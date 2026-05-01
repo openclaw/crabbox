@@ -37,7 +37,7 @@ export function paymentGuardFromEnv(env: Env): PaymentGuard | undefined {
     tempoConfig.testnet = true;
   }
   const mppx = Mppx.create({
-    methods: [tempo(tempoConfig)],
+    methods: [tempo.charge(tempoConfig)],
     secretKey: env.CRABBOX_MPP_SECRET_KEY,
   });
   return {

@@ -64,6 +64,7 @@ are fixed-list.
 
 Related docs:
 
+- [MPP E2E recipe](./payments-mpp-e2e.md)
 - [Cost and usage](./cost-usage.md)
 - [Coordinator](./coordinator.md)
 - [Broker auth and routing](./broker-auth-routing.md)
