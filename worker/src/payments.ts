@@ -36,10 +36,11 @@ export function paymentGuardFromEnv(env: Env): PaymentGuard | undefined {
   if (testnet) {
     tempoConfig.testnet = true;
   }
-  const mppx = Mppx.create({
-    methods: [tempo.charge(tempoConfig)],
-    secretKey: env.CRABBOX_MPP_SECRET_KEY,
-  });
+  const secretKey = env.CRABBOX_MPP_SECRET_KEY;
+  const realm = env.CRABBOX_MPP_REALM?.trim();
+  const mppx = realm
+    ? Mppx.create({ methods: [tempo.charge(tempoConfig)], secretKey, realm })
+    : Mppx.create({ methods: [tempo.charge(tempoConfig)], secretKey });
   return {
     charge: (amount: string) => async (request: Request) => {
       const response = await mppx.charge({ amount })(request);

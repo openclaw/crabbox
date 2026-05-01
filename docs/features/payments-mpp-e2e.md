@@ -18,6 +18,7 @@ CRABBOX_DEFAULT_ORG=crabbox-trial
 CRABBOX_MPP_RECIPIENT=0x...   # your wallet
 CRABBOX_MPP_DECIMALS=6
 CRABBOX_MPP_SECRET_KEY=dev-mpp-secret-do-not-deploy
+CRABBOX_MPP_REALM=localhost:8787   # see Realm pinning in payments-mpp.md
 # CRABBOX_MPP_TESTNET=true    # uncomment if running on Tempo testnet
 ```
 

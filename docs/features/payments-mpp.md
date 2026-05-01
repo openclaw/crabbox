@@ -21,6 +21,7 @@ CRABBOX_MPP_CURRENCY       0x... TIP-20 token contract (default: pathUSD)
 CRABBOX_MPP_DECIMALS       integer 0-32 (default: 6)
 CRABBOX_MPP_SECRET_KEY     HMAC secret binding challenges to their contents
 CRABBOX_MPP_TESTNET        "1" / "true" to use Tempo testnet
+CRABBOX_MPP_REALM          override the auto-detected realm (see below)
 ```
 
 If `CRABBOX_MPP_RECIPIENT` is unset, the lease endpoint behaves exactly
@@ -52,6 +53,17 @@ The amount charged equals `cost.maxUSD` for the requested
 rate table as the existing `/v1/usage` endpoint and the provider's
 hourly price API. AWS spot prices are looked up live; Hetzner prices
 are fixed-list.
+
+## Realm pinning for `wrangler dev`
+
+`wrangler dev` rewrites the `realm` field of `WWW-Authenticate` headers on the
+wire to match the request's `Host` header. mppx auto-detects realm from
+`URL.hostname` (no port), so the issued HMAC binds to `"localhost"` while the
+client signs against `"localhost:8787"` — verification then fails with
+`"challenge was not issued by this server."` Set `CRABBOX_MPP_REALM=localhost:8787`
+in `.dev.vars` to pre-pin the realm to what wrangler will emit. In production
+the rewrite does not occur, so leave `CRABBOX_MPP_REALM` unset and let mppx
+auto-detect from the public hostname.
 
 ## Caveats
 

@@ -25,6 +25,8 @@ import { costLimits, enforceCostLimits, leaseCost, requestOrg, usageSummary } fr
 const fleetID = "default";
 
 export class FleetDurableObject implements DurableObject {
+  private cachedPaymentGuard: PaymentGuard | null | undefined;
+
   constructor(
     private readonly state: DurableObjectState,
     private readonly env: Env,
@@ -226,7 +228,13 @@ export class FleetDurableObject implements DurableObject {
   }
 
   private paymentGuard(): PaymentGuard | undefined {
-    return this.testPaymentGuard ?? paymentGuardFromEnv(this.env);
+    if (this.testPaymentGuard) {
+      return this.testPaymentGuard;
+    }
+    if (this.cachedPaymentGuard === undefined) {
+      this.cachedPaymentGuard = paymentGuardFromEnv(this.env) ?? null;
+    }
+    return this.cachedPaymentGuard ?? undefined;
   }
 
   private async leaseRoute(request: Request, leaseID: string, action?: string): Promise<Response> {

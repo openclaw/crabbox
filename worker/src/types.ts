@@ -32,6 +32,7 @@ export interface Env {
   CRABBOX_MPP_DECIMALS?: string;
   CRABBOX_MPP_SECRET_KEY?: string;
   CRABBOX_MPP_TESTNET?: string;
+  CRABBOX_MPP_REALM?: string;
 }
 
 export interface LeaseRequest {
