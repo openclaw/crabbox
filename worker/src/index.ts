@@ -1,4 +1,4 @@
-import { authenticateRequest, requestWithAuthContext } from "./auth";
+import { authenticateRequest, requestWithAuthContext, type AuthContext } from "./auth";
 import { FleetDurableObject } from "./fleet";
 import { json } from "./http";
 import type { Env } from "./types";
@@ -16,13 +16,33 @@ export default {
       return env.FLEET.get(id).fetch(request);
     }
     const auth = await authenticateRequest(request, env);
-    if (!auth?.authorized) {
-      return json({ error: "unauthorized" }, { status: 401 });
+    const fleetID = env.FLEET.idFromName("default");
+    if (auth?.authorized) {
+      return env.FLEET.get(fleetID).fetch(requestWithAuthContext(request, auth));
     }
-    const id = env.FLEET.idFromName("default");
-    return env.FLEET.get(id).fetch(requestWithAuthContext(request, auth));
+    if (mppEligible(request, url, env)) {
+      return env.FLEET.get(fleetID).fetch(requestWithAuthContext(request, mppAuth(env)));
+    }
+    return json({ error: "unauthorized" }, { status: 401 });
   },
 };
+
+function mppEligible(request: Request, url: URL, env: Env): boolean {
+  if (!env.CRABBOX_MPP_RECIPIENT) {
+    return false;
+  }
+  return request.method === "POST" && url.pathname === "/v1/leases";
+}
+
+function mppAuth(env: Env): AuthContext {
+  return {
+    authorized: true,
+    admin: false,
+    auth: "mpp",
+    owner: `mpp:${env.CRABBOX_MPP_RECIPIENT?.toLowerCase() ?? "anonymous"}`,
+    org: env.CRABBOX_DEFAULT_ORG ?? "mpp",
+  };
+}
 
 export async function isAuthorized(
   request: Request,

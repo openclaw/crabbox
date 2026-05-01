@@ -7,7 +7,7 @@ const encoder = new TextEncoder();
 export interface AuthContext {
   authorized: boolean;
   admin: boolean;
-  auth: "bearer" | "github";
+  auth: "bearer" | "github" | "mpp";
   owner: string;
   org: string;
   login?: string;
