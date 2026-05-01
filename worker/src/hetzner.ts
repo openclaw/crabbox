@@ -2,7 +2,14 @@ import { cloudInit } from "./bootstrap";
 import { serverTypeCandidatesForClass, type LeaseConfig } from "./config";
 import { leaseProviderLabels } from "./provider-labels";
 import { leaseProviderName } from "./slug";
-import type { Env, HetznerSSHKey, HetznerServer, ProviderMachine } from "./types";
+import type {
+  Env,
+  HetznerImage,
+  HetznerSSHKey,
+  HetznerServer,
+  ProviderImage,
+  ProviderMachine,
+} from "./types";
 
 interface HetznerListServersResponse {
   servers: HetznerServer[];
@@ -18,6 +25,15 @@ interface HetznerSSHKeyResponse {
 
 interface HetznerServerResponse {
   server: HetznerServer;
+}
+
+interface HetznerImageResponse {
+  image: HetznerImage;
+}
+
+interface HetznerCreateImageResponse {
+  image: HetznerImage;
+  action: { id: number; status: string };
 }
 
 interface HetznerListServerTypesResponse {
@@ -174,6 +190,32 @@ export class HetznerClient {
     await this.request<void>("DELETE", `/servers/${id}`);
   }
 
+  async createImage(serverID: number, name: string): Promise<ProviderImage> {
+    const response = await this.request<HetznerCreateImageResponse>(
+      "POST",
+      `/servers/${serverID}/actions/create_image`,
+      {
+        type: "snapshot",
+        description: name,
+        labels: {
+          crabbox: "true",
+          created_by: "crabbox",
+          Name: name,
+        },
+      },
+    );
+    return toProviderImage(response.image);
+  }
+
+  async getImage(imageID: string): Promise<ProviderImage> {
+    const response = await this.request<HetznerImageResponse>("GET", `/images/${imageID}`);
+    return toProviderImage(response.image);
+  }
+
+  async deleteImage(imageID: string): Promise<void> {
+    await this.request<void>("DELETE", `/images/${imageID}`);
+  }
+
   toMachine(server: HetznerServer): ProviderMachine {
     return {
       provider: "hetzner",
@@ -236,6 +278,27 @@ export class HetznerClient {
       return undefined as T;
     }
     return (await response.json()) as T;
+  }
+}
+
+function toProviderImage(image: HetznerImage): ProviderImage {
+  return {
+    id: String(image.id),
+    name: image.description ?? "",
+    state: hetznerImageState(image.status),
+  };
+}
+
+function hetznerImageState(status: HetznerImage["status"]): string {
+  switch (status) {
+    case "available":
+      return "available";
+    case "creating":
+      return "pending";
+    case "unavailable":
+      return "failed";
+    default:
+      return status;
   }
 }
 

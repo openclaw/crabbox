@@ -116,6 +116,12 @@ export class FleetDurableObject implements DurableObject {
     if (config.provider === "aws" && !config.awsAMI) {
       config.awsAMI = (await this.promotedAWSImage())?.id ?? "";
     }
+    if (config.provider === "hetzner" && input.image === undefined) {
+      const promoted = await this.promotedHetznerImage();
+      if (promoted) {
+        config.image = promoted.id;
+      }
+    }
     const leaseID = validLeaseID(input.leaseID) ? input.leaseID : newLeaseID();
     const leases = await this.leaseRecords();
     const slug = allocateLeaseSlug(
@@ -492,18 +498,25 @@ export class FleetDurableObject implements DurableObject {
     if (!lease) {
       return notFound();
     }
-    if (lease.provider !== "aws" || !lease.cloudID) {
-      return json(
-        { error: "unsupported_provider", message: "only AWS leases can be imaged" },
-        { status: 400 },
+    if (lease.provider === "aws") {
+      if (!lease.cloudID) {
+        return json({ error: "lease_not_provisioned" }, { status: 400 });
+      }
+      const image = await this.provider("aws", lease.region).createImage(
+        lease.cloudID,
+        name,
+        input.noReboot ?? true,
       );
+      return json({ image }, { status: 201 });
     }
-    const image = await this.provider("aws", lease.region).createImage(
-      lease.cloudID,
-      name,
-      input.noReboot ?? true,
-    );
-    return json({ image }, { status: 201 });
+    if (lease.provider === "hetzner") {
+      if (!lease.serverID) {
+        return json({ error: "lease_not_provisioned" }, { status: 400 });
+      }
+      const image = await this.provider("hetzner").createImage(String(lease.serverID), name, false);
+      return json({ image }, { status: 201 });
+    }
+    return json({ error: "unsupported_provider" }, { status: 400 });
   }
 
   private async imageRoute(request: Request, imageID: string, action?: string): Promise<Response> {
@@ -511,12 +524,13 @@ export class FleetDurableObject implements DurableObject {
     if (!validImageID(imageID)) {
       return json({ error: "invalid_image_id" }, { status: 400 });
     }
+    const provider: Provider = imageID.startsWith("ami-") ? "aws" : "hetzner";
     if (method === "GET" && action === undefined) {
-      const image = await this.provider("aws").getImage(imageID);
+      const image = await this.provider(provider).getImage(imageID);
       return json({ image });
     }
     if (method === "POST" && action === "promote") {
-      const image = await this.provider("aws").getImage(imageID);
+      const image = await this.provider(provider).getImage(imageID);
       if (image.state !== "available") {
         return json(
           { error: "image_not_available", message: `image ${imageID} is ${image.state}` },
@@ -524,7 +538,8 @@ export class FleetDurableObject implements DurableObject {
         );
       }
       const promoted: PromotedImageRecord = { ...image, promotedAt: new Date().toISOString() };
-      await this.state.storage.put(promotedAWSImageKey(), promoted);
+      const key = provider === "aws" ? promotedAWSImageKey() : promotedHetznerImageKey();
+      await this.state.storage.put(key, promoted);
       return json({ image: promoted });
     }
     return json({ error: "not_found" }, { status: 404 });
@@ -638,6 +653,10 @@ export class FleetDurableObject implements DurableObject {
     return this.state.storage.get<PromotedImageRecord>(promotedAWSImageKey());
   }
 
+  private async promotedHetznerImage(): Promise<PromotedImageRecord | undefined> {
+    return this.state.storage.get<PromotedImageRecord>(promotedHetznerImageKey());
+  }
+
   private async getRun(runID: string): Promise<RunRecord | undefined> {
     return this.state.storage.get<RunRecord>(runKey(runID));
   }
@@ -688,6 +707,10 @@ function promotedAWSImageKey(): string {
   return "image:aws:promoted";
 }
 
+function promotedHetznerImageKey(): string {
+  return "image:hetzner:promoted";
+}
+
 function newLeaseID(): string {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
@@ -705,7 +728,10 @@ function validLeaseID(value: string | undefined): value is string {
 }
 
 function validImageID(value: string | undefined): value is string {
-  return typeof value === "string" && /^ami-[a-f0-9]{8,32}$/.test(value);
+  if (typeof value !== "string") {
+    return false;
+  }
+  return /^ami-[a-f0-9]{8,32}$/.test(value) || /^[1-9][0-9]{0,18}$/.test(value);
 }
 
 function validImageName(value: string): boolean {
@@ -937,12 +963,12 @@ class HetznerProvider implements CloudProvider {
     await this.client.deleteServer(Number(id));
   }
 
-  createImage(): Promise<ProviderImage> {
-    throw new Error("hetzner images are not supported");
+  createImage(serverID: string, name: string): Promise<ProviderImage> {
+    return this.client.createImage(Number(serverID), name);
   }
 
-  getImage(): Promise<ProviderImage> {
-    throw new Error("hetzner images are not supported");
+  getImage(imageID: string): Promise<ProviderImage> {
+    return this.client.getImage(imageID);
   }
 
   async deleteSSHKey(name: string): Promise<void> {

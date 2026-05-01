@@ -193,6 +193,15 @@ export interface HetznerSSHKey {
   public_key: string;
 }
 
+export interface HetznerImage {
+  id: number;
+  description: string | null;
+  status: "creating" | "available" | "unavailable";
+  type: "snapshot" | "system" | "backup" | "app" | "temporary";
+  labels: Record<string, string>;
+  created: string;
+}
+
 export interface MachineView {
   id: string;
   provider: Provider;

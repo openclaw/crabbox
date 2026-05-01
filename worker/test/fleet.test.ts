@@ -338,6 +338,116 @@ describe("fleet lease identity and idle", () => {
       expect.objectContaining({ id: "ami-000000000001", state: "available" }),
     );
   });
+
+  it("creates and promotes Hetzner snapshots through admin routes", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, { imageID: "382206402" }),
+    });
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        provider: "hetzner",
+        serverID: 128794819,
+        cloudID: "128794819",
+      }),
+    );
+
+    const created = await fleet.fetch(
+      request("POST", "/v1/images", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { leaseID: "cbx_000000000002", name: "crabbox-rust-stable" },
+      }),
+    );
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as { image: { id: string; state: string } };
+    expect(createdBody.image).toEqual(
+      expect.objectContaining({ id: "382206402", state: "pending" }),
+    );
+
+    const promoted = await fleet.fetch(
+      request("POST", "/v1/images/382206402/promote", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+    expect(promoted.status).toBe(200);
+    expect(storage.value("image:hetzner:promoted")).toEqual(
+      expect.objectContaining({ id: "382206402", state: "available" }),
+    );
+  });
+
+  it("uses promoted Hetzner image when lease request omits image", async () => {
+    const storage = new MemoryStorage();
+    let observedImage = "";
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider((config) => {
+        observedImage = config.image ?? "";
+      }),
+    });
+    storage.seed("image:hetzner:promoted", {
+      id: "382206402",
+      name: "crabbox-rust-stable",
+      state: "available",
+      promotedAt: "2026-05-01T00:00:00.000Z",
+    });
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "cf-access-authenticated-user-email": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: {
+          leaseID: "cbx_111111111111",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    expect(observedImage).toBe("382206402");
+  });
+
+  it("respects explicit lease image even when a promoted Hetzner image exists", async () => {
+    const storage = new MemoryStorage();
+    let observedImage = "";
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider((config) => {
+        observedImage = config.image ?? "";
+      }),
+    });
+    storage.seed("image:hetzner:promoted", {
+      id: "382206402",
+      name: "crabbox-rust-stable",
+      state: "available",
+      promotedAt: "2026-05-01T00:00:00.000Z",
+    });
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "cf-access-authenticated-user-email": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: {
+          leaseID: "cbx_222222222222",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          image: "ubuntu-24.04",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    expect(observedImage).toBe("ubuntu-24.04");
+  });
 });
 
 describe("fleet run history", () => {
@@ -759,13 +869,17 @@ function testFleet(storage = new MemoryStorage(), providers = {}): FleetDurableO
   );
 }
 
-function fakeProvider(onCreate?: (config: { awsSSHCIDRs: string[] }) => void) {
+function fakeProvider(
+  onCreate?: (config: { awsSSHCIDRs: string[]; image?: string }) => void,
+  options: { imageID?: string } = {},
+) {
+  const imageID = options.imageID ?? "ami-000000000001";
   return {
     async listCrabboxServers() {
       return [];
     },
     async createServerWithFallback(
-      config: { awsSSHCIDRs: string[] },
+      config: { awsSSHCIDRs: string[]; image?: string },
       _leaseID: string,
       slug: string,
     ) {
@@ -786,11 +900,11 @@ function fakeProvider(onCreate?: (config: { awsSSHCIDRs: string[] }) => void) {
     },
     async deleteServer() {},
     async createImage(_instanceID: string, name: string) {
-      return { id: "ami-000000000001", name, state: "pending", region: "eu-west-1" };
+      return { id: imageID, name, state: "pending", region: "eu-west-1" };
     },
-    async getImage(imageID: string) {
+    async getImage(id: string) {
       return {
-        id: imageID,
+        id,
         name: "openclaw-crabbox-test",
         state: "available",
         region: "eu-west-1",
