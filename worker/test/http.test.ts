@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { isAuthorized } from "../src";
-import { authenticateRequest, issueUserToken } from "../src/auth";
+import { authenticateRequest, issueUserToken, requestWithAuthContext } from "../src/auth";
+import { requestOwner } from "../src/http";
 
 describe("coordinator auth", () => {
   it("denies requests when no shared token is configured", async () => {
@@ -37,5 +38,25 @@ describe("coordinator auth", () => {
       org: "openclaw",
       login: "friend",
     });
+  });
+
+  it("does not let caller-supplied Access identity override signed user token identity", () => {
+    const request = new Request("https://example.test/v1/whoami", {
+      headers: {
+        "cf-access-authenticated-user-email": "spoof@example.com",
+        "x-crabbox-owner": "spoof@example.com",
+      },
+    });
+    const next = requestWithAuthContext(request, {
+      authorized: true,
+      admin: false,
+      auth: "github",
+      owner: "friend@example.com",
+      org: "openclaw",
+      login: "friend",
+    });
+
+    expect(next.headers.get("cf-access-authenticated-user-email")).toBeNull();
+    expect(requestOwner(next)).toBe("friend@example.com");
   });
 });

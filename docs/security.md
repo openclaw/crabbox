@@ -23,6 +23,7 @@ MVP:
 - Workers.dev automation can still use a shared bearer token via `crabbox login --token-stdin`.
 - The CLI sends owner/org headers only for shared-token automation; GitHub login tokens carry owner/org inside the signed token.
 - GitHub browser-login tokens are user tokens, not admin tokens. They can only see and mutate leases, runs, logs, and usage for their own owner/org identity.
+- The Worker forwards signed GitHub token owner/org identity to the Fleet Durable Object and strips caller-supplied Access identity headers from that forwarded request.
 - Missing shared-token config fails closed for non-health coordinator routes.
 
 Target:

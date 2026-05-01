@@ -60,6 +60,7 @@ export async function authenticateRequest(
 
 export function requestWithAuthContext(request: Request, auth: AuthContext): Request {
   const headers = new Headers(request.headers);
+  headers.delete("cf-access-authenticated-user-email");
   headers.set("x-crabbox-auth", auth.auth);
   headers.set("x-crabbox-admin", auth.admin ? "true" : "false");
   headers.set("x-crabbox-owner", auth.owner);
