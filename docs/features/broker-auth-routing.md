@@ -26,6 +26,8 @@ Worker secrets:
 CRABBOX_GITHUB_CLIENT_ID
 CRABBOX_GITHUB_CLIENT_SECRET
 CRABBOX_GITHUB_ALLOWED_ORG
+CRABBOX_GITHUB_ALLOWED_ORGS
+CRABBOX_GITHUB_ALLOWED_TEAMS
 CRABBOX_SESSION_SECRET
 ```
 
@@ -34,6 +36,11 @@ the coordinator mints a Crabbox user token. Set `CRABBOX_GITHUB_ALLOWED_ORG` or
 comma-separated `CRABBOX_GITHUB_ALLOWED_ORGS`; if unset, the Worker falls back
 to `CRABBOX_DEFAULT_ORG`, then `openclaw`. The OAuth app must request
 `read:user user:email read:org`.
+
+Set comma-separated `CRABBOX_GITHUB_ALLOWED_TEAMS` to require membership in at
+least one team after org membership passes. Entries are GitHub team slugs. Use
+`team-slug` for the selected org or `org/team-slug` when multiple orgs are
+allowed.
 
 Trusted automation can still use the shared operator bearer token configured in the CLI and Worker. The CLI sends:
 

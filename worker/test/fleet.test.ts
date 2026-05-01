@@ -640,9 +640,75 @@ describe("fleet identity", () => {
     });
     expect(body.token).toMatch(/^cbxu_/);
   });
+
+  it("requires configured GitHub team membership before completing login", async () => {
+    const { fleet, loginID, state, pollSecret } = await startGitHubLogin({
+      CRABBOX_GITHUB_ALLOWED_TEAMS: "maintainers",
+    });
+    vi.stubGlobal(
+      "fetch",
+      githubFetchMock({
+        member: true,
+        teams: [{ slug: "contributors", organization: { login: "openclaw" } }],
+      }),
+    );
+
+    const callback = await fleet.fetch(
+      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
+    );
+    expect(callback.status).toBe(403);
+
+    const poll = await fleet.fetch(
+      request("POST", "/v1/auth/github/poll", {
+        body: {
+          loginID,
+          pollSecret,
+        },
+      }),
+    );
+    expect(poll.status).toBe(400);
+    await expect(poll.json()).resolves.toMatchObject({
+      status: "failed",
+      error: "GitHub user friend is not a member of an allowed team in openclaw.",
+    });
+  });
+
+  it("mints GitHub login tokens for allowed team members", async () => {
+    const { fleet, loginID, state, pollSecret } = await startGitHubLogin({
+      CRABBOX_GITHUB_ALLOWED_TEAMS: "openclaw/maintainers,openclaw/release-captains",
+    });
+    vi.stubGlobal(
+      "fetch",
+      githubFetchMock({
+        member: true,
+        teams: [{ slug: "maintainers", organization: { login: "openclaw" } }],
+      }),
+    );
+
+    const callback = await fleet.fetch(
+      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
+    );
+    expect(callback.status).toBe(200);
+
+    const poll = await fleet.fetch(
+      request("POST", "/v1/auth/github/poll", {
+        body: {
+          loginID,
+          pollSecret,
+        },
+      }),
+    );
+    expect(poll.status).toBe(200);
+    await expect(poll.json()).resolves.toMatchObject({
+      status: "complete",
+      owner: "friend@example.com",
+      org: "openclaw",
+      login: "friend",
+    });
+  });
 });
 
-async function startGitHubLogin(): Promise<{
+async function startGitHubLogin(env: Partial<Env> = {}): Promise<{
   fleet: FleetDurableObject;
   loginID: string;
   pollSecret: string;
@@ -657,6 +723,7 @@ async function startGitHubLogin(): Promise<{
       CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
       CRABBOX_SHARED_TOKEN: "shared",
       CRABBOX_SESSION_SECRET: "session-secret",
+      ...env,
     } as Env,
   );
   const pollSecret = "local-poll-secret";
@@ -676,7 +743,13 @@ async function startGitHubLogin(): Promise<{
   return { fleet, loginID: body.loginID, pollSecret, state: state || "" };
 }
 
-function githubFetchMock({ member }: { member: boolean }) {
+function githubFetchMock({
+  member,
+  teams = [],
+}: {
+  member: boolean;
+  teams?: Array<{ slug: string; organization: { login: string } }>;
+}) {
   return vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
     const url =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -693,6 +766,9 @@ function githubFetchMock({ member }: { member: boolean }) {
       return member
         ? jsonResponse({ state: "active", organization: { login: "openclaw" } })
         : jsonResponse({ message: "Not Found" }, 404);
+    }
+    if (url === "https://api.github.com/user/teams?per_page=100&page=1") {
+      return jsonResponse(teams);
     }
     return jsonResponse({ message: `unexpected ${url}` }, 500);
   });
