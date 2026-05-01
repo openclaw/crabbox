@@ -9,7 +9,7 @@
 - Added coordinator OAuth routes for GitHub login: `/v1/auth/github/start`, `/v1/auth/github/callback`, and `/v1/auth/github/poll`.
 - Added signed non-admin user-token auth in the Worker while keeping the shared operator token for admin routes.
 - Added GitHub org membership enforcement before minting browser-login tokens.
-- Added the canonical coordinator endpoint `https://crabbox.openclaw.ai`, with `CRABBOX_PUBLIC_URL` configured for OAuth callback generation.
+- Added the canonical coordinator endpoint configured for OAuth callback generation.
 - Added Blacksmith Testbox workflow flags for `crabbox warmup` and `crabbox run`, enabling one-command Testbox runs without repo YAML or environment variables.
 
 ### Changed
@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Cleaned up Blacksmith Testbox local lease claims and per-lease SSH keys after failed warmups, explicit stops, and one-shot runs.
 - Restricted Worker admin routes to shared-token admin auth so GitHub browser-login users cannot call admin endpoints.
 - Fixed `whoami` reporting for GitHub browser-login tokens.
 - Fixed exact `cbx_...` lookups bypassing owner-scoped slug authorization checks.

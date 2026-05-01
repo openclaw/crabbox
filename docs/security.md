@@ -72,7 +72,7 @@ Project allowlist example:
 MVP SSH posture:
 
 - SSH allowed only for worker machines.
-- AWS broker-created security groups use `CRABBOX_AWS_SSH_CIDRS` when configured, otherwise the Cloudflare request source IP for the lease request.
+- AWS security groups use `CRABBOX_AWS_SSH_CIDRS` when configured. Brokered leases otherwise use the CLI-detected outbound IPv4 CIDR or, as a fallback, the Cloudflare request source IP for the lease request.
 - Hetzner direct mode still relies on provider networking/firewall defaults unless a profile supplies tighter controls.
 - Key-only authentication.
 - Dedicated `crabbox` user.

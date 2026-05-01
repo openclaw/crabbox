@@ -328,3 +328,17 @@ func TestAWSServerTypeForClass(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteSyncSanityReportsDeletionSample(t *testing.T) {
+	got := remoteSyncSanity("/work/repo", false)
+	for _, want := range []string{
+		"remote sync sanity failed: $deletions tracked deletions",
+		`awk '/^ D|^D / { print "  " substr($0,4) }'`,
+		"head -20",
+		"exit 66",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("remoteSyncSanity() missing %q in %q", want, got)
+		}
+	}
+}

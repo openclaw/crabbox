@@ -250,6 +250,7 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"awsSubnetID": cfg.AWSSubnetID,
 		"awsProfile":  cfg.AWSProfile,
 		"awsRootGB":   cfg.AWSRootGB,
+		"awsSSHCIDRs": cfg.AWSSSHCIDRs,
 		"capacity": map[string]any{
 			"market":            cfg.Capacity.Market,
 			"strategy":          cfg.Capacity.Strategy,

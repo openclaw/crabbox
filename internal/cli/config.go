@@ -26,6 +26,7 @@ type Config struct {
 	AWSSubnetID string
 	AWSProfile  string
 	AWSRootGB   int32
+	AWSSSHCIDRs []string
 	SSHUser     string
 	SSHKey      string
 	SSHPort     string
@@ -213,12 +214,13 @@ type fileHetznerConfig struct {
 }
 
 type fileAWSConfig struct {
-	Region          string `yaml:"region,omitempty"`
-	AMI             string `yaml:"ami,omitempty"`
-	SecurityGroupID string `yaml:"securityGroupId,omitempty"`
-	SubnetID        string `yaml:"subnetId,omitempty"`
-	InstanceProfile string `yaml:"instanceProfile,omitempty"`
-	RootGB          int32  `yaml:"rootGB,omitempty"`
+	Region          string   `yaml:"region,omitempty"`
+	AMI             string   `yaml:"ami,omitempty"`
+	SecurityGroupID string   `yaml:"securityGroupId,omitempty"`
+	SubnetID        string   `yaml:"subnetId,omitempty"`
+	InstanceProfile string   `yaml:"instanceProfile,omitempty"`
+	RootGB          int32    `yaml:"rootGB,omitempty"`
+	SSHCIDRs        []string `yaml:"sshCIDRs,omitempty"`
 }
 
 type fileSSHConfig struct {
@@ -429,6 +431,9 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		if file.AWS.RootGB > 0 {
 			cfg.AWSRootGB = file.AWS.RootGB
 		}
+		if len(file.AWS.SSHCIDRs) > 0 {
+			cfg.AWSSSHCIDRs = file.AWS.SSHCIDRs
+		}
 	}
 	if file.SSH != nil {
 		if file.SSH.User != "" {
@@ -602,6 +607,9 @@ func applyEnv(cfg *Config) {
 	cfg.AWSSubnetID = getenv("CRABBOX_AWS_SUBNET_ID", cfg.AWSSubnetID)
 	cfg.AWSProfile = getenv("CRABBOX_AWS_INSTANCE_PROFILE", cfg.AWSProfile)
 	cfg.AWSRootGB = int32(getenvInt("CRABBOX_AWS_ROOT_GB", int(cfg.AWSRootGB)))
+	if cidrs := os.Getenv("CRABBOX_AWS_SSH_CIDRS"); cidrs != "" {
+		cfg.AWSSSHCIDRs = splitCommaList(cidrs)
+	}
 	cfg.SSHUser = getenv("CRABBOX_SSH_USER", cfg.SSHUser)
 	cfg.SSHKey = getenv("CRABBOX_SSH_KEY", cfg.SSHKey)
 	cfg.SSHPort = getenv("CRABBOX_SSH_PORT", cfg.SSHPort)

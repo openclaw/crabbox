@@ -110,7 +110,10 @@ func (a App) blacksmithRun(ctx context.Context, cfg Config, repo Repo, opts blac
 		defer func() {
 			if err := a.blacksmithStopLease(context.Background(), cfg, leaseID); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: blacksmith stop failed for %s: %v\n", leaseID, err)
+				return
 			}
+			removeLeaseClaim(leaseID)
+			removeStoredTestboxKey(leaseID)
 		}()
 	}
 	fmt.Fprintf(a.Stderr, "provider=blacksmith-testbox id=%s sync=delegated auth=blacksmith\n", leaseID)
@@ -152,11 +155,18 @@ func (a App) blacksmithStop(ctx context.Context, cfg Config, id string) error {
 		return err
 	}
 	removeLeaseClaim(leaseID)
+	removeStoredTestboxKey(leaseID)
 	return nil
 }
 
 func (a App) blacksmithWarmupLease(ctx context.Context, cfg Config, repo Repo, reclaim bool) (string, string, error) {
 	pendingID := "tbx_pending_" + strings.TrimPrefix(newLeaseID(), "cbx_")
+	cleanupKeyID := pendingID
+	defer func() {
+		if cleanupKeyID != "" {
+			removeStoredTestboxKey(cleanupKeyID)
+		}
+	}()
 	_, publicKey, err := ensureTestboxKey(pendingID)
 	if err != nil {
 		return "", "", err
@@ -180,11 +190,13 @@ func (a App) blacksmithWarmupLease(ctx context.Context, cfg Config, repo Repo, r
 		_ = a.blacksmithStopLease(ctx, cfg, leaseID)
 		return "", "", exit(2, "store blacksmith key for %s: %v", leaseID, err)
 	}
+	cleanupKeyID = leaseID
 	slug := newLeaseSlug(leaseID)
 	if err := claimLeaseForRepoProvider(leaseID, slug, blacksmithTestboxProvider, repo.Root, blacksmithIdleTimeout(cfg), reclaim); err != nil {
 		_ = a.blacksmithStopLease(ctx, cfg, leaseID)
 		return "", "", err
 	}
+	cleanupKeyID = ""
 	return leaseID, slug, nil
 }
 

@@ -47,7 +47,7 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			if reachablePort == "" {
 				reachablePort = probe.Port
 			}
-			if runSSHQuiet(ctx, probe, "test -x /usr/local/bin/crabbox-ready && crabbox-ready >/tmp/crabbox-ready.log 2>&1") == nil {
+			if runSSHQuiet(ctx, probe, sshReadyCommand()) == nil {
 				if target.Port != probe.Port {
 					fmt.Fprintf(stderr, "using ssh port %s for %s (configured %s not ready)\n", probe.Port, target.Host, target.Port)
 					target.Port = probe.Port
@@ -64,6 +64,33 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 	}
 }
 
+func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration) bool {
+	if target.Host == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for _, port := range sshPortCandidates(target.Port) {
+		probe := *target
+		probe.Port = port
+		dialer := net.Dialer{Timeout: minDuration(timeout, 2*time.Second)}
+		conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(probe.Host, probe.Port))
+		if err != nil {
+			continue
+		}
+		_ = conn.Close()
+		if runSSHQuietWithOptions(ctx, probe, sshReadyCommand(), "2", "1") == nil {
+			target.Port = probe.Port
+			return true
+		}
+	}
+	return false
+}
+
+func sshReadyCommand() string {
+	return "test -x /usr/local/bin/crabbox-ready && crabbox-ready >/tmp/crabbox-ready.log 2>&1"
+}
+
 func sshPortCandidates(port string) []string {
 	if port == "" || port == "22" {
 		return []string{"22"}
@@ -72,7 +99,11 @@ func sshPortCandidates(port string) []string {
 }
 
 func runSSHQuiet(ctx context.Context, target SSHTarget, remote string) error {
-	cmd := exec.CommandContext(ctx, "ssh", sshArgs(target, remote)...)
+	return runSSHQuietWithOptions(ctx, target, remote, "10", "3")
+}
+
+func runSSHQuietWithOptions(ctx context.Context, target SSHTarget, remote, connectTimeout, connectionAttempts string) error {
+	cmd := exec.CommandContext(ctx, "ssh", sshArgsWithOptions(target, remote, connectTimeout, connectionAttempts)...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	return cmd.Run()
@@ -85,6 +116,12 @@ func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (string,
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) (string, error) {
+	cmd := exec.CommandContext(ctx, "ssh", sshArgs(target, remote)...)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }
 
 func runSSHInputQuiet(ctx context.Context, target SSHTarget, remote, input string) error {
@@ -113,20 +150,28 @@ func runSSHStream(ctx context.Context, target SSHTarget, remote string, stdout, 
 }
 
 func sshArgs(target SSHTarget, remote string) []string {
-	return append(sshBaseArgs(target),
+	return sshArgsWithOptions(target, remote, "10", "3")
+}
+
+func sshArgsWithOptions(target SSHTarget, remote, connectTimeout, connectionAttempts string) []string {
+	return append(sshBaseArgsWithOptions(target, connectTimeout, connectionAttempts),
 		target.User+"@"+target.Host,
 		remote,
 	)
 }
 
 func sshBaseArgs(target SSHTarget) []string {
+	return sshBaseArgsWithOptions(target, "10", "3")
+}
+
+func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts string) []string {
 	return []string{
 		"-i", target.Key,
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "UserKnownHostsFile=" + knownHostsFile(target),
-		"-o", "ConnectTimeout=10",
-		"-o", "ConnectionAttempts=3",
+		"-o", "ConnectTimeout=" + connectTimeout,
+		"-o", "ConnectionAttempts=" + connectionAttempts,
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=2",
 		"-o", "ControlMaster=auto",
@@ -134,6 +179,13 @@ func sshBaseArgs(target SSHTarget) []string {
 		"-o", "ControlPath=" + sshControlPath(),
 		"-p", target.Port,
 	}
+}
+
+func minDuration(left, right time.Duration) time.Duration {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func knownHostsFile(target SSHTarget) string {
@@ -404,7 +456,9 @@ func remoteSyncSanity(workdir string, allowMassDeletions bool) string {
 		"if test -d .git && git status --short >/tmp/crabbox-git-status 2>/dev/null; then " +
 		"deletions=$(awk '/^ D|^D / { n++ } END { print n+0 }' /tmp/crabbox-git-status); " +
 		"if [ " + shellQuote(allowValue) + " != '1' ] && [ \"$deletions\" -ge 200 ]; then " +
-		"echo \"remote sync sanity failed: $deletions tracked deletions\" >&2; exit 66; " +
+		"echo \"remote sync sanity failed: $deletions tracked deletions\" >&2; " +
+		"awk '/^ D|^D / { print \"  \" substr($0,4) }' /tmp/crabbox-git-status | head -20 >&2; " +
+		"exit 66; " +
 		"fi; " +
 		"fi"
 }

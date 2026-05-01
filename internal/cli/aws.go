@@ -507,7 +507,7 @@ func (c *AWSClient) ensureSecurityGroup(ctx context.Context, cfg Config) (string
 		groupID = aws.ToString(created.GroupId)
 	}
 	for _, port := range uniquePorts([]string{"22", cfg.SSHPort}) {
-		if err := c.allowTCP(ctx, groupID, port); err != nil && !strings.Contains(err.Error(), "InvalidPermission.Duplicate") {
+		if err := c.allowTCP(ctx, groupID, port, cfg.AWSSSHCIDRs); err != nil && !strings.Contains(err.Error(), "InvalidPermission.Duplicate") {
 			return "", err
 		}
 	}
@@ -543,10 +543,19 @@ func (c *AWSClient) securityGroupVPC(ctx context.Context, cfg Config) (string, e
 	return aws.ToString(out.Subnets[0].VpcId), nil
 }
 
-func (c *AWSClient) allowTCP(ctx context.Context, groupID, port string) error {
+func (c *AWSClient) allowTCP(ctx context.Context, groupID, port string, cidrs []string) error {
 	p, ok := parsePort32(port)
 	if !ok {
 		return exit(2, "invalid SSH port: %s", port)
+	}
+	ranges := make([]types.IpRange, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		if strings.TrimSpace(cidr) != "" {
+			ranges = append(ranges, types.IpRange{CidrIp: aws.String(cidr), Description: aws.String("Crabbox SSH")})
+		}
+	}
+	if len(ranges) == 0 {
+		ranges = append(ranges, types.IpRange{CidrIp: aws.String("0.0.0.0/0"), Description: aws.String("Crabbox SSH")})
 	}
 	_, err := c.ec2.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
 		GroupId: aws.String(groupID),
@@ -554,7 +563,7 @@ func (c *AWSClient) allowTCP(ctx context.Context, groupID, port string) error {
 			{
 				FromPort:   aws.Int32(p),
 				IpProtocol: aws.String("tcp"),
-				IpRanges:   []types.IpRange{{CidrIp: aws.String("0.0.0.0/0"), Description: aws.String("Crabbox SSH")}},
+				IpRanges:   ranges,
 				ToPort:     aws.Int32(p),
 			},
 		},

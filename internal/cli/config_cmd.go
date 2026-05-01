@@ -115,6 +115,7 @@ func (a App) configShow(args []string) error {
 			"subnetId":        cfg.AWSSubnetID,
 			"instanceProfile": cfg.AWSProfile,
 			"rootGB":          cfg.AWSRootGB,
+			"sshCIDRs":        cfg.AWSSSHCIDRs,
 		},
 	}
 	if *jsonOut {
@@ -131,7 +132,7 @@ func (a App) configShow(args []string) error {
 	fmt.Fprintf(a.Stdout, "blacksmith org=%s workflow=%s job=%s ref=%s idle_timeout=%s debug=%t\n", blank(cfg.Blacksmith.Org, "-"), blank(cfg.Blacksmith.Workflow, "-"), blank(cfg.Blacksmith.Job, "-"), blank(cfg.Blacksmith.Ref, "-"), cfg.Blacksmith.IdleTimeout, cfg.Blacksmith.Debug)
 	fmt.Fprintf(a.Stdout, "results junit=%s\n", blank(strings.Join(cfg.Results.JUnit, ","), "-"))
 	fmt.Fprintf(a.Stdout, "cache pnpm=%t npm=%t docker=%t git=%t max_gb=%d purge_on_release=%t\n", cfg.Cache.Pnpm, cfg.Cache.Npm, cfg.Cache.Docker, cfg.Cache.Git, cfg.Cache.MaxGB, cfg.Cache.PurgeOnRelease)
-	fmt.Fprintf(a.Stdout, "aws region=%s root_gb=%d\n", cfg.AWSRegion, cfg.AWSRootGB)
+	fmt.Fprintf(a.Stdout, "aws region=%s root_gb=%d ssh_cidrs=%s\n", cfg.AWSRegion, cfg.AWSRootGB, blank(strings.Join(cfg.AWSSSHCIDRs, ","), "-"))
 	return nil
 }
 

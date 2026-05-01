@@ -99,6 +99,13 @@ func moveStoredTestboxKey(oldLeaseID, newLeaseID string) error {
 	return os.Rename(oldDir, newDir)
 }
 
+func removeStoredTestboxKey(leaseID string) {
+	keyPath, err := testboxKeyPath(leaseID)
+	if err == nil {
+		_ = os.RemoveAll(filepath.Dir(keyPath))
+	}
+}
+
 func providerKeyForLease(leaseID string) string {
 	return strings.ReplaceAll("crabbox-"+leaseID, "_", "-")
 }

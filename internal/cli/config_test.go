@@ -29,6 +29,8 @@ lease:
 aws:
   region: eu-west-1
   rootGB: 800
+  sshCIDRs:
+    - 198.51.100.7/32
 sync:
   checksum: true
   gitSeed: false
@@ -108,6 +110,9 @@ ssh:
 	if cfg.AWSRootGB != 800 {
 		t.Fatalf("AWSRootGB=%d want 800", cfg.AWSRootGB)
 	}
+	if len(cfg.AWSSSHCIDRs) != 1 || cfg.AWSSSHCIDRs[0] != "198.51.100.7/32" {
+		t.Fatalf("AWSSSHCIDRs=%v", cfg.AWSSSHCIDRs)
+	}
 	if cfg.SSHKey != filepath.Join(home, ".ssh", "crabbox") {
 		t.Fatalf("SSHKey=%q", cfg.SSHKey)
 	}
@@ -155,6 +160,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_DEFAULT_CLASS", "fast")
 	t.Setenv("CRABBOX_TTL", "3h")
 	t.Setenv("CRABBOX_IDLE_TIMEOUT", "20m")
+	t.Setenv("CRABBOX_AWS_SSH_CIDRS", "198.51.100.7/32,203.0.113.8/32")
 	path := userConfigPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -169,6 +175,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Provider != "hetzner" || cfg.Class != "fast" || cfg.ServerType != "ccx43" || cfg.TTL.String() != "3h0m0s" || cfg.IdleTimeout.String() != "20m0s" {
 		t.Fatalf("unexpected config: provider=%s class=%s type=%s ttl=%s idle=%s", cfg.Provider, cfg.Class, cfg.ServerType, cfg.TTL, cfg.IdleTimeout)
+	}
+	if len(cfg.AWSSSHCIDRs) != 2 || cfg.AWSSSHCIDRs[0] != "198.51.100.7/32" || cfg.AWSSSHCIDRs[1] != "203.0.113.8/32" {
+		t.Fatalf("AWSSSHCIDRs=%v", cfg.AWSSSHCIDRs)
 	}
 }
 

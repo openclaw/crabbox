@@ -182,6 +182,7 @@ Environment:
   CRABBOX_IDLE_TIMEOUT         Default idle expiry, e.g. 30m
   CRABBOX_TTL                  Maximum lease lifetime, e.g. 90m
   CRABBOX_AWS_REGION           Default eu-west-1
+  CRABBOX_AWS_SSH_CIDRS        Comma-separated AWS SSH source CIDRs
   CRABBOX_CAPACITY_MARKET      spot or on-demand
   CRABBOX_CAPACITY_REGIONS     Comma-separated AWS Spot placement candidates
   HCLOUD_TOKEN/HETZNER_TOKEN   Direct Hetzner mode

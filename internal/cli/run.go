@@ -335,7 +335,10 @@ func (a App) runCommand(ctx context.Context, args []string) error {
 		}
 		timings.syncSteps.manifestApply = time.Since(stepStart)
 		stepStart = time.Now()
-		if err := runSSHQuiet(ctx, target, remoteSyncSanity(workdir, os.Getenv("CRABBOX_ALLOW_MASS_DELETIONS") == "1")); err != nil {
+		if out, err := runSSHCombinedOutput(ctx, target, remoteSyncSanity(workdir, os.Getenv("CRABBOX_ALLOW_MASS_DELETIONS") == "1")); err != nil {
+			if out != "" {
+				return exit(6, "remote sync sanity failed: %s: %v", out, err)
+			}
 			return exit(6, "remote sync sanity failed: %v", err)
 		}
 		timings.syncSteps.sanity = time.Since(stepStart)
@@ -504,6 +507,7 @@ func (a App) acquireCoordinator(ctx context.Context, cfg Config, coord *Coordina
 	}
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = providerKeyForLease(leaseID)
+	ensureAWSSSHCIDRs(ctx, &cfg)
 	fmt.Fprintf(a.Stderr, "coordinator lease class=%s preferred_type=%s keep=%v slug=%s idle_timeout=%s ttl=%s\n", cfg.Class, cfg.ServerType, keep, slug, cfg.IdleTimeout, cfg.TTL)
 	lease, err := coord.CreateLease(ctx, cfg, publicKey, keep, leaseID, slug)
 	if err != nil {
@@ -775,6 +779,7 @@ func (a App) acquireAWS(ctx context.Context, cfg Config, keep bool) (Server, SSH
 	}
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = providerKeyForLease(leaseID)
+	ensureAWSSSHCIDRs(ctx, &cfg)
 	fmt.Fprintf(a.Stderr, "provisioning provider=aws lease=%s slug=%s class=%s preferred_type=%s region=%s keep=%v market=%s strategy=%s\n", leaseID, slug, cfg.Class, cfg.ServerType, cfg.AWSRegion, keep, cfg.Capacity.Market, cfg.Capacity.Strategy)
 	server, cfg, err := client.CreateServerWithFallback(ctx, cfg, publicKey, leaseID, slug, keep, func(format string, args ...any) {
 		fmt.Fprintf(a.Stderr, format, args...)

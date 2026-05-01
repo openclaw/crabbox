@@ -1,7 +1,11 @@
 package cli
 
 import (
+	"context"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -55,6 +59,80 @@ func TestBlacksmithWarmupArgsRequiresWorkflow(t *testing.T) {
 	_, err := blacksmithWarmupArgs(cfg, "")
 	if err == nil || !strings.Contains(err.Error(), "requires blacksmith.workflow") {
 		t.Fatalf("expected workflow error, got %v", err)
+	}
+}
+
+func TestBlacksmithWarmupFailureRemovesPendingKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	original := blacksmithCommandContext
+	blacksmithCommandContext = func(context.Context, string, ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 1")
+	}
+	t.Cleanup(func() {
+		blacksmithCommandContext = original
+	})
+
+	cfg := baseConfig()
+	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	_, _, err := app.blacksmithWarmupLease(context.Background(), cfg, Repo{Root: "/repo"}, false)
+	if err == nil {
+		t.Fatal("expected warmup failure")
+	}
+	keyPath, keyErr := testboxKeyPath("tbx_probe")
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	entries, readErr := os.ReadDir(filepath.Dir(filepath.Dir(keyPath)))
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("pending key directories leaked: %v", entries)
+	}
+}
+
+func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	original := blacksmithCommandContext
+	calls := 0
+	blacksmithCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
+		calls++
+		if len(args) >= 3 && args[0] == "testbox" && args[1] == "warmup" {
+			return exec.Command("sh", "-c", "printf 'ready tbx_abc123\\n'")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+	t.Cleanup(func() {
+		blacksmithCommandContext = original
+	})
+
+	cfg := baseConfig()
+	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	err := app.blacksmithRun(context.Background(), cfg, Repo{Root: "/repo"}, blacksmithRunOptions{
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 {
+		t.Fatalf("blacksmith calls=%d, want warmup/run/stop", calls)
+	}
+	if claim, err := readLeaseClaim("tbx_abc123"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("claim leaked after one-shot stop: %#v", claim)
+	}
+	if keyPath, err := testboxKeyPath("tbx_abc123"); err != nil {
+		t.Fatal(err)
+	} else if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("key leaked after one-shot stop: %v", err)
 	}
 }
 

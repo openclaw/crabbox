@@ -45,7 +45,7 @@ func (a App) status(ctx context.Context, args []string) error {
 				return json.NewEncoder(a.Stdout).Encode(state)
 			}
 		} else {
-			fmt.Fprintf(a.Stdout, "%s slug=%s provider=%s state=%s type=%s host=%s idle_for=%s idle_timeout=%s expires=%s\n", state.ID, blank(state.Slug, "-"), state.Provider, state.State, state.ServerType, state.Host, blank(state.IdleFor, "-"), blank(state.IdleTimeout, "-"), blank(state.ExpiresAt, "-"))
+			fmt.Fprintf(a.Stdout, "%s slug=%s provider=%s state=%s type=%s host=%s ready=%t has_host=%t idle_for=%s idle_timeout=%s expires=%s\n", state.ID, blank(state.Slug, "-"), state.Provider, state.State, state.ServerType, state.Host, state.Ready, state.HasHost, blank(state.IdleFor, "-"), blank(state.IdleTimeout, "-"), blank(state.ExpiresAt, "-"))
 		}
 		if !*wait || state.Ready {
 			return nil
@@ -73,6 +73,7 @@ type statusView struct {
 	IdleTimeout   string            `json:"idleTimeout,omitempty"`
 	ExpiresAt     string            `json:"expiresAt,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
+	HasHost       bool              `json:"hasHost"`
 	Ready         bool              `json:"ready"`
 }
 
@@ -85,6 +86,8 @@ func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView
 			return statusView{}, err
 		}
 		_, target, _ := leaseToServerTarget(lease, cfg)
+		hasHost := lease.Host != ""
+		ready := lease.State == "active" && hasHost && probeSSHReady(ctx, &target, 4*time.Second)
 		return statusView{
 			ID:            lease.ID,
 			Slug:          lease.Slug,
@@ -101,13 +104,16 @@ func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView
 			IdleTimeout:   formatSecondsDuration(lease.IdleTimeoutSeconds),
 			ExpiresAt:     lease.ExpiresAt,
 			Labels:        map[string]string{"keep": fmt.Sprint(lease.Keep)},
-			Ready:         lease.State == "active" && lease.Host != "",
+			HasHost:       hasHost,
+			Ready:         ready,
 		}, nil
 	}
 	server, target, leaseID, err := a.findLease(ctx, cfg, id)
 	if err != nil {
 		return statusView{}, err
 	}
+	hasHost := server.PublicNet.IPv4.IP != ""
+	ready := hasHost && server.Labels["state"] != "provisioning" && probeSSHReady(ctx, &target, 4*time.Second)
 	return statusView{
 		ID:            leaseID,
 		Slug:          serverSlug(server),
@@ -124,7 +130,8 @@ func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView
 		IdleTimeout:   leaseLabelDurationDisplay(server.Labels["idle_timeout_secs"], server.Labels["idle_timeout"]),
 		ExpiresAt:     blank(leaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]),
 		Labels:        server.Labels,
-		Ready:         server.PublicNet.IPv4.IP != "" && server.Labels["state"] != "provisioning",
+		HasHost:       hasHost,
+		Ready:         ready,
 	}, nil
 }
 
