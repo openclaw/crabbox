@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { FleetDurableObject } from "../src/fleet";
+import type { PaymentGuard } from "../src/payments";
 import type { Env, LeaseRecord, RunRecord } from "../src/types";
 
 class MemoryStorage {
@@ -411,6 +412,89 @@ describe("fleet lease identity and idle", () => {
     );
     expect(create.status).toBe(201);
     expect(observedImage).toBe("382206402");
+  });
+
+  it("returns 402 from POST /v1/leases when a payment guard is configured and no payment is attached", async () => {
+    let createdServer = false;
+    const guard: PaymentGuard = {
+      charge: (amount: string) => async () => ({
+        status: 402,
+        challenge: new Response(null, {
+          status: 402,
+          headers: {
+            "www-authenticate": `Payment realm="crabbox", method="tempo", amount="${amount}"`,
+          },
+        }),
+      }),
+    };
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {
+        hetzner: fakeProvider(() => {
+          createdServer = true;
+        }),
+      },
+      guard,
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "cf-access-authenticated-user-email": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: {
+          leaseID: "cbx_aaaaaaaaaaaa",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(402);
+    expect(create.headers.get("www-authenticate")).toContain('method="tempo"');
+    expect(createdServer).toBe(false);
+  });
+
+  it("provisions and attaches the receipt when payment guard accepts", async () => {
+    let receiptHeader = "";
+    const guard: PaymentGuard = {
+      charge: () => async () => ({
+        withReceipt: (response: Response) => {
+          const headers = new Headers(response.headers);
+          headers.set("payment-receipt", "stub-receipt-ok");
+          receiptHeader = "stub-receipt-ok";
+          return new Response(response.body, {
+            status: response.status,
+            headers,
+          });
+        },
+      }),
+    };
+    const fleet = testFleet(new MemoryStorage(), { hetzner: fakeProvider() }, guard);
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "cf-access-authenticated-user-email": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+          authorization: "Payment stub-credential",
+        },
+        body: {
+          leaseID: "cbx_bbbbbbbbbbbb",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    expect(create.headers.get("payment-receipt")).toBe("stub-receipt-ok");
+    expect(receiptHeader).toBe("stub-receipt-ok");
   });
 
   it("respects explicit lease image even when a promoted Hetzner image exists", async () => {
@@ -861,11 +945,16 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function testFleet(storage = new MemoryStorage(), providers = {}): FleetDurableObject {
+function testFleet(
+  storage = new MemoryStorage(),
+  providers = {},
+  paymentGuard?: PaymentGuard,
+): FleetDurableObject {
   return new FleetDurableObject(
     { storage } as unknown as DurableObjectState,
     { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
     providers,
+    paymentGuard,
   );
 }
 

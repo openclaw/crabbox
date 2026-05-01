@@ -4,6 +4,7 @@ import { leaseConfig, validCIDRs } from "./config";
 import { HetznerClient } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute } from "./oauth";
+import { formatAmountUSD, isChallenge, paymentGuardFromEnv, type PaymentGuard } from "./payments";
 import { leaseSlugFromID, normalizeLeaseSlug, slugWithCollisionSuffix } from "./slug";
 import type {
   Env,
@@ -28,6 +29,7 @@ export class FleetDurableObject implements DurableObject {
     private readonly state: DurableObjectState,
     private readonly env: Env,
     private readonly testProviders: Partial<Record<Provider, CloudProvider>> = {},
+    private readonly testPaymentGuard?: PaymentGuard,
   ) {}
 
   async fetch(request: Request): Promise<Response> {
@@ -108,6 +110,7 @@ export class FleetDurableObject implements DurableObject {
   private async createLease(request: Request): Promise<Response> {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
+    const requestForPayment = request.clone();
     const input = await readJson<LeaseRequest>(request);
     const config = leaseConfig(input);
     if (config.provider === "aws" && config.awsSSHCIDRs.length === 0) {
@@ -181,6 +184,15 @@ export class FleetDurableObject implements DurableObject {
     if (limitError) {
       return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
     }
+    const guard = this.paymentGuard();
+    let attachReceipt: ((response: Response) => Response) | undefined;
+    if (guard) {
+      const charged = await guard.charge(formatAmountUSD(cost.maxUSD))(requestForPayment);
+      if (isChallenge(charged)) {
+        return charged.challenge;
+      }
+      attachReceipt = (response) => charged.withReceipt(response);
+    }
     const { server, serverType } = await provider.createServerWithFallback(
       config,
       leaseID,
@@ -209,7 +221,12 @@ export class FleetDurableObject implements DurableObject {
     }
     await this.putLease(record);
     await this.scheduleAlarm();
-    return json({ lease: record }, { status: 201 });
+    const response = json({ lease: record }, { status: 201 });
+    return attachReceipt ? attachReceipt(response) : response;
+  }
+
+  private paymentGuard(): PaymentGuard | undefined {
+    return this.testPaymentGuard ?? paymentGuardFromEnv(this.env);
   }
 
   private async leaseRoute(request: Request, leaseID: string, action?: string): Promise<Response> {

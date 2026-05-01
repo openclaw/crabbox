@@ -3,6 +3,7 @@
   "name": "crabbox-coordinator",
   "main": "src/index.ts",
   "compatibility_date": "2026-04-30",
+  "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "preview_urls": false,
   "vars": {

@@ -14,7 +14,8 @@
   },
   "dependencies": {
     "aws4fetch": "^1.0.20",
-    "fast-xml-parser": "^5.7.2"
+    "fast-xml-parser": "^5.7.2",
+    "mppx": "^0.6.13"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260501.1",

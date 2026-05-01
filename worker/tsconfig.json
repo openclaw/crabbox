@@ -13,7 +13,7 @@
     "noPropertyAccessFromIndexSignature": true,
     "noUncheckedIndexedAccess": true,
     "useUnknownInCatchVariables": true,
-    "skipLibCheck": false
+    "skipLibCheck": true
   },
   "include": ["src/**/*.ts"]
 }

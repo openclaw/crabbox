@@ -27,6 +27,11 @@ export interface Env {
   CRABBOX_MAX_MONTHLY_USD?: string;
   CRABBOX_MAX_MONTHLY_USD_PER_OWNER?: string;
   CRABBOX_MAX_MONTHLY_USD_PER_ORG?: string;
+  CRABBOX_MPP_RECIPIENT?: string;
+  CRABBOX_MPP_CURRENCY?: string;
+  CRABBOX_MPP_DECIMALS?: string;
+  CRABBOX_MPP_SECRET_KEY?: string;
+  CRABBOX_MPP_TESTNET?: string;
 }
 
 export interface LeaseRequest {
