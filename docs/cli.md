@@ -269,6 +269,8 @@ class: beast
 actions:
   workflow: .github/workflows/crabbox.yml
   ref: main
+  fields:
+    - crabbox_docker_cache=true
   runnerLabels:
     - crabbox
 sync:

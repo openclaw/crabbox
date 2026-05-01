@@ -46,6 +46,17 @@ func TestActionsHydrateFieldsOmitsEmptyJobForOldWorkflows(t *testing.T) {
 	}
 }
 
+func TestMergeWorkflowInputFieldsLetsFlagsOverrideConfig(t *testing.T) {
+	got := mergeWorkflowInputFields(
+		[]string{"crabbox_docker_cache=false", "crabbox_prepare_images=1"},
+		[]string{"crabbox_docker_cache=true", "custom=value"},
+	)
+	want := []string{"crabbox_docker_cache=true", "crabbox_prepare_images=1", "custom=value"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("fields=%#v want %#v", got, want)
+	}
+}
+
 func TestFilterWorkflowInputsDropsUndeclaredOptionalInputs(t *testing.T) {
 	fields := actionsHydrateFields("cbx_123", "crabbox-cbx-123", "hydrate", 90, []string{"custom=value"})
 	filtered, dropped := filterWorkflowInputs(fields, map[string]bool{

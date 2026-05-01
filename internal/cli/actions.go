@@ -107,7 +107,8 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 		return err
 	}
 	ref := actionsRef(cfg, repo)
-	fields := actionsHydrateFields(leaseID, label, cfg.Actions.Job, *keepAliveMinutes, fieldFlags)
+	extraFields := mergeWorkflowInputFields(cfg.Actions.Fields, fieldFlags)
+	fields := actionsHydrateFields(leaseID, label, cfg.Actions.Job, *keepAliveMinutes, extraFields)
 	if inputs, ok, err := githubWorkflowDispatchInputs(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: inspect workflow inputs failed: %v\n", err)
 	} else if ok {
@@ -308,6 +309,28 @@ func actionsHydrateFields(leaseID, label, job string, keepAliveMinutes int, extr
 		fields = append(fields, "crabbox_job="+job)
 	}
 	fields = append(fields, extra...)
+	return fields
+}
+
+func mergeWorkflowInputFields(base, override []string) []string {
+	fields := append([]string{}, base...)
+	index := map[string]int{}
+	for i, field := range fields {
+		if name := fieldName(field); name != "" {
+			index[name] = i
+		}
+	}
+	for _, field := range override {
+		name := fieldName(field)
+		if name != "" {
+			if existing, ok := index[name]; ok {
+				fields[existing] = field
+				continue
+			}
+			index[name] = len(fields)
+		}
+		fields = append(fields, field)
+	}
 	return fields
 }
 

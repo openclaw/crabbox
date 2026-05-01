@@ -40,6 +40,8 @@ actions:
   workflow: .github/workflows/crabbox.yml
   job: hydrate
   ref: main
+  fields:
+    - crabbox_docker_cache=true
   runnerLabels:
     - crabbox
   runnerVersion: latest
@@ -48,6 +50,7 @@ actions:
 
 Workflow jobs should target the dynamic label printed by registration, for example `crabbox-cbx-123`, plus any static labels configured for the project.
 When `actions.job` is set and the workflow declares `crabbox_job`, Crabbox sends it and verifies that the ready marker came from that job. Older workflows can omit both.
+Use `actions.fields` for repository-specific workflow inputs that should be sent on every hydration. CLI `-f key=value` values override matching configured fields for that dispatch.
 
 ## Hydration Flow
 

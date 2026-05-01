@@ -57,6 +57,9 @@ actions:
   workflow: .github/workflows/crabbox.yml
   job: hydrate
   ref: main
+  fields:
+    - crabbox_docker_cache=true
+    - crabbox_prepare_images=1
   runnerLabels:
     - crabbox
     - linux-large
@@ -117,6 +120,9 @@ ssh:
 	}
 	if cfg.Actions.Repo != "openclaw/crabbox" || cfg.Actions.Workflow != ".github/workflows/crabbox.yml" || cfg.Actions.Job != "hydrate" || cfg.Actions.Ref != "main" {
 		t.Fatalf("actions config not loaded: %#v", cfg.Actions)
+	}
+	if len(cfg.Actions.Fields) != 2 || cfg.Actions.Fields[0] != "crabbox_docker_cache=true" || cfg.Actions.Fields[1] != "crabbox_prepare_images=1" {
+		t.Fatalf("actions fields config not loaded: %#v", cfg.Actions.Fields)
 	}
 	if cfg.Actions.Ephemeral || len(cfg.Actions.RunnerLabels) != 2 || cfg.Actions.RunnerLabels[1] != "linux-large" {
 		t.Fatalf("actions runner config not loaded: %#v", cfg.Actions)
