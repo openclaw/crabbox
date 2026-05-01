@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+// Hetzner live snapshots silently lose unflushed pagecache writes; the
+// optional fsfreeze adds a block-level barrier on xfs/btrfs.
+const hetznerPreSnapshotFlush = `set -e
+sync; sync
+sudo -n fsfreeze -f / >/dev/null 2>&1 && sudo -n fsfreeze -u / >/dev/null 2>&1 || true
+`
+
 func (a App) image(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return exit(2, "usage: crabbox image <create|promote> [flags]")
@@ -51,6 +58,9 @@ func (a App) imageCreate(ctx context.Context, args []string) error {
 	}
 	if !ok {
 		return exit(2, "image create requires a coordinator")
+	}
+	if err := flushHetznerLeaseBeforeSnapshot(ctx, coord, cfg, *id, a.Stderr); err != nil {
+		fmt.Fprintf(a.Stderr, "warn: pre-snapshot flush failed: %v (proceeding anyway)\n", err)
 	}
 	image, err := coord.CreateImage(ctx, *id, *name, *noReboot)
 	if err != nil {
@@ -98,6 +108,24 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "promoted image=%s name=%s state=%s region=%s\n", image.ID, image.Name, image.State, blank(image.Region, "-"))
 	return nil
+}
+
+func flushHetznerLeaseBeforeSnapshot(ctx context.Context, coord *CoordinatorClient, cfg Config, leaseID string, stderr io.Writer) error {
+	lease, err := coord.GetLease(ctx, leaseID)
+	if err != nil {
+		return err
+	}
+	if lease.Provider != "hetzner" {
+		return nil
+	}
+	if lease.Host == "" {
+		return fmt.Errorf("lease %s has no host", leaseID)
+	}
+	target := sshTargetForLease(cfg, lease.Host, lease.SSHUser, lease.SSHPort)
+	target.FallbackPorts = lease.SSHFallbackPorts
+	useStoredTestboxKey(&target, lease.ID)
+	fmt.Fprintf(stderr, "flushing lease %s before snapshot\n", lease.ID)
+	return runSSHQuiet(ctx, target, hetznerPreSnapshotFlush)
 }
 
 func waitForImage(ctx context.Context, coord *CoordinatorClient, imageID string, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
