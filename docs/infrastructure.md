@@ -87,6 +87,7 @@ Current local status:
 - Core Cloudflare, Hetzner, and GitHub tokens are present in local `~/.profile`.
 - The Crabbox Cloudflare token is mirrored to MacBook Pro `~/.profile`.
 - `CRABBOX_COORDINATOR` and `CRABBOX_COORDINATOR_TOKEN` are present in local and MacBook Pro `~/.profile`.
+- Cloudflare Access service-token CLI credentials can be stored locally as `CRABBOX_ACCESS_CLIENT_ID` and `CRABBOX_ACCESS_CLIENT_SECRET`; `CRABBOX_ACCESS_TOKEN` can carry an already minted Access JWT for protected fallback routes.
 - Cloudflare Access GitHub OAuth client ID and secret may be stored locally as `CRABBOX_GITHUB_OAUTH_*`.
 - Crabbox browser-login OAuth secrets are deployed as Worker secrets `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`, and `CRABBOX_SESSION_SECRET`.
 - Cloudflare Access GitHub IdP is created.

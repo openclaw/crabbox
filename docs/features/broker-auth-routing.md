@@ -43,6 +43,8 @@ X-Crabbox-Owner: <email>
 X-Crabbox-Org: <org>
 ```
 
+If the coordinator route is also protected by Cloudflare Access, the CLI can send Access credentials before the Worker receives the request. Configure `CRABBOX_ACCESS_CLIENT_ID` and `CRABBOX_ACCESS_CLIENT_SECRET` for a Cloudflare Access service token, or `CRABBOX_ACCESS_TOKEN` to forward an already minted Access JWT as `cf-access-token`. These Access credentials only satisfy Cloudflare Access; the Worker still requires the Crabbox bearer token or a signed Crabbox user token.
+
 Owner selection for bearer-token requests:
 
 ```text

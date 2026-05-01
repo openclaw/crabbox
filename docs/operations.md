@@ -78,7 +78,7 @@ The canonical Worker URL is:
 https://crabbox.openclaw.ai
 ```
 
-The `crabbox.openclaw.ai/*` route is attached to the coordinator Worker. Bearer-token CLI automation talks to the Worker with `CRABBOX_SHARED_TOKEN`/`CRABBOX_COORDINATOR_TOKEN`; GitHub browser login stores a user-scoped signed token.
+The `crabbox.openclaw.ai/*` route is attached to the coordinator Worker. Bearer-token CLI automation talks to the Worker with `CRABBOX_SHARED_TOKEN`/`CRABBOX_COORDINATOR_TOKEN`; GitHub browser login stores a user-scoped signed token. Access-protected fallback routes can also use `CRABBOX_ACCESS_CLIENT_ID` plus `CRABBOX_ACCESS_CLIENT_SECRET`, or `CRABBOX_ACCESS_TOKEN` for an already minted Access JWT.
 
 Use `crabbox config show` to confirm which URL and provider the CLI will use:
 

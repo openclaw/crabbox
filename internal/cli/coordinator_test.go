@@ -55,7 +55,15 @@ func TestDecodeCoordinatorResponseCanReadTextBody(t *testing.T) {
 }
 
 func TestCurlConfigKeepsBearerTokenInConfig(t *testing.T) {
-	client := CoordinatorClient{BaseURL: "https://example.test", Token: "secret-token"}
+	client := CoordinatorClient{
+		BaseURL: "https://example.test",
+		Token:   "secret-token",
+		Access: AccessConfig{
+			ClientID:     "access-client",
+			ClientSecret: "access-secret",
+			Token:        "access-jwt",
+		},
+	}
 	config, cleanup, err := client.curlConfig("POST", "/v1/leases", []byte(`{"leaseID":"cbx"}`), true)
 	if err != nil {
 		t.Fatal(err)
@@ -66,6 +74,9 @@ func TestCurlConfigKeepsBearerTokenInConfig(t *testing.T) {
 		`url = "https://example.test/v1/leases"`,
 		`request = "POST"`,
 		`header = "Authorization: Bearer secret-token"`,
+		`header = "CF-Access-Client-Id: access-client"`,
+		`header = "CF-Access-Client-Secret: access-secret"`,
+		`header = "cf-access-token: access-jwt"`,
 		`header = "Content-Type: application/json"`,
 		`data-binary = "@`,
 	} {
@@ -77,6 +88,39 @@ func TestCurlConfigKeepsBearerTokenInConfig(t *testing.T) {
 	bodyPath = strings.TrimPrefix(bodyPath, "@")
 	if _, err := os.Stat(bodyPath); err != nil {
 		t.Fatalf("body file missing: %v", err)
+	}
+}
+
+func TestCoordinatorHTTPAddsAccessHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer broker-token" {
+			t.Fatalf("Authorization=%q", got)
+		}
+		if got := r.Header.Get("CF-Access-Client-Id"); got != "access-client" {
+			t.Fatalf("CF-Access-Client-Id=%q", got)
+		}
+		if got := r.Header.Get("CF-Access-Client-Secret"); got != "access-secret" {
+			t.Fatalf("CF-Access-Client-Secret=%q", got)
+		}
+		if got := r.Header.Get("cf-access-token"); got != "access-jwt" {
+			t.Fatalf("cf-access-token=%q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	client := CoordinatorClient{
+		BaseURL: server.URL,
+		Token:   "broker-token",
+		Access: AccessConfig{
+			ClientID:     "access-client",
+			ClientSecret: "access-secret",
+			Token:        "access-jwt",
+		},
+		Client: server.Client(),
+	}
+	if err := client.Health(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 

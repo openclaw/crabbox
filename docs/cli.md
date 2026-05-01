@@ -249,6 +249,9 @@ broker:
   url: https://crabbox.openclaw.ai
   provider: aws
   token: ...
+  access:
+    clientId: ...
+    clientSecret: ...
 profile: project-check
 class: beast
 lease:
@@ -345,6 +348,9 @@ blacksmith:
 ```text
 CRABBOX_COORDINATOR
 CRABBOX_COORDINATOR_TOKEN
+CRABBOX_ACCESS_CLIENT_ID
+CRABBOX_ACCESS_CLIENT_SECRET
+CRABBOX_ACCESS_TOKEN
 CRABBOX_PROVIDER
 CRABBOX_PROFILE
 CRABBOX_CONFIG

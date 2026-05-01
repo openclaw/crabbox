@@ -18,6 +18,7 @@ type Config struct {
 	ServerType  string
 	Coordinator string
 	CoordToken  string
+	Access      AccessConfig
 	Location    string
 	Image       string
 	AWSRegion   string
@@ -96,6 +97,12 @@ type CacheConfig struct {
 	Git            bool
 	MaxGB          int
 	PurgeOnRelease bool
+}
+
+type AccessConfig struct {
+	ClientID     string
+	ClientSecret string
+	Token        string
 }
 
 func defaultConfig() Config {
@@ -201,9 +208,16 @@ type fileConfig struct {
 }
 
 type fileBrokerConfig struct {
-	URL      string `yaml:"url,omitempty"`
-	Token    string `yaml:"token,omitempty"`
-	Provider string `yaml:"provider,omitempty"`
+	URL      string            `yaml:"url,omitempty"`
+	Token    string            `yaml:"token,omitempty"`
+	Provider string            `yaml:"provider,omitempty"`
+	Access   *fileAccessConfig `yaml:"access,omitempty"`
+}
+
+type fileAccessConfig struct {
+	ClientID     string `yaml:"clientId,omitempty"`
+	ClientSecret string `yaml:"clientSecret,omitempty"`
+	Token        string `yaml:"token,omitempty"`
 }
 
 type fileHetznerConfig struct {
@@ -397,6 +411,17 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		}
 		if file.Broker.Provider != "" {
 			cfg.Provider = file.Broker.Provider
+		}
+		if file.Broker.Access != nil {
+			if file.Broker.Access.ClientID != "" {
+				cfg.Access.ClientID = file.Broker.Access.ClientID
+			}
+			if file.Broker.Access.ClientSecret != "" {
+				cfg.Access.ClientSecret = file.Broker.Access.ClientSecret
+			}
+			if file.Broker.Access.Token != "" {
+				cfg.Access.Token = file.Broker.Access.Token
+			}
 		}
 	}
 	if file.Hetzner != nil {
@@ -594,6 +619,9 @@ func applyEnv(cfg *Config) {
 	cfg.ServerType = getenv("CRABBOX_SERVER_TYPE", cfg.ServerType)
 	cfg.Coordinator = getenv("CRABBOX_COORDINATOR", cfg.Coordinator)
 	cfg.CoordToken = getenv("CRABBOX_COORDINATOR_TOKEN", cfg.CoordToken)
+	cfg.Access.ClientID = getenv("CRABBOX_ACCESS_CLIENT_ID", getenv("CF_ACCESS_CLIENT_ID", cfg.Access.ClientID))
+	cfg.Access.ClientSecret = getenv("CRABBOX_ACCESS_CLIENT_SECRET", getenv("CF_ACCESS_CLIENT_SECRET", cfg.Access.ClientSecret))
+	cfg.Access.Token = getenv("CRABBOX_ACCESS_TOKEN", getenv("CF_ACCESS_TOKEN", cfg.Access.Token))
 	cfg.Location = getenv("CRABBOX_HETZNER_LOCATION", cfg.Location)
 	cfg.Image = getenv("CRABBOX_HETZNER_IMAGE", cfg.Image)
 	cfg.AWSRegion = getenv("CRABBOX_AWS_REGION", getenv("AWS_REGION", cfg.AWSRegion))

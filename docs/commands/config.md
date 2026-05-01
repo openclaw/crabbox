@@ -17,6 +17,8 @@ show [--json]
 set-broker --url <url> --token-stdin [--provider hetzner|aws]
 ```
 
+`config show` reports `access_auth` as `missing`, `service-token`, `token`, `service-token+token`, or `incomplete` so operators can confirm whether Cloudflare Access credentials are configured without printing secret values. Store Access secrets only in user config or environment variables, not repo-local config.
+
 User config lives under the OS user config directory. Repo-local `crabbox.yaml` or `.crabbox.yaml` can override user defaults for a checkout. Keep project-specific sync, env, capacity, and Actions policy in repo config, not in the Crabbox binary:
 
 ```yaml

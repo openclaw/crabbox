@@ -22,6 +22,10 @@ func TestLoadConfigFromUserFile(t *testing.T) {
   url: https://crabbox.example.test
   token: secret
   provider: aws
+  access:
+    clientId: access-client
+    clientSecret: access-secret
+    token: access-jwt
 class: standard
 lease:
   ttl: 2h
@@ -101,6 +105,9 @@ ssh:
 	if cfg.Coordinator != "https://crabbox.example.test" || cfg.CoordToken != "secret" {
 		t.Fatalf("broker config not loaded: %#v", cfg)
 	}
+	if cfg.Access.ClientID != "access-client" || cfg.Access.ClientSecret != "access-secret" || cfg.Access.Token != "access-jwt" {
+		t.Fatalf("access config not loaded: %#v", cfg.Access)
+	}
 	if cfg.TTL.String() != "2h0m0s" || cfg.IdleTimeout.String() != "45m0s" {
 		t.Fatalf("lease config not loaded: ttl=%s idle=%s", cfg.TTL, cfg.IdleTimeout)
 	}
@@ -155,6 +162,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_TTL", "3h")
 	t.Setenv("CRABBOX_IDLE_TIMEOUT", "20m")
 	t.Setenv("CRABBOX_AWS_SSH_CIDRS", "198.51.100.7/32,203.0.113.8/32")
+	t.Setenv("CRABBOX_ACCESS_CLIENT_ID", "env-access-client")
+	t.Setenv("CRABBOX_ACCESS_CLIENT_SECRET", "env-access-secret")
+	t.Setenv("CRABBOX_ACCESS_TOKEN", "env-access-jwt")
 	path := userConfigPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -172,6 +182,42 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if len(cfg.AWSSSHCIDRs) != 2 || cfg.AWSSSHCIDRs[0] != "198.51.100.7/32" || cfg.AWSSSHCIDRs[1] != "203.0.113.8/32" {
 		t.Fatalf("AWSSSHCIDRs=%v", cfg.AWSSSHCIDRs)
+	}
+	if cfg.Access.ClientID != "env-access-client" || cfg.Access.ClientSecret != "env-access-secret" || cfg.Access.Token != "env-access-jwt" {
+		t.Fatalf("unexpected access config: %#v", cfg.Access)
+	}
+}
+
+func TestAccessAuthState(t *testing.T) {
+	for name, tc := range map[string]struct {
+		access AccessConfig
+		want   string
+	}{
+		"missing": {
+			want: "missing",
+		},
+		"incomplete": {
+			access: AccessConfig{ClientID: "client"},
+			want:   "incomplete",
+		},
+		"service token": {
+			access: AccessConfig{ClientID: "client", ClientSecret: "secret"},
+			want:   "service-token",
+		},
+		"token": {
+			access: AccessConfig{Token: "jwt"},
+			want:   "token",
+		},
+		"service token plus token": {
+			access: AccessConfig{ClientID: "client", ClientSecret: "secret", Token: "jwt"},
+			want:   "service-token+token",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := accessAuthState(tc.access); got != tc.want {
+				t.Fatalf("accessAuthState()=%q want %q", got, tc.want)
+			}
+		})
 	}
 }
 

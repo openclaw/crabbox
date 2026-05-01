@@ -168,6 +168,9 @@ Config:
 Environment:
   CRABBOX_COORDINATOR          Broker URL
   CRABBOX_COORDINATOR_TOKEN    Broker bearer token
+  CRABBOX_ACCESS_CLIENT_ID     Cloudflare Access service token client ID
+  CRABBOX_ACCESS_CLIENT_SECRET Cloudflare Access service token client secret
+  CRABBOX_ACCESS_TOKEN         Cloudflare Access JWT for protected routes
   CRABBOX_PROVIDER             hetzner or aws
   CRABBOX_OWNER                Usage owner override
   CRABBOX_ORG                  Usage org override

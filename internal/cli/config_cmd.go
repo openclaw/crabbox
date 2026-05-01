@@ -47,6 +47,7 @@ func (a App) configShow(args []string) error {
 		"serverType":  cfg.ServerType,
 		"coordinator": cfg.Coordinator,
 		"brokerAuth":  tokenState(cfg.CoordToken),
+		"accessAuth":  accessAuthState(cfg.Access),
 		"sshKey":      cfg.SSHKey,
 		"sshUser":     cfg.SSHUser,
 		"sshPort":     cfg.SSHPort,
@@ -124,6 +125,7 @@ func (a App) configShow(args []string) error {
 	fmt.Fprintf(a.Stdout, "config=%s\n", userConfigPath())
 	fmt.Fprintf(a.Stdout, "provider=%s class=%s type=%s profile=%s\n", cfg.Provider, cfg.Class, cfg.ServerType, cfg.Profile)
 	fmt.Fprintf(a.Stdout, "broker=%s auth=%s\n", blank(cfg.Coordinator, "-"), tokenState(cfg.CoordToken))
+	fmt.Fprintf(a.Stdout, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(a.Stdout, "ssh=%s@<host>:%s key=%s\n", cfg.SSHUser, cfg.SSHPort, cfg.SSHKey)
 	fmt.Fprintf(a.Stdout, "sync delete=%t checksum=%t git_seed=%t fingerprint=%t base_ref=%s excludes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg)), cfg.Sync.Timeout)
 	fmt.Fprintf(a.Stdout, "env allow=%s\n", strings.Join(cfg.EnvAllow, ","))
@@ -190,6 +192,24 @@ func tokenState(token string) string {
 		return "missing"
 	}
 	return "configured"
+}
+
+func accessAuthState(access AccessConfig) string {
+	hasServiceToken := access.ClientID != "" && access.ClientSecret != ""
+	hasToken := access.Token != ""
+	if hasServiceToken && hasToken {
+		return "service-token+token"
+	}
+	if hasServiceToken {
+		return "service-token"
+	}
+	if hasToken {
+		return "token"
+	}
+	if access.ClientID != "" || access.ClientSecret != "" {
+		return "incomplete"
+	}
+	return "missing"
 }
 
 func blank(value, fallback string) string {

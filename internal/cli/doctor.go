@@ -55,7 +55,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 			fmt.Fprintf(a.Stdout, "failed  coord    %v\n", err)
 			ok = false
 		} else {
-			fmt.Fprintf(a.Stdout, "ok      coord    %s\n", cfg.Coordinator)
+			fmt.Fprintf(a.Stdout, "ok      coord    %s access=%s\n", cfg.Coordinator, accessAuthState(cfg.Access))
 			if machines, err := coord.Pool(ctx, cfg); err != nil {
 				fmt.Fprintf(a.Stdout, "failed  broker   %v\n", err)
 				ok = false

@@ -10,6 +10,7 @@
 - Added GitHub org membership enforcement before minting browser-login tokens.
 - Added the canonical coordinator endpoint configured for OAuth callback generation.
 - Added Blacksmith Testbox workflow flags for `crabbox warmup` and `crabbox run`, enabling one-command Testbox runs without repo YAML or environment variables.
+- Added Cloudflare Access service-token headers for coordinator CLI requests. Thanks @stainlu.
 
 ### Changed
 

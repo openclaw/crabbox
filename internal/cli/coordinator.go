@@ -20,6 +20,7 @@ import (
 type CoordinatorClient struct {
 	BaseURL string
 	Token   string
+	Access  AccessConfig
 	Client  *http.Client
 }
 
@@ -204,6 +205,7 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 	return &CoordinatorClient{
 		BaseURL: strings.TrimRight(base.String(), "/"),
 		Token:   cfg.CoordToken,
+		Access:  cfg.Access,
 		Client: &http.Client{
 			Timeout: 5 * time.Minute,
 			Transport: &http.Transport{
@@ -502,6 +504,7 @@ func (c *CoordinatorClient) doHTTP(ctx context.Context, method, path string, dat
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
+	c.addAccessHeaders(req.Header)
 	if owner := localCoordinatorOwner(); owner != "" {
 		req.Header.Set("X-Crabbox-Owner", owner)
 	}
@@ -580,6 +583,7 @@ func (c *CoordinatorClient) curlConfig(method, path string, data []byte, hasBody
 	if c.Token != "" {
 		curlConfigValue(&cfg, "header", "Authorization: Bearer "+c.Token)
 	}
+	c.addCurlAccessHeaders(&cfg)
 	if owner := localCoordinatorOwner(); owner != "" {
 		curlConfigValue(&cfg, "header", "X-Crabbox-Owner: "+owner)
 	}
@@ -587,6 +591,26 @@ func (c *CoordinatorClient) curlConfig(method, path string, data []byte, hasBody
 		curlConfigValue(&cfg, "header", "X-Crabbox-Org: "+org)
 	}
 	return cfg.String(), cleanup, nil
+}
+
+func (c *CoordinatorClient) addAccessHeaders(header http.Header) {
+	if c.Access.ClientID != "" && c.Access.ClientSecret != "" {
+		header.Set("CF-Access-Client-Id", c.Access.ClientID)
+		header.Set("CF-Access-Client-Secret", c.Access.ClientSecret)
+	}
+	if c.Access.Token != "" {
+		header.Set("cf-access-token", c.Access.Token)
+	}
+}
+
+func (c *CoordinatorClient) addCurlAccessHeaders(cfg *strings.Builder) {
+	if c.Access.ClientID != "" && c.Access.ClientSecret != "" {
+		curlConfigValue(cfg, "header", "CF-Access-Client-Id: "+c.Access.ClientID)
+		curlConfigValue(cfg, "header", "CF-Access-Client-Secret: "+c.Access.ClientSecret)
+	}
+	if c.Access.Token != "" {
+		curlConfigValue(cfg, "header", "cf-access-token: "+c.Access.Token)
+	}
 }
 
 func curlConfigValue(out *strings.Builder, key, value string) {
