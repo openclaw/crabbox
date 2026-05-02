@@ -15,7 +15,7 @@
   },
   "scripts": {
     "check": "node --check index.js && node --test index.test.js",
-    "docs:check": "node scripts/check-docs-links.mjs && node scripts/build-docs-site.mjs",
+    "docs:check": "node scripts/check-command-docs.mjs && node scripts/check-docs-links.mjs && node scripts/build-docs-site.mjs",
     "live:auth": "CRABBOX_LIVE=1 scripts/live-auth-smoke.sh",
     "test": "node --test index.test.js"
   },
