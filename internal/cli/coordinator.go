@@ -23,6 +23,25 @@ type CoordinatorClient struct {
 	Client  *http.Client
 }
 
+type coordinatorHTTPError struct {
+	Method string
+	Path   string
+	Status int
+	Body   string
+}
+
+func (e *coordinatorHTTPError) Error() string {
+	if e.Body != "" {
+		return fmt.Sprintf("coordinator %s %s: http %d: %s", e.Method, e.Path, e.Status, e.Body)
+	}
+	return fmt.Sprintf("coordinator %s %s: http %d", e.Method, e.Path, e.Status)
+}
+
+type CoordinatorLeaseResponse struct {
+	Lease  CoordinatorLease `json:"lease"`
+	Bearer string           `json:"bearer,omitempty"`
+}
+
 type CoordinatorLease struct {
 	ID                 string   `json:"id"`
 	Slug               string   `json:"slug,omitempty"`
@@ -231,13 +250,15 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 }
 
 func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string) (CoordinatorLease, error) {
-	var res struct {
-		Lease CoordinatorLease `json:"lease"`
-	}
+	res, err := c.CreateLeaseWithBearer(ctx, cfg, publicKey, keep, leaseID, slug)
+	return res.Lease, err
+}
+
+func (c *CoordinatorClient) CreateLeaseWithBearer(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string) (CoordinatorLeaseResponse, error) {
 	if slug == "" {
 		slug = newLeaseSlug(leaseID)
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/leases", map[string]any{
+	body := map[string]any{
 		"leaseID":     leaseID,
 		"slug":        slug,
 		"profile":     cfg.Profile,
@@ -269,8 +290,25 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"idleTimeoutSeconds": int(cfg.IdleTimeout.Seconds()),
 		"keep":               keep,
 		"sshPublicKey":       publicKey,
-	}, &res)
-	return res.Lease, err
+	}
+	if cfg.ImageTag != "" {
+		body["imageTag"] = cfg.ImageTag
+	}
+	var res CoordinatorLeaseResponse
+	err := c.do(ctx, http.MethodPost, "/v1/leases", body, &res)
+	if err == nil {
+		return res, nil
+	}
+	encoded, mErr := json.Marshal(body)
+	if mErr != nil {
+		return CoordinatorLeaseResponse{}, err
+	}
+	if retryErr := retryWithMPPX(ctx, c, http.MethodPost, "/v1/leases", encoded, err, &res); retryErr == nil {
+		return res, nil
+	} else if !errors.Is(retryErr, errMppxNotApplicable) {
+		return CoordinatorLeaseResponse{}, retryErr
+	}
+	return CoordinatorLeaseResponse{}, err
 }
 
 func (c *CoordinatorClient) GetLease(ctx context.Context, id string) (CoordinatorLease, error) {
@@ -655,11 +693,12 @@ func splitCurlResponse(data []byte) ([]byte, int, error) {
 func decodeCoordinatorResponse(method, path string, statusCode int, body io.Reader, out any) error {
 	if statusCode < 200 || statusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(body, 600))
-		msg := strings.TrimSpace(string(data))
-		if msg != "" {
-			return fmt.Errorf("coordinator %s %s: http %d: %s", method, path, statusCode, msg)
+		return &coordinatorHTTPError{
+			Method: method,
+			Path:   path,
+			Status: statusCode,
+			Body:   strings.TrimSpace(string(data)),
 		}
-		return fmt.Errorf("coordinator %s %s: http %d", method, path, statusCode)
 	}
 	if out != nil {
 		if buf, ok := out.(*bytes.Buffer); ok {

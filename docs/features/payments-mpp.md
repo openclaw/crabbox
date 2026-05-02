@@ -74,6 +74,24 @@ auto-detect from the public hostname.
   before the 402 is emitted, so a payment-gated request that exceeds the
   org-level monthly cap will get `429` instead of `402`.
 
+## CLI client behaviour
+
+The `crabbox` Go CLI does not sign Tempo payments natively. Instead, when:
+
+1. `CRABBOX_MPP_PAY=auto` is set in the environment, AND
+2. the broker returns `402 Payment Required` for `POST /v1/leases`, AND
+3. the `mppx` binary is available on `PATH`,
+
+the CLI shells out to `mppx` to handle the 402 → sign → retry cycle, using
+whichever account `MPPX_ACCOUNT` (or `MPPX_PRIVATE_KEY`) selects. Without
+the opt-in env var or without `mppx` installed, the original 402 error is
+returned unchanged.
+
+Successful MPP-paid lease creations include a `bearer` field in the response
+alongside the lease record. That `cbxl_…` token is HMAC-bound to the lease
+ID, owner, and TTL, and is the credential to use for `crabbox heartbeat`,
+`stop`, and `runs` against that lease without re-paying.
+
 Related docs:
 
 - [MPP E2E recipe](./payments-mpp-e2e.md)
