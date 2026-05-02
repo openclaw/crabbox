@@ -24,7 +24,7 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - Friendly slug generation, normalization, provider names, and direct collision handling: `internal/cli/slug.go`
 - Repo claim files and reclaim checks: `internal/cli/claim.go`
 - Direct-provider labels, safe label encoding, idle touch labels, TTL cap math: `internal/cli/provider_labels.go`
-- Coordinator client request/response structs, slug lookup, heartbeats, usage, run history: `internal/cli/coordinator.go`
+- Coordinator client request/response structs, slug lookup, heartbeats, usage, run history, run events: `internal/cli/coordinator.go`
 - Worker lease records, public routes, slug allocation, heartbeat expiry math, alarms: `worker/src/fleet.ts`, `worker/src/types.ts`
 - Worker slug generation and provider labels: `worker/src/slug.ts`, `worker/src/provider-labels.ts`
 
@@ -50,7 +50,7 @@ Bootstrap is intentionally tiny: OpenSSH, CA certificates, curl, Git, rsync, jq,
 - Per-lease SSH known_hosts and ControlMaster config: `internal/cli/ssh.go`
 - GitHub Actions hydrate/register/dispatch bridge: `internal/cli/actions.go`
 - Cache stats/purge/warm commands: `internal/cli/cache.go`
-- Run history/log commands and retained run logs: `internal/cli/history.go`, `internal/cli/runlog.go`
+- Run history/log/event commands and retained run logs: `internal/cli/history.go`, `internal/cli/run_events.go`, `internal/cli/runlog.go`
 - JUnit result parsing and remote markers: `internal/cli/results.go`, `internal/cli/results_parse.go`, `internal/cli/results_remote.go`
 
 ## Worker API, Cost, And Operations

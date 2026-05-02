@@ -52,6 +52,10 @@ func (a App) Run(ctx context.Context, args []string) error {
 		return a.admin(ctx, args[1:])
 	case "history":
 		return a.history(ctx, args[1:])
+	case "events":
+		return a.events(ctx, args[1:])
+	case "attach":
+		return a.attach(ctx, args[1:])
 	case "logs":
 		return a.logs(ctx, args[1:])
 	case "results":
@@ -124,6 +128,8 @@ Commands:
   run         Sync the repo, run a remote command, stream output
   sync-plan   Show local sync manifest size hotspots
   history     List recorded remote runs
+  events      List structured events for a recorded run
+  attach      Follow structured output for an active recorded run
   logs        Print recorded run logs
   results     Show recorded test result summaries
   cache       Inspect, purge, or warm remote caches
@@ -147,6 +153,8 @@ Common Flows:
   crabbox ssh --id blue-lobster
   crabbox inspect --id blue-lobster --json
   crabbox history --lease cbx_abcdef123456
+  crabbox events run_123
+  crabbox attach run_123
   crabbox logs run_123
   crabbox results run_123
   crabbox cache stats --id blue-lobster

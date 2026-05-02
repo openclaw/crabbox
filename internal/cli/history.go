@@ -31,8 +31,8 @@ func (a App) history(ctx context.Context, args []string) error {
 		return json.NewEncoder(a.Stdout).Encode(runs)
 	}
 	for _, run := range runs {
-		fmt.Fprintf(a.Stdout, "%-16s %-16s %-16s %-9s exit=%s duration=%s started=%s command=%s\n",
-			run.ID, run.LeaseID, blank(run.Slug, "-"), run.State, formatRunExit(run.ExitCode), formatMs(run.DurationMs), run.StartedAt, strings.Join(run.Command, " "))
+		fmt.Fprintf(a.Stdout, "%-16s %-16s %-16s %-9s phase=%-8s exit=%s duration=%s started=%s command=%s\n",
+			run.ID, run.LeaseID, blank(run.Slug, "-"), run.State, blank(run.Phase, "-"), formatRunExit(run.ExitCode), formatMs(run.DurationMs), run.StartedAt, strings.Join(run.Command, " "))
 	}
 	return nil
 }

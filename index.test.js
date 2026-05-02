@@ -43,7 +43,14 @@ test("registers the Crabbox tool surface", () => {
   const tools = registerWithConfig({});
   assert.deepEqual(
     tools.map((tool) => tool.name).sort(),
-    ["crabbox_list", "crabbox_run", "crabbox_status", "crabbox_stop", "crabbox_warmup"],
+    [
+      "crabbox_events",
+      "crabbox_list",
+      "crabbox_run",
+      "crabbox_status",
+      "crabbox_stop",
+      "crabbox_warmup",
+    ],
   );
 });
 
@@ -84,6 +91,27 @@ test("crabbox_status includes optional flags", async () => {
     "--wait",
     "--wait-timeout",
     "10m",
+    "--json",
+  ]);
+});
+
+test("crabbox_events includes optional flags", async () => {
+  const fake = createFakeCrabbox();
+  const tools = registerWithConfig({ binary: fake.file });
+  const result = await getTool(tools, "crabbox_events").execute("call-1", {
+    id: "run_123",
+    after: 4,
+    limit: 25,
+    json: true,
+  });
+  assert.deepEqual(JSON.parse(result.details.stdout).argv, [
+    "events",
+    "--id",
+    "run_123",
+    "--after",
+    "4",
+    "--limit",
+    "25",
     "--json",
   ]);
 });

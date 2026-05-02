@@ -37,6 +37,8 @@ crabbox warmup [--provider hetzner|aws|blacksmith-testbox] [--profile <name>] [-
 crabbox run [--id <lease-id-or-slug>] [--shell] [--checksum] [--debug] [--force-sync-large] [--blacksmith-workflow <workflow>] -- <command...>
 crabbox sync-plan [--limit <n>]
 crabbox history [--lease <lease-id>] [--owner <email>] [--org <name>] [--limit <n>] [--json]
+crabbox events <run-id> [--after <seq>] [--limit <n>] [--json]
+crabbox attach <run-id> [--after <seq>]
 crabbox logs <run-id> [--json]
 crabbox results <run-id> [--json]
 crabbox cache stats --id <lease-id-or-slug> [--json]
@@ -144,6 +146,8 @@ Inspect recorded runs:
 ```sh
 crabbox run --id blue-lobster --junit junit.xml -- go test ./...
 crabbox history --lease cbx_abcdef123456
+crabbox events run_123
+crabbox attach run_123
 crabbox logs run_123
 crabbox results run_123
 ```
@@ -184,7 +188,7 @@ Behavior:
 5. Sync current repo, unless a matching sync fingerprint lets Crabbox skip rsync.
 6. Seed remote Git from the configured origin/base ref before first sync when possible.
 7. Run command over SSH.
-8. Stream remote output and retain the latest log tail in coordinator history.
+8. Stream remote output, append run events, and retain the latest log tail in coordinator history.
 9. Heartbeat coordinator leases in the background.
 10. Release lease unless `--keep` is set.
 11. Exit with the remote command exit code.

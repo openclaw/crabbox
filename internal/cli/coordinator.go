@@ -116,15 +116,37 @@ type CoordinatorRun struct {
 	ServerType   string             `json:"serverType"`
 	Command      []string           `json:"command"`
 	State        string             `json:"state"`
+	Phase        string             `json:"phase,omitempty"`
 	ExitCode     *int               `json:"exitCode,omitempty"`
 	SyncMs       int64              `json:"syncMs,omitempty"`
 	CommandMs    int64              `json:"commandMs,omitempty"`
 	DurationMs   int64              `json:"durationMs,omitempty"`
+	EventSeq     int64              `json:"eventSeq,omitempty"`
+	LastEventAt  string             `json:"lastEventAt,omitempty"`
 	LogBytes     int64              `json:"logBytes"`
 	LogTruncated bool               `json:"logTruncated"`
 	Results      *TestResultSummary `json:"results,omitempty"`
 	StartedAt    string             `json:"startedAt"`
 	EndedAt      string             `json:"endedAt,omitempty"`
+}
+
+type CoordinatorRunEventsResponse struct {
+	Events []CoordinatorRunEvent `json:"events"`
+}
+
+type CoordinatorRunEventResponse struct {
+	Event CoordinatorRunEvent `json:"event"`
+}
+
+type CoordinatorRunEvent struct {
+	ID        string         `json:"id"`
+	RunID     string         `json:"runID"`
+	Seq       int64          `json:"seq"`
+	Type      string         `json:"type"`
+	Stream    string         `json:"stream,omitempty"`
+	Message   string         `json:"message,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
+	CreatedAt string         `json:"createdAt"`
 }
 
 type TestResultSummary struct {
@@ -504,6 +526,41 @@ func (c *CoordinatorClient) RunLogs(ctx context.Context, runID string) (string, 
 	var buf bytes.Buffer
 	err := c.do(ctx, http.MethodGet, "/v1/runs/"+url.PathEscape(runID)+"/logs", nil, &buf)
 	return buf.String(), err
+}
+
+func (c *CoordinatorClient) AppendRunEvent(ctx context.Context, runID, eventType string, stream string, message string, data map[string]any) (CoordinatorRunEvent, error) {
+	var res CoordinatorRunEventResponse
+	body := map[string]any{
+		"type": eventType,
+	}
+	if stream != "" {
+		body["stream"] = stream
+	}
+	if message != "" {
+		body["message"] = message
+	}
+	if data != nil {
+		body["data"] = data
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/events", body, &res)
+	return res.Event, err
+}
+
+func (c *CoordinatorClient) RunEvents(ctx context.Context, runID string, after int64, limit int) ([]CoordinatorRunEvent, error) {
+	var res CoordinatorRunEventsResponse
+	values := url.Values{}
+	if after > 0 {
+		values.Set("after", strconv.FormatInt(after, 10))
+	}
+	if limit > 0 {
+		values.Set("limit", strconv.Itoa(limit))
+	}
+	path := "/v1/runs/" + url.PathEscape(runID) + "/events"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	err := c.do(ctx, http.MethodGet, path, nil, &res)
+	return res.Events, err
 }
 
 func (c *CoordinatorClient) Health(ctx context.Context) error {

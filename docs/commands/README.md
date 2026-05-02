@@ -12,6 +12,8 @@ Command docs live here, one file per top-level command. Keep `docs/cli.md` as th
 - [run](run.md)
 - [sync-plan](sync-plan.md)
 - [history](history.md)
+- [events](events.md)
+- [attach](attach.md)
 - [logs](logs.md)
 - [results](results.md)
 - [cache](cache.md)

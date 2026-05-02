@@ -378,6 +378,50 @@ function registerList(api, config) {
   });
 }
 
+function registerEvents(api, config) {
+  api.registerTool({
+    name: "crabbox_events",
+    description: "List structured lifecycle and output events for a recorded Crabbox run.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id"],
+      properties: {
+        id: {
+          type: "string",
+          description: "Crabbox run ID.",
+        },
+        after: {
+          type: "number",
+          description: "Only return events after this sequence.",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum events to return.",
+        },
+        json: { type: "boolean" },
+        timeoutSeconds: {
+          type: "number",
+          description: "Local wrapper timeout for this Crabbox CLI invocation.",
+        },
+      },
+    },
+    async execute(_toolCallId, params, signal) {
+      const args = ["events", "--id", readString(params, "id")];
+      const after = readPositiveInteger(params, "after", undefined);
+      const limit = readPositiveInteger(params, "limit", undefined);
+      if (after !== undefined) {
+        args.push("--after", String(after));
+      }
+      if (limit !== undefined) {
+        args.push("--limit", String(limit));
+      }
+      maybePushBool(args, "--json", params?.json);
+      return execute(config, args, params, signal);
+    },
+  });
+}
+
 function registerStop(api, config) {
   api.registerTool({
     name: "crabbox_stop",
@@ -417,6 +461,7 @@ export default {
     registerWarmup(api, config);
     registerStatus(api, config);
     registerList(api, config);
+    registerEvents(api, config);
     registerStop(api, config);
     api.logger?.info?.("Crabbox plugin registered");
   },

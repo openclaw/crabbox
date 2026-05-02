@@ -181,6 +181,8 @@ func (a App) runCommand(ctx context.Context, args []string) error {
 	var server Server
 	var target SSHTarget
 	var leaseID string
+	var runID string
+	var runRecorder *runEventRecorder
 	acquired := false
 	coord, useCoordinator, err := newCoordinatorClient(cfg)
 	if err != nil {
@@ -230,6 +232,9 @@ func (a App) runCommand(ctx context.Context, args []string) error {
 		defer func() {
 			if !*keep {
 				a.releaseAcquiredLeaseBestEffort(context.Background(), cfg, coord, useCoordinator, server, target, leaseID)
+				if runRecorder != nil {
+					runRecorder.appendBestEffort("lease.released", "", "", map[string]any{"leaseID": leaseID, "slug": serverSlug(server)})
+				}
 			}
 		}()
 	}
@@ -246,6 +251,29 @@ func (a App) runCommand(ctx context.Context, args []string) error {
 		stopHeartbeat := startCoordinatorHeartbeat(ctx, coord, leaseID, cfg.IdleTimeout, heartbeatIdleTimeout, a.Stderr)
 		defer stopHeartbeat()
 	}
+	if useCoordinator && leaseID != "" && coord != nil {
+		run, err := coord.CreateRun(ctx, leaseID, cfg, command)
+		if err != nil {
+			fmt.Fprintf(a.Stderr, "warning: run history create failed: %v\n", err)
+		} else {
+			runID = run.ID
+			runRecorder = newRunEventRecorder(coord, runID, a.Stderr)
+			base := strings.TrimRight(coord.BaseURL, "/")
+			fmt.Fprintf(a.Stderr, "recording run %s events=%s/v1/runs/%s/events logs=%s/v1/runs/%s/logs\n", runID, base, runID, base, runID)
+			leaseEvent := "lease.created"
+			if !acquired {
+				leaseEvent = "lease.reused"
+			}
+			runRecorder.append(ctx, leaseEvent, "", "", map[string]any{
+				"leaseID":  leaseID,
+				"slug":     serverSlug(server),
+				"provider": cfg.Provider,
+				"class":    cfg.Class,
+				"type":     cfg.ServerType,
+				"acquired": acquired,
+			})
+		}
+	}
 
 	if cfg.Sync.BaseRef == "" {
 		cfg.Sync.BaseRef = repo.BaseRef
@@ -258,8 +286,14 @@ func (a App) runCommand(ctx context.Context, args []string) error {
 		actionsEnvFile = state.EnvFile
 		fmt.Fprintf(a.Stderr, "using GitHub Actions workspace %s\n", workdir)
 	}
+	if *noSync && runRecorder != nil {
+		runRecorder.append(ctx, "sync.finished", "", "", map[string]any{"skipped": true, "reason": "no-sync", "workdir": workdir})
+	}
 	if !*noSync {
 		syncStart := time.Now()
+		if runRecorder != nil {
+			runRecorder.append(ctx, "sync.started", "", "", map[string]any{"workdir": workdir})
+		}
 		fmt.Fprintf(a.Stderr, "syncing %s -> %s:%s\n", repo.Root, target.Host, workdir)
 		stepStart := time.Now()
 		if err := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute); err != nil {
@@ -296,6 +330,9 @@ func (a App) runCommand(ctx context.Context, args []string) error {
 				if err == nil && remoteFingerprint == fingerprint {
 					timings.sync = time.Since(syncStart)
 					timings.syncSkipped = true
+					if runRecorder != nil {
+						runRecorder.append(ctx, "sync.finished", "", "", map[string]any{"durationMs": timings.sync.Milliseconds(), "skipped": true, "workdir": workdir})
+					}
 					fmt.Fprintf(a.Stderr, "No changes detected, skipping sync (%s)\n", timings.sync.Round(time.Millisecond))
 					goto afterSync
 				}
@@ -343,8 +380,16 @@ func (a App) runCommand(ctx context.Context, args []string) error {
 		}
 		timings.syncSteps.sanity = time.Since(stepStart)
 		stepStart = time.Now()
+		if runRecorder != nil {
+			runRecorder.append(ctx, "hydrate.started", "", "", map[string]any{"baseRef": cfg.Sync.BaseRef, "workdir": workdir})
+		}
 		if err := runSSHQuiet(ctx, target, remoteGitHydrate(workdir, cfg.Sync.BaseRef)); err != nil {
 			fmt.Fprintf(a.Stderr, "warning: remote git hydrate failed: %v\n", err)
+			if runRecorder != nil {
+				runRecorder.append(ctx, "hydrate.finished", "", "", map[string]any{"ok": false, "error": err.Error(), "workdir": workdir})
+			}
+		} else if runRecorder != nil {
+			runRecorder.append(ctx, "hydrate.finished", "", "", map[string]any{"ok": true, "workdir": workdir})
 		}
 		timings.syncSteps.gitHydrate = time.Since(stepStart)
 		if fingerprint != "" {
@@ -355,12 +400,20 @@ func (a App) runCommand(ctx context.Context, args []string) error {
 			timings.syncSteps.fingerprintWrite = time.Since(stepStart)
 		}
 		timings.sync = time.Since(syncStart)
+		if runRecorder != nil {
+			runRecorder.append(ctx, "sync.finished", "", "", map[string]any{"durationMs": timings.sync.Milliseconds(), "skipped": false, "workdir": workdir})
+		}
 		fmt.Fprintf(a.Stderr, "sync complete in %s\n", timings.sync.Round(time.Millisecond))
 	}
 afterSync:
 	if *syncOnly {
 		fmt.Fprintf(a.Stdout, "synced %s\n", workdir)
 		fmt.Fprintln(a.Stderr, formatRunSummary(timings, time.Since(timings.started), 0))
+		if runID != "" {
+			if _, err := coord.FinishRun(context.Background(), runID, 0, timings.sync, 0, "", false, nil); err != nil {
+				fmt.Fprintf(a.Stderr, "warning: run history finish failed for %s: %v\n", runID, err)
+			}
+		}
 		return nil
 	}
 
@@ -380,25 +433,25 @@ afterSync:
 		}()
 	}
 	fmt.Fprintf(a.Stderr, "running on %s %s\n", target.Host, strings.Join(command, " "))
-	var runID string
-	if useCoordinator && leaseID != "" && coord != nil {
-		run, err := coord.CreateRun(ctx, leaseID, cfg, command)
-		if err != nil {
-			fmt.Fprintf(a.Stderr, "warning: run history create failed: %v\n", err)
-		} else {
-			runID = run.ID
-			fmt.Fprintf(a.Stderr, "recording run %s\n", runID)
-		}
-	}
 	remote := remoteCommandWithEnvFile(workdir, allowedEnv(cfg.EnvAllow), actionsEnvFile, command)
 	if *shellMode || shouldUseShell(command) {
 		remote = remoteShellCommandWithEnvFile(workdir, allowedEnv(cfg.EnvAllow), actionsEnvFile, strings.Join(command, " "))
 	}
+	if runRecorder != nil {
+		runRecorder.append(ctx, "command.started", "", "", map[string]any{"command": command, "workdir": workdir})
+	}
 	var logBuffer runLogBuffer
-	stdout := io.MultiWriter(a.Stdout, &logBuffer)
-	stderr := io.MultiWriter(a.Stderr, &logBuffer)
+	stdoutStreamer := newRunEventStreamer(runRecorder, "stdout")
+	stderrStreamer := newRunEventStreamer(runRecorder, "stderr")
+	stdout := runEventOutputWriter{local: a.Stdout, log: &logBuffer, streamer: stdoutStreamer}
+	stderr := runEventOutputWriter{local: a.Stderr, log: &logBuffer, streamer: stderrStreamer}
 	code := runSSHStream(ctx, target, remote, stdout, stderr)
+	stdoutStreamer.Close()
+	stderrStreamer.Close()
 	timings.command = time.Since(commandStart)
+	if runRecorder != nil {
+		runRecorder.appendBestEffort("command.finished", "", "", map[string]any{"exitCode": code, "durationMs": timings.command.Milliseconds()})
+	}
 	var results *TestResultSummary
 	if len(cfg.Results.JUnit) > 0 {
 		results, err = collectRemoteJUnitResults(ctx, target, workdir, cfg.Results.JUnit)

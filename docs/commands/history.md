@@ -21,8 +21,11 @@ Flags:
 ```
 
 Human output includes run ID, lease ID, state, exit code, duration, start time, and command. Use the run ID with [logs](logs.md).
+When event recording is available, human output also includes the last known phase, such as `sync`, `hydrate`, `command`, or `release`.
 
 Related docs:
 
+- [events](events.md)
+- [attach](attach.md)
 - [logs](logs.md)
 - [History and logs](../features/history-logs.md)

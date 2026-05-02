@@ -14,6 +14,8 @@ import type {
   ProviderMachine,
   PromotedImageRecord,
   RunCreateRequest,
+  RunEvent,
+  RunEventAppendRequest,
   RunFinishRequest,
   RunRecord,
   TestFailure,
@@ -366,6 +368,9 @@ export class FleetDurableObject implements DurableObject {
       serverType: input.serverType ?? lease?.serverType ?? "",
       command: Array.isArray(input.command) ? input.command.map(String) : [],
       state: "running",
+      phase: "created",
+      eventSeq: 1,
+      lastEventAt: now,
       logBytes: 0,
       logTruncated: false,
       startedAt: now,
@@ -373,6 +378,20 @@ export class FleetDurableObject implements DurableObject {
     if (lease?.slug) {
       run.slug = lease.slug;
     }
+    await this.putRunEvent({
+      id: runEventID(run.id, 1),
+      runID: run.id,
+      seq: 1,
+      type: "run.created",
+      data: {
+        leaseID: run.leaseID,
+        provider: run.provider,
+        class: run.class,
+        serverType: run.serverType,
+        command: run.command,
+      },
+      createdAt: now,
+    });
     await this.putRun(run);
     return json({ run }, { status: 201 });
   }
@@ -393,10 +412,64 @@ export class FleetDurableObject implements DurableObject {
         headers: { "content-type": "text/plain; charset=utf-8" },
       });
     }
+    if (method === "GET" && action === "events") {
+      const run = await this.getRun(runID);
+      if (!run || !this.runVisibleToRequest(run, request)) {
+        return notFound();
+      }
+      const url = new URL(request.url);
+      if (url.searchParams.get("stream") === "true") {
+        return this.streamRunEvents(request, run);
+      }
+      return json({ events: await this.listRunEvents(request, runID) });
+    }
+    if (method === "POST" && action === "events") {
+      return this.appendRunEvent(request, runID);
+    }
     if (method === "POST" && action === "finish") {
       return this.finishRun(request, runID);
     }
     return json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async appendRunEvent(request: Request, runID: string): Promise<Response> {
+    const run = await this.getRun(runID);
+    if (!run || !this.runVisibleToRequest(run, request)) {
+      return notFound();
+    }
+    const input = await readJson<RunEventAppendRequest>(request);
+    if (!validRunEventType(input.type)) {
+      return json({ error: "invalid_event_type" }, { status: 400 });
+    }
+    const stream =
+      input.stream === "stdout" || input.stream === "stderr" ? input.stream : undefined;
+    const now = new Date().toISOString();
+    const seq = Math.max(run.eventSeq ?? 0, await this.latestRunEventSeq(runID)) + 1;
+    const event: RunEvent = {
+      id: runEventID(runID, seq),
+      runID,
+      seq,
+      type: input.type,
+      createdAt: now,
+    };
+    if (stream) {
+      event.stream = stream;
+    }
+    if (typeof input.message === "string" && input.message.length > 0) {
+      event.message = truncateString(input.message, MAX_RUN_EVENT_MESSAGE_BYTES);
+    }
+    if (isRecord(input.data)) {
+      event.data = boundedEventData(input.data);
+    }
+    run.eventSeq = seq;
+    run.lastEventAt = now;
+    const phase = runPhaseForEvent(input.type, run.phase);
+    if (phase !== undefined) {
+      run.phase = phase;
+    }
+    await this.putRunEvent(event);
+    await this.putRun(run);
+    return json({ event }, { status: 201 });
   }
 
   private async finishRun(request: Request, runID: string): Promise<Response> {
@@ -420,7 +493,9 @@ export class FleetDurableObject implements DurableObject {
       run.durationMs = now.getTime() - started;
     }
     run.state = run.exitCode === 0 ? "succeeded" : "failed";
+    run.phase = run.state === "succeeded" ? "finished" : "failed";
     run.endedAt = now.toISOString();
+    run.lastEventAt = run.endedAt;
     const log = input.log ?? "";
     run.logBytes = new TextEncoder().encode(log).byteLength;
     run.logTruncated = Boolean(input.logTruncated);
@@ -451,6 +526,62 @@ export class FleetDurableObject implements DurableObject {
         .filter((run) => !state || run.state === state)
         .toSorted((a, b) => b.startedAt.localeCompare(a.startedAt))
         .slice(0, limit),
+    });
+  }
+
+  private async listRunEvents(request: Request, runID: string): Promise<RunEvent[]> {
+    const url = new URL(request.url);
+    const after = finiteQueryNumber(url.searchParams.get("after")) ?? 0;
+    const limit = clampLimit(url.searchParams.get("limit"), 500);
+    const events = await this.runEventRecords(runID);
+    return events.filter((event) => event.seq > after).slice(0, limit);
+  }
+
+  private streamRunEvents(request: Request, run: RunRecord): Response {
+    const url = new URL(request.url);
+    let after = finiteQueryNumber(url.searchParams.get("after")) ?? 0;
+    const encoder = new TextEncoder();
+    const self = this;
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let closed = false;
+        const close = () => {
+          closed = true;
+          try {
+            controller.close();
+          } catch {
+            /* already closed */
+          }
+        };
+        request.signal.addEventListener("abort", close, { once: true });
+        try {
+          while (!closed) {
+            const events = (await self.runEventRecords(run.id))
+              .filter((event) => event.seq > after)
+              .slice(0, 100);
+            for (const event of events) {
+              after = event.seq;
+              controller.enqueue(encoder.encode(formatRunEventSSE(event)));
+            }
+            const current = await self.getRun(run.id);
+            if (events.length === 0 && current?.state !== "running") {
+              close();
+              return;
+            }
+            await sleep(1000);
+          }
+        } catch (error) {
+          controller.error(error);
+        } finally {
+          request.signal.removeEventListener("abort", close);
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+      },
     });
   }
 
@@ -608,6 +739,16 @@ export class FleetDurableObject implements DurableObject {
     return [...runs.values()];
   }
 
+  private async runEventRecords(runID: string): Promise<RunEvent[]> {
+    const events = await this.state.storage.list<RunEvent>({ prefix: runEventPrefix(runID) });
+    return [...events.values()].toSorted((a, b) => a.seq - b.seq);
+  }
+
+  private async latestRunEventSeq(runID: string): Promise<number> {
+    const events = await this.runEventRecords(runID);
+    return events.at(-1)?.seq ?? 0;
+  }
+
   private filterLeasesForRequest(leases: LeaseRecord[], request: Request): LeaseRecord[] {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
@@ -644,6 +785,10 @@ export class FleetDurableObject implements DurableObject {
 
   private async putRun(run: RunRecord): Promise<void> {
     await this.state.storage.put(runKey(run.id), run);
+  }
+
+  private async putRunEvent(event: RunEvent): Promise<void> {
+    await this.state.storage.put(runEventKey(event.runID, event.seq), event);
   }
 
   private provider(provider: Provider, region = "eu-west-1"): CloudProvider {
@@ -684,6 +829,18 @@ function runLogKey(runID: string): string {
   return `runlog:${runID}`;
 }
 
+function runEventPrefix(runID: string): string {
+  return `runevent:${runID}:`;
+}
+
+function runEventKey(runID: string, seq: number): string {
+  return `${runEventPrefix(runID)}${String(seq).padStart(12, "0")}`;
+}
+
+function runEventID(runID: string, seq: number): string {
+  return `${runID}:${seq}`;
+}
+
 function promotedAWSImageKey(): string {
   return "image:aws:promoted";
 }
@@ -716,6 +873,15 @@ function validCrabboxProviderKey(value: string | undefined): value is string {
   return typeof value === "string" && /^crabbox-cbx-[a-f0-9]{12}$/.test(value);
 }
 
+function validRunEventType(value: string | undefined): value is string {
+  return (
+    typeof value === "string" &&
+    (value === "stdout" ||
+      value === "stderr" ||
+      /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/.test(value))
+  );
+}
+
 function clampLimit(value: string | null, fallback: number): number {
   const parsed = Number(value ?? "");
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -741,9 +907,97 @@ function finiteNumber(value: number | undefined): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
 
+function finiteQueryNumber(value: string | null): number | undefined {
+  const parsed = Number(value ?? "");
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function runPhaseForEvent(type: string, fallback: RunRecord["phase"]): RunRecord["phase"] {
+  if (type === "run.failed") {
+    return "failed";
+  }
+  if (type === "run.created") {
+    return "created";
+  }
+  if (type === "lease.released") {
+    return "release";
+  }
+  if (type.startsWith("lease.")) {
+    return "lease";
+  }
+  if (type.startsWith("sync.")) {
+    return "sync";
+  }
+  if (type.startsWith("hydrate.")) {
+    return "hydrate";
+  }
+  if (type.startsWith("command.")) {
+    return type === "command.finished" ? "finished" : "command";
+  }
+  return fallback;
+}
+
+function formatRunEventSSE(event: RunEvent): string {
+  return `id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const MAX_RESULT_FILES = 50;
 const MAX_RESULT_FAILURES = 100;
 const MAX_RESULT_STRING_BYTES = 4096;
+const MAX_RUN_EVENT_MESSAGE_BYTES = 16 * 1024;
+const MAX_RUN_EVENT_DATA_KEYS = 50;
+const MAX_RUN_EVENT_DATA_DEPTH = 4;
+const MAX_RUN_EVENT_ARRAY_ITEMS = 50;
+const MAX_RUN_EVENT_STRING_BYTES = 4096;
+
+function boundedEventData(
+  data: Record<string, unknown>,
+  depth = MAX_RUN_EVENT_DATA_DEPTH,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(data)
+      .slice(0, MAX_RUN_EVENT_DATA_KEYS)
+      .map(([key, value]) => [
+        truncateString(key, MAX_RUN_EVENT_STRING_BYTES),
+        boundedEventValue(value, depth),
+      ]),
+  );
+}
+
+function boundedEventValue(value: unknown, depth: number): unknown {
+  if (value === null || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : String(value);
+  }
+  if (typeof value === "string") {
+    return truncateString(value, MAX_RUN_EVENT_STRING_BYTES);
+  }
+  if (Array.isArray(value)) {
+    if (depth <= 0) {
+      return "[array]";
+    }
+    return value
+      .slice(0, MAX_RUN_EVENT_ARRAY_ITEMS)
+      .map((entry) => boundedEventValue(entry, depth - 1));
+  }
+  if (isRecord(value)) {
+    if (depth <= 0) {
+      return "[object]";
+    }
+    return boundedEventData(value, depth - 1);
+  }
+  return String(value);
+}
 
 function boundedTestResults(results: TestResultSummary): TestResultSummary {
   return {

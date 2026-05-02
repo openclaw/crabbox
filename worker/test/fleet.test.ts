@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { FleetDurableObject } from "../src/fleet";
-import type { Env, LeaseRecord, RunRecord } from "../src/types";
+import type { Env, LeaseRecord, RunEvent, RunRecord } from "../src/types";
 
 class MemoryStorage {
   private readonly values = new Map<string, unknown>();
@@ -406,6 +406,66 @@ describe("fleet run history", () => {
     expect(await logs.text()).toBe("ok\n");
   });
 
+  it("records append-only run events with phases", async () => {
+    const fleet = testFleet();
+    const ownerHeaders = {
+      "x-crabbox-owner": "peter@example.com",
+      "x-crabbox-org": "openclaw",
+    };
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        headers: ownerHeaders,
+        body: {
+          leaseID: "cbx_000000000001",
+          provider: "aws",
+          class: "beast",
+          serverType: "c7a.48xlarge",
+          command: ["go", "test", "./..."],
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    const { run } = (await create.json()) as { run: RunRecord };
+    expect(run.phase).toBe("created");
+    expect(run.eventSeq).toBe(1);
+
+    const append = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/events`, {
+        headers: ownerHeaders,
+        body: {
+          type: "sync.started",
+          data: { workdir: "/work/crabbox/cbx_000000000001/repo" },
+        },
+      }),
+    );
+    expect(append.status).toBe(201);
+    const appended = (await append.json()) as { event: RunEvent };
+    expect(appended.event.seq).toBe(2);
+    expect(appended.event.type).toBe("sync.started");
+
+    await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/events`, {
+        headers: ownerHeaders,
+        body: { type: "stdout", stream: "stdout", message: "ok\n" },
+      }),
+    );
+
+    const events = await fleet.fetch(
+      request("GET", `/v1/runs/${run.id}/events?after=1`, { headers: ownerHeaders }),
+    );
+    expect(events.status).toBe(200);
+    const body = (await events.json()) as { events: RunEvent[] };
+    expect(body.events.map((event) => [event.seq, event.type, event.message])).toEqual([
+      [2, "sync.started", undefined],
+      [3, "stdout", "ok\n"],
+    ]);
+
+    const read = await fleet.fetch(request("GET", `/v1/runs/${run.id}`, { headers: ownerHeaders }));
+    const current = (await read.json()) as { run: RunRecord };
+    expect(current.run.phase).toBe("sync");
+    expect(current.run.eventSeq).toBe(3);
+  });
+
   it("hides run records and logs from other non-admin users", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -446,6 +506,19 @@ describe("fleet run history", () => {
       request("GET", "/v1/runs/run_000000000001/logs", { headers: friendHeaders }),
     );
     expect(logs.status).toBe(404);
+
+    const events = await fleet.fetch(
+      request("GET", "/v1/runs/run_000000000001/events", { headers: friendHeaders }),
+    );
+    expect(events.status).toBe(404);
+
+    const append = await fleet.fetch(
+      request("POST", "/v1/runs/run_000000000001/events", {
+        headers: friendHeaders,
+        body: { type: "sync.started" },
+      }),
+    );
+    expect(append.status).toBe(404);
 
     const finish = await fleet.fetch(
       request("POST", "/v1/runs/run_000000000001/finish", {

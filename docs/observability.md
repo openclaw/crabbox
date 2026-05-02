@@ -47,7 +47,7 @@ Reports include lease count, active lease count, elapsed runtime, estimated elap
 
 ## Run History And Logs
 
-Coordinator-backed `crabbox run` creates a run record before the remote command starts and finishes it with exit code, timing, and the latest retained output tail.
+Coordinator-backed `crabbox run` creates a run record before sync starts, appends lifecycle/output events while the CLI is alive, and finishes it with exit code, timing, and the latest retained output tail.
 
 Use:
 
@@ -55,11 +55,13 @@ Use:
 bin/crabbox history
 bin/crabbox history --lease cbx_...
 bin/crabbox history --owner steipete@gmail.com --json
+bin/crabbox events run_...
+bin/crabbox attach run_...
 bin/crabbox logs run_...
 bin/crabbox results run_...
 ```
 
-History is for command debugging, not unlimited log archival. Logs are bounded tails of remote stdout/stderr. Test results are stored as structured summaries when `--junit` or `results.junit` is configured.
+History is for command debugging, not unlimited log archival. Events are structured phase/output records with sequence numbers; logs are bounded tails of remote stdout/stderr. Test results are stored as structured summaries when `--junit` or `results.junit` is configured.
 
 ## Remote Debugging
 

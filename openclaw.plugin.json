@@ -6,7 +6,14 @@
     "onStartup": true
   },
   "contracts": {
-    "tools": ["crabbox_run", "crabbox_warmup", "crabbox_status", "crabbox_list", "crabbox_stop"]
+    "tools": [
+      "crabbox_run",
+      "crabbox_warmup",
+      "crabbox_status",
+      "crabbox_list",
+      "crabbox_events",
+      "crabbox_stop"
+    ]
   },
   "configSchema": {
     "type": "object",

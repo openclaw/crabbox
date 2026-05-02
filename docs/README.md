@@ -66,6 +66,7 @@ The repository root is also a native OpenClaw plugin package. Once installed in 
 - `crabbox_warmup`
 - `crabbox_status`
 - `crabbox_list`
+- `crabbox_events`
 - `crabbox_stop`
 
 The plugin shells out to the configured `crabbox` binary with argv arrays, so local Crabbox config, broker login, repo claims, and sync behavior stay owned by the CLI. Configure `plugins.entries.crabbox.config.binary` if the binary is not on `PATH`.

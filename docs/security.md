@@ -150,7 +150,7 @@ Do not store:
 - file contents;
 - SSH keys.
 
-Coordinator run records keep bounded stdout/stderr tails and optional structured JUnit summaries for debugging.
+Coordinator run records keep bounded stdout/stderr tails, bounded run-event chunks, and optional structured JUnit summaries for debugging.
 
 ## Future Audit Trail
 

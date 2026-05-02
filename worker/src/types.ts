@@ -126,15 +126,39 @@ export interface RunRecord {
   serverType: string;
   command: string[];
   state: "running" | "succeeded" | "failed";
+  phase?: RunPhase;
   exitCode?: number;
   syncMs?: number;
   commandMs?: number;
   durationMs?: number;
+  eventSeq?: number;
+  lastEventAt?: string;
   logBytes: number;
   logTruncated: boolean;
   results?: TestResultSummary;
   startedAt: string;
   endedAt?: string;
+}
+
+export type RunPhase =
+  | "created"
+  | "lease"
+  | "sync"
+  | "hydrate"
+  | "command"
+  | "release"
+  | "finished"
+  | "failed";
+
+export interface RunEvent {
+  id: string;
+  runID: string;
+  seq: number;
+  type: string;
+  stream?: "stdout" | "stderr";
+  message?: string;
+  data?: Record<string, unknown>;
+  createdAt: string;
 }
 
 export interface RunCreateRequest {
@@ -152,6 +176,13 @@ export interface RunFinishRequest {
   log?: string;
   logTruncated?: boolean;
   results?: TestResultSummary;
+}
+
+export interface RunEventAppendRequest {
+  type: string;
+  stream?: "stdout" | "stderr";
+  message?: string;
+  data?: Record<string, unknown>;
 }
 
 export interface TestResultSummary {
