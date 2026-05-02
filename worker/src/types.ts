@@ -47,6 +47,7 @@ export interface LeaseRequest {
   image?: string;
   awsRegion?: string;
   awsAMI?: string;
+  imageTag?: string;
   awsSGID?: string;
   awsSubnetID?: string;
   awsProfile?: string;
@@ -114,6 +115,7 @@ export interface ProviderImage {
 
 export interface PromotedImageRecord extends ProviderImage {
   promotedAt: string;
+  tag?: string;
 }
 
 export interface RunRecord {

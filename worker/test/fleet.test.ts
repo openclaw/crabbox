@@ -335,7 +335,7 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(promoted.status).toBe(200);
-    expect(storage.value("image:aws:promoted")).toEqual(
+    expect(storage.value("image:aws:promoted:latest")).toEqual(
       expect.objectContaining({ id: "ami-000000000001", state: "available" }),
     );
   });
@@ -374,7 +374,7 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(promoted.status).toBe(200);
-    expect(storage.value("image:hetzner:promoted")).toEqual(
+    expect(storage.value("image:hetzner:promoted:latest")).toEqual(
       expect.objectContaining({ id: "382206402", state: "available" }),
     );
   });
@@ -387,7 +387,7 @@ describe("fleet lease identity and idle", () => {
         observedImage = config.image ?? "";
       }),
     });
-    storage.seed("image:hetzner:promoted", {
+    storage.seed("image:hetzner:promoted:latest", {
       id: "382206402",
       name: "crabbox-rust-stable",
       state: "available",
@@ -599,6 +599,50 @@ describe("fleet lease identity and idle", () => {
     expect(receiptHeader).toBe("stub-receipt-ok");
   });
 
+  it("routes promoted Hetzner snapshots by tag", async () => {
+    const storage = new MemoryStorage();
+    let observedImage = "";
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(
+        (config) => {
+          observedImage = config.image ?? "";
+        },
+        { imageID: "382206999" },
+      ),
+    });
+
+    const promote = await fleet.fetch(
+      request("POST", "/v1/images/382206999/promote", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { tag: "rust-beast" },
+      }),
+    );
+    expect(promote.status).toBe(200);
+    expect(storage.value("image:hetzner:promoted:rust-beast")).toEqual(
+      expect.objectContaining({ id: "382206999", tag: "rust-beast" }),
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "cf-access-authenticated-user-email": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: {
+          leaseID: "cbx_777777777777",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          imageTag: "rust-beast",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    expect(observedImage).toBe("382206999");
+  });
+
   it("respects explicit lease image even when a promoted Hetzner image exists", async () => {
     const storage = new MemoryStorage();
     let observedImage = "";
@@ -607,7 +651,7 @@ describe("fleet lease identity and idle", () => {
         observedImage = config.image ?? "";
       }),
     });
-    storage.seed("image:hetzner:promoted", {
+    storage.seed("image:hetzner:promoted:latest", {
       id: "382206402",
       name: "crabbox-rust-stable",
       state: "available",

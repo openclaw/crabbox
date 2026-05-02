@@ -42,12 +42,22 @@ restored snapshot.
 Promote an available image as the coordinator's default for its provider:
 
 ```sh
-crabbox image promote ami-1234567890abcdef0      # AWS
-crabbox image promote 382206402                  # Hetzner snapshot id
+crabbox image promote ami-1234567890abcdef0                  # AWS, tag=latest
+crabbox image promote 382206402                              # Hetzner, tag=latest
+crabbox image promote 382206402 --tag rust-beast             # named tag
 ```
 
-Future brokered leases use the promoted image when the request omits an
-explicit `awsAMI` / `image` (and `CRABBOX_AWS_AMI` is unset for AWS).
+Promotions are namespaced by tag. The default tag is `latest`. Future brokered
+leases resolve the promoted image by tag at lease-creation time:
+
+```sh
+crabbox warmup --image-tag rust-beast
+```
+
+If the lease request omits both an explicit image (`awsAMI` / `image`) and an
+`imageTag`, the broker falls back to the `latest` tag. AWS still respects
+`CRABBOX_AWS_AMI` if set.
+
 Promotion stores coordinator metadata only; it does not copy or modify the
 underlying image.
 

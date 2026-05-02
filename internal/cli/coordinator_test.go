@@ -190,7 +190,7 @@ func TestCoordinatorImageCreateAndPromote(t *testing.T) {
 	if image, err := client.Image(context.Background(), "ami-12345678"); err != nil || image.State != "available" {
 		t.Fatalf("image=%#v err=%v", image, err)
 	}
-	if promoted, err := client.PromoteImage(context.Background(), "ami-12345678"); err != nil || promoted.PromotedAt == "" {
+	if promoted, err := client.PromoteImage(context.Background(), "ami-12345678", ""); err != nil || promoted.PromotedAt == "" {
 		t.Fatalf("promoted=%#v err=%v", promoted, err)
 	}
 }

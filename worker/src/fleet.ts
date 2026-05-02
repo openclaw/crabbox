@@ -118,11 +118,12 @@ export class FleetDurableObject implements DurableObject {
     if (config.provider === "aws" && config.awsSSHCIDRs.length === 0) {
       config.awsSSHCIDRs = requestSourceCIDRs(request);
     }
+    const imageTag = normalizeTag(input.imageTag);
     if (config.provider === "aws" && !config.awsAMI) {
-      config.awsAMI = (await this.promotedAWSImage())?.id ?? "";
+      config.awsAMI = (await this.promotedImage("aws", imageTag))?.id ?? "";
     }
     if (config.provider === "hetzner" && input.image === undefined) {
-      const promoted = await this.promotedHetznerImage();
+      const promoted = await this.promotedImage("hetzner", imageTag);
       if (promoted) {
         config.image = promoted.id;
       }
@@ -564,6 +565,8 @@ export class FleetDurableObject implements DurableObject {
       return json({ image });
     }
     if (method === "POST" && action === "promote") {
+      const body = await optionalJson<{ tag?: string }>(request);
+      const tag = normalizeTag(body.tag);
       const image = await this.provider(provider).getImage(imageID);
       if (image.state !== "available") {
         return json(
@@ -571,9 +574,12 @@ export class FleetDurableObject implements DurableObject {
           { status: 409 },
         );
       }
-      const promoted: PromotedImageRecord = { ...image, promotedAt: new Date().toISOString() };
-      const key = provider === "aws" ? promotedAWSImageKey() : promotedHetznerImageKey();
-      await this.state.storage.put(key, promoted);
+      const promoted: PromotedImageRecord = {
+        ...image,
+        tag,
+        promotedAt: new Date().toISOString(),
+      };
+      await this.state.storage.put(promotedImageKey(provider, tag), promoted);
       return json({ image: promoted });
     }
     return json({ error: "not_found" }, { status: 404 });
@@ -691,12 +697,11 @@ export class FleetDurableObject implements DurableObject {
     await this.state.storage.put(leaseKey(lease.id), lease);
   }
 
-  private async promotedAWSImage(): Promise<PromotedImageRecord | undefined> {
-    return this.state.storage.get<PromotedImageRecord>(promotedAWSImageKey());
-  }
-
-  private async promotedHetznerImage(): Promise<PromotedImageRecord | undefined> {
-    return this.state.storage.get<PromotedImageRecord>(promotedHetznerImageKey());
+  private async promotedImage(
+    provider: Provider,
+    tag: string,
+  ): Promise<PromotedImageRecord | undefined> {
+    return this.state.storage.get<PromotedImageRecord>(promotedImageKey(provider, tag));
   }
 
   private async getRun(runID: string): Promise<RunRecord | undefined> {
@@ -745,12 +750,13 @@ function runLogKey(runID: string): string {
   return `runlog:${runID}`;
 }
 
-function promotedAWSImageKey(): string {
-  return "image:aws:promoted";
+function promotedImageKey(provider: Provider, tag: string): string {
+  return `image:${provider}:promoted:${tag}`;
 }
 
-function promotedHetznerImageKey(): string {
-  return "image:hetzner:promoted";
+function normalizeTag(tag: string | undefined): string {
+  const trimmed = (tag ?? "").trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9._-]{0,63}$/.test(trimmed) ? trimmed : "latest";
 }
 
 function newLeaseID(): string {

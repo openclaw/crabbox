@@ -81,12 +81,13 @@ func (a App) imageCreate(ctx context.Context, args []string) error {
 
 func (a App) imagePromote(ctx context.Context, args []string) error {
 	fs := newFlagSet("image promote", a.Stderr)
+	tag := fs.String("tag", "", "promotion tag (default \"latest\")")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox image promote <ami-id>")
+		return exit(2, "usage: crabbox image promote <image-id> [--tag <name>]")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -99,14 +100,14 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	if !ok {
 		return exit(2, "image promote requires a coordinator")
 	}
-	image, err := coord.PromoteImage(ctx, fs.Arg(0))
+	image, err := coord.PromoteImage(ctx, fs.Arg(0), *tag)
 	if err != nil {
 		return err
 	}
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(image)
 	}
-	fmt.Fprintf(a.Stdout, "promoted image=%s name=%s state=%s region=%s\n", image.ID, image.Name, image.State, blank(image.Region, "-"))
+	fmt.Fprintf(a.Stdout, "promoted image=%s tag=%s name=%s state=%s region=%s\n", image.ID, blank(image.Tag, "latest"), image.Name, image.State, blank(image.Region, "-"))
 	return nil
 }
 

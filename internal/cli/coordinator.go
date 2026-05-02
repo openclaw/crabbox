@@ -77,6 +77,7 @@ type CoordinatorImage struct {
 	Name       string `json:"name"`
 	State      string `json:"state"`
 	Region     string `json:"region,omitempty"`
+	Tag        string `json:"tag,omitempty"`
 	PromotedAt string `json:"promotedAt,omitempty"`
 }
 
@@ -433,11 +434,15 @@ func (c *CoordinatorClient) Image(ctx context.Context, imageID string) (Coordina
 	return res.Image, err
 }
 
-func (c *CoordinatorClient) PromoteImage(ctx context.Context, imageID string) (CoordinatorImage, error) {
+func (c *CoordinatorClient) PromoteImage(ctx context.Context, imageID, tag string) (CoordinatorImage, error) {
 	var res struct {
 		Image CoordinatorImage `json:"image"`
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/images/"+url.PathEscape(imageID)+"/promote", map[string]any{}, &res)
+	body := map[string]any{}
+	if tag != "" {
+		body["tag"] = tag
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/images/"+url.PathEscape(imageID)+"/promote", body, &res)
 	return res.Image, err
 }
 
