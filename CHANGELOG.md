@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added a command-doc drift check to `npm run docs:check` so every top-level CLI command has a matching command page and index entry. Thanks @stainlu.
+
 ### Changed
 
 ### Fixed
