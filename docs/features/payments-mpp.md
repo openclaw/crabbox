@@ -70,9 +70,18 @@ auto-detect from the public hostname.
 - Releases are no-refund. A bounded TTL keeps the maximum loss small.
 - Cost is an upper bound — the agent may be billed for the full TTL even
   if the lease is released or expires idle earlier.
-- The Worker's existing cost-limit guards (`CRABBOX_MAX_*`) still apply
-  before the 402 is emitted, so a payment-gated request that exceeds the
-  org-level monthly cap will get `429` instead of `402`.
+- The Worker's existing cost-limit guards (`CRABBOX_MAX_*`) apply
+  per-payer wallet (the credential's `source` address is the owner), not
+  per-broker-recipient.
+- Charge settles before provisioning. If Hetzner/AWS provisioning fails
+  after a successful charge, the funds have already moved; the broker
+  returns a 500 with no lease and no automated refund. To minimize the
+  window, MPP-paid leases skip the provider's serverType-fallback list:
+  the requested type is tried once and either succeeds or fails. A future
+  PR should add a paid-failed-provision reconciliation table backed by
+  DO storage so operators can refund out-of-band.
+- mppx replay protection is backed by Durable Object storage so
+  consumed transaction-hash markers survive DO eviction/rehydration.
 
 ## CLI client behaviour
 
