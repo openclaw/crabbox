@@ -26,6 +26,16 @@ const providerSchema = {
   enum: ["aws", "hetzner"],
 };
 
+const runStateSchema = {
+  type: "string",
+  enum: ["running", "succeeded", "failed"],
+};
+
+const usageScopeSchema = {
+  type: "string",
+  enum: ["user", "org", "all"],
+};
+
 function readConfig(api) {
   const raw = api?.pluginConfig && typeof api.pluginConfig === "object" ? api.pluginConfig : {};
   return {
@@ -35,6 +45,7 @@ function readConfig(api) {
     allowRun: readBoolean(raw, "allowRun", true),
     allowWarmup: readBoolean(raw, "allowWarmup", true),
     allowStop: readBoolean(raw, "allowStop", true),
+    allowInspection: readBoolean(raw, "allowInspection", true),
   };
 }
 
@@ -53,6 +64,28 @@ function readPositiveInteger(source, key, fallback) {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? Math.floor(value)
     : fallback;
+}
+
+function readOptionalPositiveInteger(source, key) {
+  const value = source?.[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+  throw new Error(`${key} must be a positive number`);
+}
+
+function readOptionalNonNegativeInteger(source, key) {
+  const value = source?.[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value);
+  }
+  throw new Error(`${key} must be a non-negative number`);
 }
 
 function readStringArray(source, key) {
@@ -95,6 +128,12 @@ function maybePush(args, flag, value) {
 function maybePushBool(args, flag, value) {
   if (value === true) {
     args.push(flag);
+  }
+}
+
+function maybePushInteger(args, flag, value) {
+  if (value !== undefined) {
+    args.push(flag, String(value));
   }
 }
 
@@ -407,6 +446,200 @@ function registerStop(api, config) {
   });
 }
 
+function registerHistory(api, config) {
+  api.registerTool({
+    name: "crabbox_history",
+    description: "List coordinator-recorded Crabbox runs.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        lease: {
+          type: "string",
+          description: "Filter by Crabbox lease ID.",
+        },
+        owner: {
+          type: "string",
+          description: "Filter by owner email.",
+        },
+        org: {
+          type: "string",
+          description: "Filter by organization.",
+        },
+        state: runStateSchema,
+        limit: {
+          type: "number",
+          description: "Maximum runs to return.",
+        },
+        json: { type: "boolean" },
+        timeoutSeconds: {
+          type: "number",
+          description: "Local wrapper timeout for this Crabbox CLI invocation.",
+        },
+      },
+    },
+    async execute(_toolCallId, params, signal) {
+      if (!config.allowInspection) {
+        throw new Error("crabbox_history is disabled by plugin config");
+      }
+      const args = ["history"];
+      maybePush(args, "--lease", readString(params, "lease"));
+      maybePush(args, "--owner", readString(params, "owner"));
+      maybePush(args, "--org", readString(params, "org"));
+      maybePush(args, "--state", readString(params, "state"));
+      maybePushInteger(args, "--limit", readOptionalPositiveInteger(params, "limit"));
+      maybePushBool(args, "--json", params?.json);
+      return execute(config, args, params, signal);
+    },
+  });
+}
+
+function registerEvents(api, config) {
+  api.registerTool({
+    name: "crabbox_events",
+    description: "Read durable event records for a coordinator-backed Crabbox run.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id"],
+      properties: {
+        id: {
+          type: "string",
+          description: "Crabbox run ID.",
+        },
+        after: {
+          type: "number",
+          description: "Only return events after this sequence number.",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum events to return.",
+        },
+        json: { type: "boolean" },
+        timeoutSeconds: {
+          type: "number",
+          description: "Local wrapper timeout for this Crabbox CLI invocation.",
+        },
+      },
+    },
+    async execute(_toolCallId, params, signal) {
+      if (!config.allowInspection) {
+        throw new Error("crabbox_events is disabled by plugin config");
+      }
+      const args = ["events", "--id", readString(params, "id")];
+      maybePushInteger(args, "--after", readOptionalNonNegativeInteger(params, "after"));
+      maybePushInteger(args, "--limit", readOptionalPositiveInteger(params, "limit"));
+      maybePushBool(args, "--json", params?.json);
+      return execute(config, args, params, signal);
+    },
+  });
+}
+
+function registerLogs(api, config) {
+  api.registerTool({
+    name: "crabbox_logs",
+    description: "Read the retained output tail for a coordinator-recorded Crabbox run.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id"],
+      properties: {
+        id: {
+          type: "string",
+          description: "Crabbox run ID.",
+        },
+        json: { type: "boolean" },
+        timeoutSeconds: {
+          type: "number",
+          description: "Local wrapper timeout for this Crabbox CLI invocation.",
+        },
+      },
+    },
+    async execute(_toolCallId, params, signal) {
+      if (!config.allowInspection) {
+        throw new Error("crabbox_logs is disabled by plugin config");
+      }
+      const args = ["logs", "--id", readString(params, "id")];
+      maybePushBool(args, "--json", params?.json);
+      return execute(config, args, params, signal);
+    },
+  });
+}
+
+function registerResults(api, config) {
+  api.registerTool({
+    name: "crabbox_results",
+    description: "Read structured test results recorded for a Crabbox run.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id"],
+      properties: {
+        id: {
+          type: "string",
+          description: "Crabbox run ID.",
+        },
+        json: { type: "boolean" },
+        timeoutSeconds: {
+          type: "number",
+          description: "Local wrapper timeout for this Crabbox CLI invocation.",
+        },
+      },
+    },
+    async execute(_toolCallId, params, signal) {
+      if (!config.allowInspection) {
+        throw new Error("crabbox_results is disabled by plugin config");
+      }
+      const args = ["results", "--id", readString(params, "id")];
+      maybePushBool(args, "--json", params?.json);
+      return execute(config, args, params, signal);
+    },
+  });
+}
+
+function registerUsage(api, config) {
+  api.registerTool({
+    name: "crabbox_usage",
+    description: "Read coordinator usage and cost estimates.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        scope: usageScopeSchema,
+        user: {
+          type: "string",
+          description: "Owner email for user-scoped usage.",
+        },
+        org: {
+          type: "string",
+          description: "Organization for org-scoped usage.",
+        },
+        month: {
+          type: "string",
+          description: "Usage month in YYYY-MM format.",
+        },
+        json: { type: "boolean" },
+        timeoutSeconds: {
+          type: "number",
+          description: "Local wrapper timeout for this Crabbox CLI invocation.",
+        },
+      },
+    },
+    async execute(_toolCallId, params, signal) {
+      if (!config.allowInspection) {
+        throw new Error("crabbox_usage is disabled by plugin config");
+      }
+      const args = ["usage"];
+      maybePush(args, "--scope", readString(params, "scope"));
+      maybePush(args, "--user", readString(params, "user"));
+      maybePush(args, "--org", readString(params, "org"));
+      maybePush(args, "--month", readString(params, "month"));
+      maybePushBool(args, "--json", params?.json);
+      return execute(config, args, params, signal);
+    },
+  });
+}
+
 export default {
   id: PLUGIN_ID,
   name: "Crabbox",
@@ -418,6 +651,11 @@ export default {
     registerStatus(api, config);
     registerList(api, config);
     registerStop(api, config);
+    registerHistory(api, config);
+    registerEvents(api, config);
+    registerLogs(api, config);
+    registerResults(api, config);
+    registerUsage(api, config);
     api.logger?.info?.("Crabbox plugin registered");
   },
 };
