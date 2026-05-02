@@ -458,6 +458,108 @@ describe("fleet lease identity and idle", () => {
     expect(createdServer).toBe(false);
   });
 
+  it("issues a lease bearer for MPP-authenticated lease creation", async () => {
+    const guard: PaymentGuard = {
+      charge: () => async () => ({
+        withReceipt: (response: Response) => response,
+      }),
+    };
+    const fleet = testFleet(new MemoryStorage(), { hetzner: fakeProvider() }, guard);
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-auth": "mpp",
+          "x-crabbox-owner": "mpp:0xfeed",
+          "x-crabbox-org": "openclaw",
+          authorization: "Payment stub-credential",
+        },
+        body: {
+          leaseID: "cbx_cccccccccccc",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    const body = (await create.json()) as { lease: LeaseRecord; bearer?: string };
+    expect(body.bearer).toMatch(/^cbxl_/);
+    expect(body.lease.id).toBe("cbx_cccccccccccc");
+    expect(body.lease.owner).toBe("mpp:0xfeed");
+  });
+
+  it("scopes lease bearer access to a single lease ID", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_lease_aaaaa",
+      testLease({
+        id: "cbx_lease_aaaaa",
+        owner: "mpp:0xfeed",
+        org: "openclaw",
+      }),
+    );
+    storage.seed(
+      "lease:cbx_lease_bbbbb",
+      testLease({
+        id: "cbx_lease_bbbbb",
+        owner: "mpp:0xfeed",
+        org: "openclaw",
+      }),
+    );
+
+    const ownLease = await fleet.fetch(
+      request("GET", "/v1/leases/cbx_lease_aaaaa", {
+        headers: {
+          "x-crabbox-auth": "lease",
+          "x-crabbox-owner": "mpp:0xfeed",
+          "x-crabbox-org": "openclaw",
+          "x-crabbox-lease-id": "cbx_lease_aaaaa",
+        },
+      }),
+    );
+    expect(ownLease.status).toBe(200);
+
+    const otherLease = await fleet.fetch(
+      request("GET", "/v1/leases/cbx_lease_bbbbb", {
+        headers: {
+          "x-crabbox-auth": "lease",
+          "x-crabbox-owner": "mpp:0xfeed",
+          "x-crabbox-org": "openclaw",
+          "x-crabbox-lease-id": "cbx_lease_aaaaa",
+        },
+      }),
+    );
+    expect(otherLease.status).toBe(404);
+  });
+
+  it("does not issue a lease bearer for non-MPP auth", async () => {
+    const fleet = testFleet(new MemoryStorage(), { hetzner: fakeProvider() });
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "cf-access-authenticated-user-email": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: {
+          leaseID: "cbx_dddddddddddd",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    const body = (await create.json()) as { lease: LeaseRecord; bearer?: string };
+    expect(body.bearer).toBeUndefined();
+  });
+
   it("provisions and attaches the receipt when payment guard accepts", async () => {
     let receiptHeader = "";
     const guard: PaymentGuard = {
@@ -952,7 +1054,10 @@ function testFleet(
 ): FleetDurableObject {
   return new FleetDurableObject(
     { storage } as unknown as DurableObjectState,
-    { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    {
+      CRABBOX_DEFAULT_ORG: "default-org",
+      CRABBOX_SESSION_SECRET: "test-session-secret",
+    } as Env,
     providers,
     paymentGuard,
   );

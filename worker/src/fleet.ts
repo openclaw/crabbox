@@ -1,4 +1,4 @@
-import { isAdminRequest } from "./auth";
+import { isAdminRequest, issueLeaseToken, requestLeaseAuth } from "./auth";
 import { EC2SpotClient } from "./aws";
 import { leaseConfig, validCIDRs } from "./config";
 import { HetznerClient } from "./hetzner";
@@ -223,7 +223,16 @@ export class FleetDurableObject implements DurableObject {
     }
     await this.putLease(record);
     await this.scheduleAlarm();
-    const response = json({ lease: record }, { status: 201 });
+    const responseBody: { lease: LeaseRecord; bearer?: string } = { lease: record };
+    if (request.headers.get("x-crabbox-auth") === "mpp") {
+      responseBody.bearer = await issueLeaseToken(this.env, {
+        leaseID: record.id,
+        owner: record.owner,
+        org: record.org,
+        ttlSeconds: record.ttlSeconds,
+      });
+    }
+    const response = json(responseBody, { status: 201 });
     return attachReceipt ? attachReceipt(response) : response;
   }
 
@@ -657,17 +666,25 @@ export class FleetDurableObject implements DurableObject {
   }
 
   private leaseVisibleToRequest(lease: LeaseRecord, request: Request, admin: boolean): boolean {
-    return (
-      admin ||
-      (lease.owner === requestOwner(request) && lease.org === requestOrg(request, this.env))
-    );
+    if (admin) {
+      return true;
+    }
+    if (lease.owner !== requestOwner(request) || lease.org !== requestOrg(request, this.env)) {
+      return false;
+    }
+    const leaseScope = requestLeaseAuth(request);
+    return !leaseScope || leaseScope === lease.id;
   }
 
   private runVisibleToRequest(run: RunRecord, request: Request): boolean {
-    return (
-      isAdminRequest(request) ||
-      (run.owner === requestOwner(request) && run.org === requestOrg(request, this.env))
-    );
+    if (isAdminRequest(request)) {
+      return true;
+    }
+    if (run.owner !== requestOwner(request) || run.org !== requestOrg(request, this.env)) {
+      return false;
+    }
+    const leaseScope = requestLeaseAuth(request);
+    return !leaseScope || leaseScope === run.leaseID;
   }
 
   private async putLease(lease: LeaseRecord): Promise<void> {
