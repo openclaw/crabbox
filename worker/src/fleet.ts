@@ -246,7 +246,7 @@ export class FleetDurableObject implements DurableObject {
     }
     if (this.cachedPaymentGuard === undefined) {
       try {
-        this.cachedPaymentGuard = paymentGuardFromEnv(this.env) ?? null;
+        this.cachedPaymentGuard = paymentGuardFromEnv(this.env, this.state.storage) ?? null;
       } catch {
         this.cachedPaymentGuard = null;
       }

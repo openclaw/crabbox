@@ -1,4 +1,4 @@
-import { Mppx, tempo } from "mppx/server";
+import { Mppx, Store, tempo } from "mppx/server";
 
 import type { Env } from "./types";
 
@@ -22,7 +22,10 @@ export function paymentEnabled(env: Env): boolean {
   return Boolean(env.CRABBOX_MPP_RECIPIENT?.trim());
 }
 
-export function paymentGuardFromEnv(env: Env): PaymentGuard | undefined {
+export function paymentGuardFromEnv(
+  env: Env,
+  storage?: DurableObjectStorage,
+): PaymentGuard | undefined {
   const recipient = env.CRABBOX_MPP_RECIPIENT?.trim();
   if (!recipient) {
     return undefined;
@@ -49,9 +52,13 @@ export function paymentGuardFromEnv(env: Env): PaymentGuard | undefined {
     recipient: `0x${string}`;
     decimals: number;
     testnet?: boolean;
+    store?: Store.AtomicStore;
   } = { currency, recipient, decimals };
   if (testnet) {
     tempoConfig.testnet = true;
+  }
+  if (storage) {
+    tempoConfig.store = doStorageStore(storage);
   }
   const secretKey = env.CRABBOX_MPP_SECRET_KEY;
   const realm = env.CRABBOX_MPP_REALM?.trim();
@@ -101,4 +108,30 @@ function parseBool(value: string | undefined): boolean {
 
 function isAddress(value: string): value is `0x${string}` {
   return /^0x[0-9a-fA-F]{40}$/.test(value);
+}
+
+// DO storage is single-threaded per object, so naive read-modify-write inside
+// `update` is atomic by definition; no explicit transaction is needed.
+function doStorageStore(storage: DurableObjectStorage): Store.AtomicStore {
+  const prefix = "mpp:";
+  return Store.cloudflare({
+    get: async (key: string) => (await storage.get<string>(prefix + key)) ?? null,
+    put: async (key: string, value: string) => {
+      await storage.put(prefix + key, value);
+    },
+    delete: async (key: string) => {
+      await storage.delete(prefix + key);
+    },
+    update: async (key, fn) => {
+      const k = prefix + key;
+      const current = (await storage.get<string>(k)) ?? null;
+      const change = fn(current);
+      if (change.op === "set") {
+        await storage.put(k, change.value);
+      } else if (change.op === "delete") {
+        await storage.delete(k);
+      }
+      return change.result;
+    },
+  });
 }
