@@ -16,14 +16,31 @@ export function isChallenge(result: ChargeResult): result is { status: 402; chal
   return "challenge" in result;
 }
 
+export class MppxConfigError extends Error {}
+
+export function paymentEnabled(env: Env): boolean {
+  return Boolean(env.CRABBOX_MPP_RECIPIENT?.trim());
+}
+
 export function paymentGuardFromEnv(env: Env): PaymentGuard | undefined {
   const recipient = env.CRABBOX_MPP_RECIPIENT?.trim();
-  if (!recipient || !isAddress(recipient)) {
+  if (!recipient) {
     return undefined;
+  }
+  if (!isAddress(recipient)) {
+    throw new MppxConfigError("CRABBOX_MPP_RECIPIENT must be a 0x… 20-byte address");
   }
   const currency = env.CRABBOX_MPP_CURRENCY?.trim() || PATH_USD_TEMPO;
   if (!isAddress(currency)) {
-    return undefined;
+    throw new MppxConfigError("CRABBOX_MPP_CURRENCY must be a 0x… 20-byte address");
+  }
+  if (!env.CRABBOX_MPP_SECRET_KEY?.trim()) {
+    throw new MppxConfigError("CRABBOX_MPP_SECRET_KEY is required when MPP is enabled");
+  }
+  if (!env.CRABBOX_SESSION_SECRET?.trim()) {
+    throw new MppxConfigError(
+      "CRABBOX_SESSION_SECRET is required when MPP is enabled (used to sign lease bearers)",
+    );
   }
   const decimals = parseDecimals(env.CRABBOX_MPP_DECIMALS) ?? 6;
   const testnet = parseBool(env.CRABBOX_MPP_TESTNET);
@@ -50,6 +67,17 @@ export function paymentGuardFromEnv(env: Env): PaymentGuard | undefined {
       return { withReceipt: (out: Response) => response.withReceipt(out) };
     },
   };
+}
+
+export function paymentConfigured(env: Env): boolean {
+  if (!paymentEnabled(env)) {
+    return false;
+  }
+  try {
+    return Boolean(paymentGuardFromEnv(env));
+  } catch {
+    return false;
+  }
 }
 
 export function formatAmountUSD(amount: number): string {

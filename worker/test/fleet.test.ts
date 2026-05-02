@@ -491,6 +491,48 @@ describe("fleet lease identity and idle", () => {
     expect(body.lease.owner).toBe("mpp:0xfeed");
   });
 
+  it("scopes list-leases to the lease bearer", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_lease_xxxxx",
+      testLease({ id: "cbx_lease_xxxxx", owner: "mpp:0xfeed", org: "openclaw" }),
+    );
+    storage.seed(
+      "lease:cbx_lease_yyyyy",
+      testLease({ id: "cbx_lease_yyyyy", owner: "mpp:0xfeed", org: "openclaw" }),
+    );
+
+    const list = await fleet.fetch(
+      request("GET", "/v1/leases", {
+        headers: {
+          "x-crabbox-auth": "lease",
+          "x-crabbox-owner": "mpp:0xfeed",
+          "x-crabbox-org": "openclaw",
+          "x-crabbox-lease-id": "cbx_lease_xxxxx",
+        },
+      }),
+    );
+    expect(list.status).toBe(200);
+    const body = (await list.json()) as { leases: LeaseRecord[] };
+    expect(body.leases.map((l) => l.id)).toEqual(["cbx_lease_xxxxx"]);
+  });
+
+  it("forbids usage reads from lease bearers", async () => {
+    const fleet = testFleet();
+    const usage = await fleet.fetch(
+      request("GET", "/v1/usage", {
+        headers: {
+          "x-crabbox-auth": "lease",
+          "x-crabbox-owner": "mpp:0xfeed",
+          "x-crabbox-org": "openclaw",
+          "x-crabbox-lease-id": "cbx_anything",
+        },
+      }),
+    );
+    expect(usage.status).toBe(403);
+  });
+
   it("scopes lease bearer access to a single lease ID", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -682,7 +724,19 @@ describe("fleet lease identity and idle", () => {
 
 describe("fleet run history", () => {
   it("records finished runs and serves logs", async () => {
-    const fleet = testFleet();
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        owner: "peter@example.com",
+        org: "openclaw",
+        provider: "aws",
+        class: "beast",
+        serverType: "c7a.48xlarge",
+      }),
+    );
     const ownerHeaders = {
       "cf-access-authenticated-user-email": "peter@example.com",
       "x-crabbox-org": "openclaw",
@@ -798,9 +852,26 @@ describe("fleet run history", () => {
   });
 
   it("bounds stored result summaries", async () => {
-    const fleet = testFleet();
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        owner: "peter@example.com",
+        org: "openclaw",
+        provider: "aws",
+        class: "beast",
+        serverType: "c7a.48xlarge",
+      }),
+    );
+    const headers = {
+      "cf-access-authenticated-user-email": "peter@example.com",
+      "x-crabbox-org": "openclaw",
+    };
     const create = await fleet.fetch(
       request("POST", "/v1/runs", {
+        headers,
         body: {
           leaseID: "cbx_000000000001",
           provider: "aws",
@@ -821,6 +892,7 @@ describe("fleet run history", () => {
 
     const finish = await fleet.fetch(
       request("POST", `/v1/runs/${run.id}/finish`, {
+        headers,
         body: {
           exitCode: 1,
           log: "",

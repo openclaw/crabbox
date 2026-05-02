@@ -251,6 +251,9 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 
 func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string) (CoordinatorLease, error) {
 	res, err := c.CreateLeaseWithBearer(ctx, cfg, publicKey, keep, leaseID, slug)
+	if err == nil && res.Bearer != "" && c.Token == "" {
+		c.Token = res.Bearer
+	}
 	return res.Lease, err
 }
 

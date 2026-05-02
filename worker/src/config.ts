@@ -32,6 +32,8 @@ export interface LeaseConfig {
   idleTimeoutSeconds: number;
   keep: boolean;
   sshPublicKey: string;
+  /** When true, providers must use exactly serverType — no fallback candidates. */
+  strictServerType: boolean;
 }
 
 export function leaseConfig(input: LeaseRequest): LeaseConfig {
@@ -75,6 +77,7 @@ export function leaseConfig(input: LeaseRequest): LeaseConfig {
     idleTimeoutSeconds,
     keep: input.keep ?? false,
     sshPublicKey,
+    strictServerType: false,
   };
 }
 

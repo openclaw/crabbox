@@ -195,6 +195,9 @@ export class FleetDurableObject implements DurableObject {
         return charged.challenge;
       }
       attachReceipt = (response) => charged.withReceipt(response);
+      // Once the agent has paid for the requested serverType, the broker must
+      // not silently substitute a cheaper one via fallback candidates.
+      config.strictServerType = true;
     }
     const { server, serverType } = await provider.createServerWithFallback(
       config,
@@ -242,7 +245,11 @@ export class FleetDurableObject implements DurableObject {
       return this.testPaymentGuard;
     }
     if (this.cachedPaymentGuard === undefined) {
-      this.cachedPaymentGuard = paymentGuardFromEnv(this.env) ?? null;
+      try {
+        this.cachedPaymentGuard = paymentGuardFromEnv(this.env) ?? null;
+      } catch {
+        this.cachedPaymentGuard = null;
+      }
     }
     return this.cachedPaymentGuard ?? undefined;
   }
@@ -393,8 +400,14 @@ export class FleetDurableObject implements DurableObject {
       return json({ error: "invalid_lease_id" }, { status: 400 });
     }
     const lease = await this.getLease(input.leaseID);
-    if (lease && !this.leaseVisibleToRequest(lease, request, false)) {
+    if (!lease) {
+      return json({ error: "lease_not_found" }, { status: 404 });
+    }
+    if (!this.leaseVisibleToRequest(lease, request, false)) {
       return json({ error: "not_found" }, { status: 404 });
+    }
+    if (lease.state !== "active") {
+      return json({ error: "lease_not_active" }, { status: 409 });
     }
     const now = new Date().toISOString();
     const run: RunRecord = {
@@ -402,16 +415,16 @@ export class FleetDurableObject implements DurableObject {
       leaseID: input.leaseID,
       owner,
       org,
-      provider: input.provider ?? lease?.provider ?? "hetzner",
-      class: input.class ?? lease?.class ?? "",
-      serverType: input.serverType ?? lease?.serverType ?? "",
+      provider: input.provider ?? lease.provider,
+      class: input.class ?? lease.class,
+      serverType: input.serverType ?? lease.serverType,
       command: Array.isArray(input.command) ? input.command.map(String) : [],
       state: "running",
       logBytes: 0,
       logTruncated: false,
       startedAt: now,
     };
-    if (lease?.slug) {
+    if (lease.slug) {
       run.slug = lease.slug;
     }
     await this.putRun(run);
@@ -484,11 +497,13 @@ export class FleetDurableObject implements DurableObject {
     const runs = await this.runRecords();
     const scopedOwner = admin ? owner : requestOwner(request);
     const scopedOrg = admin ? org : requestOrg(request, this.env);
+    const leaseScope = admin ? "" : requestLeaseAuth(request);
     return json({
       runs: runs
         .filter((run) => !leaseID || run.leaseID === leaseID)
         .filter((run) => !scopedOwner || run.owner === scopedOwner)
         .filter((run) => !scopedOrg || run.org === scopedOrg)
+        .filter((run) => !leaseScope || run.leaseID === leaseScope)
         .filter((run) => !state || run.state === state)
         .toSorted((a, b) => b.startedAt.localeCompare(a.startedAt))
         .slice(0, limit),
@@ -497,8 +512,15 @@ export class FleetDurableObject implements DurableObject {
 
   private async usage(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const requestedScope = url.searchParams.get("scope") ?? "user";
     const admin = isAdminRequest(request);
+    const leaseScope = admin ? "" : requestLeaseAuth(request);
+    if (leaseScope) {
+      return json(
+        { error: "forbidden", message: "lease tokens cannot read usage" },
+        { status: 403 },
+      );
+    }
+    const requestedScope = url.searchParams.get("scope") ?? "user";
     const scope =
       admin && (requestedScope === "org" || requestedScope === "all" || requestedScope === "user")
         ? requestedScope
@@ -666,9 +688,13 @@ export class FleetDurableObject implements DurableObject {
   private filterLeasesForRequest(leases: LeaseRecord[], request: Request): LeaseRecord[] {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
-    return this.filterLeases(leases, request).filter(
-      (lease) => lease.owner === owner && lease.org === org,
-    );
+    const leaseScope = requestLeaseAuth(request);
+    return this.filterLeases(leases, request).filter((lease) => {
+      if (lease.owner !== owner || lease.org !== org) {
+        return false;
+      }
+      return !leaseScope || leaseScope === lease.id;
+    });
   }
 
   private leaseVisibleToRequest(lease: LeaseRecord, request: Request, admin: boolean): boolean {

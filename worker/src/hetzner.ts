@@ -142,10 +142,12 @@ export class HetznerClient {
   ): Promise<{ server: HetznerServer; serverType: string }> {
     const key = await this.ensureSSHKey(config.providerKey, config.sshPublicKey);
     const resolvedConfig = { ...config, providerKey: key.name };
-    const candidates = prependUnique(
-      resolvedConfig.serverType,
-      serverTypeCandidatesForClass(resolvedConfig.class),
-    );
+    const candidates = resolvedConfig.strictServerType
+      ? [resolvedConfig.serverType]
+      : prependUnique(
+          resolvedConfig.serverType,
+          serverTypeCandidatesForClass(resolvedConfig.class),
+        );
     const failures: string[] = [];
     for (const serverType of candidates) {
       try {

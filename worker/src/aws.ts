@@ -68,10 +68,9 @@ export class EC2SpotClient {
     await this.ensureSSHKey(config.providerKey, config.sshPublicKey);
     const imageID = await this.resolveAMI(config);
     const securityGroupID = await this.ensureSecurityGroup(config);
-    const candidates = prependUnique(
-      config.serverType,
-      awsInstanceTypeCandidatesForClass(config.class),
-    );
+    const candidates = config.strictServerType
+      ? [config.serverType]
+      : prependUnique(config.serverType, awsInstanceTypeCandidatesForClass(config.class));
     const failures: string[] = [];
     for (const serverType of candidates) {
       try {

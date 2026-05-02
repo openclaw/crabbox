@@ -1,6 +1,7 @@
 import { authenticateRequest, requestWithAuthContext, type AuthContext } from "./auth";
 import { FleetDurableObject } from "./fleet";
 import { json } from "./http";
+import { paymentConfigured } from "./payments";
 import type { Env } from "./types";
 
 export { FleetDurableObject };
@@ -28,10 +29,10 @@ export default {
 };
 
 function mppEligible(request: Request, url: URL, env: Env): boolean {
-  if (!env.CRABBOX_MPP_RECIPIENT) {
+  if (request.method !== "POST" || url.pathname !== "/v1/leases") {
     return false;
   }
-  return request.method === "POST" && url.pathname === "/v1/leases";
+  return paymentConfigured(env);
 }
 
 function mppAuth(env: Env): AuthContext {
