@@ -18,6 +18,8 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
 	openClient := fs.Bool("open", false, "open the VNC client locally")
 	hostManaged := fs.Bool("host-managed", false, "allow opening host-managed static VNC")
+	managedLogin := fs.Bool("managed-login", defaults.Static.ManagedLogin, "create or reuse a Crabbox-managed static VNC login when supported")
+	managedUser := fs.String("managed-user", firstNonEmpty(defaults.Static.ManagedUser, "crabbox"), "static managed VNC login user")
 	targetFlags := registerTargetFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -31,6 +33,8 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	}
 	cfg.Provider = *provider
 	cfg.Desktop = true
+	cfg.Static.ManagedLogin = *managedLogin
+	cfg.Static.ManagedUser = *managedUser
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
@@ -40,7 +44,7 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	if *id == "" && !isStaticProvider(cfg.Provider) {
 		return exit(2, "usage: crabbox vnc --id <lease-id-or-slug>")
 	}
-	if *openClient && isStaticProvider(cfg.Provider) && !*hostManaged {
+	if *openClient && isStaticProvider(cfg.Provider) && !*hostManaged && !cfg.Static.ManagedLogin {
 		return exit(2, "static %s VNC is an existing host, not a Crabbox-created box; rerun with --host-managed only if you want to open that host's OS login prompt", cfg.TargetOS)
 	}
 	server, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, *id)
@@ -58,6 +62,10 @@ func (a App) vnc(ctx context.Context, args []string) error {
 		return err
 	}
 	a.touchActiveLeaseBestEffort(ctx, cfg, server, leaseID)
+	login, err := ensureStaticManagedVNCLogin(ctx, cfg, target)
+	if err != nil {
+		return err
+	}
 	endpoint, err := resolveVNCEndpoint(ctx, cfg, target)
 	if err != nil {
 		return err
@@ -67,7 +75,9 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	}
 	password := ""
 	if endpoint.Managed {
-		if target.TargetOS == targetLinux {
+		if login.User != "" {
+			password = login.Password
+		} else if target.TargetOS == targetLinux {
 			password, _ = runSSHOutput(ctx, target, "cat "+shellQuote(vncPasswordPath))
 		}
 	}
@@ -93,7 +103,11 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	if endpoint.Direct {
 		fmt.Fprintln(a.Stdout, "direct vnc:")
 		fmt.Fprintf(a.Stdout, "  %s:%s\n", endpoint.Host, endpoint.Port)
-		fmt.Fprintf(a.Stdout, "  vnc://%s:%s\n", endpoint.Host, endpoint.Port)
+		directURL := fmt.Sprintf("vnc://%s:%s", endpoint.Host, endpoint.Port)
+		if login.User != "" {
+			directURL = fmt.Sprintf("vnc://%s@%s:%s", login.User, endpoint.Host, endpoint.Port)
+		}
+		fmt.Fprintf(a.Stdout, "  %s\n", directURL)
 	} else {
 		fmt.Fprintln(a.Stdout, "ssh tunnel:")
 		fmt.Fprintf(a.Stdout, "  %s\n", tunnel)
@@ -105,6 +119,12 @@ func (a App) vnc(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stdout, "  localhost:%s\n", *localPort)
 	}
 	if strings.TrimSpace(password) != "" {
+		if login.User != "" {
+			fmt.Fprintf(a.Stdout, "username: %s\n", login.User)
+			if login.PasswordPath != "" {
+				fmt.Fprintf(a.Stdout, "password_file: %s\n", login.PasswordPath)
+			}
+		}
 		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(password))
 	} else if staticHostVNC {
 		fmt.Fprintln(a.Stdout, "credentials: host-managed")
@@ -120,6 +140,9 @@ func (a App) vnc(ctx context.Context, args []string) error {
 			fmt.Fprintln(a.Stdout, "opening existing host VNC; expect that host's OS credential prompt")
 		}
 		url := fmt.Sprintf("vnc://%s:%s", endpoint.Host, endpoint.Port)
+		if login.User != "" {
+			url = fmt.Sprintf("vnc://%s@%s:%s", login.User, endpoint.Host, endpoint.Port)
+		}
 		if !endpoint.Direct {
 			pid, err := startVNCTunnel(ctx, target, *localPort, endpoint.Host, endpoint.Port)
 			if err != nil {
@@ -131,6 +154,9 @@ func (a App) vnc(ctx context.Context, args []string) error {
 				fmt.Fprintln(a.Stdout, "tunnel: started in background")
 			}
 			url = fmt.Sprintf("vnc://localhost:%s", *localPort)
+			if login.User != "" {
+				url = fmt.Sprintf("vnc://%s@localhost:%s", login.User, *localPort)
+			}
 		}
 		if err := openLocalURL(url); err != nil {
 			return err

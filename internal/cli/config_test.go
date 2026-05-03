@@ -109,6 +109,8 @@ static:
   user: peter
   port: "22"
   workRoot: /home/peter/crabbox
+  managedLogin: true
+  managedUser: cbx-ui
 results:
   junit:
     - junit.xml
@@ -189,7 +191,7 @@ ssh:
 	if cfg.Blacksmith.Org != "openclaw" || cfg.Blacksmith.Workflow != ".github/workflows/blacksmith-testbox.yml" || cfg.Blacksmith.Job != "hydrate" || cfg.Blacksmith.Ref != "main" || cfg.Blacksmith.IdleTimeout != 90*time.Minute || !cfg.Blacksmith.Debug {
 		t.Fatalf("blacksmith config not loaded: %#v", cfg.Blacksmith)
 	}
-	if cfg.Static.Host != "win-dev.local" || cfg.Static.User != "peter" || cfg.Static.Port != "22" || cfg.WorkRoot != "/home/peter/crabbox" {
+	if cfg.Static.Host != "win-dev.local" || cfg.Static.User != "peter" || cfg.Static.Port != "22" || cfg.WorkRoot != "/home/peter/crabbox" || !cfg.Static.ManagedLogin || cfg.Static.ManagedUser != "cbx-ui" {
 		t.Fatalf("static config not loaded: static=%#v workRoot=%s", cfg.Static, cfg.WorkRoot)
 	}
 	if len(cfg.Results.JUnit) != 1 || cfg.Results.JUnit[0] != "junit.xml" {
@@ -218,6 +220,8 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "env-admin-secret")
 	t.Setenv("CRABBOX_TARGET", "macos")
 	t.Setenv("CRABBOX_STATIC_HOST", "mac.local")
+	t.Setenv("CRABBOX_STATIC_MANAGED_LOGIN", "true")
+	t.Setenv("CRABBOX_STATIC_MANAGED_USER", "cbx-env")
 	path := userConfigPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -245,7 +249,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if cfg.CoordAdminToken != "env-admin-secret" {
 		t.Fatalf("unexpected admin token state: %q", cfg.CoordAdminToken)
 	}
-	if cfg.TargetOS != targetMacOS || cfg.Static.Host != "mac.local" {
+	if cfg.TargetOS != targetMacOS || cfg.Static.Host != "mac.local" || !cfg.Static.ManagedLogin || cfg.Static.ManagedUser != "cbx-env" {
 		t.Fatalf("unexpected target env: target=%s static=%#v", cfg.TargetOS, cfg.Static)
 	}
 }

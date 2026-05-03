@@ -83,18 +83,23 @@ Provider notes:
 - Static macOS hosts are existing Macs, not Crabbox-created boxes. They can
   participate when Screen Sharing or another
   VNC-compatible service is already available on `127.0.0.1:5900` over SSH or
-  directly on `host:5900`. Credentials are host-managed because Apple Remote
-  Desktop authentication still belongs to the target host.
+  directly on `host:5900`. `crabbox vnc --managed-login` can create a dedicated
+  local macOS account, grant Apple Remote Desktop access to it, and print the
+  generated credentials. Without `--managed-login`, credentials are
+  host-managed because Apple Remote Desktop authentication still belongs to the
+  target host.
 - Static Windows hosts are existing Windows machines, not Crabbox-created boxes.
   They can participate only when the operator already provides a VNC-compatible
   service on `127.0.0.1:5900` for SSH tunneling or, for trusted static networks,
   directly on `host:5900`. Opening Windows requires `--host-managed` because the
-  password prompt belongs to the target OS, not Crabbox.
+  password prompt belongs to the target OS, not Crabbox. Managed Windows login
+  still needs a management channel such as SSH/WinRM plus a supported VNC server
+  setup path.
 - Blacksmith Testbox can run headless browser automation today, but VNC takeover
   needs a Blacksmith-supported SSH tunnel or connection-info API before Crabbox
   can offer the same `vnc` command there.
-- Crabbox-managed macOS and Windows VNC installers are still out of scope for
-  this release.
+- Crabbox-managed Windows VNC installers are still out of scope for this
+  release.
 
 For Mantis, the first consumer should be a Discord QA lane:
 

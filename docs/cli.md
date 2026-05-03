@@ -232,6 +232,9 @@ Flags:
 --debug                 print sync timing and itemized rsync output
 --junit <paths>         comma-separated remote JUnit XML paths to attach to run history
 --open                 open local VNC client for `crabbox vnc`
+--host-managed         allow opening host-managed static VNC
+--managed-login        create/reuse a Crabbox-managed static macOS VNC login
+--managed-user <user>  static managed VNC login user
 --reclaim              claim an existing lease for the current repo
 --timing-json          print a final JSON timing record
 --blacksmith-org <org>  Blacksmith organization
@@ -314,6 +317,8 @@ static:
   user: steipete
   port: "22"
   workRoot: /Users/steipete/crabbox
+  managedLogin: true
+  managedUser: crabbox
 ```
 
 Static Windows target:
@@ -333,6 +338,12 @@ static:
 `windows.mode: normal` runs native PowerShell over OpenSSH and syncs with a tar
 archive. `windows.mode: wsl2` runs commands through `wsl.exe --exec bash -lc`
 and uses rsync inside WSL2, so `static.workRoot` should be a WSL path.
+
+`crabbox vnc --managed-login` is currently macOS-only. It uses SSH plus sudo to
+create or reuse the configured `static.managedUser`, grants Apple Remote Desktop
+access, and prints the generated VNC credentials. Static Windows VNC remains
+host-managed until the target exposes a management channel such as SSH/WinRM and
+a supported VNC server setup path.
 
 `crabbox warmup --market spot|on-demand` and `crabbox run --market spot|on-demand`
 override `capacity.market` for a single AWS lease. Use this for temporary quota

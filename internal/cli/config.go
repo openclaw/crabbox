@@ -97,12 +97,14 @@ type BlacksmithConfig struct {
 }
 
 type StaticConfig struct {
-	ID       string
-	Name     string
-	Host     string
-	User     string
-	Port     string
-	WorkRoot string
+	ID           string
+	Name         string
+	Host         string
+	User         string
+	Port         string
+	WorkRoot     string
+	ManagedLogin bool
+	ManagedUser  string
 }
 
 type ResultsConfig struct {
@@ -329,12 +331,14 @@ type fileBlacksmithConfig struct {
 }
 
 type fileStaticConfig struct {
-	ID       string `yaml:"id,omitempty"`
-	Name     string `yaml:"name,omitempty"`
-	Host     string `yaml:"host,omitempty"`
-	User     string `yaml:"user,omitempty"`
-	Port     string `yaml:"port,omitempty"`
-	WorkRoot string `yaml:"workRoot,omitempty"`
+	ID           string `yaml:"id,omitempty"`
+	Name         string `yaml:"name,omitempty"`
+	Host         string `yaml:"host,omitempty"`
+	User         string `yaml:"user,omitempty"`
+	Port         string `yaml:"port,omitempty"`
+	WorkRoot     string `yaml:"workRoot,omitempty"`
+	ManagedLogin *bool  `yaml:"managedLogin,omitempty"`
+	ManagedUser  string `yaml:"managedUser,omitempty"`
 }
 
 type fileResultsConfig struct {
@@ -689,6 +693,12 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		if file.Static.WorkRoot != "" {
 			cfg.Static.WorkRoot = file.Static.WorkRoot
 		}
+		if file.Static.ManagedLogin != nil {
+			cfg.Static.ManagedLogin = *file.Static.ManagedLogin
+		}
+		if file.Static.ManagedUser != "" {
+			cfg.Static.ManagedUser = file.Static.ManagedUser
+		}
 	}
 	if file.Results != nil && len(file.Results.JUnit) > 0 {
 		cfg.Results.JUnit = appendUniqueStrings(nil, file.Results.JUnit...)
@@ -789,6 +799,10 @@ func applyEnv(cfg *Config) {
 	cfg.Static.User = getenv("CRABBOX_STATIC_USER", cfg.Static.User)
 	cfg.Static.Port = getenv("CRABBOX_STATIC_PORT", cfg.Static.Port)
 	cfg.Static.WorkRoot = getenv("CRABBOX_STATIC_WORK_ROOT", cfg.Static.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_STATIC_MANAGED_LOGIN"); ok {
+		cfg.Static.ManagedLogin = value
+	}
+	cfg.Static.ManagedUser = getenv("CRABBOX_STATIC_MANAGED_USER", cfg.Static.ManagedUser)
 	if idleTimeout := os.Getenv("CRABBOX_BLACKSMITH_IDLE_TIMEOUT"); idleTimeout != "" {
 		applyLeaseDuration(&cfg.Blacksmith.IdleTimeout, idleTimeout)
 	}
