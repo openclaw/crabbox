@@ -34,6 +34,8 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	market := fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand")
 	ttl := fs.Duration("ttl", defaults.TTL, "maximum lease lifetime")
 	idleTimeout := fs.Duration("idle-timeout", defaults.IdleTimeout, "idle timeout")
+	desktop := fs.Bool("desktop", defaults.Desktop, "provision or require a visible desktop/VNC session")
+	browser := fs.Bool("browser", defaults.Browser, "provision or require a browser binary")
 	keep := fs.Bool("keep", true, "keep server after warmup")
 	actionsRunner := fs.Bool("actions-runner", false, "register this box as an ephemeral GitHub Actions runner")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
@@ -50,6 +52,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	cfg.Provider = *provider
 	cfg.Profile = *profile
 	cfg.Class = *class
+	applyCapabilityFlags(&cfg, *desktop, *browser)
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
@@ -71,6 +74,9 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	}
 	applyBlacksmithFlagOverrides(&cfg, fs, blacksmithFlags)
 	if err := validateProviderTarget(cfg); err != nil {
+		return err
+	}
+	if err := validateRequestedCapabilities(cfg); err != nil {
 		return err
 	}
 	if cfg.TTL <= 0 {
@@ -147,6 +153,8 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	market := fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand")
 	ttl := fs.Duration("ttl", defaults.TTL, "maximum lease lifetime")
 	idleTimeout := fs.Duration("idle-timeout", defaults.IdleTimeout, "idle timeout")
+	desktop := fs.Bool("desktop", defaults.Desktop, "provision or require a visible desktop/VNC session")
+	browser := fs.Bool("browser", defaults.Browser, "provision or require a browser binary")
 	leaseIDFlag := fs.String("id", "", "existing lease or server id")
 	keep := fs.Bool("keep", false, "keep server after command")
 	noSync := fs.Bool("no-sync", false, "skip rsync")
@@ -178,6 +186,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	cfg.Provider = *provider
 	cfg.Profile = *profile
 	cfg.Class = *class
+	applyCapabilityFlags(&cfg, *desktop, *browser)
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
@@ -205,6 +214,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	}
 	applyBlacksmithFlagOverrides(&cfg, fs, blacksmithFlags)
 	if err := validateProviderTarget(cfg); err != nil {
+		return err
+	}
+	if err := validateRequestedCapabilities(cfg); err != nil {
 		return err
 	}
 	if cfg.TTL <= 0 {
@@ -283,6 +295,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		return recordFailure(err)
 	}
 	applyResolvedServerConfig(&cfg, server)
+	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
+		return recordFailure(err)
+	}
 	if useCoordinator {
 		recorder.AttachLease(leaseID, serverSlug(server), cfg)
 	}
@@ -512,14 +527,19 @@ afterSync:
 	}
 	fmt.Fprintf(a.Stderr, "running on %s %s\n", target.Host, strings.Join(command, " "))
 	recorder.Event("command.started", "command", strings.Join(command, " "))
-	remote := remoteCommandWithEnvFile(workdir, allowedEnv(cfg.EnvAllow), actionsEnvFile, command)
+	capabilityEnv, err := requestedCapabilityEnv(ctx, cfg, target)
+	if err != nil {
+		return recordFailure(err)
+	}
+	runEnv := mergeEnv(allowedEnv(cfg.EnvAllow), capabilityEnv)
+	remote := remoteCommandWithEnvFile(workdir, runEnv, actionsEnvFile, command)
 	if *shellMode || shouldUseShell(command) {
-		remote = remoteShellCommandWithEnvFile(workdir, allowedEnv(cfg.EnvAllow), actionsEnvFile, strings.Join(command, " "))
+		remote = remoteShellCommandWithEnvFile(workdir, runEnv, actionsEnvFile, strings.Join(command, " "))
 	}
 	if isWindowsNativeTarget(target) {
-		remote = windowsRemoteCommandWithEnvFile(workdir, allowedEnv(cfg.EnvAllow), actionsEnvFile, command)
+		remote = windowsRemoteCommandWithEnvFile(workdir, runEnv, actionsEnvFile, command)
 		if *shellMode || shouldUseShell(command) {
-			remote = windowsRemoteShellCommandWithEnvFile(workdir, allowedEnv(cfg.EnvAllow), actionsEnvFile, strings.Join(command, " "))
+			remote = windowsRemoteShellCommandWithEnvFile(workdir, runEnv, actionsEnvFile, strings.Join(command, " "))
 		}
 	}
 	var logBuffer runLogBuffer
@@ -698,6 +718,12 @@ func (a App) acquireCoordinator(ctx context.Context, cfg Config, coord *Coordina
 			fmt.Fprintf(a.Stderr, "warning: could not move local key from %s to %s: %v\n", leaseID, lease.ID, err)
 		}
 	}
+	if err := validateCoordinatorLeaseCapabilities(cfg, lease); err != nil {
+		if releaseErr := releaseCoordinatorLease(context.Background(), coord, blank(lease.ID, leaseID)); releaseErr != nil {
+			fmt.Fprintf(a.Stderr, "warning: release failed after capability mismatch for %s: %v\n", blank(lease.ID, leaseID), releaseErr)
+		}
+		return Server{}, SSHTarget{}, "", err
+	}
 	server, target, leaseID := leaseToServerTarget(lease, cfg)
 	fmt.Fprintf(a.Stderr, "leased %s slug=%s server=%d type=%s ip=%s via coordinator\n", leaseID, blank(lease.Slug, "-"), server.ID, server.ServerType.Name, target.Host)
 	if summary := coordinatorFallbackSummary(lease); summary != "" {
@@ -718,6 +744,16 @@ func (a App) acquireCoordinator(ctx context.Context, cfg Config, coord *Coordina
 		return Server{}, SSHTarget{}, "", err
 	}
 	return server, target, leaseID, nil
+}
+
+func validateCoordinatorLeaseCapabilities(cfg Config, lease CoordinatorLease) error {
+	if cfg.Desktop && !lease.Desktop {
+		return exit(5, "coordinator did not provision desktop=true for lease %s; deploy the coordinator with desktop/VNC support", blank(lease.ID, "-"))
+	}
+	if cfg.Browser && !lease.Browser {
+		return exit(5, "coordinator did not provision browser=true for lease %s; deploy the coordinator with browser support", blank(lease.ID, "-"))
+	}
+	return nil
 }
 
 func applyResolvedServerConfig(cfg *Config, server Server) {
@@ -1289,6 +1325,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 
 func (a App) writeActionsHydrationStopBestEffort(ctx context.Context, target SSHTarget, leaseID string) {
 	if leaseID == "" || target.Host == "" {
+		return
+	}
+	if isWindowsNativeTarget(target) {
 		return
 	}
 	stopCtx, cancel := context.WithTimeout(ctx, 15*time.Second)

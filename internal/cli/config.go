@@ -17,6 +17,8 @@ type Config struct {
 	Provider           string
 	TargetOS           string
 	WindowsMode        string
+	Desktop            bool
+	Browser            bool
 	Class              string
 	ServerType         string
 	ServerTypeExplicit bool
@@ -213,6 +215,8 @@ type fileConfig struct {
 	Target           string                `yaml:"target,omitempty"`
 	TargetOS         string                `yaml:"targetOS,omitempty"`
 	Windows          *fileWindowsConfig    `yaml:"windows,omitempty"`
+	Desktop          *bool                 `yaml:"desktop,omitempty"`
+	Browser          *bool                 `yaml:"browser,omitempty"`
 	Class            string                `yaml:"class,omitempty"`
 	ServerType       string                `yaml:"serverType,omitempty"`
 	Coordinator      string                `yaml:"coordinator,omitempty"`
@@ -462,6 +466,12 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 	}
 	if file.Windows != nil && file.Windows.Mode != "" {
 		cfg.WindowsMode = file.Windows.Mode
+	}
+	if file.Desktop != nil {
+		cfg.Desktop = *file.Desktop
+	}
+	if file.Browser != nil {
+		cfg.Browser = *file.Browser
 	}
 	if file.Class != "" {
 		cfg.Class = file.Class
@@ -719,6 +729,12 @@ func applyEnv(cfg *Config) {
 	cfg.Provider = getenv("CRABBOX_PROVIDER", cfg.Provider)
 	cfg.TargetOS = getenv("CRABBOX_TARGET", getenv("CRABBOX_TARGET_OS", cfg.TargetOS))
 	cfg.WindowsMode = getenv("CRABBOX_WINDOWS_MODE", cfg.WindowsMode)
+	if value, ok := getenvBool("CRABBOX_DESKTOP"); ok {
+		cfg.Desktop = value
+	}
+	if value, ok := getenvBool("CRABBOX_BROWSER"); ok {
+		cfg.Browser = value
+	}
 	cfg.Class = getenv("CRABBOX_DEFAULT_CLASS", cfg.Class)
 	if os.Getenv("CRABBOX_SERVER_TYPE") != "" {
 		cfg.ServerTypeExplicit = true

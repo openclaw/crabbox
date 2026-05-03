@@ -149,6 +149,8 @@ export class FleetDurableObject implements DurableObject {
       slug,
       provider: config.provider,
       target: config.target,
+      desktop: config.desktop,
+      browser: config.browser,
       cloudID: "",
       owner,
       org,

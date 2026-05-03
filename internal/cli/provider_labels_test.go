@@ -13,6 +13,8 @@ func TestDirectLeaseLabelsAreProviderSafe(t *testing.T) {
 		Profile:     "default",
 		ProviderKey: "crabbox-cbx-abcdef123456",
 		ServerType:  "cpx62",
+		Desktop:     true,
+		Browser:     true,
 		TTL:         15 * time.Minute,
 		IdleTimeout: 4 * time.Minute,
 	}
@@ -31,6 +33,9 @@ func TestDirectLeaseLabelsAreProviderSafe(t *testing.T) {
 	}
 	if labels["ttl_secs"] != "900" {
 		t.Fatalf("ttl_secs=%q want 900", labels["ttl_secs"])
+	}
+	if labels["desktop"] != "true" || labels["browser"] != "true" {
+		t.Fatalf("capability labels missing: %#v", labels)
 	}
 	if labels["expires_at"] != "1777637040" {
 		t.Fatalf("expires_at=%q want idle expiry", labels["expires_at"])

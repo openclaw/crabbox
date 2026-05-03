@@ -42,6 +42,7 @@ Command docs:
 - [list](../commands/list.md)
 - [usage](../commands/usage.md)
 - [ssh](../commands/ssh.md)
+- [vnc](../commands/vnc.md)
 - [inspect](../commands/inspect.md)
 - [stop](../commands/stop.md)
 - [actions](../commands/actions.md)

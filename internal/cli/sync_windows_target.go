@@ -102,14 +102,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $workdir ".git"))) {
 
 func windowsRemoteCommandWithEnvFile(workdir string, env map[string]string, envFile string, command []string) string {
 	var b bytes.Buffer
-	b.WriteString(`$ErrorActionPreference = "Stop"` + "\n")
-	b.WriteString(`Set-Location -LiteralPath ` + psQuote(workdir) + "\n")
-	if envFile != "" {
-		b.WriteString(`if (Test-Path -LiteralPath ` + psQuote(envFile) + `) { Get-Content -LiteralPath ` + psQuote(envFile) + ` | ForEach-Object { if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process') } } }` + "\n")
-	}
-	for key, value := range env {
-		b.WriteString(`$env:` + key + ` = ` + psQuote(value) + "\n")
-	}
+	writeWindowsRemotePrefix(&b, workdir, env, envFile)
 	if len(command) == 0 {
 		b.WriteString("exit 0\n")
 	} else {
@@ -124,7 +117,23 @@ func windowsRemoteCommandWithEnvFile(workdir string, env map[string]string, envF
 }
 
 func windowsRemoteShellCommandWithEnvFile(workdir string, env map[string]string, envFile, script string) string {
-	return windowsRemoteCommandWithEnvFile(workdir, env, envFile, []string{"powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script})
+	var b bytes.Buffer
+	writeWindowsRemotePrefix(&b, workdir, env, envFile)
+	b.WriteString(script)
+	b.WriteString("\nif (-not $?) { exit 1 }\n")
+	b.WriteString("if ($null -ne $global:LASTEXITCODE) { exit $global:LASTEXITCODE }\n")
+	return powershellCommand(b.String())
+}
+
+func writeWindowsRemotePrefix(b *bytes.Buffer, workdir string, env map[string]string, envFile string) {
+	b.WriteString(`$ErrorActionPreference = "Stop"` + "\n")
+	b.WriteString(`Set-Location -LiteralPath ` + psQuote(workdir) + "\n")
+	if envFile != "" {
+		b.WriteString(`if (Test-Path -LiteralPath ` + psQuote(envFile) + `) { Get-Content -LiteralPath ` + psQuote(envFile) + ` | ForEach-Object { if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process') } } }` + "\n")
+	}
+	for key, value := range env {
+		b.WriteString(`$env:` + key + ` = ` + psQuote(value) + "\n")
+	}
 }
 
 func windowsRemoteMkdir(workdir string) string {

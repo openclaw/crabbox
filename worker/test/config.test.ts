@@ -55,7 +55,19 @@ describe("lease config", () => {
     expect(config.sshFallbackPorts).toEqual(["22"]);
     expect(config.capacityMarket).toBe("spot");
     expect(config.capacityStrategy).toBe("most-available");
+    expect(config.desktop).toBe(false);
+    expect(config.browser).toBe(false);
     expect(config.ttlSeconds).toBe(86_400);
+  });
+
+  it("preserves requested desktop and browser capabilities", () => {
+    const config = leaseConfig({
+      sshPublicKey: "ssh-ed25519 test",
+      desktop: true,
+      browser: true,
+    });
+    expect(config.desktop).toBe(true);
+    expect(config.browser).toBe(true);
   });
 
   it("uses AWS defaults when requested", () => {

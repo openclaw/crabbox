@@ -6,11 +6,14 @@
 crabbox run --id blue-lobster -- pnpm test:changed:max
 crabbox run --class beast -- pnpm check
 crabbox run --provider aws --class beast --market on-demand -- pnpm check
+crabbox run --browser -- google-chrome --headless --version
+crabbox run --desktop --browser --shell 'echo "$DISPLAY"; "$BROWSER" --version'
 crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
 crabbox run --id cbx_abcdef123456 --junit junit.xml -- go test ./...
 crabbox run --provider blacksmith-testbox --blacksmith-workflow .github/workflows/ci-check-testbox.yml --blacksmith-job test -- pnpm test
 crabbox run --provider ssh --target macos --static-host mac-studio.local -- xcodebuild test
-crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local -- pwsh -NoProfile -Command "dotnet test"
+crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local -- dotnet test
+crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local --shell 'Write-Output ("BROWSER=" + $env:BROWSER)'
 crabbox run --provider ssh --target windows --windows-mode wsl2 --static-host win-dev.local -- pnpm test
 ```
 
@@ -22,12 +25,27 @@ When the lease has been hydrated by `crabbox actions hydrate`, `run` reads the r
 
 If a configured Actions hydration workflow exists and a package-manager command such as `pnpm`, `npm`, `node`, or `corepack` is run before a hydration marker exists, Crabbox warns that the raw box may not have the project runtime installed. Hydrate first for CI-like setup, or include the runtime setup explicitly in the command.
 
+`--browser` provisions or requires a known browser binary and injects
+`CRABBOX_BROWSER=1`, `BROWSER`, and `CHROME_BIN` into the remote command. It
+does not imply `--desktop`; use it alone for headless browser automation.
+Browser login/profile state is not managed by Crabbox; use a scenario-owned
+profile directory or app-specific auth artifact when tests need a logged-in
+browser.
+
+`--desktop` provisions or requires a visible Linux display and injects
+`CRABBOX_DESKTOP=1` plus `DISPLAY=:99`. It does not imply a browser. Use
+`--desktop --browser` for headed browser automation in the VNC-visible session.
+
 Sync uses `git ls-files --cached --others --exclude-standard` to build a file manifest, then feeds that manifest to rsync over SSH. That means tracked files plus nonignored untracked files sync, while `.git`, ignored local build output, dependency folders, and common caches stay out of the transfer. Crabbox records a local/remote sync fingerprint and skips rsync when the tracked commit plus manifest and dirty metadata have not changed. Use `--checksum` when you need a paranoid checksum scan, and `--debug` to print sync timing, progress, and itemized rsync output.
 
 For `provider=ssh`, `target=macos` and `target=windows windows.mode=wsl2`
 use the same POSIX rsync flow. Native Windows mode uses PowerShell over OpenSSH
 and sends the manifest as a tar archive into `static.workRoot`; cache purge and
 GitHub Actions runner registration remain Linux-only.
+
+On native Windows, plain argv is best for one executable such as `dotnet test`.
+Use `--shell` for multi-statement PowerShell snippets, env inspection, or
+commands that need PowerShell expression syntax.
 
 Before rsync starts, Crabbox prints the candidate file count and byte estimate. Large syncs warn or fail according to `sync.warnFiles`, `sync.warnBytes`, `sync.failFiles`, and `sync.failBytes`; use `--force-sync-large` or `sync.allowLarge: true` only when the transfer size is intentional. Quiet rsync runs print a heartbeat, and `sync.timeout` kills stalled syncs.
 
@@ -62,6 +80,8 @@ Flags:
 --market spot|on-demand
 --ttl <duration>
 --idle-timeout <duration>
+--desktop
+--browser
 --keep
 --no-sync
 --sync-only

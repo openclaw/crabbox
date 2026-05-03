@@ -35,6 +35,12 @@ func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 	if cfg.TargetOS == targetWindows {
 		labels["windows_mode"] = cfg.WindowsMode
 	}
+	if cfg.Desktop {
+		labels["desktop"] = "true"
+	}
+	if cfg.Browser {
+		labels["browser"] = "true"
+	}
 	return sanitizeProviderLabels(labels)
 }
 

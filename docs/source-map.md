@@ -39,9 +39,16 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - Worker AWS AMI create/read/promote routes: `worker/src/fleet.ts`, `worker/src/aws.ts`
 - CLI cloud-init bootstrap: `internal/cli/bootstrap.go`
 - Worker cloud-init bootstrap: `worker/src/bootstrap.ts`
-- Planned interactive desktop/VNC contract: `docs/features/interactive-desktop-vnc.md`
+- Desktop/browser capability flags, env injection, and VNC checks: `internal/cli/capabilities.go`, `internal/cli/run.go`
+- VNC tunnel command: `internal/cli/vnc.go`
+- Interactive desktop/VNC contract: `docs/features/interactive-desktop-vnc.md`
 
-Bootstrap is intentionally tiny: OpenSSH, CA certificates, curl, Git, rsync, jq, `/work/crabbox`, cache directories, and `crabbox-ready`. Project runtimes such as Go, Node, pnpm, Docker, databases, and services are repository-owned setup, usually through Actions hydration or repo scripts.
+Bootstrap is intentionally tiny unless optional lease capabilities are requested:
+OpenSSH, CA certificates, curl, Git, rsync, jq, `/work/crabbox`, cache
+directories, and `crabbox-ready`. `--desktop` adds Xvfb/Openbox/x11vnc and
+loopback VNC. `--browser` adds Chrome stable or a Chromium fallback. Project
+runtimes such as Go, Node, pnpm, Docker, databases, and services are
+repository-owned setup, usually through Actions hydration or repo scripts.
 
 ## Sync, Execution, Actions, Cache, And Results
 

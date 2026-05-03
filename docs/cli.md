@@ -33,8 +33,8 @@ crabbox init [--force]
 crabbox config show [--json]
 crabbox config path
 crabbox config set-broker --url <url> --token-stdin [--provider hetzner|aws]
-crabbox warmup [--provider hetzner|aws|ssh|blacksmith-testbox] [--target linux|macos|windows] [--profile <name>] [--idle-timeout <duration>] [--timing-json]
-crabbox run [--id <lease-id-or-slug>] [--provider hetzner|aws|ssh|blacksmith-testbox] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--shell] [--checksum] [--debug] [--force-sync-large] [--timing-json] [--blacksmith-workflow <workflow>] -- <command...>
+crabbox warmup [--provider hetzner|aws|ssh|blacksmith-testbox] [--target linux|macos|windows] [--desktop] [--browser] [--profile <name>] [--idle-timeout <duration>] [--timing-json]
+crabbox run [--id <lease-id-or-slug>] [--provider hetzner|aws|ssh|blacksmith-testbox] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--shell] [--checksum] [--debug] [--force-sync-large] [--timing-json] [--blacksmith-workflow <workflow>] -- <command...>
 crabbox sync-plan [--limit <n>]
 crabbox history [--lease <lease-id>] [--owner <email>] [--org <name>] [--limit <n>] [--json]
 crabbox logs <run-id> [--json]
@@ -54,6 +54,7 @@ crabbox admin leases [--state active|released|expired|failed] [--owner <email>] 
 crabbox admin release <lease-id-or-slug> [--delete]
 crabbox admin delete <lease-id-or-slug> --force
 crabbox ssh --id <lease-id-or-slug>
+crabbox vnc --id <lease-id-or-slug> [--open]
 crabbox inspect --id <lease-id-or-slug> [--json]
 crabbox stop <lease-id-or-slug>
 crabbox cleanup [--dry-run]
@@ -77,7 +78,9 @@ Warm a box, then reuse it:
 
 ```sh
 crabbox warmup --profile project-check
+crabbox warmup --desktop --browser
 crabbox run --id blue-lobster -- pnpm test:changed
+crabbox vnc --id blue-lobster --open
 crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
 crabbox stop blue-lobster
 ```
@@ -228,6 +231,7 @@ Flags:
 --checksum              use checksum rsync instead of size/time
 --debug                 print sync timing and itemized rsync output
 --junit <paths>         comma-separated remote JUnit XML paths to attach to run history
+--open                 open local VNC client for `crabbox vnc`
 --reclaim              claim an existing lease for the current repo
 --timing-json          print a final JSON timing record
 --blacksmith-org <org>  Blacksmith organization

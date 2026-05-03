@@ -42,6 +42,8 @@ export interface LeaseRequest {
   target?: TargetOS;
   targetOS?: TargetOS;
   windowsMode?: WindowsMode;
+  desktop?: boolean;
+  browser?: boolean;
   profile?: string;
   class?: string;
   serverType?: string;
@@ -83,6 +85,8 @@ export interface LeaseRecord {
   provider: Provider;
   target: TargetOS;
   windowsMode?: WindowsMode;
+  desktop?: boolean;
+  browser?: boolean;
   cloudID: string;
   region?: string;
   owner: string;

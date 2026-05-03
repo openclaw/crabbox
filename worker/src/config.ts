@@ -4,6 +4,8 @@ export interface LeaseConfig {
   provider: Provider;
   target: TargetOS;
   windowsMode: WindowsMode;
+  desktop: boolean;
+  browser: boolean;
   profile: string;
   class: string;
   serverType: string;
@@ -59,6 +61,8 @@ export function leaseConfig(input: LeaseRequest): LeaseConfig {
     provider,
     target,
     windowsMode,
+    desktop: input.desktop ?? false,
+    browser: input.browser ?? false,
     profile: input.profile ?? "default",
     class: machineClass,
     serverType,

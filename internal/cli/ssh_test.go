@@ -3,12 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 )
 
 func TestVersion(t *testing.T) {
@@ -68,6 +70,43 @@ func TestWindowsNativeRemoteCommandUsesPowerShell(t *testing.T) {
 	if !strings.HasPrefix(got, "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ") {
 		t.Fatalf("windows command should use encoded powershell: %q", got)
 	}
+}
+
+func TestWindowsNativeRemoteShellRunsScriptDirectly(t *testing.T) {
+	got := windowsRemoteShellCommandWithEnvFile(`C:\crabbox\cbx\repo`, map[string]string{"CRABBOX_BROWSER": "1"}, "", `Write-Output ("COMPUTER=" + $env:COMPUTERNAME)`)
+	decoded := decodePowerShellCommand(t, got)
+	for _, want := range []string{
+		`Set-Location -LiteralPath 'C:\crabbox\cbx\repo'`,
+		`$env:CRABBOX_BROWSER = '1'`,
+		`Write-Output ("COMPUTER=" + $env:COMPUTERNAME)`,
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("windows shell command missing %q in %q", want, decoded)
+		}
+	}
+	if strings.Contains(decoded, `& 'powershell.exe'`) {
+		t.Fatalf("windows shell command should not spawn nested powershell: %q", decoded)
+	}
+}
+
+func decodePowerShellCommand(t *testing.T, command string) string {
+	t.Helper()
+	const prefix = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+	if !strings.HasPrefix(command, prefix) {
+		t.Fatalf("command missing encoded powershell prefix: %q", command)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(command, prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw)%2 != 0 {
+		t.Fatalf("odd UTF-16LE byte length: %d", len(raw))
+	}
+	units := make([]uint16, len(raw)/2)
+	for i := range units {
+		units[i] = uint16(raw[i*2]) | uint16(raw[i*2+1])<<8
+	}
+	return string(utf16.Decode(units))
 }
 
 func TestWSL2WrapsRemoteCommand(t *testing.T) {

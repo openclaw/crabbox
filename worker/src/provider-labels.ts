@@ -35,6 +35,12 @@ export function leaseProviderLabels(
   if (config.target === "windows") {
     labels["windows_mode"] = config.windowsMode;
   }
+  if (config.desktop) {
+    labels["desktop"] = "true";
+  }
+  if (config.browser) {
+    labels["browser"] = "true";
+  }
   return sanitizeLabels({ ...labels, ...extra });
 }
 

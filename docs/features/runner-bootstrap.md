@@ -38,6 +38,10 @@ operator-managed:
 - native Windows targets need OpenSSH, PowerShell, `git`, and `tar`;
 - `static.workRoot` must point at a writable directory for that target mode.
 
+For native Windows, install Git before the Crabbox check or restart OpenSSH
+Server afterward so new non-interactive SSH sessions inherit Git and `tar` on
+PATH.
+
 The CLI prefers the configured SSH port and can fall back through `ssh.fallbackPorts` during early bootstrap or operator-network egress restrictions. Set `ssh.fallbackPorts: []` or `CRABBOX_SSH_FALLBACK_PORTS=none` when the fallback should be disabled. Long term, snapshots or provider images can replace slow cloud-init once the bootstrap contract is stable.
 
 Related docs:

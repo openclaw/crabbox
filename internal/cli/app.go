@@ -90,6 +90,8 @@ func (a App) Run(ctx context.Context, args []string) error {
 		return a.status(ctx, args[1:])
 	case "ssh":
 		return a.ssh(ctx, args[1:])
+	case "vnc":
+		return a.vnc(ctx, args[1:])
 	case "inspect":
 		return a.inspect(ctx, args[1:])
 	case "stop", "release":
@@ -117,6 +119,8 @@ Start Here:
       Lease a reusable box and print a cbx_... id plus friendly slug.
   crabbox run --id blue-lobster -- pnpm test:changed
       Sync this checkout to the box and run a command.
+  crabbox warmup --desktop --browser
+      Lease a UI-capable box with a browser.
 
 Commands:
   init        Onboard the current repo for Crabbox
@@ -140,6 +144,7 @@ Commands:
   admin       Lease admin controls for trusted operators
   actions     Register GitHub Actions runners or dispatch workflows
   ssh         Print the SSH command for a lease
+  vnc         Print or open VNC connection details for a desktop lease
   inspect     Print lease/provider details; add --json for scripts
   stop        Release a lease or delete a direct-provider machine
   cleanup     Sweep expired direct-provider machines
@@ -151,6 +156,7 @@ Common Flows:
   crabbox status --id blue-lobster --wait
   crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
   crabbox ssh --id blue-lobster
+  crabbox vnc --id blue-lobster --open
   crabbox inspect --id blue-lobster --json
   crabbox history --lease cbx_abcdef123456
   crabbox logs run_123
@@ -189,6 +195,8 @@ Environment:
   CRABBOX_PROVIDER             hetzner, aws, ssh, or blacksmith-testbox
   CRABBOX_TARGET               linux, macos, or windows
   CRABBOX_WINDOWS_MODE         normal or wsl2
+  CRABBOX_DESKTOP              Provision or require desktop/VNC capability
+  CRABBOX_BROWSER              Provision or require browser capability
   CRABBOX_STATIC_HOST          Static SSH host for provider=ssh
   CRABBOX_OWNER                Usage owner override
   CRABBOX_ORG                  Usage org override

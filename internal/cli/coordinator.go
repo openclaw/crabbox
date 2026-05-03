@@ -30,6 +30,8 @@ type CoordinatorLease struct {
 	Provider             string                `json:"provider"`
 	TargetOS             string                `json:"target,omitempty"`
 	WindowsMode          string                `json:"windowsMode,omitempty"`
+	Desktop              bool                  `json:"desktop,omitempty"`
+	Browser              bool                  `json:"browser,omitempty"`
 	Owner                string                `json:"owner"`
 	Org                  string                `json:"org"`
 	Profile              string                `json:"profile"`
@@ -304,6 +306,8 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"provider":           cfg.Provider,
 		"target":             cfg.TargetOS,
 		"windowsMode":        cfg.WindowsMode,
+		"desktop":            cfg.Desktop,
+		"browser":            cfg.Browser,
 		"class":              cfg.Class,
 		"serverType":         cfg.ServerType,
 		"serverTypeExplicit": cfg.ServerTypeExplicit,
@@ -815,6 +819,8 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 			"keep":              fmt.Sprint(lease.Keep),
 			"target":            blank(lease.TargetOS, cfg.TargetOS),
 			"windows_mode":      blank(lease.WindowsMode, cfg.WindowsMode),
+			"desktop":           fmt.Sprint(lease.Desktop),
+			"browser":           fmt.Sprint(lease.Browser),
 			"expires_at":        lease.ExpiresAt,
 			"last_touched_at":   lease.LastTouchedAt,
 			"idle_timeout_secs": fmt.Sprint(lease.IdleTimeoutSeconds),
@@ -827,6 +833,12 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 	server.ServerType.Name = lease.ServerType
 	if lease.SSHFallbackPorts != nil {
 		cfg.SSHFallbackPorts = lease.SSHFallbackPorts
+	}
+	if lease.TargetOS != "" {
+		cfg.TargetOS = lease.TargetOS
+	}
+	if lease.WindowsMode != "" {
+		cfg.WindowsMode = lease.WindowsMode
 	}
 	target := sshTargetForLease(cfg, lease.Host, lease.SSHUser, lease.SSHPort)
 	useStoredTestboxKey(&target, lease.ID)

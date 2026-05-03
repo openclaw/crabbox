@@ -5,6 +5,10 @@ import type { LeaseConfig } from "../src/config";
 
 const config: LeaseConfig = {
   provider: "aws",
+  target: "linux",
+  windowsMode: "normal",
+  desktop: false,
+  browser: false,
   profile: "project-check",
   class: "standard",
   serverType: "c7a.8xlarge",
@@ -58,5 +62,37 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain("build-essential");
     expect(got).not.toContain("docker.io");
     expect(got).not.toContain("corepack");
+  });
+
+  it("adds desktop services only when requested", () => {
+    const got = cloudInit({ ...config, desktop: true });
+    expect(got).toContain("xvfb xfce4 xfce4-terminal x11vnc xauth dbus-x11");
+    expect(got).toContain("/etc/systemd/system/crabbox-xvfb.service");
+    expect(got).toContain("/etc/systemd/system/crabbox-desktop.service");
+    expect(got).toContain("/usr/local/bin/crabbox-desktop-session");
+    expect(got).toContain("/etc/systemd/system/crabbox-desktop-session.service");
+    expect(got).toContain("/etc/systemd/system/crabbox-x11vnc.service");
+    expect(got).toContain("ExecStart=/usr/bin/startxfce4");
+    expect(got).toContain("systemctl is-active --quiet crabbox-desktop.service");
+    expect(got).toContain("systemctl is-active --quiet crabbox-desktop-session.service");
+    expect(got).toContain("x11-xserver-utils xterm");
+    expect(got).toContain("xsetroot -solid '#20242b'");
+    expect(got).toContain("xterm -title 'Crabbox Desktop'");
+    expect(got).toContain("(umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)");
+    expect(got).toContain("-rfbauth /var/lib/crabbox/vnc.pass");
+    expect(got).toContain("ss -ltn | grep -q '127.0.0.1:5900'");
+  });
+
+  it("adds browser setup only when requested", () => {
+    const got = cloudInit({ ...config, browser: true });
+    expect(got).toContain("https://dl.google.com/linux/linux_signing_key.pub");
+    expect(got).toContain("chmod 0644 /etc/apt/trusted.gpg.d/google.asc");
+    expect(got).toContain("https://dl.google.com/linux/chrome/deb/");
+    expect(got).toContain("google-chrome-stable");
+    expect(got).toContain("apt-cache show chromium");
+    expect(got).toContain("apt-cache show chromium-browser");
+    expect(got).toContain("/var/lib/crabbox/browser.env");
+    expect(got).toContain('test -x "$BROWSER"');
+    expect(got).toContain('"$BROWSER" --version >/dev/null');
   });
 });
