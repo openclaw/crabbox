@@ -1002,6 +1002,18 @@ describe("fleet identity", () => {
     expect(callback.headers.get("set-cookie")).toContain("crabbox_session=cbxu_");
   });
 
+  it("clears portal session on logout without restarting OAuth", async () => {
+    const fleet = testFleet();
+    const logout = await fleet.fetch(request("GET", "/portal/logout"));
+    expect(logout.status).toBe(200);
+    expect(logout.headers.get("location")).toBeNull();
+    expect(logout.headers.get("set-cookie")).toContain("crabbox_session=");
+    expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
+    const body = await logout.text();
+    expect(body).toContain("Crabbox logged out");
+    expect(body).toContain("/portal/login");
+  });
+
   it("cleans expired GitHub login attempts before rate limiting", async () => {
     const storage = new MemoryStorage();
     const fleet = new FleetDurableObject(

@@ -106,9 +106,15 @@ export async function githubPortalLogin(
 }
 
 export function githubPortalLogout(): Response {
-  return redirect("/portal/login", 302, {
-    "set-cookie": portalSessionCookie("", 0),
-  });
+  return html(
+    "Crabbox logged out",
+    "Your Crabbox portal session has ended.",
+    200,
+    {
+      "set-cookie": portalSessionCookie("", 0),
+    },
+    `<p><a href="/portal/login">Log in again</a></p>`,
+  );
 }
 
 async function githubAuthStart(
@@ -501,12 +507,18 @@ function randomID(prefix: string): string {
   return `${prefix}_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
-function html(title: string, message: string, status = 200): Response {
+function html(
+  title: string,
+  message: string,
+  status = 200,
+  headers: Record<string, string> = {},
+  extraBody = "",
+): Response {
   const escapedTitle = escapeHTML(title);
   const escapedMessage = escapeHTML(message);
   return new Response(
-    `<!doctype html><html><head><meta charset="utf-8"><title>${escapedTitle}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:42rem;margin:5rem auto;padding:0 1rem;line-height:1.5;color:#111}code{background:#f4f4f5;padding:.15rem .3rem;border-radius:4px}</style></head><body><h1>${escapedTitle}</h1><p>${escapedMessage}</p></body></html>`,
-    { status, headers: { "content-type": "text/html; charset=utf-8" } },
+    `<!doctype html><html><head><meta charset="utf-8"><title>${escapedTitle}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:42rem;margin:5rem auto;padding:0 1rem;line-height:1.5;color:#111}code{background:#f4f4f5;padding:.15rem .3rem;border-radius:4px}</style></head><body><h1>${escapedTitle}</h1><p>${escapedMessage}</p>${extraBody}</body></html>`,
+    { status, headers: { "content-type": "text/html; charset=utf-8", ...headers } },
   );
 }
 
