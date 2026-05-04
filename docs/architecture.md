@@ -6,7 +6,7 @@ Crabbox has three main parts:
 
 - CLI: local Go binary used by maintainers and agents.
 - Coordinator: Cloudflare Worker plus Durable Object state.
-- Workers: Hetzner or SSH-accessible machines that run commands.
+- Workers: managed cloud or SSH-accessible machines that run commands.
 
 The coordinator leases machines. The CLI executes work. Machines do not need to call back to the coordinator in the MVP.
 
@@ -19,7 +19,7 @@ developer laptop
 Cloudflare Worker
   Durable Object lease state
     |
-    | Hetzner API or AWS EC2 Spot API
+    | Hetzner API or AWS EC2 API
     v
 cloud machines
 
@@ -36,7 +36,7 @@ leased machine
 2. CLI creates a per-lease SSH key.
 3. CLI sends `POST /v1/leases` with lease ID, slug, profile, TTL, idle timeout, desired machine class, and SSH public key.
 4. Coordinator validates identity and policy.
-5. Durable Object chooses a provider from config and creates a Hetzner server or AWS EC2 Spot instance.
+5. Durable Object chooses a provider from config and creates a Hetzner server or AWS EC2 instance.
 6. Coordinator returns lease ID, slug, machine address, SSH user, workdir, and expiry.
 7. CLI waits for `crabbox-ready`.
 8. CLI seeds remote Git when possible, compares sync fingerprints, and syncs changed files with `rsync --delete`.
@@ -101,7 +101,7 @@ Owned backends:
 
 - `hetzner-static`: pre-created warm machines.
 - `hetzner-ephemeral`: created per lease or overflow.
-- `aws-spot`: one-time EC2 Spot instances for burst capacity.
+- `aws`: one-time EC2 instances for burst capacity, managed Windows/WSL2, and EC2 Mac.
 - `ssh-static`: manually managed machines reachable by SSH.
 
 Brokered backends, later:
@@ -109,7 +109,7 @@ Brokered backends, later:
 - `github-actions`: register or dispatch real Actions-backed runner work when workflow parity is required.
 - `external-runner`: adapter boundary for other hosted runner systems if needed.
 
-The MVP implements `hetzner-ephemeral` and `aws-spot`, and leaves interfaces ready for `hetzner-static`.
+The current broker implements `hetzner-ephemeral` and `aws`, and leaves interfaces ready for `hetzner-static`.
 
 ## Machine Bootstrap
 

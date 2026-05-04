@@ -8,7 +8,7 @@ crabbox warmup --provider aws --class beast --market on-demand
 crabbox warmup --browser
 crabbox warmup --tailscale
 crabbox warmup --desktop --browser
-crabbox warmup --provider aws --target windows --desktop --market on-demand
+crabbox warmup --provider aws --target windows --desktop
 crabbox warmup --provider aws --target macos --desktop --market on-demand --type mac2.metal
 crabbox warmup --actions-runner
 crabbox warmup --provider blacksmith-testbox --blacksmith-workflow .github/workflows/ci-check-testbox.yml --blacksmith-job test

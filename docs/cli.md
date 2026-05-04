@@ -71,7 +71,7 @@ One-shot run:
 crabbox run --profile project-check -- pnpm check:changed
 ```
 
-AWS EC2 Spot run:
+AWS EC2 run:
 
 ```sh
 crabbox run --class beast -- pnpm check:changed
@@ -122,7 +122,7 @@ crabbox run --provider ssh --target windows --windows-mode wsl2 --static-host wi
 Create managed AWS desktop boxes:
 
 ```sh
-crabbox warmup --provider aws --target windows --desktop --market on-demand
+crabbox warmup --provider aws --target windows --desktop
 CRABBOX_AWS_MAC_HOST_ID=h-... crabbox warmup --provider aws --target macos --desktop --market on-demand
 crabbox vnc --id blue-lobster
 crabbox screenshot --id blue-lobster --output desktop.png
@@ -253,8 +253,16 @@ Flags:
 --profile <name>        profile to run on
 --class <name>          machine class override
 --type <name>           provider server or instance type override
+--market spot|on-demand AWS capacity market override
 --ttl <duration>        maximum lease lifetime, default 90m
 --idle-timeout <duration> idle expiry, default 30m
+--desktop              provision or require visible desktop capability
+--browser              provision or require browser capability
+--tailscale            join new managed Linux leases to the configured tailnet
+--tailscale-tags <csv> Tailscale tags for new managed leases
+--tailscale-hostname-template <template>
+--tailscale-auth-key-env <env-var>
+--network auto|tailscale|public
 --no-sync               run without syncing
 --sync-only             sync and exit
 --force-sync-large      allow a sync candidate above configured fail thresholds
@@ -263,8 +271,6 @@ Flags:
 --checksum              use checksum rsync instead of size/time
 --debug                 print sync timing and itemized rsync output
 --junit <paths>         comma-separated remote JUnit XML paths to attach to run history
---open                 open local VNC client for `crabbox vnc`
---output <path>        local PNG path for `crabbox screenshot`
 --reclaim              claim an existing lease for the current repo
 --timing-json          print a final JSON timing record
 --blacksmith-org <org>  Blacksmith organization
@@ -462,18 +468,26 @@ blacksmith:
 ```text
 CRABBOX_COORDINATOR
 CRABBOX_COORDINATOR_TOKEN
+CRABBOX_COORDINATOR_ADMIN_TOKEN
+CRABBOX_ADMIN_TOKEN                alias for CRABBOX_COORDINATOR_ADMIN_TOKEN
 CRABBOX_ACCESS_CLIENT_ID
 CRABBOX_ACCESS_CLIENT_SECRET
 CRABBOX_ACCESS_TOKEN
 CRABBOX_PROVIDER
 CRABBOX_TARGET
+CRABBOX_TARGET_OS                  alias for CRABBOX_TARGET
 CRABBOX_WINDOWS_MODE
+CRABBOX_DESKTOP
+CRABBOX_BROWSER
+CRABBOX_NETWORK
 CRABBOX_STATIC_ID
 CRABBOX_STATIC_NAME
 CRABBOX_STATIC_HOST
 CRABBOX_STATIC_USER
 CRABBOX_STATIC_PORT
 CRABBOX_STATIC_WORK_ROOT
+CRABBOX_OWNER
+CRABBOX_ORG
 CRABBOX_PROFILE
 CRABBOX_CONFIG
 CRABBOX_DEFAULT_CLASS
@@ -485,6 +499,19 @@ CRABBOX_SSH_USER
 CRABBOX_SSH_PORT
 CRABBOX_SSH_FALLBACK_PORTS       comma-separated fallback ports, or none
 CRABBOX_WORK_ROOT
+CRABBOX_AWS_REGION
+CRABBOX_AWS_AMI
+CRABBOX_AWS_SECURITY_GROUP_ID
+CRABBOX_AWS_SUBNET_ID
+CRABBOX_AWS_INSTANCE_PROFILE
+CRABBOX_AWS_ROOT_GB
+CRABBOX_AWS_SSH_CIDRS
+CRABBOX_AWS_MAC_HOST_ID
+CRABBOX_CAPACITY_MARKET
+CRABBOX_CAPACITY_STRATEGY
+CRABBOX_CAPACITY_FALLBACK
+CRABBOX_CAPACITY_REGIONS
+CRABBOX_CAPACITY_AVAILABILITY_ZONES
 CRABBOX_ACTIONS_WORKFLOW
 CRABBOX_ACTIONS_JOB
 CRABBOX_ACTIONS_REF
@@ -514,6 +541,11 @@ CRABBOX_ENV_ALLOW
 CRABBOX_CACHE_PNPM/NPM/DOCKER/GIT
 CRABBOX_CACHE_MAX_GB
 CRABBOX_CACHE_PURGE_ON_RELEASE
+CRABBOX_TAILSCALE
+CRABBOX_TAILSCALE_TAGS
+CRABBOX_TAILSCALE_HOSTNAME_TEMPLATE
+CRABBOX_TAILSCALE_AUTH_KEY_ENV
+CRABBOX_TAILSCALE_AUTH_KEY        direct-provider only, via auth-key env
 ```
 
 Provider/deploy variables live outside normal CLI operation:
@@ -522,8 +554,11 @@ Provider/deploy variables live outside normal CLI operation:
 CRABBOX_CLOUDFLARE_API_TOKEN
 CRABBOX_CLOUDFLARE_ACCOUNT_ID
 CRABBOX_CLOUDFLARE_ZONE_ID
-HCLOUD_TOKEN
-AWS_PROFILE/AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY
+CRABBOX_CLOUDFLARE_ZONE_NAME
+CRABBOX_DOMAIN
+CRABBOX_FALLBACK_DOMAIN
+HCLOUD_TOKEN/HETZNER_TOKEN
+AWS_PROFILE/AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN
 GITHUB_TOKEN
 ```
 

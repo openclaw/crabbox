@@ -34,9 +34,10 @@ Browser login/profile state is not managed by Crabbox; use a scenario-owned
 profile directory or app-specific auth artifact when tests need a logged-in
 browser.
 
-`--desktop` provisions or requires a visible Linux display and injects
-`CRABBOX_DESKTOP=1` plus `DISPLAY=:99`. It does not imply a browser. Use
-`--desktop --browser` for headed browser automation in the VNC-visible session.
+`--desktop` provisions or requires a visible desktop/VNC session and injects
+`CRABBOX_DESKTOP=1`; POSIX desktop targets also use `DISPLAY=:99`. It does not
+imply a browser. Use `--desktop --browser` for headed browser automation in the
+VNC-visible session.
 
 `--tailscale` asks new managed Linux leases to join the configured tailnet.
 `--network` selects how Crabbox resolves SSH for reused leases and for the final

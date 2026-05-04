@@ -28,7 +28,7 @@ Cloud machines are vanilla Ubuntu runners that hold no broker secrets. They are 
            |                                                | provider API
            |                                                v
            |                                +------------------------------+
-           |       SSH (primary + fallback) | Hetzner Cloud / AWS Spot     |
+           |       SSH (primary + fallback) | Hetzner Cloud / AWS EC2      |
            +----------- rsync ------------> | Ubuntu runner                |
                                             | /work/crabbox/<lease>/<repo> |
                                             +------------------------------+
@@ -42,8 +42,8 @@ The CLI talks to the broker over HTTPS, then talks **directly** to the leased ru
 |:------------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **CLI** | config + flags; per-lease SSH key; SSH readiness; Git seeding + rsync; sync fingerprints + sanity checks; remote command + streaming; heartbeats; release |
 | **Broker** | request auth + identity; serialized lease state; provider credentials; machine create/delete; lease expiry; pool/status/inspect; usage; spend caps |
-| **Provider** | raw compute: Hetzner Cloud servers or AWS EC2 Spot instances |
-| **Runner** | nothing durable for brokered boxes: Ubuntu prepared by cloud-init with SSH, Git, rsync, curl, jq, `/work/crabbox`; static macOS/Windows targets are existing SSH hosts; project runtimes come from repo-owned setup |
+| **Provider** | raw compute: Hetzner Cloud servers or AWS EC2 instances |
+| **Runner** | nothing durable for brokered boxes: Linux prepared by cloud-init with SSH, Git, rsync, curl, jq, `/work/crabbox`; AWS Windows/WSL2/macOS targets have provider-specific bootstrap; static targets are existing SSH hosts; project runtimes come from repo-owned setup |
 
 ## What `crabbox run` does
 

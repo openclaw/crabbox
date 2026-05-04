@@ -12,7 +12,7 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 
 - Command router and top-level help: `internal/cli/app.go`
 - Shared flag parsing and exit helpers: `internal/cli/flags.go`, `internal/cli/errors.go`
-- Config defaults, YAML keys, env overrides, target selection, and class maps: `internal/cli/config.go`, `internal/cli/target.go`
+- Config defaults, YAML keys, env overrides, target selection, and class maps: `internal/cli/config.go`, `internal/cli/target.go`, `worker/src/config.ts`
 - Network target resolution and Tailscale metadata: `internal/cli/network.go`
 - `crabbox init` generated repo files: `internal/cli/init.go`
 - Login/logout/whoami/config commands: `internal/cli/auth.go`, `internal/cli/config_cmd.go`
@@ -26,7 +26,8 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - Repo claim files and reclaim checks: `internal/cli/claim.go`
 - Direct-provider labels, safe label encoding, idle touch labels, TTL cap math: `internal/cli/provider_labels.go`
 - Coordinator client request/response structs, slug lookup, heartbeats, usage, run history: `internal/cli/coordinator.go`
-- Worker lease records, public routes, slug allocation, heartbeat expiry math, alarms: `worker/src/fleet.ts`, `worker/src/types.ts`
+- Worker env/request/record types: `worker/src/types.ts`
+- Worker lease records, public routes, slug allocation, heartbeat expiry math, alarms: `worker/src/fleet.ts`
 - Worker Tailscale OAuth auth-key minting: `worker/src/tailscale.ts`
 - Worker slug generation and provider labels: `worker/src/slug.ts`, `worker/src/provider-labels.ts`
 
@@ -37,8 +38,9 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - Static SSH macOS/Windows provider: `internal/cli/static.go`
 - Blacksmith Testbox CLI wrapper: `internal/cli/blacksmith.go`
 - Worker Hetzner provider: `worker/src/hetzner.ts`
-- Worker AWS EC2 Spot provider: `worker/src/aws.ts`
+- Worker AWS EC2 provider: `worker/src/aws.ts`
 - Worker AWS AMI create/read/promote routes: `worker/src/fleet.ts`, `worker/src/aws.ts`
+- Provider feature docs: `docs/features/aws.md`, `docs/features/hetzner.md`, `docs/features/blacksmith-testbox.md`
 - CLI cloud-init bootstrap: `internal/cli/bootstrap.go`
 - Worker cloud-init bootstrap: `worker/src/bootstrap.ts`
 - Tailscale feature contract: `docs/features/tailscale.md`
@@ -47,7 +49,7 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - VNC tunnel command: `internal/cli/vnc.go`
 - WebVNC portal bridge: `internal/cli/webvnc.go`, `worker/src/portal.ts`, `worker/src/fleet.ts`
 - Desktop screenshot command: `internal/cli/screenshot.go`
-- Interactive desktop/VNC contract: `docs/features/interactive-desktop-vnc.md`
+- Interactive desktop/VNC contract: `docs/features/interactive-desktop-vnc.md`, `docs/features/vnc-linux.md`, `docs/features/vnc-windows.md`, `docs/features/vnc-macos.md`
 
 Bootstrap is intentionally tiny unless optional lease capabilities are requested:
 OpenSSH, CA certificates, curl, Git, rsync, jq, `/work/crabbox`, cache
@@ -91,6 +93,6 @@ repository-owned setup, usually through Actions hydration or repo scripts.
 - CI gate: `.github/workflows/ci.yml`
 - Release workflow and Homebrew tap fallback: `.github/workflows/release.yml`
 - GoReleaser archives and Homebrew formula config: `.goreleaser.yaml`
-- Docs link check, site builder, and Pages deployment: `scripts/check-docs-links.mjs`, `scripts/build-docs-site.mjs`, `.github/workflows/pages.yml`
+- Docs command-surface check, link check, site builder, and Pages deployment: `scripts/check-command-docs.mjs`, `scripts/check-docs-links.mjs`, `scripts/build-docs-site.mjs`, `.github/workflows/pages.yml`
 - Live provider smoke coverage: `scripts/live-smoke.sh`
 - Live coordinator auth smoke coverage: `scripts/live-auth-smoke.sh`

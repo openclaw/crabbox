@@ -8,9 +8,9 @@ Read when:
 
 Actions hydration lets a repository reuse its existing GitHub Actions setup without putting repository-specific setup code in the Crabbox binary.
 
-Runner registration is currently Linux-only. Brokered Hetzner/AWS targets work;
-static macOS and Windows SSH targets are for direct `crabbox run` loops until
-platform-specific runner installation is added.
+Runner registration is currently Linux-only. Brokered Hetzner/AWS Linux targets
+work; static macOS/Windows and managed AWS Windows/macOS targets are for direct
+`crabbox run` loops until platform-specific runner installation is added.
 
 The flow:
 

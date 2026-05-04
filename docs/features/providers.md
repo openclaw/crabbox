@@ -10,7 +10,7 @@ Crabbox currently supports two brokered providers:
 
 ```text
 hetzner     Hetzner Cloud servers
-aws         AWS EC2 one-time Spot instances
+aws         AWS EC2 instances
 ```
 
 Brokered Hetzner leases are Linux targets. Brokered AWS supports Linux, native
@@ -21,7 +21,13 @@ still exists for reusing existing macOS and Windows machines:
 ssh         Existing SSH host selected by static.host
 ```
 
-Hetzner behavior:
+## Provider Pages
+
+- [AWS](aws.md): EC2 Linux, Windows, WSL2, EC2 Mac, capacity, AMIs, and security groups.
+- [Hetzner](hetzner.md): Linux-only managed provider behavior, classes, and cleanup.
+- [Blacksmith Testbox](blacksmith-testbox.md): delegated Testbox backend behavior.
+
+## Hetzner Summary
 
 - imports or reuses the lease SSH key;
 - creates a server with Crabbox labels;
@@ -29,12 +35,12 @@ Hetzner behavior:
 - falls back across class server types when capacity or quota rejects a request;
 - fetches server-type hourly prices when cost estimates need provider pricing.
 
-AWS behavior:
+## AWS Summary
 
 - signs EC2 Query API calls inside the Worker;
 - imports or reuses an EC2 key pair;
 - creates or reuses the `crabbox-runners` security group with SSH ingress limited to configured CIDRs or the request source IP;
-- launches one-time Spot instances;
+- launches one-time Linux Spot or On-Demand instances;
 - launches AWS Windows Server desktop leases with EC2Launch PowerShell user
   data, OpenSSH, Git for Windows, and TightVNC when `target=windows`;
 - launches EC2 Mac leases only with an explicit Dedicated Host id
@@ -147,6 +153,8 @@ contract and needs `git`, `rsync`, `tar`, and SSH.
 Related docs:
 
 - [Infrastructure](../infrastructure.md)
+- [AWS](aws.md)
+- [Hetzner](hetzner.md)
 - [Tailscale](tailscale.md)
 - [Blacksmith Testbox](blacksmith-testbox.md)
 - [Runner bootstrap](runner-bootstrap.md)

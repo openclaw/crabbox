@@ -15,7 +15,7 @@ Subcommands:
 ```text
 path
 show [--json]
-set-broker --url <url> --token-stdin [--provider hetzner|aws]
+set-broker --url <url> [--token-stdin] [--admin-token-stdin] [--provider hetzner|aws]
 ```
 
 `config show` reports broker auth as `auth` and `admin_auth`, plus

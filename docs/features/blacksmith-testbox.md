@@ -2,11 +2,16 @@
 
 Read when:
 
+- choosing a provider/service page;
 - choosing `provider: blacksmith-testbox`;
 - changing Blacksmith CLI forwarding;
 - deciding what Crabbox owns versus Blacksmith owns.
 
 Crabbox can use Blacksmith Testboxes as the machine backend without using the Crabbox broker. Select it with `--provider blacksmith-testbox` for one command, or put `provider: blacksmith-testbox` in config when a repo or machine should use it by default.
+
+Blacksmith is a delegated service integration. Crabbox does not provision,
+bootstrap, sync, or expose VNC for the Testbox itself; it forwards to the
+Blacksmith CLI and keeps local Crabbox ergonomics around that CLI.
 
 ## One-Liners
 
@@ -100,6 +105,15 @@ Because Blacksmith owns sync in this mode, Crabbox sync flags such as `--sync-on
 
 `blacksmith.workflow` is required only when Crabbox needs to warm or acquire a Testbox. Reusing an existing `tbx_...` ID or slug does not need workflow config.
 
+## Desktop And VNC
+
+Blacksmith can run headless browser automation through its own runner setup, but
+Crabbox does not currently expose `crabbox vnc`, `crabbox webvnc`, or managed
+screenshots for `provider=blacksmith-testbox`. Blacksmith owns machine
+connectivity in this mode. Crabbox should add VNC only after Blacksmith exposes
+a stable SSH tunnel or connection-info API that preserves the same security
+boundary as managed Crabbox leases.
+
 ## Choosing The Path
 
 Use the one-liner when:
@@ -117,6 +131,7 @@ Use repo YAML when:
 Related docs:
 
 - [Providers](providers.md)
+- [Interactive desktop and VNC](interactive-desktop-vnc.md)
 - [run command](../commands/run.md)
 - [warmup command](../commands/warmup.md)
 - [Source map](../source-map.md)

@@ -43,6 +43,10 @@ Flags:
 --provider hetzner|aws
 --target linux|macos|windows
 --windows-mode normal|wsl2
+--static-host <host>
+--static-user <user>
+--static-port <port>
+--static-work-root <path>
 --network auto|tailscale|public
 --local-port <port>
 --open
@@ -55,3 +59,10 @@ Limitations:
 - Static SSH hosts are intentionally not supported yet because the portal cannot
   prove that host-managed VNC credentials and prompts are safe to expose.
 - Blacksmith Testbox still owns its own machine connectivity.
+
+Related docs:
+
+- [Interactive desktop and VNC](../features/interactive-desktop-vnc.md)
+- [Linux VNC](../features/vnc-linux.md)
+- [Windows VNC](../features/vnc-windows.md)
+- [macOS VNC](../features/vnc-macos.md)

@@ -17,4 +17,7 @@ Flags:
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>
+--static-user <user>
+--static-port <port>
+--static-work-root <path>
 ```

@@ -12,13 +12,16 @@ Core features:
 
 - [Coordinator](coordinator.md): brokered leases through Cloudflare Workers and Durable Objects.
 - [Broker auth and routing](broker-auth-routing.md): GitHub login, shared bearer tokens, optional Cloudflare Access, and Worker routes.
-- [Providers](providers.md): Hetzner, AWS EC2 Spot, static SSH macOS/Windows targets, Blacksmith Testbox selection, classes, and fallback.
+- [Providers](providers.md): provider overview, target matrix, classes, and fallback.
+- [AWS](aws.md): EC2 Linux, Windows, WSL2, EC2 Mac, capacity, AMIs, and security groups.
+- [Hetzner](hetzner.md): Linux-only managed Hetzner behavior, classes, and cleanup.
+- [Blacksmith Testbox](blacksmith-testbox.md): delegated Testbox backend behavior.
 - [Tailscale](tailscale.md): optional tailnet reachability for managed Linux leases and static hosts.
-- [Blacksmith Testbox](blacksmith-testbox.md): wrapper mode that delegates machines and sync to the Blacksmith CLI.
 - [Runner bootstrap](runner-bootstrap.md): cloud-init, installed tools, SSH port, and readiness.
 - [Sync](sync.md): Git file-list manifests, rsync, fingerprints, excludes, guardrails, and sanity checks.
 - [Actions hydration](actions-hydration.md): let GitHub Actions prepare a runner, then sync local work into that workspace.
-- [Interactive desktop and VNC](interactive-desktop-vnc.md): Linux UI leases, tunnel-only VNC takeover, and Mantis/browser QA boundaries.
+- [Interactive desktop and VNC](interactive-desktop-vnc.md): VNC hub, support matrix, tunnel model, and QA boundaries.
+- [Linux VNC](vnc-linux.md), [Windows VNC](vnc-windows.md), [macOS VNC](vnc-macos.md): OS-specific desktop setup and troubleshooting.
 - [SSH keys](ssh-keys.md): per-lease keys, provider key cleanup, and local storage.
 - [Cost and usage](cost-usage.md): guardrails, provider-backed pricing, and reporting.
 - [History and logs](history-logs.md): coordinator run records, events, and retained remote output.

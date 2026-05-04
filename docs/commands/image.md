@@ -5,6 +5,7 @@
 ```sh
 crabbox image create --id cbx_... --name openclaw-crabbox-20260501-1246 --wait
 crabbox image promote ami-...
+crabbox image promote ami-... --json
 ```
 
 Image commands require a configured coordinator and admin-token auth. Set
@@ -63,6 +64,8 @@ Promote an available AMI as the coordinator's default AWS image:
 ```sh
 crabbox image promote ami-1234567890abcdef0
 ```
+
+Add `--json` to print the promoted image record for automation.
 
 Future brokered AWS leases use the promoted image when the request does not set
 an explicit `awsAMI` or `CRABBOX_AWS_AMI` override. Promotion stores coordinator

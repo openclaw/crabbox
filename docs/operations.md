@@ -97,6 +97,26 @@ AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY
 ```
 
+Conditional Worker secrets and settings:
+
+```text
+AWS_SESSION_TOKEN optional
+CRABBOX_AWS_MAC_HOST_ID required only for brokered target=macos
+CRABBOX_ADMIN_TOKEN required for admin routes and image promotion
+CRABBOX_GITHUB_CLIENT_ID required for browser login
+CRABBOX_GITHUB_CLIENT_SECRET required for browser login
+CRABBOX_SESSION_SECRET required for browser login
+CRABBOX_GITHUB_ALLOWED_ORG or CRABBOX_GITHUB_ALLOWED_ORGS
+CRABBOX_GITHUB_ALLOWED_TEAMS optional
+CRABBOX_ACCESS_TEAM_DOMAIN required for Access JWT verification
+CRABBOX_ACCESS_AUD required for Access JWT verification
+CRABBOX_TAILSCALE_CLIENT_ID required for brokered --tailscale
+CRABBOX_TAILSCALE_CLIENT_SECRET required for brokered --tailscale
+CRABBOX_TAILSCALE_TAILNET optional
+CRABBOX_TAILSCALE_TAGS optional
+CRABBOX_TAILSCALE_ENABLED optional; set 0 to disable brokered Tailscale
+```
+
 Cost-control secrets and settings:
 
 ```text

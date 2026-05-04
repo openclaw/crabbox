@@ -184,9 +184,9 @@ Current direct-CLI status:
 - SSH prefers the configured primary port, default `2222`, and then tries `ssh.fallbackPorts`, default `["22"]`. Set `ssh.fallbackPorts: []` or `CRABBOX_SSH_FALLBACK_PORTS=none` to disable fallback dialing/opening.
 - The verified kept lease was `cbx_f782c469c9ce` on server `128694755`, `cpx62`, `188.245.91.84`.
 
-## AWS EC2 Spot
+## AWS EC2
 
-Use AWS as the first non-Hetzner burst backend. The Cloudflare coordinator brokers AWS EC2 Spot by default; the CLI direct provider remains available with `--provider aws` when no broker is configured.
+Use AWS as the first non-Hetzner burst backend. The Cloudflare coordinator brokers AWS EC2 Spot by default for Linux, can launch managed Windows and WSL2 targets, and can launch EC2 Mac instances on an operator-provided Dedicated Host. The CLI direct provider remains available with `--provider aws` when no broker is configured.
 
 Brokered AWS credentials live as Worker secrets:
 
@@ -194,6 +194,7 @@ Brokered AWS credentials live as Worker secrets:
 AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY
 AWS_SESSION_TOKEN optional
+CRABBOX_AWS_MAC_HOST_ID optional; required only for brokered target=macos
 ```
 
 Direct fallback env is whatever the AWS SDK can resolve, such as:
@@ -209,16 +210,17 @@ AWS-specific Crabbox env:
 
 ```text
 CRABBOX_AWS_REGION               default eu-west-1
-CRABBOX_AWS_AMI                  optional Ubuntu 24.04 x86_64 AMI override
+CRABBOX_AWS_AMI                  optional AMI override for selected AWS target
 CRABBOX_AWS_SECURITY_GROUP_ID    optional security group override
 CRABBOX_AWS_SUBNET_ID            optional subnet override
 CRABBOX_AWS_INSTANCE_PROFILE     optional IAM instance profile name
 CRABBOX_AWS_ROOT_GB              default 400
 CRABBOX_AWS_SSH_CIDRS            optional comma-separated SSH source CIDRs
+CRABBOX_AWS_MAC_HOST_ID          EC2 Mac Dedicated Host id for target=macos
 CRABBOX_SSH_FALLBACK_PORTS       optional comma-separated SSH fallback ports, or none
 ```
 
-The AWS provider imports the local SSH public key as an EC2 key pair when needed, creates or reuses a `crabbox-runners` security group when no security group is supplied, launches one-time Spot instances, tags instances and volumes with Crabbox lease metadata, and terminates non-kept instances after the command.
+The AWS provider imports the local SSH public key as an EC2 key pair when needed, creates or reuses a `crabbox-runners` security group when no security group is supplied, launches one-time EC2 instances, tags instances and volumes with Crabbox lease metadata, and terminates non-kept instances after the command.
 
 Grant the Worker AWS principal EC2 launch/list/tag/terminate permissions plus
 `servicequotas:GetServiceQuota`. Service Quotas access is best-effort: when it
@@ -258,20 +260,27 @@ classes:
 
 Current AWS defaults:
 
-```yaml
-classes:
-  standard:
-    provider: aws
-    serverTypes: [c7a.8xlarge, c7a.4xlarge]
-  fast:
-    provider: aws
-    serverTypes: [c7a.16xlarge, c7a.12xlarge, c7a.8xlarge]
-  large:
-    provider: aws
-    serverTypes: [c7a.24xlarge, c7a.16xlarge, c7a.12xlarge]
-  beast:
-    provider: aws
-    serverTypes: [c7a.48xlarge, c7a.32xlarge, c7a.24xlarge, c7a.16xlarge]
+```text
+AWS Linux
+standard  c7a.8xlarge, c7i.8xlarge, m7a.8xlarge, m7i.8xlarge, c7a.4xlarge
+fast      c7a.16xlarge, c7i.16xlarge, m7a.16xlarge, m7i.16xlarge, c7a.12xlarge, c7a.8xlarge
+large     c7a.24xlarge, c7i.24xlarge, m7a.24xlarge, m7i.24xlarge, r7a.24xlarge, c7a.16xlarge, c7a.12xlarge
+beast     c7a.48xlarge, c7i.48xlarge, m7a.48xlarge, m7i.48xlarge, r7a.48xlarge, c7a.32xlarge, c7i.32xlarge, m7a.32xlarge, c7a.24xlarge, c7a.16xlarge
+
+AWS Windows
+standard  m7i.large, m7a.large, t3.large
+fast      m7i.xlarge, m7a.xlarge, t3.xlarge
+large     m7i.2xlarge, m7a.2xlarge, t3.2xlarge
+beast     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge
+
+AWS Windows WSL2
+standard  m8i.large, m8i-flex.large, c8i.large, r8i.large
+fast      m8i.xlarge, m8i-flex.xlarge, c8i.xlarge, r8i.xlarge
+large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge
+beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge
+
+AWS macOS
+all       mac2.metal unless `--type` is set
 ```
 
 Profiles choose a default class, and commands can override with `--class`.
@@ -318,7 +327,9 @@ HETZNER_TOKEN
 AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY
 AWS_SESSION_TOKEN optional
+CRABBOX_AWS_MAC_HOST_ID optional; required only for brokered target=macos
 CRABBOX_SHARED_TOKEN
+CRABBOX_ADMIN_TOKEN optional; required for admin routes and image promotion
 CRABBOX_GITHUB_CLIENT_ID
 CRABBOX_GITHUB_CLIENT_SECRET
 CRABBOX_GITHUB_ALLOWED_ORG
@@ -326,6 +337,13 @@ CRABBOX_GITHUB_ALLOWED_ORGS optional
 CRABBOX_GITHUB_ALLOWED_TEAMS optional
 CRABBOX_DEFAULT_ORG
 CRABBOX_SESSION_SECRET
+CRABBOX_ACCESS_TEAM_DOMAIN
+CRABBOX_ACCESS_AUD
+CRABBOX_TAILSCALE_ENABLED optional
+CRABBOX_TAILSCALE_CLIENT_ID optional; required for brokered --tailscale
+CRABBOX_TAILSCALE_CLIENT_SECRET optional; required for brokered --tailscale
+CRABBOX_TAILSCALE_TAILNET optional
+CRABBOX_TAILSCALE_TAGS optional
 ```
 
 ## Verified OpenClaw Run

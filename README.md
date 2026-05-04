@@ -6,13 +6,13 @@
 
 **Warm a box, sync the diff, run the suite.**
 
-Crabbox is an open-source remote testbox runner for maintainers and AI agents. Lease a fast Linux machine on owned cloud capacity, or point at an existing macOS/Windows SSH host, sync your dirty checkout, run a command remotely, stream output, and release. Local edit-save-run loop, cloud-grade compute.
+Crabbox is an open-source remote testbox runner for maintainers and AI agents. Lease fast managed cloud capacity, or point at an existing SSH host, sync your dirty checkout, run a command remotely, stream output, and release. Local edit-save-run loop, cloud-grade compute.
 
 ```sh
 crabbox run -- pnpm test
 ```
 
-Behind that single command: a Go CLI on your laptop, a Cloudflare Worker broker that owns provider credentials and lease state, and a vanilla Ubuntu runner on Hetzner Cloud or AWS EC2 Spot. Crabbox can also wrap Blacksmith Testboxes when you choose `provider: blacksmith-testbox`, or use `provider: ssh` for existing macOS and Windows targets.
+Behind that single command: a Go CLI on your laptop, a Cloudflare Worker broker that owns provider credentials and lease state, and a managed runner on Hetzner Cloud or AWS EC2. Crabbox can also wrap Blacksmith Testboxes when you choose `provider: blacksmith-testbox`, or use `provider: ssh` for existing macOS and Windows targets.
 
 ---
 
@@ -55,7 +55,7 @@ Every lease has a stable `cbx_...` ID and a friendly crustacean slug (`blue-lobs
 ```text
 your laptop                Cloudflare Worker            cloud provider
 -------------              ------------------           --------------
-crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS Spot
+crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS EC2
    |                         lease + cost state              |
    |                                                         |
    +------------ SSH + rsync to leased runner <--------------+
@@ -75,7 +75,7 @@ For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For th
 - **Run observability.** Every coordinator-backed run gets an early `run_...` handle. Use `crabbox attach <run-id>` while it is active, `crabbox events <run-id> --after <seq> --limit <n>` for durable lifecycle/output events, and `crabbox logs <run-id>` for retained output after completion.
 - **Stable timing records.** `--timing-json` on `run`, `warmup`, and `actions hydrate` gives scripts one machine-readable sync/command/total timing schema across AWS, Hetzner, and Blacksmith Testboxes.
 - **Local-first sync.** No clean-checkout requirement. Tracked + nonignored files only, fingerprint skip on no-op runs, sanity checks against suspicious mass deletions, optional shallow base-ref hydration for changed-test workflows.
-- **Brokered cloud.** Maintainers and agents share infra without sharing provider tokens. Hetzner and AWS EC2 Spot are first-class Linux providers; AWS also owns managed Windows and EC2 Mac targets. Providers fall back across compatible instance families when capacity or quota rejects a request.
+- **Brokered cloud.** Maintainers and agents share infra without sharing provider tokens. Hetzner and AWS EC2 are first-class managed providers; AWS also owns managed Windows and EC2 Mac targets. Linux defaults to Spot unless capacity config says otherwise. Providers fall back across compatible instance families when capacity or quota rejects a request.
 - **macOS and Windows static hosts.** `provider: ssh` reuses existing machines; it does not create macOS or Windows Crabbox boxes. macOS and Windows WSL2 use the POSIX rsync path; native Windows uses PowerShell plus tar archive sync.
 - **Blacksmith Testbox wrapper.** Set `provider: blacksmith-testbox` to delegate warmup/run/list/status/stop to the Blacksmith CLI while Crabbox keeps local slugs, repo claims, timing summaries, and config conventions.
 - **Trusted AWS images.** Operators can create AMIs from active brokered AWS leases and promote a known-good image as the coordinator default.
@@ -96,20 +96,22 @@ Hetzner    standard  ccx33, cpx62, cx53
            large     ccx53, ccx43, cpx62, cx53
            beast     ccx63, ccx53, ccx43, cpx62, cx53
 
-AWS Spot   standard  c7a/c7i/m7a/m7i.8xlarge family
+AWS Linux  standard  c7a/c7i/m7a/m7i.8xlarge family
            fast      …16xlarge family
            large     …24xlarge family
            beast     …48xlarge family, falling back to 32x/24x/16x
 
 AWS Win    standard  m7i.large, m7a.large, t3.large
-           fast      m7i.2xlarge, m7a.2xlarge, m7i.xlarge
-           large     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge
+           fast      m7i.xlarge, m7a.xlarge, t3.xlarge
+           large     m7i.2xlarge, m7a.2xlarge, t3.2xlarge
            beast     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge
 
 AWS WSL2   standard  m8i.large, m8i-flex.large, c8i.large, r8i.large
            fast      m8i.xlarge, m8i-flex.xlarge, c8i.xlarge, r8i.xlarge
            large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge
-           beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge
+           beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge
+
+AWS macOS  all       mac2.metal unless --type is set
 ```
 
 Override with `--type` or `CRABBOX_SERVER_TYPE` for a specific instance.

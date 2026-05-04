@@ -2,128 +2,150 @@
 
 Read when:
 
-- adding or using browser/UI QA that needs a visible Linux desktop;
-- deciding whether Mantis, OpenClaw, or Crabbox owns VNC setup;
-- debugging an interactive QA lease that needs operator takeover.
+- choosing a desktop target for browser/UI QA;
+- opening a lease with VNC or WebVNC;
+- deciding which layer owns desktop setup, browser state, screenshots, or
+  credentials.
 
-Interactive desktop support belongs in Crabbox. Crabbox owns machine lifecycle,
-network reachability, SSH keys, lease expiry, and provider-specific setup.
-Scenario systems such as Mantis should ask for the needed machine capability
-and then drive browser automation, screenshots, artifacts, and PR comments from
-inside that lease.
+Crabbox treats desktop access as a lease capability, not a separate remote
+access product. A desktop lease still uses the normal Crabbox boundaries:
+provider lifecycle, per-lease SSH keys, SSH tunnels, idle expiry, cleanup, and
+run history. VNC is a way to inspect or drive the visible session inside that
+boundary.
 
-The intended contract is:
+## Quick Start
 
-- `crabbox warmup --desktop` leases or reuses a machine with the normal Crabbox
-  SSH contract plus a desktop profile;
-- `crabbox warmup --browser` leases or reuses a Linux machine with a known
-  browser binary for headless automation;
-- `crabbox warmup --desktop --browser` combines a visible session with a browser
-  for headed automation;
-- `crabbox vnc --id <lease>` prints a tunnel command and connection metadata for
-  operator takeover, including `managed: true` for Crabbox-created desktops and
-  `managed: false` for static host services;
-- `crabbox run --id <lease> --desktop -- <command...>` runs UI automation in
-  the desktop session;
-- `crabbox run --id <lease> --browser -- <command...>` injects browser env
-  without requiring a desktop;
-- `crabbox desktop launch --id <lease> --browser --url <url>` opens a browser
-  or app in the visible desktop and detaches it from SSH;
-- desktop services bind to loopback on the runner and are reachable through SSH
-  tunnels only;
-- `--network tailscale` can move the SSH tunnel endpoint onto the tailnet, but
-  managed VNC still binds to `127.0.0.1:5900` on the runner;
-- screenshots, traces, videos, and browser profiles remain regular command
-  artifacts owned by the caller or repository workflow.
+```sh
+crabbox warmup --desktop --browser
+crabbox vnc --id blue-lobster --open
+crabbox webvnc --id blue-lobster --open
+crabbox screenshot --id blue-lobster --output desktop.png
+```
 
-Login and browser profile state are caller-owned. `--browser` only guarantees a
-browser binary and env such as `BROWSER` and `CHROME_BIN`; it does not create,
-sync, unlock, or migrate a logged-in profile. On managed Linux, a manual login
-through VNC persists only for that lease and disappears with the machine unless
-the caller stores a profile artifact intentionally. On static macOS or Windows,
-the target may already have a logged-in OS browser profile, but Crabbox does not
-copy Keychain, DPAPI, cookies, or Chrome sync state across hosts or operating
-systems.
+AWS Windows and EC2 Mac use the same VNC command once the desktop lease exists:
 
-For repeatable logged-in tests, the scenario layer should create a named
-profile or import app-specific auth state, for example a Playwright storage
-state file, from the repository's normal secret flow. Avoid syncing full browser
-profile directories between operating systems; browser credentials are often
-machine- and user-encrypted.
+```sh
+crabbox warmup --provider aws --target windows --desktop
+crabbox vnc --id crimson-crab --open
 
-Crabbox should provision the reusable machine capability:
+CRABBOX_AWS_MAC_HOST_ID=h-... \
+  crabbox warmup --provider aws --target macos --desktop --market on-demand
+crabbox vnc --id silver-squid --open
+```
 
-- Xvfb or a lightweight compositor/display manager;
-- a small window manager suitable for browser automation;
-- Chrome stable or a Chromium fallback when `--browser` is requested;
-- x11vnc or an equivalent VNC server bound to `127.0.0.1`;
-- a per-lease VNC password retrieved over SSH by `crabbox vnc`.
+Static hosts are explicit and host-managed:
 
-Crabbox should not own product-specific scenario logic:
+```sh
+crabbox vnc --provider ssh --target macos --static-host mac-studio.local --host-managed --open
+crabbox vnc --provider ssh --target windows --static-host win-dev.local --host-managed --open
+```
 
-- provider tokens and app credentials;
-- Discord, Slack, WhatsApp, email, or OpenClaw workflow setup;
+## What Crabbox Owns
+
+Crabbox owns:
+
+- the lease lifecycle and cleanup;
+- per-lease SSH keys and known_hosts scoping;
+- SSH local forwarding to the target's loopback VNC service;
+- generated per-lease VNC or OS passwords for managed desktop leases;
+- `desktop=true` and `browser=true` lease metadata;
+- screenshots and desktop launch commands that operate inside the lease.
+
+Scenario systems such as Mantis own:
+
+- product-specific login and app credentials;
+- browser profile import/export;
 - screenshots that prove a bug before and after a fix;
-- PR comments or issue triage.
+- PR comments, issue triage, and artifact summaries.
 
-Those belong to Mantis or the repository workflow. Crabbox's job is to make the
-machine debuggable and reproducible.
+## Support Matrix
 
-Security rules:
+| Target | Managed by Crabbox | Desktop access | Primary page |
+| --- | --- | --- | --- |
+| Linux on Hetzner | Yes | Xvfb/XFCE/x11vnc over SSH tunnel | [Linux VNC](vnc-linux.md) |
+| Linux on AWS | Yes | Xvfb/XFCE/x11vnc over SSH tunnel | [Linux VNC](vnc-linux.md) |
+| AWS Windows | Yes | TightVNC over SSH tunnel | [Windows VNC](vnc-windows.md) |
+| AWS EC2 Mac | Yes | Screen Sharing/VNC over SSH tunnel | [macOS VNC](vnc-macos.md) |
+| Static Linux | Host-managed | Existing loopback VNC service | [Linux VNC](vnc-linux.md) |
+| Static macOS | Host-managed | Existing Screen Sharing/VNC | [macOS VNC](vnc-macos.md) |
+| Static Windows | Host-managed | Existing VNC service | [Windows VNC](vnc-windows.md) |
+| Blacksmith Testbox | No | Not exposed through Crabbox VNC today | [Blacksmith Testbox](blacksmith-testbox.md) |
 
-- never expose VNC directly to the public internet;
-- do not expose managed VNC directly on the Tailscale 100.x interface;
-- prefer SSH local forwarding such as `localhost:5901 -> 127.0.0.1:5900`;
-- generate per-lease VNC passwords for managed desktop leases;
-- redact passwords from logs and run records;
-- stop desktop services when the lease stops;
-- keep the normal TTL and idle-timeout lifecycle in force.
+## Commands
 
-Provider notes:
+Use `crabbox vnc` for a native VNC client:
 
-- Hetzner and AWS brokered Linux leases use cloud-init to install Xvfb, XFCE,
-  x11vnc, and optional Chrome/Chromium.
-- AWS brokered Windows desktop leases use EC2Launch v2 `enableOpenSsh` for the
-  first AWS key-backed foothold. The Crabbox CLI then installs Git for Windows
-  and TightVNC, creates a local `crabbox` administrator, stores the per-lease
-  password under `C:\ProgramData\crabbox`, enables Windows auto-logon for that
-  user, and verifies loopback VNC after the reboot. VNC is reached through the
-  SSH tunnel; the security group only needs SSH.
-- AWS brokered macOS desktop leases require an allocated EC2 Mac Dedicated Host
-  and On-Demand capacity. Bootstrap enables Screen Sharing for `ec2-user` and
-  stores the generated password on the instance for `crabbox vnc`.
-- Static SSH Linux hosts can participate when the operator accepts responsibility
-  for packages and display services.
-- Static macOS hosts are existing Macs, not Crabbox-created boxes. They can
-  participate when Screen Sharing or another
-  VNC-compatible service is already available on `127.0.0.1:5900` over SSH or
-  directly on `host:5900`. Credentials are host-managed because Apple Remote
-  Desktop authentication still belongs to the target host.
-- Static Windows hosts are existing Windows machines, not Crabbox-created boxes.
-  They can participate only when the operator already provides a VNC-compatible
-  service on `127.0.0.1:5900` for SSH tunneling or, for trusted static networks,
-  directly on `host:5900`. Opening Windows requires `--host-managed` because the
-  password prompt belongs to the target OS, not Crabbox.
-- Blacksmith Testbox can run headless browser automation today, but VNC takeover
-  needs a Blacksmith-supported SSH tunnel or connection-info API before Crabbox
-  can offer the same `vnc` command there.
-- EC2 Mac host allocation, host scrubbing, and the AWS 24-hour host lifecycle
-  remain operator concerns; Crabbox only launches onto a host id it is given.
+```sh
+crabbox vnc --id blue-lobster
+crabbox vnc --id blue-lobster --network tailscale
+crabbox vnc --id blue-lobster --open
+```
 
-For Mantis, the first consumer should be a Discord QA lane:
+Use `crabbox webvnc` for the authenticated coordinator portal:
 
-1. lease a desktop-capable Linux runner;
-2. hydrate OpenClaw and the Discord bot credentials;
-3. create a named browser profile;
-4. reproduce the baseline and capture screenshots;
-5. apply or check out the candidate fix;
-6. rerun the same scenario and capture candidate screenshots;
-7. attach artifacts and a compact visual summary to the PR.
+```sh
+crabbox webvnc --id blue-lobster --open
+```
 
-Related docs:
+Use `crabbox screenshot` when you need a PNG without taking over the session:
 
-- [Runner bootstrap](runner-bootstrap.md)
-- [Providers](providers.md)
-- [Tailscale](tailscale.md)
-- [SSH keys](ssh-keys.md)
-- [Actions hydration](actions-hydration.md)
+```sh
+crabbox screenshot --id blue-lobster --output desktop.png
+```
+
+Use `crabbox desktop launch` to start a browser or app inside the visible
+session without keeping the SSH command attached:
+
+```sh
+crabbox desktop launch --id blue-lobster --browser --url https://example.com
+```
+
+## Network Model
+
+Managed VNC is tunnel-first:
+
+- VNC binds to `127.0.0.1:5900` on the target.
+- The cloud firewall/security group opens SSH only, not VNC.
+- `crabbox vnc` forwards a local port such as `localhost:5901` to remote
+  `127.0.0.1:5900`.
+- `--network tailscale` changes only the SSH endpoint used by that tunnel.
+- WebVNC keeps the same local SSH tunnel and adds an authenticated browser
+  websocket through the coordinator.
+
+Crabbox does not bind managed VNC directly to a public IP or Tailscale 100.x
+address. Static hosts can expose direct `host:5900` only when the operator has
+already made that endpoint reachable on a trusted network.
+
+## Browser State
+
+`--browser` guarantees a browser binary and env such as `BROWSER` and
+`CHROME_BIN`; it does not create, unlock, sync, or migrate a logged-in profile.
+On managed targets, manual browser login through VNC lasts only for that lease
+unless the caller intentionally exports an artifact. On static hosts, any
+existing browser profile belongs to that host.
+
+For repeatable logged-in tests, use scenario-owned state such as a Playwright
+storage-state file or an app-specific short-lived token. Avoid syncing full
+browser profile directories between operating systems; browser credentials are
+often machine- and user-encrypted.
+
+## Security Rules
+
+- Never expose managed VNC directly to the public internet.
+- Do not expose managed VNC directly on a Tailscale interface.
+- Prefer SSH local forwarding such as
+  `localhost:5901 -> 127.0.0.1:5900`.
+- Generate per-lease passwords for managed desktop leases.
+- Redact passwords from logs, provider metadata, and run records.
+- Keep TTL and idle-timeout cleanup in force.
+- Require `--host-managed` before opening static-host VNC prompts.
+
+## Where To Go Next
+
+- [Linux VNC](vnc-linux.md): Hetzner/AWS Linux desktop services and static Linux.
+- [Windows VNC](vnc-windows.md): AWS Windows, native Windows static hosts, and WSL2 boundaries.
+- [macOS VNC](vnc-macos.md): AWS EC2 Mac and static Mac Screen Sharing.
+- [AWS](aws.md): AWS target matrix, capacity, AMIs, and EC2 Mac host requirements.
+- [Hetzner](hetzner.md): Linux-only managed Hetzner behavior.
+- [Blacksmith Testbox](blacksmith-testbox.md): delegated Testbox behavior and why VNC is not a Crabbox feature there yet.
+- [vnc command](../commands/vnc.md), [webvnc command](../commands/webvnc.md), [screenshot command](../commands/screenshot.md), [desktop command](../commands/desktop.md).
