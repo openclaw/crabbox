@@ -108,6 +108,10 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("OpenSSH-Win64.zip");
     expect(got).toContain("install-sshd.ps1");
     expect(got).toContain("administrators_authorized_keys");
+    expect(got).toContain("$sshPorts = @('2222', '22')");
+    expect(got).toContain("sshd_config");
+    expect(got).toContain("Port $port");
+    expect(got).toContain("crabbox-sshd-$port");
     expect(got).toContain("tightvnc-2.8.85-gpl-setup-64bit.msi");
     expect(got).toContain("VALUE_OF_PASSWORD=$vncPassword");
     expect(got).toContain("VALUE_OF_ALLOWLOOPBACK=1");

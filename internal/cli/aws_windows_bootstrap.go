@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-func bootstrapAWSWindowsDesktop(ctx context.Context, cfg Config, target SSHTarget, publicKey string, stderr io.Writer) error {
+func bootstrapAWSWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarget, publicKey string, stderr io.Writer) error {
 	if cfg.Provider != "aws" || cfg.TargetOS != targetWindows || cfg.WindowsMode != windowsModeNormal {
-		return waitForSSH(ctx, &target, stderr)
+		return waitForSSH(ctx, target, stderr)
 	}
-	bootstrapTarget := target
+	bootstrapTarget := *target
 	bootstrapTarget.User = "Administrator"
 	bootstrapTarget.ReadyCheck = powershellCommand(`$PSVersionTable.PSVersion | Out-Null`)
 	if err := waitForSSHReady(ctx, &bootstrapTarget, stderr, "windows openssh", 20*time.Minute); err != nil {
@@ -28,5 +28,5 @@ exit $LASTEXITCODE`)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: Windows bootstrap SSH command ended before completion; waiting for reboot/ready state: %v\n", err)
 	}
-	return waitForSSH(ctx, &target, stderr)
+	return waitForSSH(ctx, target, stderr)
 }

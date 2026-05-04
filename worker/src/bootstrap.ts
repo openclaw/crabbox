@@ -116,6 +116,7 @@ function New-CrabboxPassword {
 $user = ${psQuote(config.sshUser)}
 $publicKey = ${psQuote(config.sshPublicKey)}
 $workRoot = ${psQuote(config.workRoot)}
+$sshPorts = ${windowsSSHPortsPowerShell(config)}
 $vncPasswordPath = "C:\\ProgramData\\crabbox\\vnc.password"
 $windowsUsernamePath = "C:\\ProgramData\\crabbox\\windows.username"
 $windowsPasswordPath = "C:\\ProgramData\\crabbox\\windows.password"
@@ -159,8 +160,26 @@ if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
 New-Item -ItemType Directory -Force -Path "$env:ProgramData\\ssh" | Out-Null
 Set-Content -Encoding ASCII -Path "$env:ProgramData\\ssh\\administrators_authorized_keys" -Value $publicKey
 icacls.exe "$env:ProgramData\\ssh\\administrators_authorized_keys" /inheritance:r /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
-if (-not (Get-NetFirewallRule -Name "crabbox-sshd" -ErrorAction SilentlyContinue)) {
-  New-NetFirewallRule -Name "crabbox-sshd" -DisplayName "Crabbox OpenSSH" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+$sshdConfigPath = "$env:ProgramData\\ssh\\sshd_config"
+$sshdConfig = ""
+if (Test-Path -LiteralPath $sshdConfigPath) {
+  $sshdConfig = Get-Content -Raw -LiteralPath $sshdConfigPath
+}
+$globalLines = @()
+$matchLines = @()
+$inMatch = $false
+foreach ($line in ($sshdConfig -split "\\r?\\n")) {
+  if ($line -match '^\\s*Match\\s+') { $inMatch = $true }
+  if (-not $inMatch -and $line -match '^\\s*Port\\s+\\d+\\s*$') { continue }
+  if ($inMatch) { $matchLines += $line } else { $globalLines += $line }
+}
+foreach ($port in $sshPorts) { $globalLines += "Port $port" }
+Set-Content -Encoding ASCII -LiteralPath $sshdConfigPath -Value (($globalLines + $matchLines) -join [Environment]::NewLine)
+foreach ($port in $sshPorts) {
+  $ruleName = "crabbox-sshd-$port"
+  if (-not (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -Name $ruleName -DisplayName "Crabbox OpenSSH $port" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort $port | Out-Null
+  }
 }
 Set-Service -Name sshd -StartupType Automatic
 Start-Service sshd
@@ -203,6 +222,12 @@ if (-not (Test-Path -LiteralPath $setupCompletePath)) {
   Restart-Computer -Force
 }
 `;
+}
+
+function windowsSSHPortsPowerShell(config: LeaseConfig): string {
+  return `@(${sshPorts(config)
+    .map((port) => psQuote(port))
+    .join(", ")})`;
 }
 
 export function macOSUserData(config: LeaseConfig): string {
