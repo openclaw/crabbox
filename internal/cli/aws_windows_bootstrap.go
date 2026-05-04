@@ -16,6 +16,7 @@ func bootstrapAWSWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarg
 	bootstrapTarget.WindowsMode = windowsModeNormal
 	bootstrapTarget.ReadyCheck = powershellCommand(`$PSVersionTable.PSVersion | Out-Null`)
 	if cfg.WindowsMode == windowsModeWSL2 {
+		target.User = "Administrator"
 		return bootstrapAWSWindowsWSL2(ctx, cfg, target, bootstrapTarget, publicKey, stderr)
 	}
 	if err := waitForSSHReady(ctx, &bootstrapTarget, stderr, "windows openssh", 20*time.Minute); err != nil {

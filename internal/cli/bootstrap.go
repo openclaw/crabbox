@@ -133,6 +133,7 @@ $wslMode = $` + fmt.Sprint(wslMode) + `
 $wslDistro = "Crabbox"
 $wslRoot = "C:\ProgramData\crabbox\wsl\Crabbox"
 $wslRootfs = "C:\ProgramData\crabbox\wsl\ubuntu-noble-wsl-amd64.rootfs.tar.gz"
+$wslSetup = "C:\ProgramData\crabbox\wsl\linux-setup.sh"
 $wslFeaturesMarker = "C:\ProgramData\crabbox\wsl-features-rebooted"
 $wslKernelMarker = "C:\ProgramData\crabbox\wsl-kernel-rebooted"
 $sshPorts = ` + windowsSSHPortsPowerShell(cfg) + `
@@ -209,8 +210,9 @@ chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped
 crabbox-ready
 '@
-  $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($linuxSetup))
-  wsl.exe -d $wslDistro --user root --exec bash -lc "printf '%s' '$encoded' | base64 -d | bash"
+  $linuxSetup = $linuxSetup.Replace(([string][char]13 + [string][char]10), ([string][char]10))
+  [IO.File]::WriteAllText($wslSetup, $linuxSetup, (New-Object Text.UTF8Encoding($false)))
+  wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh
   if ($LASTEXITCODE -ne 0) { throw "WSL setup failed with exit $LASTEXITCODE" }
 }
 if (-not (Test-Path -LiteralPath $vncPasswordPath)) {

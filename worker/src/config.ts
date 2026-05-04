@@ -107,7 +107,7 @@ export function leaseConfig(input: LeaseRequest): LeaseConfig {
     capacityFallback: input.capacity?.fallback ?? "on-demand-after-120s",
     capacityRegions: input.capacity?.regions ?? [],
     capacityAvailabilityZones: input.capacity?.availabilityZones ?? [],
-    sshUser: input.sshUser ?? (provider === "aws" && target === "macos" ? "ec2-user" : "crabbox"),
+    sshUser: input.sshUser ?? defaultSSHUser(provider, target, windowsMode),
     sshPort: input.sshPort ?? "2222",
     sshFallbackPorts: validPorts(input.sshFallbackPorts ?? ["22"]),
     providerKey: input.providerKey ?? "crabbox-steipete",
@@ -119,6 +119,16 @@ export function leaseConfig(input: LeaseRequest): LeaseConfig {
     keep: input.keep ?? false,
     sshPublicKey,
   };
+}
+
+function defaultSSHUser(provider: Provider, target: TargetOS, windowsMode: WindowsMode): string {
+  if (provider === "aws" && target === "macos") {
+    return "ec2-user";
+  }
+  if (provider === "aws" && target === "windows" && windowsMode === "wsl2") {
+    return "Administrator";
+  }
+  return "crabbox";
 }
 
 function unsupportedManagedTargetMessage(provider: Provider, target: TargetOS): string {

@@ -131,6 +131,7 @@ describe("lease config", () => {
     expect(wsl2.serverType).toBe("m8i.4xlarge");
     expect(wsl2.workRoot).toBe("/work/crabbox");
     expect(wsl2.windowsMode).toBe("wsl2");
+    expect(wsl2.sshUser).toBe("Administrator");
   });
 
   it("allows AWS macOS leases only with on-demand capacity", () => {
