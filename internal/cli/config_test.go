@@ -345,6 +345,19 @@ func TestInvalidNetworkConfigFails(t *testing.T) {
 	}
 }
 
+func TestInvalidNetworkEnvFails(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_NETWORK", "tailnet")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected invalid CRABBOX_NETWORK to fail")
+	}
+}
+
 func TestAccessAuthState(t *testing.T) {
 	for name, tc := range map[string]struct {
 		access AccessConfig

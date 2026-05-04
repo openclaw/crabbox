@@ -782,9 +782,7 @@ func applyEnv(cfg *Config) {
 		cfg.Browser = value
 	}
 	if network := os.Getenv("CRABBOX_NETWORK"); network != "" {
-		if mode, err := parseNetworkMode(network); err == nil {
-			cfg.Network = mode
-		}
+		cfg.Network = NetworkMode(strings.ToLower(strings.TrimSpace(network)))
 	}
 	cfg.Class = getenv("CRABBOX_DEFAULT_CLASS", cfg.Class)
 	if os.Getenv("CRABBOX_SERVER_TYPE") != "" {

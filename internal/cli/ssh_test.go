@@ -186,6 +186,13 @@ func TestSSHArgsIncludeReliabilityOptions(t *testing.T) {
 	}
 }
 
+func TestSSHTransportProbeDoesNotRequireCrabboxReady(t *testing.T) {
+	got := sshTransportProbeCommand(SSHTarget{Host: "100.64.0.10", Port: "2222"})
+	if strings.Contains(got, "crabbox-ready") || strings.Contains(got, "git --version") || strings.Contains(got, "/work/crabbox") {
+		t.Fatalf("transport probe should not run readiness checks: %q", got)
+	}
+}
+
 func TestSSHArgsQuoteKnownHostsPathWithSpaces(t *testing.T) {
 	got := strings.Join(sshArgs(SSHTarget{
 		User: "crabbox",

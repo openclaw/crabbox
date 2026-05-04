@@ -126,6 +126,33 @@ func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 	return false
 }
 
+func probeSSHTransport(ctx context.Context, target *SSHTarget, timeout time.Duration) bool {
+	if target.Host == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
+		probe := *target
+		probe.Port = port
+		dialer := net.Dialer{Timeout: minDuration(timeout, 2*time.Second)}
+		conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(probe.Host, probe.Port))
+		if err != nil {
+			continue
+		}
+		_ = conn.Close()
+		if runSSHQuietWithOptions(ctx, probe, sshTransportProbeCommand(probe), "2", "1") == nil {
+			target.Port = probe.Port
+			return true
+		}
+	}
+	return false
+}
+
+func sshTransportProbeCommand(SSHTarget) string {
+	return "exit 0"
+}
+
 func sshReadyCommand(target SSHTarget) string {
 	if target.ReadyCheck != "" {
 		return target.ReadyCheck

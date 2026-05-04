@@ -207,7 +207,7 @@ func resolveNetworkTarget(ctx context.Context, cfg Config, server Server, target
 		host := tailscaleTargetHost(meta)
 		if host == "" {
 			if isStaticProvider(cfg.Provider) || server.Provider == staticProvider {
-				if !probeSSHReady(ctx, &target, 6*time.Second) {
+				if !probeSSHTransport(ctx, &target, 6*time.Second) {
 					return resolvedNetworkTarget{}, exit(5, "network=tailscale requested for static host %s but SSH is not reachable; is this client joined to the tailnet?", target.Host)
 				}
 				return resolvedNetworkTarget{Target: target, Network: NetworkTailscale}, nil
@@ -216,7 +216,7 @@ func resolveNetworkTarget(ctx context.Context, cfg Config, server Server, target
 		}
 		next := target
 		next.Host = host
-		if !probeSSHReady(ctx, &next, 6*time.Second) {
+		if !probeSSHTransport(ctx, &next, 6*time.Second) {
 			return resolvedNetworkTarget{}, exit(5, "network=tailscale requested but %s is not reachable over SSH; is this client joined to the tailnet?", host)
 		}
 		return resolvedNetworkTarget{Target: next, Network: NetworkTailscale}, nil
@@ -227,7 +227,7 @@ func resolveNetworkTarget(ctx context.Context, cfg Config, server Server, target
 		}
 		next := target
 		next.Host = host
-		if probeSSHReady(ctx, &next, 5*time.Second) {
+		if probeSSHTransport(ctx, &next, 5*time.Second) {
 			return resolvedNetworkTarget{Target: next, Network: NetworkTailscale}, nil
 		}
 		return resolvedNetworkTarget{Target: target, Network: NetworkPublic, FallbackReason: "tailscale_unreachable"}, nil
