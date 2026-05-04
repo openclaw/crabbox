@@ -91,6 +91,12 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		connPort = *localPort
 	}
 
+	bridge, err := connectWebVNCBridge(ctx, coord, leaseID, connHost, connPort)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(a.Stdout, "bridge: connected; keep this process running while using WebVNC")
+
 	portal := webVNCPortalURL(coord.BaseURL, leaseID, password)
 	fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
 	if strings.TrimSpace(password) != "" {
@@ -98,12 +104,12 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	}
 	if *openPortal {
 		if err := openLocalURL(portal); err != nil {
+			bridge.Close()
 			return err
 		}
 		fmt.Fprintf(a.Stdout, "opened: %s\n", portal)
 	}
-	fmt.Fprintln(a.Stdout, "bridge: connected; keep this process running while using WebVNC")
-	return bridgeWebVNC(ctx, coord, leaseID, connHost, connPort)
+	return bridge.Serve(ctx)
 }
 
 func startVNCForegroundTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost, remotePort string) (*exec.Cmd, error) {
@@ -129,27 +135,36 @@ func startVNCForegroundTunnel(ctx context.Context, target SSHTarget, localPort, 
 	return nil, exit(5, "timed out starting VNC SSH tunnel on localhost:%s", localPort)
 }
 
-func bridgeWebVNC(ctx context.Context, coord *CoordinatorClient, leaseID, host, port string) error {
+type webVNCBridge struct {
+	tcp net.Conn
+	ws  *websocket.Conn
+}
+
+func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID, host, port string) (*webVNCBridge, error) {
 	tcp, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(host, port))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer tcp.Close()
 	ticket, err := coord.CreateWebVNCTicket(ctx, leaseID)
 	if err != nil {
-		return err
+		_ = tcp.Close()
+		return nil, err
 	}
 	ws, _, err := websocket.Dial(ctx, webVNCAgentURL(coord.BaseURL, leaseID, ticket.Ticket), &websocket.DialOptions{
 		HTTPHeader: coord.webVNCAccessHeaders(),
 	})
 	if err != nil {
-		return err
+		_ = tcp.Close()
+		return nil, err
 	}
-	defer ws.Close(websocket.StatusNormalClosure, "bridge stopped")
+	return &webVNCBridge{tcp: tcp, ws: ws}, nil
+}
 
+func (b *webVNCBridge) Serve(ctx context.Context) error {
+	defer b.Close()
 	errc := make(chan error, 2)
-	go func() { errc <- copyWebSocketToTCP(ctx, ws, tcp) }()
-	go func() { errc <- copyTCPToWebSocket(ctx, ws, tcp) }()
+	go func() { errc <- copyWebSocketToTCP(ctx, b.ws, b.tcp) }()
+	go func() { errc <- copyTCPToWebSocket(ctx, b.ws, b.tcp) }()
 	select {
 	case <-ctx.Done():
 		return context.Cause(ctx)
@@ -158,6 +173,18 @@ func bridgeWebVNC(ctx context.Context, coord *CoordinatorClient, leaseID, host, 
 			return nil
 		}
 		return err
+	}
+}
+
+func (b *webVNCBridge) Close() {
+	if b == nil {
+		return
+	}
+	if b.ws != nil {
+		_ = b.ws.Close(websocket.StatusNormalClosure, "bridge stopped")
+	}
+	if b.tcp != nil {
+		_ = b.tcp.Close()
 	}
 }
 

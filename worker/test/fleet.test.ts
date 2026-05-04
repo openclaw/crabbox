@@ -383,7 +383,11 @@ describe("fleet lease identity and idle", () => {
 
     const page = await fleet.fetch(request("GET", "/portal/leases/blue-lobster/vnc", { headers }));
     expect(page.status).toBe(200);
-    await expect(page.text()).resolves.toContain("crabbox webvnc --id blue-lobster --open");
+    expect(page.headers.get("content-security-policy")).toContain("script-src 'self' 'nonce-");
+    const pageBody = await page.text();
+    expect(pageBody).toContain("crabbox webvnc --id blue-lobster --open");
+    expect(pageBody).toContain("/portal/assets/novnc/lib/rfb.js");
+    expect(pageBody).not.toContain("cdn.jsdelivr.net");
 
     const plain = await fleet.fetch(
       request("GET", "/portal/leases/plain-lobster/vnc", { headers }),

@@ -5,6 +5,9 @@
   "compatibility_date": "2026-04-30",
   "workers_dev": true,
   "preview_urls": false,
+  "assets": {
+    "directory": "./public",
+  },
   "vars": {
     "CRABBOX_PUBLIC_URL": "https://crabbox.openclaw.ai",
     "CRABBOX_DEFAULT_ORG": "openclaw",

@@ -1,6 +1,6 @@
 import type { LeaseRecord } from "./types";
 
-const novncModuleURL = "https://cdn.jsdelivr.net/npm/@novnc/novnc@1.6.0/core/rfb.js";
+const novncModuleURL = "/portal/assets/novnc/lib/rfb.js";
 
 export function portalHome(leases: LeaseRecord[], request: Request): Response {
   const active = leases.filter((lease) => lease.state === "active");
@@ -42,6 +42,7 @@ export function portalHome(leases: LeaseRecord[], request: Request): Response {
 }
 
 export function portalVNC(lease: LeaseRecord): Response {
+  const nonce = scriptNonce();
   const title = `WebVNC ${lease.slug || lease.id}`;
   const wsPath = `/portal/leases/${encodeURIComponent(lease.id)}/vnc/viewer`;
   return html(
@@ -65,7 +66,7 @@ export function portalVNC(lease: LeaseRecord): Response {
         <code>crabbox webvnc --id ${escapeHTML(lease.slug || lease.id)} --open</code>
       </section>
     </main>
-    <script type="module">
+    <script type="module" nonce="${nonce}">
       import RFB from ${JSON.stringify(novncModuleURL)};
       const status = document.getElementById("status");
       const screen = document.getElementById("screen");
@@ -99,6 +100,8 @@ export function portalVNC(lease: LeaseRecord): Response {
         setStatus(error instanceof Error ? error.message : String(error), "bad");
       }
     </script>`,
+    200,
+    nonce,
   );
 }
 
@@ -132,7 +135,8 @@ function leaseRow(lease: LeaseRecord): string {
   </tr>`;
 }
 
-function html(title: string, body: string, status = 200): Response {
+function html(title: string, body: string, status = 200, nonce = ""): Response {
+  const scriptSource = nonce ? `'self' 'nonce-${nonce}'` : "'self'";
   return new Response(
     `<!doctype html>
 <html lang="en">
@@ -174,8 +178,26 @@ function html(title: string, body: string, status = 200): Response {
 </head>
 <body>${body}</body>
 </html>`,
-    { status, headers: { "content-type": "text/html; charset=utf-8" } },
+    {
+      status,
+      headers: {
+        "content-security-policy": [
+          "default-src 'none'",
+          "base-uri 'none'",
+          "connect-src 'self' ws: wss:",
+          "frame-ancestors 'none'",
+          "img-src 'self' data: blob:",
+          `script-src ${scriptSource}`,
+          "style-src 'unsafe-inline'",
+        ].join("; "),
+        "content-type": "text/html; charset=utf-8",
+      },
+    },
   );
+}
+
+function scriptNonce(): string {
+  return crypto.randomUUID().replaceAll("-", "");
 }
 
 function shortTime(value: string): string {

@@ -1,6 +1,7 @@
 bin/
 dist/
 node_modules/
+worker/public/portal/assets/novnc/
 .wrangler/
 *.test
 coverage.out

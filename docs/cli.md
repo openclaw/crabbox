@@ -56,6 +56,7 @@ crabbox admin release <lease-id-or-slug> [--delete]
 crabbox admin delete <lease-id-or-slug> --force
 crabbox ssh --id <lease-id-or-slug>
 crabbox vnc --id <lease-id-or-slug> [--open]
+crabbox webvnc --id <lease-id-or-slug> [--open]
 crabbox inspect --id <lease-id-or-slug> [--json]
 crabbox stop <lease-id-or-slug>
 crabbox cleanup [--dry-run]
@@ -82,6 +83,7 @@ crabbox warmup --profile project-check
 crabbox warmup --desktop --browser
 crabbox run --id blue-lobster -- pnpm test:changed
 crabbox vnc --id blue-lobster --open
+crabbox webvnc --id blue-lobster --open
 crabbox screenshot --id blue-lobster --output desktop.png
 crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
 crabbox stop blue-lobster

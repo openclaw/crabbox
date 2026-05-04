@@ -22,6 +22,7 @@ This keeps the security boundary the same as `crabbox vnc`:
 - The cloud provider does not open public VNC ingress.
 - The coordinator authenticates the browser through portal auth and the bridge
   through a one-use short-lived ticket.
+- The noVNC client is served from the coordinator origin, not a third-party CDN.
 - The local `crabbox webvnc` process must keep running while the browser uses
   the desktop.
 
