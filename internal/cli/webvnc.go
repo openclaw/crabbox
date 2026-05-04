@@ -77,6 +77,10 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	if endpoint.Managed {
 		password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
 	}
+	username := ""
+	if endpoint.Managed && target.TargetOS == targetMacOS {
+		username = target.User
+	}
 
 	connHost := endpoint.Host
 	connPort := endpoint.Port
@@ -97,10 +101,13 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintln(a.Stdout, "bridge: connected; keep this process running while using WebVNC")
 
-	portal := webVNCPortalURL(coord.BaseURL, leaseID, password)
+	portal := webVNCPortalURL(coord.BaseURL, leaseID, username, password)
 	fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
 	if strings.TrimSpace(password) != "" {
 		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(password))
+		if strings.TrimSpace(username) != "" {
+			fmt.Fprintf(a.Stdout, "username: %s\n", strings.TrimSpace(username))
+		}
 	}
 	if *openPortal {
 		if err := openLocalURL(portal); err != nil {
@@ -242,16 +249,21 @@ func webVNCAgentURL(base, leaseID, ticket string) string {
 	return u.String()
 }
 
-func webVNCPortalURL(base, leaseID, password string) string {
+func webVNCPortalURL(base, leaseID, username, password string) string {
 	u, err := url.Parse(base)
 	if err != nil {
 		return base
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/portal/leases/" + url.PathEscape(leaseID) + "/vnc"
 	u.RawQuery = ""
-	if strings.TrimSpace(password) != "" {
+	if strings.TrimSpace(username) != "" || strings.TrimSpace(password) != "" {
 		values := url.Values{}
-		values.Set("password", strings.TrimSpace(password))
+		if strings.TrimSpace(username) != "" {
+			values.Set("username", strings.TrimSpace(username))
+		}
+		if strings.TrimSpace(password) != "" {
+			values.Set("password", strings.TrimSpace(password))
+		}
 		u.Fragment = values.Encode()
 	}
 	return u.String()

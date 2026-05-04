@@ -73,8 +73,13 @@ export function portalVNC(lease: LeaseRecord): Response {
       const screen = document.getElementById("screen");
       const wsURL = new URL(${JSON.stringify(wsPath)}, window.location.href);
       wsURL.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const password = new URLSearchParams(window.location.hash.slice(1)).get("password") || "";
-      const options = password ? { credentials: { password } } : {};
+      const fragment = new URLSearchParams(window.location.hash.slice(1));
+      const username = fragment.get("username") || "";
+      const password = fragment.get("password") || "";
+      const credentials = {};
+      if (username) credentials.username = username;
+      if (password) credentials.password = password;
+      const options = Object.keys(credentials).length ? { credentials } : {};
       function setStatus(value, tone = "") {
         status.textContent = value;
         status.dataset.tone = tone;
@@ -113,11 +118,16 @@ export function portalVNC(lease: LeaseRecord): Response {
           rfb.addEventListener("disconnect", () => {
             scheduleRetry(connected ? "bridge disconnected" : "waiting for bridge");
           });
-          rfb.addEventListener("credentialsrequired", () => {
-            const value = window.prompt("VNC password");
-            if (value) {
-              rfb.sendCredentials({ password: value });
+          rfb.addEventListener("credentialsrequired", (event) => {
+            const types = event.detail?.types || ["password"];
+            const values = {};
+            if (types.includes("username")) {
+              values.username = username || window.prompt("VNC username") || "";
             }
+            if (types.includes("password")) {
+              values.password = password || window.prompt("VNC password") || "";
+            }
+            rfb.sendCredentials(values);
           });
           rfb.addEventListener("securityfailure", () => {
             stopped = true;

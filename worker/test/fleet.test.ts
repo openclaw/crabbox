@@ -394,6 +394,8 @@ describe("fleet lease identity and idle", () => {
     expect(pageBody).toContain("crabbox webvnc --id blue-lobster --open");
     expect(pageBody).toContain("/portal/assets/novnc/rfb.js");
     expect(pageBody).toContain("function scheduleRetry");
+    expect(pageBody).toContain('fragment.get("username")');
+    expect(pageBody).toContain('types.includes("username")');
     expect(pageBody).not.toContain("cdn.jsdelivr.net");
 
     const plain = await fleet.fetch(

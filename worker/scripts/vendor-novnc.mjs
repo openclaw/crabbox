@@ -5,25 +5,27 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.join(root, "node_modules", "@novnc", "novnc");
-const targetRoot = path.join(root, "public", "portal", "assets", "novnc");
-const target = path.join(targetRoot, "rfb.js");
-const bundleURL = "https://cdn.jsdelivr.net/npm/@novnc/novnc@1.6.0/+esm";
+const assetRoot = path.join(root, "public", "portal", "assets", "novnc");
+const bundlePath = path.join(assetRoot, "rfb.js");
+const licensePath = path.join(assetRoot, "LICENSE.txt");
+const packagePath = path.join(packageRoot, "package.json");
 
-if (!fs.existsSync(packageRoot)) {
+if (!fs.existsSync(packagePath)) {
   throw new Error("missing @novnc/novnc; run npm ci --prefix worker first");
 }
 
-fs.rmSync(targetRoot, { recursive: true, force: true });
-fs.mkdirSync(targetRoot, { recursive: true });
-const response = await fetch(bundleURL);
-if (!response.ok) {
-  throw new Error(
-    `failed to download noVNC browser bundle: ${response.status} ${response.statusText}`,
-  );
+const packageJSON = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+if (packageJSON.version !== "1.6.0") {
+  throw new Error(`unexpected @novnc/novnc version ${packageJSON.version}; update vendored assets`);
 }
-const bundle = (await response.text()).replace(/\n\/\/# sourceMappingURL=.*$/s, "\n");
+
+for (const file of [bundlePath, licensePath]) {
+  if (!fs.existsSync(file)) {
+    throw new Error(`missing checked-in noVNC asset ${path.relative(root, file)}`);
+  }
+}
+
+const bundle = fs.readFileSync(bundlePath, "utf8");
 if (!bundle.includes("export{") || bundle.includes("Object.defineProperty(exports")) {
-  throw new Error("downloaded noVNC bundle is not browser-compatible ESM");
+  throw new Error("checked-in noVNC bundle is not browser-compatible ESM");
 }
-fs.writeFileSync(target, bundle);
-fs.copyFileSync(path.join(packageRoot, "LICENSE.txt"), path.join(targetRoot, "LICENSE.txt"));
