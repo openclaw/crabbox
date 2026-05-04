@@ -461,6 +461,13 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 	if hostname == "" {
 		hostname = renderTailscaleHostname(cfg.Tailscale.HostnameTemplate, "", "lease", cfg.Provider)
 	}
+	sshUser := strings.TrimSpace(cfg.SSHUser)
+	if sshUser == "" {
+		sshUser = "crabbox"
+	}
+	sshUserOwner := shellQuote(sshUser)
+	sshUserGroup := shellQuote(sshUser)
+	sshUserChown := shellQuote(sshUser + ":" + sshUser)
 	tags := strings.Join(cfg.Tailscale.Tags, ",")
 	if authKey == "" {
 		return `    echo "tailscale requested but no auth key was injected" >&2
@@ -468,7 +475,7 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 	}
 	return `    retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'
     systemctl enable --now tailscaled || service tailscaled start || true
-    install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
+    install -d -m 0750 -o ` + sshUserOwner + ` -g ` + sshUserGroup + ` /var/lib/crabbox
     set +x
     TS_AUTHKEY=` + shellQuote(authKey) + `
     tailscale up --auth-key="$TS_AUTHKEY" --hostname=` + shellQuote(hostname) + ` --advertise-tags=` + shellQuote(tags) + `
@@ -486,6 +493,6 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
     if tailscale status --json >/var/lib/crabbox/tailscale-status.json 2>/dev/null; then
       jq -r '.Self.DNSName // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-fqdn || true
     fi
-    chown crabbox:crabbox /var/lib/crabbox/tailscale-* || true
+    chown ` + sshUserChown + ` /var/lib/crabbox/tailscale-* || true
     chmod 0640 /var/lib/crabbox/tailscale-* || true`
 }

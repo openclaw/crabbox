@@ -105,18 +105,21 @@ describe("cloud-init bootstrap", () => {
     expect(plain).not.toContain("tailscale up");
     const got = cloudInit({
       ...config,
+      sshUser: "runner",
       tailscale: true,
       tailscaleTags: ["tag:crabbox"],
       tailscaleHostname: "crabbox-blue-lobster",
       tailscaleAuthKey: "tskey-secret",
     });
     expect(got).toContain("https://tailscale.com/install.sh");
+    expect(got).toContain("install -d -m 0750 -o 'runner' -g 'runner' /var/lib/crabbox");
     expect(got).toContain(
       "tailscale up --auth-key=\"$TS_AUTHKEY\" --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox'",
     );
     expect(got).toContain(
       "printf '%s\\n' 'crabbox-blue-lobster' > /var/lib/crabbox/tailscale-hostname",
     );
+    expect(got).toContain("chown 'runner:runner' /var/lib/crabbox/tailscale-* || true");
     expect(got).toContain("test -s /var/lib/crabbox/tailscale-ipv4");
     expect(got).toContain("grep -Eq '^100\\.' /var/lib/crabbox/tailscale-ipv4");
   });

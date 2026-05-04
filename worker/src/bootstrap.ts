@@ -418,9 +418,10 @@ function tailscaleBootstrap(config: LeaseConfig): string {
     return `    echo "tailscale requested but no auth key was injected" >&2
     exit 1`;
   }
+  const sshUser = config.sshUser.trim() || "crabbox";
   return `    retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'
     systemctl enable --now tailscaled || service tailscaled start || true
-    install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
+    install -d -m 0750 -o ${shellQuote(sshUser)} -g ${shellQuote(sshUser)} /var/lib/crabbox
     set +x
     TS_AUTHKEY=${shellQuote(config.tailscaleAuthKey)}
     tailscale up --auth-key="$TS_AUTHKEY" --hostname=${shellQuote(config.tailscaleHostname)} --advertise-tags=${shellQuote(config.tailscaleTags.join(","))}
@@ -438,7 +439,7 @@ function tailscaleBootstrap(config: LeaseConfig): string {
     if tailscale status --json >/var/lib/crabbox/tailscale-status.json 2>/dev/null; then
       jq -r '.Self.DNSName // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-fqdn || true
     fi
-    chown crabbox:crabbox /var/lib/crabbox/tailscale-* || true
+    chown ${shellQuote(`${sshUser}:${sshUser}`)} /var/lib/crabbox/tailscale-* || true
     chmod 0640 /var/lib/crabbox/tailscale-* || true`;
 }
 
