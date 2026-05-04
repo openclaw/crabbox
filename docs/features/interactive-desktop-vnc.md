@@ -77,7 +77,8 @@ Security rules:
 Provider notes:
 
 - Hetzner and AWS brokered Linux leases are the primary target because Crabbox
-  controls cloud-init and firewall shape there.
+  controls cloud-init and firewall shape there. Brokered macOS and Windows
+  desktop leases do not exist in this release.
 - Static SSH Linux hosts can participate when the operator accepts responsibility
   for packages and display services.
 - Static macOS hosts are existing Macs, not Crabbox-created boxes. They can

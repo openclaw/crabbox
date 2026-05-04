@@ -39,7 +39,8 @@ hosts, Crabbox first tries the same SSH tunnel to
 `127.0.0.1:5900` on the target. If a static host exposes VNC directly on
 `host:5900`, Crabbox prints that endpoint instead. Direct static VNC is
 operator-managed and should be limited to a trusted network such as Tailscale or
-LAN.
+LAN. Opening a static macOS or Windows target means opening that existing
+machine, not an external Crabbox instance.
 
 Static host credentials are host-managed. On macOS, the built-in Screen Sharing
 server uses the host's Screen Sharing or macOS account authentication. On
@@ -60,8 +61,8 @@ Security boundary:
 
 Provider behavior:
 
-- Brokered and direct AWS/Hetzner Linux leases support `vnc` only when created
-  with `--desktop`.
+- Brokered and direct AWS/Hetzner leases are Linux-only in this release. They
+  support `vnc` only when created with `--desktop`.
 - Static Linux can participate if the operator already configured Xvfb and
   loopback-bound x11vnc.
 - Static macOS can participate when Screen Sharing or another VNC-compatible

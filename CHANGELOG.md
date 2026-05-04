@@ -13,6 +13,7 @@
 ### Fixed
 
 - Quoted `crabbox vnc` tunnel key paths so macOS `Application Support` lease keys can be pasted directly into a shell.
+- Removed the static macOS managed-login path so static host VNC cannot be mistaken for a Crabbox-created external instance.
 - Fixed native Windows `--shell` runs so multi-statement PowerShell scripts keep their quotes instead of being re-parsed by a nested PowerShell process.
 - Skipped Linux-only GitHub Actions hydration stop markers on native Windows static targets.
 
