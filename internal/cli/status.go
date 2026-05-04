@@ -9,7 +9,7 @@ import (
 
 func (a App) status(ctx context.Context, args []string) error {
 	fs := newFlagSet("status", a.Stderr)
-	provider := fs.String("provider", defaultConfig().Provider, "provider: hetzner, aws, ssh, or blacksmith-testbox")
+	provider := fs.String("provider", defaultConfig().Provider, "provider: hetzner, aws, ssh, blacksmith-testbox, or islo")
 	id := fs.String("id", "", "lease id or slug")
 	wait := fs.Bool("wait", false, "wait until ready")
 	waitTimeout := fs.Duration("wait-timeout", 5*time.Minute, "maximum wait duration")
@@ -34,6 +34,9 @@ func (a App) status(ctx context.Context, args []string) error {
 	}
 	if isBlacksmithProvider(cfg.Provider) {
 		return a.blacksmithStatus(ctx, cfg, *id, *wait, *waitTimeout, *jsonOut)
+	}
+	if isIsloProvider(cfg.Provider) {
+		return a.isloStatus(ctx, cfg, *id, *wait, *waitTimeout, *jsonOut)
 	}
 	deadline := time.Now().Add(*waitTimeout)
 	for {

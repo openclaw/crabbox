@@ -17,7 +17,7 @@ func (a App) pool(ctx context.Context, args []string) error {
 
 func (a App) list(ctx context.Context, args []string) error {
 	fs := newFlagSet("list", a.Stderr)
-	provider := fs.String("provider", defaultConfig().Provider, "provider: hetzner, aws, ssh, or blacksmith-testbox")
+	provider := fs.String("provider", defaultConfig().Provider, "provider: hetzner, aws, ssh, blacksmith-testbox, or islo")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	targetFlags := registerTargetFlags(fs, defaultConfig())
 	if err := parseFlags(fs, args); err != nil {
@@ -33,6 +33,9 @@ func (a App) list(ctx context.Context, args []string) error {
 	}
 	if isBlacksmithProvider(cfg.Provider) {
 		return a.blacksmithList(ctx, cfg, *jsonOut)
+	}
+	if isIsloProvider(cfg.Provider) {
+		return a.isloList(ctx, cfg, *jsonOut)
 	}
 	if isStaticProvider(cfg.Provider) {
 		server, _, _, err := staticLease(cfg)

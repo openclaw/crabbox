@@ -27,7 +27,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	started := time.Now()
 	defaults := defaultConfig()
 	fs := newFlagSet("warmup", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, ssh, or blacksmith-testbox")
+	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, ssh, blacksmith-testbox, or islo")
 	profile := fs.String("profile", defaults.Profile, "profile")
 	class := fs.String("class", defaults.Class, "machine class")
 	serverType := fs.String("type", getenv("CRABBOX_SERVER_TYPE", ""), "provider server/instance type")
@@ -41,6 +41,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
 	blacksmithFlags := registerBlacksmithFlags(fs, defaults)
+	isloFlags := registerIsloFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -73,6 +74,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 		cfg.IdleTimeout = *idleTimeout
 	}
 	applyBlacksmithFlagOverrides(&cfg, fs, blacksmithFlags)
+	applyIsloFlagOverrides(&cfg, fs, isloFlags)
 	if err := validateProviderTarget(cfg); err != nil {
 		return err
 	}
@@ -94,6 +96,12 @@ func (a App) warmup(ctx context.Context, args []string) error {
 			return exit(2, "--actions-runner is not supported for provider=%s; Blacksmith owns runner hydration", cfg.Provider)
 		}
 		return a.blacksmithWarmup(ctx, cfg, repo, *keep, *reclaim, *timingJSON)
+	}
+	if isIsloProvider(cfg.Provider) {
+		if *actionsRunner {
+			return exit(2, "--actions-runner is not supported for provider=%s; islo owns sandbox setup", cfg.Provider)
+		}
+		return a.isloWarmup(ctx, cfg, repo, *keep, *reclaim, *timingJSON)
 	}
 
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
@@ -146,7 +154,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	defaults := defaultConfig()
 	fs := newFlagSet("run", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, ssh, or blacksmith-testbox")
+	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, ssh, blacksmith-testbox, or islo")
 	profile := fs.String("profile", defaults.Profile, "profile")
 	class := fs.String("class", defaults.Class, "machine class")
 	serverType := fs.String("type", getenv("CRABBOX_SERVER_TYPE", ""), "provider server/instance type")
@@ -167,6 +175,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
 	blacksmithFlags := registerBlacksmithFlags(fs, defaults)
+	isloFlags := registerIsloFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -213,6 +222,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		cfg.Results.JUnit = splitCommaList(*junitResults)
 	}
 	applyBlacksmithFlagOverrides(&cfg, fs, blacksmithFlags)
+	applyIsloFlagOverrides(&cfg, fs, isloFlags)
 	if err := validateProviderTarget(cfg); err != nil {
 		return err
 	}
@@ -231,6 +241,19 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	}
 	if isBlacksmithProvider(cfg.Provider) {
 		return a.blacksmithRun(ctx, cfg, repo, blacksmithRunOptions{
+			ID:          *leaseIDFlag,
+			Keep:        *keep,
+			Reclaim:     *reclaim,
+			SyncOnly:    *syncOnly,
+			Debug:       *debugSync,
+			ShellMode:   *shellMode,
+			Command:     command,
+			IdleTimeout: cfg.IdleTimeout,
+			TimingJSON:  *timingJSON,
+		})
+	}
+	if isIsloProvider(cfg.Provider) {
+		return a.isloRun(ctx, cfg, repo, isloRunOptions{
 			ID:          *leaseIDFlag,
 			Keep:        *keep,
 			Reclaim:     *reclaim,
@@ -1274,7 +1297,7 @@ func findServerByAlias(servers []Server, id string) (Server, string, error) {
 
 func (a App) stop(ctx context.Context, args []string) error {
 	fs := newFlagSet("stop", a.Stderr)
-	provider := fs.String("provider", defaultConfig().Provider, "provider: hetzner, aws, ssh, or blacksmith-testbox")
+	provider := fs.String("provider", defaultConfig().Provider, "provider: hetzner, aws, ssh, blacksmith-testbox, or islo")
 	targetFlags := registerTargetFlags(fs, defaultConfig())
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -1292,6 +1315,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 	}
 	if isBlacksmithProvider(cfg.Provider) {
 		return a.blacksmithStop(ctx, cfg, fs.Arg(0))
+	}
+	if isIsloProvider(cfg.Provider) {
+		return a.isloStop(ctx, cfg, fs.Arg(0))
 	}
 	if coord, ok, err := newTargetCoordinatorClient(cfg); err != nil {
 		return err

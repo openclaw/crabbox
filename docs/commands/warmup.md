@@ -11,6 +11,7 @@ crabbox warmup --provider aws --target windows --desktop --market on-demand
 crabbox warmup --provider aws --target macos --desktop --market on-demand --type mac2.metal
 crabbox warmup --actions-runner
 crabbox warmup --provider blacksmith-testbox --blacksmith-workflow .github/workflows/ci-check-testbox.yml --blacksmith-job test
+crabbox warmup --provider islo --islo-image docker.io/library/ubuntu:24.04
 crabbox warmup --provider ssh --target macos --static-host mac-studio.local
 crabbox warmup --provider ssh --target windows --windows-mode normal --static-host win-dev.local --static-work-root 'C:\crabbox' --browser
 ```
@@ -18,6 +19,8 @@ crabbox warmup --provider ssh --target windows --windows-mode normal --static-ho
 The command returns a stable `cbx_...` lease ID and a friendly slug. Reuse either for subsequent `run`, `status`, `ssh`, `inspect`, and `stop` commands; scripts should keep using the canonical ID.
 
 With `--provider blacksmith-testbox`, the canonical ID is the Blacksmith `tbx_...` ID returned by `blacksmith testbox warmup`; Crabbox still assigns and stores a local slug for reuse.
+
+With `--provider islo`, the canonical ID is `isb_<sandbox-name>` where `<sandbox-name>` is the islo sandbox name (auto-generated as `crabbox-<hex>` when not specified). Crabbox still assigns and stores a local slug for reuse. See [islo](../features/islo.md).
 
 With `--provider ssh`, warmup claims an existing static SSH host instead of
 creating cloud capacity. Use `--target macos`, `--target windows
@@ -44,7 +47,7 @@ On success, `warmup` prints a concise total duration line. Add `--timing-json` t
 Flags:
 
 ```text
---provider hetzner|aws|ssh|blacksmith-testbox
+--provider hetzner|aws|ssh|blacksmith-testbox|islo
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>
@@ -67,6 +70,12 @@ Flags:
 --blacksmith-workflow <file|name|id>
 --blacksmith-job <job>
 --blacksmith-ref <ref>
+--islo-image <image>
+--islo-source <repo>
+--islo-workdir <dir>
+--islo-gateway-profile <profile>
+--islo-session <session>
+--islo-org <org>
 ```
 
 `--idle-timeout` releases the lease after no touch for that duration, default `30m`. `--ttl` remains the maximum wall-clock lifetime, default `90m`.
@@ -89,7 +98,7 @@ changing capacity.
 
 `--actions-runner` immediately registers the warm box as an ephemeral self-hosted GitHub Actions runner for the current repository. Most projects should prefer `crabbox actions hydrate --id <lease-id-or-slug>` after warmup because it also dispatches the workflow and waits for the ready marker.
 
-`--actions-runner` is not supported with `blacksmith-testbox` because Blacksmith owns Testbox workflow hydration.
+`--actions-runner` is not supported with `blacksmith-testbox` because Blacksmith owns Testbox workflow hydration. It is also not supported with `islo` because islo owns sandbox setup.
 
 New leases use per-lease SSH keys under the user config directory:
 

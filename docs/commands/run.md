@@ -11,6 +11,7 @@ crabbox run --desktop --browser --shell 'echo "$DISPLAY"; "$BROWSER" --version'
 crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
 crabbox run --id cbx_abcdef123456 --junit junit.xml -- go test ./...
 crabbox run --provider blacksmith-testbox --blacksmith-workflow .github/workflows/ci-check-testbox.yml --blacksmith-job test -- pnpm test
+crabbox run --provider islo --islo-image docker.io/library/ubuntu:24.04 -- pnpm test
 crabbox run --provider ssh --target macos --static-host mac-studio.local -- xcodebuild test
 crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local -- dotnet test
 crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local --shell 'Write-Output ("BROWSER=" + $env:BROWSER)'
@@ -20,6 +21,8 @@ crabbox run --provider ssh --target windows --windows-mode wsl2 --static-host wi
 If `--id` is omitted, Crabbox creates a fresh non-kept lease and releases it when the command exits. `--id` accepts the stable `cbx_...` ID or the active friendly slug.
 
 With `--provider blacksmith-testbox`, `--id` accepts a Blacksmith `tbx_...` ID or a local Crabbox slug. Crabbox forwards the command to `blacksmith testbox run`, delegates sync to Blacksmith, and prints `sync=delegated` in the final timing summary.
+
+With `--provider islo`, `--id` accepts an islo sandbox name, an `isb_<name>` Crabbox lease id, or a local Crabbox slug. Crabbox forwards the command to `islo use <name> -- <command>`, delegates sync to islo, and prints `sync=delegated` in the final timing summary. See [islo](../features/islo.md).
 
 When the lease has been hydrated by `crabbox actions hydrate`, `run` reads the remote marker under `$HOME/.crabbox/actions`, syncs into the workflow's `$GITHUB_WORKSPACE`, and sources the non-secret env file written by the workflow. That preserves the setup the workflow performed: checkout path, installed dependencies, service containers, caches, runner temp/toolcache paths, and any project-specific preparation. GitHub secrets and OIDC request tokens remain workflow-step scoped unless the project explicitly persists its own short-lived credentials.
 
@@ -51,7 +54,7 @@ Before rsync starts, Crabbox prints the candidate file count and byte estimate. 
 
 At the end of every command, `run` prints a one-line summary with sync duration, command duration, total duration, whether sync was skipped by fingerprint, and the remote exit code.
 
-Use `--timing-json` to emit a final JSON timing record with provider, lease ID, sync phases, command duration, total duration, exit code, and Actions run URL when available. In `blacksmith-testbox` mode, sync is reported as delegated in the same schema.
+Use `--timing-json` to emit a final JSON timing record with provider, lease ID, sync phases, command duration, total duration, exit code, and Actions run URL when available. In `blacksmith-testbox` and `islo` modes, sync is reported as delegated in the same schema.
 
 Before the first rsync into a Git checkout, Crabbox tries to seed the remote worktree from the local `origin` remote so the first sync is a dirty-tree overlay instead of a full source upload. Project-specific excludes, env forwarding, and base ref belong in `crabbox.yaml` or `.crabbox.yaml`.
 
@@ -67,7 +70,7 @@ Flags:
 
 ```text
 --id <lease-id-or-slug>
---provider hetzner|aws|ssh|blacksmith-testbox
+--provider hetzner|aws|ssh|blacksmith-testbox|islo
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>
@@ -96,6 +99,12 @@ Flags:
 --blacksmith-workflow <file|name|id>
 --blacksmith-job <job>
 --blacksmith-ref <ref>
+--islo-image <image>
+--islo-source <repo>
+--islo-workdir <dir>
+--islo-gateway-profile <profile>
+--islo-session <session>
+--islo-org <org>
 ```
 
 `--idle-timeout` controls inactivity expiry, default `30m`. `--ttl` remains the maximum wall-clock lifetime, default `90m`.
@@ -106,3 +115,5 @@ Explicit `--type` keeps exact-type semantics; Crabbox reports why that type
 failed rather than falling back to a different size.
 
 Blacksmith Testbox mode does not support `--sync-only`; Blacksmith owns its own sync behavior.
+
+islo mode does not support `--sync-only`, `--checksum`, or `--force-sync-large`; islo owns sandbox sync via `--islo-source` cloning.

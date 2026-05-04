@@ -2,7 +2,7 @@
 
 Read when:
 
-- changing Hetzner, AWS, or Blacksmith Testbox provisioning;
+- changing Hetzner, AWS, Blacksmith Testbox, or islo provisioning;
 - adding a backend;
 - adjusting machine classes, fallback order, regions, or images.
 
@@ -101,6 +101,8 @@ brokered Worker path.
 
 Crabbox can also wrap Blacksmith Testboxes with `provider: blacksmith-testbox`. That backend does not use the Crabbox broker or direct cloud credentials. It shells out to the authenticated Blacksmith CLI for `testbox warmup`, `run`, `status`, `list`, and `stop`, while Crabbox keeps local slugs, repo claims, config, and timing summaries. See [Blacksmith Testbox](blacksmith-testbox.md).
 
+Crabbox can also wrap [islo.dev](https://islo.dev) sandboxes with `provider: islo`. Like the Blacksmith path it bypasses the broker; it shells out to the authenticated islo CLI for `use`, `status`, `ls`, and `rm`, while Crabbox keeps local slugs, repo claims, config, and timing summaries. See [islo](islo.md).
+
 Static SSH targets:
 
 ```yaml
@@ -136,5 +138,6 @@ Related docs:
 
 - [Infrastructure](../infrastructure.md)
 - [Blacksmith Testbox](blacksmith-testbox.md)
+- [islo](islo.md)
 - [Runner bootstrap](runner-bootstrap.md)
 - [Cost and usage](cost-usage.md)

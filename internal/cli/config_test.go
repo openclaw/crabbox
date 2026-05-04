@@ -102,6 +102,15 @@ blacksmith:
   ref: main
   idleTimeout: 90m
   debug: true
+islo:
+  org: openclaw
+  image: docker.io/library/ubuntu:24.04
+  source: github://openclaw/crabbox
+  workdir: /workspace/crabbox
+  gatewayProfile: default
+  session: main
+  idleTimeout: 75m
+  debug: true
 static:
   id: win-dev
   name: windows-dev
@@ -189,6 +198,9 @@ ssh:
 	if cfg.Blacksmith.Org != "openclaw" || cfg.Blacksmith.Workflow != ".github/workflows/blacksmith-testbox.yml" || cfg.Blacksmith.Job != "hydrate" || cfg.Blacksmith.Ref != "main" || cfg.Blacksmith.IdleTimeout != 90*time.Minute || !cfg.Blacksmith.Debug {
 		t.Fatalf("blacksmith config not loaded: %#v", cfg.Blacksmith)
 	}
+	if cfg.Islo.Org != "openclaw" || cfg.Islo.Image != "docker.io/library/ubuntu:24.04" || cfg.Islo.Source != "github://openclaw/crabbox" || cfg.Islo.Workdir != "/workspace/crabbox" || cfg.Islo.GatewayProfile != "default" || cfg.Islo.Session != "main" || cfg.Islo.IdleTimeout != 75*time.Minute || !cfg.Islo.Debug {
+		t.Fatalf("islo config not loaded: %#v", cfg.Islo)
+	}
 	if cfg.Static.Host != "win-dev.local" || cfg.Static.User != "peter" || cfg.Static.Port != "22" || cfg.WorkRoot != "/home/peter/crabbox" {
 		t.Fatalf("static config not loaded: static=%#v workRoot=%s", cfg.Static, cfg.WorkRoot)
 	}
@@ -218,6 +230,14 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "env-admin-secret")
 	t.Setenv("CRABBOX_TARGET", "macos")
 	t.Setenv("CRABBOX_STATIC_HOST", "mac.local")
+	t.Setenv("CRABBOX_ISLO_ORG", "openclaw")
+	t.Setenv("CRABBOX_ISLO_IMAGE", "docker.io/library/ubuntu:24.04")
+	t.Setenv("CRABBOX_ISLO_SOURCE", "github://openclaw/crabbox")
+	t.Setenv("CRABBOX_ISLO_WORKDIR", "/workspace/crabbox")
+	t.Setenv("CRABBOX_ISLO_GATEWAY_PROFILE", "default")
+	t.Setenv("CRABBOX_ISLO_SESSION", "main")
+	t.Setenv("CRABBOX_ISLO_IDLE_TIMEOUT", "75m")
+	t.Setenv("CRABBOX_ISLO_DEBUG", "true")
 	path := userConfigPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -247,6 +267,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.TargetOS != targetMacOS || cfg.Static.Host != "mac.local" {
 		t.Fatalf("unexpected target env: target=%s static=%#v", cfg.TargetOS, cfg.Static)
+	}
+	if cfg.Islo.Org != "openclaw" || cfg.Islo.Image != "docker.io/library/ubuntu:24.04" || cfg.Islo.Source != "github://openclaw/crabbox" || cfg.Islo.Workdir != "/workspace/crabbox" || cfg.Islo.GatewayProfile != "default" || cfg.Islo.Session != "main" || cfg.Islo.IdleTimeout != 75*time.Minute || !cfg.Islo.Debug {
+		t.Fatalf("islo env not loaded: %#v", cfg.Islo)
 	}
 }
 

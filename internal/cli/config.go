@@ -49,6 +49,7 @@ type Config struct {
 	Capacity           CapacityConfig
 	Actions            ActionsConfig
 	Blacksmith         BlacksmithConfig
+	Islo               IsloConfig
 	Static             StaticConfig
 	Results            ResultsConfig
 	Cache              CacheConfig
@@ -95,6 +96,17 @@ type BlacksmithConfig struct {
 	Ref         string
 	IdleTimeout time.Duration
 	Debug       bool
+}
+
+type IsloConfig struct {
+	Org            string
+	Image          string
+	Source         string
+	Workdir        string
+	GatewayProfile string
+	Session        string
+	IdleTimeout    time.Duration
+	Debug          bool
 }
 
 type StaticConfig struct {
@@ -231,6 +243,7 @@ type fileConfig struct {
 	Capacity         *fileCapacityConfig   `yaml:"capacity,omitempty"`
 	Actions          *fileActionsConfig    `yaml:"actions,omitempty"`
 	Blacksmith       *fileBlacksmithConfig `yaml:"blacksmith,omitempty"`
+	Islo             *fileIsloConfig       `yaml:"islo,omitempty"`
 	Static           *fileStaticConfig     `yaml:"static,omitempty"`
 	Results          *fileResultsConfig    `yaml:"results,omitempty"`
 	Cache            *fileCacheConfig      `yaml:"cache,omitempty"`
@@ -328,6 +341,17 @@ type fileBlacksmithConfig struct {
 	Ref         string `yaml:"ref,omitempty"`
 	IdleTimeout string `yaml:"idleTimeout,omitempty"`
 	Debug       *bool  `yaml:"debug,omitempty"`
+}
+
+type fileIsloConfig struct {
+	Org            string `yaml:"org,omitempty"`
+	Image          string `yaml:"image,omitempty"`
+	Source         string `yaml:"source,omitempty"`
+	Workdir        string `yaml:"workdir,omitempty"`
+	GatewayProfile string `yaml:"gatewayProfile,omitempty"`
+	Session        string `yaml:"session,omitempty"`
+	IdleTimeout    string `yaml:"idleTimeout,omitempty"`
+	Debug          *bool  `yaml:"debug,omitempty"`
 }
 
 type fileStaticConfig struct {
@@ -675,6 +699,30 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Blacksmith.Debug = *file.Blacksmith.Debug
 		}
 	}
+	if file.Islo != nil {
+		if file.Islo.Org != "" {
+			cfg.Islo.Org = file.Islo.Org
+		}
+		if file.Islo.Image != "" {
+			cfg.Islo.Image = file.Islo.Image
+		}
+		if file.Islo.Source != "" {
+			cfg.Islo.Source = file.Islo.Source
+		}
+		if file.Islo.Workdir != "" {
+			cfg.Islo.Workdir = file.Islo.Workdir
+		}
+		if file.Islo.GatewayProfile != "" {
+			cfg.Islo.GatewayProfile = file.Islo.GatewayProfile
+		}
+		if file.Islo.Session != "" {
+			cfg.Islo.Session = file.Islo.Session
+		}
+		applyLeaseDuration(&cfg.Islo.IdleTimeout, file.Islo.IdleTimeout)
+		if file.Islo.Debug != nil {
+			cfg.Islo.Debug = *file.Islo.Debug
+		}
+	}
 	if file.Static != nil {
 		if file.Static.ID != "" {
 			cfg.Static.ID = file.Static.ID
@@ -801,6 +849,18 @@ func applyEnv(cfg *Config) {
 	if value, ok := getenvBool("CRABBOX_BLACKSMITH_DEBUG"); ok {
 		cfg.Blacksmith.Debug = value
 	}
+	cfg.Islo.Org = getenv("CRABBOX_ISLO_ORG", cfg.Islo.Org)
+	cfg.Islo.Image = getenv("CRABBOX_ISLO_IMAGE", cfg.Islo.Image)
+	cfg.Islo.Source = getenv("CRABBOX_ISLO_SOURCE", cfg.Islo.Source)
+	cfg.Islo.Workdir = getenv("CRABBOX_ISLO_WORKDIR", cfg.Islo.Workdir)
+	cfg.Islo.GatewayProfile = getenv("CRABBOX_ISLO_GATEWAY_PROFILE", cfg.Islo.GatewayProfile)
+	cfg.Islo.Session = getenv("CRABBOX_ISLO_SESSION", cfg.Islo.Session)
+	if idleTimeout := os.Getenv("CRABBOX_ISLO_IDLE_TIMEOUT"); idleTimeout != "" {
+		applyLeaseDuration(&cfg.Islo.IdleTimeout, idleTimeout)
+	}
+	if value, ok := getenvBool("CRABBOX_ISLO_DEBUG"); ok {
+		cfg.Islo.Debug = value
+	}
 	if labels := os.Getenv("CRABBOX_ACTIONS_RUNNER_LABELS"); labels != "" {
 		cfg.Actions.RunnerLabels = splitCommaList(labels)
 	}
@@ -883,7 +943,7 @@ func serverTypeForClass(class string) string {
 }
 
 func serverTypeForConfig(cfg Config) string {
-	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
+	if isBlacksmithProvider(cfg.Provider) || isIsloProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
 		return ""
 	}
 	if cfg.Provider == "aws" {
@@ -893,7 +953,7 @@ func serverTypeForConfig(cfg Config) string {
 }
 
 func serverTypeForProviderClass(provider, class string) string {
-	if isBlacksmithProvider(provider) || isStaticProvider(provider) {
+	if isBlacksmithProvider(provider) || isIsloProvider(provider) || isStaticProvider(provider) {
 		return ""
 	}
 	if provider == "aws" {

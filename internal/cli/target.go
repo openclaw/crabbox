@@ -82,7 +82,7 @@ func validateTargetConfig(cfg Config) error {
 }
 
 func validateProviderTarget(cfg Config) error {
-	if isStaticProvider(cfg.Provider) || isBlacksmithProvider(cfg.Provider) {
+	if isStaticProvider(cfg.Provider) || isBlacksmithProvider(cfg.Provider) || isIsloProvider(cfg.Provider) {
 		return nil
 	}
 	if cfg.Provider == "aws" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeNormal {
@@ -104,7 +104,7 @@ func validateProviderTarget(cfg Config) error {
 }
 
 func newTargetCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
-	if isStaticProvider(cfg.Provider) {
+	if isStaticProvider(cfg.Provider) || isIsloProvider(cfg.Provider) {
 		return nil, false, nil
 	}
 	return newCoordinatorClient(cfg)

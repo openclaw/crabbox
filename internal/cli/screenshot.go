@@ -37,6 +37,9 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 	if isBlacksmithProvider(cfg.Provider) {
 		return exit(2, "desktop screenshots are not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
 	}
+	if isIsloProvider(cfg.Provider) {
+		return exit(2, "desktop screenshots are not supported for provider=%s; islo owns sandbox connectivity", cfg.Provider)
+	}
 	if *id == "" && !isStaticProvider(cfg.Provider) {
 		return exit(2, "usage: crabbox screenshot --id <lease-id-or-slug> [--output <path>]")
 	}

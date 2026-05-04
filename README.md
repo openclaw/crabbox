@@ -12,7 +12,7 @@ Crabbox is an open-source remote testbox runner for maintainers and AI agents. L
 crabbox run -- pnpm test
 ```
 
-Behind that single command: a Go CLI on your laptop, a Cloudflare Worker broker that owns provider credentials and lease state, and a vanilla Ubuntu runner on Hetzner Cloud or AWS EC2 Spot. Crabbox can also wrap Blacksmith Testboxes when you choose `provider: blacksmith-testbox`, or use `provider: ssh` for existing macOS and Windows targets.
+Behind that single command: a Go CLI on your laptop, a Cloudflare Worker broker that owns provider credentials and lease state, and a vanilla Ubuntu runner on Hetzner Cloud or AWS EC2 Spot. Crabbox can also wrap Blacksmith Testboxes when you choose `provider: blacksmith-testbox`, wrap [islo.dev](https://islo.dev) sandboxes when you choose `provider: islo`, or use `provider: ssh` for existing macOS and Windows targets.
 
 ---
 
@@ -78,6 +78,7 @@ For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For th
 - **Brokered cloud.** Maintainers and agents share infra without sharing provider tokens. Hetzner and AWS EC2 Spot are first-class; both fall back across instance families when capacity or quota rejects a request.
 - **macOS and Windows static hosts.** `provider: ssh` reuses existing machines; it does not create macOS or Windows Crabbox boxes. macOS and Windows WSL2 use the POSIX rsync path; native Windows uses PowerShell plus tar archive sync.
 - **Blacksmith Testbox wrapper.** Set `provider: blacksmith-testbox` to delegate warmup/run/list/status/stop to the Blacksmith CLI while Crabbox keeps local slugs, repo claims, timing summaries, and config conventions.
+- **islo sandbox wrapper.** Set `provider: islo` to delegate warmup/run/list/status/stop to the [islo.dev](https://islo.dev) CLI; auth and sandbox networking stay with islo while Crabbox keeps local slugs, repo claims, and timing summaries. See [docs/features/islo.md](docs/features/islo.md).
 - **Trusted AWS images.** Operators can create AMIs from active brokered AWS leases and promote a known-good image as the coordinator default.
 - **Cost guardrails.** Per-lease and monthly spend caps. Live pricing from EC2 Spot history or Hetzner server-type prices, with static fallbacks. `crabbox usage` summarizes spend by user, org, provider, and type.
 - **GitHub Actions hydration.** `crabbox actions hydrate` registers a leased box as an ephemeral Actions runner, so the repo's own workflow installs runtimes, services, and secrets. Crabbox does not parse Actions YAML.

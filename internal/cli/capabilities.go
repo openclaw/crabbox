@@ -36,6 +36,12 @@ func validateRequestedCapabilities(cfg Config) error {
 	if cfg.Browser && isBlacksmithProvider(cfg.Provider) {
 		return exit(2, "browser provisioning is not supported for provider=%s; use Blacksmith workflow setup for headless browser automation", cfg.Provider)
 	}
+	if cfg.Desktop && isIsloProvider(cfg.Provider) {
+		return exit(2, "desktop/VNC is not supported for provider=%s; islo owns sandbox connectivity", cfg.Provider)
+	}
+	if cfg.Browser && isIsloProvider(cfg.Provider) {
+		return exit(2, "browser provisioning is not supported for provider=%s; install browser tooling via the islo image or session", cfg.Provider)
+	}
 	return nil
 }
 
