@@ -13,21 +13,12 @@ import (
 )
 
 func TestRunEventStreamWriterCapsOutputEvents(t *testing.T) {
+	t.Setenv("CRABBOX_OWNER", "test@example.com")
 	var events []CoordinatorRunEventInput
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/runs/run_123/events" {
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
-		var event CoordinatorRunEventInput
-		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
-			t.Fatal(err)
-		}
-		events = append(events, event)
-		_, _ = w.Write([]byte(`{"event":{"runID":"run_123","seq":1,"type":"stdout","createdAt":"2026-05-02T00:00:00Z"}}`))
-	}))
-	defer server.Close()
-
-	client := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	client := &CoordinatorClient{
+		BaseURL: "https://example.test",
+		Client:  &http.Client{Transport: runEventRecordingRoundTripper{events: &events}},
+	}
 	rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard}
 	stdout := rec.StreamWriter("stdout")
 	chunk := bytes.Repeat([]byte("x"), runEventOutputChunkBytes)
@@ -226,4 +217,32 @@ func (t blockingRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	}
 	<-req.Context().Done()
 	return nil, context.Cause(req.Context())
+}
+
+type runEventRecordingRoundTripper struct {
+	events *[]CoordinatorRunEventInput
+}
+
+func (t runEventRecordingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodPost || req.URL.Path != "/v1/runs/run_123/events" {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Status:     "404 Not Found",
+			Body:       io.NopCloser(strings.NewReader(`{"error":"not_found"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+	var event CoordinatorRunEventInput
+	if err := json.NewDecoder(req.Body).Decode(&event); err != nil {
+		return nil, err
+	}
+	*t.events = append(*t.events, event)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Body:       io.NopCloser(strings.NewReader(`{"event":{"runID":"run_123","seq":1,"type":"stdout","createdAt":"2026-05-02T00:00:00Z"}}`)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
 }
