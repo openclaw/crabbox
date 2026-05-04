@@ -51,6 +51,14 @@ Environment variables `CRABBOX_ISLO_IMAGE`, `CRABBOX_ISLO_WORKDIR`, `CRABBOX_ISL
 
 The exec stream bypasses the SDK's JSON-coalescing wrapper so stdout/stderr deltas reach the user terminal as they arrive. The SDK still owns auth and retry semantics. If `go-sdk` later exposes a true streaming API, the consumer here should be removed.
 
+### Why SSE and not WebSocket
+
+The islo API exposes three exec entrypoints: `POST /exec` (fire-and-forget; poll `GetExecResult`), `POST /exec/stream` (SSE, batch with streamed output), and `WebSocket /exec` (interactive PTY with stdin and resize). The `islo-frontend` browser terminal uses the WebSocket path (`/sandboxes/{name}/sessions/{name}/attach`) because it needs stdin and TTY semantics. `crabbox run -- <cmd>` is non-interactive — no stdin, no resize, just stream output and exit — so the SSE endpoint matches. This also keeps parity with `provider: blacksmith-testbox`, which similarly forwards stdout/stderr without piping stdin. If `crabbox ssh --provider islo` or another interactive surface lands later, that should connect to the WebSocket attach endpoint; this is a separate code path, not a replacement for `run`.
+
+### SSE wire format
+
+The endpoint emits standard `text/event-stream`. Each event has an `event:` type line (`stdout`, `stderr`, or `exit`), one or more `data:` lines (joined with `\n` per the SSE spec, with the leading single space after the colon stripped), and a blank-line terminator. `exit` carries the exit code as a decimal string. `parseIsloSSE` in `internal/cli/islo.go` is the only place that knows this format; if islo changes the schema, only that function needs to follow.
+
 ## Ownership Boundary
 
 - Islo owns sandbox provisioning, networking, idle expiry, image lifecycle, file transfer, and command execution.
