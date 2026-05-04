@@ -59,7 +59,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stdout, "ok      remote  %s\n%s\n", *id, out)
 	}
 	if os.Getenv("CRABBOX_SERVER_TYPE") == "" {
-		cfg.ServerType = serverTypeForProviderClass(cfg.Provider, cfg.Class)
+		applyServerTypeFlagOverrides(&cfg, fs, "")
 	}
 	useCoordinator := false
 	if coord, coordinatorConfigured, err := newTargetCoordinatorClient(cfg); err != nil {

@@ -133,6 +133,86 @@ func TestApplyCapacityMarketFlag(t *testing.T) {
 	}
 }
 
+func TestApplyServerTypeFlagOverridesUsesTargetAwareAWSDefaults(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "macos",
+			args: []string{"--provider", "aws", "--target", "macos", "--class", "standard"},
+			want: "mac2.metal",
+		},
+		{
+			name: "windows",
+			args: []string{"--provider", "aws", "--target", "windows", "--class", "standard"},
+			want: "m7i.large",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				Provider:    "aws",
+				TargetOS:    targetLinux,
+				WindowsMode: windowsModeNormal,
+				Class:       "beast",
+				ServerType:  "c7a.48xlarge",
+			}
+			fs := newFlagSet("test", io.Discard)
+			provider := fs.String("provider", cfg.Provider, "")
+			class := fs.String("class", cfg.Class, "")
+			serverType := fs.String("type", "", "")
+			targetFlags := registerTargetFlags(fs, cfg)
+			if err := parseFlags(fs, tt.args); err != nil {
+				t.Fatal(err)
+			}
+			cfg.Provider = *provider
+			cfg.Class = *class
+			if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
+				t.Fatal(err)
+			}
+			applyServerTypeFlagOverrides(&cfg, fs, *serverType)
+			if cfg.ServerType != tt.want {
+				t.Fatalf("serverType=%q want %q", cfg.ServerType, tt.want)
+			}
+			if cfg.ServerTypeExplicit {
+				t.Fatal("ServerTypeExplicit=true, want false")
+			}
+		})
+	}
+}
+
+func TestApplyServerTypeFlagOverridesPreservesExplicitType(t *testing.T) {
+	cfg := Config{
+		Provider:    "aws",
+		TargetOS:    targetLinux,
+		WindowsMode: windowsModeNormal,
+		Class:       "beast",
+		ServerType:  "c7a.48xlarge",
+	}
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", cfg.Provider, "")
+	class := fs.String("class", cfg.Class, "")
+	serverType := fs.String("type", "", "")
+	targetFlags := registerTargetFlags(fs, cfg)
+	if err := parseFlags(fs, []string{"--provider", "aws", "--target", "macos", "--class", "standard", "--type", "mac1.metal"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Provider = *provider
+	cfg.Class = *class
+	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
+		t.Fatal(err)
+	}
+	applyServerTypeFlagOverrides(&cfg, fs, *serverType)
+	if cfg.ServerType != "mac1.metal" {
+		t.Fatalf("serverType=%q want mac1.metal", cfg.ServerType)
+	}
+	if !cfg.ServerTypeExplicit {
+		t.Fatal("ServerTypeExplicit=false, want true")
+	}
+}
+
 func TestCommandNeedsHydrationHint(t *testing.T) {
 	if !commandNeedsHydrationHint([]string{"env NODE_OPTIONS=--max-old-space-size=4096 pnpm test"}, true) {
 		t.Fatal("expected shell pnpm command to need hydration hint")
