@@ -11,6 +11,7 @@
 - Added generated Windows console login details and auto-logon for managed AWS Windows desktop leases.
 - Added AWS macOS desktop lease plumbing for EC2 Mac Dedicated Hosts, including Screen Sharing setup and per-lease credentials.
 - Added `crabbox screenshot` to save a PNG from a desktop lease without opening a VNC client.
+- Added authenticated WebVNC portal support with `crabbox webvnc`, which bridges a desktop lease into the coordinator portal without exposing the remote VNC port.
 - Added a minimal XFCE desktop profile with panel/window manager for managed VNC leases.
 - Clarified static macOS/Windows VNC as existing-host access, not Crabbox-created boxes, so `--open` no longer launches an OS credential prompt unless `--host-managed` is passed.
 

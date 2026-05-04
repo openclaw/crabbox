@@ -3,7 +3,8 @@ import { EC2SpotClient } from "./aws";
 import { leaseConfig, validCIDRs } from "./config";
 import { HetznerClient } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
-import { githubAuthRoute } from "./oauth";
+import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth";
+import { portalError, portalHome, portalVNC } from "./portal";
 import { leaseSlugFromID, normalizeLeaseSlug, slugWithCollisionSuffix } from "./slug";
 import type {
   Env,
@@ -31,6 +32,9 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 export class FleetDurableObject implements DurableObject {
+  private readonly webVNCAgents = new Map<string, WebSocket>();
+  private readonly webVNCViewers = new Map<string, WebSocket>();
+
   constructor(
     private readonly state: DurableObjectState,
     private readonly env: Env,
@@ -46,6 +50,15 @@ export class FleetDurableObject implements DurableObject {
       }
       if (parts[0] === "v1" && parts[1] === "auth" && parts[2] === "github") {
         return await githubAuthRoute(request, parts[3], this.state.storage, this.env);
+      }
+      if (method === "GET" && parts.join("/") === "portal/login") {
+        return await githubPortalLogin(request, this.state.storage, this.env);
+      }
+      if (method === "GET" && parts.join("/") === "portal/logout") {
+        return githubPortalLogout();
+      }
+      if (parts[0] === "portal") {
+        return await this.portalRoute(request, parts);
       }
       if (method === "GET" && parts.join("/") === "v1/pool") {
         if (!isAdminRequest(request)) {
@@ -97,6 +110,15 @@ export class FleetDurableObject implements DurableObject {
       }
       if (method === "POST" && parts.join("/") === "v1/leases") {
         return await this.createLease(request);
+      }
+      if (
+        parts[0] === "v1" &&
+        parts[1] === "leases" &&
+        parts[2] &&
+        parts[3] === "webvnc" &&
+        parts[4] === "agent"
+      ) {
+        return await this.webVNCAgent(request, parts[2]);
       }
       if (parts[0] === "v1" && parts[1] === "leases" && parts[2]) {
         return await this.leaseRoute(request, parts[2], parts[3]);
@@ -282,6 +304,129 @@ export class FleetDurableObject implements DurableObject {
       org: requestOrg(request, this.env),
       auth: request.headers.get("x-crabbox-auth") || "bearer",
     });
+  }
+
+  private async portalRoute(request: Request, parts: string[]): Promise<Response> {
+    const method = request.method.toUpperCase();
+    if (method === "GET" && parts.length === 1) {
+      return portalHome(this.filterLeasesForRequest(await this.leaseRecords(), request), request);
+    }
+    if (
+      method === "GET" &&
+      parts[1] === "leases" &&
+      parts[2] &&
+      parts[3] === "vnc" &&
+      parts[4] === undefined
+    ) {
+      const lease = await this.resolveLease(parts[2], request, false);
+      if (!lease) {
+        return portalError(
+          "Lease not found",
+          "That lease is not active or is not visible to you.",
+          404,
+        );
+      }
+      const error = webVNCLeaseError(lease);
+      if (error) {
+        return portalError("WebVNC unavailable", error, 409);
+      }
+      return portalVNC(lease);
+    }
+    if (
+      method === "GET" &&
+      parts[1] === "leases" &&
+      parts[2] &&
+      parts[3] === "vnc" &&
+      parts[4] === "viewer"
+    ) {
+      return await this.webVNCViewer(request, parts[2]);
+    }
+    return json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async webVNCAgent(request: Request, identifier: string): Promise<Response> {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return json(
+        { error: "upgrade_required", message: "WebVNC agent requires a websocket upgrade" },
+        { status: 426 },
+      );
+    }
+    const lease = await this.resolveLease(identifier, request, false);
+    if (!lease) {
+      return notFound();
+    }
+    const error = webVNCLeaseError(lease);
+    if (error) {
+      return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
+    }
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const agent = pair[1];
+    agent.accept();
+
+    closeSocket(this.webVNCAgents.get(lease.id), 1012, "replaced by a newer WebVNC bridge");
+    this.webVNCAgents.set(lease.id, agent);
+    agent.addEventListener("message", (event) => {
+      forwardWebVNC(event.data, this.webVNCViewers.get(lease.id));
+    });
+    agent.addEventListener("close", () => this.clearWebVNCAgent(lease.id, agent));
+    agent.addEventListener("error", () => this.clearWebVNCAgent(lease.id, agent));
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private async webVNCViewer(request: Request, identifier: string): Promise<Response> {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return json(
+        { error: "upgrade_required", message: "WebVNC viewer requires a websocket upgrade" },
+        { status: 426 },
+      );
+    }
+    const lease = await this.resolveLease(identifier, request, false);
+    if (!lease) {
+      return notFound();
+    }
+    const error = webVNCLeaseError(lease);
+    if (error) {
+      return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
+    }
+    const agent = this.webVNCAgents.get(lease.id);
+    if (!agent || agent.readyState !== WebSocket.OPEN) {
+      return json(
+        {
+          error: "webvnc_bridge_missing",
+          message: `start the bridge with: crabbox webvnc --id ${lease.slug || lease.id}`,
+        },
+        { status: 409 },
+      );
+    }
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const viewer = pair[1];
+    viewer.accept();
+
+    closeSocket(this.webVNCViewers.get(lease.id), 1012, "replaced by a newer WebVNC viewer");
+    this.webVNCViewers.set(lease.id, viewer);
+    viewer.addEventListener("message", (event) => {
+      forwardWebVNC(event.data, this.webVNCAgents.get(lease.id));
+    });
+    viewer.addEventListener("close", () => this.clearWebVNCViewer(lease.id, viewer));
+    viewer.addEventListener("error", () => this.clearWebVNCViewer(lease.id, viewer));
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private clearWebVNCAgent(leaseID: string, socket: WebSocket): void {
+    if (this.webVNCAgents.get(leaseID) !== socket) {
+      return;
+    }
+    this.webVNCAgents.delete(leaseID);
+    closeSocket(this.webVNCViewers.get(leaseID), 1011, "WebVNC bridge disconnected");
+    this.webVNCViewers.delete(leaseID);
+  }
+
+  private clearWebVNCViewer(leaseID: string, socket: WebSocket): void {
+    if (this.webVNCViewers.get(leaseID) === socket) {
+      this.webVNCViewers.delete(leaseID);
+    }
   }
 
   private async pool(request: Request): Promise<Response> {
@@ -848,6 +993,37 @@ function clampLimit(value: string | null, fallback: number): number {
 
 function notFound(): Response {
   return json({ error: "not_found" }, { status: 404 });
+}
+
+function webVNCLeaseError(lease: LeaseRecord): string {
+  if (lease.state !== "active") {
+    return "lease is not active";
+  }
+  if (!lease.desktop) {
+    return "lease was not created with desktop=true";
+  }
+  if (!lease.host) {
+    return "lease has no reachable host yet";
+  }
+  return "";
+}
+
+function forwardWebVNC(data: string | ArrayBuffer, socket: WebSocket | undefined): void {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  socket.send(data);
+}
+
+function closeSocket(socket: WebSocket | undefined, code: number, reason: string): void {
+  if (
+    !socket ||
+    socket.readyState === WebSocket.CLOSED ||
+    socket.readyState === WebSocket.CLOSING
+  ) {
+    return;
+  }
+  socket.close(code, reason);
 }
 
 function requestSourceCIDRs(request: Request): string[] {

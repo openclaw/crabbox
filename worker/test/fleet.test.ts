@@ -311,6 +311,91 @@ describe("fleet lease identity and idle", () => {
     expect(body.leases.map((lease) => lease.id)).toEqual(["cbx_000000000002"]);
   });
 
+  it("renders the portal with only the current owner leases", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "blue-lobster",
+        owner: "peter@example.com",
+        org: "openclaw",
+        desktop: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        slug: "amber-krill",
+        owner: "friend@example.com",
+        org: "openclaw",
+        desktop: true,
+      }),
+    );
+
+    const response = await fleet.fetch(
+      request("GET", "/portal", {
+        headers: {
+          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).toContain("blue-lobster");
+    expect(body).toContain("/portal/leases/cbx_000000000001/vnc");
+    expect(body).not.toContain("amber-krill");
+  });
+
+  it("serves WebVNC pages only for desktop leases and requires an agent upgrade", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = {
+      "x-crabbox-owner": "peter@example.com",
+      "x-crabbox-org": "openclaw",
+    };
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "blue-lobster",
+        owner: "peter@example.com",
+        org: "openclaw",
+        desktop: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        slug: "plain-lobster",
+        owner: "peter@example.com",
+        org: "openclaw",
+        desktop: false,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const page = await fleet.fetch(request("GET", "/portal/leases/blue-lobster/vnc", { headers }));
+    expect(page.status).toBe(200);
+    await expect(page.text()).resolves.toContain("crabbox webvnc --id blue-lobster --open");
+
+    const plain = await fleet.fetch(
+      request("GET", "/portal/leases/plain-lobster/vnc", { headers }),
+    );
+    expect(plain.status).toBe(409);
+
+    const agent = await fleet.fetch(
+      request("GET", "/v1/leases/blue-lobster/webvnc/agent", { headers }),
+    );
+    expect(agent.status).toBe(426);
+  });
+
   it("keeps pool inventory admin-only", async () => {
     const fleet = testFleet(new MemoryStorage(), {
       aws: fakeProvider(),
@@ -817,6 +902,35 @@ describe("fleet identity", () => {
     );
     expect(poll.status).toBe(200);
     await expect(poll.json()).resolves.toMatchObject({ status: "pending" });
+  });
+
+  it("sets a portal session cookie after GitHub login", async () => {
+    const storage = new MemoryStorage();
+    const fleet = new FleetDurableObject(
+      { storage } as unknown as DurableObjectState,
+      {
+        CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_GITHUB_CLIENT_ID: "github-client",
+        CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
+        CRABBOX_SHARED_TOKEN: "shared",
+        CRABBOX_SESSION_SECRET: "session-secret",
+      } as Env,
+    );
+    const start = await fleet.fetch(
+      request("GET", "/portal/login?returnTo=/portal/leases/cbx_000000000001/vnc"),
+    );
+    expect(start.status).toBe(302);
+    const location = start.headers.get("location") ?? "";
+    const state = new URL(location).searchParams.get("state");
+    expect(state).toBeTruthy();
+
+    vi.stubGlobal("fetch", githubFetchMock({ member: true }));
+    const callback = await fleet.fetch(
+      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
+    );
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("location")).toBe("/portal/leases/cbx_000000000001/vnc");
+    expect(callback.headers.get("set-cookie")).toContain("crabbox_session=cbxu_");
   });
 
   it("cleans expired GitHub login attempts before rate limiting", async () => {

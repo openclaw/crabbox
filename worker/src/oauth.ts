@@ -12,8 +12,10 @@ const maxGitHubTeamPages = 10;
 interface OAuthPending {
   id: string;
   state: string;
-  pollSecretHash: string;
+  pollSecretHash?: string;
+  mode?: "cli" | "portal";
   provider?: Provider;
+  returnTo?: string;
   createdAt: string;
   expiresAt: string;
   token?: string;
@@ -66,6 +68,49 @@ export async function githubAuthRoute(
   return json({ error: "not_found" }, { status: 404 });
 }
 
+export async function githubPortalLogin(
+  request: Request,
+  storage: DurableObjectStorage,
+  env: Env,
+): Promise<Response> {
+  const clientID = env.CRABBOX_GITHUB_CLIENT_ID;
+  if (!clientID || !env.CRABBOX_GITHUB_CLIENT_SECRET) {
+    return html("Crabbox login unavailable", "GitHub OAuth is not configured.", 503);
+  }
+  const pendingCount = await cleanupExpiredPendingOAuth(storage);
+  if (pendingCount >= maxPendingOAuthLogins) {
+    return html("Crabbox login busy", "Too many pending GitHub logins. Try again shortly.", 429);
+  }
+  const url = new URL(request.url);
+  const id = randomID("login");
+  const state = randomID("state");
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 10 * 60 * 1000);
+  const pending: OAuthPending = {
+    id,
+    state,
+    mode: "portal",
+    returnTo: safePortalReturnTo(url.searchParams.get("returnTo")),
+    createdAt: now.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+  };
+  await storage.put(oauthKey(id), pending);
+  await storage.put(oauthStateKey(state), id);
+
+  const authorize = new URL(githubAuthorizeURL);
+  authorize.searchParams.set("client_id", clientID);
+  authorize.searchParams.set("redirect_uri", githubRedirectURI(request, env));
+  authorize.searchParams.set("scope", "read:user user:email read:org");
+  authorize.searchParams.set("state", state);
+  return redirect(authorize.toString(), 302);
+}
+
+export function githubPortalLogout(): Response {
+  return redirect("/portal/login", 302, {
+    "set-cookie": portalSessionCookie("", 0),
+  });
+}
+
 async function githubAuthStart(
   request: Request,
   storage: DurableObjectStorage,
@@ -102,6 +147,7 @@ async function githubAuthStart(
   const pending: OAuthPending = {
     id,
     state,
+    mode: "cli",
     pollSecretHash: input.pollSecretHash,
     createdAt: now.toISOString(),
     expiresAt: expiresAt.toISOString(),
@@ -171,6 +217,12 @@ async function githubAuthCallback(
     pending.org = org;
     pending.login = identity.login;
     await storage.put(oauthKey(pending.id), pending);
+    if (pending.mode === "portal") {
+      await deletePendingOAuth(storage, pending);
+      return redirect(pending.returnTo || "/portal", 302, {
+        "set-cookie": portalSessionCookie(pending.token, 30 * 24 * 60 * 60),
+      });
+    }
     return html(
       "Crabbox login complete",
       "GitHub authorized Crabbox. You can close this tab and return to the terminal.",
@@ -193,6 +245,12 @@ async function githubAuthPoll(request: Request, storage: DurableObjectStorage): 
   const pending = await storage.get<OAuthPending>(oauthKey(input.loginID));
   if (!pending || Date.parse(pending.expiresAt) <= Date.now()) {
     return json({ status: "expired" }, { status: 410 });
+  }
+  if (pending.mode === "portal") {
+    return json({ error: "forbidden" }, { status: 403 });
+  }
+  if (!pending.pollSecretHash) {
+    return json({ error: "invalid_poll" }, { status: 400 });
   }
   if ((await sha256Hex(input.pollSecret)) !== pending.pollSecretHash) {
     return json({ error: "forbidden" }, { status: 403 });
@@ -450,6 +508,38 @@ function html(title: string, message: string, status = 200): Response {
     `<!doctype html><html><head><meta charset="utf-8"><title>${escapedTitle}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:42rem;margin:5rem auto;padding:0 1rem;line-height:1.5;color:#111}code{background:#f4f4f5;padding:.15rem .3rem;border-radius:4px}</style></head><body><h1>${escapedTitle}</h1><p>${escapedMessage}</p></body></html>`,
     { status, headers: { "content-type": "text/html; charset=utf-8" } },
   );
+}
+
+function redirect(location: string, status = 302, headers: Record<string, string> = {}): Response {
+  return new Response(null, {
+    status,
+    headers: {
+      location,
+      ...headers,
+    },
+  });
+}
+
+function portalSessionCookie(value: string, maxAgeSeconds: number): string {
+  const attrs = [
+    `crabbox_session=${encodeURIComponent(value)}`,
+    "Path=/",
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+    `Max-Age=${Math.max(0, Math.trunc(maxAgeSeconds))}`,
+  ];
+  return attrs.join("; ");
+}
+
+function safePortalReturnTo(value: string | null): string {
+  if (!value || !value.startsWith("/portal")) {
+    return "/portal";
+  }
+  if (value.startsWith("//") || value.includes("://")) {
+    return "/portal";
+  }
+  return value;
 }
 
 function escapeHTML(value: string): string {

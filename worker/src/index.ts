@@ -11,16 +11,33 @@ export default {
     if (request.method === "GET" && url.pathname === "/v1/health") {
       return json({ ok: true, service: "crabbox-coordinator" });
     }
+    if (request.method === "GET" && url.pathname === "/") {
+      return new Response(null, { status: 302, headers: { location: "/portal" } });
+    }
     if (url.pathname.startsWith("/v1/auth/")) {
       const id = env.FLEET.idFromName("default");
       return env.FLEET.get(id).fetch(request);
     }
-    const auth = await authenticateRequest(request, env);
+    if (url.pathname === "/portal/login" || url.pathname === "/portal/logout") {
+      const id = env.FLEET.idFromName("default");
+      return env.FLEET.get(id).fetch(request);
+    }
+    const portal = url.pathname.startsWith("/portal");
+    const authRequest = portal ? requestWithPortalCookie(request) : request;
+    const auth = await authenticateRequest(authRequest, env);
     if (!auth?.authorized) {
+      if (portal && request.method === "GET" && request.headers.get("upgrade") !== "websocket") {
+        const login = new URL("/portal/login", url.origin);
+        login.searchParams.set("returnTo", `${url.pathname}${url.search}`);
+        return new Response(null, {
+          status: 302,
+          headers: { location: login.pathname + login.search },
+        });
+      }
       return json({ error: "unauthorized" }, { status: 401 });
     }
     const id = env.FLEET.idFromName("default");
-    return env.FLEET.get(id).fetch(requestWithAuthContext(request, auth));
+    return env.FLEET.get(id).fetch(requestWithAuthContext(authRequest, auth));
   },
 };
 
@@ -37,4 +54,27 @@ export async function isAuthorized(
   >,
 ): Promise<boolean> {
   return Boolean((await authenticateRequest(request, env))?.authorized);
+}
+
+function requestWithPortalCookie(request: Request): Request {
+  if (request.headers.get("authorization")) {
+    return request;
+  }
+  const token = cookieValue(request.headers.get("cookie") ?? "", "crabbox_session");
+  if (!token) {
+    return request;
+  }
+  const headers = new Headers(request.headers);
+  headers.set("authorization", `Bearer ${token}`);
+  return new Request(request, { headers });
+}
+
+function cookieValue(header: string, name: string): string {
+  for (const part of header.split(";")) {
+    const [rawKey, ...rawValue] = part.trim().split("=");
+    if (rawKey === name) {
+      return decodeURIComponent(rawValue.join("="));
+    }
+  }
+  return "";
 }

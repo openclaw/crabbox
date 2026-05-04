@@ -60,6 +60,10 @@ URL for you:
 crabbox vnc --id blue-lobster --open
 ```
 
+Use `crabbox webvnc --id <lease> --open` when you want the same desktop inside
+the authenticated coordinator portal instead of a native VNC client. WebVNC
+still uses a local SSH tunnel and does not expose the runner's VNC port.
+
 Keep the tunnel process alive while you are connected.
 
 ## Credentials

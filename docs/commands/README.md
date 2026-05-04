@@ -26,6 +26,7 @@ Command docs live here, one file per top-level command. Keep `docs/cli.md` as th
 - [actions](actions.md)
 - [ssh](ssh.md)
 - [vnc](vnc.md)
+- [webvnc](webvnc.md)
 - [screenshot](screenshot.md)
 - [inspect](inspect.md)
 - [stop](stop.md)

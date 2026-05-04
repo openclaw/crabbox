@@ -41,6 +41,7 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - Worker cloud-init bootstrap: `worker/src/bootstrap.ts`
 - Desktop/browser capability flags, env injection, and VNC checks: `internal/cli/capabilities.go`, `internal/cli/run.go`
 - VNC tunnel command: `internal/cli/vnc.go`
+- WebVNC portal bridge: `internal/cli/webvnc.go`, `worker/src/portal.ts`, `worker/src/fleet.ts`
 - Desktop screenshot command: `internal/cli/screenshot.go`
 - Interactive desktop/VNC contract: `docs/features/interactive-desktop-vnc.md`
 
