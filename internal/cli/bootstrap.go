@@ -110,6 +110,7 @@ func windowsBootstrapPowerShell(cfg Config, publicKey string) string {
 	wslMode := cfg.WindowsMode == windowsModeWSL2
 	return `
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 function Retry($ScriptBlock) {
   for ($i = 1; $i -le 8; $i++) {
@@ -133,6 +134,7 @@ $wslMode = $` + fmt.Sprint(wslMode) + `
 $wslDistro = "Crabbox"
 $wslRoot = "C:\ProgramData\crabbox\wsl\Crabbox"
 $wslRootfs = "C:\ProgramData\crabbox\wsl\ubuntu-noble-wsl-amd64.rootfs.tar.gz"
+$wslRootfsDownload = "$wslRootfs.download"
 $wslRootfsMinBytes = 100 * 1024 * 1024
 $wslSetup = "C:\ProgramData\crabbox\wsl\linux-setup.sh"
 $wslFeaturesMarker = "C:\ProgramData\crabbox\wsl-features-rebooted"
@@ -183,10 +185,30 @@ function Initialize-CrabboxWSL2 {
       Remove-Item -Force -LiteralPath $wslRootfs
     }
     if (-not (Test-Path -LiteralPath $wslRootfs)) {
+      Remove-Item -Force -LiteralPath $wslRootfsDownload -ErrorAction SilentlyContinue
       Retry {
-        Invoke-WebRequest -Uri ` + psQuote(ubuntuWSLRootFSURL) + ` -OutFile $wslRootfs -UseBasicParsing
-        if ((Get-Item -LiteralPath $wslRootfs).Length -lt $wslRootfsMinBytes) { throw "downloaded WSL rootfs is incomplete" }
+        $expectedLength = 0
+        try {
+          $head = Invoke-WebRequest -Uri ` + psQuote(ubuntuWSLRootFSURL) + ` -Method Head -UseBasicParsing
+          if ($head.Headers.ContainsKey("Content-Length")) {
+            [void][Int64]::TryParse(($head.Headers["Content-Length"] | Select-Object -First 1), [ref]$expectedLength)
+          }
+        } catch {
+          $expectedLength = 0
+        }
+        if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+          & curl.exe -fL --retry 8 --retry-delay 5 --connect-timeout 30 --speed-time 30 --speed-limit 1024 -o $wslRootfsDownload ` + psQuote(ubuntuWSLRootFSURL) + `
+          if ($LASTEXITCODE -ne 0) { throw "download WSL rootfs failed with exit $LASTEXITCODE" }
+        } else {
+          Invoke-WebRequest -Uri ` + psQuote(ubuntuWSLRootFSURL) + ` -OutFile $wslRootfsDownload -UseBasicParsing
+        }
+        $actualLength = (Get-Item -LiteralPath $wslRootfsDownload).Length
+        if ($actualLength -lt $wslRootfsMinBytes) { throw "downloaded WSL rootfs is incomplete" }
+        if ($expectedLength -gt 0 -and $actualLength -ne $expectedLength) {
+          throw "downloaded WSL rootfs is incomplete: $actualLength of $expectedLength bytes"
+        }
       }
+      Move-Item -Force -LiteralPath $wslRootfsDownload -Destination $wslRootfs
     }
     wsl.exe --import $wslDistro $wslRoot $wslRootfs --version 2 | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "wsl --import failed with exit $LASTEXITCODE" }
