@@ -381,11 +381,29 @@ func wrapRemoteForTarget(target SSHTarget, remote string) string {
 		return powershellCommand(remote)
 	}
 	if isWindowsWSL2Target(target) {
-		return powershellCommand(`$ErrorActionPreference = "Stop"
-& wsl.exe --exec bash -lc ` + psQuote(remote) + `
-exit $LASTEXITCODE`)
+		return wsl2Command(remote)
 	}
 	return remote
+}
+
+func wsl2Command(remote string) string {
+	encoded := base64.StdEncoding.EncodeToString([]byte(remote))
+	return powershellCommand(`$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+$dir = "C:\ProgramData\crabbox\commands"
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$name = "cmd-" + [Guid]::NewGuid().ToString("N") + ".sh"
+$path = Join-Path $dir $name
+$scriptBytes = [Convert]::FromBase64String("` + encoded + `")
+[System.IO.File]::WriteAllBytes($path, $scriptBytes)
+$wslPath = "/mnt/c/ProgramData/crabbox/commands/" + $name
+try {
+  & wsl.exe --exec bash $wslPath
+  $code = $LASTEXITCODE
+} finally {
+  Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+}
+exit $code`)
 }
 
 func startSyncHeartbeat(stderr io.Writer, start time.Time, interval time.Duration) func() {

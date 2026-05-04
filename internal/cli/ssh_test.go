@@ -111,18 +111,39 @@ func decodePowerShellCommand(t *testing.T, command string) string {
 
 func TestWSL2WrapsRemoteCommand(t *testing.T) {
 	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
-	got := wrapRemoteForTarget(target, "echo ok")
+	remote := `printf "ok\n"; echo 'quoted'`
+	got := wrapRemoteForTarget(target, remote)
 	if !strings.HasPrefix(got, "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ") {
 		t.Fatalf("WSL2 command should use encoded PowerShell: %q", got)
 	}
 	decoded := decodePowerShellCommand(t, got)
 	for _, want := range []string{
-		`& wsl.exe --exec bash -lc 'echo ok'`,
-		`exit $LASTEXITCODE`,
+		`[Convert]::FromBase64String("`,
+		`[System.IO.File]::WriteAllBytes($path, $scriptBytes)`,
+		`& wsl.exe --exec bash $wslPath`,
+		`$code = $LASTEXITCODE`,
+		`exit $code`,
 	} {
 		if !strings.Contains(decoded, want) {
 			t.Fatalf("WSL2 command missing %q in %q", want, decoded)
 		}
+	}
+	start := strings.Index(decoded, `[Convert]::FromBase64String("`)
+	if start < 0 {
+		t.Fatalf("WSL2 command missing base64 payload: %q", decoded)
+	}
+	start += len(`[Convert]::FromBase64String("`)
+	end := strings.Index(decoded[start:], `")`)
+	if end < 0 {
+		t.Fatalf("WSL2 command has unterminated base64 payload: %q", decoded)
+	}
+	payload := decoded[start : start+end]
+	raw, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		t.Fatalf("WSL2 command payload is not base64: %v", err)
+	}
+	if string(raw) != remote {
+		t.Fatalf("WSL2 command payload=%q want %q", string(raw), remote)
 	}
 }
 
