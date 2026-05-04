@@ -27,6 +27,9 @@ func normalizeTargetConfig(cfg *Config) {
 	if cfg.Provider == "aws" && cfg.TargetOS == targetMacOS && cfg.SSHUser == baseConfig().SSHUser {
 		cfg.SSHUser = "ec2-user"
 	}
+	if cfg.Provider == "aws" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 && cfg.SSHUser == baseConfig().SSHUser {
+		cfg.SSHUser = "Administrator"
+	}
 	if cfg.Static.User != "" && cfg.SSHUser == baseConfig().SSHUser {
 		cfg.SSHUser = cfg.Static.User
 	}

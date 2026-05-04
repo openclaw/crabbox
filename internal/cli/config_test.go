@@ -147,6 +147,9 @@ ssh:
 	if cfg.ServerType != "m8i.large" {
 		t.Fatalf("ServerType=%q want m8i.large", cfg.ServerType)
 	}
+	if cfg.SSHUser != "Administrator" {
+		t.Fatalf("SSHUser=%q want Administrator", cfg.SSHUser)
+	}
 	if cfg.Coordinator != "https://crabbox.example.test" || cfg.CoordToken != "secret" || cfg.CoordAdminToken != "admin-secret" {
 		t.Fatalf("broker config not loaded: %#v", cfg)
 	}
