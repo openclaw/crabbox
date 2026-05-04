@@ -34,17 +34,68 @@ func TestIsloWarmupArgs(t *testing.T) {
 	}
 }
 
-func TestIsloRunArgsArgvQuoting(t *testing.T) {
+func TestIsloRunArgsLeadingEnvUsesShell(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Islo.Image = "docker.io/library/ubuntu:24.04"
 	got := isloRunArgs(cfg, "crabbox-abc", []string{"OPENCLAW_TESTBOX=1", "pnpm", "check:changed"}, false)
 	want := []string{
 		"use", "crabbox-abc",
 		"--image", "docker.io/library/ubuntu:24.04",
-		"--", "OPENCLAW_TESTBOX=1", "pnpm", "check:changed",
+		"--", "bash", "-lc", "OPENCLAW_TESTBOX='1' 'pnpm' 'check:changed'",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args=%#v want %#v", got, want)
+	}
+}
+
+func TestIsloRunArgsArgvWithoutEnv(t *testing.T) {
+	cfg := baseConfig()
+	got := isloRunArgs(cfg, "sb", []string{"go", "test", "./..."}, false)
+	want := []string{"use", "sb", "--", "go", "test", "./..."}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args=%#v want %#v", got, want)
+	}
+}
+
+func TestIsloCommandStringQuoting(t *testing.T) {
+	tests := []struct {
+		name    string
+		command []string
+		want    string
+	}{
+		{name: "argv", command: []string{"pnpm", "test", "has space"}, want: "'pnpm' 'test' 'has space'"},
+		{name: "env assignment", command: []string{"FOO=1", "BAR=value with spaces", "pnpm", "check"}, want: "FOO='1' BAR='value with spaces' 'pnpm' 'check'"},
+		{name: "env after command stays argv", command: []string{"echo", "FOO=1"}, want: "'echo' 'FOO=1'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isloCommandString(tt.command); got != tt.want {
+				t.Fatalf("got=%q want=%q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasLeadingEnvAssignment(t *testing.T) {
+	if !hasLeadingEnvAssignment([]string{"FOO=1", "cmd"}) {
+		t.Error("FOO=1 cmd should be detected")
+	}
+	if hasLeadingEnvAssignment([]string{"cmd", "FOO=1"}) {
+		t.Error("cmd FOO=1 should NOT be detected (env after cmd)")
+	}
+	if hasLeadingEnvAssignment([]string{}) {
+		t.Error("empty command should NOT be detected")
+	}
+	if hasLeadingEnvAssignment([]string{"go", "test"}) {
+		t.Error("plain argv should NOT be detected")
+	}
+}
+
+func TestIsloStatusRejectsJSON(t *testing.T) {
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	err := app.isloStatus(context.Background(), baseConfig(), "sb", false, 0, true)
+	if err == nil || !strings.Contains(err.Error(), "does not support --json") {
+		t.Fatalf("expected --json rejection, got %v", err)
 	}
 }
 

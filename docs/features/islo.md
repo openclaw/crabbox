@@ -93,6 +93,12 @@ Because islo owns sync in this mode, Crabbox sync flags such as `--sync-only`, `
 
 `islo.image` is required only when Crabbox needs to warm or acquire a sandbox. Reusing an existing sandbox name or slug does not need image config.
 
+`crabbox status --provider islo --json` is not supported in v1: islo's native `--output json` returns a sandbox shape (`SandboxResponse`) that does not match Crabbox's uniform `statusView`. Run `islo status <name> -o json` directly when scripting against the islo schema. The human form (`crabbox status --provider islo --id <name>`) streams islo's CLI output verbatim.
+
+`islo.idleTimeout` is a Crabbox-local accounting value: it is recorded in the local repo claim so `crabbox list` and `crabbox status` can show idle expectations, but it is **not** forwarded to islo (`islo use` has no `--idle-timeout` flag). Configure idle/sandbox lifetime in islo itself when you need server-side enforcement.
+
+Reusing an existing sandbox: `crabbox run --provider islo --id <name> -- <cmd>` resumes a paused sandbox automatically (islo's `use` semantics). Creation flags such as `--islo-image` or `--islo-source` are silently ignored by islo when the sandbox already exists, so they're safe to leave in repo YAML for the warmup case.
+
 ## Choosing The Path
 
 Use the one-liner when:

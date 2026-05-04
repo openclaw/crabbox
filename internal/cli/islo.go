@@ -201,12 +201,15 @@ func (a App) isloList(ctx context.Context, cfg Config, jsonOut bool) error {
 }
 
 func (a App) isloStatus(ctx context.Context, cfg Config, id string, wait bool, waitTimeout time.Duration, jsonOut bool) error {
+	if jsonOut {
+		return exit(2, "islo status does not support --json; run 'islo status <name> -o json' for the islo-native shape")
+	}
 	sandboxName, _, err := resolveIsloLeaseID(id, "", false)
 	if err != nil {
 		return err
 	}
 	if !wait {
-		return a.streamIslo(ctx, isloStatusArgs(cfg, sandboxName, jsonOut))
+		return a.streamIslo(ctx, isloStatusArgs(cfg, sandboxName, false))
 	}
 	deadline := time.Now().Add(waitTimeout)
 	for {
@@ -217,10 +220,6 @@ func (a App) isloStatus(ctx context.Context, cfg Config, id string, wait bool, w
 				Status string `json:"status"`
 			}
 			if jsonErr := json.Unmarshal(out, &view); jsonErr == nil && view.Status == "running" {
-				if jsonOut {
-					_, _ = a.Stdout.Write(out)
-					return nil
-				}
 				return a.streamIslo(ctx, isloStatusArgs(cfg, sandboxName, false))
 			}
 		}
@@ -311,8 +310,39 @@ func isloRunArgs(cfg Config, sandboxName string, command []string, shellMode boo
 	if shellMode || shouldUseShell(command) {
 		return append(args, "--", "bash", "-lc", strings.Join(command, " "))
 	}
+	if hasLeadingEnvAssignment(command) {
+		return append(args, "--", "bash", "-lc", isloCommandString(command))
+	}
 	args = append(args, "--")
 	return append(args, command...)
+}
+
+func isloCommandString(command []string) string {
+	if len(command) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(command))
+	seenCommand := false
+	for _, word := range command {
+		if !seenCommand && isShellEnvAssignment(word) {
+			key, value, _ := strings.Cut(word, "=")
+			parts = append(parts, key+"="+shellQuote(value))
+			continue
+		}
+		seenCommand = true
+		parts = append(parts, shellQuote(word))
+	}
+	return strings.Join(parts, " ")
+}
+
+func hasLeadingEnvAssignment(command []string) bool {
+	for _, word := range command {
+		if isShellEnvAssignment(word) {
+			return true
+		}
+		return false
+	}
+	return false
 }
 
 func isloStatusArgs(cfg Config, sandboxName string, jsonOut bool) []string {
@@ -386,7 +416,7 @@ func isloIdleTimeout(cfg Config) time.Duration {
 }
 
 func newIsloSandboxName() string {
-	var b [4]byte
+	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return isloNamePrefix + strings.ReplaceAll(time.Now().UTC().Format("150405.000"), ".", "")
 	}
