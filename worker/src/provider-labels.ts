@@ -41,6 +41,12 @@ export function leaseProviderLabels(
   if (config.browser) {
     labels["browser"] = "true";
   }
+  if (config.tailscale) {
+    labels["tailscale"] = "true";
+    labels["tailscale_state"] = "requested";
+    labels["tailscale_hostname"] = config.tailscaleHostname;
+    labels["tailscale_tags"] = config.tailscaleTags.join(",");
+  }
   return sanitizeLabels({ ...labels, ...extra });
 }
 

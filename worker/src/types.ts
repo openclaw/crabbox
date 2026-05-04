@@ -33,6 +33,11 @@ export interface Env {
   CRABBOX_MAX_MONTHLY_USD?: string;
   CRABBOX_MAX_MONTHLY_USD_PER_OWNER?: string;
   CRABBOX_MAX_MONTHLY_USD_PER_ORG?: string;
+  CRABBOX_TAILSCALE_ENABLED?: string;
+  CRABBOX_TAILSCALE_CLIENT_ID?: string;
+  CRABBOX_TAILSCALE_CLIENT_SECRET?: string;
+  CRABBOX_TAILSCALE_TAILNET?: string;
+  CRABBOX_TAILSCALE_TAGS?: string;
 }
 
 export interface LeaseRequest {
@@ -45,6 +50,9 @@ export interface LeaseRequest {
   windowsMode?: WindowsMode;
   desktop?: boolean;
   browser?: boolean;
+  tailscale?: boolean;
+  tailscaleTags?: string[];
+  tailscaleHostname?: string;
   profile?: string;
   class?: string;
   serverType?: string;
@@ -89,6 +97,7 @@ export interface LeaseRecord {
   windowsMode?: WindowsMode;
   desktop?: boolean;
   browser?: boolean;
+  tailscale?: TailscaleMetadata;
   cloudID: string;
   region?: string;
   owner: string;
@@ -118,6 +127,16 @@ export interface LeaseRecord {
   expiresAt: string;
   releasedAt?: string;
   endedAt?: string;
+}
+
+export interface TailscaleMetadata {
+  enabled: boolean;
+  hostname?: string;
+  fqdn?: string;
+  ipv4?: string;
+  tags?: string[];
+  state?: "requested" | "ready" | "failed";
+  error?: string;
 }
 
 export interface ProvisioningAttempt {

@@ -14,6 +14,12 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_COORDINATOR_TOKEN",
 		"CRABBOX_COORDINATOR_ADMIN_TOKEN",
 		"CRABBOX_ADMIN_TOKEN",
+		"CRABBOX_NETWORK",
+		"CRABBOX_TAILSCALE",
+		"CRABBOX_TAILSCALE_TAGS",
+		"CRABBOX_TAILSCALE_HOSTNAME_TEMPLATE",
+		"CRABBOX_TAILSCALE_AUTH_KEY_ENV",
+		"CRABBOX_TAILSCALE_AUTH_KEY",
 		"CRABBOX_ACCESS_CLIENT_ID",
 		"CRABBOX_ACCESS_CLIENT_SECRET",
 		"CRABBOX_ACCESS_TOKEN",
@@ -200,6 +206,42 @@ ssh:
 	}
 }
 
+func TestLoadConfigTailscaleBlock(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	path := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`provider: aws
+network: public
+tailscale:
+  enabled: true
+  network: tailscale
+  tags:
+    - tag:crabbox
+    - tag:ci
+  hostnameTemplate: cbx-{slug}
+  authKeyEnv: TEST_TS_AUTH_KEY
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Tailscale.Enabled || cfg.Network != NetworkTailscale || cfg.Tailscale.HostnameTemplate != "cbx-{slug}" || cfg.Tailscale.AuthKeyEnv != "TEST_TS_AUTH_KEY" {
+		t.Fatalf("tailscale config not loaded: network=%s tailscale=%#v", cfg.Network, cfg.Tailscale)
+	}
+	if len(cfg.Tailscale.Tags) != 2 || cfg.Tailscale.Tags[1] != "tag:ci" {
+		t.Fatalf("tailscale tags not loaded: %#v", cfg.Tailscale.Tags)
+	}
+}
+
 func TestEnvOverridesConfig(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
@@ -216,6 +258,10 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_ACCESS_CLIENT_SECRET", "env-access-secret")
 	t.Setenv("CRABBOX_ACCESS_TOKEN", "env-access-jwt")
 	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "env-admin-secret")
+	t.Setenv("CRABBOX_NETWORK", "public")
+	t.Setenv("CRABBOX_TAILSCALE_TAGS", "tag:crabbox,tag:ci")
+	t.Setenv("CRABBOX_TAILSCALE_HOSTNAME_TEMPLATE", "lease-{id}")
+	t.Setenv("CRABBOX_TAILSCALE_AUTH_KEY", "tskey-secret")
 	t.Setenv("CRABBOX_TARGET", "macos")
 	t.Setenv("CRABBOX_STATIC_HOST", "mac.local")
 	path := userConfigPath()
@@ -247,6 +293,55 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.TargetOS != targetMacOS || cfg.Static.Host != "mac.local" {
 		t.Fatalf("unexpected target env: target=%s static=%#v", cfg.TargetOS, cfg.Static)
+	}
+	if cfg.Network != NetworkPublic || cfg.Tailscale.AuthKey != "tskey-secret" || cfg.Tailscale.HostnameTemplate != "lease-{id}" {
+		t.Fatalf("unexpected tailscale env: network=%s tailscale=%#v", cfg.Network, cfg.Tailscale)
+	}
+	if len(cfg.Tailscale.Tags) != 2 || cfg.Tailscale.Tags[1] != "tag:ci" {
+		t.Fatalf("unexpected tailscale tags: %#v", cfg.Tailscale.Tags)
+	}
+}
+
+func TestTailscaleEnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "hetzner")
+	t.Setenv("CRABBOX_NETWORK", "tailscale")
+	t.Setenv("CRABBOX_TAILSCALE", "1")
+	t.Setenv("CRABBOX_TAILSCALE_TAGS", "tag:crabbox,tag:ci")
+	t.Setenv("CRABBOX_TAILSCALE_HOSTNAME_TEMPLATE", "lease-{slug}")
+	t.Setenv("CRABBOX_TAILSCALE_AUTH_KEY", "tskey-secret")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Network != NetworkTailscale || !cfg.Tailscale.Enabled || cfg.Tailscale.AuthKey != "tskey-secret" || cfg.Tailscale.HostnameTemplate != "lease-{slug}" {
+		t.Fatalf("unexpected tailscale env: network=%s tailscale=%#v", cfg.Network, cfg.Tailscale)
+	}
+	if len(cfg.Tailscale.Tags) != 2 || cfg.Tailscale.Tags[1] != "tag:ci" {
+		t.Fatalf("unexpected tailscale tags: %#v", cfg.Tailscale.Tags)
+	}
+}
+
+func TestInvalidNetworkConfigFails(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	path := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("network: private\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected invalid network config to fail")
 	}
 }
 

@@ -13,6 +13,7 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - Command router and top-level help: `internal/cli/app.go`
 - Shared flag parsing and exit helpers: `internal/cli/flags.go`, `internal/cli/errors.go`
 - Config defaults, YAML keys, env overrides, target selection, and class maps: `internal/cli/config.go`, `internal/cli/target.go`
+- Network target resolution and Tailscale metadata: `internal/cli/network.go`
 - `crabbox init` generated repo files: `internal/cli/init.go`
 - Login/logout/whoami/config commands: `internal/cli/auth.go`, `internal/cli/config_cmd.go`
 - Doctor checks: `internal/cli/doctor.go`
@@ -26,6 +27,7 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - Direct-provider labels, safe label encoding, idle touch labels, TTL cap math: `internal/cli/provider_labels.go`
 - Coordinator client request/response structs, slug lookup, heartbeats, usage, run history: `internal/cli/coordinator.go`
 - Worker lease records, public routes, slug allocation, heartbeat expiry math, alarms: `worker/src/fleet.ts`, `worker/src/types.ts`
+- Worker Tailscale OAuth auth-key minting: `worker/src/tailscale.ts`
 - Worker slug generation and provider labels: `worker/src/slug.ts`, `worker/src/provider-labels.ts`
 
 ## Providers And Runner Bootstrap
@@ -39,6 +41,7 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - Worker AWS AMI create/read/promote routes: `worker/src/fleet.ts`, `worker/src/aws.ts`
 - CLI cloud-init bootstrap: `internal/cli/bootstrap.go`
 - Worker cloud-init bootstrap: `worker/src/bootstrap.ts`
+- Tailscale feature contract: `docs/features/tailscale.md`
 - Desktop/browser capability flags, env injection, and VNC checks: `internal/cli/capabilities.go`, `internal/cli/run.go`
 - Desktop app launch into visible sessions: `internal/cli/desktop.go`
 - VNC tunnel command: `internal/cli/vnc.go`

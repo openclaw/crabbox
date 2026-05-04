@@ -83,6 +83,28 @@ CRABBOX_GITHUB_ALLOWED_TEAMS
 CRABBOX_SESSION_SECRET
 ```
 
+Optional Tailscale brokered reachability uses a Tailscale OAuth client with the
+`auth_keys` scope and only the tags Crabbox may assign, usually `tag:crabbox`.
+Store OAuth credentials as Worker secrets:
+
+```text
+CRABBOX_TAILSCALE_CLIENT_ID
+CRABBOX_TAILSCALE_CLIENT_SECRET
+```
+
+Optional Worker config:
+
+```text
+CRABBOX_TAILSCALE_ENABLED=1
+CRABBOX_TAILSCALE_TAILNET=-              # or explicit tailnet/org
+CRABBOX_TAILSCALE_TAGS=tag:crabbox       # allowlist/default tags
+```
+
+The Worker mints one-off ephemeral pre-approved auth keys per lease and injects
+the key only into cloud-init. Lease records and provider labels store only
+non-secret Tailscale metadata such as hostname, FQDN, 100.x address, state, and
+tags.
+
 Current local status:
 
 - Core Cloudflare, Hetzner, and GitHub tokens are present in local `~/.profile`.

@@ -15,6 +15,7 @@ func (a App) status(ctx context.Context, args []string) error {
 	waitTimeout := fs.Duration("wait-timeout", 5*time.Minute, "maximum wait duration")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	targetFlags := registerTargetFlags(fs, defaultConfig())
+	networkFlags := registerNetworkModeFlag(fs, defaultConfig())
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -27,6 +28,9 @@ func (a App) status(ctx context.Context, args []string) error {
 	}
 	cfg.Provider = *provider
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
+		return err
+	}
+	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
 		return err
 	}
 	if *id == "" && !isStaticProvider(cfg.Provider) {
@@ -49,7 +53,11 @@ func (a App) status(ctx context.Context, args []string) error {
 				return json.NewEncoder(a.Stdout).Encode(state)
 			}
 		} else {
-			fmt.Fprintf(a.Stdout, "%s slug=%s provider=%s target=%s windows_mode=%s state=%s type=%s host=%s ready=%t has_host=%t idle_for=%s idle_timeout=%s expires=%s\n", state.ID, blank(state.Slug, "-"), state.Provider, state.TargetOS, blank(state.WindowsMode, "-"), state.State, state.ServerType, state.Host, state.Ready, state.HasHost, blank(state.IdleFor, "-"), blank(state.IdleTimeout, "-"), blank(state.ExpiresAt, "-"))
+			tailscale := ""
+			if state.Tailscale != nil && state.Tailscale.Enabled {
+				tailscale = fmt.Sprintf(" tailscale=%s", blank(tailscaleTargetHost(*state.Tailscale), blank(state.Tailscale.State, "requested")))
+			}
+			fmt.Fprintf(a.Stdout, "%s slug=%s provider=%s target=%s windows_mode=%s state=%s type=%s host=%s network=%s%s ready=%t has_host=%t idle_for=%s idle_timeout=%s expires=%s\n", state.ID, blank(state.Slug, "-"), state.Provider, state.TargetOS, blank(state.WindowsMode, "-"), state.State, state.ServerType, state.Host, state.Network, tailscale, state.Ready, state.HasHost, blank(state.IdleFor, "-"), blank(state.IdleTimeout, "-"), blank(state.ExpiresAt, "-"))
 		}
 		if !*wait || state.Ready {
 			return nil
@@ -62,26 +70,29 @@ func (a App) status(ctx context.Context, args []string) error {
 }
 
 type statusView struct {
-	ID               string            `json:"id"`
-	Slug             string            `json:"slug,omitempty"`
-	Provider         string            `json:"provider"`
-	TargetOS         string            `json:"target"`
-	WindowsMode      string            `json:"windowsMode,omitempty"`
-	State            string            `json:"state"`
-	ServerID         string            `json:"serverId"`
-	ServerType       string            `json:"serverType"`
-	Host             string            `json:"host"`
-	SSHUser          string            `json:"sshUser"`
-	SSHPort          string            `json:"sshPort"`
-	SSHFallbackPorts []string          `json:"sshFallbackPorts,omitempty"`
-	SSHKey           string            `json:"sshKey"`
-	LastTouchedAt    string            `json:"lastTouchedAt,omitempty"`
-	IdleFor          string            `json:"idleFor,omitempty"`
-	IdleTimeout      string            `json:"idleTimeout,omitempty"`
-	ExpiresAt        string            `json:"expiresAt,omitempty"`
-	Labels           map[string]string `json:"labels,omitempty"`
-	HasHost          bool              `json:"hasHost"`
-	Ready            bool              `json:"ready"`
+	ID               string             `json:"id"`
+	Slug             string             `json:"slug,omitempty"`
+	Provider         string             `json:"provider"`
+	TargetOS         string             `json:"target"`
+	WindowsMode      string             `json:"windowsMode,omitempty"`
+	State            string             `json:"state"`
+	ServerID         string             `json:"serverId"`
+	ServerType       string             `json:"serverType"`
+	Host             string             `json:"host"`
+	Network          NetworkMode        `json:"network"`
+	Tailscale        *TailscaleMetadata `json:"tailscale,omitempty"`
+	SSHHost          string             `json:"sshHost"`
+	SSHUser          string             `json:"sshUser"`
+	SSHPort          string             `json:"sshPort"`
+	SSHFallbackPorts []string           `json:"sshFallbackPorts,omitempty"`
+	SSHKey           string             `json:"sshKey"`
+	LastTouchedAt    string             `json:"lastTouchedAt,omitempty"`
+	IdleFor          string             `json:"idleFor,omitempty"`
+	IdleTimeout      string             `json:"idleTimeout,omitempty"`
+	ExpiresAt        string             `json:"expiresAt,omitempty"`
+	Labels           map[string]string  `json:"labels,omitempty"`
+	HasHost          bool               `json:"hasHost"`
+	Ready            bool               `json:"ready"`
 }
 
 func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView, error) {
@@ -92,7 +103,12 @@ func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView
 		if err != nil {
 			return statusView{}, err
 		}
-		_, target, _ := leaseToServerTarget(lease, cfg)
+		server, target, _ := leaseToServerTarget(lease, cfg)
+		resolved, err := resolveNetworkTarget(ctx, cfg, server, target)
+		if err != nil {
+			return statusView{}, err
+		}
+		target = resolved.Target
 		hasHost := lease.Host != ""
 		ready := lease.State == "active" && hasHost && probeSSHReady(ctx, &target, 4*time.Second)
 		return statusView{
@@ -105,6 +121,9 @@ func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView
 			ServerID:         leaseDisplayID(lease),
 			ServerType:       lease.ServerType,
 			Host:             lease.Host,
+			Network:          resolved.Network,
+			Tailscale:        lease.Tailscale,
+			SSHHost:          target.Host,
 			SSHUser:          target.User,
 			SSHPort:          target.Port,
 			SSHFallbackPorts: target.FallbackPorts,
@@ -123,7 +142,17 @@ func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView
 		return statusView{}, err
 	}
 	hasHost := server.PublicNet.IPv4.IP != ""
+	resolved, err := resolveNetworkTarget(ctx, cfg, server, target)
+	if err != nil {
+		return statusView{}, err
+	}
+	target = resolved.Target
 	ready := hasHost && server.Labels["state"] != "provisioning" && probeSSHReady(ctx, &target, 4*time.Second)
+	meta := serverTailscaleMetadata(server)
+	var tailscale *TailscaleMetadata
+	if meta.Enabled {
+		tailscale = &meta
+	}
 	return statusView{
 		ID:               leaseID,
 		Slug:             serverSlug(server),
@@ -134,6 +163,9 @@ func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView
 		ServerID:         server.DisplayID(),
 		ServerType:       server.ServerType.Name,
 		Host:             server.PublicNet.IPv4.IP,
+		Network:          resolved.Network,
+		Tailscale:        tailscale,
+		SSHHost:          target.Host,
 		SSHUser:          target.User,
 		SSHPort:          target.Port,
 		SSHFallbackPorts: target.FallbackPorts,

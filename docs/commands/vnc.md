@@ -12,6 +12,7 @@ inside a lease:
 ```sh
 crabbox warmup --desktop
 crabbox vnc --id blue-lobster
+crabbox vnc --id blue-lobster --network tailscale
 crabbox vnc --id blue-lobster --open
 ```
 
@@ -63,6 +64,10 @@ crabbox vnc --id blue-lobster --open
 Use `crabbox webvnc --id <lease> --open` when you want the same desktop inside
 the authenticated coordinator portal instead of a native VNC client. WebVNC
 still uses a local SSH tunnel and does not expose the runner's VNC port.
+
+When `--network tailscale` is selected, only the SSH endpoint changes. Managed
+VNC remains loopback-bound on the runner and is still reached through the SSH
+tunnel.
 
 Keep the tunnel process alive while you are connected.
 
@@ -235,6 +240,7 @@ make sure the Dedicated Host is allocated in the selected AWS region.
 --static-user <user>
 --static-port <port>
 --static-work-root <path>
+--network auto|tailscale|public
 --local-port <port>
 --open
 --host-managed
@@ -246,4 +252,5 @@ Related docs:
 - [screenshot](screenshot.md)
 - [warmup](warmup.md)
 - [Interactive desktop and VNC](../features/interactive-desktop-vnc.md)
+- [Tailscale](../features/tailscale.md)
 - [Providers](../features/providers.md)

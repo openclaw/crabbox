@@ -82,6 +82,10 @@ all       mac2.metal unless `--type` is set
 
 Direct provider mode still exists when no coordinator is configured. It uses local AWS credentials or `HCLOUD_TOKEN`/`HETZNER_TOKEN` and should stay secondary to the brokered path.
 
+Tailscale is not a provider. Use `--tailscale` to add tailnet reachability to
+new managed Linux leases, or set a static host to a MagicDNS name/100.x address
+when the existing host is already on a tailnet. See [Tailscale](tailscale.md).
+
 Direct smoke shape:
 
 ```sh
@@ -135,6 +139,7 @@ contract and needs `git`, `rsync`, `tar`, and SSH.
 Related docs:
 
 - [Infrastructure](../infrastructure.md)
+- [Tailscale](tailscale.md)
 - [Blacksmith Testbox](blacksmith-testbox.md)
 - [Runner bootstrap](runner-bootstrap.md)
 - [Cost and usage](cost-usage.md)

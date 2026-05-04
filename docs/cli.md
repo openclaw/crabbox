@@ -33,8 +33,8 @@ crabbox init [--force]
 crabbox config show [--json]
 crabbox config path
 crabbox config set-broker --url <url> --token-stdin [--provider hetzner|aws]
-crabbox warmup [--provider hetzner|aws|ssh|blacksmith-testbox] [--target linux|macos|windows] [--desktop] [--browser] [--profile <name>] [--idle-timeout <duration>] [--timing-json]
-crabbox run [--id <lease-id-or-slug>] [--provider hetzner|aws|ssh|blacksmith-testbox] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--shell] [--checksum] [--debug] [--force-sync-large] [--timing-json] [--blacksmith-workflow <workflow>] -- <command...>
+crabbox warmup [--provider hetzner|aws|ssh|blacksmith-testbox] [--target linux|macos|windows] [--desktop] [--browser] [--tailscale] [--network auto|tailscale|public] [--profile <name>] [--idle-timeout <duration>] [--timing-json]
+crabbox run [--id <lease-id-or-slug>] [--provider hetzner|aws|ssh|blacksmith-testbox] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--tailscale] [--network auto|tailscale|public] [--shell] [--checksum] [--debug] [--force-sync-large] [--timing-json] [--blacksmith-workflow <workflow>] -- <command...>
 crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] [-- <command...>]
 crabbox screenshot --id <lease-id-or-slug> [--output <path>]
 crabbox sync-plan [--limit <n>]
@@ -49,16 +49,16 @@ crabbox cache warm --id <lease-id-or-slug> -- <command...>
 crabbox actions hydrate --id <lease-id-or-slug> [--workflow <file|name|id>] [--wait-timeout <duration>] [--timing-json]
 crabbox actions register --id <lease-id-or-slug> [--repo owner/name]
 crabbox actions dispatch [--workflow <file|name|id>] [-f key=value]
-crabbox status --id <lease-id-or-slug> [--wait]
+crabbox status --id <lease-id-or-slug> [--network auto|tailscale|public] [--wait]
 crabbox list [--json]
 crabbox usage [--scope user|org|all] [--user <email>] [--org <name>] [--month YYYY-MM] [--json]
 crabbox admin leases [--state active|released|expired|failed] [--owner <email>] [--org <name>] [--json]
 crabbox admin release <lease-id-or-slug> [--delete]
 crabbox admin delete <lease-id-or-slug> --force
-crabbox ssh --id <lease-id-or-slug>
-crabbox vnc --id <lease-id-or-slug> [--open]
-crabbox webvnc --id <lease-id-or-slug> [--open]
-crabbox inspect --id <lease-id-or-slug> [--json]
+crabbox ssh --id <lease-id-or-slug> [--network auto|tailscale|public]
+crabbox vnc --id <lease-id-or-slug> [--network auto|tailscale|public] [--open]
+crabbox webvnc --id <lease-id-or-slug> [--network auto|tailscale|public] [--open]
+crabbox inspect --id <lease-id-or-slug> [--network auto|tailscale|public] [--json]
 crabbox stop <lease-id-or-slug>
 crabbox cleanup [--dry-run]
 ```
@@ -81,6 +81,7 @@ Warm a box, then reuse it:
 
 ```sh
 crabbox warmup --profile project-check
+crabbox warmup --tailscale
 crabbox warmup --desktop --browser
 crabbox run --id blue-lobster -- pnpm test:changed
 crabbox vnc --id blue-lobster --open
@@ -133,6 +134,14 @@ Managed provider targets are intentionally narrow:
 - AWS supports Linux, native Windows (`--target windows --windows-mode normal`),
   and EC2 Mac (`--target macos`) when the Mac Dedicated Host is provided.
 - Existing macOS and Windows machines belong on `provider=ssh`.
+
+Use Tailscale as an optional network plane:
+
+```sh
+crabbox warmup --tailscale
+crabbox ssh --id blue-lobster --network tailscale
+crabbox vnc --id blue-lobster --network tailscale --open
+```
 
 Inspect pool:
 

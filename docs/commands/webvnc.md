@@ -6,6 +6,7 @@ portal.
 ```sh
 crabbox warmup --desktop
 crabbox webvnc --id blue-lobster
+crabbox webvnc --id blue-lobster --network tailscale
 crabbox webvnc --id blue-lobster --open
 ```
 
@@ -26,6 +27,9 @@ This keeps the security boundary the same as `crabbox vnc`:
 - The local `crabbox webvnc` process must keep running while the browser uses
   the desktop.
 
+`--network tailscale` changes only the SSH endpoint used for the local tunnel.
+The runner VNC service stays bound to loopback.
+
 `--open` opens the portal page after the bridge starts. If the VNC password is
 available, the command also places it in the URL fragment for the local browser
 tab. URL fragments are not sent to the coordinator. If the portal login flow
@@ -39,6 +43,7 @@ Flags:
 --provider hetzner|aws
 --target linux|macos|windows
 --windows-mode normal|wsl2
+--network auto|tailscale|public
 --local-port <port>
 --open
 --reclaim

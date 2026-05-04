@@ -19,6 +19,7 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	openClient := fs.Bool("open", false, "open the VNC client locally")
 	hostManaged := fs.Bool("host-managed", false, "allow opening host-managed static VNC")
 	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -34,6 +35,9 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
+	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
+		return err
+	}
 	if isBlacksmithProvider(cfg.Provider) {
 		return exit(2, "desktop/VNC is not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
 	}
@@ -46,6 +50,14 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	server, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, *id)
 	if err != nil {
 		return err
+	}
+	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
+		return err
+	} else {
+		target = resolved.Target
+		if resolved.FallbackReason != "" {
+			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+		}
 	}
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err

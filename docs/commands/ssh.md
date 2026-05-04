@@ -4,6 +4,7 @@
 
 ```sh
 crabbox ssh --id blue-lobster
+crabbox ssh --id blue-lobster --network tailscale
 crabbox ssh --provider ssh --target macos --static-host mac-studio.local
 ```
 
@@ -17,7 +18,12 @@ Flags:
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>
+--network auto|tailscale|public
 --reclaim
 ```
 
 `ssh` touches the lease and validates the local repo claim. Use `--reclaim` when intentionally taking over a lease from another repo.
+
+`--network auto` prefers the tailnet host when the lease has Tailscale metadata
+and this client can reach it. `--network tailscale` requires that path.
+`--network public` forces the provider host.

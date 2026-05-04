@@ -80,6 +80,19 @@ describe("lease config", () => {
     expect(config.browser).toBe(true);
   });
 
+  it("preserves Tailscale lease capability requests", () => {
+    const config = leaseConfig({
+      sshPublicKey: "ssh-ed25519 test",
+      tailscale: true,
+      tailscaleTags: ["tag:Crabbox", "tag:ci", "invalid"],
+      tailscaleHostname: "crabbox-blue-lobster",
+    });
+    expect(config.tailscale).toBe(true);
+    expect(config.tailscaleTags).toEqual(["tag:crabbox", "tag:ci"]);
+    expect(config.tailscaleHostname).toBe("crabbox-blue-lobster");
+    expect(config.tailscaleAuthKey).toBe("");
+  });
+
   it("uses AWS defaults when requested", () => {
     const config = leaseConfig({ provider: "aws", sshPublicKey: "ssh-ed25519 test" });
     expect(config.serverType).toBe("c7a.48xlarge");

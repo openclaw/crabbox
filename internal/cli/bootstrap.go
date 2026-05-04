@@ -306,6 +306,10 @@ chmod 0755 /usr/local/bin/crabbox-ready
 
 func cloudInitOptionalReadyChecks(cfg Config) string {
 	var b strings.Builder
+	if cfg.Tailscale.Enabled {
+		b.WriteString("      test -s /var/lib/crabbox/tailscale-ipv4\n")
+		b.WriteString("      grep -Eq '^100\\.' /var/lib/crabbox/tailscale-ipv4\n")
+	}
 	if cfg.Desktop {
 		b.WriteString("      systemctl is-active --quiet crabbox-xvfb.service\n")
 		b.WriteString("      systemctl is-active --quiet crabbox-desktop.service\n")
@@ -405,6 +409,9 @@ func cloudInitOptionalWriteFiles(cfg Config) string {
 
 func cloudInitOptionalBootstrap(cfg Config) string {
 	var parts []string
+	if cfg.Tailscale.Enabled {
+		parts = append(parts, cloudInitTailscaleBootstrap(cfg))
+	}
 	if cfg.Desktop {
 		parts = append(parts, `    retry apt-get install -y --no-install-recommends xvfb xfce4 xfce4-terminal x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot fonts-dejavu-core fonts-liberation iproute2 openssl
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
@@ -446,4 +453,39 @@ func cloudInitOptionalBootstrap(cfg Config) string {
     fi`)
 	}
 	return strings.Join(parts, "\n")
+}
+
+func cloudInitTailscaleBootstrap(cfg Config) string {
+	authKey := strings.TrimSpace(cfg.Tailscale.AuthKey)
+	hostname := strings.TrimSpace(cfg.Tailscale.Hostname)
+	if hostname == "" {
+		hostname = renderTailscaleHostname(cfg.Tailscale.HostnameTemplate, "", "lease", cfg.Provider)
+	}
+	tags := strings.Join(cfg.Tailscale.Tags, ",")
+	if authKey == "" {
+		return `    echo "tailscale requested but no auth key was injected" >&2
+    exit 1`
+	}
+	return `    retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'
+    systemctl enable --now tailscaled || service tailscaled start || true
+    install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
+    set +x
+    TS_AUTHKEY=` + shellQuote(authKey) + `
+    tailscale up --auth-key="$TS_AUTHKEY" --hostname=` + shellQuote(hostname) + ` --advertise-tags=` + shellQuote(tags) + `
+    unset TS_AUTHKEY
+    set -x
+    ts_ip=""
+    for _ in $(seq 1 24); do
+      ts_ip="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
+      if [ -n "$ts_ip" ]; then break; fi
+      sleep 5
+    done
+    test -n "$ts_ip"
+    printf '%s\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4
+    printf '%s\n' ` + shellQuote(hostname) + ` > /var/lib/crabbox/tailscale-hostname
+    if tailscale status --json >/var/lib/crabbox/tailscale-status.json 2>/dev/null; then
+      jq -r '.Self.DNSName // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-fqdn || true
+    fi
+    chown crabbox:crabbox /var/lib/crabbox/tailscale-* || true
+    chmod 0640 /var/lib/crabbox/tailscale-* || true`
 }

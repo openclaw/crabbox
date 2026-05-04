@@ -14,6 +14,7 @@
 - Added authenticated WebVNC portal support with `crabbox webvnc`, which bridges a desktop lease into the coordinator portal with short-lived bridge tickets and without exposing the remote VNC port.
 - Added `crabbox desktop launch` to open a browser or app inside a visible desktop lease, including native Windows scheduled-task launch for the logged-in console session.
 - Added a minimal XFCE desktop profile with panel/window manager for managed VNC leases.
+- Added optional Tailscale reachability for managed Linux leases with `--tailscale`, `--network auto|tailscale|public`, brokered OAuth auth-key minting, and non-secret tailnet metadata in status/inspect output.
 - Clarified static macOS/Windows VNC as existing-host access, not Crabbox-created boxes, so `--open` no longer launches an OS credential prompt unless `--host-managed` is passed.
 
 ### Fixed

@@ -258,6 +258,12 @@ chmod 0755 /usr/local/bin/crabbox-ready
 
 function optionalReadyChecks(config: LeaseConfig): string {
   const lines: string[] = [];
+  if (config.tailscale) {
+    lines.push(
+      "      test -s /var/lib/crabbox/tailscale-ipv4",
+      "      grep -Eq '^100\\.' /var/lib/crabbox/tailscale-ipv4",
+    );
+  }
   if (config.desktop) {
     lines.push(
       "      systemctl is-active --quiet crabbox-xvfb.service",
@@ -361,6 +367,9 @@ function optionalWriteFiles(config: LeaseConfig): string {
 
 function optionalBootstrap(config: LeaseConfig): string {
   const parts: string[] = [];
+  if (config.tailscale) {
+    parts.push(tailscaleBootstrap(config));
+  }
   if (config.desktop) {
     parts.push(`    retry apt-get install -y --no-install-recommends xvfb xfce4 xfce4-terminal x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot fonts-dejavu-core fonts-liberation iproute2 openssl
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
@@ -402,6 +411,35 @@ function optionalBootstrap(config: LeaseConfig): string {
     fi`);
   }
   return parts.join("\n");
+}
+
+function tailscaleBootstrap(config: LeaseConfig): string {
+  if (!config.tailscaleAuthKey) {
+    return `    echo "tailscale requested but no auth key was injected" >&2
+    exit 1`;
+  }
+  return `    retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'
+    systemctl enable --now tailscaled || service tailscaled start || true
+    install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
+    set +x
+    TS_AUTHKEY=${shellQuote(config.tailscaleAuthKey)}
+    tailscale up --auth-key="$TS_AUTHKEY" --hostname=${shellQuote(config.tailscaleHostname)} --advertise-tags=${shellQuote(config.tailscaleTags.join(","))}
+    unset TS_AUTHKEY
+    set -x
+    ts_ip=""
+    for _ in $(seq 1 24); do
+      ts_ip="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
+      if [ -n "$ts_ip" ]; then break; fi
+      sleep 5
+    done
+    test -n "$ts_ip"
+    printf '%s\\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4
+    printf '%s\\n' ${shellQuote(config.tailscaleHostname)} > /var/lib/crabbox/tailscale-hostname
+    if tailscale status --json >/var/lib/crabbox/tailscale-status.json 2>/dev/null; then
+      jq -r '.Self.DNSName // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-fqdn || true
+    fi
+    chown crabbox:crabbox /var/lib/crabbox/tailscale-* || true
+    chmod 0640 /var/lib/crabbox/tailscale-* || true`;
 }
 
 function psQuote(value: string): string {

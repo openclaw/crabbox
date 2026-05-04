@@ -6,6 +6,10 @@ export interface LeaseConfig {
   windowsMode: WindowsMode;
   desktop: boolean;
   browser: boolean;
+  tailscale: boolean;
+  tailscaleTags: string[];
+  tailscaleHostname: string;
+  tailscaleAuthKey: string;
   profile: string;
   class: string;
   serverType: string;
@@ -82,6 +86,10 @@ export function leaseConfig(input: LeaseRequest): LeaseConfig {
     windowsMode,
     desktop: input.desktop ?? false,
     browser: input.browser ?? false,
+    tailscale: input.tailscale ?? false,
+    tailscaleTags: normalizeTailscaleTags(input.tailscaleTags ?? ["tag:crabbox"]),
+    tailscaleHostname: input.tailscaleHostname ?? "",
+    tailscaleAuthKey: "",
     profile: input.profile ?? "default",
     class: machineClass,
     serverType,
@@ -123,6 +131,14 @@ function unsupportedManagedTargetMessage(provider: Provider, target: TargetOS): 
     return `brokered ${provider} managed provisioning supports target=linux only; use brokered aws with an EC2 Mac Dedicated Host or provider=ssh for existing macOS hosts`;
   }
   return `brokered ${provider} managed provisioning supports target=linux only`;
+}
+
+export function normalizeTailscaleTags(values: string[]): string[] {
+  return uniqueStrings(
+    values
+      .map((value) => value.trim().toLowerCase())
+      .filter((value) => /^tag:[a-z0-9_-]{1,63}$/.test(value)),
+  );
 }
 
 function normalizeTarget(value: string): TargetOS {

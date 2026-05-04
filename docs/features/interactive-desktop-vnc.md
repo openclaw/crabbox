@@ -31,6 +31,8 @@ The intended contract is:
   or app in the visible desktop and detaches it from SSH;
 - desktop services bind to loopback on the runner and are reachable through SSH
   tunnels only;
+- `--network tailscale` can move the SSH tunnel endpoint onto the tailnet, but
+  managed VNC still binds to `127.0.0.1:5900` on the runner;
 - screenshots, traces, videos, and browser profiles remain regular command
   artifacts owned by the caller or repository workflow.
 
@@ -70,6 +72,7 @@ machine debuggable and reproducible.
 Security rules:
 
 - never expose VNC directly to the public internet;
+- do not expose managed VNC directly on the Tailscale 100.x interface;
 - prefer SSH local forwarding such as `localhost:5901 -> 127.0.0.1:5900`;
 - generate per-lease VNC passwords for managed desktop leases;
 - redact passwords from logs and run records;
@@ -121,5 +124,6 @@ Related docs:
 
 - [Runner bootstrap](runner-bootstrap.md)
 - [Providers](providers.md)
+- [Tailscale](tailscale.md)
 - [SSH keys](ssh-keys.md)
 - [Actions hydration](actions-hydration.md)

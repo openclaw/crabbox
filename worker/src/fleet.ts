@@ -6,6 +6,13 @@ import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth";
 import { portalError, portalHome, portalVNC } from "./portal";
 import { leaseSlugFromID, normalizeLeaseSlug, slugWithCollisionSuffix } from "./slug";
+import {
+  createTailscaleAuthKey,
+  renderTailscaleHostname,
+  tailscaleAllowed,
+  tailscaleDefaultTags,
+  validateTailscaleTags,
+} from "./tailscale";
 import type {
   Env,
   LeaseRecord,
@@ -22,6 +29,7 @@ import type {
   RunRecord,
   TestFailure,
   TestResultSummary,
+  TailscaleMetadata,
 } from "./types";
 import { costLimits, enforceCostLimits, leaseCost, requestOrg, usageSummary } from "./usage";
 
@@ -175,6 +183,10 @@ export class FleetDurableObject implements DurableObject {
       org,
       leases,
     );
+    const tailscaleError = await this.prepareTailscaleConfig(config, input, leaseID, slug);
+    if (tailscaleError) {
+      return tailscaleError;
+    }
     const provider = this.provider(config.provider, config.awsRegion);
     const providerHourlyUSD = await provider
       .hourlyPriceUSD(config.serverType, config)
@@ -227,6 +239,14 @@ export class FleetDurableObject implements DurableObject {
     };
     if (config.target === "windows") {
       record.windowsMode = config.windowsMode;
+    }
+    if (config.tailscale) {
+      record.tailscale = {
+        enabled: true,
+        hostname: config.tailscaleHostname,
+        tags: config.tailscaleTags,
+        state: "requested",
+      };
     }
     const limitError = enforceCostLimits(leases, record, costLimits(this.env), now);
     if (limitError) {
@@ -294,10 +314,71 @@ export class FleetDurableObject implements DurableObject {
       await this.scheduleAlarm();
       return json({ lease });
     }
+    if (method === "POST" && action === "tailscale") {
+      const lease = await this.resolveLease(leaseID, request, false);
+      if (!lease) {
+        return notFound();
+      }
+      const input = await readJson<Partial<TailscaleMetadata>>(request);
+      lease.tailscale = mergeTailscaleMetadata(lease.tailscale, input);
+      lease.updatedAt = new Date().toISOString();
+      await this.putLease(lease);
+      return json({ lease });
+    }
     if (method === "POST" && action === "release") {
       return this.releaseLease(request, leaseID, false);
     }
     return json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async prepareTailscaleConfig(
+    config: ReturnType<typeof leaseConfig>,
+    input: LeaseRequest,
+    leaseID: string,
+    slug: string,
+  ): Promise<Response | undefined> {
+    if (!config.tailscale) {
+      return undefined;
+    }
+    if (config.target !== "linux") {
+      return json(
+        {
+          error: "unsupported_target",
+          message: "brokered Tailscale provisioning currently supports managed Linux leases only",
+        },
+        { status: 400 },
+      );
+    }
+    if (!tailscaleAllowed(this.env)) {
+      return json(
+        { error: "tailscale_disabled", message: "Tailscale is disabled for this coordinator" },
+        { status: 403 },
+      );
+    }
+    try {
+      config.tailscaleTags = validateTailscaleTags(
+        input.tailscaleTags ?? config.tailscaleTags,
+        tailscaleDefaultTags(this.env),
+      );
+      config.tailscaleHostname = renderTailscaleHostname(
+        input.tailscaleHostname || config.tailscaleHostname || "crabbox-{slug}",
+        leaseID,
+        slug,
+        config.provider,
+      );
+      config.tailscaleAuthKey = await createTailscaleAuthKey(this.env, {
+        hostname: config.tailscaleHostname,
+        tags: config.tailscaleTags,
+        description: `crabbox ${leaseID} ${slug}`,
+      });
+    } catch (error) {
+      const message = errorMessage(error);
+      if (message.includes("tags not allowed") || message.includes("requires at least one")) {
+        return json({ error: "invalid_tailscale_tags", message }, { status: 400 });
+      }
+      return json({ error: "tailscale_unavailable", message }, { status: 502 });
+    }
+    return undefined;
   }
 
   private async releaseLease(request: Request, leaseID: string, admin: boolean): Promise<Response> {
@@ -1126,6 +1207,47 @@ function clampLimit(value: string | null, fallback: number): number {
 
 function notFound(): Response {
   return json({ error: "not_found" }, { status: 404 });
+}
+
+function mergeTailscaleMetadata(
+  current: TailscaleMetadata | undefined,
+  input: Partial<TailscaleMetadata>,
+): TailscaleMetadata {
+  const tags = Array.isArray(input.tags)
+    ? input.tags.map((tag) => tag.trim().toLowerCase()).filter(Boolean)
+    : (current?.tags ?? []);
+  const merged: TailscaleMetadata = {
+    enabled: input.enabled ?? current?.enabled ?? true,
+    tags,
+    state:
+      input.state === "ready" || input.state === "failed" || input.state === "requested"
+        ? input.state
+        : (current?.state ?? "requested"),
+  };
+  const hostname = nonSecretString(input.hostname) || current?.hostname;
+  const fqdn = nonSecretString(input.fqdn) || current?.fqdn;
+  const ipv4 = nonSecretString(input.ipv4) || current?.ipv4;
+  const error = nonSecretString(input.error) || current?.error;
+  if (hostname) {
+    merged.hostname = hostname;
+  }
+  if (fqdn) {
+    merged.fqdn = fqdn;
+  }
+  if (ipv4) {
+    merged.ipv4 = ipv4;
+  }
+  if (error) {
+    merged.error = error;
+  }
+  if (merged.state !== "failed") {
+    delete merged.error;
+  }
+  return merged;
+}
+
+function nonSecretString(value: unknown): string {
+  return typeof value === "string" ? value.trim().slice(0, 256) : "";
 }
 
 function webVNCLeaseError(lease: LeaseRecord): string {

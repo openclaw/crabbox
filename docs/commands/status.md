@@ -4,6 +4,7 @@
 
 ```sh
 crabbox status --id blue-lobster
+crabbox status --id blue-lobster --network tailscale
 crabbox status --id blue-lobster --wait --wait-timeout 10m
 crabbox status --id blue-lobster --json
 crabbox status --provider ssh --target macos --static-host mac-studio.local
@@ -19,7 +20,11 @@ Flags:
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>
+--network auto|tailscale|public
 --wait
 --wait-timeout <duration>
 --json
 ```
+
+Human and JSON output include the selected network. With Tailscale metadata,
+status also prints the tailnet host/state.

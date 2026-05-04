@@ -6,6 +6,7 @@
 crabbox warmup --class beast
 crabbox warmup --provider aws --class beast --market on-demand
 crabbox warmup --browser
+crabbox warmup --tailscale
 crabbox warmup --desktop --browser
 crabbox warmup --provider aws --target windows --desktop --market on-demand
 crabbox warmup --provider aws --target macos --desktop --market on-demand --type mac2.metal
@@ -64,6 +65,11 @@ Flags:
 --idle-timeout <duration>
 --desktop
 --browser
+--tailscale
+--tailscale-tags <comma-separated tags>
+--tailscale-hostname-template <template>
+--tailscale-auth-key-env <env-var>
+--network auto|tailscale|public
 --keep
 --actions-runner
 --reclaim
@@ -85,6 +91,13 @@ Chromium package fallback.
 `--desktop` provisions Xvfb, Openbox, and loopback-bound x11vnc for visible UI
 automation and operator takeover. It does not imply a browser. Use
 `--desktop --browser` when a headed browser should run in the visible display.
+
+`--tailscale` joins newly created managed Linux leases to the configured
+tailnet. `--network` controls the SSH endpoint printed after readiness:
+`auto` prefers the tailnet when reachable, `tailscale` requires it, and
+`public` forces the provider/public host. Tailscale is a reachability layer, not
+a provider; static hosts should put a MagicDNS name or 100.x address in
+`static.host` instead. See [Tailscale](../features/tailscale.md).
 
 For AWS, `--market` overrides `capacity.market` for this lease. Use
 `--market on-demand` when Spot capacity is blocked or when a quota request was

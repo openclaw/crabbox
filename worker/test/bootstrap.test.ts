@@ -9,6 +9,10 @@ const config: LeaseConfig = {
   windowsMode: "normal",
   desktop: false,
   browser: false,
+  tailscale: false,
+  tailscaleTags: ["tag:crabbox"],
+  tailscaleHostname: "",
+  tailscaleAuthKey: "",
   profile: "project-check",
   class: "standard",
   serverType: "c7a.8xlarge",
@@ -94,6 +98,27 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("/var/lib/crabbox/browser.env");
     expect(got).toContain('test -x "$BROWSER"');
     expect(got).toContain('"$BROWSER" --version >/dev/null');
+  });
+
+  it("adds Tailscale setup only when requested", () => {
+    const plain = cloudInit(config);
+    expect(plain).not.toContain("tailscale up");
+    const got = cloudInit({
+      ...config,
+      tailscale: true,
+      tailscaleTags: ["tag:crabbox"],
+      tailscaleHostname: "crabbox-blue-lobster",
+      tailscaleAuthKey: "tskey-secret",
+    });
+    expect(got).toContain("https://tailscale.com/install.sh");
+    expect(got).toContain(
+      "tailscale up --auth-key=\"$TS_AUTHKEY\" --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox'",
+    );
+    expect(got).toContain(
+      "printf '%s\\n' 'crabbox-blue-lobster' > /var/lib/crabbox/tailscale-hostname",
+    );
+    expect(got).toContain("test -s /var/lib/crabbox/tailscale-ipv4");
+    expect(got).toContain("grep -Eq '^100\\.' /var/lib/crabbox/tailscale-ipv4");
   });
 
   it("builds Windows EC2Launch user data for managed VNC", () => {

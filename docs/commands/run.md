@@ -6,6 +6,8 @@
 crabbox run --id blue-lobster -- pnpm test:changed:max
 crabbox run --class beast -- pnpm check
 crabbox run --provider aws --class beast --market on-demand -- pnpm check
+crabbox run --tailscale -- pnpm check
+crabbox run --id blue-lobster --network tailscale -- pnpm test
 crabbox run --browser -- google-chrome --headless --version
 crabbox run --desktop --browser --shell 'echo "$DISPLAY"; "$BROWSER" --version'
 crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
@@ -35,6 +37,13 @@ browser.
 `--desktop` provisions or requires a visible Linux display and injects
 `CRABBOX_DESKTOP=1` plus `DISPLAY=:99`. It does not imply a browser. Use
 `--desktop --browser` for headed browser automation in the VNC-visible session.
+
+`--tailscale` asks new managed Linux leases to join the configured tailnet.
+`--network` selects how Crabbox resolves SSH for reused leases and for the final
+connection after a new lease becomes ready. `auto` prefers Tailscale when
+metadata exists and SSH is reachable, `tailscale` fails if the tailnet path is
+not available, and `public` forces the provider host. See
+[Tailscale](../features/tailscale.md).
 
 Sync uses `git ls-files --cached --others --exclude-standard` to build a file manifest, then feeds that manifest to rsync over SSH. That means tracked files plus nonignored untracked files sync, while `.git`, ignored local build output, dependency folders, and common caches stay out of the transfer. Crabbox records a local/remote sync fingerprint and skips rsync when the tracked commit plus manifest and dirty metadata have not changed. Use `--checksum` when you need a paranoid checksum scan, and `--debug` to print sync timing, progress, and itemized rsync output.
 
@@ -82,6 +91,11 @@ Flags:
 --idle-timeout <duration>
 --desktop
 --browser
+--tailscale
+--tailscale-tags <comma-separated tags>
+--tailscale-hostname-template <template>
+--tailscale-auth-key-env <env-var>
+--network auto|tailscale|public
 --keep
 --no-sync
 --sync-only

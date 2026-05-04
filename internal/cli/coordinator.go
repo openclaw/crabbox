@@ -32,6 +32,7 @@ type CoordinatorLease struct {
 	WindowsMode          string                `json:"windowsMode,omitempty"`
 	Desktop              bool                  `json:"desktop,omitempty"`
 	Browser              bool                  `json:"browser,omitempty"`
+	Tailscale            *TailscaleMetadata    `json:"tailscale,omitempty"`
 	Owner                string                `json:"owner"`
 	Org                  string                `json:"org"`
 	Profile              string                `json:"profile"`
@@ -314,6 +315,9 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"windowsMode":        cfg.WindowsMode,
 		"desktop":            cfg.Desktop,
 		"browser":            cfg.Browser,
+		"tailscale":          cfg.Tailscale.Enabled,
+		"tailscaleTags":      cfg.Tailscale.Tags,
+		"tailscaleHostname":  cfg.Tailscale.Hostname,
 		"class":              cfg.Class,
 		"serverType":         cfg.ServerType,
 		"serverTypeExplicit": cfg.ServerTypeExplicit,
@@ -344,6 +348,14 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"keep":               keep,
 		"sshPublicKey":       publicKey,
 	}, &res)
+	return res.Lease, err
+}
+
+func (c *CoordinatorClient) UpdateLeaseTailscale(ctx context.Context, id string, meta TailscaleMetadata) (CoordinatorLease, error) {
+	var res struct {
+		Lease CoordinatorLease `json:"lease"`
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/tailscale", meta, &res)
 	return res.Lease, err
 }
 
@@ -838,6 +850,9 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 			"last_touched_at":   lease.LastTouchedAt,
 			"idle_timeout_secs": fmt.Sprint(lease.IdleTimeoutSeconds),
 		},
+	}
+	if lease.Tailscale != nil {
+		applyTailscaleMetadataToServer(&server, *lease.Tailscale)
 	}
 	if server.Provider == "" {
 		server.Provider = cfg.Provider

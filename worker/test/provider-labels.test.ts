@@ -11,6 +11,10 @@ describe("provider labels", () => {
       windowsMode: "normal",
       desktop: false,
       browser: false,
+      tailscale: false,
+      tailscaleTags: ["tag:crabbox"],
+      tailscaleHostname: "",
+      tailscaleAuthKey: "",
       profile: "default",
       class: "beast",
       serverType: "c7a.48xlarge",
@@ -62,6 +66,10 @@ describe("provider labels", () => {
       windowsMode: "normal",
       desktop: true,
       browser: true,
+      tailscale: true,
+      tailscaleTags: ["tag:crabbox"],
+      tailscaleHostname: "crabbox-blue-lobster",
+      tailscaleAuthKey: "tskey-secret",
       profile: "default",
       class: "beast",
       serverType: "c7a.48xlarge",
@@ -98,5 +106,9 @@ describe("provider labels", () => {
     );
     expect(labels.desktop).toBe("true");
     expect(labels.browser).toBe("true");
+    expect(labels.tailscale).toBe("true");
+    expect(labels.tailscale_hostname).toBe("crabbox-blue-lobster");
+    expect(labels.tailscale_tags).toBe("tag_crabbox");
+    expect(Object.values(labels).join(" ")).not.toContain("tskey-secret");
   });
 });

@@ -19,6 +19,7 @@ type Config struct {
 	WindowsMode        string
 	Desktop            bool
 	Browser            bool
+	Network            NetworkMode
 	Class              string
 	ServerType         string
 	ServerTypeExplicit bool
@@ -49,6 +50,7 @@ type Config struct {
 	Capacity           CapacityConfig
 	Actions            ActionsConfig
 	Blacksmith         BlacksmithConfig
+	Tailscale          TailscaleConfig
 	Static             StaticConfig
 	Results            ResultsConfig
 	Cache              CacheConfig
@@ -145,6 +147,9 @@ func loadConfig() (Config, error) {
 	if err := validateTargetConfig(cfg); err != nil {
 		return Config{}, err
 	}
+	if err := validateNetworkConfig(cfg); err != nil {
+		return Config{}, err
+	}
 	if cfg.ServerType == "" {
 		cfg.ServerType = serverTypeForConfig(cfg)
 	}
@@ -165,6 +170,7 @@ func baseConfig() Config {
 		Provider:         provider,
 		TargetOS:         "linux",
 		WindowsMode:      "normal",
+		Network:          NetworkAuto,
 		Class:            class,
 		ServerType:       "",
 		Location:         "fsn1",
@@ -200,6 +206,11 @@ func baseConfig() Config {
 			RunnerVersion: "latest",
 			Ephemeral:     true,
 		},
+		Tailscale: TailscaleConfig{
+			Tags:             []string{"tag:crabbox"},
+			HostnameTemplate: "crabbox-{slug}",
+			AuthKeyEnv:       "CRABBOX_TAILSCALE_AUTH_KEY",
+		},
 		Cache: CacheConfig{
 			Pnpm:   true,
 			Npm:    true,
@@ -218,6 +229,7 @@ type fileConfig struct {
 	Windows          *fileWindowsConfig    `yaml:"windows,omitempty"`
 	Desktop          *bool                 `yaml:"desktop,omitempty"`
 	Browser          *bool                 `yaml:"browser,omitempty"`
+	Network          string                `yaml:"network,omitempty"`
 	Class            string                `yaml:"class,omitempty"`
 	ServerType       string                `yaml:"serverType,omitempty"`
 	Coordinator      string                `yaml:"coordinator,omitempty"`
@@ -231,6 +243,7 @@ type fileConfig struct {
 	Capacity         *fileCapacityConfig   `yaml:"capacity,omitempty"`
 	Actions          *fileActionsConfig    `yaml:"actions,omitempty"`
 	Blacksmith       *fileBlacksmithConfig `yaml:"blacksmith,omitempty"`
+	Tailscale        *fileTailscaleConfig  `yaml:"tailscale,omitempty"`
 	Static           *fileStaticConfig     `yaml:"static,omitempty"`
 	Results          *fileResultsConfig    `yaml:"results,omitempty"`
 	Cache            *fileCacheConfig      `yaml:"cache,omitempty"`
@@ -328,6 +341,14 @@ type fileBlacksmithConfig struct {
 	Ref         string `yaml:"ref,omitempty"`
 	IdleTimeout string `yaml:"idleTimeout,omitempty"`
 	Debug       *bool  `yaml:"debug,omitempty"`
+}
+
+type fileTailscaleConfig struct {
+	Enabled          *bool    `yaml:"enabled,omitempty"`
+	Network          string   `yaml:"network,omitempty"`
+	Tags             []string `yaml:"tags,omitempty"`
+	HostnameTemplate string   `yaml:"hostnameTemplate,omitempty"`
+	AuthKeyEnv       string   `yaml:"authKeyEnv,omitempty"`
 }
 
 type fileStaticConfig struct {
@@ -474,6 +495,9 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 	}
 	if file.Browser != nil {
 		cfg.Browser = *file.Browser
+	}
+	if file.Network != "" {
+		cfg.Network = NetworkMode(strings.ToLower(strings.TrimSpace(file.Network)))
 	}
 	if file.Class != "" {
 		cfg.Class = file.Class
@@ -675,6 +699,23 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Blacksmith.Debug = *file.Blacksmith.Debug
 		}
 	}
+	if file.Tailscale != nil {
+		if file.Tailscale.Enabled != nil {
+			cfg.Tailscale.Enabled = *file.Tailscale.Enabled
+		}
+		if file.Tailscale.Network != "" {
+			cfg.Network = NetworkMode(strings.ToLower(strings.TrimSpace(file.Tailscale.Network)))
+		}
+		if len(file.Tailscale.Tags) > 0 {
+			cfg.Tailscale.Tags = normalizeTailscaleTags(file.Tailscale.Tags)
+		}
+		if file.Tailscale.HostnameTemplate != "" {
+			cfg.Tailscale.HostnameTemplate = file.Tailscale.HostnameTemplate
+		}
+		if file.Tailscale.AuthKeyEnv != "" {
+			cfg.Tailscale.AuthKeyEnv = file.Tailscale.AuthKeyEnv
+		}
+	}
 	if file.Static != nil {
 		if file.Static.ID != "" {
 			cfg.Static.ID = file.Static.ID
@@ -740,6 +781,11 @@ func applyEnv(cfg *Config) {
 	if value, ok := getenvBool("CRABBOX_BROWSER"); ok {
 		cfg.Browser = value
 	}
+	if network := os.Getenv("CRABBOX_NETWORK"); network != "" {
+		if mode, err := parseNetworkMode(network); err == nil {
+			cfg.Network = mode
+		}
+	}
 	cfg.Class = getenv("CRABBOX_DEFAULT_CLASS", cfg.Class)
 	if os.Getenv("CRABBOX_SERVER_TYPE") != "" {
 		cfg.ServerTypeExplicit = true
@@ -789,6 +835,17 @@ func applyEnv(cfg *Config) {
 	cfg.Blacksmith.Workflow = getenv("CRABBOX_BLACKSMITH_WORKFLOW", cfg.Blacksmith.Workflow)
 	cfg.Blacksmith.Job = getenv("CRABBOX_BLACKSMITH_JOB", cfg.Blacksmith.Job)
 	cfg.Blacksmith.Ref = getenv("CRABBOX_BLACKSMITH_REF", cfg.Blacksmith.Ref)
+	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
+		cfg.Tailscale.Enabled = value
+	}
+	if tags := os.Getenv("CRABBOX_TAILSCALE_TAGS"); tags != "" {
+		cfg.Tailscale.Tags = normalizeTailscaleTags(splitCommaList(tags))
+	}
+	cfg.Tailscale.HostnameTemplate = getenv("CRABBOX_TAILSCALE_HOSTNAME_TEMPLATE", cfg.Tailscale.HostnameTemplate)
+	cfg.Tailscale.AuthKeyEnv = getenv("CRABBOX_TAILSCALE_AUTH_KEY_ENV", cfg.Tailscale.AuthKeyEnv)
+	if cfg.Tailscale.AuthKeyEnv != "" {
+		cfg.Tailscale.AuthKey = getenv(cfg.Tailscale.AuthKeyEnv, "")
+	}
 	cfg.Static.ID = getenv("CRABBOX_STATIC_ID", cfg.Static.ID)
 	cfg.Static.Name = getenv("CRABBOX_STATIC_NAME", cfg.Static.Name)
 	cfg.Static.Host = getenv("CRABBOX_STATIC_HOST", cfg.Static.Host)

@@ -9,6 +9,10 @@ import {
 } from "../src/fleet";
 import type { Env, LeaseRecord, ProvisioningAttempt, RunRecord } from "../src/types";
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 class MemoryStorage {
   private readonly values = new Map<string, unknown>();
 
@@ -93,6 +97,124 @@ describe("fleet lease identity and idle", () => {
     const found = (await bySlug.json()) as { lease: LeaseRecord };
     expect(found.lease.id).toBe("cbx_abcdef123456");
     expect(found.lease.slug).toBe("blue-lobster");
+  });
+
+  it("mints brokered Tailscale keys, records non-secret metadata, and accepts readiness updates", async () => {
+    const storage = new MemoryStorage();
+    let providerConfig:
+      | {
+          tailscale?: boolean;
+          tailscaleAuthKey?: string;
+          tailscaleHostname?: string;
+          tailscaleTags?: string[];
+        }
+      | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://api.tailscale.com/api/v2/oauth/token") {
+          return jsonResponse({ access_token: "oauth-token" });
+        }
+        if (url === "https://api.tailscale.com/api/v2/tailnet/-/keys") {
+          return jsonResponse({ key: "tskey-oneoff" });
+        }
+        return jsonResponse({ message: `unexpected ${url}` }, 500);
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      {
+        hetzner: fakeProvider((config) => {
+          providerConfig = config;
+        }),
+      },
+      {
+        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+        CRABBOX_TAILSCALE_TAGS: "tag:crabbox,tag:ci",
+      },
+    );
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          slug: "Blue Lobster",
+          provider: "hetzner",
+          tailscale: true,
+          tailscaleTags: ["tag:ci"],
+          tailscaleHostname: "crabbox-{slug}",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    const { lease } = (await create.json()) as { lease: LeaseRecord };
+    expect(lease.tailscale).toEqual({
+      enabled: true,
+      hostname: "crabbox-blue-lobster",
+      tags: ["tag:ci"],
+      state: "requested",
+    });
+    expect(JSON.stringify(lease)).not.toContain("tskey-oneoff");
+    expect(providerConfig).toMatchObject({
+      tailscale: true,
+      tailscaleAuthKey: "tskey-oneoff",
+      tailscaleHostname: "crabbox-blue-lobster",
+      tailscaleTags: ["tag:ci"],
+    });
+
+    const update = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/tailscale", {
+        headers: {
+          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+        body: {
+          enabled: true,
+          hostname: "crabbox-blue-lobster",
+          fqdn: "crabbox-blue-lobster.example.ts.net",
+          ipv4: "100.64.0.10",
+          state: "ready",
+        },
+      }),
+    );
+    expect(update.status).toBe(200);
+    const updated = (await update.json()) as { lease: LeaseRecord };
+    expect(updated.lease.tailscale?.ipv4).toBe("100.64.0.10");
+    expect(updated.lease.tailscale?.state).toBe("ready");
+  });
+
+  it("rejects brokered Tailscale tags outside the coordinator allowlist", async () => {
+    const fleet = testFleet(
+      new MemoryStorage(),
+      { hetzner: fakeProvider() },
+      {
+        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+        CRABBOX_TAILSCALE_TAGS: "tag:crabbox",
+      },
+    );
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "hetzner",
+          tailscale: true,
+          tailscaleTags: ["tag:prod"],
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(400);
+    await expect(create.json()).resolves.toMatchObject({
+      error: "invalid_tailscale_tags",
+      message: "tailscale tags not allowed: tag:prod",
+    });
   });
 
   it("passes the Cloudflare request source IP as AWS SSH ingress CIDR", async () => {
@@ -1245,16 +1367,26 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function testFleet(storage = new MemoryStorage(), providers = {}): FleetDurableObject {
+function testFleet(
+  storage = new MemoryStorage(),
+  providers = {},
+  env: Partial<Env> = {},
+): FleetDurableObject {
   return new FleetDurableObject(
     { storage } as unknown as DurableObjectState,
-    { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    { CRABBOX_DEFAULT_ORG: "default-org", ...env } as Env,
     providers,
   );
 }
 
 function fakeProvider(
-  onCreate?: (config: { awsSSHCIDRs: string[] }) => void,
+  onCreate?: (config: {
+    awsSSHCIDRs: string[];
+    tailscale?: boolean;
+    tailscaleAuthKey?: string;
+    tailscaleHostname?: string;
+    tailscaleTags?: string[];
+  }) => void,
   result: {
     provider?: "hetzner" | "aws";
     serverType?: string;

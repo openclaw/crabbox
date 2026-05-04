@@ -6,6 +6,7 @@ client.
 ```sh
 crabbox warmup --desktop
 crabbox screenshot --id blue-lobster
+crabbox screenshot --id blue-lobster --network tailscale
 crabbox screenshot --id blue-lobster --output desktop.png
 ```
 
@@ -44,6 +45,7 @@ Flags:
 --static-user <user>
 --static-port <port>
 --static-work-root <path>
+--network auto|tailscale|public
 --output <path>
 --reclaim
 ```

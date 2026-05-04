@@ -2,6 +2,7 @@ package cli
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,6 +40,26 @@ func TestDirectLeaseLabelsAreProviderSafe(t *testing.T) {
 	}
 	if labels["expires_at"] != "1777637040" {
 		t.Fatalf("expires_at=%q want idle expiry", labels["expires_at"])
+	}
+}
+
+func TestDirectLeaseLabelsIncludeNonSecretTailscaleMetadata(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Tailscale.Enabled = true
+	cfg.Tailscale.Hostname = "crabbox-blue-lobster"
+	cfg.Tailscale.Tags = []string{"tag:crabbox"}
+	cfg.Tailscale.AuthKey = "tskey-secret"
+	labels := directLeaseLabels(cfg, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, time.Now())
+	if labels["tailscale"] != "true" || labels["tailscale_state"] != "requested" {
+		t.Fatalf("tailscale labels missing: %#v", labels)
+	}
+	if labels["tailscale_hostname"] != "crabbox-blue-lobster" || labels["tailscale_tags"] != "tag_crabbox" {
+		t.Fatalf("tailscale metadata labels unexpected: %#v", labels)
+	}
+	for key, value := range labels {
+		if strings.Contains(value, "tskey-secret") || strings.Contains(key, "auth") {
+			t.Fatalf("tailscale secret leaked through label %s=%q", key, value)
+		}
 	}
 }
 

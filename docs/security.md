@@ -68,9 +68,16 @@ Rules:
 - `CRABBOX_SHARED_TOKEN` is stored as a Worker secret for trusted operator automation; local automation can use `CRABBOX_COORDINATOR_TOKEN`.
 - `CRABBOX_ADMIN_TOKEN` is stored as a Worker secret for admin and image lifecycle routes; local admin commands use `CRABBOX_COORDINATOR_ADMIN_TOKEN` or `broker.adminToken`.
 - `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`, and `CRABBOX_SESSION_SECRET` are Worker secrets for browser login.
+- `CRABBOX_TAILSCALE_CLIENT_ID` and `CRABBOX_TAILSCALE_CLIENT_SECRET` are
+  Worker secrets for minting one-off Tailscale auth keys when brokered
+  `--tailscale` leases are requested.
 - `CRABBOX_GITHUB_ALLOWED_ORG(S)` and `CRABBOX_GITHUB_ALLOWED_TEAMS` are Worker config values for browser-login authorization.
+- `CRABBOX_TAILSCALE_TAGS` is the coordinator allowlist/default for requested
+  Tailscale ACL tags. Do not allow arbitrary user-supplied tags.
 - `CRABBOX_ACCESS_TEAM_DOMAIN` and `CRABBOX_ACCESS_AUD` let the Worker verify Cloudflare Access JWTs before using Access-provided identity.
 - `CRABBOX_ACCESS_CLIENT_ID` and `CRABBOX_ACCESS_CLIENT_SECRET` are local Cloudflare Access service-token credentials. Store them only in user config or env, never repo config. They only satisfy Cloudflare Access; they do not authorize Crabbox actions by themselves.
+- `CRABBOX_TAILSCALE_AUTH_KEY` is local direct-provider-only. Do not forward it
+  to commands, print it, or store it in repo config.
 - User config files are written `0600`; `crabbox doctor` reports overly broad local config permissions because broker tokens may be stored there.
 
 Project allowlist example:
@@ -99,6 +106,13 @@ MVP SSH posture:
 - Matching cloud SSH keys/key pairs are removed when Crabbox deletes the machine.
 - Work happens under `/work/crabbox`.
 - Machines are disposable or cleanable.
+
+Tailscale does not replace this SSH model in v1. Crabbox still uses OpenSSH,
+per-lease keys, scoped known_hosts, SSH tunnels, lease expiry, and cleanup.
+Tailscale only changes which host the SSH client dials.
+
+Managed VNC remains tunnel-only even on Tailscale-enabled leases. Do not bind
+Crabbox-managed VNC to public interfaces or to the Tailscale 100.x interface.
 
 MVP hardening before first shared use:
 

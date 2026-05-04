@@ -19,6 +19,7 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 	output := fs.String("output", "", "local PNG output path")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -34,6 +35,9 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
+	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
+		return err
+	}
 	if isBlacksmithProvider(cfg.Provider) {
 		return exit(2, "desktop screenshots are not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
 	}
@@ -43,6 +47,11 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 	server, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, *id)
 	if err != nil {
 		return err
+	}
+	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
+		return err
+	} else {
+		target = resolved.Target
 	}
 	if isStaticProvider(cfg.Provider) && target.TargetOS != targetLinux {
 		return exit(2, "desktop screenshots are not captured from static %s hosts because those are existing host machines, not Crabbox-created desktops", target.TargetOS)

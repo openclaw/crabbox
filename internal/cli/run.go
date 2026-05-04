@@ -42,6 +42,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
 	blacksmithFlags := registerBlacksmithFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -54,6 +55,9 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	cfg.Class = *class
 	applyCapabilityFlags(&cfg, *desktop, *browser)
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
+		return err
+	}
+	if err := applyNetworkFlagOverrides(&cfg, fs, networkFlags); err != nil {
 		return err
 	}
 	if flagWasSet(fs, "type") {
@@ -116,8 +120,33 @@ func (a App) warmup(ctx context.Context, args []string) error {
 		a.releaseAcquiredLeaseBestEffort(ctx, cfg, coord, useCoordinator, server, target, leaseID)
 		return err
 	}
-	fmt.Fprintf(a.Stdout, "leased %s slug=%s provider=%s server=%s type=%s ip=%s idle_timeout=%s expires=%s\n", leaseID, blank(serverSlug(server), "-"), cfg.Provider, server.DisplayID(), server.ServerType.Name, target.Host, cfg.IdleTimeout, blank(leaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]))
-	fmt.Fprintf(a.Stdout, "ready ssh=%s@%s:%s workroot=%s\n", target.User, target.Host, target.Port, cfg.WorkRoot)
+	if serverTailscaleMetadata(server).Enabled {
+		if err := waitForSSHReady(ctx, &target, a.Stderr, "tailscale metadata", 2*time.Minute); err == nil {
+			a.refreshTailscaleMetadata(ctx, cfg, coord, useCoordinator, &server, target, leaseID)
+		} else {
+			fmt.Fprintf(a.Stderr, "warning: tailscale metadata wait failed: %v\n", err)
+		}
+	}
+	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
+		a.releaseAcquiredLeaseBestEffort(ctx, cfg, coord, useCoordinator, server, target, leaseID)
+		return err
+	} else {
+		target = resolved.Target
+		if resolved.FallbackReason != "" {
+			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+		}
+	}
+	network := NetworkPublic
+	if target.Host != server.PublicNet.IPv4.IP && target.Host != "" {
+		network = NetworkTailscale
+	}
+	meta := serverTailscaleMetadata(server)
+	tailscaleSummary := ""
+	if meta.Enabled {
+		tailscaleSummary = " tailscale=" + blank(tailscaleTargetHost(meta), blank(meta.State, "requested"))
+	}
+	fmt.Fprintf(a.Stdout, "leased %s slug=%s provider=%s server=%s type=%s ip=%s%s idle_timeout=%s expires=%s\n", leaseID, blank(serverSlug(server), "-"), cfg.Provider, server.DisplayID(), server.ServerType.Name, server.PublicNet.IPv4.IP, tailscaleSummary, cfg.IdleTimeout, blank(leaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]))
+	fmt.Fprintf(a.Stdout, "ready ssh=%s@%s:%s network=%s workroot=%s\n", target.User, target.Host, target.Port, network, cfg.WorkRoot)
 	if *actionsRunner {
 		ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo)
 		if err != nil {
@@ -168,6 +197,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
 	blacksmithFlags := registerBlacksmithFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -188,6 +218,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	cfg.Class = *class
 	applyCapabilityFlags(&cfg, *desktop, *browser)
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
+		return err
+	}
+	if err := applyNetworkFlagOverrides(&cfg, fs, networkFlags); err != nil {
 		return err
 	}
 	if flagWasSet(fs, "type") {
@@ -269,12 +302,30 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			lease, err = coord.GetLease(ctx, *leaseIDFlag)
 			if err == nil {
 				server, target, leaseID = leaseToServerTarget(lease, cfg)
+				if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
+					err = resolveErr
+				} else {
+					target = resolved.Target
+					if resolved.FallbackReason != "" {
+						fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+					}
+				}
 				if !flagWasSet(fs, "idle-timeout") && lease.IdleTimeoutSeconds > 0 {
 					cfg.IdleTimeout = time.Duration(lease.IdleTimeoutSeconds) * time.Second
 				}
 			}
 		} else {
 			server, target, leaseID, err = a.findLease(ctx, cfg, *leaseIDFlag)
+			if err == nil {
+				if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
+					err = resolveErr
+				} else {
+					target = resolved.Target
+					if resolved.FallbackReason != "" {
+						fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+					}
+				}
+			}
 			if err == nil && !flagWasSet(fs, "idle-timeout") {
 				if duration, ok := parseDurationSecondsLabel(server.Labels["idle_timeout_secs"]); ok {
 					cfg.IdleTimeout = duration
@@ -360,6 +411,15 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before sync")
 		if err := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute); err != nil {
 			return recordFailure(err)
+		}
+		a.refreshTailscaleMetadata(ctx, cfg, coord, useCoordinator, &server, target, leaseID)
+		if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
+			return recordFailure(err)
+		} else {
+			target = resolved.Target
+			if resolved.FallbackReason != "" {
+				fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+			}
 		}
 		recorder.Event("sync.started", "sync", "")
 		timings.syncSteps.sshReady = time.Since(stepStart)
@@ -509,6 +569,15 @@ afterSync:
 	recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before command")
 	if err := waitForSSHReady(ctx, &target, a.Stderr, "before command", 2*time.Minute); err != nil {
 		return recordFailure(err)
+	}
+	a.refreshTailscaleMetadata(ctx, cfg, coord, useCoordinator, &server, target, leaseID)
+	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
+		return recordFailure(err)
+	} else {
+		target = resolved.Target
+		if resolved.FallbackReason != "" {
+			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+		}
 	}
 	if *noSync {
 		mkdirCommand := remoteMkdir(workdir)
@@ -707,6 +776,9 @@ func (a App) acquireCoordinator(ctx context.Context, cfg Config, coord *Coordina
 	}
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = providerKeyForLease(leaseID)
+	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
+		cfg.Tailscale.Hostname = renderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
+	}
 	ensureAWSSSHCIDRs(ctx, &cfg)
 	fmt.Fprintf(a.Stderr, "coordinator lease class=%s preferred_type=%s keep=%v slug=%s idle_timeout=%s ttl=%s\n", cfg.Class, cfg.ServerType, keep, slug, cfg.IdleTimeout, cfg.TTL)
 	lease, err := coord.CreateLease(ctx, cfg, publicKey, keep, leaseID, slug)
@@ -752,6 +824,9 @@ func validateCoordinatorLeaseCapabilities(cfg Config, lease CoordinatorLease) er
 	}
 	if cfg.Browser && !lease.Browser {
 		return exit(5, "coordinator did not provision browser=true for lease %s; deploy the coordinator with browser support", blank(lease.ID, "-"))
+	}
+	if cfg.Tailscale.Enabled && (lease.Tailscale == nil || !lease.Tailscale.Enabled) {
+		return exit(5, "coordinator did not provision tailscale=true for lease %s; deploy the coordinator with Tailscale support", blank(lease.ID, "-"))
 	}
 	return nil
 }
@@ -1024,6 +1099,9 @@ func (a App) touchDirectLeaseBestEffort(ctx context.Context, cfg Config, server 
 func (a App) acquire(ctx context.Context, cfg Config, keep bool) (Server, SSHTarget, string, error) {
 	if isStaticProvider(cfg.Provider) {
 		return a.acquireStatic(ctx, cfg, keep)
+	}
+	if cfg.Tailscale.Enabled && cfg.Tailscale.AuthKey == "" {
+		return Server{}, SSHTarget{}, "", exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", cfg.Tailscale.AuthKeyEnv)
 	}
 	if cfg.Provider == "aws" {
 		return a.acquireAWS(ctx, cfg, keep)

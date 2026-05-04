@@ -11,6 +11,7 @@ func (a App) ssh(ctx context.Context, args []string) error {
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	targetFlags := registerTargetFlags(fs, defaultConfig())
+	networkFlags := registerNetworkModeFlag(fs, defaultConfig())
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -25,12 +26,20 @@ func (a App) ssh(ctx context.Context, args []string) error {
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
+	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
+		return err
+	}
 	if *id == "" && !isStaticProvider(cfg.Provider) {
 		return exit(2, "usage: crabbox ssh --id <lease-id-or-slug>")
 	}
 	server, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, *id)
 	if err != nil {
 		return err
+	}
+	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
+		return err
+	} else {
+		target = resolved.Target
 	}
 	repo, err := findRepo()
 	if err != nil {

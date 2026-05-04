@@ -171,6 +171,9 @@ func (c *HetznerClient) DeleteSSHKey(ctx context.Context, name string) error {
 
 func (c *HetznerClient) CreateServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool) (Server, error) {
 	name := leaseProviderName(leaseID, slug)
+	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
+		cfg.Tailscale.Hostname = renderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
+	}
 	now := time.Now().UTC()
 	labels := directLeaseLabels(cfg, leaseID, slug, "hetzner", "", keep, now)
 	body := map[string]any{

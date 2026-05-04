@@ -22,6 +22,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
 	openPortal := fs.Bool("open", false, "open the web portal VNC page")
+	networkFlags := registerNetworkModeFlag(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -37,6 +38,9 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		return err
 	}
 	cfg.Provider = *provider
+	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
+		return err
+	}
 	cfg.Desktop = true
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
@@ -54,6 +58,11 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	server, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, *id)
 	if err != nil {
 		return err
+	}
+	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
+		return err
+	} else {
+		target = resolved.Target
 	}
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err

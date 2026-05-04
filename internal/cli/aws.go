@@ -182,6 +182,9 @@ func (c *AWSClient) CreateServerWithFallback(ctx context.Context, cfg Config, pu
 func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, imageID, securityGroupID string, spot bool) (Server, error) {
 	_ = publicKey
 	name := leaseProviderName(leaseID, slug)
+	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
+		cfg.Tailscale.Hostname = renderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
+	}
 	now := time.Now().UTC()
 	labels := directLeaseLabels(cfg, leaseID, slug, "aws", mapMarket(spot), keep, now)
 	userData := base64.StdEncoding.EncodeToString([]byte(awsUserData(cfg, publicKey)))
