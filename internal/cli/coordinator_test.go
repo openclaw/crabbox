@@ -436,7 +436,7 @@ func TestLeaseStatusRequiresSSHReadiness(t *testing.T) {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","slug":"blue-crab","provider":"aws","state":"active","serverType":"c7a.8xlarge","host":"127.0.0.1","sshUser":"ubuntu","sshPort":"22"}}`))
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","slug":"blue-crab","provider":"aws","target":"windows","windowsMode":"normal","state":"active","serverType":"m7i.4xlarge","host":"127.0.0.1","sshUser":"crabbox","sshPort":"22"}}`))
 	}))
 	defer server.Close()
 
@@ -450,6 +450,9 @@ func TestLeaseStatusRequiresSSHReadiness(t *testing.T) {
 	}
 	if !state.HasHost {
 		t.Fatalf("HasHost=false, want true")
+	}
+	if state.TargetOS != targetWindows || state.WindowsMode != windowsModeNormal {
+		t.Fatalf("target=%s windowsMode=%s", state.TargetOS, state.WindowsMode)
 	}
 	if state.Ready {
 		t.Fatalf("Ready=true, want false when ssh readiness probe fails")

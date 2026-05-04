@@ -93,7 +93,18 @@ describe("lease config", () => {
     expect(config.windowsMode).toBe("normal");
     expect(() =>
       leaseConfig({ provider: "hetzner", target: "windows", sshPublicKey: "ssh-ed25519 test" }),
-    ).toThrow("unsupported target");
+    ).toThrow("managed provisioning supports target=linux only");
+    expect(() =>
+      leaseConfig({ provider: "hetzner", target: "macos", sshPublicKey: "ssh-ed25519 test" }),
+    ).toThrow("EC2 Mac Dedicated Host");
+    expect(() =>
+      leaseConfig({
+        provider: "aws",
+        target: "windows",
+        windowsMode: "wsl2",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("windowsMode=normal");
   });
 
   it("allows AWS native Windows leases", () => {

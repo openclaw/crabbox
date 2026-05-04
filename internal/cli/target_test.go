@@ -22,7 +22,27 @@ func TestValidateProviderTargetRejectsUnsupportedAWSTargets(t *testing.T) {
 		cfg.TargetOS = targetWindows
 		cfg.WindowsMode = windowsModeWSL2
 		err := validateProviderTarget(cfg)
-		if err == nil || !strings.Contains(err.Error(), "currently supports target=linux only") {
+		if err == nil || !strings.Contains(err.Error(), "managed Windows supports windows.mode=normal only") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("Hetzner Windows needs an existing static host", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "hetzner"
+		cfg.TargetOS = targetWindows
+		err := validateProviderTarget(cfg)
+		if err == nil || !strings.Contains(err.Error(), "managed provisioning supports target=linux only") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("Hetzner macOS points at AWS Mac or static hosts", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "hetzner"
+		cfg.TargetOS = targetMacOS
+		err := validateProviderTarget(cfg)
+		if err == nil || !strings.Contains(err.Error(), "EC2 Mac Dedicated Host") {
 			t.Fatalf("err=%v", err)
 		}
 	})

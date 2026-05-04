@@ -88,6 +88,9 @@ func validateProviderTarget(cfg Config) error {
 	if cfg.Provider == "aws" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeNormal {
 		return nil
 	}
+	if cfg.Provider == "aws" && cfg.TargetOS == targetWindows {
+		return exit(2, "provider=aws managed Windows supports windows.mode=normal only; use provider=ssh for target=windows windows.mode=%s static hosts", cfg.WindowsMode)
+	}
 	if cfg.Provider == "aws" && cfg.TargetOS == targetMacOS {
 		if cfg.AWSMacHostID == "" && cfg.Coordinator == "" {
 			return exit(2, "provider=aws target=macos requires CRABBOX_AWS_MAC_HOST_ID or aws.macHostId for an allocated EC2 Mac Dedicated Host")
@@ -98,9 +101,20 @@ func validateProviderTarget(cfg Config) error {
 		return nil
 	}
 	if cfg.TargetOS != targetLinux {
-		return exit(2, "provider=%s currently supports target=linux only; use provider=ssh for target=%s", cfg.Provider, cfg.TargetOS)
+		return exit(2, "%s", unsupportedManagedTargetMessage(cfg.Provider, cfg.TargetOS))
 	}
 	return nil
+}
+
+func unsupportedManagedTargetMessage(provider, target string) string {
+	switch target {
+	case targetWindows:
+		return sprintf("provider=%s managed provisioning supports target=linux only; use provider=aws for managed Windows or provider=ssh for existing Windows hosts", provider)
+	case targetMacOS:
+		return sprintf("provider=%s managed provisioning supports target=linux only; use provider=aws with an EC2 Mac Dedicated Host or provider=ssh for existing macOS hosts", provider)
+	default:
+		return sprintf("provider=%s managed provisioning supports target=linux only", provider)
+	}
 }
 
 func newTargetCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {

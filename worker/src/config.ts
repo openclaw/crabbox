@@ -52,6 +52,12 @@ export function leaseConfig(input: LeaseRequest): LeaseConfig {
     !(provider === "aws" && target === "windows" && windowsMode === "normal") &&
     !(provider === "aws" && target === "macos")
   ) {
+    if (provider === "aws" && target === "windows") {
+      throw new Error("brokered aws target=windows requires windowsMode=normal");
+    }
+    if (provider === "hetzner") {
+      throw new Error(unsupportedManagedTargetMessage(provider, target));
+    }
     throw new Error(`unsupported target for brokered ${provider}: ${target}`);
   }
   if (target === "macos") {
@@ -107,6 +113,16 @@ export function leaseConfig(input: LeaseRequest): LeaseConfig {
     keep: input.keep ?? false,
     sshPublicKey,
   };
+}
+
+function unsupportedManagedTargetMessage(provider: Provider, target: TargetOS): string {
+  if (target === "windows") {
+    return `brokered ${provider} managed provisioning supports target=linux only; use brokered aws for managed Windows or provider=ssh for existing Windows hosts`;
+  }
+  if (target === "macos") {
+    return `brokered ${provider} managed provisioning supports target=linux only; use brokered aws with an EC2 Mac Dedicated Host or provider=ssh for existing macOS hosts`;
+  }
+  return `brokered ${provider} managed provisioning supports target=linux only`;
 }
 
 function normalizeTarget(value: string): TargetOS {
