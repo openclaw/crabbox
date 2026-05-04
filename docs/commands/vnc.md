@@ -32,6 +32,27 @@ under `C:\ProgramData\crabbox`, and macOS under `/var/db/crabbox`; the password
 is retrieved over SSH only when `vnc` is called. It is not stored in provider
 labels or run history.
 
+Managed AWS Windows leases also print the Windows console login next to the VNC
+password:
+
+```text
+windows username: crabbox
+windows password: ...
+```
+
+That is the generated user inside the Crabbox-created Windows instance. It is
+not your local macOS password.
+
+Managed AWS macOS leases print the EC2 macOS account login in the same style:
+
+```text
+macos username: ec2-user
+macos password: ...
+```
+
+That password is generated per lease and set on the EC2 Mac account during
+bootstrap.
+
 Use `--open` to let Crabbox start the SSH tunnel, open the local VNC URL, and
 print the tunnel process ID. Keep that tunnel process alive while connected.
 
@@ -69,8 +90,9 @@ Provider behavior:
 - Brokered and direct AWS Linux leases support VNC when created with
   `--desktop`.
 - Brokered and direct AWS native Windows leases support VNC when created with
-  `--target windows --desktop`. Crabbox installs OpenSSH, Git for Windows, and
-  TightVNC through EC2Launch user data.
+  `--target windows --desktop`. EC2Launch opens the initial AWS key-backed
+  OpenSSH foothold, then the Crabbox CLI installs Git for Windows, TightVNC,
+  a local `crabbox` administrator, and Windows auto-logon for the lease.
 - Brokered and direct AWS macOS leases support VNC when created with
   `--target macos --desktop --market on-demand` and an EC2 Mac Dedicated Host id
   from `CRABBOX_AWS_MAC_HOST_ID` or `aws.macHostId`.

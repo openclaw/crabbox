@@ -31,8 +31,16 @@ func TestScreenshotRemoteCommandUsesDesktopDisplayAndPNG(t *testing.T) {
 
 func TestScreenshotRemoteCommandSupportsWindowsAndMacOS(t *testing.T) {
 	windows := screenshotRemoteCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
-	if !strings.Contains(windows, "System.Windows.Forms") || !strings.Contains(windows, "ImageFormat]::Png") {
-		t.Fatalf("windows screenshot command=%s", windows)
+	for _, want := range []string{
+		"System.Windows.Forms",
+		"ImageFormat]::Png",
+		"schtasks.exe /Create",
+		"/IT",
+		"windows.password",
+	} {
+		if !strings.Contains(windows, want) {
+			t.Fatalf("windows screenshot command missing %q:\n%s", want, windows)
+		}
 	}
 	mac := screenshotRemoteCommand(SSHTarget{TargetOS: targetMacOS})
 	if !strings.Contains(mac, "screencapture -x -t png -") {

@@ -58,7 +58,7 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 		return err
 	}
 	a.touchActiveLeaseBestEffort(ctx, cfg, server, leaseID)
-	if err := waitForLoopbackVNC(ctx, target); err != nil {
+	if err := waitForLoopbackVNC(ctx, &target); err != nil {
 		return err
 	}
 	outPath := strings.TrimSpace(*output)
@@ -124,19 +124,39 @@ func runSSHToWriter(ctx context.Context, target SSHTarget, remote string, stdout
 func screenshotRemoteCommand(target SSHTarget) string {
 	if isWindowsNativeTarget(target) {
 		return `$ErrorActionPreference = "Stop"
+$base = "C:\ProgramData\crabbox"
+$password = Get-Content -Raw -LiteralPath (Join-Path $base "windows.password")
+$taskName = "CrabboxScreenshot-" + [Guid]::NewGuid().ToString("N")
+$out = Join-Path $base ($taskName + ".png")
+$script = Join-Path $base ($taskName + ".ps1")
+@'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
 $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-$stream = New-Object System.IO.MemoryStream
-$bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
-$bytes = $stream.ToArray()
-[Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)
+$bitmap.Save("__CRABBOX_SCREENSHOT_OUT__", [System.Drawing.Imaging.ImageFormat]::Png)
 $graphics.Dispose()
 $bitmap.Dispose()
-$stream.Dispose()`
+'@.Replace("__CRABBOX_SCREENSHOT_OUT__", $out.Replace("\", "\\")) | Set-Content -Encoding ASCII -LiteralPath $script
+cmd.exe /c "schtasks.exe /Delete /TN $taskName /F 2>NUL" | Out-Null
+$startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
+schtasks.exe /Create /TN $taskName /SC ONCE /ST $startTime /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script" /RU $env:USERNAME /RP $password /RL HIGHEST /IT /F | Out-Null
+schtasks.exe /Run /TN $taskName | Out-Null
+for ($i = 0; $i -lt 30; $i++) {
+  if (Test-Path -LiteralPath $out) {
+    $bytes = [IO.File]::ReadAllBytes($out)
+    [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)
+    schtasks.exe /Delete /TN $taskName /F | Out-Null
+    Remove-Item -Force -LiteralPath $out, $script -ErrorAction SilentlyContinue
+    exit 0
+  }
+  Start-Sleep -Milliseconds 500
+}
+schtasks.exe /Delete /TN $taskName /F | Out-Null
+Remove-Item -Force -LiteralPath $script -ErrorAction SilentlyContinue
+throw "scheduled interactive screenshot did not produce output"`
 	}
 	if target.TargetOS == targetMacOS {
 		return `set -eu

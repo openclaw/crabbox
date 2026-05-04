@@ -11,9 +11,16 @@ crabbox screenshot --id blue-lobster --output desktop.png
 
 The command resolves and touches the lease like `crabbox ssh`, verifies that the
 lease has `desktop=true`, waits for the loopback desktop/VNC service, then
-streams a PNG over SSH. Linux captures `DISPLAY=:99`, Windows captures the
-primary desktop with PowerShell/.NET drawing APIs, and macOS uses
+streams a PNG over SSH. Linux captures `DISPLAY=:99`. Windows creates a
+one-shot scheduled task inside the logged-in `crabbox` console session, because
+non-interactive SSH sessions cannot capture the visible desktop. macOS uses
 `screencapture`.
+
+For Windows, the screenshot reflects the active console session in the
+Crabbox-created instance. Managed AWS Windows desktop leases enable auto-logon
+for the generated `crabbox` user, store that password under
+`C:\ProgramData\crabbox`, and use it only on the instance to run the scheduled
+capture task.
 
 If `--output` is omitted, Crabbox writes:
 

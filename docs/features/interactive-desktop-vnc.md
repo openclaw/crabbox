@@ -78,10 +78,12 @@ Provider notes:
 
 - Hetzner and AWS brokered Linux leases use cloud-init to install Xvfb, XFCE,
   x11vnc, and optional Chrome/Chromium.
-- AWS brokered Windows desktop leases use EC2Launch PowerShell user data to
-  install OpenSSH, Git for Windows, TightVNC, and a local `crabbox`
-  administrator. VNC is reached through the SSH tunnel; the security group only
-  needs SSH.
+- AWS brokered Windows desktop leases use EC2Launch v2 `enableOpenSsh` for the
+  first AWS key-backed foothold. The Crabbox CLI then installs Git for Windows
+  and TightVNC, creates a local `crabbox` administrator, stores the per-lease
+  password under `C:\ProgramData\crabbox`, enables Windows auto-logon for that
+  user, and verifies loopback VNC after the reboot. VNC is reached through the
+  SSH tunnel; the security group only needs SSH.
 - AWS brokered macOS desktop leases require an allocated EC2 Mac Dedicated Host
   and On-Demand capacity. Bootstrap enables Screen Sharing for `ec2-user` and
   stores the generated password on the instance for `crabbox vnc`.

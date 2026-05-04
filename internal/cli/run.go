@@ -735,7 +735,7 @@ func (a App) acquireCoordinator(ctx context.Context, cfg Config, coord *Coordina
 	defer stopHeartbeat()
 	stopLeaseWatch := startCoordinatorLeaseWatch(waitCtx, coord, leaseID, cancelWait, a.Stderr)
 	defer stopLeaseWatch()
-	if err := waitForSSH(waitCtx, &target, a.Stderr); err != nil {
+	if err := bootstrapAWSWindowsDesktop(waitCtx, cfg, target, publicKey, a.Stderr); err != nil {
 		if !keep {
 			if releaseErr := releaseCoordinatorLease(context.Background(), coord, leaseID); releaseErr != nil {
 				fmt.Fprintf(a.Stderr, "warning: release failed after bootstrap error for %s: %v\n", leaseID, releaseErr)
@@ -1109,7 +1109,7 @@ func (a App) acquireAWS(ctx context.Context, cfg Config, keep bool) (Server, SSH
 		return Server{}, SSHTarget{}, "", err
 	}
 	target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-	if err := waitForSSH(ctx, &target, a.Stderr); err != nil {
+	if err := bootstrapAWSWindowsDesktop(ctx, cfg, target, publicKey, a.Stderr); err != nil {
 		if !keep {
 			_ = client.DeleteServer(context.Background(), server.CloudID)
 		}

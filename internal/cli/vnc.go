@@ -58,7 +58,7 @@ func (a App) vnc(ctx context.Context, args []string) error {
 		return err
 	}
 	a.touchActiveLeaseBestEffort(ctx, cfg, server, leaseID)
-	endpoint, err := resolveVNCEndpoint(ctx, cfg, target)
+	endpoint, err := resolveVNCEndpoint(ctx, cfg, &target)
 	if err != nil {
 		return err
 	}
@@ -104,6 +104,14 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	}
 	if strings.TrimSpace(password) != "" {
 		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(password))
+		if endpoint.Managed && target.TargetOS == targetWindows {
+			fmt.Fprintf(a.Stdout, "windows username: %s\n", target.User)
+			fmt.Fprintf(a.Stdout, "windows password: %s\n", strings.TrimSpace(password))
+		}
+		if endpoint.Managed && target.TargetOS == targetMacOS {
+			fmt.Fprintf(a.Stdout, "macos username: %s\n", target.User)
+			fmt.Fprintf(a.Stdout, "macos password: %s\n", strings.TrimSpace(password))
+		}
 	} else if staticHostVNC {
 		fmt.Fprintln(a.Stdout, "credentials: host-managed")
 		if target.TargetOS == targetMacOS {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { awsUserData, cloudInit } from "../src/bootstrap";
+import { awsUserData, cloudInit, windowsBootstrapPowerShell } from "../src/bootstrap";
 import type { LeaseConfig } from "../src/config";
 
 const config: LeaseConfig = {
@@ -97,17 +97,25 @@ describe("cloud-init bootstrap", () => {
   });
 
   it("builds Windows EC2Launch user data for managed VNC", () => {
-    const got = awsUserData({
+    const input = {
       ...config,
       target: "windows",
       workRoot: "C:\\crabbox",
-    });
-    expect(got).toContain("<powershell>");
-    expect(got).toContain("OpenSSH.Server~~~~0.0.1.0");
+    } as const;
+    expect(awsUserData(input)).toContain("version: 1.1");
+    expect(awsUserData(input)).toContain("task: enableOpenSsh");
+    const got = windowsBootstrapPowerShell(input);
+    expect(got).toContain("OpenSSH-Win64.zip");
+    expect(got).toContain("install-sshd.ps1");
     expect(got).toContain("administrators_authorized_keys");
     expect(got).toContain("tightvnc-2.8.85-gpl-setup-64bit.msi");
     expect(got).toContain("VALUE_OF_PASSWORD=$vncPassword");
     expect(got).toContain("VALUE_OF_ALLOWLOOPBACK=1");
+    expect(got).toContain("New-CrabboxPassword");
+    expect(got).toContain("${userSID}:F");
+    expect(got).toContain("C:\\ProgramData\\crabbox\\windows.username");
+    expect(got).toContain("AutoAdminLogon");
+    expect(got).toContain("Restart-Computer -Force");
   });
 
   it("builds macOS user data for managed screen sharing", () => {

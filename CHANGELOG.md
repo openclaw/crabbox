@@ -8,6 +8,7 @@
 - Added static macOS/Windows VNC endpoint discovery, including SSH-tunneled loopback VNC and trusted static direct VNC on `host:5900`.
 - Added `crabbox vnc --open` to start the SSH tunnel and launch the local VNC client for managed desktop leases.
 - Added managed AWS Windows desktop leases with OpenSSH, Git for Windows, loopback TightVNC, per-lease VNC passwords, and `crabbox vnc`.
+- Added generated Windows console login details and auto-logon for managed AWS Windows desktop leases.
 - Added AWS macOS desktop lease plumbing for EC2 Mac Dedicated Hosts, including Screen Sharing setup and per-lease credentials.
 - Added `crabbox screenshot` to save a PNG from a desktop lease without opening a VNC client.
 - Added a minimal XFCE desktop profile with panel/window manager for managed VNC leases.

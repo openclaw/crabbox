@@ -8,6 +8,7 @@ import (
 const (
 	tightVNCMSIURL        = "https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi"
 	gitForWindowsSetupURL = "https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe"
+	openSSHWin64ZipURL    = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip"
 )
 
 func awsUserData(cfg Config, publicKey string) string {
@@ -92,11 +93,20 @@ runcmd:
 }
 
 func windowsUserData(cfg Config, publicKey string) string {
+	_ = cfg
+	_ = publicKey
+	return `version: 1.1
+tasks:
+- task: enableOpenSsh
+`
+}
+
+func windowsBootstrapPowerShell(cfg Config, publicKey string) string {
 	workRoot := cfg.WorkRoot
 	if workRoot == "" {
 		workRoot = `C:\crabbox`
 	}
-	return `<powershell>
+	return `
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 function Retry($ScriptBlock) {
@@ -108,27 +118,54 @@ function Retry($ScriptBlock) {
     }
   }
 }
+function New-CrabboxPassword {
+  $bytes = New-Object byte[] 18
+  $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+  try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+  return "Cb1!" + [Convert]::ToBase64String($bytes).Substring(0, 18)
+}
 $user = ` + psQuote(cfg.SSHUser) + `
 $publicKey = ` + psQuote(publicKey) + `
 $workRoot = ` + psQuote(workRoot) + `
 $vncPasswordPath = "C:\ProgramData\crabbox\vnc.password"
+$windowsUsernamePath = "C:\ProgramData\crabbox\windows.username"
+$windowsPasswordPath = "C:\ProgramData\crabbox\windows.password"
+$setupCompletePath = "C:\ProgramData\crabbox\setup-complete"
+$openSSHZip = "$env:TEMP\OpenSSH-Win64.zip"
 $gitInstaller = "$env:TEMP\Git-2.52.0-64-bit.exe"
 $tightVNCInstaller = "$env:TEMP\tightvnc-2.8.85-gpl-setup-64bit.msi"
 New-Item -ItemType Directory -Force -Path "C:\ProgramData\crabbox", $workRoot | Out-Null
 if (-not (Test-Path -LiteralPath $vncPasswordPath)) {
-  $bytes = New-Object byte[] 12
-  [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-  [Convert]::ToBase64String($bytes).Substring(0, 12) | Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath
+  New-CrabboxPassword | Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath
 }
-$userPassword = [Guid]::NewGuid().ToString("N") + "aA1!"
+$userPassword = Get-Content -Raw -Path $vncPasswordPath
+if ($userPassword.Length -lt 12 -or $userPassword -notmatch '[A-Z]' -or $userPassword -notmatch '[a-z]' -or $userPassword -notmatch '[0-9]' -or $userPassword -notmatch '[^A-Za-z0-9]') {
+  $userPassword = New-CrabboxPassword
+  Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath -Value $userPassword
+}
+$secure = ConvertTo-SecureString $userPassword -AsPlainText -Force
 if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
-  $secure = ConvertTo-SecureString $userPassword -AsPlainText -Force
   New-LocalUser -Name $user -Password $secure -PasswordNeverExpires -AccountNeverExpires | Out-Null
+} else {
+  Set-LocalUser -Name $user -Password $secure -PasswordNeverExpires $true
 }
 Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
-$ssh = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
-if ($ssh.State -ne "Installed") {
-  Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null
+Set-Content -NoNewline -Encoding ASCII -Path $windowsUsernamePath -Value $user
+Set-Content -NoNewline -Encoding ASCII -Path $windowsPasswordPath -Value $userPassword
+$userSID = (Get-LocalUser -Name $user).SID.Value
+$userSSHDir = Join-Path (Join-Path "C:\Users" $user) ".ssh"
+$userAuthorizedKeys = Join-Path $userSSHDir "authorized_keys"
+New-Item -ItemType Directory -Force -Path $userSSHDir | Out-Null
+Set-Content -Encoding ASCII -Path $userAuthorizedKeys -Value $publicKey
+icacls.exe $userAuthorizedKeys /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
+if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
+  Retry { Invoke-WebRequest -Uri ` + psQuote(openSSHWin64ZipURL) + ` -OutFile $openSSHZip -UseBasicParsing }
+  Remove-Item -Recurse -Force "C:\Program Files\OpenSSH" -ErrorAction SilentlyContinue
+  Expand-Archive -LiteralPath $openSSHZip -DestinationPath "C:\Program Files" -Force
+  if (Test-Path -LiteralPath "C:\Program Files\OpenSSH-Win64") {
+    Rename-Item -LiteralPath "C:\Program Files\OpenSSH-Win64" -NewName "OpenSSH" -Force
+  }
+  & "C:\Program Files\OpenSSH\install-sshd.ps1"
 }
 New-Item -ItemType Directory -Force -Path "$env:ProgramData\ssh" | Out-Null
 Set-Content -Encoding ASCII -Path "$env:ProgramData\ssh\administrators_authorized_keys" -Value $publicKey
@@ -143,7 +180,7 @@ if (-not (Test-Path -LiteralPath "C:\Program Files\Git\cmd\git.exe")) {
   Start-Process -FilePath $gitInstaller -ArgumentList "/VERYSILENT","/NORESTART","/NOCANCEL","/SP-" -Wait
 }
 $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-foreach ($path in @("C:\Program Files\Git\cmd", "C:\Program Files\Git\usr\bin")) {
+foreach ($path in @("C:\Program Files\OpenSSH", "C:\Program Files\Git\cmd", "C:\Program Files\Git\usr\bin")) {
   if ($machinePath -notlike "*$path*") { $machinePath = "$machinePath;$path" }
   if ($env:Path -notlike "*$path*") { $env:Path = "$env:Path;$path" }
 }
@@ -166,8 +203,17 @@ if (-not (Test-Path -LiteralPath "C:\Program Files\TightVNC\tvnserver.exe")) {
 }
 Get-Service -Name tvnserver -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic
 Start-Service -Name tvnserver -ErrorAction SilentlyContinue
+$winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value "1" -Type String
+Set-ItemProperty -Path $winlogon -Name ForceAutoLogon -Value "1" -Type String
+Set-ItemProperty -Path $winlogon -Name DefaultUserName -Value $user -Type String
+Set-ItemProperty -Path $winlogon -Name DefaultPassword -Value $userPassword -Type String
 Restart-Service sshd
-</powershell>`
+if (-not (Test-Path -LiteralPath $setupCompletePath)) {
+  Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
+  Restart-Computer -Force
+}
+`
 }
 
 func macOSUserData(cfg Config, _ string) string {

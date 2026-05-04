@@ -197,9 +197,9 @@ func availableLocalVNCPort() string {
 	return "5901"
 }
 
-func resolveVNCEndpoint(ctx context.Context, cfg Config, target SSHTarget) (vncEndpoint, error) {
+func resolveVNCEndpoint(ctx context.Context, cfg Config, target *SSHTarget) (vncEndpoint, error) {
 	if isStaticProvider(cfg.Provider) {
-		if err := probeLoopbackVNC(ctx, target, "2", "1"); err == nil {
+		if err := waitForLoopbackVNC(ctx, target); err == nil {
 			return vncEndpoint{Host: "127.0.0.1", Port: managedVNCPort}, nil
 		}
 		if tcpReachable(ctx, target.Host, managedVNCPort, 2*time.Second) {
@@ -213,11 +213,16 @@ func resolveVNCEndpoint(ctx context.Context, cfg Config, target SSHTarget) (vncE
 	return vncEndpoint{Host: "127.0.0.1", Port: managedVNCPort, Managed: true}, nil
 }
 
-func waitForLoopbackVNC(ctx context.Context, target SSHTarget) error {
+func waitForLoopbackVNC(ctx context.Context, target *SSHTarget) error {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := probeLoopbackVNC(ctx, target, "2", "1"); err == nil {
-			return nil
+		for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
+			probe := *target
+			probe.Port = port
+			if err := probeLoopbackVNC(ctx, probe, "2", "1"); err == nil {
+				target.Port = port
+				return nil
+			}
 		}
 		time.Sleep(2 * time.Second)
 	}
