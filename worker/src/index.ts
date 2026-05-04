@@ -14,6 +14,10 @@ export default {
     if (request.method === "GET" && url.pathname === "/") {
       return new Response(null, { status: 302, headers: { location: "/portal" } });
     }
+    const canonicalPortal = canonicalPortalRedirect(request, env, url);
+    if (canonicalPortal) {
+      return canonicalPortal;
+    }
     if (url.pathname.startsWith("/v1/auth/")) {
       const id = env.FLEET.idFromName("default");
       return env.FLEET.get(id).fetch(request);
@@ -66,6 +70,28 @@ function isWebVNCAgentUpgrade(request: Request, url: URL): boolean {
     request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
     /^\/v1\/leases\/[^/]+\/webvnc\/agent$/.test(url.pathname)
   );
+}
+
+function canonicalPortalRedirect(request: Request, env: Env, url: URL): Response | undefined {
+  if (
+    request.method !== "GET" ||
+    request.headers.get("upgrade")?.toLowerCase() === "websocket" ||
+    !url.pathname.startsWith("/portal") ||
+    !env.CRABBOX_PUBLIC_URL
+  ) {
+    return undefined;
+  }
+  let publicURL: URL;
+  try {
+    publicURL = new URL(env.CRABBOX_PUBLIC_URL);
+  } catch {
+    return undefined;
+  }
+  if (url.origin === publicURL.origin) {
+    return undefined;
+  }
+  const location = new URL(`${url.pathname}${url.search}`, publicURL.origin);
+  return new Response(null, { status: 302, headers: { location: location.toString() } });
 }
 
 function requestWithPortalCookie(request: Request): Request {

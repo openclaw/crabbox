@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { isAuthorized } from "../src";
+import coordinator, { isAuthorized } from "../src";
 import {
   authenticateRequest,
   base64URL,
@@ -8,6 +8,7 @@ import {
   requestWithAuthContext,
 } from "../src/auth";
 import { requestOwner } from "../src/http";
+import type { Env } from "../src/types";
 
 describe("coordinator auth", () => {
   it("denies requests when no shared token is configured", async () => {
@@ -142,6 +143,39 @@ describe("coordinator auth", () => {
     expect(next.headers.get("cf-access-authenticated-user-email")).toBeNull();
     expect(next.headers.get("cf-access-jwt-assertion")).toBeNull();
     expect(requestOwner(next)).toBe("friend@example.com");
+  });
+
+  it("redirects browser portal auth routes to the configured public origin", async () => {
+    let fleetCalled = false;
+    const env = {
+      CRABBOX_PUBLIC_URL: "https://crabbox.openclaw.ai",
+      FLEET: {
+        idFromName: () => "default",
+        get: () => {
+          fleetCalled = true;
+          return { fetch: () => new Response("unexpected", { status: 599 }) };
+        },
+      },
+    } as unknown as Env;
+
+    const login = await coordinator.fetch(
+      new Request(
+        "https://crabbox-coordinator.steipete.workers.dev/portal/login?returnTo=%2Fportal%2Fleases%2Fcbx_1%2Fvnc",
+      ),
+      env,
+    );
+    expect(login.status).toBe(302);
+    expect(login.headers.get("location")).toBe(
+      "https://crabbox.openclaw.ai/portal/login?returnTo=%2Fportal%2Fleases%2Fcbx_1%2Fvnc",
+    );
+
+    const logout = await coordinator.fetch(
+      new Request("https://crabbox-coordinator.steipete.workers.dev/portal/logout"),
+      env,
+    );
+    expect(logout.status).toBe(302);
+    expect(logout.headers.get("location")).toBe("https://crabbox.openclaw.ai/portal/logout");
+    expect(fleetCalled).toBe(false);
   });
 });
 
