@@ -39,6 +39,9 @@ func (a App) status(ctx context.Context, args []string) error {
 	if isBlacksmithProvider(cfg.Provider) {
 		return a.blacksmithStatus(ctx, cfg, *id, *wait, *waitTimeout, *jsonOut)
 	}
+	if isIsloProvider(cfg.Provider) {
+		return a.isloStatus(ctx, cfg, *id, *wait, *waitTimeout, *jsonOut)
+	}
 	deadline := time.Now().Add(*waitTimeout)
 	for {
 		state, err := a.leaseStatus(ctx, cfg, *id)

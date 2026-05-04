@@ -55,6 +55,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
 	blacksmithFlags := registerBlacksmithFlags(fs, defaults)
+	isloFlags := registerIsloFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -85,6 +86,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 		cfg.IdleTimeout = *idleTimeout
 	}
 	applyBlacksmithFlagOverrides(&cfg, fs, blacksmithFlags)
+	applyIsloFlagOverrides(&cfg, fs, isloFlags)
 	if err := validateProviderTarget(cfg); err != nil {
 		return err
 	}
@@ -106,6 +108,12 @@ func (a App) warmup(ctx context.Context, args []string) error {
 			return exit(2, "--actions-runner is not supported for provider=%s; Blacksmith owns runner hydration", cfg.Provider)
 		}
 		return a.blacksmithWarmup(ctx, cfg, repo, *keep, *reclaim, *timingJSON)
+	}
+	if isIsloProvider(cfg.Provider) {
+		if *actionsRunner {
+			return exit(2, "--actions-runner is not supported for provider=%s; islo owns sandbox setup", cfg.Provider)
+		}
+		return a.isloWarmup(ctx, cfg, repo, *keep, *reclaim, *timingJSON)
 	}
 
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
@@ -204,6 +212,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
 	blacksmithFlags := registerBlacksmithFlags(fs, defaults)
+	isloFlags := registerIsloFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -248,6 +257,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		cfg.Results.JUnit = splitCommaList(*junitResults)
 	}
 	applyBlacksmithFlagOverrides(&cfg, fs, blacksmithFlags)
+	applyIsloFlagOverrides(&cfg, fs, isloFlags)
 	if err := validateProviderTarget(cfg); err != nil {
 		return err
 	}
@@ -275,6 +285,27 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			Command:     command,
 			IdleTimeout: cfg.IdleTimeout,
 			TimingJSON:  *timingJSON,
+		})
+	}
+	if isIsloProvider(cfg.Provider) {
+		if *syncOnly {
+			return exit(2, "provider=islo does not sync local files; --sync-only is not supported")
+		}
+		if *checksumSync {
+			return exit(2, "provider=islo does not sync local files; --checksum is not supported")
+		}
+		if *forceSyncLarge {
+			return exit(2, "provider=islo does not sync local files; --force-sync-large is not supported")
+		}
+		if *noSync {
+			fmt.Fprintf(a.Stderr, "warning: --no-sync is implicit for provider=islo (sync is delegated)\n")
+		}
+		return a.isloRun(ctx, cfg, repo, isloRunOptions{
+			ID:         *leaseIDFlag,
+			Keep:       *keep,
+			Reclaim:    *reclaim,
+			Command:    command,
+			TimingJSON: *timingJSON,
 		})
 	}
 
@@ -1372,6 +1403,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 	}
 	if isBlacksmithProvider(cfg.Provider) {
 		return a.blacksmithStop(ctx, cfg, fs.Arg(0))
+	}
+	if isIsloProvider(cfg.Provider) {
+		return a.isloStop(ctx, cfg, fs.Arg(0))
 	}
 	if coord, ok, err := newTargetCoordinatorClient(cfg); err != nil {
 		return err

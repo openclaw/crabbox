@@ -36,6 +36,7 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - Direct AWS provider: `internal/cli/aws.go`
 - Static SSH macOS/Windows provider: `internal/cli/static.go`
 - Blacksmith Testbox CLI wrapper: `internal/cli/blacksmith.go`
+- Islo SDK wrapper: `internal/cli/islo.go`
 - Worker Hetzner provider: `worker/src/hetzner.ts`
 - Worker AWS EC2 Spot provider: `worker/src/aws.ts`
 - Worker AWS AMI create/read/promote routes: `worker/src/fleet.ts`, `worker/src/aws.ts`

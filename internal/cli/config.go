@@ -50,6 +50,7 @@ type Config struct {
 	Capacity           CapacityConfig
 	Actions            ActionsConfig
 	Blacksmith         BlacksmithConfig
+	Islo               IsloConfig
 	Tailscale          TailscaleConfig
 	Static             StaticConfig
 	Results            ResultsConfig
@@ -97,6 +98,14 @@ type BlacksmithConfig struct {
 	Ref         string
 	IdleTimeout time.Duration
 	Debug       bool
+}
+
+type IsloConfig struct {
+	Image          string
+	Workdir        string
+	GatewayProfile string
+	Env            map[string]string
+	Debug          bool
 }
 
 type StaticConfig struct {
@@ -243,6 +252,7 @@ type fileConfig struct {
 	Capacity         *fileCapacityConfig   `yaml:"capacity,omitempty"`
 	Actions          *fileActionsConfig    `yaml:"actions,omitempty"`
 	Blacksmith       *fileBlacksmithConfig `yaml:"blacksmith,omitempty"`
+	Islo             *fileIsloConfig       `yaml:"islo,omitempty"`
 	Tailscale        *fileTailscaleConfig  `yaml:"tailscale,omitempty"`
 	Static           *fileStaticConfig     `yaml:"static,omitempty"`
 	Results          *fileResultsConfig    `yaml:"results,omitempty"`
@@ -341,6 +351,14 @@ type fileBlacksmithConfig struct {
 	Ref         string `yaml:"ref,omitempty"`
 	IdleTimeout string `yaml:"idleTimeout,omitempty"`
 	Debug       *bool  `yaml:"debug,omitempty"`
+}
+
+type fileIsloConfig struct {
+	Image          string            `yaml:"image,omitempty"`
+	Workdir        string            `yaml:"workdir,omitempty"`
+	GatewayProfile string            `yaml:"gatewayProfile,omitempty"`
+	Env            map[string]string `yaml:"env,omitempty"`
+	Debug          *bool             `yaml:"debug,omitempty"`
 }
 
 type fileTailscaleConfig struct {
@@ -699,6 +717,28 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Blacksmith.Debug = *file.Blacksmith.Debug
 		}
 	}
+	if file.Islo != nil {
+		if file.Islo.Image != "" {
+			cfg.Islo.Image = file.Islo.Image
+		}
+		if file.Islo.Workdir != "" {
+			cfg.Islo.Workdir = file.Islo.Workdir
+		}
+		if file.Islo.GatewayProfile != "" {
+			cfg.Islo.GatewayProfile = file.Islo.GatewayProfile
+		}
+		if len(file.Islo.Env) > 0 {
+			if cfg.Islo.Env == nil {
+				cfg.Islo.Env = map[string]string{}
+			}
+			for k, v := range file.Islo.Env {
+				cfg.Islo.Env[k] = v
+			}
+		}
+		if file.Islo.Debug != nil {
+			cfg.Islo.Debug = *file.Islo.Debug
+		}
+	}
 	if file.Tailscale != nil {
 		if file.Tailscale.Enabled != nil {
 			cfg.Tailscale.Enabled = *file.Tailscale.Enabled
@@ -856,6 +896,12 @@ func applyEnv(cfg *Config) {
 	if value, ok := getenvBool("CRABBOX_BLACKSMITH_DEBUG"); ok {
 		cfg.Blacksmith.Debug = value
 	}
+	cfg.Islo.Image = getenv("CRABBOX_ISLO_IMAGE", cfg.Islo.Image)
+	cfg.Islo.Workdir = getenv("CRABBOX_ISLO_WORKDIR", cfg.Islo.Workdir)
+	cfg.Islo.GatewayProfile = getenv("CRABBOX_ISLO_GATEWAY_PROFILE", cfg.Islo.GatewayProfile)
+	if value, ok := getenvBool("CRABBOX_ISLO_DEBUG"); ok {
+		cfg.Islo.Debug = value
+	}
 	if labels := os.Getenv("CRABBOX_ACTIONS_RUNNER_LABELS"); labels != "" {
 		cfg.Actions.RunnerLabels = splitCommaList(labels)
 	}
@@ -938,7 +984,7 @@ func serverTypeForClass(class string) string {
 }
 
 func serverTypeForConfig(cfg Config) string {
-	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
+	if isBlacksmithProvider(cfg.Provider) || isIsloProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
 		return ""
 	}
 	if cfg.Provider == "aws" {
@@ -948,7 +994,7 @@ func serverTypeForConfig(cfg Config) string {
 }
 
 func serverTypeForProviderClass(provider, class string) string {
-	if isBlacksmithProvider(provider) || isStaticProvider(provider) {
+	if isBlacksmithProvider(provider) || isIsloProvider(provider) || isStaticProvider(provider) {
 		return ""
 	}
 	if provider == "aws" {

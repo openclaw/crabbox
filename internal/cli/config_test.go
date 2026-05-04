@@ -108,6 +108,13 @@ blacksmith:
   ref: main
   idleTimeout: 90m
   debug: true
+islo:
+  image: docker.io/library/ubuntu:24.04
+  workdir: /workspace/crabbox
+  gatewayProfile: default
+  env:
+    NODE_ENV: production
+  debug: true
 static:
   id: win-dev
   name: windows-dev
@@ -198,6 +205,12 @@ ssh:
 	if cfg.Blacksmith.Org != "openclaw" || cfg.Blacksmith.Workflow != ".github/workflows/blacksmith-testbox.yml" || cfg.Blacksmith.Job != "hydrate" || cfg.Blacksmith.Ref != "main" || cfg.Blacksmith.IdleTimeout != 90*time.Minute || !cfg.Blacksmith.Debug {
 		t.Fatalf("blacksmith config not loaded: %#v", cfg.Blacksmith)
 	}
+	if cfg.Islo.Image != "docker.io/library/ubuntu:24.04" || cfg.Islo.Workdir != "/workspace/crabbox" || cfg.Islo.GatewayProfile != "default" || !cfg.Islo.Debug {
+		t.Fatalf("islo config not loaded: %#v", cfg.Islo)
+	}
+	if cfg.Islo.Env["NODE_ENV"] != "production" {
+		t.Fatalf("islo env not loaded: %#v", cfg.Islo.Env)
+	}
 	if cfg.Static.Host != "win-dev.local" || cfg.Static.User != "peter" || cfg.Static.Port != "22" || cfg.WorkRoot != "/home/peter/crabbox" {
 		t.Fatalf("static config not loaded: static=%#v workRoot=%s", cfg.Static, cfg.WorkRoot)
 	}
@@ -267,6 +280,10 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_TAILSCALE_AUTH_KEY", "tskey-secret")
 	t.Setenv("CRABBOX_TARGET", "macos")
 	t.Setenv("CRABBOX_STATIC_HOST", "mac.local")
+	t.Setenv("CRABBOX_ISLO_IMAGE", "docker.io/library/python:3.12-slim")
+	t.Setenv("CRABBOX_ISLO_WORKDIR", "/workspace/env-test")
+	t.Setenv("CRABBOX_ISLO_GATEWAY_PROFILE", "env-profile")
+	t.Setenv("CRABBOX_ISLO_DEBUG", "true")
 	path := userConfigPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -302,6 +319,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if len(cfg.Tailscale.Tags) != 2 || cfg.Tailscale.Tags[1] != "tag:ci" {
 		t.Fatalf("unexpected tailscale tags: %#v", cfg.Tailscale.Tags)
+	}
+	if cfg.Islo.Image != "docker.io/library/python:3.12-slim" || cfg.Islo.Workdir != "/workspace/env-test" || cfg.Islo.GatewayProfile != "env-profile" || !cfg.Islo.Debug {
+		t.Fatalf("unexpected islo env config: %#v", cfg.Islo)
 	}
 }
 

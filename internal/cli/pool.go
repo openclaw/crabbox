@@ -34,6 +34,9 @@ func (a App) list(ctx context.Context, args []string) error {
 	if isBlacksmithProvider(cfg.Provider) {
 		return a.blacksmithList(ctx, cfg, *jsonOut)
 	}
+	if isIsloProvider(cfg.Provider) {
+		return a.isloList(ctx, cfg, *jsonOut)
+	}
 	if isStaticProvider(cfg.Provider) {
 		server, _, _, err := staticLease(cfg)
 		if err != nil {

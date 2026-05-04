@@ -111,6 +111,8 @@ brokered Worker path.
 
 Crabbox can also wrap Blacksmith Testboxes with `provider: blacksmith-testbox`. That backend does not use the Crabbox broker or direct cloud credentials. It shells out to the authenticated Blacksmith CLI for `testbox warmup`, `run`, `status`, `list`, and `stop`, while Crabbox keeps local slugs, repo claims, config, and timing summaries. See [Blacksmith Testbox](blacksmith-testbox.md).
 
+`provider: islo` targets [islo.dev](https://islo.dev) sandboxes via the [islo Go SDK](https://github.com/islo-labs/go-sdk). Auth comes from `ISLO_API_KEY`; sandbox lifecycle and exec are SDK calls (warmup → `Sandboxes.CreateSandbox`, run → SSE consumer for `POST /sandboxes/{name}/exec/stream`, status → `GetSandbox`, list → `ListSandboxes`, stop → `DeleteSandbox`). See [Islo](islo.md).
+
 Static SSH targets:
 
 ```yaml
@@ -149,5 +151,6 @@ Related docs:
 - [Infrastructure](../infrastructure.md)
 - [Tailscale](tailscale.md)
 - [Blacksmith Testbox](blacksmith-testbox.md)
+- [Islo](islo.md)
 - [Runner bootstrap](runner-bootstrap.md)
 - [Cost and usage](cost-usage.md)
