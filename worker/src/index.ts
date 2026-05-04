@@ -22,6 +22,10 @@ export default {
       const id = env.FLEET.idFromName("default");
       return env.FLEET.get(id).fetch(request);
     }
+    if (isWebVNCAgentUpgrade(request, url)) {
+      const id = env.FLEET.idFromName("default");
+      return env.FLEET.get(id).fetch(request);
+    }
     const portal = url.pathname.startsWith("/portal");
     const authRequest = portal ? requestWithPortalCookie(request) : request;
     const auth = await authenticateRequest(authRequest, env);
@@ -54,6 +58,14 @@ export async function isAuthorized(
   >,
 ): Promise<boolean> {
   return Boolean((await authenticateRequest(request, env))?.authorized);
+}
+
+function isWebVNCAgentUpgrade(request: Request, url: URL): boolean {
+  return (
+    request.method === "GET" &&
+    request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
+    /^\/v1\/leases\/[^/]+\/webvnc\/agent$/.test(url.pathname)
+  );
 }
 
 function requestWithPortalCookie(request: Request): Request {

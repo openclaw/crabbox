@@ -390,10 +390,25 @@ describe("fleet lease identity and idle", () => {
     );
     expect(plain.status).toBe(409);
 
+    const ticket = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/webvnc/ticket", { headers, body: {} }),
+    );
+    expect(ticket.status).toBe(200);
+    const ticketBody = (await ticket.json()) as { ticket: string; leaseID: string };
+    expect(ticketBody.ticket).toMatch(/^wvnc_[a-f0-9]{32}$/);
+    expect(ticketBody.leaseID).toBe("cbx_000000000001");
+
     const agent = await fleet.fetch(
       request("GET", "/v1/leases/blue-lobster/webvnc/agent", { headers }),
     );
     expect(agent.status).toBe(426);
+
+    const missingTicket = await fleet.fetch(
+      request("GET", "/v1/leases/blue-lobster/webvnc/agent", {
+        headers: { upgrade: "websocket" },
+      }),
+    );
+    expect(missingTicket.status).toBe(401);
   });
 
   it("keeps pool inventory admin-only", async () => {

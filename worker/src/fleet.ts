@@ -28,8 +28,18 @@ import { costLimits, enforceCostLimits, leaseCost, requestOrg, usageSummary } fr
 const fleetID = "default";
 const maxStoredRunLogBytes = 8 * 1024 * 1024;
 const runLogChunkBytes = 64 * 1024;
+const webVNCTicketTTLSeconds = 120;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+
+interface WebVNCTicketRecord {
+  ticket: string;
+  leaseID: string;
+  owner: string;
+  org: string;
+  createdAt: string;
+  expiresAt: string;
+}
 
 export class FleetDurableObject implements DurableObject {
   private readonly webVNCAgents = new Map<string, WebSocket>();
@@ -110,6 +120,15 @@ export class FleetDurableObject implements DurableObject {
       }
       if (method === "POST" && parts.join("/") === "v1/leases") {
         return await this.createLease(request);
+      }
+      if (
+        parts[0] === "v1" &&
+        parts[1] === "leases" &&
+        parts[2] &&
+        parts[3] === "webvnc" &&
+        parts[4] === "ticket"
+      ) {
+        return await this.createWebVNCTicket(request, parts[2]);
       }
       if (
         parts[0] === "v1" &&
@@ -351,8 +370,15 @@ export class FleetDurableObject implements DurableObject {
         { status: 426 },
       );
     }
-    const lease = await this.resolveLease(identifier, request, false);
-    if (!lease) {
+    const ticket = await this.consumeWebVNCTicket(request);
+    if (!ticket) {
+      return json(
+        { error: "webvnc_ticket_required", message: "valid WebVNC bridge ticket required" },
+        { status: 401 },
+      );
+    }
+    const lease = await this.getLease(ticket.leaseID);
+    if (!lease || !identifierMatchesLease(identifier, lease)) {
       return notFound();
     }
     const error = webVNCLeaseError(lease);
@@ -372,6 +398,36 @@ export class FleetDurableObject implements DurableObject {
     agent.addEventListener("close", () => this.clearWebVNCAgent(lease.id, agent));
     agent.addEventListener("error", () => this.clearWebVNCAgent(lease.id, agent));
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private async createWebVNCTicket(request: Request, identifier: string): Promise<Response> {
+    if (request.method.toUpperCase() !== "POST") {
+      return json({ error: "not_found" }, { status: 404 });
+    }
+    const lease = await this.resolveLease(identifier, request, false);
+    if (!lease) {
+      return notFound();
+    }
+    const error = webVNCLeaseError(lease);
+    if (error) {
+      return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
+    }
+    await this.cleanupExpiredWebVNCTickets();
+    const now = new Date();
+    const ticket: WebVNCTicketRecord = {
+      ticket: newWebVNCTicket(),
+      leaseID: lease.id,
+      owner: requestOwner(request),
+      org: requestOrg(request, this.env),
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + webVNCTicketTTLSeconds * 1000).toISOString(),
+    };
+    await this.state.storage.put(webVNCTicketKey(ticket.ticket), ticket);
+    return json({
+      ticket: ticket.ticket,
+      leaseID: ticket.leaseID,
+      expiresAt: ticket.expiresAt,
+    });
   }
 
   private async webVNCViewer(request: Request, identifier: string): Promise<Response> {
@@ -427,6 +483,35 @@ export class FleetDurableObject implements DurableObject {
     if (this.webVNCViewers.get(leaseID) === socket) {
       this.webVNCViewers.delete(leaseID);
     }
+  }
+
+  private async consumeWebVNCTicket(request: Request): Promise<WebVNCTicketRecord | undefined> {
+    const value = new URL(request.url).searchParams.get("ticket") ?? "";
+    if (!validWebVNCTicket(value)) {
+      return undefined;
+    }
+    const key = webVNCTicketKey(value);
+    const ticket = await this.state.storage.get<WebVNCTicketRecord>(key);
+    if (!ticket || ticket.ticket !== value) {
+      return undefined;
+    }
+    await this.state.storage.delete(key);
+    if (Date.parse(ticket.expiresAt) <= Date.now()) {
+      return undefined;
+    }
+    return ticket;
+  }
+
+  private async cleanupExpiredWebVNCTickets(): Promise<void> {
+    const tickets = await this.state.storage.list<WebVNCTicketRecord>({
+      prefix: webVNCTicketPrefix(),
+    });
+    const now = Date.now();
+    await Promise.all(
+      [...tickets.entries()]
+        .filter(([, ticket]) => Date.parse(ticket.expiresAt) <= now)
+        .map(([key]) => this.state.storage.delete(key)),
+    );
   }
 
   private async pool(request: Request): Promise<Response> {
@@ -955,6 +1040,14 @@ function promotedAWSImageKey(): string {
   return "image:aws:promoted";
 }
 
+function webVNCTicketPrefix(): string {
+  return "webvnc-ticket:";
+}
+
+function webVNCTicketKey(ticket: string): string {
+  return `${webVNCTicketPrefix()}${ticket}`;
+}
+
 function newLeaseID(): string {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
@@ -967,8 +1060,18 @@ function newRunID(): string {
   return `run_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+function newWebVNCTicket(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return `wvnc_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
 function validLeaseID(value: string | undefined): value is string {
   return typeof value === "string" && /^cbx_[a-f0-9]{12}$/.test(value);
+}
+
+function validWebVNCTicket(value: string | undefined): value is string {
+  return typeof value === "string" && /^wvnc_[a-f0-9]{32}$/.test(value);
 }
 
 function validImageID(value: string | undefined): value is string {
@@ -1006,6 +1109,12 @@ function webVNCLeaseError(lease: LeaseRecord): string {
     return "lease has no reachable host yet";
   }
   return "";
+}
+
+function identifierMatchesLease(identifier: string, lease: LeaseRecord): boolean {
+  return (
+    identifier === lease.id || normalizeLeaseSlug(identifier) === normalizeLeaseSlug(lease.slug)
+  );
 }
 
 function forwardWebVNC(data: string | ArrayBuffer, socket: WebSocket | undefined): void {

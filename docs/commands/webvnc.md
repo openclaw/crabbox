@@ -11,15 +11,17 @@ crabbox webvnc --id blue-lobster --open
 
 The command resolves the lease like `crabbox vnc`, verifies that the lease has
 `desktop=true`, starts the normal SSH tunnel to the runner's loopback VNC
-service, and opens a websocket bridge to the coordinator. The browser connects
-to `/portal/leases/<lease>/vnc` after GitHub portal auth, and the Durable Object
-pairs that browser websocket with the local bridge process.
+service, mints a short-lived bridge ticket over the authenticated coordinator
+API, and opens a websocket bridge to the coordinator with that ticket. The
+browser connects to `/portal/leases/<lease>/vnc` after GitHub portal auth, and
+the Durable Object pairs that browser websocket with the local bridge process.
 
 This keeps the security boundary the same as `crabbox vnc`:
 
 - VNC stays bound to runner loopback.
 - The cloud provider does not open public VNC ingress.
-- The coordinator authenticates both the bridge and the browser.
+- The coordinator authenticates the browser through portal auth and the bridge
+  through a one-use short-lived ticket.
 - The local `crabbox webvnc` process must keep running while the browser uses
   the desktop.
 

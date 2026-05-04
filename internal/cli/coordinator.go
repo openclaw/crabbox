@@ -110,6 +110,12 @@ type CoordinatorGitHubLoginPoll struct {
 	Error    string `json:"error,omitempty"`
 }
 
+type CoordinatorWebVNCTicket struct {
+	Ticket    string `json:"ticket"`
+	LeaseID   string `json:"leaseID"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
 type CoordinatorRunsResponse struct {
 	Runs []CoordinatorRun `json:"runs"`
 }
@@ -438,6 +444,12 @@ func (c *CoordinatorClient) PollGitHubLogin(ctx context.Context, loginID, pollSe
 		"loginID":    loginID,
 		"pollSecret": pollSecret,
 	}, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) CreateWebVNCTicket(ctx context.Context, leaseID string) (CoordinatorWebVNCTicket, error) {
+	var res CoordinatorWebVNCTicket
+	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(leaseID)+"/webvnc/ticket", map[string]any{}, &res)
 	return res, err
 }
 

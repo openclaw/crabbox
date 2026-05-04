@@ -135,8 +135,12 @@ func bridgeWebVNC(ctx context.Context, coord *CoordinatorClient, leaseID, host, 
 		return err
 	}
 	defer tcp.Close()
-	ws, _, err := websocket.Dial(ctx, webVNCAgentURL(coord.BaseURL, leaseID), &websocket.DialOptions{
-		HTTPHeader: coord.webVNCHeaders(),
+	ticket, err := coord.CreateWebVNCTicket(ctx, leaseID)
+	if err != nil {
+		return err
+	}
+	ws, _, err := websocket.Dial(ctx, webVNCAgentURL(coord.BaseURL, leaseID, ticket.Ticket), &websocket.DialOptions{
+		HTTPHeader: coord.webVNCAccessHeaders(),
 	})
 	if err != nil {
 		return err
@@ -187,22 +191,13 @@ func copyTCPToWebSocket(ctx context.Context, ws *websocket.Conn, tcp net.Conn) e
 	}
 }
 
-func (c *CoordinatorClient) webVNCHeaders() http.Header {
+func (c *CoordinatorClient) webVNCAccessHeaders() http.Header {
 	header := http.Header{}
-	if c.Token != "" {
-		header.Set("Authorization", "Bearer "+c.Token)
-	}
 	c.addAccessHeaders(header)
-	if owner := localCoordinatorOwner(); owner != "" {
-		header.Set("X-Crabbox-Owner", owner)
-	}
-	if org := getenv("CRABBOX_ORG", ""); org != "" {
-		header.Set("X-Crabbox-Org", org)
-	}
 	return header
 }
 
-func webVNCAgentURL(base, leaseID string) string {
+func webVNCAgentURL(base, leaseID, ticket string) string {
 	u, err := url.Parse(base)
 	if err != nil {
 		return base
@@ -213,7 +208,9 @@ func webVNCAgentURL(base, leaseID string) string {
 		u.Scheme = "ws"
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/v1/leases/" + url.PathEscape(leaseID) + "/webvnc/agent"
-	u.RawQuery = ""
+	values := url.Values{}
+	values.Set("ticket", ticket)
+	u.RawQuery = values.Encode()
 	u.Fragment = ""
 	return u.String()
 }
