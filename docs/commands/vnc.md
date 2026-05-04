@@ -1,17 +1,41 @@
 # vnc
 
-`crabbox vnc` prints a tunnel command and connection details for a
-desktop-capable Crabbox lease or an explicitly configured static host.
+`crabbox vnc` prints connection details for a desktop-capable Crabbox target.
+For Crabbox-created desktop leases, it gives you an SSH tunnel, a local VNC
+endpoint, and the generated per-lease password. For static SSH targets, it can
+describe an existing host-managed VNC service, but it will not pretend that
+host is a Crabbox-created box.
+
+Use this command when you need to look at or manually drive the visible desktop
+inside a lease:
 
 ```sh
 crabbox warmup --desktop
 crabbox vnc --id blue-lobster
 crabbox vnc --id blue-lobster --open
-crabbox vnc --provider ssh --target macos --static-host mac-studio.local
 ```
 
-The command resolves the lease like `crabbox ssh`, claims and touches it like
-manual use, verifies that VNC is bound to runner loopback, and prints:
+Managed AWS Windows and EC2 Mac desktop leases use the same command:
+
+```sh
+crabbox warmup --provider aws --target windows --desktop --market on-demand
+crabbox vnc --id crimson-crab
+
+CRABBOX_AWS_MAC_HOST_ID=h-... \
+  crabbox warmup --provider aws --target macos --desktop --market on-demand
+crabbox vnc --id silver-squid
+```
+
+Static hosts are explicit and host-managed:
+
+```sh
+crabbox vnc --provider ssh --target macos --static-host mac-studio.local
+crabbox vnc --provider ssh --target windows --static-host win-dev.local
+```
+
+## Output
+
+A managed Linux lease prints:
 
 ```text
 lease: cbx_... slug=blue-lobster provider=aws target=linux
@@ -25,27 +49,50 @@ password: ...
 Keep the tunnel process running while connected.
 ```
 
-Run the tunnel command in another terminal, then connect your VNC client to the
-printed `localhost:<port>` endpoint. Managed desktop leases use a per-lease VNC
-password stored on the runner. Linux stores it under `/var/lib/crabbox`, Windows
-under `C:\ProgramData\crabbox`, and macOS under `/var/db/crabbox`; the password
-is retrieved over SSH only when `vnc` is called. It is not stored in provider
-labels or run history.
+Run the printed `ssh -N -L ...` tunnel in another terminal, then connect your
+VNC client to the printed `localhost:<port>` endpoint. The tunnel forwards your
+local port to `127.0.0.1:5900` on the remote box.
 
-Managed AWS Windows leases also print the Windows console login next to the VNC
-password:
+Use `--open` when you want Crabbox to start the tunnel and open the local VNC
+URL for you:
 
-```text
-windows username: crabbox
-windows password: ...
+```sh
+crabbox vnc --id blue-lobster --open
 ```
 
-That is the generated user inside the Crabbox-created Windows instance. It is
-not your local macOS password.
+Keep the tunnel process alive while you are connected.
 
-Managed AWS macOS leases print the EC2 macOS account login in the same style:
+## Credentials
+
+Managed desktop leases use generated per-lease credentials. The password is
+stored only on the instance and is retrieved over SSH when `crabbox vnc` runs.
+Crabbox does not store it in provider tags, labels, or run history.
+
+Password locations:
+
+| Target | Password file |
+| --- | --- |
+| Linux | `/var/lib/crabbox/vnc.password` |
+| Windows | `C:\ProgramData\crabbox\vnc.password` |
+| macOS | `/var/db/crabbox/vnc.password` |
+
+Managed AWS Windows leases also print the generated Windows console login:
 
 ```text
+password: Cb1!...
+windows username: crabbox
+windows password: Cb1!...
+```
+
+That login belongs to the Crabbox-created Windows instance, not your local
+machine. Windows desktop bootstrap creates a local `crabbox` administrator,
+configures auto-logon for that user, installs TightVNC, and keeps VNC reachable
+only through the SSH tunnel.
+
+Managed AWS macOS leases print the EC2 macOS account login:
+
+```text
+password: ...
 macos username: ec2-user
 macos password: ...
 ```
@@ -53,61 +100,127 @@ macos password: ...
 That password is generated per lease and set on the EC2 Mac account during
 bootstrap.
 
-Use `--open` to let Crabbox start the SSH tunnel, open the local VNC URL, and
-print the tunnel process ID. Keep that tunnel process alive while connected.
+Static macOS and Windows hosts are different. Their VNC or Screen Sharing
+credentials are host-managed, because those targets are existing machines.
+Crabbox does not synthesize or print those passwords.
 
-Static hosts are existing machines, not Crabbox-created boxes. For static
-hosts, Crabbox first tries the same SSH tunnel to
-`127.0.0.1:5900` on the target. If a static host exposes VNC directly on
-`host:5900`, Crabbox prints that endpoint instead. Direct static VNC is
-operator-managed and should be limited to a trusted network such as Tailscale or
-LAN. Opening a static macOS or Windows target means opening that existing
-machine, not an external Crabbox instance.
+## Managed Vs Static
 
-Static host credentials are host-managed. On macOS, the built-in Screen Sharing
-server uses the host's Screen Sharing or macOS account authentication. On
-Windows, the prompt belongs to the installed VNC server. Crabbox does not print
-or synthesize those passwords.
+Managed means Crabbox created the box and owns the desktop setup:
 
-`--open` refuses host-managed static VNC by default so a host OS password prompt
-is not mistaken for a Crabbox-created box. Pass `--host-managed` only when you
-intentionally want to open that existing host's VNC login prompt.
+- cloud instance lifecycle;
+- SSH key and connection metadata;
+- desktop or VNC service setup;
+- generated per-lease password;
+- `desktop=true` lease capability;
+- tunnel-only access.
 
-Security boundary:
+Static means Crabbox is pointing at an existing SSH host:
 
-- VNC is never exposed directly to the public internet.
-- Managed Linux binds x11vnc to `127.0.0.1:5900` on the runner.
-- Managed Windows installs TightVNC and connects through the SSH tunnel.
-- Managed macOS enables Screen Sharing and connects through the SSH tunnel.
-- Crabbox does not add provider firewall or security-group ingress for VNC.
-- Brokered leases use SSH tunnels only. Static hosts may also use direct
-  operator-managed VNC when `host:5900` is already reachable.
+- the host already exists;
+- the operator owns VNC setup and credentials;
+- the host may be your local LAN, Tailscale, or another durable machine;
+- opening VNC can show that host's OS login prompt.
 
-Provider behavior:
+`--open` refuses host-managed static VNC unless you pass `--host-managed`.
+That guard prevents a local Mac or durable Windows host prompt from being
+mistaken for a Crabbox-created cloud box.
 
-- Brokered and direct Hetzner leases support Linux VNC only when created with
-  `--desktop`.
-- Brokered and direct AWS Linux leases support VNC when created with
-  `--desktop`.
-- Brokered and direct AWS native Windows leases support VNC when created with
-  `--target windows --desktop`. EC2Launch opens the initial AWS key-backed
-  OpenSSH foothold, then the Crabbox CLI installs Git for Windows, TightVNC,
-  a local `crabbox` administrator, and Windows auto-logon for the lease.
-- Brokered and direct AWS macOS leases support VNC when created with
-  `--target macos --desktop --market on-demand` and an EC2 Mac Dedicated Host id
-  from `CRABBOX_AWS_MAC_HOST_ID` or `aws.macHostId`.
-- Static Linux can participate if the operator already configured Xvfb and
-  loopback-bound x11vnc.
-- Static macOS can participate when Screen Sharing or another VNC-compatible
-  service is already available on `127.0.0.1:5900` over SSH or directly on
-  `host:5900`. This reuses an existing Mac; it does not create a macOS Crabbox.
-  Credentials are host-managed.
-- Static native Windows can participate when a VNC server is already available
-  on `127.0.0.1:5900` over SSH or directly on `host:5900`. Static Windows is
-  still host-managed; managed Windows VNC is AWS-only.
-- Blacksmith Testbox does not support managed VNC in this release.
+```sh
+crabbox vnc --provider ssh --target macos --static-host mac-studio.local --host-managed --open
+```
 
-Flags:
+Only use `--host-managed` when you intentionally want to open the existing
+host's VNC or Screen Sharing prompt.
+
+## Provider Support
+
+| Provider / target | Managed VNC | Notes |
+| --- | --- | --- |
+| Hetzner Linux | Yes | Requires `--desktop`; installs XFCE, Xvfb, and x11vnc. |
+| AWS Linux | Yes | Requires `--desktop`; same Linux desktop profile. |
+| AWS Windows | Yes | Requires `--target windows --desktop --market on-demand`; installs Git for Windows and TightVNC after EC2Launch enables OpenSSH. |
+| AWS macOS | Yes | Requires `--target macos --desktop --market on-demand` plus `CRABBOX_AWS_MAC_HOST_ID` or `aws.macHostId`. |
+| Static Linux | Host-managed | Requires an existing loopback VNC service on the host. |
+| Static macOS | Host-managed | Uses existing Screen Sharing or VNC. |
+| Static Windows | Host-managed | Uses an existing VNC server. |
+| Blacksmith Testbox | No | Blacksmith owns machine connectivity today. |
+
+AWS EC2 Mac has an important cost and lifecycle constraint: Mac instances run on
+allocated EC2 Mac Dedicated Hosts, are On-Demand only, and the Dedicated Host
+has a 24-hour minimum allocation period. Crabbox launches onto a host id you
+provide; it does not allocate or scrub EC2 Mac hosts for you.
+
+## Security Model
+
+Crabbox VNC is tunnel-first:
+
+- managed VNC binds to `127.0.0.1:5900` on the remote box;
+- the cloud security group does not open public VNC ingress;
+- the local machine connects through SSH port forwarding;
+- the normal lease TTL and idle-timeout lifecycle still apply;
+- generated passwords are retrieved only on demand over SSH.
+
+For static hosts, direct `host:5900` VNC is allowed only when that endpoint is
+already reachable. Treat direct static VNC as operator-managed and keep it on a
+trusted network such as Tailscale or a private LAN.
+
+## Screenshots
+
+Use `crabbox screenshot` when you need a PNG but do not need to open a VNC
+client:
+
+```sh
+crabbox screenshot --id blue-lobster --output desktop.png
+```
+
+Screenshots share the same managed desktop boundary as VNC. Static macOS and
+Windows hosts are rejected so Crabbox does not accidentally capture your local
+or home-host desktop.
+
+Windows screenshots run a one-shot scheduled task inside the logged-in
+`crabbox` console session. Non-interactive SSH sessions cannot reliably capture
+the visible Windows desktop.
+
+## Troubleshooting
+
+`lease ... was not created with desktop=true`
+
+Warm a new lease with `--desktop`. Existing non-desktop leases do not gain a
+desktop after creation:
+
+```sh
+crabbox warmup --desktop
+```
+
+`target does not expose VNC on 127.0.0.1:5900`
+
+The SSH connection works, but the desktop or VNC service is not listening on
+remote loopback. On managed boxes, inspect bootstrap logs or warm a fresh lease.
+On static hosts, start or configure the host's VNC service.
+
+VNC opens an OS credential prompt
+
+Check `managed:` in the output. If it says `managed: false`, you opened a
+static host. Static host credentials belong to that host. For Crabbox-created
+Windows or macOS, use the generated username/password printed by `crabbox vnc`.
+
+Tunnel command uses port `22` instead of `2222`
+
+That is expected on AWS Windows. EC2Launch enables the first OpenSSH foothold on
+port `22`, and Crabbox records the working SSH port after probing fallbacks.
+
+Windows screenshot is black or fails from raw SSH
+
+Use `crabbox screenshot`, not an ad hoc PowerShell `CopyFromScreen` over SSH.
+The command captures from the logged-in console session using a scheduled task.
+
+macOS launch fails with missing host id
+
+Set `CRABBOX_AWS_MAC_HOST_ID` or `aws.macHostId`, use `--market on-demand`, and
+make sure the Dedicated Host is allocated in the selected AWS region.
+
+## Flags
 
 ```text
 --id <lease-id-or-slug>
@@ -123,3 +236,10 @@ Flags:
 --host-managed
 --reclaim
 ```
+
+Related docs:
+
+- [screenshot](screenshot.md)
+- [warmup](warmup.md)
+- [Interactive desktop and VNC](../features/interactive-desktop-vnc.md)
+- [Providers](../features/providers.md)
