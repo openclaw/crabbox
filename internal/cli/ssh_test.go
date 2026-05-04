@@ -489,6 +489,12 @@ func TestAWSLaunchCandidatesAddsPolicyFallbackUnlessExact(t *testing.T) {
 	if got[len(got)-1] != "t3.small" {
 		t.Fatalf("last fallback=%q want t3.small in %v", got[len(got)-1], got)
 	}
+	wsl2 := awsLaunchCandidates(Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Class: "standard", ServerType: "m8i.large"})
+	for _, candidate := range wsl2 {
+		if strings.HasPrefix(candidate, "t3.") || strings.HasPrefix(candidate, "m7") {
+			t.Fatalf("WSL2 candidate %q does not support nested virtualization: %v", candidate, wsl2)
+		}
+	}
 	exact := awsLaunchCandidates(Config{Provider: "aws", Class: "beast", ServerType: "t3.small", ServerTypeExplicit: true})
 	if len(exact) != 1 || exact[0] != "t3.small" {
 		t.Fatalf("exact candidates=%v", exact)

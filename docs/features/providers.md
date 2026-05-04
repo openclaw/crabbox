@@ -76,6 +76,12 @@ fast      m7i.xlarge, m7a.xlarge, t3.xlarge
 large     m7i.2xlarge, m7a.2xlarge, t3.2xlarge
 beast     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge
 
+AWS Windows WSL2
+standard  m8i.large, m8i-flex.large, c8i.large, r8i.large
+fast      m8i.xlarge, m8i-flex.xlarge, c8i.xlarge, r8i.xlarge
+large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge
+beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge
+
 AWS macOS
 all       mac2.metal unless `--type` is set
 ```
@@ -131,7 +137,9 @@ static:
 
 `target: windows` supports `windows.mode: normal` and `windows.mode: wsl2`.
 Normal mode uses PowerShell over OpenSSH and syncs the manifest as a tar archive.
-WSL2 mode keeps the POSIX SSH contract: commands run through
+WSL2 mode requires AWS nested virtualization, so managed AWS WSL2 leases use
+C8i, M8i, or R8i families and enable nested virtualization at launch. Static
+WSL2 hosts keep the POSIX SSH contract: commands run through
 `wsl.exe --exec bash -lc`, rsync uses `wsl.exe rsync`, and `static.workRoot`
 should be a WSL path such as `/home/peter/crabbox`. macOS also uses the POSIX
 contract and needs `git`, `rsync`, `tar`, and SSH.

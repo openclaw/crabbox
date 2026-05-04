@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   addRunInstancesTagSpecifications,
+  applyAWSRunInstanceTargetOptions,
   awsInstanceTypeVCPUs,
   awsLaunchCandidates,
   awsProvisioningErrorCategory,
@@ -46,6 +47,16 @@ describe("aws provider", () => {
     expect(onDemandParams).not.toHaveProperty("TagSpecification.3.Tag.1.Key");
   });
 
+  it("enables nested virtualization only for Windows WSL2 launches", () => {
+    const wsl2Params: Record<string, string> = {};
+    applyAWSRunInstanceTargetOptions(wsl2Params, { target: "windows", windowsMode: "wsl2" });
+    expect(wsl2Params["CpuOptions.NestedVirtualization"]).toBe("enabled");
+
+    const nativeParams: Record<string, string> = {};
+    applyAWSRunInstanceTargetOptions(nativeParams, { target: "windows", windowsMode: "normal" });
+    expect(nativeParams).not.toHaveProperty("CpuOptions.NestedVirtualization");
+  });
+
   it("classifies account policy launch failures as fallback candidates", () => {
     expect(
       awsProvisioningErrorCategory(
@@ -61,6 +72,7 @@ describe("aws provider", () => {
       awsLaunchCandidates({
         class: "beast",
         target: "linux",
+        windowsMode: "normal",
         serverType: "c7a.48xlarge",
         serverTypeExplicit: false,
       }),
@@ -69,10 +81,20 @@ describe("aws provider", () => {
       awsLaunchCandidates({
         class: "beast",
         target: "linux",
+        windowsMode: "normal",
         serverType: "t3.small",
         serverTypeExplicit: true,
       }),
     ).toEqual(["t3.small"]);
+    expect(
+      awsLaunchCandidates({
+        class: "standard",
+        target: "windows",
+        windowsMode: "wsl2",
+        serverType: "m8i.large",
+        serverTypeExplicit: false,
+      }),
+    ).not.toContain("t3.large");
   });
 
   it("maps AWS instance types to vCPU quota units", () => {

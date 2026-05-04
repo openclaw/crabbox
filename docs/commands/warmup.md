@@ -33,10 +33,18 @@ run Windows through ISO/snapshot installation flows, but Crabbox does not manage
 that path today. Use `--provider aws --target windows` for managed Windows, or
 `--provider ssh --target windows` for an existing Hetzner Windows host.
 
-With `--provider aws --target windows --desktop`, Crabbox creates a real AWS
-Windows Server lease. EC2Launch user data installs OpenSSH Server, Git for
-Windows, TightVNC Server, a per-lease local administrator named `crabbox`, and a
-loopback VNC password retrievable through `crabbox vnc --id <lease>`.
+With `--provider aws --target windows --windows-mode normal --desktop`, Crabbox
+creates a real AWS Windows Server lease. EC2Launch user data installs OpenSSH
+Server, Git for Windows, TightVNC Server, a per-lease local administrator named
+`crabbox`, and a loopback VNC password retrievable through
+`crabbox vnc --id <lease>`.
+
+With `--provider aws --target windows --windows-mode wsl2`, Crabbox still
+creates a Windows Server host, then enables WSL, VirtualMachinePlatform, and
+HypervisorPlatform, reboots as needed, updates the WSL kernel from the web,
+imports an Ubuntu rootfs, and prepares the Linux-side `crabbox-ready` toolchain.
+The AWS launch enables nested virtualization and uses C8i, M8i, or R8i instance
+families for this mode. Commands and sync then use the POSIX WSL contract.
 
 With `--provider aws --target macos --desktop`, Crabbox launches an EC2 Mac
 instance on an already allocated Dedicated Host. Set `CRABBOX_AWS_MAC_HOST_ID`

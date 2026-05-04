@@ -9,6 +9,7 @@ const (
 	tightVNCMSIURL        = "https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi"
 	gitForWindowsSetupURL = "https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe"
 	openSSHWin64ZipURL    = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip"
+	ubuntuWSLRootFSURL    = "https://cloud-images.ubuntu.com/wsl/releases/noble/current/ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz"
 )
 
 func awsUserData(cfg Config, publicKey string) string {
@@ -106,6 +107,7 @@ func windowsBootstrapPowerShell(cfg Config, publicKey string) string {
 	if workRoot == "" {
 		workRoot = `C:\crabbox`
 	}
+	wslMode := cfg.WindowsMode == windowsModeWSL2
 	return `
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -127,6 +129,12 @@ function New-CrabboxPassword {
 $user = ` + psQuote(cfg.SSHUser) + `
 $publicKey = ` + psQuote(publicKey) + `
 $workRoot = ` + psQuote(workRoot) + `
+$wslMode = $` + fmt.Sprint(wslMode) + `
+$wslDistro = "Crabbox"
+$wslRoot = "C:\ProgramData\crabbox\wsl\Crabbox"
+$wslRootfs = "C:\ProgramData\crabbox\wsl\ubuntu-noble-wsl-amd64.rootfs.tar.gz"
+$wslFeaturesMarker = "C:\ProgramData\crabbox\wsl-features-rebooted"
+$wslKernelMarker = "C:\ProgramData\crabbox\wsl-kernel-rebooted"
 $sshPorts = ` + windowsSSHPortsPowerShell(cfg) + `
 $vncPasswordPath = "C:\ProgramData\crabbox\vnc.password"
 $windowsUsernamePath = "C:\ProgramData\crabbox\windows.username"
@@ -138,6 +146,73 @@ $openSSHZip = "$env:TEMP\OpenSSH-Win64.zip"
 $gitInstaller = "$env:TEMP\Git-2.52.0-64-bit.exe"
 $tightVNCInstaller = "$env:TEMP\tightvnc-2.8.85-gpl-setup-64bit.msi"
 New-Item -ItemType Directory -Force -Path "C:\ProgramData\crabbox", $workRoot | Out-Null
+function Restart-CrabboxBootstrap($MarkerPath) {
+  Set-Content -NoNewline -Encoding ASCII -Path $MarkerPath -Value (Get-Date).ToString("o")
+  Restart-Computer -Force
+  exit 0
+}
+function Initialize-CrabboxWSL2 {
+  if (-not $wslMode) { return }
+  $needsFeatureReboot = $false
+  foreach ($feature in @("Microsoft-Windows-Subsystem-Linux", "VirtualMachinePlatform", "HypervisorPlatform")) {
+    $state = (Get-WindowsOptionalFeature -Online -FeatureName $feature -ErrorAction SilentlyContinue).State
+    if ($state -ne "Enabled") {
+      dism.exe /online /enable-feature /featurename:$feature /all /norestart | Out-Host
+      if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) { throw "enable $feature failed with exit $LASTEXITCODE" }
+      $needsFeatureReboot = $true
+    }
+  }
+  bcdedit.exe /set hypervisorlaunchtype auto | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "bcdedit hypervisorlaunchtype failed with exit $LASTEXITCODE" }
+  if ($needsFeatureReboot -and -not (Test-Path -LiteralPath $wslFeaturesMarker)) {
+    Restart-CrabboxBootstrap $wslFeaturesMarker
+  }
+  if (-not (Test-Path -LiteralPath $wslKernelMarker)) {
+    wsl.exe --update --web-download | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "wsl --update --web-download failed with exit $LASTEXITCODE" }
+    Restart-CrabboxBootstrap $wslKernelMarker
+  }
+  wsl.exe --set-default-version 2 | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "wsl --set-default-version 2 failed with exit $LASTEXITCODE" }
+  $distros = (wsl.exe --list --quiet 2>$null) -join [Environment]::NewLine
+  if ($distros -notmatch "(?m)^$([Regex]::Escape($wslDistro))$") {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $wslRoot), $wslRoot | Out-Null
+    if (-not (Test-Path -LiteralPath $wslRootfs)) {
+      Retry { Invoke-WebRequest -Uri ` + psQuote(ubuntuWSLRootFSURL) + ` -OutFile $wslRootfs -UseBasicParsing }
+    }
+    wsl.exe --import $wslDistro $wslRoot $wslRootfs --version 2 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "wsl --import failed with exit $LASTEXITCODE" }
+    wsl.exe --set-default $wslDistro | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "wsl --set-default failed with exit $LASTEXITCODE" }
+  }
+  $linuxSetup = @'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+mkdir -p ` + shellQuote(workRoot) + ` /var/cache/crabbox/pnpm /var/cache/crabbox/npm /var/lib/crabbox
+cat >/etc/apt/apt.conf.d/80-crabbox-retries <<'APT'
+Acquire::Retries "8";
+Acquire::http::Timeout "30";
+Acquire::https::Timeout "30";
+APT
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates curl git rsync jq
+cat >/usr/local/bin/crabbox-ready <<'READY'
+#!/usr/bin/env bash
+set -euo pipefail
+git --version >/dev/null
+rsync --version >/dev/null
+curl --version >/dev/null
+jq --version >/dev/null
+test -w ` + shellQuote(workRoot) + `
+READY
+chmod 0755 /usr/local/bin/crabbox-ready
+touch /var/lib/crabbox/bootstrapped
+crabbox-ready
+'@
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($linuxSetup))
+  wsl.exe -d $wslDistro --user root --exec bash -lc "printf '%s' '$encoded' | base64 -d | bash"
+  if ($LASTEXITCODE -ne 0) { throw "WSL setup failed with exit $LASTEXITCODE" }
+}
 if (-not (Test-Path -LiteralPath $vncPasswordPath)) {
   New-CrabboxPassword | Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath
 }
@@ -206,6 +281,7 @@ foreach ($path in @("C:\Program Files\OpenSSH", "C:\Program Files\Git\cmd", "C:\
   if ($env:Path -notlike "*$path*") { $env:Path = "$env:Path;$path" }
 }
 [Environment]::SetEnvironmentVariable("Path", $machinePath, "Machine")
+Initialize-CrabboxWSL2
 if (-not (Test-Path -LiteralPath "C:\Program Files\TightVNC\tvnserver.exe")) {
   Retry { Invoke-WebRequest -Uri ` + psQuote(tightVNCMSIURL) + ` -OutFile $tightVNCInstaller -UseBasicParsing }
   $vncPassword = Get-Content -Raw -Path $vncPasswordPath

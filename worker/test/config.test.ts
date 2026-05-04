@@ -110,17 +110,9 @@ describe("lease config", () => {
     expect(() =>
       leaseConfig({ provider: "hetzner", target: "macos", sshPublicKey: "ssh-ed25519 test" }),
     ).toThrow("EC2 Mac Dedicated Host");
-    expect(() =>
-      leaseConfig({
-        provider: "aws",
-        target: "windows",
-        windowsMode: "wsl2",
-        sshPublicKey: "ssh-ed25519 test",
-      }),
-    ).toThrow("windowsMode=normal");
   });
 
-  it("allows AWS native Windows leases", () => {
+  it("allows AWS Windows leases", () => {
     const config = leaseConfig({
       provider: "aws",
       target: "windows",
@@ -130,6 +122,15 @@ describe("lease config", () => {
     expect(config.serverType).toBe("m7i.4xlarge");
     expect(config.workRoot).toBe("C:\\crabbox");
     expect(config.desktop).toBe(true);
+    const wsl2 = leaseConfig({
+      provider: "aws",
+      target: "windows",
+      windowsMode: "wsl2",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(wsl2.serverType).toBe("m8i.4xlarge");
+    expect(wsl2.workRoot).toBe("/work/crabbox");
+    expect(wsl2.windowsMode).toBe("wsl2");
   });
 
   it("allows AWS macOS leases only with on-demand capacity", () => {

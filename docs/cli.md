@@ -132,7 +132,8 @@ Managed provider targets are intentionally narrow:
 
 - Hetzner managed provisioning supports Linux only.
 - AWS supports Linux, native Windows (`--target windows --windows-mode normal`),
-  and EC2 Mac (`--target macos`) when the Mac Dedicated Host is provided.
+  Windows WSL2 (`--target windows --windows-mode wsl2`), and EC2 Mac
+  (`--target macos`) when the Mac Dedicated Host is provided.
 - Existing macOS and Windows machines belong on `provider=ssh`.
 
 Use Tailscale as an optional network plane:

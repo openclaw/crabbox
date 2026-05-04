@@ -144,8 +144,8 @@ ssh:
 	if cfg.TargetOS != targetWindows || cfg.WindowsMode != windowsModeWSL2 {
 		t.Fatalf("target config not loaded: target=%s windowsMode=%s", cfg.TargetOS, cfg.WindowsMode)
 	}
-	if cfg.ServerType != "m7i.large" {
-		t.Fatalf("ServerType=%q want m7i.large", cfg.ServerType)
+	if cfg.ServerType != "m8i.large" {
+		t.Fatalf("ServerType=%q want m8i.large", cfg.ServerType)
 	}
 	if cfg.Coordinator != "https://crabbox.example.test" || cfg.CoordToken != "secret" || cfg.CoordAdminToken != "admin-secret" {
 		t.Fatalf("broker config not loaded: %#v", cfg)

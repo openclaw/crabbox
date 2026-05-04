@@ -942,7 +942,7 @@ func serverTypeForConfig(cfg Config) string {
 		return ""
 	}
 	if cfg.Provider == "aws" {
-		return awsInstanceTypeCandidatesForTargetClass(cfg.TargetOS, cfg.Class)[0]
+		return awsInstanceTypeCandidatesForConfig(cfg)[0]
 	}
 	return serverTypeForClass(cfg.Class)
 }
@@ -973,10 +973,32 @@ func serverTypeCandidatesForClass(class string) []string {
 }
 
 func awsInstanceTypeCandidatesForTargetClass(target, class string) []string {
+	return awsInstanceTypeCandidatesForTargetModeClass(target, windowsModeNormal, class)
+}
+
+func awsInstanceTypeCandidatesForConfig(cfg Config) []string {
+	return awsInstanceTypeCandidatesForTargetModeClass(cfg.TargetOS, cfg.WindowsMode, cfg.Class)
+}
+
+func awsInstanceTypeCandidatesForTargetModeClass(target, windowsMode, class string) []string {
 	switch target {
 	case targetMacOS:
 		return []string{"mac2.metal"}
 	case targetWindows:
+		if windowsMode == windowsModeWSL2 {
+			switch class {
+			case "standard":
+				return []string{"m8i.large", "m8i-flex.large", "c8i.large", "r8i.large"}
+			case "fast":
+				return []string{"m8i.xlarge", "m8i-flex.xlarge", "c8i.xlarge", "r8i.xlarge"}
+			case "large":
+				return []string{"m8i.2xlarge", "m8i-flex.2xlarge", "c8i.2xlarge", "r8i.2xlarge"}
+			case "beast":
+				return []string{"m8i.4xlarge", "m8i-flex.4xlarge", "c8i.4xlarge", "r8i.4xlarge", "m8i.2xlarge"}
+			default:
+				return []string{class}
+			}
+		}
 		switch class {
 		case "standard":
 			return []string{"m7i.large", "m7a.large", "t3.large"}

@@ -88,8 +88,8 @@ func validateProviderTarget(cfg Config) error {
 	if cfg.Provider == "aws" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeNormal {
 		return nil
 	}
-	if cfg.Provider == "aws" && cfg.TargetOS == targetWindows {
-		return exit(2, "provider=aws managed Windows supports windows.mode=normal only; use provider=ssh for target=windows windows.mode=%s static hosts", cfg.WindowsMode)
+	if cfg.Provider == "aws" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 {
+		return nil
 	}
 	if cfg.Provider == "aws" && cfg.TargetOS == targetMacOS {
 		if cfg.AWSMacHostID == "" && cfg.Coordinator == "" {

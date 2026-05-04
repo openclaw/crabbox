@@ -149,6 +149,34 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 	}
 }
 
+func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeWSL2
+	cfg.WorkRoot = `/work/crabbox`
+	got := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	for _, want := range []string{
+		"$wslMode = $true",
+		"Microsoft-Windows-Subsystem-Linux",
+		"VirtualMachinePlatform",
+		"HypervisorPlatform",
+		"bcdedit.exe /set hypervisorlaunchtype auto",
+		"wsl.exe --update --web-download",
+		"wsl.exe --set-default-version 2",
+		ubuntuWSLRootFSURL,
+		"wsl.exe --import $wslDistro $wslRoot $wslRootfs --version 2",
+		"wsl.exe --set-default $wslDistro",
+		"apt-get install -y --no-install-recommends ca-certificates curl git rsync jq",
+		"cat >/usr/local/bin/crabbox-ready",
+		`test -w '/work/crabbox'`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("windows WSL2 bootstrap missing %q", want)
+		}
+	}
+}
+
 func TestAWSUserDataMacOSProfile(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"

@@ -16,17 +16,6 @@ func TestValidateProviderTargetRejectsUnsupportedAWSTargets(t *testing.T) {
 		}
 	})
 
-	t.Run("Windows WSL2 is not brokered by AWS", func(t *testing.T) {
-		cfg := baseConfig()
-		cfg.Provider = "aws"
-		cfg.TargetOS = targetWindows
-		cfg.WindowsMode = windowsModeWSL2
-		err := validateProviderTarget(cfg)
-		if err == nil || !strings.Contains(err.Error(), "managed Windows supports windows.mode=normal only") {
-			t.Fatalf("err=%v", err)
-		}
-	})
-
 	t.Run("Hetzner Windows needs an existing static host", func(t *testing.T) {
 		cfg := baseConfig()
 		cfg.Provider = "hetzner"
@@ -49,12 +38,16 @@ func TestValidateProviderTargetRejectsUnsupportedAWSTargets(t *testing.T) {
 }
 
 func TestValidateProviderTargetAllowsAWSNativeWindows(t *testing.T) {
-	cfg := baseConfig()
-	cfg.Provider = "aws"
-	cfg.TargetOS = targetWindows
-	cfg.WindowsMode = windowsModeNormal
-	if err := validateProviderTarget(cfg); err != nil {
-		t.Fatalf("err=%v", err)
+	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = "aws"
+			cfg.TargetOS = targetWindows
+			cfg.WindowsMode = mode
+			if err := validateProviderTarget(cfg); err != nil {
+				t.Fatalf("err=%v", err)
+			}
+		})
 	}
 }
 

@@ -247,6 +247,7 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 			},
 		}
 	}
+	applyAWSRunInstanceTargetOptions(input, cfg)
 	if cfg.TargetOS == targetMacOS {
 		input.Placement = &types.Placement{HostId: aws.String(cfg.AWSMacHostID), Tenancy: types.TenancyHost}
 	}
@@ -318,7 +319,7 @@ func (c *AWSClient) resolveAMI(ctx context.Context, cfg Config) (string, error) 
 	if cfg.AWSAMI != "" {
 		return cfg.AWSAMI, nil
 	}
-	if cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeNormal {
+	if cfg.TargetOS == targetWindows {
 		return c.resolveLatestAmazonAMI(ctx, "Windows_Server-2022-English-Full-Base-*", "x86_64")
 	}
 	if cfg.TargetOS == targetMacOS {
@@ -536,13 +537,24 @@ func awsLaunchCandidates(cfg Config) []string {
 		return []string{cfg.ServerType}
 	}
 	if cfg.TargetOS == targetMacOS {
-		return appendUniqueStrings([]string{cfg.ServerType}, awsInstanceTypeCandidatesForTargetClass(cfg.TargetOS, cfg.Class)...)
+		return appendUniqueStrings([]string{cfg.ServerType}, awsInstanceTypeCandidatesForConfig(cfg)...)
 	}
 	fallback := "t3.small"
 	if cfg.TargetOS == targetWindows {
 		fallback = "t3.large"
+		if cfg.WindowsMode == windowsModeWSL2 {
+			fallback = "m8i.large"
+		}
 	}
-	return appendUniqueStrings([]string{cfg.ServerType}, append(awsInstanceTypeCandidatesForTargetClass(cfg.TargetOS, cfg.Class), fallback)...)
+	return appendUniqueStrings([]string{cfg.ServerType}, append(awsInstanceTypeCandidatesForConfig(cfg), fallback)...)
+}
+
+func applyAWSRunInstanceTargetOptions(input *ec2.RunInstancesInput, cfg Config) {
+	if cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 {
+		input.CpuOptions = &types.CpuOptionsRequest{
+			NestedVirtualization: types.NestedVirtualizationSpecificationEnabled,
+		}
+	}
 }
 
 func parsePort32(port string) (int32, bool) {

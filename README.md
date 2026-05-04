@@ -81,7 +81,7 @@ For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For th
 - **Trusted AWS images.** Operators can create AMIs from active brokered AWS leases and promote a known-good image as the coordinator default.
 - **Cost guardrails.** Per-lease and monthly spend caps. Live pricing from EC2 Spot history or Hetzner server-type prices, with static fallbacks. `crabbox usage` summarizes spend by user, org, provider, and type.
 - **GitHub Actions hydration.** `crabbox actions hydrate` registers a leased box as an ephemeral Actions runner, so the repo's own workflow installs runtimes, services, and secrets. Crabbox does not parse Actions YAML.
-- **Interactive desktop and browser leases.** `--browser` provisions Chrome or Chromium for headless automation, `--desktop` provisions visible UI with tunnel-only VNC takeover on managed Linux, AWS Windows, and AWS EC2 Mac targets, and QA systems such as Mantis own scenario logic, screenshots, and PR evidence. Hetzner Windows is not a managed target; use AWS for managed Windows or `provider: ssh` for an existing Windows host.
+- **Interactive desktop and browser leases.** `--browser` provisions Chrome or Chromium for headless automation, `--desktop` provisions visible UI with tunnel-only VNC takeover on managed Linux, AWS native Windows, and AWS EC2 Mac targets, and QA systems such as Mantis own scenario logic, screenshots, and PR evidence. Hetzner Windows is not a managed target; use AWS for managed Windows or `provider: ssh` for an existing Windows host.
 - **Hardened coordinator auth.** GitHub browser login, owner-scoped leases, admin-only routes, optional GitHub team allowlists, Cloudflare Access JWT verification, and service-token support keep normal use and operator automation separate.
 - **OpenClaw plugin.** The repo root is a native OpenClaw plugin for box lifecycle operations: `crabbox_run`, `crabbox_warmup`, `crabbox_status`, `crabbox_list`, and `crabbox_stop`. Run inspection stays in the CLI and Crabbox skill.
 - **Operator surface.** `doctor`, `init`, `status`, `inspect`, `list`, `usage`, `history`, `logs`, `results`, `cache`, `admin`, `cleanup`, plus `--json` output where it matters.
@@ -105,6 +105,11 @@ AWS Win    standard  m7i.large, m7a.large, t3.large
            fast      m7i.2xlarge, m7a.2xlarge, m7i.xlarge
            large     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge
            beast     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge
+
+AWS WSL2   standard  m8i.large, m8i-flex.large, c8i.large, r8i.large
+           fast      m8i.xlarge, m8i-flex.xlarge, c8i.xlarge, r8i.xlarge
+           large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge
+           beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge
 ```
 
 Override with `--type` or `CRABBOX_SERVER_TYPE` for a specific instance.

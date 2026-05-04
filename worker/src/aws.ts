@@ -351,6 +351,7 @@ export class EC2SpotClient {
     } else {
       params["SecurityGroupId.1"] = securityGroupID;
     }
+    applyAWSRunInstanceTargetOptions(params, config);
     if (config.target === "macos") {
       const hostID = config.awsMacHostID || this.env.CRABBOX_AWS_MAC_HOST_ID || "";
       if (!hostID) {
@@ -672,7 +673,10 @@ function asString(value: unknown): string {
 }
 
 export function awsLaunchCandidates(
-  config: Pick<LeaseConfig, "serverType" | "serverTypeExplicit" | "class" | "target">,
+  config: Pick<
+    LeaseConfig,
+    "serverType" | "serverTypeExplicit" | "class" | "target" | "windowsMode"
+  >,
 ): string[] {
   if (config.serverTypeExplicit) {
     return [config.serverType];
@@ -683,12 +687,26 @@ export function awsLaunchCandidates(
       ...awsInstanceTypeCandidatesForTargetClass(config.target, config.class),
     ]);
   }
-  const policyFallback = config.target === "windows" ? "t3.large" : "t3.small";
+  const policyFallback =
+    config.target === "windows"
+      ? config.windowsMode === "wsl2"
+        ? "m8i.large"
+        : "t3.large"
+      : "t3.small";
   return uniqueStrings([
     config.serverType,
-    ...awsInstanceTypeCandidatesForTargetClass(config.target, config.class),
+    ...awsInstanceTypeCandidatesForTargetClass(config.target, config.class, config.windowsMode),
     policyFallback,
   ]);
+}
+
+export function applyAWSRunInstanceTargetOptions(
+  params: Record<string, string>,
+  config: Pick<LeaseConfig, "target" | "windowsMode">,
+): void {
+  if (config.target === "windows" && config.windowsMode === "wsl2") {
+    params["CpuOptions.NestedVirtualization"] = "enabled";
+  }
 }
 
 export function awsQuotaCodeForMarket(market: string): string {
