@@ -52,9 +52,9 @@ type isloListItem struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"`
 	Image     string `json:"image,omitempty"`
-	CreatedBy string `json:"createdBy,omitempty"`
-	CreatedAt string `json:"createdAt,omitempty"`
-	DeletedAt string `json:"deletedAt,omitempty"`
+	CreatedBy string `json:"created_by,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
+	DeletedAt string `json:"deleted_at,omitempty"`
 }
 
 func isIsloProvider(provider string) bool {

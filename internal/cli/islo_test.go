@@ -135,13 +135,13 @@ func TestApplyIsloFlagOverrides(t *testing.T) {
 
 func TestParseIsloListJSONArray(t *testing.T) {
 	got := parseIsloListJSON([]byte(`[
-    {"id":"sbx_01","name":"crabbox-blue","status":"running","image":"ubuntu","createdBy":"me","createdAt":"2026-05-01T00:00:00Z"},
+    {"id":"019deeda-e2f2-70c7-b884-5dbe218b8e07","name":"crabbox-blue","status":"running","image":"ubuntu","created_by":"me@example.test","created_at":"2026-05-01T00:00:00Z","deleted_at":null},
     {"id":"sbx_02","name":"alpha","status":"stopped"}
   ]`))
 	if len(got) != 2 {
 		t.Fatalf("items=%d want 2", len(got))
 	}
-	if got[0].ID != "sbx_01" || got[0].Name != "crabbox-blue" || got[0].Status != "running" {
+	if got[0].ID != "019deeda-e2f2-70c7-b884-5dbe218b8e07" || got[0].Name != "crabbox-blue" || got[0].Status != "running" || got[0].CreatedBy != "me@example.test" {
 		t.Fatalf("unexpected item 0: %#v", got[0])
 	}
 	if got[1].Status != "stopped" {
