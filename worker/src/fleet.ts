@@ -463,12 +463,24 @@ export class FleetDurableObject implements DurableObject {
         { status: 409 },
       );
     }
+    const existingViewer = this.webVNCViewers.get(lease.id);
+    if (existingViewer) {
+      closeSocket(existingViewer, 1012, "replaced by a newer WebVNC viewer");
+      this.clearWebVNCViewer(lease.id, existingViewer);
+      return json(
+        {
+          error: "webvnc_bridge_reset",
+          message: `restart the bridge with: crabbox webvnc --id ${lease.slug || lease.id}`,
+        },
+        { status: 409 },
+      );
+    }
+
     const pair = new WebSocketPair();
     const client = pair[0];
     const viewer = pair[1];
     viewer.accept();
 
-    closeSocket(this.webVNCViewers.get(lease.id), 1012, "replaced by a newer WebVNC viewer");
     this.webVNCViewers.set(lease.id, viewer);
     flushPendingWebVNC(this.pendingWebVNCToViewer, lease.id, viewer);
     viewer.addEventListener("message", (event) => {
@@ -490,9 +502,17 @@ export class FleetDurableObject implements DurableObject {
   }
 
   private clearWebVNCViewer(leaseID: string, socket: WebSocket): void {
-    if (this.webVNCViewers.get(leaseID) === socket) {
-      this.webVNCViewers.delete(leaseID);
+    if (this.webVNCViewers.get(leaseID) !== socket) {
+      return;
     }
+    this.webVNCViewers.delete(leaseID);
+    resetWebVNCBridge(
+      this.webVNCAgents,
+      this.pendingWebVNCToViewer,
+      leaseID,
+      1011,
+      "WebVNC viewer disconnected",
+    );
   }
 
   private async consumeWebVNCTicket(request: Request): Promise<WebVNCTicketRecord | undefined> {
@@ -1166,6 +1186,18 @@ export function flushPendingWebVNC(
   for (const chunk of buffer.chunks) {
     socket.send(chunk);
   }
+}
+
+export function resetWebVNCBridge(
+  agents: Map<string, WebSocket>,
+  buffers: Map<string, WebVNCBuffer>,
+  leaseID: string,
+  code: number,
+  reason: string,
+): void {
+  closeSocket(agents.get(leaseID), code, reason);
+  agents.delete(leaseID);
+  buffers.delete(leaseID);
 }
 
 function forwardWebVNC(data: string | ArrayBuffer, socket: WebSocket | undefined): void {

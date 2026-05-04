@@ -80,26 +80,60 @@ export function portalVNC(lease: LeaseRecord): Response {
         status.dataset.tone = tone;
       }
       let rfb;
-      try {
-        setStatus("connecting");
-        rfb = new RFB(screen, wsURL.toString(), options);
-        rfb.scaleViewport = true;
-        rfb.resizeSession = false;
-        rfb.viewOnly = false;
-        rfb.addEventListener("connect", () => setStatus("connected", "ok"));
-        rfb.addEventListener("disconnect", (event) => {
-          setStatus(event.detail.clean ? "disconnected" : "bridge disconnected", "warn");
-        });
-        rfb.addEventListener("credentialsrequired", () => {
-          const value = window.prompt("VNC password");
-          if (value) {
-            rfb.sendCredentials({ password: value });
-          }
-        });
-        rfb.addEventListener("securityfailure", () => setStatus("VNC authentication failed", "bad"));
-      } catch (error) {
-        setStatus(error instanceof Error ? error.message : String(error), "bad");
+      let retryTimer;
+      let retryAttempt = 0;
+      let connected = false;
+      let stopped = false;
+      function retryDelay() {
+        return Math.min(5000, 500 * 2 ** retryAttempt);
       }
+      function scheduleRetry(label) {
+        if (stopped) return;
+        const delay = retryDelay();
+        retryAttempt += 1;
+        setStatus(label + "; retrying in " + Math.ceil(delay / 1000) + "s", "warn");
+        window.clearTimeout(retryTimer);
+        retryTimer = window.setTimeout(connect, delay);
+      }
+      function connect() {
+        if (stopped) return;
+        connected = false;
+        screen.replaceChildren();
+        try {
+          setStatus(retryAttempt ? "waiting for bridge" : "connecting");
+          rfb = new RFB(screen, wsURL.toString(), options);
+          rfb.scaleViewport = true;
+          rfb.resizeSession = false;
+          rfb.viewOnly = false;
+          rfb.addEventListener("connect", () => {
+            connected = true;
+            retryAttempt = 0;
+            setStatus("connected", "ok");
+          });
+          rfb.addEventListener("disconnect", () => {
+            scheduleRetry(connected ? "bridge disconnected" : "waiting for bridge");
+          });
+          rfb.addEventListener("credentialsrequired", () => {
+            const value = window.prompt("VNC password");
+            if (value) {
+              rfb.sendCredentials({ password: value });
+            }
+          });
+          rfb.addEventListener("securityfailure", () => {
+            stopped = true;
+            window.clearTimeout(retryTimer);
+            setStatus("VNC authentication failed", "bad");
+          });
+        } catch (error) {
+          scheduleRetry(error instanceof Error ? error.message : String(error));
+        }
+      }
+      window.addEventListener("beforeunload", () => {
+        stopped = true;
+        window.clearTimeout(retryTimer);
+        rfb?.disconnect();
+      });
+      connect();
     </script>`,
     200,
     nonce,

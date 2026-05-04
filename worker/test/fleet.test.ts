@@ -4,6 +4,7 @@ import {
   FleetDurableObject,
   flushPendingWebVNC,
   forwardOrBufferWebVNC,
+  resetWebVNCBridge,
   type WebVNCBuffer,
 } from "../src/fleet";
 import type { Env, LeaseRecord, ProvisioningAttempt, RunRecord } from "../src/types";
@@ -392,6 +393,7 @@ describe("fleet lease identity and idle", () => {
     const pageBody = await page.text();
     expect(pageBody).toContain("crabbox webvnc --id blue-lobster --open");
     expect(pageBody).toContain("/portal/assets/novnc/rfb.js");
+    expect(pageBody).toContain("function scheduleRetry");
     expect(pageBody).not.toContain("cdn.jsdelivr.net");
 
     const plain = await fleet.fetch(
@@ -439,6 +441,25 @@ describe("fleet lease identity and idle", () => {
 
     flushPendingWebVNC(buffers, "cbx_000000000001", viewer);
     expect(sent).toEqual(["RFB 003.008\n"]);
+    expect(buffers.has("cbx_000000000001")).toBe(false);
+  });
+
+  it("resets the WebVNC bridge when the viewer goes away", () => {
+    const buffers = new Map<string, WebVNCBuffer>();
+    buffers.set("cbx_000000000001", { chunks: ["RFB 003.008\n"], bytes: 12 });
+    const closed: Array<{ code: number; reason: string }> = [];
+    const agents = new Map<string, WebSocket>();
+    agents.set("cbx_000000000001", {
+      readyState: WebSocket.OPEN,
+      close(code: number, reason: string) {
+        closed.push({ code, reason });
+      },
+    } as WebSocket);
+
+    resetWebVNCBridge(agents, buffers, "cbx_000000000001", 1011, "WebVNC viewer disconnected");
+
+    expect(closed).toEqual([{ code: 1011, reason: "WebVNC viewer disconnected" }]);
+    expect(agents.has("cbx_000000000001")).toBe(false);
     expect(buffers.has("cbx_000000000001")).toBe(false);
   });
 
