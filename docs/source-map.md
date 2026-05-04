@@ -40,8 +40,7 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - CLI cloud-init bootstrap: `internal/cli/bootstrap.go`
 - Worker cloud-init bootstrap: `worker/src/bootstrap.ts`
 - Desktop/browser capability flags, env injection, and VNC checks: `internal/cli/capabilities.go`, `internal/cli/run.go`
-- VNC tunnel command and static managed macOS login: `internal/cli/vnc.go`,
-  `internal/cli/static_vnc.go`
+- VNC tunnel command: `internal/cli/vnc.go`
 - Interactive desktop/VNC contract: `docs/features/interactive-desktop-vnc.md`
 
 Bootstrap is intentionally tiny unless optional lease capabilities are requested:

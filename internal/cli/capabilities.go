@@ -198,10 +198,10 @@ func availableLocalVNCPort() string {
 func resolveVNCEndpoint(ctx context.Context, cfg Config, target SSHTarget) (vncEndpoint, error) {
 	if isStaticProvider(cfg.Provider) {
 		if err := probeLoopbackVNC(ctx, target, "2", "1"); err == nil {
-			return vncEndpoint{Host: "127.0.0.1", Port: managedVNCPort, Managed: cfg.Static.ManagedLogin}, nil
+			return vncEndpoint{Host: "127.0.0.1", Port: managedVNCPort}, nil
 		}
 		if tcpReachable(ctx, target.Host, managedVNCPort, 2*time.Second) {
-			return vncEndpoint{Direct: true, Host: target.Host, Port: managedVNCPort, Managed: cfg.Static.ManagedLogin}, nil
+			return vncEndpoint{Direct: true, Host: target.Host, Port: managedVNCPort}, nil
 		}
 		return vncEndpoint{}, exit(5, "target does not expose VNC through SSH loopback 127.0.0.1:5900 or direct %s:%s", target.Host, managedVNCPort)
 	}

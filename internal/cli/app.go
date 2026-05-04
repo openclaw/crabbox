@@ -198,8 +198,6 @@ Environment:
   CRABBOX_DESKTOP              Provision or require desktop/VNC capability
   CRABBOX_BROWSER              Provision or require browser capability
   CRABBOX_STATIC_HOST          Static SSH host for provider=ssh
-  CRABBOX_STATIC_MANAGED_LOGIN Enable static managed VNC login where supported
-  CRABBOX_STATIC_MANAGED_USER  Static managed VNC login user
   CRABBOX_OWNER                Usage owner override
   CRABBOX_ORG                  Usage org override
   CRABBOX_CONFIG               Optional config path
