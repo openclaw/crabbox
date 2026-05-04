@@ -154,12 +154,17 @@ func TestApplyServerTypeFlagOverridesUsesTargetAwareAWSDefaults(t *testing.T) {
 			args: []string{"--provider", "aws", "--target", "windows", "--windows-mode", "wsl2", "--class", "standard"},
 			want: "m8i.large",
 		},
+		{
+			name: "windows mode only",
+			args: []string{"--windows-mode", "wsl2"},
+			want: "m8i.4xlarge",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Config{
 				Provider:    "aws",
-				TargetOS:    targetLinux,
+				TargetOS:    targetWindows,
 				WindowsMode: windowsModeNormal,
 				Class:       "beast",
 				ServerType:  "c7a.48xlarge",

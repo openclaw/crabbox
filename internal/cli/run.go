@@ -32,7 +32,7 @@ func applyServerTypeFlagOverrides(cfg *Config, fs *flag.FlagSet, serverType stri
 	if cfg.ServerTypeExplicit {
 		return
 	}
-	if cfg.ServerType == "" || flagWasSet(fs, "provider") || flagWasSet(fs, "class") || flagWasSet(fs, "target") {
+	if cfg.ServerType == "" || flagWasSet(fs, "provider") || flagWasSet(fs, "class") || flagWasSet(fs, "target") || flagWasSet(fs, "windows-mode") {
 		cfg.ServerType = serverTypeForConfig(*cfg)
 	}
 }
