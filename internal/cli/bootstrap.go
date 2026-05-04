@@ -9,7 +9,7 @@ const (
 	tightVNCMSIURL        = "https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi"
 	gitForWindowsSetupURL = "https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe"
 	openSSHWin64ZipURL    = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip"
-	ubuntuWSLRootFSURL    = "https://cloud-images.ubuntu.com/wsl/releases/noble/current/ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz"
+	ubuntuWSLRootFSURL    = "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
 )
 
 func awsUserData(cfg Config, publicKey string) string {
@@ -133,6 +133,7 @@ $wslMode = $` + fmt.Sprint(wslMode) + `
 $wslDistro = "Crabbox"
 $wslRoot = "C:\ProgramData\crabbox\wsl\Crabbox"
 $wslRootfs = "C:\ProgramData\crabbox\wsl\ubuntu-noble-wsl-amd64.rootfs.tar.gz"
+$wslRootfsMinBytes = 100 * 1024 * 1024
 $wslSetup = "C:\ProgramData\crabbox\wsl\linux-setup.sh"
 $wslFeaturesMarker = "C:\ProgramData\crabbox\wsl-features-rebooted"
 $wslKernelMarker = "C:\ProgramData\crabbox\wsl-kernel-rebooted"
@@ -178,8 +179,14 @@ function Initialize-CrabboxWSL2 {
   $distros = (wsl.exe --list --quiet 2>$null) -join [Environment]::NewLine
   if ($distros -notmatch "(?m)^$([Regex]::Escape($wslDistro))$") {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $wslRoot), $wslRoot | Out-Null
+    if ((Test-Path -LiteralPath $wslRootfs) -and ((Get-Item -LiteralPath $wslRootfs).Length -lt $wslRootfsMinBytes)) {
+      Remove-Item -Force -LiteralPath $wslRootfs
+    }
     if (-not (Test-Path -LiteralPath $wslRootfs)) {
-      Retry { Invoke-WebRequest -Uri ` + psQuote(ubuntuWSLRootFSURL) + ` -OutFile $wslRootfs -UseBasicParsing }
+      Retry {
+        Invoke-WebRequest -Uri ` + psQuote(ubuntuWSLRootFSURL) + ` -OutFile $wslRootfs -UseBasicParsing
+        if ((Get-Item -LiteralPath $wslRootfs).Length -lt $wslRootfsMinBytes) { throw "downloaded WSL rootfs is incomplete" }
+      }
     }
     wsl.exe --import $wslDistro $wslRoot $wslRootfs --version 2 | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "wsl --import failed with exit $LASTEXITCODE" }
