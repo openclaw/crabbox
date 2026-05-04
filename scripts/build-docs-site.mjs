@@ -431,7 +431,7 @@ main{min-width:0;padding:28px clamp(20px,4.5vw,60px) 72px;max-width:1180px;margi
 .doc pre{position:relative;overflow:auto;background:#0f1c1a;color:#f8efe4;border-radius:9px;padding:16px 20px;border:1px solid #0a1513;box-shadow:inset 0 0 0 1px rgba(255,255,255,.03);margin:1.35em 0;font-size:.88em;scrollbar-width:thin;scrollbar-color:#3a4a47 transparent}
 .doc pre::-webkit-scrollbar{height:8px}
 .doc pre::-webkit-scrollbar-thumb{background:#3a4a47;border-radius:8px}
-.doc pre code{background:transparent;border:0;color:inherit;padding:0;font-size:1em}
+.doc pre code{display:block;background:transparent;border:0;color:inherit;padding:0;font-size:1em;white-space:pre-wrap;overflow-wrap:anywhere}
 .doc pre .copy{position:absolute;top:8px;right:8px;background:rgba(255,251,244,.06);color:#f8efe4;border:1px solid rgba(255,251,244,.18);border-radius:6px;padding:3px 9px;font:600 .7rem/1 "IBM Plex Sans",sans-serif;cursor:pointer;opacity:0;transition:opacity .15s,background .15s,border-color .15s}
 .doc pre:hover .copy,.doc pre .copy:focus{opacity:1}
 .doc pre .copy:hover{background:rgba(255,251,244,.14)}
