@@ -1,6 +1,6 @@
 import type { LeaseRecord } from "./types";
 
-const novncModuleURL = "/portal/assets/novnc/lib/rfb.js";
+const novncModuleURL = "/portal/assets/novnc/rfb.js";
 
 export function portalHome(leases: LeaseRecord[], request: Request): Response {
   const active = leases.filter((lease) => lease.state === "active");
@@ -67,7 +67,8 @@ export function portalVNC(lease: LeaseRecord): Response {
       </section>
     </main>
     <script type="module" nonce="${nonce}">
-      import RFB from ${JSON.stringify(novncModuleURL)};
+      import RFBModule from ${JSON.stringify(novncModuleURL)};
+      const RFB = RFBModule.default || RFBModule;
       const status = document.getElementById("status");
       const screen = document.getElementById("screen");
       const wsURL = new URL(${JSON.stringify(wsPath)}, window.location.href);

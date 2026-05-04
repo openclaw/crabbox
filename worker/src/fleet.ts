@@ -29,6 +29,7 @@ const fleetID = "default";
 const maxStoredRunLogBytes = 8 * 1024 * 1024;
 const runLogChunkBytes = 64 * 1024;
 const webVNCTicketTTLSeconds = 120;
+const maxPendingWebVNCBytes = 1024 * 1024;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -44,6 +45,7 @@ interface WebVNCTicketRecord {
 export class FleetDurableObject implements DurableObject {
   private readonly webVNCAgents = new Map<string, WebSocket>();
   private readonly webVNCViewers = new Map<string, WebSocket>();
+  private readonly pendingWebVNCToViewer = new Map<string, WebVNCBuffer>();
 
   constructor(
     private readonly state: DurableObjectState,
@@ -391,9 +393,15 @@ export class FleetDurableObject implements DurableObject {
     agent.accept();
 
     closeSocket(this.webVNCAgents.get(lease.id), 1012, "replaced by a newer WebVNC bridge");
+    this.pendingWebVNCToViewer.delete(lease.id);
     this.webVNCAgents.set(lease.id, agent);
     agent.addEventListener("message", (event) => {
-      forwardWebVNC(event.data, this.webVNCViewers.get(lease.id));
+      forwardOrBufferWebVNC(
+        event.data,
+        this.webVNCViewers.get(lease.id),
+        this.pendingWebVNCToViewer,
+        lease.id,
+      );
     });
     agent.addEventListener("close", () => this.clearWebVNCAgent(lease.id, agent));
     agent.addEventListener("error", () => this.clearWebVNCAgent(lease.id, agent));
@@ -462,6 +470,7 @@ export class FleetDurableObject implements DurableObject {
 
     closeSocket(this.webVNCViewers.get(lease.id), 1012, "replaced by a newer WebVNC viewer");
     this.webVNCViewers.set(lease.id, viewer);
+    flushPendingWebVNC(this.pendingWebVNCToViewer, lease.id, viewer);
     viewer.addEventListener("message", (event) => {
       forwardWebVNC(event.data, this.webVNCAgents.get(lease.id));
     });
@@ -475,6 +484,7 @@ export class FleetDurableObject implements DurableObject {
       return;
     }
     this.webVNCAgents.delete(leaseID);
+    this.pendingWebVNCToViewer.delete(leaseID);
     closeSocket(this.webVNCViewers.get(leaseID), 1011, "WebVNC bridge disconnected");
     this.webVNCViewers.delete(leaseID);
   }
@@ -1117,11 +1127,56 @@ function identifierMatchesLease(identifier: string, lease: LeaseRecord): boolean
   );
 }
 
+export interface WebVNCBuffer {
+  chunks: Array<string | ArrayBuffer>;
+  bytes: number;
+}
+
+export function forwardOrBufferWebVNC(
+  data: string | ArrayBuffer,
+  socket: WebSocket | undefined,
+  buffers: Map<string, WebVNCBuffer>,
+  leaseID: string,
+): void {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(data);
+    return;
+  }
+  const bytes = webVNCDataBytes(data);
+  const buffer = buffers.get(leaseID) ?? { chunks: [], bytes: 0 };
+  if (buffer.bytes + bytes > maxPendingWebVNCBytes) {
+    buffers.delete(leaseID);
+    return;
+  }
+  buffer.chunks.push(data);
+  buffer.bytes += bytes;
+  buffers.set(leaseID, buffer);
+}
+
+export function flushPendingWebVNC(
+  buffers: Map<string, WebVNCBuffer>,
+  leaseID: string,
+  socket: WebSocket,
+): void {
+  const buffer = buffers.get(leaseID);
+  buffers.delete(leaseID);
+  if (!buffer || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  for (const chunk of buffer.chunks) {
+    socket.send(chunk);
+  }
+}
+
 function forwardWebVNC(data: string | ArrayBuffer, socket: WebSocket | undefined): void {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     return;
   }
   socket.send(data);
+}
+
+function webVNCDataBytes(data: string | ArrayBuffer): number {
+  return typeof data === "string" ? textEncoder.encode(data).byteLength : data.byteLength;
 }
 
 function closeSocket(socket: WebSocket | undefined, code: number, reason: string): void {

@@ -3,7 +3,7 @@
   "arrowParens": "always",
   "bracketSpacing": true,
   "endOfLine": "lf",
-  "ignorePatterns": ["dist/**", "node_modules/**"],
+  "ignorePatterns": ["dist/**", "node_modules/**", "public/portal/assets/**"],
   "insertFinalNewline": true,
   "printWidth": 100,
   "semi": true,

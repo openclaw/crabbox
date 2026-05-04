@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { FleetDurableObject } from "../src/fleet";
+import {
+  FleetDurableObject,
+  flushPendingWebVNC,
+  forwardOrBufferWebVNC,
+  type WebVNCBuffer,
+} from "../src/fleet";
 import type { Env, LeaseRecord, ProvisioningAttempt, RunRecord } from "../src/types";
 
 class MemoryStorage {
@@ -386,7 +391,7 @@ describe("fleet lease identity and idle", () => {
     expect(page.headers.get("content-security-policy")).toContain("script-src 'self' 'nonce-");
     const pageBody = await page.text();
     expect(pageBody).toContain("crabbox webvnc --id blue-lobster --open");
-    expect(pageBody).toContain("/portal/assets/novnc/lib/rfb.js");
+    expect(pageBody).toContain("/portal/assets/novnc/rfb.js");
     expect(pageBody).not.toContain("cdn.jsdelivr.net");
 
     const plain = await fleet.fetch(
@@ -413,6 +418,28 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(missingTicket.status).toBe(401);
+  });
+
+  it("buffers initial WebVNC bridge bytes until the viewer attaches", () => {
+    const buffers = new Map<string, WebVNCBuffer>();
+    const sent: Array<string | ArrayBuffer> = [];
+    const viewer = {
+      readyState: WebSocket.OPEN,
+      send(data: string | ArrayBuffer) {
+        sent.push(data);
+      },
+    } as WebSocket;
+
+    forwardOrBufferWebVNC("RFB 003.008\n", undefined, buffers, "cbx_000000000001");
+    expect(sent).toEqual([]);
+    expect(buffers.get("cbx_000000000001")).toMatchObject({
+      chunks: ["RFB 003.008\n"],
+      bytes: 12,
+    });
+
+    flushPendingWebVNC(buffers, "cbx_000000000001", viewer);
+    expect(sent).toEqual(["RFB 003.008\n"]);
+    expect(buffers.has("cbx_000000000001")).toBe(false);
   });
 
   it("keeps pool inventory admin-only", async () => {

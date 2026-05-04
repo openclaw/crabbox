@@ -12,7 +12,7 @@
     "vitest": true,
     "worker": true
   },
-  "ignorePatterns": ["dist/**", "node_modules/**"],
+  "ignorePatterns": ["dist/**", "node_modules/**", "public/portal/assets/**"],
   "options": {
     "denyWarnings": true,
     "maxWarnings": 0,
