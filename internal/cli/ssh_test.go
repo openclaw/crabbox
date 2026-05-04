@@ -112,8 +112,17 @@ func decodePowerShellCommand(t *testing.T, command string) string {
 func TestWSL2WrapsRemoteCommand(t *testing.T) {
 	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
 	got := wrapRemoteForTarget(target, "echo ok")
-	if got != "wsl.exe --exec bash -lc 'echo ok'" {
-		t.Fatalf("wrapRemoteForTarget()=%q", got)
+	if !strings.HasPrefix(got, "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ") {
+		t.Fatalf("WSL2 command should use encoded PowerShell: %q", got)
+	}
+	decoded := decodePowerShellCommand(t, got)
+	for _, want := range []string{
+		`& wsl.exe --exec bash -lc 'echo ok'`,
+		`exit $LASTEXITCODE`,
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("WSL2 command missing %q in %q", want, decoded)
+		}
 	}
 }
 

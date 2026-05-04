@@ -381,7 +381,9 @@ func wrapRemoteForTarget(target SSHTarget, remote string) string {
 		return powershellCommand(remote)
 	}
 	if isWindowsWSL2Target(target) {
-		return "wsl.exe --exec bash -lc " + shellQuote(remote)
+		return powershellCommand(`$ErrorActionPreference = "Stop"
+& wsl.exe --exec bash -lc ` + psQuote(remote) + `
+exit $LASTEXITCODE`)
 	}
 	return remote
 }
