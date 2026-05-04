@@ -127,6 +127,13 @@ crabbox vnc --id blue-lobster
 crabbox screenshot --id blue-lobster --output desktop.png
 ```
 
+Managed provider targets are intentionally narrow:
+
+- Hetzner managed provisioning supports Linux only.
+- AWS supports Linux, native Windows (`--target windows --windows-mode normal`),
+  and EC2 Mac (`--target macos`) when the Mac Dedicated Host is provided.
+- Existing macOS and Windows machines belong on `provider=ssh`.
+
 Inspect pool:
 
 ```sh

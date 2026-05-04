@@ -75,13 +75,13 @@ For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For th
 - **Run observability.** Every coordinator-backed run gets an early `run_...` handle. Use `crabbox attach <run-id>` while it is active, `crabbox events <run-id> --after <seq> --limit <n>` for durable lifecycle/output events, and `crabbox logs <run-id>` for retained output after completion.
 - **Stable timing records.** `--timing-json` on `run`, `warmup`, and `actions hydrate` gives scripts one machine-readable sync/command/total timing schema across AWS, Hetzner, and Blacksmith Testboxes.
 - **Local-first sync.** No clean-checkout requirement. Tracked + nonignored files only, fingerprint skip on no-op runs, sanity checks against suspicious mass deletions, optional shallow base-ref hydration for changed-test workflows.
-- **Brokered cloud.** Maintainers and agents share infra without sharing provider tokens. Hetzner and AWS EC2 Spot are first-class; both fall back across instance families when capacity or quota rejects a request.
+- **Brokered cloud.** Maintainers and agents share infra without sharing provider tokens. Hetzner and AWS EC2 Spot are first-class Linux providers; AWS also owns managed Windows and EC2 Mac targets. Providers fall back across compatible instance families when capacity or quota rejects a request.
 - **macOS and Windows static hosts.** `provider: ssh` reuses existing machines; it does not create macOS or Windows Crabbox boxes. macOS and Windows WSL2 use the POSIX rsync path; native Windows uses PowerShell plus tar archive sync.
 - **Blacksmith Testbox wrapper.** Set `provider: blacksmith-testbox` to delegate warmup/run/list/status/stop to the Blacksmith CLI while Crabbox keeps local slugs, repo claims, timing summaries, and config conventions.
 - **Trusted AWS images.** Operators can create AMIs from active brokered AWS leases and promote a known-good image as the coordinator default.
 - **Cost guardrails.** Per-lease and monthly spend caps. Live pricing from EC2 Spot history or Hetzner server-type prices, with static fallbacks. `crabbox usage` summarizes spend by user, org, provider, and type.
 - **GitHub Actions hydration.** `crabbox actions hydrate` registers a leased box as an ephemeral Actions runner, so the repo's own workflow installs runtimes, services, and secrets. Crabbox does not parse Actions YAML.
-- **Interactive desktop and browser leases.** `--browser` provisions Chrome or Chromium for headless automation, `--desktop` provisions visible UI with tunnel-only VNC takeover on managed Linux, AWS Windows, and AWS EC2 Mac targets, and QA systems such as Mantis own scenario logic, screenshots, and PR evidence.
+- **Interactive desktop and browser leases.** `--browser` provisions Chrome or Chromium for headless automation, `--desktop` provisions visible UI with tunnel-only VNC takeover on managed Linux, AWS Windows, and AWS EC2 Mac targets, and QA systems such as Mantis own scenario logic, screenshots, and PR evidence. Hetzner Windows is not a managed target; use AWS for managed Windows or `provider: ssh` for an existing Windows host.
 - **Hardened coordinator auth.** GitHub browser login, owner-scoped leases, admin-only routes, optional GitHub team allowlists, Cloudflare Access JWT verification, and service-token support keep normal use and operator automation separate.
 - **OpenClaw plugin.** The repo root is a native OpenClaw plugin for box lifecycle operations: `crabbox_run`, `crabbox_warmup`, `crabbox_status`, `crabbox_list`, and `crabbox_stop`. Run inspection stays in the CLI and Crabbox skill.
 - **Operator surface.** `doctor`, `init`, `status`, `inspect`, `list`, `usage`, `history`, `logs`, `results`, `cache`, `admin`, `cleanup`, plus `--json` output where it matters.
@@ -100,6 +100,11 @@ AWS Spot   standard  c7a/c7i/m7a/m7i.8xlarge family
            fast      …16xlarge family
            large     …24xlarge family
            beast     …48xlarge family, falling back to 32x/24x/16x
+
+AWS Win    standard  m7i.large, m7a.large, t3.large
+           fast      m7i.2xlarge, m7a.2xlarge, m7i.xlarge
+           large     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge
+           beast     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge
 ```
 
 Override with `--type` or `CRABBOX_SERVER_TYPE` for a specific instance.

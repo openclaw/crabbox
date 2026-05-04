@@ -27,6 +27,11 @@ OpenSSH Server reachable, PowerShell, Git, `tar`, and a writable
 `static.workRoot`. Restart `sshd` after installing Git so new SSH sessions see
 the updated PATH.
 
+With `--provider hetzner`, managed provisioning supports Linux only. Hetzner can
+run Windows through ISO/snapshot installation flows, but Crabbox does not manage
+that path today. Use `--provider aws --target windows` for managed Windows, or
+`--provider ssh --target windows` for an existing Hetzner Windows host.
+
 With `--provider aws --target windows --desktop`, Crabbox creates a real AWS
 Windows Server lease. EC2Launch user data installs OpenSSH Server, Git for
 Windows, TightVNC Server, a per-lease local administrator named `crabbox`, and a
