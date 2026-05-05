@@ -38,6 +38,7 @@ crabbox run [--id <lease-id-or-slug>] [--provider hetzner|aws|ssh|blacksmith-tes
 crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] [-- <command...>]
 crabbox screenshot --id <lease-id-or-slug> [--output <path>]
 crabbox record --id <lease-id-or-slug> [--duration 10s] [--output desktop.mp4]
+crabbox record --id <lease-id-or-slug> --while -- <local-command...>
 crabbox sync-plan [--limit <n>]
 crabbox history [--lease <lease-id>] [--owner <email>] [--org <name>] [--limit <n>] [--json]
 crabbox logs <run-id> [--json]

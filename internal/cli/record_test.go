@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,32 @@ func TestRecordRemoteCommandUsesFFmpegX11Grab(t *testing.T) {
 	}
 }
 
+func TestRecordRemoteUntilStopCommandUsesStopFile(t *testing.T) {
+	got := recordRemoteUntilStopCommand(
+		SSHTarget{TargetOS: targetLinux},
+		recordDesktopOptions{Duration: 30 * time.Second, FPS: 8, Size: "auto"},
+		"/tmp/out.mp4",
+		"/tmp/stop",
+	)
+	for _, want := range []string{
+		"out='/tmp/out.mp4'",
+		"stop='/tmp/stop'",
+		"-f x11grab",
+		"-framerate 8",
+		"-t 30",
+		`if [ -f "$stop" ]`,
+		`kill -INT "$pid"`,
+		`cat "$out"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("record until-stop command missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "-video_size") {
+		t.Fatalf("auto size should omit -video_size:\n%s", got)
+	}
+}
+
 func TestRecordRemoteCommandSupportsWindowsInteractiveTask(t *testing.T) {
 	got := recordRemoteCommand(
 		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
@@ -57,5 +84,25 @@ func TestRecordRemoteCommandSupportsWindowsInteractiveTask(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("windows record command missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestRunRecordWhileLocalCommandTimesOut(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep command unavailable")
+	}
+	start := time.Now()
+	err := runRecordWhileLocalCommand(t.Context(), recordWhileCommandOptions{
+		Command: []string{"sleep", "5"},
+		Timeout: 100 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out after 100ms") {
+		t.Fatalf("timeout error=%v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("driver timeout took too long: %s", elapsed)
 	}
 }

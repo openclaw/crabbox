@@ -104,7 +104,14 @@ Use `crabbox record` when a temporal UI bug needs video evidence:
 
 ```sh
 crabbox record --id blue-lobster --duration 10s --output desktop.mp4
+crabbox record --id blue-lobster --duration 2m --output task.mp4 --while -- ./drive-ui.sh
 ```
+
+The `--while` form records while a local driver command controls the desktop.
+Drivers can be deterministic scripts, Playwright/CDP flows, VNC/xdotool
+automation, or an agent wrapper. Crabbox injects `CRABBOX_RECORD_LEASE_ID` and
+`CRABBOX_RECORD_PROVIDER` into the driver environment. `--duration` is the hard
+cap for both recording and the local driver.
 
 Use `crabbox desktop launch` to start a browser or app inside the visible
 session without keeping the SSH command attached:

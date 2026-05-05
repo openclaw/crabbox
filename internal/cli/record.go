@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,6 +20,7 @@ func (a App) recordDesktop(ctx context.Context, args []string) error {
 	duration := fs.Duration("duration", 10*time.Second, "recording duration")
 	fps := fs.Int("fps", 15, "recording frame rate")
 	size := fs.String("size", "1024x768", "recording size, or auto")
+	while := fs.Bool("while", false, "record while a local command runs after --")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
@@ -26,6 +29,13 @@ func (a App) recordDesktop(ctx context.Context, args []string) error {
 	}
 	if *id == "" && fs.NArg() > 0 {
 		*id = fs.Arg(0)
+	}
+	whileCommand := fs.Args()
+	if *id != "" && len(whileCommand) > 0 && whileCommand[0] == *id {
+		whileCommand = whileCommand[1:]
+	}
+	if *while && len(whileCommand) == 0 {
+		return exit(2, "usage: crabbox record --id <lease-id-or-slug> --while -- <local-command...>")
 	}
 	if *duration <= 0 {
 		return exit(2, "--duration must be greater than zero")
@@ -87,11 +97,24 @@ func (a App) recordDesktop(ctx context.Context, args []string) error {
 	if outPath == "" {
 		outPath = defaultRecordingPath(leaseID, serverSlug(server))
 	}
-	if err := captureDesktopRecording(ctx, target, outPath, recordDesktopOptions{
+	recordOpts := recordDesktopOptions{
 		Duration: *duration,
 		FPS:      *fps,
 		Size:     strings.TrimSpace(*size),
-	}); err != nil {
+	}
+	if *while {
+		if isWindowsNativeTarget(target) {
+			return exit(2, "record --while is not supported on native Windows targets yet")
+		}
+		if err := captureDesktopRecordingWhile(ctx, target, outPath, recordOpts, recordWhileCommandOptions{
+			Command:  whileCommand,
+			LeaseID:  leaseID,
+			Provider: cfg.Provider,
+			Timeout:  recordOpts.Duration,
+		}); err != nil {
+			return err
+		}
+	} else if err := captureDesktopRecording(ctx, target, outPath, recordOpts); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "recording: %s\n", outPath)
@@ -104,6 +127,13 @@ type recordDesktopOptions struct {
 	Size     string
 }
 
+type recordWhileCommandOptions struct {
+	Command  []string
+	LeaseID  string
+	Provider string
+	Timeout  time.Duration
+}
+
 func defaultRecordingPath(leaseID, slug string) string {
 	name := slug
 	if strings.TrimSpace(name) == "" {
@@ -113,6 +143,69 @@ func defaultRecordingPath(leaseID, slug string) string {
 		name = "crabbox"
 	}
 	return "crabbox-" + normalizeLeaseSlug(name) + "-recording.mp4"
+}
+
+func captureDesktopRecordingWhile(ctx context.Context, target SSHTarget, outputPath string, opts recordDesktopOptions, command recordWhileCommandOptions) error {
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return exit(2, "create recording directory: %v", err)
+	}
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return exit(2, "create recording %s: %v", outputPath, err)
+	}
+	ok := false
+	defer func() {
+		_ = file.Close()
+		if !ok {
+			_ = os.Remove(outputPath)
+		}
+	}()
+	token := fmt.Sprintf("%d", time.Now().UnixNano())
+	remoteStopPath := "/tmp/crabbox-record-" + token + ".stop"
+	remoteOutputPath := "/tmp/crabbox-record-" + token + ".mp4"
+	recordDone := make(chan error, 1)
+	go func() {
+		recordDone <- runSSHToWriter(ctx, target, recordRemoteUntilStopCommand(target, opts, remoteOutputPath, remoteStopPath), file)
+	}()
+	time.Sleep(1500 * time.Millisecond)
+	driverErr := runRecordWhileLocalCommand(ctx, command)
+	stopErr := runSSHQuiet(ctx, target, "touch "+shellQuote(remoteStopPath))
+	recordErr := <-recordDone
+	if recordErr == nil {
+		ok = true
+	}
+	if driverErr != nil {
+		return exit(5, "record driver command: %v", driverErr)
+	}
+	if stopErr != nil {
+		return exit(5, "stop recording: %v", stopErr)
+	}
+	if recordErr != nil {
+		return exit(5, "capture recording: %v", recordErr)
+	}
+	return nil
+}
+
+func runRecordWhileLocalCommand(ctx context.Context, opts recordWhileCommandOptions) error {
+	driverCtx := ctx
+	cancel := func() {}
+	if opts.Timeout > 0 {
+		driverCtx, cancel = context.WithTimeout(ctx, opts.Timeout)
+	}
+	defer cancel()
+	cmd := exec.CommandContext(driverCtx, opts.Command[0], opts.Command[1:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(),
+		"CRABBOX_RECORD_LEASE_ID="+opts.LeaseID,
+		"CRABBOX_RECORD_PROVIDER="+opts.Provider,
+	)
+	err := cmd.Run()
+	if err != nil && errors.Is(driverCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("timed out after %s", opts.Timeout)
+	}
+	return err
 }
 
 func captureDesktopRecording(ctx context.Context, target SSHTarget, outputPath string, opts recordDesktopOptions) error {
@@ -137,6 +230,18 @@ func captureDesktopRecording(ctx context.Context, target SSHTarget, outputPath s
 	return nil
 }
 
+func recordRemoteUntilStopCommand(target SSHTarget, opts recordDesktopOptions, remoteOutputPath, remoteStopPath string) string {
+	durationSeconds := int(opts.Duration.Round(time.Second).Seconds())
+	if durationSeconds < 1 {
+		durationSeconds = 1
+	}
+	size := strings.TrimSpace(opts.Size)
+	if size == "" {
+		size = "1024x768"
+	}
+	return posixRecordUntilStopRemoteCommand(durationSeconds, opts.FPS, size, remoteOutputPath, remoteStopPath)
+}
+
 func recordRemoteCommand(target SSHTarget, opts recordDesktopOptions) string {
 	durationSeconds := int(opts.Duration.Round(time.Second).Seconds())
 	if durationSeconds < 1 {
@@ -150,6 +255,45 @@ func recordRemoteCommand(target SSHTarget, opts recordDesktopOptions) string {
 		return windowsRecordRemoteCommand(durationSeconds, opts.FPS, size)
 	}
 	return posixRecordRemoteCommand(durationSeconds, opts.FPS, size)
+}
+
+func posixRecordUntilStopRemoteCommand(durationSeconds, fps int, size, remoteOutputPath, remoteStopPath string) string {
+	sizeArg := ""
+	if size != "auto" {
+		sizeArg = " -video_size " + shellQuote(size)
+	}
+	return fmt.Sprintf(`set -eu
+export DISPLAY="${DISPLAY:-:99}"
+out=%s
+stop=%s
+rm -f "$out" "$stop"
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  sudo apt-get update -y >/tmp/crabbox-record-apt.log 2>&1 || true
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg >>/tmp/crabbox-record-apt.log 2>&1 || true
+fi
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "no video recording tool found; warm a new --desktop lease or install ffmpeg; apt log: /tmp/crabbox-record-apt.log" >&2
+  exit 127
+fi
+input="$DISPLAY"
+case "$input" in
+  *.*) ;;
+  *) input="${input}.0" ;;
+esac
+ffmpeg -hide_banner -loglevel error -y -f x11grab%s -framerate %d -i "$input" -t %d -pix_fmt yuv420p "$out" >/tmp/crabbox-record-ffmpeg.log 2>&1 &
+pid=$!
+while kill -0 "$pid" >/dev/null 2>&1; do
+  if [ -f "$stop" ]; then
+    kill -INT "$pid" >/dev/null 2>&1 || true
+    break
+  fi
+  sleep 0.2
+done
+wait "$pid" || true
+test -s "$out"
+cat "$out"
+rm -f "$out" "$stop"
+`, shellQuote(remoteOutputPath), shellQuote(remoteStopPath), sizeArg, fps, durationSeconds)
 }
 
 func posixRecordRemoteCommand(durationSeconds, fps int, size string) string {
