@@ -25,6 +25,13 @@ func TestRecordWhileCommandArgsOnlyStripsPositionalID(t *testing.T) {
 	}
 }
 
+func TestRecordDesktopControlTargetUsesWindowsConsoleForWSL2(t *testing.T) {
+	target := recordDesktopControlTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2})
+	if target.WindowsMode != windowsModeNormal {
+		t.Fatalf("record desktop target should use Windows console mode, got %q", target.WindowsMode)
+	}
+}
+
 func TestRecordRemoteCommandUsesFFmpegX11Grab(t *testing.T) {
 	got := recordRemoteCommand(SSHTarget{TargetOS: targetLinux}, recordDesktopOptions{
 		Duration: 3 * time.Second,
@@ -77,10 +84,20 @@ func TestRecordRemoteUntilStopCommandUsesStopFile(t *testing.T) {
 }
 
 func TestRecordRemoteCommandSupportsWindowsInteractiveTask(t *testing.T) {
-	got := recordRemoteCommand(
-		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
-		recordDesktopOptions{Duration: 4 * time.Second, FPS: 10, Size: "1024x768"},
-	)
+	for _, target := range []SSHTarget{
+		{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+		{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+	} {
+		got := recordRemoteCommand(
+			target,
+			recordDesktopOptions{Duration: 4 * time.Second, FPS: 10, Size: "1024x768"},
+		)
+		assertWindowsRecordCommand(t, got)
+	}
+}
+
+func assertWindowsRecordCommand(t *testing.T, got string) {
+	t.Helper()
 	for _, want := range []string{
 		"CrabboxRecord-",
 		"ffmpeg.exe",

@@ -94,7 +94,8 @@ func (a App) recordDesktop(ctx context.Context, args []string) error {
 		return err
 	}
 	a.touchActiveLeaseBestEffort(ctx, cfg, server, leaseID)
-	if err := waitForLoopbackVNC(ctx, &target); err != nil {
+	recordTarget := recordDesktopControlTarget(target)
+	if err := waitForLoopbackVNC(ctx, &recordTarget); err != nil {
 		return err
 	}
 	outPath := strings.TrimSpace(*output)
@@ -107,10 +108,10 @@ func (a App) recordDesktop(ctx context.Context, args []string) error {
 		Size:     strings.TrimSpace(*size),
 	}
 	if *while {
-		if isWindowsNativeTarget(target) {
-			return exit(2, "record --while is not supported on native Windows targets yet")
+		if recordTarget.TargetOS == targetWindows {
+			return exit(2, "record --while is not supported on Windows targets yet")
 		}
-		if err := captureDesktopRecordingWhile(ctx, target, outPath, recordOpts, recordWhileCommandOptions{
+		if err := captureDesktopRecordingWhile(ctx, recordTarget, outPath, recordOpts, recordWhileCommandOptions{
 			Command:  whileCommand,
 			LeaseID:  leaseID,
 			Provider: cfg.Provider,
@@ -118,7 +119,7 @@ func (a App) recordDesktop(ctx context.Context, args []string) error {
 		}); err != nil {
 			return err
 		}
-	} else if err := captureDesktopRecording(ctx, target, outPath, recordOpts); err != nil {
+	} else if err := captureDesktopRecording(ctx, recordTarget, outPath, recordOpts); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "recording: %s\n", outPath)
@@ -130,6 +131,13 @@ func recordWhileCommandArgs(args []string, id string, idFromPositional bool) []s
 		return args[1:]
 	}
 	return args
+}
+
+func recordDesktopControlTarget(target SSHTarget) SSHTarget {
+	if target.TargetOS == targetWindows {
+		target.WindowsMode = windowsModeNormal
+	}
+	return target
 }
 
 type recordDesktopOptions struct {
@@ -157,6 +165,9 @@ func defaultRecordingPath(leaseID, slug string) string {
 }
 
 func captureDesktopRecordingWhile(ctx context.Context, target SSHTarget, outputPath string, opts recordDesktopOptions, command recordWhileCommandOptions) error {
+	if target.TargetOS == targetWindows {
+		return exit(2, "record --while is not supported on Windows targets yet")
+	}
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		return exit(2, "create recording directory: %v", err)
 	}
@@ -260,6 +271,7 @@ func runRecordWhileLocalCommand(ctx context.Context, opts recordWhileCommandOpti
 }
 
 func captureDesktopRecording(ctx context.Context, target SSHTarget, outputPath string, opts recordDesktopOptions) error {
+	target = recordDesktopControlTarget(target)
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		return exit(2, "create recording directory: %v", err)
 	}
@@ -306,7 +318,7 @@ func recordRemoteCommand(target SSHTarget, opts recordDesktopOptions) string {
 	if size == "" {
 		size = "1024x768"
 	}
-	if isWindowsNativeTarget(target) {
+	if target.TargetOS == targetWindows {
 		return windowsRecordRemoteCommand(durationSeconds, opts.FPS, size)
 	}
 	return posixRecordRemoteCommand(durationSeconds, opts.FPS, size)

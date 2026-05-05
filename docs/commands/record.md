@@ -13,8 +13,9 @@ crabbox record --id blue-lobster --duration 2m --output task.mp4 --while -- ./dr
 The command resolves and touches the lease like `crabbox screenshot`, verifies
 that the lease has `desktop=true`, waits for the loopback desktop/VNC service,
 then streams an MP4 over SSH. Linux records `DISPLAY=:99` with `ffmpeg`
-`x11grab`. Windows creates a one-shot scheduled task inside the logged-in
-`crabbox` console session and records with `ffmpeg` `gdigrab`.
+`x11grab`. Windows, including `--windows-mode wsl2` leases, records the visible
+Windows console by creating a one-shot scheduled task inside the logged-in
+`crabbox` session and using `ffmpeg` `gdigrab`.
 
 New managed Linux desktop leases install `ffmpeg` as part of the desktop
 profile. Existing desktop leases can record after `ffmpeg` is installed on the
