@@ -143,6 +143,12 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("tightvnc-2.8.85-gpl-setup-64bit.msi");
     expect(got).toContain("VALUE_OF_PASSWORD=$vncPassword");
     expect(got).toContain("VALUE_OF_ALLOWLOOPBACK=1");
+    expect(got).toContain("CrabboxUserVNC");
+    expect(got).toContain("crabbox-user-vnc.cmd");
+    expect(got).toContain("start-user-vnc.ps1");
+    expect(got).toContain("Set-TightVNCBinaryValue");
+    expect(got).toContain('reg.exe add "HKCU\\Software\\TightVNC\\Server"');
+    expect(got).toContain('$hex = -join ($bytes | ForEach-Object { $_.ToString("X2") })');
     expect(got).toContain("New-CrabboxPassword");
     expect(got).toContain("${userSID}:F");
     expect(got).toContain("C:\\ProgramData\\crabbox\\windows.username");

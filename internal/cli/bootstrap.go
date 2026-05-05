@@ -336,15 +336,23 @@ $password = (Get-Content -Raw -LiteralPath (Join-Path $base "vnc.password")).Tri
 $serverKey = "HKCU:\Software\TightVNC\Server"
 $serviceKey = "HKLM:\Software\TightVNC\Server"
 $serviceConfig = Get-ItemProperty -Path $serviceKey -ErrorAction SilentlyContinue
+function Set-TightVNCBinaryValue($Name) {
+  $hex = ""
+  if ($serviceConfig -and $serviceConfig.$Name) {
+    $bytes = [byte[]]$serviceConfig.$Name
+    if ($bytes -and $bytes.Length -gt 0) {
+      $hex = -join ($bytes | ForEach-Object { $_.ToString("X2") })
+    }
+  }
+  if ($hex) {
+    & reg.exe add "HKCU\Software\TightVNC\Server" /v $Name /t REG_BINARY /d $hex /f | Out-Null
+  }
+}
 New-Item -Force -Path $serverKey | Out-Null
 New-ItemProperty -Force -Path $serverKey -Name UseVncAuthentication -PropertyType DWord -Value 1 | Out-Null
-if ($serviceConfig -and $serviceConfig.Password) {
-  New-ItemProperty -Force -Path $serverKey -Name Password -PropertyType Binary -Value $serviceConfig.Password | Out-Null
-}
+Set-TightVNCBinaryValue "Password"
 New-ItemProperty -Force -Path $serverKey -Name UseControlAuthentication -PropertyType DWord -Value 1 | Out-Null
-if ($serviceConfig -and $serviceConfig.ControlPassword) {
-  New-ItemProperty -Force -Path $serverKey -Name ControlPassword -PropertyType Binary -Value $serviceConfig.ControlPassword | Out-Null
-}
+Set-TightVNCBinaryValue "ControlPassword"
 New-ItemProperty -Force -Path $serverKey -Name AllowLoopback -PropertyType DWord -Value 1 | Out-Null
 New-ItemProperty -Force -Path $serverKey -Name AcceptHttpConnections -PropertyType DWord -Value 0 | Out-Null
 $exe = "C:\Program Files\TightVNC\tvnserver.exe"

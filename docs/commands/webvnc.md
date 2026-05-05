@@ -32,9 +32,11 @@ The runner VNC service stays bound to loopback.
 
 `--open` opens the portal page after the bridge starts. If the VNC password is
 available, the command also places it in the URL fragment for the local browser
-tab. URL fragments are not sent to the coordinator. If the portal login flow
-redirects first, the page may still prompt for the VNC password; use the
-password printed by the command.
+tab. URL fragments are not sent to the coordinator, and Crabbox preserves
+special characters such as `!` when building the fragment. If the portal login
+flow redirects first, the page may still prompt for the VNC password; use the
+password printed by the command. If an old browser tab is retrying with a stale
+fragment, close it before opening the new bridge URL.
 
 Flags:
 

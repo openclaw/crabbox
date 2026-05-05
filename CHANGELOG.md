@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed auto-shell command reconstruction so arguments with spaces stay quoted when shell operators such as `&&` are present.
+- Fixed Windows WebVNC credential handling so generated portal links preserve special characters and managed TightVNC sessions copy service passwords into the logged-in user's registry profile.
 
 ## 0.5.0 - 2026-05-04
 

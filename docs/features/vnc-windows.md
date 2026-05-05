@@ -28,6 +28,8 @@ Bootstrap flow:
 - Crabbox installs Git for Windows and TightVNC.
 - Crabbox creates a local `crabbox` administrator.
 - Windows auto-logon starts a visible console session for that user.
+- TightVNC runs in that logged-in user session, with its HKCU password values
+  copied from the service configuration during startup.
 - The generated password is stored at
   `C:\ProgramData\crabbox\vnc.password`.
 - VNC remains reachable only through the SSH tunnel.
@@ -102,6 +104,13 @@ VNC opens an OS credential prompt
 
 Check `managed:` in `crabbox vnc` output. If it is `false`, you opened a static
 host. Use that host's credentials and pass `--host-managed` intentionally.
+
+WebVNC keeps retrying in the browser
+
+Close any older retrying tab and start a fresh `crabbox webvnc` bridge. A stale
+tab can keep reconnecting with an old URL fragment. On managed AWS Windows,
+Crabbox configures TightVNC in the logged-in user's registry profile; if direct
+VNC auth also fails, recreate the lease with a current Crabbox build.
 
 Related docs:
 

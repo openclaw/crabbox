@@ -248,6 +248,8 @@ func webVNCPortalURL(base, leaseID, username, password string) string {
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/portal/leases/" + url.PathEscape(leaseID) + "/vnc"
 	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawFragment = ""
 	if strings.TrimSpace(username) != "" || strings.TrimSpace(password) != "" {
 		values := url.Values{}
 		if strings.TrimSpace(username) != "" {
@@ -256,7 +258,10 @@ func webVNCPortalURL(base, leaseID, username, password string) string {
 		if strings.TrimSpace(password) != "" {
 			values.Set("password", strings.TrimSpace(password))
 		}
-		u.Fragment = values.Encode()
+		u.RawFragment = values.Encode()
+		if fragment, err := url.PathUnescape(u.RawFragment); err == nil {
+			u.Fragment = fragment
+		}
 	}
 	return u.String()
 }

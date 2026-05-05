@@ -22,6 +22,12 @@ func TestWebVNCURLs(t *testing.T) {
 	if got := webVNCPortalURL("https://crabbox.openclaw.ai/", "cbx_abcdef123456", "ec2-user", "secret value"); got != "https://crabbox.openclaw.ai/portal/leases/cbx_abcdef123456/vnc#password=secret+value&username=ec2-user" {
 		t.Fatalf("portal URL=%q", got)
 	}
+	if got := webVNCPortalURL("https://crabbox.openclaw.ai/", "cbx_abcdef123456", "", "Cb1!abc"); got != "https://crabbox.openclaw.ai/portal/leases/cbx_abcdef123456/vnc#password=Cb1%21abc" {
+		t.Fatalf("portal URL=%q", got)
+	}
+	if got := webVNCPortalURL("https://crabbox.openclaw.ai/#stale", "cbx_abcdef123456", "", ""); got != "https://crabbox.openclaw.ai/portal/leases/cbx_abcdef123456/vnc" {
+		t.Fatalf("portal URL=%q", got)
+	}
 }
 
 func TestConnectWebVNCBridgeRegistersAgentBeforeServe(t *testing.T) {

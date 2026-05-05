@@ -120,6 +120,8 @@ $sshPorts = ${windowsSSHPortsPowerShell(config)}
 $vncPasswordPath = "C:\\ProgramData\\crabbox\\vnc.password"
 $windowsUsernamePath = "C:\\ProgramData\\crabbox\\windows.username"
 $windowsPasswordPath = "C:\\ProgramData\\crabbox\\windows.password"
+$userVNCStartupPath = "C:\\ProgramData\\crabbox\\start-user-vnc.ps1"
+$userVNCStartupCommandPath = Join-Path (Join-Path (Join-Path "C:\\Users" $user) "AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup") "crabbox-user-vnc.cmd"
 $setupCompletePath = "C:\\ProgramData\\crabbox\\setup-complete"
 $openSSHZip = "$env:TEMP\\OpenSSH-Win64.zip"
 $gitInstaller = "$env:TEMP\\Git-2.52.0-64-bit.exe"
@@ -209,8 +211,43 @@ if (-not (Test-Path -LiteralPath "C:\\Program Files\\TightVNC\\tvnserver.exe")) 
     "SET_ACCEPTHTTPCONNECTIONS=1", "VALUE_OF_ACCEPTHTTPCONNECTIONS=0"
   ) -Wait
 }
-Get-Service -Name tvnserver -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic
-Start-Service -Name tvnserver -ErrorAction SilentlyContinue
+$userVNCStartup = @'
+$ErrorActionPreference = "SilentlyContinue"
+$serverKey = "HKCU:\\Software\\TightVNC\\Server"
+$serviceKey = "HKLM:\\Software\\TightVNC\\Server"
+$serviceConfig = Get-ItemProperty -Path $serviceKey -ErrorAction SilentlyContinue
+function Set-TightVNCBinaryValue($Name) {
+  $hex = ""
+  if ($serviceConfig -and $serviceConfig.$Name) {
+    $bytes = [byte[]]$serviceConfig.$Name
+    if ($bytes -and $bytes.Length -gt 0) {
+      $hex = -join ($bytes | ForEach-Object { $_.ToString("X2") })
+    }
+  }
+  if ($hex) {
+    & reg.exe add "HKCU\\Software\\TightVNC\\Server" /v $Name /t REG_BINARY /d $hex /f | Out-Null
+  }
+}
+New-Item -Force -Path $serverKey | Out-Null
+New-ItemProperty -Force -Path $serverKey -Name UseVncAuthentication -PropertyType DWord -Value 1 | Out-Null
+Set-TightVNCBinaryValue "Password"
+New-ItemProperty -Force -Path $serverKey -Name UseControlAuthentication -PropertyType DWord -Value 1 | Out-Null
+Set-TightVNCBinaryValue "ControlPassword"
+New-ItemProperty -Force -Path $serverKey -Name AllowLoopback -PropertyType DWord -Value 1 | Out-Null
+New-ItemProperty -Force -Path $serverKey -Name AcceptHttpConnections -PropertyType DWord -Value 0 | Out-Null
+$exe = "C:\\Program Files\\TightVNC\\tvnserver.exe"
+Get-Process tvnserver -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq (Get-Process -Id $PID).SessionId } | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
+Start-Process -FilePath $exe -ArgumentList "-run" -WindowStyle Minimized
+'@
+Set-Content -Encoding UTF8 -LiteralPath $userVNCStartupPath -Value $userVNCStartup
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $userVNCStartupCommandPath) | Out-Null
+Set-Content -Encoding ASCII -LiteralPath $userVNCStartupCommandPath -Value ('@echo off' + [Environment]::NewLine + 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $userVNCStartupPath + '"' + [Environment]::NewLine)
+$startupTask = "CrabboxUserVNC"
+cmd.exe /c "schtasks.exe /Delete /TN $startupTask /F 2>NUL" | Out-Null
+schtasks.exe /Create /TN $startupTask /SC ONCE /ST ((Get-Date).AddMinutes(1).ToString("HH:mm")) /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $userVNCStartupPath" /RU $user /IT /F | Out-Null
+Get-Service -Name tvnserver -ErrorAction SilentlyContinue | Set-Service -StartupType Disabled
+Stop-Service -Name tvnserver -Force -ErrorAction SilentlyContinue
 $winlogon = "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon"
 Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value "1" -Type String
 Set-ItemProperty -Path $winlogon -Name ForceAutoLogon -Value "1" -Type String
