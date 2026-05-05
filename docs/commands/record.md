@@ -21,14 +21,16 @@ profile. Existing desktop leases can record after `ffmpeg` is installed on the
 guest. Windows recording requires `ffmpeg.exe` on the desktop lease.
 
 Use `--while -- <local-command...>` when another tool should drive the remote
-desktop while Crabbox records it. Crabbox starts the remote recorder, runs the
-local command, then stops the recorder and writes the MP4. The local driver gets
-`CRABBOX_RECORD_LEASE_ID` and `CRABBOX_RECORD_PROVIDER` in its environment so it
-can call commands such as `crabbox desktop launch`, `crabbox screenshot`, or a
-scenario runner against the same lease. `--duration` is a hard cap for both the
-recording and the local driver command; if the driver is still running at that
-limit, Crabbox stops the driver, stops the recorder, and returns an error.
-`--while` currently supports POSIX desktop targets.
+desktop while Crabbox records it. Crabbox waits until the remote recorder is
+armed, runs the local command, then stops the recorder and writes the MP4. The
+local driver gets `CRABBOX_RECORD_LEASE_ID` and `CRABBOX_RECORD_PROVIDER` in its
+environment so it can call commands such as `crabbox desktop launch`,
+`crabbox screenshot`, or a scenario runner against the same lease. `--duration`
+is a hard cap for the local driver command; if the driver is still running at
+that limit, Crabbox stops the driver, stops the recorder, and returns an error.
+The recording itself can include a small setup/teardown margin around the driver
+so it does not miss the tail of the interaction. `--while` currently supports
+POSIX desktop targets.
 
 Flags:
 

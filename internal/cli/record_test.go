@@ -16,6 +16,15 @@ func TestDefaultRecordingPath(t *testing.T) {
 	}
 }
 
+func TestRecordWhileCommandArgsOnlyStripsPositionalID(t *testing.T) {
+	if got := recordWhileCommandArgs([]string{"test", "-f", "foo"}, "test", false); strings.Join(got, " ") != "test -f foo" {
+		t.Fatalf("flag id should not strip driver command, got %q", got)
+	}
+	if got := recordWhileCommandArgs([]string{"test", "driver"}, "test", true); strings.Join(got, " ") != "driver" {
+		t.Fatalf("positional id should be stripped, got %q", got)
+	}
+}
+
 func TestRecordRemoteCommandUsesFFmpegX11Grab(t *testing.T) {
 	got := recordRemoteCommand(SSHTarget{TargetOS: targetLinux}, recordDesktopOptions{
 		Duration: 3 * time.Second,
@@ -44,13 +53,16 @@ func TestRecordRemoteUntilStopCommandUsesStopFile(t *testing.T) {
 		recordDesktopOptions{Duration: 30 * time.Second, FPS: 8, Size: "auto"},
 		"/tmp/out.mp4",
 		"/tmp/stop",
+		"/tmp/ready",
 	)
 	for _, want := range []string{
 		"out='/tmp/out.mp4'",
 		"stop='/tmp/stop'",
+		"ready='/tmp/ready'",
 		"-f x11grab",
 		"-framerate 8",
-		"-t 30",
+		"-t 45",
+		`printf ready > "$ready"`,
 		`if [ -f "$stop" ]`,
 		`kill -INT "$pid"`,
 		`cat "$out"`,
@@ -77,6 +89,9 @@ func TestRecordRemoteCommandSupportsWindowsInteractiveTask(t *testing.T) {
 		`"/IT"`,
 		"windows.password",
 		"ReadAllBytes",
+		"-PassThru",
+		"ExitCode",
+		"ffmpeg.exe produced no recording",
 		"} finally {",
 		"schtasks.exe /Delete /TN $taskName /F",
 		"Remove-Item -Force -LiteralPath $out, $done, $script",
