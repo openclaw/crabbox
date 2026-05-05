@@ -29,6 +29,7 @@ Command docs live here, one file per top-level command. Keep `docs/cli.md` as th
 - [vnc](vnc.md)
 - [webvnc](webvnc.md)
 - [screenshot](screenshot.md)
+- [record](record.md)
 - [inspect](inspect.md)
 - [stop](stop.md)
 - [cleanup](cleanup.md)

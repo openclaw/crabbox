@@ -48,7 +48,7 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - Desktop app launch into visible sessions: `internal/cli/desktop.go`
 - VNC tunnel command: `internal/cli/vnc.go`
 - WebVNC portal bridge: `internal/cli/webvnc.go`, `worker/src/portal.ts`, `worker/src/fleet.ts`
-- Desktop screenshot command: `internal/cli/screenshot.go`
+- Desktop screenshot and recording commands: `internal/cli/screenshot.go`, `internal/cli/record.go`
 - Interactive desktop/VNC contract: `docs/features/interactive-desktop-vnc.md`, `docs/features/vnc-linux.md`, `docs/features/vnc-windows.md`, `docs/features/vnc-macos.md`
 
 Bootstrap is intentionally tiny unless optional lease capabilities are requested:

@@ -79,7 +79,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("ExecStart=/usr/bin/startxfce4");
     expect(got).toContain("systemctl is-active --quiet crabbox-desktop.service");
     expect(got).toContain("systemctl is-active --quiet crabbox-desktop-session.service");
-    expect(got).toContain("x11-xserver-utils xterm scrot");
+    expect(got).toContain("x11-xserver-utils xterm scrot ffmpeg");
     expect(got).toContain("xsetroot -solid '#20242b'");
     expect(got).toContain("xterm -title 'Crabbox Desktop'");
     expect(got).toContain("(umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)");

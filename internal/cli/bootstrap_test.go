@@ -39,7 +39,7 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
 		"xvfb xfce4 xfce4-terminal x11vnc xauth dbus-x11",
-		"x11-xserver-utils xterm scrot",
+		"x11-xserver-utils xterm scrot ffmpeg",
 		"/etc/systemd/system/crabbox-xvfb.service",
 		"/etc/systemd/system/crabbox-desktop.service",
 		"/usr/local/bin/crabbox-desktop-session",

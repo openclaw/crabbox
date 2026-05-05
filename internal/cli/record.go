@@ -1,0 +1,223 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+func (a App) recordDesktop(ctx context.Context, args []string) error {
+	defaults := defaultConfig()
+	fs := newFlagSet("record", a.Stderr)
+	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or ssh")
+	id := fs.String("id", "", "lease id or slug")
+	output := fs.String("output", "", "local MP4 output path")
+	duration := fs.Duration("duration", 10*time.Second, "recording duration")
+	fps := fs.Int("fps", 15, "recording frame rate")
+	size := fs.String("size", "1024x768", "recording size, or auto")
+	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if *id == "" && fs.NArg() > 0 {
+		*id = fs.Arg(0)
+	}
+	if *duration <= 0 {
+		return exit(2, "--duration must be greater than zero")
+	}
+	if *duration > 10*time.Minute {
+		return exit(2, "--duration must be 10m or less")
+	}
+	if *fps <= 0 || *fps > 60 {
+		return exit(2, "--fps must be between 1 and 60")
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	cfg.Provider = *provider
+	cfg.Desktop = true
+	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
+		return err
+	}
+	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
+		return err
+	}
+	if isBlacksmithProvider(cfg.Provider) {
+		return exit(2, "desktop recording is not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
+	}
+	if *id == "" && !isStaticProvider(cfg.Provider) {
+		return exit(2, "usage: crabbox record --id <lease-id-or-slug> [--duration 10s] [--output <path>]")
+	}
+	server, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, *id)
+	if err != nil {
+		return err
+	}
+	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
+		return err
+	} else {
+		target = resolved.Target
+	}
+	if isStaticProvider(cfg.Provider) && target.TargetOS != targetLinux {
+		return exit(2, "desktop recordings are not captured from static %s hosts because those are existing host machines, not Crabbox-created desktops", target.TargetOS)
+	}
+	if target.TargetOS == targetMacOS {
+		return exit(2, "desktop recording is not supported for macOS targets yet")
+	}
+	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
+		return err
+	}
+	repo, err := findRepo()
+	if err != nil {
+		return err
+	}
+	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+		return err
+	}
+	a.touchActiveLeaseBestEffort(ctx, cfg, server, leaseID)
+	if err := waitForLoopbackVNC(ctx, &target); err != nil {
+		return err
+	}
+	outPath := strings.TrimSpace(*output)
+	if outPath == "" {
+		outPath = defaultRecordingPath(leaseID, serverSlug(server))
+	}
+	if err := captureDesktopRecording(ctx, target, outPath, recordDesktopOptions{
+		Duration: *duration,
+		FPS:      *fps,
+		Size:     strings.TrimSpace(*size),
+	}); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.Stdout, "recording: %s\n", outPath)
+	return nil
+}
+
+type recordDesktopOptions struct {
+	Duration time.Duration
+	FPS      int
+	Size     string
+}
+
+func defaultRecordingPath(leaseID, slug string) string {
+	name := slug
+	if strings.TrimSpace(name) == "" {
+		name = leaseID
+	}
+	if strings.TrimSpace(name) == "" {
+		name = "crabbox"
+	}
+	return "crabbox-" + normalizeLeaseSlug(name) + "-recording.mp4"
+}
+
+func captureDesktopRecording(ctx context.Context, target SSHTarget, outputPath string, opts recordDesktopOptions) error {
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return exit(2, "create recording directory: %v", err)
+	}
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return exit(2, "create recording %s: %v", outputPath, err)
+	}
+	ok := false
+	defer func() {
+		_ = file.Close()
+		if !ok {
+			_ = os.Remove(outputPath)
+		}
+	}()
+	if err := runSSHToWriter(ctx, target, recordRemoteCommand(target, opts), file); err != nil {
+		return exit(5, "capture recording: %v", err)
+	}
+	ok = true
+	return nil
+}
+
+func recordRemoteCommand(target SSHTarget, opts recordDesktopOptions) string {
+	durationSeconds := int(opts.Duration.Round(time.Second).Seconds())
+	if durationSeconds < 1 {
+		durationSeconds = 1
+	}
+	size := strings.TrimSpace(opts.Size)
+	if size == "" {
+		size = "1024x768"
+	}
+	if isWindowsNativeTarget(target) {
+		return windowsRecordRemoteCommand(durationSeconds, opts.FPS, size)
+	}
+	return posixRecordRemoteCommand(durationSeconds, opts.FPS, size)
+}
+
+func posixRecordRemoteCommand(durationSeconds, fps int, size string) string {
+	sizeArg := ""
+	if size != "auto" {
+		sizeArg = " -video_size " + shellQuote(size)
+	}
+	return fmt.Sprintf(`set -eu
+export DISPLAY="${DISPLAY:-:99}"
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  sudo apt-get update -y >/tmp/crabbox-record-apt.log 2>&1 || true
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg >>/tmp/crabbox-record-apt.log 2>&1 || true
+fi
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "no video recording tool found; warm a new --desktop lease or install ffmpeg; apt log: /tmp/crabbox-record-apt.log" >&2
+  exit 127
+fi
+input="$DISPLAY"
+case "$input" in
+  *.*) ;;
+  *) input="${input}.0" ;;
+esac
+ffmpeg -hide_banner -loglevel error -y -f x11grab%s -framerate %d -i "$input" -t %d -pix_fmt yuv420p -movflags frag_keyframe+empty_moov -f mp4 pipe:1
+`, sizeArg, fps, durationSeconds)
+}
+
+func windowsRecordRemoteCommand(durationSeconds, fps int, size string) string {
+	sizeArgs := ""
+	if size != "auto" {
+		sizeArgs = `, "-video_size", ` + psQuote(size)
+	}
+	inner := `$ErrorActionPreference = "Stop"
+$ffmpegCommand = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
+if (-not $ffmpegCommand) { throw "no video recording tool found; install ffmpeg.exe on the Windows desktop lease" }
+$args = @("-hide_banner", "-loglevel", "error", "-y", "-f", "gdigrab"` + sizeArgs + `, "-framerate", "` + fmt.Sprint(fps) + `", "-i", "desktop", "-t", "` + fmt.Sprint(durationSeconds) + `", "-pix_fmt", "yuv420p", "__CRABBOX_RECORDING_OUT__")
+Start-Process -FilePath $ffmpegCommand.Source -ArgumentList $args -WindowStyle Hidden -Wait
+Set-Content -Encoding ASCII -LiteralPath "__CRABBOX_RECORDING_DONE__" -Value "done"
+`
+	return `$ErrorActionPreference = "Stop"
+$base = "C:\ProgramData\crabbox"
+$passwordPath = Join-Path $base "windows.password"
+$password = if (Test-Path -LiteralPath $passwordPath) { (Get-Content -Raw -LiteralPath $passwordPath).Trim() } else { "" }
+$taskName = "CrabboxRecord-" + [Guid]::NewGuid().ToString("N")
+$out = Join-Path $base ($taskName + ".mp4")
+$done = Join-Path $base ($taskName + ".done")
+$script = Join-Path $base ($taskName + ".ps1")
+try {
+  Set-Content -Encoding UTF8 -LiteralPath $script -Value (` + psQuote(inner) + `.Replace("__CRABBOX_RECORDING_OUT__", $out).Replace("__CRABBOX_RECORDING_DONE__", $done))
+  cmd.exe /c "schtasks.exe /Delete /TN $taskName /F 2>NUL" | Out-Null
+  $startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
+  $createArgs = @("/Create", "/TN", $taskName, "/SC", "ONCE", "/ST", $startTime, "/TR", "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $script", "/RU", $env:USERNAME, "/IT", "/F")
+  & schtasks.exe @createArgs | Out-Null
+  if ($LASTEXITCODE -ne 0 -and $password -ne "") {
+    & schtasks.exe @($createArgs + @("/RP", $password)) | Out-Null
+  }
+  if ($LASTEXITCODE -ne 0) { throw "failed to create interactive recording task" }
+  schtasks.exe /Run /TN $taskName | Out-Null
+  $deadline = (Get-Date).AddSeconds(` + fmt.Sprint(durationSeconds+45) + `)
+  while ((Get-Date) -lt $deadline) {
+    if (Test-Path -LiteralPath $done) { break }
+    Start-Sleep -Milliseconds 500
+  }
+  if (-not (Test-Path -LiteralPath $done)) { throw "scheduled interactive recording did not finish" }
+  $bytes = [IO.File]::ReadAllBytes($out)
+  [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)
+} finally {
+  cmd.exe /c "schtasks.exe /Delete /TN $taskName /F 2>NUL" | Out-Null
+  Remove-Item -Force -LiteralPath $out, $done, $script -ErrorAction SilentlyContinue
+}
+`
+}

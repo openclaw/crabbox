@@ -37,6 +37,7 @@ crabbox warmup [--provider hetzner|aws|ssh|blacksmith-testbox] [--target linux|m
 crabbox run [--id <lease-id-or-slug>] [--provider hetzner|aws|ssh|blacksmith-testbox] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--tailscale] [--network auto|tailscale|public] [--shell] [--checksum] [--debug] [--force-sync-large] [--timing-json] [--blacksmith-workflow <workflow>] -- <command...>
 crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] [-- <command...>]
 crabbox screenshot --id <lease-id-or-slug> [--output <path>]
+crabbox record --id <lease-id-or-slug> [--duration 10s] [--output desktop.mp4]
 crabbox sync-plan [--limit <n>]
 crabbox history [--lease <lease-id>] [--owner <email>] [--org <name>] [--limit <n>] [--json]
 crabbox logs <run-id> [--json]
@@ -88,6 +89,7 @@ crabbox vnc --id blue-lobster --open
 crabbox webvnc --id blue-lobster --open
 crabbox desktop launch --id blue-lobster --browser --url https://example.com
 crabbox screenshot --id blue-lobster --output desktop.png
+crabbox record --id blue-lobster --duration 10s --output desktop.mp4
 crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
 crabbox stop blue-lobster
 ```

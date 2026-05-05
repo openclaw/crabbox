@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `crabbox record` to capture MP4 desktop recordings from UI-capable leases.
 - Added `.crabboxignore` for repo-local sync-only exclude patterns shared by `run` and `sync-plan`.
 - Added WebVNC portal controls for reconnect, fullscreen, and clipboard-ready bridge commands.
 

@@ -520,7 +520,7 @@ func cloudInitOptionalBootstrap(cfg Config) string {
 		parts = append(parts, cloudInitTailscaleBootstrap(cfg))
 	}
 	if cfg.Desktop {
-		parts = append(parts, `    retry apt-get install -y --no-install-recommends xvfb xfce4 xfce4-terminal x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot fonts-dejavu-core fonts-liberation iproute2 openssl
+		parts = append(parts, `    retry apt-get install -y --no-install-recommends xvfb xfce4 xfce4-terminal x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg fonts-dejavu-core fonts-liberation iproute2 openssl
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)

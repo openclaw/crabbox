@@ -89,6 +89,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.webvnc(ctx, helpArgs), true
 	case "screenshot":
 		return a.screenshot(ctx, helpArgs), true
+	case "record":
+		return a.recordDesktop(ctx, helpArgs), true
 	case "inspect":
 		return a.inspect(ctx, helpArgs), true
 	case "stop", "release":
@@ -151,6 +153,7 @@ Commands:
   vnc         Print or open VNC connection details for a desktop lease
   webvnc      Bridge a desktop lease into the authenticated web portal
   screenshot  Capture a PNG from a desktop lease
+  record      Capture an MP4 from a desktop lease
   inspect     Print lease/provider details; add --json for scripts
   stop        Release a lease or delete a direct-provider machine
   cleanup     Sweep expired direct-provider machines
@@ -166,6 +169,7 @@ Common Flows:
   crabbox desktop launch --id blue-lobster --browser --url https://example.com
   crabbox webvnc --id blue-lobster --open
   crabbox screenshot --id blue-lobster --output desktop.png
+  crabbox record --id blue-lobster --duration 10s --output desktop.mp4
   crabbox inspect --id blue-lobster --json
   crabbox history --lease cbx_abcdef123456
   crabbox logs run_123

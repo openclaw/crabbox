@@ -20,6 +20,7 @@ crabbox warmup --desktop --browser
 crabbox vnc --id blue-lobster --open
 crabbox webvnc --id blue-lobster --open
 crabbox screenshot --id blue-lobster --output desktop.png
+crabbox record --id blue-lobster --duration 10s --output desktop.mp4
 ```
 
 AWS Windows and EC2 Mac use the same VNC command once the desktop lease exists:
@@ -99,6 +100,12 @@ Use `crabbox screenshot` when you need a PNG without taking over the session:
 crabbox screenshot --id blue-lobster --output desktop.png
 ```
 
+Use `crabbox record` when a temporal UI bug needs video evidence:
+
+```sh
+crabbox record --id blue-lobster --duration 10s --output desktop.mp4
+```
+
 Use `crabbox desktop launch` to start a browser or app inside the visible
 session without keeping the SSH command attached:
 
@@ -158,4 +165,4 @@ often machine- and user-encrypted.
 - [AWS](aws.md): AWS target matrix, capacity, AMIs, and EC2 Mac host requirements.
 - [Hetzner](hetzner.md): Linux-only managed Hetzner behavior.
 - [Blacksmith Testbox](blacksmith-testbox.md): delegated Testbox behavior and why VNC is not a Crabbox feature there yet.
-- [vnc command](../commands/vnc.md), [webvnc command](../commands/webvnc.md), [screenshot command](../commands/screenshot.md), [desktop command](../commands/desktop.md).
+- [vnc command](../commands/vnc.md), [webvnc command](../commands/webvnc.md), [screenshot command](../commands/screenshot.md), [record command](../commands/record.md), [desktop command](../commands/desktop.md).
