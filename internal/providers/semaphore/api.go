@@ -25,6 +25,8 @@ type jobInfo struct {
 	State string
 }
 
+const userAgent = "SemaphoreCLI/crabbox (crabbox-semaphore-provider)"
+
 func newAPIClient(host, token string, rt core.Runtime) *apiClient {
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	if rt.HTTP != nil {
@@ -185,22 +187,51 @@ func (c *apiClient) resolveProjectID(ctx context.Context, name string) (string, 
 		return project.Metadata.ID, nil
 	}
 
-	// Fallback: list all and match by name
-	var projects []struct {
+	// Fallback: paginate through all projects and match by name
+	type projectEntry struct {
 		Metadata struct {
 			Name string `json:"name"`
 			ID   string `json:"id"`
 		} `json:"metadata"`
 	}
-	if err := c.get(ctx, "/api/v1alpha/projects", &projects); err != nil {
-		return "", err
-	}
-	for _, p := range projects {
-		if p.Metadata.Name == name {
-			return p.Metadata.ID, nil
+	for page := 1; ; page++ {
+		var projects []projectEntry
+		resp, headers, err := c.getWithHeaders(ctx, fmt.Sprintf("/api/v1alpha/projects?page=%d", page))
+		if err != nil {
+			return "", err
+		}
+		if err := json.Unmarshal(resp, &projects); err != nil {
+			return "", err
+		}
+		for _, p := range projects {
+			if p.Metadata.Name == name {
+				return p.Metadata.ID, nil
+			}
+		}
+		if headers.Get("x-has-more") != "true" || len(projects) == 0 {
+			break
 		}
 	}
 	return "", fmt.Errorf("project %q not found", name)
+}
+
+func (c *apiClient) getWithHeaders(ctx context.Context, path string) ([]byte, http.Header, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://"+c.host+path, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("Authorization", "Token "+c.token)
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, nil, fmt.Errorf("semaphore API %s returned %d: %s", path, resp.StatusCode, string(body))
+	}
+	return body, resp.Header, nil
 }
 
 func (c *apiClient) get(ctx context.Context, path string, target any) error {
@@ -209,7 +240,7 @@ func (c *apiClient) get(ctx context.Context, path string, target any) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Token "+c.token)
-	req.Header.Set("User-Agent", "crabbox-semaphore-provider")
+	req.Header.Set("User-Agent", userAgent)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -243,7 +274,7 @@ func (c *apiClient) post(ctx context.Context, path string, payload any, target a
 	}
 	req.Header.Set("Authorization", "Token "+c.token)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "crabbox-semaphore-provider")
+	req.Header.Set("User-Agent", userAgent)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
