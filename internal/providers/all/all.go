@@ -6,5 +6,6 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/daytona"
 	_ "github.com/openclaw/crabbox/internal/providers/hetzner"
 	_ "github.com/openclaw/crabbox/internal/providers/islo"
+	_ "github.com/openclaw/crabbox/internal/providers/semaphore"
 	_ "github.com/openclaw/crabbox/internal/providers/ssh"
 )
