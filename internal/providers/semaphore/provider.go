@@ -1,7 +1,6 @@
 // Package semaphore implements a Crabbox provider that creates Semaphore CI
 // jobs as warm testbox environments. Pure REST API — no sem-agent binary needed.
 //
-// Install: copy to internal/providers/semaphore/ and add to all/all.go
 package semaphore
 
 import (

@@ -1,4 +1,3 @@
-// Install: copy to internal/providers/semaphore/helpers.go
 package semaphore
 
 import (

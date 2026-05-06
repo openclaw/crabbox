@@ -1,4 +1,3 @@
-// Install: copy to internal/providers/semaphore/backend.go
 package semaphore
 
 import (
@@ -104,13 +103,31 @@ func (b *semaphoreBackend) Acquire(ctx context.Context, req core.AcquireRequest)
 
 // Resolve looks up an existing Semaphore job by ID or slug.
 func (b *semaphoreBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
-	// Resolve slug → lease ID via claim file
 	id := req.ID
-	if claim, found, err := core.ResolveLeaseClaim(id); err == nil && found {
-		id = claim.LeaseID
-	}
-	jobID := stripLeasePrefix(id)
 
+	// Try direct lease ID (sem_UUID or UUID)
+	if isLeaseID(id) {
+		return b.resolveByJobID(ctx, stripLeasePrefix(id))
+	}
+
+	// Resolve slug → lease ID via claim file
+	if claim, found, err := core.ResolveLeaseClaim(id); err == nil && found {
+		return b.resolveByJobID(ctx, stripLeasePrefix(claim.LeaseID))
+	}
+
+	return core.LeaseTarget{}, core.Exit(4, "semaphore lease not found for %q — use the full lease ID (sem_UUID) or a slug from a recent warmup", id)
+}
+
+func isLeaseID(id string) bool {
+	if len(id) > 4 && id[:4] == "sem_" {
+		return true
+	}
+	// UUID format: 8-4-4-4-12 hex
+	stripped := stripLeasePrefix(id)
+	return len(stripped) == 36 && stripped[8] == '-' && stripped[13] == '-'
+}
+
+func (b *semaphoreBackend) resolveByJobID(ctx context.Context, jobID string) (core.LeaseTarget, error) {
 	state, ip, sshPort, err := b.client.GetJobStatus(ctx, jobID)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -130,6 +147,12 @@ func (b *semaphoreBackend) Resolve(ctx context.Context, req core.ResolveRequest)
 		return core.LeaseTarget{}, fmt.Errorf("store SSH key: %w", err)
 	}
 
+	// Read slug from claim if available
+	slug := ""
+	if claim, err := core.ReadLeaseClaim(leaseID); err == nil && claim.Slug != "" {
+		slug = claim.Slug
+	}
+
 	target := core.SSHTarget{
 		User:       "semaphore",
 		Host:       ip,
@@ -143,6 +166,11 @@ func (b *semaphoreBackend) Resolve(ctx context.Context, req core.ResolveRequest)
 		Provider: providerName,
 		Name:     "sem-testbox",
 		Status:   "running",
+		Labels: map[string]string{
+			"lease":    leaseID,
+			"slug":     slug,
+			"provider": providerName,
+		},
 	}
 	server.PublicNet.IPv4.IP = ip
 	server.ServerType.Name = withDefault(b.cfg.Semaphore.Machine, "f1-standard-2")
