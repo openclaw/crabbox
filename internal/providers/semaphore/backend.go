@@ -4,6 +4,8 @@ package semaphore
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -60,18 +62,24 @@ func (b *semaphoreBackend) Acquire(ctx context.Context, req core.AcquireRequest)
 		return core.LeaseTarget{}, err
 	}
 
-	// 3. Get SSH key
+	// 3. Get SSH key and write to file (crabbox expects a file path)
 	sshKey, err := b.client.GetSSHKey(ctx, jobID)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
 
+	keyPath, err := storeSSHKey(leaseID, sshKey)
+	if err != nil {
+		return core.LeaseTarget{}, fmt.Errorf("store SSH key: %w", err)
+	}
+
 	target := core.SSHTarget{
-		User:     "semaphore",
-		Host:     ip,
-		Key:      sshKey,
-		Port:     fmt.Sprintf("%d", sshPort),
-		TargetOS: core.TargetLinux,
+		User:       "semaphore",
+		Host:       ip,
+		Key:        keyPath,
+		Port:       fmt.Sprintf("%d", sshPort),
+		TargetOS:   core.TargetLinux,
+		ReadyCheck: "true", // Semaphore job is ready once SSH is reachable
 	}
 
 	server := core.Server{
@@ -94,9 +102,14 @@ func (b *semaphoreBackend) Acquire(ctx context.Context, req core.AcquireRequest)
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-// Resolve looks up an existing Semaphore job by ID.
+// Resolve looks up an existing Semaphore job by ID or slug.
 func (b *semaphoreBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
-	jobID := stripLeasePrefix(req.ID)
+	// Resolve slug → lease ID via claim file
+	id := req.ID
+	if claim, found, err := core.ResolveLeaseClaim(id); err == nil && found {
+		id = claim.LeaseID
+	}
+	jobID := stripLeasePrefix(id)
 
 	state, ip, sshPort, err := b.client.GetJobStatus(ctx, jobID)
 	if err != nil {
@@ -112,12 +125,18 @@ func (b *semaphoreBackend) Resolve(ctx context.Context, req core.ResolveRequest)
 	}
 
 	leaseID := "sem_" + jobID
+	keyPath, err := storeSSHKey(leaseID, sshKey)
+	if err != nil {
+		return core.LeaseTarget{}, fmt.Errorf("store SSH key: %w", err)
+	}
+
 	target := core.SSHTarget{
-		User:     "semaphore",
-		Host:     ip,
-		Key:      sshKey,
-		Port:     fmt.Sprintf("%d", sshPort),
-		TargetOS: core.TargetLinux,
+		User:       "semaphore",
+		Host:       ip,
+		Key:        keyPath,
+		Port:       fmt.Sprintf("%d", sshPort),
+		TargetOS:   core.TargetLinux,
+		ReadyCheck: "true",
 	}
 	server := core.Server{
 		CloudID:  jobID,
@@ -164,6 +183,15 @@ func (b *semaphoreBackend) ReleaseLease(ctx context.Context, req core.ReleaseLea
 // Touch is a no-op for Semaphore — the keepalive script handles idle timeout.
 func (b *semaphoreBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	return req.Lease.Server, nil
+}
+
+func storeSSHKey(leaseID, keyContent string) (string, error) {
+	dir := os.TempDir()
+	path := filepath.Join(dir, ".crabbox-sem-"+leaseID+".key")
+	if err := os.WriteFile(path, []byte(keyContent), 0600); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func stripLeasePrefix(leaseID string) string {
