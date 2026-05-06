@@ -16,6 +16,7 @@ static SSH provider for existing machines.
 | [Hetzner](hetzner.md) | SSH lease | Linux | fast Linux capacity at low cost |
 | [Static SSH](ssh.md) | SSH lease | Linux, macOS, Windows | reusing an existing host |
 | [Blacksmith Testbox](blacksmith-testbox.md) | delegated run | Linux | existing Blacksmith Testbox workflows |
+| [Semaphore](semaphore.md) | SSH lease | Linux | Semaphore CI environments with project secrets and cache |
 | [Daytona](daytona.md) | hybrid delegated run + SSH | Linux | Daytona snapshot sandboxes |
 | [Islo](islo.md) | delegated run | Linux | Islo-owned sandbox execution |
 
@@ -53,6 +54,9 @@ Delegated providers do not use the Crabbox coordinator:
 - Daytona uses Daytona API and SDK/toolbox APIs.
 - Islo uses the Islo API and SDK auth.
 
+Semaphore is an SSH lease provider that provisions via the Semaphore REST API.
+It does not use the Crabbox coordinator.
+
 ## Feature Matrix
 
 | Provider | `run` | `warmup` | `ssh` | VNC/code | Crabbox sync | Provider sync |
@@ -62,6 +66,7 @@ Delegated providers do not use the Crabbox coordinator:
 | Hetzner | yes | yes | yes | Linux VNC/code | yes | no |
 | Static SSH | yes | resolves host | yes | host-dependent | yes | no |
 | Blacksmith Testbox | yes | yes | no | no | no | yes |
+| Semaphore | yes | yes | yes | no | yes | no |
 | Daytona | yes | yes | yes | no | archive via Daytona toolbox | no |
 | Islo | yes | yes | no | no | no | yes |
 

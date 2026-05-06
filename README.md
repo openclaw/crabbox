@@ -12,7 +12,7 @@ Crabbox is an open-source remote testbox runner for maintainers and AI agents. L
 crabbox run -- pnpm test
 ```
 
-Behind that single command: a Go CLI on your laptop, a Cloudflare Worker broker that owns provider credentials and lease state, and a managed runner on Hetzner Cloud, AWS EC2, or Azure. Azure supports managed Linux and native Windows VMs. Crabbox can also wrap Blacksmith Testboxes when you choose `provider: blacksmith-testbox`, use Daytona or Islo sandboxes for direct-provider workflows, or use `provider: ssh` for existing macOS and Windows targets.
+Behind that single command: a Go CLI on your laptop, a Cloudflare Worker broker that owns provider credentials and lease state, and a managed runner on Hetzner Cloud, AWS EC2, or Azure. Azure supports managed Linux and native Windows VMs. Crabbox can also wrap Blacksmith Testboxes when you choose `provider: blacksmith-testbox`, use Daytona or Islo sandboxes for direct-provider workflows, use `provider: semaphore` for Semaphore CI environments, or use `provider: ssh` for existing macOS and Windows targets.
 
 ---
 
@@ -77,6 +77,7 @@ For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For th
 - **Azure Linux and native Windows.** `provider: azure` provisions Linux and native Windows VMs in a configurable Azure subscription using `DefaultAzureCredential` in direct mode or service-principal secrets in the broker. Crabbox creates a shared resource group, vnet, subnet, and NSG on first use, then per-lease public IPs, NICs, and VMs. Linux uses cloud-init; Windows uses VM Agent Custom Script Extension to install OpenSSH/Git and configure the Crabbox user.
 - **macOS and Windows static hosts.** `provider: ssh` reuses existing machines; it does not create macOS or Windows Crabbox boxes. macOS and Windows WSL2 use the POSIX rsync path; native Windows uses PowerShell plus tar archive sync.
 - **Blacksmith Testbox wrapper.** Set `provider: blacksmith-testbox` to delegate warmup/run/list/status/stop to the Blacksmith CLI while Crabbox keeps local slugs, repo claims, timing summaries, config conventions, and portal visibility for active external runners.
+- **Semaphore CI testbox.** Set `provider: semaphore` to lease a Semaphore CI job as a testbox. Same environment as your real pipelines.
 - **Daytona and Islo sandboxes.** Set `provider: daytona` for Daytona SDK/toolbox execution from a snapshot with explicit SSH access when needed, or `provider: islo` for delegated Islo sandbox execution through the Islo Go SDK.
 - **Trusted AWS images.** Operators can create AMIs from active brokered AWS leases and promote a known-good image as the coordinator default.
 - **Cost guardrails.** Per-lease and monthly spend caps. Live pricing from EC2 Spot history or Hetzner server-type prices, with static fallbacks. `crabbox usage` summarizes spend by user, org, provider, and type.
@@ -196,6 +197,16 @@ provider: islo
 islo:
   image: docker.io/library/ubuntu:24.04
   workdir: crabbox
+```
+
+Optional Semaphore CI testbox:
+
+```yaml
+provider: semaphore
+semaphore:
+  host: myorg.semaphoreci.com
+  token: ...
+  project: my-app
 ```
 
 Optional static macOS or Windows target:
