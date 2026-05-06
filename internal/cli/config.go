@@ -63,6 +63,7 @@ type Config struct {
 	Blacksmith         BlacksmithConfig
 	Daytona            DaytonaConfig
 	Islo               IsloConfig
+	Semaphore          SemaphoreConfig
 	Tailscale          TailscaleConfig
 	Static             StaticConfig
 	Results            ResultsConfig
@@ -136,6 +137,17 @@ type IsloConfig struct {
 	VCPUs          int
 	MemoryMB       int
 	DiskGB         int
+}
+
+type SemaphoreConfig struct {
+	Host        string
+	Token       string
+	Project     string
+	Machine     string
+	OSImage     string
+	Duration    string
+	IdleTimeout string
+	Binary      string
 }
 
 type StaticConfig struct {
@@ -308,6 +320,7 @@ type fileConfig struct {
 	Blacksmith       *fileBlacksmithConfig `yaml:"blacksmith,omitempty"`
 	Daytona          *fileDaytonaConfig    `yaml:"daytona,omitempty"`
 	Islo             *fileIsloConfig       `yaml:"islo,omitempty"`
+	Semaphore        *fileSemaphoreConfig  `yaml:"semaphore,omitempty"`
 	Tailscale        *fileTailscaleConfig  `yaml:"tailscale,omitempty"`
 	Static           *fileStaticConfig     `yaml:"static,omitempty"`
 	Results          *fileResultsConfig    `yaml:"results,omitempty"`
@@ -441,6 +454,17 @@ type fileIsloConfig struct {
 	VCPUs          int    `yaml:"vcpus,omitempty"`
 	MemoryMB       int    `yaml:"memoryMB,omitempty"`
 	DiskGB         int    `yaml:"diskGB,omitempty"`
+}
+
+type fileSemaphoreConfig struct {
+	Host        string `yaml:"host,omitempty"`
+	Token       string `yaml:"token,omitempty"`
+	Project     string `yaml:"project,omitempty"`
+	Machine     string `yaml:"machine,omitempty"`
+	OSImage     string `yaml:"osImage,omitempty"`
+	Duration    string `yaml:"duration,omitempty"`
+	IdleTimeout string `yaml:"idleTimeout,omitempty"`
+	Binary      string `yaml:"binary,omitempty"`
 }
 
 type fileTailscaleConfig struct {
@@ -886,6 +910,32 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		}
 		if file.Islo.DiskGB > 0 {
 			cfg.Islo.DiskGB = file.Islo.DiskGB
+		}
+	}
+	if file.Semaphore != nil {
+		if file.Semaphore.Host != "" {
+			cfg.Semaphore.Host = file.Semaphore.Host
+		}
+		if file.Semaphore.Token != "" {
+			cfg.Semaphore.Token = file.Semaphore.Token
+		}
+		if file.Semaphore.Project != "" {
+			cfg.Semaphore.Project = file.Semaphore.Project
+		}
+		if file.Semaphore.Machine != "" {
+			cfg.Semaphore.Machine = file.Semaphore.Machine
+		}
+		if file.Semaphore.OSImage != "" {
+			cfg.Semaphore.OSImage = file.Semaphore.OSImage
+		}
+		if file.Semaphore.Duration != "" {
+			cfg.Semaphore.Duration = file.Semaphore.Duration
+		}
+		if file.Semaphore.IdleTimeout != "" {
+			cfg.Semaphore.IdleTimeout = file.Semaphore.IdleTimeout
+		}
+		if file.Semaphore.Binary != "" {
+			cfg.Semaphore.Binary = file.Semaphore.Binary
 		}
 	}
 	if file.Tailscale != nil {
