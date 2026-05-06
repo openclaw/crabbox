@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -43,25 +44,9 @@ func (c *apiClient) CreateJob(ctx context.Context, project, machine, osImage str
 		return "", fmt.Errorf("resolve project %q: %w", project, err)
 	}
 
-	durationSecs := int(idleTimeout.Seconds()) * 2 // max duration = 2x idle timeout
-	idleSecs := int(idleTimeout.Seconds())
+	durationSecs := int(idleTimeout.Seconds())
 
-	keepalive := fmt.Sprintf(
-		`echo crabbox-testbox-ready && touch /tmp/.testbox-activity && python3 -c "
-import os, time, sys
-max_duration = %d
-idle_timeout = %d
-start = time.time()
-f = '/tmp/.testbox-activity'
-while True:
-    if time.time() - start >= max_duration:
-        sys.exit(0)
-    try:
-        if time.time() - os.path.getmtime(f) >= idle_timeout:
-            sys.exit(0)
-    except: pass
-    time.sleep(5)
-"`, durationSecs, idleSecs)
+	keepalive := fmt.Sprintf("sudo mkdir -p /work/crabbox && sudo chown $(whoami) /work/crabbox && echo crabbox-testbox-ready && sleep %d", durationSecs)
 
 	body := map[string]any{
 		"apiVersion": "v1alpha",
@@ -78,6 +63,8 @@ while True:
 			"commands": []string{keepalive},
 		},
 	}
+
+	fmt.Fprintf(os.Stderr, "DEBUG: CreateJob url=https://%s/api/v1alpha/jobs project_id=%s\n", c.host, projectID)
 
 	var result struct {
 		Metadata struct {
@@ -261,6 +248,7 @@ func (c *apiClient) post(ctx context.Context, path string, payload any, target a
 	req.Header.Set("Authorization", "Token "+c.token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "crabbox-semaphore-provider")
+	fmt.Fprintf(os.Stderr, "DEBUG POST: %s transport=%T content-length=%d\n", req.URL, c.http.Transport, req.ContentLength)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
