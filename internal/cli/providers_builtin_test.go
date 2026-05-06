@@ -171,6 +171,14 @@ func (testDaytonaProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any 
 	}
 }
 func (testDaytonaProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	if cfg.Provider == "daytona" {
+		if flagWasSet(fs, "class") {
+			return exit(2, "--class is not supported for provider=daytona")
+		}
+		if flagWasSet(fs, "type") {
+			return exit(2, "--type is not supported for provider=daytona")
+		}
+	}
 	v, ok := values.(testDaytonaFlagValues)
 	if !ok {
 		return nil

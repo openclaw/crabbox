@@ -85,6 +85,29 @@ func TestLeaseCreateFlagsApplySelectedProviderFlags(t *testing.T) {
 	}
 }
 
+func TestLeaseCreateFlagsRejectDaytonaResourceNoops(t *testing.T) {
+	defaults := baseConfig()
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "class", args: []string{"--provider", "daytona", "--class", "standard"}},
+		{name: "type", args: []string{"--provider", "daytona", "--type", "large"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFlagSet("test", io.Discard)
+			values := registerLeaseCreateFlags(fs, defaults)
+			if err := parseFlags(fs, tc.args); err != nil {
+				t.Fatal(err)
+			}
+			cfg := defaults
+			if err := applyLeaseCreateFlags(&cfg, fs, values); err == nil {
+				t.Fatalf("expected %v to be rejected", tc.args)
+			}
+		})
+	}
+}
+
 func TestValidateRequestedCapabilitiesUsesProviderSpec(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "blacksmith-testbox"

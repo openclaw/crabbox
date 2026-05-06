@@ -38,6 +38,14 @@ func RegisterDaytonaProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyDaytonaProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	if cfg.Provider == daytonaProvider {
+		if flagWasSet(fs, "class") {
+			return exit(2, "--class is not supported for provider=daytona; choose CPU, memory, and disk in the Daytona snapshot")
+		}
+		if flagWasSet(fs, "type") {
+			return exit(2, "--type is not supported for provider=daytona; choose CPU, memory, and disk in the Daytona snapshot")
+		}
+	}
 	v, ok := values.(daytonaFlagValues)
 	if !ok {
 		return nil

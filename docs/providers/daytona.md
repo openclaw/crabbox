@@ -30,7 +30,16 @@ crabbox stop --provider daytona blue-lobster
 
 ## Auth
 
-Use an API key:
+Use the Daytona CLI login:
+
+```sh
+daytona login --api-key ...
+```
+
+Crabbox reads the active Daytona CLI profile when no Daytona auth environment
+variables are set.
+
+You can also use explicit environment auth with an API key:
 
 ```sh
 export DAYTONA_API_KEY=...
@@ -44,6 +53,7 @@ export DAYTONA_ORGANIZATION_ID=...
 ```
 
 `DAYTONA_ORGANIZATION_ID` is required with JWT auth.
+Explicit environment or Crabbox config values override the Daytona CLI profile.
 
 ## Config
 

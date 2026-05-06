@@ -13,7 +13,16 @@ requested.
 
 ## Auth
 
-Set one of:
+Run Daytona's CLI login:
+
+```sh
+daytona login --api-key ...
+```
+
+Crabbox uses the active Daytona CLI profile when no explicit Daytona auth
+environment variables are set.
+
+Alternatively, set one of:
 
 ```sh
 export DAYTONA_API_KEY=...
@@ -28,6 +37,7 @@ export DAYTONA_ORGANIZATION_ID=...
 
 `DAYTONA_ORGANIZATION_ID` is required when JWT auth is used. `DAYTONA_API_URL`
 or `daytona.apiUrl` can override the default `https://app.daytona.io/api`.
+Explicit environment or Crabbox config values override the Daytona CLI profile.
 
 ## Config
 

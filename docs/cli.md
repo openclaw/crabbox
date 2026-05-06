@@ -295,7 +295,9 @@ With `provider: blacksmith-testbox`, Crabbox delegates machine setup, sync, and 
 With `provider: daytona`, Crabbox creates Daytona sandboxes from
 `daytona.snapshot`, uploads workspaces through Daytona toolbox file APIs, and
 runs commands through Daytona toolbox process APIs. `crabbox ssh` mints
-short-lived Daytona SSH tokens and redacts those tokens from output. With
+short-lived Daytona SSH tokens and redacts those tokens from output. Daytona
+auth can come from `DAYTONA_API_KEY` / `DAYTONA_JWT_TOKEN` env or an
+authenticated Daytona CLI profile created by `daytona login --api-key`. With
 `provider: islo`, Crabbox delegates sandbox setup and command execution to the
 Islo Go SDK; sync is delegated and `--sync-only`, `--checksum`, and
 `--force-sync-large` are unsupported.
