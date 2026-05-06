@@ -47,6 +47,12 @@ func (b *semaphoreBackend) Acquire(ctx context.Context, req core.AcquireRequest)
 		return core.LeaseTarget{}, err
 	}
 
+	// Best-effort cleanup if anything fails after job creation
+	cleanup := func() {
+		fmt.Fprintf(b.rt.Stderr, "cleaning up job %s after failed acquisition\n", jobID)
+		_ = b.client.StopJob(context.Background(), jobID)
+	}
+
 	leaseID := "sem_" + jobID
 	slug := core.NewLeaseSlug(leaseID)
 	fmt.Fprintf(b.rt.Stderr, "created job=%s lease=%s slug=%s\n", jobID, leaseID, slug)
@@ -58,17 +64,20 @@ func (b *semaphoreBackend) Acquire(ctx context.Context, req core.AcquireRequest)
 	})
 	fmt.Fprintln(b.rt.Stderr)
 	if err != nil {
+		cleanup()
 		return core.LeaseTarget{}, err
 	}
 
 	// 3. Get SSH key and write to file (crabbox expects a file path)
 	sshKey, err := b.client.GetSSHKey(ctx, jobID)
 	if err != nil {
+		cleanup()
 		return core.LeaseTarget{}, err
 	}
 
 	keyPath, err := storeSSHKey(leaseID, sshKey)
 	if err != nil {
+		cleanup()
 		return core.LeaseTarget{}, fmt.Errorf("store SSH key: %w", err)
 	}
 
