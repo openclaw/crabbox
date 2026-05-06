@@ -1,4 +1,3 @@
-// Install: copy to internal/providers/semaphore/api.go
 package semaphore
 
 import (
@@ -8,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -63,8 +61,6 @@ func (c *apiClient) CreateJob(ctx context.Context, project, machine, osImage str
 			"commands": []string{keepalive},
 		},
 	}
-
-	fmt.Fprintf(os.Stderr, "DEBUG: CreateJob url=https://%s/api/v1alpha/jobs project_id=%s\n", c.host, projectID)
 
 	var result struct {
 		Metadata struct {
@@ -248,8 +244,6 @@ func (c *apiClient) post(ctx context.Context, path string, payload any, target a
 	req.Header.Set("Authorization", "Token "+c.token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "crabbox-semaphore-provider")
-	fmt.Fprintf(os.Stderr, "DEBUG POST: %s transport=%T content-length=%d\n", req.URL, c.http.Transport, req.ContentLength)
-
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
