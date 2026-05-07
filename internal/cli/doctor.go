@@ -9,7 +9,7 @@ import (
 
 func (a App) doctor(ctx context.Context, args []string) error {
 	fs := newFlagSet("doctor", a.Stderr)
-	provider := fs.String("provider", defaultConfig().Provider, "provider: hetzner, aws, or ssh")
+	provider := fs.String("provider", defaultConfig().Provider, "provider: hetzner, aws, azure, or ssh")
 	id := fs.String("id", "", "remote lease id to inspect")
 	targetFlags := registerTargetFlags(fs, defaultConfig())
 	if err := parseFlags(fs, args); err != nil {
@@ -137,6 +137,20 @@ func (a App) doctor(ctx context.Context, args []string) error {
 			ok = false
 		} else {
 			fmt.Fprintf(a.Stdout, "ok      aws      crabbox_servers=%d region=%s default_type=%s\n", len(servers), cfg.AWSRegion, cfg.ServerType)
+		}
+	case "azure":
+		client, err := NewAzureClient(ctx, cfg)
+		if err != nil {
+			fmt.Fprintf(a.Stdout, "failed  azure    %v\n", err)
+			ok = false
+			break
+		}
+		servers, err := client.ListCrabboxServers(ctx)
+		if err != nil {
+			fmt.Fprintf(a.Stdout, "failed  azure    %v\n", err)
+			ok = false
+		} else {
+			fmt.Fprintf(a.Stdout, "ok      azure    crabbox_servers=%d location=%s default_type=%s\n", len(servers), cfg.AzureLocation, cfg.ServerType)
 		}
 	default:
 		client, err := newHetznerClient()

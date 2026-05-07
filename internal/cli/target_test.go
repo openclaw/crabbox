@@ -51,6 +51,43 @@ func TestValidateProviderTargetAllowsAWSNativeWindows(t *testing.T) {
 	}
 }
 
+func TestValidateProviderTargetAllowsAzureNativeWindowsOnly(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "azure"
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	if err := validateProviderTarget(cfg); err != nil {
+		t.Fatalf("native err=%v", err)
+	}
+
+	cfg.WindowsMode = windowsModeWSL2
+	err := validateProviderTarget(cfg)
+	if err == nil || !strings.Contains(err.Error(), "native Windows only") {
+		t.Fatalf("wsl2 err=%v", err)
+	}
+}
+
+func TestValidateRequestedCapabilitiesRejectsAzureWindowsDesktop(t *testing.T) {
+	for name, mutate := range map[string]func(*Config){
+		"desktop":   func(cfg *Config) { cfg.Desktop = true },
+		"browser":   func(cfg *Config) { cfg.Browser = true },
+		"code":      func(cfg *Config) { cfg.Code = true },
+		"tailscale": func(cfg *Config) { cfg.Tailscale.Enabled = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = "azure"
+			cfg.TargetOS = targetWindows
+			cfg.WindowsMode = windowsModeNormal
+			mutate(&cfg)
+			err := validateRequestedCapabilities(cfg)
+			if err == nil || !strings.Contains(err.Error(), "SSH, sync, and run") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
 func TestValidateProviderTargetAllowsStaticNonLinux(t *testing.T) {
 	for _, target := range []string{targetMacOS, targetWindows} {
 		cfg := baseConfig()

@@ -71,7 +71,7 @@ the exit code.
 ## Flags
 
 ```text
---provider hetzner|aws|ssh   provider to validate
+--provider hetzner|aws|azure|ssh   provider to validate
 --target linux|macos|windows target OS for ssh provider checks
 --windows-mode normal|wsl2   when target=windows
 --static-host <host>         static SSH host

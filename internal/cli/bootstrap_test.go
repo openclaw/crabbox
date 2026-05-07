@@ -182,6 +182,7 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 		"OpenSSH-Win64.zip",
 		"install-sshd.ps1",
 		"administrators_authorized_keys",
+		"Match Group administrators",
 		"$sshPorts = @('2222', '22')",
 		"sshd_config",
 		"Port $port",

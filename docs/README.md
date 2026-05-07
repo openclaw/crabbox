@@ -13,13 +13,13 @@ A `crabbox run` command leases a brokered cloud machine or reuses a static SSH h
 ```text
 your laptop                Cloudflare Worker            cloud provider
 -------------              ------------------           --------------
-crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS EC2
+crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS EC2 / Azure
    |                         lease + cost state              |
    |                                                         |
    +------------ SSH + rsync to leased runner <--------------+
 ```
 
-The CLI is a Go binary. The broker is a Cloudflare Worker plus a single Durable Object. Brokered Linux runners are vanilla Ubuntu boxes prepared by cloud-init with SSH, Git, rsync, curl, jq, and `/work/crabbox`; AWS can also broker managed Windows and EC2 Mac desktop targets. Static hosts are existing SSH machines selected with `provider: ssh`. Project runtimes come from Actions hydration or repo-owned setup. Runners hold no broker credentials - they are leaf nodes.
+The CLI is a Go binary. The broker is a Cloudflare Worker plus a single Durable Object. Brokered Linux runners are vanilla Ubuntu boxes prepared by cloud-init with SSH, Git, rsync, curl, jq, and `/work/crabbox`; AWS can also broker managed Windows/WSL2 and EC2 Mac desktop targets, while Azure can broker native Windows SSH/sync/run targets. Static hosts are existing SSH machines selected with `provider: ssh`. Project runtimes come from Actions hydration or repo-owned setup. Runners hold no broker credentials - they are leaf nodes.
 
 ## A run, end to end
 

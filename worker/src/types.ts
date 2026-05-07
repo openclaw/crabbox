@@ -16,6 +16,17 @@ export interface Env {
   CRABBOX_CAPACITY_AVAILABILITY_ZONES?: string;
   CRABBOX_CAPACITY_HINTS?: string;
   CRABBOX_CAPACITY_LARGE_CLASSES?: string;
+  AZURE_TENANT_ID?: string;
+  AZURE_CLIENT_ID?: string;
+  AZURE_CLIENT_SECRET?: string;
+  AZURE_SUBSCRIPTION_ID?: string;
+  CRABBOX_AZURE_LOCATION?: string;
+  CRABBOX_AZURE_RESOURCE_GROUP?: string;
+  CRABBOX_AZURE_IMAGE?: string;
+  CRABBOX_AZURE_VNET?: string;
+  CRABBOX_AZURE_SUBNET?: string;
+  CRABBOX_AZURE_NSG?: string;
+  CRABBOX_AZURE_SSH_CIDRS?: string;
   CRABBOX_SHARED_TOKEN?: string;
   CRABBOX_ADMIN_TOKEN?: string;
   CRABBOX_SESSION_SECRET?: string;
@@ -74,6 +85,8 @@ export interface LeaseRequest {
   awsRootGB?: number;
   awsSSHCIDRs?: string[];
   awsMacHostID?: string;
+  azureLocation?: string;
+  azureImage?: string;
   capacity?: {
     market?: "spot" | "on-demand";
     strategy?: "most-available" | "price-capacity-optimized" | "capacity-optimized" | "sequential";
@@ -93,7 +106,7 @@ export interface LeaseRequest {
   sshPublicKey?: string;
 }
 
-export type Provider = "hetzner" | "aws";
+export type Provider = "hetzner" | "aws" | "azure";
 export type TargetOS = "linux" | "macos" | "windows";
 export type WindowsMode = "normal" | "wsl2";
 

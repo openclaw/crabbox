@@ -2,20 +2,22 @@
 
 Read when:
 
-- changing Hetzner, AWS, or Blacksmith Testbox provisioning;
+- changing Hetzner, AWS, Azure, or Blacksmith Testbox provisioning;
 - adding a backend;
 - adjusting machine classes, fallback order, regions, or images.
 
-Crabbox currently supports two brokered providers:
+Crabbox currently supports three brokered providers:
 
 ```text
 hetzner     Hetzner Cloud servers
 aws         AWS EC2 instances
+azure       Azure Virtual Machines
 ```
 
 Brokered Hetzner leases are Linux targets. Brokered AWS supports Linux, native
-Windows Server, and EC2 Mac when a Dedicated Host is configured. Static SSH
-still exists for reusing existing macOS and Windows machines:
+Windows Server, Windows WSL2, and EC2 Mac when a Dedicated Host is configured.
+Brokered Azure supports Linux and native Windows SSH/sync/run. Static SSH still
+exists for reusing existing macOS and Windows machines:
 
 ```text
 ssh         Existing SSH host selected by static.host
@@ -32,6 +34,7 @@ islo       Islo sandboxes with delegated command execution
 
 - [Provider reference](../providers/README.md): one page per built-in backend.
 - [AWS](../providers/aws.md): EC2 Linux, Windows, WSL2, EC2 Mac, capacity, AMIs, and security groups.
+- [Azure](../providers/azure.md): Azure Linux/native Windows, shared infra, capacity, and cleanup.
 - [Hetzner](../providers/hetzner.md): Linux-only managed provider behavior, classes, and cleanup.
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [Blacksmith Testbox](../providers/blacksmith-testbox.md): delegated Testbox backend behavior.

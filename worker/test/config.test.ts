@@ -5,6 +5,9 @@ import { describe, expect, it } from "vitest";
 import {
   awsInstanceTypeCandidatesForClass,
   awsInstanceTypeCandidatesForTargetClass,
+  azureWindowsVMSizeCandidatesForClass,
+  azureVMSizeCandidatesForClass,
+  azureVMSizeCandidatesForTargetClass,
   leaseConfig,
   serverTypeCandidatesForClass,
   serverTypeForClass,
@@ -44,6 +47,29 @@ describe("machine class config", () => {
     ]);
   });
 
+  it("maps known classes to preferred Azure candidates", () => {
+    expect(serverTypeForProviderClass("azure", "standard")).toBe("Standard_D32ads_v6");
+    expect(azureVMSizeCandidatesForClass("standard")).toEqual([
+      "Standard_D32ads_v6",
+      "Standard_D32ds_v6",
+      "Standard_F32s_v2",
+      "Standard_D32ads_v5",
+      "Standard_D32ds_v5",
+      "Standard_D16ads_v6",
+      "Standard_D16ds_v6",
+      "Standard_F16s_v2",
+    ]);
+    expect(azureVMSizeCandidatesForTargetClass("linux", "standard")).toEqual(
+      azureVMSizeCandidatesForClass("standard"),
+    );
+    expect(azureVMSizeCandidatesForTargetClass("windows", "standard")).toEqual(
+      azureWindowsVMSizeCandidatesForClass("standard"),
+    );
+    expect(azureVMSizeCandidatesForTargetClass("windows", "standard", "wsl2")).toEqual([
+      "standard",
+    ]);
+  });
+
   it("maps AWS Windows and macOS classes to compatible families", () => {
     expect(awsInstanceTypeCandidatesForTargetClass("windows", "standard")).toEqual([
       "m7i.large",
@@ -55,10 +81,17 @@ describe("machine class config", () => {
 
   it("matches the Go CLI machine class tables", () => {
     const go = readFileSync(new URL("../../internal/cli/config.go", import.meta.url), "utf8");
+    const goAzure = readFileSync(new URL("../../internal/cli/azure.go", import.meta.url), "utf8");
     const classes = ["standard", "fast", "large", "beast"];
     const hetzner = parseGoStringArrayCases(goFunctionBody(go, "serverTypeCandidatesForClass"));
     const awsLinux = parseGoStringArrayCases(
       goFunctionBody(go, "awsInstanceTypeCandidatesForClass"),
+    );
+    const azureLinux = parseGoStringArrayCases(
+      goFunctionBody(goAzure, "azureVMSizeCandidatesForClass"),
+    );
+    const azureWindows = parseGoStringArrayCases(
+      goFunctionBody(goAzure, "azureWindowsVMSizeCandidatesForClass"),
     );
     const awsTarget = goFunctionBody(go, "awsInstanceTypeCandidatesForTargetModeClass");
     const awsWSL2 = parseGoStringArrayCases(
@@ -69,6 +102,9 @@ describe("machine class config", () => {
     for (const name of classes) {
       expect(serverTypeCandidatesForClass(name)).toEqual(hetzner[name]);
       expect(awsInstanceTypeCandidatesForClass(name)).toEqual(awsLinux[name]);
+      expect(azureVMSizeCandidatesForClass(name)).toEqual(azureLinux[name]);
+      expect(azureWindowsVMSizeCandidatesForClass(name)).toEqual(azureWindows[name]);
+      expect(azureVMSizeCandidatesForTargetClass("windows", name)).toEqual(azureWindows[name]);
       expect(awsInstanceTypeCandidatesForTargetClass("windows", name)).toEqual(awsWindows[name]);
       expect(awsInstanceTypeCandidatesForTargetClass("windows", name, "wsl2")).toEqual(
         awsWSL2[name],
@@ -201,6 +237,48 @@ describe("lease config", () => {
     expect(config.serverType).toBe("c7a.48xlarge");
     expect(config.serverTypeExplicit).toBe(false);
     expect(config.awsRegion).toBe("eu-west-1");
+  });
+
+  it("uses Azure defaults when requested", () => {
+    const config = leaseConfig({
+      provider: "azure",
+      azureLocation: "eastus",
+      azureImage: "Canonical:offer:sku:latest",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(config.serverType).toBe("Standard_D192ds_v6");
+    expect(config.azureLocation).toBe("eastus");
+    expect(config.azureImage).toBe("Canonical:offer:sku:latest");
+  });
+
+  it("allows Azure native Windows leases", () => {
+    const config = leaseConfig({
+      provider: "azure",
+      target: "windows",
+      sshPublicKey: "ssh-rsa test",
+    });
+    expect(config.serverType).toBe("Standard_D16ads_v6");
+    expect(config.workRoot).toBe("C:\\crabbox");
+    expect(config.windowsMode).toBe("normal");
+    expect(config.sshUser).toBe("crabbox");
+    expect(() =>
+      leaseConfig({
+        provider: "azure",
+        target: "windows",
+        windowsMode: "wsl2",
+        sshPublicKey: "ssh-rsa test",
+      }),
+    ).toThrow("native Windows only");
+    for (const capability of ["desktop", "browser", "code", "tailscale"] as const) {
+      expect(() =>
+        leaseConfig({
+          provider: "azure",
+          target: "windows",
+          [capability]: true,
+          sshPublicKey: "ssh-rsa test",
+        }),
+      ).toThrow("SSH, sync, and run");
+    }
   });
 
   it("records linux target defaults and rejects unsupported brokered non-linux targets", () => {

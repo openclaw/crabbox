@@ -10,7 +10,7 @@ import (
 func (a App) inspect(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("inspect", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or ssh")
+	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	targetFlags := registerTargetFlags(fs, defaults)

@@ -25,16 +25,16 @@ Primary output goes to stdout. Progress, diagnostics, and errors go to stderr. J
 
 ```text
 crabbox doctor
-crabbox login [--url <url>] [--provider hetzner|aws] [--no-browser]
-crabbox login --url <url> --token-stdin [--provider hetzner|aws]
+crabbox login [--url <url>] [--provider hetzner|aws|azure] [--no-browser]
+crabbox login --url <url> --token-stdin [--provider hetzner|aws|azure]
 crabbox logout
 crabbox whoami [--json]
 crabbox init [--force]
 crabbox config show [--json]
 crabbox config path
-crabbox config set-broker --url <url> --token-stdin [--provider hetzner|aws]
-crabbox warmup [--provider hetzner|aws|ssh|blacksmith-testbox|daytona|islo] [--target linux|macos|windows] [--desktop] [--browser] [--code] [--tailscale] [--network auto|tailscale|public] [--profile <name>] [--idle-timeout <duration>] [--timing-json]
-crabbox run [--id <lease-id-or-slug>] [--provider hetzner|aws|ssh|blacksmith-testbox|daytona|islo] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--code] [--tailscale] [--network auto|tailscale|public] [--shell] [--checksum] [--debug] [--force-sync-large] [--timing-json] [--blacksmith-workflow <workflow>] -- <command...>
+crabbox config set-broker --url <url> --token-stdin [--provider hetzner|aws|azure]
+crabbox warmup [--provider hetzner|aws|azure|ssh|blacksmith-testbox|daytona|islo] [--target linux|macos|windows] [--desktop] [--browser] [--code] [--tailscale] [--network auto|tailscale|public] [--profile <name>] [--idle-timeout <duration>] [--timing-json]
+crabbox run [--id <lease-id-or-slug>] [--provider hetzner|aws|azure|ssh|blacksmith-testbox|daytona|islo] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--code] [--tailscale] [--network auto|tailscale|public] [--shell] [--checksum] [--debug] [--force-sync-large] [--timing-json] [--blacksmith-workflow <workflow>] -- <command...>
 crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] [--egress <profile>] [--webvnc] [--open] [-- <command...>]
 crabbox desktop doctor --id <lease-id-or-slug> [--network auto|tailscale|public]
 crabbox desktop click --id <lease-id-or-slug> --x <n> --y <n> [--network auto|tailscale|public]

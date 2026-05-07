@@ -9,6 +9,7 @@ crabbox warmup --browser
 crabbox warmup --tailscale
 crabbox warmup --desktop --browser
 crabbox warmup --provider aws --target windows --desktop
+crabbox warmup --provider azure --target windows
 crabbox warmup --provider aws --target macos --desktop --market on-demand --type mac2.metal
 crabbox warmup --actions-runner
 crabbox warmup --provider blacksmith-testbox --blacksmith-workflow .github/workflows/ci-check-testbox.yml --blacksmith-job test
@@ -41,8 +42,10 @@ the updated PATH.
 
 With `--provider hetzner`, managed provisioning supports Linux only. Hetzner can
 run Windows through ISO/snapshot installation flows, but Crabbox does not manage
-that path today. Use `--provider aws --target windows` for managed Windows, or
-`--provider ssh --target windows` for an existing Hetzner Windows host.
+that path today. Use `--provider aws --target windows` for managed Windows
+desktop or WSL2, `--provider azure --target windows` for native Windows
+SSH/sync/run, or `--provider ssh --target windows` for an existing Hetzner
+Windows host.
 
 With `--provider aws --target windows --windows-mode normal --desktop`, Crabbox
 creates a real AWS Windows Server lease. EC2Launch user data installs OpenSSH
@@ -57,6 +60,11 @@ imports an Ubuntu rootfs, and prepares the Linux-side `crabbox-ready` toolchain.
 The AWS launch enables nested virtualization and uses C8i, M8i, or R8i instance
 families for this mode. Commands and sync then use the POSIX WSL contract.
 
+With `--provider azure --target windows`, Crabbox creates a native Windows
+Server lease, uses the Azure VM Agent Custom Script Extension to install
+OpenSSH Server and Git for Windows, and configures the `crabbox` user for
+SSH/sync/run. Azure Windows does not provision VNC/browser/WSL2.
+
 With `--provider aws --target macos --desktop`, Crabbox launches an EC2 Mac
 instance on an already allocated Dedicated Host. Set `CRABBOX_AWS_MAC_HOST_ID`
 or `aws.macHostId`, use `--market on-demand`, and expect EC2 Mac host lifecycle
@@ -69,7 +77,7 @@ On success, `warmup` prints a concise total duration line. Add `--timing-json` t
 Flags:
 
 ```text
---provider hetzner|aws|ssh|blacksmith-testbox|daytona|islo
+--provider hetzner|aws|azure|ssh|blacksmith-testbox|daytona|islo
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>

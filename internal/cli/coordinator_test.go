@@ -379,6 +379,8 @@ func TestCoordinatorLeaseWatchCancelsWhenLeaseReleased(t *testing.T) {
 func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	var body struct {
 		AWSSSHCIDRs        []string `json:"awsSSHCIDRs"`
+		AzureLocation      string   `json:"azureLocation"`
+		AzureImage         string   `json:"azureImage"`
 		SSHFallbackPorts   []string `json:"sshFallbackPorts"`
 		ServerTypeExplicit bool     `json:"serverTypeExplicit"`
 		Capacity           map[string]any
@@ -401,6 +403,8 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 		ServerType:         "t3.small",
 		ServerTypeExplicit: true,
 		AWSSSHCIDRs:        []string{"198.51.100.7/32"},
+		AzureLocation:      "eastus",
+		AzureImage:         "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest",
 		SSHFallbackPorts:   []string{"22", "2022"},
 		Capacity: CapacityConfig{
 			Market:   "spot",
@@ -414,6 +418,12 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	}
 	if len(body.AWSSSHCIDRs) != 1 || body.AWSSSHCIDRs[0] != "198.51.100.7/32" {
 		t.Fatalf("awsSSHCIDRs=%v", body.AWSSSHCIDRs)
+	}
+	if body.AzureLocation != "eastus" {
+		t.Fatalf("azureLocation=%q", body.AzureLocation)
+	}
+	if body.AzureImage != "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest" {
+		t.Fatalf("azureImage=%q", body.AzureImage)
 	}
 	if len(body.SSHFallbackPorts) != 2 || body.SSHFallbackPorts[0] != "22" || body.SSHFallbackPorts[1] != "2022" {
 		t.Fatalf("sshFallbackPorts=%v", body.SSHFallbackPorts)

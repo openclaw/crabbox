@@ -47,7 +47,7 @@ error and continue with the next candidate.
 ## Flags
 
 ```text
---provider hetzner|aws        provider to sweep (delegated providers do not need cleanup)
+--provider hetzner|aws|azure  provider to sweep (delegated providers do not need cleanup)
 --target linux|macos|windows  for AWS, restrict by target
 --windows-mode normal|wsl2    when target=windows
 --static-host <host>          ignored (provider=ssh has nothing to sweep)

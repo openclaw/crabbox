@@ -5,7 +5,8 @@ import {
   awsRegionCandidates,
   isRetryableAWSProvisioningError,
 } from "./aws";
-import { leaseConfig, validCIDRs } from "./config";
+import { AzureClient } from "./azure";
+import { azureLocationFor, leaseConfig, validCIDRs } from "./config";
 import { HetznerClient } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth";
@@ -595,6 +596,9 @@ export class FleetDurableObject implements DurableObject {
     if (config.provider === "aws" && !config.awsAMI) {
       config.awsAMI = (await this.promotedAWSImage())?.id ?? "";
     }
+    if (config.provider === "azure" && !config.azureLocation) {
+      config.azureLocation = azureLocationFor(this.env, "");
+    }
     const leaseID = validLeaseID(input.leaseID) ? input.leaseID : newLeaseID();
     const leases = await this.leaseRecords();
     const slug = allocateLeaseSlug(
@@ -716,6 +720,9 @@ export class FleetDurableObject implements DurableObject {
       if (hints.length > 0) {
         record.capacityHints = hints;
       }
+    }
+    if (config.provider === "azure") {
+      record.region = config.azureLocation;
     }
     await this.putLease(record);
     await this.scheduleAlarm();
@@ -1996,12 +2003,13 @@ export class FleetDurableObject implements DurableObject {
         ? await this.provider("aws").listCrabboxServers()
         : provider === "hetzner"
           ? await this.provider("hetzner").listCrabboxServers()
-          : [
-              ...(await this.provider("hetzner").listCrabboxServers()),
-              ...(await this.provider("aws")
-                .listCrabboxServers()
-                .catch(() => [])),
-            ];
+          : provider === "azure"
+            ? await this.provider("azure").listCrabboxServers()
+            : [
+                ...(await this.provider("hetzner").listCrabboxServers()),
+                ...(await this.listProviderMachinesSafe("aws")),
+                ...(await this.listProviderMachinesSafe("azure")),
+              ];
     return json({ machines });
   }
 
@@ -2632,6 +2640,14 @@ export class FleetDurableObject implements DurableObject {
     return event;
   }
 
+  private async listProviderMachinesSafe(provider: Provider): Promise<ProviderMachine[]> {
+    try {
+      return await this.provider(provider).listCrabboxServers();
+    } catch {
+      return [];
+    }
+  }
+
   private provider(provider: Provider, region = "eu-west-1"): CloudProvider {
     const testProvider = this.testProviders[provider];
     if (testProvider) {
@@ -2639,6 +2655,9 @@ export class FleetDurableObject implements DurableObject {
     }
     if (provider === "aws") {
       return new AWSProvider(this.env, region || this.env.CRABBOX_AWS_REGION || "eu-west-1");
+    }
+    if (provider === "azure") {
+      return new AzureProvider(this.env);
     }
     return new HetznerProvider(this.env);
   }
@@ -2649,6 +2668,10 @@ export class FleetDurableObject implements DurableObject {
       if (validCrabboxProviderKey(lease.providerKey)) {
         await this.provider("aws", lease.region).deleteSSHKey(lease.providerKey);
       }
+      return;
+    }
+    if (lease.provider === "azure") {
+      await this.provider("azure").deleteServer(lease.cloudID);
       return;
     }
     await this.provider("hetzner").deleteServer(String(lease.serverID));
@@ -3392,7 +3415,7 @@ function boundedRunEvent(
   if (input.slug) {
     event.slug = truncateString(input.slug, 128);
   }
-  if (input.provider === "aws" || input.provider === "hetzner") {
+  if (input.provider === "aws" || input.provider === "hetzner" || input.provider === "azure") {
     event.provider = input.provider;
   }
   if (input.target === "linux" || input.target === "macos" || input.target === "windows") {
@@ -3983,6 +4006,52 @@ class HetznerProvider implements CloudProvider {
     config: ReturnType<typeof leaseConfig>,
   ): Promise<number | undefined> {
     return this.client.hourlyPriceUSD(serverType, config.location);
+  }
+}
+
+class AzureProvider implements CloudProvider {
+  private readonly client: AzureClient;
+
+  constructor(env: Env) {
+    this.client = new AzureClient(env);
+  }
+
+  listCrabboxServers(): Promise<ProviderMachine[]> {
+    return this.client.listCrabboxServers();
+  }
+
+  createServerWithFallback(
+    config: ReturnType<typeof leaseConfig>,
+    leaseID: string,
+    slug: string,
+    owner: string,
+  ): Promise<{
+    server: ProviderMachine;
+    serverType: string;
+    market?: string;
+    attempts?: ProvisioningAttempt[];
+  }> {
+    return this.client.createServerWithFallback(config, leaseID, slug, owner);
+  }
+
+  deleteServer(id: string): Promise<void> {
+    return this.client.deleteServer(id);
+  }
+
+  createImage(): Promise<ProviderImage> {
+    throw new Error("azure images are not supported");
+  }
+
+  getImage(): Promise<ProviderImage> {
+    throw new Error("azure images are not supported");
+  }
+
+  async deleteSSHKey(): Promise<void> {
+    // Azure stores the SSH public key inline on the VM; nothing to clean up.
+  }
+
+  hourlyPriceUSD(): Promise<number | undefined> {
+    return Promise.resolve(undefined);
   }
 }
 

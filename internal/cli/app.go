@@ -201,11 +201,11 @@ Global:
   --version      Print version
 
 Config:
-  crabbox login [--url <url>] [--provider aws|hetzner] [--no-browser]
-  crabbox login --url <url> --token-stdin [--provider aws|hetzner]
+  crabbox login [--url <url>] [--provider aws|azure|hetzner] [--no-browser]
+  crabbox login --url <url> --token-stdin [--provider aws|azure|hetzner]
   crabbox config path
   crabbox config show [--json]
-  crabbox config set-broker --url <url> --token-stdin [--provider aws|hetzner]
+  crabbox config set-broker --url <url> --token-stdin [--provider aws|azure|hetzner]
 
 Environment:
   CRABBOX_COORDINATOR          Broker URL
@@ -215,7 +215,7 @@ Environment:
   CRABBOX_ACCESS_CLIENT_ID     Cloudflare Access service token client ID
   CRABBOX_ACCESS_CLIENT_SECRET Cloudflare Access service token client secret
   CRABBOX_ACCESS_TOKEN         Cloudflare Access JWT for protected routes
-  CRABBOX_PROVIDER             hetzner, aws, ssh, blacksmith-testbox, daytona, or islo
+  CRABBOX_PROVIDER             hetzner, aws, azure, ssh, blacksmith-testbox, daytona, or islo
   CRABBOX_TARGET               linux, macos, or windows
   CRABBOX_WINDOWS_MODE         normal or wsl2
   CRABBOX_DESKTOP              Provision or require desktop/VNC capability

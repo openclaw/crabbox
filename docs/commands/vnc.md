@@ -233,7 +233,7 @@ make sure the Dedicated Host is allocated in the selected AWS region.
 
 ```text
 --id <lease-id-or-slug>
---provider hetzner|aws|ssh
+--provider hetzner|aws|azure|ssh|daytona
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>

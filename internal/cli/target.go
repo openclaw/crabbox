@@ -115,7 +115,7 @@ func validateProviderTarget(cfg Config) error {
 		return err
 	}
 	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
-		return exit(2, "%s", unsupportedManagedTargetMessage(provider.Name(), cfg.TargetOS))
+		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
 	if cfg.Provider == "aws" && cfg.TargetOS == targetMacOS {
 		if cfg.AWSMacHostID == "" && cfg.Coordinator == "" {
@@ -143,6 +143,20 @@ func providerSpecSupportsTarget(spec ProviderSpec, targetOS, windowsMode string)
 }
 
 func unsupportedManagedTargetMessage(provider, target string) string {
+	return unsupportedManagedTargetMessageForConfig(provider, Config{TargetOS: target, WindowsMode: windowsModeNormal})
+}
+
+func unsupportedManagedTargetMessageForConfig(provider string, cfg Config) string {
+	target := cfg.TargetOS
+	if provider == "azure" && target == targetWindows && cfg.WindowsMode == windowsModeWSL2 {
+		return "provider=azure supports native Windows only; use provider=aws for managed Windows WSL2 or provider=ssh for existing Windows WSL2 hosts"
+	}
+	if provider == "azure" {
+		if target == targetMacOS {
+			return "provider=azure managed provisioning supports target=linux and native Windows only; use provider=aws with an EC2 Mac Dedicated Host or provider=ssh for existing macOS hosts"
+		}
+		return "provider=azure managed provisioning supports target=linux and native Windows only"
+	}
 	switch target {
 	case targetWindows:
 		return sprintf("provider=%s managed provisioning supports target=linux only; use provider=aws for managed Windows or provider=ssh for existing Windows hosts", provider)

@@ -57,7 +57,7 @@ func EnsureTestboxKey(leaseID string) (string, string, error) {
 }
 
 func ensureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {
-	if cfg.Provider == "aws" && cfg.TargetOS == targetWindows {
+	if (cfg.Provider == "aws" || cfg.Provider == "azure") && cfg.TargetOS == targetWindows {
 		return ensureTestboxKeyWithType(leaseID, "rsa")
 	}
 	return ensureTestboxKey(leaseID)

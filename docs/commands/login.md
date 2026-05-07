@@ -27,7 +27,7 @@ Flags:
 
 ```text
 --url <url>                 broker URL
---provider hetzner|aws      default provider to store with the broker
+--provider hetzner|aws|azure      default provider to store with the broker
 --no-browser                print the GitHub login URL instead of opening it
 --token-stdin               read broker token from stdin for operator automation
 --json                      print JSON

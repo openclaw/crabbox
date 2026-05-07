@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { awsUserData, cloudInit, windowsBootstrapPowerShell } from "../src/bootstrap";
+import {
+  awsUserData,
+  azureWindowsBootstrapPowerShell,
+  cloudInit,
+  windowsBootstrapPowerShell,
+} from "../src/bootstrap";
 import type { LeaseConfig } from "../src/config";
 
 const config: LeaseConfig = {
@@ -191,6 +196,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("OpenSSH-Win64.zip");
     expect(got).toContain("install-sshd.ps1");
     expect(got).toContain("administrators_authorized_keys");
+    expect(got).toContain("Match Group administrators");
     expect(got).toContain("$sshPorts = @('2222', '22')");
     expect(got).toContain("sshd_config");
     expect(got).toContain("Port $port");
@@ -209,6 +215,27 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("C:\\ProgramData\\crabbox\\windows.username");
     expect(got).toContain("AutoAdminLogon");
     expect(got).toContain("Restart-Computer -Force");
+  });
+
+  it("builds Azure Windows extension bootstrap without restart", () => {
+    const input = {
+      ...config,
+      provider: "azure",
+      target: "windows",
+      workRoot: "C:\\crabbox",
+      sshPublicKey: "ssh-rsa test",
+    } as const;
+    const got = azureWindowsBootstrapPowerShell(input);
+    expect(got).toContain("OpenSSH-Win64.zip");
+    expect(got).toContain("Git-2.52.0-64-bit.exe");
+    expect(got).toContain("administrators_authorized_keys");
+    expect(got).toContain("Match Group administrators");
+    expect(got).toContain("$sshPorts = @('2222', '22')");
+    expect(got).toContain("PasswordAuthentication no");
+    expect(got).toContain("Restart-Service sshd -Force");
+    expect(got).toContain("Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath");
+    expect(got).not.toContain("Restart-Computer");
+    expect(got).not.toContain("tightvnc");
   });
 
   it("builds macOS user data for managed screen sharing", () => {

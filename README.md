@@ -12,7 +12,7 @@ Crabbox is an open-source remote testbox runner for maintainers and AI agents. L
 crabbox run -- pnpm test
 ```
 
-Behind that single command: a Go CLI on your laptop, a Cloudflare Worker broker that owns provider credentials and lease state, and a managed runner on Hetzner Cloud or AWS EC2. Crabbox can also wrap Blacksmith Testboxes when you choose `provider: blacksmith-testbox`, use Daytona or Islo sandboxes for direct-provider workflows, or use `provider: ssh` for existing macOS and Windows targets.
+Behind that single command: a Go CLI on your laptop, a Cloudflare Worker broker that owns provider credentials and lease state, and a managed runner on Hetzner Cloud, AWS EC2, or Azure. Azure supports managed Linux and native Windows VMs. Crabbox can also wrap Blacksmith Testboxes when you choose `provider: blacksmith-testbox`, use Daytona or Islo sandboxes for direct-provider workflows, or use `provider: ssh` for existing macOS and Windows targets.
 
 ---
 
@@ -53,7 +53,7 @@ Every lease has a stable `cbx_...` ID and a friendly crustacean slug (`blue-lobs
 ```text
 your laptop                Cloudflare Worker            cloud provider
 -------------              ------------------           --------------
-crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS EC2
+crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS EC2 / Azure
    |                         lease + cost state              |
    |                                                         |
    +------------ SSH + rsync to leased runner <--------------+
@@ -61,9 +61,9 @@ crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS EC2
 
 - **CLI** — Go binary. Loads config, mints a per-lease SSH key, asks the broker for a lease, waits for SSH, seeds remote Git, rsyncs the dirty checkout (with fingerprint skip when nothing changed), runs the command, streams output, releases.
 - **Broker** — Cloudflare Worker at `crabbox.openclaw.ai` plus a single Durable Object. Owns provider credentials, serializes lease state, enforces active-lease and monthly spend caps, and expires stale leases by alarm. Auth is GitHub login or a shared bearer token.
-- **Runner** — vanilla Ubuntu prepared by cloud-init with SSH on the primary port, default `2222`, plus configured fallback ports, Git, rsync, curl, jq, and `/work/crabbox`. No broker credentials live on the box. Project runtimes (Go, Node, Docker, services, secrets) come from your repo's GitHub Actions hydration, devcontainer, Nix, mise/asdf, or setup scripts — not from Crabbox.
+- **Runner** — a throwaway SSH machine prepared with SSH on the primary port, default `2222`, plus configured fallback ports and Crabbox's sync/run prerequisites. Linux uses Ubuntu with cloud-init and `/work/crabbox`; native Windows uses OpenSSH, Git for Windows, and `C:\crabbox`. No broker credentials live on the box. Project runtimes (Go, Node, Docker, services, secrets) come from your repo's GitHub Actions hydration, devcontainer, Nix, mise/asdf, or setup scripts — not from Crabbox.
 
-A direct-provider mode (`--provider hetzner|aws` with local credentials) exists for debugging the broker itself; the brokered path is the default.
+A direct-provider mode (`--provider hetzner|aws|azure` with local credentials) exists for debugging the broker itself; the brokered path is the default.
 
 For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For the doc-to-code map, see [Source Map](docs/source-map.md).
 
@@ -73,14 +73,15 @@ For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For th
 - **Run observability.** Every coordinator-backed run gets an early `run_...` handle. Use `crabbox attach <run-id>` while it is active, `crabbox events <run-id> --after <seq> --limit <n>` for durable lifecycle/output events, and `crabbox logs <run-id>` for retained output after completion.
 - **Stable timing records.** `--timing-json` on `run`, `warmup`, and `actions hydrate` gives scripts one machine-readable sync/command/total timing schema across AWS, Hetzner, and Blacksmith Testboxes.
 - **Local-first sync.** No clean-checkout requirement. Tracked + nonignored files only, fingerprint skip on no-op runs, sanity checks against suspicious mass deletions, optional shallow base-ref hydration for changed-test workflows.
-- **Brokered cloud.** Maintainers and agents share infra without sharing provider tokens. Hetzner and AWS EC2 are first-class managed providers; AWS also owns managed Windows and EC2 Mac targets. Linux defaults to Spot unless capacity config says otherwise. Providers fall back across compatible instance families when capacity or quota rejects a request.
+- **Brokered cloud.** Maintainers and agents share infra without sharing provider tokens. Hetzner, AWS EC2, and Azure are managed providers; AWS also owns Windows WSL2 and EC2 Mac targets. Linux defaults to Spot unless capacity config says otherwise. Providers fall back across compatible instance families when capacity or quota rejects a request.
+- **Azure Linux and native Windows.** `provider: azure` provisions Linux and native Windows VMs in a configurable Azure subscription using `DefaultAzureCredential` in direct mode or service-principal secrets in the broker. Crabbox creates a shared resource group, vnet, subnet, and NSG on first use, then per-lease public IPs, NICs, and VMs. Linux uses cloud-init; Windows uses VM Agent Custom Script Extension to install OpenSSH/Git and configure the Crabbox user.
 - **macOS and Windows static hosts.** `provider: ssh` reuses existing machines; it does not create macOS or Windows Crabbox boxes. macOS and Windows WSL2 use the POSIX rsync path; native Windows uses PowerShell plus tar archive sync.
 - **Blacksmith Testbox wrapper.** Set `provider: blacksmith-testbox` to delegate warmup/run/list/status/stop to the Blacksmith CLI while Crabbox keeps local slugs, repo claims, timing summaries, config conventions, and portal visibility for active external runners.
 - **Daytona and Islo sandboxes.** Set `provider: daytona` for Daytona SDK/toolbox execution from a snapshot with explicit SSH access when needed, or `provider: islo` for delegated Islo sandbox execution through the Islo Go SDK.
 - **Trusted AWS images.** Operators can create AMIs from active brokered AWS leases and promote a known-good image as the coordinator default.
 - **Cost guardrails.** Per-lease and monthly spend caps. Live pricing from EC2 Spot history or Hetzner server-type prices, with static fallbacks. `crabbox usage` summarizes spend by user, org, provider, and type.
 - **GitHub Actions hydration.** `crabbox actions hydrate` registers a leased box as an ephemeral Actions runner, so the repo's own workflow installs runtimes, services, and secrets. Crabbox does not parse Actions YAML.
-- **Interactive desktop and browser leases.** `--browser` provisions Chrome or Chromium for headless automation, `--desktop` provisions visible UI with tunnel-only VNC takeover on managed Linux, AWS native Windows, and AWS EC2 Mac targets. `crabbox desktop doctor` checks session, VNC, input tooling, browser, ffmpeg, screen size, screenshot capture, and WebVNC portal state; `desktop click/paste/type/key` provide first-class input helpers so agents do not hand-roll brittle `xdotool` snippets. Hetzner Windows is not a managed target; use AWS for managed Windows or `provider: ssh` for an existing Windows host.
+- **Interactive desktop and browser leases.** `--browser` provisions Chrome or Chromium for headless automation, `--desktop` provisions visible UI with tunnel-only VNC takeover on managed Linux, AWS native Windows, and AWS EC2 Mac targets. `crabbox desktop doctor` checks session, VNC, input tooling, browser, ffmpeg, screen size, screenshot capture, and WebVNC portal state; `desktop click/paste/type/key` provide first-class input helpers so agents do not hand-roll brittle `xdotool` snippets. QA systems such as Mantis own scenario logic, screenshots, and PR evidence. Azure native Windows is SSH/sync/run only; use AWS for managed Windows desktop/WSL2 or `provider: ssh` for an existing Windows host.
 - **Authenticated web portal.** Browser login opens owner-scoped and explicitly shared lease/run views with searchable, paginated tables, muted external-runner rows, compact provider/OS/access icons, relative sortable times, recent run logs/events, WebVNC, code-server, and Linux lease/run telemetry charts. `crabbox share` can grant a lease to one user or the owning org, and the lease page exposes the same sharing controls for owners/managers. WebVNC is preferred for human demos because it preloads the VNC password; `webvnc status` reports local daemon, tunnel, target reachability, bridge/viewer state, recent events, URL/password, and native VNC fallback, while `webvnc reset` restarts only the selected lease's WebVNC/input stack. Admin sessions can also see non-owned runner leases behind `mine`/`system` filters.
 - **Hardened coordinator auth.** GitHub browser login, owner-scoped leases, admin-only routes, optional GitHub team allowlists, Cloudflare Access JWT verification, and service-token support keep normal use and operator automation separate.
 - **OpenClaw plugin.** The repo root is a native OpenClaw plugin for box lifecycle operations: `crabbox_run`, `crabbox_warmup`, `crabbox_status`, `crabbox_list`, and `crabbox_stop`. Run inspection stays in the CLI and Crabbox skill.
@@ -112,6 +113,16 @@ AWS WSL2   standard  m8i.large, m8i-flex.large, c8i.large, r8i.large
            beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge
 
 AWS macOS  all       mac2.metal unless --type is set
+
+Azure      standard  Standard_D32ads_v6, Standard_D32ds_v6, Standard_F32s_v2, then 16-vCPU fallbacks
+           fast      Standard_D64ads_v6, Standard_D64ds_v6, Standard_F64s_v2, then 48/32-vCPU fallbacks
+           large     Standard_D96ads_v6, Standard_D96ds_v6, then 64/48-vCPU fallbacks
+           beast     Standard_D192ds_v6, Standard_D128ds_v6, then 96/64-vCPU fallbacks
+
+Azure Win  standard  Standard_D2ads_v6, Standard_D2ds_v6, Standard_D2ads_v5, Standard_D2ds_v5, Standard_D2as_v6
+           fast      Standard_D4ads_v6, Standard_D4ds_v6, Standard_D4ads_v5, Standard_D4ds_v5, Standard_D4as_v6
+           large     Standard_D8ads_v6, Standard_D8ds_v6, Standard_D8ads_v5, Standard_D8ds_v5, Standard_D8as_v6
+           beast     Standard_D16ads_v6, Standard_D16ds_v6, Standard_D16ads_v5, Standard_D16ds_v5, Standard_D8ads_v6
 ```
 
 Override with `--type` or `CRABBOX_SERVER_TYPE` for a specific instance.

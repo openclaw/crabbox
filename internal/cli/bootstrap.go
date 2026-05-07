@@ -102,12 +102,7 @@ tasks:
 `
 }
 
-func windowsBootstrapPowerShell(cfg Config, publicKey string) string {
-	workRoot := cfg.WorkRoot
-	if workRoot == "" {
-		workRoot = `C:\crabbox`
-	}
-	wslMode := cfg.WindowsMode == windowsModeWSL2
+func windowsBootstrapHeaderPowerShell(cfg Config, publicKey, workRoot string) string {
 	return `
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -130,6 +125,108 @@ function New-CrabboxPassword {
 $user = ` + psQuote(cfg.SSHUser) + `
 $publicKey = ` + psQuote(publicKey) + `
 $workRoot = ` + psQuote(workRoot) + `
+$sshPorts = ` + windowsSSHPortsPowerShell(cfg) + `
+$base = "C:\ProgramData\crabbox"
+$setupCompletePath = Join-Path $base "setup-complete"
+$openSSHZip = "$env:TEMP\OpenSSH-Win64.zip"
+$gitInstaller = "$env:TEMP\Git-2.52.0-64-bit.exe"
+New-Item -ItemType Directory -Force -Path $base, $workRoot | Out-Null
+`
+}
+
+func windowsBootstrapCorePowerShell() string {
+	return `
+if (-not (Test-Path -LiteralPath $passwordPath)) {
+  New-CrabboxPassword | Set-Content -NoNewline -Encoding ASCII -Path $passwordPath
+}
+$userPassword = (Get-Content -Raw -Path $passwordPath).Trim()
+if ($userPassword.Length -lt 12 -or $userPassword -notmatch '[A-Z]' -or $userPassword -notmatch '[a-z]' -or $userPassword -notmatch '[0-9]' -or $userPassword -notmatch '[^A-Za-z0-9]') {
+  $userPassword = New-CrabboxPassword
+  Set-Content -NoNewline -Encoding ASCII -Path $passwordPath -Value $userPassword
+}
+$secure = ConvertTo-SecureString $userPassword -AsPlainText -Force
+if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+  New-LocalUser -Name $user -Password $secure -PasswordNeverExpires -AccountNeverExpires | Out-Null
+} else {
+  Set-LocalUser -Name $user -Password $secure -PasswordNeverExpires $true
+}
+Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
+Set-Content -NoNewline -Encoding ASCII -Path $usernamePath -Value $user
+if ($passwordMirrorPath) {
+  Set-Content -NoNewline -Encoding ASCII -Path $passwordMirrorPath -Value $userPassword
+}
+$userSID = (Get-LocalUser -Name $user).SID.Value
+icacls.exe $workRoot /grant "*${userSID}:(OI)(CI)F" | Out-Null
+$userSSHDir = Join-Path (Join-Path "C:\Users" $user) ".ssh"
+$userAuthorizedKeys = Join-Path $userSSHDir "authorized_keys"
+New-Item -ItemType Directory -Force -Path $userSSHDir | Out-Null
+Set-Content -Encoding ASCII -Path $userAuthorizedKeys -Value $publicKey
+icacls.exe $userSSHDir /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
+icacls.exe $userAuthorizedKeys /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
+if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
+  Retry { Invoke-WebRequest -Uri ` + psQuote(openSSHWin64ZipURL) + ` -OutFile $openSSHZip -UseBasicParsing }
+  Remove-Item -Recurse -Force "C:\Program Files\OpenSSH" -ErrorAction SilentlyContinue
+  Expand-Archive -LiteralPath $openSSHZip -DestinationPath "C:\Program Files" -Force
+  if (Test-Path -LiteralPath "C:\Program Files\OpenSSH-Win64") {
+    Rename-Item -LiteralPath "C:\Program Files\OpenSSH-Win64" -NewName "OpenSSH" -Force
+  }
+  & "C:\Program Files\OpenSSH\install-sshd.ps1"
+}
+New-Item -ItemType Directory -Force -Path "$env:ProgramData\ssh" | Out-Null
+Set-Content -Encoding ASCII -Path "$env:ProgramData\ssh\administrators_authorized_keys" -Value $publicKey
+icacls.exe "$env:ProgramData\ssh\administrators_authorized_keys" /inheritance:r /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
+$sshdConfigPath = "$env:ProgramData\ssh\sshd_config"
+$sshdConfig = ""
+if (Test-Path -LiteralPath $sshdConfigPath) {
+  $sshdConfig = Get-Content -Raw -LiteralPath $sshdConfigPath
+}
+$globalLines = @()
+$matchLines = @()
+$inMatch = $false
+foreach ($line in ($sshdConfig -split "\r?\n")) {
+  if ($line -match '^\s*Match\s+') { $inMatch = $true }
+  if (-not $inMatch -and $line -match '^\s*Port\s+\d+\s*$') { continue }
+  if ($enforceKeyAuth -and -not $inMatch -and $line -match '^\s*(PasswordAuthentication|PubkeyAuthentication)\s+') { continue }
+  if ($inMatch) { $matchLines += $line } else { $globalLines += $line }
+}
+foreach ($port in $sshPorts) { $globalLines += "Port $port" }
+if ($enforceKeyAuth) {
+  $globalLines += "PubkeyAuthentication yes"
+  $globalLines += "PasswordAuthentication no"
+}
+if (($matchLines -join [Environment]::NewLine) -notmatch '(?im)^\s*Match\s+Group\s+administrators\b') {
+  $matchLines += "Match Group administrators"
+  $matchLines += "       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys"
+}
+Set-Content -Encoding ASCII -LiteralPath $sshdConfigPath -Value (($globalLines + $matchLines) -join [Environment]::NewLine)
+foreach ($port in $sshPorts) {
+  $ruleName = "crabbox-sshd-$port"
+  if (-not (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -Name $ruleName -DisplayName "Crabbox OpenSSH $port" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort $port | Out-Null
+  }
+}
+Set-Service -Name sshd -StartupType Automatic
+Start-Service sshd
+if (-not (Test-Path -LiteralPath "C:\Program Files\Git\cmd\git.exe")) {
+  Retry { Invoke-WebRequest -Uri ` + psQuote(gitForWindowsSetupURL) + ` -OutFile $gitInstaller -UseBasicParsing }
+  Start-Process -FilePath $gitInstaller -ArgumentList "/VERYSILENT","/NORESTART","/NOCANCEL","/SP-" -Wait
+}
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+foreach ($path in @("C:\Program Files\OpenSSH", "C:\Program Files\Git\cmd", "C:\Program Files\Git\usr\bin")) {
+  if ($machinePath -notlike "*$path*") { $machinePath = "$machinePath;$path" }
+  if ($env:Path -notlike "*$path*") { $env:Path = "$env:Path;$path" }
+}
+[Environment]::SetEnvironmentVariable("Path", $machinePath, "Machine")
+`
+}
+
+func windowsBootstrapPowerShell(cfg Config, publicKey string) string {
+	workRoot := cfg.WorkRoot
+	if workRoot == "" {
+		workRoot = `C:\crabbox`
+	}
+	wslMode := cfg.WindowsMode == windowsModeWSL2
+	return windowsBootstrapHeaderPowerShell(cfg, publicKey, workRoot) + `
 $wslMode = $` + fmt.Sprint(wslMode) + `
 $wslDistro = "Crabbox"
 $wslRoot = "C:\ProgramData\crabbox\wsl\Crabbox"
@@ -139,17 +236,16 @@ $wslRootfsMinBytes = 100 * 1024 * 1024
 $wslSetup = "C:\ProgramData\crabbox\wsl\linux-setup.sh"
 $wslFeaturesMarker = "C:\ProgramData\crabbox\wsl-features-rebooted"
 $wslKernelMarker = "C:\ProgramData\crabbox\wsl-kernel-rebooted"
-$sshPorts = ` + windowsSSHPortsPowerShell(cfg) + `
 $vncPasswordPath = "C:\ProgramData\crabbox\vnc.password"
 $windowsUsernamePath = "C:\ProgramData\crabbox\windows.username"
 $windowsPasswordPath = "C:\ProgramData\crabbox\windows.password"
+$passwordPath = $vncPasswordPath
+$usernamePath = $windowsUsernamePath
+$passwordMirrorPath = $windowsPasswordPath
+$enforceKeyAuth = $false
 $userVNCStartupPath = "C:\ProgramData\crabbox\start-user-vnc.ps1"
 $userVNCStartupCommandPath = Join-Path (Join-Path (Join-Path "C:\Users" $user) "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup") "crabbox-user-vnc.cmd"
-$setupCompletePath = "C:\ProgramData\crabbox\setup-complete"
-$openSSHZip = "$env:TEMP\OpenSSH-Win64.zip"
-$gitInstaller = "$env:TEMP\Git-2.52.0-64-bit.exe"
 $tightVNCInstaller = "$env:TEMP\tightvnc-2.8.85-gpl-setup-64bit.msi"
-New-Item -ItemType Directory -Force -Path "C:\ProgramData\crabbox", $workRoot | Out-Null
 function Restart-CrabboxBootstrap($MarkerPath) {
   Set-Content -NoNewline -Encoding ASCII -Path $MarkerPath -Value (Get-Date).ToString("o")
   Restart-Computer -Force
@@ -244,74 +340,7 @@ crabbox-ready
   wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh
   if ($LASTEXITCODE -ne 0) { throw "WSL setup failed with exit $LASTEXITCODE" }
 }
-if (-not (Test-Path -LiteralPath $vncPasswordPath)) {
-  New-CrabboxPassword | Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath
-}
-$userPassword = Get-Content -Raw -Path $vncPasswordPath
-if ($userPassword.Length -lt 12 -or $userPassword -notmatch '[A-Z]' -or $userPassword -notmatch '[a-z]' -or $userPassword -notmatch '[0-9]' -or $userPassword -notmatch '[^A-Za-z0-9]') {
-  $userPassword = New-CrabboxPassword
-  Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath -Value $userPassword
-}
-$secure = ConvertTo-SecureString $userPassword -AsPlainText -Force
-if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
-  New-LocalUser -Name $user -Password $secure -PasswordNeverExpires -AccountNeverExpires | Out-Null
-} else {
-  Set-LocalUser -Name $user -Password $secure -PasswordNeverExpires $true
-}
-Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
-Set-Content -NoNewline -Encoding ASCII -Path $windowsUsernamePath -Value $user
-Set-Content -NoNewline -Encoding ASCII -Path $windowsPasswordPath -Value $userPassword
-$userSID = (Get-LocalUser -Name $user).SID.Value
-$userSSHDir = Join-Path (Join-Path "C:\Users" $user) ".ssh"
-$userAuthorizedKeys = Join-Path $userSSHDir "authorized_keys"
-New-Item -ItemType Directory -Force -Path $userSSHDir | Out-Null
-Set-Content -Encoding ASCII -Path $userAuthorizedKeys -Value $publicKey
-icacls.exe $userAuthorizedKeys /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
-if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
-  Retry { Invoke-WebRequest -Uri ` + psQuote(openSSHWin64ZipURL) + ` -OutFile $openSSHZip -UseBasicParsing }
-  Remove-Item -Recurse -Force "C:\Program Files\OpenSSH" -ErrorAction SilentlyContinue
-  Expand-Archive -LiteralPath $openSSHZip -DestinationPath "C:\Program Files" -Force
-  if (Test-Path -LiteralPath "C:\Program Files\OpenSSH-Win64") {
-    Rename-Item -LiteralPath "C:\Program Files\OpenSSH-Win64" -NewName "OpenSSH" -Force
-  }
-  & "C:\Program Files\OpenSSH\install-sshd.ps1"
-}
-New-Item -ItemType Directory -Force -Path "$env:ProgramData\ssh" | Out-Null
-Set-Content -Encoding ASCII -Path "$env:ProgramData\ssh\administrators_authorized_keys" -Value $publicKey
-icacls.exe "$env:ProgramData\ssh\administrators_authorized_keys" /inheritance:r /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
-$sshdConfigPath = "$env:ProgramData\ssh\sshd_config"
-$sshdConfig = ""
-if (Test-Path -LiteralPath $sshdConfigPath) {
-  $sshdConfig = Get-Content -Raw -LiteralPath $sshdConfigPath
-}
-$globalLines = @()
-$matchLines = @()
-$inMatch = $false
-foreach ($line in ($sshdConfig -split "\r?\n")) {
-  if ($line -match '^\s*Match\s+') { $inMatch = $true }
-  if (-not $inMatch -and $line -match '^\s*Port\s+\d+\s*$') { continue }
-  if ($inMatch) { $matchLines += $line } else { $globalLines += $line }
-}
-foreach ($port in $sshPorts) { $globalLines += "Port $port" }
-Set-Content -Encoding ASCII -LiteralPath $sshdConfigPath -Value (($globalLines + $matchLines) -join [Environment]::NewLine)
-foreach ($port in $sshPorts) {
-  $ruleName = "crabbox-sshd-$port"
-  if (-not (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue)) {
-    New-NetFirewallRule -Name $ruleName -DisplayName "Crabbox OpenSSH $port" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort $port | Out-Null
-  }
-}
-Set-Service -Name sshd -StartupType Automatic
-Start-Service sshd
-if (-not (Test-Path -LiteralPath "C:\Program Files\Git\cmd\git.exe")) {
-  Retry { Invoke-WebRequest -Uri ` + psQuote(gitForWindowsSetupURL) + ` -OutFile $gitInstaller -UseBasicParsing }
-  Start-Process -FilePath $gitInstaller -ArgumentList "/VERYSILENT","/NORESTART","/NOCANCEL","/SP-" -Wait
-}
-$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-foreach ($path in @("C:\Program Files\OpenSSH", "C:\Program Files\Git\cmd", "C:\Program Files\Git\usr\bin")) {
-  if ($machinePath -notlike "*$path*") { $machinePath = "$machinePath;$path" }
-  if ($env:Path -notlike "*$path*") { $env:Path = "$env:Path;$path" }
-}
-[Environment]::SetEnvironmentVariable("Path", $machinePath, "Machine")
+` + windowsBootstrapCorePowerShell() + `
 Initialize-CrabboxWSL2
 if (-not (Test-Path -LiteralPath "C:\Program Files\TightVNC\tvnserver.exe")) {
   Retry { Invoke-WebRequest -Uri ` + psQuote(tightVNCMSIURL) + ` -OutFile $tightVNCInstaller -UseBasicParsing }
@@ -377,6 +406,24 @@ if (-not (Test-Path -LiteralPath $setupCompletePath)) {
   Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
   Restart-Computer -Force
 }
+`
+}
+
+func azureWindowsBootstrapPowerShell(cfg Config, publicKey string) string {
+	workRoot := cfg.WorkRoot
+	if workRoot == "" {
+		workRoot = defaultWindowsWorkRoot
+	}
+	return windowsBootstrapHeaderPowerShell(cfg, publicKey, workRoot) + `
+$passwordPath = Join-Path $base "windows.password"
+$usernamePath = Join-Path $base "windows.username"
+$passwordMirrorPath = $null
+$enforceKeyAuth = $true
+` + windowsBootstrapCorePowerShell() + `
+Restart-Service sshd -Force
+git --version | Out-Null
+tar --version | Out-Null
+Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
 `
 }
 

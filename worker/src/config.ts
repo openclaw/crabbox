@@ -27,6 +27,8 @@ export interface LeaseConfig {
   awsRootGB: number;
   awsSSHCIDRs: string[];
   awsMacHostID: string;
+  azureLocation: string;
+  azureImage: string;
   capacityMarket: "spot" | "on-demand";
   capacityStrategy:
     | "most-available"
@@ -50,7 +52,7 @@ export interface LeaseConfig {
 
 export function leaseConfig(input: LeaseRequest): LeaseConfig {
   const provider = input.provider ?? "hetzner";
-  if (provider !== "hetzner" && provider !== "aws") {
+  if (provider !== "hetzner" && provider !== "aws" && provider !== "azure") {
     throw new Error(`unsupported provider: ${String(provider)}`);
   }
   const target = normalizeTarget(input.target ?? input.targetOS ?? "linux");
@@ -58,12 +60,22 @@ export function leaseConfig(input: LeaseRequest): LeaseConfig {
   if (
     target !== "linux" &&
     !(provider === "aws" && target === "windows") &&
-    !(provider === "aws" && target === "macos")
+    !(provider === "aws" && target === "macos") &&
+    !(provider === "azure" && target === "windows" && windowsMode === "normal")
   ) {
-    if (provider === "hetzner") {
-      throw new Error(unsupportedManagedTargetMessage(provider, target));
+    if (provider === "hetzner" || provider === "azure") {
+      throw new Error(unsupportedManagedTargetMessage(provider, target, windowsMode));
     }
     throw new Error(`unsupported target for brokered ${provider}: ${target}`);
+  }
+  if (
+    provider === "azure" &&
+    target === "windows" &&
+    (input.desktop || input.browser || input.code || input.tailscale)
+  ) {
+    throw new Error(
+      "brokered azure target=windows currently supports SSH, sync, and run; desktop/browser/code/tailscale require Linux or AWS Windows where supported",
+    );
   }
   if (target === "macos") {
     if (provider !== "aws") {
@@ -115,6 +127,8 @@ export function leaseConfig(input: LeaseRequest): LeaseConfig {
     awsRootGB: input.awsRootGB ?? 400,
     awsSSHCIDRs: validCIDRs(input.awsSSHCIDRs ?? []),
     awsMacHostID: input.awsMacHostID ?? "",
+    azureLocation: input.azureLocation ?? "",
+    azureImage: input.azureImage ?? "",
     capacityMarket: input.capacity?.market ?? "spot",
     capacityStrategy: input.capacity?.strategy ?? "most-available",
     capacityFallback: input.capacity?.fallback ?? "on-demand-after-120s",
@@ -153,7 +167,20 @@ function defaultSSHUser(provider: Provider, target: TargetOS, windowsMode: Windo
   return "crabbox";
 }
 
-function unsupportedManagedTargetMessage(provider: Provider, target: TargetOS): string {
+function unsupportedManagedTargetMessage(
+  provider: Provider,
+  target: TargetOS,
+  windowsMode: WindowsMode,
+): string {
+  if (provider === "azure" && target === "windows" && windowsMode === "wsl2") {
+    return "brokered azure supports native Windows only; use brokered aws for managed Windows WSL2 or provider=ssh for existing Windows WSL2 hosts";
+  }
+  if (provider === "azure") {
+    if (target === "macos") {
+      return "brokered azure managed provisioning supports target=linux and native Windows only; use brokered aws with an EC2 Mac Dedicated Host or provider=ssh for existing macOS hosts";
+    }
+    return "brokered azure managed provisioning supports target=linux and native Windows only";
+  }
   if (target === "windows") {
     return `brokered ${provider} managed provisioning supports target=linux only; use brokered aws for managed Windows or provider=ssh for existing Windows hosts`;
   }
@@ -161,6 +188,13 @@ function unsupportedManagedTargetMessage(provider: Provider, target: TargetOS): 
     return `brokered ${provider} managed provisioning supports target=linux only; use brokered aws with an EC2 Mac Dedicated Host or provider=ssh for existing macOS hosts`;
   }
   return `brokered ${provider} managed provisioning supports target=linux only`;
+}
+
+export function azureLocationFor(
+  env: { CRABBOX_AZURE_LOCATION?: string },
+  override: string,
+): string {
+  return override.trim() || env.CRABBOX_AZURE_LOCATION?.trim() || "eastus";
 }
 
 export function normalizeTailscaleTags(values: string[]): string[] {
@@ -239,6 +273,9 @@ export function serverTypeForProviderClass(provider: Provider, machineClass: str
   if (provider === "aws") {
     return awsInstanceTypeCandidatesForClass(machineClass)[0] ?? machineClass;
   }
+  if (provider === "azure") {
+    return azureVMSizeCandidatesForClass(machineClass)[0] ?? machineClass;
+  }
   return serverTypeForClass(machineClass);
 }
 
@@ -253,7 +290,122 @@ export function serverTypeForConfig(
       awsInstanceTypeCandidatesForTargetClass(target, machineClass, windowsMode)[0] ?? machineClass
     );
   }
+  if (provider === "azure") {
+    return (
+      azureVMSizeCandidatesForTargetClass(target, machineClass, windowsMode)[0] ?? machineClass
+    );
+  }
   return serverTypeForClass(machineClass);
+}
+
+export function azureVMSizeCandidatesForTargetClass(
+  target: TargetOS,
+  machineClass: string,
+  windowsMode: WindowsMode = "normal",
+): string[] {
+  if (target === "linux") {
+    return azureVMSizeCandidatesForClass(machineClass);
+  }
+  if (target === "windows" && windowsMode === "normal") {
+    return azureWindowsVMSizeCandidatesForClass(machineClass);
+  }
+  return [machineClass];
+}
+
+export function azureVMSizeCandidatesForClass(machineClass: string): string[] {
+  switch (machineClass) {
+    case "standard":
+      return [
+        "Standard_D32ads_v6",
+        "Standard_D32ds_v6",
+        "Standard_F32s_v2",
+        "Standard_D32ads_v5",
+        "Standard_D32ds_v5",
+        "Standard_D16ads_v6",
+        "Standard_D16ds_v6",
+        "Standard_F16s_v2",
+      ];
+    case "fast":
+      return [
+        "Standard_D64ads_v6",
+        "Standard_D64ds_v6",
+        "Standard_F64s_v2",
+        "Standard_D64ads_v5",
+        "Standard_D64ds_v5",
+        "Standard_D48ads_v6",
+        "Standard_D48ds_v6",
+        "Standard_F48s_v2",
+        "Standard_D32ads_v6",
+        "Standard_D32ds_v6",
+        "Standard_F32s_v2",
+      ];
+    case "large":
+      return [
+        "Standard_D96ads_v6",
+        "Standard_D96ds_v6",
+        "Standard_D96ads_v5",
+        "Standard_D96ds_v5",
+        "Standard_D64ads_v6",
+        "Standard_D64ds_v6",
+        "Standard_F64s_v2",
+        "Standard_D48ads_v6",
+        "Standard_D48ds_v6",
+        "Standard_F48s_v2",
+      ];
+    case "beast":
+      return [
+        "Standard_D192ds_v6",
+        "Standard_D128ds_v6",
+        "Standard_D96ads_v6",
+        "Standard_D96ds_v6",
+        "Standard_D96ads_v5",
+        "Standard_D96ds_v5",
+        "Standard_D64ads_v6",
+        "Standard_D64ds_v6",
+        "Standard_F64s_v2",
+      ];
+    default:
+      return [machineClass];
+  }
+}
+
+export function azureWindowsVMSizeCandidatesForClass(machineClass: string): string[] {
+  switch (machineClass) {
+    case "standard":
+      return [
+        "Standard_D2ads_v6",
+        "Standard_D2ds_v6",
+        "Standard_D2ads_v5",
+        "Standard_D2ds_v5",
+        "Standard_D2as_v6",
+      ];
+    case "fast":
+      return [
+        "Standard_D4ads_v6",
+        "Standard_D4ds_v6",
+        "Standard_D4ads_v5",
+        "Standard_D4ds_v5",
+        "Standard_D4as_v6",
+      ];
+    case "large":
+      return [
+        "Standard_D8ads_v6",
+        "Standard_D8ds_v6",
+        "Standard_D8ads_v5",
+        "Standard_D8ds_v5",
+        "Standard_D8as_v6",
+      ];
+    case "beast":
+      return [
+        "Standard_D16ads_v6",
+        "Standard_D16ds_v6",
+        "Standard_D16ads_v5",
+        "Standard_D16ds_v5",
+        "Standard_D8ads_v6",
+      ];
+    default:
+      return [machineClass];
+  }
 }
 
 export function awsInstanceTypeCandidatesForTargetClass(

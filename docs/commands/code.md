@@ -64,7 +64,7 @@ and extension-host traffic stay below coordinator websocket frame limits.
 
 ```text
 --id <lease-id-or-slug>
---provider hetzner|aws
+--provider hetzner|aws|azure
 --target linux
 --network auto|tailscale|public
 --local-port <port>

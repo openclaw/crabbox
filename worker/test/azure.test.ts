@@ -1,0 +1,345 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  AzureClient,
+  azureLabelsFromTags,
+  azureSupportsEphemeralOS,
+  azureTagsFromLabels,
+  isRetryableDeleteError,
+  isRetryableProvisioningError,
+  preserveNonCrabboxRules,
+} from "../src/azure";
+import type { LeaseConfig } from "../src/config";
+import type { Env } from "../src/types";
+
+const baseEnv: Env = {
+  FLEET: {} as DurableObjectNamespace,
+  HETZNER_TOKEN: "",
+  AZURE_TENANT_ID: "tenant",
+  AZURE_CLIENT_ID: "client",
+  AZURE_CLIENT_SECRET: "secret",
+  AZURE_SUBSCRIPTION_ID: "sub",
+};
+
+describe("azure provider", () => {
+  it("classifies Azure capacity and quota errors as retryable", () => {
+    expect(isRetryableProvisioningError("SkuNotAvailable: D8s_v5 not available")).toBe(true);
+    expect(isRetryableProvisioningError("QuotaExceeded for cores")).toBe(true);
+    expect(isRetryableProvisioningError("AllocationFailed")).toBe(true);
+    expect(isRetryableProvisioningError("OverconstrainedAllocationRequest")).toBe(true);
+    expect(isRetryableProvisioningError("ResourceNotFound")).toBe(false);
+    expect(isRetryableProvisioningError("")).toBe(false);
+  });
+
+  it("classifies transient Azure delete dependency errors as retryable", () => {
+    expect(isRetryableDeleteError("NicReservedForAnotherVm retry after 180 seconds")).toBe(true);
+    expect(isRetryableDeleteError("PublicIPAddressCannotBeDeleted because it is in use")).toBe(
+      true,
+    );
+    expect(isRetryableDeleteError("AnotherOperationInProgress")).toBe(true);
+    expect(isRetryableDeleteError("plain validation error")).toBe(false);
+  });
+
+  it("maps Azure-reserved Windows tag prefixes without changing internal labels", () => {
+    const tags = azureTagsFromLabels({ crabbox: "true", windows_mode: "normal" });
+    expect(tags.windows_mode).toBeUndefined();
+    expect(tags.crabbox_windows_mode).toBe("normal");
+    expect(azureLabelsFromTags(tags).windows_mode).toBe("normal");
+  });
+
+  it("continues deleting per-lease resources after a delete failure", async () => {
+    const client = new AzureClient(baseEnv);
+    const deletes: string[] = [];
+    const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("login.microsoftonline.com")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), { status: 200 }),
+        );
+      }
+      if (init?.method === "DELETE") {
+        deletes.push(url);
+        if (url.includes("/virtualMachines/crabbox-blue-lobster?")) {
+          return Promise.resolve(new Response("busy", { status: 409 }));
+        }
+        if (url.includes("/networkInterfaces/crabbox-blue-lobster-nic?")) {
+          return Promise.resolve(new Response("missing", { status: 404 }));
+        }
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as typeof fetch;
+    client.fetcher = fakeFetch;
+
+    await expect(client.deleteServer("crabbox-blue-lobster")).rejects.toThrow(/delete vm/);
+    expect(deletes.some((url) => url.includes("/virtualMachines/crabbox-blue-lobster?"))).toBe(
+      true,
+    );
+    expect(
+      deletes.some((url) => url.includes("/networkInterfaces/crabbox-blue-lobster-nic?")),
+    ).toBe(true);
+    expect(
+      deletes.some((url) => url.includes("/publicIPAddresses/crabbox-blue-lobster-pip?")),
+    ).toBe(true);
+    expect(deletes.some((url) => url.includes("/disks/crabbox-blue-lobster-osdisk?"))).toBe(true);
+  });
+
+  it("requires the four Azure SP secrets", () => {
+    expect(() => new AzureClient({ ...baseEnv, AZURE_TENANT_ID: undefined })).toThrow(
+      /AZURE_TENANT_ID/,
+    );
+    expect(() => new AzureClient({ ...baseEnv, AZURE_CLIENT_ID: undefined })).toThrow(
+      /AZURE_CLIENT_ID/,
+    );
+    expect(() => new AzureClient({ ...baseEnv, AZURE_CLIENT_SECRET: undefined })).toThrow(
+      /AZURE_CLIENT_SECRET/,
+    );
+    expect(() => new AzureClient({ ...baseEnv, AZURE_SUBSCRIPTION_ID: undefined })).toThrow(
+      /AZURE_SUBSCRIPTION_ID/,
+    );
+  });
+
+  it("applies CRABBOX_AZURE_* defaults", () => {
+    const client = new AzureClient(baseEnv);
+    expect(client.resourceGroup).toBe("crabbox-leases");
+    expect(client.vnet).toBe("crabbox-vnet");
+    expect(client.subnet).toBe("crabbox-subnet");
+    expect(client.nsg).toBe("crabbox-nsg");
+    expect(client.image).toContain("Canonical");
+    expect(client.sshCIDRs).toEqual(["0.0.0.0/0"]);
+    expect(client.defaultLocation).toBe("eastus");
+  });
+
+  it("creates Windows VMs with Windows OS profile and bootstrap extension", async () => {
+    const client = new AzureClient(baseEnv);
+    const bodies: unknown[] = [];
+    const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("login.microsoftonline.com")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), { status: 200 }),
+        );
+      }
+      if (init?.body) bodies.push(JSON.parse(String(init.body)));
+      if (url.includes("/resourceGroups/crabbox-leases?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ tags: { managed_by: "crabbox" } }), { status: 200 }),
+        );
+      }
+      if (url.includes("/virtualNetworks/crabbox-vnet?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ tags: { managed_by: "crabbox" } }), { status: 200 }),
+        );
+      }
+      if (url.includes("/networkSecurityGroups/crabbox-nsg?") && init?.method === "GET") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ tags: { managed_by: "crabbox" }, properties: { securityRules: [] } }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.includes("/providers/Microsoft.Compute/skus?")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              value: [
+                {
+                  name: "Standard_D2ads_v6",
+                  resourceType: "virtualMachines",
+                  capabilities: [{ name: "EphemeralOSDiskSupported", value: "True" }],
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.includes("/publicIPAddresses/") && init?.method === "GET") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ properties: { ipAddress: "192.0.2.10" } }), {
+            status: 200,
+          }),
+        );
+      }
+      if (url.includes("/virtualMachines/") && init?.method === "GET") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              name: "crabbox-blue-lobster",
+              tags: { crabbox: "true" },
+              properties: {
+                provisioningState: "Succeeded",
+                hardwareProfile: { vmSize: "Standard_D2ads_v6" },
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as typeof fetch;
+    client.fetcher = fakeFetch;
+    const config: LeaseConfig = {
+      provider: "azure",
+      target: "windows",
+      windowsMode: "normal",
+      desktop: false,
+      browser: false,
+      code: false,
+      tailscale: false,
+      tailscaleTags: ["tag:crabbox"],
+      tailscaleHostname: "",
+      tailscaleAuthKey: "",
+      tailscaleExitNode: "",
+      tailscaleExitNodeAllowLanAccess: false,
+      profile: "default",
+      class: "standard",
+      serverType: "Standard_D2ads_v6",
+      serverTypeExplicit: true,
+      location: "fsn1",
+      image: "ubuntu-24.04",
+      awsRegion: "eu-west-1",
+      awsAMI: "",
+      awsSGID: "",
+      awsSubnetID: "",
+      awsProfile: "",
+      awsRootGB: 400,
+      awsSSHCIDRs: [],
+      awsMacHostID: "",
+      azureLocation: "eastus",
+      azureImage: "",
+      capacityMarket: "spot",
+      capacityStrategy: "most-available",
+      capacityFallback: "on-demand-after-120s",
+      capacityRegions: [],
+      capacityAvailabilityZones: [],
+      capacityHints: true,
+      sshUser: "crabbox",
+      sshPort: "2222",
+      sshFallbackPorts: ["22"],
+      providerKey: "crabbox-cbx",
+      workRoot: "C:\\crabbox",
+      ttlSeconds: 5400,
+      idleTimeoutSeconds: 1800,
+      keep: false,
+      sshPublicKey: "ssh-rsa test",
+    };
+    await client.createServerWithFallback(config, "cbx_123456789abc", "blue-lobster", "owner");
+
+    const vmBody = bodies.find(
+      (body): body is { properties: { osProfile: Record<string, unknown> } } =>
+        typeof body === "object" &&
+        body !== null &&
+        "properties" in body &&
+        JSON.stringify(body).includes("windowsConfiguration"),
+    );
+    expect(vmBody?.properties.osProfile).toMatchObject({
+      computerName: "cbxcbx123456789",
+      adminUsername: "crabadmin",
+      allowExtensionOperations: true,
+      windowsConfiguration: { provisionVMAgent: true, enableAutomaticUpdates: false },
+    });
+    expect(String(vmBody?.properties.osProfile.customData ?? "")).toBeTruthy();
+    expect(JSON.stringify(vmBody)).toContain("MicrosoftWindowsServer");
+    const extensionBody = bodies.find((body) =>
+      JSON.stringify(body).includes("CustomScriptExtension"),
+    );
+    expect(JSON.stringify(extensionBody)).toContain("AzureData\\\\CustomData.bin");
+  });
+
+  it("honors CRABBOX_AZURE_* overrides", () => {
+    const client = new AzureClient({
+      ...baseEnv,
+      CRABBOX_AZURE_RESOURCE_GROUP: "custom-rg",
+      CRABBOX_AZURE_LOCATION: "westus2",
+      CRABBOX_AZURE_SSH_CIDRS: "10.0.0.0/8, 192.168.0.0/16",
+    });
+    expect(client.resourceGroup).toBe("custom-rg");
+    expect(client.defaultLocation).toBe("westus2");
+    expect(client.sshCIDRs).toEqual(["10.0.0.0/8", "192.168.0.0/16"]);
+  });
+
+  it("caches the client_credentials token across calls", async () => {
+    const client = new AzureClient(baseEnv);
+    let tokenMints = 0;
+    const fakeFetch = ((input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("login.microsoftonline.com")) {
+        tokenMints += 1;
+        return Promise.resolve(
+          new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response(JSON.stringify({ value: [] }), { status: 200 }));
+    }) as typeof fetch;
+    client.fetcher = fakeFetch;
+    await client.listCrabboxServers();
+    await client.listCrabboxServers();
+    expect(tokenMints).toBe(1);
+  });
+
+  it("drops crabbox-ssh-* rules and preserves operator rules", () => {
+    const kept = preserveNonCrabboxRules([
+      { name: "crabbox-ssh-2222-0", properties: { destinationPortRange: "2222" } },
+      { name: "operator-https", properties: { destinationPortRange: "443" } },
+    ]);
+    expect(kept).toEqual([{ name: "operator-https", properties: { destinationPortRange: "443" } }]);
+  });
+
+  it("uses a conservative ephemeral OS disk fallback", () => {
+    expect(azureSupportsEphemeralOS("Standard_D2as_v5")).toBe(false);
+    expect(azureSupportsEphemeralOS("Standard_D2s_v5")).toBe(false);
+    expect(azureSupportsEphemeralOS("Standard_D2ads_v5")).toBe(true);
+    expect(azureSupportsEphemeralOS("Standard_D2ads_v6")).toBe(true);
+    expect(azureSupportsEphemeralOS("Standard_F2s_v2")).toBe(true);
+    expect(azureSupportsEphemeralOS("Standard_D48ads_v6")).toBe(true);
+    expect(azureSupportsEphemeralOS("Standard_F48s_v2")).toBe(true);
+  });
+
+  it("filters listCrabboxServers by crabbox=true tag", async () => {
+    const client = new AzureClient(baseEnv);
+    const fakeFetch = ((input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("login.microsoftonline.com")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), { status: 200 }),
+        );
+      }
+      if (url.includes("/virtualMachines?")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              value: [
+                {
+                  name: "kept",
+                  tags: { crabbox: "true" },
+                  properties: { provisioningState: "Succeeded" },
+                },
+                {
+                  name: "stranger",
+                  tags: { other: "thing" },
+                  properties: { provisioningState: "Succeeded" },
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.includes("/publicIPAddresses/kept-pip?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ properties: { ipAddress: "1.2.3.4" } }), { status: 200 }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as typeof fetch;
+    client.fetcher = fakeFetch;
+    const machines = await client.listCrabboxServers();
+    expect(machines).toHaveLength(1);
+    expect(machines[0]?.name).toBe("kept");
+    expect(machines[0]?.host).toBe("1.2.3.4");
+  });
+});

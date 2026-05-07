@@ -456,6 +456,8 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"awsRootGB":                       cfg.AWSRootGB,
 		"awsSSHCIDRs":                     cfg.AWSSSHCIDRs,
 		"awsMacHostID":                    cfg.AWSMacHostID,
+		"azureLocation":                   cfg.AzureLocation,
+		"azureImage":                      cfg.AzureImage,
 		"sshUser":                         cfg.SSHUser,
 		"sshPort":                         cfg.SSHPort,
 		"sshFallbackPorts":                cfg.SSHFallbackPorts,

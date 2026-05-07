@@ -11,7 +11,7 @@ import (
 func (a App) desktopLaunch(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("desktop launch", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or ssh")
+	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	browser := fs.Bool("browser", false, "launch the target browser")
 	url := fs.String("url", "", "URL to pass to the launched browser")
@@ -54,7 +54,7 @@ func (a App) desktopLaunch(ctx context.Context, args []string) error {
 		return err
 	}
 	if *webvnc && (isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider)) {
-		return exit(2, "desktop launch --webvnc currently supports coordinator-backed hetzner/aws desktop leases")
+		return exit(2, "desktop launch --webvnc currently supports coordinator-backed hetzner/aws/azure desktop leases")
 	}
 	if *id == "" && !isStaticProvider(cfg.Provider) {
 		return exit(2, "usage: crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] -- <command...>")

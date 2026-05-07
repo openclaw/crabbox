@@ -47,6 +47,9 @@ func validateRequestedCapabilities(cfg Config) error {
 	if cfg.Code && !featureSetHas(spec.Features, FeatureCode) {
 		return exit(2, "web code is not supported for provider=%s", provider.Name())
 	}
+	if cfg.Provider == "azure" && cfg.TargetOS == targetWindows && (cfg.Desktop || cfg.Browser || cfg.Code || cfg.Tailscale.Enabled) {
+		return exit(2, "provider=azure target=windows currently supports SSH, sync, and run; desktop/browser/code/tailscale require Linux or AWS Windows where supported")
+	}
 	if cfg.Code && cfg.TargetOS != targetLinux {
 		return exit(2, "web code currently supports managed Linux leases only")
 	}

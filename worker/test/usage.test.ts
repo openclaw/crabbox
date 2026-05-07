@@ -3,6 +3,21 @@ import { describe, expect, it } from "vitest";
 import type { LeaseRecord } from "../src/types";
 import { costLimits, enforceCostLimits, leaseCost, usageSummary } from "../src/usage";
 
+describe("azure cost overrides", () => {
+  it("honors CRABBOX_COST_RATES_JSON for Azure SKUs", () => {
+    const cost = leaseCost(
+      {
+        CRABBOX_COST_RATES_JSON: JSON.stringify({ "azure:Standard_D16as_v5": 0.77 }),
+      },
+      "azure",
+      "Standard_D16as_v5",
+      3600,
+      undefined,
+    );
+    expect(cost.hourlyUSD).toBe(0.77);
+  });
+});
+
 describe("usage accounting", () => {
   it("estimates cost and aggregates by owner and org", () => {
     const now = new Date("2026-05-01T02:00:00Z");

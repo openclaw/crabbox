@@ -39,7 +39,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Bridge flags:")
 		fmt.Fprintln(fs.Output(), "  --id <lease-id-or-slug>")
-		fmt.Fprintln(fs.Output(), "  --provider hetzner|aws")
+		fmt.Fprintln(fs.Output(), "  --provider hetzner|aws|azure")
 		fmt.Fprintln(fs.Output(), "  --target linux|macos|windows")
 		fmt.Fprintln(fs.Output(), "  --windows-mode normal|wsl2")
 		fmt.Fprintln(fs.Output(), "  --static-host <host>")
@@ -51,7 +51,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		fmt.Fprintln(fs.Output(), "  --open")
 		fmt.Fprintln(fs.Output(), "  --reclaim")
 	}
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner or aws")
+	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or azure")
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
@@ -83,7 +83,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		return err
 	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
-		return exit(2, "webvnc currently supports coordinator-backed hetzner/aws desktop leases")
+		return exit(2, "webvnc currently supports coordinator-backed hetzner/aws/azure desktop leases")
 	}
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 	if err != nil {
@@ -218,7 +218,7 @@ func (a App) webVNCDaemonCommand(ctx context.Context, args []string) error {
 func (a App) webVNCDaemonStart(_ context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("webvnc daemon start", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner or aws")
+	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or azure")
 	id := fs.String("id", "", "lease id or slug")
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
 	openPortal := fs.Bool("open", false, "open the web portal VNC page")
@@ -276,7 +276,7 @@ func (a App) webVNCDaemonStopCommand(args []string) error {
 func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("webvnc status", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner or aws")
+	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or azure")
 	id := fs.String("id", "", "lease id or slug")
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
 	targetFlags := registerTargetFlags(fs, defaults)
@@ -293,7 +293,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
-		return exit(2, "webvnc status currently supports coordinator-backed hetzner/aws desktop leases")
+		return exit(2, "webvnc status currently supports coordinator-backed hetzner/aws/azure desktop leases")
 	}
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 	if err != nil {
@@ -384,7 +384,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("webvnc reset", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner or aws")
+	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or azure")
 	id := fs.String("id", "", "lease id or slug")
 	openPortal := fs.Bool("open", false, "open the web portal VNC page")
 	targetFlags := registerTargetFlags(fs, defaults)
@@ -401,7 +401,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
-		return exit(2, "webvnc reset currently supports coordinator-backed hetzner/aws desktop leases")
+		return exit(2, "webvnc reset currently supports coordinator-backed hetzner/aws/azure desktop leases")
 	}
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 	if err != nil {

@@ -104,6 +104,7 @@ Owned backends:
 - `hetzner-static`: pre-created warm machines.
 - `hetzner-ephemeral`: created per lease or overflow.
 - `aws`: one-time EC2 instances for burst capacity, managed Windows/WSL2, and EC2 Mac.
+- `azure`: one-time Azure VMs for Linux and native Windows SSH/sync/run.
 - `ssh-static`: manually managed machines reachable by SSH.
 
 Brokered backends, later:
@@ -111,7 +112,7 @@ Brokered backends, later:
 - `github-actions`: register or dispatch real Actions-backed runner work when workflow parity is required.
 - `external-runner`: adapter boundary for other hosted runner systems if needed.
 
-The current broker implements `hetzner-ephemeral` and `aws`, and leaves interfaces ready for `hetzner-static`.
+The current broker implements `hetzner-ephemeral`, `aws`, and `azure`, and leaves interfaces ready for `hetzner-static`.
 
 ## Machine Bootstrap
 

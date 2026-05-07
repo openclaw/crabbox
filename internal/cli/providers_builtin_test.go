@@ -8,10 +8,35 @@ import (
 func init() {
 	RegisterProvider(testHetznerProvider{})
 	RegisterProvider(testAWSProvider{})
+	RegisterProvider(testAzureProvider{})
 	RegisterProvider(testStaticSSHProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testDaytonaProvider{})
 	RegisterProvider(testIsloProvider{})
+}
+
+type testAzureProvider struct{}
+
+func (testAzureProvider) Name() string      { return "azure" }
+func (testAzureProvider) Aliases() []string { return nil }
+func (testAzureProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name: "azure",
+		Kind: ProviderKindSSHLease,
+		Targets: []TargetSpec{
+			{OS: targetLinux},
+			{OS: targetWindows, WindowsMode: windowsModeNormal},
+		},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode, FeatureTailscale},
+		Coordinator: CoordinatorSupported,
+	}
+}
+func (testAzureProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testAzureProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testAzureProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
 }
 
 type testHetznerProvider struct{}

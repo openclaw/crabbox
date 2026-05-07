@@ -38,6 +38,16 @@ type Config struct {
 	AWSRootGB          int32
 	AWSSSHCIDRs        []string
 	AWSMacHostID       string
+	AzureSubscription  string
+	AzureTenant        string
+	AzureClientID      string
+	AzureLocation      string
+	AzureResourceGroup string
+	AzureImage         string
+	AzureVNet          string
+	AzureSubnet        string
+	AzureNSG           string
+	AzureSSHCIDRs      []string
 	SSHUser            string
 	SSHKey             string
 	SSHPort            string
@@ -195,25 +205,31 @@ func baseConfig() Config {
 	class := "beast"
 	provider := "hetzner"
 	return Config{
-		Profile:          "default",
-		Provider:         provider,
-		TargetOS:         "linux",
-		WindowsMode:      "normal",
-		Network:          NetworkAuto,
-		Class:            class,
-		ServerType:       "",
-		Location:         "fsn1",
-		Image:            "ubuntu-24.04",
-		AWSRegion:        "eu-west-1",
-		AWSRootGB:        400,
-		SSHUser:          "crabbox",
-		SSHKey:           sshKey,
-		SSHPort:          "2222",
-		SSHFallbackPorts: []string{"22"},
-		ProviderKey:      "crabbox-steipete",
-		WorkRoot:         defaultPOSIXWorkRoot,
-		TTL:              90 * time.Minute,
-		IdleTimeout:      30 * time.Minute,
+		Profile:            "default",
+		Provider:           provider,
+		TargetOS:           "linux",
+		WindowsMode:        "normal",
+		Network:            NetworkAuto,
+		Class:              class,
+		ServerType:         "",
+		Location:           "fsn1",
+		Image:              "ubuntu-24.04",
+		AWSRegion:          "eu-west-1",
+		AWSRootGB:          400,
+		AzureLocation:      "eastus",
+		AzureResourceGroup: "crabbox-leases",
+		AzureImage:         defaultAzureLinuxImage,
+		AzureVNet:          "crabbox-vnet",
+		AzureSubnet:        "crabbox-subnet",
+		AzureNSG:           "crabbox-nsg",
+		SSHUser:            "crabbox",
+		SSHKey:             sshKey,
+		SSHPort:            "2222",
+		SSHFallbackPorts:   []string{"22"},
+		ProviderKey:        "crabbox-steipete",
+		WorkRoot:           defaultPOSIXWorkRoot,
+		TTL:                90 * time.Minute,
+		IdleTimeout:        30 * time.Minute,
 		Sync: SyncConfig{
 			Delete:      true,
 			Checksum:    false,
@@ -283,6 +299,7 @@ type fileConfig struct {
 	Broker           *fileBrokerConfig     `yaml:"broker,omitempty"`
 	Hetzner          *fileHetznerConfig    `yaml:"hetzner,omitempty"`
 	AWS              *fileAWSConfig        `yaml:"aws,omitempty"`
+	Azure            *fileAzureConfig      `yaml:"azure,omitempty"`
 	SSH              *fileSSHConfig        `yaml:"ssh,omitempty"`
 	Sync             *fileSyncConfig       `yaml:"sync,omitempty"`
 	Env              *fileEnvConfig        `yaml:"env,omitempty"`
@@ -334,6 +351,19 @@ type fileAWSConfig struct {
 	RootGB          int32    `yaml:"rootGB,omitempty"`
 	SSHCIDRs        []string `yaml:"sshCIDRs,omitempty"`
 	MacHostID       string   `yaml:"macHostId,omitempty"`
+}
+
+type fileAzureConfig struct {
+	SubscriptionID string   `yaml:"subscriptionId,omitempty"`
+	TenantID       string   `yaml:"tenantId,omitempty"`
+	ClientID       string   `yaml:"clientId,omitempty"`
+	Location       string   `yaml:"location,omitempty"`
+	ResourceGroup  string   `yaml:"resourceGroup,omitempty"`
+	Image          string   `yaml:"image,omitempty"`
+	VNet           string   `yaml:"vnet,omitempty"`
+	Subnet         string   `yaml:"subnet,omitempty"`
+	NSG            string   `yaml:"nsg,omitempty"`
+	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
 }
 
 type fileSSHConfig struct {
@@ -648,6 +678,38 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.AWSMacHostID = file.AWS.MacHostID
 		}
 	}
+	if file.Azure != nil {
+		if file.Azure.SubscriptionID != "" {
+			cfg.AzureSubscription = file.Azure.SubscriptionID
+		}
+		if file.Azure.TenantID != "" {
+			cfg.AzureTenant = file.Azure.TenantID
+		}
+		if file.Azure.ClientID != "" {
+			cfg.AzureClientID = file.Azure.ClientID
+		}
+		if file.Azure.Location != "" {
+			cfg.AzureLocation = file.Azure.Location
+		}
+		if file.Azure.ResourceGroup != "" {
+			cfg.AzureResourceGroup = file.Azure.ResourceGroup
+		}
+		if file.Azure.Image != "" {
+			cfg.AzureImage = file.Azure.Image
+		}
+		if file.Azure.VNet != "" {
+			cfg.AzureVNet = file.Azure.VNet
+		}
+		if file.Azure.Subnet != "" {
+			cfg.AzureSubnet = file.Azure.Subnet
+		}
+		if file.Azure.NSG != "" {
+			cfg.AzureNSG = file.Azure.NSG
+		}
+		if len(file.Azure.SSHCIDRs) > 0 {
+			cfg.AzureSSHCIDRs = file.Azure.SSHCIDRs
+		}
+	}
 	if file.SSH != nil {
 		if file.SSH.User != "" {
 			cfg.SSHUser = file.SSH.User
@@ -943,6 +1005,18 @@ func applyEnv(cfg *Config) {
 	if cidrs := os.Getenv("CRABBOX_AWS_SSH_CIDRS"); cidrs != "" {
 		cfg.AWSSSHCIDRs = splitCommaList(cidrs)
 	}
+	cfg.AzureSubscription = getenv("CRABBOX_AZURE_SUBSCRIPTION_ID", getenv("AZURE_SUBSCRIPTION_ID", cfg.AzureSubscription))
+	cfg.AzureTenant = getenv("CRABBOX_AZURE_TENANT_ID", getenv("AZURE_TENANT_ID", cfg.AzureTenant))
+	cfg.AzureClientID = getenv("CRABBOX_AZURE_CLIENT_ID", getenv("AZURE_CLIENT_ID", cfg.AzureClientID))
+	cfg.AzureLocation = getenv("CRABBOX_AZURE_LOCATION", cfg.AzureLocation)
+	cfg.AzureResourceGroup = getenv("CRABBOX_AZURE_RESOURCE_GROUP", cfg.AzureResourceGroup)
+	cfg.AzureImage = getenv("CRABBOX_AZURE_IMAGE", cfg.AzureImage)
+	cfg.AzureVNet = getenv("CRABBOX_AZURE_VNET", cfg.AzureVNet)
+	cfg.AzureSubnet = getenv("CRABBOX_AZURE_SUBNET", cfg.AzureSubnet)
+	cfg.AzureNSG = getenv("CRABBOX_AZURE_NSG", cfg.AzureNSG)
+	if cidrs := os.Getenv("CRABBOX_AZURE_SSH_CIDRS"); cidrs != "" {
+		cfg.AzureSSHCIDRs = splitCommaList(cidrs)
+	}
 	cfg.SSHUser = getenv("CRABBOX_SSH_USER", cfg.SSHUser)
 	cfg.SSHKey = getenv("CRABBOX_SSH_KEY", cfg.SSHKey)
 	cfg.SSHPort = getenv("CRABBOX_SSH_PORT", cfg.SSHPort)
@@ -1109,6 +1183,9 @@ func serverTypeForConfig(cfg Config) string {
 	if cfg.Provider == "aws" {
 		return awsInstanceTypeCandidatesForConfig(cfg)[0]
 	}
+	if cfg.Provider == "azure" {
+		return azureVMSizeCandidatesForConfig(cfg)[0]
+	}
 	return serverTypeForClass(cfg.Class)
 }
 
@@ -1121,6 +1198,9 @@ func serverTypeForProviderClass(provider, class string) string {
 	}
 	if provider == "aws" {
 		return awsInstanceTypeCandidatesForClass(class)[0]
+	}
+	if provider == "azure" {
+		return azureVMSizeCandidatesForClass(class)[0]
 	}
 	return serverTypeForClass(class)
 }

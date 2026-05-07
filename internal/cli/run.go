@@ -1107,6 +1107,9 @@ func deleteServer(ctx context.Context, cfg Config, server Server) error {
 		}
 		return nil
 	}
+	if cfg.Provider == "azure" || server.Provider == "azure" {
+		return deleteAzureServer(ctx, cfg, server)
+	}
 	client, err := newHetznerClient()
 	if err != nil {
 		return err

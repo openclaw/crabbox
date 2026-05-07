@@ -35,6 +35,7 @@ Read when:
 - [Provider backends](../provider-backends.md): contract reference for backend interfaces and registration.
 - [Authoring a provider](provider-authoring.md): step-by-step guide to writing a new provider.
 - [AWS](aws.md): EC2 Linux, Windows, WSL2, EC2 Mac, capacity, AMIs, and security groups.
+- [Azure](azure.md): Azure Linux/native Windows, shared infra, capacity, and cleanup.
 - [Hetzner](hetzner.md): Linux-only managed Hetzner behavior, classes, and cleanup.
 - [Blacksmith Testbox](blacksmith-testbox.md): delegated Testbox backend behavior.
 - [Daytona](daytona.md): Daytona SDK/toolbox sandbox leases with optional short-lived SSH access.

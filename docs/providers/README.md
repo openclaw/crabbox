@@ -12,6 +12,7 @@ static SSH provider for existing machines.
 | Provider | Backend kind | Targets | Best for |
 | --- | --- | --- | --- |
 | [AWS](aws.md) | SSH lease | Linux, Windows, macOS | broad managed capacity, Windows, EC2 Mac |
+| [Azure](azure.md) | SSH lease | Linux, Windows | Windows clien |
 | [Hetzner](hetzner.md) | SSH lease | Linux | fast Linux capacity at low cost |
 | [Static SSH](ssh.md) | SSH lease | Linux, macOS, Windows | reusing an existing host |
 | [Blacksmith Testbox](blacksmith-testbox.md) | delegated run | Linux | existing Blacksmith Testbox workflows |
@@ -38,7 +39,8 @@ crabbox run --provider blacksmith-testbox --id tbx_123 -- pnpm test
 
 ## Brokered Versus Direct
 
-AWS and Hetzner can run through the Crabbox coordinator or directly from the CLI.
+AWS, Azure, and Hetzner can run through the Crabbox coordinator or directly
+from the CLI.
 Coordinator mode is the normal shared-team path: the Worker owns cloud
 credentials, cost state, cleanup alarms, and lease accounting.
 
@@ -56,6 +58,7 @@ Delegated providers do not use the Crabbox coordinator:
 | Provider | `run` | `warmup` | `ssh` | VNC/code | Crabbox sync | Provider sync |
 | --- | --- | --- | --- | --- | --- | --- |
 | AWS | yes | yes | yes | yes | yes | no |
+| Azure | yes | yes | yes | Linux VNC/code | yes | no |
 | Hetzner | yes | yes | yes | Linux VNC/code | yes | no |
 | Static SSH | yes | resolves host | yes | host-dependent | yes | no |
 | Blacksmith Testbox | yes | yes | no | no | no | yes |

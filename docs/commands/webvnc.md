@@ -145,7 +145,7 @@ Flags:
 
 ```text
 --id <lease-id-or-slug>
---provider hetzner|aws
+--provider hetzner|aws|azure
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>
@@ -167,7 +167,7 @@ daemon stop
 
 Limitations:
 
-- Coordinator-backed Hetzner and AWS desktop leases are supported.
+- Coordinator-backed Hetzner, AWS, and Azure Linux desktop leases are supported.
 - Static SSH hosts are intentionally not supported yet because the portal cannot
   prove that host-managed VNC credentials and prompts are safe to expose.
 - Blacksmith Testbox still owns its own machine connectivity.
@@ -179,7 +179,7 @@ Limitations:
 Run `crabbox login` for the coordinator you are using. WebVNC needs both the CLI
 bridge and the browser portal to authenticate with the coordinator.
 
-`webvnc currently supports coordinator-backed hetzner/aws desktop leases`
+`webvnc currently supports coordinator-backed hetzner/aws/azure desktop leases`
 
 WebVNC is not available for static SSH hosts or Blacksmith Testbox. Use
 `crabbox vnc` for static hosts when you explicitly trust the host-managed VNC

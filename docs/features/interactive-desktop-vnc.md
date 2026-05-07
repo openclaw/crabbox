@@ -69,8 +69,10 @@ Scenario systems such as Mantis own:
 | --- | --- | --- | --- |
 | Linux on Hetzner | Yes | Xvfb/XFCE/x11vnc over SSH tunnel | [Linux VNC](vnc-linux.md) |
 | Linux on AWS | Yes | Xvfb/XFCE/x11vnc over SSH tunnel | [Linux VNC](vnc-linux.md) |
+| Linux on Azure | Yes | Xvfb/XFCE/x11vnc over SSH tunnel | [Linux VNC](vnc-linux.md) |
 | AWS Windows | Yes | TightVNC over SSH tunnel | [Windows VNC](vnc-windows.md) |
 | AWS EC2 Mac | Yes | Screen Sharing/VNC over SSH tunnel | [macOS VNC](vnc-macos.md) |
+| Azure Windows | No | SSH/sync/run only | [Azure](azure.md) |
 | Static Linux | Host-managed | Existing loopback VNC service | [Linux VNC](vnc-linux.md) |
 | Static macOS | Host-managed | Existing Screen Sharing/VNC | [macOS VNC](vnc-macos.md) |
 | Static Windows | Host-managed | Existing VNC service | [Windows VNC](vnc-windows.md) |

@@ -311,11 +311,11 @@ func normalizeProviderName(name string) string {
 }
 
 func providerHelpAll() string {
-	return "provider: hetzner, aws, ssh, blacksmith-testbox, daytona, or islo"
+	return "provider: hetzner, aws, azure, ssh, blacksmith-testbox, daytona, or islo"
 }
 
 func providerHelpSSH() string {
-	return "provider: hetzner, aws, ssh, or daytona"
+	return "provider: hetzner, aws, azure, ssh, or daytona"
 }
 
 func isBlacksmithProvider(provider string) bool {

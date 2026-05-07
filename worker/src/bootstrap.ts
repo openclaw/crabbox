@@ -94,9 +94,10 @@ tasks:
 `;
 }
 
-export function windowsBootstrapPowerShell(config: LeaseConfig): string {
+function windowsBootstrapHeaderPowerShell(config: LeaseConfig): string {
   return `
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 function Retry($ScriptBlock) {
   for ($i = 1; $i -le 8; $i++) {
@@ -117,23 +118,23 @@ $user = ${psQuote(config.sshUser)}
 $publicKey = ${psQuote(config.sshPublicKey)}
 $workRoot = ${psQuote(config.workRoot)}
 $sshPorts = ${windowsSSHPortsPowerShell(config)}
-$vncPasswordPath = "C:\\ProgramData\\crabbox\\vnc.password"
-$windowsUsernamePath = "C:\\ProgramData\\crabbox\\windows.username"
-$windowsPasswordPath = "C:\\ProgramData\\crabbox\\windows.password"
-$userVNCStartupPath = "C:\\ProgramData\\crabbox\\start-user-vnc.ps1"
-$userVNCStartupCommandPath = Join-Path (Join-Path (Join-Path "C:\\Users" $user) "AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup") "crabbox-user-vnc.cmd"
-$setupCompletePath = "C:\\ProgramData\\crabbox\\setup-complete"
+$base = "C:\\ProgramData\\crabbox"
+$setupCompletePath = Join-Path $base "setup-complete"
 $openSSHZip = "$env:TEMP\\OpenSSH-Win64.zip"
 $gitInstaller = "$env:TEMP\\Git-2.52.0-64-bit.exe"
-$tightVNCInstaller = "$env:TEMP\\tightvnc-2.8.85-gpl-setup-64bit.msi"
-New-Item -ItemType Directory -Force -Path "C:\\ProgramData\\crabbox", $workRoot | Out-Null
-if (-not (Test-Path -LiteralPath $vncPasswordPath)) {
-  New-CrabboxPassword | Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath
+New-Item -ItemType Directory -Force -Path $base, $workRoot | Out-Null
+`;
 }
-$userPassword = Get-Content -Raw -Path $vncPasswordPath
+
+function windowsBootstrapCorePowerShell(): string {
+  return `
+if (-not (Test-Path -LiteralPath $passwordPath)) {
+  New-CrabboxPassword | Set-Content -NoNewline -Encoding ASCII -Path $passwordPath
+}
+$userPassword = (Get-Content -Raw -Path $passwordPath).Trim()
 if ($userPassword.Length -lt 12 -or $userPassword -notmatch '[A-Z]' -or $userPassword -notmatch '[a-z]' -or $userPassword -notmatch '[0-9]' -or $userPassword -notmatch '[^A-Za-z0-9]') {
   $userPassword = New-CrabboxPassword
-  Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath -Value $userPassword
+  Set-Content -NoNewline -Encoding ASCII -Path $passwordPath -Value $userPassword
 }
 $secure = ConvertTo-SecureString $userPassword -AsPlainText -Force
 if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
@@ -142,13 +143,17 @@ if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
   Set-LocalUser -Name $user -Password $secure -PasswordNeverExpires $true
 }
 Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
-Set-Content -NoNewline -Encoding ASCII -Path $windowsUsernamePath -Value $user
-Set-Content -NoNewline -Encoding ASCII -Path $windowsPasswordPath -Value $userPassword
+Set-Content -NoNewline -Encoding ASCII -Path $usernamePath -Value $user
+if ($passwordMirrorPath) {
+  Set-Content -NoNewline -Encoding ASCII -Path $passwordMirrorPath -Value $userPassword
+}
 $userSID = (Get-LocalUser -Name $user).SID.Value
+icacls.exe $workRoot /grant "*\${userSID}:(OI)(CI)F" | Out-Null
 $userSSHDir = Join-Path (Join-Path "C:\\Users" $user) ".ssh"
 $userAuthorizedKeys = Join-Path $userSSHDir "authorized_keys"
 New-Item -ItemType Directory -Force -Path $userSSHDir | Out-Null
 Set-Content -Encoding ASCII -Path $userAuthorizedKeys -Value $publicKey
+icacls.exe $userSSHDir /inheritance:r /grant "*\${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
 icacls.exe $userAuthorizedKeys /inheritance:r /grant "*\${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
 if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
   Retry { Invoke-WebRequest -Uri ${psQuote(openSSHWin64ZipURL)} -OutFile $openSSHZip -UseBasicParsing }
@@ -173,9 +178,18 @@ $inMatch = $false
 foreach ($line in ($sshdConfig -split "\\r?\\n")) {
   if ($line -match '^\\s*Match\\s+') { $inMatch = $true }
   if (-not $inMatch -and $line -match '^\\s*Port\\s+\\d+\\s*$') { continue }
+  if ($enforceKeyAuth -and -not $inMatch -and $line -match '^\\s*(PasswordAuthentication|PubkeyAuthentication)\\s+') { continue }
   if ($inMatch) { $matchLines += $line } else { $globalLines += $line }
 }
 foreach ($port in $sshPorts) { $globalLines += "Port $port" }
+if ($enforceKeyAuth) {
+  $globalLines += "PubkeyAuthentication yes"
+  $globalLines += "PasswordAuthentication no"
+}
+if (($matchLines -join [Environment]::NewLine) -notmatch '(?im)^\\s*Match\\s+Group\\s+administrators\\b') {
+  $matchLines += "Match Group administrators"
+  $matchLines += "       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys"
+}
 Set-Content -Encoding ASCII -LiteralPath $sshdConfigPath -Value (($globalLines + $matchLines) -join [Environment]::NewLine)
 foreach ($port in $sshPorts) {
   $ruleName = "crabbox-sshd-$port"
@@ -195,6 +209,26 @@ foreach ($path in @("C:\\Program Files\\OpenSSH", "C:\\Program Files\\Git\\cmd",
   if ($env:Path -notlike "*$path*") { $env:Path = "$env:Path;$path" }
 }
 [Environment]::SetEnvironmentVariable("Path", $machinePath, "Machine")
+`;
+}
+
+export function windowsBootstrapPowerShell(config: LeaseConfig): string {
+  return (
+    windowsBootstrapHeaderPowerShell(config) +
+    `
+$vncPasswordPath = "C:\\ProgramData\\crabbox\\vnc.password"
+$windowsUsernamePath = "C:\\ProgramData\\crabbox\\windows.username"
+$windowsPasswordPath = "C:\\ProgramData\\crabbox\\windows.password"
+$passwordPath = $vncPasswordPath
+$usernamePath = $windowsUsernamePath
+$passwordMirrorPath = $windowsPasswordPath
+$enforceKeyAuth = $false
+$userVNCStartupPath = "C:\\ProgramData\\crabbox\\start-user-vnc.ps1"
+$userVNCStartupCommandPath = Join-Path (Join-Path (Join-Path "C:\\Users" $user) "AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup") "crabbox-user-vnc.cmd"
+$tightVNCInstaller = "$env:TEMP\\tightvnc-2.8.85-gpl-setup-64bit.msi"
+` +
+    windowsBootstrapCorePowerShell() +
+    `
 if (-not (Test-Path -LiteralPath "C:\\Program Files\\TightVNC\\tvnserver.exe")) {
   Retry { Invoke-WebRequest -Uri ${psQuote(tightVNCMSIURL)} -OutFile $tightVNCInstaller -UseBasicParsing }
   $vncPassword = Get-Content -Raw -Path $vncPasswordPath
@@ -258,7 +292,27 @@ if (-not (Test-Path -LiteralPath $setupCompletePath)) {
   Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
   Restart-Computer -Force
 }
-`;
+`
+  );
+}
+
+export function azureWindowsBootstrapPowerShell(config: LeaseConfig): string {
+  return (
+    windowsBootstrapHeaderPowerShell(config) +
+    `
+$passwordPath = Join-Path $base "windows.password"
+$usernamePath = Join-Path $base "windows.username"
+$passwordMirrorPath = $null
+$enforceKeyAuth = $true
+` +
+    windowsBootstrapCorePowerShell() +
+    `
+Restart-Service sshd -Force
+git --version | Out-Null
+tar --version | Out-Null
+Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
+`
+  );
 }
 
 function windowsSSHPortsPowerShell(config: LeaseConfig): string {

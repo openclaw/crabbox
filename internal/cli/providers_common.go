@@ -31,6 +31,21 @@ func touchDirectLeaseBestEffort(ctx context.Context, cfg Config, server Server, 
 		}
 		return server
 	}
+	if cfg.Provider == "azure" || server.Provider == "azure" {
+		client, err := NewAzureClient(ctx, cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: direct touch state=%s: %v\n", state, err)
+			return server
+		}
+		name := server.CloudID
+		if name == "" {
+			name = server.Name
+		}
+		if err := client.SetTags(ctx, name, server.Labels); err != nil {
+			fmt.Fprintf(stderr, "warning: direct touch state=%s: %v\n", state, err)
+		}
+		return server
+	}
 	client, err := newHetznerClient()
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: direct touch state=%s: %v\n", state, err)

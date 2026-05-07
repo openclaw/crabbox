@@ -12,7 +12,7 @@ import (
 func (a App) vnc(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("vnc", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or ssh")
+	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
