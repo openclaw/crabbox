@@ -135,6 +135,32 @@ func TestManualEgressTicketCreationReusesActiveSession(t *testing.T) {
 	}
 }
 
+func TestFatalEgressBridgeSetupError(t *testing.T) {
+	fatalStatuses := []int{http.StatusForbidden, http.StatusNotFound, http.StatusGone, http.StatusConflict}
+	for _, status := range fatalStatuses {
+		err := CoordinatorHTTPError{StatusCode: status}
+		if !fatalEgressBridgeSetupError(err) {
+			t.Fatalf("status %d should stop stale egress bridge retries", status)
+		}
+	}
+	if fatalEgressBridgeSetupError(CoordinatorHTTPError{StatusCode: http.StatusTooManyRequests}) {
+		t.Fatal("transient coordinator errors should stay retryable")
+	}
+}
+
+func TestEgressDaemonSupervisorStopsOnFatalExit(t *testing.T) {
+	script := egressDaemonSupervisorScript("crabbox", []string{"egress", "host"})
+	for _, want := range []string{
+		`if [ "$code" = 4 ]; then`,
+		`egress daemon supervisor: child exited fatal code=$code; stopping`,
+		`exit "$code"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("supervisor script missing %q:\n%s", want, script)
+		}
+	}
+}
+
 func TestEgressRequestHostPort(t *testing.T) {
 	connect := &http.Request{Method: http.MethodConnect, Host: "discord.com:443"}
 	host, port, err := egressRequestHostPort(connect)

@@ -24,6 +24,20 @@ type CoordinatorClient struct {
 	Client  *http.Client
 }
 
+type CoordinatorHTTPError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Message    string
+}
+
+func (e CoordinatorHTTPError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("coordinator %s %s: http %d: %s", e.Method, e.Path, e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("coordinator %s %s: http %d", e.Method, e.Path, e.StatusCode)
+}
+
 type CoordinatorLease struct {
 	ID                   string                `json:"id"`
 	Slug                 string                `json:"slug,omitempty"`
@@ -1081,10 +1095,12 @@ func decodeCoordinatorResponse(method, path string, statusCode int, body io.Read
 	if statusCode < 200 || statusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(body, 600))
 		msg := strings.TrimSpace(string(data))
-		if msg != "" {
-			return fmt.Errorf("coordinator %s %s: http %d: %s", method, path, statusCode, msg)
+		return CoordinatorHTTPError{
+			Method:     method,
+			Path:       path,
+			StatusCode: statusCode,
+			Message:    msg,
 		}
-		return fmt.Errorf("coordinator %s %s: http %d", method, path, statusCode)
 	}
 	if out != nil {
 		if buf, ok := out.(*bytes.Buffer); ok {

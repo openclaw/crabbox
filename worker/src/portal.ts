@@ -597,8 +597,17 @@ export function portalVNC(lease: LeaseRecord): Response {
       let statusTimer;
       let controllerLabel = "";
       let isController = false;
+      const terminalStatusCodes = new Set([403, 404, 409, 410]);
       function retryDelay() {
         return Math.min(5000, 500 * 2 ** retryAttempt);
+      }
+      async function responseMessage(response, fallback) {
+        try {
+          const body = await response.json();
+          return body.message || body.error || fallback;
+        } catch (_) {
+          return fallback;
+        }
       }
       function fallbackCopyText(text) {
         const ta = document.createElement("textarea");
@@ -626,9 +635,16 @@ export function portalVNC(lease: LeaseRecord): Response {
       async function bridgeState() {
         try {
           const response = await fetch(statusURL, { cache: "no-store" });
-          return response.ok ? await response.json() : undefined;
-        } catch {
-          return undefined;
+          if (response.ok) {
+            return await response.json();
+          }
+          const message = await responseMessage(response, "WebVNC bridge unavailable");
+          if (terminalStatusCodes.has(response.status)) {
+            return { terminal: true, message };
+          }
+          return { transient: true, message };
+        } catch (error) {
+          return { transient: true, message: error instanceof Error ? error.message : String(error) };
         }
       }
       function applyCollaborationState(state) {
@@ -663,6 +679,15 @@ export function portalVNC(lease: LeaseRecord): Response {
         applyCollaborationState(state);
         return state;
       }
+      function stopPolling(label) {
+        stopped = true;
+        connected = false;
+        window.clearTimeout(retryTimer);
+        window.clearInterval(statusTimer);
+        try { rfb?.disconnect(); } catch (_) {}
+        screen.replaceChildren();
+        setStatus(label, "bad");
+      }
       function scheduleRetry(label) {
         if (stopped) return;
         const delay = retryDelay();
@@ -677,6 +702,14 @@ export function portalVNC(lease: LeaseRecord): Response {
         screen.replaceChildren();
         try {
           const state = await bridgeState();
+          if (state?.terminal) {
+            stopPolling(state.message || "WebVNC bridge unavailable");
+            return;
+          }
+          if (state?.transient) {
+            scheduleRetry(state.message || "WebVNC status unavailable");
+            return;
+          }
           if (state && !state.bridgeConnected) {
             scheduleRetry(state.message || "WebVNC daemon not running; run the bridge command below");
             return;
@@ -926,15 +959,39 @@ export function portalCode(lease: LeaseRecord): Response {
         const hint = document.getElementById("code-hint");
         const statusURL = new URL(${JSON.stringify(statusPath)}, window.location.href);
         let pollTimer;
+        let stopped = false;
+        const terminalStatusCodes = new Set([403, 404, 409, 410]);
         function setStatus(value, tone = "") {
           status.textContent = value;
           status.dataset.tone = tone;
         }
+        async function responseMessage(response, fallback) {
+          try {
+            const body = await response.json();
+            return body.message || body.error || fallback;
+          } catch (_) {
+            return fallback;
+          }
+        }
+        function stopPolling(message) {
+          stopped = true;
+          window.clearTimeout(pollTimer);
+          setStatus("bridge unavailable", "bad");
+          hint.textContent = message || "This lease is no longer available. Open a current lease from the portal.";
+        }
         async function pollBridge() {
+          if (stopped) return;
           window.clearTimeout(pollTimer);
           try {
             const response = await fetch(statusURL, { cache: "no-store" });
-            if (!response.ok) throw new Error("status " + response.status);
+            if (!response.ok) {
+              const message = await responseMessage(response, "Code bridge status unavailable");
+              if (terminalStatusCodes.has(response.status)) {
+                stopPolling(message);
+                return;
+              }
+              throw new Error(message);
+            }
             const state = await response.json();
             if (state?.code?.agentConnected) {
               setStatus("bridge connected; opening", "ok");
@@ -948,7 +1005,9 @@ export function portalCode(lease: LeaseRecord): Response {
             setStatus("status unavailable", "bad");
             hint.textContent = "Could not read bridge status. Reload or use the command below.";
           }
-          pollTimer = window.setTimeout(pollBridge, 2000);
+          if (!stopped) {
+            pollTimer = window.setTimeout(pollBridge, 2000);
+          }
         }
         document.getElementById("code-reload")?.addEventListener("click", () => {
           window.location.reload();

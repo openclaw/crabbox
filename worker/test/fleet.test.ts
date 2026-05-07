@@ -1437,6 +1437,8 @@ describe("fleet lease identity and idle", () => {
     expect(pageBody).toContain('id="code-copy"');
     expect(pageBody).toContain("/portal/leases/cbx_000000000001/code/health");
     expect(pageBody).toContain("window.location.reload()");
+    expect(pageBody).toContain("terminalStatusCodes");
+    expect(pageBody).toContain("stopPolling(message)");
 
     const health = await fleet.fetch(
       request("GET", "/portal/leases/blue-lobster/code/health", { headers }),
@@ -1748,6 +1750,11 @@ describe("fleet lease identity and idle", () => {
     expect(pageBody).not.toContain("vnc-role");
     expect(pageBody).not.toContain("status-pill vnc-role");
     expect(pageBody).toContain("rfb.viewOnly = !controlling");
+    expect(pageBody).toContain(
+      "WebVNC viewer already active; close stale WebVNC tabs or run reset",
+    );
+    expect(pageBody).toContain("state?.terminal");
+    expect(pageBody).toContain("stopPolling(state.message");
     expect(pageBody).toContain('fragment.get("username")');
     expect(pageBody).toContain('types.includes("username")');
     expect(pageBody).not.toContain("cdn.jsdelivr.net");

@@ -34,6 +34,7 @@ const (
 	egressDialTimeout       = 15 * time.Second
 	egressRemoteReadyWait   = 5 * time.Second
 	egressDaemonRestartWait = 1 * time.Second
+	egressDaemonFatalCode   = 4
 )
 
 type egressProxyMessage struct {
@@ -114,6 +115,9 @@ func (a App) egressHost(ctx context.Context, args []string) error {
 	}
 	bridge, err := connectEgressBridge(ctx, coord, leaseID, "host", *ticket, *sessionID, *profile, allow)
 	if err != nil {
+		if fatalEgressBridgeSetupError(err) {
+			return exit(egressDaemonFatalCode, "egress lease unavailable: %v", err)
+		}
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "egress host: connected lease=%s session=%s profile=%s allow=%s\n", leaseID, bridge.sessionID, blank(*profile, "-"), strings.Join(allow, ","))
@@ -145,6 +149,9 @@ func (a App) egressClient(ctx context.Context, args []string) error {
 	}
 	bridge, err := connectEgressBridge(ctx, coord, leaseID, "client", *ticket, *sessionID, "", nil)
 	if err != nil {
+		if fatalEgressBridgeSetupError(err) {
+			return exit(egressDaemonFatalCode, "egress lease unavailable: %v", err)
+		}
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "egress client: connected lease=%s session=%s listen=%s\n", leaseID, bridge.sessionID, *listen)
@@ -366,6 +373,19 @@ func connectEgressBridge(ctx context.Context, coord *CoordinatorClient, leaseID,
 		conns:     map[string]net.Conn{},
 		pending:   map[string]chan egressOpenResult{},
 	}, nil
+}
+
+func fatalEgressBridgeSetupError(err error) bool {
+	var httpErr CoordinatorHTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	switch httpErr.StatusCode {
+	case http.StatusForbidden, http.StatusNotFound, http.StatusGone, http.StatusConflict:
+		return true
+	default:
+		return false
+	}
 }
 
 func reusableEgressSessionID(ctx context.Context, coord *CoordinatorClient, leaseID, sessionID string) (string, error) {
@@ -954,6 +974,10 @@ func egressDaemonSupervisorScript(exe string, args []string) string {
 		"while :; do\n" +
 		"  " + strings.Join(argv, " ") + "\n" +
 		"  code=$?\n" +
+		"  if [ \"$code\" = " + strconv.Itoa(egressDaemonFatalCode) + " ]; then\n" +
+		"    echo \"egress daemon supervisor: child exited fatal code=$code; stopping\"\n" +
+		"    exit \"$code\"\n" +
+		"  fi\n" +
 		"  echo \"egress daemon supervisor: child exited code=$code; restarting in 1s\"\n" +
 		"  sleep " + strconv.Itoa(int(egressDaemonRestartWait/time.Second)) + "\n" +
 		"done\n"
