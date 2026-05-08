@@ -1,6 +1,5 @@
 // Package semaphore implements a Crabbox provider that creates Semaphore CI
-// jobs as warm testbox environments. Pure REST API — no sem-agent binary needed.
-//
+// jobs as warm testbox environments. Pure REST API; no sem-agent binary needed.
 package semaphore
 
 import (
