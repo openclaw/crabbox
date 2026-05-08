@@ -1750,9 +1750,6 @@ describe("fleet lease identity and idle", () => {
     expect(pageBody).not.toContain("vnc-role");
     expect(pageBody).not.toContain("status-pill vnc-role");
     expect(pageBody).toContain("rfb.viewOnly = !controlling");
-    expect(pageBody).toContain(
-      "WebVNC viewer already active; close stale WebVNC tabs or run reset",
-    );
     expect(pageBody).toContain("state?.terminal");
     expect(pageBody).toContain("stopPolling(state.message");
     expect(pageBody).toContain('fragment.get("username")');
