@@ -772,6 +772,17 @@ describe("fleet lease identity and idle", () => {
         windowsMode: "wsl2",
       }),
     );
+    storage.seed(
+      "lease:cbx_000000000006",
+      testLease({
+        id: "cbx_000000000006",
+        slug: "azure-box",
+        owner: "peter@example.com",
+        org: "openclaw",
+        provider: "azure",
+        target: "linux",
+      }),
+    );
     await fleet.fetch(
       request("POST", "/v1/runners/sync", {
         headers: {
@@ -839,7 +850,7 @@ describe("fleet lease identity and idle", () => {
     expect(body).toContain("table-scroll");
     expect(body).toContain(".lease-table th:nth-child(1)");
     expect(body).toContain(
-      'data-filter-buttons="active:active,ended:ended,external:external,stale:stale,stuck:stuck,aws:aws,hetzner:hetzner,blacksmith-testbox:blacksmith,linux:linux,macos:macos,windows:windows,all:all"',
+      'data-filter-buttons="active:active,ended:ended,external:external,stale:stale,stuck:stuck,aws:aws,azure:azure,hetzner:hetzner,blacksmith-testbox:blacksmith,linux:linux,macos:macos,windows:windows,all:all"',
     );
     expect(body).toContain('data-filter-default="active"');
     expect(body).not.toContain("external runners");
@@ -863,12 +874,14 @@ describe("fleet lease identity and idle", () => {
       'data-copy-value="crabbox stop --provider blacksmith-testbox tbx_01testbox"',
     );
     expect(body).not.toContain("tbx_friendbox");
+    expect(body).toContain('data-provider="azure"');
     expect(body).toContain('data-provider="hetzner"');
     expect(body).toContain('data-target="linux"');
     expect(body).toContain('data-target="windows"');
     expect(body).toContain("<span>win</span>");
     expect(body).toContain("<span>win (wsl2)</span>");
     expect(body).toContain('data-filter-tags="active mine hetzner linux"');
+    expect(body).toContain('data-filter-tags="active mine azure linux"');
     expect(body).toContain('class="access-cell"');
     expect(body).toContain('title="server"');
     expect(body).toContain('data-access="vscode"');

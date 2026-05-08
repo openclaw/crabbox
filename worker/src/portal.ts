@@ -58,6 +58,7 @@ export function portalHome(
     "stuck:stuck",
     ...(admin ? ["mine:mine", "system:system"] : []),
     "aws:aws",
+    "azure:azure",
     "hetzner:hetzner",
     "blacksmith-testbox:blacksmith",
     "linux:linux",
@@ -1628,6 +1629,9 @@ function providerIcon(provider: string): string {
   if (provider === "aws") {
     return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 15.5c3.8 2.2 9.1 2.5 14.8.9"/><path d="M17.5 13.2 20 16l-3.7.7"/><path d="M7 8.5h10l1.8 4H5.2z"/></svg>`;
   }
+  if (provider === "azure") {
+    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 17.5h9.2a4 4 0 0 0 .5-8 5.5 5.5 0 0 0-10.5-1.6A4.8 4.8 0 0 0 7.5 17.5Z"/><path d="M9 13h6"/></svg>`;
+  }
   if (provider === "hetzner") {
     return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M8 8v8M16 8v8M8 12h8"/></svg>`;
   }
@@ -1828,6 +1832,7 @@ function html(
     .icon-label svg { width:14px; height:14px; flex:0 0 14px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; color:#cbd5e1; }
     .icon-label span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .icon-label[data-provider="aws"] svg { color:#fbbf24; }
+    .icon-label[data-provider="azure"] svg { color:#60a5fa; }
     .icon-label[data-provider="hetzner"] svg { color:#ef4444; }
     .icon-label[data-provider="blacksmith-testbox"] svg { color:#a78bfa; }
     .icon-label[data-target="linux"] svg { color:#34d399; }
