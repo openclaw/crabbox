@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -77,7 +79,6 @@ func TestRegisterAndApplyFlags(t *testing.T) {
 	values := registerFlags(fs, cfg)
 	err := fs.Parse([]string{
 		"--semaphore-host", "myorg.semaphoreci.com",
-		"--semaphore-token", "my-token",
 		"--semaphore-project", "my-app",
 		"--semaphore-machine", "f1-standard-4",
 		"--semaphore-os-image", "ubuntu2404",
@@ -91,9 +92,6 @@ func TestRegisterAndApplyFlags(t *testing.T) {
 
 	if cfg.Semaphore.Host != "myorg.semaphoreci.com" {
 		t.Errorf("host = %q", cfg.Semaphore.Host)
-	}
-	if cfg.Semaphore.Token != "my-token" {
-		t.Errorf("token = %q", cfg.Semaphore.Token)
 	}
 	if cfg.Semaphore.Project != "my-app" {
 		t.Errorf("project = %q", cfg.Semaphore.Project)
@@ -215,6 +213,9 @@ func TestCreateJob(t *testing.T) {
 func TestGetJobStatus(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
+			"metadata": map[string]string{
+				"name": "crabbox testbox",
+			},
 			"status": map[string]any{
 				"state": "RUNNING",
 				"agent": map[string]any{
@@ -231,18 +232,21 @@ func TestGetJobStatus(t *testing.T) {
 	host := strings.TrimPrefix(server.URL, "https://")
 	client := &apiClient{host: host, token: "tok", http: server.Client()}
 
-	state, ip, port, err := client.GetJobStatus(context.Background(), "job-123")
+	status, err := client.GetJobStatus(context.Background(), "job-123")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state != "RUNNING" {
-		t.Errorf("state = %q", state)
+	if status.Name != "crabbox testbox" {
+		t.Errorf("name = %q", status.Name)
 	}
-	if ip != "1.2.3.4" {
-		t.Errorf("ip = %q", ip)
+	if status.State != "RUNNING" {
+		t.Errorf("state = %q", status.State)
 	}
-	if port != 40010 {
-		t.Errorf("port = %d", port)
+	if status.IP != "1.2.3.4" {
+		t.Errorf("ip = %q", status.IP)
+	}
+	if status.SSHPort != 40010 {
+		t.Errorf("port = %d", status.SSHPort)
 	}
 }
 
@@ -352,5 +356,143 @@ func TestStopJob(t *testing.T) {
 	}
 	if !stopped {
 		t.Error("stop endpoint was not called")
+	}
+}
+
+func TestResolveByJobIDRejectsNonCrabboxJob(t *testing.T) {
+	debugKeyHit := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs/job-123" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]string{
+					"name": "deploy",
+				},
+				"status": map[string]any{
+					"state": "RUNNING",
+					"agent": map[string]any{
+						"ip": "1.2.3.4",
+						"ports": []map[string]any{
+							{"name": "ssh", "number": 40010},
+						},
+					},
+				},
+			})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/debug_ssh_key") {
+			debugKeyHit = true
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "https://")
+	backend := &semaphoreBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    testConfig(host),
+		rt:     testRuntime(server.Client()),
+		client: &apiClient{host: host, token: "tok", http: server.Client()},
+	}
+
+	_, err := backend.resolveByJobID(context.Background(), "job-123")
+	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
+		t.Fatalf("resolve error = %v, want Crabbox-managed rejection", err)
+	}
+	if debugKeyHit {
+		t.Fatal("debug SSH key endpoint should not be called for non-Crabbox jobs")
+	}
+}
+
+func TestListFiltersNonCrabboxJobs(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs" && r.URL.Query().Get("states") == "RUNNING" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"jobs": []map[string]any{
+					{
+						"metadata": map[string]string{"id": "job-crabbox", "name": "crabbox testbox"},
+						"status":   map[string]string{"state": "RUNNING"},
+					},
+					{
+						"metadata": map[string]string{"id": "job-deploy", "name": "deploy"},
+						"status":   map[string]string{"state": "RUNNING"},
+					},
+				},
+			})
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "https://")
+	backend := &semaphoreBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    testConfig(host),
+		rt:     testRuntime(server.Client()),
+		client: &apiClient{host: host, token: "tok", http: server.Client()},
+	}
+
+	servers, err := backend.List(context.Background(), core.ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("servers = %v, want exactly one Crabbox job", servers)
+	}
+	if servers[0].CloudID != "job-crabbox" {
+		t.Errorf("cloud id = %q, want job-crabbox", servers[0].CloudID)
+	}
+}
+
+func TestReleaseRemovesClaimAndStoredKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	leaseID := "sem_job-release"
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "blue-lobster", providerName, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := storeSSHKey(leaseID, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stopped := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/api/v1alpha/jobs/job-release/stop" {
+			stopped = true
+			w.Write([]byte("{}"))
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "https://")
+	backend := &semaphoreBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    testConfig(host),
+		rt:     testRuntime(server.Client()),
+		client: &apiClient{host: host, token: "tok", http: server.Client()},
+	}
+
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{LeaseID: leaseID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stopped {
+		t.Fatal("stop endpoint was not called")
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("stored key still exists or stat failed with unexpected error: %v", err)
+	}
+	if _, found, err := core.ResolveLeaseClaim("blue-lobster"); err != nil {
+		t.Fatal(err)
+	} else if found {
+		t.Fatal("lease claim still resolves after release")
 	}
 }

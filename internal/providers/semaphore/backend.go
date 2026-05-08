@@ -18,7 +18,7 @@ type semaphoreBackend struct {
 
 func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.Semaphore.Host == "" || cfg.Semaphore.Token == "" {
-		return nil, core.Exit(2, "semaphore provider requires semaphore.host and semaphore.token in config or --semaphore-host/--semaphore-token flags")
+		return nil, core.Exit(2, "semaphore provider requires semaphore.host in config, environment, or --semaphore-host and semaphore.token in config or environment")
 	}
 	cfg.Provider = providerName
 	client := newAPIClient(cfg.Semaphore.Host, cfg.Semaphore.Token, rt)
@@ -137,12 +137,15 @@ func isLeaseID(id string) bool {
 }
 
 func (b *semaphoreBackend) resolveByJobID(ctx context.Context, jobID string) (core.LeaseTarget, error) {
-	state, ip, sshPort, err := b.client.GetJobStatus(ctx, jobID)
+	status, err := b.client.GetJobStatus(ctx, jobID)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if state != "RUNNING" {
-		return core.LeaseTarget{}, core.Exit(4, "semaphore job %s is not running (state: %s)", jobID, state)
+	if !isCrabboxJobName(status.Name) {
+		return core.LeaseTarget{}, core.Exit(4, "semaphore job %s is not Crabbox-managed", jobID)
+	}
+	if status.State != "RUNNING" {
+		return core.LeaseTarget{}, core.Exit(4, "semaphore job %s is not running (state: %s)", jobID, status.State)
 	}
 
 	sshKey, err := b.client.GetSSHKey(ctx, jobID)
@@ -164,9 +167,9 @@ func (b *semaphoreBackend) resolveByJobID(ctx context.Context, jobID string) (co
 
 	target := core.SSHTarget{
 		User:       "semaphore",
-		Host:       ip,
+		Host:       status.IP,
 		Key:        keyPath,
-		Port:       fmt.Sprintf("%d", sshPort),
+		Port:       fmt.Sprintf("%d", status.SSHPort),
 		TargetOS:   core.TargetLinux,
 		ReadyCheck: "true",
 	}
@@ -181,7 +184,7 @@ func (b *semaphoreBackend) resolveByJobID(ctx context.Context, jobID string) (co
 			"provider": providerName,
 		},
 	}
-	server.PublicNet.IPv4.IP = ip
+	server.PublicNet.IPv4.IP = status.IP
 	server.ServerType.Name = withDefault(b.cfg.Semaphore.Machine, "f1-standard-2")
 
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
@@ -196,6 +199,9 @@ func (b *semaphoreBackend) List(ctx context.Context, req core.ListRequest) ([]co
 
 	var servers []core.Server
 	for _, j := range jobs {
+		if !isCrabboxJobName(j.Name) {
+			continue
+		}
 		s := core.Server{
 			CloudID:  j.ID,
 			Provider: providerName,
@@ -214,7 +220,12 @@ func (b *semaphoreBackend) List(ctx context.Context, req core.ListRequest) ([]co
 // ReleaseLease stops the Semaphore job.
 func (b *semaphoreBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	jobID := stripLeasePrefix(req.Lease.LeaseID)
-	return b.client.StopJob(ctx, jobID)
+	if err := b.client.StopJob(ctx, jobID); err != nil {
+		return err
+	}
+	core.RemoveLeaseClaim(req.Lease.LeaseID)
+	core.RemoveStoredTestboxKey(req.Lease.LeaseID)
+	return nil
 }
 
 // Touch is a no-op for Semaphore — the keepalive script handles idle timeout.
@@ -223,8 +234,13 @@ func (b *semaphoreBackend) Touch(ctx context.Context, req core.TouchRequest) (co
 }
 
 func storeSSHKey(leaseID, keyContent string) (string, error) {
-	dir := os.TempDir()
-	path := filepath.Join(dir, ".crabbox-sem-"+leaseID+".key")
+	path, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
 	if err := os.WriteFile(path, []byte(keyContent), 0600); err != nil {
 		return "", err
 	}

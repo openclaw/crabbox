@@ -27,6 +27,13 @@ type jobInfo struct {
 	State string
 }
 
+type jobStatus struct {
+	Name    string
+	State   string
+	IP      string
+	SSHPort int
+}
+
 const userAgent = "SemaphoreCI v2.0 Client"
 
 func newAPIClient(host, token string, rt core.Runtime) *apiClient {
@@ -91,23 +98,26 @@ func (c *apiClient) WaitForRunning(ctx context.Context, jobID string, tick func(
 		}
 		tick()
 
-		state, ip, port, err := c.GetJobStatus(ctx, jobID)
+		status, err := c.GetJobStatus(ctx, jobID)
 		if err != nil {
 			continue
 		}
-		if state == "FINISHED" {
+		if status.State == "FINISHED" {
 			return "", 0, core.Exit(5, "job %s finished before reaching RUNNING state", jobID)
 		}
-		if state == "RUNNING" {
-			return ip, port, nil
+		if status.State == "RUNNING" {
+			return status.IP, status.SSHPort, nil
 		}
 	}
 	return "", 0, core.Exit(5, "job %s did not reach RUNNING state within timeout", jobID)
 }
 
-// GetJobStatus returns the job state, IP, and SSH port.
-func (c *apiClient) GetJobStatus(ctx context.Context, jobID string) (state, ip string, sshPort int, err error) {
+// GetJobStatus returns the job metadata, state, IP, and SSH port.
+func (c *apiClient) GetJobStatus(ctx context.Context, jobID string) (jobStatus, error) {
 	var result struct {
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
 		Status struct {
 			State string `json:"state"`
 			Agent struct {
@@ -120,7 +130,7 @@ func (c *apiClient) GetJobStatus(ctx context.Context, jobID string) (state, ip s
 		} `json:"status"`
 	}
 	if err := c.get(ctx, "/api/v1alpha/jobs/"+jobID, &result); err != nil {
-		return "", "", 0, err
+		return jobStatus{}, err
 	}
 	port := 0
 	for _, p := range result.Status.Agent.Ports {
@@ -128,7 +138,12 @@ func (c *apiClient) GetJobStatus(ctx context.Context, jobID string) (state, ip s
 			port = p.Number
 		}
 	}
-	return result.Status.State, result.Status.Agent.IP, port, nil
+	return jobStatus{
+		Name:    result.Metadata.Name,
+		State:   result.Status.State,
+		IP:      result.Status.Agent.IP,
+		SSHPort: port,
+	}, nil
 }
 
 // GetSSHKey returns the SSH private key for a job.

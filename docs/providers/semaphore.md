@@ -39,15 +39,17 @@ the debug SSH key API, returns a standard `LeaseTarget`.
 provider: semaphore
 semaphore:
   host: myorg.semaphoreci.com     # required
-  token: ...                       # required
+  # Prefer CRABBOX_SEMAPHORE_TOKEN or SEMAPHORE_API_TOKEN.
+  # Use user config only; do not commit tokens in repo config.
+  token: ...                       # required unless provided by env
   project: my-app                  # required
   machine: f1-standard-2           # optional, default: f1-standard-2
   osImage: ubuntu2204              # optional, default: ubuntu2204
   idleTimeout: 30m                 # optional, default: 30m
 ```
 
-Flags: `--semaphore-host`, `--semaphore-token`, `--semaphore-project`,
-`--semaphore-machine`, `--semaphore-os-image`, `--semaphore-idle-timeout`.
+Flags: `--semaphore-host`, `--semaphore-project`, `--semaphore-machine`,
+`--semaphore-os-image`, `--semaphore-idle-timeout`.
 
 Environment variables:
 

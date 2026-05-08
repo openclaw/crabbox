@@ -2,6 +2,7 @@ package semaphore
 
 import (
 	"flag"
+	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -11,7 +12,6 @@ const providerName = "semaphore"
 
 type flagValues struct {
 	Host        *string
-	Token       *string
 	Project     *string
 	Machine     *string
 	OSImage     *string
@@ -22,7 +22,6 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) flagValues {
 	sem := defaults.Semaphore
 	return flagValues{
 		Host:        fs.String("semaphore-host", sem.Host, "Semaphore host (e.g. myorg.semaphoreci.com)"),
-		Token:       fs.String("semaphore-token", sem.Token, "Semaphore API token"),
 		Project:     fs.String("semaphore-project", sem.Project, "Semaphore project name"),
 		Machine:     fs.String("semaphore-machine", withDefault(sem.Machine, "f1-standard-2"), "Machine type"),
 		OSImage:     fs.String("semaphore-os-image", withDefault(sem.OSImage, "ubuntu2204"), "OS image"),
@@ -33,9 +32,6 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) flagValues {
 func applyFlagOverrides(cfg *core.Config, fs *flag.FlagSet, v flagValues) {
 	if wasSet(fs, "semaphore-host") {
 		cfg.Semaphore.Host = *v.Host
-	}
-	if wasSet(fs, "semaphore-token") {
-		cfg.Semaphore.Token = *v.Token
 	}
 	if wasSet(fs, "semaphore-project") {
 		cfg.Semaphore.Project = *v.Project
@@ -75,4 +71,8 @@ func idleTimeout(cfg core.Config) time.Duration {
 		}
 	}
 	return 30 * time.Minute
+}
+
+func isCrabboxJobName(name string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(name)), "crabbox testbox")
 }
