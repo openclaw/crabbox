@@ -1,7 +1,32 @@
 # Provider: Semaphore
 
-SSH lease provider that creates Semaphore CI jobs as testbox environments via
-the Semaphore REST API. Crabbox handles sync and command execution over SSH.
+Read when:
+
+- choosing `provider: semaphore`;
+- configuring Semaphore CI testboxes, API auth, machine types, or OS images;
+- changing `internal/providers/semaphore`.
+
+Semaphore is an SSH lease provider that creates Semaphore CI jobs as testbox
+environments via the Semaphore REST API. Crabbox handles sync and command
+execution over SSH.
+
+## When To Use
+
+Use Semaphore when a repo already depends on Semaphore CI environments,
+project secrets, caches, or machine images and you want a Crabbox lease that
+matches that CI context. Use AWS, Azure, Hetzner, or Static SSH when the box
+should be independent managed cloud capacity, or when VNC/desktop/code
+workflows are required.
+
+## Commands
+
+```sh
+crabbox warmup --provider semaphore --semaphore-host myorg.semaphoreci.com --semaphore-project my-app
+crabbox run --provider semaphore -- pnpm test
+crabbox ssh --provider semaphore --id blue-lobster
+crabbox status --provider semaphore --id blue-lobster
+crabbox stop --provider semaphore blue-lobster
+```
 
 ## Backend kind
 
@@ -23,6 +48,20 @@ semaphore:
 
 Flags: `--semaphore-host`, `--semaphore-token`, `--semaphore-project`,
 `--semaphore-machine`, `--semaphore-os-image`, `--semaphore-idle-timeout`.
+
+Environment variables:
+
+```text
+CRABBOX_SEMAPHORE_HOST
+CRABBOX_SEMAPHORE_TOKEN
+CRABBOX_SEMAPHORE_PROJECT
+CRABBOX_SEMAPHORE_MACHINE
+CRABBOX_SEMAPHORE_OS_IMAGE
+CRABBOX_SEMAPHORE_IDLE_TIMEOUT
+SEMAPHORE_HOST
+SEMAPHORE_API_TOKEN
+SEMAPHORE_PROJECT
+```
 
 Token: `https://<host>/me/api-tokens`
 

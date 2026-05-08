@@ -77,7 +77,7 @@ On success, `warmup` prints a concise total duration line. Add `--timing-json` t
 Flags:
 
 ```text
---provider hetzner|aws|azure|ssh|blacksmith-testbox|daytona|islo
+--provider hetzner|aws|azure|ssh|blacksmith-testbox|semaphore|daytona|islo
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>

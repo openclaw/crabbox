@@ -15,7 +15,7 @@ Flags:
 
 ```text
 --id <lease-id-or-slug>
---provider hetzner|aws|azure|ssh|daytona
+--provider hetzner|aws|azure|ssh|semaphore|daytona
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>

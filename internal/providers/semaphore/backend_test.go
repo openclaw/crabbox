@@ -266,13 +266,22 @@ func TestGetSSHKey(t *testing.T) {
 
 func TestResolveProjectID(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != "SemaphoreCI v2.0 Client" {
+			t.Errorf("user-agent = %q", got)
+		}
 		if r.URL.Path == "/api/v1alpha/projects/my-project" {
 			w.WriteHeader(400) // some hosts don't support name lookup
 			return
 		}
-		if r.URL.Path == "/api/v1alpha/projects" {
+		if r.URL.Path == "/api/v1alpha/projects" && r.URL.Query().Get("page") == "" {
+			w.Header().Set("Link", `</api/v1alpha/projects?page=2>; rel="next"`)
 			json.NewEncoder(w).Encode([]map[string]any{
 				{"metadata": map[string]string{"name": "other", "id": "other-id"}},
+			})
+			return
+		}
+		if r.URL.Path == "/api/v1alpha/projects" && r.URL.Query().Get("page") == "2" {
+			json.NewEncoder(w).Encode([]map[string]any{
 				{"metadata": map[string]string{"name": "my-project", "id": "proj-abc"}},
 			})
 			return

@@ -55,6 +55,15 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ISLO_VCPUS",
 		"CRABBOX_ISLO_MEMORY_MB",
 		"CRABBOX_ISLO_DISK_GB",
+		"CRABBOX_SEMAPHORE_HOST",
+		"SEMAPHORE_HOST",
+		"CRABBOX_SEMAPHORE_TOKEN",
+		"SEMAPHORE_API_TOKEN",
+		"CRABBOX_SEMAPHORE_PROJECT",
+		"SEMAPHORE_PROJECT",
+		"CRABBOX_SEMAPHORE_MACHINE",
+		"CRABBOX_SEMAPHORE_OS_IMAGE",
+		"CRABBOX_SEMAPHORE_IDLE_TIMEOUT",
 	} {
 		t.Setenv(key, "")
 	}
@@ -155,6 +164,13 @@ islo:
   vcpus: 4
   memoryMB: 8192
   diskGB: 40
+semaphore:
+  host: semaphore.example.test
+  token: semaphore-token
+  project: crabbox
+  machine: f1-standard-4
+  osImage: ubuntu2404
+  idleTimeout: 15m
 static:
   id: win-dev
   name: windows-dev
@@ -250,6 +266,9 @@ ssh:
 	}
 	if cfg.Islo.BaseURL != "https://islo.example.test" || cfg.Islo.Image != "docker.io/library/ubuntu:24.04" || cfg.Islo.Workdir != "crabbox" || cfg.Islo.GatewayProfile != "default" || cfg.Islo.SnapshotName != "snap-ready" || cfg.Islo.VCPUs != 4 || cfg.Islo.MemoryMB != 8192 || cfg.Islo.DiskGB != 40 {
 		t.Fatalf("islo config not loaded: %#v", cfg.Islo)
+	}
+	if cfg.Semaphore.Host != "semaphore.example.test" || cfg.Semaphore.Token != "semaphore-token" || cfg.Semaphore.Project != "crabbox" || cfg.Semaphore.Machine != "f1-standard-4" || cfg.Semaphore.OSImage != "ubuntu2404" || cfg.Semaphore.IdleTimeout != "15m" {
+		t.Fatalf("semaphore config not loaded: %#v", cfg.Semaphore)
 	}
 	if cfg.Static.Host != "win-dev.local" || cfg.Static.User != "peter" || cfg.Static.Port != "22" || cfg.WorkRoot != "/home/peter/crabbox" {
 		t.Fatalf("static config not loaded: static=%#v workRoot=%s", cfg.Static, cfg.WorkRoot)
@@ -347,6 +366,15 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_ISLO_VCPUS", "8")
 	t.Setenv("CRABBOX_ISLO_MEMORY_MB", "16384")
 	t.Setenv("CRABBOX_ISLO_DISK_GB", "80")
+	t.Setenv("SEMAPHORE_HOST", "semaphore-file.example.test")
+	t.Setenv("CRABBOX_SEMAPHORE_HOST", "semaphore-env.example.test")
+	t.Setenv("SEMAPHORE_API_TOKEN", "semaphore-token-file")
+	t.Setenv("CRABBOX_SEMAPHORE_TOKEN", "semaphore-token-env")
+	t.Setenv("SEMAPHORE_PROJECT", "semaphore-project-file")
+	t.Setenv("CRABBOX_SEMAPHORE_PROJECT", "semaphore-project-env")
+	t.Setenv("CRABBOX_SEMAPHORE_MACHINE", "f1-standard-env")
+	t.Setenv("CRABBOX_SEMAPHORE_OS_IMAGE", "ubuntu-env")
+	t.Setenv("CRABBOX_SEMAPHORE_IDLE_TIMEOUT", "22m")
 	path := userConfigPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -388,6 +416,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Islo.APIKey != "islo-api-env" || cfg.Islo.BaseURL != "https://islo-env.example" || cfg.Islo.Image != "ubuntu:env" || cfg.Islo.Workdir != "env-workdir" || cfg.Islo.GatewayProfile != "env-gateway" || cfg.Islo.SnapshotName != "env-snapshot" || cfg.Islo.VCPUs != 8 || cfg.Islo.MemoryMB != 16384 || cfg.Islo.DiskGB != 80 {
 		t.Fatalf("unexpected islo env: %#v", cfg.Islo)
+	}
+	if cfg.Semaphore.Host != "semaphore-env.example.test" || cfg.Semaphore.Token != "semaphore-token-env" || cfg.Semaphore.Project != "semaphore-project-env" || cfg.Semaphore.Machine != "f1-standard-env" || cfg.Semaphore.OSImage != "ubuntu-env" || cfg.Semaphore.IdleTimeout != "22m" {
+		t.Fatalf("unexpected semaphore env: %#v", cfg.Semaphore)
 	}
 }
 

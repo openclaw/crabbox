@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -25,7 +27,7 @@ type jobInfo struct {
 	State string
 }
 
-const userAgent = "SemaphoreCLI/crabbox (crabbox-semaphore-provider)"
+const userAgent = "SemaphoreCI v2.0 Client"
 
 func newAPIClient(host, token string, rt core.Runtime) *apiClient {
 	httpClient := &http.Client{Timeout: 30 * time.Second}
@@ -194,9 +196,10 @@ func (c *apiClient) resolveProjectID(ctx context.Context, name string) (string, 
 			ID   string `json:"id"`
 		} `json:"metadata"`
 	}
-	for page := 1; ; page++ {
+	path := "/api/v1alpha/projects"
+	for path != "" {
 		var projects []projectEntry
-		resp, headers, err := c.getWithHeaders(ctx, fmt.Sprintf("/api/v1alpha/projects?page=%d", page))
+		resp, headers, err := c.getWithHeaders(ctx, path)
 		if err != nil {
 			return "", err
 		}
@@ -208,11 +211,30 @@ func (c *apiClient) resolveProjectID(ctx context.Context, name string) (string, 
 				return p.Metadata.ID, nil
 			}
 		}
-		if headers.Get("x-has-more") != "true" || len(projects) == 0 {
-			break
-		}
+		path = nextLinkPath(headers)
 	}
 	return "", fmt.Errorf("project %q not found", name)
+}
+
+func nextLinkPath(headers http.Header) string {
+	for _, part := range strings.Split(headers.Get("Link"), ",") {
+		sections := strings.Split(part, ";")
+		if len(sections) < 2 || !strings.Contains(part, `rel="next"`) {
+			continue
+		}
+		raw := strings.TrimSpace(sections[0])
+		raw = strings.TrimPrefix(raw, "<")
+		raw = strings.TrimSuffix(raw, ">")
+		u, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		if u.IsAbs() {
+			return u.RequestURI()
+		}
+		return raw
+	}
+	return ""
 }
 
 func (c *apiClient) getWithHeaders(ctx context.Context, path string) ([]byte, http.Header, error) {
