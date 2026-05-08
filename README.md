@@ -254,6 +254,7 @@ go test -race ./...
 scripts/check-go-coverage.sh 85.0
 
 # Cloudflare Worker
+# Use Node 22+ for local Worker checks; CI currently runs Node 24.
 npm ci --prefix worker
 npm test --prefix worker
 npm run build --prefix worker
