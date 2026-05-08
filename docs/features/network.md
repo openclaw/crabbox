@@ -58,16 +58,17 @@ the address is already on the tailnet.
 
 ## Public Reachability
 
-Brokered AWS Linux, AWS Windows, AWS Mac, Hetzner Linux, Daytona, and Islo
-leases all expose at least one public address. Crabbox stores the public
-address on the server record and uses it whenever the network mode resolves
-to `public`.
+Brokered AWS Linux, AWS Windows, AWS Mac, Azure Linux, Azure native Windows,
+Hetzner Linux, Daytona, and Islo leases all expose at least one public address.
+Crabbox stores the public address on the server record and uses it whenever
+the network mode resolves to `public`.
 
 Public addresses are gated by the provider's security group / firewall. AWS
 managed leases use the `crabbox-runners` security group with SSH ingress
 limited to the configured CIDRs or the request source IP. Hetzner managed
 leases use the cloud firewall attached to the project; the broker keeps it
-limited to the operator's IPs.
+limited to the operator's IPs. Azure managed leases use the configured network
+security group and `azure.sshCIDRs`.
 
 If your client IP changes during a long warmup, the existing security group
 rule may not include the new IP. Re-running `crabbox status` adds the

@@ -2,13 +2,13 @@
 
 Read when:
 
-- using `--desktop` on Hetzner or AWS Linux;
+- using `--desktop` on Hetzner, AWS, or Azure Linux;
 - debugging Xvfb, XFCE/Openbox, x11vnc, or screenshots on a Linux lease;
 - preparing a static Linux host for Crabbox VNC.
 
-Linux is the simplest managed desktop path. Hetzner and AWS Linux leases use
-the same bootstrap shape: install a lightweight desktop, run it on `DISPLAY=:99`,
-bind x11vnc to loopback, and let the CLI create an SSH tunnel.
+Linux is the simplest managed desktop path. Hetzner, AWS, and Azure Linux
+leases use the same bootstrap shape: install a lightweight desktop, run it on
+`DISPLAY=:99`, bind x11vnc to loopback, and let the CLI create an SSH tunnel.
 
 ## Managed Linux
 
@@ -105,6 +105,7 @@ Related docs:
 - [Interactive desktop and VNC](interactive-desktop-vnc.md)
 - [Hetzner](hetzner.md)
 - [AWS](aws.md)
+- [Azure](azure.md)
 - [vnc command](../commands/vnc.md)
 - [webvnc command](../commands/webvnc.md)
 - [desktop command](../commands/desktop.md)

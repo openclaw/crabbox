@@ -236,7 +236,7 @@ often machine- and user-encrypted.
 
 ## Where To Go Next
 
-- [Linux VNC](vnc-linux.md): Hetzner/AWS Linux desktop services and static Linux.
+- [Linux VNC](vnc-linux.md): Hetzner/AWS/Azure Linux desktop services and static Linux.
 - [Windows VNC](vnc-windows.md): AWS Windows, native Windows static hosts, and WSL2 boundaries.
 - [macOS VNC](vnc-macos.md): AWS EC2 Mac and static Mac Screen Sharing.
 - [AWS](aws.md): AWS target matrix, capacity, AMIs, and EC2 Mac host requirements.
