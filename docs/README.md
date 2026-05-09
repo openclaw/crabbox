@@ -4,9 +4,17 @@
 
 ## What Crabbox is
 
-Crabbox is a shared remote testbox system for OpenClaw maintainers and AI agents. The goal is to keep the local developer story unchanged - edit, save, run - while moving compute and tests onto owned cloud capacity.
+Crabbox is a shared agent workspace control plane for OpenClaw maintainers and
+AI agents. The goal is to keep the local developer story unchanged - edit,
+save, run - while moving compute, tests, and review evidence onto owned or
+provider-backed remote capacity.
 
-A `crabbox run` command leases a brokered cloud machine or reuses a static SSH host, syncs your tracked and nonignored local files, executes the command remotely, streams stdout and stderr back, and releases or unclaims the target. Behind the scenes a small Cloudflare-hosted broker owns cloud provider credentials, lease state, cleanup, usage, and cost guardrails so individual machines and CLIs never need to.
+A `crabbox run` command leases a brokered cloud machine, reuses a static SSH
+host, or delegates to a sandbox provider, syncs your tracked and nonignored
+local files, executes the command remotely, streams stdout and stderr back, and
+releases or unclaims the target. Behind the scenes a small Cloudflare-hosted
+broker owns cloud provider credentials, lease state, cleanup, usage, and cost
+guardrails so individual machines and CLIs never need to.
 
 ## How it fits together
 

@@ -6,7 +6,11 @@
 
 **Warm a box, sync the diff, run the suite.**
 
-Crabbox is an open-source remote testbox runner for maintainers and AI agents. Lease fast managed cloud capacity, or point at an existing SSH host, sync your dirty checkout, run a command remotely, stream output, and release. Local edit-save-run loop, cloud-grade compute.
+Crabbox is an open-source agent workspace control plane for maintainers and AI
+agents. Lease fast managed cloud capacity, point at an existing SSH host, or use
+an agent sandbox provider, then sync your dirty checkout, run commands remotely,
+stream output, collect evidence, and release. Local edit-save-run loop,
+cloud-grade compute, agent-ready observability.
 
 ```sh
 crabbox run -- pnpm test
@@ -69,10 +73,10 @@ For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For th
 
 ## Highlights
 
-- **One-shot or warm.** `crabbox run` for fire-and-forget; `crabbox warmup` + `--id` for repeated runs against the same box.
+- **One-shot or warm workspaces.** `crabbox run` for fire-and-forget; `crabbox warmup` + `--id` for repeated runs against the same box.
 - **Run observability.** Every coordinator-backed run gets an early `run_...` handle. Use `crabbox attach <run-id>` while it is active, `crabbox events <run-id> --after <seq> --limit <n>` for durable lifecycle/output events, and `crabbox logs <run-id>` for retained output after completion.
 - **Stable timing records.** `--timing-json` on `run`, `warmup`, and `actions hydrate` gives scripts one machine-readable sync/command/total timing schema across AWS, Hetzner, and Blacksmith Testboxes.
-- **Local-first sync.** No clean-checkout requirement. Tracked + nonignored files only, fingerprint skip on no-op runs, sanity checks against suspicious mass deletions, optional shallow base-ref hydration for changed-test workflows.
+- **Local-first workspace sync.** No clean-checkout requirement. Tracked + nonignored files only, fingerprint skip on no-op runs, sanity checks against suspicious mass deletions, optional shallow base-ref hydration for changed-test workflows.
 - **Brokered cloud.** Maintainers and agents share infra without sharing provider tokens. Hetzner, AWS EC2, and Azure are managed providers; AWS also owns Windows WSL2 and EC2 Mac targets. Linux defaults to Spot unless capacity config says otherwise. Providers fall back across compatible instance families when capacity or quota rejects a request.
 - **Azure Linux and native Windows.** `provider: azure` provisions Linux and native Windows VMs in a configurable Azure subscription using `DefaultAzureCredential` in direct mode or service-principal secrets in the broker. Crabbox creates a shared resource group, vnet, subnet, and NSG on first use, then per-lease public IPs, NICs, and VMs. Linux uses cloud-init; Windows uses VM Agent Custom Script Extension to install OpenSSH/Git and configure the Crabbox user.
 - **macOS and Windows static hosts.** `provider: ssh` reuses existing machines; it does not create macOS or Windows Crabbox boxes. macOS and Windows WSL2 use the POSIX rsync path; native Windows uses PowerShell plus tar archive sync.
@@ -84,6 +88,7 @@ For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For th
 - **GitHub Actions hydration.** `crabbox actions hydrate` registers a leased box as an ephemeral Actions runner, so the repo's own workflow installs runtimes, services, and secrets. Crabbox does not parse Actions YAML.
 - **Interactive desktop and browser leases.** `--browser` provisions Chrome or Chromium for headless automation, `--desktop` provisions visible UI with tunnel-only VNC takeover on managed Linux, AWS native Windows, and AWS EC2 Mac targets. `crabbox desktop doctor` checks session, VNC, input tooling, browser, ffmpeg, screen size, screenshot capture, and WebVNC portal state; `desktop click/paste/type/key` provide first-class input helpers so agents do not hand-roll brittle `xdotool` snippets. QA systems such as Mantis own scenario logic, screenshots, and PR evidence. Azure native Windows is SSH/sync/run only; use AWS for managed Windows desktop/WSL2 or `provider: ssh` for an existing Windows host.
 - **Authenticated web portal.** Browser login opens owner-scoped and explicitly shared lease/run views with searchable, paginated tables, muted external-runner rows, compact provider/OS/access icons, relative sortable times, recent run logs/events, WebVNC, code-server, and Linux lease/run telemetry charts. `crabbox share` can grant a lease to one user or the owning org, and the lease page exposes the same sharing controls for owners/managers. WebVNC is preferred for human demos because it preloads the VNC password; `webvnc status` reports local daemon, tunnel, target reachability, bridge/viewer state, recent events, URL/password, and native VNC fallback, while `webvnc reset` restarts only the selected lease's WebVNC/input stack. Admin sessions can also see non-owned runner leases behind `mine`/`system` filters.
+- **Agent workspace evidence.** History, logs, events, telemetry, JUnit summaries, screenshots, recordings, artifacts, and PR publishing make autonomous work reviewable instead of only ephemeral terminal output.
 - **Hardened coordinator auth.** GitHub browser login, owner-scoped leases, admin-only routes, optional GitHub team allowlists, Cloudflare Access JWT verification, and service-token support keep normal use and operator automation separate.
 - **OpenClaw plugin.** The repo root is a native OpenClaw plugin for box lifecycle operations: `crabbox_run`, `crabbox_warmup`, `crabbox_status`, `crabbox_list`, and `crabbox_stop`. Run inspection stays in the CLI and Crabbox skill.
 - **Operator surface.** `doctor`, `init`, `status`, `inspect`, `list`, `usage`, `history`, `logs`, `results`, `cache`, `admin`, `cleanup`, plus `--json` output where it matters.

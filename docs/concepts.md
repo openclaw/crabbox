@@ -41,6 +41,12 @@ suffix. See [Identifiers](features/identifiers.md).
 `run_...` ID, an owning lease, a command, an exit code, and a record in
 coordinator history.
 
+**Workspace** - the repo checkout plus runtime state inside a lease or delegated
+sandbox. A workspace includes the synced files, hydrated dependencies,
+provider-owned working directory, command output, and optional desktop/browser
+state. New docs should use "workspace" when the user-visible product is more
+than the raw runner.
+
 ## Roles
 
 **CLI** - the local Go binary `crabbox`. Owns config, sync, command
@@ -69,7 +75,8 @@ flows.
 
 **Agent** - an LLM-backed process invoking Crabbox through the CLI or the
 OpenClaw plugin. Agents are first-class users of Crabbox; the docs
-intentionally write for both humans and agents.
+intentionally write for both humans and agents. Crabbox gives agents a governed
+workspace with sync, logs, artifacts, sharing, cleanup, and review evidence.
 
 ## Modes
 

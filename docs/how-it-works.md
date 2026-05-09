@@ -8,12 +8,13 @@ Read when:
 
 ## TL;DR
 
-Crabbox is a remote testbox system. Two sides cooperate:
+Crabbox is an agent workspace control plane built around remote testboxes and
+sandboxes. Two sides cooperate:
 
 - The **CLI** keeps the developer story simple: lease a machine, sync the dirty checkout, run a command, stream output, clean up.
 - The **broker** (a Cloudflare Worker plus one Durable Object) keeps shared capacity safe: it owns provider credentials, lease state, expiry, cleanup, usage, and cost guardrails.
 
-Cloud machines are vanilla Ubuntu runners that hold no broker secrets. They are leaves: provisioned, used, deleted.
+Cloud machines are vanilla Ubuntu runners that hold no broker secrets. They are leaves: provisioned, used, deleted. Higher-level workspace evidence such as run records, logs, telemetry, screenshots, and artifacts stays with Crabbox.
 
 ## The Pieces
 
