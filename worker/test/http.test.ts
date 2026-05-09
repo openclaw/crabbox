@@ -124,6 +124,29 @@ describe("coordinator auth", () => {
     });
   });
 
+  it("rejects signed user tokens with admin claims", async () => {
+    const env = { CRABBOX_SHARED_TOKEN: "shared", CRABBOX_DEFAULT_ORG: "openclaw" };
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signedUserToken("shared", {
+      typ: "crabbox-user",
+      owner: "friend@example.com",
+      org: "openclaw",
+      login: "friend",
+      admin: true,
+      iat: now,
+      exp: now + 300,
+    });
+
+    const auth = await authenticateRequest(
+      new Request("https://example.test/v1/admin/leases", {
+        headers: { authorization: `Bearer ${token}` },
+      }),
+      env,
+    );
+
+    expect(auth).toBeUndefined();
+  });
+
   it("does not let caller-supplied Access identity override signed user token identity", () => {
     const request = new Request("https://example.test/v1/whoami", {
       headers: {
@@ -178,6 +201,20 @@ describe("coordinator auth", () => {
     expect(fleetCalled).toBe(false);
   });
 });
+
+async function signedUserToken(secret: string, payload: Record<string, unknown>): Promise<string> {
+  const encoder = new TextEncoder();
+  const encodedPayload = base64URL(encoder.encode(JSON.stringify(payload)));
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(encodedPayload));
+  return `cbxu_${encodedPayload}.${base64URL(new Uint8Array(signature))}`;
+}
 
 async function accessJwt(input: {
   kid: string;

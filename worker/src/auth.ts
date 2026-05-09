@@ -21,7 +21,6 @@ interface UserTokenPayload {
   org: string;
   login: string;
   name?: string;
-  admin?: boolean;
   exp: number;
   iat: number;
 }
@@ -67,7 +66,7 @@ export async function authenticateRequest(
   }
   return {
     authorized: true,
-    admin: payload.admin === true,
+    admin: false,
     auth: "github",
     owner: payload.owner,
     org: payload.org,
@@ -147,7 +146,8 @@ async function verifyUserToken(
     typeof payload.org !== "string" ||
     typeof payload.login !== "string" ||
     typeof payload.exp !== "number" ||
-    payload.exp <= Math.floor(Date.now() / 1000)
+    payload.exp <= Math.floor(Date.now() / 1000) ||
+    "admin" in payload
   ) {
     return undefined;
   }
