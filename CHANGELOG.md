@@ -2,12 +2,22 @@
 
 ## Unreleased
 
+### Added
+
+- Added live smoke checklists and script coverage for direct E2B and Semaphore provider validation. Thanks @stainlu.
+
 ### Changed
 
 - Updated Worker runtime dependencies and Go provider SDKs, including noVNC, fast-xml-parser, AWS EC2, Daytona, Islo, and related Go runtime libraries.
 
 ### Fixed
 
+- Fixed Semaphore host configuration so dashboard URLs normalize to hosts while API paths, query strings, fragments, and user info are rejected. Thanks @stainlu.
+- Fixed Semaphore list output so locally claimed jobs show their lease slugs.
+- Fixed E2B relative workdirs so they resolve under the configured E2B user's home instead of always `/home/user`.
+- Fixed E2B workspace guardrails so broad roots such as `/`, `/home`, and `/tmp` are rejected before sync creates, deletes, or extracts files.
+- Fixed E2B sandbox creation so unsafe workdirs are rejected before the API call. Thanks @stainlu.
+- Fixed E2B user validation so path-like users are rejected before sandbox or process calls. Thanks @stainlu.
 - Fixed `crabbox desktop paste` for terminal windows so symbol-heavy text falls back to direct typing instead of sending a literal `Ctrl+V` into xterm-like sessions.
 - Removed the vulnerable transitive `fast-xml-builder` Worker dependency by updating fast-xml-parser.
 
