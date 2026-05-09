@@ -13,6 +13,10 @@ import (
 )
 
 func (b *e2bBackend) syncWorkspace(ctx context.Context, client e2bAPI, session e2bSession, req RunRequest, workspace string) ([]timingPhase, time.Duration, error) {
+	workspace, err := cleanE2BWorkspacePath(workspace)
+	if err != nil {
+		return nil, 0, err
+	}
 	start := b.now()
 	excludes, err := syncExcludes(req.Repo.Root, b.cfg)
 	if err != nil {
@@ -70,11 +74,31 @@ func (b *e2bBackend) syncWorkspace(ctx context.Context, client e2bAPI, session e
 }
 
 func (b *e2bBackend) prepareWorkspace(ctx context.Context, client e2bAPI, session e2bSession, workspace string) error {
+	workspace, err := cleanE2BWorkspacePath(workspace)
+	if err != nil {
+		return err
+	}
 	command := "mkdir -p " + shellQuote(workspace)
 	if b.cfg.Sync.Delete {
 		command = "rm -rf " + shellQuote(workspace) + " && " + command
 	}
 	return b.execShell(ctx, client, session, command, io.Discard)
+}
+
+func cleanE2BWorkspacePath(workspace string) (string, error) {
+	trimmed := strings.TrimSpace(workspace)
+	if trimmed == "" {
+		return "", exit(2, "e2b workspace path is empty")
+	}
+	clean := path.Clean(trimmed)
+	if !strings.HasPrefix(clean, "/") {
+		return "", exit(2, "e2b workspace path %q must resolve to an absolute path", workspace)
+	}
+	switch clean {
+	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var":
+		return "", exit(2, "e2b workspace path %q is too broad; choose a dedicated subdirectory", clean)
+	}
+	return clean, nil
 }
 
 func (b *e2bBackend) execShell(ctx context.Context, client e2bAPI, session e2bSession, command string, stdout io.Writer) error {

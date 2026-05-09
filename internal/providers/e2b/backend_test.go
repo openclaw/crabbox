@@ -73,6 +73,39 @@ func TestE2BWorkspacePath(t *testing.T) {
 	}
 }
 
+func TestCleanE2BWorkspacePath(t *testing.T) {
+	tests := []struct {
+		name      string
+		workspace string
+		want      string
+		wantErr   string
+	}{
+		{name: "cleans absolute path", workspace: " /home/user/repo/ ", want: "/home/user/repo"},
+		{name: "rejects empty path", workspace: " ", wantErr: "empty"},
+		{name: "rejects relative path", workspace: "repo", wantErr: "absolute"},
+		{name: "rejects root", workspace: "/", wantErr: "too broad"},
+		{name: "rejects home root", workspace: "/home", wantErr: "too broad"},
+		{name: "rejects tmp root", workspace: "/tmp", wantErr: "too broad"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := cleanE2BWorkspacePath(tt.workspace)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err=%v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("workspace=%q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestE2BClientCreateConnectListAndDeleteUseOfficialRESTShape(t *testing.T) {
 	var createBody map[string]any
 	listHits := 0
@@ -212,6 +245,23 @@ func TestE2BSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	}
 	if !client.commandContains("mkdir -p '/home/user/repo'") || !client.commandContains("tar -xzf") {
 		t.Fatalf("commands=%#v", client.commands)
+	}
+}
+
+func TestE2BPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
+	client := &fakeE2BSyncClient{}
+	cfg := Config{}
+	cfg.Sync.Delete = true
+	backend := &e2bBackend{
+		cfg: cfg,
+		rt:  Runtime{Stderr: io.Discard},
+	}
+	err := backend.prepareWorkspace(context.Background(), client, e2bSession{SandboxID: "sbx_1"}, "/")
+	if err == nil || !strings.Contains(err.Error(), "too broad") {
+		t.Fatalf("err=%v, want unsafe workspace error", err)
+	}
+	if len(client.commands) != 0 {
+		t.Fatalf("commands=%#v, want none", client.commands)
 	}
 }
 
