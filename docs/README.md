@@ -85,7 +85,7 @@ Run history and inspection are intentionally handled by the Crabbox CLI and repo
 Pick whichever matches your intent:
 
 - **Start here:** [Getting started](getting-started.md), [How Crabbox Works](how-it-works.md), [Concepts and glossary](concepts.md).
-- **Get the mental model:** [Architecture](architecture.md), [Orchestrator](orchestrator.md).
+- **Get the mental model:** [Architecture](architecture.md), [Orchestrator](orchestrator.md), [Versioned workspace plan](plan/versioned-workspaces.md).
 - **Use the CLI:** [CLI](cli.md), [Commands](commands/README.md), [Features](features/README.md), [Configuration](features/configuration.md), [Actions hydration](features/actions-hydration.md), [Browser portal](features/portal.md), [Telemetry](features/telemetry.md).
 - **Pick or add a target:** [Provider reference](providers/README.md), [Providers feature overview](features/providers.md), [Provider authoring](features/provider-authoring.md), [Provider backends](provider-backends.md), [AWS](providers/aws.md), [Azure](providers/azure.md), [Hetzner](providers/hetzner.md), [Static SSH](providers/ssh.md), [Blacksmith Testbox](providers/blacksmith-testbox.md), [Semaphore](providers/semaphore.md), [Daytona](providers/daytona.md), [Islo](providers/islo.md), [E2B](providers/e2b.md), [Interactive desktop and VNC](features/interactive-desktop-vnc.md).
 - **Operate it:** [Operations](operations.md), [Observability](observability.md), [Troubleshooting](troubleshooting.md), [Performance](performance.md).
