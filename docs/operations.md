@@ -45,7 +45,13 @@ To narrow the live matrix while debugging, set `CRABBOX_LIVE_PROVIDERS`:
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=aws CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=hetzner CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=blacksmith-testbox CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=e2b CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=semaphore CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
 ```
+
+E2B smoke requires `E2B_API_KEY`. Semaphore smoke requires
+`CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`, and
+`CRABBOX_SEMAPHORE_TOKEN` or equivalent user config.
 
 For direct-provider smoke, disable the coordinator with a scratch config and run the same commands manually:
 

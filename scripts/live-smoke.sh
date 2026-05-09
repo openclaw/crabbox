@@ -20,7 +20,7 @@ has_provider() {
 }
 
 extract_lease() {
-  rg -o 'cbx_[a-f0-9]{12}' | head -1
+  rg -o '(cbx_[a-f0-9]{12}|sem_[A-Za-z0-9][A-Za-z0-9._-]*)' | head -1
 }
 
 extract_slug() {
@@ -34,6 +34,17 @@ stop_lease() {
     run_in_repo "$cb" stop "$slug" || run_in_repo "$cb" stop "$id" || true
   else
     run_in_repo "$cb" stop "$id" || true
+  fi
+}
+
+stop_provider_lease() {
+  local provider="$1"
+  local id="$2"
+  local slug="${3:-}"
+  if [[ -n "$slug" ]]; then
+    run_in_repo "$cb" stop --provider "$provider" "$slug" || run_in_repo "$cb" stop --provider "$provider" "$id" || true
+  else
+    run_in_repo "$cb" stop --provider "$provider" "$id" || true
   fi
 }
 
@@ -87,6 +98,57 @@ blacksmith_smoke() {
     --shell -- 'echo blacksmith-crabbox-ok && pwd'
 }
 
+e2b_smoke() {
+  local lease=""
+  local slug=""
+  cleanup() {
+    if [[ -n "$lease" ]]; then
+      stop_provider_lease e2b "$lease" "$slug"
+    fi
+  }
+  trap cleanup RETURN
+
+  local out
+  out="$(run_in_repo "$cb" warmup --provider e2b --e2b-template "${CRABBOX_E2B_TEMPLATE:-base}" --timing-json 2>&1)"
+  printf '%s\n' "$out"
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  slug="$(printf '%s\n' "$out" | extract_slug)"
+  test -n "$lease"
+  test -n "$slug"
+
+  run_in_repo "$cb" status --provider e2b --id "$slug" --wait
+  run_in_repo "$cb" run --provider e2b --id "$slug" --no-sync -- echo crabbox-e2b-ok
+  run_in_repo "$cb" run --provider e2b --id "$slug" --sync-only
+  run_in_repo "$cb" list --provider e2b --json | jq 'map({id:.id,slug:.slug,provider:.provider,state:.state})'
+  stop_provider_lease e2b "$lease" "$slug"
+  lease=""
+}
+
+semaphore_smoke() {
+  local lease=""
+  local slug=""
+  cleanup() {
+    if [[ -n "$lease" ]]; then
+      stop_provider_lease semaphore "$lease" "$slug"
+    fi
+  }
+  trap cleanup RETURN
+
+  local out
+  out="$(run_in_repo "$cb" warmup --provider semaphore --semaphore-idle-timeout "${CRABBOX_SEMAPHORE_IDLE_TIMEOUT:-10m}" 2>&1)"
+  printf '%s\n' "$out"
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  slug="$(printf '%s\n' "$out" | extract_slug)"
+  test -n "$lease"
+  test -n "$slug"
+
+  run_in_repo "$cb" status --provider semaphore --id "$slug" --wait --wait-timeout 120s
+  run_in_repo "$cb" run --provider semaphore --id "$slug" --no-sync -- echo crabbox-semaphore-ok
+  run_in_repo "$cb" list --provider semaphore --json | jq 'map({id:.id,slug:.slug,provider:.provider,state:.state})'
+  stop_provider_lease semaphore "$lease" "$slug"
+  lease=""
+}
+
 run_in_repo "$cb" whoami --json
 run_in_repo "$cb" doctor
 run_in_repo "$cb" sync-plan | sed -n '1,80p'
@@ -101,6 +163,14 @@ fi
 
 if has_provider blacksmith-testbox; then
   blacksmith_smoke
+fi
+
+if has_provider e2b; then
+  e2b_smoke
+fi
+
+if has_provider semaphore; then
+  semaphore_smoke
 fi
 
 run_in_repo "$cb" admin leases --state active --json | jq 'length'
