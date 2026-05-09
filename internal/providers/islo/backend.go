@@ -301,14 +301,16 @@ func (b *isloBackend) Stop(ctx context.Context, req StopRequest) error {
 }
 
 func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Repo, reclaim bool) (string, string, string, error) {
+	workdir, err := isloRelativeWorkdir(b.cfg)
+	if err != nil {
+		return "", "", "", err
+	}
 	name := newIsloSandboxName(repo)
 	create := &gosdk.SandboxCreate{Name: stringValue(name)}
 	if b.cfg.Islo.Image != "" {
 		create.Image = stringValue(b.cfg.Islo.Image)
 	}
-	if b.cfg.Islo.Workdir != "" {
-		create.Workdir = stringValue(b.cfg.Islo.Workdir)
-	}
+	create.Workdir = stringValue(workdir)
 	if b.cfg.Islo.GatewayProfile != "" {
 		create.GatewayProfile = stringValue(b.cfg.Islo.GatewayProfile)
 	}

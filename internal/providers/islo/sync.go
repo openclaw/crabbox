@@ -166,6 +166,14 @@ func createIsloSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest
 }
 
 func isloWorkspacePath(cfg Config) (string, error) {
+	workdir, err := isloRelativeWorkdir(cfg)
+	if err != nil {
+		return "", err
+	}
+	return path.Join("/workspace", workdir), nil
+}
+
+func isloRelativeWorkdir(cfg Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.Islo.Workdir)
 	if workdir == "" {
 		workdir = "crabbox"
@@ -173,9 +181,9 @@ func isloWorkspacePath(cfg Config) (string, error) {
 	if strings.HasPrefix(workdir, "/") {
 		return "", exit(2, "islo workdir %q must be relative under /workspace", workdir)
 	}
-	workspace := path.Clean(path.Join("/workspace", workdir))
-	if workspace == "/workspace" || !strings.HasPrefix(workspace, "/workspace/") {
+	workdir = path.Clean(workdir)
+	if workdir == "." || workdir == ".." || strings.HasPrefix(workdir, "../") {
 		return "", exit(2, "islo workdir %q escapes /workspace", workdir)
 	}
-	return workspace, nil
+	return workdir, nil
 }
