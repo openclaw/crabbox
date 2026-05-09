@@ -5,6 +5,7 @@
 ### Added
 
 - Added live smoke checklists and script coverage for direct E2B and Semaphore provider validation. Thanks @stainlu.
+- Added the versioned workspace roadmap for checkpointing, forking, comparing, and promoting agent workspace attempts. Thanks @stainlu.
 
 ### Changed
 

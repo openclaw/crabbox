@@ -95,6 +95,7 @@ repository-owned setup, usually through Actions hydration or repo scripts.
 - Cache stats/purge/warm commands: `internal/cli/cache.go`
 - Run history/event/attach/log commands and retained run logs: `internal/cli/history.go`, `internal/cli/run_recorder.go`, `internal/cli/run_output_events.go`, `internal/cli/runlog.go`
 - JUnit result parsing and remote markers: `internal/cli/results.go`, `internal/cli/results_parse.go`, `internal/cli/results_remote.go`
+- Versioned workspace roadmap and future checkpoint workflow: `docs/features/versioned-workspaces.md`
 
 ## Worker API, Cost, And Operations
 
@@ -125,6 +126,7 @@ repository-owned setup, usually through Actions hydration or repo scripts.
 - Capacity and fallback: `docs/features/capacity-fallback.md` (code in `internal/cli/aws.go`, `worker/src/aws.ts`, class maps in `internal/cli/config.go`)
 - Telemetry: `docs/features/telemetry.md` (code in `internal/cli/telemetry.go`)
 - Browser portal: `docs/features/portal.md` (code in `worker/src/portal.ts`)
+- Versioned workspaces: `docs/features/versioned-workspaces.md` (checkpoint/fork/compare/promote roadmap)
 - Provider authoring guide: `docs/features/provider-authoring.md` (cross-references `internal/cli/provider_backend.go` and `internal/providers/*`)
 - Concepts/glossary: `docs/concepts.md`
 - Getting started walkthrough: `docs/getting-started.md`
