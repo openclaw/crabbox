@@ -37,6 +37,10 @@ islo:
   diskGB: 20
 ```
 
+`islo.workdir` must be a relative directory name under `/workspace`. Absolute
+paths and `..` escapes are rejected before Crabbox prepares or syncs the
+sandbox workspace.
+
 Equivalent flags:
 
 ```sh
@@ -50,8 +54,9 @@ crabbox stop --provider islo <slug>
 
 - `warmup` creates a `crabbox-...` Islo sandbox and stores a local lease ID of
   the form `isb_<crabbox-sandbox-name>` plus a Crabbox slug.
-- `run` creates or reuses a sandbox, syncs the local Git-managed working set
-  into `/workspace/<islo.workdir>`, streams stdout/stderr from Islo's SSE exec
+- `run` creates or reuses a sandbox, validates `islo.workdir` as a relative
+  directory under `/workspace`, syncs the local Git-managed working set into
+  `/workspace/<islo.workdir>`, streams stdout/stderr from Islo's SSE exec
   endpoint, and returns the remote exit code.
 - `--sync-only` and `--checksum` are rejected because Islo does not expose a
   Crabbox SSH/rsync target. Large-sync guardrails still apply, and

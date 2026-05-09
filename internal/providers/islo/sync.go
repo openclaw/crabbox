@@ -45,7 +45,10 @@ func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name st
 		return nil, 0, err
 	}
 	preflightDuration := b.now().Sub(preflightStarted)
-	workspace := isloWorkspacePath(b.cfg)
+	workspace, err := isloWorkspacePath(b.cfg)
+	if err != nil {
+		return nil, 0, err
+	}
 	prepareStarted := b.now()
 	if err := b.prepareWorkspace(ctx, client, name, workspace); err != nil {
 		return nil, 0, err
@@ -162,13 +165,17 @@ func createIsloSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest
 	return archive, nil
 }
 
-func isloWorkspacePath(cfg Config) string {
+func isloWorkspacePath(cfg Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.Islo.Workdir)
 	if workdir == "" {
 		workdir = "crabbox"
 	}
 	if strings.HasPrefix(workdir, "/") {
-		return path.Clean(workdir)
+		return "", exit(2, "islo workdir %q must be relative under /workspace", workdir)
 	}
-	return path.Join("/workspace", workdir)
+	workspace := path.Clean(path.Join("/workspace", workdir))
+	if workspace == "/workspace" || !strings.HasPrefix(workspace, "/workspace/") {
+		return "", exit(2, "islo workdir %q escapes /workspace", workdir)
+	}
+	return workspace, nil
 }

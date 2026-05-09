@@ -124,14 +124,35 @@ func TestResolveIsloLeaseIDRejectsUnclaimedRawSandbox(t *testing.T) {
 }
 
 func TestIsloWorkspacePathDefaultsUnderWorkspace(t *testing.T) {
-	if got := isloWorkspacePath(Config{}); got != "/workspace/crabbox" {
-		t.Fatalf("workspace=%q", got)
+	if got, err := isloWorkspacePath(Config{}); err != nil || got != "/workspace/crabbox" {
+		t.Fatalf("workspace=%q err=%v", got, err)
 	}
-	if got := isloWorkspacePath(Config{Islo: IsloConfig{Workdir: "repo"}}); got != "/workspace/repo" {
-		t.Fatalf("workspace=%q", got)
+	if got, err := isloWorkspacePath(Config{Islo: IsloConfig{Workdir: "repo"}}); err != nil || got != "/workspace/repo" {
+		t.Fatalf("workspace=%q err=%v", got, err)
 	}
-	if got := isloWorkspacePath(Config{Islo: IsloConfig{Workdir: "/work/repo"}}); got != "/work/repo" {
-		t.Fatalf("workspace=%q", got)
+	if got, err := isloWorkspacePath(Config{Islo: IsloConfig{Workdir: "team/repo"}}); err != nil || got != "/workspace/team/repo" {
+		t.Fatalf("workspace=%q err=%v", got, err)
+	}
+}
+
+func TestIsloWorkspacePathRejectsEscapes(t *testing.T) {
+	for _, workdir := range []string{"/work/repo", "/etc", "../etc", "repo/../../../etc", ".", "./.."} {
+		t.Run(workdir, func(t *testing.T) {
+			if got, err := isloWorkspacePath(Config{Islo: IsloConfig{Workdir: workdir}}); err == nil {
+				t.Fatalf("workspace=%q, want error for workdir %q", got, workdir)
+			}
+		})
+	}
+}
+
+func TestIsloRunRejectsUnsafeWorkdirBeforeProviderClient(t *testing.T) {
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{Workdir: "../etc"}},
+		rt:  Runtime{Stderr: io.Discard},
+	}
+	_, err := backend.Run(context.Background(), RunRequest{NoSync: true})
+	if err == nil || !strings.Contains(err.Error(), "escapes /workspace") {
+		t.Fatalf("Run err=%v, want workdir containment error", err)
 	}
 }
 

@@ -145,6 +145,10 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	if err := rejectIsloSyncOptions(req); err != nil {
 		return RunResult{}, err
 	}
+	workspace, err := isloWorkspacePath(b.cfg)
+	if err != nil {
+		return RunResult{}, err
+	}
 	started := b.now()
 	client, err := newIsloClient(b.cfg, b.rt)
 	if err != nil {
@@ -178,7 +182,6 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	fmt.Fprintf(b.rt.Stderr, "provider=islo lease=%s sandbox=%s\n", leaseID, name)
 	syncDuration := time.Duration(0)
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	workspace := isloWorkspacePath(b.cfg)
 	if !req.NoSync {
 		var err error
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, name, req)

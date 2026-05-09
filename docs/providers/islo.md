@@ -66,12 +66,16 @@ Provider flags:
 --islo-disk-gb
 ```
 
+`--islo-workdir` / `islo.workdir` is interpreted as a relative directory below
+`/workspace`. Crabbox rejects absolute paths and `..` escapes before workspace
+preparation and sync.
+
 ## Lifecycle
 
 1. Create or resolve a Crabbox-owned Islo sandbox.
 2. Store a local lease ID with the `isb_` prefix and a friendly slug.
-3. Build the Crabbox sync manifest and upload a gzipped archive into
-   `/workspace/<islo.workdir>`.
+3. Validate the Islo workdir, build the Crabbox sync manifest, and upload a
+   gzipped archive into `/workspace/<islo.workdir>`.
 4. Execute commands through Islo's streaming exec endpoint in that workdir.
 5. Require an exit event before treating a stream as successful.
 6. Delete the sandbox on release unless kept.
