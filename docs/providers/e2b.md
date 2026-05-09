@@ -122,8 +122,8 @@ Provider flags:
 - `--class` and `--type` are rejected because E2B template contents own sandbox
   resources.
 - E2B workdirs must resolve to dedicated absolute directories. Broad roots such
-  as `/`, `/home`, and `/tmp` are rejected before sync creates, deletes, or
-  extracts files.
+  as `/`, `/home`, and `/tmp` are rejected before sandbox creation or before
+  sync creates, deletes, or extracts files.
 - `--checksum` is rejected because E2B does not expose a Crabbox SSH/rsync
   target. Large-sync guardrails still apply, and `--force-sync-large` is
   honored for intentional large archive syncs.

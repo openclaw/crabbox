@@ -295,10 +295,14 @@ func (b *e2bBackend) createSandbox(ctx context.Context, client e2bAPI, repo Repo
 	slug := newLeaseSlug(leaseID)
 	template := blank(b.cfg.E2B.Template, "base")
 	cfg := b.cfg
+	workspace, err := cleanE2BWorkspacePath(e2bWorkspacePath(cfg))
+	if err != nil {
+		return "", e2bSandbox{}, "", err
+	}
 	cfg.ServerType = template
 	labels := directLeaseLabels(cfg, leaseID, slug, e2bProvider, "", keep, b.now().UTC())
 	labels["state"] = "ready"
-	labels["workdir"] = e2bWorkspacePath(cfg)
+	labels["workdir"] = workspace
 	labels["template"] = template
 	if repo.Name != "" {
 		labels["repo"] = repo.Name

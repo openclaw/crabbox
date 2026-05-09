@@ -57,8 +57,8 @@ crabbox stop --provider e2b <slug>
   stdout/stderr, and returns the remote exit code.
 - `--sync-only` performs only the archive upload and extraction.
 - Workdirs must resolve to dedicated absolute directories. Broad roots such as
-  `/`, `/home`, and `/tmp` are rejected before sync touches the sandbox
-  filesystem.
+  `/`, `/home`, and `/tmp` are rejected before sandbox creation or sync touches
+  the sandbox filesystem.
 - `--checksum` is rejected because E2B does not expose a Crabbox SSH target.
 - `list`, `status`, and `stop` operate only on Crabbox-owned E2B sandboxes.
 

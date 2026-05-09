@@ -275,6 +275,21 @@ func TestE2BPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 	}
 }
 
+func TestE2BCreateSandboxRejectsUnsafeWorkdirBeforeAPI(t *testing.T) {
+	client := &fakeE2BSyncClient{}
+	backend := &e2bBackend{
+		cfg: Config{E2B: E2BConfig{Workdir: "/"}},
+		rt:  Runtime{Stderr: io.Discard},
+	}
+	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "too broad") {
+		t.Fatalf("err=%v, want unsafe workspace error", err)
+	}
+	if client.createCalls != 0 {
+		t.Fatalf("createCalls=%d, want 0", client.createCalls)
+	}
+}
+
 func TestE2BStatusReady(t *testing.T) {
 	for _, status := range []string{"", "running"} {
 		if !e2bStatusReady(status) {
@@ -335,15 +350,17 @@ func TestE2BResolveSyntheticIDRequiresCrabboxMetadata(t *testing.T) {
 }
 
 type fakeE2BSyncClient struct {
-	commands   []string
-	users      []string
-	sandbox    e2bSandbox
-	getErr     error
-	uploadPath string
-	uploaded   bytes.Buffer
+	commands    []string
+	users       []string
+	sandbox     e2bSandbox
+	createCalls int
+	getErr      error
+	uploadPath  string
+	uploaded    bytes.Buffer
 }
 
 func (f *fakeE2BSyncClient) CreateSandbox(context.Context, e2bCreateSandboxRequest) (e2bSandbox, error) {
+	f.createCalls++
 	return e2bSandbox{}, nil
 }
 
