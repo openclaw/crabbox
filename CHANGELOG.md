@@ -6,6 +6,10 @@
 
 - Added `provider: azure` for managed Azure Linux and native Windows SSH leases, including direct and brokered provisioning, shared Azure networking, SKU fallback, Azure docs, and cleanup support. Thanks @jwmoss.
 
+### Fixed
+
+- Fixed the portal provider filters so Azure leases show their own filter badge and provider icon. Thanks @stainlu.
+
 ## 0.7.0 - 2026-05-07
 
 ### Added
