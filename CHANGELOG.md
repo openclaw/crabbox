@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Fixed signed portal user tokens so caller-provided admin claims are rejected instead of granting admin access. Thanks @Hinotoi-agent.
 - Fixed Semaphore host configuration so dashboard URLs normalize to hosts while API paths, query strings, fragments, and user info are rejected. Thanks @stainlu.
 - Fixed WebVNC portal input focus so controller typing stays in the remote desktop and right-clicks no longer open the browser context menu.
 - Fixed Semaphore list output so locally claimed jobs show their lease slugs.
