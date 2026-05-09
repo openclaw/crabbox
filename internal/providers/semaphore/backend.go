@@ -17,6 +17,11 @@ type semaphoreBackend struct {
 }
 
 func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) (core.Backend, error) {
+	host, err := normalizeSemaphoreHost(cfg.Semaphore.Host)
+	if err != nil {
+		return nil, core.Exit(2, "%v", err)
+	}
+	cfg.Semaphore.Host = host
 	if cfg.Semaphore.Host == "" || cfg.Semaphore.Token == "" {
 		return nil, core.Exit(2, "semaphore provider requires semaphore.host in config, environment, or --semaphore-host and semaphore.token in config or environment")
 	}

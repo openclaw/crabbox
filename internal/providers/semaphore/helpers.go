@@ -3,6 +3,7 @@ package semaphore
 import (
 	"flag"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -63,6 +64,28 @@ func withDefault(value, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func normalizeSemaphoreHost(value string) (string, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return "", nil
+	}
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			return "", fmt.Errorf("invalid semaphore host %q", value)
+		}
+		if u.User != nil || strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" {
+			return "", fmt.Errorf("semaphore host %q must be a host name, not an API URL", value)
+		}
+		raw = u.Host
+	}
+	host := strings.TrimRight(raw, "/")
+	if strings.ContainsAny(host, "/?#") {
+		return "", fmt.Errorf("semaphore host %q must be a host name, not an API URL", value)
+	}
+	return host, nil
 }
 
 func idleTimeout(cfg core.Config) (time.Duration, error) {

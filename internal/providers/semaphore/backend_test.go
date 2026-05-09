@@ -165,6 +165,41 @@ func TestWithDefault(t *testing.T) {
 	}
 }
 
+func TestNormalizeSemaphoreHost(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr string
+	}{
+		{name: "bare host", input: "myorg.semaphoreci.com", want: "myorg.semaphoreci.com"},
+		{name: "trims whitespace", input: "  myorg.semaphoreci.com  ", want: "myorg.semaphoreci.com"},
+		{name: "strips trailing slash", input: "myorg.semaphoreci.com/", want: "myorg.semaphoreci.com"},
+		{name: "https url", input: "https://myorg.semaphoreci.com/", want: "myorg.semaphoreci.com"},
+		{name: "host with port", input: "https://myorg.semaphoreci.com:443", want: "myorg.semaphoreci.com:443"},
+		{name: "rejects api path", input: "https://myorg.semaphoreci.com/api/v1alpha", wantErr: "not an API URL"},
+		{name: "rejects query", input: "https://myorg.semaphoreci.com?token=secret", wantErr: "not an API URL"},
+		{name: "rejects path without scheme", input: "myorg.semaphoreci.com/api/v1alpha", wantErr: "not an API URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeSemaphoreHost(tt.input)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err=%v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("host=%q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStripLeasePrefix(t *testing.T) {
 	if stripLeasePrefix("sem_abc123") != "abc123" {
 		t.Errorf("got %q", stripLeasePrefix("sem_abc123"))
@@ -349,6 +384,18 @@ func TestConfigureRequiresHostAndToken(t *testing.T) {
 	_, err := newBackend(Provider{}.Spec(), cfg, testRuntime(nil))
 	if err == nil {
 		t.Error("expected error when host/token missing")
+	}
+}
+
+func TestConfigureNormalizesSemaphoreHost(t *testing.T) {
+	cfg := testConfig("https://semaphore.example.test/")
+	backend, err := newBackend(Provider{}.Spec(), cfg, testRuntime(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := backend.(*semaphoreBackend).client.host
+	if got != "semaphore.example.test" {
+		t.Fatalf("host=%q, want semaphore.example.test", got)
 	}
 }
 
