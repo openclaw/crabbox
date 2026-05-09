@@ -119,11 +119,6 @@ func (s checkpointStore) Create(record CheckpointRecord) (CheckpointRecord, erro
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return CheckpointRecord{}, exit(2, "create checkpoint directory: %v", err)
 	}
-	if _, err := os.Stat(path); err == nil {
-		return CheckpointRecord{}, exit(2, "checkpoint %s already exists", record.ID)
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return CheckpointRecord{}, exit(2, "stat checkpoint %s: %v", path, err)
-	}
 	if err := writeCheckpointJSON(path, record); err != nil {
 		return CheckpointRecord{}, err
 	}
@@ -193,27 +188,27 @@ func writeCheckpointJSON(path string, record CheckpointRecord) error {
 		return err
 	}
 	data = append(data, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".checkpoint-*.tmp")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return exit(2, "create checkpoint temp file: %v", err)
+		if errors.Is(err, os.ErrExist) {
+			return exit(2, "checkpoint %s already exists", record.ID)
+		}
+		return exit(2, "create checkpoint %s: %v", path, err)
 	}
-	tmpPath := tmp.Name()
+	created := false
 	defer func() {
-		_ = os.Remove(tmpPath)
+		if !created {
+			_ = os.Remove(path)
+		}
 	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
 		return exit(2, "write checkpoint %s: %v", path, err)
 	}
-	if err := tmp.Close(); err != nil {
+	if err := file.Close(); err != nil {
 		return exit(2, "close checkpoint %s: %v", path, err)
 	}
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		return exit(2, "chmod checkpoint %s: %v", path, err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return exit(2, "write checkpoint %s: %v", path, err)
-	}
+	created = true
 	return nil
 }
 

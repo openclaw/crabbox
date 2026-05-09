@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +106,42 @@ func TestCheckpointStoreRejectsDuplicatesAndUnsafeIDs(t *testing.T) {
 	}
 	if _, err := store.Create(CheckpointRecord{ID: "chk_bad", ParentID: "../parent", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
 		t.Fatal("unsafe parent id succeeded")
+	}
+}
+
+func TestCheckpointStoreConcurrentSameIDAllowsOneWriter(t *testing.T) {
+	store := checkpointStore{dir: t.TempDir()}
+	const workers = 64
+	start := make(chan struct{})
+	results := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			<-start
+			_, err := store.Create(CheckpointRecord{
+				ID:        "chk_race",
+				Name:      fmt.Sprintf("worker-%d", i),
+				CreatedAt: "2026-05-09T10:00:00Z",
+			})
+			results <- err
+		}(i)
+	}
+
+	close(start)
+	successes := 0
+	for i := 0; i < workers; i++ {
+		if err := <-results; err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful concurrent creates=%d, want 1", successes)
+	}
+	got, err := store.Read("chk_race")
+	if err != nil {
+		t.Fatalf("read raced checkpoint: %v", err)
+	}
+	if got.ID != "chk_race" || got.CreatedAt != "2026-05-09T10:00:00Z" {
+		t.Fatalf("unexpected raced checkpoint: %#v", got)
 	}
 }
 
