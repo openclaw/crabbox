@@ -102,9 +102,13 @@ func cleanE2BWorkspacePath(workspace string) (string, error) {
 }
 
 func (b *e2bBackend) execShell(ctx context.Context, client e2bAPI, session e2bSession, command string, stdout io.Writer) error {
+	user, err := e2bProcessUser(b.cfg.E2B.User)
+	if err != nil {
+		return err
+	}
 	code, err := client.StartProcess(ctx, session, e2bProcessRequest{
 		Command: command,
-		User:    b.cfg.E2B.User,
+		User:    user,
 		Timeout: b.cfg.TTL,
 		Stdout:  stdout,
 		Stderr:  b.rt.Stderr,

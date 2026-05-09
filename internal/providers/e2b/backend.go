@@ -73,6 +73,9 @@ type e2bBackend struct {
 func (b *e2bBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *e2bBackend) Warmup(ctx context.Context, req WarmupRequest) error {
+	if err := validateE2BUser(b.cfg.E2B.User); err != nil {
+		return err
+	}
 	started := b.now()
 	client, err := newE2BClient(b.cfg, b.rt)
 	if err != nil {
@@ -102,6 +105,10 @@ func (b *e2bBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 
 func (b *e2bBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if err := rejectE2BSyncOptions(req); err != nil {
+		return RunResult{}, err
+	}
+	processUser, err := e2bProcessUser(b.cfg.E2B.User)
+	if err != nil {
 		return RunResult{}, err
 	}
 	started := b.now()
@@ -181,7 +188,7 @@ func (b *e2bBackend) Run(ctx context.Context, req RunRequest) (RunResult, error)
 		Command: command,
 		CWD:     workspace,
 		Env:     allowedEnv(req.Options.EnvAllow),
-		User:    b.cfg.E2B.User,
+		User:    processUser,
 		Timeout: b.cfg.TTL,
 		Stdout:  b.rt.Stdout,
 		Stderr:  b.rt.Stderr,
@@ -475,7 +482,7 @@ func e2bWorkspacePath(cfg Config) string {
 }
 
 func e2bUserHome(user string) string {
-	user = strings.TrimSpace(user)
+	user = e2bWorkspaceUser(user)
 	if user == "" {
 		user = "user"
 	}
@@ -483,6 +490,30 @@ func e2bUserHome(user string) string {
 		return "/root"
 	}
 	return path.Join("/home", user)
+}
+
+func e2bWorkspaceUser(user string) string {
+	clean, err := e2bProcessUser(user)
+	if err != nil || clean == "" {
+		return "user"
+	}
+	return clean
+}
+
+func validateE2BUser(user string) error {
+	_, err := e2bProcessUser(user)
+	return err
+}
+
+func e2bProcessUser(user string) (string, error) {
+	clean := strings.TrimSpace(user)
+	if clean == "" {
+		return "", nil
+	}
+	if clean == "." || clean == ".." || strings.ContainsAny(clean, `/\`) || strings.ContainsRune(clean, 0) {
+		return "", exit(2, "invalid e2b.user %q: use a login name, not a path", user)
+	}
+	return clean, nil
 }
 
 func e2bCommandString(command []string, shellMode bool) string {

@@ -38,6 +38,8 @@ e2b:
 Relative `e2b.workdir` values resolve inside the selected E2B user's home. The
 default user home is `/home/user`, `user: ubuntu` resolves under `/home/ubuntu`,
 and `user: root` resolves under `/root`. Absolute workdirs are used as-is.
+`e2b.user` must be a login name, not a path; values such as `../tmp` or
+`team/dev` are rejected before sandbox or process calls.
 
 Equivalent one-off flags:
 

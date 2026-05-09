@@ -79,6 +79,53 @@ func TestE2BWorkspacePath(t *testing.T) {
 	}
 }
 
+func TestE2BProcessUser(t *testing.T) {
+	tests := []struct {
+		name    string
+		user    string
+		want    string
+		wantErr string
+	}{
+		{name: "empty keeps default process user", user: "", want: ""},
+		{name: "trims user", user: " ubuntu ", want: "ubuntu"},
+		{name: "root allowed", user: "root", want: "root"},
+		{name: "rejects slash", user: "../tmp", wantErr: "not a path"},
+		{name: "rejects backslash", user: `team\dev`, wantErr: "not a path"},
+		{name: "rejects dot", user: ".", wantErr: "not a path"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := e2bProcessUser(tt.user)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err=%v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("user=%q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestE2BWarmupRejectsUnsafeUserBeforeClient(t *testing.T) {
+	backend := &e2bBackend{
+		cfg: Config{E2B: E2BConfig{User: "../tmp"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	err := backend.Warmup(context.Background(), WarmupRequest{})
+	if err == nil || !strings.Contains(err.Error(), "invalid e2b.user") {
+		t.Fatalf("err=%v, want invalid e2b.user", err)
+	}
+	if strings.Contains(err.Error(), "E2B_API_KEY") {
+		t.Fatalf("validated user after client setup: %v", err)
+	}
+}
+
 func TestCleanE2BWorkspacePath(t *testing.T) {
 	tests := []struct {
 		name      string
