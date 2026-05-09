@@ -92,6 +92,10 @@ const (
 	FeatureBrowser     Feature = "browser"
 	FeatureCode        Feature = "code"
 	FeatureTailscale   Feature = "tailscale"
+	FeatureCheckpoint  Feature = "workspace-checkpoint"
+	FeatureFork        Feature = "workspace-fork"
+	FeatureRestore     Feature = "workspace-restore"
+	FeatureSnapshot    Feature = "provider-snapshot"
 )
 
 type FeatureSet []Feature

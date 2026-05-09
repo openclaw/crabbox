@@ -318,6 +318,10 @@ cli.FeatureDesktop
 cli.FeatureBrowser
 cli.FeatureCode
 cli.FeatureTailscale
+cli.FeatureCheckpoint
+cli.FeatureFork
+cli.FeatureRestore
+cli.FeatureSnapshot
 ```
 
 Actions runner hydration is intentionally not a provider feature. It is a core
@@ -329,6 +333,18 @@ SSH-over-Linux workflow. It requires:
 
 Only set `CoordinatorSupported` when the Crabbox coordinator can provision that
 provider. A direct-only SSH provider should use `CoordinatorNever`.
+
+Checkpoint-related features are reserved for versioned workspaces:
+
+- `FeatureCheckpoint`: provider can create a provider-aware checkpoint.
+- `FeatureFork`: provider can create a new workspace from a checkpoint.
+- `FeatureRestore`: provider can restore an existing workspace to a checkpoint.
+- `FeatureSnapshot`: provider can expose a native snapshot id for Crabbox
+  metadata.
+
+Do not set these flags for plain SSH access alone. Generic Git/archive/log
+checkpoints are core-owned and should work even when the provider advertises no
+native checkpoint features.
 
 ## Flags And Config
 

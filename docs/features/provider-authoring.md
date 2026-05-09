@@ -166,6 +166,13 @@ Rules:
   - `FeatureDesktop`, `FeatureBrowser`, `FeatureCode` - lease can host a visible
     desktop, browser, or code-server instance.
   - `FeatureTailscale` - lease can join a tailnet via cloud-init/`--tailscale`.
+  - `FeatureCheckpoint` - backend can create a provider-aware workspace
+    checkpoint beyond Crabbox's generic local ledger.
+  - `FeatureFork` - backend can create a new workspace from a checkpoint or
+    snapshot without replaying a full generic sync.
+  - `FeatureRestore` - backend can restore a workspace to a previous checkpoint.
+  - `FeatureSnapshot` - backend can return a provider-native snapshot handle
+    that Crabbox can reference in checkpoint metadata.
 - `Coordinator` is `CoordinatorSupported` only when the Cloudflare Worker can
   provision your runners. Direct-only providers, including all delegated run
   backends and Static SSH, set `CoordinatorNever`.
@@ -174,6 +181,13 @@ Actions runner hydration is not a feature flag. Core checks for an SSH lease
 backend on `target=linux` instead. Setting `FeatureSSH` on a non-Linux-only
 provider is fine; setting `target=linux` on a backend that cannot satisfy it is
 not.
+
+Versioned workspace features describe provider depth, not the presence of
+Crabbox checkpoint commands. Core can always record a generic checkpoint from
+repo metadata, logs, and artifacts once that command exists. Providers should
+set checkpoint-related flags only when they can preserve or recreate state that
+the generic ledger cannot, such as sandbox filesystem state, VM snapshot ids, or
+copy-on-write forks.
 
 ## Step 5. Own Provider-Specific Flags
 
