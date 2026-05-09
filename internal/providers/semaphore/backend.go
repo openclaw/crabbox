@@ -162,11 +162,7 @@ func (b *semaphoreBackend) resolveByJobID(ctx context.Context, jobID string) (co
 		return core.LeaseTarget{}, fmt.Errorf("store SSH key: %w", err)
 	}
 
-	// Read slug from claim if available
-	slug := ""
-	if claim, err := core.ReadLeaseClaim(leaseID); err == nil && claim.Slug != "" {
-		slug = claim.Slug
-	}
+	slug := semaphoreClaimSlug(leaseID)
 
 	target := core.SSHTarget{
 		User:       "semaphore",
@@ -179,7 +175,7 @@ func (b *semaphoreBackend) resolveByJobID(ctx context.Context, jobID string) (co
 	server := core.Server{
 		CloudID:  jobID,
 		Provider: providerName,
-		Name:     "sem-testbox",
+		Name:     semaphoreListName("sem-testbox", slug),
 		Status:   "running",
 		Labels: map[string]string{
 			"lease":    leaseID,
@@ -205,15 +201,20 @@ func (b *semaphoreBackend) List(ctx context.Context, req core.ListRequest) ([]co
 		if !isCrabboxJobName(j.Name) {
 			continue
 		}
+		leaseID := "sem_" + j.ID
+		slug := semaphoreClaimSlug(leaseID)
 		s := core.Server{
 			CloudID:  j.ID,
 			Provider: providerName,
-			Name:     j.Name,
+			Name:     semaphoreListName(j.Name, slug),
 			Status:   j.State,
 			Labels: map[string]string{
-				"lease":    "sem_" + j.ID,
+				"lease":    leaseID,
 				"provider": providerName,
 			},
+		}
+		if slug != "" {
+			s.Labels["slug"] = slug
 		}
 		servers = append(servers, s)
 	}
@@ -255,4 +256,19 @@ func stripLeasePrefix(leaseID string) string {
 		return leaseID[4:]
 	}
 	return leaseID
+}
+
+func semaphoreClaimSlug(leaseID string) string {
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil || claim.Provider != providerName {
+		return ""
+	}
+	return claim.Slug
+}
+
+func semaphoreListName(jobName, slug string) string {
+	if slug == "" {
+		return jobName
+	}
+	return "sem-testbox-" + slug
 }

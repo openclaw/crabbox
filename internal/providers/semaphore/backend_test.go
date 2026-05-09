@@ -438,6 +438,14 @@ func TestResolveIgnoresOtherProviderClaims(t *testing.T) {
 }
 
 func TestListFiltersNonCrabboxJobs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	if err := core.ClaimLeaseForRepoProvider("sem_job-crabbox", "blue-lobster", providerName, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs" && r.URL.Query().Get("states") == "RUNNING" {
 			json.NewEncoder(w).Encode(map[string]any{
@@ -475,6 +483,12 @@ func TestListFiltersNonCrabboxJobs(t *testing.T) {
 	}
 	if servers[0].CloudID != "job-crabbox" {
 		t.Errorf("cloud id = %q, want job-crabbox", servers[0].CloudID)
+	}
+	if servers[0].Name != "sem-testbox-blue-lobster" {
+		t.Errorf("name = %q, want sem-testbox-blue-lobster", servers[0].Name)
+	}
+	if servers[0].Labels["slug"] != "blue-lobster" {
+		t.Errorf("slug = %q, want blue-lobster", servers[0].Labels["slug"])
 	}
 }
 
