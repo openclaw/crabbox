@@ -28,6 +28,37 @@ crabbox status --provider semaphore --id blue-lobster
 crabbox stop --provider semaphore blue-lobster
 ```
 
+## Live Smoke
+
+Use a live smoke when changing Semaphore provisioning, API polling, SSH key
+retrieval, or release behavior. Keep the token in the environment or user
+config; do not pass it as a command-line argument.
+
+```sh
+export CRABBOX_SEMAPHORE_HOST=myorg.semaphoreci.com
+export CRABBOX_SEMAPHORE_PROJECT=my-app
+export CRABBOX_SEMAPHORE_TOKEN=...
+
+go build -trimpath -o bin/crabbox ./cmd/crabbox
+
+bin/crabbox warmup --provider semaphore --semaphore-idle-timeout 10m
+lease=<slug-or-sem_id-from-warmup-output>
+
+bin/crabbox status --provider semaphore --id "$lease" --wait
+bin/crabbox run --provider semaphore --id "$lease" --no-sync -- echo crabbox-semaphore-ok
+bin/crabbox list --provider semaphore
+bin/crabbox stop --provider semaphore "$lease"
+```
+
+Expected results:
+
+- `warmup` creates a standalone Semaphore job, prints a `sem_...` lease ID and
+  slug, and retrieves the debug SSH key.
+- `status --wait` reports a running Linux lease with SSH host details.
+- The no-sync run prints `crabbox-semaphore-ok`.
+- `list` shows the running Crabbox-managed Semaphore job while it is active.
+- `stop` posts the job stop request and removes the local lease claim and key.
+
 ## Backend kind
 
 SSH lease. Provisions a standalone Semaphore job, retrieves SSH credentials via
