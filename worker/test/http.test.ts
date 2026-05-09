@@ -147,6 +147,38 @@ describe("coordinator auth", () => {
     expect(auth).toBeUndefined();
   });
 
+  it("does not route admin-claim user tokens to the coordinator", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signedUserToken("shared", {
+      typ: "crabbox-user",
+      owner: "friend@example.com",
+      org: "openclaw",
+      login: "friend",
+      admin: true,
+      iat: now,
+      exp: now + 300,
+    });
+    const env = {
+      CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_DEFAULT_ORG: "openclaw",
+      FLEET: {
+        idFromName: () => "default",
+        get: () => {
+          throw new Error("admin-claim user token reached coordinator");
+        },
+      },
+    } as unknown as Env;
+
+    const response = await coordinator.fetch(
+      new Request("https://example.test/v1/admin/leases", {
+        headers: { authorization: `Bearer ${token}` },
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(401);
+  });
+
   it("does not let caller-supplied Access identity override signed user token identity", () => {
     const request = new Request("https://example.test/v1/whoami", {
       headers: {
