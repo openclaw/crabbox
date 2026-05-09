@@ -35,6 +35,10 @@ e2b:
   user: ""
 ```
 
+Relative `e2b.workdir` values resolve inside the selected E2B user's home. The
+default user home is `/home/user`, `user: ubuntu` resolves under `/home/ubuntu`,
+and `user: root` resolves under `/root`. Absolute workdirs are used as-is.
+
 Equivalent one-off flags:
 
 ```sh
@@ -49,7 +53,7 @@ crabbox stop --provider e2b <slug>
 - `warmup` creates an E2B sandbox from `e2b.template`, stores Crabbox metadata,
   and records a local `cbx_...` lease claim.
 - `run` creates or reuses a sandbox, syncs the manifest into
-  `/home/user/<e2b.workdir>` unless the workdir is absolute, streams
+  `<e2b user home>/<e2b.workdir>` unless the workdir is absolute, streams
   stdout/stderr, and returns the remote exit code.
 - `--sync-only` performs only the archive upload and extraction.
 - `--checksum` is rejected because E2B does not expose a Crabbox SSH target.

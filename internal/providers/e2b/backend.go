@@ -471,7 +471,18 @@ func e2bWorkspacePath(cfg Config) string {
 	if strings.HasPrefix(workdir, "/") {
 		return path.Clean(workdir)
 	}
-	return path.Join("/home/user", workdir)
+	return path.Join(e2bUserHome(cfg.E2B.User), workdir)
+}
+
+func e2bUserHome(user string) string {
+	user = strings.TrimSpace(user)
+	if user == "" {
+		user = "user"
+	}
+	if user == "root" {
+		return "/root"
+	}
+	return path.Join("/home", user)
 }
 
 func e2bCommandString(command []string, shellMode bool) string {

@@ -51,6 +51,10 @@ e2b:
   user: ""
 ```
 
+Relative `e2b.workdir` values resolve inside the selected E2B user's home. The
+default user home is `/home/user`, `user: ubuntu` resolves under `/home/ubuntu`,
+and `user: root` resolves under `/root`. Absolute workdirs are used as-is.
+
 Provider flags:
 
 ```text
@@ -66,7 +70,8 @@ Provider flags:
 1. Create or resolve a Crabbox-owned E2B sandbox from `e2b.template`.
 2. Store Crabbox metadata and a local repo claim.
 3. Build the Crabbox sync manifest, upload a gzipped archive into `/tmp`, and
-   extract it into `/home/user/<e2b.workdir>` or an absolute configured workdir.
+   extract it into `<e2b user home>/<e2b.workdir>` or an absolute configured
+   workdir.
 4. Execute commands through E2B's process stream in that workdir.
 5. Delete the sandbox on release unless the lease is kept.
 

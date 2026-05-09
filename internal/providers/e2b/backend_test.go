@@ -68,6 +68,12 @@ func TestE2BWorkspacePath(t *testing.T) {
 	if got := e2bWorkspacePath(Config{E2B: E2BConfig{Workdir: "repo"}}); got != "/home/user/repo" {
 		t.Fatalf("workspace=%q", got)
 	}
+	if got := e2bWorkspacePath(Config{E2B: E2BConfig{User: "ubuntu", Workdir: "repo"}}); got != "/home/ubuntu/repo" {
+		t.Fatalf("workspace=%q", got)
+	}
+	if got := e2bWorkspacePath(Config{E2B: E2BConfig{User: "root", Workdir: "repo"}}); got != "/root/repo" {
+		t.Fatalf("workspace=%q", got)
+	}
 	if got := e2bWorkspacePath(Config{E2B: E2BConfig{Workdir: "/work/repo"}}); got != "/work/repo" {
 		t.Fatalf("workspace=%q", got)
 	}
@@ -195,12 +201,13 @@ func TestE2BSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	}
 	client := &fakeE2BSyncClient{}
 	backend := &e2bBackend{
-		cfg: Config{E2B: E2BConfig{Workdir: "repo"}},
+		cfg: Config{E2B: E2BConfig{User: "ubuntu", Workdir: "repo"}},
 		rt:  Runtime{Stderr: io.Discard},
 	}
+	workspace := e2bWorkspacePath(backend.cfg)
 	_, _, err := backend.syncWorkspace(context.Background(), client, e2bSession{SandboxID: "sbx_1"}, RunRequest{
 		Repo: Repo{Root: root, Name: "repo"},
-	}, "/home/user/repo")
+	}, workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,8 +217,11 @@ func TestE2BSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	if !tarGzipContains(t, client.uploaded.Bytes(), "go.mod") {
 		t.Fatal("uploaded archive missing go.mod")
 	}
-	if !client.commandContains("mkdir -p '/home/user/repo'") || !client.commandContains("tar -xzf") {
+	if !client.commandContains("mkdir -p '/home/ubuntu/repo'") || !client.commandContains("tar -xzf") {
 		t.Fatalf("commands=%#v", client.commands)
+	}
+	if !client.userContains("ubuntu") {
+		t.Fatalf("users=%#v", client.users)
 	}
 }
 
@@ -276,6 +286,7 @@ func TestE2BResolveSyntheticIDRequiresCrabboxMetadata(t *testing.T) {
 
 type fakeE2BSyncClient struct {
 	commands   []string
+	users      []string
 	sandbox    e2bSandbox
 	getErr     error
 	uploadPath string
@@ -313,12 +324,22 @@ func (f *fakeE2BSyncClient) UploadFile(_ context.Context, _ e2bSession, targetPa
 
 func (f *fakeE2BSyncClient) StartProcess(_ context.Context, _ e2bSession, req e2bProcessRequest) (int, error) {
 	f.commands = append(f.commands, req.Command)
+	f.users = append(f.users, req.User)
 	return 0, nil
 }
 
 func (f *fakeE2BSyncClient) commandContains(value string) bool {
 	for _, command := range f.commands {
 		if strings.Contains(command, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeE2BSyncClient) userContains(value string) bool {
+	for _, user := range f.users {
+		if user == value {
 			return true
 		}
 	}
