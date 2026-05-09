@@ -4,7 +4,7 @@
 
 ## What Crabbox is
 
-Crabbox is a shared agent workspace control plane for OpenClaw maintainers and
+Crabbox is a shared agent workspace control plane for software maintainers and
 AI agents. The goal is to keep the local developer story unchanged - edit,
 save, run - while moving compute, tests, and review evidence onto owned or
 provider-backed remote capacity.
