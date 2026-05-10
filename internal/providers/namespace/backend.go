@@ -195,7 +195,7 @@ func (b *namespaceLeaseBackend) prepareDevbox(ctx context.Context, name string) 
 	}
 	out, err := b.commandOutput(ctx, []string{"prepare", name})
 	if err != nil {
-		return SSHTarget{}, configureErr
+		return SSHTarget{}, err
 	}
 	var result namespacePrepareResult
 	if err := json.Unmarshal([]byte(extractJSONObject(out)), &result); err != nil {

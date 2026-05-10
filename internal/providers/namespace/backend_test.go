@@ -130,13 +130,31 @@ func TestNamespaceLifecycleCommandFallbacks(t *testing.T) {
 	}
 }
 
+func TestNamespacePrepareReportsPrepareFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	runner := &namespaceRecordingRunner{failAll: true}
+	backend := &namespaceLeaseBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+
+	_, err := backend.prepareDevbox(context.Background(), "crabbox-blue-lobster-deadbeef")
+	if err == nil || !strings.Contains(err.Error(), "namespace devbox failed") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(runner.calls) != 2 || runner.calls[0] != "devbox configure-ssh" || runner.calls[1] != "devbox prepare crabbox-blue-lobster-deadbeef" {
+		t.Fatalf("prepare calls=%#v", runner.calls)
+	}
+}
+
 type namespaceRecordingRunner struct {
 	calls     []string
+	failAll   bool
 	failFirst bool
 }
 
 func (r *namespaceRecordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	r.calls = append(r.calls, req.Name+" "+strings.Join(req.Args, " "))
+	if r.failAll {
+		return LocalCommandResult{ExitCode: 2}, errors.New("unsupported")
+	}
 	if r.failFirst {
 		r.failFirst = false
 		return LocalCommandResult{ExitCode: 2}, errors.New("unsupported")
