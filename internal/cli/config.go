@@ -82,6 +82,7 @@ type Config struct {
 	Daytona            DaytonaConfig
 	E2B                E2BConfig
 	Islo               IsloConfig
+	Tensorlake         TensorlakeConfig
 	Semaphore          SemaphoreConfig
 	Sprites            SpritesConfig
 	Tailscale          TailscaleConfig
@@ -178,6 +179,22 @@ type IsloConfig struct {
 	VCPUs          int
 	MemoryMB       int
 	DiskGB         int
+}
+
+type TensorlakeConfig struct {
+	APIKey         string
+	APIURL         string
+	CLIPath        string
+	Image          string
+	Snapshot       string
+	OrganizationID string
+	ProjectID      string
+	Namespace      string
+	CPUs           float64
+	MemoryMB       int
+	DiskMB         int
+	TimeoutSecs    int
+	NoInternet     bool
 }
 
 type ProxmoxConfig struct {
@@ -417,6 +434,13 @@ func baseConfig() Config {
 			MemoryMB: 4096,
 			DiskGB:   20,
 		},
+		Tensorlake: TensorlakeConfig{
+			APIURL:   "https://api.tensorlake.ai",
+			CLIPath:  "tensorlake",
+			CPUs:     1.0,
+			MemoryMB: 1024,
+			DiskMB:   10240,
+		},
 		Proxmox: ProxmoxConfig{
 			User:      "crabbox",
 			WorkRoot:  defaultPOSIXWorkRoot,
@@ -471,6 +495,7 @@ type fileConfig struct {
 	Daytona          *fileDaytonaConfig       `yaml:"daytona,omitempty"`
 	E2B              *fileE2BConfig           `yaml:"e2b,omitempty"`
 	Islo             *fileIsloConfig          `yaml:"islo,omitempty"`
+	Tensorlake       *fileTensorlakeConfig    `yaml:"tensorlake,omitempty"`
 	Semaphore        *fileSemaphoreConfig     `yaml:"semaphore,omitempty"`
 	Sprites          *fileSpritesConfig       `yaml:"sprites,omitempty"`
 	Tailscale        *fileTailscaleConfig     `yaml:"tailscale,omitempty"`
@@ -654,6 +679,21 @@ type fileIsloConfig struct {
 	VCPUs          int    `yaml:"vcpus,omitempty"`
 	MemoryMB       int    `yaml:"memoryMB,omitempty"`
 	DiskGB         int    `yaml:"diskGB,omitempty"`
+}
+
+type fileTensorlakeConfig struct {
+	APIURL         string  `yaml:"apiUrl,omitempty"`
+	CLIPath        string  `yaml:"cliPath,omitempty"`
+	Image          string  `yaml:"image,omitempty"`
+	Snapshot       string  `yaml:"snapshot,omitempty"`
+	OrganizationID string  `yaml:"organizationId,omitempty"`
+	ProjectID      string  `yaml:"projectId,omitempty"`
+	Namespace      string  `yaml:"namespace,omitempty"`
+	CPUs           float64 `yaml:"cpus,omitempty"`
+	MemoryMB       int     `yaml:"memoryMB,omitempty"`
+	DiskMB         int     `yaml:"diskMB,omitempty"`
+	TimeoutSecs    int     `yaml:"timeoutSecs,omitempty"`
+	NoInternet     *bool   `yaml:"noInternet,omitempty"`
 }
 
 type fileSemaphoreConfig struct {
@@ -1276,6 +1316,44 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Islo.DiskGB = file.Islo.DiskGB
 		}
 	}
+	if file.Tensorlake != nil {
+		if file.Tensorlake.APIURL != "" {
+			cfg.Tensorlake.APIURL = file.Tensorlake.APIURL
+		}
+		if file.Tensorlake.CLIPath != "" {
+			cfg.Tensorlake.CLIPath = file.Tensorlake.CLIPath
+		}
+		if file.Tensorlake.Image != "" {
+			cfg.Tensorlake.Image = file.Tensorlake.Image
+		}
+		if file.Tensorlake.Snapshot != "" {
+			cfg.Tensorlake.Snapshot = file.Tensorlake.Snapshot
+		}
+		if file.Tensorlake.OrganizationID != "" {
+			cfg.Tensorlake.OrganizationID = file.Tensorlake.OrganizationID
+		}
+		if file.Tensorlake.ProjectID != "" {
+			cfg.Tensorlake.ProjectID = file.Tensorlake.ProjectID
+		}
+		if file.Tensorlake.Namespace != "" {
+			cfg.Tensorlake.Namespace = file.Tensorlake.Namespace
+		}
+		if file.Tensorlake.CPUs > 0 {
+			cfg.Tensorlake.CPUs = file.Tensorlake.CPUs
+		}
+		if file.Tensorlake.MemoryMB > 0 {
+			cfg.Tensorlake.MemoryMB = file.Tensorlake.MemoryMB
+		}
+		if file.Tensorlake.DiskMB > 0 {
+			cfg.Tensorlake.DiskMB = file.Tensorlake.DiskMB
+		}
+		if file.Tensorlake.TimeoutSecs > 0 {
+			cfg.Tensorlake.TimeoutSecs = file.Tensorlake.TimeoutSecs
+		}
+		if file.Tensorlake.NoInternet != nil {
+			cfg.Tensorlake.NoInternet = *file.Tensorlake.NoInternet
+		}
+	}
 	if file.Semaphore != nil {
 		if file.Semaphore.Host != "" {
 			cfg.Semaphore.Host = file.Semaphore.Host
@@ -1674,6 +1752,21 @@ func applyEnv(cfg *Config) {
 	cfg.Islo.VCPUs = getenvInt("CRABBOX_ISLO_VCPUS", cfg.Islo.VCPUs)
 	cfg.Islo.MemoryMB = getenvInt("CRABBOX_ISLO_MEMORY_MB", cfg.Islo.MemoryMB)
 	cfg.Islo.DiskGB = getenvInt("CRABBOX_ISLO_DISK_GB", cfg.Islo.DiskGB)
+	cfg.Tensorlake.APIKey = getenv("CRABBOX_TENSORLAKE_API_KEY", getenv("TENSORLAKE_API_KEY", cfg.Tensorlake.APIKey))
+	cfg.Tensorlake.APIURL = getenv("CRABBOX_TENSORLAKE_API_URL", getenv("TENSORLAKE_API_URL", cfg.Tensorlake.APIURL))
+	cfg.Tensorlake.CLIPath = getenv("CRABBOX_TENSORLAKE_CLI", cfg.Tensorlake.CLIPath)
+	cfg.Tensorlake.Image = getenv("CRABBOX_TENSORLAKE_IMAGE", cfg.Tensorlake.Image)
+	cfg.Tensorlake.Snapshot = getenv("CRABBOX_TENSORLAKE_SNAPSHOT", cfg.Tensorlake.Snapshot)
+	cfg.Tensorlake.OrganizationID = getenv("CRABBOX_TENSORLAKE_ORGANIZATION_ID", getenv("TENSORLAKE_ORGANIZATION_ID", cfg.Tensorlake.OrganizationID))
+	cfg.Tensorlake.ProjectID = getenv("CRABBOX_TENSORLAKE_PROJECT_ID", getenv("TENSORLAKE_PROJECT_ID", cfg.Tensorlake.ProjectID))
+	cfg.Tensorlake.Namespace = getenv("CRABBOX_TENSORLAKE_NAMESPACE", getenv("INDEXIFY_NAMESPACE", cfg.Tensorlake.Namespace))
+	cfg.Tensorlake.CPUs = getenvFloat("CRABBOX_TENSORLAKE_CPUS", cfg.Tensorlake.CPUs)
+	cfg.Tensorlake.MemoryMB = getenvInt("CRABBOX_TENSORLAKE_MEMORY_MB", cfg.Tensorlake.MemoryMB)
+	cfg.Tensorlake.DiskMB = getenvInt("CRABBOX_TENSORLAKE_DISK_MB", cfg.Tensorlake.DiskMB)
+	cfg.Tensorlake.TimeoutSecs = getenvInt("CRABBOX_TENSORLAKE_TIMEOUT_SECS", cfg.Tensorlake.TimeoutSecs)
+	if v, ok := getenvBool("CRABBOX_TENSORLAKE_NO_INTERNET"); ok {
+		cfg.Tensorlake.NoInternet = v
+	}
 	cfg.Semaphore.Host = getenv("CRABBOX_SEMAPHORE_HOST", getenv("SEMAPHORE_HOST", cfg.Semaphore.Host))
 	cfg.Semaphore.Token = getenv("CRABBOX_SEMAPHORE_TOKEN", getenv("SEMAPHORE_API_TOKEN", cfg.Semaphore.Token))
 	cfg.Semaphore.Project = getenv("CRABBOX_SEMAPHORE_PROJECT", getenv("SEMAPHORE_PROJECT", cfg.Semaphore.Project))
@@ -1975,6 +2068,18 @@ func getenvInt(name string, fallback int) int {
 		return fallback
 	}
 	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func getenvFloat(name string, fallback float64) float64 {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseFloat(v, 64)
 	if err != nil {
 		return fallback
 	}

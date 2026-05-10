@@ -14,4 +14,5 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/semaphore"
 	_ "github.com/openclaw/crabbox/internal/providers/sprites"
 	_ "github.com/openclaw/crabbox/internal/providers/ssh"
+	_ "github.com/openclaw/crabbox/internal/providers/tensorlake"
 )

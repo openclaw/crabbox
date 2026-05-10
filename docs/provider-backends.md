@@ -158,6 +158,7 @@ internal/providers/daytona
 internal/providers/islo
 internal/providers/e2b
 internal/providers/semaphore
+internal/providers/tensorlake
 ```
 
 Each provider package owns registration, provider name, aliases, spec,
@@ -193,6 +194,7 @@ internal/providers/daytona                # Daytona SSH + delegated SDK backend
 internal/providers/islo                   # Islo delegated backend
 internal/providers/e2b                    # E2B delegated backend
 internal/providers/semaphore              # Semaphore SSH lease backend
+internal/providers/tensorlake             # Tensorlake delegated CLI backend
 ```
 
 Provider packages may use small exported core helpers for claims, labels,

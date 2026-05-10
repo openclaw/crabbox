@@ -24,6 +24,7 @@ static SSH provider for existing machines.
 | [Daytona](daytona.md) | hybrid delegated run + SSH | Linux | Daytona snapshot sandboxes |
 | [Islo](islo.md) | delegated run | Linux | Islo-owned sandbox execution |
 | [E2B](e2b.md) | delegated run | Linux | E2B-owned sandbox execution |
+| [Tensorlake](tensorlake.md) | delegated run | Linux | Tensorlake Firecracker sandbox execution via the `tensorlake` CLI |
 
 ## Shared Rules
 
@@ -62,6 +63,7 @@ Proxmox and delegated providers do not use the Crabbox coordinator:
 - Islo uses the Islo API and SDK auth.
 - E2B uses E2B's sandbox REST and envd APIs.
 - Sprites uses the authenticated `sprite` CLI plus Sprites API.
+- Tensorlake uses the `tensorlake` CLI (`tensorlake sbx ...`) for sandbox lifecycle and command exec.
 
 Namespace Devbox and Semaphore are SSH lease providers that do not use the
 Crabbox coordinator. Namespace provisions through the authenticated `devbox`
@@ -85,6 +87,7 @@ through the Sprites API and reaches SSH through `sprite proxy`.
 | Daytona | yes | yes | yes | no | archive via Daytona toolbox | no |
 | Islo | yes | yes | no | no | no | yes |
 | E2B | yes | yes | no | no | archive via E2B envd | no |
+| Tensorlake | requires `--no-sync` (v1) | yes | no | no | no (planned) | no |
 
 Actions runner hydration requires a normal SSH lease on Linux and is core-over-SSH.
 Use AWS, Google Cloud, Hetzner, Proxmox, Static SSH, Namespace Devbox,
