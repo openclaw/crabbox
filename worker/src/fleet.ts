@@ -1472,9 +1472,13 @@ export class FleetDurableObject implements DurableObject {
     if (request.method.toUpperCase() !== "POST") {
       return json({ error: "not_found" }, { status: 404 });
     }
-    const lease = await this.resolveLease(identifier, request, false);
+    const admin = isAdminRequest(request);
+    const lease = await this.resolveLease(identifier, request, admin);
     if (!lease) {
       return notFound();
+    }
+    if (!this.leaseManageableByRequest(lease, request, admin)) {
+      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
     if (lease.state !== "active") {
       return json({ error: "egress_unavailable", message: "lease is not active" }, { status: 409 });
@@ -1604,9 +1608,13 @@ export class FleetDurableObject implements DurableObject {
     if (request.method.toUpperCase() !== "POST") {
       return json({ error: "not_found" }, { status: 404 });
     }
-    const lease = await this.resolveLease(identifier, request, false);
+    const admin = isAdminRequest(request);
+    const lease = await this.resolveLease(identifier, request, admin);
     if (!lease) {
       return notFound();
+    }
+    if (!this.leaseManageableByRequest(lease, request, admin)) {
+      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
     const error = webVNCLeaseError(lease);
     if (error) {
@@ -1768,9 +1776,13 @@ export class FleetDurableObject implements DurableObject {
     if (request.method.toUpperCase() !== "POST") {
       return json({ error: "not_found" }, { status: 404 });
     }
-    const lease = await this.resolveLease(identifier, request, false);
+    const admin = isAdminRequest(request);
+    const lease = await this.resolveLease(identifier, request, admin);
     if (!lease) {
       return notFound();
+    }
+    if (!this.leaseManageableByRequest(lease, request, admin)) {
+      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
     const error = codeLeaseError(lease);
     if (error) {

@@ -204,7 +204,31 @@ describe("fleet lease identity and idle", () => {
         body: {},
       }),
     );
-    expect(friendTicket.status).toBe(200);
+    expect(friendTicket.status).toBe(403);
+
+    const ownerTicket = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/webvnc/ticket", {
+        headers: ownerHeaders,
+        body: {},
+      }),
+    );
+    expect(ownerTicket.status).toBe(200);
+
+    const friendCodeTicket = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/code/ticket", {
+        headers: friendHeaders,
+        body: {},
+      }),
+    );
+    expect(friendCodeTicket.status).toBe(403);
+
+    const friendEgressTicket = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/egress/ticket", {
+        headers: friendHeaders,
+        body: { role: "host" },
+      }),
+    );
+    expect(friendEgressTicket.status).toBe(403);
 
     const friendRelease = await fleet.fetch(
       request("POST", "/v1/leases/blue-lobster/release", {
