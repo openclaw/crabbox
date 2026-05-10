@@ -71,8 +71,12 @@ slice.
 ## Replay Semantics
 
 `capsule replay` delegates to the existing `crabbox run` path with `--shell`.
-If the replay command exits non-zero, Crabbox records
-`outcome: fail_reproduced`. If it exits zero, Crabbox records `outcome: pass`
+If the replay command exits non-zero and the manifest has no
+`oracle.failure_signature`, Crabbox records `outcome: fail_reproduced`. When a
+signature is present, the bounded replay output must contain that signature to
+count as `fail_reproduced`. A non-zero replay with a different signature records
+`outcome: fail_new` and returns nonzero because it is a new failure, not an
+honest reproduction. If the command exits zero, Crabbox records `outcome: pass`
 and returns nonzero because the original failure was not reproduced.
 
 Use `--keep` when the goal is human or agent debugging. Crabbox keeps the lease

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -25,7 +26,10 @@ const (
 
 	capsuleOutcomePass           = "pass"
 	capsuleOutcomeFailReproduced = "fail_reproduced"
+	capsuleOutcomeFailNew        = "fail_new"
 	capsuleOutcomeEnvError       = "inconclusive_env_error"
+
+	capsuleReplayOutputMaxBytes = 256 * 1024
 )
 
 type capsuleManifest struct {
@@ -216,7 +220,10 @@ func (a App) capsuleFromActions(ctx context.Context, args []string) error {
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "warning: artifact metadata unavailable: %v\n", err)
 	}
-	job, step := selectCapsuleFailure(view.Jobs, *jobName)
+	job, step, jobMatched := selectCapsuleFailure(view.Jobs, *jobName)
+	if !jobMatched {
+		return exit(2, "capsule from-actions --job %q did not match any job in the run", *jobName)
+	}
 	if *scenario == "" {
 		*scenario = defaultCapsuleScenario(view, job, step)
 	}
@@ -300,7 +307,13 @@ func (a App) capsuleReplay(ctx context.Context, args []string) error {
 	}
 	runArgs = append(runArgs, "--", manifest.Replay.Command)
 	started := time.Now()
-	err = a.runCommand(ctx, runArgs)
+	runApp := a
+	var replayOutput runLogBuffer
+	if strings.TrimSpace(manifest.Oracle.FailureSignature) != "" {
+		runApp.Stdout = io.MultiWriter(a.Stdout, &replayOutput)
+		runApp.Stderr = io.MultiWriter(a.Stderr, &replayOutput)
+	}
+	err = runApp.runCommand(ctx, runArgs)
 	record := capsuleReplayRecord{
 		At:            time.Now().UTC().Format(time.RFC3339),
 		Command:       manifest.Replay.Command,
@@ -318,12 +331,16 @@ func (a App) capsuleReplay(ctx context.Context, args []string) error {
 	}
 	if code, ok := remoteReplayExitCode(err); ok {
 		record.DurationMs = time.Since(started).Milliseconds()
-		record.Outcome = capsuleOutcomeFailReproduced
 		record.ExitCode = code
-		record.Note = fmt.Sprintf("replay command exited %d", code)
+		outcome, note, reproduced := capsuleReplayFailureOutcome(manifest.Oracle.FailureSignature, replayOutput.String(), code)
+		record.Outcome = outcome
+		record.Note = note
 		manifest.Replays = append(manifest.Replays, record)
 		if writeErr := writeCapsuleManifest(path, manifest); writeErr != nil {
 			return writeErr
+		}
+		if !reproduced {
+			return exit(1, "capsule replay found a new failure; exit=%d did not contain failure_signature %q in the last %d bytes of replay output", code, strings.TrimSpace(manifest.Oracle.FailureSignature), capsuleReplayOutputMaxBytes)
 		}
 		fmt.Fprintf(a.Stdout, "capsule replay outcome=%s exit=%d quality=%s total=%s\n", record.Outcome, code, record.ReplayQuality, time.Since(started).Round(time.Millisecond))
 		if *keep {
@@ -526,12 +543,15 @@ func ghOutputAllowError(ctx context.Context, dir string, args ...string) (string
 	return string(out), nil
 }
 
-func selectCapsuleFailure(jobs []capsuleJobView, preferredJob string) (capsuleJobView, capsuleStepView) {
+func selectCapsuleFailure(jobs []capsuleJobView, preferredJob string) (capsuleJobView, capsuleStepView, bool) {
+	preferredJob = strings.TrimSpace(preferredJob)
+	matchedPreferred := preferredJob == ""
 	var selected capsuleJobView
 	for _, job := range jobs {
 		if preferredJob != "" && job.Name != preferredJob {
 			continue
 		}
+		matchedPreferred = true
 		if selected.Name == "" || isFailureConclusion(job.Conclusion) {
 			selected = job
 		}
@@ -544,10 +564,10 @@ func selectCapsuleFailure(jobs []capsuleJobView, preferredJob string) (capsuleJo
 	}
 	for _, step := range selected.Steps {
 		if isFailureConclusion(step.Conclusion) {
-			return selected, step
+			return selected, step, matchedPreferred
 		}
 	}
-	return selected, capsuleStepView{}
+	return selected, capsuleStepView{}, matchedPreferred
 }
 
 func isFailureConclusion(conclusion string) bool {
@@ -772,10 +792,37 @@ func remoteReplayExitCode(err error) (int, bool) {
 	if !AsExitError(err, &exitErr) {
 		return 0, false
 	}
-	if strings.HasPrefix(exitErr.Message, "remote command exited ") {
-		return exitErr.Code, true
+	message := strings.TrimSpace(exitErr.Message)
+	if strings.Contains(strings.ToLower(message), " failed:") {
+		return 0, false
 	}
-	return 0, false
+	fields := strings.Fields(message)
+	if len(fields) < 3 || fields[len(fields)-2] != "exited" {
+		return 0, false
+	}
+	last := fields[len(fields)-1]
+	code, err := strconv.Atoi(last)
+	if err != nil || code < 0 {
+		return 0, false
+	}
+	switch fields[len(fields)-3] {
+	case "command", "run":
+		return code, true
+	default:
+		return 0, false
+	}
+}
+
+func capsuleReplayFailureOutcome(failureSignature, replayOutput string, code int) (string, string, bool) {
+	signature := strings.TrimSpace(failureSignature)
+	if signature == "" {
+		return capsuleOutcomeFailReproduced, fmt.Sprintf("replay command exited %d", code), true
+	}
+	boundedOutput := boundString(replayOutput, capsuleReplayOutputMaxBytes)
+	if strings.Contains(boundedOutput, signature) {
+		return capsuleOutcomeFailReproduced, fmt.Sprintf("replay command exited %d and matched failure_signature", code), true
+	}
+	return capsuleOutcomeFailNew, fmt.Sprintf("replay command exited %d but failure_signature was not present in bounded replay output", code), false
 }
 
 func safePathComponent(value string) string {

@@ -46,10 +46,12 @@ Useful flags:
 --reclaim                 claim an existing lease for the current repo
 ```
 
-Replay runs the manifest's `replay.command` through `crabbox run --shell`. A
-nonzero remote command exit records `fail_reproduced` and exits successfully
-from `capsule replay`. A zero exit records `pass` and returns nonzero because
-the captured failure did not reproduce.
+Replay runs the manifest's `replay.command` through `crabbox run --shell`. When
+the manifest has `oracle.failure_signature`, a nonzero replay only records
+`fail_reproduced` if the bounded replay output contains that signature. A
+nonzero replay with a different signature records `fail_new` and returns
+nonzero so the mismatch is visible. A zero exit records `pass` and returns
+nonzero because the captured failure did not reproduce.
 
 ## Inspect
 
