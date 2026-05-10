@@ -30,6 +30,7 @@ export async function authenticateRequest(
   env: Pick<
     Env,
     | "CRABBOX_SHARED_TOKEN"
+    | "CRABBOX_SHARED_OWNER"
     | "CRABBOX_ADMIN_TOKEN"
     | "CRABBOX_SESSION_SECRET"
     | "CRABBOX_DEFAULT_ORG"
@@ -56,8 +57,8 @@ export async function authenticateRequest(
       authorized: true,
       admin: false,
       auth: "bearer",
-      owner: accessIdentity?.email ?? request.headers.get("x-crabbox-owner") ?? "unknown",
-      org: request.headers.get("x-crabbox-org") ?? env.CRABBOX_DEFAULT_ORG ?? "unknown",
+      owner: accessIdentity?.email ?? env.CRABBOX_SHARED_OWNER?.trim() ?? "unknown",
+      org: env.CRABBOX_DEFAULT_ORG ?? "unknown",
     };
   }
   const payload = await verifyUserToken(token, env).catch(() => undefined);

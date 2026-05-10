@@ -28,6 +28,7 @@ export interface Env {
   CRABBOX_AZURE_NSG?: string;
   CRABBOX_AZURE_SSH_CIDRS?: string;
   CRABBOX_SHARED_TOKEN?: string;
+  CRABBOX_SHARED_OWNER?: string;
   CRABBOX_ADMIN_TOKEN?: string;
   CRABBOX_SESSION_SECRET?: string;
   CRABBOX_GITHUB_CLIENT_ID?: string;

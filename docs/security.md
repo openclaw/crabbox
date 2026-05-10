@@ -65,7 +65,7 @@ Rules:
 - Never accept secret values as command-line flag values.
 - Never log env values.
 - Redact known secret-looking strings in diagnostics.
-- `CRABBOX_SHARED_TOKEN` is stored as a Worker secret for trusted operator automation; local automation can use `CRABBOX_COORDINATOR_TOKEN`.
+- `CRABBOX_SHARED_TOKEN` is stored as a Worker secret for trusted operator automation; local automation can use `CRABBOX_COORDINATOR_TOKEN`. Shared-token requests do not trust caller-supplied `X-Crabbox-Owner` or `X-Crabbox-Org`; configure a fixed `CRABBOX_SHARED_OWNER` for that automation identity, or use verified Cloudflare Access / signed browser tokens for per-user identity.
 - `CRABBOX_ADMIN_TOKEN` is stored as a Worker secret for admin and image lifecycle routes; local admin commands use `CRABBOX_COORDINATOR_ADMIN_TOKEN` or `broker.adminToken`.
 - `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`, and `CRABBOX_SESSION_SECRET` are Worker secrets for browser login.
 - `CRABBOX_TAILSCALE_CLIENT_ID` and `CRABBOX_TAILSCALE_CLIENT_SECRET` are
