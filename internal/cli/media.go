@@ -26,6 +26,7 @@ type mediaPreviewResult struct {
 	TrimmedStaticEdges       bool    `json:"trimmedStaticEdges"`
 	DetectedFreezeIntervals  int     `json:"detectedFreezeIntervals"`
 	DetectedMotionWindowNote string  `json:"detectedMotionWindowNote,omitempty"`
+	GifsicleOptimized        bool    `json:"gifsicleOptimized"`
 }
 
 type mediaContactSheetResult struct {
@@ -49,6 +50,9 @@ type mediaPreviewOptions struct {
 	FreezeDuration     time.Duration
 	FreezeNoise        string
 	MinDuration        time.Duration
+	GifsicleMode       string
+	GifsicleLossy      int
+	GifsicleGamma      float64
 	JSON               bool
 }
 
@@ -65,19 +69,48 @@ type mediaInterval struct {
 	End   float64
 }
 
+const (
+	defaultMediaPreviewWidth         = 1000
+	defaultMediaPreviewFPS           = 24
+	defaultMediaPreviewGifsicleMode  = "auto"
+	defaultMediaPreviewGifsicleLossy = 65
+	defaultMediaPreviewGifsicleGamma = 1.2
+)
+
+func defaultMediaPreviewOptions(input, output, trimmedVideoOutput string) mediaPreviewOptions {
+	return mediaPreviewOptions{
+		Input:              input,
+		Output:             output,
+		TrimmedVideoOutput: trimmedVideoOutput,
+		Width:              defaultMediaPreviewWidth,
+		FPS:                defaultMediaPreviewFPS,
+		TrimStatic:         true,
+		TrimPadding:        750 * time.Millisecond,
+		FreezeDuration:     500 * time.Millisecond,
+		FreezeNoise:        "-50dB",
+		MinDuration:        1500 * time.Millisecond,
+		GifsicleMode:       defaultMediaPreviewGifsicleMode,
+		GifsicleLossy:      defaultMediaPreviewGifsicleLossy,
+		GifsicleGamma:      defaultMediaPreviewGifsicleGamma,
+	}
+}
+
 func (a App) mediaPreview(ctx context.Context, args []string) error {
 	fs := newFlagSet("media preview", a.Stderr)
 	input := fs.String("input", "", "input MP4/video path")
 	output := fs.String("output", "", "output GIF preview path")
 	trimmedVideoOutput := fs.String("trimmed-video-output", "", "optional output MP4 trimmed to the same motion window")
-	width := fs.Int("width", 640, "preview width in pixels")
-	fps := fs.Float64("fps", 4, "preview frames per second")
+	width := fs.Int("width", defaultMediaPreviewWidth, "preview width in pixels")
+	fps := fs.Float64("fps", defaultMediaPreviewFPS, "preview frames per second")
 	trimStatic := fs.Bool("trim-static", true, "trim leading and trailing static regions before making the preview")
 	noTrimStatic := fs.Bool("no-trim-static", false, "disable static-region trimming")
 	trimPadding := fs.Duration("trim-padding", 750*time.Millisecond, "padding kept before first motion and after last motion")
 	freezeDuration := fs.Duration("freeze-duration", 500*time.Millisecond, "minimum still duration for ffmpeg freezedetect")
 	freezeNoise := fs.String("freeze-noise", "-50dB", "ffmpeg freezedetect noise threshold")
 	minDuration := fs.Duration("min-duration", 1500*time.Millisecond, "minimum preview duration after trimming")
+	gifsicleMode := fs.String("gifsicle", defaultMediaPreviewGifsicleMode, "gifsicle optimization: auto, off, or required")
+	gifsicleLossy := fs.Int("gifsicle-lossy", defaultMediaPreviewGifsicleLossy, "gifsicle lossy compression value")
+	gifsicleGamma := fs.Float64("gifsicle-gamma", defaultMediaPreviewGifsicleGamma, "gifsicle gamma value")
 	jsonOut := fs.Bool("json", false, "print machine-readable result metadata")
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -85,19 +118,18 @@ func (a App) mediaPreview(ctx context.Context, args []string) error {
 	if *noTrimStatic {
 		*trimStatic = false
 	}
-	opts := mediaPreviewOptions{
-		Input:              *input,
-		Output:             *output,
-		TrimmedVideoOutput: *trimmedVideoOutput,
-		Width:              *width,
-		FPS:                *fps,
-		TrimStatic:         *trimStatic,
-		TrimPadding:        *trimPadding,
-		FreezeDuration:     *freezeDuration,
-		FreezeNoise:        *freezeNoise,
-		MinDuration:        *minDuration,
-		JSON:               *jsonOut,
-	}
+	opts := defaultMediaPreviewOptions(*input, *output, *trimmedVideoOutput)
+	opts.Width = *width
+	opts.FPS = *fps
+	opts.TrimStatic = *trimStatic
+	opts.TrimPadding = *trimPadding
+	opts.FreezeDuration = *freezeDuration
+	opts.FreezeNoise = *freezeNoise
+	opts.MinDuration = *minDuration
+	opts.GifsicleMode = *gifsicleMode
+	opts.GifsicleLossy = *gifsicleLossy
+	opts.GifsicleGamma = *gifsicleGamma
+	opts.JSON = *jsonOut
 	result, err := createMediaPreview(ctx, opts)
 	if err != nil {
 		return err
@@ -136,6 +168,19 @@ func createMediaPreview(ctx context.Context, opts mediaPreviewOptions) (mediaPre
 	}
 	if opts.MinDuration < 0 {
 		return mediaPreviewResult{}, exit(2, "media preview --min-duration must be non-negative")
+	}
+	gifsicleMode := strings.ToLower(strings.TrimSpace(opts.GifsicleMode))
+	if gifsicleMode == "" {
+		gifsicleMode = defaultMediaPreviewGifsicleMode
+	}
+	if gifsicleMode != "auto" && gifsicleMode != "off" && gifsicleMode != "required" {
+		return mediaPreviewResult{}, exit(2, "media preview --gifsicle must be auto, off, or required")
+	}
+	if opts.GifsicleLossy < 0 {
+		return mediaPreviewResult{}, exit(2, "media preview --gifsicle-lossy must be non-negative")
+	}
+	if opts.GifsicleGamma <= 0 {
+		return mediaPreviewResult{}, exit(2, "media preview --gifsicle-gamma must be positive")
 	}
 	if _, err := os.Stat(opts.Input); err != nil {
 		return mediaPreviewResult{}, exit(2, "read input video: %v", err)
@@ -180,6 +225,13 @@ func createMediaPreview(ctx context.Context, opts mediaPreviewOptions) (mediaPre
 	if err := runMediaCommand(ctx, "ffmpeg", previewGIFArgs(opts.Input, palette, opts.Output, opts.Width, opts.FPS, start, previewDuration)...); err != nil {
 		return mediaPreviewResult{}, err
 	}
+	optimized := false
+	if gifsicleMode != "off" {
+		optimized, err = optimizeGIF(ctx, opts.Output, opts.GifsicleLossy, opts.GifsicleGamma, gifsicleMode == "required")
+		if err != nil {
+			return mediaPreviewResult{}, err
+		}
+	}
 	if opts.TrimmedVideoOutput != "" {
 		if err := os.MkdirAll(filepath.Dir(opts.TrimmedVideoOutput), 0o755); err != nil && filepath.Dir(opts.TrimmedVideoOutput) != "." {
 			return mediaPreviewResult{}, exit(2, "create trimmed video output directory: %v", err)
@@ -198,6 +250,7 @@ func createMediaPreview(ctx context.Context, opts mediaPreviewOptions) (mediaPre
 		TrimmedStaticEdges:       trimmed,
 		DetectedFreezeIntervals:  freezeCount,
 		DetectedMotionWindowNote: note,
+		GifsicleOptimized:        optimized,
 	}, nil
 }
 
@@ -286,11 +339,40 @@ func previewGIFArgs(input, palette, output string, width int, fps, start, durati
 	args = appendTrimInputArgs(args, input, start, duration)
 	args = append(args,
 		"-i", palette,
-		"-lavfi", fmt.Sprintf("fps=%s,scale=%d:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle", formatMediaSeconds(fps), width),
+		"-lavfi", fmt.Sprintf("fps=%s,scale=iw*sar:ih,scale=%d:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=floyd_steinberg", formatMediaSeconds(fps), width),
 		"-loop", "0",
 		output,
 	)
 	return args
+}
+
+func gifsicleOptimizeArgs(input, output string, lossy int, gamma float64) []string {
+	return []string{
+		"-O3",
+		fmt.Sprintf("--gamma=%s", formatMediaSeconds(gamma)),
+		fmt.Sprintf("--lossy=%d", lossy),
+		input,
+		"-o",
+		output,
+	}
+}
+
+func optimizeGIF(ctx context.Context, output string, lossy int, gamma float64, required bool) (bool, error) {
+	if _, err := exec.LookPath("gifsicle"); err != nil {
+		if required {
+			return false, exit(2, "gifsicle is required for media preview: %v", err)
+		}
+		return false, nil
+	}
+	temp := strings.TrimSuffix(output, filepath.Ext(output)) + ".optimized.gif"
+	defer os.Remove(temp)
+	if err := runMediaCommand(ctx, "gifsicle", gifsicleOptimizeArgs(output, temp, lossy, gamma)...); err != nil {
+		return false, err
+	}
+	if err := os.Rename(temp, output); err != nil {
+		return false, exit(2, "replace optimized GIF: %v", err)
+	}
+	return true, nil
 }
 
 func trimmedVideoArgs(input, output string, start, duration float64) []string {
