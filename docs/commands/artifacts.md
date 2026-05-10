@@ -45,7 +45,8 @@ Useful flags:
 --metadata
 --duration <duration> default 10s
 --fps <n>             default 15
---gif-width <px>      default 640
+--gif-width <px>      default 1000
+--gif-fps <n>         default 24
 --contact-sheet       default true
 --no-contact-sheet
 --contact-sheet-output <path>

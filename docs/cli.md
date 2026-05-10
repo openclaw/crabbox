@@ -51,7 +51,7 @@ crabbox egress client --id <lease-id-or-slug> [--listen <addr>] [--ticket <ticke
 crabbox egress status --id <lease-id-or-slug>
 crabbox egress stop --id <lease-id-or-slug>
 crabbox media preview --input <video> --output <preview.gif> [--trimmed-video-output <change.mp4>]
-crabbox artifacts collect --id <lease-id-or-slug> [--output <dir>] [--run <run-id>] [--all] [--screenshot] [--video] [--gif] [--doctor] [--webvnc-status] [--metadata] [--duration <duration>] [--fps <n>] [--gif-width <px>] [--network auto|tailscale|public] [--json]
+crabbox artifacts collect --id <lease-id-or-slug> [--output <dir>] [--run <run-id>] [--all] [--screenshot] [--video] [--gif] [--doctor] [--webvnc-status] [--metadata] [--duration <duration>] [--fps <n>] [--gif-width <px>] [--gif-fps <n>] [--network auto|tailscale|public] [--json]
 crabbox artifacts video --id <lease-id-or-slug> [--output <path>] [--duration <duration>] [--fps <n>] [--no-contact-sheet]
 crabbox desktop record --id <lease-id-or-slug> [--output <path>] [--duration <duration>] [--fps <n>] [--no-contact-sheet]
 crabbox artifacts gif --input <video> --output <preview.gif> [--trimmed-video-output <change.mp4>]
