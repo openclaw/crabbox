@@ -29,18 +29,18 @@ type timingPhase = core.TimingPhase
 type LocalCommandRequest = core.LocalCommandRequest
 
 const (
-	providerName     = "tensorlake"
-	leasePrefix      = "tlsbx_"
-	namePrefix       = "crabbox-"
-	defaultAPIURL    = "https://api.tensorlake.ai"
-	defaultCLIPath   = "tensorlake"
-	defaultCPUs      = 1
-	defaultMemoryMB  = 1024
-	defaultDiskMB    = 10240
-	defaultWorkdir   = "/workspace"
-	targetLinux      = core.TargetLinux
-	NetworkPublic    = core.NetworkPublic
-	statusViewReady  = "running"
+	providerName    = "tensorlake"
+	leasePrefix     = "tlsbx_"
+	namePrefix      = "crabbox-"
+	defaultAPIURL   = "https://api.tensorlake.ai"
+	defaultCLIPath  = "tensorlake"
+	defaultCPUs     = 1
+	defaultMemoryMB = 1024
+	defaultDiskMB   = 10240
+	defaultWorkdir  = "/workspace"
+	targetLinux     = core.TargetLinux
+	NetworkPublic   = core.NetworkPublic
+	statusViewReady = "running"
 )
 
 func exit(code int, format string, args ...any) core.ExitError {

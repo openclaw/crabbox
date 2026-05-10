@@ -102,7 +102,9 @@ func (c *tensorlakeCLI) runStreamed(ctx context.Context, sub []string, args []st
 	return res.ExitCode, nil
 }
 
-func (c *tensorlakeCLI) createSandbox(ctx context.Context, name string) error {
+// createSandbox runs `tensorlake sbx create` and returns the
+// Tensorlake-assigned sandbox ID parsed from stdout.
+func (c *tensorlakeCLI) createSandbox(ctx context.Context, name string) (string, error) {
 	args := []string{}
 	if c.cfg.Tensorlake.CPUs > 0 {
 		args = append(args, "-c", trimFloat(c.cfg.Tensorlake.CPUs))
@@ -125,9 +127,47 @@ func (c *tensorlakeCLI) createSandbox(ctx context.Context, name string) error {
 	if c.cfg.Tensorlake.NoInternet {
 		args = append(args, "-N")
 	}
-	args = append(args, name)
-	_, err := c.runQuiet(ctx, []string{"sbx", "create"}, args)
-	return err
+	if strings.TrimSpace(name) != "" {
+		args = append(args, name)
+	}
+	out, err := c.runQuiet(ctx, []string{"sbx", "create"}, args)
+	if err != nil {
+		return "", err
+	}
+	id := parseSandboxID(out)
+	if id == "" {
+		return "", fmt.Errorf("tensorlake sbx create: empty sandbox id in output %q", out)
+	}
+	return id, nil
+}
+
+// parseSandboxID extracts a sandbox ID from `tensorlake sbx create` stdout.
+// The CLI prints just the ID on a single line on success.
+func parseSandboxID(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if isLikelySandboxID(line) {
+			return line
+		}
+	}
+	return ""
+}
+
+// isLikelySandboxID returns true for the lowercase-alphanumeric token format
+// Tensorlake uses for sandbox IDs (e.g. "3pryjysezwsnlex226i5h").
+func isLikelySandboxID(s string) bool {
+	if len(s) < 12 || len(s) > 40 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'z') {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *tensorlakeCLI) execStream(ctx context.Context, name, workdir string, command []string, stdout, stderr io.Writer) (int, error) {
