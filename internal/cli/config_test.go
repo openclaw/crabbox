@@ -75,6 +75,25 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ISLO_VCPUS",
 		"CRABBOX_ISLO_MEMORY_MB",
 		"CRABBOX_ISLO_DISK_GB",
+		"CRABBOX_TENSORLAKE_API_KEY",
+		"TENSORLAKE_API_KEY",
+		"CRABBOX_TENSORLAKE_API_URL",
+		"TENSORLAKE_API_URL",
+		"CRABBOX_TENSORLAKE_CLI",
+		"CRABBOX_TENSORLAKE_IMAGE",
+		"CRABBOX_TENSORLAKE_SNAPSHOT",
+		"CRABBOX_TENSORLAKE_ORGANIZATION_ID",
+		"TENSORLAKE_ORGANIZATION_ID",
+		"CRABBOX_TENSORLAKE_PROJECT_ID",
+		"TENSORLAKE_PROJECT_ID",
+		"CRABBOX_TENSORLAKE_NAMESPACE",
+		"INDEXIFY_NAMESPACE",
+		"CRABBOX_TENSORLAKE_WORKDIR",
+		"CRABBOX_TENSORLAKE_CPUS",
+		"CRABBOX_TENSORLAKE_MEMORY_MB",
+		"CRABBOX_TENSORLAKE_DISK_MB",
+		"CRABBOX_TENSORLAKE_TIMEOUT_SECS",
+		"CRABBOX_TENSORLAKE_NO_INTERNET",
 		"CRABBOX_SEMAPHORE_HOST",
 		"SEMAPHORE_HOST",
 		"CRABBOX_SEMAPHORE_TOKEN",
@@ -249,6 +268,20 @@ islo:
   vcpus: 4
   memoryMB: 8192
   diskGB: 40
+tensorlake:
+  apiUrl: https://api.tensorlake.example.test
+  cliPath: /usr/local/bin/tl
+  image: ubuntu-22.04
+  snapshot: snap-tl
+  organizationId: org-tl
+  projectId: proj-tl
+  namespace: ns-tl
+  workdir: /workspace/crabbox-test
+  cpus: 4
+  memoryMB: 8192
+  diskMB: 30000
+  timeoutSecs: 1800
+  noInternet: true
 proxmox:
   apiUrl: https://pve.example.test:8006
   tokenId: crabbox@pve!test
@@ -373,6 +406,9 @@ ssh:
 	}
 	if cfg.Islo.BaseURL != "https://islo.example.test" || cfg.Islo.Image != "docker.io/library/ubuntu:24.04" || cfg.Islo.Workdir != "crabbox" || cfg.Islo.GatewayProfile != "default" || cfg.Islo.SnapshotName != "snap-ready" || cfg.Islo.VCPUs != 4 || cfg.Islo.MemoryMB != 8192 || cfg.Islo.DiskGB != 40 {
 		t.Fatalf("islo config not loaded: %#v", cfg.Islo)
+	}
+	if cfg.Tensorlake.APIURL != "https://api.tensorlake.example.test" || cfg.Tensorlake.CLIPath != "/usr/local/bin/tl" || cfg.Tensorlake.Image != "ubuntu-22.04" || cfg.Tensorlake.Snapshot != "snap-tl" || cfg.Tensorlake.OrganizationID != "org-tl" || cfg.Tensorlake.ProjectID != "proj-tl" || cfg.Tensorlake.Namespace != "ns-tl" || cfg.Tensorlake.Workdir != "/workspace/crabbox-test" || cfg.Tensorlake.CPUs != 4 || cfg.Tensorlake.MemoryMB != 8192 || cfg.Tensorlake.DiskMB != 30000 || cfg.Tensorlake.TimeoutSecs != 1800 || !cfg.Tensorlake.NoInternet {
+		t.Fatalf("tensorlake config not loaded: %#v", cfg.Tensorlake)
 	}
 	if cfg.Proxmox.APIURL != "https://pve.example.test:8006" || cfg.Proxmox.TokenID != "crabbox@pve!test" || cfg.Proxmox.TokenSecret != "proxmox-secret" || cfg.Proxmox.Node != "pve1" || cfg.Proxmox.TemplateID != 9000 || cfg.Proxmox.Storage != "local-lvm" || cfg.Proxmox.Pool != "crabbox" || cfg.Proxmox.Bridge != "vmbr1" || cfg.Proxmox.User != "runner" || cfg.Proxmox.WorkRoot != "/work/proxmox" || cfg.Proxmox.FullClone || !cfg.Proxmox.InsecureTLS {
 		t.Fatalf("proxmox config not loaded: %#v", cfg.Proxmox)
@@ -505,6 +541,25 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_ISLO_VCPUS", "8")
 	t.Setenv("CRABBOX_ISLO_MEMORY_MB", "16384")
 	t.Setenv("CRABBOX_ISLO_DISK_GB", "80")
+	t.Setenv("TENSORLAKE_API_KEY", "tl-api-file")
+	t.Setenv("CRABBOX_TENSORLAKE_API_KEY", "tl-api-env")
+	t.Setenv("TENSORLAKE_API_URL", "https://api.tl-file.example")
+	t.Setenv("CRABBOX_TENSORLAKE_API_URL", "https://api.tl-env.example")
+	t.Setenv("CRABBOX_TENSORLAKE_CLI", "/opt/tl/bin/tensorlake")
+	t.Setenv("CRABBOX_TENSORLAKE_IMAGE", "ubuntu:tl-env")
+	t.Setenv("CRABBOX_TENSORLAKE_SNAPSHOT", "snap-tl-env")
+	t.Setenv("TENSORLAKE_ORGANIZATION_ID", "org-tl-file")
+	t.Setenv("CRABBOX_TENSORLAKE_ORGANIZATION_ID", "org-tl-env")
+	t.Setenv("TENSORLAKE_PROJECT_ID", "proj-tl-file")
+	t.Setenv("CRABBOX_TENSORLAKE_PROJECT_ID", "proj-tl-env")
+	t.Setenv("INDEXIFY_NAMESPACE", "ns-tl-file")
+	t.Setenv("CRABBOX_TENSORLAKE_NAMESPACE", "ns-tl-env")
+	t.Setenv("CRABBOX_TENSORLAKE_WORKDIR", "/workspace/tl-env")
+	t.Setenv("CRABBOX_TENSORLAKE_CPUS", "2.5")
+	t.Setenv("CRABBOX_TENSORLAKE_MEMORY_MB", "4096")
+	t.Setenv("CRABBOX_TENSORLAKE_DISK_MB", "20480")
+	t.Setenv("CRABBOX_TENSORLAKE_TIMEOUT_SECS", "900")
+	t.Setenv("CRABBOX_TENSORLAKE_NO_INTERNET", "true")
 	t.Setenv("CRABBOX_PROXMOX_API_URL", "https://pve-env.example:8006")
 	t.Setenv("CRABBOX_PROXMOX_TOKEN_ID", "runner@pve!env")
 	t.Setenv("CRABBOX_PROXMOX_TOKEN_SECRET", "proxmox-env-secret")
@@ -617,6 +672,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Islo.APIKey != "islo-api-env" || cfg.Islo.BaseURL != "https://islo-env.example" || cfg.Islo.Image != "ubuntu:env" || cfg.Islo.Workdir != "env-workdir" || cfg.Islo.GatewayProfile != "env-gateway" || cfg.Islo.SnapshotName != "env-snapshot" || cfg.Islo.VCPUs != 8 || cfg.Islo.MemoryMB != 16384 || cfg.Islo.DiskGB != 80 {
 		t.Fatalf("unexpected islo env: %#v", cfg.Islo)
+	}
+	if cfg.Tensorlake.APIKey != "tl-api-env" || cfg.Tensorlake.APIURL != "https://api.tl-env.example" || cfg.Tensorlake.CLIPath != "/opt/tl/bin/tensorlake" || cfg.Tensorlake.Image != "ubuntu:tl-env" || cfg.Tensorlake.Snapshot != "snap-tl-env" || cfg.Tensorlake.OrganizationID != "org-tl-env" || cfg.Tensorlake.ProjectID != "proj-tl-env" || cfg.Tensorlake.Namespace != "ns-tl-env" || cfg.Tensorlake.Workdir != "/workspace/tl-env" || cfg.Tensorlake.CPUs != 2.5 || cfg.Tensorlake.MemoryMB != 4096 || cfg.Tensorlake.DiskMB != 20480 || cfg.Tensorlake.TimeoutSecs != 900 || !cfg.Tensorlake.NoInternet {
+		t.Fatalf("unexpected tensorlake env: %#v", cfg.Tensorlake)
 	}
 	if cfg.Proxmox.APIURL != "https://pve-env.example:8006" || cfg.Proxmox.TokenID != "runner@pve!env" || cfg.Proxmox.TokenSecret != "proxmox-env-secret" || cfg.Proxmox.Node != "pve-env" || cfg.Proxmox.TemplateID != 9100 || cfg.Proxmox.Storage != "ceph-env" || cfg.Proxmox.Pool != "pool-env" || cfg.Proxmox.Bridge != "vmbr2" || cfg.Proxmox.User != "runner-env" || cfg.Proxmox.WorkRoot != "/work/proxmox-env" || cfg.Proxmox.FullClone || !cfg.Proxmox.InsecureTLS {
 		t.Fatalf("unexpected proxmox env: %#v", cfg.Proxmox)
