@@ -31,6 +31,11 @@ type Server struct {
 			IP string `json:"ip"`
 		} `json:"ipv4"`
 	} `json:"public_net"`
+	PrivateNet struct {
+		IPv4 struct {
+			IP string `json:"ip"`
+		} `json:"ipv4"`
+	} `json:"private_net"`
 	ServerType struct {
 		Name string `json:"name"`
 	} `json:"server_type"`

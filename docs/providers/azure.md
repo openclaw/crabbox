@@ -53,6 +53,7 @@ azure:
   subnet: crabbox-subnet
   nsg: crabbox-nsg
   sshCIDRs: []
+  network: public
 ```
 
 `subscriptionId`, `tenantId`, and `clientId` may be set in config or sourced
@@ -76,7 +77,12 @@ CRABBOX_AZURE_VNET
 CRABBOX_AZURE_SUBNET
 CRABBOX_AZURE_NSG
 CRABBOX_AZURE_SSH_CIDRS
+CRABBOX_AZURE_NETWORK
 ```
+
+`CRABBOX_AZURE_NETWORK` selects the IP used for SSH: `public` (default) uses
+the VM public IP, `private` uses the NIC private IP from the vnet. Use
+`private` when connecting through a VPN to the Azure virtual network.
 
 `AZURE_*` are the standard service principal env vars consumed by
 `DefaultAzureCredential`. Crabbox does not read or print the client secret.

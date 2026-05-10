@@ -100,6 +100,7 @@ CRABBOX_AZURE_VNET
 CRABBOX_AZURE_SUBNET
 CRABBOX_AZURE_NSG
 CRABBOX_AZURE_SSH_CIDRS
+CRABBOX_AZURE_NETWORK
 ```
 
 The service principal needs the
@@ -126,6 +127,26 @@ Per-lease provisioning creates only the public IP, NIC, VM, and OS disk.
 
 Azure pricing is not hardcoded. Use `CRABBOX_COST_RATES_JSON` for exact
 Azure cost guardrails.
+
+## VPN / Private Network
+
+When connecting through a VPN to the Azure virtual network, set
+`azure.network: private` in config or `CRABBOX_AZURE_NETWORK=private` in the
+environment. This tells Crabbox to use the VM's NIC private IP (e.g.
+`10.42.0.4`) instead of the public IP for SSH connectivity.
+
+```yaml
+azure:
+  network: private
+```
+
+```sh
+export CRABBOX_AZURE_NETWORK=private
+crabbox warmup --provider azure
+```
+
+When `network` is `private` and the NIC has no private IP yet, Crabbox falls
+back to the public IP. The default is `public`.
 
 ## Desktop
 

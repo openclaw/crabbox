@@ -74,7 +74,7 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool) (LeaseTa
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+	target := sshTargetFromConfig(cfg, azureServerHost(server, cfg.AzureNetwork))
 	if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
 		_ = client.DeleteServer(context.Background(), server.CloudID)
 		return LeaseTarget{}, err
@@ -100,7 +100,7 @@ func (b *azureLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 			return LeaseTarget{}, exit(4, "lease/server not found: %s (vm exists but is not Crabbox-managed)", req.ID)
 		}
 		leaseID := blank(server.Labels["lease"], req.ID)
-		target := sshTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
+		target := sshTargetFromConfig(b.Cfg, azureServerHost(server, b.Cfg.AzureNetwork))
 		useStoredTestboxKey(&target, leaseID)
 		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 	}
@@ -111,7 +111,7 @@ func (b *azureLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 	if server, leaseID, err := findServerByAlias(servers, req.ID); err != nil {
 		return LeaseTarget{}, err
 	} else if leaseID != "" {
-		target := sshTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
+		target := sshTargetFromConfig(b.Cfg, azureServerHost(server, b.Cfg.AzureNetwork))
 		useStoredTestboxKey(&target, leaseID)
 		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 	}
@@ -202,3 +202,6 @@ func findServerByAlias(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)
 }
 func removeLeaseClaim(leaseID string) { core.RemoveLeaseClaim(leaseID) }
+func azureServerHost(server Server, network string) string {
+	return core.AzureServerHost(server, network)
+}

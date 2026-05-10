@@ -48,6 +48,7 @@ type Config struct {
 	AzureSubnet        string
 	AzureNSG           string
 	AzureSSHCIDRs      []string
+	AzureNetwork       string
 	GCPProject         string
 	gcpProjectExplicit bool
 	GCPZone            string
@@ -494,6 +495,7 @@ type fileAzureConfig struct {
 	Subnet         string   `yaml:"subnet,omitempty"`
 	NSG            string   `yaml:"nsg,omitempty"`
 	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
+	Network        string   `yaml:"network,omitempty"`
 }
 
 type fileGCPConfig struct {
@@ -927,6 +929,9 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		}
 		if len(file.Azure.SSHCIDRs) > 0 {
 			cfg.AzureSSHCIDRs = file.Azure.SSHCIDRs
+		}
+		if file.Azure.Network != "" {
+			cfg.AzureNetwork = file.Azure.Network
 		}
 	}
 	if file.GCP != nil {
@@ -1461,6 +1466,7 @@ func applyEnv(cfg *Config) {
 	if cidrs := os.Getenv("CRABBOX_AZURE_SSH_CIDRS"); cidrs != "" {
 		cfg.AzureSSHCIDRs = splitCommaList(cidrs)
 	}
+	cfg.AzureNetwork = getenv("CRABBOX_AZURE_NETWORK", cfg.AzureNetwork)
 	if project := os.Getenv("CRABBOX_GCP_PROJECT"); project != "" {
 		cfg.GCPProject = project
 		cfg.gcpProjectExplicit = true
