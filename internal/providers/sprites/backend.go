@@ -74,6 +74,9 @@ func validateSpritesOptions(cfg Config) error {
 	if cfg.Tailscale.Enabled {
 		return exit(2, "--tailscale is not supported for provider=sprites; Sprites exposes SSH through sprite proxy")
 	}
+	if err := cleanSpritesWorkRoot(cfg.Sprites.WorkRoot); err != nil {
+		return err
+	}
 	return nil
 }
 

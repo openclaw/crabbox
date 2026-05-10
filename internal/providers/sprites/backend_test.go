@@ -144,6 +144,14 @@ func TestSpritesRejectsTailscale(t *testing.T) {
 	}
 }
 
+func TestSpritesRejectsUnsafeWorkRootBeforeBackend(t *testing.T) {
+	cfg := Config{Sprites: SpritesConfig{Token: "test-token", WorkRoot: "/tmp"}}
+	_, err := NewSpritesBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
+	if err == nil || !strings.Contains(err.Error(), "too broad") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestSpritesClientLifecycleRequests(t *testing.T) {
 	var sawCreate bool
 	var sawDelete bool
