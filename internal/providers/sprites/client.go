@@ -87,6 +87,7 @@ func (c *spritesClient) GetSprite(ctx context.Context, name string) (spritesInfo
 func (c *spritesClient) ListSprites(ctx context.Context, prefix string) ([]spritesInfo, error) {
 	var all []spritesInfo
 	continuation := ""
+	seenContinuations := map[string]bool{}
 	for {
 		query := url.Values{}
 		query.Set("max_results", "50")
@@ -101,10 +102,18 @@ func (c *spritesClient) ListSprites(ctx context.Context, prefix string) ([]sprit
 			return nil, err
 		}
 		all = append(all, page.Sprites...)
-		if !page.HasMore || page.NextContinuationToken == "" {
+		if !page.HasMore {
 			return all, nil
 		}
-		continuation = page.NextContinuationToken
+		next := strings.TrimSpace(page.NextContinuationToken)
+		if next == "" {
+			return nil, fmt.Errorf("sprites list response has_more without next_continuation_token")
+		}
+		if seenContinuations[next] {
+			return nil, fmt.Errorf("sprites list response repeated continuation token %q", next)
+		}
+		seenContinuations[next] = true
+		continuation = next
 	}
 }
 
