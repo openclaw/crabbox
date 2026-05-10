@@ -2,6 +2,7 @@ package namespace
 
 import (
 	"flag"
+	"path"
 	"strings"
 	"time"
 )
@@ -82,6 +83,9 @@ func validateNamespaceConfig(cfg Config) error {
 	if cfg.Namespace.VolumeSizeGB < 0 {
 		return exit(2, "namespace volume size must be non-negative")
 	}
+	if err := cleanNamespaceWorkRoot(namespaceWorkRoot(cfg)); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -92,4 +96,16 @@ func applyNamespaceDuration(target *time.Duration, value string) {
 	if parsed, err := time.ParseDuration(value); err == nil && parsed > 0 {
 		*target = parsed
 	}
+}
+
+func cleanNamespaceWorkRoot(workRoot string) error {
+	clean := path.Clean(strings.TrimSpace(workRoot))
+	if clean == "" || !strings.HasPrefix(clean, "/") {
+		return exit(2, "namespace.workRoot %q must resolve to an absolute path", workRoot)
+	}
+	switch clean {
+	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspaces":
+		return exit(2, "namespace.workRoot %q is too broad; choose a dedicated subdirectory", clean)
+	}
+	return nil
 }

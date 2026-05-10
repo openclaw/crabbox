@@ -207,6 +207,18 @@ func TestReleaseLeaseCleansNamespaceSSHFiles(t *testing.T) {
 	}
 }
 
+func TestNamespaceRejectsUnsafeWorkRoot(t *testing.T) {
+	for _, workRoot := range []string{"/", "/workspaces", "/tmp", "relative"} {
+		cfg := Config{Namespace: NamespaceConfig{WorkRoot: workRoot}}
+		if err := validateNamespaceConfig(cfg); err == nil {
+			t.Fatalf("expected %q to be rejected", workRoot)
+		}
+	}
+	if err := validateNamespaceConfig(Config{Namespace: NamespaceConfig{WorkRoot: "/workspaces/crabbox"}}); err != nil {
+		t.Fatalf("valid work root rejected: %v", err)
+	}
+}
+
 func TestNamespaceLifecycleCommandFallbacks(t *testing.T) {
 	runner := &namespaceRecordingRunner{failFirst: true}
 	backend := &namespaceLeaseBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
