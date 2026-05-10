@@ -30,8 +30,8 @@ AWS, Hetzner, Static SSH, or Daytona when you need Crabbox-native SSH access.
 
 ```sh
 crabbox warmup --provider tensorlake --tensorlake-image <image>
-crabbox run --provider tensorlake --no-sync -- pnpm test
-crabbox run --provider tensorlake --no-sync --id blue-lobster --shell 'pnpm install && pnpm test'
+crabbox run --provider tensorlake -- pnpm test
+crabbox run --provider tensorlake --id blue-lobster --shell 'pnpm install && pnpm test'
 crabbox status --provider tensorlake --id blue-lobster
 crabbox stop --provider tensorlake blue-lobster
 ```
@@ -55,11 +55,12 @@ target: linux
 tensorlake:
   apiUrl: https://api.tensorlake.ai
   cliPath: tensorlake
-  image: ""             # required for new sandboxes when no snapshot is given
-  snapshot: ""          # snapshot ID to restore from (alternative to image)
+  image: ""              # ubuntu-minimal default; pin a registered image otherwise
+  snapshot: ""           # snapshot ID to restore from (alternative to image)
   organizationId: ""
   projectId: ""
   namespace: ""
+  workdir: /workspace/crabbox  # absolute path; sync target and -w for exec
   cpus: 1.0
   memoryMB: 1024
   diskMB: 10240
@@ -77,6 +78,7 @@ Provider flags:
 --tensorlake-organization-id
 --tensorlake-project-id
 --tensorlake-namespace
+--tensorlake-workdir
 --tensorlake-cpus
 --tensorlake-memory-mb
 --tensorlake-disk-mb
@@ -93,20 +95,25 @@ config. The API key is sourced from `CRABBOX_TENSORLAKE_API_KEY` or
 
 1. `warmup` / `run` (without `--id`) generates a Crabbox-owned sandbox name
    (`crabbox-<repo-slug>-<random6>`) and runs `tensorlake sbx create` with the
-   configured CPU/memory/disk/image/snapshot.
-2. The local lease is stored with the `tlsbx_` prefix and a friendly slug.
-3. `run` invokes `tensorlake sbx exec <name> -- <command>` and streams
-   stdout/stderr back through Crabbox.
-4. On release the sandbox is terminated via `tensorlake sbx terminate <name>`
+   configured CPU/memory/disk/image/snapshot. The Tensorlake-assigned sandbox
+   ID is captured from stdout and used as the canonical identifier.
+2. The local lease is stored as `tlsbx_<sandbox-id>` with a friendly slug.
+3. By default `run` archive-syncs the working tree: `git ls-files`-driven
+   manifest → `tar -czf` locally → `tensorlake sbx cp` upload to
+   `/tmp/crabbox-sync-*.tgz` → `tensorlake sbx exec -- bash -lc 'tar -xzf …'`
+   into the configured workdir. Pass `--no-sync` to skip the archive step.
+4. The user command runs via `tensorlake sbx exec -w <workdir> <id> -- <cmd>`,
+   streaming stdout/stderr back through Crabbox.
+5. On release the sandbox is terminated via `tensorlake sbx terminate <id>`
    unless `--keep` was set.
 
 ## Capabilities
 
 - SSH: no (Tensorlake exposes `tensorlake sbx ssh` directly; Crabbox does not
-  proxy it yet).
-- Crabbox sync: not yet — v1 requires `--no-sync`. Archive sync via
-  `tensorlake sbx cp` plus an in-sandbox `tar -xzf` is the planned follow-up.
-- Provider sync: no.
+  proxy it).
+- Crabbox sync: yes — gzipped tar uploaded via `tensorlake sbx cp` and
+  extracted in-sandbox.
+- Provider sync: no separate Tensorlake sync command.
 - Desktop/browser/code: no Crabbox VNC/code surface.
 - Actions hydration: no.
 - Coordinator: no.
@@ -114,14 +121,18 @@ config. The API key is sourced from `CRABBOX_TENSORLAKE_API_KEY` or
 ## Gotchas
 
 - `--sync-only`, `--checksum`, `--force-sync-large`, `--capture-stdout`, and
-  `--download` are rejected by core for delegated providers, and `run` further
-  requires `--no-sync` until archive sync lands.
+  `--download` are rejected because Tensorlake doesn't expose Crabbox's
+  rsync semantics. Use `--no-sync` plus an explicit `--id` if you've already
+  primed the sandbox.
 - `--shell` wraps the command as `bash -lc '<joined args>'` before passing it
-  to `tensorlake sbx exec`.
-- IDs accepted by `--id` and `stop`: Crabbox slugs, `tlsbx_<name>` lease IDs,
-  and Crabbox-created sandbox names. Sandboxes whose name does not start with
-  `crabbox-` are rejected to avoid touching unrelated workloads in the
-  Tensorlake account.
+  to `tensorlake sbx exec`. Plain commands containing shell metacharacters
+  (`&&`, `|`, `>`, etc.) or leading `KEY=VALUE` env assignments are also
+  auto-wrapped.
+- `tensorlake.workdir` must be absolute (default `/workspace/crabbox`). It's
+  used as both the sync target and the `-w` working directory for exec.
+- IDs accepted by `--id` and `stop`: Crabbox slugs and `tlsbx_<sandbox-id>`
+  lease IDs that have a local Crabbox claim. Sandboxes without a local claim
+  are rejected (matches the islo/Crabbox-owned-only safety pattern).
 - The `tensorlake` CLI authenticates from `TENSORLAKE_API_KEY` in env; never
   pass `--api-key` on the command line because process listings expose argv.
 

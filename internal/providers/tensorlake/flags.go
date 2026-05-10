@@ -10,6 +10,7 @@ type tensorlakeFlagValues struct {
 	OrganizationID *string
 	ProjectID      *string
 	Namespace      *string
+	Workdir        *string
 	CPUs           *float64
 	MemoryMB       *int
 	DiskMB         *int
@@ -26,6 +27,7 @@ func RegisterTensorlakeProviderFlags(fs *flag.FlagSet, defaults Config) any {
 		OrganizationID: fs.String("tensorlake-organization-id", defaults.Tensorlake.OrganizationID, "Tensorlake organization ID"),
 		ProjectID:      fs.String("tensorlake-project-id", defaults.Tensorlake.ProjectID, "Tensorlake project ID"),
 		Namespace:      fs.String("tensorlake-namespace", defaults.Tensorlake.Namespace, "Tensorlake namespace"),
+		Workdir:        fs.String("tensorlake-workdir", defaults.Tensorlake.Workdir, "Absolute working directory inside the sandbox (also used as sync target)"),
 		CPUs:           fs.Float64("tensorlake-cpus", defaults.Tensorlake.CPUs, "Tensorlake sandbox CPU count"),
 		MemoryMB:       fs.Int("tensorlake-memory-mb", defaults.Tensorlake.MemoryMB, "Tensorlake sandbox memory in MB"),
 		DiskMB:         fs.Int("tensorlake-disk-mb", defaults.Tensorlake.DiskMB, "Tensorlake sandbox root disk in MB"),
@@ -59,6 +61,9 @@ func ApplyTensorlakeProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 	}
 	if flagWasSet(fs, "tensorlake-namespace") {
 		cfg.Tensorlake.Namespace = *v.Namespace
+	}
+	if flagWasSet(fs, "tensorlake-workdir") {
+		cfg.Tensorlake.Workdir = *v.Workdir
 	}
 	if flagWasSet(fs, "tensorlake-cpus") {
 		cfg.Tensorlake.CPUs = *v.CPUs

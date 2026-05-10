@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	osexec "os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -11,6 +14,8 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func osExec(name string, args ...string) *osexec.Cmd { return osexec.Command(name, args...) }
 
 func TestProviderSpec(t *testing.T) {
 	p := Provider{}
@@ -29,6 +34,61 @@ func TestProviderSpec(t *testing.T) {
 	}
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v want [{linux}]", spec.Targets)
+	}
+}
+
+func TestProviderForResolvesNameAndAliases(t *testing.T) {
+	for _, name := range []string{"tensorlake", "tl", "tensorlake-sbx"} {
+		got, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q) err=%v", name, err)
+		}
+		if got.Name() != "tensorlake" {
+			t.Fatalf("ProviderFor(%q).Name()=%q want tensorlake", name, got.Name())
+		}
+	}
+}
+
+func TestBuildCommandAutoWrapsShellMetacharacters(t *testing.T) {
+	got, err := buildCommand([]string{"pnpm install && pnpm test"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0] != "bash" || got[1] != "-lc" {
+		t.Fatalf("command=%#v want bash -lc wrapping", got)
+	}
+	if !strings.Contains(got[2], "pnpm install") || !strings.Contains(got[2], "pnpm test") {
+		t.Fatalf("command=%#v missing user input", got)
+	}
+}
+
+func TestBuildCommandAutoWrapsLeadingEnvAssignment(t *testing.T) {
+	got, err := buildCommand([]string{"FOO=bar", "pnpm", "test"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0] != "bash" {
+		t.Fatalf("command=%#v want bash wrapping for FOO=bar", got)
+	}
+}
+
+func TestTensorlakeWorkdirRejectsRelative(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Tensorlake.Workdir = "relative/path"
+	if _, err := tensorlakeWorkdir(cfg); err == nil {
+		t.Fatalf("expected rejection of relative workdir")
+	}
+}
+
+func TestTensorlakeWorkdirDefault(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Tensorlake.Workdir = ""
+	got, err := tensorlakeWorkdir(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/workspace/crabbox" {
+		t.Fatalf("default=%q want /workspace/crabbox", got)
 	}
 }
 
@@ -146,12 +206,14 @@ func TestNewSandboxNameStripsRedundantPrefix(t *testing.T) {
 }
 
 // recordingCommandRunner is a fake CommandRunner that records every call and
-// replies with a scripted (stdout, stderr, exit, err) tuple keyed by the
-// subcommand sequence (e.g. "sbx create", "sbx exec", "sbx terminate").
+// replies from a per-verb queue of scripted (stdout, stderr, exit, err)
+// tuples. Replies are popped in order; if the queue for a verb is empty, the
+// last reply (or zero value) is reused.
 type recordingCommandRunner struct {
-	mu      sync.Mutex
-	calls   []core.LocalCommandRequest
-	scripts map[string]scriptedReply
+	mu       sync.Mutex
+	calls    []core.LocalCommandRequest
+	scripts  map[string][]scriptedReply
+	defaults map[string]scriptedReply
 }
 
 type scriptedReply struct {
@@ -164,9 +226,15 @@ type scriptedReply struct {
 func (r *recordingCommandRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.mu.Lock()
 	r.calls = append(r.calls, req)
-	r.mu.Unlock()
 	key := scriptKey(req.Args)
-	reply := r.scripts[key]
+	var reply scriptedReply
+	if queue := r.scripts[key]; len(queue) > 0 {
+		reply = queue[0]
+		r.scripts[key] = queue[1:]
+	} else if def, ok := r.defaults[key]; ok {
+		reply = def
+	}
+	r.mu.Unlock()
 	if req.Stdout != nil && reply.stdout != "" {
 		_, _ = io.WriteString(req.Stdout, reply.stdout)
 	}
@@ -179,6 +247,10 @@ func (r *recordingCommandRunner) Run(_ context.Context, req core.LocalCommandReq
 		Stderr:   reply.stderr,
 	}
 	return res, reply.err
+}
+
+func newRunner(defaults map[string]scriptedReply, sequenced map[string][]scriptedReply) *recordingCommandRunner {
+	return &recordingCommandRunner{defaults: defaults, scripts: sequenced}
 }
 
 // scriptKey extracts the `sbx <verb>` portion of an argv slice, ignoring
@@ -212,13 +284,11 @@ func newTestConfig() Config {
 }
 
 func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
-	runner := &recordingCommandRunner{
-		scripts: map[string]scriptedReply{
-			"sbx create":    {stdout: "3pryjysezwsnlex226i5h\n"},
-			"sbx exec":      {stdout: "hello\n"},
-			"sbx terminate": {stdout: "3pryjysezwsnlex226i5h\n"},
-		},
-	}
+	runner := newRunner(map[string]scriptedReply{
+		"sbx create":    {stdout: "3pryjysezwsnlex226i5h\n"},
+		"sbx exec":      {stdout: "hello\n"},
+		"sbx terminate": {stdout: "3pryjysezwsnlex226i5h\n"},
+	}, nil)
 	cfg := newTestConfig()
 	rt := newTestRuntime(runner)
 	backend := NewTensorlakeBackend(Provider{}.Spec(), cfg, rt).(*tensorlakeBackend)
@@ -240,20 +310,25 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 		t.Fatalf("exit=%d want 0", result.ExitCode)
 	}
 	verbs := callVerbs(runner)
-	want := []string{"sbx create", "sbx exec", "sbx terminate"}
+	// With --no-sync we still prepare the workdir (mkdir) before the user's command.
+	want := []string{"sbx create", "sbx exec", "sbx exec", "sbx terminate"}
 	if !reflect.DeepEqual(verbs, want) {
 		t.Fatalf("verbs=%v want %v", verbs, want)
 	}
 	// `sbx exec` must target the captured sandbox ID, not the human name.
-	execCall := findCall(runner, "sbx exec")
+	// The user-command exec is the second exec call (the first is the mkdir prepare).
+	execCall := findCallN(runner, "sbx exec", 1)
 	if execCall == nil {
-		t.Fatalf("missing sbx exec call")
+		t.Fatalf("missing user-command sbx exec call")
 	}
 	if !containsArg(execCall.Args, "3pryjysezwsnlex226i5h") {
 		t.Fatalf("exec args=%v missing sandbox id", execCall.Args)
 	}
 	if !containsArg(execCall.Args, "echo") || !containsArg(execCall.Args, "hello") {
 		t.Fatalf("exec args=%v missing user command", execCall.Args)
+	}
+	if !containsArg(execCall.Args, "-w") || !containsArg(execCall.Args, "/workspace/crabbox") {
+		t.Fatalf("exec args=%v missing -w workdir", execCall.Args)
 	}
 	// API key must flow via env, never argv.
 	if containsArgPrefix(execCall.Args, "tl_apiKey_") {
@@ -266,13 +341,20 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 
 func TestRunSurfacesCommandExitCodeWithoutWrappingError(t *testing.T) {
 	exitErr := &fakeExitError{code: 7}
-	runner := &recordingCommandRunner{
-		scripts: map[string]scriptedReply{
+	runner := newRunner(
+		map[string]scriptedReply{
 			"sbx create":    {stdout: "abc123def456ghi789\n"},
-			"sbx exec":      {stderr: "boom\n", exitCode: 7, err: exitErr},
 			"sbx terminate": {stdout: "abc123def456ghi789\n"},
 		},
-	}
+		map[string][]scriptedReply{
+			// First exec is the mkdir prepare (succeeds); second is the user
+			// command (exits 7).
+			"sbx exec": {
+				{stdout: ""},
+				{stderr: "boom\n", exitCode: 7, err: exitErr},
+			},
+		},
+	)
 	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
 	req := RunRequest{
 		Repo:    Repo{Name: "carbbox", Root: t.TempDir()},
@@ -289,29 +371,71 @@ func TestRunSurfacesCommandExitCodeWithoutWrappingError(t *testing.T) {
 	}
 }
 
-func TestRunRequiresNoSync(t *testing.T) {
-	runner := &recordingCommandRunner{}
+func TestRunPerformsArchiveSyncByDefault(t *testing.T) {
+	runner := newRunner(map[string]scriptedReply{
+		"sbx create":    {stdout: "syncidaaaaaaaaaaaaaa\n"},
+		"sbx exec":      {stdout: "ok\n"},
+		"sbx cp":        {stdout: ""},
+		"sbx terminate": {stdout: "syncidaaaaaaaaaaaaaa\n"},
+	}, nil)
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
+	repoRoot := newGitRepo(t)
+	if err := os.WriteFile(filepath.Join(repoRoot, "hello.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := RunRequest{
+		Repo:    Repo{Name: "carbbox", Root: repoRoot},
+		Command: []string{"echo", "ok"},
+	}
+	if _, err := backend.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	verbs := callVerbs(runner)
+	// Expected order: create → mkdir-prepare exec → cp upload → tar-extract exec → user exec → terminate
+	want := []string{"sbx create", "sbx exec", "sbx cp", "sbx exec", "sbx exec", "sbx terminate"}
+	if !reflect.DeepEqual(verbs, want) {
+		t.Fatalf("verbs=%v want %v", verbs, want)
+	}
+	cp := findCall(runner, "sbx cp")
+	if cp == nil {
+		t.Fatalf("missing sbx cp call")
+	}
+	if !containsArgPrefix(cp.Args, "syncidaaaaaaaaaaaaaa:/tmp/crabbox-sync-") {
+		t.Fatalf("cp args=%v missing remote dest", cp.Args)
+	}
+}
+
+func TestRunSkipsSyncWithNoSync(t *testing.T) {
+	runner := newRunner(map[string]scriptedReply{
+		"sbx create":    {stdout: "nosyncidaaaaaaaaaaaa\n"},
+		"sbx exec":      {stdout: "ok\n"},
+		"sbx terminate": {stdout: "nosyncidaaaaaaaaaaaa\n"},
+	}, nil)
 	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
 	req := RunRequest{
 		Repo:    Repo{Name: "carbbox", Root: t.TempDir()},
-		Command: []string{"echo"},
-		NoSync:  false,
+		Command: []string{"echo", "ok"},
+		NoSync:  true,
 	}
-	if _, err := backend.Run(context.Background(), req); err == nil {
-		t.Fatalf("expected error when --no-sync is missing")
+	if _, err := backend.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run err=%v", err)
 	}
-	if len(runner.calls) != 0 {
-		t.Fatalf("CLI was invoked despite sync rejection: %d calls", len(runner.calls))
+	if findCall(runner, "sbx cp") != nil {
+		t.Fatalf("sbx cp called despite --no-sync")
+	}
+	verbs := callVerbs(runner)
+	// With --no-sync we still prepare the workdir (mkdir) before the user's command.
+	want := []string{"sbx create", "sbx exec", "sbx exec", "sbx terminate"}
+	if !reflect.DeepEqual(verbs, want) {
+		t.Fatalf("verbs=%v want %v", verbs, want)
 	}
 }
 
 func TestKeepRetainsSandbox(t *testing.T) {
-	runner := &recordingCommandRunner{
-		scripts: map[string]scriptedReply{
-			"sbx create": {stdout: "keepid01234567890ab\n"},
-			"sbx exec":   {stdout: "hi\n"},
-		},
-	}
+	runner := newRunner(map[string]scriptedReply{
+		"sbx create": {stdout: "keepid01234567890ab\n"},
+		"sbx exec":   {stdout: "hi\n"},
+	}, nil)
 	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
 	req := RunRequest{
 		Repo:    Repo{Name: "carbbox", Root: t.TempDir()},
@@ -329,7 +453,7 @@ func TestKeepRetainsSandbox(t *testing.T) {
 }
 
 func TestStopRejectsUnclaimedID(t *testing.T) {
-	runner := &recordingCommandRunner{}
+	runner := newRunner(nil, nil)
 	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
 	err := backend.Stop(context.Background(), StopRequest{ID: "not-claimed-anywhere"})
 	if err == nil {
@@ -341,12 +465,10 @@ func TestStopRejectsUnclaimedID(t *testing.T) {
 }
 
 func TestCreateInvocationCarriesSizingFlags(t *testing.T) {
-	runner := &recordingCommandRunner{
-		scripts: map[string]scriptedReply{
-			"sbx create": {stdout: "sizingid01234567890\n"},
-			"sbx exec":   {stdout: "ok\n"},
-		},
-	}
+	runner := newRunner(map[string]scriptedReply{
+		"sbx create": {stdout: "sizingid01234567890\n"},
+		"sbx exec":   {stdout: "ok\n"},
+	}, nil)
 	cfg := newTestConfig()
 	cfg.Tensorlake.CPUs = 2.5
 	cfg.Tensorlake.MemoryMB = 8192
@@ -393,14 +515,43 @@ func callVerbs(r *recordingCommandRunner) []string {
 }
 
 func findCall(r *recordingCommandRunner, verb string) *core.LocalCommandRequest {
+	return findCallN(r, verb, 0)
+}
+
+// findCallN returns the (n+1)-th call to verb (zero-indexed). Returns nil
+// when fewer than n+1 calls exist.
+func findCallN(r *recordingCommandRunner, verb string, n int) *core.LocalCommandRequest {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	seen := 0
 	for i := range r.calls {
 		if scriptKey(r.calls[i].Args) == verb {
-			return &r.calls[i]
+			if seen == n {
+				return &r.calls[i]
+			}
+			seen++
 		}
 	}
 	return nil
+}
+
+// newGitRepo creates a temp directory, runs `git init` + an empty commit so
+// `git ls-files` (used by core.BuildSyncManifest) has something to walk.
+func newGitRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", root},
+		{"-C", root, "config", "user.email", "test@example.com"},
+		{"-C", root, "config", "user.name", "test"},
+		{"-C", root, "commit", "-q", "--allow-empty", "-m", "init"},
+	} {
+		cmd := osExec("git", args...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	return root
 }
 
 func containsArg(args []string, want string) bool {

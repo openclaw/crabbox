@@ -87,7 +87,7 @@ through the Sprites API and reaches SSH through `sprite proxy`.
 | Daytona | yes | yes | yes | no | archive via Daytona toolbox | no |
 | Islo | yes | yes | no | no | no | yes |
 | E2B | yes | yes | no | no | archive via E2B envd | no |
-| Tensorlake | requires `--no-sync` (v1) | yes | no | no | no (planned) | no |
+| Tensorlake | yes | yes | no | no | archive via `tensorlake sbx cp` | no |
 
 Actions runner hydration requires a normal SSH lease on Linux and is core-over-SSH.
 Use AWS, Google Cloud, Hetzner, Proxmox, Static SSH, Namespace Devbox,

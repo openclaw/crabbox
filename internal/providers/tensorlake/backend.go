@@ -52,7 +52,11 @@ func (b *tensorlakeBackend) Warmup(ctx context.Context, req WarmupRequest) error
 }
 
 func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
-	if err := rejectSyncOptions(req); err != nil {
+	if err := rejectIncompatibleSyncOptions(req); err != nil {
+		return RunResult{}, err
+	}
+	workdir, err := tensorlakeWorkdir(b.cfg)
+	if err != nil {
 		return RunResult{}, err
 	}
 	started := b.now()
@@ -85,13 +89,27 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 			removeLeaseClaim(leaseID)
 		}()
 	}
-	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s\n", providerName, leaseID, sandboxID)
+	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
+
+	syncDuration := time.Duration(0)
+	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
+	if !req.NoSync {
+		var err error
+		syncPhases, syncDuration, err = b.syncWorkspace(ctx, cli, sandboxID, req, workdir)
+		if err != nil {
+			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, err
+		}
+		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
+	} else if err := b.prepareWorkspace(ctx, cli, sandboxID, workdir); err != nil {
+		return RunResult{}, err
+	}
+
 	command, err := buildCommand(req.Command, req.ShellMode)
 	if err != nil {
 		return RunResult{}, err
 	}
 	commandStart := b.now()
-	exitCode, runErr := cli.execStream(ctx, sandboxID, "", command, b.rt.Stdout, b.rt.Stderr)
+	exitCode, runErr := cli.execStream(ctx, sandboxID, workdir, command, b.rt.Stdout, b.rt.Stderr)
 	commandDuration := b.now().Sub(commandStart)
 	result := RunResult{
 		ExitCode:      exitCode,
@@ -99,16 +117,24 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		Total:         b.now().Sub(started),
 		SyncDelegated: true,
 	}
-	fmt.Fprintf(b.rt.Stderr, "tensorlake run summary command=%s total=%s exit=%d\n",
-		result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
+	if req.NoSync {
+		fmt.Fprintf(b.rt.Stderr, "tensorlake run summary sync_skipped=true command=%s total=%s exit=%d\n",
+			result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
+	} else {
+		fmt.Fprintf(b.rt.Stderr, "tensorlake run summary sync=%s command=%s total=%s exit=%d\n",
+			syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
+	}
 	if req.TimingJSON {
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider:    providerName,
-			LeaseID:     leaseID,
-			SyncSkipped: true,
-			CommandMs:   result.Command.Milliseconds(),
-			TotalMs:     result.Total.Milliseconds(),
-			ExitCode:    exitCode,
+			Provider:      providerName,
+			LeaseID:       leaseID,
+			SyncDelegated: true,
+			SyncMs:        syncDuration.Milliseconds(),
+			SyncPhases:    syncPhases,
+			SyncSkipped:   req.NoSync,
+			CommandMs:     result.Command.Milliseconds(),
+			TotalMs:       result.Total.Milliseconds(),
+			ExitCode:      exitCode,
 		}); err != nil {
 			return result, err
 		}
@@ -327,7 +353,27 @@ func buildCommand(command []string, shellMode bool) ([]string, error) {
 	if shellMode {
 		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
 	}
+	if shouldUseShell(command) || leadingEnvAssignment(command) {
+		return []string{"bash", "-lc", shellScriptFromArgv(command)}, nil
+	}
 	return command, nil
+}
+
+func leadingEnvAssignment(command []string) bool {
+	return len(command) > 1 && strings.Contains(command[0], "=") && !strings.HasPrefix(command[0], "-")
+}
+
+// tensorlakeWorkdir returns the configured absolute workspace path inside the
+// sandbox, validating that it isn't relative or empty.
+func tensorlakeWorkdir(cfg Config) (string, error) {
+	workdir := strings.TrimSpace(cfg.Tensorlake.Workdir)
+	if workdir == "" {
+		workdir = "/workspace/crabbox"
+	}
+	if !strings.HasPrefix(workdir, "/") {
+		return "", exit(2, "tensorlake workdir %q must be an absolute path", workdir)
+	}
+	return workdir, nil
 }
 
 func (b *tensorlakeBackend) now() time.Time {

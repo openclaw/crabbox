@@ -190,6 +190,7 @@ type TensorlakeConfig struct {
 	OrganizationID string
 	ProjectID      string
 	Namespace      string
+	Workdir        string
 	CPUs           float64
 	MemoryMB       int
 	DiskMB         int
@@ -437,6 +438,7 @@ func baseConfig() Config {
 		Tensorlake: TensorlakeConfig{
 			APIURL:   "https://api.tensorlake.ai",
 			CLIPath:  "tensorlake",
+			Workdir:  "/workspace/crabbox",
 			CPUs:     1.0,
 			MemoryMB: 1024,
 			DiskMB:   10240,
@@ -689,6 +691,7 @@ type fileTensorlakeConfig struct {
 	OrganizationID string  `yaml:"organizationId,omitempty"`
 	ProjectID      string  `yaml:"projectId,omitempty"`
 	Namespace      string  `yaml:"namespace,omitempty"`
+	Workdir        string  `yaml:"workdir,omitempty"`
 	CPUs           float64 `yaml:"cpus,omitempty"`
 	MemoryMB       int     `yaml:"memoryMB,omitempty"`
 	DiskMB         int     `yaml:"diskMB,omitempty"`
@@ -1338,6 +1341,9 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		if file.Tensorlake.Namespace != "" {
 			cfg.Tensorlake.Namespace = file.Tensorlake.Namespace
 		}
+		if file.Tensorlake.Workdir != "" {
+			cfg.Tensorlake.Workdir = file.Tensorlake.Workdir
+		}
 		if file.Tensorlake.CPUs > 0 {
 			cfg.Tensorlake.CPUs = file.Tensorlake.CPUs
 		}
@@ -1760,6 +1766,7 @@ func applyEnv(cfg *Config) {
 	cfg.Tensorlake.OrganizationID = getenv("CRABBOX_TENSORLAKE_ORGANIZATION_ID", getenv("TENSORLAKE_ORGANIZATION_ID", cfg.Tensorlake.OrganizationID))
 	cfg.Tensorlake.ProjectID = getenv("CRABBOX_TENSORLAKE_PROJECT_ID", getenv("TENSORLAKE_PROJECT_ID", cfg.Tensorlake.ProjectID))
 	cfg.Tensorlake.Namespace = getenv("CRABBOX_TENSORLAKE_NAMESPACE", getenv("INDEXIFY_NAMESPACE", cfg.Tensorlake.Namespace))
+	cfg.Tensorlake.Workdir = getenv("CRABBOX_TENSORLAKE_WORKDIR", cfg.Tensorlake.Workdir)
 	cfg.Tensorlake.CPUs = getenvFloat("CRABBOX_TENSORLAKE_CPUS", cfg.Tensorlake.CPUs)
 	cfg.Tensorlake.MemoryMB = getenvInt("CRABBOX_TENSORLAKE_MEMORY_MB", cfg.Tensorlake.MemoryMB)
 	cfg.Tensorlake.DiskMB = getenvInt("CRABBOX_TENSORLAKE_DISK_MB", cfg.Tensorlake.DiskMB)

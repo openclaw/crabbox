@@ -8,8 +8,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-
-	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type tensorlakeCLI struct {
@@ -180,6 +178,28 @@ func (c *tensorlakeCLI) execStream(ctx context.Context, name, workdir string, co
 	return c.runStreamed(ctx, []string{"sbx", "exec"}, args, stdout, stderr)
 }
 
+// execShell runs `bash -lc <command>` inside the sandbox and returns an error
+// for non-zero exits. Used for sync helpers (mkdir, tar, cleanup) where we
+// don't care about streaming output back to the user.
+func (c *tensorlakeCLI) execShell(ctx context.Context, name, command string) error {
+	code, err := c.runStreamed(ctx, []string{"sbx", "exec"}, []string{name, "bash", "-lc", command}, io.Discard, io.Discard)
+	if err != nil {
+		return fmt.Errorf("tensorlake exec %q: %w", command, err)
+	}
+	if code != 0 {
+		return exit(code, "tensorlake exec %q exited %d", command, code)
+	}
+	return nil
+}
+
+// uploadFile pushes a local file into the sandbox via `tensorlake sbx cp`.
+func (c *tensorlakeCLI) uploadFile(ctx context.Context, name, localPath, remotePath string) error {
+	src := localPath
+	dst := name + ":" + remotePath
+	_, err := c.runQuiet(ctx, []string{"sbx", "cp"}, []string{src, dst})
+	return err
+}
+
 func (c *tensorlakeCLI) terminate(ctx context.Context, name string) error {
 	_, err := c.runQuiet(ctx, []string{"sbx", "terminate"}, []string{name})
 	return err
@@ -225,17 +245,4 @@ func tensorlakeError(action string, exitCode int, stdout, stderr *bytes.Buffer, 
 func trimFloat(v float64) string {
 	s := strconv.FormatFloat(v, 'f', -1, 64)
 	return s
-}
-
-// rejectSyncOptions refuses Crabbox sync flags that have no Tensorlake-side
-// implementation in v1. Archive sync via `tensorlake sbx cp` + tar is a
-// follow-up; for now the user must pass --no-sync.
-func rejectSyncOptions(req RunRequest) error {
-	if err := core.RejectDelegatedSyncOptions(providerName, req); err != nil {
-		return err
-	}
-	if !req.NoSync {
-		return exit(2, "provider=tensorlake requires --no-sync; archive sync via tensorlake sbx cp is not implemented yet")
-	}
-	return nil
 }
