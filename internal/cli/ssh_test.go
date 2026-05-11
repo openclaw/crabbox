@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -475,6 +476,25 @@ func TestSSHPortCandidatesUseConfiguredFallbacks(t *testing.T) {
 	}
 	if got := sshPortCandidates("2222", []string{}); strings.Join(got, ",") != "2222" {
 		t.Fatalf("sshPortCandidates(disabled fallback)=%v want [2222]", got)
+	}
+}
+
+func TestRsyncLocalPathConvertsWindowsDrivePath(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only test")
+	}
+	tests := map[string]string{
+		"C:/OpenClaw/crabbox":  "/c/OpenClaw/crabbox",
+		"D:\\Users\\test":      "/d/Users/test",
+		"/already/posix":       "/already/posix",
+		"relative/path":        "relative/path",
+	}
+	for in, want := range tests {
+		got := rsyncLocalPath(in)
+		if got != want {
+			t.Errorf("rsyncLocalPath(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

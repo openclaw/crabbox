@@ -532,7 +532,7 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	if opts.Debug {
 		args = append(args, "--stats", "--itemize-changes", "--progress")
 	}
-	args = append(args, ensureTrailingSlash(src), target.User+"@"+target.Host+":"+dst+"/")
+	args = append(args, ensureTrailingSlash(rsyncLocalPath(src)), target.User+"@"+target.Host+":"+dst+"/")
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, "rsync", args...)
 	if opts.UseFilesFrom {
@@ -610,6 +610,20 @@ func ensureTrailingSlash(path string) string {
 		return path
 	}
 	return path + "/"
+}
+
+// rsyncLocalPath converts a Windows drive path like C:/foo to /c/foo so that
+// MSYS2/Cygwin rsync does not interpret the colon as a remote host separator.
+func rsyncLocalPath(path string) string {
+	if runtime.GOOS != "windows" {
+		return path
+	}
+	path = strings.ReplaceAll(path, `\`, "/")
+	if len(path) >= 2 && path[1] == ':' {
+		drive := strings.ToLower(string(path[0]))
+		return "/" + drive + path[2:]
+	}
+	return path
 }
 
 func shellQuote(s string) string {
