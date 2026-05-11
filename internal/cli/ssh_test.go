@@ -209,6 +209,18 @@ func TestEnvAllowlist(t *testing.T) {
 	}
 }
 
+func TestEnvAllowlistRejectsEmptyWildcardPrefix(t *testing.T) {
+	if envAllowed("CRABBOX_PROOF_API_TOKEN", []string{"*"}) {
+		t.Fatal("bare wildcard must not forward every local environment variable")
+	}
+	if envAllowed("CRABBOX_PROOF_API_TOKEN", []string{"  *  "}) {
+		t.Fatal("trimmed bare wildcard must not forward every local environment variable")
+	}
+	if !envAllowed("PROJECT_FLAG", []string{"PROJECT_*"}) {
+		t.Fatal("non-empty prefix wildcard should still work")
+	}
+}
+
 func TestSSHArgsIncludeReliabilityOptions(t *testing.T) {
 	t.Setenv("HOME", "/tmp/crabbox-home")
 	got := strings.Join(sshArgs(SSHTarget{

@@ -131,7 +131,11 @@ func envAllowed(name string, allow []string) bool {
 			continue
 		}
 		if strings.HasSuffix(pattern, "*") {
-			if strings.HasPrefix(name, strings.TrimSuffix(pattern, "*")) {
+			prefix := strings.TrimSuffix(pattern, "*")
+			if prefix == "" {
+				continue
+			}
+			if strings.HasPrefix(name, prefix) {
 				return true
 			}
 			continue
