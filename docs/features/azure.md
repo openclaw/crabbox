@@ -124,6 +124,10 @@ The first acquire in an empty subscription creates:
 
 These resources are created with `createOrUpdate` and reused across leases.
 Per-lease provisioning creates only the public IP, NIC, VM, and OS disk.
+The shared vnet, subnet, and NSG are Azure regional resources. When reusing an
+existing shared resource group, set `azure.location` / `CRABBOX_AZURE_LOCATION`
+to the same region as the existing vnet and NSG, or choose distinct
+`azure.vnet`, `azure.subnet`, and `azure.nsg` names for a new region.
 
 Azure pricing is not hardcoded. Use `CRABBOX_COST_RATES_JSON` for exact
 Azure cost guardrails.

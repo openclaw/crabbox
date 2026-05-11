@@ -37,7 +37,6 @@ func TestAzAccountInfoRejectsEmptySubscription(t *testing.T) {
 }
 
 func TestAzAccountShowRequiresAzOnPath(t *testing.T) {
-	t.Parallel()
 	t.Setenv("PATH", "")
 	_, err := azAccountShow(context.Background(), "")
 	if err == nil {

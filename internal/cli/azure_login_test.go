@@ -9,7 +9,6 @@ import (
 )
 
 func TestAzureLoginWritesConfigFields(t *testing.T) {
-	t.Parallel()
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "config.yaml")
 	t.Setenv("CRABBOX_CONFIG", cfgPath)
@@ -57,7 +56,6 @@ func TestAzureLoginWritesConfigFields(t *testing.T) {
 }
 
 func TestAzureLoginPreservesExistingConfig(t *testing.T) {
-	t.Parallel()
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "config.yaml")
 	t.Setenv("CRABBOX_CONFIG", cfgPath)

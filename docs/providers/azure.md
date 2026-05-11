@@ -214,6 +214,11 @@ WSL2 and macOS remain AWS or static-SSH targets.
 - The first acquire in an empty subscription pays the cost of creating the
   shared resource group, vnet, and NSG. Subsequent acquires only create
   per-lease resources.
+- Shared Azure network resources are regional. If `crabbox-nsg` or
+  `crabbox-vnet` already exists in `westcentralus`, a later acquire configured
+  for `eastus` must either set `azure.location: westcentralus` to reuse that
+  shared infra or use different `azure.vnet` / `azure.subnet` / `azure.nsg`
+  names for the new region.
 - If you already have a resource group / vnet / NSG with the configured
   names, Crabbox will refuse to mutate them unless they carry
   `managed_by=crabbox` as a tag. Either tag them to adopt, choose
