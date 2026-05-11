@@ -9,6 +9,7 @@
 - Added `crabbox run --fresh-pr <owner/repo#number>` for fresh remote GitHub PR checkouts, with optional `--apply-local-patch`.
 - Added `crabbox run --preflight`, `--capture-stderr`, automatic failure bundles, env-forwarding summaries, and `CRABBOX_PHASE:<name>` timing markers for easier live/provider run debugging.
 - Added `crabbox run --keep-on-failure` so failed one-shot runs can leave the exact lease available for SSH inspection until idle/TTL expiry.
+- Added `provider: proxmox` for direct Proxmox VE Linux QEMU VM leases, including template clone, cloud-init SSH key injection, guest-agent bootstrap, docs, and cleanup support.
 - Added `crabbox azure login` so direct Azure users can persist the active `az login` subscription, tenant, and location without manually exporting service-principal environment variables. Thanks @galiniliev.
 - Added `azure.network` / `CRABBOX_AZURE_NETWORK` so Azure direct leases can SSH through private VNet addresses when using VPN/private-network access. Thanks @galiniliev.
 

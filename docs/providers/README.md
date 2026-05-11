@@ -15,6 +15,7 @@ static SSH provider for existing machines.
 | [Azure](azure.md) | SSH lease | Linux, Windows | Azure-backed Linux and native Windows capacity |
 | [Google Cloud](gcp.md) | SSH lease | Linux | GCP-backed Linux Compute Engine capacity |
 | [Hetzner](hetzner.md) | SSH lease | Linux | fast Linux capacity at low cost |
+| [Proxmox](proxmox.md) | SSH lease | Linux | private Proxmox VE QEMU VM templates |
 | [Static SSH](ssh.md) | SSH lease | Linux, macOS, Windows | reusing an existing host |
 | [Blacksmith Testbox](blacksmith-testbox.md) | delegated run | Linux | existing Blacksmith Testbox workflows |
 | [Namespace Devbox](namespace-devbox.md) | SSH lease | Linux | Namespace-managed dev environments with Crabbox sync |
@@ -53,8 +54,9 @@ credentials, cost state, cleanup alarms, and lease accounting.
 Direct mode is for local operator debugging or non-brokered setups. It uses local
 provider credentials and best-effort cleanup through provider labels.
 
-Delegated providers do not use the Crabbox coordinator:
+Proxmox and delegated providers do not use the Crabbox coordinator:
 
+- Proxmox clones private QEMU VM templates through the Proxmox VE REST API.
 - Blacksmith uses the authenticated Blacksmith CLI.
 - Daytona uses Daytona API and SDK/toolbox APIs.
 - Islo uses the Islo API and SDK auth.
@@ -74,6 +76,7 @@ through the Sprites API and reaches SSH through `sprite proxy`.
 | Azure | yes | yes | yes | Linux VNC/code | yes | no |
 | Google Cloud | yes | yes | yes | no | yes | no |
 | Hetzner | yes | yes | yes | Linux VNC/code | yes | no |
+| Proxmox | yes | yes | yes | no | yes | no |
 | Static SSH | yes | resolves host | yes | host-dependent | yes | no |
 | Blacksmith Testbox | yes | yes | no | no | no | yes |
 | Namespace Devbox | yes | yes | yes | no | yes | no |
@@ -84,8 +87,8 @@ through the Sprites API and reaches SSH through `sprite proxy`.
 | E2B | yes | yes | no | no | archive via E2B envd | no |
 
 Actions runner hydration requires a normal SSH lease on Linux and is core-over-SSH.
-Use AWS, Google Cloud, Hetzner, Static SSH, Namespace Devbox, Semaphore, or Sprites for that
-path.
+Use AWS, Google Cloud, Hetzner, Proxmox, Static SSH, Namespace Devbox,
+Semaphore, or Sprites for that path.
 
 ## Implementation
 

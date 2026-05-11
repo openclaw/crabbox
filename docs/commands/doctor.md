@@ -31,9 +31,9 @@ and the matching `.pub` file. When unset, it skips that check because
 per-lease keys do not need a global key.
 
 When a coordinator is configured, doctor also asks the broker for secret
-readiness for managed brokered providers such as AWS, Azure, and Hetzner. It
+readiness for managed brokered providers such as AWS, Azure, GCP, and Hetzner. It
 reports missing Worker secret names such as `AZURE_TENANT_ID` without exposing
-secret values. Static and delegated providers skip this broker-secret check.
+secret values. Static, Proxmox, and delegated providers skip this broker-secret check.
 
 For the full list of checks, including how each one decides between
 `fail`, `skip`, and `ok`, see
@@ -76,7 +76,7 @@ the exit code.
 ## Flags
 
 ```text
---provider hetzner|aws|azure|ssh   provider to validate
+--provider hetzner|aws|azure|gcp|proxmox|ssh   provider to validate
 --target linux|macos|windows target OS for ssh provider checks
 --windows-mode normal|wsl2   when target=windows
 --static-host <host>         static SSH host

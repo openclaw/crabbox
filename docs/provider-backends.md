@@ -147,12 +147,17 @@ Built-in providers live under `internal/providers/<name>`:
 internal/providers/all
 internal/providers/hetzner
 internal/providers/aws
+internal/providers/azure
+internal/providers/gcp
+internal/providers/proxmox
 internal/providers/ssh
 internal/providers/blacksmith
 internal/providers/namespace
 internal/providers/sprites
 internal/providers/daytona
 internal/providers/islo
+internal/providers/e2b
+internal/providers/semaphore
 ```
 
 Each provider package owns registration, provider name, aliases, spec,
@@ -176,13 +181,18 @@ internal/cli/provider_coordinator.go      # brokered coordinator lease wrapper
 internal/cli/provider_labels.go           # shared direct-provider label helpers
 internal/providers/shared                 # shared direct SSH retry/touch/cleanup helpers
 internal/providers/aws                    # AWS SSH lease backend
+internal/providers/azure                  # Azure SSH lease backend
+internal/providers/gcp                    # Google Cloud SSH lease backend
 internal/providers/hetzner                # Hetzner SSH lease backend
+internal/providers/proxmox                # Proxmox VE SSH lease backend
 internal/providers/ssh                    # static SSH backend
 internal/providers/blacksmith             # Blacksmith delegated backend
 internal/providers/namespace              # Namespace Devbox SSH backend
 internal/providers/sprites                # Sprites SSH backend
 internal/providers/daytona                # Daytona SSH + delegated SDK backend
 internal/providers/islo                   # Islo delegated backend
+internal/providers/e2b                    # E2B delegated backend
+internal/providers/semaphore              # Semaphore SSH lease backend
 ```
 
 Provider packages may use small exported core helpers for claims, labels,

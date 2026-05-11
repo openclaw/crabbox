@@ -26,8 +26,12 @@ Supported providers:
   native Windows, Windows WSL2, and EC2 Mac.
 - [Azure](docs/providers/azure.md) (`provider: azure`): brokered or direct
   Linux and native Windows VMs.
+- [Google Cloud](docs/providers/gcp.md) (`provider: gcp`): brokered or direct
+  Linux Compute Engine VMs.
 - [Hetzner Cloud](docs/providers/hetzner.md) (`provider: hetzner`): brokered or
   direct Linux VMs.
+- [Proxmox](docs/providers/proxmox.md) (`provider: proxmox`): direct Linux QEMU
+  VM clones from private Proxmox VE templates.
 - [Static SSH](docs/providers/ssh.md) (`provider: ssh`): existing Linux, macOS,
   Windows, or WSL2 hosts.
 - [Blacksmith Testbox](docs/providers/blacksmith-testbox.md)
@@ -87,7 +91,7 @@ Every lease has a stable `cbx_...` ID and a friendly crustacean slug (`blue-lobs
 ```text
 your laptop                Cloudflare Worker            cloud provider
 -------------              ------------------           --------------
-crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS EC2 / Azure
+crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS / Azure / GCP
    |                         lease + cost state              |
    |                                                         |
    +------------ SSH + rsync to leased runner <--------------+
@@ -97,7 +101,7 @@ crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS EC2 / Azur
 - **Broker** — Cloudflare Worker at `crabbox.openclaw.ai` plus a single Durable Object. Owns provider credentials, serializes lease state, enforces active-lease and monthly spend caps, and expires stale leases by alarm. Auth is GitHub login or a shared bearer token.
 - **Runner** — a throwaway SSH machine prepared with SSH on the primary port, default `2222`, plus configured fallback ports and Crabbox's sync/run prerequisites. Linux uses Ubuntu with cloud-init and `/work/crabbox`; native Windows uses OpenSSH, Git for Windows, and `C:\crabbox`. No broker credentials live on the box. Project runtimes (Go, Node, Docker, services, secrets) come from your repo's GitHub Actions hydration, devcontainer, Nix, mise/asdf, or setup scripts — not from Crabbox.
 
-A direct-provider mode (`--provider hetzner|aws|azure` with local credentials) exists for debugging the broker itself; the brokered path is the default.
+A direct-provider mode (`--provider hetzner|aws|azure|gcp|proxmox` with local credentials) exists for debugging the broker itself or using private infrastructure; the brokered path is the default where supported.
 
 For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For the doc-to-code map, see [Source Map](docs/source-map.md).
 
@@ -108,12 +112,13 @@ For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For th
 - **Run observability.** Every coordinator-backed run gets an early `run_...` handle. Use `crabbox attach <run-id>` while it is active, `crabbox events <run-id> --after <seq> --limit <n>` for durable lifecycle/output events, and `crabbox logs <run-id>` for retained output after completion.
 - **Stable timing records.** `--timing-json` on `run`, `warmup`, and `actions hydrate` gives scripts one machine-readable sync/command/total timing schema across AWS, Hetzner, and Blacksmith Testboxes.
 - **Local-first workspace sync.** No clean-checkout requirement. Tracked + nonignored files only, fingerprint skip on no-op runs, sanity checks against suspicious mass deletions, optional shallow base-ref hydration for changed-test workflows.
-- **Brokered cloud.** Maintainers and agents share infra without sharing provider tokens. Hetzner, AWS EC2, and Azure are managed providers; AWS also owns Windows WSL2 and EC2 Mac targets. Linux defaults to Spot unless capacity config says otherwise. Providers fall back across compatible instance families when capacity or quota rejects a request.
+- **Brokered cloud.** Maintainers and agents share infra without sharing provider tokens. Hetzner, AWS EC2, Azure, and Google Cloud are managed providers; AWS also owns Windows WSL2 and EC2 Mac targets. Linux defaults to Spot unless capacity config says otherwise. Providers fall back across compatible instance families when capacity or quota rejects a request.
 - **Azure Linux and native Windows.** `provider: azure` provisions Linux and native Windows VMs in a configurable Azure subscription using `DefaultAzureCredential` in direct mode or service-principal secrets in the broker. Crabbox creates a shared resource group, vnet, subnet, and NSG on first use, then per-lease public IPs, NICs, and VMs. Linux uses cloud-init; Windows uses VM Agent Custom Script Extension to install OpenSSH/Git and configure the Crabbox user.
 - **macOS and Windows static hosts.** `provider: ssh` reuses existing machines; it does not create macOS or Windows Crabbox boxes. macOS and Windows WSL2 use the POSIX rsync path; native Windows uses PowerShell plus tar archive sync.
 - **Blacksmith Testbox wrapper.** Set `provider: blacksmith-testbox` to delegate warmup/run/list/status/stop to the Blacksmith CLI while Crabbox keeps local slugs, repo claims, timing summaries, config conventions, and portal visibility for active external runners.
 - **Namespace Devbox SSH leases.** Set `provider: namespace-devbox` to create or reuse Namespace Devboxes through the `devbox` CLI, then let Crabbox sync the dirty checkout and run commands over SSH.
 - **Semaphore CI testbox.** Set `provider: semaphore` to lease a Semaphore CI job as a testbox. Same environment as your real pipelines.
+- **Proxmox VM clones.** Set `provider: proxmox` to clone Linux QEMU templates on a private Proxmox VE cluster, bootstrap them through the QEMU guest agent, and use normal Crabbox SSH sync/run/cleanup.
 - **Sprites SSH leases.** Set `provider: sprites` to create a Sprites microVM, bootstrap OpenSSH inside it, and let Crabbox sync/run through `sprite proxy` with `crabbox ssh` support.
 - **Daytona, Islo, and E2B sandboxes.** Set `provider: daytona` for Daytona SDK/toolbox execution from a snapshot with explicit SSH access when needed, `provider: islo` for delegated Islo sandbox execution through the Islo Go SDK, or `provider: e2b` for delegated E2B sandbox execution through E2B sandbox APIs.
 - **Trusted AWS images.** Operators can create AMIs from active brokered AWS leases and promote a known-good image as the coordinator default.

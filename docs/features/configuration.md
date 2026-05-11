@@ -160,6 +160,35 @@ aws:
 Hetzner credentials and image come from broker-side config. Repos do not need
 a `hetzner:` block unless they pin a class or location.
 
+### Google Cloud
+
+```yaml
+provider: gcp
+gcp:
+  project: example-project
+  zone: europe-west2-a
+  network: default
+  rootGB: 400
+```
+
+### Proxmox
+
+```yaml
+provider: proxmox
+proxmox:
+  apiUrl: https://pve.example.test:8006
+  tokenId: crabbox@pve!ci
+  node: pve1
+  templateId: 9000
+  storage: local-lvm
+  bridge: vmbr0
+  user: crabbox
+  workRoot: /work/crabbox
+```
+
+Put `tokenSecret` in a private config file or use
+`CRABBOX_PROXMOX_TOKEN_SECRET`; do not pass it as a command-line flag.
+
 ### Static SSH
 
 ```yaml
@@ -452,6 +481,8 @@ provider-native:
 ```text
 HCLOUD_TOKEN / HETZNER_TOKEN
 AWS_PROFILE / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN
+GOOGLE_APPLICATION_CREDENTIALS / GOOGLE_CLOUD_PROJECT
+CRABBOX_PROXMOX_TOKEN_ID / CRABBOX_PROXMOX_TOKEN_SECRET
 DAYTONA_API_KEY / DAYTONA_JWT_TOKEN
 BLACKSMITH_*  (read by the Blacksmith CLI)
 ISLO_API_KEY  (read by the Islo SDK)

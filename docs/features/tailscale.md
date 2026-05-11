@@ -7,8 +7,9 @@ Read when:
 - changing SSH, VNC, or coordinator bootstrap behavior.
 
 Tailscale is an optional Crabbox reachability layer. It is not a provider.
-Providers still own machines: Hetzner, AWS, Azure, static SSH hosts, and Blacksmith
-Testbox. Tailscale only changes which host Crabbox dials for SSH-backed work.
+Providers still own machines: Hetzner, AWS, Azure, Google Cloud, Proxmox,
+static SSH hosts, and Blacksmith Testbox. Tailscale only changes which host
+Crabbox dials for SSH-backed work.
 
 V1 support:
 

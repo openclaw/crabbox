@@ -2,7 +2,7 @@
 
 Read when:
 
-- changing Hetzner, AWS, Azure, Google Cloud, or Blacksmith Testbox provisioning;
+- changing Hetzner, AWS, Azure, Google Cloud, Proxmox, or Blacksmith Testbox provisioning;
 - adding a backend;
 - adjusting machine classes, fallback order, regions, or images.
 
@@ -28,6 +28,7 @@ ssh         Existing SSH host selected by static.host
 Direct provider backends can also run without the Crabbox coordinator:
 
 ```text
+proxmox    Proxmox VE QEMU VM clones exposed as SSH leases
 semaphore  Semaphore CI jobs exposed as SSH leases
 namespace  Namespace Devboxes exposed as SSH leases
 sprites    Sprites microVMs exposed as SSH leases through sprite proxy
@@ -43,6 +44,7 @@ e2b        E2B sandboxes with delegated command execution
 - [Azure](../providers/azure.md): Azure Linux/native Windows, shared infra, capacity, and cleanup.
 - [Google Cloud](../providers/gcp.md): GCP Compute Engine Linux SSH leases.
 - [Hetzner](../providers/hetzner.md): Linux-only managed provider behavior, classes, and cleanup.
+- [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [Blacksmith Testbox](../providers/blacksmith-testbox.md): delegated Testbox backend behavior.
 - [Namespace Devbox](../providers/namespace-devbox.md): Namespace Devbox SSH leases with Crabbox sync/run.
@@ -131,7 +133,7 @@ large     L
 beast     XL
 ```
 
-Direct provider mode still exists when no coordinator is configured. It uses local AWS credentials, Azure credentials, Google Application Default Credentials, or `HCLOUD_TOKEN`/`HETZNER_TOKEN` and should stay secondary to the brokered path.
+Direct provider mode still exists when no coordinator is configured. It uses local AWS credentials, Azure credentials, Google Application Default Credentials, Proxmox API tokens, or `HCLOUD_TOKEN`/`HETZNER_TOKEN` and should stay secondary to the brokered path when a brokered provider is available.
 
 Tailscale is not a provider. Use `--tailscale` to add tailnet reachability to
 new managed Linux leases, or set a static host to a MagicDNS name/100.x address
@@ -156,6 +158,11 @@ has no Durable Object alarm; cleanup is best-effort through provider labels and
 manual `crabbox cleanup`. Direct AWS fallback can retry provider types, but the
 structured quota preflight and `provisioningAttempts` metadata belong to the
 brokered Worker path.
+
+Use `--provider proxmox` with `CRABBOX_PROXMOX_*` config for direct Proxmox
+smoke. Proxmox clones a configured Linux QEMU template, injects SSH via
+cloud-init, discovers the IP and bootstraps the VM through the QEMU guest agent,
+then uses normal Crabbox SSH sync/run/release.
 
 Crabbox can also wrap Blacksmith Testboxes with `provider: blacksmith-testbox`. That backend does not use the Crabbox broker or direct cloud credentials. It shells out to the authenticated Blacksmith CLI for `testbox warmup`, `run`, `status`, `list`, and `stop`, while Crabbox keeps local slugs, repo claims, config, and timing summaries. See [Blacksmith Testbox](blacksmith-testbox.md).
 
@@ -230,6 +237,7 @@ Related docs:
 - [Provider reference](../providers/README.md)
 - [AWS](../providers/aws.md)
 - [Hetzner](../providers/hetzner.md)
+- [Proxmox](../providers/proxmox.md)
 - [Tailscale](tailscale.md)
 - [Blacksmith Testbox](../providers/blacksmith-testbox.md)
 - [Namespace Devbox](../providers/namespace-devbox.md)

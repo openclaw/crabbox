@@ -36,6 +36,8 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - Direct Hetzner provider: `internal/providers/hetzner`, with API client helpers in `internal/cli/hcloud.go`
 - Direct AWS provider: `internal/providers/aws`, with API client helpers in `internal/cli/aws.go`
 - Direct Azure provider: `internal/providers/azure`, with API client helpers in `internal/cli/azure.go`
+- Direct Google Cloud provider: `internal/providers/gcp`, with API client helpers in `internal/cli/gcp.go`
+- Direct Proxmox provider: `internal/providers/proxmox`, with API client helpers in `internal/cli/proxmox.go`
 - Static SSH macOS/Windows provider: `internal/providers/ssh`, with target mapping helpers in `internal/cli/static.go`
 - Blacksmith Testbox backend and argument/parsing helpers: `internal/providers/blacksmith`
 - Namespace Devbox SSH lease backend and CLI wrapper: `internal/providers/namespace`
@@ -47,14 +49,14 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
   `internal/cli/provider_backend.go`
 - Built-in provider registration packages:
   `internal/providers/hetzner`, `internal/providers/aws`,
-  `internal/providers/azure`,
-  `internal/providers/ssh`, `internal/providers/blacksmith`,
+  `internal/providers/azure`, `internal/providers/proxmox`,
+  `internal/providers/gcp`, `internal/providers/ssh`, `internal/providers/blacksmith`,
   `internal/providers/namespace`, `internal/providers/daytona`, `internal/providers/islo`,
   `internal/providers/semaphore`, `internal/providers/sprites`, `internal/providers/e2b`,
   `internal/providers/all`
 - Built-in provider backend implementations:
-  `internal/providers/aws`, `internal/providers/azure`,
-  `internal/providers/hetzner`,
+  `internal/providers/aws`, `internal/providers/azure`, `internal/providers/gcp`,
+  `internal/providers/hetzner`, `internal/providers/proxmox`,
   `internal/providers/ssh`, `internal/providers/blacksmith`,
   `internal/providers/namespace`, `internal/providers/daytona`, `internal/providers/islo`,
   `internal/providers/semaphore`, `internal/providers/sprites`, `internal/providers/e2b`,
@@ -63,7 +65,7 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
 - Worker AWS EC2 provider: `worker/src/aws.ts`
 - Worker AWS AMI create/read/promote routes: `worker/src/fleet.ts`, `worker/src/aws.ts`
 - Provider feature docs: `docs/features/aws.md`, `docs/features/azure.md`, `docs/features/hetzner.md`, `docs/features/blacksmith-testbox.md`, `docs/features/namespace-devbox.md`, `docs/features/namespace-devbox-setup.md`, `docs/features/semaphore.md`, `docs/features/sprites.md`, `docs/features/daytona.md`, `docs/features/islo.md`, `docs/features/e2b.md`
-- Provider reference docs: `docs/providers/README.md`, `docs/providers/aws.md`, `docs/providers/azure.md`, `docs/providers/hetzner.md`, `docs/providers/ssh.md`, `docs/providers/blacksmith-testbox.md`, `docs/providers/namespace-devbox.md`, `docs/providers/daytona.md`, `docs/providers/islo.md`, `docs/providers/semaphore.md`, `docs/providers/sprites.md`, `docs/providers/e2b.md`
+- Provider reference docs: `docs/providers/README.md`, `docs/providers/aws.md`, `docs/providers/azure.md`, `docs/providers/gcp.md`, `docs/providers/hetzner.md`, `docs/providers/proxmox.md`, `docs/providers/ssh.md`, `docs/providers/blacksmith-testbox.md`, `docs/providers/namespace-devbox.md`, `docs/providers/daytona.md`, `docs/providers/islo.md`, `docs/providers/semaphore.md`, `docs/providers/sprites.md`, `docs/providers/e2b.md`
 - Provider/backend authoring guide: `docs/provider-backends.md`
 - CLI cloud-init bootstrap: `internal/cli/bootstrap.go`
 - Worker cloud-init bootstrap: `worker/src/bootstrap.ts`

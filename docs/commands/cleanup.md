@@ -62,7 +62,7 @@ and continue with the next candidate.
 ## Flags
 
 ```text
---provider hetzner|aws|azure|namespace-devbox  provider to sweep
+--provider hetzner|aws|azure|gcp|proxmox|namespace-devbox  provider to sweep
 --target linux|macos|windows  for AWS, restrict by target
 --windows-mode normal|wsl2    when target=windows
 --static-host <host>          ignored (provider=ssh has nothing to sweep)

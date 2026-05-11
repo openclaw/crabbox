@@ -40,7 +40,7 @@ included.
 
 ```text
 --id <lease-id-or-slug>      lease to inspect; required for managed providers
---provider hetzner|aws|azure|ssh|namespace-devbox|semaphore|sprites|daytona   override the configured provider
+--provider hetzner|aws|azure|gcp|proxmox|ssh|namespace-devbox|semaphore|sprites|daytona   override the configured provider
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>         static SSH host for provider=ssh

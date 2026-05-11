@@ -99,7 +99,7 @@ modern version of these tools.
 Doctor stays local on purpose. It does not:
 
 - start a real lease or provision a server;
-- talk to AWS, Hetzner, Daytona, Islo, or any provider API;
+- talk to any cloud, Proxmox, or delegated provider API;
 - run `git ls-files` against the repo (that belongs in `crabbox sync-plan`);
 - estimate costs;
 - modify config or rotate keys.

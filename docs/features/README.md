@@ -38,6 +38,7 @@ Read when:
 - [Azure](azure.md): Azure Linux/native Windows, shared infra, capacity, and cleanup.
 - [Google Cloud](../providers/gcp.md): GCP Compute Engine Linux SSH leases.
 - [Hetzner](hetzner.md): Linux-only managed Hetzner behavior, classes, and cleanup.
+- [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
 - [Blacksmith Testbox](blacksmith-testbox.md): delegated Testbox backend behavior.
 - [Namespace Devbox](namespace-devbox.md): Namespace Devbox SSH leases with Crabbox sync/run.
 - [Namespace Devbox setup](namespace-devbox-setup.md): CLI install, auth token profile, and live checks.

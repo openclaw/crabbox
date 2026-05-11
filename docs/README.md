@@ -21,7 +21,7 @@ guardrails so individual machines and CLIs never need to.
 ```text
 your laptop                Cloudflare Worker            cloud provider
 -------------              ------------------           --------------
-crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS EC2 / Azure
+crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS / Azure / GCP
    |                         lease + cost state              |
    |                                                         |
    +------------ SSH + rsync to leased runner <--------------+
@@ -87,7 +87,7 @@ Pick whichever matches your intent:
 - **Start here:** [Getting started](getting-started.md), [How Crabbox Works](how-it-works.md), [Concepts and glossary](concepts.md).
 - **Get the mental model:** [Architecture](architecture.md), [Orchestrator](orchestrator.md).
 - **Use the CLI:** [CLI](cli.md), [Commands](commands/README.md), [Features](features/README.md), [Configuration](features/configuration.md), [Jobs](features/jobs.md), [Actions hydration](features/actions-hydration.md), [Browser portal](features/portal.md), [Telemetry](features/telemetry.md).
-- **Pick or add a target:** [Provider reference](providers/README.md), [Providers feature overview](features/providers.md), [Provider authoring](features/provider-authoring.md), [Provider backends](provider-backends.md), [AWS](providers/aws.md), [Azure](providers/azure.md), [Hetzner](providers/hetzner.md), [Static SSH](providers/ssh.md), [Blacksmith Testbox](providers/blacksmith-testbox.md), [Namespace Devbox](providers/namespace-devbox.md), [Semaphore](providers/semaphore.md), [Sprites](providers/sprites.md), [Daytona](providers/daytona.md), [Islo](providers/islo.md), [E2B](providers/e2b.md), [Interactive desktop and VNC](features/interactive-desktop-vnc.md).
+- **Pick or add a target:** [Provider reference](providers/README.md), [Providers feature overview](features/providers.md), [Provider authoring](features/provider-authoring.md), [Provider backends](provider-backends.md), [AWS](providers/aws.md), [Azure](providers/azure.md), [Google Cloud](providers/gcp.md), [Hetzner](providers/hetzner.md), [Proxmox](providers/proxmox.md), [Static SSH](providers/ssh.md), [Blacksmith Testbox](providers/blacksmith-testbox.md), [Namespace Devbox](providers/namespace-devbox.md), [Semaphore](providers/semaphore.md), [Sprites](providers/sprites.md), [Daytona](providers/daytona.md), [Islo](providers/islo.md), [E2B](providers/e2b.md), [Interactive desktop and VNC](features/interactive-desktop-vnc.md).
 - **Operate it:** [Operations](operations.md), [Observability](observability.md), [Troubleshooting](troubleshooting.md), [Performance](performance.md).
 - **Set it up or audit it:** [Infrastructure](infrastructure.md), [Security](security.md), [Source Map](source-map.md), [MVP Plan](mvp-plan.md).
 
