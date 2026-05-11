@@ -503,16 +503,19 @@ func TestWindowsToWSLPath(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-only test")
 	}
-	tests := map[string]string{
-		"/c/OpenClaw/crabbox":          "/mnt/c/OpenClaw/crabbox",
-		"C:/Users/test":                "/mnt/c/Users/test",
-		"/work/crabbox":                "/work/crabbox",
-		"crabbox@10.0.0.1:/work/":      "crabbox@10.0.0.1:/work/",
+	tests := []struct {
+		in, want string
+	}{
+		{"C:/Users/test", "/mnt/c/Users/test"},
+		{"'ssh' '-i' 'C:/Users/galini/key' '-o' 'UserKnownHostsFile=C:/Users/galini/known_hosts'",
+			"'ssh' '-i' '/mnt/c/Users/galini/key' '-o' 'UserKnownHostsFile=/mnt/c/Users/galini/known_hosts'"},
+		{"/work/crabbox", "/work/crabbox"},
+		{"crabbox@10.0.0.1:/work/", "crabbox@10.0.0.1:/work/"},
 	}
-	for in, want := range tests {
-		got := windowsToWSLPath(in)
-		if got != want {
-			t.Errorf("windowsToWSLPath(%q) = %q, want %q", in, got, want)
+	for _, tc := range tests {
+		got := windowsToWSLPath(tc.in)
+		if got != tc.want {
+			t.Errorf("windowsToWSLPath(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
