@@ -485,10 +485,10 @@ func TestRsyncLocalPathConvertsWindowsDrivePath(t *testing.T) {
 		t.Skip("Windows-only test")
 	}
 	tests := map[string]string{
-		"C:/OpenClaw/crabbox":  "/c/OpenClaw/crabbox",
-		"D:\\Users\\test":      "/d/Users/test",
-		"/already/posix":       "/already/posix",
-		"relative/path":        "relative/path",
+		"C:/OpenClaw/crabbox": "/c/OpenClaw/crabbox",
+		"D:\\Users\\test":     "/d/Users/test",
+		"/already/posix":      "/already/posix",
+		"relative/path":       "relative/path",
 	}
 	for in, want := range tests {
 		got := rsyncLocalPath(in)
