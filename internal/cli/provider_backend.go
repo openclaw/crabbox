@@ -324,11 +324,11 @@ func normalizeProviderName(name string) string {
 }
 
 func providerHelpAll() string {
-	return "provider: hetzner, aws, azure, gcp, ssh, blacksmith-testbox, namespace-devbox, semaphore, daytona, islo, e2b, or sprites"
+	return "provider: hetzner, aws, azure, gcp, proxmox, ssh, blacksmith-testbox, namespace-devbox, semaphore, daytona, islo, e2b, or sprites"
 }
 
 func providerHelpSSH() string {
-	return "provider: hetzner, aws, azure, gcp, ssh, namespace-devbox, semaphore, daytona, or sprites"
+	return "provider: hetzner, aws, azure, gcp, proxmox, ssh, namespace-devbox, semaphore, daytona, or sprites"
 }
 
 func isBlacksmithProvider(provider string) bool {

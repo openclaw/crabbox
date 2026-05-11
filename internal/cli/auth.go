@@ -21,7 +21,7 @@ const defaultCoordinatorURL = "https://crabbox.openclaw.ai"
 func (a App) login(ctx context.Context, args []string) error {
 	fs := newFlagSet("login", a.Stderr)
 	brokerURL := fs.String("url", "", "broker URL")
-	provider := fs.String("provider", "", "default provider: hetzner, aws, or azure")
+	provider := fs.String("provider", "", "default brokered provider: hetzner, aws, azure, or gcp")
 	tokenStdin := fs.Bool("token-stdin", false, "read broker token from stdin")
 	noBrowser := fs.Bool("no-browser", false, "print GitHub login URL instead of opening a browser")
 	jsonOut := fs.Bool("json", false, "print JSON")

@@ -1399,6 +1399,13 @@ func deleteServer(ctx context.Context, cfg Config, server Server) error {
 	if cfg.Provider == "azure" || server.Provider == "azure" {
 		return deleteAzureServer(ctx, cfg, server)
 	}
+	if cfg.Provider == "proxmox" || server.Provider == "proxmox" {
+		client, err := NewProxmoxClient(cfg)
+		if err != nil {
+			return err
+		}
+		return client.DeleteServer(ctx, server.CloudID)
+	}
 	client, err := newHetznerClient()
 	if err != nil {
 		return err

@@ -141,6 +141,20 @@ func (a App) configShow(args []string) error {
 			"sshCIDRs":       cfg.GCPSSHCIDRs,
 			"serviceAccount": cfg.GCPServiceAccount,
 		},
+		"proxmox": map[string]any{
+			"apiUrl":      cfg.Proxmox.APIURL,
+			"auth":        tokenState(cfg.Proxmox.TokenSecret),
+			"tokenId":     cfg.Proxmox.TokenID,
+			"node":        cfg.Proxmox.Node,
+			"templateId":  cfg.Proxmox.TemplateID,
+			"storage":     cfg.Proxmox.Storage,
+			"pool":        cfg.Proxmox.Pool,
+			"bridge":      cfg.Proxmox.Bridge,
+			"user":        cfg.Proxmox.User,
+			"workRoot":    cfg.Proxmox.WorkRoot,
+			"fullClone":   cfg.Proxmox.FullClone,
+			"insecureTLS": cfg.Proxmox.InsecureTLS,
+		},
 	}
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(view)
@@ -170,6 +184,7 @@ func (a App) configShow(args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "aws region=%s root_gb=%d ssh_cidrs=%s\n", cfg.AWSRegion, cfg.AWSRootGB, blank(strings.Join(cfg.AWSSSHCIDRs, ","), "-"))
 	fmt.Fprintf(a.Stdout, "gcp project=%s zone=%s image=%s network=%s subnet=%s root_gb=%d ssh_cidrs=%s\n", blank(cfg.GCPProject, "-"), cfg.GCPZone, cfg.GCPImage, cfg.GCPNetwork, blank(cfg.GCPSubnet, "-"), cfg.GCPRootGB, blank(strings.Join(cfg.GCPSSHCIDRs, ","), "-"))
+	fmt.Fprintf(a.Stdout, "proxmox api_url=%s node=%s template_id=%d storage=%s pool=%s bridge=%s user=%s work_root=%s full_clone=%t auth=%s\n", blank(cfg.Proxmox.APIURL, "-"), blank(cfg.Proxmox.Node, "-"), cfg.Proxmox.TemplateID, blank(cfg.Proxmox.Storage, "-"), blank(cfg.Proxmox.Pool, "-"), blank(cfg.Proxmox.Bridge, "-"), cfg.Proxmox.User, cfg.Proxmox.WorkRoot, cfg.Proxmox.FullClone, tokenState(cfg.Proxmox.TokenSecret))
 	return nil
 }
 
@@ -234,7 +249,7 @@ func durationString(d time.Duration) string {
 func (a App) configSetBroker(args []string) error {
 	fs := newFlagSet("config set-broker", a.Stderr)
 	url := fs.String("url", "", "broker URL")
-	provider := fs.String("provider", "", "default provider: hetzner, aws, azure, or gcp")
+	provider := fs.String("provider", "", "default brokered provider: hetzner, aws, azure, or gcp")
 	tokenStdin := fs.Bool("token-stdin", false, "read broker token from stdin")
 	adminTokenStdin := fs.Bool("admin-token-stdin", false, "read broker admin token from stdin")
 	if err := parseFlags(fs, args); err != nil {

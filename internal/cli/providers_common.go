@@ -63,6 +63,17 @@ func touchDirectLeaseBestEffort(ctx context.Context, cfg Config, server Server, 
 		}
 		return server
 	}
+	if cfg.Provider == "proxmox" || server.Provider == "proxmox" {
+		client, err := NewProxmoxClient(cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: direct touch state=%s: %v\n", state, err)
+			return server
+		}
+		if err := client.SetLabels(ctx, server.CloudID, server.Labels); err != nil {
+			fmt.Fprintf(stderr, "warning: direct touch state=%s: %v\n", state, err)
+		}
+		return server
+	}
 	client, err := newHetznerClient()
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: direct touch state=%s: %v\n", state, err)

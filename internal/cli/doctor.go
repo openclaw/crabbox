@@ -10,7 +10,7 @@ import (
 
 func (a App) doctor(ctx context.Context, args []string) error {
 	fs := newFlagSet("doctor", a.Stderr)
-	provider := fs.String("provider", defaultConfig().Provider, "provider: hetzner, aws, azure, or ssh")
+	provider := fs.String("provider", defaultConfig().Provider, "provider: hetzner, aws, azure, gcp, proxmox, or ssh")
 	id := fs.String("id", "", "remote lease id to inspect")
 	targetFlags := registerTargetFlags(fs, defaultConfig())
 	if err := parseFlags(fs, args); err != nil {

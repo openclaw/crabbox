@@ -10,6 +10,7 @@ func init() {
 	RegisterProvider(testAWSProvider{})
 	RegisterProvider(testAzureProvider{})
 	RegisterProvider(testGCPProvider{})
+	RegisterProvider(testProxmoxProvider{})
 	RegisterProvider(testStaticSSHProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
@@ -111,6 +112,70 @@ func (testAWSProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 }
 func (p testAWSProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testProxmoxProvider struct{}
+
+func (testProxmoxProvider) Name() string      { return "proxmox" }
+func (testProxmoxProvider) Aliases() []string { return nil }
+func (testProxmoxProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "proxmox",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testProxmoxProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testProxmoxFlagValues{
+		APIURL:      fs.String("proxmox-api-url", defaults.Proxmox.APIURL, "Proxmox VE API URL"),
+		Node:        fs.String("proxmox-node", defaults.Proxmox.Node, "Proxmox VE node name"),
+		TemplateID:  fs.Int("proxmox-template-id", defaults.Proxmox.TemplateID, "Proxmox QEMU template VMID"),
+		User:        fs.String("proxmox-user", defaults.Proxmox.User, "Proxmox VM user"),
+		WorkRoot:    fs.String("proxmox-work-root", defaults.Proxmox.WorkRoot, "Proxmox VM work root"),
+		InsecureTLS: fs.Bool("proxmox-insecure-tls", defaults.Proxmox.InsecureTLS, "allow self-signed Proxmox TLS certificates"),
+	}
+}
+func (testProxmoxProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testProxmoxFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "proxmox-api-url") {
+		cfg.Proxmox.APIURL = *v.APIURL
+	}
+	if flagWasSet(fs, "proxmox-node") {
+		cfg.Proxmox.Node = *v.Node
+	}
+	if flagWasSet(fs, "proxmox-template-id") {
+		cfg.Proxmox.TemplateID = *v.TemplateID
+		cfg.ServerType = proxmoxServerTypeForConfig(*cfg)
+	}
+	if flagWasSet(fs, "proxmox-user") {
+		cfg.Proxmox.User = *v.User
+		cfg.SSHUser = *v.User
+	}
+	if flagWasSet(fs, "proxmox-work-root") {
+		cfg.Proxmox.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "proxmox-insecure-tls") {
+		cfg.Proxmox.InsecureTLS = *v.InsecureTLS
+	}
+	return nil
+}
+func (p testProxmoxProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testProxmoxFlagValues struct {
+	APIURL      *string
+	Node        *string
+	TemplateID  *int
+	User        *string
+	WorkRoot    *string
+	InsecureTLS *bool
 }
 
 type testStaticSSHProvider struct{}

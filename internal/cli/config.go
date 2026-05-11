@@ -64,6 +64,7 @@ type Config struct {
 	GCPRootGB          int64
 	gcpRootGBExplicit  bool
 	GCPServiceAccount  string
+	Proxmox            ProxmoxConfig
 	SSHUser            string
 	SSHKey             string
 	SSHPort            string
@@ -179,6 +180,21 @@ type IsloConfig struct {
 	DiskGB         int
 }
 
+type ProxmoxConfig struct {
+	APIURL      string
+	TokenID     string
+	TokenSecret string
+	Node        string
+	TemplateID  int
+	Storage     string
+	Pool        string
+	Bridge      string
+	User        string
+	WorkRoot    string
+	FullClone   bool
+	InsecureTLS bool
+}
+
 type SemaphoreConfig struct {
 	Host        string
 	Token       string
@@ -280,6 +296,7 @@ func loadConfig() (Config, error) {
 	}
 	applyEnv(&cfg)
 	canonicalizeConfigProvider(&cfg)
+	applyProviderConfigDefaults(&cfg)
 	normalizeTargetConfig(&cfg)
 	if err := validateTargetConfig(cfg); err != nil {
 		return Config{}, err
@@ -297,6 +314,18 @@ func canonicalizeConfigProvider(cfg *Config) {
 	provider, err := ProviderFor(cfg.Provider)
 	if err == nil {
 		cfg.Provider = provider.Name()
+	}
+}
+
+func applyProviderConfigDefaults(cfg *Config) {
+	if cfg.Provider != "proxmox" {
+		return
+	}
+	if cfg.Proxmox.User != "" {
+		cfg.SSHUser = cfg.Proxmox.User
+	}
+	if cfg.Proxmox.WorkRoot != "" {
+		cfg.WorkRoot = cfg.Proxmox.WorkRoot
 	}
 }
 
@@ -388,6 +417,11 @@ func baseConfig() Config {
 			MemoryMB: 4096,
 			DiskGB:   20,
 		},
+		Proxmox: ProxmoxConfig{
+			User:      "crabbox",
+			WorkRoot:  defaultPOSIXWorkRoot,
+			FullClone: true,
+		},
 		Sprites: SpritesConfig{
 			APIURL:   "https://api.sprites.dev",
 			WorkRoot: "/home/sprite/crabbox",
@@ -426,6 +460,7 @@ type fileConfig struct {
 	AWS              *fileAWSConfig           `yaml:"aws,omitempty"`
 	Azure            *fileAzureConfig         `yaml:"azure,omitempty"`
 	GCP              *fileGCPConfig           `yaml:"gcp,omitempty"`
+	Proxmox          *fileProxmoxConfig       `yaml:"proxmox,omitempty"`
 	SSH              *fileSSHConfig           `yaml:"ssh,omitempty"`
 	Sync             *fileSyncConfig          `yaml:"sync,omitempty"`
 	Env              *fileEnvConfig           `yaml:"env,omitempty"`
@@ -508,6 +543,21 @@ type fileGCPConfig struct {
 	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
 	RootGB         int64    `yaml:"rootGB,omitempty"`
 	ServiceAccount string   `yaml:"serviceAccount,omitempty"`
+}
+
+type fileProxmoxConfig struct {
+	APIURL      string `yaml:"apiUrl,omitempty"`
+	TokenID     string `yaml:"tokenId,omitempty"`
+	TokenSecret string `yaml:"tokenSecret,omitempty"`
+	Node        string `yaml:"node,omitempty"`
+	TemplateID  int    `yaml:"templateId,omitempty"`
+	Storage     string `yaml:"storage,omitempty"`
+	Pool        string `yaml:"pool,omitempty"`
+	Bridge      string `yaml:"bridge,omitempty"`
+	User        string `yaml:"user,omitempty"`
+	WorkRoot    string `yaml:"workRoot,omitempty"`
+	FullClone   *bool  `yaml:"fullClone,omitempty"`
+	InsecureTLS *bool  `yaml:"insecureTLS,omitempty"`
 }
 
 type fileSSHConfig struct {
@@ -967,6 +1017,44 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		}
 		if file.GCP.ServiceAccount != "" {
 			cfg.GCPServiceAccount = file.GCP.ServiceAccount
+		}
+	}
+	if file.Proxmox != nil {
+		if file.Proxmox.APIURL != "" {
+			cfg.Proxmox.APIURL = file.Proxmox.APIURL
+		}
+		if file.Proxmox.TokenID != "" {
+			cfg.Proxmox.TokenID = file.Proxmox.TokenID
+		}
+		if file.Proxmox.TokenSecret != "" {
+			cfg.Proxmox.TokenSecret = file.Proxmox.TokenSecret
+		}
+		if file.Proxmox.Node != "" {
+			cfg.Proxmox.Node = file.Proxmox.Node
+		}
+		if file.Proxmox.TemplateID > 0 {
+			cfg.Proxmox.TemplateID = file.Proxmox.TemplateID
+		}
+		if file.Proxmox.Storage != "" {
+			cfg.Proxmox.Storage = file.Proxmox.Storage
+		}
+		if file.Proxmox.Pool != "" {
+			cfg.Proxmox.Pool = file.Proxmox.Pool
+		}
+		if file.Proxmox.Bridge != "" {
+			cfg.Proxmox.Bridge = file.Proxmox.Bridge
+		}
+		if file.Proxmox.User != "" {
+			cfg.Proxmox.User = file.Proxmox.User
+		}
+		if file.Proxmox.WorkRoot != "" {
+			cfg.Proxmox.WorkRoot = file.Proxmox.WorkRoot
+		}
+		if file.Proxmox.FullClone != nil {
+			cfg.Proxmox.FullClone = *file.Proxmox.FullClone
+		}
+		if file.Proxmox.InsecureTLS != nil {
+			cfg.Proxmox.InsecureTLS = *file.Proxmox.InsecureTLS
 		}
 	}
 	if file.SSH != nil {
@@ -1504,6 +1592,22 @@ func applyEnv(cfg *Config) {
 	if cidrs := os.Getenv("CRABBOX_GCP_SSH_CIDRS"); cidrs != "" {
 		cfg.GCPSSHCIDRs = splitCommaList(cidrs)
 	}
+	cfg.Proxmox.APIURL = getenv("CRABBOX_PROXMOX_API_URL", cfg.Proxmox.APIURL)
+	cfg.Proxmox.TokenID = getenv("CRABBOX_PROXMOX_TOKEN_ID", cfg.Proxmox.TokenID)
+	cfg.Proxmox.TokenSecret = getenv("CRABBOX_PROXMOX_TOKEN_SECRET", cfg.Proxmox.TokenSecret)
+	cfg.Proxmox.Node = getenv("CRABBOX_PROXMOX_NODE", cfg.Proxmox.Node)
+	cfg.Proxmox.TemplateID = getenvInt("CRABBOX_PROXMOX_TEMPLATE_ID", cfg.Proxmox.TemplateID)
+	cfg.Proxmox.Storage = getenv("CRABBOX_PROXMOX_STORAGE", cfg.Proxmox.Storage)
+	cfg.Proxmox.Pool = getenv("CRABBOX_PROXMOX_POOL", cfg.Proxmox.Pool)
+	cfg.Proxmox.Bridge = getenv("CRABBOX_PROXMOX_BRIDGE", cfg.Proxmox.Bridge)
+	cfg.Proxmox.User = getenv("CRABBOX_PROXMOX_USER", cfg.Proxmox.User)
+	cfg.Proxmox.WorkRoot = getenv("CRABBOX_PROXMOX_WORK_ROOT", cfg.Proxmox.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_PROXMOX_FULL_CLONE"); ok {
+		cfg.Proxmox.FullClone = value
+	}
+	if value, ok := getenvBool("CRABBOX_PROXMOX_INSECURE_TLS"); ok {
+		cfg.Proxmox.InsecureTLS = value
+	}
 	cfg.SSHUser = getenv("CRABBOX_SSH_USER", cfg.SSHUser)
 	cfg.SSHKey = getenv("CRABBOX_SSH_KEY", cfg.SSHKey)
 	cfg.SSHPort = getenv("CRABBOX_SSH_PORT", cfg.SSHPort)
@@ -1712,6 +1816,9 @@ func serverTypeForConfig(cfg Config) string {
 	if cfg.Provider == "gcp" {
 		return gcpMachineTypeCandidatesForClass(cfg.Class)[0]
 	}
+	if cfg.Provider == "proxmox" {
+		return proxmoxServerTypeForConfig(cfg)
+	}
 	return serverTypeForClass(cfg.Class)
 }
 
@@ -1740,7 +1847,17 @@ func serverTypeForProviderClass(provider, class string) string {
 	if provider == "gcp" {
 		return gcpMachineTypeCandidatesForClass(class)[0]
 	}
+	if provider == "proxmox" {
+		return "template"
+	}
 	return serverTypeForClass(class)
+}
+
+func proxmoxServerTypeForConfig(cfg Config) string {
+	if cfg.Proxmox.TemplateID > 0 {
+		return "template-" + strconv.Itoa(cfg.Proxmox.TemplateID)
+	}
+	return "template"
 }
 
 func namespaceDevboxSizeForConfig(cfg Config) string {

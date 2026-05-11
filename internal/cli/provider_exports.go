@@ -12,6 +12,10 @@ func ServerTypeForProviderClass(provider, class string) string {
 	return serverTypeForProviderClass(provider, class)
 }
 
+func ProxmoxServerTypeForConfig(cfg Config) string {
+	return proxmoxServerTypeForConfig(cfg)
+}
+
 func Exit(code int, format string, args ...any) ExitError {
 	return exit(code, format, args...)
 }

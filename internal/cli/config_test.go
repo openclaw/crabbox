@@ -249,6 +249,19 @@ islo:
   vcpus: 4
   memoryMB: 8192
   diskGB: 40
+proxmox:
+  apiUrl: https://pve.example.test:8006
+  tokenId: crabbox@pve!test
+  tokenSecret: proxmox-secret
+  node: pve1
+  templateId: 9000
+  storage: local-lvm
+  pool: crabbox
+  bridge: vmbr1
+  user: runner
+  workRoot: /work/proxmox
+  fullClone: false
+  insecureTLS: true
 semaphore:
   host: semaphore.example.test
   token: semaphore-token
@@ -360,6 +373,9 @@ ssh:
 	}
 	if cfg.Islo.BaseURL != "https://islo.example.test" || cfg.Islo.Image != "docker.io/library/ubuntu:24.04" || cfg.Islo.Workdir != "crabbox" || cfg.Islo.GatewayProfile != "default" || cfg.Islo.SnapshotName != "snap-ready" || cfg.Islo.VCPUs != 4 || cfg.Islo.MemoryMB != 8192 || cfg.Islo.DiskGB != 40 {
 		t.Fatalf("islo config not loaded: %#v", cfg.Islo)
+	}
+	if cfg.Proxmox.APIURL != "https://pve.example.test:8006" || cfg.Proxmox.TokenID != "crabbox@pve!test" || cfg.Proxmox.TokenSecret != "proxmox-secret" || cfg.Proxmox.Node != "pve1" || cfg.Proxmox.TemplateID != 9000 || cfg.Proxmox.Storage != "local-lvm" || cfg.Proxmox.Pool != "crabbox" || cfg.Proxmox.Bridge != "vmbr1" || cfg.Proxmox.User != "runner" || cfg.Proxmox.WorkRoot != "/work/proxmox" || cfg.Proxmox.FullClone || !cfg.Proxmox.InsecureTLS {
+		t.Fatalf("proxmox config not loaded: %#v", cfg.Proxmox)
 	}
 	if cfg.Semaphore.Host != "semaphore.example.test" || cfg.Semaphore.Token != "semaphore-token" || cfg.Semaphore.Project != "crabbox" || cfg.Semaphore.Machine != "f1-standard-4" || cfg.Semaphore.OSImage != "ubuntu2404" || cfg.Semaphore.IdleTimeout != "15m" {
 		t.Fatalf("semaphore config not loaded: %#v", cfg.Semaphore)
@@ -489,6 +505,18 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_ISLO_VCPUS", "8")
 	t.Setenv("CRABBOX_ISLO_MEMORY_MB", "16384")
 	t.Setenv("CRABBOX_ISLO_DISK_GB", "80")
+	t.Setenv("CRABBOX_PROXMOX_API_URL", "https://pve-env.example:8006")
+	t.Setenv("CRABBOX_PROXMOX_TOKEN_ID", "runner@pve!env")
+	t.Setenv("CRABBOX_PROXMOX_TOKEN_SECRET", "proxmox-env-secret")
+	t.Setenv("CRABBOX_PROXMOX_NODE", "pve-env")
+	t.Setenv("CRABBOX_PROXMOX_TEMPLATE_ID", "9100")
+	t.Setenv("CRABBOX_PROXMOX_STORAGE", "ceph-env")
+	t.Setenv("CRABBOX_PROXMOX_POOL", "pool-env")
+	t.Setenv("CRABBOX_PROXMOX_BRIDGE", "vmbr2")
+	t.Setenv("CRABBOX_PROXMOX_USER", "runner-env")
+	t.Setenv("CRABBOX_PROXMOX_WORK_ROOT", "/work/proxmox-env")
+	t.Setenv("CRABBOX_PROXMOX_FULL_CLONE", "false")
+	t.Setenv("CRABBOX_PROXMOX_INSECURE_TLS", "true")
 	t.Setenv("SEMAPHORE_HOST", "semaphore-file.example.test")
 	t.Setenv("CRABBOX_SEMAPHORE_HOST", "semaphore-env.example.test")
 	t.Setenv("SEMAPHORE_API_TOKEN", "semaphore-token-file")
@@ -589,6 +617,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Islo.APIKey != "islo-api-env" || cfg.Islo.BaseURL != "https://islo-env.example" || cfg.Islo.Image != "ubuntu:env" || cfg.Islo.Workdir != "env-workdir" || cfg.Islo.GatewayProfile != "env-gateway" || cfg.Islo.SnapshotName != "env-snapshot" || cfg.Islo.VCPUs != 8 || cfg.Islo.MemoryMB != 16384 || cfg.Islo.DiskGB != 80 {
 		t.Fatalf("unexpected islo env: %#v", cfg.Islo)
+	}
+	if cfg.Proxmox.APIURL != "https://pve-env.example:8006" || cfg.Proxmox.TokenID != "runner@pve!env" || cfg.Proxmox.TokenSecret != "proxmox-env-secret" || cfg.Proxmox.Node != "pve-env" || cfg.Proxmox.TemplateID != 9100 || cfg.Proxmox.Storage != "ceph-env" || cfg.Proxmox.Pool != "pool-env" || cfg.Proxmox.Bridge != "vmbr2" || cfg.Proxmox.User != "runner-env" || cfg.Proxmox.WorkRoot != "/work/proxmox-env" || cfg.Proxmox.FullClone || !cfg.Proxmox.InsecureTLS {
+		t.Fatalf("unexpected proxmox env: %#v", cfg.Proxmox)
 	}
 	if cfg.Semaphore.Host != "semaphore-env.example.test" || cfg.Semaphore.Token != "semaphore-token-env" || cfg.Semaphore.Project != "semaphore-project-env" || cfg.Semaphore.Machine != "f1-standard-env" || cfg.Semaphore.OSImage != "ubuntu-env" || cfg.Semaphore.IdleTimeout != "22m" {
 		t.Fatalf("unexpected semaphore env: %#v", cfg.Semaphore)
