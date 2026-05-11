@@ -311,7 +311,6 @@ OpenClaw WSL2 test helper:
 
 ```sh
 CRABBOX_LIVE=1 scripts/openclaw-wsl2-tests.sh
-CRABBOX_LIVE=1 CRABBOX_OPENCLAW_WSL2_PROVIDER=azure scripts/openclaw-wsl2-tests.sh
 CRABBOX_LIVE=1 CRABBOX_OPENCLAW_WSL2_ID=blue-lobster scripts/openclaw-wsl2-tests.sh
 ```
 
