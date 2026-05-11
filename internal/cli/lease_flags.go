@@ -65,6 +65,7 @@ func applyLeaseCreateFlags(cfg *Config, fs *flag.FlagSet, values leaseCreateFlag
 	if err := applyProviderFlags(cfg, fs, values.ProviderFlags); err != nil {
 		return err
 	}
+	applyProviderConfigDefaults(cfg)
 	if err := validateProviderTarget(*cfg); err != nil {
 		return err
 	}
@@ -102,6 +103,10 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 	}
 	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
 		return Config{}, err
+	}
+	applyProviderConfigDefaults(&cfg)
+	if !cfg.ServerTypeExplicit {
+		cfg.ServerType = serverTypeForConfig(cfg)
 	}
 	return cfg, nil
 }

@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -173,6 +175,34 @@ func TestLeaseCreateFlagsApplySelectedProviderFlags(t *testing.T) {
 	}
 }
 
+func TestLeaseCreateFlagsReapplyProxmoxDefaultsAfterProviderOverride(t *testing.T) {
+	defaults := baseConfig()
+	defaults.Provider = "hetzner"
+	defaults.Proxmox.TemplateID = 9000
+	defaults.Proxmox.User = "runner"
+	defaults.Proxmox.WorkRoot = "/work/proxmox"
+	defaults.ServerType = serverTypeForConfig(defaults)
+
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "proxmox"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHUser != "runner" {
+		t.Fatalf("ssh user=%q want proxmox default", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/work/proxmox" {
+		t.Fatalf("work root=%q want proxmox default", cfg.WorkRoot)
+	}
+	if cfg.ServerType != "template-9000" {
+		t.Fatalf("server type=%q want template-9000", cfg.ServerType)
+	}
+}
+
 func TestLeaseCreateFlagsDeriveGCPTypeForAlias(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)
@@ -189,6 +219,40 @@ func TestLeaseCreateFlagsDeriveGCPTypeForAlias(t *testing.T) {
 	}
 	if cfg.ServerType != "c4-standard-32" {
 		t.Fatalf("server type=%q want gcp default", cfg.ServerType)
+	}
+}
+
+func TestLoadLeaseTargetConfigReappliesProxmoxDefaultsAfterProviderOverride(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte(`provider: hetzner
+proxmox:
+  templateId: 9000
+  user: runner
+  workRoot: /work/proxmox
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := defaultConfig()
+	fs := newFlagSet("test", io.Discard)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadLeaseTargetConfig(fs, "proxmox", targetFlags, networkFlags, leaseTargetConfigOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHUser != "runner" {
+		t.Fatalf("ssh user=%q want proxmox default", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/work/proxmox" {
+		t.Fatalf("work root=%q want proxmox default", cfg.WorkRoot)
+	}
+	if cfg.ServerType != "template-9000" {
+		t.Fatalf("server type=%q want template-9000", cfg.ServerType)
 	}
 }
 
