@@ -220,7 +220,7 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 	if cfg.Proxmox.Bridge != "" {
 		config.Set("net0", "virtio,bridge="+cfg.Proxmox.Bridge)
 	}
-	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), vmid), config, nil); err != nil {
+	if err := c.configureVM(ctx, vmid, config); err != nil {
 		cleanupClone()
 		return Server{}, err
 	}
@@ -335,7 +335,15 @@ func (c *ProxmoxClient) SetLabels(ctx context.Context, id string, labels map[str
 		}
 		vmid = int(server.ID)
 	}
-	return c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), vmid), url.Values{"description": {proxmoxDescription(labels)}}, nil)
+	return c.configureVM(ctx, vmid, url.Values{"description": {proxmoxDescription(labels)}})
+}
+
+func (c *ProxmoxClient) configureVM(ctx context.Context, vmid int, form url.Values) error {
+	var upid string
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), vmid), form, &upid); err != nil {
+		return err
+	}
+	return c.waitTask(ctx, upid)
 }
 
 type proxmoxTaskStatus struct {
@@ -389,7 +397,7 @@ func (c *ProxmoxClient) bootstrapGuest(ctx context.Context, vmid int, cfg Config
 	script := proxmoxBootstrapScript(cfg)
 	var start proxmoxAgentExecStart
 	form := url.Values{
-		"command":    {"/bin/bash"},
+		"command":    {"/bin/bash", "-s"},
 		"input-data": {script},
 	}
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/agent/exec", url.PathEscape(c.Node), vmid), form, &start); err != nil {

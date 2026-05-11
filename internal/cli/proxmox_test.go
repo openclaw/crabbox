@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +59,7 @@ func TestNewProxmoxClientStripsAPIPathAndUsesTokenAuth(t *testing.T) {
 
 func TestProxmoxCreateServerFlow(t *testing.T) {
 	var forms []url.Values
+	var events []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "PVEAPIToken=runner@pve!crabbox=secret" {
 			t.Fatalf("auth=%q", r.Header.Get("Authorization"))
@@ -67,13 +69,26 @@ func TestProxmoxCreateServerFlow(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": 101})
 		case r.Method == http.MethodPost && r.URL.Path == "/api2/json/nodes/pve1/qemu/9000/clone":
 			forms = append(forms, readForm(t, r))
+			events = append(events, "clone")
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": "UPID:pve1:clone"})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/pve1/tasks/"):
+			switch {
+			case strings.Contains(r.URL.Path, "clone"):
+				events = append(events, "wait-clone")
+			case strings.Contains(r.URL.Path, "config"):
+				events = append(events, "wait-config")
+			case strings.Contains(r.URL.Path, "start"):
+				events = append(events, "wait-start")
+			default:
+				t.Fatalf("unexpected task path %s", r.URL.Path)
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"status": "stopped", "exitstatus": "OK"}})
 		case r.Method == http.MethodPost && r.URL.Path == "/api2/json/nodes/pve1/qemu/101/config":
 			forms = append(forms, readForm(t, r))
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": nil})
+			events = append(events, "config")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": "UPID:pve1:config"})
 		case r.Method == http.MethodPost && r.URL.Path == "/api2/json/nodes/pve1/qemu/101/status/start":
+			events = append(events, "start")
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": "UPID:pve1:start"})
 		case r.Method == http.MethodGet && r.URL.Path == "/api2/json/nodes/pve1/qemu/101/agent/network-get-interfaces":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"result": []any{
@@ -128,8 +143,15 @@ func TestProxmoxCreateServerFlow(t *testing.T) {
 	if forms[1].Get("ciuser") != "crabbox" || !strings.Contains(forms[1].Get("sshkeys"), "ssh-ed25519") || forms[1].Get("net0") != "virtio,bridge=vmbr1" {
 		t.Fatalf("config form=%v", forms[1])
 	}
-	if forms[2].Get("command") != "/bin/bash" || !strings.Contains(forms[2].Get("input-data"), "crabbox-ready") {
+	if got := forms[2]["command"]; !reflect.DeepEqual(got, []string{"/bin/bash", "-s"}) {
+		t.Fatalf("exec command=%v want [/bin/bash -s]", got)
+	}
+	if !strings.Contains(forms[2].Get("input-data"), "crabbox-ready") {
 		t.Fatalf("exec form=%v", forms[2])
+	}
+	wantEvents := []string{"clone", "wait-clone", "config", "wait-config", "start", "wait-start"}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("events=%v want %v", events, wantEvents)
 	}
 }
 
