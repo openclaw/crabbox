@@ -169,6 +169,7 @@ Commands:
   inspect     Print lease/provider details; add --json for scripts
   stop        Release a lease or delete a direct-provider machine
   cleanup     Sweep expired direct-provider machines or local provider state
+  azure       Azure provider setup and login
   config      Show or update user config
 
 Common Flows:
