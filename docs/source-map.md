@@ -88,6 +88,7 @@ repository-owned setup, usually through Actions hydration or repo scripts.
 ## Sync, Execution, Actions, Cache, And Results
 
 - Remote command flow, sync/reuse/release, heartbeat lifecycle: `internal/cli/run.go`
+- Named repo-local job orchestration: `internal/cli/job.go`
 - Native Windows target archive sync and PowerShell command wrapping: `internal/cli/sync_windows_target.go`, `internal/cli/ssh.go`
 - Git manifest, rsync plan, fingerprints, guardrails: `internal/cli/repo.go`
 - Sync plan command: `internal/cli/sync_plan.go`
@@ -119,6 +120,7 @@ repository-owned setup, usually through Actions hydration or repo scripts.
 ## Cross-cutting Feature Docs
 
 - Configuration precedence and YAML schema: `docs/features/configuration.md` (config code in `internal/cli/config.go`, `internal/cli/config_cmd.go`)
+- Jobs: `docs/features/jobs.md` (orchestration code in `internal/cli/job.go`; config in `internal/cli/config.go`)
 - Identifiers (lease IDs, slugs, claims, run IDs): `docs/features/identifiers.md` (code in `internal/cli/lease.go`, `internal/cli/slug.go`, `internal/cli/claim.go`)
 - Doctor checks: `docs/features/doctor.md` (code in `internal/cli/doctor.go`;
   coordinator readiness API in `worker/src/fleet.ts`)

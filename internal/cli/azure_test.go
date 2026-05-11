@@ -209,7 +209,7 @@ func TestAzureTagsMapReservedWindowsPrefix(t *testing.T) {
 	}
 	server := azureVMToServer(armcompute.VirtualMachine{
 		Tags: stringMapToPtrMap(tags),
-	}, "")
+	}, "", "")
 	if server.Labels["windows_mode"] != "normal" {
 		t.Fatalf("windows_mode label not restored: %#v", server.Labels)
 	}
@@ -390,5 +390,67 @@ func TestAzureCredentialForConfigFallsBackToDefault(t *testing.T) {
 	}
 	if _, ok := cred.(*azidentity.DefaultAzureCredential); !ok {
 		t.Fatalf("got %T, want *azidentity.DefaultAzureCredential", cred)
+	}
+}
+
+func TestNewAzureClientAutoResolvesSubscription(t *testing.T) {
+	// When az CLI is not available and no subscription is set, NewAzureClient
+	// should return an error mentioning both AZURE_SUBSCRIPTION_ID and az login.
+	t.Setenv("AZURE_SUBSCRIPTION_ID", "")
+	t.Setenv("CRABBOX_AZURE_SUBSCRIPTION_ID", "")
+	t.Setenv("PATH", "")
+
+	cfg := defaultConfig()
+	cfg.Provider = "azure"
+	cfg.AzureSubscription = ""
+	cfg.AzureLocation = "eastus"
+
+	_, err := NewAzureClient(t.Context(), cfg)
+	if err == nil {
+		t.Fatal("expected error when no subscription and no az CLI")
+	}
+	if !strings.Contains(err.Error(), "az login") {
+		t.Fatalf("error should mention 'az login': %v", err)
+	}
+}
+
+func TestAzureServerHostSelectsPrivateIP(t *testing.T) {
+	t.Parallel()
+	server := Server{}
+	server.PublicNet.IPv4.IP = "20.168.181.119"
+	server.PrivateNet.IPv4.IP = "10.42.0.4"
+
+	if got := AzureServerHost(server, "public"); got != "20.168.181.119" {
+		t.Fatalf("public network: got %q, want public IP", got)
+	}
+	if got := AzureServerHost(server, "private"); got != "10.42.0.4" {
+		t.Fatalf("private network: got %q, want private IP", got)
+	}
+	if got := AzureServerHost(server, ""); got != "20.168.181.119" {
+		t.Fatalf("empty network: got %q, want public IP", got)
+	}
+	if got := AzureServerHost(server, "PRIVATE"); got != "10.42.0.4" {
+		t.Fatalf("case-insensitive: got %q, want private IP", got)
+	}
+}
+
+func TestAzureServerHostFallsBackToPublicWhenNoPrivateIP(t *testing.T) {
+	t.Parallel()
+	server := Server{}
+	server.PublicNet.IPv4.IP = "20.168.181.119"
+
+	if got := AzureServerHost(server, "private"); got != "20.168.181.119" {
+		t.Fatalf("private with no private IP: got %q, want public IP fallback", got)
+	}
+}
+
+func TestAzureVMToServerSetsPrivateIP(t *testing.T) {
+	t.Parallel()
+	server := azureVMToServer(armcompute.VirtualMachine{}, "1.2.3.4", "10.0.0.5")
+	if server.PublicNet.IPv4.IP != "1.2.3.4" {
+		t.Fatalf("public IP: got %q", server.PublicNet.IPv4.IP)
+	}
+	if server.PrivateNet.IPv4.IP != "10.0.0.5" {
+		t.Fatalf("private IP: got %q", server.PrivateNet.IPv4.IP)
 	}
 }

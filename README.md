@@ -70,6 +70,9 @@ crabbox doctor
 # one-shot: lease, sync, run, release
 crabbox run -- pnpm test
 
+# named repo workflow from .crabbox.yaml
+crabbox job run full-ci
+
 # or warm a box once, then reuse it
 crabbox warmup                                       # prints cbx_... + a slug
 crabbox run --id blue-lobster -- pnpm test:changed
@@ -101,6 +104,7 @@ For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For th
 ## Highlights
 
 - **One-shot or warm workspaces.** `crabbox run` for fire-and-forget; `crabbox warmup` + `--id` for repeated runs against the same box.
+- **Named repo jobs.** `crabbox job run <name>` lets repos define warmup, optional Actions hydration, run command, and cleanup policy in `.crabbox.yaml`.
 - **Run observability.** Every coordinator-backed run gets an early `run_...` handle. Use `crabbox attach <run-id>` while it is active, `crabbox events <run-id> --after <seq> --limit <n>` for durable lifecycle/output events, and `crabbox logs <run-id>` for retained output after completion.
 - **Stable timing records.** `--timing-json` on `run`, `warmup`, and `actions hydrate` gives scripts one machine-readable sync/command/total timing schema across AWS, Hetzner, and Blacksmith Testboxes.
 - **Local-first workspace sync.** No clean-checkout requirement. Tracked + nonignored files only, fingerprint skip on no-op runs, sanity checks against suspicious mass deletions, optional shallow base-ref hydration for changed-test workflows.
@@ -295,6 +299,13 @@ static:
   user: Peter
   port: "22"
   workRoot: C:\crabbox
+```
+
+OpenClaw WSL2 test helper:
+
+```sh
+CRABBOX_LIVE=1 scripts/openclaw-wsl2-tests.sh
+CRABBOX_LIVE=1 CRABBOX_OPENCLAW_WSL2_ID=blue-lobster scripts/openclaw-wsl2-tests.sh
 ```
 
 Optional Tailscale reachability for managed Linux leases:

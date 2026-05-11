@@ -19,6 +19,19 @@ when Crabbox must own SSH sync and interactive access.
 
 ## Commands
 
+One-shot run:
+
+```sh
+crabbox run \
+  --provider blacksmith-testbox \
+  --blacksmith-org openclaw \
+  --blacksmith-workflow .github/workflows/ci-check-testbox.yml \
+  --blacksmith-job test \
+  --blacksmith-ref main \
+  --timing-json \
+  -- pnpm test
+```
+
 Reuse an existing Testbox:
 
 ```sh
@@ -84,6 +97,13 @@ Daytona until Blacksmith service, billing, or org limits are healthy again.
 
 Crabbox stores a per-Testbox SSH key locally, claims the Testbox for the current
 repo, maps IDs to friendly slugs, and prints a normal Crabbox timing summary.
+One-shot runs clean up the local claim/key and stop the Testbox after command
+completion unless `--keep` is set.
+
+Crabbox terminates a local Blacksmith CLI invocation that remains in the sync
+phase for five minutes without post-sync output. Set
+`CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS=0` to disable the guard, or set a larger
+millisecond value for intentionally huge local diffs.
 
 When coordinator auth is configured, `crabbox list --provider blacksmith-testbox`
 also syncs visibility-only Testbox rows into the portal lease table. If Crabbox

@@ -134,6 +134,24 @@ e2b_smoke() {
   lease=""
 }
 
+daytona_smoke() {
+  run_in_repo "$cb" run --provider daytona --no-sync -- echo crabbox-daytona-ok
+  run_in_repo "$cb" list --provider daytona --json | jq 'map({id:(.id // .CloudID),slug:(.slug // .labels.slug),provider:(.provider // .Provider // .labels.provider),state:(.state // .labels.state // .status)})'
+}
+
+namespace_smoke() {
+  if ! command -v devbox >/dev/null 2>&1; then
+    echo "namespace-devbox smoke requires the Namespace devbox CLI on PATH" >&2
+    return 2
+  fi
+  run_in_repo "$cb" run \
+    --provider namespace-devbox \
+    --namespace-size "${CRABBOX_NAMESPACE_SIZE:-S}" \
+    --namespace-delete-on-release \
+    --no-sync -- echo crabbox-namespace-ok
+  run_in_repo "$cb" list --provider namespace-devbox --json | jq 'map({id:.id,slug:.slug,provider:.provider,state:.state})'
+}
+
 semaphore_smoke() {
   local lease=""
   local slug=""
@@ -177,6 +195,14 @@ fi
 
 if has_provider e2b; then
   e2b_smoke
+fi
+
+if has_provider daytona; then
+  daytona_smoke
+fi
+
+if has_provider namespace-devbox || has_provider namespace; then
+  namespace_smoke
 fi
 
 if has_provider semaphore; then

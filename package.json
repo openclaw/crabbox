@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/crabbox-plugin",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "OpenClaw plugin for running Crabbox remote testbox workflows",
   "license": "MIT",
   "type": "module",

@@ -29,10 +29,16 @@ func (r GitHubRepo) Slug() string {
 
 func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	started := time.Now()
+	defaults := defaultConfig()
 	fs := newFlagSet("actions hydrate", a.Stderr)
+	provider := fs.String("provider", defaults.Provider, providerHelpAll())
+	providerFlags := registerProviderFlags(fs, defaults)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
 	leaseIDFlag := fs.String("id", "", "existing lease id or slug")
 	repoFlag := fs.String("repo", "", "GitHub repository owner/name")
 	workflowFlag := fs.String("workflow", "", "workflow file/name/id")
+	jobFlag := fs.String("job", "", "expected hydrate workflow job/input name")
 	refFlag := fs.String("ref", "", "workflow ref")
 	waitTimeout := fs.Duration("wait-timeout", 20*time.Minute, "time to wait for Actions hydration")
 	keepAliveMinutes := fs.Int("keep-alive-minutes", 90, "minutes for workflow to keep the job alive")
@@ -47,8 +53,11 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	if *leaseIDFlag == "" {
 		return exit(2, "actions hydrate requires --id")
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{})
 	if err != nil {
+		return err
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	repo, err := findRepo()
@@ -60,6 +69,9 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	}
 	if *workflowFlag != "" {
 		cfg.Actions.Workflow = *workflowFlag
+	}
+	if *jobFlag != "" {
+		cfg.Actions.Job = *jobFlag
 	}
 	if *refFlag != "" {
 		cfg.Actions.Ref = *refFlag
@@ -155,7 +167,12 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 }
 
 func (a App) actionsRegister(ctx context.Context, args []string) error {
+	defaults := defaultConfig()
 	fs := newFlagSet("actions register", a.Stderr)
+	provider := fs.String("provider", defaults.Provider, providerHelpAll())
+	providerFlags := registerProviderFlags(fs, defaults)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
 	leaseIDFlag := fs.String("id", "", "existing lease id or slug")
 	repoFlag := fs.String("repo", "", "GitHub repository owner/name")
 	nameFlag := fs.String("name", "", "runner name")
@@ -169,8 +186,11 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	if *leaseIDFlag == "" {
 		return exit(2, "actions register requires --id")
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{})
 	if err != nil {
+		return err
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	repo, err := findRepo()
@@ -246,8 +266,8 @@ func (a App) actionsDispatch(ctx context.Context, args []string) error {
 }
 
 func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, target SSHTarget, leaseID, slug string, ghRepo GitHubRepo, nameOverride string, extraLabels []string) error {
-	if target.TargetOS != "" && target.TargetOS != targetLinux {
-		return exit(2, "actions runner registration currently supports target=linux only")
+	if !supportsActionsRunnerTarget(target) {
+		return exit(2, "actions runner registration currently supports Linux and Windows WSL2 targets only")
 	}
 	token, err := githubActionsRegistrationToken(ctx, ghRepo)
 	if err != nil {
@@ -265,6 +285,10 @@ func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, target
 	}
 	fmt.Fprintf(a.Stdout, "actions runner registered repo=%s name=%s labels=%s ephemeral=%t\n", ghRepo.Slug(), name, strings.Join(labels, ","), cfg.Actions.Ephemeral)
 	return nil
+}
+
+func supportsActionsRunnerTarget(target SSHTarget) bool {
+	return target.TargetOS == "" || target.TargetOS == targetLinux || isWindowsWSL2Target(target)
 }
 
 func (a App) resolveLeaseTargetForActions(ctx context.Context, cfg Config, id string) (Server, SSHTarget, string, string, error) {
@@ -599,6 +623,9 @@ case "$arch" in
   aarch64|arm64) runner_arch=arm64 ;;
   *) echo "unsupported runner arch: $arch" >&2; exit 2 ;;
 esac
+if [ "$(id -u)" = 0 ]; then
+  export RUNNER_ALLOW_RUNASROOT=1
+fi
 if [ "$version" = latest ]; then
   version="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | jq -r '.tag_name' | sed 's/^v//')"
 fi
@@ -615,11 +642,18 @@ fi
 if [ -f .runner ]; then
   ./config.sh remove --unattended --token "$RUNNER_TOKEN" || true
 fi
+if command -v apt-get >/dev/null 2>&1 && grep -qi microsoft /proc/version 2>/dev/null; then
+  sudo rm -rf /var/lib/apt/lists/*
+  sudo apt-get update >/tmp/crabbox-actions-runner-apt-update.log 2>&1
+fi
 sudo ./bin/installdependencies.sh >/tmp/crabbox-actions-runner-deps.log 2>&1 || true
 ./config.sh --unattended --replace %s --url "https://github.com/${RUNNER_REPO}" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS"
 cat >"$HOME/actions-runner/run-crabbox.sh" <<'RUNNER'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "$(id -u)" = 0 ]; then
+  export RUNNER_ALLOW_RUNASROOT=1
+fi
 cd "$HOME/actions-runner"
 exec ./run.sh
 RUNNER

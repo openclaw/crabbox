@@ -91,7 +91,8 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 	metadata := fs.Bool("metadata", true, "write metadata.json")
 	duration := fs.Duration("duration", 10*time.Second, "video capture duration")
 	fps := fs.Float64("fps", 15, "video frames per second")
-	gifWidth := fs.Int("gif-width", 640, "trimmed GIF width")
+	gifWidth := fs.Int("gif-width", defaultMediaPreviewWidth, "trimmed GIF width")
+	gifFPS := fs.Float64("gif-fps", defaultMediaPreviewFPS, "trimmed GIF frames per second")
 	contactSheetFrames := fs.Int("contact-sheet-frames", 5, "number of sampled frames in the contact sheet")
 	contactSheetCols := fs.Int("contact-sheet-cols", 5, "contact sheet columns")
 	contactSheetWidth := fs.Int("contact-sheet-width", 320, "width of each contact sheet tile")
@@ -118,6 +119,9 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 	}
 	if *gifWidth <= 0 {
 		return exit(2, "artifacts collect --gif-width must be positive")
+	}
+	if *gifFPS <= 0 {
+		return exit(2, "artifacts collect --gif-fps must be positive")
 	}
 	if *contactSheetFrames <= 0 {
 		return exit(2, "artifacts collect --contact-sheet-frames must be positive")
@@ -277,18 +281,10 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 		if *gif {
 			gifPath := filepath.Join(dir, "screen.trimmed.gif")
 			trimmedPath := filepath.Join(dir, "screen.trimmed.mp4")
-			preview, err := createMediaPreview(ctx, mediaPreviewOptions{
-				Input:              path,
-				Output:             gifPath,
-				TrimmedVideoOutput: trimmedPath,
-				Width:              *gifWidth,
-				FPS:                4,
-				TrimStatic:         true,
-				TrimPadding:        750 * time.Millisecond,
-				FreezeDuration:     500 * time.Millisecond,
-				FreezeNoise:        "-50dB",
-				MinDuration:        1500 * time.Millisecond,
-			})
+			options := defaultMediaPreviewOptions(path, gifPath, trimmedPath)
+			options.Width = *gifWidth
+			options.FPS = *gifFPS
+			preview, err := createMediaPreview(ctx, options)
 			if err != nil {
 				return fail(err, artifactWarning{
 					Problem: rescueArtifactCaptureFailed,

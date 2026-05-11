@@ -83,7 +83,7 @@ console.log(`checked ${commands.length} command docs: command surface ok`);
 function readHelpCommands() {
   const appPath = path.join(root, "internal", "cli", "app.go");
   const app = fs.readFileSync(appPath, "utf8");
-  const match = app.match(/Commands:\n([\s\S]*?)\n\nCommon Flows:/);
+  const match = app.match(/Commands:\r?\n([\s\S]*?)\r?\n\r?\nCommon Flows:/);
   if (!match) {
     fail(`could not find Commands block in ${rel(appPath)}`);
   }

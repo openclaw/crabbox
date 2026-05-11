@@ -53,6 +53,7 @@ azure:
   subnet: crabbox-subnet
   nsg: crabbox-nsg
   sshCIDRs: []
+  network: public
 ```
 
 `subscriptionId`, `tenantId`, and `clientId` may be set in config or sourced
@@ -76,7 +77,12 @@ CRABBOX_AZURE_VNET
 CRABBOX_AZURE_SUBNET
 CRABBOX_AZURE_NSG
 CRABBOX_AZURE_SSH_CIDRS
+CRABBOX_AZURE_NETWORK
 ```
+
+`CRABBOX_AZURE_NETWORK` selects the IP used for SSH: `public` (default) uses
+the VM public IP, `private` uses the NIC private IP from the vnet. Use
+`private` when connecting through a VPN to the Azure virtual network.
 
 `AZURE_*` are the standard service principal env vars consumed by
 `DefaultAzureCredential`. Crabbox does not read or print the client secret.
@@ -93,6 +99,21 @@ without exposing values, and lease creation fails with `provider_not_configured`
 until the required service-principal secrets are present.
 
 ## Auth
+
+The simplest setup uses the Azure CLI — no environment variables needed:
+
+```sh
+az login
+crabbox azure login
+crabbox warmup --provider azure
+```
+
+`crabbox azure login` detects the active subscription, validates credentials,
+and stores subscription ID, tenant ID, and location in user config. After this,
+`DefaultAzureCredential` picks up the `az login` session automatically.
+
+For service-principal setups (CI, automation, shared environments), use
+environment variables:
 
 If `azure.tenantId` and `azure.clientId` (or `CRABBOX_AZURE_TENANT_ID` /
 `CRABBOX_AZURE_CLIENT_ID`) are configured and `AZURE_CLIENT_SECRET` is set
@@ -193,6 +214,11 @@ WSL2 and macOS remain AWS or static-SSH targets.
 - The first acquire in an empty subscription pays the cost of creating the
   shared resource group, vnet, and NSG. Subsequent acquires only create
   per-lease resources.
+- Shared Azure network resources are regional. If `crabbox-nsg` or
+  `crabbox-vnet` already exists in `westcentralus`, a later acquire configured
+  for `eastus` must either set `azure.location: westcentralus` to reuse that
+  shared infra or use different `azure.vnet` / `azure.subnet` / `azure.nsg`
+  names for the new region.
 - If you already have a resource group / vnet / NSG with the configured
   names, Crabbox will refuse to mutate them unless they carry
   `managed_by=crabbox` as a tag. Either tag them to adopt, choose

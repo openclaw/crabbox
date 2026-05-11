@@ -27,7 +27,20 @@ export interface Env {
   CRABBOX_AZURE_SUBNET?: string;
   CRABBOX_AZURE_NSG?: string;
   CRABBOX_AZURE_SSH_CIDRS?: string;
+  GCP_PROJECT_ID?: string;
+  GCP_CLIENT_EMAIL?: string;
+  GCP_PRIVATE_KEY?: string;
+  CRABBOX_GCP_PROJECT?: string;
+  CRABBOX_GCP_ZONE?: string;
+  CRABBOX_GCP_IMAGE?: string;
+  CRABBOX_GCP_NETWORK?: string;
+  CRABBOX_GCP_SUBNET?: string;
+  CRABBOX_GCP_TAGS?: string;
+  CRABBOX_GCP_SSH_CIDRS?: string;
+  CRABBOX_GCP_ROOT_GB?: string;
+  CRABBOX_GCP_SERVICE_ACCOUNT?: string;
   CRABBOX_SHARED_TOKEN?: string;
+  CRABBOX_SHARED_OWNER?: string;
   CRABBOX_ADMIN_TOKEN?: string;
   CRABBOX_SESSION_SECRET?: string;
   CRABBOX_GITHUB_CLIENT_ID?: string;
@@ -98,6 +111,15 @@ export interface LeaseRequest {
   awsMacHostID?: string;
   azureLocation?: string;
   azureImage?: string;
+  gcpProject?: string;
+  gcpZone?: string;
+  gcpImage?: string;
+  gcpNetwork?: string;
+  gcpSubnet?: string;
+  gcpTags?: string[];
+  gcpSSHCIDRs?: string[];
+  gcpRootGB?: number;
+  gcpServiceAccount?: string;
   capacity?: {
     market?: "spot" | "on-demand";
     strategy?: "most-available" | "price-capacity-optimized" | "capacity-optimized" | "sequential";
@@ -117,7 +139,7 @@ export interface LeaseRequest {
   sshPublicKey?: string;
 }
 
-export type Provider = "hetzner" | "aws" | "azure";
+export type Provider = "hetzner" | "aws" | "azure" | "gcp";
 export type TargetOS = "linux" | "macos" | "windows";
 export type WindowsMode = "normal" | "wsl2";
 
@@ -154,6 +176,7 @@ export interface LeaseRecord {
   tailscale?: TailscaleMetadata;
   cloudID: string;
   region?: string;
+  providerProject?: string;
   owner: string;
   org: string;
   share?: LeaseShare | undefined;

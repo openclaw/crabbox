@@ -1,6 +1,7 @@
 package namespace
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -106,6 +107,103 @@ func TestResolveNamespaceDevboxNameKeepsClaimedExternalName(t *testing.T) {
 	}
 	if name != "existing-devbox" || leaseID != "nsd_existing-devbox" || slug != "existing-devbox" {
 		t.Fatalf("name=%q leaseID=%q slug=%q", name, leaseID, slug)
+	}
+}
+
+func TestResolveReleaseOnlySkipsNamespacePrepare(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repoRoot := t.TempDir()
+	if err := claimLeaseForRepoProvider("nsd_crabbox-blue-lobster-deadbeef", "blue-lobster", namespaceProvider, repoRoot, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	runner := &namespaceRecordingRunner{}
+	backend := &namespaceLeaseBackend{
+		cfg: Config{Namespace: NamespaceConfig{WorkRoot: "/workspaces/crabbox"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+	}
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "blue-lobster", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("release-only resolve should not call devbox: %#v", runner.calls)
+	}
+	if lease.LeaseID != "nsd_crabbox-blue-lobster-deadbeef" || lease.Server.Name != "blue-lobster" {
+		t.Fatalf("lease=%#v", lease)
+	}
+	if lease.SSH.Host != "" {
+		t.Fatalf("release-only lease should not prepare SSH: %#v", lease.SSH)
+	}
+}
+
+func TestCleanupNamespaceSSHFilesRemovesOnlyCrabboxNamespaceFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".namespace", "ssh")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(dir, "personal.devbox.namespace.ssh")
+	for _, path := range []string{
+		filepath.Join(dir, "crabbox-blue-lobster-deadbeef.devbox.namespace.ssh"),
+		filepath.Join(dir, "crabbox-blue-lobster-deadbeef.devbox.namespace.key"),
+		keep,
+		filepath.Join(dir, "crabbox-blue-lobster-deadbeef.devbox.namespace.pub"),
+	} {
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if err := cleanupNamespaceSSHFiles("", false, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(dir, "crabbox-blue-lobster-deadbeef.devbox.namespace.ssh"),
+		filepath.Join(dir, "crabbox-blue-lobster-deadbeef.devbox.namespace.key"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s should be removed, err=%v", path, err)
+		}
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("non-crabbox namespace file should remain: %v", err)
+	}
+	if !strings.Contains(out.String(), "namespace ssh cleanup delete") {
+		t.Fatalf("cleanup output=%q", out.String())
+	}
+}
+
+func TestReleaseLeaseCleansNamespaceSSHFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".namespace", "ssh")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, ext := range []string{".ssh", ".key"} {
+		if err := os.WriteFile(filepath.Join(dir, "crabbox-blue-lobster-deadbeef.devbox.namespace"+ext), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := &namespaceRecordingRunner{}
+	var out bytes.Buffer
+	backend := &namespaceLeaseBackend{
+		cfg: Config{Namespace: NamespaceConfig{DeleteOnRelease: true}},
+		rt:  Runtime{Stdout: &out, Stderr: io.Discard, Exec: runner},
+	}
+	lease := LeaseTarget{LeaseID: "cbx_deadbeef0000", Server: Server{Name: "crabbox-blue-lobster-deadbeef"}}
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 || runner.calls[0] != "devbox delete crabbox-blue-lobster-deadbeef --force" {
+		t.Fatalf("calls=%#v", runner.calls)
+	}
+	for _, ext := range []string{".ssh", ".key"} {
+		path := filepath.Join(dir, "crabbox-blue-lobster-deadbeef.devbox.namespace"+ext)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s should be removed, err=%v", path, err)
+		}
 	}
 }
 

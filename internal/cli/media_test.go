@@ -67,12 +67,28 @@ func TestPreviewCommandsUsePaletteGIFAndTrimWindow(t *testing.T) {
 		"-t 6.500",
 		"-i desktop.mp4",
 		"-i palette.png",
-		"paletteuse=dither=bayer",
+		"scale=iw*sar:ih,scale=640:-1:flags=lanczos",
+		"paletteuse=dither=floyd_steinberg",
 		"-loop 0",
 		"preview.gif",
 	} {
 		if !strings.Contains(gif, want) {
 			t.Fatalf("gif args missing %q:\n%s", want, gif)
+		}
+	}
+}
+
+func TestGifsicleOptimizeArgsUseHQDefaults(t *testing.T) {
+	got := strings.Join(gifsicleOptimizeArgs("preview.gif", "preview.optimized.gif", 65, 1.2), " ")
+	for _, want := range []string{
+		"-O3",
+		"--gamma=1.200",
+		"--lossy=65",
+		"preview.gif",
+		"-o preview.optimized.gif",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("gifsicle args missing %q:\n%s", want, got)
 		}
 	}
 }

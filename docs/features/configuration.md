@@ -80,6 +80,47 @@ lease:
   ttl: 90m
 ```
 
+### Jobs
+
+Named jobs live in repo config and describe reusable Crabbox orchestration,
+not project logic baked into the binary. Use them for common "warm a box,
+hydrate it with GitHub Actions, run the repo command, clean up" flows.
+See [Jobs](jobs.md) for lifecycle details and the field contract.
+
+```yaml
+jobs:
+  openclaw-wsl2:
+    provider: aws
+    target: windows
+    windows:
+      mode: wsl2
+    class: beast
+    market: on-demand
+    idleTimeout: 240m
+    hydrate:
+      actions: true
+      waitTimeout: 45m
+      keepAliveMinutes: 240
+    actions:
+      workflow: hydrate.yml
+      job: hydrate
+    shell: true
+    command: >
+      corepack enable &&
+      pnpm install --frozen-lockfile &&
+      CI=1 NODE_OPTIONS=--max-old-space-size=4096 pnpm test
+    stop: always
+```
+
+Run with:
+
+```sh
+crabbox job run openclaw-wsl2
+```
+
+`job run --dry-run <name>` prints the underlying `warmup`, `actions hydrate`,
+`run`, and `stop` commands.
+
 ### Capacity
 
 ```yaml

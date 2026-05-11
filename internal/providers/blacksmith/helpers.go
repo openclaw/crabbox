@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,10 +14,12 @@ import (
 const blacksmithTestboxProvider = "blacksmith-testbox"
 
 var (
-	blacksmithIDPattern       = regexp.MustCompile(`\btbx_[A-Za-z0-9_-]+\b`)
-	blacksmithCleanupAttempts = 36
-	blacksmithCleanupDelay    = 5 * time.Second
-	blacksmithCleanupQuiet    = 12
+	blacksmithIDPattern        = regexp.MustCompile(`\btbx_[A-Za-z0-9_-]+\b`)
+	blacksmithSyncStartPattern = regexp.MustCompile(`(?i)^\s*Syncing(?:\.\.\.| from repo root:)`)
+	blacksmithSyncDonePattern  = regexp.MustCompile(`(?i)^\s*(Changes synced in|No changes to sync|Sync complete)\b`)
+	blacksmithCleanupAttempts  = 36
+	blacksmithCleanupDelay     = 5 * time.Second
+	blacksmithCleanupQuiet     = 12
 )
 
 type blacksmithFlagValues struct {
@@ -189,6 +192,20 @@ func durationMinutesCeil(duration time.Duration) int {
 
 func parseBlacksmithID(output string) string {
 	return blacksmithIDPattern.FindString(output)
+}
+
+func blacksmithSyncTimeout(env func(string) string) time.Duration {
+	for _, key := range []string{"CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS", "OPENCLAW_TESTBOX_SYNC_TIMEOUT_MS"} {
+		raw := strings.TrimSpace(env(key))
+		if raw == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(raw)
+		if err == nil && parsed >= 0 {
+			return time.Duration(parsed) * time.Millisecond
+		}
+	}
+	return 5 * time.Minute
 }
 
 func resolveBlacksmithLeaseID(identifier, repoRoot string, reclaim bool) (string, error) {

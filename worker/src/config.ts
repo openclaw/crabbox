@@ -29,6 +29,15 @@ export interface LeaseConfig {
   awsMacHostID: string;
   azureLocation: string;
   azureImage: string;
+  gcpProject: string;
+  gcpZone: string;
+  gcpImage: string;
+  gcpNetwork: string;
+  gcpSubnet: string;
+  gcpTags: string[];
+  gcpSSHCIDRs: string[];
+  gcpRootGB: number;
+  gcpServiceAccount: string;
   capacityMarket: "spot" | "on-demand";
   capacityStrategy:
     | "most-available"
@@ -52,7 +61,7 @@ export interface LeaseConfig {
 
 export function leaseConfig(input: LeaseRequest): LeaseConfig {
   const provider = input.provider ?? "hetzner";
-  if (provider !== "hetzner" && provider !== "aws" && provider !== "azure") {
+  if (provider !== "hetzner" && provider !== "aws" && provider !== "azure" && provider !== "gcp") {
     throw new Error(`unsupported provider: ${String(provider)}`);
   }
   const target = normalizeTarget(input.target ?? input.targetOS ?? "linux");
@@ -63,7 +72,7 @@ export function leaseConfig(input: LeaseRequest): LeaseConfig {
     !(provider === "aws" && target === "macos") &&
     !(provider === "azure" && target === "windows" && windowsMode === "normal")
   ) {
-    if (provider === "hetzner" || provider === "azure") {
+    if (provider === "hetzner" || provider === "azure" || provider === "gcp") {
       throw new Error(unsupportedManagedTargetMessage(provider, target, windowsMode));
     }
     throw new Error(`unsupported target for brokered ${provider}: ${target}`);
@@ -129,6 +138,15 @@ export function leaseConfig(input: LeaseRequest): LeaseConfig {
     awsMacHostID: input.awsMacHostID ?? "",
     azureLocation: input.azureLocation ?? "",
     azureImage: input.azureImage ?? "",
+    gcpProject: input.gcpProject ?? "",
+    gcpZone: input.gcpZone ?? "",
+    gcpImage: input.gcpImage ?? "",
+    gcpNetwork: input.gcpNetwork ?? "",
+    gcpSubnet: input.gcpSubnet ?? "",
+    gcpTags: uniqueStrings(input.gcpTags ?? []),
+    gcpSSHCIDRs: validCIDRs(input.gcpSSHCIDRs ?? []),
+    gcpRootGB: input.gcpRootGB ?? 0,
+    gcpServiceAccount: input.gcpServiceAccount ?? "",
     capacityMarket: input.capacity?.market ?? "spot",
     capacityStrategy: input.capacity?.strategy ?? "most-available",
     capacityFallback: input.capacity?.fallback ?? "on-demand-after-120s",
@@ -180,6 +198,12 @@ function unsupportedManagedTargetMessage(
       return "brokered azure managed provisioning supports target=linux and native Windows only; use brokered aws with an EC2 Mac Dedicated Host or provider=ssh for existing macOS hosts";
     }
     return "brokered azure managed provisioning supports target=linux and native Windows only";
+  }
+  if (provider === "gcp") {
+    if (target === "macos") {
+      return "brokered gcp managed provisioning supports target=linux only; use brokered aws with an EC2 Mac Dedicated Host or provider=ssh for existing macOS hosts";
+    }
+    return "brokered gcp managed provisioning supports target=linux only";
   }
   if (target === "windows") {
     return `brokered ${provider} managed provisioning supports target=linux only; use brokered aws for managed Windows or provider=ssh for existing Windows hosts`;
@@ -276,6 +300,9 @@ export function serverTypeForProviderClass(provider: Provider, machineClass: str
   if (provider === "azure") {
     return azureVMSizeCandidatesForClass(machineClass)[0] ?? machineClass;
   }
+  if (provider === "gcp") {
+    return gcpMachineTypeCandidatesForClass(machineClass)[0] ?? machineClass;
+  }
   return serverTypeForClass(machineClass);
 }
 
@@ -295,7 +322,44 @@ export function serverTypeForConfig(
       azureVMSizeCandidatesForTargetClass(target, machineClass, windowsMode)[0] ?? machineClass
     );
   }
+  if (provider === "gcp") {
+    return gcpMachineTypeCandidatesForClass(machineClass)[0] ?? machineClass;
+  }
   return serverTypeForClass(machineClass);
+}
+
+export function gcpMachineTypeCandidatesForClass(machineClass: string): string[] {
+  switch (machineClass) {
+    case "standard":
+      return ["c4-standard-32", "c3-standard-22", "n2-standard-32", "n2d-standard-32"];
+    case "fast":
+      return [
+        "c4-standard-64",
+        "c3-standard-44",
+        "n2-standard-64",
+        "n2d-standard-64",
+        "c4-standard-32",
+      ];
+    case "large":
+      return [
+        "c4-standard-96",
+        "c3-standard-88",
+        "n2-standard-80",
+        "n2d-standard-96",
+        "c4-standard-64",
+      ];
+    case "beast":
+      return [
+        "c4-standard-192",
+        "c4-standard-96",
+        "c3-standard-176",
+        "c3-standard-88",
+        "n2d-standard-224",
+        "n2-standard-128",
+      ];
+    default:
+      return [machineClass];
+  }
 }
 
 export function azureVMSizeCandidatesForTargetClass(

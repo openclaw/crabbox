@@ -61,6 +61,21 @@ supports ephemeral OS disks; ephemeral-capable sizes use local OS disks,
 while exact `--type` requests for non-ephemeral sizes use managed
 `StandardSSD_LRS` OS disks.
 
+## Quick Start With `az login`
+
+The simplest setup uses the Azure CLI — no environment variables needed:
+
+```sh
+az login
+crabbox azure login
+crabbox warmup --provider azure
+```
+
+`crabbox azure login` detects the active subscription from the `az` CLI,
+validates credentials through `DefaultAzureCredential`, and stores subscription,
+tenant, and location in user config. See the
+[azure command docs](../commands/azure.md) for flags and details.
+
 ## Direct Auth And Env
 
 Service principal env vars consumed by `DefaultAzureCredential`:
@@ -85,6 +100,7 @@ CRABBOX_AZURE_VNET
 CRABBOX_AZURE_SUBNET
 CRABBOX_AZURE_NSG
 CRABBOX_AZURE_SSH_CIDRS
+CRABBOX_AZURE_NETWORK
 ```
 
 The service principal needs the
@@ -108,9 +124,33 @@ The first acquire in an empty subscription creates:
 
 These resources are created with `createOrUpdate` and reused across leases.
 Per-lease provisioning creates only the public IP, NIC, VM, and OS disk.
+The shared vnet, subnet, and NSG are Azure regional resources. When reusing an
+existing shared resource group, set `azure.location` / `CRABBOX_AZURE_LOCATION`
+to the same region as the existing vnet and NSG, or choose distinct
+`azure.vnet`, `azure.subnet`, and `azure.nsg` names for a new region.
 
 Azure pricing is not hardcoded. Use `CRABBOX_COST_RATES_JSON` for exact
 Azure cost guardrails.
+
+## VPN / Private Network
+
+When connecting through a VPN to the Azure virtual network, set
+`azure.network: private` in config or `CRABBOX_AZURE_NETWORK=private` in the
+environment. This tells Crabbox to use the VM's NIC private IP (e.g.
+`10.42.0.4`) instead of the public IP for SSH connectivity.
+
+```yaml
+azure:
+  network: private
+```
+
+```sh
+export CRABBOX_AZURE_NETWORK=private
+crabbox warmup --provider azure
+```
+
+When `network` is `private` and the NIC has no private IP yet, Crabbox falls
+back to the public IP. The default is `public`.
 
 ## Desktop
 

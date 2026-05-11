@@ -80,6 +80,28 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
+      - name: Publish GitHub release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          notes="$(awk -v version="$RELEASE_VERSION" '
+            $1 == "##" && $2 == version { in_section = 1 }
+            in_section && $1 == "##" && $2 != version { exit }
+            in_section { print }
+          ' CHANGELOG.md)"
+          if [ -z "$notes" ]; then
+            echo "::error::CHANGELOG.md has no section for $RELEASE_VERSION"
+            exit 1
+          fi
+          gh release edit "$RELEASE_TAG" --notes "$notes"
+          body="$(gh release view "$RELEASE_TAG" --json body --jq '.body')"
+          if ! grep -q "^## $RELEASE_VERSION " <<<"$body"; then
+            echo "::error::GitHub release $RELEASE_TAG does not contain the $RELEASE_VERSION changelog"
+            exit 1
+          fi
+
       - name: Verify Homebrew formula
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

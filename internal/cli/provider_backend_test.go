@@ -22,7 +22,7 @@ func testRuntimeWithRunner(r CommandRunner) Runtime {
 }
 
 func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
-	for _, name := range []string{"hetzner", "aws", "ssh", "static", "static-ssh", "blacksmith", "blacksmith-testbox", "namespace", "namespace-devbox", "daytona", "islo", "e2b", "sprites"} {
+	for _, name := range []string{"hetzner", "aws", "azure", "gcp", "google", "google-cloud", "ssh", "static", "static-ssh", "blacksmith", "blacksmith-testbox", "namespace", "namespace-devbox", "daytona", "islo", "e2b", "sprites"} {
 		if _, err := ProviderFor(name); err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
@@ -132,6 +132,25 @@ func TestLeaseCreateFlagsApplySelectedProviderFlags(t *testing.T) {
 	}
 	if cfg.Blacksmith.Org != "openclaw" || cfg.Blacksmith.Workflow != ".github/workflows/testbox.yml" || cfg.Blacksmith.Job != "test" || cfg.Blacksmith.Ref != "feature" {
 		t.Fatalf("blacksmith flags not applied through provider registry: %#v", cfg.Blacksmith)
+	}
+}
+
+func TestLeaseCreateFlagsDeriveGCPTypeForAlias(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "google", "--class", "standard"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "google" {
+		t.Fatalf("provider should remain raw until backend load, got %q", cfg.Provider)
+	}
+	if cfg.ServerType != "c4-standard-32" {
+		t.Fatalf("server type=%q want gcp default", cfg.ServerType)
 	}
 }
 

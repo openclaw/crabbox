@@ -59,11 +59,21 @@ WSL contract:
 
 ```sh
 crabbox warmup --provider aws --target windows --windows-mode wsl2
+crabbox actions hydrate --id blue-lobster
 crabbox run --id blue-lobster -- pnpm test
 ```
 
 Use native Windows mode when you need the Windows desktop. Use WSL2 when you
 need Linux tooling on Windows-capable AWS instance families.
+
+OpenClaw maintainers can run the full OpenClaw test suite on a fresh WSL2 box
+with:
+
+```sh
+CRABBOX_LIVE=1 scripts/openclaw-wsl2-tests.sh
+```
+
+Set `CRABBOX_OPENCLAW_WSL2_ID=blue-lobster` to reuse an existing WSL2 lease.
 
 ## Static Windows
 

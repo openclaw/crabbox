@@ -587,7 +587,7 @@ func (a App) startWebVNCDaemon(args []string, leaseID string) error {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		return exit(2, "create WebVNC daemon directory: %v", err)
 	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return exit(2, "open WebVNC daemon log: %v", err)
 	}
@@ -610,8 +610,34 @@ func (a App) startWebVNCDaemon(args []string, leaseID string) error {
 		return exit(5, "release WebVNC daemon process: %v", err)
 	}
 	fmt.Fprintf(a.Stdout, "webvnc daemon: pid=%d log=%s\n", pid, logPath)
+	if webVNCDaemonLogReady(logPath, 10*time.Second) {
+		fmt.Fprintln(a.Stdout, "webvnc daemon: ready")
+	} else {
+		fmt.Fprintln(a.Stdout, "webvnc daemon: starting; run crabbox webvnc status --id <lease-id-or-slug> to check bridge readiness")
+	}
 	fmt.Fprintln(a.Stdout, "webvnc daemon: stop with crabbox webvnc daemon stop --id <lease-id-or-slug>")
 	return nil
+}
+
+func webVNCDaemonLogReady(path string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if webVNCDaemonLogHasReady(path) {
+			return true
+		}
+		if timeout <= 0 || time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func webVNCDaemonLogHasReady(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "bridge: connected; keep this process running while using WebVNC")
 }
 
 func webVNCDaemonSupervisorScript(exe string, args []string) string {

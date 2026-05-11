@@ -8,6 +8,7 @@ import {
 } from "./aws";
 import { AzureClient } from "./azure";
 import { azureLocationFor, leaseConfig, validCIDRs } from "./config";
+import { GCPClient } from "./gcp";
 import { HetznerClient } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth";
@@ -821,7 +822,14 @@ export class FleetDurableObject implements DurableObject {
     if (config.provider === "azure" && !config.azureLocation) {
       config.azureLocation = azureLocationFor(this.env, "");
     }
-    const readiness = this.providerConfigurationReadiness(config.provider);
+    if (config.provider === "gcp" && !config.gcpProject) {
+      config.gcpProject =
+        this.env.CRABBOX_GCP_PROJECT?.trim() || this.env.GCP_PROJECT_ID?.trim() || "";
+    }
+    const readiness = this.providerConfigurationReadiness(
+      config.provider,
+      config.provider === "gcp" ? config.gcpProject : undefined,
+    );
     if (!readiness.configured) {
       return json(
         {
@@ -846,7 +854,11 @@ export class FleetDurableObject implements DurableObject {
     if (tailscaleError) {
       return tailscaleError;
     }
-    const provider = this.provider(config.provider, config.awsRegion);
+    const provider = this.provider(
+      config.provider,
+      config.provider === "gcp" ? config.gcpZone : config.awsRegion,
+      config.provider === "gcp" ? config.gcpProject : undefined,
+    );
     const providerHourlyUSD = await provider
       .hourlyPriceUSD(config.serverType, config)
       .catch(() => undefined);
@@ -957,6 +969,10 @@ export class FleetDurableObject implements DurableObject {
     }
     if (config.provider === "azure") {
       record.region = config.azureLocation;
+    }
+    if (config.provider === "gcp") {
+      record.region = server.region ?? config.gcpZone;
+      record.providerProject = config.gcpProject;
     }
     await this.putLease(record);
     await this.scheduleAlarm();
@@ -1158,7 +1174,10 @@ export class FleetDurableObject implements DurableObject {
     return json(this.providerConfigurationReadiness(provider));
   }
 
-  private providerConfigurationReadiness(provider: Provider): ProviderReadiness {
+  private providerConfigurationReadiness(
+    provider: Provider,
+    gcpProject?: string,
+  ): ProviderReadiness {
     if (this.testProviders[provider]) {
       return {
         provider,
@@ -1167,7 +1186,7 @@ export class FleetDurableObject implements DurableObject {
         message: `${provider} test provider is configured`,
       };
     }
-    return providerReadiness(provider, this.env);
+    return providerReadiness(provider, this.env, gcpProject);
   }
 
   private async portalRoute(request: Request, parts: string[]): Promise<Response> {
@@ -1498,9 +1517,13 @@ export class FleetDurableObject implements DurableObject {
     if (request.method.toUpperCase() !== "POST") {
       return json({ error: "not_found" }, { status: 404 });
     }
-    const lease = await this.resolveLease(identifier, request, false);
+    const admin = isAdminRequest(request);
+    const lease = await this.resolveLease(identifier, request, admin);
     if (!lease) {
       return notFound();
+    }
+    if (!this.leaseManageableByRequest(lease, request, admin)) {
+      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
     if (lease.state !== "active") {
       return json({ error: "egress_unavailable", message: "lease is not active" }, { status: 409 });
@@ -1630,9 +1653,13 @@ export class FleetDurableObject implements DurableObject {
     if (request.method.toUpperCase() !== "POST") {
       return json({ error: "not_found" }, { status: 404 });
     }
-    const lease = await this.resolveLease(identifier, request, false);
+    const admin = isAdminRequest(request);
+    const lease = await this.resolveLease(identifier, request, admin);
     if (!lease) {
       return notFound();
+    }
+    if (!this.leaseManageableByRequest(lease, request, admin)) {
+      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
     const error = webVNCLeaseError(lease);
     if (error) {
@@ -1794,9 +1821,13 @@ export class FleetDurableObject implements DurableObject {
     if (request.method.toUpperCase() !== "POST") {
       return json({ error: "not_found" }, { status: 404 });
     }
-    const lease = await this.resolveLease(identifier, request, false);
+    const admin = isAdminRequest(request);
+    const lease = await this.resolveLease(identifier, request, admin);
     if (!lease) {
       return notFound();
+    }
+    if (!this.leaseManageableByRequest(lease, request, admin)) {
+      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
     const error = codeLeaseError(lease);
     if (error) {
@@ -2464,11 +2495,14 @@ export class FleetDurableObject implements DurableObject {
           ? await this.provider("hetzner").listCrabboxServers()
           : provider === "azure"
             ? await this.provider("azure").listCrabboxServers()
-            : [
-                ...(await this.provider("hetzner").listCrabboxServers()),
-                ...(await this.listProviderMachinesSafe("aws")),
-                ...(await this.listProviderMachinesSafe("azure")),
-              ];
+            : provider === "gcp"
+              ? await this.provider("gcp").listCrabboxServers()
+              : [
+                  ...(await this.provider("hetzner").listCrabboxServers()),
+                  ...(await this.listProviderMachinesSafe("aws")),
+                  ...(await this.listProviderMachinesSafe("azure")),
+                  ...(await this.listProviderMachinesSafe("gcp")),
+                ];
     return json({ machines });
   }
 
@@ -3192,7 +3226,7 @@ export class FleetDurableObject implements DurableObject {
     }
   }
 
-  private provider(provider: Provider, region = "eu-west-1"): CloudProvider {
+  private provider(provider: Provider, region?: string, project?: string): CloudProvider {
     const testProvider = this.testProviders[provider];
     if (testProvider) {
       return testProvider;
@@ -3202,6 +3236,9 @@ export class FleetDurableObject implements DurableObject {
     }
     if (provider === "azure") {
       return new AzureProvider(this.env);
+    }
+    if (provider === "gcp") {
+      return new GCPProvider(this.env, region, project);
     }
     return new HetznerProvider(this.env);
   }
@@ -3216,6 +3253,10 @@ export class FleetDurableObject implements DurableObject {
     }
     if (lease.provider === "azure") {
       await this.provider("azure").deleteServer(lease.cloudID);
+      return;
+    }
+    if (lease.provider === "gcp") {
+      await this.provider("gcp", lease.region, lease.providerProject).deleteServer(lease.cloudID);
       return;
     }
     await this.provider("hetzner").deleteServer(String(lease.serverID));
@@ -3252,7 +3293,26 @@ interface ProviderReadiness {
   message: string;
 }
 
-function providerReadiness(provider: Provider, env: Env): ProviderReadiness {
+function providerReadiness(provider: Provider, env: Env, gcpProject?: string): ProviderReadiness {
+  if (provider === "gcp") {
+    const missing = providerRequiredSecrets(provider).filter((name) => !nonSecretString(env[name]));
+    if (
+      !nonSecretString(gcpProject) &&
+      !nonSecretString(env.GCP_PROJECT_ID) &&
+      !nonSecretString(env.CRABBOX_GCP_PROJECT)
+    ) {
+      missing.unshift("GCP_PROJECT_ID");
+    }
+    return {
+      provider,
+      configured: missing.length === 0,
+      missing,
+      message:
+        missing.length === 0
+          ? "gcp coordinator secrets are configured"
+          : `gcp coordinator secrets missing: ${missing.join(", ")}`,
+    };
+  }
   const missing = providerRequiredSecrets(provider).filter((name) => !nonSecretString(env[name]));
   return {
     provider,
@@ -3271,13 +3331,15 @@ function providerRequiredSecrets(provider: Provider): Array<keyof Env> {
       return ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
     case "azure":
       return ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_SUBSCRIPTION_ID"];
+    case "gcp":
+      return ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"];
     case "hetzner":
       return ["HETZNER_TOKEN"];
   }
 }
 
 function isManagedProvider(provider: string): provider is Provider {
-  return provider === "aws" || provider === "azure" || provider === "hetzner";
+  return provider === "aws" || provider === "azure" || provider === "gcp" || provider === "hetzner";
 }
 
 function leaseKey(leaseID: string): string {
@@ -4071,7 +4133,12 @@ function boundedRunEvent(
   if (input.slug) {
     event.slug = truncateString(input.slug, 128);
   }
-  if (input.provider === "aws" || input.provider === "hetzner" || input.provider === "azure") {
+  if (
+    input.provider === "aws" ||
+    input.provider === "hetzner" ||
+    input.provider === "azure" ||
+    input.provider === "gcp"
+  ) {
     event.provider = input.provider;
   }
   if (input.target === "linux" || input.target === "macos" || input.target === "windows") {
@@ -4708,6 +4775,52 @@ class AzureProvider implements CloudProvider {
 
   hourlyPriceUSD(): Promise<number | undefined> {
     return Promise.resolve(undefined);
+  }
+}
+
+class GCPProvider implements CloudProvider {
+  private readonly client: GCPClient;
+
+  constructor(env: Env, zone?: string, project?: string) {
+    this.client = new GCPClient(env, zone, project);
+  }
+
+  listCrabboxServers(): Promise<ProviderMachine[]> {
+    return this.client.listCrabboxServers();
+  }
+
+  createServerWithFallback(
+    config: ReturnType<typeof leaseConfig>,
+    leaseID: string,
+    slug: string,
+    owner: string,
+  ): Promise<{
+    server: ProviderMachine;
+    serverType: string;
+    market?: string;
+    attempts?: ProvisioningAttempt[];
+  }> {
+    return this.client.createServerWithFallback(config, leaseID, slug, owner);
+  }
+
+  deleteServer(id: string): Promise<void> {
+    return this.client.deleteServer(id);
+  }
+
+  createImage(): Promise<ProviderImage> {
+    throw new Error("gcp images are not supported");
+  }
+
+  getImage(): Promise<ProviderImage> {
+    throw new Error("gcp images are not supported");
+  }
+
+  deleteSSHKey(): Promise<void> {
+    return this.client.deleteSSHKey();
+  }
+
+  hourlyPriceUSD(): Promise<number | undefined> {
+    return this.client.hourlyPriceUSD();
   }
 }
 

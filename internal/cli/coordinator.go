@@ -463,6 +463,11 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 	var res struct {
 		Lease CoordinatorLease `json:"lease"`
 	}
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return CoordinatorLease{}, err
+	}
+	cfg.Provider = provider.Name()
 	if slug == "" {
 		slug = newLeaseSlug(leaseID)
 	}
@@ -528,8 +533,55 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 	if len(capacity) > 0 {
 		req["capacity"] = capacity
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/leases", req, &res)
+	addCoordinatorGCPFields(req, cfg)
+	err = c.do(ctx, http.MethodPost, "/v1/leases", req, &res)
 	return res.Lease, err
+}
+
+func addCoordinatorGCPFields(req map[string]any, cfg Config) {
+	if cfg.Provider != "gcp" {
+		return
+	}
+	base := baseConfig()
+	if cfg.GCPProject != "" && cfg.gcpProjectExplicit {
+		req["gcpProject"] = cfg.GCPProject
+	}
+	if cfg.GCPZone != "" && (cfg.gcpZoneExplicit || cfg.GCPZone != base.GCPZone) {
+		req["gcpZone"] = cfg.GCPZone
+	}
+	if cfg.GCPImage != "" && (cfg.gcpImageExplicit || cfg.GCPImage != base.GCPImage) {
+		req["gcpImage"] = cfg.GCPImage
+	}
+	if cfg.GCPNetwork != "" && (cfg.gcpNetworkExplicit || cfg.GCPNetwork != base.GCPNetwork) {
+		req["gcpNetwork"] = cfg.GCPNetwork
+	}
+	if cfg.GCPSubnet != "" {
+		req["gcpSubnet"] = cfg.GCPSubnet
+	}
+	if len(cfg.GCPTags) > 0 && (cfg.gcpTagsExplicit || !stringSlicesEqual(cfg.GCPTags, base.GCPTags)) {
+		req["gcpTags"] = cfg.GCPTags
+	}
+	if len(cfg.GCPSSHCIDRs) > 0 {
+		req["gcpSSHCIDRs"] = cfg.GCPSSHCIDRs
+	}
+	if cfg.GCPRootGB > 0 && (cfg.gcpRootGBExplicit || cfg.GCPRootGB != base.GCPRootGB) {
+		req["gcpRootGB"] = cfg.GCPRootGB
+	}
+	if cfg.GCPServiceAccount != "" {
+		req["gcpServiceAccount"] = cfg.GCPServiceAccount
+	}
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *CoordinatorClient) UpdateLeaseTailscale(ctx context.Context, id string, meta TailscaleMetadata) (CoordinatorLease, error) {

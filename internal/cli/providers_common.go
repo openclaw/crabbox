@@ -46,6 +46,23 @@ func touchDirectLeaseBestEffort(ctx context.Context, cfg Config, server Server, 
 		}
 		return server
 	}
+	if cfg.Provider == "gcp" || server.Provider == "gcp" {
+		client, err := NewGCPClient(ctx, cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: direct touch state=%s: %v\n", state, err)
+			return server
+		}
+		if zone := server.Labels["zone"]; zone != "" {
+			cfg.GCPZone = zone
+			if zoned, err := NewGCPClient(ctx, cfg); err == nil {
+				client = zoned
+			}
+		}
+		if err := client.SetLabels(ctx, server.CloudID, server.Labels); err != nil {
+			fmt.Fprintf(stderr, "warning: direct touch state=%s: %v\n", state, err)
+		}
+		return server
+	}
 	client, err := newHetznerClient()
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: direct touch state=%s: %v\n", state, err)

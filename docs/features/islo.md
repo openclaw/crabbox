@@ -58,12 +58,16 @@ crabbox stop --provider islo <slug>
   directory under `/workspace`, syncs the local Git-managed working set into
   `/workspace/<islo.workdir>`, streams stdout/stderr from Islo's SSE exec
   endpoint, and returns the remote exit code.
-- `--sync-only` and `--checksum` are rejected because Islo does not expose a
-  Crabbox SSH/rsync target. Large-sync guardrails still apply, and
-  `--force-sync-large` is honored for intentional large archive syncs.
+- `--sync-only` and `--checksum` are rejected because the Crabbox `provider:
+  islo` backend does not yet drive a Crabbox-managed SSH/rsync target. Large-sync
+  guardrails still apply, and `--force-sync-large` is honored for intentional
+  large archive syncs.
 - `list`, `status`, and `stop` use the Islo SDK and return core-rendered
   Crabbox views for Crabbox-created sandboxes only.
 
-Islo is not an SSH lease backend today. Commands that require a Crabbox SSH
-target, such as `ssh`, `vnc`, `code`, and Actions runner hydration, should use
-Hetzner, AWS, static SSH, or Daytona instead.
+Islo sandboxes are reachable interactively over SSH using Islo's own host alias
+(`ssh <sandbox-name>.islo` after `islo ssh --setup`); see
+[Provider: Islo → SSH access](../providers/islo.md#ssh-access) for the recipe.
+Crabbox itself is not yet wired to drive `crabbox ssh`, `vnc`, `code`, or
+Actions runner hydration through that path — for those, use Hetzner, AWS,
+static SSH, or Daytona.

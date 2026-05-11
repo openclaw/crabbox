@@ -28,6 +28,17 @@ func clearConfigEnv(t *testing.T) {
 		"CF_ACCESS_CLIENT_ID",
 		"CF_ACCESS_CLIENT_SECRET",
 		"CF_ACCESS_TOKEN",
+		"CRABBOX_GCP_PROJECT",
+		"GOOGLE_CLOUD_PROJECT",
+		"GCP_PROJECT_ID",
+		"CRABBOX_GCP_ZONE",
+		"CRABBOX_GCP_IMAGE",
+		"CRABBOX_GCP_NETWORK",
+		"CRABBOX_GCP_SUBNET",
+		"CRABBOX_GCP_TAGS",
+		"CRABBOX_GCP_SSH_CIDRS",
+		"CRABBOX_GCP_ROOT_GB",
+		"CRABBOX_GCP_SERVICE_ACCOUNT",
 		"CRABBOX_DAYTONA_API_KEY",
 		"DAYTONA_API_KEY",
 		"CRABBOX_DAYTONA_JWT_TOKEN",
@@ -386,6 +397,15 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_IDLE_TIMEOUT", "20m")
 	t.Setenv("CRABBOX_AWS_SSH_CIDRS", "198.51.100.7/32,203.0.113.8/32")
 	t.Setenv("CRABBOX_AZURE_SSH_CIDRS", "198.51.100.9/32,203.0.113.10/32")
+	t.Setenv("CRABBOX_GCP_PROJECT", "crabbox-project")
+	t.Setenv("CRABBOX_GCP_ZONE", "europe-west2-b")
+	t.Setenv("CRABBOX_GCP_IMAGE", "projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64")
+	t.Setenv("CRABBOX_GCP_NETWORK", "crabbox-net")
+	t.Setenv("CRABBOX_GCP_SUBNET", "crabbox-subnet")
+	t.Setenv("CRABBOX_GCP_TAGS", "crabbox-ssh,crabbox-ci")
+	t.Setenv("CRABBOX_GCP_SSH_CIDRS", "198.51.100.11/32,203.0.113.12/32")
+	t.Setenv("CRABBOX_GCP_ROOT_GB", "900")
+	t.Setenv("CRABBOX_GCP_SERVICE_ACCOUNT", "runner@crabbox-project.iam.gserviceaccount.com")
 	t.Setenv("CRABBOX_SSH_FALLBACK_PORTS", "none")
 	t.Setenv("CRABBOX_ACCESS_CLIENT_ID", "env-access-client")
 	t.Setenv("CRABBOX_ACCESS_CLIENT_SECRET", "env-access-secret")
@@ -499,6 +519,12 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if len(cfg.AzureSSHCIDRs) != 2 || cfg.AzureSSHCIDRs[0] != "198.51.100.9/32" || cfg.AzureSSHCIDRs[1] != "203.0.113.10/32" {
 		t.Fatalf("AzureSSHCIDRs=%v", cfg.AzureSSHCIDRs)
 	}
+	if cfg.GCPProject != "crabbox-project" || cfg.GCPZone != "europe-west2-b" || cfg.GCPNetwork != "crabbox-net" || cfg.GCPSubnet != "crabbox-subnet" || cfg.GCPRootGB != 900 || cfg.GCPServiceAccount != "runner@crabbox-project.iam.gserviceaccount.com" {
+		t.Fatalf("unexpected gcp env: project=%s zone=%s network=%s subnet=%s root=%d service=%s", cfg.GCPProject, cfg.GCPZone, cfg.GCPNetwork, cfg.GCPSubnet, cfg.GCPRootGB, cfg.GCPServiceAccount)
+	}
+	if len(cfg.GCPTags) != 2 || cfg.GCPTags[1] != "crabbox-ci" || len(cfg.GCPSSHCIDRs) != 2 || cfg.GCPSSHCIDRs[1] != "203.0.113.12/32" {
+		t.Fatalf("unexpected gcp tags/cidrs: tags=%v cidrs=%v", cfg.GCPTags, cfg.GCPSSHCIDRs)
+	}
 	if len(cfg.SSHFallbackPorts) != 0 {
 		t.Fatalf("SSHFallbackPorts=%v want disabled fallback", cfg.SSHFallbackPorts)
 	}
@@ -582,6 +608,24 @@ func TestTailscaleEnvOverrides(t *testing.T) {
 	}
 	if len(cfg.Tailscale.Tags) != 2 || cfg.Tailscale.Tags[1] != "tag:ci" {
 		t.Fatalf("unexpected tailscale tags: %#v", cfg.Tailscale.Tags)
+	}
+}
+
+func TestProviderAliasCanonicalizedBeforeDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "google")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "crabbox-project")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "gcp" || cfg.ServerType != "c4-standard-192" {
+		t.Fatalf("provider=%q type=%q want gcp c4-standard-192", cfg.Provider, cfg.ServerType)
 	}
 }
 
@@ -839,5 +883,85 @@ func TestEnvHelperBranches(t *testing.T) {
 	t.Setenv("CRABBOX_LIST", "CI,NODE_OPTIONS")
 	if list, ok := getenvList("CRABBOX_LIST"); !ok || len(list) != 2 || list[1] != "NODE_OPTIONS" {
 		t.Fatalf("getenvList=%v ok=%t", list, ok)
+	}
+}
+
+func TestNamespaceDevboxSizeForConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{name: "explicit namespace size", cfg: Config{Namespace: NamespaceConfig{Size: " xl "}, Class: "standard"}, want: "XL"},
+		{name: "explicit server type", cfg: Config{ServerType: " l ", ServerTypeExplicit: true, Class: "standard"}, want: "L"},
+		{name: "class default", cfg: Config{Class: "large"}, want: "L"},
+		{name: "empty default", cfg: Config{}, want: "M"},
+		{name: "custom class", cfg: Config{Class: "gpu"}, want: "GPU"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := namespaceDevboxSizeForConfig(tc.cfg); got != tc.want {
+				t.Fatalf("size=%q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
+	enabled := true
+	disabled := false
+	job := applyFileJobConfig(JobConfig{}, fileJobConfig{
+		Provider:    "aws",
+		TargetOS:    targetLinux,
+		Windows:     &fileWindowsConfig{Mode: windowsModeWSL2},
+		Profile:     "ci",
+		Class:       "large",
+		Type:        "m8i.large",
+		Capacity:    &fileCapacityConfig{Market: "spot"},
+		Market:      "on-demand",
+		TTL:         "45m",
+		IdleTimeout: "5m",
+		Desktop:     &enabled,
+		Browser:     &disabled,
+		Code:        &enabled,
+		Network:     "tailscale",
+		Hydrate: &fileJobHydrateConfig{
+			Actions:          &enabled,
+			WaitTimeout:      "12m",
+			KeepAliveMinutes: 3,
+		},
+		Actions: &fileJobActionsConfig{
+			Repo:     "openclaw/crabbox",
+			Workflow: ".github/workflows/ci.yml",
+			Job:      "test",
+			Ref:      "main",
+			Fields:   []string{"a=1", "a=1", "b=2"},
+		},
+		Shell:          &enabled,
+		Command:        "pnpm test",
+		NoSync:         &enabled,
+		SyncOnly:       &disabled,
+		Checksum:       &enabled,
+		ForceSyncLarge: &enabled,
+		JUnit:          []string{"junit.xml", "junit.xml"},
+		Downloads:      []string{"out=out", "out=out"},
+		Stop:           "always",
+	})
+	if job.Provider != "aws" || job.Target != targetLinux || job.WindowsMode != windowsModeWSL2 || job.Profile != "ci" || job.Class != "large" || job.ServerType != "m8i.large" || job.Market != "on-demand" {
+		t.Fatalf("basic job fields not applied: %#v", job)
+	}
+	if job.TTL != 45*time.Minute || job.IdleTimeout != 5*time.Minute {
+		t.Fatalf("job durations ttl=%s idle=%s", job.TTL, job.IdleTimeout)
+	}
+	if job.Desktop == nil || !*job.Desktop || job.Browser == nil || *job.Browser || job.Code == nil || !*job.Code || job.Network != "tailscale" {
+		t.Fatalf("job UI/network fields not applied: %#v", job)
+	}
+	if !job.Hydrate.Actions || job.Hydrate.WaitTimeout != 12*time.Minute || job.Hydrate.KeepAliveMinutes != 3 {
+		t.Fatalf("hydrate not applied: %#v", job.Hydrate)
+	}
+	if job.Actions.Repo != "openclaw/crabbox" || job.Actions.Workflow != ".github/workflows/ci.yml" || job.Actions.Job != "test" || job.Actions.Ref != "main" || len(job.Actions.Fields) != 2 {
+		t.Fatalf("actions not applied: %#v", job.Actions)
+	}
+	if !job.Shell || job.Command != "pnpm test" || !job.NoSync || job.SyncOnly || job.Checksum == nil || !*job.Checksum || !job.ForceSyncLarge || len(job.JUnit) != 1 || len(job.Downloads) != 1 || job.Stop != "always" {
+		t.Fatalf("command/sync fields not applied: %#v", job)
 	}
 }

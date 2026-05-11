@@ -478,6 +478,50 @@ func TestSSHPortCandidatesUseConfiguredFallbacks(t *testing.T) {
 	}
 }
 
+func TestRsyncLocalPathConvertsWindowsDrivePath(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"C:/OpenClaw/crabbox": "/c/OpenClaw/crabbox",
+		"D:\\Users\\test":     "/d/Users/test",
+		"/already/posix":      "/already/posix",
+		"relative/path":       "relative/path",
+	}
+	for in, want := range tests {
+		got := rsyncLocalPathForGOOS("windows", in)
+		if got != want {
+			t.Errorf("rsyncLocalPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRsyncLocalPathPassesThroughNonWindowsPath(t *testing.T) {
+	t.Parallel()
+	if got := rsyncLocalPathForGOOS("linux", "C:/OpenClaw/crabbox"); got != "C:/OpenClaw/crabbox" {
+		t.Fatalf("non-Windows rsyncLocalPath = %q", got)
+	}
+}
+
+func TestWindowsToWSLPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in, want string
+	}{
+		{"C:/Users/test", "/mnt/c/Users/test"},
+		{`D:\Users\test`, "/mnt/d/Users/test"},
+		{"/c/OpenClaw/crabbox", "/mnt/c/OpenClaw/crabbox"},
+		{"'ssh' '-i' 'C:/Users/galini/key' '-o' 'UserKnownHostsFile=C:/Users/galini/known_hosts'",
+			"'ssh' '-i' '/mnt/c/Users/galini/key' '-o' 'UserKnownHostsFile=/mnt/c/Users/galini/known_hosts'"},
+		{"/work/crabbox", "/work/crabbox"},
+		{"crabbox@10.0.0.1:/work/", "crabbox@10.0.0.1:/work/"},
+	}
+	for _, tc := range tests {
+		got := windowsToWSLPath(tc.in)
+		if got != tc.want {
+			t.Errorf("windowsToWSLPath(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestRemotePruneSyncManifestDeletesOnlyManagedPaths(t *testing.T) {
 	got := remotePruneSyncManifest("/work/repo")
 	for _, want := range []string{
@@ -500,6 +544,35 @@ func TestRemotePruneSyncManifestUsesDeletedListBeforeOldManifestDiff(t *testing.
 	oldIndex := strings.Index(got, "manifest_removed_paths | delete_paths")
 	if deletedIndex < 0 || oldIndex < 0 || deletedIndex > oldIndex {
 		t.Fatalf("deleted list should be applied before old manifest diff: %q", got)
+	}
+}
+
+func TestRemoteSeedSyncManifestFromGitWritesInitialTrackedManifest(t *testing.T) {
+	workdir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = workdir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v failed: %v\n%s", args, err, out)
+		}
+	}
+	run("git", "init", "-q")
+	mustWriteTestFile(t, filepath.Join(workdir, "keep.txt"), "keep")
+	mustWriteTestFile(t, filepath.Join(workdir, "stale.txt"), "stale")
+	run("git", "add", "keep.txt", "stale.txt")
+
+	cmd := exec.Command("bash", "-lc", remoteSeedSyncManifestFromGit(workdir))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("remote seed failed: %v\n%s", err, out)
+	}
+
+	got, err := os.ReadFile(filepath.Join(workdir, ".git", "crabbox", "sync-manifest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "keep.txt\x00stale.txt\x00" {
+		t.Fatalf("unexpected seeded manifest: %q", got)
 	}
 }
 
@@ -828,6 +901,8 @@ func TestServerTypeForProviderClassDirectProviders(t *testing.T) {
 		{provider: "e2b", class: "beast", want: "base"},
 		{provider: "daytona", class: "beast", want: "snapshot"},
 		{provider: "azure", class: "standard", want: "Standard_D32ads_v6"},
+		{provider: "google", class: "standard", want: "c4-standard-32"},
+		{provider: "google-cloud", class: "standard", want: "c4-standard-32"},
 		{provider: "hetzner", class: "fast", want: "ccx43"},
 	}
 	for _, tt := range tests {

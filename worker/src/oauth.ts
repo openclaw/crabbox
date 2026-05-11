@@ -136,7 +136,7 @@ async function githubAuthStart(
     mode: "cli",
     pollSecretHash: input.pollSecretHash,
   });
-  if (input.provider === "aws" || input.provider === "hetzner") {
+  if (input.provider === "aws" || input.provider === "hetzner" || input.provider === "gcp") {
     pending.provider = input.provider;
   }
   await storePendingOAuth(storage, pending);

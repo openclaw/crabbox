@@ -63,6 +63,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.warmup(ctx, helpArgs), true
 	case "run":
 		return a.runCommand(ctx, helpArgs), true
+	case "job":
+		return nil, false
 	case "sync-plan":
 		return a.syncPlan(ctx, helpArgs), true
 	case "history":
@@ -141,6 +143,7 @@ Commands:
   doctor      Check local and broker/provider readiness
   warmup      Lease a box and wait until it is ready
   run         Sync the repo, run a remote command, stream output
+  job         Run named repo-local Crabbox jobs
   desktop     Launch apps into a visible desktop session
   media       Create preview artifacts from recorded desktop videos
   artifacts   Collect, transform, and publish QA artifacts
@@ -168,11 +171,13 @@ Commands:
   screenshot  Capture a PNG from a desktop lease
   inspect     Print lease/provider details; add --json for scripts
   stop        Release a lease or delete a direct-provider machine
-  cleanup     Sweep expired direct-provider machines
+  cleanup     Sweep expired direct-provider machines or local provider state
+  azure       Azure provider setup and login
   config      Show or update user config
 
 Common Flows:
   crabbox run --class beast -- pnpm check
+  crabbox job run openclaw-wsl2
   crabbox warmup
   crabbox status --id blue-lobster --wait
   crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
@@ -214,6 +219,7 @@ Global:
 Config:
   crabbox login [--url <url>] [--provider aws|azure|hetzner] [--no-browser]
   crabbox login --url <url> --token-stdin [--provider aws|azure|hetzner]
+  crabbox azure login [--subscription <id>] [--location <loc>] [--json]
   crabbox config path
   crabbox config show [--json]
   crabbox config set-broker --url <url> --token-stdin [--provider aws|azure|hetzner]

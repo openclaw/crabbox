@@ -13,6 +13,7 @@ static SSH provider for existing machines.
 | --- | --- | --- | --- |
 | [AWS](aws.md) | SSH lease | Linux, Windows, macOS | broad managed capacity, Windows, EC2 Mac |
 | [Azure](azure.md) | SSH lease | Linux, Windows | Azure-backed Linux and native Windows capacity |
+| [Google Cloud](gcp.md) | SSH lease | Linux | GCP-backed Linux Compute Engine capacity |
 | [Hetzner](hetzner.md) | SSH lease | Linux | fast Linux capacity at low cost |
 | [Static SSH](ssh.md) | SSH lease | Linux, macOS, Windows | reusing an existing host |
 | [Blacksmith Testbox](blacksmith-testbox.md) | delegated run | Linux | existing Blacksmith Testbox workflows |
@@ -44,7 +45,7 @@ crabbox run --provider namespace-devbox --id blue-lobster -- pnpm test
 
 ## Brokered Versus Direct
 
-AWS, Azure, and Hetzner can run through the Crabbox coordinator or directly
+AWS, Azure, Google Cloud, and Hetzner can run through the Crabbox coordinator or directly
 from the CLI.
 Coordinator mode is the normal shared-team path: the Worker owns cloud
 credentials, cost state, cleanup alarms, and lease accounting.
@@ -71,6 +72,7 @@ through the Sprites API and reaches SSH through `sprite proxy`.
 | --- | --- | --- | --- | --- | --- | --- |
 | AWS | yes | yes | yes | yes | yes | no |
 | Azure | yes | yes | yes | Linux VNC/code | yes | no |
+| Google Cloud | yes | yes | yes | no | yes | no |
 | Hetzner | yes | yes | yes | Linux VNC/code | yes | no |
 | Static SSH | yes | resolves host | yes | host-dependent | yes | no |
 | Blacksmith Testbox | yes | yes | no | no | no | yes |
@@ -82,7 +84,7 @@ through the Sprites API and reaches SSH through `sprite proxy`.
 | E2B | yes | yes | no | no | archive via E2B envd | no |
 
 Actions runner hydration requires a normal SSH lease on Linux and is core-over-SSH.
-Use AWS, Hetzner, Static SSH, Namespace Devbox, Semaphore, or Sprites for that
+Use AWS, Google Cloud, Hetzner, Static SSH, Namespace Devbox, Semaphore, or Sprites for that
 path.
 
 ## Implementation

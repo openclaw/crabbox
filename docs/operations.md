@@ -46,12 +46,16 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=aws CRABBOX_LIVE_REPO=/path/to/openclaw sc
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=hetzner CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=blacksmith-testbox CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=e2b CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=daytona CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-devbox CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=semaphore CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
 ```
 
 E2B smoke requires `E2B_API_KEY`. Semaphore smoke requires
 `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`, and
 `CRABBOX_SEMAPHORE_TOKEN` or equivalent user config.
+Daytona needs `CRABBOX_DAYTONA_SNAPSHOT` or `daytona.snapshot`.
+Namespace needs the authenticated `devbox` CLI on `PATH`.
 
 For direct-provider smoke, disable the coordinator with a scratch config and run the same commands manually:
 
@@ -108,6 +112,7 @@ Conditional Worker secrets and settings:
 ```text
 AWS_SESSION_TOKEN optional
 CRABBOX_AWS_MAC_HOST_ID required only for brokered target=macos
+CRABBOX_SHARED_OWNER optional fixed owner identity for shared-token automation
 CRABBOX_ADMIN_TOKEN required for admin routes and image promotion
 CRABBOX_GITHUB_CLIENT_ID required for browser login
 CRABBOX_GITHUB_CLIENT_SECRET required for browser login
@@ -265,7 +270,8 @@ Before tagging a release:
   `crabbox attach`, `crabbox events`, `crabbox logs`, and lease cleanup.
 - Push, pull, and wait for CI green on the release commit.
 - Tag and push `vX.Y.Z`, then wait for the release workflow. The workflow
-  publishes GitHub release assets and directly pushes the generated
+  publishes GitHub release assets, copies the matching `CHANGELOG.md` section
+  into the GitHub release body, and directly pushes the generated
   `Formula/crabbox.rb` update to `openclaw/homebrew-tap` with
   `HOMEBREW_TAP_GITHUB_TOKEN`; missing tap access is a release failure.
 - Verify the GitHub release assets and Homebrew formula update.

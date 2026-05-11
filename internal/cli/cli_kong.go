@@ -19,6 +19,7 @@ type crabboxKongCLI struct {
 	Doctor     doctorKongCmd     `cmd:"" passthrough:"" help:"Check local and broker/provider readiness."`
 	Warmup     warmupKongCmd     `cmd:"" passthrough:"" help:"Lease a box and wait until it is ready."`
 	Run        runKongCmd        `cmd:"" passthrough:"" help:"Sync the repo, run a remote command, stream output."`
+	Job        jobKongCmd        `cmd:"" help:"Run named repo-local Crabbox jobs."`
 	Desktop    desktopKongCmd    `cmd:"" help:"Launch apps into a visible desktop session."`
 	Media      mediaKongCmd      `cmd:"" help:"Create preview artifacts from recorded desktop videos."`
 	Artifacts  artifactsKongCmd  `cmd:"" help:"Collect, transform, and publish QA artifacts."`
@@ -47,7 +48,8 @@ type crabboxKongCLI struct {
 	Inspect    inspectKongCmd    `cmd:"" passthrough:"" help:"Print lease/provider details; add --json for scripts."`
 	Stop       stopKongCmd       `cmd:"" passthrough:"" help:"Release a lease or delete a direct-provider machine."`
 	Release    releaseKongCmd    `cmd:"" passthrough:"" help:"Alias for stop."`
-	Cleanup    cleanupKongCmd    `cmd:"" passthrough:"" help:"Sweep expired direct-provider machines."`
+	Cleanup    cleanupKongCmd    `cmd:"" passthrough:"" help:"Sweep expired direct-provider machines or local provider state."`
+	Azure      azureKongCmd      `cmd:"" help:"Azure provider setup and login."`
 	Config     configKongCmd     `cmd:"" help:"Show or update user config."`
 	Pool       poolKongCmd       `cmd:"" help:"Alias commands for machine pools."`
 	Machine    machineKongCmd    `cmd:"" help:"Alias commands for direct-provider machines."`
@@ -113,7 +115,7 @@ func normalizeKongHelpArgs(args []string) []string {
 
 func isKongCommandGroup(command string) bool {
 	switch command {
-	case "actions", "admin", "artifacts", "cache", "capsule", "config", "desktop", "image", "machine", "media", "pool":
+	case "actions", "admin", "artifacts", "azure", "cache", "capsule", "config", "desktop", "image", "job", "machine", "media", "pool":
 		return true
 	default:
 		return false
@@ -139,6 +141,16 @@ type warmupKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type runKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type jobKongCmd struct {
+	List jobListKongCmd `cmd:"" passthrough:"" help:"List configured jobs."`
+	Run  jobRunKongCmd  `cmd:"" passthrough:"" help:"Run a configured job."`
+}
+type jobListKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type jobRunKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type syncPlanKongCmd struct {
@@ -358,6 +370,13 @@ type configKongCmd struct {
 	Show      configShowKongCmd      `cmd:"" passthrough:"" help:"Print merged config without secret values."`
 	SetBroker configSetBrokerKongCmd `cmd:"" name:"set-broker" passthrough:"" help:"Store broker URL and optional tokens in user config."`
 }
+
+type azureKongCmd struct {
+	Login azureLoginKongCmd `cmd:"" passthrough:"" help:"Detect subscription from az CLI, validate credentials, store in user config."`
+}
+type azureLoginKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
 type configPathKongCmd struct{}
 type configShowKongCmd struct {
 	Args []string `arg:"" optional:""`
@@ -389,6 +408,8 @@ func (c *whoamiKongCmd) Run(ctx context.Context, app App) error   { return app.w
 func (c *doctorKongCmd) Run(ctx context.Context, app App) error   { return app.doctor(ctx, c.Args) }
 func (c *warmupKongCmd) Run(ctx context.Context, app App) error   { return app.warmup(ctx, c.Args) }
 func (c *runKongCmd) Run(ctx context.Context, app App) error      { return app.runCommand(ctx, c.Args) }
+func (c *jobListKongCmd) Run(ctx context.Context, app App) error  { return app.jobList(ctx, c.Args) }
+func (c *jobRunKongCmd) Run(ctx context.Context, app App) error   { return app.jobRun(ctx, c.Args) }
 func (c *syncPlanKongCmd) Run(ctx context.Context, app App) error { return app.syncPlan(ctx, c.Args) }
 func (c *historyKongCmd) Run(ctx context.Context, app App) error  { return app.history(ctx, c.Args) }
 func (c *logsKongCmd) Run(ctx context.Context, app App) error     { return app.logs(ctx, c.Args) }
@@ -525,6 +546,10 @@ func (c *configShowKongCmd) Run(app App) error {
 }
 func (c *configSetBrokerKongCmd) Run(app App) error {
 	return app.configSetBroker(c.Args)
+}
+
+func (c *azureLoginKongCmd) Run(ctx context.Context, app App) error {
+	return app.azureLogin(ctx, c.Args)
 }
 
 func (c *poolListKongCmd) Run(ctx context.Context, app App) error {

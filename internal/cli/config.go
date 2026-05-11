@@ -48,6 +48,22 @@ type Config struct {
 	AzureSubnet        string
 	AzureNSG           string
 	AzureSSHCIDRs      []string
+	AzureNetwork       string
+	GCPProject         string
+	gcpProjectExplicit bool
+	GCPZone            string
+	gcpZoneExplicit    bool
+	GCPImage           string
+	gcpImageExplicit   bool
+	GCPNetwork         string
+	gcpNetworkExplicit bool
+	GCPSubnet          string
+	GCPTags            []string
+	gcpTagsExplicit    bool
+	GCPSSHCIDRs        []string
+	GCPRootGB          int64
+	gcpRootGBExplicit  bool
+	GCPServiceAccount  string
 	SSHUser            string
 	SSHKey             string
 	SSHPort            string
@@ -71,6 +87,7 @@ type Config struct {
 	Static             StaticConfig
 	Results            ResultsConfig
 	Cache              CacheConfig
+	Jobs               map[string]JobConfig
 }
 
 type SyncConfig struct {
@@ -199,6 +216,47 @@ type CacheConfig struct {
 	PurgeOnRelease bool
 }
 
+type JobConfig struct {
+	Provider       string
+	Target         string
+	WindowsMode    string
+	Profile        string
+	Class          string
+	ServerType     string
+	Market         string
+	TTL            time.Duration
+	IdleTimeout    time.Duration
+	Desktop        *bool
+	Browser        *bool
+	Code           *bool
+	Network        string
+	Hydrate        JobHydrateConfig
+	Actions        JobActionsConfig
+	Shell          bool
+	Command        string
+	NoSync         bool
+	SyncOnly       bool
+	Checksum       *bool
+	ForceSyncLarge bool
+	JUnit          []string
+	Downloads      []string
+	Stop           string
+}
+
+type JobHydrateConfig struct {
+	Actions          bool
+	WaitTimeout      time.Duration
+	KeepAliveMinutes int
+}
+
+type JobActionsConfig struct {
+	Repo     string
+	Workflow string
+	Job      string
+	Ref      string
+	Fields   []string
+}
+
 type AccessConfig struct {
 	ClientID     string
 	ClientSecret string
@@ -221,6 +279,7 @@ func loadConfig() (Config, error) {
 		}
 	}
 	applyEnv(&cfg)
+	canonicalizeConfigProvider(&cfg)
 	normalizeTargetConfig(&cfg)
 	if err := validateTargetConfig(cfg); err != nil {
 		return Config{}, err
@@ -232,6 +291,13 @@ func loadConfig() (Config, error) {
 		cfg.ServerType = serverTypeForConfig(cfg)
 	}
 	return cfg, nil
+}
+
+func canonicalizeConfigProvider(cfg *Config) {
+	provider, err := ProviderFor(cfg.Provider)
+	if err == nil {
+		cfg.Provider = provider.Name()
+	}
 }
 
 func baseConfig() Config {
@@ -261,6 +327,11 @@ func baseConfig() Config {
 		AzureVNet:          "crabbox-vnet",
 		AzureSubnet:        "crabbox-subnet",
 		AzureNSG:           "crabbox-nsg",
+		GCPZone:            "europe-west2-a",
+		GCPImage:           defaultGCPLinuxImage,
+		GCPNetwork:         "default",
+		GCPTags:            []string{"crabbox-ssh"},
+		GCPRootGB:          400,
 		SSHUser:            "crabbox",
 		SSHKey:             sshKey,
 		SSHPort:            "2222",
@@ -337,43 +408,45 @@ func baseConfig() Config {
 }
 
 type fileConfig struct {
-	Profile          string                `yaml:"profile,omitempty"`
-	Provider         string                `yaml:"provider,omitempty"`
-	Target           string                `yaml:"target,omitempty"`
-	TargetOS         string                `yaml:"targetOS,omitempty"`
-	Windows          *fileWindowsConfig    `yaml:"windows,omitempty"`
-	Desktop          *bool                 `yaml:"desktop,omitempty"`
-	Browser          *bool                 `yaml:"browser,omitempty"`
-	Code             *bool                 `yaml:"code,omitempty"`
-	Network          string                `yaml:"network,omitempty"`
-	Class            string                `yaml:"class,omitempty"`
-	ServerType       string                `yaml:"serverType,omitempty"`
-	Coordinator      string                `yaml:"coordinator,omitempty"`
-	CoordinatorToken string                `yaml:"coordinatorToken,omitempty"`
-	Broker           *fileBrokerConfig     `yaml:"broker,omitempty"`
-	Hetzner          *fileHetznerConfig    `yaml:"hetzner,omitempty"`
-	AWS              *fileAWSConfig        `yaml:"aws,omitempty"`
-	Azure            *fileAzureConfig      `yaml:"azure,omitempty"`
-	SSH              *fileSSHConfig        `yaml:"ssh,omitempty"`
-	Sync             *fileSyncConfig       `yaml:"sync,omitempty"`
-	Env              *fileEnvConfig        `yaml:"env,omitempty"`
-	Capacity         *fileCapacityConfig   `yaml:"capacity,omitempty"`
-	Actions          *fileActionsConfig    `yaml:"actions,omitempty"`
-	Blacksmith       *fileBlacksmithConfig `yaml:"blacksmith,omitempty"`
-	Namespace        *fileNamespaceConfig  `yaml:"namespace,omitempty"`
-	Daytona          *fileDaytonaConfig    `yaml:"daytona,omitempty"`
-	E2B              *fileE2BConfig        `yaml:"e2b,omitempty"`
-	Islo             *fileIsloConfig       `yaml:"islo,omitempty"`
-	Semaphore        *fileSemaphoreConfig  `yaml:"semaphore,omitempty"`
-	Sprites          *fileSpritesConfig    `yaml:"sprites,omitempty"`
-	Tailscale        *fileTailscaleConfig  `yaml:"tailscale,omitempty"`
-	Static           *fileStaticConfig     `yaml:"static,omitempty"`
-	Results          *fileResultsConfig    `yaml:"results,omitempty"`
-	Cache            *fileCacheConfig      `yaml:"cache,omitempty"`
-	Lease            *fileLeaseConfig      `yaml:"lease,omitempty"`
-	TTL              string                `yaml:"ttl,omitempty"`
-	IdleTimeout      string                `yaml:"idleTimeout,omitempty"`
-	WorkRoot         string                `yaml:"workRoot,omitempty"`
+	Profile          string                   `yaml:"profile,omitempty"`
+	Provider         string                   `yaml:"provider,omitempty"`
+	Target           string                   `yaml:"target,omitempty"`
+	TargetOS         string                   `yaml:"targetOS,omitempty"`
+	Windows          *fileWindowsConfig       `yaml:"windows,omitempty"`
+	Desktop          *bool                    `yaml:"desktop,omitempty"`
+	Browser          *bool                    `yaml:"browser,omitempty"`
+	Code             *bool                    `yaml:"code,omitempty"`
+	Network          string                   `yaml:"network,omitempty"`
+	Class            string                   `yaml:"class,omitempty"`
+	ServerType       string                   `yaml:"serverType,omitempty"`
+	Coordinator      string                   `yaml:"coordinator,omitempty"`
+	CoordinatorToken string                   `yaml:"coordinatorToken,omitempty"`
+	Broker           *fileBrokerConfig        `yaml:"broker,omitempty"`
+	Hetzner          *fileHetznerConfig       `yaml:"hetzner,omitempty"`
+	AWS              *fileAWSConfig           `yaml:"aws,omitempty"`
+	Azure            *fileAzureConfig         `yaml:"azure,omitempty"`
+	GCP              *fileGCPConfig           `yaml:"gcp,omitempty"`
+	SSH              *fileSSHConfig           `yaml:"ssh,omitempty"`
+	Sync             *fileSyncConfig          `yaml:"sync,omitempty"`
+	Env              *fileEnvConfig           `yaml:"env,omitempty"`
+	Capacity         *fileCapacityConfig      `yaml:"capacity,omitempty"`
+	Actions          *fileActionsConfig       `yaml:"actions,omitempty"`
+	Blacksmith       *fileBlacksmithConfig    `yaml:"blacksmith,omitempty"`
+	Namespace        *fileNamespaceConfig     `yaml:"namespace,omitempty"`
+	Daytona          *fileDaytonaConfig       `yaml:"daytona,omitempty"`
+	E2B              *fileE2BConfig           `yaml:"e2b,omitempty"`
+	Islo             *fileIsloConfig          `yaml:"islo,omitempty"`
+	Semaphore        *fileSemaphoreConfig     `yaml:"semaphore,omitempty"`
+	Sprites          *fileSpritesConfig       `yaml:"sprites,omitempty"`
+	Tailscale        *fileTailscaleConfig     `yaml:"tailscale,omitempty"`
+	Static           *fileStaticConfig        `yaml:"static,omitempty"`
+	Results          *fileResultsConfig       `yaml:"results,omitempty"`
+	Cache            *fileCacheConfig         `yaml:"cache,omitempty"`
+	Lease            *fileLeaseConfig         `yaml:"lease,omitempty"`
+	Jobs             map[string]fileJobConfig `yaml:"jobs,omitempty"`
+	TTL              string                   `yaml:"ttl,omitempty"`
+	IdleTimeout      string                   `yaml:"idleTimeout,omitempty"`
+	WorkRoot         string                   `yaml:"workRoot,omitempty"`
 }
 
 type fileWindowsConfig struct {
@@ -422,6 +495,19 @@ type fileAzureConfig struct {
 	Subnet         string   `yaml:"subnet,omitempty"`
 	NSG            string   `yaml:"nsg,omitempty"`
 	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
+	Network        string   `yaml:"network,omitempty"`
+}
+
+type fileGCPConfig struct {
+	Project        string   `yaml:"project,omitempty"`
+	Zone           string   `yaml:"zone,omitempty"`
+	Image          string   `yaml:"image,omitempty"`
+	Network        string   `yaml:"network,omitempty"`
+	Subnet         string   `yaml:"subnet,omitempty"`
+	Tags           []string `yaml:"tags,omitempty"`
+	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
+	RootGB         int64    `yaml:"rootGB,omitempty"`
+	ServiceAccount string   `yaml:"serviceAccount,omitempty"`
 }
 
 type fileSSHConfig struct {
@@ -569,6 +655,50 @@ type fileCacheConfig struct {
 type fileLeaseConfig struct {
 	TTL         string `yaml:"ttl,omitempty"`
 	IdleTimeout string `yaml:"idleTimeout,omitempty"`
+}
+
+type fileJobConfig struct {
+	Provider       string                `yaml:"provider,omitempty"`
+	Target         string                `yaml:"target,omitempty"`
+	TargetOS       string                `yaml:"targetOS,omitempty"`
+	Windows        *fileWindowsConfig    `yaml:"windows,omitempty"`
+	Profile        string                `yaml:"profile,omitempty"`
+	Class          string                `yaml:"class,omitempty"`
+	ServerType     string                `yaml:"serverType,omitempty"`
+	Type           string                `yaml:"type,omitempty"`
+	Capacity       *fileCapacityConfig   `yaml:"capacity,omitempty"`
+	Market         string                `yaml:"market,omitempty"`
+	TTL            string                `yaml:"ttl,omitempty"`
+	IdleTimeout    string                `yaml:"idleTimeout,omitempty"`
+	Desktop        *bool                 `yaml:"desktop,omitempty"`
+	Browser        *bool                 `yaml:"browser,omitempty"`
+	Code           *bool                 `yaml:"code,omitempty"`
+	Network        string                `yaml:"network,omitempty"`
+	Hydrate        *fileJobHydrateConfig `yaml:"hydrate,omitempty"`
+	Actions        *fileJobActionsConfig `yaml:"actions,omitempty"`
+	Shell          *bool                 `yaml:"shell,omitempty"`
+	Command        string                `yaml:"command,omitempty"`
+	NoSync         *bool                 `yaml:"noSync,omitempty"`
+	SyncOnly       *bool                 `yaml:"syncOnly,omitempty"`
+	Checksum       *bool                 `yaml:"checksum,omitempty"`
+	ForceSyncLarge *bool                 `yaml:"forceSyncLarge,omitempty"`
+	JUnit          []string              `yaml:"junit,omitempty"`
+	Downloads      []string              `yaml:"downloads,omitempty"`
+	Stop           string                `yaml:"stop,omitempty"`
+}
+
+type fileJobHydrateConfig struct {
+	Actions          *bool  `yaml:"actions,omitempty"`
+	WaitTimeout      string `yaml:"waitTimeout,omitempty"`
+	KeepAliveMinutes int    `yaml:"keepAliveMinutes,omitempty"`
+}
+
+type fileJobActionsConfig struct {
+	Repo     string   `yaml:"repo,omitempty"`
+	Workflow string   `yaml:"workflow,omitempty"`
+	Job      string   `yaml:"job,omitempty"`
+	Ref      string   `yaml:"ref,omitempty"`
+	Fields   []string `yaml:"fields,omitempty"`
 }
 
 func configPaths() []string {
@@ -799,6 +929,44 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		}
 		if len(file.Azure.SSHCIDRs) > 0 {
 			cfg.AzureSSHCIDRs = file.Azure.SSHCIDRs
+		}
+		if file.Azure.Network != "" {
+			cfg.AzureNetwork = file.Azure.Network
+		}
+	}
+	if file.GCP != nil {
+		if file.GCP.Project != "" {
+			cfg.GCPProject = file.GCP.Project
+			cfg.gcpProjectExplicit = true
+		}
+		if file.GCP.Zone != "" {
+			cfg.GCPZone = file.GCP.Zone
+			cfg.gcpZoneExplicit = true
+		}
+		if file.GCP.Image != "" {
+			cfg.GCPImage = file.GCP.Image
+			cfg.gcpImageExplicit = true
+		}
+		if file.GCP.Network != "" {
+			cfg.GCPNetwork = file.GCP.Network
+			cfg.gcpNetworkExplicit = true
+		}
+		if file.GCP.Subnet != "" {
+			cfg.GCPSubnet = file.GCP.Subnet
+		}
+		if len(file.GCP.Tags) > 0 {
+			cfg.GCPTags = file.GCP.Tags
+			cfg.gcpTagsExplicit = true
+		}
+		if len(file.GCP.SSHCIDRs) > 0 {
+			cfg.GCPSSHCIDRs = file.GCP.SSHCIDRs
+		}
+		if file.GCP.RootGB > 0 {
+			cfg.GCPRootGB = file.GCP.RootGB
+			cfg.gcpRootGBExplicit = true
+		}
+		if file.GCP.ServiceAccount != "" {
+			cfg.GCPServiceAccount = file.GCP.ServiceAccount
 		}
 	}
 	if file.SSH != nil {
@@ -1114,6 +1282,127 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Cache.PurgeOnRelease = *file.Cache.PurgeOnRelease
 		}
 	}
+	if len(file.Jobs) > 0 {
+		if cfg.Jobs == nil {
+			cfg.Jobs = map[string]JobConfig{}
+		}
+		for name, job := range file.Jobs {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			cfg.Jobs[name] = applyFileJobConfig(cfg.Jobs[name], job)
+		}
+	}
+}
+
+func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
+	if file.Provider != "" {
+		job.Provider = file.Provider
+	}
+	if file.Target != "" {
+		job.Target = file.Target
+	}
+	if file.TargetOS != "" {
+		job.Target = file.TargetOS
+	}
+	if file.Windows != nil && file.Windows.Mode != "" {
+		job.WindowsMode = file.Windows.Mode
+	}
+	if file.Profile != "" {
+		job.Profile = file.Profile
+	}
+	if file.Class != "" {
+		job.Class = file.Class
+	}
+	if file.ServerType != "" {
+		job.ServerType = file.ServerType
+	}
+	if file.Type != "" {
+		job.ServerType = file.Type
+	}
+	if file.Capacity != nil && file.Capacity.Market != "" {
+		job.Market = file.Capacity.Market
+	}
+	if file.Market != "" {
+		job.Market = file.Market
+	}
+	applyLeaseDuration(&job.TTL, file.TTL)
+	applyLeaseDuration(&job.IdleTimeout, file.IdleTimeout)
+	if file.Desktop != nil {
+		value := *file.Desktop
+		job.Desktop = &value
+	}
+	if file.Browser != nil {
+		value := *file.Browser
+		job.Browser = &value
+	}
+	if file.Code != nil {
+		value := *file.Code
+		job.Code = &value
+	}
+	if file.Network != "" {
+		job.Network = file.Network
+	}
+	if file.Hydrate != nil {
+		if file.Hydrate.Actions != nil {
+			job.Hydrate.Actions = *file.Hydrate.Actions
+		}
+		if file.Hydrate.WaitTimeout != "" {
+			if duration, err := time.ParseDuration(file.Hydrate.WaitTimeout); err == nil {
+				job.Hydrate.WaitTimeout = duration
+			}
+		}
+		if file.Hydrate.KeepAliveMinutes > 0 {
+			job.Hydrate.KeepAliveMinutes = file.Hydrate.KeepAliveMinutes
+		}
+	}
+	if file.Actions != nil {
+		if file.Actions.Repo != "" {
+			job.Actions.Repo = file.Actions.Repo
+		}
+		if file.Actions.Workflow != "" {
+			job.Actions.Workflow = file.Actions.Workflow
+		}
+		if file.Actions.Job != "" {
+			job.Actions.Job = file.Actions.Job
+		}
+		if file.Actions.Ref != "" {
+			job.Actions.Ref = file.Actions.Ref
+		}
+		if len(file.Actions.Fields) > 0 {
+			job.Actions.Fields = appendUniqueStrings(nil, file.Actions.Fields...)
+		}
+	}
+	if file.Shell != nil {
+		job.Shell = *file.Shell
+	}
+	if file.Command != "" {
+		job.Command = file.Command
+	}
+	if file.NoSync != nil {
+		job.NoSync = *file.NoSync
+	}
+	if file.SyncOnly != nil {
+		job.SyncOnly = *file.SyncOnly
+	}
+	if file.Checksum != nil {
+		value := *file.Checksum
+		job.Checksum = &value
+	}
+	if file.ForceSyncLarge != nil {
+		job.ForceSyncLarge = *file.ForceSyncLarge
+	}
+	if len(file.JUnit) > 0 {
+		job.JUnit = appendUniqueStrings(nil, file.JUnit...)
+	}
+	if len(file.Downloads) > 0 {
+		job.Downloads = appendUniqueStrings(nil, file.Downloads...)
+	}
+	if file.Stop != "" {
+		job.Stop = file.Stop
+	}
+	return job
 }
 
 func applyLeaseDuration(target *time.Duration, value string) {
@@ -1176,6 +1465,44 @@ func applyEnv(cfg *Config) {
 	cfg.AzureNSG = getenv("CRABBOX_AZURE_NSG", cfg.AzureNSG)
 	if cidrs := os.Getenv("CRABBOX_AZURE_SSH_CIDRS"); cidrs != "" {
 		cfg.AzureSSHCIDRs = splitCommaList(cidrs)
+	}
+	cfg.AzureNetwork = getenv("CRABBOX_AZURE_NETWORK", cfg.AzureNetwork)
+	if project := os.Getenv("CRABBOX_GCP_PROJECT"); project != "" {
+		cfg.GCPProject = project
+		cfg.gcpProjectExplicit = true
+	} else if cfg.GCPProject == "" {
+		if project := os.Getenv("GOOGLE_CLOUD_PROJECT"); project != "" {
+			cfg.GCPProject = project
+			cfg.gcpProjectExplicit = false
+		} else if project := os.Getenv("GCP_PROJECT_ID"); project != "" {
+			cfg.GCPProject = project
+			cfg.gcpProjectExplicit = false
+		}
+	}
+	if zone := os.Getenv("CRABBOX_GCP_ZONE"); zone != "" {
+		cfg.GCPZone = zone
+		cfg.gcpZoneExplicit = true
+	}
+	if image := os.Getenv("CRABBOX_GCP_IMAGE"); image != "" {
+		cfg.GCPImage = image
+		cfg.gcpImageExplicit = true
+	}
+	if network := os.Getenv("CRABBOX_GCP_NETWORK"); network != "" {
+		cfg.GCPNetwork = network
+		cfg.gcpNetworkExplicit = true
+	}
+	cfg.GCPSubnet = getenv("CRABBOX_GCP_SUBNET", cfg.GCPSubnet)
+	if rootGB := os.Getenv("CRABBOX_GCP_ROOT_GB"); rootGB != "" {
+		cfg.GCPRootGB = int64(getenvInt("CRABBOX_GCP_ROOT_GB", int(cfg.GCPRootGB)))
+		cfg.gcpRootGBExplicit = true
+	}
+	cfg.GCPServiceAccount = getenv("CRABBOX_GCP_SERVICE_ACCOUNT", cfg.GCPServiceAccount)
+	if tags := os.Getenv("CRABBOX_GCP_TAGS"); tags != "" {
+		cfg.GCPTags = splitCommaList(tags)
+		cfg.gcpTagsExplicit = true
+	}
+	if cidrs := os.Getenv("CRABBOX_GCP_SSH_CIDRS"); cidrs != "" {
+		cfg.GCPSSHCIDRs = splitCommaList(cidrs)
 	}
 	cfg.SSHUser = getenv("CRABBOX_SSH_USER", cfg.SSHUser)
 	cfg.SSHKey = getenv("CRABBOX_SSH_KEY", cfg.SSHKey)
@@ -1361,6 +1688,9 @@ func serverTypeForClass(class string) string {
 }
 
 func serverTypeForConfig(cfg Config) string {
+	if resolved, err := ProviderFor(cfg.Provider); err == nil {
+		cfg.Provider = resolved.Name()
+	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) || cfg.Provider == "islo" || cfg.Provider == "sprites" {
 		return ""
 	}
@@ -1379,10 +1709,16 @@ func serverTypeForConfig(cfg Config) string {
 	if cfg.Provider == "azure" {
 		return azureVMSizeCandidatesForConfig(cfg)[0]
 	}
+	if cfg.Provider == "gcp" {
+		return gcpMachineTypeCandidatesForClass(cfg.Class)[0]
+	}
 	return serverTypeForClass(cfg.Class)
 }
 
 func serverTypeForProviderClass(provider, class string) string {
+	if resolved, err := ProviderFor(provider); err == nil {
+		provider = resolved.Name()
+	}
 	if isBlacksmithProvider(provider) || isStaticProvider(provider) || provider == "islo" || provider == "sprites" {
 		return ""
 	}
@@ -1400,6 +1736,9 @@ func serverTypeForProviderClass(provider, class string) string {
 	}
 	if provider == "azure" {
 		return azureVMSizeCandidatesForClass(class)[0]
+	}
+	if provider == "gcp" {
+		return gcpMachineTypeCandidatesForClass(class)[0]
 	}
 	return serverTypeForClass(class)
 }

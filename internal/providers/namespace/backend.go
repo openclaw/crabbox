@@ -74,6 +74,10 @@ func (b *namespaceLeaseBackend) Resolve(ctx context.Context, req ResolveRequest)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	if req.ReleaseOnly {
+		server := namespaceServer(name, leaseID, slug, b.namespaceConfigForRun(), true)
+		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
+	}
 	lease, err := b.prepareLease(ctx, name, leaseID, slug, true)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -115,6 +119,9 @@ func (b *namespaceLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLea
 		return err
 	}
 	removeLeaseClaim(req.Lease.LeaseID)
+	if err := cleanupNamespaceSSHFiles(name, false, b.rt.Stdout); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -125,6 +132,10 @@ func (b *namespaceLeaseBackend) Touch(_ context.Context, req TouchRequest) (Serv
 	}
 	server.Labels = touchDirectLeaseLabels(server.Labels, b.cfg, req.State, time.Now().UTC())
 	return server, nil
+}
+
+func (b *namespaceLeaseBackend) Cleanup(_ context.Context, req CleanupRequest) error {
+	return cleanupNamespaceSSHFiles("", req.DryRun, b.rt.Stdout)
 }
 
 func (b *namespaceLeaseBackend) namespaceConfigForRun() Config {
@@ -336,6 +347,63 @@ func namespaceSSHTargetFromConfig(name string) (SSHTarget, error) {
 		return SSHTarget{}, exit(5, "namespace devbox ssh config missing IdentityFile for %s", name)
 	}
 	return SSHTarget{User: user, Host: host, Port: "22", Key: key, SSHConfigProxy: true}, nil
+}
+
+func cleanupNamespaceSSHFiles(name string, dryRun bool, stdout io.Writer) error {
+	files, err := namespaceSSHCleanupFiles(name)
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		if strings.TrimSpace(name) == "" {
+			fmt.Fprintln(stdout, "namespace ssh cleanup no crabbox files found")
+		}
+		return nil
+	}
+	action := "delete"
+	if dryRun {
+		action = "would-delete"
+	}
+	for _, path := range files {
+		fmt.Fprintf(stdout, "namespace ssh cleanup %s %s\n", action, path)
+		if dryRun {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("namespace ssh cleanup %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func namespaceSSHCleanupFiles(name string) ([]string, error) {
+	dir := filepath.Join(os.Getenv("HOME"), ".namespace", "ssh")
+	if strings.TrimSpace(name) != "" {
+		host := namespaceSSHHost(name)
+		return namespaceFilterCleanupFiles([]string{
+			filepath.Join(dir, host+".ssh"),
+			filepath.Join(dir, host+".key"),
+		}), nil
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "crabbox-*.devbox.namespace.*"))
+	if err != nil {
+		return nil, err
+	}
+	return namespaceFilterCleanupFiles(matches), nil
+}
+
+func namespaceFilterCleanupFiles(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		base := filepath.Base(path)
+		if !strings.HasPrefix(base, "crabbox-") {
+			continue
+		}
+		if strings.HasSuffix(base, ".devbox.namespace.ssh") || strings.HasSuffix(base, ".devbox.namespace.key") {
+			out = append(out, path)
+		}
+	}
+	return out
 }
 
 func namespaceSSHHost(name string) string {

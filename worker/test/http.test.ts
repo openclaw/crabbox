@@ -25,9 +25,10 @@ describe("coordinator auth", () => {
     await expect(isAuthorized(allowed, { CRABBOX_SHARED_TOKEN: "secret" })).resolves.toBe(true);
   });
 
-  it("keeps shared bearer token non-admin and requires a separate admin token", async () => {
+  it("keeps shared bearer token non-admin and ignores caller-supplied identity headers", async () => {
     const env = {
       CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_SHARED_OWNER: "automation@example.com",
       CRABBOX_ADMIN_TOKEN: "admin",
       CRABBOX_DEFAULT_ORG: "openclaw",
     };
@@ -36,6 +37,7 @@ describe("coordinator auth", () => {
         headers: {
           authorization: "Bearer shared",
           "x-crabbox-owner": "operator@example.com",
+          "x-crabbox-org": "attacker-org",
           "cf-access-authenticated-user-email": "spoof@example.com",
         },
       }),
@@ -51,7 +53,8 @@ describe("coordinator auth", () => {
     expect(shared).toMatchObject({
       authorized: true,
       admin: false,
-      owner: "operator@example.com",
+      owner: "automation@example.com",
+      org: "openclaw",
     });
     expect(admin).toMatchObject({
       authorized: true,

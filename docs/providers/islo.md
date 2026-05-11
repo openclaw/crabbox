@@ -82,17 +82,38 @@ preparation and sync.
 
 ## Capabilities
 
-- SSH: no.
+- SSH: not driven by Crabbox. Islo sandboxes are reachable from the host with
+  the OS `ssh` client via the `<sandbox-name>.islo` host alias after a one-time
+  `islo ssh --setup` (see [SSH access](#ssh-access) below). Crabbox itself does
+  not yet route `crabbox ssh`, sync, or run through that path.
 - Crabbox sync: yes, archive sync through the Islo API or chunked exec fallback.
 - Provider sync: no separate Islo CLI sync.
 - Desktop/browser/code: no Crabbox VNC/code surface.
 - Actions hydration: no.
 - Coordinator: no.
 
+## SSH access
+
+Islo provisions a per-sandbox SSH endpoint and configures `~/.ssh/config` for
+you. The sandbox name (the Crabbox-created `crabbox-...` name, or any other
+slug shown by `islo ls`) is the SSH host:
+
+```sh
+islo ssh --setup            # one-time, idempotent; edits ~/.ssh/config
+ssh <sandbox-name>.islo     # interactive shell on the sandbox
+ssh <sandbox-name>.islo pnpm test       # one-shot remote command
+```
+
+This is useful for ad-hoc inspection of a Crabbox-created Islo sandbox while
+`provider: islo` still uses the streaming exec endpoint for `crabbox run`.
+Certificates are minted automatically and cached by the Islo CLI; no key files
+need to be plumbed into Crabbox.
+
 ## Gotchas
 
-- `--sync-only` and `--checksum` are rejected because Islo does not expose a
-  Crabbox SSH/rsync target.
+- `--sync-only` and `--checksum` are rejected because the `provider: islo`
+  backend does not yet expose a Crabbox-managed SSH/rsync target, even though
+  the sandbox is independently reachable with `ssh <sandbox-name>.islo`.
 - Large-sync guardrails still apply. Use `--force-sync-large` when a large Islo
   archive sync is intentional.
 - `--shell` passes the raw shell string to the remote shell path.

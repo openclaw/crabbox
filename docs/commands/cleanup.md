@@ -1,10 +1,12 @@
 # cleanup
 
-`crabbox cleanup` sweeps direct-provider leftovers based on Crabbox labels.
+`crabbox cleanup` sweeps provider leftovers owned by Crabbox.
 
 ```sh
 crabbox cleanup --dry-run
 crabbox cleanup
+crabbox cleanup --provider namespace-devbox --dry-run
+crabbox cleanup --provider namespace-devbox
 ```
 
 `crabbox machine cleanup` is preserved as a compatibility alias.
@@ -15,7 +17,7 @@ Cleanup refuses to run when a coordinator is configured. Brokered cleanup
 belongs to the Durable Object alarm; sweeping provider resources behind the
 coordinator can race live brokered leases.
 
-In direct-provider mode, cleanup is intentionally conservative:
+For direct machine providers, cleanup is intentionally conservative:
 
 - skip machines tagged `keep=true`;
 - skip machines in `running` or `provisioning` state until the extra stale
@@ -31,6 +33,18 @@ created. Resources without Crabbox labels are never touched.
 Static SSH targets are existing operator-owned hosts, so `provider=ssh`
 has nothing to sweep. Cleanup exits early for that provider.
 
+For `provider=namespace-devbox`, cleanup only removes Crabbox-owned local
+Namespace SSH snippets and keys:
+
+```text
+~/.namespace/ssh/crabbox-*.devbox.namespace.ssh
+~/.namespace/ssh/crabbox-*.devbox.namespace.key
+```
+
+It does not remove non-Crabbox Namespace entries and does not remove the
+global `Include ~/.namespace/ssh/*.ssh` line from `~/.ssh/config`, because
+that include may be used by operator-owned Devboxes.
+
 ## Output
 
 `--dry-run` lists every decision without taking action:
@@ -40,14 +54,15 @@ hetzner cx53 hz-12345 lease=cbx_abcdef123456 slug=blue-lobster keep=true skip=ke
 hetzner cx53 hz-67890 lease=cbx_abcdef234567 slug=amber-crab    expires_at=2026-05-01T17:30:00Z delete
 ```
 
-Without `--dry-run`, the same lines print but each `delete` is followed by
-`deleted` after the provider call returns. Failures print the provider
-error and continue with the next candidate.
+Without `--dry-run`, machine providers print the same lines but each
+`delete` is followed by `deleted` after the provider call returns. Namespace
+local cleanup prints each removed file. Failures print the provider error
+and continue with the next candidate.
 
 ## Flags
 
 ```text
---provider hetzner|aws|azure  provider to sweep (delegated providers do not need cleanup)
+--provider hetzner|aws|azure|namespace-devbox  provider to sweep
 --target linux|macos|windows  for AWS, restrict by target
 --windows-mode normal|wsl2    when target=windows
 --static-host <host>          ignored (provider=ssh has nothing to sweep)

@@ -2,21 +2,23 @@
 
 Read when:
 
-- changing Hetzner, AWS, Azure, or Blacksmith Testbox provisioning;
+- changing Hetzner, AWS, Azure, Google Cloud, or Blacksmith Testbox provisioning;
 - adding a backend;
 - adjusting machine classes, fallback order, regions, or images.
 
-Crabbox currently supports three brokered providers:
+Crabbox currently supports four brokered providers:
 
 ```text
 hetzner     Hetzner Cloud servers
 aws         AWS EC2 instances
 azure       Azure Virtual Machines
+gcp         Google Cloud Compute Engine instances
 ```
 
 Brokered Hetzner leases are Linux targets. Brokered AWS supports Linux, native
 Windows Server, Windows WSL2, and EC2 Mac when a Dedicated Host is configured.
-Brokered Azure supports Linux and native Windows SSH/sync/run. Static SSH still
+Brokered Azure supports Linux and native Windows SSH/sync/run. Brokered GCP
+supports Linux SSH/sync/run. Static SSH still
 exists for reusing existing macOS and Windows machines:
 
 ```text
@@ -39,6 +41,7 @@ e2b        E2B sandboxes with delegated command execution
 - [Provider reference](../providers/README.md): one page per built-in backend.
 - [AWS](../providers/aws.md): EC2 Linux, Windows, WSL2, EC2 Mac, capacity, AMIs, and security groups.
 - [Azure](../providers/azure.md): Azure Linux/native Windows, shared infra, capacity, and cleanup.
+- [Google Cloud](../providers/gcp.md): GCP Compute Engine Linux SSH leases.
 - [Hetzner](../providers/hetzner.md): Linux-only managed provider behavior, classes, and cleanup.
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [Blacksmith Testbox](../providers/blacksmith-testbox.md): delegated Testbox backend behavior.
@@ -115,6 +118,12 @@ beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge
 AWS macOS
 all       mac2.metal unless `--type` is set
 
+Google Cloud
+standard  c4-standard-32, c3-standard-22, n2-standard-32, n2d-standard-32
+fast      c4-standard-64, c3-standard-44, n2-standard-64, n2d-standard-64, c4-standard-32
+large     c4-standard-96, c3-standard-88, n2-standard-80, n2d-standard-96, c4-standard-64
+beast     c4-standard-192, c4-standard-96, c3-standard-176, c3-standard-88, n2d-standard-224, n2-standard-128
+
 Namespace Devbox
 standard  S
 fast      M
@@ -122,7 +131,7 @@ large     L
 beast     XL
 ```
 
-Direct provider mode still exists when no coordinator is configured. It uses local AWS credentials or `HCLOUD_TOKEN`/`HETZNER_TOKEN` and should stay secondary to the brokered path.
+Direct provider mode still exists when no coordinator is configured. It uses local AWS credentials, Azure credentials, Google Application Default Credentials, or `HCLOUD_TOKEN`/`HETZNER_TOKEN` and should stay secondary to the brokered path.
 
 Tailscale is not a provider. Use `--tailscale` to add tailnet reachability to
 new managed Linux leases, or set a static host to a MagicDNS name/100.x address
@@ -139,7 +148,10 @@ CRABBOX_CONFIG="$tmp" CRABBOX_COORDINATOR= crabbox stop --provider hetzner <slug
 rm -f "$tmp"
 ```
 
-Use `--provider aws` with AWS SDK credentials for direct AWS smoke. Direct mode
+Use `--provider aws` with AWS SDK credentials for direct AWS smoke, or
+`--provider gcp` with Google Application Default Credentials for direct GCP
+smoke. The direct GCP path uses Google's Compute Go SDK and project-wide
+aggregated instance listing for resolve, list, and cleanup. Direct mode
 has no Durable Object alarm; cleanup is best-effort through provider labels and
 manual `crabbox cleanup`. Direct AWS fallback can retry provider types, but the
 structured quota preflight and `provisioningAttempts` metadata belong to the

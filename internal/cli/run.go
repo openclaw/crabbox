@@ -434,6 +434,11 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		}
 		timings.syncSteps.manifestWrite = time.Since(stepStart)
 		if cfg.Sync.Delete {
+			if hydratedByActions {
+				if err := runSSHQuiet(ctx, target, remoteSeedSyncManifestFromGit(workdir)); err != nil {
+					return recordFailure(exit(6, "remote sync seed manifest failed: %v", err))
+				}
+			}
 			stepStart = time.Now()
 			if err := runSSHQuiet(ctx, target, remotePruneSyncManifest(workdir)); err != nil {
 				return recordFailure(exit(6, "remote sync prune failed: %v", err))
@@ -458,7 +463,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		}
 		stepStart = time.Now()
 		finalizeCommand := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
-			AllowMassDeletions: os.Getenv("CRABBOX_ALLOW_MASS_DELETIONS") == "1",
+			AllowMassDeletions: hydratedByActions || os.Getenv("CRABBOX_ALLOW_MASS_DELETIONS") == "1",
 			HydrateGit:         hydrateGit,
 			BaseRef:            cfg.Sync.BaseRef,
 			BaseSHA:            baseSHA,

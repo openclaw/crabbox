@@ -70,6 +70,9 @@ crabbox stop --provider namespace-devbox crabbox-smoke
 - The generated SSH host is `<name>.devbox.namespace`.
 - Namespace writes SSH snippets under `~/.namespace/ssh/` and includes them
   from `~/.ssh/config`.
+- `crabbox stop --provider namespace-devbox` and
+  `crabbox cleanup --provider namespace-devbox` remove Crabbox-owned
+  `crabbox-*.devbox.namespace.{ssh,key}` files.
 - `devbox list -o json` prints non-JSON text when no Devboxes exist; Crabbox
   treats that as an empty list.
 

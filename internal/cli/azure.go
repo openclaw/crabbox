@@ -57,9 +57,16 @@ type AzureClient struct {
 type azureImageRef struct{ Publisher, Offer, SKU, Version string }
 
 func NewAzureClient(ctx context.Context, cfg Config) (*AzureClient, error) {
-	_ = ctx
 	if cfg.AzureSubscription == "" {
-		return nil, exit(3, "AZURE_SUBSCRIPTION_ID is required for direct azure provider")
+		info, err := azAccountShow(ctx, "")
+		if err != nil {
+			return nil, exit(3, "AZURE_SUBSCRIPTION_ID is required for direct azure provider (or run 'az login' and 'crabbox azure login'): %v", err)
+		}
+		cfg.AzureSubscription = info.ID
+		if cfg.AzureTenant == "" {
+			cfg.AzureTenant = info.TenantID
+		}
+		fmt.Fprintf(os.Stderr, "using azure subscription from az cli: %s (%s)\n", info.Name, info.ID)
 	}
 	if cfg.AzureLocation == "" {
 		return nil, exit(3, "azure location is required (set azure.location or CRABBOX_AZURE_LOCATION)")
@@ -601,7 +608,7 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 			return Server{}, err
 		}
 	}
-	return azureVMToServer(vmResp.VirtualMachine, ""), nil
+	return azureVMToServer(vmResp.VirtualMachine, "", ""), nil
 }
 
 func (c *AzureClient) azureOSProfile(cfg Config, publicKey, name, leaseID string) (*armcompute.OSProfile, error) {
@@ -712,7 +719,7 @@ func (c *AzureClient) WaitForServerIP(ctx context.Context, name string) (Server,
 			if err != nil {
 				return Server{}, err
 			}
-			return azureVMToServer(vm.VirtualMachine, *pip.Properties.IPAddress), nil
+			return azureVMToServer(vm.VirtualMachine, *pip.Properties.IPAddress, c.nicPrivateIP(ctx, name)), nil
 		}
 		if time.Now().After(deadline) {
 			return Server{}, fmt.Errorf("timeout waiting for public ip on %s", name)
@@ -735,7 +742,7 @@ func (c *AzureClient) GetServer(ctx context.Context, name string) (Server, error
 	if pip, err := c.pipc.Get(ctx, c.ResourceGroup, pipName, nil); err == nil && pip.Properties != nil && pip.Properties.IPAddress != nil {
 		ip = *pip.Properties.IPAddress
 	}
-	return azureVMToServer(vm.VirtualMachine, ip), nil
+	return azureVMToServer(vm.VirtualMachine, ip, c.nicPrivateIP(ctx, name)), nil
 }
 
 func (c *AzureClient) ListCrabboxServers(ctx context.Context) ([]Server, error) {
@@ -763,7 +770,11 @@ func (c *AzureClient) ListCrabboxServers(ctx context.Context) ([]Server, error) 
 					ip = *pip.Properties.IPAddress
 				}
 			}
-			servers = append(servers, azureVMToServer(*vm, ip))
+			privateIP := ""
+			if vm.Name != nil {
+				privateIP = c.nicPrivateIP(ctx, *vm.Name)
+			}
+			servers = append(servers, azureVMToServer(*vm, ip, privateIP))
 		}
 	}
 	return servers, nil
@@ -855,7 +866,25 @@ func (c *AzureClient) SetTags(ctx context.Context, name string, labels map[strin
 	return nil
 }
 
-func azureVMToServer(vm armcompute.VirtualMachine, ip string) Server {
+// nicPrivateIP reads the private IP from the NIC associated with a VM.
+func (c *AzureClient) nicPrivateIP(ctx context.Context, vmName string) string {
+	nicName := vmName + "-nic"
+	nic, err := c.nicc.Get(ctx, c.ResourceGroup, nicName, nil)
+	if err != nil {
+		return ""
+	}
+	if nic.Properties == nil {
+		return ""
+	}
+	for _, ipCfg := range nic.Properties.IPConfigurations {
+		if ipCfg.Properties != nil && ipCfg.Properties.PrivateIPAddress != nil {
+			return *ipCfg.Properties.PrivateIPAddress
+		}
+	}
+	return ""
+}
+
+func azureVMToServer(vm armcompute.VirtualMachine, ip, privateIP string) Server {
 	s := Server{
 		Provider: "azure",
 		Labels:   map[string]string{},
@@ -871,6 +900,7 @@ func azureVMToServer(vm armcompute.VirtualMachine, ip string) Server {
 		s.ServerType.Name = string(*vm.Properties.HardwareProfile.VMSize)
 	}
 	s.PublicNet.IPv4.IP = ip
+	s.PrivateNet.IPv4.IP = privateIP
 	for k, v := range vm.Tags {
 		if v != nil {
 			s.Labels[azureTagToLabelKey(k)] = *v
@@ -878,6 +908,16 @@ func azureVMToServer(vm armcompute.VirtualMachine, ip string) Server {
 	}
 	normalizeAzureWindowsModeLabel(s.Labels)
 	return s
+}
+
+// AzureServerHost returns the SSH host for an Azure server based on the
+// configured network preference. When network is "private" and a private IP
+// is available, it returns the private IP; otherwise it returns the public IP.
+func AzureServerHost(server Server, network string) string {
+	if strings.EqualFold(network, "private") && server.PrivateNet.IPv4.IP != "" {
+		return server.PrivateNet.IPv4.IP
+	}
+	return server.PublicNet.IPv4.IP
 }
 
 func azureLabelsToTags(labels map[string]string) map[string]*string {

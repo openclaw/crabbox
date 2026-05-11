@@ -441,9 +441,16 @@ func TestCoordinatorLeaseWatchCancelsWhenLeaseReleased(t *testing.T) {
 
 func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	var body struct {
+		Provider           string   `json:"provider"`
 		AWSSSHCIDRs        []string `json:"awsSSHCIDRs"`
 		AzureLocation      string   `json:"azureLocation"`
 		AzureImage         string   `json:"azureImage"`
+		GCPProject         string   `json:"gcpProject"`
+		GCPZone            string   `json:"gcpZone"`
+		GCPNetwork         string   `json:"gcpNetwork"`
+		GCPTags            []string `json:"gcpTags"`
+		GCPSSHCIDRs        []string `json:"gcpSSHCIDRs"`
+		GCPRootGB          int64    `json:"gcpRootGB"`
 		SSHFallbackPorts   []string `json:"sshFallbackPorts"`
 		ServerTypeExplicit bool     `json:"serverTypeExplicit"`
 		Capacity           map[string]any
@@ -462,12 +469,20 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 
 	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
 	_, err := client.CreateLease(context.Background(), Config{
-		Provider:           "aws",
+		Provider:           "google",
 		ServerType:         "t3.small",
 		ServerTypeExplicit: true,
 		AWSSSHCIDRs:        []string{"198.51.100.7/32"},
 		AzureLocation:      "eastus",
 		AzureImage:         "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest",
+		GCPProject:         "crabbox-project",
+		gcpProjectExplicit: true,
+		GCPZone:            "europe-west2-b",
+		GCPImage:           "projects/custom/global/images/crabbox",
+		GCPNetwork:         "crabbox-net",
+		GCPTags:            []string{"crabbox-ci"},
+		GCPSSHCIDRs:        []string{"198.51.100.11/32"},
+		GCPRootGB:          900,
 		SSHFallbackPorts:   []string{"22", "2022"},
 		Capacity: CapacityConfig{
 			Market:   "spot",
@@ -482,11 +497,20 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	if len(body.AWSSSHCIDRs) != 1 || body.AWSSSHCIDRs[0] != "198.51.100.7/32" {
 		t.Fatalf("awsSSHCIDRs=%v", body.AWSSSHCIDRs)
 	}
+	if body.Provider != "gcp" {
+		t.Fatalf("provider=%q want canonical gcp", body.Provider)
+	}
 	if body.AzureLocation != "eastus" {
 		t.Fatalf("azureLocation=%q", body.AzureLocation)
 	}
 	if body.AzureImage != "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest" {
 		t.Fatalf("azureImage=%q", body.AzureImage)
+	}
+	if body.GCPProject != "crabbox-project" || body.GCPZone != "europe-west2-b" || body.GCPNetwork != "crabbox-net" || body.GCPRootGB != 900 {
+		t.Fatalf("unexpected gcp body: %#v", body)
+	}
+	if len(body.GCPTags) != 1 || body.GCPTags[0] != "crabbox-ci" || len(body.GCPSSHCIDRs) != 1 || body.GCPSSHCIDRs[0] != "198.51.100.11/32" {
+		t.Fatalf("unexpected gcp tags/cidrs: tags=%v cidrs=%v", body.GCPTags, body.GCPSSHCIDRs)
 	}
 	if len(body.SSHFallbackPorts) != 2 || body.SSHFallbackPorts[0] != "22" || body.SSHFallbackPorts[1] != "2022" {
 		t.Fatalf("sshFallbackPorts=%v", body.SSHFallbackPorts)
@@ -496,6 +520,156 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	}
 	if body.Capacity != nil {
 		t.Fatalf("default capacity fields should be omitted for mixed-version brokers: %#v", body.Capacity)
+	}
+}
+
+func TestCoordinatorCreateLeaseOmitsAmbientGCPProject(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "developer-adc-project")
+
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"gcp","state":"active","host":"192.0.2.10"}}`))
+	}))
+	defer server.Close()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Provider = "gcp"
+	cfg.ServerType = serverTypeForConfig(cfg)
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	if _, err := client.CreateLease(context.Background(), cfg, "ssh-ed25519 test", false, "cbx_123", "blue-crab"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GCPProject != "developer-adc-project" {
+		t.Fatalf("test setup project=%q", cfg.GCPProject)
+	}
+	if _, ok := body["gcpProject"]; ok {
+		t.Fatalf("ambient ADC project should be omitted so coordinator defaults apply: %#v", body)
+	}
+}
+
+func TestCoordinatorCreateLeaseSendsConfiguredGCPProjectDespiteAmbientADC(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "developer-adc-project")
+	if err := os.WriteFile(configPath, []byte(`provider: gcp
+gcp:
+  project: configured-crabbox-project
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"gcp","state":"active","host":"192.0.2.10"}}`))
+	}))
+	defer server.Close()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ServerType = serverTypeForConfig(cfg)
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	if _, err := client.CreateLease(context.Background(), cfg, "ssh-ed25519 test", false, "cbx_123", "blue-crab"); err != nil {
+		t.Fatal(err)
+	}
+	if got := body["gcpProject"]; got != "configured-crabbox-project" {
+		t.Fatalf("gcpProject=%#v body=%#v", got, body)
+	}
+}
+
+func TestCoordinatorCreateLeaseSendsExplicitBuiltInGCPDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "gcp")
+	t.Setenv("CRABBOX_GCP_ZONE", "europe-west2-a")
+	t.Setenv("CRABBOX_GCP_IMAGE", defaultGCPLinuxImage)
+	t.Setenv("CRABBOX_GCP_NETWORK", "default")
+	t.Setenv("CRABBOX_GCP_TAGS", "crabbox-ssh")
+	t.Setenv("CRABBOX_GCP_ROOT_GB", "400")
+
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"gcp","state":"active","host":"192.0.2.10"}}`))
+	}))
+	defer server.Close()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ServerType = serverTypeForConfig(cfg)
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	if _, err := client.CreateLease(context.Background(), cfg, "ssh-ed25519 test", false, "cbx_123", "blue-crab"); err != nil {
+		t.Fatal(err)
+	}
+	if body["gcpZone"] != "europe-west2-a" || body["gcpImage"] != defaultGCPLinuxImage || body["gcpNetwork"] != "default" {
+		t.Fatalf("explicit built-in string defaults not forwarded: %#v", body)
+	}
+	tags, ok := body["gcpTags"].([]any)
+	if !ok || len(tags) != 1 || tags[0] != "crabbox-ssh" {
+		t.Fatalf("explicit built-in tags not forwarded: %#v", body["gcpTags"])
+	}
+	if body["gcpRootGB"] != float64(400) {
+		t.Fatalf("explicit built-in rootGB not forwarded: %#v", body["gcpRootGB"])
+	}
+}
+
+func TestCoordinatorCreateLeaseOmitsBuiltInGCPDefaults(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"gcp","state":"active","host":"192.0.2.10"}}`))
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "gcp"
+	cfg.ServerType = serverTypeForConfig(cfg)
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	if _, err := client.CreateLease(context.Background(), cfg, "ssh-ed25519 test", false, "cbx_123", "blue-crab"); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"gcpProject", "gcpZone", "gcpImage", "gcpNetwork", "gcpSubnet", "gcpTags", "gcpSSHCIDRs", "gcpRootGB", "gcpServiceAccount"} {
+		if _, ok := body[key]; ok {
+			t.Fatalf("%s should be omitted so coordinator defaults apply: %#v", key, body)
+		}
 	}
 }
 

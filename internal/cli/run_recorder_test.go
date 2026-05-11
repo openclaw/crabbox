@@ -205,6 +205,35 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 	}
 }
 
+func TestRunRecorderFinishUsesExtendedTimeout(t *testing.T) {
+	var deadlineRemaining time.Duration
+	client := &CoordinatorClient{
+		BaseURL: "https://example.test",
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodPost || req.URL.Path != "/v1/runs/run_123/finish" {
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+			}
+			deadline, ok := req.Context().Deadline()
+			if !ok {
+				t.Fatal("finish request missing context deadline")
+			}
+			deadlineRemaining = time.Until(deadline)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Body:       io.NopCloser(strings.NewReader(`{"run":{"id":"run_123","leaseID":"","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"succeeded","phase":"completed","exitCode":0,"logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z","finishedAt":"2026-05-02T00:00:01Z"}}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})},
+	}
+	rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard}
+	rec.Finish(context.Background(), SSHTarget{}, 0, time.Second, time.Second, strings.Repeat("x", 2*runLogFallbackPreviewBytes), true, nil)
+	if deadlineRemaining < runRecorderFinishTimeout-5*time.Second {
+		t.Fatalf("deadline remaining=%s, want near %s", deadlineRemaining, runRecorderFinishTimeout)
+	}
+}
+
 type blockingRoundTripper struct {
 	started chan struct{}
 }
@@ -217,6 +246,12 @@ func (t blockingRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	}
 	<-req.Context().Done()
 	return nil, context.Cause(req.Context())
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 type runEventRecordingRoundTripper struct {

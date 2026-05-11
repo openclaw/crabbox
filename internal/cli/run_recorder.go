@@ -9,7 +9,11 @@ import (
 	"time"
 )
 
-const runTelemetrySampleInterval = 15 * time.Second
+const (
+	runTelemetrySampleInterval = 15 * time.Second
+	runRecorderRequestTimeout  = 10 * time.Second
+	runRecorderFinishTimeout   = 60 * time.Second
+)
 
 type runRecorder struct {
 	coord            *CoordinatorClient
@@ -63,7 +67,7 @@ func (r *runRecorder) appendEvent(kind string, input CoordinatorRunEventInput) {
 	if r == nil || r.coord == nil || r.runID == "" || !r.runEventsEnabled() {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), runRecorderRequestTimeout)
 	defer cancel()
 	_, err := r.coord.AppendRunEvent(ctx, r.runID, input)
 	if err != nil {
@@ -76,7 +80,7 @@ func (r *runRecorder) AttachLease(leaseID, slug string, cfg Config) {
 		return
 	}
 	if r.runID == "" && r.deferUntilLease && r.coord != nil && leaseID != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), runRecorderRequestTimeout)
 		defer cancel()
 		run, err := r.coord.CreateRun(ctx, leaseID, cfg, r.command)
 		if err != nil {
@@ -165,7 +169,7 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 	r.stopTelemetrySampler()
 	telemetryEnd := collectLeaseTelemetryBestEffort(ctx, leaseTelemetryCollectorForTarget(target))
 	r.recordTelemetrySample(telemetryEnd)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), runRecorderFinishTimeout)
 	defer cancel()
 	if _, err := r.coord.FinishRun(ctx, r.runID, exitCode, sync, command, log, truncated, results, runTelemetrySummary(r.telemetryStart, telemetryEnd, r.telemetrySnapshot())); err != nil {
 		r.warn("run history finish failed for %s: %v", r.runID, err)

@@ -19,6 +19,7 @@ type ResolveRequest = core.ResolveRequest
 type ReleaseLeaseRequest = core.ReleaseLeaseRequest
 type TouchRequest = core.TouchRequest
 type ListRequest = core.ListRequest
+type CleanupRequest = core.CleanupRequest
 type LeaseView = core.LeaseView
 type LeaseTarget = core.LeaseTarget
 type Server = core.Server

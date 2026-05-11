@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
+	"time"
 )
 
 func (a App) configShow(args []string) error {
@@ -113,6 +115,7 @@ func (a App) configShow(args []string) error {
 			"maxGB":          cfg.Cache.MaxGB,
 			"purgeOnRelease": cfg.Cache.PurgeOnRelease,
 		},
+		"jobs": jobConfigViews(cfg.Jobs),
 		"hetzner": map[string]any{
 			"location": cfg.Location,
 			"image":    cfg.Image,
@@ -126,6 +129,17 @@ func (a App) configShow(args []string) error {
 			"instanceProfile": cfg.AWSProfile,
 			"rootGB":          cfg.AWSRootGB,
 			"sshCIDRs":        cfg.AWSSSHCIDRs,
+		},
+		"gcp": map[string]any{
+			"project":        cfg.GCPProject,
+			"zone":           cfg.GCPZone,
+			"image":          cfg.GCPImage,
+			"network":        cfg.GCPNetwork,
+			"subnet":         cfg.GCPSubnet,
+			"tags":           cfg.GCPTags,
+			"rootGB":         cfg.GCPRootGB,
+			"sshCIDRs":       cfg.GCPSSHCIDRs,
+			"serviceAccount": cfg.GCPServiceAccount,
 		},
 	}
 	if *jsonOut {
@@ -146,14 +160,81 @@ func (a App) configShow(args []string) error {
 	fmt.Fprintf(a.Stdout, "static id=%s name=%s host=%s user=%s port=%s work_root=%s\n", blank(cfg.Static.ID, "-"), blank(cfg.Static.Name, "-"), blank(cfg.Static.Host, "-"), blank(cfg.Static.User, "-"), blank(cfg.Static.Port, "-"), blank(cfg.Static.WorkRoot, "-"))
 	fmt.Fprintf(a.Stdout, "results junit=%s\n", blank(strings.Join(cfg.Results.JUnit, ","), "-"))
 	fmt.Fprintf(a.Stdout, "cache pnpm=%t npm=%t docker=%t git=%t max_gb=%d purge_on_release=%t\n", cfg.Cache.Pnpm, cfg.Cache.Npm, cfg.Cache.Docker, cfg.Cache.Git, cfg.Cache.MaxGB, cfg.Cache.PurgeOnRelease)
+	if len(cfg.Jobs) > 0 {
+		names := make([]string, 0, len(cfg.Jobs))
+		for name := range cfg.Jobs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		fmt.Fprintf(a.Stdout, "jobs=%s\n", strings.Join(names, ","))
+	}
 	fmt.Fprintf(a.Stdout, "aws region=%s root_gb=%d ssh_cidrs=%s\n", cfg.AWSRegion, cfg.AWSRootGB, blank(strings.Join(cfg.AWSSSHCIDRs, ","), "-"))
+	fmt.Fprintf(a.Stdout, "gcp project=%s zone=%s image=%s network=%s subnet=%s root_gb=%d ssh_cidrs=%s\n", blank(cfg.GCPProject, "-"), cfg.GCPZone, cfg.GCPImage, cfg.GCPNetwork, blank(cfg.GCPSubnet, "-"), cfg.GCPRootGB, blank(strings.Join(cfg.GCPSSHCIDRs, ","), "-"))
 	return nil
+}
+
+func jobConfigViews(jobs map[string]JobConfig) map[string]any {
+	if len(jobs) == 0 {
+		return nil
+	}
+	view := make(map[string]any, len(jobs))
+	for name, job := range jobs {
+		entry := map[string]any{
+			"provider":       job.Provider,
+			"target":         job.Target,
+			"windowsMode":    job.WindowsMode,
+			"profile":        job.Profile,
+			"class":          job.Class,
+			"serverType":     job.ServerType,
+			"market":         job.Market,
+			"desktop":        job.Desktop,
+			"browser":        job.Browser,
+			"code":           job.Code,
+			"network":        job.Network,
+			"shell":          job.Shell,
+			"command":        job.Command,
+			"noSync":         job.NoSync,
+			"syncOnly":       job.SyncOnly,
+			"checksum":       job.Checksum,
+			"forceSyncLarge": job.ForceSyncLarge,
+			"junit":          job.JUnit,
+			"downloads":      job.Downloads,
+			"stop":           job.Stop,
+			"hydrate": map[string]any{
+				"actions":          job.Hydrate.Actions,
+				"waitTimeout":      durationString(job.Hydrate.WaitTimeout),
+				"keepAliveMinutes": job.Hydrate.KeepAliveMinutes,
+			},
+			"actions": map[string]any{
+				"repo":     job.Actions.Repo,
+				"workflow": job.Actions.Workflow,
+				"job":      job.Actions.Job,
+				"ref":      job.Actions.Ref,
+				"fields":   job.Actions.Fields,
+			},
+		}
+		if job.TTL > 0 {
+			entry["ttl"] = job.TTL.String()
+		}
+		if job.IdleTimeout > 0 {
+			entry["idleTimeout"] = job.IdleTimeout.String()
+		}
+		view[name] = entry
+	}
+	return view
+}
+
+func durationString(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return d.String()
 }
 
 func (a App) configSetBroker(args []string) error {
 	fs := newFlagSet("config set-broker", a.Stderr)
 	url := fs.String("url", "", "broker URL")
-	provider := fs.String("provider", "", "default provider: hetzner, aws, or azure")
+	provider := fs.String("provider", "", "default provider: hetzner, aws, azure, or gcp")
 	tokenStdin := fs.Bool("token-stdin", false, "read broker token from stdin")
 	adminTokenStdin := fs.Bool("admin-token-stdin", false, "read broker admin token from stdin")
 	if err := parseFlags(fs, args); err != nil {

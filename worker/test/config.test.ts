@@ -8,6 +8,7 @@ import {
   azureWindowsVMSizeCandidatesForClass,
   azureVMSizeCandidatesForClass,
   azureVMSizeCandidatesForTargetClass,
+  gcpMachineTypeCandidatesForClass,
   leaseConfig,
   serverTypeCandidatesForClass,
   serverTypeForClass,
@@ -70,6 +71,16 @@ describe("machine class config", () => {
     ]);
   });
 
+  it("maps known classes to preferred GCP candidates", () => {
+    expect(serverTypeForProviderClass("gcp", "standard")).toBe("c4-standard-32");
+    expect(gcpMachineTypeCandidatesForClass("standard")).toEqual([
+      "c4-standard-32",
+      "c3-standard-22",
+      "n2-standard-32",
+      "n2d-standard-32",
+    ]);
+  });
+
   it("maps AWS Windows and macOS classes to compatible families", () => {
     expect(awsInstanceTypeCandidatesForTargetClass("windows", "standard")).toEqual([
       "m7i.large",
@@ -82,6 +93,7 @@ describe("machine class config", () => {
   it("matches the Go CLI machine class tables", () => {
     const go = readFileSync(new URL("../../internal/cli/config.go", import.meta.url), "utf8");
     const goAzure = readFileSync(new URL("../../internal/cli/azure.go", import.meta.url), "utf8");
+    const goGCP = readFileSync(new URL("../../internal/cli/gcp.go", import.meta.url), "utf8");
     const classes = ["standard", "fast", "large", "beast"];
     const hetzner = parseGoStringArrayCases(goFunctionBody(go, "serverTypeCandidatesForClass"));
     const awsLinux = parseGoStringArrayCases(
@@ -93,6 +105,7 @@ describe("machine class config", () => {
     const azureWindows = parseGoStringArrayCases(
       goFunctionBody(goAzure, "azureWindowsVMSizeCandidatesForClass"),
     );
+    const gcp = parseGoStringArrayCases(goFunctionBody(goGCP, "gcpMachineTypeCandidatesForClass"));
     const awsTarget = goFunctionBody(go, "awsInstanceTypeCandidatesForTargetModeClass");
     const awsWSL2 = parseGoStringArrayCases(
       goSwitchAfter(awsTarget, "if windowsMode == windowsModeWSL2"),
@@ -109,6 +122,7 @@ describe("machine class config", () => {
       expect(awsInstanceTypeCandidatesForTargetClass("windows", name, "wsl2")).toEqual(
         awsWSL2[name],
       );
+      expect(gcpMachineTypeCandidatesForClass(name)).toEqual(gcp[name]);
     }
     expect(awsInstanceTypeCandidatesForTargetClass("macos", "standard")).toEqual(["mac2.metal"]);
   });
@@ -249,6 +263,36 @@ describe("lease config", () => {
     expect(config.serverType).toBe("Standard_D192ds_v6");
     expect(config.azureLocation).toBe("eastus");
     expect(config.azureImage).toBe("Canonical:offer:sku:latest");
+  });
+
+  it("leaves omitted GCP fields for Worker defaults", () => {
+    const config = leaseConfig({ provider: "gcp", sshPublicKey: "ssh-ed25519 test" });
+    expect(config.serverType).toBe("c4-standard-192");
+    expect(config.gcpProject).toBe("");
+    expect(config.gcpZone).toBe("");
+    expect(config.gcpImage).toBe("");
+    expect(config.gcpNetwork).toBe("");
+    expect(config.gcpTags).toEqual([]);
+    expect(config.gcpRootGB).toBe(0);
+  });
+
+  it("keeps explicit GCP request fields", () => {
+    const config = leaseConfig({
+      provider: "gcp",
+      gcpProject: "request-project",
+      gcpZone: "us-central1-a",
+      gcpImage: "projects/example/global/images/custom",
+      gcpNetwork: "custom-network",
+      gcpTags: ["custom-ssh", "custom-ssh", ""],
+      gcpRootGB: 128,
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(config.gcpProject).toBe("request-project");
+    expect(config.gcpZone).toBe("us-central1-a");
+    expect(config.gcpImage).toBe("projects/example/global/images/custom");
+    expect(config.gcpNetwork).toBe("custom-network");
+    expect(config.gcpTags).toEqual(["custom-ssh"]);
+    expect(config.gcpRootGB).toBe(128);
   });
 
   it("allows Azure native Windows leases", () => {

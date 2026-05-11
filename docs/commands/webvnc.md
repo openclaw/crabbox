@@ -60,7 +60,8 @@ This keeps the security boundary the same as `crabbox vnc`:
 
 Use `crabbox webvnc daemon start --id <lease> --open` to keep the bridge
 running without a tmux or foreground shell. Crabbox writes the bridge log and
-pid file under its local state directory and prints both paths. Use
+pid file under its local state directory, starts each daemon with a fresh log,
+and prints `webvnc daemon: ready` once the bridge reports connected. Use
 `crabbox webvnc daemon status --id <lease>` for the local pid/log check, and
 `crabbox webvnc daemon stop --id <lease>` to kill the background bridge for
 that lease. Shutdown terminates both the daemon supervisor and the active child

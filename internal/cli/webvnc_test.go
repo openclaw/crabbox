@@ -349,6 +349,25 @@ func TestWebVNCDaemonSupervisorRestartsWithoutReopeningPortal(t *testing.T) {
 	}
 }
 
+func TestWebVNCDaemonLogReady(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.log")
+	if webVNCDaemonLogReady(path, 0) {
+		t.Fatal("missing log must not be ready")
+	}
+	if err := os.WriteFile(path, []byte("bridge: probing VNC\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if webVNCDaemonLogReady(path, 0) {
+		t.Fatal("probe-only log must not be ready")
+	}
+	if err := os.WriteFile(path, []byte("bridge: connected; keep this process running while using WebVNC\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !webVNCDaemonLogReady(path, 0) {
+		t.Fatal("connected log must be ready")
+	}
+}
+
 func TestSafeWebVNCDaemonName(t *testing.T) {
 	if got := safeWebVNCDaemonName("pearl/krill :99"); got != "pearl_krill__99" {
 		t.Fatalf("safe daemon name=%q", got)

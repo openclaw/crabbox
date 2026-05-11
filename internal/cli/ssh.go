@@ -443,6 +443,11 @@ func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts
 	}
 	if target.AuthSecret {
 		args = append(args, "-o", "ControlMaster=no")
+	} else if runtime.GOOS == "windows" {
+		// Windows OpenSSH does not support Unix domain sockets for
+		// connection multiplexing; ControlMaster causes
+		// "getsockname failed: Not a socket" errors.
+		args = append(args, "-o", "ControlMaster=no")
 	} else {
 		args = append(args,
 			"-o", "ControlMaster=auto",
@@ -527,9 +532,14 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	if opts.Debug {
 		args = append(args, "--stats", "--itemize-changes", "--progress")
 	}
-	args = append(args, ensureTrailingSlash(src), target.User+"@"+target.Host+":"+dst+"/")
+	args = append(args, ensureTrailingSlash(rsyncLocalPath(src)), target.User+"@"+target.Host+":"+dst+"/")
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, "rsync", args...)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = windowsRsyncCommand(ctx, target, args)
+	} else {
+		cmd = exec.CommandContext(ctx, "rsync", args...)
+	}
 	if opts.UseFilesFrom {
 		cmd.Stdin = bytes.NewReader(opts.FilesFrom)
 	}
@@ -605,6 +615,117 @@ func ensureTrailingSlash(path string) string {
 		return path
 	}
 	return path + "/"
+}
+
+// rsyncLocalPath converts a Windows drive path like C:/foo to /c/foo so that
+// MSYS2/Cygwin rsync does not interpret the colon as a remote host separator.
+func rsyncLocalPath(path string) string {
+	return rsyncLocalPathForGOOS(runtime.GOOS, path)
+}
+
+func rsyncLocalPathForGOOS(goos, path string) string {
+	if goos != "windows" {
+		return path
+	}
+	path = strings.ReplaceAll(path, `\`, "/")
+	if len(path) >= 2 && path[1] == ':' {
+		drive := strings.ToLower(string(path[0]))
+		return "/" + drive + path[2:]
+	}
+	return path
+}
+
+// windowsRsyncCommand builds an exec.Cmd for rsync on Windows.
+// MSYS2/Cygwin rsync has broken signal handling with Windows SSH child
+// processes, so we prefer WSL rsync when available. The SSH key is copied
+// into WSL /tmp with correct permissions, and paths within args are
+// converted to WSL mount paths.
+func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *exec.Cmd {
+	if _, err := exec.LookPath("wsl"); err != nil {
+		// No WSL — fall back to native rsync with MSYS2 workarounds.
+		cmd := exec.CommandContext(ctx, "rsync", args...)
+		cmd.Env = append(os.Environ(), "MSYS2_ARG_CONV_EXCL=*", "MSYS_NO_PATHCONV=1", "CYGWIN=nodosfilewarning")
+		return cmd
+	}
+
+	// Prepare WSL key: copy with correct permissions.
+	wslKey := ""
+	knownHostsPath := ""
+	if target.Key != "" {
+		wslKey = "/tmp/crabbox-wsl-" + filepath.Base(filepath.Dir(target.Key))
+		knownHostsPath = filepath.Join(filepath.Dir(target.Key), "known_hosts")
+		cpCmd := exec.Command("wsl", "bash", "-c",
+			fmt.Sprintf("mkdir -p /tmp && cp %s %s 2>/dev/null; chmod 600 %s 2>/dev/null",
+				shellQuote(windowsToWSLMountPath(target.Key)),
+				shellQuote(wslKey),
+				shellQuote(wslKey)))
+		_ = cpCmd.Run()
+	}
+
+	// Convert all args: replace Windows paths inside strings (including
+	// the -e "ssh ..." arg which embeds key and known_hosts paths).
+	wslArgs := make([]string, len(args))
+	for i, arg := range args {
+		converted := windowsToWSLPath(arg)
+		// Replace key path with WSL temp copy inside -e string
+		if wslKey != "" && target.Key != "" {
+			keyWSL := windowsToWSLMountPath(target.Key)
+			converted = strings.ReplaceAll(converted, keyWSL, wslKey)
+		}
+		// Replace known_hosts path
+		if knownHostsPath != "" {
+			khWSL := windowsToWSLMountPath(knownHostsPath)
+			wslKH := wslKey + "-known_hosts"
+			converted = strings.ReplaceAll(converted, khWSL, wslKH)
+		}
+		wslArgs[i] = converted
+	}
+	return exec.CommandContext(ctx, "wsl", append([]string{"rsync"}, wslArgs...)...)
+}
+
+// windowsToWSLMountPath converts a single Windows path to WSL /mnt/ form.
+func windowsToWSLMountPath(path string) string {
+	path = strings.ReplaceAll(path, `\`, "/")
+	if len(path) >= 2 && path[1] == ':' {
+		drive := strings.ToLower(string(path[0]))
+		return "/mnt/" + drive + path[2:]
+	}
+	if len(path) >= 3 && path[0] == '/' && path[2] == '/' && path[1] >= 'a' && path[1] <= 'z' {
+		return "/mnt" + path
+	}
+	return path
+}
+
+// windowsToWSLPath converts Windows paths found anywhere in a string to
+// WSL mount paths. Handles both C:\... and /c/... formats embedded in
+// larger strings (like the -e "ssh -i C:\path\key ..." argument).
+func windowsToWSLPath(s string) string {
+	s = strings.ReplaceAll(s, `\`, "/")
+	// Replace drive-letter paths: C:/... -> /mnt/c/...
+	for i := 0; i < len(s)-2; i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z') && s[i+1] == ':' && s[i+2] == '/' {
+			// Only replace if at start of string or preceded by a non-path char
+			if i == 0 || s[i-1] == ' ' || s[i-1] == '\'' || s[i-1] == '"' || s[i-1] == '=' {
+				drive := strings.ToLower(string(c))
+				s = s[:i] + "/mnt/" + drive + s[i+2:]
+				i += 4 // skip past /mnt/X
+			}
+		}
+	}
+	// Also handle /c/... -> /mnt/c/... (from rsyncLocalPath conversion)
+	for i := 0; i < len(s)-2; i++ {
+		if s[i] == '/' && s[i+1] >= 'a' && s[i+1] <= 'z' && s[i+2] == '/' {
+			if i == 0 || s[i-1] == ' ' || s[i-1] == '\'' || s[i-1] == '"' || s[i-1] == '=' {
+				// Avoid converting remote paths like crabbox@host:/work
+				if i == 0 || s[i-1] != ':' {
+					s = s[:i] + "/mnt" + s[i:]
+					i += 4
+				}
+			}
+		}
+	}
+	return s
 }
 
 func shellQuote(s string) string {
@@ -874,6 +995,18 @@ pathlib.Path(sys.argv[1]).write_bytes(manifest)
 pathlib.Path(sys.argv[2]).write_bytes(deleted)
 `
 	script := "mkdir -p " + shellQuote(workdir) + " && cd " + shellQuote(workdir) + " && " + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\" && python3 -c " + shellQuote(python) + " \"$meta_dir/sync-manifest.new\" \"$meta_dir/sync-deleted.new\""
+	return "bash -lc " + shellQuote(script)
+}
+
+func remoteSeedSyncManifestFromGit(workdir string) string {
+	script := "set -e\ncd " + shellQuote(workdir) + `
+` + remoteSyncMetaDirScript() + `
+old="$meta_dir/sync-manifest"
+if [ ! -f "$old" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  mkdir -p "$meta_dir"
+  git ls-files -z > "$old"
+fi
+`
 	return "bash -lc " + shellQuote(script)
 }
 

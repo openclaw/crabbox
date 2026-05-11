@@ -58,6 +58,7 @@ export async function isAuthorized(
   env: Pick<
     Env,
     | "CRABBOX_SHARED_TOKEN"
+    | "CRABBOX_SHARED_OWNER"
     | "CRABBOX_ADMIN_TOKEN"
     | "CRABBOX_SESSION_SECRET"
     | "CRABBOX_DEFAULT_ORG"

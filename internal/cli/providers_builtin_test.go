@@ -9,6 +9,7 @@ func init() {
 	RegisterProvider(testHetznerProvider{})
 	RegisterProvider(testAWSProvider{})
 	RegisterProvider(testAzureProvider{})
+	RegisterProvider(testGCPProvider{})
 	RegisterProvider(testStaticSSHProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
@@ -60,6 +61,29 @@ func (testHetznerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testHetznerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testGCPProvider struct{}
+
+func (testGCPProvider) Name() string { return "gcp" }
+func (testGCPProvider) Aliases() []string {
+	return []string{"google", "google-cloud"}
+}
+func (testGCPProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "gcp",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale},
+		Coordinator: CoordinatorSupported,
+	}
+}
+func (testGCPProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testGCPProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testGCPProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

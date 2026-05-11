@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -94,10 +96,11 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 	}
 	started := b.rt.Clock.Now()
 	leaseID := req.ID
+	slug := ""
 	acquired := false
 	var err error
 	if leaseID == "" {
-		leaseID, _, err = b.warmupLease(ctx, req.Repo, req.Reclaim)
+		leaseID, slug, err = b.warmupLease(ctx, req.Repo, req.Reclaim)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -107,7 +110,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		if err != nil {
 			return RunResult{}, err
 		}
-		slug, err := blacksmithClaimSlug(req.ID, leaseID)
+		slug, err = blacksmithClaimSlug(req.ID, leaseID)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -135,6 +138,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{
 			Provider:      blacksmithTestboxProvider,
 			LeaseID:       leaseID,
+			Slug:          slug,
 			SyncPhases:    []timingPhase{{Name: "delegated", Skipped: true, Reason: "blacksmith-testbox owns sync"}},
 			SyncDelegated: true,
 			CommandMs:     commandDuration.Milliseconds(),
@@ -263,7 +267,16 @@ func (b *blacksmithBackend) runTestbox(ctx context.Context, leaseID string, comm
 		return 2
 	}
 	args := blacksmithRunArgs(b.cfg, leaseID, keyPath, command, debug || b.cfg.Blacksmith.Debug, shellMode)
-	result, err := b.runCommand(ctx, args, b.rt.Stdout, b.rt.Stderr)
+	result, timedOut, err := b.runCommandWithSyncGuard(ctx, args, b.rt.Stdout, b.rt.Stderr)
+	if timedOut {
+		fmt.Fprintf(
+			b.rt.Stderr,
+			"Blacksmith Testbox sync did not print a completion marker for %s; terminating local runner. "+
+				"Rerun with CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS=0 to disable this guard.\n",
+			blacksmithSyncTimeout(os.Getenv),
+		)
+		return 124
+	}
 	if err != nil {
 		return result.ExitCode
 	}
@@ -284,6 +297,114 @@ func (b *blacksmithBackend) runCommand(ctx context.Context, args []string, stdou
 		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("blacksmith failed: %v", err)}
 	}
 	return result, nil
+}
+
+func (b *blacksmithBackend) runCommandWithSyncGuard(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, bool, error) {
+	timeout := blacksmithSyncTimeout(os.Getenv)
+	if timeout <= 0 {
+		result, err := b.runCommand(ctx, args, stdout, stderr)
+		return result, false, err
+	}
+	guardCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	tracker := &blacksmithSyncTracker{}
+	resultCh := make(chan struct {
+		result LocalCommandResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := b.runCommand(
+			guardCtx,
+			args,
+			blacksmithSyncGuardWriter{w: stdout, tracker: tracker},
+			blacksmithSyncGuardWriter{w: stderr, tracker: tracker},
+		)
+		resultCh <- struct {
+			result LocalCommandResult
+			err    error
+		}{result: result, err: err}
+	}()
+	ticker := time.NewTicker(minBlacksmithDuration(timeout, time.Second))
+	defer ticker.Stop()
+	timedOut := false
+	for {
+		select {
+		case result := <-resultCh:
+			return result.result, timedOut, result.err
+		case <-ticker.C:
+			if !tracker.syncStalled(timeout, b.rt.Clock.Now()) {
+				continue
+			}
+			timedOut = true
+			cancel()
+		}
+	}
+}
+
+type blacksmithSyncTracker struct {
+	mu           sync.Mutex
+	syncingSince time.Time
+	pending      string
+}
+
+func (t *blacksmithSyncTracker) observe(text string, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pending += text
+	if len(t.pending) > 4096 {
+		t.pending = t.pending[len(t.pending)-4096:]
+	}
+	for {
+		i := strings.IndexByte(t.pending, '\n')
+		if i < 0 {
+			break
+		}
+		t.observeLineLocked(t.pending[:i+1], now)
+		t.pending = t.pending[i+1:]
+	}
+	if t.pending != "" {
+		t.observeLineLocked(t.pending, now)
+	}
+}
+
+func (t *blacksmithSyncTracker) observeLineLocked(line string, now time.Time) {
+	if blacksmithSyncStartPattern.MatchString(line) {
+		if t.syncingSince.IsZero() {
+			t.syncingSince = now
+		}
+		return
+	}
+	if !t.syncingSince.IsZero() && blacksmithSyncDonePattern.MatchString(line) {
+		t.syncingSince = time.Time{}
+	}
+}
+
+func (t *blacksmithSyncTracker) syncStalled(timeout time.Duration, now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return !t.syncingSince.IsZero() && now.Sub(t.syncingSince) >= timeout
+}
+
+type blacksmithSyncGuardWriter struct {
+	w       io.Writer
+	tracker *blacksmithSyncTracker
+}
+
+func (w blacksmithSyncGuardWriter) Write(chunk []byte) (int, error) {
+	if w.tracker != nil {
+		w.tracker.observe(string(chunk), time.Now())
+	}
+	if w.w == nil {
+		return len(chunk), nil
+	}
+	return w.w.Write(chunk)
+}
+
+func minBlacksmithDuration(left, right time.Duration) time.Duration {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func (b *blacksmithBackend) listIDsBestEffort(ctx context.Context) map[string]bool {

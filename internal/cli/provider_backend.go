@@ -314,11 +314,11 @@ func normalizeProviderName(name string) string {
 }
 
 func providerHelpAll() string {
-	return "provider: hetzner, aws, azure, ssh, blacksmith-testbox, namespace-devbox, semaphore, daytona, islo, e2b, or sprites"
+	return "provider: hetzner, aws, azure, gcp, ssh, blacksmith-testbox, namespace-devbox, semaphore, daytona, islo, e2b, or sprites"
 }
 
 func providerHelpSSH() string {
-	return "provider: hetzner, aws, azure, ssh, namespace-devbox, semaphore, daytona, or sprites"
+	return "provider: hetzner, aws, azure, gcp, ssh, namespace-devbox, semaphore, daytona, or sprites"
 }
 
 func isBlacksmithProvider(provider string) bool {
@@ -364,6 +364,7 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if err != nil {
 		return nil, err
 	}
+	cfg.Provider = provider.Name()
 	backend, err := provider.Configure(cfg, rt)
 	if err != nil {
 		return nil, err
@@ -416,8 +417,8 @@ func validateActionsRunnerCapability(backend Backend, cfg Config) error {
 	if _, ok := backend.(SSHLeaseBackend); !ok {
 		return exit(2, "--actions-runner requires an SSH lease provider")
 	}
-	if cfg.TargetOS != targetLinux {
-		return exit(2, "--actions-runner requires target=linux")
+	if !supportsActionsRunnerTarget(SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}) {
+		return exit(2, "--actions-runner requires target=linux or target=windows with windows-mode=wsl2")
 	}
 	return nil
 }

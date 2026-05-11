@@ -321,6 +321,7 @@ Acquire::Retries "8";
 Acquire::http::Timeout "30";
 Acquire::https::Timeout "30";
 APT
+rm -rf /var/lib/apt/lists/*
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl git rsync jq
 cat >/usr/local/bin/crabbox-ready <<'READY'
