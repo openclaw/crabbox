@@ -498,6 +498,25 @@ func TestRsyncLocalPathConvertsWindowsDrivePath(t *testing.T) {
 	}
 }
 
+func TestWindowsToWSLPath(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only test")
+	}
+	tests := map[string]string{
+		"/c/OpenClaw/crabbox":          "/mnt/c/OpenClaw/crabbox",
+		"C:/Users/test":                "/mnt/c/Users/test",
+		"/work/crabbox":                "/work/crabbox",
+		"crabbox@10.0.0.1:/work/":      "crabbox@10.0.0.1:/work/",
+	}
+	for in, want := range tests {
+		got := windowsToWSLPath(in)
+		if got != want {
+			t.Errorf("windowsToWSLPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestRemotePruneSyncManifestDeletesOnlyManagedPaths(t *testing.T) {
 	got := remotePruneSyncManifest("/work/repo")
 	for _, want := range []string{

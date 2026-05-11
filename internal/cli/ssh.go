@@ -534,7 +534,12 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	}
 	args = append(args, ensureTrailingSlash(rsyncLocalPath(src)), target.User+"@"+target.Host+":"+dst+"/")
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, "rsync", args...)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = windowsRsyncCommand(ctx, target, args)
+	} else {
+		cmd = exec.CommandContext(ctx, "rsync", args...)
+	}
 	if opts.UseFilesFrom {
 		cmd.Stdin = bytes.NewReader(opts.FilesFrom)
 	}
@@ -622,6 +627,57 @@ func rsyncLocalPath(path string) string {
 	if len(path) >= 2 && path[1] == ':' {
 		drive := strings.ToLower(string(path[0]))
 		return "/" + drive + path[2:]
+	}
+	return path
+}
+
+// windowsRsyncCommand builds an exec.Cmd for rsync on Windows.
+// MSYS2/Cygwin rsync has broken signal handling with Windows SSH child
+// processes, so we prefer WSL rsync when available. The SSH key is copied
+// into WSL /tmp with correct permissions, and local source paths are
+// converted from /c/... to /mnt/c/... for WSL's filesystem mount.
+func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *exec.Cmd {
+	if _, err := exec.LookPath("wsl"); err != nil {
+		// No WSL — fall back to native rsync with MSYS2 workarounds.
+		cmd := exec.CommandContext(ctx, "rsync", args...)
+		cmd.Env = append(os.Environ(), "MSYS2_ARG_CONV_EXCL=*", "MSYS_NO_PATHCONV=1", "CYGWIN=nodosfilewarning")
+		return cmd
+	}
+	// Convert args for WSL: source paths /c/... -> /mnt/c/... and
+	// SSH key paths need copying with chmod 600.
+	wslArgs := make([]string, len(args))
+	for i, arg := range args {
+		wslArgs[i] = windowsToWSLPath(arg)
+	}
+	if target.Key != "" {
+		wslKey := "/tmp/crabbox-wsl-" + filepath.Base(filepath.Dir(target.Key))
+		cpCmd := exec.Command("wsl", "bash", "-c",
+			fmt.Sprintf("cp %s %s 2>/dev/null; chmod 600 %s 2>/dev/null",
+				shellQuote(windowsToWSLPath(target.Key)),
+				shellQuote(wslKey),
+				shellQuote(wslKey)))
+		_ = cpCmd.Run()
+		// Replace key path in the -e ssh string
+		for i, arg := range wslArgs {
+			if strings.Contains(arg, windowsToWSLPath(target.Key)) {
+				wslArgs[i] = strings.ReplaceAll(arg, windowsToWSLPath(target.Key), wslKey)
+			}
+		}
+	}
+	return exec.CommandContext(ctx, "wsl", append([]string{"rsync"}, wslArgs...)...)
+}
+
+// windowsToWSLPath converts a POSIX-ified Windows path (/c/Users/...)
+// to a WSL mount path (/mnt/c/Users/...). Passes through other paths.
+func windowsToWSLPath(path string) string {
+	path = strings.ReplaceAll(path, `\`, "/")
+	if len(path) >= 2 && path[1] == ':' {
+		drive := strings.ToLower(string(path[0]))
+		return "/mnt/" + drive + path[2:]
+	}
+	// /c/foo -> /mnt/c/foo
+	if len(path) >= 3 && path[0] == '/' && path[2] == '/' && path[1] >= 'a' && path[1] <= 'z' {
+		return "/mnt" + path
 	}
 	return path
 }
