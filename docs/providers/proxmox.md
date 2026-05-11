@@ -55,6 +55,48 @@ Crabbox sets:
 If the guest agent does not report an IPv4 address or cannot execute the
 bootstrap script, provisioning fails and the cloned VM is deleted.
 
+## Template Build Helper
+
+For a reproducible starting point, Crabbox includes a Proxmox-node helper that
+builds an Ubuntu 24.04 cloud-image template with cloud-init, OpenSSH, the QEMU
+guest agent, and common sync/runtime tools preinstalled.
+
+Run it from a Crabbox checkout on a Proxmox VE node as root:
+
+```sh
+CRABBOX_PROXMOX_TEMPLATE_ID=9400 \
+CRABBOX_PROXMOX_TEMPLATE_NAME=crabbox-ubuntu-2404 \
+CRABBOX_PROXMOX_STORAGE=local-lvm \
+CRABBOX_PROXMOX_BRIDGE=vmbr0 \
+CRABBOX_PROXMOX_USER=crabbox \
+./scripts/proxmox-build-template.sh
+```
+
+The helper downloads the public Ubuntu Noble cloud image, optionally verifies
+`CRABBOX_PROXMOX_IMAGE_SHA256`, customizes a local copy, imports it into the
+selected Proxmox storage, attaches a cloud-init drive, and converts the VM to a
+template. It does not use Proxmox API tokens, Crabbox coordinator tokens, or
+lease SSH keys, and it does not bake secrets into the image.
+
+If the VMID already exists, the helper stops before changing it. Set
+`CRABBOX_PROXMOX_REPLACE_TEMPLATE=1` only when you intentionally want to destroy
+and rebuild that local template.
+
+The resulting config looks like:
+
+```yaml
+provider: proxmox
+proxmox:
+  node: pve1
+  templateId: 9400
+  storage: local-lvm
+  bridge: vmbr0
+  user: crabbox
+```
+
+The helper requires Proxmox's `qm` and `pvesm` commands plus `qemu-img`,
+`virt-customize`, `sha256sum`, and either `curl` or `wget`.
+
 ## Quick Start
 
 Create an API token in Proxmox and give it permission to clone, configure,
