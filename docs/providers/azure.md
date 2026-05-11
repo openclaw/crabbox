@@ -94,6 +94,21 @@ until the required service-principal secrets are present.
 
 ## Auth
 
+The simplest setup uses the Azure CLI — no environment variables needed:
+
+```sh
+az login
+crabbox azure login
+crabbox warmup --provider azure
+```
+
+`crabbox azure login` detects the active subscription, validates credentials,
+and stores subscription ID, tenant ID, and location in user config. After this,
+`DefaultAzureCredential` picks up the `az login` session automatically.
+
+For service-principal setups (CI, automation, shared environments), use
+environment variables:
+
 If `azure.tenantId` and `azure.clientId` (or `CRABBOX_AZURE_TENANT_ID` /
 `CRABBOX_AZURE_CLIENT_ID`) are configured and `AZURE_CLIENT_SECRET` is set
 in the environment, Crabbox builds a `ClientSecretCredential` from those

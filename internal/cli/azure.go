@@ -57,9 +57,16 @@ type AzureClient struct {
 type azureImageRef struct{ Publisher, Offer, SKU, Version string }
 
 func NewAzureClient(ctx context.Context, cfg Config) (*AzureClient, error) {
-	_ = ctx
 	if cfg.AzureSubscription == "" {
-		return nil, exit(3, "AZURE_SUBSCRIPTION_ID is required for direct azure provider")
+		info, err := azAccountShow(ctx, "")
+		if err != nil {
+			return nil, exit(3, "AZURE_SUBSCRIPTION_ID is required for direct azure provider (or run 'az login' and 'crabbox azure login'): %v", err)
+		}
+		cfg.AzureSubscription = info.ID
+		if cfg.AzureTenant == "" {
+			cfg.AzureTenant = info.TenantID
+		}
+		fmt.Fprintf(os.Stderr, "using azure subscription from az cli: %s (%s)\n", info.Name, info.ID)
 	}
 	if cfg.AzureLocation == "" {
 		return nil, exit(3, "azure location is required (set azure.location or CRABBOX_AZURE_LOCATION)")

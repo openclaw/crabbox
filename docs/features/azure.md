@@ -61,6 +61,21 @@ supports ephemeral OS disks; ephemeral-capable sizes use local OS disks,
 while exact `--type` requests for non-ephemeral sizes use managed
 `StandardSSD_LRS` OS disks.
 
+## Quick Start With `az login`
+
+The simplest setup uses the Azure CLI — no environment variables needed:
+
+```sh
+az login
+crabbox azure login
+crabbox warmup --provider azure
+```
+
+`crabbox azure login` detects the active subscription from the `az` CLI,
+validates credentials through `DefaultAzureCredential`, and stores subscription,
+tenant, and location in user config. See the
+[azure command docs](../commands/azure.md) for flags and details.
+
 ## Direct Auth And Env
 
 Service principal env vars consumed by `DefaultAzureCredential`:

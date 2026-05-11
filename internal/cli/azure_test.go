@@ -392,3 +392,24 @@ func TestAzureCredentialForConfigFallsBackToDefault(t *testing.T) {
 		t.Fatalf("got %T, want *azidentity.DefaultAzureCredential", cred)
 	}
 }
+
+func TestNewAzureClientAutoResolvesSubscription(t *testing.T) {
+	// When az CLI is not available and no subscription is set, NewAzureClient
+	// should return an error mentioning both AZURE_SUBSCRIPTION_ID and az login.
+	t.Setenv("AZURE_SUBSCRIPTION_ID", "")
+	t.Setenv("CRABBOX_AZURE_SUBSCRIPTION_ID", "")
+	t.Setenv("PATH", "")
+
+	cfg := defaultConfig()
+	cfg.Provider = "azure"
+	cfg.AzureSubscription = ""
+	cfg.AzureLocation = "eastus"
+
+	_, err := NewAzureClient(t.Context(), cfg)
+	if err == nil {
+		t.Fatal("expected error when no subscription and no az CLI")
+	}
+	if !strings.Contains(err.Error(), "az login") {
+		t.Fatalf("error should mention 'az login': %v", err)
+	}
+}

@@ -48,6 +48,7 @@ type crabboxKongCLI struct {
 	Stop       stopKongCmd       `cmd:"" passthrough:"" help:"Release a lease or delete a direct-provider machine."`
 	Release    releaseKongCmd    `cmd:"" passthrough:"" help:"Alias for stop."`
 	Cleanup    cleanupKongCmd    `cmd:"" passthrough:"" help:"Sweep expired direct-provider machines or local provider state."`
+	Azure      azureKongCmd      `cmd:"" help:"Azure provider setup and login."`
 	Config     configKongCmd     `cmd:"" help:"Show or update user config."`
 	Pool       poolKongCmd       `cmd:"" help:"Alias commands for machine pools."`
 	Machine    machineKongCmd    `cmd:"" help:"Alias commands for direct-provider machines."`
@@ -113,7 +114,7 @@ func normalizeKongHelpArgs(args []string) []string {
 
 func isKongCommandGroup(command string) bool {
 	switch command {
-	case "actions", "admin", "artifacts", "cache", "config", "desktop", "image", "job", "machine", "media", "pool":
+	case "actions", "admin", "artifacts", "azure", "cache", "config", "desktop", "image", "job", "machine", "media", "pool":
 		return true
 	default:
 		return false
@@ -349,6 +350,13 @@ type configKongCmd struct {
 	Show      configShowKongCmd      `cmd:"" passthrough:"" help:"Print merged config without secret values."`
 	SetBroker configSetBrokerKongCmd `cmd:"" name:"set-broker" passthrough:"" help:"Store broker URL and optional tokens in user config."`
 }
+
+type azureKongCmd struct {
+	Login azureLoginKongCmd `cmd:"" passthrough:"" help:"Detect subscription from az CLI, validate credentials, store in user config."`
+}
+type azureLoginKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
 type configPathKongCmd struct{}
 type configShowKongCmd struct {
 	Args []string `arg:"" optional:""`
@@ -505,6 +513,10 @@ func (c *configShowKongCmd) Run(app App) error {
 }
 func (c *configSetBrokerKongCmd) Run(app App) error {
 	return app.configSetBroker(c.Args)
+}
+
+func (c *azureLoginKongCmd) Run(ctx context.Context, app App) error {
+	return app.azureLogin(ctx, c.Args)
 }
 
 func (c *poolListKongCmd) Run(ctx context.Context, app App) error {
