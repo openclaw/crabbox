@@ -620,7 +620,11 @@ func ensureTrailingSlash(path string) string {
 // rsyncLocalPath converts a Windows drive path like C:/foo to /c/foo so that
 // MSYS2/Cygwin rsync does not interpret the colon as a remote host separator.
 func rsyncLocalPath(path string) string {
-	if runtime.GOOS != "windows" {
+	return rsyncLocalPathForGOOS(runtime.GOOS, path)
+}
+
+func rsyncLocalPathForGOOS(goos, path string) string {
+	if goos != "windows" {
 		return path
 	}
 	path = strings.ReplaceAll(path, `\`, "/")
