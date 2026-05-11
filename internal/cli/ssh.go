@@ -443,6 +443,11 @@ func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts
 	}
 	if target.AuthSecret {
 		args = append(args, "-o", "ControlMaster=no")
+	} else if runtime.GOOS == "windows" {
+		// Windows OpenSSH does not support Unix domain sockets for
+		// connection multiplexing; ControlMaster causes
+		// "getsockname failed: Not a socket" errors.
+		args = append(args, "-o", "ControlMaster=no")
 	} else {
 		args = append(args,
 			"-o", "ControlMaster=auto",
