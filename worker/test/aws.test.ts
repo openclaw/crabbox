@@ -10,7 +10,9 @@ import {
   awsQuotaCodeForMarket,
   awsQuotaPreflightAttempt,
   awsRegionCandidates,
+  crabboxSSHIngressRules,
   createSecurityGroupParams,
+  staleCrabboxSSHIngressRules,
 } from "../src/aws";
 
 describe("aws provider", () => {
@@ -30,6 +32,67 @@ describe("aws provider", () => {
       "TagSpecification.1.Tag.3.Value": "crabbox",
     });
     expect(params).not.toHaveProperty("Description");
+  });
+
+  it("extracts only Crabbox-owned SSH ingress rules from AWS security groups", () => {
+    expect(
+      crabboxSSHIngressRules(
+        {
+          ipPermissions: {
+            item: [
+              {
+                fromPort: 2222,
+                ipProtocol: "tcp",
+                ipRanges: {
+                  item: [
+                    { cidrIp: "203.0.113.10/32", description: "Crabbox SSH" },
+                    { cidrIp: "198.51.100.20/32", description: "other" },
+                  ],
+                },
+                ipv6Ranges: {
+                  item: { cidrIpv6: "2001:db8::1/128", description: "Crabbox SSH" },
+                },
+                toPort: 2222,
+              },
+              {
+                fromPort: 443,
+                ipProtocol: "tcp",
+                ipRanges: { item: { cidrIp: "203.0.113.30/32", description: "Crabbox SSH" } },
+                toPort: 443,
+              },
+            ],
+          },
+        },
+        ["2222"],
+      ),
+    ).toEqual([
+      { cidr: "203.0.113.10/32", family: "ipv4", port: "2222" },
+      { cidr: "2001:db8::1/128", family: "ipv6", port: "2222" },
+    ]);
+  });
+
+  it("selects stale Crabbox SSH ingress rules before adding the current source CIDR", () => {
+    expect(
+      staleCrabboxSSHIngressRules(
+        {
+          ipPermissions: {
+            item: {
+              fromPort: 2222,
+              ipProtocol: "tcp",
+              ipRanges: {
+                item: [
+                  { cidrIp: "203.0.113.10/32", description: "Crabbox SSH" },
+                  { cidrIp: "198.51.100.20/32", description: "Crabbox SSH" },
+                ],
+              },
+              toPort: 2222,
+            },
+          },
+        },
+        ["2222"],
+        ["198.51.100.20/32"],
+      ),
+    ).toEqual([{ cidr: "203.0.113.10/32", family: "ipv4", port: "2222" }]);
   });
 
   it("does not tag Spot request resources for On-Demand launches", () => {

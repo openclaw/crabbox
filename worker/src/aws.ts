@@ -32,6 +32,29 @@ export function createSecurityGroupParams(name: string, vpcID: string): Record<s
   };
 }
 
+type SSHIngressRule = {
+  cidr: string;
+  family: "ipv4" | "ipv6";
+  port: string;
+};
+
+const sshIngressRangeFamilies = [
+  {
+    cidrField: "cidrIp",
+    descriptionParam: "IpPermissions.1.IpRanges.1.Description",
+    family: "ipv4",
+    param: "IpPermissions.1.IpRanges.1.CidrIp",
+    rangesField: "ipRanges",
+  },
+  {
+    cidrField: "cidrIpv6",
+    descriptionParam: "IpPermissions.1.Ipv6Ranges.1.Description",
+    family: "ipv6",
+    param: "IpPermissions.1.Ipv6Ranges.1.CidrIpv6",
+    rangesField: "ipv6Ranges",
+  },
+] as const;
+
 export class EC2SpotClient {
   private readonly aws: AwsClient;
   private readonly serviceQuotas: AwsClient;
@@ -464,7 +487,9 @@ export class EC2SpotClient {
       throw new Error("aws security group id is empty");
     }
     const cidrs = awsSSHCIDRs(config, this.env);
-    for (const port of sshPorts(config)) {
+    const ports = sshPorts(config);
+    await this.pruneStaleSSHIngress(groupID, group, ports, cidrs);
+    for (const port of ports) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup is per port.
       await this.revokeWorldTCP(groupID, port).catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -483,6 +508,23 @@ export class EC2SpotClient {
       }
     }
     return groupID;
+  }
+
+  private async pruneStaleSSHIngress(
+    groupID: string,
+    group: unknown,
+    ports: string[],
+    cidrs: string[],
+  ): Promise<void> {
+    for (const rule of staleCrabboxSSHIngressRules(group, ports, cidrs)) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- revoke calls are per exact rule.
+      await this.revokeTCP(groupID, rule).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes("InvalidPermission.NotFound")) {
+          throw error;
+        }
+      });
+    }
   }
 
   private async securityGroupVPC(config: LeaseConfig): Promise<string> {
@@ -516,13 +558,7 @@ export class EC2SpotClient {
       "IpPermissions.1.IpProtocol": "tcp",
       "IpPermissions.1.ToPort": port,
     };
-    if (cidr.includes(":")) {
-      params["IpPermissions.1.Ipv6Ranges.1.CidrIpv6"] = cidr;
-      params["IpPermissions.1.Ipv6Ranges.1.Description"] = "Crabbox SSH";
-    } else {
-      params["IpPermissions.1.IpRanges.1.CidrIp"] = cidr;
-      params["IpPermissions.1.IpRanges.1.Description"] = "Crabbox SSH";
-    }
+    assignSSHIngressRange(params, cidr, true);
     await this.ec2("AuthorizeSecurityGroupIngress", params);
   }
 
@@ -534,6 +570,17 @@ export class EC2SpotClient {
       "IpPermissions.1.IpRanges.1.CidrIp": "0.0.0.0/0",
       "IpPermissions.1.ToPort": port,
     });
+  }
+
+  private async revokeTCP(groupID: string, rule: SSHIngressRule): Promise<void> {
+    const params: Record<string, string> = {
+      GroupId: groupID,
+      "IpPermissions.1.FromPort": rule.port,
+      "IpPermissions.1.IpProtocol": "tcp",
+      "IpPermissions.1.ToPort": rule.port,
+    };
+    assignSSHIngressRule(params, rule);
+    await this.ec2("RevokeSecurityGroupIngress", params);
   }
 
   private async ec2(
@@ -689,6 +736,66 @@ function asString(value: unknown): string {
     return String(value);
   }
   return "";
+}
+
+function assignSSHIngressRange(
+  params: Record<string, string>,
+  cidr: string,
+  describe: boolean,
+): void {
+  const family = sshIngressRangeFamily(ingressFamily(cidr));
+  params[family.param] = cidr;
+  if (describe) {
+    params[family.descriptionParam] = "Crabbox SSH";
+  }
+}
+
+function assignSSHIngressRule(params: Record<string, string>, rule: SSHIngressRule): void {
+  params[sshIngressRangeFamily(rule.family).param] = rule.cidr;
+}
+
+function ingressFamily(cidr: string): SSHIngressRule["family"] {
+  return cidr.includes(":") ? "ipv6" : "ipv4";
+}
+
+function sshIngressRangeFamily(family: SSHIngressRule["family"]) {
+  return family === "ipv6" ? sshIngressRangeFamilies[1] : sshIngressRangeFamilies[0];
+}
+
+export function crabboxSSHIngressRules(group: unknown, ports: string[]): SSHIngressRule[] {
+  const wantedPorts = new Set(ports);
+  const rules: SSHIngressRule[] = [];
+  for (const permission of items(record(record(group)["ipPermissions"])["item"])) {
+    const entry = record(permission);
+    const protocol = asString(entry["ipProtocol"]);
+    const fromPort = asString(entry["fromPort"]);
+    const toPort = asString(entry["toPort"]);
+    if (protocol !== "tcp" || fromPort !== toPort || !wantedPorts.has(fromPort)) {
+      continue;
+    }
+    for (const family of sshIngressRangeFamilies) {
+      for (const range of items(record(entry[family.rangesField])["item"])) {
+        const value = record(range);
+        if (asString(value["description"]) === "Crabbox SSH") {
+          rules.push({
+            cidr: asString(value[family.cidrField]),
+            family: family.family,
+            port: fromPort,
+          });
+        }
+      }
+    }
+  }
+  return rules.filter((rule) => rule.cidr);
+}
+
+export function staleCrabboxSSHIngressRules(
+  group: unknown,
+  ports: string[],
+  cidrs: string[],
+): SSHIngressRule[] {
+  const desired = new Set(cidrs.map((cidr) => cidr.trim()).filter(Boolean));
+  return crabboxSSHIngressRules(group, ports).filter((rule) => !desired.has(rule.cidr));
 }
 
 export function awsLaunchCandidates(
