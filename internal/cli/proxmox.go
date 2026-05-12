@@ -170,20 +170,15 @@ func (c *ProxmoxClient) ListCrabboxServers(ctx context.Context) ([]Server, error
 	return servers, nil
 }
 
-func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, error) {
-	if logf == nil {
-		logf = func(string, ...any) {}
-	}
+func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool) (Server, error) {
 	if cfg.TargetOS != targetLinux {
 		return Server{}, exit(2, "proxmox provider currently supports target=linux only")
 	}
-	logf("proxmox phase=nextid node=%s\n", c.Node)
 	vmid, err := c.nextID(ctx)
 	if err != nil {
 		return Server{}, err
 	}
 	name := leaseProviderName(leaseID, slug)
-	logf("proxmox phase=clone template=%d vmid=%d name=%s full_clone=%t storage=%s pool=%s\n", cfg.Proxmox.TemplateID, vmid, name, cfg.Proxmox.FullClone, cfg.Proxmox.Storage, cfg.Proxmox.Pool)
 	full := "1"
 	if !cfg.Proxmox.FullClone {
 		full = "0"
@@ -203,7 +198,6 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/clone", url.PathEscape(c.Node), cfg.Proxmox.TemplateID), clone, &upid); err != nil {
 		return Server{}, err
 	}
-	logf("proxmox phase=clone-wait vmid=%d task=%s\n", vmid, upid)
 	clonedVMID := strconv.Itoa(vmid)
 	cleanupClone := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -214,7 +208,6 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 		cleanupClone()
 		return Server{}, err
 	}
-	logf("proxmox phase=config vmid=%d bridge=%s\n", vmid, cfg.Proxmox.Bridge)
 
 	now := time.Now().UTC()
 	labels := directLeaseLabels(cfg, leaseID, slug, "proxmox", "", keep, now)
@@ -236,23 +229,19 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 		cleanupClone()
 		return Server{}, err
 	}
-	logf("proxmox phase=start vmid=%d\n", vmid)
 	if err := c.startVM(ctx, vmid); err != nil {
 		cleanupClone()
 		return Server{}, err
 	}
-	logf("proxmox phase=wait-ip vmid=%d\n", vmid)
 	server, err := c.waitServerIP(ctx, vmid)
 	if err != nil {
 		cleanupClone()
 		return Server{}, err
 	}
-	logf("proxmox phase=bootstrap-ssh vmid=%d ip=%s\n", vmid, server.PublicNet.IPv4.IP)
 	if err := c.bootstrapSSH(ctx, server.PublicNet.IPv4.IP, cfg); err != nil {
 		cleanupClone()
 		return Server{}, err
 	}
-	logf("proxmox phase=inspect vmid=%d\n", vmid)
 	server, err = c.GetServer(ctx, clonedVMID)
 	if err != nil {
 		cleanupClone()
