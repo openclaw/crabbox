@@ -41,6 +41,9 @@ const (
 	targetLinux     = core.TargetLinux
 	NetworkPublic   = core.NetworkPublic
 	statusViewReady = "running"
+
+	maxSandboxNameLen    = 63
+	sandboxNameSuffixLen = 6
 )
 
 func exit(code int, format string, args ...any) core.ExitError {
@@ -53,6 +56,14 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 
 func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
+}
+
+func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
+	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
+}
+
+func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
+	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
 }
 
 func newLeaseSlug(leaseID string) string {

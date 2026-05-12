@@ -1,6 +1,7 @@
 package tensorlake
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -205,6 +206,17 @@ func TestNewSandboxNameStripsRedundantPrefix(t *testing.T) {
 	}
 }
 
+func TestNewSandboxNameFitsTensorlakeLimit(t *testing.T) {
+	repo := Repo{Name: strings.Repeat("very-long-repo-name-", 8)}
+	name := newSandboxName(repo)
+	if len(name) > 63 {
+		t.Fatalf("name len=%d want <=63: %q", len(name), name)
+	}
+	if strings.HasSuffix(name, "-") || !strings.HasPrefix(name, "crabbox-") {
+		t.Fatalf("invalid sandbox name: %q", name)
+	}
+}
+
 // recordingCommandRunner is a fake CommandRunner that records every call and
 // replies from a per-verb queue of scripted (stdout, stderr, exit, err)
 // tuples. Replies are popped in order; if the queue for a verb is empty, the
@@ -339,6 +351,55 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 	}
 }
 
+func TestRunForwardsEnvViaUploadedProfile(t *testing.T) {
+	runner := newRunner(map[string]scriptedReply{
+		"sbx create":    {stdout: "envid0123456789012\n"},
+		"sbx exec":      {stdout: "ok\n"},
+		"sbx cp":        {stdout: ""},
+		"sbx terminate": {stdout: "envid0123456789012\n"},
+	}, nil)
+	var stderr bytes.Buffer
+	rt := newTestRuntime(runner)
+	rt.Stderr = &stderr
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
+	req := RunRequest{
+		Repo:       Repo{Name: "carbbox", Root: t.TempDir()},
+		Command:    []string{"printenv", "SECRET_TOKEN"},
+		NoSync:     true,
+		Env:        map[string]string{"SECRET_TOKEN": "super-secret"},
+		EnvSummary: true,
+		Options:    core.LeaseOptions{EnvAllow: []string{"SECRET_TOKEN"}},
+	}
+	if _, err := backend.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	verbs := callVerbs(runner)
+	want := []string{"sbx create", "sbx exec", "sbx cp", "sbx exec", "sbx exec", "sbx terminate"}
+	if !reflect.DeepEqual(verbs, want) {
+		t.Fatalf("verbs=%v want %v", verbs, want)
+	}
+	if strings.Contains(stderr.String(), "super-secret") {
+		t.Fatalf("secret leaked in stderr: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "SECRET_TOKEN=set len=12 secret=true") {
+		t.Fatalf("missing redacted env summary: %s", stderr.String())
+	}
+	cp := findCall(runner, "sbx cp")
+	if cp == nil || containsArgSubstring(cp.Args, "super-secret") {
+		t.Fatalf("env upload leaked secret in argv: %#v", cp)
+	}
+	userExec := findCallN(runner, "sbx exec", 1)
+	if userExec == nil {
+		t.Fatalf("missing user exec")
+	}
+	if containsArgSubstring(userExec.Args, "super-secret") {
+		t.Fatalf("secret leaked in exec argv: %v", userExec.Args)
+	}
+	if !containsArg(userExec.Args, "bash") || !containsArg(userExec.Args, "-lc") || !containsArgSubstring(userExec.Args, "/tmp/crabbox-env-") {
+		t.Fatalf("exec args=%v missing env profile wrapper", userExec.Args)
+	}
+}
+
 func TestRunSurfacesCommandExitCodeWithoutWrappingError(t *testing.T) {
 	exitErr := &fakeExitError{code: 7}
 	runner := newRunner(
@@ -368,6 +429,47 @@ func TestRunSurfacesCommandExitCodeWithoutWrappingError(t *testing.T) {
 	var ee ExitError
 	if !errors.As(err, &ee) || ee.Code != 7 {
 		t.Fatalf("err=%v want ExitError code=7", err)
+	}
+}
+
+func TestKeepOnFailureRetainsSandboxAndPrintsHint(t *testing.T) {
+	sandboxID := "failkeep" + randomSuffix() + randomSuffix()
+	defer removeLeaseClaim(leasePrefix + sandboxID)
+	runner := newRunner(
+		map[string]scriptedReply{
+			"sbx create": {stdout: sandboxID + "\n"},
+		},
+		map[string][]scriptedReply{
+			"sbx exec": {
+				{stdout: ""},
+				{stderr: "boom\n", exitCode: 7},
+			},
+		},
+	)
+	var stderr bytes.Buffer
+	rt := newTestRuntime(runner)
+	rt.Stderr = &stderr
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
+	req := RunRequest{
+		Repo:          Repo{Name: "carbbox", Root: t.TempDir()},
+		Command:       []string{"false"},
+		NoSync:        true,
+		KeepOnFailure: true,
+		Reclaim:       true,
+	}
+	result, err := backend.Run(context.Background(), req)
+	if result.ExitCode != 7 {
+		t.Fatalf("exit=%d want 7", result.ExitCode)
+	}
+	var ee ExitError
+	if !errors.As(err, &ee) || ee.Code != 7 {
+		t.Fatalf("err=%v want ExitError code=7", err)
+	}
+	if findCall(runner, "sbx terminate") != nil {
+		t.Fatalf("sbx terminate called despite --keep-on-failure")
+	}
+	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=tlsbx_"+sandboxID) {
+		t.Fatalf("missing keep-on-failure hint: %s", stderr.String())
 	}
 }
 
@@ -566,6 +668,15 @@ func containsArg(args []string, want string) bool {
 func containsArgPrefix(args []string, prefix string) bool {
 	for _, a := range args {
 		if strings.HasPrefix(a, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsArgSubstring(args []string, needle string) bool {
+	for _, a := range args {
+		if strings.Contains(a, needle) {
 			return true
 		}
 	}

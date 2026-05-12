@@ -91,6 +91,18 @@ Environment overrides (`CRABBOX_TENSORLAKE_*` and the corresponding
 config. The API key is sourced from `CRABBOX_TENSORLAKE_API_KEY` or
 `TENSORLAKE_API_KEY`.
 
+Run-time environment forwarding uses the normal Crabbox allowlist:
+
+```sh
+crabbox run --provider tensorlake --allow-env API_TOKEN -- printenv API_TOKEN
+crabbox run --provider tensorlake --env-from-profile ~/.my-live.profile --allow-env API_TOKEN -- npm test
+```
+
+Crabbox prints only redacted presence/length metadata. For Tensorlake it writes
+the allowed values to a temporary local shell profile, uploads that file into
+`/tmp`, sources it for the command, and removes both copies best-effort after
+the run. Values are not placed on the local `tensorlake` process argv.
+
 ## Lifecycle
 
 1. `warmup` / `run` (without `--id`) generates a Crabbox-owned sandbox name
@@ -105,7 +117,8 @@ config. The API key is sourced from `CRABBOX_TENSORLAKE_API_KEY` or
 4. The user command runs via `tensorlake sbx exec -w <workdir> <id> -- <cmd>`,
    streaming stdout/stderr back through Crabbox.
 5. On release the sandbox is terminated via `tensorlake sbx terminate <id>`
-   unless `--keep` was set.
+   unless `--keep` was set. `--keep-on-failure` retains newly-created failed
+   sandboxes and prints a rerun/stop hint.
 
 ## Capabilities
 
@@ -128,6 +141,9 @@ config. The API key is sourced from `CRABBOX_TENSORLAKE_API_KEY` or
   to `tensorlake sbx exec`. Plain commands containing shell metacharacters
   (`&&`, `|`, `>`, etc.) or leading `KEY=VALUE` env assignments are also
   auto-wrapped.
+- Forwarded environment values are written to a temporary in-sandbox profile
+  for the duration of the command. Avoid forwarding broad wildcard allowlists
+  unless you trust the sandbox and command.
 - `tensorlake.workdir` must be absolute (default `/workspace/crabbox`). It's
   used as both the sync target and the `-w` working directory for exec.
 - IDs accepted by `--id` and `stop`: Crabbox slugs and `tlsbx_<sandbox-id>`

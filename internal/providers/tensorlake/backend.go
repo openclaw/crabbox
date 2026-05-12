@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -64,10 +65,10 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 	if err != nil {
 		return RunResult{}, err
 	}
-	leaseID, sandboxID := "", ""
+	leaseID, sandboxID, slug := "", "", ""
 	acquired := false
 	if req.ID == "" {
-		var slug, name string
+		var name string
 		leaseID, sandboxID, name, slug, err = b.createSandbox(ctx, cli, req.Repo, req.Reclaim)
 		if err != nil {
 			return RunResult{}, err
@@ -79,9 +80,14 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		if err != nil {
 			return RunResult{}, err
 		}
+		slug = newLeaseSlug(leaseID)
 	}
-	if acquired && !req.Keep {
+	shouldStop := acquired && !req.Keep
+	if shouldStop {
 		defer func() {
+			if !shouldStop {
+				return
+			}
 			if termErr := cli.terminate(context.Background(), sandboxID); termErr != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: tensorlake terminate failed for %s: %v\n", sandboxID, termErr)
 				return
@@ -107,6 +113,17 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 	command, err := buildCommand(req.Command, req.ShellMode)
 	if err != nil {
 		return RunResult{}, err
+	}
+	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
+		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+	}
+	if len(req.Env) > 0 {
+		envPath, cleanup, err := b.uploadEnvProfile(ctx, cli, sandboxID, req.Env)
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer cleanup()
+		command = wrapCommandWithEnvProfile(command, envPath)
 	}
 	commandStart := b.now()
 	exitCode, runErr := cli.execStream(ctx, sandboxID, workdir, command, b.rt.Stdout, b.rt.Stderr)
@@ -140,9 +157,11 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		}
 	}
 	if runErr != nil {
+		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return result, ExitError{Code: 1, Message: fmt.Sprintf("tensorlake run failed: %v", runErr)}
 	}
 	if exitCode != 0 {
+		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("tensorlake run exited %d", exitCode)}
 	}
 	return result, nil
@@ -310,6 +329,16 @@ func newSandboxName(repo Repo) string {
 		base = "crabbox"
 	}
 	base = strings.TrimPrefix(base, strings.TrimSuffix(namePrefix, "-")+"-")
+	maxBase := maxSandboxNameLen - len(namePrefix) - 1 - sandboxNameSuffixLen
+	if maxBase < 1 {
+		maxBase = 1
+	}
+	if len(base) > maxBase {
+		base = strings.Trim(base[:maxBase], "-")
+	}
+	if base == "" {
+		base = "crabbox"
+	}
 	return namePrefix + base + "-" + randomSuffix()
 }
 
