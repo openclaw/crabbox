@@ -25,6 +25,11 @@ type ProxmoxClient struct {
 	Client      *http.Client
 }
 
+var (
+	proxmoxRunSSHQuietWithOptions = runSSHQuietWithOptions
+	proxmoxRunSSHInputQuiet       = runSSHInputQuiet
+)
+
 type ProxmoxError struct {
 	Method     string
 	Path       string
@@ -165,15 +170,20 @@ func (c *ProxmoxClient) ListCrabboxServers(ctx context.Context) ([]Server, error
 	return servers, nil
 }
 
-func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool) (Server, error) {
+func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, error) {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	if cfg.TargetOS != targetLinux {
 		return Server{}, exit(2, "proxmox provider currently supports target=linux only")
 	}
+	logf("proxmox phase=nextid node=%s\n", c.Node)
 	vmid, err := c.nextID(ctx)
 	if err != nil {
 		return Server{}, err
 	}
 	name := leaseProviderName(leaseID, slug)
+	logf("proxmox phase=clone template=%d vmid=%d name=%s full_clone=%t storage=%s pool=%s\n", cfg.Proxmox.TemplateID, vmid, name, cfg.Proxmox.FullClone, cfg.Proxmox.Storage, cfg.Proxmox.Pool)
 	full := "1"
 	if !cfg.Proxmox.FullClone {
 		full = "0"
@@ -193,6 +203,7 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/clone", url.PathEscape(c.Node), cfg.Proxmox.TemplateID), clone, &upid); err != nil {
 		return Server{}, err
 	}
+	logf("proxmox phase=clone-wait vmid=%d task=%s\n", vmid, upid)
 	clonedVMID := strconv.Itoa(vmid)
 	cleanupClone := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -203,6 +214,7 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 		cleanupClone()
 		return Server{}, err
 	}
+	logf("proxmox phase=config vmid=%d bridge=%s\n", vmid, cfg.Proxmox.Bridge)
 
 	now := time.Now().UTC()
 	labels := directLeaseLabels(cfg, leaseID, slug, "proxmox", "", keep, now)
@@ -211,7 +223,7 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 	description := proxmoxDescription(labels)
 	config := url.Values{
 		"ciuser":      {cfg.SSHUser},
-		"sshkeys":     {publicKey},
+		"sshkeys":     {proxmoxSSHKeysValue(publicKey)},
 		"ipconfig0":   {"ip=dhcp"},
 		"agent":       {"enabled=1"},
 		"description": {description},
@@ -224,20 +236,74 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 		cleanupClone()
 		return Server{}, err
 	}
+	logf("proxmox phase=start vmid=%d\n", vmid)
 	if err := c.startVM(ctx, vmid); err != nil {
 		cleanupClone()
 		return Server{}, err
 	}
-	if err := c.bootstrapGuest(ctx, vmid, cfg); err != nil {
+	logf("proxmox phase=wait-ip vmid=%d\n", vmid)
+	server, err := c.waitServerIP(ctx, vmid)
+	if err != nil {
 		cleanupClone()
 		return Server{}, err
 	}
-	server, err := c.GetServer(ctx, clonedVMID)
+	logf("proxmox phase=bootstrap-ssh vmid=%d ip=%s\n", vmid, server.PublicNet.IPv4.IP)
+	if err := c.bootstrapSSH(ctx, server.PublicNet.IPv4.IP, cfg); err != nil {
+		cleanupClone()
+		return Server{}, err
+	}
+	logf("proxmox phase=inspect vmid=%d\n", vmid)
+	server, err = c.GetServer(ctx, clonedVMID)
 	if err != nil {
 		cleanupClone()
 		return Server{}, err
 	}
 	return server, nil
+}
+
+func (c *ProxmoxClient) waitServerIP(ctx context.Context, vmid int) (Server, error) {
+	deadline := time.Now().Add(10 * time.Minute)
+	for {
+		server, err := c.GetServer(ctx, strconv.Itoa(vmid))
+		if err == nil && server.PublicNet.IPv4.IP != "" {
+			return server, nil
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return Server{}, fmt.Errorf("timeout waiting for proxmox guest ip: %w", err)
+			}
+			return Server{}, fmt.Errorf("timeout waiting for proxmox guest ip")
+		}
+		select {
+		case <-ctx.Done():
+			return Server{}, ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+func (c *ProxmoxClient) bootstrapSSH(ctx context.Context, host string, cfg Config) error {
+	target := SSHTargetFromConfig(cfg, host)
+	deadline := time.Now().Add(10 * time.Minute)
+	for {
+		if proxmoxRunSSHQuietWithOptions(ctx, target, sshTransportProbeCommand(target), "5", "1") == nil {
+			return proxmoxRunSSHInputQuiet(ctx, target, "sudo /bin/bash -s", proxmoxBootstrapScript(cfg))
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for proxmox ssh bootstrap transport")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+func proxmoxSSHKeysValue(publicKey string) string {
+	// Proxmox marks sshkeys as a "urlencoded" field, so it must remain
+	// URL-encoded after the regular application/x-www-form-urlencoded decode.
+	return strings.ReplaceAll(url.QueryEscape(strings.TrimSpace(publicKey)), "+", "%20")
 }
 
 func (c *ProxmoxClient) startVM(ctx context.Context, vmid int) error {
@@ -384,10 +450,38 @@ type proxmoxAgentExecStart struct {
 }
 
 type proxmoxAgentExecStatus struct {
-	Exited   bool   `json:"exited"`
-	ExitCode int    `json:"exitcode"`
-	OutData  string `json:"out-data"`
-	ErrData  string `json:"err-data"`
+	Exited   proxmoxBool `json:"exited"`
+	ExitCode int         `json:"exitcode"`
+	OutData  string      `json:"out-data"`
+	ErrData  string      `json:"err-data"`
+}
+
+type proxmoxBool bool
+
+func (b *proxmoxBool) UnmarshalJSON(data []byte) error {
+	var asBool bool
+	if err := json.Unmarshal(data, &asBool); err == nil {
+		*b = proxmoxBool(asBool)
+		return nil
+	}
+	var asNumber int
+	if err := json.Unmarshal(data, &asNumber); err == nil {
+		*b = proxmoxBool(asNumber != 0)
+		return nil
+	}
+	var asString string
+	if err := json.Unmarshal(data, &asString); err == nil {
+		switch strings.ToLower(strings.TrimSpace(asString)) {
+		case "1", "true", "yes":
+			*b = true
+		case "0", "false", "no", "":
+			*b = false
+		default:
+			return fmt.Errorf("invalid proxmox bool %q", asString)
+		}
+		return nil
+	}
+	return fmt.Errorf("invalid proxmox bool %s", string(data))
 }
 
 func (c *ProxmoxClient) bootstrapGuest(ctx context.Context, vmid int, cfg Config) error {
@@ -397,7 +491,7 @@ func (c *ProxmoxClient) bootstrapGuest(ctx context.Context, vmid int, cfg Config
 	script := proxmoxBootstrapScript(cfg)
 	var start proxmoxAgentExecStart
 	form := url.Values{
-		"command":    {"/bin/bash", "-s"},
+		"command":    {"/bin/bash"},
 		"input-data": {script},
 	}
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/agent/exec", url.PathEscape(c.Node), vmid), form, &start); err != nil {
@@ -432,9 +526,20 @@ func (c *ProxmoxClient) waitGuestExec(ctx context.Context, vmid, pid int) error 
 	for {
 		var status proxmoxAgentExecStatus
 		if err := c.do(ctx, http.MethodGet, path, nil, &status); err != nil {
+			if isProxmoxMissingGuestExecStatus(err) {
+				if time.Now().After(deadline) {
+					return fmt.Errorf("timeout waiting for proxmox guest bootstrap pid=%d", pid)
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(2 * time.Second):
+				}
+				continue
+			}
 			return err
 		}
-		if status.Exited {
+		if bool(status.Exited) {
 			if status.ExitCode == 0 {
 				return nil
 			}
@@ -449,6 +554,15 @@ func (c *ProxmoxClient) waitGuestExec(ctx context.Context, vmid, pid int) error 
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+func isProxmoxMissingGuestExecStatus(err error) bool {
+	var proxErr *ProxmoxError
+	if !errors.As(err, &proxErr) || proxErr.StatusCode != http.StatusInternalServerError {
+		return false
+	}
+	body := strings.ToLower(proxErr.Body)
+	return strings.Contains(body, "agent error") && strings.Contains(body, "pid") && strings.Contains(body, "does not exist")
 }
 
 type proxmoxAgentInterface struct {
