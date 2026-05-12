@@ -60,6 +60,18 @@ func TestNewProxmoxClientStripsAPIPathAndUsesTokenAuth(t *testing.T) {
 func TestProxmoxCreateServerFlow(t *testing.T) {
 	var forms []url.Values
 	var events []string
+	var bootstrapInput string
+	origProbe := proxmoxRunSSHQuietWithOptions
+	origInput := proxmoxRunSSHInputQuiet
+	proxmoxRunSSHQuietWithOptions = func(context.Context, SSHTarget, string, string, string) error { return nil }
+	proxmoxRunSSHInputQuiet = func(_ context.Context, _ SSHTarget, _ string, input string) error {
+		bootstrapInput = input
+		return nil
+	}
+	t.Cleanup(func() {
+		proxmoxRunSSHQuietWithOptions = origProbe
+		proxmoxRunSSHInputQuiet = origInput
+	})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "PVEAPIToken=runner@pve!crabbox=secret" {
 			t.Fatalf("auth=%q", r.Header.Get("Authorization"))
@@ -130,7 +142,7 @@ func TestProxmoxCreateServerFlow(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	got, err := client.CreateServer(ctx, cfg, "ssh-ed25519 AAAA test", "cbx_123456abcdef", "blue-crab", false)
+	got, err := client.CreateServer(ctx, cfg, "ssh-ed25519 AAAA test", "cbx_123456abcdef", "blue-crab", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,11 +155,8 @@ func TestProxmoxCreateServerFlow(t *testing.T) {
 	if forms[1].Get("ciuser") != "crabbox" || !strings.Contains(forms[1].Get("sshkeys"), "ssh-ed25519") || forms[1].Get("net0") != "virtio,bridge=vmbr1" {
 		t.Fatalf("config form=%v", forms[1])
 	}
-	if got := forms[2]["command"]; !reflect.DeepEqual(got, []string{"/bin/bash", "-s"}) {
-		t.Fatalf("exec command=%v want [/bin/bash -s]", got)
-	}
-	if !strings.Contains(forms[2].Get("input-data"), "crabbox-ready") {
-		t.Fatalf("exec form=%v", forms[2])
+	if !strings.Contains(bootstrapInput, "crabbox-ready") {
+		t.Fatalf("bootstrap input=%q", bootstrapInput)
 	}
 	wantEvents := []string{"clone", "wait-clone", "config", "wait-config", "start", "wait-start"}
 	if !reflect.DeepEqual(events, wantEvents) {
@@ -196,7 +205,7 @@ func TestProxmoxCreateServerCleansUpCloneOnConfigFailure(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := client.CreateServer(ctx, cfg, "ssh-ed25519 AAAA test", "cbx_123456abcdef", "blue-crab", false); err == nil {
+	if _, err := client.CreateServer(ctx, cfg, "ssh-ed25519 AAAA test", "cbx_123456abcdef", "blue-crab", false, nil); err == nil {
 		t.Fatal("expected config failure")
 	}
 	if !stopped || !deleted {
