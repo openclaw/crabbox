@@ -114,7 +114,9 @@ crabbox run \
 Crabbox parses simple `export NAME=value` and `NAME=value` profile lines without
 executing the profile. Only names selected by `--allow-env`, `env.allow`, or
 `CRABBOX_ENV_ALLOW` are forwarded, and summaries show presence/length metadata
-for secret-looking names rather than values.
+for secret-looking names rather than values. On native Windows, the profile
+handoff file is uploaded as UTF-8 and imported with PowerShell UTF-8 decoding,
+so non-ASCII token material and paths do not depend on the system code page.
 
 Use `--script <file>` or `--script-stdin` when the remote command is more than a
 small argv:
@@ -130,8 +132,24 @@ crabbox run \
 The script is uploaded under `.crabbox/scripts/` in the remote workdir and is
 included in failure bundles. POSIX SSH providers support this path; delegated
 providers reject it before reading stdin because they own command transport.
-Native Windows targets reject scripts too; use `--shell` for PowerShell
-snippets there.
+Native Windows targets upload scripts too and run them through Windows
+PowerShell; use `--shell` for short snippets and `--script <file.ps1>` for
+longer runs. Crabbox writes Windows scripts as UTF-8 with a byte-order mark when
+the input has no BOM, which keeps Windows PowerShell 5.1 from mojibaking
+non-ASCII script source.
+
+Native Windows example:
+
+```sh
+crabbox run \
+  --provider ssh \
+  --target windows \
+  --windows-mode normal \
+  --static-host win-dev.local \
+  --preflight \
+  --script ./scripts/windows-smoke.ps1 \
+  -- -Mode smoke
+```
 
 For PR debugging that should not inherit local dependency churn, use a fresh
 remote checkout:
@@ -174,8 +192,11 @@ For a concise pre-command capability snapshot, add `--preflight`:
 bin/crabbox run --id blue-lobster --preflight -- pnpm test:changed
 ```
 
-The preflight prints the remote user, remote cwd, sudo and apt availability,
-Node, pnpm, Docker, and bubblewrap from the same command workdir. It sources the
+The preflight prints a target-specific capability snapshot from the same
+command workdir. POSIX targets include remote user, cwd, sudo and apt
+availability, Node, pnpm, Docker, and bubblewrap. Native Windows targets include
+user, cwd, Windows PowerShell version, execution policy, git, tar, Node, pnpm,
+global `core.longpaths`, temp directory, and `pwsh` availability. It sources the
 Actions handoff env file when present, and marks the workspace as raw or
 Actions-hydrated. Raw workspaces with Actions hydration configured print the
 exact hydrate command suggestion and whether the selected provider/target

@@ -25,6 +25,7 @@ crabbox run --provider e2b --e2b-template base -- pnpm test
 crabbox run --provider ssh --target macos --static-host mac-studio.local -- xcodebuild test
 crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local -- dotnet test
 crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local --shell 'Write-Output ("BROWSER=" + $env:BROWSER)'
+crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local --script ./scripts/windows-smoke.ps1 -- -Mode smoke
 crabbox run --provider ssh --target windows --windows-mode wsl2 --static-host win-dev.local -- pnpm test
 ```
 
@@ -90,12 +91,20 @@ Sync uses `git ls-files --cached --others --exclude-standard` to build a file ma
 Use `--script <file>` or `--script-stdin` for multi-line remote commands.
 Crabbox uploads the script into `.crabbox/scripts/` under the remote workdir,
 runs it as a file, and includes that script directory in failure bundles. A
-shebang is honored; scripts without a shebang run through `bash`.
+shebang is honored on POSIX targets; scripts without a shebang run through
+`bash`. Native Windows targets run uploaded scripts through Windows PowerShell,
+and `--script-stdin` is treated as a PowerShell script. When a native Windows
+script path does not already end in `.ps1`, Crabbox adds that extension before
+uploading so `powershell.exe -File` can execute it normally.
 Trailing command arguments after `--` are passed to the script. This is a
-POSIX SSH-run feature; delegated providers reject it before reading stdin, and
-native Windows targets reject it.
+direct SSH-run feature; delegated providers reject it before reading stdin.
 
-Use `--env-from-profile <file>` with `--allow-env <name>` for live secrets. Crabbox parses simple profile lines without executing the profile, forwards only allowed names, and prints redacted presence/length metadata instead of values. `--allow-env` is repeatable and also accepts comma-separated names.
+Use `--env-from-profile <file>` with `--allow-env <name>` for live secrets.
+Crabbox parses simple profile lines without executing the profile, forwards
+only allowed names, and prints redacted presence/length metadata instead of
+values. `--allow-env` is repeatable and also accepts comma-separated names.
+Native Windows env-profile handoff files are uploaded as UTF-8 and imported
+with PowerShell UTF-8 decoding, so non-ASCII profile values are preserved.
 
 Use `--fresh-pr <owner/repo#number>` to skip local dirty sync and create a
 fresh remote GitHub PR checkout. `--fresh-pr <number>` uses the current
@@ -113,19 +122,26 @@ GitHub Actions runner registration remain Linux-only.
 
 On native Windows, plain argv is best for one executable such as `dotnet test`.
 Use `--shell` for multi-statement PowerShell snippets, env inspection, or
-commands that need PowerShell expression syntax.
+commands that need PowerShell expression syntax. Use `--script <file.ps1>` for
+longer PowerShell runs that should be uploaded and recorded with the run.
+Crabbox writes uploaded Windows scripts as UTF-8 with a byte-order mark when the
+input has no BOM, which keeps Windows PowerShell 5.1 from treating non-ASCII
+source as the system ANSI code page.
 
 Before rsync starts, Crabbox prints the candidate file count and byte estimate. Large syncs warn or fail according to `sync.warnFiles`, `sync.warnBytes`, `sync.failFiles`, and `sync.failBytes`; use `--force-sync-large` or `sync.allowLarge: true` only when the transfer size is intentional. Quiet rsync runs print a heartbeat, and `sync.timeout` kills stalled syncs.
 Large sync warnings also print the top source directories by file count plus a hint to update `.crabboxignore` or `sync.exclude`.
 
 Before sync, `run` prints a compact context block with run ID, portal/log URLs,
 lease ID, slug, provider, SSH target, remote workdir, and whether the workspace
-is raw or Actions-hydrated. Add `--preflight` to print remote user, current
-directory, sudo/apt availability, Node, pnpm, Docker, and bubblewrap versions
-before the command runs. The probe runs from the command workdir and sources the
-Actions handoff env file when present. Raw workspaces with Actions hydration
-configured also print the exact `crabbox actions hydrate ...` suggestion and
-whether the selected provider/target supports it.
+is raw or Actions-hydrated. Add `--preflight` to print a remote capability
+snapshot before the command runs. POSIX targets report the remote user, current
+directory, sudo/apt availability, Node, pnpm, Docker, and bubblewrap. Native
+Windows targets report the user, current directory, Windows PowerShell version,
+execution policy, git, tar, Node, pnpm, global `core.longpaths`, temp directory,
+and whether `pwsh` is available. The probe runs from the command workdir and
+sources the Actions handoff env file when present. Raw workspaces with Actions
+hydration configured also print the exact `crabbox actions hydrate ...`
+suggestion and whether the selected provider/target supports it.
 
 At the end of every command, `run` prints a one-line summary with sync duration, command duration, total duration, whether sync was skipped by fingerprint, and the remote exit code.
 

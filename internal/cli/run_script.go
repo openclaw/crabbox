@@ -78,13 +78,32 @@ func safeScriptName(source, prefix string) string {
 	return prefix + "-" + b.String()
 }
 
+func runScriptForTarget(spec *RunScriptSpec, target SSHTarget) *RunScriptSpec {
+	if spec == nil || !isWindowsNativeTarget(target) {
+		return spec
+	}
+	updated := *spec
+	if !strings.EqualFold(filepath.Ext(updated.RemotePath), ".ps1") {
+		updated.RemotePath += ".ps1"
+	}
+	return &updated
+}
+
 func uploadRunScript(ctx context.Context, target SSHTarget, workdir string, spec *RunScriptSpec) error {
 	if spec == nil {
 		return nil
 	}
 	remote := remoteUploadRunScriptCommand(workdir, spec.RemotePath)
-	if err := runSSHInput(ctx, target, remote, bytes.NewReader(spec.Data), io.Discard, io.Discard); err != nil {
-		return exit(7, "upload script: %v", err)
+	if isWindowsNativeTarget(target) {
+		remote = windowsRemoteUploadRunScriptCommand(workdir, spec.RemotePath)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runSSHInput(ctx, target, remote, bytes.NewReader(spec.Data), &stdout, &stderr); err != nil {
+		detail := trimFailureDetail(strings.TrimSpace(stdout.String() + "\n" + stderr.String()))
+		if detail != "" {
+			return exit(7, "upload script %s: %v: %s", spec.RemotePath, err, detail)
+		}
+		return exit(7, "upload script %s: %v", spec.RemotePath, err)
 	}
 	return nil
 }
@@ -97,6 +116,35 @@ func remoteUploadRunScriptCommand(workdir, remotePath string) string {
 		"cat > " + shellQuote(remotePath) + "\n" +
 		"chmod 700 " + shellQuote(remotePath) + "\n"
 	return "bash -lc " + shellQuote(script)
+}
+
+func windowsRemoteUploadRunScriptCommand(workdir, remotePath string) string {
+	return windowsRemoteUploadUTF8BOMFileCommand(workdir, remotePath)
+}
+
+func windowsRemoteUploadUTF8BOMFileCommand(workdir, remotePath string) string {
+	script := `$ErrorActionPreference = "Stop"
+Set-Location -LiteralPath ` + psQuote(workdir) + `
+$path = ` + psQuote(remotePath) + `
+$dir = Split-Path -Parent $path
+if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+$fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
+$stdin = [Console]::OpenStandardInput()
+$memory = New-Object System.IO.MemoryStream
+$stdin.CopyTo($memory)
+$bytes = $memory.ToArray()
+$hasBom = $false
+if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $hasBom = $true }
+if ($bytes.Length -ge 2 -and (($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) -or ($bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF))) { $hasBom = $true }
+if ($hasBom) {
+  [System.IO.File]::WriteAllBytes($fullPath, $bytes)
+} else {
+  $bom = [byte[]](0xEF, 0xBB, 0xBF)
+  [byte[]]$out = $bom + $bytes
+  [System.IO.File]::WriteAllBytes($fullPath, $out)
+}
+`
+	return powershellCommand(script)
 }
 
 func remoteRunScriptCommandWithEnvFile(workdir string, env map[string]string, envFile string, script *RunScriptSpec, args []string) string {
@@ -121,6 +169,23 @@ func remoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, e
 		b.WriteString(shellQuote(arg))
 	}
 	return b.String()
+}
+
+func windowsRemoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, envFiles []string, script *RunScriptSpec, args []string) string {
+	var b bytes.Buffer
+	writeWindowsRemotePrefix(&b, workdir, env, envFiles)
+	b.WriteString("$__crabboxScript = " + psQuote(script.RemotePath) + "\n")
+	b.WriteString("$__crabboxArgs = @(")
+	for i, arg := range args {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(psQuote(arg))
+	}
+	b.WriteString(")\n")
+	b.WriteString("& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $__crabboxScript @__crabboxArgs\n")
+	b.WriteString("exit $LASTEXITCODE\n")
+	return powershellCommand(b.String())
 }
 
 func runScriptDisplay(script *RunScriptSpec, args []string) string {

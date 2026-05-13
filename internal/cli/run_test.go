@@ -383,6 +383,23 @@ func TestRemoteCapabilityPreflightCommandUsesCommandEnvironment(t *testing.T) {
 	}
 }
 
+func TestWindowsRemoteCapabilityPreflightCommandUsesCommandEnvironment(t *testing.T) {
+	got := windowsRemoteCapabilityPreflightCommand(`C:\crabbox\repo`, map[string]string{"CI": "1"}, []string{`.crabbox\env\run.env`})
+	decoded := decodePowerShellCommand(t, got)
+	for _, want := range []string{
+		`Set-Location -LiteralPath 'C:\crabbox\repo'`,
+		`Get-Content -Encoding UTF8 -LiteralPath '.crabbox\env\run.env'`,
+		`$env:CI = '1'`,
+		`Test-Value "powershell"`,
+		`Test-Value "node"`,
+		`pwsh=`,
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("windows preflight command missing %q in %q", want, decoded)
+		}
+	}
+}
+
 func TestDelegatedPreflightPrintsUnsupportedMessage(t *testing.T) {
 	var stderr bytes.Buffer
 	printDelegatedPreflightUnsupported(&stderr, "e2b")

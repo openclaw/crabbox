@@ -650,7 +650,7 @@ afterSync:
 		}
 	}
 	if len(envSelection.Profile) > 0 {
-		profileEnvFile = ".crabbox/env/" + safeCaptureName(firstNonBlank(recorder.runID, leaseID, "run")) + ".env.sh"
+		profileEnvFile = ".crabbox/env/" + safeCaptureName(firstNonBlank(recorder.runID, leaseID, "run")) + ".env"
 		if err := uploadRunEnvProfile(ctx, target, workdir, profileEnvFile, envSelection.Profile); err != nil {
 			return recordFailure(err)
 		}
@@ -677,9 +677,7 @@ afterSync:
 	}
 	commandDisplay := strings.Join(command, " ")
 	if script != nil {
-		if isWindowsNativeTarget(target) {
-			return recordFailure(exit(2, "--script is not supported for native Windows targets"))
-		}
+		script = runScriptForTarget(script, target)
 		if err := uploadRunScript(ctx, target, workdir, script); err != nil {
 			return recordFailure(err)
 		}
@@ -710,7 +708,9 @@ afterSync:
 	}
 	if isWindowsNativeTarget(target) {
 		remote = windowsRemoteCommandWithEnvFiles(workdir, runEnv, envFiles, command)
-		if *shellMode || shouldUseShell(command) {
+		if script != nil {
+			remote = windowsRemoteRunScriptCommandWithEnvFiles(workdir, runEnv, envFiles, script, command)
+		} else if *shellMode || shouldUseShell(command) {
 			remote = windowsRemoteShellCommandWithEnvFiles(workdir, runEnv, envFiles, strings.Join(command, " "))
 		}
 	}

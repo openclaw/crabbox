@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"sort"
 	"strings"
@@ -195,8 +194,13 @@ func uploadRunEnvProfile(ctx context.Context, target SSHTarget, workdir, remoteP
 		remote = windowsRemoteUploadRunEnvProfileCommand(workdir, remotePath)
 		input = formatPlainEnvFile(env)
 	}
-	if err := runSSHInput(ctx, target, remote, strings.NewReader(input), io.Discard, io.Discard); err != nil {
-		return exit(7, "upload env profile: %v", err)
+	var stdout, stderr bytes.Buffer
+	if err := runSSHInput(ctx, target, remote, strings.NewReader(input), &stdout, &stderr); err != nil {
+		detail := trimFailureDetail(strings.TrimSpace(stdout.String() + "\n" + stderr.String()))
+		if detail != "" {
+			return exit(7, "upload env profile %s: %v: %s", remotePath, err, detail)
+		}
+		return exit(7, "upload env profile %s: %v", remotePath, err)
 	}
 	return nil
 }
@@ -257,16 +261,7 @@ func formatPlainEnvFile(env map[string]string) string {
 }
 
 func windowsRemoteUploadRunEnvProfileCommand(workdir, remotePath string) string {
-	script := `$ErrorActionPreference = "Stop"
-Set-Location -LiteralPath ` + psQuote(workdir) + `
-$path = ` + psQuote(remotePath) + `
-$dir = Split-Path -Parent $path
-if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-$inputStream = [Console]::OpenStandardInput()
-$fileStream = [System.IO.File]::Open($path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-try { $inputStream.CopyTo($fileStream) } finally { $fileStream.Dispose() }
-`
-	return powershellCommand(script)
+	return windowsRemoteUploadUTF8BOMFileCommand(workdir, remotePath)
 }
 
 func windowsRemoteRemoveRunEnvProfileCommand(workdir, remotePath string) string {

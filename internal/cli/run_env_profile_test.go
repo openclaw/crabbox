@@ -56,6 +56,26 @@ func TestFormatPlainEnvFileForWindowsProfileHandoff(t *testing.T) {
 	}
 }
 
+func TestWindowsRemoteUploadRunEnvProfileWritesUTF8BOMBytes(t *testing.T) {
+	got := windowsRemoteUploadRunEnvProfileCommand(`C:\crabbox\repo`, `.crabbox\env\run.env`)
+	decoded := decodePowerShellCommand(t, got)
+	for _, want := range []string{
+		`Set-Location -LiteralPath 'C:\crabbox\repo'`,
+		`$stdin = [Console]::OpenStandardInput()`,
+		`$stdin.CopyTo($memory)`,
+		`[byte[]](0xEF, 0xBB, 0xBF)`,
+		`$fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)`,
+		`[System.IO.File]::WriteAllBytes($fullPath, $out)`,
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("windows env upload command missing %q in %q", want, decoded)
+		}
+	}
+	if strings.Contains(decoded, "ReadToEnd()") || strings.Contains(decoded, "WriteAllText") {
+		t.Fatalf("windows env upload command should preserve bytes, got %q", decoded)
+	}
+}
+
 func containsAll(s string, values ...string) bool {
 	for _, value := range values {
 		if !strings.Contains(s, value) {

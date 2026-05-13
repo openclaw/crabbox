@@ -144,7 +144,7 @@ func writeWindowsRemotePrefix(b *bytes.Buffer, workdir string, env map[string]st
 		if envFile == "" {
 			continue
 		}
-		b.WriteString(`if (Test-Path -LiteralPath ` + psQuote(envFile) + `) { Get-Content -LiteralPath ` + psQuote(envFile) + ` | ForEach-Object { if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process') } } }` + "\n")
+		b.WriteString(`if (Test-Path -LiteralPath ` + psQuote(envFile) + `) { Get-Content -Encoding UTF8 -LiteralPath ` + psQuote(envFile) + ` | ForEach-Object { if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process') } } }` + "\n")
 	}
 	for key, value := range env {
 		b.WriteString(`$env:` + key + ` = ` + psQuote(value) + "\n")

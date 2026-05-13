@@ -161,11 +161,11 @@ func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config
 	for _, line := range remotePreflightWorkspaceLines(cfg, target, leaseID, workdir, hydrated, actionsURL, hydrateSupported) {
 		fmt.Fprintln(w, line)
 	}
+	command := remoteCapabilityPreflightCommand(workdir, env, envFiles)
 	if isWindowsNativeTarget(target) {
-		fmt.Fprintln(w, "remote preflight skipped: native Windows capability probe is not implemented")
-		return
+		command = windowsRemoteCapabilityPreflightCommand(workdir, env, envFiles)
 	}
-	out, err := runSSHCombinedOutput(ctx, target, remoteCapabilityPreflightCommand(workdir, env, envFiles))
+	out, err := runSSHCombinedOutput(ctx, target, command)
 	if err != nil {
 		fmt.Fprintf(w, "remote preflight failed: %v\n", err)
 		if strings.TrimSpace(out) != "" {
@@ -242,6 +242,38 @@ if command -v pnpm >/dev/null 2>&1; then printf 'pnpm=%s\n' "$(pnpm --version 2>
 if command -v docker >/dev/null 2>&1; then printf 'docker=%s\n' "$(docker --version 2>/dev/null | sed 's/,.*//')"; else printf 'docker=missing\n'; fi
 if command -v bwrap >/dev/null 2>&1; then printf 'bubblewrap=yes\n'; else printf 'bubblewrap=missing\n'; fi`
 	return remoteShellCommandWithEnvFiles(workdir, env, envFiles, script)
+}
+
+func windowsRemoteCapabilityPreflightCommand(workdir string, env map[string]string, envFiles []string) string {
+	var b bytes.Buffer
+	writeWindowsRemotePrefix(&b, workdir, env, envFiles)
+	b.WriteString(`function Test-Cmd($Name) {
+  $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  return "missing"
+}
+function Test-Value($Label, $ScriptBlock) {
+  try {
+    $value = & $ScriptBlock
+    if ($null -eq $value -or "$value" -eq "") { $value = "unknown" }
+    Write-Output ($Label + "=" + (($value | Select-Object -First 1) -join ""))
+  } catch {
+    Write-Output ($Label + "=error:" + $_.Exception.Message)
+  }
+}
+Test-Value "user" { whoami }
+Test-Value "cwd" { (Get-Location).Path }
+Test-Value "powershell" { $PSVersionTable.PSVersion.ToString() }
+Test-Value "execution_policy" { Get-ExecutionPolicy -Scope Process }
+Test-Value "git" { git --version }
+Test-Value "tar" { (tar --version | Select-Object -First 1) -join "" }
+Test-Value "node" { node --version }
+Test-Value "pnpm" { pnpm --version }
+Test-Value "longpaths" { git config --global --get core.longpaths }
+Test-Value "temp" { $env:TEMP }
+Write-Output ("pwsh=" + (Test-Cmd "pwsh"))
+`)
+	return powershellCommand(b.String())
 }
 
 type FailureCaptureMetadata struct {
