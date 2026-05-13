@@ -471,7 +471,7 @@ func (testModalProvider) Spec() ProviderSpec {
 		Name:        "modal",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    nil,
+		Features:    FeatureSet{FeatureArchiveSync},
 		Coordinator: CoordinatorNever,
 	}
 }

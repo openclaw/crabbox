@@ -264,7 +264,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		TimingJSON:      *timingJSON,
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
-		if err := RejectDelegatedSyncOptions(backend.Spec().Name, runReq); err != nil {
+		if err := RejectDelegatedSyncOptionsForSpec(backend.Spec(), runReq); err != nil {
 			return err
 		}
 		if runReq.Preflight {

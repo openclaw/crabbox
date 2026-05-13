@@ -20,7 +20,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Name:        providerName,
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    nil,
+		Features:    core.FeatureSet{core.FeatureArchiveSync},
 		Coordinator: core.CoordinatorNever,
 	}
 }

@@ -310,6 +310,22 @@ func TestValidateRequestedCapabilitiesUsesProviderSpec(t *testing.T) {
 	}
 }
 
+func TestRejectDelegatedSyncOptionsAllowsArchiveSyncControls(t *testing.T) {
+	spec := ProviderSpec{Name: "modal", Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeatureArchiveSync}}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{SyncOnly: true}); err != nil {
+		t.Fatalf("archive sync provider should allow --sync-only: %v", err)
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{ForceSyncLarge: true}); err != nil {
+		t.Fatalf("archive sync provider should allow --force-sync-large: %v", err)
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{ChecksumSync: true}); err == nil {
+		t.Fatal("archive sync provider should still reject --checksum")
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: "islo"}, RunRequest{SyncOnly: true}); err == nil {
+		t.Fatal("plain delegated provider should reject --sync-only")
+	}
+}
+
 func TestProviderFlagsApplyDaytonaAndIsloWithoutCoreEdits(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)

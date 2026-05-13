@@ -34,7 +34,7 @@ func (b *modalBackend) syncWorkspace(ctx context.Context, client modalAPI, sandb
 	}
 	preflightDuration := b.now().Sub(preflightStarted)
 	prepareStarted := b.now()
-	if err := b.prepareWorkspace(ctx, client, sandboxID, workdir); err != nil {
+	if err := b.prepareWorkspace(ctx, client, sandboxID, workdir, b.cfg.Sync.Delete); err != nil {
 		return nil, 0, err
 	}
 	prepareDuration := b.now().Sub(prepareStarted)
@@ -70,13 +70,13 @@ func (b *modalBackend) syncWorkspace(ctx context.Context, client modalAPI, sandb
 	}, total, nil
 }
 
-func (b *modalBackend) prepareWorkspace(ctx context.Context, client modalAPI, sandboxID, workdir string) error {
+func (b *modalBackend) prepareWorkspace(ctx context.Context, client modalAPI, sandboxID, workdir string, delete bool) error {
 	workdir, err := cleanModalWorkdir(workdir)
 	if err != nil {
 		return err
 	}
 	command := "mkdir -p " + shellQuote(workdir)
-	if b.cfg.Sync.Delete {
+	if delete {
 		command = "rm -rf " + shellQuote(workdir) + " && " + command
 	}
 	return b.execShell(ctx, client, sandboxID, command, io.Discard)

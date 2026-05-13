@@ -342,23 +342,8 @@ try:
     sb = modal.Sandbox.from_id(req["sandbox_id"])
     remote_path = req["remote_path"]
     remote_dir = os.path.dirname(remote_path) or "/tmp"
-    command = "mkdir -p " + repr(remote_dir) + " && cat > " + repr(remote_path)
-    proc = sb.exec("bash", "-lc", command)
-    with open(req["local_path"], "rb") as f:
-        while True:
-            chunk = f.read(1024 * 1024)
-            if not chunk:
-                break
-            proc.stdin.write(chunk)
-    proc.stdin.close()
-    threads = [threading.Thread(target=write_stream, args=(proc.stderr, sys.stderr.buffer))]
-    for thread in threads:
-        thread.daemon = True
-        thread.start()
-    rc = proc.wait()
-    for thread in threads:
-        thread.join()
-    sys.exit(0 if rc is None else int(rc))
+    sb.filesystem.make_directory(remote_dir, create_parents=True)
+    sb.filesystem.copy_from_local(req["local_path"], remote_path)
 except Exception as exc:
     fail(exc)
 `

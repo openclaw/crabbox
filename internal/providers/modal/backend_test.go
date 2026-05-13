@@ -31,6 +31,9 @@ func TestProviderSpec(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v want linux", spec.Targets)
 	}
+	if !hasFeature(spec.Features, core.FeatureArchiveSync) {
+		t.Fatalf("features=%#v want archive sync", spec.Features)
+	}
 }
 
 func TestProviderForResolvesModal(t *testing.T) {
@@ -73,6 +76,27 @@ func TestCleanModalWorkdir(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestModalSandboxTagsFitModalLimit(t *testing.T) {
+	tags := modalSandboxTags(newTestConfig(), "cbx_123", "blue-lobster", "repo", false, time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC))
+	if len(tags) > 10 {
+		t.Fatalf("modal tags=%d want at most 10: %#v", len(tags), tags)
+	}
+	for _, key := range []string{"crabbox", "provider", "lease", "slug", "state", "keep", "expires_at", "app", "image", "repo"} {
+		if tags[key] == "" {
+			t.Fatalf("missing tag %q in %#v", key, tags)
+		}
+	}
+}
+
+func hasFeature(features core.FeatureSet, want core.Feature) bool {
+	for _, feature := range features {
+		if feature == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBuildModalCommandWrapsWorkdirAndShell(t *testing.T) {
@@ -125,6 +149,44 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 	userCommand := fake.execCommands[1]
 	if !containsArg(userCommand, "bash") || !containsArg(userCommand, "-lc") || !containsArgSubstring(userCommand, "echo") {
 		t.Fatalf("user command=%v", userCommand)
+	}
+}
+
+func TestRunNoSyncDoesNotDeleteExistingWorkspace(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeModalAPI{
+		sandbox: modalSandbox{
+			ID:     "sb-123",
+			Status: "running",
+			Tags: map[string]string{
+				"provider": "modal",
+				"crabbox":  "true",
+				"lease":    "cbx_123",
+			},
+		},
+	}
+	withFakeModalAPI(t, fake)
+	cfg := newTestConfig()
+	cfg.Sync.Delete = true
+	backend := NewModalBackend(Provider{}.Spec(), cfg, testRuntime()).(*modalBackend)
+	req := RunRequest{
+		ID:      "sb-123",
+		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+		Command: []string{"test", "-f", "kept.txt"},
+		NoSync:  true,
+	}
+	if _, err := backend.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	if len(fake.execCommands) != 2 {
+		t.Fatalf("exec commands=%v want prepare and user command", fake.execCommands)
+	}
+	prepare := strings.Join(fake.execCommands[0], " ")
+	if strings.Contains(prepare, "rm -rf") {
+		t.Fatalf("--no-sync prepare deleted workspace: %v", fake.execCommands[0])
+	}
+	if !strings.Contains(prepare, "mkdir -p") {
+		t.Fatalf("--no-sync prepare should ensure workspace: %v", fake.execCommands[0])
 	}
 }
 

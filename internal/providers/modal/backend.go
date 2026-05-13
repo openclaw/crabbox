@@ -104,7 +104,7 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, sandboxID, workdir); err != nil {
+	} else if err := b.prepareWorkspace(ctx, client, sandboxID, workdir, false); err != nil {
 		return RunResult{}, err
 	}
 	if req.SyncOnly {
@@ -266,14 +266,7 @@ func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo 
 	cfg := b.cfg
 	cfg.TTL = modalTimeoutDuration(cfg.TTL)
 	cfg.ServerType = modalImage(cfg)
-	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, b.now().UTC())
-	labels["state"] = "ready"
-	labels["app"] = modalApp(cfg)
-	labels["image"] = modalImage(cfg)
-	labels["workdir"] = workspace
-	if repo.Name != "" {
-		labels["repo"] = repo.Name
-	}
+	labels := modalSandboxTags(cfg, leaseID, slug, repo.Name, keep, b.now().UTC())
 	timeoutSeconds := durationSecondsCeil(cfg.TTL)
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=modal lease=%s slug=%s app=%s image=%s timeout=%ds\n", leaseID, slug, modalApp(cfg), modalImage(cfg), timeoutSeconds)
 	sandbox, err := client.CreateSandbox(ctx, modalCreateSandboxRequest{
@@ -294,6 +287,25 @@ func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo 
 		return "", modalSandbox{}, "", err
 	}
 	return leaseID, sandbox, slug, nil
+}
+
+func modalSandboxTags(cfg Config, leaseID, slug, repoName string, keep bool, now time.Time) map[string]string {
+	base := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
+	tags := map[string]string{
+		"crabbox":    "true",
+		"provider":   providerName,
+		"lease":      leaseID,
+		"slug":       base["slug"],
+		"state":      "ready",
+		"keep":       base["keep"],
+		"expires_at": base["expires_at"],
+		"app":        modalApp(cfg),
+		"image":      modalImage(cfg),
+	}
+	if strings.TrimSpace(repoName) != "" {
+		tags["repo"] = repoName
+	}
+	return tags
 }
 
 func (b *modalBackend) resolveSandboxID(ctx context.Context, client modalAPI, id, repoRoot string, reclaim bool) (string, string, string, error) {

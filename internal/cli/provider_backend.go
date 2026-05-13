@@ -86,6 +86,7 @@ type Feature string
 const (
 	FeatureSSH         Feature = "ssh"
 	FeatureCrabboxSync Feature = "crabbox-sync"
+	FeatureArchiveSync Feature = "archive-sync"
 	FeatureCleanup     Feature = "cleanup"
 	FeatureDesktop     Feature = "desktop"
 	FeatureBrowser     Feature = "browser"
@@ -442,14 +443,16 @@ func featureSetHas(features FeatureSet, feature Feature) bool {
 	return false
 }
 
-func rejectDelegatedSyncOptions(provider string, req RunRequest) error {
-	if req.SyncOnly {
+func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {
+	provider := spec.Name
+	archiveSync := featureSetHas(spec.Features, FeatureArchiveSync)
+	if req.SyncOnly && !archiveSync {
 		return exit(2, "%s delegates sync; --sync-only is not supported", provider)
 	}
 	if req.ChecksumSync {
 		return exit(2, "%s delegates sync; --checksum is not supported", provider)
 	}
-	if req.ForceSyncLarge {
+	if req.ForceSyncLarge && !archiveSync {
 		return exit(2, "%s delegates sync; --force-sync-large is not supported", provider)
 	}
 	if req.CaptureStdout != "" {
@@ -473,8 +476,16 @@ func rejectDelegatedSyncOptions(provider string, req RunRequest) error {
 	return nil
 }
 
+func rejectDelegatedSyncOptions(provider string, req RunRequest) error {
+	return rejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: provider}, req)
+}
+
 func RejectDelegatedSyncOptions(provider string, req RunRequest) error {
 	return rejectDelegatedSyncOptions(provider, req)
+}
+
+func RejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {
+	return rejectDelegatedSyncOptionsForSpec(spec, req)
 }
 
 func renderServerList(stdout io.Writer, servers []Server) {
