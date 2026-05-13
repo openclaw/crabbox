@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -80,14 +81,33 @@ func (c *modalPythonClient) Exec(ctx context.Context, req modalExecRequest) (int
 		"command":    req.Command,
 		"timeout":    req.Timeout,
 	}
+	resultFile, err := os.CreateTemp("", "crabbox-modal-exec-*.rc")
+	if err != nil {
+		return 0, fmt.Errorf("create modal exec result file: %w", err)
+	}
+	resultPath := resultFile.Name()
+	_ = resultFile.Close()
+	defer os.Remove(resultPath)
+	payload["result_path"] = resultPath
 	res, err := c.runStreamed(ctx, modalExecScript, payload, req.Stdout, req.Stderr)
 	if err != nil {
 		return res.ExitCode, err
 	}
-	if res.ExitCode == modalTransportExitCode {
-		return res.ExitCode, fmt.Errorf("modal exec transport failed")
+	if res.ExitCode != 0 {
+		if res.ExitCode == modalTransportExitCode {
+			return res.ExitCode, fmt.Errorf("modal exec transport failed")
+		}
+		return res.ExitCode, fmt.Errorf("modal exec client exited %d", res.ExitCode)
 	}
-	return res.ExitCode, nil
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		return 0, fmt.Errorf("read modal exec result: %w", err)
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, fmt.Errorf("decode modal exec result %q: %w", strings.TrimSpace(string(data)), err)
+	}
+	return code, nil
 }
 
 func (c *modalPythonClient) UploadFile(ctx context.Context, sandboxID, localPath, remotePath string) error {
@@ -330,7 +350,12 @@ try:
     rc = proc.wait()
     for thread in threads:
         thread.join()
-    sys.exit(0 if rc is None else int(rc))
+    result_path = req.get("result_path")
+    if result_path:
+        with open(result_path, "w", encoding="utf-8") as f:
+            f.write(str(0 if rc is None else int(rc)))
+    else:
+        sys.exit(0 if rc is None else int(rc))
 except Exception as exc:
     fail(exc)
 `
