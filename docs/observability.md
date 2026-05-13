@@ -193,14 +193,36 @@ bin/crabbox run --id blue-lobster --preflight -- pnpm test:changed
 ```
 
 The preflight prints a target-specific capability snapshot from the same
-command workdir. POSIX targets include remote user, cwd, sudo and apt
-availability, Node, pnpm, Docker, and bubblewrap. Native Windows targets include
-user, cwd, Windows PowerShell version, execution policy, git, tar, Node, pnpm,
-global `core.longpaths`, temp directory, and `pwsh` availability. It sources the
-Actions handoff env file when present, and marks the workspace as raw or
-Actions-hydrated. Raw workspaces with Actions hydration configured print the
-exact hydrate command suggestion and whether the selected provider/target
-supports hydration.
+command workdir. It sources the Actions handoff env file when present, and
+marks the workspace as raw or Actions-hydrated. Raw workspaces with Actions
+hydration configured print the exact hydrate command suggestion and whether the
+selected provider/target supports hydration.
+
+Preflight is a probe layer, not an installer. Missing tools print
+`tool=missing`; Crabbox does not run `apt install`, `corepack prepare`,
+`bun install`, or any other setup. Install toolchains through Actions
+hydration, a prebaked image, devcontainer/Nix/mise/asdf setup, or the uploaded
+script/command itself.
+
+The default built-in probes cover common toolchains: `git`, `tar`, `node`,
+`npm`, `corepack`, `pnpm`, `yarn`, `bun`, `docker`, plus target-specific probes
+such as `sudo`, `apt`, `bubblewrap`, `powershell`, `execution_policy`,
+`longpaths`, `temp`, and `pwsh`. `uv` is available as an additional built-in.
+Override the list per run:
+
+```sh
+crabbox run --preflight --preflight-tools node,bun,docker -- bun test
+```
+
+Or per repository:
+
+```yaml
+run:
+  preflightTools:
+    - node
+    - bun
+    - docker
+```
 
 ## Actions Hydration
 

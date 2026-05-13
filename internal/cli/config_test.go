@@ -315,6 +315,10 @@ static:
 results:
   junit:
     - junit.xml
+run:
+  preflightTools:
+    - node
+    - bun
 cache:
   pnpm: true
   npm: false
@@ -424,6 +428,9 @@ ssh:
 	}
 	if len(cfg.Results.JUnit) != 1 || cfg.Results.JUnit[0] != "junit.xml" {
 		t.Fatalf("results config not loaded: %#v", cfg.Results)
+	}
+	if len(cfg.Run.PreflightTools) != 2 || cfg.Run.PreflightTools[0] != "node" || cfg.Run.PreflightTools[1] != "bun" {
+		t.Fatalf("run config not loaded: %#v", cfg.Run)
 	}
 	if !cfg.Cache.Pnpm || cfg.Cache.Npm || !cfg.Cache.Docker || !cfg.Cache.Git || cfg.Cache.MaxGB != 120 || !cfg.Cache.PurgeOnRelease {
 		t.Fatalf("cache config not loaded: %#v", cfg.Cache)
@@ -613,6 +620,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_SYNC_TIMEOUT", "45m")
 	t.Setenv("CRABBOX_SYNC_ALLOW_LARGE", "true")
 	t.Setenv("CRABBOX_ENV_ALLOW", "CI,NODE_OPTIONS,CUSTOM_*")
+	t.Setenv("CRABBOX_PREFLIGHT_TOOLS", "node,bun,docker")
 	path := userConfigPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -705,6 +713,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if len(cfg.EnvAllow) != 3 || cfg.EnvAllow[2] != "CUSTOM_*" {
 		t.Fatalf("unexpected env allow: %#v", cfg.EnvAllow)
+	}
+	if len(cfg.Run.PreflightTools) != 3 || cfg.Run.PreflightTools[1] != "bun" {
+		t.Fatalf("unexpected preflight tools: %#v", cfg.Run.PreflightTools)
 	}
 }
 

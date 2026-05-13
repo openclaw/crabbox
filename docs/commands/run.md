@@ -194,6 +194,44 @@ Add `--junit <path>` or configure `results.junit` to attach JUnit XML summaries 
 
 Use `crabbox sync-plan` to inspect the same local manifest without leasing a box when a sync estimate looks unexpectedly large.
 
+## Preflight
+
+`--preflight` prints a target-specific capability snapshot after sync and
+before the remote command. It is diagnostic only: Crabbox does not install
+tools, change the machine, or fail the run just because a tool is missing.
+Install logic belongs in Actions hydration, a prebaked image, a devcontainer,
+Nix/mise/asdf, or the command/script you run.
+
+By default, Crabbox checks common language and infrastructure tools plus
+OS-specific basics. Default generic probes are `git`, `tar`, `node`, `npm`,
+`corepack`, `pnpm`, `yarn`, `bun`, and `docker`; `uv` is available as an
+additional built-in. Linux/WSL-style POSIX probes also include `sudo`, `apt`,
+and `bubblewrap`; native Windows probes include `powershell`,
+`execution_policy`, `longpaths`, `temp`, and `pwsh`.
+
+Use `--preflight-tools` to replace the default tool list for one run:
+
+```sh
+crabbox run --preflight --preflight-tools node,bun,docker -- bun test
+crabbox run --preflight --preflight-tools default,uv -- node --test
+crabbox run --preflight --preflight-tools none -- ./smoke.sh
+```
+
+`default` expands to Crabbox's default built-ins; `none` keeps only the
+workspace summary. Unknown tool names fail before leasing so typos do not hide
+missing diagnostics. Unsupported OS-specific probes are skipped for the current
+target.
+
+Configure the default per repo:
+
+```yaml
+run:
+  preflightTools:
+    - node
+    - bun
+    - docker
+```
+
 Flags:
 
 ```text
@@ -237,6 +275,7 @@ Flags:
 --debug
 --junit <comma-separated remote XML paths>
 --preflight
+--preflight-tools <comma-separated tool names>
 --capture-stdout <local path>
 --capture-stderr <local path>
 --capture-on-fail

@@ -34,7 +34,7 @@ crabbox config show [--json]
 crabbox config path
 crabbox config set-broker --url <url> --token-stdin [--provider hetzner|aws|azure|gcp]
 crabbox warmup [--provider hetzner|aws|azure|gcp|proxmox|ssh|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--code] [--tailscale] [--network auto|tailscale|public] [--profile <name>] [--idle-timeout <duration>] [--timing-json]
-crabbox run [--id <lease-id-or-slug>] [--provider hetzner|aws|azure|gcp|proxmox|ssh|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--code] [--tailscale] [--network auto|tailscale|public] [--keep-on-failure] [--shell] [--script <file>|--script-stdin] [--fresh-pr <owner/repo#number>] [--allow-env <name>] [--env-from-profile <file>] [--checksum] [--debug] [--force-sync-large] [--preflight] [--capture-stdout <path>] [--capture-stderr <path>] [--capture-on-fail] [--download remote=local] [--timing-json] [--blacksmith-workflow <workflow>] -- <command...>
+crabbox run [--id <lease-id-or-slug>] [--provider hetzner|aws|azure|gcp|proxmox|ssh|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--code] [--tailscale] [--network auto|tailscale|public] [--keep-on-failure] [--shell] [--script <file>|--script-stdin] [--fresh-pr <owner/repo#number>] [--allow-env <name>] [--env-from-profile <file>] [--checksum] [--debug] [--force-sync-large] [--preflight] [--preflight-tools <tools>] [--capture-stdout <path>] [--capture-stderr <path>] [--capture-on-fail] [--download remote=local] [--timing-json] [--blacksmith-workflow <workflow>] -- <command...>
 crabbox job list
 crabbox job run [--id <lease-id-or-slug>] [--dry-run] [--no-hydrate] [--stop auto|always|success|failure|never] <name>
 crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] [--egress <profile>] [--webvnc] [--open] [-- <command...>]
@@ -337,6 +337,7 @@ Flags:
 --debug                 print sync timing and itemized rsync output
 --junit <paths>         comma-separated remote JUnit XML paths to attach to run history
 --preflight             print remote capability preflight before running the command
+--preflight-tools <tools> comma-separated preflight tools to probe; overrides run.preflightTools
 --capture-stdout <path> write remote stdout to a local file, skipping stdout run-log capture
 --capture-stderr <path> write remote stderr to a local file, skipping stderr run-log capture
 --capture-on-fail       compatibility alias; failure bundles are saved by default on non-zero exit

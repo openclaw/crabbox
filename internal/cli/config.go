@@ -74,6 +74,7 @@ type Config struct {
 	TTL                time.Duration
 	IdleTimeout        time.Duration
 	Sync               SyncConfig
+	Run                RunConfig
 	EnvAllow           []string
 	Capacity           CapacityConfig
 	Actions            ActionsConfig
@@ -106,6 +107,10 @@ type SyncConfig struct {
 	FailFiles   int
 	FailBytes   int64
 	AllowLarge  bool
+}
+
+type RunConfig struct {
+	PreflightTools []string
 }
 
 type CapacityConfig struct {
@@ -503,6 +508,7 @@ type fileConfig struct {
 	Proxmox          *fileProxmoxConfig       `yaml:"proxmox,omitempty"`
 	SSH              *fileSSHConfig           `yaml:"ssh,omitempty"`
 	Sync             *fileSyncConfig          `yaml:"sync,omitempty"`
+	Run              *fileRunConfig           `yaml:"run,omitempty"`
 	Env              *fileEnvConfig           `yaml:"env,omitempty"`
 	Capacity         *fileCapacityConfig      `yaml:"capacity,omitempty"`
 	Actions          *fileActionsConfig       `yaml:"actions,omitempty"`
@@ -627,6 +633,10 @@ type fileSyncConfig struct {
 
 type fileEnvConfig struct {
 	Allow []string `yaml:"allow,omitempty"`
+}
+
+type fileRunConfig struct {
+	PreflightTools []string `yaml:"preflightTools,omitempty"`
 }
 
 type fileCapacityConfig struct {
@@ -1183,6 +1193,9 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		if file.Sync.AllowLarge != nil {
 			cfg.Sync.AllowLarge = *file.Sync.AllowLarge
 		}
+	}
+	if file.Run != nil && len(file.Run.PreflightTools) > 0 {
+		cfg.Run.PreflightTools = normalizePreflightToolNames(file.Run.PreflightTools)
 	}
 	if file.Env != nil && len(file.Env.Allow) > 0 {
 		cfg.EnvAllow = appendUniqueStrings(nil, file.Env.Allow...)
@@ -1908,6 +1921,9 @@ func applyEnv(cfg *Config) {
 	cfg.Sync.BaseRef = getenv("CRABBOX_SYNC_BASE_REF", cfg.Sync.BaseRef)
 	if envAllow := os.Getenv("CRABBOX_ENV_ALLOW"); envAllow != "" {
 		cfg.EnvAllow = splitCommaList(envAllow)
+	}
+	if tools := os.Getenv("CRABBOX_PREFLIGHT_TOOLS"); tools != "" {
+		cfg.Run.PreflightTools = normalizePreflightToolNames(splitCommaList(tools))
 	}
 }
 

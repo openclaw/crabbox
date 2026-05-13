@@ -155,6 +155,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	captureStderr := fs.String("capture-stderr", "", "write remote stderr to a local file instead of the terminal")
 	captureOnFail := fs.Bool("capture-on-fail", false, "compatibility alias; failure bundles are saved by default on non-zero exit")
 	preflight := fs.Bool("preflight", false, "print remote capability preflight before running the command")
+	preflightTools := fs.String("preflight-tools", "", "comma-separated preflight tools to probe; overrides run.preflightTools")
 	scriptPath := fs.String("script", "", "upload and run a local script file")
 	scriptStdin := fs.Bool("script-stdin", false, "read a script from stdin, upload it, and run it")
 	freshPRValue := fs.String("fresh-pr", "", "run from a fresh remote checkout of a GitHub PR: owner/repo#123, URL, or number")
@@ -190,6 +191,14 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	}
 	for _, value := range allowEnvFlags {
 		cfg.EnvAllow = appendUniqueStrings(cfg.EnvAllow, splitCommaList(value)...)
+	}
+	if *preflightTools != "" {
+		cfg.Run.PreflightTools = normalizePreflightToolNames(splitCommaList(*preflightTools))
+	}
+	if *preflight {
+		if err := validatePreflightTools(cfg.Run.PreflightTools); err != nil {
+			return err
+		}
 	}
 	if flagWasSet(fs, "checksum") {
 		cfg.Sync.Checksum = *checksumSync

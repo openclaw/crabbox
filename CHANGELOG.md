@@ -6,11 +6,14 @@
 
 - Added `provider: modal` delegated runs for Modal Sandboxes through the local Modal Python client, including archive sync, env allowlist forwarding, docs, and no-live-credential tests.
 - Added native Windows support for `crabbox run --script` / `--script-stdin` and a real native Windows `--preflight` probe.
+- Added configurable `crabbox run --preflight` tool probes via `--preflight-tools`, `CRABBOX_PREFLIGHT_TOOLS`, and `run.preflightTools`.
 
 ### Changed
 
 ### Fixed
 
+- Fixed `crabbox run --preflight --preflight-tools none` so it prints only the workspace summary without running remote probes.
+- Fixed native Windows `crabbox run --preflight` so user and cwd diagnostics are always printed alongside configurable tool probes.
 - Fixed native Windows `--script` and `--env-from-profile` uploads so non-ASCII PowerShell source and profile values stay UTF-8 under Windows PowerShell.
 - Fixed native Windows `--env-from-profile` uploads so allowed profile values are written relative to the synced workdir and failures include the remote PowerShell error.
 
