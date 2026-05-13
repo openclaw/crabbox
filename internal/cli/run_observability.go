@@ -161,9 +161,13 @@ func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config
 	for _, line := range remotePreflightWorkspaceLines(cfg, target, leaseID, workdir, hydrated, actionsURL, hydrateSupported) {
 		fmt.Fprintln(w, line)
 	}
-	command := remoteCapabilityPreflightCommand(workdir, env, envFiles)
+	tools := preflightToolsForTarget(target, cfg.Run.PreflightTools)
+	if len(tools) == 0 {
+		return
+	}
+	command := remoteCapabilityPreflightCommand(workdir, env, envFiles, tools)
 	if isWindowsNativeTarget(target) {
-		command = windowsRemoteCapabilityPreflightCommand(workdir, env, envFiles)
+		command = windowsRemoteCapabilityPreflightCommand(workdir, env, envFiles, tools)
 	}
 	out, err := runSSHCombinedOutput(ctx, target, command)
 	if err != nil {
@@ -228,31 +232,31 @@ func hydrateCommandSuggestion(cfg Config, target SSHTarget, leaseID string, supp
 	return command
 }
 
-func remoteCapabilityPreflightCommand(workdir string, env map[string]string, envFiles []string) string {
+func remoteCapabilityPreflightCommand(workdir string, env map[string]string, envFiles []string, tools []string) string {
 	script := `printf 'user=%s\n' "$(id -un 2>/dev/null || whoami 2>/dev/null || printf unknown)"
 printf 'cwd=%s\n' "$(pwd -P 2>/dev/null || pwd)"
-if command -v sudo >/dev/null 2>&1; then
-  if sudo -n true >/dev/null 2>&1; then printf 'sudo=yes\n'; else printf 'sudo=no-password-required-failed\n'; fi
-else
-  printf 'sudo=missing\n'
-fi
-if command -v apt-get >/dev/null 2>&1; then printf 'apt=yes\n'; else printf 'apt=missing\n'; fi
-if command -v node >/dev/null 2>&1; then printf 'node=%s\n' "$(node --version 2>/dev/null || printf present)"; else printf 'node=missing\n'; fi
-if command -v pnpm >/dev/null 2>&1; then printf 'pnpm=%s\n' "$(pnpm --version 2>/dev/null || printf present)"; else printf 'pnpm=missing\n'; fi
-if command -v docker >/dev/null 2>&1; then printf 'docker=%s\n' "$(docker --version 2>/dev/null | sed 's/,.*//')"; else printf 'docker=missing\n'; fi
-if command -v bwrap >/dev/null 2>&1; then printf 'bubblewrap=yes\n'; else printf 'bubblewrap=missing\n'; fi`
+preflight_cmd() {
+  label="$1"; shift
+  exe="$1"; shift
+  if command -v "$exe" >/dev/null 2>&1; then
+    out="$("$@" 2>&1 | sed -n '1p')"
+    if [ -z "$out" ]; then out=present; fi
+    printf '%s=%s\n' "$label" "$out"
+  else
+    printf '%s=missing\n' "$label"
+  fi
+}
+`
+	for _, tool := range tools {
+		script += posixPreflightProbe(tool)
+	}
 	return remoteShellCommandWithEnvFiles(workdir, env, envFiles, script)
 }
 
-func windowsRemoteCapabilityPreflightCommand(workdir string, env map[string]string, envFiles []string) string {
+func windowsRemoteCapabilityPreflightCommand(workdir string, env map[string]string, envFiles []string, tools []string) string {
 	var b bytes.Buffer
 	writeWindowsRemotePrefix(&b, workdir, env, envFiles)
-	b.WriteString(`function Test-Cmd($Name) {
-  $cmd = Get-Command $Name -ErrorAction SilentlyContinue
-  if ($cmd) { return $cmd.Source }
-  return "missing"
-}
-function Test-Value($Label, $ScriptBlock) {
+	b.WriteString(`function Test-Value($Label, $ScriptBlock) {
   try {
     $value = & $ScriptBlock
     if ($null -eq $value -or "$value" -eq "") { $value = "unknown" }
@@ -261,19 +265,172 @@ function Test-Value($Label, $ScriptBlock) {
     Write-Output ($Label + "=error:" + $_.Exception.Message)
   }
 }
+function Test-Tool($Label, $Exe, $Arguments) {
+  $cmd = Get-Command $Exe -ErrorAction SilentlyContinue
+  if (-not $cmd) {
+    Write-Output ($Label + "=missing")
+    return
+  }
+  try {
+    $value = & $Exe @Arguments 2>&1 | Select-Object -First 1
+    if ($null -eq $value -or "$value" -eq "") { $value = "present" }
+    Write-Output ($Label + "=" + $value)
+  } catch {
+    Write-Output ($Label + "=error:" + $_.Exception.Message)
+  }
+}
 Test-Value "user" { whoami }
 Test-Value "cwd" { (Get-Location).Path }
-Test-Value "powershell" { $PSVersionTable.PSVersion.ToString() }
-Test-Value "execution_policy" { Get-ExecutionPolicy -Scope Process }
-Test-Value "git" { git --version }
-Test-Value "tar" { (tar --version | Select-Object -First 1) -join "" }
-Test-Value "node" { node --version }
-Test-Value "pnpm" { pnpm --version }
-Test-Value "longpaths" { git config --global --get core.longpaths }
-Test-Value "temp" { $env:TEMP }
-Write-Output ("pwsh=" + (Test-Cmd "pwsh"))
 `)
+	for _, tool := range tools {
+		b.WriteString(windowsPreflightProbe(tool))
+	}
 	return powershellCommand(b.String())
+}
+
+type preflightToolSpec struct {
+	Posix   []string
+	Windows []string
+	OS      map[string]bool
+}
+
+var preflightToolRegistry = map[string]preflightToolSpec{
+	"apt":              {Posix: []string{"apt-get", "--version"}, OS: map[string]bool{"linux": true}},
+	"bubblewrap":       {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
+	"bun":              {Posix: []string{"bun", "--version"}, Windows: []string{"bun", "--version"}},
+	"bwrap":            {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
+	"corepack":         {Posix: []string{"corepack", "--version"}, Windows: []string{"corepack", "--version"}},
+	"docker":           {Posix: []string{"docker", "--version"}, Windows: []string{"docker", "--version"}},
+	"execution_policy": {Windows: []string{"Get-ExecutionPolicy -Scope Process"}, OS: map[string]bool{"windows": true}},
+	"git":              {Posix: []string{"git", "--version"}, Windows: []string{"git", "--version"}},
+	"longpaths":        {Windows: []string{"git config --global --get core.longpaths"}, OS: map[string]bool{"windows": true}},
+	"node":             {Posix: []string{"node", "--version"}, Windows: []string{"node", "--version"}},
+	"npm":              {Posix: []string{"npm", "--version"}, Windows: []string{"npm", "--version"}},
+	"pnpm":             {Posix: []string{"pnpm", "--version"}, Windows: []string{"pnpm", "--version"}},
+	"powershell":       {Windows: []string{"$PSVersionTable.PSVersion.ToString()"}, OS: map[string]bool{"windows": true}},
+	"pwsh":             {Windows: []string{"pwsh", "--version"}, OS: map[string]bool{"windows": true}},
+	"sudo":             {OS: map[string]bool{"linux": true, "macos": true}},
+	"tar":              {Posix: []string{"tar", "--version"}, Windows: []string{"tar", "--version"}},
+	"temp":             {Windows: []string{"$env:TEMP"}, OS: map[string]bool{"windows": true}},
+	"uv":               {Posix: []string{"uv", "--version"}, Windows: []string{"uv", "--version"}},
+	"yarn":             {Posix: []string{"yarn", "--version"}, Windows: []string{"yarn", "--version"}},
+}
+
+var defaultPreflightToolNames = []string{"git", "tar", "node", "npm", "corepack", "pnpm", "yarn", "bun", "docker", "sudo", "apt", "bubblewrap", "powershell", "execution_policy", "longpaths", "temp", "pwsh"}
+
+func normalizePreflightToolNames(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, part := range splitCommaList(value) {
+			name := strings.ToLower(strings.TrimSpace(part))
+			if name == "" {
+				continue
+			}
+			if name == "default" || name == "defaults" {
+				out = appendUniqueStrings(out, defaultPreflightToolNames...)
+				continue
+			}
+			out = appendUniqueStrings(out, name)
+		}
+	}
+	return out
+}
+
+func validatePreflightTools(tools []string) error {
+	for _, tool := range normalizePreflightToolNames(tools) {
+		if tool == "none" {
+			continue
+		}
+		if _, ok := preflightToolRegistry[tool]; !ok {
+			return exit(2, "unknown preflight tool %q", tool)
+		}
+	}
+	return nil
+}
+
+func preflightToolsForTarget(target SSHTarget, configured []string) []string {
+	tools := normalizePreflightToolNames(configured)
+	if len(tools) == 0 {
+		tools = defaultPreflightToolNames
+	}
+	if len(tools) == 1 && tools[0] == "none" {
+		return nil
+	}
+	kind := preflightOSKind(target)
+	out := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if spec, ok := preflightToolRegistry[tool]; ok && spec.supports(kind) {
+			out = append(out, tool)
+		}
+	}
+	return out
+}
+
+func (spec preflightToolSpec) supports(kind string) bool {
+	if len(spec.OS) > 0 && !spec.OS[kind] {
+		return false
+	}
+	if kind == "windows" {
+		return len(spec.Windows) > 0 || spec.OS[kind]
+	}
+	return len(spec.Posix) > 0 || spec.OS[kind]
+}
+
+func preflightOSKind(target SSHTarget) string {
+	if isWindowsNativeTarget(target) {
+		return "windows"
+	}
+	if target.TargetOS == targetMacOS {
+		return "macos"
+	}
+	return "linux"
+}
+
+func posixPreflightProbe(tool string) string {
+	switch tool {
+	case "sudo":
+		return `if command -v sudo >/dev/null 2>&1; then
+  if sudo -n true >/dev/null 2>&1; then printf 'sudo=yes\n'; else printf 'sudo=no-password-required-failed\n'; fi
+else
+  printf 'sudo=missing\n'
+fi
+`
+	case "apt":
+		return "preflight_cmd apt apt-get apt-get --version\n"
+	case "bubblewrap":
+		return "preflight_cmd bubblewrap bwrap bwrap --version\n"
+	}
+	spec := preflightToolRegistry[tool]
+	if len(spec.Posix) == 0 {
+		return ""
+	}
+	return "preflight_cmd " + shellQuote(tool) + " " + shellQuote(spec.Posix[0]) + " " + strings.Join(readableShellWords(spec.Posix), " ") + "\n"
+}
+
+func windowsPreflightProbe(tool string) string {
+	switch tool {
+	case "execution_policy":
+		return `Test-Value "execution_policy" { Get-ExecutionPolicy -Scope Process }` + "\n"
+	case "longpaths":
+		return `Test-Value "longpaths" { git config --global --get core.longpaths }` + "\n"
+	case "powershell":
+		return `Test-Value "powershell" { $PSVersionTable.PSVersion.ToString() }` + "\n"
+	case "temp":
+		return `Test-Value "temp" { $env:TEMP }` + "\n"
+	}
+	spec := preflightToolRegistry[tool]
+	if len(spec.Windows) == 0 {
+		return ""
+	}
+	return "Test-Tool " + psQuote(tool) + " " + psQuote(spec.Windows[0]) + " @(" + psArrayLiteral(spec.Windows[1:]) + ")\n"
+}
+
+func psArrayLiteral(values []string) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, psQuote(value))
+	}
+	return strings.Join(parts, ", ")
 }
 
 type FailureCaptureMetadata struct {

@@ -370,12 +370,15 @@ func TestRemotePreflightRawWorkspaceSkipsHydrateSuggestionWithoutWorkflow(t *tes
 }
 
 func TestRemoteCapabilityPreflightCommandUsesCommandEnvironment(t *testing.T) {
-	got := remoteCapabilityPreflightCommand("/home/runner/work/repo/repo", map[string]string{"CI": "1"}, []string{"/home/runner/.crabbox/actions/cbx-123.env.sh"})
+	got := remoteCapabilityPreflightCommand("/home/runner/work/repo/repo", map[string]string{"CI": "1"}, []string{"/home/runner/.crabbox/actions/cbx-123.env.sh"}, []string{"node", "bun"})
 	for _, want := range []string{
 		"cd '/home/runner/work/repo/repo'",
 		". '/home/runner/.crabbox/actions/cbx-123.env.sh'",
 		"CI='1'",
 		"pwd -P",
+		`exe="$1"; shift`,
+		"preflight_cmd '\\''node'\\'' '\\''node'\\'' node --version",
+		"preflight_cmd '\\''bun'\\'' '\\''bun'\\'' bun --version",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("preflight command missing %q in %q", want, got)
@@ -384,19 +387,68 @@ func TestRemoteCapabilityPreflightCommandUsesCommandEnvironment(t *testing.T) {
 }
 
 func TestWindowsRemoteCapabilityPreflightCommandUsesCommandEnvironment(t *testing.T) {
-	got := windowsRemoteCapabilityPreflightCommand(`C:\crabbox\repo`, map[string]string{"CI": "1"}, []string{`.crabbox\env\run.env`})
+	got := windowsRemoteCapabilityPreflightCommand(`C:\crabbox\repo`, map[string]string{"CI": "1"}, []string{`.crabbox\env\run.env`}, []string{"powershell", "node", "bun", "pwsh"})
 	decoded := decodePowerShellCommand(t, got)
 	for _, want := range []string{
 		`Set-Location -LiteralPath 'C:\crabbox\repo'`,
 		`Get-Content -Encoding UTF8 -LiteralPath '.crabbox\env\run.env'`,
 		`$env:CI = '1'`,
+		`Test-Value "user" { whoami }`,
+		`Test-Value "cwd" { (Get-Location).Path }`,
 		`Test-Value "powershell"`,
-		`Test-Value "node"`,
-		`pwsh=`,
+		`Test-Tool 'node' 'node' @('--version')`,
+		`Test-Tool 'bun' 'bun' @('--version')`,
+		`Test-Tool 'pwsh' 'pwsh' @('--version')`,
 	} {
 		if !strings.Contains(decoded, want) {
 			t.Fatalf("windows preflight command missing %q in %q", want, decoded)
 		}
+	}
+}
+
+func TestPreflightToolsForTargetFiltersByOS(t *testing.T) {
+	got := preflightToolsForTarget(SSHTarget{TargetOS: targetMacOS}, []string{"node", "apt", "powershell", "bun"})
+	if strings.Join(got, ",") != "node,bun" {
+		t.Fatalf("mac tools=%v", got)
+	}
+	got = preflightToolsForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, []string{"node", "apt", "powershell", "bun"})
+	if strings.Join(got, ",") != "node,powershell,bun" {
+		t.Fatalf("windows tools=%v", got)
+	}
+	got = preflightToolsForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, []string{"node", "apt", "powershell", "bun"})
+	if strings.Join(got, ",") != "node,apt,bun" {
+		t.Fatalf("wsl2 tools=%v", got)
+	}
+	got = preflightToolsForTarget(SSHTarget{TargetOS: targetLinux}, []string{"none"})
+	if len(got) != 0 {
+		t.Fatalf("none tools=%v", got)
+	}
+	got = preflightToolsForTarget(SSHTarget{TargetOS: targetMacOS}, []string{"apt", "powershell"})
+	if len(got) != 0 {
+		t.Fatalf("unsupported mac tools=%v", got)
+	}
+}
+
+func TestRemotePreflightNonePrintsWorkspaceOnly(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Run.PreflightTools = []string{"none"}
+	var out bytes.Buffer
+	printRemoteCapabilityPreflight(context.Background(), &out, cfg, SSHTarget{TargetOS: targetLinux}, "cbx_123", "/work/repo", nil, false, "", false, nil)
+	got := out.String()
+	if !strings.Contains(got, "remote preflight workspace=raw workdir=/work/repo hydrate_supported=false") {
+		t.Fatalf("missing workspace summary: %q", got)
+	}
+	if strings.Contains(got, "remote preflight failed") || strings.Contains(got, "remote preflight user=") || strings.Contains(got, "remote preflight cwd=") {
+		t.Fatalf("none should skip remote probes, got %q", got)
+	}
+}
+
+func TestValidatePreflightToolsRejectsUnknown(t *testing.T) {
+	if err := validatePreflightTools([]string{"node", "bogus"}); err == nil {
+		t.Fatal("expected unknown preflight tool error")
+	}
+	if err := validatePreflightTools([]string{"default", "bun"}); err != nil {
+		t.Fatalf("default tools should validate: %v", err)
 	}
 }
 

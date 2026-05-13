@@ -54,6 +54,9 @@ func (a App) configShow(args []string) error {
 		"env": map[string]any{
 			"allow": cfg.EnvAllow,
 		},
+		"run": map[string]any{
+			"preflightTools": cfg.Run.PreflightTools,
+		},
 		"capacity": map[string]any{
 			"market":            cfg.Capacity.Market,
 			"strategy":          cfg.Capacity.Strategy,
@@ -166,6 +169,7 @@ func (a App) configShow(args []string) error {
 	fmt.Fprintf(a.Stdout, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)
 	fmt.Fprintf(a.Stdout, "sync delete=%t checksum=%t git_seed=%t fingerprint=%t base_ref=%s excludes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg)), cfg.Sync.Timeout)
 	fmt.Fprintf(a.Stdout, "env allow=%s\n", strings.Join(cfg.EnvAllow, ","))
+	fmt.Fprintf(a.Stdout, "run preflight_tools=%s\n", blank(strings.Join(cfg.Run.PreflightTools, ","), "-"))
 	fmt.Fprintf(a.Stdout, "capacity market=%s strategy=%s fallback=%s regions=%s hints=%t\n", cfg.Capacity.Market, cfg.Capacity.Strategy, cfg.Capacity.Fallback, blank(strings.Join(cfg.Capacity.Regions, ","), "-"), cfg.Capacity.Hints)
 	fmt.Fprintf(a.Stdout, "actions repo=%s workflow=%s job=%s ref=%s runner_version=%s ephemeral=%t labels=%s\n", blank(cfg.Actions.Repo, "-"), blank(cfg.Actions.Workflow, "-"), blank(cfg.Actions.Job, "-"), blank(cfg.Actions.Ref, "-"), cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, blank(strings.Join(cfg.Actions.RunnerLabels, ","), "-"))
 	fmt.Fprintf(a.Stdout, "blacksmith org=%s workflow=%s job=%s ref=%s idle_timeout=%s debug=%t\n", blank(cfg.Blacksmith.Org, "-"), blank(cfg.Blacksmith.Workflow, "-"), blank(cfg.Blacksmith.Job, "-"), blank(cfg.Blacksmith.Ref, "-"), cfg.Blacksmith.IdleTimeout, cfg.Blacksmith.Debug)

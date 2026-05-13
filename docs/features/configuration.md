@@ -321,6 +321,23 @@ env:
 matching local env vars to the remote command. Secrets do not belong in
 `env.allow`; pass them through provider-side mechanisms.
 
+### Run Preflight
+
+```yaml
+run:
+  preflightTools:
+    - node
+    - bun
+    - docker
+```
+
+`run.preflightTools` configures which built-in probes `crabbox run --preflight`
+executes before the remote command. The CLI flag
+`--preflight-tools node,bun,docker` overrides this list for one run. Use
+`default` to include Crabbox's default built-ins and `none` to print only the
+workspace summary. Preflight probes only report availability; they do not
+install toolchains or mutate the machine.
+
 ### Actions
 
 ```yaml
