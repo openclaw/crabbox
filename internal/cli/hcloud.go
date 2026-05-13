@@ -19,6 +19,36 @@ type HetznerClient struct {
 	Client *http.Client
 }
 
+type privateNet struct {
+	IPv4 struct {
+		IP string `json:"ip"`
+	} `json:"ipv4"`
+}
+
+func (n *privateNet) UnmarshalJSON(data []byte) error {
+	var single struct {
+		IPv4 struct {
+			IP string `json:"ip"`
+		} `json:"ipv4"`
+	}
+	if err := json.Unmarshal(data, &single); err == nil {
+		*n = privateNet(single)
+		return nil
+	}
+	var list []struct {
+		IPv4 struct {
+			IP string `json:"ip"`
+		} `json:"ipv4"`
+	}
+	if err := json.Unmarshal(data, &list); err != nil {
+		return err
+	}
+	if len(list) > 0 {
+		*n = privateNet(list[0])
+	}
+	return nil
+}
+
 type Server struct {
 	CloudID   string
 	Provider  string
@@ -31,11 +61,7 @@ type Server struct {
 			IP string `json:"ip"`
 		} `json:"ipv4"`
 	} `json:"public_net"`
-	PrivateNet struct {
-		IPv4 struct {
-			IP string `json:"ip"`
-		} `json:"ipv4"`
-	} `json:"private_net"`
+	PrivateNet privateNet `json:"private_net"`
 	ServerType struct {
 		Name string `json:"name"`
 	} `json:"server_type"`
