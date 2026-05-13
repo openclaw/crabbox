@@ -47,6 +47,7 @@ Read when:
 - [Daytona](daytona.md): Daytona SDK/toolbox sandbox leases with optional short-lived SSH access.
 - [Islo](islo.md): delegated Islo sandbox runs using the Islo Go SDK.
 - [E2B](e2b.md): delegated E2B sandbox runs using E2B sandbox APIs.
+- [Modal](../providers/modal.md): delegated Modal Sandbox runs using the local Modal Python client.
 
 ## Runners and reachability
 

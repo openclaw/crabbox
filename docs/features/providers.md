@@ -35,6 +35,7 @@ sprites    Sprites microVMs exposed as SSH leases through sprite proxy
 daytona    Daytona sandboxes with SDK/toolbox run and short-lived SSH access
 islo       Islo sandboxes with delegated command execution
 e2b        E2B sandboxes with delegated command execution
+modal      Modal Sandboxes with delegated command execution
 ```
 
 ## Provider Pages
@@ -53,6 +54,7 @@ e2b        E2B sandboxes with delegated command execution
 - [Daytona](../providers/daytona.md): Daytona SDK/toolbox sandbox leases.
 - [Islo](../providers/islo.md): delegated Islo sandbox execution.
 - [E2B](../providers/e2b.md): delegated E2B sandbox execution.
+- [Modal](../providers/modal.md): delegated Modal Sandbox execution.
 - [Provider backends](../provider-backends.md): implementation guide for adding a new provider/backend/plugin.
 
 ## Hetzner Summary
@@ -198,6 +200,11 @@ backend: Crabbox creates E2B sandboxes, syncs a gzipped archive through the
 sandbox file API, and streams command output from E2B's process API. See
 [E2B](e2b.md).
 
+Crabbox can use Modal Sandboxes with `provider: modal`. Modal is a delegated run
+backend: Crabbox creates Modal Sandboxes through the local Python client, syncs a
+gzipped archive through Sandbox exec, and streams command output from Modal's
+process API. See [Modal](../providers/modal.md).
+
 Static SSH targets:
 
 ```yaml
@@ -246,5 +253,6 @@ Related docs:
 - [Daytona](../providers/daytona.md)
 - [Islo](../providers/islo.md)
 - [E2B](../providers/e2b.md)
+- [Modal](../providers/modal.md)
 - [Runner bootstrap](runner-bootstrap.md)
 - [Cost and usage](cost-usage.md)

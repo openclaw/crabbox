@@ -157,6 +157,7 @@ internal/providers/sprites
 internal/providers/daytona
 internal/providers/islo
 internal/providers/e2b
+internal/providers/modal
 internal/providers/semaphore
 internal/providers/tensorlake
 ```
@@ -193,6 +194,7 @@ internal/providers/sprites                # Sprites SSH backend
 internal/providers/daytona                # Daytona SSH + delegated SDK backend
 internal/providers/islo                   # Islo delegated backend
 internal/providers/e2b                    # E2B delegated backend
+internal/providers/modal                 # Modal delegated Python-client backend
 internal/providers/semaphore              # Semaphore SSH lease backend
 internal/providers/tensorlake             # Tensorlake delegated CLI backend
 ```

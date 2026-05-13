@@ -134,6 +134,35 @@ e2b_smoke() {
   lease=""
 }
 
+modal_smoke() {
+  local lease=""
+  local slug=""
+  cleanup() {
+    if [[ -n "$lease" ]]; then
+      stop_provider_lease modal "$lease" "$slug"
+    fi
+  }
+  trap cleanup RETURN
+
+  local out
+  capture_run out run_in_repo "$cb" warmup \
+    --provider modal \
+    --modal-app "${CRABBOX_MODAL_APP:-crabbox}" \
+    --modal-image "${CRABBOX_MODAL_IMAGE:-python:3.13-slim}" \
+    --timing-json
+  printf '%s\n' "$out"
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  slug="$(printf '%s\n' "$out" | extract_slug)"
+  test -n "$lease"
+  test -n "$slug"
+
+  run_in_repo "$cb" status --provider modal --id "$slug" --wait
+  run_in_repo "$cb" run --provider modal --id "$slug" --no-sync -- python -c 'print("crabbox-modal-ok")'
+  run_in_repo "$cb" list --provider modal --json | jq 'map({id:(.id // .CloudID),slug:(.slug // .labels.slug),provider:(.provider // .Provider // .labels.provider),state:(.state // .labels.state // .status)})'
+  stop_provider_lease modal "$lease" "$slug"
+  lease=""
+}
+
 daytona_smoke() {
   run_in_repo "$cb" run --provider daytona --no-sync -- echo crabbox-daytona-ok
   run_in_repo "$cb" list --provider daytona --json | jq 'map({id:(.id // .CloudID),slug:(.slug // .labels.slug),provider:(.provider // .Provider // .labels.provider),state:(.state // .labels.state // .status)})'
@@ -195,6 +224,10 @@ fi
 
 if has_provider e2b; then
   e2b_smoke
+fi
+
+if has_provider modal; then
+  modal_smoke
 fi
 
 if has_provider daytona; then

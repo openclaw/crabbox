@@ -24,7 +24,7 @@ func testRuntimeWithRunner(r CommandRunner) Runtime {
 }
 
 func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
-	for _, name := range []string{"hetzner", "aws", "azure", "gcp", "google", "google-cloud", "proxmox", "ssh", "static", "static-ssh", "blacksmith", "blacksmith-testbox", "namespace", "namespace-devbox", "daytona", "islo", "e2b", "sprites"} {
+	for _, name := range []string{"hetzner", "aws", "azure", "gcp", "google", "google-cloud", "proxmox", "ssh", "static", "static-ssh", "blacksmith", "blacksmith-testbox", "namespace", "namespace-devbox", "daytona", "islo", "e2b", "modal", "sprites"} {
 		if _, err := ProviderFor(name); err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
@@ -86,6 +86,15 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 	backend, err = loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
 	if err != nil {
 		t.Fatalf("load e2b backend: %v", err)
+	}
+	if _, ok := backend.(DelegatedRunBackend); !ok {
+		t.Fatalf("backend=%T, want delegated run backend", backend)
+	}
+
+	cfg.Provider = "modal"
+	backend, err = loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	if err != nil {
+		t.Fatalf("load modal backend: %v", err)
 	}
 	if _, ok := backend.(DelegatedRunBackend); !ok {
 		t.Fatalf("backend=%T, want delegated run backend", backend)
@@ -266,6 +275,8 @@ func TestLeaseCreateFlagsRejectSnapshotSandboxResourceNoops(t *testing.T) {
 		{name: "type", args: []string{"--provider", "daytona", "--type", "large"}},
 		{name: "e2b class", args: []string{"--provider", "e2b", "--class", "standard"}},
 		{name: "e2b type", args: []string{"--provider", "e2b", "--type", "large"}},
+		{name: "modal class", args: []string{"--provider", "modal", "--class", "standard"}},
+		{name: "modal type", args: []string{"--provider", "modal", "--type", "large"}},
 		{name: "sprites class", args: []string{"--provider", "sprites", "--class", "standard"}},
 		{name: "sprites type", args: []string{"--provider", "sprites", "--type", "large"}},
 	} {
@@ -358,6 +369,26 @@ func TestProviderFlagsApplyDaytonaAndIsloWithoutCoreEdits(t *testing.T) {
 	}
 	if cfg.E2B.Template != "crabbox-ready" || cfg.E2B.Workdir != "work/repo" {
 		t.Fatalf("e2b flags not applied: %#v", cfg.E2B)
+	}
+
+	fs = newFlagSet("test", io.Discard)
+	provider = fs.String("provider", defaults.Provider, "")
+	values = registerProviderFlags(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "modal",
+		"--modal-app", "crabbox-test",
+		"--modal-image", "python:3.13-slim",
+		"--modal-workdir", "/workspace/test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg = defaults
+	cfg.Provider = *provider
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Modal.App != "crabbox-test" || cfg.Modal.Image != "python:3.13-slim" || cfg.Modal.Workdir != "/workspace/test" {
+		t.Fatalf("modal flags not applied: %#v", cfg.Modal)
 	}
 
 	fs = newFlagSet("test", io.Discard)

@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `provider: modal` delegated runs for Modal Sandboxes through the local Modal Python client, including archive sync, env allowlist forwarding, docs, and no-live-credential tests.
+
 ### Changed
 
 ### Fixed

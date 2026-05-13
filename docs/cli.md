@@ -365,6 +365,10 @@ Flags:
 --e2b-template <id>     E2B sandbox template
 --e2b-workdir <path>    E2B sandbox working directory
 --e2b-user <user>       E2B sandbox user override
+--modal-app <name>      Modal app name
+--modal-image <image>   Modal sandbox registry image
+--modal-workdir <path>  Modal sandbox working directory
+--modal-python <path>   Python binary for the local Modal client
 ```
 
 Secrets must not be accepted as flag values. Env forwarding is name-based only.
@@ -399,6 +403,12 @@ through E2B file/envd APIs, and streams command output through E2B process APIs.
 Auth comes from `CRABBOX_E2B_API_KEY` or `E2B_API_KEY`. E2B is not an SSH lease,
 so `ssh`, `desktop`, `vnc`, `code`, Actions hydration, and `--checksum` are not
 supported.
+
+With `provider: modal`, Crabbox creates Modal Sandboxes through the local Modal
+Python client, uploads the sync archive through Sandbox exec, and streams command
+output through Modal process APIs. Auth comes from `python3 -m modal setup` or
+`MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`. Modal is not an SSH lease, so `ssh`,
+`desktop`, `vnc`, `code`, Actions hydration, and `--checksum` are not supported.
 
 ## Exit Codes
 
@@ -700,6 +710,10 @@ CRABBOX_E2B_DOMAIN
 CRABBOX_E2B_TEMPLATE
 CRABBOX_E2B_WORKDIR
 CRABBOX_E2B_USER
+CRABBOX_MODAL_APP
+CRABBOX_MODAL_IMAGE
+CRABBOX_MODAL_WORKDIR
+CRABBOX_MODAL_PYTHON
 CRABBOX_RESULTS_JUNIT
 CRABBOX_SYNC_CHECKSUM
 CRABBOX_SYNC_DELETE
@@ -748,6 +762,7 @@ HCLOUD_TOKEN/HETZNER_TOKEN
 AWS_PROFILE/AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN
 SEMAPHORE_HOST/SEMAPHORE_API_TOKEN/SEMAPHORE_PROJECT
 E2B_API_KEY/E2B_API_URL/E2B_DOMAIN
+MODAL_TOKEN_ID/MODAL_TOKEN_SECRET
 GITHUB_TOKEN
 ```
 

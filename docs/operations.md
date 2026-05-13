@@ -46,12 +46,14 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=aws CRABBOX_LIVE_REPO=/path/to/openclaw sc
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=hetzner CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=blacksmith-testbox CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=e2b CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=modal CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=daytona CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-devbox CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=semaphore CRABBOX_LIVE_REPO=/path/to/openclaw scripts/live-smoke.sh
 ```
 
-E2B smoke requires `E2B_API_KEY`. Semaphore smoke requires
+E2B smoke requires `E2B_API_KEY`. Modal smoke requires an authenticated Modal
+Python client (`python3 -m modal setup` or Modal token env vars). Semaphore smoke requires
 `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`, and
 `CRABBOX_SEMAPHORE_TOKEN` or equivalent user config.
 Daytona needs `CRABBOX_DAYTONA_SNAPSHOT` or `daytona.snapshot`.

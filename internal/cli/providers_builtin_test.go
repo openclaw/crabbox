@@ -17,6 +17,7 @@ func init() {
 	RegisterProvider(testDaytonaProvider{})
 	RegisterProvider(testIsloProvider{})
 	RegisterProvider(testE2BProvider{})
+	RegisterProvider(testModalProvider{})
 	RegisterProvider(testSpritesProvider{})
 }
 
@@ -458,6 +459,61 @@ func (testE2BProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) err
 	return nil
 }
 func (p testE2BProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testDelegatedBackend{spec: p.Spec()}, nil
+}
+
+type testModalProvider struct{}
+
+func (testModalProvider) Name() string      { return "modal" }
+func (testModalProvider) Aliases() []string { return nil }
+func (testModalProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "modal",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    nil,
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testModalFlagValues struct {
+	App     *string
+	Image   *string
+	Workdir *string
+}
+
+func (testModalProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testModalFlagValues{
+		App:     fs.String("modal-app", defaults.Modal.App, "Modal app name"),
+		Image:   fs.String("modal-image", defaults.Modal.Image, "Modal sandbox image"),
+		Workdir: fs.String("modal-workdir", defaults.Modal.Workdir, "Modal sandbox workdir"),
+	}
+}
+func (testModalProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	if cfg.Provider == "modal" {
+		if flagWasSet(fs, "class") {
+			return exit(2, "--class is not supported for provider=modal")
+		}
+		if flagWasSet(fs, "type") {
+			return exit(2, "--type is not supported for provider=modal")
+		}
+	}
+	v, ok := values.(testModalFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "modal-app") {
+		cfg.Modal.App = *v.App
+	}
+	if flagWasSet(fs, "modal-image") {
+		cfg.Modal.Image = *v.Image
+	}
+	if flagWasSet(fs, "modal-workdir") {
+		cfg.Modal.Workdir = *v.Workdir
+	}
+	return nil
+}
+func (p testModalProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testDelegatedBackend{spec: p.Spec()}, nil
 }
 

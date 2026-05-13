@@ -9,6 +9,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/gcp"
 	_ "github.com/openclaw/crabbox/internal/providers/hetzner"
 	_ "github.com/openclaw/crabbox/internal/providers/islo"
+	_ "github.com/openclaw/crabbox/internal/providers/modal"
 	_ "github.com/openclaw/crabbox/internal/providers/namespace"
 	_ "github.com/openclaw/crabbox/internal/providers/proxmox"
 	_ "github.com/openclaw/crabbox/internal/providers/semaphore"

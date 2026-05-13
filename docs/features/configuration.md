@@ -252,6 +252,21 @@ e2b:
 Keep `E2B_API_KEY` or `CRABBOX_E2B_API_KEY` in the shell or credential
 manager. Repo config should select templates and workdirs, not hold API keys.
 
+### Modal
+
+```yaml
+provider: modal
+modal:
+  app: crabbox
+  image: python:3.13-slim
+  workdir: /workspace/crabbox
+  python: python3
+```
+
+Authenticate the local Modal Python client with `python3 -m modal setup` or
+`MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`. Repo config should select app/image and
+workdir only; tokens do not belong in YAML or command-line flags.
+
 ### Semaphore
 
 ```yaml
@@ -488,6 +503,7 @@ BLACKSMITH_*  (read by the Blacksmith CLI)
 ISLO_API_KEY  (read by the Islo SDK)
 SEMAPHORE_API_TOKEN / CRABBOX_SEMAPHORE_TOKEN
 E2B_API_KEY / CRABBOX_E2B_API_KEY
+MODAL_TOKEN_ID / MODAL_TOKEN_SECRET
 ```
 
 ## What Belongs Where

@@ -62,7 +62,7 @@ the trust boundary between CLI and provider.
 **Provider** - a Crabbox component that knows how to acquire, resolve,
 list, and release runners on a backing service. Built-in providers: AWS,
 Hetzner, Static SSH, Blacksmith Testbox, Namespace Devbox, Semaphore,
-Daytona, Islo, E2B. See
+Daytona, Islo, E2B, Modal. See
 [Provider reference](providers/README.md).
 
 **Backend** - the Go interface a provider implements:

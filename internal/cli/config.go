@@ -83,6 +83,7 @@ type Config struct {
 	E2B                E2BConfig
 	Islo               IsloConfig
 	Tensorlake         TensorlakeConfig
+	Modal              ModalConfig
 	Semaphore          SemaphoreConfig
 	Sprites            SpritesConfig
 	Tailscale          TailscaleConfig
@@ -196,6 +197,13 @@ type TensorlakeConfig struct {
 	DiskMB         int
 	TimeoutSecs    int
 	NoInternet     bool
+}
+
+type ModalConfig struct {
+	App     string
+	Image   string
+	Workdir string
+	Python  string
 }
 
 type ProxmoxConfig struct {
@@ -443,6 +451,12 @@ func baseConfig() Config {
 			MemoryMB: 1024,
 			DiskMB:   10240,
 		},
+		Modal: ModalConfig{
+			App:     "crabbox",
+			Image:   "python:3.13-slim",
+			Workdir: "/workspace/crabbox",
+			Python:  "python3",
+		},
 		Proxmox: ProxmoxConfig{
 			User:      "crabbox",
 			WorkRoot:  defaultPOSIXWorkRoot,
@@ -498,6 +512,7 @@ type fileConfig struct {
 	E2B              *fileE2BConfig           `yaml:"e2b,omitempty"`
 	Islo             *fileIsloConfig          `yaml:"islo,omitempty"`
 	Tensorlake       *fileTensorlakeConfig    `yaml:"tensorlake,omitempty"`
+	Modal            *fileModalConfig         `yaml:"modal,omitempty"`
 	Semaphore        *fileSemaphoreConfig     `yaml:"semaphore,omitempty"`
 	Sprites          *fileSpritesConfig       `yaml:"sprites,omitempty"`
 	Tailscale        *fileTailscaleConfig     `yaml:"tailscale,omitempty"`
@@ -697,6 +712,13 @@ type fileTensorlakeConfig struct {
 	DiskMB         int     `yaml:"diskMB,omitempty"`
 	TimeoutSecs    int     `yaml:"timeoutSecs,omitempty"`
 	NoInternet     *bool   `yaml:"noInternet,omitempty"`
+}
+
+type fileModalConfig struct {
+	App     string `yaml:"app,omitempty"`
+	Image   string `yaml:"image,omitempty"`
+	Workdir string `yaml:"workdir,omitempty"`
+	Python  string `yaml:"python,omitempty"`
 }
 
 type fileSemaphoreConfig struct {
@@ -1360,6 +1382,20 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Tensorlake.NoInternet = *file.Tensorlake.NoInternet
 		}
 	}
+	if file.Modal != nil {
+		if file.Modal.App != "" {
+			cfg.Modal.App = file.Modal.App
+		}
+		if file.Modal.Image != "" {
+			cfg.Modal.Image = file.Modal.Image
+		}
+		if file.Modal.Workdir != "" {
+			cfg.Modal.Workdir = file.Modal.Workdir
+		}
+		if file.Modal.Python != "" {
+			cfg.Modal.Python = file.Modal.Python
+		}
+	}
 	if file.Semaphore != nil {
 		if file.Semaphore.Host != "" {
 			cfg.Semaphore.Host = file.Semaphore.Host
@@ -1774,6 +1810,10 @@ func applyEnv(cfg *Config) {
 	if v, ok := getenvBool("CRABBOX_TENSORLAKE_NO_INTERNET"); ok {
 		cfg.Tensorlake.NoInternet = v
 	}
+	cfg.Modal.App = getenv("CRABBOX_MODAL_APP", cfg.Modal.App)
+	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)
+	cfg.Modal.Workdir = getenv("CRABBOX_MODAL_WORKDIR", cfg.Modal.Workdir)
+	cfg.Modal.Python = getenv("CRABBOX_MODAL_PYTHON", cfg.Modal.Python)
 	cfg.Semaphore.Host = getenv("CRABBOX_SEMAPHORE_HOST", getenv("SEMAPHORE_HOST", cfg.Semaphore.Host))
 	cfg.Semaphore.Token = getenv("CRABBOX_SEMAPHORE_TOKEN", getenv("SEMAPHORE_API_TOKEN", cfg.Semaphore.Token))
 	cfg.Semaphore.Project = getenv("CRABBOX_SEMAPHORE_PROJECT", getenv("SEMAPHORE_PROJECT", cfg.Semaphore.Project))
@@ -1904,6 +1944,9 @@ func serverTypeForConfig(cfg Config) string {
 	if cfg.Provider == "e2b" {
 		return blank(cfg.E2B.Template, "base")
 	}
+	if cfg.Provider == "modal" {
+		return blank(cfg.Modal.Image, "python:3.13-slim")
+	}
 	if cfg.Provider == "daytona" {
 		return "snapshot"
 	}
@@ -1934,6 +1977,9 @@ func serverTypeForProviderClass(provider, class string) string {
 	}
 	if provider == "e2b" {
 		return "base"
+	}
+	if provider == "modal" {
+		return "python:3.13-slim"
 	}
 	if provider == "daytona" {
 		return "snapshot"
