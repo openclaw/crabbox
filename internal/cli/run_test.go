@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 
 func init() {
 	RegisterProvider(windowsEnvHelperTestProvider{})
+	RegisterProvider(runEnvProfileTestProvider{})
 }
 
 type windowsEnvHelperTestProvider struct{}
@@ -76,6 +78,61 @@ func (b windowsEnvHelperTestBackend) ReleaseLease(context.Context, ReleaseLeaseR
 	return nil
 }
 func (b windowsEnvHelperTestBackend) Touch(context.Context, TouchRequest) (Server, error) {
+	return Server{Provider: b.spec.Name}, nil
+}
+
+type runEnvProfileTestProvider struct{}
+
+func (runEnvProfileTestProvider) Name() string { return "run-env-profile-test" }
+func (runEnvProfileTestProvider) Aliases() []string {
+	return nil
+}
+func (runEnvProfileTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "run-env-profile-test",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (runEnvProfileTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return noProviderFlags{}
+}
+func (runEnvProfileTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p runEnvProfileTestProvider) Configure(Config, Runtime) (Backend, error) {
+	return runEnvProfileTestBackend{spec: p.Spec()}, nil
+}
+
+type runEnvProfileTestBackend struct {
+	spec ProviderSpec
+}
+
+func (b runEnvProfileTestBackend) Spec() ProviderSpec { return b.spec }
+func (b runEnvProfileTestBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
+	return LeaseTarget{
+		Server: Server{Provider: b.spec.Name},
+		SSH: SSHTarget{
+			User:     "crabbox",
+			Host:     "127.0.0.1",
+			Port:     os.Getenv("CRABBOX_FAKE_SSH_PORT"),
+			TargetOS: targetLinux,
+		},
+		LeaseID: "cbx_env_profile_test",
+	}, nil
+}
+func (b runEnvProfileTestBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
+	return b.Acquire(context.Background(), AcquireRequest{})
+}
+func (b runEnvProfileTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+	return nil, nil
+}
+func (b runEnvProfileTestBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
+	return nil
+}
+func (b runEnvProfileTestBackend) Touch(context.Context, TouchRequest) (Server, error) {
 	return Server{Provider: b.spec.Name}, nil
 }
 
@@ -307,8 +364,27 @@ func TestRunCommandRejectsEnvHelperWithSyncOnly(t *testing.T) {
 
 func TestRunCommandCleansEnvProfileWhenProbeFails(t *testing.T) {
 	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
 	sshPath := filepath.Join(dir, "ssh")
 	logPath := filepath.Join(dir, "ssh.log")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
 	script := `#!/bin/sh
 cmd=""
 for arg do
@@ -325,16 +401,14 @@ exit 0
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
 	profile := filepath.Join(dir, "env.profile")
 	if err := os.WriteFile(profile, []byte("API_TOKEN=secret\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", "ssh",
-		"--static-host", "203.0.113.10",
-		"--static-user", "crabbox",
-		"--static-work-root", "/tmp/crabbox-test",
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
 		"--no-sync",
 		"--allow-env", "API_TOKEN",
 		"--env-from-profile", profile,
@@ -351,7 +425,7 @@ exit 0
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if !strings.Contains(string(logData), "rm -f --") || !strings.Contains(string(logData), ".crabbox/env/run.env") {
+	if !strings.Contains(string(logData), "rm -f --") || !strings.Contains(string(logData), ".crabbox/env/cbx_env_profile_test.env") {
 		t.Fatalf("cleanup command missing from ssh log:\n%s", logData)
 	}
 }
@@ -372,6 +446,7 @@ func TestValidateRunEnvHelperTargetRejectsNativeWindows(t *testing.T) {
 
 func TestRunCommandRejectsWindowsEnvHelperBeforeRemoteCommands(t *testing.T) {
 	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
 	sshPath := filepath.Join(dir, "ssh")
 	logPath := filepath.Join(dir, "ssh.log")
 	script := `#!/bin/sh
@@ -411,6 +486,13 @@ exit 0
 	if _, readErr := os.ReadFile(logPath); !os.IsNotExist(readErr) {
 		t.Fatalf("ssh should not run before Windows env-helper rejection, readErr=%v", readErr)
 	}
+}
+
+func isolateRunTestUserDirs(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", filepath.Join(dir, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg-config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "xdg-state"))
 }
 
 func TestFullResyncPrunesEvenWhenDeleteDisabled(t *testing.T) {
