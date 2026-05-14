@@ -1,9 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-type StoredValue = unknown;
-
 class MemoryStorage {
-  readonly values = new Map<string, StoredValue>();
+  readonly values = new Map<string, unknown>();
 
   async get<T>(key: string): Promise<T | undefined> {
     return this.values.get(key) as T | undefined;
@@ -111,6 +109,35 @@ function envWithCapturedInternalRequest(
   } as Parameters<typeof worker.fetch>[1];
 }
 
+function crabboxRequest(path: string, body?: Record<string, unknown>): Request {
+  return new Request(`http://crabbox.internal${path}`, {
+    method: body === undefined ? "GET" : "POST",
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+function createLease(
+  sandbox: InstanceType<typeof Sandbox>,
+  body: Record<string, unknown> = {},
+): Promise<Response> {
+  return sandbox.fetch(
+    crabboxRequest("/__crabbox/create", { id: "cbx_test", workdir: "/workspace/repo", ...body }),
+  );
+}
+
+function execLease(
+  sandbox: InstanceType<typeof Sandbox>,
+  body: Record<string, unknown> = {},
+): Promise<Response> {
+  return sandbox.fetch(
+    crabboxRequest("/__crabbox/exec-stream", {
+      command: "echo hi",
+      cwd: "/workspace/repo",
+      ...body,
+    }),
+  );
+}
+
 describe("Cloudflare runner lifecycle", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -172,18 +199,11 @@ describe("Cloudflare runner lifecycle", () => {
   it("stores lease metadata and schedules cleanup at the idle deadline", async () => {
     const sandbox = new Sandbox({ storage: new MemoryStorage() });
 
-    const response = await sandbox.fetch(
-      new Request("http://crabbox.internal/__crabbox/create", {
-        method: "POST",
-        body: JSON.stringify({
-          id: "cbx_test",
-          workdir: "/workspace/repo",
-          ttlSeconds: 3600,
-          idleTimeoutSeconds: 600,
-          labels: { repo: "my-app" },
-        }),
-      }),
-    );
+    const response = await createLease(sandbox, {
+      ttlSeconds: 3600,
+      idleTimeoutSeconds: 600,
+      labels: { repo: "my-app" },
+    });
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
@@ -201,28 +221,14 @@ describe("Cloudflare runner lifecycle", () => {
   it("touches the lease after streamed command completion", async () => {
     const storage = new MemoryStorage();
     const sandbox = new Sandbox({ storage });
-    await sandbox.fetch(
-      new Request("http://crabbox.internal/__crabbox/create", {
-        method: "POST",
-        body: JSON.stringify({
-          id: "cbx_test",
-          workdir: "/workspace/repo",
-          idleTimeoutSeconds: 600,
-        }),
-      }),
-    );
+    await createLease(sandbox, { idleTimeoutSeconds: 600 });
 
     vi.setSystemTime(new Date("2026-05-13T18:05:00Z"));
-    const response = await sandbox.fetch(
-      new Request("http://crabbox.internal/__crabbox/exec-stream", {
-        method: "POST",
-        body: JSON.stringify({ command: "echo hi", cwd: "/workspace/repo" }),
-      }),
-    );
+    const response = await execLease(sandbox);
     await response.text();
     await vi.runAllTimersAsync();
 
-    const status = await sandbox.fetch(new Request("http://crabbox.internal/__crabbox/status"));
+    const status = await sandbox.fetch(crabboxRequest("/__crabbox/status"));
     await expect(status.json()).resolves.toMatchObject({
       state: "running",
       lastTouchedAt: "2026-05-13T18:05:00.000Z",
@@ -233,16 +239,7 @@ describe("Cloudflare runner lifecycle", () => {
   it("does not expire a lease while a command stream is active", async () => {
     const storage = new MemoryStorage();
     const sandbox = new Sandbox({ storage });
-    await sandbox.fetch(
-      new Request("http://crabbox.internal/__crabbox/create", {
-        method: "POST",
-        body: JSON.stringify({
-          id: "cbx_test",
-          workdir: "/workspace/repo",
-          idleTimeoutSeconds: 10,
-        }),
-      }),
-    );
+    await createLease(sandbox, { idleTimeoutSeconds: 10 });
 
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
     sandbox.execResponse = new Response(
@@ -257,12 +254,7 @@ describe("Cloudflare runner lifecycle", () => {
       { headers: { "Content-Type": "application/x-ndjson" } },
     );
 
-    const response = await sandbox.fetch(
-      new Request("http://crabbox.internal/__crabbox/exec-stream", {
-        method: "POST",
-        body: JSON.stringify({ command: "sleep 30", cwd: "/workspace/repo" }),
-      }),
-    );
+    const response = await execLease(sandbox, { command: "sleep 30" });
 
     vi.setSystemTime(new Date("2026-05-13T18:00:11Z"));
     await sandbox.expireIfIdle();
@@ -272,7 +264,7 @@ describe("Cloudflare runner lifecycle", () => {
     await response.text();
     await vi.runAllTimersAsync();
 
-    const status = await sandbox.fetch(new Request("http://crabbox.internal/__crabbox/status"));
+    const status = await sandbox.fetch(crabboxRequest("/__crabbox/status"));
     await expect(status.json()).resolves.toMatchObject({
       state: "running",
       lastTouchedAt: "2026-05-13T18:00:11.000Z",
@@ -282,27 +274,13 @@ describe("Cloudflare runner lifecycle", () => {
 
   it("expires and destroys the container after the deadline", async () => {
     const sandbox = new Sandbox({ storage: new MemoryStorage() });
-    await sandbox.fetch(
-      new Request("http://crabbox.internal/__crabbox/create", {
-        method: "POST",
-        body: JSON.stringify({
-          id: "cbx_test",
-          workdir: "/workspace/repo",
-          idleTimeoutSeconds: 10,
-        }),
-      }),
-    );
+    await createLease(sandbox, { idleTimeoutSeconds: 10 });
 
     vi.setSystemTime(new Date("2026-05-13T18:00:11Z"));
     await sandbox.expireIfIdle();
 
     expect(sandbox.destroyed).toBe(true);
-    const response = await sandbox.fetch(
-      new Request("http://crabbox.internal/__crabbox/exec-stream", {
-        method: "POST",
-        body: JSON.stringify({ command: "echo hi", cwd: "/workspace/repo" }),
-      }),
-    );
+    const response = await execLease(sandbox);
     expect(response.status).toBe(410);
     await expect(response.json()).resolves.toMatchObject({
       error: "sandbox expired",
@@ -312,16 +290,7 @@ describe("Cloudflare runner lifecycle", () => {
 
   it("keeps the container awake when platform activity expires before the lease", async () => {
     const sandbox = new Sandbox({ storage: new MemoryStorage() });
-    await sandbox.fetch(
-      new Request("http://crabbox.internal/__crabbox/create", {
-        method: "POST",
-        body: JSON.stringify({
-          id: "cbx_test",
-          workdir: "/workspace/repo",
-          idleTimeoutSeconds: 3600,
-        }),
-      }),
-    );
+    await createLease(sandbox, { idleTimeoutSeconds: 3600 });
 
     vi.setSystemTime(new Date("2026-05-13T18:31:00Z"));
     await sandbox.onActivityExpired();
@@ -329,7 +298,7 @@ describe("Cloudflare runner lifecycle", () => {
     expect(sandbox.destroyed).toBe(false);
     expect(sandbox.stopped).toBe(false);
     expect(sandbox.renewedActivityTimeouts).toBe(1);
-    const status = await sandbox.fetch(new Request("http://crabbox.internal/__crabbox/status"));
+    const status = await sandbox.fetch(crabboxRequest("/__crabbox/status"));
     await expect(status.json()).resolves.toMatchObject({
       state: "running",
       expiresAt: "2026-05-13T19:00:00.000Z",

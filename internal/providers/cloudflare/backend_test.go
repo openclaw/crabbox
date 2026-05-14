@@ -25,11 +25,8 @@ func TestCloudflareProviderSpec(t *testing.T) {
 	if len(spec.Features) != 1 || spec.Features[0] != "archive-sync" {
 		t.Fatalf("spec.Features = %#v, want archive-sync", spec.Features)
 	}
-	aliases := Provider{}.Aliases()
-	for _, want := range []string{"cf"} {
-		if !containsString(aliases, want) {
-			t.Fatalf("aliases = %#v, missing %q", aliases, want)
-		}
+	if aliases := (Provider{}).Aliases(); len(aliases) != 1 || aliases[0] != "cf" {
+		t.Fatalf("aliases = %#v, want [cf]", aliases)
 	}
 }
 
@@ -277,15 +274,6 @@ func TestCloudflareResolveClaimRequiresReclaimForOtherRepo(t *testing.T) {
 	if claim.RepoRoot != repoB {
 		t.Fatalf("claim repo = %q, want %q", claim.RepoRoot, repoB)
 	}
-}
-
-func containsString(values []string, needle string) bool {
-	for _, value := range values {
-		if value == needle {
-			return true
-		}
-	}
-	return false
 }
 
 func TestCloudflareStatusPrunesExpiredClaim(t *testing.T) {

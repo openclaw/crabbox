@@ -445,12 +445,8 @@ func cloudflareReady(status string) bool {
 }
 
 func cloudflareTerminalState(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "expired", "stopped":
-		return true
-	default:
-		return false
-	}
+	state := strings.ToLower(strings.TrimSpace(status))
+	return state == "expired" || state == "stopped"
 }
 
 func durationSecondsCeil(duration time.Duration) int {
