@@ -145,6 +145,7 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{
 			Provider:      providerName,
 			LeaseID:       leaseID,
+			Slug:          slug,
 			SyncDelegated: true,
 			SyncMs:        syncDuration.Milliseconds(),
 			SyncPhases:    syncPhases,

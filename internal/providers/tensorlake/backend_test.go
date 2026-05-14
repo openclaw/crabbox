@@ -3,6 +3,7 @@ package tensorlake
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -447,6 +448,46 @@ func TestRunSurfacesCommandExitCodeWithoutWrappingError(t *testing.T) {
 	var ee ExitError
 	if !errors.As(err, &ee) || ee.Code != 7 {
 		t.Fatalf("err=%v want ExitError code=7", err)
+	}
+}
+
+func TestRunTimingJSONIncludesSlug(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	sandboxID := "timingid0123456789"
+	leaseID := leasePrefix + sandboxID
+	defer removeLeaseClaim(leaseID)
+	runner := newRunner(map[string]scriptedReply{
+		"sbx create": {stdout: sandboxID + "\n"},
+		"sbx exec":   {stdout: "ok\n"},
+	}, nil)
+	var stderr bytes.Buffer
+	rt := newTestRuntime(runner)
+	rt.Stderr = &stderr
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
+	req := RunRequest{
+		Repo:       Repo{Name: "carbbox", Root: t.TempDir()},
+		Command:    []string{"echo", "ok"},
+		NoSync:     true,
+		Keep:       true,
+		Reclaim:    true,
+		TimingJSON: true,
+	}
+	if _, err := backend.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	report := map[string]any{}
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if strings.HasPrefix(line, "{") {
+			if err := json.Unmarshal([]byte(line), &report); err != nil {
+				t.Fatalf("decode timing JSON %q: %v", line, err)
+			}
+		}
+	}
+	if report["leaseId"] != leaseID {
+		t.Fatalf("leaseId=%v want %s in timing JSON:\n%s", report["leaseId"], leaseID, stderr.String())
+	}
+	if report["slug"] != newLeaseSlug(leaseID) {
+		t.Fatalf("slug=%v want %s in timing JSON:\n%s", report["slug"], newLeaseSlug(leaseID), stderr.String())
 	}
 }
 
