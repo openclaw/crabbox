@@ -82,6 +82,30 @@ func TestTensorlakeWorkdirRejectsRelative(t *testing.T) {
 	}
 }
 
+func TestTensorlakeWorkdirRejectsBroadPaths(t *testing.T) {
+	for _, workdir := range []string{"/", "/tmp", "/workspace", "/workspace/.."} {
+		t.Run(workdir, func(t *testing.T) {
+			cfg := newTestConfig()
+			cfg.Tensorlake.Workdir = workdir
+			if _, err := tensorlakeWorkdir(cfg); err == nil || !strings.Contains(err.Error(), "too broad") {
+				t.Fatalf("err=%v, want too broad rejection", err)
+			}
+		})
+	}
+}
+
+func TestTensorlakeWorkdirCleansDedicatedPath(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Tensorlake.Workdir = " /workspace/crabbox/../project "
+	got, err := tensorlakeWorkdir(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/workspace/project" {
+		t.Fatalf("workdir=%q want /workspace/project", got)
+	}
+}
+
 func TestTensorlakeWorkdirDefault(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.Tensorlake.Workdir = ""
