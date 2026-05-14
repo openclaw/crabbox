@@ -111,8 +111,35 @@ func TestCodeUpstreamPathStripsPortalLeasePrefix(t *testing.T) {
 		"/portal/leases/blue-lobster/code/proxy/3000/?q=hello+you": "/proxy/3000/?q=hello+you",
 	}
 	for input, want := range tests {
-		if got := codeUpstreamPath(input); got != want {
+		got, err := codeUpstreamPath(input)
+		if err != nil {
+			t.Fatalf("codeUpstreamPath(%q): %v", input, err)
+		}
+		if got != want {
 			t.Fatalf("codeUpstreamPath(%q)=%q want %q", input, got, want)
+		}
+	}
+}
+
+func TestCodeUpstreamPathRejectsAbsoluteURLs(t *testing.T) {
+	for _, input := range []string{"https://evil.example/socket", "//evil.example/socket"} {
+		if _, err := codeUpstreamPath(input); err == nil {
+			t.Fatalf("codeUpstreamPath(%q) expected error", input)
+		}
+	}
+}
+
+func TestCodeBridgeUpstreamURLPinsLoopbackHost(t *testing.T) {
+	got, err := codeBridgeUpstreamURL("http://127.0.0.1:8080", "ws", "/proxy/3000/?q=hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "ws://127.0.0.1:8080/proxy/3000/?q=hello" {
+		t.Fatalf("upstream url=%q", got)
+	}
+	for _, baseURL := range []string{"http://example.com:8080", "https://127.0.0.1:8080"} {
+		if _, err := codeBridgeUpstreamURL(baseURL, "http", "/"); err == nil {
+			t.Fatalf("codeBridgeUpstreamURL(%q) expected error", baseURL)
 		}
 	}
 }

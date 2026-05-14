@@ -990,6 +990,14 @@ func TestEnvHelperBranches(t *testing.T) {
 	if got := getenvInt("CRABBOX_MISSING_INT", 7); got != 7 {
 		t.Fatalf("missing int fallback=%d", got)
 	}
+	t.Setenv("CRABBOX_INT32", "2147483647")
+	t.Setenv("CRABBOX_INT32_OVERFLOW", "2147483648")
+	if got := getenvInt32("CRABBOX_INT32", 7); got != 2147483647 {
+		t.Fatalf("int32=%d", got)
+	}
+	if got := getenvInt32("CRABBOX_INT32_OVERFLOW", 7); got != 7 {
+		t.Fatalf("overflow int32 fallback=%d", got)
+	}
 
 	for _, tc := range []struct {
 		name  string

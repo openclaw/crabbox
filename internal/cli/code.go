@@ -324,8 +324,11 @@ func (b *codeBridge) Close(code websocket.StatusCode, reason string) {
 
 func (b *codeBridge) handleHTTP(ctx context.Context, msg codeProxyMessage) {
 	body, _ := base64.StdEncoding.DecodeString(msg.Body)
-	upstreamPath := codeUpstreamPath(msg.Path)
-	upstream := b.baseURL + upstreamPath
+	upstream, upstreamPath, err := b.upstreamURL("http", msg.Path)
+	if err != nil {
+		_ = b.writeJSON(ctx, codeProxyMessage{Type: "http", ID: msg.ID, Status: 400, Error: err.Error()})
+		return
+	}
 	req, err := http.NewRequestWithContext(ctx, msg.Method, upstream, bytes.NewReader(body))
 	if err != nil {
 		_ = b.writeJSON(ctx, codeProxyMessage{Type: "http", ID: msg.ID, Status: 502, Error: err.Error()})
@@ -396,7 +399,11 @@ func (b *codeBridge) handleHTTP(ctx context.Context, msg codeProxyMessage) {
 }
 
 func (b *codeBridge) openUpstreamWebSocket(ctx context.Context, msg codeProxyMessage) {
-	upstream := "ws" + strings.TrimPrefix(b.baseURL, "http") + codeUpstreamPath(msg.Path)
+	upstream, _, err := b.upstreamURL("ws", msg.Path)
+	if err != nil {
+		_ = b.writeJSON(ctx, codeProxyMessage{Type: "ws_close", ID: msg.ID, Code: int(websocket.StatusPolicyViolation), Reason: err.Error()})
+		return
+	}
 	b.trace("ws_open id=%s path=%s upstream=%s", msg.ID, msg.Path, upstream)
 	header, subprotocols := codeWebSocketDialHeaders(b.baseURL, msg.Headers)
 	b.trace("ws_open_headers id=%s cookie=%t origin=%q subprotocols=%d", msg.ID, header.Get("Cookie") != "", header.Get("Origin"), len(subprotocols))
@@ -593,10 +600,69 @@ func isRetryableCodeBridgeError(err error) bool {
 		strings.Contains(text, "tls: bad record MAC")
 }
 
-func codeUpstreamPath(path string) string {
-	u, err := url.Parse(path)
+func (b *codeBridge) upstreamURL(scheme, rawPath string) (string, string, error) {
+	upstreamPath, err := codeUpstreamPath(rawPath)
 	if err != nil {
-		return "/"
+		return "", "", err
+	}
+	upstream, err := codeBridgeUpstreamURL(b.baseURL, scheme, upstreamPath)
+	if err != nil {
+		return "", "", err
+	}
+	return upstream, upstreamPath, nil
+}
+
+func codeBridgeUpstreamURL(baseURL, scheme, upstreamPath string) (string, error) {
+	if scheme != "http" && scheme != "ws" {
+		return "", fmt.Errorf("unsupported upstream scheme %q", scheme)
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+	if base.Scheme != "http" || !codeBridgeLoopbackHost(base.Hostname()) {
+		return "", fmt.Errorf("code bridge upstream must be loopback HTTP")
+	}
+	parsed, err := url.Parse(upstreamPath)
+	if err != nil {
+		return "", err
+	}
+	if parsed.IsAbs() || parsed.Host != "" {
+		return "", fmt.Errorf("absolute upstream URLs are not allowed")
+	}
+	if parsed.Path == "" {
+		parsed.Path = "/"
+	}
+	base.Scheme = scheme
+	base.Path = parsed.Path
+	base.RawQuery = parsed.RawQuery
+	base.ForceQuery = parsed.ForceQuery
+	base.RawFragment = ""
+	base.Fragment = ""
+	return base.String(), nil
+}
+
+func codeBridgeLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func codeUpstreamPath(rawPath string) (string, error) {
+	u, err := url.Parse(rawPath)
+	if err != nil {
+		return "", err
+	}
+	if u.IsAbs() || u.Host != "" {
+		return "", fmt.Errorf("absolute upstream URLs are not allowed")
+	}
+	if u.Path == "" {
+		u.Path = "/"
+	}
+	if !strings.HasPrefix(u.Path, "/") {
+		u.Path = "/" + u.Path
 	}
 	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
 	if len(parts) >= 4 && parts[0] == "portal" && parts[1] == "leases" && parts[3] == "code" {
@@ -606,9 +672,9 @@ func codeUpstreamPath(path string) string {
 		} else {
 			u.Path = "/" + tail
 		}
-		return u.RequestURI()
+		return u.RequestURI(), nil
 	}
-	return u.RequestURI()
+	return u.RequestURI(), nil
 }
 
 func isCodeHTML(contentType string) bool {
