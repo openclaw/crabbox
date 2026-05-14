@@ -15,7 +15,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
 
-const awsUbuntuOwner = "099720109477"
+const (
+	awsUbuntuOwner           = "099720109477"
+	awsSSHIngressDescription = "Crabbox SSH"
+)
 
 type AWSClient struct {
 	ec2    *ec2.Client
@@ -439,8 +442,10 @@ func (c *AWSClient) ensureSecurityGroup(ctx context.Context, cfg Config) (string
 		return "", err
 	}
 	var groupID string
+	var group *types.SecurityGroup
 	if len(existing.SecurityGroups) > 0 {
-		groupID = aws.ToString(existing.SecurityGroups[0].GroupId)
+		group = &existing.SecurityGroups[0]
+		groupID = aws.ToString(group.GroupId)
 	} else {
 		created, err := c.ec2.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
 			Description: aws.String("Crabbox ephemeral test runners"),
@@ -455,12 +460,116 @@ func (c *AWSClient) ensureSecurityGroup(ctx context.Context, cfg Config) (string
 		}
 		groupID = aws.ToString(created.GroupId)
 	}
-	for _, port := range sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts) {
+	ports := sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts)
+	if group != nil {
+		if err := c.pruneStaleSSHIngress(ctx, groupID, *group, ports, cfg.AWSSSHCIDRs); err != nil {
+			return "", err
+		}
+	}
+	for _, port := range ports {
 		if err := c.allowTCP(ctx, groupID, port, cfg.AWSSSHCIDRs); err != nil && !strings.Contains(err.Error(), "InvalidPermission.Duplicate") {
 			return "", err
 		}
 	}
 	return groupID, nil
+}
+
+func (c *AWSClient) pruneStaleSSHIngress(ctx context.Context, groupID string, group types.SecurityGroup, ports []string, cidrs []string) error {
+	stalePermissions := staleAWSCrabboxSSHIngressPermissions(group, ports, cidrs)
+	if len(stalePermissions) == 0 {
+		return nil
+	}
+	_, err := c.ec2.RevokeSecurityGroupIngress(ctx, &ec2.RevokeSecurityGroupIngressInput{
+		GroupId:       aws.String(groupID),
+		IpPermissions: stalePermissions,
+	})
+	if err != nil && strings.Contains(err.Error(), "InvalidPermission.NotFound") {
+		return nil
+	}
+	return err
+}
+
+func staleAWSCrabboxSSHIngressPermissions(group types.SecurityGroup, ports []string, cidrs []string) []types.IpPermission {
+	desiredPorts := map[int32]struct{}{}
+	for _, port := range ports {
+		p, ok := parsePort32(port)
+		if ok {
+			desiredPorts[p] = struct{}{}
+		}
+	}
+	if len(desiredPorts) == 0 {
+		return nil
+	}
+	desiredCIDRs := awsSSHDesiredCIDRs(cidrs)
+	var stale []types.IpPermission
+	for _, permission := range group.IpPermissions {
+		if !isTCPPortPermission(permission, desiredPorts) {
+			continue
+		}
+		staleIPv4 := staleAWSIpRanges(permission.IpRanges, desiredCIDRs)
+		staleIPv6 := staleAWSIpv6Ranges(permission.Ipv6Ranges, desiredCIDRs)
+		if len(staleIPv4) == 0 && len(staleIPv6) == 0 {
+			continue
+		}
+		stale = append(stale, types.IpPermission{
+			FromPort:   permission.FromPort,
+			IpProtocol: permission.IpProtocol,
+			IpRanges:   staleIPv4,
+			Ipv6Ranges: staleIPv6,
+			ToPort:     permission.ToPort,
+		})
+	}
+	return stale
+}
+
+func awsSSHDesiredCIDRs(cidrs []string) map[string]struct{} {
+	desired := map[string]struct{}{}
+	for _, cidr := range cidrs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr != "" {
+			desired[cidr] = struct{}{}
+		}
+	}
+	if len(desired) == 0 {
+		desired["0.0.0.0/0"] = struct{}{}
+	}
+	return desired
+}
+
+func isTCPPortPermission(permission types.IpPermission, desiredPorts map[int32]struct{}) bool {
+	if aws.ToString(permission.IpProtocol) != "tcp" || permission.FromPort == nil || permission.ToPort == nil || *permission.FromPort != *permission.ToPort {
+		return false
+	}
+	_, ok := desiredPorts[*permission.FromPort]
+	return ok
+}
+
+func staleAWSIpRanges(ranges []types.IpRange, desiredCIDRs map[string]struct{}) []types.IpRange {
+	stale := make([]types.IpRange, 0, len(ranges))
+	for _, r := range ranges {
+		if aws.ToString(r.Description) != awsSSHIngressDescription {
+			continue
+		}
+		cidr := aws.ToString(r.CidrIp)
+		if _, ok := desiredCIDRs[cidr]; !ok {
+			stale = append(stale, types.IpRange{CidrIp: r.CidrIp, Description: r.Description})
+		}
+	}
+	return stale
+}
+
+func staleAWSIpv6Ranges(ranges []types.Ipv6Range, desiredCIDRs map[string]struct{}) []types.Ipv6Range {
+	stale := make([]types.Ipv6Range, 0, len(ranges))
+	for _, r := range ranges {
+		if aws.ToString(r.Description) != awsSSHIngressDescription {
+			continue
+		}
+		cidr := aws.ToString(r.CidrIpv6)
+		if _, ok := desiredCIDRs[cidr]; !ok {
+			stale = append(stale, types.Ipv6Range{CidrIpv6: r.CidrIpv6, Description: r.Description})
+		}
+	}
+	return stale
 }
 
 func (c *AWSClient) defaultVPC(ctx context.Context) (string, error) {
@@ -500,11 +609,11 @@ func (c *AWSClient) allowTCP(ctx context.Context, groupID, port string, cidrs []
 	ranges := make([]types.IpRange, 0, len(cidrs))
 	for _, cidr := range cidrs {
 		if strings.TrimSpace(cidr) != "" {
-			ranges = append(ranges, types.IpRange{CidrIp: aws.String(cidr), Description: aws.String("Crabbox SSH")})
+			ranges = append(ranges, types.IpRange{CidrIp: aws.String(cidr), Description: aws.String(awsSSHIngressDescription)})
 		}
 	}
 	if len(ranges) == 0 {
-		ranges = append(ranges, types.IpRange{CidrIp: aws.String("0.0.0.0/0"), Description: aws.String("Crabbox SSH")})
+		ranges = append(ranges, types.IpRange{CidrIp: aws.String("0.0.0.0/0"), Description: aws.String(awsSSHIngressDescription)})
 	}
 	_, err := c.ec2.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
 		GroupId: aws.String(groupID),

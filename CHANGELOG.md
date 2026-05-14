@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed coordinator TTL cleanup so provider deletion failures keep leases active with retry metadata instead of silently expiring while cloud instances continue running.
+- Fixed direct AWS security-group maintenance so stale Crabbox-owned SSH ingress rules are pruned before adding the current source CIDRs.
 
 ## 0.13.0 - 2026-05-13
 
