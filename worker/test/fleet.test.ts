@@ -19,6 +19,7 @@ import type {
   Env,
   ExternalRunnerRecord,
   LeaseRecord,
+  ProviderMachine,
   ProvisioningAttempt,
   RunRecord,
 } from "../src/types";
@@ -2996,6 +2997,91 @@ describe("fleet identity", () => {
     expect(response.status).toBe(403);
   });
 
+  it("audits expired AWS leases against cloud state", async () => {
+    const storage = new MemoryStorage();
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "live-lobster",
+        provider: "aws",
+        cloudID: "i-live",
+        region: "eu-west-1",
+        state: "expired",
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        slug: "gone-lobster",
+        provider: "aws",
+        cloudID: "i-gone",
+        region: "eu-west-1",
+        state: "expired",
+        cleanupAttempts: 1,
+        cleanupError: "terminated",
+        createdAt: "2026-05-01T00:01:00.000Z",
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000004",
+      testLease({
+        id: "cbx_000000000004",
+        slug: "terminated-runner",
+        provider: "aws",
+        cloudID: "i-terminated",
+        region: "eu-west-1",
+        state: "expired",
+        createdAt: "2026-05-01T00:02:00.000Z",
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000003",
+      testLease({
+        id: "cbx_000000000003",
+        slug: "active-lobster",
+        provider: "aws",
+        cloudID: "i-active",
+        region: "eu-west-1",
+        state: "active",
+      }),
+    );
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, { provider: "aws" }, undefined, async (id) => {
+        if (id === "i-gone") {
+          throw new Error("aws instance not found: i-gone");
+        }
+        return {
+          provider: "aws",
+          id: 123,
+          cloudID: id,
+          region: "eu-west-1",
+          name: `crabbox-${id}`,
+          status: id === "i-terminated" ? "terminated" : "running",
+          serverType: "c7i.2xlarge",
+          host: "192.0.2.20",
+          labels: {},
+        };
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("GET", "/v1/admin/lease-audit?state=expired&provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      audits: Array<{ leaseID: string; cloudStatus: string; cloudState?: string }>;
+    };
+    expect(body.audits).toMatchObject([
+      { leaseID: "cbx_000000000004", cloudStatus: "missing", cloudState: "terminated" },
+      { leaseID: "cbx_000000000002", cloudStatus: "missing" },
+      { leaseID: "cbx_000000000001", cloudStatus: "found", cloudState: "running" },
+    ]);
+  });
+
   it("starts GitHub login and keeps polling secret server-side", async () => {
     const storage = new MemoryStorage();
     const fleet = new FleetDurableObject(
@@ -3381,10 +3467,26 @@ function fakeProvider(
     attempts?: ProvisioningAttempt[];
   } = {},
   onDelete?: (id: string) => Promise<void>,
+  onGet?: (id: string) => Promise<ProviderMachine> | ProviderMachine,
 ) {
   return {
     async listCrabboxServers() {
       return [];
+    },
+    async getServer(id: string) {
+      if (onGet) {
+        return await onGet(id);
+      }
+      return {
+        provider: result.provider ?? "hetzner",
+        id: 123,
+        cloudID: id,
+        name: `crabbox-${id}`,
+        status: "running",
+        serverType: result.serverType ?? "cpx62",
+        host: "192.0.2.10",
+        labels: {},
+      };
     },
     async createServerWithFallback(config: LeaseConfig, _leaseID: string, slug: string) {
       onCreate?.(config);

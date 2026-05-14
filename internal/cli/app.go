@@ -201,6 +201,7 @@ Common Flows:
   crabbox cache stats --id blue-lobster
   crabbox usage --scope org
   crabbox admin leases --state active
+  crabbox admin lease-audit --state expired --provider aws
   crabbox warmup --actions-runner
   crabbox actions hydrate --id blue-lobster
   crabbox actions dispatch -f testbox_id=cbx_abcdef123456

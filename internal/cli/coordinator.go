@@ -123,6 +123,29 @@ type CoordinatorMachine struct {
 	Labels     map[string]string `json:"labels"`
 }
 
+type CoordinatorLeaseCloudAudit struct {
+	LeaseID         string `json:"leaseID"`
+	Slug            string `json:"slug,omitempty"`
+	Provider        string `json:"provider"`
+	State           string `json:"state"`
+	TargetOS        string `json:"target,omitempty"`
+	Owner           string `json:"owner"`
+	Org             string `json:"org"`
+	Region          string `json:"region,omitempty"`
+	CloudID         string `json:"cloudID"`
+	Host            string `json:"host,omitempty"`
+	ServerType      string `json:"serverType,omitempty"`
+	ExpiresAt       string `json:"expiresAt,omitempty"`
+	CleanupAttempts int    `json:"cleanupAttempts,omitempty"`
+	CleanupError    string `json:"cleanupError,omitempty"`
+	CleanupRetryAt  string `json:"cleanupRetryAt,omitempty"`
+	CloudStatus     string `json:"cloudStatus"`
+	CloudState      string `json:"cloudState,omitempty"`
+	CloudHost       string `json:"cloudHost,omitempty"`
+	CloudServerType string `json:"cloudServerType,omitempty"`
+	Message         string `json:"message,omitempty"`
+}
+
 type CoordinatorUsageResponse struct {
 	Usage  CoordinatorUsageSummary `json:"usage"`
 	Limits CoordinatorCostLimits   `json:"limits"`
@@ -825,6 +848,34 @@ func (c *CoordinatorClient) AdminLeases(ctx context.Context, state, owner, org s
 	}
 	err := c.do(ctx, http.MethodGet, path, nil, &res)
 	return res.Leases, err
+}
+
+func (c *CoordinatorClient) AdminLeaseAudit(ctx context.Context, state, provider, owner, org string, limit int) ([]CoordinatorLeaseCloudAudit, error) {
+	var res struct {
+		Audits []CoordinatorLeaseCloudAudit `json:"audits"`
+	}
+	values := url.Values{}
+	if state != "" {
+		values.Set("state", state)
+	}
+	if provider != "" {
+		values.Set("provider", provider)
+	}
+	if owner != "" {
+		values.Set("owner", owner)
+	}
+	if org != "" {
+		values.Set("org", org)
+	}
+	if limit > 0 {
+		values.Set("limit", strconv.Itoa(limit))
+	}
+	path := "/v1/admin/lease-audit"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	err := c.do(ctx, http.MethodGet, path, nil, &res)
+	return res.Audits, err
 }
 
 func (c *CoordinatorClient) AdminReleaseLease(ctx context.Context, id string, deleteServer bool) (CoordinatorLease, error) {

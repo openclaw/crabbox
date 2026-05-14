@@ -191,6 +191,29 @@ interface CodePendingWebSocketFrame {
   chunks: string[];
 }
 
+interface LeaseCloudAudit {
+  leaseID: string;
+  slug?: string;
+  provider: Provider;
+  state: LeaseRecord["state"];
+  target: LeaseRecord["target"];
+  owner: string;
+  org: string;
+  region?: string;
+  cloudID: string;
+  host: string;
+  serverType: string;
+  expiresAt: string;
+  cleanupAttempts?: number;
+  cleanupError?: string;
+  cleanupRetryAt?: string;
+  cloudStatus: "found" | "missing" | "error";
+  cloudState?: string;
+  cloudHost?: string;
+  cloudServerType?: string;
+  message?: string;
+}
+
 type BridgeAttachment =
   | { kind: "webvnc-agent"; leaseID: string; id: string }
   | {
@@ -309,6 +332,9 @@ export class FleetDurableObject implements DurableObject {
       }
       if (method === "GET" && parts.join("/") === "v1/admin/leases") {
         return await this.adminLeases(request);
+      }
+      if (method === "GET" && parts.join("/") === "v1/admin/lease-audit") {
+        return await this.adminLeaseAudit(request);
       }
       if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "leases" && parts[3]) {
         return await this.adminLeaseRoute(request, parts[3], parts[4]);
@@ -2520,6 +2546,104 @@ export class FleetDurableObject implements DurableObject {
     return json({ leases: this.filterLeases(await this.leaseRecords(), request) });
   }
 
+  private async adminLeaseAudit(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const provider = (url.searchParams.get("provider") ?? "aws").trim().toLowerCase();
+    if (provider !== "aws") {
+      return json(
+        {
+          error: "unsupported_provider",
+          message: "lease audit currently supports provider=aws",
+        },
+        { status: 400 },
+      );
+    }
+    const state = url.searchParams.get("state") ?? "expired";
+    const owner = url.searchParams.get("owner") ?? "";
+    const org = url.searchParams.get("org") ?? "";
+    const limit = clampLimit(url.searchParams.get("limit"), 100);
+    const leases = (await this.leaseRecords())
+      .filter((lease) => lease.provider === "aws")
+      .filter((lease) => !state || lease.state === state)
+      .filter((lease) => !owner || lease.owner === owner)
+      .filter((lease) => !org || lease.org === org)
+      .filter((lease) => Boolean(lease.cloudID))
+      .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit);
+    const audits = await Promise.all(leases.map((lease) => this.auditAWSLeaseCloud(lease)));
+    return json({ audits });
+  }
+
+  private async auditAWSLeaseCloud(lease: LeaseRecord): Promise<LeaseCloudAudit> {
+    const audit: LeaseCloudAudit = {
+      leaseID: lease.id,
+      provider: lease.provider,
+      state: lease.state,
+      target: lease.target,
+      owner: lease.owner,
+      org: lease.org,
+      cloudID: lease.cloudID,
+      host: lease.host,
+      serverType: lease.serverType,
+      expiresAt: lease.expiresAt,
+      cloudStatus: "error",
+    };
+    if (lease.slug) {
+      audit.slug = lease.slug;
+    }
+    if (lease.region) {
+      audit.region = lease.region;
+    }
+    if (lease.cleanupAttempts !== undefined) {
+      audit.cleanupAttempts = lease.cleanupAttempts;
+    }
+    if (lease.cleanupError) {
+      audit.cleanupError = lease.cleanupError;
+    }
+    if (lease.cleanupRetryAt) {
+      audit.cleanupRetryAt = lease.cleanupRetryAt;
+    }
+    try {
+      const server = await this.awsLeaseServer(lease);
+      if (isAWSTerminalInstanceState(server.status)) {
+        return {
+          ...audit,
+          cloudStatus: "missing",
+          cloudState: server.status,
+          message: `aws instance is ${server.status}`,
+        };
+      }
+      return {
+        ...audit,
+        cloudStatus: "found",
+        cloudState: server.status,
+        cloudHost: server.host,
+        cloudServerType: server.serverType,
+      };
+    } catch (error) {
+      const message = errorMessage(error);
+      if (isCloudNotFoundError(message)) {
+        return { ...audit, cloudStatus: "missing", message };
+      }
+      return { ...audit, cloudStatus: "error", message };
+    }
+  }
+
+  private async awsLeaseServer(lease: LeaseRecord): Promise<ProviderMachine> {
+    const provider = this.provider("aws", lease.region);
+    if (provider.getServer) {
+      return await provider.getServer(lease.cloudID);
+    }
+    const machines = await provider.listCrabboxServers();
+    const server = machines.find(
+      (machine) => machine.cloudID === lease.cloudID || String(machine.id) === lease.cloudID,
+    );
+    if (!server) {
+      throw new Error(`aws instance not found: ${lease.cloudID}`);
+    }
+    return server;
+  }
+
   private async adminLeaseRoute(
     request: Request,
     leaseID: string,
@@ -3574,11 +3698,27 @@ function adminRouteError(request: Request, method: string, parts: string[]): Res
   return json({ error: "forbidden", message: "admin token required" }, { status: 403 });
 }
 
+function isCloudNotFoundError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("not found") ||
+    lower.includes("invalidinstanceid.notfound") ||
+    lower.includes("does not exist")
+  );
+}
+
+function isAWSTerminalInstanceState(state: string): boolean {
+  return state === "shutting-down" || state === "terminated";
+}
+
 function isAdminRoute(method: string, parts: string[]): boolean {
   if (method === "GET" && parts.join("/") === "v1/pool") {
     return true;
   }
   if (method === "GET" && parts.join("/") === "v1/admin/leases") {
+    return true;
+  }
+  if (method === "GET" && parts.join("/") === "v1/admin/lease-audit") {
     return true;
   }
   if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "leases" && Boolean(parts[3])) {
@@ -4697,6 +4837,7 @@ function uniqueNonEmpty(values: Array<string | undefined>): string[] {
 
 interface CloudProvider {
   listCrabboxServers(): Promise<ProviderMachine[]>;
+  getServer?(id: string): Promise<ProviderMachine>;
   createServerWithFallback(
     config: ReturnType<typeof leaseConfig>,
     leaseID: string,
@@ -4880,6 +5021,10 @@ class AWSProvider implements CloudProvider {
 
   listCrabboxServers(): Promise<ProviderMachine[]> {
     return this.client.listCrabboxServers();
+  }
+
+  getServer(id: string): Promise<ProviderMachine> {
+    return this.client.getServer(id);
   }
 
   async createServerWithFallback(

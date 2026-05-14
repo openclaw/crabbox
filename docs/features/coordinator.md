@@ -41,6 +41,7 @@ GET  /v1/runners
 POST /v1/runners/sync
 GET  /v1/usage
 GET  /v1/admin/leases
+GET  /v1/admin/lease-audit
 POST /v1/admin/leases/{id-or-slug}/release
 POST /v1/admin/leases/{id-or-slug}/delete
 ```

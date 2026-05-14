@@ -78,6 +78,7 @@ crabbox share --id <lease-id-or-slug> [--user <email>] [--org] [--role use|manag
 crabbox unshare --id <lease-id-or-slug> [--user <email>] [--org] [--all] [--json]
 crabbox usage [--scope user|org|all] [--user <email>] [--org <name>] [--month YYYY-MM] [--json]
 crabbox admin leases [--state active|released|expired|failed] [--owner <email>] [--org <name>] [--json]
+crabbox admin lease-audit [--state expired] [--provider aws] [--fail-on-live] [--json]
 crabbox admin release <lease-id-or-slug> [--delete]
 crabbox admin delete <lease-id-or-slug> --force
 crabbox ssh --id <lease-id-or-slug> [--network auto|tailscale|public]
@@ -262,6 +263,7 @@ Trusted operator lease controls:
 
 ```sh
 crabbox admin leases --state active
+crabbox admin lease-audit --state expired --provider aws --fail-on-live
 crabbox admin release blue-lobster
 crabbox admin delete cbx_abcdef123456 --force
 ```

@@ -35,6 +35,7 @@ Trusted operator controls:
 
 ```sh
 crabbox admin leases --state active
+crabbox admin lease-audit --state expired --provider aws
 crabbox admin release blue-lobster
 crabbox admin delete cbx_... --force
 ```

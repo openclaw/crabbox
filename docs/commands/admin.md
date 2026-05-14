@@ -5,6 +5,8 @@
 ```sh
 crabbox admin leases
 crabbox admin leases --state active --json
+crabbox admin lease-audit --state expired --provider aws
+crabbox admin lease-audit --fail-on-live
 crabbox admin release blue-lobster
 crabbox admin release blue-lobster --delete
 crabbox admin delete cbx_... --force
@@ -27,6 +29,24 @@ Flags:
 --owner <email>     filter by owner
 --org <name>        filter by org
 --limit <n>         default 100, maximum 500
+--json              print JSON
+```
+
+## lease-audit
+
+Check expired coordinator lease records against the backing cloud provider.
+The audit currently supports AWS leases and reports whether each expired
+`cloudID` is still present, missing, or could not be checked.
+
+Flags:
+
+```text
+--state <state>     default expired
+--provider <name>   default aws
+--owner <email>     filter by owner
+--org <name>        filter by org
+--limit <n>         default 100, maximum 500
+--fail-on-live      exit non-zero for live cloud instances or audit errors
 --json              print JSON
 ```
 

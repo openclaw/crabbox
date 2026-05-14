@@ -34,6 +34,56 @@ func (a App) adminLeases(ctx context.Context, args []string) error {
 	return nil
 }
 
+func (a App) adminLeaseAudit(ctx context.Context, args []string) error {
+	fs := newFlagSet("admin lease-audit", a.Stderr)
+	state := fs.String("state", "expired", "filter by state")
+	provider := fs.String("provider", "aws", "filter by provider")
+	owner := fs.String("owner", "", "filter by owner")
+	org := fs.String("org", "", "filter by org")
+	limit := fs.Int("limit", 100, "maximum leases")
+	failOnLive := fs.Bool("fail-on-live", false, "exit non-zero when expired leases still have live cloud instances or audit errors")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	coord, err := configuredAdminCoordinator()
+	if err != nil {
+		return err
+	}
+	audits, err := coord.AdminLeaseAudit(ctx, *state, *provider, *owner, *org, *limit)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		if err := json.NewEncoder(a.Stdout).Encode(audits); err != nil {
+			return err
+		}
+	} else {
+		for _, audit := range audits {
+			fmt.Fprintf(a.Stdout, "%-16s %-16s %-8s %-8s %-14s cloud=%-7s cloud_state=%s host=%s expires=%s cleanup=%s\n",
+				audit.LeaseID, blank(audit.Slug, "-"), audit.Provider, audit.State, audit.ServerType, audit.CloudStatus, blank(audit.CloudState, "-"), blank(audit.CloudHost, "-"), blank(audit.ExpiresAt, "-"), leaseAuditCleanupSummary(audit))
+		}
+	}
+	if *failOnLive {
+		for _, audit := range audits {
+			if audit.CloudStatus == "found" || audit.CloudStatus == "error" {
+				return exit(1, "lease audit found unreconciled cloud instances or audit errors")
+			}
+		}
+	}
+	return nil
+}
+
+func leaseAuditCleanupSummary(audit CoordinatorLeaseCloudAudit) string {
+	if audit.CleanupAttempts == 0 && audit.CleanupError == "" {
+		return "-"
+	}
+	if audit.CleanupError == "" {
+		return fmt.Sprintf("attempts=%d", audit.CleanupAttempts)
+	}
+	return fmt.Sprintf("attempts=%d error=%s", audit.CleanupAttempts, audit.CleanupError)
+}
+
 func (a App) adminRelease(ctx context.Context, args []string) error {
 	args, deleteAnywhere := extractBoolFlag(args, "delete")
 	args, jsonAnywhere := extractBoolFlag(args, "json")

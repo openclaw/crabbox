@@ -316,11 +316,15 @@ type imagePromoteKongCmd struct {
 }
 
 type adminKongCmd struct {
-	Leases  adminLeasesKongCmd  `cmd:"" passthrough:"" help:"List coordinator lease records."`
-	Release adminReleaseKongCmd `cmd:"" passthrough:"" help:"Mark a lease released."`
-	Delete  adminDeleteKongCmd  `cmd:"" passthrough:"" help:"Delete the backing server and mark the lease released."`
+	Leases     adminLeasesKongCmd     `cmd:"" passthrough:"" help:"List coordinator lease records."`
+	LeaseAudit adminLeaseAuditKongCmd `cmd:"" name:"lease-audit" passthrough:"" help:"Check expired coordinator leases against cloud provider state."`
+	Release    adminReleaseKongCmd    `cmd:"" passthrough:"" help:"Mark a lease released."`
+	Delete     adminDeleteKongCmd     `cmd:"" passthrough:"" help:"Delete the backing server and mark the lease released."`
 }
 type adminLeasesKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminLeaseAuditKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type adminReleaseKongCmd struct {
@@ -482,6 +486,9 @@ func (c *imagePromoteKongCmd) Run(ctx context.Context, app App) error {
 
 func (c *adminLeasesKongCmd) Run(ctx context.Context, app App) error {
 	return app.adminLeases(ctx, c.Args)
+}
+func (c *adminLeaseAuditKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminLeaseAudit(ctx, c.Args)
 }
 func (c *adminReleaseKongCmd) Run(ctx context.Context, app App) error {
 	return app.adminRelease(ctx, c.Args)

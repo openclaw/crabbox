@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -225,6 +226,30 @@ func TestCoordinatorHTTPAddsAccessHeaders(t *testing.T) {
 	}
 	if err := client.Health(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCoordinatorAdminLeaseAudit(t *testing.T) {
+	var gotQuery url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/admin/lease-audit" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"audits":[{"leaseID":"cbx_123","provider":"aws","state":"expired","target":"linux","owner":"alice@example.com","org":"example-org","cloudID":"i-123","cloudStatus":"found","cloudState":"running"}]}`))
+	}))
+	defer server.Close()
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	audits, err := client.AdminLeaseAudit(context.Background(), "expired", "aws", "alice@example.com", "example-org", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotQuery.Get("state") != "expired" || gotQuery.Get("provider") != "aws" || gotQuery.Get("owner") != "alice@example.com" || gotQuery.Get("org") != "example-org" || gotQuery.Get("limit") != "25" {
+		t.Fatalf("query=%v", gotQuery)
+	}
+	if len(audits) != 1 || audits[0].LeaseID != "cbx_123" || audits[0].CloudStatus != "found" {
+		t.Fatalf("audits=%#v", audits)
 	}
 }
 
