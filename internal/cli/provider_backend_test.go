@@ -213,6 +213,52 @@ func TestLeaseCreateFlagsApplySelectedProviderFlags(t *testing.T) {
 	}
 }
 
+func TestLeaseCreateFlagsDefaultCloudflareProviderOverrideToBeast(t *testing.T) {
+	defaults := baseConfig()
+	defaults.Provider = "aws"
+	defaults.Class = "standard"
+	defaults.ServerType = serverTypeForConfig(defaults)
+
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "cloudflare"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Class != "beast" {
+		t.Fatalf("class=%q want beast", cfg.Class)
+	}
+	if cfg.ServerType != "standard-4" {
+		t.Fatalf("server type=%q want standard-4", cfg.ServerType)
+	}
+}
+
+func TestLeaseCreateFlagsCloudflareProviderOverrideHonorsExplicitClass(t *testing.T) {
+	defaults := baseConfig()
+	defaults.Provider = "aws"
+	defaults.Class = "standard"
+	defaults.ServerType = serverTypeForConfig(defaults)
+
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "cloudflare", "--class", "standard"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Class != "standard" {
+		t.Fatalf("class=%q want standard", cfg.Class)
+	}
+	if cfg.ServerType != "standard-1" {
+		t.Fatalf("server type=%q want standard-1", cfg.ServerType)
+	}
+}
+
 func TestLeaseCreateFlagsReapplyProxmoxDefaultsAfterProviderOverride(t *testing.T) {
 	defaults := baseConfig()
 	defaults.Provider = "hetzner"

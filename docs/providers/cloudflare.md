@@ -86,6 +86,11 @@ to `standard-1|standard-2|standard-3|standard-4`; `beast` is the default and has
 the largest predefined disk budget. Use `--type lite|basic|standard-1|standard-2|standard-3|standard-4`
 to pin a specific Cloudflare type.
 
+When `--provider cloudflare` is used to override a repo config written for
+another provider, Crabbox defaults Cloudflare back to `beast` unless `--class`
+or `--type` is also set. This avoids inheriting a generic `class: standard`
+repo default into a small Cloudflare container by accident.
+
 Check the active container app after deploy:
 
 ```sh

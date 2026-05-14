@@ -45,6 +45,7 @@ func applyLeaseCreateFlags(cfg *Config, fs *flag.FlagSet, values leaseCreateFlag
 	cfg.Provider = *values.Provider
 	cfg.Profile = *values.Profile
 	cfg.Class = *values.Class
+	applyCloudflareProviderOverrideClassDefault(cfg, fs)
 	applyCapabilityFlags(cfg, *values.Desktop, *values.Browser, *values.Code)
 	if err := applyTargetFlagOverrides(cfg, fs, values.Target); err != nil {
 		return err
@@ -83,6 +84,17 @@ func validateLeaseDurations(cfg Config) error {
 		return exit(2, "idle timeout must be positive")
 	}
 	return nil
+}
+
+func applyCloudflareProviderOverrideClassDefault(cfg *Config, fs *flag.FlagSet) {
+	if !flagWasSet(fs, "provider") || flagWasSet(fs, "class") || flagWasSet(fs, "type") || cfg.ServerTypeExplicit {
+		return
+	}
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil || provider.Name() != "cloudflare" {
+		return
+	}
+	cfg.Class = "beast"
 }
 
 type leaseTargetConfigOptions struct {
