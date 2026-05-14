@@ -364,7 +364,7 @@ func TestRunCommandRejectsEnvHelperWithSyncOnly(t *testing.T) {
 
 func TestRunCommandCleansEnvProfileWhenProbeFails(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", filepath.Join(dir, "home"))
+	isolateRunTestUserDirs(t, dir)
 	sshPath := filepath.Join(dir, "ssh")
 	logPath := filepath.Join(dir, "ssh.log")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -446,7 +446,7 @@ func TestValidateRunEnvHelperTargetRejectsNativeWindows(t *testing.T) {
 
 func TestRunCommandRejectsWindowsEnvHelperBeforeRemoteCommands(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", filepath.Join(dir, "home"))
+	isolateRunTestUserDirs(t, dir)
 	sshPath := filepath.Join(dir, "ssh")
 	logPath := filepath.Join(dir, "ssh.log")
 	script := `#!/bin/sh
@@ -486,6 +486,13 @@ exit 0
 	if _, readErr := os.ReadFile(logPath); !os.IsNotExist(readErr) {
 		t.Fatalf("ssh should not run before Windows env-helper rejection, readErr=%v", readErr)
 	}
+}
+
+func isolateRunTestUserDirs(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", filepath.Join(dir, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg-config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "xdg-state"))
 }
 
 func TestFullResyncPrunesEvenWhenDeleteDisabled(t *testing.T) {
