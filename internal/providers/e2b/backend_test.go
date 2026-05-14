@@ -306,6 +306,43 @@ func TestE2BSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	}
 }
 
+func TestE2BSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("tar not available")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/go.mod", []byte("module example.test/repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "init")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	client := &fakeE2BSyncClient{processCodes: []int{0, 7, 0}}
+	backend := &e2bBackend{
+		cfg: Config{E2B: E2BConfig{User: "ubuntu", Workdir: "repo"}},
+		rt:  Runtime{Stderr: io.Discard},
+	}
+	workspace := e2bWorkspacePath(backend.cfg)
+	_, _, err := backend.syncWorkspace(context.Background(), client, e2bSession{SandboxID: "sbx_1"}, RunRequest{
+		Repo: Repo{Root: root, Name: "repo"},
+	}, workspace)
+	if err == nil {
+		t.Fatalf("expected extract failure")
+	}
+	if len(client.commands) != 3 {
+		t.Fatalf("commands=%#v, want prepare, extract, cleanup", client.commands)
+	}
+	cleanup := client.commands[2]
+	if !strings.Contains(cleanup, "rm -f '/tmp/crabbox-") {
+		t.Fatalf("cleanup command missing remote archive removal: %q", cleanup)
+	}
+}
+
 func TestE2BPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 	client := &fakeE2BSyncClient{}
 	cfg := Config{}
@@ -432,14 +469,15 @@ func TestE2BResolveSyntheticIDRequiresCrabboxMetadata(t *testing.T) {
 }
 
 type fakeE2BSyncClient struct {
-	commands    []string
-	users       []string
-	sandbox     e2bSandbox
-	createReq   e2bCreateSandboxRequest
-	createCalls int
-	getErr      error
-	uploadPath  string
-	uploaded    bytes.Buffer
+	commands     []string
+	users        []string
+	sandbox      e2bSandbox
+	createReq    e2bCreateSandboxRequest
+	createCalls  int
+	getErr       error
+	uploadPath   string
+	uploaded     bytes.Buffer
+	processCodes []int
 }
 
 func (f *fakeE2BSyncClient) CreateSandbox(_ context.Context, req e2bCreateSandboxRequest) (e2bSandbox, error) {
@@ -479,6 +517,11 @@ func (f *fakeE2BSyncClient) UploadFile(_ context.Context, _ e2bSession, targetPa
 func (f *fakeE2BSyncClient) StartProcess(_ context.Context, _ e2bSession, req e2bProcessRequest) (int, error) {
 	f.commands = append(f.commands, req.Command)
 	f.users = append(f.users, req.User)
+	if len(f.processCodes) > 0 {
+		code := f.processCodes[0]
+		f.processCodes = f.processCodes[1:]
+		return code, nil
+	}
 	return 0, nil
 }
 

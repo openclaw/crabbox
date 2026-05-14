@@ -59,6 +59,7 @@ func (b *e2bBackend) syncWorkspace(ctx context.Context, client e2bAPI, session e
 		"rm -f " + shellQuote(remoteArchive),
 	}, " && ")
 	if err := b.execShell(ctx, client, session, extract, io.Discard); err != nil {
+		_ = b.execShell(context.Background(), client, session, "rm -f "+shellQuote(remoteArchive), io.Discard)
 		return nil, 0, err
 	}
 	uploadDuration := b.now().Sub(uploadStarted)
