@@ -10,6 +10,7 @@
 
 - Fixed Code bridge upstream URL handling so browser-controlled paths cannot select a non-loopback upstream target, and clamped `CRABBOX_AWS_ROOT_GB` parsing to valid `int32` values.
 - Fixed AWS image promotion so macOS AMIs are scoped by target, architecture, and region instead of becoming the default for every AWS lease.
+- Fixed coordinator-backed macOS lease reuse so follow-up `run`, sync, and image smoke commands use the brokered `/Users/ec2-user/crabbox` work root instead of Linux's `/work/crabbox`.
 - Fixed `crabbox admin lease-audit --fail-on-live` so recently terminated AWS instances returned by `DescribeInstances` do not fail cleanup automation as live resources.
 - Fixed coordinator TTL cleanup so provider deletion failures keep leases active with retry metadata instead of silently expiring while cloud instances continue running.
 - Fixed direct AWS security-group maintenance so stale Crabbox-owned SSH ingress rules are pruned before adding the current source CIDRs.

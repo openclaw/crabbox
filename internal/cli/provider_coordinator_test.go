@@ -114,6 +114,41 @@ func TestCoordinatorListJSONFallsBackWhenAdminTokenMissing(t *testing.T) {
 	}
 }
 
+func TestLeaseToServerTargetPreservesCoordinatorWorkRoot(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.WorkRoot = defaultPOSIXWorkRoot
+
+	server, target, leaseID := leaseToServerTarget(CoordinatorLease{
+		ID:         "cbx_123",
+		Slug:       "silver-squid",
+		Provider:   "aws",
+		TargetOS:   targetMacOS,
+		SSHUser:    "ec2-user",
+		SSHPort:    "22",
+		Host:       "203.0.113.10",
+		WorkRoot:   defaultMacOSWorkRoot,
+		ServerType: "mac2.metal",
+		State:      "active",
+	}, cfg)
+
+	if leaseID != "cbx_123" {
+		t.Fatalf("leaseID=%q", leaseID)
+	}
+	if target.TargetOS != targetMacOS || target.User != "ec2-user" || target.Port != "22" {
+		t.Fatalf("target=%#v", target)
+	}
+	if server.Labels["work_root"] != defaultMacOSWorkRoot {
+		t.Fatalf("work_root label=%q want %q", server.Labels["work_root"], defaultMacOSWorkRoot)
+	}
+
+	applyResolvedServerConfig(&cfg, server)
+	if cfg.WorkRoot != defaultMacOSWorkRoot {
+		t.Fatalf("workRoot=%q want %q", cfg.WorkRoot, defaultMacOSWorkRoot)
+	}
+}
+
 func TestCoordinatorAcquireReleasesStaleInstanceLease(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
