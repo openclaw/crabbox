@@ -543,6 +543,42 @@ func TestCloudflareStatusPrunesExpiredClaim(t *testing.T) {
 	}
 }
 
+func TestCloudflareStopPrunesMissingClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/sandboxes/cbx_missing" {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	if err := claimLeaseForRepoProvider("cbx_missing", "stale-claim", providerName, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	backend := cloudflareBackend{
+		cfg: Config{
+			Provider: providerName,
+			Cloudflare: CloudflareConfig{
+				APIURL: server.URL,
+				Token:  "token",
+			},
+		},
+		rt: Runtime{HTTP: server.Client(), Stdout: &stdout},
+	}
+	if err := backend.Stop(context.Background(), StopRequest{ID: "stale-claim"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := resolveLeaseClaimForProvider("stale-claim", providerName); err != nil || ok {
+		t.Fatalf("claim resolved after stale stop ok=%t err=%v", ok, err)
+	}
+	if !strings.Contains(stdout.String(), "removed stale cloudflare claim cbx_missing reason=not-found") {
+		t.Fatalf("stdout = %q, want stale claim removal", stdout.String())
+	}
+}
+
 func TestCloudflareRemoteDiskCheckRejectsZeroOrUnknownAvailable(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

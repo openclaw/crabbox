@@ -280,6 +280,11 @@ func (b *cloudflareBackend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	if err := client.destroySandbox(ctx, sandboxID); err != nil {
+		if cloudflareNotFoundError(err) {
+			removeLeaseClaim(leaseID)
+			fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s reason=not-found\n", providerName, leaseID)
+			return nil
+		}
 		return err
 	}
 	removeLeaseClaim(leaseID)
@@ -300,7 +305,7 @@ func (b *cloudflareBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 	for _, claim := range claims {
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
-			if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
+			if cloudflareNotFoundError(err) {
 				if req.DryRun {
 					fmt.Fprintf(b.rt.Stdout, "would remove stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, blank(claim.Slug, "-"))
 					continue
@@ -328,6 +333,14 @@ func (b *cloudflareBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d checked=%d\n", providerName, removed, len(claims))
 	}
 	return nil
+}
+
+func cloudflareNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "404") || strings.Contains(text, "not found")
 }
 
 func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflareClient, repo Repo, reclaim bool) (string, cloudflareContainer, string, error) {
