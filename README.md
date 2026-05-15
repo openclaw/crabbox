@@ -48,6 +48,10 @@ Supported providers:
   execution.
 - [E2B](docs/providers/e2b.md) (`provider: e2b`): delegated E2B sandbox
   execution.
+- [Modal](docs/providers/modal.md) (`provider: modal`): delegated Modal
+  Sandbox execution through the local Python client.
+- [Tensorlake](docs/providers/tensorlake.md) (`provider: tensorlake`):
+  delegated Tensorlake Firecracker sandbox execution through the Tensorlake CLI.
 - [Cloudflare](docs/providers/cloudflare.md)
   (`provider: cloudflare`): delegated Cloudflare execution through a Worker and
   container runner.
@@ -131,7 +135,13 @@ For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For th
 - **Semaphore CI testbox.** Set `provider: semaphore` to lease a Semaphore CI job as a testbox. Same environment as your real pipelines.
 - **Proxmox VM clones.** Set `provider: proxmox` to clone Linux QEMU templates on a private Proxmox VE cluster, bootstrap them through the QEMU guest agent, and use normal Crabbox SSH sync/run/cleanup.
 - **Sprites SSH leases.** Set `provider: sprites` to create a Sprites microVM, bootstrap OpenSSH inside it, and let Crabbox sync/run through `sprite proxy` with `crabbox ssh` support.
-- **Daytona, Islo, and E2B sandboxes.** Set `provider: daytona` for Daytona SDK/toolbox execution from a snapshot with explicit SSH access when needed, `provider: islo` for delegated Islo sandbox execution through the Islo Go SDK, or `provider: e2b` for delegated E2B sandbox execution through E2B sandbox APIs.
+- **Delegated sandbox providers.** Set `provider: daytona` for Daytona
+  SDK/toolbox execution from a snapshot with explicit SSH access when needed,
+  `provider: islo` for delegated Islo sandbox execution through the Islo Go SDK,
+  `provider: e2b` for delegated E2B sandbox execution through E2B sandbox APIs,
+  `provider: modal` for Modal Sandbox execution through the local Python client,
+  or `provider: tensorlake` for Tensorlake Firecracker sandbox execution through
+  the Tensorlake CLI.
 - **Cloudflare.** Set `provider: cloudflare` for delegated execution through a Worker runner and custom container image.
 - **Trusted AWS images.** Operators can create AMIs from active brokered AWS leases and promote a known-good image as the coordinator default.
 - **Cost guardrails.** Per-lease and monthly spend caps. Live pricing from EC2 Spot history or Hetzner server-type prices, with static fallbacks. `crabbox usage` summarizes spend by user, org, provider, and type.
@@ -288,6 +298,25 @@ provider: e2b
 e2b:
   template: base
   workdir: crabbox
+```
+
+Optional Modal sandbox:
+
+```yaml
+provider: modal
+modal:
+  app: crabbox
+  image: python:3.13-slim
+  workdir: /workspace/crabbox
+```
+
+Optional Tensorlake sandbox:
+
+```yaml
+provider: tensorlake
+tensorlake:
+  image: ubuntu-minimal
+  workdir: /workspace/crabbox
 ```
 
 Optional Semaphore CI testbox:

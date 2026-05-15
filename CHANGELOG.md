@@ -10,6 +10,7 @@
 - Added Cloudflare runner deploy-smoke tooling, CI coverage for the container runner Go module, and redacted `crabbox config show` output for Cloudflare runner auth.
 - Added `crabbox list --refresh` so local Cloudflare claims can be checked against live runner state on demand.
 - Added brokered provider snapshot/image deletion for AWS EBS snapshots and AMIs, Azure managed disk snapshots and managed images, and GCP disk snapshots and machine images.
+- Added Modal and Tensorlake to the top-level provider docs and delegated sandbox configuration examples. Thanks @stainlu.
 
 ### Changed
 
