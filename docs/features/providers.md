@@ -36,6 +36,7 @@ daytona    Daytona sandboxes with SDK/toolbox run and short-lived SSH access
 islo       Islo sandboxes with delegated command execution
 e2b        E2B sandboxes with delegated command execution
 modal      Modal Sandboxes with delegated command execution
+tensorlake Tensorlake Firecracker sandboxes with delegated command execution
 ```
 
 ## Provider Pages
@@ -55,6 +56,7 @@ modal      Modal Sandboxes with delegated command execution
 - [Islo](../providers/islo.md): delegated Islo sandbox execution.
 - [E2B](../providers/e2b.md): delegated E2B sandbox execution.
 - [Modal](../providers/modal.md): delegated Modal Sandbox execution.
+- [Tensorlake](../providers/tensorlake.md): delegated Tensorlake Firecracker sandbox execution.
 - [Provider backends](../provider-backends.md): implementation guide for adding a new provider/backend/plugin.
 
 ## Hetzner Summary
