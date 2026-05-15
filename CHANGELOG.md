@@ -14,6 +14,7 @@
 - Fixed the macOS image lifecycle smoke so `CRABBOX_MACOS_RELEASE_HOST=1` releases a script-allocated host after source-only and candidate-only runs too.
 - Added a macOS image lifecycle `summary.json` artifact with the run phase, host id, lease ids, AMI id, and artifact paths for blocked, partial, and completed runs.
 - Added remediation text and commands to blocked macOS image lifecycle summaries so IAM and coordinator preflight failures are actionable from the artifact.
+- Added baseline AWS provider and EC2 Mac host IAM policy JSON files to the macOS image lifecycle evidence bundle.
 - Added stable macOS image lifecycle evidence files for host discovery, allocation, image creation, and image promotion outputs.
 - Added stable macOS image lifecycle warmup, host wait, and WebVNC status evidence paths to make live image-bake failures diagnosable from the run artifact alone.
 - Added regression coverage for the guarded macOS image lifecycle smoke and made its WebVNC post-start grace period configurable.

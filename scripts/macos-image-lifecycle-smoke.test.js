@@ -22,8 +22,16 @@ state_dir="\${CRABBOX_FAKE_STATE:?}"
 mkdir -p "$state_dir"
 printf '%s\\n' "$*" >>"$log"
 
+if [[ "$1" == "admin" && "$2" == "aws-policy" ]]; then
+  printf '{"Statement":[{"Action":"ec2:RunInstances"}]}\\n'
+  exit 0
+fi
+
 if [[ "$1" == "admin" && "$2" == "mac-hosts" ]]; then
   case "$3" in
+    policy)
+      printf '{"Statement":[{"Action":"ec2:AllocateHosts"}]}\\n'
+      ;;
     offerings)
       if [[ "\${CRABBOX_FAKE_OFFERINGS_404:-0}" == "1" ]]; then
         printf 'coordinator GET /v1/admin/mac-hosts/offerings?region=eu-west-1&type=mac2.metal: http 404: {"error":"not_found"}\\n' >&2
@@ -203,6 +211,8 @@ test("macOS lifecycle smoke writes a blocked IAM summary before paid work", asyn
     `${run.fake} admin aws-policy`,
     `${run.fake} admin mac-hosts allocate --region eu-west-1 --type mac2.metal --dry-run --json`,
   ]);
+  await assertFileContains(summary.evidence.awsProviderPolicy, /ec2:RunInstances/);
+  await assertFileContains(summary.evidence.macHostPolicy, /ec2:AllocateHosts/);
   await assertFileContains(summary.evidence.hostOfferings, /mac2\.metal/);
   await assertFileContains(summary.evidence.hostList, /^\[\]\n?$/);
   await assertFileContains(summary.evidence.hostDryRun, /UnauthorizedOperation/);
@@ -239,6 +249,8 @@ test("macOS lifecycle smoke preserves full mock lifecycle evidence", async () =>
   }
   await assertFileContains(summary.evidence.imageCreate, /ami-mock/);
   await assertFileContains(summary.evidence.imagePromote, /"target":"macos"/);
+  await assertFileContains(summary.evidence.awsProviderPolicy, /ec2:RunInstances/);
+  await assertFileContains(summary.evidence.macHostPolicy, /ec2:AllocateHosts/);
 
   const evidenceFiles = await readdir(path.join(run.artifacts, "evidence"));
   assert.deepEqual(

@@ -42,6 +42,8 @@ summary_phase="init"
 blocker_message=""
 blocker_remediation=""
 blocker_commands=""
+aws_policy_log=""
+mac_host_policy_log=""
 offerings_log=""
 hosts_log=""
 dry_log=""
@@ -173,6 +175,8 @@ write_summary() {
     --arg blockerMessage "$blocker_message" \
     --arg blockerRemediation "$blocker_remediation" \
     --arg blockerCommands "$blocker_commands" \
+    --arg awsPolicyLog "$aws_policy_log" \
+    --arg macHostPolicyLog "$mac_host_policy_log" \
     --arg offeringsLog "$offerings_log" \
     --arg hostsLog "$hosts_log" \
     --arg dryLog "$dry_log" \
@@ -224,6 +228,8 @@ write_summary() {
         promoted: ($artifactRoot + "/promoted")
       },
       evidence: {
+        awsProviderPolicy: $awsPolicyLog,
+        macHostPolicy: $macHostPolicyLog,
         hostOfferings: $offeringsLog,
         hostList: $hostsLog,
         hostDryRun: $dryLog,
@@ -325,6 +331,8 @@ log_line() {
 }
 
 set_evidence_paths() {
+  aws_policy_log="$evidence_dir/aws-provider-policy.json"
+  mac_host_policy_log="$evidence_dir/mac-host-policy.json"
   source_host_wait_log="$(log_for_label host-wait source)"
   candidate_host_wait_log="$(log_for_label host-wait candidate)"
   promoted_host_wait_log="$(log_for_label host-wait promoted)"
@@ -472,6 +480,8 @@ mkdir -p "$evidence_dir"
 set_evidence_paths
 write_summary running preflight
 printf 'macOS lifecycle smoke region=%s type=%s image=%s host-wait=%s\n' "$region" "$instance_type" "$image_name" "$host_wait_timeout"
+preflight_command provider-policy "aws provider policy" "$aws_policy_log" "$CRABBOX_BIN" admin aws-policy
+preflight_command mac-host-policy "mac host policy" "$mac_host_policy_log" "$CRABBOX_BIN" admin mac-hosts policy
 offerings_log="$evidence_dir/mac-host-offerings.txt"
 hosts_log="$evidence_dir/mac-host-list.json"
 preflight_command host-offerings "mac host offerings" "$offerings_log" "$CRABBOX_BIN" admin mac-hosts offerings --region "$region" --type "$instance_type"
