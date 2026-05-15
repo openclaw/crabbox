@@ -48,6 +48,7 @@ func TestAdminMacHostsPolicyPrintsLifecyclePermissions(t *testing.T) {
 		`"ec2:ReleaseHosts"`,
 		`"ec2:CreateTags"`,
 		`"ec2:CreateAction": "AllocateHosts"`,
+		`"servicequotas:ListServiceQuotas"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("policy missing %s:\n%s", want, out)
@@ -89,6 +90,7 @@ func TestAdminAWSPolicyCanIncludeMacHostPermissions(t *testing.T) {
 		`"ec2:AllocateHosts"`,
 		`"ec2:ReleaseHosts"`,
 		`"ec2:CreateAction": "AllocateHosts"`,
+		`"servicequotas:ListServiceQuotas"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("combined policy missing %s:\n%s", want, out)

@@ -11,6 +11,7 @@ crabbox admin aws-identity --region eu-west-1
 crabbox admin aws-policy [--mac-hosts]
 crabbox admin mac-hosts policy
 crabbox admin mac-hosts offerings --region eu-west-1 --type mac2.metal
+crabbox admin mac-hosts quota --region eu-west-1 --type mac2.metal
 crabbox admin mac-hosts list --region eu-west-1
 crabbox admin mac-hosts allocate --region eu-west-1 --type mac2.metal --dry-run
 crabbox admin mac-hosts allocate --region eu-west-1 --type mac2.metal --force
@@ -91,17 +92,18 @@ Flags:
 
 ## mac-hosts
 
-Print the IAM policy, list offerings, list hosts, allocate hosts, or release
-AWS EC2 Mac Dedicated Hosts through the coordinator. `policy`, `offerings`,
-`list`, and `allocate --dry-run` are read-only. Real `allocate` and `release`
+Print the IAM policy, list offerings, inspect host quota, list hosts, allocate
+hosts, or release AWS EC2 Mac Dedicated Hosts through the coordinator. `policy`,
+`offerings`, `quota`, `list`, and `allocate --dry-run` are read-only. Real `allocate` and `release`
 require `--force` because EC2 Mac Dedicated Hosts are billed separately from
 Crabbox leases and have AWS lifecycle constraints.
 
 The coordinator AWS identity must allow `ec2:DescribeInstanceTypeOfferings`,
 `ec2:DescribeHosts`, `ec2:AllocateHosts`, `ec2:ReleaseHosts`, and
-`ec2:CreateTags` for this command group. `AllocateHosts` uses create-time tags,
-so `CreateTags` should be allowed only when the EC2 create action is
-`AllocateHosts`:
+`ec2:CreateTags` for host lifecycle work, plus
+`servicequotas:ListServiceQuotas` for the quota preflight. `AllocateHosts` uses
+create-time tags, so `CreateTags` should be allowed only when the EC2 create
+action is `AllocateHosts`:
 
 ```json
 {
@@ -132,6 +134,11 @@ so `CreateTags` should be allowed only when the EC2 create action is
           "ec2:CreateAction": "AllocateHosts"
         }
       }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "servicequotas:ListServiceQuotas",
+      "Resource": "*"
     }
   ]
 }
@@ -140,7 +147,7 @@ so `CreateTags` should be allowed only when the EC2 create action is
 This policy is intentionally limited to EC2 Mac Dedicated Host lifecycle
 operations. End-to-end macOS image validation also needs the normal brokered
 AWS provider permissions for key pairs, security groups, `RunInstances`,
-`TerminateInstances`, image creation/promotion, snapshot cleanup, and optional
+`TerminateInstances`, image creation/promotion, snapshot cleanup, and baseline
 Service Quotas reads. See [Infrastructure](../infrastructure.md#aws-ec2) before
 running the paid macOS image smoke.
 
@@ -157,6 +164,11 @@ list:
   --json                print JSON
 
 offerings:
+  --region <region>     AWS region
+  --type <type>         default mac2.metal
+  --json                print JSON
+
+quota:
   --region <region>     AWS region
   --type <type>         default mac2.metal
   --json                print JSON

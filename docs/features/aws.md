@@ -113,6 +113,7 @@ crabbox admin aws-identity --region eu-west-1
 crabbox admin aws-policy --mac-hosts
 crabbox admin mac-hosts list --region eu-west-1
 crabbox admin mac-hosts offerings --region eu-west-1 --type mac2.metal
+crabbox admin mac-hosts quota --region eu-west-1 --type mac2.metal
 crabbox admin mac-hosts allocate --region eu-west-1 --type mac2.metal --dry-run
 crabbox admin mac-hosts allocate --region eu-west-1 --type mac2.metal --force
 crabbox admin mac-hosts release h-0123456789abcdef0 --region eu-west-1 --force
@@ -120,8 +121,9 @@ crabbox admin mac-hosts release h-0123456789abcdef0 --region eu-west-1 --force
 
 The coordinator AWS identity needs `ec2:DescribeInstanceTypeOfferings`,
 `ec2:DescribeHosts`, `ec2:AllocateHosts`, `ec2:ReleaseHosts`, and
-`ec2:CreateTags` for these admin commands. The `CreateTags` grant is needed
-because Crabbox tags hosts during `AllocateHosts`; scope it with
+`ec2:CreateTags` for host lifecycle work, plus
+`servicequotas:ListServiceQuotas` for `mac-hosts quota`. The `CreateTags` grant
+is needed because Crabbox tags hosts during `AllocateHosts`; scope it with
 `ec2:CreateAction=AllocateHosts`. Use `allocate --dry-run` first; it validates
 the request path without creating a Dedicated Host. Use `admin aws-identity` to
 confirm which coordinator AWS principal needs the policy.
@@ -129,15 +131,15 @@ confirm which coordinator AWS principal needs the policy.
 IAM is not the only preflight. AWS tracks Dedicated Mac host capacity through
 separate EC2 Service Quotas such as
 [Running Dedicated mac2 Hosts](https://docs.aws.amazon.com/ec2/latest/instancetypes/ec2-instance-quotas.html),
-which defaults to 0 and is adjustable. If `allocate --dry-run` succeeds but the
-real allocation fails, check the selected region's Dedicated Mac host quota
-before treating the failure as a Crabbox runtime bug.
+which `mac-hosts quota` can now inspect through the coordinator. If
+`allocate --dry-run` succeeds, check quota before treating a real allocation
+failure as a Crabbox runtime bug.
 
 That host lifecycle policy is not the full macOS image policy. The later
 warmup, WebVNC, AMI create, candidate boot, promotion, and cleanup phases also
 need the normal brokered AWS provider permissions documented in
 [Infrastructure](../infrastructure.md#aws-ec2), including launch/list/tag/terminate,
-key pair, security group, image, snapshot, and optional Service Quotas access.
+key pair, security group, image, snapshot, and baseline Service Quotas access.
 Print the combined provider plus Dedicated Host policy with
 `crabbox admin aws-policy --mac-hosts`, or print the two grants separately with
 `crabbox admin aws-policy` and `crabbox admin mac-hosts policy`.

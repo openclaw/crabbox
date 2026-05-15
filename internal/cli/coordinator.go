@@ -206,6 +206,16 @@ type CoordinatorMacHostAllocationDryRun struct {
 	Message          string `json:"message"`
 }
 
+type CoordinatorMacHostQuota struct {
+	ServiceCode string  `json:"serviceCode,omitempty"`
+	QuotaCode   string  `json:"quotaCode"`
+	QuotaName   string  `json:"quotaName"`
+	Value       float64 `json:"value"`
+	Adjustable  bool    `json:"adjustable,omitempty"`
+	GlobalQuota bool    `json:"globalQuota,omitempty"`
+	Unit        string  `json:"unit,omitempty"`
+}
+
 type CoordinatorAWSIdentity struct {
 	Account string `json:"account"`
 	ARN     string `json:"arn"`
@@ -1008,6 +1018,25 @@ func (c *CoordinatorClient) AdminMacHostOfferings(ctx context.Context, region, s
 	}
 	err := c.do(ctx, http.MethodGet, path, nil, &res)
 	return res.Offerings, err
+}
+
+func (c *CoordinatorClient) AdminMacHostQuotas(ctx context.Context, region, serverType string) ([]CoordinatorMacHostQuota, error) {
+	var res struct {
+		Quotas []CoordinatorMacHostQuota `json:"quotas"`
+	}
+	values := url.Values{}
+	if region != "" {
+		values.Set("region", region)
+	}
+	if serverType != "" {
+		values.Set("type", serverType)
+	}
+	path := "/v1/admin/mac-hosts/quota"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	err := c.do(ctx, http.MethodGet, path, nil, &res)
+	return res.Quotas, err
 }
 
 func (c *CoordinatorClient) AdminAllocateMacHost(ctx context.Context, region, serverType, availabilityZone string) ([]CoordinatorMacHost, error) {

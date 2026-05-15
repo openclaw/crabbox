@@ -89,6 +89,7 @@ crabbox admin aws-identity [--region <region>] [--json]
 crabbox admin aws-policy [--mac-hosts]
 crabbox admin mac-hosts policy
 crabbox admin mac-hosts offerings [--region <region>] [--type mac2.metal] [--json]
+crabbox admin mac-hosts quota [--region <region>] [--type mac2.metal] [--json]
 crabbox admin mac-hosts list [--region <region>] [--type <mac-type>] [--state <state>] [--json]
 crabbox admin mac-hosts allocate [--availability-zone <az>] [--region <region>] [--type mac2.metal] (--dry-run|--force)
 crabbox admin mac-hosts release <host-id> [--region <region>] --force
@@ -289,6 +290,7 @@ crabbox admin leases --state active
 crabbox admin lease-audit --state expired --provider aws --fail-on-live
 crabbox admin aws-identity --region eu-west-1
 crabbox admin mac-hosts offerings --region eu-west-1 --type mac2.metal
+crabbox admin mac-hosts quota --region eu-west-1 --type mac2.metal
 crabbox admin mac-hosts list --region eu-west-1
 crabbox admin mac-hosts allocate --region eu-west-1 --type mac2.metal --dry-run
 crabbox admin release blue-lobster

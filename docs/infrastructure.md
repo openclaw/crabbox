@@ -239,7 +239,8 @@ Service Quotas access is best-effort: when it is available, Crabbox can skip
 known quota-impossible instance types before calling `RunInstances`; when it
 is missing, EC2 launch errors are still classified after the failed call.
 EC2 Mac image bakes also need the separate Dedicated Host lifecycle grant
-printed by `crabbox admin mac-hosts policy`. Print the baseline provider
+printed by `crabbox admin mac-hosts policy`, including
+`servicequotas:ListServiceQuotas` for the Mac host quota preflight. Print the baseline provider
 policy with `crabbox admin aws-policy`, or the combined provider plus Dedicated
 Host policy with `crabbox admin aws-policy --mac-hosts`.
 

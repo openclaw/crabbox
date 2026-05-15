@@ -95,7 +95,7 @@ available host in the selected region, or you can set `CRABBOX_AWS_MAC_HOST_ID`
 / `aws.macHostId` to pin a specific host. Use `--market on-demand`, and expect
 EC2 Mac host lifecycle rules to dominate cleanup and cost. Warmup does not
 allocate a Dedicated Host implicitly; trusted operators can use
-`crabbox admin mac-hosts offerings|list|allocate|release` for the host lifecycle. The
+`crabbox admin mac-hosts offerings|quota|list|allocate|release` for the host lifecycle. The
 default SSH user is `ec2-user`; the VNC password printed by `crabbox vnc` is the
 per-lease macOS account password set by bootstrap.
 

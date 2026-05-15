@@ -2362,6 +2362,87 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("lists AWS EC2 Mac Dedicated Host service quotas through an admin route", async () => {
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async (input, init) => {
+        const awsRequest = input instanceof Request ? input : new Request(input, init);
+        expect(new URL(awsRequest.url).hostname).toBe("servicequotas.eu-west-1.amazonaws.com");
+        expect(awsRequest.headers.get("x-amz-target")).toBe(
+          "ServiceQuotasV20190624.ListServiceQuotas",
+        );
+        const body = JSON.parse(await requestBodyForTest(input, init));
+        expect(body).toMatchObject({ ServiceCode: "ec2", MaxResults: 100 });
+        return new Response(
+          JSON.stringify({
+            Quotas: [
+              {
+                ServiceCode: "ec2",
+                QuotaCode: "L-LINUX",
+                QuotaName: "Running On-Demand Standard instances",
+                Value: 128,
+                Adjustable: true,
+                GlobalQuota: false,
+                Unit: "None",
+              },
+              {
+                ServiceCode: "ec2",
+                QuotaCode: "L-MAC1",
+                QuotaName: "Running Dedicated mac1 Hosts",
+                Value: 0,
+                Adjustable: true,
+                GlobalQuota: false,
+                Unit: "None",
+              },
+              {
+                ServiceCode: "ec2",
+                QuotaCode: "L-MAC2",
+                QuotaName: "Running Dedicated mac2 Hosts",
+                Value: 1,
+                Adjustable: true,
+                GlobalQuota: false,
+                Unit: "None",
+              },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {},
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "test",
+        CRABBOX_AWS_REGION: "eu-west-1",
+      },
+    );
+
+    const response = await fleet.fetch(
+      request("GET", "/v1/admin/mac-hosts/quota?region=eu-west-1&type=mac2.metal", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      region: "eu-west-1",
+      type: "mac2.metal",
+      quotas: [
+        {
+          serviceCode: "ec2",
+          quotaCode: "L-MAC2",
+          quotaName: "Running Dedicated mac2 Hosts",
+          value: 1,
+          adjustable: true,
+          globalQuota: false,
+          unit: "None",
+        },
+      ],
+    });
+  });
+
   it("reports the coordinator AWS identity through an admin route", async () => {
     const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
       async (input, init) => {

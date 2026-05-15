@@ -2631,6 +2631,27 @@ export class FleetDurableObject implements DurableObject {
       const offerings = await client.listMacHostOfferings(serverType);
       return json({ offerings });
     }
+    if (method === "GET" && hostID === "quota") {
+      const serverType = (url.searchParams.get("type") ?? "mac2.metal").trim();
+      if (!serverType.startsWith("mac") || !serverType.endsWith(".metal")) {
+        return json(
+          { error: "invalid_type", message: "type must be an EC2 Mac metal instance type" },
+          { status: 400 },
+        );
+      }
+      try {
+        const quotas = await client.listMacHostQuotas(serverType);
+        return json({ quotas, region, type: serverType });
+      } catch (error) {
+        return json(
+          {
+            error: "mac_host_quota_failed",
+            message: sanitizeMacHostQuotaError(errorMessage(error)),
+          },
+          { status: 502 },
+        );
+      }
+    }
     if (method === "GET" && !hostID) {
       const serverType = (url.searchParams.get("type") ?? "").trim();
       const state = (url.searchParams.get("state") ?? "").trim();
@@ -3963,6 +3984,18 @@ function awsImageArchitectureForTarget(target: TargetOS, serverType: string): st
 function sanitizeAWSRegion(value: string): string {
   const region = value.trim().toLowerCase();
   return /^[a-z]{2}-[a-z-]+-[0-9]$/.test(region) ? region : "";
+}
+
+function sanitizeMacHostQuotaError(message: string): string {
+  if (
+    message.includes("AccessDenied") ||
+    message.includes("UnauthorizedOperation") ||
+    message.includes("Encoded authorization") ||
+    message.includes("arn:aws:iam::")
+  ) {
+    return "AWS authorization failure: coordinator AWS identity needs servicequotas:ListServiceQuotas to inspect EC2 Mac Dedicated Host quotas";
+  }
+  return message.replace(/\s+/g, " ");
 }
 
 function webVNCTicketPrefix(): string {

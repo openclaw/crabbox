@@ -209,6 +209,7 @@ Common Flows:
   crabbox admin aws-policy
   crabbox admin mac-hosts policy
   crabbox admin mac-hosts offerings --region eu-west-1
+  crabbox admin mac-hosts quota --region eu-west-1 --type mac2.metal
   crabbox admin mac-hosts list --region eu-west-1
   crabbox admin mac-hosts allocate --region eu-west-1 --dry-run
   crabbox warmup --actions-runner

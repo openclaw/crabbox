@@ -45,6 +45,16 @@ export interface AWSMacHostAllocationDryRun {
   message: string;
 }
 
+export interface AWSServiceQuota {
+  serviceCode?: string;
+  quotaCode: string;
+  quotaName: string;
+  value?: number;
+  adjustable?: boolean;
+  globalQuota?: boolean;
+  unit?: string;
+}
+
 export interface AWSIdentity {
   account: string;
   arn: string;
@@ -522,6 +532,24 @@ export class EC2SpotClient {
         message: conciseAWSMacHostDryRunMessage(message),
       };
     }
+  }
+
+  async listMacHostQuotas(serverType = "mac2.metal"): Promise<AWSServiceQuota[]> {
+    const family = serverType.split(".")[0]?.toLowerCase() ?? "";
+    const all = await this.listEC2ServiceQuotas();
+    const macHostQuotas = all.filter((quota) => {
+      const name = quota.quotaName.toLowerCase();
+      return name.includes("running dedicated") && name.includes("mac") && name.includes("hosts");
+    });
+    const exactName = `running dedicated ${family} hosts`;
+    const exact = macHostQuotas.filter((quota) => quota.quotaName.toLowerCase() === exactName);
+    return (exact.length > 0 ? exact : macHostQuotas).toSorted((left, right) => {
+      const leftName = left.quotaName.toLowerCase();
+      const rightName = right.quotaName.toLowerCase();
+      const leftFamily = family && leftName.includes(family) ? 0 : 1;
+      const rightFamily = family && rightName.includes(family) ? 0 : 1;
+      return leftFamily - rightFamily || left.quotaName.localeCompare(right.quotaName);
+    });
   }
 
   async releaseMacHost(hostID: string): Promise<string[]> {
@@ -1102,6 +1130,61 @@ export class EC2SpotClient {
     }
   }
 
+  private async listEC2ServiceQuotas(): Promise<AWSServiceQuota[]> {
+    const quotas: AWSServiceQuota[] = [];
+    let nextToken = "";
+    do {
+      const body: Record<string, string | number> = { ServiceCode: "ec2", MaxResults: 100 };
+      if (nextToken) {
+        body["NextToken"] = nextToken;
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- Service Quotas pagination is token-ordered.
+      const response = await this.serviceQuotas.fetch(this.serviceQuotasEndpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-amz-json-1.1",
+          "x-amz-target": "ServiceQuotasV20190624.ListServiceQuotas",
+        },
+        body: JSON.stringify(body),
+      });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- response body belongs to the current page.
+      const text = await response.text();
+      if (!response.ok) {
+        throw new Error(`aws ListServiceQuotas: http ${response.status}: ${trimBody(text)}`);
+      }
+      const parsed = record(JSON.parse(text));
+      for (const quota of items(parsed["Quotas"]).map(record)) {
+        const quotaCode = asString(quota["QuotaCode"]);
+        const quotaName = asString(quota["QuotaName"]);
+        if (!quotaCode || !quotaName) {
+          continue;
+        }
+        const out: AWSServiceQuota = { quotaCode, quotaName };
+        const serviceCode = asString(quota["ServiceCode"]);
+        const value = finiteNumber(quota["Value"]);
+        const unit = asString(quota["Unit"]);
+        if (serviceCode) {
+          out.serviceCode = serviceCode;
+        }
+        if (value !== undefined) {
+          out.value = value;
+        }
+        if (typeof quota["Adjustable"] === "boolean") {
+          out.adjustable = quota["Adjustable"];
+        }
+        if (typeof quota["GlobalQuota"] === "boolean") {
+          out.globalQuota = quota["GlobalQuota"];
+        }
+        if (unit) {
+          out.unit = unit;
+        }
+        quotas.push(out);
+      }
+      nextToken = asString(parsed["NextToken"]);
+    } while (nextToken);
+    return quotas;
+  }
+
   private withRegion(server: ProviderMachine): ProviderMachine {
     return { ...server, region: this.region };
   }
@@ -1481,6 +1564,11 @@ function positiveFloat(value: string): number | undefined {
 function positiveNumber(value: unknown): number | undefined {
   const parsed = typeof value === "number" ? value : Number.parseFloat(String(value));
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : Number.parseFloat(String(value));
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 export function awsProvisioningErrorCategory(message: string): string {

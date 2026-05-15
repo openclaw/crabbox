@@ -48,6 +48,7 @@ macos_image_policy_log=""
 offerings_log=""
 hosts_log=""
 dry_log=""
+quota_log=""
 allocate_log=""
 image_create_log=""
 image_promote_log=""
@@ -157,6 +158,7 @@ write_summary() {
   local phase="$2"
   local aws_policy_log_path mac_host_policy_log_path macos_image_policy_log_path offerings_log_path hosts_log_path
   local dry_log_path allocate_log_path image_create_log_path image_promote_log_path
+  local quota_log_path
   local source_artifact_dir_path candidate_artifact_dir_path promoted_artifact_dir_path
   local source_host_wait_log_path candidate_host_wait_log_path promoted_host_wait_log_path
   local source_warmup_log_path candidate_warmup_log_path promoted_warmup_log_path
@@ -171,6 +173,7 @@ write_summary() {
   offerings_log_path="$(existing_file_or_empty "$offerings_log")"
   hosts_log_path="$(existing_file_or_empty "$hosts_log")"
   dry_log_path="$(existing_file_or_empty "$dry_log")"
+  quota_log_path="$(existing_file_or_empty "$quota_log")"
   allocate_log_path="$(existing_file_or_empty "$allocate_log")"
   image_create_log_path="$(existing_file_or_empty "$image_create_log")"
   image_promote_log_path="$(existing_file_or_empty "$image_promote_log")"
@@ -217,6 +220,7 @@ write_summary() {
     --arg offeringsLog "$offerings_log_path" \
     --arg hostsLog "$hosts_log_path" \
     --arg dryLog "$dry_log_path" \
+    --arg quotaLog "$quota_log_path" \
     --arg allocateLog "$allocate_log_path" \
     --arg imageCreateLog "$image_create_log_path" \
     --arg imagePromoteLog "$image_promote_log_path" \
@@ -278,6 +282,7 @@ write_summary() {
         hostOfferings: maybe_path($offeringsLog),
         hostList: maybe_path($hostsLog),
         hostDryRun: maybe_path($dryLog),
+        hostQuota: maybe_path($quotaLog),
         hostAllocate: maybe_path($allocateLog),
         imageCreate: maybe_path($imageCreateLog),
         imagePromote: maybe_path($imagePromoteLog),
@@ -587,6 +592,24 @@ else
     fi
     printf 'macOS lifecycle blocked before paid work: EC2 Mac host dry-run did not succeed.\n' >&2
     write_summary blocked host-dry-run
+    exit 1
+  fi
+
+  summary_phase="host-quota"
+  quota_log="$evidence_dir/mac-host-quota.json"
+  preflight_command host-quota "mac host quota" "$quota_log" "$CRABBOX_BIN" admin mac-hosts quota --region "$region" --type "$instance_type" --json
+  if ! jq -e 'length > 0' "$quota_log" >/dev/null; then
+    blocker_message="no EC2 Mac Dedicated Host service quota was visible for $instance_type in $region"
+    blocker_remediation="Check AWS Service Quotas for the selected EC2 Mac host family in $region, then rerun the no-spend Mac host preflight."
+    printf 'macOS lifecycle blocked before paid work: %s\n' "$blocker_message" >&2
+    write_summary blocked host-quota
+    exit 1
+  fi
+  if ! jq -e 'any(.[]; (.value // 0) >= 1)' "$quota_log" >/dev/null; then
+    blocker_message="EC2 Mac Dedicated Host quota is below 1 for $instance_type in $region"
+    blocker_remediation="Request or raise the AWS EC2 Mac Dedicated Host quota for the selected host family in $region, then rerun the no-spend Mac host preflight."
+    printf 'macOS lifecycle blocked before paid work: %s\n' "$blocker_message" >&2
+    write_summary blocked host-quota
     exit 1
   fi
 

@@ -43,6 +43,9 @@ if [[ "$1" == "admin" && "$2" == "mac-hosts" ]]; then
       fi
       printf 'eu-west-1    eu-west-1b     mac2.metal\\n'
       ;;
+    quota)
+      printf '[{"serviceCode":"ec2","quotaCode":"L-MAC2","quotaName":"Running Dedicated mac2 Hosts","value":%s,"adjustable":true,"globalQuota":false,"unit":"None"}]\\n' "\${CRABBOX_FAKE_QUOTA_VALUE:-1}"
+      ;;
     list)
       if [[ "\${CRABBOX_FAKE_NO_HOST:-0}" == "1" && ! -f "$state_dir/host" ]]; then
         printf '[]\\n'
@@ -220,6 +223,7 @@ test("macOS lifecycle smoke writes a blocked IAM summary before paid work", asyn
   await assertFileContains(summary.evidence.hostOfferings, /mac2\.metal/);
   await assertFileContains(summary.evidence.hostList, /^\[\]\n?$/);
   await assertFileContains(summary.evidence.hostDryRun, /UnauthorizedOperation/);
+  assert.equal(summary.evidence.hostQuota, null);
   assert.equal(summary.evidence.hostAllocate, null);
   assert.equal(summary.evidence.webvncDaemon.source, null);
   assert.equal(summary.evidence.webvncStatus.source, null);
@@ -232,6 +236,33 @@ test("macOS lifecycle smoke writes a blocked IAM summary before paid work", asyn
     evidenceFiles.filter((name) => name.startsWith("webvnc-daemon-")),
     [],
   );
+});
+
+test("macOS lifecycle smoke blocks on missing Mac host quota before paid work", async () => {
+  const run = await setupRun();
+  const result = await runLifecycle({
+    CRABBOX_BIN: run.fake,
+    CRABBOX_FAKE_LOG: run.fakeLog,
+    CRABBOX_FAKE_STATE: run.fakeState,
+    CRABBOX_FAKE_NO_HOST: "1",
+    CRABBOX_FAKE_QUOTA_VALUE: "0",
+    CRABBOX_MACOS_ALLOCATE: "1",
+    CRABBOX_MACOS_ARTIFACT_DIR: run.artifacts,
+    CRABBOX_MACOS_IMAGE_NAME: "quota-blocked",
+    CRABBOX_MACOS_WEBVNC_START_GRACE: "0s",
+  });
+
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  const summary = await readJSON(path.join(run.artifacts, "summary.json"));
+  assert.equal(summary.result, "blocked");
+  assert.equal(summary.phase, "host-quota");
+  assert.match(summary.blocker.message, /quota is below 1/);
+  await assertFileContains(summary.evidence.hostQuota, /Running Dedicated mac2 Hosts/);
+  assert.equal(summary.evidence.hostAllocate, null);
+
+  const fakeLog = await readFile(run.fakeLog, "utf8");
+  assert.match(fakeLog, /^admin mac-hosts quota --region eu-west-1 --type mac2\.metal --json$/m);
+  assert.doesNotMatch(fakeLog, /^admin mac-hosts allocate --region eu-west-1 --type mac2\.metal --force --json$/m);
 });
 
 test("macOS lifecycle smoke preserves full mock lifecycle evidence", async () => {
@@ -271,6 +302,7 @@ test("macOS lifecycle smoke preserves full mock lifecycle evidence", async () =>
   await assertFileContains(summary.evidence.awsProviderPolicy, /ec2:RunInstances/);
   await assertFileContains(summary.evidence.macHostPolicy, /ec2:AllocateHosts/);
   await assertFileContains(summary.evidence.macosImagePolicy, /ec2:AllocateHosts/);
+  await assertFileContains(summary.evidence.hostQuota, /Running Dedicated mac2 Hosts/);
 
   const evidenceFiles = await readdir(path.join(run.artifacts, "evidence"));
   assert.deepEqual(
@@ -286,5 +318,6 @@ test("macOS lifecycle smoke preserves full mock lifecycle evidence", async () =>
   assert.equal((fakeLog.match(/^warmup\b/gm) ?? []).length, 3);
   assert.equal((fakeLog.match(/^webvnc daemon start\b/gm) ?? []).length, 3);
   assert.equal((fakeLog.match(/^webvnc status\b/gm) ?? []).length, 3);
+  assert.match(fakeLog, /^admin mac-hosts quota --region eu-west-1 --type mac2\.metal --json$/m);
   assert.match(fakeLog, /^admin mac-hosts release h-mock --region eu-west-1 --force$/m);
 });

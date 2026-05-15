@@ -200,13 +200,15 @@ func combineIAMPolicyJSON(policies ...string) (string, error) {
 func (a App) adminMacHosts(ctx context.Context, args []string) error {
 	args = stripKongCommandPath(args, "admin", "mac-hosts")
 	if len(args) == 0 || isHelpArg(args[0]) {
-		return exit(2, "usage: crabbox admin mac-hosts <list|offerings|allocate|release|policy> [flags]")
+		return exit(2, "usage: crabbox admin mac-hosts <list|offerings|quota|allocate|release|policy> [flags]")
 	}
 	switch args[0] {
 	case "list":
 		return a.adminMacHostsList(ctx, args[1:])
 	case "offerings":
 		return a.adminMacHostOfferings(ctx, args[1:])
+	case "quota":
+		return a.adminMacHostQuota(ctx, args[1:])
 	case "allocate":
 		return a.adminMacHostsAllocate(ctx, args[1:])
 	case "release":
@@ -214,7 +216,7 @@ func (a App) adminMacHosts(ctx context.Context, args []string) error {
 	case "policy":
 		return a.adminMacHostsPolicy(args[1:])
 	default:
-		return exit(2, "usage: crabbox admin mac-hosts <list|offerings|allocate|release|policy> [flags]")
+		return exit(2, "usage: crabbox admin mac-hosts <list|offerings|quota|allocate|release|policy> [flags]")
 	}
 }
 
@@ -246,6 +248,11 @@ const macHostLifecyclePolicyJSON = `{
           "ec2:CreateAction": "AllocateHosts"
         }
       }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "servicequotas:ListServiceQuotas",
+      "Resource": "*"
     }
   ]
 }`
@@ -312,6 +319,36 @@ func (a App) adminMacHostOfferings(ctx context.Context, args []string) error {
 	for _, offering := range offerings {
 		fmt.Fprintf(a.Stdout, "%-12s %-14s %-12s\n",
 			offering.Region, offering.AvailabilityZone, offering.InstanceType)
+	}
+	return nil
+}
+
+func (a App) adminMacHostQuota(ctx context.Context, args []string) error {
+	fs := newFlagSet("admin mac-hosts quota", a.Stderr)
+	region := fs.String("region", "", "AWS region")
+	serverType := fs.String("type", "mac2.metal", "EC2 Mac instance type")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	coord, err := configuredAdminCoordinator()
+	if err != nil {
+		return err
+	}
+	quotas, err := coord.AdminMacHostQuotas(ctx, *region, *serverType)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(quotas)
+	}
+	if len(quotas) == 0 {
+		fmt.Fprintf(a.Stdout, "no EC2 Mac Dedicated Host quota found for type=%s region=%s\n", *serverType, blank(*region, "-"))
+		return nil
+	}
+	for _, quota := range quotas {
+		fmt.Fprintf(a.Stdout, "quota region=%s type=%s code=%s name=%q value=%g adjustable=%t global=%t unit=%s\n",
+			blank(*region, "-"), *serverType, quota.QuotaCode, quota.QuotaName, quota.Value, quota.Adjustable, quota.GlobalQuota, blank(quota.Unit, "-"))
 	}
 	return nil
 }

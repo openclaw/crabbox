@@ -93,8 +93,9 @@ Missing host capacity
 Use `--market on-demand` and verify an available EC2 Mac Dedicated Host is
 allocated in the selected AWS region. Set `CRABBOX_AWS_MAC_HOST_ID` or
 `aws.macHostId` only when you want to pin to a specific host. Trusted operators
-can check host offerings with `crabbox admin mac-hosts offerings --region <region>` and
-allocated hosts with `crabbox admin mac-hosts list --region <region>`.
+can check host offerings with `crabbox admin mac-hosts offerings --region <region>`,
+quota with `crabbox admin mac-hosts quota --region <region>`, and allocated
+hosts with `crabbox admin mac-hosts list --region <region>`.
 
 VNC prompt asks for host credentials
 

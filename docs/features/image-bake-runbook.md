@@ -179,6 +179,7 @@ an AWS EC2 Mac lease on an allocated Dedicated Host:
 
 ```bash
 crabbox admin mac-hosts offerings --region eu-west-1 --type mac2.metal
+crabbox admin mac-hosts quota --region eu-west-1 --type mac2.metal
 crabbox admin mac-hosts list --region eu-west-1
 ```
 
@@ -202,11 +203,10 @@ crabbox admin aws-policy --mac-hosts
 crabbox admin mac-hosts policy
 ```
 
-If dry-run succeeds but real allocation fails, check the AWS EC2 Service Quotas
-entry for
-[Running Dedicated mac2 Hosts](https://docs.aws.amazon.com/ec2/latest/instancetypes/ec2-instance-quotas.html)
-in the selected region. AWS lists that Dedicated Host quota as adjustable with a
-default of 0, so quota can be the next external blocker after IAM is fixed.
+If dry-run succeeds, run `crabbox admin mac-hosts quota --region eu-west-1
+--type mac2.metal` before real allocation. It prints the selected EC2 Mac
+Dedicated Host quota from AWS Service Quotas, which is the next useful
+no-spend blocker after IAM.
 
 Do not treat that host policy as the whole image bake policy. It only unblocks
 Dedicated Host allocation and release. The full paid lifecycle also needs the
