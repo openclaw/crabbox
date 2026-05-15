@@ -560,15 +560,17 @@ func TestRemoteCheckpointArchiveCommand(t *testing.T) {
 }
 
 func TestRemoteCheckpointRestoreCommandClearsWorkdir(t *testing.T) {
-	cmd := remoteCheckpointRestoreCommand("/work/repo", "/tmp/chk.tar.gz", true)
+	cmd := remoteCheckpointRestoreCommand("/work/repo", true)
 	for _, want := range []string{
+		"mktemp /tmp/crabbox-checkpoint.XXXXXX",
+		"trap cleanup EXIT INT TERM",
+		"cat > \"$tmp\"",
 		"mkdir -p",
 		"/work/repo",
 		"find",
 		"-mindepth 1 -maxdepth 1 -exec rm -rf -- {} +",
 		"tar -C",
 		"-xzf",
-		"/tmp/chk.tar.gz",
 		"rm -f --",
 	} {
 		if !strings.Contains(cmd, want) {

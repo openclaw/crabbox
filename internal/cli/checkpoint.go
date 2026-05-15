@@ -998,20 +998,14 @@ func restoreCheckpointArchive(ctx context.Context, target SSHTarget, localPath, 
 	if info.IsDir() {
 		return exit(2, "checkpoint archive is a directory: %s", localPath)
 	}
-	remotePath := "/tmp/crabbox-" + safeCaptureName(checkpointID) + ".tar.gz"
 	file, err := os.Open(localPath)
 	if err != nil {
 		return exit(2, "open checkpoint archive: %v", err)
 	}
 	defer func() { _ = file.Close() }()
-	if err := runSSHInput(ctx, target, "cat > "+shellQuote(remotePath), file, io.Discard, io.Discard); err != nil {
-		return exit(7, "upload checkpoint archive %s: %v", checkpointID, err)
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if out, err := runSSHCombinedOutput(ctx, target, remoteCheckpointRestoreCommand(workdir, remotePath, clear)); err != nil {
-		return exit(7, "restore checkpoint %s: %v: %s", checkpointID, err, trimFailureDetail(out))
+	var stderr strings.Builder
+	if err := runSSHInputStream(ctx, target, remoteCheckpointRestoreCommand(workdir, clear), file, io.Discard, &stderr); err != nil {
+		return exit(7, "restore checkpoint %s: %v: %s", checkpointID, err, trimFailureDetail(stderr.String()))
 	}
 	return nil
 }
@@ -1023,9 +1017,13 @@ func remoteCheckpointArchiveCommand(workdir string) string {
 	return "bash -lc " + shellQuote(script)
 }
 
-func remoteCheckpointRestoreCommand(workdir, archivePath string, clear bool) string {
+func remoteCheckpointRestoreCommand(workdir string, clear bool) string {
 	var b strings.Builder
 	b.WriteString("set -eu\n")
+	b.WriteString("tmp=$(mktemp /tmp/crabbox-checkpoint.XXXXXX)\n")
+	b.WriteString("cleanup() { rm -f -- \"$tmp\"; }\n")
+	b.WriteString("trap cleanup EXIT INT TERM\n")
+	b.WriteString("cat > \"$tmp\"\n")
 	b.WriteString("mkdir -p ")
 	b.WriteString(shellQuote(workdir))
 	b.WriteByte('\n')
@@ -1036,11 +1034,7 @@ func remoteCheckpointRestoreCommand(workdir, archivePath string, clear bool) str
 	}
 	b.WriteString("tar -C ")
 	b.WriteString(shellQuote(workdir))
-	b.WriteString(" -xzf ")
-	b.WriteString(shellQuote(archivePath))
-	b.WriteByte('\n')
-	b.WriteString("rm -f -- ")
-	b.WriteString(shellQuote(archivePath))
+	b.WriteString(" -xzf \"$tmp\"")
 	return "bash -lc " + shellQuote(b.String())
 }
 
