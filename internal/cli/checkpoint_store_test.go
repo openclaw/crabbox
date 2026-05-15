@@ -10,31 +10,13 @@ import (
 )
 
 func TestCheckpointStoreCreateReadList(t *testing.T) {
-	store := checkpointStore{dir: t.TempDir()}
-	first, err := store.Create(CheckpointRecord{
+	store := checkpointStore{root: t.TempDir()}
+	first, err := store.Create(checkpointRecord{
 		ID:        "chk_first",
 		Name:      "first",
+		Kind:      checkpointKindArchive,
 		CreatedAt: "2026-05-09T10:00:00Z",
-		Repo: CheckpointRepo{
-			Root:      "/repo",
-			Name:      "my-app",
-			RemoteURL: "https://github.com/example-org/my-app",
-			Branch:    "main",
-			Head:      "abc123",
-			BaseRef:   "main",
-		},
-		Lease: CheckpointLease{
-			ID:       "cbx_123",
-			Slug:     "blue-lobster",
-			Provider: "aws",
-			TargetOS: "linux",
-			Class:    "beast",
-		},
-		Workspace: CheckpointWorkspace{
-			ChangedFiles: 2,
-			DeletedFiles: 1,
-			Bytes:        42,
-		},
+		Workdir:   "/work/cbx_1/my-app",
 	})
 	if err != nil {
 		t.Fatalf("create first: %v", err)
@@ -42,27 +24,22 @@ func TestCheckpointStoreCreateReadList(t *testing.T) {
 	if first.ID != "chk_first" {
 		t.Fatalf("id=%q", first.ID)
 	}
-	second, err := store.Create(CheckpointRecord{
+	second, err := store.Create(checkpointRecord{
 		ID:        "chk_second",
-		ParentID:  "chk_first",
 		Name:      "second",
+		Kind:      checkpointKindArchive,
 		CreatedAt: "2026-05-09T11:00:00Z",
-		Run: CheckpointRun{
-			ID:         "run_123",
-			DurationMs: 1500,
-			Command:    "go test ./...",
-		},
-		Artifacts: []CheckpointArtifact{{Path: "artifacts/blue-lobster/screenshot.png", Type: "screenshot"}},
+		Workdir:   "/work/cbx_2/my-app",
 	})
 	if err != nil {
 		t.Fatalf("create second: %v", err)
 	}
 
-	got, err := store.Read(second.ID)
+	got, _, err := store.Read(second.ID)
 	if err != nil {
 		t.Fatalf("read second: %v", err)
 	}
-	if got.ParentID != "chk_first" || got.Run.ID != "run_123" || len(got.Artifacts) != 1 {
+	if got.ID != "chk_second" || got.Workdir != "/work/cbx_2/my-app" {
 		t.Fatalf("unexpected checkpoint: %#v", got)
 	}
 
@@ -77,7 +54,7 @@ func TestCheckpointStoreCreateReadList(t *testing.T) {
 		t.Fatalf("records ordered newest first: %#v", records)
 	}
 
-	data, err := os.ReadFile(filepath.Join(store.dir, "chk_second.json"))
+	data, err := os.ReadFile(filepath.Join(store.root, "chk_second", checkpointMetaFile))
 	if err != nil {
 		t.Fatalf("read file: %v", err)
 	}
@@ -91,33 +68,70 @@ func TestCheckpointStoreCreateReadList(t *testing.T) {
 }
 
 func TestCheckpointStoreRejectsDuplicatesAndUnsafeIDs(t *testing.T) {
-	store := checkpointStore{dir: t.TempDir()}
-	if _, err := store.Create(CheckpointRecord{ID: "chk_ok", CreatedAt: "2026-05-09T10:00:00Z"}); err != nil {
+	store := checkpointStore{root: t.TempDir()}
+	if _, err := store.Create(checkpointRecord{ID: "chk_ok", CreatedAt: "2026-05-09T10:00:00Z"}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := store.Create(CheckpointRecord{ID: "chk_ok", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
+	if _, err := store.Create(checkpointRecord{ID: "chk_ok", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
 		t.Fatal("duplicate checkpoint succeeded")
 	}
-	if _, err := store.Create(CheckpointRecord{ID: "../bad", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
+	if _, err := store.Create(checkpointRecord{ID: "../bad", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
 		t.Fatal("unsafe checkpoint id succeeded")
 	}
-	if _, err := store.Create(CheckpointRecord{ID: "chk_bad/slash", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
+	if _, err := store.Create(checkpointRecord{ID: "chk_bad/slash", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
 		t.Fatal("slash checkpoint id succeeded")
 	}
-	if _, err := store.Create(CheckpointRecord{ID: "chk_bad", ParentID: "../parent", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
-		t.Fatal("unsafe parent id succeeded")
+}
+
+func TestCheckpointStoreRejectsMetadataIDMismatch(t *testing.T) {
+	store := checkpointStore{root: t.TempDir()}
+	record, err := store.Create(checkpointRecord{
+		ID:        "chk_source",
+		Kind:      checkpointKindArchive,
+		CreatedAt: "2026-05-09T10:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	source, err := store.Paths(record.ID)
+	if err != nil {
+		t.Fatalf("source paths: %v", err)
+	}
+	target, err := store.Paths("chk_copy")
+	if err != nil {
+		t.Fatalf("target paths: %v", err)
+	}
+	if err := os.MkdirAll(target.Dir, 0o700); err != nil {
+		t.Fatalf("create copied dir: %v", err)
+	}
+	data, err := os.ReadFile(source.Meta)
+	if err != nil {
+		t.Fatalf("read source metadata: %v", err)
+	}
+	if err := os.WriteFile(target.Meta, data, 0o600); err != nil {
+		t.Fatalf("write copied metadata: %v", err)
+	}
+
+	if _, _, err := store.Read("chk_copy"); err == nil {
+		t.Fatal("expected metadata id mismatch")
+	}
+	if err := store.Delete("chk_copy"); err != nil {
+		t.Fatalf("delete copied dir: %v", err)
+	}
+	if _, _, err := store.Read("chk_source"); err != nil {
+		t.Fatalf("source checkpoint removed: %v", err)
 	}
 }
 
 func TestCheckpointStoreConcurrentSameIDAllowsOneWriter(t *testing.T) {
-	store := checkpointStore{dir: t.TempDir()}
+	store := checkpointStore{root: t.TempDir()}
 	const workers = 64
 	start := make(chan struct{})
 	results := make(chan error, workers)
 	for i := 0; i < workers; i++ {
 		go func(i int) {
 			<-start
-			_, err := store.Create(CheckpointRecord{
+			_, err := store.Create(checkpointRecord{
 				ID:        "chk_race",
 				Name:      fmt.Sprintf("worker-%d", i),
 				CreatedAt: "2026-05-09T10:00:00Z",
@@ -136,7 +150,7 @@ func TestCheckpointStoreConcurrentSameIDAllowsOneWriter(t *testing.T) {
 	if successes != 1 {
 		t.Fatalf("successful concurrent creates=%d, want 1", successes)
 	}
-	got, err := store.Read("chk_race")
+	got, _, err := store.Read("chk_race")
 	if err != nil {
 		t.Fatalf("read raced checkpoint: %v", err)
 	}
@@ -146,8 +160,8 @@ func TestCheckpointStoreConcurrentSameIDAllowsOneWriter(t *testing.T) {
 }
 
 func TestCheckpointStoreFillsIDAndCreatedAt(t *testing.T) {
-	store := checkpointStore{dir: t.TempDir()}
-	record, err := store.Create(CheckpointRecord{Name: "generated"})
+	store := checkpointStore{root: t.TempDir()}
+	record, err := store.Create(checkpointRecord{Name: "generated"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

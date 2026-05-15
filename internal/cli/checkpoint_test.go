@@ -3,11 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateCheckpointID(t *testing.T) {
@@ -25,11 +27,7 @@ func TestValidateCheckpointID(t *testing.T) {
 
 func TestCheckpointRecordRoundTripAndListOrder(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	firstDir, err := checkpointDir("chk_first")
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondDir, err := checkpointDir("chk_second")
+	store, err := defaultCheckpointStore()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,20 +41,20 @@ func TestCheckpointRecordRoundTripAndListOrder(t *testing.T) {
 	second := first
 	second.ID = "chk_second"
 	second.CreatedAt = "2026-05-13T11:00:00Z"
-	if err := writeCheckpointRecord(firstDir, first); err != nil {
+	if _, err := store.Create(first); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCheckpointRecord(secondDir, second); err != nil {
+	if _, err := store.Create(second); err != nil {
 		t.Fatal(err)
 	}
-	records, err := listCheckpointRecords()
+	records, err := store.List()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(records) != 2 || records[0].ID != "chk_second" || records[1].ID != "chk_first" {
 		t.Fatalf("unexpected order: %#v", records)
 	}
-	got, _, err := readCheckpointRecord("chk_first")
+	got, _, err := store.Read("chk_first")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +96,7 @@ func TestCheckpointDeleteReturnsMetadataReadError(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: io.Discard}
-	if err := app.checkpointDelete([]string{"chk_missing"}); err == nil {
+	if err := app.checkpointDelete(context.Background(), []string{"chk_missing"}); err == nil {
 		t.Fatal("expected missing checkpoint delete to fail")
 	}
 	if stdout.String() != "" {
@@ -119,11 +117,134 @@ func TestCheckpointDeleteKeepsCorruptRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
-	if err := app.checkpointDelete([]string{"chk_corrupt"}); err == nil {
+	if err := app.checkpointDelete(context.Background(), []string{"chk_corrupt"}); err == nil {
 		t.Fatal("expected corrupt checkpoint delete to fail")
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("corrupt checkpoint dir removed: %v", err)
+	}
+}
+
+func TestCheckpointInspectVerifyArchiveStates(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(checkpointRecord{
+		ID:          "chk_archive",
+		Kind:        checkpointKindArchive,
+		CreatedAt:   "2026-05-13T10:00:00Z",
+		ArchivePath: checkpointArchive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := store.Paths(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Archive, []byte("archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.checkpointInspect(context.Background(), []string{record.ID, "--verify", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var audit checkpointAudit
+	if err := json.Unmarshal(stdout.Bytes(), &audit); err != nil {
+		t.Fatal(err)
+	}
+	if audit.LocalState != "available" || audit.ProviderState != "not_applicable" || audit.NextAction != "restore_or_fork" {
+		t.Fatalf("audit=%#v", audit)
+	}
+
+	if err := os.Remove(paths.Archive); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if err := app.checkpointInspect(context.Background(), []string{record.ID, "--verify", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &audit); err != nil {
+		t.Fatal(err)
+	}
+	if audit.LocalState != "missing_archive" || audit.NextAction != "delete_or_recreate" {
+		t.Fatalf("missing archive audit=%#v", audit)
+	}
+}
+
+func TestCheckpointPruneDryRunAndDelete(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRecord, err := store.Create(checkpointRecord{
+		ID:        "chk_old",
+		Kind:      checkpointKindArchive,
+		CreatedAt: time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(checkpointRecord{
+		ID:        "chk_new",
+		Kind:      checkpointKindArchive,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.checkpointPrune(context.Background(), []string{"--older-than", "24h", "--kind", "archive", "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "would delete id=chk_old") {
+		t.Fatalf("dry-run stdout=%q", stdout.String())
+	}
+	if _, _, err := store.Read(oldRecord.ID); err != nil {
+		t.Fatalf("dry-run deleted checkpoint: %v", err)
+	}
+
+	stdout.Reset()
+	if err := app.checkpointPrune(context.Background(), []string{"--older-than", "24h", "--kind", "archive"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "checkpoint pruned id=chk_old") {
+		t.Fatalf("prune stdout=%q", stdout.String())
+	}
+	if _, _, err := store.Read(oldRecord.ID); err == nil {
+		t.Fatal("old checkpoint still exists")
+	}
+	if _, _, err := store.Read("chk_new"); err != nil {
+		t.Fatalf("new checkpoint removed: %v", err)
+	}
+}
+
+func TestCheckpointPruneRejectsOperands(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(checkpointRecord{
+		ID:        "chk_old",
+		Kind:      checkpointKindArchive,
+		CreatedAt: time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	if err := app.checkpointPrune(context.Background(), []string{"chk_old", "--older-than", "24h"}); err == nil {
+		t.Fatal("expected unexpected operand error")
+	}
+	if _, _, err := store.Read("chk_old"); err != nil {
+		t.Fatalf("checkpoint removed after invalid prune command: %v", err)
 	}
 }
 
@@ -337,11 +458,11 @@ func TestCheckpointForkReleasesLeaseWhenKeepFalse(t *testing.T) {
 		Workdir:     remoteJoin(cfg, backend.leaseID, repo.Name),
 	}
 	record.Native.ImageID = "ami-12345678"
-	dir, err := checkpointDir(record.ID)
+	store, err := defaultCheckpointStore()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCheckpointRecord(dir, record); err != nil {
+	if _, err := store.Create(record); err != nil {
 		t.Fatal(err)
 	}
 

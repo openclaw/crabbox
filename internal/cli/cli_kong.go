@@ -361,6 +361,7 @@ type checkpointKongCmd struct {
 	Restore checkpointRestoreKongCmd `cmd:"" passthrough:"" help:"Restore a checkpoint onto an existing lease."`
 	Fork    checkpointForkKongCmd    `cmd:"" passthrough:"" help:"Lease a new box from a checkpoint."`
 	Delete  checkpointDeleteKongCmd  `cmd:"" passthrough:"" help:"Delete a checkpoint and provider snapshot."`
+	Prune   checkpointPruneKongCmd   `cmd:"" passthrough:"" help:"Delete checkpoints matching age and kind filters."`
 }
 type checkpointCreateKongCmd struct {
 	Args []string `arg:"" optional:""`
@@ -378,6 +379,9 @@ type checkpointForkKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type checkpointDeleteKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type checkpointPruneKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 
@@ -546,10 +550,10 @@ func (c *checkpointCreateKongCmd) Run(ctx context.Context, app App) error {
 	return app.checkpointCreate(ctx, stripKongCommandPath(c.Args, "checkpoint", "create"))
 }
 func (c *checkpointListKongCmd) Run(ctx context.Context, app App) error {
-	return app.checkpointList(stripKongCommandPath(c.Args, "checkpoint", "list"))
+	return app.checkpointList(ctx, stripKongCommandPath(c.Args, "checkpoint", "list"))
 }
 func (c *checkpointInspectKongCmd) Run(ctx context.Context, app App) error {
-	return app.checkpointInspect(stripKongCommandPath(c.Args, "checkpoint", "inspect"))
+	return app.checkpointInspect(ctx, stripKongCommandPath(c.Args, "checkpoint", "inspect"))
 }
 func (c *checkpointRestoreKongCmd) Run(ctx context.Context, app App) error {
 	return app.checkpointRestore(ctx, stripKongCommandPath(c.Args, "checkpoint", "restore"))
@@ -558,7 +562,10 @@ func (c *checkpointForkKongCmd) Run(ctx context.Context, app App) error {
 	return app.checkpointFork(ctx, stripKongCommandPath(c.Args, "checkpoint", "fork"))
 }
 func (c *checkpointDeleteKongCmd) Run(ctx context.Context, app App) error {
-	return app.checkpointDelete(stripKongCommandPath(c.Args, "checkpoint", "delete"))
+	return app.checkpointDelete(ctx, stripKongCommandPath(c.Args, "checkpoint", "delete"))
+}
+func (c *checkpointPruneKongCmd) Run(ctx context.Context, app App) error {
+	return app.checkpointPrune(ctx, stripKongCommandPath(c.Args, "checkpoint", "prune"))
 }
 
 func (c *configPathKongCmd) Run(ctx context.Context, app App) error {

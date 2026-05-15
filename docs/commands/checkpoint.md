@@ -98,7 +98,9 @@ Both may contain secrets. Delete when no longer needed.
 
 ```sh
 crabbox checkpoint list
+crabbox checkpoint list --verify
 crabbox checkpoint inspect chk_abc123
+crabbox checkpoint inspect chk_abc123 --verify
 crabbox checkpoint inspect chk_abc123 --json
 ```
 
@@ -115,6 +117,12 @@ Checkpoints stored in `~/.local/state/crabbox/checkpoints/`.
 **⚠️ Both parts required**: Native checkpoints need local metadata AND provider
 resource. Losing either side breaks fork. Archive checkpoints need local metadata
 AND tarball.
+
+`--verify` audits the second half of the checkpoint:
+
+- Archive checkpoints: confirms the local tarball still exists.
+- Native checkpoints: asks the coordinator to look up the provider snapshot or image.
+- JSON output includes `localState`, `providerState`, and `nextAction`.
 
 ## Restore
 
@@ -212,6 +220,30 @@ crabbox checkpoint delete chk_abc123 --local-only
 
 Use `--local-only` only when provider resource was already deleted outside
 Crabbox (manual cleanup, account migration, etc.).
+
+## Prune
+
+Delete old checkpoints by age, optionally scoped to native or archive
+checkpoints.
+
+```sh
+crabbox checkpoint prune --older-than 30d --dry-run
+crabbox checkpoint prune --older-than 30d --kind archive
+crabbox checkpoint prune --older-than 30d --kind native
+```
+
+**Flags**
+
+```
+--older-than <duration> Required. Delete checkpoints older than this duration
+--kind native|archive   Optional checkpoint kind filter
+--dry-run               Print matching checkpoints without deleting them
+--local-only            Skip provider deletion for native checkpoints
+```
+
+For native checkpoints, prune uses the same provider deletion path as
+`checkpoint delete`. Keep `--dry-run` in operator automation until the match set
+looks right.
 
 **⚠️ Storage costs**: Provider snapshots/images incur storage costs while they
 exist. Delete stale checkpoints periodically. Name checkpoints after scenarios
