@@ -1020,7 +1020,7 @@ func remoteCheckpointArchiveCommand(workdir string) string {
 func remoteCheckpointRestoreCommand(workdir string, clear bool) string {
 	var b strings.Builder
 	b.WriteString("set -eu\n")
-	b.WriteString("tmp=$(mktemp /tmp/crabbox-checkpoint.XXXXXX.tar.gz)\n")
+	b.WriteString("tmp=$(mktemp /tmp/crabbox-checkpoint.XXXXXX)\n")
 	b.WriteString("cleanup() { rm -f -- \"$tmp\"; }\n")
 	b.WriteString("trap cleanup EXIT INT TERM\n")
 	b.WriteString("cat > \"$tmp\"\n")
