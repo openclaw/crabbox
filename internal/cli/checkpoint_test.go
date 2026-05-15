@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -476,6 +478,145 @@ func TestCheckpointForkReleasesLeaseWhenKeepFalse(t *testing.T) {
 	}
 	if backend.releaseCount != 1 {
 		t.Fatalf("releaseCount=%d, want 1", backend.releaseCount)
+	}
+}
+
+func TestCheckpointForkRejectsPendingNativeCheckpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := checkpointRecord{
+		ID:        "chk_pending_native",
+		Kind:      checkpointKindAWSEBS,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		TargetOS:  targetLinux,
+	}
+	if _, err := store.Create(record); err != nil {
+		t.Fatal(err)
+	}
+
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	err = app.checkpointFork(context.Background(), []string{record.ID})
+	if err == nil {
+		t.Fatal("expected pending native checkpoint fork to fail")
+	}
+	if !strings.Contains(err.Error(), "pending") {
+		t.Fatalf("err=%v, want pending checkpoint error", err)
+	}
+}
+
+func TestCheckpointInspectVerifyResourceOnlyNativeDoesNotUseCoordinator(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := checkpointRecord{
+		ID:        "chk_resource_only",
+		Kind:      checkpointKindGCPDisk,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		TargetOS:  targetLinux,
+	}
+	record.Native.Resource = "projects/proj/global/snapshots/checkpoint"
+	if _, err := store.Create(record); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.checkpointInspect(context.Background(), []string{record.ID, "--verify", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var audit checkpointAudit
+	if err := json.Unmarshal(stdout.Bytes(), &audit); err != nil {
+		t.Fatal(err)
+	}
+	if audit.ProviderState != "unverified_ref" || audit.NextAction != "fork_or_delete_local" {
+		t.Fatalf("audit=%#v", audit)
+	}
+}
+
+func TestCheckpointDeleteResourceOnlyNativeDeletesProviderResource(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+
+	var deleteRequest string
+	var deleteProvider string
+	var deleteKind string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deleteRequest = r.Method + " " + r.RequestURI
+		deleteProvider = r.URL.Query().Get("provider")
+		deleteKind = r.URL.Query().Get("kind")
+		_, _ = w.Write([]byte(`{"deleted":true}`))
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin")
+
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := checkpointRecord{
+		ID:        "chk_resource_delete",
+		Kind:      checkpointKindAzureOS,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		TargetOS:  targetLinux,
+	}
+	record.Native.Resource = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint"
+	if _, err := store.Create(record); err != nil {
+		t.Fatal(err)
+	}
+
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	if err := app.checkpointDelete(context.Background(), []string{record.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if deleteProvider != "azure" {
+		t.Fatalf("provider query=%q", deleteProvider)
+	}
+	if deleteKind != "azure-os-disk-snapshot" {
+		t.Fatalf("kind query=%q", deleteKind)
+	}
+	if !strings.HasPrefix(deleteRequest, "DELETE /v1/images/%2Fsubscriptions%2Fsub%2FresourceGroups%2Frg%2Fproviders%2FMicrosoft.Compute%2Fsnapshots%2Fcheckpoint?") {
+		t.Fatalf("delete request=%q", deleteRequest)
+	}
+	if _, _, err := store.Read(record.ID); err == nil {
+		t.Fatal("delete kept checkpoint")
+	}
+}
+
+func TestNativeCheckpointResourceIDAllowsAzureGCPResourceOnlyRecords(t *testing.T) {
+	aws := checkpointRecord{Kind: checkpointKindAWSAMI}
+	aws.Native.Resource = "ami-resource-only"
+	if got := nativeCheckpointResourceID(aws); got != "" {
+		t.Fatalf("aws resource-only ref=%q, want empty", got)
+	}
+	aws.Native.ImageID = "ami-12345678"
+	if got := nativeCheckpointResourceID(aws); got != "ami-12345678" {
+		t.Fatalf("aws ref=%q", got)
+	}
+
+	azure := checkpointRecord{Kind: checkpointKindAzureOS}
+	azure.Native.Resource = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint"
+	if got := nativeCheckpointResourceID(azure); got != azure.Native.Resource {
+		t.Fatalf("azure ref=%q", got)
+	}
+
+	gcp := checkpointRecord{Kind: checkpointKindGCPDisk}
+	gcp.Native.Resource = "projects/proj/global/snapshots/checkpoint"
+	if got := nativeCheckpointResourceID(gcp); got != gcp.Native.Resource {
+		t.Fatalf("gcp ref=%q", got)
 	}
 }
 

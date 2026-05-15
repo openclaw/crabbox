@@ -164,6 +164,13 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
+	switch createKind {
+	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindArchive:
+		record.Kind = createKind
+	default:
+		return exit(2, "checkpoint mode must be auto, native, or archive")
+	}
 	var paths checkpointPaths
 	record, paths, err = store.Reserve(record)
 	if err != nil {
@@ -174,10 +181,8 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	defer func() {
 		cleanupUncommittedCheckpointDir(dir, recordWritten, err)
 	}()
-	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
 	switch createKind {
 	case checkpointKindRecipe:
-		record.Kind = checkpointKindRecipe
 	case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk:
 		image, err := a.createNativeCheckpoint(ctx, cfg, server, target, leaseID, record.Name, repo.Name, checkpointStrategyForKind(createKind), *noReboot, *wait, *waitTimeout)
 		if image.ID != "" {
@@ -200,11 +205,8 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 		if err != nil {
 			return err
 		}
-		record.Kind = checkpointKindArchive
 		record.ArchivePath = checkpointArchive
 		record.ArchiveBytes = bytes
-	default:
-		return exit(2, "checkpoint mode must be auto, native, or archive")
 	}
 	if err := store.Write(record); err != nil {
 		return err
@@ -426,11 +428,15 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
 		return err
 	}
-	if isNativeCheckpointKind(record.Kind) {
-		applyNativeCheckpointForkConfig(&cfg, fs, record)
-	}
-	if record.Kind != checkpointKindArchive && !isNativeCheckpointKind(record.Kind) {
+	nativeCheckpoint := isNativeCheckpointKind(record.Kind)
+	if record.Kind != checkpointKindArchive && !nativeCheckpoint {
 		return exit(2, "checkpoint %s has kind=%s; fork requires %s or a native image checkpoint", record.ID, record.Kind, checkpointKindArchive)
+	}
+	if nativeCheckpoint {
+		if nativeCheckpointResourceID(record) == "" {
+			return exit(2, "checkpoint %s is pending; native provider resource is not recorded yet", record.ID)
+		}
+		applyNativeCheckpointForkConfig(&cfg, fs, record)
 	}
 	repo, err := findRepo()
 	if err != nil {
@@ -474,7 +480,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 			a.releaseBackendLeaseBestEffort(ctx, sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 			return err
 		}
-		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s image=%s workdir=%s\n", record.ID, leaseID, blank(serverSlug(server), "-"), record.Native.ImageID, workdir)
+		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s image=%s workdir=%s\n", record.ID, leaseID, blank(serverSlug(server), "-"), nativeCheckpointResourceID(record), workdir)
 		return nil
 	}
 	workdir := strings.TrimSpace(*workdirOverride)
@@ -518,12 +524,13 @@ func deleteCheckpoint(ctx context.Context, store checkpointStore, id string, loc
 	if err != nil {
 		return err
 	}
-	if isNativeCheckpointKind(record.Kind) && record.Native.ImageID != "" && !localOnly {
+	providerID := nativeCheckpointDeleteID(record)
+	if isNativeCheckpointKind(record.Kind) && providerID != "" && !localOnly {
 		coord, err := configuredAdminCoordinator()
 		if err != nil {
 			return err
 		}
-		if err := coord.DeleteImage(ctx, record.Native.ImageID, nativeCoordinatorImageRef(record)); err != nil {
+		if err := coord.DeleteImage(ctx, providerID, nativeCoordinatorImageRef(record)); err != nil {
 			return err
 		}
 	}
@@ -665,7 +672,13 @@ func (a App) verifyCheckpointRecord(ctx context.Context, store checkpointStore, 
 		audit.NextAction = "restore_or_fork"
 		return audit, nil
 	case isNativeCheckpointKind(record.Kind):
-		if record.Native.ImageID == "" {
+		providerID := strings.TrimSpace(record.Native.ImageID)
+		if providerID == "" {
+			if nativeCheckpointResourceID(record) != "" {
+				audit.ProviderState = "unverified_ref"
+				audit.NextAction = "fork_or_delete_local"
+				return audit, nil
+			}
 			audit.ProviderState = "missing_ref"
 			audit.NextAction = "delete_local"
 			return audit, nil
@@ -677,7 +690,7 @@ func (a App) verifyCheckpointRecord(ctx context.Context, store checkpointStore, 
 			audit.Error = err.Error()
 			return audit, nil
 		}
-		image, err := coord.Image(ctx, record.Native.ImageID, nativeCoordinatorImageRef(record))
+		image, err := coord.Image(ctx, providerID, nativeCoordinatorImageRef(record))
 		if err != nil {
 			if coordinatorStatusCode(err) == 404 {
 				audit.ProviderState = "missing"
@@ -741,6 +754,27 @@ func applyNativeImageCheckpointRecord(record *checkpointRecord, image Coordinato
 
 func applyAWSAMIImageCheckpointRecord(record *checkpointRecord, image CoordinatorImage, noReboot bool) {
 	applyNativeImageCheckpointRecord(record, image, noReboot)
+}
+
+func nativeCheckpointResourceID(record checkpointRecord) string {
+	switch record.Kind {
+	case checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk:
+		return firstNonBlank(record.Native.Resource, record.Native.ImageID)
+	default:
+		return record.Native.ImageID
+	}
+}
+
+func nativeCheckpointDeleteID(record checkpointRecord) string {
+	if imageID := strings.TrimSpace(record.Native.ImageID); imageID != "" {
+		return imageID
+	}
+	switch record.Kind {
+	case checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk:
+		return strings.TrimSpace(record.Native.Resource)
+	default:
+		return ""
+	}
 }
 
 func checkpointKindForProviderImage(image CoordinatorImage) string {
@@ -1039,7 +1073,7 @@ func applyAWSAMICheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record check
 
 func nativeCoordinatorImageRef(record checkpointRecord) CoordinatorImageRef {
 	return CoordinatorImageRef{
-		Provider: firstNonBlank(record.Native.Provider, record.Provider),
+		Provider: firstNonBlank(record.Native.Provider, checkpointProviderForKind(record.Kind), record.Provider),
 		Region:   record.Native.Region,
 		Project:  record.Native.Project,
 		Kind:     firstNonBlank(record.Native.Kind, record.Kind),

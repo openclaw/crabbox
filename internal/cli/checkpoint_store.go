@@ -84,6 +84,10 @@ func (s checkpointStore) Reserve(record checkpointRecord) (checkpointRecord, che
 		}
 		return checkpointRecord{}, checkpointPaths{}, exit(2, "create checkpoint %s: %v", record.ID, err)
 	}
+	if err := s.writeMetadata(record, paths); err != nil {
+		_ = os.RemoveAll(paths.Dir)
+		return checkpointRecord{}, checkpointPaths{}, err
+	}
 	return record, paths, nil
 }
 
@@ -113,6 +117,10 @@ func (s checkpointStore) Write(record checkpointRecord) error {
 	if err := os.MkdirAll(paths.Dir, 0o700); err != nil {
 		return exit(2, "create checkpoint directory: %v", err)
 	}
+	return s.writeMetadata(record, paths)
+}
+
+func (s checkpointStore) writeMetadata(record checkpointRecord, paths checkpointPaths) error {
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return exit(2, "encode checkpoint %s: %v", record.ID, err)

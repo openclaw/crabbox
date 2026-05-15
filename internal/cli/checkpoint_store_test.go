@@ -67,6 +67,38 @@ func TestCheckpointStoreCreateReadList(t *testing.T) {
 	}
 }
 
+func TestCheckpointStoreReserveWritesMetadata(t *testing.T) {
+	store := checkpointStore{root: t.TempDir()}
+	record, paths, err := store.Reserve(checkpointRecord{
+		ID:        "chk_pending",
+		Kind:      checkpointKindAWSAMI,
+		CreatedAt: "2026-05-09T10:00:00Z",
+		Workdir:   "/work/cbx_1/my-app",
+	})
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if _, err := os.Stat(paths.Meta); err != nil {
+		t.Fatalf("stat metadata: %v", err)
+	}
+
+	got, _, err := store.Read("chk_pending")
+	if err != nil {
+		t.Fatalf("read reserved checkpoint: %v", err)
+	}
+	if got.ID != record.ID || got.Kind != checkpointKindAWSAMI {
+		t.Fatalf("unexpected reserved checkpoint: %#v", got)
+	}
+
+	records, err := store.List()
+	if err != nil {
+		t.Fatalf("list reserved checkpoint: %v", err)
+	}
+	if len(records) != 1 || records[0].ID != "chk_pending" {
+		t.Fatalf("records=%#v", records)
+	}
+}
+
 func TestCheckpointStoreRejectsDuplicatesAndUnsafeIDs(t *testing.T) {
 	store := checkpointStore{root: t.TempDir()}
 	if _, err := store.Create(checkpointRecord{ID: "chk_ok", CreatedAt: "2026-05-09T10:00:00Z"}); err != nil {
