@@ -21,6 +21,7 @@
 - Fixed E2B sync cleanup so remote upload archives are removed even when extraction fails. Thanks @stainlu.
 - Fixed installed tagged builds so `crabbox --version` and proof metadata report the Go module build version instead of the development fallback. Thanks @stainlu.
 - Fixed native provider checkpoint creation so AWS, Azure, and GCP snapshot/image checkpoints flush source filesystem writes before calling the provider API.
+- Fixed Tensorlake timing JSON so delegated runs include the lease slug and reused sandboxes preserve the stored claim slug. Thanks @stainlu.
 
 ## 0.13.0 - 2026-05-13
 
