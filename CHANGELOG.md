@@ -11,6 +11,7 @@
 - Added `crabbox list --refresh` so local Cloudflare claims can be checked against live runner state on demand.
 - Added brokered provider snapshot/image deletion for AWS EBS snapshots and AMIs, Azure managed disk snapshots and managed images, and GCP disk snapshots and machine images.
 - Added Modal and Tensorlake to the top-level provider docs and delegated sandbox configuration examples. Thanks @stainlu.
+- Added provider feature flags for workspace checkpoint, fork, restore, and native snapshot capabilities. Thanks @stainlu.
 
 ### Changed
 
