@@ -65,7 +65,7 @@ func (a App) runKong(ctx context.Context, args []string) (err error) {
 	parser, err := kong.New(&cli,
 		kong.Name("crabbox"),
 		kong.Description("Crabbox leases remote test boxes, syncs your dirty checkout, runs commands, and cleans up."),
-		kong.Vars{"version": version},
+		kong.Vars{"version": currentVersion()},
 		kong.Writers(a.Stdout, a.Stderr),
 		kong.Exit(func(code int) {
 			panic(kongExit{code: code})
@@ -588,7 +588,7 @@ func (c *machineCleanupKongCmd) Run(ctx context.Context, app App) error {
 }
 
 func (c *versionKongCmd) Run(app App) error {
-	fmt.Fprintln(app.Stdout, version)
+	fmt.Fprintln(app.Stdout, currentVersion())
 	return nil
 }
 

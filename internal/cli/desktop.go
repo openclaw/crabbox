@@ -297,7 +297,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		} else if ok {
 			if err := writeProofMetadata(filepath.Join(opts.Directory, "metadata.json"), desktopProofMetadata{
 				CreatedAt:      time.Now().UTC().Format(time.RFC3339),
-				Version:        version,
+				Version:        currentVersion(),
 				LeaseID:        leaseID,
 				Slug:           serverSlug(server),
 				Provider:       cfg.Provider,
@@ -456,7 +456,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	metadataPath := filepath.Join(dir, "metadata.json")
 	if err := writeProofMetadata(metadataPath, desktopProofMetadata{
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
-		Version:        version,
+		Version:        currentVersion(),
 		LeaseID:        leaseID,
 		Slug:           serverSlug(server),
 		Provider:       cfg.Provider,

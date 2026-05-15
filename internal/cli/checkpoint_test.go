@@ -127,6 +127,29 @@ func TestCheckpointDeleteKeepsCorruptRecord(t *testing.T) {
 	}
 }
 
+func TestNewCheckpointRecordUsesResolvedVersion(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	oldVersion := version
+	version = "v1.2.3"
+	t.Cleanup(func() { version = oldVersion })
+
+	record, _, err := newCheckpointRecord(
+		Repo{Name: "my-app"},
+		defaultConfig(),
+		Server{CloudID: "i-1234567890abcdef0", Provider: "aws"},
+		SSHTarget{TargetOS: targetLinux},
+		"cbx_123",
+		"/work/cbx_123/my-app",
+		"test checkpoint",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.CrabboxVersion != "1.2.3" {
+		t.Fatalf("CrabboxVersion=%q, want 1.2.3", record.CrabboxVersion)
+	}
+}
+
 func TestDefaultCheckpointRestoreWorkdirUsesTargetLease(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.WorkRoot = "/work"

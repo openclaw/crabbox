@@ -24,8 +24,8 @@ func TestVersion(t *testing.T) {
 	if err := app.Run(context.Background(), []string{"--version"}); err != nil {
 		t.Fatalf("Run(--version) error: %v", err)
 	}
-	if got := strings.TrimSpace(out.String()); got != version {
-		t.Fatalf("Run(--version)=%q want %q", got, version)
+	if got := strings.TrimSpace(out.String()); got != currentVersion() {
+		t.Fatalf("Run(--version)=%q want %q", got, currentVersion())
 	}
 }
 
