@@ -23,7 +23,35 @@ const envSchema = {
 
 const providerSchema = {
   type: "string",
-  enum: ["aws", "hetzner", "ssh", "blacksmith-testbox", "blacksmith", "namespace-devbox", "namespace", "semaphore", "sprites", "daytona", "islo", "e2b", "cloudflare"],
+  enum: [
+    "aws",
+    "azure",
+    "gcp",
+    "google",
+    "google-cloud",
+    "hetzner",
+    "proxmox",
+    "ssh",
+    "static",
+    "static-ssh",
+    "blacksmith-testbox",
+    "blacksmith",
+    "namespace-devbox",
+    "namespace",
+    "namespace-devboxes",
+    "semaphore",
+    "sem",
+    "sprites",
+    "daytona",
+    "islo",
+    "e2b",
+    "modal",
+    "tensorlake",
+    "tl",
+    "tensorlake-sbx",
+    "cloudflare",
+    "cf",
+  ],
 };
 
 function readConfig(api) {

@@ -24,6 +24,7 @@
 - Fixed Islo exec-upload fallback cleanup so failed archive decodes or extracts still remove temporary upload files. Thanks @stainlu.
 - Fixed Cloudflare runner URL validation so configured runner URLs cannot include query or fragment components that corrupt API request paths. Thanks @stainlu.
 - Fixed Cloudflare stop so missing runner containers prune their stale local claims instead of leaving users to run cleanup manually. Thanks @stainlu.
+- Fixed the Crabbox plugin provider schema so current providers and aliases such as `modal`, `tensorlake`, and `cf` can be selected. Thanks @stainlu.
 - Fixed coordinator TTL cleanup so provider deletion failures keep leases active with retry metadata instead of silently expiring while cloud instances continue running.
 - Fixed direct AWS security-group maintenance so stale Crabbox-owned SSH ingress rules are pruned before adding the current source CIDRs.
 - Fixed E2B sync cleanup so remote upload archives are removed even when extraction fails. Thanks @stainlu.
