@@ -131,6 +131,8 @@ func TestCloudflareClientNormalizesBaseURL(t *testing.T) {
 
 func TestCloudflareClientRejectsURLQueryAndFragment(t *testing.T) {
 	for _, rawURL := range []string{
+		"https://runner.example.com?",
+		"https://runner.example.com/?",
 		"https://runner.example.com?token=leaky",
 		"https://runner.example.com/#sandbox",
 	} {
