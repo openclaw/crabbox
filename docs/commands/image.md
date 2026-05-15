@@ -1,8 +1,8 @@
 # image
 
-`crabbox image` contains trusted operator controls for AWS runner images.
-Use it for base runner images, not per-scenario checkpoints. If you want to
-save one prepared lease and fork that exact scenario later, use
+`crabbox image` contains trusted operator controls for provider images. Use it
+for base runner images and explicit image cleanup, not per-scenario checkpoints.
+If you want to save one prepared lease and fork that exact scenario later, use
 [`crabbox checkpoint`](checkpoint.md).
 
 ```sh
@@ -10,6 +10,8 @@ crabbox image create --id cbx_... --name crabbox-runner-20260501-1246 --wait
 crabbox image promote ami-...
 crabbox image promote ami-... --json
 crabbox image delete ami-... --region eu-west-1
+crabbox image delete my-azure-image --provider azure --region westeurope
+crabbox image delete my-gcp-image --provider gcp --region europe-west1-b --project example-project
 ```
 
 Image commands require a configured coordinator and admin-token auth. Set
@@ -18,33 +20,37 @@ checks `CRABBOX_ADMIN_TOKEN`.
 They are intentionally not available to normal GitHub browser-login users.
 
 Image bytes live in the provider account, not in git or coordinator durable
-state. AWS images are AMIs backed by EBS snapshots. Crabbox stores only the
+state. AWS images are AMIs backed by EBS snapshots. Azure images are managed
+images. GCP images are Compute Engine machine images. Crabbox stores only the
 promoted AMI id and related metadata so future AWS leases can resolve the
 default image. Hetzner snapshots/images should live in the Hetzner project and
-be selected through `image`/`CRABBOX_HETZNER_IMAGE` until Crabbox grows
-Hetzner create/promote lifecycle commands.
+be selected through `image`/`CRABBOX_HETZNER_IMAGE` until Crabbox grows Hetzner
+create/promote lifecycle commands.
 
 An AMI is AWS's bootable machine image format. EBS snapshots are the stored disk
-snapshots that back the AMI. Deleting a candidate image should remove both the
-AMI registration and its EBS snapshots.
+snapshots that back the AMI. Deleting an AWS candidate image should remove both
+the AMI registration and its EBS snapshots.
 
 ## create
 
-Create an AWS AMI from an active AWS lease.
+Create a provider image from an active brokered AWS or GCP lease. Active Azure
+leases use `crabbox checkpoint` disk snapshots; Azure managed-image capture
+requires a stopped/generalized source VM.
 
 Flags:
 
 ```text
---id <cbx_id>        source lease; must be a canonical AWS lease ID
---name <name>        AMI name
---wait               poll until the AMI is available
+--id <cbx_id>        source lease; must be a canonical lease ID
+--name <name>        provider image name
+--wait               poll until the provider image is available
 --wait-timeout <d>   default 45m
---no-reboot          default true
+--no-reboot          AWS AMI CreateImage NoReboot, default true
 --json               print JSON
 ```
 
-The source lease must still be active in the coordinator. The Worker calls AWS
-`CreateImage` from the backing instance ID and tags the image as Crabbox-owned.
+The source lease must still be active in the coordinator. The Worker calls the
+provider image API from the backing cloud VM id and tags the image as
+Crabbox-owned.
 
 Recommended bake flow:
 
@@ -63,15 +69,15 @@ instead of relying only on the short smoke above.
 Failure handling:
 
 - If `--wait` times out, run `crabbox image create ... --json` or inspect the
-  AWS AMI state before retrying. AWS image creation can continue after the CLI
-  stops polling.
-- If the AMI enters a failed state, leave the current promoted image in place
-  and create a new image from a fresh lease.
+  provider image state before retrying. Provider image creation can continue
+  after the CLI stops polling.
+- If the image enters a failed state, leave the current promoted AWS image in
+  place and create a new image from a fresh lease.
 - If the source lease disappears, create a new warm lease and restart the bake;
-  image creation requires the backing AWS instance ID.
+  image creation requires the backing cloud VM ID.
 - If the baked image boots but never reaches `crabbox-ready`, do not promote it.
   Keep the previous promoted AMI and debug bootstrap on a normal lease first.
-- Cleanup of stale candidate AMIs is an AWS operator task. Promotion does not
+- Cleanup of stale candidate images is an operator task. Promotion does not
   delete old images or snapshots. Use `crabbox image delete` for explicit
   cleanup.
 - If a Mantis timing report does not improve after promotion, treat that as a
@@ -108,14 +114,17 @@ on the new image.
 
 ## delete
 
-Delete an AMI and its EBS snapshots:
+Delete a provider image:
 
 ```sh
 crabbox image delete ami-1234567890abcdef0 --region eu-west-1
+crabbox image delete my-managed-image --provider azure --region westeurope
+crabbox image delete my-machine-image --provider gcp --region europe-west1-b --project example-project
 ```
 
-Deletion deregisters the AMI, then deletes the EBS snapshots referenced by its
-block device mappings. It requires admin-token auth.
+AWS deletion deregisters the AMI, then deletes the EBS snapshots referenced by
+its block device mappings. Azure deletion removes the managed image. GCP
+deletion removes the machine image. It requires admin-token auth.
 
 Related docs:
 

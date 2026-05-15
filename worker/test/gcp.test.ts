@@ -78,6 +78,233 @@ describe("gcp provider", () => {
     ]);
   });
 
+  it("creates and deletes machine images through Compute Engine", async () => {
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "test-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    };
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ method: init?.method ?? "GET", path: url.pathname + url.search, body });
+      if (url.pathname.endsWith("/global/operations/op-1/wait")) {
+        return Response.json({ name: "op-1", status: "DONE" });
+      }
+      if (url.pathname.endsWith("/global/machineImages/checkpoint-gcp") && init?.method === "GET") {
+        return Response.json({
+          name: "checkpoint-gcp",
+          selfLink: "projects/default-project/global/machineImages/checkpoint-gcp",
+          status: "READY",
+        });
+      }
+      return Response.json({ name: "op-1", status: "PENDING" });
+    };
+
+    const image = await client.createImage("crabbox-source", "checkpoint-gcp");
+    await client.deleteImage("checkpoint-gcp");
+
+    expect(image).toMatchObject({
+      id: "checkpoint-gcp",
+      provider: "gcp",
+      kind: "gcp-machine-image",
+      state: "ready",
+    });
+    expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual([
+      "POST /compute/v1/projects/default-project/global/machineImages",
+      "POST /compute/v1/projects/default-project/global/operations/op-1/wait",
+      "GET /compute/v1/projects/default-project/global/machineImages/checkpoint-gcp",
+      "DELETE /compute/v1/projects/default-project/global/machineImages/checkpoint-gcp",
+      "POST /compute/v1/projects/default-project/global/operations/op-1/wait",
+    ]);
+    expect(calls[0]?.body).toMatchObject({
+      name: "checkpoint-gcp",
+      sourceInstance: "zones/us-central1-a/instances/crabbox-source",
+    });
+  });
+
+  it("routes kind-specific snapshot reads and deletes to GCP snapshots", async () => {
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "test-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    };
+    const calls: Array<{ method: string; path: string }> = [];
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      calls.push({ method: init?.method ?? "GET", path: url.pathname + url.search });
+      if (url.pathname.endsWith("/global/operations/op-1/wait")) {
+        return Response.json({ name: "op-1", status: "DONE" });
+      }
+      if (url.pathname.endsWith("/global/snapshots/checkpoint-gcp") && init?.method !== "DELETE") {
+        return Response.json({
+          name: "checkpoint-gcp",
+          selfLink: "projects/default-project/global/snapshots/checkpoint-gcp",
+          status: "READY",
+        });
+      }
+      return Response.json({ name: "op-1", status: "PENDING" });
+    };
+
+    const image = await client.getImage(
+      "projects/default-project/global/snapshots/checkpoint-gcp",
+      "gcp-disk-snapshot",
+    );
+    await client.deleteImage(
+      "projects/default-project/global/snapshots/checkpoint-gcp",
+      "gcp-disk-snapshot",
+    );
+
+    expect(image).toMatchObject({
+      id: "checkpoint-gcp",
+      provider: "gcp",
+      kind: "gcp-disk-snapshot",
+    });
+    expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual([
+      "GET /compute/v1/projects/default-project/global/snapshots/checkpoint-gcp",
+      "DELETE /compute/v1/projects/default-project/global/snapshots/checkpoint-gcp",
+      "POST /compute/v1/projects/default-project/global/operations/op-1/wait",
+    ]);
+  });
+
+  it("creates instances from machine images without boot disk initialization", async () => {
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "test-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    };
+    const calls: Array<{
+      method: string;
+      path: string;
+      body: Record<string, unknown> | undefined;
+    }> = [];
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      const body = init?.body
+        ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+        : undefined;
+      calls.push({ method, path: url.pathname + url.search, body });
+      if (url.pathname.endsWith("/global/firewalls/crabbox-ssh") && method === "GET") {
+        return new Response("not found", { status: 404 });
+      }
+      if (url.pathname.endsWith("/global/operations/op-firewall/wait")) {
+        return Response.json({ name: "op-firewall", status: "DONE" });
+      }
+      if (url.pathname.endsWith("/zones/us-central1-a/operations/op-instance/wait")) {
+        return Response.json({ name: "op-instance", status: "DONE" });
+      }
+      if (url.pathname.endsWith("/global/firewalls") && method === "POST") {
+        return Response.json({ name: "op-firewall", status: "PENDING" });
+      }
+      if (url.pathname.endsWith("/zones/us-central1-a/instances") && method === "POST") {
+        return Response.json({ name: "op-instance", status: "PENDING" });
+      }
+      if (url.pathname.includes("/zones/us-central1-a/instances/crabbox-blue-lobster-")) {
+        return Response.json({
+          id: "123",
+          name: url.pathname.split("/").pop(),
+          status: "RUNNING",
+          machineType: "zones/us-central1-a/machineTypes/e2-micro",
+          networkInterfaces: [{ accessConfigs: [{ natIP: "192.0.2.5" }] }],
+        });
+      }
+      return Response.json({});
+    };
+
+    const config = leaseConfig({
+      provider: "gcp",
+      serverType: "e2-micro",
+      gcpMachineImage: "checkpoint-gcp",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    const server = await client.createServer(
+      config,
+      "cbx_123456789abc",
+      "blue-lobster",
+      "alice@example.com",
+    );
+
+    const createCall = calls.find(
+      (call) => call.method === "POST" && call.path.includes("/zones/us-central1-a/instances?"),
+    );
+    expect(server.host).toBe("192.0.2.5");
+    expect(createCall?.path).toContain(
+      "sourceMachineImage=projects%2Fdefault-project%2Fglobal%2FmachineImages%2Fcheckpoint-gcp",
+    );
+    expect(createCall?.body).not.toHaveProperty("disks");
+    expect(String(createCall?.body?.name)).toMatch(/^crabbox-blue-lobster-/);
+  });
+
+  it("creates instances from disk snapshots without forcing default disk size", async () => {
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "test-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    };
+    const calls: Array<{
+      method: string;
+      path: string;
+      body: Record<string, unknown> | undefined;
+    }> = [];
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      const body = init?.body
+        ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+        : undefined;
+      calls.push({ method, path: url.pathname + url.search, body });
+      if (url.pathname.endsWith("/global/firewalls/crabbox-ssh") && method === "GET") {
+        return new Response("not found", { status: 404 });
+      }
+      if (url.pathname.endsWith("/global/operations/op-firewall/wait")) {
+        return Response.json({ name: "op-firewall", status: "DONE" });
+      }
+      if (url.pathname.endsWith("/zones/us-central1-a/operations/op-instance/wait")) {
+        return Response.json({ name: "op-instance", status: "DONE" });
+      }
+      if (url.pathname.endsWith("/global/firewalls") && method === "POST") {
+        return Response.json({ name: "op-firewall", status: "PENDING" });
+      }
+      if (url.pathname.endsWith("/zones/us-central1-a/instances") && method === "POST") {
+        return Response.json({ name: "op-instance", status: "PENDING" });
+      }
+      if (url.pathname.includes("/zones/us-central1-a/instances/crabbox-blue-lobster-")) {
+        return Response.json({
+          id: "123",
+          name: url.pathname.split("/").pop(),
+          status: "RUNNING",
+          machineType: "zones/us-central1-a/machineTypes/e2-micro",
+          networkInterfaces: [{ accessConfigs: [{ natIP: "192.0.2.5" }] }],
+        });
+      }
+      return Response.json({});
+    };
+
+    await client.createServer(
+      leaseConfig({
+        provider: "gcp",
+        serverType: "e2-micro",
+        gcpSnapshot: "checkpoint-gcp",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      "cbx_123456789abc",
+      "blue-lobster",
+      "alice@example.com",
+    );
+
+    const createCall = calls.find(
+      (call) => call.method === "POST" && call.path.endsWith("/zones/us-central1-a/instances"),
+    );
+    const disks = createCall?.body?.disks as Array<{ initializeParams?: Record<string, unknown> }>;
+    expect(disks[0]?.initializeParams).toMatchObject({
+      sourceSnapshot: "projects/default-project/global/snapshots/checkpoint-gcp",
+      diskType: "zones/us-central1-a/diskTypes/pd-balanced",
+    });
+    expect(disks[0]?.initializeParams).not.toHaveProperty("diskSizeGb");
+  });
+
   it("keeps exact GCP types eligible for zone fallback", async () => {
     const attempts: string[] = [];
     const original = GCPClient.prototype.createServer;

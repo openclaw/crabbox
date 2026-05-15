@@ -257,6 +257,22 @@ func TestIsloSyncWorkspaceFallsBackToExecUpload(t *testing.T) {
 	}
 }
 
+func TestIsloFallbackExtractCommandCleansUploadsOnFailure(t *testing.T) {
+	cmd := isloFallbackExtractCommand("/tmp/crabbox-test.tgz.b64", "/tmp/crabbox-test.tgz", "/workspace/repo")
+	for _, want := range []string{
+		"base64 -d '/tmp/crabbox-test.tgz.b64' > '/tmp/crabbox-test.tgz'",
+		"tar -xzf '/tmp/crabbox-test.tgz' -C '/workspace/repo'",
+		"; status=$?; rm -f '/tmp/crabbox-test.tgz.b64' '/tmp/crabbox-test.tgz'; exit $status",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("command missing %q: %s", want, cmd)
+		}
+	}
+	if strings.Index(cmd, "rm -f '/tmp/crabbox-test.tgz.b64'") < strings.Index(cmd, "tar -xzf") {
+		t.Fatalf("cleanup should run after extract attempt: %s", cmd)
+	}
+}
+
 func TestIsloExecForwardsEnv(t *testing.T) {
 	client := &fakeIsloSyncClient{}
 	backend := &isloBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}

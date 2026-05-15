@@ -34,7 +34,7 @@ type crabboxKongCLI struct {
 	List       listKongCmd       `cmd:"" passthrough:"" help:"List Crabbox machines."`
 	Share      shareKongCmd      `cmd:"" passthrough:"" help:"Share a lease with users or the owning org."`
 	Unshare    unshareKongCmd    `cmd:"" passthrough:"" help:"Remove lease sharing."`
-	Image      imageKongCmd      `cmd:"" help:"Create or promote brokered AWS runner images."`
+	Image      imageKongCmd      `cmd:"" help:"Create provider images and promote brokered AWS runner images."`
 	Usage      usageKongCmd      `cmd:"" passthrough:"" help:"Show cost and usage estimates by user, org, or fleet."`
 	Admin      adminKongCmd      `cmd:"" help:"Lease admin controls for trusted operators."`
 	Actions    actionsKongCmd    `cmd:"" help:"Register GitHub Actions runners or dispatch workflows."`
@@ -65,7 +65,7 @@ func (a App) runKong(ctx context.Context, args []string) (err error) {
 	parser, err := kong.New(&cli,
 		kong.Name("crabbox"),
 		kong.Description("Crabbox leases remote test boxes, syncs your dirty checkout, runs commands, and cleans up."),
-		kong.Vars{"version": version},
+		kong.Vars{"version": currentVersion()},
 		kong.Writers(a.Stdout, a.Stderr),
 		kong.Exit(func(code int) {
 			panic(kongExit{code: code})
@@ -306,9 +306,9 @@ type cacheWarmKongCmd struct {
 }
 
 type imageKongCmd struct {
-	Create  imageCreateKongCmd  `cmd:"" passthrough:"" help:"Create an AMI from a brokered AWS lease."`
+	Create  imageCreateKongCmd  `cmd:"" passthrough:"" help:"Create a provider image from a brokered lease."`
 	Promote imagePromoteKongCmd `cmd:"" passthrough:"" help:"Promote an AMI for brokered AWS runners."`
-	Delete  imageDeleteKongCmd  `cmd:"" passthrough:"" help:"Delete an AWS AMI and its EBS snapshots."`
+	Delete  imageDeleteKongCmd  `cmd:"" passthrough:"" help:"Delete a provider image."`
 }
 type imageCreateKongCmd struct {
 	Args []string `arg:"" optional:""`
@@ -588,7 +588,7 @@ func (c *machineCleanupKongCmd) Run(ctx context.Context, app App) error {
 }
 
 func (c *versionKongCmd) Run(app App) error {
-	fmt.Fprintln(app.Stdout, version)
+	fmt.Fprintln(app.Stdout, currentVersion())
 	return nil
 }
 

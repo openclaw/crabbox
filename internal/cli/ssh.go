@@ -389,6 +389,34 @@ func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.
 	return lastErr
 }
 
+func runSSHInputStream(ctx context.Context, target SSHTarget, remote string, input io.ReadSeeker, stdout, stderr io.Writer) error {
+	remote = wrapRemoteForTarget(target, remote)
+	if input == nil {
+		input = strings.NewReader("")
+	}
+	var lastErr error
+	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
+		if _, err := input.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		probe := target
+		probe.Port = port
+		cmd := exec.CommandContext(ctx, "ssh", sshArgs(probe, remote)...)
+		cmd.Stdin = input
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
+		err := cmd.Run()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !shouldRetrySSHPort(err) {
+			return err
+		}
+	}
+	return lastErr
+}
+
 func runSSHStream(ctx context.Context, target SSHTarget, remote string, stdout, stderr io.Writer) int {
 	code, _ := runSSHStreamResult(ctx, target, remote, stdout, stderr)
 	return code

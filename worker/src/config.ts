@@ -21,6 +21,7 @@ export interface LeaseConfig {
   image: string;
   awsRegion: string;
   awsAMI: string;
+  awsSnapshot: string;
   awsSGID: string;
   awsSubnetID: string;
   awsProfile: string;
@@ -29,9 +30,12 @@ export interface LeaseConfig {
   awsMacHostID: string;
   azureLocation: string;
   azureImage: string;
+  azureSnapshot: string;
   gcpProject: string;
   gcpZone: string;
   gcpImage: string;
+  gcpMachineImage: string;
+  gcpSnapshot: string;
   gcpNetwork: string;
   gcpSubnet: string;
   gcpTags: string[];
@@ -135,6 +139,7 @@ export function leaseConfig(input: LeaseRequest): LeaseConfig {
     image: input.image ?? "ubuntu-24.04",
     awsRegion: input.awsRegion ?? "eu-west-1",
     awsAMI: input.awsAMI ?? "",
+    awsSnapshot: input.awsSnapshot ?? "",
     awsSGID: input.awsSGID ?? "",
     awsSubnetID: input.awsSubnetID ?? "",
     awsProfile: input.awsProfile ?? "",
@@ -143,9 +148,12 @@ export function leaseConfig(input: LeaseRequest): LeaseConfig {
     awsMacHostID: input.awsMacHostID ?? "",
     azureLocation: input.azureLocation ?? "",
     azureImage: input.azureImage ?? "",
+    azureSnapshot: input.azureSnapshot ?? "",
     gcpProject: input.gcpProject ?? "",
     gcpZone: input.gcpZone ?? "",
     gcpImage: input.gcpImage ?? "",
+    gcpMachineImage: input.gcpMachineImage ?? "",
+    gcpSnapshot: input.gcpSnapshot ?? "",
     gcpNetwork: input.gcpNetwork ?? "",
     gcpSubnet: input.gcpSubnet ?? "",
     gcpTags: uniqueStrings(input.gcpTags ?? []),

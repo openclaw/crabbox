@@ -1,121 +1,181 @@
 # Checkpoints
 
-Crabbox checkpoints make prepared remote state reusable.
+Crabbox checkpoints save prepared remote state for reuse.
 
-The product goal is fast access to known-good or known-interesting scenarios:
-dependencies installed, repositories synced, services warm, failure artifacts
-present, or a bug paused at a useful workspace state.
+**Goal**: Skip expensive setup. Install dependencies once, pause a bug at a useful
+state, keep generated fixtures, then fork that scenario for repeated test runs.
 
-Checkpoints are scenario handles. They do not change the default runner image
-for normal `warmup` or `run` commands. Use `crabbox checkpoint fork <id>` when
-you want a fresh lease from a saved scenario. Use `crabbox image promote` when
-you want future AWS leases to boot from a new default runner image.
+**Key distinction**: Checkpoints are explicit scenario handles, not default images.
+Use `crabbox checkpoint fork <id>` to start a fresh lease from a saved scenario.
+Use `crabbox image promote` to change the default AWS runner image for all future
+leases.
 
-## Tiers
+## Two Modes
 
-Crabbox treats checkpointing as tiered, because providers do not expose the same
-snapshot primitives.
+**Native (Provider Snapshots)**
+- Snapshots entire VM disk at provider level (AWS/Azure/GCP)
+- Preserves full machine state: packages, tools, caches, services, files
+- Fast to create and fork (leverages cloud-native snapshots)
+- Lives in provider account, incurs storage costs
+- Linux only (Windows not supported)
 
-- `recipe`: metadata only. Stores repo identity, lease/provider info and
-  workdir. Current restore/fork commands do not rebuild recipe checkpoints yet.
-- `aws-ami`: VM-level AWS Linux checkpoint. Creates an AMI from the backing EC2
-  instance, then forks fresh leases from that image. An AMI is AWS's bootable
-  machine image format; the disk contents are stored as EBS snapshots.
-- `workspace-archive`: portable SSH fallback. Stores the remote workdir as a
-  local tarball and restores it to any compatible POSIX SSH lease. It preserves
-  workspace files, not the full machine.
-- `provider-native`: future provider-owned snapshots for other backends such as
-  Proxmox VM snapshots/clones and sandbox-provider snapshots.
+**Archive (Workspace Tarball)**
+- Captures workdir files only, stores locally as tarball
+- Portable across any SSH-accessible lease
+- Does not preserve system packages or machine state
+- Excludes `.crabbox/env` and `.crabbox/scripts` by default
 
-The default `auto` mode uses `aws-ami` when the source is a brokered AWS Linux
-lease. Otherwise it falls back to `workspace-archive`.
+Default `auto` mode: native for brokered AWS/Azure/GCP Linux leases, otherwise
+archive.
 
-## Current Flow
+## Native Checkpoint Strategies
 
-```sh
-crabbox warmup --class beast
-crabbox run --id blue-lobster --shell 'npm ci && npm test'
-crabbox checkpoint create --id blue-lobster --name after-npm-ci
-crabbox checkpoint fork chk_123 --class beast
-crabbox run --id <forked-lease> -- npm test
-```
+Native checkpoints use two provider primitives:
 
-`checkpoint create` records either a provider image or a local workspace
-archive. `fork` creates a fresh lease from that checkpoint and keeps it
-available for more runs or SSH debugging.
+**Disk-Snapshot Strategy (default)**
+- AWS: EBS snapshot (`aws-ebs-snapshot`)
+- Azure: Managed OS disk snapshot (`azure-os-disk-snapshot`)
+- GCP: Persistent disk snapshot (`gcp-disk-snapshot`)
+- Faster to create, boots with fresh SSH keys
+- Best for iterative development
 
-For AWS AMI checkpoints, Crabbox resets cloud-init state before image creation.
-That lets forked VMs run new user-data and install their own per-lease SSH key
-instead of inheriting the source lease key. After the fork boots, Crabbox moves
-the snapshotted source workdir to the new lease's normal workdir so existing
-`crabbox run --id <fork>` workflows see the prepared scenario.
+**Image Strategy (opt-in with `--strategy image`)**
+- AWS: AMI (`aws-ami`)
+- Azure: Managed image (`azure-managed-image`) — read-only, not created from active VMs
+- GCP: Machine image (`gcp-machine-image`)
+- Slower but preserves complete VM configuration
+- Best for distribution or long-term storage
 
-## What Gets Preserved
+**Metadata-Only (`recipe`)**
+- Records lease/repo/workdir info without creating artifacts
+- Not yet supported by fork/restore commands
 
-AWS AMI checkpoints preserve machine-level state from the EC2 root volume:
-system packages, installed tools, language runtimes, caches on disk, services,
-repository workdirs, and generated files. They can also preserve secrets if
-secrets were written to disk. Treat them like sensitive provider artifacts.
+## Security First
 
-Workspace archives preserve files under the selected workdir. They do not
-preserve installed OS packages, system services, remote caches outside the
-workdir, users, SSH host configuration, or other machine state.
+**⚠️ Native checkpoints may contain secrets**
 
-Both modes record local metadata such as checkpoint id, source lease, provider,
-repo name, git head, workdir, kind, and creation time under Crabbox's local
-state directory.
+Native snapshots capture full root volume state: system files, logs, caches,
+installed packages, and any secrets written to disk during setup. Treat them as
+sensitive provider artifacts.
 
-## When To Use It
+- Delete when no longer needed (storage costs accrue)
+- Do not create from ad-hoc debugging sessions with temporary secrets
+- Provider resources remain even if local metadata is lost
 
-Use an AWS AMI checkpoint when machine setup is the slow part:
+**Workspace archives may contain secrets too**
+
+Archives capture workdir contents: build outputs, caches, logs, generated files.
+Crabbox excludes `.crabbox/env` and `.crabbox/scripts` by default but does not
+scan for credentials in arbitrary files.
+
+**Local metadata is required**
+
+Checkpoints store metadata locally (`~/.local/state/crabbox/checkpoints/`) with
+provider resource IDs and regions. Losing local metadata means you cannot fork
+by checkpoint ID. Deleting provider resources means local metadata is insufficient
+to fork.
+
+## Workflow
+
+**Basic flow**
 
 ```sh
 crabbox warmup --provider aws --class beast
-crabbox run --id blue-lobster --shell 'sudo apt-get update && sudo apt-get install -y heavy-tool && npm ci'
-crabbox checkpoint create --id blue-lobster --name heavy-tool-ready
+crabbox run --id blue-lobster --shell 'npm ci && npm test'
+crabbox checkpoint create --id blue-lobster --name after-npm-ci
+# Creates chk_abc123
+
+crabbox checkpoint fork chk_abc123 --class beast
+# Prints forked lease slug: purple-whale
+crabbox run --id purple-whale -- npm test
+```
+
+**What happens on create**
+
+Native checkpoints:
+1. Flush filesystem writes (`sync`)
+2. Reset cloud-init state (allows fresh SSH keys on fork)
+3. Call provider snapshot/image API (EBS snapshot, AMI, etc.)
+4. Save local metadata with provider resource ID and region
+
+Archive checkpoints:
+1. SSH into lease
+2. Tar workdir (excluding `.crabbox/env` and `.crabbox/scripts`)
+3. Download tarball to `~/.local/state/crabbox/checkpoints/chk_*/workspace.tar.gz`
+4. Save local metadata
+
+**What happens on fork**
+
+Native checkpoints:
+1. Acquire new lease from provider using checkpoint snapshot/image
+2. Wait for boot
+3. Relocate snapshotted workdir to new lease's standard path
+   (`/work/cbx_old/repo` → `/work/cbx_new/repo`)
+4. Keep lease running for immediate use
+
+Archive checkpoints:
+1. Acquire standard new lease
+2. Upload tarball via SSH
+3. Extract to workdir
+4. Keep lease running
+
+**Azure disk-snapshot specifics**
+
+Azure disk-snapshot forks boot from a specialized OS disk and may inherit source
+machine identity. Treat them as exact-clone snapshots until Crabbox implements
+stronger post-boot reset. AWS and GCP disk-snapshots inject fresh user-data for
+per-lease SSH keys.
+
+## When To Use Checkpoints
+
+**Use native checkpoints when machine setup is slow**
+
+Expensive system packages, heavy toolchain installs, large dependency downloads:
+
+```sh
+crabbox warmup --provider aws --class beast
+crabbox run --id blue-lobster --shell 'sudo apt install -y cuda-toolkit && npm ci'
+crabbox checkpoint create --id blue-lobster --name cuda-ready
 crabbox checkpoint fork chk_123 --class beast
 ```
 
-Use a workspace archive when the repo state is the valuable part:
+Works identically for AWS, Azure, and GCP Linux leases.
+
+**Use workspace archives when repo state is valuable**
+
+Paused bugs, generated fixtures, build artifacts, test failures:
 
 ```sh
 crabbox checkpoint create --id blue-lobster --mode archive --name failing-fixtures
 crabbox checkpoint fork chk_123 --class standard
 ```
 
-Use a promoted image instead of a checkpoint when the prepared machine should
-become the normal base image for future AWS leases.
+Portable across all SSH-accessible leases.
 
-## Security Boundary
+**Use promoted images instead for default base images**
 
-Workspace archives may contain build outputs, caches, logs, repository data, and
-anything else in the workdir. Crabbox excludes `.crabbox/env` and
-`.crabbox/scripts` by default to avoid persisting profile-backed env helpers,
-but users should still treat checkpoint archives as sensitive local artifacts.
+If the prepared machine should become the standard image for all future AWS
+leases, use `crabbox image promote` instead of checkpoints. Checkpoints are
+explicit scenario handles; promoted images change the global default.
 
-AWS AMI checkpoints live in the provider account and are backed by EBS
-snapshots. They may contain the full root volume state. `crabbox checkpoint
-delete` deregisters the AMI and deletes its snapshots; keep long-lived
-checkpoints intentionally. EBS snapshots can incur storage cost while they
-exist.
+## Use Cases
 
-The local checkpoint record is also part of the checkpoint. For AWS, it stores
-the AMI id and region. If the local record is lost, the AMI still exists in AWS,
-but Crabbox cannot fork it by checkpoint id until equivalent metadata is
-restored. If the AMI or EBS snapshots are deleted, the local record is no longer
-enough to fork.
+- Fast test iteration: `npm ci` once, fork for each test run
+- Heavy toolchains: Install CUDA, Android SDK, Xcode once
+- Paused debugging: Capture exact failure state, fork to investigate
+- Generated fixtures: Keep expensive setup data, fork for clean runs
+- CI optimization: Prebake common environments, fork in parallel jobs
+- Team sharing: Distribute snapshot IDs for consistent environments (native only)
 
-## Native Snapshot Direction
+## Future Expansion
 
-Additional native checkpointing should be added only when a backend can
-guarantee real semantics:
+Additional native checkpoint backends require:
 
-- create a stable snapshot from a lease or workspace;
-- fork that snapshot into a new lease;
-- restore or delete it predictably;
-- report cost, retention, and security boundaries.
+- Stable snapshot creation from active lease
+- Fork snapshot into new lease
+- Predictable restore/delete operations
+- Clear cost, retention, security boundaries
 
-Proxmox is the next natural backend because it has VM-level snapshot and clone
-semantics close to local hypervisor snapshots. Plain SSH providers should not
-advertise native checkpoint features unless the target host exposes a real
-snapshot API such as ZFS, Btrfs, or LVM and Crabbox owns that integration.
+Proxmox VM snapshots/clones are the next natural fit. Plain SSH providers should
+not expose native checkpoint features unless the target host provides a real
+snapshot API (ZFS, Btrfs, LVM) and Crabbox owns the integration.

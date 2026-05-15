@@ -2223,7 +2223,7 @@ describe("fleet lease identity and idle", () => {
     const created = await fleet.fetch(
       request("POST", "/v1/images", {
         headers: { "x-crabbox-admin": "true" },
-        body: { leaseID: "cbx_000000000001", name: "openclaw-crabbox-test" },
+        body: { leaseID: "cbx_000000000001", name: "openclaw-crabbox-test", strategy: "image" },
       }),
     );
     expect(created.status).toBe(201);
@@ -2283,6 +2283,100 @@ describe("fleet lease identity and idle", () => {
     expect(body.lease.region).toBe("us-east-2");
   });
 
+  it("passes provider-native checkpoint snapshot fields into new leases", async () => {
+    let awsConfig: LeaseConfig | undefined;
+    let azureConfig: LeaseConfig | undefined;
+    let gcpConfig: LeaseConfig | undefined;
+    const fleet = testFleet(new MemoryStorage(), {
+      aws: fakeProvider(
+        (config) => {
+          awsConfig = config;
+        },
+        { provider: "aws", region: "us-east-2" },
+      ),
+      azure: fakeProvider(
+        (config) => {
+          azureConfig = config;
+        },
+        { provider: "azure", region: "eastus" },
+      ),
+      gcp: fakeProvider(
+        (config) => {
+          gcpConfig = config;
+        },
+        { provider: "gcp", region: "us-central1-a" },
+      ),
+    });
+
+    const aws = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {
+          provider: "aws",
+          awsRegion: "us-east-2",
+          awsSnapshot: "snap-000000000001",
+          sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example.com",
+        },
+      }),
+    );
+    const azure = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {
+          provider: "azure",
+          azureLocation: "eastus",
+          azureSnapshot:
+            "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint-azure",
+          sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example.com",
+        },
+      }),
+    );
+    const gcp = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {
+          provider: "gcp",
+          gcpProject: "proj",
+          gcpZone: "us-central1-a",
+          gcpSnapshot: "projects/proj/global/snapshots/checkpoint-gcp",
+          sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example.com",
+        },
+      }),
+    );
+
+    expect(aws.status).toBe(201);
+    expect(azure.status).toBe(201);
+    expect(gcp.status).toBe(201);
+    expect(awsConfig?.awsSnapshot).toBe("snap-000000000001");
+    expect(azureConfig?.azureSnapshot).toBe(
+      "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint-azure",
+    );
+    expect(gcpConfig?.gcpSnapshot).toBe("projects/proj/global/snapshots/checkpoint-gcp");
+  });
+
+  it("rejects snapshot-backed lease fields for non-admin users", async () => {
+    let created = false;
+    const fleet = testFleet(new MemoryStorage(), {
+      aws: fakeProvider(() => {
+        created = true;
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          provider: "aws",
+          awsSnapshot: "snap-000000000001",
+          sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example.com",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(created).toBe(false);
+    await expect(response.json()).resolves.toMatchObject({ error: "admin_required" });
+  });
+
   it("deletes AWS images through admin routes", async () => {
     let deleted = "";
     const fleet = testFleet(new MemoryStorage(), {
@@ -2308,6 +2402,244 @@ describe("fleet lease identity and idle", () => {
     );
     expect(allowed.status).toBe(200);
     expect(deleted).toBe("ami-000000000001");
+  });
+
+  it("creates Azure and GCP native disk snapshots through admin routes by default", async () => {
+    const storage = new MemoryStorage();
+    const createdNames: string[] = [];
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(undefined, {
+        provider: "azure",
+        region: "eastus",
+        imageRegion: "eastus",
+        onCreateImage: (_instanceID, name, strategy) =>
+          createdNames.push(`azure:${strategy}:${name}`),
+      }),
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        region: "us-central1-a",
+        imageRegion: "us-central1-a",
+        onCreateImage: (_instanceID, name, strategy) =>
+          createdNames.push(`gcp:${strategy}:${name}`),
+      }),
+    });
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        provider: "azure",
+        cloudID: "crabbox-azure",
+        region: "eastus",
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000003",
+      testLease({
+        id: "cbx_000000000003",
+        provider: "gcp",
+        cloudID: "crabbox-gcp",
+        region: "us-central1-a",
+        providerProject: "proj",
+      }),
+    );
+
+    const azure = await fleet.fetch(
+      request("POST", "/v1/images", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { leaseID: "cbx_000000000002", name: "After Install" },
+      }),
+    );
+    const longGCPName = `${"a".repeat(62)} b`;
+    const gcp = await fleet.fetch(
+      request("POST", "/v1/images", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { leaseID: "cbx_000000000003", name: longGCPName },
+      }),
+    );
+    expect(azure.status).toBe(201);
+    expect(gcp.status).toBe(201);
+    await expect(azure.json()).resolves.toMatchObject({
+      image: { id: "checkpoint-azure", provider: "azure", kind: "azure-os-disk-snapshot" },
+    });
+    await expect(gcp.json()).resolves.toMatchObject({
+      image: { id: "checkpoint-gcp", provider: "gcp", kind: "gcp-disk-snapshot" },
+    });
+    expect(createdNames).toEqual([
+      "azure:disk-snapshot:after-install",
+      `gcp:disk-snapshot:${"a".repeat(62)}`,
+    ]);
+  });
+
+  it("rejects Azure managed image creation from active leases", async () => {
+    let created = false;
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(undefined, {
+        provider: "azure",
+        onCreateImage() {
+          created = true;
+        },
+      }),
+    });
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        provider: "azure",
+        cloudID: "crabbox-azure",
+        region: "eastus",
+      }),
+    );
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/images", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { leaseID: "cbx_000000000002", name: "After Install", strategy: "image" },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(created).toBe(false);
+    await expect(response.json()).resolves.toMatchObject({ error: "unsupported_strategy" });
+  });
+
+  it("rejects invalid native image strategies", async () => {
+    let created = false;
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onCreateImage() {
+          created = true;
+        },
+      }),
+    });
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "aws",
+        cloudID: "i-000000000001",
+      }),
+    );
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/images", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { leaseID: "cbx_000000000001", name: "After Install", strategy: "snapshopt" },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(created).toBe(false);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_strategy" });
+  });
+
+  it("keeps accepting disk_snapshot as a native image strategy alias", async () => {
+    let strategy = "";
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onCreateImage(_sourceID, _name, receivedStrategy) {
+          strategy = receivedStrategy;
+        },
+      }),
+    });
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "aws",
+        cloudID: "i-000000000001",
+      }),
+    );
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/images", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { leaseID: "cbx_000000000001", name: "After Install", strategy: "disk_snapshot" },
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(strategy).toBe("disk-snapshot");
+  });
+
+  it("deletes provider-native images using provider query routing", async () => {
+    let azureDeleted = "";
+    let azureDeletedKind = "";
+    let gcpDeleted = "";
+    let gcpDeletedKind = "";
+    const fleet = testFleet(new MemoryStorage(), {
+      azure: fakeProvider(undefined, {
+        provider: "azure",
+        onDeleteImage(imageID, kind) {
+          azureDeleted = imageID;
+          azureDeletedKind = kind ?? "";
+        },
+      }),
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onDeleteImage(imageID, kind) {
+          gcpDeleted = imageID;
+          gcpDeletedKind = kind ?? "";
+        },
+      }),
+    });
+
+    const azureResource =
+      "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint-azure";
+    const gcpResource = "projects/proj/global/snapshots/checkpoint-gcp";
+    const azure = await fleet.fetch(
+      request(
+        "DELETE",
+        `/v1/images/${encodeURIComponent(azureResource)}?provider=azure&region=eastus&kind=azure-os-disk-snapshot`,
+        {
+          headers: { "x-crabbox-admin": "true" },
+          body: {},
+        },
+      ),
+    );
+    const gcp = await fleet.fetch(
+      request(
+        "DELETE",
+        `/v1/images/${encodeURIComponent(gcpResource)}?provider=gcp&region=us-central1-a&project=proj&kind=gcp-disk-snapshot`,
+        {
+          headers: { "x-crabbox-admin": "true" },
+          body: {},
+        },
+      ),
+    );
+
+    expect(azure.status).toBe(200);
+    expect(gcp.status).toBe(200);
+    expect(azureDeleted).toBe(azureResource);
+    expect(azureDeletedKind).toBe("azure-os-disk-snapshot");
+    expect(gcpDeleted).toBe(gcpResource);
+    expect(gcpDeletedKind).toBe("gcp-disk-snapshot");
+  });
+
+  it("rejects invalid image provider query routing", async () => {
+    let deleted = "";
+    const fleet = testFleet(new MemoryStorage(), {
+      aws: fakeProvider(undefined, {
+        onDeleteImage(imageID) {
+          deleted = imageID;
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("DELETE", "/v1/images/checkpoint-azure?provider=azuer", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(deleted).toBe("");
+    await expect(response.json()).resolves.toMatchObject({ error: "unsupported_provider" });
   });
 
   it("rejects deleting the promoted AWS image", async () => {
@@ -3556,14 +3888,19 @@ function testFleet(
 function fakeProvider(
   onCreate?: (config: LeaseConfig) => void,
   result: {
-    provider?: "hetzner" | "aws" | "gcp";
+    provider?: "hetzner" | "aws" | "azure" | "gcp";
     serverType?: string;
     cloudID?: string;
     region?: string;
     imageRegion?: string;
     market?: string;
     attempts?: ProvisioningAttempt[];
-    onDeleteImage?: (imageID: string) => void;
+    onCreateImage?: (
+      instanceID: string,
+      name: string,
+      strategy?: "image" | "disk-snapshot",
+    ) => void;
+    onDeleteImage?: (imageID: string, kind?: string) => void;
   } = {},
   onDelete?: (id: string) => Promise<void>,
   onGet?: (id: string) => Promise<ProviderMachine> | ProviderMachine,
@@ -3602,8 +3939,10 @@ function fakeProvider(
             result.provider === "aws"
               ? (result.region ?? "eu-west-2")
               : result.provider === "gcp"
-                ? "us-central1-a"
-                : undefined,
+                ? (result.region ?? "us-central1-a")
+                : result.provider === "azure"
+                  ? (result.region ?? "eastus")
+                  : undefined,
           labels: {},
         },
         serverType: result.serverType ?? "cpx62",
@@ -3614,25 +3953,77 @@ function fakeProvider(
     async deleteServer(id: string) {
       await onDelete?.(id);
     },
-    async createImage(_instanceID: string, name: string) {
-      return {
-        id: "ami-000000000001",
-        name,
-        state: "pending",
-        region: result.imageRegion ?? "eu-west-1",
-      };
-    },
-    async getImage(imageID: string) {
+    async createImage(
+      instanceID: string,
+      name: string,
+      _noReboot = true,
+      strategy: "image" | "disk-snapshot" = "disk-snapshot",
+    ) {
+      result.onCreateImage?.(instanceID, name, strategy);
+      const provider = result.provider ?? "aws";
+      const imageID =
+        provider === "azure"
+          ? "checkpoint-azure"
+          : provider === "gcp"
+            ? "checkpoint-gcp"
+            : strategy === "disk-snapshot"
+              ? "snap-000000000001"
+              : "ami-000000000001";
       return {
         id: imageID,
-        name: "openclaw-crabbox-test",
-        state: "available",
+        name,
+        state: "pending",
+        provider,
+        kind:
+          strategy === "disk-snapshot"
+            ? provider === "azure"
+              ? "azure-os-disk-snapshot"
+              : provider === "gcp"
+                ? "gcp-disk-snapshot"
+                : "aws-ebs-snapshot"
+            : provider === "azure"
+              ? "azure-managed-image"
+              : provider === "gcp"
+                ? "gcp-machine-image"
+                : "aws-ami",
         region: result.imageRegion ?? "eu-west-1",
+        project: provider === "gcp" ? "proj" : undefined,
+        resourceID:
+          strategy === "disk-snapshot"
+            ? provider === "azure"
+              ? `/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/${imageID}`
+              : provider === "gcp"
+                ? `projects/proj/global/snapshots/${imageID}`
+                : imageID
+            : provider === "azure"
+              ? `/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/images/${imageID}`
+              : provider === "gcp"
+                ? `projects/proj/global/machineImages/${imageID}`
+                : imageID,
+        snapshots: [imageID],
+      };
+    },
+    async getImage(imageID: string, kind?: string) {
+      const provider = result.provider ?? "aws";
+      return {
+        id: imageID,
+        name: "crabbox-runner-test",
+        state: "available",
+        provider,
+        kind:
+          kind ??
+          (provider === "azure"
+            ? "azure-managed-image"
+            : provider === "gcp"
+              ? "gcp-machine-image"
+              : "aws-ami"),
+        region: result.imageRegion ?? "eu-west-1",
+        project: provider === "gcp" ? "proj" : undefined,
         snapshots: ["snap-000000000001"],
       };
     },
-    async deleteImage(imageID: string) {
-      result.onDeleteImage?.(imageID);
+    async deleteImage(imageID: string, kind?: string) {
+      result.onDeleteImage?.(imageID, kind);
     },
     async deleteSSHKey() {},
     async hourlyPriceUSD() {

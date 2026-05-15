@@ -127,6 +127,29 @@ func TestCheckpointDeleteKeepsCorruptRecord(t *testing.T) {
 	}
 }
 
+func TestNewCheckpointRecordUsesResolvedVersion(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	oldVersion := version
+	version = "v1.2.3"
+	t.Cleanup(func() { version = oldVersion })
+
+	record, _, err := newCheckpointRecord(
+		Repo{Name: "my-app"},
+		defaultConfig(),
+		Server{CloudID: "i-1234567890abcdef0", Provider: "aws"},
+		SSHTarget{TargetOS: targetLinux},
+		"cbx_123",
+		"/work/cbx_123/my-app",
+		"test checkpoint",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.CrabboxVersion != "1.2.3" {
+		t.Fatalf("CrabboxVersion=%q, want 1.2.3", record.CrabboxVersion)
+	}
+}
+
 func TestDefaultCheckpointRestoreWorkdirUsesTargetLease(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.WorkRoot = "/work"
@@ -136,15 +159,42 @@ func TestDefaultCheckpointRestoreWorkdirUsesTargetLease(t *testing.T) {
 	}
 }
 
-func TestCheckpointCreateModePrefersAWSAMILinuxNative(t *testing.T) {
+func TestCheckpointCreateModePrefersDiskSnapshotLinuxNative(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Provider = "hetzner"
 	cfg.Coordinator = "https://coordinator.example"
 	cfg.TargetOS = targetLinux
 	server := Server{Provider: "aws", CloudID: "i-123"}
 	target := SSHTarget{TargetOS: targetLinux}
-	if got := checkpointCreateMode("auto", cfg, server, target, false); got != checkpointKindAWSAMI {
+	if got := checkpointCreateMode("auto", "", cfg, server, target, false); got != checkpointKindAWSEBS {
 		t.Fatalf("mode=%q", got)
+	}
+	if got := checkpointCreateMode("native", "image", cfg, server, target, false); got != checkpointKindAWSAMI {
+		t.Fatalf("image strategy mode=%q", got)
+	}
+	if got := checkpointCreateMode("image", "", cfg, server, target, false); got != checkpointKindAWSAMI || checkpointStrategyForKind(got) != checkpointStrategyImage {
+		t.Fatalf("legacy image mode=%q strategy=%q", got, checkpointStrategyForKind(got))
+	}
+}
+
+func TestCheckpointCreateModeSupportsAzureAndGCPNative(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Coordinator = "https://coordinator.example"
+	cfg.TargetOS = targetLinux
+	target := SSHTarget{TargetOS: targetLinux}
+	for _, tc := range []struct {
+		provider string
+		want     string
+	}{
+		{provider: "azure", want: checkpointKindAzureOS},
+		{provider: "gcp", want: checkpointKindGCPDisk},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			server := Server{Provider: tc.provider, CloudID: "vm-123"}
+			if got := checkpointCreateMode("auto", "", cfg, server, target, false); got != tc.want {
+				t.Fatalf("mode=%q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -155,7 +205,7 @@ func TestCheckpointCreateModeAutoFallsBackForDirectAWS(t *testing.T) {
 	cfg.TargetOS = targetLinux
 	server := Server{Provider: "aws", CloudID: "i-123"}
 	target := SSHTarget{TargetOS: targetLinux}
-	if got := checkpointCreateMode("auto", cfg, server, target, false); got != checkpointKindArchive {
+	if got := checkpointCreateMode("auto", "", cfg, server, target, false); got != checkpointKindArchive {
 		t.Fatalf("mode=%q, want archive", got)
 	}
 }
@@ -165,7 +215,7 @@ func TestCheckpointCreateModeNativeUsesResolvedProvider(t *testing.T) {
 	cfg.Provider = "aws"
 	cfg.TargetOS = targetLinux
 	server := Server{Provider: "hetzner", CloudID: "123"}
-	if got := checkpointCreateMode("native", cfg, server, SSHTarget{TargetOS: targetLinux}, false); got != "unsupported" {
+	if got := checkpointCreateMode("native", "", cfg, server, SSHTarget{TargetOS: targetLinux}, false); got != "unsupported" {
 		t.Fatalf("mode=%q, want unsupported", got)
 	}
 }
@@ -174,7 +224,7 @@ func TestCheckpointCreateModeFallsBackToArchiveForSSH(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Provider = "ssh"
 	cfg.TargetOS = targetLinux
-	if got := checkpointCreateMode("auto", cfg, Server{Provider: "ssh"}, SSHTarget{TargetOS: targetLinux}, false); got != checkpointKindArchive {
+	if got := checkpointCreateMode("auto", "", cfg, Server{Provider: "ssh"}, SSHTarget{TargetOS: targetLinux}, false); got != checkpointKindArchive {
 		t.Fatalf("mode=%q", got)
 	}
 }
@@ -195,6 +245,36 @@ func TestCreateAWSAMICheckpointValidatesAdminBeforeCloudInit(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "adminToken") {
 		t.Fatalf("err=%v, want admin validation before cloud-init", err)
+	}
+}
+
+func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testing.T) {
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "https://coordinator.example")
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "")
+	t.Setenv("CRABBOX_ADMIN_TOKEN", "")
+	cfg := baseConfig()
+	cfg.Coordinator = "https://coordinator.example"
+	cfg.TargetOS = targetLinux
+
+	_, err := (App{Stdout: io.Discard, Stderr: io.Discard}).createNativeCheckpoint(
+		context.Background(),
+		cfg,
+		Server{Provider: "azure", CloudID: "crabbox-source"},
+		SSHTarget{TargetOS: targetLinux},
+		"cbx_123",
+		"",
+		"repo",
+		checkpointStrategyImage,
+		true,
+		false,
+		0,
+	)
+	if err == nil {
+		t.Fatal("expected Azure image strategy to fail")
+	}
+	if !strings.Contains(err.Error(), "Azure managed images require") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -322,6 +402,7 @@ func TestApplyAWSAMICheckpointForkConfigRecomputesServerType(t *testing.T) {
 	cfg.Class = "beast"
 	cfg.ServerType = "ccx63"
 	cfg.ServerTypeExplicit = true
+	cfg.CoordAdminToken = "admin-token"
 	record := checkpointRecord{Kind: checkpointKindAWSAMI, TargetOS: targetLinux, WindowsMode: windowsModeNormal}
 	record.Native.ImageID = "ami-12345678"
 	record.Native.Region = "eu-west-1"
@@ -330,6 +411,9 @@ func TestApplyAWSAMICheckpointForkConfigRecomputesServerType(t *testing.T) {
 
 	if cfg.Provider != "aws" || cfg.AWSAMI != "ami-12345678" || cfg.AWSRegion != "eu-west-1" {
 		t.Fatalf("aws config not applied: %#v", cfg)
+	}
+	if cfg.CoordToken != "admin-token" {
+		t.Fatalf("coord token=%q, want admin token for native checkpoint fork", cfg.CoordToken)
 	}
 	if cfg.ServerTypeExplicit {
 		t.Fatal("ServerTypeExplicit=true, want false")
@@ -356,6 +440,90 @@ func TestApplyAWSAMICheckpointForkConfigPreservesExplicitTypeFlag(t *testing.T) 
 
 	if cfg.ServerType != "c7a.4xlarge" || !cfg.ServerTypeExplicit {
 		t.Fatalf("explicit type not preserved: type=%q explicit=%t", cfg.ServerType, cfg.ServerTypeExplicit)
+	}
+}
+
+func TestApplyNativeCheckpointForkConfigForAzureAndGCP(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		record checkpointRecord
+		check  func(t *testing.T, cfg Config)
+	}{
+		{
+			name: "azure",
+			record: func() checkpointRecord {
+				record := checkpointRecord{Kind: checkpointKindAzure, TargetOS: targetLinux}
+				record.Native.ImageID = "checkpoint-azure"
+				record.Native.Resource = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/images/checkpoint-azure"
+				record.Native.Region = "eastus"
+				return record
+			}(),
+			check: func(t *testing.T, cfg Config) {
+				if cfg.Provider != "azure" || cfg.AzureLocation != "eastus" || cfg.AzureImage == "" {
+					t.Fatalf("azure config not applied: %#v", cfg)
+				}
+			},
+		},
+		{
+			name: "azure disk snapshot",
+			record: func() checkpointRecord {
+				record := checkpointRecord{Kind: checkpointKindAzureOS, TargetOS: targetLinux}
+				record.Native.ImageID = "checkpoint-azure"
+				record.Native.Resource = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint-azure"
+				record.Native.Region = "eastus"
+				return record
+			}(),
+			check: func(t *testing.T, cfg Config) {
+				if cfg.Provider != "azure" || cfg.AzureLocation != "eastus" || cfg.AzureSnapshot == "" {
+					t.Fatalf("azure snapshot config not applied: %#v", cfg)
+				}
+			},
+		},
+		{
+			name: "gcp",
+			record: func() checkpointRecord {
+				record := checkpointRecord{Kind: checkpointKindGCP, TargetOS: targetLinux}
+				record.Native.ImageID = "checkpoint-gcp"
+				record.Native.Resource = "projects/proj/global/machineImages/checkpoint-gcp"
+				record.Native.Region = "us-central1-a"
+				record.Native.Project = "proj"
+				return record
+			}(),
+			check: func(t *testing.T, cfg Config) {
+				if cfg.Provider != "gcp" || cfg.GCPZone != "us-central1-a" || cfg.GCPProject != "proj" || cfg.GCPMachineImage == "" || !cfg.gcpProjectExplicit {
+					t.Fatalf("gcp config not applied: %#v", cfg)
+				}
+			},
+		},
+		{
+			name: "gcp disk snapshot",
+			record: func() checkpointRecord {
+				record := checkpointRecord{Kind: checkpointKindGCPDisk, TargetOS: targetLinux}
+				record.Native.ImageID = "checkpoint-gcp"
+				record.Native.Resource = "projects/proj/global/snapshots/checkpoint-gcp"
+				record.Native.Region = "us-central1-a"
+				record.Native.Project = "proj"
+				return record
+			}(),
+			check: func(t *testing.T, cfg Config) {
+				if cfg.Provider != "gcp" || cfg.GCPZone != "us-central1-a" || cfg.GCPProject != "proj" || cfg.GCPSnapshot == "" || !cfg.gcpProjectExplicit {
+					t.Fatalf("gcp snapshot config not applied: %#v", cfg)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFlagSet("checkpoint fork", io.Discard)
+			_ = fs.String("type", "", "provider type")
+			cfg := defaultConfig()
+			cfg.Provider = "hetzner"
+			cfg.Class = "standard"
+			applyNativeCheckpointForkConfig(&cfg, fs, tc.record)
+			tc.check(t, cfg)
+			if cfg.ServerTypeExplicit {
+				t.Fatal("ServerTypeExplicit=true, want false")
+			}
+		})
 	}
 }
 
@@ -392,15 +560,17 @@ func TestRemoteCheckpointArchiveCommand(t *testing.T) {
 }
 
 func TestRemoteCheckpointRestoreCommandClearsWorkdir(t *testing.T) {
-	cmd := remoteCheckpointRestoreCommand("/work/repo", "/tmp/chk.tar.gz", true)
+	cmd := remoteCheckpointRestoreCommand("/work/repo", true)
 	for _, want := range []string{
+		"mktemp /tmp/crabbox-checkpoint.XXXXXX",
+		"trap cleanup EXIT INT TERM",
+		"cat > \"$tmp\"",
 		"mkdir -p",
 		"/work/repo",
 		"find",
 		"-mindepth 1 -maxdepth 1 -exec rm -rf -- {} +",
 		"tar -C",
 		"-xzf",
-		"/tmp/chk.tar.gz",
 		"rm -f --",
 	} {
 		if !strings.Contains(cmd, want) {

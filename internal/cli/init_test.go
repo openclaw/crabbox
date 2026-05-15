@@ -158,8 +158,8 @@ func TestKongRouterPreservesVersionAndUsageExitCodes(t *testing.T) {
 	if err := app.Run(context.Background(), []string{"--version"}); err != nil {
 		t.Fatalf("--version error: %v", err)
 	}
-	if strings.TrimSpace(stdout.String()) != version {
-		t.Fatalf("--version output=%q, want %q", stdout.String(), version)
+	if strings.TrimSpace(stdout.String()) != currentVersion() {
+		t.Fatalf("--version output=%q, want %q", stdout.String(), currentVersion())
 	}
 
 	err := app.Run(context.Background(), []string{"nope"})

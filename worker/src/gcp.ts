@@ -2,7 +2,7 @@ import { cloudInit } from "./bootstrap";
 import { gcpMachineTypeCandidatesForClass, sshPorts, validCIDRs, type LeaseConfig } from "./config";
 import { leaseProviderLabels } from "./provider-labels";
 import { leaseProviderName } from "./slug";
-import type { Env, ProviderMachine, ProvisioningAttempt } from "./types";
+import type { Env, ProviderImage, ProviderMachine, ProvisioningAttempt } from "./types";
 
 const computeBaseURL = "https://compute.googleapis.com/compute/v1";
 const tokenURL = "https://oauth2.googleapis.com/token";
@@ -24,6 +24,10 @@ interface GCPInstance {
   networkInterfaces?: {
     accessConfigs?: { natIP?: string }[];
   }[];
+  disks?: {
+    boot?: boolean;
+    source?: string;
+  }[];
 }
 
 interface GCPAggregatedInstanceList {
@@ -34,6 +38,20 @@ interface GCPOperation {
   name?: string;
   status?: string;
   error?: { errors?: { code?: string; message?: string }[] };
+}
+
+interface GCPMachineImage {
+  id?: string;
+  name?: string;
+  selfLink?: string;
+  status?: string;
+}
+
+interface GCPSnapshot {
+  id?: string;
+  name?: string;
+  selfLink?: string;
+  status?: string;
 }
 
 export class GCPClient {
@@ -196,6 +214,7 @@ export class GCPClient {
     }
     await this.ensureFirewall(config);
     const name = leaseProviderName(leaseID, slug);
+    const project = config.gcpProject || this.project;
     const labels = gcpLabels(
       leaseProviderLabels(config, leaseID, slug, owner, "gcp", new Date(), {
         market: config.capacityMarket,
@@ -206,18 +225,6 @@ export class GCPClient {
       labels,
       machineType: `zones/${this.zone}/machineTypes/${config.serverType}`,
       tags: { items: gcpEffectiveTags(this.tags, config.gcpTags) },
-      disks: [
-        {
-          boot: true,
-          autoDelete: true,
-          type: "PERSISTENT",
-          initializeParams: {
-            sourceImage: config.gcpImage || this.image,
-            diskSizeGb: config.gcpRootGB || this.rootGB,
-            diskType: `zones/${this.zone}/diskTypes/pd-balanced`,
-          },
-        },
-      ],
       metadata: {
         items: [
           { key: "enable-oslogin", value: "FALSE" },
@@ -233,6 +240,28 @@ export class GCPClient {
         },
       ],
     };
+    if (!config.gcpMachineImage) {
+      const initializeParams: Record<string, unknown> = config.gcpSnapshot
+        ? { sourceSnapshot: gcpSnapshotRef(config.gcpSnapshot, project) }
+        : {
+            sourceImage: config.gcpImage || this.image,
+            diskSizeGb: config.gcpRootGB || this.rootGB,
+          };
+      if (config.gcpSnapshot && config.gcpRootGB > 0) {
+        initializeParams["diskSizeGb"] = config.gcpRootGB;
+      }
+      instance["disks"] = [
+        {
+          boot: true,
+          autoDelete: true,
+          type: "PERSISTENT",
+          initializeParams: {
+            ...initializeParams,
+            diskType: `zones/${this.zone}/diskTypes/pd-balanced`,
+          },
+        },
+      ];
+    }
     if (config.gcpServiceAccount || this.serviceAccount) {
       instance["serviceAccounts"] = [
         {
@@ -250,7 +279,10 @@ export class GCPClient {
       };
     }
     try {
-      const op = await this.gcp<GCPOperation>("POST", `/zones/${this.zone}/instances`, instance);
+      const path = config.gcpMachineImage
+        ? `/zones/${this.zone}/instances?sourceMachineImage=${encodeURIComponent(gcpMachineImageRef(config.gcpMachineImage, project))}`
+        : `/zones/${this.zone}/instances`;
+      const op = await this.gcp<GCPOperation>("POST", path, instance);
       await this.waitZoneOperation(op);
       return await this.getServer(name);
     } catch (error) {
@@ -291,6 +323,106 @@ export class GCPClient {
 
   async deleteSSHKey(): Promise<void> {
     // GCP stores per-instance SSH metadata; nothing global to clean up.
+  }
+
+  async createImage(instanceName: string, name: string): Promise<ProviderImage> {
+    const op = await this.gcp<GCPOperation>("POST", "/global/machineImages", {
+      name,
+      sourceInstance: `zones/${this.zone}/instances/${instanceName}`,
+      description: `Crabbox checkpoint from ${instanceName}`,
+    });
+    await this.waitGlobalOperation(op);
+    return await this.getImage(name);
+  }
+
+  async createDiskSnapshot(instanceName: string, name: string): Promise<ProviderImage> {
+    const instance = await this.gcp<GCPInstance>(
+      "GET",
+      `/zones/${this.zone}/instances/${instanceName}`,
+    );
+    const sourceDisk = instance.disks?.find((disk) => disk.boot)?.source;
+    if (!sourceDisk) {
+      throw new Error(`gcp boot disk not found for instance ${instanceName}`);
+    }
+    const diskName = lastPathPart(sourceDisk);
+    const op = await this.gcp<GCPOperation>(
+      "POST",
+      `/zones/${this.zone}/disks/${diskName}/createSnapshot`,
+      {
+        name,
+        description: `Crabbox checkpoint from ${instanceName}`,
+        labels: { crabbox: "true", managed_by: "crabbox" },
+      },
+    );
+    await this.waitZoneOperation(op);
+    return await this.getImage(name, "gcp-disk-snapshot");
+  }
+
+  async getImage(name: string, kind?: string): Promise<ProviderImage> {
+    const imageName = lastPathPart(name);
+    if (kind === "gcp-disk-snapshot") {
+      return await this.getDiskSnapshot(name);
+    }
+    if (kind === "gcp-machine-image") {
+      const image = await this.gcp<GCPMachineImage>("GET", `/global/machineImages/${imageName}`);
+      return gcpMachineProviderImage(image, imageName, this.zone, this.project);
+    }
+    const image = await this.gcp<GCPMachineImage>(
+      "GET",
+      `/global/machineImages/${imageName}`,
+    ).catch((error) => {
+      if (isNotFound(error)) return undefined;
+      throw error;
+    });
+    if (!image) return await this.getDiskSnapshot(name);
+    return gcpMachineProviderImage(image, imageName, this.zone, this.project);
+  }
+
+  async deleteImage(name: string, kind?: string): Promise<void> {
+    const imageName = lastPathPart(name);
+    if (kind === "gcp-disk-snapshot") {
+      await this.deleteDiskSnapshot(name);
+      return;
+    }
+    const op = await this.gcp<GCPOperation>("DELETE", `/global/machineImages/${imageName}`).catch(
+      (error) => {
+        if (isNotFound(error)) return undefined;
+        throw error;
+      },
+    );
+    if (op) {
+      await this.waitGlobalOperation(op);
+      return;
+    }
+    if (kind === "gcp-machine-image") return;
+    await this.deleteDiskSnapshot(name);
+  }
+
+  private async deleteDiskSnapshot(name: string): Promise<void> {
+    const snapshotOp = await this.gcp<GCPOperation>(
+      "DELETE",
+      `/global/snapshots/${lastPathPart(name)}`,
+    ).catch((error) => {
+      if (isNotFound(error)) return undefined;
+      throw error;
+    });
+    if (snapshotOp) await this.waitGlobalOperation(snapshotOp);
+  }
+
+  private async getDiskSnapshot(name: string): Promise<ProviderImage> {
+    const snapshotName = lastPathPart(name);
+    const snapshot = await this.gcp<GCPSnapshot>("GET", `/global/snapshots/${snapshotName}`);
+    return {
+      id: snapshot.name ?? snapshotName,
+      name: snapshot.name ?? snapshotName,
+      state: (snapshot.status ?? "READY").toLowerCase(),
+      provider: "gcp",
+      kind: "gcp-disk-snapshot",
+      region: this.zone,
+      project: this.project,
+      resourceID: snapshot.selfLink ?? gcpSnapshotRef(snapshotName, this.project),
+      snapshots: [snapshot.selfLink ?? gcpSnapshotRef(snapshotName, this.project)],
+    };
   }
 
   hourlyPriceUSD(): Promise<number | undefined> {
@@ -553,6 +685,24 @@ function lastPathPart(value: string): string {
   return value.slice(value.lastIndexOf("/") + 1);
 }
 
+function gcpMachineProviderImage(
+  image: GCPMachineImage,
+  fallbackName: string,
+  zone: string,
+  project: string,
+): ProviderImage {
+  return {
+    id: image.name ?? fallbackName,
+    name: image.name ?? fallbackName,
+    state: (image.status ?? "READY").toLowerCase(),
+    provider: "gcp",
+    kind: "gcp-machine-image",
+    region: zone,
+    project,
+    resourceID: image.selfLink ?? gcpMachineImageRef(fallbackName, project),
+  };
+}
+
 export function gcpFirewallNameForNetwork(network: string): string {
   const name = lastPathPart(network.trim());
   if (!name || name === "default") return firewallName;
@@ -614,6 +764,20 @@ function fnv32Hex(value: string): string {
 
 function regionFromZone(zone: string): string {
   return zone.slice(0, zone.lastIndexOf("-")) || zone;
+}
+
+function gcpMachineImageRef(value: string, project: string): string {
+  if (value.includes("/")) {
+    return value;
+  }
+  return `projects/${project}/global/machineImages/${value}`;
+}
+
+function gcpSnapshotRef(value: string, project: string): string {
+  if (value.includes("/")) {
+    return value;
+  }
+  return `projects/${project}/global/snapshots/${value}`;
 }
 
 function numberFromEnv(value: string | undefined, fallback: number): number {

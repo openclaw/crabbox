@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"strings"
 	"time"
 )
@@ -76,11 +77,10 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s name=%s\n", leaseID, slug, providerName, sandboxID, name)
 		acquired = true
 	} else {
-		leaseID, sandboxID, err = resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout)
+		leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout)
 		if err != nil {
 			return RunResult{}, err
 		}
-		slug = newLeaseSlug(leaseID)
 	}
 	shouldStop := acquired && !req.Keep
 	if shouldStop {
@@ -145,6 +145,7 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{
 			Provider:      providerName,
 			LeaseID:       leaseID,
+			Slug:          slug,
 			SyncDelegated: true,
 			SyncMs:        syncDuration.Milliseconds(),
 			SyncPhases:    syncPhases,
@@ -206,7 +207,7 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req StatusRequest) (Stat
 	if err != nil {
 		return StatusView{}, err
 	}
-	leaseID, sandboxID, err := resolveLeaseID(req.ID, "", false, 0)
+	leaseID, sandboxID, slug, err := resolveLeaseID(req.ID, "", false, 0)
 	if err != nil {
 		return StatusView{}, err
 	}
@@ -220,7 +221,7 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req StatusRequest) (Stat
 		ready := describeErr == nil && isReadyState(state)
 		view := StatusView{
 			ID:       leaseID,
-			Slug:     newLeaseSlug(leaseID),
+			Slug:     slug,
 			Provider: providerName,
 			TargetOS: targetLinux,
 			State:    state,
@@ -252,7 +253,7 @@ func (b *tensorlakeBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, sandboxID, err := resolveLeaseID(req.ID, "", false, 0)
+	leaseID, sandboxID, _, err := resolveLeaseID(req.ID, "", false, 0)
 	if err != nil {
 		return err
 	}
@@ -285,13 +286,13 @@ func (b *tensorlakeBackend) createSandbox(ctx context.Context, cli *tensorlakeCL
 }
 
 // resolveLeaseID resolves a user-supplied identifier (slug, lease ID, or
-// raw Tensorlake sandbox ID) to a (leaseID, sandboxID) pair. Resolution is
+// raw Tensorlake sandbox ID) to a (leaseID, sandboxID, slug) tuple. Resolution is
 // strict: only locally-claimed Crabbox sandboxes are accepted, mirroring
 // islo. Raw IDs are accepted only when a matching `tlsbx_<id>` claim exists.
-func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, error) {
+func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return "", "", exit(2, "provider=tensorlake requires a Crabbox-created sandbox slug or lease id")
+		return "", "", "", exit(2, "provider=tensorlake requires a Crabbox-created sandbox slug or lease id")
 	}
 	probes := []string{id}
 	if !strings.HasPrefix(id, leasePrefix) {
@@ -300,7 +301,7 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 	for _, probe := range probes {
 		claim, ok, err := resolveLeaseClaimForProvider(probe, providerName)
 		if err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 		if !ok {
 			continue
@@ -308,12 +309,16 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 		if repoRoot != "" {
 			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, providerName, repoRoot,
 				timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
-				return "", "", err
+				return "", "", "", err
 			}
 		}
-		return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, leasePrefix), nil
+		slug := claim.Slug
+		if strings.TrimSpace(slug) == "" {
+			slug = newLeaseSlug(claim.LeaseID)
+		}
+		return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, leasePrefix), slug, nil
 	}
-	return "", "", exit(4, "tensorlake sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
+	return "", "", "", exit(4, "tensorlake sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
 }
 
 func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
@@ -399,10 +404,15 @@ func tensorlakeWorkdir(cfg Config) (string, error) {
 	if workdir == "" {
 		workdir = "/workspace/crabbox"
 	}
-	if !strings.HasPrefix(workdir, "/") {
+	clean := path.Clean(workdir)
+	if !strings.HasPrefix(clean, "/") {
 		return "", exit(2, "tensorlake workdir %q must be an absolute path", workdir)
 	}
-	return workdir, nil
+	switch clean {
+	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace":
+		return "", exit(2, "tensorlake workdir %q is too broad; choose a dedicated subdirectory", clean)
+	}
+	return clean, nil
 }
 
 func (b *tensorlakeBackend) now() time.Time {

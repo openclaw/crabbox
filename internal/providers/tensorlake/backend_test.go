@@ -3,6 +3,7 @@ package tensorlake
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -79,6 +80,30 @@ func TestTensorlakeWorkdirRejectsRelative(t *testing.T) {
 	cfg.Tensorlake.Workdir = "relative/path"
 	if _, err := tensorlakeWorkdir(cfg); err == nil {
 		t.Fatalf("expected rejection of relative workdir")
+	}
+}
+
+func TestTensorlakeWorkdirRejectsBroadPaths(t *testing.T) {
+	for _, workdir := range []string{"/", "/tmp", "/workspace", "/workspace/.."} {
+		t.Run(workdir, func(t *testing.T) {
+			cfg := newTestConfig()
+			cfg.Tensorlake.Workdir = workdir
+			if _, err := tensorlakeWorkdir(cfg); err == nil || !strings.Contains(err.Error(), "too broad") {
+				t.Fatalf("err=%v, want too broad rejection", err)
+			}
+		})
+	}
+}
+
+func TestTensorlakeWorkdirCleansDedicatedPath(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Tensorlake.Workdir = " /workspace/crabbox/../project "
+	got, err := tensorlakeWorkdir(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/workspace/project" {
+		t.Fatalf("workdir=%q want /workspace/project", got)
 	}
 }
 
@@ -169,14 +194,14 @@ func TestIsReadyState(t *testing.T) {
 }
 
 func TestResolveLeaseIDRejectsUnclaimed(t *testing.T) {
-	_, _, err := resolveLeaseID("not-a-known-slug", "", false, 0)
+	_, _, _, err := resolveLeaseID("not-a-known-slug", "", false, 0)
 	if err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
 		t.Fatalf("err=%v, want rejection of unclaimed sandbox", err)
 	}
 }
 
 func TestResolveLeaseIDRejectsLeasePrefixWithoutClaim(t *testing.T) {
-	_, _, err := resolveLeaseID("tlsbx_unknown123", "", false, 0)
+	_, _, _, err := resolveLeaseID("tlsbx_unknown123", "", false, 0)
 	if err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
 		t.Fatalf("err=%v, want rejection without local claim", err)
 	}
@@ -190,17 +215,35 @@ func TestResolveLeaseIDUsesTensorlakeClaimWhenSlugCollides(t *testing.T) {
 	if err := claimLeaseForRepoProvider("tlsbx_tensorlake123456", "Blue Lobster", providerName, "/repo-b", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	leaseID, sandboxID, err := resolveLeaseID("blue-lobster", "", false, 0)
+	leaseID, sandboxID, slug, err := resolveLeaseID("blue-lobster", "", false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if leaseID != "tlsbx_tensorlake123456" || sandboxID != "tensorlake123456" {
 		t.Fatalf("lease=%q sandbox=%q", leaseID, sandboxID)
 	}
+	if slug != "Blue Lobster" {
+		t.Fatalf("slug=%q", slug)
+	}
+}
+
+func TestResolveLeaseIDFallsBackForSluglessClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "tlsbx_tensorlake123456"
+	if err := claimLeaseForRepoProvider(leaseID, "", providerName, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	_, _, slug, err := resolveLeaseID(leaseID, "", false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slug != newLeaseSlug(leaseID) {
+		t.Fatalf("slug=%q want %q", slug, newLeaseSlug(leaseID))
+	}
 }
 
 func TestResolveLeaseIDRequiresIdentifier(t *testing.T) {
-	if _, _, err := resolveLeaseID("", "", false, 0); err == nil {
+	if _, _, _, err := resolveLeaseID("", "", false, 0); err == nil {
 		t.Fatalf("expected error for empty id")
 	}
 }
@@ -447,6 +490,85 @@ func TestRunSurfacesCommandExitCodeWithoutWrappingError(t *testing.T) {
 	var ee ExitError
 	if !errors.As(err, &ee) || ee.Code != 7 {
 		t.Fatalf("err=%v want ExitError code=7", err)
+	}
+}
+
+func TestRunTimingJSONIncludesSlug(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	sandboxID := "timingid0123456789"
+	leaseID := leasePrefix + sandboxID
+	defer removeLeaseClaim(leaseID)
+	runner := newRunner(map[string]scriptedReply{
+		"sbx create": {stdout: sandboxID + "\n"},
+		"sbx exec":   {stdout: "ok\n"},
+	}, nil)
+	var stderr bytes.Buffer
+	rt := newTestRuntime(runner)
+	rt.Stderr = &stderr
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
+	req := RunRequest{
+		Repo:       Repo{Name: "carbbox", Root: t.TempDir()},
+		Command:    []string{"echo", "ok"},
+		NoSync:     true,
+		Keep:       true,
+		Reclaim:    true,
+		TimingJSON: true,
+	}
+	if _, err := backend.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	report := map[string]any{}
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if strings.HasPrefix(line, "{") {
+			if err := json.Unmarshal([]byte(line), &report); err != nil {
+				t.Fatalf("decode timing JSON %q: %v", line, err)
+			}
+		}
+	}
+	if report["leaseId"] != leaseID {
+		t.Fatalf("leaseId=%v want %s in timing JSON:\n%s", report["leaseId"], leaseID, stderr.String())
+	}
+	if report["slug"] != newLeaseSlug(leaseID) {
+		t.Fatalf("slug=%v want %s in timing JSON:\n%s", report["slug"], newLeaseSlug(leaseID), stderr.String())
+	}
+}
+
+func TestRunTimingJSONUsesClaimSlugForReusedSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repoRoot := t.TempDir()
+	sandboxID := "reuseid01234567890"
+	leaseID := leasePrefix + sandboxID
+	if err := claimLeaseForRepoProvider(leaseID, "custom-slug", providerName, repoRoot, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	defer removeLeaseClaim(leaseID)
+	runner := newRunner(map[string]scriptedReply{
+		"sbx exec": {stdout: "ok\n"},
+	}, nil)
+	var stderr bytes.Buffer
+	rt := newTestRuntime(runner)
+	rt.Stderr = &stderr
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
+	req := RunRequest{
+		ID:         "custom-slug",
+		Repo:       Repo{Name: "carbbox", Root: repoRoot},
+		Command:    []string{"echo", "ok"},
+		NoSync:     true,
+		TimingJSON: true,
+	}
+	if _, err := backend.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	report := map[string]any{}
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if strings.HasPrefix(line, "{") {
+			if err := json.Unmarshal([]byte(line), &report); err != nil {
+				t.Fatalf("decode timing JSON %q: %v", line, err)
+			}
+		}
+	}
+	if report["slug"] != "custom-slug" {
+		t.Fatalf("slug=%v want custom-slug in timing JSON:\n%s", report["slug"], stderr.String())
 	}
 }
 

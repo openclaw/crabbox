@@ -19,6 +19,51 @@ type HetznerClient struct {
 	Client *http.Client
 }
 
+// privateNet carries a server's private-network IP from any provider. It
+// implements UnmarshalJSON so it accepts:
+//
+//   - Hetzner's array shape (best-effort: IPv4.IP is taken from the first
+//     attachment, dropped if the array is empty)
+//   - The legacy struct shape `{"ipv4": {"ip": "..."}}` (kept for backward
+//     compatibility with anything that JSON-marshals a Server via tools or
+//     test fixtures)
+//
+// Azure / Proxmox set this field directly in Go (no JSON involved), so they
+// are unaffected — see azure.go:903, proxmox.go:605.
+type privateNet struct {
+	IPv4 struct {
+		IP string `json:"ip"`
+	} `json:"ipv4"`
+}
+
+func (p *privateNet) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	// Hetzner array shape — best effort: take the first attachment's IP.
+	if trimmed[0] == '[' {
+		var attachments []struct {
+			IP string `json:"ip"`
+		}
+		if err := json.Unmarshal(data, &attachments); err != nil {
+			return fmt.Errorf("private_net array: %w", err)
+		}
+		if len(attachments) > 0 {
+			p.IPv4.IP = attachments[0].IP
+		}
+		return nil
+	}
+	// Legacy struct shape.
+	type raw privateNet
+	var r raw
+	if err := json.Unmarshal(data, &r); err != nil {
+		return fmt.Errorf("private_net struct: %w", err)
+	}
+	*p = privateNet(r)
+	return nil
+}
+
 type Server struct {
 	CloudID   string
 	Provider  string
@@ -31,11 +76,17 @@ type Server struct {
 			IP string `json:"ip"`
 		} `json:"ipv4"`
 	} `json:"public_net"`
-	PrivateNet struct {
-		IPv4 struct {
-			IP string `json:"ip"`
-		} `json:"ipv4"`
-	} `json:"private_net"`
+	// PrivateNet is set by Azure / Proxmox via direct field assignment
+	// (azure.go:903, proxmox.go:605) and, on the Hetzner code path, via JSON
+	// unmarshal of the API response. Hetzner returns `private_net` as an array
+	// of network attachments (per docs.hetzner.cloud/#servers-get-all-servers),
+	// while the original shape modeled it as a single struct — a mismatch that
+	// crashed every Hetzner call with `cannot unmarshal array into Go struct
+	// field`. The named `privateNet` type below absorbs both shapes:
+	// best-effort populates IPv4.IP from the first array entry, and accepts
+	// the legacy struct shape so direct field assignment in Azure / Proxmox
+	// keeps the field shape unchanged for callers.
+	PrivateNet privateNet `json:"private_net"`
 	ServerType struct {
 		Name string `json:"name"`
 	} `json:"server_type"`

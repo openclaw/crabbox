@@ -56,6 +56,7 @@ func (b *modalBackend) syncWorkspace(ctx context.Context, client modalAPI, sandb
 		"rm -f " + shellQuote(remoteArchive),
 	}, " && ")
 	if err := b.execShell(ctx, client, sandboxID, extract, io.Discard); err != nil {
+		_ = b.execShell(context.Background(), client, sandboxID, "rm -f "+shellQuote(remoteArchive), io.Discard)
 		return nil, 0, err
 	}
 	uploadDuration := b.now().Sub(uploadStarted)

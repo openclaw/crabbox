@@ -114,6 +114,106 @@ func TestCoordinatorListJSONFallsBackWhenAdminTokenMissing(t *testing.T) {
 	}
 }
 
+func TestCoordinatorResolveFallsBackToAdminToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_admin" {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.Header.Get("Authorization") {
+		case "Bearer user-token":
+			http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		case "Bearer admin-token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID:                 "cbx_admin",
+				Slug:               "green-shrimp",
+				Provider:           "aws",
+				TargetOS:           targetLinux,
+				CloudID:            "i-admin",
+				Host:               "203.0.113.44",
+				SSHUser:            "crabbox",
+				SSHPort:            "2222",
+				SSHFallbackPorts:   []string{"22"},
+				WorkRoot:           "/work/crabbox",
+				State:              "active",
+				ServerType:         "t3.small",
+				IdleTimeoutSeconds: 600,
+			}})
+		default:
+			t.Fatalf("unexpected auth %q", r.Header.Get("Authorization"))
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Provider:        "aws",
+		TargetOS:        targetLinux,
+		Coordinator:     server.URL,
+		CoordToken:      "user-token",
+		CoordAdminToken: "admin-token",
+	}
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
+
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != "cbx_admin" || lease.SSH.Host != "203.0.113.44" || lease.Coordinator == nil {
+		t.Fatalf("lease=%#v", lease)
+	}
+	if lease.Coordinator.Token != "admin-token" {
+		t.Fatalf("coordinator token=%q, want admin token", lease.Coordinator.Token)
+	}
+}
+
+func TestCoordinatorReleaseFallsBackToAdminToken(t *testing.T) {
+	adminReleased := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/leases/cbx_admin/release" && r.URL.Path != "/v1/leases/cbx_admin/release" {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.Header.Get("Authorization") {
+		case "Bearer user-token":
+			http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		case "Bearer admin-token":
+			if r.URL.Path != "/v1/admin/leases/cbx_admin/release" {
+				t.Fatalf("admin release path=%s", r.URL.Path)
+			}
+			adminReleased = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_admin", Provider: "aws", State: "released"}})
+		default:
+			t.Fatalf("unexpected auth %q", r.Header.Get("Authorization"))
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Provider:        "aws",
+		TargetOS:        targetLinux,
+		Coordinator:     server.URL,
+		CoordToken:      "user-token",
+		CoordAdminToken: "admin-token",
+	}
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
+
+	err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_admin"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !adminReleased {
+		t.Fatal("admin release was not called")
+	}
+}
+
 func TestCoordinatorAcquireReleasesStaleInstanceLease(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

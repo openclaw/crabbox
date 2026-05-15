@@ -171,7 +171,7 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 		Directory: dir,
 		Metadata: artifactBundleMetadata{
 			CreatedAt: time.Now().UTC().Format(time.RFC3339),
-			Version:   version,
+			Version:   currentVersion(),
 			LeaseID:   leaseID,
 			Slug:      serverSlug(server),
 			Provider:  cfg.Provider,

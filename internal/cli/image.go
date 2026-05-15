@@ -5,33 +5,34 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
 func (a App) imageCreate(ctx context.Context, args []string) error {
 	fs := newFlagSet("image create", a.Stderr)
-	id := fs.String("id", "", "AWS lease id to image")
-	name := fs.String("name", "", "AMI name")
-	wait := fs.Bool("wait", false, "wait until the AMI is available")
+	id := fs.String("id", "", "lease id to image")
+	name := fs.String("name", "", "provider image name")
+	wait := fs.Bool("wait", false, "wait until the provider image is available")
 	waitTimeout := fs.Duration("wait-timeout", 45*time.Minute, "maximum wait duration")
-	noReboot := fs.Bool("no-reboot", true, "avoid rebooting the source instance while creating the AMI")
+	noReboot := fs.Bool("no-reboot", true, "avoid rebooting the source AWS instance while creating the AMI")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if *id == "" || *name == "" {
-		return exit(2, "usage: crabbox image create --id <cbx_id> --name <ami-name> [--wait]")
+		return exit(2, "usage: crabbox image create --id <cbx_id> --name <image-name> [--wait]")
 	}
 	coord, err := configuredAdminCoordinator()
 	if err != nil {
 		return err
 	}
-	image, err := coord.CreateImage(ctx, *id, *name, *noReboot)
+	image, err := coord.CreateImage(ctx, *id, *name, *noReboot, checkpointStrategyImage)
 	if err != nil {
 		return err
 	}
 	if *wait {
-		image, err = waitForImage(ctx, coord, image.ID, image.Region, *waitTimeout, a.Stderr)
+		image, err = waitForImage(ctx, coord, image.ID, imageRefFromCoordinatorImage(image), *waitTimeout, a.Stderr)
 		if err != nil {
 			return err
 		}
@@ -57,7 +58,7 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	image, err := coord.PromoteImage(ctx, fs.Arg(0), *region)
+	image, err := coord.PromoteImage(ctx, fs.Arg(0), CoordinatorImageRef{Provider: "aws", Region: *region})
 	if err != nil {
 		return err
 	}
@@ -70,37 +71,45 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 
 func (a App) imageDelete(ctx context.Context, args []string) error {
 	fs := newFlagSet("image delete", a.Stderr)
-	region := fs.String("region", "", "AWS region containing the AMI")
+	provider := fs.String("provider", "aws", "image provider: aws, azure, or gcp")
+	region := fs.String("region", "", "region, location, or zone containing the image")
+	project := fs.String("project", "", "GCP project containing the image")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox image delete <ami-id> [--region <region>]")
+		return exit(2, "usage: crabbox image delete <image-id> [--provider aws|azure|gcp] [--region <region>] [--project <project>]")
+	}
+	normalizedProvider := normalizeProviderName(*provider)
+	if normalizedProvider != "aws" && normalizedProvider != "azure" && normalizedProvider != "gcp" {
+		return exit(2, "unsupported image provider %q; use aws, azure, or gcp", *provider)
 	}
 	coord, err := configuredAdminCoordinator()
 	if err != nil {
 		return err
 	}
-	if err := coord.DeleteImage(ctx, fs.Arg(0), *region); err != nil {
+	ref := CoordinatorImageRef{Provider: normalizedProvider, Region: *region, Project: *project}
+	if err := coord.DeleteImage(ctx, fs.Arg(0), ref); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.Stdout, "deleted image=%s region=%s\n", fs.Arg(0), blank(*region, "-"))
+	fmt.Fprintf(a.Stdout, "deleted image=%s provider=%s region=%s project=%s\n", fs.Arg(0), normalizedProvider, blank(*region, "-"), blank(*project, "-"))
 	return nil
 }
 
-func waitForImage(ctx context.Context, coord *CoordinatorClient, imageID, region string, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
+func waitForImage(ctx context.Context, coord *CoordinatorClient, imageID string, ref CoordinatorImageRef, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
 	deadline := time.Now().Add(timeout)
 	var last CoordinatorImage
 	for {
-		image, err := coord.Image(ctx, imageID, region)
+		image, err := coord.Image(ctx, imageID, ref)
 		if err != nil {
 			return CoordinatorImage{}, err
 		}
 		last = image
-		if image.State == "available" {
+		state := strings.ToLower(image.State)
+		if state == "available" || state == "ready" || state == "succeeded" || state == "completed" {
 			return image, nil
 		}
-		if image.State == "failed" {
+		if state == "failed" || state == "invalid" {
 			return CoordinatorImage{}, exit(5, "image %s failed", imageID)
 		}
 		if time.Now().After(deadline) {
@@ -112,5 +121,14 @@ func waitForImage(ctx context.Context, coord *CoordinatorClient, imageID, region
 			return CoordinatorImage{}, ctx.Err()
 		case <-time.After(15 * time.Second):
 		}
+	}
+}
+
+func imageRefFromCoordinatorImage(image CoordinatorImage) CoordinatorImageRef {
+	return CoordinatorImageRef{
+		Provider: image.Provider,
+		Region:   image.Region,
+		Project:  image.Project,
+		Kind:     image.Kind,
 	}
 }

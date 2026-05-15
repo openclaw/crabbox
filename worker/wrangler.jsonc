@@ -4,7 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-04-30",
   "workers_dev": true,
-  "preview_urls": false,
+  "preview_urls": true,
   "assets": {
     "directory": "./public",
   },
@@ -42,6 +42,33 @@
         "class_name": "FleetDurableObject",
       },
     ],
+  },
+  "previews": {
+    "vars": {
+      "CRABBOX_PUBLIC_URL": "https://crabbox.openclaw.ai",
+      "CRABBOX_DEFAULT_ORG": "openclaw",
+      "CRABBOX_GITHUB_ALLOWED_ORG": "openclaw",
+      "CRABBOX_ACCESS_TEAM_DOMAIN": "crabbox-openclaw.cloudflareaccess.com",
+      "CRABBOX_ACCESS_AUD": "2c79b4c28dd40029b75b1e8d36d9a945ddc864dd40a34e50f6538bae8a3633ea",
+      "CRABBOX_AWS_REGION": "eu-west-1",
+      "CRABBOX_CAPACITY_REGIONS": "eu-west-1,eu-west-2,eu-central-1,us-east-1,us-west-2",
+      "CRABBOX_CAPACITY_HINTS": "1",
+      "CRABBOX_CAPACITY_LARGE_CLASSES": "beast",
+      "CRABBOX_ARTIFACTS_BACKEND": "r2",
+      "CRABBOX_ARTIFACTS_BUCKET": "openclaw-crabbox-artifacts",
+      "CRABBOX_ARTIFACTS_PREFIX": "crabbox-artifacts",
+      "CRABBOX_ARTIFACTS_BASE_URL": "https://artifacts.openclaw.ai",
+      "CRABBOX_ARTIFACTS_REGION": "auto",
+      "CRABBOX_ARTIFACTS_ENDPOINT_URL": "https://91b59577e757131d68d55a471fe32aca.r2.cloudflarestorage.com",
+    },
+    "durable_objects": {
+      "bindings": [
+        {
+          "name": "FLEET",
+          "class_name": "FleetDurableObject",
+        },
+      ],
+    },
   },
   "migrations": [
     {

@@ -347,7 +347,7 @@ func (b *daytonaLeaseBackend) syncDaytonaToolbox(ctx context.Context, sandbox *s
 	if b.cfg.Sync.Delete {
 		deletePrefix = "rm -rf " + shellQuote(workdir) + " && "
 	}
-	extractCommand := deletePrefix + "mkdir -p " + shellQuote(workdir) + " && tar -xzf " + shellQuote(archivePath) + " -C " + shellQuote(workdir) + " && rm -f " + shellQuote(archivePath)
+	extractCommand := daytonaExtractArchiveCommand(workdir, archivePath, deletePrefix)
 	if response, err := sandbox.Process.ExecuteCommand(ctx, extractCommand); err != nil {
 		return nil, fmt.Errorf("daytona extract archive: %w", err)
 	} else if responseExitCode(response) != 0 {
@@ -373,6 +373,13 @@ func (b *daytonaLeaseBackend) syncDaytonaToolbox(ctx context.Context, sandbox *s
 		{Name: "toolbox_sync", Ms: time.Since(start).Milliseconds()},
 	}
 	return phases, nil
+}
+
+func daytonaExtractArchiveCommand(workdir, archivePath, deletePrefix string) string {
+	return deletePrefix +
+		"mkdir -p " + shellQuote(workdir) +
+		" && tar -xzf " + shellQuote(archivePath) + " -C " + shellQuote(workdir) +
+		"; crabbox_status=$?; rm -f " + shellQuote(archivePath) + "; exit $crabbox_status"
 }
 
 func createDaytonaSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, stderr io.Writer) (*os.File, error) {

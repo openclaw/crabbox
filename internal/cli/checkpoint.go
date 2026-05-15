@@ -23,6 +23,15 @@ const (
 	checkpointKindRecipe  = "recipe"
 	checkpointKindArchive = "workspace-archive"
 	checkpointKindAWSAMI  = "aws-ami"
+	checkpointKindAWSEBS  = "aws-ebs-snapshot"
+	checkpointKindAzure   = "azure-managed-image"
+	checkpointKindAzureOS = "azure-os-disk-snapshot"
+	checkpointKindGCP     = "gcp-machine-image"
+	checkpointKindGCPDisk = "gcp-disk-snapshot"
+
+	checkpointStrategyAuto         = "auto"
+	checkpointStrategyImage        = "image"
+	checkpointStrategyDiskSnapshot = "disk-snapshot"
 )
 
 type checkpointRecord struct {
@@ -42,9 +51,13 @@ type checkpointRecord struct {
 	Native         struct {
 		Provider string `json:"provider,omitempty"`
 		ImageID  string `json:"imageId,omitempty"`
+		Kind     string `json:"kind,omitempty"`
 		Name     string `json:"name,omitempty"`
 		State    string `json:"state,omitempty"`
 		Region   string `json:"region,omitempty"`
+		Project  string `json:"project,omitempty"`
+		Resource string `json:"resource,omitempty"`
+		Strategy string `json:"strategy,omitempty"`
 		NoReboot bool   `json:"noReboot,omitempty"`
 	} `json:"native,omitempty"`
 	Repo struct {
@@ -84,14 +97,14 @@ func (a App) checkpoint(ctx context.Context, args []string) error {
 
 func (a App) printCheckpointHelp() {
 	fmt.Fprintln(a.Stdout, `Usage:
-  crabbox checkpoint create --id <lease-id-or-slug> [--name <name>] [--mode auto|native|archive]
+  crabbox checkpoint create --id <lease-id-or-slug> [--name <name>] [--mode auto|native|archive] [--strategy auto|disk-snapshot|image]
   crabbox checkpoint list [--json]
   crabbox checkpoint inspect <checkpoint-id> [--json]
   crabbox checkpoint restore <checkpoint-id> --id <lease-id-or-slug> [--clear=false]
   crabbox checkpoint fork <checkpoint-id> [--class <class>] [--keep]
   crabbox checkpoint delete <checkpoint-id>
 
-Checkpoints use AWS AMI snapshots for brokered Linux leases and portable workspace archives elsewhere.`)
+Checkpoints use provider-native disk snapshots for brokered AWS, Azure, and GCP Linux leases, and portable workspace archives elsewhere.`)
 }
 
 func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
@@ -101,6 +114,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	id := fs.String("id", "", "lease id or slug")
 	name := fs.String("name", "", "checkpoint name")
 	mode := fs.String("mode", "auto", "checkpoint mode: auto, native, or archive")
+	strategy := fs.String("strategy", checkpointStrategyAuto, "native checkpoint strategy: auto, disk-snapshot, or image")
 	workdirOverride := fs.String("workdir", "", "remote workdir to archive")
 	recipeOnly := fs.Bool("recipe-only", false, "record metadata without archiving the remote workdir")
 	wait := fs.Bool("wait", true, "wait for native provider snapshot availability")
@@ -111,6 +125,9 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
+	}
+	if !validCheckpointStrategy(*strategy) {
+		return exit(2, "checkpoint strategy must be auto, disk-snapshot, or image")
 	}
 	setIDFromFirstArg(fs, id)
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{})
@@ -143,13 +160,14 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	defer func() {
 		cleanupUncommittedCheckpointDir(dir, recordWritten, err)
 	}()
-	switch checkpointCreateMode(*mode, cfg, server, target, *recipeOnly) {
+	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
+	switch createKind {
 	case checkpointKindRecipe:
 		record.Kind = checkpointKindRecipe
-	case checkpointKindAWSAMI:
-		image, err := a.createAWSAMICheckpoint(ctx, cfg, target, leaseID, record.Name, repo.Name, *noReboot, *wait, *waitTimeout)
+	case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk:
+		image, err := a.createNativeCheckpoint(ctx, cfg, server, target, leaseID, record.Name, repo.Name, checkpointStrategyForKind(createKind), *noReboot, *wait, *waitTimeout)
 		if image.ID != "" {
-			applyAWSAMIImageCheckpointRecord(&record, image, *noReboot)
+			applyNativeImageCheckpointRecord(&record, image, *noReboot)
 		}
 		if err != nil {
 			if record.Native.ImageID != "" {
@@ -179,8 +197,8 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 		return err
 	}
 	recordWritten = true
-	if record.Kind == checkpointKindAWSAMI {
-		fmt.Fprintf(a.Stdout, "checkpoint created id=%s kind=%s image=%s state=%s region=%s workdir=%s\n", record.ID, record.Kind, record.Native.ImageID, record.Native.State, blank(record.Native.Region, "-"), record.Workdir)
+	if isNativeCheckpointKind(record.Kind) {
+		fmt.Fprintf(a.Stdout, "checkpoint created id=%s kind=%s resource=%s state=%s region=%s workdir=%s\n", record.ID, record.Kind, record.Native.ImageID, record.Native.State, blank(record.Native.Region, "-"), record.Workdir)
 		return nil
 	}
 	fmt.Fprintf(a.Stdout, "checkpoint created id=%s kind=%s bytes=%s workdir=%s\n", record.ID, record.Kind, humanBytes(record.ArchiveBytes), record.Workdir)
@@ -206,8 +224,8 @@ func (a App) checkpointList(args []string) error {
 	}
 	for _, record := range records {
 		extra := fmt.Sprintf("bytes=%s", humanBytes(record.ArchiveBytes))
-		if record.Kind == checkpointKindAWSAMI {
-			extra = fmt.Sprintf("image=%s state=%s region=%s", blank(record.Native.ImageID, "-"), blank(record.Native.State, "-"), blank(record.Native.Region, "-"))
+		if isNativeCheckpointKind(record.Kind) {
+			extra = fmt.Sprintf("resource=%s state=%s region=%s", blank(record.Native.ImageID, "-"), blank(record.Native.State, "-"), blank(record.Native.Region, "-"))
 		}
 		fmt.Fprintf(a.Stdout, "%s kind=%s name=%q repo=%s lease=%s %s created=%s\n", record.ID, record.Kind, record.Name, record.Repo.Name, blank(record.LeaseID, "-"), extra, record.CreatedAt)
 	}
@@ -232,9 +250,15 @@ func (a App) checkpointInspect(args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "id=%s\nkind=%s\nname=%s\ncreated=%s\nprovider=%s\nlease=%s\nrepo=%s\nhead=%s\nworkdir=%s\narchive=%s\nbytes=%s\n",
 		record.ID, record.Kind, blank(record.Name, "-"), record.CreatedAt, blank(record.Provider, "-"), blank(record.LeaseID, "-"), blank(record.Repo.Name, "-"), blank(record.Repo.Head, "-"), blank(record.Workdir, "-"), blank(record.ArchivePath, "-"), humanBytes(record.ArchiveBytes))
-	if record.Kind == checkpointKindAWSAMI {
-		fmt.Fprintf(a.Stdout, "image=%s\nimage_name=%s\nimage_state=%s\nimage_region=%s\nno_reboot=%t\n",
-			blank(record.Native.ImageID, "-"), blank(record.Native.Name, "-"), blank(record.Native.State, "-"), blank(record.Native.Region, "-"), record.Native.NoReboot)
+	if isNativeCheckpointKind(record.Kind) {
+		fmt.Fprintf(a.Stdout, "resource=%s\nresource_name=%s\nresource_state=%s\nresource_region=%s\nstrategy=%s\nno_reboot=%t\n",
+			blank(record.Native.ImageID, "-"), blank(record.Native.Name, "-"), blank(record.Native.State, "-"), blank(record.Native.Region, "-"), blank(record.Native.Strategy, checkpointStrategyImage), record.Native.NoReboot)
+		if record.Native.Project != "" {
+			fmt.Fprintf(a.Stdout, "image_project=%s\n", record.Native.Project)
+		}
+		if record.Native.Resource != "" {
+			fmt.Fprintf(a.Stdout, "image_resource=%s\n", record.Native.Resource)
+		}
 	}
 	return nil
 }
@@ -260,7 +284,7 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 		return err
 	}
 	if record.Kind != checkpointKindArchive {
-		if record.Kind == checkpointKindAWSAMI {
+		if isNativeCheckpointKind(record.Kind) {
 			return exit(2, "checkpoint %s is a VM image; use crabbox checkpoint fork %s to create a lease from it", record.ID, record.ID)
 		}
 		return exit(2, "checkpoint %s has kind=%s; restore requires %s", record.ID, record.Kind, checkpointKindArchive)
@@ -319,11 +343,11 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
 		return err
 	}
-	if record.Kind == checkpointKindAWSAMI {
-		applyAWSAMICheckpointForkConfig(&cfg, fs, record)
+	if isNativeCheckpointKind(record.Kind) {
+		applyNativeCheckpointForkConfig(&cfg, fs, record)
 	}
-	if record.Kind != checkpointKindArchive && record.Kind != checkpointKindAWSAMI {
-		return exit(2, "checkpoint %s has kind=%s; fork requires %s or %s", record.ID, record.Kind, checkpointKindArchive, checkpointKindAWSAMI)
+	if record.Kind != checkpointKindArchive && !isNativeCheckpointKind(record.Kind) {
+		return exit(2, "checkpoint %s has kind=%s; fork requires %s or a native image checkpoint", record.ID, record.Kind, checkpointKindArchive)
 	}
 	repo, err := findRepo()
 	if err != nil {
@@ -361,7 +385,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 		}
 	}
-	if record.Kind == checkpointKindAWSAMI {
+	if isNativeCheckpointKind(record.Kind) {
 		workdir := nativeCheckpointForkWorkdir(cfg, leaseID, repo.Name, *workdirOverride)
 		if err := relocateNativeCheckpointWorkdir(ctx, target, record.Workdir, workdir); err != nil {
 			a.releaseBackendLeaseBestEffort(ctx, sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
@@ -399,12 +423,12 @@ func (a App) checkpointDelete(args []string) error {
 	if err != nil {
 		return err
 	}
-	if record.Kind == checkpointKindAWSAMI && record.Native.ImageID != "" && !*localOnly {
+	if isNativeCheckpointKind(record.Kind) && record.Native.ImageID != "" && !*localOnly {
 		coord, err := configuredAdminCoordinator()
 		if err != nil {
 			return err
 		}
-		if err := coord.DeleteImage(context.Background(), record.Native.ImageID, record.Native.Region); err != nil {
+		if err := coord.DeleteImage(context.Background(), record.Native.ImageID, nativeCoordinatorImageRef(record)); err != nil {
 			return err
 		}
 	}
@@ -419,14 +443,41 @@ func (a App) checkpointDelete(args []string) error {
 	return nil
 }
 
-func applyAWSAMIImageCheckpointRecord(record *checkpointRecord, image CoordinatorImage, noReboot bool) {
-	record.Kind = checkpointKindAWSAMI
-	record.Native.Provider = "aws"
+func applyNativeImageCheckpointRecord(record *checkpointRecord, image CoordinatorImage, noReboot bool) {
+	record.Kind = checkpointKindForProviderImage(image)
+	record.Native.Provider = firstNonBlank(image.Provider, checkpointProviderForKind(record.Kind), record.Provider)
 	record.Native.ImageID = image.ID
+	record.Native.Kind = image.Kind
 	record.Native.Name = image.Name
 	record.Native.State = image.State
 	record.Native.Region = image.Region
+	record.Native.Project = image.Project
+	record.Native.Resource = image.ResourceID
+	record.Native.Strategy = checkpointStrategyForKind(record.Kind)
 	record.Native.NoReboot = noReboot
+}
+
+func applyAWSAMIImageCheckpointRecord(record *checkpointRecord, image CoordinatorImage, noReboot bool) {
+	applyNativeImageCheckpointRecord(record, image, noReboot)
+}
+
+func checkpointKindForProviderImage(image CoordinatorImage) string {
+	switch image.Kind {
+	case checkpointKindAWSEBS:
+		return checkpointKindAWSEBS
+	case checkpointKindAzureOS:
+		return checkpointKindAzureOS
+	case checkpointKindGCPDisk:
+		return checkpointKindGCPDisk
+	}
+	switch image.Provider {
+	case "azure":
+		return checkpointKindAzure
+	case "gcp":
+		return checkpointKindGCP
+	default:
+		return checkpointKindAWSAMI
+	}
 }
 
 func newCheckpointRecord(repo Repo, cfg Config, server Server, target SSHTarget, leaseID, workdir, name string) (checkpointRecord, string, error) {
@@ -443,7 +494,7 @@ func newCheckpointRecord(repo Repo, cfg Config, server Server, target SSHTarget,
 		Name:           strings.TrimSpace(name),
 		Kind:           checkpointKindArchive,
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
-		CrabboxVersion: version,
+		CrabboxVersion: currentVersion(),
 		Provider:       firstNonBlank(server.Provider, cfg.Provider),
 		LeaseID:        leaseID,
 		Slug:           serverSlug(server),
@@ -474,27 +525,32 @@ func newCheckpointID() (string, error) {
 	return checkpointIDPrefix + hex.EncodeToString(raw[:]), nil
 }
 
-func checkpointCreateMode(mode string, cfg Config, server Server, target SSHTarget, recipeOnly bool) string {
+func checkpointCreateMode(mode, strategy string, cfg Config, server Server, target SSHTarget, recipeOnly bool) string {
 	if recipeOnly {
 		return checkpointKindRecipe
 	}
+	normalizedStrategy := normalizeCheckpointStrategy(strategy)
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "auto":
-		if cfg.Coordinator != "" && server.Provider == "aws" && server.CloudID != "" && !isWindowsNativeTarget(target) && firstNonBlank(target.TargetOS, cfg.TargetOS) == targetLinux {
-			return checkpointKindAWSAMI
+		if kind, ok := nativeCheckpointKind(cfg, server, target, normalizedStrategy); ok {
+			return kind
 		}
 		return checkpointKindArchive
-	case "native", "provider-native", "vm", "ami":
-		if server.Provider != "aws" {
-			return "unsupported"
+	case "native", "provider-native", "vm":
+		if kind, ok := nativeCheckpointKind(cfg, server, target, normalizedStrategy); ok {
+			return kind
 		}
-		if server.CloudID == "" {
-			return "unsupported"
+		return "unsupported"
+	case "ami", "image":
+		if kind, ok := nativeCheckpointKind(cfg, server, target, checkpointStrategyImage); ok {
+			return kind
 		}
-		if isWindowsNativeTarget(target) || firstNonBlank(target.TargetOS, cfg.TargetOS) != targetLinux {
-			return "unsupported"
+		return "unsupported"
+	case "snapshot", "disk-snapshot", "disk":
+		if kind, ok := nativeCheckpointKind(cfg, server, target, checkpointStrategyDiskSnapshot); ok {
+			return kind
 		}
-		return checkpointKindAWSAMI
+		return "unsupported"
 	case "archive", "workspace", "workspace-archive":
 		return checkpointKindArchive
 	case "recipe":
@@ -504,29 +560,92 @@ func checkpointCreateMode(mode string, cfg Config, server Server, target SSHTarg
 	}
 }
 
-func (a App) createAWSAMICheckpoint(ctx context.Context, cfg Config, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
-	if cfg.Coordinator == "" {
-		return CoordinatorImage{}, exit(2, "native AWS checkpoints require a configured coordinator")
+func nativeCheckpointKind(cfg Config, server Server, target SSHTarget, strategy string) (string, bool) {
+	if cfg.Coordinator == "" || server.CloudID == "" || isWindowsNativeTarget(target) || firstNonBlank(target.TargetOS, cfg.TargetOS) != targetLinux {
+		return "", false
 	}
-	if isWindowsNativeTarget(target) || firstNonBlank(target.TargetOS, cfg.TargetOS) != targetLinux {
-		return CoordinatorImage{}, exit(2, "native AWS checkpoints currently support Linux leases only")
+	strategy = normalizeCheckpointStrategy(strategy)
+	switch server.Provider {
+	case "aws":
+		if strategy == checkpointStrategyImage {
+			return checkpointKindAWSAMI, true
+		}
+		return checkpointKindAWSEBS, true
+	case "azure":
+		if strategy == checkpointStrategyImage {
+			return checkpointKindAzure, true
+		}
+		return checkpointKindAzureOS, true
+	case "gcp":
+		if strategy == checkpointStrategyImage {
+			return checkpointKindGCP, true
+		}
+		return checkpointKindGCPDisk, true
+	default:
+		return "", false
+	}
+}
+
+func normalizeCheckpointStrategy(strategy string) string {
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "", checkpointStrategyAuto, "snapshot", "disk":
+		return checkpointStrategyDiskSnapshot
+	case checkpointStrategyImage, "ami", "machine-image", "managed-image":
+		return checkpointStrategyImage
+	case checkpointStrategyDiskSnapshot, "disk_snapshot":
+		return checkpointStrategyDiskSnapshot
+	default:
+		return checkpointStrategyDiskSnapshot
+	}
+}
+
+func validCheckpointStrategy(strategy string) bool {
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "", checkpointStrategyAuto, checkpointStrategyDiskSnapshot, checkpointStrategyImage, "snapshot", "disk", "ami", "machine-image", "managed-image", "disk_snapshot":
+		return true
+	default:
+		return false
+	}
+}
+
+func checkpointStrategyForKind(kind string) string {
+	switch kind {
+	case checkpointKindAWSAMI, checkpointKindAzure, checkpointKindGCP:
+		return checkpointStrategyImage
+	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk:
+		return checkpointStrategyDiskSnapshot
+	default:
+		return ""
+	}
+}
+
+func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID, name, repoName, strategy string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
+	if cfg.Coordinator == "" {
+		return CoordinatorImage{}, exit(2, "native checkpoints require a configured coordinator")
+	}
+	strategy = normalizeCheckpointStrategy(strategy)
+	if _, ok := nativeCheckpointKind(cfg, server, target, strategy); !ok {
+		return CoordinatorImage{}, exit(2, "native checkpoints currently support brokered AWS, Azure, and GCP Linux leases only")
+	}
+	if server.Provider == "azure" && strategy == checkpointStrategyImage {
+		return CoordinatorImage{}, exit(2, "Azure managed images require a stopped/generalized source VM; use --strategy disk-snapshot for active Azure leases")
 	}
 	if name == "" {
-		name = defaultAWSAMIName(leaseID, repoName)
+		name = defaultNativeImageName(leaseID, repoName)
 	}
 	coord, err := configuredAdminCoordinator()
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
-	if err := prepareAWSAMICloudInit(ctx, target); err != nil {
+	if err := prepareNativeLinuxImageSource(ctx, target); err != nil {
 		return CoordinatorImage{}, err
 	}
-	image, err := coord.CreateImage(ctx, leaseID, name, noReboot)
+	image, err := coord.CreateImage(ctx, leaseID, name, noReboot, strategy)
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
 	if wait {
-		waited, err := waitForImage(ctx, coord, image.ID, image.Region, waitTimeout, a.Stderr)
+		waited, err := waitForImage(ctx, coord, image.ID, imageRefFromCoordinatorImage(image), waitTimeout, a.Stderr)
 		if err != nil {
 			return image, err
 		}
@@ -535,7 +654,11 @@ func (a App) createAWSAMICheckpoint(ctx context.Context, cfg Config, target SSHT
 	return image, nil
 }
 
-func defaultAWSAMIName(leaseID, repoName string) string {
+func (a App) createAWSAMICheckpoint(ctx context.Context, cfg Config, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
+	return a.createNativeCheckpoint(ctx, cfg, Server{Provider: "aws", CloudID: leaseID}, target, leaseID, name, repoName, checkpointStrategyImage, noReboot, wait, waitTimeout)
+}
+
+func defaultNativeImageName(leaseID, repoName string) string {
 	repoName = strings.TrimSpace(repoName)
 	if repoName == "" {
 		repoName = "workspace"
@@ -547,10 +670,10 @@ func defaultAWSAMIName(leaseID, repoName string) string {
 	return base
 }
 
-func prepareAWSAMICloudInit(ctx context.Context, target SSHTarget) error {
+func prepareNativeLinuxImageSource(ctx context.Context, target SSHTarget) error {
 	command := remotePrepareAWSAMICommand()
 	if out, err := runSSHCombinedOutput(ctx, target, "bash -lc "+shellQuote(command)); err != nil {
-		return exit(7, "prepare AWS AMI source cloud-init: %v: %s", err, trimFailureDetail(out))
+		return exit(7, "prepare native checkpoint source cloud-init: %v: %s", err, trimFailureDetail(out))
 	}
 	return nil
 }
@@ -571,11 +694,50 @@ func nativeCheckpointForkWorkdir(cfg Config, leaseID, repoName, override string)
 	return remoteJoin(cfg, leaseID, repoName)
 }
 
-func applyAWSAMICheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record checkpointRecord) {
-	cfg.Provider = "aws"
-	cfg.AWSAMI = record.Native.ImageID
-	if record.Native.Region != "" {
-		cfg.AWSRegion = record.Native.Region
+func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record checkpointRecord) {
+	cfg.Provider = firstNonBlank(record.Native.Provider, checkpointProviderForKind(record.Kind), record.Provider)
+	if cfg.CoordAdminToken != "" {
+		cfg.CoordToken = cfg.CoordAdminToken
+	}
+	switch record.Kind {
+	case checkpointKindAWSAMI:
+		cfg.AWSAMI = record.Native.ImageID
+		if record.Native.Region != "" {
+			cfg.AWSRegion = record.Native.Region
+		}
+	case checkpointKindAWSEBS:
+		cfg.AWSSnapshot = record.Native.ImageID
+		if record.Native.Region != "" {
+			cfg.AWSRegion = record.Native.Region
+		}
+	case checkpointKindAzure:
+		cfg.AzureImage = firstNonBlank(record.Native.Resource, record.Native.ImageID)
+		if record.Native.Region != "" {
+			cfg.AzureLocation = record.Native.Region
+		}
+	case checkpointKindAzureOS:
+		cfg.AzureSnapshot = firstNonBlank(record.Native.Resource, record.Native.ImageID)
+		if record.Native.Region != "" {
+			cfg.AzureLocation = record.Native.Region
+		}
+	case checkpointKindGCP:
+		cfg.GCPMachineImage = firstNonBlank(record.Native.Resource, record.Native.ImageID)
+		if record.Native.Region != "" {
+			cfg.GCPZone = record.Native.Region
+		}
+		if record.Native.Project != "" {
+			cfg.GCPProject = record.Native.Project
+			cfg.gcpProjectExplicit = true
+		}
+	case checkpointKindGCPDisk:
+		cfg.GCPSnapshot = firstNonBlank(record.Native.Resource, record.Native.ImageID)
+		if record.Native.Region != "" {
+			cfg.GCPZone = record.Native.Region
+		}
+		if record.Native.Project != "" {
+			cfg.GCPProject = record.Native.Project
+			cfg.gcpProjectExplicit = true
+		}
 	}
 	if record.TargetOS != "" {
 		cfg.TargetOS = record.TargetOS
@@ -586,6 +748,36 @@ func applyAWSAMICheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record check
 	if !flagWasSet(fs, "type") {
 		cfg.ServerTypeExplicit = false
 		cfg.ServerType = serverTypeForConfig(*cfg)
+	}
+}
+
+func applyAWSAMICheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record checkpointRecord) {
+	applyNativeCheckpointForkConfig(cfg, fs, record)
+}
+
+func nativeCoordinatorImageRef(record checkpointRecord) CoordinatorImageRef {
+	return CoordinatorImageRef{
+		Provider: firstNonBlank(record.Native.Provider, record.Provider),
+		Region:   record.Native.Region,
+		Project:  record.Native.Project,
+		Kind:     firstNonBlank(record.Native.Kind, record.Kind),
+	}
+}
+
+func isNativeCheckpointKind(kind string) bool {
+	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk
+}
+
+func checkpointProviderForKind(kind string) string {
+	switch kind {
+	case checkpointKindAWSAMI, checkpointKindAWSEBS:
+		return "aws"
+	case checkpointKindAzure, checkpointKindAzureOS:
+		return "azure"
+	case checkpointKindGCP, checkpointKindGCPDisk:
+		return "gcp"
+	default:
+		return ""
 	}
 }
 
@@ -806,20 +998,14 @@ func restoreCheckpointArchive(ctx context.Context, target SSHTarget, localPath, 
 	if info.IsDir() {
 		return exit(2, "checkpoint archive is a directory: %s", localPath)
 	}
-	remotePath := "/tmp/crabbox-" + safeCaptureName(checkpointID) + ".tar.gz"
 	file, err := os.Open(localPath)
 	if err != nil {
 		return exit(2, "open checkpoint archive: %v", err)
 	}
 	defer func() { _ = file.Close() }()
-	if err := runSSHInput(ctx, target, "cat > "+shellQuote(remotePath), file, io.Discard, io.Discard); err != nil {
-		return exit(7, "upload checkpoint archive %s: %v", checkpointID, err)
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if out, err := runSSHCombinedOutput(ctx, target, remoteCheckpointRestoreCommand(workdir, remotePath, clear)); err != nil {
-		return exit(7, "restore checkpoint %s: %v: %s", checkpointID, err, trimFailureDetail(out))
+	var stderr strings.Builder
+	if err := runSSHInputStream(ctx, target, remoteCheckpointRestoreCommand(workdir, clear), file, io.Discard, &stderr); err != nil {
+		return exit(7, "restore checkpoint %s: %v: %s", checkpointID, err, trimFailureDetail(stderr.String()))
 	}
 	return nil
 }
@@ -831,9 +1017,13 @@ func remoteCheckpointArchiveCommand(workdir string) string {
 	return "bash -lc " + shellQuote(script)
 }
 
-func remoteCheckpointRestoreCommand(workdir, archivePath string, clear bool) string {
+func remoteCheckpointRestoreCommand(workdir string, clear bool) string {
 	var b strings.Builder
 	b.WriteString("set -eu\n")
+	b.WriteString("tmp=$(mktemp /tmp/crabbox-checkpoint.XXXXXX)\n")
+	b.WriteString("cleanup() { rm -f -- \"$tmp\"; }\n")
+	b.WriteString("trap cleanup EXIT INT TERM\n")
+	b.WriteString("cat > \"$tmp\"\n")
 	b.WriteString("mkdir -p ")
 	b.WriteString(shellQuote(workdir))
 	b.WriteByte('\n')
@@ -844,11 +1034,7 @@ func remoteCheckpointRestoreCommand(workdir, archivePath string, clear bool) str
 	}
 	b.WriteString("tar -C ")
 	b.WriteString(shellQuote(workdir))
-	b.WriteString(" -xzf ")
-	b.WriteString(shellQuote(archivePath))
-	b.WriteByte('\n')
-	b.WriteString("rm -f -- ")
-	b.WriteString(shellQuote(archivePath))
+	b.WriteString(" -xzf \"$tmp\"")
 	return "bash -lc " + shellQuote(b.String())
 }
 

@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	osexec "os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -190,6 +193,30 @@ func TestRunNoSyncDoesNotDeleteExistingWorkspace(t *testing.T) {
 	}
 }
 
+func TestSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
+	fake := &fakeModalAPI{execCodes: []int{0, 7, 0}}
+	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
+	repoRoot := newGitRepo(t)
+	if err := os.WriteFile(filepath.Join(repoRoot, "hello.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := backend.syncWorkspace(context.Background(), fake, "sb-123", RunRequest{
+		Repo: Repo{Name: "repo", Root: repoRoot},
+	}, "/workspace/crabbox")
+	if err == nil {
+		t.Fatalf("expected extract failure")
+	}
+	verbs := fake.verbs
+	want := []string{"exec", "upload", "exec", "exec"}
+	if !reflect.DeepEqual(verbs, want) {
+		t.Fatalf("verbs=%v want %v", verbs, want)
+	}
+	cleanup := strings.Join(fake.execCommands[2], " ")
+	if !strings.Contains(cleanup, "rm -f '/tmp/crabbox-modal-sync-") {
+		t.Fatalf("cleanup command missing remote archive removal: %v", fake.execCommands[2])
+	}
+}
+
 func TestKeepOnFailureRetainsSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := &fakeModalAPI{execCodes: []int{0, 7}}
@@ -348,4 +375,14 @@ func containsVerb(verbs []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func newGitRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	cmd := osexec.Command("git", "init", "-q", root)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	return root
 }

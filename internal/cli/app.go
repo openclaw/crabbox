@@ -159,7 +159,7 @@ Commands:
   list        List Crabbox machines
   share       Share a lease with users or the owning org
   unshare     Remove lease sharing
-  image       Create or promote brokered AWS runner images
+  image       Create provider images and promote brokered AWS runner images
   usage       Show cost and usage estimates by user, org, or fleet
   admin       Lease admin controls for trusted operators
   actions     Register GitHub Actions runners or dispatch workflows

@@ -467,11 +467,14 @@ func TestCoordinatorLeaseWatchCancelsWhenLeaseReleased(t *testing.T) {
 func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	var body struct {
 		Provider           string   `json:"provider"`
+		AWSSnapshot        string   `json:"awsSnapshot"`
 		AWSSSHCIDRs        []string `json:"awsSSHCIDRs"`
 		AzureLocation      string   `json:"azureLocation"`
 		AzureImage         string   `json:"azureImage"`
+		AzureSnapshot      string   `json:"azureSnapshot"`
 		GCPProject         string   `json:"gcpProject"`
 		GCPZone            string   `json:"gcpZone"`
+		GCPSnapshot        string   `json:"gcpSnapshot"`
 		GCPNetwork         string   `json:"gcpNetwork"`
 		GCPTags            []string `json:"gcpTags"`
 		GCPSSHCIDRs        []string `json:"gcpSSHCIDRs"`
@@ -497,9 +500,11 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 		Provider:           "google",
 		ServerType:         "t3.small",
 		ServerTypeExplicit: true,
+		AWSSnapshot:        "snap-123",
 		AWSSSHCIDRs:        []string{"198.51.100.7/32"},
 		AzureLocation:      "eastus",
 		AzureImage:         "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest",
+		AzureSnapshot:      "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint",
 		GCPProject:         "crabbox-project",
 		gcpProjectExplicit: true,
 		GCPZone:            "europe-west2-b",
@@ -507,6 +512,7 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 		GCPNetwork:         "crabbox-net",
 		GCPTags:            []string{"crabbox-ci"},
 		GCPSSHCIDRs:        []string{"198.51.100.11/32"},
+		GCPSnapshot:        "projects/crabbox-project/global/snapshots/checkpoint",
 		GCPRootGB:          900,
 		SSHFallbackPorts:   []string{"22", "2022"},
 		Capacity: CapacityConfig{
@@ -530,6 +536,9 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	}
 	if body.AzureImage != "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest" {
 		t.Fatalf("azureImage=%q", body.AzureImage)
+	}
+	if body.AWSSnapshot != "snap-123" || body.AzureSnapshot == "" || body.GCPSnapshot == "" {
+		t.Fatalf("snapshot fields not forwarded: aws=%q azure=%q gcp=%q", body.AWSSnapshot, body.AzureSnapshot, body.GCPSnapshot)
 	}
 	if body.GCPProject != "crabbox-project" || body.GCPZone != "europe-west2-b" || body.GCPNetwork != "crabbox-net" || body.GCPRootGB != 900 {
 		t.Fatalf("unexpected gcp body: %#v", body)
@@ -834,6 +843,9 @@ func TestCoordinatorImageCreateAndPromote(t *testing.T) {
 			_, _ = w.Write([]byte(`{"image":{"id":"ami-12345678","name":"openclaw-crabbox-test","state":"pending","region":"eu-west-1"}}`))
 		case "/v1/images/ami-12345678":
 			if r.Method == http.MethodDelete {
+				if got := r.URL.Query().Get("kind"); got != "aws-ami" {
+					t.Fatalf("delete kind=%q", got)
+				}
 				_, _ = w.Write([]byte(`{"imageID":"ami-12345678","deleted":true}`))
 				return
 			}
@@ -863,7 +875,7 @@ func TestCoordinatorImageCreateAndPromote(t *testing.T) {
 	if promoted, err := client.PromoteImage(context.Background(), "ami-12345678"); err != nil || promoted.PromotedAt == "" {
 		t.Fatalf("promoted=%#v err=%v", promoted, err)
 	}
-	if err := client.DeleteImage(context.Background(), "ami-12345678"); err != nil {
+	if err := client.DeleteImage(context.Background(), "ami-12345678", CoordinatorImageRef{Provider: "aws", Region: "eu-west-1", Kind: "aws-ami"}); err != nil {
 		t.Fatalf("delete image: %v", err)
 	}
 }

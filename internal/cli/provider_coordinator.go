@@ -120,6 +120,17 @@ func isCoordinatorStaleInstanceCleanedSignal(err error) bool {
 func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
 	lease, err := b.coord.GetLease(ctx, req.ID)
 	if err != nil {
+		if b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
+			adminCoord, adminErr := b.adminCoordinatorClient()
+			if adminErr != nil {
+				return LeaseTarget{}, err
+			}
+			lease, adminErr = adminCoord.GetLease(ctx, req.ID)
+			if adminErr == nil {
+				server, target, leaseID := leaseToServerTarget(lease, b.cfg)
+				return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: adminCoord}, nil
+			}
+		}
 		return LeaseTarget{}, err
 	}
 	server, target, leaseID := leaseToServerTarget(lease, b.cfg)
@@ -261,10 +272,27 @@ func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseL
 		return exit(2, "missing coordinator lease id")
 	}
 	if err := releaseCoordinatorLease(ctx, b.coord, req.Lease.LeaseID); err != nil {
+		if b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
+			adminCoord, adminErr := b.adminCoordinatorClient()
+			if adminErr != nil {
+				return err
+			}
+			if _, adminErr = adminCoord.AdminReleaseLease(ctx, req.Lease.LeaseID, true); adminErr == nil {
+				removeLeaseClaim(req.Lease.LeaseID)
+				return nil
+			}
+		}
 		return err
 	}
 	removeLeaseClaim(req.Lease.LeaseID)
 	return nil
+}
+
+func (b *coordinatorLeaseBackend) adminCoordinatorClient() (*CoordinatorClient, error) {
+	cfg := b.cfg
+	cfg.CoordToken = cfg.CoordAdminToken
+	coord, _, err := newCoordinatorClient(cfg)
+	return coord, err
 }
 
 func (b *coordinatorLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {

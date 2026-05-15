@@ -71,6 +71,22 @@ func TestDaytonaToolboxUploadURL(t *testing.T) {
 	}
 }
 
+func TestDaytonaExtractArchiveCommandCleansArchiveOnFailure(t *testing.T) {
+	cmd := daytonaExtractArchiveCommand("/workspace/repo", "/tmp/crabbox-archive.tgz", "rm -rf '/workspace/repo' && ")
+	for _, want := range []string{
+		"rm -rf '/workspace/repo' && mkdir -p '/workspace/repo'",
+		"tar -xzf '/tmp/crabbox-archive.tgz' -C '/workspace/repo'",
+		"; crabbox_status=$?; rm -f '/tmp/crabbox-archive.tgz'; exit $crabbox_status",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("command missing %q: %s", want, cmd)
+		}
+	}
+	if strings.Index(cmd, "rm -f '/tmp/crabbox-archive.tgz'") < strings.Index(cmd, "tar -xzf") {
+		t.Fatalf("cleanup should run after extract attempt: %s", cmd)
+	}
+}
+
 func TestUploadDaytonaFileStreamDoesNotPrebuffer(t *testing.T) {
 	sourceReader, sourceWriter := io.Pipe()
 	requestStarted := make(chan struct{})

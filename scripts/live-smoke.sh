@@ -35,7 +35,7 @@ extract_lease() {
 }
 
 extract_slug() {
-  sed -n 's/.*slug=\([^ ]*\).*/\1/p' | rg -v '^-$' | head -1
+  sed -n 's/.*slug=\([^ ]*\).*/\1/p' | rg -v '^-$' | tail -1
 }
 
 stop_lease() {

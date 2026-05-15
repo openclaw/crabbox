@@ -119,12 +119,16 @@ func (b *isloBackend) uploadArchiveViaExec(ctx context.Context, client isloAPI, 
 			return fmt.Errorf("islo read archive for fallback upload: %w", readErr)
 		}
 	}
+	return b.execShell(ctx, client, name, isloFallbackExtractCommand(remoteB64, remoteArchive, workspace), io.Discard)
+}
+
+func isloFallbackExtractCommand(remoteB64, remoteArchive, workspace string) string {
 	extract := strings.Join([]string{
 		"if base64 -d " + shellQuote(remoteB64) + " > " + shellQuote(remoteArchive) + " 2>/dev/null; then :; else base64 --decode " + shellQuote(remoteB64) + " > " + shellQuote(remoteArchive) + "; fi",
 		"tar -xzf " + shellQuote(remoteArchive) + " -C " + shellQuote(workspace),
-		"rm -f " + shellQuote(remoteB64) + " " + shellQuote(remoteArchive),
 	}, " && ")
-	return b.execShell(ctx, client, name, extract, io.Discard)
+	cleanup := "rm -f " + shellQuote(remoteB64) + " " + shellQuote(remoteArchive)
+	return extract + "; status=$?; " + cleanup + "; exit $status"
 }
 
 func (b *isloBackend) execShell(ctx context.Context, client isloAPI, name, command string, stdout io.Writer) error {

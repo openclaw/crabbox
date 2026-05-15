@@ -22,6 +22,10 @@ const baseEnv: Env = {
   AZURE_SUBSCRIPTION_ID: "sub",
 };
 
+function isAzureLoginURL(value: string): boolean {
+  return new URL(value).hostname === "login.microsoftonline.com";
+}
+
 function testLeaseConfig(overrides: Partial<LeaseConfig> = {}): LeaseConfig {
   return {
     provider: "azure",
@@ -97,12 +101,87 @@ describe("azure provider", () => {
     expect(azureLabelsFromTags(tags).windows_mode).toBe("normal");
   });
 
+  it("reads and deletes managed images by explicit kind", async () => {
+    const client = new AzureClient(baseEnv);
+    const calls: Array<{ method: string; pathname: string }> = [];
+    client.fetcher = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(typeof input === "string" ? input : input.toString());
+      if (url.hostname === "login.microsoftonline.com") {
+        return Response.json({ access_token: "tkn", expires_in: 3600 });
+      }
+      calls.push({ method: init?.method ?? "GET", pathname: url.pathname });
+      if (url.pathname.endsWith("/images/checkpoint-azure") && init?.method !== "DELETE") {
+        return Response.json({
+          id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/images/checkpoint-azure",
+          name: "checkpoint-azure",
+          location: "eastus",
+          properties: { provisioningState: "Succeeded" },
+        });
+      }
+      return new Response(null, { status: 204 });
+    };
+
+    const image = await client.getImage("checkpoint-azure", "azure-managed-image");
+    await client.deleteImage("checkpoint-azure", "azure-managed-image");
+
+    expect(image).toMatchObject({
+      id: "checkpoint-azure",
+      provider: "azure",
+      kind: "azure-managed-image",
+      state: "succeeded",
+    });
+    expect(calls.map((call) => `${call.method} ${call.pathname}`)).toEqual([
+      "GET /subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/images/checkpoint-azure",
+      "DELETE /subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/images/checkpoint-azure",
+    ]);
+  });
+
+  it("routes kind-specific snapshot reads and deletes to Azure snapshots", async () => {
+    const client = new AzureClient(baseEnv);
+    const calls: Array<{ method: string; pathname: string }> = [];
+    client.fetcher = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(typeof input === "string" ? input : input.toString());
+      if (url.hostname === "login.microsoftonline.com") {
+        return Response.json({ access_token: "tkn", expires_in: 3600 });
+      }
+      calls.push({ method: init?.method ?? "GET", pathname: url.pathname });
+      if (url.pathname.endsWith("/snapshots/checkpoint-azure")) {
+        return Response.json({
+          id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/snapshots/checkpoint-azure",
+          name: "checkpoint-azure",
+          location: "eastus",
+          properties: { provisioningState: "Succeeded" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    };
+
+    const image = await client.getImage(
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/snapshots/checkpoint-azure",
+      "azure-os-disk-snapshot",
+    );
+    await client.deleteImage(
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/snapshots/checkpoint-azure",
+      "azure-os-disk-snapshot",
+    );
+
+    expect(image).toMatchObject({
+      id: "checkpoint-azure",
+      provider: "azure",
+      kind: "azure-os-disk-snapshot",
+    });
+    expect(calls.map((call) => `${call.method} ${call.pathname}`)).toEqual([
+      "GET /subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/snapshots/checkpoint-azure",
+      "DELETE /subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/snapshots/checkpoint-azure",
+    ]);
+  });
+
   it("continues deleting per-lease resources after a delete failure", async () => {
     const client = new AzureClient(baseEnv);
     const deletes: string[] = [];
     const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("login.microsoftonline.com")) {
+      if (isAzureLoginURL(url)) {
         return Promise.resolve(
           new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), { status: 200 }),
         );
@@ -139,7 +218,7 @@ describe("azure provider", () => {
     const deletes: string[] = [];
     const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("login.microsoftonline.com")) {
+      if (isAzureLoginURL(url)) {
         return Promise.resolve(
           new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), { status: 200 }),
         );
@@ -195,7 +274,7 @@ describe("azure provider", () => {
     const bodies: unknown[] = [];
     const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("login.microsoftonline.com")) {
+      if (isAzureLoginURL(url)) {
         return Promise.resolve(
           new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), { status: 200 }),
         );
@@ -328,6 +407,95 @@ describe("azure provider", () => {
     expect(JSON.stringify(extensionBody)).toContain("AzureData\\\\CustomData.bin");
   });
 
+  it("installs an SSH key extension when forking Linux VMs from OS disk snapshots", async () => {
+    const client = new AzureClient(baseEnv);
+    const bodies: unknown[] = [];
+    const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input.toString();
+      const pathname = new URL(url).pathname;
+      if (isAzureLoginURL(url)) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), { status: 200 }),
+        );
+      }
+      if (init?.body) bodies.push(JSON.parse(String(init.body)));
+      if (pathname.endsWith("/resourceGroups/crabbox-leases")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ tags: { managed_by: "crabbox" } }), { status: 200 }),
+        );
+      }
+      if (pathname.endsWith("/virtualNetworks/crabbox-vnet")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ tags: { managed_by: "crabbox" } }), { status: 200 }),
+        );
+      }
+      if (pathname.endsWith("/networkSecurityGroups/crabbox-nsg") && init?.method === "GET") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              tags: { managed_by: "crabbox" },
+              properties: { securityRules: [] },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.includes("/publicIPAddresses/") && init?.method === "GET") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ properties: { ipAddress: "192.0.2.10" } }), {
+            status: 200,
+          }),
+        );
+      }
+      if (url.includes("/virtualMachines/") && init?.method === "GET") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              name: "crabbox-blue-lobster",
+              tags: { crabbox: "true" },
+              properties: {
+                provisioningState: "Succeeded",
+                hardwareProfile: { vmSize: "Standard_D2ads_v6" },
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as typeof fetch;
+    client.fetcher = fakeFetch;
+
+    await client.createServerWithFallback(
+      testLeaseConfig({
+        azureSnapshot:
+          "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/snapshots/checkpoint-azure",
+        capacityMarket: "on-demand",
+        sshPublicKey: "ssh-ed25519 snapshot-key",
+      }),
+      "cbx_123456789abc",
+      "blue-lobster",
+      "owner",
+    );
+
+    const vmBody = bodies.find(
+      (body): body is { properties: { osProfile?: unknown; storageProfile?: unknown } } =>
+        typeof body === "object" &&
+        body !== null &&
+        "properties" in body &&
+        JSON.stringify(body).includes("Attach"),
+    );
+    expect(vmBody?.properties.osProfile).toBeUndefined();
+    const extensionBody = bodies.find((body) => JSON.stringify(body).includes("authorized_keys"));
+    expect(extensionBody).toMatchObject({
+      properties: {
+        publisher: "Microsoft.Azure.Extensions",
+        type: "CustomScript",
+      },
+    });
+    expect(JSON.stringify(extensionBody)).toContain("ssh-ed25519 snapshot-key");
+  });
+
   it("honors CRABBOX_AZURE_* overrides", () => {
     const client = new AzureClient({
       ...baseEnv,
@@ -345,7 +513,7 @@ describe("azure provider", () => {
     let nsgBody: { properties?: { securityRules?: Array<{ name?: string }> } } | undefined;
     const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("login.microsoftonline.com")) {
+      if (isAzureLoginURL(url)) {
         return Promise.resolve(
           new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), { status: 200 }),
         );
@@ -390,7 +558,7 @@ describe("azure provider", () => {
     let tokenMints = 0;
     const fakeFetch = ((input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("login.microsoftonline.com")) {
+      if (isAzureLoginURL(url)) {
         tokenMints += 1;
         return Promise.resolve(
           new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), {
@@ -434,7 +602,7 @@ describe("azure provider", () => {
     const client = new AzureClient(baseEnv);
     const fakeFetch = ((input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("login.microsoftonline.com")) {
+      if (isAzureLoginURL(url)) {
         return Promise.resolve(
           new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), { status: 200 }),
         );

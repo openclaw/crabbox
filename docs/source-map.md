@@ -69,7 +69,7 @@ This page maps user-facing behavior back to implementation files. Keep docs desc
   `internal/providers/cloudflare`, plus shared helpers in `internal/providers/shared`
 - Worker Hetzner provider: `worker/src/hetzner.ts`
 - Worker AWS EC2 provider: `worker/src/aws.ts`
-- Worker AWS AMI create/read/promote routes: `worker/src/fleet.ts`, `worker/src/aws.ts`
+- Worker provider image create/read/delete/promote routes: `worker/src/fleet.ts`, `worker/src/aws.ts`, `worker/src/azure.ts`, `worker/src/gcp.ts`
 - Provider feature docs: `docs/features/aws.md`, `docs/features/azure.md`, `docs/features/hetzner.md`, `docs/features/blacksmith-testbox.md`, `docs/features/namespace-devbox.md`, `docs/features/namespace-devbox-setup.md`, `docs/features/semaphore.md`, `docs/features/sprites.md`, `docs/features/daytona.md`, `docs/features/islo.md`, `docs/features/e2b.md`
 - Provider reference docs: `docs/providers/README.md`, `docs/providers/aws.md`, `docs/providers/azure.md`, `docs/providers/gcp.md`, `docs/providers/hetzner.md`, `docs/providers/proxmox.md`, `docs/providers/ssh.md`, `docs/providers/blacksmith-testbox.md`, `docs/providers/namespace-devbox.md`, `docs/providers/daytona.md`, `docs/providers/islo.md`, `docs/providers/semaphore.md`, `docs/providers/sprites.md`, `docs/providers/e2b.md`, `docs/providers/modal.md`, `docs/providers/tensorlake.md`, `docs/providers/cloudflare.md`
 - Provider/backend authoring guide: `docs/provider-backends.md`

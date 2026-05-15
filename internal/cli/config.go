@@ -32,6 +32,7 @@ type Config struct {
 	Image              string
 	AWSRegion          string
 	AWSAMI             string
+	AWSSnapshot        string
 	AWSSGID            string
 	AWSSubnetID        string
 	AWSProfile         string
@@ -44,6 +45,7 @@ type Config struct {
 	AzureLocation      string
 	AzureResourceGroup string
 	AzureImage         string
+	AzureSnapshot      string
 	AzureVNet          string
 	AzureSubnet        string
 	AzureNSG           string
@@ -55,6 +57,8 @@ type Config struct {
 	gcpZoneExplicit    bool
 	GCPImage           string
 	gcpImageExplicit   bool
+	GCPMachineImage    string
+	GCPSnapshot        string
 	GCPNetwork         string
 	gcpNetworkExplicit bool
 	GCPSubnet          string
