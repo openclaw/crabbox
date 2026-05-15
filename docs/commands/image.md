@@ -1,12 +1,16 @@
 # image
 
 `crabbox image` contains trusted operator controls for AWS runner images.
+Use it for base runner images, not per-scenario checkpoints. If you want to
+save one prepared lease and fork that exact scenario later, use
+[`crabbox checkpoint`](checkpoint.md).
 
 ```sh
-crabbox image create --id cbx_... --name crabbox-linux-20260501-1246 --wait
+crabbox image create --id cbx_... --name crabbox-runner-20260501-1246 --wait
 crabbox image promote ami-...
 crabbox image promote ami-... --target macos --region us-east-1
 crabbox image promote ami-... --json
+crabbox image delete ami-... --region eu-west-1
 ```
 
 Image commands require a configured coordinator and admin-token auth. Set
@@ -20,6 +24,10 @@ metadata per target, architecture, and region so future AWS leases can resolve a
 matching default image. Hetzner snapshots/images should live in the Hetzner
 project and be selected through `image`/`CRABBOX_HETZNER_IMAGE` until Crabbox
 grows Hetzner create/promote lifecycle commands.
+
+An AMI is AWS's bootable machine image format. EBS snapshots are the stored disk
+snapshots that back the AMI. Deleting a candidate image should remove both the
+AMI registration and its EBS snapshots.
 
 ## create
 
@@ -44,7 +52,7 @@ Recommended bake flow:
 ```sh
 crabbox warmup --provider aws --class standard --ttl 2h --idle-timeout 30m
 crabbox run --id <slug> --shell -- 'command -v ssh git rsync curl jq && test -d /work/crabbox'
-crabbox image create --id <cbx_id> --name crabbox-linux-YYYYMMDD-HHMM --wait
+crabbox image create --id <cbx_id> --name crabbox-runner-YYYYMMDD-HHMM --wait
 ```
 
 Use a fresh, intentionally warmed lease as the source. Do not bake personal
@@ -65,7 +73,8 @@ Failure handling:
 - If the baked image boots but never reaches `crabbox-ready`, do not promote it.
   Keep the previous promoted AMI and debug bootstrap on a normal lease first.
 - Cleanup of stale candidate AMIs is an AWS operator task. Promotion does not
-  delete old images or snapshots.
+  delete old images or snapshots. Use `crabbox image delete` for explicit
+  cleanup.
 - If a timing report does not improve after promotion, treat that as a failed
   performance bake even if the AMI boots.
 
@@ -108,8 +117,7 @@ For macOS:
 
 ```sh
 crabbox image promote ami-new --target macos --region us-east-1
-CRABBOX_AWS_MAC_HOST_ID=h-... \
-  crabbox warmup --provider aws --target macos --type mac2.metal --market on-demand --ttl 30m
+crabbox warmup --provider aws --target macos --type mac2.metal --market on-demand --ttl 30m
 crabbox run --id <slug> --shell -- 'echo image-smoke-ok && sw_vers && test -d "$HOME/crabbox"'
 crabbox stop <slug>
 ```
@@ -118,6 +126,17 @@ If the smoke fails, promote the previous known-good AMI again. The coordinator
 stores only scoped selected AMI IDs, so rollback is another `image promote`
 call for the same target and region. Keep the previous AMI available until at
 least one brokered AWS smoke succeeds on the new image.
+
+## delete
+
+Delete an AMI and its EBS snapshots:
+
+```sh
+crabbox image delete ami-1234567890abcdef0 --region eu-west-1
+```
+
+Deletion deregisters the AMI, then deletes the EBS snapshots referenced by its
+block device mappings. It requires admin-token auth.
 
 Related docs:
 

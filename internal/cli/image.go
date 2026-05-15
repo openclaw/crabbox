@@ -31,7 +31,7 @@ func (a App) imageCreate(ctx context.Context, args []string) error {
 		return err
 	}
 	if *wait {
-		image, err = waitForImage(ctx, coord, image.ID, *waitTimeout, a.Stderr)
+		image, err = waitForImage(ctx, coord, image.ID, image.Region, *waitTimeout, a.Stderr)
 		if err != nil {
 			return err
 		}
@@ -46,7 +46,7 @@ func (a App) imageCreate(ctx context.Context, args []string) error {
 func (a App) imagePromote(ctx context.Context, args []string) error {
 	fs := newFlagSet("image promote", a.Stderr)
 	target := fs.String("target", "", "AWS image target: linux, macos, or windows")
-	region := fs.String("region", "", "AWS region for AMI lookup")
+	region := fs.String("region", "", "AWS region containing the AMI")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -69,11 +69,31 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	return nil
 }
 
-func waitForImage(ctx context.Context, coord *CoordinatorClient, imageID string, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
+func (a App) imageDelete(ctx context.Context, args []string) error {
+	fs := newFlagSet("image delete", a.Stderr)
+	region := fs.String("region", "", "AWS region containing the AMI")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return exit(2, "usage: crabbox image delete <ami-id> [--region <region>]")
+	}
+	coord, err := configuredAdminCoordinator()
+	if err != nil {
+		return err
+	}
+	if err := coord.DeleteImage(ctx, fs.Arg(0), *region); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.Stdout, "deleted image=%s region=%s\n", fs.Arg(0), blank(*region, "-"))
+	return nil
+}
+
+func waitForImage(ctx context.Context, coord *CoordinatorClient, imageID, region string, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
 	deadline := time.Now().Add(timeout)
 	var last CoordinatorImage
 	for {
-		image, err := coord.Image(ctx, imageID)
+		image, err := coord.Image(ctx, imageID, region)
 		if err != nil {
 			return CoordinatorImage{}, err
 		}

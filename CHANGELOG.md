@@ -5,6 +5,8 @@
 ### Added
 
 - Added `crabbox admin lease-audit` so operators can compare expired brokered AWS lease records against live cloud instance state and fail automation when a record still maps to a live instance.
+- Added `crabbox checkpoint` to create VM-level AWS AMI checkpoints for brokered Linux leases, fall back to local workspace archives on generic POSIX SSH leases, inspect/list/delete them, restore archives, or fork checkpoints into fresh leases.
+- Added brokered AWS AMI deletion, including deregistering the image and deleting referenced EBS snapshots.
 
 ### Fixed
 
@@ -16,6 +18,7 @@
 - Fixed `crabbox admin lease-audit --fail-on-live` so recently terminated AWS instances returned by `DescribeInstances` do not fail cleanup automation as live resources.
 - Fixed coordinator TTL cleanup so provider deletion failures keep leases active with retry metadata instead of silently expiring while cloud instances continue running.
 - Fixed direct AWS security-group maintenance so stale Crabbox-owned SSH ingress rules are pruned before adding the current source CIDRs.
+- Fixed native AWS checkpoint creation so no-reboot AMI snapshots flush source filesystem writes before calling `CreateImage`.
 
 ## 0.13.0 - 2026-05-13
 

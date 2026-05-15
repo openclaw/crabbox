@@ -837,6 +837,10 @@ func TestCoordinatorImageCreateAndPromote(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"image":{"id":"ami-12345678","name":"openclaw-crabbox-test","state":"pending","region":"eu-west-1"}}`))
 		case "/v1/images/ami-12345678":
+			if r.Method == http.MethodDelete {
+				_, _ = w.Write([]byte(`{"imageID":"ami-12345678","deleted":true}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"image":{"id":"ami-12345678","name":"openclaw-crabbox-test","state":"available","region":"eu-west-1"}}`))
 		case "/v1/images/ami-12345678/promote":
 			if r.Method != http.MethodPost {
@@ -868,6 +872,9 @@ func TestCoordinatorImageCreateAndPromote(t *testing.T) {
 	}
 	if promoteBody.Target != "macos" || promoteBody.Region != "us-east-1" {
 		t.Fatalf("promote body=%#v", promoteBody)
+	}
+	if err := client.DeleteImage(context.Background(), "ami-12345678"); err != nil {
+		t.Fatalf("delete image: %v", err)
 	}
 }
 

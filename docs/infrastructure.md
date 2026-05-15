@@ -231,10 +231,12 @@ CRABBOX_SSH_FALLBACK_PORTS       optional comma-separated SSH fallback ports, or
 The AWS provider imports the local SSH public key as an EC2 key pair when needed, creates or reuses a `crabbox-runners` security group when no security group is supplied, launches one-time EC2 instances, tags instances and volumes with Crabbox lease metadata, and terminates non-kept instances after the command.
 
 Grant the Worker AWS principal EC2 launch/list/tag/terminate permissions plus
-`servicequotas:GetServiceQuota`. Service Quotas access is best-effort: when it
-is available, Crabbox can skip known quota-impossible instance types before
-calling `RunInstances`; when it is missing, EC2 launch errors are still
-classified after the failed call.
+`CreateImage`, `DeregisterImage`, `DeleteSnapshot`, and
+`servicequotas:GetServiceQuota`. The image permissions are required for
+`crabbox image` and native AWS checkpoints. Service Quotas access is
+best-effort: when it is available, Crabbox can skip known quota-impossible
+instance types before calling `RunInstances`; when it is missing, EC2 launch
+errors are still classified after the failed call.
 
 SSH ingress for AWS security groups is source-scoped. If `CRABBOX_AWS_SSH_CIDRS` is set, Crabbox adds those CIDRs. Otherwise, the CLI sends its detected outbound IPv4 `/32` to the broker; when that is unavailable, the Worker falls back to `CF-Connecting-IP` as `/32` or `/128`. Direct and brokered AWS open the primary SSH port plus configured fallback ports. Crabbox also revokes the old managed `0.0.0.0/0` SSH ingress rule when the broker touches the managed security group. Supplying `CRABBOX_AWS_SECURITY_GROUP_ID` makes network policy your responsibility.
 

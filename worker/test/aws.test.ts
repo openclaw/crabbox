@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  EC2SpotClient,
   addRunInstancesTagSpecifications,
   applyAWSRunInstanceTargetOptions,
   awsAvailabilityZoneForRegion,
@@ -18,6 +19,11 @@ import {
   isAWSInstanceNotFoundError,
   staleCrabboxSSHIngressRules,
 } from "../src/aws";
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("aws provider", () => {
   it("uses the EC2 query parameter names for security group creation", () => {
@@ -271,4 +277,72 @@ describe("aws provider", () => {
     expect(awsQuotaPreflightAttempt("t3.small", "on-demand", "eu-west-1", 32)).toBeUndefined();
     expect(awsQuotaPreflightAttempt("c7gn.metal", "spot", "eu-west-1", 32)).toBeUndefined();
   });
+
+  it("retries snapshot deletion after deregistering an image", async () => {
+    vi.useFakeTimers();
+    const actions: string[] = [];
+    let deleteSnapshotCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const body = await request.clone().text();
+        const action = new URLSearchParams(body).get("Action") ?? "";
+        actions.push(action);
+        if (action === "DescribeImages") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>ami-000000000001</imageId>
+      <name>checkpoint</name>
+      <imageState>available</imageState>
+      <blockDeviceMapping>
+        <item><ebs><snapshotId>snap-000000000001</snapshotId></ebs></item>
+      </blockDeviceMapping>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`);
+        }
+        if (action === "DeregisterImage") {
+          return ec2XMLResponse("<DeregisterImageResponse />");
+        }
+        if (action === "DeleteSnapshot") {
+          deleteSnapshotCalls++;
+          if (deleteSnapshotCalls === 1) {
+            return ec2XMLResponse(
+              "<Response><Errors><Error><Code>InvalidSnapshot.InUse</Code><Message>snapshot is currently in use</Message></Error></Errors></Response>",
+              400,
+            );
+          }
+          return ec2XMLResponse("<DeleteSnapshotResponse />");
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "eu-west-1",
+    );
+    const deletion = client.deleteImage("ami-000000000001");
+    await vi.waitFor(() => expect(deleteSnapshotCalls).toBe(1));
+    expect(actions).toEqual(["DescribeImages", "DeregisterImage", "DeleteSnapshot"]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await deletion;
+
+    expect(actions).toEqual([
+      "DescribeImages",
+      "DeregisterImage",
+      "DeleteSnapshot",
+      "DeleteSnapshot",
+    ]);
+  });
 });
+
+function ec2XMLResponse(body: string, status = 200): Response {
+  return new Response(body, { status, headers: { "content-type": "application/xml" } });
+}

@@ -2348,6 +2348,102 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("image:aws:promoted")).toBeUndefined();
   });
 
+  it("uses promoted AWS image region when creating leases", async () => {
+    const storage = new MemoryStorage();
+    let createdConfig: LeaseConfig | undefined;
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(
+          (config) => {
+            createdConfig = config;
+          },
+          { provider: "aws", region: "us-east-2" },
+        ),
+      },
+      { CRABBOX_AWS_REGION: "eu-west-1" },
+    );
+    storage.seed("image:aws:promoted", {
+      id: "ami-000000000001",
+      name: "openclaw-crabbox-test",
+      state: "available",
+      region: "us-east-2",
+      promotedAt: "2026-05-01T12:46:00Z",
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          provider: "aws",
+          sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example.com",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(createdConfig?.awsAMI).toBe("ami-000000000001");
+    expect(createdConfig?.awsRegion).toBe("us-east-2");
+    const body = (await response.json()) as { lease: LeaseRecord };
+    expect(body.lease.region).toBe("us-east-2");
+  });
+
+  it("deletes AWS images through admin routes", async () => {
+    let deleted = "";
+    const fleet = testFleet(new MemoryStorage(), {
+      aws: fakeProvider(undefined, {
+        onDeleteImage(imageID) {
+          deleted = imageID;
+        },
+      }),
+    });
+
+    const denied = await fleet.fetch(
+      request("DELETE", "/v1/images/ami-000000000001", {
+        body: {},
+      }),
+    );
+    expect(denied.status).toBe(403);
+
+    const allowed = await fleet.fetch(
+      request("DELETE", "/v1/images/ami-000000000001", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+    expect(allowed.status).toBe(200);
+    expect(deleted).toBe("ami-000000000001");
+  });
+
+  it("rejects deleting the promoted AWS image", async () => {
+    let deleted = "";
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:promoted", {
+      id: "ami-000000000001",
+      name: "openclaw-crabbox-test",
+      state: "available",
+      region: "eu-west-1",
+      promotedAt: "2026-05-01T12:46:00Z",
+    });
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, {
+        onDeleteImage(imageID) {
+          deleted = imageID;
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("DELETE", "/v1/images/ami-000000000001", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(deleted).toBe("");
+    await expect(response.json()).resolves.toMatchObject({ error: "image_promoted" });
+  });
+
   it("mints broker-owned artifact upload URLs without exposing secrets", async () => {
     const fleet = testFleet(
       new MemoryStorage(),
@@ -3567,8 +3663,11 @@ function fakeProvider(
     provider?: "hetzner" | "aws" | "gcp";
     serverType?: string;
     cloudID?: string;
+    region?: string;
+    imageRegion?: string;
     market?: string;
     attempts?: ProvisioningAttempt[];
+    onDeleteImage?: (imageID: string) => void;
   } = {},
   onDelete?: (id: string) => Promise<void>,
   onGet?: (id: string) => Promise<ProviderMachine> | ProviderMachine,
@@ -3605,7 +3704,7 @@ function fakeProvider(
           host: "192.0.2.10",
           region:
             result.provider === "aws"
-              ? "eu-west-2"
+              ? (result.region ?? "eu-west-2")
               : result.provider === "gcp"
                 ? "us-central1-a"
                 : undefined,
@@ -3620,15 +3719,24 @@ function fakeProvider(
       await onDelete?.(id);
     },
     async createImage(_instanceID: string, name: string) {
-      return { id: "ami-000000000001", name, state: "pending", region: "eu-west-1" };
+      return {
+        id: "ami-000000000001",
+        name,
+        state: "pending",
+        region: result.imageRegion ?? "eu-west-1",
+      };
     },
     async getImage(imageID: string) {
       return {
         id: imageID,
         name: "openclaw-crabbox-test",
         state: "available",
-        region: "eu-west-1",
+        region: result.imageRegion ?? "eu-west-1",
+        snapshots: ["snap-000000000001"],
       };
+    },
+    async deleteImage(imageID: string) {
+      result.onDeleteImage?.(imageID);
     },
     async deleteSSHKey() {},
     async hourlyPriceUSD() {

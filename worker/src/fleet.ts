@@ -846,7 +846,11 @@ export class FleetDurableObject implements DurableObject {
       config.awsSSHCIDRs = requestSourceCIDRs(request);
     }
     if (config.provider === "aws" && !config.awsAMI) {
-      config.awsAMI = (await this.promotedAWSImage(config))?.id ?? "";
+      const promoted = await this.promotedAWSImage(config);
+      config.awsAMI = promoted?.id ?? "";
+      if (promoted?.region) {
+        config.awsRegion = promoted.region;
+      }
     }
     if (config.provider === "azure" && !config.azureLocation) {
       config.azureLocation = azureLocationFor(this.env, "");
@@ -3077,9 +3081,27 @@ export class FleetDurableObject implements DurableObject {
       return json({ error: "invalid_image_id" }, { status: 400 });
     }
     const known = await this.createdAWSImage(imageID);
+    const queryRegion = new URL(request.url).searchParams.get("region") ?? "";
+    const knownRegion = known?.region ?? "";
     if (method === "GET" && action === undefined) {
-      const image = await this.provider("aws", known?.region).getImage(imageID);
+      const image = await this.provider("aws", queryRegion || knownRegion).getImage(imageID);
       return json({ image: mergeAWSImageMetadata(image, known) });
+    }
+    if (method === "DELETE" && action === undefined) {
+      const promoted = await this.state.storage.get<PromotedImageRecord>(
+        legacyPromotedAWSImageKey(),
+      );
+      if (promoted?.id === imageID) {
+        return json(
+          {
+            error: "image_promoted",
+            message: `image ${imageID} is the promoted AWS image; promote another image before deleting it`,
+          },
+          { status: 409 },
+        );
+      }
+      await this.provider("aws", queryRegion || knownRegion).deleteImage(imageID);
+      return json({ imageID, deleted: true });
     }
     if (method === "POST" && action === "promote") {
       const input = await readJson<{
@@ -3095,7 +3117,7 @@ export class FleetDurableObject implements DurableObject {
           { status: 400 },
         );
       }
-      const rawRegion = input.region ?? known?.region ?? "";
+      const rawRegion = input.region ?? queryRegion ?? knownRegion;
       const region = sanitizeAWSRegion(rawRegion);
       if (rawRegion && !region) {
         return json(
@@ -5013,6 +5035,7 @@ interface CloudProvider {
   deleteServer(id: string): Promise<void>;
   createImage(instanceID: string, name: string, noReboot: boolean): Promise<ProviderImage>;
   getImage(imageID: string): Promise<ProviderImage>;
+  deleteImage(imageID: string): Promise<void>;
   deleteSSHKey(name: string): Promise<void>;
   hourlyPriceUSD(
     serverType: string,
@@ -5061,6 +5084,10 @@ class HetznerProvider implements CloudProvider {
   }
 
   getImage(): Promise<ProviderImage> {
+    throw new Error("hetzner images are not supported");
+  }
+
+  deleteImage(): Promise<void> {
     throw new Error("hetzner images are not supported");
   }
 
@@ -5113,6 +5140,10 @@ class AzureProvider implements CloudProvider {
     throw new Error("azure images are not supported");
   }
 
+  deleteImage(): Promise<void> {
+    throw new Error("azure images are not supported");
+  }
+
   async deleteSSHKey(): Promise<void> {
     // Azure stores the SSH public key inline on the VM; nothing to clean up.
   }
@@ -5156,6 +5187,10 @@ class GCPProvider implements CloudProvider {
   }
 
   getImage(): Promise<ProviderImage> {
+    throw new Error("gcp images are not supported");
+  }
+
+  deleteImage(): Promise<void> {
     throw new Error("gcp images are not supported");
   }
 
@@ -5278,6 +5313,10 @@ class AWSProvider implements CloudProvider {
 
   getImage(imageID: string): Promise<ProviderImage> {
     return this.client.getImage(imageID);
+  }
+
+  deleteImage(imageID: string): Promise<void> {
+    return this.client.deleteImage(imageID);
   }
 
   async deleteSSHKey(name: string): Promise<void> {

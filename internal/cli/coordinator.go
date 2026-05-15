@@ -910,11 +910,11 @@ func (c *CoordinatorClient) CreateImage(ctx context.Context, leaseID, name strin
 	return res.Image, err
 }
 
-func (c *CoordinatorClient) Image(ctx context.Context, imageID string) (CoordinatorImage, error) {
+func (c *CoordinatorClient) Image(ctx context.Context, imageID string, region ...string) (CoordinatorImage, error) {
 	var res struct {
 		Image CoordinatorImage `json:"image"`
 	}
-	err := c.do(ctx, http.MethodGet, "/v1/images/"+url.PathEscape(imageID), nil, &res)
+	err := c.do(ctx, http.MethodGet, imagePath(imageID, "", region...), nil, &res)
 	return res.Image, err
 }
 
@@ -929,8 +929,27 @@ func (c *CoordinatorClient) PromoteImage(ctx context.Context, imageID, target, r
 	if region != "" {
 		body["region"] = region
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/images/"+url.PathEscape(imageID)+"/promote", body, &res)
+	err := c.do(ctx, http.MethodPost, imagePath(imageID, "promote", region), body, &res)
 	return res.Image, err
+}
+
+func (c *CoordinatorClient) DeleteImage(ctx context.Context, imageID string, region ...string) error {
+	return c.do(ctx, http.MethodDelete, imagePath(imageID, "", region...), nil, nil)
+}
+
+func imagePath(imageID, action string, region ...string) string {
+	path := "/v1/images/" + url.PathEscape(imageID)
+	if action != "" {
+		path += "/" + url.PathEscape(action)
+	}
+	selected := ""
+	if len(region) > 0 {
+		selected = strings.TrimSpace(region[0])
+	}
+	if selected != "" {
+		path += "?region=" + url.QueryEscape(selected)
+	}
+	return path
 }
 
 func (c *CoordinatorClient) CreateRun(ctx context.Context, leaseID string, cfg Config, command []string) (CoordinatorRun, error) {

@@ -1,0 +1,880 @@
+package cli
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+const (
+	checkpointIDPrefix    = "chk_"
+	checkpointMetaFile    = "checkpoint.json"
+	checkpointArchive     = "workspace.tar.gz"
+	checkpointKindRecipe  = "recipe"
+	checkpointKindArchive = "workspace-archive"
+	checkpointKindAWSAMI  = "aws-ami"
+)
+
+type checkpointRecord struct {
+	ID             string `json:"id"`
+	Name           string `json:"name,omitempty"`
+	Kind           string `json:"kind"`
+	CreatedAt      string `json:"createdAt"`
+	CrabboxVersion string `json:"crabboxVersion"`
+	Provider       string `json:"provider,omitempty"`
+	LeaseID        string `json:"leaseId,omitempty"`
+	Slug           string `json:"slug,omitempty"`
+	TargetOS       string `json:"targetOS,omitempty"`
+	WindowsMode    string `json:"windowsMode,omitempty"`
+	Workdir        string `json:"workdir,omitempty"`
+	ArchivePath    string `json:"archivePath,omitempty"`
+	ArchiveBytes   int64  `json:"archiveBytes,omitempty"`
+	Native         struct {
+		Provider string `json:"provider,omitempty"`
+		ImageID  string `json:"imageId,omitempty"`
+		Name     string `json:"name,omitempty"`
+		State    string `json:"state,omitempty"`
+		Region   string `json:"region,omitempty"`
+		NoReboot bool   `json:"noReboot,omitempty"`
+	} `json:"native,omitempty"`
+	Repo struct {
+		Root      string `json:"root,omitempty"`
+		Name      string `json:"name,omitempty"`
+		RemoteURL string `json:"remoteUrl,omitempty"`
+		Head      string `json:"head,omitempty"`
+		BaseRef   string `json:"baseRef,omitempty"`
+	} `json:"repo"`
+}
+
+func (a App) checkpoint(ctx context.Context, args []string) error {
+	if len(args) == 0 || isHelpArg(args[0]) {
+		a.printCheckpointHelp()
+		if len(args) == 0 {
+			return exit(2, "missing checkpoint command")
+		}
+		return nil
+	}
+	switch args[0] {
+	case "create":
+		return a.checkpointCreate(ctx, args[1:])
+	case "list":
+		return a.checkpointList(args[1:])
+	case "inspect":
+		return a.checkpointInspect(args[1:])
+	case "restore":
+		return a.checkpointRestore(ctx, args[1:])
+	case "fork":
+		return a.checkpointFork(ctx, args[1:])
+	case "delete":
+		return a.checkpointDelete(args[1:])
+	default:
+		return exit(2, "unknown checkpoint command %q", args[0])
+	}
+}
+
+func (a App) printCheckpointHelp() {
+	fmt.Fprintln(a.Stdout, `Usage:
+  crabbox checkpoint create --id <lease-id-or-slug> [--name <name>] [--mode auto|native|archive]
+  crabbox checkpoint list [--json]
+  crabbox checkpoint inspect <checkpoint-id> [--json]
+  crabbox checkpoint restore <checkpoint-id> --id <lease-id-or-slug> [--clear=false]
+  crabbox checkpoint fork <checkpoint-id> [--class <class>] [--keep]
+  crabbox checkpoint delete <checkpoint-id>
+
+Checkpoints use AWS AMI snapshots for brokered Linux leases and portable workspace archives elsewhere.`)
+}
+
+func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
+	defaults := defaultConfig()
+	fs := newFlagSet("checkpoint create", a.Stderr)
+	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
+	id := fs.String("id", "", "lease id or slug")
+	name := fs.String("name", "", "checkpoint name")
+	mode := fs.String("mode", "auto", "checkpoint mode: auto, native, or archive")
+	workdirOverride := fs.String("workdir", "", "remote workdir to archive")
+	recipeOnly := fs.Bool("recipe-only", false, "record metadata without archiving the remote workdir")
+	wait := fs.Bool("wait", true, "wait for native provider snapshot availability")
+	waitTimeout := fs.Duration("wait-timeout", 45*time.Minute, "maximum native snapshot wait duration")
+	noReboot := fs.Bool("no-reboot", true, "avoid rebooting the source instance while creating a native snapshot")
+	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	setIDFromFirstArg(fs, id)
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{})
+	if err != nil {
+		return err
+	}
+	if err := requireLeaseID(*id, "crabbox checkpoint create --id <lease-id-or-slug> [--name <name>] [--mode auto|native|archive]", cfg); err != nil {
+		return err
+	}
+	repo, err := findRepo()
+	if err != nil {
+		return err
+	}
+	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, true)
+	if err != nil {
+		return err
+	}
+	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+		return err
+	}
+	workdir := strings.TrimSpace(*workdirOverride)
+	if workdir == "" {
+		workdir = remoteJoin(cfg, leaseID, repo.Name)
+	}
+	record, dir, err := newCheckpointRecord(repo, cfg, server, target, leaseID, workdir, *name)
+	if err != nil {
+		return err
+	}
+	recordWritten := false
+	defer func() {
+		cleanupUncommittedCheckpointDir(dir, recordWritten, err)
+	}()
+	switch checkpointCreateMode(*mode, cfg, server, target, *recipeOnly) {
+	case checkpointKindRecipe:
+		record.Kind = checkpointKindRecipe
+	case checkpointKindAWSAMI:
+		image, err := a.createAWSAMICheckpoint(ctx, cfg, target, leaseID, record.Name, repo.Name, *noReboot, *wait, *waitTimeout)
+		if image.ID != "" {
+			applyAWSAMIImageCheckpointRecord(&record, image, *noReboot)
+		}
+		if err != nil {
+			if record.Native.ImageID != "" {
+				if writeErr := writeCheckpointRecord(dir, record); writeErr != nil {
+					return writeErr
+				}
+				recordWritten = true
+			}
+			return err
+		}
+	case checkpointKindArchive:
+		if err := ensureCheckpointArchiveTarget(target); err != nil {
+			return err
+		}
+		archivePath := filepath.Join(dir, checkpointArchive)
+		bytes, err := createCheckpointArchive(ctx, target, workdir, archivePath)
+		if err != nil {
+			return err
+		}
+		record.Kind = checkpointKindArchive
+		record.ArchivePath = checkpointArchive
+		record.ArchiveBytes = bytes
+	default:
+		return exit(2, "checkpoint mode must be auto, native, or archive")
+	}
+	if err := writeCheckpointRecord(dir, record); err != nil {
+		return err
+	}
+	recordWritten = true
+	if record.Kind == checkpointKindAWSAMI {
+		fmt.Fprintf(a.Stdout, "checkpoint created id=%s kind=%s image=%s state=%s region=%s workdir=%s\n", record.ID, record.Kind, record.Native.ImageID, record.Native.State, blank(record.Native.Region, "-"), record.Workdir)
+		return nil
+	}
+	fmt.Fprintf(a.Stdout, "checkpoint created id=%s kind=%s bytes=%s workdir=%s\n", record.ID, record.Kind, humanBytes(record.ArchiveBytes), record.Workdir)
+	return nil
+}
+
+func (a App) checkpointList(args []string) error {
+	fs := newFlagSet("checkpoint list", a.Stderr)
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	records, err := listCheckpointRecords()
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(records)
+	}
+	if len(records) == 0 {
+		fmt.Fprintln(a.Stdout, "no checkpoints")
+		return nil
+	}
+	for _, record := range records {
+		extra := fmt.Sprintf("bytes=%s", humanBytes(record.ArchiveBytes))
+		if record.Kind == checkpointKindAWSAMI {
+			extra = fmt.Sprintf("image=%s state=%s region=%s", blank(record.Native.ImageID, "-"), blank(record.Native.State, "-"), blank(record.Native.Region, "-"))
+		}
+		fmt.Fprintf(a.Stdout, "%s kind=%s name=%q repo=%s lease=%s %s created=%s\n", record.ID, record.Kind, record.Name, record.Repo.Name, blank(record.LeaseID, "-"), extra, record.CreatedAt)
+	}
+	return nil
+}
+
+func (a App) checkpointInspect(args []string) error {
+	fs := newFlagSet("checkpoint inspect", a.Stderr)
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return exit(2, "usage: crabbox checkpoint inspect <checkpoint-id>")
+	}
+	record, _, err := readCheckpointRecord(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(record)
+	}
+	fmt.Fprintf(a.Stdout, "id=%s\nkind=%s\nname=%s\ncreated=%s\nprovider=%s\nlease=%s\nrepo=%s\nhead=%s\nworkdir=%s\narchive=%s\nbytes=%s\n",
+		record.ID, record.Kind, blank(record.Name, "-"), record.CreatedAt, blank(record.Provider, "-"), blank(record.LeaseID, "-"), blank(record.Repo.Name, "-"), blank(record.Repo.Head, "-"), blank(record.Workdir, "-"), blank(record.ArchivePath, "-"), humanBytes(record.ArchiveBytes))
+	if record.Kind == checkpointKindAWSAMI {
+		fmt.Fprintf(a.Stdout, "image=%s\nimage_name=%s\nimage_state=%s\nimage_region=%s\nno_reboot=%t\n",
+			blank(record.Native.ImageID, "-"), blank(record.Native.Name, "-"), blank(record.Native.State, "-"), blank(record.Native.Region, "-"), record.Native.NoReboot)
+	}
+	return nil
+}
+
+func (a App) checkpointRestore(ctx context.Context, args []string) error {
+	defaults := defaultConfig()
+	fs := newFlagSet("checkpoint restore", a.Stderr)
+	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
+	id := fs.String("id", "", "lease id or slug")
+	workdirOverride := fs.String("workdir", "", "remote restore workdir")
+	clear := fs.Bool("clear", true, "clear the remote workdir before restoring")
+	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return exit(2, "usage: crabbox checkpoint restore <checkpoint-id> --id <lease-id-or-slug>")
+	}
+	record, dir, err := readCheckpointRecord(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if record.Kind != checkpointKindArchive {
+		if record.Kind == checkpointKindAWSAMI {
+			return exit(2, "checkpoint %s is a VM image; use crabbox checkpoint fork %s to create a lease from it", record.ID, record.ID)
+		}
+		return exit(2, "checkpoint %s has kind=%s; restore requires %s", record.ID, record.Kind, checkpointKindArchive)
+	}
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{})
+	if err != nil {
+		return err
+	}
+	if err := requireLeaseID(*id, "crabbox checkpoint restore <checkpoint-id> --id <lease-id-or-slug>", cfg); err != nil {
+		return err
+	}
+	repo, err := findRepo()
+	if err != nil {
+		return err
+	}
+	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, true)
+	if err != nil {
+		return err
+	}
+	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+		return err
+	}
+	workdir := strings.TrimSpace(*workdirOverride)
+	if workdir == "" {
+		workdir = defaultCheckpointRestoreWorkdir(cfg, leaseID, repo.Name, record.Workdir)
+	}
+	if err := restoreCheckpointArchive(ctx, target, filepath.Join(dir, record.ArchivePath), record.ID, workdir, *clear); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.Stdout, "checkpoint restored id=%s lease=%s workdir=%s\n", record.ID, leaseID, workdir)
+	return nil
+}
+
+func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
+	defaults := defaultConfig()
+	fs := newFlagSet("checkpoint fork", a.Stderr)
+	leaseFlags := registerLeaseCreateFlags(fs, defaults)
+	keep := fs.Bool("keep", true, "keep forked lease after restore")
+	workdirOverride := fs.String("workdir", "", "remote restore workdir")
+	clear := fs.Bool("clear", true, "clear the remote workdir before restoring")
+	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return exit(2, "usage: crabbox checkpoint fork <checkpoint-id> [--class <class>]")
+	}
+	record, dir, err := readCheckpointRecord(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
+		return err
+	}
+	if record.Kind == checkpointKindAWSAMI {
+		applyAWSAMICheckpointForkConfig(&cfg, fs, record)
+	}
+	if record.Kind != checkpointKindArchive && record.Kind != checkpointKindAWSAMI {
+		return exit(2, "checkpoint %s has kind=%s; fork requires %s or %s", record.ID, record.Kind, checkpointKindArchive, checkpointKindAWSAMI)
+	}
+	repo, err := findRepo()
+	if err != nil {
+		return err
+	}
+	backend, err := loadBackend(cfg, runtimeForApp(a))
+	if err != nil {
+		return err
+	}
+	sshBackend, ok := backend.(SSHLeaseBackend)
+	if !ok {
+		return exit(2, "provider=%s does not support checkpoint fork", backend.Spec().Name)
+	}
+	lease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: leaseOptionsFromConfig(cfg), Keep: *keep, Reclaim: *reclaim})
+	if err != nil {
+		return err
+	}
+	server, target, leaseID := lease.Server, lease.SSH, lease.LeaseID
+	defer func() {
+		if err == nil && !*keep {
+			a.releaseBackendLeaseBestEffort(context.Background(), sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
+		}
+	}()
+	applyResolvedServerConfig(&cfg, server)
+	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+		a.releaseBackendLeaseBestEffort(ctx, sshBackend, lease)
+		return err
+	}
+	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
+		a.releaseBackendLeaseBestEffort(ctx, sshBackend, lease)
+		return err
+	} else {
+		target = resolved.Target
+		if resolved.FallbackReason != "" {
+			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+		}
+	}
+	if record.Kind == checkpointKindAWSAMI {
+		workdir := nativeCheckpointForkWorkdir(cfg, leaseID, repo.Name, *workdirOverride)
+		if err := relocateNativeCheckpointWorkdir(ctx, target, record.Workdir, workdir); err != nil {
+			a.releaseBackendLeaseBestEffort(ctx, sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
+			return err
+		}
+		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s image=%s workdir=%s\n", record.ID, leaseID, blank(serverSlug(server), "-"), record.Native.ImageID, workdir)
+		return nil
+	}
+	workdir := strings.TrimSpace(*workdirOverride)
+	if workdir == "" {
+		workdir = defaultCheckpointRestoreWorkdir(cfg, leaseID, repo.Name, record.Workdir)
+	}
+	if err := restoreCheckpointArchive(ctx, target, filepath.Join(dir, record.ArchivePath), record.ID, workdir, *clear); err != nil {
+		a.releaseBackendLeaseBestEffort(ctx, sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
+		return err
+	}
+	fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s workdir=%s\n", record.ID, leaseID, blank(serverSlug(server), "-"), workdir)
+	return nil
+}
+
+func (a App) checkpointDelete(args []string) error {
+	fs := newFlagSet("checkpoint delete", a.Stderr)
+	localOnly := fs.Bool("local-only", false, "delete only the local checkpoint record")
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return exit(2, "usage: crabbox checkpoint delete <checkpoint-id>")
+	}
+	id, err := validateCheckpointID(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	record, _, err := readCheckpointRecord(id)
+	if err != nil {
+		return err
+	}
+	if record.Kind == checkpointKindAWSAMI && record.Native.ImageID != "" && !*localOnly {
+		coord, err := configuredAdminCoordinator()
+		if err != nil {
+			return err
+		}
+		if err := coord.DeleteImage(context.Background(), record.Native.ImageID, record.Native.Region); err != nil {
+			return err
+		}
+	}
+	dir, err := checkpointDir(id)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return exit(2, "delete checkpoint %s: %v", id, err)
+	}
+	fmt.Fprintf(a.Stdout, "checkpoint deleted id=%s\n", id)
+	return nil
+}
+
+func applyAWSAMIImageCheckpointRecord(record *checkpointRecord, image CoordinatorImage, noReboot bool) {
+	record.Kind = checkpointKindAWSAMI
+	record.Native.Provider = "aws"
+	record.Native.ImageID = image.ID
+	record.Native.Name = image.Name
+	record.Native.State = image.State
+	record.Native.Region = image.Region
+	record.Native.NoReboot = noReboot
+}
+
+func newCheckpointRecord(repo Repo, cfg Config, server Server, target SSHTarget, leaseID, workdir, name string) (checkpointRecord, string, error) {
+	id, err := newCheckpointID()
+	if err != nil {
+		return checkpointRecord{}, "", err
+	}
+	dir, err := checkpointDir(id)
+	if err != nil {
+		return checkpointRecord{}, "", err
+	}
+	record := checkpointRecord{
+		ID:             id,
+		Name:           strings.TrimSpace(name),
+		Kind:           checkpointKindArchive,
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+		CrabboxVersion: version,
+		Provider:       firstNonBlank(server.Provider, cfg.Provider),
+		LeaseID:        leaseID,
+		Slug:           serverSlug(server),
+		TargetOS:       firstNonBlank(target.TargetOS, cfg.TargetOS),
+		WindowsMode:    firstNonBlank(target.WindowsMode, cfg.WindowsMode),
+		Workdir:        workdir,
+	}
+	record.Repo.Root = repo.Root
+	record.Repo.Name = repo.Name
+	record.Repo.RemoteURL = repo.RemoteURL
+	record.Repo.Head = repo.Head
+	record.Repo.BaseRef = repo.BaseRef
+	return record, dir, nil
+}
+
+func cleanupUncommittedCheckpointDir(dir string, committed bool, err error) {
+	if err == nil || committed || dir == "" {
+		return
+	}
+	_ = os.RemoveAll(dir)
+}
+
+func newCheckpointID() (string, error) {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", exit(2, "generate checkpoint id: %v", err)
+	}
+	return checkpointIDPrefix + hex.EncodeToString(raw[:]), nil
+}
+
+func checkpointCreateMode(mode string, cfg Config, server Server, target SSHTarget, recipeOnly bool) string {
+	if recipeOnly {
+		return checkpointKindRecipe
+	}
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "auto":
+		if cfg.Coordinator != "" && server.Provider == "aws" && server.CloudID != "" && !isWindowsNativeTarget(target) && firstNonBlank(target.TargetOS, cfg.TargetOS) == targetLinux {
+			return checkpointKindAWSAMI
+		}
+		return checkpointKindArchive
+	case "native", "provider-native", "vm", "ami":
+		if server.Provider != "aws" {
+			return "unsupported"
+		}
+		if server.CloudID == "" {
+			return "unsupported"
+		}
+		if isWindowsNativeTarget(target) || firstNonBlank(target.TargetOS, cfg.TargetOS) != targetLinux {
+			return "unsupported"
+		}
+		return checkpointKindAWSAMI
+	case "archive", "workspace", "workspace-archive":
+		return checkpointKindArchive
+	case "recipe":
+		return checkpointKindRecipe
+	default:
+		return "unsupported"
+	}
+}
+
+func (a App) createAWSAMICheckpoint(ctx context.Context, cfg Config, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
+	if cfg.Coordinator == "" {
+		return CoordinatorImage{}, exit(2, "native AWS checkpoints require a configured coordinator")
+	}
+	if isWindowsNativeTarget(target) || firstNonBlank(target.TargetOS, cfg.TargetOS) != targetLinux {
+		return CoordinatorImage{}, exit(2, "native AWS checkpoints currently support Linux leases only")
+	}
+	if name == "" {
+		name = defaultAWSAMIName(leaseID, repoName)
+	}
+	coord, err := configuredAdminCoordinator()
+	if err != nil {
+		return CoordinatorImage{}, err
+	}
+	if err := prepareAWSAMICloudInit(ctx, target); err != nil {
+		return CoordinatorImage{}, err
+	}
+	image, err := coord.CreateImage(ctx, leaseID, name, noReboot)
+	if err != nil {
+		return CoordinatorImage{}, err
+	}
+	if wait {
+		waited, err := waitForImage(ctx, coord, image.ID, image.Region, waitTimeout, a.Stderr)
+		if err != nil {
+			return image, err
+		}
+		return waited, nil
+	}
+	return image, nil
+}
+
+func defaultAWSAMIName(leaseID, repoName string) string {
+	repoName = strings.TrimSpace(repoName)
+	if repoName == "" {
+		repoName = "workspace"
+	}
+	base := "crabbox-" + safeCaptureName(repoName) + "-" + strings.ReplaceAll(leaseID, "_", "-") + "-" + time.Now().UTC().Format("20060102-150405")
+	if len(base) > 128 {
+		return base[:128]
+	}
+	return base
+}
+
+func prepareAWSAMICloudInit(ctx context.Context, target SSHTarget) error {
+	command := remotePrepareAWSAMICommand()
+	if out, err := runSSHCombinedOutput(ctx, target, "bash -lc "+shellQuote(command)); err != nil {
+		return exit(7, "prepare AWS AMI source cloud-init: %v: %s", err, trimFailureDetail(out))
+	}
+	return nil
+}
+
+func remotePrepareAWSAMICommand() string {
+	return "if command -v cloud-init >/dev/null 2>&1; then sudo cloud-init clean --logs; fi; sync"
+}
+
+func defaultCheckpointRestoreWorkdir(cfg Config, leaseID, repoName, savedWorkdir string) string {
+	return firstNonBlank(remoteJoin(cfg, leaseID, repoName), savedWorkdir)
+}
+
+func nativeCheckpointForkWorkdir(cfg Config, leaseID, repoName, override string) string {
+	override = strings.TrimSpace(override)
+	if override != "" {
+		return override
+	}
+	return remoteJoin(cfg, leaseID, repoName)
+}
+
+func applyAWSAMICheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record checkpointRecord) {
+	cfg.Provider = "aws"
+	cfg.AWSAMI = record.Native.ImageID
+	if record.Native.Region != "" {
+		cfg.AWSRegion = record.Native.Region
+	}
+	if record.TargetOS != "" {
+		cfg.TargetOS = record.TargetOS
+	}
+	if record.WindowsMode != "" {
+		cfg.WindowsMode = record.WindowsMode
+	}
+	if !flagWasSet(fs, "type") {
+		cfg.ServerTypeExplicit = false
+		cfg.ServerType = serverTypeForConfig(*cfg)
+	}
+}
+
+func parseInterspersedFlags(fs *flag.FlagSet, args []string) error {
+	return parseFlags(fs, reorderInterspersedFlags(fs, args))
+}
+
+func reorderInterspersedFlags(fs *flag.FlagSet, args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positionals = append(positionals, arg)
+			continue
+		}
+		flags = append(flags, arg)
+		name := strings.TrimLeft(arg, "-")
+		if cut, _, ok := strings.Cut(name, "="); ok {
+			name = cut
+		}
+		if strings.Contains(arg, "=") || isBoolFlag(fs, name) || i+1 >= len(args) {
+			continue
+		}
+		i++
+		flags = append(flags, args[i])
+	}
+	return append(flags, positionals...)
+}
+
+func isBoolFlag(fs *flag.FlagSet, name string) bool {
+	f := fs.Lookup(name)
+	if f == nil {
+		return false
+	}
+	boolValue, ok := f.Value.(interface{ IsBoolFlag() bool })
+	return ok && boolValue.IsBoolFlag()
+}
+
+func validateCheckpointID(value string) (string, error) {
+	id := strings.TrimSpace(value)
+	if !strings.HasPrefix(id, checkpointIDPrefix) || len(id) <= len(checkpointIDPrefix) {
+		return "", exit(2, "checkpoint id must start with %s", checkpointIDPrefix)
+	}
+	for _, r := range strings.TrimPrefix(id, checkpointIDPrefix) {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			continue
+		}
+		return "", exit(2, "checkpoint id contains unsafe character %q", r)
+	}
+	return id, nil
+}
+
+func checkpointRootDir() (string, error) {
+	stateDir, err := crabboxStateDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(stateDir, "checkpoints"), nil
+}
+
+func checkpointDir(id string) (string, error) {
+	id, err := validateCheckpointID(id)
+	if err != nil {
+		return "", err
+	}
+	root, err := checkpointRootDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, id), nil
+}
+
+func writeCheckpointRecord(dir string, record checkpointRecord) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return exit(2, "create checkpoint directory: %v", err)
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return exit(2, "encode checkpoint %s: %v", record.ID, err)
+	}
+	data = append(data, '\n')
+	path := filepath.Join(dir, checkpointMetaFile)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return exit(2, "write checkpoint %s: %v", record.ID, err)
+	}
+	return nil
+}
+
+func readCheckpointRecord(id string) (checkpointRecord, string, error) {
+	dir, err := checkpointDir(id)
+	if err != nil {
+		return checkpointRecord{}, "", err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, checkpointMetaFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return checkpointRecord{}, "", exit(2, "checkpoint %s not found", id)
+		}
+		return checkpointRecord{}, "", exit(2, "read checkpoint %s: %v", id, err)
+	}
+	var record checkpointRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return checkpointRecord{}, "", exit(2, "parse checkpoint %s: %v", id, err)
+	}
+	if record.ID == "" {
+		record.ID = filepath.Base(dir)
+	}
+	return record, dir, nil
+}
+
+func listCheckpointRecords() ([]checkpointRecord, error) {
+	root, err := checkpointRootDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, exit(2, "read checkpoints: %v", err)
+	}
+	records := []checkpointRecord{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		record, _, err := readCheckpointRecord(entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		left, leftErr := time.Parse(time.RFC3339, records[i].CreatedAt)
+		right, rightErr := time.Parse(time.RFC3339, records[j].CreatedAt)
+		if leftErr == nil && rightErr == nil && !left.Equal(right) {
+			return left.After(right)
+		}
+		return records[i].ID > records[j].ID
+	})
+	return records, nil
+}
+
+func ensureCheckpointArchiveTarget(target SSHTarget) error {
+	if isWindowsNativeTarget(target) {
+		return exit(2, "workspace-archive checkpoints currently require POSIX SSH targets; use Windows WSL2 or a Linux/macOS lease")
+	}
+	return nil
+}
+
+func createCheckpointArchive(ctx context.Context, target SSHTarget, workdir, localPath string) (size int64, err error) {
+	if err := ensureCheckpointArchiveTarget(target); err != nil {
+		return 0, err
+	}
+	archiveDir := filepath.Dir(localPath)
+	createdArchiveDir := false
+	if _, statErr := os.Stat(archiveDir); os.IsNotExist(statErr) {
+		createdArchiveDir = true
+	}
+	published := false
+	defer func() {
+		if err != nil && createdArchiveDir && !published {
+			_ = os.RemoveAll(archiveDir)
+		}
+	}()
+	if err := os.MkdirAll(archiveDir, 0o700); err != nil {
+		return 0, exit(2, "create checkpoint archive directory: %v", err)
+	}
+	tmpPath := localPath + ".tmp"
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return 0, exit(2, "create checkpoint archive: %v", err)
+	}
+	defer func() { _ = os.Remove(tmpPath) }()
+	cmd := exec.CommandContext(ctx, "ssh", sshArgs(target, remoteCheckpointArchiveCommand(workdir))...)
+	cmd.Stdout = file
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	closeErr := file.Close()
+	if runErr != nil {
+		return 0, exit(7, "archive checkpoint workdir %s: %v: %s", workdir, runErr, trimFailureDetail(stderr.String()))
+	}
+	if closeErr != nil {
+		return 0, exit(2, "close checkpoint archive: %v", closeErr)
+	}
+	info, err := os.Stat(tmpPath)
+	if err != nil {
+		return 0, exit(2, "stat checkpoint archive: %v", err)
+	}
+	if info.Size() == 0 {
+		return 0, exit(7, "archive checkpoint workdir %s: empty archive", workdir)
+	}
+	if err := os.Rename(tmpPath, localPath); err != nil {
+		return 0, exit(2, "publish checkpoint archive: %v", err)
+	}
+	published = true
+	return info.Size(), nil
+}
+
+func restoreCheckpointArchive(ctx context.Context, target SSHTarget, localPath, checkpointID, workdir string, clear bool) error {
+	if err := ensureCheckpointArchiveTarget(target); err != nil {
+		return err
+	}
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return exit(2, "read checkpoint archive: %v", err)
+	}
+	if info.IsDir() {
+		return exit(2, "checkpoint archive is a directory: %s", localPath)
+	}
+	remotePath := "/tmp/crabbox-" + safeCaptureName(checkpointID) + ".tar.gz"
+	file, err := os.Open(localPath)
+	if err != nil {
+		return exit(2, "open checkpoint archive: %v", err)
+	}
+	defer func() { _ = file.Close() }()
+	if err := runSSHInput(ctx, target, "cat > "+shellQuote(remotePath), file, io.Discard, io.Discard); err != nil {
+		return exit(7, "upload checkpoint archive %s: %v", checkpointID, err)
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if out, err := runSSHCombinedOutput(ctx, target, remoteCheckpointRestoreCommand(workdir, remotePath, clear)); err != nil {
+		return exit(7, "restore checkpoint %s: %v: %s", checkpointID, err, trimFailureDetail(out))
+	}
+	return nil
+}
+
+func remoteCheckpointArchiveCommand(workdir string) string {
+	script := "set -eu\n" +
+		"test -d " + shellQuote(workdir) + "\n" +
+		"tar -C " + shellQuote(workdir) + " --exclude './.crabbox/env' --exclude './.crabbox/scripts' -czf - ."
+	return "bash -lc " + shellQuote(script)
+}
+
+func remoteCheckpointRestoreCommand(workdir, archivePath string, clear bool) string {
+	var b strings.Builder
+	b.WriteString("set -eu\n")
+	b.WriteString("mkdir -p ")
+	b.WriteString(shellQuote(workdir))
+	b.WriteByte('\n')
+	if clear {
+		b.WriteString("find ")
+		b.WriteString(shellQuote(workdir))
+		b.WriteString(" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +\n")
+	}
+	b.WriteString("tar -C ")
+	b.WriteString(shellQuote(workdir))
+	b.WriteString(" -xzf ")
+	b.WriteString(shellQuote(archivePath))
+	b.WriteByte('\n')
+	b.WriteString("rm -f -- ")
+	b.WriteString(shellQuote(archivePath))
+	return "bash -lc " + shellQuote(b.String())
+}
+
+func relocateNativeCheckpointWorkdir(ctx context.Context, target SSHTarget, sourceWorkdir, targetWorkdir string) error {
+	command := remoteRelocateNativeCheckpointWorkdirCommand(sourceWorkdir, targetWorkdir)
+	if command == "" {
+		return nil
+	}
+	if out, err := runSSHCombinedOutput(ctx, target, command); err != nil {
+		return exit(7, "relocate native checkpoint workdir: %v: %s", err, trimFailureDetail(out))
+	}
+	return nil
+}
+
+func remoteRelocateNativeCheckpointWorkdirCommand(sourceWorkdir, targetWorkdir string) string {
+	sourceWorkdir = strings.TrimSpace(sourceWorkdir)
+	targetWorkdir = strings.TrimSpace(targetWorkdir)
+	if sourceWorkdir == "" || targetWorkdir == "" || sourceWorkdir == targetWorkdir {
+		return ""
+	}
+	script := "set -eu\n" +
+		"src=" + shellQuote(sourceWorkdir) + "\n" +
+		"dst=" + shellQuote(targetWorkdir) + "\n" +
+		"if test -d \"$src\" && ! test -e \"$dst\"; then\n" +
+		"  mkdir -p \"$(dirname \"$dst\")\"\n" +
+		"  mv \"$src\" \"$dst\"\n" +
+		"fi"
+	return "bash -lc " + shellQuote(script)
+}

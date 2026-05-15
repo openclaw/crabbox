@@ -264,6 +264,7 @@ export interface ProviderImage {
   windowsMode?: WindowsMode;
   serverType?: string;
   architecture?: string;
+  snapshots?: string[];
 }
 
 export interface PromotedImageRecord extends ProviderImage {

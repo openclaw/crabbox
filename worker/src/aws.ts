@@ -16,6 +16,7 @@ const awsUbuntuOwner = "099720109477";
 const ec2Version = "2016-11-15";
 const awsSpotQuotaCode = "L-34B43A08";
 const awsOnDemandQuotaCode = "L-1216C47A";
+const snapshotDeleteBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 
 export function createSecurityGroupParams(name: string, vpcID: string): Record<string, string> {
   return {
@@ -299,7 +300,49 @@ export class EC2SpotClient {
       name: asString(image["name"]),
       state: asString(image["imageState"]),
       region: this.region,
+      snapshots: imageSnapshotIDs(image),
     };
+  }
+
+  async deleteImage(imageID: string): Promise<void> {
+    const image = await this.getImage(imageID);
+    await this.ec2("DeregisterImage", { ImageId: imageID }).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("InvalidAMIID.NotFound")) {
+        throw error;
+      }
+    });
+    for (const snapshotID of image.snapshots ?? []) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- EBS snapshot deletes are independent cleanup calls.
+      await this.deleteSnapshotWithRetry(snapshotID);
+    }
+  }
+
+  private async deleteSnapshotWithRetry(snapshotID: string): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= snapshotDeleteBackoffMs.length; attempt++) {
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- retry preserves snapshot IDs after AMI deregistration.
+        await this.ec2("DeleteSnapshot", { SnapshotId: snapshotID });
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("InvalidSnapshot.NotFound")) {
+          return;
+        }
+        if (!isRetryableSnapshotDeleteError(message)) {
+          throw error;
+        }
+        lastError = error;
+        const backoffMs = snapshotDeleteBackoffMs[attempt];
+        if (backoffMs === undefined) {
+          break;
+        }
+        // oxlint-disable-next-line eslint/no-await-in-loop -- AWS can keep just-deregistered AMI snapshots locked briefly.
+        await sleep(backoffMs);
+      }
+    }
+    throw lastError;
   }
 
   async deleteSSHKey(name: string): Promise<void> {
@@ -766,6 +809,26 @@ function items(value: unknown): unknown[] {
     return value;
   }
   return value === undefined ? [] : [value];
+}
+
+function imageSnapshotIDs(image: Record<string, unknown>): string[] {
+  const mappings = items(record(image["blockDeviceMapping"])["item"]);
+  const snapshots = mappings
+    .map((mapping) => asString(record(record(mapping)["ebs"])["snapshotId"]))
+    .filter((snapshotID) => snapshotID !== "");
+  return [...new Set(snapshots)];
+}
+
+function isRetryableSnapshotDeleteError(message: string): boolean {
+  return (
+    message.includes("InvalidSnapshot.InUse") ||
+    message.includes("RequestLimitExceeded") ||
+    message.includes("Throttl") ||
+    message.includes("ServiceUnavailable") ||
+    message.includes("InternalError") ||
+    message.includes("http 5") ||
+    message.toLowerCase().includes("currently in use")
+  );
 }
 
 function asString(value: unknown): string {

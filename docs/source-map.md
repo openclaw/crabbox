@@ -99,6 +99,7 @@ repository-owned setup, usually through Actions hydration or repo scripts.
 - SSH command output and direct SSH touch behavior: `internal/cli/ssh.go`, `internal/cli/ssh_cmd.go`
 - Per-lease SSH known_hosts and ControlMaster config: `internal/cli/ssh.go`
 - GitHub Actions hydrate/register/dispatch bridge: `internal/cli/actions.go`
+- Workspace checkpoints: `internal/cli/checkpoint.go`
 - Cache stats/purge/warm commands: `internal/cli/cache.go`
 - Run history/event/attach/log commands and retained run logs: `internal/cli/history.go`, `internal/cli/run_recorder.go`, `internal/cli/run_output_events.go`, `internal/cli/runlog.go`
 - JUnit result parsing and remote markers: `internal/cli/results.go`, `internal/cli/results_parse.go`, `internal/cli/results_remote.go`

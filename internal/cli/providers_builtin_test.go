@@ -92,6 +92,8 @@ func (p testGCPProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 
 type testAWSProvider struct{}
 
+var testAWSBackendOverride SSHLeaseBackend
+
 func (testAWSProvider) Name() string      { return "aws" }
 func (testAWSProvider) Aliases() []string { return nil }
 func (testAWSProvider) Spec() ProviderSpec {
@@ -113,6 +115,9 @@ func (testAWSProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testAWSProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	if testAWSBackendOverride != nil {
+		return testAWSBackendOverride, nil
+	}
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
