@@ -47,6 +47,42 @@ test("registers the Crabbox tool surface", () => {
   );
 });
 
+test("provider schema accepts current Crabbox providers and aliases", () => {
+  const tools = registerWithConfig({});
+  const providerEnum = getTool(tools, "crabbox_run").parameters.properties.provider.enum;
+  for (const provider of [
+    "aws",
+    "azure",
+    "gcp",
+    "google",
+    "google-cloud",
+    "hetzner",
+    "proxmox",
+    "ssh",
+    "static",
+    "static-ssh",
+    "blacksmith-testbox",
+    "blacksmith",
+    "namespace-devbox",
+    "namespace",
+    "namespace-devboxes",
+    "semaphore",
+    "sem",
+    "sprites",
+    "daytona",
+    "islo",
+    "e2b",
+    "modal",
+    "tensorlake",
+    "tl",
+    "tensorlake-sbx",
+    "cloudflare",
+    "cf",
+  ]) {
+    assert.ok(providerEnum.includes(provider), `${provider} missing from provider schema`);
+  }
+});
+
 test("crabbox_run executes the CLI without shell wrapping", async () => {
   const fake = createFakeCrabbox();
   const tools = registerWithConfig({ binary: fake.file });
