@@ -14,8 +14,7 @@ Crabbox supports macOS in two ways:
 ## Managed AWS EC2 Mac
 
 ```sh
-CRABBOX_AWS_MAC_HOST_ID=h-... \
-  crabbox warmup --provider aws --target macos --desktop --market on-demand
+crabbox warmup --provider aws --target macos --desktop --market on-demand
 crabbox vnc --id silver-squid --open
 crabbox screenshot --id silver-squid --output macos.png
 ```
@@ -23,7 +22,8 @@ crabbox screenshot --id silver-squid --output macos.png
 EC2 Mac requirements:
 
 - an allocated EC2 Mac Dedicated Host in the selected region;
-- `CRABBOX_AWS_MAC_HOST_ID` or `aws.macHostId`;
+- an optional `CRABBOX_AWS_MAC_HOST_ID` or `aws.macHostId` when you want to pin
+  the lease to a specific Dedicated Host;
 - On-Demand capacity;
 - the default `mac2.metal` instance type unless `--type` is set.
 
@@ -44,8 +44,8 @@ non-interactive SSH sessions.
 
 AWS EC2 Mac has a provider-level lifecycle constraint: Mac instances run on
 allocated Dedicated Hosts with a 24-hour minimum host allocation period.
-Crabbox launches onto a host id you provide; it does not allocate, scrub, or
-retire Mac hosts for you.
+Crabbox launches onto an available host or the host id you provide; it does not
+allocate, scrub, or retire Mac hosts for you.
 
 Promoted AWS images are scoped by target, architecture, and region. Use
 `crabbox image promote <ami-id> --target macos --region <aws-region>` when
@@ -79,10 +79,11 @@ Static Macs work well over Tailscale: put the MagicDNS name or 100.x address in
 
 ## Troubleshooting
 
-Missing host id
+Missing host capacity
 
-Set `CRABBOX_AWS_MAC_HOST_ID` or `aws.macHostId`, use `--market on-demand`, and
-verify the Dedicated Host is allocated in the selected AWS region.
+Use `--market on-demand` and verify an available EC2 Mac Dedicated Host is
+allocated in the selected AWS region. Set `CRABBOX_AWS_MAC_HOST_ID` or
+`aws.macHostId` only when you want to pin to a specific host.
 
 VNC prompt asks for host credentials
 

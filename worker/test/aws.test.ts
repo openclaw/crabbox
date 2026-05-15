@@ -6,6 +6,7 @@ import {
   awsAvailabilityZoneForRegion,
   awsInstanceTypeVCPUs,
   awsLaunchCandidates,
+  awsMacHostIDFromDescribeHosts,
   awsProvisioningErrorCategory,
   awsQuotaCodeForMarket,
   awsQuotaPreflightAttempt,
@@ -13,6 +14,7 @@ import {
   crabboxSSHIngressRules,
   createSecurityGroupParams,
   isAWSInstanceCleanedAfterReadinessFailure,
+  isAWSInvalidHostIDError,
   isAWSInstanceNotFoundError,
   staleCrabboxSSHIngressRules,
 } from "../src/aws";
@@ -144,6 +146,41 @@ describe("aws provider", () => {
       ),
     ).toBe(true);
     expect(isAWSInstanceNotFoundError("UnauthorizedOperation: nope")).toBe(false);
+  });
+
+  it("classifies stale EC2 Mac host ID errors", () => {
+    expect(
+      isAWSInvalidHostIDError(
+        "<Code>InvalidHostID.NotFound</Code><Message>The specified Dedicated host IDs do not exist.</Message>",
+      ),
+    ).toBe(true);
+    expect(isAWSInvalidHostIDError("InvalidInstanceID.NotFound")).toBe(false);
+  });
+
+  it("selects an available EC2 Mac Dedicated Host from DescribeHosts", () => {
+    expect(
+      awsMacHostIDFromDescribeHosts({
+        hostSet: {
+          item: [
+            { hostId: "h-stale", hostState: "available" },
+            { hostId: "h-usable", hostState: "available" },
+          ],
+        },
+      }),
+    ).toBe("h-stale");
+    expect(
+      awsMacHostIDFromDescribeHosts(
+        {
+          hostSet: {
+            item: [
+              { hostId: "h-stale", hostState: "available" },
+              { hostId: "h-usable", hostState: "available" },
+            ],
+          },
+        },
+        "h-stale",
+      ),
+    ).toBe("h-usable");
   });
 
   it("treats missing stale AWS instance cleanup as cleaned", () => {

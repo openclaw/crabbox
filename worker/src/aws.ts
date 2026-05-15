@@ -354,58 +354,68 @@ export class EC2SpotClient {
     const rootGB = config.awsRootGB || positiveInt(this.env.CRABBOX_AWS_ROOT_GB) || 400;
     const instanceProfile = config.awsProfile || this.env.CRABBOX_AWS_INSTANCE_PROFILE || "";
     const subnetID = config.awsSubnetID || this.env.CRABBOX_AWS_SUBNET_ID || "";
-    const params: Record<string, string> = {
-      ClientToken: leaseID,
-      ImageId: imageID,
-      InstanceType: config.serverType,
-      KeyName: config.providerKey,
-      MaxCount: "1",
-      MinCount: "1",
-      UserData: btoa(awsUserData(config)),
-      "BlockDeviceMapping.1.DeviceName": "/dev/sda1",
-      "BlockDeviceMapping.1.Ebs.DeleteOnTermination": "true",
-      "BlockDeviceMapping.1.Ebs.Encrypted": "true",
-      "BlockDeviceMapping.1.Ebs.VolumeSize": String(Math.max(1, rootGB)),
-      "BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
+    const configuredMacHostID = config.awsMacHostID || this.env.CRABBOX_AWS_MAC_HOST_ID || "";
+    const run = async (macHostID: string): Promise<ProviderMachine> => {
+      const params: Record<string, string> = {
+        ClientToken: leaseID,
+        ImageId: imageID,
+        InstanceType: config.serverType,
+        KeyName: config.providerKey,
+        MaxCount: "1",
+        MinCount: "1",
+        UserData: btoa(awsUserData(config)),
+        "BlockDeviceMapping.1.DeviceName": "/dev/sda1",
+        "BlockDeviceMapping.1.Ebs.DeleteOnTermination": "true",
+        "BlockDeviceMapping.1.Ebs.Encrypted": "true",
+        "BlockDeviceMapping.1.Ebs.VolumeSize": String(Math.max(1, rootGB)),
+        "BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
+      };
+      if (config.capacityMarket !== "on-demand") {
+        params["InstanceMarketOptions.MarketType"] = "spot";
+        params["InstanceMarketOptions.SpotOptions.InstanceInterruptionBehavior"] = "terminate";
+        params["InstanceMarketOptions.SpotOptions.SpotInstanceType"] = "one-time";
+      }
+      if (instanceProfile) {
+        params["IamInstanceProfile.Name"] = instanceProfile;
+      }
+      if (subnetID) {
+        params["NetworkInterface.1.AssociatePublicIpAddress"] = "true";
+        params["NetworkInterface.1.DeleteOnTermination"] = "true";
+        params["NetworkInterface.1.DeviceIndex"] = "0";
+        params["NetworkInterface.1.GroupSet.1"] = securityGroupID;
+        params["NetworkInterface.1.SubnetId"] = subnetID;
+      } else {
+        params["SecurityGroupId.1"] = securityGroupID;
+      }
+      applyAWSRunInstanceTargetOptions(params, config);
+      if (config.target === "macos") {
+        const hostID = macHostID || (await this.discoverMacHostID(config.serverType));
+        params["Placement.HostId"] = hostID;
+        params["Placement.Tenancy"] = "host";
+      } else if (!subnetID) {
+        const availabilityZone = awsAvailabilityZoneForRegion(config, this.env, this.region);
+        if (availabilityZone) {
+          params["Placement.AvailabilityZone"] = availabilityZone;
+        }
+      }
+      addRunInstancesTagSpecifications(params, { ...labels, Name: name }, config.capacityMarket);
+      const root = await this.ec2("RunInstances", params);
+      const instance = items(record(root["instancesSet"])["item"])[0];
+      if (!instance) {
+        throw new Error("aws returned no instances");
+      }
+      return this.withRegion(instanceToMachine(instance));
     };
-    if (config.capacityMarket !== "on-demand") {
-      params["InstanceMarketOptions.MarketType"] = "spot";
-      params["InstanceMarketOptions.SpotOptions.InstanceInterruptionBehavior"] = "terminate";
-      params["InstanceMarketOptions.SpotOptions.SpotInstanceType"] = "one-time";
-    }
-    if (instanceProfile) {
-      params["IamInstanceProfile.Name"] = instanceProfile;
-    }
-    if (subnetID) {
-      params["NetworkInterface.1.AssociatePublicIpAddress"] = "true";
-      params["NetworkInterface.1.DeleteOnTermination"] = "true";
-      params["NetworkInterface.1.DeviceIndex"] = "0";
-      params["NetworkInterface.1.GroupSet.1"] = securityGroupID;
-      params["NetworkInterface.1.SubnetId"] = subnetID;
-    } else {
-      params["SecurityGroupId.1"] = securityGroupID;
-    }
-    applyAWSRunInstanceTargetOptions(params, config);
-    if (config.target === "macos") {
-      const hostID = config.awsMacHostID || this.env.CRABBOX_AWS_MAC_HOST_ID || "";
-      if (!hostID) {
-        throw new Error("aws target=macos requires CRABBOX_AWS_MAC_HOST_ID");
+    try {
+      return await run(configuredMacHostID);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (config.target !== "macos" || !configuredMacHostID || !isAWSInvalidHostIDError(message)) {
+        throw error;
       }
-      params["Placement.HostId"] = hostID;
-      params["Placement.Tenancy"] = "host";
-    } else if (!subnetID) {
-      const availabilityZone = awsAvailabilityZoneForRegion(config, this.env, this.region);
-      if (availabilityZone) {
-        params["Placement.AvailabilityZone"] = availabilityZone;
-      }
+      const discovered = await this.discoverMacHostID(config.serverType, configuredMacHostID);
+      return run(discovered);
     }
-    addRunInstancesTagSpecifications(params, { ...labels, Name: name }, config.capacityMarket);
-    const root = await this.ec2("RunInstances", params);
-    const instance = items(record(root["instancesSet"])["item"])[0];
-    if (!instance) {
-      throw new Error("aws returned no instances");
-    }
-    return this.withRegion(instanceToMachine(instance));
   }
 
   private async resolveAMI(config: LeaseConfig): Promise<string> {
@@ -508,6 +518,22 @@ export class EC2SpotClient {
       }
     }
     return groupID;
+  }
+
+  private async discoverMacHostID(serverType: string, excludedHostID = ""): Promise<string> {
+    const root = await this.ec2("DescribeHosts", {
+      "Filter.1.Name": "instance-type",
+      "Filter.1.Value.1": serverType,
+      "Filter.2.Name": "state",
+      "Filter.2.Value.1": "available",
+    });
+    const hostID = awsMacHostIDFromDescribeHosts(root, excludedHostID);
+    if (!hostID) {
+      throw new Error(
+        `no available EC2 Mac Dedicated Host found in ${this.region} for ${serverType}; allocate a host or set CRABBOX_AWS_MAC_HOST_ID`,
+      );
+    }
+    return hostID;
   }
 
   private async pruneStaleSSHIngress(
@@ -672,6 +698,20 @@ function instanceToMachine(input: unknown): ProviderMachine {
     host: asString(instance["ipAddress"]),
     labels: tags,
   };
+}
+
+export function awsMacHostIDFromDescribeHosts(
+  root: Record<string, unknown>,
+  excludedHostID = "",
+): string {
+  const hosts = items(record(root["hostSet"])["item"])
+    .map(record)
+    .filter((host) => {
+      const hostID = asString(host["hostId"]);
+      return hostID && hostID !== excludedHostID;
+    });
+  const available = hosts.find((host) => asString(host["hostState"]) === "available");
+  return asString((available ?? hosts[0] ?? {})["hostId"]);
 }
 
 function tagMap(input: unknown): Record<string, string> {
@@ -966,6 +1006,10 @@ export function isRetryableAWSProvisioningError(message: string): boolean {
 
 export function isAWSInstanceNotFoundError(message: string): boolean {
   return message.includes("InvalidInstanceID.NotFound");
+}
+
+export function isAWSInvalidHostIDError(message: string): boolean {
+  return message.includes("InvalidHostID.NotFound");
 }
 
 export function isAWSInstanceCleanedAfterReadinessFailure(
