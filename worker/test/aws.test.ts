@@ -20,6 +20,7 @@ import {
   isRetryableAWSProvisioningError,
   staleCrabboxSSHIngressRules,
 } from "../src/aws";
+import { leaseConfig } from "../src/config";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -268,6 +269,109 @@ describe("aws provider", () => {
     expect(isRetryableAWSProvisioningError(hostMiss)).toBe(true);
     expect(awsProvisioningErrorCategory(imageMiss)).toBe("region");
     expect(isRetryableAWSProvisioningError(imageMiss)).toBe(true);
+  });
+
+  it("resolves macOS AMIs per fallback instance type", async () => {
+    const imageArchitectures: string[] = [];
+    const hostTypes: string[] = [];
+    const runImages: string[] = [];
+    const runTypes: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const body = await request.clone().text();
+        const params = new URLSearchParams(body);
+        const action = params.get("Action") ?? "";
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+        }
+        if (action === "DescribeImages") {
+          const architecture = params.get("Filter.1.Value.1") ?? "";
+          imageArchitectures.push(architecture);
+          const imageID = architecture === "x86_64_mac" ? "ami-x86-mac" : "ami-arm-mac";
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>${imageID}</imageId>
+      <name>macos</name>
+      <imageState>available</imageState>
+      <creationDate>2026-05-01T00:00:00.000Z</creationDate>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`);
+        }
+        if (action === "DescribeHosts") {
+          const serverType = params.get("Filter.1.Value.1") ?? "";
+          hostTypes.push(serverType);
+          if (serverType === "mac1.metal") {
+            return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeHostsResponse>
+  <hostSet>
+    <item>
+      <hostId>h-mac1</hostId>
+      <hostState>available</hostState>
+    </item>
+  </hostSet>
+</DescribeHostsResponse>`);
+          }
+          return ec2XMLResponse("<DescribeHostsResponse><hostSet /></DescribeHostsResponse>");
+        }
+        if (action === "RunInstances") {
+          runImages.push(params.get("ImageId") ?? "");
+          runTypes.push(params.get("InstanceType") ?? "");
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<RunInstancesResponse>
+  <instancesSet>
+    <item>
+      <instanceId>i-mac1</instanceId>
+      <instanceType>mac1.metal</instanceType>
+      <ipAddress>203.0.113.44</ipAddress>
+      <instanceState><name>pending</name></instanceState>
+      <tagSet><item><key>Name</key><value>crabbox-violet-prawn</value></item></tagSet>
+    </item>
+  </instancesSet>
+</RunInstancesResponse>`);
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
+      } as never,
+      "eu-west-1",
+    );
+    const result = await client.createServerWithFallback(
+      leaseConfig({
+        provider: "aws",
+        target: "macos",
+        capacity: { market: "on-demand" },
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(imageArchitectures).toEqual(["arm64_mac", "x86_64_mac"]);
+    expect(hostTypes).toEqual(["mac2.metal", "mac1.metal"]);
+    expect(runTypes).toEqual(["mac1.metal"]);
+    expect(runImages).toEqual(["ami-x86-mac"]);
+    expect(result.serverType).toBe("mac1.metal");
   });
 
   it("maps AWS instance types to vCPU quota units", () => {

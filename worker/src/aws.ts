@@ -118,7 +118,7 @@ export class EC2SpotClient {
     attempts?: ProvisioningAttempt[];
   }> {
     await this.ensureSSHKey(config.providerKey, config.sshPublicKey);
-    const imageID = await this.resolveAMI(config);
+    const defaultImageID = config.target === "macos" ? "" : await this.resolveAMI(config);
     const securityGroupID = await this.ensureSecurityGroup(config);
     const candidates = awsLaunchCandidates(config);
     const failures: string[] = [];
@@ -137,6 +137,7 @@ export class EC2SpotClient {
         continue;
       }
       try {
+        const imageID = defaultImageID || (await this.resolveAMI({ ...config, serverType }));
         // oxlint-disable-next-line eslint/no-await-in-loop -- instance-type fallback must stay sequential.
         const server = await this.createServer(
           { ...config, serverType },
@@ -181,6 +182,7 @@ export class EC2SpotClient {
           continue;
         }
         try {
+          const imageID = defaultImageID || (await this.resolveAMI({ ...config, serverType }));
           // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
           const server = await this.createServer(
             { ...config, capacityMarket: "on-demand", serverType },

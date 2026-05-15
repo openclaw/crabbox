@@ -16,7 +16,7 @@
 - Fixed remote macOS screenshots so `crabbox screenshot` captures the Screen Sharing/VNC framebuffer instead of relying on `screencapture` from non-interactive SSH sessions.
 - Fixed brokered AWS macOS launches so a stale configured Dedicated Host id can fall back to discovering another available EC2 Mac Dedicated Host in the selected region.
 - Fixed brokered AWS macOS region fallback so missing Mac hosts or regional macOS AMIs do not stop the configured region search early.
-- Fixed AWS macOS class fallback so `mac1.metal` can satisfy a request when `mac2.metal` capacity is unavailable and no exact `--type` is set.
+- Fixed AWS macOS class fallback so `mac1.metal` can satisfy a request with a matching AMI when `mac2.metal` capacity is unavailable and no exact `--type` is set.
 - Fixed AWS image deletion so scoped promoted macOS images cannot be deleted until another image is promoted.
 - Fixed `crabbox admin lease-audit --fail-on-live` so recently terminated AWS instances returned by `DescribeInstances` do not fail cleanup automation as live resources.
 - Fixed coordinator TTL cleanup so provider deletion failures keep leases active with retry metadata instead of silently expiring while cloud instances continue running.
