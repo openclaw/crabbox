@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"strings"
 	"time"
 )
@@ -403,10 +404,15 @@ func tensorlakeWorkdir(cfg Config) (string, error) {
 	if workdir == "" {
 		workdir = "/workspace/crabbox"
 	}
-	if !strings.HasPrefix(workdir, "/") {
+	clean := path.Clean(workdir)
+	if !strings.HasPrefix(clean, "/") {
 		return "", exit(2, "tensorlake workdir %q must be an absolute path", workdir)
 	}
-	return workdir, nil
+	switch clean {
+	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace":
+		return "", exit(2, "tensorlake workdir %q is too broad; choose a dedicated subdirectory", clean)
+	}
+	return clean, nil
 }
 
 func (b *tensorlakeBackend) now() time.Time {
