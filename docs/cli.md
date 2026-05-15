@@ -86,6 +86,7 @@ crabbox usage [--scope user|org|all] [--user <email>] [--org <name>] [--month YY
 crabbox admin leases [--state active|released|expired|failed] [--owner <email>] [--org <name>] [--json]
 crabbox admin lease-audit [--state expired] [--provider aws] [--fail-on-live] [--json]
 crabbox admin aws-identity [--region <region>] [--json]
+crabbox admin aws-policy
 crabbox admin mac-hosts policy
 crabbox admin mac-hosts offerings [--region <region>] [--type mac2.metal] [--json]
 crabbox admin mac-hosts list [--region <region>] [--type <mac-type>] [--state <state>] [--json]

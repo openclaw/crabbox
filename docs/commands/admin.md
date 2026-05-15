@@ -8,6 +8,7 @@ crabbox admin leases --state active --json
 crabbox admin lease-audit --state expired --provider aws
 crabbox admin lease-audit --fail-on-live
 crabbox admin aws-identity --region eu-west-1
+crabbox admin aws-policy
 crabbox admin mac-hosts policy
 crabbox admin mac-hosts offerings --region eu-west-1 --type mac2.metal
 crabbox admin mac-hosts list --region eu-west-1
@@ -67,6 +68,24 @@ Flags:
 ```text
 --region <region>   AWS region used for the STS endpoint
 --json              print JSON
+```
+
+## aws-policy
+
+Print the baseline IAM policy for brokered AWS provider operations. This is a
+local, read-only helper for operators configuring the Worker AWS principal.
+
+The policy covers key pairs, instance launch and termination, managed security
+groups, image creation/promotion, snapshot cleanup, and optional Service Quotas
+reads. If `CRABBOX_AWS_INSTANCE_PROFILE` is set, add a separate scoped
+`iam:PassRole` grant for that role with `iam:PassedToService=ec2.amazonaws.com`.
+EC2 Mac Dedicated Host allocation and release are intentionally separate; use
+`crabbox admin mac-hosts policy` for that grant.
+
+Flags:
+
+```text
+no flags
 ```
 
 ## mac-hosts

@@ -239,7 +239,8 @@ Service Quotas access is best-effort: when it is available, Crabbox can skip
 known quota-impossible instance types before calling `RunInstances`; when it
 is missing, EC2 launch errors are still classified after the failed call.
 EC2 Mac image bakes also need the separate Dedicated Host lifecycle grant
-printed by `crabbox admin mac-hosts policy`.
+printed by `crabbox admin mac-hosts policy`. Print the baseline provider
+policy with `crabbox admin aws-policy`.
 
 SSH ingress for AWS security groups is source-scoped. If `CRABBOX_AWS_SSH_CIDRS` is set, Crabbox adds those CIDRs. Otherwise, the CLI sends its detected outbound IPv4 `/32` to the broker; when that is unavailable, the Worker falls back to `CF-Connecting-IP` as `/32` or `/128`. Direct and brokered AWS open the primary SSH port plus configured fallback ports. Crabbox also revokes the old managed `0.0.0.0/0` SSH ingress rule when the broker touches the managed security group. Supplying `CRABBOX_AWS_SECURITY_GROUP_ID` makes network policy your responsibility.
 

@@ -206,6 +206,7 @@ Common Flows:
   crabbox admin leases --state active
   crabbox admin lease-audit --state expired --provider aws
   crabbox admin aws-identity --region eu-west-1
+  crabbox admin aws-policy
   crabbox admin mac-hosts policy
   crabbox admin mac-hosts offerings --region eu-west-1
   crabbox admin mac-hosts list --region eu-west-1

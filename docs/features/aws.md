@@ -110,6 +110,7 @@ EC2 Mac host lifecycle is explicit operator work:
 ```sh
 crabbox admin mac-hosts policy
 crabbox admin aws-identity --region eu-west-1
+crabbox admin aws-policy
 crabbox admin mac-hosts list --region eu-west-1
 crabbox admin mac-hosts offerings --region eu-west-1 --type mac2.metal
 crabbox admin mac-hosts allocate --region eu-west-1 --type mac2.metal --dry-run
@@ -130,6 +131,7 @@ warmup, WebVNC, AMI create, candidate boot, promotion, and cleanup phases also
 need the normal brokered AWS provider permissions documented in
 [Infrastructure](../infrastructure.md#aws-ec2), including launch/list/tag/terminate,
 key pair, security group, image, snapshot, and optional Service Quotas access.
+Print the baseline provider policy with `crabbox admin aws-policy`.
 
 CLI/direct env and config:
 

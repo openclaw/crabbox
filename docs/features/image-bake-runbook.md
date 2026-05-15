@@ -198,6 +198,7 @@ copy-pasteable policy with:
 
 ```bash
 crabbox admin aws-identity --region eu-west-1
+crabbox admin aws-policy
 crabbox admin mac-hosts policy
 ```
 
@@ -205,7 +206,8 @@ Do not treat that host policy as the whole image bake policy. It only unblocks
 Dedicated Host allocation and release. The full paid lifecycle also needs the
 normal AWS provider permissions in [Infrastructure](../infrastructure.md#aws-ec2)
 for key pairs, security groups, macOS `RunInstances`, AMI creation, candidate
-boot, promotion, snapshot cleanup, and lease termination.
+boot, promotion, snapshot cleanup, and lease termination. Print the baseline
+provider policy with `crabbox admin aws-policy`.
 
 For an end-to-end guarded run, use the repository smoke script:
 

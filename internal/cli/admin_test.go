@@ -54,6 +54,28 @@ func TestAdminMacHostsPolicyPrintsLifecyclePermissions(t *testing.T) {
 	}
 }
 
+func TestAdminAWSPolicyPrintsProviderPermissions(t *testing.T) {
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.adminAWSPolicy(nil); err != nil {
+		t.Fatal(err)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		`"ec2:RunInstances"`,
+		`"ec2:TerminateInstances"`,
+		`"ec2:CreateSecurityGroup"`,
+		`"ec2:CreateImage"`,
+		`"ec2:RegisterImage"`,
+		`"ec2:DeleteSnapshot"`,
+		`"servicequotas:GetServiceQuota"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("policy missing %s:\n%s", want, out)
+		}
+	}
+}
+
 func TestSummarizeMacHostDryRunMessage(t *testing.T) {
 	tests := []struct {
 		name    string

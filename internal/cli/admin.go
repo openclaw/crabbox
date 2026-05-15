@@ -108,6 +108,62 @@ func (a App) adminAWSIdentity(ctx context.Context, args []string) error {
 	return nil
 }
 
+const awsProviderPolicyJSON = `{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeImages",
+        "ec2:DescribeInstances",
+        "ec2:DescribeKeyPairs",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSnapshots",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeHosts"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:ImportKeyPair",
+        "ec2:DeleteKeyPair",
+        "ec2:RunInstances",
+        "ec2:TerminateInstances",
+        "ec2:CreateSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:CreateImage",
+        "ec2:RegisterImage",
+        "ec2:DeregisterImage",
+        "ec2:CreateSnapshot",
+        "ec2:DeleteSnapshot",
+        "ec2:CreateTags"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "servicequotas:GetServiceQuota",
+      "Resource": "*"
+    }
+  ]
+}`
+
+func (a App) adminAWSPolicy(args []string) error {
+	fs := newFlagSet("admin aws-policy", a.Stderr)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return exit(2, "usage: crabbox admin aws-policy")
+	}
+	fmt.Fprintln(a.Stdout, awsProviderPolicyJSON)
+	return nil
+}
+
 func (a App) adminMacHosts(ctx context.Context, args []string) error {
 	args = stripKongCommandPath(args, "admin", "mac-hosts")
 	if len(args) == 0 || isHelpArg(args[0]) {
