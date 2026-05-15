@@ -82,12 +82,16 @@ func newCloudflareClient(cfg Config, rt Runtime) (*cloudflareClient, error) {
 	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
 		return nil, exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
 	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, exit(2, "%s url %q must not include query or fragment components", providerName, apiURL)
+	}
+	baseURL := strings.TrimRight(parsed.String(), "/")
 	httpClient := rt.HTTP
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
 	return &cloudflareClient{
-		baseURL:      strings.TrimRight(apiURL, "/"),
+		baseURL:      baseURL,
 		token:        token,
 		instanceType: instanceType,
 		http:         httpClient,

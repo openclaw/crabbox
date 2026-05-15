@@ -21,6 +21,7 @@
 - Fixed checkpoint archive restores so large archives stream over SSH without buffering the full tarball in memory and unpack through a per-restore remote temp file. Thanks @stainlu.
 - Fixed Daytona toolbox archive sync so failed remote extracts still remove the uploaded `/tmp/crabbox-*.tgz` archive. Thanks @stainlu.
 - Fixed Islo exec-upload fallback cleanup so failed archive decodes or extracts still remove temporary upload files. Thanks @stainlu.
+- Fixed Cloudflare runner URL validation so configured runner URLs cannot include query or fragment components that corrupt API request paths. Thanks @stainlu.
 - Fixed coordinator TTL cleanup so provider deletion failures keep leases active with retry metadata instead of silently expiring while cloud instances continue running.
 - Fixed direct AWS security-group maintenance so stale Crabbox-owned SSH ingress rules are pruned before adding the current source CIDRs.
 - Fixed E2B sync cleanup so remote upload archives are removed even when extraction fails. Thanks @stainlu.

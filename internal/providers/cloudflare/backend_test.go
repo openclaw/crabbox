@@ -116,6 +116,39 @@ func TestCloudflareFlagsApply(t *testing.T) {
 	}
 }
 
+func TestCloudflareClientNormalizesBaseURL(t *testing.T) {
+	cfg := Config{}
+	cfg.Cloudflare.APIURL = " https://runner.example.com/base/ "
+	cfg.Cloudflare.Token = "token"
+	client, err := newCloudflareClient(cfg, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.baseURL != "https://runner.example.com/base" {
+		t.Fatalf("baseURL = %q, want normalized base URL", client.baseURL)
+	}
+}
+
+func TestCloudflareClientRejectsURLQueryAndFragment(t *testing.T) {
+	for _, rawURL := range []string{
+		"https://runner.example.com?token=leaky",
+		"https://runner.example.com/#sandbox",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			cfg := Config{}
+			cfg.Cloudflare.APIURL = rawURL
+			cfg.Cloudflare.Token = "token"
+			_, err := newCloudflareClient(cfg, Runtime{})
+			if err == nil {
+				t.Fatal("newCloudflareClient accepted URL query or fragment")
+			}
+			if !strings.Contains(err.Error(), "must not include query or fragment") {
+				t.Fatalf("error = %v, want query or fragment message", err)
+			}
+		})
+	}
+}
+
 func TestCloudflareCreateSandboxSendsInstanceType(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var got createSandboxRequest
