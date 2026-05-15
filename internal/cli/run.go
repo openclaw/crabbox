@@ -66,7 +66,11 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	}
 	options := leaseOptionsFromConfig(cfg)
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
-		return delegated.Warmup(ctx, WarmupRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim, ActionsRunner: *actionsRunner, TimingJSON: *timingJSON})
+		if err := delegated.Warmup(ctx, WarmupRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim, ActionsRunner: *actionsRunner, TimingJSON: *timingJSON}); err != nil {
+			return err
+		}
+		a.syncExternalRunnersBestEffort(ctx, cfg, backend)
+		return nil
 	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
@@ -294,8 +298,11 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		if runReq.Preflight {
 			printDelegatedPreflightUnsupported(a.Stderr, backend.Spec().Name)
 		}
-		_, err := delegated.Run(ctx, runReq)
-		return err
+		result, runErr := delegated.Run(ctx, runReq)
+		if runErr == nil || result.Command > 0 || result.Total > 0 {
+			a.syncExternalRunnersBestEffort(ctx, cfg, backend)
+		}
+		return runErr
 	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {

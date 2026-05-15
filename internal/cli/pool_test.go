@@ -1,6 +1,11 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -136,6 +141,59 @@ func TestCoordinatorExternalRunnersFromBlacksmithListView(t *testing.T) {
 	}
 	if got.ID != "tbx_01kqyahxh67z6qtwtsdkt5xcst" || got.CreatedAt != "2026-05-06T09:45:16.000000Z" {
 		t.Fatalf("unexpected runner: %#v", got)
+	}
+}
+
+type testExternalRunnerJSONBackend struct {
+	view     any
+	requests []ListRequest
+}
+
+func (b *testExternalRunnerJSONBackend) Spec() ProviderSpec {
+	return ProviderSpec{Name: "blacksmith-testbox"}
+}
+
+func (b *testExternalRunnerJSONBackend) ListJSON(_ context.Context, req ListRequest) (any, error) {
+	b.requests = append(b.requests, req)
+	return b.view, nil
+}
+
+func TestSyncExternalRunnersBestEffortPostsBlacksmithJSONList(t *testing.T) {
+	var posted struct {
+		Provider string                      `json:"provider"`
+		Runners  []CoordinatorExternalRunner `json:"runners"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/runners/sync" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+			t.Fatalf("decode sync body: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(CoordinatorExternalRunnerSyncResponse{})
+	}))
+	defer server.Close()
+
+	backend := &testExternalRunnerJSONBackend{view: []map[string]string{
+		{
+			"id":      "tbx_01sync",
+			"status":  "ready",
+			"repo":    "example-org/example-repo",
+			"created": "2026-05-06T09:45:16.000000Z",
+		},
+	}}
+
+	app := App{Stderr: io.Discard}
+	app.syncExternalRunnersBestEffort(context.Background(), Config{Provider: "blacksmith-testbox", Coordinator: server.URL}, backend)
+
+	if len(backend.requests) != 1 || !backend.requests[0].All {
+		t.Fatalf("list requests=%#v, want one all request", backend.requests)
+	}
+	if posted.Provider != "blacksmith-testbox" || len(posted.Runners) != 1 {
+		t.Fatalf("posted=%#v", posted)
+	}
+	if got := posted.Runners[0]; got.ID != "tbx_01sync" || got.Provider != "blacksmith-testbox" {
+		t.Fatalf("runner=%#v", got)
 	}
 }
 

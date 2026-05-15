@@ -292,7 +292,7 @@ func (b *blacksmithBackend) warmupLease(ctx context.Context, repo Repo, reclaim 
 	output := result.Stdout + result.Stderr
 	if err != nil {
 		b.cleanupFailedWarmup(ctx, beforeWarmup, output)
-		return "", "", exit(result.ExitCode, "blacksmith testbox warmup failed: %v", err)
+		return "", "", exit(result.ExitCode, "blacksmith testbox warmup failed: %v; if the delegated queue is unavailable, rerun with a coordinator-backed provider such as --provider aws", err)
 	}
 	leaseID := parseBlacksmithID(output)
 	if leaseID == "" {

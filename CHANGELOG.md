@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Fixed delegated Blacksmith Testbox warmup/run flows so successful allocations refresh the coordinator runner portal instead of waiting for a later manual list.
 - Fixed Code bridge upstream URL handling so browser-controlled paths cannot select a non-loopback upstream target, and clamped `CRABBOX_AWS_ROOT_GB` parsing to valid `int32` values.
 - Fixed `crabbox admin lease-audit --fail-on-live` so recently terminated AWS instances returned by `DescribeInstances` do not fail cleanup automation as live resources.
 - Fixed checkpoint archive restores so large archives stream over SSH without buffering the full tarball in memory and unpack through a per-restore remote temp file. Thanks @stainlu.
