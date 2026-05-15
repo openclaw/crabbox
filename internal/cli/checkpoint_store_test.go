@@ -17,8 +17,8 @@ func TestCheckpointStoreCreateReadList(t *testing.T) {
 		CreatedAt: "2026-05-09T10:00:00Z",
 		Repo: CheckpointRepo{
 			Root:      "/repo",
-			Name:      "crabbox",
-			RemoteURL: "https://github.com/openclaw/crabbox",
+			Name:      "my-app",
+			RemoteURL: "https://github.com/example-org/my-app",
 			Branch:    "main",
 			Head:      "abc123",
 			BaseRef:   "main",

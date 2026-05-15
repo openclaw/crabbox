@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,8 +10,6 @@ import (
 	"strings"
 	"time"
 )
-
-const checkpointIDPrefix = "chk_"
 
 type CheckpointRecord struct {
 	ID               string                      `json:"id"`
@@ -99,15 +95,18 @@ func (s checkpointStore) Create(record CheckpointRecord) (CheckpointRecord, erro
 		}
 		record.ID = id
 	}
-	record.ID = strings.TrimSpace(record.ID)
-	if err := validateCheckpointID(record.ID); err != nil {
+	id, err := validateCheckpointID(record.ID)
+	if err != nil {
 		return CheckpointRecord{}, err
 	}
+	record.ID = id
 	record.ParentID = strings.TrimSpace(record.ParentID)
 	if record.ParentID != "" {
-		if err := validateCheckpointID(record.ParentID); err != nil {
+		parentID, err := validateCheckpointID(record.ParentID)
+		if err != nil {
 			return CheckpointRecord{}, fmt.Errorf("parent id: %w", err)
 		}
+		record.ParentID = parentID
 	}
 	if strings.TrimSpace(record.CreatedAt) == "" {
 		record.CreatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -126,8 +125,8 @@ func (s checkpointStore) Create(record CheckpointRecord) (CheckpointRecord, erro
 }
 
 func (s checkpointStore) Read(id string) (CheckpointRecord, error) {
-	id = strings.TrimSpace(id)
-	if err := validateCheckpointID(id); err != nil {
+	id, err := validateCheckpointID(id)
+	if err != nil {
 		return CheckpointRecord{}, err
 	}
 	data, err := os.ReadFile(s.path(id))
@@ -209,26 +208,5 @@ func writeCheckpointJSON(path string, record CheckpointRecord) error {
 		return exit(2, "close checkpoint %s: %v", path, err)
 	}
 	created = true
-	return nil
-}
-
-func newCheckpointID() (string, error) {
-	var raw [8]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
-	}
-	return checkpointIDPrefix + hex.EncodeToString(raw[:]), nil
-}
-
-func validateCheckpointID(id string) error {
-	if !strings.HasPrefix(id, checkpointIDPrefix) || len(id) <= len(checkpointIDPrefix) {
-		return exit(2, "checkpoint id must start with %s", checkpointIDPrefix)
-	}
-	for _, r := range strings.TrimPrefix(id, checkpointIDPrefix) {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
-			continue
-		}
-		return exit(2, "checkpoint id contains unsafe character %q", r)
-	}
 	return nil
 }
