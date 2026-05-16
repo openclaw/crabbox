@@ -3515,12 +3515,17 @@ export class FleetDurableObject implements DurableObject {
           { status: 400 },
         );
       }
-      const input = await readJson<{
+      const input: {
         target?: string;
         region?: string;
         serverType?: string;
         architecture?: string;
-      }>(request);
+      } = await readJson<{
+        target?: string;
+        region?: string;
+        serverType?: string;
+        architecture?: string;
+      }>(request).catch(() => ({}));
       const target = normalizeAWSImageTarget(
         input.target ?? url.searchParams.get("target") ?? known?.target ?? "linux",
       );
