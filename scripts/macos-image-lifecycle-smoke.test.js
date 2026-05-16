@@ -232,12 +232,12 @@ test("macOS lifecycle smoke writes a blocked IAM summary before paid work", asyn
   assert.match(summary.blocker.message, /ec2:CreateTags/);
   assert.match(summary.blocker.remediation, /Apply the EC2 Mac host lifecycle policy/);
   assert.deepEqual(summary.blocker.commands, [
-    `${run.fake} admin aws-identity --region eu-west-1`,
-    `${run.fake} admin aws-policy --mac-hosts`,
-    `coordinator_account=$(${run.fake} admin aws-identity --region eu-west-1 --json | jq -r .account)`,
+    "crabbox admin aws-identity --region eu-west-1",
+    "crabbox admin aws-policy --mac-hosts",
+    "coordinator_account=$(crabbox admin aws-identity --region eu-west-1 --json | jq -r .account)",
     "local_account=$(aws sts get-caller-identity --query Account --output text)",
     'test "$local_account" = "$coordinator_account"',
-    `${run.fake} admin mac-hosts allocate --region eu-west-1 --type mac2.metal --dry-run --json`,
+    "crabbox admin mac-hosts allocate --region eu-west-1 --type mac2.metal --dry-run --json",
   ]);
   await assertFileContains(summary.evidence.awsProviderPolicy, /ec2:RunInstances/);
   await assertFileContains(summary.evidence.macHostPolicy, /ec2:AllocateHosts/);
@@ -282,13 +282,13 @@ test("macOS lifecycle smoke preserves quota IAM evidence when dry-run is also bl
   assert.match(summary.blocker.message, /quota preflight also failed/);
   assert.match(summary.blocker.remediation, /servicequotas:ListServiceQuotas/);
   assert.deepEqual(summary.blocker.commands, [
-    `${run.fake} admin aws-identity --region eu-west-1`,
-    `${run.fake} admin aws-policy --mac-hosts`,
-    `coordinator_account=$(${run.fake} admin aws-identity --region eu-west-1 --json | jq -r .account)`,
+    "crabbox admin aws-identity --region eu-west-1",
+    "crabbox admin aws-policy --mac-hosts",
+    "coordinator_account=$(crabbox admin aws-identity --region eu-west-1 --json | jq -r .account)",
     "local_account=$(aws sts get-caller-identity --query Account --output text)",
     'test "$local_account" = "$coordinator_account"',
-    `${run.fake} admin mac-hosts quota --region eu-west-1 --type mac2.metal --json`,
-    `${run.fake} admin mac-hosts allocate --region eu-west-1 --type mac2.metal --dry-run --json`,
+    "crabbox admin mac-hosts quota --region eu-west-1 --type mac2.metal --json",
+    "crabbox admin mac-hosts allocate --region eu-west-1 --type mac2.metal --dry-run --json",
   ]);
   await assertFileContains(summary.evidence.hostQuota, /servicequotas:ListServiceQuotas/);
   await assertFileContains(summary.evidence.hostDryRun, /UnauthorizedOperation/);

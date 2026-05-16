@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CRABBOX_BIN="${CRABBOX_BIN:-$ROOT/bin/crabbox}"
+CRABBOX_REMEDIATION_BIN="${CRABBOX_REMEDIATION_BIN:-crabbox}"
+CRABBOX_REGION_PREFLIGHT_COMMAND="${CRABBOX_REGION_PREFLIGHT_COMMAND:-scripts/macos-host-region-preflight.sh}"
 
 if [[ -n "${CRABBOX_MACOS_TYPE:-}" ]]; then
   types_raw="$CRABBOX_MACOS_TYPE"
@@ -107,12 +109,12 @@ instance_types_json="$(printf '%s\n' "${instance_types[@]}" | jq -R . | jq -s .)
 remediation_region="${regions[0]}"
 blocker_commands_json="$(
   printf '%s\n' \
-    "$CRABBOX_BIN admin aws-identity --region $remediation_region" \
-    "$CRABBOX_BIN admin aws-policy --mac-hosts" \
-    "coordinator_account=\$($CRABBOX_BIN admin aws-identity --region $remediation_region --json | jq -r .account)" \
+    "$CRABBOX_REMEDIATION_BIN admin aws-identity --region $remediation_region" \
+    "$CRABBOX_REMEDIATION_BIN admin aws-policy --mac-hosts" \
+    "coordinator_account=\$($CRABBOX_REMEDIATION_BIN admin aws-identity --region $remediation_region --json | jq -r .account)" \
     "local_account=\$(aws sts get-caller-identity --query Account --output text)" \
     "test \"\$local_account\" = \"\$coordinator_account\"" \
-    "$ROOT/scripts/macos-host-region-preflight.sh" |
+    "$CRABBOX_REGION_PREFLIGHT_COMMAND" |
     jq -R . |
     jq -s .
 )"

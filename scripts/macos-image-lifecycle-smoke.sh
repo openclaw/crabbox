@@ -3,11 +3,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CRABBOX_BIN="${CRABBOX_BIN:-$ROOT/bin/crabbox}"
+CRABBOX_REMEDIATION_BIN="${CRABBOX_REMEDIATION_BIN:-crabbox}"
 
 region="${CRABBOX_MACOS_REGION:-eu-west-1}"
 regions_raw="${CRABBOX_MACOS_REGIONS:-${CRABBOX_CAPACITY_REGIONS:-}}"
 region_preflight="${CRABBOX_MACOS_REGION_PREFLIGHT:-auto}"
 region_preflight_script="${CRABBOX_MACOS_REGION_PREFLIGHT_SCRIPT:-$ROOT/scripts/macos-host-region-preflight.sh}"
+region_preflight_command="${CRABBOX_MACOS_REGION_PREFLIGHT_COMMAND:-scripts/macos-host-region-preflight.sh}"
 instance_type="${CRABBOX_MACOS_TYPE:-mac2.metal}"
 image_name="${CRABBOX_MACOS_IMAGE_NAME:-crabbox-macos-arm64-$(date -u +%Y%m%d-%H%M)}"
 ttl="${CRABBOX_MACOS_TTL:-2h}"
@@ -106,35 +108,35 @@ preflight_blocker_from_stderr() {
 set_host_iam_remediation() {
   blocker_remediation="Apply the EC2 Mac host lifecycle policy to the coordinator AWS identity, verify the baseline AWS provider policy before paid image validation, then rerun the no-spend Mac host dry-run."
   blocker_commands="$(printf '%s\n' \
-    "$CRABBOX_BIN admin aws-identity --region $region" \
-    "$CRABBOX_BIN admin aws-policy --mac-hosts" \
-    "coordinator_account=\$($CRABBOX_BIN admin aws-identity --region $region --json | jq -r .account)" \
+    "$CRABBOX_REMEDIATION_BIN admin aws-identity --region $region" \
+    "$CRABBOX_REMEDIATION_BIN admin aws-policy --mac-hosts" \
+    "coordinator_account=\$($CRABBOX_REMEDIATION_BIN admin aws-identity --region $region --json | jq -r .account)" \
     "local_account=\$(aws sts get-caller-identity --query Account --output text)" \
     "test \"\$local_account\" = \"\$coordinator_account\"" \
-    "$CRABBOX_BIN admin mac-hosts allocate --region $region --type $instance_type --dry-run --json")"
+    "$CRABBOX_REMEDIATION_BIN admin mac-hosts allocate --region $region --type $instance_type --dry-run --json")"
 }
 
 set_quota_iam_remediation() {
   blocker_remediation="Apply the combined AWS provider plus EC2 Mac host lifecycle policy printed by crabbox admin aws-policy --mac-hosts; it includes servicequotas:ListServiceQuotas for the quota preflight."
   blocker_commands="$(printf '%s\n' \
-    "$CRABBOX_BIN admin aws-identity --region $region" \
-    "$CRABBOX_BIN admin aws-policy --mac-hosts" \
-    "coordinator_account=\$($CRABBOX_BIN admin aws-identity --region $region --json | jq -r .account)" \
+    "$CRABBOX_REMEDIATION_BIN admin aws-identity --region $region" \
+    "$CRABBOX_REMEDIATION_BIN admin aws-policy --mac-hosts" \
+    "coordinator_account=\$($CRABBOX_REMEDIATION_BIN admin aws-identity --region $region --json | jq -r .account)" \
     "local_account=\$(aws sts get-caller-identity --query Account --output text)" \
     "test \"\$local_account\" = \"\$coordinator_account\"" \
-    "$CRABBOX_BIN admin mac-hosts quota --region $region --type $instance_type --json")"
+    "$CRABBOX_REMEDIATION_BIN admin mac-hosts quota --region $region --type $instance_type --json")"
 }
 
 set_host_and_quota_iam_remediation() {
   blocker_remediation="Apply the combined AWS provider plus EC2 Mac host lifecycle policy printed by crabbox admin aws-policy --mac-hosts, then rerun both the Mac host quota preflight and no-spend Mac host dry-run."
   blocker_commands="$(printf '%s\n' \
-    "$CRABBOX_BIN admin aws-identity --region $region" \
-    "$CRABBOX_BIN admin aws-policy --mac-hosts" \
-    "coordinator_account=\$($CRABBOX_BIN admin aws-identity --region $region --json | jq -r .account)" \
+    "$CRABBOX_REMEDIATION_BIN admin aws-identity --region $region" \
+    "$CRABBOX_REMEDIATION_BIN admin aws-policy --mac-hosts" \
+    "coordinator_account=\$($CRABBOX_REMEDIATION_BIN admin aws-identity --region $region --json | jq -r .account)" \
     "local_account=\$(aws sts get-caller-identity --query Account --output text)" \
     "test \"\$local_account\" = \"\$coordinator_account\"" \
-    "$CRABBOX_BIN admin mac-hosts quota --region $region --type $instance_type --json" \
-    "$CRABBOX_BIN admin mac-hosts allocate --region $region --type $instance_type --dry-run --json")"
+    "$CRABBOX_REMEDIATION_BIN admin mac-hosts quota --region $region --type $instance_type --json" \
+    "$CRABBOX_REMEDIATION_BIN admin mac-hosts allocate --region $region --type $instance_type --dry-run --json")"
 }
 
 capture_preflight_command() {
@@ -514,12 +516,12 @@ select_region_from_preflight() {
     blocker_message="$(jq -r '.blocker.message // "no configured macOS region is ready"' "$region_preflight_log" 2>/dev/null || printf 'no configured macOS region is ready')"
     blocker_remediation="$(jq -r '.blocker.remediation // "Rerun the macOS region preflight after IAM, quota, or host availability changes."' "$region_preflight_log" 2>/dev/null || printf 'Rerun the macOS region preflight after IAM, quota, or host availability changes.')"
     blocker_commands="$(printf '%s\n' \
-      "$CRABBOX_BIN admin aws-identity --region $region" \
-      "$CRABBOX_BIN admin aws-policy --mac-hosts" \
-      "coordinator_account=\$($CRABBOX_BIN admin aws-identity --region $region --json | jq -r .account)" \
+      "$CRABBOX_REMEDIATION_BIN admin aws-identity --region $region" \
+      "$CRABBOX_REMEDIATION_BIN admin aws-policy --mac-hosts" \
+      "coordinator_account=\$($CRABBOX_REMEDIATION_BIN admin aws-identity --region $region --json | jq -r .account)" \
       "local_account=\$(aws sts get-caller-identity --query Account --output text)" \
       "test \"\$local_account\" = \"\$coordinator_account\"" \
-      "$region_preflight_script")"
+      "$region_preflight_command")"
     printf 'macOS lifecycle blocked before paid work: %s\n' "$blocker_message" >&2
     write_summary blocked region-preflight
     exit 1

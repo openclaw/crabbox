@@ -53,6 +53,7 @@
 
 ### Fixed
 
+- Fixed macOS image lifecycle and host-region preflight blockers so remediation commands use neutral `crabbox` commands instead of embedding local binary or checkout paths.
 - Fixed Code bridge upstream URL handling so browser-controlled paths cannot select a non-loopback upstream target, and clamped `CRABBOX_AWS_ROOT_GB` parsing to valid `int32` values.
 - Fixed EC2 Mac host dry-run JSON output so AWS authorization failures do not expose raw provider error details in operator logs.
 - Fixed the macOS image lifecycle smoke so missing coordinator Mac host admin endpoints are reported as a blocked preflight instead of an empty preflight failure.

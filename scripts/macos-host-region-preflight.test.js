@@ -170,12 +170,12 @@ test("macOS host region preflight blocks when dry-run succeeds but quota is unav
   assert.equal(summary.regions[0].dryRun.ok, true);
   assert.equal(summary.regions[0].quota.ok, false);
   assert.deepEqual(summary.blocker.commands, [
-    `${run.fake} admin aws-identity --region us-west-2`,
-    `${run.fake} admin aws-policy --mac-hosts`,
-    `coordinator_account=$(${run.fake} admin aws-identity --region us-west-2 --json | jq -r .account)`,
+    "crabbox admin aws-identity --region us-west-2",
+    "crabbox admin aws-policy --mac-hosts",
+    "coordinator_account=$(crabbox admin aws-identity --region us-west-2 --json | jq -r .account)",
     "local_account=$(aws sts get-caller-identity --query Account --output text)",
     'test "$local_account" = "$coordinator_account"',
-    preflightScript,
+    "scripts/macos-host-region-preflight.sh",
   ]);
   assert.match(summary.regions[0].quota.output, /Running Dedicated mac2 Hosts/);
 });
@@ -196,11 +196,11 @@ test("macOS host region preflight blocks when every region is unavailable", asyn
   assert.match(summary.regions[1].dryRun.output, /no_mac_host_offerings/);
   assert.match(summary.regions[0].quota.output, /Running Dedicated mac2 Hosts/);
   assert.deepEqual(summary.blocker.commands, [
-    `${run.fake} admin aws-identity --region eu-west-1`,
-    `${run.fake} admin aws-policy --mac-hosts`,
-    `coordinator_account=$(${run.fake} admin aws-identity --region eu-west-1 --json | jq -r .account)`,
+    "crabbox admin aws-identity --region eu-west-1",
+    "crabbox admin aws-policy --mac-hosts",
+    "coordinator_account=$(crabbox admin aws-identity --region eu-west-1 --json | jq -r .account)",
     "local_account=$(aws sts get-caller-identity --query Account --output text)",
     'test "$local_account" = "$coordinator_account"',
-    preflightScript,
+    "scripts/macos-host-region-preflight.sh",
   ]);
 });
