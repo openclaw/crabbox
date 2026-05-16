@@ -757,6 +757,9 @@ func capsuleFailureSignature(logText string) string {
 
 func capsuleFailureSignatureForSelection(logText, jobName, stepName string) string {
 	filtered := filterActionsLogForSelection(logText, jobName, stepName)
+	if strings.TrimSpace(filtered) == "" && strings.TrimSpace(stepName) != "" {
+		filtered = filterActionsLogForSelection(logText, jobName, "")
+	}
 	if strings.TrimSpace(filtered) == "" {
 		return ""
 	}
@@ -793,6 +796,7 @@ func stripGitHubLogPrefix(line string) string {
 		line = fields[len(fields)-1]
 	}
 	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "\ufeff")
 	if len(line) > len(time.RFC3339Nano) && line[4] == '-' && line[7] == '-' && line[10] == 'T' {
 		if space := strings.IndexByte(line, ' '); space > 0 {
 			line = strings.TrimSpace(line[space+1:])

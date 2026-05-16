@@ -158,6 +158,17 @@ func TestCapsuleFailureSignatureForSelectionFiltersJobAndStep(t *testing.T) {
 	}
 }
 
+func TestCapsuleFailureSignatureForSelectionFallsBackToJob(t *testing.T) {
+	log := strings.Join([]string{
+		"Go\tUNKNOWN STEP\t\ufeff2026-05-16T05:20:06.2281757Z Error: selected",
+		"Worker\tUNKNOWN STEP\t2026-05-16T05:20:07.0000000Z Error: other",
+	}, "\n")
+	got := capsuleFailureSignatureForSelection(log, "Go", "Test")
+	if got != "Error: selected" {
+		t.Fatalf("signature=%q", got)
+	}
+}
+
 func TestCapsuleFailureSignatureSkipsGenericFailSummaries(t *testing.T) {
 	got := capsuleFailureSignature("Go\tTest\tassertion failed: wanted true\nGo\tTest\tFAIL\tgithub.com/example-org/my-app\t0.1s\n")
 	if got != "assertion failed: wanted true" {
