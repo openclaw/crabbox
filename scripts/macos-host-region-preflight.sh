@@ -47,6 +47,13 @@ for region in "${regions[@]}"; do
     dry_ok=true
   fi
 
+  quota_status=0
+  quota_output="$("$CRABBOX_BIN" admin mac-hosts quota --region "$region" --type "$instance_type" --json 2>&1)" || quota_status=$?
+  quota_ok=false
+  if [[ "$quota_status" -eq 0 ]] && printf '%s\n' "$quota_output" | jq -e 'any(.[]; (.value // 0) >= 1)' >/dev/null 2>&1; then
+    quota_ok=true
+  fi
+
   jq -n \
     --arg region "$region" \
     --arg instanceType "$instance_type" \
@@ -56,6 +63,9 @@ for region in "${regions[@]}"; do
     --argjson dryRunStatus "$dry_status" \
     --arg dryRunOutput "$dry_output" \
     --argjson dryRunOK "$dry_ok" \
+    --argjson quotaStatus "$quota_status" \
+    --arg quotaOutput "$quota_output" \
+    --argjson quotaOK "$quota_ok" \
     '{
       region: $region,
       instanceType: $instanceType,
@@ -69,6 +79,11 @@ for region in "${regions[@]}"; do
         ok: $dryRunOK,
         status: $dryRunStatus,
         output: $dryRunOutput
+      },
+      quota: {
+        ok: $quotaOK,
+        status: $quotaStatus,
+        output: $quotaOutput
       }
     }' >>"$tmp"
 done
@@ -76,25 +91,25 @@ done
 summary="$(
   jq -s --arg instanceType "$instance_type" '
     def first_existing: [ .[] | select(.existingHost != null) ][0] // null;
-    def first_dry_run: [ .[] | select(.dryRun.ok == true) ][0] // null;
+    def first_ready_allocation: [ .[] | select(.dryRun.ok == true and .quota.ok == true) ][0] // null;
     . as $regions |
     (first_existing) as $existing |
-    (first_dry_run) as $dry |
+    (first_ready_allocation) as $ready |
     {
       result:
         (if $existing != null then "ready-existing-host"
-         elif $dry != null then "ready-allocation"
+         elif $ready != null then "ready-allocation"
          else "blocked" end),
       instanceType: $instanceType,
       selectedRegion:
         (if $existing != null then $existing.region
-         elif $dry != null then $dry.region
+         elif $ready != null then $ready.region
          else null end),
       existingHost:
         (if $existing != null then $existing.existingHost else null end),
       blocker:
-        (if $existing == null and $dry == null then {
-          message: "no configured region has an available EC2 Mac Dedicated Host or successful no-spend allocation dry-run",
+        (if $existing == null and $ready == null then {
+          message: "no configured region has an available EC2 Mac Dedicated Host or quota-backed no-spend allocation dry-run",
           remediation: "Apply crabbox admin aws-policy --mac-hosts to the coordinator AWS identity, verify regional EC2 Mac Dedicated Host quota, then rerun this preflight before paid allocation."
         } else null end),
       regions: $regions

@@ -248,8 +248,10 @@ Before approving paid EC2 Mac host allocation, run the no-spend region
 preflight against the coordinator you intend to use:
 `CRABBOX_MACOS_REGIONS=eu-west-1,us-east-1,us-west-2 scripts/macos-host-region-preflight.sh`.
 It checks for an existing reusable Dedicated Host first, then runs allocation
-dry-runs by region and returns JSON with `ready-existing-host`,
-`ready-allocation`, or `blocked`.
+dry-runs and Dedicated Mac host quota checks by region. It returns JSON with
+`ready-existing-host`, `ready-allocation`, or `blocked`; `ready-allocation`
+requires both a successful allocation dry-run and visible quota of at least one
+host.
 
 The guarded macOS image lifecycle smoke also runs that region preflight
 automatically when `CRABBOX_MACOS_REGIONS` or `CRABBOX_CAPACITY_REGIONS` is set

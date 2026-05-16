@@ -46,6 +46,17 @@ if [[ "$1" == "admin" && "$2" == "mac-hosts" ]]; then
         fi
       fi
       ;;
+    quota)
+      if [[ "\${CRABBOX_FAKE_QUOTA_FAIL_REGION:-}" == "$region" ]]; then
+        printf 'coordinator GET /v1/admin/mac-hosts/quota?region=%s&type=mac2.metal: http 502: {"error":"mac_host_quota_failed","message":"AWS authorization failure: coordinator AWS identity needs servicequotas:ListServiceQuotas to inspect EC2 Mac Dedicated Host quotas"}\\n' "$region" >&2
+        exit 1
+      fi
+      if [[ "\${CRABBOX_FAKE_QUOTA_ZERO_REGION:-}" == "$region" ]]; then
+        printf '[{"serviceCode":"ec2","quotaCode":"L-MAC2","quotaName":"Running Dedicated mac2 Hosts","value":0,"adjustable":true,"globalQuota":false,"unit":"None"}]\\n'
+      else
+        printf '[{"serviceCode":"ec2","quotaCode":"L-MAC2","quotaName":"Running Dedicated mac2 Hosts","value":1,"adjustable":true,"globalQuota":false,"unit":"None"}]\\n'
+      fi
+      ;;
   esac
   exit 0
 fi
@@ -100,7 +111,7 @@ test("macOS host region preflight selects an existing host without paid allocati
   assert.equal(summary.existingHost, "h-existing");
 });
 
-test("macOS host region preflight selects the first successful no-spend dry-run", async () => {
+test("macOS host region preflight selects the first quota-backed no-spend dry-run", async () => {
   const run = await setupRun();
   const result = await runPreflight({
     CRABBOX_BIN: run.fake,
@@ -114,6 +125,25 @@ test("macOS host region preflight selects the first successful no-spend dry-run"
   assert.equal(summary.selectedRegion, "us-west-2");
   assert.equal(summary.existingHost, null);
   assert.equal(summary.regions.length, 3);
+  assert.equal(summary.regions[2].quota.ok, true);
+});
+
+test("macOS host region preflight blocks when dry-run succeeds but quota is unavailable", async () => {
+  const run = await setupRun();
+  const result = await runPreflight({
+    CRABBOX_BIN: run.fake,
+    CRABBOX_MACOS_REGIONS: "us-west-2",
+    CRABBOX_FAKE_DRY_REGION: "us-west-2",
+    CRABBOX_FAKE_QUOTA_ZERO_REGION: "us-west-2",
+  });
+
+  assert.equal(result.code, 1);
+  const summary = JSON.parse(result.stdout);
+  assert.equal(summary.result, "blocked");
+  assert.equal(summary.selectedRegion, null);
+  assert.equal(summary.regions[0].dryRun.ok, true);
+  assert.equal(summary.regions[0].quota.ok, false);
+  assert.match(summary.regions[0].quota.output, /Running Dedicated mac2 Hosts/);
 });
 
 test("macOS host region preflight blocks when every region is unavailable", async () => {
@@ -127,7 +157,8 @@ test("macOS host region preflight blocks when every region is unavailable", asyn
   const summary = JSON.parse(result.stdout);
   assert.equal(summary.result, "blocked");
   assert.equal(summary.selectedRegion, null);
-  assert.match(summary.blocker.message, /no configured region/);
+  assert.match(summary.blocker.message, /quota-backed/);
   assert.match(summary.regions[0].dryRun.output, /UnauthorizedOperation/);
   assert.match(summary.regions[1].dryRun.output, /no_mac_host_offerings/);
+  assert.match(summary.regions[0].quota.output, /Running Dedicated mac2 Hosts/);
 });
