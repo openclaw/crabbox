@@ -227,12 +227,18 @@ func (a App) capsuleFromActions(ctx context.Context, args []string) error {
 	if !jobMatched {
 		return exit(2, "capsule from-actions --job %q did not match any job in the run", *jobName)
 	}
+	if !isFailureConclusion(job.Conclusion) {
+		if job.Name != "" {
+			return exit(2, "capsule from-actions selected job %q but its conclusion is %q, not a failure", job.Name, blank(job.Conclusion, "-"))
+		}
+		return exit(2, "capsule from-actions requires a failed GitHub Actions job")
+	}
 	if *scenario == "" {
 		*scenario = defaultCapsuleScenario(view, job, step)
 	}
 	dir := *outputDir
 	if dir == "" {
-		dir = filepath.Join("capsules", safePathComponent(runRef.Repo.Owner+"-"+runRef.Repo.Name+"-actions-"+runRef.RunID))
+		dir = filepath.Join("capsules", defaultCapsuleOutputName(runRef))
 	}
 	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o755); err != nil {
 		return err
@@ -250,7 +256,7 @@ func (a App) capsuleFromActions(ctx context.Context, args []string) error {
 			}
 			logDigest := sha256String(logText)
 			logRef = capsuleArtifactRef{Name: "failed-actions-log", Path: filepath.ToSlash(filepath.Join("logs", "failed.log")), Size: int64(len(logText)), Digest: "sha256:" + logDigest}
-			failureSignature = capsuleFailureSignature(logText)
+			failureSignature = capsuleFailureSignatureForSelection(logText, job.Name, step.Name)
 		}
 	}
 	manifest := buildActionsCapsuleManifest(runRef, view, workflowPath, job, step, *scenario, *replayCommand, *requiredQuality, failureSignature, logRef, artifacts)
@@ -603,8 +609,10 @@ func buildActionsCapsuleManifest(ref actionsRunRef, view capsuleRunView, workflo
 	capsuleID := "sha256:" + capsuleIDDigest(ref, view.HeadSHA, replayCommand)
 	failureSignature = strings.TrimSpace(failureSignature)
 	successCondition := "The replay command exits non-zero."
+	nondeterminismBudget := "exit code must remain non-zero"
 	if failureSignature != "" {
 		successCondition = "The replay command exits non-zero with the same failure signature."
+		nondeterminismBudget = "exit code and failure signature must match"
 	}
 	logs := []capsuleArtifactRef{}
 	if logRef.Name != "" {
@@ -655,7 +663,7 @@ func buildActionsCapsuleManifest(ref actionsRunRef, view capsuleRunView, workflo
 			Command:              replayCommand,
 			CommandMode:          "shell",
 			RequiredQuality:      blank(requiredQuality, "semantically_identical"),
-			NondeterminismBudget: "exit code and failure signature must match",
+			NondeterminismBudget: nondeterminismBudget,
 		},
 		Cost: capsuleCost{
 			MaxWallTimeSec:         3600,
@@ -683,8 +691,16 @@ func buildActionsCapsuleManifest(ref actionsRunRef, view capsuleRunView, workflo
 }
 
 func capsuleIDDigest(ref actionsRunRef, headSHA, replayCommand string) string {
-	sum := sha256.Sum256([]byte(ref.Repo.Slug() + "\n" + ref.RunID + "\n" + headSHA + "\n" + replayCommand))
+	sum := sha256.Sum256([]byte(ref.Repo.Slug() + "\n" + ref.RunID + "\n" + strconv.Itoa(ref.Attempt) + "\n" + headSHA + "\n" + replayCommand))
 	return hex.EncodeToString(sum[:])
+}
+
+func defaultCapsuleOutputName(ref actionsRunRef) string {
+	name := ref.Repo.Owner + "-" + ref.Repo.Name + "-actions-" + ref.RunID
+	if ref.Attempt > 0 {
+		name += "-attempt-" + strconv.Itoa(ref.Attempt)
+	}
+	return safePathComponent(name)
 }
 
 func digestLabel(kind, value string) string {
@@ -739,6 +755,38 @@ func capsuleFailureSignature(logText string) string {
 	return ""
 }
 
+func capsuleFailureSignatureForSelection(logText, jobName, stepName string) string {
+	filtered := filterActionsLogForSelection(logText, jobName, stepName)
+	if strings.TrimSpace(filtered) == "" {
+		return ""
+	}
+	return capsuleFailureSignature(filtered)
+}
+
+func filterActionsLogForSelection(logText, jobName, stepName string) string {
+	jobName = strings.TrimSpace(jobName)
+	stepName = strings.TrimSpace(stepName)
+	if jobName == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, line := range strings.Split(logText, "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 3 {
+			continue
+		}
+		if strings.TrimSpace(fields[0]) != jobName {
+			continue
+		}
+		if stepName != "" && strings.TrimSpace(fields[1]) != stepName {
+			continue
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 func stripGitHubLogPrefix(line string) string {
 	fields := strings.Split(line, "\t")
 	if len(fields) >= 3 {
@@ -757,8 +805,10 @@ func stripGitHubLogPrefix(line string) string {
 func isLowSignalActionsLogLine(line string) bool {
 	lower := strings.ToLower(strings.TrimSpace(line))
 	return lower == "post job cleanup." ||
+		lower == "fail" ||
 		strings.Contains(lower, "cleaning up orphan processes") ||
 		strings.HasPrefix(lower, "process completed with exit code ") ||
+		strings.HasPrefix(lower, "fail\t") ||
 		strings.HasPrefix(lower, "[command]/usr/bin/git ") ||
 		strings.HasPrefix(lower, "removing ") ||
 		strings.HasPrefix(lower, "temporarily overriding home=") ||

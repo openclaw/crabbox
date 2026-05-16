@@ -7,11 +7,11 @@ import (
 )
 
 func TestParseActionsRunRefFromURL(t *testing.T) {
-	ref, err := parseActionsRunRef("https://github.com/openclaw/crabbox/actions/runs/123456/attempts/2", "")
+	ref, err := parseActionsRunRef("https://github.com/example-org/my-app/actions/runs/123456/attempts/2", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ref.Repo.Slug() != "openclaw/crabbox" || ref.RunID != "123456" || ref.Attempt != 2 {
+	if ref.Repo.Slug() != "example-org/my-app" || ref.RunID != "123456" || ref.Attempt != 2 {
 		t.Fatalf("unexpected ref: %#v", ref)
 	}
 }
@@ -20,11 +20,11 @@ func TestParseActionsRunRefRequiresRepoForNumericID(t *testing.T) {
 	if _, err := parseActionsRunRef("123456", ""); err == nil {
 		t.Fatal("expected numeric run id without --repo to fail")
 	}
-	ref, err := parseActionsRunRef("123456", "openclaw/crabbox")
+	ref, err := parseActionsRunRef("123456", "example-org/my-app")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ref.Repo.Slug() != "openclaw/crabbox" || ref.RunID != "123456" {
+	if ref.Repo.Slug() != "example-org/my-app" || ref.RunID != "123456" {
 		t.Fatalf("unexpected ref: %#v", ref)
 	}
 }
@@ -33,12 +33,12 @@ func TestParseActionsRunRefRejectsInvalidIDsAndAttempts(t *testing.T) {
 	for _, value := range []string{
 		"0",
 		"-1",
-		"https://github.com/openclaw/crabbox/actions/runs/not-a-number",
-		"https://github.com/openclaw/crabbox/actions/runs/123/attempts/0",
-		"https://github.com/openclaw/crabbox/actions/runs/123/attempts/nope",
+		"https://github.com/example-org/my-app/actions/runs/not-a-number",
+		"https://github.com/example-org/my-app/actions/runs/123/attempts/0",
+		"https://github.com/example-org/my-app/actions/runs/123/attempts/nope",
 	} {
 		t.Run(value, func(t *testing.T) {
-			if _, err := parseActionsRunRef(value, "openclaw/crabbox"); err == nil {
+			if _, err := parseActionsRunRef(value, "example-org/my-app"); err == nil {
 				t.Fatal("expected invalid run ref to fail")
 			}
 		})
@@ -69,9 +69,9 @@ func TestSelectCapsuleFailureReportsMissingPreferredJob(t *testing.T) {
 }
 
 func TestBuildActionsCapsuleManifestKeepsSmallContract(t *testing.T) {
-	ref := actionsRunRef{Repo: GitHubRepo{Owner: "openclaw", Name: "crabbox"}, RunID: "123"}
+	ref := actionsRunRef{Repo: GitHubRepo{Owner: "example-org", Name: "my-app"}, RunID: "123"}
 	view := capsuleRunView{
-		URL:          "https://github.com/openclaw/crabbox/actions/runs/123",
+		URL:          "https://github.com/example-org/my-app/actions/runs/123",
 		WorkflowName: "CI",
 		HeadSHA:      "abc123",
 		Conclusion:   "failure",
@@ -94,13 +94,16 @@ func TestBuildActionsCapsuleManifestKeepsSmallContract(t *testing.T) {
 }
 
 func TestBuildActionsCapsuleManifestAllowsExitOnlyOracle(t *testing.T) {
-	ref := actionsRunRef{Repo: GitHubRepo{Owner: "openclaw", Name: "crabbox"}, RunID: "123"}
+	ref := actionsRunRef{Repo: GitHubRepo{Owner: "example-org", Name: "my-app"}, RunID: "123"}
 	manifest := buildActionsCapsuleManifest(ref, capsuleRunView{}, "", capsuleJobView{Name: "Go"}, capsuleStepView{Name: "Test"}, "Replay", "go test ./...", "", "", capsuleArtifactRef{}, nil)
 	if manifest.Oracle.FailureSignature != "" {
 		t.Fatalf("unexpected fallback failure signature: %#v", manifest.Oracle)
 	}
 	if manifest.Oracle.SuccessCondition != "The replay command exits non-zero." {
 		t.Fatalf("unexpected success condition: %q", manifest.Oracle.SuccessCondition)
+	}
+	if manifest.Replay.NondeterminismBudget != "exit code must remain non-zero" {
+		t.Fatalf("unexpected nondeterminism budget: %q", manifest.Replay.NondeterminismBudget)
 	}
 }
 
@@ -141,10 +144,48 @@ func TestCapsuleFailureSignatureStripsGitHubPrefixes(t *testing.T) {
 	}
 }
 
+func TestCapsuleFailureSignatureForSelectionFiltersJobAndStep(t *testing.T) {
+	log := strings.Join([]string{
+		"Go\tTest\tpanic: selected",
+		"Worker\tCheck\tpanic: other",
+	}, "\n")
+	got := capsuleFailureSignatureForSelection(log, "Go", "Test")
+	if got != "panic: selected" {
+		t.Fatalf("signature=%q", got)
+	}
+	if got := capsuleFailureSignatureForSelection(log, "Docs", "Test"); got != "" {
+		t.Fatalf("unexpected unmatched signature=%q", got)
+	}
+}
+
+func TestCapsuleFailureSignatureSkipsGenericFailSummaries(t *testing.T) {
+	got := capsuleFailureSignature("Go\tTest\tassertion failed: wanted true\nGo\tTest\tFAIL\tgithub.com/example-org/my-app\t0.1s\n")
+	if got != "assertion failed: wanted true" {
+		t.Fatalf("signature=%q", got)
+	}
+}
+
 func TestSafePathComponent(t *testing.T) {
-	got := safePathComponent("OpenClaw/Crabbox Actions 123")
-	if strings.ContainsAny(got, "/ ") || got != "openclaw-crabbox-actions-123" {
+	got := safePathComponent("Example Org/My App Actions 123")
+	if strings.ContainsAny(got, "/ ") || got != "example-org-my-app-actions-123" {
 		t.Fatalf("safe component=%q", got)
+	}
+}
+
+func TestDefaultCapsuleOutputNameIncludesAttempt(t *testing.T) {
+	ref := actionsRunRef{Repo: GitHubRepo{Owner: "example-org", Name: "my-app"}, RunID: "123", Attempt: 2}
+	if got := defaultCapsuleOutputName(ref); got != "example-org-my-app-actions-123-attempt-2" {
+		t.Fatalf("output name=%q", got)
+	}
+}
+
+func TestCapsuleIDDigestIncludesAttempt(t *testing.T) {
+	ref := actionsRunRef{Repo: GitHubRepo{Owner: "example-org", Name: "my-app"}, RunID: "123", Attempt: 1}
+	one := capsuleIDDigest(ref, "abc", "go test ./...")
+	ref.Attempt = 2
+	two := capsuleIDDigest(ref, "abc", "go test ./...")
+	if one == two {
+		t.Fatal("attempt-specific captures should not share capsule ids")
 	}
 }
 

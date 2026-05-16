@@ -163,10 +163,10 @@ crabbox stop blue-lobster
 Capture and replay a failed GitHub Actions run:
 
 ```sh
-crabbox capsule from-actions https://github.com/openclaw/crabbox/actions/runs/123 --replay 'go test ./...'
-crabbox capsule replay capsules/openclaw-crabbox-actions-123/capsule.yaml --keep
+crabbox capsule from-actions https://github.com/example-org/my-app/actions/runs/123 --replay 'go test ./...'
+crabbox capsule replay capsules/example-org-my-app-actions-123/capsule.yaml --keep
 crabbox ssh --id blue-lobster
-crabbox capsule promote capsules/openclaw-crabbox-actions-123/capsule.yaml --regression
+crabbox capsule promote capsules/example-org-my-app-actions-123/capsule.yaml --regression
 ```
 
 Save and fork a prepared workspace:

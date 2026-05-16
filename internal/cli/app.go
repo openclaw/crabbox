@@ -211,8 +211,8 @@ Common Flows:
   crabbox warmup --actions-runner
   crabbox actions hydrate --id blue-lobster
   crabbox actions dispatch -f testbox_id=cbx_abcdef123456
-  crabbox capsule from-actions https://github.com/openclaw/crabbox/actions/runs/123 --replay 'go test ./...'
-  crabbox capsule replay capsules/openclaw-crabbox-actions-123/capsule.yaml --keep
+  crabbox capsule from-actions https://github.com/example-org/my-app/actions/runs/123 --replay 'go test ./...'
+  crabbox capsule replay capsules/example-org-my-app-actions-123/capsule.yaml --keep
   crabbox checkpoint create --id blue-lobster --name after-install --mode native
   crabbox checkpoint fork chk_abcdef1234567890 --class beast
   crabbox run --provider ssh --target macos --static-host mac.local -- echo ok

@@ -14,7 +14,7 @@ oracle, and replay history.
 
 ```sh
 crabbox capsule from-actions <run-url> --replay '<command>'
-crabbox capsule from-actions 123456 --repo openclaw/crabbox --replay 'go test ./...'
+crabbox capsule from-actions 123456 --repo example-org/my-app --replay 'go test ./...'
 ```
 
 Useful flags:
