@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func clearConfigEnv(t *testing.T) {
@@ -161,6 +163,37 @@ func TestRepoConfigBareEnvWildcardDoesNotForwardEveryLocalVariable(t *testing.T)
 	}
 	if got := allowedEnv(cfg.EnvAllow); got["CRABBOX_PROOF_API_TOKEN"] != "" {
 		t.Fatalf("bare wildcard forwarded proof secret: %q", got["CRABBOX_PROOF_API_TOKEN"])
+	}
+}
+
+func TestProfileEnvConfigYAMLShape(t *testing.T) {
+	var env fileProfileEnvConfig
+	if err := yaml.Unmarshal([]byte("CI: 1\nNODE_OPTIONS: --max-old-space-size=4096\nallow:\n  - CUSTOM_*\n"), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Values["CI"] != "1" || env.Values["NODE_OPTIONS"] != "--max-old-space-size=4096" {
+		t.Fatalf("profile env values not decoded: %#v", env.Values)
+	}
+	if len(env.Allow) != 1 || env.Allow[0] != "CUSTOM_*" {
+		t.Fatalf("profile env allow not decoded: %#v", env.Allow)
+	}
+	data, err := yaml.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	for _, want := range []string{"CI: \"1\"", "NODE_OPTIONS: --max-old-space-size=4096", "allow:"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("marshaled profile env missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestProfileEnvConfigYAMLRejectsNonMapping(t *testing.T) {
+	var env fileProfileEnvConfig
+	err := yaml.Unmarshal([]byte("- CI=1\n"), &env)
+	if err == nil || !strings.Contains(err.Error(), "profile env must be a mapping") {
+		t.Fatalf("error=%v want profile env mapping error", err)
 	}
 }
 
