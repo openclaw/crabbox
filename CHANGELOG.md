@@ -7,6 +7,7 @@
 - Added an AWS orphan-audit script for trusted operators to find Crabbox-tagged EC2 instances left behind in old provider accounts after credential or account rotation.
 - Added provider-neutral `CRABBOX_HOST_ID` / `hostId` config for host-pinned leases while keeping `CRABBOX_AWS_MAC_HOST_ID` / `aws.macHostId` as AWS compatibility aliases.
 - Added provider-scoped admin entrypoints: `crabbox admin providers identity`, `crabbox admin providers policy`, and `crabbox admin hosts` for host lifecycle operations. Existing `admin aws-*` and `admin mac-hosts` commands remain compatibility aliases.
+- Added provider-neutral coordinator admin routes for host lifecycle and provider identity operations, while keeping the legacy AWS routes as compatibility fallbacks.
 
 ### Changed
 
