@@ -202,7 +202,8 @@ Brokered AWS credentials live as Worker secrets:
 AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY
 AWS_SESSION_TOKEN optional
-CRABBOX_AWS_MAC_HOST_ID optional; required only for brokered target=macos
+CRABBOX_HOST_ID optional; pins a brokered host such as an EC2 Mac Dedicated Host
+CRABBOX_AWS_MAC_HOST_ID optional legacy AWS alias for CRABBOX_HOST_ID
 ```
 
 Direct fallback env is whatever the AWS SDK can resolve, such as:
@@ -224,7 +225,8 @@ CRABBOX_AWS_SUBNET_ID            optional subnet override
 CRABBOX_AWS_INSTANCE_PROFILE     optional IAM instance profile name
 CRABBOX_AWS_ROOT_GB              default 400
 CRABBOX_AWS_SSH_CIDRS            optional comma-separated SSH source CIDRs
-CRABBOX_AWS_MAC_HOST_ID          EC2 Mac Dedicated Host id for target=macos
+CRABBOX_HOST_ID                  optional provider host id for target=macos; required for direct AWS macOS
+CRABBOX_AWS_MAC_HOST_ID          optional legacy AWS alias for CRABBOX_HOST_ID
 CRABBOX_AWS_ORPHAN_SWEEP_ENABLED defaults on when AWS broker credentials exist
 CRABBOX_AWS_ORPHAN_SWEEP_DELETE  set 1 to terminate confirmed orphan EC2 instances
 CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS default 3600
@@ -237,13 +239,41 @@ every 15 minutes to bootstrap scheduled cleanup even when no leases are active.
 
 The AWS provider imports the local SSH public key as an EC2 key pair when needed, creates or reuses a `crabbox-runners` security group when no security group is supplied, launches one-time EC2 instances, tags instances and volumes with Crabbox lease metadata, and terminates non-kept instances after the command.
 
-Grant the Worker AWS principal EC2 launch/list/tag/terminate permissions plus
-`CreateImage`, `DeregisterImage`, `DeleteSnapshot`, and
-`servicequotas:GetServiceQuota`. The image permissions are required for
-`crabbox image` and native AWS checkpoints. Service Quotas access is
-best-effort: when it is available, Crabbox can skip known quota-impossible
-instance types before calling `RunInstances`; when it is missing, EC2 launch
-errors are still classified after the failed call.
+Grant the Worker AWS principal EC2 launch/list/tag/terminate permissions for
+instances, key pairs, and managed security groups, plus `CreateImage`,
+`DeregisterImage`, `RegisterImage`, `DescribeSnapshots`, `DeleteSnapshot`,
+and `servicequotas:GetServiceQuota`. The image permissions are required for
+`crabbox image`, native AWS checkpoints, and macOS image bake validation.
+Service Quotas access is best-effort: when it is available, Crabbox can skip
+known quota-impossible instance types before calling `RunInstances`; when it
+is missing, EC2 launch errors are still classified after the failed call.
+EC2 Mac image bakes also need the separate Dedicated Host lifecycle grant
+printed by `crabbox admin hosts policy --provider aws --target macos`, including
+direct Service Quotas lookups for the Mac host quota preflight and
+`servicequotas:ListServiceQuotas` as a fallback for future Mac families. Print the baseline provider
+policy with `crabbox admin providers policy --provider aws`, or the combined
+provider plus Dedicated Host policy with
+`crabbox admin providers policy --provider aws --target macos`.
+
+Before approving paid EC2 Mac host allocation, run the no-spend region
+preflight against the coordinator you intend to use:
+`CRABBOX_MACOS_REGIONS=eu-west-1,us-east-1,us-west-2 scripts/macos-host-region-preflight.sh`.
+It checks `mac2.metal` and then `mac1.metal` by default unless
+`CRABBOX_MACOS_TYPE` or `CRABBOX_MACOS_TYPES` is set. Set
+`CRABBOX_MACOS_TYPES=all` to sweep every known EC2 Mac Dedicated Host family.
+It looks for an existing reusable Dedicated Host first, then runs allocation
+dry-runs and Dedicated Mac host quota checks by region and type. It returns JSON
+with `ready-existing-host`, `ready-allocation`, or `blocked`; `ready-allocation`
+requires both a successful allocation dry-run and visible quota of at least one
+host for the selected type.
+
+The guarded macOS image lifecycle smoke also runs that region preflight
+automatically when `CRABBOX_MACOS_REGIONS` or `CRABBOX_CAPACITY_REGIONS` is set
+and `CRABBOX_MACOS_REGION` is not set. It records the region-preflight JSON in
+`summary.json` evidence and continues with the selected region and instance type
+only when a reusable host or dry-run-ready allocation region is found. Set
+`CRABBOX_MACOS_REGION_PREFLIGHT=0` to skip this automatic selection, or set
+`CRABBOX_MACOS_REGION` to force one region.
 
 SSH ingress for AWS security groups is source-scoped. If `CRABBOX_AWS_SSH_CIDRS` is set, Crabbox adds those CIDRs. Otherwise, the CLI sends its detected outbound IPv4 `/32` to the broker; when that is unavailable, the Worker falls back to `CF-Connecting-IP` as `/32` or `/128`. Direct and brokered AWS open the primary SSH port plus configured fallback ports. Crabbox also revokes the old managed `0.0.0.0/0` SSH ingress rule when the broker touches the managed security group. Supplying `CRABBOX_AWS_SECURITY_GROUP_ID` makes network policy your responsibility.
 
@@ -297,7 +327,7 @@ large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge
 beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge
 
 AWS macOS
-all       mac2.metal unless `--type` is set
+all       mac2.metal, mac2-m2.metal, mac2-m2pro.metal, mac-m4.metal, mac-m4pro.metal, mac-m4max.metal, mac2-m1ultra.metal, mac-m3ultra.metal, then mac1.metal unless `--type` is set
 ```
 
 Profiles choose a default class, and commands can override with `--class`.
@@ -391,7 +421,8 @@ HETZNER_TOKEN
 AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY
 AWS_SESSION_TOKEN optional
-CRABBOX_AWS_MAC_HOST_ID optional; required only for brokered target=macos
+CRABBOX_HOST_ID optional; pins a brokered host such as an EC2 Mac Dedicated Host
+CRABBOX_AWS_MAC_HOST_ID optional legacy AWS alias for CRABBOX_HOST_ID
 CRABBOX_SHARED_TOKEN
 CRABBOX_ADMIN_TOKEN optional; required for admin routes and image promotion
 CRABBOX_GITHUB_CLIENT_ID

@@ -180,7 +180,7 @@ AWS WSL2   standard  m8i.large, m8i-flex.large, c8i.large, r8i.large
            large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge
            beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge
 
-AWS macOS  all       mac2.metal unless --type is set
+AWS macOS  all       mac2.metal, then mac1.metal unless --type is set
 
 Azure      standard  Standard_D32ads_v6, Standard_D32ds_v6, Standard_F32s_v2, then 16-vCPU fallbacks
            fast      Standard_D64ads_v6, Standard_D64ds_v6, Standard_F64s_v2, then 48/32-vCPU fallbacks

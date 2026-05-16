@@ -2,13 +2,20 @@ import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts"
 import { isAdminRequest } from "./auth";
 import {
   EC2SpotClient,
+  awsLaunchCandidates,
   awsProvisioningErrorCategory,
   awsRegionCandidates,
   isAWSInstanceCleanedAfterReadinessFailure,
   isRetryableAWSProvisioningError,
 } from "./aws";
 import { AzureClient } from "./azure";
-import { azureLocationFor, leaseConfig, validCIDRs, type LeaseConfig } from "./config";
+import {
+  awsPromotedAMIConfigKey,
+  azureLocationFor,
+  leaseConfig,
+  validCIDRs,
+  type LeaseConfig,
+} from "./config";
 import { GCPClient } from "./gcp";
 import { HetznerClient } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
@@ -55,6 +62,7 @@ import type {
   RunRecord,
   RunTelemetryRequest,
   RunTelemetrySummary,
+  TargetOS,
   TestFailure,
   TestResultSummary,
   TailscaleMetadata,
@@ -383,6 +391,18 @@ export class FleetDurableObject implements DurableObject {
       }
       if (method === "GET" && parts.join("/") === "v1/admin/lease-audit") {
         return await this.adminLeaseAudit(request);
+      }
+      if (method === "GET" && parts.join("/") === "v1/admin/aws-identity") {
+        return await this.adminAWSIdentity(request);
+      }
+      if (method === "GET" && parts.join("/") === "v1/admin/providers/identity") {
+        return await this.adminProviderIdentity(request);
+      }
+      if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "hosts") {
+        return await this.adminHostsRoute(request, parts[3]);
+      }
+      if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "mac-hosts") {
+        return await this.adminMacHostsRoute(request, parts[3]);
       }
       if (
         (method === "GET" || method === "POST") &&
@@ -924,10 +944,14 @@ export class FleetDurableObject implements DurableObject {
       config.awsSSHCIDRs = requestSourceCIDRs(request);
     }
     if (config.provider === "aws" && !config.awsAMI && !config.awsSnapshot) {
-      const promoted = await this.promotedAWSImage();
-      config.awsAMI = promoted?.id ?? "";
-      if (promoted?.region) {
-        config.awsRegion = promoted.region;
+      if (config.target === "macos") {
+        config.awsPromotedAMIs = await this.promotedAWSImagesForFallback(config);
+      } else {
+        const promoted = await this.promotedAWSImage(config);
+        config.awsAMI = promoted?.id ?? "";
+        if (promoted?.region) {
+          config.awsRegion = promoted.region;
+        }
       }
     }
     if (config.provider === "azure" && !config.azureLocation) {
@@ -1020,6 +1044,10 @@ export class FleetDurableObject implements DurableObject {
         config.idleTimeoutSeconds,
       ).toISOString(),
     };
+    const requestedHostID = config.hostID || config.awsMacHostID;
+    if (requestedHostID) {
+      record.hostId = requestedHostID;
+    }
     if (config.target === "windows") {
       record.windowsMode = config.windowsMode;
     }
@@ -1047,6 +1075,9 @@ export class FleetDurableObject implements DurableObject {
     );
     record.cloudID = server.cloudID;
     record.serverType = serverType;
+    if (server.hostID) {
+      record.hostId = server.hostID;
+    }
     if (market) {
       record.market = market;
     }
@@ -2657,6 +2688,220 @@ export class FleetDurableObject implements DurableObject {
     return json({ audits });
   }
 
+  private async adminAWSIdentity(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const queryRegion = url.searchParams.get("region") ?? this.env.CRABBOX_AWS_REGION ?? "";
+    const region = sanitizeAWSRegion(queryRegion || "eu-west-1");
+    if (!region) {
+      return json(
+        { error: "invalid_region", message: "region must be an AWS region name" },
+        { status: 400 },
+      );
+    }
+    const identity = await new EC2SpotClient(this.env, region).identity();
+    return json({ identity });
+  }
+
+  private async adminProviderIdentity(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const provider = (url.searchParams.get("provider") ?? "aws").trim().toLowerCase();
+    if (provider !== "aws") {
+      return json(
+        {
+          error: "unsupported_provider",
+          message: "admin provider identity currently supports provider=aws",
+        },
+        { status: 400 },
+      );
+    }
+    return await this.adminAWSIdentity(request);
+  }
+
+  private async adminHostsRoute(request: Request, hostID?: string): Promise<Response> {
+    const url = new URL(request.url);
+    const provider = (url.searchParams.get("provider") ?? "aws").trim().toLowerCase();
+    const target = (url.searchParams.get("target") ?? "macos").trim().toLowerCase();
+    if (provider !== "aws" || target !== "macos") {
+      return json(
+        {
+          error: "unsupported_host_scope",
+          message: "admin hosts currently supports provider=aws and target=macos",
+        },
+        { status: 400 },
+      );
+    }
+    return await this.adminMacHostsRoute(request, hostID);
+  }
+
+  private async adminMacHostsRoute(request: Request, hostID?: string): Promise<Response> {
+    const method = request.method.toUpperCase();
+    const url = new URL(request.url);
+    const queryRegion = url.searchParams.get("region") ?? this.env.CRABBOX_AWS_REGION ?? "";
+    const region = sanitizeAWSRegion(queryRegion || "eu-west-1");
+    if (!region) {
+      return json(
+        { error: "invalid_region", message: "region must be an AWS region name" },
+        { status: 400 },
+      );
+    }
+    const client = new EC2SpotClient(this.env, region);
+    if (method === "GET" && hostID === "offerings") {
+      const serverType = (url.searchParams.get("type") ?? "mac2.metal").trim();
+      if (!serverType.startsWith("mac") || !serverType.endsWith(".metal")) {
+        return json(
+          { error: "invalid_type", message: "type must be an EC2 Mac metal instance type" },
+          { status: 400 },
+        );
+      }
+      const offerings = await client.listMacHostOfferings(serverType);
+      return json({ offerings });
+    }
+    if (method === "GET" && hostID === "quota") {
+      const serverType = (url.searchParams.get("type") ?? "mac2.metal").trim();
+      if (!serverType.startsWith("mac") || !serverType.endsWith(".metal")) {
+        return json(
+          { error: "invalid_type", message: "type must be an EC2 Mac metal instance type" },
+          { status: 400 },
+        );
+      }
+      try {
+        const quotas = await client.listMacHostQuotas(serverType);
+        return json({ quotas, region, type: serverType });
+      } catch (error) {
+        return json(
+          {
+            error: "mac_host_quota_failed",
+            message: sanitizeMacHostQuotaError(errorMessage(error)),
+          },
+          { status: 502 },
+        );
+      }
+    }
+    if (method === "GET" && !hostID) {
+      const serverType = (url.searchParams.get("type") ?? "").trim();
+      const state = (url.searchParams.get("state") ?? "").trim();
+      const hosts = await client.listMacHosts(serverType, state);
+      return json({ hosts });
+    }
+    if (method === "POST" && hostID === "dry-run") {
+      const input = await readJson<{
+        type?: string;
+        availabilityZone?: string;
+        clientToken?: string;
+      }>(request);
+      const serverType = (input.type ?? "mac2.metal").trim();
+      if (!serverType.startsWith("mac") || !serverType.endsWith(".metal")) {
+        return json(
+          { error: "invalid_type", message: "type must be an EC2 Mac metal instance type" },
+          { status: 400 },
+        );
+      }
+      const availabilityZone = input.availabilityZone?.trim().toLowerCase() ?? "";
+      if (availabilityZone && !availabilityZone.startsWith(region)) {
+        return json(
+          {
+            error: "invalid_availability_zone",
+            message: "availabilityZone must be an AWS availability zone in the selected region",
+          },
+          { status: 400 },
+        );
+      }
+      const offerings = availabilityZone
+        ? [{ region, availabilityZone, instanceType: serverType }]
+        : await client.listMacHostOfferings(serverType);
+      if (offerings.length === 0) {
+        return json(
+          {
+            error: "no_mac_host_offerings",
+            message: `no EC2 Mac host offerings found in ${region} for ${serverType}`,
+          },
+          { status: 400 },
+        );
+      }
+      const clientToken = input.clientToken?.trim() || `crabbox-mac-host-${newLeaseID().slice(4)}`;
+      const checks = await Promise.all(
+        offerings.map((offering) =>
+          client.dryRunAllocateMacHost(
+            serverType,
+            offering.availabilityZone,
+            `${clientToken}-${offering.availabilityZone.replaceAll("-", "")}`,
+          ),
+        ),
+      );
+      return json({ dryRun: true, checks, offerings });
+    }
+    if (method === "POST" && !hostID) {
+      const input = await readJson<{
+        type?: string;
+        availabilityZone?: string;
+        clientToken?: string;
+      }>(request);
+      const serverType = (input.type ?? "mac2.metal").trim();
+      if (!serverType.startsWith("mac") || !serverType.endsWith(".metal")) {
+        return json(
+          { error: "invalid_type", message: "type must be an EC2 Mac metal instance type" },
+          { status: 400 },
+        );
+      }
+      const availabilityZone = input.availabilityZone?.trim().toLowerCase() ?? "";
+      if (availabilityZone && !availabilityZone.startsWith(region)) {
+        return json(
+          {
+            error: "invalid_availability_zone",
+            message: "availabilityZone must be an AWS availability zone in the selected region",
+          },
+          { status: 400 },
+        );
+      }
+      const clientToken = input.clientToken?.trim() || `crabbox-mac-host-${newLeaseID().slice(4)}`;
+      if (!availabilityZone) {
+        const offerings = await client.listMacHostOfferings(serverType);
+        if (offerings.length === 0) {
+          return json(
+            {
+              error: "no_mac_host_offerings",
+              message: `no EC2 Mac host offerings found in ${region} for ${serverType}`,
+            },
+            { status: 400 },
+          );
+        }
+        const failures: string[] = [];
+        for (const offering of offerings) {
+          try {
+            // oxlint-disable-next-line eslint/no-await-in-loop -- Mac host allocation can bill capacity; try one AZ at a time.
+            const hosts = await client.allocateMacHost(
+              serverType,
+              offering.availabilityZone,
+              `${clientToken}-${offering.availabilityZone.replaceAll("-", "")}`,
+            );
+            return json(
+              { hosts, availabilityZone: offering.availabilityZone, offerings },
+              { status: 201 },
+            );
+          } catch (error) {
+            const message = errorMessage(error);
+            failures.push(`${offering.availabilityZone}: ${message}`);
+          }
+        }
+        return json(
+          {
+            error: "mac_host_allocation_failed",
+            message: failures.join("; "),
+            offerings,
+          },
+          { status: 502 },
+        );
+      }
+      const hosts = await client.allocateMacHost(serverType, availabilityZone, clientToken);
+      return json({ hosts }, { status: 201 });
+    }
+    if (method === "DELETE" && hostID) {
+      const released = await client.releaseMacHost(hostID);
+      return json({ hostId: hostID, released });
+    }
+    return json({ error: "not_found" }, { status: 404 });
+  }
+
   private async adminAWSOrphanSweep(request: Request): Promise<Response> {
     const config = this.awsOrphanSweepConfig();
     const lastRun =
@@ -3168,7 +3413,9 @@ export class FleetDurableObject implements DurableObject {
         { status: 400 },
       );
     }
-    const strategy = checkpointStrategy(input.strategy);
+    const strategy = checkpointStrategy(
+      input.strategy ?? (lease.provider === "aws" ? "image" : "disk-snapshot"),
+    );
     if (!strategy) {
       return json(
         {
@@ -3198,7 +3445,11 @@ export class FleetDurableObject implements DurableObject {
       input.noReboot ?? true,
       strategy,
     );
-    return json({ image }, { status: 201 });
+    const enriched = lease.provider === "aws" ? enrichAWSImage(image, lease) : image;
+    if (lease.provider === "aws") {
+      await this.state.storage.put(createdAWSImageKey(enriched.id), enriched);
+    }
+    return json({ image: enriched }, { status: 201 });
   }
 
   private async imageRoute(request: Request, imageID: string, action?: string): Promise<Response> {
@@ -3218,10 +3469,16 @@ export class FleetDurableObject implements DurableObject {
     const region = url.searchParams.get("region") ?? undefined;
     const project = url.searchParams.get("project") ?? undefined;
     const kind = url.searchParams.get("kind") ?? undefined;
+    const known = provider === "aws" ? await this.createdAWSImage(decodedImageID) : undefined;
+    const knownRegion = known?.region ?? "";
+    const providerRegion = region || knownRegion;
     if (method === "GET" && action === undefined) {
       let image: ProviderImage;
       try {
-        image = await this.provider(provider, region, project).getImage(decodedImageID, kind);
+        image = await this.provider(provider, providerRegion, project).getImage(
+          decodedImageID,
+          kind,
+        );
       } catch (error) {
         if (isProviderImageNotFound(error)) {
           return json(
@@ -3231,13 +3488,11 @@ export class FleetDurableObject implements DurableObject {
         }
         throw error;
       }
-      return json({ image });
+      return json({ image: provider === "aws" ? mergeAWSImageMetadata(image, known) : image });
     }
     if (method === "DELETE" && action === undefined) {
       const promoted =
-        provider === "aws"
-          ? await this.state.storage.get<PromotedImageRecord>(promotedAWSImageKey())
-          : undefined;
+        provider === "aws" ? await this.promotedAWSImageByID(decodedImageID) : undefined;
       if (promoted?.id === decodedImageID) {
         return json(
           {
@@ -3247,7 +3502,7 @@ export class FleetDurableObject implements DurableObject {
           { status: 409 },
         );
       }
-      await this.provider(provider, region, project).deleteImage(decodedImageID, kind);
+      await this.provider(provider, providerRegion, project).deleteImage(decodedImageID, kind);
       return json({ imageID: decodedImageID, deleted: true });
     }
     if (method === "POST" && action === "promote") {
@@ -3257,18 +3512,139 @@ export class FleetDurableObject implements DurableObject {
           { status: 400 },
         );
       }
-      const image = await this.provider("aws", region).getImage(decodedImageID);
+      const input: {
+        target?: string;
+        region?: string;
+        serverType?: string;
+        architecture?: string;
+      } = await readJson<{
+        target?: string;
+        region?: string;
+        serverType?: string;
+        architecture?: string;
+      }>(request).catch(() => ({}));
+      const target = normalizeAWSImageTarget(
+        input.target ?? url.searchParams.get("target") ?? known?.target ?? "linux",
+      );
+      if (!target) {
+        return json(
+          { error: "invalid_target", message: "target must be linux, macos, or windows" },
+          { status: 400 },
+        );
+      }
+      const rawRegion = input.region ?? region ?? knownRegion;
+      const imageRegion = sanitizeAWSRegion(rawRegion);
+      if (rawRegion && !imageRegion) {
+        return json(
+          { error: "invalid_region", message: "region must be an AWS region name" },
+          { status: 400 },
+        );
+      }
+      const metadata: Partial<ProviderImage> = { ...known, target, region: imageRegion };
+      const serverType =
+        input.serverType ?? url.searchParams.get("serverType") ?? known?.serverType;
+      if (serverType) {
+        metadata.serverType = serverType;
+      }
+      const architecture =
+        input.architecture ?? url.searchParams.get("architecture") ?? known?.architecture;
+      if (architecture) {
+        metadata.architecture = architecture;
+      }
+      const image = mergeAWSImageMetadata(
+        await this.provider("aws", imageRegion).getImage(decodedImageID),
+        metadata,
+      );
       if (image.state !== "available") {
         return json(
           { error: "image_not_available", message: `image ${decodedImageID} is ${image.state}` },
           { status: 409 },
         );
       }
-      const promoted: PromotedImageRecord = { ...image, promotedAt: new Date().toISOString() };
-      await this.state.storage.put(promotedAWSImageKey(), promoted);
+      if (target === "macos" && !image.serverType) {
+        return json(
+          {
+            error: "invalid_server_type",
+            message: "macOS AWS image promotion requires serverType",
+          },
+          { status: 400 },
+        );
+      }
+      const promoted: PromotedImageRecord = {
+        ...image,
+        target,
+        region: image.region ?? imageRegion,
+        architecture:
+          image.architecture ?? awsImageArchitectureForTarget(target, image.serverType ?? ""),
+        promotedAt: new Date().toISOString(),
+      };
+      await this.state.storage.put(promotedAWSImageKey(promoted), promoted);
+      if (target === "linux") {
+        await this.state.storage.put(legacyPromotedAWSImageKey(), promoted);
+      }
       return json({ image: promoted });
     }
     return json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async createdAWSImage(imageID: string): Promise<ProviderImage | undefined> {
+    return this.state.storage.get<ProviderImage>(createdAWSImageKey(imageID));
+  }
+
+  private async promotedAWSImage(config: {
+    target: TargetOS;
+    serverType: string;
+    awsRegion: string;
+  }): Promise<PromotedImageRecord | undefined> {
+    const scoped = await this.state.storage.get<PromotedImageRecord>(
+      promotedAWSImageKey({
+        target: config.target,
+        architecture: awsImageArchitectureForTarget(config.target, config.serverType),
+        serverType: config.serverType,
+        region: config.awsRegion,
+      }),
+    );
+    if (scoped) {
+      return scoped;
+    }
+    if (config.target === "macos") {
+      return this.state.storage.get<PromotedImageRecord>(
+        legacyScopedPromotedAWSImageKey({
+          target: config.target,
+          architecture: awsImageArchitectureForTarget(config.target, config.serverType),
+          region: config.awsRegion,
+        }),
+      );
+    }
+    if (config.target !== "linux") {
+      return scoped;
+    }
+    return this.state.storage.get<PromotedImageRecord>(legacyPromotedAWSImageKey());
+  }
+
+  private async promotedAWSImagesForFallback(config: LeaseConfig): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    for (const region of awsRegionCandidates(config, this.env, config.awsRegion)) {
+      for (const serverType of awsLaunchCandidates(config)) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- storage reads preserve deterministic fallback key construction.
+        const promoted = await this.promotedAWSImage({
+          target: config.target,
+          serverType,
+          awsRegion: region,
+        });
+        if (promoted?.id) {
+          out[awsPromotedAMIConfigKey(region, serverType)] = promoted.id;
+        }
+      }
+    }
+    return out;
+  }
+
+  private async promotedAWSImageByID(imageID: string): Promise<PromotedImageRecord | undefined> {
+    const promoted = await this.state.storage.list<PromotedImageRecord>({
+      prefix: promotedAWSImagePrefix(),
+    });
+    return [...promoted.values()].find((image) => image.id === imageID);
   }
 
   private async expireLeases(): Promise<void> {
@@ -3626,10 +4002,6 @@ export class FleetDurableObject implements DurableObject {
     await this.state.storage.put(leaseKey(lease.id), lease);
   }
 
-  private async promotedAWSImage(): Promise<PromotedImageRecord | undefined> {
-    return this.state.storage.get<PromotedImageRecord>(promotedAWSImageKey());
-  }
-
   private async getRun(runID: string): Promise<RunRecord | undefined> {
     return this.state.storage.get<RunRecord>(runKey(runID));
   }
@@ -3846,8 +4218,140 @@ function runEventKey(runID: string, seq: number): string {
   return `${runEventPrefix(runID)}${String(seq).padStart(12, "0")}`;
 }
 
-function promotedAWSImageKey(): string {
+function createdAWSImageKey(imageID: string): string {
+  return `image:aws:created:${imageID}`;
+}
+
+function legacyPromotedAWSImageKey(): string {
+  return promotedAWSImagePrefix();
+}
+
+function promotedAWSImagePrefix(): string {
   return "image:aws:promoted";
+}
+
+function promotedAWSImageKey(
+  image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType">,
+): string {
+  const target = image.target ?? "linux";
+  const architecture = image.architecture ?? awsImageArchitectureForTarget(target, "");
+  const region = sanitizeAWSRegion(image.region ?? "");
+  if (target === "macos") {
+    return `image:aws:promoted:${target}:${architecture}:${sanitizePromotedAWSImageKeyPart(image.serverType ?? "")}:${region}`;
+  }
+  return `image:aws:promoted:${target}:${architecture}:${region}`;
+}
+
+function legacyScopedPromotedAWSImageKey(
+  image: Pick<ProviderImage, "target" | "architecture" | "region">,
+): string {
+  const target = image.target ?? "linux";
+  const architecture = image.architecture ?? awsImageArchitectureForTarget(target, "");
+  const region = sanitizeAWSRegion(image.region ?? "");
+  return `image:aws:promoted:${target}:${architecture}:${region}`;
+}
+
+function sanitizePromotedAWSImageKeyPart(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9._-]/g, "");
+}
+
+function enrichAWSImage(image: ProviderImage, lease: LeaseRecord): ProviderImage {
+  const metadata: Partial<ProviderImage> = {};
+  if (lease.target) {
+    metadata.target = lease.target;
+  }
+  if (lease.windowsMode) {
+    metadata.windowsMode = lease.windowsMode;
+  }
+  if (lease.serverType) {
+    metadata.serverType = lease.serverType;
+  }
+  const region = image.region ?? lease.region;
+  if (region !== undefined && region !== "") {
+    metadata.region = region;
+  }
+  return mergeAWSImageMetadata(image, metadata);
+}
+
+function mergeAWSImageMetadata(
+  image: ProviderImage,
+  metadata?: Partial<ProviderImage>,
+): ProviderImage {
+  const target = normalizeAWSImageTarget(metadata?.target ?? image.target ?? "linux") ?? "linux";
+  const serverType = metadata?.serverType ?? image.serverType ?? "";
+  const result: ProviderImage = {
+    ...metadata,
+    ...image,
+    target,
+    architecture:
+      metadata?.architecture ??
+      image.architecture ??
+      awsImageArchitectureForTarget(target, serverType),
+  };
+  const windowsMode = metadata?.windowsMode ?? image.windowsMode;
+  if (windowsMode !== undefined) {
+    result.windowsMode = windowsMode;
+  }
+  if (serverType) {
+    result.serverType = serverType;
+  }
+  const imageRegion = image.region;
+  const metadataRegion = metadata?.region;
+  if (imageRegion !== undefined && imageRegion !== "") {
+    result.region = imageRegion;
+  } else if (metadataRegion !== undefined && metadataRegion !== "") {
+    result.region = metadataRegion;
+  }
+  return result;
+}
+
+function normalizeAWSImageTarget(value: string | undefined): TargetOS | undefined {
+  switch ((value ?? "").trim().toLowerCase()) {
+    case "":
+    case "linux":
+    case "ubuntu":
+      return "linux";
+    case "mac":
+    case "macos":
+    case "darwin":
+    case "osx":
+      return "macos";
+    case "win":
+    case "windows":
+      return "windows";
+    default:
+      return undefined;
+  }
+}
+
+function awsImageArchitectureForTarget(target: TargetOS, serverType: string): string {
+  if (target === "macos") {
+    return serverType.startsWith("mac1.") ? "x86_64_mac" : "arm64_mac";
+  }
+  return "x86_64";
+}
+
+function sanitizeAWSRegion(value: string): string {
+  const region = value.trim().toLowerCase();
+  return /^[a-z]{2}-[a-z-]+-[0-9]$/.test(region) ? region : "";
+}
+
+function sanitizeMacHostQuotaError(message: string): string {
+  if (
+    message.includes("AccessDenied") ||
+    message.includes("UnauthorizedOperation") ||
+    message.includes("Encoded authorization") ||
+    message.includes("arn:aws:iam::")
+  ) {
+    if (message.includes("GetServiceQuota")) {
+      return "AWS authorization failure: coordinator AWS identity needs servicequotas:GetServiceQuota to inspect EC2 Mac Dedicated Host quotas";
+    }
+    return "AWS authorization failure: coordinator AWS identity needs servicequotas:GetServiceQuota or servicequotas:ListServiceQuotas to inspect EC2 Mac Dedicated Host quotas";
+  }
+  return message.replace(/\s+/g, " ");
 }
 
 function webVNCTicketPrefix(): string {
@@ -4127,6 +4631,18 @@ function isAdminRoute(method: string, parts: string[]): boolean {
     return true;
   }
   if (method === "GET" && parts.join("/") === "v1/admin/lease-audit") {
+    return true;
+  }
+  if (method === "GET" && parts.join("/") === "v1/admin/aws-identity") {
+    return true;
+  }
+  if (method === "GET" && parts.join("/") === "v1/admin/providers/identity") {
+    return true;
+  }
+  if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "hosts") {
+    return true;
+  }
+  if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "mac-hosts") {
     return true;
   }
   if ((method === "GET" || method === "POST") && parts.join("/") === "v1/admin/aws-orphan-sweep") {

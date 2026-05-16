@@ -33,8 +33,7 @@ AWS Windows and EC2 Mac use the same VNC command once the desktop lease exists:
 crabbox warmup --provider aws --target windows --desktop
 crabbox vnc --id crimson-crab --open
 
-CRABBOX_AWS_MAC_HOST_ID=h-... \
-  crabbox warmup --provider aws --target macos --desktop --market on-demand
+crabbox warmup --provider aws --target macos --desktop --market on-demand
 crabbox vnc --id silver-squid --open
 ```
 

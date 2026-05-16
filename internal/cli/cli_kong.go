@@ -322,15 +322,35 @@ type imageDeleteKongCmd struct {
 }
 
 type adminKongCmd struct {
-	Leases     adminLeasesKongCmd     `cmd:"" passthrough:"" help:"List coordinator lease records."`
-	LeaseAudit adminLeaseAuditKongCmd `cmd:"" name:"lease-audit" passthrough:"" help:"Check expired coordinator leases against cloud provider state."`
-	Release    adminReleaseKongCmd    `cmd:"" passthrough:"" help:"Mark a lease released."`
-	Delete     adminDeleteKongCmd     `cmd:"" passthrough:"" help:"Delete the backing server and mark the lease released."`
+	Leases      adminLeasesKongCmd      `cmd:"" passthrough:"" help:"List coordinator lease records."`
+	LeaseAudit  adminLeaseAuditKongCmd  `cmd:"" name:"lease-audit" passthrough:"" help:"Check expired coordinator leases against cloud provider state."`
+	Providers   adminProvidersKongCmd   `cmd:"" passthrough:"" help:"Inspect provider identities and policies."`
+	Hosts       adminHostsKongCmd       `cmd:"" passthrough:"" help:"List, allocate, or release provider hosts."`
+	AWSIdentity adminAWSIdentityKongCmd `cmd:"" name:"aws-identity" passthrough:"" help:"Show the coordinator AWS caller identity."`
+	AWSPolicy   adminAWSPolicyKongCmd   `cmd:"" name:"aws-policy" passthrough:"" help:"Print the baseline brokered AWS IAM policy."`
+	MacHosts    adminMacHostsKongCmd    `cmd:"" name:"mac-hosts" passthrough:"" help:"List, allocate, or release AWS EC2 Mac Dedicated Hosts."`
+	Release     adminReleaseKongCmd     `cmd:"" passthrough:"" help:"Mark a lease released."`
+	Delete      adminDeleteKongCmd      `cmd:"" passthrough:"" help:"Delete the backing server and mark the lease released."`
 }
 type adminLeasesKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type adminLeaseAuditKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminProvidersKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminHostsKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminAWSIdentityKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminAWSPolicyKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminMacHostsKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type adminReleaseKongCmd struct {
@@ -548,6 +568,21 @@ func (c *adminLeasesKongCmd) Run(ctx context.Context, app App) error {
 }
 func (c *adminLeaseAuditKongCmd) Run(ctx context.Context, app App) error {
 	return app.adminLeaseAudit(ctx, c.Args)
+}
+func (c *adminProvidersKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminProviders(ctx, c.Args)
+}
+func (c *adminHostsKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminHosts(ctx, c.Args)
+}
+func (c *adminAWSIdentityKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminAWSIdentity(ctx, c.Args)
+}
+func (c *adminAWSPolicyKongCmd) Run(_ context.Context, app App) error {
+	return app.adminAWSPolicy(c.Args)
+}
+func (c *adminMacHostsKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminMacHosts(ctx, c.Args)
 }
 func (c *adminReleaseKongCmd) Run(ctx context.Context, app App) error {
 	return app.adminRelease(ctx, c.Args)

@@ -97,6 +97,23 @@ jobs:
         run: npm run build
         working-directory: worker
 
+  plugin:
+    name: Plugin
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Check
+        run: npm run check
+
   docs:
     name: Docs
     runs-on: ubuntu-latest

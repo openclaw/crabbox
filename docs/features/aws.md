@@ -18,7 +18,7 @@ debugging.
 | Linux | Yes | Spot by default; On-Demand optional; cloud-init bootstrap. |
 | Windows native | Yes | EC2Launch, OpenSSH, Git for Windows, archive sync; optional TightVNC/autologon with `--desktop`. |
 | Windows WSL2 | Yes | Nested virtualization on C8i/M8i/R8i families; POSIX sync through WSL. |
-| macOS | Yes | EC2 Mac Dedicated Host id required; On-Demand only. |
+| macOS | Yes | Requires an available EC2 Mac Dedicated Host; brokered mode can discover one, direct mode requires a host id. On-Demand only. |
 
 Examples:
 
@@ -27,7 +27,7 @@ crabbox warmup --provider aws --class beast
 crabbox run --provider aws --class beast --market on-demand -- pnpm check
 crabbox warmup --provider aws --target windows --desktop
 crabbox warmup --provider aws --target windows --windows-mode wsl2
-CRABBOX_AWS_MAC_HOST_ID=h-... crabbox warmup --provider aws --target macos --desktop --market on-demand
+crabbox warmup --provider aws --target macos --desktop --market on-demand
 ```
 
 ## Capacity
@@ -87,7 +87,7 @@ large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge
 beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge
 
 AWS macOS
-all       mac2.metal unless `--type` is set
+all       mac2.metal, mac2-m2.metal, mac2-m2pro.metal, mac-m4.metal, mac-m4pro.metal, mac-m4max.metal, mac2-m1ultra.metal, mac-m3ultra.metal, then mac1.metal unless `--type` is set
 ```
 
 Exact AWS Windows WSL2 `--type` values must come from nested-virtualization
@@ -102,8 +102,53 @@ Worker secrets:
 AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY
 AWS_SESSION_TOKEN optional
-CRABBOX_AWS_MAC_HOST_ID optional; required for brokered target=macos
+CRABBOX_HOST_ID optional; pins a brokered host such as an EC2 Mac Dedicated Host
+CRABBOX_AWS_MAC_HOST_ID optional legacy AWS alias for CRABBOX_HOST_ID
 ```
+
+EC2 Mac host lifecycle is explicit operator work:
+
+```sh
+crabbox admin hosts policy --provider aws --target macos
+crabbox admin providers identity --provider aws --region eu-west-1
+crabbox admin providers policy --provider aws --target macos
+crabbox admin hosts list --provider aws --target macos --region eu-west-1
+crabbox admin hosts offerings --provider aws --target macos --region eu-west-1 --type mac2.metal
+crabbox admin hosts quota --provider aws --target macos --region eu-west-1 --type mac2.metal
+crabbox admin hosts allocate --provider aws --target macos --region eu-west-1 --type mac2.metal --dry-run
+crabbox admin hosts allocate --provider aws --target macos --region eu-west-1 --type mac2.metal --force
+crabbox admin hosts release h-0123456789abcdef0 --provider aws --target macos --region eu-west-1 --force
+```
+
+The coordinator AWS identity needs `ec2:DescribeInstanceTypeOfferings`,
+`ec2:DescribeHosts`, `ec2:AllocateHosts`, `ec2:ReleaseHosts`, and
+`ec2:CreateTags` for host lifecycle work, plus
+`servicequotas:GetServiceQuota` for known Mac host quota checks and
+`servicequotas:ListServiceQuotas` as a fallback for future Mac host families.
+The `CreateTags` grant is needed because Crabbox tags hosts during
+`AllocateHosts`; scope it with `ec2:CreateAction=AllocateHosts`. Use
+`allocate --dry-run` first; it validates the request path without creating a
+Dedicated Host. Use
+`admin providers identity --provider aws` to confirm which coordinator AWS
+principal needs the policy.
+
+IAM is not the only preflight. AWS tracks Dedicated Mac host capacity through
+separate EC2 Service Quotas such as
+[Running Dedicated mac2 Hosts](https://docs.aws.amazon.com/ec2/latest/instancetypes/ec2-instance-quotas.html),
+which `hosts quota --provider aws --target macos` can inspect through the
+coordinator. If
+`allocate --dry-run` succeeds, check quota before treating a real allocation
+failure as a Crabbox runtime bug.
+
+That host lifecycle policy is not the full macOS image policy. The later
+warmup, WebVNC, AMI create, candidate boot, promotion, and cleanup phases also
+need the normal brokered AWS provider permissions documented in
+[Infrastructure](../infrastructure.md#aws-ec2), including launch/list/tag/terminate,
+key pair, security group, image, snapshot, and baseline Service Quotas access.
+Print the combined provider plus Dedicated Host policy with
+`crabbox admin providers policy --provider aws --target macos`, or print the
+two grants separately with `crabbox admin providers policy --provider aws` and
+`crabbox admin hosts policy --provider aws --target macos`.
 
 CLI/direct env and config:
 
@@ -119,7 +164,8 @@ CRABBOX_AWS_SUBNET_ID
 CRABBOX_AWS_INSTANCE_PROFILE
 CRABBOX_AWS_ROOT_GB
 CRABBOX_AWS_SSH_CIDRS
-CRABBOX_AWS_MAC_HOST_ID
+CRABBOX_HOST_ID
+CRABBOX_AWS_MAC_HOST_ID legacy AWS alias
 CRABBOX_AWS_ORPHAN_SWEEP_ENABLED
 CRABBOX_AWS_ORPHAN_SWEEP_DELETE
 CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS

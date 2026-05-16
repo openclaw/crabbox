@@ -76,8 +76,9 @@ tensorlake Tensorlake Firecracker sandboxes with delegated command execution
 - launches AWS Windows Server leases with EC2Launch PowerShell user data, then a
   post-SSH Crabbox bootstrap for OpenSSH/Git/user setup; `--desktop` adds
   TightVNC, auto-logon, and first-network flyout suppression;
-- launches EC2 Mac leases only with an explicit Dedicated Host id
-  (`CRABBOX_AWS_MAC_HOST_ID` or `aws.macHostId`) and On-Demand capacity;
+- launches EC2 Mac leases on available Dedicated Hosts with On-Demand capacity,
+  optionally pinned by `CRABBOX_HOST_ID` or `hostId`; `CRABBOX_AWS_MAC_HOST_ID`
+  and `aws.macHostId` remain AWS compatibility aliases;
 - tags instances, volumes, and Spot requests;
 - falls back across broad C/M/R instance families for class requests, including account policy and capacity rejections;
 - can fall back to a small burstable type when account policy rejects the high-core class candidates;
@@ -122,7 +123,7 @@ large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge
 beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge
 
 AWS macOS
-all       mac2.metal unless `--type` is set
+all       mac2.metal, mac2-m2.metal, mac2-m2pro.metal, mac-m4.metal, mac-m4pro.metal, mac-m4max.metal, mac2-m1ultra.metal, mac-m3ultra.metal, then mac1.metal unless `--type` is set
 
 Google Cloud
 standard  c4-standard-32, c3-standard-22, n2-standard-32, n2d-standard-32

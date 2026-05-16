@@ -152,8 +152,10 @@ aws:
   rootGB: 400
   sshCidrs:
     - 203.0.113.0/24
-  macHostId: h-0123456789abcdef0
+hostId: h-0123456789abcdef0
 ```
+
+`aws.macHostId` remains supported as a legacy AWS-specific alias for `hostId`.
 
 ### Azure
 

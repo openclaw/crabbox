@@ -11,7 +11,18 @@ func TestValidateProviderTargetRejectsUnsupportedAWSTargets(t *testing.T) {
 		cfg.Provider = "aws"
 		cfg.TargetOS = targetMacOS
 		err := validateProviderTarget(cfg)
-		if err == nil || !strings.Contains(err.Error(), "requires CRABBOX_AWS_MAC_HOST_ID") {
+		if err == nil || !strings.Contains(err.Error(), "requires CRABBOX_HOST_ID") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("macOS accepts provider neutral host id", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "aws"
+		cfg.TargetOS = targetMacOS
+		cfg.HostID = "h-000000000001"
+		cfg.Capacity.Market = "on-demand"
+		if err := validateProviderTarget(cfg); err != nil {
 			t.Fatalf("err=%v", err)
 		}
 	})

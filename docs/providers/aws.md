@@ -68,7 +68,8 @@ CRABBOX_AWS_SUBNET_ID
 CRABBOX_AWS_INSTANCE_PROFILE
 CRABBOX_AWS_ROOT_GB
 CRABBOX_AWS_SSH_CIDRS
-CRABBOX_AWS_MAC_HOST_ID
+CRABBOX_HOST_ID
+CRABBOX_AWS_MAC_HOST_ID legacy AWS alias
 CRABBOX_CAPACITY_REGIONS
 CRABBOX_CAPACITY_AVAILABILITY_ZONES
 CRABBOX_CAPACITY_HINTS
@@ -84,7 +85,7 @@ Brokered AWS credentials belong in the Worker, not on developer machines.
 | Linux | Ubuntu bootstrap, SSH, rsync, optional desktop/browser/code. |
 | Windows native | EC2Launch, OpenSSH, Git for Windows, archive sync; optional TightVNC/autologon with `--desktop`. |
 | Windows WSL2 | Nested virtualization families; POSIX sync and commands through WSL. |
-| macOS | Requires `CRABBOX_AWS_MAC_HOST_ID` or `aws.macHostId`; On-Demand only. |
+| macOS | Requires an available EC2 Mac Dedicated Host in the selected region; On-Demand only. `CRABBOX_HOST_ID` or `hostId` can pin a specific host; `CRABBOX_AWS_MAC_HOST_ID` and `aws.macHostId` remain AWS compatibility aliases. |
 
 ## Lifecycle
 
@@ -121,7 +122,7 @@ provider labels and `crabbox cleanup`.
 - Windows WSL2 needs nested virtualization instance families. If you pass an
   exact `--type`, use the listed C8i/M8i/M8i Flex/R8i families; M7/T3-style
   Windows types are rejected before leasing.
-- EC2 Mac needs an explicit Dedicated Host id.
+- EC2 Mac needs an allocated Dedicated Host in the selected region.
 - VNC stays behind SSH tunnels; do not expose VNC ports directly.
 
 Related docs:

@@ -174,9 +174,13 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 	if err := c.EnsureSSHKey(ctx, cfg.ProviderKey, publicKey); err != nil {
 		return Server{}, cfg, err
 	}
-	imageID, err := c.resolveAMI(ctx, cfg)
-	if err != nil {
-		return Server{}, cfg, err
+	staticImageID := ""
+	if cfg.TargetOS != targetMacOS || cfg.AWSAMI != "" {
+		imageID, err := c.resolveAMI(ctx, cfg)
+		if err != nil {
+			return Server{}, cfg, err
+		}
+		staticImageID = imageID
 	}
 	securityGroupID, err := c.ensureSecurityGroup(ctx, cfg)
 	if err != nil {
@@ -190,6 +194,14 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 		next.ServerType = instanceType
 		if i > 0 && logf != nil {
 			logf("fallback provisioning type=%s after capacity/quota rejection\n", instanceType)
+		}
+		imageID, err := c.resolveLaunchAMI(ctx, next, staticImageID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s image: %w", instanceType, err))
+			if !isRetryableAWSProvisioningError(err) {
+				return Server{}, next, joinErrors(errs)
+			}
+			continue
 		}
 		server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep, imageID, securityGroupID, useSpot)
 		if err == nil {
@@ -207,6 +219,14 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 			if logf != nil {
 				logf("fallback provisioning type=%s market=on-demand after spot rejection\n", instanceType)
 			}
+			imageID, err := c.resolveLaunchAMI(ctx, next, staticImageID)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("on-demand %s image: %w", instanceType, err))
+				if !isRetryableAWSProvisioningError(err) {
+					return Server{}, next, joinErrors(errs)
+				}
+				continue
+			}
 			server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep, imageID, securityGroupID, false)
 			if err == nil {
 				return server, next, nil
@@ -221,6 +241,13 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 		return Server{}, cfg, fmt.Errorf("requested exact AWS instance type %s failed; remove --type to allow class fallback: %w", cfg.ServerType, joinErrors(errs))
 	}
 	return Server{}, cfg, joinErrors(errs)
+}
+
+func (c *AWSClient) resolveLaunchAMI(ctx context.Context, cfg Config, staticImageID string) (string, error) {
+	if staticImageID != "" {
+		return staticImageID, nil
+	}
+	return c.resolveAMI(ctx, cfg)
 }
 
 func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, imageID, securityGroupID string, spot bool) (Server, error) {
@@ -293,7 +320,11 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 	}
 	applyAWSRunInstanceTargetOptions(input, cfg)
 	if cfg.TargetOS == targetMacOS {
-		input.Placement = &types.Placement{HostId: aws.String(cfg.AWSMacHostID), Tenancy: types.TenancyHost}
+		hostID := cfg.HostID
+		if hostID == "" {
+			hostID = cfg.AWSMacHostID
+		}
+		input.Placement = &types.Placement{HostId: aws.String(hostID), Tenancy: types.TenancyHost}
 	} else if cfg.AWSSubnetID == "" {
 		if zone := awsAvailabilityZoneForRegion(cfg, cfg.AWSRegion); zone != "" {
 			input.Placement = &types.Placement{AvailabilityZone: aws.String(zone)}
@@ -375,10 +406,8 @@ func (c *AWSClient) resolveAMI(ctx context.Context, cfg Config) (string, error) 
 		return c.resolveLatestAmazonAMI(ctx, "Windows_Server-2022-English-Full-Base-*", "x86_64")
 	}
 	if cfg.TargetOS == targetMacOS {
-		if strings.HasPrefix(cfg.ServerType, "mac1.") {
-			return c.resolveLatestAmazonAMI(ctx, "amzn-ec2-macos-14.*", "x86_64_mac")
-		}
-		return c.resolveLatestAmazonAMI(ctx, "amzn-ec2-macos-14.*-arm64", "arm64_mac")
+		name, architecture := awsMacOSAMIQueryForInstanceType(cfg.ServerType)
+		return c.resolveLatestAmazonAMI(ctx, name, architecture)
 	}
 	out, err := c.ec2.DescribeImages(ctx, &ec2.DescribeImagesInput{
 		Owners: []string{awsUbuntuOwner},
@@ -399,6 +428,16 @@ func (c *AWSClient) resolveAMI(ctx context.Context, cfg Config) (string, error) 
 		return aws.ToString(out.Images[i].CreationDate) > aws.ToString(out.Images[j].CreationDate)
 	})
 	return aws.ToString(out.Images[0].ImageId), nil
+}
+
+func awsMacOSAMIQueryForInstanceType(instanceType string) (string, string) {
+	if strings.HasPrefix(instanceType, "mac1.") {
+		return "amzn-ec2-macos-14.*", "x86_64_mac"
+	}
+	if strings.HasPrefix(instanceType, "mac-m") {
+		return "amzn-ec2-macos-15.*-arm64", "arm64_mac"
+	}
+	return "amzn-ec2-macos-14.*-arm64", "arm64_mac"
 }
 
 func (c *AWSClient) resolveLatestAmazonAMI(ctx context.Context, name, architecture string) (string, error) {
@@ -684,6 +723,9 @@ func isRetryableAWSProvisioningError(err error) bool {
 	return strings.Contains(s, "InsufficientInstanceCapacity") ||
 		strings.Contains(s, "MaxSpotInstanceCountExceeded") ||
 		strings.Contains(s, "VcpuLimitExceeded") ||
+		strings.Contains(s, "InvalidHostID.NotFound") ||
+		strings.Contains(s, "no AWS AMI found") ||
+		strings.Contains(s, "no available EC2 Mac Dedicated Host") ||
 		strings.Contains(s, "Unsupported") ||
 		strings.Contains(s, "InvalidParameterValue") ||
 		(strings.Contains(s, "InvalidParameterCombination") &&
