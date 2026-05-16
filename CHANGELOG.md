@@ -29,6 +29,7 @@
 - Changed standalone macOS host region preflight blockers to use the guarded IAM apply helper instead of manual account-match shell snippets.
 - Hardened the macOS image lifecycle smoke so EC2 Mac Dedicated Host scrubbing, WebVNC daemon cleanup, active portal bridge checks, and Mac host family fallback are covered before image promotion.
 - Hardened the macOS image lifecycle smoke so native checkpoint snapshot creation, checkpoint forks, WebVNC proof, and checkpoint cleanup run before candidate-image promotion.
+- Changed native checkpoint records to preserve the source provider server type so macOS snapshot forks reuse the matching EC2 Mac host family unless `--type` is explicitly overridden.
 - Changed EC2 Mac Dedicated Host quota checks to use direct Service Quotas lookups for known Mac host families before falling back to broader quota listing.
 - Changed AWS macOS instance fallback candidates to include current Apple silicon Mac host families before the legacy `mac1.metal` fallback.
 - Documented the AWS account-match and IAM remediation flow for attaching the combined macOS image lifecycle policy to the coordinator role or user.

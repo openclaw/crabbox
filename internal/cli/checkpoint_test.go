@@ -273,11 +273,12 @@ func TestNewCheckpointRecordUsesResolvedVersion(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointRecordStoresHostPin(t *testing.T) {
+func TestNewCheckpointRecordStoresHostPinAndServerType(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Provider = "aws"
 	cfg.TargetOS = targetMacOS
 	cfg.HostID = "h-000000000001"
+	cfg.ServerType = "mac2-m2pro.metal"
 
 	record, _, err := newCheckpointRecord(
 		Repo{Name: "my-app"},
@@ -293,6 +294,9 @@ func TestNewCheckpointRecordStoresHostPin(t *testing.T) {
 	}
 	if record.HostID != "h-000000000001" {
 		t.Fatalf("HostID=%q, want h-000000000001", record.HostID)
+	}
+	if record.ServerType != "mac2-m2pro.metal" {
+		t.Fatalf("ServerType=%q, want mac2-m2pro.metal", record.ServerType)
 	}
 }
 
@@ -757,6 +761,7 @@ func TestApplyAWSMacOSCheckpointForkConfigPreservesHostAndOnDemand(t *testing.T)
 		Kind:        checkpointKindAWSEBS,
 		TargetOS:    targetMacOS,
 		WindowsMode: windowsModeNormal,
+		ServerType:  "mac2-m2pro.metal",
 		HostID:      "h-000000000001",
 	}
 	record.Native.ImageID = "snap-000000000001"
@@ -769,6 +774,9 @@ func TestApplyAWSMacOSCheckpointForkConfigPreservesHostAndOnDemand(t *testing.T)
 	}
 	if cfg.HostID != "h-000000000001" || cfg.AWSMacHostID != "h-000000000001" {
 		t.Fatalf("host pin not applied: hostID=%q awsMacHostID=%q", cfg.HostID, cfg.AWSMacHostID)
+	}
+	if cfg.ServerType != "mac2-m2pro.metal" || !cfg.ServerTypeExplicit {
+		t.Fatalf("server type not preserved: type=%q explicit=%t", cfg.ServerType, cfg.ServerTypeExplicit)
 	}
 	if cfg.Capacity.Market != "on-demand" {
 		t.Fatalf("market=%q, want on-demand", cfg.Capacity.Market)

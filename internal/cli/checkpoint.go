@@ -46,6 +46,7 @@ type checkpointRecord struct {
 	Slug           string `json:"slug,omitempty"`
 	TargetOS       string `json:"targetOS,omitempty"`
 	WindowsMode    string `json:"windowsMode,omitempty"`
+	ServerType     string `json:"serverType,omitempty"`
 	HostID         string `json:"hostId,omitempty"`
 	Workdir        string `json:"workdir,omitempty"`
 	ArchivePath    string `json:"archivePath,omitempty"`
@@ -327,8 +328,8 @@ func (a App) checkpointInspect(ctx context.Context, args []string) error {
 }
 
 func printCheckpointInspect(stdout io.Writer, record checkpointRecord) {
-	fmt.Fprintf(stdout, "id=%s\nkind=%s\nname=%s\ncreated=%s\nprovider=%s\nlease=%s\nrepo=%s\nhead=%s\nworkdir=%s\narchive=%s\nbytes=%s\n",
-		record.ID, record.Kind, blank(record.Name, "-"), record.CreatedAt, blank(record.Provider, "-"), blank(record.LeaseID, "-"), blank(record.Repo.Name, "-"), blank(record.Repo.Head, "-"), blank(record.Workdir, "-"), blank(record.ArchivePath, "-"), humanBytes(record.ArchiveBytes))
+	fmt.Fprintf(stdout, "id=%s\nkind=%s\nname=%s\ncreated=%s\nprovider=%s\nlease=%s\nrepo=%s\nhead=%s\nserver_type=%s\nworkdir=%s\narchive=%s\nbytes=%s\n",
+		record.ID, record.Kind, blank(record.Name, "-"), record.CreatedAt, blank(record.Provider, "-"), blank(record.LeaseID, "-"), blank(record.Repo.Name, "-"), blank(record.Repo.Head, "-"), blank(record.ServerType, "-"), blank(record.Workdir, "-"), blank(record.ArchivePath, "-"), humanBytes(record.ArchiveBytes))
 	if isNativeCheckpointKind(record.Kind) {
 		fmt.Fprintf(stdout, "resource=%s\nresource_name=%s\nresource_state=%s\nresource_region=%s\nstrategy=%s\nno_reboot=%t\n",
 			blank(record.Native.ImageID, "-"), blank(record.Native.Name, "-"), blank(record.Native.State, "-"), blank(record.Native.Region, "-"), blank(record.Native.Strategy, checkpointStrategyImage), record.Native.NoReboot)
@@ -820,6 +821,7 @@ func newCheckpointRecord(repo Repo, cfg Config, server Server, target SSHTarget,
 		Slug:           serverSlug(server),
 		TargetOS:       firstNonBlank(target.TargetOS, cfg.TargetOS),
 		WindowsMode:    firstNonBlank(target.WindowsMode, cfg.WindowsMode),
+		ServerType:     firstNonBlank(server.ServerType.Name, cfg.ServerType),
 		HostID:         firstNonBlank(cfg.HostID, cfg.AWSMacHostID),
 		Workdir:        workdir,
 	}
@@ -1087,8 +1089,13 @@ func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record check
 		normalizeTargetConfig(cfg)
 	}
 	if !flagWasSet(fs, "type") {
-		cfg.ServerTypeExplicit = false
-		cfg.ServerType = serverTypeForConfig(*cfg)
+		if record.ServerType != "" {
+			cfg.ServerType = record.ServerType
+			cfg.ServerTypeExplicit = true
+		} else {
+			cfg.ServerTypeExplicit = false
+			cfg.ServerType = serverTypeForConfig(*cfg)
+		}
 	}
 }
 
