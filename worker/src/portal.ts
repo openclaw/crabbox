@@ -765,6 +765,11 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         applyCollaborationState(state);
         return state;
       }
+      async function refreshCollaborationStateAndMaybeTakeControl() {
+        const state = await refreshCollaborationState();
+        await takeControlIfRequested(state);
+        return state;
+      }
       async function takeControl(label = "you took control") {
         const response = await fetch(controlURL, {
           method: "POST",
@@ -834,9 +839,11 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
             connected = true;
             retryAttempt = 0;
             setStatus("connected", "ok");
-            void refreshCollaborationState().then((state) => takeControlIfRequested(state)).then(focusVNC).catch(() => {});
+            void refreshCollaborationStateAndMaybeTakeControl().then(focusVNC).catch(() => {});
             window.clearInterval(statusTimer);
-            statusTimer = window.setInterval(refreshCollaborationState, 1500);
+            statusTimer = window.setInterval(() => {
+              void refreshCollaborationStateAndMaybeTakeControl().catch(() => {});
+            }, 1500);
           });
           rfb.addEventListener("clipboard", (event) => {
             remoteClipboardText = event.detail?.text || "";

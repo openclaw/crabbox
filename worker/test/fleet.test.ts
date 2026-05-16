@@ -2170,6 +2170,10 @@ describe("fleet lease identity and idle", () => {
     expect(pageBody).toContain("you control");
     expect(pageBody).toContain('fragment.get("control") === "take"');
     expect(pageBody).toContain("takeControlIfRequested(state)");
+    expect(pageBody).toContain("refreshCollaborationStateAndMaybeTakeControl");
+    expect(pageBody).toContain(
+      "void refreshCollaborationStateAndMaybeTakeControl().catch(() => {})",
+    );
     expect(pageBody).toContain('aria-label="WebVNC display" tabindex="0"');
     expect(pageBody).toContain('screen.addEventListener("contextmenu"');
     expect(pageBody).toContain(

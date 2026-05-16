@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Fixed WebVNC `--take-control` handoff links so the portal keeps retrying the automatic control claim until the opened viewer is registered as an observer.
 - Fixed WebVNC portal click forwarding so controller clicks reach the remote desktop while preserving focus and browser context-menu suppression.
 
 ## 0.14.0 - 2026-05-15
