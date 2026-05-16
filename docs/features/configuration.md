@@ -80,6 +80,66 @@ lease:
   ttl: 90m
 ```
 
+### Profiles And Presets
+
+Profiles are repo-local contracts for real validation lanes. Keep project
+knowledge in YAML, not in the Crabbox binary: runtime prerequisites, environment
+defaults, artifact globs, command presets, and proof wording all belong here.
+
+```yaml
+profile: live-qa
+profiles:
+  live-qa:
+    env:
+      CI: "1"
+      NODE_OPTIONS: "--max-old-space-size=4096"
+      allow:
+        - QA_*
+    envAllow:
+      - QA_TEST_PROJECTS_PARALLEL
+    artifactGlobs:
+      - ".artifacts/qa-e2e/**"
+    doctor:
+      enabled: true
+      tools: [node, corepack, pnpm]
+      nodeMajor: 22
+      minDiskGB: 40
+      requireDocker: true
+      requireCompose: true
+    presets:
+      qa-live:
+        command: >
+          pnpm qa live
+          --scenario {{scenario}}
+          --fail-fast
+        env:
+          VITEST_NO_OUTPUT_TIMEOUT_MS: "900000"
+          QA_SERVICE_TIMEOUT_MS: "3000"
+        preflight: true
+        proofTemplate: real-behavior-pr
+    proofTemplates:
+      real-behavior-pr:
+        behaviorAddressed: "Live QA scenario {{scenario}}"
+        realEnvironmentTested: "AWS Crabbox {{leaseId}} ({{slug}}) with disposable service topology."
+        exactSteps: "{{command}}"
+        observedResult: "The named E2E scenario completed successfully."
+        notTested: "No external public service; deterministic disposable services were used."
+```
+
+Run with:
+
+```sh
+crabbox run --provider aws --profile live-qa --preset qa-live --scenario login-regression --emit-proof /tmp/proof.md --stop-after success
+```
+
+Preset commands are expanded before the remote run and printed for auditability.
+`{{scenario}}` comes from `--scenario`; additional placeholders come from
+repeatable `--preset-var name=value`.
+
+`profiles.<name>.env` sets literal environment defaults for that profile.
+The legacy `profiles.<name>.env.allow` shape is also accepted and is merged
+with `profiles.<name>.envAllow`.
+
 ### Jobs
 
 Named jobs live in repo config and describe reusable Crabbox orchestration,
@@ -479,28 +539,12 @@ user-configurable.
 
 ## Profiles
 
-Profiles are named bundles of config that get applied as a layer on top of
-user/repo config. They live under a `profiles:` map and are selected by
-`--profile` or `profile:` in repo config.
-
-```yaml
-profiles:
-  project-check:
-    class: beast
-    sync:
-      baseRef: main
-    env:
-      allow:
-        - PROJECT_*
-  smoke:
-    class: standard
-    lease:
-      ttl: 30m
-```
-
-Use profiles when one repo has multiple test lanes with different machine
-classes, sync rules, or env allowlists. A repo without profiles never needs
-the block.
+`--profile` is still a provider/coordinator label and does not require a
+matching `profiles:` block. When a matching block exists, Crabbox applies the
+profile metadata described in [Profiles And Presets](#profiles-and-presets):
+environment defaults, env allowlists, artifact globs, doctor requirements,
+presets, and proof templates. Provider sizing, sync rules, and lease TTL stay
+at their normal top-level or job config locations.
 
 ## Machine Classes
 

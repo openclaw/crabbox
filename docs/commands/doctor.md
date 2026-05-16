@@ -7,6 +7,7 @@ never calls a billable provider API.
 ```sh
 crabbox doctor
 crabbox doctor --provider aws
+crabbox doctor --profile live-qa --id blue-lobster
 crabbox doctor --provider hetzner --target linux
 crabbox doctor --provider ssh --target windows --windows-mode normal --static-host win-dev.local
 ```
@@ -34,6 +35,13 @@ When a coordinator is configured, doctor also asks the broker for secret
 readiness for managed brokered providers such as AWS, Azure, GCP, and Hetzner. It
 reports missing Worker secret names such as `AZURE_TENANT_ID` without exposing
 secret values. Static, Proxmox, and delegated providers skip this broker-secret check.
+
+When `--profile <name> --id <lease>` selects a profile with `doctor.enabled:
+true`, doctor runs that profile's remote prerequisite contract instead of the
+generic remote probe. Profiles can require exact tool availability, Node major
+version, Docker daemon usability, Docker Compose v2, and minimum free disk. A
+failing profile doctor reports `failed` lines for missing prerequisites and
+exits nonzero without installing or changing anything.
 
 For the full list of checks, including how each one decides between
 `fail`, `skip`, and `ok`, see
@@ -77,6 +85,7 @@ the exit code.
 
 ```text
 --provider hetzner|aws|azure|gcp|proxmox|ssh   provider to validate
+--profile <name>             configured profile for remote prereq checks
 --target linux|macos|windows target OS for ssh provider checks
 --windows-mode normal|wsl2   when target=windows
 --static-host <host>         static SSH host

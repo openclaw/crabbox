@@ -167,26 +167,41 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	freshPRValue := fs.String("fresh-pr", "", "run from a fresh remote checkout of a GitHub PR: owner/repo#123, URL, or number")
 	applyLocalPatch := fs.Bool("apply-local-patch", false, "apply the local git diff on top of --fresh-pr checkout")
 	envHelper := fs.String("env-helper", "", "persist profile env as a reusable remote helper name under .crabbox/env/")
+	presetName := fs.String("preset", "", "configured profile preset to expand into a command")
+	scenario := fs.String("scenario", "", "preset variable shorthand for --preset-var scenario=<value>")
+	emitProof := fs.String("emit-proof", "", "write a generated proof block after a successful run")
+	proofTemplate := fs.String("proof-template", "", "proof template name from the selected profile")
+	stopAfter := fs.String("stop-after", "", "stop policy for the lease: success, always, failure, or never")
 	var downloads stringListFlag
 	var allowEnvFlags stringListFlag
 	var envProfileFlags stringListFlag
+	var presetVars stringListFlag
+	var artifactGlobs stringListFlag
 	fs.Var(&downloads, "download", "download a remote file after command success: remote=local; repeatable")
 	fs.Var(&allowEnvFlags, "allow-env", "allow an environment variable for this run; repeatable or comma-separated")
 	fs.Var(&envProfileFlags, "env-from-profile", "load allowed environment values from a local profile file; repeatable")
+	fs.Var(&presetVars, "preset-var", "preset template variable name=value; repeatable or comma-separated")
+	fs.Var(&artifactGlobs, "artifact-glob", "collect remote files matching a safe glob into a local run artifact tarball; repeatable")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
+	var cleanup leaseCleanupResult
+	var finalTimingReport *timingReport
+	defer func() {
+		if !*timingJSON || finalTimingReport == nil {
+			return
+		}
+		report := *finalTimingReport
+		cleanup.apply(&report)
+		if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil && err == nil {
+			err = writeErr
+		}
+	}()
 	command := fs.Args()
 	if len(command) > 0 && command[0] == "--" {
 		command = command[1:]
-	}
-	if len(command) == 0 && *scriptPath == "" && !*scriptStdin && !*syncOnly {
-		return exit(2, "usage: crabbox run [flags] -- <command...>")
-	}
-	if err := preflightRunLocalOutputs(*captureStdout, *captureStderr, downloads); err != nil {
-		return err
 	}
 	fullResyncRequested := *fullResync || *freshSync
 
@@ -194,8 +209,58 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	cfg.Profile = *leaseFlags.Profile
+	if err := applySelectedProfileConfig(&cfg); err != nil {
+		return err
+	}
 	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
 		return err
+	}
+	expansion, err := expandRunProfile(cfg, *presetName, *scenario, presetVars, command, *shellMode, *preflight, artifactGlobs, *proofTemplate)
+	if err != nil {
+		return err
+	}
+	command = expansion.Command
+	*shellMode = expansion.Shell
+	*preflight = expansion.Preflight
+	if expansion.ProofTemplate != "" {
+		*proofTemplate = expansion.ProofTemplate
+	}
+	if expansion.PresetName != "" {
+		fmt.Fprintln(a.Stderr, formatExpandedPresetCommand(expansion.PresetName, command, *shellMode, expansion.Env, expansion.LiteralArgs))
+	}
+	if len(command) == 0 && *scriptPath == "" && !*scriptStdin && !*syncOnly {
+		return exit(2, "usage: crabbox run [flags] -- <command...>")
+	}
+	if err := validateRunStopAfterPolicy(*stopAfter); err != nil {
+		return err
+	}
+	if err := validateRunArtifactGlobs(expansion.ArtifactGlobs); err != nil {
+		return err
+	}
+	if *syncOnly {
+		if len(expansion.ArtifactGlobs) > 0 {
+			return exit(2, "--artifact-glob cannot be combined with --sync-only")
+		}
+		if strings.TrimSpace(*emitProof) != "" {
+			return exit(2, "--emit-proof cannot be combined with --sync-only")
+		}
+	}
+	if err := preflightRunLocalOutputs(*captureStdout, *captureStderr, downloads); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*emitProof) != "" {
+		if err := preflightProofOutputPath(strings.TrimSpace(*emitProof), *captureStdout, *captureStderr, downloads); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*proofTemplate) != "" {
+			if _, ok := cfg.ProofTemplates[strings.TrimSpace(*proofTemplate)]; !ok {
+				return exit(2, "proof template %q is not configured for profile %q", strings.TrimSpace(*proofTemplate), cfg.Profile)
+			}
+		}
+		if err := preflightLocalOutputPath("emit proof", strings.TrimSpace(*emitProof), true); err != nil {
+			return err
+		}
 	}
 	for _, value := range allowEnvFlags {
 		cfg.EnvAllow = appendUniqueStrings(cfg.EnvAllow, splitCommaList(value)...)
@@ -245,6 +310,8 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	envSelection.Inline = mergeEnv(envSelection.Inline, expansion.Env)
+	envSelection.Effective = mergeEnv(envSelection.Effective, expansion.Env)
 	envHelperName := strings.TrimSpace(*envHelper)
 	if envHelperName != "" && len(envSelection.Profile) == 0 {
 		return exit(2, "--env-helper requires --env-from-profile values selected by --allow-env")
@@ -255,6 +322,14 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		}
 		if _, err := safeEnvHelperName(envHelperName); err != nil {
 			return err
+		}
+	}
+	if *leaseIDFlag == "" {
+		if err := validateRunArtifactGlobTarget(SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}, expansion.ArtifactGlobs); err != nil {
+			return err
+		}
+		if expansion.Profile.Doctor.Enabled && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeNormal {
+			return exit(2, "profile doctor is not supported for native Windows targets")
 		}
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
@@ -290,8 +365,15 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		ApplyLocalPatch: *applyLocalPatch,
 		Command:         command,
 		TimingJSON:      *timingJSON,
+		ArtifactGlobs:   expansion.ArtifactGlobs,
+		EmitProof:       strings.TrimSpace(*emitProof),
+		ProofTemplate:   strings.TrimSpace(*proofTemplate),
+		StopAfter:       strings.TrimSpace(*stopAfter),
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
+		if expansion.Profile.Doctor.Enabled {
+			return exit(2, "%s delegates run execution; profile doctor is not supported", backend.Spec().Name)
+		}
 		if err := RejectDelegatedSyncOptionsForSpec(backend.Spec(), runReq); err != nil {
 			return err
 		}
@@ -376,13 +458,42 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return recordFailure(err)
 	}
+	if err := validateRunArtifactGlobTarget(target, expansion.ArtifactGlobs); err != nil {
+		return recordFailure(err)
+	}
+	if expansion.Profile.Doctor.Enabled && isWindowsNativeTarget(target) {
+		return recordFailure(exit(2, "profile doctor is not supported for native Windows targets"))
+	}
 	if useCoordinator {
 		recorder.AttachLease(leaseID, serverSlug(server), cfg)
 	}
-	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
-		if acquired && !*keep {
-			a.releaseBackendLeaseBestEffort(ctx, sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
+	keepFailedLease := false
+	defer func() {
+		if !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure) {
+			return
 		}
+		releaseApp := a
+		if *timingJSON {
+			releaseApp.Stderr = io.Discard
+		}
+		cleanup.Attempted = true
+		cleanup.Err = releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
+		cleanup.Stopped = cleanup.Err == nil
+		if cleanup.Err == nil {
+			recorder.Event("lease.released", "released", "")
+		}
+		if !*timingJSON {
+			if cleanup.Err != nil {
+				fmt.Fprintf(a.Stderr, "lease cleanup stopped=false policy=%s lease=%s slug=%s error=%q\n", blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"), cleanup.Err.Error())
+				if err == nil {
+					err = exit(7, "lease cleanup failed for %s: %v", leaseID, cleanup.Err)
+				}
+				return
+			}
+			fmt.Fprintf(a.Stderr, "lease cleanup stopped=true policy=%s lease=%s slug=%s\n", blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"))
+		}
+	}()
+	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 		return recordFailure(err)
 	}
 	if !useCoordinator && leaseID != "" {
@@ -391,15 +502,6 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		} else {
 			fmt.Fprintf(a.Stderr, "warning: direct touch failed for %s: %v\n", leaseID, touchErr)
 		}
-	}
-	keepFailedLease := false
-	if acquired {
-		defer func() {
-			if !*keep && !keepFailedLease {
-				a.releaseBackendLeaseBestEffort(context.Background(), sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
-				recorder.Event("lease.released", "released", "")
-			}
-		}()
 	}
 	if envHelperName != "" {
 		// Reject target-specific helper gaps before SSH wait or sync mutates the remote.
@@ -667,9 +769,9 @@ afterSync:
 		fmt.Fprintln(a.Stderr, formatRunSummary(timings, time.Since(timings.started), 0))
 		if *timingJSON {
 			total := time.Since(timings.started)
-			if err := writeTimingJSON(a.Stderr, timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, 0, actionsURL)); err != nil {
-				return recordFailure(err)
-			}
+			report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, 0, actionsURL)
+			populateRunTimingMetadata(&report, cfg, repo, server, leaseID, recorder.runID, workdir, nil)
+			finalTimingReport = &report
 		}
 		recorder.Finish(ctx, target, 0, timings.sync, 0, "", false, nil)
 		return nil
@@ -744,6 +846,20 @@ afterSync:
 		}
 	}
 	printPreflight(target)
+	if expansion.Profile.Doctor.Enabled {
+		fmt.Fprintf(a.Stderr, "profile doctor profile=%s\n", cfg.Profile)
+		out, err := runSSHCombinedOutput(ctx, target, remoteProfileDoctorCommand(cfg.Profile, expansion.Profile.Doctor, workdir))
+		if strings.TrimSpace(out) != "" {
+			fmt.Fprintln(a.Stderr, strings.TrimSpace(out))
+		}
+		if err != nil {
+			failure := exit(7, "profile doctor failed for %s: image_prereq_missing", cfg.Profile)
+			if shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, failure) {
+				return recordFailure(exit(7, "%s; fix the profile image prerequisites, then rerun the command; use --keep or --stop-after never to inspect the failed lease", failure.Error()))
+			}
+			return recordFailure(exit(7, "%s; rerun crabbox doctor --profile %s --id %s", failure.Error(), cfg.Profile, firstNonBlank(serverSlug(server), leaseID)))
+		}
+	}
 	if !useCoordinator {
 		if touched, touchErr := sshBackend.Touch(context.Background(), TouchRequest{Lease: LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, State: "running", IdleTimeout: cfg.IdleTimeout}); touchErr == nil {
 			server = touched
@@ -758,7 +874,7 @@ afterSync:
 			}
 		}()
 	}
-	commandDisplay := strings.Join(command, " ")
+	commandDisplay := runCommandDisplayWithLiteralArgs(command, *shellMode, expansion.LiteralArgs)
 	if script != nil {
 		script = runScriptForTarget(script, target)
 		if err := uploadRunScript(ctx, target, workdir, script); err != nil {
@@ -781,20 +897,23 @@ afterSync:
 	}
 	runEnv := mergeEnv(envSelection.Inline, capabilityEnv)
 	envFiles := remoteRunEnvFiles(actionsEnvFile, profileEnvFile)
+	useShell := shouldUseShellWithLiteralArgs(command, expansion.LiteralArgs)
 	remote := remoteCommandWithEnvFiles(workdir, runEnv, envFiles, command)
 	if script != nil {
 		remote = remoteRunScriptCommandWithEnvFiles(workdir, runEnv, envFiles, script, command)
 	} else if *shellMode {
 		remote = remoteShellCommandWithEnvFiles(workdir, runEnv, envFiles, strings.Join(command, " "))
-	} else if shouldUseShell(command) {
-		remote = remoteShellCommandWithEnvFiles(workdir, runEnv, envFiles, shellScriptFromArgv(command))
+	} else if useShell {
+		remote = remoteShellCommandWithEnvFiles(workdir, runEnv, envFiles, runCommandShellStringWithLiteralArgs(command, false, expansion.LiteralArgs))
 	}
 	if isWindowsNativeTarget(target) {
 		remote = windowsRemoteCommandWithEnvFiles(workdir, runEnv, envFiles, command)
 		if script != nil {
 			remote = windowsRemoteRunScriptCommandWithEnvFiles(workdir, runEnv, envFiles, script, command)
-		} else if *shellMode || shouldUseShell(command) {
+		} else if *shellMode {
 			remote = windowsRemoteShellCommandWithEnvFiles(workdir, runEnv, envFiles, strings.Join(command, " "))
+		} else if useShell {
+			remote = windowsRemoteShellCommandWithEnvFiles(workdir, runEnv, envFiles, runCommandShellStringWithLiteralArgs(command, false, expansion.LiteralArgs))
 		}
 	}
 	var logBuffer runLogBuffer
@@ -858,15 +977,53 @@ afterSync:
 			fmt.Fprintf(a.Stderr, "downloaded %s bytes=%d\n", local, bytes)
 		}
 	}
-	recorder.Finish(ctx, target, code, timings.sync, timings.command, logBuffer.String(), logBuffer.Truncated(), results)
-	total := time.Since(timings.started)
-	report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, code, actionsURL)
-	fmt.Fprintf(a.Stderr, "command complete in %s total=%s\n", timings.command.Round(time.Millisecond), total.Round(time.Millisecond))
-	fmt.Fprintln(a.Stderr, formatRunSummary(timings, total, code))
-	if *timingJSON {
-		if err := writeTimingJSON(a.Stderr, report); err != nil {
+	var runArtifacts []runArtifact
+	if code == 0 && len(expansion.ArtifactGlobs) > 0 {
+		collected, artifactOutput, err := collectRunArtifactGlobs(ctx, target, workdir, repo.Root, recorder.runID, leaseID, expansion.ArtifactGlobs)
+		if err != nil {
 			return recordFailure(err)
 		}
+		if strings.TrimSpace(artifactOutput) != "" {
+			fmt.Fprintln(a.Stderr, strings.TrimSpace(artifactOutput))
+		}
+		runArtifacts = append(runArtifacts, collected...)
+		for _, artifact := range collected {
+			fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
+		}
+	}
+	total := time.Since(timings.started)
+	report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, code, actionsURL)
+	populateRunTimingMetadata(&report, cfg, repo, server, leaseID, recorder.runID, workdir, runArtifacts)
+	if strings.TrimSpace(*emitProof) != "" && code == 0 {
+		template := cfg.ProofTemplates[strings.TrimSpace(*proofTemplate)]
+		proof, err := writeRunProof(strings.TrimSpace(*emitProof), strings.TrimSpace(*proofTemplate), proofRenderInput{
+			Template:    template,
+			Provider:    cfg.Provider,
+			LeaseID:     leaseID,
+			Slug:        serverSlug(server),
+			RunID:       recorder.runID,
+			Command:     commandDisplay,
+			LogExcerpt:  selectProofLogExcerpt(logBuffer.String()),
+			ActionsURL:  actionsURL,
+			Artifacts:   runArtifacts,
+			Variables:   expansion.Variables,
+			CommandMs:   report.CommandMs,
+			ExitCode:    code,
+			GeneratedAt: time.Now(),
+		})
+		if err != nil {
+			return recordFailure(err)
+		}
+		runArtifacts = append(runArtifacts, proof)
+		report.Artifacts = runArtifacts
+		fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
+	}
+	recorder.Finish(ctx, target, code, timings.sync, timings.command, logBuffer.String(), logBuffer.Truncated(), results)
+	fmt.Fprintf(a.Stderr, "command complete in %s total=%s\n", timings.command.Round(time.Millisecond), total.Round(time.Millisecond))
+	fmt.Fprintln(a.Stderr, formatRunSummary(timings, total, code))
+	fmt.Fprintf(a.Stderr, "run details provider=%s lease=%s slug=%s run=%s type=%s repo=%s workdir=%s actions=%s stop_command=%q idle_timeout=%s\n", cfg.Provider, leaseID, blank(serverSlug(server), "-"), blank(recorder.runID, "-"), blank(server.ServerType.Name, "-"), repo.Root, workdir, blank(actionsURL, "-"), report.StopCommand, cfg.IdleTimeout)
+	if *timingJSON {
+		finalTimingReport = &report
 	}
 	if code != 0 {
 		capture := FailureCaptureMetadata{
@@ -922,6 +1079,134 @@ func recordRunFailure(dst *error, failure error) error {
 		*dst = failure
 	}
 	return failure
+}
+
+func validateRunStopAfterPolicy(policy string) error {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "", "success", "always", "failure", "never":
+		return nil
+	default:
+		return exit(2, "--stop-after must be success, always, failure, or never")
+	}
+}
+
+func shouldReleaseRunLease(acquired, keep, keepFailedLease bool, stopAfter string, runFailure error) bool {
+	switch strings.ToLower(strings.TrimSpace(stopAfter)) {
+	case "never":
+		return false
+	case "always":
+		return true
+	case "success":
+		return runFailure == nil
+	case "failure":
+		return runFailure != nil
+	default:
+		return acquired && !keep && !keepFailedLease
+	}
+}
+
+func populateRunTimingMetadata(report *timingReport, cfg Config, repo Repo, server Server, leaseID, runID, workdir string, artifacts []runArtifact) {
+	report.RunID = runID
+	report.MachineType = server.ServerType.Name
+	report.RepoPath = repo.Root
+	report.Workdir = workdir
+	report.StopCommand = runStopCommand(cfg, firstNonBlank(serverSlug(server), leaseID))
+	report.IdleTimeout = cfg.IdleTimeout.String()
+	report.Artifacts = artifacts
+}
+
+func runCommandDisplay(command []string, shellMode bool) string {
+	return runCommandDisplayWithLiteralArgs(command, shellMode, nil)
+}
+
+func runCommandDisplayWithLiteralArgs(command []string, shellMode bool, literalArgs map[int]bool) string {
+	if shellMode || shouldUseShellWithLiteralArgs(command, literalArgs) {
+		return runCommandShellStringWithLiteralArgs(command, shellMode, literalArgs)
+	}
+	return strings.Join(readableShellWords(command), " ")
+}
+
+func runCommandShellString(command []string, shellMode bool) string {
+	return runCommandShellStringWithLiteralArgs(command, shellMode, nil)
+}
+
+func runCommandShellStringWithLiteralArgs(command []string, shellMode bool, literalArgs map[int]bool) string {
+	if shellMode {
+		return strings.Join(command, " ")
+	}
+	if len(command) == 1 && !literalArgs[0] {
+		return command[0]
+	}
+	return shellScriptFromArgvWithLiteralArgs(command, literalArgs)
+}
+
+func runStopCommand(cfg Config, id string) string {
+	args := []string{"crabbox", "stop", "--provider", cfg.Provider}
+	if strings.TrimSpace(cfg.TargetOS) != "" {
+		args = append(args, "--target", cfg.TargetOS)
+	}
+	if cfg.TargetOS == targetWindows && strings.TrimSpace(cfg.WindowsMode) != "" {
+		args = append(args, "--windows-mode", cfg.WindowsMode)
+	}
+	if strings.TrimSpace(cfg.Static.Host) != "" {
+		args = append(args, "--static-host", cfg.Static.Host)
+	}
+	if strings.TrimSpace(cfg.Static.User) != "" {
+		args = append(args, "--static-user", cfg.Static.User)
+	}
+	if strings.TrimSpace(cfg.Static.Port) != "" {
+		args = append(args, "--static-port", cfg.Static.Port)
+	}
+	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
+		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
+	}
+	args = appendProviderStopRoutingArgs(args, cfg)
+	args = append(args, id)
+	return strings.Join(readableShellWords(args), " ")
+}
+
+func appendProviderStopRoutingArgs(args []string, cfg Config) []string {
+	switch normalizeProviderName(cfg.Provider) {
+	case "proxmox":
+		if strings.TrimSpace(cfg.Proxmox.APIURL) != "" {
+			args = append(args, "--proxmox-api-url", cfg.Proxmox.APIURL)
+		}
+		if strings.TrimSpace(cfg.Proxmox.Node) != "" {
+			args = append(args, "--proxmox-node", cfg.Proxmox.Node)
+		}
+		if cfg.Proxmox.InsecureTLS {
+			args = append(args, "--proxmox-insecure-tls")
+		}
+	case "namespace", "namespace-devbox":
+		if strings.TrimSpace(cfg.Namespace.Site) != "" {
+			args = append(args, "--namespace-site", cfg.Namespace.Site)
+		}
+		if strings.TrimSpace(cfg.Namespace.WorkRoot) != "" {
+			args = append(args, "--namespace-work-root", cfg.Namespace.WorkRoot)
+		}
+		if cfg.Namespace.DeleteOnRelease {
+			args = append(args, "--namespace-delete-on-release")
+		}
+	case "daytona":
+		if strings.TrimSpace(cfg.Daytona.APIURL) != "" {
+			args = append(args, "--daytona-api-url", cfg.Daytona.APIURL)
+		}
+		if strings.TrimSpace(cfg.Daytona.Target) != "" {
+			args = append(args, "--daytona-target", cfg.Daytona.Target)
+		}
+		if strings.TrimSpace(cfg.Daytona.User) != "" {
+			args = append(args, "--daytona-user", cfg.Daytona.User)
+		}
+	case "sprites":
+		if strings.TrimSpace(cfg.Sprites.APIURL) != "" {
+			args = append(args, "--sprites-api-url", cfg.Sprites.APIURL)
+		}
+	case "semaphore":
+		if strings.TrimSpace(cfg.Semaphore.Host) != "" {
+			args = append(args, "--semaphore-host", cfg.Semaphore.Host)
+		}
+	}
+	return args
 }
 
 type runTimings struct {
@@ -1044,10 +1329,23 @@ func gitHydrateBaseSHA(repo Repo, baseRef string) string {
 }
 
 func shouldUseShell(command []string) bool {
+	return shouldUseShellWithLiteralArgs(command, nil)
+}
+
+func shouldUseShellWithLiteralArgs(command []string, literalArgs map[int]bool) bool {
 	if len(command) == 1 {
+		if literalArgs[0] {
+			return false
+		}
 		return strings.ContainsAny(command[0], " \t\r\n&|;<>*$`()")
 	}
-	for _, word := range command {
+	if leadingEnvAssignment(command) {
+		return true
+	}
+	for idx, word := range command {
+		if literalArgs[idx] {
+			continue
+		}
 		if isShellControlOperator(word) {
 			return true
 		}
@@ -1060,11 +1358,33 @@ func ShouldUseShell(command []string) bool {
 }
 
 func leadingEnvAssignment(command []string) bool {
-	return len(command) > 1 && strings.Contains(command[0], "=") && !strings.HasPrefix(command[0], "-")
+	return len(command) > 1 && isShellEnvAssignment(command[0])
 }
 
 func LeadingEnvAssignment(command []string) bool {
 	return leadingEnvAssignment(command)
+}
+
+func shellScriptFromArgvWithLiteralArgs(command []string, literalArgs map[int]bool) string {
+	parts := make([]string, 0, len(command))
+	seenCommand := false
+	for idx, word := range command {
+		if !literalArgs[idx] && isShellControlOperator(word) {
+			parts = append(parts, word)
+			if resetsShellCommandPosition(word) {
+				seenCommand = false
+			}
+			continue
+		}
+		if !literalArgs[idx] && !seenCommand && isShellEnvAssignment(word) {
+			key, value, _ := strings.Cut(word, "=")
+			parts = append(parts, key+"="+shellQuote(value))
+			continue
+		}
+		seenCommand = true
+		parts = append(parts, shellQuote(word))
+	}
+	return strings.Join(parts, " ")
 }
 
 func validateCoordinatorLeaseCapabilities(cfg Config, lease CoordinatorLease) error {
@@ -1190,12 +1510,31 @@ func releaseCoordinatorLease(ctx context.Context, coord *CoordinatorClient, leas
 	return lastErr
 }
 
-func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, lease LeaseTarget) {
+type leaseCleanupResult struct {
+	Attempted bool
+	Stopped   bool
+	Err       error
+}
+
+func (result leaseCleanupResult) apply(report *timingReport) {
+	if !result.Attempted || report == nil {
+		return
+	}
+	stopped := result.Stopped
+	report.LeaseStopped = &stopped
+	if result.Err != nil {
+		report.LeaseStopErr = result.Err.Error()
+	}
+}
+
+func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, lease LeaseTarget) error {
 	a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
 	fmt.Fprintf(a.Stderr, "releasing %s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
 	if err := backend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: release failed for %s: %v\n", lease.LeaseID, err)
+		return err
 	}
+	return nil
 }
 
 func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, leaseID string, idleTimeout time.Duration, updateIdleTimeout *time.Duration, telemetryCollector leaseTelemetryCollector, stderr io.Writer) func() {

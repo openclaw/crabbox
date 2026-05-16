@@ -59,6 +59,7 @@ func defaultExcludes() []string {
 		".local",
 		".crabbox/logs",
 		".crabbox/captures",
+		".crabbox/runs",
 		".swiftpm",
 		".build",
 		"apps/*/.build",

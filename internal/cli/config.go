@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -98,6 +99,9 @@ type Config struct {
 	Static              StaticConfig
 	Results             ResultsConfig
 	Cache               CacheConfig
+	Profiles            map[string]ProfileConfig
+	Presets             map[string]PresetConfig
+	ProofTemplates      map[string]ProofTemplateConfig
 	Jobs                map[string]JobConfig
 }
 
@@ -274,6 +278,41 @@ type CacheConfig struct {
 	Git            bool
 	MaxGB          int
 	PurgeOnRelease bool
+}
+
+type ProfileConfig struct {
+	Env            map[string]string
+	EnvAllow       []string
+	ArtifactGlobs  []string
+	Doctor         DoctorProfileConfig
+	Presets        map[string]PresetConfig
+	ProofTemplates map[string]ProofTemplateConfig
+}
+
+type DoctorProfileConfig struct {
+	Enabled        bool
+	Tools          []string
+	NodeMajor      int
+	MinDiskGB      int
+	RequireDocker  bool
+	RequireCompose bool
+}
+
+type PresetConfig struct {
+	Command       string
+	Shell         bool
+	Env           map[string]string
+	Preflight     bool
+	ArtifactGlobs []string
+	ProofTemplate string
+}
+
+type ProofTemplateConfig struct {
+	BehaviorAddressed     string
+	RealEnvironmentTested string
+	ExactSteps            string
+	ObservedResult        string
+	NotTested             string
 }
 
 type JobConfig struct {
@@ -504,50 +543,53 @@ func baseConfig() Config {
 }
 
 type fileConfig struct {
-	Profile          string                   `yaml:"profile,omitempty"`
-	Provider         string                   `yaml:"provider,omitempty"`
-	Target           string                   `yaml:"target,omitempty"`
-	TargetOS         string                   `yaml:"targetOS,omitempty"`
-	Windows          *fileWindowsConfig       `yaml:"windows,omitempty"`
-	Desktop          *bool                    `yaml:"desktop,omitempty"`
-	Browser          *bool                    `yaml:"browser,omitempty"`
-	Code             *bool                    `yaml:"code,omitempty"`
-	Network          string                   `yaml:"network,omitempty"`
-	Class            string                   `yaml:"class,omitempty"`
-	ServerType       string                   `yaml:"serverType,omitempty"`
-	Coordinator      string                   `yaml:"coordinator,omitempty"`
-	CoordinatorToken string                   `yaml:"coordinatorToken,omitempty"`
-	Broker           *fileBrokerConfig        `yaml:"broker,omitempty"`
-	Hetzner          *fileHetznerConfig       `yaml:"hetzner,omitempty"`
-	AWS              *fileAWSConfig           `yaml:"aws,omitempty"`
-	Azure            *fileAzureConfig         `yaml:"azure,omitempty"`
-	GCP              *fileGCPConfig           `yaml:"gcp,omitempty"`
-	Proxmox          *fileProxmoxConfig       `yaml:"proxmox,omitempty"`
-	SSH              *fileSSHConfig           `yaml:"ssh,omitempty"`
-	Sync             *fileSyncConfig          `yaml:"sync,omitempty"`
-	Run              *fileRunConfig           `yaml:"run,omitempty"`
-	Env              *fileEnvConfig           `yaml:"env,omitempty"`
-	Capacity         *fileCapacityConfig      `yaml:"capacity,omitempty"`
-	Actions          *fileActionsConfig       `yaml:"actions,omitempty"`
-	Blacksmith       *fileBlacksmithConfig    `yaml:"blacksmith,omitempty"`
-	Namespace        *fileNamespaceConfig     `yaml:"namespace,omitempty"`
-	Daytona          *fileDaytonaConfig       `yaml:"daytona,omitempty"`
-	E2B              *fileE2BConfig           `yaml:"e2b,omitempty"`
-	Islo             *fileIsloConfig          `yaml:"islo,omitempty"`
-	Tensorlake       *fileTensorlakeConfig    `yaml:"tensorlake,omitempty"`
-	Modal            *fileModalConfig         `yaml:"modal,omitempty"`
-	Cloudflare       *fileCloudflareConfig    `yaml:"cloudflare,omitempty"`
-	Semaphore        *fileSemaphoreConfig     `yaml:"semaphore,omitempty"`
-	Sprites          *fileSpritesConfig       `yaml:"sprites,omitempty"`
-	Tailscale        *fileTailscaleConfig     `yaml:"tailscale,omitempty"`
-	Static           *fileStaticConfig        `yaml:"static,omitempty"`
-	Results          *fileResultsConfig       `yaml:"results,omitempty"`
-	Cache            *fileCacheConfig         `yaml:"cache,omitempty"`
-	Lease            *fileLeaseConfig         `yaml:"lease,omitempty"`
-	Jobs             map[string]fileJobConfig `yaml:"jobs,omitempty"`
-	TTL              string                   `yaml:"ttl,omitempty"`
-	IdleTimeout      string                   `yaml:"idleTimeout,omitempty"`
-	WorkRoot         string                   `yaml:"workRoot,omitempty"`
+	Profile          string                             `yaml:"profile,omitempty"`
+	Provider         string                             `yaml:"provider,omitempty"`
+	Target           string                             `yaml:"target,omitempty"`
+	TargetOS         string                             `yaml:"targetOS,omitempty"`
+	Windows          *fileWindowsConfig                 `yaml:"windows,omitempty"`
+	Desktop          *bool                              `yaml:"desktop,omitempty"`
+	Browser          *bool                              `yaml:"browser,omitempty"`
+	Code             *bool                              `yaml:"code,omitempty"`
+	Network          string                             `yaml:"network,omitempty"`
+	Class            string                             `yaml:"class,omitempty"`
+	ServerType       string                             `yaml:"serverType,omitempty"`
+	Coordinator      string                             `yaml:"coordinator,omitempty"`
+	CoordinatorToken string                             `yaml:"coordinatorToken,omitempty"`
+	Broker           *fileBrokerConfig                  `yaml:"broker,omitempty"`
+	Hetzner          *fileHetznerConfig                 `yaml:"hetzner,omitempty"`
+	AWS              *fileAWSConfig                     `yaml:"aws,omitempty"`
+	Azure            *fileAzureConfig                   `yaml:"azure,omitempty"`
+	GCP              *fileGCPConfig                     `yaml:"gcp,omitempty"`
+	Proxmox          *fileProxmoxConfig                 `yaml:"proxmox,omitempty"`
+	SSH              *fileSSHConfig                     `yaml:"ssh,omitempty"`
+	Sync             *fileSyncConfig                    `yaml:"sync,omitempty"`
+	Run              *fileRunConfig                     `yaml:"run,omitempty"`
+	Env              *fileEnvConfig                     `yaml:"env,omitempty"`
+	Capacity         *fileCapacityConfig                `yaml:"capacity,omitempty"`
+	Actions          *fileActionsConfig                 `yaml:"actions,omitempty"`
+	Blacksmith       *fileBlacksmithConfig              `yaml:"blacksmith,omitempty"`
+	Namespace        *fileNamespaceConfig               `yaml:"namespace,omitempty"`
+	Daytona          *fileDaytonaConfig                 `yaml:"daytona,omitempty"`
+	E2B              *fileE2BConfig                     `yaml:"e2b,omitempty"`
+	Islo             *fileIsloConfig                    `yaml:"islo,omitempty"`
+	Tensorlake       *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
+	Modal            *fileModalConfig                   `yaml:"modal,omitempty"`
+	Cloudflare       *fileCloudflareConfig              `yaml:"cloudflare,omitempty"`
+	Semaphore        *fileSemaphoreConfig               `yaml:"semaphore,omitempty"`
+	Sprites          *fileSpritesConfig                 `yaml:"sprites,omitempty"`
+	Tailscale        *fileTailscaleConfig               `yaml:"tailscale,omitempty"`
+	Static           *fileStaticConfig                  `yaml:"static,omitempty"`
+	Results          *fileResultsConfig                 `yaml:"results,omitempty"`
+	Cache            *fileCacheConfig                   `yaml:"cache,omitempty"`
+	Lease            *fileLeaseConfig                   `yaml:"lease,omitempty"`
+	Profiles         map[string]fileProfileConfig       `yaml:"profiles,omitempty"`
+	Presets          map[string]filePresetConfig        `yaml:"presets,omitempty"`
+	ProofTemplates   map[string]fileProofTemplateConfig `yaml:"proofTemplates,omitempty"`
+	Jobs             map[string]fileJobConfig           `yaml:"jobs,omitempty"`
+	TTL              string                             `yaml:"ttl,omitempty"`
+	IdleTimeout      string                             `yaml:"idleTimeout,omitempty"`
+	WorkRoot         string                             `yaml:"workRoot,omitempty"`
 }
 
 type fileWindowsConfig struct {
@@ -815,6 +857,108 @@ type fileCacheConfig struct {
 	Git            *bool `yaml:"git,omitempty"`
 	MaxGB          int   `yaml:"maxGB,omitempty"`
 	PurgeOnRelease *bool `yaml:"purgeOnRelease,omitempty"`
+}
+
+type fileProfileConfig struct {
+	Env            fileProfileEnvConfig               `yaml:"env,omitempty"`
+	EnvAllow       []string                           `yaml:"envAllow,omitempty"`
+	ArtifactGlobs  []string                           `yaml:"artifactGlobs,omitempty"`
+	Doctor         *fileDoctorProfileConfig           `yaml:"doctor,omitempty"`
+	Presets        map[string]filePresetConfig        `yaml:"presets,omitempty"`
+	ProofTemplates map[string]fileProofTemplateConfig `yaml:"proofTemplates,omitempty"`
+}
+
+type fileProfileEnvConfig struct {
+	Values map[string]string
+	Allow  []string
+}
+
+func (env fileProfileEnvConfig) IsZero() bool {
+	return len(env.Values) == 0 && len(env.Allow) == 0
+}
+
+func (env *fileProfileEnvConfig) UnmarshalYAML(node *yaml.Node) error {
+	if node == nil || node.Kind == 0 {
+		return nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("profile env must be a mapping")
+	}
+	values := map[string]string{}
+	var allow []string
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := strings.TrimSpace(node.Content[i].Value)
+		valueNode := node.Content[i+1]
+		if key == "" {
+			continue
+		}
+		if key == "allow" {
+			if err := valueNode.Decode(&allow); err != nil {
+				return fmt.Errorf("profile env.allow: %w", err)
+			}
+			continue
+		}
+		var value string
+		if err := valueNode.Decode(&value); err != nil {
+			return fmt.Errorf("profile env.%s: %w", key, err)
+		}
+		values[key] = value
+	}
+	env.Values = values
+	env.Allow = allow
+	return nil
+}
+
+func (env fileProfileEnvConfig) MarshalYAML() (any, error) {
+	node := &yaml.Node{Kind: yaml.MappingNode}
+	keys := make([]string, 0, len(env.Values))
+	for key := range env.Values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		node.Content = append(node.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: env.Values[key]},
+		)
+	}
+	if len(env.Allow) > 0 {
+		seq := &yaml.Node{Kind: yaml.SequenceNode}
+		for _, value := range env.Allow {
+			seq.Content = append(seq.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value})
+		}
+		node.Content = append(node.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "allow"},
+			seq,
+		)
+	}
+	return node, nil
+}
+
+type fileDoctorProfileConfig struct {
+	Enabled        *bool    `yaml:"enabled,omitempty"`
+	Tools          []string `yaml:"tools,omitempty"`
+	NodeMajor      int      `yaml:"nodeMajor,omitempty"`
+	MinDiskGB      int      `yaml:"minDiskGB,omitempty"`
+	RequireDocker  *bool    `yaml:"requireDocker,omitempty"`
+	RequireCompose *bool    `yaml:"requireCompose,omitempty"`
+}
+
+type filePresetConfig struct {
+	Command       string            `yaml:"command,omitempty"`
+	Shell         *bool             `yaml:"shell,omitempty"`
+	Env           map[string]string `yaml:"env,omitempty"`
+	Preflight     *bool             `yaml:"preflight,omitempty"`
+	ArtifactGlobs []string          `yaml:"artifactGlobs,omitempty"`
+	ProofTemplate string            `yaml:"proofTemplate,omitempty"`
+}
+
+type fileProofTemplateConfig struct {
+	BehaviorAddressed     string `yaml:"behaviorAddressed,omitempty"`
+	RealEnvironmentTested string `yaml:"realEnvironmentTested,omitempty"`
+	ExactSteps            string `yaml:"exactSteps,omitempty"`
+	ObservedResult        string `yaml:"observedResult,omitempty"`
+	NotTested             string `yaml:"notTested,omitempty"`
 }
 
 type fileLeaseConfig struct {
@@ -1548,6 +1692,39 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Cache.PurgeOnRelease = *file.Cache.PurgeOnRelease
 		}
 	}
+	if len(file.Presets) > 0 {
+		if cfg.Presets == nil {
+			cfg.Presets = map[string]PresetConfig{}
+		}
+		for name, preset := range file.Presets {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				cfg.Presets[name] = applyFilePresetConfig(cfg.Presets[name], preset)
+			}
+		}
+	}
+	if len(file.ProofTemplates) > 0 {
+		if cfg.ProofTemplates == nil {
+			cfg.ProofTemplates = map[string]ProofTemplateConfig{}
+		}
+		for name, tmpl := range file.ProofTemplates {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				cfg.ProofTemplates[name] = applyFileProofTemplateConfig(cfg.ProofTemplates[name], tmpl)
+			}
+		}
+	}
+	if len(file.Profiles) > 0 {
+		if cfg.Profiles == nil {
+			cfg.Profiles = map[string]ProfileConfig{}
+		}
+		for name, profile := range file.Profiles {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				cfg.Profiles[name] = applyFileProfileConfig(cfg.Profiles[name], profile)
+			}
+		}
+	}
 	if len(file.Jobs) > 0 {
 		if cfg.Jobs == nil {
 			cfg.Jobs = map[string]JobConfig{}
@@ -1560,6 +1737,126 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Jobs[name] = applyFileJobConfig(cfg.Jobs[name], job)
 		}
 	}
+}
+
+func applyFileProfileConfig(profile ProfileConfig, file fileProfileConfig) ProfileConfig {
+	if len(file.Env.Values) > 0 {
+		if profile.Env == nil {
+			profile.Env = map[string]string{}
+		}
+		for key, value := range file.Env.Values {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				profile.Env[key] = value
+			}
+		}
+	}
+	if len(file.Env.Allow) > 0 {
+		profile.EnvAllow = appendUniqueStrings(profile.EnvAllow, file.Env.Allow...)
+	}
+	if len(file.EnvAllow) > 0 {
+		profile.EnvAllow = appendUniqueStrings(profile.EnvAllow, file.EnvAllow...)
+	}
+	if len(file.ArtifactGlobs) > 0 {
+		profile.ArtifactGlobs = appendUniqueStrings(nil, file.ArtifactGlobs...)
+	}
+	if file.Doctor != nil {
+		profile.Doctor = applyFileDoctorProfileConfig(profile.Doctor, *file.Doctor)
+	}
+	if len(file.Presets) > 0 {
+		if profile.Presets == nil {
+			profile.Presets = map[string]PresetConfig{}
+		}
+		for name, preset := range file.Presets {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				profile.Presets[name] = applyFilePresetConfig(profile.Presets[name], preset)
+			}
+		}
+	}
+	if len(file.ProofTemplates) > 0 {
+		if profile.ProofTemplates == nil {
+			profile.ProofTemplates = map[string]ProofTemplateConfig{}
+		}
+		for name, tmpl := range file.ProofTemplates {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				profile.ProofTemplates[name] = applyFileProofTemplateConfig(profile.ProofTemplates[name], tmpl)
+			}
+		}
+	}
+	return profile
+}
+
+func applyFileDoctorProfileConfig(doctor DoctorProfileConfig, file fileDoctorProfileConfig) DoctorProfileConfig {
+	if file.Enabled != nil {
+		doctor.Enabled = *file.Enabled
+	}
+	if len(file.Tools) > 0 {
+		doctor.Tools = normalizePreflightToolNames(file.Tools)
+	}
+	if file.NodeMajor > 0 {
+		doctor.NodeMajor = file.NodeMajor
+	}
+	if file.MinDiskGB > 0 {
+		doctor.MinDiskGB = file.MinDiskGB
+	}
+	if file.RequireDocker != nil {
+		doctor.RequireDocker = *file.RequireDocker
+	}
+	if file.RequireCompose != nil {
+		doctor.RequireCompose = *file.RequireCompose
+	}
+	return doctor
+}
+
+func applyFilePresetConfig(preset PresetConfig, file filePresetConfig) PresetConfig {
+	if file.Command != "" {
+		preset.Command = file.Command
+	}
+	if file.Shell != nil {
+		preset.Shell = *file.Shell
+	}
+	if len(file.Env) > 0 {
+		if preset.Env == nil {
+			preset.Env = map[string]string{}
+		}
+		for key, value := range file.Env {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				preset.Env[key] = value
+			}
+		}
+	}
+	if file.Preflight != nil {
+		preset.Preflight = *file.Preflight
+	}
+	if len(file.ArtifactGlobs) > 0 {
+		preset.ArtifactGlobs = appendUniqueStrings(nil, file.ArtifactGlobs...)
+	}
+	if file.ProofTemplate != "" {
+		preset.ProofTemplate = file.ProofTemplate
+	}
+	return preset
+}
+
+func applyFileProofTemplateConfig(tmpl ProofTemplateConfig, file fileProofTemplateConfig) ProofTemplateConfig {
+	if file.BehaviorAddressed != "" {
+		tmpl.BehaviorAddressed = file.BehaviorAddressed
+	}
+	if file.RealEnvironmentTested != "" {
+		tmpl.RealEnvironmentTested = file.RealEnvironmentTested
+	}
+	if file.ExactSteps != "" {
+		tmpl.ExactSteps = file.ExactSteps
+	}
+	if file.ObservedResult != "" {
+		tmpl.ObservedResult = file.ObservedResult
+	}
+	if file.NotTested != "" {
+		tmpl.NotTested = file.NotTested
+	}
+	return tmpl
 }
 
 func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {

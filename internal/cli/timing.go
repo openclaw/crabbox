@@ -19,6 +19,15 @@ type TimingReport struct {
 	TotalMs       int64         `json:"totalMs"`
 	ExitCode      int           `json:"exitCode"`
 	ActionsRunURL string        `json:"actionsRunUrl,omitempty"`
+	RunID         string        `json:"runId,omitempty"`
+	MachineType   string        `json:"machineType,omitempty"`
+	RepoPath      string        `json:"repoPath,omitempty"`
+	Workdir       string        `json:"workdir,omitempty"`
+	StopCommand   string        `json:"stopCommand,omitempty"`
+	IdleTimeout   string        `json:"idleTimeout,omitempty"`
+	Artifacts     []runArtifact `json:"artifacts,omitempty"`
+	LeaseStopped  *bool         `json:"leaseStopped,omitempty"`
+	LeaseStopErr  string        `json:"leaseStopError,omitempty"`
 }
 
 type TimingPhase struct {

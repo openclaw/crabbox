@@ -242,6 +242,10 @@ type RunRequest struct {
 	ApplyLocalPatch bool
 	Command         []string
 	TimingJSON      bool
+	ArtifactGlobs   []string
+	EmitProof       string
+	ProofTemplate   string
+	StopAfter       string
 }
 
 type WarmupRequest struct {
@@ -479,6 +483,15 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	}
 	if len(req.Downloads) > 0 {
 		return exit(2, "%s delegates run execution; --download is not supported", provider)
+	}
+	if len(req.ArtifactGlobs) > 0 {
+		return exit(2, "%s delegates run execution; --artifact-glob is not supported", provider)
+	}
+	if req.EmitProof != "" {
+		return exit(2, "%s delegates run execution; --emit-proof is not supported", provider)
+	}
+	if req.StopAfter != "" {
+		return exit(2, "%s delegates run execution; --stop-after is not supported", provider)
 	}
 	if req.Script != nil || req.ScriptRequested {
 		return exit(2, "%s delegates run execution; --script is not supported", provider)

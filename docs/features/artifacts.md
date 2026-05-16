@@ -11,6 +11,19 @@ Crabbox artifacts are a local bundle plus optional hosted URLs. The command is
 designed for QA handoff: capture the state of a lease, preserve enough metadata
 to reproduce what happened, and publish a concise before/after/summary comment.
 
+`crabbox run` can also create run-scoped artifacts directly. Repeat
+`--artifact-glob <glob>` to archive matching files from the remote workdir after
+a successful SSH-backed command. Profile and preset `artifactGlobs` use the same
+collector. The local tarball lands under `.crabbox/runs/<run-or-lease>/` and is
+listed in the final run details and `--timing-json` artifact array. Native
+Windows and macOS targets reject this collector; use Linux or Windows WSL2.
+
+`--emit-proof <path>` renders proof as a derived artifact after a successful
+run. The proof block uses the selected profile proof template, expanded command,
+run metadata, copied live console output, artifact paths, and Actions URL when
+available. This keeps PR-ready evidence next to the raw logs and test reports
+that back it.
+
 ## Bundle Contract
 
 `crabbox artifacts collect --id <lease>` writes a directory such as

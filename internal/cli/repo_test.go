@@ -21,6 +21,7 @@ func TestSyncManifestUsesGitFilesAndIgnoresIgnoredJunk(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "untracked.txt"), "untracked")
 	writeFile(t, filepath.Join(dir, ".local", "cache.bin"), strings.Repeat("x", 1024))
 	writeFile(t, filepath.Join(dir, ".build", "artifact"), strings.Repeat("x", 1024))
+	writeFile(t, filepath.Join(dir, ".crabbox", "runs", "run_123", "artifacts.tgz"), "artifact")
 
 	manifest, err := syncManifest(dir, configuredExcludes(baseConfig()))
 	if err != nil {
@@ -32,7 +33,7 @@ func TestSyncManifestUsesGitFilesAndIgnoresIgnoredJunk(t *testing.T) {
 			t.Fatalf("manifest %q missing %q", got, want)
 		}
 	}
-	for _, notWant := range []string{".local/cache.bin", ".build/artifact", ".git/HEAD"} {
+	for _, notWant := range []string{".local/cache.bin", ".build/artifact", ".crabbox/runs/run_123/artifacts.tgz", ".git/HEAD"} {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("manifest %q should not contain %q", got, notWant)
 		}

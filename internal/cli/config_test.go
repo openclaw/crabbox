@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1049,6 +1050,43 @@ func TestEnvHelperBranches(t *testing.T) {
 	t.Setenv("CRABBOX_LIST", "CI,NODE_OPTIONS")
 	if list, ok := getenvList("CRABBOX_LIST"); !ok || len(list) != 2 || list[1] != "NODE_OPTIONS" {
 		t.Fatalf("getenvList=%v ok=%t", list, ok)
+	}
+}
+
+func TestWriteUserFileConfigPreservesProfileEnvShape(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "explicit.yaml"))
+
+	path, err := writeUserFileConfig(fileConfig{
+		Profiles: map[string]fileProfileConfig{
+			"qa": {
+				Env: fileProfileEnvConfig{
+					Values: map[string]string{"CI": "1"},
+					Allow:  []string{"QA_*"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "values:") || !strings.Contains(text, "CI: \"1\"") || !strings.Contains(text, "allow:") {
+		t.Fatalf("unexpected profile env YAML:\n%s", text)
+	}
+	file, err := readFileConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := file.Profiles["qa"].Env
+	if env.Values["CI"] != "1" || strings.Join(env.Allow, ",") != "QA_*" {
+		t.Fatalf("env=%#v", env)
 	}
 }
 

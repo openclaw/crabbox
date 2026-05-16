@@ -94,6 +94,44 @@ func rejectCaptureDownloadCollision(label, capturePath string, download runDownl
 	return nil
 }
 
+func preflightProofOutputPath(proofPath, captureStdout, captureStderr string, downloads []string) error {
+	if proofPath == "" {
+		return nil
+	}
+	if captureStdout != "" {
+		same, err := sameLocalOutputPath(proofPath, captureStdout)
+		if err != nil {
+			return err
+		}
+		if same {
+			return exit(2, "emit proof/capture stdout: paths must be different")
+		}
+	}
+	if captureStderr != "" {
+		same, err := sameLocalOutputPath(proofPath, captureStderr)
+		if err != nil {
+			return err
+		}
+		if same {
+			return exit(2, "emit proof/capture stderr: paths must be different")
+		}
+	}
+	for _, spec := range downloads {
+		download, err := parseRunDownloadSpec(spec)
+		if err != nil {
+			return err
+		}
+		same, err := sameLocalOutputPath(proofPath, download.Local)
+		if err != nil {
+			return err
+		}
+		if same {
+			return exit(2, "emit proof/download %s: paths must be different", download.Remote)
+		}
+	}
+	return nil
+}
+
 func sameLocalOutputPath(left, right string) (bool, error) {
 	leftAbs, err := filepath.Abs(filepath.Clean(left))
 	if err != nil {

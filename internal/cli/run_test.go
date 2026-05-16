@@ -54,6 +54,8 @@ type windowsEnvHelperTestBackend struct {
 	spec ProviderSpec
 }
 
+var windowsEnvHelperTestTouchCount int
+
 func (b windowsEnvHelperTestBackend) Spec() ProviderSpec { return b.spec }
 func (b windowsEnvHelperTestBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
 	return LeaseTarget{
@@ -78,6 +80,7 @@ func (b windowsEnvHelperTestBackend) ReleaseLease(context.Context, ReleaseLeaseR
 	return nil
 }
 func (b windowsEnvHelperTestBackend) Touch(context.Context, TouchRequest) (Server, error) {
+	windowsEnvHelperTestTouchCount++
 	return Server{Provider: b.spec.Name}, nil
 }
 
@@ -110,6 +113,8 @@ type runEnvProfileTestBackend struct {
 	spec ProviderSpec
 }
 
+var runEnvProfileTestReleaseErr error
+
 func (b runEnvProfileTestBackend) Spec() ProviderSpec { return b.spec }
 func (b runEnvProfileTestBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
 	return LeaseTarget{
@@ -130,7 +135,7 @@ func (b runEnvProfileTestBackend) List(context.Context, ListRequest) ([]LeaseVie
 	return nil, nil
 }
 func (b runEnvProfileTestBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
-	return nil
+	return runEnvProfileTestReleaseErr
 }
 func (b runEnvProfileTestBackend) Touch(context.Context, TouchRequest) (Server, error) {
 	return Server{Provider: b.spec.Name}, nil
@@ -265,6 +270,7 @@ func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
 		{name: "daytona download", provider: "daytona", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "daytona delegates run execution; --download is not supported"},
 		{name: "islo download", provider: "islo", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "islo delegates run execution; --download is not supported"},
 		{name: "e2b download", provider: "e2b", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "e2b delegates run execution; --download is not supported"},
+		{name: "e2b stop after", provider: "e2b", args: []string{"--stop-after", "never"}, want: "e2b delegates run execution; --stop-after is not supported"},
 		{name: "daytona script", provider: "daytona", args: []string{"--script", "testdata/missing.sh"}, want: "daytona delegates run execution; --script is not supported"},
 		{name: "e2b fresh pr", provider: "e2b", args: []string{"--fresh-pr", "example-org/my-app#1"}, want: "e2b delegates sync; --fresh-pr is not supported"},
 		{name: "e2b full resync", provider: "e2b", args: []string{"--full-resync"}, want: "e2b delegates sync; --full-resync is not supported"},
@@ -325,6 +331,34 @@ func TestRunCommandRejectsDelegatedEnvHelper(t *testing.T) {
 	}
 }
 
+func TestRunCommandRejectsDelegatedProfileDoctor(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, ".crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte(`
+profiles:
+  qa:
+    doctor:
+      enabled: true
+      tools: [node]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "e2b",
+		"--profile", "qa",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want exit 2", err)
+	}
+	if !strings.Contains(exitErr.Message, "e2b delegates run execution; profile doctor is not supported") {
+		t.Fatalf("message=%q", exitErr.Message)
+	}
+}
+
 func TestRunCommandRejectsSyncOnlyScriptStdinBeforeReading(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := (App{
@@ -359,6 +393,233 @@ func TestRunCommandRejectsEnvHelperWithSyncOnly(t *testing.T) {
 	}
 	if !strings.Contains(exitErr.Message, "--env-helper cannot be combined with --sync-only") {
 		t.Fatalf("message=%q", exitErr.Message)
+	}
+}
+
+func TestRunCommandRejectsProofAndArtifactsWithSyncOnly(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "artifact glob",
+			args: []string{"--sync-only", "--artifact-glob", ".artifacts/**"},
+			want: "--artifact-glob cannot be combined with --sync-only",
+		},
+		{
+			name: "emit proof",
+			args: []string{"--sync-only", "--emit-proof", filepath.Join(t.TempDir(), "proof.md")},
+			want: "--emit-proof cannot be combined with --sync-only",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), tt.args)
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+				t.Fatalf("error=%v, want exit 2", err)
+			}
+			if !strings.Contains(exitErr.Message, tt.want) {
+				t.Fatalf("message=%q want %q", exitErr.Message, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunCommandRejectsTargetOnlyProfileOutputsBeforeLease(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		config string
+		args   []string
+		want   string
+	}{
+		{
+			name: "macos artifacts",
+			args: []string{"--provider", "ssh", "--target", "macos", "--artifact-glob", ".artifacts/**", "--", "true"},
+			want: "--artifact-glob is not supported for macOS targets",
+		},
+		{
+			name: "native windows doctor",
+			config: `
+profiles:
+  qa:
+    doctor:
+      enabled: true
+      tools: [node]
+`,
+			args: []string{"--provider", "windows-env-helper-test", "--target", "windows", "--windows-mode", "normal", "--profile", "qa", "--", "true"},
+			want: "profile doctor is not supported for native Windows targets",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			cfgPath := filepath.Join(dir, ".crabbox.yaml")
+			t.Setenv("CRABBOX_CONFIG", cfgPath)
+			if strings.TrimSpace(tt.config) != "" {
+				if err := os.WriteFile(cfgPath, []byte(tt.config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), tt.args)
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+				t.Fatalf("error=%v, want exit 2", err)
+			}
+			if !strings.Contains(exitErr.Message, tt.want) {
+				t.Fatalf("message=%q want %q", exitErr.Message, tt.want)
+			}
+			if strings.Contains(stderr.String(), "leased ") || strings.Contains(stderr.String(), "claim") {
+				t.Fatalf("lease work happened before target rejection: %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunCommandRejectsExistingLeaseTargetBeforeTouch(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	windowsEnvHelperTestTouchCount = 0
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "windows-env-helper-test",
+		"--target", "windows",
+		"--windows-mode", "normal",
+		"--id", "cbx_win",
+		"--artifact-glob", ".artifacts/**",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want exit 2", err)
+	}
+	if !strings.Contains(exitErr.Message, "--artifact-glob is not supported for native Windows targets") {
+		t.Fatalf("message=%q", exitErr.Message)
+	}
+	if windowsEnvHelperTestTouchCount != 0 {
+		t.Fatalf("touch count=%d, want 0", windowsEnvHelperTestTouchCount)
+	}
+}
+
+func TestRunCommandTimingJSONRemainsFinalLineWithCleanup(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--timing-json",
+		"--stop-after", "success",
+		"--", "true",
+	})
+	if err != nil {
+		t.Fatalf("runCommand error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	if len(lines) == 0 {
+		t.Fatal("stderr was empty")
+	}
+	last := lines[len(lines)-1]
+	var report TimingReport
+	if err := json.Unmarshal([]byte(last), &report); err != nil {
+		t.Fatalf("last stderr line is not timing JSON: %q\nfull stderr:\n%s", last, stderr.String())
+	}
+	if strings.Contains(last, "lease cleanup") {
+		t.Fatalf("cleanup log appended to timing JSON: %q", last)
+	}
+	if report.LeaseStopped == nil || !*report.LeaseStopped {
+		t.Fatalf("leaseStopped=%v, want true", report.LeaseStopped)
+	}
+}
+
+func TestRunCommandTimingJSONSurfacesCleanupFailure(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	runEnvProfileTestReleaseErr = errors.New("release API unavailable")
+	t.Cleanup(func() { runEnvProfileTestReleaseErr = nil })
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--timing-json",
+		"--stop-after", "success",
+		"--", "true",
+	})
+	if err != nil {
+		t.Fatalf("runCommand error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	last := lines[len(lines)-1]
+	var report TimingReport
+	if err := json.Unmarshal([]byte(last), &report); err != nil {
+		t.Fatalf("last stderr line is not timing JSON: %q\nfull stderr:\n%s", last, stderr.String())
+	}
+	if report.LeaseStopped == nil || *report.LeaseStopped {
+		t.Fatalf("leaseStopped=%v, want false", report.LeaseStopped)
+	}
+	if !strings.Contains(report.LeaseStopErr, "release API unavailable") {
+		t.Fatalf("leaseStopError=%q", report.LeaseStopErr)
 	}
 }
 

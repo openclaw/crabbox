@@ -11,6 +11,7 @@ import (
 func (a App) doctor(ctx context.Context, args []string) error {
 	fs := newFlagSet("doctor", a.Stderr)
 	provider := fs.String("provider", defaultConfig().Provider, "provider: hetzner, aws, azure, gcp, proxmox, or ssh")
+	profile := fs.String("profile", defaultConfig().Profile, "configured profile for remote prerequisite checks")
 	id := fs.String("id", "", "remote lease id to inspect")
 	targetFlags := registerTargetFlags(fs, defaultConfig())
 	if err := parseFlags(fs, args); err != nil {
@@ -32,6 +33,10 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	cfg.Profile = strings.TrimSpace(*profile)
+	if err := applySelectedProfileConfig(&cfg); err != nil {
+		return err
+	}
 	if problem := configFilePermissionProblem(writableConfigPath()); problem != "" {
 		fmt.Fprintf(a.Stdout, "failed  config   %s: %s\n", writableConfigPath(), problem)
 		ok = false
@@ -45,16 +50,25 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		return err
 	}
 	if *id != "" {
-		_, target, _, err := a.resolveLeaseTarget(ctx, cfg, *id)
+		_, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, *id)
 		if err != nil {
 			return err
 		}
 		remote := "printf 'git='; git --version; printf 'rsync='; rsync --version | head -1; printf 'curl='; curl --version | head -1; printf 'jq='; jq --version"
+		if cfg.Profiles[cfg.Profile].Doctor.Enabled {
+			if isWindowsNativeTarget(target) {
+				return exit(2, "profile doctor is not supported for native Windows targets")
+			}
+			remote = remoteProfileDoctorCommand(cfg.Profile, cfg.Profiles[cfg.Profile].Doctor, profileDoctorWorkdirForLease(cfg, leaseID))
+		}
 		if isWindowsNativeTarget(target) {
 			remote = windowsRemoteDoctor()
 		}
-		out, err := runSSHOutput(ctx, target, remote)
+		out, err := runSSHCombinedOutput(ctx, target, remote)
 		if err != nil {
+			if strings.TrimSpace(out) != "" {
+				fmt.Fprintf(a.Stdout, "failed  remote  %s\n%s\n", *id, strings.TrimSpace(out))
+			}
 			return exit(7, "remote doctor failed for %s: %v", *id, err)
 		}
 		fmt.Fprintf(a.Stdout, "ok      remote  %s\n%s\n", *id, out)

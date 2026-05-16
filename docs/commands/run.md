@@ -30,6 +30,7 @@ crabbox run --provider ssh --target windows --windows-mode normal --static-host 
 crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local --shell 'Write-Output ("BROWSER=" + $env:BROWSER)'
 crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local --script ./scripts/windows-smoke.ps1 -- -Mode smoke
 crabbox run --provider ssh --target windows --windows-mode wsl2 --static-host win-dev.local -- pnpm test
+crabbox run --profile live-qa --preset qa-live --scenario login-regression --emit-proof /tmp/proof.md --stop-after success
 ```
 
 If `--id` is omitted, Crabbox creates a fresh non-kept lease and releases it when the command exits. `--id` accepts the stable `cbx_...` ID or the active friendly slug.
@@ -153,7 +154,37 @@ sources the Actions handoff env file when present. Raw workspaces with Actions
 hydration configured also print the exact `crabbox actions hydrate ...`
 suggestion and whether the selected provider/target supports it.
 
-At the end of every command, `run` prints a one-line summary with sync duration, command duration, total duration, whether sync was skipped by fingerprint, and the remote exit code.
+Configured profiles can define reusable presets. `--preset <name>` expands the
+profile command before execution, applies profile and preset environment
+defaults, and prints the expanded command for auditability. `--scenario <value>`
+sets the common `{{scenario}}` variable; use repeatable `--preset-var name=value`
+for other placeholders. Profile doctor checks run before the remote command
+when the selected profile enables them, so missing Node, pnpm, Docker, Compose,
+or disk prerequisites fail before the expensive lane starts.
+
+Use repeatable `--artifact-glob <glob>` to collect matching remote files after a
+successful SSH-backed run. Globs are resolved relative to the remote workdir and
+stored locally under `.crabbox/runs/<run-or-lease>/` as a tarball. Profile and
+preset `artifactGlobs` are collected the same way. Delegated providers reject
+artifact globs because they own command transport. Native Windows and macOS
+targets reject artifact globs; use Linux or Windows WSL2 for this collector.
+
+Use `--emit-proof <path>` to render a Markdown `## Real behavior proof` block
+after a successful run. The proof is a derived artifact: it uses run metadata,
+the expanded command, selected live console output, collected artifact paths,
+and the selected `--proof-template` or preset template. Keep proof templates in
+repo config so parser-sensitive PR wording stays project-owned.
+
+Use `--stop-after success|always|failure|never` to make lease cleanup explicit.
+Without it, a newly acquired one-shot lease is released after the command and an
+existing `--id` lease is left alone. The final run details print the exact
+`crabbox stop ...` command either way.
+
+At the end of every command, `run` prints a one-line timing summary with sync
+duration, command duration, total duration, whether sync was skipped by
+fingerprint, and the remote exit code. It also prints run details with provider,
+lease ID, slug, run ID, machine type, repo path, remote workdir, Actions URL
+when present, stop command, and idle timeout.
 
 Use `--capture-stdout <path>` when stdout is binary or terminal-hostile. Crabbox
 writes the remote stdout bytes directly to the local file, leaves stderr on the
@@ -192,7 +223,13 @@ resolved relative to the remote workdir unless absolute, and Windows paths use
 Crabbox rejects local output path collisions between stdout capture, stderr
 capture, and downloads before command execution.
 
-Use `--timing-json` to emit a final JSON timing record with provider, lease ID, sync phases, command phases, command duration, total duration, exit code, and Actions run URL when available. Commands can emit phase markers on stdout or stderr as `CRABBOX_PHASE:<name>`; Crabbox records those as `commandPhases` without removing the marker line from output. In `blacksmith-testbox` mode, sync is reported as delegated in the same schema.
+Use `--timing-json` to emit a final JSON timing record with provider, lease ID,
+slug, run ID, machine type, repo path, remote workdir, sync phases, command
+phases, command duration, total duration, exit code, stop command, artifacts,
+and Actions run URL when available. Commands can emit phase markers on stdout
+or stderr as `CRABBOX_PHASE:<name>`; Crabbox records those as `commandPhases`
+without removing the marker line from output. In `blacksmith-testbox` mode,
+sync is reported as delegated in the same schema.
 
 Before the first rsync into a Git checkout, Crabbox tries to seed the remote worktree from the local `origin` remote so the first sync is a dirty-tree overlay instead of a full source upload. Project-specific excludes can live in `.crabboxignore` or `sync.exclude` in `crabbox.yaml` / `.crabbox.yaml`; env forwarding and base ref belong in config.
 
