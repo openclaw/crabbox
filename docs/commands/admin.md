@@ -168,7 +168,7 @@ crabbox admin providers policy --provider aws --target macos > /tmp/crabbox-maco
 scripts/apply-macos-image-iam-policy.sh \
   --identity /tmp/crabbox-provider-identity.json \
   --policy /tmp/crabbox-macos-image-policy.json \
-  --profile <aws-profile>
+  --profile auto
 
 scripts/apply-macos-image-iam-policy.sh \
   --identity /tmp/crabbox-provider-identity.json \
@@ -177,10 +177,12 @@ scripts/apply-macos-image-iam-policy.sh \
   --apply
 ```
 
-The helper dry-runs by default, verifies that the local AWS profile account
-matches the coordinator account, and then writes the inline role or user policy
-only when `--apply` is present. For assumed-role identities, it attaches the
-policy to the underlying role name, not the session name. JSON output includes
+The helper dry-runs by default. With `--profile auto`, it scans local AWS
+profiles and selects the one whose account matches the coordinator account.
+With an explicit `--profile`, it verifies that profile directly. It writes the
+inline role or user policy only when `--apply` is present. For assumed-role
+identities, it attaches the policy to the underlying role name, not the session
+name. JSON output includes
 `policyTarget.type` and `policyTarget.name` when the coordinator ARN is an IAM
 user, IAM role, or STS assumed-role ARN.
 

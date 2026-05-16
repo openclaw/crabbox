@@ -207,13 +207,13 @@ crabbox admin hosts policy --provider aws --target macos
 scripts/apply-macos-image-iam-policy.sh \
   --identity /tmp/crabbox-provider-identity.json \
   --policy /tmp/crabbox-macos-image-policy.json \
-  --profile <aws-profile>
+  --profile auto
 ```
 
-The apply helper dry-runs first and refuses to write when the local AWS profile
-account does not match the coordinator account. If the dry-run is pointed at the
-right account and target, attach the combined policy to the coordinator AWS
-principal before rerunning the preflight:
+The apply helper dry-runs first. With `--profile auto`, it scans local AWS
+profiles and selects the one whose account matches the coordinator account. If
+the dry-run is pointed at the right account and target, attach the combined
+policy to the coordinator AWS principal before rerunning the preflight:
 
 ```bash
 scripts/apply-macos-image-iam-policy.sh \
