@@ -140,7 +140,7 @@ func serveTestARDRFB(conn net.Conn, username, password string) error {
 	if _, err := conn.Write(serverInit); err != nil {
 		return err
 	}
-	if _, err := io.CopyN(io.Discard, conn, 20); err != nil {
+	if err := readTestRFBPixelFormat(conn); err != nil {
 		return err
 	}
 	if _, err := io.CopyN(io.Discard, conn, 8); err != nil {
@@ -207,7 +207,7 @@ func serveTestNoneRFB(conn net.Conn) error {
 	if _, err := conn.Write(serverInit); err != nil {
 		return err
 	}
-	if _, err := io.CopyN(io.Discard, conn, 20); err != nil {
+	if err := readTestRFBPixelFormat(conn); err != nil {
 		return err
 	}
 	if _, err := io.CopyN(io.Discard, conn, 8); err != nil {
@@ -237,6 +237,17 @@ func aesECBDecryptForTest(key, ciphertext []byte) ([]byte, error) {
 		block.Decrypt(out[offset:offset+aes.BlockSize], ciphertext[offset:offset+aes.BlockSize])
 	}
 	return out, nil
+}
+
+func readTestRFBPixelFormat(conn net.Conn) error {
+	msg := make([]byte, 20)
+	if _, err := io.ReadFull(conn, msg); err != nil {
+		return err
+	}
+	if msg[0] != 0 || msg[4] != 32 || msg[5] != 24 || msg[7] != 0 {
+		return errUnexpectedTestBytes("pixel format", msg)
+	}
+	return nil
 }
 
 type testError string

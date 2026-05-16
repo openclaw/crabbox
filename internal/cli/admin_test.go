@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -22,6 +24,37 @@ func TestAdminMacHostsRequiresForceForRelease(t *testing.T) {
 	err := app.adminMacHosts(context.Background(), []string{"release", "h-000000000001"})
 	if err == nil || !strings.Contains(err.Error(), "requires --force") {
 		t.Fatalf("err=%v, want force requirement", err)
+	}
+}
+
+func TestAdminMacHostsReleaseAcceptsFlagsAfterHostID(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var gotPath, gotRegion, gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotRegion = r.URL.Query().Get("region")
+		gotAuth = r.Header.Get("Authorization")
+		if r.Method != http.MethodDelete {
+			t.Fatalf("method=%s, want DELETE", r.Method)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"released": []string{"h-000000000001"}})
+	}))
+	defer server.Close()
+
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin-token")
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	if err := app.adminHosts(context.Background(), []string{"release", "h-000000000001", "--provider", "aws", "--target", "macos", "--region", "us-east-1", "--force"}); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/v1/admin/hosts/h-000000000001" || gotRegion != "us-east-1" {
+		t.Fatalf("release request path=%q region=%q, want host route in us-east-1", gotPath, gotRegion)
+	}
+	if gotAuth != "Bearer admin-token" {
+		t.Fatalf("auth=%q, want admin token", gotAuth)
 	}
 }
 

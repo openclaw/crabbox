@@ -276,7 +276,7 @@ func writeRFBPixelFormat(conn net.Conn) error {
 	msg[4] = 32
 	msg[5] = 24
 	msg[6] = 0
-	msg[7] = 1
+	msg[7] = 0
 	binary.BigEndian.PutUint16(msg[8:10], 255)
 	binary.BigEndian.PutUint16(msg[10:12], 255)
 	binary.BigEndian.PutUint16(msg[12:14], 255)

@@ -565,6 +565,13 @@ func xmlTagValue(input, tag string) string {
 func (a App) adminMacHostsRelease(ctx context.Context, args []string) error {
 	args, forceAnywhere := extractBoolFlag(args, "force")
 	args, jsonAnywhere := extractBoolFlag(args, "json")
+	var positionalID string
+	args, positionalID = extractFirstPositionalArg(args, map[string]bool{
+		"id":       true,
+		"provider": true,
+		"region":   true,
+		"target":   true,
+	})
 	fs := newFlagSet("admin mac-hosts release", a.Stderr)
 	provider, target := adminHostScopeFlags(fs)
 	id := fs.String("id", "", "EC2 Mac Dedicated Host id")
@@ -577,8 +584,8 @@ func (a App) adminMacHostsRelease(ctx context.Context, args []string) error {
 	if err := validateAdminHostScope(*provider, *target); err != nil {
 		return err
 	}
-	if *id == "" && fs.NArg() > 0 {
-		*id = fs.Arg(0)
+	if *id == "" {
+		*id = positionalID
 	}
 	if forceAnywhere {
 		*force = true
