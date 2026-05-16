@@ -64,6 +64,7 @@ Read when:
 - [Sync](sync.md): Git file-list manifests, rsync, fingerprints, excludes, guardrails, and sanity checks.
 - [Jobs](jobs.md): named repo-local warmup, hydrate, run, and cleanup workflows.
 - [Actions hydration](actions-hydration.md): let GitHub Actions prepare a runner, then sync local work into that workspace.
+- [Capsules](capsules.md): local-first replay manifests for GitHub Actions failures.
 - [Checkpoints](checkpoints.md): save, restore, and fork reusable remote workspaces.
 - [Interactive desktop and VNC](interactive-desktop-vnc.md): VNC hub, support matrix, tunnel model, and QA boundaries.
 - [Artifacts](artifacts.md): screenshots, video, trimmed GIFs, logs, metadata, templates, and PR publishing.
@@ -96,6 +97,7 @@ Read when:
 - [inspect](../commands/inspect.md)
 - [stop](../commands/stop.md)
 - [actions](../commands/actions.md)
+- [capsule](../commands/capsule.md)
 - [checkpoint](../commands/checkpoint.md)
 - [cleanup](../commands/cleanup.md)
 - [config](../commands/config.md)

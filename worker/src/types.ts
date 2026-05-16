@@ -11,6 +11,7 @@ export interface Env {
   CRABBOX_AWS_INSTANCE_PROFILE?: string;
   CRABBOX_AWS_ROOT_GB?: string;
   CRABBOX_AWS_SSH_CIDRS?: string;
+  CRABBOX_HOST_ID?: string;
   CRABBOX_AWS_MAC_HOST_ID?: string;
   CRABBOX_AWS_ORPHAN_SWEEP_ENABLED?: string;
   CRABBOX_AWS_ORPHAN_SWEEP_DELETE?: string;
@@ -104,6 +105,8 @@ export interface LeaseRequest {
   class?: string;
   serverType?: string;
   serverTypeExplicit?: boolean;
+  hostId?: string;
+  hostID?: string;
   location?: string;
   image?: string;
   awsRegion?: string;
@@ -194,6 +197,8 @@ export interface LeaseRecord {
   class: string;
   serverType: string;
   requestedServerType?: string;
+  hostId?: string;
+  hostID?: string;
   market?: string;
   provisioningAttempts?: ProvisioningAttempt[];
   capacityHints?: CapacityHint[];
@@ -272,6 +277,10 @@ export interface ProviderImage {
   provider?: Provider;
   kind?: string;
   region?: string;
+  target?: TargetOS;
+  windowsMode?: WindowsMode;
+  serverType?: string;
+  architecture?: string;
   project?: string;
   resourceID?: string;
   snapshots?: string[];
@@ -467,6 +476,7 @@ export interface MachineView {
   name: string;
   status: string;
   serverType: string;
+  hostId?: string;
   host: string;
   labels: Record<string, string>;
 }
@@ -479,6 +489,7 @@ export interface ProviderMachine {
   name: string;
   status: string;
   serverType: string;
+  hostID?: string;
   host: string;
   labels: Record<string, string>;
 }

@@ -114,6 +114,62 @@ func TestCoordinatorListJSONFallsBackWhenAdminTokenMissing(t *testing.T) {
 	}
 }
 
+func TestLeaseToServerTargetPreservesCoordinatorWorkRoot(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.WorkRoot = defaultPOSIXWorkRoot
+
+	server, target, leaseID := leaseToServerTarget(CoordinatorLease{
+		ID:         "cbx_123",
+		Slug:       "silver-squid",
+		Provider:   "aws",
+		TargetOS:   targetMacOS,
+		HostID:     "h-000000000001",
+		SSHUser:    "ec2-user",
+		SSHPort:    "22",
+		Host:       "203.0.113.10",
+		WorkRoot:   defaultMacOSWorkRoot,
+		ServerType: "mac2.metal",
+		State:      "active",
+	}, cfg)
+
+	if leaseID != "cbx_123" {
+		t.Fatalf("leaseID=%q", leaseID)
+	}
+	if target.TargetOS != targetMacOS || target.User != "ec2-user" || target.Port != "22" {
+		t.Fatalf("target=%#v", target)
+	}
+	if server.Labels["work_root"] != defaultMacOSWorkRoot {
+		t.Fatalf("work_root label=%q want %q", server.Labels["work_root"], defaultMacOSWorkRoot)
+	}
+	if server.HostID != "h-000000000001" || server.Labels["host_id"] != "h-000000000001" {
+		t.Fatalf("server host id not preserved: %#v", server)
+	}
+
+	applyResolvedServerConfig(&cfg, server)
+	if cfg.WorkRoot != defaultMacOSWorkRoot {
+		t.Fatalf("workRoot=%q want %q", cfg.WorkRoot, defaultMacOSWorkRoot)
+	}
+}
+
+func TestCoordinatorLeaseHostIDAcceptsCanonicalAndCompatJSON(t *testing.T) {
+	for name, input := range map[string]string{
+		"canonical": `{"id":"cbx_123","provider":"aws","hostId":"h-canonical"}`,
+		"compat":    `{"id":"cbx_123","provider":"aws","hostID":"h-compat"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var lease CoordinatorLease
+			if err := json.Unmarshal([]byte(input), &lease); err != nil {
+				t.Fatal(err)
+			}
+			if got := coordinatorLeaseHostID(lease); got == "" || !strings.HasPrefix(got, "h-") {
+				t.Fatalf("host id not decoded from %s: %#v", name, lease)
+			}
+		})
+	}
+}
+
 func TestCoordinatorResolveFallsBackToAdminToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_admin" {

@@ -56,6 +56,8 @@ type CoordinatorLease struct {
 	Class                string                `json:"class"`
 	ServerType           string                `json:"serverType"`
 	RequestedServerType  string                `json:"requestedServerType,omitempty"`
+	HostID               string                `json:"hostId,omitempty"`
+	HostIDCompat         string                `json:"hostID,omitempty"`
 	Market               string                `json:"market,omitempty"`
 	ProvisioningAttempts []ProvisioningAttempt `json:"provisioningAttempts,omitempty"`
 	CapacityHints        []CapacityHint        `json:"capacityHints,omitempty"`
@@ -165,22 +167,79 @@ type CoordinatorProviderReadiness struct {
 }
 
 type CoordinatorImage struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	State      string `json:"state"`
-	Provider   string `json:"provider,omitempty"`
-	Kind       string `json:"kind,omitempty"`
-	Region     string `json:"region,omitempty"`
-	Project    string `json:"project,omitempty"`
-	ResourceID string `json:"resourceID,omitempty"`
-	PromotedAt string `json:"promotedAt,omitempty"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	State        string `json:"state"`
+	Provider     string `json:"provider,omitempty"`
+	Kind         string `json:"kind,omitempty"`
+	Region       string `json:"region,omitempty"`
+	Project      string `json:"project,omitempty"`
+	ResourceID   string `json:"resourceID,omitempty"`
+	Target       string `json:"target,omitempty"`
+	WindowsMode  string `json:"windowsMode,omitempty"`
+	ServerType   string `json:"serverType,omitempty"`
+	Architecture string `json:"architecture,omitempty"`
+	PromotedAt   string `json:"promotedAt,omitempty"`
+}
+
+type CoordinatorMacHost struct {
+	ID               string            `json:"id"`
+	State            string            `json:"state"`
+	Region           string            `json:"region"`
+	AvailabilityZone string            `json:"availabilityZone"`
+	InstanceType     string            `json:"instanceType"`
+	AutoPlacement    string            `json:"autoPlacement"`
+	AllocationTime   string            `json:"allocationTime,omitempty"`
+	ReleaseTime      string            `json:"releaseTime,omitempty"`
+	Tags             map[string]string `json:"tags,omitempty"`
+}
+
+type CoordinatorMacHostOffering struct {
+	Region           string `json:"region"`
+	AvailabilityZone string `json:"availabilityZone"`
+	InstanceType     string `json:"instanceType"`
+}
+
+type CoordinatorMacHostAllocationDryRun struct {
+	Region           string `json:"region"`
+	AvailabilityZone string `json:"availabilityZone"`
+	InstanceType     string `json:"instanceType"`
+	OK               bool   `json:"ok"`
+	Message          string `json:"message"`
+}
+
+type CoordinatorMacHostQuota struct {
+	ServiceCode string  `json:"serviceCode,omitempty"`
+	QuotaCode   string  `json:"quotaCode"`
+	QuotaName   string  `json:"quotaName"`
+	Value       float64 `json:"value"`
+	Adjustable  bool    `json:"adjustable,omitempty"`
+	GlobalQuota bool    `json:"globalQuota,omitempty"`
+	Unit        string  `json:"unit,omitempty"`
+}
+
+type CoordinatorAWSIdentity struct {
+	Account      string                      `json:"account"`
+	ARN          string                      `json:"arn"`
+	UserID       string                      `json:"userId"`
+	Region       string                      `json:"region"`
+	PolicyTarget *CoordinatorAWSPolicyTarget `json:"policyTarget,omitempty"`
+}
+
+type CoordinatorAWSPolicyTarget struct {
+	Type   string `json:"type"`
+	Name   string `json:"name"`
+	Source string `json:"source"`
 }
 
 type CoordinatorImageRef struct {
-	Provider string
-	Region   string
-	Project  string
-	Kind     string
+	Provider     string
+	Region       string
+	Project      string
+	Kind         string
+	Target       string
+	ServerType   string
+	Architecture string
 }
 
 type CoordinatorGitHubLoginStart struct {
@@ -542,6 +601,8 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"class":                           cfg.Class,
 		"serverType":                      cfg.ServerType,
 		"serverTypeExplicit":              cfg.ServerTypeExplicit,
+		"hostId":                          cfg.HostID,
+		"hostID":                          cfg.HostID,
 		"location":                        cfg.Location,
 		"image":                           cfg.Image,
 		"awsRegion":                       cfg.AWSRegion,
@@ -916,6 +977,189 @@ func (c *CoordinatorClient) AdminDeleteLease(ctx context.Context, id string) (Co
 	return res.Lease, err
 }
 
+func (c *CoordinatorClient) AdminMacHosts(ctx context.Context, region, serverType, state string) ([]CoordinatorMacHost, error) {
+	var res struct {
+		Hosts []CoordinatorMacHost `json:"hosts"`
+	}
+	values := adminHostScopeValues(region, serverType)
+	if state != "" {
+		values.Set("state", state)
+	}
+	path := "/v1/admin/hosts"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	legacyPath := "/v1/admin/mac-hosts"
+	if encoded := legacyMacHostValues(region, serverType, state).Encode(); encoded != "" {
+		legacyPath += "?" + encoded
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodGet, path, legacyPath, nil, &res)
+	return res.Hosts, err
+}
+
+func (c *CoordinatorClient) AdminAWSIdentity(ctx context.Context, region string) (CoordinatorAWSIdentity, error) {
+	var res struct {
+		Identity CoordinatorAWSIdentity `json:"identity"`
+	}
+	values := url.Values{"provider": []string{"aws"}}
+	if region != "" {
+		values.Set("region", region)
+	}
+	path := "/v1/admin/providers/identity"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	legacyPath := "/v1/admin/aws-identity"
+	if region != "" {
+		legacyPath += "?region=" + url.QueryEscape(region)
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodGet, path, legacyPath, nil, &res)
+	return res.Identity, err
+}
+
+func (c *CoordinatorClient) AdminMacHostOfferings(ctx context.Context, region, serverType string) ([]CoordinatorMacHostOffering, error) {
+	var res struct {
+		Offerings []CoordinatorMacHostOffering `json:"offerings"`
+	}
+	values := adminHostScopeValues(region, serverType)
+	path := "/v1/admin/hosts/offerings"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	legacyPath := "/v1/admin/mac-hosts/offerings"
+	if encoded := legacyMacHostValues(region, serverType, "").Encode(); encoded != "" {
+		legacyPath += "?" + encoded
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodGet, path, legacyPath, nil, &res)
+	return res.Offerings, err
+}
+
+func (c *CoordinatorClient) AdminMacHostQuotas(ctx context.Context, region, serverType string) ([]CoordinatorMacHostQuota, error) {
+	var res struct {
+		Quotas []CoordinatorMacHostQuota `json:"quotas"`
+	}
+	values := adminHostScopeValues(region, serverType)
+	path := "/v1/admin/hosts/quota"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	legacyPath := "/v1/admin/mac-hosts/quota"
+	if encoded := legacyMacHostValues(region, serverType, "").Encode(); encoded != "" {
+		legacyPath += "?" + encoded
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodGet, path, legacyPath, nil, &res)
+	return res.Quotas, err
+}
+
+func (c *CoordinatorClient) AdminAllocateMacHost(ctx context.Context, region, serverType, availabilityZone string) ([]CoordinatorMacHost, error) {
+	var res struct {
+		Hosts []CoordinatorMacHost `json:"hosts"`
+	}
+	values := adminHostScopeValues(region, "")
+	path := "/v1/admin/hosts"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	body := map[string]any{"type": serverType}
+	if availabilityZone != "" {
+		body["availabilityZone"] = availabilityZone
+	}
+	legacyPath := "/v1/admin/mac-hosts"
+	if region != "" {
+		legacyPath += "?region=" + url.QueryEscape(region)
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodPost, path, legacyPath, body, &res)
+	return res.Hosts, err
+}
+
+func (c *CoordinatorClient) AdminDryRunAllocateMacHost(ctx context.Context, region, serverType, availabilityZone string) ([]CoordinatorMacHostAllocationDryRun, error) {
+	var res struct {
+		Checks []CoordinatorMacHostAllocationDryRun `json:"checks"`
+	}
+	values := adminHostScopeValues(region, "")
+	path := "/v1/admin/hosts/dry-run"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	body := map[string]any{"type": serverType}
+	if availabilityZone != "" {
+		body["availabilityZone"] = availabilityZone
+	}
+	legacyPath := "/v1/admin/mac-hosts/dry-run"
+	if region != "" {
+		legacyPath += "?region=" + url.QueryEscape(region)
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodPost, path, legacyPath, body, &res)
+	return res.Checks, err
+}
+
+func (c *CoordinatorClient) AdminReleaseMacHost(ctx context.Context, region, hostID string) ([]string, error) {
+	var res struct {
+		Released []string `json:"released"`
+	}
+	values := adminHostScopeValues(region, "")
+	path := "/v1/admin/hosts/" + url.PathEscape(hostID)
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	legacyPath := "/v1/admin/mac-hosts/" + url.PathEscape(hostID)
+	if region != "" {
+		legacyPath += "?region=" + url.QueryEscape(region)
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodDelete, path, legacyPath, nil, &res)
+	return res.Released, err
+}
+
+func adminHostScopeValues(region, serverType string) url.Values {
+	values := url.Values{
+		"provider": []string{"aws"},
+		"target":   []string{targetMacOS},
+	}
+	if region != "" {
+		values.Set("region", region)
+	}
+	if serverType != "" {
+		values.Set("type", serverType)
+	}
+	return values
+}
+
+func legacyMacHostValues(region, serverType, state string) url.Values {
+	values := url.Values{}
+	if region != "" {
+		values.Set("region", region)
+	}
+	if serverType != "" {
+		values.Set("type", serverType)
+	}
+	if state != "" {
+		values.Set("state", state)
+	}
+	return values
+}
+
+func (c *CoordinatorClient) doWithLegacyFallback(ctx context.Context, method, path, legacyPath string, body any, out any) error {
+	err := c.do(ctx, method, path, body, out)
+	if err == nil || !isCoordinatorNotFound(err) {
+		return err
+	}
+	legacyErr := c.do(ctx, method, legacyPath, body, out)
+	if legacyErr == nil || !isCoordinatorNotFound(legacyErr) {
+		return legacyErr
+	}
+	return CoordinatorHTTPError{
+		Method:     method,
+		Path:       path,
+		StatusCode: http.StatusNotFound,
+		Message:    fmt.Sprintf("endpoint not found; legacy compatibility route %s also returned 404", legacyPath),
+	}
+}
+
+func isCoordinatorNotFound(err error) bool {
+	var httpErr CoordinatorHTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound
+}
+
 func (c *CoordinatorClient) CreateImage(ctx context.Context, leaseID, name string, noReboot bool, strategies ...string) (CoordinatorImage, error) {
 	var res struct {
 		Image CoordinatorImage `json:"image"`
@@ -971,6 +1215,15 @@ func imagePath(imageID, action string, refs ...CoordinatorImageRef) string {
 		}
 		if strings.TrimSpace(ref.Kind) != "" {
 			values.Set("kind", strings.TrimSpace(ref.Kind))
+		}
+		if strings.TrimSpace(ref.Target) != "" {
+			values.Set("target", strings.TrimSpace(ref.Target))
+		}
+		if strings.TrimSpace(ref.ServerType) != "" {
+			values.Set("serverType", strings.TrimSpace(ref.ServerType))
+		}
+		if strings.TrimSpace(ref.Architecture) != "" {
+			values.Set("architecture", strings.TrimSpace(ref.Architecture))
 		}
 	}
 	if encoded := values.Encode(); encoded != "" {
@@ -1310,9 +1563,11 @@ func localCoordinatorOwner() string {
 }
 
 func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget, string) {
+	hostID := coordinatorLeaseHostID(lease)
 	server := Server{
 		Provider: lease.Provider,
 		CloudID:  lease.CloudID,
+		HostID:   hostID,
 		ID:       lease.ServerID,
 		Name:     lease.ServerName,
 		Status:   lease.State,
@@ -1321,10 +1576,12 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 			"slug":              lease.Slug,
 			"keep":              fmt.Sprint(lease.Keep),
 			"target":            blank(lease.TargetOS, cfg.TargetOS),
+			"host_id":           hostID,
 			"windows_mode":      blank(lease.WindowsMode, cfg.WindowsMode),
 			"desktop":           fmt.Sprint(lease.Desktop),
 			"browser":           fmt.Sprint(lease.Browser),
 			"code":              fmt.Sprint(lease.Code),
+			"work_root":         lease.WorkRoot,
 			"expires_at":        lease.ExpiresAt,
 			"last_touched_at":   lease.LastTouchedAt,
 			"idle_timeout_secs": fmt.Sprint(lease.IdleTimeoutSeconds),
@@ -1350,6 +1607,10 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 	target := sshTargetForLease(cfg, lease.Host, lease.SSHUser, lease.SSHPort)
 	useStoredTestboxKey(&target, lease.ID)
 	return server, target, lease.ID
+}
+
+func coordinatorLeaseHostID(lease CoordinatorLease) string {
+	return firstNonBlank(lease.HostID, lease.HostIDCompat)
 }
 
 func (a App) touchCoordinatorLeaseBestEffort(ctx context.Context, cfg Config, leaseID string) {

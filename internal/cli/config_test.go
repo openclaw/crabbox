@@ -15,6 +15,8 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_COORDINATOR_TOKEN",
 		"CRABBOX_COORDINATOR_ADMIN_TOKEN",
 		"CRABBOX_ADMIN_TOKEN",
+		"CRABBOX_HOST_ID",
+		"CRABBOX_AWS_MAC_HOST_ID",
 		"CRABBOX_NETWORK",
 		"CRABBOX_TAILSCALE",
 		"CRABBOX_TAILSCALE_TAGS",
@@ -185,6 +187,7 @@ func TestLoadConfigFromUserFile(t *testing.T) {
     token: access-jwt
 class: standard
 target: windows
+hostId: h-neutral-file
 windows:
   mode: wsl2
 lease:
@@ -362,6 +365,9 @@ ssh:
 	if cfg.Coordinator != "https://crabbox.example.test" || cfg.CoordToken != "secret" || cfg.CoordAdminToken != "admin-secret" {
 		t.Fatalf("broker config not loaded: %#v", cfg)
 	}
+	if cfg.HostID != "h-neutral-file" {
+		t.Fatalf("host id not loaded: %q", cfg.HostID)
+	}
 	if cfg.Access.ClientID != "access-client" || cfg.Access.ClientSecret != "access-secret" || cfg.Access.Token != "access-jwt" {
 		t.Fatalf("access config not loaded: %#v", cfg.Access)
 	}
@@ -517,6 +523,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_ACCESS_CLIENT_SECRET", "env-access-secret")
 	t.Setenv("CRABBOX_ACCESS_TOKEN", "env-access-jwt")
 	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "env-admin-secret")
+	t.Setenv("CRABBOX_HOST_ID", "h-neutral-env")
 	t.Setenv("CRABBOX_NETWORK", "public")
 	t.Setenv("CRABBOX_CAPACITY_HINTS", "false")
 	t.Setenv("CRABBOX_CAPACITY_REGIONS", "eu-west-1,us-east-1")
@@ -680,6 +687,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.CoordAdminToken != "env-admin-secret" {
 		t.Fatalf("unexpected admin token state: %q", cfg.CoordAdminToken)
+	}
+	if cfg.HostID != "h-neutral-env" {
+		t.Fatalf("unexpected host id: %q", cfg.HostID)
 	}
 	if cfg.TargetOS != targetMacOS || cfg.Static.Host != "mac.local" {
 		t.Fatalf("unexpected target env: target=%s static=%#v", cfg.TargetOS, cfg.Static)

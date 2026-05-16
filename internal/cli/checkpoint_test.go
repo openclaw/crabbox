@@ -273,6 +273,33 @@ func TestNewCheckpointRecordUsesResolvedVersion(t *testing.T) {
 	}
 }
 
+func TestNewCheckpointRecordStoresHostPinAndServerType(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetMacOS
+	cfg.HostID = "h-000000000001"
+	cfg.ServerType = "mac2-m2pro.metal"
+
+	record, _, err := newCheckpointRecord(
+		Repo{Name: "my-app"},
+		cfg,
+		Server{CloudID: "i-1234567890abcdef0", Provider: "aws", HostID: "h-000000000002"},
+		SSHTarget{TargetOS: targetMacOS},
+		"cbx_123",
+		"/Users/ec2-user/crabbox/cbx_123/my-app",
+		"test checkpoint",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.HostID != "h-000000000002" {
+		t.Fatalf("HostID=%q, want h-000000000002", record.HostID)
+	}
+	if record.ServerType != "mac2-m2pro.metal" {
+		t.Fatalf("ServerType=%q, want mac2-m2pro.metal", record.ServerType)
+	}
+}
+
 func TestDefaultCheckpointRestoreWorkdirUsesTargetLease(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.WorkRoot = "/work"
@@ -297,6 +324,23 @@ func TestCheckpointCreateModePrefersDiskSnapshotLinuxNative(t *testing.T) {
 	}
 	if got := checkpointCreateMode("image", "", cfg, server, target, false); got != checkpointKindAWSAMI || checkpointStrategyForKind(got) != checkpointStrategyImage {
 		t.Fatalf("legacy image mode=%q strategy=%q", got, checkpointStrategyForKind(got))
+	}
+}
+
+func TestCheckpointCreateModeSupportsAWSMacOSNativeSnapshots(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.Coordinator = "https://coordinator.example"
+	cfg.TargetOS = targetMacOS
+	cfg.Capacity.Market = "on-demand"
+	server := Server{Provider: "aws", CloudID: "i-123"}
+	target := SSHTarget{TargetOS: targetMacOS}
+
+	if got := checkpointCreateMode("auto", "", cfg, server, target, false); got != checkpointKindAWSEBS {
+		t.Fatalf("mode=%q, want %q", got, checkpointKindAWSEBS)
+	}
+	if got := checkpointCreateMode("native", "image", cfg, server, target, false); got != checkpointKindAWSAMI {
+		t.Fatalf("image strategy mode=%q, want %q", got, checkpointKindAWSAMI)
 	}
 }
 
@@ -401,8 +445,8 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 	}
 }
 
-func TestRemotePrepareAWSAMICommandFlushesFilesystem(t *testing.T) {
-	cmd := remotePrepareAWSAMICommand()
+func TestRemotePrepareNativeImageCommandFlushesFilesystem(t *testing.T) {
+	cmd := remotePrepareNativeImageCommand()
 	for _, want := range []string{"cloud-init clean --logs", "sync"} {
 		if !strings.Contains(cmd, want) {
 			t.Fatalf("command missing %q: %s", want, cmd)
@@ -687,6 +731,42 @@ func TestApplyAWSAMICheckpointForkConfigRecomputesServerType(t *testing.T) {
 	}
 }
 
+func TestApplyAWSAMICheckpointForkConfigHonorsClassOverride(t *testing.T) {
+	fs := newFlagSet("checkpoint fork", io.Discard)
+	class := fs.String("class", "standard", "provider class")
+	_ = fs.String("type", "", "provider type")
+	if err := parseFlags(fs, []string{"--class", "beast"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	cfg.Provider = "hetzner"
+	cfg.Class = *class
+	cfg.ServerType = "ccx63"
+	cfg.ServerTypeExplicit = true
+	record := checkpointRecord{
+		Kind:        checkpointKindAWSAMI,
+		TargetOS:    targetLinux,
+		WindowsMode: windowsModeNormal,
+		ServerType:  "c7a.4xlarge",
+	}
+	record.Native.ImageID = "ami-12345678"
+	record.Native.Region = "eu-west-1"
+
+	if err := applyAWSAMICheckpointForkConfig(&cfg, fs, record); err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Provider != "aws" || cfg.AWSAMI != "ami-12345678" || cfg.AWSRegion != "eu-west-1" {
+		t.Fatalf("aws config not applied: %#v", cfg)
+	}
+	if cfg.ServerTypeExplicit {
+		t.Fatal("ServerTypeExplicit=true, want false")
+	}
+	if cfg.ServerType != "c7a.48xlarge" {
+		t.Fatalf("ServerType=%q, want AWS beast default instead of checkpoint source type", cfg.ServerType)
+	}
+}
+
 func TestApplyAWSAMICheckpointForkConfigPreservesExplicitTypeFlag(t *testing.T) {
 	fs := newFlagSet("checkpoint fork", io.Discard)
 	serverType := fs.String("type", "", "provider type")
@@ -706,6 +786,43 @@ func TestApplyAWSAMICheckpointForkConfigPreservesExplicitTypeFlag(t *testing.T) 
 
 	if cfg.ServerType != "c7a.4xlarge" || !cfg.ServerTypeExplicit {
 		t.Fatalf("explicit type not preserved: type=%q explicit=%t", cfg.ServerType, cfg.ServerTypeExplicit)
+	}
+}
+
+func TestApplyAWSMacOSCheckpointForkConfigPreservesTypeWithoutHostPin(t *testing.T) {
+	fs := newFlagSet("checkpoint fork", io.Discard)
+	_ = fs.String("type", "", "provider type")
+	_ = fs.String("market", "spot", "capacity market")
+	cfg := defaultConfig()
+	cfg.Provider = "hetzner"
+	cfg.Class = "standard"
+	cfg.Capacity.Market = "spot"
+	record := checkpointRecord{
+		Kind:        checkpointKindAWSEBS,
+		TargetOS:    targetMacOS,
+		WindowsMode: windowsModeNormal,
+		ServerType:  "mac2-m2pro.metal",
+		HostID:      "h-000000000001",
+	}
+	record.Native.ImageID = "snap-000000000001"
+	record.Native.Region = "eu-west-1"
+
+	applyNativeCheckpointForkConfig(&cfg, fs, record)
+
+	if cfg.Provider != "aws" || cfg.TargetOS != targetMacOS || cfg.AWSSnapshot != "snap-000000000001" {
+		t.Fatalf("aws macOS snapshot config not applied: %#v", cfg)
+	}
+	if cfg.HostID != "" || cfg.AWSMacHostID != "" {
+		t.Fatalf("host pin carried into fork: hostID=%q awsMacHostID=%q", cfg.HostID, cfg.AWSMacHostID)
+	}
+	if cfg.ServerType != "mac2-m2pro.metal" || !cfg.ServerTypeExplicit {
+		t.Fatalf("server type not preserved: type=%q explicit=%t", cfg.ServerType, cfg.ServerTypeExplicit)
+	}
+	if cfg.Capacity.Market != "on-demand" {
+		t.Fatalf("market=%q, want on-demand", cfg.Capacity.Market)
+	}
+	if cfg.WorkRoot != defaultMacOSWorkRoot {
+		t.Fatalf("WorkRoot=%q, want %q", cfg.WorkRoot, defaultMacOSWorkRoot)
 	}
 }
 

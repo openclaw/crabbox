@@ -46,19 +46,32 @@ func (a App) imageCreate(ctx context.Context, args []string) error {
 
 func (a App) imagePromote(ctx context.Context, args []string) error {
 	fs := newFlagSet("image promote", a.Stderr)
+	target := fs.String("target", "", "AWS image target: linux, macos, or windows")
 	region := fs.String("region", "", "AWS region containing the AMI")
+	serverType := fs.String("type", "", "AWS instance type the AMI boots on, for example mac1.metal")
+	serverTypeAlias := fs.String("server-type", "", "alias for --type")
+	architecture := fs.String("architecture", "", "AWS AMI architecture, for example x86_64_mac or arm64_mac")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox image promote <ami-id>")
+		return exit(2, "usage: crabbox image promote <ami-id> [--target linux|macos|windows] [--region <aws-region>] [--type <instance-type>] [--architecture <arch>]")
+	}
+	if *serverType == "" {
+		*serverType = *serverTypeAlias
 	}
 	coord, err := configuredAdminCoordinator()
 	if err != nil {
 		return err
 	}
-	image, err := coord.PromoteImage(ctx, fs.Arg(0), CoordinatorImageRef{Provider: "aws", Region: *region})
+	image, err := coord.PromoteImage(ctx, fs.Arg(0), CoordinatorImageRef{
+		Provider:     "aws",
+		Region:       *region,
+		Target:       *target,
+		ServerType:   *serverType,
+		Architecture: *architecture,
+	})
 	if err != nil {
 		return err
 	}
@@ -126,9 +139,12 @@ func waitForImage(ctx context.Context, coord *CoordinatorClient, imageID string,
 
 func imageRefFromCoordinatorImage(image CoordinatorImage) CoordinatorImageRef {
 	return CoordinatorImageRef{
-		Provider: image.Provider,
-		Region:   image.Region,
-		Project:  image.Project,
-		Kind:     image.Kind,
+		Provider:     image.Provider,
+		Region:       image.Region,
+		Project:      image.Project,
+		Kind:         image.Kind,
+		Target:       image.Target,
+		ServerType:   image.ServerType,
+		Architecture: image.Architecture,
 	}
 }

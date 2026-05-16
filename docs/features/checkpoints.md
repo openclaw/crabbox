@@ -17,7 +17,7 @@ leases.
 - Preserves full machine state: packages, tools, caches, services, files
 - Fast to create and fork (leverages cloud-native snapshots)
 - Lives in provider account, incurs storage costs
-- Linux only (Windows not supported)
+- AWS supports Linux and macOS; Azure/GCP support Linux only
 
 **Archive (Workspace Tarball)**
 - Captures workdir files only, stores locally as tarball
@@ -25,8 +25,8 @@ leases.
 - Does not preserve system packages or machine state
 - Excludes `.crabbox/env` and `.crabbox/scripts` by default
 
-Default `auto` mode: native for brokered AWS/Azure/GCP Linux leases, otherwise
-archive.
+Default `auto` mode: native for brokered AWS Linux/macOS leases and Azure/GCP
+Linux leases, otherwise archive.
 
 ## Native Checkpoint Strategies
 
@@ -38,6 +38,8 @@ Native checkpoints use two provider primitives:
 - GCP: Persistent disk snapshot (`gcp-disk-snapshot`)
 - Faster to create, boots with fresh SSH keys
 - Best for iterative development
+- AWS macOS forks still require EC2 Mac Dedicated Host capacity; brokered mode can
+  discover a host, and host-pinned checkpoints reuse the recorded `hostId`
 
 Azure disk-snapshot checkpoints require managed OS disks, which are the default
 for new Azure leases. Crabbox refuses native checkpoint creation from Azure
@@ -100,7 +102,7 @@ crabbox run --id purple-whale -- npm test
 
 Native checkpoints:
 1. Flush filesystem writes (`sync`)
-2. Reset cloud-init state (allows fresh SSH keys on fork)
+2. Reset Linux cloud-init state when present (allows fresh SSH keys on fork)
 3. Call provider snapshot/image API (EBS snapshot, AMI, etc.)
 4. Save local metadata with provider resource ID and region
 
@@ -145,7 +147,7 @@ crabbox checkpoint create --id blue-lobster --name cuda-ready
 crabbox checkpoint fork chk_123 --class beast
 ```
 
-Works identically for AWS, Azure, and GCP Linux leases.
+Works identically for AWS Linux/macOS leases and Azure/GCP Linux leases.
 
 **Use workspace archives when repo state is valuable**
 

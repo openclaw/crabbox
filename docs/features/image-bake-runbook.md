@@ -4,7 +4,7 @@ Read when:
 
 - baking a new Crabbox AWS image;
 - promoting or rolling back the default AWS image;
-- preparing a desktop/browser image for Mantis or other UI QA;
+- preparing a desktop/browser image for UI QA;
 - checking whether state belongs in the image or in a warm lease.
 
 This runbook is for trusted operators. Image commands need coordinator admin
@@ -15,13 +15,13 @@ auth and can create provider-side artifacts that cost money until cleaned up.
 Use names that identify owner, purpose, and UTC bake time:
 
 ```text
-openclaw-crabbox-linux-desktop-browser-YYYYMMDD-HHMM
-openclaw-mantis-linux-desktop-browser-YYYYMMDD-HHMM
+crabbox-linux-desktop-browser-YYYYMMDD-HHMM
+crabbox-macos-arm64-YYYYMMDD-HHMM
 ```
 
-Use a generic `openclaw-crabbox-*` image when the contents are useful to many
-repositories. Use `openclaw-mantis-*` only when the image is specifically tuned
-for OpenClaw Mantis QA.
+Use names that make the target and architecture obvious. A promoted macOS AMI
+is scoped separately from Linux and Windows images, but the name should still be
+human-auditable in the AWS console.
 
 ## What To Bake
 
@@ -90,7 +90,7 @@ Create the candidate image:
 ```bash
 crabbox image create \
   --id <cbx_id> \
-  --name openclaw-crabbox-linux-desktop-browser-YYYYMMDD-HHMM \
+  --name crabbox-linux-desktop-browser-YYYYMMDD-HHMM \
   --wait \
   --json
 ```
@@ -133,7 +133,7 @@ crabbox run \
    test -d /work/crabbox'
 ```
 
-For Mantis images, also run a real desktop/browser proof:
+For desktop/browser images, also run a real desktop/browser proof:
 
 ```bash
 crabbox screenshot --provider aws --id <candidate-cbx_id-or-slug> --output /tmp/crabbox-image-smoke.png
@@ -171,6 +171,186 @@ crabbox run \
 
 Keep the previous promoted AMI available until at least one normal brokered
 lease and one relevant QA lane pass on the new image.
+
+## macOS Images
+
+macOS images use the same `image create` command, but the source lease must be
+an AWS EC2 Mac lease on an allocated Dedicated Host:
+
+```bash
+crabbox admin hosts offerings --provider aws --target macos --region eu-west-1 --type mac2.metal
+crabbox admin hosts quota --provider aws --target macos --region eu-west-1 --type mac2.metal
+crabbox admin hosts list --provider aws --target macos --region eu-west-1
+```
+
+If no suitable host is available, allocate one explicitly before warmup:
+
+```bash
+crabbox admin hosts allocate \
+  --provider aws \
+  --target macos \
+  --region eu-west-1 \
+  --type mac2.metal \
+  --dry-run
+```
+
+If dry-run reports `UnauthorizedOperation`, update the coordinator AWS identity
+with the EC2 Mac host lifecycle policy in [admin](../commands/admin.md#hosts)
+before doing the real allocation. Confirm the caller identity and print the
+copy-pasteable combined policy with:
+
+```bash
+crabbox admin providers identity --provider aws --region eu-west-1 --json > /tmp/crabbox-provider-identity.json
+crabbox admin providers policy --provider aws --target macos > /tmp/crabbox-macos-image-policy.json
+crabbox admin hosts policy --provider aws --target macos
+
+scripts/apply-macos-image-iam-policy.sh \
+  --identity /tmp/crabbox-provider-identity.json \
+  --policy /tmp/crabbox-macos-image-policy.json \
+  --profile auto
+```
+
+The apply helper dry-runs first. With `--profile auto`, it scans local AWS
+profiles and selects the one whose account matches the coordinator account. If
+the dry-run is pointed at the right account and target, attach the combined
+policy to the coordinator AWS principal before rerunning the preflight:
+
+```bash
+scripts/apply-macos-image-iam-policy.sh \
+  --identity /tmp/crabbox-provider-identity.json \
+  --policy /tmp/crabbox-macos-image-policy.json \
+  --profile <aws-profile> \
+  --apply
+```
+
+For assumed-role identities, attach the policy to the underlying role name from
+the ARN rather than to the session name. `admin providers identity --provider aws --json` includes
+`policyTarget.type` and `policyTarget.name` when Crabbox can derive the IAM
+attachment target from the ARN.
+
+If dry-run succeeds, run
+`crabbox admin hosts quota --provider aws --target macos --region eu-west-1 --type mac2.metal`
+before real allocation. It prints the selected EC2 Mac Dedicated Host quota
+from AWS Service Quotas, which is the next useful no-spend blocker after IAM.
+
+Do not treat that host policy as the whole image bake policy. It only unblocks
+Dedicated Host allocation and release. The full paid lifecycle also needs the
+normal AWS provider permissions in [Infrastructure](../infrastructure.md#aws-ec2)
+for key pairs, security groups, macOS `RunInstances`, AMI creation, candidate
+boot, promotion, snapshot cleanup, and lease termination. Print the baseline
+provider policy with `crabbox admin providers policy --provider aws`, or the
+combined provider plus Dedicated Host policy with
+`crabbox admin providers policy --provider aws --target macos`.
+
+For an end-to-end guarded run, use the repository smoke script:
+
+```bash
+scripts/macos-image-lifecycle-smoke.sh
+```
+
+By default it only runs host offering/list/dry-run checks and stops before paid
+allocation or lease creation. The dry-run is parsed from the command's JSON
+output so the script only continues when at least one availability zone reports
+`ok: true`. After the dry-run succeeds, opt in to the paid lifecycle
+explicitly:
+
+```bash
+CRABBOX_MACOS_ALLOCATE=1 \
+CRABBOX_MACOS_PROMOTE=1 \
+scripts/macos-image-lifecycle-smoke.sh
+```
+
+The script warms a macOS desktop lease, verifies SSH/sync/VNC prerequisites,
+starts WebVNC, waits for the portal bridge to report `connected=true`, collects
+desktop artifacts, creates a candidate AMI with a rebooting image capture,
+boots and smokes the candidate, then promotes and smokes the promoted image
+when `CRABBOX_MACOS_PROMOTE=1`. Tune the WebVNC bridge wait with
+`CRABBOX_MACOS_WEBVNC_WAIT_TIMEOUT` and
+`CRABBOX_MACOS_WEBVNC_WAIT_INTERVAL`; tune the post-start grace period with
+`CRABBOX_MACOS_WEBVNC_START_GRACE`. EC2 Mac Dedicated Hosts have
+provider-side billing and release constraints; the script stops each lease's
+local WebVNC daemon before lease cleanup, waits for the host to return to
+`available` between macOS boots, and releases the host only when
+`CRABBOX_MACOS_RELEASE_HOST=1`. Host release is honored for source-only,
+candidate-only, and promoted-image runs; the script refuses to release a
+pre-existing host unless `CRABBOX_MACOS_RELEASE_EXISTING_HOST=1` is also set.
+Every run writes `.crabbox/macos-image-smoke/<image-name>/summary.json` with
+the current phase, host id, lease ids, AMI id when available, blocker
+remediation commands when blocked, and artifact paths. It also preserves the
+baseline AWS provider policy, EC2 Mac host policy, combined macOS image policy,
+host offering/list/dry-run, allocation, image create, image promotion, host
+wait, warmup, WebVNC daemon, and WebVNC status evidence under the run's
+`evidence/` directory.
+Override the directory with
+`CRABBOX_MACOS_ARTIFACT_DIR`.
+
+If an available EC2 Mac Dedicated Host already exists, the script still stops
+after preflight unless `CRABBOX_MACOS_RUN=1` or `CRABBOX_MACOS_ALLOCATE=1` is
+set.
+
+Stopping or terminating an EC2 Mac instance starts the AWS host scrubbing
+workflow. The script waits up to `CRABBOX_MACOS_HOST_WAIT_TIMEOUT` before each
+next macOS boot; the default is `5h` because Apple silicon scrubbing can take
+up to 4.5 hours. Override `CRABBOX_MACOS_HOST_WAIT_INTERVAL` to change the poll
+interval. If the host existed before the script started, `CRABBOX_MACOS_RELEASE_HOST=1`
+will not release it unless `CRABBOX_MACOS_RELEASE_EXISTING_HOST=1` is also set.
+
+```bash
+crabbox admin hosts allocate \
+  --provider aws \
+  --target macos \
+  --region eu-west-1 \
+  --type mac2.metal \
+  --force
+```
+
+```bash
+crabbox warmup \
+  --provider aws \
+  --target macos \
+  --type mac2.metal \
+  --market on-demand \
+  --desktop \
+  --ttl 2h \
+  --idle-timeout 30m
+```
+
+Verify the source lease before creating the AMI:
+
+```bash
+crabbox run \
+  --provider aws \
+  --target macos \
+  --id <cbx_id> \
+  --no-sync \
+  --shell -- \
+  'set -euo pipefail
+   sw_vers
+   command -v ssh
+   command -v git
+   command -v rsync
+   command -v curl
+   test -d "$HOME/crabbox"
+   test -w "$HOME/crabbox"
+   nc -z 127.0.0.1 5900'
+```
+
+Then create and promote the candidate:
+
+```bash
+crabbox image create \
+  --id <cbx_id> \
+  --name crabbox-macos-arm64-YYYYMMDD-HHMM \
+  --wait \
+  --json
+
+crabbox image promote ami-1234567890abcdef0 --target macos --region us-east-1 --json
+```
+
+Crabbox scopes promoted AWS images by target, architecture, and region. A macOS
+promotion is only selected by matching `target=macos` leases, so it will not
+replace the Linux or Windows default. If you promote an AMI that was not created
+through `crabbox image create`, pass both `--target macos` and `--region`.
 
 ## Roll Back
 

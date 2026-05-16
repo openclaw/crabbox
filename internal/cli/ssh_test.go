@@ -1196,7 +1196,7 @@ func TestAWSInstanceTypeCandidatesForTargetsAndModes(t *testing.T) {
 		class       string
 		want        []string
 	}{
-		{name: "macos", target: targetMacOS, class: "beast", want: []string{"mac2.metal"}},
+		{name: "macos", target: targetMacOS, class: "beast", want: awsMacOSInstanceTypeCandidates()},
 		{name: "windows normal standard", target: targetWindows, class: "standard", want: []string{"m7i.large", "m7a.large", "t3.large"}},
 		{name: "windows normal custom", target: targetWindows, class: "m7i.8xlarge", want: []string{"m7i.8xlarge"}},
 		{name: "windows wsl2 fast", target: targetWindows, windowsMode: windowsModeWSL2, class: "fast", want: []string{"m8i.xlarge", "m8i-flex.xlarge", "c8i.xlarge", "r8i.xlarge"}},

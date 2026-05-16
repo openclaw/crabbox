@@ -103,6 +103,7 @@ repository-owned setup, usually through Actions hydration or repo scripts.
 - SSH command output and direct SSH touch behavior: `internal/cli/ssh.go`, `internal/cli/ssh_cmd.go`
 - Per-lease SSH known_hosts and ControlMaster config: `internal/cli/ssh.go`
 - GitHub Actions hydrate/register/dispatch bridge: `internal/cli/actions.go`
+- Actions-first failure capsules: `internal/cli/capsule.go`
 - Workspace checkpoints: `internal/cli/checkpoint.go`
 - Cache stats/purge/warm commands: `internal/cli/cache.go`
 - Run history/event/attach/log commands and retained run logs: `internal/cli/history.go`, `internal/cli/run_recorder.go`, `internal/cli/run_output_events.go`, `internal/cli/runlog.go`
@@ -139,6 +140,7 @@ repository-owned setup, usually through Actions hydration or repo scripts.
 - Capacity and fallback: `docs/features/capacity-fallback.md` (code in `internal/cli/aws.go`, `worker/src/aws.ts`, class maps in `internal/cli/config.go`)
 - Telemetry: `docs/features/telemetry.md` (code in `internal/cli/telemetry.go`)
 - Browser portal: `docs/features/portal.md` (code in `worker/src/portal.ts`)
+- Capsules: `docs/features/capsules.md` (code in `internal/cli/capsule.go`)
 - Provider authoring guide: `docs/features/provider-authoring.md` (cross-references `internal/cli/provider_backend.go` and `internal/providers/*`)
 - Concepts/glossary: `docs/concepts.md`
 - Getting started walkthrough: `docs/getting-started.md`

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
+  awsMacOSInstanceTypeCandidates,
   awsInstanceTypeCandidatesForClass,
   awsInstanceTypeCandidatesForTargetClass,
   azureWindowsVMSizeCandidatesForClass,
@@ -87,7 +88,9 @@ describe("machine class config", () => {
       "m7a.large",
       "t3.large",
     ]);
-    expect(awsInstanceTypeCandidatesForTargetClass("macos", "standard")).toEqual(["mac2.metal"]);
+    expect(awsInstanceTypeCandidatesForTargetClass("macos", "standard")).toEqual([
+      ...awsMacOSInstanceTypeCandidates,
+    ]);
   });
 
   it("matches the Go CLI machine class tables", () => {
@@ -127,7 +130,9 @@ describe("machine class config", () => {
       );
       expect(gcpMachineTypeCandidatesForClass(name)).toEqual(gcp[name]);
     }
-    expect(awsInstanceTypeCandidatesForTargetClass("macos", "standard")).toEqual(["mac2.metal"]);
+    expect(awsInstanceTypeCandidatesForTargetClass("macos", "standard")).toEqual(
+      awsMacOSInstanceTypeCandidates,
+    );
   });
 });
 
@@ -379,6 +384,12 @@ describe("lease config", () => {
     expect(() =>
       leaseConfig({ provider: "hetzner", target: "macos", sshPublicKey: "ssh-ed25519 test" }),
     ).toThrow("EC2 Mac Dedicated Host");
+    expect(leaseConfig({ hostId: "h-neutral", sshPublicKey: "ssh-ed25519 test" }).hostID).toBe(
+      "h-neutral",
+    );
+    expect(leaseConfig({ hostID: "h-compat", sshPublicKey: "ssh-ed25519 test" }).hostID).toBe(
+      "h-compat",
+    );
   });
 
   it("allows AWS Windows leases", () => {

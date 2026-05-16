@@ -3,6 +3,7 @@ import { XMLParser } from "fast-xml-parser";
 
 import { awsUserData } from "./bootstrap";
 import {
+  awsPromotedAMIConfigKey,
   awsInstanceTypeCandidatesForTargetClass,
   sshPorts,
   validCIDRs,
@@ -14,9 +15,119 @@ import type { Env, ProviderImage, ProviderMachine, ProvisioningAttempt } from ".
 
 const awsUbuntuOwner = "099720109477";
 const ec2Version = "2016-11-15";
+const stsVersion = "2011-06-15";
 const awsSpotQuotaCode = "L-34B43A08";
 const awsOnDemandQuotaCode = "L-1216C47A";
+const awsMacHostQuotaSpecs: Record<string, { quotaCode: string; quotaName: string }> = {
+  mac1: { quotaCode: "L-A8448DC5", quotaName: "Running Dedicated mac1 Hosts" },
+  mac2: { quotaCode: "L-5D8DADF5", quotaName: "Running Dedicated mac2 Hosts" },
+  "mac2-m1ultra": {
+    quotaCode: "L-AE4D744C",
+    quotaName: "Running Dedicated mac2-m1ultra Hosts",
+  },
+  "mac2-m2": { quotaCode: "L-B90B5B66", quotaName: "Running Dedicated mac2-m2 Hosts" },
+  "mac2-m2pro": {
+    quotaCode: "L-14F120D1",
+    quotaName: "Running Dedicated mac2-m2pro Hosts",
+  },
+  "mac-m3ultra": {
+    quotaCode: "L-7108A7B5",
+    quotaName: "Running Dedicated mac-m3ultra Hosts",
+  },
+  "mac-m4": { quotaCode: "L-2CBA8B92", quotaName: "Running Dedicated mac-m4 Hosts" },
+  "mac-m4max": {
+    quotaCode: "L-D82CB68A",
+    quotaName: "Running Dedicated mac-m4max Hosts",
+  },
+  "mac-m4pro": {
+    quotaCode: "L-6919FC30",
+    quotaName: "Running Dedicated mac-m4pro Hosts",
+  },
+};
 const snapshotDeleteBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
+
+export interface AWSMacHost {
+  id: string;
+  state: string;
+  region: string;
+  availabilityZone: string;
+  instanceType: string;
+  autoPlacement: string;
+  allocationTime?: string;
+  releaseTime?: string;
+  tags: Record<string, string>;
+}
+
+export interface AWSMacHostOffering {
+  region: string;
+  availabilityZone: string;
+  instanceType: string;
+}
+
+export interface AWSMacHostAllocationDryRun {
+  region: string;
+  availabilityZone: string;
+  instanceType: string;
+  ok: boolean;
+  message: string;
+}
+
+export interface AWSReleaseHostFailure {
+  resourceID: string;
+  code: string;
+  message: string;
+}
+
+export interface AWSReleaseHostsResult {
+  successful: string[];
+  unsuccessful: AWSReleaseHostFailure[];
+}
+
+export interface AWSServiceQuota {
+  serviceCode?: string;
+  quotaCode: string;
+  quotaName: string;
+  value?: number;
+  adjustable?: boolean;
+  globalQuota?: boolean;
+  unit?: string;
+}
+
+export interface AWSIdentity {
+  account: string;
+  arn: string;
+  userId: string;
+  region: string;
+  policyTarget?: AWSPolicyTarget;
+}
+
+export interface AWSPolicyTarget {
+  type: "role" | "user";
+  name: string;
+  source: "iam-role" | "iam-user" | "assumed-role";
+}
+
+export function awsPolicyTargetFromArn(arn: string): AWSPolicyTarget | undefined {
+  const parts = arn.split(":");
+  if (parts.length < 6 || parts[0] !== "arn" || !parts[1]) {
+    return undefined;
+  }
+  const service = parts[2];
+  const resource = parts.slice(5).join(":");
+  const segments = resource.split("/").filter(Boolean);
+  const leafName = segments[segments.length - 1];
+  if (service === "iam" && segments[0] === "user" && leafName) {
+    return { type: "user", name: leafName, source: "iam-user" };
+  }
+  if (service === "iam" && segments[0] === "role" && leafName) {
+    return { type: "role", name: leafName, source: "iam-role" };
+  }
+  const assumedRoleName = segments[1];
+  if (service === "sts" && segments[0] === "assumed-role" && assumedRoleName) {
+    return { type: "role", name: assumedRoleName, source: "assumed-role" };
+  }
+  return undefined;
+}
 
 export function createSecurityGroupParams(name: string, vpcID: string): Record<string, string> {
   return {
@@ -59,8 +170,10 @@ const sshIngressRangeFamilies = [
 export class EC2SpotClient {
   private readonly aws: AwsClient;
   private readonly serviceQuotas: AwsClient;
+  private readonly stsClient: AwsClient;
   private readonly endpoint: string;
   private readonly serviceQuotasEndpoint: string;
+  private readonly stsEndpoint: string;
   private readonly region: string;
   private readonly parser = new XMLParser({ ignoreAttributes: false });
 
@@ -76,6 +189,7 @@ export class EC2SpotClient {
     this.region = region || env.CRABBOX_AWS_REGION || "eu-west-1";
     this.endpoint = `https://ec2.${this.region}.amazonaws.com/`;
     this.serviceQuotasEndpoint = `https://servicequotas.${this.region}.amazonaws.com/`;
+    this.stsEndpoint = `https://sts.${this.region}.amazonaws.com/`;
     const clientOptions: ConstructorParameters<typeof AwsClient>[0] = {
       accessKeyId,
       secretAccessKey,
@@ -87,6 +201,24 @@ export class EC2SpotClient {
     }
     this.aws = new AwsClient(clientOptions);
     this.serviceQuotas = new AwsClient({ ...clientOptions, service: "servicequotas" });
+    this.stsClient = new AwsClient({ ...clientOptions, service: "sts" });
+  }
+
+  async identity(): Promise<AWSIdentity> {
+    const root = await this.sts("GetCallerIdentity", {});
+    const result = record(root["GetCallerIdentityResult"] ?? root);
+    const arn = asString(result["Arn"]);
+    const identity: AWSIdentity = {
+      account: asString(result["Account"]),
+      arn,
+      userId: asString(result["UserId"]),
+      region: this.region,
+    };
+    const policyTarget = awsPolicyTargetFromArn(arn);
+    if (policyTarget) {
+      identity.policyTarget = policyTarget;
+    }
+    return identity;
   }
 
   async listCrabboxServers(): Promise<ProviderMachine[]> {
@@ -120,17 +252,51 @@ export class EC2SpotClient {
     await this.ensureSSHKey(config.providerKey, config.sshPublicKey);
     let transientImageID = "";
     try {
-      const imageID = config.awsSnapshot
+      const defaultImageID = config.awsSnapshot
         ? await (async () => {
             transientImageID = await this.registerSnapshotImage(config.awsSnapshot, leaseID);
             return this.waitForImageAvailable(transientImageID);
           })()
-        : await this.resolveAMI(config);
+        : config.target === "macos"
+          ? ""
+          : await this.resolveAMI(config);
       const securityGroupID = await this.ensureSecurityGroup(config);
       const candidates = awsLaunchCandidates(config);
       const failures: string[] = [];
       const attempts: ProvisioningAttempt[] = [];
       const quotaCache = new Map<string, number | undefined>();
+      const imageCache = new Map<string, string>();
+      const pinnedMacOSImageID =
+        config.target === "macos" ? config.awsAMI || this.env.CRABBOX_AWS_AMI || "" : "";
+      const resolveCandidateImageID = async (candidateConfig: LeaseConfig): Promise<string> => {
+        if (defaultImageID) {
+          return defaultImageID;
+        }
+        if (candidateConfig.target !== "macos") {
+          return this.resolveAMI(candidateConfig);
+        }
+        const promotedImageID =
+          config.awsPromotedAMIs[
+            awsPromotedAMIConfigKey(this.region, candidateConfig.serverType)
+          ] ?? "";
+        if (promotedImageID) {
+          return promotedImageID;
+        }
+        if (pinnedMacOSImageID && candidateConfig.serverType === config.serverType) {
+          return pinnedMacOSImageID;
+        }
+        const query = awsMacOSAMIQuery(candidateConfig.serverType);
+        const cacheKey = `${query.name}\0${query.architecture}`;
+        const cached = imageCache.get(cacheKey);
+        if (cached) {
+          return cached;
+        }
+        const imageID = pinnedMacOSImageID
+          ? await this.resolveLatestAmazonAMI(query.name, query.architecture)
+          : await this.resolveAMI(candidateConfig);
+        imageCache.set(cacheKey, imageID);
+        return imageID;
+      };
       for (const serverType of candidates) {
         // oxlint-disable-next-line eslint/no-await-in-loop -- quota preflight follows sequential fallback order.
         const preflight = await this.quotaPreflightAttempt(
@@ -144,6 +310,8 @@ export class EC2SpotClient {
           continue;
         }
         try {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- instance-type fallback may need an architecture-specific AMI.
+          const imageID = await resolveCandidateImageID({ ...config, serverType });
           // oxlint-disable-next-line eslint/no-await-in-loop -- instance-type fallback must stay sequential.
           const server = await this.createServer(
             { ...config, serverType },
@@ -188,6 +356,12 @@ export class EC2SpotClient {
             continue;
           }
           try {
+            // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback may need an architecture-specific AMI.
+            const imageID = await resolveCandidateImageID({
+              ...config,
+              capacityMarket: "on-demand",
+              serverType,
+            });
             // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
             const server = await this.createServer(
               { ...config, capacityMarket: "on-demand", serverType },
@@ -359,6 +533,7 @@ export class EC2SpotClient {
       kind: "aws-ami",
       region: this.region,
       resourceID: id,
+      architecture: asString(image["architecture"]),
       snapshots: imageSnapshotIDs(image),
     };
   }
@@ -379,6 +554,161 @@ export class EC2SpotClient {
       // oxlint-disable-next-line eslint/no-await-in-loop -- EBS snapshot deletes are independent cleanup calls.
       await this.deleteSnapshotWithRetry(snapshotID);
     }
+  }
+
+  async listMacHosts(serverType = "", state = ""): Promise<AWSMacHost[]> {
+    const params: Record<string, string> = {};
+    let filter = 1;
+    if (serverType) {
+      params[`Filter.${filter}.Name`] = "instance-type";
+      params[`Filter.${filter}.Value.1`] = serverType;
+      filter++;
+    }
+    if (state) {
+      params[`Filter.${filter}.Name`] = "state";
+      params[`Filter.${filter}.Value.1`] = state;
+    }
+    const root = await this.ec2("DescribeHosts", params);
+    return items(record(root["hostSet"])["item"])
+      .map((host) => this.macHostFromDescribeHost(host))
+      .filter((host) => host.instanceType.startsWith("mac"));
+  }
+
+  async listMacHostOfferings(serverType = "mac2.metal"): Promise<AWSMacHostOffering[]> {
+    const root = await this.ec2("DescribeInstanceTypeOfferings", {
+      LocationType: "availability-zone",
+      "Filter.1.Name": "instance-type",
+      "Filter.1.Value.1": serverType,
+    });
+    return awsMacHostOfferingsFromDescribeInstanceTypeOfferings(root, this.region);
+  }
+
+  async allocateMacHost(
+    serverType: string,
+    availabilityZone: string,
+    clientToken: string,
+  ): Promise<AWSMacHost[]> {
+    const params = this.allocateMacHostParams(serverType, availabilityZone, clientToken);
+    const root = await this.ec2("AllocateHosts", params);
+    const hostIDs = awsHostIDsFromSet(root["hostIdSet"]);
+    if (hostIDs.length === 0) {
+      return [];
+    }
+    const fallbackHosts = this.macHostsFromAllocatedIDs(hostIDs, availabilityZone, serverType);
+    let hosts: AWSMacHost[];
+    try {
+      hosts = await this.describeMacHostsByID(hostIDs);
+    } catch {
+      return fallbackHosts;
+    }
+    return hosts.length > 0 ? hosts : fallbackHosts;
+  }
+
+  async dryRunAllocateMacHost(
+    serverType: string,
+    availabilityZone: string,
+    clientToken: string,
+  ): Promise<AWSMacHostAllocationDryRun> {
+    try {
+      await this.ec2("AllocateHosts", {
+        ...this.allocateMacHostParams(serverType, availabilityZone, clientToken),
+        DryRun: "true",
+      });
+      return {
+        region: this.region,
+        availabilityZone,
+        instanceType: serverType,
+        ok: true,
+        message: "dry run accepted",
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        region: this.region,
+        availabilityZone,
+        instanceType: serverType,
+        ok: message.includes("DryRunOperation"),
+        message: conciseAWSMacHostDryRunMessage(message),
+      };
+    }
+  }
+
+  async listMacHostQuotas(serverType = "mac2.metal"): Promise<AWSServiceQuota[]> {
+    const family = awsMacHostFamily(serverType);
+    const direct = await this.macHostQuotasByFamily(family);
+    if (direct) {
+      return direct;
+    }
+    const all = await this.listEC2ServiceQuotas();
+    const macHostQuotas = all.filter((quota) => {
+      const name = quota.quotaName.toLowerCase();
+      return name.includes("running dedicated") && name.includes("mac") && name.includes("hosts");
+    });
+    const exactName = `running dedicated ${family} hosts`;
+    const exact = macHostQuotas.filter((quota) => quota.quotaName.toLowerCase() === exactName);
+    return (exact.length > 0 ? exact : macHostQuotas).toSorted((left, right) => {
+      const leftName = left.quotaName.toLowerCase();
+      const rightName = right.quotaName.toLowerCase();
+      const leftFamily = family && leftName.includes(family) ? 0 : 1;
+      const rightFamily = family && rightName.includes(family) ? 0 : 1;
+      return leftFamily - rightFamily || left.quotaName.localeCompare(right.quotaName);
+    });
+  }
+
+  private async macHostQuotasByFamily(family: string): Promise<AWSServiceQuota[] | undefined> {
+    const spec = awsMacHostQuotaSpecs[family];
+    if (!spec) {
+      return undefined;
+    }
+    const quota = await this.getEC2ServiceQuota(spec.quotaCode);
+    if (!quota) {
+      return [];
+    }
+    return [
+      {
+        ...quota,
+        quotaCode: quota.quotaCode || spec.quotaCode,
+        quotaName: quota.quotaName || spec.quotaName,
+        serviceCode: quota.serviceCode || "ec2",
+      },
+    ];
+  }
+
+  async releaseMacHost(hostID: string): Promise<string[]> {
+    const root = await this.ec2("ReleaseHosts", { "HostId.1": hostID });
+    const result = awsReleaseHostsResult(root);
+    if (result.unsuccessful.length > 0) {
+      const details = result.unsuccessful.map((failure) =>
+        [failure.resourceID || hostID, failure.code, failure.message].filter(Boolean).join(": "),
+      );
+      throw new Error(`aws ReleaseHosts failed: ${details.join("; ")}`);
+    }
+    if (!result.successful.includes(hostID)) {
+      throw new Error(`aws ReleaseHosts did not confirm release for ${hostID}`);
+    }
+    return result.successful;
+  }
+
+  private allocateMacHostParams(
+    serverType: string,
+    availabilityZone: string,
+    clientToken: string,
+  ): Record<string, string> {
+    const params: Record<string, string> = {
+      AutoPlacement: "off",
+      ClientToken: clientToken,
+      InstanceType: serverType,
+      Quantity: "1",
+      "TagSpecification.1.ResourceType": "dedicated-host",
+      "TagSpecification.1.Tag.1.Key": "crabbox",
+      "TagSpecification.1.Tag.1.Value": "true",
+      "TagSpecification.1.Tag.2.Key": "created_by",
+      "TagSpecification.1.Tag.2.Value": "crabbox",
+    };
+    if (availabilityZone) {
+      params["AvailabilityZone"] = availabilityZone;
+    }
+    return params;
   }
 
   private async getSnapshot(snapshotID: string): Promise<ProviderImage> {
@@ -569,58 +899,83 @@ export class EC2SpotClient {
     const rootGB = config.awsRootGB || positiveInt(this.env.CRABBOX_AWS_ROOT_GB) || 400;
     const instanceProfile = config.awsProfile || this.env.CRABBOX_AWS_INSTANCE_PROFILE || "";
     const subnetID = config.awsSubnetID || this.env.CRABBOX_AWS_SUBNET_ID || "";
-    const params: Record<string, string> = {
-      ClientToken: leaseID,
-      ImageId: imageID,
-      InstanceType: config.serverType,
-      KeyName: config.providerKey,
-      MaxCount: "1",
-      MinCount: "1",
-      UserData: btoa(awsUserData(config)),
-      "BlockDeviceMapping.1.DeviceName": "/dev/sda1",
-      "BlockDeviceMapping.1.Ebs.DeleteOnTermination": "true",
-      "BlockDeviceMapping.1.Ebs.Encrypted": "true",
-      "BlockDeviceMapping.1.Ebs.VolumeSize": String(Math.max(1, rootGB)),
-      "BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
+    const configuredMacHostID =
+      config.hostID ||
+      config.awsMacHostID ||
+      this.env.CRABBOX_HOST_ID ||
+      this.env.CRABBOX_AWS_MAC_HOST_ID ||
+      "";
+    const macHostAvailabilityZone =
+      config.target === "macos"
+        ? await this.macHostAvailabilityZoneForLaunch(config, subnetID)
+        : "";
+    const run = async (macHostID: string): Promise<ProviderMachine> => {
+      const params: Record<string, string> = {
+        ClientToken: leaseID,
+        ImageId: imageID,
+        InstanceType: config.serverType,
+        KeyName: config.providerKey,
+        MaxCount: "1",
+        MinCount: "1",
+        UserData: btoa(awsUserData(config)),
+        "BlockDeviceMapping.1.DeviceName": "/dev/sda1",
+        "BlockDeviceMapping.1.Ebs.DeleteOnTermination": "true",
+        "BlockDeviceMapping.1.Ebs.Encrypted": "true",
+        "BlockDeviceMapping.1.Ebs.VolumeSize": String(Math.max(1, rootGB)),
+        "BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
+      };
+      if (config.capacityMarket !== "on-demand") {
+        params["InstanceMarketOptions.MarketType"] = "spot";
+        params["InstanceMarketOptions.SpotOptions.InstanceInterruptionBehavior"] = "terminate";
+        params["InstanceMarketOptions.SpotOptions.SpotInstanceType"] = "one-time";
+      }
+      if (instanceProfile) {
+        params["IamInstanceProfile.Name"] = instanceProfile;
+      }
+      if (subnetID) {
+        params["NetworkInterface.1.AssociatePublicIpAddress"] = "true";
+        params["NetworkInterface.1.DeleteOnTermination"] = "true";
+        params["NetworkInterface.1.DeviceIndex"] = "0";
+        params["NetworkInterface.1.GroupSet.1"] = securityGroupID;
+        params["NetworkInterface.1.SubnetId"] = subnetID;
+      } else {
+        params["SecurityGroupId.1"] = securityGroupID;
+      }
+      applyAWSRunInstanceTargetOptions(params, config);
+      if (config.target === "macos") {
+        const hostID =
+          macHostID ||
+          (await this.discoverMacHostID(config.serverType, "", macHostAvailabilityZone));
+        params["Placement.HostId"] = hostID;
+        params["Placement.Tenancy"] = "host";
+      } else if (!subnetID) {
+        const availabilityZone = awsAvailabilityZoneForRegion(config, this.env, this.region);
+        if (availabilityZone) {
+          params["Placement.AvailabilityZone"] = availabilityZone;
+        }
+      }
+      addRunInstancesTagSpecifications(params, { ...labels, Name: name }, config.capacityMarket);
+      const root = await this.ec2("RunInstances", params);
+      const instance = items(record(root["instancesSet"])["item"])[0];
+      if (!instance) {
+        throw new Error("aws returned no instances");
+      }
+      return this.withRegion(instanceToMachine(instance));
     };
-    if (config.capacityMarket !== "on-demand") {
-      params["InstanceMarketOptions.MarketType"] = "spot";
-      params["InstanceMarketOptions.SpotOptions.InstanceInterruptionBehavior"] = "terminate";
-      params["InstanceMarketOptions.SpotOptions.SpotInstanceType"] = "one-time";
-    }
-    if (instanceProfile) {
-      params["IamInstanceProfile.Name"] = instanceProfile;
-    }
-    if (subnetID) {
-      params["NetworkInterface.1.AssociatePublicIpAddress"] = "true";
-      params["NetworkInterface.1.DeleteOnTermination"] = "true";
-      params["NetworkInterface.1.DeviceIndex"] = "0";
-      params["NetworkInterface.1.GroupSet.1"] = securityGroupID;
-      params["NetworkInterface.1.SubnetId"] = subnetID;
-    } else {
-      params["SecurityGroupId.1"] = securityGroupID;
-    }
-    applyAWSRunInstanceTargetOptions(params, config);
-    if (config.target === "macos") {
-      const hostID = config.awsMacHostID || this.env.CRABBOX_AWS_MAC_HOST_ID || "";
-      if (!hostID) {
-        throw new Error("aws target=macos requires CRABBOX_AWS_MAC_HOST_ID");
+    try {
+      return await run(configuredMacHostID);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (config.target !== "macos" || !configuredMacHostID || !isAWSInvalidHostIDError(message)) {
+        throw error;
       }
-      params["Placement.HostId"] = hostID;
-      params["Placement.Tenancy"] = "host";
-    } else if (!subnetID) {
-      const availabilityZone = awsAvailabilityZoneForRegion(config, this.env, this.region);
-      if (availabilityZone) {
-        params["Placement.AvailabilityZone"] = availabilityZone;
-      }
+      const discovered = await this.discoverMacHostID(
+        config.serverType,
+        configuredMacHostID,
+        macHostAvailabilityZone,
+      );
+      return run(discovered);
     }
-    addRunInstancesTagSpecifications(params, { ...labels, Name: name }, config.capacityMarket);
-    const root = await this.ec2("RunInstances", params);
-    const instance = items(record(root["instancesSet"])["item"])[0];
-    if (!instance) {
-      throw new Error("aws returned no instances");
-    }
-    return this.withRegion(instanceToMachine(instance));
   }
 
   private async resolveAMI(config: LeaseConfig): Promise<string> {
@@ -631,10 +986,8 @@ export class EC2SpotClient {
       return this.resolveLatestAmazonAMI("Windows_Server-2022-English-Full-Base-*", "x86_64");
     }
     if (config.target === "macos") {
-      if (config.serverType.startsWith("mac1.")) {
-        return this.resolveLatestAmazonAMI("amzn-ec2-macos-14.*", "x86_64_mac");
-      }
-      return this.resolveLatestAmazonAMI("amzn-ec2-macos-14.*-arm64", "arm64_mac");
+      const query = awsMacOSAMIQuery(config.serverType);
+      return this.resolveLatestAmazonAMI(query.name, query.architecture);
     }
     return this.resolveLatestAMI(
       awsUbuntuOwner,
@@ -723,6 +1076,102 @@ export class EC2SpotClient {
       }
     }
     return groupID;
+  }
+
+  private async discoverMacHostID(
+    serverType: string,
+    excludedHostID = "",
+    availabilityZone = "",
+  ): Promise<string> {
+    const params: Record<string, string> = {
+      "Filter.1.Name": "instance-type",
+      "Filter.1.Value.1": serverType,
+      "Filter.2.Name": "state",
+      "Filter.2.Value.1": "available",
+      "Filter.3.Name": "tag:crabbox",
+      "Filter.3.Value.1": "true",
+    };
+    if (availabilityZone) {
+      params["Filter.4.Name"] = "availability-zone";
+      params["Filter.4.Value.1"] = availabilityZone;
+    }
+    const root = await this.ec2("DescribeHosts", params);
+    const hostID = awsMacHostIDFromDescribeHosts(root, excludedHostID);
+    if (!hostID) {
+      const zoneHint = availabilityZone ? ` in ${availabilityZone}` : "";
+      throw new Error(
+        `no available EC2 Mac Dedicated Host found in ${this.region}${zoneHint} for ${serverType}; allocate a host or set CRABBOX_HOST_ID`,
+      );
+    }
+    return hostID;
+  }
+
+  private async macHostAvailabilityZoneForLaunch(
+    config: LeaseConfig,
+    subnetID: string,
+  ): Promise<string> {
+    if (subnetID) {
+      return this.subnetAvailabilityZone(subnetID);
+    }
+    return awsAvailabilityZoneForRegion(config, this.env, this.region);
+  }
+
+  private async subnetAvailabilityZone(subnetID: string): Promise<string> {
+    const root = await this.ec2("DescribeSubnets", { "SubnetId.1": subnetID });
+    const subnet = record(items(record(root["subnetSet"])["item"])[0]);
+    const availabilityZone = asString(subnet["availabilityZone"]);
+    if (!availabilityZone) {
+      throw new Error(`AWS subnet not found: ${subnetID}`);
+    }
+    return availabilityZone;
+  }
+
+  private async describeMacHostsByID(hostIDs: string[]): Promise<AWSMacHost[]> {
+    const params: Record<string, string> = {};
+    hostIDs.forEach((hostID, index) => {
+      params[`HostId.${index + 1}`] = hostID;
+    });
+    const root = await this.ec2("DescribeHosts", params);
+    return items(record(root["hostSet"])["item"]).map((host) => this.macHostFromDescribeHost(host));
+  }
+
+  private macHostsFromAllocatedIDs(
+    hostIDs: string[],
+    availabilityZone: string,
+    serverType: string,
+  ): AWSMacHost[] {
+    return hostIDs.map((id) => ({
+      id,
+      state: "available",
+      region: this.region,
+      availabilityZone,
+      instanceType: serverType,
+      autoPlacement: "off",
+      tags: {},
+    }));
+  }
+
+  private macHostFromDescribeHost(input: unknown): AWSMacHost {
+    const host = record(input);
+    const properties = record(host["hostProperties"]);
+    const macHost: AWSMacHost = {
+      id: asString(host["hostId"]),
+      state: asString(host["hostState"]),
+      region: this.region,
+      availabilityZone: asString(host["availabilityZone"]),
+      instanceType: asString(properties["instanceType"] ?? host["instanceType"]),
+      autoPlacement: asString(host["autoPlacement"]),
+      tags: tagMap(host["tagSet"]),
+    };
+    const allocationTime = asString(host["allocationTime"]);
+    if (allocationTime) {
+      macHost.allocationTime = allocationTime;
+    }
+    const releaseTime = asString(host["releaseTime"]);
+    if (releaseTime) {
+      macHost.releaseTime = releaseTime;
+    }
+    return macHost;
   }
 
   private async pruneStaleSSHIngress(
@@ -818,6 +1267,26 @@ export class EC2SpotClient {
     return record(root);
   }
 
+  private async sts(
+    action: string,
+    params: Record<string, string>,
+  ): Promise<Record<string, unknown>> {
+    const body = new URLSearchParams({ Action: action, Version: stsVersion, ...params });
+    const response = await this.stsClient.fetch(this.stsEndpoint, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
+      body: body.toString(),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`aws ${action}: http ${response.status}: ${trimBody(text)}`);
+    }
+    const parsed = this.parser.parse(text) as unknown;
+    const parsedRecord = record(parsed);
+    const root = parsedRecord[`${action}Response`] ?? parsedRecord["Response"] ?? parsedRecord;
+    return record(root);
+  }
+
   private async quotaPreflightAttempt(
     serverType: string,
     market: LeaseConfig["capacityMarket"],
@@ -853,6 +1322,63 @@ export class EC2SpotClient {
     }
   }
 
+  private async listEC2ServiceQuotas(): Promise<AWSServiceQuota[]> {
+    const quotas: AWSServiceQuota[] = [];
+    let nextToken = "";
+    do {
+      const body: Record<string, string | number> = { ServiceCode: "ec2", MaxResults: 100 };
+      if (nextToken) {
+        body["NextToken"] = nextToken;
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- Service Quotas pagination is token-ordered.
+      const response = await this.serviceQuotas.fetch(this.serviceQuotasEndpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-amz-json-1.1",
+          "x-amz-target": "ServiceQuotasV20190624.ListServiceQuotas",
+        },
+        body: JSON.stringify(body),
+      });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- response body belongs to the current page.
+      const text = await response.text();
+      if (!response.ok) {
+        throw new Error(`aws ListServiceQuotas: http ${response.status}: ${trimBody(text)}`);
+      }
+      const parsed = record(JSON.parse(text));
+      for (const quota of items(parsed["Quotas"]).map(record)) {
+        const out = awsServiceQuotaFromRecord(quota);
+        if (out) {
+          quotas.push(out);
+        }
+      }
+      nextToken = asString(parsed["NextToken"]);
+    } while (nextToken);
+    return quotas;
+  }
+
+  private async getEC2ServiceQuota(quotaCode: string): Promise<AWSServiceQuota | undefined> {
+    const response = await this.serviceQuotas.fetch(this.serviceQuotasEndpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-amz-json-1.1",
+        "x-amz-target": "ServiceQuotasV20190624.GetServiceQuota",
+      },
+      body: JSON.stringify({ ServiceCode: "ec2", QuotaCode: quotaCode }),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      if (text.includes("NoSuchResourceException")) {
+        return undefined;
+      }
+      throw new Error(`aws GetServiceQuota: http ${response.status}: ${trimBody(text)}`);
+    }
+    const quota = awsServiceQuotaFromRecord(record(JSON.parse(text))["Quota"]);
+    if (!quota) {
+      throw new Error(`aws GetServiceQuota: missing quota ${quotaCode}`);
+    }
+    return quota;
+  }
+
   private withRegion(server: ProviderMachine): ProviderMachine {
     return { ...server, region: this.region };
   }
@@ -884,9 +1410,81 @@ function instanceToMachine(input: unknown): ProviderMachine {
     name: tags["Name"] || cloudID,
     status: asString(record(instance["instanceState"])["name"]),
     serverType: asString(instance["instanceType"]),
+    hostID: asString(record(instance["placement"])["hostId"]),
     host: asString(instance["ipAddress"]),
     labels: tags,
   };
+}
+
+export function awsMacHostIDFromDescribeHosts(
+  root: Record<string, unknown>,
+  excludedHostID = "",
+): string {
+  const hosts = items(record(root["hostSet"])["item"])
+    .map(record)
+    .filter((host) => {
+      const hostID = asString(host["hostId"]);
+      return hostID && hostID !== excludedHostID;
+    });
+  const available = hosts.find((host) => asString(host["hostState"]) === "available");
+  return asString((available ?? hosts[0] ?? {})["hostId"]);
+}
+
+export function awsHostIDsFromSet(input: unknown): string[] {
+  return items(record(input)["item"])
+    .map((item) => asString(record(item)["hostId"]) || asString(item))
+    .filter(Boolean);
+}
+
+export function awsReleaseHostsResult(root: Record<string, unknown>): AWSReleaseHostsResult {
+  const unsuccessful = items(record(root["unsuccessful"])["item"])
+    .map((item) => {
+      const failure = record(item);
+      const error = record(failure["error"]);
+      return {
+        resourceID: asString(failure["resourceId"]),
+        code: asString(error["code"]),
+        message: asString(error["message"]),
+      };
+    })
+    .filter((failure) => failure.resourceID || failure.code || failure.message);
+  return {
+    successful: awsHostIDsFromSet(root["successful"]),
+    unsuccessful,
+  };
+}
+
+export function awsMacHostOfferingsFromDescribeInstanceTypeOfferings(
+  root: Record<string, unknown>,
+  region: string,
+): AWSMacHostOffering[] {
+  const seen = new Set<string>();
+  return items(record(root["instanceTypeOfferingSet"])["item"])
+    .map(record)
+    .map((item) => ({
+      region,
+      availabilityZone: asString(item["location"]),
+      instanceType: asString(item["instanceType"]),
+    }))
+    .filter((offering) => {
+      if (
+        !offering.availabilityZone.startsWith(region) ||
+        !offering.instanceType.startsWith("mac") ||
+        !offering.instanceType.endsWith(".metal")
+      ) {
+        return false;
+      }
+      const key = `${offering.availabilityZone}\0${offering.instanceType}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .toSorted((left, right) => {
+      const azCompare = left.availabilityZone.localeCompare(right.availabilityZone);
+      return azCompare || left.instanceType.localeCompare(right.instanceType);
+    });
 }
 
 function tagMap(input: unknown): Record<string, string> {
@@ -1109,6 +1707,52 @@ export function awsQuotaCodeForMarket(market: string): string {
   return market === "on-demand" ? awsOnDemandQuotaCode : awsSpotQuotaCode;
 }
 
+function awsMacHostFamily(serverType: string): string {
+  return serverType.split(".")[0]?.toLowerCase() ?? "";
+}
+
+function awsMacOSAMIQuery(serverType: string): {
+  name: string;
+  architecture: "arm64_mac" | "x86_64_mac";
+} {
+  if (serverType.startsWith("mac1.")) {
+    return { name: "amzn-ec2-macos-14.*", architecture: "x86_64_mac" };
+  }
+  if (serverType.startsWith("mac-m")) {
+    return { name: "amzn-ec2-macos-15.*-arm64", architecture: "arm64_mac" };
+  }
+  return { name: "amzn-ec2-macos-14.*-arm64", architecture: "arm64_mac" };
+}
+
+function awsServiceQuotaFromRecord(value: unknown): AWSServiceQuota | undefined {
+  const quota = record(value);
+  const quotaCode = asString(quota["QuotaCode"]);
+  const quotaName = asString(quota["QuotaName"]);
+  if (!quotaCode || !quotaName) {
+    return undefined;
+  }
+  const out: AWSServiceQuota = { quotaCode, quotaName };
+  const serviceCode = asString(quota["ServiceCode"]);
+  const valueNumber = finiteNumber(quota["Value"]);
+  const unit = asString(quota["Unit"]);
+  if (serviceCode) {
+    out.serviceCode = serviceCode;
+  }
+  if (valueNumber !== undefined) {
+    out.value = valueNumber;
+  }
+  if (typeof quota["Adjustable"] === "boolean") {
+    out.adjustable = quota["Adjustable"];
+  }
+  if (typeof quota["GlobalQuota"] === "boolean") {
+    out.globalQuota = quota["GlobalQuota"];
+  }
+  if (unit) {
+    out.unit = unit;
+  }
+  return out;
+}
+
 export function awsInstanceTypeVCPUs(serverType: string): number | undefined {
   const match = /\.([0-9]+)xlarge$/.exec(serverType);
   if (match?.[1]) {
@@ -1181,7 +1825,18 @@ function positiveNumber(value: unknown): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+function finiteNumber(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : Number.parseFloat(String(value));
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 export function awsProvisioningErrorCategory(message: string): string {
+  if (message.includes("no available EC2 Mac Dedicated Host")) {
+    return "capacity";
+  }
+  if (message.includes("no AWS AMI found")) {
+    return "region";
+  }
   if (message.includes("InsufficientInstanceCapacity")) {
     return "capacity";
   }
@@ -1211,6 +1866,10 @@ export function isAWSInstanceNotFoundError(message: string): boolean {
   return message.includes("InvalidInstanceID.NotFound");
 }
 
+export function isAWSInvalidHostIDError(message: string): boolean {
+  return message.includes("InvalidHostID.NotFound");
+}
+
 export function isAWSInstanceCleanedAfterReadinessFailure(
   waitMessage: string,
   cleanupMessage: string,
@@ -1230,6 +1889,23 @@ function conciseAWSProvisioningMessage(message: string): string {
   const detail = /<Message>([^<]+)<\/Message>/.exec(message)?.[1] ?? "";
   if (code && detail) {
     return `${code}: ${detail}`;
+  }
+  return trimBody(message).replace(/\s+/g, " ");
+}
+
+function conciseAWSMacHostDryRunMessage(message: string): string {
+  const code = /<Code>([^<]+)<\/Code>/.exec(message)?.[1] ?? "";
+  if (code === "DryRunOperation" || message.includes("DryRunOperation")) {
+    return "DryRunOperation: request would have succeeded";
+  }
+  if (code === "UnauthorizedOperation" || message.includes("UnauthorizedOperation")) {
+    return "UnauthorizedOperation: coordinator AWS identity needs EC2 Mac host lifecycle permissions, including ec2:AllocateHosts and ec2:CreateTags";
+  }
+  if (code) {
+    return code;
+  }
+  if (message.includes("Encoded authorization failure") || message.includes("arn:aws:iam::")) {
+    return "AWS authorization failure: details omitted";
   }
   return trimBody(message).replace(/\s+/g, " ");
 }

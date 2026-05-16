@@ -6,18 +6,28 @@ import {
   applyAWSRunInstanceTargetOptions,
   awsAvailabilityZoneForRegion,
   awsInstanceTypeVCPUs,
+  awsHostIDsFromSet,
   awsLaunchCandidates,
+  awsMacHostIDFromDescribeHosts,
+  awsMacHostOfferingsFromDescribeInstanceTypeOfferings,
   awsProvisioningErrorCategory,
   awsQuotaCodeForMarket,
   awsQuotaPreflightAttempt,
   awsRegionCandidates,
+  awsReleaseHostsResult,
   crabboxSSHIngressRules,
   createSecurityGroupParams,
   isAWSInstanceCleanedAfterReadinessFailure,
+  isAWSInvalidHostIDError,
   isAWSInstanceNotFoundError,
+  isRetryableAWSProvisioningError,
   staleCrabboxSSHIngressRules,
 } from "../src/aws";
-import { leaseConfig } from "../src/config";
+import {
+  awsMacOSInstanceTypeCandidates,
+  awsPromotedAMIConfigKey,
+  leaseConfig,
+} from "../src/config";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -153,6 +163,122 @@ describe("aws provider", () => {
     expect(isAWSInstanceNotFoundError("UnauthorizedOperation: nope")).toBe(false);
   });
 
+  it("classifies stale EC2 Mac host ID errors", () => {
+    expect(
+      isAWSInvalidHostIDError(
+        "<Code>InvalidHostID.NotFound</Code><Message>The specified Dedicated host IDs do not exist.</Message>",
+      ),
+    ).toBe(true);
+    expect(isAWSInvalidHostIDError("InvalidInstanceID.NotFound")).toBe(false);
+  });
+
+  it("selects an available EC2 Mac Dedicated Host from DescribeHosts", () => {
+    expect(
+      awsMacHostIDFromDescribeHosts({
+        hostSet: {
+          item: [
+            { hostId: "h-stale", hostState: "available" },
+            { hostId: "h-usable", hostState: "available" },
+          ],
+        },
+      }),
+    ).toBe("h-stale");
+    expect(
+      awsMacHostIDFromDescribeHosts(
+        {
+          hostSet: {
+            item: [
+              { hostId: "h-stale", hostState: "available" },
+              { hostId: "h-usable", hostState: "available" },
+            ],
+          },
+        },
+        "h-stale",
+      ),
+    ).toBe("h-usable");
+  });
+
+  it("parses EC2 host id sets from AllocateHosts responses", () => {
+    expect(awsHostIDsFromSet({ item: "h-000000000001" })).toEqual(["h-000000000001"]);
+    expect(
+      awsHostIDsFromSet({
+        item: [{ hostId: "h-000000000001" }, { hostId: "h-000000000002" }],
+      }),
+    ).toEqual(["h-000000000001", "h-000000000002"]);
+  });
+
+  it("parses EC2 ReleaseHosts successful and unsuccessful sets", () => {
+    expect(
+      awsReleaseHostsResult({
+        successful: { item: "h-000000000001" },
+        unsuccessful: "",
+      }),
+    ).toEqual({
+      successful: ["h-000000000001"],
+      unsuccessful: [],
+    });
+    expect(
+      awsReleaseHostsResult({
+        successful: "",
+        unsuccessful: {
+          item: {
+            resourceId: "h-000000000001",
+            error: {
+              code: "Client.InvalidHost.Occupied",
+              message: "Dedicated host cannot be released as it is occupied",
+            },
+          },
+        },
+      }),
+    ).toEqual({
+      successful: [],
+      unsuccessful: [
+        {
+          resourceID: "h-000000000001",
+          code: "Client.InvalidHost.Occupied",
+          message: "Dedicated host cannot be released as it is occupied",
+        },
+      ],
+    });
+  });
+
+  it("parses EC2 Mac instance type offerings by availability zone", () => {
+    expect(
+      awsMacHostOfferingsFromDescribeInstanceTypeOfferings(
+        {
+          instanceTypeOfferingSet: {
+            item: [
+              {
+                instanceType: "mac2.metal",
+                location: "eu-west-1b",
+                locationType: "availability-zone",
+              },
+              {
+                instanceType: "mac2.metal",
+                location: "eu-west-1a",
+                locationType: "availability-zone",
+              },
+              {
+                instanceType: "m7i.large",
+                location: "eu-west-1a",
+                locationType: "availability-zone",
+              },
+              {
+                instanceType: "mac2.metal",
+                location: "us-east-1a",
+                locationType: "availability-zone",
+              },
+            ],
+          },
+        },
+        "eu-west-1",
+      ),
+    ).toEqual([
+      { region: "eu-west-1", availabilityZone: "eu-west-1a", instanceType: "mac2.metal" },
+      { region: "eu-west-1", availabilityZone: "eu-west-1b", instanceType: "mac2.metal" },
+    ]);
+  });
+
   it("treats missing stale AWS instance cleanup as cleaned", () => {
     expect(
       isAWSInstanceCleanedAfterReadinessFailure(
@@ -221,6 +347,527 @@ describe("aws provider", () => {
     ).toBe("eu-west-1b");
   });
 
+  it("treats macOS host and image misses as retryable regional AWS failures", () => {
+    const hostMiss =
+      "no available EC2 Mac Dedicated Host found in eu-west-1 for mac2.metal; allocate a host or set CRABBOX_HOST_ID";
+    const imageMiss =
+      "no AWS AMI found in eu-west-2 for name=amzn-ec2-macos-14.*-arm64 architecture=arm64_mac";
+
+    expect(awsProvisioningErrorCategory(hostMiss)).toBe("capacity");
+    expect(isRetryableAWSProvisioningError(hostMiss)).toBe(true);
+    expect(awsProvisioningErrorCategory(imageMiss)).toBe("region");
+    expect(isRetryableAWSProvisioningError(imageMiss)).toBe(true);
+  });
+
+  it("resolves macOS AMIs per fallback instance type", async () => {
+    const imageQueries: string[] = [];
+    const hostTypes: string[] = [];
+    const runImages: string[] = [];
+    const runTypes: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const body = await request.clone().text();
+        const params = new URLSearchParams(body);
+        const action = params.get("Action") ?? "";
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+        }
+        if (action === "DescribeImages") {
+          const architecture = params.get("Filter.1.Value.1") ?? "";
+          const name = params.get("Filter.2.Value.1") ?? "";
+          imageQueries.push(`${name}:${architecture}`);
+          const imageID =
+            architecture === "x86_64_mac"
+              ? "ami-x86-mac"
+              : name === "amzn-ec2-macos-15.*-arm64"
+                ? "ami-m4-mac"
+                : "ami-arm-mac";
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>${imageID}</imageId>
+      <name>macos</name>
+      <imageState>available</imageState>
+      <creationDate>2026-05-01T00:00:00.000Z</creationDate>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`);
+        }
+        if (action === "DescribeHosts") {
+          const serverType = params.get("Filter.1.Value.1") ?? "";
+          hostTypes.push(serverType);
+          if (serverType === "mac1.metal") {
+            return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeHostsResponse>
+  <hostSet>
+    <item>
+      <hostId>h-mac1</hostId>
+      <hostState>available</hostState>
+    </item>
+  </hostSet>
+</DescribeHostsResponse>`);
+          }
+          return ec2XMLResponse("<DescribeHostsResponse><hostSet /></DescribeHostsResponse>");
+        }
+        if (action === "RunInstances") {
+          runImages.push(params.get("ImageId") ?? "");
+          runTypes.push(params.get("InstanceType") ?? "");
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<RunInstancesResponse>
+  <instancesSet>
+    <item>
+      <instanceId>i-mac1</instanceId>
+      <instanceType>mac1.metal</instanceType>
+      <placement><hostId>h-mac1</hostId></placement>
+      <ipAddress>203.0.113.44</ipAddress>
+      <instanceState><name>pending</name></instanceState>
+      <tagSet><item><key>Name</key><value>crabbox-violet-prawn</value></item></tagSet>
+    </item>
+  </instancesSet>
+</RunInstancesResponse>`);
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
+      } as never,
+      "eu-west-1",
+    );
+    const result = await client.createServerWithFallback(
+      leaseConfig({
+        provider: "aws",
+        target: "macos",
+        capacity: { market: "on-demand" },
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(imageQueries).toEqual([
+      "amzn-ec2-macos-14.*-arm64:arm64_mac",
+      "amzn-ec2-macos-15.*-arm64:arm64_mac",
+      "amzn-ec2-macos-14.*:x86_64_mac",
+    ]);
+    expect(hostTypes).toEqual(awsMacOSInstanceTypeCandidates);
+    expect(runTypes).toEqual(["mac1.metal"]);
+    expect(runImages).toEqual(["ami-x86-mac"]);
+    expect(result.serverType).toBe("mac1.metal");
+    expect(result.server.hostID).toBe("h-mac1");
+  });
+
+  it("does not reuse a pinned macOS AMI after changing fallback host families", async () => {
+    const runImages: string[] = [];
+    const imageQueries: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const body = await request.clone().text();
+        const params = new URLSearchParams(body);
+        const action = params.get("Action") ?? "";
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+        }
+        if (action === "DescribeImages") {
+          const architecture = params.get("Filter.1.Value.1") ?? "";
+          const name = params.get("Filter.2.Value.1") ?? "";
+          imageQueries.push(`${name}:${architecture}`);
+          const imageID = architecture === "x86_64_mac" ? "ami-x86-mac" : "ami-arm-mac";
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>${imageID}</imageId>
+      <name>macos</name>
+      <imageState>available</imageState>
+      <creationDate>2026-05-01T00:00:00.000Z</creationDate>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`);
+        }
+        if (action === "DescribeHosts") {
+          const serverType = params.get("Filter.1.Value.1") ?? "";
+          if (serverType === "mac1.metal") {
+            return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeHostsResponse>
+  <hostSet>
+    <item>
+      <hostId>h-mac1</hostId>
+      <hostState>available</hostState>
+    </item>
+  </hostSet>
+</DescribeHostsResponse>`);
+          }
+          return ec2XMLResponse("<DescribeHostsResponse><hostSet /></DescribeHostsResponse>");
+        }
+        if (action === "RunInstances") {
+          runImages.push(params.get("ImageId") ?? "");
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<RunInstancesResponse>
+  <instancesSet>
+    <item>
+      <instanceId>i-mac1</instanceId>
+      <instanceType>mac1.metal</instanceType>
+      <placement><hostId>h-mac1</hostId></placement>
+      <ipAddress>203.0.113.44</ipAddress>
+      <instanceState><name>pending</name></instanceState>
+    </item>
+  </instancesSet>
+</RunInstancesResponse>`);
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+      } as never,
+      "eu-west-1",
+    );
+    const result = await client.createServerWithFallback(
+      leaseConfig({
+        provider: "aws",
+        target: "macos",
+        capacity: { market: "on-demand" },
+        awsAMI: "ami-promoted-mac2",
+        serverType: "mac2.metal",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(imageQueries).toContain("amzn-ec2-macos-14.*:x86_64_mac");
+    expect(runImages).toEqual(["ami-x86-mac"]);
+    expect(result.serverType).toBe("mac1.metal");
+  });
+
+  it("uses scoped promoted macOS AMIs for fallback host families", async () => {
+    const runImages: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const body = await request.clone().text();
+        const params = new URLSearchParams(body);
+        const action = params.get("Action") ?? "";
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+        }
+        if (action === "DescribeImages") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>ami-stock-mac</imageId>
+      <name>macos</name>
+      <imageState>available</imageState>
+      <creationDate>2026-05-01T00:00:00.000Z</creationDate>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`);
+        }
+        if (action === "DescribeHosts") {
+          const serverType = params.get("Filter.1.Value.1") ?? "";
+          if (serverType === "mac1.metal") {
+            return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeHostsResponse>
+  <hostSet>
+    <item>
+      <hostId>h-mac1</hostId>
+      <hostState>available</hostState>
+    </item>
+  </hostSet>
+</DescribeHostsResponse>`);
+          }
+          return ec2XMLResponse("<DescribeHostsResponse><hostSet /></DescribeHostsResponse>");
+        }
+        if (action === "RunInstances") {
+          runImages.push(params.get("ImageId") ?? "");
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<RunInstancesResponse>
+  <instancesSet>
+    <item>
+      <instanceId>i-mac1</instanceId>
+      <instanceType>mac1.metal</instanceType>
+      <placement><hostId>h-mac1</hostId></placement>
+      <ipAddress>203.0.113.44</ipAddress>
+      <instanceState><name>pending</name></instanceState>
+    </item>
+  </instancesSet>
+</RunInstancesResponse>`);
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+      } as never,
+      "eu-west-1",
+    );
+    const config = leaseConfig({
+      provider: "aws",
+      target: "macos",
+      capacity: { market: "on-demand" },
+      serverType: "mac2.metal",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    config.awsPromotedAMIs[awsPromotedAMIConfigKey("eu-west-1", "mac1.metal")] =
+      "ami-promoted-mac1";
+    const result = await client.createServerWithFallback(
+      config,
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(runImages).toEqual(["ami-promoted-mac1"]);
+    expect(result.serverType).toBe("mac1.metal");
+  });
+
+  it("prefers region-scoped promoted macOS AMIs over a pinned AMI", async () => {
+    const runImages: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+        }
+        if (action === "DescribeHosts") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeHostsResponse>
+  <hostSet>
+    <item>
+      <hostId>h-mac2</hostId>
+      <hostState>available</hostState>
+    </item>
+  </hostSet>
+</DescribeHostsResponse>`);
+        }
+        if (action === "RunInstances") {
+          runImages.push(params.get("ImageId") ?? "");
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<RunInstancesResponse>
+  <instancesSet>
+    <item>
+      <instanceId>i-mac2</instanceId>
+      <instanceType>mac2.metal</instanceType>
+      <placement><hostId>h-mac2</hostId></placement>
+      <ipAddress>203.0.113.44</ipAddress>
+      <instanceState><name>pending</name></instanceState>
+    </item>
+  </instancesSet>
+</RunInstancesResponse>`);
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+      } as never,
+      "us-west-2",
+    );
+    const config = leaseConfig({
+      provider: "aws",
+      target: "macos",
+      capacity: { market: "on-demand" },
+      awsAMI: "ami-eu-mac2",
+      serverType: "mac2.metal",
+      serverTypeExplicit: true,
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    config.awsPromotedAMIs[awsPromotedAMIConfigKey("us-west-2", "mac2.metal")] = "ami-us-mac2";
+
+    await client.createServerWithFallback(
+      config,
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(runImages).toEqual(["ami-us-mac2"]);
+  });
+
+  it("discovers brokered macOS hosts in the configured subnet availability zone", async () => {
+    const describeSubnetParams: Record<string, string>[] = [];
+    const describeHostFilters: Record<string, string>[] = [];
+    const runParams: Record<string, string>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const body = await request.clone().text();
+        const params = Object.fromEntries(new URLSearchParams(body));
+        const action = params.Action ?? "";
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+        }
+        if (action === "DescribeSubnets") {
+          describeSubnetParams.push(params);
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSubnetsResponse>
+  <subnetSet>
+    <item>
+      <subnetId>subnet-123</subnetId>
+      <vpcId>vpc-123</vpcId>
+      <availabilityZone>eu-west-1b</availabilityZone>
+    </item>
+  </subnetSet>
+</DescribeSubnetsResponse>`);
+        }
+        if (action === "DescribeImages") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>ami-arm-mac</imageId>
+      <name>macos</name>
+      <imageState>available</imageState>
+      <creationDate>2026-05-01T00:00:00.000Z</creationDate>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`);
+        }
+        if (action === "DescribeHosts") {
+          describeHostFilters.push(params);
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeHostsResponse>
+  <hostSet>
+    <item>
+      <hostId>h-mac2-b</hostId>
+      <hostState>available</hostState>
+      <availabilityZone>eu-west-1b</availabilityZone>
+    </item>
+  </hostSet>
+</DescribeHostsResponse>`);
+        }
+        if (action === "RunInstances") {
+          runParams.push(params);
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<RunInstancesResponse>
+  <instancesSet>
+    <item>
+      <instanceId>i-mac2</instanceId>
+      <instanceType>mac2.metal</instanceType>
+      <placement><hostId>h-mac2-b</hostId></placement>
+      <ipAddress>203.0.113.45</ipAddress>
+      <instanceState><name>pending</name></instanceState>
+    </item>
+  </instancesSet>
+</RunInstancesResponse>`);
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SUBNET_ID: "subnet-123",
+      } as never,
+      "eu-west-1",
+    );
+    const result = await client.createServerWithFallback(
+      leaseConfig({
+        provider: "aws",
+        target: "macos",
+        capacity: { market: "on-demand" },
+        serverType: "mac2.metal",
+        serverTypeExplicit: true,
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(describeSubnetParams[0]).toMatchObject({ "SubnetId.1": "subnet-123" });
+    expect(describeHostFilters[0]).toMatchObject({
+      "Filter.1.Name": "instance-type",
+      "Filter.1.Value.1": "mac2.metal",
+      "Filter.2.Name": "state",
+      "Filter.2.Value.1": "available",
+      "Filter.3.Name": "tag:crabbox",
+      "Filter.3.Value.1": "true",
+      "Filter.4.Name": "availability-zone",
+      "Filter.4.Value.1": "eu-west-1b",
+    });
+    expect(runParams[0]).toMatchObject({
+      "NetworkInterface.1.SubnetId": "subnet-123",
+      "Placement.HostId": "h-mac2-b",
+      "Placement.Tenancy": "host",
+    });
+    expect(result.server.hostID).toBe("h-mac2-b");
+  });
+
   it("waits for transient AMIs before launching from EBS snapshots", async () => {
     const client = new EC2SpotClient(
       { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
@@ -230,6 +877,7 @@ describe("aws provider", () => {
       registerSnapshotImage: () => Promise<string>;
       waitForImageAvailable: (imageID: string) => Promise<string>;
       ensureSecurityGroup: () => Promise<string>;
+      ec2: (action: string, params?: Record<string, string>) => Promise<unknown>;
       createServer: (...args: unknown[]) => Promise<{
         provider: "aws";
         id: number;
@@ -256,6 +904,10 @@ describe("aws provider", () => {
     client.ensureSecurityGroup = async () => {
       calls.push("security-group");
       return "sg-123";
+    };
+    client.ec2 = async (action, params) => {
+      calls.push(`${action}:${params?.ImageId ?? ""}`);
+      return {};
     };
     client.createServer = async (...args: unknown[]) => {
       calls.push(`launch:${String(args[4])}`);
@@ -291,6 +943,7 @@ describe("aws provider", () => {
       "wait:ami-transient",
       "security-group",
       "launch:ami-transient",
+      "DeregisterImage:ami-transient",
     ]);
   });
 

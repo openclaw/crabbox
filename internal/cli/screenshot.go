@@ -79,6 +79,9 @@ func captureDesktopScreenshot(ctx context.Context, target SSHTarget, outputPath 
 	if isLocalMacTarget(target) {
 		return captureLocalMacScreenshot(ctx, outputPath)
 	}
+	if target.TargetOS == targetMacOS {
+		return captureRemoteMacVNCScreenshot(ctx, target, outputPath)
+	}
 	file, err := os.Create(outputPath)
 	if err != nil {
 		return exit(2, "create screenshot %s: %v", outputPath, err)

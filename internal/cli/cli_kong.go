@@ -38,6 +38,7 @@ type crabboxKongCLI struct {
 	Usage      usageKongCmd      `cmd:"" passthrough:"" help:"Show cost and usage estimates by user, org, or fleet."`
 	Admin      adminKongCmd      `cmd:"" help:"Lease admin controls for trusted operators."`
 	Actions    actionsKongCmd    `cmd:"" help:"Register GitHub Actions runners or dispatch workflows."`
+	Capsule    capsuleKongCmd    `cmd:"" help:"Capture and replay lightweight failure capsules."`
 	Checkpoint checkpointKongCmd `cmd:"" help:"Create, restore, and fork VM or workspace checkpoints."`
 	Ssh        sshKongCmd        `cmd:"" name:"ssh" passthrough:"" help:"Print the SSH command for a lease."`
 	Vnc        vncKongCmd        `cmd:"" name:"vnc" passthrough:"" help:"Print or open VNC connection details for a desktop lease."`
@@ -115,7 +116,7 @@ func normalizeKongHelpArgs(args []string) []string {
 
 func isKongCommandGroup(command string) bool {
 	switch command {
-	case "actions", "admin", "artifacts", "azure", "cache", "checkpoint", "config", "desktop", "image", "job", "machine", "media", "pool":
+	case "actions", "admin", "artifacts", "azure", "cache", "capsule", "checkpoint", "config", "desktop", "image", "job", "machine", "media", "pool":
 		return true
 	default:
 		return false
@@ -321,15 +322,35 @@ type imageDeleteKongCmd struct {
 }
 
 type adminKongCmd struct {
-	Leases     adminLeasesKongCmd     `cmd:"" passthrough:"" help:"List coordinator lease records."`
-	LeaseAudit adminLeaseAuditKongCmd `cmd:"" name:"lease-audit" passthrough:"" help:"Check expired coordinator leases against cloud provider state."`
-	Release    adminReleaseKongCmd    `cmd:"" passthrough:"" help:"Mark a lease released."`
-	Delete     adminDeleteKongCmd     `cmd:"" passthrough:"" help:"Delete the backing server and mark the lease released."`
+	Leases      adminLeasesKongCmd      `cmd:"" passthrough:"" help:"List coordinator lease records."`
+	LeaseAudit  adminLeaseAuditKongCmd  `cmd:"" name:"lease-audit" passthrough:"" help:"Check expired coordinator leases against cloud provider state."`
+	Providers   adminProvidersKongCmd   `cmd:"" passthrough:"" help:"Inspect provider identities and policies."`
+	Hosts       adminHostsKongCmd       `cmd:"" passthrough:"" help:"List, allocate, or release provider hosts."`
+	AWSIdentity adminAWSIdentityKongCmd `cmd:"" name:"aws-identity" passthrough:"" help:"Show the coordinator AWS caller identity."`
+	AWSPolicy   adminAWSPolicyKongCmd   `cmd:"" name:"aws-policy" passthrough:"" help:"Print the baseline brokered AWS IAM policy."`
+	MacHosts    adminMacHostsKongCmd    `cmd:"" name:"mac-hosts" passthrough:"" help:"List, allocate, or release AWS EC2 Mac Dedicated Hosts."`
+	Release     adminReleaseKongCmd     `cmd:"" passthrough:"" help:"Mark a lease released."`
+	Delete      adminDeleteKongCmd      `cmd:"" passthrough:"" help:"Delete the backing server and mark the lease released."`
 }
 type adminLeasesKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type adminLeaseAuditKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminProvidersKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminHostsKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminAWSIdentityKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminAWSPolicyKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminMacHostsKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type adminReleaseKongCmd struct {
@@ -351,6 +372,25 @@ type actionsRegisterKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type actionsDispatchKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+
+type capsuleKongCmd struct {
+	FromActions capsuleFromActionsKongCmd `cmd:"" name:"from-actions" passthrough:"" help:"Create a capsule from a GitHub Actions run URL."`
+	Replay      capsuleReplayKongCmd      `cmd:"" passthrough:"" help:"Replay a capsule using Crabbox run."`
+	Inspect     capsuleInspectKongCmd     `cmd:"" passthrough:"" help:"Inspect a capsule manifest and replay history."`
+	Promote     capsulePromoteKongCmd     `cmd:"" passthrough:"" help:"Promote a capsule as a regression."`
+}
+type capsuleFromActionsKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type capsuleReplayKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type capsuleInspectKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type capsulePromoteKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 
@@ -529,6 +569,21 @@ func (c *adminLeasesKongCmd) Run(ctx context.Context, app App) error {
 func (c *adminLeaseAuditKongCmd) Run(ctx context.Context, app App) error {
 	return app.adminLeaseAudit(ctx, c.Args)
 }
+func (c *adminProvidersKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminProviders(ctx, c.Args)
+}
+func (c *adminHostsKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminHosts(ctx, c.Args)
+}
+func (c *adminAWSIdentityKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminAWSIdentity(ctx, c.Args)
+}
+func (c *adminAWSPolicyKongCmd) Run(_ context.Context, app App) error {
+	return app.adminAWSPolicy(c.Args)
+}
+func (c *adminMacHostsKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminMacHosts(ctx, c.Args)
+}
 func (c *adminReleaseKongCmd) Run(ctx context.Context, app App) error {
 	return app.adminRelease(ctx, c.Args)
 }
@@ -544,6 +599,19 @@ func (c *actionsRegisterKongCmd) Run(ctx context.Context, app App) error {
 }
 func (c *actionsDispatchKongCmd) Run(ctx context.Context, app App) error {
 	return app.actionsDispatch(ctx, c.Args)
+}
+
+func (c *capsuleFromActionsKongCmd) Run(ctx context.Context, app App) error {
+	return app.capsuleFromActions(ctx, stripKongCommandPath(c.Args, "capsule", "from-actions"))
+}
+func (c *capsuleReplayKongCmd) Run(ctx context.Context, app App) error {
+	return app.capsuleReplay(ctx, stripKongCommandPath(c.Args, "capsule", "replay"))
+}
+func (c *capsuleInspectKongCmd) Run(ctx context.Context, app App) error {
+	return app.capsuleInspect(ctx, stripKongCommandPath(c.Args, "capsule", "inspect"))
+}
+func (c *capsulePromoteKongCmd) Run(ctx context.Context, app App) error {
+	return app.capsulePromote(ctx, stripKongCommandPath(c.Args, "capsule", "promote"))
 }
 
 func (c *checkpointCreateKongCmd) Run(ctx context.Context, app App) error {

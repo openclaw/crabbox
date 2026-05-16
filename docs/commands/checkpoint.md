@@ -11,14 +11,15 @@ fixtures. Fork the scenario for repeated test runs without repeating setup.
 - AWS/Azure/GCP: Creates VM disk snapshot at provider level
 - Preserves entire machine: packages, tools, caches, services
 - Stored in provider account (incurs storage costs)
-- Linux only
+- AWS supports Linux and macOS; Azure/GCP support Linux only
 
 **Archive (workspace tarball)**
 - Creates local tar of workdir
 - Portable across any SSH lease
 - Preserves files only, not machine state
 
-Default `--mode auto`: native for AWS/Azure/GCP Linux, otherwise archive.
+Default `--mode auto`: native for AWS Linux/macOS and Azure/GCP Linux,
+otherwise archive.
 
 ## Quick Start
 
@@ -45,7 +46,7 @@ images change the default AWS runner for all future leases.
 Create checkpoint from existing lease.
 
 ```sh
-# Auto mode (native for AWS/Azure/GCP, archive otherwise)
+# Auto mode (native for AWS Linux/macOS and Azure/GCP Linux, archive otherwise)
 crabbox checkpoint create --id blue-lobster --name after-install
 
 # Force native (fails if unsupported)
@@ -54,7 +55,7 @@ crabbox checkpoint create --id blue-lobster --mode native --wait
 # Force archive (portable tarball)
 crabbox checkpoint create --id blue-lobster --mode archive
 
-# Use image strategy instead of disk-snapshot (AWS/GCP only)
+# Use image strategy instead of disk-snapshot (AWS Linux/macOS, GCP Linux)
 crabbox checkpoint create --id blue-lobster --strategy image
 
 # Custom workdir
@@ -79,12 +80,12 @@ crabbox checkpoint create --id blue-lobster --workdir /work/cbx_123/my-app
 **Strategy details**
 
 - `disk-snapshot`: EBS/Azure disk/GCP disk snapshot — faster, best for iteration
-- `image`: AMI/GCP machine image — slower, preserves full VM config
+- `image`: AWS AMI/GCP machine image — slower, preserves full VM config
 - Azure managed images require stopped VMs, not created from active leases
 
 **What gets cleaned before native snapshot**
 
-- `cloud-init clean --logs` — resets cloud-init for fresh SSH keys on fork
+- Linux: `cloud-init clean --logs` — resets cloud-init for fresh SSH keys on fork
 - `sync` — flushes filesystem writes
 
 **⚠️ Security note**
@@ -251,10 +252,10 @@ they preserve to identify candidates for cleanup.
 
 ## Provider Support
 
-**Native checkpoints (Linux only)**
+**Native checkpoints**
 
 Default strategy `disk-snapshot`:
-- AWS: EBS snapshot
+- AWS Linux/macOS: EBS snapshot
 - Azure: Managed OS disk snapshot
 - GCP: Persistent disk snapshot
 
@@ -264,9 +265,12 @@ leases started with `--azure-os-disk ephemeral`, because Azure reports a
 successful snapshot but does not capture the live OS disk state.
 
 Opt-in strategy `--strategy image`:
-- AWS: AMI (Amazon Machine Image)
+- AWS Linux/macOS: AMI (Amazon Machine Image)
 - Azure: Not created from active VMs (requires stopped/generalized source)
-- GCP: Machine image
+- GCP Linux: Machine image
+
+AWS macOS checkpoint forks still require EC2 Mac Dedicated Host capacity. Brokered
+mode can discover a host; host-pinned checkpoints reuse the recorded `hostId`.
 
 **Archive checkpoints**
 

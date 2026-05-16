@@ -253,6 +253,265 @@ func TestCoordinatorAdminLeaseAudit(t *testing.T) {
 	}
 }
 
+func TestCoordinatorAdminMacHosts(t *testing.T) {
+	var allocateBody map[string]string
+	var dryRunBody map[string]any
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.String())
+		if strings.HasPrefix(r.URL.Path, "/v1/admin/hosts") {
+			if got := r.URL.Query().Get("provider"); got != "aws" {
+				t.Fatalf("provider query=%q", got)
+			}
+			if got := r.URL.Query().Get("target"); got != "macos" {
+				t.Fatalf("target query=%q", got)
+			}
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/hosts":
+			if got := r.URL.Query().Get("region"); got != "eu-west-1" {
+				t.Fatalf("region query=%q", got)
+			}
+			if got := r.URL.Query().Get("type"); got != "mac2.metal" {
+				t.Fatalf("type query=%q", got)
+			}
+			if got := r.URL.Query().Get("state"); got != "available" {
+				t.Fatalf("state query=%q", got)
+			}
+			_, _ = w.Write([]byte(`{"hosts":[{"id":"h-000000000001","state":"available","region":"eu-west-1","availabilityZone":"eu-west-1a","instanceType":"mac2.metal","autoPlacement":"off"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/hosts/offerings":
+			if got := r.URL.Query().Get("region"); got != "eu-west-1" {
+				t.Fatalf("offerings region query=%q", got)
+			}
+			if got := r.URL.Query().Get("type"); got != "mac2.metal" {
+				t.Fatalf("offerings type query=%q", got)
+			}
+			_, _ = w.Write([]byte(`{"offerings":[{"region":"eu-west-1","availabilityZone":"eu-west-1a","instanceType":"mac2.metal"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/hosts/quota":
+			if got := r.URL.Query().Get("region"); got != "eu-west-1" {
+				t.Fatalf("quota region query=%q", got)
+			}
+			if got := r.URL.Query().Get("type"); got != "mac2.metal" {
+				t.Fatalf("quota type query=%q", got)
+			}
+			_, _ = w.Write([]byte(`{"quotas":[{"serviceCode":"ec2","quotaCode":"L-MAC2","quotaName":"Running Dedicated mac2 Hosts","value":1,"adjustable":true,"unit":"None"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/hosts/dry-run":
+			if got := r.URL.Query().Get("region"); got != "eu-west-1" {
+				t.Fatalf("dry-run region query=%q", got)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&dryRunBody); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write([]byte(`{"checks":[{"region":"eu-west-1","availabilityZone":"eu-west-1a","instanceType":"mac2.metal","ok":true,"message":"dry run accepted"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/hosts":
+			if got := r.URL.Query().Get("region"); got != "eu-west-1" {
+				t.Fatalf("allocate region query=%q", got)
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			allocateBody = mapStringString(body)
+			_, _ = w.Write([]byte(`{"hosts":[{"id":"h-000000000002","state":"available","region":"eu-west-1","availabilityZone":"eu-west-1b","instanceType":"mac1.metal","autoPlacement":"off"}]}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/admin/hosts/h-000000000002":
+			if got := r.URL.Query().Get("region"); got != "eu-west-1" {
+				t.Fatalf("release region query=%q", got)
+			}
+			_, _ = w.Write([]byte(`{"released":["h-000000000002"]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+	client := &CoordinatorClient{BaseURL: server.URL, Token: "admin-token", Client: server.Client()}
+
+	hosts, err := client.AdminMacHosts(context.Background(), "eu-west-1", "mac2.metal", "available")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts) != 1 || hosts[0].ID != "h-000000000001" || hosts[0].InstanceType != "mac2.metal" {
+		t.Fatalf("hosts=%#v", hosts)
+	}
+	offerings, err := client.AdminMacHostOfferings(context.Background(), "eu-west-1", "mac2.metal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offerings) != 1 || offerings[0].AvailabilityZone != "eu-west-1a" {
+		t.Fatalf("offerings=%#v", offerings)
+	}
+	quotas, err := client.AdminMacHostQuotas(context.Background(), "eu-west-1", "mac2.metal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quotas) != 1 || quotas[0].QuotaName != "Running Dedicated mac2 Hosts" || quotas[0].Value != 1 {
+		t.Fatalf("quotas=%#v", quotas)
+	}
+	checks, err := client.AdminDryRunAllocateMacHost(context.Background(), "eu-west-1", "mac2.metal", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dryRunBody["type"] != "mac2.metal" || dryRunBody["dryRun"] != nil {
+		t.Fatalf("dryRunBody=%#v", dryRunBody)
+	}
+	if len(checks) != 1 || !checks[0].OK || checks[0].AvailabilityZone != "eu-west-1a" {
+		t.Fatalf("checks=%#v", checks)
+	}
+	allocated, err := client.AdminAllocateMacHost(context.Background(), "eu-west-1", "mac1.metal", "eu-west-1b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allocateBody["type"] != "mac1.metal" || allocateBody["availabilityZone"] != "eu-west-1b" {
+		t.Fatalf("allocateBody=%#v", allocateBody)
+	}
+	if len(allocated) != 1 || allocated[0].ID != "h-000000000002" {
+		t.Fatalf("allocated=%#v", allocated)
+	}
+	released, err := client.AdminReleaseMacHost(context.Background(), "eu-west-1", "h-000000000002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(released, []string{"h-000000000002"}) {
+		t.Fatalf("released=%#v", released)
+	}
+	if len(seen) != 6 {
+		t.Fatalf("seen=%#v", seen)
+	}
+}
+
+func TestCoordinatorAdminAWSIdentity(t *testing.T) {
+	var seen string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Method + " " + r.URL.String()
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/admin/providers/identity" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if got := r.URL.Query().Get("provider"); got != "aws" {
+			t.Fatalf("provider query=%q", got)
+		}
+		if got := r.URL.Query().Get("region"); got != "eu-west-1" {
+			t.Fatalf("region query=%q", got)
+		}
+		_, _ = w.Write([]byte(`{"identity":{"account":"123456789012","arn":"arn:aws:iam::123456789012:user/crabbox","userId":"AIDAEXAMPLE","region":"eu-west-1","policyTarget":{"type":"user","name":"crabbox","source":"iam-user"}}}`))
+	}))
+	defer server.Close()
+	client := &CoordinatorClient{BaseURL: server.URL, Token: "admin-token", Client: server.Client()}
+
+	identity, err := client.AdminAWSIdentity(context.Background(), "eu-west-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Account != "123456789012" || identity.UserID != "AIDAEXAMPLE" || identity.Region != "eu-west-1" {
+		t.Fatalf("identity=%#v", identity)
+	}
+	if identity.PolicyTarget == nil || identity.PolicyTarget.Type != "user" || identity.PolicyTarget.Name != "crabbox" {
+		t.Fatalf("policyTarget=%#v", identity.PolicyTarget)
+	}
+	if seen != "GET /v1/admin/providers/identity?provider=aws&region=eu-west-1" {
+		t.Fatalf("seen=%q", seen)
+	}
+}
+
+func TestCoordinatorAdminAWSIdentityFallsBackToLegacyRoute(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.String())
+		if r.URL.Path == "/v1/admin/providers/identity" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/admin/aws-identity" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{"identity":{"account":"123456789012","arn":"arn:aws:iam::123456789012:user/crabbox","userId":"AIDAEXAMPLE","region":"eu-west-1"}}`))
+	}))
+	defer server.Close()
+	client := &CoordinatorClient{BaseURL: server.URL, Token: "admin-token", Client: server.Client()}
+
+	identity, err := client.AdminAWSIdentity(context.Background(), "eu-west-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Account != "123456789012" {
+		t.Fatalf("identity=%#v", identity)
+	}
+	if !reflect.DeepEqual(seen, []string{
+		"GET /v1/admin/providers/identity?provider=aws&region=eu-west-1",
+		"GET /v1/admin/aws-identity?region=eu-west-1",
+	}) {
+		t.Fatalf("seen=%#v", seen)
+	}
+}
+
+func TestCoordinatorLegacyFallbackKeepsNeutralNotFoundContext(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.String())
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	client := &CoordinatorClient{BaseURL: server.URL, Token: "admin-token", Client: server.Client()}
+
+	_, err := client.AdminAWSIdentity(context.Background(), "eu-west-1")
+	if err == nil {
+		t.Fatal("expected not found error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"/v1/admin/providers/identity?provider=aws&region=eu-west-1",
+		"legacy compatibility route /v1/admin/aws-identity?region=eu-west-1 also returned 404",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error missing %q:\n%s", want, msg)
+		}
+	}
+	if !reflect.DeepEqual(seen, []string{
+		"GET /v1/admin/providers/identity?provider=aws&region=eu-west-1",
+		"GET /v1/admin/aws-identity?region=eu-west-1",
+	}) {
+		t.Fatalf("seen=%#v", seen)
+	}
+}
+
+func TestCoordinatorHostLegacyFallbackKeepsNeutralNotFoundContext(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.String())
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	client := &CoordinatorClient{BaseURL: server.URL, Token: "admin-token", Client: server.Client()}
+
+	_, err := client.AdminMacHostOfferings(context.Background(), "eu-west-1", "mac2.metal")
+	if err == nil {
+		t.Fatal("expected not found error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"/v1/admin/hosts/offerings?provider=aws&region=eu-west-1&target=macos&type=mac2.metal",
+		"legacy compatibility route /v1/admin/mac-hosts/offerings?region=eu-west-1&type=mac2.metal also returned 404",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error missing %q:\n%s", want, msg)
+		}
+	}
+	if !reflect.DeepEqual(seen, []string{
+		"GET /v1/admin/hosts/offerings?provider=aws&region=eu-west-1&target=macos&type=mac2.metal",
+		"GET /v1/admin/mac-hosts/offerings?region=eu-west-1&type=mac2.metal",
+	}) {
+		t.Fatalf("seen=%#v", seen)
+	}
+}
+
+func mapStringString(input map[string]any) map[string]string {
+	out := map[string]string{}
+	for key, value := range input {
+		if text, ok := value.(string); ok {
+			out[key] = text
+		}
+	}
+	return out
+}
+
 func TestHeartbeatRequestBodyOmitsIdleTimeoutForTouch(t *testing.T) {
 	if body := heartbeatRequestBody(nil, nil); len(body) != 0 {
 		t.Fatalf("touch heartbeat body=%v, want empty", body)
@@ -482,6 +741,8 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 		GCPRootGB          int64    `json:"gcpRootGB"`
 		SSHFallbackPorts   []string `json:"sshFallbackPorts"`
 		ServerTypeExplicit bool     `json:"serverTypeExplicit"`
+		HostID             string   `json:"hostId"`
+		HostIDCompat       string   `json:"hostID"`
 		Capacity           map[string]any
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -501,6 +762,7 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 		Provider:            "google",
 		ServerType:          "t3.small",
 		ServerTypeExplicit:  true,
+		HostID:              "h-000000000001",
 		AWSSnapshot:         "snap-123",
 		AWSSSHCIDRs:         []string{"198.51.100.7/32"},
 		AzureLocation:       "eastus",
@@ -557,6 +819,9 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	}
 	if !body.ServerTypeExplicit {
 		t.Fatal("serverTypeExplicit=false, want true")
+	}
+	if body.HostID != "h-000000000001" || body.HostIDCompat != "h-000000000001" {
+		t.Fatalf("host id fields not forwarded: hostId=%q hostID=%q", body.HostID, body.HostIDCompat)
 	}
 	if body.Capacity != nil {
 		t.Fatalf("default capacity fields should be omitted for mixed-version brokers: %#v", body.Capacity)
@@ -892,6 +1157,18 @@ func TestCoordinatorImageCreateAndPromote(t *testing.T) {
 			if r.Method != http.MethodPost {
 				t.Fatalf("method=%s", r.Method)
 			}
+			if got := r.URL.Query().Get("target"); got != "macos" {
+				t.Fatalf("promote target=%q", got)
+			}
+			if got := r.URL.Query().Get("region"); got != "us-east-1" {
+				t.Fatalf("promote region=%q", got)
+			}
+			if got := r.URL.Query().Get("serverType"); got != "mac1.metal" {
+				t.Fatalf("promote serverType=%q", got)
+			}
+			if got := r.URL.Query().Get("architecture"); got != "x86_64_mac" {
+				t.Fatalf("promote architecture=%q", got)
+			}
 			_, _ = w.Write([]byte(`{"image":{"id":"ami-12345678","name":"openclaw-crabbox-test","state":"available","region":"eu-west-1","promotedAt":"2026-05-01T12:46:00Z"}}`))
 		default:
 			http.NotFound(w, r)
@@ -910,7 +1187,7 @@ func TestCoordinatorImageCreateAndPromote(t *testing.T) {
 	if image, err := client.Image(context.Background(), "ami-12345678"); err != nil || image.State != "available" {
 		t.Fatalf("image=%#v err=%v", image, err)
 	}
-	if promoted, err := client.PromoteImage(context.Background(), "ami-12345678"); err != nil || promoted.PromotedAt == "" {
+	if promoted, err := client.PromoteImage(context.Background(), "ami-12345678", CoordinatorImageRef{Provider: "aws", Region: "us-east-1", Target: "macos", ServerType: "mac1.metal", Architecture: "x86_64_mac"}); err != nil || promoted.PromotedAt == "" {
 		t.Fatalf("promoted=%#v err=%v", promoted, err)
 	}
 	if err := client.DeleteImage(context.Background(), "ami-12345678", CoordinatorImageRef{Provider: "aws", Region: "eu-west-1", Kind: "aws-ami"}); err != nil {

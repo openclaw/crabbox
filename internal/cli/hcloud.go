@@ -67,6 +67,7 @@ func (p *privateNet) UnmarshalJSON(data []byte) error {
 type Server struct {
 	CloudID   string
 	Provider  string
+	HostID    string
 	ID        int64             `json:"id"`
 	Name      string            `json:"name"`
 	Status    string            `json:"status"`

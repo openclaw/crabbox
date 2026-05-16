@@ -8,6 +8,7 @@ If you want to save one prepared lease and fork that exact scenario later, use
 ```sh
 crabbox image create --id cbx_... --name crabbox-runner-20260501-1246 --wait
 crabbox image promote ami-...
+crabbox image promote ami-... --target macos --region us-east-1 --type mac1.metal
 crabbox image promote ami-... --json
 crabbox image delete ami-... --region eu-west-1
 crabbox image delete my-azure-image --provider azure --region westeurope
@@ -21,11 +22,11 @@ They are intentionally not available to normal GitHub browser-login users.
 
 Image bytes live in the provider account, not in git or coordinator durable
 state. AWS images are AMIs backed by EBS snapshots. Azure images are managed
-images. GCP images are Compute Engine machine images. Crabbox stores only the
-promoted AMI id and related metadata so future AWS leases can resolve the
-default image. Hetzner snapshots/images should live in the Hetzner project and
-be selected through `image`/`CRABBOX_HETZNER_IMAGE` until Crabbox grows Hetzner
-create/promote lifecycle commands.
+images. GCP images are Compute Engine machine images. Crabbox stores promoted
+AWS AMI metadata per target, architecture, and region so future AWS leases can
+resolve a matching default image. Hetzner snapshots/images should live in the
+Hetzner project and be selected through `image`/`CRABBOX_HETZNER_IMAGE` until
+Crabbox grows Hetzner create/promote lifecycle commands.
 
 An AMI is AWS's bootable machine image format. EBS snapshots are the stored disk
 snapshots that back the AMI. Deleting an AWS candidate image should remove both
@@ -63,7 +64,7 @@ crabbox image create --id <cbx_id> --name crabbox-runner-YYYYMMDD-HHMM --wait
 Use a fresh, intentionally warmed lease as the source. Do not bake personal
 workspace state, local secrets, repository checkouts, or one-off debugging
 artifacts into the image.
-For desktop/browser or Mantis images, follow the full [Image bake runbook](../features/image-bake-runbook.md)
+For desktop/browser images, follow the full [Image bake runbook](../features/image-bake-runbook.md)
 instead of relying only on the short smoke above.
 
 Failure handling:
@@ -80,8 +81,8 @@ Failure handling:
 - Cleanup of stale candidate images is an operator task. Promotion does not
   delete old images or snapshots. Use `crabbox image delete` for explicit
   cleanup.
-- If a Mantis timing report does not improve after promotion, treat that as a
-  failed performance bake even if the AMI boots.
+- If a timing report does not improve after promotion, treat that as a failed
+  performance bake even if the AMI boots.
 
 ## promote
 
@@ -91,12 +92,28 @@ Promote an available AMI as the coordinator's default AWS image:
 crabbox image promote ami-1234567890abcdef0
 ```
 
-Add `--json` to print the promoted image record for automation.
-Add `--region` when the AMI is outside the coordinator's default AWS region.
+Flags:
+
+```text
+--target <name>          linux, macos, or windows when promoting an existing AMI
+--region <name>          AWS region for AMI lookup when promoting an existing AMI
+--type <instance-type>   instance type the AMI boots on, for example mac1.metal
+--server-type <type>     alias for --type
+--architecture <arch>    AWS AMI architecture, for example x86_64_mac or arm64_mac
+--json                   print JSON
+```
+
+Add `--target` and `--region` when promoting an AMI that was not created through
+`crabbox image create`; created images inherit target and region metadata from
+their source lease. For external macOS AMIs, Crabbox reads the AMI architecture
+from AWS and also accepts `--type` or `--architecture` when you want to pin the
+promotion metadata explicitly. Add `--json` to print the promoted image record
+for automation.
 
 Future brokered AWS leases use the promoted image when the request does not set
 an explicit `awsAMI` or `CRABBOX_AWS_AMI` override. Promotion stores coordinator
-metadata only; it does not copy or modify the AMI.
+metadata only; it does not copy or modify the AMI. A macOS promotion is only
+used by matching macOS leases and will not become the Linux or Windows default.
 
 Promotion and rollback:
 
@@ -107,10 +124,19 @@ crabbox run --id <slug> --shell -- 'echo image-smoke-ok && uname -srm && test -d
 crabbox stop <slug>
 ```
 
+For macOS:
+
+```sh
+crabbox image promote ami-new --target macos --region us-east-1 --type mac2.metal
+crabbox warmup --provider aws --target macos --type mac2.metal --market on-demand --ttl 30m
+crabbox run --id <slug> --shell -- 'echo image-smoke-ok && sw_vers && test -d "$HOME/crabbox"'
+crabbox stop <slug>
+```
+
 If the smoke fails, promote the previous known-good AMI again. The coordinator
-stores only the selected AMI ID, so rollback is another `image promote` call.
-Keep the previous AMI available until at least one brokered AWS smoke succeeds
-on the new image.
+stores only scoped selected AMI IDs, so rollback is another `image promote`
+call for the same target and region. Keep the previous AMI available until at
+least one brokered AWS smoke succeeds on the new image.
 
 ## delete
 
