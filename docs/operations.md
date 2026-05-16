@@ -140,6 +140,10 @@ CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY required when artifact backend is enabled
 CRABBOX_ARTIFACTS_SESSION_TOKEN optional
 CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS optional
 CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS optional
+CRABBOX_AWS_ORPHAN_SWEEP_ENABLED optional; defaults on when AWS broker credentials exist
+CRABBOX_AWS_ORPHAN_SWEEP_DELETE optional; set 1 to terminate confirmed orphan EC2 instances
+CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS optional; default 3600
+CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS optional; default 900
 ```
 
 Artifact backend vars are ordinary Worker vars except
@@ -248,6 +252,30 @@ Direct-provider cleanup is only for debug mode without a coordinator:
 ```sh
 bin/crabbox cleanup --dry-run
 bin/crabbox cleanup
+```
+
+The coordinator also runs an AWS orphan sweep from the Durable Object alarm when
+AWS broker credentials are configured. It scans `CRABBOX_AWS_REGION` plus
+`CRABBOX_CAPACITY_REGIONS` for `crabbox=true` EC2 instances and compares their
+lease tags with active coordinator leases. Active matching leases always win,
+because provider `expires_at` tags are written at launch and can be older than a
+heartbeat-extended lease.
+
+The sweep reports candidates when an instance is past its provider `expires_at`
+tag, has no active lease, is missing a lease label, or points at an active lease
+whose current cloud ID is different. It skips `keep=true` instances and applies
+the grace window before acting on missing or mismatched lease state. Set
+`CRABBOX_AWS_ORPHAN_SWEEP_DELETE=1` to terminate confirmed candidates
+automatically.
+
+Trusted admins can inspect or trigger the sweep:
+
+```sh
+curl -H "Authorization: Bearer $CRABBOX_COORDINATOR_ADMIN_TOKEN" \
+  https://crabbox.openclaw.ai/v1/admin/aws-orphan-sweep
+
+curl -X POST -H "Authorization: Bearer $CRABBOX_COORDINATOR_ADMIN_TOKEN" \
+  https://crabbox.openclaw.ai/v1/admin/aws-orphan-sweep
 ```
 
 ## AWS Security Guardrails

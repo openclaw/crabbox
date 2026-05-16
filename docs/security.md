@@ -148,10 +148,17 @@ Required:
 - Idle timeout and heartbeat/touch deadline.
 - Explicit release.
 - Durable Object alarm cleanup.
+- Durable Object AWS orphan sweep for current broker credentials and capacity regions.
 - Provider label sweep for clearly expired, inactive orphan machines.
 - Boot-time cleanup of stale `/work/crabbox/*` dirs.
 
 Direct-CLI cleanup uses provider labels. It skips kept machines, deletes expired ready/leased/active machines, and only removes running/provisioning machines after the extra stale safety window. When a coordinator is configured, provider-side cleanup is disabled because the Durable Object alarm owns brokered cleanup.
+
+Brokered AWS cleanup includes a coordinator-side orphan sweep. The sweep uses
+live Durable Object lease state as the authority and only uses provider tags
+after a matching active lease is absent or points at a different cloud instance.
+It skips `keep=true` provider resources and has a grace window before acting on
+missing labels or stale lease mappings.
 
 Release must be idempotent. Delete must tolerate already-deleted provider resources.
 

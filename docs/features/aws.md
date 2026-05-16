@@ -164,6 +164,10 @@ CRABBOX_AWS_ROOT_GB
 CRABBOX_AWS_SSH_CIDRS
 CRABBOX_HOST_ID
 CRABBOX_AWS_MAC_HOST_ID legacy AWS alias
+CRABBOX_AWS_ORPHAN_SWEEP_ENABLED
+CRABBOX_AWS_ORPHAN_SWEEP_DELETE
+CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS
+CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS
 CRABBOX_CAPACITY_REGIONS
 CRABBOX_CAPACITY_AVAILABILITY_ZONES
 CRABBOX_CAPACITY_HINTS
@@ -202,6 +206,13 @@ for region in eu-west-1 eu-west-2 eu-central-1 us-east-1 us-west-2; do
   fi
 done
 ```
+
+The brokered coordinator can also sweep AWS orphans itself. When
+`CRABBOX_AWS_ORPHAN_SWEEP_ENABLED` is not disabled and AWS broker credentials are
+present, the Durable Object alarm periodically scans `CRABBOX_AWS_REGION` plus
+`CRABBOX_CAPACITY_REGIONS` for Crabbox-tagged EC2 instances. It only terminates
+confirmed orphan candidates when `CRABBOX_AWS_ORPHAN_SWEEP_DELETE=1`; otherwise
+it stores the latest report for admin inspection.
 
 ## Images
 
