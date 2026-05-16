@@ -2290,9 +2290,13 @@ describe("fleet lease identity and idle", () => {
     );
 
     const response = await fleet.fetch(
-      request("GET", "/v1/admin/mac-hosts?region=eu-west-1&type=mac2.metal&state=available", {
-        headers: { "x-crabbox-admin": "true" },
-      }),
+      request(
+        "GET",
+        "/v1/admin/hosts?provider=aws&target=macos&region=eu-west-1&type=mac2.metal&state=available",
+        {
+          headers: { "x-crabbox-admin": "true" },
+        },
+      ),
     );
 
     expect(response.status).toBe(200);
@@ -2308,6 +2312,21 @@ describe("fleet lease identity and idle", () => {
           tags: { crabbox: "true" },
         },
       ],
+    });
+  });
+
+  it("rejects unsupported provider-neutral host scopes", async () => {
+    const fleet = testFleet(new MemoryStorage(), {});
+
+    const response = await fleet.fetch(
+      request("GET", "/v1/admin/hosts?provider=azure&target=macos", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "unsupported_host_scope",
     });
   });
 
@@ -2472,7 +2491,7 @@ describe("fleet lease identity and idle", () => {
     );
 
     const response = await fleet.fetch(
-      request("GET", "/v1/admin/aws-identity?region=eu-west-1", {
+      request("GET", "/v1/admin/providers/identity?provider=aws&region=eu-west-1", {
         headers: { "x-crabbox-admin": "true" },
       }),
     );

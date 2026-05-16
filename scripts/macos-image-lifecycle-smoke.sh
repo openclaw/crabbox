@@ -95,8 +95,8 @@ preflight_blocker_from_stderr() {
     detail="$(head -c 500 "$err" | tr '\n' ' ' | tr -s ' ')"
   fi
   if grep -q -E 'http 404|not_found' "$err"; then
-    blocker_message="coordinator does not expose EC2 Mac host lifecycle admin endpoints; deploy a coordinator with /v1/admin/mac-hosts support before Mac image validation"
-    blocker_remediation="Deploy a coordinator that exposes /v1/admin/mac-hosts, then rerun the no-spend Mac host preflight."
+    blocker_message="coordinator does not expose provider-neutral host lifecycle admin endpoints; deploy a coordinator with admin hosts support before Mac image validation"
+    blocker_remediation="Deploy a coordinator that exposes /v1/admin/hosts with the legacy /v1/admin/mac-hosts compatibility route, then rerun the no-spend Mac host preflight."
     return 0
   fi
   blocker_message="$label failed"

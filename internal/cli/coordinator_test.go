@@ -259,8 +259,16 @@ func TestCoordinatorAdminMacHosts(t *testing.T) {
 	var seen []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, r.Method+" "+r.URL.String())
+		if strings.HasPrefix(r.URL.Path, "/v1/admin/hosts") {
+			if got := r.URL.Query().Get("provider"); got != "aws" {
+				t.Fatalf("provider query=%q", got)
+			}
+			if got := r.URL.Query().Get("target"); got != "macos" {
+				t.Fatalf("target query=%q", got)
+			}
+		}
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/mac-hosts":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/hosts":
 			if got := r.URL.Query().Get("region"); got != "eu-west-1" {
 				t.Fatalf("region query=%q", got)
 			}
@@ -271,7 +279,7 @@ func TestCoordinatorAdminMacHosts(t *testing.T) {
 				t.Fatalf("state query=%q", got)
 			}
 			_, _ = w.Write([]byte(`{"hosts":[{"id":"h-000000000001","state":"available","region":"eu-west-1","availabilityZone":"eu-west-1a","instanceType":"mac2.metal","autoPlacement":"off"}]}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/mac-hosts/offerings":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/hosts/offerings":
 			if got := r.URL.Query().Get("region"); got != "eu-west-1" {
 				t.Fatalf("offerings region query=%q", got)
 			}
@@ -279,7 +287,7 @@ func TestCoordinatorAdminMacHosts(t *testing.T) {
 				t.Fatalf("offerings type query=%q", got)
 			}
 			_, _ = w.Write([]byte(`{"offerings":[{"region":"eu-west-1","availabilityZone":"eu-west-1a","instanceType":"mac2.metal"}]}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/mac-hosts/quota":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/hosts/quota":
 			if got := r.URL.Query().Get("region"); got != "eu-west-1" {
 				t.Fatalf("quota region query=%q", got)
 			}
@@ -287,7 +295,7 @@ func TestCoordinatorAdminMacHosts(t *testing.T) {
 				t.Fatalf("quota type query=%q", got)
 			}
 			_, _ = w.Write([]byte(`{"quotas":[{"serviceCode":"ec2","quotaCode":"L-MAC2","quotaName":"Running Dedicated mac2 Hosts","value":1,"adjustable":true,"unit":"None"}]}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/mac-hosts/dry-run":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/hosts/dry-run":
 			if got := r.URL.Query().Get("region"); got != "eu-west-1" {
 				t.Fatalf("dry-run region query=%q", got)
 			}
@@ -295,7 +303,7 @@ func TestCoordinatorAdminMacHosts(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, _ = w.Write([]byte(`{"checks":[{"region":"eu-west-1","availabilityZone":"eu-west-1a","instanceType":"mac2.metal","ok":true,"message":"dry run accepted"}]}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/mac-hosts":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/hosts":
 			if got := r.URL.Query().Get("region"); got != "eu-west-1" {
 				t.Fatalf("allocate region query=%q", got)
 			}
@@ -305,7 +313,7 @@ func TestCoordinatorAdminMacHosts(t *testing.T) {
 			}
 			allocateBody = mapStringString(body)
 			_, _ = w.Write([]byte(`{"hosts":[{"id":"h-000000000002","state":"available","region":"eu-west-1","availabilityZone":"eu-west-1b","instanceType":"mac1.metal","autoPlacement":"off"}]}`))
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/admin/mac-hosts/h-000000000002":
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/admin/hosts/h-000000000002":
 			if got := r.URL.Query().Get("region"); got != "eu-west-1" {
 				t.Fatalf("release region query=%q", got)
 			}
@@ -374,8 +382,11 @@ func TestCoordinatorAdminAWSIdentity(t *testing.T) {
 	var seen string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = r.Method + " " + r.URL.String()
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/admin/aws-identity" {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/admin/providers/identity" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if got := r.URL.Query().Get("provider"); got != "aws" {
+			t.Fatalf("provider query=%q", got)
 		}
 		if got := r.URL.Query().Get("region"); got != "eu-west-1" {
 			t.Fatalf("region query=%q", got)
@@ -395,8 +406,39 @@ func TestCoordinatorAdminAWSIdentity(t *testing.T) {
 	if identity.PolicyTarget == nil || identity.PolicyTarget.Type != "user" || identity.PolicyTarget.Name != "crabbox" {
 		t.Fatalf("policyTarget=%#v", identity.PolicyTarget)
 	}
-	if seen != "GET /v1/admin/aws-identity?region=eu-west-1" {
+	if seen != "GET /v1/admin/providers/identity?provider=aws&region=eu-west-1" {
 		t.Fatalf("seen=%q", seen)
+	}
+}
+
+func TestCoordinatorAdminAWSIdentityFallsBackToLegacyRoute(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.String())
+		if r.URL.Path == "/v1/admin/providers/identity" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/admin/aws-identity" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{"identity":{"account":"123456789012","arn":"arn:aws:iam::123456789012:user/crabbox","userId":"AIDAEXAMPLE","region":"eu-west-1"}}`))
+	}))
+	defer server.Close()
+	client := &CoordinatorClient{BaseURL: server.URL, Token: "admin-token", Client: server.Client()}
+
+	identity, err := client.AdminAWSIdentity(context.Background(), "eu-west-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Account != "123456789012" {
+		t.Fatalf("identity=%#v", identity)
+	}
+	if !reflect.DeepEqual(seen, []string{
+		"GET /v1/admin/providers/identity?provider=aws&region=eu-west-1",
+		"GET /v1/admin/aws-identity?region=eu-west-1",
+	}) {
+		t.Fatalf("seen=%#v", seen)
 	}
 }
 

@@ -975,6 +975,150 @@ func (c *CoordinatorClient) AdminMacHosts(ctx context.Context, region, serverTyp
 	var res struct {
 		Hosts []CoordinatorMacHost `json:"hosts"`
 	}
+	values := adminHostScopeValues(region, serverType)
+	if state != "" {
+		values.Set("state", state)
+	}
+	path := "/v1/admin/hosts"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	legacyPath := "/v1/admin/mac-hosts"
+	if encoded := legacyMacHostValues(region, serverType, state).Encode(); encoded != "" {
+		legacyPath += "?" + encoded
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodGet, path, legacyPath, nil, &res)
+	return res.Hosts, err
+}
+
+func (c *CoordinatorClient) AdminAWSIdentity(ctx context.Context, region string) (CoordinatorAWSIdentity, error) {
+	var res struct {
+		Identity CoordinatorAWSIdentity `json:"identity"`
+	}
+	values := url.Values{"provider": []string{"aws"}}
+	if region != "" {
+		values.Set("region", region)
+	}
+	path := "/v1/admin/providers/identity"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	legacyPath := "/v1/admin/aws-identity"
+	if region != "" {
+		legacyPath += "?region=" + url.QueryEscape(region)
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodGet, path, legacyPath, nil, &res)
+	return res.Identity, err
+}
+
+func (c *CoordinatorClient) AdminMacHostOfferings(ctx context.Context, region, serverType string) ([]CoordinatorMacHostOffering, error) {
+	var res struct {
+		Offerings []CoordinatorMacHostOffering `json:"offerings"`
+	}
+	values := adminHostScopeValues(region, serverType)
+	path := "/v1/admin/hosts/offerings"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	legacyPath := "/v1/admin/mac-hosts/offerings"
+	if encoded := legacyMacHostValues(region, serverType, "").Encode(); encoded != "" {
+		legacyPath += "?" + encoded
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodGet, path, legacyPath, nil, &res)
+	return res.Offerings, err
+}
+
+func (c *CoordinatorClient) AdminMacHostQuotas(ctx context.Context, region, serverType string) ([]CoordinatorMacHostQuota, error) {
+	var res struct {
+		Quotas []CoordinatorMacHostQuota `json:"quotas"`
+	}
+	values := adminHostScopeValues(region, serverType)
+	path := "/v1/admin/hosts/quota"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	legacyPath := "/v1/admin/mac-hosts/quota"
+	if encoded := legacyMacHostValues(region, serverType, "").Encode(); encoded != "" {
+		legacyPath += "?" + encoded
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodGet, path, legacyPath, nil, &res)
+	return res.Quotas, err
+}
+
+func (c *CoordinatorClient) AdminAllocateMacHost(ctx context.Context, region, serverType, availabilityZone string) ([]CoordinatorMacHost, error) {
+	var res struct {
+		Hosts []CoordinatorMacHost `json:"hosts"`
+	}
+	values := adminHostScopeValues(region, "")
+	path := "/v1/admin/hosts"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	body := map[string]any{"type": serverType}
+	if availabilityZone != "" {
+		body["availabilityZone"] = availabilityZone
+	}
+	legacyPath := "/v1/admin/mac-hosts"
+	if region != "" {
+		legacyPath += "?region=" + url.QueryEscape(region)
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodPost, path, legacyPath, body, &res)
+	return res.Hosts, err
+}
+
+func (c *CoordinatorClient) AdminDryRunAllocateMacHost(ctx context.Context, region, serverType, availabilityZone string) ([]CoordinatorMacHostAllocationDryRun, error) {
+	var res struct {
+		Checks []CoordinatorMacHostAllocationDryRun `json:"checks"`
+	}
+	values := adminHostScopeValues(region, "")
+	path := "/v1/admin/hosts/dry-run"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	body := map[string]any{"type": serverType}
+	if availabilityZone != "" {
+		body["availabilityZone"] = availabilityZone
+	}
+	legacyPath := "/v1/admin/mac-hosts/dry-run"
+	if region != "" {
+		legacyPath += "?region=" + url.QueryEscape(region)
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodPost, path, legacyPath, body, &res)
+	return res.Checks, err
+}
+
+func (c *CoordinatorClient) AdminReleaseMacHost(ctx context.Context, region, hostID string) ([]string, error) {
+	var res struct {
+		Released []string `json:"released"`
+	}
+	values := adminHostScopeValues(region, "")
+	path := "/v1/admin/hosts/" + url.PathEscape(hostID)
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	legacyPath := "/v1/admin/mac-hosts/" + url.PathEscape(hostID)
+	if region != "" {
+		legacyPath += "?region=" + url.QueryEscape(region)
+	}
+	err := c.doWithLegacyFallback(ctx, http.MethodDelete, path, legacyPath, nil, &res)
+	return res.Released, err
+}
+
+func adminHostScopeValues(region, serverType string) url.Values {
+	values := url.Values{
+		"provider": []string{"aws"},
+		"target":   []string{targetMacOS},
+	}
+	if region != "" {
+		values.Set("region", region)
+	}
+	if serverType != "" {
+		values.Set("type", serverType)
+	}
+	return values
+}
+
+func legacyMacHostValues(region, serverType, state string) url.Values {
 	values := url.Values{}
 	if region != "" {
 		values.Set("region", region)
@@ -985,122 +1129,20 @@ func (c *CoordinatorClient) AdminMacHosts(ctx context.Context, region, serverTyp
 	if state != "" {
 		values.Set("state", state)
 	}
-	path := "/v1/admin/mac-hosts"
-	if encoded := values.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-	err := c.do(ctx, http.MethodGet, path, nil, &res)
-	return res.Hosts, err
+	return values
 }
 
-func (c *CoordinatorClient) AdminAWSIdentity(ctx context.Context, region string) (CoordinatorAWSIdentity, error) {
-	var res struct {
-		Identity CoordinatorAWSIdentity `json:"identity"`
+func (c *CoordinatorClient) doWithLegacyFallback(ctx context.Context, method, path, legacyPath string, body any, out any) error {
+	err := c.do(ctx, method, path, body, out)
+	if err == nil || !isCoordinatorNotFound(err) {
+		return err
 	}
-	values := url.Values{}
-	if region != "" {
-		values.Set("region", region)
-	}
-	path := "/v1/admin/aws-identity"
-	if encoded := values.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-	err := c.do(ctx, http.MethodGet, path, nil, &res)
-	return res.Identity, err
+	return c.do(ctx, method, legacyPath, body, out)
 }
 
-func (c *CoordinatorClient) AdminMacHostOfferings(ctx context.Context, region, serverType string) ([]CoordinatorMacHostOffering, error) {
-	var res struct {
-		Offerings []CoordinatorMacHostOffering `json:"offerings"`
-	}
-	values := url.Values{}
-	if region != "" {
-		values.Set("region", region)
-	}
-	if serverType != "" {
-		values.Set("type", serverType)
-	}
-	path := "/v1/admin/mac-hosts/offerings"
-	if encoded := values.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-	err := c.do(ctx, http.MethodGet, path, nil, &res)
-	return res.Offerings, err
-}
-
-func (c *CoordinatorClient) AdminMacHostQuotas(ctx context.Context, region, serverType string) ([]CoordinatorMacHostQuota, error) {
-	var res struct {
-		Quotas []CoordinatorMacHostQuota `json:"quotas"`
-	}
-	values := url.Values{}
-	if region != "" {
-		values.Set("region", region)
-	}
-	if serverType != "" {
-		values.Set("type", serverType)
-	}
-	path := "/v1/admin/mac-hosts/quota"
-	if encoded := values.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-	err := c.do(ctx, http.MethodGet, path, nil, &res)
-	return res.Quotas, err
-}
-
-func (c *CoordinatorClient) AdminAllocateMacHost(ctx context.Context, region, serverType, availabilityZone string) ([]CoordinatorMacHost, error) {
-	var res struct {
-		Hosts []CoordinatorMacHost `json:"hosts"`
-	}
-	values := url.Values{}
-	if region != "" {
-		values.Set("region", region)
-	}
-	path := "/v1/admin/mac-hosts"
-	if encoded := values.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-	body := map[string]any{"type": serverType}
-	if availabilityZone != "" {
-		body["availabilityZone"] = availabilityZone
-	}
-	err := c.do(ctx, http.MethodPost, path, body, &res)
-	return res.Hosts, err
-}
-
-func (c *CoordinatorClient) AdminDryRunAllocateMacHost(ctx context.Context, region, serverType, availabilityZone string) ([]CoordinatorMacHostAllocationDryRun, error) {
-	var res struct {
-		Checks []CoordinatorMacHostAllocationDryRun `json:"checks"`
-	}
-	values := url.Values{}
-	if region != "" {
-		values.Set("region", region)
-	}
-	path := "/v1/admin/mac-hosts/dry-run"
-	if encoded := values.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-	body := map[string]any{"type": serverType}
-	if availabilityZone != "" {
-		body["availabilityZone"] = availabilityZone
-	}
-	err := c.do(ctx, http.MethodPost, path, body, &res)
-	return res.Checks, err
-}
-
-func (c *CoordinatorClient) AdminReleaseMacHost(ctx context.Context, region, hostID string) ([]string, error) {
-	var res struct {
-		Released []string `json:"released"`
-	}
-	values := url.Values{}
-	if region != "" {
-		values.Set("region", region)
-	}
-	path := "/v1/admin/mac-hosts/" + url.PathEscape(hostID)
-	if encoded := values.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-	err := c.do(ctx, http.MethodDelete, path, nil, &res)
-	return res.Released, err
+func isCoordinatorNotFound(err error) bool {
+	var httpErr CoordinatorHTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound
 }
 
 func (c *CoordinatorClient) CreateImage(ctx context.Context, leaseID, name string, noReboot bool, strategies ...string) (CoordinatorImage, error) {

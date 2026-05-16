@@ -340,6 +340,12 @@ export class FleetDurableObject implements DurableObject {
       if (method === "GET" && parts.join("/") === "v1/admin/aws-identity") {
         return await this.adminAWSIdentity(request);
       }
+      if (method === "GET" && parts.join("/") === "v1/admin/providers/identity") {
+        return await this.adminProviderIdentity(request);
+      }
+      if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "hosts") {
+        return await this.adminHostsRoute(request, parts[3]);
+      }
       if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "mac-hosts") {
         return await this.adminMacHostsRoute(request, parts[3]);
       }
@@ -2608,6 +2614,37 @@ export class FleetDurableObject implements DurableObject {
     return json({ identity });
   }
 
+  private async adminProviderIdentity(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const provider = (url.searchParams.get("provider") ?? "aws").trim().toLowerCase();
+    if (provider !== "aws") {
+      return json(
+        {
+          error: "unsupported_provider",
+          message: "admin provider identity currently supports provider=aws",
+        },
+        { status: 400 },
+      );
+    }
+    return await this.adminAWSIdentity(request);
+  }
+
+  private async adminHostsRoute(request: Request, hostID?: string): Promise<Response> {
+    const url = new URL(request.url);
+    const provider = (url.searchParams.get("provider") ?? "aws").trim().toLowerCase();
+    const target = (url.searchParams.get("target") ?? "macos").trim().toLowerCase();
+    if (provider !== "aws" || target !== "macos") {
+      return json(
+        {
+          error: "unsupported_host_scope",
+          message: "admin hosts currently supports provider=aws and target=macos",
+        },
+        { status: 400 },
+      );
+    }
+    return await this.adminMacHostsRoute(request, hostID);
+  }
+
   private async adminMacHostsRoute(request: Request, hostID?: string): Promise<Response> {
     const method = request.method.toUpperCase();
     const url = new URL(request.url);
@@ -4278,6 +4315,12 @@ function isAdminRoute(method: string, parts: string[]): boolean {
     return true;
   }
   if (method === "GET" && parts.join("/") === "v1/admin/aws-identity") {
+    return true;
+  }
+  if (method === "GET" && parts.join("/") === "v1/admin/providers/identity") {
+    return true;
+  }
+  if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "hosts") {
     return true;
   }
   if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "mac-hosts") {
