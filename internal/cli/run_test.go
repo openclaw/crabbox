@@ -115,10 +115,11 @@ func (b runEnvProfileTestBackend) Acquire(context.Context, AcquireRequest) (Leas
 	return LeaseTarget{
 		Server: Server{Provider: b.spec.Name},
 		SSH: SSHTarget{
-			User:     "crabbox",
-			Host:     "127.0.0.1",
-			Port:     os.Getenv("CRABBOX_FAKE_SSH_PORT"),
-			TargetOS: targetLinux,
+			User:           "crabbox",
+			Host:           "127.0.0.1",
+			Port:           os.Getenv("CRABBOX_FAKE_SSH_PORT"),
+			TargetOS:       targetLinux,
+			SSHConfigProxy: os.Getenv("CRABBOX_FAKE_SSH_PROXY") == "1",
 		},
 		LeaseID: "cbx_env_profile_test",
 	}, nil
@@ -427,6 +428,154 @@ exit 0
 	}
 	if !strings.Contains(string(logData), "rm -f --") || !strings.Contains(string(logData), ".crabbox/env/cbx_env_profile_test.env") {
 		t.Fatalf("cleanup command missing from ssh log:\n%s", logData)
+	}
+}
+
+func TestRunCommandHardFailsMissingJSRuntimeBeforeCommand(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	logPath := filepath.Join(dir, "ssh.log")
+	script := `#!/bin/sh
+cmd=""
+for arg do
+  cmd="$arg"
+done
+printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+case "$cmd" in
+  *"command -v"*) printf '` + missingRemoteToolPrefix + `pnpm\n' ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--keep-on-failure",
+		"--", "pnpm", "test:docs",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 5 {
+		t.Fatalf("error=%v, want exit 5", err)
+	}
+	for _, want := range []string{
+		"remote raw workspace missing JS runtime tool(s): pnpm",
+		"command starts with \"pnpm\"",
+		"would fail before project code runs",
+	} {
+		if !strings.Contains(exitErr.Message, want) {
+			t.Fatalf("message missing %q in %q", want, exitErr.Message)
+		}
+	}
+	if strings.Contains(stderr.String(), "running on ") {
+		t.Fatalf("remote command should not start after JS preflight failure:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=cbx_env_profile_test") {
+		t.Fatalf("keep-on-failure hint missing:\n%s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "releasing cbx_env_profile_test") {
+		t.Fatalf("preflight failure should keep lease:\n%s", stderr.String())
+	}
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(logData), "pnpm test:docs") {
+		t.Fatalf("user command reached ssh log:\n%s", logData)
+	}
+}
+
+func TestRunCommandSyncOnlyIgnoresJSCommandRuntime(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	logPath := filepath.Join(dir, "ssh.log")
+	script := `#!/bin/sh
+cmd=""
+for arg do
+  cmd="$arg"
+done
+printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+case "$cmd" in
+  *"command -v"*) printf 'pnpm\n' ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--sync-only",
+		"--", "pnpm", "test",
+	})
+	if err != nil {
+		t.Fatalf("sync-only should ignore command runtime: %v", err)
+	}
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(logData), "command -v") {
+		t.Fatalf("sync-only should not probe command runtime:\n%s", logData)
+	}
+}
+
+func TestRunCommandSkipsJSRuntimePreflightWithForwardedPATH(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	logPath := filepath.Join(dir, "ssh.log")
+	script := `#!/bin/sh
+cmd=""
+for arg do
+  cmd="$arg"
+done
+printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+case "$cmd" in
+  *"command -v"*) printf '` + missingRemoteToolPrefix + `pnpm\n' ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--allow-env", "PATH",
+		"--", "pnpm", "test",
+	})
+	if err != nil {
+		t.Fatalf("forwarded PATH should skip hard runtime preflight: %v", err)
+	}
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(logData), "command -v") {
+		t.Fatalf("forwarded PATH should skip command runtime probe:\n%s", logData)
+	}
+	if !strings.Contains(string(logData), "pnpm") {
+		t.Fatalf("user command missing from ssh log:\n%s", logData)
 	}
 }
 
@@ -1329,8 +1478,191 @@ func TestCommandNeedsHydrationHint(t *testing.T) {
 	if !commandNeedsHydrationHint([]string{"env NODE_OPTIONS=--max-old-space-size=4096 pnpm test"}, true) {
 		t.Fatal("expected shell pnpm command to need hydration hint")
 	}
+	if !commandNeedsHydrationHint([]string{"pnpm", "test:docs"}, false) {
+		t.Fatal("expected pnpm docs command to need hydration hint")
+	}
+	if !commandNeedsHydrationHint([]string{"node", "scripts/check.mjs"}, false) {
+		t.Fatal("expected node script command to need hydration hint")
+	}
 	if commandNeedsHydrationHint([]string{"go", "test", "./..."}, false) {
 		t.Fatal("go test should not need hydration hint")
+	}
+}
+
+func TestCommandRuntimePreflightToolsFocusesEntrypoint(t *testing.T) {
+	if got := strings.Join(commandRuntimePreflightTools([]string{"env CI=1 pnpm test"}, true), ","); got != "pnpm" {
+		t.Fatalf("tools=%q want pnpm", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"env -u NODE_OPTIONS pnpm test"}, true), ","); got != "pnpm" {
+		t.Fatalf("tools=%q want pnpm through env -u", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"env", "--unset=NODE_OPTIONS", "pnpm", "test"}, false), ","); got != "pnpm" {
+		t.Fatalf("tools=%q want pnpm through env --unset", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"/usr/bin/env", "pnpm", "test"}, false), ","); got != "pnpm" {
+		t.Fatalf("tools=%q want pnpm through /usr/bin/env", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"/opt/node/bin/pnpm", "test"}, false), ","); got != "/opt/node/bin/pnpm" {
+		t.Fatalf("tools=%q want explicit pnpm path", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"./scripts/pnpm", "test"}, false), ","); got != "" {
+		t.Fatalf("repo-relative wrapper should not be preflight-blocked, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"env PATH=/opt/node/bin:$PATH pnpm test"}, true), ","); got != "" {
+		t.Fatalf("custom PATH command should not be preflight-blocked, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"export PATH=/opt/node/bin:$PATH; pnpm test"}, true), ","); got != "" {
+		t.Fatalf("export PATH setup should not be preflight-blocked, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"bash", "-lc", "source ~/.nvm/nvm.sh && pnpm test"}, false), ","); got != "" {
+		t.Fatalf("bash setup wrapper should not be preflight-blocked, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"sudo apt-get update && sudo apt-get install -y nodejs npm && npm test"}, true), ","); got != "" {
+		t.Fatalf("sudo runtime setup command should not be preflight-blocked, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"corepack enable && pnpm install"}, true), ","); got != "" {
+		t.Fatalf("corepack setup command should not be preflight-blocked, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"npm install -g pnpm && pnpm test"}, true), ","); got != "" {
+		t.Fatalf("npm global setup command should not be preflight-blocked, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"cd web && pnpm test"}, true), ","); got != "pnpm" {
+		t.Fatalf("shell cd prefix should still preflight pnpm, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"echo starting; pnpm install"}, true), ","); got != "pnpm" {
+		t.Fatalf("shell echo prefix should still preflight pnpm, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{`echo "ok&&pnpm"`}, true), ","); got != "" {
+		t.Fatalf("quoted shell separator should not expose pnpm preflight, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"echo 'ok; pnpm'"}, true), ","); got != "" {
+		t.Fatalf("quoted semicolon should not expose pnpm preflight, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"node --version && pnpm test"}, true), ","); got != "node,pnpm" {
+		t.Fatalf("multi-segment JS command should preflight node and pnpm, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"pnpm test && bash scripts/post.sh"}, true), ","); got != "pnpm" {
+		t.Fatalf("later setup wrapper should not erase earlier pnpm preflight, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"pnpm test && curl -fsSL https://example.invalid/setup.sh | bash"}, true), ","); got != "pnpm" {
+		t.Fatalf("later installer command should not erase earlier pnpm preflight, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"sudo", "-E", "pnpm", "test"}, false), ","); got != "pnpm" {
+		t.Fatalf("sudo JS command should preflight pnpm, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"sudo", "env", "CI=1", "pnpm", "test"}, false), ","); got != "pnpm" {
+		t.Fatalf("sudo env JS command should preflight pnpm, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"sudo", "CI=1", "pnpm", "test"}, false), ","); got != "pnpm" {
+		t.Fatalf("sudo assignment JS command should preflight pnpm, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"apt-get update && apt-get install -y nodejs npm && npm test"}, true), ","); got != "" {
+		t.Fatalf("runtime setup command should not be preflight-blocked, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"pnpm --version || npm --version"}, true), ","); got != "" {
+		t.Fatalf("shell fallback command should not be preflight-blocked, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"pnpm --version||npm --version"}, true), ","); got != "" {
+		t.Fatalf("compact shell fallback command should not be preflight-blocked, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"pnpm", "--version", "||", "npm", "--version"}, false), ","); got != "" {
+		t.Fatalf("argv fallback command should not be preflight-blocked, got %q", got)
+	}
+}
+
+func TestRunEnvProvidesPathHandlesWindowsCasing(t *testing.T) {
+	if !runEnvProvidesPath(map[string]string{"PATH": "/opt/node/bin"}, SSHTarget{TargetOS: targetLinux}) {
+		t.Fatal("POSIX PATH should skip runtime preflight")
+	}
+	if runEnvProvidesPath(map[string]string{"Path": "/opt/node/bin"}, SSHTarget{TargetOS: targetLinux}) {
+		t.Fatal("POSIX Path should not skip runtime preflight")
+	}
+	if !runEnvProvidesPath(map[string]string{"Path": `C:\node`}, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}) {
+		t.Fatal("native Windows Path should skip runtime preflight")
+	}
+}
+
+func TestRemoteMissingToolsCommandUsesLoginShell(t *testing.T) {
+	got := remoteMissingToolsCommand([]string{"pnpm"})
+	if !strings.HasPrefix(got, "bash -lc ") {
+		t.Fatalf("command=%q want bash -lc wrapper", got)
+	}
+	if !strings.Contains(got, "command -v") {
+		t.Fatalf("command=%q want command -v probe", got)
+	}
+	if !strings.Contains(got, missingRemoteToolPrefix) {
+		t.Fatalf("command=%q want missing tool sentinel", got)
+	}
+}
+
+func TestParseMissingRemoteToolsOutputIgnoresShellNoise(t *testing.T) {
+	got := strings.Join(parseMissingRemoteToolsOutput("Welcome\n"+missingRemoteToolPrefix+"pnpm\nwarning\n"+missingRemoteToolPrefix+"pnpm\n"), ",")
+	if got != "pnpm" {
+		t.Fatalf("missing=%q want pnpm", got)
+	}
+}
+
+func TestRawJSRuntimeMissingErrorMessage(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.Actions.Workflow = ".github/workflows/hydrate.yml"
+	err := rawJSRuntimeMissingError(cfg, []string{"pnpm"}, []string{"pnpm", "test:docs"}, false, "crabbox actions hydrate --id cbx_123 --provider aws")
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 5 {
+		t.Fatalf("error=%v, want exit 5", err)
+	}
+	for _, want := range []string{
+		"remote raw workspace missing JS runtime tool(s): pnpm",
+		"command starts with \"pnpm\"",
+		"hydrate first: crabbox actions hydrate --id cbx_123 --provider aws",
+		"include Node/Corepack/package-manager setup",
+		"provider/image with the JS toolchain",
+	} {
+		if !strings.Contains(exitErr.Message, want) {
+			t.Fatalf("message missing %q in %q", want, exitErr.Message)
+		}
+	}
+}
+
+func TestRawJSRuntimeHydrateSuggestionAvoidsReleasedLease(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.Actions.Workflow = ".github/workflows/hydrate.yml"
+	target := SSHTarget{TargetOS: targetLinux}
+	got := rawJSRuntimeHydrateSuggestion(cfg, target, "cbx_released", true, false, false)
+	if strings.Contains(got, "cbx_released") || !strings.Contains(got, "--keep") {
+		t.Fatalf("suggestion=%q should not target released lease", got)
+	}
+	got = rawJSRuntimeHydrateSuggestion(cfg, target, "cbx_kept", true, true, false)
+	if !strings.Contains(got, "cbx_kept") {
+		t.Fatalf("suggestion=%q should target kept lease", got)
+	}
+}
+
+func TestPrintCommandNotFoundHint(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.Actions.Workflow = ".github/workflows/hydrate.yml"
+	var out bytes.Buffer
+	printCommandNotFoundHint(&out, cfg, SSHTarget{TargetOS: targetLinux}, "cbx_123", []string{"pnpm", "test"}, false, 127, false, "crabbox actions hydrate --id cbx_123 --provider aws")
+	got := out.String()
+	for _, want := range []string{"exit 127", "pnpm", "crabbox actions hydrate --id cbx_123"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("hint missing %q in %q", want, got)
+		}
+	}
+}
+
+func TestPrintCommandNotFoundHintAvoidsReleasedLease(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.Actions.Workflow = ".github/workflows/hydrate.yml"
+	var out bytes.Buffer
+	suggestion := rawJSRuntimeHydrateSuggestion(cfg, SSHTarget{TargetOS: targetLinux}, "cbx_released", true, false, false)
+	printCommandNotFoundHint(&out, cfg, SSHTarget{TargetOS: targetLinux}, "cbx_released", []string{"pnpm", "test"}, false, 127, false, suggestion)
+	got := out.String()
+	if strings.Contains(got, "cbx_released") || !strings.Contains(got, "--keep") {
+		t.Fatalf("hint should avoid released lease and suggest --keep, got %q", got)
 	}
 }
 

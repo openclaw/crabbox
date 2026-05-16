@@ -232,6 +232,117 @@ func hydrateCommandSuggestion(cfg Config, target SSHTarget, leaseID string, supp
 	return command
 }
 
+func probeMissingRemoteTools(ctx context.Context, target SSHTarget, tools []string) ([]string, error) {
+	if len(tools) == 0 {
+		return nil, nil
+	}
+	command := remoteMissingToolsCommand(tools)
+	if isWindowsNativeTarget(target) {
+		command = windowsRemoteMissingToolsCommand(tools)
+	}
+	out, err := runSSHCombinedOutput(ctx, target, command)
+	if err != nil {
+		return nil, err
+	}
+	return parseMissingRemoteToolsOutput(out), nil
+}
+
+const missingRemoteToolPrefix = "__crabbox_missing_tool__:"
+
+func remoteMissingToolsCommand(tools []string) string {
+	var b strings.Builder
+	b.WriteString("for tool in")
+	for _, tool := range tools {
+		b.WriteString(" ")
+		b.WriteString(shellQuote(tool))
+	}
+	b.WriteString(`; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf '` + missingRemoteToolPrefix + `%s\n' "$tool"
+  fi
+done
+`)
+	return "bash -lc " + shellQuote(b.String())
+}
+
+func windowsRemoteMissingToolsCommand(tools []string) string {
+	var b strings.Builder
+	b.WriteString("foreach ($tool in @(")
+	for i, tool := range tools {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(psQuote(tool))
+	}
+	b.WriteString(`)) {
+  if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+    Write-Output (` + psQuote(missingRemoteToolPrefix) + ` + $tool)
+  }
+}
+`)
+	return powershellCommand(b.String())
+}
+
+func parseMissingRemoteToolsOutput(value string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, line := range strings.Split(value, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, missingRemoteToolPrefix) {
+			continue
+		}
+		line = strings.TrimPrefix(line, missingRemoteToolPrefix)
+		if line == "" || seen[line] {
+			continue
+		}
+		seen[line] = true
+		out = append(out, line)
+	}
+	return out
+}
+
+func rawJSRuntimeMissingError(cfg Config, missing []string, command []string, shellMode bool, hydrateSuggestion string) error {
+	parts := []string{
+		fmt.Sprintf("remote raw workspace missing JS runtime tool(s): %s", strings.Join(missing, ",")),
+		fmt.Sprintf("command starts with %q and would fail before project code runs", commandStartForMessage(command, shellMode)),
+	}
+	if hydrateSuggestion != "" {
+		parts = append(parts, "hydrate first: "+hydrateSuggestion)
+	} else if strings.TrimSpace(cfg.Actions.Workflow) == "" {
+		parts = append(parts, "configure actions.workflow and hydrate the lease first")
+	}
+	parts = append(parts, "or include Node/Corepack/package-manager setup before the command")
+	parts = append(parts, "or choose a provider/image with the JS toolchain")
+	return exit(5, "%s", strings.Join(parts, "; "))
+}
+
+func printCommandNotFoundHint(w io.Writer, cfg Config, target SSHTarget, leaseID string, command []string, shellMode bool, exitCode int, hydrated bool, hydrateSuggestion string) {
+	if w == nil || exitCode != 127 || hydrated {
+		return
+	}
+	tools := commandRuntimePreflightTools(command, shellMode)
+	if len(tools) == 0 {
+		return
+	}
+	suggestion := ""
+	if strings.TrimSpace(cfg.Actions.Workflow) != "" && hydrateSuggestion != "" {
+		suggestion = "; hydrate first: " + hydrateSuggestion
+	}
+	fmt.Fprintf(w, "hint: exit 127 usually means command not found; JS runtime tool(s) needed: %s%s; or include runtime setup before the command\n", strings.Join(tools, ","), suggestion)
+}
+
+func commandStartForMessage(command []string, shellMode bool) string {
+	tools := commandRuntimePreflightTools(command, shellMode)
+	if len(tools) > 0 {
+		return tools[0]
+	}
+	words := commandWords(command, shellMode)
+	if len(words) == 0 {
+		return ""
+	}
+	return commandBase(cleanCommandWord(words[0]))
+}
+
 func remoteCapabilityPreflightCommand(workdir string, env map[string]string, envFiles []string, tools []string) string {
 	script := `printf 'user=%s\n' "$(id -un 2>/dev/null || whoami 2>/dev/null || printf unknown)"
 printf 'cwd=%s\n' "$(pwd -P 2>/dev/null || pwd)"

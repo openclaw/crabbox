@@ -40,6 +40,7 @@
 
 ### Fixed
 
+- Fixed raw SSH-provider JS package command failures so Crabbox probes obvious `pnpm`, `npm`, `node`, `corepack`, `yarn`, and `bun` entrypoints before syncing and fails with hydration/setup guidance instead of an empty `exit 127` tail.
 - Fixed macOS image lifecycle region-preflight blockers so they preserve guarded IAM helper remediation commands from the region preflight evidence instead of falling back to manual account-match snippets.
 - Fixed macOS image lifecycle cleanup so script-allocated EC2 Mac Dedicated Hosts are released from failure traps when host release is requested.
 - Fixed EC2 Mac Dedicated Host allocation and release handling so paid host IDs returned by AWS are not retried in another availability zone after post-allocation describe failures, and failed `ReleaseHosts` results are surfaced instead of reported as released.

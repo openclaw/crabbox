@@ -448,6 +448,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	}
 	contextPrinted := false
 	preflightPrinted := false
+	rawJSRuntimePreflightDone := false
 	printContext := func(currentTarget SSHTarget) {
 		if contextPrinted {
 			return
@@ -469,6 +470,47 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		hydrateSupported := supportsActionsRunnerTarget(hydrateTarget)
 		printRemoteCapabilityPreflight(ctx, a.Stderr, cfg, currentTarget, leaseID, workdir, remoteRunEnvFiles(actionsEnvFile, profileEnvFile), hydratedByActions, actionsURL, hydrateSupported, envSelection.Inline)
 		preflightPrinted = true
+	}
+	preflightRawJSRuntime := func(currentTarget SSHTarget) error {
+		if rawJSRuntimePreflightDone {
+			return nil
+		}
+		if hydratedByActions || script != nil || *syncOnly {
+			rawJSRuntimePreflightDone = true
+			return nil
+		}
+		if runEnvProvidesPath(envSelection.Effective, currentTarget) {
+			rawJSRuntimePreflightDone = true
+			return nil
+		}
+		tools := commandRuntimePreflightTools(command, *shellMode)
+		if len(tools) == 0 {
+			rawJSRuntimePreflightDone = true
+			return nil
+		}
+		missing, err := probeMissingRemoteTools(ctx, currentTarget, tools)
+		if err != nil {
+			return exit(5, "remote JS runtime preflight failed before sync: %v", err)
+		}
+		if len(missing) == 0 {
+			rawJSRuntimePreflightDone = true
+			return nil
+		}
+		if *keepOnFailure {
+			if acquired && !*keep {
+				keepFailedLease = true
+			}
+			printKeepOnFailureSSHHint(a.Stderr, cfg, leaseID, server, currentTarget)
+		}
+		hydrateTarget := currentTarget
+		if hydrateTarget.TargetOS == "" {
+			hydrateTarget.TargetOS = cfg.TargetOS
+		}
+		if hydrateTarget.WindowsMode == "" {
+			hydrateTarget.WindowsMode = cfg.WindowsMode
+		}
+		suggestion := rawJSRuntimeHydrateSuggestion(cfg, hydrateTarget, leaseID, acquired, *keep, *keepOnFailure)
+		return rawJSRuntimeMissingError(cfg, missing, command, *shellMode, suggestion)
 	}
 	if !*noSync {
 		syncStart := time.Now()
@@ -498,6 +540,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 				return recordFailure(err)
 			}
 			exitNodeEgressChecked = true
+		}
+		if err := preflightRawJSRuntime(target); err != nil {
+			return recordFailure(err)
 		}
 		recorder.CaptureTelemetryStart(ctx, target)
 		recorder.StartTelemetrySampler(ctx, target)
@@ -708,6 +753,9 @@ afterSync:
 			return recordFailure(exit(7, "create remote workdir: %v", err))
 		}
 	}
+	if err := preflightRawJSRuntime(target); err != nil {
+		return recordFailure(err)
+	}
 	if len(envSelection.Profile) > 0 {
 		profileEnvFile = runEnvProfilePath(firstNonBlank(recorder.runID, leaseID, "run"))
 		envHelperPath := ""
@@ -899,6 +947,8 @@ afterSync:
 			}
 			printKeepOnFailureSSHHint(a.Stderr, cfg, leaseID, server, target)
 		}
+		hydrateSuggestion := rawJSRuntimeHydrateSuggestion(cfg, target, leaseID, acquired, *keep, *keepOnFailure)
+		printCommandNotFoundHint(a.Stderr, cfg, target, leaseID, command, *shellMode, code, hydratedByActions, hydrateSuggestion)
 		printFailureTail(a.Stderr, "stdout", stdoutTail, *captureStdout)
 		printFailureTail(a.Stderr, "stderr", stderrTail, *captureStderr)
 		return recordFailure(ExitError{Code: code, Message: fmt.Sprintf("remote command exited %d", code)})
@@ -1010,27 +1060,342 @@ func shouldSeedRemotePruneManifest(hydratedByActions, fullResync bool) bool {
 }
 
 func commandNeedsHydrationHint(command []string, shellMode bool) bool {
-	if len(command) == 0 {
-		return false
+	return len(commandRuntimePreflightTools(command, shellMode)) > 0
+}
+
+func rawJSRuntimeHydrateSuggestion(cfg Config, target SSHTarget, leaseID string, acquired, keep, keepOnFailure bool) string {
+	if strings.TrimSpace(cfg.Actions.Workflow) == "" {
+		return ""
 	}
-	words := command
-	if shellMode || len(command) == 1 {
-		words = strings.Fields(strings.Join(command, " "))
+	if !acquired || keep || keepOnFailure {
+		return hydrateCommandSuggestion(cfg, target, leaseID, supportsActionsRunnerTarget(target))
 	}
-	for len(words) > 0 && words[0] == "env" {
-		words = words[1:]
-		for len(words) > 0 && strings.Contains(words[0], "=") {
-			words = words[1:]
+	return "rerun with --keep and then hydrate the kept lease"
+}
+
+func commandRuntimePreflightTools(command []string, shellMode bool) []string {
+	words := commandWords(command, shellMode)
+	if shellWordsContainFailureFallback(words) {
+		return nil
+	}
+	var tools []string
+	for len(words) > 0 {
+		segment, rest := nextShellCommandSegment(words)
+		tool, skip := commandSegmentRuntimePreflightTool(segment)
+		if skip {
+			if len(tools) == 0 {
+				return nil
+			}
+			return tools
 		}
+		if tool != "" {
+			tools = appendUniqueStrings(tools, tool)
+		}
+		words = rest
 	}
-	for _, word := range words {
-		word = strings.Trim(word, "'\";|&()")
-		switch word {
-		case "pnpm", "npm", "node", "npx", "corepack", "yarn", "bun":
+	return tools
+}
+
+func commandSegmentRuntimePreflightTool(words []string) (tool string, skip bool) {
+	var customPath bool
+	words, customPath = stripCommandEnvPrefixes(words)
+	if customPath {
+		return "", true
+	}
+	words = stripSudoCommandPrefix(words)
+	words, customPath = stripCommandEnvPrefixes(words)
+	if customPath {
+		return "", true
+	}
+	if len(words) == 0 {
+		return "", false
+	}
+	first := cleanCommandWord(words[0])
+	if strings.Contains(first, "/") && !strings.HasPrefix(first, "/") {
+		return "", true
+	}
+	base := commandBase(first)
+	if commandSegmentSetsPath(base, words[1:]) {
+		return "", true
+	}
+	if commandSegmentSetsUpJSRuntime(base, words[1:]) {
+		return "", true
+	}
+	switch base {
+	case "pnpm", "npm", "npx", "corepack", "yarn", "bun":
+		return first, false
+	case "node":
+		return first, false
+	}
+	if commandMayInstallRuntime(base) {
+		return "", true
+	}
+	return "", false
+}
+
+func runEnvProvidesPath(env map[string]string, target SSHTarget) bool {
+	for key := range env {
+		if key == "PATH" || isWindowsNativeTarget(target) && strings.EqualFold(key, "PATH") {
 			return true
 		}
 	}
 	return false
+}
+
+func stripCommandEnvPrefixes(words []string) ([]string, bool) {
+	for len(words) > 0 && commandBase(cleanCommandWord(words[0])) == "env" {
+		var customPath bool
+		words, customPath = stripEnvCommandPrefix(words[1:])
+		if customPath {
+			return nil, true
+		}
+	}
+	for len(words) > 0 && shellAssignmentWord(words[0]) {
+		if shellAssignmentKey(words[0]) == "PATH" {
+			return nil, true
+		}
+		words = words[1:]
+	}
+	return words, false
+}
+
+func commandSegmentSetsPath(base string, args []string) bool {
+	if base != "export" {
+		return false
+	}
+	for _, arg := range args {
+		if shellAssignmentWord(cleanCommandWord(arg)) && shellAssignmentKey(cleanCommandWord(arg)) == "PATH" {
+			return true
+		}
+	}
+	return false
+}
+
+func commandSegmentSetsUpJSRuntime(base string, args []string) bool {
+	switch base {
+	case "corepack":
+		return len(args) > 0 && (cleanCommandWord(args[0]) == "enable" || cleanCommandWord(args[0]) == "prepare")
+	case "npm":
+		if len(args) == 0 {
+			return false
+		}
+		action := cleanCommandWord(args[0])
+		if action != "install" && action != "i" && action != "add" {
+			return false
+		}
+		for _, arg := range args[1:] {
+			arg = cleanCommandWord(arg)
+			if arg == "-g" || arg == "--global" || strings.HasPrefix(arg, "--location=global") {
+				return true
+			}
+		}
+	case "yarn":
+		return len(args) >= 2 && cleanCommandWord(args[0]) == "global" && cleanCommandWord(args[1]) == "add"
+	}
+	return false
+}
+
+func stripSudoCommandPrefix(words []string) []string {
+	if len(words) == 0 || commandBase(cleanCommandWord(words[0])) != "sudo" {
+		return words
+	}
+	words = words[1:]
+	for len(words) > 0 {
+		word := cleanCommandWord(words[0])
+		if word == "--" {
+			return words[1:]
+		}
+		if word == "-E" || word == "-n" || word == "-S" || word == "-H" || word == "-k" || word == "-v" {
+			words = words[1:]
+			continue
+		}
+		if word == "-u" || word == "-g" || word == "-C" || word == "-p" || word == "-h" {
+			if len(words) < 2 {
+				return nil
+			}
+			words = words[2:]
+			continue
+		}
+		if strings.HasPrefix(word, "-u") || strings.HasPrefix(word, "-g") || strings.HasPrefix(word, "-C") || strings.HasPrefix(word, "-p") || strings.HasPrefix(word, "-h") {
+			words = words[1:]
+			continue
+		}
+		if strings.HasPrefix(word, "-") {
+			return nil
+		}
+		return words
+	}
+	return nil
+}
+
+func nextShellCommandSegment(words []string) ([]string, []string) {
+	for i, word := range words {
+		if isShellCommandSeparator(word) {
+			return words[:i], words[i+1:]
+		}
+	}
+	return words, nil
+}
+
+func isShellCommandSeparator(word string) bool {
+	switch strings.TrimSpace(word) {
+	case "&&", ";", "|":
+		return true
+	default:
+		return false
+	}
+}
+
+func commandMayInstallRuntime(base string) bool {
+	switch base {
+	case "apt", "apt-get", "apk", "brew", "dnf", "yum", "curl", "wget", "mise", "asdf", "volta", "nvm", "source", ".", "bash", "sh", "zsh":
+		return true
+	default:
+		return false
+	}
+}
+
+func shellWordsContainFailureFallback(words []string) bool {
+	for _, word := range words {
+		if strings.TrimSpace(word) == "||" {
+			return true
+		}
+	}
+	return false
+}
+
+func stripEnvCommandPrefix(words []string) ([]string, bool) {
+	for len(words) > 0 {
+		word := cleanCommandWord(words[0])
+		if shellAssignmentWord(word) {
+			if shellAssignmentKey(word) == "PATH" {
+				return nil, true
+			}
+			words = words[1:]
+			continue
+		}
+		if word == "--" {
+			return words[1:], false
+		}
+		if word == "-u" || word == "--unset" || word == "-C" || word == "--chdir" {
+			if len(words) < 2 {
+				return nil, false
+			}
+			words = words[2:]
+			continue
+		}
+		if word == "-S" || word == "--split-string" {
+			return nil, false
+		}
+		if strings.HasPrefix(word, "--unset=") || strings.HasPrefix(word, "--chdir=") {
+			words = words[1:]
+			continue
+		}
+		if word == "-i" || word == "-" || word == "--ignore-environment" || word == "-0" || word == "--null" {
+			words = words[1:]
+			continue
+		}
+		if strings.HasPrefix(word, "-") {
+			return nil, false
+		}
+		return words, false
+	}
+	return nil, false
+}
+
+func commandWords(command []string, shellMode bool) []string {
+	if len(command) == 0 {
+		return nil
+	}
+	if shellMode || len(command) == 1 {
+		return shellCommandWords(strings.Join(command, " "))
+	}
+	return append([]string(nil), command...)
+}
+
+func shellCommandWords(value string) []string {
+	var words []string
+	var current strings.Builder
+	var quote rune
+	flush := func() {
+		if current.Len() == 0 {
+			return
+		}
+		words = append(words, current.String())
+		current.Reset()
+	}
+	for i, r := range value {
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+				continue
+			}
+			current.WriteRune(r)
+			continue
+		}
+		if r == '\'' || r == '"' {
+			quote = r
+			continue
+		}
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			flush()
+			continue
+		}
+		if i > 0 && ((value[i-1] == '&' && r == '&') || (value[i-1] == '|' && r == '|')) {
+			continue
+		}
+		if r == ';' || r == '|' {
+			flush()
+			if r == '|' && i+1 < len(value) && value[i+1] == '|' {
+				words = append(words, "||")
+				continue
+			}
+			words = append(words, string(r))
+			continue
+		}
+		if r == '&' && i+1 < len(value) && value[i+1] == '&' {
+			flush()
+			words = append(words, "&&")
+			continue
+		}
+		current.WriteRune(r)
+	}
+	flush()
+	return words
+}
+
+func shellAssignmentWord(word string) bool {
+	if strings.HasPrefix(word, "-") {
+		return false
+	}
+	idx := strings.Index(word, "=")
+	if idx <= 0 {
+		return false
+	}
+	name := word[:idx]
+	for i, r := range name {
+		if !(r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func shellAssignmentKey(word string) string {
+	key, _, _ := strings.Cut(word, "=")
+	return key
+}
+
+func cleanCommandWord(word string) string {
+	word = strings.TrimSpace(word)
+	return strings.Trim(word, "'\";|&()")
+}
+
+func commandBase(word string) string {
+	if idx := strings.LastIndex(word, "/"); idx >= 0 {
+		word = word[idx+1:]
+	}
+	return word
 }
 
 func gitHydrateBaseSHA(repo Repo, baseRef string) string {
