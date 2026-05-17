@@ -2,6 +2,10 @@
 
 ## 0.15.1 - Unreleased
 
+### Added
+
+- Added `provider: exe-dev` delegated runs against the stateless [exe.dev](https://exe.dev) `POST /exec` shell endpoint, including env-only auth via `EXE_API_KEY` / `CRABBOX_EXE_API_KEY`, `--exe-dev-url` for custom endpoints, docs, and no-live-credential tests.
+
 ## 0.15.0 - 2026-05-17
 
 ### Added
