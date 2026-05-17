@@ -789,6 +789,22 @@ func TestRunArtifactCollectScriptRecursiveGlobPreservesPathSegments(t *testing.T
 	}
 }
 
+func TestArtifactGlobSearchRootUsesLiteralPrefix(t *testing.T) {
+	tests := map[string]string{
+		".artifacts/**/*.xml": ".artifacts",
+		"foo/**/bar/*.txt":    "foo",
+		"foo/bar*.txt":        "foo",
+		"foo*/*.txt":          ".",
+		"**/*.xml":            ".",
+		"result.xml":          ".",
+	}
+	for glob, want := range tests {
+		if got := artifactGlobSearchRoot(glob); got != want {
+			t.Fatalf("artifactGlobSearchRoot(%q)=%q, want %q", glob, got, want)
+		}
+	}
+}
+
 func tarGzNames(t *testing.T, path string) []string {
 	t.Helper()
 	file, err := os.Open(path)

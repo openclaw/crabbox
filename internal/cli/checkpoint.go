@@ -541,6 +541,9 @@ func deleteCheckpoint(ctx context.Context, store checkpointStore, id string, loc
 			if err != nil {
 				return err
 			}
+			if err := client.GuardAccount(ctx, record.Native.AccountID); err != nil {
+				return err
+			}
 			if len(record.Native.SnapshotIDs) == 0 {
 				if image, err := client.GetImageCheckpoint(ctx, providerID); err == nil && len(image.SnapshotIDs) > 0 {
 					record.Native.SnapshotIDs = image.SnapshotIDs

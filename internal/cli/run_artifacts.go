@@ -101,11 +101,43 @@ func runArtifactCollectScript(workdir, remotePath string, globs []string) string
 	for _, glob := range globs {
 		b.WriteString("for f in " + glob + "; do add_artifact_file \"$f\"; done\n")
 		if strings.Contains(glob, "**") {
-			b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; while IFS= read -r -d '' f; do rel=${f#./}; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then add_artifact_file \"$f\"; fi; done < <(find . \\( -type f -o -type l \\) -print0)\n")
+			if strings.Contains(glob, "**/") {
+				b.WriteString("for f in " + strings.Replace(glob, "**/", "", 1) + "; do add_artifact_file \"$f\"; done\n")
+			}
+			searchRoot := artifactGlobSearchRoot(glob)
+			b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(searchRoot) + "; if [ -e \"$artifact_root\" ]; then while IFS= read -r -d '' f; do rel=${f#./}; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then add_artifact_file \"$f\"; fi; done < <(find \"$artifact_root\" \\( -path ./.git -o -path ./.git/* -o -path ./.crabbox -o -path ./.crabbox/* -o -path .git -o -path .git/* -o -path .crabbox -o -path .crabbox/* \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
 		}
 	}
 	b.WriteString("if [ ${#files[@]} -eq 0 ]; then printf 'warning: no artifact matches\\n' >&2; tar -czf " + shellQuote(remotePath) + " --files-from /dev/null; else tar -czf " + shellQuote(remotePath) + " -- \"${files[@]}\"; fi\n")
 	return b.String()
+}
+
+func artifactGlobSearchRoot(glob string) string {
+	glob = strings.TrimSpace(filepath.ToSlash(glob))
+	glob = strings.TrimPrefix(glob, "./")
+	if glob == "" {
+		return "."
+	}
+	firstMeta := strings.IndexAny(glob, "*?")
+	if firstMeta < 0 {
+		dir := filepath.ToSlash(filepath.Dir(glob))
+		if dir == "" {
+			return "."
+		}
+		return dir
+	}
+	prefix := strings.TrimRight(glob[:firstMeta], "/")
+	if prefix == "" {
+		return "."
+	}
+	dir := filepath.ToSlash(filepath.Dir(prefix))
+	if dir == "." && strings.HasSuffix(glob[:firstMeta], "/") {
+		return prefix
+	}
+	if dir == "." && !strings.Contains(prefix, "/") {
+		return "."
+	}
+	return dir
 }
 
 func artifactGlobRegex(glob string) string {
