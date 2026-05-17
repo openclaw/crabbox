@@ -464,6 +464,28 @@ func TestCreateDirectAWSAMICheckpointValidatesConfigBeforePreparingSource(t *tes
 	}
 }
 
+func TestWaitForDirectAWSImagePreservesAccountID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if action := r.Form.Get("Action"); action != "DescribeImages" {
+			writeEC2Error(w, "Unexpected", action, http.StatusBadRequest)
+			return
+		}
+		writeEC2XML(w, `<DescribeImagesResponse><imagesSet><item><imageId>ami-12345678</imageId><name>checkpoint</name><imageState>available</imageState></item></imagesSet></DescribeImagesResponse>`)
+	}))
+	defer server.Close()
+
+	image, err := waitForDirectAWSImage(context.Background(), testAWSClient(server.URL), "ami-12345678", "123456789012", time.Second, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if image.AccountID != "123456789012" {
+		t.Fatalf("AccountID=%q, want preserved caller account", image.AccountID)
+	}
+}
+
 func TestApplyNativeImageCheckpointRecordPersistsSnapshotIDs(t *testing.T) {
 	record := checkpointRecord{Kind: checkpointKindArchive, Provider: "aws"}
 	applyNativeImageCheckpointRecord(&record, CoordinatorImage{

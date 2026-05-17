@@ -1122,7 +1122,7 @@ func (a App) createDirectAWSAMICheckpoint(ctx context.Context, cfg Config, serve
 		return CoordinatorImage{}, err
 	}
 	if wait {
-		waited, err := waitForDirectAWSImage(ctx, client, image.ID, waitTimeout, a.Stderr)
+		waited, err := waitForDirectAWSImage(ctx, client, image.ID, image.AccountID, waitTimeout, a.Stderr)
 		if err != nil {
 			return image, err
 		}
@@ -1131,13 +1131,16 @@ func (a App) createDirectAWSAMICheckpoint(ctx context.Context, cfg Config, serve
 	return image, nil
 }
 
-func waitForDirectAWSImage(ctx context.Context, client *AWSClient, imageID string, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
+func waitForDirectAWSImage(ctx context.Context, client *AWSClient, imageID, accountID string, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
 	deadline := time.Now().Add(timeout)
 	var last CoordinatorImage
 	for {
 		image, err := client.GetImageCheckpoint(ctx, imageID)
 		if err != nil {
 			return CoordinatorImage{}, err
+		}
+		if image.AccountID == "" {
+			image.AccountID = accountID
 		}
 		last = image
 		state := strings.ToLower(image.State)
