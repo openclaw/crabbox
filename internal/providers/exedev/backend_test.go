@@ -136,6 +136,72 @@ func TestExeDevExecSurfacesNon2xxAsAPIError(t *testing.T) {
 	}
 }
 
+func TestExeDevExecMaps422ToCommandFailure(t *testing.T) {
+	// Per https://exe.dev/docs/https-api, HTTP 422 means the command ran but
+	// returned a non-zero exit code. The body should be streamed to stdout
+	// and the call should return a non-zero exit with exeDevCommandFailedError.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, "missing arguments\n")
+	}))
+	defer server.Close()
+
+	cfg := Config{}
+	cfg.ExeDev.APIKey = "test-key"
+	cfg.ExeDev.APIURL = server.URL
+	client, err := newExeDevClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	code, err := client.Exec(context.Background(), "new", &stdout, io.Discard)
+	if err == nil {
+		t.Fatal("Exec accepted 422 response")
+	}
+	cmdErr, ok := err.(*exeDevCommandFailedError)
+	if !ok {
+		t.Fatalf("err = %T, want *exeDevCommandFailedError", err)
+	}
+	if !strings.Contains(cmdErr.Body, "missing arguments") {
+		t.Fatalf("body = %q, want missing arguments snippet", cmdErr.Body)
+	}
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stdout.String(), "missing arguments") {
+		t.Fatalf("stdout = %q, want command output body", stdout.String())
+	}
+}
+
+func TestExeDevExecSurfaces504AsAPIError(t *testing.T) {
+	// Per https://exe.dev/docs/https-api, HTTP 504 means the command exceeded
+	// the 30s timeout. It should surface as a transport-level API error rather
+	// than a clean exit, so callers can distinguish it from command failures.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "timeout", http.StatusGatewayTimeout)
+	}))
+	defer server.Close()
+
+	cfg := Config{}
+	cfg.ExeDev.APIKey = "test-key"
+	cfg.ExeDev.APIURL = server.URL
+	client, err := newExeDevClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Exec(context.Background(), "sleep 60", io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("Exec accepted 504 response")
+	}
+	apiErr, ok := err.(*exeDevAPIError)
+	if !ok {
+		t.Fatalf("err = %T, want *exeDevAPIError", err)
+	}
+	if apiErr.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want 504", apiErr.StatusCode)
+	}
+}
+
 func TestExeDevRunRequiresNoSync(t *testing.T) {
 	backend := &exeDevBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
 	_, err := backend.Run(context.Background(), RunRequest{Command: []string{"whoami"}})

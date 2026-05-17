@@ -6,6 +6,10 @@
 
 - Added `provider: exe-dev` delegated runs against the stateless [exe.dev](https://exe.dev) `POST /exec` shell endpoint, including env-only auth via `EXE_API_KEY` / `CRABBOX_EXE_API_KEY`, `--exe-dev-url` for custom endpoints, docs, and no-live-credential tests.
 
+### Fixed
+
+- Mapped exe.dev `HTTP 422` to a command-exit failure (per [exe.dev/docs/https-api](https://exe.dev/docs/https-api)) so non-zero exit codes from `POST /exec` surface as `crabbox run` exit codes instead of a generic API error. Documented the 30-second timeout, 64KB body limit, and JSON-response semantics in `docs/providers/exe-dev.md`.
+
 ## 0.15.0 - 2026-05-17
 
 ### Added

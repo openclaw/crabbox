@@ -7,9 +7,12 @@ Read when:
 - changing `internal/providers/exedev`.
 
 [exe.dev](https://exe.dev) is a delegated run provider with a single stateless
-exec endpoint. Crabbox `POST`s the user command as the request body and streams
-the response back as stdout. There is no sandbox lifecycle: every `run`
-constructs a fresh request and the service owns the execution environment.
+exec endpoint (`POST /exec`, see <https://exe.dev/docs/https-api>). Crabbox
+`POST`s the user command as the request body and writes the response body to
+stdout. The exe.dev API always returns JSON output (equivalent to `--json`);
+the body is the SSH command output, streamed verbatim. There is no sandbox
+lifecycle: every `run` constructs a fresh request and the service owns the
+execution environment.
 
 ## When To Use
 
@@ -87,8 +90,19 @@ CRABBOX_EXE_API_URL  (or EXE_API_URL)
 - The provider must run with `--no-sync`; there is no documented file upload
   endpoint, and the service does not maintain a working directory between
   requests.
-- A 2xx response is treated as exit code 0. Non-2xx responses are surfaced as
-  `exeDevAPIError`, mirroring the error shape used by other delegated providers.
+- `/exec` has a 30-second server-side timeout (HTTP 504) and a 64KB request
+  body limit (HTTP 413). It has no stdin and no pty, so interactive commands
+  will not work.
+- Response responses are always JSON-formatted command output (the API enables
+  `--json` server-side). Pipe stdout through `jq` if you need to extract
+  individual fields.
+- Status mapping, per <https://exe.dev/docs/https-api>:
+  - `2xx` -> command exited 0.
+  - `422` -> command ran but exited non-zero; the body is streamed to stdout
+    and `crabbox` exits non-zero (surfaced as `exeDevCommandFailedError`).
+  - Other non-2xx (`400`, `401`, `403`, `404`, `405`, `413`, `429`, `500`,
+    `504`) are transport-level failures surfaced as `exeDevAPIError`,
+    mirroring the error shape used by other delegated providers.
 
 Related docs:
 

@@ -34,6 +34,20 @@ func (e *exeDevAPIError) Error() string {
 	return e.Status + ": " + e.Body
 }
 
+// exeDevCommandFailedError signals that the exe.dev API ran the command
+// successfully (HTTP 422 per https://exe.dev/docs/https-api) but the command
+// itself exited non-zero. The body carries the error message from the command.
+type exeDevCommandFailedError struct {
+	Body string
+}
+
+func (e *exeDevCommandFailedError) Error() string {
+	if e.Body == "" {
+		return "command failed"
+	}
+	return "command failed: " + e.Body
+}
+
 func newExeDevClient(cfg Config, rt Runtime) (exeDevAPI, error) {
 	apiKey := strings.TrimSpace(cfg.ExeDev.APIKey)
 	if apiKey == "" {
@@ -64,26 +78,38 @@ func (c *exeDevClient) Exec(ctx context.Context, command string, stdout, stderr 
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "text/plain")
-	req.Header.Set("Accept", "application/octet-stream, text/plain, application/json")
+	req.Header.Set("Accept", "application/json, text/plain, application/octet-stream")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return 1, err
 	}
 	defer resp.Body.Close()
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	// Per https://exe.dev/docs/https-api, HTTP 422 means the command ran but
+	// returned a non-zero exit code; the response body contains the error
+	// message. Treat it as a command failure (the body is still part of the
+	// command's output) rather than a transport-level API error.
+	if resp.StatusCode == http.StatusUnprocessableEntity {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		if _, err := io.Copy(stdout, bytes.NewReader(data)); err != nil {
+			return 1, fmt.Errorf("read exe.dev exec body: %w", err)
+		}
+		return 1, &exeDevCommandFailedError{Body: strings.TrimSpace(string(data))}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return 1, &exeDevAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: strings.TrimSpace(string(data))}
 	}
-	if stdout == nil {
-		stdout = io.Discard
-	}
 	if _, err := io.Copy(stdout, resp.Body); err != nil {
 		return 1, fmt.Errorf("read exe.dev exec body: %w", err)
 	}
-	// exe.dev does not document a separate exit-code surface, so a 2xx response
-	// is treated as a successful command run; non-2xx is surfaced through
-	// exeDevAPIError above. If the service later returns an exit code via a
-	// trailer/header, parse it here.
+	// Per https://exe.dev/docs/https-api, JSON output is always enabled for
+	// API responses (equivalent to --json) and the returned body is the ssh
+	// command output. A 2xx response means the command exited 0; 422 (handled
+	// above) means non-zero exit; all other non-2xx statuses are transport
+	// errors surfaced through exeDevAPIError.
 	return 0, nil
 }
 

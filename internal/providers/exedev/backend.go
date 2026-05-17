@@ -2,6 +2,7 @@ package exedev
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -63,6 +64,14 @@ func (b *exeDevBackend) Run(ctx context.Context, req RunRequest) (RunResult, err
 		}
 	}
 	if execErr != nil {
+		var cmdFailed *exeDevCommandFailedError
+		if errors.As(execErr, &cmdFailed) {
+			// The remote command itself failed; the body has already been
+			// written to stdout. Surface a non-zero exit without wrapping the
+			// transport-level message, mirroring how other delegated providers
+			// propagate exit codes.
+			return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s run exited %d", providerName, result.ExitCode)}
+		}
 		return result, ExitError{Code: 1, Message: fmt.Sprintf("%s run failed: %v", providerName, execErr)}
 	}
 	if result.ExitCode != 0 {
