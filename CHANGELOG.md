@@ -11,6 +11,11 @@
 
 - Clarified WebVNC docs to include coordinator-backed AWS macOS desktop leases in the supported portal bridge surface.
 
+### Fixed
+
+- Fixed direct AWS AMI checkpoint inspect, delete, and fork paths so recorded account and direct-backend metadata are honored even after coordinator configuration changes.
+- Fixed recursive run artifact globs so `**` works on older Bash without crossing unintended path segments.
+
 ## 0.15.0 - 2026-05-17
 
 ### Added
