@@ -24,6 +24,7 @@ static SSH provider for existing machines.
 | [Daytona](daytona.md) | hybrid delegated run + SSH | Linux | Daytona snapshot sandboxes |
 | [Islo](islo.md) | delegated run | Linux | Islo-owned sandbox execution |
 | [E2B](e2b.md) | delegated run | Linux | E2B-owned sandbox execution |
+| [exe.dev](exe-dev.md) | delegated run | Linux | stateless `POST /exec` shell endpoint |
 | [Modal](modal.md) | delegated run | Linux | Modal Sandbox execution through the local Python client |
 | [Tensorlake](tensorlake.md) | delegated run | Linux | Tensorlake Firecracker sandbox execution via the `tensorlake` CLI |
 | [Cloudflare](cloudflare.md) | delegated run | Linux | Cloudflare execution through a Worker and container runner |
@@ -64,6 +65,8 @@ Proxmox and delegated providers do not use the Crabbox coordinator:
 - Daytona uses Daytona API and SDK/toolbox APIs.
 - Islo uses the Islo API and SDK auth.
 - E2B uses E2B's sandbox REST and envd APIs.
+- exe.dev uses a single bearer-authenticated `POST /exec` endpoint with the
+  command as the request body.
 - Modal uses the local Modal Python client and Modal Sandbox APIs.
 - Sprites uses the authenticated `sprite` CLI plus Sprites API.
 - Tensorlake uses the `tensorlake` CLI (`tensorlake sbx ...`) for sandbox lifecycle and command exec.
@@ -92,6 +95,7 @@ through the Sprites API and reaches SSH through `sprite proxy`.
 | Daytona | yes | yes | yes | no | archive via Daytona toolbox | no |
 | Islo | yes | yes | no | no | no | yes |
 | E2B | yes | yes | no | no | archive via E2B envd | no |
+| exe.dev | yes | no | no | no | no | no |
 | Modal | yes | yes | no | no | archive via Modal Sandbox exec | no |
 | Tensorlake | yes | yes | no | no | archive via `tensorlake sbx cp` | no |
 | Cloudflare | yes | yes | no | no | archive via Worker runner | no |

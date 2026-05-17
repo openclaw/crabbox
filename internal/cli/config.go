@@ -90,6 +90,7 @@ type Config struct {
 	Namespace           NamespaceConfig
 	Daytona             DaytonaConfig
 	E2B                 E2BConfig
+	ExeDev              ExeDevConfig
 	Islo                IsloConfig
 	Tensorlake          TensorlakeConfig
 	Modal               ModalConfig
@@ -185,6 +186,11 @@ type E2BConfig struct {
 	Template string
 	Workdir  string
 	User     string
+}
+
+type ExeDevConfig struct {
+	APIKey string
+	APIURL string
 }
 
 type IsloConfig struct {
@@ -494,6 +500,9 @@ func baseConfig() Config {
 			Template: "base",
 			Workdir:  "crabbox",
 		},
+		ExeDev: ExeDevConfig{
+			APIURL: "https://exe.dev",
+		},
 		Islo: IsloConfig{
 			BaseURL:  "https://api.islo.dev",
 			Image:    "docker.io/library/ubuntu:24.04",
@@ -574,6 +583,7 @@ type fileConfig struct {
 	Namespace        *fileNamespaceConfig               `yaml:"namespace,omitempty"`
 	Daytona          *fileDaytonaConfig                 `yaml:"daytona,omitempty"`
 	E2B              *fileE2BConfig                     `yaml:"e2b,omitempty"`
+	ExeDev           *fileExeDevConfig                  `yaml:"exeDev,omitempty"`
 	Islo             *fileIsloConfig                    `yaml:"islo,omitempty"`
 	Tensorlake       *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	Modal            *fileModalConfig                   `yaml:"modal,omitempty"`
@@ -758,6 +768,10 @@ type fileE2BConfig struct {
 	Template string `yaml:"template,omitempty"`
 	Workdir  string `yaml:"workdir,omitempty"`
 	User     string `yaml:"user,omitempty"`
+}
+
+type fileExeDevConfig struct {
+	APIURL string `yaml:"apiUrl,omitempty"`
 }
 
 type fileIsloConfig struct {
@@ -1524,6 +1538,11 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.E2B.User = file.E2B.User
 		}
 	}
+	if file.ExeDev != nil {
+		if file.ExeDev.APIURL != "" {
+			cfg.ExeDev.APIURL = file.ExeDev.APIURL
+		}
+	}
 	if file.Islo != nil {
 		if file.Islo.BaseURL != "" {
 			cfg.Islo.BaseURL = file.Islo.BaseURL
@@ -2159,6 +2178,8 @@ func applyEnv(cfg *Config) {
 	cfg.E2B.Template = getenv("CRABBOX_E2B_TEMPLATE", cfg.E2B.Template)
 	cfg.E2B.Workdir = getenv("CRABBOX_E2B_WORKDIR", cfg.E2B.Workdir)
 	cfg.E2B.User = getenv("CRABBOX_E2B_USER", cfg.E2B.User)
+	cfg.ExeDev.APIKey = getenv("CRABBOX_EXE_API_KEY", getenv("EXE_API_KEY", cfg.ExeDev.APIKey))
+	cfg.ExeDev.APIURL = getenv("CRABBOX_EXE_API_URL", getenv("EXE_API_URL", cfg.ExeDev.APIURL))
 	cfg.Islo.APIKey = getenv("CRABBOX_ISLO_API_KEY", getenv("ISLO_API_KEY", cfg.Islo.APIKey))
 	cfg.Islo.BaseURL = getenv("CRABBOX_ISLO_BASE_URL", getenv("ISLO_BASE_URL", cfg.Islo.BaseURL))
 	cfg.Islo.Image = getenv("CRABBOX_ISLO_IMAGE", cfg.Islo.Image)

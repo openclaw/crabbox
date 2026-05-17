@@ -48,6 +48,8 @@ Supported providers:
   execution.
 - [E2B](docs/providers/e2b.md) (`provider: e2b`): delegated E2B sandbox
   execution.
+- [exe.dev](docs/providers/exe-dev.md) (`provider: exe-dev`): delegated
+  stateless `POST /exec` execution against [exe.dev](https://exe.dev).
 - [Modal](docs/providers/modal.md) (`provider: modal`): delegated Modal
   Sandbox execution through the local Python client.
 - [Tensorlake](docs/providers/tensorlake.md) (`provider: tensorlake`):
