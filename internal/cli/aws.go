@@ -440,6 +440,17 @@ func (c *AWSClient) CreateImageCheckpoint(ctx context.Context, instanceID, name 
 	}, nil
 }
 
+func (c *AWSClient) ValidateImageCheckpointSource(ctx context.Context, instanceID string) (string, error) {
+	accountID, err := c.CallerAccountID(ctx)
+	if err != nil {
+		return "", err
+	}
+	if _, err := c.GetServer(ctx, instanceID); err != nil {
+		return "", err
+	}
+	return accountID, nil
+}
+
 func (c *AWSClient) GetImageCheckpoint(ctx context.Context, imageID string) (CoordinatorImage, error) {
 	out, err := c.ec2.DescribeImages(ctx, &ec2.DescribeImagesInput{
 		ImageIds: []string{imageID},

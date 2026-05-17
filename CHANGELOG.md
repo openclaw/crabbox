@@ -13,7 +13,7 @@
 
 ### Fixed
 
-- Fixed direct AWS AMI checkpoint inspect, delete, and fork paths so recorded account and direct-backend metadata are honored even after coordinator configuration changes.
+- Fixed direct AWS AMI checkpoint create, inspect, delete, and fork paths so source instances are validated before host preparation and recorded account/direct-backend metadata is honored even after coordinator configuration changes.
 - Fixed recursive run artifact globs so `**` works on older Bash without crossing unintended path segments.
 
 ## 0.15.0 - 2026-05-17

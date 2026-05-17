@@ -1124,6 +1124,9 @@ func (a App) createDirectAWSAMICheckpoint(ctx context.Context, cfg Config, serve
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
+	if _, err := client.ValidateImageCheckpointSource(ctx, server.CloudID); err != nil {
+		return CoordinatorImage{}, err
+	}
 	if err := prepareNativeImageSource(ctx, target); err != nil {
 		return CoordinatorImage{}, err
 	}

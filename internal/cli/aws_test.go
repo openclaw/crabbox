@@ -92,6 +92,68 @@ func TestCreateImageCheckpointRecordsCallerAccount(t *testing.T) {
 	}
 }
 
+func TestValidateImageCheckpointSourceChecksAccountAndInstance(t *testing.T) {
+	var actions []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		action := r.Form.Get("Action")
+		actions = append(actions, action)
+		switch action {
+		case "GetCallerIdentity":
+			writeSTSXML(w, `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>123456789012</Account><Arn>arn:aws:iam::123456789012:user/test</Arn><UserId>AIDAEXAMPLE</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>`)
+		case "DescribeInstances":
+			writeEC2XML(w, `<DescribeInstancesResponse><reservationSet><item><instancesSet><item><instanceId>i-1234567890abcdef0</instanceId><instanceType>t3.micro</instanceType><ipAddress>203.0.113.44</ipAddress><instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`)
+		case "CreateImage":
+			t.Fatal("CreateImage must not be part of source validation")
+		default:
+			writeEC2Error(w, "Unexpected", action, http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	accountID, err := testAWSClient(server.URL).ValidateImageCheckpointSource(context.Background(), "i-1234567890abcdef0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accountID != "123456789012" {
+		t.Fatalf("accountID=%q, want caller account", accountID)
+	}
+	if got := strings.Join(actions, ","); got != "GetCallerIdentity,DescribeInstances" {
+		t.Fatalf("actions=%s, want GetCallerIdentity,DescribeInstances", got)
+	}
+}
+
+func TestValidateImageCheckpointSourceRejectsMissingInstance(t *testing.T) {
+	var sawDescribe bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		switch action := r.Form.Get("Action"); action {
+		case "GetCallerIdentity":
+			writeSTSXML(w, `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>123456789012</Account><Arn>arn:aws:iam::123456789012:user/test</Arn><UserId>AIDAEXAMPLE</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>`)
+		case "DescribeInstances":
+			sawDescribe = true
+			writeEC2XML(w, `<DescribeInstancesResponse><reservationSet></reservationSet></DescribeInstancesResponse>`)
+		case "CreateImage":
+			t.Fatal("CreateImage must not run when the source instance is missing")
+		default:
+			writeEC2Error(w, "Unexpected", action, http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	_, err := testAWSClient(server.URL).ValidateImageCheckpointSource(context.Background(), "i-missing")
+	if err == nil || !strings.Contains(err.Error(), "aws instance not found") {
+		t.Fatalf("err=%v, want missing instance validation error", err)
+	}
+	if !sawDescribe {
+		t.Fatal("DescribeInstances was not called")
+	}
+}
+
 func TestDeleteImageCheckpointRefusesNotFoundWithoutAccountID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
