@@ -47,6 +47,15 @@ func (b *exeDevBackend) Run(ctx context.Context, req RunRequest) (RunResult, err
 	fmt.Fprintf(b.rt.Stderr, "running on %s %s\n", providerName, strings.Join(req.Command, " "))
 	exitCode, execErr := client.Exec(ctx, command, b.rt.Stdout, b.rt.Stderr)
 	commandDuration := b.now().Sub(started)
+	// Distinguish a transport-level failure (exeDevAPIError, network errors)
+	// from a remote command exit. exeDevCommandFailedError already carries the
+	// command's non-zero exit code in exitCode; everything else gets wrapped as
+	// a generic "run failed" with exit=1.
+	var cmdFailed *exeDevCommandFailedError
+	commandExited := execErr == nil || errors.As(execErr, &cmdFailed)
+	if !commandExited {
+		exitCode = 1
+	}
 	result := RunResult{
 		ExitCode: exitCode,
 		Command:  commandDuration,
@@ -63,21 +72,14 @@ func (b *exeDevBackend) Run(ctx context.Context, req RunRequest) (RunResult, err
 			return result, err
 		}
 	}
-	if execErr != nil {
-		var cmdFailed *exeDevCommandFailedError
-		if errors.As(execErr, &cmdFailed) {
-			// The remote command itself failed; the body has already been
-			// written to stdout. Surface a non-zero exit without wrapping the
-			// transport-level message, mirroring how other delegated providers
-			// propagate exit codes.
-			return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s run exited %d", providerName, result.ExitCode)}
-		}
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("%s run failed: %v", providerName, execErr)}
+	var runErr error
+	switch {
+	case !commandExited:
+		runErr = ExitError{Code: 1, Message: fmt.Sprintf("%s run failed: %v", providerName, execErr)}
+	case result.ExitCode != 0:
+		runErr = ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s run exited %d", providerName, result.ExitCode)}
 	}
-	if result.ExitCode != 0 {
-		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s run exited %d", providerName, result.ExitCode)}
-	}
-	return result, nil
+	return result, runErr
 }
 
 func (b *exeDevBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {

@@ -87,10 +87,6 @@ func (c *exeDevClient) Exec(ctx context.Context, command string, stdout, stderr 
 	if stdout == nil {
 		stdout = io.Discard
 	}
-	// Per https://exe.dev/docs/https-api, HTTP 422 means the command ran but
-	// returned a non-zero exit code; the response body contains the error
-	// message. Treat it as a command failure (the body is still part of the
-	// command's output) rather than a transport-level API error.
 	if resp.StatusCode == http.StatusUnprocessableEntity {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		if _, err := io.Copy(stdout, bytes.NewReader(data)); err != nil {

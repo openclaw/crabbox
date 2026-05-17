@@ -252,6 +252,65 @@ func TestExeDevRunHappyPath(t *testing.T) {
 	}
 }
 
+func TestExeDevRunMaps422ToExitErrorWithoutTransportWrapper(t *testing.T) {
+	// 422 means the remote command ran but failed; Run() must surface "run
+	// exited N" (not "run failed: ..."), keep the body on stdout, and propagate
+	// the command's non-zero exit through ExitError.Code.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, "missing arguments\n")
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: providerName}
+	cfg.ExeDev.APIKey = "test-key"
+	cfg.ExeDev.APIURL = server.URL
+	var stdout bytes.Buffer
+	rt := Runtime{HTTP: server.Client(), Stdout: &stdout, Stderr: io.Discard}
+	backend := NewExeDevBackend(Provider{}.Spec(), cfg, rt).(*exeDevBackend)
+	result, err := backend.Run(context.Background(), RunRequest{Command: []string{"whoami"}, NoSync: true})
+	if err == nil {
+		t.Fatal("Run accepted 422 response")
+	}
+	if result.ExitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", result.ExitCode)
+	}
+	if !strings.Contains(err.Error(), "run exited") {
+		t.Fatalf("err = %v, want 'run exited' (not transport-wrapped)", err)
+	}
+	if strings.Contains(err.Error(), "run failed") {
+		t.Fatalf("err = %v, must not wrap as 'run failed'", err)
+	}
+	if !strings.Contains(stdout.String(), "missing arguments") {
+		t.Fatalf("stdout = %q, want command output body", stdout.String())
+	}
+}
+
+func TestExeDevRunMapsTransportFailureToRunFailed(t *testing.T) {
+	// Non-422 non-2xx responses (here: 504) are transport-level failures. Run()
+	// must surface them as "run failed: ..." with exit=1, not "run exited ...".
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "timeout", http.StatusGatewayTimeout)
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: providerName}
+	cfg.ExeDev.APIKey = "test-key"
+	cfg.ExeDev.APIURL = server.URL
+	rt := Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}
+	backend := NewExeDevBackend(Provider{}.Spec(), cfg, rt).(*exeDevBackend)
+	result, err := backend.Run(context.Background(), RunRequest{Command: []string{"whoami"}, NoSync: true})
+	if err == nil {
+		t.Fatal("Run accepted 504 response")
+	}
+	if result.ExitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", result.ExitCode)
+	}
+	if !strings.Contains(err.Error(), "run failed") {
+		t.Fatalf("err = %v, want 'run failed' transport wrapper", err)
+	}
+}
+
 func TestExeDevWarmupRejected(t *testing.T) {
 	backend := &exeDevBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
 	err := backend.Warmup(context.Background(), WarmupRequest{})
