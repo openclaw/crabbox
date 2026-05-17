@@ -153,7 +153,7 @@ if [[ "$quota_status" == "0" ]] && jq -e 'any(.[]; (.value // 0) >= 1)' "$artifa
 fi
 
 helper_profile_ok=true
-if grep -q 'no local AWS profile matches coordinator account' "$artifact_dir/evidence/iam-apply-dry-run.err" "$artifact_dir/evidence/quota-request-dry-run.err" 2>/dev/null; then
+if grep -Eq 'no local AWS profile matches coordinator account|local AWS account .* does not match coordinator account' "$artifact_dir/evidence/iam-apply-dry-run.err" "$artifact_dir/evidence/quota-request-dry-run.err" 2>/dev/null; then
   helper_profile_ok=false
 fi
 

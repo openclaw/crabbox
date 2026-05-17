@@ -192,3 +192,22 @@ test("macOS coordinator remediation audit blocks when required evidence failed",
   assert.ok(summary.blockers.includes("iam-apply-dry-run"));
   assert.ok(summary.blockers.includes("quota-request-dry-run"));
 });
+
+test("macOS coordinator remediation audit reports explicit profile account mismatch", async () => {
+  const ctx = await setup("123456789012");
+  const result = await runAudit(ctx, {
+    CRABBOX_FAKE_DRY_OK: "1",
+    CRABBOX_FAKE_QUOTA_VALUE: "1",
+    CRABBOX_FAKE_AWS_ACCOUNT: "999999999999",
+    CRABBOX_MACOS_REMEDIATION_PROFILE: "prod",
+  });
+
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  const summary = JSON.parse(await readFile(path.join(ctx.artifacts, "summary.json"), "utf8"));
+  assert.equal(summary.result, "blocked");
+  assert.equal(summary.ready.hostDryRun, true);
+  assert.equal(summary.ready.hostQuota, true);
+  assert.equal(summary.ready.localCoordinatorAWSProfile, false);
+  assert.ok(summary.blockers.includes("local-coordinator-aws-profile"));
+  assert.match(summary.evidence.iamApplyDryRun.stderrText, /does not match coordinator account/);
+});
