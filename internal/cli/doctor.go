@@ -9,11 +9,13 @@ import (
 )
 
 func (a App) doctor(ctx context.Context, args []string) error {
+	defaults := defaultConfig()
 	fs := newFlagSet("doctor", a.Stderr)
-	provider := fs.String("provider", defaultConfig().Provider, "provider: hetzner, aws, azure, gcp, proxmox, or ssh")
-	profile := fs.String("profile", defaultConfig().Profile, "configured profile for remote prerequisite checks")
+	provider := fs.String("provider", defaults.Provider, providerHelpAll())
+	profile := fs.String("profile", defaults.Profile, "configured profile for remote prerequisite checks")
 	id := fs.String("id", "", "remote lease id to inspect")
-	targetFlags := registerTargetFlags(fs, defaultConfig())
+	targetFlags := registerTargetFlags(fs, defaults)
+	providerFlags := registerProviderFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -49,6 +51,13 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
+		return err
+	}
+	providerDef, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return err
+	}
 	if *id != "" {
 		_, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, *id)
 		if err != nil {
@@ -77,52 +86,54 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		applyServerTypeFlagOverrides(&cfg, fs, "")
 	}
 	useCoordinator := false
-	if coord, coordinatorConfigured, err := newTargetCoordinatorClient(cfg); err != nil {
-		fmt.Fprintf(a.Stdout, "failed  coord    %v\n", err)
-		ok = false
-	} else if coordinatorConfigured {
-		useCoordinator = true
-		if err := coord.Health(ctx); err != nil {
+	if shouldUseCoordinator(cfg, providerDef.Spec()) {
+		if coord, coordinatorConfigured, err := newTargetCoordinatorClient(cfg); err != nil {
 			fmt.Fprintf(a.Stdout, "failed  coord    %v\n", err)
 			ok = false
-		} else {
-			fmt.Fprintf(a.Stdout, "ok      coord    %s access=%s\n", cfg.Coordinator, accessAuthState(cfg.Access))
-			if whoami, err := coord.Whoami(ctx); err != nil {
-				fmt.Fprintf(a.Stdout, "failed  broker   %v\n", err)
+		} else if coordinatorConfigured {
+			useCoordinator = true
+			if err := coord.Health(ctx); err != nil {
+				fmt.Fprintf(a.Stdout, "failed  coord    %v\n", err)
 				ok = false
 			} else {
-				fmt.Fprintf(a.Stdout, "ok      broker   auth=%s owner=%s org=%s default_type=%s\n", whoami.Auth, whoami.Owner, whoami.Org, cfg.ServerType)
-			}
-			if coordinatorProviderReadinessSupported(cfg.Provider) {
-				readiness, err := coord.ProviderReadiness(ctx, cfg.Provider)
-				if err == nil {
-					if readiness.Configured {
-						fmt.Fprintf(a.Stdout, "ok      provider provider=%s coordinator_secrets=ready\n", readiness.Provider)
-					} else {
-						fmt.Fprintf(a.Stdout, "failed  provider provider=%s missing=%s\n", readiness.Provider, strings.Join(readiness.Missing, ","))
-						ok = false
-					}
-				} else if !isCoordinatorNotFoundError(err) {
-					fmt.Fprintf(a.Stdout, "failed  provider %v\n", err)
+				fmt.Fprintf(a.Stdout, "ok      coord    %s access=%s\n", cfg.Coordinator, accessAuthState(cfg.Access))
+				if whoami, err := coord.Whoami(ctx); err != nil {
+					fmt.Fprintf(a.Stdout, "failed  broker   %v\n", err)
 					ok = false
+				} else {
+					fmt.Fprintf(a.Stdout, "ok      broker   auth=%s owner=%s org=%s default_type=%s\n", whoami.Auth, whoami.Owner, whoami.Org, cfg.ServerType)
 				}
-			}
-			if cfg.CoordAdminToken != "" {
-				adminCfg := cfg
-				adminCfg.CoordToken = cfg.CoordAdminToken
-				adminCoord, _, err := newCoordinatorClient(adminCfg)
-				if err != nil {
-					return err
-				}
-				if machines, err := adminCoord.Pool(ctx, cfg); err != nil {
-					if isCoordinatorUnauthorized(err) {
-						fmt.Fprintf(a.Stdout, "warning admin    pool list unauthorized; user broker checks still passed\n")
-					} else {
-						fmt.Fprintf(a.Stdout, "failed  admin    %v\n", err)
+				if coordinatorProviderReadinessSupported(cfg.Provider) {
+					readiness, err := coord.ProviderReadiness(ctx, cfg.Provider)
+					if err == nil {
+						if readiness.Configured {
+							fmt.Fprintf(a.Stdout, "ok      provider provider=%s coordinator_secrets=ready\n", readiness.Provider)
+						} else {
+							fmt.Fprintf(a.Stdout, "failed  provider provider=%s missing=%s\n", readiness.Provider, strings.Join(readiness.Missing, ","))
+							ok = false
+						}
+					} else if !isCoordinatorNotFoundError(err) {
+						fmt.Fprintf(a.Stdout, "failed  provider %v\n", err)
 						ok = false
 					}
-				} else {
-					fmt.Fprintf(a.Stdout, "ok      admin    provider=%s machines=%d\n", cfg.Provider, len(machines))
+				}
+				if cfg.CoordAdminToken != "" {
+					adminCfg := cfg
+					adminCfg.CoordToken = cfg.CoordAdminToken
+					adminCoord, _, err := newCoordinatorClient(adminCfg)
+					if err != nil {
+						return err
+					}
+					if machines, err := adminCoord.Pool(ctx, cfg); err != nil {
+						if isCoordinatorUnauthorized(err) {
+							fmt.Fprintf(a.Stdout, "warning admin    pool list unauthorized; user broker checks still passed\n")
+						} else {
+							fmt.Fprintf(a.Stdout, "failed  admin    %v\n", err)
+							ok = false
+						}
+					} else {
+						fmt.Fprintf(a.Stdout, "ok      admin    provider=%s machines=%d\n", cfg.Provider, len(machines))
+					}
 				}
 			}
 		}
@@ -142,6 +153,23 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stdout, "ok      ssh-key  per-lease\n")
 	}
 
+	doctorProvider, doctorSupported := providerDef.(DoctorProvider)
+	if doctorSupported {
+		doctor, err := doctorProvider.ConfigureDoctor(cfg, runtimeForApp(a))
+		if err != nil {
+			fmt.Fprintf(a.Stdout, "failed  provider provider=%s %v\n", providerDef.Name(), err)
+			ok = false
+		} else {
+			result, err := doctor.Doctor(ctx, DoctorRequest{})
+			if err != nil {
+				fmt.Fprintf(a.Stdout, "failed  provider provider=%s %v\n", doctor.Spec().Name, err)
+				ok = false
+			} else {
+				fmt.Fprintf(a.Stdout, "ok      provider provider=%s %s\n", result.Provider, result.Message)
+			}
+		}
+	}
+
 	if useCoordinator {
 		if !ok {
 			return exit(1, "doctor found problems")
@@ -149,7 +177,17 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	switch cfg.Provider {
+	if providerDef.Spec().Kind == ProviderKindDelegatedRun {
+		if !ok {
+			return exit(1, "doctor found problems")
+		}
+		if !doctorSupported {
+			fmt.Fprintf(a.Stdout, "skip    provider provider=%s direct_doctor=unsupported\n", providerDef.Name())
+		}
+		return nil
+	}
+
+	switch providerDef.Name() {
 	case "ssh", "static", "static-ssh":
 		if cfg.Static.Host == "" {
 			fmt.Fprintf(a.Stdout, "failed  static   missing static.host\n")
@@ -185,7 +223,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		} else {
 			fmt.Fprintf(a.Stdout, "ok      azure    crabbox_servers=%d location=%s default_type=%s\n", len(servers), cfg.AzureLocation, cfg.ServerType)
 		}
-	default:
+	case "hetzner":
 		client, err := newHetznerClient()
 		if err != nil {
 			fmt.Fprintf(a.Stdout, "missing hcloud token\n")
@@ -199,6 +237,12 @@ func (a App) doctor(ctx context.Context, args []string) error {
 				fmt.Fprintf(a.Stdout, "ok      hcloud   crabbox_servers=%d default_type=%s\n", len(servers), cfg.ServerType)
 			}
 		}
+	default:
+		if !ok {
+			return exit(1, "doctor found problems")
+		}
+		fmt.Fprintf(a.Stdout, "skip    provider provider=%s direct_doctor=unsupported\n", providerDef.Name())
+		return nil
 	}
 
 	if !ok {

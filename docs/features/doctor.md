@@ -57,6 +57,10 @@ diffable across runs.
   secrets. Missing names are reported without exposing values, for example
   `AZURE_TENANT_ID` or `AZURE_SUBSCRIPTION_ID`. Delegated and static providers
   skip this check.
+- Direct provider readiness succeeds for delegated providers that expose a cheap
+  non-mutating check. Cloudflare validates its runner URL and bearer token
+  directly instead of treating a healthy coordinator as proof of runner
+  readiness, using the runner's authenticated readiness endpoint.
 
 When auth is missing, doctor prints `crabbox login` as the next step.
 
@@ -96,17 +100,20 @@ modern version of these tools.
 
 ## What Doctor Does Not Do
 
-Doctor stays local on purpose. It does not:
+Doctor avoids mutating provider state on purpose. It does not:
 
 - start a real lease or provision a server;
-- talk to any cloud, Proxmox, or delegated provider API;
+- create, delete, or mutate cloud or Proxmox resources;
+- call delegated provider APIs except for explicit, cheap readiness probes such
+  as Cloudflare runner auth checks;
 - run `git ls-files` against the repo (that belongs in `crabbox sync-plan`);
 - estimate costs;
 - modify config or rotate keys.
 
-Anything that costs money or has side effects belongs in a different
-command. Doctor is for "before I run anything, is my machine sane?" and
-should be safe to run from `pre-commit` hooks, agent boot, or CI smoke.
+Anything that costs money or has side effects belongs in a different command.
+Doctor is for "before I run anything, is my machine and configured control
+plane sane?" and should be safe to run from preflight hooks, agent boot, or CI
+smoke.
 
 ## Output Shape
 

@@ -47,6 +47,12 @@ export CRABBOX_CLOUDFLARE_RUNNER_TOKEN=...
 is intentionally not exposed as a command-line flag because command-line
 arguments can be captured in shell history and process listings.
 
+Check the configured runner URL and token without creating a container:
+
+```sh
+crabbox doctor --provider cloudflare
+```
+
 ## Deploy
 
 Install dependencies and verify the Worker before deploy:
@@ -198,8 +204,8 @@ https://developers.cloudflare.com/containers/platform-details/workers-connection
 
 ## Limitations
 
-- Linux delegated `run`, `warmup`, `status`, `stop`, `list`, and local-claim
-  cleanup are supported.
+- Linux delegated `run`, `warmup`, `status`, `stop`, `list`, `doctor`, and
+  local-claim cleanup are supported.
 - SSH, VNC, browser desktop, code-server, Actions hydration, `--download`, and
   `--fresh-pr` are not supported.
 - `--checksum` is not supported because sync uses archive upload/extract rather

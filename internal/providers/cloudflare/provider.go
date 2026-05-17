@@ -50,3 +50,15 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	}
 	return NewCloudflareBackend(p.Spec(), cfg, rt), nil
 }
+
+func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
+	backend, err := p.Configure(cfg, rt)
+	if err != nil {
+		return nil, err
+	}
+	doctor, ok := backend.(core.DoctorBackend)
+	if !ok {
+		return nil, core.Exit(2, "cloudflare doctor backend unavailable")
+	}
+	return doctor, nil
+}

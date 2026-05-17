@@ -406,6 +406,10 @@ export default {
     const auth = authorize(request, env);
     if (auth) return auth;
 
+    if (url.pathname === "/v1/readiness" && request.method === "GET") {
+      return json({ ok: true, runner: "cloudflare" });
+    }
+
     if (url.pathname === "/v1/sandboxes" && request.method === "POST") {
       return createSandbox(request, env);
     }

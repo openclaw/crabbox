@@ -1,8 +1,8 @@
 # doctor
 
 `crabbox doctor` runs the local preflight before you commit to a long
-workflow. It is fast (under a second on a healthy machine), local-only, and
-never calls a billable provider API.
+workflow. It is fast on a healthy machine, non-destructive, and does not create
+or mutate provider resources.
 
 ```sh
 crabbox doctor
@@ -35,6 +35,9 @@ When a coordinator is configured, doctor also asks the broker for secret
 readiness for managed brokered providers such as AWS, Azure, GCP, and Hetzner. It
 reports missing Worker secret names such as `AZURE_TENANT_ID` without exposing
 secret values. Static, Proxmox, and delegated providers skip this broker-secret check.
+Delegated providers can still run their own direct readiness checks; for example,
+Cloudflare validates the configured runner URL and bearer token against the
+authenticated runner readiness API.
 
 When `--profile <name> --id <lease>` selects a profile with `doctor.enabled:
 true`, doctor runs that profile's remote prerequisite contract instead of the

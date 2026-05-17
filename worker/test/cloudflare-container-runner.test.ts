@@ -209,6 +209,35 @@ describe("Cloudflare runner lifecycle", () => {
     vi.useRealTimers();
   });
 
+  it("exposes authenticated runner readiness without touching containers", async () => {
+    const capture: CapturedInternalRequest = {};
+    const response = await worker.fetch(
+      new Request("https://runner.example/v1/readiness", {
+        headers: {
+          Authorization: "Bearer runner-token",
+        },
+      }),
+      envWithCapturedInternalRequest(capture),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, runner: "cloudflare" });
+    expect(capture.binding).toBeUndefined();
+    expect(capture.request).toBeUndefined();
+  });
+
+  it("requires runner auth for readiness", async () => {
+    const capture: CapturedInternalRequest = {};
+    const response = await worker.fetch(
+      new Request("https://runner.example/v1/readiness"),
+      envWithCapturedInternalRequest(capture),
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: "unauthorized" });
+    expect(capture.binding).toBeUndefined();
+  });
+
   it("sanitizes create payload before dispatching to the durable object", async () => {
     const capture: CapturedInternalRequest = {};
     const response = await worker.fetch(

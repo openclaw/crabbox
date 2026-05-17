@@ -545,7 +545,15 @@ func (testCloudflareProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testCloudflareProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testDelegatedBackend{spec: p.Spec()}, nil
+	return testDoctorDelegatedBackend{testDelegatedBackend{spec: p.Spec()}}, nil
+}
+
+func (p testCloudflareProvider) ConfigureDoctor(cfg Config, rt Runtime) (DoctorBackend, error) {
+	backend, err := p.Configure(cfg, rt)
+	if err != nil {
+		return nil, err
+	}
+	return backend.(DoctorBackend), nil
 }
 
 type testSpritesProvider struct{}
@@ -617,6 +625,14 @@ func (b testDelegatedBackend) Status(context.Context, StatusRequest) (StatusView
 }
 func (b testDelegatedBackend) Stop(context.Context, StopRequest) error {
 	return nil
+}
+
+type testDoctorDelegatedBackend struct {
+	testDelegatedBackend
+}
+
+func (b testDoctorDelegatedBackend) Doctor(context.Context, DoctorRequest) (DoctorResult, error) {
+	return DoctorResult{Provider: b.spec.Name, Message: "direct_check=ready"}, nil
 }
 
 type testDaytonaBackend struct {

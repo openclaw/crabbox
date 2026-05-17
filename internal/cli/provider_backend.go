@@ -26,6 +26,16 @@ type Backend interface {
 	Spec() ProviderSpec
 }
 
+type DoctorProvider interface {
+	Provider
+	ConfigureDoctor(cfg Config, rt Runtime) (DoctorBackend, error)
+}
+
+type DoctorBackend interface {
+	Backend
+	Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, error)
+}
+
 type SSHLeaseBackend interface {
 	Backend
 	Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error)
@@ -133,6 +143,13 @@ type LocalCommandResult struct {
 	ExitCode int
 	Stdout   string
 	Stderr   string
+}
+
+type DoctorRequest struct{}
+
+type DoctorResult struct {
+	Provider string
+	Message  string
 }
 
 type execCommandRunner struct{}
