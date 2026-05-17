@@ -27,7 +27,7 @@ func TestRailwayProviderSpec(t *testing.T) {
 
 func TestRailwayClientRequiresAPIToken(t *testing.T) {
 	cfg := Config{}
-	cfg.Railway.APIURL = "https://backboard.railway.app/graphql/v2"
+	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	if _, err := newRailwayClient(cfg, Runtime{}); err == nil {
 		t.Fatal("newRailwayClient accepted empty API token")
 	}
@@ -36,7 +36,7 @@ func TestRailwayClientRequiresAPIToken(t *testing.T) {
 func TestRailwayClientRejectsBareHTTPURL(t *testing.T) {
 	cfg := Config{}
 	cfg.Railway.APIToken = "test-token"
-	cfg.Railway.APIURL = "http://backboard.railway.app/graphql/v2"
+	cfg.Railway.APIURL = "http://backboard.railway.com/graphql/v2"
 	if _, err := newRailwayClient(cfg, Runtime{}); err == nil {
 		t.Fatal("newRailwayClient accepted plaintext http URL")
 	}
@@ -278,7 +278,7 @@ func TestRailwayRunHappyPath(t *testing.T) {
 	}
 	cfg := Config{Provider: providerName}
 	cfg.Railway.APIToken = "test-token"
-	cfg.Railway.APIURL = "https://backboard.railway.app/graphql/v2"
+	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	cfg.Railway.ProjectID = "proj-1"
 	cfg.Railway.EnvironmentID = "env-1"
 	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard}
@@ -302,7 +302,7 @@ func TestRailwayRunFailedDeploymentMapsToExit1(t *testing.T) {
 	}
 	cfg := Config{Provider: providerName}
 	cfg.Railway.APIToken = "test-token"
-	cfg.Railway.APIURL = "https://backboard.railway.app/graphql/v2"
+	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	cfg.Railway.ProjectID = "proj-1"
 	cfg.Railway.EnvironmentID = "env-1"
 	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard}
@@ -335,7 +335,7 @@ func TestRailwayStopCallsDeploymentStop(t *testing.T) {
 	api := &fakeRailwayAPI{deployment: railwayDeployment{ID: "dep-1", Status: "BUILDING"}}
 	cfg := Config{Provider: providerName}
 	cfg.Railway.APIToken = "test-token"
-	cfg.Railway.APIURL = "https://backboard.railway.app/graphql/v2"
+	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	cfg.Railway.ProjectID = "proj-1"
 	cfg.Railway.EnvironmentID = "env-1"
 	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
@@ -354,7 +354,7 @@ func TestRailwayStatusReturnsView(t *testing.T) {
 	}
 	cfg := Config{Provider: providerName}
 	cfg.Railway.APIToken = "test-token"
-	cfg.Railway.APIURL = "https://backboard.railway.app/graphql/v2"
+	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	cfg.Railway.ProjectID = "proj-1"
 	cfg.Railway.EnvironmentID = "env-1"
 	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
@@ -377,7 +377,7 @@ func TestRailwayListEnumeratesServices(t *testing.T) {
 	}}
 	cfg := Config{Provider: providerName}
 	cfg.Railway.APIToken = "test-token"
-	cfg.Railway.APIURL = "https://backboard.railway.app/graphql/v2"
+	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
 	servers, err := backend.List(context.Background(), ListRequest{})
 	if err != nil {
@@ -393,7 +393,7 @@ func TestRailwayListEnumeratesServices(t *testing.T) {
 
 func TestRailwayFlagsApply(t *testing.T) {
 	cfg := Config{Provider: providerName}
-	cfg.Railway.APIURL = "https://backboard.railway.app/graphql/v2"
+	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := RegisterRailwayProviderFlags(fs, cfg)
 	if err := fs.Parse([]string{"--railway-url", "https://example.com/graphql/v2", "--railway-project", "proj-x", "--railway-environment", "env-x"}); err != nil {

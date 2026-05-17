@@ -8,7 +8,7 @@ Read when:
 
 [Railway](https://railway.com) is a deployment platform whose primitives are
 projects, environments, services, and deployments. Railway's public API is
-GraphQL at `https://backboard.railway.app/graphql/v2` and is authenticated with
+GraphQL at `https://backboard.railway.com/graphql/v2` and is authenticated with
 `Authorization: Bearer $RAILWAY_API_TOKEN`. Account-scoped tokens from
 `/account/tokens` operate across every project the account can see.
 
@@ -86,7 +86,7 @@ not register a CLI flag for it. Do not pass the token on the command line.
 The canonical Railway request shape is:
 
 ```sh
-curl -X POST https://backboard.railway.app/graphql/v2 \
+curl -X POST https://backboard.railway.com/graphql/v2 \
   -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query":"query { projects { edges { node { id name } } } }"}'
@@ -101,7 +101,7 @@ JSON `{query, variables}` body to the same endpoint.
 provider: railway
 target: linux
 railway:
-  apiUrl: https://backboard.railway.app/graphql/v2
+  apiUrl: https://backboard.railway.com/graphql/v2
   projectId: <project-uuid>
   environmentId: <environment-uuid>
 ```
