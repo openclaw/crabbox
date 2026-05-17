@@ -13,6 +13,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
 const (
@@ -31,6 +32,7 @@ var awsSnapshotDeleteBackoff = []time.Duration{
 
 type AWSClient struct {
 	ec2    *ec2.Client
+	sts    *sts.Client
 	region string
 }
 
@@ -46,7 +48,7 @@ func newAWSClientForRegion(ctx context.Context, cfg Config, region string) (*AWS
 	if err != nil {
 		return nil, err
 	}
-	return &AWSClient{ec2: ec2.NewFromConfig(awsCfg), region: region}, nil
+	return &AWSClient{ec2: ec2.NewFromConfig(awsCfg), sts: sts.NewFromConfig(awsCfg), region: region}, nil
 }
 
 func NewAWSClient(ctx context.Context, cfg Config) (*AWSClient, error) {
@@ -400,6 +402,10 @@ func (c *AWSClient) DeleteServer(ctx context.Context, id string) error {
 }
 
 func (c *AWSClient) CreateImageCheckpoint(ctx context.Context, instanceID, name string, noReboot bool) (CoordinatorImage, error) {
+	accountID, err := c.CallerAccountID(ctx)
+	if err != nil {
+		return CoordinatorImage{}, err
+	}
 	tags := awsTagsWithName(map[string]string{
 		"crabbox":           "true",
 		"created_by":        "crabbox",
@@ -429,6 +435,7 @@ func (c *AWSClient) CreateImageCheckpoint(ctx context.Context, instanceID, name 
 		Kind:       checkpointKindAWSAMI,
 		Region:     c.region,
 		ResourceID: imageID,
+		AccountID:  accountID,
 		Direct:     true,
 	}, nil
 }
@@ -458,12 +465,21 @@ func (c *AWSClient) GetImageCheckpoint(ctx context.Context, imageID string) (Coo
 	}, nil
 }
 
-func (c *AWSClient) DeleteImageCheckpoint(ctx context.Context, imageID string, fallbackSnapshotIDs []string) error {
+func (c *AWSClient) DeleteImageCheckpoint(ctx context.Context, imageID string, fallbackSnapshotIDs []string, expectedAccountID string) error {
+	if err := c.GuardAccount(ctx, expectedAccountID); err != nil {
+		return err
+	}
 	out, err := c.ec2.DescribeImages(ctx, &ec2.DescribeImagesInput{
 		ImageIds: []string{imageID},
 	})
-	if err != nil && !strings.Contains(err.Error(), "InvalidAMIID.NotFound") {
-		return err
+	imageNotFound := err != nil && strings.Contains(err.Error(), "InvalidAMIID.NotFound")
+	if err != nil {
+		if !imageNotFound {
+			return err
+		}
+		if expectedAccountID == "" {
+			return exit(3, "cannot confirm direct AWS checkpoint delete for %s: image not found and checkpoint record has no accountId; switch to the original AWS account or use --local-only", imageID)
+		}
 	}
 	snapshotIDs := append([]string(nil), fallbackSnapshotIDs...)
 	if err == nil && len(out.Images) > 0 {
@@ -477,6 +493,36 @@ func (c *AWSClient) DeleteImageCheckpoint(ctx context.Context, imageID string, f
 		if err := c.deleteSnapshotWithRetry(ctx, snapshotID); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (c *AWSClient) CallerAccountID(ctx context.Context) (string, error) {
+	if c.sts == nil {
+		return "", exit(3, "aws sts client is unavailable")
+	}
+	out, err := c.sts.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return "", err
+	}
+	accountID := aws.ToString(out.Account)
+	if accountID == "" {
+		return "", exit(3, "aws returned no caller account id")
+	}
+	return accountID, nil
+}
+
+func (c *AWSClient) GuardAccount(ctx context.Context, expectedAccountID string) error {
+	expectedAccountID = strings.TrimSpace(expectedAccountID)
+	if expectedAccountID == "" {
+		return nil
+	}
+	accountID, err := c.CallerAccountID(ctx)
+	if err != nil {
+		return err
+	}
+	if accountID != expectedAccountID {
+		return exit(3, "direct AWS checkpoint account mismatch: current account %s does not match checkpoint account %s", accountID, expectedAccountID)
 	}
 	return nil
 }

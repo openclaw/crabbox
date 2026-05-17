@@ -58,6 +58,7 @@ type checkpointRecord struct {
 		Name        string   `json:"name,omitempty"`
 		State       string   `json:"state,omitempty"`
 		Region      string   `json:"region,omitempty"`
+		AccountID   string   `json:"accountId,omitempty"`
 		Project     string   `json:"project,omitempty"`
 		Resource    string   `json:"resource,omitempty"`
 		SnapshotIDs []string `json:"snapshotIds,omitempty"`
@@ -548,7 +549,7 @@ func deleteCheckpoint(ctx context.Context, store checkpointStore, id string, loc
 					}
 				}
 			}
-			if err := client.DeleteImageCheckpoint(ctx, providerID, record.Native.SnapshotIDs); err != nil {
+			if err := client.DeleteImageCheckpoint(ctx, providerID, record.Native.SnapshotIDs, record.Native.AccountID); err != nil {
 				return err
 			}
 			return store.Delete(id)
@@ -820,6 +821,7 @@ func applyNativeImageCheckpointRecord(record *checkpointRecord, image Coordinato
 	record.Native.Name = image.Name
 	record.Native.State = image.State
 	record.Native.Region = image.Region
+	record.Native.AccountID = image.AccountID
 	record.Native.Project = image.Project
 	record.Native.Resource = image.ResourceID
 	record.Native.SnapshotIDs = image.SnapshotIDs

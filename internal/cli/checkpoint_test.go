@@ -473,6 +473,7 @@ func TestApplyNativeImageCheckpointRecordPersistsSnapshotIDs(t *testing.T) {
 		Provider:    "aws",
 		Kind:        checkpointKindAWSAMI,
 		Region:      "eu-west-1",
+		AccountID:   "123456789012",
 		ResourceID:  "ami-12345678",
 		SnapshotIDs: []string{"snap-1", "snap-2"},
 		Direct:      true,
@@ -483,6 +484,9 @@ func TestApplyNativeImageCheckpointRecordPersistsSnapshotIDs(t *testing.T) {
 	}
 	if got := strings.Join(record.Native.SnapshotIDs, ","); got != "snap-1,snap-2" {
 		t.Fatalf("snapshot IDs=%q, want snap-1,snap-2", got)
+	}
+	if record.Native.AccountID != "123456789012" {
+		t.Fatalf("AccountID=%q, want caller account", record.Native.AccountID)
 	}
 	if !record.Native.Direct {
 		t.Fatal("direct marker was not persisted")

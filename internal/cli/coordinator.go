@@ -173,6 +173,7 @@ type CoordinatorImage struct {
 	Provider     string   `json:"provider,omitempty"`
 	Kind         string   `json:"kind,omitempty"`
 	Region       string   `json:"region,omitempty"`
+	AccountID    string   `json:"accountId,omitempty"`
 	Project      string   `json:"project,omitempty"`
 	ResourceID   string   `json:"resourceID,omitempty"`
 	SnapshotIDs  []string `json:"snapshotIds,omitempty"`
