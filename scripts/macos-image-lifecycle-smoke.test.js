@@ -95,6 +95,10 @@ if [[ "$1" == "admin" && ( "$2" == "mac-hosts" || "$2" == "hosts" ) ]]; then
         fi
       else
         : >"$state_dir/host"
+        if [[ "\${CRABBOX_FAKE_ALLOCATE_FAIL:-0}" == "1" ]]; then
+          printf 'coordinator POST /v1/admin/hosts?provider=aws&region=%s&target=macos: http 502: {"error":"mac_host_allocation_failed","message":"aws AllocateHosts: http 500: service unavailable"}\\n' "$region" >&2
+          exit 1
+        fi
         printf '[{"id":"h-mock","instanceType":"%s","state":"available"}]\\n' "$type"
       fi
       ;;
@@ -443,6 +447,35 @@ test("macOS lifecycle smoke blocks on missing Mac host quota before paid work", 
   const fakeLog = await readFile(run.fakeLog, "utf8");
   assert.match(fakeLog, /^admin hosts quota --provider aws --target macos --region eu-west-1 --type mac2\.metal --json$/m);
   assert.doesNotMatch(fakeLog, /^admin hosts allocate --provider aws --target macos --region eu-west-1 --type mac2\.metal --force --json$/m);
+});
+
+test("macOS lifecycle smoke records paid host allocation failures", async () => {
+  const run = await setupRun();
+  const result = await runLifecycle({
+    CRABBOX_BIN: run.fake,
+    CRABBOX_FAKE_LOG: run.fakeLog,
+    CRABBOX_FAKE_STATE: run.fakeState,
+    CRABBOX_FAKE_NO_HOST: "1",
+    CRABBOX_FAKE_ALLOCATE_FAIL: "1",
+    CRABBOX_MACOS_ALLOCATE: "1",
+    CRABBOX_MACOS_ARTIFACT_DIR: run.artifacts,
+    CRABBOX_MACOS_IMAGE_NAME: "allocation-blocked",
+    CRABBOX_MACOS_WEBVNC_START_GRACE: "0s",
+  });
+
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  const summary = await readJSON(path.join(run.artifacts, "summary.json"));
+  assert.equal(summary.result, "blocked");
+  assert.equal(summary.phase, "host-allocation");
+  assert.match(summary.blocker.message, /mac host allocation failed/);
+  assert.match(summary.blocker.message, /AllocateHosts/);
+  assert.match(summary.blocker.remediation, /Retry the allocation/);
+  assert.equal(summary.evidence.hostAllocate, "evidence/mac-host-allocate.json");
+  await assertSummaryFileContains(run.artifacts, summary.evidence.hostAllocate, /mac_host_allocation_failed/);
+
+  const fakeLog = await readFile(run.fakeLog, "utf8");
+  assert.match(fakeLog, /^admin hosts allocate --provider aws --target macos --region eu-west-1 --type mac2\.metal --force --json$/m);
+  assert.doesNotMatch(fakeLog, /^warmup /m);
 });
 
 test("macOS lifecycle smoke selects a dry-run-ready configured region before paid work", async () => {

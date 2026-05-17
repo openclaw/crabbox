@@ -937,7 +937,17 @@ else
 
   summary_phase="host-allocation"
   allocate_log="$evidence_dir/mac-host-allocate.json"
-  run_tee "$allocate_log" "$CRABBOX_BIN" admin hosts allocate --provider aws --target macos --region "$region" --type "$instance_type" --force --json
+  set +e
+  capture_preflight_command host-allocation "mac host allocation" "$allocate_log" "$CRABBOX_BIN" admin hosts allocate --provider aws --target macos --region "$region" --type "$instance_type" --force --json
+  allocate_status=$?
+  set -e
+  if [[ "$allocate_status" -ne 0 ]]; then
+    preflight_blocker_from_stderr "mac host allocation" "${allocate_log}.stderr"
+    blocker_remediation="Retry the allocation if AWS reports a transient service error. If dry-run still succeeds but paid allocation keeps failing, use an existing available EC2 Mac Dedicated Host or try another host family/region with non-zero quota."
+    printf 'macOS lifecycle blocked during paid work: %s\n' "$blocker_message" >&2
+    write_summary blocked host-allocation
+    exit 1
+  fi
   allocated_host="$(jq -r '.[0].id // empty' "$allocate_log")"
   if [[ -z "$allocated_host" ]]; then
     blocker_message="mac host allocation did not return a host id"
