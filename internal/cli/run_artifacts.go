@@ -95,10 +95,14 @@ func runArtifactCollectScript(workdir, remotePath string, globs []string) string
 	b.WriteString("set -euo pipefail\n")
 	b.WriteString("cd " + shellQuote(workdir) + "\n")
 	b.WriteString("mkdir -p .crabbox\n")
-	b.WriteString("shopt -s globstar nullglob dotglob\n")
+	b.WriteString("shopt -s nullglob dotglob\n")
 	b.WriteString("files=()\n")
+	b.WriteString("add_artifact_file() { local f=\"$1\" rel existing; { [ -f \"$f\" ] || [ -L \"$f\" ]; } || return 0; rel=${f#./}; case \"$rel\" in .git|.git/*|.crabbox|.crabbox/*|" + remotePath + ") return 0;; esac; if [ ${#files[@]} -gt 0 ]; then for existing in \"${files[@]}\"; do [ \"$existing\" = \"$rel\" ] && return 0; done; fi; files+=(\"$rel\"); }\n")
 	for _, glob := range globs {
-		b.WriteString("for f in " + glob + "; do { [ -f \"$f\" ] || [ -L \"$f\" ]; } || continue; rel=${f#./}; case \"$rel\" in .git|.git/*|.crabbox|.crabbox/*|" + remotePath + ") continue;; esac; files+=(\"$rel\"); done\n")
+		b.WriteString("for f in " + glob + "; do add_artifact_file \"$f\"; done\n")
+		if strings.Contains(glob, "**") {
+			b.WriteString("while IFS= read -r -d '' f; do rel=${f#./}; if [[ \"./$rel\" == " + glob + " || \"$rel\" == " + strings.TrimPrefix(glob, "./") + " ]]; then add_artifact_file \"$f\"; fi; done < <(find . \\( -type f -o -type l \\) -print0)\n")
+		}
 	}
 	b.WriteString("if [ ${#files[@]} -eq 0 ]; then printf 'warning: no artifact matches\\n' >&2; tar -czf " + shellQuote(remotePath) + " --files-from /dev/null; else tar -czf " + shellQuote(remotePath) + " -- \"${files[@]}\"; fi\n")
 	return b.String()
