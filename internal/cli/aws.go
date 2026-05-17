@@ -889,6 +889,9 @@ func awsInstanceToServer(instance types.Instance) Server {
 		Status:   string(instance.State.Name),
 		Labels:   labels,
 	}
+	if instance.Placement != nil {
+		server.HostID = aws.ToString(instance.Placement.HostId)
+	}
 	server.PublicNet.IPv4.IP = aws.ToString(instance.PublicIpAddress)
 	server.ServerType.Name = string(instance.InstanceType)
 	return server

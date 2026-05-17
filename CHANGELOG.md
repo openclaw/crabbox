@@ -14,7 +14,7 @@
 ### Fixed
 
 - Fixed direct AWS AMI checkpoint create, inspect, delete, and fork paths so source instances are validated before host preparation and recorded account/direct-backend metadata is honored even after coordinator configuration changes.
-- Fixed direct AWS macOS AMI checkpoint forks so recorded EC2 Mac Dedicated Host pins are reused after coordinator routing is disabled.
+- Fixed direct AWS macOS AMI checkpoint forks so resolved and recorded EC2 Mac Dedicated Host pins are reused after coordinator routing is disabled.
 - Fixed AWS macOS native checkpoint selection so macOS checkpoints use AMI-backed snapshots by default instead of raw EBS snapshot forks that EC2 Mac cannot reliably relaunch.
 - Fixed macOS image lifecycle smoke summaries so paid EC2 Mac Dedicated Host allocation failures preserve stderr, blocker text, and remediation guidance instead of writing an empty blocker.
 - Fixed EC2 Mac Dedicated Host state parsing so live AWS `DescribeHosts` responses are recognized as reusable by macOS lifecycle smoke instead of falling through to a new host allocation path.

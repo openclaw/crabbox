@@ -42,6 +42,19 @@ func TestApplyAWSRunInstanceTargetOptionsLeavesNativeWindowsDefault(t *testing.T
 	}
 }
 
+func TestAWSInstanceToServerPreservesHostID(t *testing.T) {
+	server := awsInstanceToServer(types.Instance{
+		InstanceId:   aws.String("i-1234567890abcdef0"),
+		InstanceType: types.InstanceTypeMac2Metal,
+		Placement:    &types.Placement{HostId: aws.String("h-000000000001")},
+		State:        &types.InstanceState{Name: types.InstanceStateNameRunning},
+	})
+
+	if server.HostID != "h-000000000001" {
+		t.Fatalf("HostID=%q, want h-000000000001", server.HostID)
+	}
+}
+
 func TestRetryableAWSSnapshotDeleteError(t *testing.T) {
 	for _, message := range []string{
 		"InvalidSnapshot.InUse: snapshot is currently in use by ami-123",
