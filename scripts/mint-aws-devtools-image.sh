@@ -318,7 +318,21 @@ smoke() {
 run_prep() {
   local lease="$1"
   if [[ "$target" == "windows" ]]; then
-    run_cmd "$CRABBOX_BIN" run --provider aws --target windows --id "$lease" --no-sync --script "$prep_script"
+    local encoded chunk_size offset chunk remote_b64 remote_script command decode_and_run
+    encoded="$(base64 <"$prep_script" | tr -d '\n')"
+    chunk_size=1800
+    remote_b64='C:\ProgramData\crabbox\image-prep.b64'
+    remote_script='C:\ProgramData\crabbox\image-prep.ps1'
+    decode_and_run="; \$__crabboxPrep = Get-Content -Raw '$remote_b64'; [IO.File]::WriteAllBytes('$remote_script', [Convert]::FromBase64String(\$__crabboxPrep)); powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '$remote_script'; exit \$LASTEXITCODE"
+    run_cmd "$CRABBOX_BIN" run --provider aws --target windows --id "$lease" --no-sync --shell -- "New-Item -ItemType Directory -Force -Path 'C:\\ProgramData\\crabbox' | Out-Null; Set-Content -Path '$remote_b64' -Value '' -NoNewline"
+    for ((offset = 0; offset < ${#encoded}; offset += chunk_size)); do
+      chunk="${encoded:offset:chunk_size}"
+      command="Add-Content -Path '$remote_b64' -Value '$chunk' -NoNewline"
+      if ((offset + chunk_size >= ${#encoded})); then
+        command+="$decode_and_run"
+      fi
+      run_cmd "$CRABBOX_BIN" run --provider aws --target windows --id "$lease" --no-sync --shell -- "$command"
+    done
     return
   fi
   run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --script "$prep_script"

@@ -16,7 +16,7 @@
 ### Fixed
 
 - Fixed Windows developer-image bootstrap readiness so setup completion is written before restarting SSH and native Windows bakes wait for a stable SSH window before continuing.
-- Fixed the Windows developer-image mint wrapper to use Crabbox's native PowerShell script upload instead of a manual base64 chunk transfer.
+- Fixed the Windows developer-image mint wrapper so the final PowerShell prep chunk decodes and runs inline instead of relying on a separate post-upload command.
 
 ## 0.16.0 - 2026-05-18
 
