@@ -203,7 +203,7 @@ func TestCloudflareDoctorChecksRunnerAuth(t *testing.T) {
 	if !sawAuth {
 		t.Fatal("doctor did not make authenticated runner request")
 	}
-	if result.Provider != providerName || !strings.Contains(result.Message, "auth=configured") || !strings.Contains(result.Message, "type=standard-4") {
+	if result.Provider != providerName || !strings.Contains(result.Message, "auth=ready") || !strings.Contains(result.Message, "api=readiness") || !strings.Contains(result.Message, "type=standard-4") {
 		t.Fatalf("doctor result = %#v", result)
 	}
 }

@@ -10,6 +10,7 @@ crabbox doctor --provider aws
 crabbox doctor --profile live-qa --id blue-lobster
 crabbox doctor --provider hetzner --target linux
 crabbox doctor --provider ssh --target windows --windows-mode normal --static-host win-dev.local
+crabbox doctor --json
 ```
 
 ## What It Checks
@@ -22,8 +23,9 @@ ssh          SSH key path readable, key permissions sane, ssh-keygen on PATH
 tools        provider-applicable local tools are present and executable
 ```
 
-For `--provider ssh`, doctor validates that `static.host` is configured.
-Use `crabbox doctor --id <lease>` for a remote SSH/tool probe against a
+For `--provider ssh`, doctor validates that `static.host` is configured. Add
+`--doctor-probe-ssh` to run a short SSH reachability probe without creating a
+lease. Use `crabbox doctor --id <lease>` for a remote SSH/tool probe against a
 resolved target.
 
 When `CRABBOX_SSH_KEY` is explicitly set, doctor validates the private key
@@ -36,11 +38,12 @@ reports missing Worker secret names such as `AZURE_TENANT_ID` without exposing
 secret values. Static, Proxmox, and delegated providers skip this broker-secret check.
 Delegated providers can still run their own direct readiness checks; for example,
 Cloudflare validates the configured runner URL and bearer token against the
-authenticated runner readiness API. GCP, Proxmox, Daytona, and Blacksmith
-Testbox use cheap inventory/list checks when running in direct mode, as do the
-other built-in providers that expose non-mutating list APIs. Blacksmith Testbox
-reports runtime as provider-hydrated because GitHub Actions hydration is owned
-by Testbox.
+authenticated runner readiness API. Direct provider checks print stable fields
+such as `timeout=10s`, `api=list`, and `mutation=false` so scripts can tell
+what was checked. GCP uses an aggregated Compute Engine inventory query across
+zones, while the other built-in providers use their cheapest non-mutating list
+or readiness API. Blacksmith Testbox reports runtime as provider-hydrated
+because GitHub Actions hydration is owned by Testbox.
 
 When `--profile <name> --id <lease>` selects a profile with `doctor.enabled:
 true`, doctor runs that profile's remote prerequisite contract instead of the
@@ -78,12 +81,16 @@ tools:
   ok    tar
 ```
 
-Failures swap the leading `ok` for `fail` and add a remediation hint:
+Failures swap the leading `ok` for `failed` and add a class and remediation
+hint:
 
 ```text
-auth:
-  fail  broker token is missing - run `crabbox login`
+failed  provider provider=gcp class=auth hint=check_gcp_project_credentials_and_compute_instances_list ...
 ```
+
+`--json` prints the same checks as structured JSON with `ok`, `provider`, and
+`checks` fields. Each check includes `status`, `check`, `message`, and parsed
+`details` when available.
 
 Exit code is `0` on full success, `1` on any failure. Skips never change
 the exit code.
@@ -93,6 +100,8 @@ the exit code.
 ```text
 --provider hetzner|aws|azure|gcp|proxmox|ssh   provider to validate
 --profile <name>             configured profile for remote prereq checks
+--json                       print JSON
+--doctor-probe-ssh           probe static SSH reachability
 --target linux|macos|windows target OS for ssh provider checks
 --windows-mode normal|wsl2   when target=windows
 --static-host <host>         static SSH host

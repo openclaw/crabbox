@@ -72,7 +72,7 @@ func TestDaytonaDoctorListsInventoryOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Provider != daytonaProvider || !strings.Contains(result.Message, "inventory=ready leases=1 runtime=unchecked") {
+	if result.Provider != daytonaProvider || !strings.Contains(result.Message, "inventory=ready api=list mutation=false leases=1 runtime=unchecked") {
 		t.Fatalf("result=%#v", result)
 	}
 	if fake.listCalls != 1 {

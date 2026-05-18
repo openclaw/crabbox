@@ -8,6 +8,7 @@
 - Added a no-spend macOS coordinator remediation audit helper that bundles provider identity, IAM policy, host quota, host allocation dry-run, guarded IAM apply dry-run, and guarded quota request dry-run evidence into `summary.json`.
 - Added Cloudflare runner readiness to `crabbox doctor --provider cloudflare` so runner URL, auth, and container bindings are checked without creating a sandbox. Thanks @altaywtf.
 - Added direct `crabbox doctor` readiness for all built-in providers without creating provider resources.
+- Added `crabbox doctor --json`, provider error classification and hints, direct-check timeout/API/mutation labels, optional `--doctor-probe-ssh`, and `scripts/live-doctor-smoke.sh` for maintainer live coverage checks.
 - Added `--slug` for `crabbox warmup`, fresh `crabbox run` leases, and `crabbox checkpoint fork`, plus `--label` for human-readable run history/timing metadata.
 
 ### Changed

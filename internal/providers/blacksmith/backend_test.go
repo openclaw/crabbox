@@ -607,7 +607,7 @@ func TestBlacksmithDoctorListsInventoryOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Provider != blacksmithTestboxProvider || !strings.Contains(result.Message, "cli=ready inventory=ready leases=1 runtime=ci_hydrated_by_provider") {
+	if result.Provider != blacksmithTestboxProvider || !strings.Contains(result.Message, "cli=ready control_plane=ready inventory=ready api=list mutation=false leases=1 runtime=ci_hydrated_by_provider") {
 		t.Fatalf("result=%#v", result)
 	}
 	if len(runner.calls) != 1 {

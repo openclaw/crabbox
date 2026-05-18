@@ -222,7 +222,7 @@ func (b *blacksmithBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (c
 	}
 	return core.DoctorResult{
 		Provider: blacksmithTestboxProvider,
-		Message:  fmt.Sprintf("cli=ready inventory=ready leases=%d runtime=ci_hydrated_by_provider", len(servers)),
+		Message:  fmt.Sprintf("cli=ready control_plane=ready inventory=ready api=list mutation=false leases=%d runtime=ci_hydrated_by_provider", len(servers)),
 	}, nil
 }
 

@@ -69,7 +69,8 @@ func TestDoctorCloudflareUsesRealProviderReadiness(t *testing.T) {
 	text := stdout.String()
 	if !strings.Contains(text, "ok      provider provider=cloudflare") ||
 		!strings.Contains(text, "runner="+server.URL) ||
-		!strings.Contains(text, "auth=configured") {
+		!strings.Contains(text, "auth=ready") ||
+		!strings.Contains(text, "api=readiness") {
 		t.Fatalf("doctor output missing Cloudflare readiness result: %q", text)
 	}
 }

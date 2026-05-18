@@ -48,7 +48,7 @@ func (b *cloudflareBackend) Doctor(ctx context.Context, _ DoctorRequest) (Doctor
 	}
 	return DoctorResult{
 		Provider: providerName,
-		Message:  fmt.Sprintf("runner=%s auth=configured type=%s", client.baseURL, client.instanceType),
+		Message:  fmt.Sprintf("auth=ready control_plane=ready api=readiness mutation=false runner=%s type=%s runtime=ready", client.baseURL, client.instanceType),
 	}, nil
 }
 

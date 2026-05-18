@@ -154,7 +154,9 @@ type LocalCommandResult struct {
 	Stderr   string
 }
 
-type DoctorRequest struct{}
+type DoctorRequest struct {
+	ProbeSSH bool
+}
 
 type DoctorResult struct {
 	Provider string
@@ -164,14 +166,14 @@ type DoctorResult struct {
 func InventoryDoctorResult(provider string, leases int) DoctorResult {
 	return DoctorResult{
 		Provider: provider,
-		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready leases=%d runtime=unchecked", leases),
+		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready api=list mutation=false leases=%d runtime=unchecked", leases),
 	}
 }
 
 func CLIDoctorResult(provider string, leases int, runtime string) DoctorResult {
 	return DoctorResult{
 		Provider: provider,
-		Message:  fmt.Sprintf("cli=ready inventory=ready leases=%d runtime=%s", leases, runtime),
+		Message:  fmt.Sprintf("cli=ready control_plane=ready inventory=ready api=list mutation=false leases=%d runtime=%s", leases, runtime),
 	}
 }
 

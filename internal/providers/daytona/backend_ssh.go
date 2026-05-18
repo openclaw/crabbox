@@ -210,7 +210,7 @@ func (b *daytonaLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (Doct
 	}
 	return DoctorResult{
 		Provider: daytonaProvider,
-		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready leases=%d runtime=unchecked", len(servers)),
+		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready api=list mutation=false leases=%d runtime=unchecked", len(servers)),
 	}, nil
 }
 

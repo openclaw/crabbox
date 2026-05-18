@@ -162,7 +162,7 @@ func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.D
 	}
 	return core.DoctorResult{
 		Provider: "proxmox",
-		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready leases=%d runtime=unchecked", len(servers)),
+		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready api=list mutation=false leases=%d runtime=unchecked", len(servers)),
 	}, nil
 }
 

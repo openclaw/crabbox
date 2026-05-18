@@ -69,13 +69,26 @@ func (b *staticLeaseBackend) List(_ context.Context, req ListRequest) ([]LeaseVi
 	return []LeaseView{server}, nil
 }
 
-func (b *staticLeaseBackend) Doctor(_ context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+func (b *staticLeaseBackend) Doctor(ctx context.Context, req core.DoctorRequest) (core.DoctorResult, error) {
 	if b.Cfg.Static.Host == "" {
 		return core.DoctorResult{}, exit(3, "missing static.host")
 	}
+	runtime := "unchecked"
+	api := "static_config"
+	if req.ProbeSSH {
+		_, target, _, err := staticLease(b.Cfg)
+		if err != nil {
+			return core.DoctorResult{}, err
+		}
+		if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "doctor", 10*time.Second); err != nil {
+			return core.DoctorResult{}, err
+		}
+		api = "ssh_probe"
+		runtime = "ssh_reachable"
+	}
 	return core.DoctorResult{
 		Provider: "ssh",
-		Message:  fmt.Sprintf("target=%s windows_mode=%s host=%s runtime=unchecked", b.Cfg.TargetOS, b.Cfg.WindowsMode, b.Cfg.Static.Host),
+		Message:  fmt.Sprintf("target=%s windows_mode=%s host=%s api=%s mutation=false runtime=%s", b.Cfg.TargetOS, b.Cfg.WindowsMode, b.Cfg.Static.Host, api, runtime),
 	}, nil
 }
 
@@ -101,6 +114,9 @@ func staticLease(cfg Config) (Server, SSHTarget, string, error) { return core.St
 func serverSlug(server Server) string                           { return core.ServerSlug(server) }
 func waitForSSH(ctx context.Context, target *SSHTarget, stderr io.Writer) error {
 	return core.WaitForSSH(ctx, target, stderr)
+}
+func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
 }
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)

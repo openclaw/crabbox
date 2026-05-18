@@ -164,10 +164,9 @@ func (b *gcpLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (cor
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
-	return core.DoctorResult{
-		Provider: "gcp",
-		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready leases=%d runtime=unchecked", len(servers)),
-	}, nil
+	result := core.InventoryDoctorResult("gcp", len(servers))
+	result.Message += fmt.Sprintf(" project=%s zone=aggregated", b.Cfg.GCPProject)
+	return result, nil
 }
 
 func (b *gcpLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {

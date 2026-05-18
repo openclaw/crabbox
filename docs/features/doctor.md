@@ -62,7 +62,10 @@ diffable across runs.
   directly instead of treating a healthy coordinator as proof of runner
   readiness, using the runner's authenticated readiness endpoint. All built-in
   providers now expose provider-owned direct doctor checks; providers with list
-  APIs use non-mutating inventory checks when running in direct mode.
+  APIs use non-mutating inventory checks when running in direct mode. Direct
+  checks include stable `timeout`, `api`, and `mutation` fields; for example
+  GCP reports an aggregated Compute Engine list query, and Blacksmith Testbox
+  reports provider-owned runtime hydration.
 
 When auth is missing, doctor prints `crabbox login` as the next step.
 
@@ -74,7 +77,7 @@ When auth is missing, doctor prints `crabbox login` as the next step.
   joined client.
 - `crabbox doctor --id <lease>` runs an SSH transport/tool probe against the
   resolved target. The static provider check without `--id` only verifies that
-  `static.host` is configured.
+  `static.host` is configured unless `--doctor-probe-ssh` is set.
 
 DNS is checked before HTTPS so a broken DNS responder does not look like a
 broker outage.
@@ -147,8 +150,7 @@ tools:
 Failures swap the leading `ok` for `fail` and add a remediation hint:
 
 ```text
-auth:
-  fail  broker token is missing - run `crabbox login`
+failed  provider provider=gcp class=auth hint=check_gcp_project_credentials_and_compute_instances_list ...
 ```
 
 Skips swap `ok` for `skip` and explain why the check did not run:
@@ -161,12 +163,18 @@ network:
 Exit code is `0` on full success, `1` on any failure. Skips do not change
 the exit code.
 
+Use `--json` for automation. The JSON view contains the overall `ok` boolean,
+selected `provider`, and a `checks` array with each check's status, category,
+message, and parsed details.
+
 ## Adding A Check
 
 Doctor orchestration lives in `internal/cli/doctor.go`. Prefer provider-owned
 `DoctorProvider` implementations for direct provider checks. Keep each check
 explicit and cheap, and print stable `ok`, `failed`, `missing`, `skip`, or
-`warning` lines that remain easy to scan in terminal logs.
+`warning` lines that remain easy to scan in terminal logs. Maintainers can run
+`scripts/live-doctor-smoke.sh` after building `bin/crabbox` to exercise every
+built-in provider against the local machine and configured credentials.
 
 Rules for new checks:
 
