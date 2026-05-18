@@ -226,7 +226,7 @@ run:
 
 ## Actions Hydration
 
-`crabbox actions hydrate` dispatches the configured workflow and waits for a ready marker. The workflow run URL and marker path are the key correlation points.
+`crabbox actions hydrate` runs the configured workflow setup locally over SSH by default and waits for a ready marker. The marker path is the key local correlation point; `--github-runner` also reports the workflow run URL when Crabbox uses the GitHub runner fallback.
 
 Use:
 

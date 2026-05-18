@@ -112,4 +112,4 @@ Usage reports include lease count, active lease count, elapsed runtime, estimate
 
 Actions-backed lanes can use local SSH hydration for ordinary repository setup. They should run inside a real GitHub Actions job when they need Actions secrets, OIDC, service containers, or unsupported `uses:` steps.
 
-The current bridge is `crabbox init`: generate repo-local workflow and agent instructions so warmup/run can hydrate the same dependencies the real CI uses. The GitHub fallback should register ephemeral self-hosted runners or dispatch a configured workflow for full secrets/OIDC parity.
+The current bridge is `crabbox init`: generate repo-local workflow and agent instructions so warmup/run can hydrate the same dependencies the real CI uses. The GitHub fallback registers ephemeral self-hosted runners or dispatches a configured workflow for full secrets/OIDC parity.
