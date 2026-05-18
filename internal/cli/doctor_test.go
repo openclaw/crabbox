@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,7 @@ func TestCoordinatorProviderReadinessSupported(t *testing.T) {
 		{provider: "namespace-devbox", want: false},
 		{provider: "semaphore", want: false},
 		{provider: "sprites", want: false},
+		{provider: "cloudflare", want: false},
 		{provider: "ssh", want: false},
 	}
 	for _, tt := range tests {
@@ -37,6 +39,76 @@ func TestCoordinatorProviderReadinessSupported(t *testing.T) {
 				t.Fatalf("coordinatorProviderReadinessSupported(%q)=%t want %t", tt.provider, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDoctorLocalToolsAreProviderAware(t *testing.T) {
+	tests := []struct {
+		name string
+		spec ProviderSpec
+		want []string
+	}{
+		{
+			name: "delegated no local ssh sync",
+			spec: ProviderSpec{Kind: ProviderKindDelegatedRun},
+			want: []string{"git"},
+		},
+		{
+			name: "ssh lease sync",
+			spec: ProviderSpec{Kind: ProviderKindSSHLease, Features: FeatureSet{FeatureSSH, FeatureCrabboxSync}},
+			want: []string{"git", "ssh", "ssh-keygen", "rsync"},
+		},
+		{
+			name: "archive sync requires tar but not rsync",
+			spec: ProviderSpec{Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeatureArchiveSync}},
+			want: []string{"git", "tar"},
+		},
+		{
+			name: "provider-owned local archive sync requires tar",
+			spec: ProviderSpec{Name: "e2b", Kind: ProviderKindDelegatedRun},
+			want: []string{"git", "tar"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := doctorLocalTools(tt.spec); !slices.Equal(got, tt.want) {
+				t.Fatalf("tools=%v want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDoctorRunsDirectProviderCheckForCoordinatorNeverProvider(t *testing.T) {
+	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync", "curl"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("missing local doctor tool %s: %v", tool, err)
+		}
+	}
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+
+	coordinatorCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		coordinatorCalled = true
+		http.Error(w, "coordinator should not be checked for direct provider", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "token")
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--provider", "cloudflare"})
+	if err != nil {
+		t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "ok      provider provider=cloudflare direct_check=ready") {
+		t.Fatalf("doctor did not run direct provider check: %q", stdout.String())
+	}
+	if coordinatorCalled {
+		t.Fatalf("doctor checked coordinator for direct provider: %q", stdout.String())
 	}
 }
 
@@ -58,7 +130,7 @@ func TestDoctorSkipsProviderReadinessForCoordinatorUnsupportedProvider(t *testin
 		case "/v1/health":
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		case "/v1/whoami":
-			_ = json.NewEncoder(w).Encode(CoordinatorWhoami{Auth: "token", Owner: "peter@example.test", Org: "openclaw"})
+			_ = json.NewEncoder(w).Encode(CoordinatorWhoami{Auth: "token", Owner: "alice@example.test", Org: "example-org"})
 		default:
 			if strings.Contains(r.URL.Path, "/readiness") {
 				readinessCalled = true

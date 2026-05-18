@@ -13,6 +13,8 @@ type ModalConfig = core.ModalConfig
 type ProviderSpec = core.ProviderSpec
 type Runtime = core.Runtime
 type Backend = core.Backend
+type DoctorRequest = core.DoctorRequest
+type DoctorResult = core.DoctorResult
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
@@ -122,4 +124,8 @@ func syncManifest(root string, excludes []string) (SyncManifest, error) {
 
 func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
 	return core.CheckSyncPreflight(manifest, cfg, force, stderr)
+}
+
+func inventoryDoctorResult(provider string, leases int) DoctorResult {
+	return core.InventoryDoctorResult(provider, leases)
 }

@@ -136,6 +136,32 @@ type JSONListBackend interface {
 Use it only when an existing provider already exposed a different JSON schema
 than the normalized `[]LeaseView` shape.
 
+Provider doctor checks are optional for direct providers that can prove cheap,
+non-mutating readiness:
+
+```go
+type DoctorBackend interface {
+	Backend
+
+	Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, error)
+}
+```
+
+Use `DoctorBackend` when a provider owns direct credentials or a delegated
+runner outside the coordinator. The check must validate provider-specific
+readiness without creating resources, and it must not treat unrelated
+coordinator health as proof that the provider itself is configured correctly.
+Expose it through the matching provider-level hook so `doctor` does not
+configure every provider just to discover the optional capability:
+
+```go
+type DoctorProvider interface {
+	Provider
+
+	ConfigureDoctor(cfg Config, rt Runtime) (DoctorBackend, error)
+}
+```
+
 Future provider-specific capability areas should follow the same pattern, for
 example pricing or image management.
 

@@ -40,3 +40,15 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return newBackend(p.Spec(), cfg, rt)
 }
+
+func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
+	backend, err := p.Configure(cfg, rt)
+	if err != nil {
+		return nil, err
+	}
+	doctor, ok := backend.(core.DoctorBackend)
+	if !ok {
+		return nil, core.Exit(2, "semaphore doctor backend unavailable")
+	}
+	return doctor, nil
+}

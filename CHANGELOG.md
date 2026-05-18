@@ -7,6 +7,8 @@
 - Added an account-guarded EC2 Mac Dedicated Host quota request helper for turning macOS lifecycle smoke quota evidence into a dry-run or explicit AWS Service Quotas request.
 - Added a no-spend macOS coordinator remediation audit helper that bundles provider identity, IAM policy, host quota, host allocation dry-run, guarded IAM apply dry-run, and guarded quota request dry-run evidence into `summary.json`.
 - Added `provider: exe-dev` for exe.dev VM SSH leases through the exe.dev SSH API, including Crabbox sync/run, `crabbox ssh`, and provider docs.
+- Added Cloudflare runner readiness to `crabbox doctor --provider cloudflare` so runner URL, auth, and container bindings are checked without creating a sandbox. Thanks @altaywtf.
+- Added direct `crabbox doctor` readiness for all built-in providers without creating provider resources.
 - Added `--slug` for `crabbox warmup`, fresh `crabbox run` leases, and `crabbox checkpoint fork`, plus `--label` for human-readable run history/timing metadata.
 
 ### Changed
@@ -24,6 +26,7 @@
 - Fixed EC2 Mac Dedicated Host state parsing so live AWS `DescribeHosts` responses are recognized as reusable by macOS lifecycle smoke instead of falling through to a new host allocation path.
 - Fixed existing AWS macOS lease commands so `crabbox run --id ... --target macos` defaults the irrelevant capacity market to On-Demand instead of failing Spot validation before reaching the lease.
 - Fixed recursive run artifact globs so `**` works on older Bash without crossing unintended path segments.
+- Fixed `crabbox doctor` local tool checks so providers that do not use local SSH/rsync do not fail on those tools.
 
 ## 0.15.0 - 2026-05-17
 

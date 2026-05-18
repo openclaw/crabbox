@@ -14,6 +14,8 @@ type NamespaceConfig = core.NamespaceConfig
 type ProviderSpec = core.ProviderSpec
 type Runtime = core.Runtime
 type Backend = core.Backend
+type DoctorRequest = core.DoctorRequest
+type DoctorResult = core.DoctorResult
 type AcquireRequest = core.AcquireRequest
 type ResolveRequest = core.ResolveRequest
 type ReleaseLeaseRequest = core.ReleaseLeaseRequest
@@ -112,4 +114,8 @@ func bootstrapWaitTimeout(cfg Config) time.Duration {
 
 func durationMinutesCeil(duration time.Duration) int {
 	return core.DurationMinutesCeil(duration)
+}
+
+func cliDoctorResult(provider string, leases int, runtime string) DoctorResult {
+	return core.CLIDoctorResult(provider, leases, runtime)
 }

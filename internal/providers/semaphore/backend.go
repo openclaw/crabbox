@@ -226,6 +226,14 @@ func (b *semaphoreBackend) List(ctx context.Context, req core.ListRequest) ([]co
 	return servers, nil
 }
 
+func (b *semaphoreBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	servers, err := b.List(ctx, core.ListRequest{})
+	if err != nil {
+		return core.DoctorResult{}, err
+	}
+	return core.InventoryDoctorResult(providerName, len(servers)), nil
+}
+
 // ReleaseLease stops the Semaphore job.
 func (b *semaphoreBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	jobID := stripLeasePrefix(req.Lease.LeaseID)

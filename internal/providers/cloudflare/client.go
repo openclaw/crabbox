@@ -76,7 +76,13 @@ func newCloudflareClient(cfg Config, rt Runtime) (*cloudflareClient, error) {
 		instanceType = cloudflareContainerInstanceTypeForClass(cfg.Class)
 	}
 	parsed, err := url.Parse(apiURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil {
+		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)
+	}
+	if parsed.User != nil {
+		return nil, exit(2, "%s url must not include userinfo", providerName)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
 		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)
 	}
 	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
@@ -110,6 +116,20 @@ func (c *cloudflareClient) createSandbox(ctx context.Context, req createSandboxR
 	var sandbox cloudflareContainer
 	err := c.doJSON(ctx, http.MethodPost, "/v1/sandboxes", req, &sandbox)
 	return sandbox, err
+}
+
+func (c *cloudflareClient) checkAuth(ctx context.Context) error {
+	var readiness struct {
+		OK     bool   `json:"ok"`
+		Runner string `json:"runner"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/readiness", nil, &readiness); err != nil {
+		return err
+	}
+	if !readiness.OK || readiness.Runner != providerName {
+		return fmt.Errorf("%s API readiness response is invalid", providerName)
+	}
+	return nil
 }
 
 func (c *cloudflareClient) getSandbox(ctx context.Context, sandboxID string) (cloudflareContainer, error) {

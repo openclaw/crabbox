@@ -257,6 +257,14 @@ func (b *e2bBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, er
 	return servers, nil
 }
 
+func (b *e2bBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+	servers, err := b.List(ctx, ListRequest{})
+	if err != nil {
+		return DoctorResult{}, err
+	}
+	return inventoryDoctorResult(e2bProvider, len(servers)), nil
+}
+
 func (b *e2bBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
 	client, err := newE2BClient(b.cfg, b.rt)
 	if err != nil {

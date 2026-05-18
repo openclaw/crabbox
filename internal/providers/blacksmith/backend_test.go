@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type testClock struct{}
@@ -506,7 +508,7 @@ func TestBlacksmithSyncTrackerHandlesSplitMarkers(t *testing.T) {
 func TestBlacksmithBackendUsesInjectedCommandRunnerForListAndStatus(t *testing.T) {
 	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
 		return LocalCommandResult{
-			Stdout: "tbx_123 ready openclaw .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
+			Stdout: "tbx_123 ready my-app .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
 		}, nil
 	}}
 	cfg := baseConfig()
@@ -554,7 +556,7 @@ func TestBlacksmithStatusWaitTimeoutMentionsQueuedState(t *testing.T) {
 func TestBlacksmithBackendListJSONKeepsParsedTableShape(t *testing.T) {
 	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
 		return LocalCommandResult{
-			Stdout: "tbx_123 ready openclaw .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
+			Stdout: "tbx_123 ready my-app .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
 		}, nil
 	}}
 	backend := newTestBlacksmithBackend(baseConfig(), runner)
@@ -566,7 +568,7 @@ func TestBlacksmithBackendListJSONKeepsParsedTableShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("view=%T, want []blacksmithListItem", view)
 	}
-	if len(items) != 1 || items[0].ID != "tbx_123" || items[0].Repo != "openclaw" {
+	if len(items) != 1 || items[0].ID != "tbx_123" || items[0].Repo != "my-app" {
 		t.Fatalf("items=%#v", items)
 	}
 }
@@ -591,6 +593,29 @@ func TestBlacksmithBackendListJSONCanIncludeAllStates(t *testing.T) {
 	}
 	if len(runner.calls) != 1 || !containsString(runner.calls[0], "--all") {
 		t.Fatalf("calls=%#v, want --all", runner.calls)
+	}
+}
+
+func TestBlacksmithDoctorListsInventoryOnly(t *testing.T) {
+	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
+		return LocalCommandResult{
+			Stdout: "tbx_123 ready my-app .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
+		}, nil
+	}}
+	backend := newTestBlacksmithBackend(baseConfig(), runner)
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Provider != blacksmithTestboxProvider || !strings.Contains(result.Message, "cli=ready inventory=ready leases=1 runtime=ci_hydrated_by_provider") {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%#v, want one list", runner.calls)
+	}
+	want := []string{"testbox", "list"}
+	if !reflect.DeepEqual(runner.calls[0], want) {
+		t.Fatalf("call=%#v, want %#v", runner.calls[0], want)
 	}
 }
 

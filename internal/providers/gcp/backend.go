@@ -29,6 +29,15 @@ type SSHTarget = core.SSHTarget
 
 type gcpLeaseBackend struct{ shared.DirectSSHBackend }
 
+type gcpClient interface {
+	ListCrabboxServers(context.Context) ([]Server, error)
+	CreateServerWithFallback(context.Context, Config, string, string, string, bool, func(string, ...any)) (Server, Config, error)
+	WaitForServerIP(context.Context, string) (Server, error)
+	GetServer(context.Context, string) (Server, error)
+	DeleteServer(context.Context, string) error
+	SetLabels(context.Context, string, map[string]string) error
+}
+
 func NewGCPLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = "gcp"
 	return &gcpLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt}}
@@ -150,6 +159,17 @@ func (b *gcpLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseVie
 	return client.ListCrabboxServers(ctx)
 }
 
+func (b *gcpLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	servers, err := b.List(ctx, ListRequest{})
+	if err != nil {
+		return core.DoctorResult{}, err
+	}
+	return core.DoctorResult{
+		Provider: "gcp",
+		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready leases=%d runtime=unchecked", len(servers)),
+	}, nil
+}
+
 func (b *gcpLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	client, err := newGCPClient(ctx, b.Cfg)
 	if err != nil {
@@ -229,9 +249,10 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func newGCPClient(ctx context.Context, cfg Config) (*core.GCPClient, error) {
+var newGCPClient = func(ctx context.Context, cfg Config) (gcpClient, error) {
 	return core.NewGCPClient(ctx, cfg)
 }
+
 func newLeaseID() string { return core.NewLeaseID() }
 func allocateDirectLeaseSlug(id, requested string, servers []Server) (string, error) {
 	return core.AllocateDirectLeaseSlug(id, requested, servers)

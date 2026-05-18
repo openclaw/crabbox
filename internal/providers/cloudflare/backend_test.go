@@ -151,6 +151,169 @@ func TestCloudflareClientRejectsURLQueryAndFragment(t *testing.T) {
 	}
 }
 
+func TestCloudflareClientRejectsURLUserinfoWithoutLeakingIt(t *testing.T) {
+	for _, rawURL := range []string{
+		"https://secret-token@runner.example.com",
+		"http://secret-token@runner.example.com",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			cfg := Config{}
+			cfg.Cloudflare.APIURL = rawURL
+			cfg.Cloudflare.Token = "token"
+			_, err := newCloudflareClient(cfg, Runtime{})
+			if err == nil {
+				t.Fatal("newCloudflareClient accepted URL userinfo")
+			}
+			if !strings.Contains(err.Error(), "must not include userinfo") {
+				t.Fatalf("error = %v, want userinfo message", err)
+			}
+			if strings.Contains(err.Error(), "secret-token") {
+				t.Fatalf("error leaked URL userinfo: %v", err)
+			}
+		})
+	}
+}
+
+func TestCloudflareDoctorChecksRunnerAuth(t *testing.T) {
+	var sawAuth bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/readiness" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer token" {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		sawAuth = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true,"runner":"cloudflare"}`)
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: providerName, Class: "beast"}
+	cfg.Cloudflare.APIURL = server.URL
+	cfg.Cloudflare.Token = "token"
+	cfg.ServerType = cloudflareContainerInstanceTypeForClass(cfg.Class)
+	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
+	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawAuth {
+		t.Fatal("doctor did not make authenticated runner request")
+	}
+	if result.Provider != providerName || !strings.Contains(result.Message, "auth=configured") || !strings.Contains(result.Message, "type=standard-4") {
+		t.Fatalf("doctor result = %#v", result)
+	}
+}
+
+func TestCloudflareDoctorTimesOutStalledRunnerReadiness(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/readiness" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	oldTimeout := cloudflareDoctorTimeout
+	cloudflareDoctorTimeout = 20 * time.Millisecond
+	t.Cleanup(func() {
+		cloudflareDoctorTimeout = oldTimeout
+	})
+
+	cfg := Config{Provider: providerName}
+	cfg.Cloudflare.APIURL = server.URL
+	cfg.Cloudflare.Token = "token"
+	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	started := time.Now()
+	_, err := backend.Doctor(ctx, DoctorRequest{})
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("doctor succeeded against stalled runner")
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("doctor took %s, want bounded timeout", elapsed)
+	}
+}
+
+func TestCloudflareDoctorRejectsInvalidReadinessPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/readiness" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "runner": "other"})
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: providerName}
+	cfg.Cloudflare.APIURL = server.URL
+	cfg.Cloudflare.Token = "token"
+	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
+	err := func() error {
+		_, err := backend.Doctor(context.Background(), DoctorRequest{})
+		return err
+	}()
+	if err == nil || !strings.Contains(err.Error(), "readiness response is invalid") {
+		t.Fatalf("doctor err = %v, want invalid readiness payload", err)
+	}
+}
+
+func TestCloudflareDoctorRejectsWrongRunnerPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: providerName}
+	cfg.Cloudflare.APIURL = server.URL + "/wrong"
+	cfg.Cloudflare.Token = "token"
+	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
+	err := func() error {
+		_, err := backend.Doctor(context.Background(), DoctorRequest{})
+		return err
+	}()
+	if err == nil || !cloudflareNotFoundError(err) {
+		t.Fatalf("doctor err = %v, want not-found for wrong runner path", err)
+	}
+}
+
+func TestCloudflareDoctorRejectsUnauthorizedRunner(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: providerName}
+	cfg.Cloudflare.APIURL = server.URL
+	cfg.Cloudflare.Token = "wrong"
+	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
+	err := func() error {
+		_, err := backend.Doctor(context.Background(), DoctorRequest{})
+		return err
+	}()
+	if err == nil || !strings.Contains(err.Error(), "unauthorized") {
+		t.Fatalf("doctor err = %v, want unauthorized", err)
+	}
+}
+
+func TestCloudflareDoctorRejectsMissingRunnerConfig(t *testing.T) {
+	backend := NewCloudflareBackend(Provider{}.Spec(), Config{Provider: providerName}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
+	err := func() error {
+		_, err := backend.Doctor(context.Background(), DoctorRequest{})
+		return err
+	}()
+	if err == nil || !strings.Contains(err.Error(), "requires --cloudflare-url") {
+		t.Fatalf("doctor err = %v, want missing URL", err)
+	}
+}
+
 func TestCloudflareCreateSandboxSendsInstanceType(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var got createSandboxRequest

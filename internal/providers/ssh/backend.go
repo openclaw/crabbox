@@ -69,6 +69,16 @@ func (b *staticLeaseBackend) List(_ context.Context, req ListRequest) ([]LeaseVi
 	return []LeaseView{server}, nil
 }
 
+func (b *staticLeaseBackend) Doctor(_ context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	if b.Cfg.Static.Host == "" {
+		return core.DoctorResult{}, exit(3, "missing static.host")
+	}
+	return core.DoctorResult{
+		Provider: "ssh",
+		Message:  fmt.Sprintf("target=%s windows_mode=%s host=%s runtime=unchecked", b.Cfg.TargetOS, b.Cfg.WindowsMode, b.Cfg.Static.Host),
+	}, nil
+}
+
 func (b *staticLeaseBackend) ReleaseLease(_ context.Context, req ReleaseLeaseRequest) error {
 	removeLeaseClaim(req.Lease.LeaseID)
 	return nil

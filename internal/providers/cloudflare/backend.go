@@ -29,7 +29,28 @@ type cloudflareBackend struct {
 	rt   Runtime
 }
 
+var cloudflareDoctorTimeout = 10 * time.Second
+
 func (b *cloudflareBackend) Spec() ProviderSpec { return b.spec }
+
+func (b *cloudflareBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+	client, err := newCloudflareClient(b.cfg, b.rt)
+	if err != nil {
+		return DoctorResult{}, err
+	}
+	if cloudflareDoctorTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cloudflareDoctorTimeout)
+		defer cancel()
+	}
+	if err := client.checkAuth(ctx); err != nil {
+		return DoctorResult{}, err
+	}
+	return DoctorResult{
+		Provider: providerName,
+		Message:  fmt.Sprintf("runner=%s auth=configured type=%s", client.baseURL, client.instanceType),
+	}, nil
+}
 
 func (b *cloudflareBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.ActionsRunner {

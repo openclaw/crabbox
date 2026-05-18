@@ -372,6 +372,14 @@ type SandboxNamespace =
   | DurableObjectNamespace<SandboxStandard2>
   | DurableObjectNamespace<SandboxStandard3>;
 
+type SandboxBindingName =
+  | "Sandbox"
+  | "SandboxLite"
+  | "SandboxBasic"
+  | "SandboxStandard1"
+  | "SandboxStandard2"
+  | "SandboxStandard3";
+
 type ResolvedSandbox = {
   container: DurableObjectStub<SandboxBase>;
   status: Response;
@@ -405,6 +413,8 @@ export default {
 
     const auth = authorize(request, env);
     if (auth) return auth;
+
+    if (url.pathname === "/v1/readiness" && request.method === "GET") return runnerReadiness(env);
 
     if (url.pathname === "/v1/sandboxes" && request.method === "POST") {
       return createSandbox(request, env);
@@ -535,21 +545,52 @@ async function resolveSandbox(
   return json({ error: "not found" }, 404);
 }
 
-function namespaceForInstanceType(env: Env, instanceType: InstanceType): SandboxNamespace {
+function runnerReadiness(env: Env): Response {
+  const missing = missingContainerBindings(env);
+  if (missing.length > 0) {
+    return json(
+      {
+        ok: false,
+        runner: "cloudflare",
+        error: `missing container bindings: ${missing.join(", ")}`,
+        missing,
+      },
+      503,
+    );
+  }
+  return json({ ok: true, runner: "cloudflare", instanceTypes });
+}
+
+function missingContainerBindings(env: Env): string[] {
+  const missing: string[] = [];
+  for (const instanceType of instanceTypes) {
+    const name = namespaceBindingNameForInstanceType(instanceType);
+    if ((env[name] as unknown) === undefined || (env[name] as unknown) === null) {
+      missing.push(name);
+    }
+  }
+  return missing;
+}
+
+function namespaceBindingNameForInstanceType(instanceType: InstanceType): SandboxBindingName {
   switch (instanceType) {
     case "lite":
-      return env.SandboxLite;
+      return "SandboxLite";
     case "basic":
-      return env.SandboxBasic;
+      return "SandboxBasic";
     case "standard-1":
-      return env.SandboxStandard1;
+      return "SandboxStandard1";
     case "standard-2":
-      return env.SandboxStandard2;
+      return "SandboxStandard2";
     case "standard-3":
-      return env.SandboxStandard3;
+      return "SandboxStandard3";
     case "standard-4":
-      return env.Sandbox;
+      return "Sandbox";
   }
+}
+
+function namespaceForInstanceType(env: Env, instanceType: InstanceType): SandboxNamespace {
+  return env[namespaceBindingNameForInstanceType(instanceType)];
 }
 
 function requestedInstanceType(url: URL): InstanceType | Response | undefined {

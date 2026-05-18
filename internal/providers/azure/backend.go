@@ -142,6 +142,16 @@ func (b *azureLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseV
 	return client.ListCrabboxServers(ctx)
 }
 
+func (b *azureLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	servers, err := b.List(ctx, ListRequest{})
+	if err != nil {
+		return core.DoctorResult{}, err
+	}
+	result := core.InventoryDoctorResult("azure", len(servers))
+	result.Message += fmt.Sprintf(" location=%s default_type=%s", b.Cfg.AzureLocation, b.Cfg.ServerType)
+	return result, nil
+}
+
 func (b *azureLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	if err := deleteServer(ctx, b.Cfg, req.Lease.Server); err != nil {
 		return err

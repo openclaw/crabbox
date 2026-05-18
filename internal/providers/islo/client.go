@@ -36,7 +36,7 @@ type isloSDKClient struct {
 	httpClient *http.Client
 }
 
-func newIsloClient(cfg Config, rt Runtime) (isloAPI, error) {
+var newIsloClient = func(cfg Config, rt Runtime) (isloAPI, error) {
 	apiKey := strings.TrimSpace(cfg.Islo.APIKey)
 	if apiKey == "" {
 		return nil, exit(2, "provider=islo requires ISLO_API_KEY")

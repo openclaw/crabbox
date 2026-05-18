@@ -257,6 +257,14 @@ func (b *isloBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, e
 	return servers, nil
 }
 
+func (b *isloBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	servers, err := b.List(ctx, ListRequest{})
+	if err != nil {
+		return core.DoctorResult{}, err
+	}
+	return core.InventoryDoctorResult(isloProvider, len(servers)), nil
+}
+
 func (b *isloBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
 	client, err := newIsloClient(b.cfg, b.rt)
 	if err != nil {

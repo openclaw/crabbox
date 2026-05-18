@@ -1,8 +1,8 @@
 # doctor
 
 `crabbox doctor` runs the local preflight before you commit to a long
-workflow. It is fast (under a second on a healthy machine), local-only, and
-never calls a billable provider API.
+workflow. It is fast on a healthy machine, non-destructive, and does not create
+or mutate provider resources.
 
 ```sh
 crabbox doctor
@@ -19,13 +19,12 @@ config       config files load and parse, required keys are present
 auth         broker token is set, signed token is valid, identity resolves
 network      coordinator URL reachable, DNS works, SSH transport probes work
 ssh          SSH key path readable, key permissions sane, ssh-keygen on PATH
-tools        rsync, git, ssh, ssh-keygen present and executable
+tools        provider-applicable local tools are present and executable
 ```
 
-For `--provider ssh`, doctor also probes the static host: SSH reachability
-on the configured port, target-required tools (`bash`, `git`, `rsync`,
-`tar` for POSIX targets; OpenSSH, PowerShell, and `tar` for native
-Windows), and `static.workRoot` writability.
+For `--provider ssh`, doctor validates that `static.host` is configured.
+Use `crabbox doctor --id <lease>` for a remote SSH/tool probe against a
+resolved target.
 
 When `CRABBOX_SSH_KEY` is explicitly set, doctor validates the private key
 and the matching `.pub` file. When unset, it skips that check because
@@ -35,6 +34,13 @@ When a coordinator is configured, doctor also asks the broker for secret
 readiness for managed brokered providers such as AWS, Azure, GCP, and Hetzner. It
 reports missing Worker secret names such as `AZURE_TENANT_ID` without exposing
 secret values. Static, Proxmox, and delegated providers skip this broker-secret check.
+Delegated providers can still run their own direct readiness checks; for example,
+Cloudflare validates the configured runner URL and bearer token against the
+authenticated runner readiness API. GCP, Proxmox, Daytona, and Blacksmith
+Testbox use cheap inventory/list checks when running in direct mode, as do the
+other built-in providers that expose non-mutating list APIs. Blacksmith Testbox
+reports runtime as provider-hydrated because GitHub Actions hydration is owned
+by Testbox.
 
 When `--profile <name> --id <lease>` selects a profile with `doctor.enabled:
 true`, doctor runs that profile's remote prerequisite contract instead of the
@@ -69,6 +75,7 @@ tools:
   ok    rsync
   ok    ssh
   ok    ssh-keygen
+  ok    tar
 ```
 
 Failures swap the leading `ok` for `fail` and add a remediation hint:
@@ -78,7 +85,7 @@ auth:
   fail  broker token is missing - run `crabbox login`
 ```
 
-Exit code is `0` on full success, `2` on any failure. Skips never change
+Exit code is `0` on full success, `1` on any failure. Skips never change
 the exit code.
 
 ## Flags

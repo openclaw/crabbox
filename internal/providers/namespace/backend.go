@@ -106,6 +106,14 @@ func (b *namespaceLeaseBackend) List(ctx context.Context, req ListRequest) ([]Le
 	return servers, nil
 }
 
+func (b *namespaceLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+	servers, err := b.List(ctx, ListRequest{})
+	if err != nil {
+		return DoctorResult{}, err
+	}
+	return cliDoctorResult(namespaceProvider, len(servers), "unchecked"), nil
+}
+
 func (b *namespaceLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	name := strings.TrimSpace(req.Lease.Server.Name)
 	if name == "" {
