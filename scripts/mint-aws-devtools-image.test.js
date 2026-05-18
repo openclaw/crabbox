@@ -38,6 +38,19 @@ case "$1" in
     esac
     ;;
   run)
+    if [[ "$*" == *"Test-Path 'C:\\ProgramData\\crabbox\\image-prep-reboot-required'"* ]]; then
+      if [[ "\${CRABBOX_FAKE_WINDOWS_REBOOT:-0}" == "1" && ! -f "\${CRABBOX_FAKE_LOG}.rebooted" ]]; then
+        printf 'crabbox-reboot-required\\n'
+      else
+        printf 'crabbox-reboot-not-required\\n'
+      fi
+      exit 0
+    fi
+    if [[ "$*" == *"shutdown /r"* ]]; then
+      touch "\${CRABBOX_FAKE_LOG}.rebooted"
+      printf 'reboot scheduled\\n'
+      exit 0
+    fi
     printf 'devtools-smoke-ok\\n'
     ;;
   image)
@@ -49,6 +62,9 @@ case "$1" in
     ;;
   stop)
     printf 'stopped %s\\n' "\${*: -1}"
+    ;;
+  status)
+    printf 'ready\\n'
     ;;
 esac
 `,
@@ -142,4 +158,34 @@ test("AWS devtools mint wrapper maps windows flags", async () => {
   assert.doesNotMatch(log, /warmup .*--region us-east-1/);
   assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --script/);
   assert.doesNotMatch(log, /image promote/);
+});
+
+test("AWS devtools mint wrapper reboots windows source when prep requires it", async () => {
+  const fake = await setupFakeCrabbox();
+  const result = await runScript(
+    [
+      "--target",
+      "windows",
+      "--region",
+      "us-east-1",
+      "--type",
+      "m7i.large",
+      "--run",
+      "--no-promote",
+      "--prep-script",
+      fake.windowsPrep,
+    ],
+    {
+      CRABBOX_BIN: fake.fake,
+      CRABBOX_FAKE_LOG: fake.log,
+      CRABBOX_FAKE_WINDOWS_REBOOT: "1",
+      CRABBOX_IMAGE_REBOOT_SETTLE_SECONDS: "0",
+    },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  const log = await readFile(fake.log, "utf8");
+  assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- if \(Test-Path/);
+  assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- shutdown \/r \/t 5 \/f/);
+  assert.match(log, /status --provider aws --target windows --id cbx_source --wait --wait-timeout 25m/);
+  assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --script/);
 });

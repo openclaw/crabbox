@@ -10,6 +10,7 @@ $DockerImages = $env:CRABBOX_WINDOWS_DOCKER_IMAGES
 if (-not $DockerImages) { $DockerImages = "mcr.microsoft.com/windows/servercore:ltsc2022" }
 $InstallDocker = $env:CRABBOX_WINDOWS_INSTALL_DOCKER
 if (-not $InstallDocker) { $InstallDocker = "1" }
+$RebootMarker = "C:\ProgramData\crabbox\image-prep-reboot-required"
 
 function Write-Log {
   param([string]$Message)
@@ -100,8 +101,13 @@ function Install-DockerEngine {
     & docker version
   } catch {
     if (-not $restartRequired) { throw }
-    Write-Log "Docker service will be verified after the image-create reboot"
+    New-Item -ItemType Directory -Force -Path (Split-Path $RebootMarker) | Out-Null
+    Set-Content -Path $RebootMarker -Value "Containers feature requires reboot before Docker service verification"
+    Write-Log "Docker service will be verified after reboot"
     return
+  }
+  if (Test-Path $RebootMarker) {
+    Remove-Item -Force $RebootMarker
   }
   foreach ($image in ($DockerImages -split "\s+")) {
     if (-not $image) { continue }

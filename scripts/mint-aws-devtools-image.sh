@@ -10,6 +10,8 @@ image_name="${CRABBOX_IMAGE_NAME:-}"
 ttl="${CRABBOX_IMAGE_TTL:-2h}"
 idle_timeout="${CRABBOX_IMAGE_IDLE_TIMEOUT:-30m}"
 wait_timeout="${CRABBOX_IMAGE_WAIT_TIMEOUT:-60m}"
+reboot_wait_timeout="${CRABBOX_IMAGE_REBOOT_WAIT_TIMEOUT:-25m}"
+reboot_settle_seconds="${CRABBOX_IMAGE_REBOOT_SETTLE_SECONDS:-30}"
 run="${CRABBOX_IMAGE_RUN:-0}"
 promote="${CRABBOX_IMAGE_PROMOTE:-1}"
 keep_lease="${CRABBOX_IMAGE_KEEP_LEASE:-0}"
@@ -17,6 +19,7 @@ desktop="${CRABBOX_IMAGE_DESKTOP:-1}"
 browser="${CRABBOX_IMAGE_BROWSER:-auto}"
 windows_mode="${CRABBOX_WINDOWS_MODE:-normal}"
 prep_script="${CRABBOX_IMAGE_PREP_SCRIPT:-}"
+windows_reboot_marker='C:\ProgramData\crabbox\image-prep-reboot-required'
 
 usage() {
   cat <<'USAGE'
@@ -46,6 +49,8 @@ Useful env:
   CRABBOX_IMAGE_PROMOTE
   CRABBOX_IMAGE_KEEP_LEASE
   CRABBOX_IMAGE_WAIT_TIMEOUT
+  CRABBOX_IMAGE_REBOOT_WAIT_TIMEOUT
+  CRABBOX_IMAGE_REBOOT_SETTLE_SECONDS
 USAGE
 }
 
@@ -260,6 +265,31 @@ smoke() {
   run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --shell -- "$script"
 }
 
+windows_reboot_required() {
+  local lease="$1"
+  local output
+  output="$("$CRABBOX_BIN" run --provider aws --target windows --id "$lease" --no-sync --shell -- "if (Test-Path '$windows_reboot_marker') { Write-Output 'crabbox-reboot-required' } else { Write-Output 'crabbox-reboot-not-required' }")"
+  printf '%s\n' "$output"
+  grep -q 'crabbox-reboot-required' <<<"$output"
+}
+
+reboot_windows_source_if_needed() {
+  local lease="$1"
+  [[ "$target" == "windows" ]] || return 0
+  if ! windows_reboot_required "$lease"; then
+    return 0
+  fi
+  printf 'Windows source lease requires reboot before Docker image pull/proof\n' >&2
+  run_cmd "$CRABBOX_BIN" run --provider aws --target windows --id "$lease" --no-sync --shell -- 'shutdown /r /t 5 /f; Write-Output "reboot scheduled"'
+  sleep "$reboot_settle_seconds"
+  run_cmd "$CRABBOX_BIN" status --provider aws --target windows --id "$lease" --wait --wait-timeout "$reboot_wait_timeout"
+  run_cmd "$CRABBOX_BIN" run --provider aws --target windows --id "$lease" --no-sync --script "$prep_script"
+  if windows_reboot_required "$lease"; then
+    printf 'Windows prep still requires reboot after one reboot cycle\n' >&2
+    exit 1
+  fi
+}
+
 cat >&2 <<EOF
 AWS devtools image mint
   target: $target
@@ -278,6 +308,7 @@ fi
 
 source_lease="$(warmup source)"
 run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$source_lease" --no-sync --script "$prep_script"
+reboot_windows_source_if_needed "$source_lease"
 smoke "$source_lease"
 
 image_json="$("$CRABBOX_BIN" image create --id "$source_lease" --name "$image_name" --no-reboot=false --wait --wait-timeout "$wait_timeout" --json)"

@@ -212,6 +212,11 @@ and Windows Server container support with Docker Engine. It deliberately avoids
 Docker Desktop because headless image bakes should not depend on a user-session
 desktop app or Docker Desktop licensing.
 
+Windows container support can require one reboot before Docker starts. The
+wrapper detects the prep script's reboot marker, reboots the source lease,
+waits for Crabbox readiness, reruns the prep script to pull the configured
+Docker images, and only then runs the source smoke and AMI capture.
+
 Tune the default prebake set with environment variables:
 
 ```bash
