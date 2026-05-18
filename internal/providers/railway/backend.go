@@ -3,6 +3,7 @@ package railway
 import (
 	"context"
 	"fmt"
+	"io"
 	"math/rand"
 	"strings"
 	"sync"
@@ -108,18 +109,11 @@ func (b *railwayBackend) Run(ctx context.Context, req RunRequest) (RunResult, er
 		return RunResult{ExitCode: 1}, ExitError{Code: 1, Message: fmt.Sprintf("%s trigger deploy returned no deployment id", providerName)}
 	}
 
-	finalStatus, pollErr := b.pollDeployment(ctx, client, deploymentID)
+	logs := &railwayLogStreamer{out: b.rt.Stdout}
+	finalStatus, pollErr := b.pollDeployment(ctx, client, deploymentID, logs)
 	if pollErr != nil {
 		commandDuration := b.now().Sub(started)
 		return RunResult{ExitCode: 1, Command: commandDuration, Total: commandDuration}, ExitError{Code: 1, Message: fmt.Sprintf("%s deployment %s polling failed: %v", providerName, deploymentID, pollErr)}
-	}
-
-	logs, err := client.DeploymentLogs(ctx, deploymentID, railwayPollLogLimit)
-	if err != nil {
-		return RunResult{}, ExitError{Code: 1, Message: fmt.Sprintf("%s fetch logs failed: %v", providerName, err)}
-	}
-	for _, line := range logs {
-		fmt.Fprintln(b.rt.Stdout, line)
 	}
 
 	commandDuration := b.now().Sub(started)
@@ -148,7 +142,7 @@ func (b *railwayBackend) Run(ctx context.Context, req RunRequest) (RunResult, er
 // pollDeployment polls a specific deployment until it reaches a terminal state
 // or the overall timeout / parent context expires. Returns the final observed
 // status on success.
-func (b *railwayBackend) pollDeployment(ctx context.Context, client railwayAPI, deploymentID string) (railwayDeploymentStatus, error) {
+func (b *railwayBackend) pollDeployment(ctx context.Context, client railwayAPI, deploymentID string, logs *railwayLogStreamer) (railwayDeploymentStatus, error) {
 	overall := railwayPollOverallTimeout
 	if b.pollOverallOverride > 0 {
 		overall = b.pollOverallOverride
@@ -173,7 +167,17 @@ func (b *railwayBackend) pollDeployment(ctx context.Context, client railwayAPI, 
 			return "", err
 		}
 		if dep.Status.IsTerminal() {
+			if logs != nil {
+				if err := logs.Flush(deadlineCtx, client, deploymentID); err != nil {
+					return "", err
+				}
+			}
 			return dep.Status, nil
+		}
+		if logs != nil {
+			if err := logs.Flush(deadlineCtx, client, deploymentID); err != nil {
+				return "", err
+			}
 		}
 		// Backoff with ±jitter, capped at railwayPollMaxInterval.
 		sleepFor := railwayJitter(interval)
@@ -189,6 +193,50 @@ func (b *railwayBackend) pollDeployment(ctx context.Context, client railwayAPI, 
 			}
 		}
 	}
+}
+
+type railwayLogStreamer struct {
+	out            io.Writer
+	buildSeen      []string
+	deploymentSeen []string
+}
+
+func (s *railwayLogStreamer) Flush(ctx context.Context, client railwayAPI, deploymentID string) error {
+	buildLogs, err := client.BuildLogs(ctx, deploymentID, railwayPollLogLimit)
+	if err != nil {
+		return fmt.Errorf("fetch build logs: %w", err)
+	}
+	s.buildSeen = printNewRailwayLogs(s.out, buildLogs, s.buildSeen)
+
+	deploymentLogs, err := client.DeploymentLogs(ctx, deploymentID, railwayPollLogLimit)
+	if err != nil {
+		return fmt.Errorf("fetch deployment logs: %w", err)
+	}
+	s.deploymentSeen = printNewRailwayLogs(s.out, deploymentLogs, s.deploymentSeen)
+	return nil
+}
+
+func printNewRailwayLogs(out io.Writer, lines []string, seen []string) []string {
+	start := commonRailwayLogPrefix(seen, lines)
+	for _, line := range lines[start:] {
+		fmt.Fprintln(out, line)
+	}
+	next := make([]string, len(lines))
+	copy(next, lines)
+	return next
+}
+
+func commonRailwayLogPrefix(a, b []string) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return n
 }
 
 func (b *railwayBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -265,7 +313,7 @@ func (b *railwayBackend) Status(ctx context.Context, req StatusRequest) (StatusV
 		ServerID:   service.ID,
 		ServerType: "railway-service",
 		Network:    networkPublic,
-		Ready:      deployment.Status.Normalized() == railwayStatusSuccess,
+		Ready:      deployment.Status.IsReady(),
 		Labels:     map[string]string{"projectId": service.ProjectID},
 	}
 	return view, nil

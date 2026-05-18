@@ -8,6 +8,7 @@
 - Added an account-guarded EC2 Mac Dedicated Host quota request helper for turning macOS lifecycle smoke quota evidence into a dry-run or explicit AWS Service Quotas request.
 - Added a no-spend macOS coordinator remediation audit helper that bundles provider identity, IAM policy, host quota, host allocation dry-run, guarded IAM apply dry-run, and guarded quota request dry-run evidence into `summary.json`.
 - Added `provider: exe-dev` for exe.dev VM SSH leases through the exe.dev SSH API, including Crabbox sync/run, `crabbox ssh`, and provider docs.
+- Added the Railway delegated provider for redeploying an existing Railway service, streaming build/runtime logs, and reporting deployment status through `crabbox run`, `status`, `stop`, and `list`. Thanks @zozo123.
 - Added direct `crabbox doctor --provider exe-dev` readiness through the exe.dev inventory API without creating VMs.
 - Added Cloudflare runner readiness to `crabbox doctor --provider cloudflare` so runner URL, auth, and container bindings are checked without creating a sandbox. Thanks @altaywtf.
 - Added direct `crabbox doctor` readiness for all built-in providers without creating provider resources.

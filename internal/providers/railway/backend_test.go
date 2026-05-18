@@ -236,6 +236,8 @@ type fakeRailwayAPI struct {
 	triggerEnvironmentID string
 	triggerServiceID     string
 	deployID             string
+	buildLogs            []string
+	buildLogsForID       string
 	logs                 []string
 	logsForID            string
 	deployment           railwayDeployment
@@ -261,6 +263,13 @@ func (f *fakeRailwayAPI) TriggerDeploy(_ context.Context, projectID, environment
 	f.triggerEnvironmentID = environmentID
 	f.triggerServiceID = serviceID
 	return f.deployID, f.triggerErr
+}
+
+func (f *fakeRailwayAPI) BuildLogs(_ context.Context, deploymentID string, _ int) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.buildLogsForID = deploymentID
+	return f.buildLogs, nil
 }
 
 func (f *fakeRailwayAPI) DeploymentLogs(_ context.Context, deploymentID string, _ int) ([]string, error) {
@@ -347,6 +356,7 @@ func TestRailwayRunHappyPath(t *testing.T) {
 		// Trigger returns dep-1; the poll loop sees one non-terminal status before
 		// terminating on SUCCESS; logs are then fetched against that exact id.
 		pollStatuses: []railwayDeploymentStatus{railwayStatusDeploying, railwayStatusSuccess},
+		buildLogs:    []string{"building image"},
 		logs:         []string{"+ pnpm test", "PASS suite (1.2s)"},
 	}
 	backend := newRailwayBackendForTest(api)
@@ -362,6 +372,9 @@ func TestRailwayRunHappyPath(t *testing.T) {
 	}
 	if api.logsForID != "dep-1" {
 		t.Fatalf("logs fetched for id=%q, want dep-1 (new deployment, not stale)", api.logsForID)
+	}
+	if api.buildLogsForID != "dep-1" {
+		t.Fatalf("build logs fetched for id=%q, want dep-1 (new deployment, not stale)", api.buildLogsForID)
 	}
 	if api.pollCalls < 2 {
 		t.Fatalf("poll calls = %d, want at least 2 (DEPLOYING then SUCCESS)", api.pollCalls)
@@ -399,6 +412,59 @@ func TestRailwayRunPollsDeployingThenSuccess(t *testing.T) {
 	}
 	if api.pollCalls != 4 {
 		t.Fatalf("poll calls = %d, want 4 (queued, building, deploying, success)", api.pollCalls)
+	}
+}
+
+func TestRailwayRunTreatsSleepingAsSuccessfulTerminalStatus(t *testing.T) {
+	api := &fakeRailwayAPI{
+		deployID:     "dep-1",
+		pollStatuses: []railwayDeploymentStatus{railwayStatusSleeping},
+		logs:         []string{"service is sleeping"},
+	}
+	backend := newRailwayBackendForTest(api)
+	result, err := backend.Run(context.Background(), RunRequest{ID: "svc-1", NoSync: true, Command: []string{"pnpm", "test"}})
+	if err != nil {
+		t.Fatalf("Run err: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", result.ExitCode)
+	}
+	if api.pollCalls != 1 {
+		t.Fatalf("poll calls = %d, want 1 for terminal SLEEPING", api.pollCalls)
+	}
+}
+
+func TestRailwayRunStreamsBuildAndDeploymentLogsWithoutDuplicates(t *testing.T) {
+	var stdout strings.Builder
+	api := &fakeRailwayAPI{
+		deployID:     "dep-1",
+		pollStatuses: []railwayDeploymentStatus{railwayStatusDeploying, railwayStatusSuccess},
+		buildLogs:    []string{"build line"},
+		logs:         []string{"deploy line"},
+	}
+	backend := newRailwayBackendForTest(api)
+	backend.rt.Stdout = &stdout
+	if _, err := backend.Run(context.Background(), RunRequest{ID: "svc-1", NoSync: true, Command: []string{"pnpm", "test"}}); err != nil {
+		t.Fatalf("Run err: %v", err)
+	}
+	out := stdout.String()
+	if strings.Count(out, "build line") != 1 {
+		t.Fatalf("stdout = %q, want build line once", out)
+	}
+	if strings.Count(out, "deploy line") != 1 {
+		t.Fatalf("stdout = %q, want deploy line once", out)
+	}
+}
+
+func TestRailwayLogStreamerPrintsChangedSnapshots(t *testing.T) {
+	var stdout strings.Builder
+	var seen []string
+	seen = printNewRailwayLogs(&stdout, []string{"build 1", "build 2"}, seen)
+	seen = printNewRailwayLogs(&stdout, []string{"build 1", "build 2"}, seen)
+	seen = printNewRailwayLogs(&stdout, []string{"build 1", "build 2", "build 3"}, seen)
+	seen = printNewRailwayLogs(&stdout, []string{"build 1", "changed 2", "build 3"}, seen)
+	if got := stdout.String(); got != "build 1\nbuild 2\nbuild 3\nchanged 2\nbuild 3\n" {
+		t.Fatalf("stdout = %q", got)
 	}
 }
 
@@ -448,6 +514,7 @@ func TestRailwayDeploymentStatusEnum(t *testing.T) {
 		{railwayStatusCrashed, true, 1},
 		{railwayStatusRemoved, true, 1},
 		{railwayStatusSkipped, true, 1},
+		{railwayStatusSleeping, true, 0},
 		{railwayStatusQueued, false, 1},
 		{railwayStatusInitializing, false, 1},
 		{railwayStatusBuilding, false, 1},
@@ -455,7 +522,6 @@ func TestRailwayDeploymentStatusEnum(t *testing.T) {
 		{railwayStatusWaiting, false, 1},
 		{railwayStatusNeedsApproval, false, 1},
 		{railwayStatusRemoving, false, 1},
-		{railwayStatusSleeping, false, 1},
 	} {
 		t.Run(string(tc.status), func(t *testing.T) {
 			if got := tc.status.IsTerminal(); got != tc.isTerminal {

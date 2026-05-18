@@ -20,6 +20,7 @@ import (
 // service; Stop calls deploymentStop on that latest deployment.
 type railwayAPI interface {
 	TriggerDeploy(ctx context.Context, projectID, environmentID, serviceID string) (string, error)
+	BuildLogs(ctx context.Context, deploymentID string, limit int) ([]string, error)
 	DeploymentLogs(ctx context.Context, deploymentID string, limit int) ([]string, error)
 	LatestDeployment(ctx context.Context, projectID, environmentID, serviceID string) (railwayDeployment, error)
 	Deployment(ctx context.Context, deploymentID string) (railwayDeployment, error)
@@ -62,7 +63,7 @@ type railwayDeployment struct {
 
 // railwayDeploymentStatus mirrors Railway's GraphQL DeploymentStatus enum.
 // Values: https://docs.railway.com (verified via docs.railway.com/integrations/api/manage-deployments).
-// Terminal states represent a completed deployment (SUCCESS/FAILED/CRASHED/REMOVED/SKIPPED);
+// Terminal states represent a completed deployment (SUCCESS/SLEEPING/FAILED/CRASHED/REMOVED/SKIPPED);
 // the remaining values are still progressing and must be polled.
 type railwayDeploymentStatus string
 
@@ -106,6 +107,7 @@ func (s railwayDeploymentStatus) Normalized() railwayDeploymentStatus {
 func (s railwayDeploymentStatus) IsTerminal() bool {
 	switch s.Normalized() {
 	case railwayStatusSuccess,
+		railwayStatusSleeping,
 		railwayStatusFailed,
 		railwayStatusCrashed,
 		railwayStatusRemoved,
@@ -115,12 +117,21 @@ func (s railwayDeploymentStatus) IsTerminal() bool {
 	return false
 }
 
-// ExitCode maps a terminal deployment status to a process exit code: 0 for
-// SUCCESS, 1 for every other terminal state. Non-terminal statuses also map to
-// 1 because they only reach this function when the polling loop bails out (for
-// example on context cancellation).
+// IsReady reports whether the latest deployment represents a usable service.
+func (s railwayDeploymentStatus) IsReady() bool {
+	switch s.Normalized() {
+	case railwayStatusSuccess, railwayStatusSleeping:
+		return true
+	}
+	return false
+}
+
+// ExitCode maps a terminal deployment status to a process exit code: 0 for a
+// usable deployment, 1 for every other terminal state. Non-terminal statuses
+// also map to 1 because they only reach this function when the polling loop
+// bails out (for example on context cancellation).
 func (s railwayDeploymentStatus) ExitCode() int {
-	if s.Normalized() == railwayStatusSuccess {
+	if s.IsReady() {
 		return 0
 	}
 	return 1
@@ -311,6 +322,38 @@ const deploymentLogsQuery = `query crabboxDeploymentLogs($deploymentId: String!,
     message
   }
 }`
+
+const buildLogsQuery = `query crabboxBuildLogs($deploymentId: String!, $limit: Int) {
+  buildLogs(deploymentId: $deploymentId, limit: $limit) {
+    message
+  }
+}`
+
+func (c *railwayClient) BuildLogs(ctx context.Context, deploymentID string, limit int) ([]string, error) {
+	if deploymentID == "" {
+		return nil, fmt.Errorf("buildLogs: deploymentId is required")
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	vars := map[string]any{
+		"deploymentId": deploymentID,
+		"limit":        limit,
+	}
+	var out struct {
+		BuildLogs []struct {
+			Message string `json:"message"`
+		} `json:"buildLogs"`
+	}
+	if err := c.do(ctx, buildLogsQuery, vars, &out); err != nil {
+		return nil, err
+	}
+	messages := make([]string, 0, len(out.BuildLogs))
+	for _, l := range out.BuildLogs {
+		messages = append(messages, l.Message)
+	}
+	return messages, nil
+}
 
 func (c *railwayClient) DeploymentLogs(ctx context.Context, deploymentID string, limit int) ([]string, error) {
 	if deploymentID == "" {

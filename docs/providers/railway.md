@@ -24,12 +24,14 @@ SSH mutation, no `service.run(cmd)` GraphQL field. Crabbox therefore maps
 2. The provider issues the GraphQL mutation
    `environmentTriggersDeploy(input: { projectId, environmentId, serviceId })`
    to kick a redeploy of that service.
-3. The provider queries `deployments(input, first: 1)` to resolve the new
-   deployment id, then `deploymentLogs(deploymentId, limit)` and streams the
-   returned messages to stdout.
-4. The deployment `status` is mapped to a process exit code: `SUCCESS` /
-   `DEPLOYED` becomes `0`; anything else (`FAILED`, `CRASHED`, `BUILDING`,
-   ...) becomes `1`.
+3. The provider polls `deployment(id: $deploymentId)` for the deployment id
+   returned by the mutation, while fetching newly available
+   `buildLogs(deploymentId, limit)` and `deploymentLogs(deploymentId, limit)`
+   messages to stdout.
+4. The deployment `status` is mapped to a process exit code: `SUCCESS` and
+   `SLEEPING` become `0`; terminal failure/removal states (`FAILED`, `CRASHED`,
+   `REMOVED`, `SKIPPED`) become `1`. Non-terminal states are polled until they
+   finish or the 30 minute timeout expires.
 
 This means **the user's command argument is informational only**. Railway runs
 whatever start command the service is configured with (in `railway.toml`, the
@@ -50,8 +52,8 @@ Railway dashboard or via `serviceCreate`.
 
 Use Railway when the workload is already a Railway service and the redeploy
 loop is what you want from a Crabbox run (for example, "rebuild and stream
-build/runtime logs after a config change"). Pick a different provider for
-ad-hoc command execution.
+new build/runtime log messages after a config change"). Pick a different
+provider for ad-hoc command execution.
 
 ## Commands
 
