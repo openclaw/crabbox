@@ -95,12 +95,73 @@ func runArtifactCollectScript(workdir, remotePath string, globs []string) string
 	b.WriteString("set -euo pipefail\n")
 	b.WriteString("cd " + shellQuote(workdir) + "\n")
 	b.WriteString("mkdir -p .crabbox\n")
-	b.WriteString("shopt -s globstar nullglob dotglob\n")
+	b.WriteString("shopt -s nullglob dotglob\n")
 	b.WriteString("files=()\n")
 	for _, glob := range globs {
+		if strings.Contains(glob, "**") {
+			base := artifactGlobFindBase(glob)
+			re := artifactGlobRegex(glob)
+			b.WriteString("artifact_re=" + shellQuote(re) + "; if [ -e " + shellQuote(base) + " ]; then while IFS= read -r -d '' f; do rel=${f#./}; [[ \"$rel\" =~ $artifact_re ]] || continue; case \"$rel\" in .git|.git/*|.crabbox|.crabbox/*|" + remotePath + ") continue;; esac; files+=(\"$rel\"); done < <(find " + shellQuote(base) + " \\( -type f -o -type l \\) -print0); fi\n")
+			continue
+		}
 		b.WriteString("for f in " + glob + "; do { [ -f \"$f\" ] || [ -L \"$f\" ]; } || continue; rel=${f#./}; case \"$rel\" in .git|.git/*|.crabbox|.crabbox/*|" + remotePath + ") continue;; esac; files+=(\"$rel\"); done\n")
 	}
 	b.WriteString("if [ ${#files[@]} -eq 0 ]; then printf 'warning: no artifact matches\\n' >&2; tar -czf " + shellQuote(remotePath) + " --files-from /dev/null; else tar -czf " + shellQuote(remotePath) + " -- \"${files[@]}\"; fi\n")
+	return b.String()
+}
+
+func artifactGlobFindBase(glob string) string {
+	trimmed := strings.TrimPrefix(strings.TrimSpace(glob), "./")
+	cut := len(trimmed)
+	for i, r := range trimmed {
+		if r == '*' || r == '?' {
+			cut = i
+			break
+		}
+	}
+	prefix := trimmed[:cut]
+	if strings.HasSuffix(prefix, "/") {
+		prefix = strings.TrimSuffix(prefix, "/")
+	} else if idx := strings.LastIndex(prefix, "/"); idx >= 0 {
+		prefix = prefix[:idx]
+	} else if cut < len(trimmed) {
+		prefix = ""
+	}
+	if prefix == "" {
+		return "."
+	}
+	return prefix
+}
+
+func artifactGlobRegex(glob string) string {
+	pattern := strings.TrimPrefix(strings.TrimSpace(glob), "./")
+	var b strings.Builder
+	b.WriteByte('^')
+	for i := 0; i < len(pattern); {
+		if strings.HasPrefix(pattern[i:], "**/") {
+			b.WriteString("(.*/)?")
+			i += 3
+			continue
+		}
+		if strings.HasPrefix(pattern[i:], "**") {
+			b.WriteString(".*")
+			i += 2
+			continue
+		}
+		switch ch := pattern[i]; ch {
+		case '*':
+			b.WriteString("[^/]*")
+		case '?':
+			b.WriteString("[^/]")
+		case '.', '+', '(', ')', '[', ']', '^', '$', '|', '\\':
+			b.WriteByte('\\')
+			b.WriteByte(ch)
+		default:
+			b.WriteByte(ch)
+		}
+		i++
+	}
+	b.WriteByte('$')
 	return b.String()
 }
 

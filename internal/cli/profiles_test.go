@@ -726,6 +726,52 @@ func TestRunArtifactCollectScriptWarnsOnEmptyMatches(t *testing.T) {
 	}
 }
 
+func TestRunArtifactCollectScriptSupportsRecursiveGlobstarPatterns(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "reports", "unit", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(dir, "reports", "root.xml"),
+		filepath.Join(dir, "reports", "unit", "result.xml"),
+		filepath.Join(dir, "reports", "unit", "nested", "result.xml"),
+		filepath.Join(dir, "reports", "unit", "notes.txt"),
+	} {
+		if err := os.WriteFile(path, []byte("ok\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archivePath := filepath.Join(dir, ".crabbox", "artifacts.tgz")
+	script := runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", []string{"reports/**/*.xml"})
+	if out, err := exec.Command("bash", "-lc", script).CombinedOutput(); err != nil {
+		t.Fatalf("collect script failed: %v\n%s", err, out)
+	}
+	names := tarGzNames(t, archivePath)
+	for _, want := range []string{"reports/root.xml", "reports/unit/result.xml", "reports/unit/nested/result.xml"} {
+		if !stringSliceContains(names, want) {
+			t.Fatalf("archive missing %s: %#v", want, names)
+		}
+	}
+	if stringSliceContains(names, "reports/unit/notes.txt") {
+		t.Fatalf("archive included non-matching file: %#v", names)
+	}
+}
+
+func TestArtifactGlobFindBaseKeepsRecursiveSearchScoped(t *testing.T) {
+	tests := map[string]string{
+		"./**":                ".",
+		".artifacts/**":       ".artifacts",
+		"reports/**/*.xml":    "reports",
+		"reports/unit/*.json": "reports/unit",
+		"*.xml":               ".",
+	}
+	for glob, want := range tests {
+		if got := artifactGlobFindBase(glob); got != want {
+			t.Fatalf("artifactGlobFindBase(%q)=%q want %q", glob, got, want)
+		}
+	}
+}
+
 func tarGzNames(t *testing.T, path string) []string {
 	t.Helper()
 	file, err := os.Open(path)

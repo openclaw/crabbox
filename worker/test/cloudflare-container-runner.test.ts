@@ -221,7 +221,35 @@ describe("Cloudflare runner lifecycle", () => {
     );
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, runner: "cloudflare" });
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      runner: "cloudflare",
+      instanceTypes: ["lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"],
+    });
+    expect(capture.binding).toBeUndefined();
+    expect(capture.request).toBeUndefined();
+  });
+
+  it("reports missing container bindings in readiness without touching containers", async () => {
+    const capture: CapturedInternalRequest = {};
+    const env = envWithCapturedInternalRequest(capture) as Record<string, unknown>;
+    delete env.SandboxStandard2;
+    const response = await worker.fetch(
+      new Request("https://runner.example/v1/readiness", {
+        headers: {
+          Authorization: "Bearer runner-token",
+        },
+      }),
+      env as Parameters<typeof worker.fetch>[1],
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      runner: "cloudflare",
+      error: "missing container bindings: SandboxStandard2",
+      missing: ["SandboxStandard2"],
+    });
     expect(capture.binding).toBeUndefined();
     expect(capture.request).toBeUndefined();
   });

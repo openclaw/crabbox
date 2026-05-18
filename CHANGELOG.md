@@ -2,6 +2,14 @@
 
 ## 0.15.1 - Unreleased
 
+### Added
+
+- Added Cloudflare runner readiness to `crabbox doctor --provider cloudflare` so runner URL, auth, and container bindings are checked without creating a sandbox. Thanks @altaywtf.
+
+### Fixed
+
+- Fixed run artifact collection so recursive `/**` artifact globs work on macOS Bash 3.2 without requiring Bash `globstar`.
+
 ## 0.15.0 - 2026-05-17
 
 ### Added
