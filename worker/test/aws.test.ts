@@ -887,6 +887,7 @@ describe("aws provider", () => {
       registerSnapshotImage: () => Promise<string>;
       waitForImageAvailable: (imageID: string) => Promise<string>;
       ensureSecurityGroup: () => Promise<string>;
+      quotaPreflightAttempt: () => Promise<undefined>;
       ec2: (action: string, params?: Record<string, string>) => Promise<unknown>;
       createServer: (...args: unknown[]) => Promise<{
         provider: "aws";
@@ -915,6 +916,7 @@ describe("aws provider", () => {
       calls.push("security-group");
       return "sg-123";
     };
+    client.quotaPreflightAttempt = async () => undefined;
     client.ec2 = async (action, params) => {
       calls.push(`${action}:${params?.ImageId ?? ""}`);
       return {};
@@ -965,6 +967,7 @@ describe("aws provider", () => {
       ensureSSHKey: () => Promise<void>;
       registerSnapshotImage: () => Promise<string>;
       waitForImageAvailable: (imageID: string) => Promise<string>;
+      quotaPreflightAttempt: () => Promise<undefined>;
       ec2: (action: string, params?: Record<string, string>) => Promise<unknown>;
     };
     const calls: string[] = [];
@@ -979,6 +982,7 @@ describe("aws provider", () => {
       calls.push(`wait:${imageID}`);
       throw new Error("timed out waiting");
     };
+    client.quotaPreflightAttempt = async () => undefined;
     client.ec2 = async (action, params) => {
       calls.push(`${action}:${params?.ImageId ?? ""}`);
       return {};
