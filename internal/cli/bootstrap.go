@@ -450,6 +450,7 @@ Set-ItemProperty -Path $winlogon -Name DefaultPassword -Value $userPassword -Typ
 if (-not (Test-Path -LiteralPath $setupCompletePath)) {
   Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
 	  Restart-Computer -Force
+	  exit 0
 	}
 Restart-Service sshd
 	`
