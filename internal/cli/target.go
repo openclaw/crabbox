@@ -59,6 +59,10 @@ func isDefaultWorkRoot(value string) bool {
 	}
 }
 
+func IsDefaultWorkRoot(value string) bool {
+	return isDefaultWorkRoot(value)
+}
+
 func defaultWorkRootForTarget(targetOS, windowsMode string) string {
 	if targetOS == targetMacOS {
 		return defaultMacOSWorkRoot

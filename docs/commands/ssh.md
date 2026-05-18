@@ -6,6 +6,7 @@
 crabbox ssh --id blue-lobster
 crabbox ssh --id blue-lobster --network tailscale
 crabbox ssh --provider namespace-devbox --id blue-lobster
+crabbox ssh --provider exe-dev --id blue-lobster
 crabbox ssh --provider semaphore --id blue-lobster
 crabbox ssh --provider sprites --id blue-lobster
 crabbox ssh --provider daytona --id blue-lobster
@@ -20,6 +21,8 @@ generated SSH endpoint/key. In
 `provider=semaphore` mode it resolves the Semaphore debug SSH endpoint. In
 `provider=sprites` mode it prints a normal SSH command with
 `ProxyCommand=sprite proxy -s %h -W 22`. In
+`provider=exe-dev` mode it resolves the exe.dev VM and prints the normal VM SSH
+command. In
 `provider=daytona` mode the short-lived SSH token is redacted by default; pass
 `--show-secret` only when you need a pasteable command in a trusted terminal.
 
@@ -27,7 +30,7 @@ Flags:
 
 ```text
 --id <lease-id-or-slug>
---provider hetzner|aws|azure|gcp|proxmox|ssh|namespace-devbox|semaphore|sprites|daytona
+--provider hetzner|aws|azure|gcp|proxmox|ssh|exe-dev|namespace-devbox|semaphore|sprites|daytona
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>

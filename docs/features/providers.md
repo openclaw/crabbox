@@ -29,6 +29,7 @@ Direct provider backends can also run without the Crabbox coordinator:
 
 ```text
 proxmox    Proxmox VE QEMU VM clones exposed as SSH leases
+exe-dev    exe.dev VMs exposed as SSH leases
 semaphore  Semaphore CI jobs exposed as SSH leases
 namespace  Namespace Devboxes exposed as SSH leases
 sprites    Sprites microVMs exposed as SSH leases through sprite proxy
@@ -48,6 +49,7 @@ tensorlake Tensorlake Firecracker sandboxes with delegated command execution
 - [Hetzner](../providers/hetzner.md): Linux-only managed provider behavior, classes, and cleanup.
 - [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
+- [exe.dev](../providers/exe-dev.md): exe.dev VMs exposed as SSH leases.
 - [Blacksmith Testbox](../providers/blacksmith-testbox.md): delegated Testbox backend behavior.
 - [Namespace Devbox](../providers/namespace-devbox.md): Namespace Devbox SSH leases with Crabbox sync/run.
 - [Semaphore](../providers/semaphore.md): Semaphore CI job leases with Crabbox SSH sync/run.
@@ -175,6 +177,11 @@ Crabbox can use Namespace Devboxes with `provider: namespace-devbox`. Namespace
 owns Devbox auth and lifecycle through the `devbox` CLI, while Crabbox treats
 the prepared Devbox as a normal Linux SSH lease and owns rsync, run, status,
 and timing. See [Namespace Devbox](namespace-devbox.md).
+
+Crabbox can use exe.dev VMs with `provider: exe-dev`. exe.dev owns auth and
+lifecycle through `ssh exe.dev`, while Crabbox treats the returned `ssh_dest`
+as a normal Linux SSH lease and owns rsync, run, status, and timing. See
+[exe.dev](../providers/exe-dev.md).
 
 Crabbox can use Semaphore CI jobs with `provider: semaphore`. Semaphore is an
 SSH lease backend: the provider creates a standalone Semaphore job, waits until

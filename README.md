@@ -34,6 +34,8 @@ Supported providers:
   VM clones from private Proxmox VE templates.
 - [Static SSH](docs/providers/ssh.md) (`provider: ssh`): existing Linux, macOS,
   Windows, or WSL2 hosts.
+- [exe.dev](docs/providers/exe-dev.md) (`provider: exe-dev`): exe.dev VMs
+  exposed as normal SSH leases.
 - [Blacksmith Testbox](docs/providers/blacksmith-testbox.md)
   (`provider: blacksmith-testbox`): delegated Testbox lifecycle and execution.
 - [Namespace Devbox](docs/providers/namespace-devbox.md)
@@ -130,6 +132,7 @@ For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For th
 - **Brokered cloud.** Maintainers and agents share infra without sharing provider tokens. Hetzner, AWS EC2, Azure, and Google Cloud are managed providers; AWS owns EC2 Mac targets. Linux defaults to Spot unless capacity config says otherwise. Providers fall back across compatible instance families when capacity or quota rejects a request. See [Coordinator](docs/features/coordinator.md) and [Capacity fallback](docs/features/capacity-fallback.md).
 - **Azure Linux and Windows.** `provider: azure` provisions Linux, native Windows, and Windows WSL2 VMs in a configurable Azure subscription using `DefaultAzureCredential` in direct mode or service-principal secrets in the broker. Crabbox creates a shared resource group, vnet, subnet, and NSG on first use, then per-lease public IPs, NICs, and VMs. Linux uses cloud-init; Windows uses VM Agent Custom Script Extension to install OpenSSH/Git and configure the Crabbox user, with optional post-SSH desktop/VNC or WSL2 bootstrap. See [Azure provider](docs/providers/azure.md).
 - **macOS and Windows static hosts.** `provider: ssh` reuses existing machines; it does not create macOS or Windows Crabbox boxes. macOS and Windows WSL2 use the POSIX rsync path; native Windows uses PowerShell plus tar archive sync. See [Static SSH provider](docs/providers/ssh.md).
+- **exe.dev SSH leases.** Set `provider: exe-dev` to create exe.dev VMs through the exe.dev SSH API, then let Crabbox sync and run commands over the returned VM SSH target. See [exe.dev](docs/providers/exe-dev.md).
 - **Blacksmith Testbox wrapper.** Set `provider: blacksmith-testbox` to delegate warmup/run/list/status/stop to the Blacksmith CLI while Crabbox keeps local slugs, repo claims, timing summaries, config conventions, and portal visibility for active external runners. See [Blacksmith Testbox](docs/providers/blacksmith-testbox.md).
 - **Namespace Devbox SSH leases.** Set `provider: namespace-devbox` to create or reuse Namespace Devboxes through the `devbox` CLI, then let Crabbox sync the dirty checkout and run commands over SSH. See [Namespace Devbox](docs/providers/namespace-devbox.md).
 - **Semaphore CI testbox.** Set `provider: semaphore` to lease a Semaphore CI job as a testbox. Same environment as your real pipelines. See [Semaphore](docs/providers/semaphore.md).
@@ -281,6 +284,19 @@ daytona:
   snapshot: crabbox-ready
   workRoot: /home/daytona/crabbox
 ```
+
+Optional exe.dev VM:
+
+```yaml
+provider: exe-dev
+exeDev:
+  cpus: 2
+  memory: 4GB
+  disk: 10GB
+  workRoot: /tmp/crabbox
+```
+
+Authenticate with `ssh exe.dev`; VM creation requires an active exe.dev plan.
 
 Optional Islo sandbox:
 

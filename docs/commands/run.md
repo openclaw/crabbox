@@ -293,7 +293,7 @@ Flags:
 
 ```text
 --id <lease-id-or-slug>
---provider hetzner|aws|azure|gcp|proxmox|ssh|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b
+--provider hetzner|aws|azure|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>
@@ -346,6 +346,15 @@ Flags:
 --blacksmith-workflow <file|name|id>
 --blacksmith-job <job>
 --blacksmith-ref <ref>
+--exe-dev-control-host <host>
+--exe-dev-image <image>
+--exe-dev-cpus <n>
+--exe-dev-memory <size>
+--exe-dev-disk <size>
+--exe-dev-command <command>
+--exe-dev-user <user>
+--exe-dev-work-root <path>
+--exe-dev-no-email
 --namespace-image <image>
 --namespace-size <S|M|L|XL>
 --namespace-repository <repo>

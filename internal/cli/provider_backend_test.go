@@ -38,6 +38,9 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		{name: "ssh", canonical: "ssh"},
 		{name: "static", canonical: "ssh"},
 		{name: "static-ssh", canonical: "ssh"},
+		{name: "exe-dev", canonical: "exe-dev"},
+		{name: "exe", canonical: "exe-dev"},
+		{name: "exedev", canonical: "exe-dev"},
 		{name: "blacksmith", canonical: "blacksmith-testbox"},
 		{name: "blacksmith-testbox", canonical: "blacksmith-testbox"},
 		{name: "namespace", canonical: "namespace-devbox"},
@@ -82,6 +85,15 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 	}
 	if _, ok := backend.(*coordinatorLeaseBackend); ok {
 		t.Fatalf("static ssh unexpectedly used coordinator wrapper")
+	}
+
+	cfg.Provider = "exe-dev"
+	backend, err = loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	if err != nil {
+		t.Fatalf("load exe-dev backend: %v", err)
+	}
+	if _, ok := backend.(SSHLeaseBackend); !ok {
+		t.Fatalf("backend=%T, want ssh lease backend", backend)
 	}
 
 	cfg.Provider = "blacksmith-testbox"
@@ -159,6 +171,30 @@ func TestProviderFlagsApplyNamespaceWithoutCoreEdits(t *testing.T) {
 	}
 	if cfg.Namespace.Image != "crabbox-ready" || cfg.Namespace.Size != "L" || cfg.Namespace.WorkRoot != "/workspaces/test" {
 		t.Fatalf("namespace flags not applied: %#v", cfg.Namespace)
+	}
+}
+
+func TestProviderFlagsApplyExeDevWithoutCoreEdits(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	values := registerProviderFlags(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "exe",
+		"--exe-dev-control-host", "ssh.exe.example.test",
+		"--exe-dev-image", "ubuntu:24.04",
+		"--exe-dev-user", "runner",
+		"--exe-dev-work-root", "/tmp/work",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = *provider
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ExeDev.ControlHost != "ssh.exe.example.test" || cfg.ExeDev.Image != "ubuntu:24.04" || cfg.ExeDev.User != "runner" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/tmp/work" {
+		t.Fatalf("exe-dev flags not applied: %#v", cfg.ExeDev)
 	}
 }
 

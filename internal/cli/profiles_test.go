@@ -607,6 +607,25 @@ func TestRunStopCommandIncludesSemaphoreRoutingFlags(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandIncludesExeDevRoutingFlags(t *testing.T) {
+	got := runStopCommand(Config{
+		Provider: "exe-dev",
+		TargetOS: targetLinux,
+		ExeDev: ExeDevConfig{
+			ControlHost: "staging.exe.dev",
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"--provider exe-dev",
+		"--exe-dev-control-host staging.exe.dev",
+		"cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestPopulateRunTimingMetadata(t *testing.T) {
 	report := timingReportFromRunWithActionsURL("aws", "cbx_123", "blue-lobster", runTimings{}, 0, 0, "https://example.test/actions")
 	populateRunTimingMetadata(&report,

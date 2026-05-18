@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"io"
 	"strings"
 	"testing"
 )
@@ -145,5 +146,19 @@ func TestValidateProviderTargetAllowsStaticNonLinux(t *testing.T) {
 		if err := validateProviderTarget(cfg); err != nil {
 			t.Fatalf("target=%s err=%v", target, err)
 		}
+	}
+}
+
+func TestLeaseCreateFlagsRejectExeDevNonLinuxTarget(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "exe-dev", "--target", "macos"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	err := applyLeaseCreateFlags(&cfg, fs, values)
+	if err == nil || !strings.Contains(err.Error(), "target=linux only") {
+		t.Fatalf("err=%v", err)
 	}
 }

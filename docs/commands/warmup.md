@@ -15,6 +15,7 @@ crabbox warmup --provider azure --target windows
 crabbox warmup --provider aws --target macos --desktop --market on-demand --type mac2.metal
 crabbox warmup --actions-runner
 crabbox warmup --provider blacksmith-testbox --blacksmith-workflow .github/workflows/ci-check-testbox.yml --blacksmith-job test
+crabbox warmup --provider exe-dev --slug update-flow-smoke
 crabbox warmup --provider namespace-devbox --namespace-image builtin:base --namespace-size M
 crabbox warmup --provider semaphore --semaphore-host myorg.semaphoreci.com --semaphore-project my-app
 crabbox warmup --provider sprites
@@ -35,6 +36,10 @@ With `--provider namespace-devbox`, the canonical ID is a Crabbox `cbx_...`
 lease backed by a Namespace Devbox created through `devbox create --from`.
 Crabbox stores a local slug, prepares SSH access with `devbox configure-ssh`, and
 later uses normal SSH sync/run.
+
+With `--provider exe-dev`, the canonical ID is a Crabbox `cbx_...` lease backed
+by an exe.dev VM created through `ssh exe.dev new`. Crabbox stores a local slug,
+uses the returned VM SSH target, and later uses normal SSH sync/run.
 
 With `--provider semaphore`, the canonical ID is a Crabbox `cbx_...` lease
 backed by a Semaphore CI job. Crabbox stores a local slug, retrieves the debug
@@ -109,7 +114,7 @@ On success, `warmup` prints a concise total duration line. Add `--timing-json` t
 Flags:
 
 ```text
---provider hetzner|aws|azure|gcp|proxmox|ssh|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b
+--provider hetzner|aws|azure|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>
@@ -142,6 +147,15 @@ Flags:
 --blacksmith-workflow <file|name|id>
 --blacksmith-job <job>
 --blacksmith-ref <ref>
+--exe-dev-control-host <host>
+--exe-dev-image <image>
+--exe-dev-cpus <n>
+--exe-dev-memory <size>
+--exe-dev-disk <size>
+--exe-dev-command <command>
+--exe-dev-user <user>
+--exe-dev-work-root <path>
+--exe-dev-no-email
 --namespace-image <image>
 --namespace-size <S|M|L|XL>
 --namespace-repository <repo>

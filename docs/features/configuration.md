@@ -314,6 +314,25 @@ daytona:
   apiKey: <daytona-api-key>      # prefer DAYTONA_API_KEY env
 ```
 
+### exe.dev
+
+```yaml
+provider: exe-dev
+exeDev:
+  controlHost: exe.dev
+  image: ""
+  cpus: 2
+  memory: 4GB
+  disk: 10GB
+  command: ""
+  user: ""
+  workRoot: /tmp/crabbox
+  noEmail: true
+```
+
+Authenticate with `ssh exe.dev`; repo config should select VM sizing and work
+root only. VM creation requires an active exe.dev plan.
+
 ### E2B
 
 ```yaml

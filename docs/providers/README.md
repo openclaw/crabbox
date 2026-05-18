@@ -17,6 +17,7 @@ static SSH provider for existing machines.
 | [Hetzner](hetzner.md) | SSH lease | Linux | fast Linux capacity at low cost |
 | [Proxmox](proxmox.md) | SSH lease | Linux | private Proxmox VE QEMU VM templates |
 | [Static SSH](ssh.md) | SSH lease | Linux, macOS, Windows | reusing an existing host |
+| [exe.dev](exe-dev.md) | SSH lease | Linux | disposable exe.dev VMs with Crabbox sync |
 | [Blacksmith Testbox](blacksmith-testbox.md) | delegated run | Linux | existing Blacksmith Testbox workflows |
 | [Namespace Devbox](namespace-devbox.md) | SSH lease | Linux | Namespace-managed dev environments with Crabbox sync |
 | [Semaphore](semaphore.md) | SSH lease | Linux | Semaphore CI environments with project secrets and cache |
@@ -60,6 +61,7 @@ provider credentials and best-effort cleanup through provider labels.
 Proxmox and delegated providers do not use the Crabbox coordinator:
 
 - Proxmox clones private QEMU VM templates through the Proxmox VE REST API.
+- exe.dev creates and deletes VMs through the exe.dev SSH API.
 - Blacksmith uses the authenticated Blacksmith CLI.
 - Daytona uses Daytona API and SDK/toolbox APIs.
 - Islo uses the Islo API and SDK auth.
@@ -73,7 +75,8 @@ Proxmox and delegated providers do not use the Crabbox coordinator:
 Namespace Devbox and Semaphore are SSH lease providers that do not use the
 Crabbox coordinator. Namespace provisions through the authenticated `devbox`
 CLI; Semaphore provisions through the Semaphore REST API; Sprites provisions
-through the Sprites API and reaches SSH through `sprite proxy`.
+through the Sprites API and reaches SSH through `sprite proxy`; exe.dev
+provisions through `ssh exe.dev` and returns a normal VM SSH target.
 
 ## Feature Matrix
 
@@ -85,6 +88,7 @@ through the Sprites API and reaches SSH through `sprite proxy`.
 | Hetzner | yes | yes | yes | Linux VNC/code | yes | no |
 | Proxmox | yes | yes | yes | no | yes | no |
 | Static SSH | yes | resolves host | yes | host-dependent | yes | no |
+| exe.dev | yes | yes | yes | no | yes | no |
 | Blacksmith Testbox | yes | yes | no | no | no | yes |
 | Namespace Devbox | yes | yes | yes | no | yes | no |
 | Semaphore | yes | yes | yes | no | yes | no |
@@ -97,7 +101,7 @@ through the Sprites API and reaches SSH through `sprite proxy`.
 | Cloudflare | yes | yes | no | no | archive via Worker runner | no |
 
 Actions runner hydration requires a normal SSH lease on Linux and is core-over-SSH.
-Use AWS, Google Cloud, Hetzner, Proxmox, Static SSH, Namespace Devbox,
+Use AWS, Google Cloud, Hetzner, Proxmox, Static SSH, exe.dev, Namespace Devbox,
 Semaphore, or Sprites for that path.
 
 ## Implementation

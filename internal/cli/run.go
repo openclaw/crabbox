@@ -1276,6 +1276,10 @@ func appendProviderStopRoutingArgs(args []string, cfg Config) []string {
 		if strings.TrimSpace(cfg.Semaphore.Host) != "" {
 			args = append(args, "--semaphore-host", cfg.Semaphore.Host)
 		}
+	case "exe-dev":
+		if strings.TrimSpace(cfg.ExeDev.ControlHost) != "" {
+			args = append(args, "--exe-dev-control-host", cfg.ExeDev.ControlHost)
+		}
 	}
 	return args
 }

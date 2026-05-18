@@ -126,6 +126,19 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_NAMESPACE_AUTO_STOP_IDLE_TIMEOUT",
 		"CRABBOX_NAMESPACE_WORK_ROOT",
 		"CRABBOX_NAMESPACE_DELETE_ON_RELEASE",
+		"CRABBOX_EXE_DEV_CONTROL_HOST",
+		"EXE_DEV_CONTROL_HOST",
+		"CRABBOX_EXE_DEV_IMAGE",
+		"EXE_DEV_IMAGE",
+		"CRABBOX_EXE_DEV_CPUS",
+		"CRABBOX_EXE_DEV_MEMORY",
+		"EXE_DEV_MEMORY",
+		"CRABBOX_EXE_DEV_DISK",
+		"EXE_DEV_DISK",
+		"CRABBOX_EXE_DEV_COMMAND",
+		"CRABBOX_EXE_DEV_USER",
+		"CRABBOX_EXE_DEV_WORK_ROOT",
+		"CRABBOX_EXE_DEV_NO_EMAIL",
 	} {
 		t.Setenv(key, "")
 	}
@@ -484,6 +497,49 @@ ssh:
 	}
 	if !cfg.Cache.Pnpm || cfg.Cache.Npm || !cfg.Cache.Docker || !cfg.Cache.Git || cfg.Cache.MaxGB != 120 || !cfg.Cache.PurgeOnRelease {
 		t.Fatalf("cache config not loaded: %#v", cfg.Cache)
+	}
+}
+
+func TestLoadConfigExeDevWorkRootDefaults(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body    string
+		want    string
+		wantExe string
+	}{
+		"default": {
+			body:    "provider: exe-dev\n",
+			want:    "/tmp/crabbox",
+			wantExe: "/tmp/crabbox",
+		},
+		"top-level": {
+			body:    "provider: exe-dev\nworkRoot: /custom/crabbox\n",
+			want:    "/custom/crabbox",
+			wantExe: "/custom/crabbox",
+		},
+		"provider-specific": {
+			body:    "provider: exe-dev\nworkRoot: /custom/crabbox\nexeDev:\n  workRoot: /exe/crabbox\n",
+			want:    "/exe/crabbox",
+			wantExe: "/exe/crabbox",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigEnv(t)
+			home := t.TempDir()
+			path := filepath.Join(home, "config.yaml")
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			t.Setenv("CRABBOX_CONFIG", path)
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.WorkRoot != tc.want || cfg.ExeDev.WorkRoot != tc.wantExe {
+				t.Fatalf("workRoot=%q exeDev.workRoot=%q", cfg.WorkRoot, cfg.ExeDev.WorkRoot)
+			}
+		})
 	}
 }
 
