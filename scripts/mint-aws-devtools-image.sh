@@ -231,16 +231,30 @@ warmup() {
   [[ -n "$region" ]] && env_args+=(CRABBOX_AWS_REGION="$region" AWS_REGION="$region")
   [[ "$label" == "candidate" ]] && env_args+=(CRABBOX_AWS_AMI="$2")
   printf 'warming %s lease\n' "$label" >&2
+  local warmup_status=0
   if [[ "${#env_args[@]}" -gt 0 ]]; then
-    run_cmd env "${env_args[@]}" "$CRABBOX_BIN" "${args[@]}" 2>&1 | tee "$log" >&2
+    run_cmd env "${env_args[@]}" "$CRABBOX_BIN" "${args[@]}" 2>&1 | tee "$log" >&2 || warmup_status=$?
   else
-    run_cmd "$CRABBOX_BIN" "${args[@]}" 2>&1 | tee "$log" >&2
+    run_cmd "$CRABBOX_BIN" "${args[@]}" 2>&1 | tee "$log" >&2 || warmup_status=$?
   fi
   local lease
-  lease="$(lease_from_log "$log")"
+  lease="$(lease_from_log "$log" || true)"
+  if [[ "$warmup_status" -ne 0 ]]; then
+    if [[ -n "$lease" && "$keep_lease" != "1" ]]; then
+      run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" >&2 || true
+    fi
+    return "$warmup_status"
+  fi
+  if [[ -z "$lease" ]]; then
+    printf 'warmup did not return a lease id for %s\n' "$label" >&2
+    return 1
+  fi
   if [[ "$target" == "windows" ]]; then
     sleep "$windows_warmup_settle_seconds"
-    run_cmd "$CRABBOX_BIN" status --provider aws --target windows --id "$lease" --wait --wait-timeout "$windows_warmup_wait_timeout" >&2
+    if ! run_cmd "$CRABBOX_BIN" status --provider aws --target windows --id "$lease" --wait --wait-timeout "$windows_warmup_wait_timeout" >&2; then
+      [[ "$keep_lease" == "1" ]] || run_cmd "$CRABBOX_BIN" stop --provider aws --target windows "$lease" >&2 || true
+      return 1
+    fi
   fi
   printf '%s\n' "$lease"
 }

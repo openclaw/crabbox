@@ -36,6 +36,9 @@ case "$1" in
       2) printf '{"leaseId":"cbx_candidate"}\\n' ;;
       *) printf '{"leaseId":"cbx_promoted"}\\n' ;;
     esac
+    if [[ "\${CRABBOX_FAKE_WARMUP_FAIL_AFTER_LEASE:-0}" == "1" ]]; then
+      exit 23
+    fi
     ;;
   run)
     if [[ "$*" == *"Test-Path 'C:\\ProgramData\\crabbox\\image-prep-reboot-required'"* ]]; then
@@ -198,4 +201,17 @@ test("AWS devtools mint wrapper reboots windows source when prep requires it", a
   assert.match(log, /status --provider aws --target windows --id cbx_source --wait --wait-timeout 25m/);
   assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- Add-Content/);
   assert.match(log, /FromBase64String/);
+});
+
+test("AWS devtools mint wrapper cleans up lease when warmup fails after allocation", async () => {
+  const fake = await setupFakeCrabbox();
+  const result = await runScript(["--target", "linux", "--run", "--prep-script", fake.linuxPrep], {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_FAKE_WARMUP_FAIL_AFTER_LEASE: "1",
+  });
+  assert.equal(result.code, 23, result.stderr);
+  const log = await readFile(fake.log, "utf8");
+  assert.match(log, /warmup --provider aws --target linux/);
+  assert.match(log, /stop --provider aws --target linux cbx_source/);
 });
