@@ -250,6 +250,7 @@ func waitForLoopbackVNC(ctx context.Context, target *SSHTarget) error {
 		for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 			probe := *target
 			probe.Port = port
+			probe.FallbackPorts = []string{}
 			if err := probeLoopbackVNC(ctx, probe, "2", "1"); err == nil {
 				target.Port = port
 				return nil

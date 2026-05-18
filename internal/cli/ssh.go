@@ -128,6 +128,7 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 				probe := *target
 				probe.Port = port
+				probe.FallbackPorts = []string{}
 				conn, err := net.DialTimeout("tcp", net.JoinHostPort(probe.Host, probe.Port), 5*time.Second)
 				if err != nil {
 					probes = append(probes, port+":closed")
@@ -206,6 +207,7 @@ func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := *target
 		probe.Port = port
+		probe.FallbackPorts = []string{}
 		dialer := net.Dialer{Timeout: minDuration(timeout, 2*time.Second)}
 		conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(probe.Host, probe.Port))
 		if err != nil {
@@ -232,6 +234,7 @@ func probeSSHTransport(ctx context.Context, target *SSHTarget, timeout time.Dura
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := *target
 		probe.Port = port
+		probe.FallbackPorts = []string{}
 		dialer := net.Dialer{Timeout: minDuration(timeout, 2*time.Second)}
 		conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(probe.Host, probe.Port))
 		if err != nil {

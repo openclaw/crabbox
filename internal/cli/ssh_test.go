@@ -474,6 +474,53 @@ exit 0
 	}
 }
 
+func TestWaitForLoopbackVNCRecordsResolvedFallbackPort(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	portsPath := filepath.Join(dir, "ports")
+	script := `#!/bin/sh
+port=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    port="$1"
+  fi
+  shift
+done
+printf '%s\n' "$port" >> "$CRABBOX_FAKE_SSH_PORTS"
+if [ "$port" = "2222" ]; then
+  exit 255
+fi
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORTS", portsPath)
+
+	target := SSHTarget{
+		User:          "ec2-user",
+		Host:          "203.0.113.10",
+		Port:          "2222",
+		FallbackPorts: []string{"22"},
+		TargetOS:      targetMacOS,
+	}
+	if err := waitForLoopbackVNC(context.Background(), &target); err != nil {
+		t.Fatalf("waitForLoopbackVNC failed: %v", err)
+	}
+	if target.Port != "22" {
+		t.Fatalf("target.Port=%q want resolved fallback port 22", target.Port)
+	}
+	ports, err := os.ReadFile(portsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ports) != "2222\n22\n" {
+		t.Fatalf("ports=%q want outer fallback sequence", string(ports))
+	}
+}
+
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) {
