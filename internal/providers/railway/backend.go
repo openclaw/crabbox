@@ -100,13 +100,16 @@ func (b *railwayBackend) Run(ctx context.Context, req RunRequest) (RunResult, er
 	started := b.now()
 	fmt.Fprintf(b.rt.Stderr, "running on %s service=%s command=%s (start command is owned by the Railway service)\n", providerName, req.ID, strings.Join(req.Command, " "))
 
-	previousDeployment, _ := client.LatestDeployment(ctx, projectID, environmentID, req.ID)
+	previousDeployment, previousErr := client.LatestDeployment(ctx, projectID, environmentID, req.ID)
 	deploymentID, err := client.TriggerDeploy(ctx, projectID, environmentID, req.ID)
 	if err != nil {
 		return RunResult{}, ExitError{Code: 1, Message: fmt.Sprintf("%s trigger deploy failed: %v", providerName, err)}
 	}
 	deploymentID = strings.TrimSpace(deploymentID)
 	if deploymentID == "" {
+		if previousErr != nil {
+			return RunResult{ExitCode: 1}, ExitError{Code: 1, Message: fmt.Sprintf("%s read latest deployment before trigger failed: %v", providerName, previousErr)}
+		}
 		deploymentID, err = b.resolveTriggeredDeployment(ctx, client, projectID, environmentID, req.ID, previousDeployment.ID)
 		if err != nil {
 			return RunResult{ExitCode: 1}, ExitError{Code: 1, Message: fmt.Sprintf("%s resolve triggered deployment failed: %v", providerName, err)}
@@ -260,7 +263,7 @@ func (s *railwayLogStreamer) Flush(ctx context.Context, client railwayAPI, deplo
 }
 
 func printNewRailwayLogs(out io.Writer, lines []string, seen []string) []string {
-	start := commonRailwayLogPrefix(seen, lines)
+	start := overlappingRailwayLogLines(seen, lines)
 	for _, line := range lines[start:] {
 		fmt.Fprintln(out, line)
 	}
@@ -269,17 +272,25 @@ func printNewRailwayLogs(out io.Writer, lines []string, seen []string) []string 
 	return next
 }
 
-func commonRailwayLogPrefix(a, b []string) int {
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
+func overlappingRailwayLogLines(previous, current []string) int {
+	n := len(previous)
+	if len(current) < n {
+		n = len(current)
 	}
-	for i := 0; i < n; i++ {
-		if a[i] != b[i] {
-			return i
+	for overlap := n; overlap > 0; overlap-- {
+		match := true
+		previousStart := len(previous) - overlap
+		for i := 0; i < overlap; i++ {
+			if previous[previousStart+i] != current[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return overlap
 		}
 	}
-	return n
+	return 0
 }
 
 func (b *railwayBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {

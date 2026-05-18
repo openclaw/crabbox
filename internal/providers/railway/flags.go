@@ -1,6 +1,9 @@
 package railway
 
-import "flag"
+import (
+	"flag"
+	"strings"
+)
 
 type railwayFlagValues struct {
 	APIURL        *string
@@ -21,7 +24,7 @@ func RegisterRailwayProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyRailwayProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if cfg.Provider == providerName {
+	if isRailwayProviderName(cfg.Provider) {
 		if flagWasSet(fs, "class") {
 			return exit(2, "--class is not supported for provider=%s", providerName)
 		}
@@ -43,4 +46,13 @@ func ApplyRailwayProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error 
 		cfg.Railway.EnvironmentID = *v.EnvironmentID
 	}
 	return nil
+}
+
+func isRailwayProviderName(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case providerName, "rail", "railwayapp":
+		return true
+	default:
+		return false
+	}
 }

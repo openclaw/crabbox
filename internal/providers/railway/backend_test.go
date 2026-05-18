@@ -278,6 +278,7 @@ type fakeRailwayAPI struct {
 	triggerErr      error
 	logsErr         error
 	listErr         error
+	latestErr       error
 }
 
 func (f *fakeRailwayAPI) TriggerDeploy(_ context.Context, projectID, environmentID, serviceID string) (string, error) {
@@ -307,6 +308,9 @@ func (f *fakeRailwayAPI) LatestDeployment(_ context.Context, _, _, _ string) (ra
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.latestCalls++
+	if f.latestErr != nil {
+		return railwayDeployment{}, f.latestErr
+	}
 	if len(f.latestDeployments) > 0 {
 		idx := f.latestCalls - 1
 		if idx >= len(f.latestDeployments) {
@@ -475,6 +479,43 @@ func TestRailwayRunResolvesDeploymentWhenTriggerReturnsNoID(t *testing.T) {
 	}
 }
 
+func TestRailwayRunRequiresPreviousDeploymentReadWhenTriggerReturnsNoID(t *testing.T) {
+	api := &fakeRailwayAPI{
+		deployID:  "",
+		latestErr: fmt.Errorf("latest unavailable"),
+	}
+	backend := newRailwayBackendForTest(api)
+	result, err := backend.Run(context.Background(), RunRequest{ID: "svc-1", NoSync: true, Command: []string{"pnpm", "test"}})
+	if err == nil {
+		t.Fatal("Run accepted boolean trigger fallback without a trusted previous deployment")
+	}
+	if result.ExitCode == 0 {
+		t.Fatalf("exit code = %d, want non-zero on failed previous deployment read", result.ExitCode)
+	}
+	if !strings.Contains(err.Error(), "read latest deployment before trigger failed") {
+		t.Fatalf("err = %v, want previous deployment read message", err)
+	}
+	if api.triggerServiceID != "svc-1" {
+		t.Fatalf("trigger service = %q, want svc-1", api.triggerServiceID)
+	}
+}
+
+func TestRailwayRunIgnoresPreviousDeploymentReadErrorWhenTriggerReturnsID(t *testing.T) {
+	api := &fakeRailwayAPI{
+		deployID:     "dep-1",
+		latestErr:    fmt.Errorf("latest unavailable"),
+		pollStatuses: []railwayDeploymentStatus{railwayStatusSuccess},
+	}
+	backend := newRailwayBackendForTest(api)
+	result, err := backend.Run(context.Background(), RunRequest{ID: "svc-1", NoSync: true, Command: []string{"pnpm", "test"}})
+	if err != nil {
+		t.Fatalf("Run err: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", result.ExitCode)
+	}
+}
+
 func TestRailwayRunTreatsSleepingAsSuccessfulTerminalStatus(t *testing.T) {
 	api := &fakeRailwayAPI{
 		deployID:     "dep-1",
@@ -516,14 +557,14 @@ func TestRailwayRunStreamsBuildAndDeploymentLogsWithoutDuplicates(t *testing.T) 
 	}
 }
 
-func TestRailwayLogStreamerPrintsChangedSnapshots(t *testing.T) {
+func TestRailwayLogStreamerPrintsRollingWindowsOnce(t *testing.T) {
 	var stdout strings.Builder
 	var seen []string
-	seen = printNewRailwayLogs(&stdout, []string{"build 1", "build 2"}, seen)
-	seen = printNewRailwayLogs(&stdout, []string{"build 1", "build 2"}, seen)
 	seen = printNewRailwayLogs(&stdout, []string{"build 1", "build 2", "build 3"}, seen)
-	seen = printNewRailwayLogs(&stdout, []string{"build 1", "changed 2", "build 3"}, seen)
-	if got := stdout.String(); got != "build 1\nbuild 2\nbuild 3\nchanged 2\nbuild 3\n" {
+	seen = printNewRailwayLogs(&stdout, []string{"build 1", "build 2", "build 3"}, seen)
+	seen = printNewRailwayLogs(&stdout, []string{"build 2", "build 3", "build 4"}, seen)
+	seen = printNewRailwayLogs(&stdout, []string{"build 3", "build 4", "build 5"}, seen)
+	if got := stdout.String(); got != "build 1\nbuild 2\nbuild 3\nbuild 4\nbuild 5\n" {
 		t.Fatalf("stdout = %q", got)
 	}
 }
@@ -758,5 +799,23 @@ func TestRailwayFlagsApply(t *testing.T) {
 	}
 	if cfg.Railway.ProjectID != "proj-x" || cfg.Railway.EnvironmentID != "env-x" {
 		t.Fatalf("project=%q env=%q", cfg.Railway.ProjectID, cfg.Railway.EnvironmentID)
+	}
+}
+
+func TestRailwayFlagsRejectUnsupportedSizingForAliases(t *testing.T) {
+	for _, provider := range []string{providerName, "rail", "railwayapp"} {
+		t.Run(provider, func(t *testing.T) {
+			cfg := Config{Provider: provider}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.String("class", "", "class")
+			values := RegisterRailwayProviderFlags(fs, cfg)
+			if err := fs.Parse([]string{"--class", "beast"}); err != nil {
+				t.Fatal(err)
+			}
+			err := ApplyRailwayProviderFlags(&cfg, fs, values)
+			if err == nil || !strings.Contains(err.Error(), "--class is not supported") {
+				t.Fatalf("err = %v, want class rejection", err)
+			}
+		})
 	}
 }
