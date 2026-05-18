@@ -208,6 +208,14 @@ func (b *modalBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 	return servers, nil
 }
 
+func (b *modalBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+	servers, err := b.List(ctx, ListRequest{})
+	if err != nil {
+		return DoctorResult{}, err
+	}
+	return inventoryDoctorResult(providerName, len(servers)), nil
+}
+
 func (b *modalBackend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
 	client, err := newModalAPI(b.cfg, b.rt)
 	if err != nil {

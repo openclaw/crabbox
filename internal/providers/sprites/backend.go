@@ -179,6 +179,14 @@ func (b *spritesBackend) List(ctx context.Context, req ListRequest) ([]LeaseView
 	return out, nil
 }
 
+func (b *spritesBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+	servers, err := b.List(ctx, ListRequest{})
+	if err != nil {
+		return DoctorResult{}, err
+	}
+	return inventoryDoctorResult(spritesProvider, len(servers)), nil
+}
+
 func (b *spritesBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	name := strings.TrimSpace(req.Lease.Server.Name)
 	if name == "" {

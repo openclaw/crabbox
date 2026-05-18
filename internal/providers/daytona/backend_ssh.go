@@ -203,6 +203,17 @@ func (b *daytonaLeaseBackend) List(ctx context.Context, req ListRequest) ([]Leas
 	return daytonaSandboxesToServers(sandboxes, b.cfg), nil
 }
 
+func (b *daytonaLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+	servers, err := b.List(ctx, ListRequest{})
+	if err != nil {
+		return DoctorResult{}, err
+	}
+	return DoctorResult{
+		Provider: daytonaProvider,
+		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready leases=%d runtime=unchecked", len(servers)),
+	}, nil
+}
+
 func (b *daytonaLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {

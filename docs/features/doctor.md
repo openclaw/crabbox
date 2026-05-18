@@ -24,7 +24,7 @@ config       config files load and parse, required keys are present
 auth         broker token is set, signed token is valid, identity resolves
 network      coordinator URL reachable, DNS works, SSH transport probes work
 ssh          SSH key path readable, key type acceptable, ssh-keygen on PATH
-tools        rsync, git, ssh, ssh-keygen present and executable
+tools        provider-applicable local tools are present and executable
 ```
 
 Each category emits one or more pass/fail/skip lines. Failures are listed
@@ -60,7 +60,9 @@ diffable across runs.
 - Direct provider readiness succeeds for delegated providers that expose a cheap
   non-mutating check. Cloudflare validates its runner URL and bearer token
   directly instead of treating a healthy coordinator as proof of runner
-  readiness, using the runner's authenticated readiness endpoint.
+  readiness, using the runner's authenticated readiness endpoint. All built-in
+  providers now expose provider-owned direct doctor checks; providers with list
+  APIs use non-mutating inventory checks when running in direct mode.
 
 When auth is missing, doctor prints `crabbox login` as the next step.
 
@@ -70,8 +72,9 @@ When auth is missing, doctor prints `crabbox login` as the next step.
 - The coordinator is reachable over HTTPS within a small timeout.
 - When `--network tailscale` is configured, `tailscale status` reports a
   joined client.
-- SSH transport probes succeed for the primary port and fall back to the
-  configured fallback ports.
+- `crabbox doctor --id <lease>` runs an SSH transport/tool probe against the
+  resolved target. The static provider check without `--id` only verifies that
+  `static.host` is configured.
 
 DNS is checked before HTTPS so a broken DNS responder does not look like a
 broker outage.
@@ -91,9 +94,9 @@ do not need a global key.
 ## What `tools` Checks
 
 - `git` is on PATH.
-- `rsync` is on PATH.
-- `ssh` is on PATH.
-- `ssh-keygen` is on PATH.
+- `ssh` and `ssh-keygen` are on PATH for SSH-backed providers.
+- `rsync` is on PATH for providers that use local rsync-based workspace sync.
+- `tar` is on PATH for providers that use local archive-based workspace sync.
 
 The check is path-based, not version-based. Crabbox tolerates any reasonably
 modern version of these tools.
@@ -104,8 +107,8 @@ Doctor avoids mutating provider state on purpose. It does not:
 
 - start a real lease or provision a server;
 - create, delete, or mutate cloud or Proxmox resources;
-- call delegated provider APIs except for explicit, cheap readiness probes such
-  as Cloudflare runner auth checks;
+- call delegated provider APIs except for explicit, cheap readiness or inventory
+  probes such as Cloudflare runner auth checks or provider list commands;
 - run `git ls-files` against the repo (that belongs in `crabbox sync-plan`);
 - estimate costs;
 - modify config or rotate keys.
@@ -155,14 +158,15 @@ network:
   skip  coordinator unconfigured (direct provider mode)
 ```
 
-Exit code is `0` on full success, `2` on any failure. Skips do not change
+Exit code is `0` on full success, `1` on any failure. Skips do not change
 the exit code.
 
 ## Adding A Check
 
-Doctor checks live in `internal/cli/doctor.go`. Keep each check explicit and
-cheap, and print stable `ok`, `failed`, `missing`, `skip`, or `warning` lines
-that remain easy to scan in terminal logs.
+Doctor orchestration lives in `internal/cli/doctor.go`. Prefer provider-owned
+`DoctorProvider` implementations for direct provider checks. Keep each check
+explicit and cheap, and print stable `ok`, `failed`, `missing`, `skip`, or
+`warning` lines that remain easy to scan in terminal logs.
 
 Rules for new checks:
 

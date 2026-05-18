@@ -20,17 +20,6 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		return err
 	}
 
-	ok := true
-	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync", "curl"} {
-		path, err := exec.LookPath(tool)
-		if err != nil {
-			fmt.Fprintf(a.Stdout, "missing %-8s\n", tool)
-			ok = false
-			continue
-		}
-		fmt.Fprintf(a.Stdout, "ok      %-8s %s\n", tool, path)
-	}
-
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -39,6 +28,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	if err := applySelectedProfileConfig(&cfg); err != nil {
 		return err
 	}
+	ok := true
 	if problem := configFilePermissionProblem(writableConfigPath()); problem != "" {
 		fmt.Fprintf(a.Stdout, "failed  config   %s: %s\n", writableConfigPath(), problem)
 		ok = false
@@ -57,6 +47,15 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	providerDef, err := ProviderFor(cfg.Provider)
 	if err != nil {
 		return err
+	}
+	for _, tool := range doctorLocalTools(providerDef.Spec()) {
+		path, err := exec.LookPath(tool)
+		if err != nil {
+			fmt.Fprintf(a.Stdout, "missing %-8s\n", tool)
+			ok = false
+			continue
+		}
+		fmt.Fprintf(a.Stdout, "ok      %-8s %s\n", tool, path)
 	}
 	if *id != "" {
 		_, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, *id)
@@ -153,6 +152,13 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stdout, "ok      ssh-key  per-lease\n")
 	}
 
+	if useCoordinator {
+		if !ok {
+			return exit(1, "doctor found problems")
+		}
+		return nil
+	}
+
 	doctorProvider, doctorSupported := providerDef.(DoctorProvider)
 	if doctorSupported {
 		doctor, err := doctorProvider.ConfigureDoctor(cfg, runtimeForApp(a))
@@ -168,9 +174,6 @@ func (a App) doctor(ctx context.Context, args []string) error {
 				fmt.Fprintf(a.Stdout, "ok      provider provider=%s %s\n", result.Provider, result.Message)
 			}
 		}
-	}
-
-	if useCoordinator {
 		if !ok {
 			return exit(1, "doctor found problems")
 		}
@@ -187,68 +190,34 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	switch providerDef.Name() {
-	case "ssh", "static", "static-ssh":
-		if cfg.Static.Host == "" {
-			fmt.Fprintf(a.Stdout, "failed  static   missing static.host\n")
-			ok = false
-		} else {
-			fmt.Fprintf(a.Stdout, "ok      static   target=%s windows_mode=%s host=%s\n", cfg.TargetOS, cfg.WindowsMode, cfg.Static.Host)
-		}
-	case "aws":
-		client, err := newAWSClient(ctx, cfg)
-		if err != nil {
-			fmt.Fprintf(a.Stdout, "failed  aws      %v\n", err)
-			ok = false
-			break
-		}
-		servers, err := client.ListCrabboxServers(ctx)
-		if err != nil {
-			fmt.Fprintf(a.Stdout, "failed  aws      %v\n", err)
-			ok = false
-		} else {
-			fmt.Fprintf(a.Stdout, "ok      aws      crabbox_servers=%d region=%s default_type=%s\n", len(servers), cfg.AWSRegion, cfg.ServerType)
-		}
-	case "azure":
-		client, err := NewAzureClient(ctx, cfg)
-		if err != nil {
-			fmt.Fprintf(a.Stdout, "failed  azure    %v\n", err)
-			ok = false
-			break
-		}
-		servers, err := client.ListCrabboxServers(ctx)
-		if err != nil {
-			fmt.Fprintf(a.Stdout, "failed  azure    %v\n", err)
-			ok = false
-		} else {
-			fmt.Fprintf(a.Stdout, "ok      azure    crabbox_servers=%d location=%s default_type=%s\n", len(servers), cfg.AzureLocation, cfg.ServerType)
-		}
-	case "hetzner":
-		client, err := newHetznerClient()
-		if err != nil {
-			fmt.Fprintf(a.Stdout, "missing hcloud token\n")
-			ok = false
-		} else {
-			servers, err := client.ListCrabboxServers(ctx)
-			if err != nil {
-				fmt.Fprintf(a.Stdout, "failed  hcloud   %v\n", err)
-				ok = false
-			} else {
-				fmt.Fprintf(a.Stdout, "ok      hcloud   crabbox_servers=%d default_type=%s\n", len(servers), cfg.ServerType)
-			}
-		}
-	default:
-		if !ok {
-			return exit(1, "doctor found problems")
-		}
-		fmt.Fprintf(a.Stdout, "skip    provider provider=%s direct_doctor=unsupported\n", providerDef.Name())
-		return nil
-	}
-
 	if !ok {
 		return exit(1, "doctor found problems")
 	}
+	fmt.Fprintf(a.Stdout, "skip    provider provider=%s direct_doctor=unsupported\n", providerDef.Name())
 	return nil
+}
+
+func doctorLocalTools(spec ProviderSpec) []string {
+	tools := []string{"git"}
+	if spec.Kind == ProviderKindSSHLease || spec.Features.Has(FeatureSSH) {
+		tools = append(tools, "ssh", "ssh-keygen")
+	}
+	if spec.Features.Has(FeatureCrabboxSync) {
+		tools = append(tools, "rsync")
+	}
+	if spec.Features.Has(FeatureArchiveSync) || doctorProviderUsesLocalArchive(spec.Name) {
+		tools = append(tools, "tar")
+	}
+	return tools
+}
+
+func doctorProviderUsesLocalArchive(provider string) bool {
+	switch provider {
+	case "daytona", "e2b", "islo", "tensorlake":
+		return true
+	default:
+		return false
+	}
 }
 
 func coordinatorProviderReadinessSupported(provider string) bool {

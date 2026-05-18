@@ -39,7 +39,7 @@ type daytonaSDKClient struct {
 
 const defaultDaytonaAPIURL = "https://app.daytona.io/api"
 
-func newDaytonaClient(cfg Config, rt Runtime) (daytonaAPI, error) {
+var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 	auth, err := daytonaAuthConfig(cfg)
 	if err != nil {
 		return nil, err

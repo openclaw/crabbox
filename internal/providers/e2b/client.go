@@ -88,7 +88,7 @@ func (e *e2bAPIError) Error() string {
 	return e.Status + ": " + e.Body
 }
 
-func newE2BClient(cfg Config, rt Runtime) (e2bAPI, error) {
+var newE2BClient = func(cfg Config, rt Runtime) (e2bAPI, error) {
 	apiKey := strings.TrimSpace(cfg.E2B.APIKey)
 	if apiKey == "" {
 		return nil, exit(2, "provider=e2b requires E2B_API_KEY")
