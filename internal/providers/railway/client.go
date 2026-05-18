@@ -35,6 +35,8 @@ type railwayClient struct {
 	httpClient *http.Client
 }
 
+const railwayMaxGraphQLResponseBytes = 16 << 20
+
 type railwayAPIError struct {
 	StatusCode int
 	Status     string
@@ -199,9 +201,12 @@ func (c *railwayClient) do(ctx context.Context, query string, vars map[string]an
 		return err
 	}
 	defer resp.Body.Close()
-	data, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, railwayMaxGraphQLResponseBytes+1))
 	if readErr != nil {
 		return readErr
+	}
+	if len(data) > railwayMaxGraphQLResponseBytes {
+		return fmt.Errorf("railway response exceeds %d bytes", railwayMaxGraphQLResponseBytes)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &railwayAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: strings.TrimSpace(string(data))}

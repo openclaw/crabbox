@@ -218,6 +218,36 @@ func TestRailwayClientSurfacesGraphQLErrorsAsAPIError(t *testing.T) {
 	}
 }
 
+func TestRailwayClientDecodesLargeLogResponse(t *testing.T) {
+	message := strings.Repeat("x", 2<<20)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"deploymentLogs": []map[string]string{{"message": message}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := Config{}
+	cfg.Railway.APIToken = "test-token"
+	cfg.Railway.APIURL = server.URL
+	client, err := newRailwayClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs, err := client.DeploymentLogs(context.Background(), "dep-1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("logs len=%d, want 1", len(logs))
+	}
+	if logs[0] != message {
+		t.Fatalf("log len=%d, want %d", len(logs[0]), len(message))
+	}
+}
+
 func TestRailwayRunRequiresNoSync(t *testing.T) {
 	backend := &railwayBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
 	_, err := backend.Run(context.Background(), RunRequest{ID: "svc-1", Command: []string{"pnpm", "test"}})
@@ -261,8 +291,7 @@ func TestRailwayRunRejectsLeaseFlags(t *testing.T) {
 		{name: "keep", req: RunRequest{ID: "svc-1", Keep: true, NoSync: true, Command: []string{"pnpm", "test"}}, want: "--keep"},
 		{name: "reclaim", req: RunRequest{ID: "svc-1", Reclaim: true, NoSync: true, Command: []string{"pnpm", "test"}}, want: "--reclaim"},
 		{name: "shell", req: RunRequest{ID: "svc-1", ShellMode: true, NoSync: true, Command: []string{"pnpm test"}}, want: "--shell"},
-		{name: "env", req: RunRequest{ID: "svc-1", NoSync: true, Env: map[string]string{"TOKEN": "secret"}, Command: []string{"pnpm", "test"}}, want: "environment"},
-		{name: "env summary", req: RunRequest{ID: "svc-1", NoSync: true, EnvSummary: true, Command: []string{"pnpm", "test"}}, want: "environment"},
+		{name: "env summary", req: RunRequest{ID: "svc-1", NoSync: true, Env: map[string]string{"TOKEN": "secret"}, EnvSummary: true, Command: []string{"pnpm", "test"}}, want: "environment"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := &railwayBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
@@ -271,6 +300,18 @@ func TestRailwayRunRejectsLeaseFlags(t *testing.T) {
 				t.Fatalf("err = %v, want %s rejection", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestRailwayRunAllowsImplicitDefaultEnv(t *testing.T) {
+	err := rejectRailwayRunOptions(RunRequest{
+		ID:      "svc-1",
+		NoSync:  true,
+		Env:     map[string]string{"CI": "true"},
+		Command: []string{"pnpm", "test"},
+	})
+	if err != nil {
+		t.Fatalf("rejectRailwayRunOptions err: %v", err)
 	}
 }
 

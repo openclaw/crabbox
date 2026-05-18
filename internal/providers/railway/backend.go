@@ -457,7 +457,7 @@ func rejectRailwayRunOptions(req RunRequest) error {
 	if req.ShellMode {
 		return exit(2, "provider=%s runs the Railway service start command; --shell is not supported", providerName)
 	}
-	if len(req.Env) > 0 || req.EnvSummary {
+	if req.EnvSummary {
 		return exit(2, "provider=%s cannot forward per-run environment variables", providerName)
 	}
 	return nil
