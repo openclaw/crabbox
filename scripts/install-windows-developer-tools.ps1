@@ -86,6 +86,12 @@ function Install-DockerEngine {
       $restartRequired = $true
     }
   }
+  if ($restartRequired) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $RebootMarker) | Out-Null
+    Set-Content -Path $RebootMarker -Value "Containers feature requires reboot before Docker Engine installation"
+    Write-Log "Docker Engine will be installed after reboot"
+    return
+  }
   if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
     Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
   }
