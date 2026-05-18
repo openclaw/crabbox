@@ -32,7 +32,7 @@ Bake machine capabilities:
 - Xvfb/slim XFCE/VNC for desktop leases;
 - Chrome/Chromium for browser leases;
 - `ffmpeg`, `ffprobe`, `scrot`, `xdotool`, and other capture helpers;
-- Node 22, npm, corepack, pnpm;
+- Node 24, npm, corepack, pnpm;
 - build-essential, Python, and common native-addon headers;
 - empty cache directories such as `/var/cache/crabbox/pnpm`.
 
@@ -308,14 +308,19 @@ If the source lease needs operator-specific setup before smoking, pass a local
 prep script:
 
 ```bash
-CRABBOX_MACOS_SOURCE_PREP_SCRIPT=scripts/private/install-macos-tools.sh \
+CRABBOX_MACOS_SOURCE_PREP_SCRIPT=scripts/install-macos-developer-tools.sh \
 CRABBOX_MACOS_ALLOCATE=1 \
 scripts/macos-image-lifecycle-smoke.sh
 ```
 
-Use that hook for Homebrew, Command Line Tools, Swift, Node/pnpm, or
-organization-specific toolchain setup. Do not put Apple credentials, download
-tokens, or private package mirrors in this repository or in baked images.
+The bundled developer-tool prep script keeps the image generic: it verifies
+Command Line Tools, installs Homebrew when missing, installs common developer
+packages such as Git, GitHub CLI, jq/yq, ripgrep, fd, ShellCheck, shfmt, Python,
+Node 24, and activates pnpm through corepack. It also creates `/usr/local/bin`
+shims so non-login SSH commands can find those tools after the AMI boots. Use a
+private prep hook only for organization-specific setup. Do not put Apple
+credentials, download tokens, or private package mirrors in this repository or
+in baked images.
 
 If an available EC2 Mac Dedicated Host already exists, the script still stops
 after preflight unless `CRABBOX_MACOS_RUN=1` or `CRABBOX_MACOS_ALLOCATE=1` is
