@@ -12,6 +12,8 @@ type Config = core.Config
 type ProviderSpec = core.ProviderSpec
 type Runtime = core.Runtime
 type Backend = core.Backend
+type DoctorRequest = core.DoctorRequest
+type DoctorResult = core.DoctorResult
 type TensorlakeConfig = core.TensorlakeConfig
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
@@ -123,3 +125,7 @@ func checkSyncPreflight(manifest core.SyncManifest, cfg Config, force bool, stde
 }
 
 type SyncManifest = core.SyncManifest
+
+func cliDoctorResult(provider string, leases int, runtime string) DoctorResult {
+	return core.CLIDoctorResult(provider, leases, runtime)
+}

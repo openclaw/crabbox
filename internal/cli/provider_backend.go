@@ -110,6 +110,15 @@ const (
 
 type FeatureSet []Feature
 
+func (s FeatureSet) Has(feature Feature) bool {
+	for _, item := range s {
+		if item == feature {
+			return true
+		}
+	}
+	return false
+}
+
 type Runtime struct {
 	Stdout io.Writer
 	Stderr io.Writer
@@ -150,6 +159,20 @@ type DoctorRequest struct{}
 type DoctorResult struct {
 	Provider string
 	Message  string
+}
+
+func InventoryDoctorResult(provider string, leases int) DoctorResult {
+	return DoctorResult{
+		Provider: provider,
+		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready leases=%d runtime=unchecked", leases),
+	}
+}
+
+func CLIDoctorResult(provider string, leases int, runtime string) DoctorResult {
+	return DoctorResult{
+		Provider: provider,
+		Message:  fmt.Sprintf("cli=ready inventory=ready leases=%d runtime=%s", leases, runtime),
+	}
 }
 
 type execCommandRunner struct{}

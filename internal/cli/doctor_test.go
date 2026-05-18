@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -36,6 +37,42 @@ func TestCoordinatorProviderReadinessSupported(t *testing.T) {
 		t.Run(tt.provider, func(t *testing.T) {
 			if got := coordinatorProviderReadinessSupported(tt.provider); got != tt.want {
 				t.Fatalf("coordinatorProviderReadinessSupported(%q)=%t want %t", tt.provider, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDoctorLocalToolsAreProviderAware(t *testing.T) {
+	tests := []struct {
+		name string
+		spec ProviderSpec
+		want []string
+	}{
+		{
+			name: "delegated no local ssh sync",
+			spec: ProviderSpec{Kind: ProviderKindDelegatedRun},
+			want: []string{"git"},
+		},
+		{
+			name: "ssh lease sync",
+			spec: ProviderSpec{Kind: ProviderKindSSHLease, Features: FeatureSet{FeatureSSH, FeatureCrabboxSync}},
+			want: []string{"git", "ssh", "ssh-keygen", "rsync"},
+		},
+		{
+			name: "archive sync requires tar but not rsync",
+			spec: ProviderSpec{Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeatureArchiveSync}},
+			want: []string{"git", "tar"},
+		},
+		{
+			name: "provider-owned local archive sync requires tar",
+			spec: ProviderSpec{Name: "e2b", Kind: ProviderKindDelegatedRun},
+			want: []string{"git", "tar"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := doctorLocalTools(tt.spec); !slices.Equal(got, tt.want) {
+				t.Fatalf("tools=%v want %v", got, tt.want)
 			}
 		})
 	}

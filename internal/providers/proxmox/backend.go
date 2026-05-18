@@ -30,6 +30,14 @@ type SSHTarget = core.SSHTarget
 
 type leaseBackend struct{ shared.DirectSSHBackend }
 
+type proxmoxClient interface {
+	ListCrabboxServers(context.Context) ([]Server, error)
+	CreateServer(context.Context, Config, string, string, string, bool) (Server, error)
+	GetServer(context.Context, string) (Server, error)
+	DeleteServer(context.Context, string) error
+	SetLabels(context.Context, string, map[string]string) error
+}
+
 func NewLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = "proxmox"
 	if cfg.Proxmox.User != "" {
@@ -147,6 +155,17 @@ func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 	return client.ListCrabboxServers(ctx)
 }
 
+func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	servers, err := b.List(ctx, ListRequest{})
+	if err != nil {
+		return core.DoctorResult{}, err
+	}
+	return core.DoctorResult{
+		Provider: "proxmox",
+		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready leases=%d runtime=unchecked", len(servers)),
+	}, nil
+}
+
 func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	client, err := newClient(b.Cfg)
 	if err != nil {
@@ -202,8 +221,9 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	return nil
 }
 
-func newClient(cfg Config) (*core.ProxmoxClient, error) { return core.NewProxmoxClient(cfg) }
-func newLeaseID() string                                { return core.NewLeaseID() }
+var newClient = func(cfg Config) (proxmoxClient, error) { return core.NewProxmoxClient(cfg) }
+
+func newLeaseID() string { return core.NewLeaseID() }
 func allocateDirectLeaseSlug(id, requested string, servers []Server) (string, error) {
 	return core.AllocateDirectLeaseSlug(id, requested, servers)
 }

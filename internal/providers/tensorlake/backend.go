@@ -203,6 +203,14 @@ func (b *tensorlakeBackend) List(ctx context.Context, req ListRequest) ([]LeaseV
 	return servers, nil
 }
 
+func (b *tensorlakeBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+	servers, err := b.List(ctx, ListRequest{})
+	if err != nil {
+		return DoctorResult{}, err
+	}
+	return cliDoctorResult(providerName, len(servers), "unchecked"), nil
+}
+
 func (b *tensorlakeBackend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
 	cli, err := newTensorlakeCLI(b.cfg, b.rt)
 	if err != nil {

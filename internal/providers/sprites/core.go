@@ -14,6 +14,8 @@ type SpritesConfig = core.SpritesConfig
 type ProviderSpec = core.ProviderSpec
 type Runtime = core.Runtime
 type Backend = core.Backend
+type DoctorRequest = core.DoctorRequest
+type DoctorResult = core.DoctorResult
 type AcquireRequest = core.AcquireRequest
 type ResolveRequest = core.ResolveRequest
 type ReleaseLeaseRequest = core.ReleaseLeaseRequest
@@ -100,4 +102,8 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 
 func bootstrapWaitTimeout(cfg Config) time.Duration {
 	return core.BootstrapWaitTimeout(cfg)
+}
+
+func inventoryDoctorResult(provider string, leases int) DoctorResult {
+	return core.InventoryDoctorResult(provider, leases)
 }

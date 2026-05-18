@@ -126,6 +126,16 @@ func (b *awsLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseVie
 	return client.ListCrabboxServers(ctx)
 }
 
+func (b *awsLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	servers, err := b.List(ctx, ListRequest{})
+	if err != nil {
+		return core.DoctorResult{}, err
+	}
+	result := core.InventoryDoctorResult("aws", len(servers))
+	result.Message += fmt.Sprintf(" region=%s default_type=%s", b.Cfg.AWSRegion, b.Cfg.ServerType)
+	return result, nil
+}
+
 func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	if err := deleteServer(ctx, b.Cfg, req.Lease.Server); err != nil {
 		return err

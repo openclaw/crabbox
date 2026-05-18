@@ -13,6 +13,8 @@ type E2BConfig = core.E2BConfig
 type ProviderSpec = core.ProviderSpec
 type Runtime = core.Runtime
 type Backend = core.Backend
+type DoctorRequest = core.DoctorRequest
+type DoctorResult = core.DoctorResult
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
@@ -131,4 +133,8 @@ func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io
 
 func summarizeJSON(data []byte) string {
 	return core.SummarizeJSON(data)
+}
+
+func inventoryDoctorResult(provider string, leases int) DoctorResult {
+	return core.InventoryDoctorResult(provider, leases)
 }

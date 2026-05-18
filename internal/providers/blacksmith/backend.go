@@ -215,6 +215,17 @@ func (b *blacksmithBackend) ListJSON(ctx context.Context, req ListRequest) (any,
 	return parseBlacksmithList(out), nil
 }
 
+func (b *blacksmithBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	servers, err := b.List(ctx, ListRequest{})
+	if err != nil {
+		return core.DoctorResult{}, err
+	}
+	return core.DoctorResult{
+		Provider: blacksmithTestboxProvider,
+		Message:  fmt.Sprintf("cli=ready inventory=ready leases=%d runtime=ci_hydrated_by_provider", len(servers)),
+	}, nil
+}
+
 func delegatedTimingReport(provider, leaseID, slug, syncReason string, commandDuration time.Duration, commandPhases []timingPhase, total time.Duration, exitCode int) timingReport {
 	return timingReport{
 		Provider:      provider,
