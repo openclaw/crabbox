@@ -775,6 +775,8 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       if (username) credentials.username = username;
       if (password) credentials.password = password;
       const options = Object.keys(credentials).length ? { credentials } : {};
+      const missingVNCCredentialMessage = "VNC credentials missing; open WebVNC from crabbox webvnc status";
+      const failedVNCCredentialMessage = "VNC authentication failed; reopen WebVNC from crabbox webvnc status";
       function setStatus(value, tone = "") {
         status.textContent = value;
         status.dataset.tone = tone;
@@ -789,6 +791,8 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       let controllerLabel = "";
       let isController = false;
       let takeControlAttempted = false;
+      let credentialsSent = false;
+      let authenticationFailed = false;
       const terminalStatusCodes = new Set([403, 404, 409, 410]);
       function focusVNC() {
         if (!isController) return;
@@ -941,6 +945,8 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       async function connect() {
         if (stopped) return;
         connected = false;
+        credentialsSent = false;
+        authenticationFailed = false;
         screen.replaceChildren();
         try {
           const state = await bridgeState();
@@ -958,6 +964,10 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
           }
           if (state && state.availableViewerSlots === 0) {
             scheduleRetry(state.message || "waiting for an available WebVNC observer slot");
+            return;
+          }
+          if (target === "macos" && !password) {
+            stopPolling(missingVNCCredentialMessage);
             return;
           }
           setStatus(retryAttempt ? "bridge connected; opening viewer" : "connecting");
@@ -991,23 +1001,36 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
             }
           });
           rfb.addEventListener("disconnect", () => {
+            if (stopped) return;
+            if (!connected && (authenticationFailed || credentialsSent)) {
+              stopPolling(authenticationFailed ? failedVNCCredentialMessage : "VNC authentication timed out; reopen WebVNC from crabbox webvnc status");
+              return;
+            }
             scheduleRetry(connected ? "VNC bridge disconnected" : "waiting for VNC bridge");
           });
           rfb.addEventListener("credentialsrequired", (event) => {
             const types = event.detail?.types || ["password"];
             const values = {};
             if (types.includes("username")) {
-              values.username = username || window.prompt("VNC username") || "";
+              if (!username) {
+                stopPolling(missingVNCCredentialMessage);
+                return;
+              }
+              values.username = username;
             }
             if (types.includes("password")) {
-              values.password = password || window.prompt("VNC password") || "";
+              if (!password) {
+                stopPolling(missingVNCCredentialMessage);
+                return;
+              }
+              values.password = password;
             }
+            credentialsSent = true;
             rfb.sendCredentials(values);
           });
           rfb.addEventListener("securityfailure", () => {
-            stopped = true;
-            window.clearTimeout(retryTimer);
-            setStatus("VNC authentication failed; reopen WebVNC or copy the password from crabbox webvnc status", "bad");
+            authenticationFailed = true;
+            stopPolling(failedVNCCredentialMessage);
           });
         } catch (error) {
           scheduleRetry(error instanceof Error ? error.message : String(error));

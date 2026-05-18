@@ -2795,6 +2795,16 @@ describe("fleet lease identity and idle", () => {
     expect(pageBody).toContain("stopPolling(state.message");
     expect(pageBody).toContain('fragment.get("username")');
     expect(pageBody).toContain('types.includes("username")');
+    expect(pageBody).toContain("VNC credentials missing; open WebVNC from crabbox webvnc status");
+    expect(pageBody).toContain(
+      "VNC authentication failed; reopen WebVNC from crabbox webvnc status",
+    );
+    expect(pageBody).toContain(
+      "VNC authentication timed out; reopen WebVNC from crabbox webvnc status",
+    );
+    expect(pageBody).toContain("credentialsSent = true");
+    expect(pageBody).not.toContain('window.prompt("VNC username")');
+    expect(pageBody).not.toContain('window.prompt("VNC password")');
     expect(pageBody).not.toContain("cdn.jsdelivr.net");
 
     const friendPage = await fleet.fetch(
