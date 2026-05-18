@@ -114,6 +114,81 @@ describe("aws provider", () => {
     ).toEqual([{ cidr: "203.0.113.10/32", family: "ipv4", port: "2222" }]);
   });
 
+  it("refreshes configured AWS security groups with current SSH ingress", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        calls.push(
+          [
+            action,
+            params.get("GroupId") ?? params.get("GroupId.1") ?? "",
+            params.get("IpPermissions.1.FromPort") ?? "",
+            params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "",
+          ].join(":"),
+        );
+        if (action === "DescribeSecurityGroups") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <securityGroupInfo>
+    <item>
+      <groupId>sg-fixed</groupId>
+      <ipPermissions>
+        <item>
+          <ipProtocol>tcp</ipProtocol>
+          <fromPort>2222</fromPort>
+          <toPort>2222</toPort>
+          <ipRanges>
+            <item>
+              <cidrIp>203.0.113.10/32</cidrIp>
+              <description>Crabbox SSH</description>
+            </item>
+          </ipRanges>
+        </item>
+      </ipPermissions>
+    </item>
+  </securityGroupInfo>
+</DescribeSecurityGroupsResponse>`);
+        }
+        if (action === "RevokeSecurityGroupIngress") {
+          return ec2XMLResponse("<RevokeSecurityGroupIngressResponse />");
+        }
+        if (action === "AuthorizeSecurityGroupIngress") {
+          return ec2XMLResponse("<AuthorizeSecurityGroupIngressResponse />");
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-fixed",
+      } as never,
+      "eu-west-1",
+    );
+
+    await client.refreshSSHIngress(
+      leaseConfig({
+        provider: "aws",
+        target: "windows",
+        awsSSHCIDRs: ["198.51.100.77/32"],
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    );
+
+    expect(calls).toContain("DescribeSecurityGroups:sg-fixed::");
+    expect(calls).toContain("AuthorizeSecurityGroupIngress:sg-fixed:2222:198.51.100.77/32");
+    expect(calls).toContain("AuthorizeSecurityGroupIngress:sg-fixed:22:198.51.100.77/32");
+    expect(calls).not.toContain("DescribeVpcs:::");
+  });
+
   it("does not tag Spot request resources for On-Demand launches", () => {
     const spotParams: Record<string, string> = {};
     addRunInstancesTagSpecifications(spotParams, { crabbox: "true", Name: "crabbox-cbx" }, "spot");
@@ -410,6 +485,10 @@ describe("aws provider", () => {
         const body = await request.clone().text();
         const params = new URLSearchParams(body);
         const action = params.get("Action") ?? "";
+        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+        if (securityGroupResponse) {
+          return securityGroupResponse;
+        }
         if (action === "DescribeKeyPairs") {
           return ec2XMLResponse("<DescribeKeyPairsResponse />");
         }
@@ -523,6 +602,10 @@ describe("aws provider", () => {
         const body = await request.clone().text();
         const params = new URLSearchParams(body);
         const action = params.get("Action") ?? "";
+        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+        if (securityGroupResponse) {
+          return securityGroupResponse;
+        }
         if (action === "DescribeKeyPairs") {
           return ec2XMLResponse("<DescribeKeyPairsResponse />");
         }
@@ -585,6 +668,7 @@ describe("aws provider", () => {
         AWS_ACCESS_KEY_ID: "test",
         AWS_SECRET_ACCESS_KEY: "secret",
         CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
       } as never,
       "eu-west-1",
     );
@@ -621,6 +705,10 @@ describe("aws provider", () => {
         const body = await request.clone().text();
         const params = new URLSearchParams(body);
         const action = params.get("Action") ?? "";
+        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+        if (securityGroupResponse) {
+          return securityGroupResponse;
+        }
         if (action === "DescribeKeyPairs") {
           return ec2XMLResponse("<DescribeKeyPairsResponse />");
         }
@@ -679,6 +767,7 @@ describe("aws provider", () => {
         AWS_ACCESS_KEY_ID: "test",
         AWS_SECRET_ACCESS_KEY: "secret",
         CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
       } as never,
       "eu-west-1",
     );
@@ -715,6 +804,10 @@ describe("aws provider", () => {
         }
         const params = new URLSearchParams(await request.clone().text());
         const action = params.get("Action") ?? "";
+        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+        if (securityGroupResponse) {
+          return securityGroupResponse;
+        }
         if (action === "DescribeKeyPairs") {
           return ec2XMLResponse("<DescribeKeyPairsResponse />");
         }
@@ -756,6 +849,7 @@ describe("aws provider", () => {
         AWS_ACCESS_KEY_ID: "test",
         AWS_SECRET_ACCESS_KEY: "secret",
         CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
       } as never,
       "us-west-2",
     );
@@ -796,6 +890,13 @@ describe("aws provider", () => {
         const body = await request.clone().text();
         const params = Object.fromEntries(new URLSearchParams(body));
         const action = params.Action ?? "";
+        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(
+          action,
+          new URLSearchParams(body),
+        );
+        if (securityGroupResponse) {
+          return securityGroupResponse;
+        }
         if (action === "DescribeKeyPairs") {
           return ec2XMLResponse("<DescribeKeyPairsResponse />");
         }
@@ -865,6 +966,7 @@ describe("aws provider", () => {
         AWS_ACCESS_KEY_ID: "test",
         AWS_SECRET_ACCESS_KEY: "secret",
         CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
         CRABBOX_AWS_SUBNET_ID: "subnet-123",
       } as never,
       "eu-west-1",
@@ -1211,6 +1313,25 @@ describe("aws provider", () => {
     ]);
   });
 });
+
+function ec2ConfiguredSecurityGroupResponse(
+  action: string,
+  params: URLSearchParams,
+): Response | undefined {
+  if (action === "DescribeSecurityGroups") {
+    const groupID = params.get("GroupId.1") ?? params.get("GroupId") ?? "sg-123";
+    return ec2XMLResponse(
+      `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>${groupID}</groupId></item></securityGroupInfo></DescribeSecurityGroupsResponse>`,
+    );
+  }
+  if (action === "RevokeSecurityGroupIngress") {
+    return ec2XMLResponse("<RevokeSecurityGroupIngressResponse />");
+  }
+  if (action === "AuthorizeSecurityGroupIngress") {
+    return ec2XMLResponse("<AuthorizeSecurityGroupIngressResponse />");
+  }
+  return undefined;
+}
 
 function ec2XMLResponse(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "application/xml" } });

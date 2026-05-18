@@ -18,6 +18,7 @@
 - Fixed Windows developer-image bootstrap readiness so setup completion is written before restarting SSH and native Windows bakes wait for a stable SSH window before continuing.
 - Fixed the Windows developer-image mint wrapper so the final PowerShell prep chunk decodes and runs inline instead of relying on a separate post-upload command.
 - Fixed Windows developer-image prep so Docker Engine installation is deferred until after the required Containers feature reboot.
+- Fixed AWS developer-image bakes behind configured security groups so coordinator heartbeats still refresh the configured Crabbox SSH ports, and aligned the Worker Windows bootstrap ordering with the CLI path.
 
 ## 0.16.0 - 2026-05-18
 

@@ -1038,22 +1038,32 @@ export class EC2SpotClient {
   }
 
   private async ensureSecurityGroup(config: LeaseConfig): Promise<string> {
-    if (config.awsSGID || this.env.CRABBOX_AWS_SECURITY_GROUP_ID) {
-      return config.awsSGID || this.env.CRABBOX_AWS_SECURITY_GROUP_ID || "";
-    }
-    const vpcID = await this.securityGroupVPC(config);
-    const name = "crabbox-runners";
-    const existing = await this.ec2("DescribeSecurityGroups", {
-      "Filter.1.Name": "group-name",
-      "Filter.1.Value.1": name,
-      "Filter.2.Name": "vpc-id",
-      "Filter.2.Value.1": vpcID,
-    });
-    const group = items(record(existing["securityGroupInfo"])["item"])[0];
-    let groupID = asString(record(group)["groupId"]);
-    if (!groupID) {
-      const created = await this.ec2("CreateSecurityGroup", createSecurityGroupParams(name, vpcID));
-      groupID = asString(record(created)["groupId"]);
+    const configuredGroupID = config.awsSGID || this.env.CRABBOX_AWS_SECURITY_GROUP_ID || "";
+    let group: unknown;
+    let groupID = configuredGroupID;
+    if (groupID) {
+      const existing = await this.ec2("DescribeSecurityGroups", {
+        "GroupId.1": groupID,
+      });
+      group = items(record(existing["securityGroupInfo"])["item"])[0];
+    } else {
+      const vpcID = await this.securityGroupVPC(config);
+      const name = "crabbox-runners";
+      const existing = await this.ec2("DescribeSecurityGroups", {
+        "Filter.1.Name": "group-name",
+        "Filter.1.Value.1": name,
+        "Filter.2.Name": "vpc-id",
+        "Filter.2.Value.1": vpcID,
+      });
+      group = items(record(existing["securityGroupInfo"])["item"])[0];
+      groupID = asString(record(group)["groupId"]);
+      if (!groupID) {
+        const created = await this.ec2(
+          "CreateSecurityGroup",
+          createSecurityGroupParams(name, vpcID),
+        );
+        groupID = asString(record(created)["groupId"]);
+      }
     }
     if (!groupID) {
       throw new Error("aws security group id is empty");

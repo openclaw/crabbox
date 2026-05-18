@@ -289,6 +289,76 @@ func TestStaleAWSCrabboxSSHIngressPermissionsKeepsDefaultCIDR(t *testing.T) {
 	}
 }
 
+func TestEnsureAWSSecurityGroupRefreshesConfiguredGroupIngress(t *testing.T) {
+	var actions []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		action := r.Form.Get("Action")
+		actions = append(actions, strings.Join([]string{
+			action,
+			r.Form.Get("GroupId"),
+			r.Form.Get("GroupId.1"),
+			r.Form.Get("IpPermissions.1.FromPort"),
+			r.Form.Get("IpPermissions.1.IpRanges.1.CidrIp"),
+		}, ":"))
+		switch action {
+		case "DescribeSecurityGroups":
+			writeEC2XML(w, `<DescribeSecurityGroupsResponse>
+  <securityGroupInfo>
+    <item>
+      <groupId>sg-fixed</groupId>
+      <ipPermissions>
+        <item>
+          <ipProtocol>tcp</ipProtocol>
+          <fromPort>2222</fromPort>
+          <toPort>2222</toPort>
+          <ipRanges>
+            <item>
+              <cidrIp>203.0.113.10/32</cidrIp>
+              <description>`+awsSSHIngressDescription+`</description>
+            </item>
+          </ipRanges>
+        </item>
+      </ipPermissions>
+    </item>
+  </securityGroupInfo>
+</DescribeSecurityGroupsResponse>`)
+		case "RevokeSecurityGroupIngress":
+			writeEC2XML(w, `<RevokeSecurityGroupIngressResponse />`)
+		case "AuthorizeSecurityGroupIngress":
+			writeEC2XML(w, `<AuthorizeSecurityGroupIngressResponse />`)
+		default:
+			writeEC2Error(w, "Unexpected", action, http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	groupID, err := testAWSClient(server.URL).ensureSecurityGroup(context.Background(), Config{
+		Provider:         "aws",
+		AWSSGID:          "sg-fixed",
+		SSHPort:          "2222",
+		SSHFallbackPorts: []string{"22"},
+		AWSSSHCIDRs:      []string{"198.51.100.77/32"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if groupID != "sg-fixed" {
+		t.Fatalf("groupID=%q, want sg-fixed", groupID)
+	}
+	if !slices.Contains(actions, "DescribeSecurityGroups::sg-fixed::") {
+		t.Fatalf("actions=%v, want configured group describe", actions)
+	}
+	if !slices.Contains(actions, "AuthorizeSecurityGroupIngress:sg-fixed::2222:198.51.100.77/32") {
+		t.Fatalf("actions=%v, want 2222 ingress authorization", actions)
+	}
+	if !slices.Contains(actions, "AuthorizeSecurityGroupIngress:sg-fixed::22:198.51.100.77/32") {
+		t.Fatalf("actions=%v, want 22 ingress authorization", actions)
+	}
+}
+
 func TestAWSMacOSFallbackResolvesAMIForEachInstanceType(t *testing.T) {
 	var imageQueries []string
 	var runImages []string
@@ -305,6 +375,12 @@ func TestAWSMacOSFallbackResolvesAMIForEachInstanceType(t *testing.T) {
 		switch action := params.Get("Action"); action {
 		case "DescribeKeyPairs":
 			writeEC2XML(w, `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-test</keyName></item></keySet></DescribeKeyPairsResponse>`)
+		case "DescribeSecurityGroups":
+			writeEC2XML(w, `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-123</groupId></item></securityGroupInfo></DescribeSecurityGroupsResponse>`)
+		case "RevokeSecurityGroupIngress":
+			writeEC2XML(w, `<RevokeSecurityGroupIngressResponse />`)
+		case "AuthorizeSecurityGroupIngress":
+			writeEC2XML(w, `<AuthorizeSecurityGroupIngressResponse />`)
 		case "DescribeImages":
 			architecture := params.Get("Filter.1.Value.1")
 			name := params.Get("Filter.2.Value.1")

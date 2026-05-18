@@ -230,6 +230,13 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("C:\\ProgramData\\crabbox\\windows.username");
     expect(got).toContain("AutoAdminLogon");
     expect(got).toContain("Restart-Computer -Force");
+    expect(got).toContain("exit 0");
+    const setupIndex = got.indexOf(
+      "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
+    );
+    const restartIndex = got.indexOf("Restart-Computer -Force");
+    expect(setupIndex).toBeGreaterThanOrEqual(0);
+    expect(setupIndex).toBeLessThan(restartIndex);
   });
 
   it("builds Windows core bootstrap without desktop/VNC", () => {
@@ -244,6 +251,12 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("$passwordPath = $windowsPasswordPath");
     expect(got).toContain("Restart-Service sshd -Force");
     expect(got).toContain("Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath");
+    const setupIndex = got.indexOf(
+      "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
+    );
+    const restartIndex = got.indexOf("Restart-Service sshd -Force");
+    expect(setupIndex).toBeGreaterThanOrEqual(0);
+    expect(setupIndex).toBeLessThan(restartIndex);
     expect(got).not.toContain("tightvnc-2.8.85-gpl-setup-64bit.msi");
     expect(got).not.toContain("C:\\ProgramData\\crabbox\\vnc.password");
     expect(got).not.toContain("CrabboxUserVNC");
@@ -274,6 +287,12 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("wsl.exe --import $wslDistro $wslRoot $wslRootfs --version 2");
     expect(got).toContain("wsl.exe --set-default $wslDistro");
     expect(got).toContain("test -w '/work/crabbox'");
+    const setupIndex = got.indexOf(
+      "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
+    );
+    const restartIndex = got.lastIndexOf("Restart-Service sshd -Force");
+    expect(setupIndex).toBeGreaterThanOrEqual(0);
+    expect(setupIndex).toBeLessThan(restartIndex);
     expect(got).not.toContain("tightvnc-2.8.85-gpl-setup-64bit.msi");
     expect(got).not.toContain("C:\\ProgramData\\crabbox\\vnc.password");
     expect(got).not.toContain("CrabboxUserVNC");

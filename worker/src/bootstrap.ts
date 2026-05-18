@@ -369,8 +369,8 @@ crabbox-ready
 	[IO.File]::WriteAllText($wslSetup, $linuxSetup, (New-Object Text.UTF8Encoding($false)))
 	wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh
 	if ($LASTEXITCODE -ne 0) { throw "WSL setup failed with exit $LASTEXITCODE" }
-	Restart-Service sshd -Force
 	Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
+	Restart-Service sshd -Force
 	`;
 }
 
@@ -434,20 +434,21 @@ Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value "1" -Type String
 Set-ItemProperty -Path $winlogon -Name ForceAutoLogon -Value "1" -Type String
 Set-ItemProperty -Path $winlogon -Name DefaultUserName -Value $user -Type String
 Set-ItemProperty -Path $winlogon -Name DefaultPassword -Value $userPassword -Type String
-Restart-Service sshd
 if (-not (Test-Path -LiteralPath $setupCompletePath)) {
   Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
 	  Restart-Computer -Force
+	  exit 0
 	}
+Restart-Service sshd
 	`;
 }
 
 function windowsCoreBootstrapFinalizePowerShell(): string {
   return `
-	Restart-Service sshd -Force
 	git --version | Out-Null
 	tar --version | Out-Null
 	Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
+	Restart-Service sshd -Force
 	`;
 }
 

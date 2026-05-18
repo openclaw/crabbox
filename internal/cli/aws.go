@@ -663,41 +663,54 @@ func (c *AWSClient) resolveLatestAmazonAMI(ctx context.Context, name, architectu
 }
 
 func (c *AWSClient) ensureSecurityGroup(ctx context.Context, cfg Config) (string, error) {
-	if cfg.AWSSGID != "" {
-		return cfg.AWSSGID, nil
-	}
-	vpcID, err := c.securityGroupVPC(ctx, cfg)
-	if err != nil {
-		return "", err
-	}
-	const name = "crabbox-runners"
-	existing, err := c.ec2.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
-		Filters: []types.Filter{
-			{Name: aws.String("group-name"), Values: []string{name}},
-			{Name: aws.String("vpc-id"), Values: []string{vpcID}},
-		},
-	})
-	if err != nil {
-		return "", err
-	}
 	var groupID string
 	var group *types.SecurityGroup
-	if len(existing.SecurityGroups) > 0 {
-		group = &existing.SecurityGroups[0]
-		groupID = aws.ToString(group.GroupId)
-	} else {
-		created, err := c.ec2.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
-			Description: aws.String("Crabbox ephemeral test runners"),
-			GroupName:   aws.String(name),
-			TagSpecifications: []types.TagSpecification{
-				{ResourceType: types.ResourceTypeSecurityGroup, Tags: awsTags(map[string]string{"Name": name, "crabbox": "true", "created_by": "crabbox"})},
-			},
-			VpcId: aws.String(vpcID),
+	if cfg.AWSSGID != "" {
+		groupID = cfg.AWSSGID
+		existing, err := c.ec2.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
+			GroupIds: []string{groupID},
 		})
 		if err != nil {
 			return "", err
 		}
-		groupID = aws.ToString(created.GroupId)
+		if len(existing.SecurityGroups) > 0 {
+			group = &existing.SecurityGroups[0]
+		}
+	} else {
+		vpcID, err := c.securityGroupVPC(ctx, cfg)
+		if err != nil {
+			return "", err
+		}
+		const name = "crabbox-runners"
+		existing, err := c.ec2.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
+			Filters: []types.Filter{
+				{Name: aws.String("group-name"), Values: []string{name}},
+				{Name: aws.String("vpc-id"), Values: []string{vpcID}},
+			},
+		})
+		if err != nil {
+			return "", err
+		}
+		if len(existing.SecurityGroups) > 0 {
+			group = &existing.SecurityGroups[0]
+			groupID = aws.ToString(group.GroupId)
+		} else {
+			created, err := c.ec2.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
+				Description: aws.String("Crabbox ephemeral test runners"),
+				GroupName:   aws.String(name),
+				TagSpecifications: []types.TagSpecification{
+					{ResourceType: types.ResourceTypeSecurityGroup, Tags: awsTags(map[string]string{"Name": name, "crabbox": "true", "created_by": "crabbox"})},
+				},
+				VpcId: aws.String(vpcID),
+			})
+			if err != nil {
+				return "", err
+			}
+			groupID = aws.ToString(created.GroupId)
+		}
+	}
+	if groupID == "" {
+		return "", exit(3, "aws security group id is empty")
 	}
 	ports := sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts)
 	if group != nil {
