@@ -58,12 +58,58 @@ exit $LASTEXITCODE`)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: %s SSH command ended before completion; waiting for reboot/ready state: %v\n", phase, err)
 	}
-	if err := waitForSSHReady(ctx, target, stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
+	if err := waitForWindowsBootstrapSSHReady(ctx, target, stderr, bootstrapWaitTimeout(cfg)); err != nil {
 		return err
 	}
 	if cfg.Desktop && cfg.WindowsMode == windowsModeNormal {
 		return waitForManagedWindowsLoopbackVNC(ctx, target, stderr, 5*time.Minute)
 	}
+	return nil
+}
+
+func waitForWindowsBootstrapSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	if err := waitForSSHReady(ctx, target, stderr, "bootstrap", timeout); err != nil {
+		return err
+	}
+	const stableProbes = 3
+	const stableInterval = 10 * time.Second
+	stable := 1
+	for stable < stableProbes {
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return exit(5, "timed out waiting for stable Windows SSH on %s during bootstrap; %s", target.Host, sshWaitNextAction("bootstrap"))
+		}
+		timer := time.NewTimer(minDuration(stableInterval, remaining))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return context.Cause(ctx)
+		case <-timer.C:
+		}
+		remaining = time.Until(deadline)
+		if remaining <= 0 {
+			return exit(5, "timed out waiting for stable Windows SSH on %s during bootstrap; %s", target.Host, sshWaitNextAction("bootstrap"))
+		}
+		if probeSSHReady(ctx, target, minDuration(10*time.Second, remaining)) {
+			stable++
+			continue
+		}
+		fmt.Fprintln(stderr, "Windows bootstrap SSH reached once but is still settling; waiting for stable ready-check")
+		stable = 0
+		remaining = time.Until(deadline)
+		if remaining <= 0 {
+			return exit(5, "timed out waiting for stable Windows SSH on %s during bootstrap; %s", target.Host, sshWaitNextAction("bootstrap"))
+		}
+		if err := waitForSSHReady(ctx, target, stderr, "bootstrap", remaining); err != nil {
+			return err
+		}
+		stable = 1
+	}
+	fmt.Fprintln(stderr, "Windows bootstrap SSH stable")
 	return nil
 }
 

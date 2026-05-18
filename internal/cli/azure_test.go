@@ -267,6 +267,14 @@ func TestAzureWindowsBootstrapPowerShell(t *testing.T) {
 	if strings.Contains(got, "Restart-Computer") {
 		t.Fatalf("azure extension bootstrap must not restart inside Custom Script Extension")
 	}
+	setupIndex := strings.Index(got, "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath")
+	restartIndex := strings.Index(got, "Restart-Service sshd -Force")
+	if setupIndex < 0 || restartIndex < 0 {
+		t.Fatalf("azure bootstrap missing setup/restart markers")
+	}
+	if setupIndex > restartIndex {
+		t.Fatalf("azure bootstrap must mark setup complete before restarting sshd")
+	}
 }
 
 func TestAzureTagsMapReservedWindowsPrefix(t *testing.T) {

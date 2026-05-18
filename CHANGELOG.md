@@ -13,6 +13,10 @@
 - Changed the portal lease table filter bar from a long single-choice pill list to grouped state, provider, OS, kind, and admin ownership selectors.
 - Changed the macOS developer-tools mint wrapper to default to a full Xcode macOS 15 / Swift 6.2 toolchain on newer EC2 Mac host families, while keeping CLT-only image bakes explicit.
 
+### Fixed
+
+- Fixed Windows developer-image bootstrap readiness so setup completion is written before restarting SSH and native Windows bakes wait for a stable SSH window before continuing.
+
 ## 0.16.0 - 2026-05-18
 
 ### Added

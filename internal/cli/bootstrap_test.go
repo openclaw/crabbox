@@ -284,6 +284,14 @@ func TestAWSUserDataWindowsCoreProfileSkipsDesktop(t *testing.T) {
 			t.Fatalf("windows core bootstrap missing %q", want)
 		}
 	}
+	setupIndex := strings.Index(got, "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath")
+	restartIndex := strings.Index(got, "Restart-Service sshd -Force")
+	if setupIndex < 0 || restartIndex < 0 {
+		t.Fatalf("windows core bootstrap missing setup/restart markers")
+	}
+	if setupIndex > restartIndex {
+		t.Fatalf("windows core bootstrap must mark setup complete before restarting sshd")
+	}
 	for _, notWant := range []string{
 		"tightvnc-2.8.85-gpl-setup-64bit.msi",
 		`C:\ProgramData\crabbox\vnc.password`,
