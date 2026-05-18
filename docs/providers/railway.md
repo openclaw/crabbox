@@ -67,7 +67,7 @@ crabbox run --provider railway --no-sync \
 
 ```sh
 crabbox status --provider railway --id $RAILWAY_SERVICE_ID
-crabbox stop   --provider railway --id $RAILWAY_SERVICE_ID
+crabbox stop   --provider railway $RAILWAY_SERVICE_ID
 crabbox list   --provider railway
 ```
 

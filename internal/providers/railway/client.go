@@ -126,6 +126,17 @@ func (s railwayDeploymentStatus) IsReady() bool {
 	return false
 }
 
+// State returns the generic Crabbox status state. Railway has several terminal
+// failure statuses; expose them as "failed" so status --wait can stop promptly.
+func (s railwayDeploymentStatus) State() string {
+	switch s.Normalized() {
+	case railwayStatusFailed, railwayStatusCrashed, railwayStatusRemoved, railwayStatusSkipped:
+		return "failed"
+	default:
+		return strings.ToLower(string(s.Normalized()))
+	}
+}
+
 // ExitCode maps a terminal deployment status to a process exit code: 0 for a
 // usable deployment, 1 for every other terminal state. Non-terminal statuses
 // also map to 1 because they only reach this function when the polling loop
@@ -235,10 +246,9 @@ func (c *railwayClient) TriggerDeploy(ctx context.Context, projectID, environmen
 	if err := c.do(ctx, triggerDeployMutation, vars, &out); err != nil {
 		return "", err
 	}
-	// Railway's environmentTriggersDeploy historically returns the new deployment
-	// id as a bare string. Some schema versions wrap it in a Deployment object;
-	// accept either so callers always receive the id of the deployment they just
-	// triggered (which they then poll for terminal status).
+	// Railway's environmentTriggersDeploy can return the new deployment id as a
+	// bare string, wrap it in a Deployment object, or return a boolean success
+	// marker. The boolean case falls back to LatestDeployment in Run().
 	var maybeID string
 	if err := json.Unmarshal(out.EnvironmentTriggersDeploy, &maybeID); err == nil {
 		return strings.TrimSpace(maybeID), nil

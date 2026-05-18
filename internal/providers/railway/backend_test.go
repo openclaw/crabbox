@@ -122,6 +122,28 @@ func TestRailwayClientSendsBearerAndGraphQLBody(t *testing.T) {
 	}
 }
 
+func TestRailwayClientAcceptsBooleanTriggerDeployResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"data":{"environmentTriggersDeploy":true}}`)
+	}))
+	defer server.Close()
+
+	cfg := Config{}
+	cfg.Railway.APIToken = "test-token"
+	cfg.Railway.APIURL = server.URL
+	client, err := newRailwayClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployID, err := client.TriggerDeploy(context.Background(), "proj-1", "env-1", "svc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deployID != "" {
+		t.Fatalf("deployID = %q, want empty fallback marker", deployID)
+	}
+}
+
 func TestRailwayClientSurfacesNon2xxAsAPIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden by token", http.StatusForbidden)
@@ -241,6 +263,8 @@ type fakeRailwayAPI struct {
 	logs                 []string
 	logsForID            string
 	deployment           railwayDeployment
+	latestDeployments    []railwayDeployment
+	latestCalls          int
 	// pollStatuses, when non-empty, is the sequence of statuses returned by
 	// Deployment() one call at a time. The last entry is replayed forever so
 	// callers can model "many non-terminal polls then a terminal one".
@@ -282,6 +306,14 @@ func (f *fakeRailwayAPI) DeploymentLogs(_ context.Context, deploymentID string, 
 func (f *fakeRailwayAPI) LatestDeployment(_ context.Context, _, _, _ string) (railwayDeployment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.latestCalls++
+	if len(f.latestDeployments) > 0 {
+		idx := f.latestCalls - 1
+		if idx >= len(f.latestDeployments) {
+			idx = len(f.latestDeployments) - 1
+		}
+		return f.latestDeployments[idx], nil
+	}
 	return f.deployment, nil
 }
 
@@ -341,12 +373,13 @@ func newRailwayBackendForTest(api *fakeRailwayAPI) *railwayBackend {
 	cfg.Railway.EnvironmentID = "env-1"
 	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard}
 	return &railwayBackend{
-		spec:                Provider{}.Spec(),
-		cfg:                 cfg,
-		rt:                  rt,
-		client:              api,
-		pollInitialOverride: time.Millisecond,
-		pollOverallOverride: 5 * time.Second,
+		spec:                  Provider{}.Spec(),
+		cfg:                   cfg,
+		rt:                    rt,
+		client:                api,
+		pollInitialOverride:   time.Millisecond,
+		pollOverallOverride:   5 * time.Second,
+		deployResolveOverride: 5 * time.Second,
 	}
 }
 
@@ -415,6 +448,33 @@ func TestRailwayRunPollsDeployingThenSuccess(t *testing.T) {
 	}
 }
 
+func TestRailwayRunResolvesDeploymentWhenTriggerReturnsNoID(t *testing.T) {
+	api := &fakeRailwayAPI{
+		deployID: "",
+		latestDeployments: []railwayDeployment{
+			{ID: "dep-old", Status: railwayStatusSuccess},
+			{ID: "dep-old", Status: railwayStatusSuccess},
+			{ID: "dep-new", Status: railwayStatusQueued},
+		},
+		pollStatuses: []railwayDeploymentStatus{railwayStatusSuccess},
+		logs:         []string{"ok"},
+	}
+	backend := newRailwayBackendForTest(api)
+	result, err := backend.Run(context.Background(), RunRequest{ID: "svc-1", NoSync: true, Command: []string{"pnpm", "test"}})
+	if err != nil {
+		t.Fatalf("Run err: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", result.ExitCode)
+	}
+	if api.logsForID != "dep-new" {
+		t.Fatalf("logs fetched for id=%q, want dep-new", api.logsForID)
+	}
+	if api.latestCalls < 3 {
+		t.Fatalf("latest calls = %d, want fallback polling", api.latestCalls)
+	}
+}
+
 func TestRailwayRunTreatsSleepingAsSuccessfulTerminalStatus(t *testing.T) {
 	api := &fakeRailwayAPI{
 		deployID:     "dep-1",
@@ -471,6 +531,7 @@ func TestRailwayLogStreamerPrintsChangedSnapshots(t *testing.T) {
 func TestRailwayRunReturnsErrorWhenTriggerYieldsEmptyID(t *testing.T) {
 	api := &fakeRailwayAPI{deployID: ""}
 	backend := newRailwayBackendForTest(api)
+	backend.deployResolveOverride = 25 * time.Millisecond
 	result, err := backend.Run(context.Background(), RunRequest{ID: "svc-1", NoSync: true, Command: []string{"pnpm", "test"}})
 	if err == nil {
 		t.Fatal("Run accepted empty deployment id from TriggerDeploy")
@@ -478,8 +539,8 @@ func TestRailwayRunReturnsErrorWhenTriggerYieldsEmptyID(t *testing.T) {
 	if result.ExitCode == 0 {
 		t.Fatalf("exit code = %d, want non-zero on empty deployment id", result.ExitCode)
 	}
-	if !strings.Contains(err.Error(), "no deployment id") {
-		t.Fatalf("err = %v, want 'no deployment id' message", err)
+	if !strings.Contains(err.Error(), "resolve triggered deployment") {
+		t.Fatalf("err = %v, want deployment resolution message", err)
 	}
 }
 
@@ -531,6 +592,17 @@ func TestRailwayDeploymentStatusEnum(t *testing.T) {
 				t.Fatalf("ExitCode() = %d, want %d", got, tc.exitCode)
 			}
 		})
+	}
+}
+
+func TestRailwayDeploymentStatusStateMapsTerminalFailures(t *testing.T) {
+	for _, status := range []railwayDeploymentStatus{railwayStatusFailed, railwayStatusCrashed, railwayStatusRemoved, railwayStatusSkipped} {
+		if got := status.State(); got != "failed" {
+			t.Fatalf("%s State() = %q, want failed", status, got)
+		}
+	}
+	if got := railwayStatusSleeping.State(); got != "sleeping" {
+		t.Fatalf("SLEEPING State() = %q, want sleeping", got)
 	}
 }
 
@@ -623,6 +695,29 @@ func TestRailwayStatusReturnsView(t *testing.T) {
 	}
 	if view.Provider != providerName {
 		t.Fatalf("view.Provider = %q, want %q", view.Provider, providerName)
+	}
+}
+
+func TestRailwayStatusMapsTerminalFailureState(t *testing.T) {
+	api := &fakeRailwayAPI{
+		service:    railwayService{ID: "svc-1", Name: "api", ProjectID: "proj-1"},
+		deployment: railwayDeployment{ID: "dep-1", Status: railwayStatusCrashed},
+	}
+	cfg := Config{Provider: providerName}
+	cfg.Railway.APIToken = "test-token"
+	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
+	cfg.Railway.ProjectID = "proj-1"
+	cfg.Railway.EnvironmentID = "env-1"
+	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
+	view, err := backend.Status(context.Background(), StatusRequest{ID: "svc-1"})
+	if err != nil {
+		t.Fatalf("Status err: %v", err)
+	}
+	if view.State != "failed" {
+		t.Fatalf("view.State = %q, want failed", view.State)
+	}
+	if view.Ready {
+		t.Fatal("CRASHED deployment should not be ready")
 	}
 }
 

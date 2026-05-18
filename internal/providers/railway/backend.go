@@ -15,11 +15,12 @@ import (
 // reaches a terminal state. The interval grows exponentially with jitter so a
 // long deployment doesn't hammer the API while a short one still feels snappy.
 const (
-	railwayPollInitialInterval = 5 * time.Second
-	railwayPollMaxInterval     = 30 * time.Second
-	railwayPollOverallTimeout  = 30 * time.Minute
-	railwayPollJitterFraction  = 0.2
-	railwayPollLogLimit        = 500
+	railwayPollInitialInterval  = 5 * time.Second
+	railwayPollMaxInterval      = 30 * time.Second
+	railwayPollOverallTimeout   = 30 * time.Minute
+	railwayDeployResolveTimeout = 2 * time.Minute
+	railwayPollJitterFraction   = 0.2
+	railwayPollLogLimit         = 500
 )
 
 // railwayPollRand seeds a private rand.Source on first use so jitter doesn't
@@ -62,6 +63,8 @@ type railwayBackend struct {
 	pollInitialOverride time.Duration
 	// pollOverallOverride lets tests shorten the overall poll timeout.
 	pollOverallOverride time.Duration
+	// deployResolveOverride lets tests shorten boolean-trigger deployment resolution.
+	deployResolveOverride time.Duration
 }
 
 func (b *railwayBackend) Spec() ProviderSpec { return b.spec }
@@ -97,16 +100,17 @@ func (b *railwayBackend) Run(ctx context.Context, req RunRequest) (RunResult, er
 	started := b.now()
 	fmt.Fprintf(b.rt.Stderr, "running on %s service=%s command=%s (start command is owned by the Railway service)\n", providerName, req.ID, strings.Join(req.Command, " "))
 
+	previousDeployment, _ := client.LatestDeployment(ctx, projectID, environmentID, req.ID)
 	deploymentID, err := client.TriggerDeploy(ctx, projectID, environmentID, req.ID)
 	if err != nil {
 		return RunResult{}, ExitError{Code: 1, Message: fmt.Sprintf("%s trigger deploy failed: %v", providerName, err)}
 	}
 	deploymentID = strings.TrimSpace(deploymentID)
 	if deploymentID == "" {
-		// Without an id we cannot poll the deployment we just created vs. the
-		// prior one — surface this as a hard error rather than silently returning
-		// 0 (the legacy behaviour, which masked failing deploys).
-		return RunResult{ExitCode: 1}, ExitError{Code: 1, Message: fmt.Sprintf("%s trigger deploy returned no deployment id", providerName)}
+		deploymentID, err = b.resolveTriggeredDeployment(ctx, client, projectID, environmentID, req.ID, previousDeployment.ID)
+		if err != nil {
+			return RunResult{ExitCode: 1}, ExitError{Code: 1, Message: fmt.Sprintf("%s resolve triggered deployment failed: %v", providerName, err)}
+		}
 	}
 
 	logs := &railwayLogStreamer{out: b.rt.Stdout}
@@ -137,6 +141,45 @@ func (b *railwayBackend) Run(ctx context.Context, req RunRequest) (RunResult, er
 		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s deployment status=%s", providerName, finalStatus)}
 	}
 	return result, nil
+}
+
+func (b *railwayBackend) resolveTriggeredDeployment(ctx context.Context, client railwayAPI, projectID, environmentID, serviceID, previousID string) (string, error) {
+	overall := railwayDeployResolveTimeout
+	if b.deployResolveOverride > 0 {
+		overall = b.deployResolveOverride
+	}
+	deadlineCtx, cancel := context.WithTimeout(ctx, overall)
+	defer cancel()
+
+	interval := railwayPollInitialInterval
+	if b.pollInitialOverride > 0 {
+		interval = b.pollInitialOverride
+	}
+	for {
+		deployment, err := client.LatestDeployment(deadlineCtx, projectID, environmentID, serviceID)
+		if err != nil {
+			if deadlineCtx.Err() != nil {
+				return "", fmt.Errorf("deployment resolution cancelled: %w", deadlineCtx.Err())
+			}
+			return "", err
+		}
+		deploymentID := strings.TrimSpace(deployment.ID)
+		if deploymentID != "" && deploymentID != strings.TrimSpace(previousID) {
+			return deploymentID, nil
+		}
+		sleepFor := railwayJitter(interval)
+		select {
+		case <-deadlineCtx.Done():
+			return "", fmt.Errorf("deployment resolution cancelled: %w", deadlineCtx.Err())
+		case <-time.After(sleepFor):
+		}
+		if interval < railwayPollMaxInterval {
+			interval *= 2
+			if interval > railwayPollMaxInterval {
+				interval = railwayPollMaxInterval
+			}
+		}
+	}
 }
 
 // pollDeployment polls a specific deployment until it reaches a terminal state
@@ -309,7 +352,7 @@ func (b *railwayBackend) Status(ctx context.Context, req StatusRequest) (StatusV
 		Slug:       service.Name,
 		Provider:   providerName,
 		TargetOS:   targetLinux,
-		State:      strings.ToLower(string(deployment.Status.Normalized())),
+		State:      deployment.Status.State(),
 		ServerID:   service.ID,
 		ServerType: "railway-service",
 		Network:    networkPublic,
