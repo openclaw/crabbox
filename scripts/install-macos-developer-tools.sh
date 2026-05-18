@@ -154,9 +154,9 @@ install_node_and_pnpm() {
 link_common_tools() {
   local brew_prefix python_bin
   brew_prefix="$(brew --prefix)"
-  python_bin="$brew_prefix/opt/$python_formula/bin"
+  python_bin="$brew_prefix/opt/$python_formula/libexec/bin"
   if [[ ! -x "$python_bin/python3" ]]; then
-    python_bin="$brew_prefix/opt/python@3.12/bin"
+    python_bin="$brew_prefix/opt/python@3.12/libexec/bin"
   fi
   link_tool brew "$brew_prefix/bin"
   link_tool git "$brew_prefix/bin"
