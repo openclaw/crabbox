@@ -67,6 +67,12 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stdout, "%-7s %-8s %s\n", status, check, message)
 	}
 	finish := func() error {
+		if status, message, details := doctorCrewSummary(ctx, cfg); status != "" {
+			if status == "failed" {
+				ok = false
+			}
+			record(status, "crew", message, details)
+		}
 		if *jsonOut {
 			if err := json.NewEncoder(a.Stdout).Encode(doctorJSONOutput{OK: ok, Provider: cfg.Provider, Checks: checks}); err != nil {
 				return err

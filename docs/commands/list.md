@@ -16,11 +16,17 @@ crabbox list --provider islo
 crabbox list --provider e2b
 crabbox list --provider cloudflare --refresh
 crabbox list --json
+crabbox list --crew alpha
 ```
 
 `--refresh` asks providers with local claims, such as Cloudflare, to check live
 runner state before printing the list. Without it, Cloudflare list stays
 credential-free and reports local claims only.
+
+`--crew <name>` keeps only leases tagged with the requested crew. Crew names are
+normalized the same way as slugs (lowercased, non-alphanumeric runs collapsed to
+single dashes), so `--crew "Alpha Crew"` matches a lease created with `--crew
+alpha-crew`. See `docs/features/crew.md`.
 
 `crabbox pool list` remains as a compatibility alias.
 
@@ -54,6 +60,7 @@ Flags:
 --static-port <port>
 --static-work-root <path>
 --json
+--crew <name>
 --exe-dev-control-host <host>
 --sprites-api-url <url>
 --e2b-api-url <url>

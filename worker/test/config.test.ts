@@ -237,6 +237,13 @@ describe("lease config", () => {
     expect(config.code).toBe(true);
   });
 
+  it("normalizes the optional crew label and defaults it to empty", () => {
+    const empty = leaseConfig({ sshPublicKey: "ssh-ed25519 test" });
+    expect(empty.crew).toBe("");
+    const tagged = leaseConfig({ sshPublicKey: "ssh-ed25519 test", crew: " Alpha Crew " });
+    expect(tagged.crew).toBe("alpha-crew");
+  });
+
   it("preserves Tailscale lease capability requests", () => {
     const config = leaseConfig({
       sshPublicKey: "ssh-ed25519 test",

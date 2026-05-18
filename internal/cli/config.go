@@ -23,6 +23,7 @@ type Config struct {
 	Code                bool
 	Network             NetworkMode
 	Class               string
+	Crew                string
 	ServerType          string
 	ServerTypeExplicit  bool
 	Coordinator         string
