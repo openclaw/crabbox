@@ -164,7 +164,7 @@ Commands:
   image       Create provider images and promote brokered AWS runner images
   usage       Show cost and usage estimates by user, org, or fleet
   admin       Lease admin controls for trusted operators
-  actions     Register GitHub Actions runners or dispatch workflows
+  actions     Hydrate boxes from repo workflows or GitHub runners
   capsule     Capture and replay lightweight failure capsules
   checkpoint  Create, restore, and fork workspace checkpoints
   ssh         Print the SSH command for a lease

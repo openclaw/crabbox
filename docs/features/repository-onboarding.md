@@ -25,7 +25,7 @@ Repo-local config should hold project-specific behavior:
 - base ref for changed-test hydration;
 - environment allowlist.
 
-Generated agent instructions should point agents toward warmup/reuse flows and project-specific test commands. Generated workflow stubs are the bridge for Actions-backed hydration: Crabbox dispatches real GitHub Actions jobs rather than reimplementing Actions syntax locally.
+Generated agent instructions should point agents toward warmup/reuse flows and project-specific test commands. Generated workflow stubs are the bridge for Actions-backed hydration: Crabbox executes supported setup steps locally by default, with the GitHub runner path available when full Actions semantics are required.
 
 Related docs:
 

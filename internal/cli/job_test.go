@@ -26,6 +26,7 @@ func TestLoadConfigJobs(t *testing.T) {
     idleTimeout: 240m
     hydrate:
       actions: true
+      githubRunner: true
       waitTimeout: 45m
       keepAliveMinutes: 240
     actions:
@@ -48,7 +49,7 @@ func TestLoadConfigJobs(t *testing.T) {
 	if job.Provider != "aws" || job.Target != "windows" || job.WindowsMode != "wsl2" || job.Class != "beast" || job.Market != "on-demand" {
 		t.Fatalf("job target/capacity not loaded: %#v", job)
 	}
-	if !job.Hydrate.Actions || job.Hydrate.WaitTimeout.String() != "45m0s" || job.Hydrate.KeepAliveMinutes != 240 {
+	if !job.Hydrate.Actions || !job.Hydrate.GitHubRunner || job.Hydrate.WaitTimeout.String() != "45m0s" || job.Hydrate.KeepAliveMinutes != 240 {
 		t.Fatalf("job hydrate not loaded: %#v", job.Hydrate)
 	}
 	if job.Actions.Workflow != "hydrate.yml" || job.Actions.Job != "hydrate" || len(job.Actions.Fields) != 1 {
@@ -103,6 +104,92 @@ func TestJobRunDryRunBuildsOrchestrationCommands(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("dry-run output missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestJobRunDryRunNoHydratePropagatesToRun(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	if err := os.WriteFile(filepath.Join(dir, ".crabbox.yaml"), []byte(`actions:
+  workflow: .github/workflows/hydrate.yml
+jobs:
+  test:
+    hydrate:
+      actions: true
+    command: pnpm test
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run(context.Background(), []string{"job", "run", "--dry-run", "--no-hydrate", "--id", "blue-lobster", "test"}); err != nil {
+		t.Fatalf("job dry-run failed: %v\nstderr=%s", err, stderr.String())
+	}
+	got := stdout.String()
+	if strings.Contains(got, "crabbox actions hydrate") {
+		t.Fatalf("--no-hydrate should skip explicit hydrate:\n%s", got)
+	}
+	if !strings.Contains(got, "crabbox run --id blue-lobster --no-hydrate -- pnpm test") {
+		t.Fatalf("--no-hydrate should be passed to nested run:\n%s", got)
+	}
+}
+
+func TestJobRunDryRunHydrateOptOutDisablesRunAutoHydrate(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	if err := os.WriteFile(filepath.Join(dir, ".crabbox.yaml"), []byte(`actions:
+  workflow: .github/workflows/hydrate.yml
+jobs:
+  test:
+    command: pnpm test
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run(context.Background(), []string{"job", "run", "--dry-run", "--id", "blue-lobster", "test"}); err != nil {
+		t.Fatalf("job dry-run failed: %v\nstderr=%s", err, stderr.String())
+	}
+	got := stdout.String()
+	if strings.Contains(got, "crabbox actions hydrate") {
+		t.Fatalf("hydrate opt-out should skip explicit hydrate:\n%s", got)
+	}
+	if !strings.Contains(got, "crabbox run --id blue-lobster --no-hydrate -- pnpm test") {
+		t.Fatalf("hydrate opt-out should disable nested run auto-hydrate:\n%s", got)
+	}
+}
+
+func TestJobRunDryRunGitHubRunnerPropagatesToHydrate(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	if err := os.WriteFile(filepath.Join(dir, ".crabbox.yaml"), []byte(`jobs:
+  test:
+    hydrate:
+      actions: true
+    command: pnpm test
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run(context.Background(), []string{"job", "run", "--dry-run", "--github-runner", "--id", "blue-lobster", "test"}); err != nil {
+		t.Fatalf("job dry-run failed: %v\nstderr=%s", err, stderr.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "crabbox actions hydrate --id blue-lobster --github-runner") {
+		t.Fatalf("--github-runner should be passed to actions hydrate:\n%s", got)
 	}
 }
 

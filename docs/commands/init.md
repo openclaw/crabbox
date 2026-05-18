@@ -51,10 +51,9 @@ agents begin repeated `crabbox run` calls.
 The workflow contract is the one used by `crabbox actions hydrate`:
 
 - accepts the Crabbox lease ID and dynamic runner label;
-- runs on that self-hosted runner registered by Crabbox;
+- runs locally over SSH by default, or on the self-hosted runner when `--github-runner` is used;
 - writes a ready marker under `$HOME/.crabbox/actions`;
-- keeps the job alive so the local CLI can run repeated commands in the
-  hydrated workspace.
+- keeps the job alive only for the GitHub-runner fallback.
 
 If the repo has no Actions hydration plans, you can delete the workflow.
 `crabbox run` works fine without it - hydration is optional.

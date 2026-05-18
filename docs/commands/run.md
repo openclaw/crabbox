@@ -69,13 +69,14 @@ the sync archive through E2B file APIs, extracts it in the sandbox, and runs the
 command through E2B process APIs. The final timing summary reports
 `sync=delegated`.
 
-When the lease has been hydrated by `crabbox actions hydrate`, `run` reads the remote marker under `$HOME/.crabbox/actions`, syncs into the workflow's `$GITHUB_WORKSPACE`, and sources the non-secret env file written by the workflow. That preserves the setup the workflow performed: checkout path, installed dependencies, service containers, caches, runner temp/toolcache paths, and any project-specific preparation. GitHub secrets and OIDC request tokens remain workflow-step scoped unless the project explicitly persists its own short-lived credentials.
+When the lease has been hydrated by `crabbox actions hydrate`, `run` reads the remote marker under `$HOME/.crabbox/actions`, syncs into the workflow's `$GITHUB_WORKSPACE`, and sources the non-secret env file written by the workflow. If no marker exists and `actions.workflow` is configured, `run` now performs local Actions hydration automatically after sync unless `--no-hydrate` or `--no-sync` is set. That preserves the setup the workflow performed: checkout path, installed dependencies, caches, runner temp/toolcache paths, and any project-specific preparation.
 
 If a JavaScript package-manager command such as `pnpm`, `npm`, `node`, or
 `corepack` is run on a raw SSH workspace before a hydration marker exists,
-Crabbox probes the remote tool first. Missing tools fail before source sync with
-guidance to hydrate first, include runtime setup in the command, or choose a
-provider/image with the JavaScript toolchain.
+Crabbox probes the remote tool first unless automatic hydration is available.
+Missing tools fail before source sync with guidance to hydrate first, include
+runtime setup in the command, or choose a provider/image with the JavaScript
+toolchain.
 
 `--browser` provisions or requires a known browser binary and injects
 `CRABBOX_BROWSER=1`, `BROWSER`, and `CHROME_BIN` into the remote command. It
@@ -321,6 +322,7 @@ Flags:
 --keep
 --keep-on-failure
 --no-sync
+--no-hydrate
 --sync-only
 --force-sync-large
 --shell

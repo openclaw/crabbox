@@ -15,6 +15,7 @@ crabbox job run <name>
 crabbox job run --dry-run <name>
 crabbox job run --id <lease-or-slug> <name>
 crabbox job run --stop never <name>
+crabbox job run --github-runner <name>
 ```
 
 `job run` creates a lease when `--id` is omitted. For created leases the default
@@ -43,6 +44,7 @@ jobs:
     idleTimeout: 240m
     hydrate:
       actions: true
+      githubRunner: false
       waitTimeout: 45m
       keepAliveMinutes: 240
     actions:
@@ -61,10 +63,12 @@ Supported job fields:
 - `provider`, `target`, `windows.mode`, `profile`, `class`, `type` or `serverType`.
 - `market` or `capacity.market`.
 - `ttl`, `idleTimeout`, `desktop`, `browser`, `code`, `network`.
-- `hydrate.actions`, `hydrate.waitTimeout`, `hydrate.keepAliveMinutes`.
+- `hydrate.actions`, `hydrate.githubRunner`, `hydrate.waitTimeout`, `hydrate.keepAliveMinutes`.
 - `actions.repo`, `actions.workflow`, `actions.job`, `actions.ref`, `actions.fields`.
 - `shell`, `command`, `noSync`, `syncOnly`, `checksum`, `forceSyncLarge`, `junit`, `downloads`.
 - `stop`: `auto`, `always`, `success`, `failure`, or `never`.
+
+When `hydrate.actions` is omitted or false, `job run` passes `--no-hydrate` to the nested `run` command. That keeps the job opt-out effective even when the global profile has `actions.workflow` configured.
 
 Use `--dry-run` to inspect the exact `warmup`, `actions hydrate`, `run`, and
 `stop` commands before spending cloud capacity.

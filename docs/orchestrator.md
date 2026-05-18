@@ -110,6 +110,6 @@ Usage reports include lease count, active lease count, elapsed runtime, estimate
 
 ## Actions Parity Boundary
 
-Actions-backed lanes should run inside a real GitHub Actions job when they need Actions secrets, OIDC, service containers, or repository workflow setup. Crabbox should dispatch or host a real GitHub Actions job and attach to the hydrated runner, not parse workflow YAML into a local pseudo-runner.
+Actions-backed lanes can use local SSH hydration for ordinary repository setup. They should run inside a real GitHub Actions job when they need Actions secrets, OIDC, service containers, or unsupported `uses:` steps.
 
-The current bridge is `crabbox init`: generate repo-local workflow and agent instructions so warmup can hydrate the same dependencies the real CI uses. The Actions-backed backend should register ephemeral self-hosted runners or dispatch a configured workflow for full secrets/OIDC parity.
+The current bridge is `crabbox init`: generate repo-local workflow and agent instructions so warmup/run can hydrate the same dependencies the real CI uses. The GitHub fallback should register ephemeral self-hosted runners or dispatch a configured workflow for full secrets/OIDC parity.

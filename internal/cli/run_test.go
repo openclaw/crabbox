@@ -1814,6 +1814,30 @@ func TestCommandNeedsHydrationHint(t *testing.T) {
 	}
 }
 
+func TestShouldAutoHydrateActions(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Actions.Workflow = ".github/workflows/hydrate.yml"
+	if !shouldAutoHydrateActions(cfg, false, false, FreshPRSpec{}, false) {
+		t.Fatal("configured workflow should auto-hydrate normal runs")
+	}
+	if shouldAutoHydrateActions(cfg, true, false, FreshPRSpec{}, false) {
+		t.Fatal("--no-hydrate should disable auto hydration")
+	}
+	if shouldAutoHydrateActions(cfg, false, true, FreshPRSpec{}, false) {
+		t.Fatal("--no-sync should disable auto hydration")
+	}
+	if shouldAutoHydrateActions(cfg, false, false, FreshPRSpec{Owner: "example-org", Repo: "my-app", Number: 1}, false) {
+		t.Fatal("--fresh-pr should disable auto hydration")
+	}
+	if shouldAutoHydrateActions(cfg, false, false, FreshPRSpec{}, true) {
+		t.Fatal("--sync-only should disable auto hydration")
+	}
+	cfg.Actions.Workflow = ""
+	if shouldAutoHydrateActions(cfg, false, false, FreshPRSpec{}, false) {
+		t.Fatal("missing workflow should disable auto hydration")
+	}
+}
+
 func TestCommandRuntimePreflightToolsFocusesEntrypoint(t *testing.T) {
 	if got := strings.Join(commandRuntimePreflightTools([]string{"env CI=1 pnpm test"}, true), ","); got != "pnpm" {
 		t.Fatalf("tools=%q want pnpm", got)

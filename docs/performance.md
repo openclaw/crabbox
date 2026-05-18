@@ -92,14 +92,14 @@ bin/crabbox cache warm --id blue-lobster -- pnpm install --frozen-lockfile
 bin/crabbox cache purge --id blue-lobster --kind pnpm --force
 ```
 
-For repeatable setup that needs repository secrets, use Actions hydration:
+For repeatable setup, use Actions hydration:
 
 ```sh
 bin/crabbox actions hydrate --id blue-lobster
 bin/crabbox run --id blue-lobster -- pnpm test:changed:max
 ```
 
-The workflow owns dependency installation, cache/service setup, and secret-backed environment hydration. Crabbox attaches later commands to the hydrated workspace.
+The workflow owns dependency installation, cache setup, and project tooling. Crabbox attaches later commands to the hydrated workspace. Use `crabbox actions hydrate --github-runner` when the setup needs repository secrets, OIDC, service containers, or unsupported Actions features.
 
 For live/provider E2E loops, keep two lanes:
 

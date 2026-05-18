@@ -99,7 +99,7 @@ Read when:
 
 ### Workspace management
 - [sync-plan](../commands/sync-plan.md) — preview sync manifest
-- [actions](../commands/actions.md) — hydrate with GitHub Actions
+- [actions](../commands/actions.md) — hydrate from repo workflow setup
 - [capsule](../commands/capsule.md) — capture/replay Actions failures
 - [checkpoint](../commands/checkpoint.md) — snapshot/restore/fork workspaces
 - [cache](../commands/cache.md) — manage remote caches

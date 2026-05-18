@@ -1,12 +1,12 @@
 ---
 name: crabbox
-description: Use Crabbox for remote validation, warmed reusable boxes, GitHub Actions hydration, fresh PR checkouts, secret-safe env forwarding, scripts, timing, logs, results, captures, caches, and lease cleanup.
+description: "Use Crabbox for remote validation, warmed reusable boxes, Actions hydration, fresh PR checkouts, secret-safe env forwarding, scripts, timing, logs, results, captures, caches, and lease cleanup."
 ---
 
 # Crabbox
 
 Use Crabbox when a project needs remote proof, larger cloud capacity, warm
-reusable runner state, GitHub Actions hydration, fresh PR checkouts, live-secret
+reusable runner state, Actions hydration, fresh PR checkouts, live-secret
 smoke tests, durable logs/results, or fast sync from a dirty local checkout.
 
 ## Before Running
@@ -59,12 +59,16 @@ crabbox warmup --idle-timeout 90m
 crabbox warmup --provider aws --class beast --market on-demand --idle-timeout 90m
 ```
 
-Hydrate it through a repository GitHub Actions workflow when CI-like setup,
-services, or secret-backed preparation are needed:
+Repos with `actions.workflow` hydrate automatically during `crabbox run`. Use
+manual hydration when you want to prepare a reused lease before running commands:
 
 ```sh
 crabbox actions hydrate --id <cbx_id-or-slug>
 ```
+
+Use `crabbox actions hydrate --github-runner --id <cbx_id-or-slug>` when the
+workflow needs full GitHub Actions semantics, repository secrets, OIDC, service
+containers, or unsupported `uses:` steps.
 
 Run commands:
 
@@ -74,9 +78,10 @@ crabbox run --id <cbx_id-or-slug> --full-resync -- pnpm test:changed
 crabbox run --id <cbx_id-or-slug> --shell "corepack enable && pnpm install --frozen-lockfile && pnpm test"
 ```
 
-For package-manager commands on raw AWS/Hetzner boxes, hydrate first when the
-repo declares an Actions workflow; bootstrap only installs Crabbox plumbing, not
-project runtimes. Add `--timing-json` when comparing providers or sync phases.
+For package-manager commands on raw AWS/Hetzner boxes, rely on configured
+Actions hydration or include setup in the command; bootstrap only installs
+Crabbox plumbing, not project runtimes. Add `--timing-json` when comparing
+providers or sync phases.
 
 Stop boxes you created before handoff:
 

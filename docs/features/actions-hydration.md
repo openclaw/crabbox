@@ -6,28 +6,57 @@ Read when:
 - changing `crabbox actions hydrate`;
 - deciding whether setup belongs in Crabbox or in a repository workflow.
 
-Actions hydration lets a repository reuse its existing GitHub Actions setup without putting repository-specific setup code in the Crabbox binary.
+Actions hydration lets a repository reuse its existing Actions setup without putting repository-specific setup code in the Crabbox binary.
 
-Runner registration supports POSIX targets: brokered Hetzner/AWS/Azure/GCP
-Linux, direct Proxmox Linux, and AWS/Azure Windows WSL2. Static macOS and native Windows targets are for direct
-`crabbox run` loops until platform-specific runner installation is added.
+Local hydration is the default. Crabbox reads the repo-local workflow file from
+`.github/workflows/`, executes supported setup steps over SSH in the persistent
+workspace, and writes the same ready marker that later runs consume. This does
+not require GitHub repository write access. Manual `crabbox actions hydrate`
+syncs the current checkout before executing the local workflow; automatic
+hydration during `crabbox run` reuses the run sync.
+
+For local hydration, Crabbox runs the workflow job named `hydrate` when present,
+or the only job in a single-job workflow. `actions.job` / `--job` remains the
+`crabbox_job` input and marker verifier; it is not required to match the YAML
+job key.
+
+GitHub runner hydration remains available with `crabbox actions hydrate
+--github-runner` when a workflow needs full GitHub Actions semantics,
+repository secrets, OIDC, service containers, or unsupported `uses:` steps.
+Local checkout support assumes Crabbox sync provides the current repository
+workspace; checkout options for another repository, subdirectory, submodules, or
+LFS require `--github-runner`.
+
+Hydration supports POSIX targets: brokered Hetzner/AWS/Azure/GCP Linux, direct
+Proxmox Linux, and AWS/Azure Windows WSL2. Static macOS and native Windows
+targets are for direct `crabbox run` loops until platform-specific hydration is
+added.
 
 The flow:
 
 1. `crabbox warmup` leases a machine and prints both `cbx_...` and a friendly slug.
-2. `crabbox actions hydrate --id blue-lobster` registers that machine as an ephemeral self-hosted runner for the repository.
-3. Crabbox inspects the configured workflow's `workflow_dispatch.inputs` when it can read the workflow path, then dispatches it with the lease ID, dynamic runner label, keepalive timeout, and optional expected hydrate job.
-4. The workflow runs on `[self-hosted, crabbox-cbx-...]`; the runner also carries a readable slug label such as `crabbox-blue-lobster`.
-5. The workflow writes `$HOME/.crabbox/actions/<lease>.env` with `WORKSPACE`, `RUN_ID`, `JOB`, `ENV_FILE`, `SERVICES_FILE`, and `READY_AT`.
-6. `crabbox run --id blue-lobster -- <command>` reads that marker, syncs the local dirty checkout into `$GITHUB_WORKSPACE`, and sources the non-secret env file when present.
+2. `crabbox run --id blue-lobster -- <command>` syncs the dirty checkout.
+3. If no marker exists and `actions.workflow` is configured, `run` executes the hydrate workflow locally unless `--no-hydrate` or `--no-sync` is set.
+4. The workflow writes `$HOME/.crabbox/actions/<lease>.env` with `WORKSPACE`, `RUN_ID`, `JOB`, `ENV_FILE`, `SERVICES_FILE`, and `READY_AT`.
+5. The command runs inside `$GITHUB_WORKSPACE` and sources the non-secret env file when present.
 
-The important boundary: project setup lives in the repository workflow. Crabbox owns runner registration, dispatch, marker waiting, SSH sync, and command execution. It does not contain repository-specific setup code.
+The GitHub fallback flow is the old remote-runner path: `actions hydrate
+--github-runner` registers the machine as an ephemeral self-hosted runner,
+dispatches the workflow, waits for the marker, then later `run` attaches to that
+workspace.
+
+The important boundary: project setup lives in the repository workflow. Crabbox
+owns workflow translation for the local default, runner registration and
+dispatch for the GitHub fallback, marker waiting, SSH sync, and command
+execution. It does not contain repository-specific setup code.
 
 Input compatibility:
 
 - `crabbox_id`, `crabbox_runner_label`, and `crabbox_keep_alive_minutes` must be declared when Crabbox can inspect the workflow.
-- `crabbox_job` is optional. Crabbox sends it only when the workflow declares it, or retries once without it when GitHub reports an unexpected input.
+- `crabbox_job` is optional. Crabbox sends it only when the workflow declares it, or retries once without it when GitHub reports an unexpected input. It identifies the ready marker, not the local YAML job key.
 - Extra `-f key=value` fields are sent only when the inspected workflow declares those inputs.
+- Every field must be `key=value`; malformed local fields fail before setup starts.
+- Local hydration resolves simple `inputs`, `env`, `github.workspace`, and runner temp/toolcache expressions, including supported setup action inputs.
 
 Repo config:
 
@@ -89,9 +118,11 @@ tmp="${state}.tmp"
 mv "$tmp" "$state"
 ```
 
-The env file should contain only stable, non-secret context that SSH commands need, such as `GITHUB_WORKSPACE`, `GITHUB_RUN_ID`, `RUNNER_TEMP`, and `RUNNER_TOOL_CACHE`. Secrets and OIDC request tokens are step-scoped GitHub material and should stay inside the hydration workflow unless the project intentionally persists its own short-lived credentials.
+The env file should contain only stable, non-secret context that SSH commands need, such as `GITHUB_WORKSPACE`, `GITHUB_RUN_ID`, `GITHUB_JOB`, `RUNNER_TEMP`, and `RUNNER_TOOL_CACHE`. Secrets and OIDC request tokens are step-scoped GitHub material and should stay inside the hydration workflow unless the project intentionally persists its own short-lived credentials.
 
 The final workflow step should keep the job alive while agents run commands. It can exit when `$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.stop` appears or when its timeout expires. `crabbox stop` and non-kept `crabbox run` leases write that stop marker before releasing the machine.
+
+For local hydration, Crabbox sends `crabbox_keep_alive_minutes=0`, so the keepalive step exits immediately after writing the marker. Keep the long-running step for `--github-runner` hydration where services or job-scoped setup must stay alive.
 
 Related docs:
 

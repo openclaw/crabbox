@@ -1255,6 +1255,7 @@ func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
 		Network:     "tailscale",
 		Hydrate: &fileJobHydrateConfig{
 			Actions:          &enabled,
+			GitHubRunner:     &enabled,
 			WaitTimeout:      "12m",
 			KeepAliveMinutes: 3,
 		},
@@ -1284,7 +1285,7 @@ func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
 	if job.Desktop == nil || !*job.Desktop || job.Browser == nil || *job.Browser || job.Code == nil || !*job.Code || job.Network != "tailscale" {
 		t.Fatalf("job UI/network fields not applied: %#v", job)
 	}
-	if !job.Hydrate.Actions || job.Hydrate.WaitTimeout != 12*time.Minute || job.Hydrate.KeepAliveMinutes != 3 {
+	if !job.Hydrate.Actions || !job.Hydrate.GitHubRunner || job.Hydrate.WaitTimeout != 12*time.Minute || job.Hydrate.KeepAliveMinutes != 3 {
 		t.Fatalf("hydrate not applied: %#v", job.Hydrate)
 	}
 	if job.Actions.Repo != "openclaw/crabbox" || job.Actions.Workflow != ".github/workflows/ci.yml" || job.Actions.Job != "test" || job.Actions.Ref != "main" || len(job.Actions.Fields) != 2 {

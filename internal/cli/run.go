@@ -154,6 +154,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	keepOnFailure := fs.Bool("keep-on-failure", false, "keep a newly acquired lease when the remote command exits non-zero")
 	noSync := fs.Bool("no-sync", false, "skip rsync")
 	syncOnly := fs.Bool("sync-only", false, "sync and exit")
+	noHydrate := fs.Bool("no-hydrate", false, "skip configured Actions hydration")
 	debugSync := fs.Bool("debug", false, "print detailed sync timing")
 	shellMode := fs.Bool("shell", false, "run command through the remote shell")
 	checksumSync := fs.Bool("checksum", false, "use checksum rsync instead of size/time")
@@ -548,6 +549,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	profileEnvFile := ""
 	actionsURL := ""
 	hydratedByActions := false
+	autoHydrateActions := shouldAutoHydrateActions(cfg, *noHydrate, *noSync, freshPR, *syncOnly)
 	if !freshPR.Empty() {
 		workdir = remoteJoin(cfg, leaseID, freshPR.WorkdirName())
 	} else if state, err := readActionsHydrationState(ctx, target, leaseID); err == nil && state.Workspace != "" {
@@ -559,9 +561,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			}
 		}
 		hydratedByActions = true
-		fmt.Fprintf(a.Stderr, "using GitHub Actions workspace %s\n", workdir)
-	} else if commandNeedsHydrationHint(command, *shellMode) && cfg.Actions.Workflow != "" {
-		fmt.Fprintf(a.Stderr, "warning: no GitHub Actions hydration marker found for %s; JS package commands may fail on a raw box. Run \"crabbox actions hydrate --id %s\" first, or include runtime setup in the command.\n", leaseID, leaseID)
+		fmt.Fprintf(a.Stderr, "using Actions workspace %s\n", workdir)
+	} else if commandNeedsHydrationHint(command, *shellMode) && cfg.Actions.Workflow != "" && !autoHydrateActions {
+		fmt.Fprintf(a.Stderr, "warning: no Actions hydration marker found for %s; JS package commands may fail on a raw box. Run \"crabbox actions hydrate --id %s\" first, omit --no-hydrate, or include runtime setup in the command.\n", leaseID, leaseID)
 	}
 	contextPrinted := false
 	preflightPrinted := false
@@ -605,6 +607,17 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			rawJSRuntimePreflightDone = true
 			return nil
 		}
+		hydrateTarget := currentTarget
+		if hydrateTarget.TargetOS == "" {
+			hydrateTarget.TargetOS = cfg.TargetOS
+		}
+		if hydrateTarget.WindowsMode == "" {
+			hydrateTarget.WindowsMode = cfg.WindowsMode
+		}
+		if autoHydrateActions && supportsActionsRunnerTarget(hydrateTarget) {
+			rawJSRuntimePreflightDone = true
+			return nil
+		}
 		missing, err := probeMissingRemoteTools(ctx, currentTarget, tools)
 		if err != nil {
 			return exit(5, "remote JS runtime preflight failed before sync: %v", err)
@@ -619,6 +632,13 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			}
 			printKeepOnFailureSSHHint(a.Stderr, cfg, leaseID, server, currentTarget)
 		}
+		suggestion := rawJSRuntimeHydrateSuggestion(cfg, hydrateTarget, leaseID, acquired, *keep, *keepOnFailure)
+		return rawJSRuntimeMissingError(cfg, missing, command, *shellMode, suggestion)
+	}
+	autoHydrateActionsIfNeeded := func(currentTarget SSHTarget) error {
+		if !autoHydrateActions || hydratedByActions {
+			return nil
+		}
 		hydrateTarget := currentTarget
 		if hydrateTarget.TargetOS == "" {
 			hydrateTarget.TargetOS = cfg.TargetOS
@@ -626,8 +646,24 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		if hydrateTarget.WindowsMode == "" {
 			hydrateTarget.WindowsMode = cfg.WindowsMode
 		}
-		suggestion := rawJSRuntimeHydrateSuggestion(cfg, hydrateTarget, leaseID, acquired, *keep, *keepOnFailure)
-		return rawJSRuntimeMissingError(cfg, missing, command, *shellMode, suggestion)
+		if !supportsActionsRunnerTarget(hydrateTarget) {
+			return nil
+		}
+		fields := actionsHydrateFields(leaseID, githubActionsLeaseLabel(leaseID), cfg.Actions.Job, 0, cfg.Actions.Fields)
+		recorder.Event("actions.hydrate.started", "hydrate", cfg.Actions.Workflow)
+		state, err := a.hydrateActionsLocally(ctx, cfg, repo, currentTarget, leaseID, cfg.Actions.Job, fields, 20*time.Minute, false, false)
+		if err != nil {
+			recorder.Event("actions.hydrate.failed", "hydrate", err.Error())
+			return err
+		}
+		workdir = state.Workspace
+		actionsEnvFile = state.EnvFile
+		actionsURL = ""
+		hydratedByActions = true
+		rawJSRuntimePreflightDone = true
+		recorder.Event("actions.hydrate.finished", "hydrate", workdir)
+		fmt.Fprintf(a.Stderr, "using local Actions workspace %s\n", workdir)
+		return nil
 	}
 	if !*noSync {
 		syncStart := time.Now()
@@ -823,6 +859,11 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		recorder.Event("sync.finished", "synced", "skipped by --no-sync")
 	}
 afterSync:
+	if !*noSync {
+		if err := autoHydrateActionsIfNeeded(target); err != nil {
+			return recordFailure(err)
+		}
+	}
 	if *syncOnly {
 		printPreflight(target)
 		fmt.Fprintf(a.Stdout, "synced %s\n", workdir)
@@ -1371,6 +1412,10 @@ func shouldSeedRemotePruneManifest(hydratedByActions, fullResync bool) bool {
 
 func commandNeedsHydrationHint(command []string, shellMode bool) bool {
 	return len(commandRuntimePreflightTools(command, shellMode)) > 0
+}
+
+func shouldAutoHydrateActions(cfg Config, noHydrate, noSync bool, freshPR FreshPRSpec, syncOnly bool) bool {
+	return strings.TrimSpace(cfg.Actions.Workflow) != "" && !noHydrate && !noSync && freshPR.Empty() && !syncOnly
 }
 
 func rawJSRuntimeHydrateSuggestion(cfg Config, target SSHTarget, leaseID string, acquired, keep, keepOnFailure bool) string {

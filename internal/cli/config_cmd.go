@@ -243,6 +243,7 @@ func jobConfigViews(jobs map[string]JobConfig) map[string]any {
 			"stop":           job.Stop,
 			"hydrate": map[string]any{
 				"actions":          job.Hydrate.Actions,
+				"githubRunner":     job.Hydrate.GitHubRunner,
 				"waitTimeout":      durationString(job.Hydrate.WaitTimeout),
 				"keepAliveMinutes": job.Hydrate.KeepAliveMinutes,
 			},

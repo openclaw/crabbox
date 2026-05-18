@@ -17,6 +17,7 @@
 
 ### Changed
 
+- Changed Actions hydration to run repo workflow setup locally over SSH by default, auto-hydrate `crabbox run` when `actions.workflow` is configured, and keep GitHub self-hosted runner registration behind `--github-runner` fallback.
 - Clarified WebVNC docs to include coordinator-backed AWS macOS desktop leases in the supported portal bridge surface.
 
 ### Fixed

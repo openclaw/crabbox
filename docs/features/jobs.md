@@ -8,7 +8,7 @@ crabbox job run <name>
 ```
 
 Jobs are intentionally generic. Crabbox owns cloud lease lifecycle, optional
-GitHub Actions hydration, dirty checkout sync, command execution, timing/log
+Actions hydration, dirty checkout sync, command execution, timing/log
 output, and cleanup. The repository owns the command string, package-manager
 setup, test environment variables, workflow names, and project-specific
 parallelism.
@@ -89,6 +89,14 @@ crabbox job run --id blue-lobster openclaw-wsl2
 2. `actions hydrate` runs when `hydrate.actions: true`.
 3. `run` syncs the local checkout and executes the configured command.
 4. `stop` runs according to the stop policy.
+
+Set `hydrate.githubRunner: true` or pass `job run --github-runner` when the
+hydrate workflow needs repository secrets, OIDC, services, job containers, or
+unsupported Actions features.
+
+Omitting `hydrate.actions` is an explicit opt-out for that job. The nested
+`run` receives `--no-hydrate` so a global `actions.workflow` does not
+auto-hydrate unexpectedly.
 
 The default stop policy is `auto`:
 

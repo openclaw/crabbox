@@ -54,6 +54,7 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 	fs := newFlagSet("job run", a.Stderr)
 	id := fs.String("id", "", "existing lease id or slug")
 	noHydrate := fs.Bool("no-hydrate", false, "skip configured Actions hydration")
+	githubRunner := fs.Bool("github-runner", false, "hydrate by registering a GitHub self-hosted runner instead of local SSH execution")
 	stopOverride := fs.String("stop", "", "stop policy: auto, always, success, failure, never")
 	dryRun := fs.Bool("dry-run", false, "print the planned Crabbox commands without running them")
 	if err := parseFlags(fs, args); err != nil {
@@ -81,8 +82,9 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 	leaseID := strings.TrimSpace(*id)
 	createdLease := leaseID == ""
 	plannedLease := blank(leaseID, "<lease>")
+	runNoHydrate := *noHydrate || !job.Hydrate.Actions
 	if *dryRun {
-		for _, line := range jobPlanCommands(name, job, plannedLease, createdLease, !*noHydrate, stopPolicy) {
+		for _, line := range jobPlanCommands(name, job, plannedLease, createdLease, runNoHydrate, *githubRunner, stopPolicy) {
 			fmt.Fprintln(a.Stdout, line)
 		}
 		return nil
@@ -120,12 +122,12 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 		}
 	}()
 	if job.Hydrate.Actions && !*noHydrate {
-		if hydrateErr := a.actionsHydrate(ctx, jobActionsHydrateArgs(job, leaseID)); hydrateErr != nil {
+		if hydrateErr := a.actionsHydrate(ctx, jobActionsHydrateArgs(job, leaseID, *githubRunner)); hydrateErr != nil {
 			err = hydrateErr
 			return err
 		}
 	}
-	err = a.runCommand(ctx, jobRunArgs(job, leaseID))
+	err = a.runCommand(ctx, jobRunArgs(job, leaseID, runNoHydrate))
 	return err
 }
 
@@ -161,15 +163,15 @@ func parseWarmupLeaseID(out string) string {
 	return ""
 }
 
-func jobPlanCommands(name string, job JobConfig, leaseID string, createLease, hydrate bool, stopPolicy string) []string {
+func jobPlanCommands(name string, job JobConfig, leaseID string, createLease, noHydrate, githubRunner bool, stopPolicy string) []string {
 	lines := []string{fmt.Sprintf("# job %s", name)}
 	if createLease {
 		lines = append(lines, "crabbox "+strings.Join(readableShellWords(append([]string{"warmup"}, append(jobLeaseCreateArgs(job), "--keep=true")...)), " "))
 	}
-	if hydrate && job.Hydrate.Actions {
-		lines = append(lines, "crabbox "+strings.Join(readableShellWords(append([]string{"actions", "hydrate"}, jobActionsHydrateArgs(job, leaseID)...)), " "))
+	if !noHydrate && job.Hydrate.Actions {
+		lines = append(lines, "crabbox "+strings.Join(readableShellWords(append([]string{"actions", "hydrate"}, jobActionsHydrateArgs(job, leaseID, githubRunner)...)), " "))
 	}
-	lines = append(lines, "crabbox "+strings.Join(readableShellWords(append([]string{"run"}, jobRunArgs(job, leaseID)...)), " "))
+	lines = append(lines, "crabbox "+strings.Join(readableShellWords(append([]string{"run"}, jobRunArgs(job, leaseID, noHydrate)...)), " "))
 	if shouldPlanJobStop(createLease, stopPolicy) {
 		lines = append(lines, "crabbox "+strings.Join(readableShellWords(append([]string{"stop"}, jobStopRoutingArgs(job)...)), " ")+" "+leaseID)
 	}
@@ -242,8 +244,11 @@ func jobStopRoutingArgs(job JobConfig) []string {
 	return jobRoutingArgs(job, false)
 }
 
-func jobActionsHydrateArgs(job JobConfig, leaseID string) []string {
+func jobActionsHydrateArgs(job JobConfig, leaseID string, githubRunner bool) []string {
 	args := append(jobRoutingArgs(job, true), "--id", leaseID)
+	if githubRunner || job.Hydrate.GitHubRunner {
+		args = append(args, "--github-runner")
+	}
 	if job.Actions.Repo != "" {
 		args = append(args, "--repo", job.Actions.Repo)
 	}
@@ -268,8 +273,11 @@ func jobActionsHydrateArgs(job JobConfig, leaseID string) []string {
 	return args
 }
 
-func jobRunArgs(job JobConfig, leaseID string) []string {
+func jobRunArgs(job JobConfig, leaseID string, noHydrate bool) []string {
 	args := append(jobLeaseCreateArgs(job), "--id", leaseID)
+	if noHydrate {
+		args = append(args, "--no-hydrate")
+	}
 	if job.NoSync {
 		args = append(args, "--no-sync")
 	}

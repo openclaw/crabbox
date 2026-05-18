@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -42,6 +45,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	refFlag := fs.String("ref", "", "workflow ref")
 	waitTimeout := fs.Duration("wait-timeout", 20*time.Minute, "time to wait for Actions hydration")
 	keepAliveMinutes := fs.Int("keep-alive-minutes", 90, "minutes for workflow to keep the job alive")
+	githubRunner := fs.Bool("github-runner", false, "hydrate by registering a GitHub self-hosted runner instead of local SSH execution")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
 	fieldFlags := stringListFlag{}
@@ -97,10 +101,6 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	if cfg.Actions.Workflow == "" {
 		return exit(2, "actions hydrate requires --workflow or actions.workflow")
 	}
-	ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo)
-	if err != nil {
-		return err
-	}
 	server, target, leaseID, slug, err := a.resolveLeaseTargetForActions(ctx, cfg, *leaseIDFlag)
 	if err != nil {
 		return err
@@ -122,47 +122,36 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 		}
 	}
 	label := githubActionsLeaseLabel(leaseID)
-	if err := a.registerGitHubActionsRunner(ctx, cfg, target, leaseID, slug, ghRepo, "", nil); err != nil {
-		return err
-	}
-	if err := clearActionsHydrationState(ctx, target, leaseID); err != nil {
-		return err
-	}
 	ref := actionsRef(cfg, repo)
 	extraFields := mergeWorkflowInputFields(cfg.Actions.Fields, fieldFlags)
 	fields := actionsHydrateFields(leaseID, label, cfg.Actions.Job, *keepAliveMinutes, extraFields)
-	if inputs, ok, err := githubWorkflowDispatchInputs(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref); err != nil {
-		fmt.Fprintf(a.Stderr, "warning: inspect workflow inputs failed: %v\n", err)
-	} else if ok {
-		filtered, dropped := filterWorkflowInputs(fields, inputs)
-		for _, field := range dropped {
-			fmt.Fprintf(a.Stderr, "warning: workflow %s does not declare input %s; omitting it\n", cfg.Actions.Workflow, fieldName(field))
-		}
-		fields = filtered
-		for _, required := range []string{"crabbox_id", "crabbox_runner_label", "crabbox_keep_alive_minutes"} {
-			if !inputs[required] {
-				return exit(2, "workflow %s at %s does not declare required hydrate input %s", cfg.Actions.Workflow, ref, required)
+	if !*githubRunner {
+		localFields := actionsHydrateFields(leaseID, label, cfg.Actions.Job, 0, extraFields)
+		if state, err := a.hydrateActionsLocally(ctx, cfg, repo, target, leaseID, cfg.Actions.Job, localFields, *waitTimeout, true, true); err == nil {
+			fmt.Fprintf(a.Stdout, "actions hydrated local id=%s slug=%s workspace=%s run_id=%s\n", leaseID, blank(slug, "-"), state.Workspace, blank(state.RunID, "-"))
+			fmt.Fprintf(a.Stdout, "actions hydrate complete total=%s\n", time.Since(started).Round(time.Millisecond))
+			if *timingJSON {
+				total := time.Since(started)
+				if err := writeTimingJSON(a.Stderr, timingReport{
+					Provider: cfg.Provider,
+					LeaseID:  leaseID,
+					Slug:     slug,
+					TotalMs:  total.Milliseconds(),
+					ExitCode: 0,
+				}); err != nil {
+					return err
+				}
 			}
-		}
-	}
-	expectedJob := cfg.Actions.Job
-	if !workflowFieldsContain(fields, "crabbox_job") {
-		expectedJob = ""
-	}
-	if err := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fields); err != nil {
-		if expectedJob != "" && strings.Contains(err.Error(), "Unexpected input") {
-			fields = dropWorkflowField(fields, "crabbox_job")
-			expectedJob = ""
-			fmt.Fprintf(a.Stderr, "warning: retrying workflow dispatch without crabbox_job for compatibility\n")
-			if retryErr := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fields); retryErr != nil {
-				return retryErr
-			}
+			return nil
 		} else {
-			return err
+			return exit(exitCodeForError(err, 7), "local Actions hydration failed for %s: %v; rerun with --github-runner when the workflow needs full GitHub Actions semantics", leaseID, err)
 		}
 	}
-	fmt.Fprintf(a.Stdout, "dispatched workflow=%s repo=%s ref=%s runner_label=%s\n", cfg.Actions.Workflow, ghRepo.Slug(), ref, label)
-	state, err := waitForActionsHydration(ctx, target, leaseID, expectedJob, *waitTimeout, a.Stderr)
+	ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo)
+	if err != nil {
+		return err
+	}
+	state, err := a.hydrateActionsWithGitHubRunner(ctx, cfg, repo, target, leaseID, slug, ghRepo, label, ref, fields, *waitTimeout)
 	if err != nil {
 		return err
 	}
@@ -182,6 +171,47 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 		}
 	}
 	return nil
+}
+
+func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, repo Repo, target SSHTarget, leaseID, slug string, ghRepo GitHubRepo, label, ref string, fields []string, waitTimeout time.Duration) (actionsHydrationState, error) {
+	if err := a.registerGitHubActionsRunner(ctx, cfg, target, leaseID, slug, ghRepo, "", nil); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if err := clearActionsHydrationState(ctx, target, leaseID); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if inputs, ok, err := githubWorkflowDispatchInputs(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref); err != nil {
+		fmt.Fprintf(a.Stderr, "warning: inspect workflow inputs failed: %v\n", err)
+	} else if ok {
+		filtered, dropped := filterWorkflowInputs(fields, inputs)
+		for _, field := range dropped {
+			fmt.Fprintf(a.Stderr, "warning: workflow %s does not declare input %s; omitting it\n", cfg.Actions.Workflow, fieldName(field))
+		}
+		fields = filtered
+		for _, required := range []string{"crabbox_id", "crabbox_runner_label", "crabbox_keep_alive_minutes"} {
+			if !inputs[required] {
+				return actionsHydrationState{}, exit(2, "workflow %s at %s does not declare required hydrate input %s", cfg.Actions.Workflow, ref, required)
+			}
+		}
+	}
+	expectedJob := cfg.Actions.Job
+	if !workflowFieldsContain(fields, "crabbox_job") {
+		expectedJob = ""
+	}
+	if err := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fields); err != nil {
+		if expectedJob != "" && strings.Contains(err.Error(), "Unexpected input") {
+			fields = dropWorkflowField(fields, "crabbox_job")
+			expectedJob = ""
+			fmt.Fprintf(a.Stderr, "warning: retrying workflow dispatch without crabbox_job for compatibility\n")
+			if retryErr := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fields); retryErr != nil {
+				return actionsHydrationState{}, retryErr
+			}
+		} else {
+			return actionsHydrationState{}, err
+		}
+	}
+	fmt.Fprintf(a.Stdout, "dispatched workflow=%s repo=%s ref=%s runner_label=%s\n", cfg.Actions.Workflow, ghRepo.Slug(), ref, label)
+	return waitForActionsHydration(ctx, target, leaseID, expectedJob, waitTimeout, a.Stderr)
 }
 
 func (a App) actionsRegister(ctx context.Context, args []string) error {
@@ -330,13 +360,951 @@ func shouldSkipBlacksmithActionsHydrate(identifier, provider string) (bool, stri
 
 func dispatchGitHubActionsWorkflow(ctx context.Context, dir string, repo GitHubRepo, workflow, ref string, fields []string) error {
 	cmdArgs := []string{"workflow", "run", workflow, "--repo", repo.Slug(), "--ref", ref}
+	if err := validateWorkflowInputFields(fields); err != nil {
+		return err
+	}
 	for _, field := range fields {
-		if !strings.Contains(field, "=") {
-			return exit(2, "workflow input must be key=value: %s", field)
-		}
 		cmdArgs = append(cmdArgs, "-f", field)
 	}
 	return runGH(ctx, dir, cmdArgs...)
+}
+
+func exitCodeForError(err error, fallback int) int {
+	var exitErr ExitError
+	if AsExitError(err, &exitErr) && exitErr.Code != 0 {
+		return exitErr.Code
+	}
+	return fallback
+}
+
+func (a App) hydrateActionsLocally(ctx context.Context, cfg Config, repo Repo, target SSHTarget, leaseID, expectedJob string, fields []string, waitTimeout time.Duration, streamOutput bool, syncBefore bool) (actionsHydrationState, error) {
+	if !supportsActionsRunnerTarget(target) {
+		return actionsHydrationState{}, exit(2, "local Actions hydration currently supports Linux and Windows WSL2 targets only")
+	}
+	if err := validateWorkflowInputFields(fields); err != nil {
+		return actionsHydrationState{}, err
+	}
+	workflowPath, err := localActionsWorkflowPath(repo.Root, cfg.Actions.Workflow)
+	if err != nil {
+		return actionsHydrationState{}, err
+	}
+	workflow, err := readLocalHydrateWorkflow(workflowPath)
+	if err != nil {
+		return actionsHydrationState{}, err
+	}
+	jobName, job, err := selectLocalHydrateJob(workflow, cfg.Actions.Job)
+	if err != nil {
+		return actionsHydrationState{}, exit(2, "workflow %s %v", cfg.Actions.Workflow, err)
+	}
+	if inputs, defaults, required, ok, err := parseWorkflowDispatchInputSpecFromFile(workflowPath); err != nil {
+		return actionsHydrationState{}, err
+	} else if ok {
+		fields = applyWorkflowInputDefaults(fields, defaults)
+		if missing := missingRequiredWorkflowInputs(fields, required); len(missing) > 0 {
+			return actionsHydrationState{}, exit(2, "workflow %s requires hydrate input(s) %s; pass them with -f key=value or define defaults", cfg.Actions.Workflow, strings.Join(missing, ","))
+		}
+		filtered, dropped := filterWorkflowInputs(fields, inputs)
+		for _, field := range dropped {
+			fmt.Fprintf(a.Stderr, "warning: workflow %s does not declare input %s; omitting it\n", cfg.Actions.Workflow, fieldName(field))
+		}
+		fields = filtered
+		if !workflowFieldsContain(fields, "crabbox_job") {
+			expectedJob = ""
+		}
+		for _, required := range []string{"crabbox_id", "crabbox_runner_label", "crabbox_keep_alive_minutes"} {
+			if !inputs[required] {
+				return actionsHydrationState{}, exit(2, "workflow %s does not declare required hydrate input %s", cfg.Actions.Workflow, required)
+			}
+		}
+	}
+	workdir := remoteJoin(cfg, leaseID, repo.Name)
+	if streamOutput {
+		fmt.Fprintf(a.Stdout, "local actions hydrate workflow=%s job=%s workspace=%s\n", cfg.Actions.Workflow, jobName, workdir)
+	}
+	if err := clearActionsHydrationState(ctx, target, leaseID); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if syncBefore {
+		if err := a.syncLocalActionsWorkspace(ctx, cfg, repo, target, workdir); err != nil {
+			return actionsHydrationState{}, err
+		}
+	}
+	script, err := localActionsHydrateScript(cfg, repo, workflow, job, jobName, leaseID, fields, workdir)
+	if err != nil {
+		return actionsHydrationState{}, err
+	}
+	stdout := io.Discard
+	stderr := io.Discard
+	if streamOutput {
+		stdout = a.Stdout
+		stderr = a.Stderr
+	}
+	if err := runSSHInput(ctx, target, remoteInstallLocalActionsHydrateScript(leaseID), strings.NewReader(script), stdout, stderr); err != nil {
+		return actionsHydrationState{}, exit(7, "install local Actions hydration script on %s: %v", target.Host, err)
+	}
+	pid, err := runSSHOutput(ctx, target, remoteStartLocalActionsHydrateScript(leaseID))
+	if err != nil {
+		return actionsHydrationState{}, exit(7, "start local Actions hydration on %s: %v", target.Host, err)
+	}
+	return waitForLocalActionsHydration(ctx, target, leaseID, expectedJob, strings.TrimSpace(pid), waitTimeout, stderr)
+}
+
+func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Repo, target SSHTarget, workdir string) error {
+	if cfg.Sync.BaseRef == "" {
+		cfg.Sync.BaseRef = repo.BaseRef
+	}
+	excludes, err := syncExcludes(repo.Root, cfg)
+	if err != nil {
+		return err
+	}
+	manifest, err := syncManifest(repo.Root, excludes)
+	if err != nil {
+		return exit(6, "build sync file list: %v", err)
+	}
+	if err := checkSyncPreflight(manifest, cfg, false, a.Stderr); err != nil {
+		return err
+	}
+	if err := runSSHQuiet(ctx, target, remoteMkdir(workdir)); err != nil {
+		return exit(7, "create remote workdir: %v", err)
+	}
+	if cfg.Sync.GitSeed && remoteGitSeedCandidate(repo) {
+		if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
+			fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
+		}
+	}
+	manifestData := manifest.NUL()
+	manifestInput := fmt.Sprintf("%d\n", len(manifestData)) + string(manifestData) + string(manifest.DeletedNUL())
+	if err := runSSHInputQuiet(ctx, target, remoteWriteSyncManifestsNew(workdir), manifestInput); err != nil {
+		return exit(7, "write sync manifests: %v", err)
+	}
+	if shouldPruneRemoteSync(cfg.Sync.Delete, false) {
+		if err := runSSHQuiet(ctx, target, remoteSeedSyncManifestFromGit(workdir)); err != nil {
+			return exit(6, "remote sync seed manifest failed: %v", err)
+		}
+		if err := runSSHQuiet(ctx, target, remotePruneSyncManifest(workdir)); err != nil {
+			return exit(6, "remote sync prune failed: %v", err)
+		}
+	}
+	fmt.Fprintf(a.Stderr, "syncing %s -> %s:%s for local actions hydrate\n", repo.Root, target.Host, workdir)
+	if err := rsync(ctx, target, repo.Root, workdir, excludes, a.Stdout, a.Stderr, rsyncOptions{Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: manifestData, Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+		return exit(6, "rsync failed: %v", err)
+	}
+	fingerprint := ""
+	if cfg.Sync.Fingerprint {
+		if value, err := syncFingerprintForManifest(repo, cfg, manifest, excludes); err == nil {
+			fingerprint = value
+		} else {
+			fmt.Fprintf(a.Stderr, "warning: sync fingerprint failed: %v\n", err)
+		}
+	}
+	finalizeCommand := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+		AllowMassDeletions: true,
+		HydrateGit:         true,
+		BaseRef:            cfg.Sync.BaseRef,
+		BaseSHA:            gitHydrateBaseSHA(repo, cfg.Sync.BaseRef),
+		Fingerprint:        fingerprint,
+	})
+	if out, err := runSSHCombinedOutput(ctx, target, finalizeCommand); err != nil {
+		if out != "" {
+			return exit(6, "remote sync finalize failed: %s: %v", out, err)
+		}
+		return exit(6, "remote sync finalize failed: %v", err)
+	}
+	return nil
+}
+
+func parseWorkflowDispatchInputSpecFromFile(path string) (map[string]bool, map[string]string, map[string]bool, bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, nil, false, err
+	}
+	return parseWorkflowDispatchInputSpec(data)
+}
+
+func localActionsWorkflowPath(root, workflow string) (string, error) {
+	workflow = strings.TrimSpace(strings.TrimPrefix(workflow, "/"))
+	if workflow == "" {
+		return "", exit(2, "actions hydrate requires actions.workflow")
+	}
+	candidates := []string{workflow}
+	if !strings.Contains(workflow, "/") {
+		candidates = []string{".github/workflows/" + workflow}
+		if filepath.Ext(workflow) == "" {
+			candidates = append(candidates, ".github/workflows/"+workflow+".yml", ".github/workflows/"+workflow+".yaml")
+		}
+	}
+	workflowRoot := filepath.Join(root, ".github", "workflows")
+	var lastErr error
+	for _, candidate := range candidates {
+		if !strings.HasPrefix(candidate, ".github/workflows/") {
+			continue
+		}
+		path := filepath.Join(root, filepath.FromSlash(candidate))
+		rel, err := filepath.Rel(workflowRoot, path)
+		if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." || filepath.IsAbs(rel) {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if info.IsDir() {
+			return "", exit(2, "local Actions hydration workflow %s is a directory", candidate)
+		}
+		return path, nil
+	}
+	if lastErr != nil {
+		return "", exit(2, "local Actions hydration workflow %s is not readable: %v", workflow, lastErr)
+	}
+	return "", exit(2, "local Actions hydration requires a repo-local workflow path under .github/workflows")
+}
+
+type localHydrateWorkflow struct {
+	Name     string            `yaml:"name"`
+	Env      map[string]string `yaml:"env"`
+	Defaults localHydrateDefaults
+	Jobs     map[string]localHydrateJob `yaml:"jobs"`
+}
+
+type localHydrateDefaults struct {
+	Run localHydrateRunDefaults `yaml:"run"`
+}
+
+type localHydrateRunDefaults struct {
+	Shell            string `yaml:"shell"`
+	WorkingDirectory string `yaml:"working-directory"`
+}
+
+type localHydrateJob struct {
+	Name      string            `yaml:"name"`
+	Env       map[string]string `yaml:"env"`
+	Defaults  localHydrateDefaults
+	Container yaml.Node            `yaml:"container"`
+	Services  map[string]yaml.Node `yaml:"services"`
+	Steps     []localHydrateStep   `yaml:"steps"`
+}
+
+type localHydrateStep struct {
+	ID               string            `yaml:"id"`
+	Name             string            `yaml:"name"`
+	If               string            `yaml:"if"`
+	Uses             string            `yaml:"uses"`
+	Run              string            `yaml:"run"`
+	Shell            string            `yaml:"shell"`
+	WorkingDirectory string            `yaml:"working-directory"`
+	Env              map[string]string `yaml:"env"`
+	With             map[string]string `yaml:"with"`
+}
+
+func readLocalHydrateWorkflow(path string) (localHydrateWorkflow, error) {
+	var workflow localHydrateWorkflow
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return workflow, err
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		return workflow, err
+	}
+	if len(workflow.Jobs) == 0 {
+		return workflow, exit(2, "workflow %s does not define jobs", path)
+	}
+	return workflow, nil
+}
+
+func selectLocalHydrateJob(workflow localHydrateWorkflow, legacyJob string) (string, localHydrateJob, error) {
+	if job, ok := workflow.Jobs["hydrate"]; ok {
+		return "hydrate", job, nil
+	}
+	if legacyJob != "" {
+		if job, ok := workflow.Jobs[legacyJob]; ok {
+			return legacyJob, job, nil
+		}
+	}
+	if len(workflow.Jobs) == 1 {
+		for name, job := range workflow.Jobs {
+			return name, job, nil
+		}
+	}
+	return "", localHydrateJob{}, fmt.Errorf("does not define a hydrate job; add a job named %q or use a single-job workflow", "hydrate")
+}
+
+func validateLocalHydrateJob(job localHydrateJob) error {
+	if job.Container.Kind != 0 {
+		return exit(2, "local Actions hydration does not support job containers; rerun with --github-runner when the workflow needs full GitHub Actions semantics")
+	}
+	if len(job.Services) > 0 {
+		return exit(2, "local Actions hydration does not support service containers; rerun with --github-runner when the workflow needs full GitHub Actions semantics")
+	}
+	return nil
+}
+
+func localActionsHydrateScript(cfg Config, repo Repo, workflow localHydrateWorkflow, job localHydrateJob, jobName, leaseID string, fields []string, workdir string) (string, error) {
+	if err := validateLocalHydrateJob(job); err != nil {
+		return "", err
+	}
+	inputs, err := fieldsMap(fields)
+	if err != nil {
+		return "", err
+	}
+	leaseWorkRoot := path.Dir(workdir)
+	runnerTemp := path.Join(leaseWorkRoot, ".crabbox", "tmp", leaseID)
+	runnerToolCache := path.Join(leaseWorkRoot, ".crabbox", "tools")
+	githubRef := actionsFullRef(cfg, repo)
+	env := map[string]string{
+		"CI":                    "true",
+		"GITHUB_ACTIONS":        "true",
+		"GITHUB_WORKSPACE":      workdir,
+		"GITHUB_REPOSITORY":     repoSlugForActions(cfg, repo),
+		"GITHUB_RUN_ID":         "local-" + leaseID,
+		"GITHUB_RUN_NUMBER":     "1",
+		"GITHUB_RUN_ATTEMPT":    "1",
+		"GITHUB_REF":            githubRef,
+		"GITHUB_REF_NAME":       actionsRefName(githubRef),
+		"GITHUB_SHA":            repo.Head,
+		"GITHUB_EVENT_NAME":     "workflow_dispatch",
+		"GITHUB_ACTOR":          "crabbox",
+		"GITHUB_JOB":            jobName,
+		"RUNNER_OS":             "Linux",
+		"RUNNER_TEMP":           runnerTemp,
+		"RUNNER_TOOL_CACHE":     runnerToolCache,
+		"CRABBOX_LOCAL_ACTIONS": "1",
+	}
+	if err := mergeInterpolatedEnv(env, workflow.Env, inputs, workdir); err != nil {
+		return "", err
+	}
+	if err := mergeInterpolatedEnv(env, job.Env, inputs, workdir); err != nil {
+		return "", err
+	}
+
+	var b strings.Builder
+	b.WriteString("set -euo pipefail\n")
+	b.WriteString("mkdir -p " + shellQuote(runnerTemp) + " " + shellQuote(runnerToolCache) + " " + shellQuote(workdir) + "\n")
+	b.WriteString("export PATH=" + shellQuote(runnerToolCache+"/node/bin") + ":\"$PATH\"\n")
+	b.WriteString("case \"$(uname -m)\" in\n")
+	b.WriteString("  x86_64|amd64) export RUNNER_ARCH='X64' ;;\n")
+	b.WriteString("  aarch64|arm64) export RUNNER_ARCH='ARM64' ;;\n")
+	b.WriteString("  *) export RUNNER_ARCH=\"$(uname -m)\" ;;\n")
+	b.WriteString("esac\n")
+	for _, key := range sortedKeys(env) {
+		value, err := interpolateLocalActionsValue(env[key], inputs, env, workdir)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "export %s=%s\n", key, shellQuote(value))
+	}
+	b.WriteString("mkdir -p \"$RUNNER_TEMP\" \"$RUNNER_TOOL_CACHE\"\n")
+	for key, value := range inputs {
+		fmt.Fprintf(&b, "export INPUT_%s=%s\n", actionInputEnvName(key), shellQuote(value))
+	}
+	b.WriteString(localActionsRuntimeShell())
+	for i, step := range job.Steps {
+		skip, err := shouldSkipLocalHydrateStep(step.If)
+		if err != nil {
+			return "", err
+		}
+		if skip {
+			continue
+		}
+		label := step.Name
+		if label == "" {
+			label = firstNonBlank(step.Uses, fmt.Sprintf("step %d", i+1))
+		}
+		fmt.Fprintf(&b, "echo %s\n", shellQuote("local actions: "+label))
+		stepEnv := copyStringMap(env)
+		if err := mergeInterpolatedEnv(stepEnv, step.Env, inputs, workdir); err != nil {
+			return "", err
+		}
+		for _, key := range sortedKeys(step.Env) {
+			if !validShellEnvName(key) {
+				return "", exit(2, "local Actions hydration does not support env name %q", key)
+			}
+			value, err := interpolateLocalActionsValue(stepEnv[key], inputs, stepEnv, workdir)
+			if err != nil {
+				return "", err
+			}
+			fmt.Fprintf(&b, "__crabbox_save_step_env %s\n", shellQuote(key))
+			fmt.Fprintf(&b, "export %s=%s\n", key, shellQuote(value))
+		}
+		b.WriteString("__crabbox_prepare_step_files\n")
+		if step.Uses != "" {
+			usesScript, err := localHydrateUsesScript(step, inputs, stepEnv, workdir)
+			if err != nil {
+				return "", err
+			}
+			b.WriteString(usesScript)
+		}
+		if step.Run != "" {
+			shellName := firstNonBlank(step.Shell, job.Defaults.Run.Shell, workflow.Defaults.Run.Shell, "bash")
+			wd := firstNonBlank(step.WorkingDirectory, job.Defaults.Run.WorkingDirectory, workflow.Defaults.Run.WorkingDirectory)
+			wd, err = interpolateLocalActionsValue(wd, inputs, stepEnv, workdir)
+			if err != nil {
+				return "", err
+			}
+			if wd == "" {
+				wd = workdir
+			} else if !strings.HasPrefix(wd, "/") {
+				wd = path.Join(workdir, wd)
+			}
+			run, err := interpolateLocalActionsValue(step.Run, inputs, stepEnv, workdir)
+			if err != nil {
+				return "", err
+			}
+			if err := appendLocalHydrateRunStep(&b, shellName, wd, run); err != nil {
+				return "", err
+			}
+		}
+		for _, key := range sortedKeys(step.Env) {
+			fmt.Fprintf(&b, "__crabbox_restore_step_env %s\n", shellQuote(key))
+		}
+		b.WriteString("__crabbox_apply_step_files\n")
+	}
+	return b.String(), nil
+}
+
+func fieldsMap(fields []string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, field := range fields {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok || key == "" {
+			return nil, exit(2, "workflow input must be key=value: %s", field)
+		}
+		out[key] = value
+	}
+	return out, nil
+}
+
+func repoSlugForActions(cfg Config, repo Repo) string {
+	if ghRepo, err := parseGitHubRepo(cfg.Actions.Repo); err == nil && ghRepo.Slug() != "" {
+		return ghRepo.Slug()
+	}
+	ghRepo, err := resolveGitHubRepo(repo, "")
+	if err == nil && ghRepo.Slug() != "" {
+		return ghRepo.Slug()
+	}
+	return repo.Name + "/" + repo.Name
+}
+
+func mergeInterpolatedEnv(dst map[string]string, src map[string]string, inputs map[string]string, workdir string) error {
+	for key, value := range src {
+		interpolated, err := interpolateLocalActionsValue(value, inputs, dst, workdir)
+		if err != nil {
+			return err
+		}
+		dst[key] = interpolated
+	}
+	return nil
+}
+
+func interpolateLocalActionsValue(value string, inputs, env map[string]string, workdir string) (string, error) {
+	replacements := map[string]string{
+		"github.workspace":  workdir,
+		"github.ref":        env["GITHUB_REF"],
+		"github.ref_name":   env["GITHUB_REF_NAME"],
+		"github.sha":        env["GITHUB_SHA"],
+		"github.run_id":     env["GITHUB_RUN_ID"],
+		"runner.temp":       env["RUNNER_TEMP"],
+		"runner.tool_cache": env["RUNNER_TOOL_CACHE"],
+	}
+	var unsupported string
+	out := localActionsExpressionPattern.ReplaceAllStringFunc(value, func(match string) string {
+		parts := localActionsExpressionPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		expr := strings.TrimSpace(parts[1])
+		if replacement, ok := replacements[expr]; ok {
+			return replacement
+		}
+		if key, ok := strings.CutPrefix(expr, "inputs."); ok {
+			if input, ok := inputs[key]; ok {
+				return input
+			}
+			return ""
+		}
+		if key, ok := strings.CutPrefix(expr, "env."); ok {
+			if envValue, ok := env[key]; ok {
+				return envValue
+			}
+			return ""
+		}
+		unsupported = expr
+		return match
+	})
+	if unsupported != "" {
+		return "", exit(2, "local Actions hydration does not support expression %q; rerun with --github-runner when the workflow needs full GitHub Actions semantics", unsupported)
+	}
+	if strings.Contains(out, "${{") {
+		return "", exit(2, "local Actions hydration does not support complex Actions expressions in %q; rerun with --github-runner when the workflow needs full GitHub Actions semantics", value)
+	}
+	return out, nil
+}
+
+var localActionsExpressionPattern = regexp.MustCompile(`\$\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}`)
+
+func shouldSkipLocalHydrateStep(expr string) (bool, error) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return false, nil
+	}
+	expr = strings.TrimPrefix(strings.TrimSuffix(expr, "}}"), "${{")
+	expr = strings.TrimSpace(expr)
+	switch strings.ToLower(expr) {
+	case "", "true", "success()", "always()":
+		return false, nil
+	case "false", "cancelled()", "failure()":
+		return true, nil
+	default:
+		return false, exit(2, "local Actions hydration does not support if expression %q", expr)
+	}
+}
+
+func localHydrateUsesScript(step localHydrateStep, inputs, env map[string]string, workdir string) (string, error) {
+	uses := strings.ToLower(strings.TrimSpace(step.Uses))
+	switch {
+	case strings.HasPrefix(uses, "actions/checkout@"):
+		if err := validateLocalCheckoutStep(step, inputs, env, workdir); err != nil {
+			return "", err
+		}
+		return "# actions/checkout handled by Crabbox sync/git seed\n", nil
+	case strings.HasPrefix(uses, "actions/setup-node@"):
+		if err := validateLocalActionWithKeys("actions/setup-node", step.With, "node-version", "node-version-file"); err != nil {
+			return "", err
+		}
+		version, err := localHydrateWithInput(step, []string{"node-version", "node-version-file"}, "", inputs, env, workdir)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(step.With["node-version"]) != "" && !supportedLocalNodeVersionSpec(version) {
+			return "", exit(2, "local Actions hydration does not support actions/setup-node version %q; rerun with --github-runner when the workflow needs full GitHub Actions semantics", version)
+		}
+		return "__crabbox_setup_node " + shellQuote(version) + "\n", nil
+	case strings.HasPrefix(uses, "actions/setup-go@"):
+		if err := validateLocalActionWithKeys("actions/setup-go", step.With, "go-version", "go-version-file"); err != nil {
+			return "", err
+		}
+		version, err := localHydrateWithInput(step, []string{"go-version", "go-version-file"}, "", inputs, env, workdir)
+		if err != nil {
+			return "", err
+		}
+		return "__crabbox_setup_go " + shellQuote(version) + "\n", nil
+	case strings.HasPrefix(uses, "actions/setup-python@"):
+		if err := validateLocalActionWithKeys("actions/setup-python", step.With, "python-version", "python-version-file"); err != nil {
+			return "", err
+		}
+		version, err := localHydrateWithInput(step, []string{"python-version", "python-version-file"}, "", inputs, env, workdir)
+		if err != nil {
+			return "", err
+		}
+		return "__crabbox_setup_python " + shellQuote(version) + "\n", nil
+	default:
+		return "", exit(2, "local Actions hydration does not support uses step %q", step.Uses)
+	}
+}
+
+func validateLocalActionWithKeys(action string, with map[string]string, allowed ...string) error {
+	if len(with) == 0 {
+		return nil
+	}
+	allowedSet := map[string]bool{}
+	for _, key := range allowed {
+		allowedSet[strings.ToLower(strings.TrimSpace(key))] = true
+	}
+	for key := range with {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		if !allowedSet[normalized] {
+			return exit(2, "local Actions hydration does not support %s option %q; rerun with --github-runner when the workflow needs full GitHub Actions semantics", action, key)
+		}
+	}
+	return nil
+}
+
+func localHydrateWithInput(step localHydrateStep, names []string, fallback string, inputs, env map[string]string, workdir string) (string, error) {
+	value := fallback
+	for _, name := range names {
+		if raw := strings.TrimSpace(step.With[name]); raw != "" {
+			value = raw
+			break
+		}
+	}
+	return interpolateLocalActionsValue(value, inputs, env, workdir)
+}
+
+func validateLocalCheckoutStep(step localHydrateStep, inputs, env map[string]string, workdir string) error {
+	for key, value := range step.With {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "ref", "fetch-depth", "persist-credentials", "set-safe-directory":
+			continue
+		case "path":
+			resolved, err := interpolateLocalActionsValue(value, inputs, env, workdir)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(resolved) == "" || strings.TrimSpace(resolved) == "." {
+				continue
+			}
+		case "submodules", "lfs":
+			resolved, err := interpolateLocalActionsValue(value, inputs, env, workdir)
+			if err != nil {
+				return err
+			}
+			if isFalseActionsInput(resolved) {
+				continue
+			}
+		}
+		return exit(2, "local Actions hydration does not support actions/checkout option %q; rerun with --github-runner when the workflow needs full GitHub Actions semantics", key)
+	}
+	return nil
+}
+
+func validateWorkflowInputFields(fields []string) error {
+	for _, field := range fields {
+		key, _, ok := strings.Cut(field, "=")
+		if !ok || key == "" {
+			return exit(2, "workflow input must be key=value: %s", field)
+		}
+	}
+	return nil
+}
+
+func applyWorkflowInputDefaults(fields []string, defaults map[string]string) []string {
+	if len(defaults) == 0 {
+		return fields
+	}
+	out := append([]string{}, fields...)
+	seen := map[string]bool{}
+	for _, field := range out {
+		if name := fieldName(field); name != "" {
+			seen[name] = true
+		}
+	}
+	for _, name := range sortedKeys(defaults) {
+		if !seen[name] {
+			out = append(out, name+"="+defaults[name])
+		}
+	}
+	return out
+}
+
+func missingRequiredWorkflowInputs(fields []string, required map[string]bool) []string {
+	if len(required) == 0 {
+		return nil
+	}
+	present := map[string]bool{}
+	for _, field := range fields {
+		if name := fieldName(field); name != "" {
+			present[name] = true
+		}
+	}
+	var missing []string
+	for name := range required {
+		if !present[name] {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+func isFalseActionsInput(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "false", "0", "no":
+		return true
+	default:
+		return false
+	}
+}
+
+func supportedLocalNodeVersionSpec(value string) bool {
+	value = strings.TrimSpace(strings.TrimPrefix(value, "v"))
+	if value == "" {
+		return true
+	}
+	for _, part := range strings.Split(value, ".") {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func appendLocalHydrateRunStep(b *strings.Builder, shellName, workdir, script string) error {
+	shellName = strings.TrimSpace(shellName)
+	delimiter := localHydrateHeredocDelimiter(script)
+	switch {
+	case shellName == "", shellName == "bash":
+		fmt.Fprintf(b, "__crabbox_run_bash %s <<'%s'\n%s\n%s\n", shellQuote(workdir), delimiter, script, delimiter)
+	case shellName == "sh":
+		fmt.Fprintf(b, "__crabbox_run_sh %s <<'%s'\n%s\n%s\n", shellQuote(workdir), delimiter, script, delimiter)
+	default:
+		return exit(2, "local Actions hydration does not support shell %q", shellName)
+	}
+	return nil
+}
+
+func localHydrateHeredocDelimiter(script string) string {
+	const base = "CRABBOX_STEP"
+	delimiter := base
+	for i := 2; strings.Contains("\n"+script+"\n", "\n"+delimiter+"\n"); i++ {
+		delimiter = fmt.Sprintf("%s_%d", base, i)
+	}
+	return delimiter
+}
+
+func actionInputEnvName(name string) string {
+	name = strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+	var b strings.Builder
+	for _, r := range name {
+		if r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+func sortedKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func validShellEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r == '_':
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func localActionsRuntimeShell() string {
+	return `__crabbox_prepare_step_files() {
+  export GITHUB_ENV="$RUNNER_TEMP/step-env"
+  export GITHUB_PATH="$RUNNER_TEMP/step-path"
+  export GITHUB_OUTPUT="$RUNNER_TEMP/step-output"
+  export GITHUB_STATE="$RUNNER_TEMP/step-state"
+  export GITHUB_STEP_SUMMARY="$RUNNER_TEMP/step-summary"
+  : >"$GITHUB_ENV"
+  : >"$GITHUB_PATH"
+  : >"$GITHUB_OUTPUT"
+  : >"$GITHUB_STATE"
+  : >"$GITHUB_STEP_SUMMARY"
+}
+__crabbox_apply_env_file() {
+  [ -s "$GITHUB_ENV" ] || return 0
+  local line key value
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *=*)
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "$key" in
+          ''|*[!A-Za-z0-9_]*|[0-9]*) continue ;;
+        esac
+        export "$key=$value"
+        ;;
+    esac
+  done <"$GITHUB_ENV"
+}
+__crabbox_apply_path_file() {
+  [ -s "$GITHUB_PATH" ] || return 0
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] && export PATH="$line:$PATH"
+  done <"$GITHUB_PATH"
+}
+__crabbox_apply_step_files() {
+  __crabbox_apply_env_file
+  __crabbox_apply_path_file
+}
+__crabbox_save_step_env() {
+  local key="$1"
+  eval "case \"\${${key}+set}\" in set) export __CRABBOX_SAVED_${key}=\"\${${key}}\"; export __CRABBOX_SAVED_${key}_SET=1 ;; *) unset __CRABBOX_SAVED_${key}; export __CRABBOX_SAVED_${key}_SET=0 ;; esac"
+}
+__crabbox_restore_step_env() {
+  local key="$1"
+  eval "case \"\${__CRABBOX_SAVED_${key}_SET:-0}\" in 1) export ${key}=\"\${__CRABBOX_SAVED_${key}}\" ;; *) unset ${key} ;; esac"
+  unset "__CRABBOX_SAVED_${key}" "__CRABBOX_SAVED_${key}_SET"
+}
+__crabbox_run_bash() {
+	  local wd="$1"
+	  shift
+	  mkdir -p "$wd"
+	  local script="$RUNNER_TEMP/step.sh"
+	  cat >"$script"
+	  (cd "$wd" && bash --noprofile --norc -e -o pipefail "$script")
+	}
+__crabbox_run_sh() {
+	  local wd="$1"
+	  shift
+	  mkdir -p "$wd"
+	  local script="$RUNNER_TEMP/step.sh"
+	  cat >"$script"
+	  (cd "$wd" && sh -e "$script")
+	}
+__crabbox_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf x64 ;;
+    aarch64|arm64) printf arm64 ;;
+    *) uname -m ;;
+  esac
+}
+__crabbox_setup_node() {
+  local requested="${1:-}"
+  if [ -n "$requested" ] && [ -f "$GITHUB_WORKSPACE/$requested" ]; then
+    if [ "$(basename "$requested")" = "package.json" ]; then
+      requested="$(sed -nE 's/.*"node"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$GITHUB_WORKSPACE/$requested" | head -n 1 | tr -d '[:space:]')"
+    else
+      requested="$(head -n 1 "$GITHUB_WORKSPACE/$requested" | tr -d '[:space:]')"
+    fi
+  fi
+  if [ -z "$requested" ]; then
+    if command -v node >/dev/null 2>&1; then
+      corepack enable >/dev/null 2>&1 || true
+      return 0
+    fi
+    echo "actions/setup-node did not request a Node version, and Node is not installed on this image; add node-version or rerun with --github-runner" >&2
+    return 2
+  fi
+  local major="${requested%%.*}"
+  major="${major#v}"
+  case "$major" in
+    ''|*[!0-9]*)
+      echo "local Actions hydration does not support actions/setup-node version ${requested}; use a numeric major version or rerun with --github-runner" >&2
+      return 2
+      ;;
+  esac
+  local want dots
+  want="${requested#v}"
+  dots="$(printf '%s' "$want" | tr -cd '.' | wc -c | tr -d ' ')"
+  if command -v node >/dev/null 2>&1; then
+    local actual
+    actual="$(node -p 'process.versions.node' 2>/dev/null || true)"
+    case "$dots" in
+      0) case "${actual%%.*}" in "$major") corepack enable >/dev/null 2>&1 || true; return 0 ;; esac ;;
+      1) case "$actual" in "$want"|"$want".*) corepack enable >/dev/null 2>&1 || true; return 0 ;; esac ;;
+      *) case "$actual" in "$want") corepack enable >/dev/null 2>&1 || true; return 0 ;; esac ;;
+    esac
+  fi
+  local arch version dir tmp selector
+  arch="$(__crabbox_arch)"
+  case "$dots" in
+    0) selector="v${major}." ;;
+    1) selector="v${want}." ;;
+    *) selector="v${want}" ;;
+  esac
+  version="$(curl -fsSL https://nodejs.org/dist/index.tab | awk -v selector="$selector" 'NR>1 && found == "" && ($1 == selector || index($1, selector)==1) { found=$1 } END { if (found != "") print found }')"
+  if [ -z "$version" ]; then
+    echo "unable to resolve Node $major" >&2
+    return 2
+  fi
+	  dir="$RUNNER_TOOL_CACHE/node-${version}-linux-${arch}"
+	  if [ ! -x "$dir/bin/node" ]; then
+	    tmp="$RUNNER_TEMP/node-${version}.tar.xz"
+	    mkdir -p "$RUNNER_TOOL_CACHE" "$RUNNER_TEMP"
+	    curl -fsSL -o "$tmp" "https://nodejs.org/dist/${version}/node-${version}-linux-${arch}.tar.xz"
+	    tar -xJf "$tmp" -C "$RUNNER_TOOL_CACHE"
+	  fi
+	  rm -f "$RUNNER_TOOL_CACHE/node"
+	  ln -s "$dir" "$RUNNER_TOOL_CACHE/node"
+	  export PATH="$RUNNER_TOOL_CACHE/node/bin:$PATH"
+  corepack enable >/dev/null 2>&1 || true
+}
+__crabbox_setup_go() {
+  local requested="${1:-}"
+  if [ -n "$requested" ] && [ -f "$GITHUB_WORKSPACE/$requested" ]; then
+    if [ "$(basename "$requested")" = "go.mod" ]; then
+      requested="$(awk '$1 == "go" { print $2; exit }' "$GITHUB_WORKSPACE/$requested" | tr -d '[:space:]')"
+    else
+      requested="$(head -n 1 "$GITHUB_WORKSPACE/$requested" | tr -d '[:space:]')"
+    fi
+  fi
+  if command -v go >/dev/null 2>&1; then
+    if [ -z "$requested" ]; then
+      return 0
+    fi
+    local want major rest minor patch prefix actual
+    want="${requested#go}"
+    want="${want#v}"
+    major="${want%%.*}"
+    actual="$(go version | awk '{ print $3 }')"
+    case "$major" in
+      ''|*[!0-9]*) ;;
+      *)
+        rest="${want#*.}"
+        if [ "$rest" != "$want" ]; then
+          minor="${rest%%.*}"
+          patch="${rest#*.}"
+          if [ "$patch" != "$rest" ]; then
+            case "$actual" in "go${major}.${minor}.${patch}") return 0 ;; esac
+          else
+            prefix="go${major}.${minor}"
+            case "$actual" in "$prefix"|"$prefix".*) return 0 ;; esac
+          fi
+        else
+          case "$actual" in go"$major"|go"$major".*) return 0 ;; esac
+        fi
+        ;;
+    esac
+    echo "actions/setup-go requested ${requested}, but installed ${actual:-unknown}; install Go in a run step or rerun with --github-runner" >&2
+    return 2
+  fi
+  echo "actions/setup-go requested ${requested:-default}, but Go is not installed on this image; install Go in a run step or prebuild the Crabbox image" >&2
+  return 2
+}
+__crabbox_setup_python() {
+  local requested="${1:-}"
+  if [ -n "$requested" ] && [ -f "$GITHUB_WORKSPACE/$requested" ]; then
+    requested="$(head -n 1 "$GITHUB_WORKSPACE/$requested" | tr -d '[:space:]')"
+  fi
+  local py
+  py="$(command -v python3 || command -v python || true)"
+  if [ -n "$py" ]; then
+    if [ -z "$requested" ]; then
+      return 0
+    fi
+    local want actual
+    want="${requested#v}"
+    want="${want%%-*}"
+    actual="$("$py" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null || true)"
+    case "$want" in
+      ''|*[!0-9.]*) ;;
+      *.*) case "$actual" in "$want"|"$want".*) return 0 ;; esac ;;
+      *) case "$actual" in "$want"|"$want".*) return 0 ;; esac ;;
+    esac
+    echo "actions/setup-python requested ${requested}, but installed ${actual:-unknown}; install Python in a run step or rerun with --github-runner" >&2
+    return 2
+  fi
+  echo "actions/setup-python requested ${requested:-default}, but Python is not installed on this image; install Python in a run step or prebuild the Crabbox image" >&2
+  return 2
+}
+`
 }
 
 func actionsHydrateFields(leaseID, label, job string, keepAliveMinutes int, extra []string) []string {
@@ -398,31 +1366,48 @@ func githubWorkflowDispatchInputs(ctx context.Context, dir string, repo GitHubRe
 }
 
 func parseWorkflowDispatchInputs(data []byte) (map[string]bool, bool, error) {
+	inputs, _, _, ok, err := parseWorkflowDispatchInputSpec(data)
+	return inputs, ok, err
+}
+
+func parseWorkflowDispatchInputSpec(data []byte) (map[string]bool, map[string]string, map[string]bool, bool, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, false, err
+		return nil, nil, nil, false, err
 	}
 	root := mappingValue(&doc, "")
 	if root == nil {
-		return nil, false, nil
+		return nil, nil, nil, false, nil
 	}
 	on := mappingValue(root, "on")
 	if on == nil {
-		return nil, false, nil
+		return nil, nil, nil, false, nil
 	}
 	dispatch := mappingValue(on, "workflow_dispatch")
 	if dispatch == nil {
-		return nil, false, nil
+		return nil, nil, nil, false, nil
 	}
 	inputsNode := mappingValue(dispatch, "inputs")
 	if inputsNode == nil || inputsNode.Kind != yaml.MappingNode {
-		return map[string]bool{}, true, nil
+		return map[string]bool{}, map[string]string{}, map[string]bool{}, true, nil
 	}
 	inputs := map[string]bool{}
+	defaults := map[string]string{}
+	required := map[string]bool{}
 	for i := 0; i+1 < len(inputsNode.Content); i += 2 {
-		inputs[inputsNode.Content[i].Value] = true
+		name := inputsNode.Content[i].Value
+		inputs[name] = true
+		valueNode := inputsNode.Content[i+1]
+		if defaultNode := mappingValue(valueNode, "default"); defaultNode != nil && defaultNode.Kind == yaml.ScalarNode {
+			defaults[name] = defaultNode.Value
+		}
+		if requiredNode := mappingValue(valueNode, "required"); requiredNode != nil && requiredNode.Kind == yaml.ScalarNode && strings.EqualFold(requiredNode.Value, "true") {
+			if _, hasDefault := defaults[name]; !hasDefault {
+				required[name] = true
+			}
+		}
 	}
-	return inputs, true, nil
+	return inputs, defaults, required, true, nil
 }
 
 func mappingValue(node *yaml.Node, key string) *yaml.Node {
@@ -500,6 +1485,24 @@ func actionsRef(cfg Config, repo Repo) string {
 	return "main"
 }
 
+func actionsFullRef(cfg Config, repo Repo) string {
+	ref := actionsRef(cfg, repo)
+	if strings.HasPrefix(ref, "refs/") {
+		return ref
+	}
+	return "refs/heads/" + ref
+}
+
+func actionsRefName(ref string) string {
+	if strings.HasPrefix(ref, "refs/heads/") {
+		return strings.TrimPrefix(ref, "refs/heads/")
+	}
+	if strings.HasPrefix(ref, "refs/tags/") {
+		return strings.TrimPrefix(ref, "refs/tags/")
+	}
+	return path.Base(ref)
+}
+
 func githubActionsRunnerLabels(cfg Config, leaseID, slug string, extra []string) []string {
 	labels := []string{
 		"crabbox",
@@ -557,6 +1560,53 @@ func readActionsHydrationState(ctx context.Context, target SSHTarget, leaseID st
 	return parseActionsHydrationState(out), nil
 }
 
+func waitForLocalActionsHydration(ctx context.Context, target SSHTarget, leaseID, expectedJob, pid string, timeout time.Duration, stderr io.Writer) (actionsHydrationState, error) {
+	if timeout <= 0 {
+		timeout = 20 * time.Minute
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		state, err := readActionsHydrationState(ctx, target, leaseID)
+		if err == nil && state.Workspace != "" {
+			if expectedJob != "" && state.Job != "" && state.Job != expectedJob {
+				return actionsHydrationState{}, exit(5, "local Actions hydration marker for %s came from job %q, expected %q", leaseID, state.Job, expectedJob)
+			}
+			if err := ensureLocalActionsRunEnv(ctx, target, leaseID, state); err != nil {
+				return actionsHydrationState{}, err
+			}
+			return state, nil
+		}
+		status, statusErr := runSSHOutput(ctx, target, remoteLocalActionsHydrateStatus(leaseID, pid))
+		if statusErr == nil && strings.HasPrefix(status, "exit=") {
+			if state, err := readActionsHydrationState(ctx, target, leaseID); err == nil && state.Workspace != "" {
+				if expectedJob != "" && state.Job != "" && state.Job != expectedJob {
+					return actionsHydrationState{}, exit(5, "local Actions hydration marker for %s came from job %q, expected %q", leaseID, state.Job, expectedJob)
+				}
+				if err := ensureLocalActionsRunEnv(ctx, target, leaseID, state); err != nil {
+					return actionsHydrationState{}, err
+				}
+				return state, nil
+			}
+			return actionsHydrationState{}, exit(7, "local Actions hydration exited before writing marker for %s: %s", leaseID, strings.TrimSpace(status))
+		}
+		if ctx.Err() != nil {
+			return actionsHydrationState{}, ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			return actionsHydrationState{}, exit(5, "timed out waiting for local Actions hydration marker for %s", leaseID)
+		}
+		fmt.Fprintf(stderr, "waiting for local Actions hydration marker id=%s...\n", leaseID)
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func ensureLocalActionsRunEnv(ctx context.Context, target SSHTarget, leaseID string, state actionsHydrationState) error {
+	if err := runSSHQuiet(ctx, target, remoteEnsureLocalActionsRunEnv(leaseID, state.EnvFile)); err != nil {
+		return exit(7, "update local Actions env handoff on %s: %v", target.Host, err)
+	}
+	return nil
+}
+
 func clearActionsHydrationState(ctx context.Context, target SSHTarget, leaseID string) error {
 	if err := runSSHQuiet(ctx, target, remoteClearActionsHydrationState(leaseID)); err != nil {
 		return exit(7, "clear GitHub Actions hydration marker on %s: %v", target.Host, err)
@@ -600,8 +1650,53 @@ func remoteReadActionsHydrationState(leaseID string) string {
 	return "cat \"$HOME\"/" + shellQuote(actionsHydrationStatePath(leaseID)) + " 2>/dev/null || true"
 }
 
+func remoteInstallLocalActionsHydrateScript(leaseID string) string {
+	path := "\"$HOME\"/" + shellQuote(actionsHydrationLocalScriptPath(leaseID))
+	return "mkdir -p \"$HOME\"/" + shellQuote(actionsHydrationDir()) + " && cat > " + path + " && chmod 700 " + path
+}
+
+func remoteStartLocalActionsHydrateScript(leaseID string) string {
+	script := "\"$HOME\"/" + shellQuote(actionsHydrationLocalScriptPath(leaseID))
+	logPath := "\"$HOME\"/" + shellQuote(actionsHydrationLocalLogPath(leaseID))
+	exitPath := "\"$HOME\"/" + shellQuote(actionsHydrationLocalExitPath(leaseID))
+	wrapper := `bash "$1" >"$2" 2>&1; printf '%s\n' "$?" >"$3"`
+	return "rm -f " + exitPath + " " + logPath + " && nohup bash -c " + shellQuote(wrapper) + " sh " + script + " " + logPath + " " + exitPath + " >/dev/null 2>&1 < /dev/null & printf '%s\\n' \"$!\""
+}
+
+func remoteLocalActionsHydrateStatus(leaseID, pid string) string {
+	exitPath := "\"$HOME\"/" + shellQuote(actionsHydrationLocalExitPath(leaseID))
+	logPath := "\"$HOME\"/" + shellQuote(actionsHydrationLocalLogPath(leaseID))
+	pid = strings.TrimSpace(pid)
+	if pid == "" {
+		pid = "-"
+	}
+	return "if [ -f " + exitPath + " ]; then printf 'exit=%s\\n' \"$(cat " + exitPath + " 2>/dev/null)\"; tail -80 " + logPath + " 2>/dev/null || true; elif kill -0 " + shellQuote(pid) + " 2>/dev/null; then printf running; else printf 'exit=unknown\\n'; tail -80 " + logPath + " 2>/dev/null || true; fi"
+}
+
+func remoteEnsureLocalActionsRunEnv(leaseID, envFile string) string {
+	envPath := "\"$HOME\"/" + shellQuote(actionsHydrationEnvPath(leaseID))
+	if strings.TrimSpace(envFile) != "" {
+		envPath = shellQuote(envFile)
+	}
+	script := `set -e
+env_file=` + envPath + `
+if [ -f "$env_file" ]; then
+  set +u
+  . "$env_file" >/dev/null 2>&1 || true
+  set -u
+  if [ -n "${RUNNER_TOOL_CACHE:-}" ] && [ -x "$RUNNER_TOOL_CACHE/node/bin/node" ] && ! grep -q '^# CRABBOX_LOCAL_ACTIONS_NODE_PATH$' "$env_file"; then
+    {
+      printf '%s\n' '# CRABBOX_LOCAL_ACTIONS_NODE_PATH'
+      printf '%s\n' 'export PATH="${RUNNER_TOOL_CACHE}/node/bin:$PATH"'
+    } >> "$env_file"
+  fi
+fi
+`
+	return "bash -lc " + shellQuote(script)
+}
+
 func remoteClearActionsHydrationState(leaseID string) string {
-	return "rm -f \"$HOME\"/" + shellQuote(actionsHydrationStatePath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationEnvPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationServicesPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationStopPath(leaseID))
+	return "rm -f \"$HOME\"/" + shellQuote(actionsHydrationStatePath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationEnvPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationServicesPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationStopPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationLocalScriptPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationLocalLogPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationLocalExitPath(leaseID))
 }
 
 func actionsHydrationStatePath(leaseID string) string {
@@ -620,12 +1715,24 @@ func actionsHydrationStopPath(leaseID string) string {
 	return actionsHydrationDir() + "/" + leaseID + ".stop"
 }
 
+func actionsHydrationLocalScriptPath(leaseID string) string {
+	return actionsHydrationDir() + "/" + leaseID + ".local.sh"
+}
+
+func actionsHydrationLocalLogPath(leaseID string) string {
+	return actionsHydrationDir() + "/" + leaseID + ".local.log"
+}
+
+func actionsHydrationLocalExitPath(leaseID string) string {
+	return actionsHydrationDir() + "/" + leaseID + ".local.exit"
+}
+
 func actionsHydrationDir() string {
 	return ".crabbox/actions"
 }
 
 func actionsRunURL(repo GitHubRepo, runID string) string {
-	if repo.Slug() == "" || runID == "" {
+	if repo.Slug() == "" || runID == "" || strings.HasPrefix(runID, "local-") {
 		return ""
 	}
 	return "https://github.com/" + repo.Slug() + "/actions/runs/" + runID

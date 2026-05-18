@@ -34,9 +34,9 @@ crabbox config show [--json]
 crabbox config path
 crabbox config set-broker --url <url> --token-stdin [--provider hetzner|aws|azure|gcp]
 crabbox warmup [--provider hetzner|aws|azure|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--code] [--tailscale] [--network auto|tailscale|public] [--profile <name>] [--slug <slug>] [--idle-timeout <duration>] [--timing-json]
-crabbox run [--id <lease-id-or-slug>] [--provider hetzner|aws|azure|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--code] [--tailscale] [--network auto|tailscale|public] [--slug <slug>] [--label <text>] [--keep-on-failure] [--shell] [--script <file>|--script-stdin] [--fresh-pr <owner/repo#number>] [--allow-env <name>] [--env-from-profile <file>] [--checksum] [--debug] [--force-sync-large] [--preflight] [--preflight-tools <tools>] [--capture-stdout <path>] [--capture-stderr <path>] [--capture-on-fail] [--download remote=local] [--timing-json] [--blacksmith-workflow <workflow>] -- <command...>
+crabbox run [--id <lease-id-or-slug>] [--provider hetzner|aws|azure|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--code] [--tailscale] [--network auto|tailscale|public] [--slug <slug>] [--label <text>] [--keep-on-failure] [--shell] [--script <file>|--script-stdin] [--fresh-pr <owner/repo#number>] [--no-hydrate] [--allow-env <name>] [--env-from-profile <file>] [--checksum] [--debug] [--force-sync-large] [--preflight] [--preflight-tools <tools>] [--capture-stdout <path>] [--capture-stderr <path>] [--capture-on-fail] [--download remote=local] [--timing-json] [--blacksmith-workflow <workflow>] -- <command...>
 crabbox job list
-crabbox job run [--id <lease-id-or-slug>] [--dry-run] [--no-hydrate] [--stop auto|always|success|failure|never] <name>
+crabbox job run [--id <lease-id-or-slug>] [--dry-run] [--no-hydrate] [--github-runner] [--stop auto|always|success|failure|never] <name>
 crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] [--egress <profile>] [--webvnc] [--open] [-- <command...>]
 crabbox desktop terminal --id <lease-id-or-slug> [--font-size <n>] [--cols <n>] [--rows <n>] [--sixel] [--screenshot <path>] [--record <path>] [--publish-pr <n>] [-- <command...>]
 crabbox desktop proof --id <lease-id-or-slug> [--output <dir>] [--publish-pr <n>] [-- <command...>]
@@ -69,7 +69,7 @@ crabbox results <run-id> [--json]
 crabbox cache stats --id <lease-id-or-slug> [--json]
 crabbox cache purge --id <lease-id-or-slug> --kind pnpm|npm|docker|git|all --force
 crabbox cache warm --id <lease-id-or-slug> -- <command...>
-crabbox actions hydrate --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--workflow <file|name|id>] [--job <name>] [--wait-timeout <duration>] [--timing-json]
+crabbox actions hydrate --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--workflow <file|name|id>] [--job <name>] [--github-runner] [--wait-timeout <duration>] [--timing-json]
 crabbox actions register --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--repo owner/name]
 crabbox actions dispatch [--workflow <file|name|id>] [-f key=value]
 crabbox capsule from-actions <run-url> --replay '<command>' [--output <dir>]
@@ -159,7 +159,7 @@ crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm te
 crabbox stop blue-lobster
 ```
 
-Hydrate through GitHub Actions, then run local dirty work in the hydrated workspace:
+Hydrate from the repo workflow, then run local dirty work in the hydrated workspace:
 
 ```sh
 crabbox warmup

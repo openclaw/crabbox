@@ -46,6 +46,37 @@ func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesJobHydrateGitHubRunner(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte("jobs:\n  smoke:\n    hydrate:\n      actions: true\n      githubRunner: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Jobs map[string]struct {
+			Hydrate struct {
+				GitHubRunner bool `json:"githubRunner"`
+			} `json:"hydrate"`
+		} `json:"jobs"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Jobs["smoke"].Hydrate.GitHubRunner {
+		t.Fatalf("json jobs.smoke.hydrate.githubRunner=false in %s", stdout.String())
+	}
+}
+
 func TestConfigShowIncludesCloudflareWithoutSecret(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

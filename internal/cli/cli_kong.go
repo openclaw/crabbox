@@ -361,7 +361,7 @@ type adminDeleteKongCmd struct {
 }
 
 type actionsKongCmd struct {
-	Hydrate  actionsHydrateKongCmd  `cmd:"" passthrough:"" help:"Register a runner, dispatch the hydrate workflow, wait for readiness."`
+	Hydrate  actionsHydrateKongCmd  `cmd:"" passthrough:"" help:"Hydrate a lease from the configured repo workflow."`
 	Register actionsRegisterKongCmd `cmd:"" passthrough:"" help:"Register an existing Linux lease as a GitHub Actions runner."`
 	Dispatch actionsDispatchKongCmd `cmd:"" passthrough:"" help:"Dispatch the configured GitHub Actions workflow."`
 }

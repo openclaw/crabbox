@@ -366,6 +366,7 @@ type JobConfig struct {
 
 type JobHydrateConfig struct {
 	Actions          bool
+	GitHubRunner     bool
 	WaitTimeout      time.Duration
 	KeepAliveMinutes int
 }
@@ -1076,6 +1077,7 @@ type fileJobConfig struct {
 
 type fileJobHydrateConfig struct {
 	Actions          *bool  `yaml:"actions,omitempty"`
+	GitHubRunner     *bool  `yaml:"githubRunner,omitempty"`
 	WaitTimeout      string `yaml:"waitTimeout,omitempty"`
 	KeepAliveMinutes int    `yaml:"keepAliveMinutes,omitempty"`
 }
@@ -2034,6 +2036,9 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 	if file.Hydrate != nil {
 		if file.Hydrate.Actions != nil {
 			job.Hydrate.Actions = *file.Hydrate.Actions
+		}
+		if file.Hydrate.GitHubRunner != nil {
+			job.Hydrate.GitHubRunner = *file.Hydrate.GitHubRunner
 		}
 		if file.Hydrate.WaitTimeout != "" {
 			if duration, err := time.ParseDuration(file.Hydrate.WaitTimeout); err == nil {

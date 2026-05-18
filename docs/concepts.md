@@ -119,10 +119,10 @@ creating a new one. Both `warmup` (idempotent) and `run` accept `--id`.
 created in repo A can be reused from repo B. Required because Crabbox
 binds leases to repos by default.
 
-**hydrate** - prepare a runner with project dependencies, usually by
-dispatching a real GitHub Actions job that registers an ephemeral
-self-hosted runner. The CLI then runs the local command in the hydrated
-workspace. See [Actions hydration](features/actions-hydration.md).
+**hydrate** - prepare a runner with project dependencies from a repo-owned
+workflow. The default path executes supported setup steps over SSH; the
+GitHub-runner fallback dispatches a real Actions job when full GitHub semantics
+are required. See [Actions hydration](features/actions-hydration.md).
 
 ## State
 

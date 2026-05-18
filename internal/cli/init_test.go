@@ -50,6 +50,7 @@ func TestInitProjectWritesExpectedFiles(t *testing.T) {
 		"crabbox_job:",
 		"ENV_FILE=${env_file}",
 		"SERVICES_FILE=${services_file}",
+		"GITHUB_JOB",
 		"RUNNER_TOOL_CACHE",
 	} {
 		if !strings.Contains(string(workflow), want) {
