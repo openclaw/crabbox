@@ -443,6 +443,12 @@ func rejectRailwayRunOptions(req RunRequest) error {
 	if req.FullResync {
 		return exit(2, "provider=%s does not support sync; --full-resync is rejected", providerName)
 	}
+	if req.ShellMode {
+		return exit(2, "provider=%s runs the Railway service start command; --shell is not supported", providerName)
+	}
+	if len(req.Env) > 0 || req.EnvSummary {
+		return exit(2, "provider=%s cannot forward per-run environment variables", providerName)
+	}
 	return nil
 }
 

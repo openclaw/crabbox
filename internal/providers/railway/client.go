@@ -406,7 +406,16 @@ func (c *railwayClient) StopDeployment(ctx context.Context, deploymentID string)
 	if deploymentID == "" {
 		return fmt.Errorf("stopDeployment: deploymentId is required")
 	}
-	return c.do(ctx, deploymentStopMutation, map[string]any{"id": deploymentID}, nil)
+	var out struct {
+		DeploymentStop bool `json:"deploymentStop"`
+	}
+	if err := c.do(ctx, deploymentStopMutation, map[string]any{"id": deploymentID}, &out); err != nil {
+		return err
+	}
+	if !out.DeploymentStop {
+		return fmt.Errorf("deploymentStop returned false")
+	}
+	return nil
 }
 
 // railwayListServicesPageSize bounds the number of projects (and the services

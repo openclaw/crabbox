@@ -260,6 +260,9 @@ func TestRailwayRunRejectsLeaseFlags(t *testing.T) {
 	}{
 		{name: "keep", req: RunRequest{ID: "svc-1", Keep: true, NoSync: true, Command: []string{"pnpm", "test"}}, want: "--keep"},
 		{name: "reclaim", req: RunRequest{ID: "svc-1", Reclaim: true, NoSync: true, Command: []string{"pnpm", "test"}}, want: "--reclaim"},
+		{name: "shell", req: RunRequest{ID: "svc-1", ShellMode: true, NoSync: true, Command: []string{"pnpm test"}}, want: "--shell"},
+		{name: "env", req: RunRequest{ID: "svc-1", NoSync: true, Env: map[string]string{"TOKEN": "secret"}, Command: []string{"pnpm", "test"}}, want: "environment"},
+		{name: "env summary", req: RunRequest{ID: "svc-1", NoSync: true, EnvSummary: true, Command: []string{"pnpm", "test"}}, want: "environment"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := &railwayBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
@@ -268,6 +271,25 @@ func TestRailwayRunRejectsLeaseFlags(t *testing.T) {
 				t.Fatalf("err = %v, want %s rejection", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestRailwayClientRejectsFalseStopDeploymentResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"data":{"deploymentStop":false}}`)
+	}))
+	defer server.Close()
+
+	cfg := Config{}
+	cfg.Railway.APIToken = "test-token"
+	cfg.Railway.APIURL = server.URL
+	client, err := newRailwayClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.StopDeployment(context.Background(), "dep-1")
+	if err == nil || !strings.Contains(err.Error(), "deploymentStop returned false") {
+		t.Fatalf("err = %v, want false stop error", err)
 	}
 }
 
