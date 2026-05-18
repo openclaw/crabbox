@@ -84,6 +84,14 @@ func (b *exeDevLeaseBackend) List(ctx context.Context, req ListRequest) ([]Lease
 	return b.listServers(ctx, req.All)
 }
 
+func (b *exeDevLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+	servers, err := b.List(ctx, ListRequest{})
+	if err != nil {
+		return DoctorResult{}, err
+	}
+	return cliDoctorResult(providerName, len(servers), "unchecked"), nil
+}
+
 func (b *exeDevLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	name := strings.TrimSpace(req.Lease.Server.Name)
 	if name == "" {

@@ -49,6 +49,30 @@ func TestExeDevListFiltersCrabboxVMsByDefault(t *testing.T) {
 	}
 }
 
+func TestExeDevDoctorListsInventory(t *testing.T) {
+	runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		got := strings.Join(req.Args, " ")
+		if !strings.Contains(got, "exe.dev ls --l --json") {
+			t.Fatalf("args=%v", req.Args)
+		}
+		if strings.Contains(got, " new ") || strings.Contains(got, " rm ") {
+			t.Fatalf("doctor used mutating command: %v", req.Args)
+		}
+		return LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running"}]}`}, nil
+	}}
+	doctor, err := Provider{}.ConfigureDoctor(Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := doctor.Doctor(context.Background(), DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Provider != providerName || !strings.Contains(result.Message, "cli=ready") || !strings.Contains(result.Message, "api=list") || !strings.Contains(result.Message, "leases=1") {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
 func TestExeDevCreateVMUsesSSHControlAPI(t *testing.T) {
 	runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		got := strings.Join(req.Args, " ")

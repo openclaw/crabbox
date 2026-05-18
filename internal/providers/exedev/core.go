@@ -14,6 +14,8 @@ type ExeDevConfig = core.ExeDevConfig
 type ProviderSpec = core.ProviderSpec
 type Runtime = core.Runtime
 type Backend = core.Backend
+type DoctorRequest = core.DoctorRequest
+type DoctorResult = core.DoctorResult
 type AcquireRequest = core.AcquireRequest
 type ResolveRequest = core.ResolveRequest
 type ListRequest = core.ListRequest
@@ -104,4 +106,8 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 
 func bootstrapWaitTimeout(cfg Config) time.Duration {
 	return core.BootstrapWaitTimeout(cfg)
+}
+
+func cliDoctorResult(provider string, leases int, runtime string) DoctorResult {
+	return core.CLIDoctorResult(provider, leases, runtime)
 }
