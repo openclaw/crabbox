@@ -6,6 +6,7 @@
 
 - Added a thin macOS developer-tools image mint wrapper that keeps paid host allocation explicit while wiring the reusable prep script, promotion, checkpoint proof, and lifecycle evidence defaults.
 - Added a light/dark mode toggle to the Crabbox documentation site that defaults to the system color scheme, persists the choice in local storage, and applies before first paint to avoid a flash.
+- Added `scripts/openclaw-config-compat.sh`, an OpenClaw config compatibility smoke that leases a Linux box, installs a baseline OpenClaw version, stages a source-controlled config snapshot, then upgrades to a target version and reports whether `openclaw doctor` is required to migrate the config.
 
 ### Changed
 
