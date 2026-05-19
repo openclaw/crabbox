@@ -6,6 +6,8 @@ $NodeVersion = $env:CRABBOX_WINDOWS_NODE_VERSION
 if (-not $NodeVersion) { $NodeVersion = "24.11.1" }
 $PnpmVersion = $env:CRABBOX_WINDOWS_PNPM_VERSION
 if (-not $PnpmVersion) { $PnpmVersion = "11.1.0" }
+$DockerVersion = $env:CRABBOX_WINDOWS_DOCKER_VERSION
+if (-not $DockerVersion) { $DockerVersion = "29.5.1" }
 $DockerImages = $env:CRABBOX_WINDOWS_DOCKER_IMAGES
 if (-not $DockerImages) { $DockerImages = "mcr.microsoft.com/windows/servercore:ltsc2022" }
 $InstallDocker = $env:CRABBOX_WINDOWS_INSTALL_DOCKER
@@ -54,6 +56,7 @@ function Refresh-SessionPath {
   Add-MachinePath "C:\Python313\Scripts"
   Add-MachinePath "C:\Program Files\nodejs"
   Add-MachinePath "C:\ProgramData\crabbox\pnpm"
+  Add-MachinePath "C:\Program Files\docker"
 }
 
 function Install-Chocolatey {
@@ -89,6 +92,24 @@ function Enable-CorepackPnpm {
   & corepack prepare "pnpm@$PnpmVersion" --activate
 }
 
+function Install-StaticDockerEngine {
+  $dockerBin = Join-Path $env:ProgramFiles "docker"
+  $dockerd = Join-Path $dockerBin "dockerd.exe"
+  $dockerExe = Join-Path $dockerBin "docker.exe"
+  if (-not (Test-Path $dockerd) -or -not (Test-Path $dockerExe)) {
+    $zip = Join-Path $env:TEMP "docker-$DockerVersion.zip"
+    $url = "https://download.docker.com/win/static/stable/x86_64/docker-$DockerVersion.zip"
+    Write-Log "installing Docker Engine $DockerVersion"
+    Retry { Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing }
+    Expand-Archive -Path $zip -DestinationPath $env:ProgramFiles -Force
+  }
+  Add-MachinePath $dockerBin
+  Refresh-SessionPath
+  if (-not (Get-Service -Name docker -ErrorAction SilentlyContinue)) {
+    & $dockerd --register-service
+  }
+}
+
 function Install-DockerEngine {
   if ($InstallDocker -ne "1") { return }
   Write-Log "installing Windows container support and Docker Engine"
@@ -109,15 +130,7 @@ function Install-DockerEngine {
     Write-Log "Docker Engine will be installed after reboot"
     return
   }
-  if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
-  }
-  if (-not (Get-Module -ListAvailable -Name DockerMsftProvider)) {
-    Install-Module -Name DockerMsftProvider -Repository PSGallery -Force | Out-Null
-  }
-  if (-not (Get-Service -Name docker -ErrorAction SilentlyContinue)) {
-    Install-Package -Name docker -ProviderName DockerMsftProvider -Force | Out-Null
-  }
+  Install-StaticDockerEngine
   Set-Service -Name docker -StartupType Automatic
   try {
     Start-Service docker

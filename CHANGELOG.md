@@ -21,6 +21,7 @@
 - Fixed Windows developer-image bakes so the Docker Containers feature can interrupt SSH without aborting the image mint, as long as the reboot marker is present.
 - Fixed Windows developer-image warmup proof so the mint wrapper keeps the source lease alive with an SSH command instead of waiting on stale coordinator readiness.
 - Fixed Windows developer-image prep so fresh Chocolatey and Node shims are visible in the active PowerShell session, and first-pass Docker feature installs exit cleanly before final tool verification.
+- Fixed Windows developer-image Docker Engine installation to use static Docker binaries instead of the stale DockerMsftProvider package feed.
 - Fixed AWS developer-image bakes behind configured security groups so coordinator heartbeats still refresh the configured Crabbox SSH ports, and aligned the Worker Windows bootstrap ordering with the CLI path.
 
 ## 0.16.0 - 2026-05-18
