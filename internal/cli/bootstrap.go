@@ -783,7 +783,7 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 		return `    echo "tailscale requested but no auth key was injected" >&2
     exit 1`
 	}
-	return `    retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'
+	tailscaleUpScript := `    retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'
     systemctl enable --now tailscaled || service tailscaled start || true
     install -d -m 0750 -o ` + sshUserOwner + ` -g ` + sshUserGroup + ` /var/lib/crabbox
     set +x
@@ -809,4 +809,100 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
     fi
     chown ` + sshUserChown + ` /var/lib/crabbox/tailscale-* || true
     chmod 0640 /var/lib/crabbox/tailscale-* || true`
+	if crew := normalizeCrewName(cfg.Crew); crew != "" {
+		tailscaleUpScript += "\n" + cloudInitCrewHostsBootstrap(cfg.Crew)
+	}
+	return tailscaleUpScript
+}
+
+// cloudInitCrewHostsBootstrap installs /usr/local/bin/crabbox-crew-hosts and a
+// systemd timer that rewrites /etc/hosts.cbx plus a managed /etc/hosts block
+// every 30s with one entry per crew peer reachable on the local tailnet. Peers
+// are discovered purely from the box-local `tailscale status --json` output
+// filtered by the crew ACL tag, so the broker never sees a Tailscale
+// credential. Each peer renders as `<tailnet-ipv4> <slug>.box` where `<slug>`
+// is the suffix of the `crabbox-<slug>` hostname template every
+// Tailscale-capable provider already uses.
+func cloudInitCrewHostsBootstrap(crew string) string {
+	tag := crewTailscaleTag(localCoordinatorOwner(), crew)
+	if tag == "" {
+		return ""
+	}
+	hostsFile := shellQuote(crewHostsFile)
+	tagLiteral := shellQuote(tag)
+	systemHostsFile := shellQuote("/etc/hosts")
+	return `    install -m 0644 /dev/null ` + hostsFile + ` || true
+    cat >/usr/local/bin/crabbox-crew-hosts <<'CREWHOSTS'
+#!/bin/sh
+set -eu
+TAG="$1"
+OUT="$2"
+SYSTEM_HOSTS="${3:-/etc/hosts}"
+TMP="$(mktemp)"
+trap 'rm -f "$TMP" "$TMP".raw "$TMP".hosts' EXIT
+if ! tailscale status --json >"$TMP".raw 2>/dev/null; then
+  exit 0
+fi
+jq -r --arg tag "$TAG" '
+  [(.Peer // {}) | to_entries[] | .value]
+  | map(select((.Tags // []) | index($tag)))
+  | map({ ip: ((.TailscaleIPs // [])[0] // ""), host: ((.HostName // "") | sub("^crabbox-"; "")) })
+  | map(select(.ip != "" and .host != ""))
+  | unique_by(.ip)
+  | .[]
+  | "\(.ip) \(.host).box"
+' "$TMP".raw > "$TMP"
+printf '# managed by crabbox-crew-hosts; do not edit\n' >"$OUT".new
+cat "$TMP" >>"$OUT".new
+mv "$OUT".new "$OUT"
+chmod 0644 "$OUT"
+BEGIN="# crabbox crew hosts begin"
+END="# crabbox crew hosts end"
+if [ -f "$SYSTEM_HOSTS" ]; then
+  awk -v begin="$BEGIN" -v end="$END" '
+    $0 == begin { skip = 1; next }
+    $0 == end { skip = 0; next }
+    !skip { print }
+  ' "$SYSTEM_HOSTS" >"$TMP".hosts
+else
+  : >"$TMP".hosts
+fi
+{
+  cat "$TMP".hosts
+  printf '%s\n' "$BEGIN"
+  cat "$TMP"
+  printf '%s\n' "$END"
+} >"$SYSTEM_HOSTS".new
+mv "$SYSTEM_HOSTS".new "$SYSTEM_HOSTS"
+chmod 0644 "$SYSTEM_HOSTS"
+CREWHOSTS
+    chmod 0755 /usr/local/bin/crabbox-crew-hosts
+    cat >/etc/systemd/system/crabbox-crew-hosts.service <<'CREWUNIT'
+[Unit]
+Description=Refresh Crabbox crew peer hostnames
+After=tailscaled.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/crabbox-crew-hosts ` + tag + ` ` + crewHostsFile + ` /etc/hosts
+CREWUNIT
+    cat >/etc/systemd/system/crabbox-crew-hosts.timer <<'CREWTIMER'
+[Unit]
+Description=Refresh Crabbox crew hostnames every ` + crewHostsRefreshPeriod + `
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=` + crewHostsRefreshPeriod + `
+AccuracySec=2s
+Unit=crabbox-crew-hosts.service
+
+[Install]
+WantedBy=timers.target
+CREWTIMER
+    systemctl daemon-reload
+    systemctl enable --now crabbox-crew-hosts.timer
+    /usr/local/bin/crabbox-crew-hosts ` + tagLiteral + ` ` + hostsFile + ` ` + systemHostsFile + ` || true
+    test -f ` + hostsFile + `
+`
 }

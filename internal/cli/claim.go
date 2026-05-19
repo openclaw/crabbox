@@ -13,6 +13,7 @@ type leaseClaim struct {
 	LeaseID            string `json:"leaseID"`
 	Slug               string `json:"slug,omitempty"`
 	Provider           string `json:"provider,omitempty"`
+	Crew               string `json:"crew,omitempty"`
 	RepoRoot           string `json:"repoRoot"`
 	ClaimedAt          string `json:"claimedAt"`
 	LastUsedAt         string `json:"lastUsedAt"`
@@ -32,6 +33,10 @@ func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, 
 }
 
 func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderWithCrew(leaseID, slug, provider, "", repoRoot, idleTimeout, reclaim)
+}
+
+func claimLeaseForRepoProviderWithCrew(leaseID, slug, provider, crew, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	if leaseID == "" || repoRoot == "" {
 		return nil
 	}
@@ -54,6 +59,9 @@ func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTim
 	existing.Slug = slug
 	if provider != "" {
 		existing.Provider = provider
+	}
+	if crew = normalizeCrewName(crew); crew != "" {
+		existing.Crew = crew
 	}
 	existing.RepoRoot = repoRoot
 	existing.LastUsedAt = now

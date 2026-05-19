@@ -1,12 +1,24 @@
 # Changelog
 
-## 0.16.1 - Unreleased
+## Unreleased
 
 ### Added
 
 - Added a thin macOS developer-tools image mint wrapper that keeps paid host allocation explicit while wiring the reusable prep script, promotion, checkpoint proof, and lifecycle evidence defaults.
 - Added AWS Linux and Windows developer-image prep scripts plus a guarded mint wrapper for baking Docker, Node 24, pnpm, GitHub CLI, and common developer tooling into fast-booting Crabbox AMIs.
 - Added a light/dark mode toggle to the Crabbox documentation site that defaults to the system color scheme, persists the choice in local storage, and applies before first paint to avoid a flash.
+- Added `--crew <name>` for `crabbox warmup`/`run` plus `crabbox list --crew
+  <name>` so related leases share a reserved `crew` provider label and can be
+  selected together. On Tailscale-capable providers (Hetzner, Azure, GCP
+  managed Linux) the CLI advertises one extra ACL tag
+  `tag:cbx-crew-<owner>-<crew>` when the box joins the tailnet, and cloud-init
+  installs a 30s systemd timer that rewrites `/etc/hosts.cbx` and a managed
+  `/etc/hosts` block from `tailscale status --json` so peers are reachable as
+  `<slug>.box`. `crabbox doctor --crew <name>` verifies the one-time concrete
+  crew grants or ACL row when `TS_API_KEY` is exported and skips with a hint otherwise;
+  non-Tailscale providers honor the label as metadata and `doctor --crew`
+  reports the missing plane. See `docs/features/crew.md` for the one-time
+  policy snippet.
 
 ### Changed
 

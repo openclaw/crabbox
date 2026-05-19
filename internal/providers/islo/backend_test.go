@@ -187,6 +187,36 @@ func TestIsloCreateSandboxPassesRelativeWorkdirToProvider(t *testing.T) {
 	}
 }
 
+func TestIsloCreateSandboxStoresCrewClaimForList(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
+	backend := &isloBackend{
+		cfg: Config{
+			Crew: "Alpha Crew",
+			Islo: IsloConfig{Workdir: "team/repo"},
+		},
+		rt: Runtime{Stderr: io.Discard},
+	}
+	leaseID, _, slug, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("resolve claim ok=%t err=%v", ok, err)
+	}
+	if claim.Crew != "alpha-crew" {
+		t.Fatalf("claim crew=%q want alpha-crew", claim.Crew)
+	}
+	server := isloSandboxToServer(&gosdk.SandboxResponse{Name: client.createName, Status: "running"})
+	if server.Labels["crew"] != "alpha-crew" {
+		t.Fatalf("server crew label=%q labels=%#v", server.Labels["crew"], server.Labels)
+	}
+	if server.Labels["slug"] != normalizeLeaseSlug(slug) {
+		t.Fatalf("server slug=%q want %q", server.Labels["slug"], normalizeLeaseSlug(slug))
+	}
+}
+
 func TestIsloSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

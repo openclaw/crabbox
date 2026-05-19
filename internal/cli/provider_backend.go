@@ -207,6 +207,7 @@ type LeaseOptions struct {
 	TargetOS      string
 	WindowsMode   string
 	Class         string
+	Crew          string
 	ServerType    string
 	IdleTimeout   time.Duration
 	TTL           time.Duration
@@ -463,6 +464,7 @@ func leaseOptionsFromConfig(cfg Config) LeaseOptions {
 		TargetOS:      cfg.TargetOS,
 		WindowsMode:   cfg.WindowsMode,
 		Class:         cfg.Class,
+		Crew:          normalizeCrewName(cfg.Crew),
 		ServerType:    cfg.ServerType,
 		IdleTimeout:   cfg.IdleTimeout,
 		TTL:           cfg.TTL,
