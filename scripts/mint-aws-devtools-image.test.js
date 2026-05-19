@@ -168,7 +168,7 @@ test("AWS devtools mint wrapper maps windows flags", async () => {
   assert.doesNotMatch(log, /--desktop/);
   assert.doesNotMatch(log, /--browser/);
   assert.doesNotMatch(log, /warmup .*--region us-east-1/);
-  assert.match(log, /status --provider aws --target windows --id cbx_source --wait --wait-timeout 15m/);
+  assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- Write-Output "windows-ssh-ready"/);
   assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- New-Item/);
   assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- Add-Content/);
   assert.match(log, /FromBase64String/);
@@ -202,7 +202,7 @@ test("AWS devtools mint wrapper reboots windows source when prep requires it", a
   const log = await readFile(fake.log, "utf8");
   assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- if \(Test-Path/);
   assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- shutdown \/r \/t 5 \/f/);
-  assert.match(log, /status --provider aws --target windows --id cbx_source --wait --wait-timeout 25m/);
+  assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- Write-Output "windows-ssh-ready"/);
   assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- Add-Content/);
   assert.match(log, /FromBase64String/);
 });
@@ -234,7 +234,7 @@ test("AWS devtools mint wrapper recovers windows prep disconnects with reboot ma
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stderr, /Windows prep command disconnected; checking whether a planned Docker reboot is pending/);
   const log = await readFile(fake.log, "utf8");
-  assert.match(log, /status --provider aws --target windows --id cbx_source --wait --wait-timeout 25m/);
+  assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- Write-Output "windows-ssh-ready"/);
   assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- if \(Test-Path/);
   assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- shutdown \/r \/t 5 \/f/);
   assert.match(log, /image create --id cbx_source --name crabbox-windows-devtools-/);

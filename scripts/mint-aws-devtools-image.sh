@@ -196,6 +196,32 @@ run_cmd() {
   "$@"
 }
 
+duration_seconds() {
+  case "$1" in
+    *h) printf '%s\n' "$((${1%h} * 3600))" ;;
+    *m) printf '%s\n' "$((${1%m} * 60))" ;;
+    *s) printf '%s\n' "${1%s}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+wait_windows_ssh_probe() {
+  local lease="$1"
+  local timeout_value="$2"
+  local deadline
+  deadline=$((SECONDS + $(duration_seconds "$timeout_value")))
+  while true; do
+    if run_cmd "$CRABBOX_BIN" run --provider aws --target windows --id "$lease" --no-sync --shell -- 'Write-Output "windows-ssh-ready"' >&2; then
+      return 0
+    fi
+    if ((SECONDS >= deadline)); then
+      printf 'Windows SSH probe did not succeed within %s\n' "$timeout_value" >&2
+      return 1
+    fi
+    sleep 15
+  done
+}
+
 warmup_args() {
   printf '%s\0' warmup --provider aws --target "$target" --class "$server_class" --market on-demand --ttl "$ttl" --idle-timeout "$idle_timeout" --timing-json
   [[ -n "$server_type" ]] && printf '%s\0' --type "$server_type"
@@ -251,7 +277,7 @@ warmup() {
   fi
   if [[ "$target" == "windows" ]]; then
     sleep "$windows_warmup_settle_seconds"
-    if ! run_cmd "$CRABBOX_BIN" status --provider aws --target windows --id "$lease" --wait --wait-timeout "$windows_warmup_wait_timeout" >&2; then
+    if ! wait_windows_ssh_probe "$lease" "$windows_warmup_wait_timeout"; then
       [[ "$keep_lease" == "1" ]] || run_cmd "$CRABBOX_BIN" stop --provider aws --target windows "$lease" >&2 || true
       return 1
     fi
@@ -354,7 +380,7 @@ windows_reboot_required() {
 recover_windows_prep_disconnect() {
   local lease="$1"
   printf 'Windows prep command disconnected; checking whether a planned Docker reboot is pending\n' >&2
-  if ! run_cmd "$CRABBOX_BIN" status --provider aws --target windows --id "$lease" --wait --wait-timeout "$reboot_wait_timeout" >&2; then
+  if ! wait_windows_ssh_probe "$lease" "$reboot_wait_timeout"; then
     return 1
   fi
   if windows_reboot_required "$lease"; then
@@ -373,7 +399,7 @@ reboot_windows_source_if_needed() {
   printf 'Windows source lease requires reboot before Docker image pull/proof\n' >&2
   run_cmd "$CRABBOX_BIN" run --provider aws --target windows --id "$lease" --no-sync --shell -- 'shutdown /r /t 5 /f; Write-Output "reboot scheduled"'
   sleep "$reboot_settle_seconds"
-  run_cmd "$CRABBOX_BIN" status --provider aws --target windows --id "$lease" --wait --wait-timeout "$reboot_wait_timeout"
+  wait_windows_ssh_probe "$lease" "$reboot_wait_timeout"
   run_prep "$lease"
   if windows_reboot_required "$lease"; then
     printf 'Windows prep still requires reboot after one reboot cycle\n' >&2
