@@ -94,6 +94,16 @@ func filterJSONListViewByCrew(view any, crew string) any {
 	if !ok {
 		return view
 	}
+	hasLabels := false
+	for _, entry := range entries {
+		if extractLabelMap(entry) != nil {
+			hasLabels = true
+			break
+		}
+	}
+	if !hasLabels {
+		return view
+	}
 	kept := make([]any, 0, len(entries))
 	for _, entry := range entries {
 		labels := extractLabelMap(entry)

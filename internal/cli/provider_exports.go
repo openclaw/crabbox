@@ -24,6 +24,10 @@ func ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTim
 	return claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
 }
 
+func ClaimLeaseForRepoProviderWithCrew(leaseID, slug, provider, crew, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderWithCrew(leaseID, slug, provider, crew, repoRoot, idleTimeout, reclaim)
+}
+
 func ResolveLeaseClaim(identifier string) (LeaseClaim, bool, error) {
 	return resolveLeaseClaim(identifier)
 }

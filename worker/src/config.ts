@@ -206,7 +206,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
 
 // normalizeCrewName mirrors the Go-side helper in internal/cli/crew.go. The
 // `crew` label is a reserved provider-label key that groups N leases so peers
-// can be selected by `--crew <name>` on existing verbs (list, status, stop).
+// can be selected by `crabbox list --crew <name>`.
 export function normalizeCrewName(value: string): string {
   return value
     .toLowerCase()

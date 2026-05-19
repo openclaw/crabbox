@@ -6,8 +6,8 @@ import (
 
 // crewLabelKey is the reserved provider-label key used to group leases into a
 // crew. The key is part of the provider label index that every direct and
-// brokered backend already writes, so existing list/status/release paths can
-// filter by `--crew <name>` without growing a new verb tree.
+// brokered backend already writes, so `list --crew <name>` can select peers
+// without growing a new verb tree.
 //
 // The label is emergent: there is no top-level crew object. A crew exists for
 // as long as at least one active lease carries this label.
@@ -15,19 +15,18 @@ const crewLabelKey = "crew"
 
 // crewTailscaleTagPrefix is the ACL tag namespace used for crew peers. Every
 // member of crew `<name>` owned by `<owner>` is advertised as
-// `tag:cbx-crew-<owner>-<name>` so a single ACL row gates the whole
-// `tag:cbx-crew-*` namespace.
+// `tag:cbx-crew-<owner>-<name>` so one concrete ACL row gates that crew.
 const crewTailscaleTagPrefix = "tag:cbx-crew-"
 
 // crewHostsFile is written on every Tailscale-capable Linux peer. A timer
-// refreshes it every 30s from the box-local `tailscale status --json` output,
-// so peers stay reachable as `<slug>.box` without the broker ever seeing a
-// Tailscale credential.
+// refreshes it and a managed /etc/hosts block every 30s from the box-local
+// `tailscale status --json` output, so peers stay reachable as `<slug>.box`
+// without the broker ever seeing a Tailscale credential.
 const crewHostsFile = "/etc/hosts.cbx"
 
 // crewHostsRefreshPeriod is the refresh cadence baked into the systemd timer
-// that rewrites /etc/hosts.cbx. Kept low so a new peer is discoverable within
-// a single user-visible interaction window.
+// that rewrites crew host entries. Kept low so a new peer is discoverable
+// within a single user-visible interaction window.
 const crewHostsRefreshPeriod = "30s"
 
 // maxRequestedCrewNameLength bounds the user-visible portion of the label.

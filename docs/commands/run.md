@@ -202,8 +202,9 @@ Use `--crew <name>` to tag a new lease into a named crew. Crew is a reserved
 provider label that groups peers, and `crabbox list --crew <name>` selects
 them as a set. With `--tailscale` on a Tailscale-capable provider the CLI
 also advertises a `tag:cbx-crew-<owner>-<name>` ACL tag and cloud-init keeps
-`/etc/hosts.cbx` in sync every 30 seconds so peers reach each other as
-`<slug>.box`. See [`docs/features/crew.md`](../features/crew.md).
+`/etc/hosts.cbx` plus a managed `/etc/hosts` block in sync every 30 seconds so
+peers reach each other as `<slug>.box`. See
+[`docs/features/crew.md`](../features/crew.md).
 
 Use `--capture-stdout <path>` when stdout is binary or terminal-hostile. Crabbox
 writes the remote stdout bytes directly to the local file, leaves stderr on the

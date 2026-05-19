@@ -35,9 +35,10 @@ Use `--crew <name>` to tag a new lease into a named crew. The crew name is
 stored on the lease as a reserved provider label, and `crabbox list --crew
 <name>` filters by it. When combined with `--tailscale` on a Tailscale-capable
 provider, the CLI also advertises a `tag:cbx-crew-<owner>-<name>` ACL tag and
-cloud-init refreshes `/etc/hosts.cbx` every 30 seconds so peers are reachable
-as `<slug>.box`. See [`docs/features/crew.md`](../features/crew.md) for the
-one-time policy snippet and the doctor coverage.
+cloud-init refreshes `/etc/hosts.cbx` plus a managed `/etc/hosts` block every
+30 seconds so peers are reachable as `<slug>.box`. See
+[`docs/features/crew.md`](../features/crew.md) for the one-time policy snippet
+and the `doctor --crew` coverage.
 
 With `--provider blacksmith-testbox`, the canonical ID is the Blacksmith `tbx_...` ID returned by `blacksmith testbox warmup`; Crabbox still assigns and stores a local slug for reuse.
 

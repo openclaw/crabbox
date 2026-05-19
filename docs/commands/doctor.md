@@ -9,6 +9,7 @@ crabbox doctor
 crabbox doctor --provider aws
 crabbox doctor --profile live-qa --id blue-lobster
 crabbox doctor --provider hetzner --target linux
+crabbox doctor --provider hetzner --crew alpha
 crabbox doctor --provider ssh --target windows --windows-mode normal --static-host win-dev.local
 crabbox doctor --json
 ```
@@ -44,6 +45,13 @@ what was checked. GCP uses an aggregated Compute Engine inventory query across
 zones, while the other built-in providers use their cheapest non-mutating list
 or readiness API. Blacksmith Testbox reports runtime as provider-hydrated
 because GitHub Actions hydration is owned by Testbox.
+
+Use `--crew <name>` to verify the Tailscale policy row for a crew before
+warming peers with `--tailscale`. The check confirms the concrete
+`tag:cbx-crew-<owner>-<crew>` tag is declared in `tagOwners` and allowed to
+reach itself through either `grants` or legacy `acls`. It reads the policy only
+when `TS_API_KEY` is exported; without that env var it skips with a hint. Plain
+`crabbox doctor` does not call the Tailscale ACL API.
 
 When `--profile <name> --id <lease>` selects a profile with `doctor.enabled:
 true`, doctor runs that profile's remote prerequisite contract instead of the
@@ -100,6 +108,7 @@ the exit code.
 ```text
 --provider hetzner|aws|azure|gcp|proxmox|ssh   provider to validate
 --profile <name>             configured profile for remote prereq checks
+--crew <name>                verify Tailscale ACL setup for this crew
 --json                       print JSON
 --doctor-probe-ssh           probe static SSH reachability
 --target linux|macos|windows target OS for ssh provider checks

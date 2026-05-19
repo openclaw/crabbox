@@ -26,6 +26,31 @@ func TestClaimLeaseForRepoWritesAndUpdatesClaim(t *testing.T) {
 	}
 }
 
+func TestClaimLeaseForRepoProviderStoresCrew(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := claimLeaseForRepoProviderWithCrew("isb_crabbox-test", "web", "islo", "Alpha Crew", repo, 30*time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := readLeaseClaim("isb_crabbox-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Crew != "alpha-crew" {
+		t.Fatalf("crew=%q want alpha-crew", claim.Crew)
+	}
+	if err := claimLeaseForRepoProvider("isb_crabbox-test", "web", "islo", repo, 30*time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err = readLeaseClaim("isb_crabbox-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Crew != "alpha-crew" {
+		t.Fatalf("crew should be preserved when omitted, got %q", claim.Crew)
+	}
+}
+
 func TestClaimLeaseForRepoConfigScopesStaticProviderClaims(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")

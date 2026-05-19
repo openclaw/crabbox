@@ -180,6 +180,13 @@ func TestFilterJSONListViewByCrew(t *testing.T) {
 	if other := filterJSONListViewByCrew("not-a-list", "alpha"); other != "not-a-list" {
 		t.Fatalf("non-slice view should pass through unchanged, got %#v", other)
 	}
+	unsupported := []any{
+		map[string]any{"id": "native-a", "state": "ready"},
+		map[string]any{"id": "native-b", "state": "leased"},
+	}
+	if same := filterJSONListViewByCrew(unsupported, "alpha"); fmt.Sprintf("%#v", same) != fmt.Sprintf("%#v", unsupported) {
+		t.Fatalf("unlabeled JSON list should pass through unchanged, got %#v", same)
+	}
 }
 
 func sameAny(a, b any) bool {
@@ -318,7 +325,11 @@ func TestCloudInitCrewHostsBootstrapEmittedWhenCrewAndTailscale(t *testing.T) {
 		"/usr/local/bin/crabbox-crew-hosts",
 		"/etc/systemd/system/crabbox-crew-hosts.service",
 		"/etc/systemd/system/crabbox-crew-hosts.timer",
+		"/etc/hosts",
+		"# crabbox crew hosts begin",
+		"# crabbox crew hosts end",
 		"OnUnitActiveSec=30s",
+		"ExecStart=/usr/local/bin/crabbox-crew-hosts",
 		"tag:cbx-crew-",
 		"tailscale status --json",
 		"systemctl enable --now crabbox-crew-hosts.timer",
@@ -359,8 +370,16 @@ func (s stubDoctorTailscaleACLClient) PolicyHuJSON(_ context.Context, _ string) 
 	return s.policy, s.err
 }
 
-func TestDoctorCrewSummarySkipsNonTailscaleProvider(t *testing.T) {
-	cfg := Config{Provider: "e2b"}
+func TestDoctorCrewSummaryNoopsWithoutCrew(t *testing.T) {
+	cfg := Config{Provider: "hetzner"}
+	status, message, details := doctorCrewSummary(context.Background(), cfg)
+	if status != "" || message != "" || details != nil {
+		t.Fatalf("expected no crew check without cfg.Crew, got status=%q msg=%q details=%#v", status, message, details)
+	}
+}
+
+func TestDoctorCrewSummarySkipsNonTailscaleProviderWithCrew(t *testing.T) {
+	cfg := Config{Provider: "e2b", Crew: "alpha"}
 	status, message, details := doctorCrewSummary(context.Background(), cfg)
 	if status != "skip" {
 		t.Fatalf("expected skip, got %q", status)
@@ -375,7 +394,7 @@ func TestDoctorCrewSummarySkipsNonTailscaleProvider(t *testing.T) {
 
 func TestDoctorCrewSummarySkipsWhenAPIKeyMissing(t *testing.T) {
 	t.Setenv("TS_API_KEY", "")
-	cfg := Config{Provider: "hetzner"}
+	cfg := Config{Provider: "hetzner", Crew: "alpha"}
 	status, _, details := doctorCrewSummary(context.Background(), cfg)
 	if status != "skip" {
 		t.Fatalf("expected skip when TS_API_KEY is missing, got %q", status)
@@ -387,40 +406,38 @@ func TestDoctorCrewSummarySkipsWhenAPIKeyMissing(t *testing.T) {
 
 func TestDoctorCrewSummaryOKWhenACLPresent(t *testing.T) {
 	t.Setenv("TS_API_KEY", "tskey-api-stub")
-	policy := `{
-  "tagOwners": { "tag:cbx-crew-*": ["autogroup:admin"] },
-  "acls": [{ "action": "accept", "src": ["tag:cbx-crew-*"], "dst": ["tag:cbx-crew-*:*"] }]
-}`
+	tag := crewTailscaleTag(localCoordinatorOwner(), "alpha")
+	policy := crewPolicyFixture(tag)
 	prev := doctorTailscaleACLClientFactory
 	defer func() { doctorTailscaleACLClientFactory = prev }()
 	doctorTailscaleACLClientFactory = func(_ string) doctorTailscaleACLClient {
 		return stubDoctorTailscaleACLClient{policy: policy}
 	}
-	cfg := Config{Provider: "hetzner"}
+	cfg := Config{Provider: "hetzner", Crew: "alpha"}
 	status, message, details := doctorCrewSummary(context.Background(), cfg)
 	if status != "ok" {
 		t.Fatalf("expected ok, got %q (msg=%q details=%#v)", status, message, details)
 	}
-	if !strings.Contains(message, "acl row present") {
-		t.Fatalf("expected acl row present message, got %q", message)
+	if !strings.Contains(message, "access row present") {
+		t.Fatalf("expected access row present message, got %q", message)
 	}
 }
 
 func TestDoctorCrewSummaryFailsWhenACLMissing(t *testing.T) {
 	t.Setenv("TS_API_KEY", "tskey-api-stub")
-	policy := `{"acls": [{"action":"accept","src":["*"],"dst":["*:*"]}]}`
+	policy := crewPolicyFixture("tag:cbx-crew-user-bravo")
 	prev := doctorTailscaleACLClientFactory
 	defer func() { doctorTailscaleACLClientFactory = prev }()
 	doctorTailscaleACLClientFactory = func(_ string) doctorTailscaleACLClient {
 		return stubDoctorTailscaleACLClient{policy: policy}
 	}
-	cfg := Config{Provider: "hetzner"}
+	cfg := Config{Provider: "hetzner", Crew: "alpha"}
 	status, message, details := doctorCrewSummary(context.Background(), cfg)
 	if status != "failed" {
 		t.Fatalf("expected failed, got %q", status)
 	}
-	if !strings.Contains(message, "acl row missing") {
-		t.Fatalf("expected acl row missing message, got %q", message)
+	if !strings.Contains(message, "access row missing") {
+		t.Fatalf("expected access row missing message, got %q", message)
 	}
 	if details["remedy"] == "" {
 		t.Fatalf("expected remedy in details, got %#v", details)
@@ -434,7 +451,7 @@ func TestDoctorCrewSummaryFailsWhenAPIClientErrors(t *testing.T) {
 	doctorTailscaleACLClientFactory = func(_ string) doctorTailscaleACLClient {
 		return stubDoctorTailscaleACLClient{err: fmt.Errorf("tailscale api 401: invalid api key")}
 	}
-	cfg := Config{Provider: "hetzner"}
+	cfg := Config{Provider: "hetzner", Crew: "alpha"}
 	status, message, _ := doctorCrewSummary(context.Background(), cfg)
 	if status != "failed" {
 		t.Fatalf("expected failed, got %q", status)
@@ -444,22 +461,46 @@ func TestDoctorCrewSummaryFailsWhenAPIClientErrors(t *testing.T) {
 	}
 }
 
-func TestCrewACLRowPresentLenientScan(t *testing.T) {
+func TestCrewACLRowPresentChecksConcreteTag(t *testing.T) {
+	tag := "tag:cbx-crew-yossi-e-alpha"
 	cases := []struct {
 		name string
 		body string
 		want bool
 	}{
-		{"both present", `{"tagOwners":{"tag:cbx-crew-*":["autogroup:admin"]},"acls":[{"action":"accept","src":["tag:cbx-crew-*"],"dst":["tag:cbx-crew-*:*"]}]}`, true},
-		{"missing tagOwners", `{"acls":[{"src":["tag:cbx-crew-*"]}]}`, false},
+		{"both present", crewPolicyFixture(tag), true},
+		{"grants present", crewGrantPolicyFixture(tag), true},
+		{"commented sample before grants", `{
+  // "tagOwners": { "tag:cbx-crew-yossi-e-alpha": ["autogroup:admin"] },
+  "tagOwners": { "tag:cbx-crew-yossi-e-alpha": ["autogroup:admin"] },
+  "grants": [{ "src": ["tag:cbx-crew-yossi-e-alpha"], "dst": ["tag:cbx-crew-yossi-e-alpha"], "ip": ["*"] }]
+}`, true},
+		{"different crew", crewPolicyFixture("tag:cbx-crew-yossi-e-bravo"), false},
+		{"missing tagOwners", `{"acls":[{"src":["tag:cbx-crew-yossi-e-alpha"],"dst":["tag:cbx-crew-yossi-e-alpha:*"]}]}`, false},
+		{"missing dst", `{"tagOwners":{"tag:cbx-crew-yossi-e-alpha":["autogroup:admin"]},"acls":[{"src":["tag:cbx-crew-yossi-e-alpha"],"dst":["tag:crabbox:*"]}]}`, false},
+		{"grant src only", `{"tagOwners":{"tag:cbx-crew-yossi-e-alpha":["autogroup:admin"]},"grants":[{"src":["tag:cbx-crew-yossi-e-alpha"],"dst":["tag:crabbox"],"ip":["*"]}]}`, false},
 		{"missing tag mention", `{"acls":[{"src":["*"]}],"tagOwners":{"tag:crabbox":["autogroup:admin"]}}`, false},
 		{"empty body", ``, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := crewACLRowPresent(tc.body); got != tc.want {
+			if got := crewACLRowPresent(tc.body, tag); got != tc.want {
 				t.Fatalf("crewACLRowPresent(%q)=%v want %v", tc.name, got, tc.want)
 			}
 		})
 	}
+}
+
+func crewPolicyFixture(tag string) string {
+	return fmt.Sprintf(`{
+  "tagOwners": { %q: ["autogroup:admin"] },
+  "acls": [{ "action": "accept", "src": [%q], "dst": [%q] }]
+}`, tag, tag, tag+":*")
+}
+
+func crewGrantPolicyFixture(tag string) string {
+	return fmt.Sprintf(`{
+  "tagOwners": { %q: ["autogroup:admin"] },
+  "grants": [{ "src": [%q], "dst": [%q], "ip": ["*"] }]
+}`, tag, tag, tag)
 }

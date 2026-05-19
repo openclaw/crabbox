@@ -32,17 +32,20 @@ var doctorTailscaleACLClientFactory = newDoctorTailscaleACLClient
 // intentionally bounded to a few seconds so doctor stays fast even on
 // degraded tailnets.
 func doctorCrewSummary(ctx context.Context, cfg Config) (string, string, map[string]string) {
+	crew := normalizeCrewName(cfg.Crew)
+	if crew == "" {
+		return "", "", nil
+	}
+	tag := crewTailscaleTag(localCoordinatorOwner(), crew)
+	if tag == "" {
+		return "", "", nil
+	}
 	if !providerCapableOfTailscale(cfg.Provider) {
-		return "skip", fmt.Sprintf("provider=%s does not support the Tailscale plane; crew network is unavailable", cfg.Provider), map[string]string{"provider": cfg.Provider, "plane": "tailscale", "reason": "provider_not_tailscale_capable"}
+		return "skip", fmt.Sprintf("provider=%s does not support the Tailscale plane; crew network is unavailable", cfg.Provider), map[string]string{"provider": cfg.Provider, "crew": crew, "tag": tag, "plane": "tailscale", "reason": "provider_not_tailscale_capable"}
 	}
-	owner := crewTagOwner(localCoordinatorOwner())
-	if owner == "" {
-		owner = "user"
-	}
-	tag := crewTailscaleTagPrefix + owner + "-*"
 	apiKey := strings.TrimSpace(os.Getenv("TS_API_KEY"))
 	if apiKey == "" {
-		return "skip", "TS_API_KEY missing; skipped ACL verification", map[string]string{"tag": tag, "reason": "ts_api_key_missing"}
+		return "skip", "TS_API_KEY missing; skipped ACL verification", map[string]string{"crew": crew, "tag": tag, "reason": "ts_api_key_missing"}
 	}
 	tailnet := strings.TrimSpace(os.Getenv("TS_TAILNET"))
 	if tailnet == "" {
@@ -50,30 +53,122 @@ func doctorCrewSummary(ctx context.Context, cfg Config) (string, string, map[str
 	}
 	client := doctorTailscaleACLClientFactory(apiKey)
 	if client == nil {
-		return "skip", "tailscale api client unavailable", map[string]string{"tag": tag, "reason": "client_unavailable"}
+		return "skip", "tailscale api client unavailable", map[string]string{"crew": crew, "tag": tag, "reason": "client_unavailable"}
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, doctorCrewTimeout)
 	defer cancel()
 	body, err := client.PolicyHuJSON(checkCtx, tailnet)
 	if err != nil {
-		return "failed", fmt.Sprintf("tailscale policy lookup failed: %v", err), map[string]string{"tag": tag, "tailnet": tailnet, "error": err.Error()}
+		return "failed", fmt.Sprintf("tailscale policy lookup failed: %v", err), map[string]string{"crew": crew, "tag": tag, "tailnet": tailnet, "error": err.Error()}
 	}
-	if crewACLRowPresent(body) {
-		return "ok", fmt.Sprintf("acl row present for %s", tag), map[string]string{"tag": tag, "tailnet": tailnet}
+	if crewACLRowPresent(body, tag) {
+		return "ok", fmt.Sprintf("access row present for %s", tag), map[string]string{"crew": crew, "tag": tag, "tailnet": tailnet}
 	}
-	return "failed", fmt.Sprintf("acl row missing for %s; add the one-time setup snippet from docs/features/crew.md", tag), map[string]string{"tag": tag, "tailnet": tailnet, "remedy": "see_docs_features_crew_md"}
+	return "failed", fmt.Sprintf("access row missing for %s; add the one-time setup snippet from docs/features/crew.md", tag), map[string]string{"crew": crew, "tag": tag, "tailnet": tailnet, "remedy": "see_docs_features_crew_md"}
 }
 
-// crewACLRowPresent does a deliberately lenient text scan for the two
-// tag:cbx-crew-* mentions an operator-correct policy must contain (one in
-// `acls`, one in `tagOwners`). The Tailscale policy file is HuJSON and not
-// trivially JSON-parseable; a substring check is good enough to flag the
-// common misconfiguration without dragging in a HuJSON dependency.
-func crewACLRowPresent(policy string) bool {
-	if !strings.Contains(policy, crewTailscaleTagPrefix) {
+// crewACLRowPresent checks for the concrete tag declaration and access row
+// needed by a crew. The Tailscale policy file is HuJSON and not trivially
+// JSON-parseable without an extra dependency, so keep the scan textual but
+// exact enough: the tag must appear under tagOwners and either a legacy ACL row
+// (`tag` -> `tag:*`) or a grants row (`tag` -> `tag`) must be present.
+func crewACLRowPresent(policy, tag string) bool {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
 		return false
 	}
-	return strings.Contains(policy, "tagOwners") && strings.Contains(policy, "acls")
+	quotedTag := `"` + tag + `"`
+	quotedDst := `"` + tag + `:*"`
+	if !policySectionContains(policy, "tagOwners", quotedTag) {
+		return false
+	}
+	if policySectionContains(policy, "acls", quotedTag) &&
+		policySectionContains(policy, "acls", quotedDst) {
+		return true
+	}
+	if grants, ok := policySection(policy, "grants"); ok {
+		return strings.Count(grants, quotedTag) >= 2 && strings.Contains(grants, `"ip"`)
+	}
+	return false
+}
+
+func policySectionContains(policy, section, token string) bool {
+	body, ok := policySection(policy, section)
+	return ok && strings.Contains(body, token)
+}
+
+func policySection(policy, section string) (string, bool) {
+	start := activePolicySectionStart(policy, section)
+	if start < 0 {
+		return "", false
+	}
+	rest := policy[start+len(section)+2:]
+	colon := strings.IndexByte(rest, ':')
+	if colon < 0 {
+		return "", false
+	}
+	rest = rest[colon+1:]
+	trimmed := strings.TrimLeft(rest, " \t\r\n")
+	if trimmed == "" {
+		return "", false
+	}
+	open := trimmed[0]
+	close := byte(0)
+	switch open {
+	case '{':
+		close = '}'
+	case '[':
+		close = ']'
+	default:
+		return "", false
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			continue
+		}
+		switch ch {
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return trimmed[:i+1], true
+			}
+		}
+	}
+	return "", false
+}
+
+func activePolicySectionStart(policy, section string) int {
+	offset := 0
+	prefix := `"` + section + `"`
+	for _, line := range strings.SplitAfter(policy, "\n") {
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, prefix) {
+			return offset + strings.Index(line, prefix)
+		}
+		offset += len(line)
+	}
+	return -1
 }
 
 // liveDoctorTailscaleACLClient is the production implementation. It targets
