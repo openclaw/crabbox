@@ -1,0 +1,8 @@
+{
+  "audio": {
+    "transcription": {
+      "command": ["whisper-cli", "--model", "small", "{input}", "--input={input}"],
+      "timeoutSeconds": 30
+    }
+  }
+}

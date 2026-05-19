@@ -1,0 +1,12 @@
+{
+  "messages": {
+    "queue": {
+      "mode": "queue",
+      "byChannel": {
+        "discord": "steer-backlog",
+        "telegram": "collect",
+        "slack": "steer"
+      }
+    }
+  }
+}

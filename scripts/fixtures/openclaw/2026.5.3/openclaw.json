@@ -1,0 +1,19 @@
+{
+  "routing": {
+    "allowFrom": ["+15555550123"],
+    "groupChat": {
+      "requireMention": false,
+      "historyLimit": 25,
+      "mentionPatterns": ["@bot"]
+    }
+  },
+  "channels": {
+    "whatsapp": {
+      "enabled": true
+    },
+    "telegram": {
+      "enabled": true,
+      "requireMention": true
+    }
+  }
+}
