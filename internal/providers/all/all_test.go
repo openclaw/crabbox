@@ -22,6 +22,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"namespace-devbox",
 		"proxmox",
 		"railway",
+		"runpod",
 		"semaphore",
 		"sprites",
 		"ssh",

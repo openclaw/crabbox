@@ -324,6 +324,15 @@ railway:
   apiUrl: https://railway.example.test/graphql/v2
   projectId: project-file
   environmentId: environment-file
+runpod:
+  apiUrl: https://runpod.example.test/graphql
+  cloudType: SECURE
+  instanceId: cpu5c-2-4
+  image: runpod/base:custom
+  templateId: tpl-file
+  diskGB: 25
+  user: runpod-user
+  workRoot: /workspaces/runpod-test
 islo:
   baseUrl: https://islo.example.test
   image: docker.io/library/ubuntu:24.04
@@ -482,6 +491,9 @@ ssh:
 	}
 	if cfg.Railway.APIURL != "https://railway.example.test/graphql/v2" || cfg.Railway.ProjectID != "project-file" || cfg.Railway.EnvironmentID != "environment-file" {
 		t.Fatalf("railway config not loaded: %#v", cfg.Railway)
+	}
+	if cfg.Runpod.APIURL != "https://runpod.example.test/graphql" || cfg.Runpod.CloudType != "SECURE" || cfg.Runpod.InstanceID != "cpu5c-2-4" || cfg.Runpod.Image != "runpod/base:custom" || cfg.Runpod.TemplateID != "tpl-file" || cfg.Runpod.DiskGB != 25 || cfg.Runpod.User != "runpod-user" || cfg.Runpod.WorkRoot != "/workspaces/runpod-test" {
+		t.Fatalf("runpod config not loaded: %#v", cfg.Runpod)
 	}
 	if cfg.Islo.BaseURL != "https://islo.example.test" || cfg.Islo.Image != "docker.io/library/ubuntu:24.04" || cfg.Islo.Workdir != "crabbox" || cfg.Islo.GatewayProfile != "default" || cfg.Islo.SnapshotName != "snap-ready" || cfg.Islo.VCPUs != 4 || cfg.Islo.MemoryMB != 8192 || cfg.Islo.DiskGB != 40 {
 		t.Fatalf("islo config not loaded: %#v", cfg.Islo)
@@ -668,6 +680,21 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_RAILWAY_PROJECT_ID", "railway-project-env")
 	t.Setenv("RAILWAY_ENVIRONMENT_ID", "railway-environment-file")
 	t.Setenv("CRABBOX_RAILWAY_ENVIRONMENT_ID", "railway-environment-env")
+	t.Setenv("RUNPOD_API_KEY", "runpod-key-file")
+	t.Setenv("CRABBOX_RUNPOD_API_KEY", "runpod-key-env")
+	t.Setenv("RUNPOD_API_URL", "https://runpod-file.example/graphql")
+	t.Setenv("CRABBOX_RUNPOD_API_URL", "https://runpod-env.example/graphql")
+	t.Setenv("RUNPOD_CLOUD_TYPE", "COMMUNITY")
+	t.Setenv("CRABBOX_RUNPOD_CLOUD_TYPE", "SECURE")
+	t.Setenv("RUNPOD_INSTANCE_ID", "cpu3g-2-4")
+	t.Setenv("CRABBOX_RUNPOD_INSTANCE_ID", "cpu5m-2-4")
+	t.Setenv("RUNPOD_IMAGE", "runpod/base:file")
+	t.Setenv("CRABBOX_RUNPOD_IMAGE", "runpod/base:env")
+	t.Setenv("RUNPOD_TEMPLATE_ID", "tpl-file")
+	t.Setenv("CRABBOX_RUNPOD_TEMPLATE_ID", "tpl-env")
+	t.Setenv("CRABBOX_RUNPOD_DISK_GB", "30")
+	t.Setenv("CRABBOX_RUNPOD_USER", "runpod-env-user")
+	t.Setenv("CRABBOX_RUNPOD_WORK_ROOT", "/work/runpod-env")
 	t.Setenv("ISLO_API_KEY", "islo-api-file")
 	t.Setenv("CRABBOX_ISLO_API_KEY", "islo-api-env")
 	t.Setenv("ISLO_BASE_URL", "https://islo-file.example")
@@ -823,6 +850,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Railway.APIToken != "railway-token-env" || cfg.Railway.APIURL != "https://railway-env.example/graphql/v2" || cfg.Railway.ProjectID != "railway-project-env" || cfg.Railway.EnvironmentID != "railway-environment-env" {
 		t.Fatalf("unexpected railway env: %#v", cfg.Railway)
+	}
+	if cfg.Runpod.APIKey != "runpod-key-env" || cfg.Runpod.APIURL != "https://runpod-env.example/graphql" || cfg.Runpod.CloudType != "SECURE" || cfg.Runpod.InstanceID != "cpu5m-2-4" || cfg.Runpod.Image != "runpod/base:env" || cfg.Runpod.TemplateID != "tpl-env" || cfg.Runpod.DiskGB != 30 || cfg.Runpod.User != "runpod-env-user" || cfg.Runpod.WorkRoot != "/work/runpod-env" {
+		t.Fatalf("unexpected runpod env: %#v", cfg.Runpod)
 	}
 	if cfg.Islo.APIKey != "islo-api-env" || cfg.Islo.BaseURL != "https://islo-env.example" || cfg.Islo.Image != "ubuntu:env" || cfg.Islo.Workdir != "env-workdir" || cfg.Islo.GatewayProfile != "env-gateway" || cfg.Islo.SnapshotName != "env-snapshot" || cfg.Islo.VCPUs != 8 || cfg.Islo.MemoryMB != 16384 || cfg.Islo.DiskGB != 80 {
 		t.Fatalf("unexpected islo env: %#v", cfg.Islo)

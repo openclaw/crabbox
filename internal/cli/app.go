@@ -246,7 +246,7 @@ Environment:
   CRABBOX_ACCESS_CLIENT_ID     Cloudflare Access service token client ID
   CRABBOX_ACCESS_CLIENT_SECRET Cloudflare Access service token client secret
   CRABBOX_ACCESS_TOKEN         Cloudflare Access JWT for protected routes
-  CRABBOX_PROVIDER             hetzner, aws, azure, gcp, proxmox, ssh, exe-dev, blacksmith-testbox, namespace-devbox, semaphore, daytona, islo, e2b, modal, sprites, or cloudflare
+  CRABBOX_PROVIDER             hetzner, aws, azure, gcp, proxmox, ssh, exe-dev, blacksmith-testbox, namespace-devbox, semaphore, daytona, islo, e2b, modal, sprites, runpod, or cloudflare
   CRABBOX_TARGET               linux, macos, or windows
   CRABBOX_WINDOWS_MODE         normal or wsl2
   CRABBOX_DESKTOP              Provision or require desktop/VNC capability

@@ -29,6 +29,7 @@ static SSH provider for existing machines.
 | [Tensorlake](tensorlake.md) | delegated run | Linux | Tensorlake Firecracker sandbox execution via the `tensorlake` CLI |
 | [Cloudflare](cloudflare.md) | delegated run | Linux | Cloudflare execution through a Worker and container runner |
 | [Railway](railway.md) | delegated run | Linux | redeploy and stream logs for an existing Railway service via the GraphQL API |
+| [RunPod](runpod.md) | SSH lease | Linux | disposable RunPod CPU pods provisioned via the GraphQL API and accessed over public SSH |
 
 ## Shared Rules
 
@@ -76,6 +77,10 @@ Proxmox and delegated providers do not use the Crabbox coordinator:
   `deploymentLogs`, `deploymentStop`) against a pre-existing service the user
   owns. The user's command argument is logged; Railway runs the service's own
   start command — there is no synchronous exec endpoint.
+- RunPod uses the [RunPod](https://runpod.io) GraphQL API (`deployCpuPod`,
+  `pod`, `podTerminate`) to provision a CPU pod that exposes SSH on port 22.
+  Once `pod.runtime.ports` reports the public TCP mapping, Crabbox reuses its
+  normal SSH sync/run path against `root@<pod-ip>:<public-port>`.
 
 Namespace Devbox and Semaphore are SSH lease providers that do not use the
 Crabbox coordinator. Namespace provisions through the authenticated `devbox`
@@ -105,10 +110,11 @@ provisions through `ssh exe.dev` and returns a normal VM SSH target.
 | Tensorlake | yes | yes | no | no | archive via `tensorlake sbx cp` | no |
 | Cloudflare | yes | yes | no | no | archive via Worker runner | no |
 | Railway | yes | no | no | no | no | no |
+| RunPod | yes | yes | yes | no | yes | no |
 
 Actions runner hydration requires a normal SSH lease on Linux and is core-over-SSH.
 Use AWS, Google Cloud, Hetzner, Proxmox, Static SSH, exe.dev, Namespace Devbox,
-Semaphore, or Sprites for that path.
+Semaphore, Sprites, or RunPod for that path.
 
 ## Implementation
 

@@ -92,6 +92,7 @@ type Config struct {
 	E2B                 E2BConfig
 	ExeDev              ExeDevConfig
 	Railway             RailwayConfig
+	Runpod              RunpodConfig
 	Islo                IsloConfig
 	Tensorlake          TensorlakeConfig
 	Modal               ModalConfig
@@ -206,6 +207,18 @@ type RailwayConfig struct {
 	APIURL        string
 	ProjectID     string
 	EnvironmentID string
+}
+
+type RunpodConfig struct {
+	APIKey     string
+	APIURL     string
+	CloudType  string
+	InstanceID string
+	Image      string
+	TemplateID string
+	DiskGB     int
+	User       string
+	WorkRoot   string
 }
 
 type IsloConfig struct {
@@ -551,6 +564,13 @@ func baseConfig() Config {
 		Railway: RailwayConfig{
 			APIURL: "https://backboard.railway.com/graphql/v2",
 		},
+		Runpod: RunpodConfig{
+			APIURL:     "https://api.runpod.io/graphql",
+			CloudType:  "ALL",
+			InstanceID: "cpu3c-2-4",
+			Image:      "runpod/base:0.6.2",
+			DiskGB:     10,
+		},
 		Islo: IsloConfig{
 			BaseURL:  "https://api.islo.dev",
 			Image:    "docker.io/library/ubuntu:24.04",
@@ -633,6 +653,7 @@ type fileConfig struct {
 	E2B              *fileE2BConfig                     `yaml:"e2b,omitempty"`
 	ExeDev           *fileExeDevConfig                  `yaml:"exeDev,omitempty"`
 	Railway          *fileRailwayConfig                 `yaml:"railway,omitempty"`
+	Runpod           *fileRunpodConfig                  `yaml:"runpod,omitempty"`
 	Islo             *fileIsloConfig                    `yaml:"islo,omitempty"`
 	Tensorlake       *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	Modal            *fileModalConfig                   `yaml:"modal,omitempty"`
@@ -835,6 +856,17 @@ type fileRailwayConfig struct {
 	APIURL        string `yaml:"apiUrl,omitempty"`
 	ProjectID     string `yaml:"projectId,omitempty"`
 	EnvironmentID string `yaml:"environmentId,omitempty"`
+}
+
+type fileRunpodConfig struct {
+	APIURL     string `yaml:"apiUrl,omitempty"`
+	CloudType  string `yaml:"cloudType,omitempty"`
+	InstanceID string `yaml:"instanceId,omitempty"`
+	Image      string `yaml:"image,omitempty"`
+	TemplateID string `yaml:"templateId,omitempty"`
+	DiskGB     int    `yaml:"diskGB,omitempty"`
+	User       string `yaml:"user,omitempty"`
+	WorkRoot   string `yaml:"workRoot,omitempty"`
 }
 
 type fileIsloConfig struct {
@@ -1642,6 +1674,32 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Railway.EnvironmentID = file.Railway.EnvironmentID
 		}
 	}
+	if file.Runpod != nil {
+		if file.Runpod.APIURL != "" {
+			cfg.Runpod.APIURL = file.Runpod.APIURL
+		}
+		if file.Runpod.CloudType != "" {
+			cfg.Runpod.CloudType = file.Runpod.CloudType
+		}
+		if file.Runpod.InstanceID != "" {
+			cfg.Runpod.InstanceID = file.Runpod.InstanceID
+		}
+		if file.Runpod.Image != "" {
+			cfg.Runpod.Image = file.Runpod.Image
+		}
+		if file.Runpod.TemplateID != "" {
+			cfg.Runpod.TemplateID = file.Runpod.TemplateID
+		}
+		if file.Runpod.DiskGB != 0 {
+			cfg.Runpod.DiskGB = file.Runpod.DiskGB
+		}
+		if file.Runpod.User != "" {
+			cfg.Runpod.User = file.Runpod.User
+		}
+		if file.Runpod.WorkRoot != "" {
+			cfg.Runpod.WorkRoot = file.Runpod.WorkRoot
+		}
+	}
 	if file.Islo != nil {
 		if file.Islo.BaseURL != "" {
 			cfg.Islo.BaseURL = file.Islo.BaseURL
@@ -2295,6 +2353,15 @@ func applyEnv(cfg *Config) {
 	cfg.Railway.APIURL = getenv("CRABBOX_RAILWAY_API_URL", getenv("RAILWAY_API_URL", cfg.Railway.APIURL))
 	cfg.Railway.ProjectID = getenv("CRABBOX_RAILWAY_PROJECT_ID", getenv("RAILWAY_PROJECT_ID", cfg.Railway.ProjectID))
 	cfg.Railway.EnvironmentID = getenv("CRABBOX_RAILWAY_ENVIRONMENT_ID", getenv("RAILWAY_ENVIRONMENT_ID", cfg.Railway.EnvironmentID))
+	cfg.Runpod.APIKey = getenv("CRABBOX_RUNPOD_API_KEY", getenv("RUNPOD_API_KEY", cfg.Runpod.APIKey))
+	cfg.Runpod.APIURL = getenv("CRABBOX_RUNPOD_API_URL", getenv("RUNPOD_API_URL", cfg.Runpod.APIURL))
+	cfg.Runpod.CloudType = getenv("CRABBOX_RUNPOD_CLOUD_TYPE", getenv("RUNPOD_CLOUD_TYPE", cfg.Runpod.CloudType))
+	cfg.Runpod.InstanceID = getenv("CRABBOX_RUNPOD_INSTANCE_ID", getenv("RUNPOD_INSTANCE_ID", cfg.Runpod.InstanceID))
+	cfg.Runpod.Image = getenv("CRABBOX_RUNPOD_IMAGE", getenv("RUNPOD_IMAGE", cfg.Runpod.Image))
+	cfg.Runpod.TemplateID = getenv("CRABBOX_RUNPOD_TEMPLATE_ID", getenv("RUNPOD_TEMPLATE_ID", cfg.Runpod.TemplateID))
+	cfg.Runpod.DiskGB = getenvInt("CRABBOX_RUNPOD_DISK_GB", cfg.Runpod.DiskGB)
+	cfg.Runpod.User = getenv("CRABBOX_RUNPOD_USER", cfg.Runpod.User)
+	cfg.Runpod.WorkRoot = getenv("CRABBOX_RUNPOD_WORK_ROOT", cfg.Runpod.WorkRoot)
 	cfg.Islo.APIKey = getenv("CRABBOX_ISLO_API_KEY", getenv("ISLO_API_KEY", cfg.Islo.APIKey))
 	cfg.Islo.BaseURL = getenv("CRABBOX_ISLO_BASE_URL", getenv("ISLO_BASE_URL", cfg.Islo.BaseURL))
 	cfg.Islo.Image = getenv("CRABBOX_ISLO_IMAGE", cfg.Islo.Image)
