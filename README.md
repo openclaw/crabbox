@@ -60,6 +60,9 @@ Supported providers:
 - [Railway](docs/providers/railway.md) (`provider: railway`): delegated
   redeploy-and-stream execution against a pre-existing Railway service through
   the [Railway](https://railway.com) GraphQL API.
+- [W&B Sandboxes](docs/providers/wandb.md) (`provider: wandb`): delegated
+  Weights & Biases sandbox execution through an embedded Python shim around the
+  `cwsandbox` SDK.
 
 ---
 

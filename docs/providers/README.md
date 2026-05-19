@@ -29,6 +29,7 @@ static SSH provider for existing machines.
 | [Tensorlake](tensorlake.md) | delegated run | Linux | Tensorlake Firecracker sandbox execution via the `tensorlake` CLI |
 | [Cloudflare](cloudflare.md) | delegated run | Linux | Cloudflare execution through a Worker and container runner |
 | [Railway](railway.md) | delegated run | Linux | redeploy and stream logs for an existing Railway service via the GraphQL API |
+| [W&B Sandboxes](wandb.md) | delegated run | Linux | Weights & Biases sandbox execution via an embedded Python shim around the `cwsandbox` SDK |
 
 ## Shared Rules
 
@@ -76,6 +77,10 @@ Proxmox and delegated providers do not use the Crabbox coordinator:
   `deploymentLogs`, `deploymentStop`) against a pre-existing service the user
   owns. The user's command argument is logged; Railway runs the service's own
   start command — there is no synchronous exec endpoint.
+- W&B Sandboxes uses the `cwsandbox` Python SDK through an embedded shim
+  (`internal/providers/wandb/shim/wandb_sandbox.py`) because the upstream
+  `cwsandbox` CLI 0.23.0 only covers `exec/logs/ls/sh` — sandbox creation
+  (`Sandbox.run`) and `Sandbox.stop` live only in the Python SDK.
 
 Namespace Devbox and Semaphore are SSH lease providers that do not use the
 Crabbox coordinator. Namespace provisions through the authenticated `devbox`
@@ -105,6 +110,7 @@ provisions through `ssh exe.dev` and returns a normal VM SSH target.
 | Tensorlake | yes | yes | no | no | archive via `tensorlake sbx cp` | no |
 | Cloudflare | yes | yes | no | no | archive via Worker runner | no |
 | Railway | yes | no | no | no | no | no |
+| W&B Sandboxes | yes | no | no | no | no | no |
 
 Actions runner hydration requires a normal SSH lease on Linux and is core-over-SSH.
 Use AWS, Google Cloud, Hetzner, Proxmox, Static SSH, exe.dev, Namespace Devbox,
