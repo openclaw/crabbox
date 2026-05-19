@@ -176,6 +176,30 @@ function Disable-FirstBootNoise {
   New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Network\NewNetworkWindowOff" -Force | Out-Null
 }
 
+function Reset-EC2LaunchForImage {
+  $ec2Launch = @(
+    "C:\Program Files\Amazon\EC2Launch\EC2Launch.exe",
+    "C:\ProgramData\Amazon\EC2Launch\EC2Launch.exe"
+  ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+  if ($ec2Launch) {
+    Write-Log "resetting EC2Launch v2 state for AMI boot"
+    & $ec2Launch reset --block
+    if ($LASTEXITCODE -ne 0) {
+      & $ec2Launch reset
+    }
+    if ($LASTEXITCODE -ne 0) {
+      throw "EC2Launch reset failed with exit code $LASTEXITCODE"
+    }
+  } else {
+    $initialize = "C:\ProgramData\Amazon\EC2-Windows\Launch\Scripts\InitializeInstance.ps1"
+    if (Test-Path $initialize) {
+      Write-Log "scheduling EC2Launch v1 initialize for AMI boot"
+      & powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $initialize -Schedule
+    }
+  }
+  Remove-Item -Force "C:\ProgramData\crabbox\setup-complete" -ErrorAction SilentlyContinue
+}
+
 Install-Chocolatey
 Install-ChocoPackage @(
   "git",
@@ -206,6 +230,8 @@ if (Test-Path $RebootMarker) {
   Write-Log "reboot required before final verification"
   exit 0
 }
+
+Reset-EC2LaunchForImage
 
 Write-Log "versions"
 Get-ComputerInfo | Select-Object OsName, OsVersion, OsBuildNumber | Format-List
