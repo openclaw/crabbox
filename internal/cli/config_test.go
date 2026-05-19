@@ -147,6 +147,14 @@ func clearConfigEnv(t *testing.T) {
 		"RAILWAY_PROJECT_ID",
 		"CRABBOX_RAILWAY_ENVIRONMENT_ID",
 		"RAILWAY_ENVIRONMENT_ID",
+		"CRABBOX_WANDB_API_KEY",
+		"WANDB_API_KEY",
+		"CRABBOX_WANDB_PYTHON",
+		"WANDB_PYTHON",
+		"CRABBOX_WANDB_DEFAULT_IMAGE",
+		"WANDB_DEFAULT_IMAGE",
+		"CRABBOX_WANDB_MAX_LIFETIME_SECONDS",
+		"WANDB_MAX_LIFETIME_SECONDS",
 	} {
 		t.Setenv(key, "")
 	}
@@ -324,6 +332,10 @@ railway:
   apiUrl: https://railway.example.test/graphql/v2
   projectId: project-file
   environmentId: environment-file
+wandb:
+  python: /opt/py/bin/python3
+  defaultImage: ubuntu:22.04
+  maxLifetimeSeconds: 3600
 islo:
   baseUrl: https://islo.example.test
   image: docker.io/library/ubuntu:24.04
@@ -482,6 +494,9 @@ ssh:
 	}
 	if cfg.Railway.APIURL != "https://railway.example.test/graphql/v2" || cfg.Railway.ProjectID != "project-file" || cfg.Railway.EnvironmentID != "environment-file" {
 		t.Fatalf("railway config not loaded: %#v", cfg.Railway)
+	}
+	if cfg.Wandb.Python != "/opt/py/bin/python3" || cfg.Wandb.DefaultImage != "ubuntu:22.04" || cfg.Wandb.MaxLifetimeSeconds != 3600 {
+		t.Fatalf("wandb config not loaded: %#v", cfg.Wandb)
 	}
 	if cfg.Islo.BaseURL != "https://islo.example.test" || cfg.Islo.Image != "docker.io/library/ubuntu:24.04" || cfg.Islo.Workdir != "crabbox" || cfg.Islo.GatewayProfile != "default" || cfg.Islo.SnapshotName != "snap-ready" || cfg.Islo.VCPUs != 4 || cfg.Islo.MemoryMB != 8192 || cfg.Islo.DiskGB != 40 {
 		t.Fatalf("islo config not loaded: %#v", cfg.Islo)
@@ -668,6 +683,14 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_RAILWAY_PROJECT_ID", "railway-project-env")
 	t.Setenv("RAILWAY_ENVIRONMENT_ID", "railway-environment-file")
 	t.Setenv("CRABBOX_RAILWAY_ENVIRONMENT_ID", "railway-environment-env")
+	t.Setenv("WANDB_API_KEY", "wandb-key-file")
+	t.Setenv("CRABBOX_WANDB_API_KEY", "wandb-key-env")
+	t.Setenv("WANDB_PYTHON", "/opt/py/bin/python3-file")
+	t.Setenv("CRABBOX_WANDB_PYTHON", "/opt/py/bin/python3-env")
+	t.Setenv("WANDB_DEFAULT_IMAGE", "ubuntu:wandb-file")
+	t.Setenv("CRABBOX_WANDB_DEFAULT_IMAGE", "ubuntu:wandb-env")
+	t.Setenv("WANDB_MAX_LIFETIME_SECONDS", "900")
+	t.Setenv("CRABBOX_WANDB_MAX_LIFETIME_SECONDS", "1200")
 	t.Setenv("ISLO_API_KEY", "islo-api-file")
 	t.Setenv("CRABBOX_ISLO_API_KEY", "islo-api-env")
 	t.Setenv("ISLO_BASE_URL", "https://islo-file.example")
@@ -823,6 +846,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Railway.APIToken != "railway-token-env" || cfg.Railway.APIURL != "https://railway-env.example/graphql/v2" || cfg.Railway.ProjectID != "railway-project-env" || cfg.Railway.EnvironmentID != "railway-environment-env" {
 		t.Fatalf("unexpected railway env: %#v", cfg.Railway)
+	}
+	if cfg.Wandb.APIKey != "wandb-key-env" || cfg.Wandb.Python != "/opt/py/bin/python3-env" || cfg.Wandb.DefaultImage != "ubuntu:wandb-env" || cfg.Wandb.MaxLifetimeSeconds != 1200 {
+		t.Fatalf("unexpected wandb env: %#v", cfg.Wandb)
 	}
 	if cfg.Islo.APIKey != "islo-api-env" || cfg.Islo.BaseURL != "https://islo-env.example" || cfg.Islo.Image != "ubuntu:env" || cfg.Islo.Workdir != "env-workdir" || cfg.Islo.GatewayProfile != "env-gateway" || cfg.Islo.SnapshotName != "env-snapshot" || cfg.Islo.VCPUs != 8 || cfg.Islo.MemoryMB != 16384 || cfg.Islo.DiskGB != 80 {
 		t.Fatalf("unexpected islo env: %#v", cfg.Islo)

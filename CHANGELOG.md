@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a W&B Sandboxes delegated-run provider that wraps the `cwsandbox` Python SDK through an embedded shim because the upstream CLI lacks `run` and `stop`.
 - Added a thin macOS developer-tools image mint wrapper that keeps paid host allocation explicit while wiring the reusable prep script, promotion, checkpoint proof, and lifecycle evidence defaults.
 - Added AWS Linux and Windows developer-image prep scripts plus a guarded mint wrapper for baking Docker, Node 24, pnpm, GitHub CLI, and common developer tooling into fast-booting Crabbox AMIs.
 - Added a light/dark mode toggle to the Crabbox documentation site that defaults to the system color scheme, persists the choice in local storage, and applies before first paint to avoid a flash.

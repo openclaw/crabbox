@@ -92,6 +92,7 @@ type Config struct {
 	E2B                 E2BConfig
 	ExeDev              ExeDevConfig
 	Railway             RailwayConfig
+	Wandb               WandbConfig
 	Islo                IsloConfig
 	Tensorlake          TensorlakeConfig
 	Modal               ModalConfig
@@ -206,6 +207,13 @@ type RailwayConfig struct {
 	APIURL        string
 	ProjectID     string
 	EnvironmentID string
+}
+
+type WandbConfig struct {
+	APIKey             string
+	Python             string
+	DefaultImage       string
+	MaxLifetimeSeconds int
 }
 
 type IsloConfig struct {
@@ -551,6 +559,11 @@ func baseConfig() Config {
 		Railway: RailwayConfig{
 			APIURL: "https://backboard.railway.com/graphql/v2",
 		},
+		Wandb: WandbConfig{
+			Python:             "python3",
+			DefaultImage:       "ubuntu:24.04",
+			MaxLifetimeSeconds: 1800,
+		},
 		Islo: IsloConfig{
 			BaseURL:  "https://api.islo.dev",
 			Image:    "docker.io/library/ubuntu:24.04",
@@ -633,6 +646,7 @@ type fileConfig struct {
 	E2B              *fileE2BConfig                     `yaml:"e2b,omitempty"`
 	ExeDev           *fileExeDevConfig                  `yaml:"exeDev,omitempty"`
 	Railway          *fileRailwayConfig                 `yaml:"railway,omitempty"`
+	Wandb            *fileWandbConfig                   `yaml:"wandb,omitempty"`
 	Islo             *fileIsloConfig                    `yaml:"islo,omitempty"`
 	Tensorlake       *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	Modal            *fileModalConfig                   `yaml:"modal,omitempty"`
@@ -835,6 +849,12 @@ type fileRailwayConfig struct {
 	APIURL        string `yaml:"apiUrl,omitempty"`
 	ProjectID     string `yaml:"projectId,omitempty"`
 	EnvironmentID string `yaml:"environmentId,omitempty"`
+}
+
+type fileWandbConfig struct {
+	Python             string `yaml:"python,omitempty"`
+	DefaultImage       string `yaml:"defaultImage,omitempty"`
+	MaxLifetimeSeconds int    `yaml:"maxLifetimeSeconds,omitempty"`
 }
 
 type fileIsloConfig struct {
@@ -1642,6 +1662,17 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Railway.EnvironmentID = file.Railway.EnvironmentID
 		}
 	}
+	if file.Wandb != nil {
+		if file.Wandb.Python != "" {
+			cfg.Wandb.Python = file.Wandb.Python
+		}
+		if file.Wandb.DefaultImage != "" {
+			cfg.Wandb.DefaultImage = file.Wandb.DefaultImage
+		}
+		if file.Wandb.MaxLifetimeSeconds > 0 {
+			cfg.Wandb.MaxLifetimeSeconds = file.Wandb.MaxLifetimeSeconds
+		}
+	}
 	if file.Islo != nil {
 		if file.Islo.BaseURL != "" {
 			cfg.Islo.BaseURL = file.Islo.BaseURL
@@ -2295,6 +2326,10 @@ func applyEnv(cfg *Config) {
 	cfg.Railway.APIURL = getenv("CRABBOX_RAILWAY_API_URL", getenv("RAILWAY_API_URL", cfg.Railway.APIURL))
 	cfg.Railway.ProjectID = getenv("CRABBOX_RAILWAY_PROJECT_ID", getenv("RAILWAY_PROJECT_ID", cfg.Railway.ProjectID))
 	cfg.Railway.EnvironmentID = getenv("CRABBOX_RAILWAY_ENVIRONMENT_ID", getenv("RAILWAY_ENVIRONMENT_ID", cfg.Railway.EnvironmentID))
+	cfg.Wandb.APIKey = getenv("CRABBOX_WANDB_API_KEY", getenv("WANDB_API_KEY", cfg.Wandb.APIKey))
+	cfg.Wandb.Python = getenv("CRABBOX_WANDB_PYTHON", getenv("WANDB_PYTHON", cfg.Wandb.Python))
+	cfg.Wandb.DefaultImage = getenv("CRABBOX_WANDB_DEFAULT_IMAGE", getenv("WANDB_DEFAULT_IMAGE", cfg.Wandb.DefaultImage))
+	cfg.Wandb.MaxLifetimeSeconds = getenvInt("CRABBOX_WANDB_MAX_LIFETIME_SECONDS", getenvInt("WANDB_MAX_LIFETIME_SECONDS", cfg.Wandb.MaxLifetimeSeconds))
 	cfg.Islo.APIKey = getenv("CRABBOX_ISLO_API_KEY", getenv("ISLO_API_KEY", cfg.Islo.APIKey))
 	cfg.Islo.BaseURL = getenv("CRABBOX_ISLO_BASE_URL", getenv("ISLO_BASE_URL", cfg.Islo.BaseURL))
 	cfg.Islo.Image = getenv("CRABBOX_ISLO_IMAGE", cfg.Islo.Image)
