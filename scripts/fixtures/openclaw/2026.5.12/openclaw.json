@@ -1,0 +1,17 @@
+{
+  "tools": {
+    "web": {
+      "search": {
+        "apiKey": "brave-key",
+        "grok": {
+          "apiKey": "xai-key",
+          "model": "grok-4-search"
+        },
+        "kimi": {
+          "apiKey": "kimi-key",
+          "model": "kimi-k2.5"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "mcp": {
+    "servers": {
+      "example-http": {
+        "type": "http",
+        "url": "https://mcp.example.com/sse"
+      },
+      "example-stdio": {
+        "type": "stdio",
+        "command": "/usr/local/bin/example-mcp"
+      }
+    }
+  }
+}
