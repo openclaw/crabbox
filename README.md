@@ -60,6 +60,9 @@ Supported providers:
 - [Railway](docs/providers/railway.md) (`provider: railway`): delegated
   redeploy-and-stream execution against a pre-existing Railway service through
   the [Railway](https://railway.com) GraphQL API.
+- [RunPod](docs/providers/runpod.md) (`provider: runpod`): RunPod CPU pods
+  provisioned through the [RunPod](https://runpod.io) GraphQL API and exposed
+  as normal SSH leases with Crabbox sync.
 
 ---
 
