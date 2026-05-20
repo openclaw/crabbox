@@ -31,6 +31,7 @@ type gcpLeaseBackend struct{ shared.DirectSSHBackend }
 
 type gcpClient interface {
 	ListCrabboxServers(context.Context) ([]Server, error)
+	ListCrabboxServersComplete(context.Context) ([]Server, error)
 	CreateServerWithFallback(context.Context, Config, string, string, string, bool, func(string, ...any)) (Server, Config, error)
 	WaitForServerIP(context.Context, string) (Server, error)
 	GetServer(context.Context, string) (Server, error)
@@ -215,6 +216,20 @@ func (b *gcpLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 	if err != nil {
 		return err
 	}
+	client, err := newGCPClient(ctx, b.Cfg)
+	if err != nil {
+		return err
+	}
+	completeServers, err := client.ListCrabboxServersComplete(ctx)
+	if err != nil {
+		return err
+	}
+	liveLeaseIDs := make(map[string]struct{}, len(completeServers))
+	for _, server := range completeServers {
+		if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
+			liveLeaseIDs[leaseID] = struct{}{}
+		}
+	}
 	for _, server := range servers {
 		shouldDelete, reason := core.ShouldCleanupServer(server, time.Now().UTC())
 		if !shouldDelete {
@@ -236,8 +251,45 @@ func (b *gcpLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 		if err := client.DeleteServer(ctx, server.CloudID); err != nil {
 			return err
 		}
+		if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
+			removeLeaseClaim(leaseID)
+		}
+	}
+	if err := b.pruneStaleClaims(liveLeaseIDs, req.DryRun); err != nil {
+		return err
 	}
 	return nil
+}
+
+func (b *gcpLeaseBackend) pruneStaleClaims(liveLeaseIDs map[string]struct{}, dryRun bool) error {
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return err
+	}
+	scope := gcpClaimScope(b.Cfg)
+	for _, claim := range claims {
+		if strings.TrimSpace(claim.Provider) != "gcp" {
+			continue
+		}
+		if strings.TrimSpace(claim.ProviderScope) != scope {
+			continue
+		}
+		if _, ok := liveLeaseIDs[claim.LeaseID]; ok {
+			continue
+		}
+		fmt.Fprintf(b.RT.Stderr, "remove stale claim lease=%s slug=%s provider=gcp\n", claim.LeaseID, blank(claim.Slug, "-"))
+		if !dryRun {
+			removeLeaseClaim(claim.LeaseID)
+		}
+	}
+	return nil
+}
+
+func gcpClaimScope(cfg Config) string {
+	if cfg.GCPProject == "" {
+		return ""
+	}
+	return "project:" + cfg.GCPProject
 }
 
 func acquireAttemptsRetry(rt Runtime, keep bool, acquire func() (LeaseTarget, error)) (LeaseTarget, error) {

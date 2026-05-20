@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	gcpcompute "cloud.google.com/go/compute/apiv1"
 	"cloud.google.com/go/compute/apiv1/computepb"
@@ -128,6 +129,26 @@ func TestGCPClientDefaultsBlankTags(t *testing.T) {
 	}
 }
 
+func TestGCPSchedulingAppliesTTLDelete(t *testing.T) {
+	got := gcpScheduling(Config{TTL: 90 * time.Minute})
+	if got == nil || got.GetMaxRunDuration().GetSeconds() != 5400 || got.GetInstanceTerminationAction() != "DELETE" {
+		t.Fatalf("scheduling=%#v", got)
+	}
+	if got := gcpScheduling(Config{TTL: 10 * time.Second}); got != nil {
+		t.Fatalf("short TTL scheduling=%#v", got)
+	}
+	if got := gcpScheduling(Config{TTL: 121 * 24 * time.Hour}); got != nil {
+		t.Fatalf("long TTL scheduling=%#v", got)
+	}
+	got = gcpScheduling(Config{TTL: 90 * time.Minute, Capacity: CapacityConfig{Market: "spot"}})
+	if got.GetProvisioningModel() != "SPOT" || got.GetOnHostMaintenance() != "TERMINATE" || got.GetAutomaticRestart() {
+		t.Fatalf("spot scheduling=%#v", got)
+	}
+	if got := gcpScheduling(Config{}); got != nil {
+		t.Fatalf("empty scheduling=%#v", got)
+	}
+}
+
 func TestGCPListCrabboxServersAggregatesZones(t *testing.T) {
 	var gotPath string
 	var gotFilter string
@@ -186,6 +207,14 @@ func TestGCPListCrabboxServersAggregatesZones(t *testing.T) {
 	}
 	if servers[1].Name != "crabbox-other-zone" || servers[1].Labels["zone"] != "us-central1-a" {
 		t.Fatalf("other server=%#v", servers[1])
+	}
+
+	_, err = client.ListCrabboxServersComplete(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPartialSuccess != "false" {
+		t.Fatalf("complete returnPartialSuccess=%q", gotPartialSuccess)
 	}
 }
 

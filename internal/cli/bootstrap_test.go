@@ -38,6 +38,28 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 	}
 }
 
+func TestCloudInitGCPInstallsExpiryGuard(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "gcp"
+	got := cloudInit(cfg, "ssh-ed25519 test")
+	for _, want := range []string{
+		"/usr/local/sbin/crabbox-gcp-expiry-guard",
+		"computeMetadata/v1/$1",
+		"compute/v1/projects/$project/zones/$zone/instances/$name",
+		"crabbox-gcp-expiry-guard.service",
+		"crabbox-gcp-expiry-guard.timer",
+		"OnUnitActiveSec=2min",
+		"systemctl enable --now crabbox-gcp-expiry-guard.timer",
+		"expires_at",
+		"failed|released|expired",
+		"running|provisioning",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("cloudInit(gcp) missing %q", want)
+		}
+	}
+}
+
 func TestCloudInitStartsSSHBeforeOptionalDesktopBootstrap(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Desktop = true

@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Fixed direct GCP leases so new VMs set GCP `maxRunDuration` with `DELETE` for the TTL hard cap, install a guest-side idle expiry guard for expired ready/active leases when possible, and `crabbox cleanup --provider gcp` removes stale local GCP claim files after provider inventory no longer contains the lease.
 - Fixed Windows developer-image bootstrap readiness so setup completion is written before restarting SSH and native Windows bakes wait for a stable SSH window before continuing.
 - Fixed the Windows developer-image mint wrapper so the final PowerShell prep chunk decodes and runs inline instead of relying on a separate post-upload command.
 - Fixed Windows developer-image prep so Docker Engine installation is deferred until after the required Containers feature reboot.

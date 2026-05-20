@@ -203,20 +203,13 @@ func (c *GCPClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 			Subnetwork:    optionalString(c.subnetworkSelfLink()),
 			AccessConfigs: []*computepb.AccessConfig{{Name: proto.String("External NAT"), Type: proto.String("ONE_TO_ONE_NAT")}},
 		}},
+		Scheduling: gcpScheduling(cfg),
 	}
 	if c.ServiceAccount != "" {
 		instance.ServiceAccounts = []*computepb.ServiceAccount{{
 			Email:  proto.String(c.ServiceAccount),
 			Scopes: []string{gcpCloudPlatformScope},
 		}}
-	}
-	if strings.EqualFold(cfg.Capacity.Market, "spot") {
-		instance.Scheduling = &computepb.Scheduling{
-			ProvisioningModel:         proto.String("SPOT"),
-			InstanceTerminationAction: proto.String("DELETE"),
-			AutomaticRestart:          proto.Bool(false),
-			OnHostMaintenance:         proto.String("TERMINATE"),
-		}
 	}
 	op, err := c.instances.Insert(ctx, &computepb.InsertInstanceRequest{
 		Project:          c.Project,
@@ -230,6 +223,35 @@ func (c *GCPClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 		return Server{}, err
 	}
 	return c.GetServer(ctx, name)
+}
+
+func gcpScheduling(cfg Config) *computepb.Scheduling {
+	scheduling := &computepb.Scheduling{}
+	if seconds := gcpMaxRunDurationSeconds(cfg.TTL); seconds > 0 {
+		scheduling.MaxRunDuration = &computepb.Duration{Seconds: proto.Int64(seconds)}
+		scheduling.InstanceTerminationAction = proto.String("DELETE")
+	}
+	if strings.EqualFold(cfg.Capacity.Market, "spot") {
+		scheduling.ProvisioningModel = proto.String("SPOT")
+		scheduling.InstanceTerminationAction = proto.String("DELETE")
+		scheduling.AutomaticRestart = proto.Bool(false)
+		scheduling.OnHostMaintenance = proto.String("TERMINATE")
+	}
+	if scheduling.MaxRunDuration == nil && scheduling.ProvisioningModel == nil {
+		return nil
+	}
+	return scheduling
+}
+
+func gcpMaxRunDurationSeconds(ttl time.Duration) int64 {
+	const (
+		min = 30 * time.Second
+		max = 120 * 24 * time.Hour
+	)
+	if ttl < min || ttl > max {
+		return 0
+	}
+	return int64(ttl.Round(time.Second) / time.Second)
 }
 
 func gcpMetadataItem(key, value string) *computepb.Items {
@@ -310,11 +332,19 @@ func (c *GCPClient) WaitForServerIP(ctx context.Context, name string) (Server, e
 }
 
 func (c *GCPClient) ListCrabboxServers(ctx context.Context) ([]Server, error) {
+	return c.listCrabboxServers(ctx, true)
+}
+
+func (c *GCPClient) ListCrabboxServersComplete(ctx context.Context) ([]Server, error) {
+	return c.listCrabboxServers(ctx, false)
+}
+
+func (c *GCPClient) listCrabboxServers(ctx context.Context, returnPartialSuccess bool) ([]Server, error) {
 	var servers []Server
 	it := c.instances.AggregatedList(ctx, &computepb.AggregatedListInstancesRequest{
 		Project:              c.Project,
 		Filter:               proto.String("labels.crabbox = true"),
-		ReturnPartialSuccess: proto.Bool(true),
+		ReturnPartialSuccess: proto.Bool(returnPartialSuccess),
 	})
 	for {
 		item, err := it.Next()

@@ -26,7 +26,7 @@ func TestClaimLeaseForRepoWritesAndUpdatesClaim(t *testing.T) {
 	}
 }
 
-func TestClaimLeaseForRepoConfigScopesStaticProviderClaims(t *testing.T) {
+func TestClaimLeaseForRepoConfigScopesProviderClaims(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")
 	cfg := Config{Provider: "ssh"}
@@ -49,8 +49,32 @@ func TestClaimLeaseForRepoConfigScopesStaticProviderClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claim.Provider != "" {
-		t.Fatalf("provider=%q want empty for managed provider claim", claim.Provider)
+	if claim.Provider != "aws" {
+		t.Fatalf("provider=%q want aws", claim.Provider)
+	}
+
+	cfg = Config{Provider: "gcp", GCPProject: "project-a"}
+	if err := claimLeaseForRepoConfig("cbx_gcp", "gcp-box", cfg, repo, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err = readLeaseClaim("cbx_gcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Provider != "gcp" || claim.ProviderScope != "project:project-a" {
+		t.Fatalf("gcp claim scope=%#v", claim)
+	}
+
+	cfg = Config{Provider: "google-cloud", GCPProject: "project-a"}
+	if err := claimLeaseForRepoConfig("cbx_gcp_alias", "gcp-alias-box", cfg, repo, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err = readLeaseClaim("cbx_gcp_alias")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Provider != "gcp" || claim.ProviderScope != "project:project-a" {
+		t.Fatalf("gcp alias claim scope=%#v", claim)
 	}
 }
 

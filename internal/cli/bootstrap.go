@@ -612,10 +612,12 @@ func cloudInitOptionalReadyChecks(cfg Config) string {
 }
 
 func cloudInitOptionalWriteFiles(cfg Config) string {
-	if !cfg.Desktop {
-		return ""
+	var parts []string
+	if cfg.Provider == "gcp" {
+		parts = append(parts, cloudInitGCPExpiryGuardFiles())
 	}
-	return `  - path: /etc/systemd/system/crabbox-xvfb.service
+	if cfg.Desktop {
+		parts = append(parts, `  - path: /etc/systemd/system/crabbox-xvfb.service
     permissions: '0644'
     content: |
       [Unit]
@@ -691,7 +693,9 @@ func cloudInitOptionalWriteFiles(cfg Config) string {
 
       [Install]
       WantedBy=multi-user.target
-`
+`)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func cloudInitOptionalBootstrap(cfg Config) string {
@@ -710,6 +714,9 @@ func cloudInitOptionalBootstrap(cfg Config) string {
     chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
     systemctl daemon-reload
     systemctl enable --now crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service crabbox-x11vnc.service`)
+	}
+	if cfg.Provider == "gcp" {
+		parts = append(parts, cloudInitGCPExpiryGuardBootstrap())
 	}
 	if cfg.Browser {
 		parts = append(parts, `    retry apt-get install -y --no-install-recommends gnupg build-essential python3
@@ -751,6 +758,101 @@ func cloudInitOptionalBootstrap(cfg Config) string {
     /usr/local/bin/code-server --version >/dev/null`)
 	}
 	return strings.Join(parts, "\n")
+}
+
+func cloudInitGCPExpiryGuardFiles() string {
+	return `  - path: /usr/local/sbin/crabbox-gcp-expiry-guard
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      metadata() {
+        curl -fsS -H 'Metadata-Flavor: Google' "http://metadata.google.internal/computeMetadata/v1/$1"
+      }
+      project="$(metadata project/project-id 2>/dev/null || true)"
+      name="$(metadata instance/name 2>/dev/null || true)"
+      zone_path="$(metadata instance/zone 2>/dev/null || true)"
+      zone="${zone_path##*/}"
+      token_json="$(metadata instance/service-accounts/default/token 2>/dev/null || true)"
+      token="$(printf '%s' "$token_json" | jq -r '.access_token // empty' 2>/dev/null || true)"
+      if [ -z "$project" ] || [ -z "$name" ] || [ -z "$zone" ] || [ -z "$token" ]; then
+        exit 0
+      fi
+      instance="$(curl -fsS -H "Authorization: Bearer $token" "https://compute.googleapis.com/compute/v1/projects/$project/zones/$zone/instances/$name" 2>/dev/null || true)"
+      if [ -z "$instance" ]; then
+        exit 0
+      fi
+      label() {
+        printf '%s' "$instance" | jq -r --arg key "$1" '.labels[$key] // empty'
+      }
+      crabbox="$(label crabbox)"
+      provider="$(label provider)"
+      if [ "$crabbox" != "true" ] || { [ -n "$provider" ] && [ "$provider" != "gcp" ]; }; then
+        exit 0
+      fi
+      keep="$(label keep | tr '[:upper:]' '[:lower:]')"
+      if [ "$keep" = "true" ]; then
+        exit 0
+      fi
+      expires_at="$(label expires_at)"
+      state="$(label state | tr '[:upper:]' '[:lower:]')"
+      now="$(date -u +%s)"
+      delete=false
+      case "$state" in
+        failed|released|expired)
+          delete=true
+          ;;
+        running|provisioning)
+          if [[ "$expires_at" =~ ^[0-9]+$ ]] && [ "$now" -gt $((expires_at + 43200)) ]; then
+            delete=true
+          fi
+          ;;
+        leased|ready|active|"")
+          if [[ "$expires_at" =~ ^[0-9]+$ ]] && [ "$now" -gt "$expires_at" ]; then
+            delete=true
+          fi
+          ;;
+        *)
+          if [[ "$expires_at" =~ ^[0-9]+$ ]] && [ "$now" -gt "$expires_at" ]; then
+            delete=true
+          fi
+          ;;
+      esac
+      if [ "$delete" != "true" ]; then
+        exit 0
+      fi
+      logger -t crabbox-gcp-expiry-guard "deleting expired lease=$(label lease) state=${state:-unknown} expires_at=${expires_at:-missing}"
+      curl -fsS -X DELETE -H "Authorization: Bearer $token" "https://compute.googleapis.com/compute/v1/projects/$project/zones/$zone/instances/$name" >/dev/null || true
+  - path: /etc/systemd/system/crabbox-gcp-expiry-guard.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Crabbox GCP direct lease expiry guard
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/crabbox-gcp-expiry-guard
+  - path: /etc/systemd/system/crabbox-gcp-expiry-guard.timer
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Run Crabbox GCP direct lease expiry guard
+
+      [Timer]
+      OnBootSec=2min
+      OnUnitActiveSec=2min
+      RandomizedDelaySec=30s
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target`
+}
+
+func cloudInitGCPExpiryGuardBootstrap() string {
+	return `    systemctl daemon-reload
+    systemctl enable --now crabbox-gcp-expiry-guard.timer`
 }
 
 func cloudInitTailscaleBootstrap(cfg Config) string {

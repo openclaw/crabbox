@@ -293,7 +293,13 @@ env -u CRABBOX_COORDINATOR -u CRABBOX_COORDINATOR_TOKEN \
 Cleanup lists Crabbox-labeled instances across the visible project zones by
 using aggregated instance listing with partial success enabled. It deletes
 expired or released leases in the zone recorded on the VM. Brokered cleanup is
-coordinator-owned; direct cleanup is best-effort label cleanup.
+coordinator-owned; direct cleanup is best-effort label cleanup. GCP direct VMs
+set `maxRunDuration` with `DELETE` so the TTL hard cap is enforced by Compute
+Engine. They also install a guest-side `crabbox-gcp-expiry-guard` systemd timer.
+The timer reads live instance labels through the metadata service and Compute
+API, then self-deletes expired non-kept leases when the attached service account
+can delete the VM. Cleanup also removes stale local GCP claim files whose lease
+IDs no longer appear in provider inventory.
 
 ## Troubleshooting
 

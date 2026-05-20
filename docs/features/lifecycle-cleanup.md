@@ -28,6 +28,10 @@ Direct-provider cleanup is conservative:
 - delete clearly expired ready/leased/active direct machines;
 - delete clearly expired inactive machines.
 
+Direct GCP leases also set a provider TTL delete and install a guest-side expiry
+guard so expired ready/active VMs can self-delete if the local CLI disappears
+before release.
+
 Provider resources should carry Crabbox labels/tags so orphan cleanup can identify them without touching unrelated infrastructure.
 
 Related docs:
