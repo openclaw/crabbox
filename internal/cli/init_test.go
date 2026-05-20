@@ -69,6 +69,39 @@ func TestInitProjectWritesExpectedFiles(t *testing.T) {
 	}
 }
 
+func TestWriteInitFileBranches(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "file.txt")
+	if err := writeInitFile(path, "first", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeInitFile(path, "second", false); err == nil {
+		t.Fatal("expected existing file error")
+	}
+	if err := writeInitFile(path, "second", true); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "second" {
+		t.Fatalf("content=%q", data)
+	}
+
+	parent := filepath.Join(t.TempDir(), "not-dir")
+	if err := os.WriteFile(parent, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeInitFile(filepath.Join(parent, "file.txt"), "x", false); err == nil {
+		t.Fatal("expected create directory error")
+	}
+
+	dirPath := t.TempDir()
+	if err := writeInitFile(dirPath, "x", true); err == nil {
+		t.Fatal("expected write directory error")
+	}
+}
+
 func TestSubcommandHelpExitsZero(t *testing.T) {
 	var stderr bytes.Buffer
 	app := App{Stdout: &bytes.Buffer{}, Stderr: &stderr}

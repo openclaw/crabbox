@@ -162,6 +162,23 @@ func TestResolveLeaseClaimForProviderSkipsSlugCollision(t *testing.T) {
 	}
 }
 
+func TestResolveLeaseClaimForProviderFallsBackToUnscopedLookup(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := claimLeaseForRepoProvider("tbx_abc123", "Blue Lobster", "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := resolveLeaseClaimForProvider("blue-lobster", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || claim.LeaseID != "tbx_abc123" {
+		t.Fatalf("unexpected unscoped claim ok=%t claim=%#v", ok, claim)
+	}
+	if claim, ok, err := resolveLeaseClaimForProvider("blue-lobster", "runpod"); err != nil || ok || claim.LeaseID != "" {
+		t.Fatalf("provider mismatch resolved ok=%t claim=%#v err=%v", ok, claim, err)
+	}
+}
+
 func TestResolveLeaseClaimFallbacks(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	if claim, ok, err := resolveLeaseClaim(""); err != nil || ok || claim.LeaseID != "" {
@@ -191,5 +208,26 @@ func TestResolveLeaseClaimFallbacks(t *testing.T) {
 	}
 	if claim, ok, err := resolveLeaseClaim("not-blue-lobster"); err != nil || ok || claim.LeaseID != "" {
 		t.Fatalf("unmatched slug resolved ok=%t claim=%#v err=%v", ok, claim, err)
+	}
+}
+
+func TestClaimStateDirFallbackAndMissingClaim(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	dir, err := crabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(dir, home) || filepath.Base(dir) != "state" {
+		t.Fatalf("state dir=%q should live under home %q and end in state", dir, home)
+	}
+	claim, err := readLeaseClaim("cbx_missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.LeaseID != "" {
+		t.Fatalf("missing claim=%#v", claim)
 	}
 }

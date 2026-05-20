@@ -1216,6 +1216,17 @@ func TestEnvHelperBranches(t *testing.T) {
 	if got := getenvInt32("CRABBOX_INT32_OVERFLOW", 7); got != 7 {
 		t.Fatalf("overflow int32 fallback=%d", got)
 	}
+	t.Setenv("CRABBOX_FLOAT", "1.5")
+	t.Setenv("CRABBOX_BAD_FLOAT", "oops")
+	if got := getenvFloat("CRABBOX_FLOAT", 7); got != 1.5 {
+		t.Fatalf("float=%f", got)
+	}
+	if got := getenvFloat("CRABBOX_BAD_FLOAT", 7); got != 7 {
+		t.Fatalf("bad float fallback=%f", got)
+	}
+	if got := getenvFloat("CRABBOX_MISSING_FLOAT", 7); got != 7 {
+		t.Fatalf("missing float fallback=%f", got)
+	}
 
 	for _, tc := range []struct {
 		name  string
@@ -1244,6 +1255,16 @@ func TestEnvHelperBranches(t *testing.T) {
 	t.Setenv("CRABBOX_LIST", "CI,NODE_OPTIONS")
 	if list, ok := getenvList("CRABBOX_LIST"); !ok || len(list) != 2 || list[1] != "NODE_OPTIONS" {
 		t.Fatalf("getenvList=%v ok=%t", list, ok)
+	}
+}
+
+func TestFileProfileEnvConfigUnmarshalRejectsNonMapping(t *testing.T) {
+	var cfg struct {
+		Env fileProfileEnvConfig `yaml:"env"`
+	}
+	err := yaml.Unmarshal([]byte("env: []\n"), &cfg)
+	if err == nil || !strings.Contains(err.Error(), "profile env must be a mapping") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -1301,6 +1322,97 @@ func TestNamespaceDevboxSizeForConfig(t *testing.T) {
 				t.Fatalf("size=%q want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestConfigServerTypeHelperBranches(t *testing.T) {
+	if got := proxmoxServerTypeForConfig(Config{}); got != "template" {
+		t.Fatalf("proxmox default=%q", got)
+	}
+	if got := proxmoxServerTypeForConfig(Config{Proxmox: ProxmoxConfig{TemplateID: 9000}}); got != "template-9000" {
+		t.Fatalf("proxmox template=%q", got)
+	}
+	for _, tc := range []struct {
+		class string
+		want  string
+	}{
+		{class: "standard", want: "S"},
+		{class: "fast", want: "M"},
+		{class: "beast", want: "XL"},
+	} {
+		if got := namespaceDevboxSizeForClass(tc.class); got != tc.want {
+			t.Fatalf("namespaceDevboxSizeForClass(%q)=%q want %q", tc.class, got, tc.want)
+		}
+	}
+}
+
+func TestApplyFileConfigCloudProviderBranches(t *testing.T) {
+	enabled := true
+	disabled := false
+	cfg := Config{}
+	applyFileConfig(&cfg, fileConfig{
+		TargetOS:         targetLinux,
+		Desktop:          &enabled,
+		Browser:          &disabled,
+		Code:             &enabled,
+		ServerType:       "custom-type",
+		CoordinatorToken: "coord-token",
+		HostID:           "",
+		Broker: &fileBrokerConfig{
+			Provider: "aws",
+			Access:   &fileAccessConfig{ClientID: "access-id", ClientSecret: "access-secret", Token: "access-token"},
+		},
+		Hetzner: &fileHetznerConfig{Location: "fsn1", Image: "ubuntu-24.04", SSHKey: "hetzner-key"},
+		AWS: &fileAWSConfig{
+			Region:          "eu-central-1",
+			AMI:             "ami-test",
+			SecurityGroupID: "sg-test",
+			SubnetID:        "subnet-test",
+			InstanceProfile: "profile-test",
+			RootGB:          123,
+			SSHCIDRs:        []string{"198.51.100.1/32"},
+			MacHostID:       "h-mac",
+		},
+		Azure: &fileAzureConfig{
+			SubscriptionID: "sub",
+			TenantID:       "tenant",
+			ClientID:       "client",
+			Location:       "westeurope",
+			ResourceGroup:  "rg",
+			Image:          "ubuntu",
+			OSDisk:         "ephemeral",
+			VNet:           "vnet",
+			Subnet:         "subnet",
+			NSG:            "nsg",
+			SSHCIDRs:       []string{"198.51.100.2/32"},
+			Network:        "public",
+		},
+		GCP: &fileGCPConfig{
+			Project:        "project",
+			Zone:           "europe-west1-b",
+			Image:          "ubuntu",
+			Network:        "net",
+			Subnet:         "subnet",
+			Tags:           []string{"crabbox"},
+			SSHCIDRs:       []string{"198.51.100.3/32"},
+			RootGB:         456,
+			ServiceAccount: "runner@example.iam.gserviceaccount.com",
+		},
+	})
+	if !cfg.Desktop || cfg.Browser || !cfg.Code || cfg.TargetOS != targetLinux || cfg.ServerType != "custom-type" {
+		t.Fatalf("top-level config not applied: %#v", cfg)
+	}
+	if cfg.Provider != "aws" || cfg.Access.ClientID != "access-id" || cfg.CoordToken != "coord-token" {
+		t.Fatalf("broker/access config not applied: provider=%s access=%#v token=%s", cfg.Provider, cfg.Access, cfg.CoordToken)
+	}
+	if cfg.Location != "fsn1" || cfg.ProviderKey != "hetzner-key" || cfg.HostID != "h-mac" || cfg.AWSRootGB != 123 {
+		t.Fatalf("hetzner/aws config not applied: location=%s key=%s host=%s root=%d", cfg.Location, cfg.ProviderKey, cfg.HostID, cfg.AWSRootGB)
+	}
+	if cfg.AzureOSDisk != "ephemeral" || !cfg.AzureOSDiskExplicit || cfg.AzureNetwork != "public" {
+		t.Fatalf("azure config not applied: %#v", cfg)
+	}
+	if cfg.GCPProject != "project" || !cfg.gcpProjectExplicit || cfg.GCPRootGB != 456 || cfg.GCPServiceAccount == "" {
+		t.Fatalf("gcp config not applied: %#v", cfg)
 	}
 }
 
