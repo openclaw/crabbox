@@ -33,6 +33,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	provider := fs.String("provider", defaults.Provider, providerHelpAll())
 	profile := fs.String("profile", defaults.Profile, "configured profile for remote prerequisite checks")
 	id := fs.String("id", "", "remote lease id to inspect")
+	crew := fs.String("crew", defaults.Crew, "verify Tailscale ACL setup for this crew")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	probeSSH := fs.Bool("doctor-probe-ssh", false, "probe static SSH reachability during doctor")
 	targetFlags := registerTargetFlags(fs, defaults)
@@ -48,6 +49,13 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	cfg.Profile = strings.TrimSpace(*profile)
 	if err := applySelectedProfileConfig(&cfg); err != nil {
 		return err
+	}
+	if flagWasSet(fs, "crew") {
+		crewName, err := requestedCrewName(*crew)
+		if err != nil {
+			return err
+		}
+		cfg.Crew = crewName
 	}
 	ok := true
 	var checks []doctorJSONCheck
@@ -67,6 +75,12 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stdout, "%-7s %-8s %s\n", status, check, message)
 	}
 	finish := func() error {
+		if status, message, details := doctorCrewSummary(ctx, cfg); status != "" {
+			if status == "failed" {
+				ok = false
+			}
+			record(status, "crew", message, details)
+		}
 		if *jsonOut {
 			if err := json.NewEncoder(a.Stdout).Encode(doctorJSONOutput{OK: ok, Provider: cfg.Provider, Checks: checks}); err != nil {
 				return err
