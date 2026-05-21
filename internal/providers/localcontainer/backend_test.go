@@ -3,6 +3,8 @@ package localcontainer
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -210,5 +212,31 @@ func TestFindContainerForClaimReturnsMatchedContainerIdentity(t *testing.T) {
 	}
 	if container.ID != "newcontainer123456" || leaseID != "cbx_new" || slug != "blue-lobster" {
 		t.Fatalf("identity = container=%s lease=%s slug=%s", container.ID, leaseID, slug)
+	}
+}
+
+func TestReleaseLeaseRemovesStoredKey(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	keyPath, err := core.TestboxKeyPath("cbx_release")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"rm", "-f", "container123"}): {},
+		},
+	}
+	b := testBackend(runner)
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_release", Server: core.Server{CloudID: "container123"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("stored key still exists after release: %v", err)
 	}
 }
