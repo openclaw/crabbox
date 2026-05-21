@@ -485,6 +485,9 @@ func validateActionsRunnerCapability(backend Backend, cfg Config) error {
 	if _, ok := backend.(SSHLeaseBackend); !ok {
 		return exit(2, "--actions-runner requires an SSH lease provider")
 	}
+	if backend.Spec().Name == "local-container" {
+		return exit(2, "--actions-runner is not supported for provider=local-container; use normal crabbox run or a remote SSH provider")
+	}
 	if !supportsActionsRunnerTarget(SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}) {
 		return exit(2, "--actions-runner requires target=linux or target=windows with windows-mode=wsl2")
 	}

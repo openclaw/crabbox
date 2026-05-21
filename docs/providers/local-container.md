@@ -115,6 +115,9 @@ CRABBOX_LOCAL_CONTAINER_NETWORK
   are local-only. `webvnc` starts noVNC/websockify on the target and tunnels it
   over SSH; it does not use the authenticated Crabbox portal.
 - No code-server, Tailscale bootstrap, or native checkpoint support yet.
+- `warmup --actions-runner` is not supported; use normal `crabbox run` for
+  local container smoke tests or a remote SSH provider for GitHub runner
+  registration.
 - The Docker daemon is a powerful local capability. Do not treat this as the
   same host isolation boundary as a remote VM or microVM.
 - The current checkout is synced into the container by default. Crabbox does not

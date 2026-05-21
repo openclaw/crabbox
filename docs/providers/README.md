@@ -122,8 +122,8 @@ Sprites API and reaches SSH through `sprite proxy`; exe.dev provisions through
 | RunPod | yes | yes | yes | no | yes | no |
 
 Actions runner hydration requires a normal SSH lease on Linux and is core-over-SSH.
-Use AWS, Google Cloud, Hetzner, Proxmox, Parallels, Local Container, Static SSH,
-exe.dev, Namespace Devbox, Semaphore, Sprites, or RunPod for that path.
+Use AWS, Google Cloud, Hetzner, Proxmox, Parallels, Static SSH, exe.dev,
+Namespace Devbox, Semaphore, Sprites, or RunPod for that path.
 
 ## Implementation
 

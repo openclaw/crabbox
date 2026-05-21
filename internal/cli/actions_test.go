@@ -216,6 +216,14 @@ func TestValidateActionsRunnerCapabilityAllowsWSL2(t *testing.T) {
 	}
 }
 
+func TestValidateActionsRunnerCapabilityRejectsLocalContainer(t *testing.T) {
+	backend := testSSHBackend{spec: ProviderSpec{Name: "local-container"}}
+	err := validateActionsRunnerCapability(backend, Config{Provider: "local-container", TargetOS: targetLinux})
+	if err == nil || !strings.Contains(err.Error(), "provider=local-container") {
+		t.Fatalf("local-container actions runner error=%v", err)
+	}
+}
+
 func TestLocalActionsWorkflowPathRequiresRepoWorkflowFile(t *testing.T) {
 	root := t.TempDir()
 	workflow := filepath.Join(root, ".github", "workflows", "hydrate.yml")
