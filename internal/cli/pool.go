@@ -20,6 +20,7 @@ func (a App) list(ctx context.Context, args []string) error {
 	provider := fs.String("provider", defaults.Provider, providerHelpAll())
 	jsonOut := fs.Bool("json", false, "print JSON")
 	refresh := fs.Bool("refresh", false, "refresh provider-backed state where supported")
+	crewFilter := fs.String("crew", "", "only list leases tagged with this crew")
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -36,6 +37,10 @@ func (a App) list(ctx context.Context, args []string) error {
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
+	crewName, err := requestedCrewName(*crewFilter)
+	if err != nil {
+		return err
+	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
@@ -47,6 +52,9 @@ func (a App) list(ctx context.Context, args []string) error {
 				return err
 			}
 			a.syncExternalRunnersBestEffort(ctx, cfg, backend)
+			if crewName != "" {
+				view = filterJSONListViewByCrew(view, crewName)
+			}
 			return json.NewEncoder(a.Stdout).Encode(view)
 		}
 	}
@@ -63,11 +71,68 @@ func (a App) list(ctx context.Context, args []string) error {
 		return err
 	}
 	a.syncExternalRunnersBestEffort(ctx, cfg, backend)
+	if crewName != "" {
+		servers = filterServersByCrew(servers, crewName)
+	}
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(servers)
 	}
 	renderServerList(a.Stdout, servers)
 	return nil
+}
+
+// filterJSONListViewByCrew filters a list-view payload (whatever shape the
+// backend produces) by inspecting label-bearing entries. Backends that emit
+// shapes without labels are returned unchanged so JSON list output stays
+// authoritative for those providers.
+func filterJSONListViewByCrew(view any, crew string) any {
+	crew = normalizeCrewName(crew)
+	if crew == "" {
+		return view
+	}
+	entries, ok := view.([]any)
+	if !ok {
+		return view
+	}
+	hasLabels := false
+	for _, entry := range entries {
+		if extractLabelMap(entry) != nil {
+			hasLabels = true
+			break
+		}
+	}
+	if !hasLabels {
+		return view
+	}
+	kept := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		labels := extractLabelMap(entry)
+		if labels == nil {
+			continue
+		}
+		if normalizeCrewName(labels[crewLabelKey]) == crew {
+			kept = append(kept, entry)
+		}
+	}
+	return kept
+}
+
+func extractLabelMap(entry any) map[string]string {
+	mapEntry, ok := entry.(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, ok := mapEntry["labels"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	labels := make(map[string]string, len(raw))
+	for key, value := range raw {
+		if str, ok := value.(string); ok {
+			labels[key] = str
+		}
+	}
+	return labels
 }
 
 func (a App) syncExternalRunnersBestEffort(ctx context.Context, cfg Config, backend Backend) {

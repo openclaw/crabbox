@@ -2,8 +2,11 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -14,6 +17,7 @@ type leaseCreateFlagValues struct {
 	ServerType    *string
 	Market        *string
 	Slug          *string
+	Crew          *string
 	TTL           *time.Duration
 	Idle          *time.Duration
 	Desktop       *bool
@@ -32,6 +36,7 @@ func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlag
 		ServerType:    fs.String("type", getenv("CRABBOX_SERVER_TYPE", ""), "provider server/instance type"),
 		Market:        fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand"),
 		Slug:          fs.String("slug", "", "request a friendly slug for a new lease"),
+		Crew:          fs.String("crew", defaults.Crew, "tag this lease with a crew name so peers can be selected with --crew"),
 		TTL:           fs.Duration("ttl", defaults.TTL, "maximum lease lifetime"),
 		Idle:          fs.Duration("idle-timeout", defaults.IdleTimeout, "idle timeout"),
 		Desktop:       fs.Bool("desktop", defaults.Desktop, "provision or require a visible desktop/VNC session"),
@@ -51,6 +56,13 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 	cfg.Provider = *values.Provider
 	cfg.Profile = *values.Profile
 	cfg.Class = *values.Class
+	if flagWasSet(fs, "crew") {
+		crew, err := requestedCrewName(*values.Crew)
+		if err != nil {
+			return err
+		}
+		cfg.Crew = crew
+	}
 	applyCapabilityFlags(cfg, *values.Desktop, *values.Browser, *values.Code)
 	if err := applyTargetFlagOverrides(cfg, fs, values.Target); err != nil {
 		return err
@@ -81,7 +93,46 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 	if err := validateRequestedCapabilities(*cfg); err != nil {
 		return err
 	}
+	if cfg.Crew != "" {
+		appendCrewTailscaleTag(cfg, providerCapableOfTailscale(cfg.Provider))
+		if err := maybeBootstrapCrewACL(context.Background(), *cfg); err != nil {
+			return err
+		}
+	}
 	return validateLeaseDurations(*cfg)
+}
+
+// maybeBootstrapCrewACL self-bootstraps the crew tag's tagOwners + grants
+// rows on the operator tailnet when TS_API_KEY is exported. When the key is
+// absent, when the provider lacks Tailscale, or when the row is already
+// present, this is a silent no-op so doctor still owns the manual-snippet
+// fallback path. Failures from the live API are surfaced so the lease is
+// not created against a tailnet that cannot actually carry crew traffic.
+func maybeBootstrapCrewACL(ctx context.Context, cfg Config) error {
+	if cfg.Crew == "" || !cfg.Tailscale.Enabled {
+		return nil
+	}
+	if !providerCapableOfTailscale(cfg.Provider) {
+		return nil
+	}
+	apiKey := strings.TrimSpace(os.Getenv("TS_API_KEY"))
+	if apiKey == "" {
+		return nil
+	}
+	client := crewTailnetACLClientFactory(apiKey)
+	if client == nil {
+		return nil
+	}
+	tailnet := strings.TrimSpace(os.Getenv("TS_TAILNET"))
+	owner := localCoordinatorOwner()
+	err := crewACLEnsure(ctx, client, tailnet, owner, cfg.Crew)
+	// A self-hosted control plane (e.g. Headscale) without a Tailscale-shaped
+	// policy API must not block lease creation. Doctor surfaces the same
+	// condition to the operator with the manual-snippet pointer.
+	if errors.Is(err, ErrCrewACLAutoBootstrapUnavailable) {
+		return nil
+	}
+	return err
 }
 
 func validateLeaseDurations(cfg Config) error {

@@ -76,6 +76,7 @@ export interface LeaseConfig {
   idleTimeoutSeconds: number;
   keep: boolean;
   sshPublicKey: string;
+  crew: string;
 }
 
 export type AzureOSDiskMode = "managed" | "ephemeral";
@@ -199,7 +200,19 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     idleTimeoutSeconds,
     keep: input.keep ?? false,
     sshPublicKey,
+    crew: normalizeCrewName(input.crew ?? ""),
   };
+}
+
+// normalizeCrewName mirrors the Go-side helper in internal/cli/crew.go. The
+// `crew` label is a reserved provider-label key that groups N leases so peers
+// can be selected by `crabbox list --crew <name>`.
+export function normalizeCrewName(value: string): string {
+  return value
+    .toLowerCase()
+    .trim()
+    .replaceAll(/[^a-z0-9]+/g, "-")
+    .replaceAll(/^-+|-+$/g, "");
 }
 
 export function awsPromotedAMIConfigKey(region: string, serverType: string): string {

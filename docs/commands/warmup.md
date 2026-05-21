@@ -9,6 +9,7 @@ crabbox warmup --provider azure --class beast
 crabbox warmup --browser
 crabbox warmup --tailscale
 crabbox warmup --slug update-flow-smoke
+crabbox warmup --crew alpha --slug db
 crabbox warmup --desktop --browser
 crabbox warmup --provider aws --target windows --desktop
 crabbox warmup --provider azure --target windows
@@ -29,6 +30,15 @@ crabbox warmup --provider ssh --target windows --windows-mode normal --static-ho
 The command returns a stable `cbx_...` lease ID and a friendly slug. Reuse either for subsequent `run`, `status`, `ssh`, `inspect`, and `stop` commands; scripts should keep using the canonical ID.
 Use `--slug <slug>` to request a human-chosen slug for a new lease. Crabbox
 normalizes it and may add a suffix when an active lease already uses it.
+
+Use `--crew <name>` to tag a new lease into a named crew. The crew name is
+stored on the lease as a reserved provider label, and `crabbox list --crew
+<name>` filters by it. When combined with `--tailscale` on a Tailscale-capable
+provider, the CLI also advertises a `tag:cbx-crew-<owner>-<name>` ACL tag and
+cloud-init refreshes `/etc/hosts.cbx` plus a managed `/etc/hosts` block every
+30 seconds so peers are reachable as `<slug>.cbx`. See
+[`docs/features/crew.md`](../features/crew.md) for the one-time policy snippet
+and the `doctor --crew` coverage.
 
 With `--provider blacksmith-testbox`, the canonical ID is the Blacksmith `tbx_...` ID returned by `blacksmith testbox warmup`; Crabbox still assigns and stores a local slug for reuse.
 
@@ -127,6 +137,7 @@ Flags:
 --azure-os-disk managed|ephemeral|auto
 --market spot|on-demand
 --slug <slug>
+--crew <name>
 --ttl <duration>
 --idle-timeout <duration>
 --desktop

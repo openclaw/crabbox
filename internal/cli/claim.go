@@ -14,6 +14,7 @@ type leaseClaim struct {
 	Slug               string `json:"slug,omitempty"`
 	Provider           string `json:"provider,omitempty"`
 	ProviderScope      string `json:"providerScope,omitempty"`
+	Crew               string `json:"crew,omitempty"`
 	RepoRoot           string `json:"repoRoot"`
 	ClaimedAt          string `json:"claimedAt"`
 	LastUsedAt         string `json:"lastUsedAt"`
@@ -30,10 +31,18 @@ func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, 
 }
 
 func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return claimLeaseForRepoProviderScope(leaseID, slug, provider, "", repoRoot, idleTimeout, reclaim)
+	return claimLeaseForRepoProviderScopeCrew(leaseID, slug, provider, "", "", repoRoot, idleTimeout, reclaim)
 }
 
 func claimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopeCrew(leaseID, slug, provider, providerScope, "", repoRoot, idleTimeout, reclaim)
+}
+
+func claimLeaseForRepoProviderWithCrew(leaseID, slug, provider, crew, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopeCrew(leaseID, slug, provider, "", crew, repoRoot, idleTimeout, reclaim)
+}
+
+func claimLeaseForRepoProviderScopeCrew(leaseID, slug, provider, providerScope, crew, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	if leaseID == "" || repoRoot == "" {
 		return nil
 	}
@@ -59,6 +68,9 @@ func claimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repo
 	}
 	if providerScope != "" {
 		existing.ProviderScope = providerScope
+	}
+	if crew = normalizeCrewName(crew); crew != "" {
+		existing.Crew = crew
 	}
 	existing.RepoRoot = repoRoot
 	existing.LastUsedAt = now

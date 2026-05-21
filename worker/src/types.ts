@@ -150,6 +150,7 @@ export interface LeaseRequest {
   idleTimeoutSeconds?: number;
   keep?: boolean;
   sshPublicKey?: string;
+  crew?: string;
 }
 
 export type Provider = "hetzner" | "aws" | "azure" | "gcp";
