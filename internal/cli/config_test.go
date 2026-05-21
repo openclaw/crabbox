@@ -218,6 +218,117 @@ func TestProfileEnvConfigYAMLRejectsNonMapping(t *testing.T) {
 	}
 }
 
+func TestApplyFileParallelsTemplateConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	existing := ParallelsTemplateConfig{
+		Source:   "macOS Tahoe",
+		TargetOS: targetMacOS,
+	}
+	got := applyFileParallelsTemplateConfig(existing, fileParallelsTemplateConfig{
+		Source:           "Windows 11",
+		SourceID:         "{source-id}",
+		SourceSnapshot:   "Known Good",
+		SourceSnapshotID: "{snapshot-id}",
+		Target:           targetLinux,
+		TargetOS:         targetWindows,
+		WindowsMode:      windowsModeNormal,
+		CloneMode:        "linked",
+		Host:             "mac.example.test",
+		HostUser:         "build",
+		HostKey:          "~/keys/parallels",
+		VMRoot:           "~/Parallels",
+		User:             "runner",
+		WorkRoot:         "C:\\crabbox",
+	})
+	if got.Source != "Windows 11" || got.SourceID != "{source-id}" || got.SourceSnapshot != "Known Good" || got.SourceSnapshotID != "{snapshot-id}" {
+		t.Fatalf("source fields=%#v", got)
+	}
+	if got.TargetOS != targetWindows || got.WindowsMode != windowsModeNormal || got.CloneMode != "linked" {
+		t.Fatalf("target fields=%#v", got)
+	}
+	if got.Host != "mac.example.test" || got.HostUser != "build" || got.User != "runner" || got.WorkRoot != "C:\\crabbox" {
+		t.Fatalf("host/user fields=%#v", got)
+	}
+	if got.HostKey != filepath.Join(home, "keys/parallels") || got.VMRoot != filepath.Join(home, "Parallels") {
+		t.Fatalf("expanded paths hostKey=%q vmRoot=%q", got.HostKey, got.VMRoot)
+	}
+}
+
+func TestApplyFileParallelsHostConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	targets := []string{targetMacOS, targetLinux}
+	got := applyFileParallelsHostConfig(fileParallelsHostConfig{
+		Name:    " mac-mini ",
+		Host:    " mac.example.test ",
+		User:    " build ",
+		Key:     " ~/keys/fleet ",
+		VMRoot:  " ~/Parallels ",
+		Targets: targets,
+		MaxVMs:  3,
+	})
+	targets[0] = targetWindows
+	if got.Name != "mac-mini" || got.Host != "mac.example.test" || got.User != "build" {
+		t.Fatalf("trimmed fields=%#v", got)
+	}
+	if got.Key != filepath.Join(home, "keys/fleet") || got.VMRoot != filepath.Join(home, "Parallels") {
+		t.Fatalf("expanded paths key=%q vmRoot=%q", got.Key, got.VMRoot)
+	}
+	if got.MaxVMs != 3 || len(got.Targets) != 2 || got.Targets[0] != targetMacOS || got.Targets[1] != targetLinux {
+		t.Fatalf("targets/max=%#v", got)
+	}
+}
+
+func TestParallelsServerTypeForConfig(t *testing.T) {
+	if got := parallelsServerTypeForConfig(Config{}); got != "template" {
+		t.Fatalf("empty=%q", got)
+	}
+	if got := parallelsServerTypeForConfig(Config{Parallels: ParallelsConfig{Template: "macOS Tahoe Latest"}}); got != "template-macos-tahoe-latest" {
+		t.Fatalf("template=%q", got)
+	}
+	if got := parallelsServerTypeForConfig(Config{Parallels: ParallelsConfig{SourceID: "{VM-ID}"}}); got != "template-vm-id" {
+		t.Fatalf("source id=%q", got)
+	}
+}
+
+func TestApplyParallelsTemplateConfigSourceIDsAndEmptyName(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "parallels"
+	cfg.Parallels.Source = "old-source"
+	cfg.Parallels.SourceSnapshot = "old-snapshot"
+	cfg.Parallels.Templates = map[string]ParallelsTemplateConfig{
+		"ids": {
+			SourceID:         "{source-id}",
+			SourceSnapshotID: "{snapshot-id}",
+			TargetOS:         "windows",
+			WindowsMode:      windowsModeNormal,
+			CloneMode:        "linked",
+			HostKey:          "/keys/fleet",
+			VMRoot:           "/vms",
+			WorkRoot:         "C:\\work",
+		},
+	}
+	if err := ApplyParallelsTemplateConfig(&cfg, " "); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Parallels.Template != "" || cfg.parallelsTemplateApplied {
+		t.Fatalf("empty name should be no-op: %#v", cfg.Parallels)
+	}
+	if err := ApplyParallelsTemplateConfig(&cfg, "ids"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Parallels.Source != "old-source" || cfg.Parallels.SourceID != "{source-id}" || cfg.Parallels.SourceSnapshot != "old-snapshot" || cfg.Parallels.SourceSnapshotID != "{snapshot-id}" {
+		t.Fatalf("source ids=%#v", cfg.Parallels)
+	}
+	if cfg.TargetOS != targetWindows || cfg.WindowsMode != windowsModeNormal || cfg.WorkRoot != "C:\\work" {
+		t.Fatalf("defaults target=%s windows=%s work=%s", cfg.TargetOS, cfg.WindowsMode, cfg.WorkRoot)
+	}
+	if cfg.Parallels.CloneMode != "linked" || cfg.Parallels.HostKey != "/keys/fleet" || cfg.Parallels.VMRoot != "/vms" || !cfg.parallelsTemplateApplied {
+		t.Fatalf("template fields=%#v applied=%v", cfg.Parallels, cfg.parallelsTemplateApplied)
+	}
+}
+
 func TestLoadConfigFromUserFile(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
