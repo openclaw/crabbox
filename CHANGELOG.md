@@ -20,6 +20,21 @@
   non-Tailscale providers honor the label as metadata and `doctor --crew`
   reports the missing plane. See `docs/features/crew.md` for the one-time
   policy snippet.
+- Added the crew **bridge plane** — `crabbox crew peers --crew <name>`
+  returns a unified peer listing across every provider in the crew with a
+  per-peer `transport` hint (`tailnet`, `url`, `ssh`, `pending`, `none`) and
+  a canonical endpoint. Managed-Linux peers report their tailnet IPv4;
+  SSH-lease peers report `ssh://host:port`; delegated providers with a URL
+  adapter (Islo / E2B / Railway today; Modal / Cloudflare / Tensorlake
+  surface as `unsupported` until their providers expose a per-sandbox
+  HTTPS ingress) report per-port public HTTPS URLs minted through the
+  provider's native ingress (idempotent via `--share-port` / `--share-ttl`).
+  Providers without an adapter, plus Blacksmith, are surfaced as
+  `transport=none` with an honest note so doctor does not pretend the peer
+  is reachable. The companion `crabbox doctor --crew <name>` prints the
+  per-transport reachability matrix alongside its existing Tailscale ACL
+  check and is explicit about the asymmetry — `tailnet -> url` works,
+  `url -> tailnet` does not, and SSH pairs need operator-side bridging.
 
 ### Changed
 

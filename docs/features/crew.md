@@ -206,6 +206,129 @@ headscale policy set --file ./policy.hujson
 The client-side plane (advertise-tags, `/etc/hosts.cbx` synthesis from
 `tailscale status --json`) works identically against either control plane.
 
+For delegated providers (E2B, Modal, Cloudflare, Railway, Islo, Tensorlake,
+Blacksmith), the label is honored as metadata but the Tailscale plane is not
+applicable. The **bridge plane** (see next section) gives delegated providers
+HTTP-only peer discovery on top of the provider's own ingress primitive.
+
+## Bridge plane (cross-provider peer discovery)
+
+`crabbox crew peers --crew <name>` is the single command that lists every
+member of a crew with a transport hint, regardless of how that member is
+hosted. It folds three planes into one view:
+
+- **Tailscale plane** for managed Linux providers (AWS / Azure / GCP /
+  Hetzner / Proxmox / Static SSH). Endpoint is the peer's tailnet IPv4
+  (or FQDN when only that is recorded). Reachability is direct on the
+  tailnet.
+- **URL plane** for delegated providers (Islo / E2B / Railway today;
+  Modal / Cloudflare / Tensorlake surface as `unsupported` until their
+  providers expose a per-sandbox HTTPS ingress). Endpoint is a
+  per-sandbox public HTTPS URL. The plane is deliberately HTTP-only — it
+  is not a general-purpose VPN.
+- **SSH plane** for SSH-lease providers (exe.dev / RunPod / Daytona /
+  Sprites / Namespace / Semaphore). Endpoint is `ssh://<host>:<port>`.
+
+Two more states cover the gaps honestly:
+
+- `pending` — the provider class is known but the lease record has not
+  yet captured an endpoint (tailnet not joined, share not minted, SSH
+  host not yet known).
+- `none` — the provider owns its own connectivity (Blacksmith) or
+  Crabbox has no bridge adapter for it. The peer is listed with a note
+  explaining the gap so the doctor command can report it without
+  pretending the peer is reachable.
+
+For URL-transport peers the bridge calls the provider's native ingress
+API (islo `share`, E2B preview, Modal web endpoint, …) through the
+`core.BridgeProvider` interface (`PublishPeer` / `ListPeerTargets`). For
+tailnet and SSH peers the unified view does not invoke a bridge adapter
+at all — it reads the endpoint straight off the local claim sidecar.
+
+### How it works on islo
+
+Islo exposes `POST /sandboxes/{name}/shares` to create a public HTTPS URL
+that routes to a chosen sandbox port. Crabbox's bridge calls that endpoint
+when the user asks for peer URLs, caches the results inside the islo
+share registry (so calls are idempotent), and surfaces them as
+`BridgePeerTarget` rows.
+
+```sh
+crabbox warmup --provider islo --crew bridge-demo --slug bridge-demo-web
+crabbox warmup --provider islo --crew bridge-demo --slug bridge-demo-client
+
+# Publish a public URL for port 8080 on every member of the crew.
+crabbox crew peers --crew bridge-demo --share-port 8080 --json
+```
+
+The JSON output contains one `BridgePeer` per lease, each with a list of
+`Targets` (`{port, url, shareID, expiresAt}`). A client that wants to dial
+the web peer from inside another sandbox uses the URL directly:
+
+```sh
+curl --silent --show-error https://abc123.share.islo.dev/
+```
+
+Without `--share-port`, the command lists *existing* shares rather than
+minting new ones, so the call is cheap and side-effect-free. That is also
+what the doctor probe runs (HEAD against the first target with a 3s budget
+per peer).
+
+### Honest scope
+
+- HTTP/HTTPS only. The bridge plane is built on islo `share`, which is an
+  HTTPS endpoint; raw TCP (Postgres, Redis, SSH) is out of scope.
+- One target per share. Each sandbox port needs its own share; the bridge
+  plane is per-port discovery, not a wildcard tunnel.
+- TTL: islo shares default to 24h, max 7d (the bridge clamps any user
+  override into that range). Renewal is the application's responsibility.
+- No name resolution. The bridge does not write `<slug>.cbx` aliases — peer
+  URLs are random subdomains under `share.islo.dev`. Applications consume
+  the JSON output and dial by URL; they do not assume a stable hostname.
+- Delegated provider only. The Tailscale plane is still the right answer
+  for managed Linux providers; the bridge plane is purpose-built for
+  backends that cannot join a tailnet.
+
+### Per-provider posture
+
+| Provider                                                | Transport       | Notes                                                                                                       |
+| ------------------------------------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------- |
+| AWS / Azure / GCP / Hetzner / Proxmox / Static SSH      | `tailnet`       | Endpoint = tailnet IPv4 from the lease record. Empty endpoint surfaces as `pending`.                        |
+| exe.dev / RunPod / Daytona / Sprites / Namespace / Semaphore | `ssh`           | Endpoint = `ssh://<host>:<port>` from the lease record. Empty host surfaces as `pending`.                   |
+| Islo                                                    | `url`           | Implemented via the islo `share` API (per-port public HTTPS URL, idempotent).                               |
+| E2B                                                     | `url`           | URLs synthesised from the native `https://<port>-<sandboxID>.<domain>` preview convention.                  |
+| Railway                                                 | `url`           | Surfaces the existing deployment URL on `railwayDeployment.URL` (one URL per service, no per-port routing). |
+| Modal                                                   | `url` (unsupported) | Sandbox lease record carries no tunnel URL; the adapter returns an explicit `BridgeState=unsupported`.       |
+| Cloudflare                                              | `url` (unsupported) | Worker URL is auth-gated; the adapter returns `BridgeState=unsupported`.                                     |
+| Tensorlake                                              | `url` (unsupported) | Serverless invocation model — no per-sandbox HTTPS endpoint; the adapter returns `BridgeState=unsupported`.  |
+| Blacksmith                                              | `none`          | Owns its own connectivity; surfaced with the documented note.                                                 |
+
+### Doctor reachability matrix
+
+`crabbox doctor --crew <name>` runs the existing Tailscale ACL check for
+the named crew and, in the same invocation, prints the per-transport
+reachability matrix derived from the unified peer list:
+
+```
+crew "alpha": 4 members
+  transport breakdown: none=1 ssh=1 tailnet=1 url=1
+  reachability:
+    tailnet -> tailnet : OK
+    tailnet -> url     : OK (via outbound HTTPS)
+    tailnet -> ssh     : WARN (requires operator-side bridge — see SSH-mesh DRAFT PR)
+    url     -> tailnet : NO (no public endpoint on tailnet members)
+    url     -> url     : OK
+    url     -> ssh     : WARN (requires operator-side bridge)
+    ssh     -> tailnet : WARN (requires operator-side bridge)
+    ssh     -> url     : OK (via outbound HTTPS)
+    ssh     -> ssh     : WARN (requires operator-side bridge — peers do not share a mesh)
+```
+
+The matrix is asymmetric on purpose. A tailnet peer can dial a URL peer
+over outbound HTTPS, but a URL peer cannot dial a tailnet peer — the
+tailnet member has no public endpoint. SSH pairs are flagged WARN
+because Crabbox does not currently mesh SSH leases.
+
 ## Why a label, not a new object
 
 Crabbox's labels already drive cleanup, the portal lease list, broker

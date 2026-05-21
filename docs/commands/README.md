@@ -41,5 +41,6 @@ Command docs live here, one file per top-level command. Keep `docs/cli.md` as th
 - [inspect](inspect.md)
 - [stop](stop.md)
 - [cleanup](cleanup.md)
+- [crew](crew.md)
 - [azure](azure.md)
 - [config](config.md)

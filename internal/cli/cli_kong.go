@@ -54,6 +54,7 @@ type crabboxKongCLI struct {
 	Config     configKongCmd     `cmd:"" help:"Show or update user config."`
 	Pool       poolKongCmd       `cmd:"" help:"Alias commands for machine pools."`
 	Machine    machineKongCmd    `cmd:"" help:"Alias commands for direct-provider machines."`
+	Crew       crewKongCmd       `cmd:"" help:"Crew bridge plane: peer discovery for delegated providers."`
 }
 
 type kongExit struct {
@@ -116,7 +117,7 @@ func normalizeKongHelpArgs(args []string) []string {
 
 func isKongCommandGroup(command string) bool {
 	switch command {
-	case "actions", "admin", "artifacts", "azure", "cache", "capsule", "checkpoint", "config", "desktop", "image", "job", "machine", "media", "pool":
+	case "actions", "admin", "artifacts", "azure", "cache", "capsule", "checkpoint", "config", "crew", "desktop", "image", "job", "machine", "media", "pool":
 		return true
 	default:
 		return false
@@ -459,6 +460,13 @@ type machineCleanupKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 
+type crewKongCmd struct {
+	Peers crewPeersKongCmd `cmd:"" passthrough:"" help:"List peer endpoints for a crew on a delegated provider."`
+}
+type crewPeersKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+
 type versionKongCmd struct{}
 
 func (c *initKongCmd) Run(ctx context.Context, app App) error     { return app.initProject(ctx, c.Args) }
@@ -660,6 +668,10 @@ func (c *poolListKongCmd) Run(ctx context.Context, app App) error {
 }
 func (c *machineCleanupKongCmd) Run(ctx context.Context, app App) error {
 	return app.cleanup(ctx, c.Args)
+}
+
+func (c *crewPeersKongCmd) Run(ctx context.Context, app App) error {
+	return app.crewPeers(ctx, stripKongCommandPath(c.Args, "crew", "peers"))
 }
 
 func (c *versionKongCmd) Run(app App) error {

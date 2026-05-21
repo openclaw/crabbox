@@ -81,6 +81,26 @@ func (a App) doctor(ctx context.Context, args []string) error {
 			}
 			record(status, "crew", message, details)
 		}
+		// Cross-provider reachability matrix: a separate doctor row that
+		// folds the unified `crew peers` view into a per-transport-pair
+		// reachability grid. The grid is the load-bearing output users get
+		// when they pass `--crew`, so the matrix text is also written to
+		// stdout in non-JSON mode so it shows up alongside the per-check
+		// status lines.
+		if crew := normalizeCrewName(cfg.Crew); crew != "" {
+			matrix, rendered, err := doctorCrewReachabilitySummary(crew)
+			if err != nil {
+				return err
+			}
+			details := map[string]string{"crew": crew, "members": fmt.Sprintf("%d", len(matrix.Members))}
+			for transport, count := range matrix.Breakdown {
+				details["transport_"+transport] = fmt.Sprintf("%d", count)
+			}
+			record("ok", "crew-matrix", fmt.Sprintf("crew %q: %d members; matrix=%d cells", crew, len(matrix.Members), len(matrix.Cells)), details)
+			if !*jsonOut {
+				fmt.Fprint(a.Stdout, rendered)
+			}
+		}
 		if *jsonOut {
 			if err := json.NewEncoder(a.Stdout).Encode(doctorJSONOutput{OK: ok, Provider: cfg.Provider, Checks: checks}); err != nil {
 				return err

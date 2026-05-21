@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	gosdk "github.com/islo-labs/go-sdk"
 )
@@ -512,6 +513,14 @@ func (f *fakeIsloSyncClient) ExecStream(_ context.Context, _ string, req *gosdk.
 	f.execRequests = append(f.execRequests, req)
 	f.prepareCommands = append(f.prepareCommands, strings.Join(req.GetCommand(), " "))
 	return 0, nil
+}
+
+func (f *fakeIsloSyncClient) CreateShare(context.Context, string, int, time.Duration) (IsloShare, error) {
+	return IsloShare{}, nil
+}
+
+func (f *fakeIsloSyncClient) ListShares(context.Context, string) ([]IsloShare, error) {
+	return nil, nil
 }
 
 func (f *fakeIsloSyncClient) commandContains(value string) bool {

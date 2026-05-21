@@ -32,6 +32,13 @@ func ClaimLeaseForRepoProviderWithCrew(leaseID, slug, provider, crew, repoRoot s
 	return claimLeaseForRepoProviderWithCrew(leaseID, slug, provider, crew, repoRoot, idleTimeout, reclaim)
 }
 
+// ClaimLeaseForRepoProviderCrew is the crew-aware variant exposed for
+// delegated providers that need to persist the crew label in the local claim
+// sidecar (delegated providers do not own a provider-side label store).
+func ClaimLeaseForRepoProviderCrew(leaseID, slug, provider, crew, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopeCrew(leaseID, slug, provider, "", crew, repoRoot, idleTimeout, reclaim)
+}
+
 func ResolveLeaseClaim(identifier string) (LeaseClaim, bool, error) {
 	return resolveLeaseClaim(identifier)
 }
