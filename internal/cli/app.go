@@ -246,7 +246,7 @@ Environment:
   CRABBOX_ACCESS_CLIENT_ID     Cloudflare Access service token client ID
   CRABBOX_ACCESS_CLIENT_SECRET Cloudflare Access service token client secret
   CRABBOX_ACCESS_TOKEN         Cloudflare Access JWT for protected routes
-  CRABBOX_PROVIDER             hetzner, aws, azure, gcp, proxmox, ssh, exe-dev, blacksmith-testbox, namespace-devbox, semaphore, daytona, islo, e2b, modal, sprites, runpod, or cloudflare
+  CRABBOX_PROVIDER             hetzner, aws, azure, gcp, proxmox, parallels, ssh, exe-dev, blacksmith-testbox, namespace-devbox, semaphore, daytona, islo, e2b, modal, sprites, runpod, or cloudflare
   CRABBOX_TARGET               linux, macos, or windows
   CRABBOX_WINDOWS_MODE         normal or wsl2
   CRABBOX_DESKTOP              Provision or require desktop/VNC capability
@@ -265,6 +265,8 @@ Environment:
   CRABBOX_CAPACITY_REGIONS     Comma-separated AWS region fallback candidates
   HCLOUD_TOKEN/HETZNER_TOKEN   Direct Hetzner mode
   CRABBOX_PROXMOX_API_URL      Proxmox VE API URL, e.g. https://pve.local:8006
+  CRABBOX_PARALLELS_SOURCE     Parallels source VM name for provider=parallels
+  CRABBOX_PARALLELS_TEMPLATE   Parallels named template alias
 
 Aliases:
   crabbox release <id-or-slug> Alias for stop

@@ -19,9 +19,11 @@ const (
 )
 
 const (
-	TargetLinux   = targetLinux
-	TargetMacOS   = targetMacOS
-	TargetWindows = targetWindows
+	TargetLinux       = targetLinux
+	TargetMacOS       = targetMacOS
+	TargetWindows     = targetWindows
+	WindowsModeNormal = windowsModeNormal
+	WindowsModeWSL2   = windowsModeWSL2
 )
 
 func normalizeTargetConfig(cfg *Config) {

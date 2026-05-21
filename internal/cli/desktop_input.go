@@ -44,7 +44,7 @@ func (a App) desktopDoctor(ctx context.Context, args []string) error {
 }
 
 func (a App) desktopClick(ctx context.Context, args []string) error {
-	target, cfg, leaseID, err := a.desktopCommandTarget(ctx, "desktop click", args, true)
+	target, cfg, leaseID, err := a.desktopCommandTarget(ctx, "desktop click", args, false)
 	if err != nil {
 		return err
 	}
@@ -53,12 +53,19 @@ func (a App) desktopClick(ctx context.Context, args []string) error {
 	if !xOK || !yOK || x < 0 || y < 0 {
 		return exit(2, "usage: crabbox desktop click --id <lease-id-or-slug> --x <n> --y <n>")
 	}
-	if out, err := runSSHCombinedOutput(ctx, target, desktopClickRemoteCommand(x, y)); err != nil {
+	if !desktopClickSupportsTarget(target) {
+		return exit(2, "desktop click supports target=linux, target=macos, or target=windows with windowsMode=normal")
+	}
+	if out, err := runSSHCombinedOutput(ctx, target, desktopClickRemoteCommand(target, x, y)); err != nil {
 		a.printDesktopInputRescue(classifyDesktopFailure(out), out, cfg, target, leaseID)
 		return exit(5, "desktop click failed for %s: %v", leaseID, err)
 	}
 	fmt.Fprintf(a.Stdout, "clicked: lease=%s x=%d y=%d\n", leaseID, x, y)
 	return nil
+}
+
+func desktopClickSupportsTarget(target SSHTarget) bool {
+	return target.TargetOS == targetLinux || target.TargetOS == targetMacOS || isWindowsNativeTarget(target)
 }
 
 func (a App) desktopPaste(ctx context.Context, args []string) error {
@@ -133,7 +140,7 @@ func (a App) printDesktopInputRescue(problem, output string, cfg Config, target 
 func (a App) desktopCommandTarget(ctx context.Context, name string, args []string, requireLinux bool) (SSHTarget, Config, string, error) {
 	defaults := defaultConfig()
 	fs := newFlagSet(name, a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or ssh")
+	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
@@ -189,7 +196,7 @@ func (a App) desktopCommandTarget(ctx context.Context, name string, args []strin
 func desktopKeySequenceArg(args []string) (string, error) {
 	defaults := defaultConfig()
 	fs := newFlagSet("desktop key", io.Discard)
-	fs.String("provider", defaults.Provider, "provider: hetzner, aws, or ssh")
+	fs.String("provider", defaults.Provider, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	registerTargetFlags(fs, defaults)
 	registerNetworkModeFlag(fs, defaults)
@@ -340,7 +347,68 @@ func desktopShouldPasteForType(text string) bool {
 	return false
 }
 
-func desktopClickRemoteCommand(x, y int) string {
+func desktopClickRemoteCommand(target SSHTarget, x, y int) string {
+	if isWindowsNativeTarget(target) {
+		return fmt.Sprintf(`$ErrorActionPreference = "Stop"
+$base = "C:\ProgramData\crabbox"
+$passwordPath = Join-Path $base "windows.password"
+$password = ""
+if (Test-Path -LiteralPath $passwordPath) { $password = Get-Content -Raw -LiteralPath $passwordPath }
+$taskName = "CrabboxClick-" + [Guid]::NewGuid().ToString("N")
+$script = Join-Path $base ($taskName + ".ps1")
+@'
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class MouseInput {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+}
+"@
+[MouseInput]::SetCursorPos(%d, %d) | Out-Null
+Start-Sleep -Milliseconds 80
+[MouseInput]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 80
+[MouseInput]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+'@ | Set-Content -Encoding ASCII -LiteralPath $script
+cmd.exe /c "schtasks.exe /Delete /TN $taskName /F 2>NUL" | Out-Null
+$startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
+$createArgs = @("/Create", "/TN", $taskName, "/SC", "ONCE", "/ST", $startTime, "/TR", "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $script", "/RU", $env:USERNAME, "/IT", "/F")
+& schtasks.exe @createArgs | Out-Null
+if ($LASTEXITCODE -ne 0 -and $password -ne "") {
+  & schtasks.exe @($createArgs + @("/RP", $password)) | Out-Null
+}
+if ($LASTEXITCODE -ne 0) { throw "failed to create interactive click task" }
+schtasks.exe /Run /TN $taskName | Out-Null
+Start-Sleep -Seconds 2
+schtasks.exe /Delete /TN $taskName /F | Out-Null
+Remove-Item -Force -LiteralPath $script -ErrorAction SilentlyContinue`, x, y)
+	}
+	if target.TargetOS == targetMacOS {
+		return fmt.Sprintf(`set -eu
+if command -v cliclick >/dev/null 2>&1; then
+  cliclick c:%d,%d
+  exit 0
+fi
+if command -v swift >/dev/null 2>&1; then
+  tmp="$(mktemp -t crabbox-click).swift"
+  trap 'rm -f "$tmp"' EXIT
+  cat > "$tmp" <<'SWIFT'
+import CoreGraphics
+import Foundation
+let point = CGPoint(x: %d, y: %d)
+CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+Thread.sleep(forTimeInterval: 0.08)
+CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+Thread.sleep(forTimeInterval: 0.08)
+CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+SWIFT
+  swift "$tmp"
+  exit 0
+fi
+echo "missing macOS click tool; install cliclick or Xcode swift in the template" >&2
+exit 127`, x, y, x, y)
+	}
 	return fmt.Sprintf(`set -eu
 export DISPLAY="${DISPLAY:-:99}"
 command -v xdotool >/dev/null 2>&1 || { echo "missing xdotool; warm a new --desktop lease or install xdotool" >&2; exit 127; }

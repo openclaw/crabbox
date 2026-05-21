@@ -127,6 +127,185 @@ func TestCheckpointDeleteKeepsCorruptRecord(t *testing.T) {
 	}
 }
 
+func TestCheckpointDeleteDryRunKeepsRecordedCheckpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(checkpointRecord{ID: "chk_delete_dryrun", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.checkpointDelete(context.Background(), []string{record.ID, "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "would delete checkpoint") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+	if _, _, err := store.Read(record.ID); err != nil {
+		t.Fatalf("dry-run deleted checkpoint: %v", err)
+	}
+}
+
+func TestCheckpointRestoreDryRunDoesNotResolveLease(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(checkpointRecord{ID: "chk_restore_dryrun", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339), Workdir: "/work/cbx_old/my-app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.checkpointRestore(context.Background(), []string{record.ID, "--id", "cbx_missing", "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "would restore checkpoint") || !strings.Contains(stdout.String(), "cbx_missing") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestCheckpointForkDryRunDoesNotAcquireLease(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(checkpointRecord{ID: "chk_fork_dryrun", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.checkpointFork(context.Background(), []string{record.ID, "--dry-run", "--slug", "fork-dryrun"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "would fork checkpoint") || !strings.Contains(stdout.String(), "fork-dryrun") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestCheckpointDeleteParallelsSnapshotRejectsLocalOnly(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	err := app.checkpointDelete(context.Background(), []string{
+		"--provider", "parallels",
+		"--id", "Ubuntu 25.10",
+		"--snapshot", "fresh",
+		"--local-only",
+	})
+	if err == nil || !strings.Contains(err.Error(), "--local-only applies only to recorded checkpoints") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestParallelsSnapshotCheckpointViewMarksForkablePoweroffOnly(t *testing.T) {
+	poweredOff := parallelsSnapshotCheckpointView("vm1", ParallelsSnapshot{
+		ID:      "{snap1}",
+		Name:    "known-good",
+		Date:    "2026-03-12 13:55:00",
+		State:   "poweroff",
+		Current: true,
+		Parent:  "{parent}",
+	})
+	if !poweredOff.Forkable || poweredOff.Reason != "" || poweredOff.Source != "vm1" {
+		t.Fatalf("poweredOff=%#v", poweredOff)
+	}
+
+	poweredOn := parallelsSnapshotCheckpointView("vm1", ParallelsSnapshot{ID: "{snap2}", Name: "live", State: "poweron"})
+	if poweredOn.Forkable || !strings.Contains(poweredOn.Reason, "power-off") {
+		t.Fatalf("poweredOn=%#v", poweredOn)
+	}
+}
+
+func TestDirectParallelsCheckpointRefusesRunningVMWithNoReboot(t *testing.T) {
+	runner := &checkpointParallelsRunner{vmState: "running", snapshotState: "poweroff"}
+	_, err := (directParallelsCheckpointDriver{Runner: runner}).Create(context.Background(), checkpointNativeCreateRequest{
+		Cfg:      Config{Provider: "parallels"},
+		Server:   Server{CloudID: "vm1", Labels: map[string]string{}},
+		LeaseID:  "cbx_123",
+		RepoName: "my-app",
+		NoReboot: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "require a powered-off VM") {
+		t.Fatalf("err=%v", err)
+	}
+	if runner.called("stop") || runner.called("snapshot") {
+		t.Fatalf("unexpected mutating command: %#v", runner.commands)
+	}
+}
+
+func TestDirectParallelsCheckpointStopsAndRestartsForForkableSnapshot(t *testing.T) {
+	runner := &checkpointParallelsRunner{vmState: "running", snapshotState: "poweroff"}
+	image, err := (directParallelsCheckpointDriver{Runner: runner}).Create(context.Background(), checkpointNativeCreateRequest{
+		Cfg:      Config{Provider: "parallels"},
+		Server:   Server{CloudID: "vm1", Labels: map[string]string{}},
+		LeaseID:  "cbx_123",
+		RepoName: "my-app",
+		NoReboot: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if image.ID != "{snap1}" || image.State != "poweroff" {
+		t.Fatalf("image=%#v", image)
+	}
+	for _, want := range []string{"stop", "snapshot", "snapshot-list", "start"} {
+		if !runner.called(want) {
+			t.Fatalf("missing %s command: %#v", want, runner.commands)
+		}
+	}
+}
+
+func TestParallelsSnapshotCheckpointViewsTreeAndFilters(t *testing.T) {
+	snapshots := []ParallelsSnapshot{
+		{ID: "{child}", Name: "child", Parent: "{root}", Date: "2026-01-02", State: "poweroff"},
+		{ID: "{root}", Name: "root", Date: "2026-01-01", State: "poweron"},
+		{ID: "{sibling}", Name: "sibling", Parent: "{root}", Date: "2026-01-03", State: "poweron", Current: true},
+	}
+	views := parallelsSnapshotCheckpointViews("vm1", snapshots, checkpointParallelsListOptions{Tree: true})
+	if len(views) != 3 || views[0].Name != "root" || views[1].Name != "child" || views[1].Depth != 1 {
+		t.Fatalf("views=%#v", views)
+	}
+	views = parallelsSnapshotCheckpointViews("vm1", snapshots, checkpointParallelsListOptions{Tree: true, ForkableOnly: true})
+	if len(views) != 1 || views[0].Name != "child" {
+		t.Fatalf("forkable views=%#v", views)
+	}
+	views = parallelsSnapshotCheckpointViews("vm1", snapshots, checkpointParallelsListOptions{Tree: true, CurrentOnly: true})
+	if len(views) != 1 || views[0].Name != "sibling" {
+		t.Fatalf("current views=%#v", views)
+	}
+}
+
+func TestApplyParallelsCheckpointHostConfigPreservesFleetHostAuth(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "ssh"
+	cfg.Parallels.Hosts = []ParallelsHostConfig{{
+		Name:   "mac-fleet-1",
+		Host:   "mac-host.example.net",
+		User:   "builder",
+		Key:    "~/.ssh/mac-host",
+		VMRoot: "/Users/builder/Parallels",
+	}}
+	record := checkpointRecord{Kind: checkpointKindParallels}
+	record.Native.Region = "mac-host.example.net"
+
+	applyParallelsCheckpointHostConfig(&cfg, record)
+	if cfg.Provider != "parallels" || cfg.Parallels.Host != "mac-host.example.net" || cfg.Parallels.HostUser != "builder" || cfg.Parallels.HostKey != "~/.ssh/mac-host" || cfg.Parallels.VMRoot != "/Users/builder/Parallels" || cfg.Parallels.SelectedHost != "mac-fleet-1" {
+		t.Fatalf("cfg=%#v", cfg.Parallels)
+	}
+	if got := parallelsHostRefForConfig(cfg); got != "mac-fleet-1" {
+		t.Fatalf("host ref=%q", got)
+	}
+}
+
 func TestCheckpointInspectVerifyArchiveStates(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	store, err := defaultCheckpointStore()
@@ -402,6 +581,19 @@ func TestCheckpointCreateModeNativeSupportsDirectAWSAMI(t *testing.T) {
 	}
 	if got := checkpointCreateMode("snapshot", "", cfg, server, target, false); got != checkpointKindAWSAMI {
 		t.Fatalf("snapshot mode=%q, want %q", got, checkpointKindAWSAMI)
+	}
+}
+
+func TestCheckpointCreateModeParallelsRejectsImageStrategy(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "parallels"
+	server := Server{Provider: "parallels", CloudID: "vm-123"}
+	target := SSHTarget{TargetOS: targetMacOS}
+	if got := checkpointCreateMode("native", checkpointStrategyImage, cfg, server, target, false); got != "unsupported" {
+		t.Fatalf("native image mode=%q, want unsupported", got)
+	}
+	if got := checkpointCreateMode("native", checkpointStrategyDiskSnapshot, cfg, server, target, false); got != checkpointKindParallels {
+		t.Fatalf("native disk snapshot mode=%q, want %q", got, checkpointKindParallels)
 	}
 }
 
@@ -1222,6 +1414,45 @@ func TestApplyNativeCheckpointForkConfigForAzureAndGCP(t *testing.T) {
 	}
 }
 
+func TestApplyNativeCheckpointForkConfigForParallelsPreservesLinkedCloneMode(t *testing.T) {
+	fs := newFlagSet("checkpoint fork", io.Discard)
+	_ = fs.String("type", "", "provider type")
+	_ = fs.String("parallels-clone-mode", "", "Parallels clone mode")
+	cfg := defaultConfig()
+	cfg.Provider = "hetzner"
+	record := checkpointRecord{Kind: checkpointKindParallels, TargetOS: targetMacOS}
+	record.Native.ImageID = "{snap1}"
+	record.Native.Resource = "vm1"
+	record.Native.State = "poweron"
+	record.Native.Region = "mac-host"
+
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "parallels" || cfg.Parallels.SourceID != "vm1" || cfg.Parallels.SourceSnapshotID != "{snap1}" || cfg.Parallels.Host != "mac-host" {
+		t.Fatalf("parallels config not applied: %#v", cfg)
+	}
+	if cfg.Parallels.CloneMode != "linked" {
+		t.Fatalf("snapshot forks should preserve linked clone mode, got %q", cfg.Parallels.CloneMode)
+	}
+
+	cfg = defaultConfig()
+	cfg.Provider = "hetzner"
+	cfg.Parallels.CloneMode = "linked"
+	fs = newFlagSet("checkpoint fork", io.Discard)
+	_ = fs.String("type", "", "provider type")
+	_ = fs.String("parallels-clone-mode", "", "Parallels clone mode")
+	if err := parseFlags(fs, []string{"--parallels-clone-mode", "linked"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Parallels.CloneMode != "linked" {
+		t.Fatalf("explicit clone mode should be preserved, got %q", cfg.Parallels.CloneMode)
+	}
+}
+
 func TestApplyNativeCheckpointForkConfigHonorsAzureOSDiskFlagAfterProviderRewrite(t *testing.T) {
 	fs := newFlagSet("checkpoint fork", io.Discard)
 	_ = fs.String("type", "", "provider type")
@@ -1314,4 +1545,43 @@ func TestRemoteRelocateNativeCheckpointWorkdirCommand(t *testing.T) {
 	if got := remoteRelocateNativeCheckpointWorkdirCommand("/work/app", "/work/app"); got != "" {
 		t.Fatalf("same workdir command=%q, want empty", got)
 	}
+}
+
+type checkpointParallelsRunner struct {
+	vmState       string
+	snapshotState string
+	snapshotName  string
+	commands      []string
+}
+
+func (r *checkpointParallelsRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	if len(req.Args) == 0 {
+		return LocalCommandResult{}, nil
+	}
+	r.commands = append(r.commands, req.Args[0])
+	switch req.Args[0] {
+	case "list":
+		return LocalCommandResult{Stdout: `[{"ID":"vm1","Name":"test-vm","State":"` + r.vmState + `"}]`}, nil
+	case "snapshot":
+		for i, arg := range req.Args {
+			if arg == "--name" && i+1 < len(req.Args) {
+				r.snapshotName = req.Args[i+1]
+				break
+			}
+		}
+		return LocalCommandResult{}, nil
+	case "snapshot-list":
+		return LocalCommandResult{Stdout: `{"{snap1}":{"name":"` + r.snapshotName + `","state":"` + r.snapshotState + `"}}`}, nil
+	default:
+		return LocalCommandResult{}, nil
+	}
+}
+
+func (r *checkpointParallelsRunner) called(name string) bool {
+	for _, command := range r.commands {
+		if command == name {
+			return true
+		}
+	}
+	return false
 }

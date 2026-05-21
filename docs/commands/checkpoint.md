@@ -19,7 +19,7 @@ fixtures. Fork the scenario for repeated test runs without repeating setup.
 - Preserves files only, not machine state
 
 Default `--mode auto`: native for AWS Linux/macOS and Azure/GCP Linux,
-otherwise archive.
+Parallels VM leases, otherwise archive.
 
 ## Quick Start
 
@@ -109,6 +109,11 @@ crabbox checkpoint list --verify
 crabbox checkpoint inspect chk_abc123
 crabbox checkpoint inspect chk_abc123 --verify
 crabbox checkpoint inspect chk_abc123 --json
+
+# List existing Parallels snapshots directly from a source VM
+crabbox checkpoint list --provider parallels --id "macOS Tahoe"
+crabbox checkpoint list --provider parallels --id "macOS Tahoe" --json
+crabbox checkpoint list --provider parallels --parallels-template tahoe-latest --forkable-only
 ```
 
 Checkpoints stored in `~/.local/state/crabbox/checkpoints/`.
@@ -131,6 +136,12 @@ AND tarball.
 - Native checkpoints: asks the coordinator to look up the provider snapshot or image.
 - JSON output includes `localState`, `providerState`, and `nextAction`.
 
+For `provider=parallels`, `checkpoint list --id <vm>` reads live Parallels
+snapshots from the VM instead of local `chk_...` metadata. The output marks
+whether each snapshot is forkable. Linked clones require a `poweroff` snapshot.
+Use `--tree=false` for flat output, `--forkable-only`, `--current`, and
+`--name <text>` to filter live snapshots.
+
 ## Restore
 
 **Archive checkpoints only**. Uploads tarball to running lease, extracts to workdir.
@@ -148,8 +159,14 @@ crabbox checkpoint restore chk_abc123 --id target-lease --clear=false
 --workdir <path> Custom restore path, default is lease's workdir
 ```
 
-**Native checkpoints cannot restore**. Fork them instead (creates new lease from
-snapshot).
+Recorded native image checkpoints cannot restore in place. Fork them instead
+(creates new lease from snapshot/image). Parallels VM snapshots can restore a VM
+in place:
+
+```sh
+crabbox checkpoint restore --provider parallels --id "macOS Tahoe" --snapshot "macOS 26.3.1 LATEST"
+crabbox checkpoint restore --provider parallels --parallels-template tahoe-latest --snapshot "macOS 26.3.1 LATEST" --dry-run
+```
 
 ## Fork
 
@@ -158,6 +175,10 @@ Create fresh lease from checkpoint. Works for both native and archive checkpoint
 ```sh
 crabbox checkpoint fork chk_abc123 --class beast
 # Output: checkpoint forked id=chk_abc123 lease=cbx_xyz slug=purple-whale
+
+# Fork directly from an existing Parallels snapshot without importing it first
+crabbox checkpoint fork --provider parallels --target macos --id "macOS Tahoe" --snapshot "macOS 26.4" --slug tahoe-test
+crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --slug test-a --dry-run
 ```
 
 **Flags**
@@ -167,6 +188,10 @@ crabbox checkpoint fork chk_abc123 --class beast
 --provider <p>   Provider (aws, azure, gcp, etc.)
 --slug <slug>    Request a friendly slug for the forked lease
 --keep           Keep lease running, default true
+--id <vm>        Parallels source VM when using --snapshot
+--snapshot <s>   Parallels snapshot name or id for direct fork
+--dry-run        Validate direct Parallels fork without cloning
+--parallels-template <name> Use a configured Parallels template alias
 ```
 
 **What happens**
@@ -207,6 +232,10 @@ Delete checkpoint from provider and local storage.
 ```sh
 crabbox checkpoint delete chk_abc123
 crabbox checkpoint delete chk_abc123 --local-only
+
+# Delete an existing Parallels snapshot directly
+crabbox checkpoint delete --provider parallels --id blue-lobster --snapshot "crabbox-test-snap"
+crabbox checkpoint delete --provider parallels --id blue-lobster --snapshot "manual-snap" --yes
 ```
 
 **Default behavior (native checkpoints)**
@@ -224,6 +253,10 @@ crabbox checkpoint delete chk_abc123 --local-only
 
 ```
 --local-only  Skip provider deletion, remove local metadata only
+--id <vm>     Parallels source VM when using --snapshot
+--snapshot <s> Parallels snapshot name or id for direct deletion
+--dry-run     Validate direct Parallels deletion without deleting
+--yes         Allow direct deletion of non-crabbox snapshot names
 ```
 
 Use `--local-only` only when provider resource was already deleted outside
@@ -266,6 +299,7 @@ Default strategy `disk-snapshot`:
 - AWS macOS: AMI-backed checkpoint with backing EBS snapshots
 - Azure: Managed OS disk snapshot
 - GCP: Persistent disk snapshot
+- Parallels: VM snapshot
 
 Azure disk-snapshot checkpoints require the source lease to use a managed OS
 disk, which is the default for new Azure leases. Checkpoint creation refuses

@@ -14,99 +14,101 @@ import (
 )
 
 type Config struct {
-	Profile             string
-	Provider            string
-	TargetOS            string
-	WindowsMode         string
-	Desktop             bool
-	Browser             bool
-	Code                bool
-	Network             NetworkMode
-	Class               string
-	ServerType          string
-	ServerTypeExplicit  bool
-	Coordinator         string
-	CoordToken          string
-	CoordAdminToken     string
-	HostID              string
-	Access              AccessConfig
-	Location            string
-	Image               string
-	AWSRegion           string
-	AWSAMI              string
-	AWSSnapshot         string
-	AWSSGID             string
-	AWSSubnetID         string
-	AWSProfile          string
-	AWSRootGB           int32
-	AWSSSHCIDRs         []string
-	AWSMacHostID        string
-	AzureSubscription   string
-	AzureTenant         string
-	AzureClientID       string
-	AzureLocation       string
-	AzureResourceGroup  string
-	AzureImage          string
-	AzureSnapshot       string
-	AzureOSDisk         string
-	AzureOSDiskExplicit bool
-	AzureVNet           string
-	AzureSubnet         string
-	AzureNSG            string
-	AzureSSHCIDRs       []string
-	AzureNetwork        string
-	GCPProject          string
-	gcpProjectExplicit  bool
-	GCPZone             string
-	gcpZoneExplicit     bool
-	GCPImage            string
-	gcpImageExplicit    bool
-	GCPMachineImage     string
-	GCPSnapshot         string
-	GCPNetwork          string
-	gcpNetworkExplicit  bool
-	GCPSubnet           string
-	GCPTags             []string
-	gcpTagsExplicit     bool
-	GCPSSHCIDRs         []string
-	GCPRootGB           int64
-	gcpRootGBExplicit   bool
-	GCPServiceAccount   string
-	Proxmox             ProxmoxConfig
-	SSHUser             string
-	SSHKey              string
-	SSHPort             string
-	SSHFallbackPorts    []string
-	ProviderKey         string
-	WorkRoot            string
-	TTL                 time.Duration
-	IdleTimeout         time.Duration
-	Sync                SyncConfig
-	Run                 RunConfig
-	EnvAllow            []string
-	Capacity            CapacityConfig
-	Actions             ActionsConfig
-	Blacksmith          BlacksmithConfig
-	Namespace           NamespaceConfig
-	Daytona             DaytonaConfig
-	E2B                 E2BConfig
-	ExeDev              ExeDevConfig
-	Railway             RailwayConfig
-	Runpod              RunpodConfig
-	Islo                IsloConfig
-	Tensorlake          TensorlakeConfig
-	Modal               ModalConfig
-	Cloudflare          CloudflareConfig
-	Semaphore           SemaphoreConfig
-	Sprites             SpritesConfig
-	Tailscale           TailscaleConfig
-	Static              StaticConfig
-	Results             ResultsConfig
-	Cache               CacheConfig
-	Profiles            map[string]ProfileConfig
-	Presets             map[string]PresetConfig
-	ProofTemplates      map[string]ProofTemplateConfig
-	Jobs                map[string]JobConfig
+	Profile                  string
+	Provider                 string
+	TargetOS                 string
+	WindowsMode              string
+	Desktop                  bool
+	Browser                  bool
+	Code                     bool
+	Network                  NetworkMode
+	Class                    string
+	ServerType               string
+	ServerTypeExplicit       bool
+	Coordinator              string
+	CoordToken               string
+	CoordAdminToken          string
+	HostID                   string
+	Access                   AccessConfig
+	Location                 string
+	Image                    string
+	AWSRegion                string
+	AWSAMI                   string
+	AWSSnapshot              string
+	AWSSGID                  string
+	AWSSubnetID              string
+	AWSProfile               string
+	AWSRootGB                int32
+	AWSSSHCIDRs              []string
+	AWSMacHostID             string
+	AzureSubscription        string
+	AzureTenant              string
+	AzureClientID            string
+	AzureLocation            string
+	AzureResourceGroup       string
+	AzureImage               string
+	AzureSnapshot            string
+	AzureOSDisk              string
+	AzureOSDiskExplicit      bool
+	AzureVNet                string
+	AzureSubnet              string
+	AzureNSG                 string
+	AzureSSHCIDRs            []string
+	AzureNetwork             string
+	GCPProject               string
+	gcpProjectExplicit       bool
+	GCPZone                  string
+	gcpZoneExplicit          bool
+	GCPImage                 string
+	gcpImageExplicit         bool
+	GCPMachineImage          string
+	GCPSnapshot              string
+	GCPNetwork               string
+	gcpNetworkExplicit       bool
+	GCPSubnet                string
+	GCPTags                  []string
+	gcpTagsExplicit          bool
+	GCPSSHCIDRs              []string
+	GCPRootGB                int64
+	gcpRootGBExplicit        bool
+	GCPServiceAccount        string
+	Proxmox                  ProxmoxConfig
+	Parallels                ParallelsConfig
+	parallelsTemplateApplied bool
+	SSHUser                  string
+	SSHKey                   string
+	SSHPort                  string
+	SSHFallbackPorts         []string
+	ProviderKey              string
+	WorkRoot                 string
+	TTL                      time.Duration
+	IdleTimeout              time.Duration
+	Sync                     SyncConfig
+	Run                      RunConfig
+	EnvAllow                 []string
+	Capacity                 CapacityConfig
+	Actions                  ActionsConfig
+	Blacksmith               BlacksmithConfig
+	Namespace                NamespaceConfig
+	Daytona                  DaytonaConfig
+	E2B                      E2BConfig
+	ExeDev                   ExeDevConfig
+	Railway                  RailwayConfig
+	Runpod                   RunpodConfig
+	Islo                     IsloConfig
+	Tensorlake               TensorlakeConfig
+	Modal                    ModalConfig
+	Cloudflare               CloudflareConfig
+	Semaphore                SemaphoreConfig
+	Sprites                  SpritesConfig
+	Tailscale                TailscaleConfig
+	Static                   StaticConfig
+	Results                  ResultsConfig
+	Cache                    CacheConfig
+	Profiles                 map[string]ProfileConfig
+	Presets                  map[string]PresetConfig
+	ProofTemplates           map[string]ProofTemplateConfig
+	Jobs                     map[string]JobConfig
 }
 
 type SyncConfig struct {
@@ -278,6 +280,51 @@ type ProxmoxConfig struct {
 	InsecureTLS bool
 }
 
+type ParallelsConfig struct {
+	Template         string
+	Source           string
+	SourceID         string
+	SourceSnapshot   string
+	SourceSnapshotID string
+	CloneMode        string
+	Host             string
+	HostUser         string
+	HostKey          string
+	VMRoot           string
+	User             string
+	WorkRoot         string
+	StartupTimeout   time.Duration
+	Templates        map[string]ParallelsTemplateConfig
+	Hosts            []ParallelsHostConfig
+	SelectedHost     string
+}
+
+type ParallelsTemplateConfig struct {
+	Source           string
+	SourceID         string
+	SourceSnapshot   string
+	SourceSnapshotID string
+	TargetOS         string
+	WindowsMode      string
+	CloneMode        string
+	Host             string
+	HostUser         string
+	HostKey          string
+	VMRoot           string
+	User             string
+	WorkRoot         string
+}
+
+type ParallelsHostConfig struct {
+	Name    string
+	Host    string
+	User    string
+	Key     string
+	VMRoot  string
+	Targets []string
+	MaxVMs  int
+}
+
 type SemaphoreConfig struct {
 	Host        string
 	Token       string
@@ -415,7 +462,9 @@ func loadConfig() (Config, error) {
 	}
 	applyEnv(&cfg)
 	canonicalizeConfigProvider(&cfg)
-	applyProviderConfigDefaults(&cfg)
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		return Config{}, err
+	}
 	normalizeTargetConfig(&cfg)
 	if err := validateTargetConfig(cfg); err != nil {
 		return Config{}, err
@@ -436,7 +485,7 @@ func canonicalizeConfigProvider(cfg *Config) {
 	}
 }
 
-func applyProviderConfigDefaults(cfg *Config) {
+func applyProviderConfigDefaults(cfg *Config) error {
 	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
 		if cfg.ExeDev.User != "" {
 			cfg.SSHUser = cfg.ExeDev.User
@@ -460,10 +509,24 @@ func applyProviderConfigDefaults(cfg *Config) {
 		if cfg.TargetOS == "" {
 			cfg.TargetOS = targetLinux
 		}
-		return
+		return nil
 	}
 	if cfg.Provider != "proxmox" {
-		return
+		if cfg.Provider != "parallels" {
+			return nil
+		}
+		if cfg.Parallels.Template != "" && !cfg.parallelsTemplateApplied {
+			if err := ApplyParallelsTemplateConfig(cfg, cfg.Parallels.Template); err != nil {
+				return err
+			}
+		}
+		if cfg.Parallels.User != "" {
+			cfg.SSHUser = cfg.Parallels.User
+		}
+		if cfg.Parallels.WorkRoot != "" {
+			cfg.WorkRoot = cfg.Parallels.WorkRoot
+		}
+		return nil
 	}
 	if cfg.Proxmox.User != "" {
 		cfg.SSHUser = cfg.Proxmox.User
@@ -471,6 +534,7 @@ func applyProviderConfigDefaults(cfg *Config) {
 	if cfg.Proxmox.WorkRoot != "" {
 		cfg.WorkRoot = cfg.Proxmox.WorkRoot
 	}
+	return nil
 }
 
 func baseConfig() Config {
@@ -601,6 +665,11 @@ func baseConfig() Config {
 			WorkRoot:  defaultPOSIXWorkRoot,
 			FullClone: true,
 		},
+		Parallels: ParallelsConfig{
+			CloneMode:      "linked",
+			User:           "crabbox",
+			StartupTimeout: 15 * time.Minute,
+		},
 		Sprites: SpritesConfig{
 			APIURL:   "https://api.sprites.dev",
 			WorkRoot: "/home/sprite/crabbox",
@@ -641,6 +710,7 @@ type fileConfig struct {
 	Azure            *fileAzureConfig                   `yaml:"azure,omitempty"`
 	GCP              *fileGCPConfig                     `yaml:"gcp,omitempty"`
 	Proxmox          *fileProxmoxConfig                 `yaml:"proxmox,omitempty"`
+	Parallels        *fileParallelsConfig               `yaml:"parallels,omitempty"`
 	SSH              *fileSSHConfig                     `yaml:"ssh,omitempty"`
 	Sync             *fileSyncConfig                    `yaml:"sync,omitempty"`
 	Run              *fileRunConfig                     `yaml:"run,omitempty"`
@@ -749,6 +819,51 @@ type fileProxmoxConfig struct {
 	WorkRoot    string `yaml:"workRoot,omitempty"`
 	FullClone   *bool  `yaml:"fullClone,omitempty"`
 	InsecureTLS *bool  `yaml:"insecureTLS,omitempty"`
+}
+
+type fileParallelsConfig struct {
+	Template         string                                 `yaml:"template,omitempty"`
+	Source           string                                 `yaml:"source,omitempty"`
+	SourceID         string                                 `yaml:"sourceId,omitempty"`
+	SourceSnapshot   string                                 `yaml:"sourceSnapshot,omitempty"`
+	SourceSnapshotID string                                 `yaml:"sourceSnapshotId,omitempty"`
+	CloneMode        string                                 `yaml:"cloneMode,omitempty"`
+	Host             string                                 `yaml:"host,omitempty"`
+	HostUser         string                                 `yaml:"hostUser,omitempty"`
+	HostKey          string                                 `yaml:"hostKey,omitempty"`
+	VMRoot           string                                 `yaml:"vmRoot,omitempty"`
+	User             string                                 `yaml:"user,omitempty"`
+	WorkRoot         string                                 `yaml:"workRoot,omitempty"`
+	StartupTimeout   string                                 `yaml:"startupTimeout,omitempty"`
+	Templates        map[string]fileParallelsTemplateConfig `yaml:"templates,omitempty"`
+	Hosts            []fileParallelsHostConfig              `yaml:"hosts,omitempty"`
+}
+
+type fileParallelsTemplateConfig struct {
+	Source           string `yaml:"source,omitempty"`
+	SourceID         string `yaml:"sourceId,omitempty"`
+	SourceSnapshot   string `yaml:"sourceSnapshot,omitempty"`
+	SourceSnapshotID string `yaml:"sourceSnapshotId,omitempty"`
+	Target           string `yaml:"target,omitempty"`
+	TargetOS         string `yaml:"targetOS,omitempty"`
+	WindowsMode      string `yaml:"windowsMode,omitempty"`
+	CloneMode        string `yaml:"cloneMode,omitempty"`
+	Host             string `yaml:"host,omitempty"`
+	HostUser         string `yaml:"hostUser,omitempty"`
+	HostKey          string `yaml:"hostKey,omitempty"`
+	VMRoot           string `yaml:"vmRoot,omitempty"`
+	User             string `yaml:"user,omitempty"`
+	WorkRoot         string `yaml:"workRoot,omitempty"`
+}
+
+type fileParallelsHostConfig struct {
+	Name    string   `yaml:"name,omitempty"`
+	Host    string   `yaml:"host,omitempty"`
+	User    string   `yaml:"user,omitempty"`
+	Key     string   `yaml:"key,omitempty"`
+	VMRoot  string   `yaml:"vmRoot,omitempty"`
+	Targets []string `yaml:"targets,omitempty"`
+	MaxVMs  int      `yaml:"maxVMs,omitempty"`
 }
 
 type fileSSHConfig struct {
@@ -1436,6 +1551,63 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		}
 		if file.Proxmox.InsecureTLS != nil {
 			cfg.Proxmox.InsecureTLS = *file.Proxmox.InsecureTLS
+		}
+	}
+	if file.Parallels != nil {
+		if file.Parallels.Template != "" {
+			cfg.Parallels.Template = file.Parallels.Template
+		}
+		if file.Parallels.Source != "" {
+			cfg.Parallels.Source = file.Parallels.Source
+		}
+		if file.Parallels.SourceID != "" {
+			cfg.Parallels.SourceID = file.Parallels.SourceID
+		}
+		if file.Parallels.SourceSnapshot != "" {
+			cfg.Parallels.SourceSnapshot = file.Parallels.SourceSnapshot
+		}
+		if file.Parallels.SourceSnapshotID != "" {
+			cfg.Parallels.SourceSnapshotID = file.Parallels.SourceSnapshotID
+		}
+		if file.Parallels.CloneMode != "" {
+			cfg.Parallels.CloneMode = file.Parallels.CloneMode
+		}
+		if file.Parallels.Host != "" {
+			cfg.Parallels.Host = file.Parallels.Host
+		}
+		if file.Parallels.HostUser != "" {
+			cfg.Parallels.HostUser = file.Parallels.HostUser
+		}
+		if file.Parallels.HostKey != "" {
+			cfg.Parallels.HostKey = expandUserPath(file.Parallels.HostKey)
+		}
+		if file.Parallels.VMRoot != "" {
+			cfg.Parallels.VMRoot = expandUserPath(file.Parallels.VMRoot)
+		}
+		if file.Parallels.User != "" {
+			cfg.Parallels.User = file.Parallels.User
+		}
+		if file.Parallels.WorkRoot != "" {
+			cfg.Parallels.WorkRoot = file.Parallels.WorkRoot
+		}
+		applyLeaseDuration(&cfg.Parallels.StartupTimeout, file.Parallels.StartupTimeout)
+		if len(file.Parallels.Templates) > 0 {
+			if cfg.Parallels.Templates == nil {
+				cfg.Parallels.Templates = map[string]ParallelsTemplateConfig{}
+			}
+			for name, template := range file.Parallels.Templates {
+				name = strings.TrimSpace(name)
+				if name == "" {
+					continue
+				}
+				cfg.Parallels.Templates[name] = applyFileParallelsTemplateConfig(cfg.Parallels.Templates[name], template)
+			}
+		}
+		if len(file.Parallels.Hosts) > 0 {
+			cfg.Parallels.Hosts = cfg.Parallels.Hosts[:0]
+			for _, host := range file.Parallels.Hosts {
+				cfg.Parallels.Hosts = append(cfg.Parallels.Hosts, applyFileParallelsHostConfig(host))
+			}
 		}
 	}
 	if file.SSH != nil {
@@ -2281,6 +2453,21 @@ func applyEnv(cfg *Config) {
 	if value, ok := getenvBool("CRABBOX_PROXMOX_INSECURE_TLS"); ok {
 		cfg.Proxmox.InsecureTLS = value
 	}
+	cfg.Parallels.Source = getenv("CRABBOX_PARALLELS_SOURCE", cfg.Parallels.Source)
+	cfg.Parallels.SourceID = getenv("CRABBOX_PARALLELS_SOURCE_ID", cfg.Parallels.SourceID)
+	cfg.Parallels.SourceSnapshot = getenv("CRABBOX_PARALLELS_SOURCE_SNAPSHOT", cfg.Parallels.SourceSnapshot)
+	cfg.Parallels.SourceSnapshotID = getenv("CRABBOX_PARALLELS_SOURCE_SNAPSHOT_ID", cfg.Parallels.SourceSnapshotID)
+	cfg.Parallels.Template = getenv("CRABBOX_PARALLELS_TEMPLATE", cfg.Parallels.Template)
+	cfg.Parallels.CloneMode = getenv("CRABBOX_PARALLELS_CLONE_MODE", cfg.Parallels.CloneMode)
+	cfg.Parallels.Host = getenv("CRABBOX_PARALLELS_HOST", cfg.Parallels.Host)
+	cfg.Parallels.HostUser = getenv("CRABBOX_PARALLELS_HOST_USER", cfg.Parallels.HostUser)
+	cfg.Parallels.HostKey = expandUserPath(getenv("CRABBOX_PARALLELS_HOST_KEY", cfg.Parallels.HostKey))
+	cfg.Parallels.VMRoot = expandUserPath(getenv("CRABBOX_PARALLELS_VM_ROOT", cfg.Parallels.VMRoot))
+	cfg.Parallels.User = getenv("CRABBOX_PARALLELS_USER", cfg.Parallels.User)
+	cfg.Parallels.WorkRoot = getenv("CRABBOX_PARALLELS_WORK_ROOT", cfg.Parallels.WorkRoot)
+	if startupTimeout := os.Getenv("CRABBOX_PARALLELS_STARTUP_TIMEOUT"); startupTimeout != "" {
+		applyLeaseDuration(&cfg.Parallels.StartupTimeout, startupTimeout)
+	}
 	cfg.SSHUser = getenv("CRABBOX_SSH_USER", cfg.SSHUser)
 	cfg.SSHKey = getenv("CRABBOX_SSH_KEY", cfg.SSHKey)
 	cfg.SSHPort = getenv("CRABBOX_SSH_PORT", cfg.SSHPort)
@@ -2551,6 +2738,9 @@ func serverTypeForConfig(cfg Config) string {
 	if cfg.Provider == "proxmox" {
 		return proxmoxServerTypeForConfig(cfg)
 	}
+	if cfg.Provider == "parallels" {
+		return parallelsServerTypeForConfig(cfg)
+	}
 	return serverTypeForClass(cfg.Class)
 }
 
@@ -2591,6 +2781,9 @@ func serverTypeForProviderClass(provider, class string) string {
 	if provider == "proxmox" {
 		return "template"
 	}
+	if provider == "parallels" {
+		return "template"
+	}
 	return serverTypeForClass(class)
 }
 
@@ -2599,6 +2792,132 @@ func proxmoxServerTypeForConfig(cfg Config) string {
 		return "template-" + strconv.Itoa(cfg.Proxmox.TemplateID)
 	}
 	return "template"
+}
+
+func parallelsServerTypeForConfig(cfg Config) string {
+	source := strings.TrimSpace(firstNonBlank(cfg.Parallels.Source, cfg.Parallels.SourceID))
+	if source == "" {
+		if cfg.Parallels.Template != "" {
+			return "template-" + normalizeLeaseSlug(cfg.Parallels.Template)
+		}
+		return "template"
+	}
+	return "template-" + normalizeLeaseSlug(source)
+}
+
+func applyFileParallelsTemplateConfig(template ParallelsTemplateConfig, file fileParallelsTemplateConfig) ParallelsTemplateConfig {
+	if file.Source != "" {
+		template.Source = file.Source
+	}
+	if file.SourceID != "" {
+		template.SourceID = file.SourceID
+	}
+	if file.SourceSnapshot != "" {
+		template.SourceSnapshot = file.SourceSnapshot
+	}
+	if file.SourceSnapshotID != "" {
+		template.SourceSnapshotID = file.SourceSnapshotID
+	}
+	if file.Target != "" {
+		template.TargetOS = file.Target
+	}
+	if file.TargetOS != "" {
+		template.TargetOS = file.TargetOS
+	}
+	if file.WindowsMode != "" {
+		template.WindowsMode = file.WindowsMode
+	}
+	if file.CloneMode != "" {
+		template.CloneMode = file.CloneMode
+	}
+	if file.Host != "" {
+		template.Host = file.Host
+	}
+	if file.HostUser != "" {
+		template.HostUser = file.HostUser
+	}
+	if file.HostKey != "" {
+		template.HostKey = expandUserPath(file.HostKey)
+	}
+	if file.VMRoot != "" {
+		template.VMRoot = expandUserPath(file.VMRoot)
+	}
+	if file.User != "" {
+		template.User = file.User
+	}
+	if file.WorkRoot != "" {
+		template.WorkRoot = file.WorkRoot
+	}
+	return template
+}
+
+func applyFileParallelsHostConfig(file fileParallelsHostConfig) ParallelsHostConfig {
+	return ParallelsHostConfig{
+		Name:    strings.TrimSpace(file.Name),
+		Host:    strings.TrimSpace(file.Host),
+		User:    strings.TrimSpace(file.User),
+		Key:     expandUserPath(strings.TrimSpace(file.Key)),
+		VMRoot:  expandUserPath(strings.TrimSpace(file.VMRoot)),
+		Targets: append([]string(nil), file.Targets...),
+		MaxVMs:  file.MaxVMs,
+	}
+}
+
+func ApplyParallelsTemplateConfig(cfg *Config, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	template, ok := cfg.Parallels.Templates[name]
+	if !ok {
+		return exit(2, "parallels template %q not found", name)
+	}
+	cfg.Parallels.Template = name
+	if template.Source != "" {
+		cfg.Parallels.Source = template.Source
+		cfg.Parallels.SourceID = ""
+	}
+	if template.SourceID != "" {
+		cfg.Parallels.SourceID = template.SourceID
+	}
+	if template.SourceSnapshot != "" {
+		cfg.Parallels.SourceSnapshot = template.SourceSnapshot
+		cfg.Parallels.SourceSnapshotID = ""
+	}
+	if template.SourceSnapshotID != "" {
+		cfg.Parallels.SourceSnapshotID = template.SourceSnapshotID
+	}
+	if template.TargetOS != "" {
+		cfg.TargetOS = normalizeTargetOS(template.TargetOS)
+	}
+	if template.WindowsMode != "" {
+		cfg.WindowsMode = template.WindowsMode
+	}
+	if template.CloneMode != "" {
+		cfg.Parallels.CloneMode = template.CloneMode
+	}
+	if template.Host != "" {
+		cfg.Parallels.Host = template.Host
+	}
+	if template.HostUser != "" {
+		cfg.Parallels.HostUser = template.HostUser
+	}
+	if template.HostKey != "" {
+		cfg.Parallels.HostKey = template.HostKey
+	}
+	if template.VMRoot != "" {
+		cfg.Parallels.VMRoot = template.VMRoot
+	}
+	if template.User != "" {
+		cfg.Parallels.User = template.User
+		cfg.SSHUser = template.User
+	}
+	if template.WorkRoot != "" {
+		cfg.Parallels.WorkRoot = template.WorkRoot
+		cfg.WorkRoot = template.WorkRoot
+	}
+	cfg.parallelsTemplateApplied = true
+	return nil
 }
 
 func namespaceDevboxSizeForConfig(cfg Config) string {

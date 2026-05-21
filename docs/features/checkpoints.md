@@ -39,6 +39,7 @@ Native checkpoints use two provider primitives:
 - AWS macOS: AMI-backed checkpoint (`aws-ami`) with AWS-managed backing EBS snapshots
 - Azure: Managed OS disk snapshot (`azure-os-disk-snapshot`)
 - GCP: Persistent disk snapshot (`gcp-disk-snapshot`)
+- Parallels: VM snapshot (`parallels-snapshot`) for local or remote Mac Parallels Desktop clones
 - Faster to create, boots with fresh SSH keys
 - Best for iterative development
 - AWS macOS forks still require EC2 Mac Dedicated Host capacity; brokered mode can
@@ -192,6 +193,6 @@ Additional native checkpoint backends require:
 - Predictable restore/delete operations
 - Clear cost, retention, security boundaries
 
-Proxmox VM snapshots/clones are the next natural fit. Plain SSH providers should
+Proxmox VM snapshots/clones are another natural fit. Plain SSH providers should
 not expose native checkpoint features unless the target host provides a real
 snapshot API (ZFS, Btrfs, LVM) and Crabbox owns the integration.

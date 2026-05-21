@@ -179,6 +179,23 @@ func configShowView(cfg Config) map[string]any {
 			"fullClone":   cfg.Proxmox.FullClone,
 			"insecureTLS": cfg.Proxmox.InsecureTLS,
 		},
+		"parallels": map[string]any{
+			"template":         cfg.Parallels.Template,
+			"source":           cfg.Parallels.Source,
+			"sourceId":         cfg.Parallels.SourceID,
+			"sourceSnapshot":   cfg.Parallels.SourceSnapshot,
+			"sourceSnapshotId": cfg.Parallels.SourceSnapshotID,
+			"cloneMode":        cfg.Parallels.CloneMode,
+			"host":             cfg.Parallels.Host,
+			"hostUser":         cfg.Parallels.HostUser,
+			"hostKey":          cfg.Parallels.HostKey,
+			"vmRoot":           cfg.Parallels.VMRoot,
+			"user":             cfg.Parallels.User,
+			"workRoot":         cfg.Parallels.WorkRoot,
+			"startupTimeout":   cfg.Parallels.StartupTimeout.String(),
+			"templates":        cfg.Parallels.Templates,
+			"hosts":            cfg.Parallels.Hosts,
+		},
 	}
 }
 
@@ -212,6 +229,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "azure location=%s resource_group=%s os_disk=%s network=%s ssh_cidrs=%s\n", cfg.AzureLocation, cfg.AzureResourceGroup, cfg.AzureOSDisk, blank(cfg.AzureNetwork, "-"), blank(strings.Join(cfg.AzureSSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "gcp project=%s zone=%s image=%s network=%s subnet=%s root_gb=%d ssh_cidrs=%s\n", blank(cfg.GCPProject, "-"), cfg.GCPZone, cfg.GCPImage, cfg.GCPNetwork, blank(cfg.GCPSubnet, "-"), cfg.GCPRootGB, blank(strings.Join(cfg.GCPSSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "proxmox api_url=%s node=%s template_id=%d storage=%s pool=%s bridge=%s user=%s work_root=%s full_clone=%t auth=%s\n", blank(cfg.Proxmox.APIURL, "-"), blank(cfg.Proxmox.Node, "-"), cfg.Proxmox.TemplateID, blank(cfg.Proxmox.Storage, "-"), blank(cfg.Proxmox.Pool, "-"), blank(cfg.Proxmox.Bridge, "-"), cfg.Proxmox.User, cfg.Proxmox.WorkRoot, cfg.Proxmox.FullClone, tokenState(cfg.Proxmox.TokenSecret))
+	fmt.Fprintf(w, "parallels template=%s source=%s source_id=%s snapshot=%s snapshot_id=%s clone_mode=%s host=%s user=%s work_root=%s startup_timeout=%s templates=%d hosts=%d\n", blank(cfg.Parallels.Template, "-"), blank(cfg.Parallels.Source, "-"), blank(cfg.Parallels.SourceID, "-"), blank(cfg.Parallels.SourceSnapshot, "-"), blank(cfg.Parallels.SourceSnapshotID, "-"), cfg.Parallels.CloneMode, blank(cfg.Parallels.Host, "local"), cfg.Parallels.User, cfg.Parallels.WorkRoot, cfg.Parallels.StartupTimeout, len(cfg.Parallels.Templates), len(cfg.Parallels.Hosts))
 }
 
 func jobConfigViews(jobs map[string]JobConfig) map[string]any {

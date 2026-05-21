@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `provider: parallels` for local and remote Mac Parallels Desktop fleets, including template and snapshot-backed cloning, direct checkpoints, desktop/VNC forwarding, and Linux, macOS, and Windows guests.
 - Added `provider: runpod` for RunPod public TCP SSH leases through the RunPod REST API, including Crabbox sync/run, `crabbox ssh`, `crabbox doctor`, and provider docs. Thanks @zozo123.
 - Added a thin macOS developer-tools image mint wrapper that keeps paid host allocation explicit while wiring the reusable prep script, promotion, checkpoint proof, and lifecycle evidence defaults.
 - Added AWS Linux and Windows developer-image prep scripts plus a guarded mint wrapper for baking Docker, Node 24, pnpm, GitHub CLI, and common developer tooling into fast-booting Crabbox AMIs.

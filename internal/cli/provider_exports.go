@@ -1,11 +1,30 @@
 package cli
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type LeaseClaim = leaseClaim
 
 func BaseConfig() Config {
 	return baseConfig()
+}
+
+func ExpandUserPath(path string) string {
+	return expandUserPath(path)
+}
+
+func ApplyLeaseDuration(target *time.Duration, value string) error {
+	if value == "" {
+		return nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return fmt.Errorf("invalid duration %q", value)
+	}
+	*target = parsed
+	return nil
 }
 
 func ServerTypeForProviderClass(provider, class string) string {
@@ -94,4 +113,8 @@ func ServerSlug(server Server) string {
 
 func IsCanonicalLeaseID(value string) bool {
 	return isCanonicalLeaseID(value)
+}
+
+func PowershellCommand(script string) string {
+	return powershellCommand(script)
 }

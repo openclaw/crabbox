@@ -42,8 +42,10 @@ func (directAWSAMICheckpointDriver) Create(ctx context.Context, req checkpointNa
 	if _, err := client.ValidateImageCheckpointSource(ctx, req.Server.CloudID); err != nil {
 		return CoordinatorImage{}, err
 	}
-	if err := prepareNativeImageSource(ctx, req.Target); err != nil {
-		return CoordinatorImage{}, err
+	if !isWindowsNativeTarget(req.Target) {
+		if err := prepareNativeImageSource(ctx, req.Target); err != nil {
+			return CoordinatorImage{}, err
+		}
 	}
 	image, err := client.CreateImageCheckpoint(ctx, req.Server.CloudID, name, req.NoReboot)
 	if err != nil {
@@ -97,7 +99,75 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req checkpointNat
 	return image, nil
 }
 
+type directParallelsCheckpointDriver struct {
+	Runner CommandRunner
+}
+
+func (d directParallelsCheckpointDriver) Create(ctx context.Context, req checkpointNativeCreateRequest) (image CoordinatorImage, err error) {
+	name := req.Name
+	if name == "" {
+		name = defaultNativeImageName(req.LeaseID, req.RepoName)
+	}
+	cfg := req.Cfg
+	applyParallelsHostRefConfig(&cfg, firstNonBlank(req.Server.Labels["host"], req.Cfg.Parallels.Host))
+	client := NewParallelsClient(cfg, d.Runner)
+	vm, err := client.GetVM(ctx, req.Server.CloudID)
+	if err != nil {
+		return CoordinatorImage{}, err
+	}
+	if !parallelsPowerOffState(vm.State) {
+		if req.NoReboot {
+			return CoordinatorImage{}, exit(2, "Parallels native checkpoints require a powered-off VM for forkable linked clones; stop the VM first or rerun with --no-reboot=false")
+		}
+		restartAfter := parallelsRunningState(vm.State)
+		if err := client.Stop(ctx, req.Server.CloudID); err != nil {
+			return CoordinatorImage{}, err
+		}
+		if restartAfter {
+			defer func() {
+				if startErr := client.Start(ctx, req.Server.CloudID); err == nil && startErr != nil {
+					err = startErr
+				}
+			}()
+		}
+	}
+	snapshot, err := client.CreateSnapshot(ctx, req.Server.CloudID, name, "crabbox checkpoint "+req.LeaseID)
+	if err != nil {
+		return CoordinatorImage{}, err
+	}
+	if !parallelsPowerOffState(snapshot.State) {
+		_ = client.DeleteSnapshot(ctx, req.Server.CloudID, snapshot.ID, false)
+		return CoordinatorImage{}, exit(5, "Parallels snapshot %q state=%s is not forkable; expected poweroff", snapshot.Name, blank(snapshot.State, "unknown"))
+	}
+	return CoordinatorImage{
+		ID:         snapshot.ID,
+		Name:       snapshot.Name,
+		State:      snapshot.State,
+		Provider:   "parallels",
+		Kind:       checkpointKindParallels,
+		ResourceID: req.Server.CloudID,
+		Region:     parallelsHostRefForConfig(cfg),
+		Direct:     true,
+	}, nil
+}
+
+func parallelsPowerOffState(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "poweroff", "powered off", "stopped":
+		return true
+	default:
+		return false
+	}
+}
+
+func parallelsRunningState(state string) bool {
+	return strings.EqualFold(strings.TrimSpace(state), "running")
+}
+
 func nativeCheckpointCreateDriver(cfg Config, server Server, target SSHTarget, strategy string) (checkpointNativeCreateDriver, bool) {
+	if _, ok := parallelsNativeCheckpointKind(cfg, server, strategy); ok {
+		return directParallelsCheckpointDriver{}, true
+	}
 	if kind, ok := directAWSNativeCheckpointKind(cfg, server, target, strategy); ok && kind == checkpointKindAWSAMI {
 		return directAWSAMICheckpointDriver{}, true
 	}
@@ -243,6 +313,19 @@ func nativeCheckpointKind(cfg Config, server Server, target SSHTarget, strategy 
 	}
 }
 
+func parallelsNativeCheckpointKind(cfg Config, server Server, strategy string) (string, bool) {
+	if cfg.Provider == "parallels" || server.Provider == "parallels" {
+		if server.CloudID == "" {
+			return "", false
+		}
+		if normalizeCheckpointStrategy(strategy) == checkpointStrategyImage {
+			return "", false
+		}
+		return checkpointKindParallels, true
+	}
+	return "", false
+}
+
 func directAWSNativeCheckpointKind(cfg Config, server Server, target SSHTarget, strategy string) (string, bool) {
 	if cfg.Coordinator != "" || server.Provider != "aws" || server.CloudID == "" || isWindowsNativeTarget(target) {
 		return "", false
@@ -336,6 +419,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindAzure
 	case "gcp":
 		return checkpointKindGCP
+	case "parallels":
+		return checkpointKindParallels
 	default:
 		return checkpointKindAWSAMI
 	}
@@ -345,7 +430,7 @@ func checkpointStrategyForKind(kind string) string {
 	switch kind {
 	case checkpointKindAWSAMI, checkpointKindAzure, checkpointKindGCP:
 		return checkpointStrategyImage
-	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk:
+	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindParallels:
 		return checkpointStrategyDiskSnapshot
 	default:
 		return ""
@@ -477,6 +562,13 @@ func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record check
 			cfg.GCPProject = record.Native.Project
 			cfg.gcpProjectExplicit = true
 		}
+	case checkpointKindParallels:
+		cfg.Provider = "parallels"
+		cfg.Coordinator = ""
+		cfg.CoordToken = ""
+		cfg.Parallels.SourceID = record.Native.Resource
+		cfg.Parallels.SourceSnapshotID = record.Native.ImageID
+		applyParallelsHostRefConfig(cfg, record.Native.Region)
 	}
 	if record.TargetOS != "" {
 		cfg.TargetOS = record.TargetOS

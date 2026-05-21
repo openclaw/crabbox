@@ -61,6 +61,36 @@ func TestDesktopPasteRemoteCommandPrefersClipboardTools(t *testing.T) {
 	}
 }
 
+func TestDesktopClickRemoteCommandSupportsManagedTargets(t *testing.T) {
+	linux := desktopClickRemoteCommand(SSHTarget{TargetOS: targetLinux}, 12, 34)
+	for _, want := range []string{"DISPLAY=\"${DISPLAY:-:99}\"", "xdotool mousemove 12 34 click 1"} {
+		if !strings.Contains(linux, want) {
+			t.Fatalf("linux click command missing %q:\n%s", want, linux)
+		}
+	}
+	mac := desktopClickRemoteCommand(SSHTarget{TargetOS: targetMacOS}, 12, 34)
+	for _, want := range []string{"cliclick c:12,34", "import CoreGraphics", "CGEvent"} {
+		if !strings.Contains(mac, want) {
+			t.Fatalf("mac click command missing %q:\n%s", want, mac)
+		}
+	}
+	windows := desktopClickRemoteCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, 12, 34)
+	for _, want := range []string{"MouseInput", "SetCursorPos(12, 34)", "schtasks.exe", "/IT"} {
+		if !strings.Contains(windows, want) {
+			t.Fatalf("windows click command missing %q:\n%s", want, windows)
+		}
+	}
+}
+
+func TestDesktopClickRejectsWSL2Target(t *testing.T) {
+	if desktopClickSupportsTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}) {
+		t.Fatal("WSL2 desktop click should be rejected before xdotool dispatch")
+	}
+	if !desktopClickSupportsTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}) {
+		t.Fatal("native Windows desktop click should be supported")
+	}
+}
+
 func TestDesktopKeySequenceArgSkipsLeaseID(t *testing.T) {
 	tests := []struct {
 		name string

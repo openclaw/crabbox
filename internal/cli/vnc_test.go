@@ -20,6 +20,21 @@ func TestVNCTunnelCommandQuotesKeyPath(t *testing.T) {
 	}
 }
 
+func TestVNCTunnelCommandForwardsProxyCommand(t *testing.T) {
+	got := vncTunnelCommand(SSHTarget{
+		Port:         "22",
+		User:         "crabbox",
+		Host:         "10.211.55.3",
+		ProxyCommand: "ssh -W 10.211.55.3:%p mac-host",
+	}, "5907")
+	if strings.Contains(got, "'-i' ''") {
+		t.Fatalf("empty key must not emit -i: %q", got)
+	}
+	if !strings.Contains(got, "ProxyCommand=ssh -W 10.211.55.3:%p mac-host") {
+		t.Fatalf("tunnel should preserve proxy command: %q", got)
+	}
+}
+
 func TestVNCLoopbackCheckCommandSupportsWindows(t *testing.T) {
 	got := vncLoopbackCheckCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
 	if !strings.Contains(got, "powershell.exe") {

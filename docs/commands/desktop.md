@@ -116,11 +116,12 @@ daemon not running`. The same output includes exact `rescue:` commands such as
 --open`.
 
 Input helpers also operate on the selected lease over SSH without repo sync.
-Use them instead of hand-written `xdotool` snippets. `desktop type` uses raw
-`xdotool type` only for simple alphanumeric text; text with emails, passwords,
-symbols such as `@` or `+`, URLs, whitespace, or long payloads goes through the
-remote clipboard and paste path because keyboard layouts can otherwise corrupt
-special characters.
+Use them instead of hand-written input snippets. `desktop click` supports
+managed Linux, macOS, and native Windows targets. `desktop type` uses raw
+`xdotool type` only for simple alphanumeric text on Linux; text with emails,
+passwords, symbols such as `@` or `+`, URLs, whitespace, or long payloads goes
+through the remote clipboard and paste path because keyboard layouts can
+otherwise corrupt special characters.
 
 `desktop paste` accepts `--text` or stdin. `desktop key` accepts either
 `--id <lease> <keys>` or the positional lease form `<lease> <keys>`; the key
@@ -132,7 +133,7 @@ Flags:
 
 ```text
 --id <lease-id-or-slug>
---provider hetzner|aws|azure|ssh|semaphore|daytona
+--provider hetzner|aws|azure|parallels|ssh|semaphore|daytona
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>

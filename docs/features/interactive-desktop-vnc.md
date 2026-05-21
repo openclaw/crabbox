@@ -171,11 +171,12 @@ crabbox desktop key --id blue-lobster ctrl+l
 crabbox desktop key blue-lobster ctrl+l
 ```
 
+`desktop click` works across managed Linux, macOS, and native Windows targets.
 Prefer `desktop paste` or symbol-aware `desktop type` for emails, passwords,
 URLs, and text containing characters such as `@` or `+`; raw key-symbol typing
-can vary with the target X keyboard layout. `desktop key` is for shortcuts and
+can vary with the target keyboard layout. `desktop key` is for shortcuts and
 special keys, and supports both `--id <lease> <keys>` and positional
-`<lease> <keys>` forms.
+`<lease> <keys>` forms on Linux desktop leases.
 
 ## Network Model
 
@@ -186,6 +187,8 @@ Managed VNC is tunnel-first:
 - `crabbox vnc` forwards a local port such as `localhost:5901` to remote
   `127.0.0.1:5900`.
 - `--network tailscale` changes only the SSH endpoint used by that tunnel.
+- Remote-host providers such as Parallels keep the same SSH tunnel model and
+  carry their SSH proxy command into VNC, screenshots, and input commands.
 - WebVNC keeps the same local SSH tunnel and adds an authenticated browser
   websocket through the coordinator.
 - WebVNC browser websockets are paired with local bridge backend sessions

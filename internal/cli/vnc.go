@@ -167,8 +167,7 @@ func startVNCTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost
 }
 
 func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) []string {
-	return []string{
-		"-i", target.Key,
+	args := []string{
 		"-o", "IdentitiesOnly=yes",
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=accept-new",
@@ -179,10 +178,19 @@ func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) [
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=2",
 		"-p", target.Port,
+	}
+	if target.Key != "" {
+		args = append([]string{"-i", target.Key}, args...)
+	}
+	if target.ProxyCommand != "" {
+		args = append(args, "-o", "ProxyCommand="+target.ProxyCommand)
+	}
+	args = append(args,
 		"-N",
 		"-L", fmt.Sprintf("%s:%s:%s", localPort, remoteHost, remotePort),
-		target.User + "@" + target.Host,
-	}
+		target.User+"@"+target.Host,
+	)
+	return args
 }
 
 func vncTunnelBackgroundArgs(target SSHTarget, localPort, remoteHost, remotePort string) []string {

@@ -29,6 +29,7 @@ Direct provider backends can also run without the Crabbox coordinator:
 
 ```text
 proxmox    Proxmox VE QEMU VM clones exposed as SSH leases
+parallels  Parallels Desktop linked clones exposed as SSH leases
 exe-dev    exe.dev VMs exposed as SSH leases
 semaphore  Semaphore CI jobs exposed as SSH leases
 namespace  Namespace Devboxes exposed as SSH leases
@@ -48,6 +49,7 @@ tensorlake Tensorlake Firecracker sandboxes with delegated command execution
 - [Google Cloud](../providers/gcp.md): GCP Compute Engine Linux SSH leases.
 - [Hetzner](../providers/hetzner.md): Linux-only managed provider behavior, classes, and cleanup.
 - [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
+- [Parallels](../providers/parallels.md): direct local or remote Mac Parallels Desktop VM clones, named VM snapshot templates, and small Mac fleets.
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [exe.dev](../providers/exe-dev.md): exe.dev VMs exposed as SSH leases.
 - [Blacksmith Testbox](../providers/blacksmith-testbox.md): delegated Testbox backend behavior.
@@ -171,6 +173,12 @@ smoke. Proxmox clones a configured Linux QEMU template, injects SSH via
 cloud-init, discovers the IP and bootstraps the VM through the QEMU guest agent,
 then uses normal Crabbox SSH sync/run/release.
 
+Use `--provider parallels` with `CRABBOX_PARALLELS_*` config for direct
+Parallels smoke. Parallels creates a linked clone from a configured source VM
+and optional snapshot, starts it, discovers the guest IP through `prlctl`, then
+uses normal Crabbox SSH sync/run/release. It supports Linux, macOS, and Windows
+templates when the guest already exposes the matching SSH contract.
+
 Crabbox can also wrap Blacksmith Testboxes with `provider: blacksmith-testbox`. That backend does not use the Crabbox broker or direct cloud credentials. It shells out to the authenticated Blacksmith CLI for `testbox warmup`, `run`, `status`, `list`, and `stop`, while Crabbox keeps local slugs, repo claims, config, and timing summaries. See [Blacksmith Testbox](blacksmith-testbox.md).
 
 Crabbox can use Namespace Devboxes with `provider: namespace-devbox`. Namespace
@@ -222,9 +230,9 @@ provider: ssh
 target: macos
 static:
   host: mac-studio.local
-  user: steipete
+  user: alice
   port: "22"
-  workRoot: /Users/steipete/crabbox
+  workRoot: /Users/alice/crabbox
 ```
 
 ```yaml
@@ -234,7 +242,7 @@ windows:
   mode: normal
 static:
   host: win-dev.local
-  user: Peter
+  user: alice
   port: "22"
   workRoot: C:\crabbox
 ```
