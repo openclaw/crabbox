@@ -17,6 +17,7 @@ static SSH provider for existing machines.
 | [Hetzner](hetzner.md) | SSH lease | Linux | fast Linux capacity at low cost |
 | [Proxmox](proxmox.md) | SSH lease | Linux | private Proxmox VE QEMU VM templates |
 | [Parallels](parallels.md) | SSH lease | Linux, macOS, Windows | local or remote Mac Parallels template/fleet clones |
+| [Local Container](local-container.md) | SSH lease | Linux | zero-cloud Linux and desktop/browser smoke tests through Docker-compatible runtimes |
 | [Static SSH](ssh.md) | SSH lease | Linux, macOS, Windows | reusing an existing host |
 | [exe.dev](exe-dev.md) | SSH lease | Linux | disposable exe.dev VMs with Crabbox sync |
 | [Blacksmith Testbox](blacksmith-testbox.md) | delegated run | Linux | existing Blacksmith Testbox workflows |
@@ -47,6 +48,7 @@ default.
 ```sh
 crabbox warmup --provider aws --class beast
 crabbox run --provider hetzner -- pnpm test
+crabbox run --provider docker -- pnpm test
 crabbox run --provider blacksmith-testbox --id tbx_123 -- pnpm test
 crabbox run --provider namespace-devbox --id blue-lobster -- pnpm test
 ```
@@ -65,6 +67,8 @@ Proxmox and delegated providers do not use the Crabbox coordinator:
 
 - Proxmox clones private QEMU VM templates through the Proxmox VE REST API.
 - Parallels clones local or remote Mac Parallels Desktop VMs through `prlctl`.
+- Local Container starts labeled Linux containers through a Docker-compatible
+  local runtime such as Docker Desktop, OrbStack, or Colima.
 - exe.dev creates and deletes VMs through the exe.dev SSH API.
 - Blacksmith uses the authenticated Blacksmith CLI.
 - Daytona uses Daytona API and SDK/toolbox APIs.
@@ -84,11 +88,12 @@ Proxmox and delegated providers do not use the Crabbox coordinator:
   `portMappings["22"]` report the public TCP mapping, Crabbox reuses its
   normal SSH sync/run path against `root@<pod-ip>:<public-port>`.
 
-Namespace Devbox and Semaphore are SSH lease providers that do not use the
-Crabbox coordinator. Namespace provisions through the authenticated `devbox`
-CLI; Semaphore provisions through the Semaphore REST API; Sprites provisions
-through the Sprites API and reaches SSH through `sprite proxy`; exe.dev
-provisions through `ssh exe.dev` and returns a normal VM SSH target.
+Local Container, Namespace Devbox, and Semaphore are SSH lease providers that do
+not use the Crabbox coordinator. Local Container provisions through `docker`;
+Namespace provisions through the authenticated `devbox` CLI; Semaphore
+provisions through the Semaphore REST API; Sprites provisions through the
+Sprites API and reaches SSH through `sprite proxy`; exe.dev provisions through
+`ssh exe.dev` and returns a normal VM SSH target.
 
 ## Feature Matrix
 
@@ -100,6 +105,7 @@ provisions through `ssh exe.dev` and returns a normal VM SSH target.
 | Hetzner | yes | yes | yes | Linux VNC/code | yes | no |
 | Proxmox | yes | yes | yes | no | yes | no |
 | Parallels | yes | yes | yes | host-dependent | yes | no |
+| Local Container | yes | yes | yes | local VNC/WebVNC; no code | yes | no |
 | Static SSH | yes | resolves host | yes | host-dependent | yes | no |
 | exe.dev | yes | yes | yes | no | yes | no |
 | Blacksmith Testbox | yes | yes | no | no | no | yes |
@@ -116,8 +122,8 @@ provisions through `ssh exe.dev` and returns a normal VM SSH target.
 | RunPod | yes | yes | yes | no | yes | no |
 
 Actions runner hydration requires a normal SSH lease on Linux and is core-over-SSH.
-Use AWS, Google Cloud, Hetzner, Proxmox, Parallels, Static SSH, exe.dev, Namespace Devbox,
-Semaphore, Sprites, or RunPod for that path.
+Use AWS, Google Cloud, Hetzner, Proxmox, Parallels, Local Container, Static SSH,
+exe.dev, Namespace Devbox, Semaphore, Sprites, or RunPod for that path.
 
 ## Implementation
 

@@ -176,6 +176,7 @@ internal/providers/aws
 internal/providers/azure
 internal/providers/gcp
 internal/providers/proxmox
+internal/providers/localcontainer
 internal/providers/ssh
 internal/providers/blacksmith
 internal/providers/namespace
@@ -213,6 +214,7 @@ internal/providers/azure                  # Azure SSH lease backend
 internal/providers/gcp                    # Google Cloud SSH lease backend
 internal/providers/hetzner                # Hetzner SSH lease backend
 internal/providers/proxmox                # Proxmox VE SSH lease backend
+internal/providers/localcontainer         # local Docker-compatible container SSH backend
 internal/providers/ssh                    # static SSH backend
 internal/providers/blacksmith             # Blacksmith delegated backend
 internal/providers/namespace              # Namespace Devbox SSH backend

@@ -101,6 +101,7 @@ type Config struct {
 	Cloudflare               CloudflareConfig
 	Semaphore                SemaphoreConfig
 	Sprites                  SpritesConfig
+	LocalContainer           LocalContainerConfig
 	Tailscale                TailscaleConfig
 	Static                   StaticConfig
 	Results                  ResultsConfig
@@ -338,6 +339,16 @@ type SpritesConfig struct {
 	Token    string
 	APIURL   string
 	WorkRoot string
+}
+
+type LocalContainerConfig struct {
+	Runtime  string
+	Image    string
+	User     string
+	WorkRoot string
+	CPUs     int
+	Memory   string
+	Network  string
 }
 
 type StaticConfig struct {
@@ -674,6 +685,12 @@ func baseConfig() Config {
 			APIURL:   "https://api.sprites.dev",
 			WorkRoot: "/home/sprite/crabbox",
 		},
+		LocalContainer: LocalContainerConfig{
+			Runtime: "docker",
+			Image:   "debian:bookworm",
+			User:    "crabbox",
+			Network: "bridge",
+		},
 		Tailscale: TailscaleConfig{
 			Tags:             []string{"tag:crabbox"},
 			HostnameTemplate: "crabbox-{slug}",
@@ -730,6 +747,7 @@ type fileConfig struct {
 	Cloudflare       *fileCloudflareConfig              `yaml:"cloudflare,omitempty"`
 	Semaphore        *fileSemaphoreConfig               `yaml:"semaphore,omitempty"`
 	Sprites          *fileSpritesConfig                 `yaml:"sprites,omitempty"`
+	LocalContainer   *fileLocalContainerConfig          `yaml:"localContainer,omitempty"`
 	Tailscale        *fileTailscaleConfig               `yaml:"tailscale,omitempty"`
 	Static           *fileStaticConfig                  `yaml:"static,omitempty"`
 	Results          *fileResultsConfig                 `yaml:"results,omitempty"`
@@ -1051,6 +1069,16 @@ type fileSemaphoreConfig struct {
 type fileSpritesConfig struct {
 	APIURL   string `yaml:"apiUrl,omitempty"`
 	WorkRoot string `yaml:"workRoot,omitempty"`
+}
+
+type fileLocalContainerConfig struct {
+	Runtime  string `yaml:"runtime,omitempty"`
+	Image    string `yaml:"image,omitempty"`
+	User     string `yaml:"user,omitempty"`
+	WorkRoot string `yaml:"workRoot,omitempty"`
+	CPUs     int    `yaml:"cpus,omitempty"`
+	Memory   string `yaml:"memory,omitempty"`
+	Network  string `yaml:"network,omitempty"`
 }
 
 type fileTailscaleConfig struct {
@@ -1982,6 +2010,29 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Sprites.WorkRoot = file.Sprites.WorkRoot
 		}
 	}
+	if file.LocalContainer != nil {
+		if file.LocalContainer.Runtime != "" {
+			cfg.LocalContainer.Runtime = file.LocalContainer.Runtime
+		}
+		if file.LocalContainer.Image != "" {
+			cfg.LocalContainer.Image = file.LocalContainer.Image
+		}
+		if file.LocalContainer.User != "" {
+			cfg.LocalContainer.User = file.LocalContainer.User
+		}
+		if file.LocalContainer.WorkRoot != "" {
+			cfg.LocalContainer.WorkRoot = file.LocalContainer.WorkRoot
+		}
+		if file.LocalContainer.CPUs > 0 {
+			cfg.LocalContainer.CPUs = file.LocalContainer.CPUs
+		}
+		if file.LocalContainer.Memory != "" {
+			cfg.LocalContainer.Memory = file.LocalContainer.Memory
+		}
+		if file.LocalContainer.Network != "" {
+			cfg.LocalContainer.Network = file.LocalContainer.Network
+		}
+	}
 	if file.Tailscale != nil {
 		if file.Tailscale.Enabled != nil {
 			cfg.Tailscale.Enabled = *file.Tailscale.Enabled
@@ -2590,6 +2641,13 @@ func applyEnv(cfg *Config) {
 	cfg.Sprites.Token = getenv("CRABBOX_SPRITES_TOKEN", getenv("SPRITES_TOKEN", getenv("SPRITE_TOKEN", getenv("SETUP_SPRITE_TOKEN", cfg.Sprites.Token))))
 	cfg.Sprites.APIURL = getenv("CRABBOX_SPRITES_API_URL", getenv("SPRITES_API_URL", cfg.Sprites.APIURL))
 	cfg.Sprites.WorkRoot = getenv("CRABBOX_SPRITES_WORK_ROOT", cfg.Sprites.WorkRoot)
+	cfg.LocalContainer.Runtime = getenv("CRABBOX_LOCAL_CONTAINER_RUNTIME", cfg.LocalContainer.Runtime)
+	cfg.LocalContainer.Image = getenv("CRABBOX_LOCAL_CONTAINER_IMAGE", cfg.LocalContainer.Image)
+	cfg.LocalContainer.User = getenv("CRABBOX_LOCAL_CONTAINER_USER", cfg.LocalContainer.User)
+	cfg.LocalContainer.WorkRoot = getenv("CRABBOX_LOCAL_CONTAINER_WORK_ROOT", cfg.LocalContainer.WorkRoot)
+	cfg.LocalContainer.CPUs = getenvInt("CRABBOX_LOCAL_CONTAINER_CPUS", cfg.LocalContainer.CPUs)
+	cfg.LocalContainer.Memory = getenv("CRABBOX_LOCAL_CONTAINER_MEMORY", cfg.LocalContainer.Memory)
+	cfg.LocalContainer.Network = getenv("CRABBOX_LOCAL_CONTAINER_NETWORK", cfg.LocalContainer.Network)
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value
 	}
@@ -2705,7 +2763,7 @@ func serverTypeForConfig(cfg Config) string {
 	if resolved, err := ProviderFor(cfg.Provider); err == nil {
 		cfg.Provider = resolved.Name()
 	}
-	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) || cfg.Provider == "islo" || cfg.Provider == "sprites" {
+	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) || cfg.Provider == "islo" || cfg.Provider == "sprites" || cfg.Provider == "local-container" {
 		return ""
 	}
 	if cfg.Provider == "namespace-devbox" || cfg.Provider == "namespace" {
@@ -2748,7 +2806,7 @@ func serverTypeForProviderClass(provider, class string) string {
 	if resolved, err := ProviderFor(provider); err == nil {
 		provider = resolved.Name()
 	}
-	if isBlacksmithProvider(provider) || isStaticProvider(provider) || provider == "islo" || provider == "sprites" {
+	if isBlacksmithProvider(provider) || isStaticProvider(provider) || provider == "islo" || provider == "sprites" || provider == "local-container" {
 		return ""
 	}
 	if provider == "namespace-devbox" || provider == "namespace" {

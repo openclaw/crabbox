@@ -118,6 +118,13 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_SPRITES_API_URL",
 		"SPRITES_API_URL",
 		"CRABBOX_SPRITES_WORK_ROOT",
+		"CRABBOX_LOCAL_CONTAINER_RUNTIME",
+		"CRABBOX_LOCAL_CONTAINER_IMAGE",
+		"CRABBOX_LOCAL_CONTAINER_USER",
+		"CRABBOX_LOCAL_CONTAINER_WORK_ROOT",
+		"CRABBOX_LOCAL_CONTAINER_CPUS",
+		"CRABBOX_LOCAL_CONTAINER_MEMORY",
+		"CRABBOX_LOCAL_CONTAINER_NETWORK",
 		"CRABBOX_NAMESPACE_IMAGE",
 		"CRABBOX_NAMESPACE_SIZE",
 		"CRABBOX_NAMESPACE_REPOSITORY",
@@ -867,6 +874,13 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("SPRITES_API_URL", "https://api.sprites-file.example")
 	t.Setenv("CRABBOX_SPRITES_API_URL", "https://api.sprites-env.example")
 	t.Setenv("CRABBOX_SPRITES_WORK_ROOT", "/home/sprite/env")
+	t.Setenv("CRABBOX_LOCAL_CONTAINER_RUNTIME", "docker")
+	t.Setenv("CRABBOX_LOCAL_CONTAINER_IMAGE", "ubuntu:env")
+	t.Setenv("CRABBOX_LOCAL_CONTAINER_USER", "runner-env")
+	t.Setenv("CRABBOX_LOCAL_CONTAINER_WORK_ROOT", "/workspace/env")
+	t.Setenv("CRABBOX_LOCAL_CONTAINER_CPUS", "6")
+	t.Setenv("CRABBOX_LOCAL_CONTAINER_MEMORY", "12g")
+	t.Setenv("CRABBOX_LOCAL_CONTAINER_NETWORK", "bridge")
 	t.Setenv("CRABBOX_NAMESPACE_IMAGE", "namespace-env-image")
 	t.Setenv("CRABBOX_NAMESPACE_SIZE", "XL")
 	t.Setenv("CRABBOX_NAMESPACE_REPOSITORY", "github.com/openclaw/env")
@@ -982,6 +996,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Sprites.Token != "sprites-token-env" || cfg.Sprites.APIURL != "https://api.sprites-env.example" || cfg.Sprites.WorkRoot != "/home/sprite/env" {
 		t.Fatalf("unexpected sprites env: %#v", cfg.Sprites)
+	}
+	if cfg.LocalContainer.Runtime != "docker" || cfg.LocalContainer.Image != "ubuntu:env" || cfg.LocalContainer.User != "runner-env" || cfg.LocalContainer.WorkRoot != "/workspace/env" || cfg.LocalContainer.CPUs != 6 || cfg.LocalContainer.Memory != "12g" || cfg.LocalContainer.Network != "bridge" {
+		t.Fatalf("unexpected local-container env: %#v", cfg.LocalContainer)
 	}
 	if cfg.Blacksmith.IdleTimeout != 2*time.Hour || !cfg.Blacksmith.Debug {
 		t.Fatalf("unexpected blacksmith env: %#v", cfg.Blacksmith)

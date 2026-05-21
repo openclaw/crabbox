@@ -21,6 +21,7 @@ func init() {
 	RegisterProvider(testModalProvider{})
 	RegisterProvider(testCloudflareProvider{})
 	RegisterProvider(testSpritesProvider{})
+	RegisterProvider(testLocalContainerProvider{})
 }
 
 type testAzureProvider struct{}
@@ -659,6 +660,80 @@ func (testSpritesProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any)
 	return nil
 }
 func (p testSpritesProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testLocalContainerProvider struct{}
+
+func (testLocalContainerProvider) Name() string { return "local-container" }
+func (testLocalContainerProvider) Aliases() []string {
+	return []string{"docker", "container", "local-docker"}
+}
+func (testLocalContainerProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "local-container",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureDesktop, FeatureBrowser},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testLocalContainerFlagValues struct {
+	Runtime  *string
+	Image    *string
+	User     *string
+	WorkRoot *string
+	CPUs     *int
+	Memory   *string
+	Network  *string
+}
+
+func (testLocalContainerProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testLocalContainerFlagValues{
+		Runtime:  fs.String("local-container-runtime", defaults.LocalContainer.Runtime, "Docker-compatible CLI"),
+		Image:    fs.String("local-container-image", defaults.LocalContainer.Image, "container image"),
+		User:     fs.String("local-container-user", defaults.LocalContainer.User, "container SSH user"),
+		WorkRoot: fs.String("local-container-work-root", defaults.LocalContainer.WorkRoot, "container work root"),
+		CPUs:     fs.Int("local-container-cpus", defaults.LocalContainer.CPUs, "container CPUs"),
+		Memory:   fs.String("local-container-memory", defaults.LocalContainer.Memory, "container memory"),
+		Network:  fs.String("local-container-network", defaults.LocalContainer.Network, "container network"),
+	}
+}
+func (testLocalContainerProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testLocalContainerFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "local-container-runtime") {
+		cfg.LocalContainer.Runtime = *v.Runtime
+	}
+	if flagWasSet(fs, "local-container-image") {
+		cfg.LocalContainer.Image = *v.Image
+	}
+	if flagWasSet(fs, "local-container-user") {
+		cfg.LocalContainer.User = *v.User
+		cfg.SSHUser = *v.User
+	}
+	if flagWasSet(fs, "local-container-work-root") {
+		cfg.LocalContainer.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "local-container-cpus") {
+		cfg.LocalContainer.CPUs = *v.CPUs
+	}
+	if flagWasSet(fs, "local-container-memory") {
+		cfg.LocalContainer.Memory = *v.Memory
+	}
+	if flagWasSet(fs, "local-container-network") {
+		cfg.LocalContainer.Network = *v.Network
+	}
+	if cfg.Provider == "docker" || cfg.Provider == "container" || cfg.Provider == "local-docker" {
+		cfg.Provider = "local-container"
+	}
+	return nil
+}
+func (p testLocalContainerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

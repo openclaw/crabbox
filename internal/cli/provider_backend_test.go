@@ -52,6 +52,10 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		{name: "cloudflare", canonical: "cloudflare"},
 		{name: "cf", canonical: "cloudflare"},
 		{name: "sprites", canonical: "sprites"},
+		{name: "local-container", canonical: "local-container"},
+		{name: "docker", canonical: "local-container"},
+		{name: "container", canonical: "local-container"},
+		{name: "local-docker", canonical: "local-container"},
 	} {
 		provider, err := ProviderFor(tc.name)
 		if err != nil {
@@ -149,6 +153,15 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 	if _, ok := backend.(SSHLeaseBackend); !ok {
 		t.Fatalf("backend=%T, want ssh lease backend", backend)
 	}
+
+	cfg.Provider = "local-container"
+	backend, err = loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	if err != nil {
+		t.Fatalf("load local-container backend: %v", err)
+	}
+	if _, ok := backend.(SSHLeaseBackend); !ok {
+		t.Fatalf("backend=%T, want ssh lease backend", backend)
+	}
 }
 
 func TestProviderFlagsApplyNamespaceWithoutCoreEdits(t *testing.T) {
@@ -195,6 +208,33 @@ func TestProviderFlagsApplyExeDevWithoutCoreEdits(t *testing.T) {
 	}
 	if cfg.ExeDev.ControlHost != "ssh.exe.example.test" || cfg.ExeDev.Image != "ubuntu:24.04" || cfg.ExeDev.User != "runner" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/tmp/work" {
 		t.Fatalf("exe-dev flags not applied: %#v", cfg.ExeDev)
+	}
+}
+
+func TestProviderFlagsApplyLocalContainerWithoutCoreEdits(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	values := registerProviderFlags(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "docker",
+		"--local-container-runtime", "docker",
+		"--local-container-image", "ubuntu:24.04",
+		"--local-container-user", "runner",
+		"--local-container-work-root", "/workspace/crabbox",
+		"--local-container-cpus", "4",
+		"--local-container-memory", "8g",
+		"--local-container-network", "bridge",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = *provider
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "local-container" || cfg.LocalContainer.Runtime != "docker" || cfg.LocalContainer.Image != "ubuntu:24.04" || cfg.LocalContainer.User != "runner" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/workspace/crabbox" || cfg.LocalContainer.CPUs != 4 || cfg.LocalContainer.Memory != "8g" || cfg.LocalContainer.Network != "bridge" {
+		t.Fatalf("local-container flags not applied: provider=%s cfg=%#v", cfg.Provider, cfg.LocalContainer)
 	}
 }
 

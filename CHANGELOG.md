@@ -11,6 +11,7 @@
 - Added explicit AWS Fast Snapshot Restore promotion support for hot developer-image AMIs via `crabbox image promote --fast-snapshot-restore --fsr-az <az>` and the AWS developer-image mint wrapper.
 - Added `crabbox image fsr-status` and the coordinator Fast Snapshot Restore status route for checking live AWS snapshot/AZ state after promotion.
 - Added a light/dark mode toggle to the Crabbox documentation site that defaults to the system color scheme, persists the choice in local storage, and applies before first paint to avoid a flash.
+- Added `provider: local-container` with `docker`, `container`, and `local-docker` aliases for local Linux container leases and optional desktop/browser/WebVNC smoke boxes through Docker-compatible runtimes such as Docker Desktop, OrbStack, and Colima.
 
 ### Changed
 

@@ -32,6 +32,9 @@ Supported providers:
   direct Linux VMs.
 - [Proxmox](docs/providers/proxmox.md) (`provider: proxmox`): direct Linux QEMU
   VM clones from private Proxmox VE templates.
+- [Local Container](docs/providers/local-container.md)
+  (`provider: local-container`, alias `docker`): local Linux containers through
+  a Docker-compatible runtime such as Docker Desktop, OrbStack, or Colima.
 - [Static SSH](docs/providers/ssh.md) (`provider: ssh`): existing Linux, macOS,
   Windows, or WSL2 hosts.
 - [exe.dev](docs/providers/exe-dev.md) (`provider: exe-dev`): exe.dev VMs
@@ -303,6 +306,21 @@ exeDev:
 ```
 
 Authenticate with `ssh exe.dev`; VM creation requires an active exe.dev plan.
+
+Optional local container:
+
+```yaml
+provider: local-container
+localContainer:
+  runtime: docker
+  image: debian:bookworm
+  workRoot: /work/crabbox
+```
+
+`provider: docker` is an alias for `local-container`; the backend uses standard
+Docker-compatible CLI commands, so OrbStack works when it is the active Docker
+context. Add `--desktop --browser` for local Xvfb/XFCE/x11vnc/noVNC browser
+smoke tests before moving the same workflow to remote capacity.
 
 Optional Islo sandbox:
 

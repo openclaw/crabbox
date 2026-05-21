@@ -284,6 +284,29 @@ static:
   workRoot: /Users/steipete/crabbox
 ```
 
+### Local Container
+
+```yaml
+provider: local-container
+localContainer:
+  runtime: docker
+  image: debian:bookworm
+  user: crabbox
+  workRoot: /work/crabbox
+  cpus: 0
+  memory: ""
+  network: bridge
+```
+
+`provider: docker`, `provider: container`, and `provider: local-docker` are
+aliases for `local-container`. The backend uses Docker-compatible CLI commands,
+so Docker Desktop, OrbStack, Colima, and similar local runtimes work when their
+Docker context is active.
+
+Use `--desktop --browser` to bootstrap Xvfb, XFCE, x11vnc, noVNC/websockify,
+desktop input tools, screenshot tools, ffmpeg, and a packaged browser inside
+the container.
+
 ### Blacksmith Testbox
 
 ```yaml

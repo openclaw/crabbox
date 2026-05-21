@@ -84,6 +84,9 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if isLocalContainerProvider(cfg.Provider) {
+		return a.localContainerWebVNC(ctx, cfg, *id, *localPort, *openPortal, *takeControl, *reclaim)
+	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
 		return exit(2, "webvnc currently supports coordinator-backed hetzner/aws/azure desktop leases")
 	}
@@ -418,6 +421,9 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if isLocalContainerProvider(cfg.Provider) {
+		return a.localContainerWebVNCStatus(ctx, cfg, *id, *localPort)
+	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
 		return exit(2, "webvnc status currently supports coordinator-backed hetzner/aws/azure desktop leases")
 	}
@@ -529,6 +535,9 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{Desktop: true})
 	if err != nil {
 		return err
+	}
+	if isLocalContainerProvider(cfg.Provider) {
+		return a.localContainerWebVNCReset(ctx, cfg, *id, *openPortal, *takeControl)
 	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
 		return exit(2, "webvnc reset currently supports coordinator-backed hetzner/aws/azure desktop leases")
@@ -1093,6 +1102,170 @@ func webVNCObserverSlotsExhausted(status CoordinatorWebVNCStatus) bool {
 		return true
 	}
 	return strings.Contains(status.Message, "available WebVNC observer slot")
+}
+
+func isLocalContainerProvider(provider string) bool {
+	p, err := ProviderFor(provider)
+	return err == nil && p.Name() == "local-container"
+}
+
+func (a App) localContainerWebVNC(ctx context.Context, cfg Config, id, localPort string, openViewer, _ bool, reclaim bool) error {
+	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, id, false)
+	if err != nil {
+		return err
+	}
+	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
+		return err
+	}
+	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, leaseID, reclaim); err != nil {
+		return err
+	}
+	if _, err := resolveVNCEndpoint(ctx, cfg, &target); err != nil {
+		return err
+	}
+	if out, err := runSSHCombinedOutput(ctx, target, localContainerNoVNCRemoteCommand()); err != nil {
+		rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
+		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx))
+		return exit(5, "start local WebVNC bridge: %v", err)
+	}
+	if localPort == "" {
+		localPort = availableLocalVNCPort()
+	}
+	fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=%s\n", leaseID, blank(serverSlug(server), "-"), blank(server.Provider, cfg.Provider), blank(target.TargetOS, cfg.TargetOS))
+	fmt.Fprintf(a.Stdout, "bridge: starting SSH tunnel localhost:%s -> 127.0.0.1:6080\n", localPort)
+	tunnel, err := startVNCForegroundTunnel(ctx, target, localPort, "127.0.0.1", "6080")
+	if err != nil {
+		return err
+	}
+	defer stopProcess(tunnel)
+	password, _ := runSSHOutput(ctx, target, vncPasswordCommand(target))
+	viewerURL := localContainerWebVNCURL(localPort, strings.TrimSpace(password))
+	fmt.Fprintln(a.Stdout, "bridge: connected; keep this process running while using WebVNC")
+	fmt.Fprintf(a.Stdout, "webvnc: %s\n", viewerURL)
+	if strings.TrimSpace(password) != "" {
+		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(password))
+	}
+	if openViewer {
+		if err := openLocalURL(viewerURL); err != nil {
+			return err
+		}
+		fmt.Fprintf(a.Stdout, "opened: %s\n", viewerURL)
+	}
+	<-ctx.Done()
+	return context.Cause(ctx)
+}
+
+func (a App) localContainerWebVNCStatus(ctx context.Context, cfg Config, id, localPort string) error {
+	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, id, false)
+	if err != nil {
+		return err
+	}
+	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
+		return err
+	}
+	if localPort == "" {
+		localPort = availableLocalVNCPort()
+	}
+	endpoint, endpointErr := resolveVNCEndpoint(ctx, cfg, &target)
+	websockify := "unknown"
+	if out, err := runSSHOutput(ctx, target, `if ss -ltn | grep -q '127.0.0.1:6080'; then echo running; else echo stopped; fi`); err == nil {
+		websockify = strings.TrimSpace(out)
+	}
+	password := ""
+	if endpointErr == nil && endpoint.Managed {
+		password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
+	}
+	fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=%s\n", leaseID, blank(serverSlug(server), "-"), blank(server.Provider, cfg.Provider), blank(target.TargetOS, cfg.TargetOS))
+	if endpointErr != nil {
+		fmt.Fprintf(a.Stdout, "vnc target: unreachable 127.0.0.1:5900 (%v)\n", endpointErr)
+		printRescue(a.Stdout, rescueVNCTargetUnreachable, endpointErr.Error(), desktopDoctorCommand(rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}))
+	} else {
+		fmt.Fprintf(a.Stdout, "vnc target: reachable %s:%s managed=%t\n", endpoint.Host, endpoint.Port, endpoint.Managed)
+	}
+	fmt.Fprintf(a.Stdout, "local webvnc: %s\n", blank(websockify, "unknown"))
+	fmt.Fprintf(a.Stdout, "ssh tunnel: %s\n", vncTunnelCommandTo(target, localPort, "127.0.0.1", "6080"))
+	fmt.Fprintf(a.Stdout, "webvnc: %s\n", localContainerWebVNCURL(localPort, strings.TrimSpace(password)))
+	if strings.TrimSpace(password) != "" {
+		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(password))
+	}
+	fmt.Fprintf(a.Stdout, "fallback: %s\n", nativeVNCOpenCommand(cfg, target, leaseID))
+	return nil
+}
+
+func (a App) localContainerWebVNCReset(ctx context.Context, cfg Config, id string, openViewer, takeControl bool) error {
+	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, id, false)
+	if err != nil {
+		return err
+	}
+	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
+		return err
+	}
+	if out, err := runSSHCombinedOutput(ctx, target, localContainerWebVNCResetRemoteCommand()); err != nil {
+		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}))
+		return exit(5, "reset local WebVNC/input stack: %v", err)
+	}
+	fmt.Fprintf(a.Stdout, "webvnc reset: lease=%s slug=%s\n", leaseID, blank(serverSlug(server), "-"))
+	if openViewer {
+		return a.localContainerWebVNC(ctx, cfg, leaseID, "", true, takeControl, false)
+	}
+	fmt.Fprintf(a.Stdout, "webvnc: run crabbox webvnc --provider local-container --id %s\n", leaseID)
+	return nil
+}
+
+func localContainerWebVNCURL(localPort, password string) string {
+	values := url.Values{}
+	values.Set("host", "127.0.0.1")
+	values.Set("port", localPort)
+	values.Set("path", "websockify")
+	values.Set("autoconnect", "1")
+	values.Set("resize", "scale")
+	if strings.TrimSpace(password) != "" {
+		values.Set("password", strings.TrimSpace(password))
+	}
+	return "http://127.0.0.1:" + localPort + "/vnc.html?" + values.Encode()
+}
+
+func vncTunnelCommandTo(target SSHTarget, localPort, remoteHost, remotePort string) string {
+	return strings.Join(shellWords(append([]string{"ssh"}, vncTunnelArgs(target, localPort, remoteHost, remotePort)...)), " ")
+}
+
+func localContainerNoVNCRemoteCommand() string {
+	return `set -eu
+if ! command -v websockify >/dev/null 2>&1; then
+  echo "missing websockify; warm a new --desktop lease or install novnc websockify" >&2
+  exit 127
+fi
+web_dir=""
+for candidate in /usr/share/novnc /usr/share/novnc/core /usr/share/novnc/html; do
+  if [ -f "$candidate/vnc.html" ]; then
+    web_dir="$candidate"
+    break
+  fi
+done
+if [ -z "$web_dir" ]; then
+  echo "missing noVNC web assets; warm a new --desktop lease or install novnc" >&2
+  exit 127
+fi
+if ! ss -ltn | grep -q '127.0.0.1:6080'; then
+  nohup websockify --web="$web_dir" 127.0.0.1:6080 127.0.0.1:5900 >/tmp/crabbox-websockify.log 2>&1 &
+fi
+for i in 1 2 3 4 5; do
+  if ss -ltn | grep -q '127.0.0.1:6080'; then
+    exit 0
+  fi
+  sleep 1
+done
+cat /tmp/crabbox-websockify.log >&2 || true
+exit 1`
+}
+
+func localContainerWebVNCResetRemoteCommand() string {
+	return `set -eu
+pkill -f 'websockify.*127.0.0.1:6080' >/dev/null 2>&1 || true
+if [ -x /usr/local/bin/crabbox-start-desktop ]; then
+  sudo CRABBOX_SSH_USER="$(id -un)" /usr/local/bin/crabbox-start-desktop
+fi
+` + localContainerNoVNCRemoteCommand()
 }
 
 func webVNCReconnectDelay(attempt int) time.Duration {

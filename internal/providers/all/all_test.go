@@ -18,6 +18,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"gcp",
 		"hetzner",
 		"islo",
+		"local-container",
 		"modal",
 		"namespace-devbox",
 		"proxmox",
