@@ -236,6 +236,7 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		"run", "-d",
 		"--name", name,
 		"--hostname", name,
+		"--user", "root",
 		"--network", cfg.LocalContainer.Network,
 		"-p", "127.0.0.1::" + sshPort,
 		"-e", "CRABBOX_AUTHORIZED_KEY=" + publicKey,
@@ -571,29 +572,33 @@ ssh_port="${CRABBOX_SSH_PORT:-2222}"
 if ! id "$user" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$user"
 fi
-mkdir -p /run/sshd "$work_root" "/home/$user/.ssh"
-printf '%s\n' "$CRABBOX_AUTHORIZED_KEY" > "/home/$user/.ssh/authorized_keys"
-chmod 700 "/home/$user/.ssh"
-chmod 600 "/home/$user/.ssh/authorized_keys"
-chown -R "$user:$user" "/home/$user/.ssh" "$work_root"
+home_dir="$(getent passwd "$user" | cut -d: -f6)"
+if [ -z "$home_dir" ]; then
+  home_dir="/home/$user"
+fi
+mkdir -p /run/sshd "$work_root" "$home_dir/.ssh"
+printf '%s\n' "$CRABBOX_AUTHORIZED_KEY" > "$home_dir/.ssh/authorized_keys"
+chmod 700 "$home_dir/.ssh"
+chmod 600 "$home_dir/.ssh/authorized_keys"
+chown -R "$user" "$home_dir/.ssh" "$work_root"
 if command -v sudo >/dev/null 2>&1; then
   printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$user" > /etc/sudoers.d/crabbox
   chmod 440 /etc/sudoers.d/crabbox
 fi
 if [ "${CRABBOX_DESKTOP:-0}" = "1" ]; then
-  install -d -m 0750 -o "$user" -g "$user" /var/lib/crabbox
+  install -d -m 0750 -o "$user" /var/lib/crabbox
   if [ ! -s /var/lib/crabbox/vnc.password ]; then
     (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
   fi
   x11vnc -storepasswd "$(cat /var/lib/crabbox/vnc.password)" /var/lib/crabbox/vnc.pass >/dev/null
-  chown "$user:$user" /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
+  chown "$user" /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
   chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
   cat >/usr/local/bin/crabbox-start-desktop <<'DESKTOP'
 #!/bin/sh
 set -eu
 user="${CRABBOX_SSH_USER:-crabbox}"
 runtime="/tmp/crabbox-runtime-$user"
-install -d -m 0700 -o "$user" -g "$user" "$runtime"
+install -d -m 0700 -o "$user" "$runtime"
 if ! pgrep -u "$user" -f 'Xvfb :99' >/dev/null 2>&1; then
   su "$user" -s /bin/sh -c "XDG_RUNTIME_DIR='$runtime' Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac >/tmp/crabbox-xvfb.log 2>&1 &"
 fi
@@ -638,7 +643,7 @@ if [ "${CRABBOX_BROWSER:-0}" = "1" ]; then
   chmod 0755 "$browser_wrapper"
   install -d -m 0755 /var/lib/crabbox
   printf 'CHROME_BIN=%s\nBROWSER=%s\n' "$browser_wrapper" "$browser_wrapper" > /var/lib/crabbox/browser.env
-  chown "$user:$user" /var/lib/crabbox/browser.env
+  chown "$user" /var/lib/crabbox/browser.env
   chmod 0644 /var/lib/crabbox/browser.env
 fi
 exec /usr/sbin/sshd -D -e -p "$ssh_port"

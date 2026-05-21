@@ -88,6 +88,7 @@ func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
 	for _, want := range []string{
 		"run",
 		"--name\ncrabbox-blue",
+		"--user\nroot",
 		"--network\nbridge",
 		"-p\n127.0.0.1::2222",
 		"-e\nCRABBOX_SSH_USER=runner",
@@ -107,6 +108,18 @@ func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
 	} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("docker run args missing %q:\n%s", want, args)
+		}
+	}
+}
+
+func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
+	for _, want := range []string{
+		`home_dir="$(getent passwd "$user" | cut -d: -f6)"`,
+		`"$home_dir/.ssh/authorized_keys"`,
+		`chown -R "$user" "$home_dir/.ssh" "$work_root"`,
+	} {
+		if !strings.Contains(bootstrapScript, want) {
+			t.Fatalf("bootstrap script missing %q", want)
 		}
 	}
 }
