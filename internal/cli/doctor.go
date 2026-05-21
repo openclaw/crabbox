@@ -81,6 +81,12 @@ func (a App) doctor(ctx context.Context, args []string) error {
 			}
 			record(status, "crew", message, details)
 		}
+		if status, message, details := a.doctorCrewMeshSummary(ctx, cfg); status != "" {
+			if status == "failed" {
+				ok = false
+			}
+			record(status, "crew-mesh", message, details)
+		}
 		if *jsonOut {
 			if err := json.NewEncoder(a.Stdout).Encode(doctorJSONOutput{OK: ok, Provider: cfg.Provider, Checks: checks}); err != nil {
 				return err

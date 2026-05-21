@@ -31,6 +31,13 @@ The command returns a stable `cbx_...` lease ID and a friendly slug. Reuse eithe
 Use `--slug <slug>` to request a human-chosen slug for a new lease. Crabbox
 normalizes it and may add a suffix when an active lease already uses it.
 
+Use `--expose <port>` (repeatable; accepts comma-separated lists) to declare
+a TCP port this lease wants reachable through the operator-side SSH-mesh
+plane. Crabbox writes the normalized port list into a reserved provider label
+so `crabbox crew connect <name>` can later open local `ssh -L` tunnels from
+the operator's machine to each declared port. See
+[`docs/features/crew-ssh-mesh.md`](../features/crew-ssh-mesh.md).
+
 Use `--crew <name>` to tag a new lease into a named crew. The crew name is
 stored on the lease as a reserved provider label, and `crabbox list --crew
 <name>` filters by it. When combined with `--tailscale` on a Tailscale-capable
@@ -138,6 +145,7 @@ Flags:
 --market spot|on-demand
 --slug <slug>
 --crew <name>
+--expose <port>
 --ttl <duration>
 --idle-timeout <duration>
 --desktop

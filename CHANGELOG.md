@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `crabbox crew connect <name>` and `--expose <port>` on `crabbox run`/`warmup` for an operator-orchestrated SSH-mesh plane. `connect` opens local `ssh -L` tunnels from the operator's machine to every crew member's declared expose port and writes `~/.crabbox/crew/<name>/{hosts,env}` so the operator can dial peers as `127.0.0.1:<local-port>`. `crabbox doctor --crew <name>` adds a `crew-mesh` sub-check that counts members and exposed ports. Works on every SSH-accessible provider; no Tailscale, no Headscale, no relay required. See `docs/features/crew-ssh-mesh.md`.
 - Added `provider: runpod` for RunPod public TCP SSH leases through the RunPod REST API, including Crabbox sync/run, `crabbox ssh`, `crabbox doctor`, and provider docs. Thanks @zozo123.
 - Added a thin macOS developer-tools image mint wrapper that keeps paid host allocation explicit while wiring the reusable prep script, promotion, checkpoint proof, and lifecycle evidence defaults.
 - Added AWS Linux and Windows developer-image prep scripts plus a guarded mint wrapper for baking Docker, Node 24, pnpm, GitHub CLI, and common developer tooling into fast-booting Crabbox AMIs.

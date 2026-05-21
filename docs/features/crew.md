@@ -72,6 +72,11 @@ namespace-devbox), the crew label still sticks for `list --crew`, but the
 networking plane is unavailable. `crabbox doctor --crew <name>` flags this with
 `skip crew provider=<name> does not support the Tailscale plane`.
 
+For SSH-accessible providers without a Tailscale plane, the operator-side
+SSH-mesh plane gives an equivalent dial path: see
+[`docs/features/crew-ssh-mesh.md`](crew-ssh-mesh.md) for `--expose <port>` on
+`run`/`warmup` and `crabbox crew connect <name>`.
+
 ## Example: two-lease web server demo
 
 End-to-end smoke that proves a crew is wired up. Each terminal runs from the

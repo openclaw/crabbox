@@ -52,6 +52,7 @@ type crabboxKongCLI struct {
 	Cleanup    cleanupKongCmd    `cmd:"" passthrough:"" help:"Sweep expired direct-provider machines or local provider state."`
 	Azure      azureKongCmd      `cmd:"" help:"Azure provider setup and login."`
 	Config     configKongCmd     `cmd:"" help:"Show or update user config."`
+	Crew       crewKongCmd       `cmd:"" help:"Operator-side SSH-mesh against a crew."`
 	Pool       poolKongCmd       `cmd:"" help:"Alias commands for machine pools."`
 	Machine    machineKongCmd    `cmd:"" help:"Alias commands for direct-provider machines."`
 }
@@ -445,6 +446,14 @@ type configSetBrokerKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 
+type crewKongCmd struct {
+	Connect crewConnectKongCmd `cmd:"" passthrough:"" help:"Open SSH -L forwards to every crew member that declared --expose ports."`
+}
+
+type crewConnectKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+
 type poolKongCmd struct {
 	List poolListKongCmd `cmd:"" passthrough:"" help:"Alias for list."`
 }
@@ -493,6 +502,9 @@ func (c *inspectKongCmd) Run(ctx context.Context, app App) error { return app.in
 func (c *stopKongCmd) Run(ctx context.Context, app App) error    { return app.stop(ctx, c.Args) }
 func (c *releaseKongCmd) Run(ctx context.Context, app App) error { return app.stop(ctx, c.Args) }
 func (c *cleanupKongCmd) Run(ctx context.Context, app App) error { return app.cleanup(ctx, c.Args) }
+func (c *crewConnectKongCmd) Run(ctx context.Context, app App) error {
+	return app.crewConnect(ctx, c.Args)
+}
 
 func (c *desktopLaunchKongCmd) Run(ctx context.Context, app App) error {
 	return app.desktopLaunch(ctx, c.Args)

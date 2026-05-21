@@ -17,6 +17,7 @@ type leaseCreateFlagValues struct {
 	Market        *string
 	Slug          *string
 	Crew          *string
+	Expose        *stringListFlag
 	TTL           *time.Duration
 	Idle          *time.Duration
 	Desktop       *bool
@@ -28,6 +29,8 @@ type leaseCreateFlagValues struct {
 }
 
 func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlagValues {
+	expose := stringListFlag{}
+	fs.Var(&expose, "expose", "declare a TCP port this lease wants reachable over the SSH-mesh plane; repeatable")
 	return leaseCreateFlagValues{
 		Provider:      fs.String("provider", defaults.Provider, providerHelpAll()),
 		Profile:       fs.String("profile", defaults.Profile, "profile"),
@@ -36,6 +39,7 @@ func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlag
 		Market:        fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand"),
 		Slug:          fs.String("slug", "", "request a friendly slug for a new lease"),
 		Crew:          fs.String("crew", defaults.Crew, "tag this lease with a crew name so peers can be selected with --crew"),
+		Expose:        &expose,
 		TTL:           fs.Duration("ttl", defaults.TTL, "maximum lease lifetime"),
 		Idle:          fs.Duration("idle-timeout", defaults.IdleTimeout, "idle timeout"),
 		Desktop:       fs.Bool("desktop", defaults.Desktop, "provision or require a visible desktop/VNC session"),
@@ -61,6 +65,13 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 			return err
 		}
 		cfg.Crew = crew
+	}
+	if values.Expose != nil && len(*values.Expose) > 0 {
+		ports, err := requestedExposedPorts(*values.Expose)
+		if err != nil {
+			return err
+		}
+		cfg.ExposedPorts = ports
 	}
 	applyCapabilityFlags(cfg, *values.Desktop, *values.Browser, *values.Code)
 	if err := applyTargetFlagOverrides(cfg, fs, values.Target); err != nil {

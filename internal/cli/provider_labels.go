@@ -35,6 +35,9 @@ func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 	if crew := normalizeCrewName(cfg.Crew); crew != "" {
 		labels[crewLabelKey] = crew
 	}
+	if rendered := renderExposedPortsLabel(cfg.ExposedPorts); rendered != "" {
+		labels[crewExposedPortsLabelKey] = rendered
+	}
 	if cfg.TargetOS == targetWindows {
 		labels["windows_mode"] = cfg.WindowsMode
 	}

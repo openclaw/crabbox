@@ -206,6 +206,13 @@ also advertises a `tag:cbx-crew-<owner>-<name>` ACL tag and cloud-init keeps
 peers reach each other as `<slug>.cbx`. See
 [`docs/features/crew.md`](../features/crew.md).
 
+Use `--expose <port>` (repeatable; accepts comma-separated lists) to declare a
+TCP port this lease wants reachable through the operator-side SSH-mesh plane.
+Crabbox writes the normalized port list into a reserved provider label so
+`crabbox crew connect <name>` can later open local `ssh -L` tunnels from the
+operator's machine to each declared port. See
+[`docs/features/crew-ssh-mesh.md`](../features/crew-ssh-mesh.md).
+
 Use `--capture-stdout <path>` when stdout is binary or terminal-hostile. Crabbox
 writes the remote stdout bytes directly to the local file, leaves stderr on the
 terminal, and skips stdout run-log/event capture. This is useful for Windows
@@ -317,6 +324,7 @@ Flags:
 --market spot|on-demand
 --slug <slug>
 --crew <name>
+--expose <port>
 --ttl <duration>
 --idle-timeout <duration>
 --desktop

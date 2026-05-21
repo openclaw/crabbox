@@ -24,6 +24,7 @@ type Config struct {
 	Network             NetworkMode
 	Class               string
 	Crew                string
+	ExposedPorts        []string
 	ServerType          string
 	ServerTypeExplicit  bool
 	Coordinator         string

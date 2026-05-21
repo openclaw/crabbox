@@ -15,6 +15,54 @@ import (
 // doctor command stays responsive even when the user's tailnet is degraded.
 const doctorCrewTimeout = 4 * time.Second
 
+// doctorCrewMeshTimeout bounds the provider List call the SSH-mesh sub-check
+// makes when verifying how many crew members have declared --expose ports.
+// Kept short so doctor stays responsive even when a provider inventory is
+// slow.
+const doctorCrewMeshTimeout = 8 * time.Second
+
+// doctorCrewMeshSummary reports the operator-side SSH-mesh plane readiness
+// for the selected crew. It runs alongside the Tailscale plane sub-check
+// (doctorCrewSummary) — the two planes are complementary, so doctor surfaces
+// both. Returns ("","",nil) when no crew is selected or no SSH-lease backend
+// is available, mirroring the discipline of every other doctor sub-check.
+func (a App) doctorCrewMeshSummary(ctx context.Context, cfg Config) (string, string, map[string]string) {
+	crew := normalizeCrewName(cfg.Crew)
+	if crew == "" {
+		return "", "", nil
+	}
+	backend, err := loadBackend(cfg, runtimeForApp(a))
+	if err != nil {
+		return "skip", fmt.Sprintf("crew %q: SSH-mesh plane unavailable: %v", crew, err), map[string]string{"crew": crew, "plane": "ssh-mesh", "reason": "backend_unavailable"}
+	}
+	sshBackend, ok := backend.(SSHLeaseBackend)
+	if !ok {
+		return "skip", fmt.Sprintf("crew %q: provider %s does not expose SSH leases; SSH-mesh plane unavailable", crew, backend.Spec().Name), map[string]string{"crew": crew, "plane": "ssh-mesh", "provider": backend.Spec().Name, "reason": "provider_not_ssh_capable"}
+	}
+	listCtx, cancel := context.WithTimeout(ctx, doctorCrewMeshTimeout)
+	defer cancel()
+	servers, err := sshBackend.List(listCtx, ListRequest{Options: leaseOptionsFromConfig(cfg)})
+	if err != nil {
+		return "skip", fmt.Sprintf("crew %q: SSH-mesh inventory failed: %v", crew, err), map[string]string{"crew": crew, "plane": "ssh-mesh", "reason": "list_failed", "error": err.Error()}
+	}
+	members := filterServersByCrew(servers, crew)
+	memberCount, exposedCount, totalPorts := crewMeshDoctorCounts(members)
+	details := map[string]string{
+		"crew":            crew,
+		"plane":           "ssh-mesh",
+		"members":         fmt.Sprintf("%d", memberCount),
+		"members_exposed": fmt.Sprintf("%d", exposedCount),
+		"exposed_ports":   fmt.Sprintf("%d", totalPorts),
+	}
+	if memberCount == 0 {
+		return "skip", fmt.Sprintf("crew %q: no active members; SSH-mesh has nothing to forward", crew), details
+	}
+	if exposedCount == 0 {
+		return "skip", fmt.Sprintf("crew %q: %d members but none declared --expose; SSH-mesh has nothing to forward", crew, memberCount), details
+	}
+	return "ok", fmt.Sprintf("crew %q: SSH-mesh ready (%d/%d members exposing %d ports)", crew, exposedCount, memberCount, totalPorts), details
+}
+
 // doctorTailscaleACLClient is satisfied by anything that can return the raw
 // policy document for the user's tailnet. The real implementation hits the
 // Tailscale API; tests inject a stub so unit tests never reach the network.
