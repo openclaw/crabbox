@@ -2301,6 +2301,8 @@ if command -v apt-get >/dev/null 2>&1 && grep -qi microsoft /proc/version 2>/dev
   sudo apt-get update >/tmp/crabbox-actions-runner-apt-update.log 2>&1
 fi
 sudo ./bin/installdependencies.sh >/tmp/crabbox-actions-runner-deps.log 2>&1 || true
+sudo mkdir -p "$HOME/.cache/node/corepack/v1"
+sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache" 2>/dev/null || true
 ./config.sh --unattended --replace %s --url "https://github.com/${RUNNER_REPO}" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS"
 cat >"$HOME/actions-runner/run-crabbox.sh" <<'RUNNER'
 #!/usr/bin/env bash

@@ -147,6 +147,8 @@ func TestGitHubActionsRunnerInstallScriptUsesOfficialRunner(t *testing.T) {
 		"grep -qi microsoft /proc/version",
 		"sudo rm -rf /var/lib/apt/lists/*",
 		"sudo apt-get update >/tmp/crabbox-actions-runner-apt-update.log",
+		"sudo mkdir -p \"$HOME/.cache/node/corepack/v1\"",
+		"sudo chown -R \"$(id -u):$(id -g)\" \"$HOME/.cache\"",
 		"./config.sh --unattended --replace --ephemeral",
 		"crabbox-actions-runner.service",
 	} {
