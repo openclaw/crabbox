@@ -15,6 +15,7 @@
 - Fixed `crabbox cleanup --provider docker` support for stale local-container leases.
 - Fixed `provider: docker` stop/release cleanup so host-visible per-lease work directories created for Docker socket pass-through are removed with the lease.
 - Fixed local Actions hydration for repo-local composite actions, cache no-ops, simple input conditions, safe `hashFiles`, secret-expression rejection, and Node 24.x setup on minimal Debian images.
+- Fixed Parallels linked-clone provisioning to require an explicit source snapshot so `prlctl` cannot create a template-side linked-clone snapshot implicitly.
 
 ## 0.17.0 - 2026-05-21
 
