@@ -440,6 +440,168 @@ runs:
 	}
 }
 
+func TestLocalActionsHydrateScriptTracksCompositeRunStepOutputs(t *testing.T) {
+	root := t.TempDir()
+	actionDir := filepath.Join(root, ".github", "actions", "pnpm-cache")
+	if err := os.MkdirAll(actionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	action := []byte(`name: pnpm cache
+inputs:
+  use-actions-cache:
+    default: "true"
+outputs:
+  cache-enabled:
+    value: ${{ steps.config.outputs.enabled }}
+  primary-key:
+    value: ${{ steps.config.outputs.primary-key }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve cache keys
+      id: config
+      shell: bash
+      env:
+        CACHE_KEY_SUFFIX: node24-pnpm11
+      run: |
+        echo "enabled=$INPUT_USE_ACTIONS_CACHE" >> "$GITHUB_OUTPUT"
+        echo "primary-key=${RUNNER_OS}-pnpm-store-${CACHE_KEY_SUFFIX}" >> "$GITHUB_OUTPUT"
+`)
+	if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), action, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	job := localHydrateJob{Steps: []localHydrateStep{
+		{ID: "cache", Uses: "./.github/actions/pnpm-cache"},
+		{If: "steps.cache.outputs.cache-enabled == 'true'", Run: "echo cache is enabled"},
+		{Run: "echo ${{ steps.cache.outputs.primary-key }}"},
+	}}
+	got, err := localActionsHydrateScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`echo "enabled=$INPUT_USE_ACTIONS_CACHE" >> "$GITHUB_OUTPUT"`,
+		"echo cache is enabled",
+		"echo Linux-pnpm-store-node24-pnpm11",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("local composite run output script missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "${{") {
+		t.Fatalf("local composite run output script kept unresolved content:\n%s", got)
+	}
+}
+
+func TestLocalActionsHydrateScriptRejectsDynamicCompositeRunStepOutputs(t *testing.T) {
+	root := t.TempDir()
+	actionDir := filepath.Join(root, ".github", "actions", "dynamic-output")
+	if err := os.MkdirAll(actionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	action := []byte(`name: dynamic output
+outputs:
+  value:
+    value: ${{ steps.config.outputs.value }}
+runs:
+  using: composite
+  steps:
+    - id: config
+      shell: bash
+      run: |
+        value=computed-at-runtime
+        echo "value=$value" >> "$GITHUB_OUTPUT"
+`)
+	if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), action, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	job := localHydrateJob{Steps: []localHydrateStep{
+		{ID: "dynamic", Uses: "./.github/actions/dynamic-output"},
+		{Run: "echo ${{ steps.dynamic.outputs.value }}"},
+	}}
+	_, err := localActionsHydrateScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	if err == nil || !strings.Contains(err.Error(), "--github-runner") {
+		t.Fatalf("dynamic composite output should require GitHub fallback: %v", err)
+	}
+}
+
+func TestLocalActionsHydrateScriptRejectsConditionalCompositeRunStepOutputs(t *testing.T) {
+	root := t.TempDir()
+	actionDir := filepath.Join(root, ".github", "actions", "conditional-output")
+	if err := os.MkdirAll(actionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	action := []byte(`name: conditional output
+outputs:
+  enabled:
+    value: ${{ steps.config.outputs.enabled }}
+runs:
+  using: composite
+  steps:
+    - id: config
+      shell: bash
+      run: |
+        if [ "$INPUT_ENABLED" = true ]; then
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+        fi
+`)
+	if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), action, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	job := localHydrateJob{Steps: []localHydrateStep{
+		{ID: "conditional", Uses: "./.github/actions/conditional-output"},
+		{If: "steps.conditional.outputs.enabled == 'true'", Run: "echo enabled"},
+	}}
+	_, err := localActionsHydrateScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	if err == nil || !strings.Contains(err.Error(), "--github-runner") {
+		t.Fatalf("conditional composite output should require GitHub fallback: %v", err)
+	}
+}
+
+func TestInferLocalRunStepOutputsPreservesSingleQuotedPayload(t *testing.T) {
+	got := inferLocalRunStepOutputs(`echo 'value=$FOO' >> "$GITHUB_OUTPUT"`, map[string]string{"FOO": "expanded"})
+	if got["value"] != "$FOO" {
+		t.Fatalf("single-quoted output expanded unexpectedly: %#v", got)
+	}
+}
+
+func TestInferLocalRunStepOutputsRejectsParameterExpansion(t *testing.T) {
+	got := inferLocalRunStepOutputs(`echo "value=${FOO:-fallback}" >> "$GITHUB_OUTPUT"`, map[string]string{"FOO": "expanded"})
+	if len(got) != 0 {
+		t.Fatalf("parameter expansion inferred unexpectedly: %#v", got)
+	}
+}
+
+func TestInferLocalRunStepOutputsRejectsEscapedDollar(t *testing.T) {
+	got := inferLocalRunStepOutputs(`echo "value=\$FOO" >> "$GITHUB_OUTPUT"`, map[string]string{"FOO": "expanded"})
+	if len(got) != 0 {
+		t.Fatalf("escaped dollar inferred unexpectedly: %#v", got)
+	}
+}
+
+func TestInferLocalRunStepOutputsRejectsUnmodeledOverwrite(t *testing.T) {
+	got := inferLocalRunStepOutputs(`echo "enabled=false" >> "$GITHUB_OUTPUT"
+echo "enabled=$RUNTIME_VALUE" >> "$GITHUB_OUTPUT"`, nil)
+	if len(got) != 0 {
+		t.Fatalf("unmodeled overwrite inferred unexpectedly: %#v", got)
+	}
+}
+
+func TestLocalActionsHydrateScriptAllowsEmptySecrets(t *testing.T) {
+	job := localHydrateJob{Env: map[string]string{
+		"OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
+	}, Steps: []localHydrateStep{
+		{Run: "test -z \"$OPENAI_API_KEY\""},
+	}}
+	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "export OPENAI_API_KEY=''") || strings.Contains(got, "${{") {
+		t.Fatalf("local hydrate script did not empty secret expression:\n%s", got)
+	}
+}
+
 func TestLocalActionsHydrateScriptRejectsUnknownStepOutputs(t *testing.T) {
 	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{
@@ -705,12 +867,24 @@ func TestLocalActionsHydrateScriptRejectsEnvIf(t *testing.T) {
 	}
 }
 
-func TestLocalActionsHydrateScriptRejectsSecretsExpressions(t *testing.T) {
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+func TestLocalActionsHydrateScriptEmptiesSecretsExpressions(t *testing.T) {
+	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{{Run: "echo '${{ secrets.NPM_TOKEN }}' '${{ secrets.MISSING_TOKEN }}'"}},
 	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
-	if err == nil {
-		t.Fatal("secret expression accepted")
+	if err != nil {
+		t.Fatalf("secret expression should render empty locally: %v", err)
+	}
+	if strings.Contains(got, "${{") || !strings.Contains(got, "echo '' ''") {
+		t.Fatalf("local hydrate script did not empty secret expressions:\n%s", got)
+	}
+}
+
+func TestLocalActionsHydrateScriptRejectsComplexSecretsExpressions(t *testing.T) {
+	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+		Steps: []localHydrateStep{{Run: "echo '${{ secrets.NPM_TOKEN != '' }}'"}},
+	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	if err == nil || !strings.Contains(err.Error(), "--github-runner") {
+		t.Fatalf("complex secret expression should require GitHub fallback: %v", err)
 	}
 }
 

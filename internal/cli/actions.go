@@ -721,7 +721,9 @@ func localActionsHydrateScript(cfg Config, repo Repo, workflow localHydrateWorkf
 	}
 	b.WriteString("mkdir -p \"$RUNNER_TEMP\" \"$RUNNER_TOOL_CACHE\"\n")
 	for key, value := range inputs {
-		fmt.Fprintf(&b, "export INPUT_%s=%s\n", actionInputEnvName(key), shellQuote(value))
+		envName := "INPUT_" + actionInputEnvName(key)
+		env[envName] = value
+		fmt.Fprintf(&b, "export %s=%s\n", envName, shellQuote(value))
 	}
 	b.WriteString(localActionsRuntimeShell())
 	ctx := localHydrateScriptContext{
@@ -812,6 +814,11 @@ func appendLocalHydrateSteps(b *strings.Builder, steps []localHydrateStep, ctx l
 			if err := appendLocalHydrateRunStep(b, shellName, wd, run); err != nil {
 				return err
 			}
+			if step.ID != "" {
+				if outputs := inferLocalRunStepOutputs(run, stepEnv); len(outputs) > 0 {
+					ctx.StepOutputs[step.ID] = outputs
+				}
+			}
 		}
 		for _, key := range sortedKeys(step.Env) {
 			fmt.Fprintf(b, "__crabbox_restore_step_env %s\n", shellQuote(key))
@@ -893,6 +900,9 @@ func interpolateLocalActionsValue(value string, inputs, env map[string]string, w
 			}
 			return ""
 		}
+		if localActionsDirectSecretPattern.MatchString(expr) {
+			return ""
+		}
 		if output, ok := localActionsStepOutput(expr, stepOutputs); ok {
 			return output
 		}
@@ -909,6 +919,7 @@ func interpolateLocalActionsValue(value string, inputs, env map[string]string, w
 }
 
 var localActionsExpressionPattern = regexp.MustCompile(`\$\{\{\s*([^}]+?)\s*\}\}`)
+var localActionsDirectSecretPattern = regexp.MustCompile(`^secrets\.[A-Za-z_][A-Za-z0-9_]*$`)
 
 func shouldSkipLocalHydrateStep(expr string, inputs, env map[string]string, stepOutputs map[string]map[string]string) (bool, error) {
 	expr = strings.TrimSpace(expr)
@@ -1084,6 +1095,7 @@ func localCompositeActionScript(step localHydrateStep, ctx localHydrateScriptCon
 	fmt.Fprintf(&b, "export GITHUB_ACTION_PATH=%s\n", shellQuote(actionTargetPath))
 	for _, name := range sortedKeys(inputs) {
 		envName := "INPUT_" + actionInputEnvName(name)
+		next.Env[envName] = inputs[name]
 		fmt.Fprintf(&b, "__crabbox_save_step_env %s\n", shellQuote(envName))
 		fmt.Fprintf(&b, "export %s=%s\n", envName, shellQuote(inputs[name]))
 	}
@@ -1379,6 +1391,84 @@ func localActionsStepOutput(expr string, stepOutputs map[string]map[string]strin
 		}
 	}
 	return "", false
+}
+
+var localRunStepOutputEchoPattern = regexp.MustCompile(`^echo\s+(?:"([^"]*)"|'([^']*)')\s*>>\s*"?\$GITHUB_OUTPUT"?\s*$`)
+var localShellVariablePattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
+
+func inferLocalRunStepOutputs(script string, env map[string]string) map[string]string {
+	outputs := map[string]string{}
+	for _, line := range strings.Split(script, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		match := localRunStepOutputEchoPattern.FindStringSubmatch(line)
+		if len(match) != 3 {
+			return nil
+		}
+		content := firstNonBlank(match[1], match[2])
+		singleQuoted := match[2] != ""
+		key, value, ok := strings.Cut(content, "=")
+		if !ok || !validLocalActionsOutputName(key) {
+			continue
+		}
+		if singleQuoted {
+			outputs[key] = value
+			continue
+		}
+		expanded, ok := expandLocalShellVariables(value, env)
+		if !ok {
+			return nil
+		}
+		outputs[key] = expanded
+	}
+	if len(outputs) == 0 {
+		return nil
+	}
+	return outputs
+}
+
+func validLocalActionsOutputName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r == '_', r == '-':
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func expandLocalShellVariables(value string, env map[string]string) (string, bool) {
+	if strings.Contains(value, `\$`) {
+		return "", false
+	}
+	ok := true
+	out := localShellVariablePattern.ReplaceAllStringFunc(value, func(match string) string {
+		parts := localShellVariablePattern.FindStringSubmatch(match)
+		for _, key := range parts[1:] {
+			if key != "" {
+				value, exists := env[key]
+				if !exists {
+					ok = false
+					return match
+				}
+				return value
+			}
+		}
+		return ""
+	})
+	if !ok || strings.Contains(out, "$") || strings.Contains(out, "`") {
+		return "", false
+	}
+	return out, true
 }
 
 func evalLocalActionsIf(expr string, inputs, env map[string]string, stepOutputs map[string]map[string]string) (bool, bool) {
