@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -160,7 +162,8 @@ func (b *backend) Doctor(ctx context.Context, req core.DoctorRequest) (core.Doct
 	if req.ProbeSSH {
 		probe = "requires_running_lease"
 	}
-	msg := fmt.Sprintf("cli=ready control_plane=local inventory=ready api=list mutation=false leases=%d runtime=%s context=%s ssh_probe=%s image=%s", len(containers), runtime, blank(contextName, "-"), probe, b.configForRun().LocalContainer.Image)
+	cfg := b.configForRun()
+	msg := fmt.Sprintf("cli=ready control_plane=local inventory=ready api=list mutation=false leases=%d runtime=%s context=%s ssh_probe=%s image=%s docker_socket=%v", len(containers), runtime, blank(contextName, "-"), probe, cfg.LocalContainer.Image, cfg.LocalContainer.DockerSocket)
 	return core.DoctorResult{Provider: providerName, Message: msg}, nil
 }
 
@@ -217,6 +220,9 @@ func applyDefaults(cfg *core.Config) {
 	if cfg.LocalContainer.User == "" {
 		cfg.LocalContainer.User = "crabbox"
 	}
+	if cfg.LocalContainer.DockerSocket && isDefaultWorkRoot(cfg.LocalContainer.WorkRoot) && isDefaultWorkRoot(cfg.WorkRoot) {
+		cfg.LocalContainer.WorkRoot = defaultDockerSocketWorkRoot()
+	}
 	if cfg.LocalContainer.WorkRoot == "" {
 		if !isDefaultWorkRoot(cfg.WorkRoot) {
 			cfg.LocalContainer.WorkRoot = cfg.WorkRoot
@@ -240,6 +246,7 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	labels["ssh_user"] = cfg.LocalContainer.User
 	labels["ssh_port"] = sshPort
 	labels["work_root"] = cfg.LocalContainer.WorkRoot
+	labels["docker_socket"] = boolEnv(cfg.LocalContainer.DockerSocket)
 	args := []string{
 		"run", "-d",
 		"--name", name,
@@ -253,6 +260,7 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		"-e", "CRABBOX_SSH_PORT=" + sshPort,
 		"-e", "CRABBOX_DESKTOP=" + boolEnv(cfg.Desktop),
 		"-e", "CRABBOX_BROWSER=" + boolEnv(cfg.Browser),
+		"-e", "CRABBOX_DOCKER_SOCKET=" + boolEnv(cfg.LocalContainer.DockerSocket),
 	}
 	for key, value := range labels {
 		args = append(args, "--label", key+"="+value)
@@ -262,6 +270,24 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	}
 	if memory := strings.TrimSpace(cfg.LocalContainer.Memory); memory != "" {
 		args = append(args, "--memory", memory)
+	}
+	if cfg.LocalContainer.DockerSocket {
+		if err := os.MkdirAll(cfg.LocalContainer.WorkRoot, 0o755); err != nil {
+			return "", core.Exit(2, "create local-container host work root %s: %v", cfg.LocalContainer.WorkRoot, err)
+		}
+		leaseWorkRoot := filepath.Join(cfg.LocalContainer.WorkRoot, leaseID)
+		if err := os.MkdirAll(leaseWorkRoot, 0o777); err != nil {
+			return "", core.Exit(2, "create local-container host lease work root %s: %v", leaseWorkRoot, err)
+		}
+		if err := os.Chmod(leaseWorkRoot, 0o777); err != nil {
+			return "", core.Exit(2, "make local-container host lease work root writable %s: %v", leaseWorkRoot, err)
+		}
+		args = append(args, "-v", cfg.LocalContainer.WorkRoot+":"+cfg.LocalContainer.WorkRoot)
+		socketPath, err := b.dockerSocketMountPath(ctx)
+		if err != nil {
+			return "", err
+		}
+		args = append(args, "-v", socketPath+":/var/run/docker.sock")
 	}
 	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "-lc", bootstrapScript)
 	result, err := b.docker(ctx, args, nil, b.rt.Stderr)
@@ -273,6 +299,70 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		return "", core.Exit(2, "%s run did not return a container id", cfg.LocalContainer.Runtime)
 	}
 	return id, nil
+}
+
+func (b *backend) dockerSocketMountPath(ctx context.Context) (string, error) {
+	if host := strings.TrimSpace(os.Getenv("DOCKER_HOST")); host != "" {
+		return dockerSocketMountPathFromHost(host)
+	}
+	if result, err := b.docker(ctx, []string{"context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"}, nil, nil); err == nil {
+		host := strings.TrimSpace(result.Stdout)
+		if host != "" && host != "<no value>" {
+			var decoded string
+			if err := json.Unmarshal([]byte(host), &decoded); err == nil {
+				host = decoded
+			}
+			return dockerSocketMountPathFromHost(host)
+		}
+	}
+	return validateDockerSocketMountPath("/var/run/docker.sock")
+}
+
+func dockerSocketMountPathFromHost(host string) (string, error) {
+	path, ok := localDockerSocketPath(host)
+	if !ok {
+		return "", core.Exit(2, "local-container docker socket requested but active Docker host %q is not a local Unix socket", host)
+	}
+	return validateDockerSocketMountPath(path)
+}
+
+func localDockerSocketPath(host string) (string, bool) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", false
+	}
+	if strings.HasPrefix(host, "/") {
+		return host, true
+	}
+	if strings.HasPrefix(host, "unix://") {
+		u, err := url.Parse(host)
+		if err == nil && u.Path != "" {
+			return u.Path, true
+		}
+		path := strings.TrimPrefix(host, "unix://")
+		if strings.HasPrefix(path, "/") {
+			return path, true
+		}
+	}
+	return "", false
+}
+
+func validateDockerSocketMountPath(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", core.Exit(2, "local-container docker socket requested but %s is not available: %v", path, err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return "", core.Exit(2, "local-container docker socket requested but %s is not a socket", path)
+	}
+	return path, nil
+}
+
+func defaultDockerSocketWorkRoot() string {
+	if cache, err := os.UserCacheDir(); err == nil && strings.TrimSpace(cache) != "" {
+		return filepath.Join(cache, "crabbox", "local-container-work")
+	}
+	return filepath.Join(os.TempDir(), "crabbox-local-container-work")
 }
 
 func (b *backend) prepareLease(ctx context.Context, cfg core.Config, container inspectContainer, leaseID, slug string, wait bool) (core.LeaseTarget, error) {
@@ -570,6 +660,14 @@ if [ "${CRABBOX_BROWSER:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
     apt-get install -y --no-install-recommends firefox || true
   fi
 fi
+if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y --no-install-recommends docker.io
+fi
+if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker >/dev/null 2>&1; then
+  echo "docker socket requested but docker CLI is not installed; use a Debian/Ubuntu-compatible image or preinstall docker" >&2
+  exit 127
+fi
 if ! command -v /usr/sbin/sshd >/dev/null 2>&1; then
   echo "missing /usr/sbin/sshd; use a Debian/Ubuntu-compatible image or a prebuilt Crabbox runner image" >&2
   exit 127
@@ -584,11 +682,28 @@ home_dir="$(getent passwd "$user" | cut -d: -f6)"
 if [ -z "$home_dir" ]; then
   home_dir="/home/$user"
 fi
+if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && [ -S /var/run/docker.sock ]; then
+  socket_gid="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)"
+  if [ -n "$socket_gid" ]; then
+    socket_group="$(getent group "$socket_gid" | cut -d: -f1 || true)"
+    if [ -z "$socket_group" ]; then
+      socket_group="crabbox-docker"
+      groupadd -g "$socket_gid" "$socket_group" 2>/dev/null || socket_group=""
+    fi
+    if [ -n "$socket_group" ]; then
+      usermod -aG "$socket_group" "$user" || true
+    fi
+  fi
+fi
 mkdir -p /run/sshd "$work_root" "$home_dir/.ssh"
 printf '%s\n' "$CRABBOX_AUTHORIZED_KEY" > "$home_dir/.ssh/authorized_keys"
 chmod 700 "$home_dir/.ssh"
 chmod 600 "$home_dir/.ssh/authorized_keys"
-chown -R "$user" "$home_dir/.ssh" "$work_root"
+if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ]; then
+  chown -R "$user" "$home_dir/.ssh"
+else
+  chown -R "$user" "$home_dir/.ssh" "$work_root"
+fi
 if command -v sudo >/dev/null 2>&1; then
   printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$user" > /etc/sudoers.d/crabbox
   chmod 440 /etc/sudoers.d/crabbox

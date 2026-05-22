@@ -296,12 +296,17 @@ localContainer:
   cpus: 0
   memory: ""
   network: bridge
+  dockerSocket: false
 ```
 
 `provider: docker`, `provider: container`, and `provider: local-docker` are
 aliases for `local-container`. The backend uses Docker-compatible CLI commands,
 so Docker Desktop, OrbStack, Colima, and similar local runtimes work when their
-Docker context is active.
+Docker context is active. Set `dockerSocket: true` only when commands inside the
+lease must use the host Docker daemon. Crabbox mounts the active local Unix
+Docker socket and rejects remote Docker contexts. With the socket enabled and no
+explicit work root, Crabbox chooses a host-visible cache work root so nested
+Docker bind mounts can see the synced checkout.
 
 Use `--desktop --browser` to bootstrap Xvfb, XFCE, x11vnc, noVNC/websockify,
 desktop input tools, screenshot tools, ffmpeg, and a packaged browser inside

@@ -342,13 +342,14 @@ type SpritesConfig struct {
 }
 
 type LocalContainerConfig struct {
-	Runtime  string
-	Image    string
-	User     string
-	WorkRoot string
-	CPUs     int
-	Memory   string
-	Network  string
+	Runtime      string
+	Image        string
+	User         string
+	WorkRoot     string
+	CPUs         int
+	Memory       string
+	Network      string
+	DockerSocket bool
 }
 
 type StaticConfig struct {
@@ -1072,13 +1073,14 @@ type fileSpritesConfig struct {
 }
 
 type fileLocalContainerConfig struct {
-	Runtime  string `yaml:"runtime,omitempty"`
-	Image    string `yaml:"image,omitempty"`
-	User     string `yaml:"user,omitempty"`
-	WorkRoot string `yaml:"workRoot,omitempty"`
-	CPUs     int    `yaml:"cpus,omitempty"`
-	Memory   string `yaml:"memory,omitempty"`
-	Network  string `yaml:"network,omitempty"`
+	Runtime      string `yaml:"runtime,omitempty"`
+	Image        string `yaml:"image,omitempty"`
+	User         string `yaml:"user,omitempty"`
+	WorkRoot     string `yaml:"workRoot,omitempty"`
+	CPUs         int    `yaml:"cpus,omitempty"`
+	Memory       string `yaml:"memory,omitempty"`
+	Network      string `yaml:"network,omitempty"`
+	DockerSocket *bool  `yaml:"dockerSocket,omitempty"`
 }
 
 type fileTailscaleConfig struct {
@@ -2032,6 +2034,9 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		if file.LocalContainer.Network != "" {
 			cfg.LocalContainer.Network = file.LocalContainer.Network
 		}
+		if file.LocalContainer.DockerSocket != nil {
+			cfg.LocalContainer.DockerSocket = *file.LocalContainer.DockerSocket
+		}
 	}
 	if file.Tailscale != nil {
 		if file.Tailscale.Enabled != nil {
@@ -2648,6 +2653,9 @@ func applyEnv(cfg *Config) {
 	cfg.LocalContainer.CPUs = getenvInt("CRABBOX_LOCAL_CONTAINER_CPUS", cfg.LocalContainer.CPUs)
 	cfg.LocalContainer.Memory = getenv("CRABBOX_LOCAL_CONTAINER_MEMORY", cfg.LocalContainer.Memory)
 	cfg.LocalContainer.Network = getenv("CRABBOX_LOCAL_CONTAINER_NETWORK", cfg.LocalContainer.Network)
+	if value, ok := getenvBool("CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET"); ok {
+		cfg.LocalContainer.DockerSocket = value
+	}
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value
 	}

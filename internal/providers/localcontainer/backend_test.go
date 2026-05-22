@@ -3,6 +3,7 @@ package localcontainer
 import (
 	"context"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,17 @@ func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (
 
 func commandKey(args []string) string {
 	return strings.Join(args, "\x00")
+}
+
+func recordedArgsForCommand(t *testing.T, runner *recordingRunner, command string) string {
+	t.Helper()
+	for i := len(runner.calls) - 1; i >= 0; i-- {
+		if len(runner.calls[i].Args) > 0 && runner.calls[i].Args[0] == command {
+			return strings.Join(runner.calls[i].Args, "\n")
+		}
+	}
+	t.Fatalf("%s command was not recorded: %#v", command, runner.calls)
+	return ""
 }
 
 func testBackend(runner *recordingRunner) *backend {
@@ -97,6 +109,7 @@ func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
 		"-e\nCRABBOX_WORK_ROOT=/workspace/crabbox",
 		"-e\nCRABBOX_DESKTOP=0",
 		"-e\nCRABBOX_BROWSER=0",
+		"-e\nCRABBOX_DOCKER_SOCKET=0",
 		"--cpus\n4",
 		"--memory\n8g",
 		"--label\nprovider=local-container",
@@ -112,13 +125,126 @@ func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
 			t.Fatalf("docker run args missing %q:\n%s", want, args)
 		}
 	}
+	if strings.Contains(args, "-v\n/var/run/docker.sock:/var/run/docker.sock") {
+		t.Fatalf("docker socket should be opt-in:\n%s", args)
+	}
+}
+
+func TestCreateContainerCanMountDockerSocket(t *testing.T) {
+	if _, err := os.Stat("/var/run/docker.sock"); err != nil {
+		t.Skipf("docker socket not available: %v", err)
+	}
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.DockerSocket = true
+	cfg.LocalContainer.WorkRoot = t.TempDir()
+	cfg.WorkRoot = cfg.LocalContainer.WorkRoot
+	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
+
+	_, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "run")
+	for _, want := range []string{
+		"--label\ndocker_socket=1",
+		"-e\nCRABBOX_DOCKER_SOCKET=1",
+		"-v\n" + cfg.LocalContainer.WorkRoot + ":" + cfg.LocalContainer.WorkRoot,
+		"-v\n/var/run/docker.sock:/var/run/docker.sock",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("docker socket run args missing %q:\n%s", want, args)
+		}
+	}
+}
+
+func TestCreateContainerMountsDockerHostUnixSocket(t *testing.T) {
+	socketDir, err := os.MkdirTemp("/tmp", "cbx-sock-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(socketDir)
+	socketPath := filepath.Join(socketDir, "docker.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	t.Setenv("DOCKER_HOST", "unix://"+socketPath)
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.DockerSocket = true
+	cfg.LocalContainer.WorkRoot = t.TempDir()
+	cfg.WorkRoot = cfg.LocalContainer.WorkRoot
+	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
+
+	_, err = b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "run")
+	if !strings.Contains(args, "-v\n"+socketPath+":/var/run/docker.sock") {
+		t.Fatalf("docker host socket was not mounted:\n%s", args)
+	}
+	leaseRoot := filepath.Join(cfg.LocalContainer.WorkRoot, "cbx_123")
+	info, err := os.Stat(leaseRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o777 {
+		t.Fatalf("lease work root mode=%#o want 0777", info.Mode().Perm())
+	}
+}
+
+func TestDockerSocketMountRejectsRemoteDockerHost(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	if _, err := b.dockerSocketMountPath(context.Background()); err == nil {
+		t.Fatal("remote docker host accepted")
+	}
+}
+
+func TestConfigForRunUsesHostVisibleWorkRootWithDockerSocket(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.LocalContainer.DockerSocket = true
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	got := b.configForRun()
+	if got.LocalContainer.WorkRoot == "/work/crabbox" || got.WorkRoot == "/work/crabbox" {
+		t.Fatalf("docker socket work root should be host-visible: %#v", got.LocalContainer)
+	}
+	if !strings.Contains(got.LocalContainer.WorkRoot, "crabbox") || got.WorkRoot != got.LocalContainer.WorkRoot {
+		t.Fatalf("unexpected docker socket work root: workRoot=%q local=%q", got.WorkRoot, got.LocalContainer.WorkRoot)
+	}
 }
 
 func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 	for _, want := range []string{
 		`home_dir="$(getent passwd "$user" | cut -d: -f6)"`,
 		`"$home_dir/.ssh/authorized_keys"`,
+		`if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ]; then`,
+		`chown -R "$user" "$home_dir/.ssh"`,
 		`chown -R "$user" "$home_dir/.ssh" "$work_root"`,
+	} {
+		if !strings.Contains(bootstrapScript, want) {
+			t.Fatalf("bootstrap script missing %q", want)
+		}
+	}
+}
+
+func TestBootstrapScriptSupportsDockerSocketCLI(t *testing.T) {
+	for _, want := range []string{
+		`[ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker`,
+		`apt-get install -y --no-install-recommends docker.io`,
+		`docker socket requested but docker CLI is not installed`,
+		`stat -c '%g' /var/run/docker.sock`,
+		`usermod -aG "$socket_group" "$user"`,
 	} {
 		if !strings.Contains(bootstrapScript, want) {
 			t.Fatalf("bootstrap script missing %q", want)

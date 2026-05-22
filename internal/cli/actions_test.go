@@ -338,6 +338,167 @@ func TestLocalActionsHydrateScriptTranslatesCoreSteps(t *testing.T) {
 	}
 }
 
+func TestLocalActionsHydrateScriptTracksCacheRestoreOutputs(t *testing.T) {
+	job := localHydrateJob{Steps: []localHydrateStep{
+		{ID: "deps", Uses: "actions/cache/restore@v5"},
+		{Name: "Install on miss", If: "steps.deps.outputs.cache-hit == 'false'", Run: "echo install"},
+		{Name: "Skip on hit", If: "steps.deps.outputs.cache-hit != 'false'", Run: "exit 99"},
+		{Name: "Report", Run: "echo ${{ steps.deps.outputs.cache-hit }}"},
+	}}
+	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"printf 'cache-hit=false\\ncache-matched-key=\\n' >> \"$GITHUB_OUTPUT\"",
+		"echo install",
+		"echo false",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("local hydrate script missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "exit 99") || strings.Contains(got, "${{ steps.deps.outputs.cache-hit }}") {
+		t.Fatalf("cache output condition or interpolation failed:\n%s", got)
+	}
+}
+
+func TestLocalActionsHydrateScriptExpandsLocalCompositeActions(t *testing.T) {
+	root := t.TempDir()
+	actionDir := filepath.Join(root, ".github", "actions", "setup-node-env")
+	if err := os.MkdirAll(actionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pnpm-lock.yaml"), []byte("lockfileVersion: '9.0'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	action := []byte(`name: Setup Node
+inputs:
+  node-version:
+    default: "24.x"
+  install-bun:
+    default: "true"
+outputs:
+  cache-hit:
+    value: ${{ steps.pnpm-cache-restore.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: ${{ inputs.node-version }}
+    - name: Cache restore
+      id: pnpm-cache-restore
+      if: inputs.install-bun == 'false'
+      uses: actions/cache/restore@v5
+      with:
+        key: ${{ hashFiles('pnpm-lock.yaml') }}
+    - name: Skipped Bun
+      if: inputs.install-bun == 'true'
+      run: exit 99
+      shell: bash
+    - name: Install
+      env:
+        NODE_VERSION: ${{ inputs.node-version }}
+        ACTION_SCRIPT: ${{ github.action_path }}/setup.sh
+      run: |
+        echo "$GITHUB_ACTION_PATH"
+        echo "$ACTION_SCRIPT"
+        echo "$NODE_VERSION"
+        printf 'NEXT=1\n' >> "$GITHUB_ENV"
+      shell: bash
+`)
+	if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), action, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	job := localHydrateJob{Steps: []localHydrateStep{
+		{ID: "setup", Uses: "./.github/actions/setup-node-env", With: map[string]string{"install-bun": "false"}},
+		{If: "steps.setup.outputs.cache-hit == 'false'", Run: "echo outer install"},
+	}}
+	got, err := localActionsHydrateScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, nil), "/work/cbx_123/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"export INPUT_NODE_VERSION='24.x'",
+		"__crabbox_setup_node '24'",
+		"printf 'cache-hit=false\\ncache-matched-key=\\n' >> \"$GITHUB_OUTPUT\"",
+		"export GITHUB_ACTION_PATH='/work/cbx_123/repo/.github/actions/setup-node-env'",
+		"export ACTION_SCRIPT='/work/cbx_123/repo/.github/actions/setup-node-env/setup.sh'",
+		"echo \"$GITHUB_ACTION_PATH\"",
+		"echo \"$NODE_VERSION\"",
+		"echo outer install",
+		"printf 'NEXT=1\\n' >> \"$GITHUB_ENV\"",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("local composite script missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "exit 99") || strings.Contains(got, "${{") {
+		t.Fatalf("local composite script kept skipped or unresolved content:\n%s", got)
+	}
+}
+
+func TestLocalActionsHydrateScriptRejectsUnknownStepOutputs(t *testing.T) {
+	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+		Steps: []localHydrateStep{
+			{ID: "build", Run: "printf 'artifact=app\\n' >> \"$GITHUB_OUTPUT\""},
+			{Run: "echo ${{ steps.build.outputs.artifact }}"},
+		},
+	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	if err == nil {
+		t.Fatal("runtime step output expression accepted")
+	}
+	if !strings.Contains(err.Error(), "steps.build.outputs.artifact") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLocalActionsHashFilesMatchesRecursiveGlobs(t *testing.T) {
+	root := t.TempDir()
+	for _, file := range []string{"pnpm-lock.yaml", filepath.Join("packages", "app", "pnpm-lock.yaml")} {
+		path := filepath.Join(root, file)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(file+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hash, ok := localActionsHashFiles("hashFiles('**/pnpm-lock.yaml')", root)
+	if !ok || hash == "" {
+		t.Fatalf("recursive hashFiles did not match: ok=%v hash=%q", ok, hash)
+	}
+	got, err := localActionsHydrateScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+		Steps: []localHydrateStep{{Run: "echo ${{ hashFiles('**/pnpm-lock.yaml') }}"}},
+	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "echo "+hash) {
+		t.Fatalf("recursive hash not interpolated:\n%s", got)
+	}
+}
+
+func TestLocalActionsHashFilesSkipsSymlinks(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "outside-lock.yaml")
+	if err := os.WriteFile(target, []byte("outside\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "pnpm-lock.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	hash, ok := localActionsHashFiles("hashFiles('pnpm-lock.yaml')", root)
+	if !ok {
+		t.Fatal("hashFiles expression was not handled")
+	}
+	if hash != "" {
+		t.Fatalf("symlink was hashed: %q", hash)
+	}
+}
+
 func TestLocalActionsHydrateScriptUsesFullGitHubRef(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Actions.Ref = "refs/tags/v1.2.3"
@@ -406,6 +567,20 @@ func TestLocalActionsHydrateScriptRejectsUnsupportedSetupNodeOptions(t *testing.
 	}
 	if !strings.Contains(err.Error(), "--github-runner") {
 		t.Fatalf("unsupported setup-node option error should suggest GitHub fallback: %v", err)
+	}
+}
+
+func TestLocalActionsHydrateScriptAllowsSetupNodeCheckLatest(t *testing.T) {
+	job := localHydrateJob{Steps: []localHydrateStep{{Uses: "actions/setup-node@v4", With: map[string]string{"node-version": "22", "check-latest": "true"}}}}
+	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, nil), "/work/cbx_123/repo")
+	if err != nil {
+		t.Fatalf("setup-node check-latest should be allowed: %v", err)
+	}
+	if !strings.Contains(got, "__crabbox_setup_node '22'") {
+		t.Fatalf("setup-node script missing version:\n%s", got)
+	}
+	if !strings.Contains(got, "xz-utils") {
+		t.Fatalf("setup-node script should ensure xz-utils:\n%s", got)
 	}
 }
 
@@ -518,9 +693,30 @@ func TestLocalActionsHydrateScriptRejectsUnsupportedIf(t *testing.T) {
 	}
 }
 
+func TestLocalActionsHydrateScriptRejectsEnvIf(t *testing.T) {
+	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+		Steps: []localHydrateStep{
+			{Run: "printf 'RUN_TESTS=true\\n' >> \"$GITHUB_ENV\""},
+			{If: "env.RUN_TESTS == 'true'", Run: "echo nope"},
+		},
+	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	if err == nil {
+		t.Fatal("env if expression accepted")
+	}
+}
+
+func TestLocalActionsHydrateScriptRejectsSecretsExpressions(t *testing.T) {
+	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+		Steps: []localHydrateStep{{Run: "echo '${{ secrets.NPM_TOKEN }}' '${{ secrets.MISSING_TOKEN }}'"}},
+	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	if err == nil {
+		t.Fatal("secret expression accepted")
+	}
+}
+
 func TestLocalActionsHydrateScriptRejectsUnsupportedExpression(t *testing.T) {
 	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
-		Steps: []localHydrateStep{{Run: "echo '${{ secrets.NPM_TOKEN }}'"}},
+		Steps: []localHydrateStep{{Run: "echo '${{ matrix.node }}'"}},
 	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err == nil {
 		t.Fatal("unsupported expression accepted")

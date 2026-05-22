@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/url"
@@ -105,6 +107,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	applyResolvedServerConfig(&cfg, server)
 	if err := claimLeaseForRepoConfig(leaseID, slug, cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 		return err
 	}
@@ -597,6 +600,29 @@ type localHydrateStep struct {
 	With             map[string]string `yaml:"with"`
 }
 
+type localCompositeAction struct {
+	Name    string                          `yaml:"name"`
+	Inputs  map[string]localCompositeInput  `yaml:"inputs"`
+	Outputs map[string]localCompositeOutput `yaml:"outputs"`
+	Runs    localCompositeRuns              `yaml:"runs"`
+}
+
+type localCompositeInput struct {
+	Description string `yaml:"description"`
+	Required    bool   `yaml:"required"`
+	Default     string `yaml:"default"`
+}
+
+type localCompositeOutput struct {
+	Description string `yaml:"description"`
+	Value       string `yaml:"value"`
+}
+
+type localCompositeRuns struct {
+	Using string             `yaml:"using"`
+	Steps []localHydrateStep `yaml:"steps"`
+}
+
 func readLocalHydrateWorkflow(path string) (localHydrateWorkflow, error) {
 	var workflow localHydrateWorkflow
 	data, err := os.ReadFile(path)
@@ -670,10 +696,10 @@ func localActionsHydrateScript(cfg Config, repo Repo, workflow localHydrateWorkf
 		"RUNNER_TOOL_CACHE":     runnerToolCache,
 		"CRABBOX_LOCAL_ACTIONS": "1",
 	}
-	if err := mergeInterpolatedEnv(env, workflow.Env, inputs, workdir); err != nil {
+	if err := mergeInterpolatedEnv(env, workflow.Env, inputs, workdir, repo.Root, nil); err != nil {
 		return "", err
 	}
-	if err := mergeInterpolatedEnv(env, job.Env, inputs, workdir); err != nil {
+	if err := mergeInterpolatedEnv(env, job.Env, inputs, workdir, repo.Root, nil); err != nil {
 		return "", err
 	}
 
@@ -687,7 +713,7 @@ func localActionsHydrateScript(cfg Config, repo Repo, workflow localHydrateWorkf
 	b.WriteString("  *) export RUNNER_ARCH=\"$(uname -m)\" ;;\n")
 	b.WriteString("esac\n")
 	for _, key := range sortedKeys(env) {
-		value, err := interpolateLocalActionsValue(env[key], inputs, env, workdir)
+		value, err := interpolateLocalActionsValue(env[key], inputs, env, workdir, repo.Root, nil)
 		if err != nil {
 			return "", err
 		}
@@ -698,10 +724,40 @@ func localActionsHydrateScript(cfg Config, repo Repo, workflow localHydrateWorkf
 		fmt.Fprintf(&b, "export INPUT_%s=%s\n", actionInputEnvName(key), shellQuote(value))
 	}
 	b.WriteString(localActionsRuntimeShell())
-	for i, step := range job.Steps {
-		skip, err := shouldSkipLocalHydrateStep(step.If)
+	ctx := localHydrateScriptContext{
+		RepoRoot:         repo.Root,
+		Workdir:          workdir,
+		Inputs:           inputs,
+		Env:              env,
+		WorkflowDefaults: workflow.Defaults,
+		JobDefaults:      job.Defaults,
+		StepOutputs:      map[string]map[string]string{},
+	}
+	if err := appendLocalHydrateSteps(&b, job.Steps, ctx); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+type localHydrateScriptContext struct {
+	RepoRoot         string
+	Workdir          string
+	Inputs           map[string]string
+	Env              map[string]string
+	WorkflowDefaults localHydrateDefaults
+	JobDefaults      localHydrateDefaults
+	StepOutputs      map[string]map[string]string
+	Depth            int
+}
+
+func appendLocalHydrateSteps(b *strings.Builder, steps []localHydrateStep, ctx localHydrateScriptContext) error {
+	if ctx.Depth > 8 {
+		return exit(2, "local Actions hydration composite action nesting is too deep")
+	}
+	for i, step := range steps {
+		skip, err := shouldSkipLocalHydrateStep(step.If, ctx.Inputs, ctx.Env, ctx.StepOutputs)
 		if err != nil {
-			return "", err
+			return err
 		}
 		if skip {
 			continue
@@ -710,56 +766,59 @@ func localActionsHydrateScript(cfg Config, repo Repo, workflow localHydrateWorkf
 		if label == "" {
 			label = firstNonBlank(step.Uses, fmt.Sprintf("step %d", i+1))
 		}
-		fmt.Fprintf(&b, "echo %s\n", shellQuote("local actions: "+label))
-		stepEnv := copyStringMap(env)
-		if err := mergeInterpolatedEnv(stepEnv, step.Env, inputs, workdir); err != nil {
-			return "", err
+		fmt.Fprintf(b, "echo %s\n", shellQuote("local actions: "+label))
+		stepEnv := copyStringMap(ctx.Env)
+		if err := mergeInterpolatedEnv(stepEnv, step.Env, ctx.Inputs, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs); err != nil {
+			return err
 		}
 		for _, key := range sortedKeys(step.Env) {
 			if !validShellEnvName(key) {
-				return "", exit(2, "local Actions hydration does not support env name %q", key)
+				return exit(2, "local Actions hydration does not support env name %q", key)
 			}
-			value, err := interpolateLocalActionsValue(stepEnv[key], inputs, stepEnv, workdir)
+			value, err := interpolateLocalActionsValue(stepEnv[key], ctx.Inputs, stepEnv, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs)
 			if err != nil {
-				return "", err
+				return err
 			}
-			fmt.Fprintf(&b, "__crabbox_save_step_env %s\n", shellQuote(key))
-			fmt.Fprintf(&b, "export %s=%s\n", key, shellQuote(value))
+			fmt.Fprintf(b, "__crabbox_save_step_env %s\n", shellQuote(key))
+			fmt.Fprintf(b, "export %s=%s\n", key, shellQuote(value))
 		}
 		b.WriteString("__crabbox_prepare_step_files\n")
 		if step.Uses != "" {
-			usesScript, err := localHydrateUsesScript(step, inputs, stepEnv, workdir)
+			usesScript, outputs, err := localHydrateUsesScript(step, ctx, stepEnv)
 			if err != nil {
-				return "", err
+				return err
 			}
 			b.WriteString(usesScript)
+			if step.ID != "" && len(outputs) > 0 {
+				ctx.StepOutputs[step.ID] = outputs
+			}
 		}
 		if step.Run != "" {
-			shellName := firstNonBlank(step.Shell, job.Defaults.Run.Shell, workflow.Defaults.Run.Shell, "bash")
-			wd := firstNonBlank(step.WorkingDirectory, job.Defaults.Run.WorkingDirectory, workflow.Defaults.Run.WorkingDirectory)
-			wd, err = interpolateLocalActionsValue(wd, inputs, stepEnv, workdir)
+			shellName := firstNonBlank(step.Shell, ctx.JobDefaults.Run.Shell, ctx.WorkflowDefaults.Run.Shell, "bash")
+			wd := firstNonBlank(step.WorkingDirectory, ctx.JobDefaults.Run.WorkingDirectory, ctx.WorkflowDefaults.Run.WorkingDirectory)
+			wd, err = interpolateLocalActionsValue(wd, ctx.Inputs, stepEnv, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs)
 			if err != nil {
-				return "", err
+				return err
 			}
 			if wd == "" {
-				wd = workdir
+				wd = ctx.Workdir
 			} else if !strings.HasPrefix(wd, "/") {
-				wd = path.Join(workdir, wd)
+				wd = path.Join(ctx.Workdir, wd)
 			}
-			run, err := interpolateLocalActionsValue(step.Run, inputs, stepEnv, workdir)
+			run, err := interpolateLocalActionsValue(step.Run, ctx.Inputs, stepEnv, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs)
 			if err != nil {
-				return "", err
+				return err
 			}
-			if err := appendLocalHydrateRunStep(&b, shellName, wd, run); err != nil {
-				return "", err
+			if err := appendLocalHydrateRunStep(b, shellName, wd, run); err != nil {
+				return err
 			}
 		}
 		for _, key := range sortedKeys(step.Env) {
-			fmt.Fprintf(&b, "__crabbox_restore_step_env %s\n", shellQuote(key))
+			fmt.Fprintf(b, "__crabbox_restore_step_env %s\n", shellQuote(key))
 		}
 		b.WriteString("__crabbox_apply_step_files\n")
 	}
-	return b.String(), nil
+	return nil
 }
 
 func fieldsMap(fields []string) (map[string]string, error) {
@@ -785,9 +844,9 @@ func repoSlugForActions(cfg Config, repo Repo) string {
 	return repo.Name + "/" + repo.Name
 }
 
-func mergeInterpolatedEnv(dst map[string]string, src map[string]string, inputs map[string]string, workdir string) error {
+func mergeInterpolatedEnv(dst map[string]string, src map[string]string, inputs map[string]string, workdir, repoRoot string, stepOutputs map[string]map[string]string) error {
 	for key, value := range src {
-		interpolated, err := interpolateLocalActionsValue(value, inputs, dst, workdir)
+		interpolated, err := interpolateLocalActionsValue(value, inputs, dst, workdir, repoRoot, stepOutputs)
 		if err != nil {
 			return err
 		}
@@ -796,7 +855,7 @@ func mergeInterpolatedEnv(dst map[string]string, src map[string]string, inputs m
 	return nil
 }
 
-func interpolateLocalActionsValue(value string, inputs, env map[string]string, workdir string) (string, error) {
+func interpolateLocalActionsValue(value string, inputs, env map[string]string, workdir, repoRoot string, stepOutputs map[string]map[string]string) (string, error) {
 	replacements := map[string]string{
 		"github.workspace":  workdir,
 		"github.ref":        env["GITHUB_REF"],
@@ -805,6 +864,9 @@ func interpolateLocalActionsValue(value string, inputs, env map[string]string, w
 		"github.run_id":     env["GITHUB_RUN_ID"],
 		"runner.temp":       env["RUNNER_TEMP"],
 		"runner.tool_cache": env["RUNNER_TOOL_CACHE"],
+	}
+	if actionPath := env["GITHUB_ACTION_PATH"]; actionPath != "" {
+		replacements["github.action_path"] = actionPath
 	}
 	var unsupported string
 	out := localActionsExpressionPattern.ReplaceAllStringFunc(value, func(match string) string {
@@ -815,6 +877,9 @@ func interpolateLocalActionsValue(value string, inputs, env map[string]string, w
 		expr := strings.TrimSpace(parts[1])
 		if replacement, ok := replacements[expr]; ok {
 			return replacement
+		}
+		if hash, ok := localActionsHashFiles(expr, repoRoot); ok {
+			return hash
 		}
 		if key, ok := strings.CutPrefix(expr, "inputs."); ok {
 			if input, ok := inputs[key]; ok {
@@ -828,6 +893,9 @@ func interpolateLocalActionsValue(value string, inputs, env map[string]string, w
 			}
 			return ""
 		}
+		if output, ok := localActionsStepOutput(expr, stepOutputs); ok {
+			return output
+		}
 		unsupported = expr
 		return match
 	})
@@ -840,9 +908,9 @@ func interpolateLocalActionsValue(value string, inputs, env map[string]string, w
 	return out, nil
 }
 
-var localActionsExpressionPattern = regexp.MustCompile(`\$\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}`)
+var localActionsExpressionPattern = regexp.MustCompile(`\$\{\{\s*([^}]+?)\s*\}\}`)
 
-func shouldSkipLocalHydrateStep(expr string) (bool, error) {
+func shouldSkipLocalHydrateStep(expr string, inputs, env map[string]string, stepOutputs map[string]map[string]string) (bool, error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
 		return false, nil
@@ -855,50 +923,61 @@ func shouldSkipLocalHydrateStep(expr string) (bool, error) {
 	case "false", "cancelled()", "failure()":
 		return true, nil
 	default:
+		result, ok := evalLocalActionsIf(expr, inputs, env, stepOutputs)
+		if ok {
+			return !result, nil
+		}
 		return false, exit(2, "local Actions hydration does not support if expression %q", expr)
 	}
 }
 
-func localHydrateUsesScript(step localHydrateStep, inputs, env map[string]string, workdir string) (string, error) {
+func localHydrateUsesScript(step localHydrateStep, ctx localHydrateScriptContext, env map[string]string) (string, map[string]string, error) {
 	uses := strings.ToLower(strings.TrimSpace(step.Uses))
 	switch {
 	case strings.HasPrefix(uses, "actions/checkout@"):
-		if err := validateLocalCheckoutStep(step, inputs, env, workdir); err != nil {
-			return "", err
+		if err := validateLocalCheckoutStep(step, ctx.Inputs, env, ctx.Workdir, ctx.RepoRoot); err != nil {
+			return "", nil, err
 		}
-		return "# actions/checkout handled by Crabbox sync/git seed\n", nil
+		return "# actions/checkout handled by Crabbox sync/git seed\n", nil, nil
 	case strings.HasPrefix(uses, "actions/setup-node@"):
-		if err := validateLocalActionWithKeys("actions/setup-node", step.With, "node-version", "node-version-file"); err != nil {
-			return "", err
+		if err := validateLocalActionWithKeys("actions/setup-node", step.With, "node-version", "node-version-file", "check-latest"); err != nil {
+			return "", nil, err
 		}
-		version, err := localHydrateWithInput(step, []string{"node-version", "node-version-file"}, "", inputs, env, workdir)
+		version, err := localHydrateWithInput(step, []string{"node-version", "node-version-file"}, "", ctx.Inputs, env, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
+		version = normalizeLocalNodeVersionSpec(version)
 		if strings.TrimSpace(step.With["node-version"]) != "" && !supportedLocalNodeVersionSpec(version) {
-			return "", exit(2, "local Actions hydration does not support actions/setup-node version %q; rerun with --github-runner when the workflow needs full GitHub Actions semantics", version)
+			return "", nil, exit(2, "local Actions hydration does not support actions/setup-node version %q; rerun with --github-runner when the workflow needs full GitHub Actions semantics", version)
 		}
-		return "__crabbox_setup_node " + shellQuote(version) + "\n", nil
+		return "__crabbox_setup_node " + shellQuote(version) + "\n", nil, nil
 	case strings.HasPrefix(uses, "actions/setup-go@"):
 		if err := validateLocalActionWithKeys("actions/setup-go", step.With, "go-version", "go-version-file"); err != nil {
-			return "", err
+			return "", nil, err
 		}
-		version, err := localHydrateWithInput(step, []string{"go-version", "go-version-file"}, "", inputs, env, workdir)
+		version, err := localHydrateWithInput(step, []string{"go-version", "go-version-file"}, "", ctx.Inputs, env, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
-		return "__crabbox_setup_go " + shellQuote(version) + "\n", nil
+		return "__crabbox_setup_go " + shellQuote(version) + "\n", nil, nil
 	case strings.HasPrefix(uses, "actions/setup-python@"):
 		if err := validateLocalActionWithKeys("actions/setup-python", step.With, "python-version", "python-version-file"); err != nil {
-			return "", err
+			return "", nil, err
 		}
-		version, err := localHydrateWithInput(step, []string{"python-version", "python-version-file"}, "", inputs, env, workdir)
+		version, err := localHydrateWithInput(step, []string{"python-version", "python-version-file"}, "", ctx.Inputs, env, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
-		return "__crabbox_setup_python " + shellQuote(version) + "\n", nil
+		return "__crabbox_setup_python " + shellQuote(version) + "\n", nil, nil
+	case strings.HasPrefix(uses, "actions/cache/restore@"):
+		return "printf 'cache-hit=false\\ncache-matched-key=\\n' >> \"$GITHUB_OUTPUT\"\n", map[string]string{"cache-hit": "false", "cache-matched-key": ""}, nil
+	case strings.HasPrefix(uses, "actions/cache/save@"):
+		return "# actions/cache/save skipped by local Actions hydration\n", nil, nil
+	case isLocalCompositeActionUse(step.Uses):
+		return localCompositeActionScript(step, ctx, env)
 	default:
-		return "", exit(2, "local Actions hydration does not support uses step %q", step.Uses)
+		return "", nil, exit(2, "local Actions hydration does not support uses step %q", step.Uses)
 	}
 }
 
@@ -919,7 +998,7 @@ func validateLocalActionWithKeys(action string, with map[string]string, allowed 
 	return nil
 }
 
-func localHydrateWithInput(step localHydrateStep, names []string, fallback string, inputs, env map[string]string, workdir string) (string, error) {
+func localHydrateWithInput(step localHydrateStep, names []string, fallback string, inputs, env map[string]string, workdir, repoRoot string, stepOutputs map[string]map[string]string) (string, error) {
 	value := fallback
 	for _, name := range names {
 		if raw := strings.TrimSpace(step.With[name]); raw != "" {
@@ -927,16 +1006,16 @@ func localHydrateWithInput(step localHydrateStep, names []string, fallback strin
 			break
 		}
 	}
-	return interpolateLocalActionsValue(value, inputs, env, workdir)
+	return interpolateLocalActionsValue(value, inputs, env, workdir, repoRoot, stepOutputs)
 }
 
-func validateLocalCheckoutStep(step localHydrateStep, inputs, env map[string]string, workdir string) error {
+func validateLocalCheckoutStep(step localHydrateStep, inputs, env map[string]string, workdir, repoRoot string) error {
 	for key, value := range step.With {
 		switch strings.ToLower(strings.TrimSpace(key)) {
 		case "ref", "fetch-depth", "persist-credentials", "set-safe-directory":
 			continue
 		case "path":
-			resolved, err := interpolateLocalActionsValue(value, inputs, env, workdir)
+			resolved, err := interpolateLocalActionsValue(value, inputs, env, workdir, repoRoot, nil)
 			if err != nil {
 				return err
 			}
@@ -944,7 +1023,7 @@ func validateLocalCheckoutStep(step localHydrateStep, inputs, env map[string]str
 				continue
 			}
 		case "submodules", "lfs":
-			resolved, err := interpolateLocalActionsValue(value, inputs, env, workdir)
+			resolved, err := interpolateLocalActionsValue(value, inputs, env, workdir, repoRoot, nil)
 			if err != nil {
 				return err
 			}
@@ -955,6 +1034,151 @@ func validateLocalCheckoutStep(step localHydrateStep, inputs, env map[string]str
 		return exit(2, "local Actions hydration does not support actions/checkout option %q; rerun with --github-runner when the workflow needs full GitHub Actions semantics", key)
 	}
 	return nil
+}
+
+func isLocalCompositeActionUse(uses string) bool {
+	uses = strings.TrimSpace(uses)
+	return strings.HasPrefix(uses, "./") || uses == "." || strings.HasPrefix(uses, "../")
+}
+
+func localCompositeActionScript(step localHydrateStep, ctx localHydrateScriptContext, env map[string]string) (string, map[string]string, error) {
+	actionPath, err := localCompositeActionPath(ctx.RepoRoot, step.Uses)
+	if err != nil {
+		return "", nil, err
+	}
+	action, err := readLocalCompositeAction(actionPath)
+	if err != nil {
+		return "", nil, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(action.Runs.Using), "composite") {
+		return "", nil, exit(2, "local Actions hydration only supports repo-local composite actions; %s uses %q", step.Uses, action.Runs.Using)
+	}
+	inputs := map[string]string{}
+	for _, name := range sortedCompositeInputKeys(action.Inputs) {
+		inputs[name] = action.Inputs[name].Default
+	}
+	for _, name := range sortedKeys(step.With) {
+		value, err := interpolateLocalActionsValue(step.With[name], ctx.Inputs, env, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs)
+		if err != nil {
+			return "", nil, err
+		}
+		inputs[name] = value
+	}
+	for name, spec := range action.Inputs {
+		if spec.Required && strings.TrimSpace(inputs[name]) == "" {
+			return "", nil, exit(2, "local composite action %s requires input %s", step.Uses, name)
+		}
+	}
+	actionTargetPath, err := localCompositeActionTargetPath(ctx.Workdir, step.Uses)
+	if err != nil {
+		return "", nil, err
+	}
+	next := ctx
+	next.Inputs = inputs
+	next.Env = copyStringMap(env)
+	next.Env["GITHUB_ACTION_PATH"] = actionTargetPath
+	next.StepOutputs = map[string]map[string]string{}
+	next.Depth++
+	var b strings.Builder
+	fmt.Fprintf(&b, "__crabbox_save_step_env %s\n", shellQuote("GITHUB_ACTION_PATH"))
+	fmt.Fprintf(&b, "export GITHUB_ACTION_PATH=%s\n", shellQuote(actionTargetPath))
+	for _, name := range sortedKeys(inputs) {
+		envName := "INPUT_" + actionInputEnvName(name)
+		fmt.Fprintf(&b, "__crabbox_save_step_env %s\n", shellQuote(envName))
+		fmt.Fprintf(&b, "export %s=%s\n", envName, shellQuote(inputs[name]))
+	}
+	if err := appendLocalHydrateSteps(&b, action.Runs.Steps, next); err != nil {
+		return "", nil, err
+	}
+	for _, name := range sortedKeys(inputs) {
+		fmt.Fprintf(&b, "__crabbox_restore_step_env %s\n", shellQuote("INPUT_"+actionInputEnvName(name)))
+	}
+	fmt.Fprintf(&b, "__crabbox_restore_step_env %s\n", shellQuote("GITHUB_ACTION_PATH"))
+	outputs, err := localCompositeActionOutputs(action.Outputs, next, actionTargetPath)
+	if err != nil {
+		return "", nil, err
+	}
+	return b.String(), outputs, nil
+}
+
+func localCompositeActionPath(repoRoot, uses string) (string, error) {
+	if repoRoot == "" {
+		return "", exit(2, "local Actions hydration cannot resolve repo-local action %q without a repository root", uses)
+	}
+	uses = strings.TrimSpace(uses)
+	if at := strings.IndexByte(uses, '@'); at >= 0 {
+		return "", exit(2, "local Actions hydration does not support versioned repo-local action %q", uses)
+	}
+	clean := filepath.Clean(uses)
+	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", exit(2, "local Actions hydration repo-local action must stay inside the repository: %q", uses)
+	}
+	return filepath.Join(repoRoot, clean), nil
+}
+
+func localCompositeActionTargetPath(workdir, uses string) (string, error) {
+	uses = strings.TrimSpace(uses)
+	if at := strings.IndexByte(uses, '@'); at >= 0 {
+		return "", exit(2, "local Actions hydration does not support versioned repo-local action %q", uses)
+	}
+	clean := filepath.Clean(uses)
+	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", exit(2, "local Actions hydration repo-local action must stay inside the repository: %q", uses)
+	}
+	return path.Join(workdir, filepath.ToSlash(clean)), nil
+}
+
+func readLocalCompositeAction(dir string) (localCompositeAction, error) {
+	var lastErr error
+	for _, name := range []string{"action.yml", "action.yaml"} {
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		var action localCompositeAction
+		if err := yaml.Unmarshal(data, &action); err != nil {
+			return action, err
+		}
+		return action, nil
+	}
+	return localCompositeAction{}, exit(2, "local composite action %s is not readable: %v", dir, lastErr)
+}
+
+func sortedCompositeInputKeys(values map[string]localCompositeInput) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func localCompositeActionOutputs(specs map[string]localCompositeOutput, ctx localHydrateScriptContext, actionTargetPath string) (map[string]string, error) {
+	if len(specs) == 0 {
+		return nil, nil
+	}
+	env := copyStringMap(ctx.Env)
+	env["GITHUB_ACTION_PATH"] = actionTargetPath
+	out := map[string]string{}
+	for _, name := range sortedCompositeOutputKeys(specs) {
+		value, err := interpolateLocalActionsValue(specs[name].Value, ctx.Inputs, env, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs)
+		if err != nil {
+			return nil, err
+		}
+		out[name] = value
+	}
+	return out, nil
+}
+
+func sortedCompositeOutputKeys(values map[string]localCompositeOutput) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func validateWorkflowInputFields(fields []string) error {
@@ -1031,6 +1255,187 @@ func supportedLocalNodeVersionSpec(value string) bool {
 		}
 	}
 	return true
+}
+
+func normalizeLocalNodeVersionSpec(value string) string {
+	value = strings.TrimSpace(strings.TrimPrefix(value, "v"))
+	value = strings.TrimSuffix(value, ".x")
+	value = strings.TrimSuffix(value, ".X")
+	return value
+}
+
+func localActionsHashFiles(expr, repoRoot string) (string, bool) {
+	if !strings.HasPrefix(expr, "hashFiles(") || !strings.HasSuffix(expr, ")") {
+		return "", false
+	}
+	if repoRoot == "" {
+		return "", true
+	}
+	arg := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(expr, "hashFiles("), ")"))
+	arg = strings.Trim(arg, `'"`)
+	if !validLocalActionsHashPattern(arg) {
+		return "", true
+	}
+	matches, err := localActionsHashMatches(repoRoot, arg)
+	if err != nil || len(matches) == 0 {
+		return "", true
+	}
+	sort.Strings(matches)
+	h := sha256.New()
+	wrote := false
+	for _, match := range matches {
+		rel, err := filepath.Rel(repoRoot, match)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			continue
+		}
+		info, err := os.Lstat(match)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		data, err := os.ReadFile(match)
+		if err != nil {
+			continue
+		}
+		_, _ = h.Write([]byte(filepath.ToSlash(strings.TrimPrefix(match, repoRoot+string(filepath.Separator)))))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(data)
+		_, _ = h.Write([]byte{0})
+		wrote = true
+	}
+	if !wrote {
+		return "", true
+	}
+	return hex.EncodeToString(h.Sum(nil)), true
+}
+
+func validLocalActionsHashPattern(pattern string) bool {
+	if pattern == "" || filepath.IsAbs(pattern) {
+		return false
+	}
+	for _, part := range strings.Split(filepath.ToSlash(pattern), "/") {
+		if part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func localActionsHashMatches(repoRoot, pattern string) ([]string, error) {
+	pattern = filepath.ToSlash(pattern)
+	var matches []string
+	err := filepath.WalkDir(repoRoot, func(filePath string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(repoRoot, filePath)
+		if err != nil {
+			return err
+		}
+		if localActionsPathMatch(pattern, filepath.ToSlash(rel)) {
+			matches = append(matches, filePath)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(matches)
+	return matches, nil
+}
+
+func localActionsPathMatch(pattern, name string) bool {
+	return localActionsPathMatchParts(strings.Split(pattern, "/"), strings.Split(name, "/"))
+}
+
+func localActionsPathMatchParts(pattern, name []string) bool {
+	if len(pattern) == 0 {
+		return len(name) == 0
+	}
+	if pattern[0] == "**" {
+		if localActionsPathMatchParts(pattern[1:], name) {
+			return true
+		}
+		return len(name) > 0 && localActionsPathMatchParts(pattern, name[1:])
+	}
+	if len(name) == 0 {
+		return false
+	}
+	matched, err := path.Match(pattern[0], name[0])
+	if err != nil || !matched {
+		return false
+	}
+	return localActionsPathMatchParts(pattern[1:], name[1:])
+}
+
+func localActionsStepOutput(expr string, stepOutputs map[string]map[string]string) (string, bool) {
+	if !strings.HasPrefix(expr, "steps.") {
+		return "", false
+	}
+	parts := strings.Split(expr, ".")
+	if len(parts) == 4 && parts[2] == "outputs" && parts[1] != "" && parts[3] != "" {
+		if outputs := stepOutputs[parts[1]]; outputs != nil {
+			value, ok := outputs[parts[3]]
+			return value, ok
+		}
+	}
+	return "", false
+}
+
+func evalLocalActionsIf(expr string, inputs, env map[string]string, stepOutputs map[string]map[string]string) (bool, bool) {
+	parts := strings.Split(expr, "&&")
+	if len(parts) == 0 {
+		return false, false
+	}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		var op string
+		if strings.Contains(part, "==") {
+			op = "=="
+		} else if strings.Contains(part, "!=") {
+			op = "!="
+		} else {
+			return false, false
+		}
+		left, right, ok := strings.Cut(part, op)
+		if !ok {
+			return false, false
+		}
+		leftValue, ok := localActionsIfValue(strings.TrimSpace(left), inputs, env, stepOutputs)
+		if !ok {
+			return false, false
+		}
+		rightValue, ok := localActionsIfValue(strings.TrimSpace(right), inputs, env, stepOutputs)
+		if !ok {
+			return false, false
+		}
+		matched := leftValue == rightValue
+		if op == "!=" {
+			matched = !matched
+		}
+		if !matched {
+			return false, true
+		}
+	}
+	return true, true
+}
+
+func localActionsIfValue(value string, inputs, env map[string]string, stepOutputs map[string]map[string]string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 {
+		if value[0] == '\'' && value[len(value)-1] == '\'' || value[0] == '"' && value[len(value)-1] == '"' {
+			return value[1 : len(value)-1], true
+		}
+	}
+	if key, ok := strings.CutPrefix(value, "inputs."); ok {
+		return inputs[key], true
+	}
+	if _, ok := strings.CutPrefix(value, "env."); ok {
+		return "", false
+	}
+	if output, ok := localActionsStepOutput(value, stepOutputs); ok {
+		return output, true
+	}
+	return "", false
 }
 
 func appendLocalHydrateRunStep(b *strings.Builder, shellName, workdir, script string) error {
@@ -1175,6 +1580,25 @@ __crabbox_arch() {
     *) uname -m ;;
   esac
 }
+__crabbox_sudo() {
+  if [ "$(id -u)" = "0" ]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    "$@"
+  fi
+}
+__crabbox_ensure_xz() {
+  if command -v xz >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    __crabbox_sudo apt-get update >/tmp/crabbox-actions-apt-update.log 2>&1 || true
+    __crabbox_sudo apt-get install -y --no-install-recommends xz-utils
+  fi
+  command -v xz >/dev/null 2>&1
+}
 __crabbox_setup_node() {
   local requested="${1:-}"
   if [ -n "$requested" ] && [ -f "$GITHUB_WORKSPACE/$requested" ]; then
@@ -1229,6 +1653,7 @@ __crabbox_setup_node() {
 	    tmp="$RUNNER_TEMP/node-${version}.tar.xz"
 	    mkdir -p "$RUNNER_TOOL_CACHE" "$RUNNER_TEMP"
 	    curl -fsSL -o "$tmp" "https://nodejs.org/dist/${version}/node-${version}-linux-${arch}.tar.xz"
+	    __crabbox_ensure_xz || { echo "xz is required to extract Node archives; install xz-utils or use a fuller local-container image" >&2; return 2; }
 	    tar -xJf "$tmp" -C "$RUNNER_TOOL_CACHE"
 	  fi
 	  rm -f "$RUNNER_TOOL_CACHE/node"

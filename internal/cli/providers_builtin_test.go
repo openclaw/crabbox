@@ -680,24 +680,26 @@ func (testLocalContainerProvider) Spec() ProviderSpec {
 }
 
 type testLocalContainerFlagValues struct {
-	Runtime  *string
-	Image    *string
-	User     *string
-	WorkRoot *string
-	CPUs     *int
-	Memory   *string
-	Network  *string
+	Runtime      *string
+	Image        *string
+	User         *string
+	WorkRoot     *string
+	CPUs         *int
+	Memory       *string
+	Network      *string
+	DockerSocket *bool
 }
 
 func (testLocalContainerProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
 	return testLocalContainerFlagValues{
-		Runtime:  fs.String("local-container-runtime", defaults.LocalContainer.Runtime, "Docker-compatible CLI"),
-		Image:    fs.String("local-container-image", defaults.LocalContainer.Image, "container image"),
-		User:     fs.String("local-container-user", defaults.LocalContainer.User, "container SSH user"),
-		WorkRoot: fs.String("local-container-work-root", defaults.LocalContainer.WorkRoot, "container work root"),
-		CPUs:     fs.Int("local-container-cpus", defaults.LocalContainer.CPUs, "container CPUs"),
-		Memory:   fs.String("local-container-memory", defaults.LocalContainer.Memory, "container memory"),
-		Network:  fs.String("local-container-network", defaults.LocalContainer.Network, "container network"),
+		Runtime:      fs.String("local-container-runtime", defaults.LocalContainer.Runtime, "Docker-compatible CLI"),
+		Image:        fs.String("local-container-image", defaults.LocalContainer.Image, "container image"),
+		User:         fs.String("local-container-user", defaults.LocalContainer.User, "container SSH user"),
+		WorkRoot:     fs.String("local-container-work-root", defaults.LocalContainer.WorkRoot, "container work root"),
+		CPUs:         fs.Int("local-container-cpus", defaults.LocalContainer.CPUs, "container CPUs"),
+		Memory:       fs.String("local-container-memory", defaults.LocalContainer.Memory, "container memory"),
+		Network:      fs.String("local-container-network", defaults.LocalContainer.Network, "container network"),
+		DockerSocket: fs.Bool("local-container-docker-socket", defaults.LocalContainer.DockerSocket, "container Docker socket"),
 	}
 }
 func (testLocalContainerProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
@@ -727,6 +729,9 @@ func (testLocalContainerProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, valu
 	}
 	if flagWasSet(fs, "local-container-network") {
 		cfg.LocalContainer.Network = *v.Network
+	}
+	if flagWasSet(fs, "local-container-docker-socket") {
+		cfg.LocalContainer.DockerSocket = *v.DockerSocket
 	}
 	if cfg.Provider == "docker" || cfg.Provider == "container" || cfg.Provider == "local-docker" {
 		cfg.Provider = "local-container"

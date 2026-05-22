@@ -5,6 +5,11 @@
 ### Added
 
 - Added `crabbox run --emit-proof` support for Blacksmith Testbox delegated runs, including bounded local stdout/stderr, timing, and metadata artifacts for successful proof runs.
+- Added local-container Docker socket pass-through with host-visible work roots so `provider: docker` leases can run Docker-based test suites through the host daemon.
+
+### Fixed
+
+- Fixed local Actions hydration for repo-local composite actions, cache no-ops, simple input conditions, safe `hashFiles`, secret-expression rejection, and Node 24.x setup on minimal Debian images.
 
 ## 0.17.0 - 2026-05-21
 
