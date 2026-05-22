@@ -112,6 +112,19 @@ redacted env/config metadata even though remote file capture is delegated to
 Blacksmith. These implicit stream logs are capped so a verbose successful run
 does not fill local temp storage.
 
+`--emit-proof <path>` is supported for successful Blacksmith runs. Crabbox
+renders the same proof block used by SSH-backed runs from the delegated
+stdout/stderr transcript, command timing, Testbox ID, and any GitHub Actions run
+URL found in the stream. When proof is requested, Crabbox also keeps bounded
+local transcript artifacts under `.crabbox/runs/<testbox-id>/`:
+
+```text
+blacksmith.stdout.log
+blacksmith.stderr.log
+timing.json
+metadata.json
+```
+
 Crabbox terminates a local Blacksmith CLI invocation that remains in the sync
 phase for five minutes without post-sync output. Set
 `CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS=0` to disable the guard, or set a larger
@@ -130,6 +143,7 @@ visibility-only detail page for the row.
 - Crabbox sync: no.
 - Provider sync: yes, Blacksmith-owned.
 - Desktop/browser/code: no Crabbox VNC/code surface.
+- Proof: yes, from delegated stream/timing metadata.
 - Actions hydration: Blacksmith-owned workflow setup, not Crabbox SSH hydration.
 - Coordinator: no.
 
@@ -137,9 +151,9 @@ visibility-only detail page for the row.
 
 - `--sync-only`, `--checksum`, and `--force-sync-large` do not apply because
   Blacksmith owns sync.
-- `--script`, `--script-stdin`, `--fresh-pr`, local captures, and
-  `--download` are rejected because Blacksmith owns command transport and
-  artifact handling.
+- `--script`, `--script-stdin`, `--fresh-pr`, local captures, `--download`, and
+  `--artifact-glob` are rejected because Blacksmith owns command transport and
+  remote artifact handling. Use `--emit-proof` for PR-ready transcript proof.
 - `list` and `status` are core-rendered from parsed Blacksmith CLI output.
 - `blacksmith.workflow` is required only when Crabbox needs to create a Testbox.
   Reusing an existing ID or slug does not need workflow config.

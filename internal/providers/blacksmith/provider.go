@@ -21,7 +21,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Name:        "blacksmith-testbox",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    nil,
+		Features:    core.FeatureSet{core.FeatureRunProof},
 		Coordinator: core.CoordinatorNever,
 	}
 }

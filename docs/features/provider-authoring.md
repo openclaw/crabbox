@@ -173,6 +173,8 @@ Rules:
   - `FeatureRestore` - backend can restore a workspace to a previous checkpoint.
   - `FeatureSnapshot` - backend can return a provider-native snapshot handle
     that Crabbox can reference in checkpoint metadata.
+  - `FeatureRunProof` - delegated backend can return bounded stream/timing
+    metadata for core `crabbox run --emit-proof` rendering.
 - `Coordinator` is `CoordinatorSupported` only when the Cloudflare Worker can
   provision your runners. Direct-only providers, including all delegated run
   backends and Static SSH, set `CoordinatorNever`.

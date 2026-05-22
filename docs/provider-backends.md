@@ -350,6 +350,7 @@ cli.FeatureCheckpoint
 cli.FeatureFork
 cli.FeatureRestore
 cli.FeatureSnapshot
+cli.FeatureRunProof
 ```
 
 Actions runner hydration is intentionally not a provider feature. It is a core
@@ -369,6 +370,8 @@ Checkpoint-related features are reserved for versioned workspaces:
 - `FeatureRestore`: provider can restore an existing workspace to a checkpoint.
 - `FeatureSnapshot`: provider can expose a native snapshot id for Crabbox
   metadata.
+- `FeatureRunProof`: delegated provider can return bounded stream/timing
+  metadata for core `crabbox run --emit-proof` rendering.
 
 Do not set these flags for plain SSH access alone. Generic Git/archive/log
 checkpoints are core-owned and should work even when the provider advertises no

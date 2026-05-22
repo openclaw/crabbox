@@ -106,6 +106,7 @@ const (
 	FeatureFork        Feature = "workspace-fork"
 	FeatureRestore     Feature = "workspace-restore"
 	FeatureSnapshot    Feature = "provider-snapshot"
+	FeatureRunProof    Feature = "run-proof"
 )
 
 type FeatureSet []Feature
@@ -258,39 +259,40 @@ type ListRequest struct {
 }
 
 type RunRequest struct {
-	Repo            Repo
-	ID              string
-	Options         LeaseOptions
-	Keep            bool
-	Reclaim         bool
-	NoSync          bool
-	SyncOnly        bool
-	DebugSync       bool
-	ShellMode       bool
-	ChecksumSync    bool
-	ForceSyncLarge  bool
-	FullResync      bool
-	EnvHelper       string
-	CaptureStdout   string
-	CaptureStderr   string
-	CaptureOnFail   bool
-	KeepOnFailure   bool
-	Preflight       bool
-	Downloads       []string
-	Env             map[string]string
-	EnvSummary      bool
-	ScriptRequested bool
-	Script          *RunScriptSpec
-	FreshPR         FreshPRSpec
-	ApplyLocalPatch bool
-	Command         []string
-	Label           string
-	RequestedSlug   string
-	TimingJSON      bool
-	ArtifactGlobs   []string
-	EmitProof       string
-	ProofTemplate   string
-	StopAfter       string
+	Repo             Repo
+	ID               string
+	Options          LeaseOptions
+	Keep             bool
+	Reclaim          bool
+	NoSync           bool
+	SyncOnly         bool
+	DebugSync        bool
+	ShellMode        bool
+	ChecksumSync     bool
+	ForceSyncLarge   bool
+	FullResync       bool
+	EnvHelper        string
+	CaptureStdout    string
+	CaptureStderr    string
+	CaptureOnFail    bool
+	KeepOnFailure    bool
+	Preflight        bool
+	Downloads        []string
+	Env              map[string]string
+	EnvSummary       bool
+	ScriptRequested  bool
+	Script           *RunScriptSpec
+	FreshPR          FreshPRSpec
+	ApplyLocalPatch  bool
+	Command          []string
+	Label            string
+	RequestedSlug    string
+	TimingJSON       bool
+	ArtifactGlobs    []string
+	EmitProof        string
+	ProofTemplate    string
+	ProfileVariables map[string]string
+	StopAfter        string
 }
 
 type WarmupRequest struct {
@@ -325,6 +327,13 @@ type RunResult struct {
 	Command       time.Duration
 	Total         time.Duration
 	SyncDelegated bool
+	Provider      string
+	LeaseID       string
+	Slug          string
+	CommandText   string
+	LogExcerpt    string
+	ActionsURL    string
+	Artifacts     []RunArtifact
 }
 
 type LeaseTarget struct {
@@ -536,7 +545,7 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if len(req.ArtifactGlobs) > 0 {
 		return exit(2, "%s delegates run execution; --artifact-glob is not supported", provider)
 	}
-	if req.EmitProof != "" {
+	if req.EmitProof != "" && !featureSetHas(spec.Features, FeatureRunProof) {
 		return exit(2, "%s delegates run execution; --emit-proof is not supported", provider)
 	}
 	if req.StopAfter != "" {

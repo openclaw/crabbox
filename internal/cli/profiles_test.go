@@ -450,6 +450,18 @@ func TestRenderRunProofUsesSafeMarkdownFence(t *testing.T) {
 	}
 }
 
+func TestSelectProofLogExcerptStripsTerminalControl(t *testing.T) {
+	got := selectProofLogExcerpt("\x1b[2KWaiting for testbox... queued\r\x1b[2KTestbox ready!\nblacksmith-proof-live-ok\n")
+	for _, want := range []string{"Waiting for testbox... queued", "Testbox ready!", "blacksmith-proof-live-ok"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("excerpt missing %q:\n%s", want, got)
+		}
+	}
+	if strings.ContainsAny(got, "\x1b\r") {
+		t.Fatalf("excerpt contains terminal control bytes: %q", got)
+	}
+}
+
 func TestRenderRunProofRejectsUnresolvedTemplateVariables(t *testing.T) {
 	_, err := renderRunProof(proofRenderInput{
 		Template: ProofTemplateConfig{
@@ -968,6 +980,40 @@ profiles:
 	var exitErr ExitError
 	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "proof template") {
 		t.Fatalf("error=%v, want proof template config error", err)
+	}
+}
+
+func TestRunCommandDelegatedProviderEmitsProof(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, ".crabbox.yaml"), []byte(`provider: blacksmith-testbox
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proofPath := filepath.Join(dir, "proof.md")
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "blacksmith-testbox",
+		"--emit-proof", proofPath,
+		"--",
+		"pnpm", "test",
+	})
+	if err != nil {
+		t.Fatalf("runCommand error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	proofData, err := os.ReadFile(proofPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := string(proofData)
+	for _, want := range []string{"## Real behavior proof", "blacksmith-testbox", "delegated test output", "suite pass"} {
+		if !strings.Contains(proof, want) {
+			t.Fatalf("proof missing %q:\n%s", want, proof)
+		}
+	}
+	if !strings.Contains(stderr.String(), "artifact kind=proof") {
+		t.Fatalf("stderr missing proof artifact line:\n%s", stderr.String())
 	}
 }
 

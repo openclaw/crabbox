@@ -73,11 +73,13 @@ a local `.crabbox/captures/*.tar.gz` bundle by default. SSH-backed runs include
 the uploaded script, redacted env/config summaries, timing JSON, command
 stdout/stderr, common test/report/log paths, and a generic gateway log tail when
 present. Blacksmith delegated runs include stdout/stderr plus timing and
-redacted env/config metadata. Implicit stdout/stderr files inside automatic
-failure bundles are capped; use `--capture-stdout` / `--capture-stderr` when a
-full local stream file is required. `--capture-on-fail` remains accepted for
-older scripts. Crabbox does not redact captured files, so treat them as
-secret-bearing until reviewed.
+redacted env/config metadata. Successful Blacksmith runs also support
+`--emit-proof`; when requested, Crabbox writes bounded stdout/stderr, timing,
+metadata, and the generated proof block as local run artifacts. Implicit
+stdout/stderr files inside automatic failure bundles are capped; use
+`--capture-stdout` / `--capture-stderr` when a full local stream file is
+required. `--capture-on-fail` remains accepted for older scripts. Crabbox does
+not redact captured files, so treat them as secret-bearing until reviewed.
 `run --download remote=local` copies successful-run artifacts back to the local
 machine without adding file bytes to coordinator logs.
 Test results are stored as structured summaries when `--junit` or

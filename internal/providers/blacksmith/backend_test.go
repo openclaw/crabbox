@@ -355,6 +355,71 @@ func TestBlacksmithRunTimingJSONIncludesCommandPhases(t *testing.T) {
 	}
 }
 
+func TestBlacksmithRunProofArtifactsPersistSuccessStreams(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
+			return LocalCommandResult{Stdout: "ready tbx_proof123\n"}, nil
+		}
+		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
+			if req.Stdout != nil {
+				_, _ = req.Stdout.Write([]byte("https://github.com/example-org/my-app/actions/runs/123456789\n"))
+				_, _ = req.Stdout.Write([]byte(strings.Repeat("verbose setup line\n", blacksmithProofStreamCaptureBytes/19+8)))
+				_, _ = req.Stdout.Write([]byte("scenario pass delegated-proof\n"))
+			}
+			if req.Stderr != nil {
+				_, _ = req.Stderr.Write([]byte("stderr detail\n"))
+			}
+			return LocalCommandResult{}, nil
+		}
+		return LocalCommandResult{}, nil
+	}}
+	cfg := baseConfig()
+	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	backend := newTestBlacksmithBackend(cfg, runner)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:      Repo{Root: repo},
+		Command:   []string{"pnpm", "test"},
+		EmitProof: filepath.Join(repo, "proof.md"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.LeaseID != "tbx_proof123" || result.ActionsURL != "https://github.com/example-org/my-app/actions/runs/123456789" {
+		t.Fatalf("result=%#v", result)
+	}
+	if !strings.Contains(result.LogExcerpt, "scenario pass delegated-proof") || !strings.Contains(result.LogExcerpt, "stderr detail") {
+		t.Fatalf("log excerpt=%q", result.LogExcerpt)
+	}
+	if len(result.Artifacts) != 4 {
+		t.Fatalf("artifacts=%#v", result.Artifacts)
+	}
+	for _, artifact := range result.Artifacts {
+		data, err := os.ReadFile(artifact.Path)
+		if err != nil {
+			t.Fatalf("read artifact %#v: %v", artifact, err)
+		}
+		if artifact.Bytes != len(data) {
+			t.Fatalf("artifact bytes mismatch for %#v got=%d", artifact, len(data))
+		}
+	}
+	stdoutPath := core.LocalRunArtifactPath(repo, "", "tbx_proof123", "blacksmith.stdout.log")
+	stdoutData, err := os.ReadFile(stdoutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stdoutData), "scenario pass delegated-proof") {
+		t.Fatalf("stdout artifact missing run output:\n%s", stdoutData)
+	}
+	if strings.Contains(string(stdoutData), "https://github.com/example-org/my-app/actions/runs/123456789") {
+		t.Fatalf("stdout artifact should be tail-limited, got early URL:\n%s", stdoutData)
+	}
+}
+
 func TestBlacksmithKeepOnFailureKeepsTestboxAndWritesBundle(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
