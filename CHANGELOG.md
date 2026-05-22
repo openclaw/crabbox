@@ -2,6 +2,10 @@
 
 ## 0.17.1 - Unreleased
 
+### Added
+
+- Added `crabbox run --emit-proof` support for Blacksmith Testbox delegated runs, including bounded local stdout/stderr, timing, and metadata artifacts for successful proof runs.
+
 ## 0.17.0 - 2026-05-21
 
 ### Added

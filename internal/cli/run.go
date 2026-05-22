@@ -353,38 +353,39 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	options := leaseOptionsFromConfig(cfg)
 	scriptRequested := *scriptPath != "" || *scriptStdin
 	runReq := RunRequest{
-		Repo:            repo,
-		ID:              *leaseIDFlag,
-		Options:         options,
-		Keep:            *keep,
-		KeepOnFailure:   *keepOnFailure,
-		Reclaim:         *reclaim,
-		NoSync:          *noSync,
-		SyncOnly:        *syncOnly,
-		DebugSync:       *debugSync,
-		ShellMode:       *shellMode,
-		ChecksumSync:    *checksumSync,
-		ForceSyncLarge:  *forceSyncLarge,
-		FullResync:      fullResyncRequested,
-		EnvHelper:       envHelperName,
-		CaptureStdout:   *captureStdout,
-		CaptureStderr:   *captureStderr,
-		CaptureOnFail:   *captureOnFail,
-		Preflight:       *preflight,
-		Downloads:       downloads,
-		Env:             envSelection.Effective,
-		EnvSummary:      envSelection.SummaryRequested,
-		ScriptRequested: scriptRequested,
-		FreshPR:         freshPR,
-		ApplyLocalPatch: *applyLocalPatch,
-		Command:         command,
-		Label:           runLabelValue,
-		RequestedSlug:   requestedSlug,
-		TimingJSON:      *timingJSON,
-		ArtifactGlobs:   expansion.ArtifactGlobs,
-		EmitProof:       strings.TrimSpace(*emitProof),
-		ProofTemplate:   strings.TrimSpace(*proofTemplate),
-		StopAfter:       strings.TrimSpace(*stopAfter),
+		Repo:             repo,
+		ID:               *leaseIDFlag,
+		Options:          options,
+		Keep:             *keep,
+		KeepOnFailure:    *keepOnFailure,
+		Reclaim:          *reclaim,
+		NoSync:           *noSync,
+		SyncOnly:         *syncOnly,
+		DebugSync:        *debugSync,
+		ShellMode:        *shellMode,
+		ChecksumSync:     *checksumSync,
+		ForceSyncLarge:   *forceSyncLarge,
+		FullResync:       fullResyncRequested,
+		EnvHelper:        envHelperName,
+		CaptureStdout:    *captureStdout,
+		CaptureStderr:    *captureStderr,
+		CaptureOnFail:    *captureOnFail,
+		Preflight:        *preflight,
+		Downloads:        downloads,
+		Env:              envSelection.Effective,
+		EnvSummary:       envSelection.SummaryRequested,
+		ScriptRequested:  scriptRequested,
+		FreshPR:          freshPR,
+		ApplyLocalPatch:  *applyLocalPatch,
+		Command:          command,
+		Label:            runLabelValue,
+		RequestedSlug:    requestedSlug,
+		TimingJSON:       *timingJSON,
+		ArtifactGlobs:    expansion.ArtifactGlobs,
+		EmitProof:        strings.TrimSpace(*emitProof),
+		ProofTemplate:    strings.TrimSpace(*proofTemplate),
+		ProfileVariables: expansion.Variables,
+		StopAfter:        strings.TrimSpace(*stopAfter),
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		if expansion.Profile.Doctor.Enabled {
@@ -399,6 +400,13 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		result, runErr := delegated.Run(ctx, runReq)
 		if runErr == nil || result.Command > 0 || result.Total > 0 {
 			a.syncExternalRunnersBestEffort(ctx, cfg, backend)
+		}
+		if runErr == nil && strings.TrimSpace(*emitProof) != "" {
+			proof, err := writeDelegatedRunProof(strings.TrimSpace(*emitProof), strings.TrimSpace(*proofTemplate), cfg, result, runReq)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
 		}
 		return runErr
 	}
@@ -1225,6 +1233,35 @@ func populateRunTimingMetadata(report *timingReport, cfg Config, repo Repo, serv
 	report.StopCommand = runStopCommand(cfg, firstNonBlank(serverSlug(server), leaseID))
 	report.IdleTimeout = cfg.IdleTimeout.String()
 	report.Artifacts = artifacts
+}
+
+func writeDelegatedRunProof(path, templateName string, cfg Config, result RunResult, req RunRequest) (runArtifact, error) {
+	template := cfg.ProofTemplates[strings.TrimSpace(templateName)]
+	provider := firstNonBlank(result.Provider, cfg.Provider)
+	leaseID := result.LeaseID
+	slug := result.Slug
+	command := strings.TrimSpace(result.CommandText)
+	if command == "" {
+		command = runCommandDisplay(req.Command, req.ShellMode)
+	}
+	logExcerpt := strings.TrimSpace(result.LogExcerpt)
+	if logExcerpt == "" {
+		logExcerpt = "(no console output captured)"
+	}
+	return writeRunProof(path, templateName, proofRenderInput{
+		Template:    template,
+		Provider:    provider,
+		LeaseID:     leaseID,
+		Slug:        slug,
+		Command:     command,
+		LogExcerpt:  logExcerpt,
+		ActionsURL:  result.ActionsURL,
+		Artifacts:   result.Artifacts,
+		Variables:   req.ProfileVariables,
+		CommandMs:   result.Command.Milliseconds(),
+		ExitCode:    result.ExitCode,
+		GeneratedAt: time.Now(),
+	})
 }
 
 func runCommandDisplay(command []string, shellMode bool) string {

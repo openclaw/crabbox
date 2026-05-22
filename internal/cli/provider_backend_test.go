@@ -431,6 +431,16 @@ func TestRejectDelegatedSyncOptionsAllowsArchiveSyncControls(t *testing.T) {
 	}
 }
 
+func TestRejectDelegatedSyncOptionsAllowsProofFeature(t *testing.T) {
+	spec := ProviderSpec{Name: "blacksmith-testbox", Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeatureRunProof}}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{EmitProof: "/tmp/proof.md"}); err != nil {
+		t.Fatalf("delegated proof provider should allow --emit-proof: %v", err)
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: "islo"}, RunRequest{EmitProof: "/tmp/proof.md"}); err == nil {
+		t.Fatal("plain delegated provider should reject --emit-proof")
+	}
+}
+
 func TestProviderFlagsApplyDaytonaAndIsloWithoutCoreEdits(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)

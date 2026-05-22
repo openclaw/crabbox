@@ -12,12 +12,14 @@ import (
 	"time"
 )
 
-type runArtifact struct {
+type RunArtifact struct {
 	Kind     string `json:"kind"`
 	Path     string `json:"path"`
 	Template string `json:"template,omitempty"`
 	Bytes    int    `json:"bytes,omitempty"`
 }
+
+type runArtifact = RunArtifact
 
 type runArtifactResult struct {
 	Files []runArtifact `json:"files,omitempty"`
@@ -57,6 +59,10 @@ func localRunArtifactPath(repoRoot, runID, leaseID, name string) string {
 		root = "."
 	}
 	return filepath.Join(root, ".crabbox", "runs", safeCaptureName(firstNonBlank(runID, leaseID, "run")), name)
+}
+
+func LocalRunArtifactPath(repoRoot, runID, leaseID, name string) string {
+	return localRunArtifactPath(repoRoot, runID, leaseID, name)
 }
 
 func validateRunArtifactGlobs(globs []string) error {
@@ -331,6 +337,7 @@ func markdownFence(info, content string) (string, string) {
 }
 
 func selectProofLogExcerpt(log string) string {
+	log = strings.ReplaceAll(stripANSI(log), "\r", "\n")
 	lines := strings.Split(strings.TrimSpace(log), "\n")
 	out := make([]string, 0, 12)
 	for i := len(lines) - 1; i >= 0 && len(out) < 12; i-- {
@@ -350,6 +357,10 @@ func selectProofLogExcerpt(log string) string {
 		excerpt = excerpt[len(excerpt)-4000:]
 	}
 	return excerpt
+}
+
+func SelectProofLogExcerpt(log string) string {
+	return selectProofLogExcerpt(log)
 }
 
 func remoteProfileDoctorCommand(profile string, doctor DoctorProfileConfig, workdir string) string {

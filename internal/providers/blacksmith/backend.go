@@ -2,10 +2,13 @@ package blacksmith
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -91,7 +94,7 @@ func (b *blacksmithBackend) Warmup(ctx context.Context, req WarmupRequest) error
 }
 
 func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
-	if err := rejectDelegatedSyncOptions(blacksmithTestboxProvider, req); err != nil {
+	if err := core.RejectDelegatedSyncOptionsForSpec(b.spec, req); err != nil {
 		return RunResult{}, err
 	}
 	started := b.rt.Clock.Now()
@@ -147,9 +150,20 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		return RunResult{}, err
 	}
 	defer stderrCleanup()
+	stdoutProof := newBlacksmithProofTailBuffer()
+	stderrProof := newBlacksmithProofTailBuffer()
 	commandStart := b.rt.Clock.Now()
 	phaseTracker := core.NewCommandPhaseTracker(commandStart)
-	code := b.runTestbox(ctx, leaseID, req.Command, req.DebugSync, req.ShellMode, phaseTracker, stdoutCapture, stderrCapture)
+	code := b.runTestbox(
+		ctx,
+		leaseID,
+		req.Command,
+		req.DebugSync,
+		req.ShellMode,
+		phaseTracker,
+		mergeWriters(stdoutCapture, stdoutProof),
+		mergeWriters(stderrCapture, stderrProof),
+	)
 	if closeErr := stdoutCapture.Close(); closeErr != nil && code == 0 {
 		return RunResult{}, core.Exit(2, "blacksmith failure bundle stdout close: %v", closeErr)
 	}
@@ -168,7 +182,16 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 			return RunResult{}, err
 		}
 	}
-	result := RunResult{ExitCode: code, Command: commandDuration, Total: total, SyncDelegated: true}
+	actionsURL := firstNonBlank(stdoutProof.ActionsURL(), stderrProof.ActionsURL())
+	proof, proofErr := b.blacksmithProofResult(req, leaseID, slug, code, commandDuration, total, report, stdoutProof.Bytes(), stderrProof.Bytes(), actionsURL)
+	if proofErr != nil && code == 0 {
+		return RunResult{}, proofErr
+	}
+	result := proof
+	result.ExitCode = code
+	result.Command = commandDuration
+	result.Total = total
+	result.SyncDelegated = true
 	if code != 0 {
 		local, bytes, bundleErr := core.CaptureLocalFailureBundle(leaseID, core.FailureCaptureMetadata{
 			Provider:   blacksmithTestboxProvider,
@@ -192,6 +215,145 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		return result, ExitError{Code: code, Message: fmt.Sprintf("blacksmith testbox run exited %d", code)}
 	}
 	return result, nil
+}
+
+var githubActionsRunURLPattern = regexp.MustCompile(`https://github\.com/[^\s"'<>]+/actions/runs/[0-9]+[^\s"'<>]*`)
+
+const blacksmithProofStreamCaptureBytes = 1024 * 1024
+
+type blacksmithProofTailBuffer struct {
+	mu         sync.Mutex
+	data       []byte
+	scanTail   string
+	actionsURL string
+	truncated  bool
+}
+
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func newBlacksmithProofTailBuffer() *blacksmithProofTailBuffer {
+	return &blacksmithProofTailBuffer{data: make([]byte, 0, 32*1024)}
+}
+
+func (b *blacksmithProofTailBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.actionsURL == "" {
+		probe := b.scanTail + string(p)
+		if match := firstBlacksmithActionsURL(probe); match != "" {
+			b.actionsURL = match
+		}
+		if len(probe) > 2048 {
+			b.scanTail = probe[len(probe)-2048:]
+		} else {
+			b.scanTail = probe
+		}
+	}
+	if len(p) >= blacksmithProofStreamCaptureBytes {
+		b.data = append(b.data[:0], p[len(p)-blacksmithProofStreamCaptureBytes:]...)
+		b.truncated = true
+		return len(p), nil
+	}
+	overflow := len(b.data) + len(p) - blacksmithProofStreamCaptureBytes
+	if overflow > 0 {
+		copy(b.data, b.data[overflow:])
+		b.data = b.data[:len(b.data)-overflow]
+		b.truncated = true
+	}
+	b.data = append(b.data, p...)
+	return len(p), nil
+}
+
+func (b *blacksmithProofTailBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data := append([]byte(nil), b.data...)
+	if !b.truncated {
+		return data
+	}
+	prefix := fmt.Appendf(nil, "[crabbox: proof stream kept last %d bytes]\n", blacksmithProofStreamCaptureBytes)
+	return append(prefix, data...)
+}
+
+func (b *blacksmithProofTailBuffer) ActionsURL() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.actionsURL
+}
+
+func (b *blacksmithBackend) blacksmithProofResult(req RunRequest, leaseID, slug string, exitCode int, commandDuration, total time.Duration, report timingReport, stdoutData, stderrData []byte, actionsURL string) (RunResult, error) {
+	combined := strings.TrimSpace(string(stdoutData) + "\n" + string(stderrData))
+	result := RunResult{
+		Provider:    blacksmithTestboxProvider,
+		LeaseID:     leaseID,
+		Slug:        slug,
+		CommandText: blacksmithCommandString(req.Command, req.ShellMode),
+		LogExcerpt:  core.SelectProofLogExcerpt(combined),
+		ActionsURL:  firstNonBlank(actionsURL, firstBlacksmithActionsURL(combined)),
+	}
+	if strings.TrimSpace(req.EmitProof) == "" {
+		return result, nil
+	}
+	artifacts, err := persistBlacksmithRunArtifacts(req.Repo.Root, leaseID, exitCode, commandDuration, total, report, stdoutData, stderrData, result)
+	if err != nil {
+		return RunResult{}, err
+	}
+	result.Artifacts = artifacts
+	return result, nil
+}
+
+func firstBlacksmithActionsURL(text string) string {
+	return githubActionsRunURLPattern.FindString(text)
+}
+
+func persistBlacksmithRunArtifacts(repoRoot, leaseID string, exitCode int, commandDuration, total time.Duration, report timingReport, stdoutData, stderrData []byte, result RunResult) ([]core.RunArtifact, error) {
+	metadata := map[string]any{
+		"provider":      blacksmithTestboxProvider,
+		"leaseId":       leaseID,
+		"slug":          result.Slug,
+		"command":       result.CommandText,
+		"exitCode":      exitCode,
+		"commandMs":     commandDuration.Milliseconds(),
+		"totalMs":       total.Milliseconds(),
+		"actionsRunUrl": result.ActionsURL,
+	}
+	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	timingJSON, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	files := []struct {
+		kind string
+		name string
+		data []byte
+	}{
+		{kind: "stdout", name: "blacksmith.stdout.log", data: stdoutData},
+		{kind: "stderr", name: "blacksmith.stderr.log", data: stderrData},
+		{kind: "timing", name: "timing.json", data: append(timingJSON, '\n')},
+		{kind: "metadata", name: "metadata.json", data: append(metadataJSON, '\n')},
+	}
+	artifacts := make([]core.RunArtifact, 0, len(files))
+	for _, file := range files {
+		path := core.LocalRunArtifactPath(repoRoot, "", leaseID, file.name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, core.Exit(2, "blacksmith proof artifact create %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, file.data, 0o600); err != nil {
+			return nil, core.Exit(2, "blacksmith proof artifact write %s: %v", path, err)
+		}
+		artifacts = append(artifacts, core.RunArtifact{Kind: file.kind, Path: path, Bytes: len(file.data)})
+	}
+	return artifacts, nil
 }
 
 func (b *blacksmithBackend) List(ctx context.Context, req ListRequest) ([]Server, error) {

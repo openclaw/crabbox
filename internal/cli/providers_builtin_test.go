@@ -282,7 +282,7 @@ func (testBlacksmithProvider) Spec() ProviderSpec {
 		Name:        "blacksmith-testbox",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    nil,
+		Features:    FeatureSet{FeatureRunProof},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -746,7 +746,13 @@ func (b testDelegatedBackend) Warmup(context.Context, WarmupRequest) error {
 	return nil
 }
 func (b testDelegatedBackend) Run(context.Context, RunRequest) (RunResult, error) {
-	return RunResult{}, nil
+	return RunResult{
+		Provider:    b.spec.Name,
+		LeaseID:     "tbx_test",
+		Slug:        "testbox",
+		CommandText: "pnpm test",
+		LogExcerpt:  "delegated test output\nsuite pass",
+	}, nil
 }
 func (b testDelegatedBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
 	return nil, nil
