@@ -6,8 +6,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -73,6 +76,9 @@ func TestProviderAliases(t *testing.T) {
 	spec := Provider{}.Spec()
 	if !spec.Features.Has(core.FeatureDesktop) || !spec.Features.Has(core.FeatureBrowser) {
 		t.Fatalf("local-container features=%v, want desktop and browser", spec.Features)
+	}
+	if !spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("local-container features=%v, want cleanup", spec.Features)
 	}
 }
 
@@ -151,6 +157,7 @@ func TestCreateContainerCanMountDockerSocket(t *testing.T) {
 	args := recordedArgsForCommand(t, runner, "run")
 	for _, want := range []string{
 		"--label\ndocker_socket=1",
+		"--label\nhost_work_root=" + cfg.LocalContainer.WorkRoot,
 		"-e\nCRABBOX_DOCKER_SOCKET=1",
 		"-v\n" + cfg.LocalContainer.WorkRoot + ":" + cfg.LocalContainer.WorkRoot,
 		"-v\n/var/run/docker.sock:/var/run/docker.sock",
@@ -182,6 +189,11 @@ func TestCreateContainerMountsDockerHostUnixSocket(t *testing.T) {
 	cfg.LocalContainer.DockerSocket = true
 	cfg.LocalContainer.WorkRoot = t.TempDir()
 	cfg.WorkRoot = cfg.LocalContainer.WorkRoot
+	rootInfo, err := os.Stat(cfg.LocalContainer.WorkRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootMode := rootInfo.Mode().Perm()
 	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
 
 	_, err = b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
@@ -189,8 +201,19 @@ func TestCreateContainerMountsDockerHostUnixSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := recordedArgsForCommand(t, runner, "run")
-	if !strings.Contains(args, "-v\n"+socketPath+":/var/run/docker.sock") {
+	wantSocketPath := socketPath
+	if runtime.GOOS != "linux" {
+		wantSocketPath = "/var/run/docker.sock"
+	}
+	if !strings.Contains(args, "-v\n"+wantSocketPath+":/var/run/docker.sock") {
 		t.Fatalf("docker host socket was not mounted:\n%s", args)
+	}
+	rootInfo, err = os.Stat(cfg.LocalContainer.WorkRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootInfo.Mode().Perm() != rootMode {
+		t.Fatalf("host work root mode=%#o want preserved %#o", rootInfo.Mode().Perm(), rootMode)
 	}
 	leaseRoot := filepath.Join(cfg.LocalContainer.WorkRoot, "cbx_123")
 	info, err := os.Stat(leaseRoot)
@@ -210,12 +233,98 @@ func TestDockerSocketMountRejectsRemoteDockerHost(t *testing.T) {
 	}
 }
 
+func TestDockerSocketMountUsesDaemonSocketForNonLinuxClient(t *testing.T) {
+	path, err := dockerSocketMountPathFromHostForGOOS("unix:///var/run/docker.sock", "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/var/run/docker.sock" {
+		t.Fatalf("path=%q, want daemon-visible socket", path)
+	}
+}
+
+func TestDockerSocketMountUsesDaemonSocketForWindowsPipe(t *testing.T) {
+	path, err := dockerSocketMountPathFromHostForGOOS(`npipe:////./pipe/docker_engine`, "windows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/var/run/docker.sock" {
+		t.Fatalf("path=%q, want daemon-visible socket", path)
+	}
+}
+
+func TestDockerSocketWorkRootsUseLinuxGuestPathForWindows(t *testing.T) {
+	host, guest := dockerSocketWorkRootsForGOOS(`C:\crabbox\local-container-work`, "windows")
+	if host != `C:\crabbox\local-container-work` {
+		t.Fatalf("host root=%q", host)
+	}
+	if guest != "/work/crabbox" {
+		t.Fatalf("guest root=%q, want /work/crabbox", guest)
+	}
+
+	host, guest = dockerSocketWorkRootsForGOOS("/work/custom", "windows")
+	if !strings.Contains(host, "crabbox") || guest != "/work/custom" {
+		t.Fatalf("default Windows socket roots host=%q guest=%q", host, guest)
+	}
+}
+
+func TestPrepareLeaseUsesLabeledGuestWorkRootForReadyCheck(t *testing.T) {
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	cfg := b.configForRun()
+	cfg.LocalContainer.DockerSocket = true
+	cfg.LocalContainer.WorkRoot = `C:\crabbox\local-container-work`
+	cfg.WorkRoot = cfg.LocalContainer.WorkRoot
+	container := inspectContainer{
+		ID:   "container1234567890",
+		Name: "/crabbox-windows-root",
+		Config: inspectConfig{
+			Image: "ubuntu:24.04",
+			Labels: map[string]string{
+				"crabbox":        "true",
+				"provider":       providerName,
+				"lease":          "cbx_windows",
+				"slug":           "windows-root",
+				"state":          "ready",
+				"server_type":    "ubuntu:24.04",
+				"ssh_user":       "runner",
+				"docker_socket":  "1",
+				"host_work_root": `C:\crabbox\local-container-work`,
+				"work_root":      "/work/crabbox",
+			},
+		},
+		State: inspectState{Status: "running", Running: true},
+		NetworkSettings: inspectNetworking{
+			Ports: map[string][]inspectPort{"2222/tcp": []inspectPort{{HostIP: "127.0.0.1", HostPort: "49153"}}},
+		},
+	}
+
+	lease, err := b.prepareLease(context.Background(), cfg, container, "cbx_windows", "windows-root", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.ReadyCheck == "" || !strings.Contains(lease.SSH.ReadyCheck, "test -d '/work/crabbox'") {
+		t.Fatalf("ready check did not use guest work root: %q", lease.SSH.ReadyCheck)
+	}
+	if strings.Contains(lease.SSH.ReadyCheck, `C:\crabbox`) {
+		t.Fatalf("ready check used host work root: %q", lease.SSH.ReadyCheck)
+	}
+	if lease.SSH.User != "runner" || lease.SSH.Port != "49153" {
+		t.Fatalf("unexpected lease target: %#v", lease.SSH)
+	}
+}
+
 func TestConfigForRunUsesHostVisibleWorkRootWithDockerSocket(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.LocalContainer.DockerSocket = true
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	got := b.configForRun()
+	if runtime.GOOS == "windows" {
+		if got.LocalContainer.WorkRoot != "/work/crabbox" || got.WorkRoot != "/work/crabbox" {
+			t.Fatalf("windows docker socket work root should stay Linux-visible: %#v", got.LocalContainer)
+		}
+		return
+	}
 	if got.LocalContainer.WorkRoot == "/work/crabbox" || got.WorkRoot == "/work/crabbox" {
 		t.Fatalf("docker socket work root should be host-visible: %#v", got.LocalContainer)
 	}
@@ -241,6 +350,10 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 func TestBootstrapScriptSupportsDockerSocketCLI(t *testing.T) {
 	for _, want := range []string{
 		`[ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker`,
+		`https://download.docker.com/linux/${ID}/gpg`,
+		`if apt-get update && apt-get install -y --no-install-recommends docker-ce-cli; then`,
+		`rm -f /etc/apt/sources.list.d/docker.list`,
+		`apt-get install -y --no-install-recommends docker-ce-cli`,
 		`apt-get install -y --no-install-recommends docker.io`,
 		`docker socket requested but docker CLI is not installed`,
 		`stat -c '%g' /var/run/docker.sock`,
@@ -316,6 +429,46 @@ func TestListAndResolveContainers(t *testing.T) {
 	}
 }
 
+func TestTouchPreservesLocalContainerLabels(t *testing.T) {
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	lease := core.LeaseTarget{
+		LeaseID: "cbx_touch",
+		Server: core.Server{
+			Labels: map[string]string{
+				"docker_socket":  "1",
+				"host_work_root": "/tmp/crabbox-local-container-work",
+				"work_root":      "/tmp/crabbox-local-container-work",
+				"ssh_user":       "runner",
+			},
+		},
+	}
+	server, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.Labels["work_root"] != lease.Server.Labels["work_root"] || server.Labels["host_work_root"] != lease.Server.Labels["host_work_root"] || server.Labels["docker_socket"] != "1" || server.Labels["ssh_user"] != "runner" {
+		t.Fatalf("provider labels not preserved: %#v", server.Labels)
+	}
+	if server.Labels["state"] != "running" {
+		t.Fatalf("state not touched: %#v", server.Labels)
+	}
+}
+
+func TestHostLeaseWorkRootRequiresTrustedLabels(t *testing.T) {
+	hostRoot := t.TempDir()
+	leaseID := "cbx_trusted"
+	if got := hostLeaseWorkRootFromLabels(leaseID, map[string]string{"docker_socket": "1", "work_root": hostRoot}); got != "" {
+		t.Fatalf("unmarked work root accepted: %q", got)
+	}
+	if got := hostLeaseWorkRootFromLabels("Users", map[string]string{"docker_socket": "1", "work_root": "/"}); got != "" {
+		t.Fatalf("spoofed lease root accepted: %q", got)
+	}
+	markTestLocalContainerWorkRoot(t, hostRoot)
+	if got := hostLeaseWorkRootFromLabels(leaseID, map[string]string{"docker_socket": "1", "host_work_root": hostRoot, "work_root": "/work/crabbox"}); got != filepath.Join(hostRoot, leaseID) {
+		t.Fatalf("work root=%q want %q", got, filepath.Join(hostRoot, leaseID))
+	}
+}
+
 func TestFindContainerForClaimReturnsMatchedContainerIdentity(t *testing.T) {
 	inspectJSON := `[{
 		"Id":"newcontainer123456",
@@ -364,5 +517,331 @@ func TestReleaseLeaseRemovesStoredKey(t *testing.T) {
 	}
 	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
 		t.Fatalf("stored key still exists after release: %v", err)
+	}
+}
+
+func TestReleaseLeaseRemovesDockerSocketHostWorkRoot(t *testing.T) {
+	hostRoot := t.TempDir()
+	markTestLocalContainerWorkRoot(t, hostRoot)
+	leaseRoot := filepath.Join(hostRoot, "cbx_release")
+	if err := os.MkdirAll(filepath.Join(leaseRoot, "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"rm", "-f", "container123"}): {},
+		},
+	}
+	b := testBackend(runner)
+	lease := core.LeaseTarget{
+		LeaseID: "cbx_release",
+		Server: core.Server{
+			CloudID: "container123",
+			Labels: map[string]string{
+				"docker_socket": "1",
+				"work_root":     hostRoot,
+			},
+		},
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(leaseRoot); !os.IsNotExist(err) {
+		t.Fatalf("host lease root still exists after release: %v", err)
+	}
+	if _, err := os.Stat(hostRoot); err != nil {
+		t.Fatalf("host work root parent removed: %v", err)
+	}
+}
+
+func TestReleaseLeaseWithIDResolvesHostWorkRoot(t *testing.T) {
+	hostRoot := t.TempDir()
+	markTestLocalContainerWorkRoot(t, hostRoot)
+	leaseRoot := filepath.Join(hostRoot, "cbx_release")
+	if err := os.MkdirAll(filepath.Join(leaseRoot, "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inspectJSON := `[{
+		"Id":"container1234567890",
+		"Name":"/crabbox-release",
+		"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_release","slug":"release-root","state":"ready","server_type":"ubuntu:24.04","ssh_user":"runner","work_root":"` + hostRoot + `","docker_socket":"1"}},
+		"State":{"Status":"running","Running":true},
+		"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49153"}]}}
+	}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "container1234567890\n"},
+			commandKey([]string{"inspect", "container1234567890"}):  {Stdout: inspectJSON},
+			commandKey([]string{"rm", "-f", "container1234567890"}): {},
+		},
+	}
+	b := testBackend(runner)
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_release"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(leaseRoot); !os.IsNotExist(err) {
+		t.Fatalf("host lease root still exists after release by id: %v", err)
+	}
+}
+
+func TestCleanupRemovesExpiredLocalContainers(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	hostRoot := t.TempDir()
+	markTestLocalContainerWorkRoot(t, hostRoot)
+	leaseRoot := filepath.Join(hostRoot, "cbx_cleanup")
+	if err := os.MkdirAll(filepath.Join(leaseRoot, "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Now().Add(-48 * time.Hour).Unix()
+	inspectJSON := `[{
+		"Id":"abcdef1234567890",
+		"Name":"/crabbox-cleanup",
+		"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_cleanup","slug":"old-cleanup","state":"ready","server_type":"ubuntu:24.04","ssh_user":"runner","work_root":"` + hostRoot + `","docker_socket":"1","expires_at":"` + strconv.FormatInt(created, 10) + `"}},
+		"State":{"Status":"running","Running":true},
+		"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49153"}]}}
+	}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "abcdef1234567890\n"},
+			commandKey([]string{"inspect", "abcdef1234567890"}):  {Stdout: inspectJSON},
+			commandKey([]string{"rm", "-f", "abcdef1234567890"}): {},
+		},
+	}
+	b := testBackend(runner)
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(leaseRoot); !os.IsNotExist(err) {
+		t.Fatalf("host lease root still exists after cleanup: %v", err)
+	}
+	args := recordedArgsForCommand(t, runner, "rm")
+	if !strings.Contains(args, "abcdef1234567890") {
+		t.Fatalf("cleanup did not remove container:\n%s", args)
+	}
+}
+
+func TestCleanupRemovesClaimAfterHostWorkRootFailure(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	claimDir := filepath.Join(stateHome, "crabbox", "claims")
+	if err := os.MkdirAll(claimDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	expired := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339)
+	claimData := []byte(`{"leaseID":"cbx_cleanup","slug":"old-cleanup","provider":"` + providerName + `","repoRoot":` + strconv.Quote(t.TempDir()) + `,"claimedAt":` + strconv.Quote(expired) + `,"lastUsedAt":` + strconv.Quote(expired) + `,"idleTimeoutSeconds":60}`)
+	if err := os.WriteFile(filepath.Join(claimDir, "cbx_cleanup.json"), claimData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := core.TestboxKeyPath("cbx_cleanup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hostRoot := t.TempDir()
+	markTestLocalContainerWorkRoot(t, hostRoot)
+	leaseRoot := filepath.Join(hostRoot, "cbx_cleanup")
+	if err := os.MkdirAll(filepath.Join(leaseRoot, "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(hostRoot, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(hostRoot, 0o700)
+	})
+	created := time.Now().Add(-48 * time.Hour).Unix()
+	inspectJSON := `[{
+		"Id":"abcdef1234567890",
+		"Name":"/crabbox-cleanup",
+		"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_cleanup","slug":"old-cleanup","state":"ready","server_type":"ubuntu:24.04","ssh_user":"runner","work_root":"` + hostRoot + `","docker_socket":"1","expires_at":"` + strconv.FormatInt(created, 10) + `"}},
+		"State":{"Status":"running","Running":true},
+		"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49153"}]}}
+	}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "abcdef1234567890\n"},
+			commandKey([]string{"inspect", "abcdef1234567890"}):  {Stdout: inspectJSON},
+			commandKey([]string{"rm", "-f", "abcdef1234567890"}): {},
+		},
+	}
+	b := testBackend(runner)
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err == nil {
+		t.Fatal("cleanup succeeded despite host work root removal failure")
+	}
+	if claim, err := core.ReadLeaseClaim("cbx_cleanup"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("claim still exists after partial cleanup failure: %#v", claim)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("stored key still exists after partial cleanup failure: %v", err)
+	}
+}
+
+func TestCleanupRemovesClaimWithoutContainer(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	scope := localContainerClaimScope("docker", "default")
+	keyPath := writeLocalContainerClaimAndKey(t, "cbx_missing", "missing-container", scope)
+
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"context", "show"}): {Stdout: "default\n"},
+	}})
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := core.ReadLeaseClaim("cbx_missing"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("claim still exists after cleanup: %#v", claim)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("stored key still exists after cleanup: %v", err)
+	}
+}
+
+func TestCleanupDryRunKeepsClaimWithoutContainer(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	scope := localContainerClaimScope("docker", "default")
+	keyPath := writeLocalContainerClaimAndKey(t, "cbx_missing", "missing-container", scope)
+
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"context", "show"}): {Stdout: "default\n"},
+	}})
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := core.ReadLeaseClaim("cbx_missing"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "cbx_missing" {
+		t.Fatalf("claim removed during dry-run: %#v", claim)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key removed during dry-run: %v", err)
+	}
+}
+
+func TestCleanupKeepsClaimFromDifferentRuntimeContext(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	keyPath := writeLocalContainerClaimAndKey(t, "cbx_other", "other-context", localContainerClaimScope("docker", "colima"))
+
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"context", "show"}): {Stdout: "desktop-linux\n"},
+	}})
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := core.ReadLeaseClaim("cbx_other"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "cbx_other" {
+		t.Fatalf("claim from another context was removed: %#v", claim)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key from another context was removed: %v", err)
+	}
+}
+
+func TestCleanupKeepsClaimFromDifferentDockerHostSameContext(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	keyPath := writeLocalContainerClaimAndKey(t, "cbx_other_host", "other-host", localContainerClaimScope("docker", "default", "unix:///tmp/docker-a.sock"))
+	t.Setenv("DOCKER_HOST", "unix:///tmp/docker-b.sock")
+
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"context", "show"}): {Stdout: "default\n"},
+	}})
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := core.ReadLeaseClaim("cbx_other_host"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "cbx_other_host" {
+		t.Fatalf("claim from another Docker host was removed: %#v", claim)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key from another Docker host was removed: %v", err)
+	}
+}
+
+func TestCleanupRemovesStaleLegacyUnscopedClaimWithoutContainer(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	lastUsed := time.Now().Add(-48 * time.Hour).UTC()
+	keyPath := writeLocalContainerClaimAndKeyAt(t, "cbx_legacy", "legacy-missing", "", lastUsed, time.Minute)
+
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"context", "show"}): {Stdout: "default\n"},
+	}})
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := core.ReadLeaseClaim("cbx_legacy"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("stale legacy claim still exists after cleanup: %#v", claim)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("stale legacy stored key still exists after cleanup: %v", err)
+	}
+}
+
+func writeLocalContainerClaimAndKey(t *testing.T, leaseID, slug string, scopes ...string) string {
+	t.Helper()
+	scope := ""
+	if len(scopes) > 0 {
+		scope = scopes[0]
+	}
+	return writeLocalContainerClaimAndKeyAt(t, leaseID, slug, scope, time.Now().UTC(), time.Minute)
+}
+
+func writeLocalContainerClaimAndKeyAt(t *testing.T, leaseID, slug, scope string, lastUsed time.Time, idle time.Duration) string {
+	t.Helper()
+	if err := writeLocalContainerClaim(t, leaseID, slug, scope, lastUsed, idle); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return keyPath
+}
+
+func writeLocalContainerClaim(t *testing.T, leaseID, slug, scope string, lastUsed time.Time, idle time.Duration) error {
+	t.Helper()
+	stateHome := os.Getenv("XDG_STATE_HOME")
+	if stateHome == "" {
+		t.Fatal("XDG_STATE_HOME must be set before writing test claims")
+	}
+	claimDir := filepath.Join(stateHome, "crabbox", "claims")
+	if err := os.MkdirAll(claimDir, 0o700); err != nil {
+		return err
+	}
+	scopeField := ""
+	if scope != "" {
+		scopeField = `,"providerScope":` + strconv.Quote(scope)
+	}
+	data := []byte(`{"leaseID":` + strconv.Quote(leaseID) + `,"slug":` + strconv.Quote(slug) + `,"provider":` + strconv.Quote(providerName) + scopeField + `,"repoRoot":` + strconv.Quote(t.TempDir()) + `,"claimedAt":` + strconv.Quote(lastUsed.Format(time.RFC3339)) + `,"lastUsedAt":` + strconv.Quote(lastUsed.Format(time.RFC3339)) + `,"idleTimeoutSeconds":` + strconv.Itoa(int(idle.Seconds())) + `}`)
+	return os.WriteFile(filepath.Join(claimDir, leaseID+".json"), data, 0o600)
+}
+
+func markTestLocalContainerWorkRoot(t *testing.T, root string) {
+	t.Helper()
+	if err := markLocalContainerWorkRoot(root); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -547,11 +547,20 @@ type rsyncOptions struct {
 	FullResync        bool
 	UseFilesFrom      bool
 	FilesFrom         []byte
+	NoTimes           bool
 	Timeout           time.Duration
 	HeartbeatInterval time.Duration
 }
 
+func normalizeRsyncOptions(opts rsyncOptions) rsyncOptions {
+	if opts.NoTimes {
+		opts.Checksum = true
+	}
+	return opts
+}
+
 func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []string, stdout, stderr io.Writer, opts rsyncOptions) error {
+	opts = normalizeRsyncOptions(opts)
 	if opts.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
@@ -560,6 +569,9 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	args := []string{
 		"-az",
 		"-e", strings.Join(shellWords(append([]string{"ssh"}, sshBaseArgs(target)...)), " "),
+	}
+	if opts.NoTimes {
+		args = append(args, "--no-times", "--omit-dir-times")
 	}
 	if opts.Delete && !opts.UseFilesFrom {
 		args = append(args, "--delete")

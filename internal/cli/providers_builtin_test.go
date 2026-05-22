@@ -674,7 +674,7 @@ func (testLocalContainerProvider) Spec() ProviderSpec {
 		Name:        "local-container",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureDesktop, FeatureBrowser},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser},
 		Coordinator: CoordinatorNever,
 	}
 }

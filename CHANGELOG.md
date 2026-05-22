@@ -9,6 +9,11 @@
 
 ### Fixed
 
+- Fixed local-container Docker socket pass-through on Docker Desktop, OrbStack, Colima, and similar local VM runtimes by mounting the daemon-visible socket path instead of the client context socket path.
+- Fixed local-container Docker socket sync on local VM runtimes that reject rsync mtime updates on host-mounted work roots.
+- Fixed local-container Docker socket bootstrap to prefer Docker's current Debian/Ubuntu CLI package before falling back to distro `docker.io`.
+- Fixed `crabbox cleanup --provider docker` support for stale local-container leases.
+- Fixed `provider: docker` stop/release cleanup so host-visible per-lease work directories created for Docker socket pass-through are removed with the lease.
 - Fixed local Actions hydration for repo-local composite actions, cache no-ops, simple input conditions, safe `hashFiles`, secret-expression rejection, and Node 24.x setup on minimal Debian images.
 
 ## 0.17.0 - 2026-05-21

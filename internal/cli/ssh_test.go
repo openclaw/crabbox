@@ -694,6 +694,18 @@ func TestRsyncLocalPathPassesThroughNonWindowsPath(t *testing.T) {
 	}
 }
 
+func TestNormalizeRsyncOptionsNoTimesForcesChecksum(t *testing.T) {
+	t.Parallel()
+	got := normalizeRsyncOptions(rsyncOptions{NoTimes: true})
+	if !got.Checksum {
+		t.Fatal("NoTimes rsync must force checksum comparison")
+	}
+	got = normalizeRsyncOptions(rsyncOptions{})
+	if got.Checksum {
+		t.Fatal("normal rsync should keep checksum disabled by default")
+	}
+}
+
 func TestWindowsToWSLPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
