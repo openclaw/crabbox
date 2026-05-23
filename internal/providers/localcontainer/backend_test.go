@@ -119,6 +119,11 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 		`home_dir="$(getent passwd "$user" | cut -d: -f6)"`,
 		`"$home_dir/.ssh/authorized_keys"`,
 		`chown -R "$user" "$home_dir/.ssh" "$work_root"`,
+		`"$config_dir/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"`,
+		`ThemeName" type="string" value="Adwaita-dark"`,
+		`gtk-application-prefer-dark-theme=1`,
+		`xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme`,
+		`gsettings set org.gnome.desktop.interface color-scheme prefer-dark`,
 	} {
 		if !strings.Contains(bootstrapScript, want) {
 			t.Fatalf("bootstrap script missing %q", want)

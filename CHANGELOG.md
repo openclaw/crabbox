@@ -6,6 +6,10 @@
 
 - Added `crabbox run --emit-proof` support for Blacksmith Testbox delegated runs, including bounded local stdout/stderr, timing, and metadata artifacts for successful proof runs.
 
+### Changed
+
+- Changed Linux desktop/WebVNC leases to seed and apply XFCE, GTK, GSettings, and terminal dark theme settings, and changed the portal theme toggle to preserve a system-synced mode.
+
 ## 0.17.0 - 2026-05-21
 
 ### Added

@@ -601,6 +601,39 @@ if [ "${CRABBOX_DESKTOP:-0}" = "1" ]; then
   x11vnc -storepasswd "$(cat /var/lib/crabbox/vnc.password)" /var/lib/crabbox/vnc.pass >/dev/null
   chown "$user" /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
   chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
+  config_dir="$home_dir/.config"
+  install -d -m 0700 -o "$user" "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0"
+  cat > "$config_dir/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xsettings" version="1.0">
+  <property name="Net" type="empty">
+    <property name="ThemeName" type="string" value="Adwaita-dark"/>
+    <property name="IconThemeName" type="string" value="Adwaita"/>
+  </property>
+  <property name="Gtk" type="empty">
+    <property name="ApplicationPreferDarkTheme" type="bool" value="true"/>
+  </property>
+</channel>
+XML
+  cat > "$config_dir/xfce4/terminal/terminalrc" <<'EOF'
+[Configuration]
+ColorForeground=#e5e7eb
+ColorBackground=#111827
+ColorCursor=#f3f4f6
+MiscBell=FALSE
+EOF
+  cat > "$config_dir/gtk-3.0/settings.ini" <<'EOF'
+[Settings]
+gtk-theme-name=Adwaita-dark
+gtk-icon-theme-name=Adwaita
+gtk-application-prefer-dark-theme=1
+EOF
+  cat > "$home_dir/.gtkrc-2.0" <<'EOF'
+gtk-theme-name="Adwaita-dark"
+gtk-icon-theme-name="Adwaita"
+gtk-application-prefer-dark-theme=1
+EOF
+  chown -R "$user" "$config_dir" "$home_dir/.gtkrc-2.0"
   cat >/usr/local/bin/crabbox-start-desktop <<'DESKTOP'
 #!/bin/sh
 set -eu
@@ -615,6 +648,15 @@ if ! pgrep -u "$user" -f 'xfce4-session|startxfce4' >/dev/null 2>&1; then
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' dbus-launch startxfce4 >/tmp/crabbox-desktop.log 2>&1 &"
 fi
 sleep 2
+if command -v xfconf-query >/dev/null 2>&1; then
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s Adwaita-dark >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s Adwaita >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme -n -t bool -s true >/dev/null 2>&1 || true"
+fi
+if command -v gsettings >/dev/null 2>&1; then
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' gsettings set org.gnome.desktop.interface color-scheme prefer-dark >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' gsettings set org.gnome.desktop.interface gtk-theme Adwaita-dark >/dev/null 2>&1 || true"
+fi
 if command -v xfce4-terminal >/dev/null 2>&1 && ! pgrep -u "$user" -f 'xfce4-terminal.*Crabbox Desktop' >/dev/null 2>&1; then
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfce4-terminal --title='Crabbox Desktop' --geometry=110x32+48+48 >/tmp/crabbox-terminal.log 2>&1 &" || true
 elif command -v xterm >/dev/null 2>&1 && ! pgrep -u "$user" -f 'xterm -title Crabbox Desktop' >/dev/null 2>&1; then

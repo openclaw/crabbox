@@ -9,10 +9,11 @@ const codeIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 8-4 4 
 const shareIcon = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4"/><path d="m8.6 13.5 6.8 4"/></svg>`;
 const themeMoonIcon = `<svg class="theme-icon-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M14.6 12.1A6.5 6.5 0 0 1 7.4 2.7a6.5 6.5 0 1 0 7.2 9.4z" fill="currentColor"/></svg>`;
 const themeSunIcon = `<svg class="theme-icon-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.4" fill="currentColor"/><g stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="10" y1="2" x2="10" y2="4"/><line x1="10" y1="16" x2="10" y2="18"/><line x1="2" y1="10" x2="4" y2="10"/><line x1="16" y1="10" x2="18" y2="10"/><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"/><line x1="14.4" y1="14.4" x2="15.8" y2="15.8"/><line x1="4.2" y1="15.8" x2="5.6" y2="14.4"/><line x1="14.4" y1="5.6" x2="15.8" y2="4.2"/></g></svg>`;
+const themeSystemIcon = `<svg class="theme-icon-system" viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="10" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 17h6M10 14v3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`;
 const portalBrand = "🦀 crabbox";
 
 function themeToggleButton(): string {
-  return `<button class="icon-btn theme-toggle" type="button" aria-label="Toggle dark mode" aria-pressed="true" data-theme-toggle>${themeMoonIcon}${themeSunIcon}</button>`;
+  return `<button class="icon-btn theme-toggle" type="button" aria-label="Theme: system" aria-pressed="false" title="Theme: system" data-theme-toggle>${themeMoonIcon}${themeSunIcon}${themeSystemIcon}</button>`;
 }
 
 interface PortalHeaderOptions {
@@ -2489,7 +2490,7 @@ function html(
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#0b0d0f">
   <title>${escapeHTML(title)}</title>
-  <script nonce="${pageNonce}">(function(){var s;try{s=localStorage.getItem('crabbox-theme')}catch(e){}var d=window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.dataset.theme=(s==='light'||s==='dark')?s:(d?'dark':'light')})();</script>
+  <script nonce="${pageNonce}">(function(){var s;try{s=localStorage.getItem('crabbox-theme')}catch(e){}var m=(s==='light'||s==='dark')?s:'system';var d=window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.dataset.themeSource=m;document.documentElement.dataset.theme=m==='system'?(d?'dark':'light'):m})();</script>
   <style>
     :root {
       color-scheme: dark;
@@ -2715,10 +2716,10 @@ function html(
     .theme-toggle { color:var(--muted); }
     .theme-toggle:hover { color:var(--fg); }
     .theme-toggle svg { width:15px; height:15px; display:block; }
-    .theme-icon-moon { display:none; }
-    .theme-icon-sun { display:block; }
-    :root[data-theme="light"] .theme-icon-moon { display:block; }
-    :root[data-theme="light"] .theme-icon-sun { display:none; }
+    .theme-icon-moon,.theme-icon-sun,.theme-icon-system { display:none; }
+    :root[data-theme-source="system"] .theme-icon-system { display:block; }
+    :root[data-theme-source="dark"] .theme-icon-sun { display:block; }
+    :root[data-theme-source="light"] .theme-icon-moon { display:block; }
     .screen { min-height:0; border:1px solid var(--line); border-radius:8px; background:var(--bg); overflow:hidden; box-shadow:inset 0 0 0 1px rgba(255,255,255,0.02); }
     .screen div { margin:0 auto; }
     .code-wait-screen { display:grid; place-items:center; padding:clamp(18px,5vw,64px); }
@@ -2829,31 +2830,43 @@ function portalEnhancementsScript(): string {
   return `
 (() => {
   const themeRoot = document.documentElement;
+  const systemDark = window.matchMedia && matchMedia("(prefers-color-scheme: dark)");
   function storedTheme() {
     try { return localStorage.getItem("crabbox-theme"); } catch (_) { return null; }
   }
-  function applyTheme(mode) {
+  function themeSource(value) {
+    return value === "light" || value === "dark" ? value : "system";
+  }
+  function resolvedTheme(source) {
+    return source === "system" ? (systemDark && systemDark.matches ? "dark" : "light") : source;
+  }
+  function applyTheme(source) {
+    source = themeSource(source);
+    const mode = resolvedTheme(source);
+    themeRoot.dataset.themeSource = source;
     themeRoot.dataset.theme = mode;
     const dark = mode !== "light";
     document.querySelectorAll("[data-theme-toggle]").forEach((btn) => {
       btn.setAttribute("aria-pressed", dark ? "true" : "false");
+      btn.setAttribute("aria-label", "Theme: " + source);
+      btn.setAttribute("title", "Theme: " + source);
     });
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute("content", dark ? "#0b0d0f" : "#f4f6f8");
   }
-  applyTheme(themeRoot.dataset.theme === "light" ? "light" : "dark");
+  applyTheme(themeRoot.dataset.themeSource || storedTheme());
   document.querySelectorAll("[data-theme-toggle]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const next = themeRoot.dataset.theme === "light" ? "dark" : "light";
+      const current = themeSource(themeRoot.dataset.themeSource);
+      const next = current === "system" ? "dark" : current === "dark" ? "light" : "system";
       applyTheme(next);
       try { localStorage.setItem("crabbox-theme", next); } catch (_) {}
     });
   });
-  const systemDark = window.matchMedia && matchMedia("(prefers-color-scheme: dark)");
   if (systemDark) {
-    const onSystemChange = (event) => {
-      if (storedTheme()) return;
-      applyTheme(event.matches ? "dark" : "light");
+    const onSystemChange = () => {
+      if (themeSource(storedTheme()) !== "system") return;
+      applyTheme("system");
     };
     if (systemDark.addEventListener) systemDark.addEventListener("change", onSystemChange);
     else if (systemDark.addListener) systemDark.addListener(onSystemChange);
