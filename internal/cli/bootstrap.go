@@ -642,7 +642,12 @@ func cloudInitOptionalWriteFiles(cfg Config) string {
         home_dir="/home/$user"
       fi
       config_dir="$home_dir/.config"
-      install -d -m 0700 -o "$user" "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0"
+      if [ "$(id -u)" -eq 0 ]; then
+        install -d -m 0700 -o "$user" "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0"
+      else
+        mkdir -p "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0"
+        chmod 0700 "$config_dir" "$config_dir/xfce4" "$config_dir/xfce4/xfconf" "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0"
+      fi
       cat > "$config_dir/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" <<'XML'
       <?xml version="1.0" encoding="UTF-8"?>
       <channel name="xsettings" version="1.0">

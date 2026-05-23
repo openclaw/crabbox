@@ -97,6 +97,7 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 		"systemctl is-active --quiet crabbox-desktop-session.service",
 		"ThemeName\" type=\"string\" value=\"Adwaita-dark",
 		"gtk-application-prefer-dark-theme=1",
+		"mkdir -p \"$config_dir/xfce4/xfconf/xfce-perchannel-xml\"",
 		"xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme",
 		"gsettings set org.gnome.desktop.interface color-scheme prefer-dark",
 		"CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme",

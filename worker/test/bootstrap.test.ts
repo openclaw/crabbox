@@ -96,6 +96,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("systemctl is-active --quiet crabbox-desktop-session.service");
     expect(got).toContain('ThemeName" type="string" value="Adwaita-dark');
     expect(got).toContain("gtk-application-prefer-dark-theme=1");
+    expect(got).toContain('mkdir -p "$config_dir/xfce4/xfconf/xfce-perchannel-xml"');
     expect(got).toContain("xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme");
     expect(got).toContain("gsettings set org.gnome.desktop.interface color-scheme prefer-dark");
     expect(got).toContain(
