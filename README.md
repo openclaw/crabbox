@@ -55,6 +55,8 @@ Supported providers:
   execution.
 - [Modal](docs/providers/modal.md) (`provider: modal`): delegated Modal
   Sandbox execution through the local Python client.
+- [Upstash Box](docs/providers/upstash-box.md) (`provider: upstash-box`):
+  delegated Upstash Box execution through the Box REST API.
 - [Tensorlake](docs/providers/tensorlake.md) (`provider: tensorlake`):
   delegated Tensorlake Firecracker sandbox execution through the Tensorlake CLI.
 - [Cloudflare](docs/providers/cloudflare.md)
@@ -152,8 +154,10 @@ For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For th
   `provider: islo` for delegated Islo sandbox execution through the Islo Go SDK,
   `provider: e2b` for delegated E2B sandbox execution through E2B sandbox APIs,
   `provider: modal` for Modal Sandbox execution through the local Python client,
+  `provider: upstash-box` for delegated Upstash Box execution through the Box
+  REST API,
   or `provider: tensorlake` for Tensorlake Firecracker sandbox execution through
-  the Tensorlake CLI. See [Daytona](docs/providers/daytona.md), [Islo](docs/providers/islo.md), [E2B](docs/providers/e2b.md), [Modal](docs/providers/modal.md), and [Tensorlake](docs/providers/tensorlake.md).
+  the Tensorlake CLI. See [Daytona](docs/providers/daytona.md), [Islo](docs/providers/islo.md), [E2B](docs/providers/e2b.md), [Modal](docs/providers/modal.md), [Upstash Box](docs/providers/upstash-box.md), and [Tensorlake](docs/providers/tensorlake.md).
 - **Cloudflare.** Set `provider: cloudflare` for delegated execution through a Worker runner and custom container image. See [Cloudflare](docs/providers/cloudflare.md).
 - **Trusted AWS images.** Operators can create AMIs from active brokered AWS leases and promote a known-good image as the coordinator default. See [Image bake runbook](docs/features/image-bake-runbook.md) and [Prebaked images](docs/features/prebaked-images.md).
 - **Cost guardrails.** Per-lease and monthly spend caps. Live pricing from EC2 Spot history or Hetzner server-type prices, with static fallbacks. `crabbox usage` summarizes spend by user, org, provider, and type. See [Cost and usage](docs/features/cost-usage.md).
@@ -348,6 +352,16 @@ modal:
   app: crabbox
   image: python:3.13-slim
   workdir: /workspace/crabbox
+```
+
+Optional Upstash Box sandbox:
+
+```yaml
+provider: upstash-box
+upstashBox:
+  runtime: node
+  size: small
+  workdir: /workspace/home/crabbox
 ```
 
 Optional Tensorlake sandbox:

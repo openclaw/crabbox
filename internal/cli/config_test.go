@@ -125,6 +125,7 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_LOCAL_CONTAINER_CPUS",
 		"CRABBOX_LOCAL_CONTAINER_MEMORY",
 		"CRABBOX_LOCAL_CONTAINER_NETWORK",
+		"CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET",
 		"CRABBOX_NAMESPACE_IMAGE",
 		"CRABBOX_NAMESPACE_SIZE",
 		"CRABBOX_NAMESPACE_REPOSITORY",
@@ -881,6 +882,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_LOCAL_CONTAINER_CPUS", "6")
 	t.Setenv("CRABBOX_LOCAL_CONTAINER_MEMORY", "12g")
 	t.Setenv("CRABBOX_LOCAL_CONTAINER_NETWORK", "bridge")
+	t.Setenv("CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET", "true")
 	t.Setenv("CRABBOX_NAMESPACE_IMAGE", "namespace-env-image")
 	t.Setenv("CRABBOX_NAMESPACE_SIZE", "XL")
 	t.Setenv("CRABBOX_NAMESPACE_REPOSITORY", "github.com/openclaw/env")
@@ -997,7 +999,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if cfg.Sprites.Token != "sprites-token-env" || cfg.Sprites.APIURL != "https://api.sprites-env.example" || cfg.Sprites.WorkRoot != "/home/sprite/env" {
 		t.Fatalf("unexpected sprites env: %#v", cfg.Sprites)
 	}
-	if cfg.LocalContainer.Runtime != "docker" || cfg.LocalContainer.Image != "ubuntu:env" || cfg.LocalContainer.User != "runner-env" || cfg.LocalContainer.WorkRoot != "/workspace/env" || cfg.LocalContainer.CPUs != 6 || cfg.LocalContainer.Memory != "12g" || cfg.LocalContainer.Network != "bridge" {
+	if cfg.LocalContainer.Runtime != "docker" || cfg.LocalContainer.Image != "ubuntu:env" || cfg.LocalContainer.User != "runner-env" || cfg.LocalContainer.WorkRoot != "/workspace/env" || cfg.LocalContainer.CPUs != 6 || cfg.LocalContainer.Memory != "12g" || cfg.LocalContainer.Network != "bridge" || !cfg.LocalContainer.DockerSocket {
 		t.Fatalf("unexpected local-container env: %#v", cfg.LocalContainer)
 	}
 	if cfg.Blacksmith.IdleTimeout != 2*time.Hour || !cfg.Blacksmith.Debug {

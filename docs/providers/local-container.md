@@ -64,6 +64,7 @@ localContainer:
   cpus: 0
   memory: ""
   network: bridge
+  dockerSocket: false
 ```
 
 Provider flags:
@@ -76,6 +77,7 @@ Provider flags:
 --local-container-cpus <n>
 --local-container-memory <size>
 --local-container-network <network>
+--local-container-docker-socket
 ```
 
 Environment overrides:
@@ -88,7 +90,19 @@ CRABBOX_LOCAL_CONTAINER_WORK_ROOT
 CRABBOX_LOCAL_CONTAINER_CPUS
 CRABBOX_LOCAL_CONTAINER_MEMORY
 CRABBOX_LOCAL_CONTAINER_NETWORK
+CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET
 ```
+
+Set `localContainer.dockerSocket: true` or
+`CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET=1` when commands inside the lease need
+Docker. Crabbox mounts the active local Unix Docker socket into the container as
+`/var/run/docker.sock`, so `docker` commands run against the active local
+Docker-compatible daemon. Remote Docker contexts are rejected. When the socket is
+enabled and no work root is explicitly configured, Crabbox uses a host-visible
+cache work root. On POSIX clients it mounts that root at the same absolute path
+inside the lease so nested Docker bind mounts can see the synced checkout. On
+Windows npipe clients, the host cache root is mounted at the Linux guest work
+root instead because Windows paths are not valid Linux container work paths.
 
 ## Behavior
 
@@ -105,6 +119,9 @@ CRABBOX_LOCAL_CONTAINER_NETWORK
 6. Crabbox waits for SSH readiness, syncs tracked and nonignored files into
    `localContainer.workRoot`, and uses the normal SSH executor.
 7. `status`, `list`, and `stop` inspect or remove labeled containers.
+8. `cleanup --provider docker` removes stopped containers and running
+   non-`keep` containers whose local claim or lease labels are stale past the
+   idle timeout plus a safety grace period.
 
 ## Limits
 
@@ -115,13 +132,18 @@ CRABBOX_LOCAL_CONTAINER_NETWORK
   are local-only. `webvnc` starts noVNC/websockify on the target and tunnels it
   over SSH; it does not use the authenticated Crabbox portal.
 - No code-server, Tailscale bootstrap, or native checkpoint support yet.
+- Docker socket pass-through is opt-in and gives the lease access to the host
+  Docker daemon. On Docker Desktop, OrbStack, Colima, and similar local VM
+  runtimes, Crabbox mounts the daemon-visible `/var/run/docker.sock` rather than
+  the client context socket path. Socket mode syncs without preserving mtimes so
+  host-mounted local VM filesystems do not fail on metadata updates.
 - `warmup --actions-runner` is not supported; use normal `crabbox run` for
   local container smoke tests or a remote SSH provider for GitHub runner
   registration.
 - The Docker daemon is a powerful local capability. Do not treat this as the
   same host isolation boundary as a remote VM or microVM.
-- The current checkout is synced into the container by default. Crabbox does not
-  bind-mount the repo or mount the Docker socket.
+- The current checkout is synced into the container by default rather than
+  bind-mounted. Crabbox mounts the Docker socket only when explicitly enabled.
 - The default `debian:bookworm` image bootstraps packages on first start. Use a
   prebuilt image with SSH/Git/rsync/desktop/browser packages when startup time
   matters.

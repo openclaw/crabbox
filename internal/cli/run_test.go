@@ -2031,3 +2031,46 @@ func TestRecordRunFailureCapturesShadowedReturnErrors(t *testing.T) {
 		t.Fatalf("nil failure should not clear recorded error, got %v", recorded)
 	}
 }
+
+func TestLocalContainerDockerSocketSyncUsesResolvedLabels(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "local-container"
+	server := Server{
+		Provider: "local-container",
+		Labels:   map[string]string{"docker_socket": "1"},
+	}
+	if !localContainerDockerSocketSync(cfg, server) {
+		t.Fatal("socket-enabled resolved lease should sync without preserving mtimes")
+	}
+	server.Labels["docker_socket"] = "0"
+	cfg.LocalContainer.DockerSocket = true
+	if !localContainerDockerSocketSync(cfg, server) {
+		t.Fatal("socket-enabled config should sync without preserving mtimes")
+	}
+	cfg.Provider = "aws"
+	server.Provider = "aws"
+	if localContainerDockerSocketSync(cfg, server) {
+		t.Fatal("non-local-container provider should preserve normal rsync defaults")
+	}
+}
+
+func TestApplyResolvedServerConfigRestoresLocalContainerSocketConfig(t *testing.T) {
+	cfg := defaultConfig()
+	server := Server{
+		Provider: "local-container",
+		Labels: map[string]string{
+			"docker_socket": "1",
+			"work_root":     "/tmp/crabbox-local-container-work",
+		},
+	}
+	applyResolvedServerConfig(&cfg, server)
+	if cfg.Provider != "local-container" || !cfg.LocalContainer.DockerSocket {
+		t.Fatalf("local-container socket labels not restored: provider=%s local=%#v", cfg.Provider, cfg.LocalContainer)
+	}
+	if cfg.WorkRoot != server.Labels["work_root"] || cfg.LocalContainer.WorkRoot != server.Labels["work_root"] {
+		t.Fatalf("work roots not restored: workRoot=%q local=%q", cfg.WorkRoot, cfg.LocalContainer.WorkRoot)
+	}
+	if !localContainerDockerSocketConfig(cfg) {
+		t.Fatal("restored socket config should use no-times sync")
+	}
+}

@@ -44,6 +44,27 @@ provider: aws
 - If remote proof is blocked, say exactly which capability is missing:
   auth, capacity, provider support, target OS, hydration, or secret access.
 
+## OpenClaw Provider Choice
+
+For OpenClaw/OpenClawd validation, prefer Blacksmith Testbox first when the
+workflow already gives the needed setup and the delegated command path is enough:
+
+```sh
+crabbox run --provider blacksmith-testbox --timing-json -- pnpm test
+```
+
+If Blacksmith is queued, unavailable, unauthenticated, or lacks the SSH-backed
+feature needed for the proof, rerun the same command shape on AWS:
+
+```sh
+crabbox run --provider aws --timing-json -- pnpm test
+```
+
+Actions setup remains repo-owned in both paths. Blacksmith owns Testbox workflow
+hydration and command transport. AWS uses Crabbox SSH sync/run and Actions
+hydration for the persistent workspace. This is operator choice, not automatic
+CLI fallback.
+
 ## Common Flow
 
 One-shot command:

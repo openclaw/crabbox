@@ -28,6 +28,7 @@ static SSH provider for existing machines.
 | [Islo](islo.md) | delegated run | Linux | Islo-owned sandbox execution |
 | [E2B](e2b.md) | delegated run | Linux | E2B-owned sandbox execution |
 | [Modal](modal.md) | delegated run | Linux | Modal Sandbox execution through the local Python client |
+| [Upstash Box](upstash-box.md) | delegated run | Linux | Upstash Box execution through the Box REST API |
 | [Tensorlake](tensorlake.md) | delegated run | Linux | Tensorlake Firecracker sandbox execution via the `tensorlake` CLI |
 | [Cloudflare](cloudflare.md) | delegated run | Linux | Cloudflare execution through a Worker and container runner |
 | [Railway](railway.md) | delegated run | Linux | redeploy and stream logs for an existing Railway service via the GraphQL API |
@@ -75,6 +76,8 @@ Proxmox and delegated providers do not use the Crabbox coordinator:
 - Islo uses the Islo API and SDK auth.
 - E2B uses E2B's sandbox REST and envd APIs.
 - Modal uses the local Modal Python client and Modal Sandbox APIs.
+- Upstash Box uses the [Upstash Box](https://upstash.com/blog/upstash-box)
+  REST API for sandbox lifecycle, archive upload, and command streaming.
 - Sprites uses the authenticated `sprite` CLI plus Sprites API.
 - Tensorlake uses the `tensorlake` CLI (`tensorlake sbx ...`) for sandbox lifecycle and command exec.
 - Cloudflare uses a deployed Worker runner backed by a Cloudflare
@@ -116,6 +119,7 @@ Sprites API and reaches SSH through `sprite proxy`; exe.dev provisions through
 | Islo | yes | yes | no | no | no | yes |
 | E2B | yes | yes | no | no | archive via E2B envd | no |
 | Modal | yes | yes | no | no | archive via Modal Sandbox exec | no |
+| Upstash Box | yes | yes | no | no | archive via Box file upload | no |
 | Tensorlake | yes | yes | no | no | archive via `tensorlake sbx cp` | no |
 | Cloudflare | yes | yes | no | no | archive via Worker runner | no |
 | Railway | yes | no | no | no | no | no |

@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -14,8 +17,10 @@ import (
 )
 
 const (
-	providerName = "local-container"
-	sshPort      = "2222"
+	providerName        = "local-container"
+	sshPort             = "2222"
+	workRootMarkerName  = ".crabbox-local-container-work-root"
+	dockerSocketInGuest = "/var/run/docker.sock"
 )
 
 type backend struct {
@@ -105,7 +110,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		return core.LeaseTarget{}, err
 	}
-	if err := core.ClaimLeaseForRepoProvider(leaseID, slug, providerName, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, b.claimScope(ctx), req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
 			_ = b.removeContainer(context.Background(), containerID)
 		}
@@ -130,7 +135,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return core.LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" {
-		if err := core.ClaimLeaseForRepoProvider(leaseID, slug, providerName, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		if err := core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, b.claimScope(ctx), req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -160,27 +165,121 @@ func (b *backend) Doctor(ctx context.Context, req core.DoctorRequest) (core.Doct
 	if req.ProbeSSH {
 		probe = "requires_running_lease"
 	}
-	msg := fmt.Sprintf("cli=ready control_plane=local inventory=ready api=list mutation=false leases=%d runtime=%s context=%s ssh_probe=%s image=%s", len(containers), runtime, blank(contextName, "-"), probe, b.configForRun().LocalContainer.Image)
+	cfg := b.configForRun()
+	msg := fmt.Sprintf("cli=ready control_plane=local inventory=ready api=list mutation=false leases=%d runtime=%s context=%s ssh_probe=%s image=%s docker_socket=%v", len(containers), runtime, blank(contextName, "-"), probe, cfg.LocalContainer.Image, cfg.LocalContainer.DockerSocket)
 	return core.DoctorResult{Provider: providerName, Message: msg}, nil
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	lease := req.Lease
 	id := strings.TrimSpace(req.Lease.Server.CloudID)
 	if id == "" {
-		container, _, _, err := b.resolveContainer(ctx, req.Lease.LeaseID)
+		container, leaseID, _, err := b.resolveContainer(ctx, req.Lease.LeaseID)
 		if err != nil {
 			return err
 		}
 		id = container.ID
+		if lease.LeaseID == "" {
+			lease.LeaseID = leaseID
+		}
+		lease.Server = b.serverFromContainer(container, b.configForRun())
 	}
 	if id == "" {
 		return core.Exit(2, "provider=%s release requires a container id", providerName)
 	}
+	hostLeaseRoot := hostLeaseWorkRoot(lease)
 	if err := b.removeContainer(ctx, id); err != nil {
 		return err
 	}
-	core.RemoveLeaseClaim(req.Lease.LeaseID)
-	core.RemoveStoredTestboxKey(req.Lease.LeaseID)
+	var cleanupErr error
+	if hostLeaseRoot != "" {
+		cleanupErr = os.RemoveAll(hostLeaseRoot)
+	}
+	core.RemoveLeaseClaim(lease.LeaseID)
+	core.RemoveStoredTestboxKey(lease.LeaseID)
+	if cleanupErr != nil {
+		return core.Exit(2, "remove local-container host work root %s: %v", hostLeaseRoot, cleanupErr)
+	}
+	return nil
+}
+
+func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
+	containers, err := b.listContainers(ctx)
+	if err != nil {
+		return err
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return err
+	}
+	claimScope := b.claimScope(ctx)
+	claimsByLease := map[string]core.LeaseClaim{}
+	for _, claim := range claims {
+		if claim.Provider == providerName {
+			claimsByLease[claim.LeaseID] = claim
+		}
+	}
+	liveLeases := map[string]struct{}{}
+	now := time.Now().UTC()
+	removed := 0
+	for _, container := range containers {
+		server := b.serverFromContainer(container, b.configForRun())
+		leaseID := strings.TrimSpace(server.Labels["lease"])
+		if leaseID != "" {
+			liveLeases[leaseID] = struct{}{}
+		}
+		claim, hasClaim := claimsByLease[leaseID]
+		shouldDelete, reason := shouldCleanupLocalContainer(server, claim, hasClaim, now)
+		if !shouldDelete {
+			fmt.Fprintf(b.rt.Stderr, "skip container id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
+			continue
+		}
+		if req.DryRun {
+			fmt.Fprintf(b.rt.Stdout, "would remove container id=%s name=%s lease=%s reason=%s\n", server.DisplayID(), server.Name, blank(leaseID, "-"), reason)
+			continue
+		}
+		fmt.Fprintf(b.rt.Stdout, "remove container id=%s name=%s lease=%s reason=%s\n", server.DisplayID(), server.Name, blank(leaseID, "-"), reason)
+		if err := b.removeContainer(ctx, container.ID); err != nil {
+			return err
+		}
+		var cleanupErr error
+		hostLeaseRoot := hostLeaseWorkRootFromLabels(leaseID, server.Labels)
+		if hostLeaseRoot != "" {
+			cleanupErr = os.RemoveAll(hostLeaseRoot)
+		}
+		if leaseID != "" {
+			core.RemoveLeaseClaim(leaseID)
+			core.RemoveStoredTestboxKey(leaseID)
+		}
+		if cleanupErr != nil {
+			return core.Exit(2, "remove local-container host work root %s: %v", hostLeaseRoot, cleanupErr)
+		}
+		removed++
+	}
+	claimsRemoved := 0
+	for leaseID, claim := range claimsByLease {
+		if leaseID == "" {
+			continue
+		}
+		if _, ok := liveLeases[leaseID]; ok {
+			continue
+		}
+		if !localContainerClaimMatchesScope(claim, claimScope, now) {
+			continue
+		}
+		reason := "missing container"
+		if req.DryRun {
+			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=%s\n", leaseID, blank(claim.Slug, "-"), reason)
+			continue
+		}
+		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=%s\n", leaseID, blank(claim.Slug, "-"), reason)
+		core.RemoveLeaseClaim(leaseID)
+		core.RemoveStoredTestboxKey(leaseID)
+		claimsRemoved++
+	}
+	if !req.DryRun {
+		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, len(containers))
+	}
 	return nil
 }
 
@@ -189,7 +288,13 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	}
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.configForRun(), req.State, time.Now().UTC())
+	original := server.Labels
+	server.Labels = core.TouchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
+	for _, key := range []string{"container_id", "docker_socket", "host_work_root", "image", "runtime", "runtime_context", "ssh_port", "ssh_user", "work_root"} {
+		if value := strings.TrimSpace(original[key]); value != "" {
+			server.Labels[key] = value
+		}
+	}
 	return server, nil
 }
 
@@ -217,6 +322,13 @@ func applyDefaults(cfg *core.Config) {
 	if cfg.LocalContainer.User == "" {
 		cfg.LocalContainer.User = "crabbox"
 	}
+	if cfg.LocalContainer.DockerSocket && isDefaultWorkRoot(cfg.LocalContainer.WorkRoot) && isDefaultWorkRoot(cfg.WorkRoot) {
+		if runtime.GOOS == "windows" {
+			cfg.LocalContainer.WorkRoot = "/work/crabbox"
+		} else {
+			cfg.LocalContainer.WorkRoot = defaultDockerSocketWorkRoot()
+		}
+	}
 	if cfg.LocalContainer.WorkRoot == "" {
 		if !isDefaultWorkRoot(cfg.WorkRoot) {
 			cfg.LocalContainer.WorkRoot = cfg.WorkRoot
@@ -239,7 +351,14 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	labels["image"] = cfg.LocalContainer.Image
 	labels["ssh_user"] = cfg.LocalContainer.User
 	labels["ssh_port"] = sshPort
-	labels["work_root"] = cfg.LocalContainer.WorkRoot
+	labels["docker_socket"] = boolEnv(cfg.LocalContainer.DockerSocket)
+	containerWorkRoot := cfg.LocalContainer.WorkRoot
+	hostWorkRoot := ""
+	if cfg.LocalContainer.DockerSocket {
+		hostWorkRoot, containerWorkRoot = dockerSocketWorkRoots(cfg)
+		labels["host_work_root"] = hostWorkRoot
+	}
+	labels["work_root"] = containerWorkRoot
 	args := []string{
 		"run", "-d",
 		"--name", name,
@@ -249,10 +368,11 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		"-p", "127.0.0.1::" + sshPort,
 		"-e", "CRABBOX_AUTHORIZED_KEY=" + publicKey,
 		"-e", "CRABBOX_SSH_USER=" + cfg.LocalContainer.User,
-		"-e", "CRABBOX_WORK_ROOT=" + cfg.LocalContainer.WorkRoot,
+		"-e", "CRABBOX_WORK_ROOT=" + containerWorkRoot,
 		"-e", "CRABBOX_SSH_PORT=" + sshPort,
 		"-e", "CRABBOX_DESKTOP=" + boolEnv(cfg.Desktop),
 		"-e", "CRABBOX_BROWSER=" + boolEnv(cfg.Browser),
+		"-e", "CRABBOX_DOCKER_SOCKET=" + boolEnv(cfg.LocalContainer.DockerSocket),
 	}
 	for key, value := range labels {
 		args = append(args, "--label", key+"="+value)
@@ -262,6 +382,27 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	}
 	if memory := strings.TrimSpace(cfg.LocalContainer.Memory); memory != "" {
 		args = append(args, "--memory", memory)
+	}
+	if cfg.LocalContainer.DockerSocket {
+		if err := os.MkdirAll(hostWorkRoot, 0o755); err != nil {
+			return "", core.Exit(2, "create local-container host work root %s: %v", hostWorkRoot, err)
+		}
+		if err := markLocalContainerWorkRoot(hostWorkRoot); err != nil {
+			return "", core.Exit(2, "mark local-container host work root %s: %v", hostWorkRoot, err)
+		}
+		leaseWorkRoot := filepath.Join(hostWorkRoot, leaseID)
+		if err := os.MkdirAll(leaseWorkRoot, 0o777); err != nil {
+			return "", core.Exit(2, "create local-container host lease work root %s: %v", leaseWorkRoot, err)
+		}
+		if err := os.Chmod(leaseWorkRoot, 0o777); err != nil {
+			return "", core.Exit(2, "make local-container host lease work root writable %s: %v", leaseWorkRoot, err)
+		}
+		args = append(args, "-v", hostWorkRoot+":"+containerWorkRoot)
+		socketPath, err := b.dockerSocketMountPath(ctx)
+		if err != nil {
+			return "", err
+		}
+		args = append(args, "-v", socketPath+":"+dockerSocketInGuest)
 	}
 	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "-lc", bootstrapScript)
 	result, err := b.docker(ctx, args, nil, b.rt.Stderr)
@@ -273,6 +414,117 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		return "", core.Exit(2, "%s run did not return a container id", cfg.LocalContainer.Runtime)
 	}
 	return id, nil
+}
+
+func (b *backend) dockerSocketMountPath(ctx context.Context) (string, error) {
+	if host := strings.TrimSpace(os.Getenv("DOCKER_HOST")); host != "" {
+		return dockerSocketMountPathFromHost(host)
+	}
+	if result, err := b.docker(ctx, []string{"context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"}, nil, nil); err == nil {
+		host := strings.TrimSpace(result.Stdout)
+		if host != "" && host != "<no value>" {
+			var decoded string
+			if err := json.Unmarshal([]byte(host), &decoded); err == nil {
+				host = decoded
+			}
+			return dockerSocketMountPathFromHost(host)
+		}
+	}
+	if runtime.GOOS != "linux" {
+		return dockerSocketInGuest, nil
+	}
+	return validateDockerSocketMountPath(dockerSocketInGuest)
+}
+
+func dockerSocketMountPathFromHost(host string) (string, error) {
+	return dockerSocketMountPathFromHostForGOOS(host, runtime.GOOS)
+}
+
+func dockerSocketMountPathFromHostForGOOS(host, goos string) (string, error) {
+	if goos == "windows" && windowsDockerPipeHost(host) {
+		return dockerSocketInGuest, nil
+	}
+	path, ok := localDockerSocketPath(host)
+	if !ok {
+		return "", core.Exit(2, "local-container docker socket requested but active Docker host %q is not a local Unix socket", host)
+	}
+	if goos != "linux" {
+		return dockerSocketInGuest, nil
+	}
+	return validateDockerSocketMountPath(path)
+}
+
+func dockerSocketWorkRoots(cfg core.Config) (string, string) {
+	return dockerSocketWorkRootsForGOOS(cfg.LocalContainer.WorkRoot, runtime.GOOS)
+}
+
+func dockerSocketWorkRootsForGOOS(workRoot, goos string) (string, string) {
+	workRoot = strings.TrimSpace(workRoot)
+	if workRoot == "" {
+		workRoot = "/work/crabbox"
+	}
+	if goos == "windows" {
+		if windowsHostPath(workRoot) {
+			return workRoot, "/work/crabbox"
+		}
+		return defaultDockerSocketWorkRoot(), workRoot
+	}
+	return workRoot, workRoot
+}
+
+func windowsHostPath(path string) bool {
+	path = strings.TrimSpace(path)
+	if len(path) >= 3 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':' && (path[2] == '\\' || path[2] == '/') {
+		return true
+	}
+	return strings.HasPrefix(path, `\\`)
+}
+
+func windowsDockerPipeHost(host string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(host)), "npipe:")
+}
+
+func localDockerSocketPath(host string) (string, bool) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", false
+	}
+	if strings.HasPrefix(host, "/") {
+		return host, true
+	}
+	if strings.HasPrefix(host, "unix://") {
+		u, err := url.Parse(host)
+		if err == nil && u.Path != "" {
+			return u.Path, true
+		}
+		path := strings.TrimPrefix(host, "unix://")
+		if strings.HasPrefix(path, "/") {
+			return path, true
+		}
+	}
+	return "", false
+}
+
+func validateDockerSocketMountPath(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", core.Exit(2, "local-container docker socket requested but %s is not available: %v", path, err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return "", core.Exit(2, "local-container docker socket requested but %s is not a socket", path)
+	}
+	return path, nil
+}
+
+func defaultDockerSocketWorkRoot() string {
+	if cache, err := os.UserCacheDir(); err == nil && strings.TrimSpace(cache) != "" {
+		return filepath.Join(cache, "crabbox", "local-container-work")
+	}
+	return filepath.Join(os.TempDir(), "crabbox-local-container-work")
+}
+
+func markLocalContainerWorkRoot(root string) error {
+	return os.WriteFile(filepath.Join(root, workRootMarkerName), []byte("crabbox local-container work root\n"), 0o644)
 }
 
 func (b *backend) prepareLease(ctx context.Context, cfg core.Config, container inspectContainer, leaseID, slug string, wait bool) (core.LeaseTarget, error) {
@@ -400,8 +652,76 @@ func (b *backend) runtimeInfo(ctx context.Context) (string, string) {
 	if err != nil {
 		return "unknown", ""
 	}
-	contextName, _ := b.docker(ctx, []string{"context", "show"}, nil, nil)
-	return strings.TrimSpace(version.Stdout), strings.TrimSpace(contextName.Stdout)
+	return strings.TrimSpace(version.Stdout), b.runtimeContext(ctx)
+}
+
+func (b *backend) runtimeContext(ctx context.Context) string {
+	contextName, err := b.docker(ctx, []string{"context", "show"}, nil, nil)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(contextName.Stdout)
+}
+
+func (b *backend) claimScope(ctx context.Context) string {
+	return localContainerClaimScope(b.configForRun().LocalContainer.Runtime, b.runtimeContext(ctx), b.runtimeHost(ctx))
+}
+
+func localContainerClaimScope(runtimeName, contextName string, hostValues ...string) string {
+	runtimeName = strings.TrimSpace(runtimeName)
+	contextName = strings.TrimSpace(contextName)
+	host := ""
+	if len(hostValues) > 0 {
+		host = strings.TrimSpace(hostValues[0])
+	}
+	if runtimeName == "" || contextName == "" {
+		return ""
+	}
+	scope := "runtime:" + runtimeName + "/context:" + contextName
+	if host != "" {
+		scope += "/host:" + host
+	}
+	return scope
+}
+
+func (b *backend) runtimeHost(ctx context.Context) string {
+	if host := strings.TrimSpace(os.Getenv("DOCKER_HOST")); host != "" {
+		return host
+	}
+	result, err := b.docker(ctx, []string{"context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"}, nil, nil)
+	if err != nil {
+		return ""
+	}
+	host := strings.TrimSpace(result.Stdout)
+	if host == "" || host == "<no value>" {
+		return ""
+	}
+	var decoded string
+	if err := json.Unmarshal([]byte(host), &decoded); err == nil {
+		host = decoded
+	}
+	return strings.TrimSpace(host)
+}
+
+func localContainerClaimMatchesScope(claim core.LeaseClaim, currentScope string, now time.Time) bool {
+	currentScope = strings.TrimSpace(currentScope)
+	claimScope := strings.TrimSpace(claim.ProviderScope)
+	if currentScope != "" && claimScope == currentScope {
+		return true
+	}
+	return claimScope == "" && localContainerClaimExpired(claim, now)
+}
+
+func localContainerClaimExpired(claim core.LeaseClaim, now time.Time) bool {
+	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
+	if err != nil || lastUsed.IsZero() {
+		return false
+	}
+	idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
+	if idle <= 0 {
+		return false
+	}
+	return now.After(lastUsed.Add(idle).Add(12 * time.Hour))
 }
 
 func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
@@ -498,6 +818,104 @@ func firstNonBlank(values ...string) string {
 	return ""
 }
 
+func hostLeaseWorkRoot(lease core.LeaseTarget) string {
+	return hostLeaseWorkRootFromLabels(firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]), lease.Server.Labels)
+}
+
+func hostLeaseWorkRootFromLabels(leaseID string, labels map[string]string) string {
+	if labels["docker_socket"] != "1" {
+		return ""
+	}
+	root := strings.TrimSpace(firstNonBlank(labels["host_work_root"], labels["work_root"]))
+	leaseID = strings.TrimSpace(leaseID)
+	if root == "" || leaseID == "" || !filepath.IsAbs(root) {
+		return ""
+	}
+	if !safeLocalContainerLeaseID(leaseID) {
+		return ""
+	}
+	root = filepath.Clean(root)
+	if !trustedLocalContainerWorkRoot(root) {
+		return ""
+	}
+	leaseRoot := filepath.Join(root, leaseID)
+	rel, err := filepath.Rel(root, leaseRoot)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return ""
+	}
+	return leaseRoot
+}
+
+func safeLocalContainerLeaseID(leaseID string) bool {
+	if !strings.HasPrefix(leaseID, "cbx_") || len(leaseID) <= len("cbx_") {
+		return false
+	}
+	for _, r := range strings.TrimPrefix(leaseID, "cbx_") {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func trustedLocalContainerWorkRoot(root string) bool {
+	info, err := os.Stat(filepath.Join(root, workRootMarkerName))
+	if err == nil && !info.IsDir() {
+		return true
+	}
+	return filepath.Clean(root) == filepath.Clean(defaultDockerSocketWorkRoot())
+}
+
+func shouldCleanupLocalContainer(server core.Server, claim core.LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
+	labels := server.Labels
+	if labels == nil {
+		return false, "missing labels"
+	}
+	if strings.EqualFold(labels["keep"], "true") {
+		return false, "keep=true"
+	}
+	if !strings.EqualFold(server.Status, "running") && server.Status != "ready" {
+		return true, "container state=" + blank(server.Status, "unknown")
+	}
+	if hasClaim {
+		lastUsed, err := time.Parse(time.RFC3339, claim.LastUsedAt)
+		if err != nil || lastUsed.IsZero() {
+			return false, "claim active"
+		}
+		idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
+		if idle <= 0 {
+			return false, "claim active"
+		}
+		expires := lastUsed.Add(idle)
+		if now.After(expires.Add(12 * time.Hour)) {
+			return true, "claim expired"
+		}
+		return false, "claim active"
+	}
+	if expires, ok := localContainerLabelTime(labels["expires_at"]); ok {
+		if now.After(expires.Add(12 * time.Hour)) {
+			return true, "expired"
+		}
+		return false, "not expired"
+	}
+	return false, "missing claim"
+}
+
+func localContainerLabelTime(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	if unix, err := strconv.ParseInt(value, 10, 64); err == nil && unix > 0 {
+		return time.Unix(unix, 0).UTC(), true
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed.UTC(), true
+	}
+	return time.Time{}, false
+}
+
 func boolEnv(value bool) string {
 	if value {
 		return "1"
@@ -570,6 +988,38 @@ if [ "${CRABBOX_BROWSER:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
     apt-get install -y --no-install-recommends firefox || true
   fi
 fi
+if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  install_docker_cli=0
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    case "${ID:-}" in
+      debian|ubuntu)
+        install -m 0755 -d /etc/apt/keyrings
+        if curl -fsSL "https://download.docker.com/linux/${ID}/gpg" -o /etc/apt/keyrings/docker.asc; then
+          chmod a+r /etc/apt/keyrings/docker.asc
+          codename="${VERSION_CODENAME:-}"
+          if [ -n "$codename" ]; then
+            arch="$(dpkg --print-architecture)"
+            printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' "$arch" "$ID" "$codename" > /etc/apt/sources.list.d/docker.list
+            if apt-get update && apt-get install -y --no-install-recommends docker-ce-cli; then
+              install_docker_cli=1
+            else
+              rm -f /etc/apt/sources.list.d/docker.list
+            fi
+          fi
+        fi
+        ;;
+    esac
+  fi
+  if [ "$install_docker_cli" != "1" ]; then
+    apt-get install -y --no-install-recommends docker.io
+  fi
+fi
+if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker >/dev/null 2>&1; then
+  echo "docker socket requested but docker CLI is not installed; use a Debian/Ubuntu-compatible image or preinstall docker" >&2
+  exit 127
+fi
 if ! command -v /usr/sbin/sshd >/dev/null 2>&1; then
   echo "missing /usr/sbin/sshd; use a Debian/Ubuntu-compatible image or a prebuilt Crabbox runner image" >&2
   exit 127
@@ -584,11 +1034,28 @@ home_dir="$(getent passwd "$user" | cut -d: -f6)"
 if [ -z "$home_dir" ]; then
   home_dir="/home/$user"
 fi
+if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && [ -S /var/run/docker.sock ]; then
+  socket_gid="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)"
+  if [ -n "$socket_gid" ]; then
+    socket_group="$(getent group "$socket_gid" | cut -d: -f1 || true)"
+    if [ -z "$socket_group" ]; then
+      socket_group="crabbox-docker"
+      groupadd -g "$socket_gid" "$socket_group" 2>/dev/null || socket_group=""
+    fi
+    if [ -n "$socket_group" ]; then
+      usermod -aG "$socket_group" "$user" || true
+    fi
+  fi
+fi
 mkdir -p /run/sshd "$work_root" "$home_dir/.ssh"
 printf '%s\n' "$CRABBOX_AUTHORIZED_KEY" > "$home_dir/.ssh/authorized_keys"
 chmod 700 "$home_dir/.ssh"
 chmod 600 "$home_dir/.ssh/authorized_keys"
-chown -R "$user" "$home_dir/.ssh" "$work_root"
+if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ]; then
+  chown -R "$user" "$home_dir/.ssh"
+else
+  chown -R "$user" "$home_dir/.ssh" "$work_root"
+fi
 if command -v sudo >/dev/null 2>&1; then
   printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$user" > /etc/sudoers.d/crabbox
   chmod 440 /etc/sudoers.d/crabbox

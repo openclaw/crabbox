@@ -147,6 +147,20 @@ func TestParallelsCloneRejectsSnapshotIDForFullAndUnlink(t *testing.T) {
 	}
 }
 
+func TestParallelsLinkedCloneRequiresExplicitSnapshot(t *testing.T) {
+	runner := &parallelsFakeRunner{}
+	client := NewParallelsClient(Config{
+		Parallels: ParallelsConfig{CloneMode: "linked"},
+	}, runner)
+	_, err := client.Clone(context.Background(), "source-vm", "", "cbx_abcdef123456", "fork", true)
+	if err == nil || !strings.Contains(err.Error(), "require --parallels-source-snapshot") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("clone should fail before prlctl: %#v", runner.requests)
+	}
+}
+
 func TestApplyParallelsTemplateConfig(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "parallels"

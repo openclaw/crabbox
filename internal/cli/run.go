@@ -829,7 +829,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			timings.syncSteps.prune = time.Since(stepStart)
 		}
 		stepStart = time.Now()
-		if err := rsync(ctx, target, repo.Root, workdir, excludes, a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: manifestData, Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+		if err := rsync(ctx, target, repo.Root, workdir, excludes, a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: manifestData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
 			return recordFailure(exit(6, "rsync failed: %v", err))
 		}
 		timings.syncSteps.rsync = time.Since(stepStart)
@@ -1885,6 +1885,14 @@ func applyResolvedServerConfig(cfg *Config, server Server) {
 	if root := server.Labels["work_root"]; root != "" {
 		cfg.WorkRoot = root
 	}
+	if cfg.Provider == "local-container" || server.Provider == "local-container" {
+		if root := server.Labels["work_root"]; root != "" {
+			cfg.LocalContainer.WorkRoot = root
+		}
+		if labelBool(server.Labels["docker_socket"]) {
+			cfg.LocalContainer.DockerSocket = true
+		}
+	}
 }
 
 func readyNetworkDisplay(cfg Config, server Server, target SSHTarget) NetworkMode {
@@ -2325,6 +2333,17 @@ func deleteServer(ctx context.Context, cfg Config, server Server) error {
 
 func DeleteServer(ctx context.Context, cfg Config, server Server) error {
 	return deleteServer(ctx, cfg, server)
+}
+
+func localContainerDockerSocketSync(cfg Config, server Server) bool {
+	if cfg.Provider != "local-container" && server.Provider != "local-container" {
+		return false
+	}
+	return cfg.LocalContainer.DockerSocket || labelBool(server.Labels["docker_socket"])
+}
+
+func localContainerDockerSocketConfig(cfg Config) bool {
+	return cfg.Provider == "local-container" && cfg.LocalContainer.DockerSocket
 }
 
 func serverProviderKey(server Server) string {

@@ -2716,10 +2716,10 @@ function html(
     .theme-toggle { color:var(--muted); }
     .theme-toggle:hover { color:var(--fg); }
     .theme-toggle svg { width:15px; height:15px; display:block; }
-    .theme-icon-moon,.theme-icon-sun,.theme-icon-system { display:none; }
-    :root[data-theme-source="system"] .theme-icon-system { display:block; }
-    :root[data-theme-source="dark"] .theme-icon-sun { display:block; }
-    :root[data-theme-source="light"] .theme-icon-moon { display:block; }
+    .theme-toggle .theme-icon-moon,.theme-toggle .theme-icon-sun,.theme-toggle .theme-icon-system { display:none; }
+    :root[data-theme-source="system"] .theme-toggle .theme-icon-system { display:block; }
+    :root[data-theme-source="dark"] .theme-toggle .theme-icon-sun { display:block; }
+    :root[data-theme-source="light"] .theme-toggle .theme-icon-moon { display:block; }
     .screen { min-height:0; border:1px solid var(--line); border-radius:8px; background:var(--bg); overflow:hidden; box-shadow:inset 0 0 0 1px rgba(255,255,255,0.02); }
     .screen div { margin:0 auto; }
     .code-wait-screen { display:grid; place-items:center; padding:clamp(18px,5vw,64px); }

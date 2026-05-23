@@ -120,6 +120,14 @@ func configShowView(cfg Config) map[string]any {
 			"auth":    tokenState(cfg.Cloudflare.Token),
 			"workdir": cfg.Cloudflare.Workdir,
 		},
+		"upstashBox": map[string]any{
+			"baseUrl":   cfg.UpstashBox.BaseURL,
+			"auth":      tokenState(cfg.UpstashBox.APIKey),
+			"runtime":   cfg.UpstashBox.Runtime,
+			"size":      cfg.UpstashBox.Size,
+			"workdir":   cfg.UpstashBox.Workdir,
+			"keepAlive": cfg.UpstashBox.KeepAlive,
+		},
 		"static": map[string]any{
 			"id":       cfg.Static.ID,
 			"name":     cfg.Static.Name,
@@ -213,6 +221,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "blacksmith org=%s workflow=%s job=%s ref=%s idle_timeout=%s debug=%t\n", blank(cfg.Blacksmith.Org, "-"), blank(cfg.Blacksmith.Workflow, "-"), blank(cfg.Blacksmith.Job, "-"), blank(cfg.Blacksmith.Ref, "-"), cfg.Blacksmith.IdleTimeout, cfg.Blacksmith.Debug)
 	fmt.Fprintf(w, "namespace image=%s size=%s repository=%s site=%s volume_size_gb=%d auto_stop_idle_timeout=%s work_root=%s delete_on_release=%t\n", cfg.Namespace.Image, blank(cfg.Namespace.Size, "-"), blank(cfg.Namespace.Repository, "-"), blank(cfg.Namespace.Site, "-"), cfg.Namespace.VolumeSizeGB, cfg.Namespace.AutoStopIdleTimeout, cfg.Namespace.WorkRoot, cfg.Namespace.DeleteOnRelease)
 	fmt.Fprintf(w, "e2b api_url=%s domain=%s template=%s workdir=%s user=%s\n", cfg.E2B.APIURL, cfg.E2B.Domain, cfg.E2B.Template, cfg.E2B.Workdir, blank(cfg.E2B.User, "-"))
+	fmt.Fprintf(w, "upstash_box base_url=%s runtime=%s size=%s workdir=%s keep_alive=%t auth=%s\n", cfg.UpstashBox.BaseURL, cfg.UpstashBox.Runtime, cfg.UpstashBox.Size, cfg.UpstashBox.Workdir, cfg.UpstashBox.KeepAlive, tokenState(cfg.UpstashBox.APIKey))
 	fmt.Fprintf(w, "cloudflare api_url=%s workdir=%s auth=%s\n", blank(cfg.Cloudflare.APIURL, "-"), cfg.Cloudflare.Workdir, tokenState(cfg.Cloudflare.Token))
 	fmt.Fprintf(w, "static id=%s name=%s host=%s user=%s port=%s work_root=%s\n", blank(cfg.Static.ID, "-"), blank(cfg.Static.Name, "-"), blank(cfg.Static.Host, "-"), blank(cfg.Static.User, "-"), blank(cfg.Static.Port, "-"), blank(cfg.Static.WorkRoot, "-"))
 	fmt.Fprintf(w, "results junit=%s\n", blank(strings.Join(cfg.Results.JUnit, ","), "-"))

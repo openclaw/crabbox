@@ -7,13 +7,14 @@ import (
 )
 
 type flagValues struct {
-	Runtime  *string
-	Image    *string
-	User     *string
-	WorkRoot *string
-	CPUs     *int
-	Memory   *string
-	Network  *string
+	Runtime      *string
+	Image        *string
+	User         *string
+	WorkRoot     *string
+	CPUs         *int
+	Memory       *string
+	Network      *string
+	DockerSocket *bool
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
@@ -25,6 +26,8 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 		CPUs:     fs.Int("local-container-cpus", defaults.LocalContainer.CPUs, "CPU limit for local-container leases; 0 leaves runtime default"),
 		Memory:   fs.String("local-container-memory", defaults.LocalContainer.Memory, "memory limit for local-container leases, for example 8g"),
 		Network:  fs.String("local-container-network", defaults.LocalContainer.Network, "container network for local-container leases"),
+		DockerSocket: fs.Bool("local-container-docker-socket", defaults.LocalContainer.DockerSocket,
+			"mount /var/run/docker.sock into local-container leases so docker commands use the host daemon"),
 	}
 }
 
@@ -55,6 +58,9 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "local-container-network") {
 		cfg.LocalContainer.Network = *v.Network
+	}
+	if core.FlagWasSet(fs, "local-container-docker-socket") {
+		cfg.LocalContainer.DockerSocket = *v.DockerSocket
 	}
 	if cfg.Provider == providerName || cfg.Provider == "docker" || cfg.Provider == "container" || cfg.Provider == "local-docker" {
 		applyDefaults(cfg)

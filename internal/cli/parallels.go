@@ -191,6 +191,9 @@ func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Cfg.Parallels.CloneMode)) {
 	case "", "linked":
+		if strings.TrimSpace(snapshotID) == "" {
+			return Server{}, exit(2, "Parallels linked clones require --parallels-source-snapshot or --parallels-source-snapshot-id; otherwise prlctl creates a source-side linked-clone snapshot")
+		}
 		if snapshotID != "" {
 			snapshot, ok, err := c.snapshotByID(ctx, source, snapshotID)
 			if err != nil {

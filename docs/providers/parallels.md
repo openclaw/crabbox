@@ -8,9 +8,9 @@ Read when:
 - changing `internal/providers/parallels` or Parallels checkpoint behavior.
 
 Parallels is a direct SSH lease provider. Crabbox asks `prlctl` to create a
-linked clone from a configured source VM and optional snapshot, starts the clone,
-discovers the guest IP, injects the per-lease SSH key with Parallels Tools, then
-uses the normal Crabbox SSH sync/run/checkpoint path.
+linked clone from a configured source VM and explicit snapshot, starts the
+clone, discovers the guest IP, injects the per-lease SSH key with Parallels
+Tools, then uses the normal Crabbox SSH sync/run/checkpoint path.
 
 The provider is local-first. Set `parallels.host` when the Parallels Desktop
 install lives on another Mac reachable over SSH.
@@ -59,9 +59,13 @@ Each template should already include:
   shell/PowerShell);
 - a known-good Parallels snapshot for fast linked clones.
 
-Linked clones require a power-off snapshot. Parallels also refuses to clone from
-a busy source VM, so keep template VMs shut down when they are used as local
-fleet bases.
+Linked clones require an explicit power-off snapshot. Crabbox rejects linked
+clone requests without `parallels.sourceSnapshot`/`sourceSnapshotId`, because
+otherwise `prlctl` creates a source-side "Snapshot for linked clone" on the
+template VM. Use `cloneMode: full` or `cloneMode: unlink` only when you
+intentionally want to clone the current source VM state without a snapshot.
+Parallels also refuses to clone from a busy source VM, so keep template VMs shut
+down when they are used as local fleet bases.
 
 For macOS templates, use a user with SSH login permission and a writable
 `parallels.workRoot`, for example `/Users/<user>/crabbox`. For Windows native

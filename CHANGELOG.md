@@ -1,14 +1,35 @@
 # Changelog
 
-## 0.17.1 - Unreleased
+## 0.17.2 - Unreleased
 
 ### Added
 
-- Added `crabbox run --emit-proof` support for Blacksmith Testbox delegated runs, including bounded local stdout/stderr, timing, and metadata artifacts for successful proof runs.
+- Added `provider: upstash-box` for delegated Upstash Box sandbox runs through the Box REST API, including archive sync, `run`, `warmup`, `list`, `status`, `stop`, config/env overrides, and provider docs.
+
+### Fixed
+
+- Fixed portal and documentation theme toggles so dark mode shows only the sun icon and light mode shows only the moon icon.
 
 ### Changed
 
 - Changed Linux desktop/WebVNC leases to seed and apply XFCE, GTK, GSettings, and terminal dark theme settings, and changed the portal theme toggle to preserve a system-synced mode.
+
+## 0.17.1 - 2026-05-22
+
+### Added
+
+- Added `crabbox run --emit-proof` support for Blacksmith Testbox delegated runs, including bounded local stdout/stderr, timing, and metadata artifacts for successful proof runs.
+- Added local-container Docker socket pass-through with host-visible work roots so `provider: docker` leases can run Docker-based test suites through the host daemon.
+
+### Fixed
+
+- Fixed local-container Docker socket pass-through on Docker Desktop, OrbStack, Colima, and similar local VM runtimes by mounting the daemon-visible socket path instead of the client context socket path.
+- Fixed local-container Docker socket sync on local VM runtimes that reject rsync mtime updates on host-mounted work roots.
+- Fixed local-container Docker socket bootstrap to prefer Docker's current Debian/Ubuntu CLI package before falling back to distro `docker.io`.
+- Fixed `crabbox cleanup --provider docker` support for stale local-container leases.
+- Fixed `provider: docker` stop/release cleanup so host-visible per-lease work directories created for Docker socket pass-through are removed with the lease.
+- Fixed local Actions hydration for repo-local composite actions, cache no-ops, simple input conditions, safe `hashFiles`, secret-expression rejection, and Node 24.x setup on minimal Debian images.
+- Fixed Parallels linked-clone provisioning to require an explicit source snapshot so `prlctl` cannot create a template-side linked-clone snapshot implicitly.
 
 ## 0.17.0 - 2026-05-21
 

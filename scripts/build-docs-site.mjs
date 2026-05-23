@@ -448,9 +448,9 @@ a:hover{color:var(--coral)}
 .theme-toggle:hover{border-color:var(--coral);color:var(--coral)}
 .theme-toggle:active{transform:scale(.94)}
 .theme-toggle svg{width:17px;height:17px;display:block}
-.theme-icon-sun{display:none}
-:root[data-theme="dark"] .theme-icon-sun{display:block}
-:root[data-theme="dark"] .theme-icon-moon{display:none}
+.theme-toggle .theme-icon-sun{display:none}
+:root[data-theme="dark"] .theme-toggle .theme-icon-sun{display:block}
+:root[data-theme="dark"] .theme-toggle .theme-icon-moon{display:none}
 .brand strong{display:block;font-family:Fraunces,serif;font-size:1.32rem;line-height:1;letter-spacing:.005em}
 .brand small{display:block;color:var(--muted);font-size:.74rem;margin-top:4px}
 .search{display:block;margin:0 0 22px}
