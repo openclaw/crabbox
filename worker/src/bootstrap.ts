@@ -619,6 +619,65 @@ function optionalWriteFiles(config: LeaseConfig): string {
 
       [Install]
       WantedBy=multi-user.target
+  - path: /usr/local/bin/crabbox-configure-desktop-theme
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
+      user="\${CRABBOX_DESKTOP_USER:-crabbox}"
+      home_dir="$(getent passwd "$user" | cut -d: -f6)"
+      if [ -z "$home_dir" ]; then
+        home_dir="/home/$user"
+      fi
+      config_dir="$home_dir/.config"
+      if [ "$(id -u)" -eq 0 ]; then
+        install -d -m 0700 -o "$user" "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0"
+      else
+        mkdir -p "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0"
+        chmod 0700 "$config_dir" "$config_dir/xfce4" "$config_dir/xfce4/xfconf" "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0"
+      fi
+      cat > "$config_dir/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" <<'XML'
+      <?xml version="1.0" encoding="UTF-8"?>
+      <channel name="xsettings" version="1.0">
+        <property name="Net" type="empty">
+          <property name="ThemeName" type="string" value="Adwaita-dark"/>
+          <property name="IconThemeName" type="string" value="Adwaita"/>
+        </property>
+        <property name="Gtk" type="empty">
+          <property name="ApplicationPreferDarkTheme" type="bool" value="true"/>
+        </property>
+      </channel>
+      XML
+      cat > "$config_dir/xfce4/terminal/terminalrc" <<'EOF'
+      [Configuration]
+      ColorForeground=#e5e7eb
+      ColorBackground=#111827
+      ColorCursor=#f3f4f6
+      MiscBell=FALSE
+      EOF
+      cat > "$config_dir/gtk-3.0/settings.ini" <<'EOF'
+      [Settings]
+      gtk-theme-name=Adwaita-dark
+      gtk-icon-theme-name=Adwaita
+      gtk-application-prefer-dark-theme=1
+      EOF
+      cat > "$home_dir/.gtkrc-2.0" <<'EOF'
+      gtk-theme-name="Adwaita-dark"
+      gtk-icon-theme-name="Adwaita"
+      gtk-application-prefer-dark-theme=1
+      EOF
+      if [ "$(id -u)" -eq 0 ]; then
+        chown -R "$user" "$config_dir" "$home_dir/.gtkrc-2.0"
+      fi
+      if [ -n "\${DISPLAY:-}" ] && command -v xfconf-query >/dev/null 2>&1; then
+        xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s Adwaita-dark >/dev/null 2>&1 || true
+        xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s Adwaita >/dev/null 2>&1 || true
+        xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme -n -t bool -s true >/dev/null 2>&1 || true
+      fi
+      if command -v gsettings >/dev/null 2>&1; then
+        gsettings set org.gnome.desktop.interface color-scheme prefer-dark >/dev/null 2>&1 || true
+        gsettings set org.gnome.desktop.interface gtk-theme Adwaita-dark >/dev/null 2>&1 || true
+      fi
   - path: /etc/systemd/system/crabbox-desktop.service
     permissions: '0644'
     content: |
@@ -641,6 +700,7 @@ function optionalWriteFiles(config: LeaseConfig): string {
       #!/bin/sh
       set -eu
       export DISPLAY="\${DISPLAY:-:99}"
+      CRABBOX_DESKTOP_USER="$(id -un)" /usr/local/bin/crabbox-configure-desktop-theme || true
       if command -v xsetroot >/dev/null 2>&1; then
         xsetroot -solid '#20242b' || true
       fi
@@ -698,6 +758,7 @@ function optionalBootstrap(config: LeaseConfig): string {
     x11vnc -storepasswd "$(cat /var/lib/crabbox/vnc.password)" /var/lib/crabbox/vnc.pass >/dev/null
     chown crabbox:crabbox /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
     chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
+    CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme
     systemctl daemon-reload
     systemctl enable --now crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service crabbox-x11vnc.service`);
   }

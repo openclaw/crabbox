@@ -10,6 +10,10 @@
 
 - Fixed portal and documentation theme toggles so dark mode shows only the sun icon and light mode shows only the moon icon.
 
+### Changed
+
+- Changed Linux desktop/WebVNC leases to seed and apply XFCE, GTK, GSettings, and terminal dark theme settings, and changed the portal theme toggle to preserve a system-synced mode.
+
 ## 0.17.1 - 2026-05-22
 
 ### Added

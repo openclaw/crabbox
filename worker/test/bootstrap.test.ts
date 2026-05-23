@@ -86,6 +86,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal");
     expect(got).toContain("xfconf xfce4-settings x11vnc xauth dbus-x11");
     expect(got).toContain("/etc/systemd/system/crabbox-xvfb.service");
+    expect(got).toContain("/usr/local/bin/crabbox-configure-desktop-theme");
     expect(got).toContain("/etc/systemd/system/crabbox-desktop.service");
     expect(got).toContain("/usr/local/bin/crabbox-desktop-session");
     expect(got).toContain("/etc/systemd/system/crabbox-desktop-session.service");
@@ -93,6 +94,17 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("ExecStart=/usr/bin/startxfce4");
     expect(got).toContain("systemctl is-active --quiet crabbox-desktop.service");
     expect(got).toContain("systemctl is-active --quiet crabbox-desktop-session.service");
+    expect(got).toContain('ThemeName" type="string" value="Adwaita-dark');
+    expect(got).toContain("gtk-application-prefer-dark-theme=1");
+    expect(got).toContain('mkdir -p "$config_dir/xfce4/xfconf/xfce-perchannel-xml"');
+    expect(got).toContain("xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme");
+    expect(got).toContain("gsettings set org.gnome.desktop.interface color-scheme prefer-dark");
+    expect(got).toContain(
+      "CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme",
+    );
+    expect(got).toContain(
+      'CRABBOX_DESKTOP_USER="$(id -un)" /usr/local/bin/crabbox-configure-desktop-theme',
+    );
     expect(got).toContain("x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl");
     expect(got).toContain("xsetroot -solid '#20242b'");
     expect(got).toContain("xfce4-terminal --title='Crabbox Desktop'");
