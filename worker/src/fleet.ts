@@ -1076,6 +1076,9 @@ export class FleetDurableObject implements DurableObject {
     if (config.target === "windows") {
       record.windowsMode = config.windowsMode;
     }
+    if (config.pond) {
+      record.pond = config.pond;
+    }
     if (config.tailscale) {
       record.tailscale = {
         enabled: true,

@@ -318,6 +318,38 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	}
 }
 
+// TestCloudInitTailscaleHonorsControlURL exercises the self-hosted control
+// plane path: when TS_CONTROL_URL is set in the operator shell, cloud-init
+// must forward it into the box so `tailscale up` registers against the
+// custom login server (e.g. Headscale) via --login-server. Unset means the
+// default Tailscale control plane and no new flag is introduced.
+func TestCloudInitTailscaleHonorsControlURL(t *testing.T) {
+	t.Setenv("TS_CONTROL_URL", "https://headscale.example.com")
+	cfg := baseConfig()
+	cfg.Tailscale.Enabled = true
+	cfg.Tailscale.AuthKey = "tskey-secret"
+	got := cloudInit(cfg, "ssh-ed25519 test")
+	for _, want := range []string{
+		"TS_LOGIN_SERVER='https://headscale.example.com'",
+		`${TS_LOGIN_SERVER:+--login-server="$TS_LOGIN_SERVER"}`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("cloudInit(TS_CONTROL_URL) missing %q\n--- got ---\n%s", want, got)
+		}
+	}
+
+	t.Setenv("TS_CONTROL_URL", "")
+	got = cloudInit(cfg, "ssh-ed25519 test")
+	if strings.Contains(got, "TS_LOGIN_SERVER=") {
+		t.Fatalf("cloudInit must not export TS_LOGIN_SERVER when TS_CONTROL_URL is unset:\n%s", got)
+	}
+	// The conditional shell expansion is still present so the box honors a
+	// downstream override, but no operator-supplied value should leak.
+	if !strings.Contains(got, `${TS_LOGIN_SERVER:+--login-server="$TS_LOGIN_SERVER"}`) {
+		t.Fatal("cloudInit must keep the conditional --login-server expansion even when unset")
+	}
+}
+
 func TestCloudInitTailscaleDefaultsAndMissingAuthKey(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Tailscale.Enabled = true

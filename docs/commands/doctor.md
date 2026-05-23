@@ -122,6 +122,7 @@ warnings never change the exit code.
 --provider hetzner|aws|azure|azure-dynamic-sessions|gcp|proxmox|ssh   provider to validate
 --profile <name>             configured profile for remote prereq checks
 --from-run <run-id>          load diagnostic context from recorded run history
+--pond <name>                verify Tailscale ACL setup for this pond
 --json                       print JSON
 --doctor-probe-ssh           probe static SSH reachability
 --target linux|macos|windows target OS for ssh provider checks

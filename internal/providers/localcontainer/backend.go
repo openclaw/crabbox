@@ -110,7 +110,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		return core.LeaseTarget{}, err
 	}
-	if err := core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, b.claimScope(ctx), req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
 			_ = b.removeContainer(context.Background(), containerID)
 		}
@@ -135,7 +135,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return core.LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" {
-		if err := core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, b.claimScope(ctx), req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}

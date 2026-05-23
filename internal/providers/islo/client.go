@@ -27,6 +27,19 @@ type isloAPI interface {
 	DeleteSandbox(context.Context, string) error
 	UploadArchive(context.Context, string, string, io.Reader) error
 	ExecStream(context.Context, string, *gosdk.ExecRequest, io.Writer, io.Writer) (int, error)
+	CreateShare(ctx context.Context, sandboxName string, port int, ttl time.Duration) (IsloShare, error)
+	ListShares(ctx context.Context, sandboxName string) ([]IsloShare, error)
+}
+
+// IsloShare describes a per-port public HTTPS share produced by the islo
+// `POST /sandboxes/{name}/shares` API. It is the islo-specific shape of the
+// generic BridgePeer entry surfaced by the pond bridge plane.
+type IsloShare struct {
+	ShareID   string    `json:"share_id"`
+	URL       string    `json:"url"`
+	Port      int       `json:"port"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type isloSDKClient struct {
@@ -140,6 +153,121 @@ func multipartArchiveBody(archive io.Reader) (io.Reader, string) {
 	prefix.WriteString("Content-Type: application/gzip\r\n\r\n")
 	suffix := "\r\n--" + boundary + "--\r\n"
 	return io.MultiReader(strings.NewReader(prefix.String()), archive, strings.NewReader(suffix)), writer.FormDataContentType()
+}
+
+type isloCreateShareRequest struct {
+	Port       int  `json:"port"`
+	TTLSeconds *int `json:"ttl_seconds,omitempty"`
+}
+
+type isloShareResponse struct {
+	ShareID   string  `json:"share_id"`
+	URL       string  `json:"url"`
+	Port      int     `json:"port"`
+	CreatedAt string  `json:"created_at"`
+	ExpiresAt *string `json:"expires_at"`
+}
+
+func (c *isloSDKClient) CreateShare(ctx context.Context, name string, port int, ttl time.Duration) (IsloShare, error) {
+	reqBody := isloCreateShareRequest{Port: port}
+	if ttl > 0 {
+		seconds := int(ttl.Seconds())
+		// Islo accepts 60s..7d. Snap into range so the bridge plane uses the
+		// closest legal TTL rather than refusing the call — the user-facing
+		// flag already validates the original range.
+		if seconds < 60 {
+			seconds = 60
+		}
+		if seconds > 7*24*3600 {
+			seconds = 7 * 24 * 3600
+		}
+		reqBody.TTLSeconds = &seconds
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return IsloShare{}, fmt.Errorf("encode share request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/sandboxes/"+url.PathEscape(name)+"/shares", bytes.NewReader(body))
+	if err != nil {
+		return IsloShare{}, err
+	}
+	if err := c.authorize(ctx, httpReq); err != nil {
+		return IsloShare{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return IsloShare{}, fmt.Errorf("islo create share: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return IsloShare{}, fmt.Errorf("islo create share %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+	}
+	var raw isloShareResponse
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return IsloShare{}, fmt.Errorf("decode share response: %w", err)
+	}
+	return isloShareFromAPI(raw), nil
+}
+
+func (c *isloSDKClient) ListShares(ctx context.Context, name string) ([]IsloShare, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/sandboxes/"+url.PathEscape(name)+"/shares", nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.authorize(ctx, httpReq); err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("islo list shares: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode >= 400 {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("islo list shares %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+	}
+	var raw []isloShareResponse
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("decode share list response: %w", err)
+	}
+	out := make([]IsloShare, 0, len(raw))
+	for _, item := range raw {
+		out = append(out, isloShareFromAPI(item))
+	}
+	return out, nil
+}
+
+func (c *isloSDKClient) authorize(ctx context.Context, req *http.Request) error {
+	token, err := c.auth.Token(ctx)
+	if err != nil {
+		return fmt.Errorf("islo auth: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return nil
+}
+
+func isloShareFromAPI(raw isloShareResponse) IsloShare {
+	share := IsloShare{
+		ShareID: raw.ShareID,
+		URL:     raw.URL,
+		Port:    raw.Port,
+	}
+	if t, err := time.Parse(time.RFC3339, raw.CreatedAt); err == nil {
+		share.CreatedAt = t
+	}
+	if raw.ExpiresAt != nil && *raw.ExpiresAt != "" {
+		if t, err := time.Parse(time.RFC3339, *raw.ExpiresAt); err == nil {
+			share.ExpiresAt = t
+		}
+	}
+	return share
 }
 
 func (c *isloSDKClient) ExecStream(ctx context.Context, name string, req *gosdk.ExecRequest, stdout, stderr io.Writer) (int, error) {

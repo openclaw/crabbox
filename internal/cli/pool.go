@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ func (a App) list(ctx context.Context, args []string) error {
 	provider := fs.String("provider", defaults.Provider, providerHelpAll())
 	jsonOut := fs.Bool("json", false, "print JSON")
 	refresh := fs.Bool("refresh", false, "refresh provider-backed state where supported")
+	pondFilter := fs.String("pond", "", "only list leases tagged with this pond")
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -36,6 +38,10 @@ func (a App) list(ctx context.Context, args []string) error {
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
+	pondName, err := requestedPondName(*pondFilter)
+	if err != nil {
+		return err
+	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
@@ -47,6 +53,9 @@ func (a App) list(ctx context.Context, args []string) error {
 				return err
 			}
 			a.syncExternalRunnersBestEffort(ctx, cfg, backend)
+			if pondName != "" {
+				view = filterJSONListViewByPond(view, pondName)
+			}
 			return json.NewEncoder(a.Stdout).Encode(view)
 		}
 	}
@@ -63,11 +72,177 @@ func (a App) list(ctx context.Context, args []string) error {
 		return err
 	}
 	a.syncExternalRunnersBestEffort(ctx, cfg, backend)
+	if pondName != "" {
+		servers = filterServersByPond(servers, pondName)
+	}
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(servers)
 	}
 	renderServerList(a.Stdout, servers)
 	return nil
+}
+
+// filterJSONListViewByPond filters a list-view payload (whatever shape the
+// backend produces) by inspecting label-bearing entries. Backends that emit
+// shapes without labels are returned unchanged so JSON list output stays
+// authoritative for those providers.
+//
+// For []any slices entries are iterated directly. For typed slices (e.g.
+// []CoordinatorMachine, []CoordinatorLease emitted by coordinator-backed
+// ListJSON) we use reflection to walk entries and extract labels without a
+// JSON marshal/unmarshal round-trip that would silently change number types
+// (int → float64). Typed entries are kept in their original form so downstream
+// JSON encoding preserves field order, struct tags, and number precision.
+func filterJSONListViewByPond(view any, pond string) any {
+	pond = normalizePondName(pond)
+	if pond == "" {
+		return view
+	}
+	entries, ok := view.([]any)
+	if !ok {
+		return filterTypedSliceByPond(view, pond)
+	}
+	hasLabels := false
+	for _, entry := range entries {
+		if extractLabelMap(entry) != nil {
+			hasLabels = true
+			break
+		}
+	}
+	if !hasLabels {
+		return view
+	}
+	kept := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		labels := extractLabelMap(entry)
+		if labels == nil {
+			continue
+		}
+		if normalizePondName(labels[pondLabelKey]) == pond {
+			kept = append(kept, entry)
+		}
+	}
+	return kept
+}
+
+func extractLabelMap(entry any) map[string]string {
+	mapEntry, ok := entry.(map[string]any)
+	if !ok {
+		return extractLabelMapFromStruct(entry)
+	}
+	raw, ok := mapEntry["labels"].(map[string]any)
+	if !ok {
+		// coordinator fallback (ListJSON) returns CoordinatorLease maps
+		// where pond is a direct field, not inside labels.
+		return extractPondLabelFromMap(mapEntry)
+	}
+	labels := make(map[string]string, len(raw))
+	for key, value := range raw {
+		if str, ok := value.(string); ok {
+			labels[key] = str
+		}
+	}
+	return labels
+}
+
+// extractLabelMapFromStruct uses reflection to extract a Labels field from a
+// typed struct (e.g. CoordinatorMachine, CoordinatorLease). The field must be
+// of type map[string]string for direct extraction. map[string]any values are
+// converted by filtering string-typed entries. This handles the coordinator
+// list JSON path where typed slices bypass the map[string]any type assertion.
+func extractLabelMapFromStruct(entry any) map[string]string {
+	v := reflect.ValueOf(entry)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil
+	}
+	field := v.FieldByName("Labels")
+	if !field.IsValid() {
+		field = v.FieldByName("labels")
+	}
+	if field.IsValid() && field.CanInterface() {
+		switch fv := field.Interface().(type) {
+		case map[string]string:
+			if len(fv) == 0 {
+				break
+			}
+			out := make(map[string]string, len(fv))
+			for k, v := range fv {
+				out[k] = v
+			}
+			return out
+		case map[string]any:
+			if len(fv) == 0 {
+				break
+			}
+			out := make(map[string]string, len(fv))
+			for k, v := range fv {
+				if str, ok := v.(string); ok {
+					out[k] = str
+				}
+			}
+			return out
+		}
+	}
+	// For types like CoordinatorLease where pond is stored as a direct
+	// field (not inside Labels), synthesize a label map from the Pond
+	// field so pond-scoped filtering works across all list paths.
+	return extractPondLabelFromReflect(v)
+}
+
+// extractPondLabelFromReflect reads a direct Pond field (string) from a typed
+// struct and wraps it as a synthetic single-entry label map. Used by
+// extractLabelMapFromStruct for types like CoordinatorLease that carry pond
+// membership outside of Labels.
+func extractPondLabelFromReflect(v reflect.Value) map[string]string {
+	field := v.FieldByName("Pond")
+	if !field.IsValid() || !field.CanInterface() {
+		return nil
+	}
+	if str, ok := field.Interface().(string); ok && str != "" {
+		return map[string]string{pondLabelKey: str}
+	}
+	return nil
+}
+
+// extractPondLabelFromMap handles the ListJSON coordinator fallback where
+// map[string]any carries a direct "pond" key instead of "labels.pond".
+func extractPondLabelFromMap(entry map[string]any) map[string]string {
+	if pond, ok := entry["pond"].(string); ok && pond != "" {
+		return map[string]string{pondLabelKey: pond}
+	}
+	return nil
+}
+
+// filterTypedSliceByPond handles typed slices ([]CoordinatorMachine,
+// []CoordinatorLease, etc.) by using reflection to iterate entries and extract
+// labels, preserving the original entry structs. This avoids a JSON marshal/
+// unmarshal round-trip that would silently change number types (int → float64)
+// and lose struct-specific JSON encoding (field tags, ordering, omitempty).
+func filterTypedSliceByPond(view any, pond string) any {
+	v := reflect.ValueOf(view)
+	if v.Kind() != reflect.Slice {
+		return view
+	}
+	elemType := v.Type().Elem()
+	hasLabels := false
+	kept := reflect.MakeSlice(reflect.SliceOf(elemType), 0, v.Len())
+	for i := 0; i < v.Len(); i++ {
+		elem := v.Index(i)
+		labels := extractLabelMap(elem.Interface())
+		if labels != nil {
+			hasLabels = true
+			if normalizePondName(labels[pondLabelKey]) == pond {
+				kept = reflect.Append(kept, elem)
+			}
+		}
+	}
+	if !hasLabels {
+		return view
+	}
+	return kept.Interface()
 }
 
 func (a App) syncExternalRunnersBestEffort(ctx context.Context, cfg Config, backend Backend) {

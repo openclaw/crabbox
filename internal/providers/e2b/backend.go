@@ -350,7 +350,7 @@ func (b *e2bBackend) createSandbox(ctx context.Context, client e2bAPI, repo Repo
 	if sandbox.SandboxID == "" {
 		return "", e2bSandbox{}, "", exit(5, "e2b create sandbox returned no sandbox id")
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, e2bProvider, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseForRepoProviderPond(leaseID, slug, e2bProvider, cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
 		_ = client.DeleteSandbox(context.Background(), sandbox.SandboxID)
 		return "", e2bSandbox{}, "", err
 	}

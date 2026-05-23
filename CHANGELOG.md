@@ -110,6 +110,52 @@
 - Fixed local Actions hydration for repo-local composite actions, cache no-ops, simple input conditions, safe `hashFiles`, secret-expression rejection, and Node 24.x setup on minimal Debian images.
 - Fixed Parallels linked-clone provisioning to require an explicit source snapshot so `prlctl` cannot create a template-side linked-clone snapshot implicitly.
 
+- Added `--pond <name>` for `crabbox warmup`/`run` plus `crabbox list --pond
+  <name>` so related leases share a reserved `pond` provider label and can be
+  selected together. On Tailscale-capable providers (Hetzner, Azure, GCP
+  managed Linux) the CLI advertises one extra ACL tag
+  `tag:cbx-pond-<owner>-<pond>` when the box joins the tailnet, and cloud-init
+  installs a 30s systemd timer that rewrites `/etc/hosts.cbx` and a managed
+  `/etc/hosts` block from `tailscale status --json` so peers are reachable as
+  `<slug>.cbx`. `crabbox doctor --pond <name>` verifies the one-time concrete
+  pond grants or ACL row when `TS_API_KEY` is exported and skips with a hint otherwise;
+  non-Tailscale providers honor the label as metadata and `doctor --pond`
+  reports the missing plane. See `docs/features/pond.md` for the one-time
+  policy snippet.
+
+- Added the pond **bridge plane** — `crabbox pond peers --pond <name>`
+  returns a unified peer listing across every provider in the pond with a
+  per-peer `transport` hint (`tailnet`, `url`, `ssh`, `pending`, `none`) and
+  a canonical endpoint. Managed-Linux peers report their tailnet IPv4;
+  SSH-lease peers report `ssh://host:port`; delegated providers with a URL
+  adapter (Islo / E2B / Railway today; Modal / Cloudflare / Tensorlake
+  surface as `unsupported` until their providers expose a per-sandbox
+  HTTPS ingress) report per-port public HTTPS URLs minted through the
+  provider's native ingress (idempotent via `--share-port` / `--share-ttl`).
+  Providers without an adapter, plus Blacksmith, are surfaced as
+  `transport=none` with an honest note so doctor does not pretend the peer
+  is reachable. The companion `crabbox doctor --pond <name>` prints the
+  per-transport reachability matrix alongside its existing Tailscale ACL
+  check and is explicit about the asymmetry — `tailnet -> url` works,
+  `url -> tailnet` does not, and SSH pairs need operator-side bridging.
+
+- Added the **SSH-mesh plane** — `crabbox pond connect <name> [--export]` opens
+  operator-side `ssh -L` tunnels to every pond member that declared an
+  `--expose <port>` on warmup. Local ports are auto-allocated in
+  51820–52819; `--export` emits `eval`-able `CRABBOX_POND_<SLUG>_<PORT>`
+  environment variables for shell consumption. TCP-only, operator-side
+  only — no lease-to-lease mesh in v0. Useful for SSH-only providers
+  (RunPod, Proxmox, exe.dev, Daytona, Sprites, Namespace, Semaphore)
+  where neither Tailscale nor the Bridge plane applies.
+
+- Added `crabbox pond release <name>` — releases every lease in the named pond
+  across all providers, removing their claim sidecars. Individual stop failures
+  are logged as warnings without blocking remaining peers.
+
+- Added `pond` field to `crabbox status` output — status now shows `pond=<name>`
+  when a lease belongs to a pond, so operators can see pond membership without
+  parsing provider labels.
+
 ## 0.17.0 - 2026-05-21
 
 ### Added

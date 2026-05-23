@@ -17,6 +17,7 @@ crabbox run --env-from-profile ~/.project-live.profile --allow-env API_TOKEN --s
 crabbox run --id blue-lobster --full-resync -- pnpm check:changed
 crabbox run --label "update flow smoke" -- pnpm test:changed
 crabbox run --slug update-flow-smoke -- pnpm test:changed
+crabbox run --pond alpha --slug web -- pnpm test:integration
 crabbox run --id blue-lobster --env-from-profile ~/.project-live.profile --allow-env OPENAI_API_KEY --env-helper live -- ./.crabbox/env/live pnpm test:live
 crabbox run --fresh-pr acme/app#123 --script ./scripts/e2e-smoke.sh
 crabbox run --id cbx_abcdef123456 --junit junit.xml -- go test ./...
@@ -211,6 +212,14 @@ timing JSON, and coordinator run record when available.
 Use `--slug <slug>` only when creating a fresh lease. Crabbox normalizes the
 requested slug and may add a suffix when an active lease already uses it.
 
+Use `--pond <name>` to tag a new lease into a named pond. Pond is a reserved
+provider label that groups peers, and `crabbox list --pond <name>` selects
+them as a set. With `--tailscale` on a Tailscale-capable provider the CLI
+also advertises a `tag:cbx-pond-<owner>-<name>` ACL tag and cloud-init keeps
+`/etc/hosts.cbx` plus a managed `/etc/hosts` block in sync every 30 seconds so
+peers reach each other as `<slug>.cbx`. See
+[`docs/features/pond.md`](../features/pond.md).
+
 Use `--capture-stdout <path>` when stdout is binary or terminal-hostile. Crabbox
 writes the remote stdout bytes directly to the local file, leaves stderr on the
 terminal, and skips stdout run-log/event capture. This is useful for Windows
@@ -323,6 +332,7 @@ Flags:
 --azure-os-disk managed|ephemeral|auto
 --market spot|on-demand
 --slug <slug>
+--pond <name>
 --ttl <duration>
 --idle-timeout <duration>
 --desktop

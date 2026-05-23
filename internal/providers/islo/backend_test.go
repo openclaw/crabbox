@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	gosdk "github.com/islo-labs/go-sdk"
 )
@@ -184,6 +185,36 @@ func TestIsloCreateSandboxPassesRelativeWorkdirToProvider(t *testing.T) {
 	}
 	if client.createRequest == nil || client.createRequest.Workdir == nil || *client.createRequest.Workdir != "team/repo" {
 		t.Fatalf("create workdir=%v", client.createRequest)
+	}
+}
+
+func TestIsloCreateSandboxStoresPondClaimForList(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
+	backend := &isloBackend{
+		cfg: Config{
+			Pond: "Alpha Pond",
+			Islo: IsloConfig{Workdir: "team/repo"},
+		},
+		rt: Runtime{Stderr: io.Discard},
+	}
+	leaseID, _, slug, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("resolve claim ok=%t err=%v", ok, err)
+	}
+	if claim.Pond != "alpha-pond" {
+		t.Fatalf("claim pond=%q want alpha-pond", claim.Pond)
+	}
+	server := isloSandboxToServer(&gosdk.SandboxResponse{Name: client.createName, Status: "running"})
+	if server.Labels["pond"] != "alpha-pond" {
+		t.Fatalf("server pond label=%q labels=%#v", server.Labels["pond"], server.Labels)
+	}
+	if server.Labels["slug"] != normalizeLeaseSlug(slug) {
+		t.Fatalf("server slug=%q want %q", server.Labels["slug"], normalizeLeaseSlug(slug))
 	}
 }
 
@@ -482,6 +513,14 @@ func (f *fakeIsloSyncClient) ExecStream(_ context.Context, _ string, req *gosdk.
 	f.execRequests = append(f.execRequests, req)
 	f.prepareCommands = append(f.prepareCommands, strings.Join(req.GetCommand(), " "))
 	return 0, nil
+}
+
+func (f *fakeIsloSyncClient) CreateShare(context.Context, string, int, time.Duration) (IsloShare, error) {
+	return IsloShare{}, nil
+}
+
+func (f *fakeIsloSyncClient) ListShares(context.Context, string) ([]IsloShare, error) {
+	return nil, nil
 }
 
 func (f *fakeIsloSyncClient) commandContains(value string) bool {

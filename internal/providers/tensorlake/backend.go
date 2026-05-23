@@ -291,7 +291,7 @@ func (b *tensorlakeBackend) createSandbox(ctx context.Context, cli *tensorlakeCL
 		_ = cli.terminate(context.Background(), sandboxID)
 		return "", "", "", "", err
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, providerName, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		_ = cli.terminate(context.Background(), sandboxID)
 		return "", "", "", "", err
 	}
