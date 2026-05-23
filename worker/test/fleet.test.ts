@@ -1655,9 +1655,11 @@ describe("fleet lease identity and idle", () => {
     expect(body).toContain('class="portal-shell"');
     expect(body).toContain("<h1>🦀 crabbox</h1>");
     expect(body).toContain('class="portal-actions"');
-    expect(body).toContain(".theme-toggle .theme-icon-moon { display:none; }");
     expect(body).toContain(
-      ':root[data-theme="light"] .theme-toggle .theme-icon-sun { display:none; }',
+      ".theme-toggle .theme-icon-moon,.theme-toggle .theme-icon-sun,.theme-toggle .theme-icon-system { display:none; }",
+    );
+    expect(body).toContain(
+      ':root[data-theme-source="system"] .theme-toggle .theme-icon-system { display:block; }',
     );
     expect(body).toContain("table-scroll");
     expect(body).toContain(".lease-table th:nth-child(1)");
