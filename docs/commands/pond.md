@@ -66,9 +66,9 @@ Transport semantics:
 
 | Transport | Producers                                                                | Endpoint shape              |
 | --------- | ------------------------------------------------------------------------ | --------------------------- |
-| `tailnet` | AWS / Azure / GCP / Hetzner / Proxmox / Static SSH (managed Linux)       | tailnet IPv4 (or FQDN)      |
+| `tailnet` | Hetzner / Azure / GCP (managed Linux)                                    | tailnet IPv4 (or FQDN)      |
 | `url`     | Islo / E2B / Railway today; Modal / Cloudflare / Tensorlake surface as `unsupported` until their providers expose a per-sandbox HTTPS ingress | per-sandbox public HTTPS URL |
-| `ssh`     | exe.dev / RunPod / Daytona / Sprites / Namespace / Semaphore             | `ssh://<host>:<port>`        |
+| `ssh`     | AWS / Proxmox / Static SSH / exe.dev / RunPod / Daytona / Sprites / Namespace / Semaphore | `ssh://<host>:<port>`        |
 | `pending` | tailnet- or SSH-capable provider whose lease record has no endpoint yet  | empty                        |
 | `none`    | Blacksmith (owns connectivity), or any provider without a bridge adapter | empty (`note` explains why)  |
 
@@ -76,7 +76,8 @@ Transport semantics:
 
 | Provider                                              | Transport class | Notes                                                                                                                              |
 | ----------------------------------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Hetzner / AWS / Azure / GCP / Proxmox / Static SSH    | `tailnet`       | Endpoint = tailnet IPv4 from the local claim sidecar (`tailscaleIPv4` field). Empty endpoint surfaces as `pending`.                |
+| Hetzner / Azure / GCP                                 | `tailnet`       | Endpoint = tailnet IPv4 from the local claim sidecar (`tailscaleIPv4` field). Empty endpoint surfaces as `pending`.                |
+| AWS / Proxmox / Static SSH                            | `ssh`           | Endpoint = `ssh://<host>:<port>` from the local claim sidecar. Empty host surfaces as `pending`.                                   |
 | exe.dev / RunPod / Daytona / Sprites / Namespace / Semaphore | `ssh`           | Endpoint = `ssh://<host>:<port>` from the local claim sidecar. Empty host surfaces as `pending`.                                   |
 | Islo                                                  | `url`           | Uses the islo `POST /sandboxes/{name}/shares` API. Existing shares are reused so calls are idempotent.                             |
 | E2B                                                   | `url`           | Synthesises the canonical `https://<port>-<sandboxID>.<domain>` preview URL directly from the existing E2B sandbox + config.       |
@@ -89,6 +90,45 @@ Transport semantics:
 Peers on `unsupported` URL adapters still appear in the output with
 `BridgeState=unsupported` (JSON) / `bridge=unsupported` (text) so callers
 see the gap rather than mistaking it for "no shares published yet".
+
+## `pond connect`
+
+`crabbox pond connect <name> [--export]` opens operator-side SSH `-L` port
+forwards to every pond member that declared ports with `--expose` at warmup
+time, and writes a per-pond hosts file and shell-export snippet under
+`~/.crabbox/pond/<name>/`.
+
+```
+Usage:
+  crabbox pond connect <name> [flags]
+
+Flags:
+  --export          print shell exports for eval and daemonize the forwards
+  --provider <n>    restrict to a single provider (default: all SSH-mesh members)
+  --json            emit machine-readable JSON instead of starting forwards
+```
+
+With `--export`, the command starts SSH tunnels as daemon processes, prints
+`export CRABBOX_POND_<NAME>_<PORT>=127.0.0.1:<local>` lines to stdout,
+and exits — the tunnels survive via the daemon runner. Use as:
+
+```bash
+eval $(crabbox pond connect mypond --export)
+curl $CRABBOX_POND_WEB_8080
+```
+
+Without `--export`, the command blocks until Ctrl-C, keeping all tunnels
+alive.
+
+Each forward gets a local loopback port in the 51820–52819 range, probed
+for availability. The hosts file (`~/.crabbox/pond/<name>/hosts`) maps each
+`<peer>.cbx` to its local address:
+
+```
+# crabbox pond SSH-mesh — operator-side forwards
+127.0.0.1:51820  web.cbx (remote :8080)
+127.0.0.1:51821  worker.cbx (remote :3000)
+```
 
 ## `doctor --pond`
 

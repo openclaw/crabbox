@@ -398,6 +398,7 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 					if perr != nil {
 						if errors.Is(perr, ErrBridgeNotImplemented) {
 							peer.BridgeState = "unsupported"
+							peer.Transport = TransportNone
 							peer.Note = fmt.Sprintf("bridge adapter for provider %s reports unsupported", peer.Provider)
 							peers = append(peers, peer)
 							continue
@@ -413,6 +414,7 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 					if lerr != nil {
 						if errors.Is(lerr, ErrBridgeNotImplemented) {
 							peer.BridgeState = "unsupported"
+							peer.Transport = TransportNone
 							peer.Note = fmt.Sprintf("bridge adapter for provider %s reports unsupported", peer.Provider)
 							peers = append(peers, peer)
 							continue
