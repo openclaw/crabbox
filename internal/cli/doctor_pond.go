@@ -82,11 +82,9 @@ func doctorPondSummary(ctx context.Context, cfg Config) (string, string, map[str
 }
 
 // normalizeHuJSON strips HuJSON line comments and trailing commas from a
-// brace-balanced policy section so json.Unmarshal can parse it. Conservative:
-// only removes // comments (not /* */) and trailing commas before ] or }.
+// brace-balanced policy section so json.Unmarshal can parse it. Uses the
+// same algorithm as hujsonStandardize in pond_acl.go for consistency.
 func normalizeHuJSON(input string) string {
-	// Strip // comments (string-aware) and trailing commas so
-	// json.Unmarshal can parse Tailscale policy sections.
 	var out strings.Builder
 	out.Grow(len(input))
 	inString := false
@@ -112,14 +110,11 @@ func normalizeHuJSON(input string) string {
 			continue
 		}
 		if !inString && ch == '/' && i+1 < len(input) && input[i+1] == '/' {
-			// Skip to end of line.
-			nl := strings.IndexByte(input[i:], '\n')
-			if nl < 0 {
-				break
+			// Skip // comment to end of line or EOF.
+			i += 2
+			for i < len(input) && input[i] != '\n' {
+				i++
 			}
-			i += nl
-			out.WriteByte('\n')
-			i++
 			continue
 		}
 		out.WriteByte(ch)
