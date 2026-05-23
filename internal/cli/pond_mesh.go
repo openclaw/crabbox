@@ -415,7 +415,7 @@ func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Conf
 			ineligible = append(ineligible, p)
 			continue
 		}
-		servers, serr := sshBackend.List(ctx, ListRequest{Options: leaseOptionsFromConfig(providerCfg)})
+		servers, serr := sshBackend.List(ctx, ListRequest{Options: LeaseOptions{Pond: normalizePondName(pond)}})
 		if serr != nil {
 			return nil, nil, fmt.Errorf("list %s leases: %w", p, serr)
 		}
