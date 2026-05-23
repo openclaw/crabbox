@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `provider: upstash-box` for delegated Upstash Box sandbox runs through the Box REST API, including archive sync, `run`, `warmup`, `list`, `status`, `stop`, config/env overrides, and provider docs.
+
 ### Fixed
 
 ## 0.17.1 - 2026-05-22

@@ -98,6 +98,7 @@ type Config struct {
 	Islo                     IsloConfig
 	Tensorlake               TensorlakeConfig
 	Modal                    ModalConfig
+	UpstashBox               UpstashBoxConfig
 	Cloudflare               CloudflareConfig
 	Semaphore                SemaphoreConfig
 	Sprites                  SpritesConfig
@@ -258,6 +259,15 @@ type ModalConfig struct {
 	Image   string
 	Workdir string
 	Python  string
+}
+
+type UpstashBoxConfig struct {
+	APIKey    string
+	BaseURL   string
+	Runtime   string
+	Size      string
+	Workdir   string
+	KeepAlive bool
 }
 
 type CloudflareConfig struct {
@@ -669,6 +679,12 @@ func baseConfig() Config {
 			Workdir: "/workspace/crabbox",
 			Python:  "python3",
 		},
+		UpstashBox: UpstashBoxConfig{
+			BaseURL: "https://us-east-1.box.upstash.com",
+			Runtime: "node",
+			Size:    "small",
+			Workdir: "/workspace/home/crabbox",
+		},
 		Cloudflare: CloudflareConfig{
 			Workdir: "/workspace/crabbox",
 		},
@@ -745,6 +761,7 @@ type fileConfig struct {
 	Islo             *fileIsloConfig                    `yaml:"islo,omitempty"`
 	Tensorlake       *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	Modal            *fileModalConfig                   `yaml:"modal,omitempty"`
+	UpstashBox       *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
 	Cloudflare       *fileCloudflareConfig              `yaml:"cloudflare,omitempty"`
 	Semaphore        *fileSemaphoreConfig               `yaml:"semaphore,omitempty"`
 	Sprites          *fileSpritesConfig                 `yaml:"sprites,omitempty"`
@@ -1035,6 +1052,14 @@ type fileModalConfig struct {
 	Image   string `yaml:"image,omitempty"`
 	Workdir string `yaml:"workdir,omitempty"`
 	Python  string `yaml:"python,omitempty"`
+}
+
+type fileUpstashBoxConfig struct {
+	BaseURL   string `yaml:"baseUrl,omitempty"`
+	Runtime   string `yaml:"runtime,omitempty"`
+	Size      string `yaml:"size,omitempty"`
+	Workdir   string `yaml:"workdir,omitempty"`
+	KeepAlive *bool  `yaml:"keepAlive,omitempty"`
 }
 
 type fileCloudflareConfig struct {
@@ -1983,6 +2008,23 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Modal.Python = file.Modal.Python
 		}
 	}
+	if file.UpstashBox != nil {
+		if file.UpstashBox.BaseURL != "" {
+			cfg.UpstashBox.BaseURL = file.UpstashBox.BaseURL
+		}
+		if file.UpstashBox.Runtime != "" {
+			cfg.UpstashBox.Runtime = file.UpstashBox.Runtime
+		}
+		if file.UpstashBox.Size != "" {
+			cfg.UpstashBox.Size = file.UpstashBox.Size
+		}
+		if file.UpstashBox.Workdir != "" {
+			cfg.UpstashBox.Workdir = file.UpstashBox.Workdir
+		}
+		if file.UpstashBox.KeepAlive != nil {
+			cfg.UpstashBox.KeepAlive = *file.UpstashBox.KeepAlive
+		}
+	}
 	applyCloudflareFileConfig(cfg, file.Cloudflare)
 	if file.Semaphore != nil {
 		if file.Semaphore.Host != "" {
@@ -2634,6 +2676,14 @@ func applyEnv(cfg *Config) {
 	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)
 	cfg.Modal.Workdir = getenv("CRABBOX_MODAL_WORKDIR", cfg.Modal.Workdir)
 	cfg.Modal.Python = getenv("CRABBOX_MODAL_PYTHON", cfg.Modal.Python)
+	cfg.UpstashBox.APIKey = getenv("CRABBOX_UPSTASH_BOX_API_KEY", getenv("UPSTASH_BOX_API_KEY", cfg.UpstashBox.APIKey))
+	cfg.UpstashBox.BaseURL = getenv("CRABBOX_UPSTASH_BOX_BASE_URL", getenv("UPSTASH_BOX_BASE_URL", cfg.UpstashBox.BaseURL))
+	cfg.UpstashBox.Runtime = getenv("CRABBOX_UPSTASH_BOX_RUNTIME", cfg.UpstashBox.Runtime)
+	cfg.UpstashBox.Size = getenv("CRABBOX_UPSTASH_BOX_SIZE", cfg.UpstashBox.Size)
+	cfg.UpstashBox.Workdir = getenv("CRABBOX_UPSTASH_BOX_WORKDIR", cfg.UpstashBox.Workdir)
+	if value, ok := getenvBool("CRABBOX_UPSTASH_BOX_KEEP_ALIVE"); ok {
+		cfg.UpstashBox.KeepAlive = value
+	}
 	cfg.Cloudflare.APIURL = getenv("CRABBOX_CLOUDFLARE_RUNNER_URL", cfg.Cloudflare.APIURL)
 	cfg.Cloudflare.Token = getenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", cfg.Cloudflare.Token)
 	cfg.Cloudflare.Workdir = getenv("CRABBOX_CLOUDFLARE_WORKDIR", cfg.Cloudflare.Workdir)
@@ -2785,6 +2835,9 @@ func serverTypeForConfig(cfg Config) string {
 	}
 	if cfg.Provider == "modal" {
 		return blank(cfg.Modal.Image, "python:3.13-slim")
+	}
+	if cfg.Provider == "upstash-box" || cfg.Provider == "upstash" {
+		return blank(cfg.UpstashBox.Size, "small")
 	}
 	if cfg.Provider == "daytona" {
 		return "snapshot"
