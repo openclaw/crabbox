@@ -165,25 +165,25 @@ func extractLabelMapFromStruct(entry any) map[string]string {
 	if field.IsValid() && field.CanInterface() {
 		switch fv := field.Interface().(type) {
 		case map[string]string:
-			if len(fv) == 0 {
-				break
-			}
-			out := make(map[string]string, len(fv))
-			for k, v := range fv {
-				out[k] = v
-			}
-			return out
-		case map[string]any:
-			if len(fv) == 0 {
-				break
-			}
-			out := make(map[string]string, len(fv))
-			for k, v := range fv {
-				if str, ok := v.(string); ok {
-					out[k] = str
+			if len(fv) > 0 {
+				out := make(map[string]string, len(fv))
+				for k, v := range fv {
+					out[k] = v
 				}
+				return out
 			}
-			return out
+			return nil
+		case map[string]any:
+			if len(fv) > 0 {
+				out := make(map[string]string, len(fv))
+				for k, v := range fv {
+					if str, ok := v.(string); ok {
+						out[k] = str
+					}
+				}
+				return out
+			}
+			return nil
 		}
 	}
 	// For types like CoordinatorLease where pond is stored as a direct
