@@ -437,7 +437,7 @@ func (testIsloProvider) Spec() ProviderSpec {
 		Name:        "islo",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    nil,
+		Features:    FeatureSet{FeatureURLBridge},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -484,7 +484,7 @@ func (testE2BProvider) Spec() ProviderSpec {
 		Name:        "e2b",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    nil,
+		Features:    FeatureSet{FeatureURLBridge},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -534,7 +534,7 @@ func (testModalProvider) Spec() ProviderSpec {
 		Name:        "modal",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureArchiveSync},
+		Features:    FeatureSet{FeatureArchiveSync, FeatureURLBridge},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -591,7 +591,7 @@ func (testCloudflareProvider) Spec() ProviderSpec {
 		Name:        "cloudflare",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureArchiveSync, FeatureCleanup},
+		Features:    FeatureSet{FeatureArchiveSync, FeatureCleanup, FeatureURLBridge},
 		Coordinator: CoordinatorNever,
 	}
 }

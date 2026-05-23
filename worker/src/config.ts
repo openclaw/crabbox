@@ -76,6 +76,8 @@ export interface LeaseConfig {
   idleTimeoutSeconds: number;
   keep: boolean;
   sshPublicKey: string;
+  pond: string;
+  exposedPorts: string[];
 }
 
 export type AzureOSDiskMode = "managed" | "ephemeral";
@@ -199,7 +201,20 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     idleTimeoutSeconds,
     keep: input.keep ?? false,
     sshPublicKey,
+    pond: normalizePondName(input.pond ?? ""),
+    exposedPorts: input.exposedPorts ?? [],
   };
+}
+
+// normalizePondName mirrors the Go-side helper in internal/cli/pond.go. The
+// `pond` label is a reserved provider-label key that groups N leases so peers
+// can be selected by `crabbox list --pond <name>`.
+export function normalizePondName(value: string): string {
+  return value
+    .toLowerCase()
+    .trim()
+    .replaceAll(/[^a-z0-9]+/g, "-")
+    .replaceAll(/^-+|-+$/g, "");
 }
 
 export function awsPromotedAMIConfigKey(region: string, serverType: string): string {

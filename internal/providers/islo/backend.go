@@ -354,7 +354,7 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 		_ = client.DeleteSandbox(context.Background(), sandbox.GetName())
 		return "", "", "", err
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, isloProvider, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseForRepoProviderWithPond(leaseID, slug, isloProvider, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		_ = client.DeleteSandbox(context.Background(), sandbox.GetName())
 		return "", "", "", err
 	}
@@ -424,13 +424,15 @@ func isloSandboxToServer(sandbox *gosdk.SandboxResponse) Server {
 	if sandbox == nil {
 		return Server{Provider: isloProvider, Labels: map[string]string{"provider": isloProvider}}
 	}
+	leaseID := isloLeasePrefix + sandbox.GetName()
 	labels := map[string]string{
 		"provider": isloProvider,
-		"lease":    isloLeasePrefix + sandbox.GetName(),
-		"slug":     newLeaseSlug(isloLeasePrefix + sandbox.GetName()),
+		"lease":    leaseID,
+		"slug":     newLeaseSlug(leaseID),
 		"target":   targetLinux,
 		"state":    sandbox.GetStatus(),
 	}
+	applyIsloClaimLabels(labels, leaseID)
 	return Server{
 		Provider: isloProvider,
 		CloudID:  sandbox.GetID(),
@@ -449,9 +451,16 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 		status = sandbox.GetStatus()
 		image = sandbox.GetImage()
 	}
+	labels := map[string]string{
+		"provider": isloProvider,
+		"lease":    leaseID,
+		"slug":     newLeaseSlug(leaseID),
+		"state":    status,
+	}
+	applyIsloClaimLabels(labels, leaseID)
 	return statusView{
 		ID:         leaseID,
-		Slug:       newLeaseSlug(leaseID),
+		Slug:       labels["slug"],
 		Provider:   isloProvider,
 		TargetOS:   targetLinux,
 		State:      status,
@@ -459,11 +468,20 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 		ServerType: image,
 		Network:    NetworkPublic,
 		Ready:      isloStatusReady(status),
-		Labels: map[string]string{
-			"provider": isloProvider,
-			"lease":    leaseID,
-			"state":    status,
-		},
+		Labels:     labels,
+	}
+}
+
+func applyIsloClaimLabels(labels map[string]string, leaseID string) {
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok {
+		return
+	}
+	if claim.Slug != "" {
+		labels["slug"] = normalizeLeaseSlug(claim.Slug)
+	}
+	if claim.Pond != "" {
+		labels["pond"] = claim.Pond
 	}
 }
 

@@ -2,8 +2,11 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -14,6 +17,8 @@ type leaseCreateFlagValues struct {
 	ServerType    *string
 	Market        *string
 	Slug          *string
+	Pond          *string
+	Expose        *stringListFlag
 	TTL           *time.Duration
 	Idle          *time.Duration
 	Desktop       *bool
@@ -25,6 +30,8 @@ type leaseCreateFlagValues struct {
 }
 
 func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlagValues {
+	expose := stringListFlag{}
+	fs.Var(&expose, "expose", "declare a TCP port this lease wants reachable over the SSH-mesh plane; repeatable")
 	return leaseCreateFlagValues{
 		Provider:      fs.String("provider", defaults.Provider, providerHelpAll()),
 		Profile:       fs.String("profile", defaults.Profile, "profile"),
@@ -32,6 +39,8 @@ func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlag
 		ServerType:    fs.String("type", getenv("CRABBOX_SERVER_TYPE", ""), "provider server/instance type"),
 		Market:        fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand"),
 		Slug:          fs.String("slug", "", "request a friendly slug for a new lease"),
+		Pond:          fs.String("pond", defaults.Pond, "tag this lease with a pond name so peers can be selected with --pond"),
+		Expose:        &expose,
 		TTL:           fs.Duration("ttl", defaults.TTL, "maximum lease lifetime"),
 		Idle:          fs.Duration("idle-timeout", defaults.IdleTimeout, "idle timeout"),
 		Desktop:       fs.Bool("desktop", defaults.Desktop, "provision or require a visible desktop/VNC session"),
@@ -51,6 +60,19 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 	cfg.Provider = *values.Provider
 	cfg.Profile = *values.Profile
 	cfg.Class = *values.Class
+	if flagWasSet(fs, "pond") {
+		pond, err := requestedPondName(*values.Pond)
+		if err != nil {
+			return err
+		}
+		cfg.Pond = pond
+	} else if cfg.Pond != "" {
+		pond, err := requestedPondName(cfg.Pond)
+		if err != nil {
+			return err
+		}
+		cfg.Pond = pond
+	}
 	applyCapabilityFlags(cfg, *values.Desktop, *values.Browser, *values.Code)
 	if err := applyTargetFlagOverrides(cfg, fs, values.Target); err != nil {
 		return err
@@ -83,7 +105,62 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 	if err := validateRequestedCapabilities(*cfg); err != nil {
 		return err
 	}
+	if cfg.Pond != "" {
+		appendPondTailscaleTag(cfg, providerCapableOfTailscale(cfg.Provider))
+		// Reuse paths do not mutate ACL state.
+		if existingLeaseID == "" {
+			if err := maybeBootstrapPondACL(context.Background(), *cfg); err != nil {
+				return err
+			}
+		}
+	}
+	if values.Expose != nil && len(*values.Expose) > 0 {
+		ports, err := requestedExposedPorts(*values.Expose)
+		if err != nil {
+			return err
+		}
+		cfg.ExposedPorts = ports
+	}
 	return validateLeaseDurations(*cfg)
+}
+
+// maybeBootstrapPondACL self-bootstraps the pond tag's tagOwners + grants
+// rows on the operator tailnet when TS_API_KEY is exported. When the key is
+// absent, when the provider lacks Tailscale, or when the row is already
+// present, this is a silent no-op so doctor still owns the manual-snippet
+// fallback path. Failures from the live API are surfaced so the lease is
+// not created against a tailnet that cannot actually carry pond traffic.
+func maybeBootstrapPondACL(ctx context.Context, cfg Config) error {
+	if cfg.Pond == "" || !cfg.Tailscale.Enabled {
+		return nil
+	}
+	if !providerCapableOfTailscale(cfg.Provider) {
+		return nil
+	}
+	apiKey := strings.TrimSpace(os.Getenv("TS_API_KEY"))
+	if apiKey == "" {
+		return nil
+	}
+	// Don't mutate tailnet ACLs if no Tailscale auth key is configured
+	// for the lease itself — provisioning will fail later, and we'd leave
+	// a dangling policy mutation behind.
+	if cfg.Tailscale.AuthKey == "" && os.Getenv("CRABBOX_TAILSCALE_AUTH_KEY") == "" {
+		return nil
+	}
+	client := pondTailnetACLClientFactory(apiKey)
+	if client == nil {
+		return nil
+	}
+	tailnet := strings.TrimSpace(os.Getenv("TS_TAILNET"))
+	owner := localCoordinatorOwner()
+	err := pondACLEnsure(ctx, client, tailnet, owner, cfg.Pond)
+	// A self-hosted control plane (e.g. Headscale) without a Tailscale-shaped
+	// policy API must not block lease creation. Doctor surfaces the same
+	// condition to the operator with the manual-snippet pointer.
+	if errors.Is(err, ErrPondACLAutoBootstrapUnavailable) {
+		return nil
+	}
+	return err
 }
 
 func validateLeaseDurations(cfg Config) error {

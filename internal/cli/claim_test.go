@@ -26,6 +26,31 @@ func TestClaimLeaseForRepoWritesAndUpdatesClaim(t *testing.T) {
 	}
 }
 
+func TestClaimLeaseForRepoProviderStoresPond(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := claimLeaseForRepoProviderWithPond("isb_crabbox-test", "web", "islo", "Alpha Pond", repo, 30*time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := readLeaseClaim("isb_crabbox-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Pond != "alpha-pond" {
+		t.Fatalf("pond=%q want alpha-pond", claim.Pond)
+	}
+	if err := claimLeaseForRepoProvider("isb_crabbox-test", "web", "islo", repo, 30*time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err = readLeaseClaim("isb_crabbox-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Pond != "alpha-pond" {
+		t.Fatalf("pond should be preserved when omitted, got %q", claim.Pond)
+	}
+}
+
 func TestClaimLeaseForRepoConfigScopesProviderClaims(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")

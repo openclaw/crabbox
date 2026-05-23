@@ -87,7 +87,7 @@ func (a App) status(ctx context.Context, args []string) error {
 			if telemetry != "" {
 				telemetry = " " + telemetry
 			}
-			fmt.Fprintf(a.Stdout, "%s slug=%s provider=%s target=%s windows_mode=%s state=%s type=%s host=%s network=%s%s ready=%t has_host=%t idle_for=%s idle_timeout=%s expires=%s%s\n", state.ID, blank(state.Slug, "-"), state.Provider, state.TargetOS, blank(state.WindowsMode, "-"), state.State, state.ServerType, state.Host, state.Network, tailscale, state.Ready, state.HasHost, blank(state.IdleFor, "-"), blank(state.IdleTimeout, "-"), blank(state.ExpiresAt, "-"), telemetry)
+			fmt.Fprintf(a.Stdout, "%s slug=%s provider=%s target=%s windows_mode=%s state=%s type=%s host=%s pond=%s network=%s%s ready=%t has_host=%t idle_for=%s idle_timeout=%s expires=%s%s\n", state.ID, blank(state.Slug, "-"), state.Provider, state.TargetOS, blank(state.WindowsMode, "-"), state.State, state.ServerType, state.Host, blank(state.Pond, "-"), state.Network, tailscale, state.Ready, state.HasHost, blank(state.IdleFor, "-"), blank(state.IdleTimeout, "-"), blank(state.ExpiresAt, "-"), telemetry)
 		}
 		if *wait {
 			if err := statusWaitTerminalError(*id, state); err != nil {
@@ -156,6 +156,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		ServerID:         server.DisplayID(),
 		ServerType:       server.ServerType.Name,
 		Host:             server.PublicNet.IPv4.IP,
+		Pond:             blank(server.Labels[pondLabelKey], cfg.Pond),
 		Network:          resolved.Network,
 		Tailscale:        tailscale,
 		SSHHost:          target.Host,
@@ -190,6 +191,7 @@ type StatusView struct {
 	ServerID         string             `json:"serverId"`
 	ServerType       string             `json:"serverType"`
 	Host             string             `json:"host"`
+	Pond             string             `json:"pond,omitempty"`
 	Network          NetworkMode        `json:"network"`
 	Tailscale        *TailscaleMetadata `json:"tailscale,omitempty"`
 	SSHHost          string             `json:"sshHost"`

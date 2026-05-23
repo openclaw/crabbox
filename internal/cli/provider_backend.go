@@ -102,6 +102,7 @@ const (
 	FeatureBrowser     Feature = "browser"
 	FeatureCode        Feature = "code"
 	FeatureTailscale   Feature = "tailscale"
+	FeatureURLBridge   Feature = "url-bridge"
 	FeatureCheckpoint  Feature = "workspace-checkpoint"
 	FeatureFork        Feature = "workspace-fork"
 	FeatureRestore     Feature = "workspace-restore"
@@ -208,6 +209,7 @@ type LeaseOptions struct {
 	TargetOS      string
 	WindowsMode   string
 	Class         string
+	Pond          string
 	ServerType    string
 	IdleTimeout   time.Duration
 	TTL           time.Duration
@@ -472,6 +474,7 @@ func leaseOptionsFromConfig(cfg Config) LeaseOptions {
 		TargetOS:      cfg.TargetOS,
 		WindowsMode:   cfg.WindowsMode,
 		Class:         cfg.Class,
+		Pond:          normalizePondName(cfg.Pond),
 		ServerType:    cfg.ServerType,
 		IdleTimeout:   cfg.IdleTimeout,
 		TTL:           cfg.TTL,

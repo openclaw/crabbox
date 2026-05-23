@@ -54,6 +54,7 @@ type crabboxKongCLI struct {
 	Config     configKongCmd     `cmd:"" help:"Show or update user config."`
 	Pool       poolKongCmd       `cmd:"" help:"Alias commands for machine pools."`
 	Machine    machineKongCmd    `cmd:"" help:"Alias commands for direct-provider machines."`
+	Pond       pondKongCmd       `cmd:"" help:"Pond bridge plane: peer discovery for delegated providers."`
 }
 
 type kongExit struct {
@@ -116,7 +117,7 @@ func normalizeKongHelpArgs(args []string) []string {
 
 func isKongCommandGroup(command string) bool {
 	switch command {
-	case "actions", "admin", "artifacts", "azure", "cache", "capsule", "checkpoint", "config", "desktop", "image", "job", "machine", "media", "pool":
+	case "actions", "admin", "artifacts", "azure", "cache", "capsule", "checkpoint", "config", "pond", "desktop", "image", "job", "machine", "media", "pool":
 		return true
 	default:
 		return false
@@ -463,6 +464,21 @@ type machineCleanupKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 
+type pondKongCmd struct {
+	Peers   pondPeersKongCmd   `cmd:"" passthrough:"" help:"List peer endpoints for a pond on a delegated provider."`
+	Connect pondConnectKongCmd `cmd:"" passthrough:"" help:"Open SSH -L forwards to every pond member that declared --expose ports."`
+	Release pondReleaseKongCmd `cmd:"" passthrough:"" help:"Stop every lease in the named pond and remove their claims."`
+}
+type pondPeersKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type pondConnectKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type pondReleaseKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+
 type versionKongCmd struct{}
 
 func (c *initKongCmd) Run(ctx context.Context, app App) error     { return app.initProject(ctx, c.Args) }
@@ -497,6 +513,12 @@ func (c *inspectKongCmd) Run(ctx context.Context, app App) error { return app.in
 func (c *stopKongCmd) Run(ctx context.Context, app App) error    { return app.stop(ctx, c.Args) }
 func (c *releaseKongCmd) Run(ctx context.Context, app App) error { return app.stop(ctx, c.Args) }
 func (c *cleanupKongCmd) Run(ctx context.Context, app App) error { return app.cleanup(ctx, c.Args) }
+func (c *pondConnectKongCmd) Run(ctx context.Context, app App) error {
+	return app.pondConnect(ctx, c.Args)
+}
+func (c *pondReleaseKongCmd) Run(ctx context.Context, app App) error {
+	return app.pondRelease(ctx, c.Args)
+}
 
 func (c *desktopLaunchKongCmd) Run(ctx context.Context, app App) error {
 	return app.desktopLaunch(ctx, c.Args)
@@ -667,6 +689,10 @@ func (c *poolListKongCmd) Run(ctx context.Context, app App) error {
 }
 func (c *machineCleanupKongCmd) Run(ctx context.Context, app App) error {
 	return app.cleanup(ctx, c.Args)
+}
+
+func (c *pondPeersKongCmd) Run(ctx context.Context, app App) error {
+	return app.pondPeers(ctx, stripKongCommandPath(c.Args, "pond", "peers"))
 }
 
 func (c *versionKongCmd) Run(app App) error {

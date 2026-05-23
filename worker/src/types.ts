@@ -151,6 +151,8 @@ export interface LeaseRequest {
   idleTimeoutSeconds?: number;
   keep?: boolean;
   sshPublicKey?: string;
+  pond?: string;
+  exposedPorts?: string[];
 }
 
 export type Provider = "hetzner" | "aws" | "azure" | "gcp";
@@ -198,6 +200,7 @@ export interface LeaseRecord {
   class: string;
   serverType: string;
   requestedServerType?: string;
+  pond?: string;
   hostId?: string;
   hostID?: string;
   market?: string;

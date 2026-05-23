@@ -237,6 +237,13 @@ describe("lease config", () => {
     expect(config.code).toBe(true);
   });
 
+  it("normalizes the optional pond label and defaults it to empty", () => {
+    const empty = leaseConfig({ sshPublicKey: "ssh-ed25519 test" });
+    expect(empty.pond).toBe("");
+    const tagged = leaseConfig({ sshPublicKey: "ssh-ed25519 test", pond: " Alpha Pond " });
+    expect(tagged.pond).toBe("alpha-pond");
+  });
+
   it("preserves Tailscale lease capability requests", () => {
     const config = leaseConfig({
       sshPublicKey: "ssh-ed25519 test",

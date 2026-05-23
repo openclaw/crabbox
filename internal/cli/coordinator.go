@@ -54,6 +54,7 @@ type CoordinatorLease struct {
 	Share                *CoordinatorShare     `json:"share,omitempty"`
 	Profile              string                `json:"profile"`
 	Class                string                `json:"class"`
+	Pond                 string                `json:"pond,omitempty"`
 	ServerType           string                `json:"serverType"`
 	RequestedServerType  string                `json:"requestedServerType,omitempty"`
 	HostID               string                `json:"hostId,omitempty"`
@@ -641,6 +642,8 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"idleTimeoutSeconds":              int(cfg.IdleTimeout.Seconds()),
 		"keep":                            keep,
 		"sshPublicKey":                    publicKey,
+		"pond":                            cfg.Pond,
+		"exposedPorts":                    cfg.ExposedPorts,
 	}
 	if len(capacity) > 0 {
 		req["capacity"] = capacity
@@ -1625,6 +1628,9 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 			"last_touched_at":   lease.LastTouchedAt,
 			"idle_timeout_secs": fmt.Sprint(lease.IdleTimeoutSeconds),
 		},
+	}
+	if pond := normalizePondName(lease.Pond); pond != "" {
+		server.Labels[pondLabelKey] = pond
 	}
 	if lease.Tailscale != nil {
 		applyTailscaleMetadataToServer(&server, *lease.Tailscale)
