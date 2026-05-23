@@ -15,6 +15,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"daytona",
 		"e2b",
 		"exe-dev",
+		"freestyle",
 		"gcp",
 		"hetzner",
 		"islo",

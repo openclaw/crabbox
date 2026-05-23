@@ -377,6 +377,8 @@ func doctorErrorHint(provider, class string) string {
 		return "check_e2b_api_key_and_sandbox_list"
 	case "islo":
 		return "check_islo_api_key_and_sandbox_list"
+	case "freestyle":
+		return "check_freestyle_api_key_and_sandbox_list"
 	case "modal":
 		return "check_modal_profile_and_sandbox_list"
 	case "namespace-devbox":

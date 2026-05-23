@@ -98,6 +98,7 @@ type Config struct {
 	Railway                  RailwayConfig
 	Runpod                   RunpodConfig
 	Islo                     IsloConfig
+	Freestyle                FreestyleConfig
 	Tensorlake               TensorlakeConfig
 	Modal                    ModalConfig
 	Cloudflare               CloudflareConfig
@@ -236,6 +237,14 @@ type IsloConfig struct {
 	VCPUs          int
 	MemoryMB       int
 	DiskGB         int
+}
+
+type FreestyleConfig struct {
+	APIKey   string
+	APIURL   string
+	Workdir  string
+	VCPUs    int
+	MemoryMB int
 }
 
 type TensorlakeConfig struct {
@@ -657,6 +666,12 @@ func baseConfig() Config {
 			MemoryMB: 4096,
 			DiskGB:   20,
 		},
+		Freestyle: FreestyleConfig{
+			APIURL:   "https://api.freestyle.sh",
+			Workdir:  "crabbox",
+			VCPUs:    2,
+			MemoryMB: 4096,
+		},
 		Tensorlake: TensorlakeConfig{
 			APIURL:   "https://api.tensorlake.ai",
 			CLIPath:  "tensorlake",
@@ -745,6 +760,7 @@ type fileConfig struct {
 	Railway          *fileRailwayConfig                 `yaml:"railway,omitempty"`
 	Runpod           *fileRunpodConfig                  `yaml:"runpod,omitempty"`
 	Islo             *fileIsloConfig                    `yaml:"islo,omitempty"`
+	Freestyle        *fileFreestyleConfig               `yaml:"freestyle,omitempty"`
 	Tensorlake       *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	Modal            *fileModalConfig                   `yaml:"modal,omitempty"`
 	Cloudflare       *fileCloudflareConfig              `yaml:"cloudflare,omitempty"`
@@ -1014,6 +1030,13 @@ type fileIsloConfig struct {
 	VCPUs          int    `yaml:"vcpus,omitempty"`
 	MemoryMB       int    `yaml:"memoryMB,omitempty"`
 	DiskGB         int    `yaml:"diskGB,omitempty"`
+}
+
+type fileFreestyleConfig struct {
+	APIURL   string `yaml:"apiUrl,omitempty"`
+	Workdir  string `yaml:"workdir,omitempty"`
+	VCPUs    int    `yaml:"vcpus,omitempty"`
+	MemoryMB int    `yaml:"memoryMB,omitempty"`
 }
 
 type fileTensorlakeConfig struct {
@@ -1930,6 +1953,20 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Islo.DiskGB = file.Islo.DiskGB
 		}
 	}
+	if file.Freestyle != nil {
+		if file.Freestyle.APIURL != "" {
+			cfg.Freestyle.APIURL = file.Freestyle.APIURL
+		}
+		if file.Freestyle.Workdir != "" {
+			cfg.Freestyle.Workdir = file.Freestyle.Workdir
+		}
+		if file.Freestyle.VCPUs > 0 {
+			cfg.Freestyle.VCPUs = file.Freestyle.VCPUs
+		}
+		if file.Freestyle.MemoryMB > 0 {
+			cfg.Freestyle.MemoryMB = file.Freestyle.MemoryMB
+		}
+	}
 	if file.Tensorlake != nil {
 		if file.Tensorlake.APIURL != "" {
 			cfg.Tensorlake.APIURL = file.Tensorlake.APIURL
@@ -2616,6 +2653,11 @@ func applyEnv(cfg *Config) {
 	cfg.Islo.VCPUs = getenvInt("CRABBOX_ISLO_VCPUS", cfg.Islo.VCPUs)
 	cfg.Islo.MemoryMB = getenvInt("CRABBOX_ISLO_MEMORY_MB", cfg.Islo.MemoryMB)
 	cfg.Islo.DiskGB = getenvInt("CRABBOX_ISLO_DISK_GB", cfg.Islo.DiskGB)
+	cfg.Freestyle.APIKey = getenv("CRABBOX_FREESTYLE_API_KEY", getenv("FREESTYLE_API_KEY", cfg.Freestyle.APIKey))
+	cfg.Freestyle.APIURL = getenv("CRABBOX_FREESTYLE_API_URL", getenv("FREESTYLE_API_URL", cfg.Freestyle.APIURL))
+	cfg.Freestyle.Workdir = getenv("CRABBOX_FREESTYLE_WORKDIR", cfg.Freestyle.Workdir)
+	cfg.Freestyle.VCPUs = getenvInt("CRABBOX_FREESTYLE_VCPUS", cfg.Freestyle.VCPUs)
+	cfg.Freestyle.MemoryMB = getenvInt("CRABBOX_FREESTYLE_MEMORY_MB", cfg.Freestyle.MemoryMB)
 	cfg.Tensorlake.APIKey = getenv("CRABBOX_TENSORLAKE_API_KEY", getenv("TENSORLAKE_API_KEY", cfg.Tensorlake.APIKey))
 	cfg.Tensorlake.APIURL = getenv("CRABBOX_TENSORLAKE_API_URL", getenv("TENSORLAKE_API_URL", cfg.Tensorlake.APIURL))
 	cfg.Tensorlake.CLIPath = getenv("CRABBOX_TENSORLAKE_CLI", cfg.Tensorlake.CLIPath)
@@ -2816,7 +2858,7 @@ func serverTypeForProviderClass(provider, class string) string {
 	if resolved, err := ProviderFor(provider); err == nil {
 		provider = resolved.Name()
 	}
-	if isBlacksmithProvider(provider) || isStaticProvider(provider) || provider == "islo" || provider == "sprites" || provider == "local-container" {
+	if isBlacksmithProvider(provider) || isStaticProvider(provider) || provider == "islo" || provider == "freestyle" || provider == "sprites" || provider == "local-container" {
 		return ""
 	}
 	if provider == "namespace-devbox" || provider == "namespace" {

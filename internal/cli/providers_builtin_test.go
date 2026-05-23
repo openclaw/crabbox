@@ -17,6 +17,7 @@ func init() {
 	RegisterProvider(testNamespaceProvider{})
 	RegisterProvider(testDaytonaProvider{})
 	RegisterProvider(testIsloProvider{})
+	RegisterProvider(testFreestyleProvider{})
 	RegisterProvider(testE2BProvider{})
 	RegisterProvider(testModalProvider{})
 	RegisterProvider(testCloudflareProvider{})
@@ -472,6 +473,58 @@ func (testIsloProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	return nil
 }
 func (p testIsloProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testDelegatedBackend{spec: p.Spec()}, nil
+}
+
+type testFreestyleProvider struct{}
+
+func (testFreestyleProvider) Name() string      { return "freestyle" }
+func (testFreestyleProvider) Aliases() []string { return nil }
+func (testFreestyleProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "freestyle",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureArchiveSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testFreestyleFlagValues struct {
+	APIURL   *string
+	Workdir  *string
+	VCPUs    *int
+	MemoryMB *int
+}
+
+func (testFreestyleProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testFreestyleFlagValues{
+		APIURL:   fs.String("freestyle-api-url", defaults.Freestyle.APIURL, "Freestyle API URL"),
+		Workdir:  fs.String("freestyle-workdir", defaults.Freestyle.Workdir, "Freestyle sandbox workdir"),
+		VCPUs:    fs.Int("freestyle-vcpus", defaults.Freestyle.VCPUs, "Freestyle sandbox vCPUs"),
+		MemoryMB: fs.Int("freestyle-memory-mb", defaults.Freestyle.MemoryMB, "Freestyle sandbox memory in MB"),
+	}
+}
+func (testFreestyleProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testFreestyleFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "freestyle-api-url") {
+		cfg.Freestyle.APIURL = *v.APIURL
+	}
+	if flagWasSet(fs, "freestyle-workdir") {
+		cfg.Freestyle.Workdir = *v.Workdir
+	}
+	if flagWasSet(fs, "freestyle-vcpus") {
+		cfg.Freestyle.VCPUs = *v.VCPUs
+	}
+	if flagWasSet(fs, "freestyle-memory-mb") {
+		cfg.Freestyle.MemoryMB = *v.MemoryMB
+	}
+	return nil
+}
+func (p testFreestyleProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testDelegatedBackend{spec: p.Spec()}, nil
 }
 
