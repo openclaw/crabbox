@@ -96,6 +96,7 @@ type Config struct {
 	ExeDev                   ExeDevConfig
 	Railway                  RailwayConfig
 	Runpod                   RunpodConfig
+	Wandb                    WandbConfig
 	Islo                     IsloConfig
 	Tensorlake               TensorlakeConfig
 	Modal                    ModalConfig
@@ -224,6 +225,15 @@ type RunpodConfig struct {
 	DiskGB     int
 	User       string
 	WorkRoot   string
+}
+
+// WandbConfig drives the W&B Sandboxes (CoreWeave Sandboxes) provider. The
+// API key is the same one `wandb login` writes to ~/.netrc — the value
+// proposition of this provider is that AI researchers already have it.
+type WandbConfig struct {
+	APIKey             string
+	DefaultImage       string
+	MaxLifetimeSeconds int
 }
 
 type IsloConfig struct {
@@ -762,6 +772,7 @@ type fileConfig struct {
 	ExeDev           *fileExeDevConfig                  `yaml:"exeDev,omitempty"`
 	Railway          *fileRailwayConfig                 `yaml:"railway,omitempty"`
 	Runpod           *fileRunpodConfig                  `yaml:"runpod,omitempty"`
+	Wandb            *fileWandbConfig                   `yaml:"wandb,omitempty"`
 	Islo             *fileIsloConfig                    `yaml:"islo,omitempty"`
 	Tensorlake       *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	Modal            *fileModalConfig                   `yaml:"modal,omitempty"`
@@ -1022,6 +1033,12 @@ type fileRunpodConfig struct {
 	DiskGB     int    `yaml:"diskGB,omitempty"`
 	User       string `yaml:"user,omitempty"`
 	WorkRoot   string `yaml:"workRoot,omitempty"`
+}
+
+type fileWandbConfig struct {
+	APIKey             string `yaml:"apiKey,omitempty"`
+	DefaultImage       string `yaml:"defaultImage,omitempty"`
+	MaxLifetimeSeconds int    `yaml:"maxLifetimeSeconds,omitempty"`
 }
 
 type fileIsloConfig struct {
@@ -1935,6 +1952,17 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Runpod.WorkRoot = file.Runpod.WorkRoot
 		}
 	}
+	if file.Wandb != nil {
+		if file.Wandb.APIKey != "" {
+			cfg.Wandb.APIKey = file.Wandb.APIKey
+		}
+		if file.Wandb.DefaultImage != "" {
+			cfg.Wandb.DefaultImage = file.Wandb.DefaultImage
+		}
+		if file.Wandb.MaxLifetimeSeconds > 0 {
+			cfg.Wandb.MaxLifetimeSeconds = file.Wandb.MaxLifetimeSeconds
+		}
+	}
 	if file.Islo != nil {
 		if file.Islo.BaseURL != "" {
 			cfg.Islo.BaseURL = file.Islo.BaseURL
@@ -2659,6 +2687,11 @@ func applyEnv(cfg *Config) {
 	cfg.Runpod.DiskGB = getenvInt("CRABBOX_RUNPOD_DISK_GB", cfg.Runpod.DiskGB)
 	cfg.Runpod.User = getenv("CRABBOX_RUNPOD_USER", cfg.Runpod.User)
 	cfg.Runpod.WorkRoot = getenv("CRABBOX_RUNPOD_WORK_ROOT", cfg.Runpod.WorkRoot)
+	// WANDB_API_KEY is resolved by the W&B client after file config so a
+	// generic shell login cannot override an explicit wandb.apiKey value.
+	cfg.Wandb.APIKey = getenv("CRABBOX_WANDB_API_KEY", cfg.Wandb.APIKey)
+	cfg.Wandb.DefaultImage = getenv("CRABBOX_WANDB_DEFAULT_IMAGE", getenv("WANDB_DEFAULT_IMAGE", cfg.Wandb.DefaultImage))
+	cfg.Wandb.MaxLifetimeSeconds = getenvInt("CRABBOX_WANDB_MAX_LIFETIME_SECONDS", getenvInt("WANDB_MAX_LIFETIME_SECONDS", cfg.Wandb.MaxLifetimeSeconds))
 	cfg.Islo.APIKey = getenv("CRABBOX_ISLO_API_KEY", getenv("ISLO_API_KEY", cfg.Islo.APIKey))
 	cfg.Islo.BaseURL = getenv("CRABBOX_ISLO_BASE_URL", getenv("ISLO_BASE_URL", cfg.Islo.BaseURL))
 	cfg.Islo.Image = getenv("CRABBOX_ISLO_IMAGE", cfg.Islo.Image)

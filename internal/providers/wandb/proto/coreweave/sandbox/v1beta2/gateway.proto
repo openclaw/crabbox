@@ -1,0 +1,590 @@
+// GatewayService provides the public API for sandbox lifecycle management.
+syntax = "proto3";
+
+package coreweave.sandbox.v1beta2;
+
+import "coreweave/sandbox/v1beta2/secrets.proto";
+import "google/api/annotations.proto";
+import "google/api/field_behavior.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/coreweave/sandbox/api/coreweave/sandbox/v1beta2;sandboxv1beta2";
+
+// ----------------------------------------------------------------------------------
+// Gateway API (v1beta2) - Public Facing API
+// ----------------------------------------------------------------------------------
+// This file defines the public-facing Gateway (Sandbox) API. The Gateway API provides
+// sandbox management capabilities including lifecycle management, file operations,
+// and execution capabilities.
+// Field numbers MUST remain stable for wire compatibility.
+// ----------------------------------------------------------------------------------
+
+// ----------------------------------------------------------------------------------
+// Common / Shared Messages (v1beta2)
+// ----------------------------------------------------------------------------------
+// This section contains shared message definitions used across the Gateway API.
+// ----------------------------------------------------------------------------------
+
+// MountedFile describes a file injected at container startup time.
+// The mount_path should include the full path including the filename.
+message MountedFile {
+  string mount_path = 1 [(google.api.field_behavior) = REQUIRED];
+  bytes file_content = 2 [(google.api.field_behavior) = REQUIRED];
+}
+
+message GpuRequest {
+  int64 gpu_count = 1; // Number of GPUs requested
+  oneof spec {
+    string gpu_type = 2; // Specific GPU type requested (e.g., "A100", "RTX_A6000")
+    int64 gpu_memory_gb = 3; // Amount of VRAM in GB if you don't care about the specific instance
+  }
+}
+
+// ResourceRequest specifies compute resource requirements for a sandbox.
+message ResourceRequest {
+  string cpu = 1 [(google.api.field_behavior) = OPTIONAL]; // CPU in Kubernetes format (e.g., "250m" for 250 millicores, "2" or "2.5" for cores)
+  string memory = 2 [(google.api.field_behavior) = OPTIONAL]; // Memory in Kubernetes format (e.g., "512Mi", "1Gi", "512M", "1G")
+  GpuRequest gpu = 3 [(google.api.field_behavior) = OPTIONAL]; // GPU requirements
+}
+
+// Port defines a port to expose on the container.
+message Port {
+  int32 container_port = 1 [(google.api.field_behavior) = REQUIRED]; // Port number inside the container
+  string name = 2 [(google.api.field_behavior) = OPTIONAL]; // Optional name for the port
+  string protocol = 3 [(google.api.field_behavior) = OPTIONAL]; // Protocol (TCP, UDP, SCTP). Defaults to TCP if not specified.
+}
+
+// ServiceConfig defines how to expose container ports as a Kubernetes Service.
+// Service type is controlled by runner operator configuration based on ingress_mode.
+message ServiceConfig {
+  // Ports to expose as a service. If empty, no service will be created.
+  // Only ports listed in the payload's ports can be exposed.
+  repeated int32 exposed_ports = 1 [(google.api.field_behavior) = REQUIRED]; // Container port numbers to expose
+}
+
+// NetworkOptions defines network configuration options for the sandbox.
+message NetworkOptions {
+  // Ingress mode name configured by runner operator (e.g., "internal", "public", "custom").
+  // Empty means no service exposed. Must match a mode in runner's service_exposure_modes.
+  string ingress_mode = 1 [(google.api.field_behavior) = OPTIONAL];
+
+  // Which container ports (from request.ports) to expose via K8s Service.
+  // Must reference valid port numbers from the ports field.
+  repeated int32 exposed_ports = 2 [(google.api.field_behavior) = OPTIONAL];
+
+  // Egress mode name configured by runner operator (e.g., "direct", "natgateway").
+  // Empty means default egress behavior. Must match a mode in runner's egress_modes.
+  string egress_mode = 3 [(google.api.field_behavior) = OPTIONAL];
+}
+
+// KubernetesSecretSource identifies a specific key within a Kubernetes Secret.
+// Used for runner cluster secrets resolved locally by Runner.
+message KubernetesSecretSource {
+  string secret_name = 1 [(google.api.field_behavior) = REQUIRED]; // K8s Secret name in the cluster secrets namespace
+  string secret_key = 2 [(google.api.field_behavior) = REQUIRED]; // Key within the Secret's data map
+}
+
+// RunnerClusterSecretReference describes a runner cluster secret to inject into a sandbox.
+// Distinct from external secret stores (see docs/architecture/secrets-management.md).
+// This mechanism resolves secrets locally on the Runner's cluster — secret values
+// never transit Gateway, only references flow through the hub.
+message RunnerClusterSecretReference {
+  // Source of the secret — cluster-specific.
+  oneof source {
+    KubernetesSecretSource kubernetes = 1; // Kubernetes Secret reference
+    // Future: other cluster backends (baremetal, VM, etc.)
+  }
+
+  reserved 2 to 9; // Reserved for future source types in the oneof
+
+  // Target environment variable name for the resolved secret value.
+  string env_var = 10 [(google.api.field_behavior) = REQUIRED];
+}
+
+//TODO: This is not yet implemented, need to think through this implementation a bit more.
+message S3Mount {
+  string bucket = 1 [(google.api.field_behavior) = REQUIRED];
+  string directory = 2 [(google.api.field_behavior) = REQUIRED];
+  string mount_path = 3 [(google.api.field_behavior) = REQUIRED];
+}
+
+// ExecPayload describes a command execution inside an existing sandbox.
+message ExecPayload {
+  string command = 1 [(google.api.field_behavior) = REQUIRED];
+  repeated string args = 2 [(google.api.field_behavior) = OPTIONAL];
+}
+
+// ExecResponse is the result of an Exec call.
+message ExecResponse {
+  bytes stdout = 1; // Raw output (stdout) when applicable
+  bytes stderr = 2; // Raw stderr output or execution error details (non-fatal to RPC)
+  int32 exit_code = 3; // Process exit code (0 = success, non-zero = failure, -1 = execution error)
+}
+
+// ResourceUsage represents current resource usage of a sandbox.
+message ResourceUsage {
+  int64 cpu_millicores_used = 1; // Current CPU usage in millicores
+  int64 memory_mb_used = 2; // Current memory usage in MB
+  int64 gpu_count_used = 3; // Number of GPUs currently allocated
+}
+
+// ----------------------------------------------------------------------------------
+// Gateway API Messages
+// ----------------------------------------------------------------------------------
+
+// ----------------------------------------------------------------------------------
+// Enums
+// ----------------------------------------------------------------------------------
+
+// SandboxStatus represents the high-level lifecycle state of a sandbox.
+//
+// Lifecycle: CREATING → RUNNING → TERMINATING → COMPLETED | FAILED
+//
+// TERMINATING is a non-terminal intermediate state indicating the sandbox
+// is being torn down (pod has DeletionTimestamp, draining through grace
+// period). The workload routing key and cache metadata remain alive so
+// the Get path can still query the runner for real-time status.
+enum SandboxStatus {
+  SANDBOX_STATUS_UNSPECIFIED = 0; // State is unknown / not yet determined
+  SANDBOX_STATUS_CREATING = 1; // Being provisioned / started
+  SANDBOX_STATUS_RUNNING = 2; // Actively running
+  SANDBOX_STATUS_COMPLETED = 3; // Finished successfully
+  SANDBOX_STATUS_FAILED = 4; // Failed during creation or execution
+  SANDBOX_STATUS_TERMINATED = 5 [deprecated = true]; // Deprecated: use TERMINATING (non-terminal) or COMPLETED/FAILED (terminal)
+  SANDBOX_STATUS_PENDING = 6; // Pending assignment within a given compute cluster
+  SANDBOX_STATUS_PAUSED = 7; // Paused state
+  SANDBOX_STATUS_TERMINATING = 9; // Being torn down — pod is draining (non-terminal)
+}
+
+// ActionType enumerates supported raw action types that can be executed on a sandbox.
+enum ActionType {
+  ACTION_TYPE_UNSPECIFIED = 0;
+  ACTION_TYPE_EXEC = 1;
+  ACTION_TYPE_ADD_FILE = 2;
+  ACTION_TYPE_RETRIEVE_FILE = 3;
+  ACTION_TYPE_GET_LOGS = 4;
+  ACTION_TYPE_SNAPSHOT = 5;
+  ACTION_TYPE_RESTORE = 6;
+  ACTION_TYPE_STATUS = 7;
+  ACTION_TYPE_STOP = 8;
+}
+
+// EgressType determines how egress traffic is allowed for sandboxes.
+// Maps to pkg.EgressType Go constants.
+enum EgressType {
+  EGRESS_TYPE_UNSPECIFIED = 0;
+  EGRESS_TYPE_NONE = 1;
+  EGRESS_TYPE_INTERNET = 2;
+  EGRESS_TYPE_USER = 3;
+  EGRESS_TYPE_ORG = 4;
+  EGRESS_TYPE_RUNWAY = 5;
+  EGRESS_TYPE_ALLOWLIST = 6;
+}
+
+// ObjectStoragePermission specifies the access level for object storage buckets.
+enum ObjectStoragePermission {
+  OBJECT_STORAGE_PERMISSION_UNSPECIFIED = 0;
+  OBJECT_STORAGE_PERMISSION_READ = 1;
+  OBJECT_STORAGE_PERMISSION_READ_WRITE = 2;
+}
+
+// ObjectStorageAccess describes object storage access to provision for a sandbox.
+// When provided, Gateway mints a per-sandbox OIDC token and Runner injects a credential
+// vending sidecar that exchanges it for temporary S3 credentials.
+message ObjectStorageAccess {
+  repeated string buckets = 1; // Bucket names the sandbox may access
+  ObjectStoragePermission permission = 2; // Required access level
+}
+
+// ----------------------------------------------------------------------------------
+// Request/Response Messages
+// ----------------------------------------------------------------------------------
+
+// StartSandboxRequest launches a new sandbox.
+message StartSandboxRequest {
+  string command = 1 [(google.api.field_behavior) = REQUIRED];
+  repeated string args = 2 [(google.api.field_behavior) = OPTIONAL];
+  repeated string tags = 3 [(google.api.field_behavior) = OPTIONAL]; // Tags used to identify sandboxes
+  ResourceRequest resources = 4 [(google.api.field_behavior) = OPTIONAL]; // Requested resources (mem, cpu, gpu). Ignored if either resource_limit or resource_request is provided.
+  string container_image = 5 [(google.api.field_behavior) = REQUIRED];
+  map<string, string> environment_variables = 6 [(google.api.field_behavior) = OPTIONAL]; // Environment variables to set inside the sandbox
+  repeated Port ports = 7 [(google.api.field_behavior) = OPTIONAL]; // Ports to expose on the container
+  repeated MountedFile mounted_files = 8 [(google.api.field_behavior) = OPTIONAL]; // Files to mount at startup
+  S3Mount s3_mount = 9 [(google.api.field_behavior) = OPTIONAL]; // S3 bucket/directory to mount as a directory
+  NetworkOptions network = 10 [(google.api.field_behavior) = OPTIONAL]; // Network configuration options (ingress/egress). Defaults to private if not specified.
+  repeated string profile_ids = 20 [(google.api.field_behavior) = OPTIONAL]; // Profile template UUIDs or names to constrain scheduling to. UUIDs are resolved to profile names via runner bindings. For backward compatibility, profile names are also accepted.
+  repeated string runner_ids = 21 [(google.api.field_behavior) = OPTIONAL]; // Optional list of operator-assigned runner names (the Runner.identity.runner_id value, e.g. "prod-east-6-managed") to restrict scheduling to. Only runners in the caller's own organization are addressable by name — runner names are unique per org, not globally, so a bare name could otherwise be ambiguous across shared orgs. To schedule against a shared-org runner, omit this field and let the scheduler pick from the caller's visible pool.
+  repeated string profile_names = 33 [(google.api.field_behavior) = OPTIONAL]; // Profile names to constrain scheduling to. Use this when you know the profile name on the runner (e.g., "default", "gvisor-profile").
+  int32 max_lifetime_seconds = 22 [(google.api.field_behavior) = OPTIONAL]; // Optional TTL for max lifetime
+  int32 max_timeout_seconds = 23 [(google.api.field_behavior) = OPTIONAL]; // Optional max timeout in seconds for the request
+  repeated RunnerClusterSecretReference runner_cluster_secrets = 24 [(google.api.field_behavior) = OPTIONAL]; // Runner cluster secrets to inject as environment variables. Max 100 per sandbox.
+  ObjectStorageAccess object_storage_access = 25 [(google.api.field_behavior) = OPTIONAL]; // Object storage access to provision for this sandbox.
+  map<string, string> pod_annotations = 26 [(google.api.field_behavior) = OPTIONAL]; // User-defined annotations to apply to the sandbox pod metadata. Max 100 per sandbox.
+  repeated SecretStoreReference secret_stores = 30 [(google.api.field_behavior) = OPTIONAL]; // Secret stores to resolve and inject into the sandbox
+  ResourceRequest resource_limits = 31 [(google.api.field_behavior) = OPTIONAL]; // The requested resource limit. If provided, resource_requests must also be set.
+  ResourceRequest resource_requests = 32 [(google.api.field_behavior) = OPTIONAL]; // The requested resource request. If provided, resource_limits must also be set. resource_request attributes must always be equal to or lower than their resource_limit counterpart.
+}
+
+// StartSandboxResponse returns identifiers and metadata for a started sandbox.
+message StartSandboxResponse {
+  string sandbox_id = 1; // Server-assigned unique sandbox ID
+  google.protobuf.Timestamp started_at_time = 2; // When the sandbox was started
+  string service_address = 3; // Service address if service is exposed
+  repeated Port exposed_ports = 4; // Exposed ports if there are any
+  ResourceRequest requested_resources = 5; // Requested resources
+  string profile_id = 6; // Profile ID it was assigned to
+  string runner_id = 7; // Runner ID it was assigned to (string value)
+  SandboxStatus sandbox_status = 8; // Current status of the sandbox (Creating, Running, Failed, etc.)
+  string applied_ingress_mode = 9; // The ingress mode that was applied (may differ from requested if defaulted)
+  string applied_egress_mode = 10; // The egress mode that was applied (may differ from requested if defaulted)
+  ResourceRequest requested_resource_limits = 11; // Resource limit.
+  ResourceRequest requested_resource_requests = 12; // Requested resource request.
+}
+
+// StopSandboxRequest terminates a running sandbox.
+message StopSandboxRequest {
+  string sandbox_id = 1 [(google.api.field_behavior) = REQUIRED];
+  int32 graceful_shutdown_seconds = 2 [(google.api.field_behavior) = OPTIONAL]; // Optional delay before shutdown
+  bool snapshot_on_stop = 3 [(google.api.field_behavior) = OPTIONAL]; // Option to snapshot on stop
+  int32 max_timeout_seconds = 4 [(google.api.field_behavior) = OPTIONAL]; // Optional max timeout in seconds for the request
+}
+
+// StopSandboxResponse indicates success or failure of stopping a sandbox.
+message StopSandboxResponse {
+  bool success = 1;
+  string error_message = 2; // Present if stop failed
+}
+
+// GetSandboxRequest gets details about a specific sandbox.
+message GetSandboxRequest {
+  string sandbox_id = 1 [(google.api.field_behavior) = REQUIRED];
+  int32 max_timeout_seconds = 2 [(google.api.field_behavior) = OPTIONAL]; // Optional max timeout in seconds for the request
+}
+
+// GetSandboxResponse returns details about a sandbox.
+message GetSandboxResponse {
+  string sandbox_id = 1;
+  google.protobuf.Timestamp started_at_time = 2;
+  SandboxStatus sandbox_status = 3;
+  ResourceUsage current_resource_usage = 4;
+  string runner_id = 5; // Runner ID where the sandbox is placed
+  string runner_group_id = 6; // Runner group ID for the sandbox
+  string profile_id = 7; // Profile ID where the sandbox is placed (if applicable)
+  string service_address = 8; // Service address if service is exposed
+  repeated Port exposed_ports = 9; // Exposed ports if there are any
+  string applied_ingress_mode = 10; // The ingress mode that was applied (may differ from requested if defaulted)
+  string applied_egress_mode = 11; // The egress mode that was applied (may differ from requested if defaulted)
+  // The reason recorded for the most recent status transition. Populated for
+  // terminal statuses (FAILED, COMPLETED, TERMINATED) so clients can surface
+  // why a sandbox finished without a separate API call. Empty for sandboxes
+  // still running normally.
+  string status_reason = 12;
+}
+
+// ListSandboxesRequest lists sandboxes with optional filters.
+message ListSandboxesRequest {
+  repeated string tags = 1 [(google.api.field_behavior) = OPTIONAL]; // Filter by tags
+  SandboxStatus status = 2 [(google.api.field_behavior) = OPTIONAL]; // Filter by status
+  repeated string profile_ids = 3 [(google.api.field_behavior) = OPTIONAL]; // Filter by profile names (template UUID resolution is not supported for List; use profile_names instead)
+  repeated string runner_ids = 4 [(google.api.field_behavior) = OPTIONAL]; // Filter by runner IDs
+  repeated string profile_names = 7 [(google.api.field_behavior) = OPTIONAL]; // Filter by profile names
+  int32 max_timeout_seconds = 5 [(google.api.field_behavior) = OPTIONAL]; // Optional max timeout in seconds for the request
+  bool include_stopped = 6 [(google.api.field_behavior) = OPTIONAL]; // Include terminal (stopped/completed/failed) sandboxes from DB
+  // The maximum number of sandboxes to return. If unspecified (0), the server
+  // uses a legacy-compatible default of 1000. New callers are encouraged to
+  // request 500 or smaller. The server caps at 1000.
+  int32 page_size = 8 [(google.api.field_behavior) = OPTIONAL];
+  // Opaque page token returned by a previous call's next_page_token. Treat as
+  // opaque — the encoding may change without notice.
+  string page_token = 9 [(google.api.field_behavior) = OPTIONAL];
+}
+
+// ListSandboxesResponse returns a list of sandboxes.
+message ListSandboxesResponse {
+  repeated SandboxInfo sandboxes = 1;
+  // Token to pass as page_token in the next request. Empty when there are no
+  // more pages.
+  string next_page_token = 2;
+}
+
+// SandboxInfo contains basic information about a sandbox.
+message SandboxInfo {
+  string sandbox_id = 1;
+  google.protobuf.Timestamp started_at_time = 2;
+  SandboxStatus sandbox_status = 3;
+  ResourceUsage current_resource_usage = 4;
+  string runner_id = 5; // Runner ID where the sandbox is placed
+  string runner_group_id = 6; // Runner group ID for the sandbox
+  string profile_id = 7; // Profile ID where the sandbox is placed (if applicable)
+  string service_address = 8; // Service address if service is exposed
+  repeated Port exposed_ports = 9; // Exposed ports if there are any
+  string applied_ingress_mode = 10; // The ingress mode that was applied (may differ from requested if defaulted)
+  string applied_egress_mode = 11; // The egress mode that was applied (may differ from requested if defaulted)
+}
+
+// DeleteSandboxRequest deletes a sandbox.
+message DeleteSandboxRequest {
+  string sandbox_id = 1 [(google.api.field_behavior) = REQUIRED];
+  int32 max_timeout_seconds = 2 [(google.api.field_behavior) = OPTIONAL]; // Optional max timeout in seconds for the request
+}
+
+// DeleteSandboxResponse indicates success or failure of deletion.
+message DeleteSandboxResponse {
+  bool success = 1;
+  string error_message = 2; // Present if deletion failed
+}
+
+// ExecSandboxRequest executes a command within a sandbox.
+message ExecSandboxRequest {
+  string sandbox_id = 1 [(google.api.field_behavior) = REQUIRED];
+  repeated string command = 2 [(google.api.field_behavior) = REQUIRED];
+  repeated string args = 3 [(google.api.field_behavior) = OPTIONAL];
+  int32 max_timeout_seconds = 4 [(google.api.field_behavior) = OPTIONAL]; // Optional max timeout in seconds for the request
+}
+
+// ExecSandboxResponse returns command output.
+message ExecSandboxResponse {
+  ExecResponse result = 1;
+}
+
+// AddFileSandboxRequest writes (or overwrites) a file inside the sandbox filesystem.
+message AddFileSandboxRequest {
+  string sandbox_id = 1 [(google.api.field_behavior) = REQUIRED];
+  // File contents to write. An empty value is valid and creates a zero-byte file.
+  bytes file_contents = 2 [(google.api.field_behavior) = OPTIONAL];
+  string filepath = 3 [(google.api.field_behavior) = REQUIRED];
+  int32 max_timeout_seconds = 4 [(google.api.field_behavior) = OPTIONAL]; // Optional max timeout in seconds for the request
+}
+
+// AddFileSandboxResponse indicates success or failure.
+message AddFileSandboxResponse {
+  bool success = 1;
+  string error_message = 2; // Present if add file failed
+}
+
+// RetrieveFileSandboxRequest retrieves a file's contents from the sandbox.
+message RetrieveFileSandboxRequest {
+  string sandbox_id = 1 [(google.api.field_behavior) = REQUIRED];
+  string filepath = 2 [(google.api.field_behavior) = REQUIRED];
+  int32 max_timeout_seconds = 3 [(google.api.field_behavior) = OPTIONAL]; // Optional max timeout in seconds for the request
+}
+
+// RetrieveFileSandboxResponse returns file contents.
+message RetrieveFileSandboxResponse {
+  bytes file_contents = 1; // Base64-encoded file contents
+  bool success = 2;
+  string error_message = 3; // Present if retrieval failed
+}
+
+// PauseSandboxRequest pauses a running sandbox.
+message PauseSandboxRequest {
+  string sandbox_id = 1 [(google.api.field_behavior) = REQUIRED];
+  int32 max_timeout_seconds = 2 [(google.api.field_behavior) = OPTIONAL]; // Optional max timeout in seconds for the request
+}
+
+// PauseSandboxResponse indicates success or failure.
+message PauseSandboxResponse {
+  bool success = 1;
+  string error_message = 2; // Present if pause failed
+}
+
+// ResumeSandboxRequest resumes a paused sandbox.
+message ResumeSandboxRequest {
+  string sandbox_id = 1 [(google.api.field_behavior) = REQUIRED];
+  int32 max_timeout_seconds = 2 [(google.api.field_behavior) = OPTIONAL]; // Optional max timeout in seconds for the request
+}
+
+// ResumeSandboxResponse indicates success or failure.
+message ResumeSandboxResponse {
+  bool success = 1;
+  string error_message = 2; // Present if resume failed
+}
+
+// RawSandboxRequest executes a raw action on a sandbox.
+message RawSandboxRequest {
+  string sandbox_id = 1 [(google.api.field_behavior) = REQUIRED];
+  ActionType action_type = 2 [(google.api.field_behavior) = REQUIRED];
+  oneof action_payload {
+    ExecPayload exec_payload = 3;
+    AddFileSandboxRequest add_file_payload = 4;
+    RetrieveFileSandboxRequest retrieve_file_payload = 5;
+    // Additional action payloads can be added here as needed
+  }
+  int32 max_timeout_seconds = 6 [(google.api.field_behavior) = OPTIONAL]; // Optional max timeout in seconds for the request
+}
+
+// RawSandboxResponse returns the result of a raw action.
+message RawSandboxResponse {
+  ActionType action_type = 1;
+  oneof action_response {
+    ExecSandboxResponse exec_response = 2;
+    AddFileSandboxResponse add_file_response = 3;
+    RetrieveFileSandboxResponse retrieve_file_response = 4;
+    // Additional action responses can be added here as needed
+  }
+}
+
+// ----------------------------------------------------------------------------------
+// Object Storage WIF Config Messages
+// ----------------------------------------------------------------------------------
+
+// The WIF configuration for an organization's object storage access.
+message ObjectStorageWIFConfig {
+  // Server-assigned unique identifier.
+  string id = 1 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // The WIF config ID from CoreWeave Cloud Console.
+  // Obtained by creating a Workload Federation configuration in the Console.
+  string wif_config_id = 2 [(google.api.field_behavior) = REQUIRED];
+
+  // Whether object storage access is enabled for this organization.
+  // When omitted in a Set request, defaults to true (enabled).
+  optional bool enabled = 3;
+
+  // Bucket names the organization is allowed to access.
+  // Empty means all buckets are allowed.
+  repeated string allowed_buckets = 4 [(google.api.field_behavior) = OPTIONAL];
+
+  // Maximum permission level for sandboxes.
+  ObjectStoragePermission max_permission = 5 [(google.api.field_behavior) = REQUIRED];
+
+  // Server-assigned timestamps.
+  google.protobuf.Timestamp created_at = 6 [(google.api.field_behavior) = OUTPUT_ONLY];
+  google.protobuf.Timestamp updated_at = 7 [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+message GetObjectStorageWIFConfigRequest {
+  // No fields — org_id is derived from auth context.
+}
+
+message SetObjectStorageWIFConfigRequest {
+  // The WIF config ID from CoreWeave Cloud Console.
+  string wif_config_id = 1 [(google.api.field_behavior) = REQUIRED];
+
+  // Whether object storage access is enabled.
+  // When omitted, defaults to true (enabled). Use `false` to explicitly disable.
+  optional bool enabled = 2;
+
+  // Bucket names the organization is allowed to access.
+  // Empty list means all buckets are allowed.
+  repeated string allowed_buckets = 3 [(google.api.field_behavior) = OPTIONAL];
+
+  // Maximum permission level for sandboxes. Must be READ or READ_WRITE.
+  ObjectStoragePermission max_permission = 4 [(google.api.field_behavior) = REQUIRED];
+}
+
+message DeleteObjectStorageWIFConfigRequest {
+  // No fields — org_id is derived from auth context.
+}
+
+message DeleteObjectStorageWIFConfigResponse {
+  // Empty — successful deletion returns no content.
+}
+
+// ----------------------------------------------------------------------------------
+// Service Definition
+// ----------------------------------------------------------------------------------
+
+// GatewayService provides sandbox management capabilities.
+service GatewayService {
+  // Start launches a new sandbox.
+  rpc Start(StartSandboxRequest) returns (StartSandboxResponse) {
+    option (google.api.http) = {
+      post: "/v1beta2/sandboxes"
+      body: "*"
+    };
+  }
+
+  // Stop terminates a running sandbox.
+  rpc Stop(StopSandboxRequest) returns (StopSandboxResponse) {
+    option (google.api.http) = {
+      post: "/v1beta2/sandboxes/{sandbox_id}/stop"
+      body: "*"
+    };
+  }
+
+  // Get retrieves details about a specific sandbox.
+  rpc Get(GetSandboxRequest) returns (GetSandboxResponse) {
+    option (google.api.http) = {get: "/v1beta2/sandboxes/{sandbox_id}"};
+  }
+
+  // List enumerates sandboxes with optional filters.
+  rpc List(ListSandboxesRequest) returns (ListSandboxesResponse) {
+    option (google.api.http) = {get: "/v1beta2/sandboxes"};
+  }
+
+  // Delete removes a sandbox.
+  rpc Delete(DeleteSandboxRequest) returns (DeleteSandboxResponse) {
+    option (google.api.http) = {delete: "/v1beta2/sandboxes/{sandbox_id}"};
+  }
+
+  // Exec executes a command within a sandbox.
+  rpc Exec(ExecSandboxRequest) returns (ExecSandboxResponse) {
+    option (google.api.http) = {
+      post: "/v1beta2/sandboxes/{sandbox_id}/exec"
+      body: "*"
+    };
+  }
+
+  // AddFile writes (or overwrites) a file inside the sandbox filesystem.
+  rpc AddFile(AddFileSandboxRequest) returns (AddFileSandboxResponse) {
+    option (google.api.http) = {
+      post: "/v1beta2/sandboxes/{sandbox_id}/files"
+      body: "*"
+    };
+  }
+
+  // RetrieveFile retrieves a file's contents from the sandbox.
+  rpc RetrieveFile(RetrieveFileSandboxRequest) returns (RetrieveFileSandboxResponse) {
+    option (google.api.http) = {get: "/v1beta2/sandboxes/{sandbox_id}/files/{filepath}"};
+  }
+
+  // Pause pauses a running sandbox.
+  rpc Pause(PauseSandboxRequest) returns (PauseSandboxResponse) {
+    option (google.api.http) = {
+      post: "/v1beta2/sandboxes/{sandbox_id}/pause"
+      body: "*"
+    };
+  }
+
+  // Resume resumes a paused sandbox.
+  rpc Resume(ResumeSandboxRequest) returns (ResumeSandboxResponse) {
+    option (google.api.http) = {
+      post: "/v1beta2/sandboxes/{sandbox_id}/resume"
+      body: "*"
+    };
+  }
+
+  // Raw executes a raw action on a sandbox based on action_type.
+  rpc Raw(RawSandboxRequest) returns (RawSandboxResponse) {
+    option (google.api.http) = {
+      post: "/v1beta2/sandboxes/{sandbox_id}/raw"
+      body: "*"
+    };
+  }
+
+  // --- Object Storage WIF Config Management ---
+
+  // Returns the organization's WIF configuration.
+  // Derives org_id from the authenticated caller.
+  rpc GetObjectStorageWIFConfig(GetObjectStorageWIFConfigRequest) returns (ObjectStorageWIFConfig) {
+    option (google.api.http) = {get: "/v1beta2/object-storage/wif-config"};
+  }
+
+  // Creates or replaces the organization's WIF configuration.
+  // Derives org_id from the authenticated caller.
+  // Since there is one config per org, this is an idempotent upsert.
+  rpc SetObjectStorageWIFConfig(SetObjectStorageWIFConfigRequest) returns (ObjectStorageWIFConfig) {
+    option (google.api.http) = {
+      put: "/v1beta2/object-storage/wif-config"
+      body: "*"
+    };
+  }
+
+  // Deletes the organization's WIF configuration.
+  // Running sandboxes are unaffected until their OIDC JWT expires.
+  // New sandbox requests with object_storage_access will be rejected.
+  rpc DeleteObjectStorageWIFConfig(DeleteObjectStorageWIFConfigRequest) returns (DeleteObjectStorageWIFConfigResponse) {
+    option (google.api.http) = {delete: "/v1beta2/object-storage/wif-config"};
+  }
+}

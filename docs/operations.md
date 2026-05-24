@@ -51,6 +51,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=daytona CRABBOX_LIVE_REPO=/path/to/my-app 
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-devbox CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=semaphore CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=sprites CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=wandb CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 ```
 
 Blacksmith smoke requires a workflow containing a `useblacksmith/testbox`,
@@ -63,6 +64,8 @@ requires `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`, and
 `CRABBOX_DAYTONA_SNAPSHOT`, `DAYTONA_SNAPSHOT`, or `daytona.snapshot`.
 Namespace needs the authenticated `devbox` CLI on `PATH`. Sprites needs the
 authenticated `sprite` CLI on `PATH` plus a Sprites token in the environment.
+W&B smoke requires `CRABBOX_WANDB_API_KEY` or `WANDB_API_KEY` (from `wandb login`).
+Use `scripts/wandb-smoke.sh` for a coordinator-free wandb-only gate.
 
 For direct-provider smoke, disable the coordinator with a scratch config and run the same commands manually:
 

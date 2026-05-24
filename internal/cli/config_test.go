@@ -99,6 +99,12 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_TENSORLAKE_DISK_MB",
 		"CRABBOX_TENSORLAKE_TIMEOUT_SECS",
 		"CRABBOX_TENSORLAKE_NO_INTERNET",
+		"CRABBOX_WANDB_API_KEY",
+		"WANDB_API_KEY",
+		"CRABBOX_WANDB_DEFAULT_IMAGE",
+		"WANDB_DEFAULT_IMAGE",
+		"CRABBOX_WANDB_MAX_LIFETIME_SECONDS",
+		"WANDB_MAX_LIFETIME_SECONDS",
 		"CRABBOX_CLOUDFLARE_RUNNER_URL",
 		"CRABBOX_CLOUDFLARE_RUNNER_TOKEN",
 		"CRABBOX_CLOUDFLARE_WORKDIR",
@@ -1025,6 +1031,57 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if len(cfg.Run.PreflightTools) != 3 || cfg.Run.PreflightTools[1] != "bun" {
 		t.Fatalf("unexpected preflight tools: %#v", cfg.Run.PreflightTools)
+	}
+}
+
+func TestWandbConfigAPIKeyBeatsGenericWANDBEnv(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("WANDB_API_KEY", "generic-env-key")
+
+	path := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("provider: wandb\nwandb:\n  apiKey: config-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Wandb.APIKey != "config-key" {
+		t.Fatalf("Wandb.APIKey = %q, want config-key", cfg.Wandb.APIKey)
+	}
+}
+
+func TestCrabboxWandbAPIKeyOverridesConfig(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_WANDB_API_KEY", "crabbox-env-key")
+	t.Setenv("WANDB_API_KEY", "generic-env-key")
+
+	path := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("provider: wandb\nwandb:\n  apiKey: config-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Wandb.APIKey != "crabbox-env-key" {
+		t.Fatalf("Wandb.APIKey = %q, want crabbox-env-key", cfg.Wandb.APIKey)
 	}
 }
 

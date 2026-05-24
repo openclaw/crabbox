@@ -29,6 +29,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"ssh",
 		"tensorlake",
 		"upstash-box",
+		"wandb",
 	}
 	for _, name := range providers {
 		t.Run(name, func(t *testing.T) {

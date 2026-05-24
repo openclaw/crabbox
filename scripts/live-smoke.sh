@@ -337,6 +337,23 @@ semaphore_smoke() {
   lease=""
 }
 
+wandb_smoke() {
+  need_tool jq
+
+  if [[ -z "${CRABBOX_WANDB_API_KEY:-${WANDB_API_KEY:-}}" ]]; then
+    echo "wandb smoke requires CRABBOX_WANDB_API_KEY or WANDB_API_KEY" >&2
+    return 2
+  fi
+
+  run_in_repo "$cb" doctor --provider wandb
+  run_in_repo "$cb" run \
+    --provider wandb \
+    --no-sync \
+    --wandb-max-lifetime 60 \
+    -- echo crabbox-wandb-ok
+  run_in_repo "$cb" list --provider wandb --json | jq 'map({id:(.id // .CloudID),provider:(.provider // .Provider),state:(.status // .state)})'
+}
+
 sprites_smoke() {
   need_tool jq
   need_tool rg
@@ -376,9 +393,19 @@ sprites_smoke() {
   lease=""
 }
 
-run_in_repo "$cb" whoami --json
-run_in_repo "$cb" doctor
-run_in_repo "$cb" sync-plan | sed -n '1,80p'
+run_coordinator_preamble() {
+  run_in_repo "$cb" whoami --json
+  run_in_repo "$cb" doctor
+  run_in_repo "$cb" sync-plan | sed -n '1,80p'
+}
+
+needs_coordinator_preamble() {
+  [[ "${CRABBOX_LIVE_COORDINATOR:-1}" == "1" ]]
+}
+
+if needs_coordinator_preamble; then
+  run_coordinator_preamble
+fi
 
 if has_provider aws; then
   provider_smoke aws --type "${CRABBOX_LIVE_AWS_TYPE:-t3.small}" --ttl 15m --idle-timeout 5m
@@ -414,6 +441,10 @@ fi
 
 if has_provider sprites; then
   sprites_smoke
+fi
+
+if has_provider wandb; then
+  wandb_smoke
 fi
 
 admin_out="$(run_in_repo "$cb" admin leases --state active --json 2>&1)" || {

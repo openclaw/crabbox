@@ -68,6 +68,13 @@ Supported providers:
 - [RunPod](docs/providers/runpod.md) (`provider: runpod`): RunPod pods
   provisioned through the [RunPod](https://runpod.io) REST API and exposed as
   normal SSH leases with Crabbox sync.
+- [W&B Sandboxes](docs/providers/wandb.md) (`provider: wandb`, alias
+  `weights-and-biases`): [Weights & Biases](https://wandb.ai/) Sandboxes —
+  managed by CoreWeave post-2025 acquisition — the sandbox provider the
+  AI/ML research community already has credentials for. The only provider an
+  ML engineer or researcher can use with the `wandb login` API key already
+  in `~/.netrc`: zero new accounts, zero new credentials. Native Go gRPC
+  client against `coreweave.sandbox.v1beta2`; no Python in the binary.
 
 ---
 

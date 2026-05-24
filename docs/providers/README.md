@@ -33,6 +33,7 @@ static SSH provider for existing machines.
 | [Cloudflare](cloudflare.md) | delegated run | Linux | Cloudflare execution through a Worker and container runner |
 | [Railway](railway.md) | delegated run | Linux | redeploy and stream logs for an existing Railway service via the GraphQL API |
 | [RunPod](runpod.md) | SSH lease | Linux | disposable RunPod pods provisioned via the REST API and accessed over public SSH |
+| [W&B Sandboxes](wandb.md) | delegated run | Linux | [wandb.ai](https://wandb.ai/) (by CoreWeave) — the only provider an AI researcher can use with the `wandb login` credential they already have |
 
 ## Shared Rules
 
