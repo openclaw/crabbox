@@ -212,6 +212,7 @@ export interface LeaseRecord {
   sshUser: string;
   sshPort: string;
   sshFallbackPorts?: string[];
+  awsSSHCIDRs?: string[];
   workRoot: string;
   keep: boolean;
   ttlSeconds: number;

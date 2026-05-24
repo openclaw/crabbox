@@ -1084,12 +1084,22 @@ export class FleetDurableObject implements DurableObject {
     if (limitError) {
       return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
     }
-    const { server, serverType, market, attempts } = await provider.createServerWithFallback(
-      config,
-      leaseID,
-      slug,
-      owner,
-    );
+    if (config.provider === "aws") {
+      record.awsSSHCIDRs = config.awsSSHCIDRs;
+      await this.putLease(record);
+    }
+    const providerConfig =
+      config.provider === "aws"
+        ? { ...config, awsSSHCIDRs: activeAWSSSHCIDRs([...leases, record], config.awsSSHCIDRs) }
+        : config;
+    const { server, serverType, market, attempts } = await provider
+      .createServerWithFallback(providerConfig, leaseID, slug, owner)
+      .catch(async (error: unknown) => {
+        if (config.provider === "aws") {
+          await this.state.storage.delete(leaseKey(record.id));
+        }
+        throw error;
+      });
     record.cloudID = server.cloudID;
     record.serverType = serverType;
     if (server.hostID) {
@@ -1202,6 +1212,10 @@ export class FleetDurableObject implements DurableObject {
     lease.lastTouchedAt = now.toISOString();
     lease.expiresAt = recomputeLeaseExpiresAt(lease, now).toISOString();
     clearLeaseCleanupMetadata(lease);
+    const requestSource = request ? requestSourceCIDRs(request) : [];
+    if (lease.provider === "aws" && lease.state === "active" && requestSource.length > 0) {
+      lease.awsSSHCIDRs = requestSource;
+    }
     await this.putLease(lease);
     await this.refreshLeaseSSHIngress(lease, request);
     await this.scheduleAlarm();
@@ -1211,18 +1225,19 @@ export class FleetDurableObject implements DurableObject {
     if (!request || lease.provider !== "aws" || lease.state !== "active") {
       return;
     }
-    const cidrs = requestSourceCIDRs(request);
+    const cidrs = lease.awsSSHCIDRs ?? [];
     if (cidrs.length === 0) {
       return;
     }
     try {
+      const leases = await this.leaseRecords();
       const config = leaseConfig({
         provider: "aws",
         target: lease.target,
         windowsMode: lease.windowsMode ?? "normal",
         class: lease.class,
         serverType: lease.serverType,
-        awsSSHCIDRs: cidrs,
+        awsSSHCIDRs: activeAWSSSHCIDRs(leases, cidrs),
         capacity: { market: lease.market === "spot" ? "spot" : "on-demand" },
         providerKey: lease.providerKey,
         sshUser: lease.sshUser,
@@ -6270,6 +6285,15 @@ function uniqueNonEmpty(values: Array<string | undefined>): string[] {
     }
   }
   return out;
+}
+
+function activeAWSSSHCIDRs(leases: LeaseRecord[], cidrs: string[]): string[] {
+  return uniqueNonEmpty([
+    ...leases.flatMap((lease) =>
+      lease.provider === "aws" && lease.state === "active" ? (lease.awsSSHCIDRs ?? []) : [],
+    ),
+    ...cidrs,
+  ]);
 }
 
 function awsOrphanSweepCandidate(

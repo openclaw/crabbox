@@ -211,7 +211,6 @@ describe("fleet lease identity and idle", () => {
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       }),
     );
-
     const heartbeat = await fleet.fetch(
       request("POST", "/v1/leases/cbx_000000000001/heartbeat", {
         headers: {
@@ -259,6 +258,15 @@ describe("fleet lease identity and idle", () => {
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       }),
     );
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        provider: "aws",
+        awsSSHCIDRs: ["203.0.113.9/32"],
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
 
     const heartbeat = await fleet.fetch(
       request("POST", "/v1/leases/cbx_000000000001/heartbeat", {
@@ -277,10 +285,13 @@ describe("fleet lease identity and idle", () => {
       provider: "aws",
       target: "macos",
       awsRegion: "eu-west-1",
-      awsSSHCIDRs: ["198.51.100.44/32"],
+      awsSSHCIDRs: ["198.51.100.44/32", "203.0.113.9/32"],
       sshPort: "2222",
       sshFallbackPorts: ["22"],
     });
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000001")?.awsSSHCIDRs).toEqual([
+      "198.51.100.44/32",
+    ]);
   });
 
   it("does not postpone the first AWS orphan sweep alarm on repeated scheduling", async () => {
@@ -953,6 +964,48 @@ describe("fleet lease identity and idle", () => {
     );
     expect(create.status).toBe(201);
     expect(awsCIDRs).toEqual(["203.0.113.7/32"]);
+  });
+
+  it("preserves active AWS lease SSH ingress CIDRs while creating another lease", async () => {
+    const storage = new MemoryStorage();
+    let awsCIDRs: string[] = [];
+    const fleet = testFleet(storage, {
+      aws: fakeProvider((config) => {
+        awsCIDRs = config.awsSSHCIDRs;
+      }),
+    });
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "aws",
+        awsSSHCIDRs: ["198.51.100.44/32"],
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "cf-connecting-ip": "203.0.113.7",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "aws",
+          class: "standard",
+          serverType: "c7a.8xlarge",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(create.status).toBe(201);
+    expect(awsCIDRs).toEqual(["198.51.100.44/32", "203.0.113.7/32"]);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.awsSSHCIDRs).toEqual([
+      "203.0.113.7/32",
+    ]);
   });
 
   it("persists provider host pins on AWS macOS leases", async () => {
