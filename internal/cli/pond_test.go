@@ -398,22 +398,50 @@ func TestDoctorPondSummaryNoopsWithoutPond(t *testing.T) {
 	}
 }
 
-func TestDoctorPondSummarySkipsNonTailscaleProviderWithPond(t *testing.T) {
+func TestDoctorPondSummarySkipsWithoutLocalPondClaims(t *testing.T) {
 	cfg := Config{Provider: "e2b", Pond: "alpha"}
 	status, message, details := doctorPondSummary(context.Background(), cfg)
 	if status != "skip" {
 		t.Fatalf("expected skip, got %q", status)
 	}
-	want := `pond "alpha": no Tailscale-capable provider found; pond networking unavailable`
+	want := `pond "alpha": no local lease claims found; create or claim a pond member before checking Tailscale policy`
 	if message != want {
 		t.Fatalf("verdict text drifted\n want: %q\n got:  %q", want, message)
 	}
-	if details["reason"] != "no_tailscale_capable_provider" {
+	if details["reason"] != "no_pond_claims" {
 		t.Fatalf("expected reason metadata, got %#v", details)
 	}
 }
 
+func TestDoctorPondSummarySkipsPondWithOnlyNonTailscaleClaims(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "cbx_e2b1", Provider: "e2b", Pond: "alpha", Slug: "api", RepoRoot: "/r"},
+	})
+	t.Setenv("TS_API_KEY", "tskey-api-stub")
+	prev := doctorTailscaleACLClientFactory
+	called := false
+	defer func() { doctorTailscaleACLClientFactory = prev }()
+	doctorTailscaleACLClientFactory = func(_ string) doctorTailscaleACLClient {
+		called = true
+		return stubDoctorTailscaleACLClient{policy: pondPolicyFixture(pondTailscaleTag(localCoordinatorOwner(), "alpha"))}
+	}
+	cfg := Config{Provider: "hetzner", Pond: "alpha"}
+	status, _, details := doctorPondSummary(context.Background(), cfg)
+	if status != "skip" {
+		t.Fatalf("expected skip for URL-only pond, got %q details=%#v", status, details)
+	}
+	if called {
+		t.Fatalf("doctor should not call Tailscale policy API for a pond with only non-Tailscale claims")
+	}
+	if details["reason"] != "no_tailscale_capable_provider" {
+		t.Fatalf("expected no_tailscale_capable_provider reason, got %#v", details)
+	}
+}
+
 func TestDoctorPondSummarySkipsWhenAPIKeyMissing(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "cbx_hz1", Provider: "hetzner", Pond: "alpha", Slug: "web", RepoRoot: "/r"},
+	})
 	t.Setenv("TS_API_KEY", "")
 	cfg := Config{Provider: "hetzner", Pond: "alpha"}
 	status, _, details := doctorPondSummary(context.Background(), cfg)
@@ -426,6 +454,9 @@ func TestDoctorPondSummarySkipsWhenAPIKeyMissing(t *testing.T) {
 }
 
 func TestDoctorPondSummaryOKWhenACLPresent(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "cbx_hz1", Provider: "hetzner", Pond: "alpha", Slug: "web", RepoRoot: "/r"},
+	})
 	t.Setenv("TS_API_KEY", "tskey-api-stub")
 	tag := pondTailscaleTag(localCoordinatorOwner(), "alpha")
 	policy := pondPolicyFixture(tag)
@@ -450,6 +481,9 @@ func TestDoctorPondSummaryOKWhenACLPresent(t *testing.T) {
 }
 
 func TestDoctorPondSummaryFailsWhenACLMissing(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "cbx_hz1", Provider: "hetzner", Pond: "alpha", Slug: "web", RepoRoot: "/r"},
+	})
 	t.Setenv("TS_API_KEY", "tskey-api-stub")
 	policy := pondPolicyFixture("tag:cbx-pond-user-bravo")
 	prev := doctorTailscaleACLClientFactory
@@ -473,6 +507,9 @@ func TestDoctorPondSummaryFailsWhenACLMissing(t *testing.T) {
 }
 
 func TestDoctorPondSummaryFailsWhenAPIClientErrors(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "cbx_hz1", Provider: "hetzner", Pond: "alpha", Slug: "web", RepoRoot: "/r"},
+	})
 	t.Setenv("TS_API_KEY", "tskey-api-stub")
 	prev := doctorTailscaleACLClientFactory
 	defer func() { doctorTailscaleACLClientFactory = prev }()
@@ -494,6 +531,9 @@ func TestDoctorPondSummaryFailsWhenAPIClientErrors(t *testing.T) {
 // with Tailscale's /api/v2/tailnet/.../acl shape. Doctor must skip with a
 // helpful pointer at the manual snippet rather than reporting a failure.
 func TestDoctorPondSummarySkipsWhenControlPlaneIncompatible(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "cbx_hz1", Provider: "hetzner", Pond: "alpha", Slug: "web", RepoRoot: "/r"},
+	})
 	t.Setenv("TS_API_KEY", "tskey-api-stub")
 	t.Setenv("CRABBOX_TS_API_URL", "https://headscale.example.com")
 	t.Setenv("TS_API_URL", "")
@@ -535,6 +575,10 @@ func TestPondACLRowPresentChecksConcreteTag(t *testing.T) {
   "tagOwners": { "tag:cbx-pond-yossi-e-alpha": ["autogroup:admin"] },
   "grants": [{ "src": ["tag:cbx-pond-yossi-e-alpha"], "dst": ["tag:cbx-pond-yossi-e-alpha"], "ip": ["*"] }]
 }`, true},
+		{"commented tag owner only", `{
+  // "tagOwners": { "tag:cbx-pond-yossi-e-alpha": ["autogroup:admin"] },
+  "grants": [{ "src": ["tag:cbx-pond-yossi-e-alpha"], "dst": ["tag:cbx-pond-yossi-e-alpha"], "ip": ["*"] }]
+}`, false},
 		{"multiline trailing commas", `{
   "tagOwners": {
     "tag:cbx-pond-yossi-e-alpha": ["autogroup:admin"],

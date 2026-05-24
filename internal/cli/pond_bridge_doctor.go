@@ -36,8 +36,8 @@ type BridgePeerProbeResult struct {
 //     plane (e.g. modal/cloudflare/tensorlake). The peer is still listed so
 //     `crabbox pond peers` callers see the gap.
 //   - "unsupported-provider" — provider has no BridgeProvider implementation
-//     at all. Same semantic as "unsupported" but produced by the framework
-//     fallback rather than an explicit per-provider adapter.
+//     at all. Same semantic as "unsupported" but produced before an explicit
+//     per-provider adapter is loaded.
 //
 // A peer that returned a 4xx/5xx is still recorded as "reachable" because the
 // bridge plane only asserts that the public URL exists and routes; the user

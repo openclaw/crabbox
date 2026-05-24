@@ -1,6 +1,14 @@
 # Pond
 
-A small group of crabbox boxes connected on a private network, addressable by name, that live and die together. Same idea as a tidepool — a contained body of water where a few creatures coexist for a while, then it dries up.
+A preview way to group related Crabbox leases, discover their reachability
+metadata, and release them together. A pond is not a central cluster object: it
+is an emergent set of active leases tagged with the reserved `pond=<name>`
+metadata plus local claim sidecars for providers that do not own cloud labels.
+
+Some pond members can reach each other directly by name, but only on the
+transport plane that supports that. Tailscale gives true peer-to-peer
+`<slug>.cbx` reachability; URL bridge gives HTTP(S) endpoints; SSH-mesh gives
+operator-side `ssh -L` forwards.
 
 A `--pond` of one is the default; existing single-box flows are unchanged.
 
@@ -16,25 +24,31 @@ crabbox pond connect NAME [--export]
 crabbox pond release NAME
 ```
 
-Each lease in a pond is addressable by its `--slug` from any other member of the same pond.
+Use `--slug` as the stable role name for discovery. Whether that slug is
+directly dialable from another lease depends on the transport plane below.
+
+The OpenClaw plugin does not add first-class pond tools in this PR. Agents can
+still create pond-tagged leases through the existing `crabbox_run` and
+`crabbox_warmup` argv surfaces; `pond peers`, `pond connect`, `pond release`,
+and Tailscale policy bootstrap remain CLI-led.
 
 ## Three transport planes
 
 Each provider self-declares which planes it supports via `Spec().Features`
-(`FeatureTailscale`, `FeatureSSH`, `FeatureURLBridge`). Most providers
-declare more than one — a Hetzner box advertises both Tailscale and SSH,
-so it is reachable via either the peer mesh or `pond connect`; an Islo
-sandbox advertises URL Bridge, etc. The CLI verbs opportunistically use
-whichever plane best fits the call site.
+(`FeatureTailscale`, `FeatureSSH`, `FeatureURLBridge`). Some providers declare
+more than one: a Hetzner box advertises both Tailscale and SSH, so Tailscale is
+the preferred peer mesh and `pond connect` can still build operator-side SSH
+forwards for declared ports. URL-only sandboxes, such as Islo and E2B, do not
+join the peer mesh; they surface HTTP(S) endpoints instead.
 
 | Plane     | Feature flag       | Providers (today)                                                                                                                                                    | What you get                                                  |
 | --------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
 | Tailscale | `FeatureTailscale` | Hetzner, Azure, GCP                                                                                                                                                  | true peer-to-peer mesh, `<slug>.cbx` DNS                      |
-| Bridge    | `FeatureURLBridge` | Islo, E2B, Railway (live adapters); Modal, Cloudflare, Tensorlake (report `unsupported` until adapters ship)                                                         | HTTPS endpoints between pond members                          |
+| Bridge    | `FeatureURLBridge` | Islo, E2B, Railway (live adapters); Modal, Cloudflare, Tensorlake (report `unsupported` until adapters ship)                                                         | provider-native HTTP(S) endpoints for discovery and sharing   |
 | SSH-mesh  | `FeatureSSH`       | **any provider advertising SSH**: Hetzner, Azure, GCP, AWS, Proxmox, static SSH, RunPod, exe-dev, Daytona, Sprites, Namespace, Semaphore, local-container, Parallels | operator-side `ssh -L` tunnels via `pond connect [--export]` |
 | (gap)     | —                  | macOS sandboxes, Windows                                                                                                                                             | not yet covered                                               |
 
-`crabbox pond peers` returns *both* a primary `transport` hint and the
+`crabbox pond peers` returns locally known peers with *both* a primary `transport` hint and the
 full `transports` list per member:
 
 ```jsonc
@@ -47,8 +61,8 @@ full `transports` list per member:
 So `pond connect` works against any provider that includes `ssh` in its
 `transports` list — including Hetzner / Azure / GCP / AWS, not just the
 old SSH-only class. Tailscale stays the recommended path when it's also
-available; SSH-mesh becomes a universal fallback that works wherever the
-provider exposes SSH.
+available; SSH-mesh is an explicit operator-side plane for providers that
+advertise SSH.
 
 ## Three simple use cases
 
@@ -59,15 +73,20 @@ provider exposes SSH.
    crabbox pond release pr-$PR
    ```
 
-2. **API + GPU + DB integration test.** Vendor-mix in 4 lines — CPU on Hetzner, GPU on Modal, DB on Hetzner — talking by name:
+2. **API + GPU + DB integration test.** Vendor-mix in 4 lines — CPU on Hetzner,
+   GPU on a delegated provider, DB on Hetzner. Use Tailscale names for
+   tailnet members, URL bridge for HTTP(S) peers, and `pond connect` for
+   operator-side TCP forwards:
    ```
    crabbox warmup --pond it-$SHA --slug api --provider hetzner --tailscale
    crabbox warmup --pond it-$SHA --slug ml  --provider modal   --class a10g
    crabbox warmup --pond it-$SHA --slug db  --provider hetzner --tailscale
-   crabbox run --id it-$SHA-api -- "ML_HOST=ml.cbx DB_HOST=db.cbx go test ./..."
+   crabbox run --id it-$SHA-api -- "DB_HOST=db.cbx go test ./..."
    ```
 
-3. **Per-PR build farm.** 30-helper Islo pond per PR, dies with the PR — useful for slow C++/Bazel/Rust builds:
+3. **Per-PR build farm.** 30-helper delegated pond per PR, dies with the PR —
+   useful for latency-tolerant work queues. This is not an MPI/NCCL-style
+   low-latency fabric:
    ```
    crabbox warmup --pond build-$PR --slug coord --provider hetzner
    for i in $(seq 1 30); do
@@ -87,4 +106,5 @@ Setting `TS_API_KEY` in your shell empowers `crabbox run` to mutate your operato
 
 ## API stability
 
-`pond` is **preview** for v0.x. The reserved `pond=` label key stays; the flag shape may evolve. Stable from v1.0.
+`pond` is **preview** for v0.x. The reserved `pond=` label key is intended to
+stay, but metadata shape and command flags may evolve before v1.0.

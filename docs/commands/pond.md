@@ -1,9 +1,10 @@
 # pond
 
-`crabbox pond` is the cross-provider peer-discovery surface. A single
-invocation lists every member of the named pond with a transport hint
-(`tailnet` / `url` / `ssh` / `pending` / `none`) and a canonical endpoint, so
-callers can dial peers without knowing which provider each lease lives on.
+`crabbox pond` is the cross-provider peer-discovery surface. It lists locally
+known members of the named pond with a transport hint (`tailnet` / `url` /
+`ssh` / `pending` / `none`) and, when known, a canonical endpoint. That makes
+scripts transport-aware without pretending every provider exposes the same
+network shape.
 See `docs/features/pond.md` for the full design.
 
 ```sh
@@ -17,9 +18,9 @@ crabbox doctor --pond alpha
 
 ## `pond release`
 
-Stop every lease in the named pond across all providers and remove their
-claim sidecars. No `--provider` flag is needed — the command iterates every
-claim whose pond label matches. Individual stop failures are logged as
+Stop every locally claimed lease in the named pond across all providers and
+remove their claim sidecars. No `--provider` flag is needed — the command
+iterates every local claim whose pond label matches. Individual stop failures are logged as
 warnings and do not block the remaining peers.
 
 ```sh
@@ -34,9 +35,12 @@ with a warning.
 
 ## `pond peers`
 
-List every peer in the named pond, regardless of provider. When
-`--provider` is omitted the command fans out across every provider in
-the pond; passing it preserves the original single-provider semantics.
+List every locally known peer in the named pond, regardless of provider. When
+`--provider` is omitted the command fans out across every provider represented
+in local claims for the pond; passing it preserves the original single-provider
+semantics. Provider labels and coordinator state remain authoritative for
+`crabbox list --pond`; `pond peers` depends on local claim sidecars for bridge
+metadata and may ignore leases claimed on another operator machine.
 
 | Flag             | Default | Description                                            |
 | ---------------- | ------- | ------------------------------------------------------ |
@@ -122,7 +126,8 @@ alive.
 
 Each forward gets a local loopback port in the 51820–52819 range, probed
 for availability. The hosts file (`~/.crabbox/pond/<name>/hosts`) maps each
-`<peer>.cbx` to its local address:
+operator-side forward to its local address; these entries are not lease-to-lease
+DNS:
 
 ```
 # crabbox pond SSH-mesh — operator-side forwards

@@ -48,6 +48,9 @@ export function leaseProviderLabels(
   if (config.browser) {
     labels["browser"] = "true";
   }
+  if (config.code) {
+    labels["code"] = "true";
+  }
   if (config.tailscale) {
     labels["tailscale"] = "true";
     labels["tailscale_state"] = "requested";

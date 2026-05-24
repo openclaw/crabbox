@@ -70,6 +70,7 @@ describe("provider labels", () => {
       desktop: true,
       desktopEnv: "wayland",
       browser: true,
+      code: true,
       tailscale: true,
       tailscaleTags: ["tag:crabbox"],
       tailscaleHostname: "crabbox-blue-lobster",
@@ -113,6 +114,7 @@ describe("provider labels", () => {
     expect(labels.desktop).toBe("true");
     expect(labels.desktop_env).toBe("wayland");
     expect(labels.browser).toBe("true");
+    expect(labels.code).toBe("true");
     expect(labels.tailscale).toBe("true");
     expect(labels.tailscale_hostname).toBe("crabbox-blue-lobster");
     expect(labels.tailscale_tags).toBe("tag_crabbox");

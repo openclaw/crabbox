@@ -56,6 +56,14 @@ built-in providers use their cheapest non-mutating list or readiness API.
 Blacksmith Testbox reports runtime as provider-hydrated because GitHub Actions
 hydration is owned by Testbox.
 
+Use `--pond <name>` to verify the Tailscale policy row for an existing local
+pond claim set. The check confirms the concrete
+`tag:cbx-pond-<owner>-<pond>` tag is declared in `tagOwners` and allowed to
+reach itself through either `grants` or legacy `acls`. It reads the policy only
+when the pond has at least one locally claimed Tailscale-capable member and
+`TS_API_KEY` is exported; otherwise it skips with a reason. Plain `crabbox
+doctor` does not call the Tailscale ACL API.
+
 When `--profile <name> --id <lease>` selects a profile with `doctor.enabled:
 true`, doctor runs that profile's remote prerequisite contract instead of the
 generic remote probe. Profiles can require exact tool availability, Node major

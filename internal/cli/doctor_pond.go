@@ -41,12 +41,11 @@ func doctorPondSummary(ctx context.Context, cfg Config) (string, string, map[str
 	if tag == "" {
 		return "", "", nil
 	}
-	// Check the pond's actual members, not just cfg.Provider:
-	// a mixed-provider pond (e.g. islo + hetzner) needs ACL
-	// verification even when the operator's default provider
-	// (cfg.Provider) does not support Tailscale. Fall back to
-	// cfg.Provider only when the pond has no existing claims.
-	if !providerCapableOfTailscale(cfg.Provider) && !pondHasTailscaleCapableProvider(pond) {
+	hasClaims, hasTailscaleProvider := pondClaimProviderSummary(pond)
+	if !hasClaims {
+		return "skip", fmt.Sprintf("pond %q: no local lease claims found; create or claim a pond member before checking Tailscale policy", pond), map[string]string{"pond": pond, "tag": tag, "plane": "tailscale", "reason": "no_pond_claims"}
+	}
+	if !hasTailscaleProvider {
 		return "skip", fmt.Sprintf("pond %q: no Tailscale-capable provider found; pond networking unavailable", pond), map[string]string{"provider": cfg.Provider, "pond": pond, "tag": tag, "plane": "tailscale", "reason": "no_tailscale_capable_provider"}
 	}
 	apiKey := strings.TrimSpace(os.Getenv("TS_API_KEY"))
@@ -169,8 +168,7 @@ func pondACLRowPresent(policy, tag string) bool {
 	if tag == "" {
 		return false
 	}
-	quotedTag := `"` + tag + `"`
-	if !policySectionContains(policy, "tagOwners", quotedTag) {
+	if !policyTagOwnerPresent(policy, tag) {
 		return false
 	}
 	if acls, ok := policySection(policy, "acls"); ok && pondACLSelfPeerRule(acls, tag) {
@@ -252,12 +250,25 @@ func pondGrantSelfPeerRule(section, tag string) bool {
 	return false
 }
 
-func policySectionContains(policy, section, token string) bool {
-	body, ok := policySection(policy, section)
-	return ok && strings.Contains(body, token)
+func policyTagOwnerPresent(policy, tag string) bool {
+	body, ok := policySection(policy, "tagOwners")
+	if !ok {
+		return false
+	}
+	var owners map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(normalizeHuJSON(body)), &owners); err != nil {
+		return false
+	}
+	_, ok = owners[tag]
+	return ok
 }
 
 func policySection(policy, section string) (string, bool) {
+	if standardized, err := hujsonStandardize(policy); err == nil {
+		policy = standardized
+	} else {
+		policy = normalizeHuJSON(policy)
+	}
 	start := activePolicySectionStart(policy, section)
 	if start < 0 {
 		return "", false

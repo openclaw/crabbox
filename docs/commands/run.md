@@ -217,7 +217,7 @@ provider label that groups peers, and `crabbox list --pond <name>` selects
 them as a set. With `--tailscale` on a Tailscale-capable provider the CLI
 also advertises a `tag:cbx-pond-<owner>-<name>` ACL tag and cloud-init keeps
 `/etc/hosts.cbx` plus a managed `/etc/hosts` block in sync every 30 seconds so
-peers reach each other as `<slug>.cbx`. See
+Tailscale peers in the same pond reach each other as `<slug>.cbx`. See
 [`docs/features/pond.md`](../features/pond.md).
 
 Use `--capture-stdout <path>` when stdout is binary or terminal-hostile. Crabbox

@@ -206,10 +206,11 @@ func parseExposedPortsLabel(value string) []int {
 // connect orchestration only needs the name shown in rendered hosts, the
 // lease identity, the SSH target, and the declared exposed ports.
 type pondMember struct {
-	Name  string
-	SSH   SSHTarget
-	Ports []int
-	Lease string
+	Name     string
+	Provider string
+	SSH      SSHTarget
+	Ports    []int
+	Lease    string
 }
 
 // pondMeshForward is one (peer, port) pair plus the loopback port the
@@ -373,7 +374,7 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 //
 // providerFilter, when non-empty, restricts the search to that single
 // provider — the caller passes this through from `--provider X` for users
-// who want the legacy single-provider behavior.
+// who want an explicit single-provider filter.
 func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Config, pond, providerFilter string) ([]pondMember, []string, error) {
 	claims, err := listLeaseClaims()
 	if err != nil {
@@ -423,8 +424,12 @@ func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Conf
 		if merr != nil {
 			return nil, nil, fmt.Errorf("collect %s pond members: %w", p, merr)
 		}
+		for i := range providerMembers {
+			providerMembers[i].Provider = p
+		}
 		members = append(members, providerMembers...)
 	}
+	members = disambiguatePondMemberNames(members)
 	sort.Slice(members, func(i, j int) bool { return members[i].Name < members[j].Name })
 	return members, ineligible, nil
 }
@@ -454,6 +459,60 @@ func collectPondMembers(ctx context.Context, backend SSHLeaseBackend, cfg Config
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+func disambiguatePondMemberNames(members []pondMember) []pondMember {
+	counts := map[string]int{}
+	for _, member := range members {
+		counts[envSafeName(member.Name)]++
+	}
+	used := map[string]bool{}
+	for i := range members {
+		key := envSafeName(members[i].Name)
+		if counts[key] > 1 || used[key] {
+			members[i].Name = duplicatePondMemberName(members[i])
+			key = envSafeName(members[i].Name)
+		}
+		if used[key] {
+			members[i].Name = duplicatePondMemberNameWithLease(members[i])
+			key = envSafeName(members[i].Name)
+		}
+		used[key] = true
+	}
+	return members
+}
+
+func duplicatePondMemberName(member pondMember) string {
+	base := normalizePondName(member.Name)
+	if base == "" {
+		base = "peer"
+	}
+	suffix := normalizePondName(member.Provider)
+	if suffix == "" {
+		suffix = shortLeaseID(member.Lease)
+	}
+	if suffix == "" {
+		suffix = "peer"
+	}
+	return base + "-" + suffix
+}
+
+func duplicatePondMemberNameWithLease(member pondMember) string {
+	name := duplicatePondMemberName(member)
+	if suffix := shortLeaseID(member.Lease); suffix != "" {
+		return name + "-" + suffix
+	}
+	return name
+}
+
+func shortLeaseID(leaseID string) string {
+	leaseID = normalizePondName(leaseID)
+	leaseID = strings.TrimPrefix(leaseID, "cbx-")
+	leaseID = strings.TrimPrefix(leaseID, "isb-")
+	if len(leaseID) > 6 {
+		return leaseID[len(leaseID)-6:]
+	}
+	return leaseID
 }
 
 // preparePondMeshSummary builds the forward table and renders hosts + env
@@ -582,7 +641,11 @@ func envSafeName(name string) string {
 			b.WriteByte('_')
 		}
 	}
-	return strings.Trim(b.String(), "_")
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "_"
+	}
+	return out
 }
 
 // writePondMeshStateFile persists rendered content with 0600 permissions so
@@ -621,6 +684,7 @@ func pondMeshSSHArgsForForward(target SSHTarget, fwd pondMeshForward) []string {
 	forward := fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", fwd.LocalPort, fwd.RemotePort)
 	args = append(args,
 		"-N",
+		"-o", "ExitOnForwardFailure=yes",
 		"-L", forward,
 		target.User+"@"+target.Host,
 	)

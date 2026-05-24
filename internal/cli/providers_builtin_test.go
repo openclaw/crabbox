@@ -14,6 +14,7 @@ func init() {
 	RegisterProvider(testProxmoxProvider{})
 	RegisterProvider(testStaticSSHProvider{})
 	RegisterProvider(testExeDevProvider{})
+	RegisterProvider(testRunPodProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
 	RegisterProvider(testDaytonaProvider{})
@@ -507,6 +508,27 @@ type testExeDevFlagValues struct {
 	Image       *string
 	User        *string
 	WorkRoot    *string
+}
+
+type testRunPodProvider struct{}
+
+func (testRunPodProvider) Name() string      { return "runpod" }
+func (testRunPodProvider) Aliases() []string { return nil }
+func (testRunPodProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "runpod",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testRunPodProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testRunPodProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testRunPodProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
 }
 
 type testBlacksmithProvider struct{}

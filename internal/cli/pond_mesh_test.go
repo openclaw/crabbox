@@ -331,6 +331,9 @@ func TestPondMeshSSHArgsBuildsLocalForward(t *testing.T) {
 	if !strings.Contains(joined, "-N") {
 		t.Fatalf("args missing -N (no remote command): %v", args)
 	}
+	if !strings.Contains(joined, "ExitOnForwardFailure=yes") {
+		t.Fatalf("args missing ExitOnForwardFailure option: %v", args)
+	}
 	if !strings.Contains(joined, "ControlMaster=auto") && !strings.Contains(joined, "ControlMaster=no") {
 		t.Fatalf("args missing ControlMaster option: %v", args)
 	}
@@ -430,6 +433,7 @@ func TestEnvSafeName(t *testing.T) {
 		"client-foo":  "CLIENT_FOO",
 		"a.b/c":       "A_B_C",
 		"  ":          "_",
+		"---":         "_",
 		"123-name":    "123_NAME",
 		"pond/peer-1": "POND_PEER_1",
 	}
@@ -466,6 +470,37 @@ func TestRenderPondMeshEnvFileEmitsStableExports(t *testing.T) {
 	}
 	if !strings.Contains(body, "CRABBOX_POND_WORKER_3000=127.0.0.1:51821") {
 		t.Fatalf("env body missing worker export: %s", body)
+	}
+}
+
+func TestDisambiguatePondMemberNamesAvoidsShellExportCollisions(t *testing.T) {
+	members := []pondMember{
+		{Name: "web", Provider: "aws", Lease: "cbx_aws123456"},
+		{Name: "web", Provider: "gcp", Lease: "cbx_gcp123456"},
+		{Name: "web-aws", Provider: "hetzner", Lease: "cbx_hz123456"},
+		{Name: "api-a", Provider: "runpod", Lease: "cbx_rp123456"},
+		{Name: "api_a", Provider: "proxmox", Lease: "cbx_px123456"},
+	}
+	got := disambiguatePondMemberNames(members)
+	seen := map[string]bool{}
+	for _, member := range got {
+		key := envSafeName(member.Name)
+		if seen[key] {
+			t.Fatalf("duplicate env-safe name %q in %#v", key, got)
+		}
+		seen[key] = true
+	}
+	if got[0].Name != "web-aws" {
+		t.Fatalf("first duplicate name=%q want web-aws", got[0].Name)
+	}
+	if got[1].Name != "web-gcp" {
+		t.Fatalf("second duplicate name=%q want web-gcp", got[1].Name)
+	}
+	if got[2].Name != "web-aws-hetzner" {
+		t.Fatalf("preexisting colliding name=%q want web-aws-hetzner", got[2].Name)
+	}
+	if got[3].Name == got[4].Name || envSafeName(got[3].Name) == envSafeName(got[4].Name) {
+		t.Fatalf("slug variants should be shell-safe unique: %#v", got)
 	}
 }
 

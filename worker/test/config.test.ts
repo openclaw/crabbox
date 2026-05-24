@@ -238,6 +238,39 @@ describe("lease config", () => {
     expect(config.code).toBe(true);
   });
 
+  it("normalizes the optional pond label and defaults it to empty", () => {
+    const empty = leaseConfig({ sshPublicKey: "ssh-ed25519 test" });
+    expect(empty.pond).toBe("");
+    const tagged = leaseConfig({ sshPublicKey: "ssh-ed25519 test", pond: " Alpha Pond " });
+    expect(tagged.pond).toBe("alpha-pond");
+    expect(() => leaseConfig({ sshPublicKey: "ssh-ed25519 test", pond: " --- " })).toThrow(
+      "pond must contain at least one letter or digit",
+    );
+    expect(() => leaseConfig({ sshPublicKey: "ssh-ed25519 test", pond: "a".repeat(42) })).toThrow(
+      "pond must be 41 characters or fewer",
+    );
+  });
+
+  it("validates and normalizes exposed ports", () => {
+    const config = leaseConfig({
+      sshPublicKey: "ssh-ed25519 test",
+      exposedPorts: ["9090", "8080,443", "8080"],
+    });
+    expect(config.exposedPorts).toEqual(["443", "8080", "9090"]);
+    expect(() => leaseConfig({ sshPublicKey: "ssh-ed25519 test", exposedPorts: ["abc"] })).toThrow(
+      "must be a TCP port",
+    );
+    expect(() =>
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", exposedPorts: ["70000"] }),
+    ).toThrow("must be a TCP port");
+    expect(() =>
+      leaseConfig({
+        sshPublicKey: "ssh-ed25519 test",
+        exposedPorts: Array.from({ length: 11 }, (_, index) => String(8000 + index)),
+      }),
+    ).toThrow("at most 10 distinct ports");
+  });
+
   it("validates desktop environment", () => {
     const config = leaseConfig({
       sshPublicKey: "ssh-ed25519 test",
@@ -263,13 +296,6 @@ describe("lease config", () => {
         desktopEnv: "gnome",
       }),
     ).toThrow("desktopEnv=gnome requires target=linux");
-  });
-
-  it("normalizes the optional pond label and defaults it to empty", () => {
-    const empty = leaseConfig({ sshPublicKey: "ssh-ed25519 test" });
-    expect(empty.pond).toBe("");
-    const tagged = leaseConfig({ sshPublicKey: "ssh-ed25519 test", pond: " Alpha Pond " });
-    expect(tagged.pond).toBe("alpha-pond");
   });
 
   it("preserves Tailscale lease capability requests", () => {

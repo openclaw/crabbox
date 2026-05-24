@@ -37,7 +37,7 @@ stored on the lease as a reserved provider label, and `crabbox list --pond
 <name>` filters by it. When combined with `--tailscale` on a Tailscale-capable
 provider, the CLI also advertises a `tag:cbx-pond-<owner>-<name>` ACL tag and
 cloud-init refreshes `/etc/hosts.cbx` plus a managed `/etc/hosts` block every
-30 seconds so peers are reachable as `<slug>.cbx`. See
+30 seconds so Tailscale peers in the same pond are reachable as `<slug>.cbx`. See
 [`docs/features/pond.md`](../features/pond.md) for the one-time policy snippet
 and the `doctor --pond` coverage.
 

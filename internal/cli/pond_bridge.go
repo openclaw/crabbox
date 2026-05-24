@@ -13,8 +13,8 @@ import (
 // BridgePeer is the cross-provider shape returned by `crabbox pond peers`.
 // One row per pond member, regardless of which plane carries that member:
 //
-//   - Managed-Linux providers (AWS / Azure / GCP / Hetzner / Proxmox / SSH)
-//     surface with Transport="tailnet" and Endpoint=tailnet IPv4.
+//   - Tailscale-capable managed Linux providers (Hetzner / Azure / GCP)
+//     surface with Transport="tailnet" and Endpoint=tailnet IPv4/FQDN.
 //   - SSH-lease providers (exe.dev / RunPod / Daytona / Sprites / Namespace /
 //     Semaphore) surface with Transport="ssh" and Endpoint=ssh://host:port.
 //   - Delegated-with-URL providers (Islo, E2B, Modal, Cloudflare, Railway,
@@ -320,19 +320,12 @@ func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, fl
 	}
 	sort.Strings(order)
 	peers := make([]BridgePeer, 0, len(matches))
-	var firstErr error
 	for _, p := range order {
 		providerPeers, err := resolvePondPeersForProvider(ctx, rt, p, byProvider[p], flags)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("%s: %w", p, err)
-			}
-			continue
+			return nil, fmt.Errorf("%s: %w", p, err)
 		}
 		peers = append(peers, providerPeers...)
-	}
-	if len(peers) == 0 && firstErr != nil {
-		return nil, firstErr
 	}
 	sort.Slice(peers, func(i, j int) bool {
 		if peers[i].Slug == peers[j].Slug {
@@ -462,12 +455,13 @@ func bridgePeerFromClaim(claim leaseClaim, class string) BridgePeer {
 			peer.Note = "ssh endpoint not yet recorded for this lease"
 			return peer
 		}
-		port := claim.SSHPort
-		if port == 0 {
-			port = 22
+		if claim.SSHPort == 0 {
+			peer.Transport = TransportPending
+			peer.Note = "ssh port not yet recorded for this lease"
+			return peer
 		}
 		peer.Transport = TransportSSH
-		peer.Endpoint = fmt.Sprintf("ssh://%s:%d", claim.SSHHost, port)
+		peer.Endpoint = fmt.Sprintf("ssh://%s:%d", claim.SSHHost, claim.SSHPort)
 	case TransportURL:
 		peer.Transport = TransportURL
 		peer.Endpoint = claim.BridgeURL
@@ -488,12 +482,12 @@ func bridgePeerFromClaim(claim leaseClaim, class string) BridgePeer {
 // providerTransportClass returns the *primary* (recommended) transport for a
 // provider. It used to hardcode a 1:1 mapping; that's now derived from the
 // provider's capability set so a single provider can advertise multiple
-// planes (Hetzner has both Tailscale and SSH-mesh; Islo has all three) and
-// the recommended one is picked deterministically.
+// planes (Hetzner has both Tailscale and SSH-mesh) and the recommended one is
+// picked deterministically.
 //
 // Most call sites in `pond peers` and the doctor reachability matrix still
-// want one value per peer for legacy single-valued reporting; those keep
-// using this function. The full set of available transports is exposed via
+// want one value per peer for single-valued reporting; those keep using this
+// function. The full set of available transports is exposed via
 // `providerCapabilities(p).Available()` and surfaced on
 // `BridgePeer.Transports` so callers that want the multi-transport view
 // (e.g. `pond connect` deciding which members it can SSH into regardless of

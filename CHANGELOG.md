@@ -116,17 +116,18 @@
   managed Linux) the CLI advertises one extra ACL tag
   `tag:cbx-pond-<owner>-<pond>` when the box joins the tailnet, and cloud-init
   installs a 30s systemd timer that rewrites `/etc/hosts.cbx` and a managed
-  `/etc/hosts` block from `tailscale status --json` so peers are reachable as
-  `<slug>.cbx`. `crabbox doctor --pond <name>` verifies the one-time concrete
+  `/etc/hosts` block from `tailscale status --json` so Tailscale peers in the
+  same pond are reachable as `<slug>.cbx`. `crabbox doctor --pond <name>` verifies the one-time concrete
   pond grants or ACL row when `TS_API_KEY` is exported and skips with a hint otherwise;
   non-Tailscale providers honor the label as metadata and `doctor --pond`
   reports the missing plane. See `docs/features/pond.md` for the one-time
   policy snippet.
 
 - Added the pond **bridge plane** — `crabbox pond peers --pond <name>`
-  returns a unified peer listing across every provider in the pond with a
-  per-peer `transport` hint (`tailnet`, `url`, `ssh`, `pending`, `none`) and
-  a canonical endpoint. Managed-Linux peers report their tailnet IPv4;
+  returns a locally known peer listing across provider claim sidecars in the
+  pond with a per-peer `transport` hint (`tailnet`, `url`, `ssh`, `pending`,
+  `none`) and, when known, a canonical endpoint. Tailscale-capable managed
+  Linux peers report their tailnet IPv4/FQDN;
   SSH-lease peers report `ssh://host:port`; delegated providers with a URL
   adapter (Islo / E2B / Railway today; Modal / Cloudflare / Tensorlake
   surface as `unsupported` until their providers expose a per-sandbox
@@ -148,9 +149,9 @@
   (RunPod, Proxmox, exe.dev, Daytona, Sprites, Namespace, Semaphore)
   where neither Tailscale nor the Bridge plane applies.
 
-- Added `crabbox pond release <name>` — releases every lease in the named pond
-  across all providers, removing their claim sidecars. Individual stop failures
-  are logged as warnings without blocking remaining peers.
+- Added `crabbox pond release <name>` — releases every locally claimed lease in
+  the named pond across all providers, removing their claim sidecars. Individual
+  stop failures are logged as warnings without blocking remaining peers.
 
 - Added `pond` field to `crabbox status` output — status now shows `pond=<name>`
   when a lease belongs to a pond, so operators can see pond membership without

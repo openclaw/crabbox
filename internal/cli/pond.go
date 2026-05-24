@@ -173,8 +173,7 @@ func appendPondTailscaleTag(cfg *Config, providerSupportsTailscale bool) {
 }
 
 // providerCapableOfTailscale reports whether the named provider advertises
-// FeatureTailscale. Unknown providers return false, mirroring the
-// conservative posture other capability checks already take.
+// FeatureTailscale in the registered provider spec.
 func providerCapableOfTailscale(provider string) bool {
 	return providerCapabilities(provider).Tailscale
 }
@@ -185,34 +184,45 @@ func providerCapableOfTailscale(provider string) bool {
 // operator's default provider (cfg.Provider) does not support Tailscale
 // but the pond includes mixed-provider members that do.
 func pondHasTailscaleCapableProvider(pond string) bool {
+	_, hasTailscale := pondClaimProviderSummary(pond)
+	return hasTailscale
+}
+
+func pondClaimProviderSummary(pond string) (bool, bool) {
 	pond = normalizePondName(pond)
 	if pond == "" {
-		return false
+		return false, false
 	}
 	claims, err := listLeaseClaims()
 	if err != nil {
-		return false
+		return false, false
 	}
+	hasClaims := false
+	hasTailscale := false
 	for _, claim := range claims {
-		if normalizePondName(claim.Pond) == pond && providerCapableOfTailscale(claim.Provider) {
-			return true
+		if normalizePondName(claim.Pond) != pond {
+			continue
+		}
+		hasClaims = true
+		if providerCapableOfTailscale(claim.Provider) {
+			hasTailscale = true
 		}
 	}
-	return false
+	return hasClaims, hasTailscale
 }
 
 // ProviderCapabilities is the per-provider truth about which pond transport
 // planes are *physically* possible on its leases. Each plane is independent —
-// most providers advertise more than one (Hetzner / Azure / GCP support both
-// the Tailscale peer mesh AND the operator-side SSH-mesh; Islo supports all
-// three). Older code that asked "which one transport does this provider use"
+// some providers advertise more than one (Hetzner / Azure / GCP support both
+// the Tailscale peer mesh AND the operator-side SSH-mesh; Islo is URL-only
+// today). Older code that asked "which one transport does this provider use"
 // (providerTransportClass) is now a thin Primary() picker; the capability set
 // is the source of truth and the `pond peers` + `pond connect` paths fan out
 // across whichever planes the operator (or default preference) actually wants.
 //
 // Capabilities are derived from the provider's own FeatureSet, so a provider
 // opts in to a transport plane by declaring the feature, not by being added
-// to a hardcoded switch.
+// to a static table.
 type ProviderCapabilities struct {
 	Tailscale bool // peer mesh via tailnet (cloud-init Tailscale daemon + ACL tag)
 	SSHMesh   bool // operator-side `ssh -L` against the lease's SSH endpoint
@@ -220,18 +230,8 @@ type ProviderCapabilities struct {
 }
 
 // providerCapabilities returns the capability set for the named provider.
-// The primary source of truth is the provider's own FeatureSet (so a new
-// provider opts into a transport plane by declaring the right Feature).
-//
-// The fallback table that follows handles two cases:
-//
-//  1. The full provider registry isn't loaded (e.g. unit tests that
-//     construct ad-hoc BridgePeers without importing every provider).
-//  2. A provider name that pre-dates the live registry but still appears
-//     in legacy claim sidecars.
-//
-// The fallback values mirror what each provider's live FeatureSet would
-// declare, so behavior is identical with or without registration.
+// The provider's own FeatureSet is the only source of truth: a provider opts
+// into a transport plane by declaring the right Feature.
 func providerCapabilities(provider string) ProviderCapabilities {
 	if p, err := ProviderFor(provider); err == nil {
 		features := p.Spec().Features
@@ -240,22 +240,6 @@ func providerCapabilities(provider string) ProviderCapabilities {
 			SSHMesh:   featureSetHas(features, FeatureSSH),
 			URLBridge: featureSetHas(features, FeatureURLBridge),
 		}
-	}
-	switch normalizeProviderName(provider) {
-	case "hetzner", "azure", "gcp":
-		return ProviderCapabilities{Tailscale: true, SSHMesh: true}
-	case "aws":
-		return ProviderCapabilities{SSHMesh: true}
-	case "proxmox", "ssh", "static", "parallels":
-		return ProviderCapabilities{SSHMesh: true}
-	case "runpod", "exe-dev", "exedev", "daytona", "sprites", "namespace", "namespace-devbox", "semaphore", "localcontainer", "local-container":
-		return ProviderCapabilities{SSHMesh: true}
-	case "islo", "e2b", "railway":
-		return ProviderCapabilities{URLBridge: true}
-	case "modal", "cloudflare", "tensorlake":
-		return ProviderCapabilities{URLBridge: true}
-	case "blacksmith", "blacksmith-testbox":
-		return ProviderCapabilities{}
 	}
 	return ProviderCapabilities{}
 }
@@ -278,10 +262,10 @@ func (c ProviderCapabilities) Available() []string {
 	return out
 }
 
-// Primary picks the single recommended transport for the legacy single-valued
-// surfaces (BridgePeer.Transport, doctor reachability matrix). The preference
-// order matches Available(): peer-to-peer beats native HTTPS beats
-// operator-routed SSH. Providers with no capability fall to TransportNone.
+// Primary picks the single recommended transport for single-valued surfaces
+// (BridgePeer.Transport, doctor reachability matrix). The preference order
+// matches Available(): peer-to-peer beats native HTTPS beats operator-routed
+// SSH. Providers with no declared capability return TransportNone.
 func (c ProviderCapabilities) Primary() string {
 	if c.Tailscale {
 		return TransportTailnet
