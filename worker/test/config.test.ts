@@ -212,6 +212,7 @@ describe("lease config", () => {
     expect(config.capacityStrategy).toBe("most-available");
     expect(config.capacityHints).toBe(true);
     expect(config.desktop).toBe(false);
+    expect(config.desktopEnv).toBe("xfce");
     expect(config.browser).toBe(false);
     expect(config.code).toBe(false);
     expect(config.ttlSeconds).toBe(86_400);
@@ -235,6 +236,27 @@ describe("lease config", () => {
     expect(config.desktop).toBe(true);
     expect(config.browser).toBe(true);
     expect(config.code).toBe(true);
+  });
+
+  it("validates desktop environment", () => {
+    const config = leaseConfig({
+      sshPublicKey: "ssh-ed25519 test",
+      desktop: true,
+      desktopEnv: "wayland",
+    });
+    expect(config.desktopEnv).toBe("wayland");
+    expect(() => leaseConfig({ sshPublicKey: "ssh-ed25519 test", desktopEnv: "gnome" })).toThrow(
+      "desktopEnv must be xfce or wayland",
+    );
+    expect(() =>
+      leaseConfig({
+        sshPublicKey: "ssh-ed25519 test",
+        provider: "aws",
+        target: "windows",
+        desktop: true,
+        desktopEnv: "wayland",
+      }),
+    ).toThrow("desktopEnv=wayland requires target=linux");
   });
 
   it("preserves Tailscale lease capability requests", () => {

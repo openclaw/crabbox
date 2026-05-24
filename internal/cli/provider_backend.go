@@ -212,6 +212,7 @@ type LeaseOptions struct {
 	IdleTimeout   time.Duration
 	TTL           time.Duration
 	Desktop       bool
+	DesktopEnv    string
 	Browser       bool
 	Code          bool
 	Tailscale     TailscaleConfig
@@ -476,6 +477,7 @@ func leaseOptionsFromConfig(cfg Config) LeaseOptions {
 		IdleTimeout:   cfg.IdleTimeout,
 		TTL:           cfg.TTL,
 		Desktop:       cfg.Desktop,
+		DesktopEnv:    normalizedDesktopEnv(cfg.DesktopEnv),
 		Browser:       cfg.Browser,
 		Code:          cfg.Code,
 		Tailscale:     cfg.Tailscale,

@@ -86,9 +86,10 @@ profile directory or app-specific auth artifact when tests need a logged-in
 browser.
 
 `--desktop` provisions or requires a visible desktop/VNC session and injects
-`CRABBOX_DESKTOP=1`; POSIX desktop targets also use `DISPLAY=:99`. It does not
-imply a browser. Use `--desktop --browser` for headed browser automation in the
-VNC-visible session.
+`CRABBOX_DESKTOP=1`. Linux defaults to XFCE on `DISPLAY=:99`; leases created
+with `--desktop-env wayland` expose `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY`
+from `/var/lib/crabbox/desktop.env` instead. It does not imply a browser. Use
+`--desktop --browser` for headed browser automation in the VNC-visible session.
 
 `--tailscale` asks new managed Linux leases to join the configured tailnet.
 `--network` selects how Crabbox resolves SSH for reused leases and for the final

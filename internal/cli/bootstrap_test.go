@@ -134,6 +134,55 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 	}
 }
 
+func TestCloudInitWaylandDesktopProfile(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Desktop = true
+	cfg.Browser = true
+	cfg.DesktopEnv = "wayland"
+	got := cloudInit(cfg, "ssh-ed25519 test")
+	for _, want := range []string{
+		"sway wayvnc foot grim slurp wtype wl-clipboard",
+		"xdg-desktop-portal-wlr",
+		"/usr/local/bin/crabbox-start-wayland-desktop",
+		"/etc/systemd/system/crabbox-wayvnc.service",
+		"CRABBOX_DESKTOP_ENV=wayland",
+		"WLR_BACKENDS=headless",
+		"WLR_RENDERER=pixman",
+		"exec dbus-run-session sway --unsupported-gpu",
+		"bindsym $mod+Return exec $term",
+		"bindsym $mod+d exec $menu",
+		"set $menu foot --title='Crabbox Desktop'",
+		"    for_window [app_id=\"google-chrome\"] floating enable",
+		"/usr/local/bin/crabbox-sway-status",
+		"status_command /usr/local/bin/crabbox-sway-status",
+		`for socket in "$XDG_RUNTIME_DIR"/wayland-*`,
+		`WAYLAND_DISPLAY="${socket##*/}"`,
+		"wayvnc --config \"$HOME/.config/wayvnc/config\" --render-cursor --max-fps=30",
+		"systemctl is-active --quiet crabbox-wayvnc.service",
+		"systemctl enable --now crabbox-desktop.service crabbox-wayvnc.service",
+		"--ozone-platform=wayland",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("cloudInit(wayland desktop) missing %q", want)
+		}
+	}
+	for _, notWant := range []string{
+		"startxfce4",
+		"crabbox-x11vnc.service",
+		"x11vnc -storepasswd",
+		"crabbox-xvfb.service",
+		"XDG_RUNTIME_DIR=/tmp/crabbox-runtime-1000",
+		"\nset $mod",
+		"\nSWAY",
+		"\nCRABBOX_DESKTOP_ENV=wayland",
+		"\nEOF",
+	} {
+		if strings.Contains(got, notWant) {
+			t.Fatalf("cloudInit(wayland desktop) contains %q", notWant)
+		}
+	}
+}
+
 func TestCloudInitBrowserWrapper(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Browser = true
@@ -148,12 +197,12 @@ func TestCloudInitBrowserWrapper(t *testing.T) {
 		"apt-cache show chromium-browser",
 		"/etc/opt/chrome/policies/managed/crabbox.json",
 		"/usr/local/bin/crabbox-browser",
-		`--no-first-run --no-default-browser-check --disable-default-apps --window-size=1500,900 --window-position=80,80`,
+		`--no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --window-size=1500,900 --window-position=80,80`,
 		"/var/lib/crabbox/browser.env",
 		"test -x \"$BROWSER\"",
 		"\"$BROWSER\" --version >/dev/null",
 		"printf '%s\\n' '{\"DefaultBrowserSettingEnabled\":false,\"MetricsReportingEnabled\":false,\"PromotionalTabsEnabled\":false}' > /etc/opt/chrome/policies/managed/crabbox.json",
-		"printf '%s\\n' '#!/bin/sh' \"exec \\\"$browser_path\\\" --no-first-run --no-default-browser-check --disable-default-apps --window-size=1500,900 --window-position=80,80 \\\"\\$@\\\"\" > \"$browser_wrapper\"",
+		"printf '%s\\n' '#!/bin/sh' \"exec \\\"$browser_path\\\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --window-size=1500,900 --window-position=80,80 \\\"\\$@\\\"\" > \"$browser_wrapper\"",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloudInit(browser) missing %q", want)

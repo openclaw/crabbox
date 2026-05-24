@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDesktopLaunchRemoteCommandUsesDetachedPOSIXSession(t *testing.T) {
@@ -21,6 +22,7 @@ func TestDesktopLaunchRemoteCommandUsesDetachedPOSIXSession(t *testing.T) {
 		"BROWSER='/usr/bin/chromium'",
 		"setsid '/usr/bin/chromium' 'https://example.com'",
 		"crabbox-desktop-launch.log",
+		"swaymsg '[app_id=\"google-chrome\"] floating enable",
 		"wmctrl -r :ACTIVE: -b remove,fullscreen",
 		"xdotool search --onlyvisible --class google-chrome",
 		"windowsize \"$window\" 1500 900",
@@ -45,6 +47,8 @@ func TestDesktopBrowserDarkModeCommandPatchesManagedChromiumWrapper(t *testing.T
 		"--blink-settings=preferredColorScheme=1",
 		"--force-dark-mode --enable-features=WebUIDarkMode --blink-settings=preferredColorScheme=2",
 		`--user-data-dir=\"\$profile\"`,
+		"CRABBOX_DESKTOP_ENV=wayland",
+		"--ozone-platform=wayland",
 		"sudo install -m 0755",
 	} {
 		if !strings.Contains(got, want) {
@@ -67,6 +71,8 @@ func TestDesktopTypeUsesPasteForSymbolHeavyText(t *testing.T) {
 func TestDesktopPasteRemoteCommandPrefersClipboardTools(t *testing.T) {
 	got := desktopPasteRemoteCommand()
 	for _, want := range []string{
+		`CRABBOX_DESKTOP_ENV:-xfce`,
+		"wtype -d 1 -",
 		"timeout 5s xclip -selection clipboard -loops 1",
 		"timeout 5s xsel --clipboard --input",
 		"wl-copy --paste-once",
@@ -83,9 +89,33 @@ func TestDesktopPasteRemoteCommandPrefersClipboardTools(t *testing.T) {
 	}
 }
 
+func TestDesktopLinuxTerminalSupportsWaylandAndX11(t *testing.T) {
+	got, err := desktopTerminalCommand(
+		SSHTarget{TargetOS: targetLinux},
+		[]string{"bash", "-lc", "echo hello"},
+		desktopTerminalOptions{FontSize: 16, Cols: 120, Rows: 40},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(got, " ")
+	for _, want := range []string{
+		"CRABBOX_DESKTOP_ENV:-xfce",
+		"exec foot --title='Crabbox Desktop'",
+		"monospace:size=16",
+		"export DISPLAY=\"${DISPLAY:-:99}\"",
+		"exec xterm -fa monospace -fs '16' -geometry '120x40'",
+		"bash -lc ''\\''bash'\\'' '\\''-lc'\\'' '\\''echo hello'\\'''",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("linux terminal command missing %q: %v", want, got)
+		}
+	}
+}
+
 func TestDesktopClickRemoteCommandSupportsManagedTargets(t *testing.T) {
 	linux := desktopClickRemoteCommand(SSHTarget{TargetOS: targetLinux}, 12, 34)
-	for _, want := range []string{"DISPLAY=\"${DISPLAY:-:99}\"", "xdotool mousemove 12 34 click 1"} {
+	for _, want := range []string{"CRABBOX_DESKTOP_ENV:-xfce", "not supported on --desktop-env wayland", "DISPLAY=\"${DISPLAY:-:99}\"", "xdotool mousemove 12 34 click 1"} {
 		if !strings.Contains(linux, want) {
 			t.Fatalf("linux click command missing %q:\n%s", want, linux)
 		}
@@ -100,6 +130,30 @@ func TestDesktopClickRemoteCommandSupportsManagedTargets(t *testing.T) {
 	for _, want := range []string{"MouseInput", "SetCursorPos(12, 34)", "schtasks.exe", "/IT"} {
 		if !strings.Contains(windows, want) {
 			t.Fatalf("windows click command missing %q:\n%s", want, windows)
+		}
+	}
+}
+
+func TestDesktopWaylandInputBranches(t *testing.T) {
+	key := desktopKeyRemoteCommand("ctrl+l")
+	for _, want := range []string{
+		"CRABBOX_DESKTOP_ENV:-xfce",
+		"command -v wtype",
+		"exec 'wtype' '-M' 'ctrl' '-k' 'l' '-m' 'ctrl'",
+		"xdotool key --clearmodifiers 'ctrl+l'",
+	} {
+		if !strings.Contains(key, want) {
+			t.Fatalf("key command missing %q:\n%s", want, key)
+		}
+	}
+	unsupported := desktopKeyRemoteCommand("ctrl+l alt+Tab")
+	if !strings.Contains(unsupported, "supports a single key or modifier+key sequence") {
+		t.Fatalf("complex wayland key sequence should be rejected:\n%s", unsupported)
+	}
+	typed := desktopTypeRemoteCommand("hello")
+	for _, want := range []string{"wtype -d 1 -- 'hello'", "xdotool type --clearmodifiers --delay 1 -- 'hello'"} {
+		if !strings.Contains(typed, want) {
+			t.Fatalf("type command missing %q:\n%s", want, typed)
 		}
 	}
 }
@@ -491,6 +545,30 @@ func TestDesktopVideoTargetGate(t *testing.T) {
 				t.Fatalf("supportsDesktopVideoTarget=%t want %t", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRejectWaylandDesktopVideoEnv(t *testing.T) {
+	err := rejectWaylandDesktopVideoEnv(map[string]string{"CRABBOX_DESKTOP_ENV": desktopEnvWayland}, "desktop proof")
+	if err == nil || !strings.Contains(err.Error(), "does not support --desktop-env wayland") {
+		t.Fatalf("err=%v, want wayland video rejection", err)
+	}
+	if err := rejectWaylandDesktopVideoEnv(map[string]string{"CRABBOX_DESKTOP_ENV": desktopEnvXFCE}, "desktop proof"); err != nil {
+		t.Fatalf("xfce video rejected: %v", err)
+	}
+}
+
+func TestDesktopVideoRemoteCommandRejectsWayland(t *testing.T) {
+	got := desktopVideoRemoteCommand(5*time.Second, 8)
+	for _, want := range []string{
+		"/var/lib/crabbox/desktop.env",
+		`CRABBOX_DESKTOP_ENV:-xfce`,
+		"does not support --desktop-env wayland",
+		"x11grab",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("video command missing %q:\n%s", want, got)
+		}
 	}
 }
 

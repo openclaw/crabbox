@@ -136,6 +136,30 @@ func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
 	}
 }
 
+func TestCreateContainerPassesDesktopEnv(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.Desktop = true
+	cfg.DesktopEnv = "wayland"
+	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
+
+	if _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true); err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "run")
+	for _, want := range []string{
+		"-e\nCRABBOX_DESKTOP=1",
+		"-e\nCRABBOX_DESKTOP_ENV=wayland",
+		"--label\ndesktop=true",
+		"--label\ndesktop_env=wayland",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("docker run args missing %q:\n%s", want, args)
+		}
+	}
+}
+
 func TestCreateContainerCanMountDockerSocket(t *testing.T) {
 	if _, err := os.Stat("/var/run/docker.sock"); err != nil {
 		t.Skipf("docker socket not available: %v", err)
@@ -367,6 +391,49 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 		if !strings.Contains(bootstrapScript, want) {
 			t.Fatalf("bootstrap script missing %q", want)
 		}
+	}
+}
+
+func TestBootstrapScriptSupportsWaylandDesktop(t *testing.T) {
+	for _, want := range []string{
+		`CRABBOX_DESKTOP_ENV:-xfce`,
+		`sway wayvnc foot grim slurp wtype wl-clipboard`,
+		`xdg-desktop-portal-wlr`,
+		`CRABBOX_DESKTOP_ENV=wayland`,
+		`bindsym $mod+Return exec $term`,
+		`set $menu foot --title='Crabbox Desktop'`,
+		`for_window [app_id="google-chrome"] floating enable`,
+		`/usr/local/bin/crabbox-sway-status`,
+		`status_command /usr/local/bin/crabbox-sway-status`,
+		`for socket in "$runtime"/wayland-*`,
+		`display="${socket##*/}"`,
+		`WLR_BACKENDS=headless`,
+		`dbus-run-session sway --unsupported-gpu`,
+		`wayvnc --config`,
+		`--ozone-platform=wayland`,
+	} {
+		if !strings.Contains(bootstrapScript, want) {
+			t.Fatalf("bootstrap script missing %q", want)
+		}
+	}
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Desktop = true
+	cfg.DesktopEnv = "wayland"
+	cfg.LocalContainer.WorkRoot = "/work/crabbox"
+	got := localContainerReadyCheck(cfg)
+	for _, want := range []string{
+		"pgrep -x sway",
+		"pgrep -x wayvnc",
+		"127.0.0.1:5900",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("wayland ready check missing %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "Xvfb :99") || strings.Contains(got, "x11vnc") {
+		t.Fatalf("wayland ready check contains XFCE checks: %s", got)
 	}
 }
 

@@ -37,6 +37,7 @@ export function leaseProviderLabels(
   }
   if (config.desktop) {
     labels["desktop"] = "true";
+    labels["desktop_env"] = config.desktopEnv;
   }
   if (config.browser) {
     labels["browser"] = "true";

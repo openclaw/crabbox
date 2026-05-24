@@ -17,6 +17,7 @@ export interface LeaseConfig {
   target: TargetOS;
   windowsMode: WindowsMode;
   desktop: boolean;
+  desktopEnv: "xfce" | "wayland";
   browser: boolean;
   code: boolean;
   tailscale: boolean;
@@ -116,6 +117,10 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
       "brokered target=windows windowsMode=wsl2 does not support desktop/VNC; use windowsMode=normal for desktop/VNC or omit desktop for WSL2",
     );
   }
+  const desktopEnv = normalizeDesktopEnv(input.desktopEnv);
+  if (desktopEnv === "wayland" && input.desktop && target !== "linux") {
+    throw new Error("desktopEnv=wayland requires target=linux");
+  }
   if (target === "macos") {
     if (provider !== "aws") {
       throw new Error(`unsupported target for brokered ${provider}: ${target}`);
@@ -144,6 +149,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     target,
     windowsMode,
     desktop: input.desktop ?? false,
+    desktopEnv,
     browser: input.browser ?? false,
     code: input.code ?? false,
     tailscale: input.tailscale ?? false,
@@ -200,6 +206,19 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     keep: input.keep ?? false,
     sshPublicKey,
   };
+}
+
+export function normalizeDesktopEnv(value: string | undefined): "xfce" | "wayland" {
+  const normalized = (value ?? "").trim().toLowerCase();
+  switch (normalized) {
+    case "":
+    case "xfce":
+      return "xfce";
+    case "wayland":
+      return "wayland";
+    default:
+      throw new Error("desktopEnv must be xfce or wayland");
+  }
 }
 
 export function awsPromotedAMIConfigKey(region: string, serverType: string): string {

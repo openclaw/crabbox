@@ -45,6 +45,7 @@ type CoordinatorLease struct {
 	TargetOS             string                `json:"target,omitempty"`
 	WindowsMode          string                `json:"windowsMode,omitempty"`
 	Desktop              bool                  `json:"desktop,omitempty"`
+	DesktopEnv           string                `json:"desktopEnv,omitempty"`
 	Browser              bool                  `json:"browser,omitempty"`
 	Code                 bool                  `json:"code,omitempty"`
 	Tailscale            *TailscaleMetadata    `json:"tailscale,omitempty"`
@@ -606,6 +607,7 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"target":                          cfg.TargetOS,
 		"windowsMode":                     cfg.WindowsMode,
 		"desktop":                         cfg.Desktop,
+		"desktopEnv":                      normalizedDesktopEnv(cfg.DesktopEnv),
 		"browser":                         cfg.Browser,
 		"code":                            cfg.Code,
 		"tailscale":                       cfg.Tailscale.Enabled,
@@ -1618,6 +1620,7 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 			"host_id":           hostID,
 			"windows_mode":      blank(lease.WindowsMode, cfg.WindowsMode),
 			"desktop":           fmt.Sprint(lease.Desktop),
+			"desktop_env":       normalizedDesktopEnv(lease.DesktopEnv),
 			"browser":           fmt.Sprint(lease.Browser),
 			"code":              fmt.Sprint(lease.Code),
 			"work_root":         lease.WorkRoot,

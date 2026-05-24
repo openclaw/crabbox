@@ -37,6 +37,7 @@ func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 	}
 	if cfg.Desktop {
 		labels["desktop"] = "true"
+		labels["desktop_env"] = normalizedDesktopEnv(cfg.DesktopEnv)
 	}
 	if cfg.Browser {
 		labels["browser"] = "true"

@@ -2,6 +2,10 @@
 
 ## 0.18.1 - Unreleased
 
+### Added
+
+- Added an experimental Linux `--desktop-env wayland` profile using Sway, WayVNC, Wayland browser launch env, and `grim` screenshots while keeping XFCE as the default desktop.
+
 ### Fixed
 
 - Fixed Linux desktop theme setup so WebVNC sessions install and prefer native Arc-Dark/other dark XFCE themes instead of custom-painting panel and window chrome.

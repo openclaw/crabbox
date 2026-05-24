@@ -95,6 +95,7 @@ export interface LeaseRequest {
   targetOS?: TargetOS;
   windowsMode?: WindowsMode;
   desktop?: boolean;
+  desktopEnv?: string;
   browser?: boolean;
   code?: boolean;
   tailscale?: boolean;
@@ -185,6 +186,7 @@ export interface LeaseRecord {
   target: TargetOS;
   windowsMode?: WindowsMode;
   desktop?: boolean;
+  desktopEnv?: string;
   browser?: boolean;
   code?: boolean;
   tailscale?: TailscaleMetadata;

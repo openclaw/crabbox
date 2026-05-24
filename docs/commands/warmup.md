@@ -186,9 +186,11 @@ Warmup records a local claim tying the lease to the current repo; `--reclaim` ov
 browser automation. Managed Linux tries Google Chrome stable first, then a
 Chromium package fallback.
 
-`--desktop` provisions Xvfb, slim XFCE, and loopback-bound x11vnc for visible UI
-automation and operator takeover. It does not imply a browser. Use
-`--desktop --browser` when a headed browser should run in the visible display.
+`--desktop` provisions a visible UI and loopback-bound VNC for automation and
+operator takeover. Linux defaults to Xvfb, slim XFCE, and x11vnc; use
+`--desktop-env wayland` for the experimental Sway/WayVNC profile on Ubuntu
+24.04-compatible images. It does not imply a browser. Use `--desktop --browser`
+when a headed browser should run in the visible display.
 
 `--code` provisions `code-server` for Linux leases and enables
 `crabbox code --id <lease>` to bridge the workspace through the authenticated

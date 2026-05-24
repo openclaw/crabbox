@@ -962,7 +962,12 @@ Start-Sleep -Seconds 1`
 sudo launchctl kickstart -k system/com.apple.screensharing >/dev/null 2>&1 || true`
 	}
 	return `set -eu
-sudo systemctl restart crabbox-desktop-session.service crabbox-x11vnc.service`
+if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+  sudo systemctl restart crabbox-desktop.service crabbox-wayvnc.service
+else
+  sudo systemctl restart crabbox-desktop-session.service crabbox-x11vnc.service
+fi`
 }
 
 func webVNCDaemonPaths(leaseID string) (string, string, error) {

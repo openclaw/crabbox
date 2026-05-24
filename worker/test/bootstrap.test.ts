@@ -13,6 +13,7 @@ const config: LeaseConfig = {
   target: "linux",
   windowsMode: "normal",
   desktop: false,
+  desktopEnv: "xfce",
   browser: false,
   code: false,
   tailscale: false,
@@ -134,6 +135,40 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("ss -ltn | grep -q '127.0.0.1:5900'");
   });
 
+  it("adds Wayland desktop services when requested", () => {
+    const got = cloudInit({ ...config, desktop: true, desktopEnv: "wayland", browser: true });
+    expect(got).toContain("sway wayvnc foot grim slurp wtype wl-clipboard");
+    expect(got).toContain("xdg-desktop-portal-wlr");
+    expect(got).toContain("/usr/local/bin/crabbox-start-wayland-desktop");
+    expect(got).toContain("/etc/systemd/system/crabbox-wayvnc.service");
+    expect(got).toContain("CRABBOX_DESKTOP_ENV=wayland");
+    expect(got).toContain("WLR_BACKENDS=headless");
+    expect(got).toContain("exec dbus-run-session sway --unsupported-gpu");
+    expect(got).toContain("bindsym $mod+Return exec $term");
+    expect(got).toContain("bindsym $mod+d exec $menu");
+    expect(got).toContain("set $menu foot --title='Crabbox Desktop'");
+    expect(got).toContain('    for_window [app_id="google-chrome"] floating enable');
+    expect(got).toContain("/usr/local/bin/crabbox-sway-status");
+    expect(got).toContain("status_command /usr/local/bin/crabbox-sway-status");
+    expect(got).toContain('for socket in "$XDG_RUNTIME_DIR"/wayland-*');
+    expect(got).toContain('WAYLAND_DISPLAY="${socket##*/}"');
+    expect(got).toContain(
+      'wayvnc --config "$HOME/.config/wayvnc/config" --render-cursor --max-fps=30',
+    );
+    expect(got).toContain("systemctl is-active --quiet crabbox-wayvnc.service");
+    expect(got).toContain("systemctl enable --now crabbox-desktop.service crabbox-wayvnc.service");
+    expect(got).toContain("--ozone-platform=wayland");
+    expect(got).not.toContain("startxfce4");
+    expect(got).not.toContain("crabbox-x11vnc.service");
+    expect(got).not.toContain("x11vnc -storepasswd");
+    expect(got).not.toContain("XDG_RUNTIME_DIR=/tmp/crabbox-runtime-1000");
+    expect(got).not.toContain("\nset $mod");
+    expect(got).not.toContain("\nSWAY");
+    expect(got).not.toContain("\nCRABBOX_DESKTOP_ENV=wayland");
+    expect(got).not.toContain("\nEOF");
+    expect(got).not.toContain("\n#!/bin/sh\nwhile");
+  });
+
   it("starts ssh before optional desktop and browser bootstrap", () => {
     const got = cloudInit({ ...config, desktop: true, browser: true });
     const sshIndex = got.indexOf("systemctl restart ssh");
@@ -162,7 +197,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("/etc/opt/chrome/policies/managed/crabbox.json");
     expect(got).toContain("/usr/local/bin/crabbox-browser");
     expect(got).toContain(
-      "--no-first-run --no-default-browser-check --disable-default-apps --window-size=1500,900 --window-position=80,80",
+      "--no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --window-size=1500,900 --window-position=80,80",
     );
     expect(got).toContain("/var/lib/crabbox/browser.env");
     expect(got).toContain('test -x "$BROWSER"');
@@ -171,7 +206,7 @@ describe("cloud-init bootstrap", () => {
       `printf '%s\\n' '{"DefaultBrowserSettingEnabled":false,"MetricsReportingEnabled":false,"PromotionalTabsEnabled":false}' > /etc/opt/chrome/policies/managed/crabbox.json`,
     );
     expect(got).toContain(
-      `printf '%s\\n' '#!/bin/sh' "exec \\"$browser_path\\" --no-first-run --no-default-browser-check --disable-default-apps --window-size=1500,900 --window-position=80,80 \\"\\$@\\"" > "$browser_wrapper"`,
+      `printf '%s\\n' '#!/bin/sh' "exec \\"$browser_path\\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --window-size=1500,900 --window-position=80,80 \\"\\$@\\"" > "$browser_wrapper"`,
     );
     expect(got).not.toContain("<<'EOF'");
     expect(got).not.toContain("<<EOF");

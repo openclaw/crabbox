@@ -10,6 +10,9 @@ import (
 
 const (
 	desktopDisplay         = ":99"
+	desktopEnvPath         = "/var/lib/crabbox/desktop.env"
+	desktopEnvXFCE         = "xfce"
+	desktopEnvWayland      = "wayland"
 	managedVNCPort         = "5900"
 	managedCodePort        = "8080"
 	codeServerBinary       = "/usr/local/bin/code-server"
@@ -41,6 +44,9 @@ func validateRequestedCapabilities(cfg Config) error {
 	if cfg.Desktop && !featureSetHas(spec.Features, FeatureDesktop) {
 		return exit(2, "desktop/VNC is not supported for provider=%s", provider.Name())
 	}
+	if err := validateDesktopEnv(cfg); err != nil {
+		return err
+	}
 	if cfg.Browser && !featureSetHas(spec.Features, FeatureBrowser) {
 		return exit(2, "browser provisioning is not supported for provider=%s", provider.Name())
 	}
@@ -59,12 +65,44 @@ func validateRequestedCapabilities(cfg Config) error {
 	return nil
 }
 
+func normalizedDesktopEnv(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return desktopEnvXFCE
+	}
+	return value
+}
+
+func NormalizedDesktopEnv(value string) string {
+	return normalizedDesktopEnv(value)
+}
+
+func validateDesktopEnv(cfg Config) error {
+	switch normalizedDesktopEnv(cfg.DesktopEnv) {
+	case desktopEnvXFCE:
+		return nil
+	case desktopEnvWayland:
+		if cfg.Desktop && cfg.TargetOS != targetLinux {
+			return exit(2, "desktopEnv=wayland requires target=linux")
+		}
+		return nil
+	default:
+		return exit(2, "desktopEnv must be xfce or wayland")
+	}
+}
+
 func enforceManagedLeaseCapabilities(cfg Config, server Server, leaseID string) error {
 	if isStaticProvider(cfg.Provider) || server.Provider == staticProvider {
 		return nil
 	}
 	if cfg.Desktop && !labelBool(server.Labels["desktop"]) && !macOSScreenSharingLease(cfg, server) {
 		return exit(2, "lease %s was not created with desktop=true; warm a new lease with --desktop", leaseID)
+	}
+	if cfg.Desktop {
+		requestedDesktopEnv := normalizedDesktopEnv(cfg.DesktopEnv)
+		if requestedDesktopEnv != desktopEnvXFCE && normalizedDesktopEnv(server.Labels["desktop_env"]) != requestedDesktopEnv {
+			return exit(2, "lease %s was not created with desktopEnv=%s; warm a new lease with --desktop-env %s", leaseID, requestedDesktopEnv, requestedDesktopEnv)
+		}
 	}
 	if cfg.Browser && !labelBool(server.Labels["browser"]) {
 		return exit(2, "lease %s was not created with browser=true; warm a new lease with --browser", leaseID)
@@ -91,13 +129,19 @@ func labelBool(value string) bool {
 func requestedCapabilityEnv(ctx context.Context, cfg Config, target SSHTarget) (map[string]string, error) {
 	env := map[string]string{}
 	if cfg.Desktop {
+		desktopEnv, _ := probeDesktopEnv(ctx, target)
 		if isStaticProvider(cfg.Provider) {
 			if err := ensureStaticDesktop(ctx, cfg, target); err != nil {
 				return nil, err
 			}
 		}
-		env["DISPLAY"] = desktopDisplay
 		env["CRABBOX_DESKTOP"] = "1"
+		for key, value := range desktopEnv {
+			env[key] = value
+		}
+		if env["WAYLAND_DISPLAY"] == "" {
+			env["DISPLAY"] = desktopDisplay
+		}
 	}
 	if cfg.Browser {
 		browserEnv, err := probeBrowserEnv(ctx, cfg, target)
@@ -126,11 +170,11 @@ func mergeEnv(base map[string]string, extra map[string]string) map[string]string
 	return out
 }
 
-func ensureStaticDesktop(ctx context.Context, _ Config, target SSHTarget) error {
-	return probeStaticDesktop(ctx, target)
+func ensureStaticDesktop(ctx context.Context, cfg Config, target SSHTarget) error {
+	return probeStaticDesktop(ctx, cfg, target)
 }
 
-func probeStaticDesktop(ctx context.Context, target SSHTarget) error {
+func probeStaticDesktop(ctx context.Context, cfg Config, target SSHTarget) error {
 	if isWindowsNativeTarget(target) {
 		if err := probeLoopbackVNC(ctx, target, "10", "3"); err != nil {
 			return exit(2, "target=windows does not expose a localhost VNC service; install a VNC server bound to 127.0.0.1:5900 or expose static VNC on host:5900")
@@ -143,11 +187,40 @@ func probeStaticDesktop(ctx context.Context, target SSHTarget) error {
 		}
 		return nil
 	}
-	check := "pgrep -f 'Xvfb :99' >/dev/null && pgrep -f x11vnc >/dev/null && " + vncLoopbackCheckCommand(target)
+	check := staticDesktopProbeCommand(cfg, target)
 	if err := runSSHQuiet(ctx, target, check); err != nil {
-		return exit(2, "target=linux does not expose a loopback VNC desktop; start Xvfb :99 and x11vnc on 127.0.0.1:5900")
+		if normalizedDesktopEnv(cfg.DesktopEnv) == desktopEnvWayland {
+			return exit(2, "target=linux does not expose a Crabbox Wayland desktop; create %s with CRABBOX_DESKTOP_ENV=wayland, XDG_RUNTIME_DIR, and WAYLAND_DISPLAY, then start Sway/WayVNC on 127.0.0.1:5900", desktopEnvPath)
+		}
+		return exit(2, "target=linux does not expose a loopback X11 VNC desktop; start Xvfb/x11vnc on 127.0.0.1:5900 or request --desktop-env wayland for a configured Wayland target")
 	}
 	return nil
+}
+
+func staticDesktopProbeCommand(cfg Config, target SSHTarget) string {
+	if normalizedDesktopEnv(cfg.DesktopEnv) == desktopEnvWayland {
+		return `test -f ` + shellQuote(desktopEnvPath) + ` && . ` + shellQuote(desktopEnvPath) + ` && ` +
+			`test "${CRABBOX_DESKTOP_ENV:-}" = "wayland" && ` +
+			`test -n "${XDG_RUNTIME_DIR:-}" && test -n "${WAYLAND_DISPLAY:-}" && ` +
+			`test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" && ` +
+			`pgrep -x sway >/dev/null && pgrep -x wayvnc >/dev/null && ` + vncLoopbackCheckCommand(target)
+	}
+	return `pgrep -f 'Xvfb :99' >/dev/null && pgrep -f x11vnc >/dev/null && ` + vncLoopbackCheckCommand(target)
+}
+
+func probeDesktopEnv(ctx context.Context, target SSHTarget) (map[string]string, error) {
+	if isWindowsNativeTarget(target) || target.TargetOS == targetMacOS {
+		return map[string]string{}, nil
+	}
+	out, err := runSSHOutput(ctx, target, `if [ -f `+shellQuote(desktopEnvPath)+` ]; then . `+shellQuote(desktopEnvPath)+`; fi
+for key in CRABBOX_DESKTOP_ENV DISPLAY XDG_RUNTIME_DIR WAYLAND_DISPLAY; do
+  eval "value=\${$key:-}"
+  [ -n "$value" ] && printf '%s=%s\n' "$key" "$value"
+done`)
+	if err != nil {
+		return map[string]string{}, err
+	}
+	return parseEnvLines(out), nil
 }
 
 func probeBrowserEnv(ctx context.Context, cfg Config, target SSHTarget) (map[string]string, error) {

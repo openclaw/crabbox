@@ -1027,6 +1027,7 @@ export class FleetDurableObject implements DurableObject {
       provider: config.provider,
       target: config.target,
       desktop: config.desktop,
+      desktopEnv: config.desktopEnv,
       browser: config.browser,
       code: config.code,
       cloudID: "",

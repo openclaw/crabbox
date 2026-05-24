@@ -371,6 +371,7 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		"-e", "CRABBOX_WORK_ROOT=" + containerWorkRoot,
 		"-e", "CRABBOX_SSH_PORT=" + sshPort,
 		"-e", "CRABBOX_DESKTOP=" + boolEnv(cfg.Desktop),
+		"-e", "CRABBOX_DESKTOP_ENV=" + core.NormalizedDesktopEnv(cfg.DesktopEnv),
 		"-e", "CRABBOX_BROWSER=" + boolEnv(cfg.Browser),
 		"-e", "CRABBOX_DOCKER_SOCKET=" + boolEnv(cfg.LocalContainer.DockerSocket),
 	}
@@ -931,12 +932,21 @@ func localContainerReadyCheck(cfg core.Config) string {
 		"test -d " + shellQuote(cfg.LocalContainer.WorkRoot),
 	}
 	if cfg.Desktop {
-		checks = append(checks,
-			"pgrep -f 'Xvfb :99' >/dev/null",
-			"pgrep -f 'x11vnc.*-rfbport 5900' >/dev/null",
-			"ss -ltn | grep -q '127.0.0.1:5900'",
-			"test -s /var/lib/crabbox/vnc.password",
-		)
+		if core.NormalizedDesktopEnv(cfg.DesktopEnv) == "wayland" {
+			checks = append(checks,
+				"pgrep -x sway >/dev/null",
+				"pgrep -x wayvnc >/dev/null",
+				"ss -ltn | grep -q '127.0.0.1:5900'",
+				"test -s /var/lib/crabbox/vnc.password",
+			)
+		} else {
+			checks = append(checks,
+				"pgrep -f 'Xvfb :99' >/dev/null",
+				"pgrep -f 'x11vnc.*-rfbport 5900' >/dev/null",
+				"ss -ltn | grep -q '127.0.0.1:5900'",
+				"test -s /var/lib/crabbox/vnc.password",
+			)
+		}
 	}
 	if cfg.Browser {
 		checks = append(checks,
@@ -971,7 +981,11 @@ need_install=0
 	fi
 if [ "${CRABBOX_DESKTOP:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
   apt-get update
-  apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme procps netcat-openbsd novnc websockify
+  if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+    apt-get install -y --no-install-recommends sway wayvnc foot grim slurp wtype wl-clipboard dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps netcat-openbsd novnc websockify
+  else
+    apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme procps netcat-openbsd novnc websockify
+  fi
 fi
 if [ "${CRABBOX_BROWSER:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
   apt-get update
@@ -1061,13 +1075,106 @@ if command -v sudo >/dev/null 2>&1; then
   chmod 440 /etc/sudoers.d/crabbox
 fi
 if [ "${CRABBOX_DESKTOP:-0}" = "1" ]; then
+  desktop_env="${CRABBOX_DESKTOP_ENV:-xfce}"
+  case "$desktop_env" in
+    xfce|wayland) ;;
+    *) echo "CRABBOX_DESKTOP_ENV must be xfce or wayland" >&2; exit 2 ;;
+  esac
   install -d -m 0750 -o "$user" /var/lib/crabbox
   if [ ! -s /var/lib/crabbox/vnc.password ]; then
     (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
   fi
+  if [ "$desktop_env" = "wayland" ]; then
+    chown "$user" /var/lib/crabbox/vnc.password
+    chmod 0600 /var/lib/crabbox/vnc.password
+    runtime="/tmp/crabbox-runtime-$(id -u "$user")"
+    install -d -m 0700 -o "$user" "$runtime" "$home_dir/.config/sway" "$home_dir/.config/wayvnc"
+    cat > /usr/local/bin/crabbox-sway-status <<'STATUS'
+#!/bin/sh
+while :; do
+  printf 'Crabbox Wayland - Mod+Enter/D terminal - %s\n' "$(date '+%H:%M:%S')"
+  sleep 1
+done
+STATUS
+    chmod 0755 /usr/local/bin/crabbox-sway-status
+    cat > "$home_dir/.config/sway/config" <<'SWAY'
+set $mod Mod4
+set $term foot
+set $menu foot --title='Crabbox Desktop'
+output * resolution 1920x1080 position 0,0
+default_border pixel 2
+default_floating_border pixel 2
+gaps inner 8
+gaps outer 12
+focus_follows_mouse no
+client.focused #2dd4bf #1f2937 #f8fafc #2dd4bf #2dd4bf
+client.unfocused #475569 #111827 #cbd5e1 #475569 #475569
+bindsym $mod+Return exec $term
+bindsym $mod+d exec $menu
+bindsym $mod+Shift+c reload
+bindsym $mod+Shift+q kill
+for_window [app_id="foot"] floating enable, resize set width 900 px height 640 px, move position 48 px 72 px
+for_window [app_id="google-chrome"] floating enable, resize set width 1500 px height 900 px, move position 360 px 96 px
+for_window [app_id="chromium"] floating enable, resize set width 1500 px height 900 px, move position 360 px 96 px
+exec foot --title='Crabbox Desktop'
+bar {
+    position top
+    status_command /usr/local/bin/crabbox-sway-status
+    colors {
+        background #111827
+        statusline #e5e7eb
+        focused_workspace #2dd4bf #1f2937 #f8fafc
+        inactive_workspace #1f2937 #111827 #cbd5e1
+    }
+}
+SWAY
+    cat > "$home_dir/.config/wayvnc/config" <<'WAYVNC'
+address=127.0.0.1
+port=5900
+enable_auth=false
+xkb_layout=us
+WAYVNC
+    chown -R "$user" "$home_dir/.config/sway" "$home_dir/.config/wayvnc"
+    cat >/usr/local/bin/crabbox-start-desktop <<'DESKTOP'
+#!/bin/sh
+set -eu
+user="${CRABBOX_SSH_USER:-crabbox}"
+runtime="/tmp/crabbox-runtime-$(id -u "$user")"
+install -d -m 0700 -o "$user" "$runtime"
+if ! pgrep -u "$user" -x sway >/dev/null 2>&1; then
+  su "$user" -s /bin/sh -c "XDG_RUNTIME_DIR='$runtime' WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman MOZ_ENABLE_WAYLAND=1 dbus-run-session sway --unsupported-gpu >/tmp/crabbox-sway.log 2>&1 &"
+fi
+display=""
+for _ in $(seq 1 30); do
+  for socket in "$runtime"/wayland-*; do
+    [ -S "$socket" ] || continue
+    display="${socket##*/}"
+    break 2
+  done
+  sleep 1
+done
+[ -n "$display" ] || { echo "wayland socket not ready" >&2; exit 1; }
+cat >/var/lib/crabbox/desktop.env <<EOF
+CRABBOX_DESKTOP_ENV=wayland
+XDG_RUNTIME_DIR=$runtime
+WAYLAND_DISPLAY=$display
+EOF
+chown "$user" /var/lib/crabbox/desktop.env
+chmod 0644 /var/lib/crabbox/desktop.env
+if ! ss -ltn | grep -q '127.0.0.1:5900'; then
+  home_dir="$(getent passwd "$user" | cut -d: -f6)"
+  su "$user" -s /bin/sh -c "XDG_RUNTIME_DIR='$runtime' WAYLAND_DISPLAY='$display' wayvnc --config '$home_dir/.config/wayvnc/config' --render-cursor --max-fps=30 >/tmp/crabbox-wayvnc.log 2>&1 &"
+fi
+DESKTOP
+    chmod 0755 /usr/local/bin/crabbox-start-desktop
+    CRABBOX_SSH_USER="$user" /usr/local/bin/crabbox-start-desktop
+  else
   x11vnc -storepasswd "$(cat /var/lib/crabbox/vnc.password)" /var/lib/crabbox/vnc.pass >/dev/null
   chown "$user" /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
   chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
+  printf 'CRABBOX_DESKTOP_ENV=xfce\nDISPLAY=:99\n' >/var/lib/crabbox/desktop.env
+  chown "$user" /var/lib/crabbox/desktop.env
+  chmod 0644 /var/lib/crabbox/desktop.env
   config_dir="$home_dir/.config"
   mode="${CRABBOX_DESKTOP_THEME:-}"
   if [ -z "$mode" ] && [ -f "$config_dir/crabbox/desktop-theme" ]; then
@@ -1357,6 +1464,7 @@ fi
 DESKTOP
   chmod 0755 /usr/local/bin/crabbox-start-desktop
   CRABBOX_SSH_USER="$user" /usr/local/bin/crabbox-start-desktop
+  fi
 fi
 if [ "${CRABBOX_BROWSER:-0}" = "1" ]; then
   browser_path=""
@@ -1373,10 +1481,18 @@ if [ "${CRABBOX_BROWSER:-0}" = "1" ]; then
   browser_wrapper=/usr/local/bin/crabbox-browser
   case "$(basename "$browser_path")" in
     firefox*|iceweasel*)
-      printf '%s\n' '#!/bin/sh' "exec \"$browser_path\" --width 1500 --height 900 \"\$@\"" > "$browser_wrapper"
+      if [ -f /var/lib/crabbox/desktop.env ] && grep -q '^CRABBOX_DESKTOP_ENV=wayland$' /var/lib/crabbox/desktop.env; then
+        printf '%s\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY MOZ_ENABLE_WAYLAND=1' "exec \"$browser_path\" --width 1500 --height 900 \"\$@\"" > "$browser_wrapper"
+      else
+        printf '%s\n' '#!/bin/sh' "exec \"$browser_path\" --width 1500 --height 900 \"\$@\"" > "$browser_wrapper"
+      fi
       ;;
     *)
-      printf '%s\n' '#!/bin/sh' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$browser_wrapper"
+      if [ -f /var/lib/crabbox/desktop.env ] && grep -q '^CRABBOX_DESKTOP_ENV=wayland$' /var/lib/crabbox/desktop.env; then
+        printf '%s\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY' 'export MOZ_ENABLE_WAYLAND=1' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --ozone-platform=wayland --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$browser_wrapper"
+      else
+        printf '%s\n' '#!/bin/sh' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$browser_wrapper"
+      fi
       ;;
   esac
   chmod 0755 "$browser_wrapper"

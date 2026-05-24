@@ -256,6 +256,7 @@ func jobConfigViews(jobs map[string]JobConfig) map[string]any {
 			"serverType":     job.ServerType,
 			"market":         job.Market,
 			"desktop":        job.Desktop,
+			"desktopEnv":     job.DesktopEnv,
 			"browser":        job.Browser,
 			"code":           job.Code,
 			"network":        job.Network,

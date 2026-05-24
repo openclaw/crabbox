@@ -214,6 +214,9 @@ func jobLeaseCreateArgs(job JobConfig) []string {
 	if job.Desktop != nil {
 		args = append(args, "--desktop="+fmt.Sprint(*job.Desktop))
 	}
+	if job.DesktopEnv != "" {
+		args = append(args, "--desktop-env", job.DesktopEnv)
+	}
 	if job.Browser != nil {
 		args = append(args, "--browser="+fmt.Sprint(*job.Browser))
 	}

@@ -10,6 +10,7 @@ describe("provider labels", () => {
       target: "linux",
       windowsMode: "normal",
       desktop: false,
+      desktopEnv: "xfce",
       browser: false,
       tailscale: false,
       tailscaleTags: ["tag:crabbox"],
@@ -67,6 +68,7 @@ describe("provider labels", () => {
       target: "linux",
       windowsMode: "normal",
       desktop: true,
+      desktopEnv: "wayland",
       browser: true,
       tailscale: true,
       tailscaleTags: ["tag:crabbox"],
@@ -109,6 +111,7 @@ describe("provider labels", () => {
       new Date("2026-05-01T12:00:00Z"),
     );
     expect(labels.desktop).toBe("true");
+    expect(labels.desktop_env).toBe("wayland");
     expect(labels.browser).toBe("true");
     expect(labels.tailscale).toBe("true");
     expect(labels.tailscale_hostname).toBe("crabbox-blue-lobster");

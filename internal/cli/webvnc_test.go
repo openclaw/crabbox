@@ -73,6 +73,20 @@ func TestWebVNCURLs(t *testing.T) {
 	}
 }
 
+func TestWebVNCResetRemoteCommandHandlesWaylandAndX11(t *testing.T) {
+	got := webVNCResetRemoteCommand(SSHTarget{TargetOS: targetLinux})
+	for _, want := range []string{
+		"/var/lib/crabbox/desktop.env",
+		`CRABBOX_DESKTOP_ENV:-xfce`,
+		"crabbox-desktop.service crabbox-wayvnc.service",
+		"crabbox-desktop-session.service crabbox-x11vnc.service",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("reset command missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestConnectWebVNCBridgeRegistersAgentBeforeServe(t *testing.T) {
 	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

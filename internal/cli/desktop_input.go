@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -410,13 +411,32 @@ echo "missing macOS click tool; install cliclick or Xcode swift in the template"
 exit 127`, x, y, x, y)
 	}
 	return fmt.Sprintf(`set -eu
+if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+  echo "desktop click is not supported on --desktop-env wayland yet; use WebVNC pointer input" >&2
+  exit 2
+fi
 export DISPLAY="${DISPLAY:-:99}"
 command -v xdotool >/dev/null 2>&1 || { echo "missing xdotool; warm a new --desktop lease or install xdotool" >&2; exit 127; }
 xdotool mousemove %d %d click 1`, x, y)
 }
 
 func desktopKeyRemoteCommand(keys string) string {
+	waylandArgs, waylandOK := desktopWaylandWtypeKeyArgs(keys)
+	var wayland bytes.Buffer
+	if waylandOK {
+		wayland.WriteString("exec ")
+		writeShellArgv(&wayland, append([]string{"wtype"}, waylandArgs...))
+		wayland.WriteByte('\n')
+	} else {
+		wayland.WriteString("echo \"desktop key on --desktop-env wayland supports a single key or modifier+key sequence\" >&2\nexit 2\n")
+	}
 	return `set -eu
+if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+  export XDG_RUNTIME_DIR WAYLAND_DISPLAY
+  command -v wtype >/dev/null 2>&1 || { echo "missing wtype; warm a new --desktop-env wayland lease or install wtype" >&2; exit 127; }
+  ` + wayland.String() + `fi
 export DISPLAY="${DISPLAY:-:99}"
 command -v xdotool >/dev/null 2>&1 || { echo "missing xdotool; warm a new --desktop lease or install xdotool" >&2; exit 127; }
 xdotool key --clearmodifiers ` + shellQuote(strings.TrimSpace(keys))
@@ -424,6 +444,12 @@ xdotool key --clearmodifiers ` + shellQuote(strings.TrimSpace(keys))
 
 func desktopTypeRemoteCommand(text string) string {
 	return `set -eu
+if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+  export XDG_RUNTIME_DIR WAYLAND_DISPLAY
+  command -v wtype >/dev/null 2>&1 || { echo "missing wtype; warm a new --desktop-env wayland lease or install wtype" >&2; exit 127; }
+  exec wtype -d 1 -- ` + shellQuote(text) + `
+fi
 export DISPLAY="${DISPLAY:-:99}"
 command -v xdotool >/dev/null 2>&1 || { echo "missing xdotool; warm a new --desktop lease or install xdotool" >&2; exit 127; }
 xdotool type --clearmodifiers --delay 1 -- ` + shellQuote(text)
@@ -431,10 +457,17 @@ xdotool type --clearmodifiers --delay 1 -- ` + shellQuote(text)
 
 func desktopPasteRemoteCommand() string {
 	return `set -eu
-export DISPLAY="${DISPLAY:-:99}"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 cat > "$tmp"
+if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+  export XDG_RUNTIME_DIR WAYLAND_DISPLAY
+  command -v wtype >/dev/null 2>&1 || { echo "missing wtype; warm a new --desktop-env wayland lease or install wtype" >&2; exit 127; }
+  wtype -d 1 - < "$tmp"
+  exit 0
+fi
+export DISPLAY="${DISPLAY:-:99}"
 command -v xdotool >/dev/null 2>&1 || { echo "missing xdotool; warm a new --desktop lease or install xdotool" >&2; exit 127; }
 active_class="$(xdotool getactivewindow getwindowclassname 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
 active_name="$(xdotool getactivewindow getwindowname 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
@@ -467,11 +500,78 @@ xdotool key --clearmodifiers ctrl+v
 wait "$clip_pid" || true`
 }
 
+func desktopWaylandWtypeKeyArgs(keys string) ([]string, bool) {
+	fields := strings.Fields(strings.TrimSpace(keys))
+	if len(fields) != 1 || fields[0] == "" {
+		return nil, false
+	}
+	parts := strings.Split(fields[0], "+")
+	if len(parts) == 0 {
+		return nil, false
+	}
+	var args []string
+	var mods []string
+	for _, raw := range parts[:len(parts)-1] {
+		mod := desktopWaylandModifier(raw)
+		if mod == "" {
+			return nil, false
+		}
+		mods = append(mods, mod)
+		args = append(args, "-M", mod)
+	}
+	key := strings.TrimSpace(parts[len(parts)-1])
+	if key == "" {
+		return nil, false
+	}
+	args = append(args, "-k", key)
+	for i := len(mods) - 1; i >= 0; i-- {
+		args = append(args, "-m", mods[i])
+	}
+	return args, true
+}
+
+func desktopWaylandModifier(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "ctrl", "control":
+		return "ctrl"
+	case "shift":
+		return "shift"
+	case "alt", "option":
+		return "alt"
+	case "logo", "win", "super", "cmd", "command", "meta":
+		return "logo"
+	case "altgr":
+		return "altgr"
+	default:
+		return ""
+	}
+}
+
 func desktopDoctorRemoteCommand(target SSHTarget) string {
 	if target.TargetOS != targetLinux {
 		return `echo "session warn target unsupported repair=desktop doctor has full checks for linux/xvfb leases"`
 	}
 	return `set +e
+if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+  export XDG_RUNTIME_DIR WAYLAND_DISPLAY
+  check() {
+    layer="$1"; item="$2"; shift 2
+    if "$@" >/dev/null 2>&1; then
+      echo "$layer ok $item"
+    else
+      echo "$layer failed $item repair=$CRABBOX_REPAIR"
+    fi
+  }
+  [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] && echo "session ok wayland=$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" || echo "session failed wayland repair=restart crabbox-desktop.service"
+  CRABBOX_REPAIR="restart crabbox-desktop.service"; check session sway pgrep -x sway
+  CRABBOX_REPAIR="restart crabbox-wayvnc.service"; check vm vnc ss -ltn sport = :5900
+  CRABBOX_REPAIR="warm a new --desktop-env wayland lease or install wtype"; check input wtype command -v wtype
+  CRABBOX_REPAIR="warm a new --desktop-env wayland lease or install wl-clipboard"; check input clipboard command -v wl-copy
+  CRABBOX_REPAIR="warm a new --desktop-env wayland lease or install grim"; check capture screenshot command -v grim
+  CRABBOX_REPAIR="warm with --browser or install Chrome/Chromium"; if [ -f /var/lib/crabbox/browser.env ]; then . /var/lib/crabbox/browser.env; fi; if [ -n "${BROWSER:-}" ] && [ -x "$BROWSER" ]; then echo "session ok browser=$BROWSER"; elif command -v google-chrome >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then echo "session ok browser"; else echo "session failed browser repair=$CRABBOX_REPAIR"; fi
+  exit 0
+fi
 export DISPLAY="${DISPLAY:-:99}"
 check() {
   layer="$1"; item="$2"; shift 2

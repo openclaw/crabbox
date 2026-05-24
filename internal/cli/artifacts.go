@@ -385,6 +385,9 @@ func (a App) artifactsVideo(ctx context.Context, args []string) error {
 	if contactWidth <= 0 {
 		return exit(2, "artifacts video --contact-sheet-width must be positive")
 	}
+	if err := rejectWaylandDesktopVideoTarget(ctx, target, "artifacts video"); err != nil {
+		return err
+	}
 	if err := captureDesktopVideo(ctx, target, output, duration, fps); err != nil {
 		printRescue(a.Stdout, classifyDesktopFailure(err.Error()), err.Error(), desktopDoctorCommand(rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}))
 		return err
@@ -649,6 +652,9 @@ func captureDesktopVideo(ctx context.Context, target SSHTarget, outputPath strin
 	if target.TargetOS != targetLinux {
 		return exit(2, "artifacts video currently requires target=linux or native Windows desktop capture")
 	}
+	if err := rejectWaylandDesktopVideoTarget(ctx, target, "desktop video capture"); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil && filepath.Dir(outputPath) != "." {
 		return exit(2, "create video directory: %v", err)
 	}
@@ -674,6 +680,11 @@ func desktopVideoRemoteCommand(duration time.Duration, fps float64) string {
 	seconds := strconv.FormatFloat(duration.Seconds(), 'f', 3, 64)
 	frameRate := strconv.FormatFloat(fps, 'f', 3, 64)
 	return fmt.Sprintf(`set -eu
+if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+  echo "video capture does not support --desktop-env wayland yet; use an X11 desktop" >&2
+  exit 2
+fi
 export DISPLAY="${DISPLAY:-:99}"
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "missing ffmpeg; warm a new --desktop lease or install ffmpeg" >&2
@@ -687,6 +698,17 @@ fi
 if [ -z "$size" ]; then size="1920x1080"; fi
 ffmpeg -hide_banner -loglevel error -y -f x11grab -video_size "$size" -framerate %s -i "$DISPLAY" -t %s -pix_fmt yuv420p -an -movflags frag_keyframe+empty_moov -f mp4 -
 `, frameRate, seconds)
+}
+
+func rejectWaylandDesktopVideoTarget(ctx context.Context, target SSHTarget, command string) error {
+	if target.TargetOS != targetLinux {
+		return nil
+	}
+	env, err := probeDesktopEnv(ctx, target)
+	if err != nil {
+		return nil
+	}
+	return rejectWaylandDesktopVideoEnv(env, command)
 }
 
 func captureWindowsDesktopVideo(ctx context.Context, target SSHTarget, outputPath string, duration time.Duration, fps float64) error {

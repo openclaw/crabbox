@@ -199,6 +199,25 @@ func TestLeaseToServerTargetPreservesCoordinatorWorkRoot(t *testing.T) {
 	}
 }
 
+func TestLeaseToServerTargetPreservesDesktopEnvLabel(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+
+	server, _, _ := leaseToServerTarget(CoordinatorLease{
+		ID:         "cbx_123",
+		Provider:   "aws",
+		TargetOS:   targetLinux,
+		Desktop:    true,
+		DesktopEnv: desktopEnvWayland,
+		Host:       "203.0.113.10",
+	}, cfg)
+
+	if server.Labels["desktop_env"] != desktopEnvWayland {
+		t.Fatalf("desktop_env label=%q want %q", server.Labels["desktop_env"], desktopEnvWayland)
+	}
+}
+
 func TestCoordinatorLeaseHostIDAcceptsCanonicalAndCompatJSON(t *testing.T) {
 	for name, input := range map[string]string{
 		"canonical": `{"id":"cbx_123","provider":"aws","hostId":"h-canonical"}`,

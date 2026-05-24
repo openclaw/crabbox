@@ -19,6 +19,7 @@ type Config struct {
 	TargetOS                 string
 	WindowsMode              string
 	Desktop                  bool
+	DesktopEnv               string
 	Browser                  bool
 	Code                     bool
 	Network                  NetworkMode
@@ -430,6 +431,7 @@ type JobConfig struct {
 	TTL            time.Duration
 	IdleTimeout    time.Duration
 	Desktop        *bool
+	DesktopEnv     string
 	Browser        *bool
 	Code           *bool
 	Network        string
@@ -573,6 +575,7 @@ func baseConfig() Config {
 		Provider:           provider,
 		TargetOS:           "linux",
 		WindowsMode:        "normal",
+		DesktopEnv:         desktopEnvXFCE,
 		Network:            NetworkAuto,
 		Class:              class,
 		ServerType:         "",
@@ -730,6 +733,7 @@ type fileConfig struct {
 	TargetOS         string                             `yaml:"targetOS,omitempty"`
 	Windows          *fileWindowsConfig                 `yaml:"windows,omitempty"`
 	Desktop          *bool                              `yaml:"desktop,omitempty"`
+	DesktopEnv       string                             `yaml:"desktopEnv,omitempty"`
 	Browser          *bool                              `yaml:"browser,omitempty"`
 	Code             *bool                              `yaml:"code,omitempty"`
 	Network          string                             `yaml:"network,omitempty"`
@@ -1261,6 +1265,7 @@ type fileJobConfig struct {
 	TTL            string                `yaml:"ttl,omitempty"`
 	IdleTimeout    string                `yaml:"idleTimeout,omitempty"`
 	Desktop        *bool                 `yaml:"desktop,omitempty"`
+	DesktopEnv     string                `yaml:"desktopEnv,omitempty"`
 	Browser        *bool                 `yaml:"browser,omitempty"`
 	Code           *bool                 `yaml:"code,omitempty"`
 	Network        string                `yaml:"network,omitempty"`
@@ -1406,6 +1411,9 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 	}
 	if file.Desktop != nil {
 		cfg.Desktop = *file.Desktop
+	}
+	if file.DesktopEnv != "" {
+		cfg.DesktopEnv = file.DesktopEnv
 	}
 	if file.Browser != nil {
 		cfg.Browser = *file.Browser
@@ -2350,6 +2358,9 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 		value := *file.Desktop
 		job.Desktop = &value
 	}
+	if file.DesktopEnv != "" {
+		job.DesktopEnv = file.DesktopEnv
+	}
 	if file.Browser != nil {
 		value := *file.Browser
 		job.Browser = &value
@@ -2442,6 +2453,7 @@ func applyEnv(cfg *Config) {
 	if value, ok := getenvBool("CRABBOX_DESKTOP"); ok {
 		cfg.Desktop = value
 	}
+	cfg.DesktopEnv = getenv("CRABBOX_DESKTOP_ENV", cfg.DesktopEnv)
 	if value, ok := getenvBool("CRABBOX_BROWSER"); ok {
 		cfg.Browser = value
 	}

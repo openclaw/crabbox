@@ -18,6 +18,10 @@ func TestScreenshotRemoteCommandUsesDesktopDisplayAndPNG(t *testing.T) {
 	got := screenshotRemoteCommand(SSHTarget{TargetOS: targetLinux})
 	for _, want := range []string{
 		`DISPLAY="${DISPLAY:-:99}"`,
+		"/var/lib/crabbox/desktop.env",
+		"export XDG_RUNTIME_DIR WAYLAND_DISPLAY",
+		"command -v grim",
+		"grim -",
 		"command -v scrot",
 		"scrot -z -o",
 		"cat \"$tmp\"",

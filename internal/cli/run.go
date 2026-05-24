@@ -1880,6 +1880,12 @@ func validateCoordinatorLeaseCapabilities(cfg Config, lease CoordinatorLease) er
 	if cfg.Desktop && !lease.Desktop {
 		return exit(5, "coordinator did not provision desktop=true for lease %s; deploy the coordinator with desktop/VNC support", blank(lease.ID, "-"))
 	}
+	if cfg.Desktop {
+		requestedDesktopEnv := normalizedDesktopEnv(cfg.DesktopEnv)
+		if requestedDesktopEnv != desktopEnvXFCE && normalizedDesktopEnv(lease.DesktopEnv) != requestedDesktopEnv {
+			return exit(5, "coordinator did not provision desktopEnv=%s for lease %s; deploy the coordinator with desktop environment support", requestedDesktopEnv, blank(lease.ID, "-"))
+		}
+	}
 	if cfg.Browser && !lease.Browser {
 		return exit(5, "coordinator did not provision browser=true for lease %s; deploy the coordinator with browser support", blank(lease.ID, "-"))
 	}
