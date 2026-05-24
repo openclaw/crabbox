@@ -431,7 +431,15 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	useCoordinator := coord != nil
 	recorder := &runRecorder{}
 	var runFailure error
+	failureClassificationPrinted := false
 	recordFailure := func(failure error) error {
+		if failure != nil && !failureClassificationPrinted {
+			classification := ClassifyRunFailure(1, failure.Error(), nil)
+			if classification.BlockedStage != "" && classification.BlockedStage != "unknown" {
+				fmt.Fprintf(a.Stderr, "failure classification%s\n", FormatFailureClassificationFields(classification))
+				failureClassificationPrinted = true
+			}
+		}
 		return recordRunFailure(&runFailure, failure)
 	}
 	recordCommand := runScriptRecordCommand(script, command)
@@ -1105,6 +1113,12 @@ afterSync:
 		}
 	}
 	total := time.Since(timings.started)
+	if code != 0 {
+		classification := ClassifyRunFailure(code, logBuffer.String(), timings.commandPhases)
+		timings.blockedStage = classification.BlockedStage
+		timings.retryLikely = classification.RetryLikely
+		failureClassificationPrinted = true
+	}
 	report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, code, actionsURL)
 	populateRunTimingMetadata(&report, cfg, repo, server, leaseID, recorder.runID, workdir, runArtifacts)
 	report.Label = runLabelValue
@@ -1369,6 +1383,8 @@ type runTimings struct {
 	syncSteps     syncStepTimings
 	commandPhases []timingPhase
 	syncSkipped   bool
+	blockedStage  string
+	retryLikely   string
 }
 
 type syncStepTimings struct {
@@ -1406,6 +1422,7 @@ func formatRunSummary(timings runTimings, total time.Duration, exitCode int) str
 	if breakdown := formatCommandPhaseTimings(timings.commandPhases); breakdown != "" {
 		summary += " command_phases=" + breakdown
 	}
+	summary += FormatFailureClassificationFields(FailureClassification{BlockedStage: timings.blockedStage, RetryLikely: timings.retryLikely})
 	return summary
 }
 

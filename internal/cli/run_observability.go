@@ -912,6 +912,10 @@ func printFailureTail(w io.Writer, label string, tail *streamTailBuffer, capture
 		fmt.Fprintf(w, "%s tail: empty\n", label)
 		return
 	}
+	if redacted, ok := RedactKnownFailureBody(strings.Join(lines, "\n")); ok {
+		fmt.Fprintf(w, "%s tail redacted: %s\n", label, redacted)
+		return
+	}
 	fmt.Fprintf(w, "%s tail last %d lines:\n", label, len(lines))
 	for _, line := range lines {
 		fmt.Fprintf(w, "%s\n", line)

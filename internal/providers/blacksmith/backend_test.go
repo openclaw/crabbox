@@ -103,6 +103,132 @@ func TestBlacksmithWarmupArgsRequiresWorkflow(t *testing.T) {
 	}
 }
 
+func TestBlacksmithRunRejectsEnvForwardingBeforeWarmup(t *testing.T) {
+	var stderr bytes.Buffer
+	runner := &blacksmithFuncRunner{}
+	cfg := baseConfig()
+	backend := &blacksmithBackend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+	}
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:       Repo{Root: "/repo"},
+		Command:    []string{"true"},
+		EnvSummary: true,
+		Options: core.LeaseOptions{
+			EnvAllow: []string{"API_TOKEN"},
+		},
+		Env: map[string]string{"API_TOKEN": "secret-token-value"},
+	})
+	var exitErr ExitError
+	if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("Run error=%v, want exit 2", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner was called before validation: %#v", runner.calls)
+	}
+	out := stderr.String()
+	for _, want := range []string{"provider=blacksmith-testbox", "behavior=unsupported", "configure secrets in the Testbox workflow"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stderr missing %q in %q", want, out)
+		}
+	}
+	if strings.Contains(out, "secret-token-value") {
+		t.Fatalf("stderr leaked env value: %q", out)
+	}
+}
+
+func TestBlacksmithRunDoesNotRejectDefaultEnvMetadata(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	var stderr bytes.Buffer
+	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
+		return LocalCommandResult{ExitCode: 1}, errors.New("warmup failed")
+	}}
+	cfg := baseConfig()
+	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	backend := &blacksmithBackend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+	}
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: "/repo"},
+		Command: []string{"true"},
+		Options: core.LeaseOptions{
+			EnvAllow: []string{"CI", "NODE_OPTIONS"},
+		},
+		Env: map[string]string{"NODE_OPTIONS": "--max-old-space-size=4096"},
+	})
+	if err == nil {
+		t.Fatal("expected warmup failure")
+	}
+	if len(runner.calls) == 0 {
+		t.Fatal("runner was not called")
+	}
+	if strings.Contains(stderr.String(), "behavior=unsupported") {
+		t.Fatalf("default env metadata was rejected: %q", stderr.String())
+	}
+}
+
+func TestBlacksmithRunRejectsExplicitDefaultEnvBeforeWarmup(t *testing.T) {
+	var stderr bytes.Buffer
+	runner := &blacksmithFuncRunner{}
+	cfg := baseConfig()
+	backend := &blacksmithBackend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+	}
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:       Repo{Root: "/repo"},
+		Command:    []string{"true"},
+		EnvSummary: true,
+		Options: core.LeaseOptions{
+			EnvAllow: []string{"CI", "NODE_OPTIONS"},
+		},
+		Env: map[string]string{"NODE_OPTIONS": "--max-old-space-size=4096"},
+	})
+	var exitErr ExitError
+	if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("Run error=%v, want exit 2", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner was called before validation: %#v", runner.calls)
+	}
+}
+
+func TestBlacksmithRunRejectsConfiguredEnvForwardingBeforeWarmup(t *testing.T) {
+	var stderr bytes.Buffer
+	runner := &blacksmithFuncRunner{}
+	cfg := baseConfig()
+	backend := &blacksmithBackend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+	}
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: "/repo"},
+		Command: []string{"true"},
+		Options: core.LeaseOptions{
+			EnvAllow: []string{"API_TOKEN"},
+		},
+		Env: map[string]string{"API_TOKEN": "secret-token-value"},
+	})
+	var exitErr ExitError
+	if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("Run error=%v, want exit 2", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner was called before validation: %#v", runner.calls)
+	}
+	if strings.Contains(stderr.String(), "secret-token-value") {
+		t.Fatalf("stderr leaked env value: %q", stderr.String())
+	}
+}
+
 func TestBlacksmithWarmupFailureRemovesPendingKey(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

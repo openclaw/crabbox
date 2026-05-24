@@ -237,10 +237,11 @@ capture, and downloads before command execution.
 Use `--timing-json` to emit a final JSON timing record with provider, lease ID,
 slug, run ID, machine type, repo path, remote workdir, sync phases, command
 phases, command duration, total duration, exit code, stop command, artifacts,
-and Actions run URL when available. Commands can emit phase markers on stdout
-or stderr as `CRABBOX_PHASE:<name>`; Crabbox records those as `commandPhases`
-without removing the marker line from output. In `blacksmith-testbox` mode,
-sync is reported as delegated in the same schema.
+and Actions run URL when available. Failed runs also include `blockedStage` and
+`retryLikely` when Crabbox can classify the likely blocker. Commands can emit
+phase markers on stdout or stderr as `CRABBOX_PHASE:<name>`; Crabbox records
+those as `commandPhases` without removing the marker line from output. In
+`blacksmith-testbox` mode, sync is reported as delegated in the same schema.
 
 Before the first rsync into a Git checkout, Crabbox tries to seed the remote worktree from the local `origin` remote so the first sync is a dirty-tree overlay instead of a full source upload. Project-specific excludes can live in `.crabboxignore` or `sync.exclude` in `crabbox.yaml` / `.crabbox.yaml`; env forwarding and base ref belong in config.
 

@@ -85,8 +85,11 @@ machine without adding file bytes to coordinator logs.
 Test results are stored as structured summaries when `--junit` or
 `results.junit` is configured.
 
-`--timing-json` includes sync phases and command phases. Commands can add
-user-defined phases by printing marker lines to stdout or stderr:
+`--timing-json` includes sync phases and command phases. Failed runs add
+`blockedStage` and `retryLikely` when Crabbox can classify the likely blocker;
+the human run summary prints the same values as `blocked_stage` and
+`retry_likely`. Commands can add user-defined phases by printing marker lines
+to stdout or stderr:
 
 ```sh
 echo CRABBOX_PHASE:install

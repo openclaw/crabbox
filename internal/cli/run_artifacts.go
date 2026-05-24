@@ -338,6 +338,9 @@ func markdownFence(info, content string) (string, string) {
 
 func selectProofLogExcerpt(log string) string {
 	log = strings.ReplaceAll(stripANSI(log), "\r", "\n")
+	if redacted, ok := RedactKnownFailureBody(log); ok {
+		return redacted
+	}
 	lines := strings.Split(strings.TrimSpace(log), "\n")
 	out := make([]string, 0, 12)
 	for i := len(lines) - 1; i >= 0 && len(out) < 12; i-- {

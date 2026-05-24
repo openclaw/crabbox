@@ -26,6 +26,8 @@ type TimingReport struct {
 	Workdir       string        `json:"workdir,omitempty"`
 	StopCommand   string        `json:"stopCommand,omitempty"`
 	IdleTimeout   string        `json:"idleTimeout,omitempty"`
+	BlockedStage  string        `json:"blockedStage,omitempty"`
+	RetryLikely   string        `json:"retryLikely,omitempty"`
 	Artifacts     []runArtifact `json:"artifacts,omitempty"`
 	LeaseStopped  *bool         `json:"leaseStopped,omitempty"`
 	LeaseStopErr  string        `json:"leaseStopError,omitempty"`
@@ -81,6 +83,8 @@ func timingReportFromRun(provider, leaseID, slug string, timings runTimings, tot
 		CommandPhases: timings.commandPhases,
 		TotalMs:       total.Milliseconds(),
 		ExitCode:      exitCode,
+		BlockedStage:  timings.blockedStage,
+		RetryLikely:   timings.retryLikely,
 	}
 }
 

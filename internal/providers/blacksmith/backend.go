@@ -97,6 +97,11 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 	if err := core.RejectDelegatedSyncOptionsForSpec(b.spec, req); err != nil {
 		return RunResult{}, err
 	}
+	if blacksmithEnvForwardingRequested(req) {
+		core.PrintEnvForwardingSummary(b.rt.Stderr, blacksmithTestboxProvider, "unsupported", req.Options.EnvAllow, req.Env)
+		fmt.Fprintf(b.rt.Stderr, "env forwarding note=blacksmith-testbox delegates execution to the Blacksmith CLI; configure secrets in the Testbox workflow instead\n")
+		return RunResult{}, core.Exit(2, "env forwarding is unsupported for provider=%s; configure secrets in the provider workflow or use an SSH-backed provider", blacksmithTestboxProvider)
+	}
 	started := b.rt.Clock.Now()
 	leaseID := req.ID
 	slug := ""
@@ -174,8 +179,12 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 	commandDuration := finished.Sub(commandStart)
 	commandPhases := core.FinishCommandPhaseTracker(phaseTracker, finished)
 	total := finished.Sub(started)
-	fmt.Fprintf(b.rt.Stderr, "blacksmith run summary sync=delegated command=%s total=%s exit=%d\n", commandDuration.Round(time.Millisecond), total.Round(time.Millisecond), code)
 	report := delegatedTimingReport(blacksmithTestboxProvider, leaseID, slug, "blacksmith-testbox owns sync", commandDuration, commandPhases, total, code)
+	if code != 0 {
+		classification := core.ClassifyRunFailure(code, string(stdoutProof.Bytes())+"\n"+string(stderrProof.Bytes()), commandPhases)
+		core.ApplyFailureClassification(&report, classification)
+	}
+	fmt.Fprintf(b.rt.Stderr, "blacksmith run summary sync=delegated command=%s total=%s exit=%d%s\n", commandDuration.Round(time.Millisecond), total.Round(time.Millisecond), code, core.FormatFailureClassificationFields(core.FailureClassification{BlockedStage: report.BlockedStage, RetryLikely: report.RetryLikely}))
 	report.Label = strings.TrimSpace(req.Label)
 	if req.TimingJSON {
 		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
@@ -218,6 +227,32 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 }
 
 var githubActionsRunURLPattern = regexp.MustCompile(`https://github\.com/[^\s"'<>]+/actions/runs/[0-9]+[^\s"'<>]*`)
+
+func blacksmithEnvForwardingRequested(req RunRequest) bool {
+	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
+		return true
+	}
+	for _, name := range req.Options.EnvAllow {
+		if !blacksmithDefaultEnvMetadataName(name) {
+			return true
+		}
+	}
+	for name := range req.Env {
+		if !blacksmithDefaultEnvMetadataName(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func blacksmithDefaultEnvMetadataName(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "", "CI", "NODE_OPTIONS":
+		return true
+	default:
+		return false
+	}
+}
 
 const blacksmithProofStreamCaptureBytes = 1024 * 1024
 

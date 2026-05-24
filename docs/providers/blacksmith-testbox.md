@@ -80,9 +80,10 @@ Blacksmith authentication stays in the Blacksmith CLI. Run
 
 `--env-from-profile`, `--allow-env`, and `CRABBOX_ENV_ALLOW` are useful for
 direct SSH-backed Crabbox runs, but Blacksmith delegated runs cannot inject
-CLI-side environment values into the remote Testbox command. Crabbox prints an
-explicit `env forwarding ... behavior=unsupported` summary when those knobs are
-present; put live secrets in the Blacksmith workflow instead.
+CLI-side environment values into the remote Testbox command. Crabbox fails
+before warmup with an explicit `env forwarding ... behavior=unsupported`
+summary when those knobs are present; put live secrets in the Blacksmith
+workflow instead.
 
 ## Lifecycle
 

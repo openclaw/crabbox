@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed Linux desktop theme setup so WebVNC sessions also apply dark window-manager chrome and panel styling instead of only darkening GTK apps and browser content.
+- Fixed run failure summaries and timing JSON to classify likely blocked stages, redact known HTML auth challenge bodies from failure excerpts, and reject unsupported Blacksmith environment forwarding before warmup.
 - Fixed desktop browser launches so Linux WebVNC browser sessions inherit the dark desktop theme, advertise dark color-scheme preference to web apps, and repair older managed browser wrappers before launch.
 
 ## 0.18.0 - 2026-05-23
