@@ -1204,8 +1204,9 @@ afterSync:
 		}
 	}
 	total := time.Since(timings.started)
+	classification := FailureClassification{}
 	if code != 0 {
-		classification := ClassifyRunFailure(code, logBuffer.String(), timings.commandPhases)
+		classification = ClassifyRunFailure(code, logBuffer.String(), timings.commandPhases)
 		timings.blockedStage = classification.BlockedStage
 		timings.retryLikely = classification.RetryLikely
 		failureClassificationPrinted = true
@@ -1249,6 +1250,20 @@ afterSync:
 		finalTimingReport = &report
 	}
 	if code != 0 {
+		printRunFailureDigest(a.Stderr, runFailureDigestInput{
+			Provider:       cfg.Provider,
+			TargetOS:       cfg.TargetOS,
+			WindowsMode:    cfg.WindowsMode,
+			LeaseID:        leaseID,
+			Slug:           serverSlug(server),
+			RunID:          recorder.runID,
+			CommandDisplay: commandDisplay,
+			ShellMode:      *shellMode,
+			RoutingArgs:    runFailureDigestRoutingArgs(cfg),
+			StopCommand:    report.StopCommand,
+			Classification: classification,
+			Phases:         timings.commandPhases,
+		}, stdoutTail, stderrTail, *captureStdout, *captureStderr)
 		capture := FailureCaptureMetadata{
 			Provider:       cfg.Provider,
 			LeaseID:        leaseID,

@@ -33,6 +33,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	provider := fs.String("provider", defaults.Provider, providerHelpAll())
 	profile := fs.String("profile", defaults.Profile, "configured profile for remote prerequisite checks")
 	id := fs.String("id", "", "remote lease id to inspect")
+	fromRun := fs.String("from-run", "", "recorded run id to use for provider, target, lease, and phase context")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	probeSSH := fs.Bool("doctor-probe-ssh", false, "probe static SSH reachability during doctor")
 	targetFlags := registerTargetFlags(fs, defaults)
@@ -49,6 +50,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	if err := applySelectedProfileConfig(&cfg); err != nil {
 		return err
 	}
+	resolvedDoctorID := strings.TrimSpace(*id)
 	ok := true
 	var checks []doctorJSONCheck
 	record := func(status, check, message string, details map[string]string) {
@@ -108,6 +110,36 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		}
 		return nil
 	}
+	if runID := strings.TrimSpace(*fromRun); runID != "" {
+		run, missing, err := applyDoctorFromRunContext(ctx, &cfg, runID)
+		if err != nil {
+			return err
+		}
+		if run.Provider != "" {
+			*provider = run.Provider
+		}
+		if resolvedDoctorID == "" && run.LeaseID != "" {
+			resolvedDoctorID = run.LeaseID
+		}
+		status := "ok"
+		if len(missing) > 0 {
+			status = "warning"
+		}
+		details := map[string]string{
+			"run":      run.ID,
+			"provider": cfg.Provider,
+			"target":   cfg.TargetOS,
+			"lease":    blank(run.LeaseID, "-"),
+			"phase":    blank(run.Phase, "-"),
+		}
+		if len(missing) > 0 {
+			details["missing"] = strings.Join(missing, ",")
+		}
+		record(status, "run", doctorFromRunMessage(run, missing), details)
+		if resolvedDoctorID == "" {
+			record("skip", "remote", fmt.Sprintf("from_run=%s lease=missing remote_checks=skipped", run.ID), map[string]string{"run": run.ID, "reason": "missing_lease"})
+		}
+	}
 	if problem := configFilePermissionProblem(writableConfigPath()); problem != "" {
 		record("failed", "config", fmt.Sprintf("%s: %s", writableConfigPath(), problem), nil)
 		ok = false
@@ -136,33 +168,39 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		}
 		record("ok", tool, path, map[string]string{"tool": tool, "path": path})
 	}
-	if *id != "" {
-		_, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, *id)
+	if resolvedDoctorID != "" {
+		_, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, resolvedDoctorID)
 		if err != nil {
-			return err
+			if strings.TrimSpace(*fromRun) != "" {
+				record("skip", "remote", fmt.Sprintf("%s unavailable: %v", resolvedDoctorID, err), map[string]string{"id": resolvedDoctorID, "reason": "lease_unavailable"})
+			} else {
+				return err
+			}
 		}
-		remote := "printf 'git='; git --version; printf 'rsync='; rsync --version | head -1; printf 'curl='; curl --version | head -1; printf 'jq='; jq --version"
-		if cfg.Profiles[cfg.Profile].Doctor.Enabled {
+		if err == nil {
+			remote := "printf 'git='; git --version; printf 'rsync='; rsync --version | head -1; printf 'curl='; curl --version | head -1; printf 'jq='; jq --version"
+			if cfg.Profiles[cfg.Profile].Doctor.Enabled {
+				if isWindowsNativeTarget(target) {
+					return exit(2, "profile doctor is not supported for native Windows targets")
+				}
+				remote = remoteProfileDoctorCommand(cfg.Profile, cfg.Profiles[cfg.Profile].Doctor, profileDoctorWorkdirForLease(cfg, leaseID))
+			}
 			if isWindowsNativeTarget(target) {
-				return exit(2, "profile doctor is not supported for native Windows targets")
+				remote = windowsRemoteDoctor()
 			}
-			remote = remoteProfileDoctorCommand(cfg.Profile, cfg.Profiles[cfg.Profile].Doctor, profileDoctorWorkdirForLease(cfg, leaseID))
-		}
-		if isWindowsNativeTarget(target) {
-			remote = windowsRemoteDoctor()
-		}
-		out, err := runSSHCombinedOutput(ctx, target, remote)
-		if err != nil {
-			ok = false
-			if strings.TrimSpace(out) != "" {
-				record("failed", "remote", fmt.Sprintf("%s\n%s", *id, strings.TrimSpace(out)), map[string]string{"id": *id})
+			out, err := runSSHCombinedOutput(ctx, target, remote)
+			if err != nil {
+				ok = false
+				if strings.TrimSpace(out) != "" {
+					record("failed", "remote", fmt.Sprintf("%s\n%s", resolvedDoctorID, strings.TrimSpace(out)), map[string]string{"id": resolvedDoctorID})
+				}
+				if *jsonOut {
+					_ = json.NewEncoder(a.Stdout).Encode(doctorJSONOutput{OK: false, Provider: cfg.Provider, Checks: checks})
+				}
+				return exit(7, "remote doctor failed for %s: %v", resolvedDoctorID, err)
 			}
-			if *jsonOut {
-				_ = json.NewEncoder(a.Stdout).Encode(doctorJSONOutput{OK: false, Provider: cfg.Provider, Checks: checks})
-			}
-			return exit(7, "remote doctor failed for %s: %v", *id, err)
+			record("ok", "remote", fmt.Sprintf("%s\n%s", resolvedDoctorID, out), map[string]string{"id": resolvedDoctorID})
 		}
-		record("ok", "remote", fmt.Sprintf("%s\n%s", *id, out), map[string]string{"id": *id})
 	}
 	if os.Getenv("CRABBOX_SERVER_TYPE") == "" {
 		applyServerTypeFlagOverrides(&cfg, fs, "")
@@ -295,6 +333,68 @@ func (a App) doctor(ctx context.Context, args []string) error {
 
 	record("skip", "provider", fmt.Sprintf("provider=%s direct_doctor=unsupported", providerDef.Name()), map[string]string{"provider": providerDef.Name(), "direct_doctor": "unsupported"})
 	return finish()
+}
+
+func applyDoctorFromRunContext(ctx context.Context, cfg *Config, runID string) (CoordinatorRun, []string, error) {
+	coord, ok, err := newCoordinatorClient(*cfg)
+	if err != nil {
+		return CoordinatorRun{}, nil, err
+	}
+	if !ok {
+		return CoordinatorRun{}, nil, exit(2, "doctor --from-run requires a configured coordinator")
+	}
+	run, err := coord.Run(ctx, runID)
+	if err != nil {
+		return CoordinatorRun{}, nil, err
+	}
+	var missing []string
+	if strings.TrimSpace(run.Provider) != "" {
+		cfg.Provider = strings.TrimSpace(run.Provider)
+	} else {
+		missing = append(missing, "provider")
+	}
+	if strings.TrimSpace(run.TargetOS) != "" {
+		cfg.TargetOS = strings.TrimSpace(run.TargetOS)
+	} else {
+		missing = append(missing, "target")
+	}
+	if strings.TrimSpace(run.WindowsMode) != "" {
+		cfg.WindowsMode = strings.TrimSpace(run.WindowsMode)
+	}
+	if strings.TrimSpace(run.Class) != "" {
+		cfg.Class = strings.TrimSpace(run.Class)
+	} else {
+		missing = append(missing, "class")
+	}
+	if strings.TrimSpace(run.ServerType) != "" {
+		cfg.ServerType = strings.TrimSpace(run.ServerType)
+		cfg.ServerTypeExplicit = true
+	} else {
+		missing = append(missing, "serverType")
+	}
+	if strings.TrimSpace(run.LeaseID) == "" {
+		missing = append(missing, "leaseID")
+	}
+	if strings.TrimSpace(run.Phase) == "" {
+		missing = append(missing, "phase")
+	}
+	return run, missing, nil
+}
+
+func doctorFromRunMessage(run CoordinatorRun, missing []string) string {
+	fields := []string{
+		"run=" + run.ID,
+		"provider=" + blank(run.Provider, "-"),
+		"target=" + blank(run.TargetOS, "-"),
+		"class=" + blank(run.Class, "-"),
+		"type=" + blank(run.ServerType, "-"),
+		"lease=" + blank(run.LeaseID, "-"),
+		"phase=" + blank(run.Phase, "-"),
+	}
+	if len(missing) > 0 {
+		fields = append(fields, "missing="+strings.Join(missing, ","))
+	}
+	return strings.Join(fields, " ")
 }
 
 func doctorLocalTools(spec ProviderSpec) []string {

@@ -6,6 +6,7 @@ run.
 ```sh
 crabbox run --id cbx_abcdef123456 --junit junit.xml -- go test ./...
 crabbox results run_abcdef123456
+crabbox results run_abcdef123456 --failed-only
 crabbox results run_abcdef123456 --json
 ```
 
@@ -45,6 +46,9 @@ failures:
   src/sync.test.ts > rsync → handles deletes
 ```
 
+Use `--failed-only` when the totals are noise and you only need the failing
+case list. With `--json`, `--failed-only` returns the stored failed-case array.
+
 `--json` returns the stored structured summary:
 
 ```json
@@ -77,6 +81,7 @@ the run detail page to render without paging through gigabytes of XML.
 
 ```text
 --id <run-id>     run id (also accepted as a positional argument)
+--failed-only     print only failed test cases
 --json            print JSON
 ```
 

@@ -5,7 +5,10 @@
 ### Added
 
 - Added default artifact manifests for `crabbox artifacts publish`, plus `crabbox artifacts list` and `crabbox artifacts pull` for URL-backed proof handoff with size and SHA256 verification.
-
+- Added `crabbox providers` to print the registered provider capability matrix, including targets, backend kind, coordinator mode, aliases, and feature flags.
+- Added failed-run follow-through output with a compact digest that shows the failed phase, likely area, retryability, next commands, and a short redacted tail.
+- Added `crabbox doctor --from-run <run-id>` to load provider, target, class, type, lease, and phase context from recorded run history before diagnostics.
+- Added `crabbox logs --tail`, `crabbox events --type`, `crabbox events --phase`, and `crabbox results --failed-only` for faster recorded-run triage.
 ### Fixed
 
 - Fixed AWS Linux desktop bootstrap so generated theme helpers include the latest WebVNC desktop styling on fresh leases.

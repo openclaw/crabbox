@@ -113,6 +113,54 @@ func TestDoctorRunsDirectProviderCheckForCoordinatorNeverProvider(t *testing.T) 
 	}
 }
 
+func TestDoctorFromRunAppliesRecordedContext(t *testing.T) {
+	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("missing local doctor tool %s: %v", tool, err)
+		}
+	}
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/runs/run_123" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
+			ID:         "run_123",
+			Provider:   "proxmox",
+			TargetOS:   targetLinux,
+			Class:      "standard",
+			ServerType: "vm-large",
+			Command:    []string{"go", "test", "./..."},
+			State:      "failed",
+			Phase:      "test",
+			StartedAt:  "2026-05-01T00:00:00Z",
+		}})
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--from-run", "run_123"})
+	if err != nil {
+		t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	text := stdout.String()
+	for _, want := range []string{
+		"warning run      run=run_123 provider=proxmox target=linux class=standard type=vm-large lease=- phase=test missing=leaseID",
+		"skip    remote   from_run=run_123 lease=missing remote_checks=skipped",
+		"skip    provider provider=proxmox direct_doctor=unsupported",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("doctor --from-run output missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestDoctorDirectProviderCheckIncludesTimeoutWhenMessageHasProvider(t *testing.T) {
 	for _, tool := range doctorLocalTools(testCloudflareProvider{}.Spec()) {
 		if _, err := exec.LookPath(tool); err != nil {

@@ -78,6 +78,15 @@ Missing tools fail before source sync with guidance to hydrate first, include
 runtime setup in the command, or choose a provider/image with the JavaScript
 toolchain.
 
+When a remote command exits nonzero, `run` prints a compact failure digest after
+the normal timing summary. The digest includes the failed phase when phase
+markers are known, a likely area such as provider auth, SSH/connectivity, sync,
+install/setup, user command, or model/tool/provider limit, retryability when the
+classifier can infer it, next commands for `logs`, `events`, `doctor --from-run`,
+`ssh`, retrying an existing lease with `--fresh-sync`, and `stop`, plus a short
+redacted stdout/stderr tail. It does not reconstruct secrets or hidden local
+shell state.
+
 `--browser` provisions or requires a known browser binary and injects
 `CRABBOX_BROWSER=1`, `BROWSER`, and `CHROME_BIN` into the remote command. It
 does not imply `--desktop`; use it alone for headless browser automation.

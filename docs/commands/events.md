@@ -5,6 +5,8 @@
 ```sh
 crabbox events run_abcdef123456
 crabbox events --id run_abcdef123456 --after 42 --limit 100
+crabbox events run_abcdef123456 --type stderr
+crabbox events run_abcdef123456 --phase command
 crabbox events run_abcdef123456 --json
 ```
 
@@ -58,6 +60,8 @@ retained command output, use [logs](logs.md).
 --id <run-id>     run id (also accepted as a positional argument)
 --after <seq>     only show events after this sequence number
 --limit <n>       maximum number of events, default 500, maximum 500
+--type <kind>     only show events with this exact type
+--phase <name>    only show events with this exact phase
 --json            print JSON
 ```
 

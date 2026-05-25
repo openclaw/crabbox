@@ -45,7 +45,9 @@ func (a App) history(ctx context.Context, args []string) error {
 func (a App) logs(ctx context.Context, args []string) error {
 	args, jsonAnywhere := extractBoolFlag(args, "json")
 	fs := newFlagSet("logs", a.Stderr)
-	runID := fs.String("id", "", "run id")
+	runIDValue, args := popLeadingRunID(args)
+	runID := fs.String("id", runIDValue, "run id")
+	tail := fs.Int("tail", 0, "print only the last N log lines")
 	jsonOut := fs.Bool("json", false, "print JSON metadata and log")
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -59,6 +61,9 @@ func (a App) logs(ctx context.Context, args []string) error {
 	if jsonAnywhere {
 		*jsonOut = true
 	}
+	if *tail < 0 {
+		return exit(2, "tail must be >= 0")
+	}
 	coord, err := configuredCoordinator()
 	if err != nil {
 		return err
@@ -66,6 +71,9 @@ func (a App) logs(ctx context.Context, args []string) error {
 	logText, err := coord.RunLogs(ctx, *runID)
 	if err != nil {
 		return err
+	}
+	if *tail > 0 {
+		logText = tailLogLines(logText, *tail)
 	}
 	if *jsonOut {
 		run, err := coord.Run(ctx, *runID)
@@ -85,6 +93,8 @@ func (a App) events(ctx context.Context, args []string) error {
 	runID := fs.String("id", runIDValue, "run id")
 	after := fs.Int("after", 0, "only show events after this sequence")
 	limit := fs.Int("limit", 500, "maximum events")
+	eventType := fs.String("type", "", "only show events with this type")
+	phase := fs.String("phase", "", "only show events with this phase")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -108,7 +118,9 @@ func (a App) events(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	events, err := coord.RunEvents(ctx, *runID, *after, *limit)
+	eventTypeFilter := strings.TrimSpace(*eventType)
+	phaseFilter := strings.TrimSpace(*phase)
+	events, err := fetchFilteredRunEvents(ctx, coord, *runID, *after, *limit, eventTypeFilter, phaseFilter)
 	if err != nil {
 		return err
 	}
@@ -233,4 +245,75 @@ func formatMs(ms int64) string {
 		return "-"
 	}
 	return (time.Duration(ms) * time.Millisecond).Round(time.Millisecond).String()
+}
+
+func tailLogLines(text string, n int) string {
+	if n <= 0 || text == "" {
+		return text
+	}
+	lines := strings.SplitAfter(text, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) <= n {
+		return text
+	}
+	return strings.Join(lines[len(lines)-n:], "")
+}
+
+func filterRunEvents(events []CoordinatorRunEvent, eventType, phase string) []CoordinatorRunEvent {
+	if eventType == "" && phase == "" {
+		return events
+	}
+	filtered := events[:0]
+	for _, event := range events {
+		if eventType != "" && event.Type != eventType {
+			continue
+		}
+		if phase != "" && event.Phase != phase {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	return filtered
+}
+
+func fetchFilteredRunEvents(ctx context.Context, coord *CoordinatorClient, runID string, after, limit int, eventType, phase string) ([]CoordinatorRunEvent, error) {
+	if eventType == "" && phase == "" {
+		return coord.RunEvents(ctx, runID, after, limit)
+	}
+	const pageSize = 500
+	var filtered []CoordinatorRunEvent
+	nextAfter := after
+	for len(filtered) < limit {
+		page, err := coord.RunEvents(ctx, runID, nextAfter, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, event := range page {
+			if event.Seq > nextAfter {
+				nextAfter = event.Seq
+			}
+			if eventType != "" && event.Type != eventType {
+				continue
+			}
+			if phase != "" && event.Phase != phase {
+				continue
+			}
+			filtered = append(filtered, event)
+			if len(filtered) >= limit {
+				break
+			}
+		}
+		if len(page) < pageSize {
+			break
+		}
+	}
+	if filtered == nil {
+		return []CoordinatorRunEvent{}, nil
+	}
+	return filtered, nil
 }

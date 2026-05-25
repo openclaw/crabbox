@@ -5,6 +5,7 @@
 ```sh
 crabbox logs run_abcdef123456
 crabbox logs --id run_abcdef123456
+crabbox logs run_abcdef123456 --tail 80
 crabbox logs run_abcdef123456 --json
 ```
 
@@ -27,8 +28,12 @@ remote=local` are local artifacts and are not stored in coordinator logs.
 
 ## Output
 
-The plain form writes the log text to stdout. `--json` returns run metadata
-plus the log:
+The plain form writes the log text to stdout. Add `--tail N` to print only the
+last N retained log lines. Logs are stored as combined command output; stdout
+and stderr are not separately indexed in the retained log, so stream filtering
+belongs on `events`.
+
+`--json` returns run metadata plus the log:
 
 ```json
 {
@@ -47,6 +52,7 @@ log text in one payload.
 
 ```text
 --id <run-id>       run id (also accepted as a positional argument)
+--tail <n>          print only the last N log lines
 --json              print JSON with metadata and log text
 ```
 

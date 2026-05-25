@@ -16,6 +16,7 @@ Command docs live here, one file per top-level command. Keep `docs/cli.md` as th
 - [media](media.md)
 - [artifacts](artifacts.md)
 - [sync-plan](sync-plan.md)
+- [providers](providers.md)
 - [history](history.md)
 - [logs](logs.md)
 - [events](events.md)

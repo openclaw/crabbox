@@ -8,6 +8,7 @@ or mutate provider resources.
 crabbox doctor
 crabbox doctor --provider aws
 crabbox doctor --profile live-qa --id blue-lobster
+crabbox doctor --from-run run_abcdef123456
 crabbox doctor --provider hetzner --target linux
 crabbox doctor --provider ssh --target windows --windows-mode normal --static-host win-dev.local
 crabbox doctor --json
@@ -62,6 +63,13 @@ version, Docker daemon usability, Docker Compose v2, and minimum free disk. A
 failing profile doctor reports `failed` lines for missing prerequisites and
 exits nonzero without installing or changing anything.
 
+Use `--from-run <run-id>` when triaging a recorded failure. Doctor fetches the
+run record and applies the recorded provider, target, class, server type, lease,
+and phase before running diagnostics. Older run records may not contain every
+field; doctor prints a `warning run` line with `missing=...` and skips checks
+that cannot be tied to the old run, such as remote lease probes when no lease
+ID was recorded.
+
 For the full list of checks, including how each one decides between
 `fail`, `skip`, and `ok`, see
 [Doctor checks](../features/doctor.md).
@@ -113,6 +121,7 @@ warnings never change the exit code.
 ```text
 --provider hetzner|aws|azure|gcp|proxmox|ssh   provider to validate
 --profile <name>             configured profile for remote prereq checks
+--from-run <run-id>          load diagnostic context from recorded run history
 --json                       print JSON
 --doctor-probe-ssh           probe static SSH reachability
 --target linux|macos|windows target OS for ssh provider checks

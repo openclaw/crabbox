@@ -68,6 +68,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return nil, false
 	case "sync-plan":
 		return a.syncPlan(ctx, helpArgs), true
+	case "providers":
+		return a.providers(ctx, helpArgs), true
 	case "history":
 		return a.history(ctx, helpArgs), true
 	case "logs":
@@ -151,6 +153,7 @@ Commands:
   media       Create preview artifacts from recorded desktop videos
   artifacts   Collect, transform, and publish QA artifacts
   sync-plan   Show local sync manifest size hotspots
+  providers   Show provider capabilities
   history     List recorded remote runs
   logs        Print recorded run logs
   events      Print recorded run events
@@ -194,6 +197,8 @@ Common Flows:
   crabbox artifacts publish --pr 123 --dir artifacts/blue-lobster --storage s3 --bucket qa-artifacts
   crabbox artifacts list artifacts/blue-lobster
   crabbox artifacts pull artifacts/blue-lobster --output /tmp/blue-lobster-proof
+  crabbox providers
+  crabbox providers --json
   crabbox webvnc --id blue-lobster --open
   crabbox code --id blue-lobster --open
   crabbox egress start --id blue-lobster --profile discord --daemon

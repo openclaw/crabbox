@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -128,4 +129,186 @@ func finalTimingPhaseName(phases []TimingPhase) string {
 		}
 	}
 	return ""
+}
+
+type runFailureDigestInput struct {
+	Provider       string
+	TargetOS       string
+	WindowsMode    string
+	LeaseID        string
+	Slug           string
+	RunID          string
+	CommandDisplay string
+	ShellMode      bool
+	RoutingArgs    []string
+	StopCommand    string
+	Classification FailureClassification
+	Phases         []TimingPhase
+}
+
+func printRunFailureDigest(w io.Writer, input runFailureDigestInput, stdoutTail, stderrTail *streamTailBuffer, stdoutCapture, stderrCapture string) {
+	if w == nil {
+		return
+	}
+	phase := failureDigestPhase(input.Classification, input.Phases)
+	area := failureDigestArea(input.Classification, phase)
+	retry := input.Classification.RetryLikely
+	if retry == "" {
+		retry = "unknown"
+	}
+	fmt.Fprintln(w, "failure digest")
+	fmt.Fprintf(w, "  phase: %s\n", blank(phase, "unknown"))
+	fmt.Fprintf(w, "  area: %s\n", area)
+	fmt.Fprintf(w, "  retryable: %s\n", retry)
+	for _, command := range failureDigestNextCommands(input, retry) {
+		fmt.Fprintf(w, "  next: %s\n", command)
+	}
+	printFailureDigestTail(w, "stderr", stderrTail, stderrCapture)
+	if stderrCapture != "" || tailLineCount(stderrTail) == 0 {
+		printFailureDigestTail(w, "stdout", stdoutTail, stdoutCapture)
+	}
+}
+
+func failureDigestPhase(classification FailureClassification, phases []TimingPhase) string {
+	if phase := finalTimingPhaseName(phases); phase != "" {
+		return phase
+	}
+	if classification.BlockedStage != "" && classification.BlockedStage != "unknown" {
+		return classification.BlockedStage
+	}
+	return "command"
+}
+
+func failureDigestArea(classification FailureClassification, phase string) string {
+	switch classification.BlockedStage {
+	case "provider_auth":
+		return "provider_auth"
+	case "ssh":
+		return "ssh_connectivity"
+	case "install":
+		return "install_setup"
+	case "model_call":
+		return "model_tool_provider_limit"
+	}
+	switch {
+	case strings.Contains(phase, "sync"):
+		return "sync"
+	case strings.Contains(phase, "install") || strings.Contains(phase, "setup") || strings.Contains(phase, "hydrate"):
+		return "install_setup"
+	case strings.Contains(phase, "ssh"):
+		return "ssh_connectivity"
+	default:
+		return "user_command"
+	}
+}
+
+func failureDigestNextCommands(input runFailureDigestInput, retry string) []string {
+	var commands []string
+	if input.RunID != "" {
+		commands = append(commands,
+			"crabbox logs "+input.RunID+" --tail 80",
+			"crabbox events "+input.RunID+" --type stderr",
+			"crabbox doctor --from-run "+input.RunID,
+		)
+	}
+	leaseRef := firstNonBlank(input.Slug, input.LeaseID)
+	if leaseRef != "" {
+		routing := append([]string(nil), input.RoutingArgs...)
+		if len(routing) == 0 {
+			routing = fallbackFailureDigestRoutingArgs(input)
+		}
+		commands = append(commands, crabboxCommandString(append(append([]string{"ssh"}, routing...), "--id", leaseRef)))
+		if retry != "false" && canSuggestRunRetry(input.CommandDisplay) {
+			runArgs := append(append([]string{"run"}, routing...), "--id", leaseRef, "--fresh-sync")
+			if input.ShellMode {
+				runArgs = append(runArgs, "--shell")
+			}
+			runCommand := crabboxCommandString(runArgs) + " -- " + input.CommandDisplay
+			commands = append(commands, runCommand)
+		}
+		commands = append(commands, firstNonBlank(input.StopCommand, crabboxCommandString(append(append([]string{"stop"}, routing...), leaseRef))))
+	}
+	return commands
+}
+
+func runFailureDigestRoutingArgs(cfg Config) []string {
+	args := []string{}
+	if strings.TrimSpace(cfg.Provider) != "" {
+		args = append(args, "--provider", cfg.Provider)
+	}
+	if strings.TrimSpace(cfg.TargetOS) != "" {
+		args = append(args, "--target", cfg.TargetOS)
+	}
+	if cfg.TargetOS == targetWindows && strings.TrimSpace(cfg.WindowsMode) != "" {
+		args = append(args, "--windows-mode", cfg.WindowsMode)
+	}
+	if strings.TrimSpace(cfg.Static.Host) != "" {
+		args = append(args, "--static-host", cfg.Static.Host)
+	}
+	if strings.TrimSpace(cfg.Static.User) != "" {
+		args = append(args, "--static-user", cfg.Static.User)
+	}
+	if strings.TrimSpace(cfg.Static.Port) != "" {
+		args = append(args, "--static-port", cfg.Static.Port)
+	}
+	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
+		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
+	}
+	return appendProviderStopRoutingArgs(args, cfg)
+}
+
+func fallbackFailureDigestRoutingArgs(input runFailureDigestInput) []string {
+	args := []string{}
+	if strings.TrimSpace(input.Provider) != "" {
+		args = append(args, "--provider", input.Provider)
+	}
+	if strings.TrimSpace(input.TargetOS) != "" {
+		args = append(args, "--target", input.TargetOS)
+	}
+	if input.TargetOS == targetWindows && strings.TrimSpace(input.WindowsMode) != "" {
+		args = append(args, "--windows-mode", input.WindowsMode)
+	}
+	return args
+}
+
+func crabboxCommandString(args []string) string {
+	return "crabbox " + strings.Join(readableShellWords(args), " ")
+}
+
+func canSuggestRunRetry(commandDisplay string) bool {
+	commandDisplay = strings.TrimSpace(commandDisplay)
+	return commandDisplay != "" && !strings.HasPrefix(commandDisplay, "--script")
+}
+
+func printFailureDigestTail(w io.Writer, label string, tail *streamTailBuffer, capturedPath string) {
+	if capturedPath != "" {
+		fmt.Fprintf(w, "  tail %s: captured at %s\n", label, capturedPath)
+		return
+	}
+	if tail == nil {
+		return
+	}
+	lines := tail.Lines()
+	if len(lines) == 0 {
+		return
+	}
+	if len(lines) > 8 {
+		lines = lines[len(lines)-8:]
+	}
+	text := strings.Join(lines, "\n")
+	if redacted, ok := RedactKnownFailureBody(text); ok {
+		fmt.Fprintf(w, "  tail %s: %s\n", label, redacted)
+		return
+	}
+	fmt.Fprintf(w, "  tail %s:\n", label)
+	for _, line := range lines {
+		fmt.Fprintf(w, "    %s\n", line)
+	}
+}
+
+func tailLineCount(tail *streamTailBuffer) int {
+	if tail == nil {
+		return 0
+	}
+	return len(tail.Lines())
 }

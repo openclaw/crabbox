@@ -24,6 +24,7 @@ type crabboxKongCLI struct {
 	Media      mediaKongCmd      `cmd:"" help:"Create preview artifacts from recorded desktop videos."`
 	Artifacts  artifactsKongCmd  `cmd:"" help:"Collect, transform, and publish QA artifacts."`
 	SyncPlan   syncPlanKongCmd   `cmd:"" name:"sync-plan" passthrough:"" help:"Show local sync manifest size hotspots."`
+	Providers  providersKongCmd  `cmd:"" passthrough:"" help:"Show provider capabilities."`
 	History    historyKongCmd    `cmd:"" passthrough:"" help:"List recorded remote runs."`
 	Logs       logsKongCmd       `cmd:"" passthrough:"" help:"Print recorded run logs."`
 	Events     eventsKongCmd     `cmd:"" passthrough:"" help:"Print recorded run events."`
@@ -155,6 +156,9 @@ type jobRunKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type syncPlanKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type providersKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type historyKongCmd struct {
@@ -473,31 +477,32 @@ type machineCleanupKongCmd struct {
 
 type versionKongCmd struct{}
 
-func (c *initKongCmd) Run(ctx context.Context, app App) error     { return app.initProject(ctx, c.Args) }
-func (c *loginKongCmd) Run(ctx context.Context, app App) error    { return app.login(ctx, c.Args) }
-func (c *logoutKongCmd) Run(ctx context.Context, app App) error   { return app.logout(ctx, c.Args) }
-func (c *whoamiKongCmd) Run(ctx context.Context, app App) error   { return app.whoami(ctx, c.Args) }
-func (c *doctorKongCmd) Run(ctx context.Context, app App) error   { return app.doctor(ctx, c.Args) }
-func (c *warmupKongCmd) Run(ctx context.Context, app App) error   { return app.warmup(ctx, c.Args) }
-func (c *runKongCmd) Run(ctx context.Context, app App) error      { return app.runCommand(ctx, c.Args) }
-func (c *jobListKongCmd) Run(ctx context.Context, app App) error  { return app.jobList(ctx, c.Args) }
-func (c *jobRunKongCmd) Run(ctx context.Context, app App) error   { return app.jobRun(ctx, c.Args) }
-func (c *syncPlanKongCmd) Run(ctx context.Context, app App) error { return app.syncPlan(ctx, c.Args) }
-func (c *historyKongCmd) Run(ctx context.Context, app App) error  { return app.history(ctx, c.Args) }
-func (c *logsKongCmd) Run(ctx context.Context, app App) error     { return app.logs(ctx, c.Args) }
-func (c *eventsKongCmd) Run(ctx context.Context, app App) error   { return app.events(ctx, c.Args) }
-func (c *attachKongCmd) Run(ctx context.Context, app App) error   { return app.attach(ctx, c.Args) }
-func (c *resultsKongCmd) Run(ctx context.Context, app App) error  { return app.results(ctx, c.Args) }
-func (c *statusKongCmd) Run(ctx context.Context, app App) error   { return app.status(ctx, c.Args) }
-func (c *listKongCmd) Run(ctx context.Context, app App) error     { return app.list(ctx, c.Args) }
-func (c *shareKongCmd) Run(ctx context.Context, app App) error    { return app.share(ctx, c.Args) }
-func (c *unshareKongCmd) Run(ctx context.Context, app App) error  { return app.unshare(ctx, c.Args) }
-func (c *usageKongCmd) Run(ctx context.Context, app App) error    { return app.usage(ctx, c.Args) }
-func (c *sshKongCmd) Run(ctx context.Context, app App) error      { return app.ssh(ctx, c.Args) }
-func (c *vncKongCmd) Run(ctx context.Context, app App) error      { return app.vnc(ctx, c.Args) }
-func (c *webvncKongCmd) Run(ctx context.Context, app App) error   { return app.webvnc(ctx, c.Args) }
-func (c *codeKongCmd) Run(ctx context.Context, app App) error     { return app.webCode(ctx, c.Args) }
-func (c *egressKongCmd) Run(ctx context.Context, app App) error   { return app.egress(ctx, c.Args) }
+func (c *initKongCmd) Run(ctx context.Context, app App) error      { return app.initProject(ctx, c.Args) }
+func (c *loginKongCmd) Run(ctx context.Context, app App) error     { return app.login(ctx, c.Args) }
+func (c *logoutKongCmd) Run(ctx context.Context, app App) error    { return app.logout(ctx, c.Args) }
+func (c *whoamiKongCmd) Run(ctx context.Context, app App) error    { return app.whoami(ctx, c.Args) }
+func (c *doctorKongCmd) Run(ctx context.Context, app App) error    { return app.doctor(ctx, c.Args) }
+func (c *warmupKongCmd) Run(ctx context.Context, app App) error    { return app.warmup(ctx, c.Args) }
+func (c *runKongCmd) Run(ctx context.Context, app App) error       { return app.runCommand(ctx, c.Args) }
+func (c *jobListKongCmd) Run(ctx context.Context, app App) error   { return app.jobList(ctx, c.Args) }
+func (c *jobRunKongCmd) Run(ctx context.Context, app App) error    { return app.jobRun(ctx, c.Args) }
+func (c *syncPlanKongCmd) Run(ctx context.Context, app App) error  { return app.syncPlan(ctx, c.Args) }
+func (c *providersKongCmd) Run(ctx context.Context, app App) error { return app.providers(ctx, c.Args) }
+func (c *historyKongCmd) Run(ctx context.Context, app App) error   { return app.history(ctx, c.Args) }
+func (c *logsKongCmd) Run(ctx context.Context, app App) error      { return app.logs(ctx, c.Args) }
+func (c *eventsKongCmd) Run(ctx context.Context, app App) error    { return app.events(ctx, c.Args) }
+func (c *attachKongCmd) Run(ctx context.Context, app App) error    { return app.attach(ctx, c.Args) }
+func (c *resultsKongCmd) Run(ctx context.Context, app App) error   { return app.results(ctx, c.Args) }
+func (c *statusKongCmd) Run(ctx context.Context, app App) error    { return app.status(ctx, c.Args) }
+func (c *listKongCmd) Run(ctx context.Context, app App) error      { return app.list(ctx, c.Args) }
+func (c *shareKongCmd) Run(ctx context.Context, app App) error     { return app.share(ctx, c.Args) }
+func (c *unshareKongCmd) Run(ctx context.Context, app App) error   { return app.unshare(ctx, c.Args) }
+func (c *usageKongCmd) Run(ctx context.Context, app App) error     { return app.usage(ctx, c.Args) }
+func (c *sshKongCmd) Run(ctx context.Context, app App) error       { return app.ssh(ctx, c.Args) }
+func (c *vncKongCmd) Run(ctx context.Context, app App) error       { return app.vnc(ctx, c.Args) }
+func (c *webvncKongCmd) Run(ctx context.Context, app App) error    { return app.webvnc(ctx, c.Args) }
+func (c *codeKongCmd) Run(ctx context.Context, app App) error      { return app.webCode(ctx, c.Args) }
+func (c *egressKongCmd) Run(ctx context.Context, app App) error    { return app.egress(ctx, c.Args) }
 func (c *screenshotKongCmd) Run(ctx context.Context, app App) error {
 	return app.screenshot(ctx, c.Args)
 }
