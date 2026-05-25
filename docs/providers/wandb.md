@@ -146,7 +146,7 @@ Provider flags:
 Endpoint override (matches the upstream cwsandbox SDK behaviour):
 
 ```text
-CWSANDBOX_BASE_URL    # default: api.cwsandbox.com:443
+CWSANDBOX_BASE_URL    # default: atc.cw-sandbox.com:443
 ```
 
 ## Capabilities

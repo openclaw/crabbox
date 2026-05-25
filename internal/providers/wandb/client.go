@@ -20,10 +20,10 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// defaultEndpoint is the CoreWeave Sandboxes gateway data plane that the
-// upstream cwsandbox SDK targets. Overridable via CWSANDBOX_BASE_URL so the
-// devops team can coordinate region or staging cutovers without a code change.
-const defaultEndpoint = "api.cwsandbox.com:443"
+// defaultEndpoint is the current CoreWeave Sandboxes data plane. Overridable
+// via CWSANDBOX_BASE_URL so the devops team can coordinate region or staging
+// cutovers without a code change.
+const defaultEndpoint = "atc.cw-sandbox.com:443"
 
 // idleCommand keeps the sandbox container alive after Start so callers can
 // invoke Exec into it on demand. Mirrors what cwsandbox.Sandbox.run() does
