@@ -80,6 +80,31 @@ type NativeCheckpointProvider interface {
 	NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool)
 }
 
+type NativeCheckpointForkRecord struct {
+	Kind        string
+	ImageID     string
+	Resource    string
+	Region      string
+	Project     string
+	Direct      bool
+	HostID      string
+	TargetOS    string
+	WindowsMode string
+	ServerType  string
+}
+
+type NativeCheckpointForkRequest struct {
+	Config              *Config
+	Record              NativeCheckpointForkRecord
+	MarketExplicit      bool
+	AzureOSDisk         string
+	AzureOSDiskExplicit bool
+}
+
+type NativeCheckpointForkProvider interface {
+	ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error
+}
+
 type JSONListBackend interface {
 	Backend
 	ListJSON(ctx context.Context, req ListRequest) (any, error)

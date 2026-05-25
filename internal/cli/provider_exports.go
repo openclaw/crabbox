@@ -11,6 +11,10 @@ func BaseConfig() Config {
 	return baseConfig()
 }
 
+func NormalizeTargetConfig(cfg *Config) {
+	normalizeTargetConfig(cfg)
+}
+
 func ExpandUserPath(path string) string {
 	return expandUserPath(path)
 }
@@ -113,6 +117,15 @@ func ServerSlug(server Server) string {
 
 func ServerProviderKey(server Server) string {
 	return serverProviderKey(server)
+}
+
+func SetGCPProjectExplicit(cfg *Config, project string) {
+	cfg.GCPProject = project
+	cfg.gcpProjectExplicit = true
+}
+
+func ApplyParallelsHostRefConfig(cfg *Config, hostRef string) {
+	applyParallelsHostRefConfig(cfg, hostRef)
 }
 
 func IsCanonicalLeaseID(value string) bool {

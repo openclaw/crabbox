@@ -1477,6 +1477,31 @@ func TestApplyNativeCheckpointForkConfigHonorsAzureOSDiskFlagAfterProviderRewrit
 	}
 }
 
+func TestApplyNativeCheckpointForkConfigHonorsEmptyAzureOSDiskFlag(t *testing.T) {
+	fs := newFlagSet("checkpoint fork", io.Discard)
+	_ = fs.String("type", "", "provider type")
+	_ = fs.String("azure-os-disk", AzureOSDiskManaged, "Azure OS disk mode")
+	if err := parseFlags(fs, []string{"--azure-os-disk="}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	cfg.Provider = "hetzner"
+	cfg.AzureOSDisk = AzureOSDiskEphemeral
+	cfg.AzureOSDiskExplicit = true
+	record := checkpointRecord{Kind: checkpointKindAzureOS, TargetOS: targetLinux}
+	record.Native.ImageID = "checkpoint-azure"
+
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "azure" {
+		t.Fatalf("Provider=%q", cfg.Provider)
+	}
+	if cfg.AzureOSDisk != AzureOSDiskManaged || !cfg.AzureOSDiskExplicit {
+		t.Fatalf("AzureOSDisk=%q explicit=%t", cfg.AzureOSDisk, cfg.AzureOSDiskExplicit)
+	}
+}
+
 func TestParseInterspersedFlagsAllowsCheckpointBeforeFlags(t *testing.T) {
 	fs := newFlagSet("checkpoint restore", io.Discard)
 	id := fs.String("id", "", "lease id")
