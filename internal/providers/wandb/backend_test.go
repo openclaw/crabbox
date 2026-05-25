@@ -283,7 +283,12 @@ func TestWandbRunWithExistingIDSkipsAcquireAndStop(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
 	api := &fakeWandbAPI{execCode: 0}
 	backend := newWandbBackendForTest(api)
-	if _, err := backend.Run(context.Background(), RunRequest{ID: "sb-supplied", NoSync: true, Command: []string{"echo"}}); err != nil {
+	if _, err := backend.Run(context.Background(), RunRequest{
+		ID:      "sb-supplied",
+		NoSync:  true,
+		Command: []string{"echo"},
+		Env:     map[string]string{"CI": "true"},
+	}); err != nil {
 		t.Fatalf("Run err: %v", err)
 	}
 	if api.acquireReq.Image != "" {
@@ -448,10 +453,11 @@ func TestWandbRunRejectsIDWithEnv(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
 	backend := newWandbBackendForTest(&fakeWandbAPI{})
 	_, err := backend.Run(context.Background(), RunRequest{
-		ID:      "sb-existing",
-		NoSync:  true,
-		Command: []string{"echo"},
-		Env:     map[string]string{"FOO": "bar"},
+		ID:         "sb-existing",
+		NoSync:     true,
+		Command:    []string{"echo"},
+		Env:        map[string]string{"FOO": "bar"},
+		EnvSummary: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "cannot forward env vars to an existing sandbox") {
 		t.Fatalf("err = %v, want --id + env rejection", err)

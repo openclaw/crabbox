@@ -71,11 +71,11 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 		if req.EnvSummary {
 			printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 		}
-	} else if len(req.Env) > 0 {
+	} else if len(req.Env) > 0 && req.EnvSummary {
 		// CoreWeave Sandboxes apply environment variables at Start time only;
 		// the v1beta2 Exec RPC has no env field, so we can't honour
-		// --allow-env / env profiles on an already-running sandbox. Reject
-		// explicitly rather than silently dropping the user's env selection.
+		// explicit --allow-env / env profiles on an already-running sandbox.
+		// Default allowlisted env is intentionally ignored for --id runs.
 		return RunResult{}, exit(2, "provider=%s cannot forward env vars to an existing sandbox (--id); rerun without --id or omit --allow-env", providerName)
 	}
 
