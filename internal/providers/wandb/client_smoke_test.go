@@ -11,12 +11,16 @@ import (
 )
 
 // TestSmokeVersionAndExec hits the live CoreWeave Sandboxes gateway.
-// Requires CRABBOX_WANDB_API_KEY or WANDB_API_KEY. Sandbox lifetime capped at 60s.
+// Requires WANDB_ENTITY_NAME plus CRABBOX_WANDB_API_KEY or WANDB_API_KEY.
+// Sandbox lifetime capped at 60s.
 //
 //	go test -tags smoke -run TestSmokeVersionAndExec -v ./internal/providers/wandb/
 func TestSmokeVersionAndExec(t *testing.T) {
 	if os.Getenv("CRABBOX_WANDB_API_KEY") == "" && os.Getenv("WANDB_API_KEY") == "" {
 		t.Skip("set CRABBOX_WANDB_API_KEY or WANDB_API_KEY to run smoke")
+	}
+	if os.Getenv("WANDB_ENTITY_NAME") == "" {
+		t.Skip("set WANDB_ENTITY_NAME to run smoke")
 	}
 	if testing.Short() {
 		t.Skip("live sandbox skipped in -short mode")

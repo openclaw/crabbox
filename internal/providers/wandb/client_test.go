@@ -1,6 +1,7 @@
 package wandb
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	sandboxv1 "github.com/openclaw/crabbox/internal/providers/wandb/gen/coreweave/sandbox/v1beta2"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -70,9 +72,10 @@ func TestResolveAuthPrecedence(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CRABBOX_WANDB_API_KEY", "crabbox-key")
 	t.Setenv("WANDB_API_KEY", "wandb-key")
+	t.Setenv("WANDB_ENTITY_NAME", "team")
 
 	auth, err := resolveAuth(Config{Wandb: WandbConfig{APIKey: "cfg-key"}})
-	if err != nil || auth.APIKey != "crabbox-key" {
+	if err != nil || auth.APIKey != "crabbox-key" || auth.Entity != "team" {
 		t.Fatalf("CRABBOX precedence: auth=%#v err=%v", auth, err)
 	}
 
@@ -128,8 +131,47 @@ func TestResolveAuthMissingKey(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CRABBOX_WANDB_API_KEY", "")
 	t.Setenv("WANDB_API_KEY", "")
+	t.Setenv("WANDB_ENTITY_NAME", "team")
 	_, err := resolveAuth(Config{})
 	if err == nil || !strings.Contains(err.Error(), "W&B API key") {
 		t.Fatalf("err = %v, want missing-key error", err)
+	}
+}
+
+func TestResolveAuthRequiresEntity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRABBOX_WANDB_API_KEY", "crabbox-key")
+	t.Setenv("WANDB_ENTITY_NAME", "")
+	_, err := resolveAuth(Config{})
+	if err == nil || !strings.Contains(err.Error(), "WANDB_ENTITY_NAME") {
+		t.Fatalf("err = %v, want missing entity error", err)
+	}
+}
+
+type stopGatewayClient struct {
+	sandboxv1.GatewayServiceClient
+	resp *sandboxv1.StopSandboxResponse
+	err  error
+}
+
+func (f stopGatewayClient) Stop(context.Context, *sandboxv1.StopSandboxRequest, ...grpc.CallOption) (*sandboxv1.StopSandboxResponse, error) {
+	return f.resp, f.err
+}
+
+func TestWandbStopChecksResponseSuccess(t *testing.T) {
+	client := &wandbClient{gw: stopGatewayClient{resp: &sandboxv1.StopSandboxResponse{
+		Success:      false,
+		ErrorMessage: "quota cleanup blocked",
+	}}}
+	err := client.Stop(context.Background(), "sb-123", 10, false)
+	if err == nil || !strings.Contains(err.Error(), "quota cleanup blocked") {
+		t.Fatalf("err = %v, want stop failure", err)
+	}
+}
+
+func TestWandbStopAllowsSuccessfulResponse(t *testing.T) {
+	client := &wandbClient{gw: stopGatewayClient{resp: &sandboxv1.StopSandboxResponse{Success: true}}}
+	if err := client.Stop(context.Background(), "sb-123", 10, false); err != nil {
+		t.Fatalf("Stop err: %v", err)
 	}
 }

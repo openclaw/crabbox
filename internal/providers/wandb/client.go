@@ -98,8 +98,9 @@ func (e *wandbAPIError) As(target any) bool {
 }
 
 // Auth carries the gRPC metadata headers that CoreWeave Sandboxes accepts.
-// The W&B API key (x-wandb-api-key) is the seamless onramp for users who
-// already ran `wandb login` — no new account, no new credential.
+// The W&B API key (x-wandb-api-key) plus entity (x-entity-id) is the seamless
+// onramp for users who already ran `wandb login` — no new account, no new
+// credential.
 type Auth struct {
 	APIKey  string
 	Entity  string
@@ -155,7 +156,8 @@ func newWandbClient(cfg Config, _ Runtime) (wandbAPI, error) {
 //  3. WANDB_API_KEY           — canonical env var
 //  4. ~/.netrc                — what `wandb login` writes (machine api.wandb.ai)
 //
-// WANDB_ENTITY_NAME / WANDB_PROJECT are picked up if set (optional scoping).
+// WANDB_ENTITY_NAME is required for W&B-authenticated sandboxes; WANDB_PROJECT
+// is optional.
 func resolveAuth(cfg Config) (Auth, error) {
 	key := strings.TrimSpace(os.Getenv("CRABBOX_WANDB_API_KEY"))
 	if key == "" {
@@ -170,9 +172,13 @@ func resolveAuth(cfg Config) (Auth, error) {
 	if key == "" {
 		return Auth{}, exit(2, "provider=%s requires a W&B API key (run `wandb login`, set CRABBOX_WANDB_API_KEY, or add `wandb.apiKey` to your crabbox config)", providerName)
 	}
+	entity := strings.TrimSpace(os.Getenv("WANDB_ENTITY_NAME"))
+	if entity == "" {
+		return Auth{}, exit(2, "provider=%s requires WANDB_ENTITY_NAME when using W&B credentials", providerName)
+	}
 	return Auth{
 		APIKey:  key,
-		Entity:  strings.TrimSpace(os.Getenv("WANDB_ENTITY_NAME")),
+		Entity:  entity,
 		Project: strings.TrimSpace(os.Getenv("WANDB_PROJECT")),
 	}, nil
 }
@@ -341,7 +347,7 @@ func (c *wandbClient) Stop(ctx context.Context, id string, gracefulSeconds int, 
 	if id == "" {
 		return fmt.Errorf("wandb stop: sandbox id is required")
 	}
-	_, err := c.gw.Stop(ctx, &sandboxv1.StopSandboxRequest{
+	resp, err := c.gw.Stop(ctx, &sandboxv1.StopSandboxRequest{
 		SandboxId:               id,
 		GracefulShutdownSeconds: int32(gracefulSeconds),
 	})
@@ -350,6 +356,16 @@ func (c *wandbClient) Stop(ctx context.Context, id string, gracefulSeconds int, 
 			return nil
 		}
 		return mapRPCError(err, "Stop")
+	}
+	if resp == nil {
+		return fmt.Errorf("wandb stop %s: empty response", id)
+	}
+	if !resp.GetSuccess() {
+		msg := strings.TrimSpace(resp.GetErrorMessage())
+		if msg == "" {
+			msg = "stop failed"
+		}
+		return fmt.Errorf("wandb stop %s: %s", id, msg)
 	}
 	return nil
 }

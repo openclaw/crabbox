@@ -64,7 +64,8 @@ requires `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`, and
 `CRABBOX_DAYTONA_SNAPSHOT`, `DAYTONA_SNAPSHOT`, or `daytona.snapshot`.
 Namespace needs the authenticated `devbox` CLI on `PATH`. Sprites needs the
 authenticated `sprite` CLI on `PATH` plus a Sprites token in the environment.
-W&B smoke requires `CRABBOX_WANDB_API_KEY` or `WANDB_API_KEY` (from `wandb login`).
+W&B smoke requires `WANDB_ENTITY_NAME` plus `CRABBOX_WANDB_API_KEY` or
+`WANDB_API_KEY` (from `wandb login`).
 Use `scripts/wandb-smoke.sh` for a coordinator-free wandb-only gate.
 
 For direct-provider smoke, disable the coordinator with a scratch config and run the same commands manually:

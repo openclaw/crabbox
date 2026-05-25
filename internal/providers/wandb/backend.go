@@ -36,8 +36,9 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 		return RunResult{}, exit(2, "missing command")
 	}
 	// Credential resolution lives in the client (CRABBOX_WANDB_API_KEY →
-	// cfg.Wandb.APIKey → WANDB_API_KEY). The old direct WANDB_API_KEY check
-	// here ignored the documented CRABBOX_WANDB_API_KEY override.
+	// cfg.Wandb.APIKey → WANDB_API_KEY plus required WANDB_ENTITY_NAME). The
+	// old direct WANDB_API_KEY check here ignored the documented
+	// CRABBOX_WANDB_API_KEY override.
 	client, err := b.api()
 	if err != nil {
 		return RunResult{}, err

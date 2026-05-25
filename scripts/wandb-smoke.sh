@@ -15,6 +15,11 @@ if [[ -z "${CRABBOX_WANDB_API_KEY:-${WANDB_API_KEY:-}}" ]]; then
   exit 2
 fi
 
+if [[ -z "${WANDB_ENTITY_NAME:-}" ]]; then
+  echo "wandb smoke requires WANDB_ENTITY_NAME" >&2
+  exit 2
+fi
+
 if ! command -v jq >/dev/null 2>&1; then
   echo "wandb smoke requires jq on PATH" >&2
   exit 2

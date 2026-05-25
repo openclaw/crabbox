@@ -29,17 +29,19 @@ the protos are published at [buf.build/coreweave/sandbox](https://buf.build/core
 
 ## Why this provider exists
 
-Every other crabbox provider asks the user for a new credential. **This one
-doesn't.** Every AI/ML practitioner who has ever run `wandb login` —
-researchers, sweep operators, eval harness builders — already has the exact
-credential CoreWeave Sandboxes accepts as the `x-wandb-api-key` gRPC
-metadata header. The key is sitting in `~/.netrc` from a year ago.
+Every other crabbox provider asks the user for a new provider-specific
+credential. **This one doesn't.** Every AI/ML practitioner who has ever run
+`wandb login` — researchers, sweep operators, eval harness builders — already
+has the W&B API key CoreWeave Sandboxes accepts as the `x-wandb-api-key` gRPC
+metadata header. The key is sitting in `~/.netrc` from a year ago; the caller
+must also set `WANDB_ENTITY_NAME` so the sandbox gateway knows the W&B entity
+scope.
 
 That is the wedge. **`crabbox run --provider wandb -- python train.py`
 warms a CoreWeave GPU sandbox using the W&B identity the researcher
-already has** — zero new accounts, zero new credentials, zero billing
-setup. For the AI research persona, this is the lowest-friction provider
-in the tree.
+already has** — zero new accounts, no provider-specific token, zero billing
+setup. For the AI research persona, this is the lowest-friction provider in
+the tree.
 
 ## Lifecycle
 
@@ -80,10 +82,12 @@ crabbox doctor --provider wandb
 ## Live Smoke
 
 Keep the API key in `CRABBOX_WANDB_API_KEY` or `WANDB_API_KEY`; do not pass it
-on the command line.
+on the command line. Set `WANDB_ENTITY_NAME` to the W&B entity/team that owns
+the sandbox runs.
 
 ```sh
 export CRABBOX_WANDB_API_KEY=wandb_v1_...
+export WANDB_ENTITY_NAME=my-team
 go build -trimpath -o bin/crabbox ./cmd/crabbox
 
 bin/crabbox doctor --provider wandb
@@ -93,7 +97,7 @@ bin/crabbox run --provider wandb --no-sync --wandb-max-lifetime 60 -- echo crabb
 Or the standalone script (no coordinator required):
 
 ```sh
-CRABBOX_LIVE=1 CRABBOX_WANDB_API_KEY=wandb_v1_... scripts/wandb-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_WANDB_API_KEY=wandb_v1_... WANDB_ENTITY_NAME=my-team scripts/wandb-smoke.sh
 ```
 
 Or the Go smoke test (Acquire → Exec → Stop):
@@ -111,9 +115,12 @@ Credential precedence (first match wins):
 3. `WANDB_API_KEY` — canonical env var written by `wandb login`.
 4. `~/.netrc` — machine `api.wandb.ai` entry, written by `wandb login`.
 
-Optional W&B scoping:
+Required W&B scoping:
 
 - `WANDB_ENTITY_NAME` → sent as `x-entity-id`.
+
+Optional W&B scoping:
+
 - `WANDB_PROJECT`     → sent as `x-project-name`.
 
 The API key is never exposed as a CLI flag — secrets do not belong on
