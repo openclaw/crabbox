@@ -762,7 +762,7 @@ function optionalWriteFiles(config: LeaseConfig): string {
         mkdir -p "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0" "$config_dir/crabbox"
         chmod 0700 "$config_dir" "$config_dir/xfce4" "$config_dir/xfce4/xfconf" "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0" "$config_dir/crabbox"
       fi
-      printf '%s\n' "$mode" > "$config_dir/crabbox/desktop-theme"
+      printf '%s\\n' "$mode" > "$config_dir/crabbox/desktop-theme"
       cat > "$config_dir/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" <<XML
       <?xml version="1.0" encoding="UTF-8"?>
       <channel name="xsettings" version="1.0">
@@ -851,6 +851,10 @@ function optionalWriteFiles(config: LeaseConfig): string {
       /* crabbox desktop theme end */
       EOF
       mv "$css_tmp" "$css_file"
+      background_file="$config_dir/crabbox/desktop-background-$mode.svg"
+      cat > "$background_file" <<EOF
+      <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080"><rect width="100%" height="100%" fill="$root_color"/></svg>
+      EOF
       if [ "$(id -u)" -eq 0 ]; then
         chown -R "$user" "$config_dir" "$home_dir/.gtkrc-2.0"
       fi
@@ -865,9 +869,28 @@ function optionalWriteFiles(config: LeaseConfig): string {
           xfconf-query -c xfce4-panel -p "/panels/$panel_id/background-style" -n -t int -s 1 >/dev/null 2>&1 || true
           xfconf-query -c xfce4-panel -p "/panels/$panel_id/background-rgba" -n -a -t double -s "$1" -t double -s "$2" -t double -s "$3" -t double -s "$4" >/dev/null 2>&1 || true
         done
+        for workspace in workspace0 workspace1 workspace2 workspace3; do
+          backdrop="/backdrop/screen0/monitorscreen/$workspace"
+          xfconf-query -c xfce4-desktop -p "$backdrop/color-style" -n -t int -s 0 >/dev/null 2>&1 || true
+          xfconf-query -c xfce4-desktop -p "$backdrop/image-style" -n -t int -s 5 >/dev/null 2>&1 || true
+          xfconf-query -c xfce4-desktop -p "$backdrop/last-image" -n -t string -s "$background_file" >/dev/null 2>&1 || true
+        done
         if [ "$(id -un)" = "$user" ]; then
-          pkill -TERM -x xfce4-panel >/dev/null 2>&1 || true
-          (sleep 0.4; xfce4-panel >"/tmp/crabbox-xfce4-panel-$user.log" 2>&1 &) >/dev/null 2>&1 &
+          user_id="$(id -u)"
+          pkill -TERM -u "$user_id" -x xfce4-panel >/dev/null 2>&1 || true
+          pkill -TERM -u "$user_id" -f '/xfce4/panel/wrapper-2.0' >/dev/null 2>&1 || true
+          for _ in 1 2 3 4 5; do
+            if ! pgrep -u "$user_id" -x xfce4-panel >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.2
+          done
+          (
+            sleep 1
+            if ! pgrep -u "$user_id" -x xfce4-panel >/dev/null 2>&1; then
+              xfce4-panel --disable-wm-check >"/tmp/crabbox-xfce4-panel-$user.log" 2>&1 &
+            fi
+          ) >/dev/null 2>&1 &
         else
           pkill -USR1 -x xfce4-panel >/dev/null 2>&1 || true
         fi
@@ -875,6 +898,11 @@ function optionalWriteFiles(config: LeaseConfig): string {
       fi
       if [ -n "\${DISPLAY:-}" ] && command -v xsetroot >/dev/null 2>&1; then
         xsetroot -solid "$root_color" || true
+      fi
+      if [ -n "\${DISPLAY:-}" ] && command -v xfdesktop >/dev/null 2>&1; then
+        user_id="$(id -u)"
+        pkill -TERM -u "$user_id" -x xfdesktop >/dev/null 2>&1 || true
+        (sleep 0.5; xfdesktop >"/tmp/crabbox-xfdesktop-$user.log" 2>&1 &) >/dev/null 2>&1 &
       fi
       if command -v gsettings >/dev/null 2>&1; then
         gsettings set org.gnome.desktop.interface color-scheme "$gsettings_scheme" >/dev/null 2>&1 || true
@@ -963,7 +991,7 @@ function optionalBootstrap(config: LeaseConfig): string {
     cat >/usr/local/bin/crabbox-sway-status <<'STATUS'
     #!/bin/sh
     while :; do
-      printf 'Crabbox Wayland - Mod+Enter/D terminal - %s\n' "$(date '+%H:%M:%S')"
+      printf 'Crabbox Wayland - Mod+Enter/D terminal - %s\\n' "$(date '+%H:%M:%S')"
       sleep 1
     done
     STATUS

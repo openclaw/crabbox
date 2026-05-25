@@ -98,6 +98,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("systemctl is-active --quiet crabbox-desktop-session.service");
     expect(got).toContain('requested_mode="${1:-${CRABBOX_DESKTOP_THEME:-}}"');
     expect(got).toContain('"$config_dir/crabbox/desktop-theme"');
+    expect(got).toContain(`printf '%s\\n' "$mode" > "$config_dir/crabbox/desktop-theme"`);
+    expect(got).not.toContain(`printf '%s\n' "$mode" > "$config_dir/crabbox/desktop-theme"`);
     expect(got).toContain("gtk_theme=Adwaita-dark");
     expect(got).toContain('gtk_candidates="Arc-Dark Greybird-dark Adwaita-dark Greybird"');
     expect(got).toContain('gtk_candidates="Arc Greybird Adwaita"');
@@ -113,11 +115,19 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("xfconf-query -c xfwm4 -p /general/theme");
     expect(got).toContain("xfconf-query -c xfce4-panel -p /panels/dark-mode");
     expect(got).toContain("/panels/$panel_id/background-rgba");
+    expect(got).toContain("desktop-background-$mode.svg");
+    expect(got).toContain('xfconf-query -c xfce4-desktop -p "$backdrop/image-style"');
+    expect(got).toContain('xfconf-query -c xfce4-desktop -p "$backdrop/last-image"');
     expect(got).toContain("crabbox desktop theme start");
     expect(got).toContain("crabbox-xfce4-panel-$user.log");
-    expect(got).toContain("pkill -USR1 -x xfce4-panel");
+    expect(got).toContain('pkill -TERM -u "$user_id" -x xfce4-panel');
+    expect(got).toContain("pkill -TERM -u \"$user_id\" -f '/xfce4/panel/wrapper-2.0'");
+    expect(got).toContain('pgrep -u "$user_id" -x xfce4-panel');
+    expect(got).toContain("sleep 1");
+    expect(got).toContain("xfce4-panel --disable-wm-check");
     expect(got).toContain("xfwm4 --replace");
     expect(got).toContain('xsetroot -solid "$root_color"');
+    expect(got).toContain("crabbox-xfdesktop-$user.log");
     expect(got).toContain(
       'gsettings set org.gnome.desktop.interface color-scheme "$gsettings_scheme"',
     );
@@ -149,6 +159,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("set $menu foot --title='Crabbox Desktop'");
     expect(got).toContain('    for_window [app_id="google-chrome"] floating enable');
     expect(got).toContain("/usr/local/bin/crabbox-sway-status");
+    expect(got).toContain("printf 'Crabbox Wayland - Mod+Enter/D terminal - %s\\n'");
+    expect(got).not.toContain("printf 'Crabbox Wayland - Mod+Enter/D terminal - %s\n'");
     expect(got).toContain("status_command /usr/local/bin/crabbox-sway-status");
     expect(got).toContain('for socket in "$XDG_RUNTIME_DIR"/wayland-*');
     expect(got).toContain('WAYLAND_DISPLAY="${socket##*/}"');
