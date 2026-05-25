@@ -4498,7 +4498,7 @@ describe("fleet lease identity and idle", () => {
     );
     storage.seed("image:aws:promoted", {
       id: "ami-000000000001",
-      name: "openclaw-crabbox-test",
+      name: "crabbox-image-test",
       state: "available",
       region: "us-east-2",
       promotedAt: "2026-05-01T12:46:00Z",
@@ -4740,6 +4740,29 @@ describe("fleet lease identity and idle", () => {
     await expect(response.json()).resolves.toMatchObject({ error: "unsupported_strategy" });
   });
 
+  it("rejects unsupported native image providers before constructing provider clients", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_000000000004",
+      testLease({
+        id: "cbx_000000000004",
+        provider: "hetzner",
+        cloudID: "123",
+      }),
+    );
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/images", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { leaseID: "cbx_000000000004", name: "After Install" },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "unsupported_provider" });
+  });
+
   it("rejects invalid native image strategies", async () => {
     let created = false;
     const storage = new MemoryStorage();
@@ -4907,6 +4930,42 @@ describe("fleet lease identity and idle", () => {
       name: "openclaw-crabbox-test",
       state: "available",
       region: "eu-west-1",
+      promotedAt: "2026-05-01T12:46:00Z",
+    });
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, {
+        onDeleteImage(imageID) {
+          deleted = imageID;
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("DELETE", "/v1/images/ami-000000000001", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(deleted).toBe("");
+    await expect(response.json()).resolves.toMatchObject({ error: "image_promoted" });
+  });
+
+  it("rejects deleting a promoted AWS image even when a created-image record also exists", async () => {
+    let deleted = "";
+    const storage = new MemoryStorage();
+    const image = {
+      id: "ami-000000000001",
+      name: "openclaw-crabbox-test",
+      state: "available",
+      provider: "aws",
+      kind: "aws-ami",
+      region: "eu-west-1",
+    };
+    storage.seed("image:aws:created:ami-000000000001", image);
+    storage.seed("image:aws:promoted", {
+      ...image,
       promotedAt: "2026-05-01T12:46:00Z",
     });
     const fleet = testFleet(storage, {
@@ -6184,6 +6243,13 @@ function testFleet(
   providers = {},
   env: Partial<Env> = {},
 ): FleetDurableObject {
+  for (const provider of Object.values(providers)) {
+    (
+      provider as {
+        attachStorage?: (storage: MemoryStorage) => void;
+      }
+    ).attachStorage?.(storage);
+  }
   return new FleetDurableObject(
     { storage } as unknown as DurableObjectState,
     { CRABBOX_DEFAULT_ORG: "default-org", ...env } as Env,
@@ -6237,11 +6303,19 @@ function fakeProvider(
       sshIngressReconcile?: "authoritative" | "additive";
       publishAccessBeforeProvisioning?: boolean;
     }) => void;
+    onPrepareLeaseConfig?: (
+      config: LeaseConfig,
+      storage: MemoryStorage | undefined,
+    ) => Promise<LeaseConfig> | LeaseConfig;
   } = {},
   onDelete?: (id: string) => Promise<void>,
   onGet?: (id: string) => Promise<ProviderMachine> | ProviderMachine,
 ) {
+  let storage: MemoryStorage | undefined;
   return {
+    attachStorage(nextStorage: MemoryStorage) {
+      storage = nextStorage;
+    },
     async listCrabboxServers() {
       return result.servers ?? [];
     },
@@ -6267,6 +6341,32 @@ function fakeProvider(
       context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
     ) {
       return result.onPrepareLeaseCreate?.(config, lease, context);
+    },
+    async prepareLeaseConfig(config: LeaseConfig) {
+      const prepared = await result.onPrepareLeaseConfig?.(config, storage);
+      if (prepared) {
+        return prepared;
+      }
+      if ((result.provider ?? config.provider) !== "aws" || config.awsAMI || config.awsSnapshot) {
+        return config;
+      }
+      if (config.target === "macos") {
+        const awsPromotedAMIs: Record<string, string> = {};
+        const promoted = await storage?.list<ProviderImage>({ prefix: "image:aws:promoted" });
+        for (const image of promoted?.values() ?? []) {
+          if (image.target !== "macos" || !image.region || !image.serverType) {
+            continue;
+          }
+          awsPromotedAMIs[awsPromotedAMIConfigKey(image.region, image.serverType)] = image.id;
+        }
+        return { ...config, awsPromotedAMIs };
+      }
+      const promoted = await storage?.get<ProviderImage>("image:aws:promoted");
+      return {
+        ...config,
+        awsAMI: promoted?.id ?? "",
+        ...(promoted?.region ? { awsRegion: promoted.region } : {}),
+      };
     },
     async refreshLeaseAccess(
       lease: LeaseRecord,
@@ -6313,6 +6413,89 @@ function fakeProvider(
     },
     async deleteServer(id: string) {
       await onDelete?.(id);
+    },
+    async releaseLease(lease: LeaseRecord) {
+      await onDelete?.(
+        (lease.provider ?? result.provider) === "hetzner" ? String(lease.serverID) : lease.cloudID,
+      );
+    },
+    async finalizeLeaseCreate(
+      config: LeaseConfig,
+      lease: LeaseRecord,
+      server: ProviderMachine,
+      attempts: ProvisioningAttempt[],
+    ) {
+      const provider = result.provider ?? lease.provider;
+      const nextLease = { ...lease };
+      if (provider === "aws") {
+        nextLease.region = server.region ?? config.awsRegion;
+        const codes = new Set(attempts.map((attempt) => attempt.category));
+        if (codes.has("capacity") || codes.has("quota") || result.market === "on-demand") {
+          const regionsTried = [
+            ...new Set(
+              [...attempts.map((attempt) => attempt.region), server.region].filter(Boolean),
+            ),
+          ];
+          nextLease.capacityHints = [
+            {
+              code: "aws_capacity_routed",
+              message: "AWS capacity fallback selected a working launch path",
+              regionsTried,
+            },
+            { code: "aws_quota_pressure", message: "AWS quota or capacity pressure was observed" },
+            { code: "aws_on_demand_fallback", message: "AWS on-demand fallback was used" },
+            { code: "capacity_large_class", message: "Large class capacity can be constrained" },
+          ];
+        }
+      }
+      if (provider === "azure") {
+        nextLease.region = config.azureLocation;
+      }
+      if (provider === "gcp") {
+        nextLease.region = server.region ?? config.gcpZone;
+        nextLease.providerProject = config.gcpProject;
+      }
+      return { config, lease: nextLease };
+    },
+    supportsNativeImages() {
+      return (result.provider ?? "aws") !== "hetzner";
+    },
+    nativeImagesUnsupportedMessage() {
+      return "native images are supported for AWS, Azure, and GCP leases";
+    },
+    defaultImageStrategy() {
+      return (result.provider ?? "aws") === "aws" ? "image" : "disk-snapshot";
+    },
+    validateLeaseImageStrategy(_lease: LeaseRecord, strategy: "image" | "disk-snapshot") {
+      return (result.provider ?? "aws") === "azure" && strategy === "image"
+        ? "Azure managed images require a stopped/generalized source VM; use disk-snapshot checkpoints for active Azure leases"
+        : undefined;
+    },
+    async createLeaseImage(
+      lease: LeaseRecord,
+      name: string,
+      noReboot = true,
+      strategy: "image" | "disk-snapshot" = "disk-snapshot",
+    ) {
+      const image = await this.createImage(
+        lease.cloudID,
+        fakeProviderImageResourceName(lease.provider, name, lease.id),
+        noReboot,
+        strategy,
+      );
+      const enriched =
+        lease.provider === "aws"
+          ? fakeMergeAWSImageMetadata(image, {
+              target: lease.target,
+              windowsMode: lease.windowsMode,
+              serverType: lease.serverType,
+              region: image.region ?? lease.region,
+            })
+          : image;
+      if (lease.provider === "aws") {
+        await storage?.put(`image:aws:created:${enriched.id}`, enriched);
+      }
+      return enriched;
     },
     async createImage(
       instanceID: string,
@@ -6389,6 +6572,121 @@ function fakeProvider(
     async deleteImage(imageID: string, kind?: string) {
       result.onDeleteImage?.(imageID, kind);
     },
+    async storedImageMetadata(imageID: string) {
+      const promoted = await storage?.list<ProviderImage>({ prefix: "image:aws:promoted" });
+      return (
+        [...(promoted?.values() ?? [])].find((image) => image.id === imageID) ??
+        (await storage?.get<ProviderImage>(`image:aws:created:${imageID}`))
+      );
+    },
+    decorateImage(image: ProviderImage, metadata?: Partial<ProviderImage>) {
+      return (result.provider ?? "aws") === "aws"
+        ? fakeMergeAWSImageMetadata(image, metadata)
+        : image;
+    },
+    async validateDeleteImage(imageID: string, metadata?: Partial<ProviderImage>) {
+      if (metadata?.id === imageID && "promotedAt" in metadata) {
+        return {
+          status: 409,
+          body: {
+            error: "image_promoted",
+            message: `image ${imageID} is the promoted AWS image; promote another image before deleting it`,
+          },
+        };
+      }
+      return undefined;
+    },
+    async fastSnapshotRestoreForImage(
+      imageID: string,
+      metadata: ProviderImage | undefined,
+      url: URL,
+    ) {
+      const image = fakeMergeAWSImageMetadata(await this.getImage(imageID), metadata);
+      const snapshots = image.snapshots ?? [];
+      if (snapshots.length === 0) {
+        return jsonResponse(
+          {
+            error: "image_snapshots_missing",
+            message: `image ${imageID} has no EBS snapshots to describe for Fast Snapshot Restore`,
+          },
+          409,
+        );
+      }
+      const zones = fakeFastSnapshotRestoreStatusAZs(url, image.region ?? "");
+      const fastSnapshotRestores = await this.fastSnapshotRestoreStatus(snapshots, zones);
+      return { image: { ...image, fastSnapshotRestores }, fastSnapshotRestores };
+    },
+    async promoteImage(imageID: string, known: ProviderImage | undefined, req: Request, url: URL) {
+      const input = (await req
+        .clone()
+        .json()
+        .catch(() => ({}))) as {
+        target?: string;
+        region?: string;
+        serverType?: string;
+        architecture?: string;
+        fastSnapshotRestore?: unknown;
+        fastSnapshotRestoreAvailabilityZones?: string[];
+      };
+      const target = fakeNormalizeAWSImageTarget(
+        input.target ?? url.searchParams.get("target") ?? known?.target ?? "linux",
+      );
+      if (!target) {
+        return jsonResponse(
+          { error: "invalid_target", message: "target must be linux, macos, or windows" },
+          400,
+        );
+      }
+      const region = input.region ?? url.searchParams.get("region") ?? known?.region ?? "";
+      const metadata: Partial<ProviderImage> = { ...known, target, region };
+      const serverType =
+        input.serverType ?? url.searchParams.get("serverType") ?? known?.serverType;
+      if (serverType) {
+        metadata.serverType = serverType;
+      }
+      const architecture =
+        input.architecture ?? url.searchParams.get("architecture") ?? known?.architecture;
+      if (architecture) {
+        metadata.architecture = architecture;
+      }
+      const fastSnapshotRestore = fakeBoolFromUnknown(
+        input.fastSnapshotRestore ?? url.searchParams.get("fastSnapshotRestore"),
+      );
+      const zones = fastSnapshotRestore
+        ? fakeFastSnapshotRestoreAZs(input.fastSnapshotRestoreAvailabilityZones, url, region)
+        : [];
+      if (fastSnapshotRestore && zones.length === 0) {
+        return jsonResponse({ error: "invalid_fast_snapshot_restore_zones" }, 400);
+      }
+      const image = fakeMergeAWSImageMetadata(await this.getImage(imageID), metadata);
+      if (image.state !== "available") {
+        return jsonResponse({ error: "image_not_available" }, 409);
+      }
+      if (target === "macos" && !image.serverType) {
+        return jsonResponse({ error: "invalid_server_type" }, 400);
+      }
+      if (zones.length > 0 && (image.snapshots ?? []).length === 0) {
+        return jsonResponse({ error: "image_snapshots_missing" }, 409);
+      }
+      const fastSnapshotRestores =
+        zones.length > 0
+          ? await this.enableFastSnapshotRestore(image.snapshots ?? [], zones)
+          : undefined;
+      const promoted = {
+        ...image,
+        ...(fastSnapshotRestores ? { fastSnapshotRestores } : {}),
+        target,
+        region: image.region ?? region,
+        architecture:
+          image.architecture ?? fakeAWSImageArchitectureForTarget(target, image.serverType ?? ""),
+        promotedAt: "2026-05-25T00:00:00.000Z",
+      };
+      await storage?.put(fakePromotedAWSImageKey(promoted), promoted);
+      if (target === "linux") {
+        await storage?.put("image:aws:promoted", promoted);
+      }
+      return { image: promoted };
+    },
     async enableFastSnapshotRestore(snapshotIDs: string[], availabilityZones: string[]) {
       result.onEnableFastSnapshotRestore?.(snapshotIDs, availabilityZones);
       return snapshotIDs.flatMap((snapshotID) =>
@@ -6410,6 +6708,134 @@ function fakeProvider(
       return 0.1;
     },
   };
+}
+
+function fakeProviderImageResourceName(provider: string, name: string, leaseID: string): string {
+  if (provider === "aws") {
+    return name;
+  }
+  const allowed = provider === "gcp" ? /[^a-z0-9-]/g : /[^a-z0-9_.-]/g;
+  const normalized = name.trim().toLowerCase().replaceAll(allowed, "-");
+  const trimmed =
+    provider === "gcp"
+      ? normalized
+          .replaceAll(/^[^a-z]+/g, "")
+          .replaceAll(/-+/g, "-")
+          .replaceAll(/-+$/g, "")
+      : normalized
+          .replaceAll(/^[^a-z]+/g, "")
+          .replaceAll(/-+/g, "-")
+          .replaceAll(/[-.]+$/g, "");
+  const fallback = leaseID.toLowerCase().replaceAll(/[^a-z0-9-]/g, "-");
+  const maxLength = provider === "gcp" ? 63 : 80;
+  const truncated = (trimmed || `checkpoint-${fallback}`).slice(0, maxLength);
+  return provider === "gcp"
+    ? truncated.replaceAll(/-+$/g, "")
+    : truncated.replaceAll(/[-.]+$/g, "");
+}
+
+function fakeMergeAWSImageMetadata(
+  image: ProviderImage,
+  metadata?: Partial<ProviderImage>,
+): ProviderImage {
+  const target =
+    fakeNormalizeAWSImageTarget(metadata?.target ?? image.target ?? "linux") ?? "linux";
+  const serverType = metadata?.serverType ?? image.serverType ?? "";
+  const result: ProviderImage = {
+    ...metadata,
+    ...image,
+    target,
+    architecture:
+      metadata?.architecture ??
+      image.architecture ??
+      fakeAWSImageArchitectureForTarget(target, serverType),
+  };
+  const windowsMode = metadata?.windowsMode ?? image.windowsMode;
+  if (windowsMode !== undefined) {
+    result.windowsMode = windowsMode;
+  }
+  if (serverType) {
+    result.serverType = serverType;
+  }
+  if (image.region) {
+    result.region = image.region;
+  } else if (metadata?.region) {
+    result.region = metadata.region;
+  }
+  return result;
+}
+
+function fakeNormalizeAWSImageTarget(
+  value: string | undefined,
+): "linux" | "macos" | "windows" | undefined {
+  switch ((value ?? "").trim().toLowerCase()) {
+    case "":
+    case "linux":
+    case "ubuntu":
+      return "linux";
+    case "mac":
+    case "macos":
+    case "darwin":
+    case "osx":
+      return "macos";
+    case "win":
+    case "windows":
+      return "windows";
+    default:
+      return undefined;
+  }
+}
+
+function fakeAWSImageArchitectureForTarget(
+  target: "linux" | "macos" | "windows",
+  serverType: string,
+): string {
+  if (target === "macos") {
+    return serverType.startsWith("mac1.") ? "x86_64_mac" : "arm64_mac";
+  }
+  return "x86_64";
+}
+
+function fakePromotedAWSImageKey(
+  image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType">,
+): string {
+  const target = image.target ?? "linux";
+  const architecture = image.architecture ?? fakeAWSImageArchitectureForTarget(target, "");
+  const region = image.region ?? "";
+  if (target === "macos") {
+    return `image:aws:promoted:${target}:${architecture}:${(image.serverType ?? "").trim().toLowerCase()}:${region}`;
+  }
+  return `image:aws:promoted:${target}:${architecture}:${region}`;
+}
+
+function fakeBoolFromUnknown(value: unknown): boolean {
+  if (value === true) return true;
+  if (value === false || value === undefined || value === null) return false;
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
+function fakeFastSnapshotRestoreAZs(
+  inputZones: string[] | undefined,
+  url: URL,
+  region: string,
+): string[] {
+  return [
+    ...new Set(
+      [...(inputZones ?? []), ...url.searchParams.getAll("fsrAz")]
+        .map((zone) => zone.trim())
+        .filter((zone) => !region || zone.startsWith(region)),
+    ),
+  ];
+}
+
+function fakeFastSnapshotRestoreStatusAZs(url: URL, region: string): string[] {
+  return [
+    ...new Set(
+      [...url.searchParams.getAll("fsrAz"), ...url.searchParams.getAll("az")]
+        .map((zone) => zone.trim())
+        .filter((zone) => !region || zone.startsWith(region)),
+    ),
+  ];
 }
 
 function testMachine(overrides: Partial<ProviderMachine>): ProviderMachine {

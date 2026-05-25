@@ -10,7 +10,7 @@ Crabbox is a generic remote software testing and execution tool. New code, docs,
 
 ## Architecture Boundaries
 
-Keep core provider-neutral. Core may pass generic context such as request source CIDRs, active leases, lease state, and provision hooks; provider-specific reconciliation, firewall/security-group semantics, labels, snapshots, hosts, regions, and rollout compatibility live behind provider adapters. Do not add `provider == aws/gcp/...` logic in core unless it is unavoidable routing glue and no provider hook fits.
+Keep core provider-neutral. Core may pass generic request/lease context and call provider capabilities for defaults, access, provision, images, release, cleanup, and diagnostics. Provider-specific reconciliation, firewall/security-group semantics, labels, snapshots, hosts, regions, rollout compatibility, and resource naming live behind provider adapters. No `provider == aws/gcp/...` logic in core unless it is unavoidable routing/config glue and no provider hook fits.
 
 ## Build, Test, and Development Commands
 
