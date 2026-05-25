@@ -194,7 +194,7 @@ func (b *wandbBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	return client.Stop(ctx, req.ID, 10, true)
+	return client.Stop(ctx, req.ID, 10, false)
 }
 
 // Doctor mirrors the modal/e2b/runpod pattern: dial, probe auth via a cheap

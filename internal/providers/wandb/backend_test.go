@@ -193,6 +193,7 @@ type fakeWandbAPI struct {
 	execCode         int
 	execErr          error
 	stopID           string
+	stopMissingOK    bool
 	stopErr          error
 	listValue        []wandbSandbox
 	listErr          error
@@ -217,8 +218,9 @@ func (f *fakeWandbAPI) Exec(_ context.Context, req wandbExecRequest) (int, error
 	return f.execCode, f.execErr
 }
 
-func (f *fakeWandbAPI) Stop(_ context.Context, id string, _ int, _ bool) error {
+func (f *fakeWandbAPI) Stop(_ context.Context, id string, _ int, missingOK bool) error {
 	f.stopID = id
+	f.stopMissingOK = missingOK
 	return f.stopErr
 }
 
@@ -351,6 +353,9 @@ func TestWandbStopCallsClient(t *testing.T) {
 	}
 	if api.stopID != "sb-abc" {
 		t.Fatalf("Stop called with %q, want sb-abc", api.stopID)
+	}
+	if api.stopMissingOK {
+		t.Fatal("explicit Stop used missingOK=true")
 	}
 }
 
