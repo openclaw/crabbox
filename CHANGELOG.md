@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added AWS doctor capacity readiness checks that surface Spot and On-Demand vCPU quota pressure before warmup. Thanks @jwmoss.
 - Added an experimental Linux `--desktop-env wayland` profile using Sway, WayVNC, Wayland browser launch env, and `grim` screenshots while keeping XFCE as the default desktop.
 
 ### Fixed
