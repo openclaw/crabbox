@@ -274,7 +274,9 @@ func (c *wandbClient) Acquire(ctx context.Context, req wandbAcquireRequest) (wan
 	defer cancel()
 	sb, perr := c.pollUntilRunning(startupCtx, started.SandboxId)
 	if perr != nil {
-		_, _ = c.gw.Stop(context.Background(), &sandboxv1.StopSandboxRequest{SandboxId: started.SandboxId})
+		stopCtx, cancel := context.WithTimeout(context.Background(), wandbStopTimeout)
+		defer cancel()
+		_, _ = c.gw.Stop(stopCtx, &sandboxv1.StopSandboxRequest{SandboxId: started.SandboxId})
 		return wandbSandbox{}, perr
 	}
 	return sb, nil
@@ -364,7 +366,11 @@ func (c *wandbClient) Exec(ctx context.Context, req wandbExecRequest) (int, erro
 	if req.Stderr != nil && len(resp.Result.Stderr) > 0 {
 		_, _ = req.Stderr.Write(resp.Result.Stderr)
 	}
-	return int(resp.Result.ExitCode), nil
+	exitCode := int(resp.Result.ExitCode)
+	if exitCode < 0 {
+		return 1, fmt.Errorf("wandb exec failed with exit_code=%d", exitCode)
+	}
+	return exitCode, nil
 }
 
 func (c *wandbClient) Stop(ctx context.Context, id string, gracefulSeconds int, missingOK bool) error {

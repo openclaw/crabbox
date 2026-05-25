@@ -199,3 +199,34 @@ func TestWandbStopAllowsSuccessfulResponse(t *testing.T) {
 		t.Fatalf("Stop err: %v", err)
 	}
 }
+
+type execGatewayClient struct {
+	sandboxv1.GatewayServiceClient
+	resp *sandboxv1.ExecSandboxResponse
+	err  error
+}
+
+func (f execGatewayClient) Exec(context.Context, *sandboxv1.ExecSandboxRequest, ...grpc.CallOption) (*sandboxv1.ExecSandboxResponse, error) {
+	return f.resp, f.err
+}
+
+func TestWandbExecMapsNegativeExitCode(t *testing.T) {
+	client := &wandbClient{gw: execGatewayClient{resp: &sandboxv1.ExecSandboxResponse{
+		Result: &sandboxv1.ExecResponse{ExitCode: -1, Stderr: []byte("execution failed")},
+	}}}
+	var stderr strings.Builder
+	exitCode, err := client.Exec(context.Background(), wandbExecRequest{
+		SandboxID: "sb-123",
+		Command:   []string{"echo"},
+		Stderr:    &stderr,
+	})
+	if err == nil || !strings.Contains(err.Error(), "exit_code=-1") {
+		t.Fatalf("err = %v, want negative sentinel error", err)
+	}
+	if exitCode != 1 {
+		t.Fatalf("exitCode = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "execution failed") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
