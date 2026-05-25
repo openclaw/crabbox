@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `provider: wandb` for W&B/CoreWeave Sandbox delegated runs through the native gRPC API. Thanks @zozo123.
 - Added AWS doctor capacity readiness checks that surface Spot and On-Demand vCPU quota pressure before warmup. Thanks @jwmoss.
 - Added an experimental Linux `--desktop-env wayland` profile using Sway, WayVNC, Wayland browser launch env, and `grim` screenshots while keeping XFCE as the default desktop.
 
