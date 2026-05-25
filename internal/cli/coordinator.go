@@ -161,10 +161,11 @@ type CoordinatorWhoami struct {
 }
 
 type CoordinatorProviderReadiness struct {
-	Provider   string   `json:"provider"`
-	Configured bool     `json:"configured"`
-	Missing    []string `json:"missing,omitempty"`
-	Message    string   `json:"message,omitempty"`
+	Provider   string        `json:"provider"`
+	Configured bool          `json:"configured"`
+	Missing    []string      `json:"missing,omitempty"`
+	Message    string        `json:"message,omitempty"`
+	Checks     []DoctorCheck `json:"checks,omitempty"`
 }
 
 type CoordinatorImage struct {
@@ -857,10 +858,26 @@ func (c *CoordinatorClient) Whoami(ctx context.Context) (CoordinatorWhoami, erro
 	return res, err
 }
 
-func (c *CoordinatorClient) ProviderReadiness(ctx context.Context, provider string) (CoordinatorProviderReadiness, error) {
+func (c *CoordinatorClient) ProviderReadiness(ctx context.Context, cfg Config) (CoordinatorProviderReadiness, error) {
 	var res CoordinatorProviderReadiness
-	path := "/v1/providers/" + url.PathEscape(provider) + "/readiness"
-	err := c.do(ctx, http.MethodGet, path, nil, &res)
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return res, err
+	}
+	values := url.Values{}
+	values.Set("target", cfg.TargetOS)
+	values.Set("windowsMode", cfg.WindowsMode)
+	values.Set("class", cfg.Class)
+	values.Set("serverType", cfg.ServerType)
+	values.Set("serverTypeExplicit", strconv.FormatBool(cfg.ServerTypeExplicit))
+	values.Set("market", cfg.Capacity.Market)
+	values.Set("fallback", cfg.Capacity.Fallback)
+	values.Set("region", cfg.AWSRegion)
+	path := "/v1/providers/" + url.PathEscape(provider.Name()) + "/readiness"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	err = c.do(ctx, http.MethodGet, path, nil, &res)
 	return res, err
 }
 

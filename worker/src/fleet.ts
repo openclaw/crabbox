@@ -70,6 +70,7 @@ import type {
   TestFailure,
   TestResultSummary,
   TailscaleMetadata,
+  WindowsMode,
 } from "./types";
 import { costLimits, enforceCostLimits, leaseCost, requestOrg, usageSummary } from "./usage";
 
@@ -386,7 +387,7 @@ export class FleetDurableObject implements DurableObject {
         parts[2] &&
         parts[3] === "readiness"
       ) {
-        return this.providerReadiness(parts[2]);
+        return await this.providerReadiness(request, parts[2]);
       }
       if (method === "GET" && parts.join("/") === "v1/control") {
         return await this.controlSocket(request);
@@ -1359,14 +1360,22 @@ export class FleetDurableObject implements DurableObject {
     });
   }
 
-  private providerReadiness(provider: string): Response {
+  private async providerReadiness(request: Request, provider: string): Promise<Response> {
     if (!isManagedProvider(provider)) {
       return json(
         { error: "invalid_provider", message: `unsupported provider: ${provider}` },
         { status: 400 },
       );
     }
-    return json(this.providerConfigurationReadiness(provider));
+    const url = new URL(request.url);
+    const readiness = this.providerConfigurationReadiness(
+      provider,
+      url.searchParams.get("gcpProject") ?? undefined,
+    );
+    if (provider === "aws" && readiness.configured && !this.testProviders.aws) {
+      readiness.checks = await this.awsProviderCapacityChecks(url.searchParams);
+    }
+    return json(readiness);
   }
 
   private providerConfigurationReadiness(
@@ -1382,6 +1391,42 @@ export class FleetDurableObject implements DurableObject {
       };
     }
     return providerReadiness(provider, this.env, gcpProject);
+  }
+
+  private async awsProviderCapacityChecks(
+    params: URLSearchParams,
+  ): Promise<ProviderReadinessCheck[]> {
+    const capacity: NonNullable<LeaseRequest["capacity"]> = {};
+    const market = normalizeReadinessMarket(params.get("market"));
+    if (market) {
+      capacity.market = market;
+    }
+    const fallback = params.get("fallback");
+    if (fallback) {
+      capacity.fallback = fallback;
+    }
+    const leaseRequest: LeaseRequest = {
+      provider: "aws",
+      target: normalizeReadinessTarget(params.get("target")),
+      windowsMode: normalizeReadinessWindowsMode(params.get("windowsMode")),
+      serverTypeExplicit: params.get("serverTypeExplicit") === "true",
+      capacity,
+      sshPublicKey: readinessDummySSHPublicKey,
+    };
+    const className = params.get("class");
+    if (className) {
+      leaseRequest.class = className;
+    }
+    const serverType = params.get("serverType") || params.get("type");
+    if (serverType) {
+      leaseRequest.serverType = serverType;
+    }
+    const region = params.get("region");
+    if (region) {
+      leaseRequest.awsRegion = region;
+    }
+    const config = leaseConfig(leaseRequest);
+    return await new EC2SpotClient(this.env, config.awsRegion).capacityReadinessChecks(config);
   }
 
   private async portalRoute(request: Request, parts: string[]): Promise<Response> {
@@ -4547,6 +4592,14 @@ interface ProviderReadiness {
   configured: boolean;
   missing: string[];
   message: string;
+  checks?: ProviderReadinessCheck[];
+}
+
+interface ProviderReadinessCheck {
+  status: string;
+  check: string;
+  message?: string;
+  details?: Record<string, string>;
 }
 
 function providerReadiness(provider: Provider, env: Env, gcpProject?: string): ProviderReadiness {
@@ -4579,6 +4632,24 @@ function providerReadiness(provider: Provider, env: Env, gcpProject?: string): P
         ? `${provider} coordinator secrets are configured`
         : `${provider} coordinator secrets missing: ${missing.join(", ")}`,
   };
+}
+
+const readinessDummySSHPublicKey =
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEcrabboxDoctorReadinessPlaceholder crabbox-doctor";
+
+function normalizeReadinessTarget(value: string | null): TargetOS {
+  return value === "windows" || value === "macos" ? value : "linux";
+}
+
+function normalizeReadinessWindowsMode(value: string | null): WindowsMode {
+  return value === "wsl2" ? "wsl2" : "normal";
+}
+
+function normalizeReadinessMarket(value: string | null): "spot" | "on-demand" | undefined {
+  if (value === "spot" || value === "on-demand") {
+    return value;
+  }
+  return undefined;
 }
 
 function providerRequiredSecrets(provider: Provider): Array<keyof Env> {

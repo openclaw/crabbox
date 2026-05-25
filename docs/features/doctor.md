@@ -17,11 +17,12 @@ readiness.
 
 ## Categories
 
-Doctor groups checks under five categories:
+Doctor groups checks under six categories:
 
 ```text
 config       config files load and parse, required keys are present
 auth         broker token is set, signed token is valid, identity resolves
+provider     provider API, broker secret readiness, and capacity preflights
 network      coordinator URL reachable, DNS works, SSH transport probes work
 ssh          SSH key path readable, key type acceptable, ssh-keygen on PATH
 tools        provider-applicable local tools are present and executable
@@ -53,10 +54,20 @@ diffable across runs.
   `git config user.email`.
 - `whoami` succeeds against the configured coordinator with the stored
   token.
+
+When auth is missing, doctor prints `crabbox login` as the next step.
+
+## What `provider` Checks
+
 - Provider readiness succeeds for managed brokered providers that need Worker
   secrets. Missing names are reported without exposing values, for example
   `AZURE_TENANT_ID` or `AZURE_SUBSCRIPTION_ID`. Delegated and static providers
-  skip this check.
+  skip this check. AWS broker readiness also performs non-mutating EC2 vCPU
+  quota checks through Service Quotas when broker secrets are available. Low
+  quotas emit advisory `warning capacity` lines with the quota code, applied
+  limit, default type, required vCPUs, and recommended class/type. If Service
+  Quotas cannot be inspected, the capacity check is skipped with
+  `capacity=unknown` instead of warning about unproven pressure.
 - Direct provider readiness succeeds for delegated providers that expose a cheap
   non-mutating check. Cloudflare validates its runner URL and bearer token
   directly instead of treating a healthy coordinator as proof of runner
@@ -64,10 +75,9 @@ diffable across runs.
   providers now expose provider-owned direct doctor checks; providers with list
   APIs use non-mutating inventory checks when running in direct mode. Direct
   checks include stable `timeout`, `api`, and `mutation` fields; for example
-  GCP reports an aggregated Compute Engine list query, and Blacksmith Testbox
-  reports provider-owned runtime hydration.
-
-When auth is missing, doctor prints `crabbox login` as the next step.
+  AWS reports EC2 inventory plus advisory vCPU quota checks, GCP reports an
+  aggregated Compute Engine list query, and Blacksmith Testbox reports
+  provider-owned runtime hydration.
 
 ## What `network` Checks
 
@@ -111,7 +121,8 @@ Doctor avoids mutating provider state on purpose. It does not:
 - start a real lease or provision a server;
 - create, delete, or mutate cloud or Proxmox resources;
 - call delegated provider APIs except for explicit, cheap readiness or inventory
-  probes such as Cloudflare runner auth checks or provider list commands;
+  probes such as Cloudflare runner auth checks, Service Quotas reads, or
+  provider list commands;
 - run `git ls-files` against the repo (that belongs in `crabbox sync-plan`);
 - estimate costs;
 - modify config or rotate keys.
@@ -134,6 +145,9 @@ auth:
   ok    broker: https://crabbox.openclaw.ai
   ok    owner: alex@example.com
   ok    org:   openclaw
+provider:
+  ok    provider provider=aws coordinator_secrets=ready
+  warning capacity provider=aws capacity=quota_pressure market=spot recommended_class=standard
 network:
   ok    coordinator dns
   ok    coordinator https
@@ -160,8 +174,14 @@ network:
   skip  coordinator unconfigured (direct provider mode)
 ```
 
-Exit code is `0` on full success, `1` on any failure. Skips do not change
-the exit code.
+Warnings swap `ok` for `warning` and are advisory:
+
+```text
+warning capacity provider=aws capacity=quota_pressure market=spot quota_code=L-34B43A08 limit_vcpus=32 default_type=c7a.48xlarge default_needed_vcpus=192 recommended_class=standard recommended_type=c7a.8xlarge
+```
+
+Exit code is `0` when there are no failures, `1` on any failure. Skips and
+warnings do not change the exit code.
 
 Use `--json` for automation. The JSON view contains the overall `ok` boolean,
 selected `provider`, and a `checks` array with each check's status, category,

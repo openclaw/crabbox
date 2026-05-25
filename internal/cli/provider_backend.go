@@ -162,6 +162,15 @@ type DoctorRequest struct {
 type DoctorResult struct {
 	Provider string
 	Message  string
+	Status   string
+	Checks   []DoctorCheck
+}
+
+type DoctorCheck struct {
+	Status  string            `json:"status"`
+	Check   string            `json:"check"`
+	Message string            `json:"message,omitempty"`
+	Details map[string]string `json:"details,omitempty"`
 }
 
 func InventoryDoctorResult(provider string, leases int) DoctorResult {

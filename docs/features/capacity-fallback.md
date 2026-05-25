@@ -134,6 +134,8 @@ them sequentially.
 
 Hints apply only on the brokered (Worker) path. Direct AWS mode still falls
 back through the class chain but does not run quota or placement preflight.
+`crabbox doctor --provider aws` can run the EC2 vCPU quota preflight before the
+first warmup in both direct and brokered setups.
 
 ## Region And Availability Zone Routing
 

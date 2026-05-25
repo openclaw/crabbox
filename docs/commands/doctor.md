@@ -18,6 +18,7 @@ crabbox doctor --json
 ```text
 config       config files load and parse, required keys are present
 auth         broker token is set, signed token is valid, identity resolves
+provider     provider API, broker secret readiness, and capacity preflights
 network      coordinator URL reachable, DNS works, SSH transport probes work
 ssh          SSH key path readable, key permissions sane, ssh-keygen on PATH
 tools        provider-applicable local tools are present and executable
@@ -32,18 +33,27 @@ When `CRABBOX_SSH_KEY` is explicitly set, doctor validates the private key
 and the matching `.pub` file. When unset, it skips that check because
 per-lease keys do not need a global key.
 
-When a coordinator is configured, doctor also asks the broker for secret
-readiness for managed brokered providers such as AWS, Azure, GCP, and Hetzner. It
-reports missing Worker secret names such as `AZURE_TENANT_ID` without exposing
-secret values. Static, Proxmox, and delegated providers skip this broker-secret check.
-Delegated providers can still run their own direct readiness checks; for example,
-Cloudflare validates the configured runner URL and bearer token against the
-authenticated runner readiness API. Direct provider checks print stable fields
-such as `timeout=10s`, `api=list`, and `mutation=false` so scripts can tell
-what was checked. GCP uses an aggregated Compute Engine inventory query across
-zones, while the other built-in providers use their cheapest non-mutating list
-or readiness API. Blacksmith Testbox reports runtime as provider-hydrated
-because GitHub Actions hydration is owned by Testbox.
+Provider readiness checks validate the selected provider without creating a
+lease. When a coordinator is configured, doctor asks the broker for secret
+readiness for managed brokered providers such as AWS, Azure, GCP, and Hetzner.
+It reports missing Worker secret names such as `AZURE_TENANT_ID` without
+exposing secret values. Static, Proxmox, and delegated providers skip this
+broker-secret check. For AWS, broker readiness also includes non-mutating EC2
+vCPU quota checks when the broker has AWS secrets. Low quotas print advisory
+`warning capacity` lines with the quota code, applied limit, default type,
+required vCPUs, and a lower recommended class/type. If Service Quotas cannot be
+inspected, the capacity check is skipped with `capacity=unknown`.
+
+Delegated providers can still run their own direct readiness checks; for
+example, Cloudflare validates the configured runner URL and bearer token against
+the authenticated runner readiness API. Direct provider checks print stable
+fields such as `timeout=10s`, `api=list`, and `mutation=false` so scripts can
+tell what was checked. Direct AWS also checks EC2 vCPU quotas through Service
+Quotas and reports advisory capacity warnings before a lease is created. GCP
+uses an aggregated Compute Engine inventory query across zones, while the other
+built-in providers use their cheapest non-mutating list or readiness API.
+Blacksmith Testbox reports runtime as provider-hydrated because GitHub Actions
+hydration is owned by Testbox.
 
 When `--profile <name> --id <lease>` selects a profile with `doctor.enabled:
 true`, doctor runs that profile's remote prerequisite contract instead of the
@@ -88,12 +98,15 @@ hint:
 failed  provider provider=gcp class=auth hint=check_gcp_project_credentials_and_compute_instances_list ...
 ```
 
+AWS quota warnings are advisory. Doctor still exits `0` unless another check
+fails.
+
 `--json` prints the same checks as structured JSON with `ok`, `provider`, and
 `checks` fields. Each check includes `status`, `check`, `message`, and parsed
 `details` when available.
 
-Exit code is `0` on full success, `1` on any failure. Skips never change
-the exit code.
+Exit code is `0` when there are no failures, `1` on any failure. Skips and
+warnings never change the exit code.
 
 ## Flags
 

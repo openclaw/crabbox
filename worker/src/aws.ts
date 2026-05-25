@@ -99,6 +99,13 @@ export interface AWSServiceQuota {
   unit?: string;
 }
 
+export interface AWSCapacityReadinessCheck {
+  status: "ok" | "skip" | "warning";
+  check: "capacity";
+  message: string;
+  details: Record<string, string>;
+}
+
 export interface AWSIdentity {
   account: string;
   arn: string;
@@ -208,6 +215,19 @@ export class EC2SpotClient {
     this.aws = new AwsClient(clientOptions);
     this.serviceQuotas = new AwsClient({ ...clientOptions, service: "servicequotas" });
     this.stsClient = new AwsClient({ ...clientOptions, service: "sts" });
+  }
+
+  async capacityReadinessChecks(config: LeaseConfig): Promise<AWSCapacityReadinessCheck[]> {
+    if (config.target === "macos") {
+      return [];
+    }
+    return await Promise.all(
+      awsCapacityReadinessMarkets(config).map(async (market) => {
+        const code = awsQuotaCodeForMarket(market);
+        const quota = await this.appliedServiceQuota(code);
+        return awsCapacityReadinessCheckForQuota(config, market, this.region, quota);
+      }),
+    );
   }
 
   async identity(): Promise<AWSIdentity> {
@@ -1914,6 +1934,116 @@ export function awsQuotaPreflightAttempt(
     category: "quota",
     message: `quota ${quotaCode} in ${region} is ${quotaValue} vCPUs; ${serverType} needs ${needed} vCPUs`,
   };
+}
+
+type AWSCapacityReadinessConfig = Pick<
+  LeaseConfig,
+  "target" | "windowsMode" | "class" | "serverType" | "capacityMarket" | "capacityFallback"
+>;
+
+export function awsCapacityReadinessCheckForQuota(
+  config: AWSCapacityReadinessConfig,
+  market: string,
+  region: string,
+  quotaValue: number | undefined,
+): AWSCapacityReadinessCheck {
+  const quotaCode = awsQuotaCodeForMarket(market);
+  const needed = awsInstanceTypeVCPUs(config.serverType);
+  const details: Record<string, string> = {
+    provider: "aws",
+    market,
+    region,
+    quota_code: quotaCode,
+    default_class: config.class,
+    default_type: config.serverType,
+    default_needed_vcpus: String(needed ?? 0),
+  };
+  if (quotaValue === undefined) {
+    details["hint"] = "servicequotas_unavailable_or_forbidden";
+    return {
+      status: "skip",
+      check: "capacity",
+      message: awsCapacityReadinessMessage("provider=aws capacity=unknown", details),
+      details,
+    };
+  }
+  details["limit_vcpus"] = String(Math.trunc(quotaValue));
+  if (!needed) {
+    details["hint"] = "unknown_instance_vcpus";
+    return {
+      status: "skip",
+      check: "capacity",
+      message: awsCapacityReadinessMessage("provider=aws capacity=unknown", details),
+      details,
+    };
+  }
+  if (quotaValue < needed) {
+    const recommendation = awsRecommendedClassForQuota(config, Math.trunc(quotaValue));
+    if (recommendation) {
+      details["recommended_class"] = recommendation.machineClass;
+      details["recommended_type"] = recommendation.serverType;
+    }
+    details["hint"] = "lower_class_or_request_quota";
+    return {
+      status: "warning",
+      check: "capacity",
+      message: awsCapacityReadinessMessage("provider=aws capacity=quota_pressure", details),
+      details,
+    };
+  }
+  details["hint"] = "quota_satisfies_default_class";
+  return {
+    status: "ok",
+    check: "capacity",
+    message: awsCapacityReadinessMessage("provider=aws capacity=ready", details),
+    details,
+  };
+}
+
+function awsCapacityReadinessMarkets(config: AWSCapacityReadinessConfig): string[] {
+  const markets = [config.capacityMarket || "spot"];
+  if (config.capacityMarket === "spot" && config.capacityFallback.startsWith("on-demand")) {
+    markets.push("on-demand");
+  }
+  return uniqueStrings(markets);
+}
+
+function awsCapacityReadinessMessage(prefix: string, details: Record<string, string>): string {
+  const suffix = Object.entries(details)
+    .filter(([key, value]) => key !== "provider" && value)
+    .toSorted(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value.replaceAll(" ", "_")}`)
+    .join(" ");
+  return suffix ? `${prefix} ${suffix}` : prefix;
+}
+
+function awsRecommendedClassForQuota(
+  config: Pick<LeaseConfig, "target" | "windowsMode">,
+  limitVCPUs: number,
+): { machineClass: string; serverType: string } | undefined {
+  if (limitVCPUs <= 0) {
+    return undefined;
+  }
+  for (const machineClass of ["beast", "large", "fast", "standard"]) {
+    const [serverType] = awsInstanceTypeCandidatesForTargetClass(
+      config.target,
+      machineClass,
+      config.windowsMode,
+    );
+    if (serverType && (awsInstanceTypeVCPUs(serverType) ?? 0) <= limitVCPUs) {
+      return { machineClass, serverType };
+    }
+  }
+  for (const serverType of awsInstanceTypeCandidatesForTargetClass(
+    config.target,
+    "standard",
+    config.windowsMode,
+  )) {
+    if ((awsInstanceTypeVCPUs(serverType) ?? 0) <= limitVCPUs) {
+      return { machineClass: "standard", serverType };
+    }
+  }
+  return undefined;
 }
 
 function uniqueStrings(values: string[]): string[] {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -160,6 +161,71 @@ func TestDoctorJSONCoordinatorOutput(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("provider readiness missing from JSON: %#v", view.Checks)
+	}
+}
+
+func TestDoctorJSONCoordinatorOutputIncludesCapacityWarnings(t *testing.T) {
+	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("missing local doctor tool %s: %v", tool, err)
+		}
+	}
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+
+	var readinessQuery url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/health":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/v1/whoami":
+			_ = json.NewEncoder(w).Encode(CoordinatorWhoami{Auth: "token", Owner: "alice@example.test", Org: "example-org"})
+		case "/v1/providers/aws/readiness":
+			readinessQuery = r.URL.Query()
+			_ = json.NewEncoder(w).Encode(CoordinatorProviderReadiness{
+				Provider:   "aws",
+				Configured: true,
+				Checks: []DoctorCheck{{
+					Status:  "warning",
+					Check:   "capacity",
+					Message: "provider=aws capacity=quota_pressure market=spot recommended_class=standard",
+					Details: map[string]string{"provider": "aws", "market": "spot", "recommended_class": "standard"},
+				}},
+			})
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "token")
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--provider", "aws", "--json"})
+	if err != nil {
+		t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if readinessQuery.Get("class") != "beast" || readinessQuery.Get("serverType") != "c7a.48xlarge" {
+		t.Fatalf("readiness query=%s, want default AWS class/type", readinessQuery.Encode())
+	}
+	var view doctorJSONOutput
+	if err := json.Unmarshal(stdout.Bytes(), &view); err != nil {
+		t.Fatalf("doctor JSON invalid: %v\n%s", err, stdout.String())
+	}
+	if !view.OK {
+		t.Fatalf("capacity warning should not fail doctor: %#v", view)
+	}
+	found := false
+	for _, check := range view.Checks {
+		if check.Check == "capacity" && check.Status == "warning" && check.Details["recommended_class"] == "standard" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("capacity warning missing from JSON: %#v", view.Checks)
 	}
 }
 

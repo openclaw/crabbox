@@ -114,6 +114,10 @@ provider labels and `crabbox cleanup`.
 
 - Spot capacity and quota errors are normal. Prefer classes over exact `--type`
   when you want fallback.
+- Run `crabbox doctor --provider aws` before first warmup in a new or unfunded
+  account. Doctor checks EC2 vCPU Service Quotas for the effective class/type
+  and reports a smaller recommended class/type when `beast` would exceed the
+  account cap.
 - Brokered leases include `capacityHints` unless disabled with
   `capacity.hints: false` or `CRABBOX_CAPACITY_HINTS=0`.
 - During capacity pressure, prefer `standard` or `fast` plus multiple

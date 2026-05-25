@@ -101,6 +101,7 @@ Symptoms:
 Checks:
 
 ```sh
+bin/crabbox doctor --provider aws
 bin/crabbox list --json
 bin/crabbox usage --scope all
 CRABBOX_CAPACITY_REGIONS=eu-west-1,eu-west-2,eu-central-1,us-east-1,us-west-2 \
@@ -116,6 +117,7 @@ Fixes:
 - set `CRABBOX_CAPACITY_AVAILABILITY_ZONES` only when you intentionally want a specific zone in those regions;
 - set `CRABBOX_CAPACITY_STRATEGY=most-available`;
 - keep capacity hints enabled, or set `CRABBOX_CAPACITY_LARGE_CLASSES` when your installation wants warnings for classes beyond `beast`;
+- if `doctor` prints `warning capacity`, use its recommended class/type or request the printed AWS quota code;
 - raise the AWS `Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances` quota for C/M/R/T/Z families, or the matching Spot quota when using Spot;
 - raise Hetzner dedicated-core quota when dedicated classes are required;
 - temporarily use AWS fallback capacity.
@@ -125,7 +127,8 @@ uses AWS Service Quotas when available and reports the quota code, applied vCPU
 limit, requested type, and required vCPUs before trying the next candidate.
 Brokered responses also include `capacityHints` so callers can surface the
 selected region/market and next operator action instead of parsing provider
-errors.
+errors. `crabbox doctor --provider aws` can surface the same quota pressure
+before the first warmup.
 
 If AWS reports `InvalidInstanceID.NotFound` during coordinator-backed lease
 creation, the backing instance record was stale by the time Crabbox tried to use

@@ -127,12 +127,27 @@ func (b *awsLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseVie
 }
 
 func (b *awsLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
-	servers, err := b.List(ctx, ListRequest{})
+	client, err := newAWSClient(ctx, b.Cfg)
+	if err != nil {
+		return core.DoctorResult{}, err
+	}
+	servers, err := client.ListCrabboxServers(ctx)
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
 	result := core.InventoryDoctorResult("aws", len(servers))
 	result.Message += fmt.Sprintf(" region=%s default_type=%s", b.Cfg.AWSRegion, b.Cfg.ServerType)
+	result.Checks = append(result.Checks, core.DoctorCheck{
+		Status:  "ok",
+		Check:   "provider",
+		Message: result.Message,
+		Details: map[string]string{
+			"provider":     "aws",
+			"region":       b.Cfg.AWSRegion,
+			"default_type": b.Cfg.ServerType,
+		},
+	})
+	result.Checks = append(result.Checks, client.CapacityDoctorChecks(ctx, b.Cfg)...)
 	return result, nil
 }
 

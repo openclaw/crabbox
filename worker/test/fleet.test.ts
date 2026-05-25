@@ -5865,6 +5865,56 @@ describe("fleet identity", () => {
     });
   });
 
+  it("reports AWS capacity quota readiness before a lease is requested", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const awsRequest = input instanceof Request ? input : new Request(input, init);
+        expect(new URL(awsRequest.url).hostname).toBe("servicequotas.eu-west-1.amazonaws.com");
+        expect(awsRequest.headers.get("x-amz-target")).toBe(
+          "ServiceQuotasV20190624.GetServiceQuota",
+        );
+        return new Response(JSON.stringify({ Quota: { Value: 32 } }), {
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+    const fleet = testFleet(
+      undefined,
+      {},
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "test",
+        CRABBOX_AWS_REGION: "eu-west-1",
+      },
+    );
+
+    const response = await fleet.fetch(
+      request(
+        "GET",
+        "/v1/providers/aws/readiness?target=linux&class=beast&serverType=c7a.48xlarge&market=spot&fallback=on-demand-after-120s&region=eu-west-1",
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      checks?: Array<{ status: string; details: Record<string, string> }>;
+    };
+    expect(body.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "warning",
+          details: expect.objectContaining({
+            market: "spot",
+            default_needed_vcpus: "192",
+            recommended_class: "standard",
+            recommended_type: "c7a.8xlarge",
+          }),
+        }),
+      ]),
+    );
+  });
+
   it("fails brokered Azure leases with provider_not_configured before constructing Azure", async () => {
     const fleet = testFleet();
     const response = await fleet.fetch(

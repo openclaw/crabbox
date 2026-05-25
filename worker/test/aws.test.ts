@@ -5,6 +5,7 @@ import {
   addRunInstancesTagSpecifications,
   applyAWSRunInstanceTargetOptions,
   awsAvailabilityZoneForRegion,
+  awsCapacityReadinessCheckForQuota,
   awsInstanceTypeVCPUs,
   awsHostIDsFromSet,
   awsLaunchCandidates,
@@ -88,6 +89,66 @@ describe("aws provider", () => {
       { cidr: "203.0.113.10/32", family: "ipv4", port: "2222" },
       { cidr: "2001:db8::1/128", family: "ipv6", port: "2222" },
     ]);
+  });
+
+  it("turns low AWS vCPU quota into a doctor readiness warning", () => {
+    const check = awsCapacityReadinessCheckForQuota(
+      {
+        target: "linux",
+        windowsMode: "normal",
+        class: "beast",
+        serverType: "c7a.48xlarge",
+        capacityMarket: "spot",
+        capacityFallback: "on-demand-after-120s",
+      },
+      "spot",
+      "eu-west-1",
+      32,
+    );
+
+    expect(check).toMatchObject({
+      status: "warning",
+      check: "capacity",
+      details: {
+        provider: "aws",
+        market: "spot",
+        quota_code: "L-34B43A08",
+        default_needed_vcpus: "192",
+        recommended_class: "standard",
+        recommended_type: "c7a.8xlarge",
+        hint: "lower_class_or_request_quota",
+      },
+    });
+    expect(check.message).toContain("capacity=quota_pressure");
+  });
+
+  it("skips AWS vCPU quota readiness when quota cannot be inspected", () => {
+    const check = awsCapacityReadinessCheckForQuota(
+      {
+        target: "linux",
+        windowsMode: "normal",
+        class: "beast",
+        serverType: "c7a.48xlarge",
+        capacityMarket: "spot",
+        capacityFallback: "on-demand-after-120s",
+      },
+      "spot",
+      "eu-west-1",
+      undefined,
+    );
+
+    expect(check).toMatchObject({
+      status: "skip",
+      check: "capacity",
+      details: {
+        provider: "aws",
+        market: "spot",
+        quota_code: "L-34B43A08",
+        default_needed_vcpus: "192",
+        hint: "servicequotas_unavailable_or_forbidden",
+      },
+    });
+    expect(check.message).toContain("capacity=unknown");
   });
 
   it("selects stale Crabbox SSH ingress rules before adding the current source CIDR", () => {
