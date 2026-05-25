@@ -1260,6 +1260,7 @@ afterSync:
 			CommandDisplay: commandDisplay,
 			ShellMode:      *shellMode,
 			RoutingArgs:    runFailureDigestRoutingArgs(cfg),
+			SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg),
 			StopCommand:    report.StopCommand,
 			Classification: classification,
 			Phases:         timings.commandPhases,

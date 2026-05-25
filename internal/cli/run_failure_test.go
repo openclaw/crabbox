@@ -164,6 +164,27 @@ func TestFailureDigestRoutesNextCommands(t *testing.T) {
 	}
 }
 
+func TestFailureDigestUsesSSHCompatibleRouting(t *testing.T) {
+	commands := failureDigestNextCommands(runFailureDigestInput{
+		Provider:       "proxmox",
+		LeaseID:        "cbx_123",
+		CommandDisplay: "go test ./...",
+		RoutingArgs:    []string{"--provider", "proxmox", "--proxmox-api-url", "https://pve.example"},
+		SSHRoutingArgs: []string{"--provider", "proxmox"},
+		Classification: FailureClassification{RetryLikely: "unknown"},
+		StopCommand:    "crabbox stop --provider proxmox --proxmox-api-url https://pve.example cbx_123",
+	}, "unknown")
+	if len(commands) < 3 {
+		t.Fatalf("commands=%v", commands)
+	}
+	if strings.Contains(commands[0], "proxmox-api-url") {
+		t.Fatalf("ssh command contains provider-specific flag: %q", commands[0])
+	}
+	if !strings.Contains(commands[1], "--proxmox-api-url") || !strings.Contains(commands[2], "--proxmox-api-url") {
+		t.Fatalf("run/stop commands lost provider routing: %v", commands)
+	}
+}
+
 func TestFailureTailRedactsHTMLAuthBody(t *testing.T) {
 	tail := newStreamTailBuffer(40)
 	_, _ = tail.Write([]byte("<!doctype html><html><head><title>Cloudflare Access</title></head><body>login</body></html>\n"))

@@ -141,6 +141,7 @@ type runFailureDigestInput struct {
 	CommandDisplay string
 	ShellMode      bool
 	RoutingArgs    []string
+	SSHRoutingArgs []string
 	StopCommand    string
 	Classification FailureClassification
 	Phases         []TimingPhase
@@ -213,12 +214,16 @@ func failureDigestNextCommands(input runFailureDigestInput, retry string) []stri
 	}
 	leaseRef := firstNonBlank(input.Slug, input.LeaseID)
 	if leaseRef != "" {
-		routing := append([]string(nil), input.RoutingArgs...)
-		if len(routing) == 0 {
-			routing = fallbackFailureDigestRoutingArgs(input)
+		sshRouting := append([]string(nil), input.SSHRoutingArgs...)
+		if len(sshRouting) == 0 {
+			sshRouting = fallbackFailureDigestRoutingArgs(input)
 		}
-		commands = append(commands, crabboxCommandString(append(append([]string{"ssh"}, routing...), "--id", leaseRef)))
+		commands = append(commands, crabboxCommandString(append(append([]string{"ssh"}, sshRouting...), "--id", leaseRef)))
 		if retry != "false" && canSuggestRunRetry(input.CommandDisplay) {
+			routing := append([]string(nil), input.RoutingArgs...)
+			if len(routing) == 0 {
+				routing = fallbackFailureDigestRoutingArgs(input)
+			}
 			runArgs := append(append([]string{"run"}, routing...), "--id", leaseRef, "--fresh-sync")
 			if input.ShellMode {
 				runArgs = append(runArgs, "--shell")
@@ -226,7 +231,11 @@ func failureDigestNextCommands(input runFailureDigestInput, retry string) []stri
 			runCommand := crabboxCommandString(runArgs) + " -- " + input.CommandDisplay
 			commands = append(commands, runCommand)
 		}
-		commands = append(commands, firstNonBlank(input.StopCommand, crabboxCommandString(append(append([]string{"stop"}, routing...), leaseRef))))
+		stopRouting := append([]string(nil), input.RoutingArgs...)
+		if len(stopRouting) == 0 {
+			stopRouting = fallbackFailureDigestRoutingArgs(input)
+		}
+		commands = append(commands, firstNonBlank(input.StopCommand, crabboxCommandString(append(append([]string{"stop"}, stopRouting...), leaseRef))))
 	}
 	return commands
 }
@@ -255,6 +264,32 @@ func runFailureDigestRoutingArgs(cfg Config) []string {
 		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
 	}
 	return appendProviderStopRoutingArgs(args, cfg)
+}
+
+func runFailureDigestSSHRoutingArgs(cfg Config) []string {
+	args := []string{}
+	if strings.TrimSpace(cfg.Provider) != "" {
+		args = append(args, "--provider", cfg.Provider)
+	}
+	if strings.TrimSpace(cfg.TargetOS) != "" {
+		args = append(args, "--target", cfg.TargetOS)
+	}
+	if cfg.TargetOS == targetWindows && strings.TrimSpace(cfg.WindowsMode) != "" {
+		args = append(args, "--windows-mode", cfg.WindowsMode)
+	}
+	if strings.TrimSpace(cfg.Static.Host) != "" {
+		args = append(args, "--static-host", cfg.Static.Host)
+	}
+	if strings.TrimSpace(cfg.Static.User) != "" {
+		args = append(args, "--static-user", cfg.Static.User)
+	}
+	if strings.TrimSpace(cfg.Static.Port) != "" {
+		args = append(args, "--static-port", cfg.Static.Port)
+	}
+	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
+		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
+	}
+	return args
 }
 
 func fallbackFailureDigestRoutingArgs(input runFailureDigestInput) []string {
