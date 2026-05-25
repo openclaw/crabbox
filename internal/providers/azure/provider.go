@@ -95,3 +95,27 @@ func firstNonBlank(values ...string) string {
 	}
 	return ""
 }
+
+func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {
+	cfg := req.Config
+	switch req.Record.Kind {
+	case core.CheckpointKindAzure:
+		cfg.AzureImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	case core.CheckpointKindAzureOS:
+		cfg.AzureSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	default:
+		return core.Exit(2, "provider=azure does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	if req.Record.Region != "" {
+		cfg.AzureLocation = req.Record.Region
+	}
+	if req.AzureOSDiskExplicit {
+		mode, err := core.NormalizeAzureOSDiskMode(req.AzureOSDisk)
+		if err != nil {
+			return err
+		}
+		cfg.AzureOSDisk = mode
+		cfg.AzureOSDiskExplicit = true
+	}
+	return nil
+}

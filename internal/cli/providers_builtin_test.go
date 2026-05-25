@@ -61,6 +61,28 @@ func (testAzureProvider) NativeCheckpointCapability(req NativeCheckpointRequest)
 	}
 	return NativeCheckpointCapability{Kind: checkpointKindAzureOS}, true
 }
+func (testAzureProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
+	switch req.Record.Kind {
+	case checkpointKindAzure:
+		req.Config.AzureImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	case checkpointKindAzureOS:
+		req.Config.AzureSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	default:
+		return exit(2, "provider=azure does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	if req.Record.Region != "" {
+		req.Config.AzureLocation = req.Record.Region
+	}
+	if req.AzureOSDiskExplicit {
+		mode, err := NormalizeAzureOSDiskMode(req.AzureOSDisk)
+		if err != nil {
+			return err
+		}
+		req.Config.AzureOSDisk = mode
+		req.Config.AzureOSDiskExplicit = true
+	}
+	return nil
+}
 
 type testHetznerProvider struct{}
 
@@ -114,6 +136,24 @@ func (testGCPProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (
 	}
 	return NativeCheckpointCapability{Kind: checkpointKindGCPDisk}, true
 }
+func (testGCPProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
+	switch req.Record.Kind {
+	case checkpointKindGCP:
+		req.Config.GCPMachineImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	case checkpointKindGCPDisk:
+		req.Config.GCPSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	default:
+		return exit(2, "provider=gcp does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	if req.Record.Region != "" {
+		req.Config.GCPZone = req.Record.Region
+	}
+	if req.Record.Project != "" {
+		req.Config.GCPProject = req.Record.Project
+		req.Config.gcpProjectExplicit = true
+	}
+	return nil
+}
 
 type testAWSProvider struct{}
 
@@ -165,6 +205,30 @@ func (testAWSProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (
 	}
 	return NativeCheckpointCapability{Kind: checkpointKindAWSEBS}, true
 }
+func (testAWSProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
+	switch req.Record.Kind {
+	case checkpointKindAWSAMI:
+		req.Config.AWSAMI = req.Record.ImageID
+	case checkpointKindAWSEBS:
+		req.Config.AWSSnapshot = req.Record.ImageID
+	default:
+		return exit(2, "provider=aws does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	if req.Record.Region != "" {
+		req.Config.AWSRegion = req.Record.Region
+	}
+	if req.Config.TargetOS == targetMacOS {
+		if req.Record.Direct && req.Record.HostID != "" {
+			req.Config.HostID = req.Record.HostID
+			req.Config.AWSMacHostID = req.Record.HostID
+		}
+		if !req.MarketExplicit {
+			req.Config.Capacity.Market = "on-demand"
+		}
+		normalizeTargetConfig(req.Config)
+	}
+	return nil
+}
 
 type testParallelsProvider struct{}
 
@@ -196,6 +260,18 @@ func (testParallelsProvider) NativeCheckpointCapability(req NativeCheckpointRequ
 		return NativeCheckpointCapability{}, false
 	}
 	return NativeCheckpointCapability{Kind: checkpointKindParallels, Direct: true}, true
+}
+func (testParallelsProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
+	if req.Record.Kind != checkpointKindParallels {
+		return exit(2, "provider=parallels does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	req.Config.Provider = "parallels"
+	req.Config.Coordinator = ""
+	req.Config.CoordToken = ""
+	req.Config.Parallels.SourceID = req.Record.Resource
+	req.Config.Parallels.SourceSnapshotID = req.Record.ImageID
+	applyParallelsHostRefConfig(req.Config, req.Record.Region)
+	return nil
 }
 
 type testProxmoxProvider struct{}

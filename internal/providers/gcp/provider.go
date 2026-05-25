@@ -68,3 +68,22 @@ func firstNonBlank(values ...string) string {
 	}
 	return ""
 }
+
+func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {
+	cfg := req.Config
+	switch req.Record.Kind {
+	case core.CheckpointKindGCP:
+		cfg.GCPMachineImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	case core.CheckpointKindGCPDisk:
+		cfg.GCPSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	default:
+		return core.Exit(2, "provider=gcp does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	if req.Record.Region != "" {
+		cfg.GCPZone = req.Record.Region
+	}
+	if req.Record.Project != "" {
+		core.SetGCPProjectExplicit(cfg, req.Record.Project)
+	}
+	return nil
+}

@@ -164,3 +164,17 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	}
 	return core.NativeCheckpointCapability{Kind: core.CheckpointKindParallels, Direct: true}, true
 }
+
+func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {
+	if req.Record.Kind != core.CheckpointKindParallels {
+		return core.Exit(2, "provider=parallels does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	cfg := req.Config
+	cfg.Provider = "parallels"
+	cfg.Coordinator = ""
+	cfg.CoordToken = ""
+	cfg.Parallels.SourceID = req.Record.Resource
+	cfg.Parallels.SourceSnapshotID = req.Record.ImageID
+	core.ApplyParallelsHostRefConfig(cfg, req.Record.Region)
+	return nil
+}
