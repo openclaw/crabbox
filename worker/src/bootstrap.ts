@@ -836,7 +836,8 @@ function optionalWriteFiles(config: LeaseConfig): string {
         background-image: none;
         background-color: $panel_css_bg;
         border-image: none;
-        border-color: $panel_css_fg;
+        border-color: transparent;
+        border-radius: 2px;
         box-shadow: none;
         color: $panel_css_fg;
         outline-color: transparent;

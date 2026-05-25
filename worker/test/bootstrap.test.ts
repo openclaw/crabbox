@@ -119,6 +119,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain('xfconf-query -c xfce4-desktop -p "$backdrop/image-style"');
     expect(got).toContain('xfconf-query -c xfce4-desktop -p "$backdrop/last-image"');
     expect(got).toContain("crabbox desktop theme start");
+    expect(got).toContain("border-color: transparent");
     expect(got).toContain("crabbox-xfce4-panel-$user.log");
     expect(got).toContain('pkill -TERM -u "$user_id" -x xfce4-panel');
     expect(got).toContain("pkill -TERM -u \"$user_id\" -f '/xfce4/panel/wrapper-2.0'");
