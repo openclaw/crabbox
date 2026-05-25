@@ -229,14 +229,18 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBe(Date.parse(lease.expiresAt));
   });
 
-  it("refreshes AWS SSH ingress from the heartbeat request source", async () => {
+  it("offers providers heartbeat request source and active lease access state", async () => {
     const storage = new MemoryStorage();
-    const refreshed: LeaseConfig[] = [];
+    let refreshContext: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] } | undefined;
     const fleet = testFleet(storage, {
       aws: fakeProvider(undefined, {
         provider: "aws",
-        onRefreshSSHIngress(config) {
-          refreshed.push(config);
+        onRefreshLeaseAccess(lease, context) {
+          refreshContext = context;
+          return {
+            ...lease,
+            network: { sshSourceCIDRs: context.requestSourceCIDRs },
+          };
         },
       }),
     });
@@ -263,7 +267,7 @@ describe("fleet lease identity and idle", () => {
       testLease({
         id: "cbx_000000000002",
         provider: "aws",
-        awsSSHCIDRs: ["203.0.113.9/32"],
+        network: { sshSourceCIDRs: ["203.0.113.9/32"] },
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       }),
     );
@@ -280,16 +284,14 @@ describe("fleet lease identity and idle", () => {
     );
 
     expect(heartbeat.status).toBe(200);
-    expect(refreshed).toHaveLength(1);
-    expect(refreshed[0]).toMatchObject({
-      provider: "aws",
-      target: "macos",
-      awsRegion: "eu-west-1",
-      awsSSHCIDRs: ["198.51.100.44/32", "203.0.113.9/32"],
-      sshPort: "2222",
-      sshFallbackPorts: ["22"],
-    });
-    expect(storage.value<LeaseRecord>("lease:cbx_000000000001")?.awsSSHCIDRs).toEqual([
+    const heartbeatBody = (await heartbeat.json()) as { lease: LeaseRecord };
+    expect(heartbeatBody.lease.network?.sshSourceCIDRs).toEqual(["198.51.100.44/32"]);
+    expect(refreshContext?.requestSourceCIDRs).toEqual(["198.51.100.44/32"]);
+    expect(
+      refreshContext?.activeLeases.find((lease) => lease.id === "cbx_000000000002")?.network
+        ?.sshSourceCIDRs,
+    ).toEqual(["203.0.113.9/32"]);
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000001")?.network?.sshSourceCIDRs).toEqual([
       "198.51.100.44/32",
     ]);
   });
@@ -940,8 +942,15 @@ describe("fleet lease identity and idle", () => {
   it("passes the Cloudflare request source IP as AWS SSH ingress CIDR", async () => {
     let awsCIDRs: string[] = [];
     const fleet = testFleet(new MemoryStorage(), {
-      aws: fakeProvider((config) => {
-        awsCIDRs = config.awsSSHCIDRs;
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onPrepareLeaseCreate(config, lease, context) {
+          awsCIDRs = context.requestSourceCIDRs;
+          return {
+            config: { ...config, awsSSHCIDRs: awsCIDRs },
+            lease: { ...lease, network: { sshSourceCIDRs: awsCIDRs } },
+          };
+        },
       }),
     });
     const create = await fleet.fetch(
@@ -969,17 +978,45 @@ describe("fleet lease identity and idle", () => {
   it("preserves active AWS lease SSH ingress CIDRs while creating another lease", async () => {
     const storage = new MemoryStorage();
     let awsCIDRs: string[] = [];
+    let reconcile: string | undefined;
+    let inFlightCIDRs: string[] | undefined;
+    let inFlightLeaseVisible = false;
     const fleet = testFleet(storage, {
-      aws: fakeProvider((config) => {
-        awsCIDRs = config.awsSSHCIDRs;
-      }),
+      aws: fakeProvider(
+        () => {
+          inFlightLeaseVisible = storage.value<LeaseRecord>("lease:cbx_abcdef123456") !== undefined;
+          inFlightCIDRs = storage.value<LeaseRecord>("provider-access:cbx_abcdef123456")?.network
+            ?.sshSourceCIDRs;
+        },
+        {
+          provider: "aws",
+          onPrepareLeaseCreate(config, lease, context) {
+            const sourceCIDRs = context.requestSourceCIDRs;
+            awsCIDRs = [
+              ...context.activeLeases.flatMap((active) => active.network?.sshSourceCIDRs ?? []),
+              ...sourceCIDRs,
+            ];
+            return {
+              config: { ...config, awsSSHCIDRs: awsCIDRs },
+              lease: { ...lease, network: { sshSourceCIDRs: sourceCIDRs } },
+              provisioning: {
+                sshIngressReconcile: "authoritative",
+                publishAccessBeforeProvisioning: true,
+              },
+            };
+          },
+          onCreateProvisioning(provisioning) {
+            reconcile = provisioning?.sshIngressReconcile;
+          },
+        },
+      ),
     });
     storage.seed(
       "lease:cbx_000000000001",
       testLease({
         id: "cbx_000000000001",
         provider: "aws",
-        awsSSHCIDRs: ["198.51.100.44/32"],
+        network: { sshSourceCIDRs: ["198.51.100.44/32"] },
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       }),
     );
@@ -1003,9 +1040,111 @@ describe("fleet lease identity and idle", () => {
 
     expect(create.status).toBe(201);
     expect(awsCIDRs).toEqual(["198.51.100.44/32", "203.0.113.7/32"]);
-    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.awsSSHCIDRs).toEqual([
+    expect(reconcile).toBe("authoritative");
+    expect(inFlightLeaseVisible).toBe(false);
+    expect(inFlightCIDRs).toEqual(["203.0.113.7/32"]);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.network?.sshSourceCIDRs).toEqual([
       "203.0.113.7/32",
     ]);
+  });
+
+  it("lets providers choose additive access reconciliation for unknown active lease state", async () => {
+    const storage = new MemoryStorage();
+    let reconcile: string | undefined;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onPrepareLeaseCreate(config, lease, context) {
+          const sourceCIDRs = context.requestSourceCIDRs;
+          return {
+            config: { ...config, awsSSHCIDRs: sourceCIDRs },
+            lease: { ...lease, network: { sshSourceCIDRs: sourceCIDRs } },
+            provisioning: {
+              sshIngressReconcile: context.activeLeases.some(
+                (active) =>
+                  active.provider === "aws" &&
+                  active.state === "active" &&
+                  (active.network?.sshSourceCIDRs?.length ?? 0) === 0,
+              )
+                ? "additive"
+                : "authoritative",
+            },
+          };
+        },
+        onCreateProvisioning(provisioning) {
+          reconcile = provisioning?.sshIngressReconcile;
+        },
+      }),
+    });
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "aws",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "cf-connecting-ip": "203.0.113.7",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "aws",
+          class: "standard",
+          serverType: "c7a.8xlarge",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(create.status).toBe(201);
+    expect(reconcile).toBe("additive");
+  });
+
+  it("counts in-flight provider access reservations against active lease limits", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(undefined, { provider: "aws" }),
+      },
+      { CRABBOX_MAX_ACTIVE_LEASES: "1" },
+    );
+    storage.seed(
+      "provider-access:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "aws",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "cf-connecting-ip": "203.0.113.7",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "aws",
+          class: "standard",
+          serverType: "c7a.8xlarge",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(create.status).toBe(429);
+    await expect(create.json()).resolves.toMatchObject({
+      error: "cost_limit_exceeded",
+    });
   });
 
   it("persists provider host pins on AWS macOS leases", async () => {
@@ -1219,8 +1358,15 @@ describe("fleet lease identity and idle", () => {
   it("honors requested AWS SSH ingress CIDRs over request source IP", async () => {
     let awsCIDRs: string[] = [];
     const fleet = testFleet(new MemoryStorage(), {
-      aws: fakeProvider((config) => {
-        awsCIDRs = config.awsSSHCIDRs;
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onPrepareLeaseCreate(config, lease) {
+          awsCIDRs = config.awsSSHCIDRs;
+          return {
+            config,
+            lease: { ...lease, network: { sshSourceCIDRs: config.awsSSHCIDRs } },
+          };
+        },
       }),
     });
     const create = await fleet.fetch(
@@ -6069,7 +6215,28 @@ function fakeProvider(
       snapshotIDs: string[],
       availabilityZones: string[] | undefined,
     ) => ProviderFastSnapshotRestore[];
-    onRefreshSSHIngress?: (config: LeaseConfig) => void;
+    onPrepareLeaseCreate?: (
+      config: LeaseConfig,
+      lease: LeaseRecord,
+      context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
+    ) =>
+      | {
+          config: LeaseConfig;
+          lease: LeaseRecord;
+          provisioning?: {
+            sshIngressReconcile?: "authoritative" | "additive";
+            publishAccessBeforeProvisioning?: boolean;
+          };
+        }
+      | undefined;
+    onRefreshLeaseAccess?: (
+      lease: LeaseRecord,
+      context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
+    ) => LeaseRecord | undefined;
+    onCreateProvisioning?: (provisioning?: {
+      sshIngressReconcile?: "authoritative" | "additive";
+      publishAccessBeforeProvisioning?: boolean;
+    }) => void;
   } = {},
   onDelete?: (id: string) => Promise<void>,
   onGet?: (id: string) => Promise<ProviderMachine> | ProviderMachine,
@@ -6094,10 +6261,30 @@ function fakeProvider(
         labels: {},
       };
     },
-    async refreshSSHIngress(config: LeaseConfig) {
-      result.onRefreshSSHIngress?.(config);
+    async prepareLeaseCreate(
+      config: LeaseConfig,
+      lease: LeaseRecord,
+      context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
+    ) {
+      return result.onPrepareLeaseCreate?.(config, lease, context);
     },
-    async createServerWithFallback(config: LeaseConfig, _leaseID: string, slug: string) {
+    async refreshLeaseAccess(
+      lease: LeaseRecord,
+      context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
+    ) {
+      return result.onRefreshLeaseAccess?.(lease, context);
+    },
+    async createServerWithFallback(
+      config: LeaseConfig,
+      _leaseID: string,
+      slug: string,
+      _owner: string,
+      provisioning?: {
+        sshIngressReconcile?: "authoritative" | "additive";
+        publishAccessBeforeProvisioning?: boolean;
+      },
+    ) {
+      result.onCreateProvisioning?.(provisioning);
       onCreate?.(config);
       return {
         server: {

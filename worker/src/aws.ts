@@ -156,6 +156,10 @@ type SSHIngressRule = {
   port: string;
 };
 
+interface AWSIngressOptions {
+  reconcile?: "authoritative" | "additive";
+}
+
 const sshIngressRangeFamilies = [
   {
     cidrField: "cidrIp",
@@ -244,8 +248,8 @@ export class EC2SpotClient {
     );
   }
 
-  async refreshSSHIngress(config: LeaseConfig): Promise<void> {
-    await this.ensureSecurityGroup(config);
+  async refreshSSHIngress(config: LeaseConfig, options: AWSIngressOptions = {}): Promise<void> {
+    await this.ensureSecurityGroup(config, options);
   }
 
   async createServerWithFallback(
@@ -253,6 +257,7 @@ export class EC2SpotClient {
     leaseID: string,
     slug: string,
     owner: string,
+    options: AWSIngressOptions = {},
   ): Promise<{
     server: ProviderMachine;
     serverType: string;
@@ -270,7 +275,7 @@ export class EC2SpotClient {
         : config.target === "macos"
           ? ""
           : await this.resolveAMI(config);
-      const securityGroupID = await this.ensureSecurityGroup(config);
+      const securityGroupID = await this.ensureSecurityGroup(config, options);
       const candidates = awsLaunchCandidates(config);
       const failures: string[] = [];
       const attempts: ProvisioningAttempt[] = [];
@@ -1125,7 +1130,10 @@ export class EC2SpotClient {
     return imageID;
   }
 
-  private async ensureSecurityGroup(config: LeaseConfig): Promise<string> {
+  private async ensureSecurityGroup(
+    config: LeaseConfig,
+    options: AWSIngressOptions = {},
+  ): Promise<string> {
     const configuredGroupID = config.awsSGID || this.env.CRABBOX_AWS_SECURITY_GROUP_ID || "";
     let group: unknown;
     let groupID = configuredGroupID;
@@ -1158,7 +1166,9 @@ export class EC2SpotClient {
     }
     const cidrs = awsSSHCIDRs(config, this.env);
     const ports = sshPorts(config);
-    await this.pruneStaleSSHIngress(groupID, group, ports, cidrs);
+    if (options.reconcile !== "additive") {
+      await this.pruneStaleSSHIngress(groupID, group, ports, cidrs);
+    }
     for (const port of ports) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup is per port.
       await this.revokeWorldTCP(groupID, port).catch((error: unknown) => {

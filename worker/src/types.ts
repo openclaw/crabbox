@@ -193,6 +193,7 @@ export interface LeaseRecord {
   cloudID: string;
   region?: string;
   providerProject?: string;
+  network?: LeaseNetworkState;
   owner: string;
   org: string;
   share?: LeaseShare | undefined;
@@ -212,7 +213,6 @@ export interface LeaseRecord {
   sshUser: string;
   sshPort: string;
   sshFallbackPorts?: string[];
-  awsSSHCIDRs?: string[];
   workRoot: string;
   keep: boolean;
   ttlSeconds: number;
@@ -232,6 +232,11 @@ export interface LeaseRecord {
   cleanupRetryAt?: string;
   releasedAt?: string;
   endedAt?: string;
+}
+
+export interface LeaseNetworkState {
+  sshSourceCIDRs?: string[];
+  sshSourceCIDRsComplete?: boolean;
 }
 
 export type LeaseShareRole = "use" | "manage";

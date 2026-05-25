@@ -86,6 +86,7 @@ const leaseCleanupRetryDelayMs = 5 * 60 * 1000;
 const awsOrphanSweepInitialDelayMs = 60 * 1000;
 const defaultAWSOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAWSOrphanSweepGraceSeconds = 15 * 60;
+const providerAccessReservationTTLMS = 15 * 60 * 1000;
 const maxPendingWebVNCBytes = 1024 * 1024;
 const maxCodeRequestBytes = 10 * 1024 * 1024;
 const maxCodeWebSocketFrameChunkBytes = 15 * 1024;
@@ -943,7 +944,7 @@ export class FleetDurableObject implements DurableObject {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<LeaseRequest>(request);
-    const config = leaseConfig(
+    let config = leaseConfig(
       input,
       this.env.CRABBOX_AZURE_OS_DISK ? { azureOSDisk: this.env.CRABBOX_AZURE_OS_DISK } : undefined,
     );
@@ -955,9 +956,6 @@ export class FleetDurableObject implements DurableObject {
         },
         { status: 403 },
       );
-    }
-    if (config.provider === "aws" && config.awsSSHCIDRs.length === 0) {
-      config.awsSSHCIDRs = requestSourceCIDRs(request);
     }
     if (config.provider === "aws" && !config.awsAMI && !config.awsSnapshot) {
       if (config.target === "macos") {
@@ -1001,6 +999,7 @@ export class FleetDurableObject implements DurableObject {
       org,
       leases,
     );
+    const providerAccessLeases = await this.providerAccessRecords();
     const tailscaleError = await this.prepareTailscaleConfig(config, input, leaseID, slug);
     if (tailscaleError) {
       return tailscaleError;
@@ -1021,7 +1020,7 @@ export class FleetDurableObject implements DurableObject {
       providerHourlyUSD,
     );
     const now = new Date();
-    const record: LeaseRecord = {
+    let record: LeaseRecord = {
       id: leaseID,
       slug,
       provider: config.provider,
@@ -1080,23 +1079,32 @@ export class FleetDurableObject implements DurableObject {
         record.tailscale.exitNodeAllowLanAccess = config.tailscaleExitNodeAllowLanAccess;
       }
     }
-    const limitError = enforceCostLimits(leases, record, costLimits(this.env), now);
+    const limitError = enforceCostLimits(
+      [...leases, ...providerAccessLeases],
+      record,
+      costLimits(this.env),
+      now,
+    );
     if (limitError) {
       return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
     }
-    if (config.provider === "aws") {
-      record.awsSSHCIDRs = config.awsSSHCIDRs;
-      await this.putLease(record);
+    const accessContext = providerAccessContext(requestSourceCIDRs(request), [
+      ...leases,
+      ...providerAccessLeases,
+    ]);
+    const prepared = await provider.prepareLeaseCreate?.(config, record, accessContext);
+    if (prepared) {
+      config = prepared.config;
+      record = prepared.lease;
     }
-    const providerConfig =
-      config.provider === "aws"
-        ? { ...config, awsSSHCIDRs: activeAWSSSHCIDRs([...leases, record], config.awsSSHCIDRs) }
-        : config;
+    if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
+      await this.putProviderAccess(providerAccessReservation(record, now));
+    }
     const { server, serverType, market, attempts } = await provider
-      .createServerWithFallback(providerConfig, leaseID, slug, owner)
+      .createServerWithFallback(config, leaseID, slug, owner, prepared?.provisioning)
       .catch(async (error: unknown) => {
-        if (config.provider === "aws") {
-          await this.state.storage.delete(leaseKey(record.id));
+        if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
+          await this.deleteProviderAccess(record.id);
         }
         throw error;
       });
@@ -1144,6 +1152,9 @@ export class FleetDurableObject implements DurableObject {
       record.providerProject = config.gcpProject;
     }
     await this.putLease(record);
+    if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
+      await this.deleteProviderAccess(record.id);
+    }
     await this.scheduleAlarm();
     return json({ lease: record }, { status: 201 });
   }
@@ -1163,8 +1174,8 @@ export class FleetDurableObject implements DurableObject {
         idleTimeoutSeconds?: number;
         telemetry?: Partial<LeaseTelemetry>;
       }>(request);
-      await this.applyLeaseHeartbeat(lease, body, request);
-      return json({ lease });
+      const updatedLease = await this.applyLeaseHeartbeat(lease, body, request);
+      return json({ lease: updatedLease });
     }
     if (method === "POST" && action === "tailscale") {
       const lease = await this.resolveLease(leaseID, request, false);
@@ -1193,7 +1204,7 @@ export class FleetDurableObject implements DurableObject {
       telemetry?: Partial<LeaseTelemetry>;
     },
     request?: Request,
-  ): Promise<void> {
+  ): Promise<LeaseRecord> {
     const now = new Date();
     const requestedIdleTimeoutSeconds = input.idleTimeoutSeconds;
     if (
@@ -1212,47 +1223,22 @@ export class FleetDurableObject implements DurableObject {
     lease.lastTouchedAt = now.toISOString();
     lease.expiresAt = recomputeLeaseExpiresAt(lease, now).toISOString();
     clearLeaseCleanupMetadata(lease);
-    const requestSource = request ? requestSourceCIDRs(request) : [];
-    if (lease.provider === "aws" && lease.state === "active" && requestSource.length > 0) {
-      lease.awsSSHCIDRs = requestSource;
+    const requestCIDRs = request ? requestSourceCIDRs(request) : [];
+    if (requestCIDRs.length > 0) {
+      const provider = this.provider(lease.provider, lease.region, lease.providerProject);
+      const leases = await this.leaseRecords();
+      const accessContext = providerAccessContext(
+        requestCIDRs,
+        replaceProviderAccessState([...leases, ...(await this.providerAccessRecords())], lease),
+      );
+      const updatedLease = await provider.refreshLeaseAccess?.(lease, accessContext);
+      if (updatedLease) {
+        lease = updatedLease;
+      }
     }
     await this.putLease(lease);
-    await this.refreshLeaseSSHIngress(lease, request);
     await this.scheduleAlarm();
-  }
-
-  private async refreshLeaseSSHIngress(lease: LeaseRecord, request: Request | undefined) {
-    if (!request || lease.provider !== "aws" || lease.state !== "active") {
-      return;
-    }
-    const cidrs = lease.awsSSHCIDRs ?? [];
-    if (cidrs.length === 0) {
-      return;
-    }
-    try {
-      const leases = await this.leaseRecords();
-      const config = leaseConfig({
-        provider: "aws",
-        target: lease.target,
-        windowsMode: lease.windowsMode ?? "normal",
-        class: lease.class,
-        serverType: lease.serverType,
-        awsSSHCIDRs: activeAWSSSHCIDRs(leases, cidrs),
-        capacity: { market: lease.market === "spot" ? "spot" : "on-demand" },
-        providerKey: lease.providerKey,
-        sshUser: lease.sshUser,
-        sshPort: lease.sshPort,
-        sshFallbackPorts: lease.sshFallbackPorts ?? [],
-        sshPublicKey: "ssh-ed25519 heartbeat-refresh",
-        workRoot: lease.workRoot,
-        ...(lease.hostId || lease.hostID ? { hostId: lease.hostId || lease.hostID } : {}),
-        ...(lease.region ? { awsRegion: lease.region } : {}),
-      });
-      const provider = this.provider("aws", lease.region || config.awsRegion);
-      await provider.refreshSSHIngress?.(config);
-    } catch (error) {
-      console.warn(`refresh AWS SSH ingress failed for ${lease.id}: ${errorMessage(error)}`);
-    }
+    return lease;
   }
 
   private async prepareTailscaleConfig(
@@ -4336,6 +4322,24 @@ export class FleetDurableObject implements DurableObject {
     return [...leases.values()];
   }
 
+  private async providerAccessRecords(): Promise<LeaseRecord[]> {
+    const records = await this.state.storage.list<LeaseRecord>({
+      prefix: providerAccessPrefix(),
+    });
+    const now = Date.now();
+    const active: LeaseRecord[] = [];
+    const staleKeys: string[] = [];
+    for (const [key, record] of records) {
+      if (record.state === "active" && Date.parse(record.expiresAt) > now) {
+        active.push(record);
+        continue;
+      }
+      staleKeys.push(key);
+    }
+    await Promise.all(staleKeys.map((key) => this.state.storage.delete(key)));
+    return active;
+  }
+
   private async runRecords(): Promise<RunRecord[]> {
     const runs = await this.state.storage.list<RunRecord>({ prefix: "run:" });
     return [...runs.values()];
@@ -4431,6 +4435,14 @@ export class FleetDurableObject implements DurableObject {
 
   private async putLease(lease: LeaseRecord): Promise<void> {
     await this.state.storage.put(leaseKey(lease.id), lease);
+  }
+
+  private async putProviderAccess(lease: LeaseRecord): Promise<void> {
+    await this.state.storage.put(providerAccessKey(lease.id), lease);
+  }
+
+  private async deleteProviderAccess(leaseID: string): Promise<void> {
+    await this.state.storage.delete(providerAccessKey(leaseID));
   }
 
   private async getRun(runID: string): Promise<RunRecord | undefined> {
@@ -4615,6 +4627,14 @@ function isManagedProvider(provider: string): provider is Provider {
 
 function leaseKey(leaseID: string): string {
   return `lease:${leaseID}`;
+}
+
+function providerAccessPrefix(): string {
+  return "provider-access:";
+}
+
+function providerAccessKey(leaseID: string): string {
+  return `${providerAccessPrefix()}${leaseID}`;
 }
 
 function runKey(runID: string): string {
@@ -5605,6 +5625,40 @@ function requestSourceCIDRs(request: Request): string[] {
   return validCIDRs([cidr]);
 }
 
+function providerAccessContext(
+  sourceCIDRs: string[],
+  activeLeases: LeaseRecord[],
+): ProviderAccessContext {
+  return {
+    requestSourceCIDRs: sourceCIDRs,
+    activeLeases,
+  };
+}
+
+function providerAccessReservation(lease: LeaseRecord, now: Date): LeaseRecord {
+  const leaseExpiry = Date.parse(lease.expiresAt);
+  const reservationExpiry = now.getTime() + providerAccessReservationTTLMS;
+  return {
+    ...lease,
+    expiresAt: new Date(Math.min(leaseExpiry, reservationExpiry)).toISOString(),
+  };
+}
+
+function replaceProviderAccessState(leases: LeaseRecord[], lease: LeaseRecord): LeaseRecord[] {
+  let replaced = false;
+  const next = leases.map((candidate) => {
+    if (candidate.id !== lease.id) {
+      return candidate;
+    }
+    replaced = true;
+    return lease;
+  });
+  if (!replaced) {
+    next.push(lease);
+  }
+  return next;
+}
+
 function finiteNumber(value: number | undefined): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
@@ -6287,13 +6341,54 @@ function uniqueNonEmpty(values: Array<string | undefined>): string[] {
   return out;
 }
 
-function activeAWSSSHCIDRs(leases: LeaseRecord[], cidrs: string[]): string[] {
+function awsLeaseSSHSourceCIDRs(
+  config: Pick<ReturnType<typeof leaseConfig>, "awsSSHCIDRs">,
+  context: ProviderAccessContext,
+): string[] {
+  return config.awsSSHCIDRs.length > 0 ? config.awsSSHCIDRs : context.requestSourceCIDRs;
+}
+
+function awsGlobalSSHSourceCIDRs(env: Env): string[] {
+  return uniqueNonEmpty(validCIDRs((env.CRABBOX_AWS_SSH_CIDRS ?? "").split(",")));
+}
+
+function withLeaseSSHSourceCIDRs(
+  lease: LeaseRecord,
+  cidrs: string[],
+  complete: boolean,
+): LeaseRecord {
+  if (cidrs.length === 0 && !complete) {
+    return lease;
+  }
+  return {
+    ...lease,
+    network: {
+      ...lease.network,
+      sshSourceCIDRs: uniqueNonEmpty(cidrs),
+      sshSourceCIDRsComplete: complete,
+    },
+  };
+}
+
+function activeAWSSSHSourceCIDRs(leases: LeaseRecord[], cidrs: string[]): string[] {
   return uniqueNonEmpty([
     ...leases.flatMap((lease) =>
-      lease.provider === "aws" && lease.state === "active" ? (lease.awsSSHCIDRs ?? []) : [],
+      lease.provider === "aws" && lease.state === "active"
+        ? (lease.network?.sshSourceCIDRs ?? [])
+        : [],
     ),
     ...cidrs,
   ]);
+}
+
+function hasUnknownActiveAWSSSHSource(leases: LeaseRecord[]): boolean {
+  return leases.some(
+    (lease) =>
+      lease.provider === "aws" &&
+      lease.state === "active" &&
+      (lease.network?.sshSourceCIDRs?.length ?? 0) === 0 &&
+      !lease.network?.sshSourceCIDRsComplete,
+  );
 }
 
 function awsOrphanSweepCandidate(
@@ -6383,12 +6478,21 @@ function parseProviderLabelTime(value: string | undefined): number {
 interface CloudProvider {
   listCrabboxServers(): Promise<ProviderMachine[]>;
   getServer?(id: string): Promise<ProviderMachine>;
-  refreshSSHIngress?(config: ReturnType<typeof leaseConfig>): Promise<void>;
+  prepareLeaseCreate?(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+    context: ProviderAccessContext,
+  ): Promise<ProviderLeaseCreatePreparation>;
+  refreshLeaseAccess?(
+    lease: LeaseRecord,
+    context: ProviderAccessContext,
+  ): Promise<LeaseRecord | void>;
   createServerWithFallback(
     config: ReturnType<typeof leaseConfig>,
     leaseID: string,
     slug: string,
     owner: string,
+    provisioning?: ProviderProvisioningContext,
   ): Promise<{
     server: ProviderMachine;
     serverType: string;
@@ -6417,6 +6521,22 @@ interface CloudProvider {
     serverType: string,
     config: ReturnType<typeof leaseConfig>,
   ): Promise<number | undefined>;
+}
+
+interface ProviderAccessContext {
+  requestSourceCIDRs: string[];
+  activeLeases: LeaseRecord[];
+}
+
+interface ProviderLeaseCreatePreparation {
+  config: ReturnType<typeof leaseConfig>;
+  lease: LeaseRecord;
+  provisioning?: ProviderProvisioningContext;
+}
+
+interface ProviderProvisioningContext {
+  sshIngressReconcile?: "authoritative" | "additive";
+  publishAccessBeforeProvisioning?: boolean;
 }
 
 class HetznerProvider implements CloudProvider {
@@ -6610,10 +6730,78 @@ class AWSProvider implements CloudProvider {
     return this.client.getServer(id);
   }
 
-  refreshSSHIngress(config: ReturnType<typeof leaseConfig>): Promise<void> {
-    const region = config.awsRegion || this.region;
-    const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
-    return client.refreshSSHIngress(config);
+  async prepareLeaseCreate(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+    context: ProviderAccessContext,
+  ): Promise<ProviderLeaseCreatePreparation> {
+    const sourceCIDRs = awsLeaseSSHSourceCIDRs(config, context);
+    const globalCIDRs = awsGlobalSSHSourceCIDRs(this.env);
+    const nextLease = withLeaseSSHSourceCIDRs(
+      lease,
+      sourceCIDRs,
+      sourceCIDRs.length > 0 || globalCIDRs.length > 0,
+    );
+    const activeLeases = replaceProviderAccessState(context.activeLeases, nextLease);
+    return {
+      config: {
+        ...config,
+        awsSSHCIDRs: activeAWSSSHSourceCIDRs(activeLeases, [...sourceCIDRs, ...globalCIDRs]),
+      },
+      lease: nextLease,
+      provisioning: {
+        sshIngressReconcile: hasUnknownActiveAWSSSHSource(activeLeases)
+          ? "additive"
+          : "authoritative",
+        publishAccessBeforeProvisioning: true,
+      },
+    };
+  }
+
+  async refreshLeaseAccess(
+    lease: LeaseRecord,
+    context: ProviderAccessContext,
+  ): Promise<LeaseRecord | void> {
+    if (lease.state !== "active") {
+      return;
+    }
+    const sourceCIDRs = context.requestSourceCIDRs;
+    if (sourceCIDRs.length === 0) {
+      return;
+    }
+    const nextLease = withLeaseSSHSourceCIDRs(lease, sourceCIDRs, true);
+    const activeLeases = replaceProviderAccessState(context.activeLeases, nextLease);
+    const cidrs = activeAWSSSHSourceCIDRs(activeLeases, sourceCIDRs);
+    if (cidrs.length === 0) {
+      return nextLease;
+    }
+    try {
+      const config = leaseConfig({
+        provider: "aws",
+        target: lease.target,
+        windowsMode: lease.windowsMode ?? "normal",
+        class: lease.class,
+        serverType: lease.serverType,
+        awsSSHCIDRs: cidrs,
+        capacity: { market: lease.market === "spot" ? "spot" : "on-demand" },
+        providerKey: lease.providerKey,
+        sshUser: lease.sshUser,
+        sshPort: lease.sshPort,
+        sshFallbackPorts: lease.sshFallbackPorts ?? [],
+        sshPublicKey: "ssh-ed25519 heartbeat-refresh",
+        workRoot: lease.workRoot,
+        ...(lease.hostId || lease.hostID ? { hostId: lease.hostId || lease.hostID } : {}),
+        ...(lease.region ? { awsRegion: lease.region } : {}),
+      });
+      const region = config.awsRegion || this.region;
+      const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
+      await client.refreshSSHIngress(config, {
+        reconcile: hasUnknownActiveAWSSSHSource(activeLeases) ? "additive" : "authoritative",
+      });
+    } catch (error) {
+      console.warn(`refresh AWS SSH ingress failed for ${lease.id}: ${errorMessage(error)}`);
+    }
+    return nextLease;
   }
 
   async createServerWithFallback(
@@ -6621,6 +6809,7 @@ class AWSProvider implements CloudProvider {
     leaseID: string,
     slug: string,
     owner: string,
+    provisioning?: ProviderProvisioningContext,
   ): Promise<{
     server: ProviderMachine;
     serverType: string;
@@ -6630,6 +6819,10 @@ class AWSProvider implements CloudProvider {
     const regions = awsRegionCandidates(config, this.env, this.region);
     const failures: string[] = [];
     const regionAttempts: ProvisioningAttempt[] = [];
+    const ingressOptions =
+      provisioning?.sshIngressReconcile === undefined
+        ? undefined
+        : { reconcile: provisioning.sshIngressReconcile };
     for (const region of regions) {
       const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
       try {
@@ -6639,6 +6832,7 @@ class AWSProvider implements CloudProvider {
           leaseID,
           slug,
           owner,
+          ingressOptions,
         );
         let readyServer: ProviderMachine;
         try {
