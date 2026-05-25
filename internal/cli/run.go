@@ -1259,6 +1259,7 @@ afterSync:
 			RunID:          recorder.runID,
 			CommandDisplay: commandDisplay,
 			ShellMode:      *shellMode,
+			ScriptMode:     script != nil,
 			RoutingArgs:    runFailureDigestRoutingArgs(cfg),
 			SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg),
 			StopCommand:    report.StopCommand,

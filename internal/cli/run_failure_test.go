@@ -132,7 +132,8 @@ func TestPrintRunFailureDigest(t *testing.T) {
 func TestFailureDigestSuppressesScriptRetryCommand(t *testing.T) {
 	commands := failureDigestNextCommands(runFailureDigestInput{
 		LeaseID:        "cbx_123",
-		CommandDisplay: "--script=./smoke.sh arg",
+		CommandDisplay: "'--script=./smoke test.sh' arg",
+		ScriptMode:     true,
 		Classification: FailureClassification{RetryLikely: "unknown"},
 	}, "unknown")
 	for _, command := range commands {

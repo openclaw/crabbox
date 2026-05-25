@@ -140,6 +140,7 @@ type runFailureDigestInput struct {
 	RunID          string
 	CommandDisplay string
 	ShellMode      bool
+	ScriptMode     bool
 	RoutingArgs    []string
 	SSHRoutingArgs []string
 	StopCommand    string
@@ -219,7 +220,7 @@ func failureDigestNextCommands(input runFailureDigestInput, retry string) []stri
 			sshRouting = fallbackFailureDigestRoutingArgs(input)
 		}
 		commands = append(commands, crabboxCommandString(append(append([]string{"ssh"}, sshRouting...), "--id", leaseRef)))
-		if retry != "false" && canSuggestRunRetry(input.CommandDisplay) {
+		if retry != "false" && !input.ScriptMode && canSuggestRunRetry(input.CommandDisplay) {
 			routing := append([]string(nil), input.RoutingArgs...)
 			if len(routing) == 0 {
 				routing = fallbackFailureDigestRoutingArgs(input)
