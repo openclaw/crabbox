@@ -59,6 +59,27 @@ type CleanupBackend interface {
 	Cleanup(ctx context.Context, req CleanupRequest) error
 }
 
+type ReleaseLeaseReporter interface {
+	ReleaseLeaseMessage(lease LeaseTarget) string
+}
+
+type NativeCheckpointCapability struct {
+	Kind              string
+	Direct            bool
+	CreateUnsupported string
+}
+
+type NativeCheckpointRequest struct {
+	Config   Config
+	Server   Server
+	Target   SSHTarget
+	Strategy string
+}
+
+type NativeCheckpointProvider interface {
+	NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool)
+}
+
 type JSONListBackend interface {
 	Backend
 	ListJSON(ctx context.Context, req ListRequest) (any, error)

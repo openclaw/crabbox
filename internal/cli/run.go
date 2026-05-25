@@ -2385,12 +2385,8 @@ func (a App) stop(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stderr, "released lease=%s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
 		return nil
 	}
-	if isStaticProvider(cfg.Provider) || lease.Server.Provider == staticProvider {
-		fmt.Fprintf(a.Stderr, "released static lease=%s host=%s\n", lease.LeaseID, lease.SSH.Host)
-		return nil
-	}
-	if cfg.Provider == "namespace-devbox" || cfg.Provider == "namespace" || lease.Server.Provider == "namespace-devbox" {
-		fmt.Fprintf(a.Stderr, "released namespace devbox lease=%s name=%s\n", lease.LeaseID, lease.Server.Name)
+	if reporter, ok := backend.(ReleaseLeaseReporter); ok {
+		fmt.Fprintln(a.Stderr, reporter.ReleaseLeaseMessage(lease))
 		return nil
 	}
 	fmt.Fprintf(a.Stderr, "deleted lease=%s server=%s name=%s\n", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
@@ -2416,50 +2412,6 @@ func leaseDisplayID(lease CoordinatorLease) string {
 		return lease.CloudID
 	}
 	return fmt.Sprint(lease.ServerID)
-}
-
-func deleteServer(ctx context.Context, cfg Config, server Server) error {
-	if isStaticProvider(cfg.Provider) || server.Provider == staticProvider {
-		return nil
-	}
-	if cfg.Provider == "aws" || server.Provider == "aws" || strings.HasPrefix(server.CloudID, "i-") {
-		client, err := newAWSClient(ctx, cfg)
-		if err != nil {
-			return err
-		}
-		if err := client.DeleteServer(ctx, server.CloudID); err != nil {
-			return err
-		}
-		if keyName := serverProviderKey(server); validCrabboxProviderKey(keyName) {
-			return client.DeleteSSHKey(ctx, keyName)
-		}
-		return nil
-	}
-	if cfg.Provider == "azure" || server.Provider == "azure" {
-		return deleteAzureServer(ctx, cfg, server)
-	}
-	if cfg.Provider == "proxmox" || server.Provider == "proxmox" {
-		client, err := NewProxmoxClient(cfg)
-		if err != nil {
-			return err
-		}
-		return client.DeleteServer(ctx, server.CloudID)
-	}
-	client, err := newHetznerClient()
-	if err != nil {
-		return err
-	}
-	if err := client.DeleteServer(ctx, server.ID); err != nil {
-		return err
-	}
-	if keyName := serverProviderKey(server); validCrabboxProviderKey(keyName) {
-		return client.DeleteSSHKey(ctx, keyName)
-	}
-	return nil
-}
-
-func DeleteServer(ctx context.Context, cfg Config, server Server) error {
-	return deleteServer(ctx, cfg, server)
 }
 
 func localContainerDockerSocketSync(cfg Config, server Server) bool {

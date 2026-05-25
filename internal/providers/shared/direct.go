@@ -12,6 +12,7 @@ type DirectSSHBackend struct {
 	SpecValue core.ProviderSpec
 	Cfg       core.Config
 	RT        core.Runtime
+	Delete    func(context.Context, core.Config, core.Server) error
 }
 
 func (b *DirectSSHBackend) Spec() core.ProviderSpec { return b.SpecValue }
@@ -25,7 +26,10 @@ func (b *DirectSSHBackend) CleanupServers(ctx context.Context, req core.CleanupR
 		}
 		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", s.DisplayID(), s.Name)
 		if !req.DryRun {
-			if err := core.DeleteServer(ctx, b.Cfg, s); err != nil {
+			if b.Delete == nil {
+				return core.Exit(2, "provider=%s cleanup backend has no delete capability", b.SpecValue.Name)
+			}
+			if err := b.Delete(ctx, b.Cfg, s); err != nil {
 				return err
 			}
 		}

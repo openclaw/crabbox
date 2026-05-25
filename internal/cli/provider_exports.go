@@ -111,10 +111,34 @@ func ServerSlug(server Server) string {
 	return serverSlug(server)
 }
 
+func ServerProviderKey(server Server) string {
+	return serverProviderKey(server)
+}
+
 func IsCanonicalLeaseID(value string) bool {
 	return isCanonicalLeaseID(value)
 }
 
 func PowershellCommand(script string) string {
 	return powershellCommand(script)
+}
+
+func ValidCrabboxProviderKey(value string) bool {
+	return validCrabboxProviderKey(value)
+}
+
+const (
+	CheckpointKindAWSAMI           = checkpointKindAWSAMI
+	CheckpointKindAWSEBS           = checkpointKindAWSEBS
+	CheckpointKindAzure            = checkpointKindAzure
+	CheckpointKindAzureOS          = checkpointKindAzureOS
+	CheckpointKindGCP              = checkpointKindGCP
+	CheckpointKindGCPDisk          = checkpointKindGCPDisk
+	CheckpointKindParallels        = checkpointKindParallels
+	CheckpointStrategyImage        = checkpointStrategyImage
+	CheckpointStrategyDiskSnapshot = checkpointStrategyDiskSnapshot
+)
+
+func NormalizeCheckpointStrategy(value string) string {
+	return normalizeCheckpointStrategy(value)
 }

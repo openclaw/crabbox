@@ -30,7 +30,7 @@ type azureLeaseBackend struct{ shared.DirectSSHBackend }
 
 func NewAzureLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = "azure"
-	return &azureLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt}}
+	return &azureLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, Delete: deleteServer}}
 }
 
 func (b *azureLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
@@ -160,6 +160,10 @@ func (b *azureLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 	return nil
 }
 
+func (b *azureLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
+	return fmt.Sprintf("deleted lease=%s server=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
+}
+
 func (b *azureLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 	return b.DirectSSHBackend.Touch(ctx, req.Lease.Server, req.State), nil
 }
@@ -199,7 +203,15 @@ func bootstrapManagedWindowsDesktop(ctx context.Context, cfg Config, target *SSH
 	return core.BootstrapManagedWindowsDesktop(ctx, cfg, target, publicKey, stderr)
 }
 func deleteServer(ctx context.Context, cfg Config, server Server) error {
-	return core.DeleteServer(ctx, cfg, server)
+	client, err := newAzureClient(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	name := server.CloudID
+	if name == "" {
+		name = server.Name
+	}
+	return client.DeleteServer(ctx, name)
 }
 func blank(value, fallback string) string { return core.Blank(value, fallback) }
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {

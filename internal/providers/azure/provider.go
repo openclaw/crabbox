@@ -70,3 +70,28 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 	}
 	return doctor, nil
 }
+
+func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
+	if req.Config.Coordinator == "" || req.Server.CloudID == "" {
+		return core.NativeCheckpointCapability{}, false
+	}
+	if firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
+		return core.NativeCheckpointCapability{}, false
+	}
+	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
+		return core.NativeCheckpointCapability{
+			Kind:              core.CheckpointKindAzure,
+			CreateUnsupported: "Azure managed images require a stopped/generalized source VM; use --strategy disk-snapshot for active Azure leases",
+		}, true
+	}
+	return core.NativeCheckpointCapability{Kind: core.CheckpointKindAzureOS}, true
+}
+
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}

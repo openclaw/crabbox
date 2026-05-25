@@ -47,3 +47,38 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 	}
 	return doctor, nil
 }
+
+func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
+	if req.Server.CloudID == "" || isWindowsNativeTarget(req) {
+		return core.NativeCheckpointCapability{}, false
+	}
+	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
+	if targetOS != core.TargetLinux && targetOS != core.TargetMacOS {
+		return core.NativeCheckpointCapability{}, false
+	}
+	strategy := core.NormalizeCheckpointStrategy(req.Strategy)
+	if req.Config.Coordinator == "" {
+		if targetOS != core.TargetMacOS && strategy != core.CheckpointStrategyImage {
+			return core.NativeCheckpointCapability{}, false
+		}
+		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSAMI, Direct: true}, true
+	}
+	if targetOS == core.TargetMacOS || strategy == core.CheckpointStrategyImage {
+		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSAMI}, true
+	}
+	return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSEBS}, true
+}
+
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func isWindowsNativeTarget(req core.NativeCheckpointRequest) bool {
+	return firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) == core.TargetWindows &&
+		firstNonBlank(req.Target.WindowsMode, req.Config.WindowsMode) == core.WindowsModeNormal
+}

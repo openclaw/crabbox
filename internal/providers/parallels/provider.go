@@ -154,3 +154,13 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 	}
 	return doctor, nil
 }
+
+func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
+	if req.Server.CloudID == "" {
+		return core.NativeCheckpointCapability{}, false
+	}
+	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
+		return core.NativeCheckpointCapability{}, false
+	}
+	return core.NativeCheckpointCapability{Kind: core.CheckpointKindParallels, Direct: true}, true
+}

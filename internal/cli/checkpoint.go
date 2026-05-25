@@ -1287,7 +1287,7 @@ func checkpointCreateMode(mode, strategy string, cfg Config, server Server, targ
 			return kind
 		}
 		if !isAutoCheckpointStrategy(strategy) {
-			if kind, ok := directAWSNativeCheckpointKind(cfg, server, target, normalizedStrategy); ok {
+			if kind, ok := directNativeCheckpointKind(cfg, server, target, normalizedStrategy); ok {
 				return kind
 			}
 		}
@@ -1296,14 +1296,14 @@ func checkpointCreateMode(mode, strategy string, cfg Config, server Server, targ
 		if kind, ok := nativeCheckpointKind(cfg, server, target, normalizedStrategy); ok {
 			return kind
 		}
-		if kind, ok := directAWSNativeCheckpointKind(cfg, server, target, normalizedStrategy); ok {
+		if kind, ok := directNativeCheckpointKind(cfg, server, target, normalizedStrategy); ok {
 			return kind
 		}
 		if kind, ok := parallelsNativeCheckpointKind(cfg, server, normalizedStrategy); ok {
 			return kind
 		}
 		if isAutoCheckpointStrategy(strategy) {
-			if kind, ok := directAWSNativeCheckpointKind(cfg, server, target, checkpointStrategyImage); ok {
+			if kind, ok := directNativeCheckpointKind(cfg, server, target, checkpointStrategyImage); ok {
 				return kind
 			}
 		}
@@ -1312,7 +1312,7 @@ func checkpointCreateMode(mode, strategy string, cfg Config, server Server, targ
 		if kind, ok := nativeCheckpointKind(cfg, server, target, checkpointStrategyImage); ok {
 			return kind
 		}
-		if kind, ok := directAWSNativeCheckpointKind(cfg, server, target, checkpointStrategyImage); ok {
+		if kind, ok := directNativeCheckpointKind(cfg, server, target, checkpointStrategyImage); ok {
 			return kind
 		}
 		return "unsupported"
@@ -1323,7 +1323,7 @@ func checkpointCreateMode(mode, strategy string, cfg Config, server Server, targ
 		if kind, ok := parallelsNativeCheckpointKind(cfg, server, checkpointStrategyDiskSnapshot); ok {
 			return kind
 		}
-		if kind, ok := directAWSNativeCheckpointKind(cfg, server, target, checkpointStrategyDiskSnapshot); ok {
+		if kind, ok := directNativeCheckpointKind(cfg, server, target, checkpointStrategyDiskSnapshot); ok {
 			return kind
 		}
 		return "unsupported"

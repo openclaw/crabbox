@@ -22,6 +22,7 @@ func init() {
 	RegisterProvider(testCloudflareProvider{})
 	RegisterProvider(testSpritesProvider{})
 	RegisterProvider(testLocalContainerProvider{})
+	RegisterProvider(testParallelsProvider{})
 }
 
 type testAzureProvider struct{}
@@ -47,6 +48,18 @@ func (testAzureProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 }
 func (p testAzureProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
+}
+func (testAzureProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
+	if req.Config.Coordinator == "" || req.Server.CloudID == "" || firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != targetLinux {
+		return NativeCheckpointCapability{}, false
+	}
+	if normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+		return NativeCheckpointCapability{
+			Kind:              checkpointKindAzure,
+			CreateUnsupported: "Azure managed images require a stopped/generalized source VM; use --strategy disk-snapshot for active Azure leases",
+		}, true
+	}
+	return NativeCheckpointCapability{Kind: checkpointKindAzureOS}, true
 }
 
 type testHetznerProvider struct{}
@@ -92,6 +105,15 @@ func (testGCPProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 func (p testGCPProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
+func (testGCPProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
+	if req.Config.Coordinator == "" || req.Server.CloudID == "" || firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != targetLinux {
+		return NativeCheckpointCapability{}, false
+	}
+	if normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+		return NativeCheckpointCapability{Kind: checkpointKindGCP}, true
+	}
+	return NativeCheckpointCapability{Kind: checkpointKindGCPDisk}, true
+}
 
 type testAWSProvider struct{}
 
@@ -122,6 +144,58 @@ func (p testAWSProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 		return testAWSBackendOverride, nil
 	}
 	return testSSHBackend{spec: p.Spec()}, nil
+}
+func (testAWSProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
+	if req.Server.CloudID == "" || isWindowsNativeTarget(req.Target) {
+		return NativeCheckpointCapability{}, false
+	}
+	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
+	if targetOS != targetLinux && targetOS != targetMacOS {
+		return NativeCheckpointCapability{}, false
+	}
+	strategy := normalizeCheckpointStrategy(req.Strategy)
+	if req.Config.Coordinator == "" {
+		if targetOS != targetMacOS && strategy != checkpointStrategyImage {
+			return NativeCheckpointCapability{}, false
+		}
+		return NativeCheckpointCapability{Kind: checkpointKindAWSAMI, Direct: true}, true
+	}
+	if targetOS == targetMacOS || strategy == checkpointStrategyImage {
+		return NativeCheckpointCapability{Kind: checkpointKindAWSAMI}, true
+	}
+	return NativeCheckpointCapability{Kind: checkpointKindAWSEBS}, true
+}
+
+type testParallelsProvider struct{}
+
+func (testParallelsProvider) Name() string      { return "parallels" }
+func (testParallelsProvider) Aliases() []string { return nil }
+func (testParallelsProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name: "parallels",
+		Kind: ProviderKindSSHLease,
+		Targets: []TargetSpec{
+			{OS: targetLinux},
+			{OS: targetMacOS},
+			{OS: targetWindows, WindowsMode: windowsModeNormal},
+			{OS: targetWindows, WindowsMode: windowsModeWSL2},
+		},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode, FeatureCheckpoint, FeatureFork, FeatureRestore, FeatureSnapshot},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testParallelsProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testParallelsProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testParallelsProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+func (testParallelsProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
+	if req.Server.CloudID == "" || normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+		return NativeCheckpointCapability{}, false
+	}
+	return NativeCheckpointCapability{Kind: checkpointKindParallels, Direct: true}, true
 }
 
 type testProxmoxProvider struct{}
