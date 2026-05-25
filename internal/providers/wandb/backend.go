@@ -47,10 +47,7 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 	started := b.now()
 	cfg := b.cfg
 	image := blank(strings.TrimSpace(cfg.Wandb.DefaultImage), "ubuntu:24.04")
-	maxLifetime := cfg.Wandb.MaxLifetimeSeconds
-	if maxLifetime <= 0 {
-		maxLifetime = 1800
-	}
+	maxLifetime := wandbMaxLifetimeSeconds(cfg)
 
 	sandboxID := strings.TrimSpace(req.ID)
 	acquired := false
@@ -266,6 +263,20 @@ func applyWandbDefaults(cfg *Config) {
 	if cfg.Wandb.MaxLifetimeSeconds <= 0 {
 		cfg.Wandb.MaxLifetimeSeconds = 1800
 	}
+}
+
+func wandbMaxLifetimeSeconds(cfg Config) int {
+	maxLifetime := cfg.Wandb.MaxLifetimeSeconds
+	if maxLifetime <= 0 {
+		maxLifetime = 1800
+	}
+	if cfg.TTL > 0 {
+		ttlSeconds := int((cfg.TTL + time.Second - 1) / time.Second)
+		if ttlSeconds > 0 && ttlSeconds < maxLifetime {
+			maxLifetime = ttlSeconds
+		}
+	}
+	return maxLifetime
 }
 
 func rejectWandbRunOptions(req RunRequest) error {

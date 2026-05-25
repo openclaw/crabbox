@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // wandbRecordingRunner mirrors the recording-runner pattern used by
@@ -135,6 +136,15 @@ func TestWandbDefaultsDoNotTouchSSHOrWorkRoot(t *testing.T) {
 	}
 	if cfg.Wandb.MaxLifetimeSeconds != 1800 {
 		t.Fatalf("MaxLifetimeSeconds=%d", cfg.Wandb.MaxLifetimeSeconds)
+	}
+}
+
+func TestWandbMaxLifetimeHonorsTTL(t *testing.T) {
+	cfg := Config{}
+	cfg.Wandb.MaxLifetimeSeconds = 1800
+	cfg.TTL = time.Minute
+	if got := wandbMaxLifetimeSeconds(cfg); got != 60 {
+		t.Fatalf("wandbMaxLifetimeSeconds = %d, want 60", got)
 	}
 }
 

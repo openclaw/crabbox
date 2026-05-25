@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -67,6 +68,12 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 	}
 	if _, err := ProviderFor("missing"); err == nil {
 		t.Fatal("expected missing provider to fail")
+	}
+}
+
+func TestProviderHelpAllIncludesWandb(t *testing.T) {
+	if !strings.Contains(providerHelpAll(), "wandb") {
+		t.Fatalf("providerHelpAll() = %q, want wandb", providerHelpAll())
 	}
 }
 
