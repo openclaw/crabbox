@@ -1,0 +1,16 @@
+# Codex per-repo overlay for crabbox.
+#
+# Token-bearing MCP servers point at canonical wrappers in
+# ~/.codex/wrappers/ (Phase 12+13 item B.9) because Codex does not expand
+# ${VAR} references in config.toml. See ~/.codex/wrappers/README.md and
+# ~/Projects/openclaw-cf-tools-worker/RUNBOOK_WRAPPER_ROLLBACK.md.
+
+[mcp_servers.context7]
+url = "https://mcp.context7.com/mcp"
+
+[mcp_servers.fetch]
+command = "uvx"
+args = ["mcp-server-fetch"]
+
+[mcp_servers.github]
+command = "/Users/louisherman/.codex/wrappers/github-token.sh"
