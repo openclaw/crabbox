@@ -132,9 +132,9 @@ func TestStripScheme(t *testing.T) {
 	for _, tc := range []struct {
 		in, want string
 	}{
-		{"atc.cw-sandbox.com:443", "atc.cw-sandbox.com:443"},
-		{"https://atc.cw-sandbox.com:443", "atc.cw-sandbox.com:443"},
-		{"http://atc.cw-sandbox.com:443/", "atc.cw-sandbox.com:443"},
+		{"api.cwsandbox.com:443", "api.cwsandbox.com:443"},
+		{"https://api.cwsandbox.com:443", "api.cwsandbox.com:443"},
+		{"http://api.cwsandbox.com:443/", "api.cwsandbox.com:443"},
 	} {
 		if got := stripScheme(tc.in); got != tc.want {
 			t.Fatalf("stripScheme(%q) = %q, want %q", tc.in, got, tc.want)
