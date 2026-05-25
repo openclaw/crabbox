@@ -3,6 +3,7 @@
   "version": "0.18.0",
   "description": "OpenClaw plugin for running Crabbox remote testbox workflows",
   "license": "MIT",
+  "private": true,
   "type": "module",
   "main": "index.js",
   "openclaw": {

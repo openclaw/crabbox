@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/claude-code/main/schemas/mcp.json",
+  "mcpServers": {
+    "context7": {"type": "http", "url": "https://mcp.context7.com/mcp"},
+    "fetch": {"type": "stdio", "command": "uvx", "args": ["mcp-server-fetch"]},
+    "github": {
+      "type": "stdio", "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"}
+    }
+  }
+}
