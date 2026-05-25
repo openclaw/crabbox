@@ -195,6 +195,46 @@ func TestFormatRunSummaryNoSync(t *testing.T) {
 	}
 }
 
+func TestShouldReplaceLeaseAfterBeforeCommandSSHFailure(t *testing.T) {
+	waitErr := exit(5, "timed out waiting for SSH on 203.0.113.10 during before command")
+	otherErr := exit(6, "rsync failed")
+	tests := []struct {
+		name            string
+		err             error
+		acquired        bool
+		useCoordinator  bool
+		explicitLeaseID bool
+		keep            bool
+		keepOnFailure   bool
+		noSync          bool
+		syncOnly        bool
+		stopAfter       string
+		requestedSlug   string
+		want            bool
+	}{
+		{name: "fresh coordinator one shot", err: waitErr, acquired: true, useCoordinator: true, want: true},
+		{name: "wrong error", err: otherErr, acquired: true, useCoordinator: true},
+		{name: "direct backend", err: waitErr, acquired: true},
+		{name: "existing lease", err: waitErr, acquired: true, useCoordinator: true, explicitLeaseID: true},
+		{name: "kept lease", err: waitErr, acquired: true, useCoordinator: true, keep: true},
+		{name: "keep on failure", err: waitErr, acquired: true, useCoordinator: true, keepOnFailure: true},
+		{name: "no sync", err: waitErr, acquired: true, useCoordinator: true, noSync: true},
+		{name: "sync only", err: waitErr, acquired: true, useCoordinator: true, syncOnly: true},
+		{name: "custom slug", err: waitErr, acquired: true, useCoordinator: true, requestedSlug: "qa-smoke"},
+		{name: "stop after failure", err: waitErr, acquired: true, useCoordinator: true, stopAfter: "failure", want: true},
+		{name: "stop after success", err: waitErr, acquired: true, useCoordinator: true, stopAfter: "success"},
+		{name: "stop after never", err: waitErr, acquired: true, useCoordinator: true, stopAfter: "never"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldReplaceLeaseAfterBeforeCommandSSHFailure(tt.err, tt.acquired, tt.useCoordinator, tt.explicitLeaseID, tt.keep, tt.keepOnFailure, tt.noSync, tt.syncOnly, tt.stopAfter, tt.requestedSlug)
+			if got != tt.want {
+				t.Fatalf("shouldReplaceLeaseAfterBeforeCommandSSHFailure()=%t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTimingJSONShape(t *testing.T) {
 	var buf bytes.Buffer
 	err := writeTimingJSON(&buf, timingReportFromRun("aws", "cbx_123", "blue-crab", runTimings{

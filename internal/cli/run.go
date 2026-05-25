@@ -541,6 +541,19 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			return recordFailure(err)
 		}
 	}
+	var stopHeartbeat func()
+	stopRunHeartbeat := func() {
+		if stopHeartbeat == nil {
+			return
+		}
+		stopHeartbeat()
+		stopHeartbeat = nil
+	}
+	defer stopRunHeartbeat()
+	startRunHeartbeat := func(updateIdleTimeout *time.Duration) {
+		stopRunHeartbeat()
+		stopHeartbeat = startCoordinatorHeartbeat(ctx, coord, leaseID, cfg.IdleTimeout, updateIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr)
+	}
 	if useCoordinator && leaseID != "" {
 		var heartbeatIdleTimeout *time.Duration
 		if *leaseIDFlag != "" && flagWasSet(fs, "idle-timeout") {
@@ -551,8 +564,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 				return recordFailure(err)
 			}
 		}
-		stopHeartbeat := startCoordinatorHeartbeat(ctx, coord, leaseID, cfg.IdleTimeout, heartbeatIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr)
-		defer stopHeartbeat()
+		startRunHeartbeat(heartbeatIdleTimeout)
 	}
 
 	if cfg.Sync.BaseRef == "" {
@@ -681,6 +693,78 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		fmt.Fprintf(a.Stderr, "using local Actions workspace %s\n", workdir)
 		return nil
 	}
+	beforeCommandLeaseReplacementAttempted := false
+	replaceLeaseAfterBeforeCommandSSHFailure := func(waitErr error) (bool, error) {
+		if beforeCommandLeaseReplacementAttempted ||
+			!shouldReplaceLeaseAfterBeforeCommandSSHFailure(waitErr, acquired, useCoordinator, *leaseIDFlag != "", *keep, *keepOnFailure, *noSync, *syncOnly, *stopAfter, requestedSlug) {
+			return false, nil
+		}
+		beforeCommandLeaseReplacementAttempted = true
+		oldLease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}
+		oldLeaseID := leaseID
+		oldSlug := serverSlug(server)
+		fmt.Fprintf(a.Stderr, "warning: SSH became unavailable after sync on lease=%s slug=%s; replacing lease once and retrying sync\n", oldLeaseID, blank(oldSlug, "-"))
+		recorder.Event("lease.replace.started", "leasing", fmt.Sprintf("old_lease=%s old_slug=%s reason=ssh_before_command", oldLeaseID, blank(oldSlug, "-")))
+
+		stopRunHeartbeat()
+		recorder.resetTelemetryForLeaseReplacement()
+		releaseApp := a
+		if *timingJSON {
+			releaseApp.Stderr = io.Discard
+		}
+		if err := releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, oldLease); err != nil {
+			recorder.Event("lease.replace.failed", "leasing", err.Error())
+			return true, exit(7, "replace stale lease %s: release failed: %v", oldLeaseID, err)
+		}
+		acquired = false
+
+		newLease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim})
+		if err != nil {
+			recorder.Event("lease.replace.failed", "leasing", err.Error())
+			return true, err
+		}
+
+		server, target, leaseID = newLease.Server, newLease.SSH, newLease.LeaseID
+		acquired = true
+		coord = newLease.Coordinator
+		useCoordinator = coord != nil
+		applyResolvedServerConfig(&cfg, server)
+		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
+			return true, err
+		}
+		if err := validateRunArtifactGlobTarget(target, expansion.ArtifactGlobs); err != nil {
+			return true, err
+		}
+		if expansion.Profile.Doctor.Enabled && isWindowsNativeTarget(target) {
+			return true, exit(2, "profile doctor is not supported for native Windows targets")
+		}
+		if useCoordinator {
+			recorder.AttachLease(leaseID, serverSlug(server), cfg)
+			startRunHeartbeat(nil)
+		}
+		if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+			return true, err
+		}
+		workdir = remoteJoin(cfg, leaseID, repo.Name)
+		if !freshPR.Empty() {
+			workdir = remoteJoin(cfg, leaseID, freshPR.WorkdirName())
+		}
+		actionsEnvFile = ""
+		profileEnvFile = ""
+		actionsURL = ""
+		hydratedByActions = false
+		contextPrinted = false
+		preflightPrinted = false
+		rawJSRuntimePreflightDone = false
+		exitNodeEgressChecked = false
+		timings.sync = 0
+		timings.syncSteps = syncStepTimings{}
+		timings.syncSkipped = false
+		fmt.Fprintf(a.Stderr, "retrying sync on replacement lease=%s slug=%s\n", leaseID, blank(serverSlug(server), "-"))
+		recorder.Event("lease.replace.finished", "leasing", fmt.Sprintf("lease=%s slug=%s", leaseID, blank(serverSlug(server), "-")))
+		return true, nil
+	}
+retrySync:
 	if !*noSync {
 		syncStart := time.Now()
 		if freshPR.Empty() {
@@ -899,6 +983,13 @@ afterSync:
 	recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before command")
 	target = bootstrapNetworkTarget(cfg, server, target)
 	if err := waitForSSHReady(ctx, &target, a.Stderr, "before command", 2*time.Minute); err != nil {
+		replaced, replaceErr := replaceLeaseAfterBeforeCommandSSHFailure(err)
+		if replaceErr != nil {
+			return recordFailure(replaceErr)
+		}
+		if replaced {
+			goto retrySync
+		}
 		return recordFailure(err)
 	}
 	a.refreshTailscaleMetadata(ctx, cfg, coord, useCoordinator, &server, target, leaseID)
@@ -1993,6 +2084,19 @@ func isBootstrapWaitError(err error) bool {
 
 func IsBootstrapWaitError(err error) bool {
 	return isBootstrapWaitError(err)
+}
+
+func shouldReplaceLeaseAfterBeforeCommandSSHFailure(err error, acquired, useCoordinator, explicitLeaseID, keep, keepOnFailure, noSync, syncOnly bool, stopAfter, requestedSlug string) bool {
+	if !isBootstrapWaitError(err) ||
+		!acquired ||
+		!useCoordinator ||
+		explicitLeaseID ||
+		noSync ||
+		syncOnly ||
+		strings.TrimSpace(requestedSlug) != "" {
+		return false
+	}
+	return shouldReleaseRunLease(acquired, keep, keepOnFailure, stopAfter, err)
 }
 
 func releaseCoordinatorLease(ctx context.Context, coord *CoordinatorClient, leaseID string) error {
