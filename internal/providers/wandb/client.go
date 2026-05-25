@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // defaultEndpoint is the CoreWeave Sandboxes gateway data plane that the
@@ -64,10 +65,13 @@ type wandbExecRequest struct {
 	Stderr    io.Writer
 }
 
-// normalizeStatus converts the proto enum (e.g. SANDBOX_STATUS_RUNNING) into
-// the lowercase short form ("running") that backend.Status compares against
-// and that the rest of crabbox prints in user-facing tables.
+// normalizeStatus converts the proto enum into Crabbox's status vocabulary.
+// W&B reports COMPLETED for a stopped idle sandbox; map it to "stopped" so
+// status --wait recognizes it as terminal.
 func normalizeStatus(s sandboxv1.SandboxStatus) string {
+	if s == sandboxv1.SandboxStatus_SANDBOX_STATUS_COMPLETED {
+		return "stopped"
+	}
 	return strings.ToLower(strings.TrimPrefix(s.String(), "SANDBOX_STATUS_"))
 }
 
@@ -415,7 +419,7 @@ func (c *wandbClient) Status(ctx context.Context, id string) (wandbSandbox, erro
 // formatTimestamp safely renders a protobuf Timestamp as RFC3339 UTC; nil
 // timestamps (the server may omit StartedAtTime for sandboxes that never
 // reached RUNNING) are returned as an empty string.
-func formatTimestamp(ts interface{ AsTime() time.Time }) string {
+func formatTimestamp(ts *timestamppb.Timestamp) string {
 	if ts == nil {
 		return ""
 	}

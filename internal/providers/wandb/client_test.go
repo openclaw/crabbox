@@ -7,11 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	sandboxv1 "github.com/openclaw/crabbox/internal/providers/wandb/gen/coreweave/sandbox/v1beta2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestNormalizeStatus(t *testing.T) {
@@ -20,12 +22,25 @@ func TestNormalizeStatus(t *testing.T) {
 		want string
 	}{
 		{sandboxv1.SandboxStatus_SANDBOX_STATUS_RUNNING, "running"},
-		{sandboxv1.SandboxStatus_SANDBOX_STATUS_COMPLETED, "completed"},
+		{sandboxv1.SandboxStatus_SANDBOX_STATUS_COMPLETED, "stopped"},
 		{sandboxv1.SandboxStatus_SANDBOX_STATUS_FAILED, "failed"},
 	} {
 		if got := normalizeStatus(tc.in); got != tc.want {
 			t.Fatalf("normalizeStatus(%v) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestFormatTimestampNil(t *testing.T) {
+	if got := formatTimestamp(nil); got != "" {
+		t.Fatalf("formatTimestamp(nil) = %q, want empty", got)
+	}
+}
+
+func TestFormatTimestampValue(t *testing.T) {
+	ts := timestamppb.New(time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC))
+	if got := formatTimestamp(ts); got != "2026-05-25T12:00:00Z" {
+		t.Fatalf("formatTimestamp(value) = %q", got)
 	}
 }
 
