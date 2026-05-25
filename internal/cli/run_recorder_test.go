@@ -234,6 +234,32 @@ func TestRunRecorderFinishUsesExtendedTimeout(t *testing.T) {
 	}
 }
 
+func TestRunRecorderResetTelemetryForLeaseReplacement(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		close(done)
+	}()
+	rec := &runRecorder{
+		telemetryStart:   &LeaseTelemetry{CapturedAt: "2026-05-02T00:00:00Z"},
+		telemetrySamples: []*LeaseTelemetry{{CapturedAt: "2026-05-02T00:00:01Z"}},
+		telemetryCancel:  cancel,
+		telemetryDone:    done,
+	}
+
+	rec.resetTelemetryForLeaseReplacement()
+
+	if rec.telemetryStart != nil || rec.telemetryCancel != nil || rec.telemetryDone != nil || len(rec.telemetrySamples) != 0 {
+		t.Fatalf("telemetry not reset: %#v", rec)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("telemetry sampler was not stopped")
+	}
+}
+
 type blockingRoundTripper struct {
 	started chan struct{}
 }

@@ -68,11 +68,12 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req checkpointNat
 		return CoordinatorImage{}, exit(2, "native checkpoints require a configured coordinator")
 	}
 	strategy := normalizeCheckpointStrategy(req.Strategy)
-	if _, ok := nativeCheckpointKind(req.Cfg, req.Server, req.Target, strategy); !ok {
+	capability, ok := providerNativeCheckpointCapability(req.Cfg, req.Server, req.Target, strategy)
+	if !ok || capability.Direct || capability.Kind == "" {
 		return CoordinatorImage{}, exit(2, "native checkpoints support brokered AWS Linux/macOS leases and brokered Azure/GCP Linux leases only")
 	}
-	if req.Server.Provider == "azure" && strategy == checkpointStrategyImage {
-		return CoordinatorImage{}, exit(2, "Azure managed images require a stopped/generalized source VM; use --strategy disk-snapshot for active Azure leases")
+	if capability.CreateUnsupported != "" {
+		return CoordinatorImage{}, exit(2, "%s", capability.CreateUnsupported)
 	}
 	name := req.Name
 	if name == "" {
@@ -165,10 +166,10 @@ func parallelsRunningState(state string) bool {
 }
 
 func nativeCheckpointCreateDriver(cfg Config, server Server, target SSHTarget, strategy string) (checkpointNativeCreateDriver, bool) {
-	if _, ok := parallelsNativeCheckpointKind(cfg, server, strategy); ok {
+	if _, ok := directParallelsNativeCheckpointKind(cfg, server, target, strategy); ok {
 		return directParallelsCheckpointDriver{}, true
 	}
-	if kind, ok := directAWSNativeCheckpointKind(cfg, server, target, strategy); ok && kind == checkpointKindAWSAMI {
+	if kind, ok := directNativeCheckpointKind(cfg, server, target, strategy); ok && kind == checkpointKindAWSAMI {
 		return directAWSAMICheckpointDriver{}, true
 	}
 	if _, ok := nativeCheckpointKind(cfg, server, target, strategy); ok {
@@ -275,72 +276,55 @@ func remotePrepareNativeImageCommand() string {
 }
 
 func nativeCheckpointKind(cfg Config, server Server, target SSHTarget, strategy string) (string, bool) {
-	if cfg.Coordinator == "" || server.CloudID == "" || isWindowsNativeTarget(target) {
+	capability, ok := providerNativeCheckpointCapability(cfg, server, target, strategy)
+	if !ok || capability.Direct {
 		return "", false
 	}
-	targetOS := firstNonBlank(target.TargetOS, cfg.TargetOS)
-	strategy = normalizeCheckpointStrategy(strategy)
-	switch server.Provider {
-	case "aws":
-		if targetOS != targetLinux && targetOS != targetMacOS {
-			return "", false
-		}
-		if targetOS == targetMacOS {
-			return checkpointKindAWSAMI, true
-		}
-		if strategy == checkpointStrategyImage {
-			return checkpointKindAWSAMI, true
-		}
-		return checkpointKindAWSEBS, true
-	case "azure":
-		if targetOS != targetLinux {
-			return "", false
-		}
-		if strategy == checkpointStrategyImage {
-			return checkpointKindAzure, true
-		}
-		return checkpointKindAzureOS, true
-	case "gcp":
-		if targetOS != targetLinux {
-			return "", false
-		}
-		if strategy == checkpointStrategyImage {
-			return checkpointKindGCP, true
-		}
-		return checkpointKindGCPDisk, true
-	default:
+	if capability.Kind == "" {
 		return "", false
 	}
+	return capability.Kind, true
 }
 
 func parallelsNativeCheckpointKind(cfg Config, server Server, strategy string) (string, bool) {
-	if cfg.Provider == "parallels" || server.Provider == "parallels" {
-		if server.CloudID == "" {
-			return "", false
-		}
-		if normalizeCheckpointStrategy(strategy) == checkpointStrategyImage {
-			return "", false
-		}
-		return checkpointKindParallels, true
-	}
-	return "", false
+	return directParallelsNativeCheckpointKind(cfg, server, SSHTarget{}, strategy)
 }
 
-func directAWSNativeCheckpointKind(cfg Config, server Server, target SSHTarget, strategy string) (string, bool) {
-	if cfg.Coordinator != "" || server.Provider != "aws" || server.CloudID == "" || isWindowsNativeTarget(target) {
+func directParallelsNativeCheckpointKind(cfg Config, server Server, target SSHTarget, strategy string) (string, bool) {
+	capability, ok := providerNativeCheckpointCapability(cfg, server, target, strategy)
+	if !ok || !capability.Direct || capability.Kind != checkpointKindParallels {
 		return "", false
 	}
-	targetOS := firstNonBlank(target.TargetOS, cfg.TargetOS)
-	if targetOS != targetLinux && targetOS != targetMacOS {
+	return capability.Kind, true
+}
+
+func directNativeCheckpointKind(cfg Config, server Server, target SSHTarget, strategy string) (string, bool) {
+	capability, ok := providerNativeCheckpointCapability(cfg, server, target, strategy)
+	if !ok || !capability.Direct {
 		return "", false
 	}
-	if targetOS == targetMacOS {
-		return checkpointKindAWSAMI, true
-	}
-	if normalizeCheckpointStrategy(strategy) != checkpointStrategyImage {
+	if capability.Kind == "" {
 		return "", false
 	}
-	return checkpointKindAWSAMI, true
+	return capability.Kind, true
+}
+
+func providerNativeCheckpointCapability(cfg Config, server Server, target SSHTarget, strategy string) (NativeCheckpointCapability, bool) {
+	providerName := firstNonBlank(server.Provider, cfg.Provider)
+	provider, err := ProviderFor(providerName)
+	if err != nil {
+		return NativeCheckpointCapability{}, false
+	}
+	capabilityProvider, ok := provider.(NativeCheckpointProvider)
+	if !ok {
+		return NativeCheckpointCapability{}, false
+	}
+	return capabilityProvider.NativeCheckpointCapability(NativeCheckpointRequest{
+		Config:   cfg,
+		Server:   server,
+		Target:   target,
+		Strategy: normalizeCheckpointStrategy(strategy),
+	})
 }
 
 func (record checkpointRecord) nativeProvider() string {
@@ -507,6 +491,21 @@ func nativeCoordinatorImageRef(record checkpointRecord) CoordinatorImageRef {
 	}
 }
 
+func nativeCheckpointForkRecord(record checkpointRecord) NativeCheckpointForkRecord {
+	return NativeCheckpointForkRecord{
+		Kind:        record.Kind,
+		ImageID:     record.Native.ImageID,
+		Resource:    record.Native.Resource,
+		Region:      record.Native.Region,
+		Project:     record.Native.Project,
+		Direct:      record.Native.Direct,
+		HostID:      record.HostID,
+		TargetOS:    record.TargetOS,
+		WindowsMode: record.WindowsMode,
+		ServerType:  record.ServerType,
+	}
+}
+
 func coordinatorStatusCode(err error) int {
 	var httpErr CoordinatorHTTPError
 	if errors.As(err, &httpErr) {
@@ -523,76 +522,33 @@ func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record check
 	} else if cfg.CoordAdminToken != "" {
 		cfg.CoordToken = cfg.CoordAdminToken
 	}
-	switch record.Kind {
-	case checkpointKindAWSAMI:
-		cfg.AWSAMI = record.Native.ImageID
-		if record.Native.Region != "" {
-			cfg.AWSRegion = record.Native.Region
-		}
-	case checkpointKindAWSEBS:
-		cfg.AWSSnapshot = record.Native.ImageID
-		if record.Native.Region != "" {
-			cfg.AWSRegion = record.Native.Region
-		}
-	case checkpointKindAzure:
-		cfg.AzureImage = firstNonBlank(record.Native.Resource, record.Native.ImageID)
-		if record.Native.Region != "" {
-			cfg.AzureLocation = record.Native.Region
-		}
-	case checkpointKindAzureOS:
-		cfg.AzureSnapshot = firstNonBlank(record.Native.Resource, record.Native.ImageID)
-		if record.Native.Region != "" {
-			cfg.AzureLocation = record.Native.Region
-		}
-	case checkpointKindGCP:
-		cfg.GCPMachineImage = firstNonBlank(record.Native.Resource, record.Native.ImageID)
-		if record.Native.Region != "" {
-			cfg.GCPZone = record.Native.Region
-		}
-		if record.Native.Project != "" {
-			cfg.GCPProject = record.Native.Project
-			cfg.gcpProjectExplicit = true
-		}
-	case checkpointKindGCPDisk:
-		cfg.GCPSnapshot = firstNonBlank(record.Native.Resource, record.Native.ImageID)
-		if record.Native.Region != "" {
-			cfg.GCPZone = record.Native.Region
-		}
-		if record.Native.Project != "" {
-			cfg.GCPProject = record.Native.Project
-			cfg.gcpProjectExplicit = true
-		}
-	case checkpointKindParallels:
-		cfg.Provider = "parallels"
-		cfg.Coordinator = ""
-		cfg.CoordToken = ""
-		cfg.Parallels.SourceID = record.Native.Resource
-		cfg.Parallels.SourceSnapshotID = record.Native.ImageID
-		applyParallelsHostRefConfig(cfg, record.Native.Region)
-	}
 	if record.TargetOS != "" {
 		cfg.TargetOS = record.TargetOS
 	}
 	if record.WindowsMode != "" {
 		cfg.WindowsMode = record.WindowsMode
 	}
-	if cfg.Provider == "aws" && cfg.TargetOS == targetMacOS {
-		if record.Native.Direct && record.HostID != "" {
-			cfg.HostID = record.HostID
-			cfg.AWSMacHostID = record.HostID
-		}
-		if !flagWasSet(fs, "market") {
-			cfg.Capacity.Market = "on-demand"
-		}
-		normalizeTargetConfig(cfg)
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return err
 	}
-	if cfg.Provider == "azure" && flagWasSet(fs, "azure-os-disk") {
-		mode, err := NormalizeAzureOSDiskMode(fs.Lookup("azure-os-disk").Value.String())
-		if err != nil {
-			return err
-		}
-		cfg.AzureOSDisk = mode
-		cfg.AzureOSDiskExplicit = true
+	forkProvider, ok := provider.(NativeCheckpointForkProvider)
+	if !ok {
+		return exit(2, "provider=%s does not support native checkpoint fork config", cfg.Provider)
+	}
+	azureOSDisk := ""
+	azureOSDiskExplicit := flagWasSet(fs, "azure-os-disk")
+	if azureOSDiskExplicit {
+		azureOSDisk = fs.Lookup("azure-os-disk").Value.String()
+	}
+	if err := forkProvider.ApplyNativeCheckpointForkConfig(NativeCheckpointForkRequest{
+		Config:              cfg,
+		Record:              nativeCheckpointForkRecord(record),
+		MarketExplicit:      flagWasSet(fs, "market"),
+		AzureOSDisk:         azureOSDisk,
+		AzureOSDiskExplicit: azureOSDiskExplicit,
+	}); err != nil {
+		return err
 	}
 	if !flagWasSet(fs, "type") {
 		if record.ServerType != "" && !flagWasSet(fs, "class") {

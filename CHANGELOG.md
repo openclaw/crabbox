@@ -4,10 +4,13 @@
 
 ### Added
 
+- Added AWS doctor capacity readiness checks that surface Spot and On-Demand vCPU quota pressure before warmup. Thanks @jwmoss.
 - Added an experimental Linux `--desktop-env wayland` profile using Sway, WayVNC, Wayland browser launch env, and `grim` screenshots while keeping XFCE as the default desktop.
 
 ### Fixed
 
+- Fixed coordinator-backed AWS SSH ingress so active lease source CIDRs are preserved through provider-owned access reconciliation instead of core AWS special cases. Thanks @obviyus.
+- Fixed coordinator-backed one-shot runs to replace a lease once when SSH drops after sync but before the command starts, stopping the stale lease and retrying sync on the replacement.
 - Fixed Linux desktop theme setup so WebVNC sessions install and prefer native Arc-Dark/other dark XFCE themes instead of custom-painting panel and window chrome.
 - Fixed Linux WebVNC desktop sessions so they follow the portal light/dark toggle and system theme changes after the remote desktop has already connected.
 - Fixed run failure summaries and timing JSON to classify likely blocked stages, redact known HTML auth challenge bodies from failure excerpts, and reject unsupported Blacksmith environment forwarding before warmup.

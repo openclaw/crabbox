@@ -66,6 +66,37 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		}
 		fmt.Fprintf(a.Stdout, "%-7s %-8s %s\n", status, check, message)
 	}
+	recordProviderDoctorCheck := func(provider string, check DoctorCheck) {
+		status := strings.TrimSpace(check.Status)
+		if status == "" {
+			status = "ok"
+		}
+		name := strings.TrimSpace(check.Check)
+		if name == "" {
+			name = "provider"
+		}
+		message := strings.TrimSpace(check.Message)
+		details := make(map[string]string, len(check.Details)+2)
+		if message != "" {
+			for key, value := range parseDoctorDetails(message) {
+				details[key] = value
+			}
+		}
+		for key, value := range check.Details {
+			details[key] = value
+		}
+		if provider != "" && details["provider"] == "" {
+			details["provider"] = provider
+		}
+		if name == "provider" {
+			details["timeout"] = doctorProviderTimeout.String()
+			message = doctorProviderMessage(provider, message)
+		}
+		record(status, name, message, details)
+		if doctorStatusFails(status) {
+			ok = false
+		}
+	}
 	finish := func() error {
 		if *jsonOut {
 			if err := json.NewEncoder(a.Stdout).Encode(doctorJSONOutput{OK: ok, Provider: cfg.Provider, Checks: checks}); err != nil {
@@ -155,7 +186,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 					record("ok", "broker", fmt.Sprintf("auth=%s owner=%s org=%s default_type=%s", whoami.Auth, whoami.Owner, whoami.Org, cfg.ServerType), map[string]string{"auth": whoami.Auth, "owner": whoami.Owner, "org": whoami.Org, "default_type": cfg.ServerType})
 				}
 				if coordinatorProviderReadinessSupported(cfg.Provider) {
-					readiness, err := coord.ProviderReadiness(ctx, cfg.Provider)
+					readiness, err := coord.ProviderReadiness(ctx, cfg)
 					if err == nil {
 						if readiness.Configured {
 							record("ok", "provider", fmt.Sprintf("provider=%s coordinator_secrets=ready", readiness.Provider), map[string]string{"provider": readiness.Provider, "coordinator_secrets": "ready"})
@@ -163,6 +194,9 @@ func (a App) doctor(ctx context.Context, args []string) error {
 							hint := doctorErrorHint(readiness.Provider, "config")
 							record("failed", "provider", fmt.Sprintf("provider=%s missing=%s class=config hint=%s", readiness.Provider, strings.Join(readiness.Missing, ","), hint), map[string]string{"provider": readiness.Provider, "missing": strings.Join(readiness.Missing, ","), "class": "config", "hint": hint})
 							ok = false
+						}
+						for _, check := range readiness.Checks {
+							recordProviderDoctorCheck(readiness.Provider, check)
 						}
 					} else if !isCoordinatorNotFoundError(err) {
 						class := doctorErrorClass(err)
@@ -229,11 +263,24 @@ func (a App) doctor(ctx context.Context, args []string) error {
 				record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", doctor.Spec().Name, class, hint, err), map[string]string{"provider": doctor.Spec().Name, "class": class, "hint": hint, "error": err.Error(), "timeout": doctorProviderTimeout.String()})
 				ok = false
 			} else {
-				message := fmt.Sprintf("provider=%s timeout=%s %s", result.Provider, doctorProviderTimeout, result.Message)
-				details := parseDoctorDetails(result.Message)
-				details["provider"] = result.Provider
-				details["timeout"] = doctorProviderTimeout.String()
-				record("ok", "provider", message, details)
+				if len(result.Checks) > 0 {
+					for _, check := range result.Checks {
+						recordProviderDoctorCheck(result.Provider, check)
+					}
+				} else {
+					status := strings.TrimSpace(result.Status)
+					if status == "" {
+						status = "ok"
+					}
+					message := fmt.Sprintf("provider=%s timeout=%s %s", result.Provider, doctorProviderTimeout, result.Message)
+					details := parseDoctorDetails(result.Message)
+					details["provider"] = result.Provider
+					details["timeout"] = doctorProviderTimeout.String()
+					record(status, "provider", message, details)
+					if doctorStatusFails(status) {
+						ok = false
+					}
+				}
 			}
 		}
 		return finish()
@@ -288,6 +335,55 @@ func parseDoctorDetails(message string) map[string]string {
 		details[key] = value
 	}
 	return details
+}
+
+func doctorProviderMessage(provider, message string) string {
+	fields := strings.Fields(message)
+	if len(fields) == 0 {
+		return ""
+	}
+	hasProvider := false
+	hasTimeout := false
+	for _, field := range fields {
+		key, _, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "provider":
+			hasProvider = true
+		case "timeout":
+			hasTimeout = true
+		}
+	}
+	if !hasProvider && provider != "" {
+		fields = append([]string{fmt.Sprintf("provider=%s", provider)}, fields...)
+		hasProvider = true
+	}
+	if !hasTimeout {
+		timeoutField := fmt.Sprintf("timeout=%s", doctorProviderTimeout)
+		insert := 0
+		if hasProvider {
+			for i, field := range fields {
+				key, _, ok := strings.Cut(field, "=")
+				if ok && key == "provider" {
+					insert = i + 1
+					break
+				}
+			}
+		}
+		fields = append(fields[:insert], append([]string{timeoutField}, fields[insert:]...)...)
+	}
+	return strings.Join(fields, " ")
+}
+
+func doctorStatusFails(status string) bool {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "failed", "missing":
+		return true
+	default:
+		return false
+	}
 }
 
 func doctorErrorClass(err error) string {

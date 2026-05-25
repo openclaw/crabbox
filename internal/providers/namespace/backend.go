@@ -136,6 +136,10 @@ func (b *namespaceLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLea
 	return nil
 }
 
+func (b *namespaceLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
+	return fmt.Sprintf("released namespace devbox lease=%s name=%s", lease.LeaseID, lease.Server.Name)
+}
+
 func (b *namespaceLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 	server := req.Lease.Server
 	if server.Labels == nil {

@@ -97,6 +97,10 @@ func (b *staticLeaseBackend) ReleaseLease(_ context.Context, req ReleaseLeaseReq
 	return nil
 }
 
+func (b *staticLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
+	return fmt.Sprintf("released static lease=%s host=%s", lease.LeaseID, lease.SSH.Host)
+}
+
 func (b *staticLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 	server := req.Lease.Server
 	if server.Labels == nil {

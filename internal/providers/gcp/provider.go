@@ -46,3 +46,44 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 	}
 	return doctor, nil
 }
+
+func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
+	if req.Config.Coordinator == "" || req.Server.CloudID == "" {
+		return core.NativeCheckpointCapability{}, false
+	}
+	if firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
+		return core.NativeCheckpointCapability{}, false
+	}
+	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
+		return core.NativeCheckpointCapability{Kind: core.CheckpointKindGCP}, true
+	}
+	return core.NativeCheckpointCapability{Kind: core.CheckpointKindGCPDisk}, true
+}
+
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {
+	cfg := req.Config
+	switch req.Record.Kind {
+	case core.CheckpointKindGCP:
+		cfg.GCPMachineImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	case core.CheckpointKindGCPDisk:
+		cfg.GCPSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	default:
+		return core.Exit(2, "provider=gcp does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	if req.Record.Region != "" {
+		cfg.GCPZone = req.Record.Region
+	}
+	if req.Record.Project != "" {
+		core.SetGCPProjectExplicit(cfg, req.Record.Project)
+	}
+	return nil
+}

@@ -70,6 +70,7 @@ import type {
   TestFailure,
   TestResultSummary,
   TailscaleMetadata,
+  WindowsMode,
 } from "./types";
 import { costLimits, enforceCostLimits, leaseCost, requestOrg, usageSummary } from "./usage";
 
@@ -86,6 +87,7 @@ const leaseCleanupRetryDelayMs = 5 * 60 * 1000;
 const awsOrphanSweepInitialDelayMs = 60 * 1000;
 const defaultAWSOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAWSOrphanSweepGraceSeconds = 15 * 60;
+const providerAccessReservationTTLMS = 15 * 60 * 1000;
 const maxPendingWebVNCBytes = 1024 * 1024;
 const maxCodeRequestBytes = 10 * 1024 * 1024;
 const maxCodeWebSocketFrameChunkBytes = 15 * 1024;
@@ -386,7 +388,7 @@ export class FleetDurableObject implements DurableObject {
         parts[2] &&
         parts[3] === "readiness"
       ) {
-        return this.providerReadiness(parts[2]);
+        return await this.providerReadiness(request, parts[2]);
       }
       if (method === "GET" && parts.join("/") === "v1/control") {
         return await this.controlSocket(request);
@@ -943,7 +945,7 @@ export class FleetDurableObject implements DurableObject {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<LeaseRequest>(request);
-    const config = leaseConfig(
+    let config = leaseConfig(
       input,
       this.env.CRABBOX_AZURE_OS_DISK ? { azureOSDisk: this.env.CRABBOX_AZURE_OS_DISK } : undefined,
     );
@@ -956,30 +958,15 @@ export class FleetDurableObject implements DurableObject {
         { status: 403 },
       );
     }
-    if (config.provider === "aws" && config.awsSSHCIDRs.length === 0) {
-      config.awsSSHCIDRs = requestSourceCIDRs(request);
-    }
-    if (config.provider === "aws" && !config.awsAMI && !config.awsSnapshot) {
-      if (config.target === "macos") {
-        config.awsPromotedAMIs = await this.promotedAWSImagesForFallback(config);
-      } else {
-        const promoted = await this.promotedAWSImage(config);
-        config.awsAMI = promoted?.id ?? "";
-        if (promoted?.region) {
-          config.awsRegion = promoted.region;
-        }
-      }
-    }
-    if (config.provider === "azure" && !config.azureLocation) {
-      config.azureLocation = azureLocationFor(this.env, "");
-    }
-    if (config.provider === "gcp" && !config.gcpProject) {
-      config.gcpProject =
-        this.env.CRABBOX_GCP_PROJECT?.trim() || this.env.GCP_PROJECT_ID?.trim() || "";
-    }
+    config =
+      (await this.provider(
+        config.provider,
+        providerRegionForConfig(config),
+        providerProjectForConfig(config),
+      ).prepareLeaseConfig?.(config)) ?? config;
     const readiness = this.providerConfigurationReadiness(
       config.provider,
-      config.provider === "gcp" ? config.gcpProject : undefined,
+      providerProjectForConfig(config),
     );
     if (!readiness.configured) {
       return json(
@@ -1001,14 +988,15 @@ export class FleetDurableObject implements DurableObject {
       org,
       leases,
     );
+    const providerAccessLeases = await this.providerAccessRecords();
     const tailscaleError = await this.prepareTailscaleConfig(config, input, leaseID, slug);
     if (tailscaleError) {
       return tailscaleError;
     }
     const provider = this.provider(
       config.provider,
-      config.provider === "gcp" ? config.gcpZone : config.awsRegion,
-      config.provider === "gcp" ? config.gcpProject : undefined,
+      providerRegionForConfig(config),
+      providerProjectForConfig(config),
     );
     const providerHourlyUSD = await provider
       .hourlyPriceUSD(config.serverType, config)
@@ -1021,7 +1009,7 @@ export class FleetDurableObject implements DurableObject {
       providerHourlyUSD,
     );
     const now = new Date();
-    const record: LeaseRecord = {
+    let record: LeaseRecord = {
       id: leaseID,
       slug,
       provider: config.provider,
@@ -1080,16 +1068,35 @@ export class FleetDurableObject implements DurableObject {
         record.tailscale.exitNodeAllowLanAccess = config.tailscaleExitNodeAllowLanAccess;
       }
     }
-    const limitError = enforceCostLimits(leases, record, costLimits(this.env), now);
+    const limitError = enforceCostLimits(
+      [...leases, ...providerAccessLeases],
+      record,
+      costLimits(this.env),
+      now,
+    );
     if (limitError) {
       return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
     }
-    const { server, serverType, market, attempts } = await provider.createServerWithFallback(
-      config,
-      leaseID,
-      slug,
-      owner,
-    );
+    const accessContext = providerAccessContext(requestSourceCIDRs(request), [
+      ...leases,
+      ...providerAccessLeases,
+    ]);
+    const prepared = await provider.prepareLeaseCreate?.(config, record, accessContext);
+    if (prepared) {
+      config = prepared.config;
+      record = prepared.lease;
+    }
+    if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
+      await this.putProviderAccess(providerAccessReservation(record, now));
+    }
+    const { server, serverType, market, attempts } = await provider
+      .createServerWithFallback(config, leaseID, slug, owner, prepared?.provisioning)
+      .catch(async (error: unknown) => {
+        if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
+          await this.deleteProviderAccess(record.id);
+        }
+        throw error;
+      });
     record.cloudID = server.cloudID;
     record.serverType = serverType;
     if (server.hostID) {
@@ -1098,15 +1105,17 @@ export class FleetDurableObject implements DurableObject {
     if (market) {
       record.market = market;
     }
-    if (config.provider === "aws" && server.region) {
-      config.awsRegion = server.region;
-    }
     if (attempts && attempts.length > 0) {
       record.provisioningAttempts = attempts;
     }
     record.serverID = server.id;
     record.serverName = server.name;
     record.host = server.host;
+    const finalized = await provider.finalizeLeaseCreate?.(config, record, server, attempts ?? []);
+    if (finalized) {
+      config = finalized.config;
+      record = finalized.lease;
+    }
     const finalProviderHourlyUSD = await provider
       .hourlyPriceUSD(serverType, config)
       .catch(() => undefined);
@@ -1119,21 +1128,10 @@ export class FleetDurableObject implements DurableObject {
     );
     record.estimatedHourlyUSD = finalCost.hourlyUSD;
     record.maxEstimatedUSD = finalCost.maxUSD;
-    if (config.provider === "aws") {
-      record.region = server.region ?? config.awsRegion;
-      const hints = capacityHints(this.env, config, record, attempts ?? []);
-      if (hints.length > 0) {
-        record.capacityHints = hints;
-      }
-    }
-    if (config.provider === "azure") {
-      record.region = config.azureLocation;
-    }
-    if (config.provider === "gcp") {
-      record.region = server.region ?? config.gcpZone;
-      record.providerProject = config.gcpProject;
-    }
     await this.putLease(record);
+    if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
+      await this.deleteProviderAccess(record.id);
+    }
     await this.scheduleAlarm();
     return json({ lease: record }, { status: 201 });
   }
@@ -1153,8 +1151,8 @@ export class FleetDurableObject implements DurableObject {
         idleTimeoutSeconds?: number;
         telemetry?: Partial<LeaseTelemetry>;
       }>(request);
-      await this.applyLeaseHeartbeat(lease, body, request);
-      return json({ lease });
+      const updatedLease = await this.applyLeaseHeartbeat(lease, body, request);
+      return json({ lease: updatedLease });
     }
     if (method === "POST" && action === "tailscale") {
       const lease = await this.resolveLease(leaseID, request, false);
@@ -1183,7 +1181,7 @@ export class FleetDurableObject implements DurableObject {
       telemetry?: Partial<LeaseTelemetry>;
     },
     request?: Request,
-  ): Promise<void> {
+  ): Promise<LeaseRecord> {
     const now = new Date();
     const requestedIdleTimeoutSeconds = input.idleTimeoutSeconds;
     if (
@@ -1202,42 +1200,22 @@ export class FleetDurableObject implements DurableObject {
     lease.lastTouchedAt = now.toISOString();
     lease.expiresAt = recomputeLeaseExpiresAt(lease, now).toISOString();
     clearLeaseCleanupMetadata(lease);
+    const requestCIDRs = request ? requestSourceCIDRs(request) : [];
+    if (requestCIDRs.length > 0) {
+      const provider = this.provider(lease.provider, lease.region, lease.providerProject);
+      const leases = await this.leaseRecords();
+      const accessContext = providerAccessContext(
+        requestCIDRs,
+        replaceProviderAccessState([...leases, ...(await this.providerAccessRecords())], lease),
+      );
+      const updatedLease = await provider.refreshLeaseAccess?.(lease, accessContext);
+      if (updatedLease) {
+        lease = updatedLease;
+      }
+    }
     await this.putLease(lease);
-    await this.refreshLeaseSSHIngress(lease, request);
     await this.scheduleAlarm();
-  }
-
-  private async refreshLeaseSSHIngress(lease: LeaseRecord, request: Request | undefined) {
-    if (!request || lease.provider !== "aws" || lease.state !== "active") {
-      return;
-    }
-    const cidrs = requestSourceCIDRs(request);
-    if (cidrs.length === 0) {
-      return;
-    }
-    try {
-      const config = leaseConfig({
-        provider: "aws",
-        target: lease.target,
-        windowsMode: lease.windowsMode ?? "normal",
-        class: lease.class,
-        serverType: lease.serverType,
-        awsSSHCIDRs: cidrs,
-        capacity: { market: lease.market === "spot" ? "spot" : "on-demand" },
-        providerKey: lease.providerKey,
-        sshUser: lease.sshUser,
-        sshPort: lease.sshPort,
-        sshFallbackPorts: lease.sshFallbackPorts ?? [],
-        sshPublicKey: "ssh-ed25519 heartbeat-refresh",
-        workRoot: lease.workRoot,
-        ...(lease.hostId || lease.hostID ? { hostId: lease.hostId || lease.hostID } : {}),
-        ...(lease.region ? { awsRegion: lease.region } : {}),
-      });
-      const provider = this.provider("aws", lease.region || config.awsRegion);
-      await provider.refreshSSHIngress?.(config);
-    } catch (error) {
-      console.warn(`refresh AWS SSH ingress failed for ${lease.id}: ${errorMessage(error)}`);
-    }
+    return lease;
   }
 
   private async prepareTailscaleConfig(
@@ -1359,14 +1337,22 @@ export class FleetDurableObject implements DurableObject {
     });
   }
 
-  private providerReadiness(provider: string): Response {
+  private async providerReadiness(request: Request, provider: string): Promise<Response> {
     if (!isManagedProvider(provider)) {
       return json(
         { error: "invalid_provider", message: `unsupported provider: ${provider}` },
         { status: 400 },
       );
     }
-    return json(this.providerConfigurationReadiness(provider));
+    const url = new URL(request.url);
+    const readiness = this.providerConfigurationReadiness(
+      provider,
+      url.searchParams.get("gcpProject") ?? undefined,
+    );
+    if (provider === "aws" && readiness.configured && !this.testProviders.aws) {
+      readiness.checks = await this.awsProviderCapacityChecks(url.searchParams);
+    }
+    return json(readiness);
   }
 
   private providerConfigurationReadiness(
@@ -1382,6 +1368,42 @@ export class FleetDurableObject implements DurableObject {
       };
     }
     return providerReadiness(provider, this.env, gcpProject);
+  }
+
+  private async awsProviderCapacityChecks(
+    params: URLSearchParams,
+  ): Promise<ProviderReadinessCheck[]> {
+    const capacity: NonNullable<LeaseRequest["capacity"]> = {};
+    const market = normalizeReadinessMarket(params.get("market"));
+    if (market) {
+      capacity.market = market;
+    }
+    const fallback = params.get("fallback");
+    if (fallback) {
+      capacity.fallback = fallback;
+    }
+    const leaseRequest: LeaseRequest = {
+      provider: "aws",
+      target: normalizeReadinessTarget(params.get("target")),
+      windowsMode: normalizeReadinessWindowsMode(params.get("windowsMode")),
+      serverTypeExplicit: params.get("serverTypeExplicit") === "true",
+      capacity,
+      sshPublicKey: readinessDummySSHPublicKey,
+    };
+    const className = params.get("class");
+    if (className) {
+      leaseRequest.class = className;
+    }
+    const serverType = params.get("serverType") || params.get("type");
+    if (serverType) {
+      leaseRequest.serverType = serverType;
+    }
+    const region = params.get("region");
+    if (region) {
+      leaseRequest.awsRegion = region;
+    }
+    const config = leaseConfig(leaseRequest);
+    return await new EC2SpotClient(this.env, config.awsRegion).capacityReadinessChecks(config);
   }
 
   private async portalRoute(request: Request, parts: string[]): Promise<Response> {
@@ -3732,18 +3754,17 @@ export class FleetDurableObject implements DurableObject {
     if (!lease) {
       return notFound();
     }
-    if (!lease.cloudID || !providerSupportsNativeImages(lease.provider)) {
+    const provider = this.provider(lease.provider, lease.region, lease.providerProject);
+    if (!lease.cloudID || !provider.supportsNativeImages()) {
       return json(
         {
           error: "unsupported_provider",
-          message: "native images are supported for AWS, Azure, and GCP leases",
+          message: provider.nativeImagesUnsupportedMessage(),
         },
         { status: 400 },
       );
     }
-    const strategy = checkpointStrategy(
-      input.strategy ?? (lease.provider === "aws" ? "image" : "disk-snapshot"),
-    );
+    const strategy = checkpointStrategy(input.strategy ?? provider.defaultImageStrategy(lease));
     if (!strategy) {
       return json(
         {
@@ -3753,31 +3774,18 @@ export class FleetDurableObject implements DurableObject {
         { status: 400 },
       );
     }
-    if (lease.provider === "azure" && strategy === "image") {
+    const unsupportedStrategy = provider.validateLeaseImageStrategy(lease, strategy);
+    if (unsupportedStrategy) {
       return json(
         {
           error: "unsupported_strategy",
-          message:
-            "Azure managed images require a stopped/generalized source VM; use disk-snapshot checkpoints for active Azure leases",
+          message: unsupportedStrategy,
         },
         { status: 400 },
       );
     }
-    const image = await this.provider(
-      lease.provider,
-      lease.region,
-      lease.providerProject,
-    ).createImage(
-      lease.cloudID,
-      providerImageResourceName(lease.provider, name, leaseID),
-      input.noReboot ?? true,
-      strategy,
-    );
-    const enriched = lease.provider === "aws" ? enrichAWSImage(image, lease) : image;
-    if (lease.provider === "aws") {
-      await this.state.storage.put(createdAWSImageKey(enriched.id), enriched);
-    }
-    return json({ image: enriched }, { status: 201 });
+    const image = await provider.createLeaseImage(lease, name, input.noReboot ?? true, strategy);
+    return json({ image }, { status: 201 });
   }
 
   private async imageRoute(request: Request, imageID: string, action?: string): Promise<Response> {
@@ -3797,19 +3805,16 @@ export class FleetDurableObject implements DurableObject {
     const region = url.searchParams.get("region") ?? undefined;
     const project = url.searchParams.get("project") ?? undefined;
     const kind = url.searchParams.get("kind") ?? undefined;
-    const known = provider === "aws" ? await this.createdAWSImage(decodedImageID) : undefined;
-    const promotedAWSImage =
-      provider === "aws" ? await this.promotedAWSImageByID(decodedImageID) : undefined;
-    const awsMetadata = known ?? promotedAWSImage;
-    const knownRegion = awsMetadata?.region ?? "";
+    const imageProvider = this.provider(provider, region, project);
+    const metadata = await imageProvider.storedImageMetadata(decodedImageID);
+    const knownRegion = metadata?.region ?? "";
     const providerRegion = region || knownRegion;
+    const providerForRegion =
+      providerRegion === region ? imageProvider : this.provider(provider, providerRegion, project);
     if (method === "GET" && action === undefined) {
       let image: ProviderImage;
       try {
-        image = await this.provider(provider, providerRegion, project).getImage(
-          decodedImageID,
-          kind,
-        );
+        image = await providerForRegion.getImage(decodedImageID, kind);
       } catch (error) {
         if (isProviderImageNotFound(error)) {
           return json(
@@ -3820,247 +3825,42 @@ export class FleetDurableObject implements DurableObject {
         throw error;
       }
       return json({
-        image: provider === "aws" ? mergeAWSImageMetadata(image, awsMetadata) : image,
+        image: providerForRegion.decorateImage(image, metadata),
       });
     }
     if (method === "GET" && (action === "fast-snapshot-restore" || action === "fsr-status")) {
-      if (provider !== "aws") {
+      if (!providerForRegion.fastSnapshotRestoreForImage) {
         return json(
           { error: "unsupported_provider", message: "Fast Snapshot Restore is AWS-only" },
           { status: 400 },
         );
       }
-      const rawRegion = region ?? knownRegion;
-      const imageRegion = rawRegion ? sanitizeAWSRegion(rawRegion) : "";
-      if (rawRegion && !imageRegion) {
-        return json(
-          { error: "invalid_region", message: "region must be an AWS region name" },
-          { status: 400 },
-        );
-      }
-      const image = mergeAWSImageMetadata(
-        await this.provider("aws", imageRegion).getImage(decodedImageID),
-        awsMetadata,
+      const result = await providerForRegion.fastSnapshotRestoreForImage(
+        decodedImageID,
+        metadata,
+        url,
       );
-      const snapshots = image.snapshots ?? [];
-      if (snapshots.length === 0) {
-        return json(
-          {
-            error: "image_snapshots_missing",
-            message: `image ${decodedImageID} has no EBS snapshots to describe for Fast Snapshot Restore`,
-          },
-          { status: 409 },
-        );
-      }
-      const availabilityZones = fastSnapshotRestoreStatusAZs(url, image.region ?? imageRegion);
-      const fastSnapshotRestores = await this.provider(
-        "aws",
-        image.region ?? imageRegion,
-      ).fastSnapshotRestoreStatus?.(snapshots, availabilityZones);
-      const imageWithStatus = {
-        ...image,
-        fastSnapshotRestores: fastSnapshotRestores ?? [],
-      };
-      return json({
-        image: imageWithStatus,
-        fastSnapshotRestores: imageWithStatus.fastSnapshotRestores,
-      });
+      return result instanceof Response ? result : json(result);
     }
     if (method === "DELETE" && action === undefined) {
-      if (promotedAWSImage?.id === decodedImageID) {
-        return json(
-          {
-            error: "image_promoted",
-            message: `image ${decodedImageID} is the promoted AWS image; promote another image before deleting it`,
-          },
-          { status: 409 },
-        );
+      const deleteBlocked = await providerForRegion.validateDeleteImage(decodedImageID, metadata);
+      if (deleteBlocked) {
+        return json(deleteBlocked.body, { status: deleteBlocked.status });
       }
-      await this.provider(provider, providerRegion, project).deleteImage(decodedImageID, kind);
+      await providerForRegion.deleteImage(decodedImageID, kind);
       return json({ imageID: decodedImageID, deleted: true });
     }
     if (method === "POST" && action === "promote") {
-      if (provider !== "aws") {
+      if (!providerForRegion.promoteImage) {
         return json(
           { error: "unsupported_provider", message: "image promotion is currently AWS-only" },
           { status: 400 },
         );
       }
-      const input: {
-        target?: string;
-        region?: string;
-        serverType?: string;
-        architecture?: string;
-        fastSnapshotRestore?: unknown;
-        fastSnapshotRestoreAvailabilityZones?: string[];
-      } = await readJson<{
-        target?: string;
-        region?: string;
-        serverType?: string;
-        architecture?: string;
-        fastSnapshotRestore?: unknown;
-        fastSnapshotRestoreAvailabilityZones?: string[];
-      }>(request).catch(() => ({}));
-      const target = normalizeAWSImageTarget(
-        input.target ?? url.searchParams.get("target") ?? known?.target ?? "linux",
-      );
-      if (!target) {
-        return json(
-          { error: "invalid_target", message: "target must be linux, macos, or windows" },
-          { status: 400 },
-        );
-      }
-      const rawRegion = input.region ?? region ?? knownRegion;
-      const imageRegion = sanitizeAWSRegion(rawRegion);
-      if (rawRegion && !imageRegion) {
-        return json(
-          { error: "invalid_region", message: "region must be an AWS region name" },
-          { status: 400 },
-        );
-      }
-      const metadata: Partial<ProviderImage> = { ...known, target, region: imageRegion };
-      const serverType =
-        input.serverType ?? url.searchParams.get("serverType") ?? known?.serverType;
-      if (serverType) {
-        metadata.serverType = serverType;
-      }
-      const architecture =
-        input.architecture ?? url.searchParams.get("architecture") ?? known?.architecture;
-      if (architecture) {
-        metadata.architecture = architecture;
-      }
-      const fastSnapshotRestore = boolFromUnknown(
-        input.fastSnapshotRestore ?? url.searchParams.get("fastSnapshotRestore"),
-      );
-      const fastSnapshotRestoreAvailabilityZones = fastSnapshotRestore
-        ? fastSnapshotRestoreAZs(
-            input.fastSnapshotRestoreAvailabilityZones,
-            url,
-            imageRegion,
-            this.env,
-          )
-        : [];
-      if (fastSnapshotRestore && fastSnapshotRestoreAvailabilityZones.length === 0) {
-        return json(
-          {
-            error: "invalid_fast_snapshot_restore_zones",
-            message:
-              "Fast Snapshot Restore promotion requires at least one availability zone via fsrAz, fastSnapshotRestoreAvailabilityZones, CRABBOX_AWS_FAST_SNAPSHOT_RESTORE_AZS, or CRABBOX_CAPACITY_AVAILABILITY_ZONES",
-          },
-          { status: 400 },
-        );
-      }
-      const image = mergeAWSImageMetadata(
-        await this.provider("aws", imageRegion).getImage(decodedImageID),
-        metadata,
-      );
-      if (image.state !== "available") {
-        return json(
-          { error: "image_not_available", message: `image ${decodedImageID} is ${image.state}` },
-          { status: 409 },
-        );
-      }
-      if (target === "macos" && !image.serverType) {
-        return json(
-          {
-            error: "invalid_server_type",
-            message: "macOS AWS image promotion requires serverType",
-          },
-          { status: 400 },
-        );
-      }
-      if (fastSnapshotRestoreAvailabilityZones.length > 0 && (image.snapshots ?? []).length === 0) {
-        return json(
-          {
-            error: "image_snapshots_missing",
-            message: `image ${decodedImageID} has no EBS snapshots to enable for Fast Snapshot Restore`,
-          },
-          { status: 409 },
-        );
-      }
-      const fastSnapshotRestores =
-        fastSnapshotRestoreAvailabilityZones.length > 0
-          ? await this.provider("aws", imageRegion).enableFastSnapshotRestore?.(
-              image.snapshots ?? [],
-              fastSnapshotRestoreAvailabilityZones,
-            )
-          : undefined;
-      const promoted: PromotedImageRecord = {
-        ...image,
-        ...(fastSnapshotRestores ? { fastSnapshotRestores } : {}),
-        target,
-        region: image.region ?? imageRegion,
-        architecture:
-          image.architecture ?? awsImageArchitectureForTarget(target, image.serverType ?? ""),
-        promotedAt: new Date().toISOString(),
-      };
-      await this.state.storage.put(promotedAWSImageKey(promoted), promoted);
-      if (target === "linux") {
-        await this.state.storage.put(legacyPromotedAWSImageKey(), promoted);
-      }
-      return json({ image: promoted });
+      const result = await providerForRegion.promoteImage(decodedImageID, metadata, request, url);
+      return result instanceof Response ? result : json(result);
     }
     return json({ error: "not_found" }, { status: 404 });
-  }
-
-  private async createdAWSImage(imageID: string): Promise<ProviderImage | undefined> {
-    return this.state.storage.get<ProviderImage>(createdAWSImageKey(imageID));
-  }
-
-  private async promotedAWSImage(config: {
-    target: TargetOS;
-    serverType: string;
-    awsRegion: string;
-  }): Promise<PromotedImageRecord | undefined> {
-    const scoped = await this.state.storage.get<PromotedImageRecord>(
-      promotedAWSImageKey({
-        target: config.target,
-        architecture: awsImageArchitectureForTarget(config.target, config.serverType),
-        serverType: config.serverType,
-        region: config.awsRegion,
-      }),
-    );
-    if (scoped) {
-      return scoped;
-    }
-    if (config.target === "macos") {
-      return this.state.storage.get<PromotedImageRecord>(
-        legacyScopedPromotedAWSImageKey({
-          target: config.target,
-          architecture: awsImageArchitectureForTarget(config.target, config.serverType),
-          region: config.awsRegion,
-        }),
-      );
-    }
-    if (config.target !== "linux") {
-      return scoped;
-    }
-    return this.state.storage.get<PromotedImageRecord>(legacyPromotedAWSImageKey());
-  }
-
-  private async promotedAWSImagesForFallback(config: LeaseConfig): Promise<Record<string, string>> {
-    const out: Record<string, string> = {};
-    for (const region of awsRegionCandidates(config, this.env, config.awsRegion)) {
-      for (const serverType of awsLaunchCandidates(config)) {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- storage reads preserve deterministic fallback key construction.
-        const promoted = await this.promotedAWSImage({
-          target: config.target,
-          serverType,
-          awsRegion: region,
-        });
-        if (promoted?.id) {
-          out[awsPromotedAMIConfigKey(region, serverType)] = promoted.id;
-        }
-      }
-    }
-    return out;
-  }
-
-  private async promotedAWSImageByID(imageID: string): Promise<PromotedImageRecord | undefined> {
-    const promoted = await this.state.storage.list<PromotedImageRecord>({
-      prefix: promotedAWSImagePrefix(),
-    });
-    return [...promoted.values()].find((image) => image.id === imageID);
   }
 
   private async expireLeases(): Promise<void> {
@@ -4321,6 +4121,24 @@ export class FleetDurableObject implements DurableObject {
     return [...leases.values()];
   }
 
+  private async providerAccessRecords(): Promise<LeaseRecord[]> {
+    const records = await this.state.storage.list<LeaseRecord>({
+      prefix: providerAccessPrefix(),
+    });
+    const now = Date.now();
+    const active: LeaseRecord[] = [];
+    const staleKeys: string[] = [];
+    for (const [key, record] of records) {
+      if (record.state === "active" && Date.parse(record.expiresAt) > now) {
+        active.push(record);
+        continue;
+      }
+      staleKeys.push(key);
+    }
+    await Promise.all(staleKeys.map((key) => this.state.storage.delete(key)));
+    return active;
+  }
+
   private async runRecords(): Promise<RunRecord[]> {
     const runs = await this.state.storage.list<RunRecord>({ prefix: "run:" });
     return [...runs.values()];
@@ -4418,6 +4236,14 @@ export class FleetDurableObject implements DurableObject {
     await this.state.storage.put(leaseKey(lease.id), lease);
   }
 
+  private async putProviderAccess(lease: LeaseRecord): Promise<void> {
+    await this.state.storage.put(providerAccessKey(lease.id), lease);
+  }
+
+  private async deleteProviderAccess(leaseID: string): Promise<void> {
+    await this.state.storage.delete(providerAccessKey(leaseID));
+  }
+
   private async getRun(runID: string): Promise<RunRecord | undefined> {
     return this.state.storage.get<RunRecord>(runKey(runID));
   }
@@ -4487,7 +4313,11 @@ export class FleetDurableObject implements DurableObject {
       return testProvider;
     }
     if (provider === "aws") {
-      return new AWSProvider(this.env, region || this.env.CRABBOX_AWS_REGION || "eu-west-1");
+      return new AWSProvider(
+        this.env,
+        region || this.env.CRABBOX_AWS_REGION || "eu-west-1",
+        this.state.storage,
+      );
     }
     if (provider === "azure") {
       return new AzureProvider(this.env);
@@ -4499,25 +4329,7 @@ export class FleetDurableObject implements DurableObject {
   }
 
   private async deleteLeaseServer(lease: LeaseRecord): Promise<void> {
-    if (lease.provider === "aws") {
-      await this.provider("aws", lease.region).deleteServer(lease.cloudID);
-      if (validCrabboxProviderKey(lease.providerKey)) {
-        await this.provider("aws", lease.region).deleteSSHKey(lease.providerKey);
-      }
-      return;
-    }
-    if (lease.provider === "azure") {
-      await this.provider("azure").deleteServer(lease.cloudID);
-      return;
-    }
-    if (lease.provider === "gcp") {
-      await this.provider("gcp", lease.region, lease.providerProject).deleteServer(lease.cloudID);
-      return;
-    }
-    await this.provider("hetzner").deleteServer(String(lease.serverID));
-    if (validCrabboxProviderKey(lease.providerKey)) {
-      await this.provider("hetzner").deleteSSHKey(lease.providerKey);
-    }
+    await this.provider(lease.provider, lease.region, lease.providerProject).releaseLease(lease);
   }
 
   private async releaseResolvedLease(
@@ -4547,6 +4359,14 @@ interface ProviderReadiness {
   configured: boolean;
   missing: string[];
   message: string;
+  checks?: ProviderReadinessCheck[];
+}
+
+interface ProviderReadinessCheck {
+  status: string;
+  check: string;
+  message?: string;
+  details?: Record<string, string>;
 }
 
 function providerReadiness(provider: Provider, env: Env, gcpProject?: string): ProviderReadiness {
@@ -4581,6 +4401,24 @@ function providerReadiness(provider: Provider, env: Env, gcpProject?: string): P
   };
 }
 
+const readinessDummySSHPublicKey =
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEcrabboxDoctorReadinessPlaceholder crabbox-doctor";
+
+function normalizeReadinessTarget(value: string | null): TargetOS {
+  return value === "windows" || value === "macos" ? value : "linux";
+}
+
+function normalizeReadinessWindowsMode(value: string | null): WindowsMode {
+  return value === "wsl2" ? "wsl2" : "normal";
+}
+
+function normalizeReadinessMarket(value: string | null): "spot" | "on-demand" | undefined {
+  if (value === "spot" || value === "on-demand") {
+    return value;
+  }
+  return undefined;
+}
+
 function providerRequiredSecrets(provider: Provider): Array<keyof Env> {
   switch (provider) {
     case "aws":
@@ -4600,6 +4438,14 @@ function isManagedProvider(provider: string): provider is Provider {
 
 function leaseKey(leaseID: string): string {
   return `lease:${leaseID}`;
+}
+
+function providerAccessPrefix(): string {
+  return "provider-access:";
+}
+
+function providerAccessKey(leaseID: string): string {
+  return `${providerAccessPrefix()}${leaseID}`;
 }
 
 function runKey(runID: string): string {
@@ -4983,10 +4829,6 @@ function validImageName(value: string): boolean {
   return /^[A-Za-z0-9()[\]./_ -]{3,128}$/.test(value);
 }
 
-function providerSupportsNativeImages(provider: Provider): boolean {
-  return provider === "aws" || provider === "azure" || provider === "gcp";
-}
-
 function hasNativeLeaseSource(config: LeaseConfig): boolean {
   return Boolean(
     config.awsSnapshot || config.azureSnapshot || config.gcpMachineImage || config.gcpSnapshot,
@@ -5033,6 +4875,16 @@ function providerFromQuery(value: string | null): Provider | undefined {
   return undefined;
 }
 
+function providerRegionForConfig(config: LeaseConfig): string | undefined {
+  if (config.provider === "gcp") return config.gcpZone;
+  if (config.provider === "azure") return config.azureLocation;
+  return config.awsRegion;
+}
+
+function providerProjectForConfig(config: LeaseConfig): string | undefined {
+  return config.provider === "gcp" ? config.gcpProject : undefined;
+}
+
 function providerImageResourceName(provider: Provider, name: string, leaseID: string): string {
   if (provider === "aws") {
     return name;
@@ -5059,6 +4911,18 @@ function providerImageResourceName(provider: Provider, name: string, leaseID: st
 
 function unsupportedProviderImageLifecycle(provider: Provider) {
   return () => Promise.reject(new Error(`${provider} images are not supported`));
+}
+
+function noStoredImageMetadata(): Promise<ProviderImage | undefined> {
+  return Promise.resolve(undefined);
+}
+
+function passthroughProviderImage(image: ProviderImage): ProviderImage {
+  return image;
+}
+
+function allowProviderImageDelete(): Promise<undefined> {
+  return Promise.resolve(undefined);
 }
 
 function validCrabboxProviderKey(value: string | undefined): value is string {
@@ -5588,6 +5452,40 @@ function requestSourceCIDRs(request: Request): string[] {
   }
   const cidr = sourceIP.includes(":") ? `${sourceIP}/128` : `${sourceIP}/32`;
   return validCIDRs([cidr]);
+}
+
+function providerAccessContext(
+  sourceCIDRs: string[],
+  activeLeases: LeaseRecord[],
+): ProviderAccessContext {
+  return {
+    requestSourceCIDRs: sourceCIDRs,
+    activeLeases,
+  };
+}
+
+function providerAccessReservation(lease: LeaseRecord, now: Date): LeaseRecord {
+  const leaseExpiry = Date.parse(lease.expiresAt);
+  const reservationExpiry = now.getTime() + providerAccessReservationTTLMS;
+  return {
+    ...lease,
+    expiresAt: new Date(Math.min(leaseExpiry, reservationExpiry)).toISOString(),
+  };
+}
+
+function replaceProviderAccessState(leases: LeaseRecord[], lease: LeaseRecord): LeaseRecord[] {
+  let replaced = false;
+  const next = leases.map((candidate) => {
+    if (candidate.id !== lease.id) {
+      return candidate;
+    }
+    replaced = true;
+    return lease;
+  });
+  if (!replaced) {
+    next.push(lease);
+  }
+  return next;
 }
 
 function finiteNumber(value: number | undefined): number | undefined {
@@ -6272,6 +6170,56 @@ function uniqueNonEmpty(values: Array<string | undefined>): string[] {
   return out;
 }
 
+function awsLeaseSSHSourceCIDRs(
+  config: Pick<ReturnType<typeof leaseConfig>, "awsSSHCIDRs">,
+  context: ProviderAccessContext,
+): string[] {
+  return config.awsSSHCIDRs.length > 0 ? config.awsSSHCIDRs : context.requestSourceCIDRs;
+}
+
+function awsGlobalSSHSourceCIDRs(env: Env): string[] {
+  return uniqueNonEmpty(validCIDRs((env.CRABBOX_AWS_SSH_CIDRS ?? "").split(",")));
+}
+
+function withLeaseSSHSourceCIDRs(
+  lease: LeaseRecord,
+  cidrs: string[],
+  complete: boolean,
+): LeaseRecord {
+  if (cidrs.length === 0 && !complete) {
+    return lease;
+  }
+  return {
+    ...lease,
+    network: {
+      ...lease.network,
+      sshSourceCIDRs: uniqueNonEmpty(cidrs),
+      sshSourceCIDRsComplete: complete,
+    },
+  };
+}
+
+function activeAWSSSHSourceCIDRs(leases: LeaseRecord[], cidrs: string[]): string[] {
+  return uniqueNonEmpty([
+    ...leases.flatMap((lease) =>
+      lease.provider === "aws" && lease.state === "active"
+        ? (lease.network?.sshSourceCIDRs ?? [])
+        : [],
+    ),
+    ...cidrs,
+  ]);
+}
+
+function hasUnknownActiveAWSSSHSource(leases: LeaseRecord[]): boolean {
+  return leases.some(
+    (lease) =>
+      lease.provider === "aws" &&
+      lease.state === "active" &&
+      (lease.network?.sshSourceCIDRs?.length ?? 0) === 0 &&
+      !lease.network?.sshSourceCIDRsComplete,
+  );
+}
+
 function awsOrphanSweepCandidate(
   machine: ProviderMachine,
   activeLeases: Map<string, LeaseRecord>,
@@ -6359,27 +6307,72 @@ function parseProviderLabelTime(value: string | undefined): number {
 interface CloudProvider {
   listCrabboxServers(): Promise<ProviderMachine[]>;
   getServer?(id: string): Promise<ProviderMachine>;
-  refreshSSHIngress?(config: ReturnType<typeof leaseConfig>): Promise<void>;
+  prepareLeaseConfig?(
+    config: ReturnType<typeof leaseConfig>,
+  ): Promise<ReturnType<typeof leaseConfig>>;
+  prepareLeaseCreate?(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+    context: ProviderAccessContext,
+  ): Promise<ProviderLeaseCreatePreparation>;
+  refreshLeaseAccess?(
+    lease: LeaseRecord,
+    context: ProviderAccessContext,
+  ): Promise<LeaseRecord | void>;
   createServerWithFallback(
     config: ReturnType<typeof leaseConfig>,
     leaseID: string,
     slug: string,
     owner: string,
+    provisioning?: ProviderProvisioningContext,
   ): Promise<{
     server: ProviderMachine;
     serverType: string;
     market?: string;
     attempts?: ProvisioningAttempt[];
   }>;
+  finalizeLeaseCreate?(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+    server: ProviderMachine,
+    attempts: ProvisioningAttempt[],
+  ): Promise<ProviderLeaseCreateFinalization>;
+  releaseLease(lease: LeaseRecord): Promise<void>;
   deleteServer(id: string): Promise<void>;
-  createImage(
-    instanceID: string,
+  supportsNativeImages(): boolean;
+  nativeImagesUnsupportedMessage(): string;
+  defaultImageStrategy(lease: LeaseRecord): "image" | "disk-snapshot";
+  validateLeaseImageStrategy(
+    lease: LeaseRecord,
+    strategy: "image" | "disk-snapshot",
+  ): string | undefined;
+  createLeaseImage(
+    lease: LeaseRecord,
     name: string,
     noReboot: boolean,
     strategy: "image" | "disk-snapshot",
   ): Promise<ProviderImage>;
   getImage(imageID: string, kind?: string): Promise<ProviderImage>;
   deleteImage(imageID: string, kind?: string): Promise<void>;
+  storedImageMetadata(imageID: string): Promise<ProviderImage | undefined>;
+  decorateImage(image: ProviderImage, metadata?: Partial<ProviderImage>): ProviderImage;
+  validateDeleteImage(
+    imageID: string,
+    metadata?: Partial<ProviderImage>,
+  ): Promise<{ status: number; body: Record<string, unknown> } | undefined>;
+  promoteImage?(
+    imageID: string,
+    metadata: ProviderImage | undefined,
+    request: Request,
+    url: URL,
+  ): Promise<Response | { image: ProviderImage }>;
+  fastSnapshotRestoreForImage?(
+    imageID: string,
+    metadata: ProviderImage | undefined,
+    url: URL,
+  ): Promise<
+    Response | { image: ProviderImage; fastSnapshotRestores: ProviderFastSnapshotRestore[] }
+  >;
   enableFastSnapshotRestore?(
     snapshotIDs: string[],
     availabilityZones: string[],
@@ -6395,11 +6388,41 @@ interface CloudProvider {
   ): Promise<number | undefined>;
 }
 
-class HetznerProvider implements CloudProvider {
-  private readonly client: HetznerClient;
+interface ProviderStateStorage {
+  get<T>(key: string): Promise<T | undefined>;
+  put<T>(key: string, value: T): Promise<void>;
+  list<T>(options?: { prefix?: string }): Promise<Map<string, T>>;
+}
 
-  constructor(env: Env) {
-    this.client = new HetznerClient(env);
+interface ProviderAccessContext {
+  requestSourceCIDRs: string[];
+  activeLeases: LeaseRecord[];
+}
+
+interface ProviderLeaseCreatePreparation {
+  config: ReturnType<typeof leaseConfig>;
+  lease: LeaseRecord;
+  provisioning?: ProviderProvisioningContext;
+}
+
+interface ProviderLeaseCreateFinalization {
+  config: ReturnType<typeof leaseConfig>;
+  lease: LeaseRecord;
+}
+
+interface ProviderProvisioningContext {
+  sshIngressReconcile?: "authoritative" | "additive";
+  publishAccessBeforeProvisioning?: boolean;
+}
+
+class HetznerProvider implements CloudProvider {
+  private clientValue?: HetznerClient;
+
+  constructor(private readonly env: Env) {}
+
+  private get client(): HetznerClient {
+    this.clientValue ??= new HetznerClient(this.env);
+    return this.clientValue;
   }
 
   async listCrabboxServers(): Promise<ProviderMachine[]> {
@@ -6431,9 +6454,35 @@ class HetznerProvider implements CloudProvider {
     await this.client.deleteServer(Number(id));
   }
 
-  createImage = unsupportedProviderImageLifecycle("hetzner");
+  async releaseLease(lease: LeaseRecord): Promise<void> {
+    await this.deleteServer(String(lease.serverID));
+    if (validCrabboxProviderKey(lease.providerKey)) {
+      await this.deleteSSHKey(lease.providerKey);
+    }
+  }
+
+  supportsNativeImages(): boolean {
+    return false;
+  }
+
+  nativeImagesUnsupportedMessage(): string {
+    return "native images are supported for AWS, Azure, and GCP leases";
+  }
+
+  defaultImageStrategy(): "image" | "disk-snapshot" {
+    return "disk-snapshot";
+  }
+
+  validateLeaseImageStrategy(): string | undefined {
+    return undefined;
+  }
+
+  createLeaseImage = unsupportedProviderImageLifecycle("hetzner");
   getImage = unsupportedProviderImageLifecycle("hetzner");
   deleteImage = unsupportedProviderImageLifecycle("hetzner");
+  storedImageMetadata = noStoredImageMetadata;
+  decorateImage = passthroughProviderImage;
+  validateDeleteImage = allowProviderImageDelete;
 
   async deleteSSHKey(name: string): Promise<void> {
     await this.client.deleteSSHKey(name);
@@ -6448,14 +6497,25 @@ class HetznerProvider implements CloudProvider {
 }
 
 class AzureProvider implements CloudProvider {
-  private readonly client: AzureClient;
+  private clientValue?: AzureClient;
 
-  constructor(env: Env) {
-    this.client = new AzureClient(env);
+  constructor(private readonly env: Env) {}
+
+  private get client(): AzureClient {
+    this.clientValue ??= new AzureClient(this.env);
+    return this.clientValue;
   }
 
   listCrabboxServers(): Promise<ProviderMachine[]> {
     return this.client.listCrabboxServers();
+  }
+
+  async prepareLeaseConfig(
+    config: ReturnType<typeof leaseConfig>,
+  ): Promise<ReturnType<typeof leaseConfig>> {
+    return config.azureLocation
+      ? config
+      : { ...config, azureLocation: azureLocationFor(this.env, "") };
   }
 
   createServerWithFallback(
@@ -6476,20 +6536,48 @@ class AzureProvider implements CloudProvider {
     return this.client.deleteServer(id);
   }
 
-  createImage(
-    instanceID: string,
+  async finalizeLeaseCreate(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+  ): Promise<ProviderLeaseCreateFinalization> {
+    return { config, lease: { ...lease, region: config.azureLocation } };
+  }
+
+  async releaseLease(lease: LeaseRecord): Promise<void> {
+    await this.deleteServer(lease.cloudID);
+  }
+
+  supportsNativeImages(): boolean {
+    return true;
+  }
+
+  nativeImagesUnsupportedMessage(): string {
+    return "native images are supported for AWS, Azure, and GCP leases";
+  }
+
+  defaultImageStrategy(): "image" | "disk-snapshot" {
+    return "disk-snapshot";
+  }
+
+  validateLeaseImageStrategy(
+    _lease: LeaseRecord,
+    strategy: "image" | "disk-snapshot",
+  ): string | undefined {
+    return strategy === "image"
+      ? "Azure managed images require a stopped/generalized source VM; use disk-snapshot checkpoints for active Azure leases"
+      : undefined;
+  }
+
+  createLeaseImage(
+    lease: LeaseRecord,
     name: string,
     _noReboot: boolean,
-    strategy: "image" | "disk-snapshot",
+    _strategy: "image" | "disk-snapshot",
   ): Promise<ProviderImage> {
-    if (strategy === "image") {
-      return Promise.reject(
-        new Error(
-          "Azure managed images require a stopped/generalized source VM; use disk-snapshot checkpoints for active Azure leases",
-        ),
-      );
-    }
-    return this.client.createDiskSnapshot(instanceID, name);
+    return this.client.createDiskSnapshot(
+      lease.cloudID,
+      providerImageResourceName(lease.provider, name, lease.id),
+    );
   }
 
   getImage(imageID: string, kind?: string): Promise<ProviderImage> {
@@ -6499,6 +6587,10 @@ class AzureProvider implements CloudProvider {
   deleteImage(imageID: string, kind?: string): Promise<void> {
     return this.client.deleteImage(imageID, kind);
   }
+
+  storedImageMetadata = noStoredImageMetadata;
+  decorateImage = passthroughProviderImage;
+  validateDeleteImage = allowProviderImageDelete;
 
   async deleteSSHKey(): Promise<void> {
     // Azure stores the SSH public key inline on the VM; nothing to clean up.
@@ -6510,14 +6602,33 @@ class AzureProvider implements CloudProvider {
 }
 
 class GCPProvider implements CloudProvider {
-  private readonly client: GCPClient;
+  private clientValue?: GCPClient;
 
-  constructor(env: Env, zone?: string, project?: string) {
-    this.client = new GCPClient(env, zone, project);
+  constructor(
+    private readonly env: Env,
+    private readonly zone?: string,
+    private readonly project?: string,
+  ) {}
+
+  private get client(): GCPClient {
+    this.clientValue ??= new GCPClient(this.env, this.zone, this.project);
+    return this.clientValue;
   }
 
   listCrabboxServers(): Promise<ProviderMachine[]> {
     return this.client.listCrabboxServers();
+  }
+
+  async prepareLeaseConfig(
+    config: ReturnType<typeof leaseConfig>,
+  ): Promise<ReturnType<typeof leaseConfig>> {
+    if (config.gcpProject) {
+      return config;
+    }
+    return {
+      ...config,
+      gcpProject: this.env.CRABBOX_GCP_PROJECT?.trim() || this.env.GCP_PROJECT_ID?.trim() || "",
+    };
   }
 
   createServerWithFallback(
@@ -6538,15 +6649,56 @@ class GCPProvider implements CloudProvider {
     return this.client.deleteServer(id);
   }
 
-  createImage(
-    instanceID: string,
+  async finalizeLeaseCreate(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+    server: ProviderMachine,
+  ): Promise<ProviderLeaseCreateFinalization> {
+    return {
+      config,
+      lease: {
+        ...lease,
+        region: server.region ?? config.gcpZone,
+        providerProject: config.gcpProject,
+      },
+    };
+  }
+
+  async releaseLease(lease: LeaseRecord): Promise<void> {
+    await this.deleteServer(lease.cloudID);
+  }
+
+  supportsNativeImages(): boolean {
+    return true;
+  }
+
+  nativeImagesUnsupportedMessage(): string {
+    return "native images are supported for AWS, Azure, and GCP leases";
+  }
+
+  defaultImageStrategy(): "image" | "disk-snapshot" {
+    return "disk-snapshot";
+  }
+
+  validateLeaseImageStrategy(): string | undefined {
+    return undefined;
+  }
+
+  createLeaseImage(
+    lease: LeaseRecord,
     name: string,
     _noReboot: boolean,
     strategy: "image" | "disk-snapshot",
   ): Promise<ProviderImage> {
     return strategy === "image"
-      ? this.client.createImage(instanceID, name)
-      : this.client.createDiskSnapshot(instanceID, name);
+      ? this.client.createImage(
+          lease.cloudID,
+          providerImageResourceName(lease.provider, name, lease.id),
+        )
+      : this.client.createDiskSnapshot(
+          lease.cloudID,
+          providerImageResourceName(lease.provider, name, lease.id),
+        );
   }
 
   getImage(imageID: string, kind?: string): Promise<ProviderImage> {
@@ -6556,6 +6708,10 @@ class GCPProvider implements CloudProvider {
   deleteImage(imageID: string, kind?: string): Promise<void> {
     return this.client.deleteImage(imageID, kind);
   }
+
+  storedImageMetadata = noStoredImageMetadata;
+  decorateImage = passthroughProviderImage;
+  validateDeleteImage = allowProviderImageDelete;
 
   deleteSSHKey(): Promise<void> {
     return this.client.deleteSSHKey();
@@ -6567,15 +6723,20 @@ class GCPProvider implements CloudProvider {
 }
 
 class AWSProvider implements CloudProvider {
-  private readonly client: EC2SpotClient;
+  private clientValue?: EC2SpotClient;
   private readonly region: string;
 
   constructor(
     private readonly env: Env,
     region: string,
+    private readonly storage: ProviderStateStorage,
   ) {
     this.region = region;
-    this.client = new EC2SpotClient(env, region);
+  }
+
+  private get client(): EC2SpotClient {
+    this.clientValue ??= new EC2SpotClient(this.env, this.region);
+    return this.clientValue;
   }
 
   listCrabboxServers(): Promise<ProviderMachine[]> {
@@ -6586,10 +6747,95 @@ class AWSProvider implements CloudProvider {
     return this.client.getServer(id);
   }
 
-  refreshSSHIngress(config: ReturnType<typeof leaseConfig>): Promise<void> {
-    const region = config.awsRegion || this.region;
-    const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
-    return client.refreshSSHIngress(config);
+  async prepareLeaseConfig(
+    config: ReturnType<typeof leaseConfig>,
+  ): Promise<ReturnType<typeof leaseConfig>> {
+    if (config.awsAMI || config.awsSnapshot) {
+      return config;
+    }
+    if (config.target === "macos") {
+      return { ...config, awsPromotedAMIs: await this.promotedImagesForFallback(config) };
+    }
+    const promoted = await this.promotedImage(config);
+    return {
+      ...config,
+      awsAMI: promoted?.id ?? "",
+      ...(promoted?.region ? { awsRegion: promoted.region } : {}),
+    };
+  }
+
+  async prepareLeaseCreate(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+    context: ProviderAccessContext,
+  ): Promise<ProviderLeaseCreatePreparation> {
+    const sourceCIDRs = awsLeaseSSHSourceCIDRs(config, context);
+    const globalCIDRs = awsGlobalSSHSourceCIDRs(this.env);
+    const nextLease = withLeaseSSHSourceCIDRs(
+      lease,
+      sourceCIDRs,
+      sourceCIDRs.length > 0 || globalCIDRs.length > 0,
+    );
+    const activeLeases = replaceProviderAccessState(context.activeLeases, nextLease);
+    return {
+      config: {
+        ...config,
+        awsSSHCIDRs: activeAWSSSHSourceCIDRs(activeLeases, [...sourceCIDRs, ...globalCIDRs]),
+      },
+      lease: nextLease,
+      provisioning: {
+        sshIngressReconcile: hasUnknownActiveAWSSSHSource(activeLeases)
+          ? "additive"
+          : "authoritative",
+        publishAccessBeforeProvisioning: true,
+      },
+    };
+  }
+
+  async refreshLeaseAccess(
+    lease: LeaseRecord,
+    context: ProviderAccessContext,
+  ): Promise<LeaseRecord | void> {
+    if (lease.state !== "active") {
+      return;
+    }
+    const sourceCIDRs = context.requestSourceCIDRs;
+    if (sourceCIDRs.length === 0) {
+      return;
+    }
+    const nextLease = withLeaseSSHSourceCIDRs(lease, sourceCIDRs, true);
+    const activeLeases = replaceProviderAccessState(context.activeLeases, nextLease);
+    const cidrs = activeAWSSSHSourceCIDRs(activeLeases, sourceCIDRs);
+    if (cidrs.length === 0) {
+      return nextLease;
+    }
+    try {
+      const config = leaseConfig({
+        provider: "aws",
+        target: lease.target,
+        windowsMode: lease.windowsMode ?? "normal",
+        class: lease.class,
+        serverType: lease.serverType,
+        awsSSHCIDRs: cidrs,
+        capacity: { market: lease.market === "spot" ? "spot" : "on-demand" },
+        providerKey: lease.providerKey,
+        sshUser: lease.sshUser,
+        sshPort: lease.sshPort,
+        sshFallbackPorts: lease.sshFallbackPorts ?? [],
+        sshPublicKey: "ssh-ed25519 heartbeat-refresh",
+        workRoot: lease.workRoot,
+        ...(lease.hostId || lease.hostID ? { hostId: lease.hostId || lease.hostID } : {}),
+        ...(lease.region ? { awsRegion: lease.region } : {}),
+      });
+      const region = config.awsRegion || this.region;
+      const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
+      await client.refreshSSHIngress(config, {
+        reconcile: hasUnknownActiveAWSSSHSource(activeLeases) ? "additive" : "authoritative",
+      });
+    } catch (error) {
+      console.warn(`refresh AWS SSH ingress failed for ${lease.id}: ${errorMessage(error)}`);
+    }
+    return nextLease;
   }
 
   async createServerWithFallback(
@@ -6597,6 +6843,7 @@ class AWSProvider implements CloudProvider {
     leaseID: string,
     slug: string,
     owner: string,
+    provisioning?: ProviderProvisioningContext,
   ): Promise<{
     server: ProviderMachine;
     serverType: string;
@@ -6606,6 +6853,10 @@ class AWSProvider implements CloudProvider {
     const regions = awsRegionCandidates(config, this.env, this.region);
     const failures: string[] = [];
     const regionAttempts: ProvisioningAttempt[] = [];
+    const ingressOptions =
+      provisioning?.sshIngressReconcile === undefined
+        ? undefined
+        : { reconcile: provisioning.sshIngressReconcile };
     for (const region of regions) {
       const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
       try {
@@ -6615,6 +6866,7 @@ class AWSProvider implements CloudProvider {
           leaseID,
           slug,
           owner,
+          ingressOptions,
         );
         let readyServer: ProviderMachine;
         try {
@@ -6676,15 +6928,57 @@ class AWSProvider implements CloudProvider {
     await this.client.deleteServer(id);
   }
 
-  createImage(
-    instanceID: string,
+  async finalizeLeaseCreate(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+    server: ProviderMachine,
+    attempts: ProvisioningAttempt[],
+  ): Promise<ProviderLeaseCreateFinalization> {
+    const nextConfig = server.region ? { ...config, awsRegion: server.region } : config;
+    const nextLease: LeaseRecord = { ...lease, region: server.region ?? nextConfig.awsRegion };
+    const hints = capacityHints(this.env, nextConfig, nextLease, attempts);
+    if (hints.length > 0) {
+      nextLease.capacityHints = hints;
+    }
+    return { config: nextConfig, lease: nextLease };
+  }
+
+  async releaseLease(lease: LeaseRecord): Promise<void> {
+    await this.deleteServer(lease.cloudID);
+    if (validCrabboxProviderKey(lease.providerKey)) {
+      await this.deleteSSHKey(lease.providerKey);
+    }
+  }
+
+  supportsNativeImages(): boolean {
+    return true;
+  }
+
+  nativeImagesUnsupportedMessage(): string {
+    return "native images are supported for AWS, Azure, and GCP leases";
+  }
+
+  defaultImageStrategy(): "image" | "disk-snapshot" {
+    return "image";
+  }
+
+  validateLeaseImageStrategy(): string | undefined {
+    return undefined;
+  }
+
+  async createLeaseImage(
+    lease: LeaseRecord,
     name: string,
     noReboot: boolean,
     strategy: "image" | "disk-snapshot",
   ): Promise<ProviderImage> {
-    return strategy === "image"
-      ? this.client.createImage(instanceID, name, noReboot)
-      : this.client.createDiskSnapshot(instanceID, name);
+    const image =
+      strategy === "image"
+        ? await this.client.createImage(lease.cloudID, name, noReboot)
+        : await this.client.createDiskSnapshot(lease.cloudID, name);
+    const enriched = enrichAWSImage(image, lease);
+    await this.storage.put(createdAWSImageKey(enriched.id), enriched);
+    return enriched;
   }
 
   getImage(imageID: string): Promise<ProviderImage> {
@@ -6709,6 +7003,191 @@ class AWSProvider implements CloudProvider {
     return this.client.deleteImage(imageID);
   }
 
+  async storedImageMetadata(imageID: string): Promise<ProviderImage | undefined> {
+    return (
+      (await this.promotedImageByID(imageID)) ??
+      (await this.storage.get<ProviderImage>(createdAWSImageKey(imageID)))
+    );
+  }
+
+  decorateImage(image: ProviderImage, metadata?: Partial<ProviderImage>): ProviderImage {
+    return mergeAWSImageMetadata(image, metadata);
+  }
+
+  async validateDeleteImage(
+    imageID: string,
+    metadata?: Partial<ProviderImage>,
+  ): Promise<{ status: number; body: Record<string, unknown> } | undefined> {
+    if (metadata?.id === imageID && "promotedAt" in metadata) {
+      return {
+        status: 409,
+        body: {
+          error: "image_promoted",
+          message: `image ${imageID} is the promoted AWS image; promote another image before deleting it`,
+        },
+      };
+    }
+    return undefined;
+  }
+
+  async fastSnapshotRestoreForImage(
+    imageID: string,
+    metadata: ProviderImage | undefined,
+    url: URL,
+  ): Promise<
+    Response | { image: ProviderImage; fastSnapshotRestores: ProviderFastSnapshotRestore[] }
+  > {
+    const rawRegion = url.searchParams.get("region") ?? metadata?.region ?? "";
+    const imageRegion = rawRegion ? sanitizeAWSRegion(rawRegion) : "";
+    if (rawRegion && !imageRegion) {
+      return json(
+        { error: "invalid_region", message: "region must be an AWS region name" },
+        { status: 400 },
+      );
+    }
+    const region = imageRegion || this.region;
+    const provider =
+      region === this.region ? this : new AWSProvider(this.env, region, this.storage);
+    const image = mergeAWSImageMetadata(await provider.getImage(imageID), metadata);
+    const snapshots = image.snapshots ?? [];
+    if (snapshots.length === 0) {
+      return json(
+        {
+          error: "image_snapshots_missing",
+          message: `image ${imageID} has no EBS snapshots to describe for Fast Snapshot Restore`,
+        },
+        { status: 409 },
+      );
+    }
+    const availabilityZones = fastSnapshotRestoreStatusAZs(url, image.region ?? imageRegion);
+    const fastSnapshotRestores = await provider.fastSnapshotRestoreStatus(
+      snapshots,
+      availabilityZones,
+    );
+    const imageWithStatus = { ...image, fastSnapshotRestores };
+    return {
+      image: imageWithStatus,
+      fastSnapshotRestores: imageWithStatus.fastSnapshotRestores ?? [],
+    };
+  }
+
+  async promoteImage(
+    imageID: string,
+    known: ProviderImage | undefined,
+    request: Request,
+    url: URL,
+  ): Promise<Response | { image: ProviderImage }> {
+    const input: {
+      target?: string;
+      region?: string;
+      serverType?: string;
+      architecture?: string;
+      fastSnapshotRestore?: unknown;
+      fastSnapshotRestoreAvailabilityZones?: string[];
+    } = await readJson<{
+      target?: string;
+      region?: string;
+      serverType?: string;
+      architecture?: string;
+      fastSnapshotRestore?: unknown;
+      fastSnapshotRestoreAvailabilityZones?: string[];
+    }>(request).catch(() => ({}));
+    const target = normalizeAWSImageTarget(
+      input.target ?? url.searchParams.get("target") ?? known?.target ?? "linux",
+    );
+    if (!target) {
+      return json(
+        { error: "invalid_target", message: "target must be linux, macos, or windows" },
+        { status: 400 },
+      );
+    }
+    const rawRegion = input.region ?? url.searchParams.get("region") ?? known?.region ?? "";
+    const imageRegion = sanitizeAWSRegion(rawRegion);
+    if (rawRegion && !imageRegion) {
+      return json(
+        { error: "invalid_region", message: "region must be an AWS region name" },
+        { status: 400 },
+      );
+    }
+    const metadata: Partial<ProviderImage> = { ...known, target, region: imageRegion };
+    const serverType = input.serverType ?? url.searchParams.get("serverType") ?? known?.serverType;
+    if (serverType) {
+      metadata.serverType = serverType;
+    }
+    const architecture =
+      input.architecture ?? url.searchParams.get("architecture") ?? known?.architecture;
+    if (architecture) {
+      metadata.architecture = architecture;
+    }
+    const fastSnapshotRestore = boolFromUnknown(
+      input.fastSnapshotRestore ?? url.searchParams.get("fastSnapshotRestore"),
+    );
+    const fastSnapshotRestoreAvailabilityZones = fastSnapshotRestore
+      ? fastSnapshotRestoreAZs(
+          input.fastSnapshotRestoreAvailabilityZones,
+          url,
+          imageRegion,
+          this.env,
+        )
+      : [];
+    if (fastSnapshotRestore && fastSnapshotRestoreAvailabilityZones.length === 0) {
+      return json(
+        {
+          error: "invalid_fast_snapshot_restore_zones",
+          message:
+            "Fast Snapshot Restore promotion requires at least one availability zone via fsrAz, fastSnapshotRestoreAvailabilityZones, CRABBOX_AWS_FAST_SNAPSHOT_RESTORE_AZS, or CRABBOX_CAPACITY_AVAILABILITY_ZONES",
+        },
+        { status: 400 },
+      );
+    }
+    const region = imageRegion || this.region;
+    const provider =
+      region === this.region ? this : new AWSProvider(this.env, region, this.storage);
+    const image = mergeAWSImageMetadata(await provider.getImage(imageID), metadata);
+    if (image.state !== "available") {
+      return json(
+        { error: "image_not_available", message: `image ${imageID} is ${image.state}` },
+        { status: 409 },
+      );
+    }
+    if (target === "macos" && !image.serverType) {
+      return json(
+        { error: "invalid_server_type", message: "macOS AWS image promotion requires serverType" },
+        { status: 400 },
+      );
+    }
+    if (fastSnapshotRestoreAvailabilityZones.length > 0 && (image.snapshots ?? []).length === 0) {
+      return json(
+        {
+          error: "image_snapshots_missing",
+          message: `image ${imageID} has no EBS snapshots to enable for Fast Snapshot Restore`,
+        },
+        { status: 409 },
+      );
+    }
+    const fastSnapshotRestores =
+      fastSnapshotRestoreAvailabilityZones.length > 0
+        ? await provider.enableFastSnapshotRestore(
+            image.snapshots ?? [],
+            fastSnapshotRestoreAvailabilityZones,
+          )
+        : undefined;
+    const promoted: PromotedImageRecord = {
+      ...image,
+      ...(fastSnapshotRestores ? { fastSnapshotRestores } : {}),
+      target,
+      region: image.region ?? imageRegion,
+      architecture:
+        image.architecture ?? awsImageArchitectureForTarget(target, image.serverType ?? ""),
+      promotedAt: new Date().toISOString(),
+    };
+    await this.storage.put(promotedAWSImageKey(promoted), promoted);
+    if (target === "linux") {
+      await this.storage.put(legacyPromotedAWSImageKey(), promoted);
+    }
+    return { image: promoted };
+  }
+
   async deleteSSHKey(name: string): Promise<void> {
     await this.client.deleteSSHKey(name);
   }
@@ -6720,6 +7199,62 @@ class AWSProvider implements CloudProvider {
     const region = config.awsRegion || this.region;
     const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
     return client.hourlySpotPriceUSD(serverType);
+  }
+
+  private async promotedImage(config: {
+    target: TargetOS;
+    serverType: string;
+    awsRegion: string;
+  }): Promise<PromotedImageRecord | undefined> {
+    const scoped = await this.storage.get<PromotedImageRecord>(
+      promotedAWSImageKey({
+        target: config.target,
+        architecture: awsImageArchitectureForTarget(config.target, config.serverType),
+        serverType: config.serverType,
+        region: config.awsRegion,
+      }),
+    );
+    if (scoped) {
+      return scoped;
+    }
+    if (config.target === "macos") {
+      return this.storage.get<PromotedImageRecord>(
+        legacyScopedPromotedAWSImageKey({
+          target: config.target,
+          architecture: awsImageArchitectureForTarget(config.target, config.serverType),
+          region: config.awsRegion,
+        }),
+      );
+    }
+    if (config.target !== "linux") {
+      return scoped;
+    }
+    return this.storage.get<PromotedImageRecord>(legacyPromotedAWSImageKey());
+  }
+
+  private async promotedImagesForFallback(config: LeaseConfig): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    for (const region of awsRegionCandidates(config, this.env, config.awsRegion)) {
+      for (const serverType of awsLaunchCandidates(config)) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- storage reads preserve deterministic fallback key construction.
+        const promoted = await this.promotedImage({
+          target: config.target,
+          serverType,
+          awsRegion: region,
+        });
+        if (promoted?.id) {
+          out[awsPromotedAMIConfigKey(region, serverType)] = promoted.id;
+        }
+      }
+    }
+    return out;
+  }
+
+  private async promotedImageByID(imageID: string): Promise<PromotedImageRecord | undefined> {
+    const promoted = await this.storage.list<PromotedImageRecord>({
+      prefix: promotedAWSImagePrefix(),
+    });
+    return [...promoted.values()].find((image) => image.id === imageID);
   }
 }
 

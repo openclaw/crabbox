@@ -154,3 +154,27 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 	}
 	return doctor, nil
 }
+
+func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
+	if req.Server.CloudID == "" {
+		return core.NativeCheckpointCapability{}, false
+	}
+	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
+		return core.NativeCheckpointCapability{}, false
+	}
+	return core.NativeCheckpointCapability{Kind: core.CheckpointKindParallels, Direct: true}, true
+}
+
+func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {
+	if req.Record.Kind != core.CheckpointKindParallels {
+		return core.Exit(2, "provider=parallels does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	cfg := req.Config
+	cfg.Provider = "parallels"
+	cfg.Coordinator = ""
+	cfg.CoordToken = ""
+	cfg.Parallels.SourceID = req.Record.Resource
+	cfg.Parallels.SourceSnapshotID = req.Record.ImageID
+	core.ApplyParallelsHostRefConfig(cfg, req.Record.Region)
+	return nil
+}

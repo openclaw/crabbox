@@ -42,6 +42,69 @@ func TestApplyAWSRunInstanceTargetOptionsLeavesNativeWindowsDefault(t *testing.T
 	}
 }
 
+func TestAWSCapacityDoctorCheckWarnsWhenQuotaBelowDefaultClass(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Class = "beast"
+	cfg.ServerType = serverTypeForConfig(cfg)
+
+	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 32, true, nil)
+
+	if check.Status != "warning" {
+		t.Fatalf("status=%q, want warning", check.Status)
+	}
+	if check.Details["quota_code"] != awsSpotQuotaCode {
+		t.Fatalf("quota_code=%q", check.Details["quota_code"])
+	}
+	if check.Details["default_needed_vcpus"] != "192" {
+		t.Fatalf("default_needed_vcpus=%q", check.Details["default_needed_vcpus"])
+	}
+	if check.Details["recommended_class"] != "standard" || check.Details["recommended_type"] != "c7a.8xlarge" {
+		t.Fatalf("recommendation=(%q,%q), want standard/c7a.8xlarge", check.Details["recommended_class"], check.Details["recommended_type"])
+	}
+	if !strings.Contains(check.Message, "capacity=quota_pressure") {
+		t.Fatalf("message=%q, want quota pressure", check.Message)
+	}
+}
+
+func TestAWSCapacityDoctorCheckPassesWhenQuotaCoversDefaultClass(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Class = "beast"
+	cfg.ServerType = serverTypeForConfig(cfg)
+
+	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 256, true, nil)
+
+	if check.Status != "ok" {
+		t.Fatalf("status=%q, want ok", check.Status)
+	}
+	if check.Details["hint"] != "quota_satisfies_default_class" {
+		t.Fatalf("hint=%q", check.Details["hint"])
+	}
+}
+
+func TestAWSCapacityDoctorCheckSkipsWhenQuotaUnknown(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Class = "beast"
+	cfg.ServerType = serverTypeForConfig(cfg)
+
+	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 0, false, nil)
+
+	if check.Status != "skip" {
+		t.Fatalf("status=%q, want skip", check.Status)
+	}
+	if check.Details["hint"] != "servicequotas_unavailable" {
+		t.Fatalf("hint=%q", check.Details["hint"])
+	}
+	if !strings.Contains(check.Message, "capacity=unknown") {
+		t.Fatalf("message=%q, want unknown capacity", check.Message)
+	}
+}
+
 func TestAWSInstanceToServerPreservesHostID(t *testing.T) {
 	server := awsInstanceToServer(types.Instance{
 		InstanceId:   aws.String("i-1234567890abcdef0"),

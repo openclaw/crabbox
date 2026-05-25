@@ -35,7 +35,7 @@ crabbox run --provider ssh --target windows --windows-mode wsl2 --static-host wi
 crabbox run --profile live-qa --preset qa-live --scenario login-regression --emit-proof /tmp/proof.md --stop-after success
 ```
 
-If `--id` is omitted, Crabbox creates a fresh non-kept lease and releases it when the command exits. `--id` accepts the stable `cbx_...` ID or the active friendly slug.
+If `--id` is omitted, Crabbox creates a fresh non-kept lease and releases it when the command exits. On coordinator-backed one-shot runs, if SSH becomes unavailable after a successful sync but before the command starts, Crabbox stops that stale lease, creates one replacement lease, and retries sync once. It does not replace explicit `--id`, kept, `--keep-on-failure`, `--no-sync`, `--sync-only`, or custom-slug runs. `--id` accepts the stable `cbx_...` ID or the active friendly slug.
 
 With `--provider blacksmith-testbox`, `--id` accepts a Blacksmith `tbx_...` ID or a local Crabbox slug. Crabbox forwards the command to `blacksmith testbox run`, delegates sync to Blacksmith, and prints `sync=delegated` in the final timing summary.
 

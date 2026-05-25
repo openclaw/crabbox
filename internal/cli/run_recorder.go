@@ -266,6 +266,17 @@ func (r *runRecorder) stopTelemetrySampler() {
 	}
 }
 
+func (r *runRecorder) resetTelemetryForLeaseReplacement() {
+	if r == nil {
+		return
+	}
+	r.stopTelemetrySampler()
+	r.telemetryMu.Lock()
+	r.telemetryStart = nil
+	r.telemetrySamples = nil
+	r.telemetryMu.Unlock()
+}
+
 func (r *runRecorder) waitForOutputEvents(timeout time.Duration) {
 	if r == nil || r.output == nil {
 		return

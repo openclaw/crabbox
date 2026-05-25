@@ -22,6 +22,7 @@ func init() {
 	RegisterProvider(testCloudflareProvider{})
 	RegisterProvider(testSpritesProvider{})
 	RegisterProvider(testLocalContainerProvider{})
+	RegisterProvider(testParallelsProvider{})
 }
 
 type testAzureProvider struct{}
@@ -47,6 +48,40 @@ func (testAzureProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 }
 func (p testAzureProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
+}
+func (testAzureProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
+	if req.Config.Coordinator == "" || req.Server.CloudID == "" || firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != targetLinux {
+		return NativeCheckpointCapability{}, false
+	}
+	if normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+		return NativeCheckpointCapability{
+			Kind:              checkpointKindAzure,
+			CreateUnsupported: "Azure managed images require a stopped/generalized source VM; use --strategy disk-snapshot for active Azure leases",
+		}, true
+	}
+	return NativeCheckpointCapability{Kind: checkpointKindAzureOS}, true
+}
+func (testAzureProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
+	switch req.Record.Kind {
+	case checkpointKindAzure:
+		req.Config.AzureImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	case checkpointKindAzureOS:
+		req.Config.AzureSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	default:
+		return exit(2, "provider=azure does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	if req.Record.Region != "" {
+		req.Config.AzureLocation = req.Record.Region
+	}
+	if req.AzureOSDiskExplicit {
+		mode, err := NormalizeAzureOSDiskMode(req.AzureOSDisk)
+		if err != nil {
+			return err
+		}
+		req.Config.AzureOSDisk = mode
+		req.Config.AzureOSDiskExplicit = true
+	}
+	return nil
 }
 
 type testHetznerProvider struct{}
@@ -92,6 +127,33 @@ func (testGCPProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 func (p testGCPProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
+func (testGCPProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
+	if req.Config.Coordinator == "" || req.Server.CloudID == "" || firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != targetLinux {
+		return NativeCheckpointCapability{}, false
+	}
+	if normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+		return NativeCheckpointCapability{Kind: checkpointKindGCP}, true
+	}
+	return NativeCheckpointCapability{Kind: checkpointKindGCPDisk}, true
+}
+func (testGCPProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
+	switch req.Record.Kind {
+	case checkpointKindGCP:
+		req.Config.GCPMachineImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	case checkpointKindGCPDisk:
+		req.Config.GCPSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+	default:
+		return exit(2, "provider=gcp does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	if req.Record.Region != "" {
+		req.Config.GCPZone = req.Record.Region
+	}
+	if req.Record.Project != "" {
+		req.Config.GCPProject = req.Record.Project
+		req.Config.gcpProjectExplicit = true
+	}
+	return nil
+}
 
 type testAWSProvider struct{}
 
@@ -122,6 +184,94 @@ func (p testAWSProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 		return testAWSBackendOverride, nil
 	}
 	return testSSHBackend{spec: p.Spec()}, nil
+}
+func (testAWSProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
+	if req.Server.CloudID == "" || isWindowsNativeTarget(req.Target) {
+		return NativeCheckpointCapability{}, false
+	}
+	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
+	if targetOS != targetLinux && targetOS != targetMacOS {
+		return NativeCheckpointCapability{}, false
+	}
+	strategy := normalizeCheckpointStrategy(req.Strategy)
+	if req.Config.Coordinator == "" {
+		if targetOS != targetMacOS && strategy != checkpointStrategyImage {
+			return NativeCheckpointCapability{}, false
+		}
+		return NativeCheckpointCapability{Kind: checkpointKindAWSAMI, Direct: true}, true
+	}
+	if targetOS == targetMacOS || strategy == checkpointStrategyImage {
+		return NativeCheckpointCapability{Kind: checkpointKindAWSAMI}, true
+	}
+	return NativeCheckpointCapability{Kind: checkpointKindAWSEBS}, true
+}
+func (testAWSProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
+	switch req.Record.Kind {
+	case checkpointKindAWSAMI:
+		req.Config.AWSAMI = req.Record.ImageID
+	case checkpointKindAWSEBS:
+		req.Config.AWSSnapshot = req.Record.ImageID
+	default:
+		return exit(2, "provider=aws does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	if req.Record.Region != "" {
+		req.Config.AWSRegion = req.Record.Region
+	}
+	if req.Config.TargetOS == targetMacOS {
+		if req.Record.Direct && req.Record.HostID != "" {
+			req.Config.HostID = req.Record.HostID
+			req.Config.AWSMacHostID = req.Record.HostID
+		}
+		if !req.MarketExplicit {
+			req.Config.Capacity.Market = "on-demand"
+		}
+		normalizeTargetConfig(req.Config)
+	}
+	return nil
+}
+
+type testParallelsProvider struct{}
+
+func (testParallelsProvider) Name() string      { return "parallels" }
+func (testParallelsProvider) Aliases() []string { return nil }
+func (testParallelsProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name: "parallels",
+		Kind: ProviderKindSSHLease,
+		Targets: []TargetSpec{
+			{OS: targetLinux},
+			{OS: targetMacOS},
+			{OS: targetWindows, WindowsMode: windowsModeNormal},
+			{OS: targetWindows, WindowsMode: windowsModeWSL2},
+		},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode, FeatureCheckpoint, FeatureFork, FeatureRestore, FeatureSnapshot},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testParallelsProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testParallelsProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testParallelsProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+func (testParallelsProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
+	if req.Server.CloudID == "" || normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+		return NativeCheckpointCapability{}, false
+	}
+	return NativeCheckpointCapability{Kind: checkpointKindParallels, Direct: true}, true
+}
+func (testParallelsProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
+	if req.Record.Kind != checkpointKindParallels {
+		return exit(2, "provider=parallels does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	req.Config.Provider = "parallels"
+	req.Config.Coordinator = ""
+	req.Config.CoordToken = ""
+	req.Config.Parallels.SourceID = req.Record.Resource
+	req.Config.Parallels.SourceSnapshotID = req.Record.ImageID
+	applyParallelsHostRefConfig(req.Config, req.Record.Region)
+	return nil
 }
 
 type testProxmoxProvider struct{}
@@ -582,6 +732,8 @@ func (p testModalProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 
 type testCloudflareProvider struct{}
 
+var testCloudflareDoctorResult *DoctorResult
+
 func (testCloudflareProvider) Name() string { return "cloudflare" }
 func (testCloudflareProvider) Aliases() []string {
 	return []string{"cf"}
@@ -774,6 +926,9 @@ type testDoctorDelegatedBackend struct {
 }
 
 func (b testDoctorDelegatedBackend) Doctor(context.Context, DoctorRequest) (DoctorResult, error) {
+	if testCloudflareDoctorResult != nil {
+		return *testCloudflareDoctorResult, nil
+	}
 	return DoctorResult{Provider: b.spec.Name, Message: "direct_check=ready"}, nil
 }
 

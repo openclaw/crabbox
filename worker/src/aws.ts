@@ -99,6 +99,13 @@ export interface AWSServiceQuota {
   unit?: string;
 }
 
+export interface AWSCapacityReadinessCheck {
+  status: "ok" | "skip" | "warning";
+  check: "capacity";
+  message: string;
+  details: Record<string, string>;
+}
+
 export interface AWSIdentity {
   account: string;
   arn: string;
@@ -156,6 +163,10 @@ type SSHIngressRule = {
   port: string;
 };
 
+interface AWSIngressOptions {
+  reconcile?: "authoritative" | "additive";
+}
+
 const sshIngressRangeFamilies = [
   {
     cidrField: "cidrIp",
@@ -210,6 +221,19 @@ export class EC2SpotClient {
     this.stsClient = new AwsClient({ ...clientOptions, service: "sts" });
   }
 
+  async capacityReadinessChecks(config: LeaseConfig): Promise<AWSCapacityReadinessCheck[]> {
+    if (config.target === "macos") {
+      return [];
+    }
+    return await Promise.all(
+      awsCapacityReadinessMarkets(config).map(async (market) => {
+        const code = awsQuotaCodeForMarket(market);
+        const quota = await this.appliedServiceQuota(code);
+        return awsCapacityReadinessCheckForQuota(config, market, this.region, quota);
+      }),
+    );
+  }
+
   async identity(): Promise<AWSIdentity> {
     const root = await this.sts("GetCallerIdentity", {});
     const result = record(root["GetCallerIdentityResult"] ?? root);
@@ -244,8 +268,8 @@ export class EC2SpotClient {
     );
   }
 
-  async refreshSSHIngress(config: LeaseConfig): Promise<void> {
-    await this.ensureSecurityGroup(config);
+  async refreshSSHIngress(config: LeaseConfig, options: AWSIngressOptions = {}): Promise<void> {
+    await this.ensureSecurityGroup(config, options);
   }
 
   async createServerWithFallback(
@@ -253,6 +277,7 @@ export class EC2SpotClient {
     leaseID: string,
     slug: string,
     owner: string,
+    options: AWSIngressOptions = {},
   ): Promise<{
     server: ProviderMachine;
     serverType: string;
@@ -270,7 +295,7 @@ export class EC2SpotClient {
         : config.target === "macos"
           ? ""
           : await this.resolveAMI(config);
-      const securityGroupID = await this.ensureSecurityGroup(config);
+      const securityGroupID = await this.ensureSecurityGroup(config, options);
       const candidates = awsLaunchCandidates(config);
       const failures: string[] = [];
       const attempts: ProvisioningAttempt[] = [];
@@ -1125,7 +1150,10 @@ export class EC2SpotClient {
     return imageID;
   }
 
-  private async ensureSecurityGroup(config: LeaseConfig): Promise<string> {
+  private async ensureSecurityGroup(
+    config: LeaseConfig,
+    options: AWSIngressOptions = {},
+  ): Promise<string> {
     const configuredGroupID = config.awsSGID || this.env.CRABBOX_AWS_SECURITY_GROUP_ID || "";
     let group: unknown;
     let groupID = configuredGroupID;
@@ -1158,7 +1186,9 @@ export class EC2SpotClient {
     }
     const cidrs = awsSSHCIDRs(config, this.env);
     const ports = sshPorts(config);
-    await this.pruneStaleSSHIngress(groupID, group, ports, cidrs);
+    if (options.reconcile !== "additive") {
+      await this.pruneStaleSSHIngress(groupID, group, ports, cidrs);
+    }
     for (const port of ports) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup is per port.
       await this.revokeWorldTCP(groupID, port).catch((error: unknown) => {
@@ -1914,6 +1944,116 @@ export function awsQuotaPreflightAttempt(
     category: "quota",
     message: `quota ${quotaCode} in ${region} is ${quotaValue} vCPUs; ${serverType} needs ${needed} vCPUs`,
   };
+}
+
+type AWSCapacityReadinessConfig = Pick<
+  LeaseConfig,
+  "target" | "windowsMode" | "class" | "serverType" | "capacityMarket" | "capacityFallback"
+>;
+
+export function awsCapacityReadinessCheckForQuota(
+  config: AWSCapacityReadinessConfig,
+  market: string,
+  region: string,
+  quotaValue: number | undefined,
+): AWSCapacityReadinessCheck {
+  const quotaCode = awsQuotaCodeForMarket(market);
+  const needed = awsInstanceTypeVCPUs(config.serverType);
+  const details: Record<string, string> = {
+    provider: "aws",
+    market,
+    region,
+    quota_code: quotaCode,
+    default_class: config.class,
+    default_type: config.serverType,
+    default_needed_vcpus: String(needed ?? 0),
+  };
+  if (quotaValue === undefined) {
+    details["hint"] = "servicequotas_unavailable_or_forbidden";
+    return {
+      status: "skip",
+      check: "capacity",
+      message: awsCapacityReadinessMessage("provider=aws capacity=unknown", details),
+      details,
+    };
+  }
+  details["limit_vcpus"] = String(Math.trunc(quotaValue));
+  if (!needed) {
+    details["hint"] = "unknown_instance_vcpus";
+    return {
+      status: "skip",
+      check: "capacity",
+      message: awsCapacityReadinessMessage("provider=aws capacity=unknown", details),
+      details,
+    };
+  }
+  if (quotaValue < needed) {
+    const recommendation = awsRecommendedClassForQuota(config, Math.trunc(quotaValue));
+    if (recommendation) {
+      details["recommended_class"] = recommendation.machineClass;
+      details["recommended_type"] = recommendation.serverType;
+    }
+    details["hint"] = "lower_class_or_request_quota";
+    return {
+      status: "warning",
+      check: "capacity",
+      message: awsCapacityReadinessMessage("provider=aws capacity=quota_pressure", details),
+      details,
+    };
+  }
+  details["hint"] = "quota_satisfies_default_class";
+  return {
+    status: "ok",
+    check: "capacity",
+    message: awsCapacityReadinessMessage("provider=aws capacity=ready", details),
+    details,
+  };
+}
+
+function awsCapacityReadinessMarkets(config: AWSCapacityReadinessConfig): string[] {
+  const markets = [config.capacityMarket || "spot"];
+  if (config.capacityMarket === "spot" && config.capacityFallback.startsWith("on-demand")) {
+    markets.push("on-demand");
+  }
+  return uniqueStrings(markets);
+}
+
+function awsCapacityReadinessMessage(prefix: string, details: Record<string, string>): string {
+  const suffix = Object.entries(details)
+    .filter(([key, value]) => key !== "provider" && value)
+    .toSorted(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value.replaceAll(" ", "_")}`)
+    .join(" ");
+  return suffix ? `${prefix} ${suffix}` : prefix;
+}
+
+function awsRecommendedClassForQuota(
+  config: Pick<LeaseConfig, "target" | "windowsMode">,
+  limitVCPUs: number,
+): { machineClass: string; serverType: string } | undefined {
+  if (limitVCPUs <= 0) {
+    return undefined;
+  }
+  for (const machineClass of ["beast", "large", "fast", "standard"]) {
+    const [serverType] = awsInstanceTypeCandidatesForTargetClass(
+      config.target,
+      machineClass,
+      config.windowsMode,
+    );
+    if (serverType && (awsInstanceTypeVCPUs(serverType) ?? 0) <= limitVCPUs) {
+      return { machineClass, serverType };
+    }
+  }
+  for (const serverType of awsInstanceTypeCandidatesForTargetClass(
+    config.target,
+    "standard",
+    config.windowsMode,
+  )) {
+    if ((awsInstanceTypeVCPUs(serverType) ?? 0) <= limitVCPUs) {
+      return { machineClass: "standard", serverType };
+    }
+  }
+  return undefined;
 }
 
 function uniqueStrings(values: string[]): string[] {

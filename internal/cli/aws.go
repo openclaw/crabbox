@@ -13,12 +13,15 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/servicequotas"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
 const (
 	awsUbuntuOwner           = "099720109477"
 	awsSSHIngressDescription = "Crabbox SSH"
+	awsSpotQuotaCode         = "L-34B43A08"
+	awsOnDemandQuotaCode     = "L-1216C47A"
 )
 
 var awsSnapshotDeleteBackoff = []time.Duration{
@@ -31,9 +34,10 @@ var awsSnapshotDeleteBackoff = []time.Duration{
 }
 
 type AWSClient struct {
-	ec2    *ec2.Client
-	sts    *sts.Client
-	region string
+	ec2           *ec2.Client
+	serviceQuotas *servicequotas.Client
+	sts           *sts.Client
+	region        string
 }
 
 func newAWSClient(ctx context.Context, cfg Config) (*AWSClient, error) {
@@ -48,11 +52,48 @@ func newAWSClientForRegion(ctx context.Context, cfg Config, region string) (*AWS
 	if err != nil {
 		return nil, err
 	}
-	return &AWSClient{ec2: ec2.NewFromConfig(awsCfg), sts: sts.NewFromConfig(awsCfg), region: region}, nil
+	return &AWSClient{
+		ec2:           ec2.NewFromConfig(awsCfg),
+		serviceQuotas: servicequotas.NewFromConfig(awsCfg),
+		sts:           sts.NewFromConfig(awsCfg),
+		region:        region,
+	}, nil
 }
 
 func NewAWSClient(ctx context.Context, cfg Config) (*AWSClient, error) {
 	return newAWSClient(ctx, cfg)
+}
+
+func (c *AWSClient) CapacityDoctorChecks(ctx context.Context, cfg Config) []DoctorCheck {
+	if cfg.TargetOS == targetMacOS || c.serviceQuotas == nil {
+		return nil
+	}
+	if cfg.Provider == "" {
+		cfg.Provider = "aws"
+	}
+	if cfg.ServerType == "" {
+		cfg.ServerType = serverTypeForConfig(cfg)
+	}
+	checks := make([]DoctorCheck, 0, 2)
+	for _, market := range awsCapacityDoctorMarkets(cfg) {
+		limit, known, err := c.appliedEC2ServiceQuota(ctx, awsQuotaCodeForMarket(market))
+		checks = append(checks, awsCapacityDoctorCheckForQuota(cfg, market, limit, known, err))
+	}
+	return checks
+}
+
+func (c *AWSClient) appliedEC2ServiceQuota(ctx context.Context, quotaCode string) (float64, bool, error) {
+	out, err := c.serviceQuotas.GetServiceQuota(ctx, &servicequotas.GetServiceQuotaInput{
+		ServiceCode: aws.String("ec2"),
+		QuotaCode:   aws.String(quotaCode),
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	if out.Quota == nil || out.Quota.Value == nil {
+		return 0, false, nil
+	}
+	return *out.Quota.Value, true, nil
 }
 
 func (c *AWSClient) SpotPlacementScores(ctx context.Context, cfg Config) ([]types.SpotPlacementScore, error) {
@@ -986,6 +1027,162 @@ func awsLaunchCandidates(cfg Config) []string {
 		}
 	}
 	return appendUniqueStrings([]string{cfg.ServerType}, append(awsInstanceTypeCandidatesForConfig(cfg), fallback)...)
+}
+
+func awsCapacityDoctorMarkets(cfg Config) []string {
+	market := strings.TrimSpace(cfg.Capacity.Market)
+	if market == "" {
+		market = "spot"
+	}
+	markets := []string{market}
+	if market == "spot" && strings.HasPrefix(cfg.Capacity.Fallback, "on-demand") {
+		markets = append(markets, "on-demand")
+	}
+	return appendUniqueStrings(markets)
+}
+
+func awsQuotaCodeForMarket(market string) string {
+	if market == "on-demand" {
+		return awsOnDemandQuotaCode
+	}
+	return awsSpotQuotaCode
+}
+
+func awsCapacityDoctorCheckForQuota(cfg Config, market string, quotaValue float64, quotaKnown bool, quotaErr error) DoctorCheck {
+	serverType := strings.TrimSpace(cfg.ServerType)
+	if serverType == "" {
+		serverType = serverTypeForConfig(cfg)
+	}
+	quotaCode := awsQuotaCodeForMarket(market)
+	needed := awsInstanceTypeVCPUs(serverType)
+	base := map[string]string{
+		"provider":             "aws",
+		"market":               market,
+		"quota_code":           quotaCode,
+		"default_class":        cfg.Class,
+		"default_type":         serverType,
+		"default_needed_vcpus": strconv.Itoa(needed),
+	}
+	if quotaErr != nil {
+		base["hint"] = "allow_servicequotas_getservicequota"
+		base["error"] = quotaErr.Error()
+		return DoctorCheck{
+			Status:  "skip",
+			Check:   "capacity",
+			Message: awsDoctorMessage("provider=aws capacity=unknown", base),
+			Details: base,
+		}
+	}
+	if !quotaKnown {
+		base["hint"] = "servicequotas_unavailable"
+		return DoctorCheck{
+			Status:  "skip",
+			Check:   "capacity",
+			Message: awsDoctorMessage("provider=aws capacity=unknown", base),
+			Details: base,
+		}
+	}
+	limit := int(quotaValue)
+	base["limit_vcpus"] = strconv.Itoa(limit)
+	if needed == 0 {
+		base["hint"] = "unknown_instance_vcpus"
+		return DoctorCheck{
+			Status:  "skip",
+			Check:   "capacity",
+			Message: awsDoctorMessage("provider=aws capacity=unknown", base),
+			Details: base,
+		}
+	}
+	if quotaValue < float64(needed) {
+		recommendedClass, recommendedType := awsRecommendedClassForQuota(cfg, limit)
+		if recommendedClass != "" {
+			base["recommended_class"] = recommendedClass
+			base["recommended_type"] = recommendedType
+		}
+		base["hint"] = "lower_class_or_request_quota"
+		return DoctorCheck{
+			Status:  "warning",
+			Check:   "capacity",
+			Message: awsDoctorMessage("provider=aws capacity=quota_pressure", base),
+			Details: base,
+		}
+	}
+	base["hint"] = "quota_satisfies_default_class"
+	return DoctorCheck{
+		Status:  "ok",
+		Check:   "capacity",
+		Message: awsDoctorMessage("provider=aws capacity=ready", base),
+		Details: base,
+	}
+}
+
+func awsDoctorMessage(prefix string, details map[string]string) string {
+	keys := make([]string, 0, len(details))
+	for key := range details {
+		if key == "provider" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString(prefix)
+	for _, key := range keys {
+		if details[key] == "" {
+			continue
+		}
+		b.WriteByte(' ')
+		b.WriteString(key)
+		b.WriteByte('=')
+		b.WriteString(strings.ReplaceAll(details[key], " ", "_"))
+	}
+	return b.String()
+}
+
+func awsRecommendedClassForQuota(cfg Config, limitVCPUs int) (string, string) {
+	if limitVCPUs <= 0 {
+		return "", ""
+	}
+	classes := []string{"beast", "large", "fast", "standard"}
+	for _, class := range classes {
+		candidates := awsInstanceTypeCandidatesForTargetModeClass(cfg.TargetOS, cfg.WindowsMode, class)
+		if len(candidates) == 0 {
+			continue
+		}
+		if awsInstanceTypeVCPUs(candidates[0]) <= limitVCPUs {
+			return class, candidates[0]
+		}
+	}
+	for _, serverType := range awsInstanceTypeCandidatesForTargetModeClass(cfg.TargetOS, cfg.WindowsMode, "standard") {
+		if awsInstanceTypeVCPUs(serverType) <= limitVCPUs {
+			return "standard", serverType
+		}
+	}
+	return "", ""
+}
+
+func awsInstanceTypeVCPUs(serverType string) int {
+	_, size, ok := strings.Cut(strings.TrimSpace(serverType), ".")
+	if !ok || size == "" {
+		return 0
+	}
+	if strings.HasSuffix(size, "xlarge") {
+		multiplier := strings.TrimSuffix(size, "xlarge")
+		if multiplier == "" {
+			return 4
+		}
+		parsed, err := strconv.Atoi(multiplier)
+		if err != nil {
+			return 0
+		}
+		return parsed * 4
+	}
+	switch size {
+	case "nano", "micro", "small", "medium", "large":
+		return 2
+	default:
+		return 0
+	}
 }
 
 func awsInstanceTypeSupportsNestedVirtualization(instanceType string) bool {

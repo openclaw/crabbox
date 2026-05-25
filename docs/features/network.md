@@ -66,8 +66,8 @@ the network mode resolves to `public`.
 
 Public addresses are gated by the provider's security group / firewall. AWS
 managed leases use the `crabbox-runners` security group with SSH ingress
-limited to the configured CIDRs or the request source IP. Hetzner managed
-leases use the cloud firewall attached to the project; the broker keeps it
+limited to configured CIDRs or request source IPs for active leases. Hetzner
+managed leases use the cloud firewall attached to the project; the broker keeps it
 limited to the operator's IPs. Azure managed leases use the configured network
 security group and `azure.sshCIDRs`.
 Proxmox uses the first non-loopback IPv4 address reported by the QEMU guest

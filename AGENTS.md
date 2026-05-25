@@ -8,6 +8,10 @@ Crabbox is a Go CLI plus a Cloudflare Worker coordinator. The CLI entrypoint is 
 
 Crabbox is a generic remote software testing and execution tool. New code, docs, tests, and examples should not mention OpenClaw, Peter, or other project/person-specific workflows unless the file is explicitly about legacy compatibility or release history. Prefer neutral examples such as `example-org`, `alice@example.com`, `my-app`, `test:live`, and generic repository workflows.
 
+## Architecture Boundaries
+
+Keep core provider-neutral. Core may pass generic request/lease context and call provider capabilities for defaults, access, provision, images, release, cleanup, and diagnostics. Provider-specific reconciliation, firewall/security-group semantics, labels, snapshots, hosts, regions, rollout compatibility, and resource naming live behind provider adapters. No `provider == aws/gcp/...` logic in core unless it is unavoidable routing/config glue and no provider hook fits.
+
 ## Build, Test, and Development Commands
 
 - `go build -trimpath -o bin/crabbox ./cmd/crabbox`: build the local CLI.

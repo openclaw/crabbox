@@ -190,6 +190,10 @@ func (b *gcpLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 	return nil
 }
 
+func (b *gcpLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
+	return fmt.Sprintf("deleted lease=%s server=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
+}
+
 func (b *gcpLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 	client, err := newGCPClient(ctx, b.Cfg)
 	if err != nil {

@@ -59,6 +59,52 @@ type CleanupBackend interface {
 	Cleanup(ctx context.Context, req CleanupRequest) error
 }
 
+type ReleaseLeaseReporter interface {
+	ReleaseLeaseMessage(lease LeaseTarget) string
+}
+
+type NativeCheckpointCapability struct {
+	Kind              string
+	Direct            bool
+	CreateUnsupported string
+}
+
+type NativeCheckpointRequest struct {
+	Config   Config
+	Server   Server
+	Target   SSHTarget
+	Strategy string
+}
+
+type NativeCheckpointProvider interface {
+	NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool)
+}
+
+type NativeCheckpointForkRecord struct {
+	Kind        string
+	ImageID     string
+	Resource    string
+	Region      string
+	Project     string
+	Direct      bool
+	HostID      string
+	TargetOS    string
+	WindowsMode string
+	ServerType  string
+}
+
+type NativeCheckpointForkRequest struct {
+	Config              *Config
+	Record              NativeCheckpointForkRecord
+	MarketExplicit      bool
+	AzureOSDisk         string
+	AzureOSDiskExplicit bool
+}
+
+type NativeCheckpointForkProvider interface {
+	ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error
+}
+
 type JSONListBackend interface {
 	Backend
 	ListJSON(ctx context.Context, req ListRequest) (any, error)
@@ -162,6 +208,15 @@ type DoctorRequest struct {
 type DoctorResult struct {
 	Provider string
 	Message  string
+	Status   string
+	Checks   []DoctorCheck
+}
+
+type DoctorCheck struct {
+	Status  string            `json:"status"`
+	Check   string            `json:"check"`
+	Message string            `json:"message,omitempty"`
+	Details map[string]string `json:"details,omitempty"`
 }
 
 func InventoryDoctorResult(provider string, leases int) DoctorResult {

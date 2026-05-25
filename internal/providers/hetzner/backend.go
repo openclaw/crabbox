@@ -30,7 +30,7 @@ type hetznerLeaseBackend struct{ shared.DirectSSHBackend }
 
 func NewHetznerLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = "hetzner"
-	return &hetznerLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt}}
+	return &hetznerLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, Delete: deleteServer}}
 }
 
 func (b *hetznerLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
@@ -150,6 +150,10 @@ func (b *hetznerLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLease
 	return nil
 }
 
+func (b *hetznerLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
+	return fmt.Sprintf("deleted lease=%s server=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
+}
+
 func (b *hetznerLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 	return b.DirectSSHBackend.Touch(ctx, req.Lease.Server, req.State), nil
 }
@@ -188,7 +192,17 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 }
 func bootstrapWaitTimeout(cfg Config) time.Duration { return core.BootstrapWaitTimeout(cfg) }
 func deleteServer(ctx context.Context, cfg Config, server Server) error {
-	return core.DeleteServer(ctx, cfg, server)
+	client, err := newHetznerClient()
+	if err != nil {
+		return err
+	}
+	if err := client.DeleteServer(ctx, server.ID); err != nil {
+		return err
+	}
+	if keyName := core.ServerProviderKey(server); core.ValidCrabboxProviderKey(keyName) {
+		return client.DeleteSSHKey(ctx, keyName)
+	}
+	return nil
 }
 func parseServerID(s string) (int64, bool) { return core.ParseServerID(s) }
 func blank(value, fallback string) string  { return core.Blank(value, fallback) }

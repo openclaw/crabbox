@@ -30,7 +30,7 @@ type awsLeaseBackend struct{ shared.DirectSSHBackend }
 
 func NewAWSLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = "aws"
-	return &awsLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt}}
+	return &awsLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, Delete: deleteServer}}
 }
 
 func (b *awsLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
@@ -127,12 +127,27 @@ func (b *awsLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseVie
 }
 
 func (b *awsLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
-	servers, err := b.List(ctx, ListRequest{})
+	client, err := newAWSClient(ctx, b.Cfg)
+	if err != nil {
+		return core.DoctorResult{}, err
+	}
+	servers, err := client.ListCrabboxServers(ctx)
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
 	result := core.InventoryDoctorResult("aws", len(servers))
 	result.Message += fmt.Sprintf(" region=%s default_type=%s", b.Cfg.AWSRegion, b.Cfg.ServerType)
+	result.Checks = append(result.Checks, core.DoctorCheck{
+		Status:  "ok",
+		Check:   "provider",
+		Message: result.Message,
+		Details: map[string]string{
+			"provider":     "aws",
+			"region":       b.Cfg.AWSRegion,
+			"default_type": b.Cfg.ServerType,
+		},
+	})
+	result.Checks = append(result.Checks, client.CapacityDoctorChecks(ctx, b.Cfg)...)
 	return result, nil
 }
 
@@ -142,6 +157,10 @@ func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 	}
 	removeLeaseClaim(req.Lease.LeaseID)
 	return nil
+}
+
+func (b *awsLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
+	return fmt.Sprintf("deleted lease=%s server=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
 func (b *awsLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
@@ -227,6 +246,16 @@ func findServerByAlias(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)
 }
 func deleteServer(ctx context.Context, cfg Config, server Server) error {
-	return core.DeleteServer(ctx, cfg, server)
+	client, err := newAWSClient(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if err := client.DeleteServer(ctx, server.CloudID); err != nil {
+		return err
+	}
+	if keyName := core.ServerProviderKey(server); core.ValidCrabboxProviderKey(keyName) {
+		return client.DeleteSSHKey(ctx, keyName)
+	}
+	return nil
 }
 func removeLeaseClaim(leaseID string) { core.RemoveLeaseClaim(leaseID) }
