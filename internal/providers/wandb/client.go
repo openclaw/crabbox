@@ -24,6 +24,7 @@ import (
 // via CWSANDBOX_BASE_URL so the devops team can coordinate region or staging
 // cutovers without a code change.
 const defaultEndpoint = "atc.cw-sandbox.com:443"
+const defaultStartupTimeout = 5 * time.Minute
 
 // idleCommand keeps the sandbox container alive after Start so callers can
 // invoke Exec into it on demand. Mirrors what cwsandbox.Sandbox.run() does
@@ -269,7 +270,9 @@ func (c *wandbClient) Acquire(ctx context.Context, req wandbAcquireRequest) (wan
 	if err != nil {
 		return wandbSandbox{}, mapRPCError(err, "Start")
 	}
-	sb, perr := c.pollUntilRunning(ctx, started.SandboxId)
+	startupCtx, cancel := context.WithTimeout(ctx, startupTimeout(req.MaxLifetimeSecs))
+	defer cancel()
+	sb, perr := c.pollUntilRunning(startupCtx, started.SandboxId)
 	if perr != nil {
 		_, _ = c.gw.Stop(context.Background(), &sandboxv1.StopSandboxRequest{SandboxId: started.SandboxId})
 		return wandbSandbox{}, perr
@@ -304,7 +307,13 @@ func (c *wandbClient) pollUntilRunning(ctx context.Context, id string) (wandbSan
 			sandboxv1.SandboxStatus_SANDBOX_STATUS_TERMINATING:
 			return wandbSandbox{}, fmt.Errorf("sandbox %s ended before reaching RUNNING (status=%s)", id, resp.SandboxStatus)
 		}
-		time.Sleep(interval)
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return wandbSandbox{}, ctx.Err()
+		case <-timer.C:
+		}
 		if interval < cap {
 			interval = interval * 3 / 2
 			if interval > cap {
@@ -312,6 +321,17 @@ func (c *wandbClient) pollUntilRunning(ctx context.Context, id string) (wandbSan
 			}
 		}
 	}
+}
+
+func startupTimeout(maxLifetimeSecs int) time.Duration {
+	timeout := defaultStartupTimeout
+	if maxLifetimeSecs > 0 {
+		lifetime := time.Duration(maxLifetimeSecs) * time.Second
+		if lifetime < timeout {
+			timeout = lifetime
+		}
+	}
+	return timeout
 }
 
 // Exec runs a single command in the sandbox via the unary Exec RPC. Streamed

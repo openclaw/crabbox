@@ -464,6 +464,20 @@ func TestWandbRunRejectsIDWithEnv(t *testing.T) {
 	}
 }
 
+func TestWandbRunRejectsIDWithConfiguredEnv(t *testing.T) {
+	t.Setenv("WANDB_API_KEY", "fake")
+	backend := newWandbBackendForTest(&fakeWandbAPI{})
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID:      "sb-existing",
+		NoSync:  true,
+		Command: []string{"echo"},
+		Env:     map[string]string{"CUSTOM_TOKEN": "secret"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot forward env vars to an existing sandbox") {
+		t.Fatalf("err = %v, want configured env rejection", err)
+	}
+}
+
 func TestWandbRunEmitsTimingJSONOnFailure(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
 	api := &fakeWandbAPI{

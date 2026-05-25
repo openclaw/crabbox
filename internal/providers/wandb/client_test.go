@@ -142,6 +142,15 @@ func TestStripScheme(t *testing.T) {
 	}
 }
 
+func TestStartupTimeout(t *testing.T) {
+	if got := startupTimeout(0); got != defaultStartupTimeout {
+		t.Fatalf("startupTimeout(0) = %s, want %s", got, defaultStartupTimeout)
+	}
+	if got := startupTimeout(60); got != time.Minute {
+		t.Fatalf("startupTimeout(60) = %s, want 1m", got)
+	}
+}
+
 func TestResolveAuthMissingKey(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CRABBOX_WANDB_API_KEY", "")
