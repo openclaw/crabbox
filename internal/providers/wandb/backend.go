@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const wandbStopTimeout = 15 * time.Second
+
 func NewWandbBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = providerName
 	applyWandbDefaults(&cfg)
@@ -86,7 +88,9 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 		if !shouldStop {
 			return
 		}
-		if err := client.Stop(context.Background(), sandboxID, 10, true); err != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), wandbStopTimeout)
+		defer cancel()
+		if err := client.Stop(stopCtx, sandboxID, 10, true); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: wandb stop failed for %s: %v\n", sandboxID, err)
 		}
 	}()
