@@ -494,6 +494,37 @@ func TestWandbRunEmitsTimingJSONOnFailure(t *testing.T) {
 	}
 }
 
+func TestWandbRunTimingJSONUsesExecErrorCode(t *testing.T) {
+	t.Setenv("WANDB_API_KEY", "fake")
+	api := &fakeWandbAPI{
+		acquired: wandbSandbox{ID: "sb-abc", Status: "running"},
+		execErr:  ExitError{Code: 69, Message: "unavailable"},
+	}
+	var stderr bytes.Buffer
+	backend := newWandbBackendForTest(api)
+	backend.rt.Stderr = &stderr
+	if _, err := backend.Run(context.Background(), RunRequest{
+		NoSync:     true,
+		TimingJSON: true,
+		Command:    []string{"echo", "hi"},
+	}); err == nil {
+		t.Fatal("Run accepted exec error")
+	}
+	var report timingReport
+	for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		if err := json.Unmarshal([]byte(line), &report); err != nil {
+			t.Fatalf("decode timing JSON: %v (line=%q)", err, line)
+		}
+		break
+	}
+	if report.ExitCode != 69 {
+		t.Fatalf("timing exit = %d, want 69; stderr=%s", report.ExitCode, stderr.String())
+	}
+}
+
 func TestWandbListAllIncludesStopped(t *testing.T) {
 	api := &fakeWandbAPI{listValue: []wandbSandbox{{ID: "sb-done", Status: "completed"}}}
 	backend := newWandbBackendForTest(api)

@@ -2,6 +2,7 @@ package wandb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -99,6 +100,14 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 		Stdout:    b.rt.Stdout,
 		Stderr:    b.rt.Stderr,
 	})
+	if execErr != nil && exitCode == 0 {
+		var ee ExitError
+		if errors.As(execErr, &ee) && ee.Code != 0 {
+			exitCode = ee.Code
+		} else {
+			exitCode = 1
+		}
+	}
 	// Command measures just the user's exec; Total includes Acquire+poll.
 	// Conflating them (the previous bug) made commandMs == totalMs on every
 	// fresh-sandbox run, hiding provisioning time from --timing-json users.
