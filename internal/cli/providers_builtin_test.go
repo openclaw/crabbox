@@ -582,6 +582,8 @@ func (p testModalProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 
 type testCloudflareProvider struct{}
 
+var testCloudflareDoctorResult *DoctorResult
+
 func (testCloudflareProvider) Name() string { return "cloudflare" }
 func (testCloudflareProvider) Aliases() []string {
 	return []string{"cf"}
@@ -774,6 +776,9 @@ type testDoctorDelegatedBackend struct {
 }
 
 func (b testDoctorDelegatedBackend) Doctor(context.Context, DoctorRequest) (DoctorResult, error) {
+	if testCloudflareDoctorResult != nil {
+		return *testCloudflareDoctorResult, nil
+	}
 	return DoctorResult{Provider: b.spec.Name, Message: "direct_check=ready"}, nil
 }
 

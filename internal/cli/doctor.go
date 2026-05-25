@@ -90,9 +90,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		}
 		if name == "provider" {
 			details["timeout"] = doctorProviderTimeout.String()
-			if message != "" && !strings.Contains(message, "provider=") {
-				message = fmt.Sprintf("provider=%s timeout=%s %s", provider, doctorProviderTimeout, message)
-			}
+			message = doctorProviderMessage(provider, message)
 		}
 		record(status, name, message, details)
 		if doctorStatusFails(status) {
@@ -337,6 +335,46 @@ func parseDoctorDetails(message string) map[string]string {
 		details[key] = value
 	}
 	return details
+}
+
+func doctorProviderMessage(provider, message string) string {
+	fields := strings.Fields(message)
+	if len(fields) == 0 {
+		return ""
+	}
+	hasProvider := false
+	hasTimeout := false
+	for _, field := range fields {
+		key, _, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "provider":
+			hasProvider = true
+		case "timeout":
+			hasTimeout = true
+		}
+	}
+	if !hasProvider && provider != "" {
+		fields = append([]string{fmt.Sprintf("provider=%s", provider)}, fields...)
+		hasProvider = true
+	}
+	if !hasTimeout {
+		timeoutField := fmt.Sprintf("timeout=%s", doctorProviderTimeout)
+		insert := 0
+		if hasProvider {
+			for i, field := range fields {
+				key, _, ok := strings.Cut(field, "=")
+				if ok && key == "provider" {
+					insert = i + 1
+					break
+				}
+			}
+		}
+		fields = append(fields[:insert], append([]string{timeoutField}, fields[insert:]...)...)
+	}
+	return strings.Join(fields, " ")
 }
 
 func doctorStatusFails(status string) bool {
