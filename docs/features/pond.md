@@ -36,10 +36,15 @@ remain CLI-led.
 
 Each provider self-declares which planes it supports via `Spec().Features`
 (`FeatureTailscale`, `FeatureSSH`, `FeatureURLBridge`). Some providers declare
-more than one: a Hetzner box advertises both Tailscale and SSH, so Tailscale is
-the preferred peer mesh and `pond connect` can still build operator-side SSH
-forwards for declared ports. URL-only sandboxes, such as Islo and E2B, do not
-join the peer mesh; they surface HTTP(S) endpoints instead.
+more than one: a direct Hetzner box advertises both Tailscale and SSH, so
+Tailscale is the preferred peer mesh and `pond connect` can still build
+operator-side SSH forwards for declared ports. URL-only sandboxes, such as Islo
+and E2B, do not join the peer mesh; they surface HTTP(S) endpoints instead.
+
+Auto-generated `tag:cbx-pond-*` Tailscale tags are direct-provider only in this
+preview. Brokered coordinators keep using their configured
+`CRABBOX_TAILSCALE_TAGS` allowlist; they do not receive dynamic per-pond tags
+until the Worker owns an explicit pond tag policy.
 
 | Plane     | Feature flag       | Providers (today)                                                                                                                                                    | What you get                                                  |
 | --------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |

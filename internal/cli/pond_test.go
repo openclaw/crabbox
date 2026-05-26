@@ -332,6 +332,54 @@ func TestApplyLeaseCreateFlagsAddsPondTailscaleTag(t *testing.T) {
 	}
 }
 
+func TestApplyLeaseCreateFlagsKeepsBrokeredPondTailscaleTagsAllowlisted(t *testing.T) {
+	t.Setenv("TS_API_KEY", "tskey-test")
+	t.Setenv("CRABBOX_TAILSCALE_AUTH_KEY", "tskey-auth-test")
+	var factoryCalls int
+	prev := pondTailnetACLClientFactory
+	pondTailnetACLClientFactory = func(_ string) pondTailnetACLClient {
+		factoryCalls++
+		return &stubPondTailnetACLClient{policy: `{"tagOwners":{}}`, etag: `"v1"`}
+	}
+	t.Cleanup(func() { pondTailnetACLClientFactory = prev })
+
+	defaults := Config{
+		Provider:    "hetzner",
+		Profile:     "default",
+		Class:       "standard",
+		TargetOS:    targetLinux,
+		Coordinator: "https://broker.example.test",
+		TTL:         time.Hour,
+		IdleTimeout: 15 * time.Minute,
+		Network:     NetworkAuto,
+		Capacity:    CapacityConfig{Market: "spot"},
+		Tailscale: TailscaleConfig{
+			HostnameTemplate: "crabbox-{slug}",
+			Tags:             []string{"tag:crabbox"},
+		},
+	}
+	fs := flag.NewFlagSet("warmup", flag.ContinueOnError)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := fs.Parse([]string{"--pond", "alpha", "--tailscale"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+		t.Fatalf("applyLeaseCreateFlags: %v", err)
+	}
+	if !cfg.Tailscale.Enabled {
+		t.Fatalf("expected Tailscale enabled by --tailscale")
+	}
+	for _, tag := range cfg.Tailscale.Tags {
+		if strings.HasPrefix(tag, "tag:cbx-pond-") {
+			t.Fatalf("brokered lease must not send dynamic pond tag to Worker allowlist: %#v", cfg.Tailscale.Tags)
+		}
+	}
+	if factoryCalls != 0 {
+		t.Fatalf("brokered lease should not auto-bootstrap direct pond ACL, factory calls=%d", factoryCalls)
+	}
+}
+
 func TestCloudInitPondHostsBootstrapEmittedWhenPondAndTailscale(t *testing.T) {
 	cfg := baseConfig()
 	cfg.SSHUser = "runner"

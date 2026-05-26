@@ -156,13 +156,11 @@ func pondTailscaleTag(owner, pond string) string {
 }
 
 // appendPondTailscaleTag mutates cfg.Tailscale.Tags to include the pond tag
-// when both `--pond` and Tailscale are in play. The mint happens entirely in
-// user (CLI) context: the same auth key the operator already supplies is
-// re-used with one extra advertised tag, so the broker never sees a
-// Tailscale credential. No-op when the provider lacks FeatureTailscale or
-// when Tailscale is not enabled on this lease.
-func appendPondTailscaleTag(cfg *Config, providerSupportsTailscale bool) {
-	if cfg == nil || !cfg.Tailscale.Enabled || !providerSupportsTailscale {
+// when both `--pond` and direct-provider Tailscale are in play. Brokered
+// coordinators enforce their own Tailscale tag allowlist, so generated pond
+// tags stay out of brokered requests until the Worker owns an explicit policy.
+func appendPondTailscaleTag(cfg *Config, dynamicTagAllowed bool) {
+	if cfg == nil || !cfg.Tailscale.Enabled || !dynamicTagAllowed {
 		return
 	}
 	tag := pondTailscaleTag(localCoordinatorOwner(), cfg.Pond)
@@ -170,6 +168,17 @@ func appendPondTailscaleTag(cfg *Config, providerSupportsTailscale bool) {
 		return
 	}
 	cfg.Tailscale.Tags = appendUniqueStrings(cfg.Tailscale.Tags, tag)
+}
+
+func pondDynamicTailscaleTagAllowed(cfg Config) bool {
+	if !providerCapableOfTailscale(cfg.Provider) {
+		return false
+	}
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return false
+	}
+	return !shouldUseCoordinator(cfg, provider.Spec())
 }
 
 // providerCapableOfTailscale reports whether the named provider advertises

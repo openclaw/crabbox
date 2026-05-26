@@ -136,9 +136,10 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 		return err
 	}
 	if cfg.Pond != "" {
-		appendPondTailscaleTag(cfg, providerCapableOfTailscale(cfg.Provider))
+		dynamicTailscaleTagAllowed := pondDynamicTailscaleTagAllowed(*cfg)
+		appendPondTailscaleTag(cfg, dynamicTailscaleTagAllowed)
 		// Reuse paths do not mutate ACL state.
-		if existingLeaseID == "" {
+		if existingLeaseID == "" && dynamicTailscaleTagAllowed {
 			if err := maybeBootstrapPondACL(context.Background(), *cfg); err != nil {
 				return err
 			}
@@ -157,7 +158,7 @@ func maybeBootstrapPondACL(ctx context.Context, cfg Config) error {
 	if cfg.Pond == "" || !cfg.Tailscale.Enabled {
 		return nil
 	}
-	if !providerCapableOfTailscale(cfg.Provider) {
+	if !pondDynamicTailscaleTagAllowed(cfg) {
 		return nil
 	}
 	apiKey := strings.TrimSpace(os.Getenv("TS_API_KEY"))
