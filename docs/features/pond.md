@@ -27,10 +27,10 @@ crabbox pond release NAME
 Use `--slug` as the stable role name for discovery. Whether that slug is
 directly dialable from another lease depends on the transport plane below.
 
-The OpenClaw plugin does not add first-class pond tools in this PR. Agents can
-still create pond-tagged leases through the existing `crabbox_run` and
-`crabbox_warmup` argv surfaces; `pond peers`, `pond connect`, `pond release`,
-and Tailscale policy bootstrap remain CLI-led.
+The plugin surface does not add first-class pond tools in this PR. Agents can
+still create pond-tagged leases through existing argv-forwarding tools;
+`pond peers`, `pond connect`, `pond release`, and Tailscale policy bootstrap
+remain CLI-led.
 
 ## Three transport planes
 
