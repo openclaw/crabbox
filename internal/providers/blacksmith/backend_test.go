@@ -200,10 +200,16 @@ func TestBlacksmithRunRejectsExplicitDefaultEnvBeforeWarmup(t *testing.T) {
 	}
 }
 
-func TestBlacksmithRunRejectsConfiguredEnvForwardingBeforeWarmup(t *testing.T) {
+func TestBlacksmithRunIgnoresConfiguredEnvAllowBeforeWarmup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	var stderr bytes.Buffer
-	runner := &blacksmithFuncRunner{}
+	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
+		return LocalCommandResult{ExitCode: 1}, errors.New("warmup failed")
+	}}
 	cfg := baseConfig()
+	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := &blacksmithBackend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
@@ -217,12 +223,14 @@ func TestBlacksmithRunRejectsConfiguredEnvForwardingBeforeWarmup(t *testing.T) {
 		},
 		Env: map[string]string{"API_TOKEN": "secret-token-value"},
 	})
-	var exitErr ExitError
-	if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 {
-		t.Fatalf("Run error=%v, want exit 2", err)
+	if err == nil {
+		t.Fatal("expected warmup failure")
 	}
-	if len(runner.calls) != 0 {
-		t.Fatalf("runner was called before validation: %#v", runner.calls)
+	if len(runner.calls) == 0 {
+		t.Fatal("runner was not called")
+	}
+	if strings.Contains(stderr.String(), "behavior=unsupported") {
+		t.Fatalf("configured env allow was rejected: %q", stderr.String())
 	}
 	if strings.Contains(stderr.String(), "secret-token-value") {
 		t.Fatalf("stderr leaked env value: %q", stderr.String())

@@ -229,29 +229,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 var githubActionsRunURLPattern = regexp.MustCompile(`https://github\.com/[^\s"'<>]+/actions/runs/[0-9]+[^\s"'<>]*`)
 
 func blacksmithEnvForwardingRequested(req RunRequest) bool {
-	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-		return true
-	}
-	for _, name := range req.Options.EnvAllow {
-		if !blacksmithDefaultEnvMetadataName(name) {
-			return true
-		}
-	}
-	for name := range req.Env {
-		if !blacksmithDefaultEnvMetadataName(name) {
-			return true
-		}
-	}
-	return false
-}
-
-func blacksmithDefaultEnvMetadataName(name string) bool {
-	switch strings.TrimSpace(name) {
-	case "", "CI", "NODE_OPTIONS":
-		return true
-	default:
-		return false
-	}
+	return req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != ""
 }
 
 const blacksmithProofStreamCaptureBytes = 1024 * 1024

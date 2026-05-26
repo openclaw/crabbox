@@ -85,6 +85,9 @@ before warmup with an explicit `env forwarding ... behavior=unsupported`
 summary when those knobs are present; put live secrets in the Blacksmith
 workflow instead.
 
+Repo-level env allowlists are ignored for this provider. They can still support
+SSH-backed providers without blocking delegated Blacksmith Testbox runs.
+
 ## Lifecycle
 
 Crabbox forwards:
