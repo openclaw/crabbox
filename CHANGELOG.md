@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed the LXQt labwc desktop profile to show the bottom taskbar by running LXQt shell apps through Xwayland and giving generated browser wrappers a private profile directory.
 - Fixed Daytona provider sandbox inventory to use Daytona's cursor-based listing API.
 - Removed OpenClaw-specific hosted broker defaults and documentation from the generic Crabbox broker login flow.
 

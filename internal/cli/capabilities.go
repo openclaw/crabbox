@@ -226,15 +226,19 @@ func probeDesktopEnv(ctx context.Context, target SSHTarget) (map[string]string, 
 	if isWindowsNativeTarget(target) || target.TargetOS == targetMacOS {
 		return map[string]string{}, nil
 	}
-	out, err := runSSHOutput(ctx, target, `if [ -f `+shellQuote(desktopEnvPath)+` ]; then . `+shellQuote(desktopEnvPath)+`; fi
-for key in CRABBOX_DESKTOP_ENV DISPLAY XDG_RUNTIME_DIR WAYLAND_DISPLAY; do
-  eval "value=\${$key:-}"
-  [ -n "$value" ] && printf '%s=%s\n' "$key" "$value"
-done`)
+	out, err := runSSHOutput(ctx, target, probeDesktopEnvCommand())
 	if err != nil {
 		return map[string]string{}, err
 	}
 	return parseEnvLines(out), nil
+}
+
+func probeDesktopEnvCommand() string {
+	return `if [ -f ` + shellQuote(desktopEnvPath) + ` ]; then . ` + shellQuote(desktopEnvPath) + `; fi
+for key in CRABBOX_DESKTOP_ENV DISPLAY XAUTHORITY XDG_RUNTIME_DIR WAYLAND_DISPLAY; do
+  eval "value=\${$key:-}"
+  [ -n "$value" ] && printf '%s=%s\n' "$key" "$value"
+done`
 }
 
 func probeBrowserEnv(ctx context.Context, cfg Config, target SSHTarget) (map[string]string, error) {

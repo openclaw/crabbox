@@ -200,11 +200,17 @@ func TestCloudInitLXQtDesktopProfile(t *testing.T) {
 		"/usr/local/bin/crabbox-start-wayland-desktop",
 		"/etc/systemd/system/crabbox-wayvnc.service",
 		"CRABBOX_DESKTOP_ENV=lxqt",
+		"rm -f /var/lib/crabbox/display.env",
+		"cat /var/lib/crabbox/display.env >>/var/lib/crabbox/desktop.env",
 		"XDG_CURRENT_DESKTOP=LXQt",
-		"QT_QPA_PLATFORM=wayland",
-		"lxqt-panel >/tmp/crabbox-lxqt-panel.log",
-		"pcmanfm-qt --desktop --profile=lxqt",
-		"qterminal --workdir=\"$HOME\"",
+		"printf 'DISPLAY=%s\\n' \"$DISPLAY\" >/var/lib/crabbox/display.env",
+		"printf 'XAUTHORITY=%s\\n' \"$XAUTHORITY\" >>/var/lib/crabbox/display.env",
+		"QT_QPA_PLATFORM=xcb lxqt-panel >/tmp/crabbox-lxqt-panel.log",
+		"QT_QPA_PLATFORM=xcb pcmanfm-qt --desktop --profile=lxqt",
+		"QT_QPA_PLATFORM=xcb qterminal --workdir=\"$HOME\"",
+		"export DISPLAY XAUTHORITY MOZ_ENABLE_WAYLAND=0",
+		"--user-data-dir=",
+		"--ozone-platform=x11",
 		"--ozone-platform=wayland",
 	} {
 		if !strings.Contains(got, want) {
@@ -235,12 +241,12 @@ func TestCloudInitBrowserWrapper(t *testing.T) {
 		"apt-cache show chromium-browser",
 		"/etc/opt/chrome/policies/managed/crabbox.json",
 		"/usr/local/bin/crabbox-browser",
-		`--no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --window-size=1500,900 --window-position=80,80`,
+		`--no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --user-data-dir=`,
 		"/var/lib/crabbox/browser.env",
 		"test -x \"$BROWSER\"",
 		"\"$BROWSER\" --version >/dev/null",
 		"printf '%s\\n' '{\"DefaultBrowserSettingEnabled\":false,\"MetricsReportingEnabled\":false,\"PromotionalTabsEnabled\":false}' > /etc/opt/chrome/policies/managed/crabbox.json",
-		"printf '%s\\n' '#!/bin/sh' \"exec \\\"$browser_path\\\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --window-size=1500,900 --window-position=80,80 \\\"\\$@\\\"\" > \"$browser_wrapper\"",
+		"browser-profile",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloudInit(browser) missing %q", want)
@@ -252,7 +258,6 @@ func TestCloudInitBrowserWrapper(t *testing.T) {
 		"\nEOF",
 		"--force-dark-mode",
 		"preferredColorScheme=2",
-		"--user-data-dir",
 	} {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("cloudInit(browser) contains browser heredoc content %q", notWant)

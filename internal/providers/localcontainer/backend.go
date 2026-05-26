@@ -1108,11 +1108,18 @@ wlr-randr --output HEADLESS-1 --custom-mode 1920x1080 >/tmp/crabbox-wlr-randr.lo
 if [ "${CRABBOX_DESKTOP_ENV:-wayland}" = "lxqt" ]; then
   export XDG_CURRENT_DESKTOP=LXQt
   export XDG_SESSION_DESKTOP=LXQt
-  export QT_QPA_PLATFORM=wayland
   export QT_QPA_PLATFORMTHEME=lxqt
-  lxqt-panel >/tmp/crabbox-lxqt-panel.log 2>&1 &
-  pcmanfm-qt --desktop --profile=lxqt >/tmp/crabbox-pcmanfm-qt.log 2>&1 &
-  qterminal --workdir="$HOME" >/tmp/crabbox-qterminal.log 2>&1 &
+  if [ -n "${DISPLAY:-}" ]; then
+    printf 'DISPLAY=%s\n' "$DISPLAY" >/var/lib/crabbox/display.env || true
+    [ -n "${XAUTHORITY:-}" ] && printf 'XAUTHORITY=%s\n' "$XAUTHORITY" >>/var/lib/crabbox/display.env || true
+    QT_QPA_PLATFORM=xcb lxqt-panel >/tmp/crabbox-lxqt-panel.log 2>&1 &
+    QT_QPA_PLATFORM=xcb pcmanfm-qt --desktop --profile=lxqt >/tmp/crabbox-pcmanfm-qt.log 2>&1 &
+    QT_QPA_PLATFORM=xcb qterminal --workdir="$HOME" >/tmp/crabbox-qterminal.log 2>&1 &
+  else
+    QT_QPA_PLATFORM=wayland lxqt-panel >/tmp/crabbox-lxqt-panel.log 2>&1 &
+    QT_QPA_PLATFORM=wayland pcmanfm-qt --desktop --profile=lxqt >/tmp/crabbox-pcmanfm-qt.log 2>&1 &
+    QT_QPA_PLATFORM=wayland qterminal --workdir="$HOME" >/tmp/crabbox-qterminal.log 2>&1 &
+  fi
 else
   foot --title='Crabbox Desktop' >/tmp/crabbox-foot.log 2>&1 &
 fi
@@ -1137,6 +1144,7 @@ esac
 runtime="/tmp/crabbox-runtime-$(id -u "$user")"
 install -d -m 0700 -o "$user" "$runtime"
 if ! pgrep -u "$user" -x labwc >/dev/null 2>&1; then
+  rm -f /var/lib/crabbox/display.env
   su "$user" -s /bin/sh -c "CRABBOX_DESKTOP_ENV='$desktop_env' XDG_RUNTIME_DIR='$runtime' WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman MOZ_ENABLE_WAYLAND=1 dbus-run-session labwc >/tmp/crabbox-labwc.log 2>&1 &"
 fi
 display=""
@@ -1149,11 +1157,20 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 [ -n "$display" ] || { echo "wayland socket not ready" >&2; exit 1; }
+if [ "$desktop_env" = "lxqt" ]; then
+  for _ in $(seq 1 10); do
+    [ -f /var/lib/crabbox/display.env ] && break
+    sleep 1
+  done
+fi
 cat >/var/lib/crabbox/desktop.env <<EOF
 CRABBOX_DESKTOP_ENV=$desktop_env
 XDG_RUNTIME_DIR=$runtime
 WAYLAND_DISPLAY=$display
 EOF
+if [ -f /var/lib/crabbox/display.env ]; then
+  cat /var/lib/crabbox/display.env >>/var/lib/crabbox/desktop.env
+fi
 chown "$user" /var/lib/crabbox/desktop.env
 chmod 0644 /var/lib/crabbox/desktop.env
 if ! ss -ltn | grep -q '127.0.0.1:5900'; then
@@ -1476,17 +1493,21 @@ if [ "${CRABBOX_BROWSER:-0}" = "1" ]; then
   browser_wrapper=/usr/local/bin/crabbox-browser
   case "$(basename "$browser_path")" in
     firefox*|iceweasel*)
-      if [ -f /var/lib/crabbox/desktop.env ] && grep -Eq '^CRABBOX_DESKTOP_ENV=(wayland|lxqt)$' /var/lib/crabbox/desktop.env; then
+      if [ -f /var/lib/crabbox/desktop.env ] && grep -q '^CRABBOX_DESKTOP_ENV=lxqt$' /var/lib/crabbox/desktop.env; then
+        printf '%s\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY' 'if [ -n "${DISPLAY:-}" ]; then' '  export DISPLAY XAUTHORITY MOZ_ENABLE_WAYLAND=0' "  exec \"$browser_path\" --width 1500 --height 900 \"\$@\"" 'fi' 'export MOZ_ENABLE_WAYLAND=1' "exec \"$browser_path\" --width 1500 --height 900 \"\$@\"" > "$browser_wrapper"
+      elif [ -f /var/lib/crabbox/desktop.env ] && grep -q '^CRABBOX_DESKTOP_ENV=wayland$' /var/lib/crabbox/desktop.env; then
         printf '%s\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY MOZ_ENABLE_WAYLAND=1' "exec \"$browser_path\" --width 1500 --height 900 \"\$@\"" > "$browser_wrapper"
       else
         printf '%s\n' '#!/bin/sh' "exec \"$browser_path\" --width 1500 --height 900 \"\$@\"" > "$browser_wrapper"
       fi
       ;;
     *)
-      if [ -f /var/lib/crabbox/desktop.env ] && grep -Eq '^CRABBOX_DESKTOP_ENV=(wayland|lxqt)$' /var/lib/crabbox/desktop.env; then
-        printf '%s\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY' 'export MOZ_ENABLE_WAYLAND=1' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --ozone-platform=wayland --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$browser_wrapper"
+      if [ -f /var/lib/crabbox/desktop.env ] && grep -q '^CRABBOX_DESKTOP_ENV=lxqt$' /var/lib/crabbox/desktop.env; then
+        printf '%s\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY' 'profile="${CRABBOX_BROWSER_PROFILE:-$HOME/.cache/crabbox/browser-profile}"' 'umask 077' 'mkdir -p "$profile"' 'chmod 700 "$profile"' 'if [ -n "${DISPLAY:-}" ]; then' '  export DISPLAY XAUTHORITY MOZ_ENABLE_WAYLAND=0' "  exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --user-data-dir=\"\$profile\" --ozone-platform=x11 --window-size=1500,900 --window-position=80,80 \"\$@\"" 'fi' 'export MOZ_ENABLE_WAYLAND=1' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --user-data-dir=\"\$profile\" --ozone-platform=wayland --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$browser_wrapper"
+      elif [ -f /var/lib/crabbox/desktop.env ] && grep -q '^CRABBOX_DESKTOP_ENV=wayland$' /var/lib/crabbox/desktop.env; then
+        printf '%s\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY' 'export MOZ_ENABLE_WAYLAND=1' 'profile="${CRABBOX_BROWSER_PROFILE:-$HOME/.cache/crabbox/browser-profile}"' 'umask 077' 'mkdir -p "$profile"' 'chmod 700 "$profile"' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --user-data-dir=\"\$profile\" --ozone-platform=wayland --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$browser_wrapper"
       else
-        printf '%s\n' '#!/bin/sh' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$browser_wrapper"
+        printf '%s\n' '#!/bin/sh' 'profile="${CRABBOX_BROWSER_PROFILE:-$HOME/.cache/crabbox/browser-profile}"' 'umask 077' 'mkdir -p "$profile"' 'chmod 700 "$profile"' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --user-data-dir=\"\$profile\" --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$browser_wrapper"
       fi
       ;;
   esac

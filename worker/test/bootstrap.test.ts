@@ -199,12 +199,20 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("apt-cache show qt6-wayland");
     expect(got).toContain("apt-cache show qtwayland5");
     expect(got).toContain("CRABBOX_DESKTOP_ENV=lxqt");
+    expect(got).toContain("rm -f /var/lib/crabbox/display.env");
+    expect(got).toContain("cat /var/lib/crabbox/display.env >>/var/lib/crabbox/desktop.env");
     expect(got).toContain("XDG_CURRENT_DESKTOP=LXQt");
-    expect(got).toContain("QT_QPA_PLATFORM=wayland");
-    expect(got).toContain("lxqt-panel >/tmp/crabbox-lxqt-panel.log");
-    expect(got).toContain("pcmanfm-qt --desktop --profile=lxqt");
-    expect(got).toContain('qterminal --workdir="$HOME"');
+    expect(got).toContain("printf 'DISPLAY=%s\\n' \"$DISPLAY\" >/var/lib/crabbox/display.env");
+    expect(got).toContain(
+      "printf 'XAUTHORITY=%s\\n' \"$XAUTHORITY\" >>/var/lib/crabbox/display.env",
+    );
+    expect(got).toContain("QT_QPA_PLATFORM=xcb lxqt-panel >/tmp/crabbox-lxqt-panel.log");
+    expect(got).toContain("QT_QPA_PLATFORM=xcb pcmanfm-qt --desktop --profile=lxqt");
+    expect(got).toContain('QT_QPA_PLATFORM=xcb qterminal --workdir="$HOME"');
     expect(got).toContain("/etc/systemd/system/crabbox-wayvnc.service");
+    expect(got).toContain("export DISPLAY XAUTHORITY MOZ_ENABLE_WAYLAND=0");
+    expect(got).toContain("--user-data-dir=");
+    expect(got).toContain("--ozone-platform=x11");
     expect(got).toContain("--ozone-platform=wayland");
     expect(got).not.toContain("startxfce4");
     expect(got).not.toContain("x11vnc -storepasswd");
@@ -238,23 +246,20 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("/etc/opt/chrome/policies/managed/crabbox.json");
     expect(got).toContain("/usr/local/bin/crabbox-browser");
     expect(got).toContain(
-      "--no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --window-size=1500,900 --window-position=80,80",
+      "--no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --user-data-dir=",
     );
+    expect(got).toContain("browser-profile");
     expect(got).toContain("/var/lib/crabbox/browser.env");
     expect(got).toContain('test -x "$BROWSER"');
     expect(got).toContain('"$BROWSER" --version >/dev/null');
     expect(got).toContain(
       `printf '%s\\n' '{"DefaultBrowserSettingEnabled":false,"MetricsReportingEnabled":false,"PromotionalTabsEnabled":false}' > /etc/opt/chrome/policies/managed/crabbox.json`,
     );
-    expect(got).toContain(
-      `printf '%s\\n' '#!/bin/sh' "exec \\"$browser_path\\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --window-size=1500,900 --window-position=80,80 \\"\\$@\\"" > "$browser_wrapper"`,
-    );
     expect(got).not.toContain("<<'EOF'");
     expect(got).not.toContain("<<EOF");
     expect(got).not.toContain("\nEOF");
     expect(got).not.toContain("--force-dark-mode");
     expect(got).not.toContain("preferredColorScheme=2");
-    expect(got).not.toContain("--user-data-dir");
   });
 
   it("adds code-server setup only when requested", () => {

@@ -49,8 +49,11 @@ func TestDesktopBrowserDarkModeCommandPatchesManagedChromiumWrapper(t *testing.T
 		"--blink-settings=preferredColorScheme=1",
 		"--force-dark-mode --enable-features=WebUIDarkMode --blink-settings=preferredColorScheme=2",
 		`--user-data-dir=\"\$profile\"`,
-		`CRABBOX_DESKTOP_ENV=(wayland|lxqt)`,
+		`CRABBOX_DESKTOP_ENV=wayland`,
+		`CRABBOX_DESKTOP_ENV=lxqt`,
+		"export DISPLAY XAUTHORITY MOZ_ENABLE_WAYLAND=0",
 		"--ozone-platform=wayland",
+		"--ozone-platform=x11",
 		"sudo install -m 0755",
 	} {
 		if !strings.Contains(got, want) {

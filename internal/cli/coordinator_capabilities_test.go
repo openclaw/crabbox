@@ -107,6 +107,21 @@ func TestStaticDesktopProbeCommandRequiresLXQtWhenRequested(t *testing.T) {
 	}
 }
 
+func TestProbeDesktopEnvCommandIncludesXAuthority(t *testing.T) {
+	got := probeDesktopEnvCommand()
+	for _, want := range []string{
+		desktopEnvPath,
+		"DISPLAY",
+		"XAUTHORITY",
+		"XDG_RUNTIME_DIR",
+		"WAYLAND_DISPLAY",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("desktop env probe missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestStaticDesktopProbeCommandDefaultsToX11(t *testing.T) {
 	got := staticDesktopProbeCommand(Config{}, SSHTarget{TargetOS: targetLinux})
 	for _, want := range []string{"Xvfb :99", "x11vnc"} {
