@@ -23,9 +23,10 @@ import (
 //     with Transport="none" and an honest Note so doctor reports the gap
 //     instead of pretending the peer is reachable.
 //
-// BridgeState is retained for backward compatibility with PR #136's first
-// shape: it carries "unsupported" / "unsupported-provider" for URL-transport
-// peers whose per-provider adapter explicitly cannot bridge.
+// BridgeState is retained for backward compatibility with
+// https://github.com/openclaw/crabbox/pull/136's first shape: it carries
+// "unsupported" / "unsupported-provider" for URL-transport peers whose
+// per-provider adapter explicitly cannot bridge.
 type BridgePeer struct {
 	Slug     string `json:"slug"`
 	LeaseID  string `json:"leaseID"`
@@ -181,8 +182,9 @@ func (a App) pondPeers(ctx context.Context, args []string) error {
 	}
 	// Empty --provider means "every provider represented in the pond"; the
 	// resolver fans out per provider and concatenates the result. Non-empty
-	// preserves the original single-provider semantics so existing scripts
-	// (and the islo live-demo in PR #136) keep working unchanged.
+	// preserves the original single-provider semantics so existing scripts and
+	// the islo live-demo in https://github.com/openclaw/crabbox/pull/136 keep
+	// working unchanged.
 	provider := strings.TrimSpace(flags.Provider)
 	peers, err := resolvePondPeers(ctx, runtimeForApp(a), pondName, provider, flags)
 	if err != nil {
@@ -291,13 +293,13 @@ type pondPeersJSON struct {
 // split out so unit tests can swap in fakes for the provider backend and the
 // claim store without going through the full kong/flag stack.
 //
-// When provider is non-empty the resolver behaves as in the original PR #136
-// design: a single backend is configured and every matching claim is fanned
-// out against it. When provider is empty the resolver groups matching claims
-// by provider, configures each backend exactly once, and concatenates the
-// results — this is the path that gives `crabbox pond peers --pond <name>`
-// honest cross-provider output without making the caller enumerate providers
-// by hand.
+// When provider is non-empty the resolver behaves as in the original
+// https://github.com/openclaw/crabbox/pull/136 design: a single backend is
+// configured and every matching claim is fanned out against it. When provider
+// is empty the resolver groups matching claims by provider, configures each
+// backend exactly once, and concatenates the results — this is the path that
+// gives `crabbox pond peers --pond <name>` honest cross-provider output without
+// making the caller enumerate providers by hand.
 func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, flags pondPeersFlags) ([]BridgePeer, error) {
 	claims, err := listLeaseClaims()
 	if err != nil {
@@ -366,8 +368,9 @@ func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, fl
 //     Namespace / Semaphore). Endpoint is built from SSHHost+SSHPort; an
 //     unset host surfaces as transport=pending.
 //   - url — delegated-with-URL providers. The per-provider BridgeProvider is
-//     invoked for live target discovery, preserving the original PR #136
-//     behavior (publish/list/honest-unsupported).
+//     invoked for live target discovery, preserving the original
+//     https://github.com/openclaw/crabbox/pull/136 behavior
+//     (publish/list/honest-unsupported).
 //   - none — Blacksmith and providers with no Crabbox bridge adapter.
 //     Surfaced with a documented note so doctor stays honest.
 func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider string, claims []leaseClaim, flags pondPeersFlags) ([]BridgePeer, error) {
