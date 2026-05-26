@@ -363,6 +363,37 @@ func TestPondPeersCommandRejectsBadPort(t *testing.T) {
 	}
 }
 
+func TestPondConnectKongStripsCommandPath(t *testing.T) {
+	withTempClaims(t, nil)
+	t.Setenv("HOME", t.TempDir())
+	var out, errBuf strings.Builder
+	app := App{Stdout: &out, Stderr: &errBuf}
+	if err := app.Run(context.Background(), []string{"pond", "connect", "alpha", "--export"}); err != nil {
+		t.Fatalf("pond connect through Kong: %v", err)
+	}
+	if !strings.Contains(errBuf.String(), `pond "alpha" has no SSH-mesh-capable members`) {
+		t.Fatalf("expected stripped pond name alpha, stdout=%q stderr=%q", out.String(), errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), `pond "pond"`) {
+		t.Fatalf("Kong command path leaked into pond name: %q", errBuf.String())
+	}
+}
+
+func TestPondReleaseKongStripsCommandPath(t *testing.T) {
+	withTempClaims(t, nil)
+	var out, errBuf strings.Builder
+	app := App{Stdout: &out, Stderr: &errBuf}
+	if err := app.Run(context.Background(), []string{"pond", "release", "alpha"}); err != nil {
+		t.Fatalf("pond release through Kong: %v", err)
+	}
+	if !strings.Contains(out.String(), `pond "alpha" has no active leases`) {
+		t.Fatalf("expected stripped pond name alpha, stdout=%q stderr=%q", out.String(), errBuf.String())
+	}
+	if strings.Contains(out.String(), `pond "pond-release-alpha"`) {
+		t.Fatalf("Kong command path leaked into pond name: %q", out.String())
+	}
+}
+
 func TestProbeBridgePeersReachable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

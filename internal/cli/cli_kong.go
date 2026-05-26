@@ -527,10 +527,10 @@ func (c *stopKongCmd) Run(ctx context.Context, app App) error    { return app.st
 func (c *releaseKongCmd) Run(ctx context.Context, app App) error { return app.stop(ctx, c.Args) }
 func (c *cleanupKongCmd) Run(ctx context.Context, app App) error { return app.cleanup(ctx, c.Args) }
 func (c *pondConnectKongCmd) Run(ctx context.Context, app App) error {
-	return app.pondConnect(ctx, c.Args)
+	return app.pondConnect(ctx, stripKongCommandPath(c.Args, "pond", "connect"))
 }
 func (c *pondReleaseKongCmd) Run(ctx context.Context, app App) error {
-	return app.pondRelease(ctx, c.Args)
+	return app.pondRelease(ctx, stripKongCommandPath(c.Args, "pond", "release"))
 }
 
 func (c *desktopLaunchKongCmd) Run(ctx context.Context, app App) error {
