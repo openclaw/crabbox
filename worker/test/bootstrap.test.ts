@@ -194,10 +194,13 @@ describe("cloud-init bootstrap", () => {
 
   it("adds GNOME Wayland desktop services when requested", () => {
     const got = cloudInit({ ...config, desktop: true, desktopEnv: "gnome", browser: true });
-    expect(got).toContain("labwc wayvnc wlr-randr grim slurp wtype wl-clipboard");
+    expect(got).toContain("labwc wayvnc waybar wlr-randr grim slurp wtype wl-clipboard");
     expect(got).toContain("dbus-user-session xwayland");
     expect(got).toContain("gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme");
     expect(got).toContain("/usr/local/bin/crabbox-start-wayland-desktop");
+    expect(got).toContain("/home/crabbox/.config/waybar/config");
+    expect(got).toContain('"wlr/taskbar"');
+    expect(got).toContain("waybar --config");
     expect(got).toContain("CRABBOX_DESKTOP_ENV=gnome");
     expect(got).toContain("WAYLAND_DISPLAY=wayland-1");
     expect(got).toContain("exec dbus-run-session labwc");

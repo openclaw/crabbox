@@ -6,6 +6,7 @@
 
 - Added a portable `--os`/`os` lease selector with Ubuntu 26.04 as the preferred Linux image where provider catalogs support it, while preserving explicit provider image overrides.
 - Added `--desktop-env gnome` for a GNOME-apps desktop profile on labwc/WayVNC.
+- Added a bottom taskbar to the `--desktop-env gnome` profile.
 
 ### Fixed
 

@@ -193,10 +193,13 @@ func TestCloudInitGnomeDesktopProfile(t *testing.T) {
 	cfg.DesktopEnv = "gnome"
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
-		"labwc wayvnc wlr-randr grim slurp wtype wl-clipboard",
+		"labwc wayvnc waybar wlr-randr grim slurp wtype wl-clipboard",
 		"dbus-user-session xwayland",
 		"gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme",
 		"/usr/local/bin/crabbox-start-wayland-desktop",
+		"/home/crabbox/.config/waybar/config",
+		`"wlr/taskbar"`,
+		"waybar --config",
 		"/etc/systemd/system/crabbox-wayvnc.service",
 		"CRABBOX_DESKTOP_ENV=gnome",
 		"WAYLAND_DISPLAY=wayland-1",

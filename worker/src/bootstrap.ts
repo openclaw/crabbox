@@ -1003,13 +1003,65 @@ function optionalBootstrap(config: LeaseConfig): string {
   if (config.desktop && config.desktopEnv !== "xfce") {
     const gnome = config.desktopEnv === "gnome";
     const packages = gnome
-      ? "labwc wayvnc wlr-randr grim slurp wtype wl-clipboard dbus-user-session xwayland xdg-desktop-portal-wlr xdg-desktop-portal-gtk gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme fonts-dejavu-core fonts-liberation iproute2 openssl procps"
+      ? "labwc wayvnc waybar wlr-randr grim slurp wtype wl-clipboard dbus-user-session xwayland xdg-desktop-portal-wlr xdg-desktop-portal-gtk gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme fonts-dejavu-core fonts-liberation iproute2 openssl procps"
       : "labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps";
+    const configDirs = gnome
+      ? "/home/crabbox/.config/labwc /home/crabbox/.config/wayvnc /home/crabbox/.config/waybar"
+      : "/home/crabbox/.config/labwc /home/crabbox/.config/wayvnc";
+    const waybarConfig = gnome
+      ? `    cat >/home/crabbox/.config/waybar/config <<'WAYBAR'
+    {
+      "layer": "top",
+      "position": "bottom",
+      "height": 34,
+      "modules-left": ["wlr/taskbar"],
+      "modules-center": [],
+      "modules-right": ["clock"],
+      "wlr/taskbar": {
+        "format": "{title}",
+        "tooltip": true,
+        "on-click": "activate",
+        "on-click-middle": "close"
+      },
+      "clock": {
+        "format": "{:%H:%M}"
+      }
+    }
+    WAYBAR
+    cat >/home/crabbox/.config/waybar/style.css <<'WAYBAR_CSS'
+    * {
+      font-family: Sans, sans-serif;
+      font-size: 13px;
+    }
+    window#waybar {
+      background: #20242b;
+      border-top: 1px solid #3b4048;
+      color: #f8fafc;
+    }
+    #taskbar button {
+      background: #2f3540;
+      border: 0;
+      border-radius: 0;
+      color: #f8fafc;
+      margin: 3px 2px;
+      padding: 0 10px;
+    }
+    #taskbar button.active {
+      background: #e5e7eb;
+      color: #111827;
+    }
+    #clock {
+      padding: 0 12px;
+    }
+    WAYBAR_CSS
+`
+      : "";
     const autostart = gnome
       ? `    wlr-randr --output HEADLESS-1 --custom-mode 1920x1080 >/tmp/crabbox-wlr-randr.log 2>&1 || true
     export XDG_CURRENT_DESKTOP=GNOME
     export XDG_SESSION_DESKTOP=gnome
     export GTK_THEME=Adwaita
+    waybar --config "$HOME/.config/waybar/config" --style "$HOME/.config/waybar/style.css" >/tmp/crabbox-waybar.log 2>&1 &
     gnome-terminal -- bash -l >/tmp/crabbox-gnome-terminal.log 2>&1 &
     nautilus --new-window "$HOME" >/tmp/crabbox-nautilus.log 2>&1 &
 `
@@ -1030,8 +1082,9 @@ ${autostart}    AUTOSTART
     crabbox_uid="$(id -u crabbox)"
     crabbox_runtime="/tmp/crabbox-runtime-$crabbox_uid"
     install -d -m 0700 -o crabbox -g crabbox "$crabbox_runtime"
-    install -d -m 0700 -o crabbox -g crabbox /home/crabbox/.config/labwc /home/crabbox/.config/wayvnc
+    install -d -m 0700 -o crabbox -g crabbox ${configDirs}
 ${labwcAutostart}
+${waybarConfig}
     cat >/home/crabbox/.config/wayvnc/config <<'WAYVNC'
     address=127.0.0.1
     port=5900
