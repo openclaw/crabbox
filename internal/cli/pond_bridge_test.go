@@ -252,6 +252,57 @@ func TestResolvePondPeersMultiProviderFanOut(t *testing.T) {
 	}
 }
 
+func TestResolvePondPeersMultiProviderFanOutSkipsFailedProvider(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "cbx_e2b1", Slug: "e2b-a", Provider: "e2b", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "isb_islo1", Slug: "islo-a", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	adapters := map[string]*fakeBridgeProvider{
+		"e2b":  {listed: map[string][]BridgePeerTarget{"cbx_e2b1": {{Port: 8080, URL: "https://8080-sbx.e2b.app"}}}},
+		"islo": {listErr: errors.New("islo api down")},
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(provider string, _ Runtime) (BridgeProvider, error) {
+		if adapter, ok := adapters[provider]; ok {
+			return adapter, nil
+		}
+		t.Fatalf("unexpected provider in fan-out: %q", provider)
+		return nil, nil
+	}
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "", pondPeersFlags{})
+	if err != nil {
+		t.Fatalf("resolvePondPeers should keep healthy providers when one fails: %v", err)
+	}
+	if len(peers) != 1 {
+		t.Fatalf("expected only the healthy e2b peer, got %d: %#v", len(peers), peers)
+	}
+	if peers[0].Provider != "e2b" || len(peers[0].Targets) != 1 || peers[0].Targets[0].URL == "" {
+		t.Fatalf("expected healthy e2b peer with target, got %#v", peers[0])
+	}
+}
+
+func TestResolvePondPeersMultiProviderFanOutFailsWhenEveryProviderFails(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "cbx_e2b1", Slug: "e2b-a", Provider: "e2b", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "isb_islo1", Slug: "islo-a", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(provider string, _ Runtime) (BridgeProvider, error) {
+		return &fakeBridgeProvider{listErr: errors.New(provider + " api down")}, nil
+	}
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	_, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "", pondPeersFlags{})
+	if err == nil {
+		t.Fatalf("expected error when every provider fails")
+	}
+	if !strings.Contains(err.Error(), "e2b") {
+		t.Fatalf("expected first provider error to identify provider, got %v", err)
+	}
+}
+
 func TestResolvePondPeersListError(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},

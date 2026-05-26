@@ -125,6 +125,16 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 	if err := validateRequestedCapabilities(*cfg); err != nil {
 		return err
 	}
+	if values.Expose != nil && len(*values.Expose) > 0 {
+		ports, err := requestedExposedPorts(*values.Expose)
+		if err != nil {
+			return err
+		}
+		cfg.ExposedPorts = ports
+	}
+	if err := validateLeaseDurations(*cfg); err != nil {
+		return err
+	}
 	if cfg.Pond != "" {
 		appendPondTailscaleTag(cfg, providerCapableOfTailscale(cfg.Provider))
 		// Reuse paths do not mutate ACL state.
@@ -134,14 +144,7 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 			}
 		}
 	}
-	if values.Expose != nil && len(*values.Expose) > 0 {
-		ports, err := requestedExposedPorts(*values.Expose)
-		if err != nil {
-			return err
-		}
-		cfg.ExposedPorts = ports
-	}
-	return validateLeaseDurations(*cfg)
+	return nil
 }
 
 // maybeBootstrapPondACL self-bootstraps the pond tag's tagOwners + grants

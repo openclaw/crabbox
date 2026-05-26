@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // stubPondTailnetACLClient lets unit tests exercise pondACLEnsure without
@@ -458,5 +459,70 @@ func TestMaybeBootstrapPondACLSkipsNonTailscaleProvider(t *testing.T) {
 	}
 	if atomic.LoadInt32(&stub.gets) != 0 {
 		t.Fatalf("expected no API call for non-Tailscale provider, got %d gets", stub.gets)
+	}
+}
+
+func TestApplyLeaseCreateFlagsValidatesBeforePondACLBootstrap(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "invalid expose",
+			args: []string{"--pond", "alpha", "--expose", "not-a-port"},
+		},
+		{
+			name: "invalid ttl",
+			args: []string{"--pond", "alpha", "--ttl", "0s"},
+		},
+		{
+			name: "invalid idle timeout",
+			args: []string{"--pond", "alpha", "--idle-timeout", "0s"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TS_API_KEY", "tskey-test")
+			t.Setenv("CRABBOX_TAILSCALE_AUTH_KEY", "tskey-auth-test")
+			stub := &stubPondTailnetACLClient{policy: `{"tagOwners":{}}`, etag: `"v1"`}
+			var factories int32
+			prev := pondTailnetACLClientFactory
+			pondTailnetACLClientFactory = func(_ string) pondTailnetACLClient {
+				atomic.AddInt32(&factories, 1)
+				return stub
+			}
+			t.Cleanup(func() { pondTailnetACLClientFactory = prev })
+
+			defaults := Config{
+				Provider:    "hetzner",
+				Profile:     "default",
+				Class:       "standard",
+				TargetOS:    targetLinux,
+				TTL:         time.Hour,
+				IdleTimeout: 15 * time.Minute,
+				Network:     NetworkAuto,
+				Capacity:    CapacityConfig{Market: "spot"},
+				Tailscale: TailscaleConfig{
+					Enabled: true,
+					AuthKey: "tskey-auth-test",
+				},
+			}
+			fs := newFlagSet("warmup", io.Discard)
+			values := registerLeaseCreateFlags(fs, defaults)
+			if err := parseFlags(fs, tc.args); err != nil {
+				t.Fatal(err)
+			}
+			cfg := defaults
+			if err := applyLeaseCreateFlags(&cfg, fs, values); err == nil {
+				t.Fatalf("expected validation error for %v", tc.args)
+			}
+			if got := atomic.LoadInt32(&factories); got != 0 {
+				t.Fatalf("ACL client factory called %d time(s) before validation failed", got)
+			}
+			if got := atomic.LoadInt32(&stub.gets); got != 0 {
+				t.Fatalf("ACL policy read %d time(s) before validation failed", got)
+			}
+		})
 	}
 }

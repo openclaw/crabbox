@@ -320,12 +320,26 @@ func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, fl
 	}
 	sort.Strings(order)
 	peers := make([]BridgePeer, 0, len(matches))
+	allProviders := strings.TrimSpace(provider) == ""
+	var firstErr error
+	successes := 0
 	for _, p := range order {
 		providerPeers, err := resolvePondPeersForProvider(ctx, rt, p, byProvider[p], flags)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", p, err)
+			err = fmt.Errorf("%s: %w", p, err)
+			if !allProviders {
+				return nil, err
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
+		successes++
 		peers = append(peers, providerPeers...)
+	}
+	if successes == 0 && firstErr != nil {
+		return nil, firstErr
 	}
 	sort.Slice(peers, func(i, j int) bool {
 		if peers[i].Slug == peers[j].Slug {
