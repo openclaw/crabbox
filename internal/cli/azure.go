@@ -19,16 +19,19 @@ import (
 )
 
 const (
-	azureAddressSpace        = "10.42.0.0/16"
-	azureSubnetCIDR          = "10.42.0.0/24"
-	azureProviderTag         = "crabbox"
-	AzureOSDiskAuto          = "auto"
-	AzureOSDiskEphemeral     = "ephemeral"
-	AzureOSDiskManaged       = "managed"
-	defaultAzureLinuxImage   = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest"
-	defaultAzureWindowsImage = "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest"
-	azureDeleteRetryDelay    = 15 * time.Second
-	azureDeleteRetryAttempts = 13
+	azureAddressSpace         = "10.42.0.0/16"
+	azureSubnetCIDR           = "10.42.0.0/24"
+	azureProviderTag          = "crabbox"
+	AzureOSDiskAuto           = "auto"
+	AzureOSDiskEphemeral      = "ephemeral"
+	AzureOSDiskManaged        = "managed"
+	defaultAzureLinuxImage    = "Canonical:ubuntu-26_04-lts:server:latest"
+	azureNobleLinuxImage      = "Canonical:ubuntu-24_04-lts:server:latest"
+	legacyAzureJammyImage     = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest"
+	legacyAzureNobleGen2Image = "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest"
+	defaultAzureWindowsImage  = "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest"
+	azureDeleteRetryDelay     = 15 * time.Second
+	azureDeleteRetryAttempts  = 13
 )
 
 type AzureClient struct {
@@ -140,13 +143,22 @@ func parseAzureImageRef(s string) (azureImageRef, error) {
 }
 
 func azureImageForConfig(cfg Config) string {
-	if cfg.TargetOS == targetWindows && (cfg.AzureImage == "" || cfg.AzureImage == defaultAzureLinuxImage) {
+	if cfg.TargetOS == targetWindows && (cfg.AzureImage == "" || isAzureDefaultLinuxImage(cfg.AzureImage)) {
 		return defaultAzureWindowsImage
 	}
 	if cfg.AzureImage == "" {
 		return defaultAzureLinuxImage
 	}
 	return cfg.AzureImage
+}
+
+func isAzureDefaultLinuxImage(image string) bool {
+	switch strings.TrimSpace(image) {
+	case defaultAzureLinuxImage, azureNobleLinuxImage, legacyAzureJammyImage, legacyAzureNobleGen2Image:
+		return true
+	default:
+		return false
+	}
 }
 
 func azureVMSizeCandidatesForConfig(cfg Config) []string {

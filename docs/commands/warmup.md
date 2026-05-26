@@ -5,6 +5,7 @@
 ```sh
 crabbox warmup --class beast
 crabbox warmup --provider aws --class beast --market on-demand
+crabbox warmup --provider aws --os ubuntu:26.04 --desktop --browser --desktop-env wayland
 crabbox warmup --provider azure --class beast
 crabbox warmup --browser
 crabbox warmup --tailscale
@@ -123,6 +124,7 @@ Flags:
 --static-work-root <path>
 --profile <name>
 --class <name>
+--os ubuntu:26.04|ubuntu:24.04
 --type <provider-type>
 --azure-os-disk managed|ephemeral|auto
 --market spot|on-demand
@@ -186,10 +188,14 @@ Warmup records a local claim tying the lease to the current repo; `--reclaim` ov
 browser automation. Managed Linux tries Google Chrome stable first, then a
 Chromium package fallback.
 
+`--os` selects a portable Linux OS image. Ubuntu 26.04 is the default; explicit
+provider image flags and config values still win for exact AMIs, URNs, image
+families, or provider image names.
+
 `--desktop` provisions a visible UI and loopback-bound VNC for automation and
 operator takeover. Linux defaults to Xvfb, slim XFCE, and x11vnc; use
 `--desktop-env wayland` for the experimental labwc/WayVNC profile on Ubuntu
-24.04-compatible images. It does not imply a browser. Use `--desktop --browser`
+26.04-compatible images. It does not imply a browser. Use `--desktop --browser`
 when a headed browser should run in the visible display.
 
 `--code` provisions `code-server` for Linux leases and enables

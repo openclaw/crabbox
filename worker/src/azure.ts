@@ -20,7 +20,11 @@ const API_VERSIONS = {
 const DELETE_RETRY_ATTEMPTS = 13;
 const DELETE_RETRY_DELAY_MS = 15_000;
 const MIN_LRO_POLL_INTERVAL_MS = 15_000;
-const DEFAULT_AZURE_LINUX_IMAGE = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest";
+const DEFAULT_AZURE_LINUX_IMAGE = "Canonical:ubuntu-26_04-lts:server:latest";
+const AZURE_NOBLE_LINUX_IMAGE = "Canonical:ubuntu-24_04-lts:server:latest";
+const LEGACY_AZURE_JAMMY_IMAGE = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest";
+const LEGACY_AZURE_NOBLE_GEN2_IMAGE =
+  "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest";
 const DEFAULT_AZURE_WINDOWS_IMAGE =
   "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest";
 
@@ -475,7 +479,7 @@ export class AzureClient {
 
   private imageForConfig(config: LeaseConfig): string {
     const image = config.azureImage || this.image;
-    if (config.target === "windows" && image === DEFAULT_AZURE_LINUX_IMAGE) {
+    if (config.target === "windows" && isAzureDefaultLinuxImage(image)) {
       return DEFAULT_AZURE_WINDOWS_IMAGE;
     }
     return image;
@@ -1132,6 +1136,15 @@ export function isRetryableProvisioningError(message: string): boolean {
 
 function prependUnique(first: string, rest: string[]): string[] {
   return [first, ...rest.filter((value) => value !== first)];
+}
+
+function isAzureDefaultLinuxImage(image: string): boolean {
+  return (
+    image.trim() === DEFAULT_AZURE_LINUX_IMAGE ||
+    image.trim() === AZURE_NOBLE_LINUX_IMAGE ||
+    image.trim() === LEGACY_AZURE_JAMMY_IMAGE ||
+    image.trim() === LEGACY_AZURE_NOBLE_GEN2_IMAGE
+  );
 }
 
 async function safeBody(response: Response): Promise<string> {

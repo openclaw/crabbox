@@ -11,6 +11,7 @@ type leaseCreateFlagValues struct {
 	Provider      *string
 	Profile       *string
 	Class         *string
+	OSImage       *string
 	ServerType    *string
 	Market        *string
 	Slug          *string
@@ -30,6 +31,7 @@ func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlag
 		Provider:      fs.String("provider", defaults.Provider, providerHelpAll()),
 		Profile:       fs.String("profile", defaults.Profile, "profile"),
 		Class:         fs.String("class", defaults.Class, "machine class"),
+		OSImage:       fs.String("os", defaults.OSImage, "portable Linux OS image selector, for example ubuntu:26.04"),
 		ServerType:    fs.String("type", getenv("CRABBOX_SERVER_TYPE", ""), "provider server/instance type"),
 		Market:        fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand"),
 		Slug:          fs.String("slug", "", "request a friendly slug for a new lease"),
@@ -57,6 +59,15 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 	cfg.DesktopEnv = *values.DesktopEnv
 	if err := applyTargetFlagOverrides(cfg, fs, values.Target); err != nil {
 		return err
+	}
+	if flagWasSet(fs, "os") {
+		osImage, err := normalizeOSImage(*values.OSImage)
+		if err != nil {
+			return err
+		}
+		cfg.OSImage = osImage
+		cfg.osImageExplicit = true
+		applyOSImageProviderDefaults(cfg, false)
 	}
 	if err := applyNetworkFlagOverrides(cfg, fs, values.Network); err != nil {
 		return err

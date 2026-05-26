@@ -281,6 +281,7 @@ describe("lease config", () => {
     expect(config.serverType).toBe("c7a.48xlarge");
     expect(config.serverTypeExplicit).toBe(false);
     expect(config.awsRegion).toBe("eu-west-1");
+    expect(config.os).toBe("ubuntu:26.04");
   });
 
   it("uses Azure defaults when requested", () => {
@@ -351,6 +352,31 @@ describe("lease config", () => {
     expect(config.gcpNetwork).toBe("");
     expect(config.gcpTags).toEqual([]);
     expect(config.gcpRootGB).toBe(0);
+  });
+
+  it("maps explicit portable OS selectors", () => {
+    const config = leaseConfig({
+      provider: "aws",
+      os: "ubuntu-24.04",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(config.os).toBe("ubuntu:24.04");
+    expect(config.image).toBe("ubuntu-24.04");
+    expect(config.azureImage).toBe("Canonical:ubuntu-24_04-lts:server:latest");
+    expect(config.gcpImage).toBe(
+      "projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64",
+    );
+  });
+
+  it("does not apply portable Linux OS images to Azure Windows", () => {
+    const config = leaseConfig({
+      provider: "azure",
+      target: "windows",
+      os: "ubuntu:24.04",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(config.os).toBe("ubuntu:24.04");
+    expect(config.azureImage).toBe("");
   });
 
   it("keeps explicit GCP request fields", () => {

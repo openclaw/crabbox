@@ -47,6 +47,7 @@ func (a App) imageCreate(ctx context.Context, args []string) error {
 func (a App) imagePromote(ctx context.Context, args []string) error {
 	fs := newFlagSet("image promote", a.Stderr)
 	target := fs.String("target", "", "AWS image target: linux, macos, or windows")
+	osImage := fs.String("os", "", "portable Linux OS selector for promoted Linux AMIs")
 	region := fs.String("region", "", "AWS region containing the AMI")
 	serverType := fs.String("type", "", "AWS instance type the AMI boots on, for example mac1.metal")
 	serverTypeAlias := fs.String("server-type", "", "alias for --type")
@@ -59,10 +60,17 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox image promote <ami-id> [--target linux|macos|windows] [--region <aws-region>] [--type <instance-type>] [--architecture <arch>] [--fast-snapshot-restore --fsr-az <az>]")
+		return exit(2, "usage: crabbox image promote <ami-id> [--target linux|macos|windows] [--os ubuntu:26.04|ubuntu:24.04] [--region <aws-region>] [--type <instance-type>] [--architecture <arch>] [--fast-snapshot-restore --fsr-az <az>]")
 	}
 	if *serverType == "" {
 		*serverType = *serverTypeAlias
+	}
+	if flagWasSet(fs, "os") {
+		normalized, err := normalizeOSImage(*osImage)
+		if err != nil {
+			return err
+		}
+		*osImage = normalized
 	}
 	coord, err := configuredAdminCoordinator()
 	if err != nil {
@@ -72,6 +80,7 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 		Provider:               "aws",
 		Region:                 *region,
 		Target:                 *target,
+		OSImage:                *osImage,
 		ServerType:             *serverType,
 		Architecture:           *architecture,
 		FastSnapshotRestore:    *fastSnapshotRestore,

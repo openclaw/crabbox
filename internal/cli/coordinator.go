@@ -182,6 +182,7 @@ type CoordinatorImage struct {
 	Snapshots            []string                         `json:"snapshots,omitempty"`
 	Direct               bool                             `json:"direct,omitempty"`
 	Target               string                           `json:"target,omitempty"`
+	OSImage              string                           `json:"os,omitempty"`
 	WindowsMode          string                           `json:"windowsMode,omitempty"`
 	ServerType           string                           `json:"serverType,omitempty"`
 	Architecture         string                           `json:"architecture,omitempty"`
@@ -252,6 +253,7 @@ type CoordinatorImageRef struct {
 	Project                string
 	Kind                   string
 	Target                 string
+	OSImage                string
 	ServerType             string
 	Architecture           string
 	FastSnapshotRestore    bool
@@ -647,6 +649,9 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 	}
 	if len(capacity) > 0 {
 		req["capacity"] = capacity
+	}
+	if cfg.osImageExplicit {
+		req["os"] = cfg.OSImage
 	}
 	if cfg.AzureOSDiskExplicit {
 		req["azureOSDisk"] = cfg.AzureOSDisk
@@ -1264,6 +1269,9 @@ func imagePath(imageID, action string, refs ...CoordinatorImageRef) string {
 		}
 		if strings.TrimSpace(ref.Target) != "" {
 			values.Set("target", strings.TrimSpace(ref.Target))
+		}
+		if strings.TrimSpace(ref.OSImage) != "" {
+			values.Set("os", strings.TrimSpace(ref.OSImage))
 		}
 		if strings.TrimSpace(ref.ServerType) != "" {
 			values.Set("serverType", strings.TrimSpace(ref.ServerType))

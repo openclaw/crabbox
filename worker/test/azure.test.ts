@@ -482,7 +482,7 @@ describe("azure provider", () => {
       awsSSHCIDRs: [],
       awsMacHostID: "",
       azureLocation: "eastus",
-      azureImage: "",
+      azureImage: "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest",
       azureSnapshot: "",
       azureOSDisk: "managed",
       gcpProject: "",

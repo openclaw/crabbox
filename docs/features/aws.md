@@ -220,7 +220,8 @@ admin inspection.
 
 ## Images
 
-Linux resolves the latest Ubuntu 24.04 x86_64 AMI unless overridden. Windows
+Linux resolves the latest Ubuntu 26.04 x86_64 AMI unless overridden. Use
+`--os ubuntu:24.04` when a lease needs the previous LTS. Windows
 resolves the latest Windows Server 2022 English Full Base AMI unless overridden.
 Operators can create and promote trusted AWS images with `crabbox image`.
 

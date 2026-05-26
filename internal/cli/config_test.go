@@ -1034,6 +1034,79 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 }
 
+func TestExplicitProviderImagesSurvivePortableOSDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte(`
+os: ubuntu:24.04
+hetzner:
+  image: ubuntu-26.04
+azure:
+  image: Canonical:ubuntu-26_04-lts:server:latest
+islo:
+  image: docker.io/library/ubuntu:26.04
+localContainer:
+  image: ubuntu:26.04
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Image != "ubuntu-26.04" || cfg.AzureImage != defaultAzureLinuxImage || cfg.Islo.Image != "docker.io/library/ubuntu:26.04" || cfg.LocalContainer.Image != "ubuntu:26.04" {
+		t.Fatalf("explicit images were overwritten: hetzner=%q azure=%q islo=%q local=%q", cfg.Image, cfg.AzureImage, cfg.Islo.Image, cfg.LocalContainer.Image)
+	}
+}
+
+func TestPortableOSDefaultsRespectTargetAlias(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte(`
+target: ubuntu
+os: ubuntu:24.04
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.Image != "ubuntu-24.04" || cfg.AzureImage != "Canonical:ubuntu-24_04-lts:server:latest" {
+		t.Fatalf("portable os defaults not applied through target alias: target=%q image=%q azure=%q", cfg.TargetOS, cfg.Image, cfg.AzureImage)
+	}
+}
+
+func TestPortableOSHigherPrecedenceOverridesEarlierPortableDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	t.Setenv("CRABBOX_OS", "ubuntu:26.04")
+	if err := os.WriteFile(cfgPath, []byte(`
+os: ubuntu:24.04
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OSImage != "ubuntu:26.04" || cfg.Image != "ubuntu-24.04" || cfg.AzureImage != defaultAzureLinuxImage {
+		t.Fatalf("higher precedence os did not override provider defaults: os=%q image=%q azure=%q", cfg.OSImage, cfg.Image, cfg.AzureImage)
+	}
+}
+
 func TestWandbConfigAPIKeyBeatsGenericWANDBEnv(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

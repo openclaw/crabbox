@@ -14,105 +14,112 @@ import (
 )
 
 type Config struct {
-	Profile                  string
-	Provider                 string
-	TargetOS                 string
-	WindowsMode              string
-	Desktop                  bool
-	DesktopEnv               string
-	Browser                  bool
-	Code                     bool
-	Network                  NetworkMode
-	Class                    string
-	ServerType               string
-	ServerTypeExplicit       bool
-	Coordinator              string
-	CoordToken               string
-	CoordAdminToken          string
-	HostID                   string
-	Access                   AccessConfig
-	Location                 string
-	Image                    string
-	AWSRegion                string
-	AWSAMI                   string
-	AWSSnapshot              string
-	AWSSGID                  string
-	AWSSubnetID              string
-	AWSProfile               string
-	AWSRootGB                int32
-	AWSSSHCIDRs              []string
-	AWSMacHostID             string
-	AzureSubscription        string
-	AzureTenant              string
-	AzureClientID            string
-	AzureLocation            string
-	AzureResourceGroup       string
-	AzureImage               string
-	AzureSnapshot            string
-	AzureOSDisk              string
-	AzureOSDiskExplicit      bool
-	AzureVNet                string
-	AzureSubnet              string
-	AzureNSG                 string
-	AzureSSHCIDRs            []string
-	AzureNetwork             string
-	GCPProject               string
-	gcpProjectExplicit       bool
-	GCPZone                  string
-	gcpZoneExplicit          bool
-	GCPImage                 string
-	gcpImageExplicit         bool
-	GCPMachineImage          string
-	GCPSnapshot              string
-	GCPNetwork               string
-	gcpNetworkExplicit       bool
-	GCPSubnet                string
-	GCPTags                  []string
-	gcpTagsExplicit          bool
-	GCPSSHCIDRs              []string
-	GCPRootGB                int64
-	gcpRootGBExplicit        bool
-	GCPServiceAccount        string
-	Proxmox                  ProxmoxConfig
-	Parallels                ParallelsConfig
-	parallelsTemplateApplied bool
-	SSHUser                  string
-	SSHKey                   string
-	SSHPort                  string
-	SSHFallbackPorts         []string
-	ProviderKey              string
-	WorkRoot                 string
-	TTL                      time.Duration
-	IdleTimeout              time.Duration
-	Sync                     SyncConfig
-	Run                      RunConfig
-	EnvAllow                 []string
-	Capacity                 CapacityConfig
-	Actions                  ActionsConfig
-	Blacksmith               BlacksmithConfig
-	Namespace                NamespaceConfig
-	Daytona                  DaytonaConfig
-	E2B                      E2BConfig
-	ExeDev                   ExeDevConfig
-	Railway                  RailwayConfig
-	Runpod                   RunpodConfig
-	Wandb                    WandbConfig
-	Islo                     IsloConfig
-	Tensorlake               TensorlakeConfig
-	Modal                    ModalConfig
-	UpstashBox               UpstashBoxConfig
-	Cloudflare               CloudflareConfig
-	Semaphore                SemaphoreConfig
-	Sprites                  SpritesConfig
-	LocalContainer           LocalContainerConfig
-	Tailscale                TailscaleConfig
-	Static                   StaticConfig
-	Results                  ResultsConfig
-	Cache                    CacheConfig
-	Profiles                 map[string]ProfileConfig
-	Presets                  map[string]PresetConfig
-	ProofTemplates           map[string]ProofTemplateConfig
-	Jobs                     map[string]JobConfig
+	Profile                     string
+	Provider                    string
+	TargetOS                    string
+	OSImage                     string
+	osImageExplicit             bool
+	osImageProviderDefaults     string
+	WindowsMode                 string
+	Desktop                     bool
+	DesktopEnv                  string
+	Browser                     bool
+	Code                        bool
+	Network                     NetworkMode
+	Class                       string
+	ServerType                  string
+	ServerTypeExplicit          bool
+	Coordinator                 string
+	CoordToken                  string
+	CoordAdminToken             string
+	HostID                      string
+	Access                      AccessConfig
+	Location                    string
+	Image                       string
+	imageExplicit               bool
+	AWSRegion                   string
+	AWSAMI                      string
+	AWSSnapshot                 string
+	AWSSGID                     string
+	AWSSubnetID                 string
+	AWSProfile                  string
+	AWSRootGB                   int32
+	AWSSSHCIDRs                 []string
+	AWSMacHostID                string
+	AzureSubscription           string
+	AzureTenant                 string
+	AzureClientID               string
+	AzureLocation               string
+	AzureResourceGroup          string
+	AzureImage                  string
+	azureImageExplicit          bool
+	AzureSnapshot               string
+	AzureOSDisk                 string
+	AzureOSDiskExplicit         bool
+	AzureVNet                   string
+	AzureSubnet                 string
+	AzureNSG                    string
+	AzureSSHCIDRs               []string
+	AzureNetwork                string
+	GCPProject                  string
+	gcpProjectExplicit          bool
+	GCPZone                     string
+	gcpZoneExplicit             bool
+	GCPImage                    string
+	gcpImageExplicit            bool
+	GCPMachineImage             string
+	GCPSnapshot                 string
+	GCPNetwork                  string
+	gcpNetworkExplicit          bool
+	GCPSubnet                   string
+	GCPTags                     []string
+	gcpTagsExplicit             bool
+	GCPSSHCIDRs                 []string
+	GCPRootGB                   int64
+	gcpRootGBExplicit           bool
+	GCPServiceAccount           string
+	Proxmox                     ProxmoxConfig
+	Parallels                   ParallelsConfig
+	parallelsTemplateApplied    bool
+	SSHUser                     string
+	SSHKey                      string
+	SSHPort                     string
+	SSHFallbackPorts            []string
+	ProviderKey                 string
+	WorkRoot                    string
+	TTL                         time.Duration
+	IdleTimeout                 time.Duration
+	Sync                        SyncConfig
+	Run                         RunConfig
+	EnvAllow                    []string
+	Capacity                    CapacityConfig
+	Actions                     ActionsConfig
+	Blacksmith                  BlacksmithConfig
+	Namespace                   NamespaceConfig
+	Daytona                     DaytonaConfig
+	E2B                         E2BConfig
+	ExeDev                      ExeDevConfig
+	Railway                     RailwayConfig
+	Runpod                      RunpodConfig
+	Wandb                       WandbConfig
+	Islo                        IsloConfig
+	isloImageExplicit           bool
+	Tensorlake                  TensorlakeConfig
+	Modal                       ModalConfig
+	UpstashBox                  UpstashBoxConfig
+	Cloudflare                  CloudflareConfig
+	Semaphore                   SemaphoreConfig
+	Sprites                     SpritesConfig
+	LocalContainer              LocalContainerConfig
+	localContainerImageExplicit bool
+	Tailscale                   TailscaleConfig
+	Static                      StaticConfig
+	Results                     ResultsConfig
+	Cache                       CacheConfig
+	Profiles                    map[string]ProfileConfig
+	Presets                     map[string]PresetConfig
+	ProofTemplates              map[string]ProofTemplateConfig
+	Jobs                        map[string]JobConfig
 }
 
 type SyncConfig struct {
@@ -520,6 +527,12 @@ func canonicalizeConfigProvider(cfg *Config) {
 }
 
 func applyProviderConfigDefaults(cfg *Config) error {
+	if normalized, err := normalizeOSImage(cfg.OSImage); err != nil {
+		return err
+	} else {
+		cfg.OSImage = normalized
+	}
+	applyOSImageProviderDefaults(cfg, false)
 	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
 		if cfg.ExeDev.User != "" {
 			cfg.SSHUser = cfg.ExeDev.User
@@ -571,6 +584,42 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	return nil
 }
 
+func applyOSImageProviderDefaults(cfg *Config, force bool) {
+	if normalizeTargetOS(cfg.TargetOS) != targetLinux {
+		return
+	}
+	hetznerImage, azureImage, gcpImage, isloImage, containerImage, err := osImageDefaultProviderImages(cfg.OSImage)
+	if err != nil {
+		return
+	}
+	base := baseConfig()
+	wasOSDefault := cfg.osImageProviderDefaults != ""
+	if force || cfg.Image == "" || (!cfg.imageExplicit && (cfg.Image == base.Image || wasOSDefault)) {
+		cfg.Image = hetznerImage
+	}
+	if force || cfg.AzureImage == "" || (!cfg.azureImageExplicit && (cfg.AzureImage == base.AzureImage || wasOSDefault)) {
+		cfg.AzureImage = azureImage
+	}
+	if force || cfg.GCPImage == "" || (!cfg.gcpImageExplicit && (cfg.GCPImage == base.GCPImage || wasOSDefault)) {
+		cfg.GCPImage = gcpImage
+	}
+	if force || cfg.Islo.Image == "" || (!cfg.isloImageExplicit && (cfg.Islo.Image == base.Islo.Image || wasOSDefault)) {
+		cfg.Islo.Image = isloImage
+	}
+	if force || cfg.LocalContainer.Image == "" || (!cfg.localContainerImageExplicit && (cfg.LocalContainer.Image == base.LocalContainer.Image || wasOSDefault)) {
+		cfg.LocalContainer.Image = containerImage
+	}
+	cfg.osImageProviderDefaults = cfg.OSImage
+}
+
+func MarkIsloImageExplicit(cfg *Config) {
+	cfg.isloImageExplicit = true
+}
+
+func MarkLocalContainerImageExplicit(cfg *Config) {
+	cfg.localContainerImageExplicit = true
+}
+
 func baseConfig() Config {
 	home, _ := os.UserHomeDir()
 	sshKey := ""
@@ -580,28 +629,31 @@ func baseConfig() Config {
 
 	class := "beast"
 	provider := "hetzner"
+	osImage := defaultOSImage
+	hetznerImage, azureImage, gcpImage, isloImage, containerImage, _ := osImageDefaultProviderImages(osImage)
 	return Config{
 		Profile:            "default",
 		Provider:           provider,
 		TargetOS:           "linux",
+		OSImage:            osImage,
 		WindowsMode:        "normal",
 		DesktopEnv:         desktopEnvXFCE,
 		Network:            NetworkAuto,
 		Class:              class,
 		ServerType:         "",
 		Location:           "fsn1",
-		Image:              "ubuntu-24.04",
+		Image:              hetznerImage,
 		AWSRegion:          "eu-west-1",
 		AWSRootGB:          400,
 		AzureLocation:      "eastus",
 		AzureResourceGroup: "crabbox-leases",
-		AzureImage:         defaultAzureLinuxImage,
+		AzureImage:         azureImage,
 		AzureOSDisk:        AzureOSDiskManaged,
 		AzureVNet:          "crabbox-vnet",
 		AzureSubnet:        "crabbox-subnet",
 		AzureNSG:           "crabbox-nsg",
 		GCPZone:            "europe-west2-a",
-		GCPImage:           defaultGCPLinuxImage,
+		GCPImage:           gcpImage,
 		GCPNetwork:         "default",
 		GCPTags:            []string{"crabbox-ssh"},
 		GCPRootGB:          400,
@@ -672,7 +724,7 @@ func baseConfig() Config {
 		},
 		Islo: IsloConfig{
 			BaseURL:  "https://api.islo.dev",
-			Image:    "docker.io/library/ubuntu:24.04",
+			Image:    isloImage,
 			Workdir:  "crabbox",
 			VCPUs:    2,
 			MemoryMB: 4096,
@@ -717,7 +769,7 @@ func baseConfig() Config {
 		},
 		LocalContainer: LocalContainerConfig{
 			Runtime: "docker",
-			Image:   "debian:bookworm",
+			Image:   containerImage,
 			User:    "crabbox",
 			Network: "bridge",
 		},
@@ -741,6 +793,7 @@ type fileConfig struct {
 	Provider         string                             `yaml:"provider,omitempty"`
 	Target           string                             `yaml:"target,omitempty"`
 	TargetOS         string                             `yaml:"targetOS,omitempty"`
+	OSImage          string                             `yaml:"os,omitempty"`
 	Windows          *fileWindowsConfig                 `yaml:"windows,omitempty"`
 	Desktop          *bool                              `yaml:"desktop,omitempty"`
 	DesktopEnv       string                             `yaml:"desktopEnv,omitempty"`
@@ -1423,6 +1476,14 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 	if file.TargetOS != "" {
 		cfg.TargetOS = file.TargetOS
 	}
+	if file.OSImage != "" {
+		cfg.OSImage = file.OSImage
+		cfg.osImageExplicit = true
+		if normalized, err := normalizeOSImage(file.OSImage); err == nil {
+			cfg.OSImage = normalized
+			applyOSImageProviderDefaults(cfg, false)
+		}
+	}
 	if file.Windows != nil && file.Windows.Mode != "" {
 		cfg.WindowsMode = file.Windows.Mode
 	}
@@ -1487,6 +1548,7 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		}
 		if file.Hetzner.Image != "" {
 			cfg.Image = file.Hetzner.Image
+			cfg.imageExplicit = true
 		}
 		if file.Hetzner.SSHKey != "" {
 			cfg.ProviderKey = file.Hetzner.SSHKey
@@ -1539,6 +1601,7 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		}
 		if file.Azure.Image != "" {
 			cfg.AzureImage = file.Azure.Image
+			cfg.azureImageExplicit = true
 		}
 		if file.Azure.OSDisk != "" {
 			cfg.AzureOSDisk = file.Azure.OSDisk
@@ -1969,6 +2032,7 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		}
 		if file.Islo.Image != "" {
 			cfg.Islo.Image = file.Islo.Image
+			cfg.isloImageExplicit = true
 		}
 		if file.Islo.Workdir != "" {
 			cfg.Islo.Workdir = file.Islo.Workdir
@@ -2096,6 +2160,7 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		}
 		if file.LocalContainer.Image != "" {
 			cfg.LocalContainer.Image = file.LocalContainer.Image
+			cfg.localContainerImageExplicit = true
 		}
 		if file.LocalContainer.User != "" {
 			cfg.LocalContainer.User = file.LocalContainer.User
@@ -2477,6 +2542,14 @@ func applyEnv(cfg *Config) {
 	cfg.Profile = getenv("CRABBOX_PROFILE", cfg.Profile)
 	cfg.Provider = getenv("CRABBOX_PROVIDER", cfg.Provider)
 	cfg.TargetOS = getenv("CRABBOX_TARGET", getenv("CRABBOX_TARGET_OS", cfg.TargetOS))
+	if osImage := os.Getenv("CRABBOX_OS"); osImage != "" {
+		cfg.OSImage = osImage
+		cfg.osImageExplicit = true
+		if normalized, err := normalizeOSImage(osImage); err == nil {
+			cfg.OSImage = normalized
+			applyOSImageProviderDefaults(cfg, false)
+		}
+	}
 	cfg.WindowsMode = getenv("CRABBOX_WINDOWS_MODE", cfg.WindowsMode)
 	if value, ok := getenvBool("CRABBOX_DESKTOP"); ok {
 		cfg.Desktop = value
@@ -2504,7 +2577,10 @@ func applyEnv(cfg *Config) {
 	cfg.Access.ClientSecret = getenv("CRABBOX_ACCESS_CLIENT_SECRET", getenv("CF_ACCESS_CLIENT_SECRET", cfg.Access.ClientSecret))
 	cfg.Access.Token = getenv("CRABBOX_ACCESS_TOKEN", getenv("CF_ACCESS_TOKEN", cfg.Access.Token))
 	cfg.Location = getenv("CRABBOX_HETZNER_LOCATION", cfg.Location)
-	cfg.Image = getenv("CRABBOX_HETZNER_IMAGE", cfg.Image)
+	if image := os.Getenv("CRABBOX_HETZNER_IMAGE"); image != "" {
+		cfg.Image = image
+		cfg.imageExplicit = true
+	}
 	cfg.AWSRegion = getenv("CRABBOX_AWS_REGION", getenv("AWS_REGION", cfg.AWSRegion))
 	cfg.AWSAMI = getenv("CRABBOX_AWS_AMI", cfg.AWSAMI)
 	cfg.AWSSGID = getenv("CRABBOX_AWS_SECURITY_GROUP_ID", cfg.AWSSGID)
@@ -2526,7 +2602,10 @@ func applyEnv(cfg *Config) {
 	cfg.AzureClientID = getenv("CRABBOX_AZURE_CLIENT_ID", getenv("AZURE_CLIENT_ID", cfg.AzureClientID))
 	cfg.AzureLocation = getenv("CRABBOX_AZURE_LOCATION", cfg.AzureLocation)
 	cfg.AzureResourceGroup = getenv("CRABBOX_AZURE_RESOURCE_GROUP", cfg.AzureResourceGroup)
-	cfg.AzureImage = getenv("CRABBOX_AZURE_IMAGE", cfg.AzureImage)
+	if image := os.Getenv("CRABBOX_AZURE_IMAGE"); image != "" {
+		cfg.AzureImage = image
+		cfg.azureImageExplicit = true
+	}
 	if value := os.Getenv("CRABBOX_AZURE_OS_DISK"); value != "" {
 		cfg.AzureOSDisk = value
 		cfg.AzureOSDiskExplicit = true
@@ -2694,7 +2773,10 @@ func applyEnv(cfg *Config) {
 	cfg.Wandb.MaxLifetimeSeconds = getenvInt("CRABBOX_WANDB_MAX_LIFETIME_SECONDS", getenvInt("WANDB_MAX_LIFETIME_SECONDS", cfg.Wandb.MaxLifetimeSeconds))
 	cfg.Islo.APIKey = getenv("CRABBOX_ISLO_API_KEY", getenv("ISLO_API_KEY", cfg.Islo.APIKey))
 	cfg.Islo.BaseURL = getenv("CRABBOX_ISLO_BASE_URL", getenv("ISLO_BASE_URL", cfg.Islo.BaseURL))
-	cfg.Islo.Image = getenv("CRABBOX_ISLO_IMAGE", cfg.Islo.Image)
+	if image := os.Getenv("CRABBOX_ISLO_IMAGE"); image != "" {
+		cfg.Islo.Image = image
+		cfg.isloImageExplicit = true
+	}
 	cfg.Islo.Workdir = getenv("CRABBOX_ISLO_WORKDIR", cfg.Islo.Workdir)
 	cfg.Islo.GatewayProfile = getenv("CRABBOX_ISLO_GATEWAY_PROFILE", cfg.Islo.GatewayProfile)
 	cfg.Islo.SnapshotName = getenv("CRABBOX_ISLO_SNAPSHOT_NAME", cfg.Islo.SnapshotName)
@@ -2742,7 +2824,10 @@ func applyEnv(cfg *Config) {
 	cfg.Sprites.APIURL = getenv("CRABBOX_SPRITES_API_URL", getenv("SPRITES_API_URL", cfg.Sprites.APIURL))
 	cfg.Sprites.WorkRoot = getenv("CRABBOX_SPRITES_WORK_ROOT", cfg.Sprites.WorkRoot)
 	cfg.LocalContainer.Runtime = getenv("CRABBOX_LOCAL_CONTAINER_RUNTIME", cfg.LocalContainer.Runtime)
-	cfg.LocalContainer.Image = getenv("CRABBOX_LOCAL_CONTAINER_IMAGE", cfg.LocalContainer.Image)
+	if image := os.Getenv("CRABBOX_LOCAL_CONTAINER_IMAGE"); image != "" {
+		cfg.LocalContainer.Image = image
+		cfg.localContainerImageExplicit = true
+	}
 	cfg.LocalContainer.User = getenv("CRABBOX_LOCAL_CONTAINER_USER", cfg.LocalContainer.User)
 	cfg.LocalContainer.WorkRoot = getenv("CRABBOX_LOCAL_CONTAINER_WORK_ROOT", cfg.LocalContainer.WorkRoot)
 	cfg.LocalContainer.CPUs = getenvInt("CRABBOX_LOCAL_CONTAINER_CPUS", cfg.LocalContainer.CPUs)

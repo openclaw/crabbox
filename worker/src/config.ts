@@ -1,3 +1,4 @@
+import { normalizeOSImage, osImageSpec } from "./os-image";
 import type { LeaseRequest, Provider, TargetOS, WindowsMode } from "./types";
 
 export const awsMacOSInstanceTypeCandidates = [
@@ -15,6 +16,7 @@ export const awsMacOSInstanceTypeCandidates = [
 export interface LeaseConfig {
   provider: Provider;
   target: TargetOS;
+  os: string;
   windowsMode: WindowsMode;
   desktop: boolean;
   desktopEnv: "xfce" | "wayland";
@@ -91,6 +93,9 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     throw new Error(`unsupported provider: ${String(provider)}`);
   }
   const target = normalizeTarget(input.target ?? input.targetOS ?? "linux");
+  const os = normalizeOSImage(input.os);
+  const osExplicit = Boolean(input.os?.trim());
+  const linuxOSImage = target === "linux" ? osImageSpec(os) : undefined;
   const windowsMode = normalizeWindowsMode(input.windowsMode ?? "normal");
   if (
     target !== "linux" &&
@@ -147,6 +152,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
   return {
     provider,
     target,
+    os,
     windowsMode,
     desktop: input.desktop ?? false,
     desktopEnv,
@@ -164,7 +170,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     serverTypeExplicit: input.serverTypeExplicit ?? false,
     hostID: input.hostId ?? input.hostID ?? "",
     location: input.location ?? "fsn1",
-    image: input.image ?? "ubuntu-24.04",
+    image: input.image ?? linuxOSImage?.hetznerImage ?? "ubuntu-24.04",
     awsRegion: input.awsRegion ?? "eu-west-1",
     awsAMI: input.awsAMI ?? "",
     awsPromotedAMIs: {},
@@ -176,12 +182,12 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     awsSSHCIDRs: validCIDRs(input.awsSSHCIDRs ?? []),
     awsMacHostID: input.awsMacHostID ?? "",
     azureLocation: input.azureLocation ?? "",
-    azureImage: input.azureImage ?? "",
+    azureImage: input.azureImage ?? (osExplicit ? (linuxOSImage?.azureImage ?? "") : ""),
     azureSnapshot: input.azureSnapshot ?? "",
     azureOSDisk: normalizeAzureOSDiskMode(input.azureOSDisk ?? defaults.azureOSDisk),
     gcpProject: input.gcpProject ?? "",
     gcpZone: input.gcpZone ?? "",
-    gcpImage: input.gcpImage ?? "",
+    gcpImage: input.gcpImage ?? (osExplicit ? (linuxOSImage?.gcpImage ?? "") : ""),
     gcpMachineImage: input.gcpMachineImage ?? "",
     gcpSnapshot: input.gcpSnapshot ?? "",
     gcpNetwork: input.gcpNetwork ?? "",

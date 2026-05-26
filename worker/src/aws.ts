@@ -9,6 +9,7 @@ import {
   validCIDRs,
   type LeaseConfig,
 } from "./config";
+import { osImageSpec } from "./os-image";
 import { leaseProviderLabels } from "./provider-labels";
 import { leaseProviderName } from "./slug";
 import type {
@@ -1106,11 +1107,12 @@ export class EC2SpotClient {
       const query = awsMacOSAMIQuery(config.serverType);
       return this.resolveLatestAmazonAMI(query.name, query.architecture);
     }
+    const os = osImageSpec(config.os);
     return this.resolveLatestAMI(
       awsUbuntuOwner,
-      "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*",
+      os.awsName,
       "x86_64",
-      `no Ubuntu 24.04 x86_64 AMI found in ${this.region}`,
+      `no ${os.awsLabel} x86_64 AMI found in ${this.region}`,
     );
   }
 

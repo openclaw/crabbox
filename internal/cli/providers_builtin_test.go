@@ -612,6 +612,7 @@ func (testIsloProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	}
 	if flagWasSet(fs, "islo-image") {
 		cfg.Islo.Image = *v.Image
+		cfg.isloImageExplicit = true
 	}
 	if flagWasSet(fs, "islo-vcpus") {
 		cfg.Islo.VCPUs = *v.VCPUs
@@ -864,6 +865,7 @@ func (testLocalContainerProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, valu
 	}
 	if flagWasSet(fs, "local-container-image") {
 		cfg.LocalContainer.Image = *v.Image
+		cfg.localContainerImageExplicit = true
 	}
 	if flagWasSet(fs, "local-container-user") {
 		cfg.LocalContainer.User = *v.User

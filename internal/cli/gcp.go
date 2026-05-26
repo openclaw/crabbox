@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	defaultGCPLinuxImage  = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64"
+	defaultGCPLinuxImage  = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-lts-amd64"
 	gcpFirewallName       = "crabbox-ssh"
 	gcpCloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
 )

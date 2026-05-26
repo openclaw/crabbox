@@ -78,7 +78,12 @@ Warm a reusable box:
 ```sh
 crabbox warmup --idle-timeout 90m
 crabbox warmup --provider aws --class beast --market on-demand --idle-timeout 90m
+crabbox warmup --provider aws --os ubuntu:26.04 --desktop --browser --desktop-env wayland
 ```
+
+`ubuntu:26.04` is the preferred portable Linux OS selector where the provider
+catalog supports it. Use `--os ubuntu:24.04` only when a test must stay on the
+previous LTS. Explicit provider image flags still win over `--os`.
 
 Repos with `actions.workflow` hydrate automatically during `crabbox run`. Use
 manual hydration when you want to prepare a reused lease before running commands:
@@ -208,6 +213,7 @@ the problem persists.
 ```sh
 crabbox status --id <id-or-slug> --wait
 crabbox inspect --id <id-or-slug> --json
+crabbox warmup --provider aws --os ubuntu:26.04 --desktop --browser --desktop-env wayland
 crabbox webvnc --id <id-or-slug> --open
 crabbox webvnc daemon start --id <id-or-slug> --open
 crabbox webvnc daemon status --id <id-or-slug>

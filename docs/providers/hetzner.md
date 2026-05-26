@@ -50,6 +50,13 @@ CRABBOX_HETZNER_SSH_KEY
 
 Brokered Hetzner credentials belong in the Worker.
 
+## OS Selector
+
+Crabbox accepts the portable Linux selector `--os ubuntu:26.04`, but Hetzner's
+current public image catalog does not expose an Ubuntu 26.04 image slug. Until
+that exists, `ubuntu:26.04` leases on Hetzner provision `ubuntu-24.04`. Use AWS,
+GCP, Azure, or a container provider when proof must actually run on Ubuntu 26.04.
+
 ## Lifecycle
 
 1. Import or reuse the lease SSH key.

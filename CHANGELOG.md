@@ -2,6 +2,10 @@
 
 ## 0.20.1 - Unreleased
 
+### Added
+
+- Added a portable `--os`/`os` lease selector with Ubuntu 26.04 as the preferred Linux image where provider catalogs support it, while preserving explicit provider image overrides.
+
 ## 0.20.0 - 2026-05-26
 
 ### Added

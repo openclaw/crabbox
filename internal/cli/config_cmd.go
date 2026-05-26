@@ -32,6 +32,7 @@ func configShowView(cfg Config) map[string]any {
 		"profile":            cfg.Profile,
 		"provider":           cfg.Provider,
 		"target":             cfg.TargetOS,
+		"os":                 cfg.OSImage,
 		"windowsMode":        cfg.WindowsMode,
 		"class":              cfg.Class,
 		"serverType":         cfg.ServerType,
@@ -209,7 +210,7 @@ func configShowView(cfg Config) map[string]any {
 
 func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "config=%s\n", userConfigPath())
-	fmt.Fprintf(w, "provider=%s target=%s windows_mode=%s class=%s type=%s profile=%s\n", cfg.Provider, cfg.TargetOS, cfg.WindowsMode, cfg.Class, cfg.ServerType, cfg.Profile)
+	fmt.Fprintf(w, "provider=%s target=%s os=%s windows_mode=%s class=%s type=%s profile=%s\n", cfg.Provider, cfg.TargetOS, cfg.OSImage, cfg.WindowsMode, cfg.Class, cfg.ServerType, cfg.Profile)
 	fmt.Fprintf(w, "broker=%s auth=%s admin_auth=%s\n", blank(cfg.Coordinator, "-"), tokenState(cfg.CoordToken), tokenState(cfg.CoordAdminToken))
 	fmt.Fprintf(w, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(w, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)

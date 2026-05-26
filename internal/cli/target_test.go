@@ -162,3 +162,19 @@ func TestLeaseCreateFlagsRejectExeDevNonLinuxTarget(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestLeaseCreateFlagsDoNotApplyPortableOSImageToAzureWindows(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "azure", "--target", "windows", "--os", "ubuntu:24.04"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if got := azureImageForConfig(cfg); got != defaultAzureWindowsImage {
+		t.Fatalf("azure image=%q want %q", got, defaultAzureWindowsImage)
+	}
+}

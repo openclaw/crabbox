@@ -93,6 +93,7 @@ export interface LeaseRequest {
   provider?: Provider;
   target?: TargetOS;
   targetOS?: TargetOS;
+  os?: string;
   windowsMode?: WindowsMode;
   desktop?: boolean;
   desktopEnv?: string;
@@ -184,6 +185,7 @@ export interface LeaseRecord {
   slug?: string;
   provider: Provider;
   target: TargetOS;
+  os?: string;
   windowsMode?: WindowsMode;
   desktop?: boolean;
   desktopEnv?: string;
@@ -287,6 +289,7 @@ export interface ProviderImage {
   kind?: string;
   region?: string;
   target?: TargetOS;
+  os?: string;
   windowsMode?: WindowsMode;
   serverType?: string;
   architecture?: string;

@@ -6,7 +6,7 @@ import type { Env, ProviderImage, ProviderMachine, ProvisioningAttempt } from ".
 
 const computeBaseURL = "https://compute.googleapis.com/compute/v1";
 const tokenURL = "https://oauth2.googleapis.com/token";
-const defaultImage = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64";
+const defaultImage = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-lts-amd64";
 const firewallName = "crabbox-ssh";
 
 interface TokenCache {

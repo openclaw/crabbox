@@ -41,6 +41,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "local-container-image") {
 		cfg.LocalContainer.Image = *v.Image
+		core.MarkLocalContainerImageExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "local-container-user") {
 		cfg.LocalContainer.User = *v.User

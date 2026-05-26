@@ -20,6 +20,7 @@ import { GCPClient } from "./gcp";
 import { HetznerClient } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth";
+import { defaultOSImage, normalizeOSImage } from "./os-image";
 import {
   portalCode,
   portalError,
@@ -1014,6 +1015,7 @@ export class FleetDurableObject implements DurableObject {
       slug,
       provider: config.provider,
       target: config.target,
+      os: config.os,
       desktop: config.desktop,
       desktopEnv: config.desktopEnv,
       browser: config.browser,
@@ -4488,18 +4490,28 @@ function legacyPromotedAWSImageKey(): string {
   return promotedAWSImagePrefix();
 }
 
+function promotedAWSLinuxOSImageKey(image: Pick<ProviderImage, "architecture" | "os">): string {
+  const architecture = image.architecture ?? awsImageArchitectureForTarget("linux", "");
+  return `image:aws:promoted:linux:${architecture}:${sanitizePromotedAWSImageKeyPart(image.os ?? "")}`;
+}
+
 function promotedAWSImagePrefix(): string {
   return "image:aws:promoted";
 }
 
 function promotedAWSImageKey(
-  image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType">,
+  image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType"> & {
+    os?: string;
+  },
 ): string {
   const target = image.target ?? "linux";
   const architecture = image.architecture ?? awsImageArchitectureForTarget(target, "");
   const region = sanitizeAWSRegion(image.region ?? "");
   if (target === "macos") {
     return `image:aws:promoted:${target}:${architecture}:${sanitizePromotedAWSImageKeyPart(image.serverType ?? "")}:${region}`;
+  }
+  if (target === "linux" && image.os) {
+    return `image:aws:promoted:${target}:${architecture}:${sanitizePromotedAWSImageKeyPart(image.os)}:${region}`;
   }
   return `image:aws:promoted:${target}:${architecture}:${region}`;
 }
@@ -4527,6 +4539,9 @@ function enrichAWSImage(image: ProviderImage, lease: LeaseRecord): ProviderImage
   }
   if (lease.windowsMode) {
     metadata.windowsMode = lease.windowsMode;
+  }
+  if (lease.os) {
+    metadata.os = lease.os;
   }
   if (lease.serverType) {
     metadata.serverType = lease.serverType;
@@ -7079,6 +7094,7 @@ class AWSProvider implements CloudProvider {
   ): Promise<Response | { image: ProviderImage }> {
     const input: {
       target?: string;
+      os?: string;
       region?: string;
       serverType?: string;
       architecture?: string;
@@ -7086,6 +7102,7 @@ class AWSProvider implements CloudProvider {
       fastSnapshotRestoreAvailabilityZones?: string[];
     } = await readJson<{
       target?: string;
+      os?: string;
       region?: string;
       serverType?: string;
       architecture?: string;
@@ -7100,6 +7117,16 @@ class AWSProvider implements CloudProvider {
         { error: "invalid_target", message: "target must be linux, macos, or windows" },
         { status: 400 },
       );
+    }
+    let imageOS: string | undefined;
+    if (target === "linux") {
+      const requestedOS = input.os ?? url.searchParams.get("os");
+      const fallbackOS = known ? (known.os ?? "ubuntu:24.04") : defaultOSImage;
+      try {
+        imageOS = normalizeOSImage(requestedOS ?? fallbackOS);
+      } catch (error) {
+        return json({ error: "invalid_os", message: errorMessage(error) }, { status: 400 });
+      }
     }
     const rawRegion = input.region ?? url.searchParams.get("region") ?? known?.region ?? "";
     const imageRegion = sanitizeAWSRegion(rawRegion);
@@ -7176,13 +7203,17 @@ class AWSProvider implements CloudProvider {
       ...image,
       ...(fastSnapshotRestores ? { fastSnapshotRestores } : {}),
       target,
+      ...(imageOS ? { os: imageOS } : {}),
       region: image.region ?? imageRegion,
       architecture:
         image.architecture ?? awsImageArchitectureForTarget(target, image.serverType ?? ""),
       promotedAt: new Date().toISOString(),
     };
     await this.storage.put(promotedAWSImageKey(promoted), promoted);
-    if (target === "linux") {
+    if (target === "linux" && promoted.os) {
+      await this.storage.put(promotedAWSLinuxOSImageKey(promoted), promoted);
+    }
+    if (target === "linux" && (!promoted.os || promoted.os === "ubuntu:24.04")) {
       await this.storage.put(legacyPromotedAWSImageKey(), promoted);
     }
     return { image: promoted };
@@ -7203,12 +7234,14 @@ class AWSProvider implements CloudProvider {
 
   private async promotedImage(config: {
     target: TargetOS;
+    os?: string;
     serverType: string;
     awsRegion: string;
   }): Promise<PromotedImageRecord | undefined> {
     const scoped = await this.storage.get<PromotedImageRecord>(
       promotedAWSImageKey({
         target: config.target,
+        ...(config.os ? { os: config.os } : {}),
         architecture: awsImageArchitectureForTarget(config.target, config.serverType),
         serverType: config.serverType,
         region: config.awsRegion,
@@ -7229,7 +7262,21 @@ class AWSProvider implements CloudProvider {
     if (config.target !== "linux") {
       return scoped;
     }
-    return this.storage.get<PromotedImageRecord>(legacyPromotedAWSImageKey());
+    if (config.os) {
+      const osScoped = await this.storage.get<PromotedImageRecord>(
+        promotedAWSLinuxOSImageKey({
+          os: config.os,
+          architecture: awsImageArchitectureForTarget(config.target, config.serverType),
+        }),
+      );
+      if (osScoped) {
+        return osScoped;
+      }
+    }
+    if (!config.os || config.os === "ubuntu:24.04") {
+      return this.storage.get<PromotedImageRecord>(legacyPromotedAWSImageKey());
+    }
+    return undefined;
   }
 
   private async promotedImagesForFallback(config: LeaseConfig): Promise<Record<string, string>> {
@@ -7239,6 +7286,7 @@ class AWSProvider implements CloudProvider {
         // oxlint-disable-next-line eslint/no-await-in-loop -- storage reads preserve deterministic fallback key construction.
         const promoted = await this.promotedImage({
           target: config.target,
+          os: config.os,
           serverType,
           awsRegion: region,
         });

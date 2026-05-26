@@ -78,6 +78,7 @@ func ApplyIsloProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "islo-image") {
 		cfg.Islo.Image = *v.Image
+		core.MarkIsloImageExplicit(cfg)
 	}
 	if flagWasSet(fs, "islo-workdir") {
 		cfg.Islo.Workdir = *v.Workdir

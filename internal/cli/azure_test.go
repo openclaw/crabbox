@@ -25,6 +25,16 @@ func TestParseAzureImageRef(t *testing.T) {
 			want:  azureImageRef{Publisher: "Canonical", Offer: "0001-com-ubuntu-server-jammy", SKU: "22_04-lts-gen2", Version: "latest"},
 		},
 		{
+			name:  "ubuntu resolute server",
+			input: "Canonical:ubuntu-26_04-lts:server:latest",
+			want:  azureImageRef{Publisher: "Canonical", Offer: "ubuntu-26_04-lts", SKU: "server", Version: "latest"},
+		},
+		{
+			name:  "ubuntu noble server",
+			input: "Canonical:ubuntu-24_04-lts:server:latest",
+			want:  azureImageRef{Publisher: "Canonical", Offer: "ubuntu-24_04-lts", SKU: "server", Version: "latest"},
+		},
+		{
 			name:    "missing version",
 			input:   "Canonical:offer:sku",
 			wantErr: true,
@@ -71,6 +81,21 @@ func TestAzureImageForConfig(t *testing.T) {
 	windows.AzureImage = "Contoso:offer:sku:latest"
 	if got := azureImageForConfig(windows); got != windows.AzureImage {
 		t.Fatalf("windows explicit image=%q want %q", got, windows.AzureImage)
+	}
+	windows.AzureImage = legacyAzureJammyImage
+	if got := azureImageForConfig(windows); got != defaultAzureWindowsImage {
+		t.Fatalf("windows legacy linux default=%q want %q", got, defaultAzureWindowsImage)
+	}
+	windows.AzureImage = azureNobleLinuxImage
+	if got := azureImageForConfig(windows); got != defaultAzureWindowsImage {
+		t.Fatalf("windows portable noble linux default=%q want %q", got, defaultAzureWindowsImage)
+	}
+	windows = baseConfig()
+	windows.TargetOS = targetWindows
+	windows.OSImage = "ubuntu:24.04"
+	applyOSImageProviderDefaults(&windows, false)
+	if got := azureImageForConfig(windows); got != defaultAzureWindowsImage {
+		t.Fatalf("windows image after portable os=%q want %q", got, defaultAzureWindowsImage)
 	}
 }
 

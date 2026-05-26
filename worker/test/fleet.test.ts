@@ -4183,6 +4183,7 @@ describe("fleet lease identity and idle", () => {
         provider: "aws",
         cloudID: "i-123",
         region: "eu-west-1",
+        os: "ubuntu:26.04",
       }),
     );
 
@@ -4212,12 +4213,15 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(promoted.status).toBe(200);
-    expect(storage.value("image:aws:promoted:linux:x86_64:eu-west-1")).toEqual(
-      expect.objectContaining({ id: "ami-000000000001", state: "available", target: "linux" }),
+    expect(storage.value("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1")).toEqual(
+      expect.objectContaining({
+        id: "ami-000000000001",
+        state: "available",
+        target: "linux",
+        os: "ubuntu:26.04",
+      }),
     );
-    expect(storage.value("image:aws:promoted")).toEqual(
-      expect.objectContaining({ id: "ami-000000000001", state: "available", target: "linux" }),
-    );
+    expect(storage.value("image:aws:promoted")).toBeUndefined();
   });
 
   it("scopes promoted AWS macOS images by target, architecture, and server type", async () => {
@@ -4481,6 +4485,56 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("scopes external Linux AWS promotions to the default portable OS", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(),
+    });
+
+    const promoted = await fleet.fetch(
+      request("POST", "/v1/images/ami-linux/promote?target=linux&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+
+    expect(promoted.status).toBe(200);
+    expect(storage.value("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1")).toEqual(
+      expect.objectContaining({ id: "ami-linux", os: "ubuntu:26.04" }),
+    );
+    expect(storage.value("image:aws:promoted")).toBeUndefined();
+  });
+
+  it("treats legacy created Linux AWS images without OS metadata as Ubuntu 24.04", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:created:ami-legacy", {
+      id: "ami-legacy",
+      name: "crabbox-legacy",
+      state: "available",
+      provider: "aws",
+      target: "linux",
+      region: "eu-west-1",
+    });
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(),
+    });
+
+    const promoted = await fleet.fetch(
+      request("POST", "/v1/images/ami-legacy/promote", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+
+    expect(promoted.status).toBe(200);
+    expect(storage.value("image:aws:promoted:linux:x86_64:ubuntu24.04:eu-west-1")).toEqual(
+      expect.objectContaining({ id: "ami-legacy", os: "ubuntu:24.04" }),
+    );
+    expect(storage.value("image:aws:promoted")).toEqual(
+      expect.objectContaining({ id: "ami-legacy", os: "ubuntu:24.04" }),
+    );
+  });
+
   it("uses promoted AWS image region when creating leases", async () => {
     const storage = new MemoryStorage();
     let createdConfig: LeaseConfig | undefined;
@@ -4496,11 +4550,13 @@ describe("fleet lease identity and idle", () => {
       },
       { CRABBOX_AWS_REGION: "eu-west-1" },
     );
-    storage.seed("image:aws:promoted", {
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04", {
       id: "ami-000000000001",
       name: "crabbox-image-test",
       state: "available",
       region: "us-east-2",
+      target: "linux",
+      os: "ubuntu:26.04",
       promotedAt: "2026-05-01T12:46:00Z",
     });
 
@@ -6411,7 +6467,23 @@ function fakeProvider(
         }
         return { ...config, awsPromotedAMIs };
       }
-      const promoted = await storage?.get<ProviderImage>("image:aws:promoted");
+      const promoted =
+        (await storage?.get<ProviderImage>(
+          fakePromotedAWSImageKey({
+            target: config.target,
+            os: config.os,
+            architecture: fakeAWSImageArchitectureForTarget(config.target, config.serverType),
+            region: config.awsRegion,
+          }),
+        )) ??
+        (config.os
+          ? await storage?.get<ProviderImage>(
+              `image:aws:promoted:linux:${fakeAWSImageArchitectureForTarget(config.target, config.serverType)}:${config.os.replaceAll(/[^a-z0-9._-]/g, "")}`,
+            )
+          : undefined) ??
+        (!config.os || config.os === "ubuntu:24.04"
+          ? await storage?.get<ProviderImage>("image:aws:promoted")
+          : undefined);
       return {
         ...config,
         awsAMI: promoted?.id ?? "",
@@ -6537,6 +6609,7 @@ function fakeProvider(
         lease.provider === "aws"
           ? fakeMergeAWSImageMetadata(image, {
               target: lease.target,
+              os: lease.os,
               windowsMode: lease.windowsMode,
               serverType: lease.serverType,
               region: image.region ?? lease.region,
@@ -6672,6 +6745,7 @@ function fakeProvider(
         .json()
         .catch(() => ({}))) as {
         target?: string;
+        os?: string;
         region?: string;
         serverType?: string;
         architecture?: string;
@@ -6687,8 +6761,13 @@ function fakeProvider(
           400,
         );
       }
+      const requestedOS = input.os ?? url.searchParams.get("os");
+      const os =
+        target === "linux"
+          ? fakeNormalizeOSImage(requestedOS ?? (known ? (known.os ?? "ubuntu:24.04") : undefined))
+          : undefined;
       const region = input.region ?? url.searchParams.get("region") ?? known?.region ?? "";
-      const metadata: Partial<ProviderImage> = { ...known, target, region };
+      const metadata: Partial<ProviderImage> = { ...known, target, ...(os ? { os } : {}), region };
       const serverType =
         input.serverType ?? url.searchParams.get("serverType") ?? known?.serverType;
       if (serverType) {
@@ -6732,7 +6811,13 @@ function fakeProvider(
         promotedAt: "2026-05-25T00:00:00.000Z",
       };
       await storage?.put(fakePromotedAWSImageKey(promoted), promoted);
-      if (target === "linux") {
+      if (target === "linux" && promoted.os) {
+        await storage?.put(
+          `image:aws:promoted:linux:${promoted.architecture}:${promoted.os.replaceAll(/[^a-z0-9._-]/g, "")}`,
+          promoted,
+        );
+      }
+      if (target === "linux" && (!promoted.os || promoted.os === "ubuntu:24.04")) {
         await storage?.put("image:aws:promoted", promoted);
       }
       return { image: promoted };
@@ -6846,14 +6931,32 @@ function fakeAWSImageArchitectureForTarget(
   return "x86_64";
 }
 
+function fakeNormalizeOSImage(value: string | undefined | null): string {
+  let normalized = (value ?? "").trim().toLowerCase();
+  if (!normalized) {
+    normalized = "ubuntu:26.04";
+  }
+  normalized = normalized.replaceAll("_", ".").replaceAll("-", ":");
+  if (normalized === "ubuntu2604" || normalized === "ubuntu:2604") {
+    return "ubuntu:26.04";
+  }
+  if (normalized === "ubuntu2404" || normalized === "ubuntu:2404") {
+    return "ubuntu:24.04";
+  }
+  return normalized;
+}
+
 function fakePromotedAWSImageKey(
-  image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType">,
+  image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType" | "os">,
 ): string {
   const target = image.target ?? "linux";
   const architecture = image.architecture ?? fakeAWSImageArchitectureForTarget(target, "");
   const region = image.region ?? "";
   if (target === "macos") {
     return `image:aws:promoted:${target}:${architecture}:${(image.serverType ?? "").trim().toLowerCase()}:${region}`;
+  }
+  if (target === "linux" && image.os) {
+    return `image:aws:promoted:${target}:${architecture}:${(image.os ?? "").replaceAll(/[^a-z0-9._-]/g, "")}:${region}`;
   }
   return `image:aws:promoted:${target}:${architecture}:${region}`;
 }

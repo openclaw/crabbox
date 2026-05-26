@@ -729,6 +729,7 @@ func TestCoordinatorLeaseWatchCancelsWhenLeaseReleased(t *testing.T) {
 func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	var body struct {
 		Provider           string   `json:"provider"`
+		OSImage            string   `json:"os"`
 		AWSSnapshot        string   `json:"awsSnapshot"`
 		AWSSSHCIDRs        []string `json:"awsSSHCIDRs"`
 		AzureLocation      string   `json:"azureLocation"`
@@ -763,6 +764,8 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
 	_, err := client.CreateLease(context.Background(), Config{
 		Provider:            "google",
+		OSImage:             "ubuntu:26.04",
+		osImageExplicit:     true,
 		ServerType:          "t3.small",
 		ServerTypeExplicit:  true,
 		HostID:              "h-000000000001",
@@ -798,6 +801,9 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	}
 	if body.Provider != "gcp" {
 		t.Fatalf("provider=%q want canonical gcp", body.Provider)
+	}
+	if body.OSImage != "ubuntu:26.04" {
+		t.Fatalf("os=%q", body.OSImage)
 	}
 	if body.AzureLocation != "eastus" {
 		t.Fatalf("azureLocation=%q", body.AzureLocation)
@@ -899,6 +905,9 @@ func TestCoordinatorCreateLeaseOmitsAmbientGCPProject(t *testing.T) {
 	}
 	if _, ok := body["gcpProject"]; ok {
 		t.Fatalf("ambient ADC project should be omitted so coordinator defaults apply: %#v", body)
+	}
+	if _, ok := body["os"]; ok {
+		t.Fatalf("default os should be omitted so coordinator provider defaults apply: %#v", body)
 	}
 }
 
@@ -1163,6 +1172,9 @@ func TestCoordinatorImageCreateAndPromote(t *testing.T) {
 			if got := r.URL.Query().Get("target"); got != "macos" {
 				t.Fatalf("promote target=%q", got)
 			}
+			if got := r.URL.Query().Get("os"); got != "ubuntu:26.04" {
+				t.Fatalf("promote os=%q", got)
+			}
 			if got := r.URL.Query().Get("region"); got != "us-east-1" {
 				t.Fatalf("promote region=%q", got)
 			}
@@ -1210,7 +1222,7 @@ func TestCoordinatorImageCreateAndPromote(t *testing.T) {
 	if image, err := client.Image(context.Background(), "ami-12345678"); err != nil || image.State != "available" {
 		t.Fatalf("image=%#v err=%v", image, err)
 	}
-	if promoted, err := client.PromoteImage(context.Background(), "ami-12345678", CoordinatorImageRef{Provider: "aws", Region: "us-east-1", Target: "macos", ServerType: "mac1.metal", Architecture: "x86_64_mac", FastSnapshotRestore: true, FastSnapshotRestoreAZs: []string{"us-east-1a", "us-east-1b"}}); err != nil || promoted.PromotedAt == "" {
+	if promoted, err := client.PromoteImage(context.Background(), "ami-12345678", CoordinatorImageRef{Provider: "aws", Region: "us-east-1", Target: "macos", OSImage: defaultOSImage, ServerType: "mac1.metal", Architecture: "x86_64_mac", FastSnapshotRestore: true, FastSnapshotRestoreAZs: []string{"us-east-1a", "us-east-1b"}}); err != nil || promoted.PromotedAt == "" {
 		t.Fatalf("promoted=%#v err=%v", promoted, err)
 	}
 	if status, err := client.FastSnapshotRestoreStatus(context.Background(), "ami-12345678", CoordinatorImageRef{Provider: "aws", Region: "us-east-1", FastSnapshotRestoreAZs: []string{"us-east-1a"}}); err != nil || len(status.FastSnapshotRestores) != 1 || status.FastSnapshotRestores[0].State != "enabled" {

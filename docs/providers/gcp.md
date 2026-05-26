@@ -78,7 +78,7 @@ class: beast
 gcp:
   project: example-project-123
   zone: europe-west2-a
-  image: projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64
+  image: projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-lts-amd64
   network: default
   subnet: ""
   tags:

@@ -650,11 +650,15 @@ func (c *AWSClient) resolveAMI(ctx context.Context, cfg Config) (string, error) 
 		name, architecture := awsMacOSAMIQueryForInstanceType(cfg.ServerType)
 		return c.resolveLatestAmazonAMI(ctx, name, architecture)
 	}
+	name, label, err := awsLinuxAMIQueryForOS(cfg.OSImage)
+	if err != nil {
+		return "", err
+	}
 	out, err := c.ec2.DescribeImages(ctx, &ec2.DescribeImagesInput{
 		Owners: []string{awsUbuntuOwner},
 		Filters: []types.Filter{
 			{Name: aws.String("architecture"), Values: []string{"x86_64"}},
-			{Name: aws.String("name"), Values: []string{"ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"}},
+			{Name: aws.String("name"), Values: []string{name}},
 			{Name: aws.String("root-device-type"), Values: []string{"ebs"}},
 			{Name: aws.String("virtualization-type"), Values: []string{"hvm"}},
 		},
@@ -663,7 +667,7 @@ func (c *AWSClient) resolveAMI(ctx context.Context, cfg Config) (string, error) 
 		return "", err
 	}
 	if len(out.Images) == 0 {
-		return "", exit(3, "no Ubuntu 24.04 x86_64 AMI found in %s; set CRABBOX_AWS_AMI", cfg.AWSRegion)
+		return "", exit(3, "no %s x86_64 AMI found in %s; set CRABBOX_AWS_AMI", label, cfg.AWSRegion)
 	}
 	sort.Slice(out.Images, func(i, j int) bool {
 		return aws.ToString(out.Images[i].CreationDate) > aws.ToString(out.Images[j].CreationDate)
