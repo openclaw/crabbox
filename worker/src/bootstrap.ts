@@ -576,7 +576,7 @@ function optionalReadyChecks(config: LeaseConfig): string {
     );
   }
   if (config.desktop) {
-    if (config.desktopEnv === "wayland") {
+    if (config.desktopEnv !== "xfce") {
       lines.push(
         "      systemctl is-active --quiet crabbox-desktop.service",
         "      systemctl is-active --quiet crabbox-wayvnc.service",
@@ -613,7 +613,8 @@ function optionalWriteFiles(config: LeaseConfig): string {
   if (!config.desktop) {
     return "";
   }
-  if (config.desktopEnv === "wayland") {
+  if (config.desktopEnv !== "xfce") {
+    const desktopEnv = config.desktopEnv;
     return `  - path: /usr/local/bin/crabbox-start-wayland-desktop
     permissions: '0755'
     content: |
@@ -653,7 +654,7 @@ function optionalWriteFiles(config: LeaseConfig): string {
           [ -S "$socket" ] || continue
           export WAYLAND_DISPLAY="\${socket##*/}"
           cat >/var/lib/crabbox/desktop.env <<EOF
-      CRABBOX_DESKTOP_ENV=wayland
+      CRABBOX_DESKTOP_ENV=${desktopEnv}
       XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR
       WAYLAND_DISPLAY=$WAYLAND_DISPLAY
       EOF
@@ -998,8 +999,39 @@ function optionalBootstrap(config: LeaseConfig): string {
   if (config.tailscale) {
     parts.push(tailscaleBootstrap(config));
   }
-  if (config.desktop && config.desktopEnv === "wayland") {
-    parts.push(`    retry apt-get install -y --no-install-recommends labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps
+  if (config.desktop && config.desktopEnv !== "xfce") {
+    const lxqtPackages =
+      config.desktopEnv === "lxqt"
+        ? " lxqt-session lxqt-panel pcmanfm-qt qterminal lxqt-qtplugin"
+        : "";
+    const qtWaylandInstall =
+      config.desktopEnv === "lxqt"
+        ? `    if apt-cache show qt6-wayland >/dev/null 2>&1; then
+      retry apt-get install -y --no-install-recommends qt6-wayland
+    elif apt-cache show qtwayland5 >/dev/null 2>&1; then
+      retry apt-get install -y --no-install-recommends qtwayland5
+    else
+      echo "missing Qt Wayland plugin package; expected qt6-wayland or qtwayland5" >&2
+      exit 1
+    fi
+`
+        : "";
+    const autostart =
+      config.desktopEnv === "lxqt"
+        ? `    wlr-randr --output HEADLESS-1 --custom-mode 1920x1080 >/tmp/crabbox-wlr-randr.log 2>&1 || true
+    export XDG_CURRENT_DESKTOP=LXQt
+    export XDG_SESSION_DESKTOP=LXQt
+    export QT_QPA_PLATFORM=wayland
+    export QT_QPA_PLATFORMTHEME=lxqt
+    lxqt-panel >/tmp/crabbox-lxqt-panel.log 2>&1 &
+    pcmanfm-qt --desktop --profile=lxqt >/tmp/crabbox-pcmanfm-qt.log 2>&1 &
+    qterminal --workdir="$HOME" >/tmp/crabbox-qterminal.log 2>&1 &
+`
+        : `    wlr-randr --output HEADLESS-1 --custom-mode 1920x1080 >/tmp/crabbox-wlr-randr.log 2>&1 || true
+    foot --title='Crabbox Desktop' >/tmp/crabbox-foot.log 2>&1 &
+`;
+    parts.push(`    retry apt-get install -y --no-install-recommends labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps${lxqtPackages}
+${qtWaylandInstall}
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
@@ -1011,9 +1043,7 @@ function optionalBootstrap(config: LeaseConfig): string {
     install -d -m 0700 -o crabbox -g crabbox "$crabbox_runtime"
     install -d -m 0700 -o crabbox -g crabbox /home/crabbox/.config/labwc /home/crabbox/.config/wayvnc
     cat >/home/crabbox/.config/labwc/autostart <<'AUTOSTART'
-    wlr-randr --output HEADLESS-1 --custom-mode 1920x1080 >/tmp/crabbox-wlr-randr.log 2>&1 || true
-    foot --title='Crabbox Desktop' >/tmp/crabbox-foot.log 2>&1 &
-    AUTOSTART
+${autostart}    AUTOSTART
     chmod 0755 /home/crabbox/.config/labwc/autostart
     cat >/home/crabbox/.config/wayvnc/config <<'WAYVNC'
     address=127.0.0.1
@@ -1022,7 +1052,7 @@ function optionalBootstrap(config: LeaseConfig): string {
     xkb_layout=us
     WAYVNC
     cat >/var/lib/crabbox/desktop.env <<EOF
-    CRABBOX_DESKTOP_ENV=wayland
+    CRABBOX_DESKTOP_ENV=${config.desktopEnv}
     XDG_RUNTIME_DIR=$crabbox_runtime
     WAYLAND_DISPLAY=wayland-1
     EOF
@@ -1077,7 +1107,7 @@ function optionalBootstrap(config: LeaseConfig): string {
       install -d -m 0755 /etc/opt/chrome/policies/managed /etc/chromium/policies/managed
       printf '%s\\n' '{"DefaultBrowserSettingEnabled":false,"MetricsReportingEnabled":false,"PromotionalTabsEnabled":false}' > /etc/opt/chrome/policies/managed/crabbox.json
       cp /etc/opt/chrome/policies/managed/crabbox.json /etc/chromium/policies/managed/crabbox.json
-      if [ -f /var/lib/crabbox/desktop.env ] && grep -q '^CRABBOX_DESKTOP_ENV=wayland$' /var/lib/crabbox/desktop.env; then
+      if [ -f /var/lib/crabbox/desktop.env ] && grep -Eq '^CRABBOX_DESKTOP_ENV=(wayland|lxqt)$' /var/lib/crabbox/desktop.env; then
         printf '%s\\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY' 'export MOZ_ENABLE_WAYLAND=1' "exec \\"$browser_path\\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --ozone-platform=wayland --window-size=1500,900 --window-position=80,80 \\"\\$@\\"" > "$browser_wrapper"
       else
         printf '%s\\n' '#!/bin/sh' "exec \\"$browser_path\\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --window-size=1500,900 --window-position=80,80 \\"\\$@\\"" > "$browser_wrapper"

@@ -5,6 +5,7 @@
 ### Added
 
 - Added a portable `--os`/`os` lease selector with Ubuntu 26.04 as the preferred Linux image where provider catalogs support it, while preserving explicit provider image overrides.
+- Added `--desktop-env lxqt` for a lightweight LXQt panel/desktop on labwc with WayVNC.
 
 ### Fixed
 

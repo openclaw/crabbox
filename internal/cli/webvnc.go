@@ -963,7 +963,7 @@ sudo launchctl kickstart -k system/com.apple.screensharing >/dev/null 2>&1 || tr
 	}
 	return `set -eu
 if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
-if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
   sudo systemctl restart crabbox-desktop.service crabbox-wayvnc.service
 else
   sudo systemctl restart crabbox-desktop-session.service crabbox-x11vnc.service

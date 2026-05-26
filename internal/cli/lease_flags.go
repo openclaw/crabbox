@@ -38,7 +38,7 @@ func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlag
 		TTL:           fs.Duration("ttl", defaults.TTL, "maximum lease lifetime"),
 		Idle:          fs.Duration("idle-timeout", defaults.IdleTimeout, "idle timeout"),
 		Desktop:       fs.Bool("desktop", defaults.Desktop, "provision or require a visible desktop/VNC session"),
-		DesktopEnv:    fs.String("desktop-env", defaults.DesktopEnv, "Linux desktop environment: xfce or wayland"),
+		DesktopEnv:    fs.String("desktop-env", defaults.DesktopEnv, "Linux desktop environment: xfce, wayland, or lxqt"),
 		Browser:       fs.Bool("browser", defaults.Browser, "provision or require a browser binary"),
 		Code:          fs.Bool("code", defaults.Code, "provision or require web code-server capability"),
 		ProviderFlags: registerProviderFlags(fs, defaults),

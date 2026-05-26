@@ -186,6 +186,41 @@ func TestCloudInitWaylandDesktopProfile(t *testing.T) {
 	}
 }
 
+func TestCloudInitLXQtDesktopProfile(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Desktop = true
+	cfg.Browser = true
+	cfg.DesktopEnv = "lxqt"
+	got := cloudInit(cfg, "ssh-ed25519 test")
+	for _, want := range []string{
+		"labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr",
+		"lxqt-session lxqt-panel pcmanfm-qt qterminal lxqt-qtplugin",
+		"apt-cache show qt6-wayland",
+		"apt-cache show qtwayland5",
+		"/usr/local/bin/crabbox-start-wayland-desktop",
+		"/etc/systemd/system/crabbox-wayvnc.service",
+		"CRABBOX_DESKTOP_ENV=lxqt",
+		"XDG_CURRENT_DESKTOP=LXQt",
+		"QT_QPA_PLATFORM=wayland",
+		"lxqt-panel >/tmp/crabbox-lxqt-panel.log",
+		"pcmanfm-qt --desktop --profile=lxqt",
+		"qterminal --workdir=\"$HOME\"",
+		"--ozone-platform=wayland",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("cloudInit(lxqt desktop) missing %q", want)
+		}
+	}
+	for _, notWant := range []string{
+		"startxfce4",
+		"x11vnc -storepasswd",
+	} {
+		if strings.Contains(got, notWant) {
+			t.Fatalf("cloudInit(lxqt desktop) contains %q", notWant)
+		}
+	}
+}
+
 func TestCloudInitBrowserWrapper(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Browser = true

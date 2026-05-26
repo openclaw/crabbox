@@ -932,7 +932,7 @@ func localContainerReadyCheck(cfg core.Config) string {
 		"test -d " + shellQuote(cfg.LocalContainer.WorkRoot),
 	}
 	if cfg.Desktop {
-		if core.NormalizedDesktopEnv(cfg.DesktopEnv) == "wayland" {
+		if core.NormalizedDesktopEnv(cfg.DesktopEnv) != "xfce" {
 			checks = append(checks,
 				"pgrep -x labwc >/dev/null",
 				"pgrep -x wayvnc >/dev/null",
@@ -981,8 +981,22 @@ need_install=0
 	fi
 if [ "${CRABBOX_DESKTOP:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
   apt-get update
-  if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
-    apt-get install -y --no-install-recommends labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps netcat-openbsd novnc websockify
+  if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
+    lxqt_packages=""
+    if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "lxqt" ]; then
+      lxqt_packages="lxqt-session lxqt-panel pcmanfm-qt qterminal lxqt-qtplugin"
+    fi
+    apt-get install -y --no-install-recommends labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps netcat-openbsd novnc websockify $lxqt_packages
+    if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "lxqt" ]; then
+      if apt-cache show qt6-wayland >/dev/null 2>&1; then
+        apt-get install -y --no-install-recommends qt6-wayland
+      elif apt-cache show qtwayland5 >/dev/null 2>&1; then
+        apt-get install -y --no-install-recommends qtwayland5
+      else
+        echo "missing Qt Wayland plugin package; expected qt6-wayland or qtwayland5" >&2
+        exit 1
+      fi
+    fi
   else
     apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme procps netcat-openbsd novnc websockify
   fi
@@ -1077,21 +1091,31 @@ fi
 if [ "${CRABBOX_DESKTOP:-0}" = "1" ]; then
   desktop_env="${CRABBOX_DESKTOP_ENV:-xfce}"
   case "$desktop_env" in
-    xfce|wayland) ;;
-    *) echo "CRABBOX_DESKTOP_ENV must be xfce or wayland" >&2; exit 2 ;;
+    xfce|wayland|lxqt) ;;
+    *) echo "CRABBOX_DESKTOP_ENV must be xfce, wayland, or lxqt" >&2; exit 2 ;;
   esac
   install -d -m 0750 -o "$user" /var/lib/crabbox
   if [ ! -s /var/lib/crabbox/vnc.password ]; then
     (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
   fi
-  if [ "$desktop_env" = "wayland" ]; then
+  if [ "$desktop_env" != "xfce" ]; then
     chown "$user" /var/lib/crabbox/vnc.password
     chmod 0600 /var/lib/crabbox/vnc.password
     runtime="/tmp/crabbox-runtime-$(id -u "$user")"
     install -d -m 0700 -o "$user" "$runtime" "$home_dir/.config/labwc" "$home_dir/.config/wayvnc"
-    cat > "$home_dir/.config/labwc/autostart" <<'AUTOSTART'
+cat > "$home_dir/.config/labwc/autostart" <<'AUTOSTART'
 wlr-randr --output HEADLESS-1 --custom-mode 1920x1080 >/tmp/crabbox-wlr-randr.log 2>&1 || true
-foot --title='Crabbox Desktop' >/tmp/crabbox-foot.log 2>&1 &
+if [ "${CRABBOX_DESKTOP_ENV:-wayland}" = "lxqt" ]; then
+  export XDG_CURRENT_DESKTOP=LXQt
+  export XDG_SESSION_DESKTOP=LXQt
+  export QT_QPA_PLATFORM=wayland
+  export QT_QPA_PLATFORMTHEME=lxqt
+  lxqt-panel >/tmp/crabbox-lxqt-panel.log 2>&1 &
+  pcmanfm-qt --desktop --profile=lxqt >/tmp/crabbox-pcmanfm-qt.log 2>&1 &
+  qterminal --workdir="$HOME" >/tmp/crabbox-qterminal.log 2>&1 &
+else
+  foot --title='Crabbox Desktop' >/tmp/crabbox-foot.log 2>&1 &
+fi
 AUTOSTART
     chmod 0755 "$home_dir/.config/labwc/autostart"
     cat > "$home_dir/.config/wayvnc/config" <<'WAYVNC'
@@ -1105,10 +1129,15 @@ WAYVNC
 #!/bin/sh
 set -eu
 user="${CRABBOX_SSH_USER:-crabbox}"
+desktop_env="${CRABBOX_DESKTOP_ENV:-wayland}"
+case "$desktop_env" in
+  wayland|lxqt) ;;
+  *) echo "CRABBOX_DESKTOP_ENV must be wayland or lxqt for Wayland startup" >&2; exit 2 ;;
+esac
 runtime="/tmp/crabbox-runtime-$(id -u "$user")"
 install -d -m 0700 -o "$user" "$runtime"
 if ! pgrep -u "$user" -x labwc >/dev/null 2>&1; then
-  su "$user" -s /bin/sh -c "XDG_RUNTIME_DIR='$runtime' WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman MOZ_ENABLE_WAYLAND=1 dbus-run-session labwc >/tmp/crabbox-labwc.log 2>&1 &"
+  su "$user" -s /bin/sh -c "CRABBOX_DESKTOP_ENV='$desktop_env' XDG_RUNTIME_DIR='$runtime' WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman MOZ_ENABLE_WAYLAND=1 dbus-run-session labwc >/tmp/crabbox-labwc.log 2>&1 &"
 fi
 display=""
 for _ in $(seq 1 30); do
@@ -1121,7 +1150,7 @@ for _ in $(seq 1 30); do
 done
 [ -n "$display" ] || { echo "wayland socket not ready" >&2; exit 1; }
 cat >/var/lib/crabbox/desktop.env <<EOF
-CRABBOX_DESKTOP_ENV=wayland
+CRABBOX_DESKTOP_ENV=$desktop_env
 XDG_RUNTIME_DIR=$runtime
 WAYLAND_DISPLAY=$display
 EOF
@@ -1447,14 +1476,14 @@ if [ "${CRABBOX_BROWSER:-0}" = "1" ]; then
   browser_wrapper=/usr/local/bin/crabbox-browser
   case "$(basename "$browser_path")" in
     firefox*|iceweasel*)
-      if [ -f /var/lib/crabbox/desktop.env ] && grep -q '^CRABBOX_DESKTOP_ENV=wayland$' /var/lib/crabbox/desktop.env; then
+      if [ -f /var/lib/crabbox/desktop.env ] && grep -Eq '^CRABBOX_DESKTOP_ENV=(wayland|lxqt)$' /var/lib/crabbox/desktop.env; then
         printf '%s\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY MOZ_ENABLE_WAYLAND=1' "exec \"$browser_path\" --width 1500 --height 900 \"\$@\"" > "$browser_wrapper"
       else
         printf '%s\n' '#!/bin/sh' "exec \"$browser_path\" --width 1500 --height 900 \"\$@\"" > "$browser_wrapper"
       fi
       ;;
     *)
-      if [ -f /var/lib/crabbox/desktop.env ] && grep -q '^CRABBOX_DESKTOP_ENV=wayland$' /var/lib/crabbox/desktop.env; then
+      if [ -f /var/lib/crabbox/desktop.env ] && grep -Eq '^CRABBOX_DESKTOP_ENV=(wayland|lxqt)$' /var/lib/crabbox/desktop.env; then
         printf '%s\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY' 'export MOZ_ENABLE_WAYLAND=1' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --ozone-platform=wayland --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$browser_wrapper"
       else
         printf '%s\n' '#!/bin/sh' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$browser_wrapper"

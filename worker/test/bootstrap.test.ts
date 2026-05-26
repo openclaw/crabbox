@@ -192,6 +192,24 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain("\n#!/bin/sh\nwhile");
   });
 
+  it("adds LXQt on labwc desktop services when requested", () => {
+    const got = cloudInit({ ...config, desktop: true, desktopEnv: "lxqt", browser: true });
+    expect(got).toContain("labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr");
+    expect(got).toContain("lxqt-session lxqt-panel pcmanfm-qt qterminal lxqt-qtplugin");
+    expect(got).toContain("apt-cache show qt6-wayland");
+    expect(got).toContain("apt-cache show qtwayland5");
+    expect(got).toContain("CRABBOX_DESKTOP_ENV=lxqt");
+    expect(got).toContain("XDG_CURRENT_DESKTOP=LXQt");
+    expect(got).toContain("QT_QPA_PLATFORM=wayland");
+    expect(got).toContain("lxqt-panel >/tmp/crabbox-lxqt-panel.log");
+    expect(got).toContain("pcmanfm-qt --desktop --profile=lxqt");
+    expect(got).toContain('qterminal --workdir="$HOME"');
+    expect(got).toContain("/etc/systemd/system/crabbox-wayvnc.service");
+    expect(got).toContain("--ozone-platform=wayland");
+    expect(got).not.toContain("startxfce4");
+    expect(got).not.toContain("x11vnc -storepasswd");
+  });
+
   it("starts ssh before optional desktop and browser bootstrap", () => {
     const got = cloudInit({ ...config, desktop: true, browser: true });
     const sshIndex = got.indexOf("systemctl restart ssh");

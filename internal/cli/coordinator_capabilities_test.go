@@ -97,6 +97,16 @@ func TestStaticDesktopProbeCommandRequiresWaylandEnvFile(t *testing.T) {
 	}
 }
 
+func TestStaticDesktopProbeCommandRequiresLXQtWhenRequested(t *testing.T) {
+	got := staticDesktopProbeCommand(Config{DesktopEnv: desktopEnvLXQT}, SSHTarget{TargetOS: targetLinux})
+	if !strings.Contains(got, `test "${CRABBOX_DESKTOP_ENV:-}" = "lxqt"`) {
+		t.Fatalf("static lxqt probe should require lxqt env:\n%s", got)
+	}
+	if strings.Contains(got, `case "${CRABBOX_DESKTOP_ENV:-}" in wayland|lxqt)`) {
+		t.Fatalf("static lxqt probe should not accept plain wayland env:\n%s", got)
+	}
+}
+
 func TestStaticDesktopProbeCommandDefaultsToX11(t *testing.T) {
 	got := staticDesktopProbeCommand(Config{}, SSHTarget{TargetOS: targetLinux})
 	for _, want := range []string{"Xvfb :99", "x11vnc"} {

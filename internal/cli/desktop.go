@@ -549,8 +549,8 @@ func supportsDesktopVideoTarget(target SSHTarget) bool {
 }
 
 func rejectWaylandDesktopVideoEnv(env map[string]string, command string) error {
-	if normalizedDesktopEnv(env["CRABBOX_DESKTOP_ENV"]) == desktopEnvWayland {
-		return exit(2, "%s does not support --desktop-env wayland yet; video capture currently requires an X11 desktop", command)
+	if isWaylandDesktopEnv(env["CRABBOX_DESKTOP_ENV"]) {
+		return exit(2, "%s does not support Wayland desktop envs yet; video capture currently requires an X11 desktop", command)
 	}
 	return nil
 }
@@ -622,13 +622,17 @@ func desktopTerminalCommand(target SSHTarget, command []string, opts desktopTerm
 	}
 	shellCommand := shellJoin(command)
 	terminalScript := fmt.Sprintf(`if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
-if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
   export XDG_RUNTIME_DIR WAYLAND_DISPLAY
-  command -v foot >/dev/null 2>&1 || { echo "missing foot; warm a new --desktop-env wayland lease or install foot" >&2; exit 127; }
+  if [ "${CRABBOX_DESKTOP_ENV:-}" = "lxqt" ] && command -v qterminal >/dev/null 2>&1; then
+    exec qterminal --workdir="$PWD" -e bash -lc %s
+  fi
+  command -v foot >/dev/null 2>&1 || { echo "missing foot; warm a new Wayland desktop lease or install foot" >&2; exit 127; }
   exec foot --title='Crabbox Desktop' --font=%s bash -lc %s
 fi
 export DISPLAY="${DISPLAY:-:99}"
 exec xterm -fa monospace -fs %s -geometry %s -e bash -lc %s`,
+		shellQuote(shellCommand),
 		shellQuote(fmt.Sprintf("monospace:size=%d", opts.FontSize)),
 		shellQuote(shellCommand),
 		shellQuote(fmt.Sprintf("%d", opts.FontSize)),
@@ -713,7 +717,7 @@ func posixWindowBrowserCommand() string {
 	return `(
   sleep 2
   if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
-  if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+  if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
     export XDG_RUNTIME_DIR WAYLAND_DISPLAY
     exit 0
   fi
@@ -769,12 +773,12 @@ if [ "$browser_wrapper" = "/usr/local/bin/crabbox-browser" ] && [ -f "$browser_w
   ! grep -q -- "--force-dark-mode" "$browser_wrapper" 2>/dev/null ||
   ! grep -q -- "desktop-theme" "$browser_wrapper" 2>/dev/null ||
   ! grep -q -- "--user-data-dir" "$browser_wrapper" 2>/dev/null ||
-  { [ -f /var/lib/crabbox/desktop.env ] && grep -q '^CRABBOX_DESKTOP_ENV=wayland$' /var/lib/crabbox/desktop.env && ! grep -q -- "--ozone-platform=wayland" "$browser_wrapper" 2>/dev/null; }
+  { [ -f /var/lib/crabbox/desktop.env ] && grep -Eq '^CRABBOX_DESKTOP_ENV=(wayland|lxqt)$' /var/lib/crabbox/desktop.env && ! grep -q -- "--ozone-platform=wayland" "$browser_wrapper" 2>/dev/null; }
 }; then
   browser_path="$(sed -n 's/^exec "\([^"]*\)".*/\1/p' "$browser_wrapper" | head -1)"
   if [ -n "$browser_path" ] && "$browser_path" --version 2>/dev/null | grep -Eiq 'chrome|chromium'; then
     tmp="$(mktemp)"
-    if [ -f /var/lib/crabbox/desktop.env ] && grep -q '^CRABBOX_DESKTOP_ENV=wayland$' /var/lib/crabbox/desktop.env; then
+    if [ -f /var/lib/crabbox/desktop.env ] && grep -Eq '^CRABBOX_DESKTOP_ENV=(wayland|lxqt)$' /var/lib/crabbox/desktop.env; then
       printf '%s\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY' 'export MOZ_ENABLE_WAYLAND=1' 'profile="${CRABBOX_BROWSER_PROFILE:-$HOME/.cache/crabbox/browser-profile}"' 'theme="$(cat "${CRABBOX_DESKTOP_THEME_FILE:-$HOME/.config/crabbox/desktop-theme}" 2>/dev/null || printf dark)"' 'umask 077' 'mkdir -p "$profile"' 'chmod 700 "$profile"' 'if [ "$theme" = light ]; then' "  exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --blink-settings=preferredColorScheme=1 --user-data-dir=\"\$profile\" --ozone-platform=wayland --window-size=1500,900 --window-position=80,80 \"\$@\"" 'fi' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --force-dark-mode --enable-features=WebUIDarkMode --blink-settings=preferredColorScheme=2 --user-data-dir=\"\$profile\" --ozone-platform=wayland --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$tmp"
     else
       printf '%s\n' '#!/bin/sh' 'profile="${CRABBOX_BROWSER_PROFILE:-$HOME/.cache/crabbox/browser-profile}"' 'theme="$(cat "${CRABBOX_DESKTOP_THEME_FILE:-$HOME/.config/crabbox/desktop-theme}" 2>/dev/null || printf dark)"' 'umask 077' 'mkdir -p "$profile"' 'chmod 700 "$profile"' 'if [ "$theme" = light ]; then' "  exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --blink-settings=preferredColorScheme=1 --user-data-dir=\"\$profile\" --window-size=1500,900 --window-position=80,80 \"\$@\"" 'fi' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --force-dark-mode --enable-features=WebUIDarkMode --blink-settings=preferredColorScheme=2 --user-data-dir=\"\$profile\" --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$tmp"

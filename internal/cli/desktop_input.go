@@ -412,8 +412,8 @@ exit 127`, x, y, x, y)
 	}
 	return fmt.Sprintf(`set -eu
 if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
-if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
-  echo "desktop click is not supported on --desktop-env wayland yet; use WebVNC pointer input" >&2
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
+  echo "desktop click is not supported on Wayland desktop envs yet; use WebVNC pointer input" >&2
   exit 2
 fi
 export DISPLAY="${DISPLAY:-:99}"
@@ -433,9 +433,9 @@ func desktopKeyRemoteCommand(keys string) string {
 	}
 	return `set -eu
 if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
-if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
   export XDG_RUNTIME_DIR WAYLAND_DISPLAY
-  command -v wtype >/dev/null 2>&1 || { echo "missing wtype; warm a new --desktop-env wayland lease or install wtype" >&2; exit 127; }
+  command -v wtype >/dev/null 2>&1 || { echo "missing wtype; warm a new Wayland desktop lease or install wtype" >&2; exit 127; }
   ` + wayland.String() + `fi
 export DISPLAY="${DISPLAY:-:99}"
 command -v xdotool >/dev/null 2>&1 || { echo "missing xdotool; warm a new --desktop lease or install xdotool" >&2; exit 127; }
@@ -445,9 +445,9 @@ xdotool key --clearmodifiers ` + shellQuote(strings.TrimSpace(keys))
 func desktopTypeRemoteCommand(text string) string {
 	return `set -eu
 if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
-if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
   export XDG_RUNTIME_DIR WAYLAND_DISPLAY
-  command -v wtype >/dev/null 2>&1 || { echo "missing wtype; warm a new --desktop-env wayland lease or install wtype" >&2; exit 127; }
+  command -v wtype >/dev/null 2>&1 || { echo "missing wtype; warm a new Wayland desktop lease or install wtype" >&2; exit 127; }
   exec wtype -d 1 -- ` + shellQuote(text) + `
 fi
 export DISPLAY="${DISPLAY:-:99}"
@@ -461,9 +461,9 @@ tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 cat > "$tmp"
 if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
-if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
   export XDG_RUNTIME_DIR WAYLAND_DISPLAY
-  command -v wtype >/dev/null 2>&1 || { echo "missing wtype; warm a new --desktop-env wayland lease or install wtype" >&2; exit 127; }
+  command -v wtype >/dev/null 2>&1 || { echo "missing wtype; warm a new Wayland desktop lease or install wtype" >&2; exit 127; }
   wtype -d 1 - < "$tmp"
   exit 0
 fi
@@ -553,7 +553,7 @@ func desktopDoctorRemoteCommand(target SSHTarget) string {
 	}
 	return `set +e
 if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
-if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
   export XDG_RUNTIME_DIR WAYLAND_DISPLAY
   check() {
     layer="$1"; item="$2"; shift 2

@@ -195,8 +195,9 @@ families, or provider image names.
 `--desktop` provisions a visible UI and loopback-bound VNC for automation and
 operator takeover. Linux defaults to Xvfb, slim XFCE, and x11vnc; use
 `--desktop-env wayland` for the experimental labwc/WayVNC profile on Ubuntu
-26.04-compatible images. It does not imply a browser. Use `--desktop --browser`
-when a headed browser should run in the visible display.
+26.04-compatible images, or `--desktop-env lxqt` for LXQt panel/desktop
+components running on labwc with WayVNC. It does not imply a browser. Use
+`--desktop --browser` when a headed browser should run in the visible display.
 
 `--code` provisions `code-server` for Linux leases and enables
 `crabbox code --id <lease>` to bridge the workspace through the authenticated

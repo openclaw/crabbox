@@ -49,7 +49,7 @@ func TestDesktopBrowserDarkModeCommandPatchesManagedChromiumWrapper(t *testing.T
 		"--blink-settings=preferredColorScheme=1",
 		"--force-dark-mode --enable-features=WebUIDarkMode --blink-settings=preferredColorScheme=2",
 		`--user-data-dir=\"\$profile\"`,
-		"CRABBOX_DESKTOP_ENV=wayland",
+		`CRABBOX_DESKTOP_ENV=(wayland|lxqt)`,
 		"--ozone-platform=wayland",
 		"sudo install -m 0755",
 	} {
@@ -117,7 +117,7 @@ func TestDesktopLinuxTerminalSupportsWaylandAndX11(t *testing.T) {
 
 func TestDesktopClickRemoteCommandSupportsManagedTargets(t *testing.T) {
 	linux := desktopClickRemoteCommand(SSHTarget{TargetOS: targetLinux}, 12, 34)
-	for _, want := range []string{"CRABBOX_DESKTOP_ENV:-xfce", "not supported on --desktop-env wayland", "DISPLAY=\"${DISPLAY:-:99}\"", "xdotool mousemove 12 34 click 1"} {
+	for _, want := range []string{"CRABBOX_DESKTOP_ENV:-xfce", "not supported on Wayland desktop envs", "DISPLAY=\"${DISPLAY:-:99}\"", "xdotool mousemove 12 34 click 1"} {
 		if !strings.Contains(linux, want) {
 			t.Fatalf("linux click command missing %q:\n%s", want, linux)
 		}
@@ -552,7 +552,7 @@ func TestDesktopVideoTargetGate(t *testing.T) {
 
 func TestRejectWaylandDesktopVideoEnv(t *testing.T) {
 	err := rejectWaylandDesktopVideoEnv(map[string]string{"CRABBOX_DESKTOP_ENV": desktopEnvWayland}, "desktop proof")
-	if err == nil || !strings.Contains(err.Error(), "does not support --desktop-env wayland") {
+	if err == nil || !strings.Contains(err.Error(), "does not support Wayland desktop envs") {
 		t.Fatalf("err=%v, want wayland video rejection", err)
 	}
 	if err := rejectWaylandDesktopVideoEnv(map[string]string{"CRABBOX_DESKTOP_ENV": desktopEnvXFCE}, "desktop proof"); err != nil {
@@ -565,7 +565,7 @@ func TestDesktopVideoRemoteCommandRejectsWayland(t *testing.T) {
 	for _, want := range []string{
 		"/var/lib/crabbox/desktop.env",
 		`CRABBOX_DESKTOP_ENV:-xfce`,
-		"does not support --desktop-env wayland",
+		"does not support Wayland desktop envs",
 		"x11grab",
 	} {
 		if !strings.Contains(got, want) {

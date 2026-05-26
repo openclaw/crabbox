@@ -13,6 +13,7 @@ const (
 	desktopEnvPath         = "/var/lib/crabbox/desktop.env"
 	desktopEnvXFCE         = "xfce"
 	desktopEnvWayland      = "wayland"
+	desktopEnvLXQT         = "lxqt"
 	managedVNCPort         = "5900"
 	managedCodePort        = "8080"
 	codeServerBinary       = "/usr/local/bin/code-server"
@@ -81,13 +82,22 @@ func validateDesktopEnv(cfg Config) error {
 	switch normalizedDesktopEnv(cfg.DesktopEnv) {
 	case desktopEnvXFCE:
 		return nil
-	case desktopEnvWayland:
+	case desktopEnvWayland, desktopEnvLXQT:
 		if cfg.Desktop && cfg.TargetOS != targetLinux {
-			return exit(2, "desktopEnv=wayland requires target=linux")
+			return exit(2, "desktopEnv=%s requires target=linux", normalizedDesktopEnv(cfg.DesktopEnv))
 		}
 		return nil
 	default:
-		return exit(2, "desktopEnv must be xfce or wayland")
+		return exit(2, "desktopEnv must be xfce, wayland, or lxqt")
+	}
+}
+
+func isWaylandDesktopEnv(value string) bool {
+	switch normalizedDesktopEnv(value) {
+	case desktopEnvWayland, desktopEnvLXQT:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -189,18 +199,22 @@ func probeStaticDesktop(ctx context.Context, cfg Config, target SSHTarget) error
 	}
 	check := staticDesktopProbeCommand(cfg, target)
 	if err := runSSHQuiet(ctx, target, check); err != nil {
-		if normalizedDesktopEnv(cfg.DesktopEnv) == desktopEnvWayland {
-			return exit(2, "target=linux does not expose a Crabbox Wayland desktop; create %s with CRABBOX_DESKTOP_ENV=wayland, XDG_RUNTIME_DIR, and WAYLAND_DISPLAY, then start labwc/WayVNC on 127.0.0.1:5900", desktopEnvPath)
+		if isWaylandDesktopEnv(cfg.DesktopEnv) {
+			return exit(2, "target=linux does not expose a Crabbox Wayland desktop; create %s with CRABBOX_DESKTOP_ENV=wayland or lxqt, XDG_RUNTIME_DIR, and WAYLAND_DISPLAY, then start labwc/WayVNC on 127.0.0.1:5900", desktopEnvPath)
 		}
-		return exit(2, "target=linux does not expose a loopback X11 VNC desktop; start Xvfb/x11vnc on 127.0.0.1:5900 or request --desktop-env wayland for a configured Wayland target")
+		return exit(2, "target=linux does not expose a loopback X11 VNC desktop; start Xvfb/x11vnc on 127.0.0.1:5900 or request --desktop-env wayland or lxqt for a configured Wayland target")
 	}
 	return nil
 }
 
 func staticDesktopProbeCommand(cfg Config, target SSHTarget) string {
-	if normalizedDesktopEnv(cfg.DesktopEnv) == desktopEnvWayland {
+	if isWaylandDesktopEnv(cfg.DesktopEnv) {
+		envCheck := `case "${CRABBOX_DESKTOP_ENV:-}" in wayland|lxqt) ;; *) exit 1 ;; esac`
+		if normalizedDesktopEnv(cfg.DesktopEnv) == desktopEnvLXQT {
+			envCheck = `test "${CRABBOX_DESKTOP_ENV:-}" = "lxqt"`
+		}
 		return `test -f ` + shellQuote(desktopEnvPath) + ` && . ` + shellQuote(desktopEnvPath) + ` && ` +
-			`test "${CRABBOX_DESKTOP_ENV:-}" = "wayland" && ` +
+			envCheck + ` && ` +
 			`test -n "${XDG_RUNTIME_DIR:-}" && test -n "${WAYLAND_DISPLAY:-}" && ` +
 			`test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" && ` +
 			`pgrep -x labwc >/dev/null && pgrep -x wayvnc >/dev/null && ` + vncLoopbackCheckCommand(target)

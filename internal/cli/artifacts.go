@@ -760,8 +760,8 @@ func desktopVideoRemoteCommand(duration time.Duration, fps float64) string {
 	frameRate := strconv.FormatFloat(fps, 'f', 3, 64)
 	return fmt.Sprintf(`set -eu
 if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
-if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "wayland" ]; then
-  echo "video capture does not support --desktop-env wayland yet; use an X11 desktop" >&2
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
+  echo "video capture does not support Wayland desktop envs yet; use an X11 desktop" >&2
   exit 2
 fi
 export DISPLAY="${DISPLAY:-:99}"
