@@ -12,7 +12,7 @@ import (
 // Python SDK, but the existing `modalSandbox` struct that the rest of this
 // backend works with does not populate them — extending the provider to
 // surface tunnels would be a runtime-behavior change, which is explicitly
-// out of scope for PR #136.
+// out of scope for https://github.com/openclaw/crabbox/pull/136.
 //
 // So the modal adapter implements core.BridgeProvider only to return
 // core.ErrBridgeNotImplemented. The pond bridge resolver maps that error to
