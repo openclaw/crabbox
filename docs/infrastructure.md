@@ -28,6 +28,13 @@ https://crabbox-coordinator.services-91b.workers.dev
 
 The `crabbox.openclaw.ai/*` Worker route is the stable automation and browser-login endpoint. `crabbox-access.openclaw.ai/*` is the Cloudflare Access-protected route for service-token proof and hardened automation. `crabbox.clawd.bot/*` and the workers.dev URL remain fallback routes.
 
+Both aliases proxy to the same `crabbox-coordinator` Worker script, so the
+Worker-side auth behavior is identical for the same identity on either
+alias. The only difference is the Cloudflare Access edge gate sits ahead of
+`crabbox-access.openclaw.ai/*` only — see `docs/security.md`
+"Authentication" for the defense-in-depth model and `worker/wrangler.jsonc`
+for the inline route-block annotation.
+
 ## Cloudflare
 
 Use Cloudflare for:

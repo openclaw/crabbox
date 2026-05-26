@@ -32,6 +32,24 @@
     "CRABBOX_ARTIFACTS_REGION": "auto",
     "CRABBOX_ARTIFACTS_ENDPOINT_URL": "https://91b59577e757131d68d55a471fe32aca.r2.cloudflarestorage.com",
   },
+  // Dual-alias routing — both routes hit the same Worker script, but they
+  // differ in what fires *before* the Worker:
+  //   - crabbox.openclaw.ai          → Worker is the authoritative auth
+  //                                    boundary. Browser-login + bearer-token
+  //                                    automation traffic terminates here.
+  //                                    Unauthenticated probes hit the Worker
+  //                                    directly and get 401 (or 200 for the
+  //                                    intentional /v1/health public route).
+  //   - crabbox-access.openclaw.ai   → Cloudflare Access service-token gate
+  //                                    at the edge ahead of the Worker; the
+  //                                    same Worker then enforces the same
+  //                                    bearer-auth. Unauthenticated probes
+  //                                    get 403 from Access without reaching
+  //                                    the Worker.
+  //
+  // This is the intentional defense-in-depth design, not an asymmetry bug.
+  // See docs/security.md "Authentication" and docs/infrastructure.md
+  // "Current Intended Setup" for the full model.
   "routes": [
     {
       "pattern": "crabbox.openclaw.ai/*",

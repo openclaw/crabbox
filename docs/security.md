@@ -21,6 +21,22 @@ Cloudflare Access service-token credentials at the edge. After that, the same
 Worker still requires a Crabbox signed user token or shared operator bearer
 token before lease, run, log, usage, or admin routes are allowed.
 
+The dual aliases therefore behave differently for *unauthenticated* probes
+even though they front the same Worker:
+
+```text
+curl https://crabbox.openclaw.ai/v1/health           # → 200 (Worker public route)
+curl https://crabbox-access.openclaw.ai/v1/health    # → 403 (Access edge gate)
+```
+
+This is the intended posture. For an authenticated caller that holds both a
+Crabbox bearer token AND a valid Cloudflare Access service-token pair, both
+aliases return the same Worker response for the same Crabbox identity. A
+mismatch in `owner`, `org`, or HTTP status across aliases for the same
+identity would indicate a real per-alias asymmetry and should be filed as a
+security bug. See `worker/test/http.test.ts` for the regression test that
+locks in this property.
+
 MVP:
 
 - One-time PIN Access remains available for early fallback.

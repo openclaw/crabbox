@@ -267,6 +267,40 @@ describe("coordinator auth", () => {
     expect(requestOwner(next)).toBe("friend@example.com");
   });
 
+  it("returns identical auth context for the same bearer on both production aliases", async () => {
+    // Regression for Phase 17 W2.6 (P16 W2.4 F1 reframing).
+    //
+    // Both production routes — crabbox.openclaw.ai/* and
+    // crabbox-access.openclaw.ai/* — proxy to the same Worker script. The
+    // Cloudflare Access edge gate on the second alias is a defense-in-depth
+    // layer; the Worker's own auth must behave identically for the same
+    // Crabbox identity on either alias. If a future change introduces
+    // per-alias branching in the Worker (e.g. trusting Access identity
+    // headers only on the access-gated alias), this test catches it.
+    const env = {
+      CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_SHARED_OWNER: "automation@example.com",
+      CRABBOX_DEFAULT_ORG: "openclaw",
+    };
+    const headers = { authorization: "Bearer shared" };
+    const canonical = await authenticateRequest(
+      new Request("https://crabbox.openclaw.ai/v1/whoami", { headers }),
+      env,
+    );
+    const accessGated = await authenticateRequest(
+      new Request("https://crabbox-access.openclaw.ai/v1/whoami", { headers }),
+      env,
+    );
+    expect(canonical).toEqual(accessGated);
+    expect(canonical).toMatchObject({
+      authorized: true,
+      admin: false,
+      auth: "bearer",
+      owner: "automation@example.com",
+      org: "openclaw",
+    });
+  });
+
   it("redirects browser portal auth routes to the configured public origin", async () => {
     let fleetCalled = false;
     const env = {
