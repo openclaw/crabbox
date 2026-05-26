@@ -6,6 +6,10 @@
 
 - Added a portable `--os`/`os` lease selector with Ubuntu 26.04 as the preferred Linux image where provider catalogs support it, while preserving explicit provider image overrides.
 
+### Fixed
+
+- Fixed Daytona provider sandbox inventory to use Daytona's cursor-based listing API.
+
 ## 0.20.0 - 2026-05-26
 
 ### Added
@@ -638,7 +642,7 @@ and tightens coordinator auth boundaries.
 - Added best-effort AWS vCPU quota preflight for brokered launch fallback, with concise quota-code attempt metadata when a requested instance type cannot fit the applied quota.
 - Added Blacksmith Testbox timing JSON output that reports delegated sync in the same schema as AWS and Hetzner runs.
 - Added coordinator-orphan hints to human `crabbox list` output when provider machines carry no active coordinator lease.
-- Added the Access-protected coordinator route `https://crabbox-access.openclaw.ai` for service-token proof and hardened automation.
+- Added the Access-protected coordinator route `https://broker-access.example.com` for service-token proof and hardened automation.
 - Added Cloudflare Access service-token headers for coordinator CLI requests. Thanks @stainlu.
 - Added optional GitHub team allowlisting for browser-login tokens with `CRABBOX_GITHUB_ALLOWED_TEAMS`. Thanks @stainlu.
 - Added separate coordinator admin-token auth so shared operator tokens no longer grant admin routes.
@@ -659,7 +663,7 @@ and tightens coordinator auth boundaries.
 - Brokered lease records now keep the requested AWS instance type plus concise provisioning-attempt metadata when fallback chooses a different type.
 - Coordinator run history now records the resolved lease provider/class/type when a lease exists, avoiding stale requested-type entries after fallback.
 - Brokered AWS lease creation now uses the promoted AWS image when no explicit `awsAMI` or `CRABBOX_AWS_AMI` override is supplied.
-- Moved the deployed coordinator route to the OpenClaw Cloudflare account at `https://crabbox.openclaw.ai` and scoped default broker org/auth settings to `openclaw`.
+- Moved the deployed coordinator route to the OpenClaw Cloudflare account at `https://broker.example.com` and scoped default broker org/auth settings to `openclaw`.
 - User config writes now force `0600` permissions, and `crabbox doctor` reports overly broad config permissions.
 - Image route validation now rejects noncanonical lease IDs, invalid AMI IDs, invalid AMI names, non-AWS leases, and promotion attempts before an image reaches `available`.
 
@@ -699,7 +703,7 @@ Crabbox 0.2.0 hardens the brokered runner path after real AWS and Blacksmith Tes
 
 ### Changed
 
-- Updated CLI defaults, docs, examples, and auth guidance to prefer `https://crabbox.openclaw.ai`.
+- Updated CLI defaults, docs, examples, and auth guidance to prefer `https://broker.example.com`.
 - Clarified that Cloudflare Access OAuth and Crabbox CLI OAuth are separate GitHub OAuth apps with separate callback URLs.
 - Scoped normal GitHub-login users to their own leases, run history, logs, and usage; shared-token admin auth remains required for pool and fleet-wide operator views.
 - AWS coordinator-created security groups now allow SSH only from configured CIDRs, the CLI-detected outbound IPv4 CIDR, or the request source IP instead of adding world-open SSH ingress.

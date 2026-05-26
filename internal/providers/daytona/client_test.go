@@ -1,0 +1,89 @@
+package daytona
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
+)
+
+func TestDaytonaListCrabboxSandboxesUsesCursorPagination(t *testing.T) {
+	var cursors []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sandbox" {
+			t.Fatalf("path=%s, want /sandbox", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer api-token" {
+			t.Fatalf("authorization=%q", got)
+		}
+		if got := r.Header.Get("X-Daytona-Organization-ID"); got != "org-123" {
+			t.Fatalf("organization=%q", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "100" {
+			t.Fatalf("limit=%q", got)
+		}
+		if got := r.URL.Query().Get("labels"); got != `{"crabbox":"true"}` {
+			t.Fatalf("labels=%q", got)
+		}
+		cursors = append(cursors, r.URL.Query().Get("cursor"))
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("cursor") {
+		case "":
+			_, _ = w.Write([]byte(`{"items":[` + daytonaListItemJSON("sandbox-one", "slug-one") + `],"nextCursor":"cursor-2"}`))
+		case "cursor-2":
+			_, _ = w.Write([]byte(`{"items":[` + daytonaListItemJSON("sandbox-two", "slug-two") + `],"nextCursor":null}`))
+		default:
+			t.Fatalf("unexpected cursor=%q", r.URL.Query().Get("cursor"))
+		}
+	}))
+	defer srv.Close()
+
+	apiCfg := apidaytona.NewConfiguration()
+	apiCfg.Servers = apidaytona.ServerConfigurations{{URL: srv.URL}}
+	apiCfg.HTTPClient = srv.Client()
+	client := &daytonaSDKClient{api: apidaytona.NewAPIClient(apiCfg), token: "api-token", orgID: "org-123"}
+
+	got, err := client.ListCrabboxSandboxes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("sandboxes=%d, want 2", len(got))
+	}
+	if got[0].GetId() != "sandbox-one" || got[0].GetLabels()["slug"] != "slug-one" {
+		t.Fatalf("first sandbox=%#v labels=%#v", got[0], got[0].GetLabels())
+	}
+	if got[1].GetId() != "sandbox-two" || got[1].GetLabels()["slug"] != "slug-two" {
+		t.Fatalf("second sandbox=%#v labels=%#v", got[1], got[1].GetLabels())
+	}
+	resolved, leaseID, err := resolveDaytonaSandbox(context.Background(), client, Config{}, "slug-two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.GetId() != "sandbox-two" || leaseID != "lease-two" {
+		t.Fatalf("resolved=%s lease=%s, want sandbox-two lease-two", resolved.GetId(), leaseID)
+	}
+	if len(cursors) != 4 || cursors[0] != "" || cursors[1] != "cursor-2" || cursors[2] != "" || cursors[3] != "cursor-2" {
+		t.Fatalf("cursors=%#v, want two cursor-paginated inventory scans", cursors)
+	}
+}
+
+func daytonaListItemJSON(id, slug string) string {
+	return `{
+		"id": "` + id + `",
+		"organizationId": "org-123",
+		"name": "` + id + `",
+		"target": "us",
+		"user": "daytona",
+		"public": false,
+		"cpu": 2,
+		"gpu": 0,
+		"memory": 4,
+		"disk": 20,
+		"labels": {"crabbox": "true", "lease": "lease-` + id[len(id)-3:] + `", "slug": "` + slug + `"},
+		"toolboxProxyUrl": "https://toolbox.example/` + id + `",
+		"state": "started"
+	}`
+}

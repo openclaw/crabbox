@@ -242,8 +242,12 @@ func (c *daytonaSDKClient) GetSandbox(ctx context.Context, id string) (*daytona.
 func (c *daytonaSDKClient) ListCrabboxSandboxes(ctx context.Context) ([]daytona.Sandbox, error) {
 	filter, _ := json.Marshal(map[string]string{"crabbox": "true"})
 	var all []daytona.Sandbox
-	for page := float32(1); ; page++ {
-		req := c.api.SandboxAPI.ListSandboxesPaginated(c.ctx(ctx)).Page(page).Limit(100).Labels(string(filter))
+	var cursor string
+	for {
+		req := c.api.SandboxAPI.ListSandboxes(c.ctx(ctx)).Limit(100).Labels(string(filter))
+		if cursor != "" {
+			req = req.Cursor(cursor)
+		}
 		if c.orgID != "" {
 			req = req.XDaytonaOrganizationID(c.orgID)
 		}
@@ -254,11 +258,74 @@ func (c *daytonaSDKClient) ListCrabboxSandboxes(ctx context.Context) ([]daytona.
 		if out == nil {
 			return all, nil
 		}
-		all = append(all, out.GetItems()...)
-		if out.GetTotalPages() <= page || len(out.GetItems()) == 0 {
+		for _, item := range out.GetItems() {
+			all = append(all, daytonaSandboxFromListItem(item))
+		}
+		nextCursor := strings.TrimSpace(out.GetNextCursor())
+		if nextCursor == "" {
 			return all, nil
 		}
+		cursor = nextCursor
 	}
+}
+
+func daytonaSandboxFromListItem(item daytona.SandboxListItem) daytona.Sandbox {
+	sandbox := daytona.Sandbox{}
+	sandbox.SetId(item.GetId())
+	sandbox.SetOrganizationId(item.GetOrganizationId())
+	sandbox.SetName(item.GetName())
+	sandbox.SetTarget(item.GetTarget())
+	sandbox.SetUser(item.GetUser())
+	sandbox.SetPublic(item.GetPublic())
+	sandbox.SetCpu(item.GetCpu())
+	sandbox.SetGpu(item.GetGpu())
+	sandbox.SetMemory(item.GetMemory())
+	sandbox.SetDisk(item.GetDisk())
+	sandbox.SetLabels(item.GetLabels())
+	sandbox.SetToolboxProxyUrl(item.GetToolboxProxyUrl())
+	if state, ok := item.GetStateOk(); ok && state != nil {
+		sandbox.SetState(*state)
+	}
+	if desiredState, ok := item.GetDesiredStateOk(); ok && desiredState != nil {
+		sandbox.SetDesiredState(*desiredState)
+	}
+	if snapshot, ok := item.GetSnapshotOk(); ok && snapshot != nil {
+		sandbox.SetSnapshot(*snapshot)
+	}
+	if errorReason, ok := item.GetErrorReasonOk(); ok && errorReason != nil {
+		sandbox.SetErrorReason(*errorReason)
+	}
+	if recoverable, ok := item.GetRecoverableOk(); ok && recoverable != nil {
+		sandbox.SetRecoverable(*recoverable)
+	}
+	if backupState, ok := item.GetBackupStateOk(); ok && backupState != nil {
+		sandbox.SetBackupState(*backupState)
+	}
+	if autoStopInterval, ok := item.GetAutoStopIntervalOk(); ok && autoStopInterval != nil {
+		sandbox.SetAutoStopInterval(*autoStopInterval)
+	}
+	if autoArchiveInterval, ok := item.GetAutoArchiveIntervalOk(); ok && autoArchiveInterval != nil {
+		sandbox.SetAutoArchiveInterval(*autoArchiveInterval)
+	}
+	if autoDeleteInterval, ok := item.GetAutoDeleteIntervalOk(); ok && autoDeleteInterval != nil {
+		sandbox.SetAutoDeleteInterval(*autoDeleteInterval)
+	}
+	if createdAt, ok := item.GetCreatedAtOk(); ok && createdAt != nil {
+		sandbox.SetCreatedAt(*createdAt)
+	}
+	if updatedAt, ok := item.GetUpdatedAtOk(); ok && updatedAt != nil {
+		sandbox.SetUpdatedAt(*updatedAt)
+	}
+	if lastActivityAt, ok := item.GetLastActivityAtOk(); ok && lastActivityAt != nil {
+		sandbox.SetLastActivityAt(*lastActivityAt)
+	}
+	if daemonVersion, ok := item.GetDaemonVersionOk(); ok && daemonVersion != nil {
+		sandbox.SetDaemonVersion(*daemonVersion)
+	}
+	if runnerID, ok := item.GetRunnerIdOk(); ok && runnerID != nil {
+		sandbox.SetRunnerId(*runnerID)
+	}
+	return sandbox
 }
 
 func (c *daytonaSDKClient) StartSandbox(ctx context.Context, id string) (*daytona.Sandbox, error) {
