@@ -59,6 +59,7 @@ func TestRemoteFindJUnitResultFiles(t *testing.T) {
 		"-name 'TEST-*.xml'",
 		"-name 'results.xml'",
 		"&& { count=0;",
+		"[ -f '.crabbox/results-start' ] || exit 0",
 		"'.crabbox/results-start' -nt \"$f\"",
 		"| sort | while IFS= read -r f",
 		"bs=4096 count=1",

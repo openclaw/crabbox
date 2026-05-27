@@ -89,6 +89,11 @@ func remoteFindJUnitResultFiles(workdir, marker string) string {
 	b.WriteString(shellQuote(workdir))
 	b.WriteString(" && { ")
 	b.WriteString("count=0; ")
+	if strings.TrimSpace(marker) != "" {
+		b.WriteString("[ -f ")
+		b.WriteString(shellQuote(marker))
+		b.WriteString(" ] || exit 0; ")
+	}
 	b.WriteString(`find . \( -path './node_modules' -o -path '*/node_modules' -o -path './.git' -o -path '*/.git' \) -prune -o -type f \( -name 'junit*.xml' -o -name 'TEST-*.xml' -o -name 'results.xml' \)`)
 	b.WriteString(` -print 2>/dev/null | sort | while IFS= read -r f; do `)
 	if strings.TrimSpace(marker) != "" {
