@@ -29,7 +29,7 @@ crabbox login --url <url> [--provider hetzner|aws|azure|gcp] [--no-browser]
 crabbox login --url <url> --token-stdin [--provider hetzner|aws|azure|gcp]
 crabbox logout
 crabbox whoami [--json]
-crabbox init [--force]
+crabbox init [--force] [--detect]
 crabbox config show [--json]
 crabbox config path
 crabbox config set-broker --url <url> --token-stdin [--provider hetzner|aws|azure|gcp]

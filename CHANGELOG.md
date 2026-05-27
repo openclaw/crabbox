@@ -2,6 +2,10 @@
 
 ## 0.21.1 - Unreleased
 
+### Added
+
+- Added `crabbox init --detect` to scan common Go, Node, Rust, and Makefile project markers and generate a repo-local `jobs.detected` remote check plus matching preflight tools. Thanks @zozo123.
+
 ### Fixed
 
 - Fixed brokered AWS provisioning to compact stale Crabbox SSH ingress after EC2 reports the security group rule limit, then retry the current source rule before failing.

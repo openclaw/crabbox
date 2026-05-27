@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 func (a App) initProject(_ context.Context, args []string) error {
 	fs := newFlagSet("init", a.Stderr)
 	force := fs.Bool("force", false, "overwrite generated files")
+	detect := fs.Bool("detect", false, "detect repo test commands and write a jobs.detected entry")
 	workflow := fs.String("workflow", ".github/workflows/crabbox.yml", "workflow path")
 	skill := fs.String("skill", ".agents/skills/crabbox/SKILL.md", "agent skill path")
 	config := fs.String("config", ".crabbox.yaml", "repo config path")
@@ -20,16 +22,27 @@ func (a App) initProject(_ context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	detected := initProjectDetection{}
+	if *detect {
+		detected = detectInitProject(repo.Root)
+	}
 	files := map[string]string{
-		filepath.Join(repo.Root, *config):   projectConfigTemplate(repo.Name),
+		filepath.Join(repo.Root, *config):   projectConfigTemplate(repo.Name, detected),
 		filepath.Join(repo.Root, *workflow): workflowTemplate(),
-		filepath.Join(repo.Root, *skill):    skillTemplate(),
+		filepath.Join(repo.Root, *skill):    skillTemplate(detected),
 	}
 	for path, content := range files {
 		if err := writeInitFile(path, content, *force); err != nil {
 			return err
 		}
 		fmt.Fprintf(a.Stdout, "wrote %s\n", path)
+	}
+	if *detect {
+		if len(detected.Commands) == 0 {
+			fmt.Fprintln(a.Stdout, "detected no runnable project commands; edit .crabbox.yaml jobs manually")
+		} else {
+			fmt.Fprintf(a.Stdout, "detected job: crabbox job run detected\n")
+		}
 	}
 	return nil
 }
@@ -47,8 +60,24 @@ func writeInitFile(path, content string, force bool) error {
 	return nil
 }
 
-func projectConfigTemplate(repoName string) string {
-	return fmt.Sprintf(`profile: %s-check
+type initProjectDetection struct {
+	Commands       []string
+	PreflightTools []string
+	SyncExcludes   []string
+	EnvAllow       []string
+}
+
+func projectConfigTemplate(repoName string, detected initProjectDetection) string {
+	syncExcludes := appendUniqueStrings([]string{
+		".cache",
+		".turbo",
+		"dist",
+		"node_modules",
+	}, detected.SyncExcludes...)
+	envAllow := appendUniqueStrings([]string{"CI", "NODE_OPTIONS"}, detected.EnvAllow...)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, `profile: %s-check
 class: beast
 capacity:
   market: spot
@@ -72,21 +101,56 @@ sync:
   failFiles: 150000
   failBytes: 21474836480
   exclude:
-    - .cache
-    - .turbo
-    - dist
-    - node_modules
-env:
+`, repoName)
+	writeYAMLList(&b, syncExcludes, 4)
+	if len(detected.PreflightTools) > 0 {
+		b.WriteString("run:\n")
+		b.WriteString("  preflightTools:\n")
+		writeYAMLList(&b, detected.PreflightTools, 4)
+	}
+	b.WriteString(`env:
   allow:
-    - CI
-    - NODE_OPTIONS
-ssh:
+`)
+	writeYAMLList(&b, envAllow, 4)
+	b.WriteString(`ssh:
   user: crabbox
   port: "2222"
   # Ordered fallback ports tried after ssh.port; use [] to disable fallback.
   fallbackPorts:
     - "22"
-`, repoName)
+`)
+	if len(detected.Commands) > 0 {
+		b.WriteString("jobs:\n")
+		b.WriteString("  detected:\n")
+		b.WriteString("    shell: true\n")
+		b.WriteString("    command: >\n")
+		for i, command := range detected.Commands {
+			line := command
+			if i < len(detected.Commands)-1 {
+				line += " &&"
+			}
+			fmt.Fprintf(&b, "      %s\n", line)
+		}
+		b.WriteString("    stop: auto\n")
+	}
+	return b.String()
+}
+
+func writeYAMLList(b *strings.Builder, values []string, indent int) {
+	prefix := strings.Repeat(" ", indent)
+	for _, value := range values {
+		fmt.Fprintf(b, "%s- %s\n", prefix, yamlScalar(value))
+	}
+}
+
+func yamlScalar(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return `""`
+	}
+	if strings.ContainsAny(value, ":#[]{}&,*!?|>'\"%@\t`") {
+		return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
+	}
+	return value
 }
 
 func workflowTemplate() string {
@@ -189,8 +253,9 @@ jobs:
 `
 }
 
-func skillTemplate() string {
-	return `# Crabbox
+func skillTemplate(detected initProjectDetection) string {
+	var b strings.Builder
+	b.WriteString(`# Crabbox
 
 Use Crabbox for remote Linux verification.
 
@@ -203,5 +268,9 @@ Workflow:
 - Stop with crabbox stop <slug> when finished.
 
 Do not debug product failures on a reused box that fails sync sanity. Stop it, warm a fresh box, and rerun.
-`
+`)
+	if len(detected.Commands) > 0 {
+		b.WriteString("\nDetected workflow:\n- Prefer crabbox job run detected for the broad remote check.\n\n```sh\ncrabbox job run detected\n```\n")
+	}
+	return b.String()
 }

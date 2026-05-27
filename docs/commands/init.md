@@ -6,6 +6,7 @@ optional Actions hydration bridge and agent skill.
 
 ```sh
 crabbox init
+crabbox init --detect
 crabbox init --force
 crabbox init --workflow .github/workflows/crabbox-test.yml
 ```
@@ -40,6 +41,19 @@ Open the file after `init` and adjust it to match the repo:
 - pin `sync.baseRef` to the project's default branch.
 
 See [Configuration](../features/configuration.md) for the full schema.
+
+With `--detect`, `init` scans common project markers and adds a `jobs.detected`
+entry when it can infer a broad check. Detection is intentionally conservative:
+
+- `go.mod` creates `go test ./...` commands, including nested modules;
+- `package.json` uses the first script from `test:ci`, `test`, `check`, or
+  `build`, with npm, pnpm, Yarn, or Bun install commands based on lockfiles or
+  `packageManager`;
+- `Cargo.toml` creates `cargo test`;
+- a root `Makefile` with a `test` target creates `make test`.
+
+The generated job is just repo-local YAML. Edit it when the real project check
+needs services, secrets, sharding, or a narrower command.
 
 ## `.github/workflows/crabbox.yml`
 
@@ -76,6 +90,7 @@ skill is read by OpenClaw and similar agent runtimes that auto-discover
 
 ```text
 --force                 overwrite generated files
+--detect                detect repo test commands and write jobs.detected
 --config <path>         repo config path (default ./.crabbox.yaml)
 --workflow <path>       Actions workflow path (default .github/workflows/crabbox.yml)
 --skill <path>          agent skill path (default .agents/skills/crabbox/SKILL.md)
@@ -94,6 +109,7 @@ crabbox doctor              # validate the config
 crabbox sync-plan           # preview what would sync
 crabbox warmup              # acquire a lease
 crabbox run -- pnpm test    # run a command
+crabbox job run detected    # run the detected job, when generated
 ```
 
 Related docs:
