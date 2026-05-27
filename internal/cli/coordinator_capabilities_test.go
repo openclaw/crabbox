@@ -118,6 +118,8 @@ func TestProbeDesktopEnvCommandIncludesXAuthority(t *testing.T) {
 		"XAUTHORITY",
 		"XDG_RUNTIME_DIR",
 		"WAYLAND_DISPLAY",
+		"GDK_BACKEND",
+		"MOZ_ENABLE_WAYLAND",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("desktop env probe missing %q:\n%s", want, got)

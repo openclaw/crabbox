@@ -196,7 +196,8 @@ families, or provider image names.
 operator takeover. Linux defaults to Xvfb, slim XFCE, and x11vnc; use
 `--desktop-env wayland` for the experimental labwc/WayVNC profile on Ubuntu
 26.04-compatible images, or `--desktop-env gnome` for a GNOME-apps profile with
-GNOME Panel taskbars on labwc/WayVNC. It does not imply a browser. Use
+GNOME Panel taskbars on labwc/WayVNC. GNOME-profile app launches use Xwayland
+so the panel can list open windows. It does not imply a browser. Use
 `--desktop --browser` when a headed browser should run in the visible display.
 
 `--code` provisions `code-server` for Linux leases and enables

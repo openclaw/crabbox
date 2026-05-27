@@ -236,7 +236,7 @@ func probeDesktopEnv(ctx context.Context, target SSHTarget) (map[string]string, 
 
 func probeDesktopEnvCommand() string {
 	return `if [ -f ` + shellQuote(desktopEnvPath) + ` ]; then . ` + shellQuote(desktopEnvPath) + `; fi
-for key in CRABBOX_DESKTOP_ENV DISPLAY XAUTHORITY XDG_RUNTIME_DIR WAYLAND_DISPLAY; do
+for key in CRABBOX_DESKTOP_ENV DISPLAY XAUTHORITY XDG_RUNTIME_DIR WAYLAND_DISPLAY GDK_BACKEND MOZ_ENABLE_WAYLAND; do
   eval "value=\${$key:-}"
   [ -n "$value" ] && printf '%s=%s\n' "$key" "$value"
 done`

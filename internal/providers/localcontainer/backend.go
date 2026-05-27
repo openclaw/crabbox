@@ -1157,6 +1157,8 @@ WAYLAND_DISPLAY=$display
 EOF
 if [ "$desktop_env" = "gnome" ]; then
   printf 'DISPLAY=:0\n' >>/var/lib/crabbox/desktop.env
+  printf 'GDK_BACKEND=x11\n' >>/var/lib/crabbox/desktop.env
+  printf 'MOZ_ENABLE_WAYLAND=0\n' >>/var/lib/crabbox/desktop.env
 fi
 chown "$user" /var/lib/crabbox/desktop.env
 chmod 0644 /var/lib/crabbox/desktop.env

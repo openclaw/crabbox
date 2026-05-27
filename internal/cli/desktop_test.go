@@ -11,7 +11,7 @@ func TestDesktopLaunchRemoteCommandUsesDetachedPOSIXSession(t *testing.T) {
 	got := desktopLaunchRemoteCommand(
 		SSHTarget{TargetOS: targetLinux},
 		"/work/crabbox/cbx_1/repo",
-		map[string]string{"DISPLAY": ":99", "BROWSER": "/usr/bin/chromium"},
+		map[string]string{"DISPLAY": ":99", "BROWSER": "/usr/bin/chromium", "GDK_BACKEND": "x11", "MOZ_ENABLE_WAYLAND": "0"},
 		[]string{"/usr/bin/chromium", "https://example.com"},
 		true,
 	)
@@ -20,6 +20,8 @@ func TestDesktopLaunchRemoteCommandUsesDetachedPOSIXSession(t *testing.T) {
 		"cd '/work/crabbox/cbx_1/repo'",
 		"DISPLAY=':99'",
 		"BROWSER='/usr/bin/chromium'",
+		"GDK_BACKEND='x11'",
+		"MOZ_ENABLE_WAYLAND='0'",
 		"setsid '/usr/bin/chromium' 'https://example.com'",
 		"crabbox-desktop-launch.log",
 		"wmctrl -r :ACTIVE: -b remove,fullscreen",

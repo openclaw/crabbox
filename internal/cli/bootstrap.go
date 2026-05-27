@@ -892,7 +892,7 @@ func cloudInitOptionalWriteFiles(cfg Config) string {
 func cloudInitWaylandDesktopWriteFiles(desktopEnv string) string {
 	displayEnv := ""
 	if desktopEnv == desktopEnvGnome {
-		displayEnv = "      DISPLAY=:0\n"
+		displayEnv = "      DISPLAY=:0\n      GDK_BACKEND=x11\n      MOZ_ENABLE_WAYLAND=0\n"
 	}
 	return `  - path: /usr/local/bin/crabbox-start-wayland-desktop
     permissions: '0755'
@@ -995,7 +995,7 @@ func cloudInitOptionalBootstrap(cfg Config) string {
     gnome-terminal -- bash -l >/tmp/crabbox-gnome-terminal.log 2>&1 &
     nautilus --new-window "$HOME" >/tmp/crabbox-nautilus.log 2>&1 &
 `
-			desktopEnvExtra = "    DISPLAY=:0\n"
+			desktopEnvExtra = "    DISPLAY=:0\n    GDK_BACKEND=x11\n    MOZ_ENABLE_WAYLAND=0\n"
 		}
 		parts = append(parts, `    retry apt-get install -y --no-install-recommends `+packages+`
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox

@@ -615,7 +615,10 @@ function optionalWriteFiles(config: LeaseConfig): string {
   }
   if (config.desktopEnv !== "xfce") {
     const desktopEnv = config.desktopEnv;
-    const displayEnv = desktopEnv === "gnome" ? "      DISPLAY=:0\n" : "";
+    const displayEnv =
+      desktopEnv === "gnome"
+        ? "      DISPLAY=:0\n      GDK_BACKEND=x11\n      MOZ_ENABLE_WAYLAND=0\n"
+        : "";
     return `  - path: /usr/local/bin/crabbox-start-wayland-desktop
     permissions: '0755'
     content: |
@@ -1006,7 +1009,9 @@ function optionalBootstrap(config: LeaseConfig): string {
     const packages = gnome
       ? "labwc wayvnc gnome-panel wlr-randr grim slurp wtype wl-clipboard dbus-user-session xwayland xdg-desktop-portal-wlr xdg-desktop-portal-gtk gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme fonts-dejavu-core fonts-liberation iproute2 openssl procps"
       : "labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps";
-    const desktopEnvExtra = gnome ? "    DISPLAY=:0\n" : "";
+    const desktopEnvExtra = gnome
+      ? "    DISPLAY=:0\n    GDK_BACKEND=x11\n    MOZ_ENABLE_WAYLAND=0\n"
+      : "";
     const autostart = gnome
       ? `    wlr-randr --output HEADLESS-1 --custom-mode 1920x1080 >/tmp/crabbox-wlr-randr.log 2>&1 || true
     for _ in $(seq 1 20); do
