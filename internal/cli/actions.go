@@ -694,9 +694,9 @@ func localActionsHydrateScript(cfg Config, repo Repo, workflow localHydrateWorkf
 	if err != nil {
 		return "", err
 	}
-	leaseWorkRoot := path.Dir(workdir)
-	runnerTemp := path.Join(leaseWorkRoot, ".crabbox", "tmp", leaseID)
-	runnerToolCache := path.Join(leaseWorkRoot, ".crabbox", "tools")
+	runnerRoot := path.Join("/tmp", localActionsRunnerRootName(leaseID))
+	runnerTemp := path.Join(runnerRoot, "tmp")
+	runnerToolCache := path.Join(runnerRoot, "tools")
 	githubRef := actionsFullRef(cfg, repo)
 	env := map[string]string{
 		"CI":                    "true",
@@ -726,7 +726,11 @@ func localActionsHydrateScript(cfg Config, repo Repo, workflow localHydrateWorkf
 
 	var b strings.Builder
 	b.WriteString("set -euo pipefail\n")
-	b.WriteString("mkdir -p " + shellQuote(runnerTemp) + " " + shellQuote(runnerToolCache) + " " + shellQuote(workdir) + "\n")
+	b.WriteString("rm -rf " + shellQuote(runnerRoot) + "\n")
+	b.WriteString("mkdir -p " + shellQuote(runnerRoot) + " " + shellQuote(workdir) + "\n")
+	b.WriteString("chmod 700 " + shellQuote(runnerRoot) + "\n")
+	b.WriteString("[ \"$(stat -c %u " + shellQuote(runnerRoot) + ")\" = \"$(id -u)\" ] || { echo 'crabbox local Actions runner root is not owned by the current user' >&2; exit 2; }\n")
+	b.WriteString("mkdir -p " + shellQuote(runnerTemp) + " " + shellQuote(runnerToolCache) + "\n")
 	b.WriteString("export PATH=" + shellQuote(runnerToolCache+"/node/bin") + ":\"$PATH\"\n")
 	b.WriteString("case \"$(uname -m)\" in\n")
 	b.WriteString("  x86_64|amd64) export RUNNER_ARCH='X64' ;;\n")
@@ -760,6 +764,20 @@ func localActionsHydrateScript(cfg Config, repo Repo, workflow localHydrateWorkf
 		return "", err
 	}
 	return b.String(), nil
+}
+
+func localActionsRunnerRootName(leaseID string) string {
+	slug := normalizeLeaseSlug(leaseID)
+	if slug == "" {
+		slug = "lease"
+	} else if len(slug) > 32 {
+		slug = strings.Trim(slug[:32], "-")
+		if slug == "" {
+			slug = "lease"
+		}
+	}
+	sum := sha256.Sum256([]byte(leaseID))
+	return "crabbox-local-actions-" + slug + "-" + hex.EncodeToString(sum[:8])
 }
 
 type localHydrateScriptContext struct {

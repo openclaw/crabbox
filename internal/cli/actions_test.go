@@ -332,6 +332,7 @@ func TestLocalActionsHydrateScriptTranslatesCoreSteps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runnerRoot := "/tmp/" + localActionsRunnerRootName("cbx_123")
 	for _, want := range []string{
 		"export GITHUB_ACTIONS='true'",
 		"export GITHUB_JOB='hydrate'",
@@ -340,15 +341,18 @@ func TestLocalActionsHydrateScriptTranslatesCoreSteps(t *testing.T) {
 		"export GITHUB_REPOSITORY='example-org/configured'",
 		"export GITHUB_WORKSPACE='/work/cbx_123/my-app'",
 		"export INPUT_CRABBOX_ID='cbx_123'",
-		"export RUNNER_TEMP='/work/cbx_123/.crabbox/tmp/cbx_123'",
-		"export RUNNER_TOOL_CACHE='/work/cbx_123/.crabbox/tools'",
+		"rm -rf " + shellQuote(runnerRoot),
+		"chmod 700 " + shellQuote(runnerRoot),
+		"$(stat -c %u " + shellQuote(runnerRoot) + ")",
+		"export RUNNER_TEMP=" + shellQuote(runnerRoot+"/tmp"),
+		"export RUNNER_TOOL_CACHE=" + shellQuote(runnerRoot+"/tools"),
 		"x86_64|amd64) export RUNNER_ARCH='X64'",
 		"aarch64|arm64) export RUNNER_ARCH='ARM64'",
 		"# actions/checkout handled by Crabbox sync/git seed",
 		"__crabbox_setup_node '22'",
 		"__crabbox_run_bash '/work/cbx_123/my-app'",
 		"echo cbx_123",
-		"echo /work/cbx_123/.crabbox/tmp/cbx_123",
+		"echo " + runnerRoot + "/tmp",
 		"printf 'NEXT=1\\n' >> \"$GITHUB_ENV\"",
 	} {
 		if !strings.Contains(got, want) {
@@ -768,6 +772,57 @@ func TestLocalActionsHydrateScriptAllowsSetupNodeCheckLatest(t *testing.T) {
 	}
 	if !strings.Contains(got, "xz-utils") {
 		t.Fatalf("setup-node script should ensure xz-utils:\n%s", got)
+	}
+}
+
+func TestLocalActionsHydrateScriptKeepsToolCacheOffWorkRoot(t *testing.T) {
+	job := localHydrateJob{Steps: []localHydrateStep{{Uses: "actions/setup-node@v4", With: map[string]string{"node-version": "22"}}}}
+	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerRoot := "/tmp/" + localActionsRunnerRootName("cbx_123")
+	for _, want := range []string{
+		"rm -rf " + shellQuote(runnerRoot),
+		"chmod 700 " + shellQuote(runnerRoot),
+		"$(stat -c %u " + shellQuote(runnerRoot) + ")",
+		"export RUNNER_TEMP=" + shellQuote(runnerRoot+"/tmp"),
+		"export RUNNER_TOOL_CACHE=" + shellQuote(runnerRoot+"/tools"),
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("local hydrate script missing %q in:\n%s", want, got)
+		}
+	}
+	for _, notWant := range []string{
+		"RUNNER_TEMP='/work/cbx_123/.crabbox/tmp/cbx_123'",
+		"RUNNER_TOOL_CACHE='/work/cbx_123/.crabbox/tools'",
+	} {
+		if strings.Contains(got, notWant) {
+			t.Fatalf("local hydrate script should not place runner cache under work root %q:\n%s", notWant, got)
+		}
+	}
+}
+
+func TestLocalActionsHydrateScriptUsesSafeRunnerRootName(t *testing.T) {
+	job := localHydrateJob{Steps: []localHydrateStep{{Run: "echo ok"}}}
+	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "../cbx_123/../../bad", nil, "/work/cbx_123/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerRoot := "/tmp/" + localActionsRunnerRootName("../cbx_123/../../bad")
+	for _, want := range []string{
+		"rm -rf " + shellQuote(runnerRoot),
+		"mkdir -p " + shellQuote(runnerRoot),
+		"export RUNNER_TEMP=" + shellQuote(runnerRoot+"/tmp"),
+		"export RUNNER_TOOL_CACHE=" + shellQuote(runnerRoot+"/tools"),
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("local hydrate script missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "rm -rf '/tmp/crabbox-local-actions/..") ||
+		strings.Contains(got, "RUNNER_TOOL_CACHE='/tmp/crabbox-local-actions/..") {
+		t.Fatalf("local hydrate script used raw lease id for runner root:\n%s", got)
 	}
 }
 
