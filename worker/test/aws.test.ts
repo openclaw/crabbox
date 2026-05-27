@@ -91,6 +91,76 @@ describe("aws provider", () => {
     ]);
   });
 
+  it("reports parsed AWS XML query errors instead of the XML declaration", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>AuthFailure</Code>
+      <Message>AWS was not able to validate the provided access credentials</Message>
+    </Error>
+  </Errors>
+  <RequestID>req-1</RequestID>
+</Response>`,
+          { status: 400 },
+        );
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.listCrabboxServers()).rejects.toThrow(
+      "aws DescribeInstances: http 400: AuthFailure: AWS was not able to validate the provided access credentials",
+    );
+  });
+
+  it("waits through transient EC2 instance visibility after RunInstances", async () => {
+    vi.useFakeTimers();
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    ) as EC2SpotClient & {
+      getServer: (instanceID: string) => Promise<{
+        id: string;
+        name: string;
+        provider: "aws";
+        cloudID: string;
+        host: string;
+        status: string;
+        serverType: string;
+      }>;
+    };
+    let calls = 0;
+    client.getServer = async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error(
+          "aws DescribeInstances: http 400: InvalidInstanceID.NotFound: The instance ID 'i-1' does not exist",
+        );
+      }
+      return {
+        id: "i-1",
+        name: "blue-lobster",
+        provider: "aws",
+        cloudID: "i-1",
+        host: "203.0.113.10",
+        status: "running",
+        serverType: "m7i.large",
+      };
+    };
+
+    const resultPromise = client.waitForServerIP("i-1");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(resultPromise).resolves.toMatchObject({ host: "203.0.113.10" });
+    expect(calls).toBe(2);
+  });
+
   it("turns low AWS vCPU quota into a doctor readiness warning", () => {
     const check = awsCapacityReadinessCheckForQuota(
       {

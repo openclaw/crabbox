@@ -119,6 +119,34 @@ func remoteFreshPRCheckoutCommand(workdir string, spec FreshPRSpec) string {
 	return "bash -lc " + shellQuote(script)
 }
 
+func remoteFreshPRCheckoutCommandForTarget(workdir string, spec FreshPRSpec, target SSHTarget) string {
+	if isWindowsNativeTarget(target) {
+		return windowsRemoteFreshPRCheckoutCommand(workdir, spec)
+	}
+	return remoteFreshPRCheckoutCommand(workdir, spec)
+}
+
+func windowsRemoteFreshPRCheckoutCommand(workdir string, spec FreshPRSpec) string {
+	repoURL := fmt.Sprintf("https://github.com/%s/%s.git", spec.Owner, spec.Repo)
+	branch := fmt.Sprintf("crabbox-pr-%d", spec.Number)
+	ref := fmt.Sprintf("pull/%d/head:%s", spec.Number, branch)
+	return powershellCommand(`$ErrorActionPreference = "Stop"
+$workdir = ` + psQuote(workdir) + `
+$parent = Split-Path -Parent $workdir
+if (Test-Path -LiteralPath $workdir) {
+  Remove-Item -LiteralPath $workdir -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $parent | Out-Null
+git clone --quiet --filter=blob:none ` + psQuote(repoURL) + ` $workdir
+if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit $LASTEXITCODE" }
+Set-Location -LiteralPath $workdir
+git fetch --quiet origin ` + psQuote(ref) + `
+if ($LASTEXITCODE -ne 0) { throw "git fetch failed with exit $LASTEXITCODE" }
+git checkout --quiet ` + psQuote(branch) + `
+if ($LASTEXITCODE -ne 0) { throw "git checkout failed with exit $LASTEXITCODE" }
+`)
+}
+
 func localGitBinaryDiff(root string) ([]byte, error) {
 	cmd := exec.Command("git", "diff", "--binary", "HEAD")
 	cmd.Dir = root
@@ -130,6 +158,17 @@ func remoteApplyLocalPatchCommand(workdir string) string {
 	return "bash -lc " + shellQuote(script)
 }
 
+func remoteApplyLocalPatchCommandForTarget(workdir string, target SSHTarget) string {
+	if isWindowsNativeTarget(target) {
+		return powershellCommand(`$ErrorActionPreference = "Stop"
+Set-Location -LiteralPath ` + psQuote(workdir) + `
+git apply --whitespace=nowarn -
+if ($LASTEXITCODE -ne 0) { throw "git apply failed with exit $LASTEXITCODE" }
+`)
+	}
+	return remoteApplyLocalPatchCommand(workdir)
+}
+
 func applyLocalPatchToFreshPR(ctx context.Context, target SSHTarget, workdir string, repo Repo) (bool, error) {
 	diff, err := localGitBinaryDiff(repo.Root)
 	if err != nil {
@@ -138,7 +177,7 @@ func applyLocalPatchToFreshPR(ctx context.Context, target SSHTarget, workdir str
 	if len(diff) == 0 {
 		return false, nil
 	}
-	if err := runSSHInput(ctx, target, remoteApplyLocalPatchCommand(workdir), bytes.NewReader(diff), io.Discard, io.Discard); err != nil {
+	if err := runSSHInput(ctx, target, remoteApplyLocalPatchCommandForTarget(workdir, target), bytes.NewReader(diff), io.Discard, io.Discard); err != nil {
 		return false, exit(7, "apply local patch: %v", err)
 	}
 	return true, nil

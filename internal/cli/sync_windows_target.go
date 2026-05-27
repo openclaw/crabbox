@@ -204,12 +204,47 @@ func windowsRemoteShellCommandWithEnvFiles(workdir string, env map[string]string
 func writeWindowsRemotePrefix(b *bytes.Buffer, workdir string, env map[string]string, envFiles []string) {
 	b.WriteString(`$ErrorActionPreference = "Stop"` + "\n")
 	b.WriteString(`Set-Location -LiteralPath ` + psQuote(workdir) + "\n")
+	if len(envFiles) > 0 {
+		b.WriteString(`function Import-CrabboxEnvFile($Path) {
+  if ($Path -match '^/([A-Za-z])/(.*)$') {
+    $Path = ($matches[1].ToUpperInvariant() + ':\' + $matches[2].Replace('/', '\'))
+  }
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  Get-Content -Encoding UTF8 -LiteralPath $Path | ForEach-Object {
+    if ($_ -match '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
+      $name = $matches[1]
+      $value = $matches[2].Trim()
+      if (($value.StartsWith("'") -and $value.EndsWith("'")) -or ($value.StartsWith('"') -and $value.EndsWith('"'))) {
+        $value = $value.Substring(1, $value.Length - 2)
+      }
+      $value = $value.Replace('\ ', ' ')
+      [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+    }
+  }
+}
+function Add-CrabboxPath($Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return }
+  if (Test-Path -LiteralPath $Path) { $env:Path = "$Path;$env:Path" }
+}
+`)
+	}
 	for _, envFile := range envFiles {
 		envFile = strings.TrimSpace(envFile)
 		if envFile == "" {
 			continue
 		}
-		b.WriteString(`if (Test-Path -LiteralPath ` + psQuote(envFile) + `) { Get-Content -Encoding UTF8 -LiteralPath ` + psQuote(envFile) + ` | ForEach-Object { if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process') } } }` + "\n")
+		b.WriteString(`Import-CrabboxEnvFile ` + psQuote(envFile) + "\n")
+	}
+	if len(envFiles) > 0 {
+		b.WriteString(`Add-CrabboxPath $env:PNPM_HOME
+if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TOOL_CACHE)) {
+  $nodeRoot = Join-Path $env:RUNNER_TOOL_CACHE 'node'
+  if (Test-Path -LiteralPath $nodeRoot) {
+    $node = Get-ChildItem -LiteralPath $nodeRoot -Recurse -Filter node.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($node) { Add-CrabboxPath $node.DirectoryName }
+  }
+}
+`)
 	}
 	for key, value := range env {
 		b.WriteString(`$env:` + key + ` = ` + psQuote(value) + "\n")

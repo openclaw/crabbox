@@ -7,7 +7,7 @@ Default hydration runs the local hydrate workflow over SSH on the leased box. It
 GitHub runner hydration remains available as a fallback:
 
 - `actions hydrate --github-runner` registers the runner, dispatches the configured workflow with the canonical lease label, waits for the workflow to write the hydrated workspace marker, and then returns.
-- `actions register` gets a repository runner registration token through `gh api`, installs the official `actions/runner` package on an existing box, and starts it with systemd.
+- `actions register` gets a repository runner registration token through `gh api`, installs the official `actions/runner` package on an existing box, and starts it with systemd on Linux/WSL2 or a detached PowerShell runner on native Windows.
 - `actions dispatch` calls `gh workflow run` for the configured workflow.
 
 Blacksmith Testbox IDs (`tbx_...`) and `--provider blacksmith-testbox` are skipped because Blacksmith owns Testbox workflow hydration. Run commands against those boxes with `crabbox run --provider blacksmith-testbox --id <tbx_id> -- ...`.
@@ -16,9 +16,13 @@ For `actions hydrate`, Crabbox inspects the selected workflow's `workflow_dispat
 
 Runner names and extra labels use the friendly slug when available, but workflow inputs and state-file paths keep using the canonical `cbx_...` ID.
 
-Local hydration and runner registration support Linux and Windows WSL2 targets.
-Static macOS and native Windows hosts can run commands through `provider=ssh`,
-but Actions hydration still needs a POSIX shell target.
+Local hydration supports Linux and Windows WSL2 targets. GitHub runner hydration
+also supports native Windows targets with `--github-runner`, so the repository's
+real workflow can install Node, pnpm, browser tooling, services, or other
+project-owned setup before `crabbox run` attaches to the hydrated workspace.
+Static macOS hosts can run commands through `provider=ssh`, but Actions
+hydration still needs Linux, Windows WSL2, or native Windows with
+`--github-runner`.
 
 On success, `actions hydrate` prints a concise total duration line. Add `--timing-json` to emit a final JSON timing record with provider, lease ID, slug, total duration, exit code, and the GitHub Actions run URL when the GitHub fallback marker reports a run ID.
 

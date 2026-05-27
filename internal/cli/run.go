@@ -618,7 +618,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		if hydrateTarget.WindowsMode == "" {
 			hydrateTarget.WindowsMode = cfg.WindowsMode
 		}
-		hydrateSupported := supportsActionsRunnerTarget(hydrateTarget)
+		hydrateSupported := supportsLocalActionsHydrateTarget(hydrateTarget) || supportsGitHubActionsRunnerTarget(hydrateTarget)
 		printRemoteCapabilityPreflight(ctx, a.Stderr, cfg, currentTarget, leaseID, workdir, remoteRunEnvFiles(actionsEnvFile, profileEnvFile), hydratedByActions, actionsURL, hydrateSupported, envSelection.Inline)
 		preflightPrinted = true
 	}
@@ -646,7 +646,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		if hydrateTarget.WindowsMode == "" {
 			hydrateTarget.WindowsMode = cfg.WindowsMode
 		}
-		if autoHydrateActions && supportsActionsRunnerTarget(hydrateTarget) {
+		if autoHydrateActions && supportsLocalActionsHydrateTarget(hydrateTarget) {
 			rawJSRuntimePreflightDone = true
 			return nil
 		}
@@ -678,7 +678,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		if hydrateTarget.WindowsMode == "" {
 			hydrateTarget.WindowsMode = cfg.WindowsMode
 		}
-		if !supportsActionsRunnerTarget(hydrateTarget) {
+		if !supportsLocalActionsHydrateTarget(hydrateTarget) {
 			return nil
 		}
 		fields := actionsHydrateFields(leaseID, githubActionsLeaseLabel(leaseID), cfg.Actions.Job, 0, cfg.Actions.Fields)
@@ -806,11 +806,29 @@ retrySync:
 		recorder.Event("sync.started", "sync", "")
 		timings.syncSteps.sshReady = time.Since(stepStart)
 		if !freshPR.Empty() {
-			if isWindowsNativeTarget(target) {
-				return recordFailure(exit(2, "--fresh-pr is not supported for native Windows targets"))
-			}
 			stepStart = time.Now()
-			if out, err := runSSHCombinedOutput(ctx, target, remoteFreshPRCheckoutCommand(workdir, freshPR)); err != nil {
+			checkoutCommand := remoteFreshPRCheckoutCommandForTarget(workdir, freshPR, target)
+			out, err := runSSHCombinedOutput(ctx, target, checkoutCommand)
+			if err != nil && isWindowsNativeTarget(target) {
+				fmt.Fprintf(a.Stderr, "warning: fresh-pr checkout SSH failed on native Windows; refreshing SSH port and retrying once: %v\n", err)
+				target.Port = cfg.SSHPort
+				target.FallbackPorts = cfg.SSHFallbackPorts
+				target = bootstrapNetworkTarget(cfg, server, target)
+				if waitErr := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute); waitErr != nil {
+					return recordFailure(waitErr)
+				}
+				if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
+					return recordFailure(resolveErr)
+				} else {
+					target = resolved.Target
+					if resolved.FallbackReason != "" {
+						fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+					}
+				}
+				checkoutCommand = remoteFreshPRCheckoutCommandForTarget(workdir, freshPR, target)
+				out, err = runSSHCombinedOutput(ctx, target, checkoutCommand)
+			}
+			if err != nil {
 				return recordFailure(exit(6, "fresh-pr checkout failed: %v: %s", err, strings.TrimSpace(out)))
 			}
 			timings.syncSteps.gitSeed = time.Since(stepStart)

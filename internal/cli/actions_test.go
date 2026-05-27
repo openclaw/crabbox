@@ -158,21 +158,44 @@ func TestGitHubActionsRunnerInstallScriptUsesOfficialRunner(t *testing.T) {
 	}
 }
 
-func TestSupportsActionsRunnerTargetAllowsLinuxAndWSL2(t *testing.T) {
+func TestGitHubActionsRunnerInstallPowerShellScriptUsesOfficialWindowsRunner(t *testing.T) {
+	got := githubActionsRunnerInstallScriptForTarget("latest", true, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
+	for _, want := range []string{
+		"https://api.github.com/repos/actions/runner/releases/latest",
+		"actions-runner-win-$runnerArch-$version.zip",
+		".\\config.cmd",
+		"--ephemeral",
+		"New-ScheduledTaskAction",
+		"Start-ScheduledTask",
+		"C:\\ProgramData\\crabbox\\windows.password",
+		"Start-Process",
+		"run-crabbox.ps1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("windows install script missing %q", want)
+		}
+	}
+}
+
+func TestActionsHydrateTargetSupport(t *testing.T) {
 	tests := map[string]struct {
-		target SSHTarget
-		want   bool
+		target     SSHTarget
+		wantLocal  bool
+		wantGitHub bool
 	}{
-		"default":        {target: SSHTarget{}, want: true},
-		"linux":          {target: SSHTarget{TargetOS: targetLinux}, want: true},
-		"windows wsl2":   {target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, want: true},
-		"windows native": {target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, want: false},
-		"macos":          {target: SSHTarget{TargetOS: targetMacOS}, want: false},
+		"default":        {target: SSHTarget{}, wantLocal: true, wantGitHub: true},
+		"linux":          {target: SSHTarget{TargetOS: targetLinux}, wantLocal: true, wantGitHub: true},
+		"windows wsl2":   {target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, wantLocal: true, wantGitHub: true},
+		"windows native": {target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, wantLocal: false, wantGitHub: true},
+		"macos":          {target: SSHTarget{TargetOS: targetMacOS}, wantLocal: false, wantGitHub: false},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			if got := supportsActionsRunnerTarget(tt.target); got != tt.want {
-				t.Fatalf("supportsActionsRunnerTarget(%#v)=%t want %t", tt.target, got, tt.want)
+			if got := supportsLocalActionsHydrateTarget(tt.target); got != tt.wantLocal {
+				t.Fatalf("supportsLocalActionsHydrateTarget(%#v)=%t want %t", tt.target, got, tt.wantLocal)
+			}
+			if got := supportsGitHubActionsRunnerTarget(tt.target); got != tt.wantGitHub {
+				t.Fatalf("supportsGitHubActionsRunnerTarget(%#v)=%t want %t", tt.target, got, tt.wantGitHub)
 			}
 		})
 	}
@@ -213,8 +236,8 @@ func TestValidateActionsRunnerCapabilityAllowsWSL2(t *testing.T) {
 	if err := validateActionsRunnerCapability(backend, Config{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}); err != nil {
 		t.Fatalf("wsl2 actions runner rejected: %v", err)
 	}
-	if err := validateActionsRunnerCapability(backend, Config{TargetOS: targetWindows, WindowsMode: windowsModeNormal}); err == nil {
-		t.Fatal("native windows actions runner accepted")
+	if err := validateActionsRunnerCapability(backend, Config{TargetOS: targetWindows, WindowsMode: windowsModeNormal}); err != nil {
+		t.Fatalf("native windows actions runner rejected: %v", err)
 	}
 }
 
@@ -954,6 +977,17 @@ func TestParseActionsHydrationState(t *testing.T) {
 	}
 }
 
+func TestNormalizeActionsHydrationStateForNativeWindows(t *testing.T) {
+	got := normalizeActionsHydrationStateForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, actionsHydrationState{
+		Workspace:    "/c/Users/runner/actions-runner/_work/openclaw/openclaw",
+		EnvFile:      "/c/Users/runner/.crabbox/actions/cbx-123.env.sh",
+		ServicesFile: "/c/Users/runner/.crabbox/actions/cbx-123.services",
+	})
+	if got.Workspace != `C:\Users\runner\actions-runner\_work\openclaw\openclaw` || got.EnvFile != `C:\Users\runner\.crabbox\actions\cbx-123.env.sh` || got.ServicesFile != `C:\Users\runner\.crabbox\actions\cbx-123.services` {
+		t.Fatalf("unexpected normalized state: %#v", got)
+	}
+}
+
 func TestActionsHydrationStatePathMatchesWorkflowInput(t *testing.T) {
 	got := actionsHydrationStatePath("cbx_123")
 	if got != ".crabbox/actions/cbx_123.env" {
@@ -986,6 +1020,22 @@ func TestRemoteWriteActionsHydrationStopMatchesWorkflowInput(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stop command %q missing %q", got, want)
+		}
+	}
+}
+
+func TestWindowsActionsHydrationMarkerCommandsUsePowerShellHome(t *testing.T) {
+	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	for name, command := range map[string]string{
+		"read":  remoteReadActionsHydrationStateForTarget(target, "cbx_123"),
+		"clear": remoteClearActionsHydrationStateForTarget(target, "cbx_123"),
+		"stop":  remoteWriteActionsHydrationStopForTarget(target, "cbx_123"),
+	} {
+		decoded := decodePowerShellCommand(t, command)
+		for _, want := range []string{`$HOME`, `.crabbox\actions`, `cbx_123`} {
+			if !strings.Contains(decoded, want) {
+				t.Fatalf("%s command missing %q in:\n%s", name, want, decoded)
+			}
 		}
 	}
 }

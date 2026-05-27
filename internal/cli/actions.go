@@ -108,6 +108,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 		return err
 	}
 	applyResolvedServerConfig(&cfg, server)
+	target = targetWithConfigDefaults(target, cfg)
 	if err := claimLeaseForRepoConfig(leaseID, slug, cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 		return err
 	}
@@ -266,6 +267,8 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	applyResolvedServerConfig(&cfg, server)
+	target = targetWithConfigDefaults(target, cfg)
 	if err := claimLeaseForRepoConfig(leaseID, slug, cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 		return err
 	}
@@ -317,8 +320,8 @@ func (a App) actionsDispatch(ctx context.Context, args []string) error {
 }
 
 func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, target SSHTarget, leaseID, slug string, ghRepo GitHubRepo, nameOverride string, extraLabels []string) error {
-	if !supportsActionsRunnerTarget(target) {
-		return exit(2, "actions runner registration currently supports Linux and Windows WSL2 targets only")
+	if !supportsGitHubActionsRunnerTarget(target) {
+		return exit(2, "actions runner registration currently supports Linux and Windows targets only")
 	}
 	token, err := githubActionsRegistrationToken(ctx, ghRepo)
 	if err != nil {
@@ -329,8 +332,8 @@ func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, target
 		name = leaseProviderName(leaseID, slug)
 	}
 	labels := githubActionsRunnerLabels(cfg, leaseID, slug, extraLabels)
-	script := githubActionsRunnerInstallScript(cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral)
-	remote := fmt.Sprintf("RUNNER_REPO=%s RUNNER_NAME=%s RUNNER_LABELS=%s RUNNER_TOKEN=%s bash -s", shellQuote(ghRepo.Slug()), shellQuote(name), shellQuote(strings.Join(labels, ",")), shellQuote(token))
+	script := githubActionsRunnerInstallScriptForTarget(cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, target)
+	remote := githubActionsRunnerInstallRemoteCommand(target, ghRepo.Slug(), name, strings.Join(labels, ","), token)
 	if err := runSSHInputQuiet(ctx, target, remote, script); err != nil {
 		return exit(7, "register GitHub Actions runner on %s: %v", target.Host, err)
 	}
@@ -339,7 +342,25 @@ func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, target
 }
 
 func supportsActionsRunnerTarget(target SSHTarget) bool {
+	return supportsGitHubActionsRunnerTarget(target)
+}
+
+func supportsLocalActionsHydrateTarget(target SSHTarget) bool {
 	return target.TargetOS == "" || target.TargetOS == targetLinux || isWindowsWSL2Target(target)
+}
+
+func supportsGitHubActionsRunnerTarget(target SSHTarget) bool {
+	return target.TargetOS == "" || target.TargetOS == targetLinux || target.TargetOS == targetWindows || isWindowsWSL2Target(target)
+}
+
+func targetWithConfigDefaults(target SSHTarget, cfg Config) SSHTarget {
+	if target.TargetOS == "" {
+		target.TargetOS = cfg.TargetOS
+	}
+	if target.WindowsMode == "" {
+		target.WindowsMode = cfg.WindowsMode
+	}
+	return target
 }
 
 func (a App) resolveLeaseTargetForActions(ctx context.Context, cfg Config, id string) (Server, SSHTarget, string, string, error) {
@@ -381,7 +402,7 @@ func exitCodeForError(err error, fallback int) int {
 }
 
 func (a App) hydrateActionsLocally(ctx context.Context, cfg Config, repo Repo, target SSHTarget, leaseID, expectedJob string, fields []string, waitTimeout time.Duration, streamOutput bool, syncBefore bool) (actionsHydrationState, error) {
-	if !supportsActionsRunnerTarget(target) {
+	if !supportsLocalActionsHydrateTarget(target) {
 		return actionsHydrationState{}, exit(2, "local Actions hydration currently supports Linux and Windows WSL2 targets only")
 	}
 	if err := validateWorkflowInputFields(fields); err != nil {
@@ -2068,11 +2089,11 @@ func waitForActionsHydration(ctx context.Context, target SSHTarget, leaseID, exp
 }
 
 func readActionsHydrationState(ctx context.Context, target SSHTarget, leaseID string) (actionsHydrationState, error) {
-	out, err := runSSHOutput(ctx, target, remoteReadActionsHydrationState(leaseID))
+	out, err := runSSHOutput(ctx, target, remoteReadActionsHydrationStateForTarget(target, leaseID))
 	if err != nil {
 		return actionsHydrationState{}, err
 	}
-	return parseActionsHydrationState(out), nil
+	return normalizeActionsHydrationStateForTarget(target, parseActionsHydrationState(out)), nil
 }
 
 func waitForLocalActionsHydration(ctx context.Context, target SSHTarget, leaseID, expectedJob, pid string, timeout time.Duration, stderr io.Writer) (actionsHydrationState, error) {
@@ -2123,14 +2144,14 @@ func ensureLocalActionsRunEnv(ctx context.Context, target SSHTarget, leaseID str
 }
 
 func clearActionsHydrationState(ctx context.Context, target SSHTarget, leaseID string) error {
-	if err := runSSHQuiet(ctx, target, remoteClearActionsHydrationState(leaseID)); err != nil {
+	if err := runSSHQuiet(ctx, target, remoteClearActionsHydrationStateForTarget(target, leaseID)); err != nil {
 		return exit(7, "clear GitHub Actions hydration marker on %s: %v", target.Host, err)
 	}
 	return nil
 }
 
 func writeActionsHydrationStop(ctx context.Context, target SSHTarget, leaseID string) error {
-	if err := runSSHQuiet(ctx, target, remoteWriteActionsHydrationStop(leaseID)); err != nil {
+	if err := runSSHQuiet(ctx, target, remoteWriteActionsHydrationStopForTarget(target, leaseID)); err != nil {
 		return exit(7, "write GitHub Actions hydration stop marker on %s: %v", target.Host, err)
 	}
 	return nil
@@ -2161,8 +2182,39 @@ func parseActionsHydrationState(value string) actionsHydrationState {
 	return state
 }
 
+func normalizeActionsHydrationStateForTarget(target SSHTarget, state actionsHydrationState) actionsHydrationState {
+	if !isWindowsNativeTarget(target) {
+		return state
+	}
+	state.Workspace = windowsNativePathFromMSYSPath(state.Workspace)
+	state.EnvFile = windowsNativePathFromMSYSPath(state.EnvFile)
+	state.ServicesFile = windowsNativePathFromMSYSPath(state.ServicesFile)
+	return state
+}
+
+func windowsNativePathFromMSYSPath(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 3 && value[0] == '/' && value[2] == '/' {
+		drive := value[1]
+		if (drive >= 'a' && drive <= 'z') || (drive >= 'A' && drive <= 'Z') {
+			return strings.ToUpper(string(drive)) + `:\` + strings.ReplaceAll(value[3:], "/", `\`)
+		}
+	}
+	return value
+}
+
 func remoteReadActionsHydrationState(leaseID string) string {
 	return "cat \"$HOME\"/" + shellQuote(actionsHydrationStatePath(leaseID)) + " 2>/dev/null || true"
+}
+
+func remoteReadActionsHydrationStateForTarget(target SSHTarget, leaseID string) string {
+	if isWindowsNativeTarget(target) {
+		return powershellCommand(`$path = Join-Path $HOME ` + psQuote(windowsPathJoin(strings.Split(actionsHydrationStatePath(leaseID), "/")...)) + `
+if (Test-Path -LiteralPath $path) { Get-Content -Raw -LiteralPath $path }
+exit 0
+`)
+	}
+	return remoteReadActionsHydrationState(leaseID)
 }
 
 func remoteInstallLocalActionsHydrateScript(leaseID string) string {
@@ -2214,6 +2266,39 @@ func remoteClearActionsHydrationState(leaseID string) string {
 	return "rm -f \"$HOME\"/" + shellQuote(actionsHydrationStatePath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationEnvPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationServicesPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationStopPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationLocalScriptPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationLocalLogPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationLocalExitPath(leaseID))
 }
 
+func remoteClearActionsHydrationStateForTarget(target SSHTarget, leaseID string) string {
+	if isWindowsNativeTarget(target) {
+		paths := []string{
+			actionsHydrationStatePath(leaseID),
+			actionsHydrationEnvPath(leaseID),
+			actionsHydrationServicesPath(leaseID),
+			actionsHydrationStopPath(leaseID),
+			actionsHydrationLocalScriptPath(leaseID),
+			actionsHydrationLocalLogPath(leaseID),
+			actionsHydrationLocalExitPath(leaseID),
+		}
+		var b strings.Builder
+		b.WriteString(`$ErrorActionPreference = "SilentlyContinue"` + "\n")
+		foreach := "$paths = @("
+		for i, value := range paths {
+			if i > 0 {
+				foreach += ", "
+			}
+			foreach += psQuote(windowsPathJoin(strings.Split(value, "/")...))
+		}
+		foreach += ")\n"
+		b.WriteString(foreach)
+		b.WriteString(`foreach ($rel in $paths) {
+  $path = Join-Path $HOME $rel
+  Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+}
+exit 0
+`)
+		return powershellCommand(b.String())
+	}
+	return remoteClearActionsHydrationState(leaseID)
+}
+
 func actionsHydrationStatePath(leaseID string) string {
 	return actionsHydrationDir() + "/" + leaseID + ".env"
 }
@@ -2255,6 +2340,18 @@ func actionsRunURL(repo GitHubRepo, runID string) string {
 
 func remoteWriteActionsHydrationStop(leaseID string) string {
 	return "mkdir -p \"$HOME\"/" + shellQuote(actionsHydrationDir()) + " && touch \"$HOME\"/" + shellQuote(actionsHydrationStopPath(leaseID))
+}
+
+func remoteWriteActionsHydrationStopForTarget(target SSHTarget, leaseID string) string {
+	if isWindowsNativeTarget(target) {
+		return powershellCommand(`$ErrorActionPreference = "Stop"
+$dir = Join-Path $HOME ` + psQuote(windowsPathJoin(strings.Split(actionsHydrationDir(), "/")...)) + `
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+New-Item -ItemType File -Force -Path (Join-Path $HOME ` + psQuote(windowsPathJoin(strings.Split(actionsHydrationStopPath(leaseID), "/")...)) + `) | Out-Null
+exit 0
+`)
+	}
+	return remoteWriteActionsHydrationStop(leaseID)
 }
 
 func githubActionsRunnerInstallScript(version string, ephemeral bool) string {
@@ -2332,6 +2429,105 @@ SERVICE
 sudo systemctl daemon-reload
 sudo systemctl enable --now crabbox-actions-runner.service
 `, shellQuote(version), ephemeralArg)
+}
+
+func githubActionsRunnerInstallScriptForTarget(version string, ephemeral bool, target SSHTarget) string {
+	if isWindowsNativeTarget(target) {
+		return githubActionsRunnerInstallPowerShellScript(version, ephemeral)
+	}
+	return githubActionsRunnerInstallScript(version, ephemeral)
+}
+
+func githubActionsRunnerInstallRemoteCommand(target SSHTarget, repo, name, labels, token string) string {
+	if isWindowsNativeTarget(target) {
+		return powershellCommand(`$ErrorActionPreference = "Stop"
+$env:RUNNER_REPO = ` + psQuote(repo) + `
+$env:RUNNER_NAME = ` + psQuote(name) + `
+$env:RUNNER_LABELS = ` + psQuote(labels) + `
+$env:RUNNER_TOKEN = ` + psQuote(token) + `
+$script = [Console]::In.ReadToEnd()
+$path = Join-Path $env:TEMP ("crabbox-actions-runner-" + [Guid]::NewGuid().ToString("N") + ".ps1")
+[System.IO.File]::WriteAllText($path, $script, [System.Text.UTF8Encoding]::new($false))
+try {
+  & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path
+  exit $LASTEXITCODE
+} finally {
+  Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+}
+`)
+	}
+	return fmt.Sprintf("RUNNER_REPO=%s RUNNER_NAME=%s RUNNER_LABELS=%s RUNNER_TOKEN=%s bash -s", shellQuote(repo), shellQuote(name), shellQuote(labels), shellQuote(token))
+}
+
+func githubActionsRunnerInstallPowerShellScript(version string, ephemeral bool) string {
+	if version == "" {
+		version = "latest"
+	}
+	ephemeralArg := ""
+	if ephemeral {
+		ephemeralArg = `, "--ephemeral"`
+	}
+	return fmt.Sprintf(`$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+if ([string]::IsNullOrWhiteSpace($env:RUNNER_REPO) -or [string]::IsNullOrWhiteSpace($env:RUNNER_NAME) -or [string]::IsNullOrWhiteSpace($env:RUNNER_TOKEN)) {
+  throw "missing runner env"
+}
+$version = %s
+$arch = $env:PROCESSOR_ARCHITECTURE
+switch -Regex ($arch) {
+  "^(AMD64|x86_64)$" { $runnerArch = "x64"; break }
+  "^ARM64$" { $runnerArch = "arm64"; break }
+  default { throw "unsupported runner arch: $arch" }
+}
+if ($version -eq "latest") {
+  $release = Invoke-RestMethod -Uri "https://api.github.com/repos/actions/runner/releases/latest" -UseBasicParsing
+  $version = ($release.tag_name -replace "^v", "")
+}
+$runnerDir = Join-Path $HOME "actions-runner"
+New-Item -ItemType Directory -Force -Path $runnerDir | Out-Null
+Set-Location -LiteralPath $runnerDir
+$versionMarker = ".crabbox-runner-version-$version-$runnerArch"
+if (-not (Test-Path -LiteralPath ".\config.cmd") -or -not (Test-Path -LiteralPath $versionMarker)) {
+  Get-ChildItem -Force -LiteralPath $runnerDir | Remove-Item -Recurse -Force
+  $zip = Join-Path $runnerDir "actions-runner.zip"
+  Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v$version/actions-runner-win-$runnerArch-$version.zip" -OutFile $zip -UseBasicParsing
+  Expand-Archive -LiteralPath $zip -DestinationPath $runnerDir -Force
+  Remove-Item -LiteralPath $zip -Force
+  New-Item -ItemType File -Path $versionMarker -Force | Out-Null
+}
+if (Test-Path -LiteralPath ".\.runner") {
+  & .\config.cmd remove --unattended --token $env:RUNNER_TOKEN
+  if ($LASTEXITCODE -ne 0) { Write-Warning "previous runner removal failed; continuing with replace"; $global:LASTEXITCODE = 0 }
+}
+$configArgs = @("--unattended", "--replace"%s, "--url", "https://github.com/$env:RUNNER_REPO", "--token", $env:RUNNER_TOKEN, "--name", $env:RUNNER_NAME, "--labels", $env:RUNNER_LABELS)
+& .\config.cmd @configArgs
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$runScript = Join-Path $runnerDir "run-crabbox.ps1"
+Set-Content -Encoding UTF8 -LiteralPath $runScript -Value @'
+$ErrorActionPreference = "Stop"
+Set-Location -LiteralPath $PSScriptRoot
+& .\run.cmd
+exit $LASTEXITCODE
+'@
+$log = Join-Path $runnerDir "crabbox-runner.log"
+$err = Join-Path $runnerDir "crabbox-runner.err.log"
+$taskName = ("crabbox-actions-runner-" + ($env:RUNNER_NAME -replace "[^A-Za-z0-9_.-]", "-"))
+$passwordPath = "C:\ProgramData\crabbox\windows.password"
+if (Test-Path -LiteralPath $passwordPath) {
+  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+  $argument = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $runScript + '"'
+  $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument
+  $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(5))
+  $password = (Get-Content -Raw -LiteralPath $passwordPath).Trim()
+  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User (whoami) -Password $password -RunLevel Highest -Force | Out-Null
+  Start-ScheduledTask -TaskName $taskName
+  Write-Output ("started runner task=" + $taskName)
+} else {
+  $process = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runScript) -WorkingDirectory $runnerDir -RedirectStandardOutput $log -RedirectStandardError $err -WindowStyle Hidden -PassThru
+  Write-Output ("started runner pid=" + $process.Id)
+}
+`, psQuote(version), ephemeralArg)
 }
 
 func githubActionsRegistrationToken(ctx context.Context, repo GitHubRepo) (string, error) {

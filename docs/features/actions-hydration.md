@@ -43,7 +43,8 @@ The flow:
 The GitHub fallback flow is the old remote-runner path: `actions hydrate
 --github-runner` registers the machine as an ephemeral self-hosted runner,
 dispatches the workflow, waits for the marker, then later `run` attaches to that
-workspace.
+workspace. Use this path for native Windows targets and for workflows that need
+full GitHub Actions semantics.
 
 The important boundary: project setup lives in the repository workflow. Crabbox
 owns workflow translation for the local default, runner registration and

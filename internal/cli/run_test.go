@@ -1181,6 +1181,26 @@ func TestRemotePreflightRawWorkspaceHydrateWarning(t *testing.T) {
 	}
 }
 
+func TestRemotePreflightNativeWindowsHydrateSuggestionUsesGitHubRunner(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Actions.Workflow = ".github/workflows/hydrate.yml"
+	lines := remotePreflightWorkspaceLines(cfg, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, "cbx_123", `C:\crabbox\cbx_123\repo`, false, "", true)
+	got := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"hydrate_supported=true",
+		"--target windows",
+		"--windows-mode normal",
+		"--github-runner",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("preflight text missing %q in %q", want, got)
+		}
+	}
+}
+
 func TestRemotePreflightRawWorkspaceSkipsHydrateSuggestionWithoutWorkflow(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Provider = "aws"
@@ -1216,7 +1236,7 @@ func TestWindowsRemoteCapabilityPreflightCommandUsesCommandEnvironment(t *testin
 	decoded := decodePowerShellCommand(t, got)
 	for _, want := range []string{
 		`Set-Location -LiteralPath 'C:\crabbox\repo'`,
-		`Get-Content -Encoding UTF8 -LiteralPath '.crabbox\env\run.env'`,
+		`Import-CrabboxEnvFile '.crabbox\env\run.env'`,
 		`$env:CI = '1'`,
 		`Test-Value "user" { whoami }`,
 		`Test-Value "cwd" { (Get-Location).Path }`,

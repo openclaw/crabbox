@@ -60,3 +60,39 @@ func TestRemoteFreshPRCheckoutCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsRemoteFreshPRCheckoutCommand(t *testing.T) {
+	got := remoteFreshPRCheckoutCommandForTarget(`C:\crabbox\cbx\fresh-pr-example-org-my-app-66278`, FreshPRSpec{
+		Owner:  "example-org",
+		Repo:   "my-app",
+		Number: 66278,
+	}, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
+	decoded := decodePowerShellCommand(t, got)
+	for _, want := range []string{
+		"Remove-Item -LiteralPath $workdir -Recurse -Force",
+		"git clone --quiet --filter=blob:none",
+		"https://github.com/example-org/my-app.git",
+		"git fetch --quiet origin",
+		"pull/66278/head:crabbox-pr-66278",
+		"git checkout --quiet",
+		"crabbox-pr-66278",
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("checkout command missing %q in %q", want, decoded)
+		}
+	}
+}
+
+func TestWindowsRemoteApplyLocalPatchCommand(t *testing.T) {
+	got := remoteApplyLocalPatchCommandForTarget(`C:\crabbox\cbx\fresh-pr-example-org-my-app-66278`, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
+	decoded := decodePowerShellCommand(t, got)
+	for _, want := range []string{
+		`Set-Location -LiteralPath 'C:\crabbox\cbx\fresh-pr-example-org-my-app-66278'`,
+		"git apply --whitespace=nowarn -",
+		"git apply failed with exit $LASTEXITCODE",
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("apply-patch command missing %q in %q", want, decoded)
+		}
+	}
+}

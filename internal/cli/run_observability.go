@@ -225,6 +225,9 @@ func hydrateCommandSuggestion(cfg Config, target SSHTarget, leaseID string, supp
 	if cfg.Actions.Job != "" {
 		args = append(args, "--job", cfg.Actions.Job)
 	}
+	if !supportsLocalActionsHydrateTarget(SSHTarget{TargetOS: targetOS, WindowsMode: windowsMode}) && supportsGitHubActionsRunnerTarget(SSHTarget{TargetOS: targetOS, WindowsMode: windowsMode}) {
+		args = append(args, "--github-runner")
+	}
 	command := strings.Join(readableShellWords(args), " ")
 	if !supported {
 		command += " (unsupported for this provider/target)"

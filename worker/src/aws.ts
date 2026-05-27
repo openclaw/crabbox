@@ -461,9 +461,17 @@ export class EC2SpotClient {
   async waitForServerIP(instanceID: string): Promise<ProviderMachine> {
     const deadline = Date.now() + 600_000;
     while (Date.now() < deadline) {
-      // oxlint-disable-next-line eslint/no-await-in-loop -- polling waits between EC2 reads.
-      const server = await this.getServer(instanceID);
-      if (server.host) {
+      let server: ProviderMachine | undefined;
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- polling waits between EC2 reads.
+        server = await this.getServer(instanceID);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!isAWSInstanceNotFoundError(message)) {
+          throw error;
+        }
+      }
+      if (server?.host) {
         return server;
       }
       // oxlint-disable-next-line eslint/no-await-in-loop -- this delay is the polling interval.
@@ -1393,7 +1401,7 @@ export class EC2SpotClient {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`aws ${action}: http ${response.status}: ${trimBody(text)}`);
+      throw new Error(this.awsQueryErrorMessage(action, response.status, text));
     }
     const parsed = this.parser.parse(text) as unknown;
     const parsedRecord = record(parsed);
@@ -1413,12 +1421,37 @@ export class EC2SpotClient {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`aws ${action}: http ${response.status}: ${trimBody(text)}`);
+      throw new Error(this.awsQueryErrorMessage(action, response.status, text));
     }
     const parsed = this.parser.parse(text) as unknown;
     const parsedRecord = record(parsed);
     const root = parsedRecord[`${action}Response`] ?? parsedRecord["Response"] ?? parsedRecord;
     return record(root);
+  }
+
+  private awsQueryErrorMessage(action: string, status: number, text: string): string {
+    let detail = "";
+    try {
+      const parsed = this.parser.parse(text) as unknown;
+      const parsedRecord = record(parsed);
+      const root = record(
+        parsedRecord["ErrorResponse"] ?? parsedRecord["Response"] ?? parsedRecord,
+      );
+      const error = record(
+        items(
+          root["Error"] ??
+            root["error"] ??
+            record(root["Errors"])["Error"] ??
+            record(root["Errors"])["error"],
+        )[0],
+      );
+      const code = asString(error["Code"] ?? error["code"]);
+      const message = asString(error["Message"] ?? error["message"]);
+      detail = code && message ? `${code}: ${message}` : code || message;
+    } catch {
+      detail = "";
+    }
+    return `aws ${action}: http ${status}: ${detail || trimBody(text).replace(/\s+/g, " ")}`;
   }
 
   private async quotaPreflightAttempt(

@@ -46,7 +46,7 @@ func TestWindowsRemoteRunScriptCommandUsesPowerShellFile(t *testing.T) {
 	decoded := decodePowerShellCommand(t, got)
 	for _, want := range []string{
 		`Set-Location -LiteralPath 'C:\crabbox\repo'`,
-		`Get-Content -Encoding UTF8 -LiteralPath '.crabbox\env\run.env'`,
+		`Import-CrabboxEnvFile '.crabbox\env\run.env'`,
 		`$env:API_TOKEN = 'secret'`,
 		`$__crabboxScript = '.crabbox\scripts\abc-script.ps1'`,
 		`$__crabboxArgs = @('arg one')`,

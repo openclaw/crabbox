@@ -136,8 +136,13 @@ func TestWindowsNativeRemoteCommandSourcesMultipleEnvFiles(t *testing.T) {
 	}, []string{"pwsh", "-NoProfile", "-Command", "echo ok"})
 	decoded := decodePowerShellCommand(t, got)
 	for _, want := range []string{
-		`Get-Content -Encoding UTF8 -LiteralPath '.crabbox\actions.env'`,
-		`Get-Content -Encoding UTF8 -LiteralPath '.crabbox\env\run.env'`,
+		`Import-CrabboxEnvFile '.crabbox\actions.env'`,
+		`Import-CrabboxEnvFile '.crabbox\env\run.env'`,
+		`$Path -match '^/([A-Za-z])/(.*)$'`,
+		`$Path = ($matches[1].ToUpperInvariant() + ':\' + $matches[2].Replace('/', '\'))`,
+		`(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$`,
+		`Add-CrabboxPath $env:PNPM_HOME`,
+		`Get-ChildItem -LiteralPath $nodeRoot -Recurse -Filter node.exe`,
 		`$env:CI = '1'`,
 	} {
 		if !strings.Contains(decoded, want) {
