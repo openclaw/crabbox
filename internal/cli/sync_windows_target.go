@@ -251,12 +251,14 @@ Set-Content -LiteralPath ` + psQuote(remoteResultsMarker) + ` -Value ""
 
 func windowsRemoteFindJUnitResultFiles(workdir, marker string) string {
 	var b bytes.Buffer
+	b.WriteString(`$ErrorActionPreference = "Stop"` + "\n")
+	b.WriteString(`Set-Location -LiteralPath ` + psQuote(workdir) + "\n")
 	b.WriteString(`$ErrorActionPreference = "SilentlyContinue"` + "\n")
 	b.WriteString(fmt.Sprintf("$maxBytes = %d\n", autoJUnitMaxBytes))
 	b.WriteString(fmt.Sprintf("$sniffBytes = %d\n", autoJUnitSniffBytes))
 	b.WriteString(fmt.Sprintf("$maxFiles = %d\n", autoJUnitMaxFiles))
-	b.WriteString(`Set-Location -LiteralPath ` + psQuote(workdir) + "\n")
 	if strings.TrimSpace(marker) != "" {
+		b.WriteString(`if (-not (Test-Path -LiteralPath ` + psQuote(marker) + `)) { return }` + "\n")
 		b.WriteString(`$markerTime = (Get-Item -LiteralPath ` + psQuote(marker) + `).LastWriteTimeUtc` + "\n")
 	}
 	b.WriteString(`function Get-CrabboxJUnitFiles([string]$Path, [int]$Depth) {` + "\n")

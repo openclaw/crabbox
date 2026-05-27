@@ -87,7 +87,7 @@ func remoteFindJUnitResultFiles(workdir, marker string) string {
 	var b strings.Builder
 	b.WriteString("cd ")
 	b.WriteString(shellQuote(workdir))
-	b.WriteString(" && ")
+	b.WriteString(" && { ")
 	b.WriteString("count=0; ")
 	b.WriteString(`find . \( -path './node_modules' -o -path '*/node_modules' -o -path './.git' -o -path '*/.git' \) -prune -o -type f \( -name 'junit*.xml' -o -name 'TEST-*.xml' -o -name 'results.xml' \)`)
 	b.WriteString(` -print 2>/dev/null | sort | while IFS= read -r f; do `)
@@ -99,7 +99,7 @@ func remoteFindJUnitResultFiles(workdir, marker string) string {
 	b.WriteString(fmt.Sprintf(`dd if="$f" bs=%d count=1 2>/dev/null | grep -Eq '<testsuites?' || continue; count=$((count + 1)); if [ "$count" -gt %d ]; then break; fi; `, autoJUnitSniffBytes, autoJUnitMaxFiles))
 	b.WriteString(`printf '\n`)
 	b.WriteString(resultFileMarker)
-	b.WriteString(fmt.Sprintf(`%%s\n' "$f"; dd if="$f" bs=%d count=1 2>/dev/null; done`, autoJUnitMaxBytes))
+	b.WriteString(fmt.Sprintf(`%%s\n' "$f"; dd if="$f" bs=%d count=1 2>/dev/null; done; }`, autoJUnitMaxBytes))
 	return b.String()
 }
 

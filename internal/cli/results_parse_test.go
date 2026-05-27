@@ -58,12 +58,14 @@ func TestRemoteFindJUnitResultFiles(t *testing.T) {
 		"-name 'junit*.xml'",
 		"-name 'TEST-*.xml'",
 		"-name 'results.xml'",
+		"&& { count=0;",
 		"'.crabbox/results-start' -nt \"$f\"",
 		"| sort | while IFS= read -r f",
 		"bs=4096 count=1",
 		"grep -Eq '<testsuites?'",
 		"count=$((count + 1))",
 		"bs=1048576 count=1",
+		"done; }",
 		resultFileMarker,
 	} {
 		if !strings.Contains(got, want) {
@@ -80,8 +82,12 @@ func TestRemoteFindJUnitResultFiles(t *testing.T) {
 func TestWindowsRemoteFindJUnitResultFilesPrintsPathMarker(t *testing.T) {
 	got := decodePowerShellCommand(t, windowsRemoteFindJUnitResultFiles(`C:\repo`, remoteResultsMarker))
 	for _, want := range []string{
+		"$ErrorActionPreference = \"Stop\"",
+		"Set-Location -LiteralPath 'C:\\repo'",
+		"$ErrorActionPreference = \"SilentlyContinue\"",
 		"function Get-CrabboxJUnitFiles",
 		"$_.Name -ne 'node_modules' -and $_.Name -ne '.git'",
+		"if (-not (Test-Path -LiteralPath '.crabbox/results-start')) { return }",
 		"$markerTime = (Get-Item -LiteralPath '.crabbox/results-start').LastWriteTimeUtc",
 		"$_.LastWriteTimeUtc -ge $markerTime",
 		"$maxBytes = 1048576",
