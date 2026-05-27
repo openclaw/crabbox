@@ -2445,10 +2445,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 }
 
 func (a App) writeActionsHydrationStopBestEffort(ctx context.Context, target SSHTarget, leaseID string) {
-	if leaseID == "" || target.Host == "" {
-		return
-	}
-	if isWindowsNativeTarget(target) {
+	if !shouldWriteActionsHydrationStop(leaseID, target) {
 		return
 	}
 	stopCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -2456,6 +2453,10 @@ func (a App) writeActionsHydrationStopBestEffort(ctx context.Context, target SSH
 	if err := writeActionsHydrationStop(stopCtx, target, leaseID); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: could not stop GitHub Actions hydration for %s: %v\n", leaseID, err)
 	}
+}
+
+func shouldWriteActionsHydrationStop(leaseID string, target SSHTarget) bool {
+	return leaseID != "" && target.Host != ""
 }
 
 func leaseDisplayID(lease CoordinatorLease) string {

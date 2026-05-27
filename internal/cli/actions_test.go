@@ -1040,6 +1040,20 @@ func TestWindowsActionsHydrationMarkerCommandsUsePowerShellHome(t *testing.T) {
 	}
 }
 
+func TestActionsHydrationStopIsWrittenForNativeWindowsTargets(t *testing.T) {
+	target := SSHTarget{Host: "203.0.113.10", TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	if !shouldWriteActionsHydrationStop("cbx_123", target) {
+		t.Fatal("native Windows hydrated runners must receive the stop marker")
+	}
+	if shouldWriteActionsHydrationStop("", target) {
+		t.Fatal("empty lease id should not write a stop marker")
+	}
+	target.Host = ""
+	if shouldWriteActionsHydrationStop("cbx_123", target) {
+		t.Fatal("missing SSH target should not write a stop marker")
+	}
+}
+
 func TestLocalActionsRemoteCommandsQuoteLeasePaths(t *testing.T) {
 	leaseID := "lease id;touch nope"
 	for name, tc := range map[string]struct {
