@@ -31,6 +31,7 @@ Read when:
 ## Providers
 
 - [Providers](providers.md): provider overview, target matrix, classes, and fallback.
+- [Live Provider E2E](live-provider-e2e.md): maintainer-run GitHub Actions smoke matrix for every built-in provider.
 - [Capacity and fallback](capacity-fallback.md): class chains, market spot/on-demand, region/AZ routing.
 - [Provider backends](../provider-backends.md): contract reference for backend interfaces and registration.
 - [Authoring a provider](provider-authoring.md): step-by-step guide to writing a new provider.
