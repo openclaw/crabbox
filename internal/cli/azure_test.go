@@ -144,6 +144,21 @@ func TestAzureWindowsVMSizeCandidatesForClass(t *testing.T) {
 	}
 }
 
+func TestApplyAzureSpotCapacity(t *testing.T) {
+	t.Parallel()
+	props := &armcompute.VirtualMachineProperties{}
+	applyAzureSpotCapacity(props)
+	if props.Priority == nil || *props.Priority != armcompute.VirtualMachinePriorityTypesSpot {
+		t.Fatalf("Priority=%v want Spot", props.Priority)
+	}
+	if props.EvictionPolicy == nil || *props.EvictionPolicy != armcompute.VirtualMachineEvictionPolicyTypesDelete {
+		t.Fatalf("EvictionPolicy=%v want Delete", props.EvictionPolicy)
+	}
+	if props.BillingProfile == nil || props.BillingProfile.MaxPrice == nil || *props.BillingProfile.MaxPrice != -1 {
+		t.Fatalf("BillingProfile.MaxPrice=%v want -1", props.BillingProfile)
+	}
+}
+
 func TestServerTypeForProviderClassAzure(t *testing.T) {
 	t.Parallel()
 	got := serverTypeForProviderClass("azure", "beast")

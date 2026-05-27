@@ -527,6 +527,11 @@ describe("azure provider", () => {
       allowExtensionOperations: true,
       windowsConfiguration: { provisionVMAgent: true, enableAutomaticUpdates: false },
     });
+    expect(vmBody?.properties).toMatchObject({
+      priority: "Spot",
+      evictionPolicy: "Delete",
+      billingProfile: { maxPrice: -1 },
+    });
     expect(String(vmBody?.properties.osProfile.customData ?? "")).toBeTruthy();
     expect(JSON.stringify(vmBody)).toContain("MicrosoftWindowsServer");
     const extensionBody = bodies.find((body) =>

@@ -456,6 +456,7 @@ export class AzureClient {
     if (config.capacityMarket === "spot") {
       vmProperties["priority"] = "Spot";
       vmProperties["evictionPolicy"] = "Delete";
+      vmProperties["billingProfile"] = { maxPrice: -1 };
     }
     await this.arm("PUT", vmPath(this.resourceGroup, name), API_VERSIONS.compute, {
       location,

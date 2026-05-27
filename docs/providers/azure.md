@@ -213,7 +213,10 @@ Class-based provisioning falls back across the candidate list when Azure
 rejects a SKU for capacity or quota
 (`SkuNotAvailable`, `QuotaExceeded`, `AllocationFailed`,
 `OverconstrainedAllocationRequest`). Spot leases fall back to on-demand when
-`capacity.fallback` starts with `on-demand`. Explicit `--type` is exact.
+`capacity.fallback` starts with `on-demand`. Azure Spot VMs use eviction policy
+`Delete` and `billingProfile.maxPrice: -1`, so price alone does not evict a
+lease while Azure still charges no more than the on-demand price. Explicit
+`--type` is exact.
 The default Linux candidates mirror the AWS Linux class table's vCPU scale.
 The default Windows candidates mirror the AWS native Windows class table's
 vCPU scale. Azure native Windows support covers SSH, sync, run, and optional

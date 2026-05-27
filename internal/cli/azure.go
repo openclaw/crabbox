@@ -637,8 +637,7 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 		},
 	}
 	if strings.EqualFold(cfg.Capacity.Market, "spot") {
-		vmProperties.Priority = to.Ptr(armcompute.VirtualMachinePriorityTypesSpot)
-		vmProperties.EvictionPolicy = to.Ptr(armcompute.VirtualMachineEvictionPolicyTypesDelete)
+		applyAzureSpotCapacity(vmProperties)
 	}
 	vmPoller, err := c.vmc.BeginCreateOrUpdate(ctx, c.ResourceGroup, name, armcompute.VirtualMachine{
 		Location:   to.Ptr(c.Location),
@@ -658,6 +657,12 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 		}
 	}
 	return azureVMToServer(vmResp.VirtualMachine, "", ""), nil
+}
+
+func applyAzureSpotCapacity(vmProperties *armcompute.VirtualMachineProperties) {
+	vmProperties.Priority = to.Ptr(armcompute.VirtualMachinePriorityTypesSpot)
+	vmProperties.EvictionPolicy = to.Ptr(armcompute.VirtualMachineEvictionPolicyTypesDelete)
+	vmProperties.BillingProfile = &armcompute.BillingProfile{MaxPrice: to.Ptr(float64(-1))}
 }
 
 func (c *AzureClient) azureOSProfile(cfg Config, publicKey, name, leaseID string) (*armcompute.OSProfile, error) {

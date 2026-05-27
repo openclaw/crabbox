@@ -11,6 +11,7 @@
 ### Fixed
 
 - Fixed failed-run summaries so application output mentioning provider auth no longer looks like a provider/auth blocker, shell `&&` command chains explain short-circuit behavior, observed phases identify the likely failed phase, and opt-in automatic JUnit discovery can add structured test failures.
+- Fixed Azure Spot VM provisioning to send `billingProfile.maxPrice: -1` explicitly in both direct and brokered mode, keeping Crabbox leases on Spot pricing without price-threshold evictions.
 - Fixed native Windows `--fresh-pr` runs so PR checkout, local patch application, and post-bootstrap SSH port changes work over PowerShell.
 - Fixed native Windows Actions env handoff so `crabbox run` can consume bash-style hydrate env files and reuse hydrated Node/pnpm paths.
 - Fixed AWS coordinator EC2 polling to tolerate transient `InvalidInstanceID.NotFound` after instance creation and to report parsed AWS XML errors.

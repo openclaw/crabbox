@@ -59,7 +59,9 @@ beast     Standard_D16ads_v6, Standard_D16ds_v6, Standard_D16ads_v5, Standard_D1
 Crabbox falls back through the candidate list when Azure rejects a SKU for
 capacity or quota. Explicit `--type` is exact and fails clearly when the
 SKU cannot be created. Spot leases fall back to on-demand when
-`capacity.fallback` starts with `on-demand`.
+`capacity.fallback` starts with `on-demand`. Azure Spot VMs use eviction policy
+`Delete` and `billingProfile.maxPrice: -1`, so price alone does not evict a
+lease while Azure still charges no more than the on-demand price.
 
 Default Azure Linux class candidates mirror the vCPU scale of the AWS Linux
 class table. Default Azure Windows candidates mirror the AWS native Windows
