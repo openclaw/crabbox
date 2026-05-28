@@ -1,6 +1,6 @@
-![Crabbox banner](docs/assets/readme-banner.jpg)
-
 # 🦀 📦 Crabbox
+
+![Crabbox banner](docs/assets/readme-banner.jpg)
 
 [![CI](https://github.com/openclaw/crabbox/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/openclaw/crabbox/actions/workflows/ci.yml)
 [![Release](https://github.com/openclaw/crabbox/actions/workflows/release.yml/badge.svg)](https://github.com/openclaw/crabbox/actions/workflows/release.yml)
