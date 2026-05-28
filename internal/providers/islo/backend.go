@@ -205,6 +205,14 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		Command:       commandDuration,
 		Total:         b.now().Sub(started),
 		SyncDelegated: true,
+		Session: &core.RunSessionHandle{
+			Provider:       isloProvider,
+			LeaseID:        leaseID,
+			Slug:           slug,
+			Reused:         !acquired,
+			Kept:           !shouldStop,
+			CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", isloProvider, leaseID),
+		},
 	}
 	if req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "islo run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
@@ -229,10 +237,12 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	}
 	if runErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, isloProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		result.Session.Kept = !shouldStop
 		return result, ExitError{Code: 1, Message: fmt.Sprintf("islo run failed: %v", runErr)}
 	}
 	if exitCode != 0 {
 		handleDelegatedRunFailure(b.rt.Stderr, req, isloProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		result.Session.Kept = !shouldStop
 		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("islo run exited %d", exitCode)}
 	}
 	return result, nil

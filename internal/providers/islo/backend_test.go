@@ -157,6 +157,45 @@ func TestIsloRunRejectsUnsafeWorkdirBeforeProviderClient(t *testing.T) {
 	}
 }
 
+func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/go.mod", []byte("module example.test/repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "init")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: root, Name: "repo"},
+		Keep:    true,
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Session == nil {
+		t.Fatal("missing session handle")
+	}
+	got := result.Session
+	if got.Provider != isloProvider || got.LeaseID != "isb_crabbox-repo-abcdef" || got.Slug == "" || got.Reused || !got.Kept {
+		t.Fatalf("session=%#v", got)
+	}
+	if got.CleanupCommand != "crabbox stop --provider islo isb_crabbox-repo-abcdef" {
+		t.Fatalf("cleanup command=%q", got.CleanupCommand)
+	}
+}
+
 func TestIsloCreateSandboxRejectsUnsafeWorkdirBeforeAPI(t *testing.T) {
 	client := &fakeIsloSyncClient{}
 	backend := &isloBackend{
@@ -530,6 +569,16 @@ func (f *fakeIsloSyncClient) commandContains(value string) bool {
 		}
 	}
 	return false
+}
+
+func swapNewIsloClient(client isloAPI) func() {
+	previous := newIsloClient
+	newIsloClient = func(Config, Runtime) (isloAPI, error) {
+		return client, nil
+	}
+	return func() {
+		newIsloClient = previous
+	}
 }
 
 func tarGzipContains(t *testing.T, data []byte, name string) bool {
