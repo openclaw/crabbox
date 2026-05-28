@@ -128,7 +128,7 @@ Reasons for keeping these out of the plugin:
 
 - they often produce more output than `maxOutputBytes` can usefully capture;
 - agents tend to want raw logs they can grep, not trimmed model output;
-- `pond` is transport-aware preview orchestration and may mutate local
+- `pond` is transport-aware preview orchestration and may update operator
   Tailscale policy or start SSH tunnels, so it stays CLI-led for now;
 - admin tools are easier to gate at the shell level (env, allowlists) than
   through plugin config;

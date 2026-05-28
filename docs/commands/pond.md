@@ -12,6 +12,8 @@ crabbox pond peers --pond alpha
 crabbox pond peers --pond alpha --json
 crabbox pond peers --pond alpha --provider islo --share-port 8080
 crabbox pond peers --pond alpha --share-port 8080 --share-ttl 1h --json
+crabbox pond connect alpha --export
+crabbox pond disconnect alpha
 crabbox pond release alpha
 crabbox doctor --pond alpha
 ```
@@ -114,11 +116,13 @@ Flags:
 
 With `--export`, the command starts SSH tunnels as daemon processes, prints
 `export CRABBOX_POND_<NAME>_<PORT>=127.0.0.1:<local>` lines to stdout,
-and exits — the tunnels survive via the daemon runner. Use as:
+records the daemon PIDs under `~/.crabbox/pond/<name>/daemon.json`, and exits.
+Use as:
 
 ```bash
 eval $(crabbox pond connect mypond --export)
 curl $CRABBOX_POND_WEB_8080
+crabbox pond disconnect mypond
 ```
 
 Without `--export`, the command blocks until Ctrl-C, keeping all tunnels
@@ -126,14 +130,19 @@ alive.
 
 Each forward gets a local loopback port in the 51820–52819 range, probed
 for availability. The hosts file (`~/.crabbox/pond/<name>/hosts`) maps each
-operator-side forward to its local address; these entries are not lease-to-lease
-DNS:
+operator-side aliases to loopback; the port mapping is carried in comments and
+the exported `CRABBOX_POND_*` variables, not as invalid `hosts` ports. These
+entries are not lease-to-lease DNS:
 
 ```
-# crabbox pond SSH-mesh — operator-side forwards
-127.0.0.1:51820  web.cbx (remote :8080)
-127.0.0.1:51821  worker.cbx (remote :3000)
+# crabbox pond SSH-mesh operator-side aliases
+127.0.0.1  web.cbx web-8080.cbx  # local=127.0.0.1:51820 remote=:8080
+127.0.0.1  worker.cbx worker-3000.cbx  # local=127.0.0.1:51821 remote=:3000
 ```
+
+`crabbox pond disconnect <name>` stops the daemonized SSH tunnels recorded by
+the last `pond connect <name> --export` run. It only reads the per-pond state
+file and does not scan unrelated SSH processes.
 
 ## `doctor --pond`
 
@@ -147,7 +156,7 @@ pond "alpha": 4 members
   reachability:
     tailnet -> tailnet : OK
     tailnet -> url     : OK (via outbound HTTPS)
-    tailnet -> ssh     : WARN (requires operator-side bridge — see SSH-mesh DRAFT PR)
+    tailnet -> ssh     : WARN (requires operator-side bridge)
     tailnet -> none    : NO (destination has no published endpoint)
     url     -> tailnet : NO (no public endpoint on tailnet members)
     url     -> url     : OK

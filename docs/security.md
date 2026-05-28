@@ -125,10 +125,12 @@ Tailscale only changes which host the SSH client dials.
 
 `--pond` is a trusted-operator preview surface. A pond is a lease grouping plus
 transport metadata, not a new isolation boundary. When `--tailscale` is used on
-a direct Tailscale-capable provider, the local CLI may use the operator's
-`TS_API_KEY` to add a concrete `tag:cbx-pond-<owner>-<pond>` tag owner and a
-same-tag allow rule to the operator's tailnet policy. The broker never receives
-the Tailscale API key.
+a direct Tailscale-capable provider, the local CLI may add a concrete
+`tag:cbx-pond-<owner>-<pond>` tag owner and a same-tag allow rule to the
+operator's tailnet policy only when both `TS_API_KEY` and
+`CRABBOX_POND_ACL_BOOTSTRAP=1` are set. `TS_API_KEY` alone is used for
+read-only `doctor --pond` verification. The broker never receives the Tailscale
+API key.
 
 Brokered leases keep using the Worker's configured `CRABBOX_TAILSCALE_TAGS`
 allowlist and do not receive generated `tag:cbx-pond-*` tags in this preview.

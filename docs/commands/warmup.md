@@ -39,7 +39,10 @@ provider, the CLI also advertises a `tag:cbx-pond-<owner>-<name>` ACL tag and
 cloud-init refreshes `/etc/hosts.cbx` plus a managed `/etc/hosts` block every
 30 seconds so Tailscale peers in the same pond are reachable as `<slug>.cbx`. See
 [`docs/features/pond.md`](../features/pond.md) for the one-time policy snippet
-and the `doctor --pond` coverage.
+and the `doctor --pond` coverage. If you want Crabbox to install the Tailscale
+policy rows automatically, set both `TS_API_KEY` and
+`CRABBOX_POND_ACL_BOOTSTRAP=1`; `TS_API_KEY` by itself is read-only
+verification for pond commands.
 
 With `--provider blacksmith-testbox`, the canonical ID is the Blacksmith `tbx_...` ID returned by `blacksmith testbox warmup`; Crabbox still assigns and stores a local slug for reuse.
 

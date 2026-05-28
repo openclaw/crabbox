@@ -148,17 +148,24 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 	return nil
 }
 
+const pondACLAutoBootstrapEnvVar = "CRABBOX_POND_ACL_BOOTSTRAP"
+
 // maybeBootstrapPondACL self-bootstraps the pond tag's tagOwners + grants
-// rows on the operator tailnet when TS_API_KEY is exported. When the key is
-// absent, when the provider lacks Tailscale, or when the row is already
-// present, this is a silent no-op so doctor still owns the manual-snippet
-// fallback path. Failures from the live API are surfaced so the lease is
-// not created against a tailnet that cannot actually carry pond traffic.
+// rows on the operator tailnet when explicitly enabled. TS_API_KEY alone is
+// not consent to edit a tailnet policy; operators must also set
+// CRABBOX_POND_ACL_BOOTSTRAP=1. When disabled, when the key is absent, when
+// the provider lacks Tailscale, or when the row is already present, this is a
+// silent no-op so doctor still owns the manual-snippet fallback path. Failures
+// from the live API are surfaced so the lease is not created against a tailnet
+// that cannot actually carry pond traffic.
 func maybeBootstrapPondACL(ctx context.Context, cfg Config) error {
 	if cfg.Pond == "" || !cfg.Tailscale.Enabled {
 		return nil
 	}
 	if !pondDynamicTailscaleTagAllowed(cfg) {
+		return nil
+	}
+	if !truthyEnv(os.Getenv(pondACLAutoBootstrapEnvVar)) {
 		return nil
 	}
 	apiKey := strings.TrimSpace(os.Getenv("TS_API_KEY"))
@@ -195,6 +202,15 @@ func validateLeaseDurations(cfg Config) error {
 		return exit(2, "idle timeout must be positive")
 	}
 	return nil
+}
+
+func truthyEnv(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 type leaseTargetConfigOptions struct {

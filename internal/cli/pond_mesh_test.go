@@ -20,6 +20,7 @@ import (
 type pondMeshRecordingHandle struct {
 	name    string
 	args    []string
+	pid     int
 	started bool
 	signal  chan struct{}
 	mu      sync.Mutex
@@ -40,6 +41,8 @@ func (h *pondMeshRecordingHandle) Wait() error {
 func (h *pondMeshRecordingHandle) String() string {
 	return h.name + " " + strings.Join(h.args, " ")
 }
+
+func (h *pondMeshRecordingHandle) PID() int { return h.pid }
 
 func (h *pondMeshRecordingHandle) Process() processSignaler { return testProcessSignaler{h.signal} }
 
@@ -75,7 +78,7 @@ func (r *pondMeshRecordingRunner) Command(_ context.Context, name string, args .
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, append([]string{name}, args...))
-	h := &pondMeshRecordingHandle{name: name, args: append([]string{}, args...), signal: make(chan struct{})}
+	h := &pondMeshRecordingHandle{name: name, args: append([]string{}, args...), pid: 1000 + len(r.handles), signal: make(chan struct{})}
 	r.handles = append(r.handles, h)
 	return h
 }
@@ -427,6 +430,46 @@ func TestPondSSHTargetsByLeaseAllowsDuplicatePeerNames(t *testing.T) {
 	}
 }
 
+type pondMeshResolveRecordingBackend struct {
+	ids []string
+}
+
+func (b *pondMeshResolveRecordingBackend) Spec() ProviderSpec { return ProviderSpec{Name: "hetzner"} }
+func (b *pondMeshResolveRecordingBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
+	return LeaseTarget{}, nil
+}
+func (b *pondMeshResolveRecordingBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
+	b.ids = append(b.ids, req.ID)
+	return LeaseTarget{LeaseID: req.ID, SSH: SSHTarget{User: "ubuntu", Host: req.ID + ".example", Port: "22"}}, nil
+}
+func (b *pondMeshResolveRecordingBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+	return nil, nil
+}
+func (b *pondMeshResolveRecordingBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
+	return nil
+}
+func (b *pondMeshResolveRecordingBackend) Touch(context.Context, TouchRequest) (Server, error) {
+	return Server{}, nil
+}
+
+func TestCollectPondMembersResolvesByLeaseIDBeforeSlug(t *testing.T) {
+	backend := &pondMeshResolveRecordingBackend{}
+	servers := []Server{
+		{Name: "server-a", Labels: map[string]string{pondLabelKey: "alpha", "slug": "web", "lease": "cbx_web_a", pondExposedPortsLabelKey: "8080"}},
+		{Name: "server-b", Labels: map[string]string{pondLabelKey: "alpha", "slug": "web", "lease": "cbx_web_b", pondExposedPortsLabelKey: "9090"}},
+	}
+	members, err := collectPondMembers(context.Background(), backend, Config{}, servers, "alpha")
+	if err != nil {
+		t.Fatalf("collectPondMembers: %v", err)
+	}
+	if !reflect.DeepEqual(backend.ids, []string{"cbx_web_a", "cbx_web_b"}) {
+		t.Fatalf("resolve IDs=%v, want lease IDs before duplicate slug", backend.ids)
+	}
+	if members[0].Lease != "cbx_web_a" || members[1].Lease != "cbx_web_b" {
+		t.Fatalf("members=%#v", members)
+	}
+}
+
 func TestEnvSafeName(t *testing.T) {
 	cases := map[string]string{
 		"web":         "WEB",
@@ -449,11 +492,16 @@ func TestRenderPondMeshHostsFileIncludesAllPeers(t *testing.T) {
 		{Peer: "web", RemotePort: 8080, LocalPort: 51820},
 		{Peer: "worker", RemotePort: 3000, LocalPort: 51821},
 	})
-	if !strings.Contains(body, "127.0.0.1:51820") || !strings.Contains(body, "127.0.0.1:51821") {
-		t.Fatalf("hosts body missing local ports: %s", body)
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "127.0.0.1:") {
+			t.Fatalf("hosts body must stay /etc/hosts-compatible, got: %s", body)
+		}
 	}
 	if !strings.Contains(body, "web.cbx") || !strings.Contains(body, "worker.cbx") {
 		t.Fatalf("hosts body missing peer names: %s", body)
+	}
+	if !strings.Contains(body, "local=127.0.0.1:51820") || !strings.Contains(body, "local=127.0.0.1:51821") {
+		t.Fatalf("hosts body missing local port comments: %s", body)
 	}
 }
 

@@ -334,6 +334,7 @@ func TestPondACLEnsureSurfacesAfterPersistent412(t *testing.T) {
 }
 
 func TestMaybeBootstrapPondACLNoopWithoutAPIKey(t *testing.T) {
+	t.Setenv(pondACLAutoBootstrapEnvVar, "1")
 	t.Setenv("TS_API_KEY", "")
 	cfg := Config{Provider: "hetzner", Pond: "alpha"}
 	cfg.Tailscale.Enabled = true
@@ -342,7 +343,26 @@ func TestMaybeBootstrapPondACLNoopWithoutAPIKey(t *testing.T) {
 	}
 }
 
+func TestMaybeBootstrapPondACLNoopWithoutExplicitOptIn(t *testing.T) {
+	t.Setenv(pondACLAutoBootstrapEnvVar, "")
+	t.Setenv("TS_API_KEY", "tskey-api-stub")
+	stub := &stubPondTailnetACLClient{}
+	prev := pondTailnetACLClientFactory
+	defer func() { pondTailnetACLClientFactory = prev }()
+	pondTailnetACLClientFactory = func(_ string) pondTailnetACLClient { return stub }
+	cfg := Config{Provider: "hetzner", Pond: "alpha"}
+	cfg.Tailscale.Enabled = true
+	cfg.Tailscale.AuthKey = "tskey-auth-test"
+	if err := maybeBootstrapPondACL(context.Background(), cfg); err != nil {
+		t.Fatalf("expected silent noop without %s, got %v", pondACLAutoBootstrapEnvVar, err)
+	}
+	if atomic.LoadInt32(&stub.gets) != 0 {
+		t.Fatalf("expected no API call without explicit opt-in, got %d gets", stub.gets)
+	}
+}
+
 func TestMaybeBootstrapPondACLCallsFactoryWhenKeyPresent(t *testing.T) {
+	t.Setenv(pondACLAutoBootstrapEnvVar, "1")
 	t.Setenv("TS_API_KEY", "tskey-api-stub")
 	tag := pondTailscaleTag(localCoordinatorOwner(), "alpha")
 	stub := &stubPondTailnetACLClient{policy: pondPolicyFixture(tag), etag: `"v1"`}
@@ -433,6 +453,7 @@ func TestPondACLEnsureReturnsUnavailableWhenMissingETag(t *testing.T) {
 // (e.g. against Headscale), the lease creation must not fail. Doctor surfaces
 // the same condition with a manual-snippet pointer.
 func TestMaybeBootstrapPondACLSilentlySkipsWhenControlPlaneUnavailable(t *testing.T) {
+	t.Setenv(pondACLAutoBootstrapEnvVar, "1")
 	t.Setenv("TS_API_KEY", "tskey-api-stub")
 	prev := pondTailnetACLClientFactory
 	defer func() { pondTailnetACLClientFactory = prev }()
@@ -441,12 +462,14 @@ func TestMaybeBootstrapPondACLSilentlySkipsWhenControlPlaneUnavailable(t *testin
 	}
 	cfg := Config{Provider: "hetzner", Pond: "alpha"}
 	cfg.Tailscale.Enabled = true
+	cfg.Tailscale.AuthKey = "tskey-auth-test"
 	if err := maybeBootstrapPondACL(context.Background(), cfg); err != nil {
 		t.Fatalf("expected silent skip on unavailable control plane, got %v", err)
 	}
 }
 
 func TestMaybeBootstrapPondACLSkipsNonTailscaleProvider(t *testing.T) {
+	t.Setenv(pondACLAutoBootstrapEnvVar, "1")
 	t.Setenv("TS_API_KEY", "tskey-api-stub")
 	stub := &stubPondTailnetACLClient{}
 	prev := pondTailnetACLClientFactory
@@ -483,6 +506,7 @@ func TestApplyLeaseCreateFlagsValidatesBeforePondACLBootstrap(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(pondACLAutoBootstrapEnvVar, "1")
 			t.Setenv("TS_API_KEY", "tskey-test")
 			t.Setenv("CRABBOX_TAILSCALE_AUTH_KEY", "tskey-auth-test")
 			stub := &stubPondTailnetACLClient{policy: `{"tagOwners":{}}`, etag: `"v1"`}

@@ -84,8 +84,8 @@ func (a App) list(ctx context.Context, args []string) error {
 
 // filterJSONListViewByPond filters a list-view payload (whatever shape the
 // backend produces) by inspecting label-bearing entries. Backends that emit
-// shapes without labels are returned unchanged so JSON list output stays
-// authoritative for those providers.
+// shapes without labels fail closed to an empty list; returning an unfiltered
+// payload for `list --pond --json` is worse than returning no matches.
 //
 // For []any slices entries are iterated directly. For typed slices (e.g.
 // []CoordinatorMachine, []CoordinatorLease emitted by coordinator-backed
@@ -110,7 +110,7 @@ func filterJSONListViewByPond(view any, pond string) any {
 		}
 	}
 	if !hasLabels {
-		return view
+		return emptyListViewLike(view)
 	}
 	kept := make([]any, 0, len(entries))
 	for _, entry := range entries {
@@ -224,7 +224,7 @@ func extractPondLabelFromMap(entry map[string]any) map[string]string {
 func filterTypedSliceByPond(view any, pond string) any {
 	v := reflect.ValueOf(view)
 	if v.Kind() != reflect.Slice {
-		return view
+		return []any{}
 	}
 	elemType := v.Type().Elem()
 	hasLabels := false
@@ -240,9 +240,17 @@ func filterTypedSliceByPond(view any, pond string) any {
 		}
 	}
 	if !hasLabels {
-		return view
+		return kept.Interface()
 	}
 	return kept.Interface()
+}
+
+func emptyListViewLike(view any) any {
+	v := reflect.ValueOf(view)
+	if !v.IsValid() || v.Kind() != reflect.Slice {
+		return []any{}
+	}
+	return reflect.MakeSlice(v.Type(), 0, 0).Interface()
 }
 
 func (a App) syncExternalRunnersBestEffort(ctx context.Context, cfg Config, backend Backend) {

@@ -21,6 +21,7 @@ crabbox list   --pond NAME
 crabbox doctor --pond NAME
 crabbox pond peers   --pond NAME
 crabbox pond connect NAME [--export]
+crabbox pond disconnect NAME
 crabbox pond release NAME
 ```
 
@@ -29,8 +30,8 @@ directly dialable from another lease depends on the transport plane below.
 
 The plugin surface does not add first-class pond tools in this PR. Agents can
 still create pond-tagged leases through existing argv-forwarding tools;
-`pond peers`, `pond connect`, `pond release`, and Tailscale policy bootstrap
-remain CLI-led.
+`pond peers`, `pond connect`, `pond disconnect`, `pond release`, and Tailscale
+policy bootstrap remain CLI-led.
 
 ## Three transport planes
 
@@ -105,9 +106,22 @@ advertise SSH.
 - **macOS / Windows peer reachability** — gap, tracked separately.
 - **Untrusted multi-tenant** — default-allow within a pond. For agent-isolation cases, see `--isolation per-slug` (future).
 
+## Pool vs pond
+
+`pool` is inventory: "what runners exist?" It is exposed through `crabbox list`
+and `/v1/pool`.
+
+`pond` is grouping: "which leases belong to this test environment?" It is
+created by tagging leases with `--pond <name>` and operated through
+`crabbox pond ...`.
+
 ## Security
 
-Setting `TS_API_KEY` in your shell empowers `crabbox run` to mutate your operator's Tailscale ACL policy (the auto-bootstrap path). The broker never sees Tailscale credentials.
+Tailscale ACL bootstrap is opt-in. To let `crabbox run --pond ... --tailscale`
+add the concrete `tag:cbx-pond-<owner>-<pond>` policy rows, set both
+`TS_API_KEY` and `CRABBOX_POND_ACL_BOOTSTRAP=1`. Without the opt-in, Crabbox
+prints/verifies the required policy through `doctor --pond` but does not edit
+the tailnet policy. The broker never sees Tailscale credentials.
 
 ## API stability
 

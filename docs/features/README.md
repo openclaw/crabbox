@@ -55,6 +55,7 @@ Read when:
 ## Runners and reachability
 
 - [Tailscale](tailscale.md): optional tailnet reachability for managed Linux leases and static hosts.
+- [Pond](pond.md): group related leases and discover their Tailscale, URL bridge, or SSH-mesh reachability.
 - [Mediated egress](egress.md): browser/app egress through an operator machine using the Cloudflare Worker mediator.
 - [Runner bootstrap](runner-bootstrap.md): cloud-init, installed tools, SSH port, and readiness.
 - [Prebaked runner images](prebaked-images.md): provider-owned image storage and the image/cache/state boundary.

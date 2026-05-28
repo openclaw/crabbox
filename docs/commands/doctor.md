@@ -62,7 +62,9 @@ pond claim set. The check confirms the concrete
 reach itself through either `grants` or legacy `acls`. It reads the policy only
 when the pond has at least one locally claimed Tailscale-capable member and
 `TS_API_KEY` is exported; otherwise it skips with a reason. Plain `crabbox
-doctor` does not call the Tailscale ACL API.
+doctor` does not call the Tailscale ACL API. Automatic ACL edits require both
+`TS_API_KEY` and `CRABBOX_POND_ACL_BOOTSTRAP=1`; verification needs only
+`TS_API_KEY`.
 
 When `--profile <name> --id <lease>` selects a profile with `doctor.enabled:
 true`, doctor runs that profile's remote prerequisite contract instead of the

@@ -77,7 +77,7 @@ func doctorPondSummary(ctx context.Context, cfg Config) (string, string, map[str
 	if pondACLRowPresent(body, tag) {
 		return "ok", fmt.Sprintf("pond %q: Tailscale plane auto-managed (%s)", pond, tag), map[string]string{"pond": pond, "tag": tag, "tailnet": tailnet, "mode": "auto-managed"}
 	}
-	return "failed", fmt.Sprintf("pond %q: tailnet policy row missing for %s. Run with $TS_API_KEY exported to auto-install, or apply the snippet from docs/features/pond.md", pond, tag), map[string]string{"pond": pond, "tag": tag, "tailnet": tailnet, "remedy": "see_docs_features_pond_md"}
+	return "failed", fmt.Sprintf("pond %q: tailnet policy row missing for %s. Set TS_API_KEY plus %s=1 to auto-install, or apply the snippet from docs/features/pond.md", pond, tag, pondACLAutoBootstrapEnvVar), map[string]string{"pond": pond, "tag": tag, "tailnet": tailnet, "remedy": "see_docs_features_pond_md"}
 }
 
 // normalizeHuJSON strips HuJSON line comments and trailing commas from a

@@ -58,6 +58,10 @@ const pondMeshHostsFileName = "hosts"
 // `eval $(crabbox pond connect <name> --export)` and use peer names directly.
 const pondMeshEnvFileName = "env"
 
+// pondMeshDaemonFileName records daemonized `pond connect --export` PIDs so
+// `pond disconnect <name>` can clean up this pond without broad process scans.
+const pondMeshDaemonFileName = "daemon.json"
+
 // pondMeshRunner abstracts os/exec.CommandContext so the connect orchestration
 // is testable without spawning real ssh processes. The production runner
 // returns a real *exec.Cmd; tests inject a recorder that captures arguments.
@@ -73,6 +77,7 @@ type pondMeshHandle interface {
 	Start() error
 	Wait() error
 	Process() processSignaler
+	PID() int
 	String() string
 }
 
@@ -113,6 +118,12 @@ type pondMeshExecHandle struct {
 func (h *pondMeshExecHandle) Start() error   { return h.cmd.Start() }
 func (h *pondMeshExecHandle) Wait() error    { return h.cmd.Wait() }
 func (h *pondMeshExecHandle) String() string { return h.cmd.String() }
+func (h *pondMeshExecHandle) PID() int {
+	if h.cmd.Process == nil {
+		return 0
+	}
+	return h.cmd.Process.Pid
+}
 func (h *pondMeshExecHandle) Process() processSignaler {
 	if h.cmd.Process == nil {
 		return nil
@@ -217,10 +228,10 @@ type pondMember struct {
 // operator-side allocator assigned to it. The doctor sub-check counts these
 // to report the SSH-mesh plane status without re-running the orchestration.
 type pondMeshForward struct {
-	Peer       string
-	RemotePort int
-	LocalPort  int
-	LeaseID    string
+	Peer       string `json:"peer"`
+	RemotePort int    `json:"remotePort"`
+	LocalPort  int    `json:"localPort"`
+	LeaseID    string `json:"leaseID"`
 }
 
 // pondMeshSummary captures the operator-visible result of preparing a
@@ -228,10 +239,17 @@ type pondMeshForward struct {
 // export lines so the same object can be returned from tests or rendered to
 // stdout in production.
 type pondMeshSummary struct {
-	HostsPath string
-	EnvPath   string
-	Exports   []string
-	Forwards  []pondMeshForward
+	HostsPath string            `json:"hostsPath"`
+	EnvPath   string            `json:"envPath"`
+	Exports   []string          `json:"exports"`
+	Forwards  []pondMeshForward `json:"forwards"`
+}
+
+type pondMeshDaemonState struct {
+	Pond      string            `json:"pond"`
+	StartedAt string            `json:"startedAt"`
+	PIDs      []int             `json:"pids"`
+	Forwards  []pondMeshForward `json:"forwards"`
 }
 
 // pondConnectOptions bundles the dependencies the orchestration needs.
@@ -314,6 +332,9 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 	if *exportOnly {
 		// Start daemons before emitting exports so shell evals never see
 		// assignments for tunnels that failed to start.
+		if _, err := stopPondMeshDaemonState(opts.HomeDir, pond); err != nil {
+			return err
+		}
 		daemonRunner := pondMeshDaemonRunner{}
 		peerTarget := pondSSHTargetsByLease(members)
 		var started []pondMeshHandle
@@ -351,6 +372,10 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 			return err
 		case <-time.After(200 * time.Millisecond):
 		}
+		if err := writePondMeshDaemonState(opts.HomeDir, pond, summary, started); err != nil {
+			stopDaemonHandles(started)
+			return err
+		}
 		for _, line := range summary.Exports {
 			fmt.Fprintln(a.Stdout, line)
 		}
@@ -363,6 +388,33 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "wrote %s\nwrote %s\n", summary.HostsPath, summary.EnvPath)
 	return runPondMeshForwards(ctx, opts, members, summary)
+}
+
+func (a App) pondDisconnect(_ context.Context, args []string) error {
+	fs := newFlagSet("pond disconnect", a.Stderr)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return exit(2, "usage: crabbox pond disconnect <name>")
+	}
+	pond, err := requestedPondName(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if pond == "" {
+		return exit(2, "usage: crabbox pond disconnect <name>")
+	}
+	stopped, err := stopPondMeshDaemonState(os.Getenv("HOME"), pond)
+	if err != nil {
+		return err
+	}
+	if stopped == 0 {
+		fmt.Fprintf(a.Stdout, "pond %q has no recorded SSH-mesh daemons\n", pond)
+		return nil
+	}
+	fmt.Fprintf(a.Stdout, "pond %q disconnected %d SSH-mesh daemon(s)\n", pond, stopped)
+	return nil
 }
 
 // collectPondMembersAcrossProviders reads local claim sidecars for the pond,
@@ -442,7 +494,7 @@ func collectPondMembers(ctx context.Context, backend SSHLeaseBackend, cfg Config
 	servers = filterServersByPond(servers, pond)
 	out := make([]pondMember, 0, len(servers))
 	for _, server := range servers {
-		lease, err := backend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: serverSlug(server)})
+		lease, err := backend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: pondResolveIDForServer(server)})
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s: %w", server.Name, err)
 		}
@@ -582,26 +634,56 @@ func allocateLocalForwardPort(used map[int]bool) (int, error) {
 // files under HOME. The parent directory is created with 0700 so the layout
 // matches the rest of ~/.crabbox.
 func pondMeshHostsAndEnvPaths(home, pond string) (string, string, error) {
-	if home == "" {
-		return "", "", exit(2, "HOME is unset; cannot write pond SSH-mesh state files")
-	}
-	dir := filepath.Join(home, pondMeshHostsRoot, pond)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	dir, err := ensurePondMeshStateDir(home, pond)
+	if err != nil {
 		return "", "", err
 	}
 	return filepath.Join(dir, pondMeshHostsFileName), filepath.Join(dir, pondMeshEnvFileName), nil
 }
 
-// renderPondMeshHostsFile renders the operator-visible hosts table that maps
-// `<peer>.cbx` (with `<peer>:<port>.cbx` for multi-port peers) to its assigned
-// loopback port. The format mirrors /etc/hosts so an operator can paste the
-// content into their resolver if they choose.
+func pondMeshStateDir(home, pond string) (string, error) {
+	if home == "" {
+		return "", exit(2, "HOME is unset; cannot write pond SSH-mesh state files")
+	}
+	return filepath.Join(home, pondMeshHostsRoot, pond), nil
+}
+
+func ensurePondMeshStateDir(home, pond string) (string, error) {
+	dir, err := pondMeshStateDir(home, pond)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func pondMeshDaemonStatePath(home, pond string, create bool) (string, error) {
+	var (
+		dir string
+		err error
+	)
+	if create {
+		dir, err = ensurePondMeshStateDir(home, pond)
+	} else {
+		dir, err = pondMeshStateDir(home, pond)
+	}
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, pondMeshDaemonFileName), nil
+}
+
+// renderPondMeshHostsFile renders operator-visible hosts aliases. Ports stay
+// in comments and CRABBOX_POND_* exports because /etc/hosts cannot encode
+// host:port pairs.
 func renderPondMeshHostsFile(forwards []pondMeshForward) string {
 	var b strings.Builder
-	b.WriteString("# crabbox pond SSH-mesh — operator-side forwards\n")
-	b.WriteString("# Format: <local-port> <peer>.cbx\n")
+	b.WriteString("# crabbox pond SSH-mesh operator-side aliases\n")
+	b.WriteString("# Use CRABBOX_POND_<PEER>_<PORT> for the forwarded host:port.\n")
 	for _, fwd := range forwards {
-		fmt.Fprintf(&b, "127.0.0.1:%d  %s.cbx (remote :%d)\n", fwd.LocalPort, fwd.Peer, fwd.RemotePort)
+		fmt.Fprintf(&b, "127.0.0.1  %s.cbx %s-%d.cbx  # local=127.0.0.1:%d remote=:%d\n", fwd.Peer, fwd.Peer, fwd.RemotePort, fwd.LocalPort, fwd.RemotePort)
 	}
 	return b.String()
 }
@@ -666,6 +748,66 @@ func stopDaemonHandles(handles []pondMeshHandle) {
 	}
 }
 
+func writePondMeshDaemonState(home, pond string, summary pondMeshSummary, handles []pondMeshHandle) error {
+	path, err := pondMeshDaemonStatePath(home, pond, true)
+	if err != nil {
+		return err
+	}
+	pids := make([]int, 0, len(handles))
+	for _, handle := range handles {
+		if pid := handle.PID(); pid > 0 {
+			pids = append(pids, pid)
+		}
+	}
+	state := pondMeshDaemonState{
+		Pond:      pond,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		PIDs:      pids,
+		Forwards:  summary.Forwards,
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o600)
+}
+
+func stopPondMeshDaemonState(home, pond string) (int, error) {
+	path, err := pondMeshDaemonStatePath(home, pond, false)
+	if err != nil {
+		return 0, err
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var state pondMeshDaemonState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return 0, exit(2, "parse pond daemon state %s: %v", path, err)
+	}
+	stopped := 0
+	for _, pid := range state.PIDs {
+		if pid <= 0 {
+			continue
+		}
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			continue
+		}
+		if err := proc.Kill(); err == nil {
+			stopped++
+		}
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return stopped, err
+	}
+	return stopped, nil
+}
+
 func pondSSHTargetsByLease(members []pondMember) map[string]SSHTarget {
 	targets := make(map[string]SSHTarget, len(members))
 	for _, member := range members {
@@ -675,6 +817,21 @@ func pondSSHTargetsByLease(members []pondMember) map[string]SSHTarget {
 		targets[member.Lease] = member.SSH
 	}
 	return targets
+}
+
+func pondResolveIDForServer(server Server) string {
+	if server.Labels != nil {
+		if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
+			return leaseID
+		}
+	}
+	if server.CloudID != "" {
+		return server.CloudID
+	}
+	if server.ID != 0 {
+		return strconv.FormatInt(server.ID, 10)
+	}
+	return serverSlug(server)
 }
 
 // pondMeshSSHArgsForForward builds the `ssh -L ...` argument vector for one

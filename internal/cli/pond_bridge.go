@@ -114,6 +114,10 @@ func (a App) pond(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "peers":
 		return a.pondPeers(ctx, args[1:])
+	case "connect":
+		return a.pondConnect(ctx, args[1:])
+	case "disconnect":
+		return a.pondDisconnect(ctx, args[1:])
 	case "release":
 		return a.pondRelease(ctx, args[1:])
 	case "-h", "--help", "help":
@@ -130,10 +134,14 @@ func (a App) pondHelp() {
 
 Usage:
   crabbox pond peers   --pond <name> [flags]
+  crabbox pond connect <name> [flags]
+  crabbox pond disconnect <name>
   crabbox pond release <name>
 
 Subcommands:
   peers   List every peer in the named pond, regardless of provider.
+  connect Open operator-side SSH forwards for exposed pond ports.
+  disconnect Stop daemonized SSH forwards started by connect --export.
   release Stop every lease in the named pond and remove their claims.
 
 Flags for `+"`pond peers`"+`:

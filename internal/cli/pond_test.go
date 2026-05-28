@@ -177,15 +177,15 @@ func TestFilterJSONListViewByPond(t *testing.T) {
 	if same := filterJSONListViewByPond(view, ""); !sameAny(same, view) {
 		t.Fatalf("empty filter should be identity")
 	}
-	if other := filterJSONListViewByPond("not-a-list", "alpha"); other != "not-a-list" {
-		t.Fatalf("non-slice view should pass through unchanged, got %#v", other)
+	if other := filterJSONListViewByPond("not-a-list", "alpha"); len(other.([]any)) != 0 {
+		t.Fatalf("non-slice view should fail closed, got %#v", other)
 	}
 	unsupported := []any{
 		map[string]any{"id": "native-a", "state": "ready"},
 		map[string]any{"id": "native-b", "state": "leased"},
 	}
-	if same := filterJSONListViewByPond(unsupported, "alpha"); fmt.Sprintf("%#v", same) != fmt.Sprintf("%#v", unsupported) {
-		t.Fatalf("unlabeled JSON list should pass through unchanged, got %#v", same)
+	if empty := filterJSONListViewByPond(unsupported, "alpha").([]any); len(empty) != 0 {
+		t.Fatalf("unlabeled JSON list should fail closed, got %#v", empty)
 	}
 }
 
@@ -545,7 +545,7 @@ func TestDoctorPondSummaryFailsWhenACLMissing(t *testing.T) {
 		t.Fatalf("expected failed, got %q", status)
 	}
 	wantTag := pondTailscaleTag(localCoordinatorOwner(), "alpha")
-	want := fmt.Sprintf(`pond "alpha": tailnet policy row missing for %s. Run with $TS_API_KEY exported to auto-install, or apply the snippet from docs/features/pond.md`, wantTag)
+	want := fmt.Sprintf(`pond "alpha": tailnet policy row missing for %s. Set TS_API_KEY plus %s=1 to auto-install, or apply the snippet from docs/features/pond.md`, wantTag, pondACLAutoBootstrapEnvVar)
 	if message != want {
 		t.Fatalf("verdict text drifted\n want: %q\n got:  %q", want, message)
 	}

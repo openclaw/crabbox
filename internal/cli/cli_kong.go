@@ -477,14 +477,18 @@ type machineCleanupKongCmd struct {
 }
 
 type pondKongCmd struct {
-	Peers   pondPeersKongCmd   `cmd:"" passthrough:"" help:"List peer endpoints for a pond on a delegated provider."`
-	Connect pondConnectKongCmd `cmd:"" passthrough:"" help:"Open SSH -L forwards to every pond member that declared --expose ports."`
-	Release pondReleaseKongCmd `cmd:"" passthrough:"" help:"Stop every lease in the named pond and remove their claims."`
+	Peers      pondPeersKongCmd      `cmd:"" passthrough:"" help:"List peer endpoints for a pond on a delegated provider."`
+	Connect    pondConnectKongCmd    `cmd:"" passthrough:"" help:"Open SSH -L forwards to every pond member that declared --expose ports."`
+	Disconnect pondDisconnectKongCmd `cmd:"" passthrough:"" help:"Stop daemonized SSH-mesh forwards for a pond."`
+	Release    pondReleaseKongCmd    `cmd:"" passthrough:"" help:"Stop every lease in the named pond and remove their claims."`
 }
 type pondPeersKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type pondConnectKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type pondDisconnectKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type pondReleaseKongCmd struct {
@@ -528,6 +532,9 @@ func (c *releaseKongCmd) Run(ctx context.Context, app App) error { return app.st
 func (c *cleanupKongCmd) Run(ctx context.Context, app App) error { return app.cleanup(ctx, c.Args) }
 func (c *pondConnectKongCmd) Run(ctx context.Context, app App) error {
 	return app.pondConnect(ctx, stripKongCommandPath(c.Args, "pond", "connect"))
+}
+func (c *pondDisconnectKongCmd) Run(ctx context.Context, app App) error {
+	return app.pondDisconnect(ctx, stripKongCommandPath(c.Args, "pond", "disconnect"))
 }
 func (c *pondReleaseKongCmd) Run(ctx context.Context, app App) error {
 	return app.pondRelease(ctx, stripKongCommandPath(c.Args, "pond", "release"))
