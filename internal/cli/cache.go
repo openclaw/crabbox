@@ -144,7 +144,7 @@ func (a App) cacheTarget(ctx context.Context, id string, reclaim bool) (SSHTarge
 		if repoErr != nil {
 			return SSHTarget{}, Config{}, "", repoErr
 		}
-		if claimErr := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, reclaim); claimErr != nil {
+		if claimErr := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, reclaim); claimErr != nil {
 			return SSHTarget{}, Config{}, "", claimErr
 		}
 		a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")

@@ -697,6 +697,8 @@ describe("fleet lease identity and idle", () => {
           provider: "hetzner",
           class: "standard",
           serverType: "cpx62",
+          pond: "Alpha Pond",
+          exposedPorts: ["8080", "9090"],
           ttlSeconds: 1200,
           idleTimeoutSeconds: 360,
           keep: true,
@@ -710,6 +712,8 @@ describe("fleet lease identity and idle", () => {
     expect(lease.slug).toBe("blue-lobster");
     expect(lease.idleTimeoutSeconds).toBe(360);
     expect(lease.ttlSeconds).toBe(1200);
+    expect(lease.pond).toBe("alpha-pond");
+    expect(lease.exposedPorts).toEqual(["8080", "9090"]);
     expect(lease.lastTouchedAt).toBeTruthy();
     expect(Date.parse(lease.expiresAt)).toBeGreaterThan(Date.parse(lease.createdAt));
 

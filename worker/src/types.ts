@@ -208,6 +208,7 @@ export interface LeaseRecord {
   serverType: string;
   requestedServerType?: string;
   pond?: string;
+  exposedPorts?: string[];
   hostId?: string;
   hostID?: string;
   market?: string;

@@ -159,7 +159,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 		return err
 	}
 	workdir := strings.TrimSpace(*workdirOverride)
@@ -668,7 +668,7 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 		return err
 	}
 	if err := restoreCheckpointArchive(ctx, target, checkpointArchivePath(paths, record), record.ID, workdir, *clear); err != nil {
@@ -765,7 +765,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 		}
 	}()
 	applyResolvedServerConfig(&cfg, server)
-	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 		a.releaseBackendLeaseBestEffort(ctx, sshBackend, lease)
 		return err
 	}
@@ -864,7 +864,7 @@ func (a App) checkpointForkParallelsSnapshot(ctx context.Context, fs *flag.FlagS
 		}
 	}()
 	applyResolvedServerConfig(&cfg, server)
-	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
 		a.releaseBackendLeaseBestEffort(ctx, sshBackend, lease)
 		return err
 	}

@@ -105,7 +105,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
-	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, leaseID, *reclaim); err != nil {
+	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, *reclaim); err != nil {
 		return err
 	}
 	if err := ensureOpenWebVNCPortalAccess(ctx, coord, leaseID, *openPortal, a.Stdout); err != nil {
@@ -1126,7 +1126,7 @@ func (a App) localContainerWebVNC(ctx context.Context, cfg Config, id, localPort
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
-	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, leaseID, reclaim); err != nil {
+	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, reclaim); err != nil {
 		return err
 	}
 	if _, err := resolveVNCEndpoint(ctx, cfg, &target); err != nil {

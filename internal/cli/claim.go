@@ -55,6 +55,13 @@ func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, 
 	return claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim)
 }
 
+func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	if err := claimLeaseForRepoConfig(leaseID, slug, cfg, repoRoot, idleTimeout, reclaim); err != nil {
+		return err
+	}
+	return updateLeaseClaimEndpoint(leaseID, server, target)
+}
+
 func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, "", "", repoRoot, idleTimeout, reclaim)
 }

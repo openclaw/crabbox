@@ -58,6 +58,7 @@ type CoordinatorLease struct {
 	Profile              string                `json:"profile"`
 	Class                string                `json:"class"`
 	Pond                 string                `json:"pond,omitempty"`
+	ExposedPorts         []string              `json:"exposedPorts,omitempty"`
 	ServerType           string                `json:"serverType"`
 	RequestedServerType  string                `json:"requestedServerType,omitempty"`
 	HostID               string                `json:"hostId,omitempty"`
@@ -1669,6 +1670,9 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 	}
 	if pond := normalizePondName(lease.Pond); pond != "" {
 		server.Labels[pondLabelKey] = pond
+	}
+	if exposedPorts := renderExposedPortsLabel(lease.ExposedPorts); exposedPorts != "" {
+		server.Labels[pondExposedPortsLabelKey] = exposedPorts
 	}
 	if lease.Tailscale != nil {
 		applyTailscaleMetadataToServer(&server, *lease.Tailscale)

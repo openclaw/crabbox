@@ -30,7 +30,7 @@ func (a App) ssh(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, leaseID, *reclaim); err != nil {
+	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, *reclaim); err != nil {
 		return err
 	}
 	if target.AuthSecret && !*showSecret {

@@ -278,20 +278,21 @@ func (a App) resolveNetworkLeaseTarget(ctx context.Context, cfg Config, id strin
 	if target.Host != "" {
 		_ = probeSSHTransport(ctx, &target, 4*time.Second)
 	}
+	_ = updateLeaseClaimEndpoint(leaseID, server, target)
 	if printFallback && resolved.FallbackReason != "" {
 		fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 	}
 	return server, target, leaseID, nil
 }
 
-func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server Server, leaseID string, reclaim bool) error {
+func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID string, reclaim bool) error {
 	repo, err := findRepo()
 	if err != nil {
 		return err
 	}
-	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
 		return err
 	}
-	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, LeaseID: leaseID}, "")
+	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
 	return nil
 }
