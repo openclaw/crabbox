@@ -174,6 +174,38 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBeUndefined();
   });
 
+  it("keeps provider cleanup failures active even when the cloud instance is already gone", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, { provider: "aws" }, async () => {
+        throw new Error("aws instance not found: i-000000000001");
+      }),
+    });
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "aws",
+        cloudID: "i-000000000001",
+        region: "eu-west-1",
+        cleanupAttempts: 2,
+        cleanupError: "previous failure",
+        cleanupFailedAt: "2026-05-01T00:00:10.000Z",
+        cleanupRetryAt: "2026-05-01T00:05:10.000Z",
+        expiresAt: "2026-05-01T00:00:01.000Z",
+      }),
+    );
+
+    await fleet.alarm();
+
+    const lease = storage.value<LeaseRecord>("lease:cbx_000000000001");
+    expect(lease?.state).toBe("active");
+    expect(lease?.cleanupAttempts).toBe(3);
+    expect(lease?.cleanupError).toContain("aws instance not found");
+    expect(Date.parse(lease?.cleanupRetryAt ?? "")).toBeGreaterThan(Date.now());
+    expect(storage.alarm()).toBe(Date.parse(lease?.cleanupRetryAt ?? ""));
+  });
+
   it("schedules the real expiry before stale cleanup retry metadata", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);

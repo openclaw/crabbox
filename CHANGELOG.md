@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed brokered AWS provisioning to compact stale Crabbox SSH ingress after EC2 reports the security group rule limit, then retry the current source rule before failing.
+- Fixed coordinator lease cleanup so expired AWS leases whose EC2 instance is already gone still clean provider keys before closing.
 
 ## 0.21.0 - 2026-05-27
 

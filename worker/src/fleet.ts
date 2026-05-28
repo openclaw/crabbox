@@ -6988,7 +6988,17 @@ class AWSProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
-    await this.deleteServer(lease.cloudID);
+    try {
+      await this.deleteServer(lease.cloudID);
+    } catch (error) {
+      const message = errorMessage(error);
+      if (!isCloudNotFoundError(message)) {
+        throw error;
+      }
+      console.warn(
+        `AWS lease cleanup found missing instance lease=${lease.id} cloud=${lease.cloudID}: ${message}`,
+      );
+    }
     if (validCrabboxProviderKey(lease.providerKey)) {
       await this.deleteSSHKey(lease.providerKey);
     }
