@@ -1,7 +1,7 @@
 import { AwsClient } from "aws4fetch";
 import { XMLParser } from "fast-xml-parser";
 
-import { awsUserData } from "./bootstrap";
+import { awsRunInstancesUserData } from "./bootstrap";
 import {
   awsPromotedAMIConfigKey,
   awsInstanceTypeCandidatesForTargetClass,
@@ -1046,7 +1046,7 @@ export class EC2SpotClient {
         KeyName: config.providerKey,
         MaxCount: "1",
         MinCount: "1",
-        UserData: btoa(awsUserData(config)),
+        UserData: await awsRunInstancesUserData(config),
         "BlockDeviceMapping.1.DeviceName": "/dev/sda1",
         "BlockDeviceMapping.1.Ebs.DeleteOnTermination": "true",
         "BlockDeviceMapping.1.Ebs.Encrypted": "true",

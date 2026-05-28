@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  awsRunInstancesUserData,
   awsUserData,
   azureWindowsBootstrapPowerShell,
   cloudInit,
@@ -48,6 +49,12 @@ const config: LeaseConfig = {
   keep: false,
   sshPublicKey: "ssh-ed25519 test",
 };
+
+async function gunzipBase64(value: string): Promise<string> {
+  const bytes = Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return await new Response(stream).text();
+}
 
 describe("cloud-init bootstrap", () => {
   it("uses retrying package installation in runcmd", () => {
@@ -234,6 +241,21 @@ describe("cloud-init bootstrap", () => {
     expect(sshIndex).toBeLessThan(browserIndex);
     expect(bootstrappedIndex).toBeGreaterThan(desktopIndex);
     expect(bootstrappedIndex).toBeGreaterThan(browserIndex);
+  });
+
+  it("compresses AWS Linux user data below the EC2 launch limit", async () => {
+    const longKey = `ssh-rsa ${"a".repeat(724)}`;
+    const raw = awsUserData({ ...config, desktop: true, browser: true, sshPublicKey: longKey });
+    const encoded = await awsRunInstancesUserData({
+      ...config,
+      desktop: true,
+      browser: true,
+      sshPublicKey: longKey,
+    });
+    const compressedBytes = atob(encoded).length;
+    expect(new TextEncoder().encode(raw).length).toBeGreaterThan(16 * 1024);
+    expect(compressedBytes).toBeLessThan(16 * 1024);
+    expect(await gunzipBase64(encoded)).toBe(raw);
   });
 
   it("adds browser setup only when requested", () => {

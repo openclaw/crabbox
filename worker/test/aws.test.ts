@@ -939,6 +939,87 @@ describe("aws provider", () => {
     expect(isRetryableAWSProvisioningError(imageMiss)).toBe(true);
   });
 
+  it("sends compressed Linux cloud-init user data to RunInstances", async () => {
+    let userData = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+        if (securityGroupResponse) {
+          return securityGroupResponse;
+        }
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+        }
+        if (action === "DescribeImages") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>ami-linux</imageId>
+      <name>ubuntu</name>
+      <imageState>available</imageState>
+      <creationDate>2026-05-01T00:00:00.000Z</creationDate>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`);
+        }
+        if (action === "RunInstances") {
+          userData = params.get("UserData") ?? "";
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<RunInstancesResponse>
+  <instancesSet>
+    <item>
+      <instanceId>i-linux</instanceId>
+      <instanceType>c7a.8xlarge</instanceType>
+      <ipAddress>203.0.113.44</ipAddress>
+      <instanceState><name>pending</name></instanceState>
+    </item>
+  </instancesSet>
+</RunInstancesResponse>`);
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
+      } as never,
+      "us-east-1",
+    );
+    await client.createServerWithFallback(
+      leaseConfig({
+        provider: "aws",
+        target: "linux",
+        class: "standard",
+        desktop: true,
+        browser: true,
+        sshPublicKey: `ssh-rsa ${"a".repeat(724)}`,
+      }),
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(atob(userData).length).toBeLessThan(16 * 1024);
+    expect(await gunzipBase64(userData)).toContain("crabbox-configure-desktop-theme");
+  });
+
   it("resolves macOS AMIs per fallback instance type", async () => {
     const imageQueries: string[] = [];
     const hostTypes: string[] = [];
@@ -1869,4 +1950,10 @@ function ec2ConfiguredSecurityGroupResponse(
 
 function ec2XMLResponse(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "application/xml" } });
+}
+
+async function gunzipBase64(value: string): Promise<string> {
+  const bytes = Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return await new Response(stream).text();
 }
