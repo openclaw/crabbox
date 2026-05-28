@@ -61,6 +61,8 @@ export interface AWSMacHost {
   availabilityZone: string;
   instanceType: string;
   autoPlacement: string;
+  availableCapacity?: number;
+  availableVCpus?: number;
   allocationTime?: string;
   releaseTime?: string;
   tags: Record<string, string>;
@@ -1038,6 +1040,7 @@ export class EC2SpotClient {
       config.target === "macos"
         ? await this.macHostAvailabilityZoneForLaunch(config, subnetID)
         : "";
+    let lastMacHostID = "";
     const run = async (macHostID: string): Promise<ProviderMachine> => {
       const params: Record<string, string> = {
         ClientToken: leaseID,
@@ -1075,6 +1078,7 @@ export class EC2SpotClient {
         const hostID =
           macHostID ||
           (await this.discoverMacHostID(config.serverType, "", macHostAvailabilityZone));
+        lastMacHostID = hostID;
         params["Placement.HostId"] = hostID;
         params["Placement.Tenancy"] = "host";
       } else if (!subnetID) {
@@ -1095,6 +1099,18 @@ export class EC2SpotClient {
       return await run(configuredMacHostID);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (
+        config.target === "macos" &&
+        ((configuredMacHostID && isAWSInvalidHostIDError(message)) ||
+          (!configuredMacHostID && isAWSInsufficientCapacityOnHostError(message)))
+      ) {
+        const discovered = await this.discoverMacHostID(
+          config.serverType,
+          configuredMacHostID || lastMacHostID,
+          macHostAvailabilityZone,
+        );
+        return run(discovered);
+      }
       if (config.target !== "macos" || !configuredMacHostID || !isAWSInvalidHostIDError(message)) {
         throw error;
       }
@@ -1262,7 +1278,7 @@ export class EC2SpotClient {
       params["Filter.4.Value.1"] = availabilityZone;
     }
     const root = await this.ec2("DescribeHosts", params);
-    const hostID = awsMacHostIDFromDescribeHosts(root, excludedHostID);
+    const hostID = awsMacHostIDFromDescribeHosts(root, excludedHostID, serverType);
     if (!hostID) {
       const zoneHint = availabilityZone ? ` in ${availabilityZone}` : "";
       throw new Error(
@@ -1320,15 +1336,24 @@ export class EC2SpotClient {
   private macHostFromDescribeHost(input: unknown): AWSMacHost {
     const host = record(input);
     const properties = record(host["hostProperties"]);
+    const instanceType = asString(properties["instanceType"] ?? host["instanceType"]);
     const macHost: AWSMacHost = {
       id: asString(host["hostId"]),
       state: asString(host["hostState"] ?? host["state"]),
       region: this.region,
       availabilityZone: asString(host["availabilityZone"]),
-      instanceType: asString(properties["instanceType"] ?? host["instanceType"]),
+      instanceType,
       autoPlacement: asString(host["autoPlacement"]),
       tags: tagMap(host["tagSet"]),
     };
+    const availableCapacity = awsMacHostAvailableCapacity(host, instanceType);
+    if (availableCapacity !== undefined) {
+      macHost.availableCapacity = availableCapacity;
+    }
+    const availableVCpus = finiteNumber(record(host["availableCapacity"])["availableVCpus"]);
+    if (availableVCpus !== undefined) {
+      macHost.availableVCpus = availableVCpus;
+    }
     const allocationTime = asString(host["allocationTime"]);
     if (allocationTime) {
       macHost.allocationTime = allocationTime;
@@ -1632,17 +1657,47 @@ function instanceToMachine(input: unknown): ProviderMachine {
 export function awsMacHostIDFromDescribeHosts(
   root: Record<string, unknown>,
   excludedHostID = "",
+  serverType = "",
 ): string {
-  const hosts = items(record(root["hostSet"])["item"])
+  const selectedHost = items(record(root["hostSet"])["item"])
     .map(record)
-    .filter((host) => {
+    .find((host) => {
       const hostID = asString(host["hostId"]);
-      return hostID && hostID !== excludedHostID;
+      return (
+        hostID &&
+        hostID !== excludedHostID &&
+        asString(host["hostState"] ?? host["state"]) === "available" &&
+        awsMacHostHasLaunchCapacity(host, serverType)
+      );
     });
-  const available = hosts.find(
-    (host) => asString(host["hostState"] ?? host["state"]) === "available",
-  );
-  return asString((available ?? hosts[0] ?? {})["hostId"]);
+  return asString(selectedHost?.["hostId"]);
+}
+
+function awsMacHostHasLaunchCapacity(host: Record<string, unknown>, serverType: string): boolean {
+  const availableCapacity = awsMacHostAvailableCapacity(host, serverType);
+  if (availableCapacity !== undefined) {
+    return availableCapacity > 0;
+  }
+  const availableVCpus = finiteNumber(record(host["availableCapacity"])["availableVCpus"]);
+  return availableVCpus === undefined || availableVCpus > 0;
+}
+
+function awsMacHostAvailableCapacity(
+  host: Record<string, unknown>,
+  serverType: string,
+): number | undefined {
+  if (!serverType) {
+    return undefined;
+  }
+  const capacity = record(host["availableCapacity"]);
+  const itemsSet = record(capacity["availableInstanceCapacity"]);
+  for (const item of items(itemsSet["item"]).map(record)) {
+    if (asString(item["instanceType"]) !== serverType) {
+      continue;
+    }
+    return finiteNumber(item["availableCapacity"]);
+  }
+  return undefined;
 }
 
 export function awsHostIDsFromSet(input: unknown): string[] {
@@ -1917,6 +1972,10 @@ function isCrabboxManagedSecurityGroup(group: unknown): boolean {
 
 function isAWSSecurityGroupRuleLimitError(message: string): boolean {
   return message.includes("RulesPerSecurityGroupLimitExceeded");
+}
+
+function isAWSInsufficientCapacityOnHostError(message: string): boolean {
+  return message.includes("InsufficientCapacityOnHost");
 }
 
 export function awsLaunchCandidates(
@@ -2236,7 +2295,10 @@ export function awsProvisioningErrorCategory(message: string): string {
   if (message.includes("no AWS AMI found")) {
     return "region";
   }
-  if (message.includes("InsufficientInstanceCapacity")) {
+  if (
+    message.includes("InsufficientInstanceCapacity") ||
+    isAWSInsufficientCapacityOnHostError(message)
+  ) {
     return "capacity";
   }
   if (message.includes("MaxSpotInstanceCountExceeded") || message.includes("VcpuLimitExceeded")) {

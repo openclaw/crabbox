@@ -153,6 +153,7 @@ CRABBOX_AWS_ORPHAN_SWEEP_ENABLED optional; defaults on when AWS broker credentia
 CRABBOX_AWS_ORPHAN_SWEEP_DELETE optional; set 1 to terminate confirmed orphan EC2 instances
 CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS optional; default 3600
 CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS optional; default 900
+CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE optional; set 1 to release stale pending EC2 Mac hosts during orphan sweep
 ```
 
 Artifact backend vars are ordinary Worker vars except
@@ -278,7 +279,9 @@ tag, has no active lease, is missing a lease label, or points at an active lease
 whose current cloud ID is different. It skips `keep=true` instances and applies
 the grace window before acting on missing or mismatched lease state. Set
 `CRABBOX_AWS_ORPHAN_SWEEP_DELETE=1` to terminate confirmed candidates
-automatically.
+automatically. When `CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE=1` is also set, the same
+sweep releases Crabbox-tagged EC2 Mac Dedicated Hosts that have stayed in
+`pending` for at least one hour and are not attached to an active lease.
 
 Trusted admins can inspect or trigger the sweep:
 

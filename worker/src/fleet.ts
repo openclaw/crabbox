@@ -7,6 +7,7 @@ import {
   awsRegionCandidates,
   isAWSInstanceCleanedAfterReadinessFailure,
   isRetryableAWSProvisioningError,
+  type AWSMacHost,
 } from "./aws";
 import { AzureClient } from "./azure";
 import {
@@ -237,6 +238,7 @@ interface LeaseCloudAudit {
 interface AWSOrphanSweepConfig {
   enabled: boolean;
   deleteEnabled: boolean;
+  macHostReleaseEnabled: boolean;
   intervalSeconds: number;
   graceSeconds: number;
   regions: string[];
@@ -260,6 +262,19 @@ interface AWSOrphanSweepCandidate {
   error?: string;
 }
 
+interface AWSMacHostSweepCandidate {
+  region: string;
+  hostID: string;
+  state: string;
+  instanceType: string;
+  availabilityZone: string;
+  allocationTime?: string;
+  activeLeaseID?: string;
+  reason: string;
+  action: "reported" | "released" | "release_failed";
+  error?: string;
+}
+
 interface AWSOrphanSweepRecord {
   startedAt: string;
   finishedAt: string;
@@ -270,6 +285,9 @@ interface AWSOrphanSweepRecord {
   scanned: number;
   candidates: AWSOrphanSweepCandidate[];
   terminated: number;
+  macHostsScanned?: number;
+  macHostCandidates?: AWSMacHostSweepCandidate[];
+  macHostsReleased?: number;
   errors: Array<{ region: string; message: string }>;
   nextRunAt?: string;
 }
@@ -3975,8 +3993,10 @@ export class FleetDurableObject implements DurableObject {
     const activeLeases = new Map(activeAWSLeases.map((lease) => [lease.id, lease]));
     const activeCloudIDs = new Set(activeAWSLeases.map((lease) => lease.cloudID).filter(Boolean));
     const candidates: AWSOrphanSweepCandidate[] = [];
+    const macHostCandidates: AWSMacHostSweepCandidate[] = [];
     const errors: AWSOrphanSweepRecord["errors"] = [];
     let scanned = 0;
+    let macHostsScanned = 0;
     for (const region of config.regions) {
       try {
         // oxlint-disable-next-line eslint/no-await-in-loop -- regions are swept independently.
@@ -4010,6 +4030,37 @@ export class FleetDurableObject implements DurableObject {
           }
           candidates.push(candidate);
         }
+        if (config.macHostReleaseEnabled) {
+          const client = new EC2SpotClient(this.env, region);
+          // oxlint-disable-next-line eslint/no-await-in-loop -- keep host cleanup attached to its region.
+          const macHosts = await client.listMacHosts();
+          macHostsScanned += macHosts.length;
+          for (const host of macHosts) {
+            const candidate = awsMacHostSweepCandidate(
+              host,
+              activeAWSLeases,
+              region,
+              Math.max(config.graceSeconds, 3600),
+            );
+            if (!candidate) {
+              continue;
+            }
+            if (config.deleteEnabled) {
+              try {
+                // oxlint-disable-next-line eslint/no-await-in-loop -- release failures must stay attached to the host.
+                await client.releaseMacHost(host.id);
+                candidate.action = "released";
+              } catch (error) {
+                candidate.action = "release_failed";
+                candidate.error = errorMessage(error);
+                console.warn(
+                  `aws orphan sweep mac host release failed region=${region} host=${host.id}: ${candidate.error}`,
+                );
+              }
+            }
+            macHostCandidates.push(candidate);
+          }
+        }
       } catch (error) {
         const message = errorMessage(error);
         errors.push({ region, message });
@@ -4027,14 +4078,18 @@ export class FleetDurableObject implements DurableObject {
       scanned,
       candidates,
       terminated: candidates.filter((candidate) => candidate.action === "terminated").length,
+      macHostsScanned,
+      macHostCandidates,
+      macHostsReleased: macHostCandidates.filter((candidate) => candidate.action === "released")
+        .length,
       errors,
       nextRunAt: new Date(Date.parse(finishedAt) + config.intervalSeconds * 1000).toISOString(),
     };
     await this.state.storage.put(awsOrphanSweepRecordKey, record);
     await this.state.storage.delete(awsOrphanSweepFirstAlarmKey);
-    if (candidates.length > 0 || errors.length > 0) {
+    if (candidates.length > 0 || macHostCandidates.length > 0 || errors.length > 0) {
       console.warn(
-        `aws orphan sweep mode=${record.mode} scanned=${record.scanned} candidates=${candidates.length} terminated=${record.terminated} errors=${errors.length}`,
+        `aws orphan sweep mode=${record.mode} scanned=${record.scanned} candidates=${candidates.length} terminated=${record.terminated} mac_hosts=${macHostCandidates.length} mac_hosts_released=${record.macHostsReleased ?? 0} errors=${errors.length}`,
       );
     }
     return record;
@@ -4047,6 +4102,10 @@ export class FleetDurableObject implements DurableObject {
     return {
       enabled,
       deleteEnabled: enabled && envFlagEnabled(this.env.CRABBOX_AWS_ORPHAN_SWEEP_DELETE),
+      macHostReleaseEnabled:
+        enabled &&
+        envFlagEnabled(this.env.CRABBOX_AWS_ORPHAN_SWEEP_DELETE) &&
+        envFlagEnabled(this.env.CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE),
       intervalSeconds: positiveEnvInt(
         this.env.CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS,
         defaultAWSOrphanSweepIntervalSeconds,
@@ -6325,6 +6384,42 @@ function awsOrphanSweepCandidate(
     candidate.activeCloudID = activeLease.cloudID;
   }
   return candidate;
+}
+
+function awsMacHostSweepCandidate(
+  host: AWSMacHost,
+  activeLeases: LeaseRecord[],
+  region: string,
+  graceSeconds: number,
+): AWSMacHostSweepCandidate | undefined {
+  if (host.tags["crabbox"] !== "true" && host.tags["created_by"] !== "crabbox") {
+    return undefined;
+  }
+  const activeLease = activeLeases.find((lease) => leaseHostID(lease) === host.id);
+  if (activeLease) {
+    return undefined;
+  }
+  if (host.state !== "pending") {
+    return undefined;
+  }
+  const allocationTime = Date.parse(host.allocationTime ?? "");
+  if (!Number.isFinite(allocationTime)) {
+    return undefined;
+  }
+  const graceMs = Math.max(0, graceSeconds) * 1000;
+  if (allocationTime + graceMs > Date.now()) {
+    return undefined;
+  }
+  return {
+    region,
+    hostID: host.id,
+    state: host.state,
+    instanceType: host.instanceType,
+    availabilityZone: host.availabilityZone,
+    allocationTime: new Date(allocationTime).toISOString(),
+    reason: "stale-pending-mac-host",
+    action: "reported",
+  };
 }
 
 function parseProviderLabelTime(value: string | undefined): number {

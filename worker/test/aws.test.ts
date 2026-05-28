@@ -752,6 +752,38 @@ describe("aws provider", () => {
         },
       }),
     ).toBe("h-live");
+    expect(
+      awsMacHostIDFromDescribeHosts(
+        {
+          hostSet: {
+            item: [
+              {
+                hostId: "h-occupied",
+                hostState: "available",
+                availableCapacity: {
+                  availableInstanceCapacity: {
+                    item: { instanceType: "mac2.metal", availableCapacity: 0 },
+                  },
+                  availableVCpus: 0,
+                },
+              },
+              {
+                hostId: "h-capacity",
+                hostState: "available",
+                availableCapacity: {
+                  availableInstanceCapacity: {
+                    item: { instanceType: "mac2.metal", availableCapacity: 1 },
+                  },
+                  availableVCpus: 12,
+                },
+              },
+            ],
+          },
+        },
+        "",
+        "mac2.metal",
+      ),
+    ).toBe("h-capacity");
   });
 
   it("parses EC2 host id sets from AllocateHosts responses", () => {
@@ -1137,6 +1169,190 @@ describe("aws provider", () => {
     expect(runImages).toEqual(["ami-x86-mac"]);
     expect(result.serverType).toBe("mac1.metal");
     expect(result.server.hostID).toBe("h-mac1");
+  });
+
+  it("retries macOS launch on another discovered host after host capacity is exhausted", async () => {
+    const runHosts: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+        if (securityGroupResponse) {
+          return securityGroupResponse;
+        }
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+        }
+        if (action === "DescribeImages") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>ami-arm-mac</imageId>
+      <name>macos</name>
+      <imageState>available</imageState>
+      <creationDate>2026-05-01T00:00:00.000Z</creationDate>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`);
+        }
+        if (action === "DescribeHosts") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeHostsResponse>
+  <hostSet>
+    <item>
+      <hostId>h-occupied</hostId>
+      <hostState>available</hostState>
+      <availabilityZone>eu-west-1a</availabilityZone>
+      <hostProperties><instanceType>mac2.metal</instanceType></hostProperties>
+    </item>
+    <item>
+      <hostId>h-spare</hostId>
+      <hostState>available</hostState>
+      <availabilityZone>eu-west-1a</availabilityZone>
+      <hostProperties><instanceType>mac2.metal</instanceType></hostProperties>
+    </item>
+  </hostSet>
+</DescribeHostsResponse>`);
+        }
+        if (action === "RunInstances") {
+          const hostID = params.get("Placement.HostId") ?? "";
+          runHosts.push(hostID);
+          if (hostID === "h-occupied") {
+            return ec2XMLResponse(
+              `<Response><Errors><Error><Code>InsufficientCapacityOnHost</Code><Message>Dedicated host h-occupied has insufficient capacity.</Message></Error></Errors></Response>`,
+              400,
+            );
+          }
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<RunInstancesResponse>
+  <instancesSet>
+    <item>
+      <instanceId>i-mac2</instanceId>
+      <instanceType>mac2.metal</instanceType>
+      <placement><hostId>${hostID}</hostId></placement>
+      <ipAddress>203.0.113.44</ipAddress>
+      <instanceState><name>pending</name></instanceState>
+      <tagSet><item><key>Name</key><value>crabbox-violet-prawn</value></item></tagSet>
+    </item>
+  </instancesSet>
+</RunInstancesResponse>`);
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
+      } as never,
+      "eu-west-1",
+    );
+    const result = await client.createServerWithFallback(
+      leaseConfig({
+        provider: "aws",
+        target: "macos",
+        capacity: { market: "on-demand" },
+        serverType: "mac2.metal",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(runHosts).toEqual(["h-occupied", "h-spare"]);
+    expect(result.server.hostID).toBe("h-spare");
+  });
+
+  it("does not fail over from an explicit macOS host pin after host capacity is exhausted", async () => {
+    const runHosts: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+        if (securityGroupResponse) {
+          return securityGroupResponse;
+        }
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+        }
+        if (action === "DescribeImages") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>ami-arm-mac</imageId>
+      <name>macos</name>
+      <imageState>available</imageState>
+      <creationDate>2026-05-01T00:00:00.000Z</creationDate>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`);
+        }
+        if (action === "RunInstances") {
+          runHosts.push(params.get("Placement.HostId") ?? "");
+          return ec2XMLResponse(
+            `<Response><Errors><Error><Code>InsufficientCapacityOnHost</Code><Message>Dedicated host h-occupied has insufficient capacity.</Message></Error></Errors></Response>`,
+            400,
+          );
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
+      } as never,
+      "eu-west-1",
+    );
+    await expect(
+      client.createServerWithFallback(
+        leaseConfig({
+          provider: "aws",
+          target: "macos",
+          capacity: { market: "on-demand" },
+          hostID: "h-occupied",
+          serverType: "mac2.metal",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+        "cbx_abcdef123456",
+        "violet-prawn",
+        "alice@example.com",
+      ),
+    ).rejects.toThrow("InsufficientCapacityOnHost");
+
+    expect(runHosts.length).toBeGreaterThan(0);
+    expect(new Set(runHosts)).toEqual(new Set(["h-occupied"]));
   });
 
   it("does not reuse a pinned macOS AMI after changing fallback host families", async () => {
