@@ -16,11 +16,17 @@ crabbox list --provider islo
 crabbox list --provider e2b
 crabbox list --provider cloudflare --refresh
 crabbox list --json
+crabbox list --pond alpha
 ```
 
 `--refresh` asks providers with local claims, such as Cloudflare, to check live
 runner state before printing the list. Without it, Cloudflare list stays
 credential-free and reports local claims only.
+
+`--pond <name>` keeps only leases tagged with the requested pond. Pond names are
+normalized the same way as slugs (lowercased, non-alphanumeric runs collapsed to
+single dashes), so `--pond "Alpha Pond"` matches a lease created with `--pond
+alpha-pond`. See `docs/features/pond.md`.
 
 `crabbox pool list` remains as a compatibility alias.
 
@@ -54,6 +60,7 @@ Flags:
 --static-port <port>
 --static-work-root <path>
 --json
+--pond <name>
 --exe-dev-control-host <host>
 --sprites-api-url <url>
 --azure-dynamic-sessions-endpoint <url>

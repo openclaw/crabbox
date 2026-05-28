@@ -79,6 +79,8 @@ export interface LeaseConfig {
   idleTimeoutSeconds: number;
   keep: boolean;
   sshPublicKey: string;
+  pond: string;
+  exposedPorts: string[];
 }
 
 export type AzureOSDiskMode = "managed" | "ephemeral";
@@ -86,6 +88,10 @@ export type AzureOSDiskMode = "managed" | "ephemeral";
 export interface LeaseConfigDefaults {
   azureOSDisk?: string;
 }
+
+const maxRequestedPondNameLength = 41;
+const maxExposedPort = 65_535;
+const maxExposedPortsPerLease = 10;
 
 export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults = {}): LeaseConfig {
   const provider = input.provider ?? "hetzner";
@@ -211,7 +217,36 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     idleTimeoutSeconds,
     keep: input.keep ?? false,
     sshPublicKey,
+    pond: requestedPondName(input.pond ?? ""),
+    exposedPorts: normalizeExposedPorts(input.exposedPorts ?? []),
   };
+}
+
+// normalizePondName mirrors the Go-side helper in internal/cli/pond.go. The
+// `pond` label is a reserved provider-label key that groups leases for
+// peer discovery and lifecycle commands.
+export function normalizePondName(value: string): string {
+  return value
+    .toLowerCase()
+    .trim()
+    .replaceAll(/[^a-z0-9]+/g, "-")
+    .replaceAll(/^-+|-+$/g, "");
+}
+
+function requestedPondName(value: string): string {
+  if (value.trim() === "") {
+    return "";
+  }
+  const name = normalizePondName(value);
+  if (!name) {
+    throw new Error("pond must contain at least one letter or digit");
+  }
+  if (name.length > maxRequestedPondNameLength) {
+    throw new Error(
+      `pond must be ${maxRequestedPondNameLength} characters or fewer after normalization`,
+    );
+  }
+  return name;
 }
 
 export function normalizeDesktopEnv(value: string | undefined): "xfce" | "wayland" | "gnome" {
@@ -359,6 +394,36 @@ function validPorts(values: string[]): string[] {
       .map((value) => value.trim())
       .filter((value) => /^[1-9][0-9]{0,4}$/.test(value) && Number(value) <= 65_535),
   );
+}
+
+function normalizeExposedPorts(values: string[]): string[] {
+  const seen = new Set<number>();
+  for (const raw of values) {
+    if (raw.trim() === "") {
+      throw new Error("exposedPorts values must not be empty");
+    }
+    const parts = raw
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    if (parts.length === 0) {
+      throw new Error("exposedPorts values must not be empty");
+    }
+    for (const part of parts) {
+      if (!/^[1-9][0-9]*$/.test(part)) {
+        throw new Error(`exposedPorts value ${part} must be a TCP port in 1..${maxExposedPort}`);
+      }
+      const port = Number(part);
+      if (!Number.isSafeInteger(port) || port <= 0 || port > maxExposedPort) {
+        throw new Error(`exposedPorts value ${part} must be a TCP port in 1..${maxExposedPort}`);
+      }
+      seen.add(port);
+    }
+  }
+  if (seen.size > maxExposedPortsPerLease) {
+    throw new Error(`exposedPorts accepts at most ${maxExposedPortsPerLease} distinct ports`);
+  }
+  return [...seen].toSorted((left, right) => left - right).map((port) => String(port));
 }
 
 function uniqueStrings(values: string[]): string[] {

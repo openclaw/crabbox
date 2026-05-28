@@ -109,7 +109,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	}
 	applyResolvedServerConfig(&cfg, server)
 	target = targetWithConfigDefaults(target, cfg)
-	if err := claimLeaseForRepoConfig(leaseID, slug, cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 		return err
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
@@ -269,7 +269,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	}
 	applyResolvedServerConfig(&cfg, server)
 	target = targetWithConfigDefaults(target, cfg)
-	if err := claimLeaseForRepoConfig(leaseID, slug, cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")

@@ -219,6 +219,43 @@ func TestExternalRunnerGitHubRepoFallsBackToRepoMirror(t *testing.T) {
 	}
 }
 
+func TestFilterJSONListViewByPondFailsClosedWithoutLabels(t *testing.T) {
+	view := []any{
+		map[string]any{"id": "cbx_one", "status": "active"},
+		map[string]any{"id": "cbx_two", "status": "active"},
+	}
+	got, ok := filterJSONListViewByPond(view, "alpha").([]any)
+	if !ok {
+		t.Fatalf("filtered type=%T, want []any", got)
+	}
+	if len(got) != 0 {
+		t.Fatalf("filtered=%#v, want empty without label evidence", got)
+	}
+}
+
+func TestFilterTypedListViewByPondPreservesTypeAndFailsClosed(t *testing.T) {
+	view := []CoordinatorMachine{
+		{ID: "cbx_one", Labels: map[string]string{pondLabelKey: "alpha"}},
+		{ID: "cbx_two", Labels: map[string]string{pondLabelKey: "bravo"}},
+	}
+	got, ok := filterJSONListViewByPond(view, "alpha").([]CoordinatorMachine)
+	if !ok {
+		t.Fatalf("filtered type=%T, want []CoordinatorMachine", got)
+	}
+	if len(got) != 1 || string(got[0].ID) != "cbx_one" {
+		t.Fatalf("filtered=%#v", got)
+	}
+
+	noLabels := []CoordinatorMachine{{ID: "cbx_unlabeled"}}
+	empty, ok := filterJSONListViewByPond(noLabels, "alpha").([]CoordinatorMachine)
+	if !ok {
+		t.Fatalf("filtered type=%T, want []CoordinatorMachine", empty)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("filtered=%#v, want empty without label evidence", empty)
+	}
+}
+
 func TestMatchExternalRunnerActionRunChoosesClosestCreatedAt(t *testing.T) {
 	runner := CoordinatorExternalRunner{
 		Ref:       "main",

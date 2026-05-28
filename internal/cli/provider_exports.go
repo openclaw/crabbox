@@ -71,6 +71,24 @@ func ClaimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repo
 	return claimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repoRoot, idleTimeout, reclaim)
 }
 
+func ClaimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
+}
+
+// ClaimLeaseForRepoProviderPond is the pond-aware variant exposed for
+// delegated providers that need to persist the pond label in the local claim
+// sidecar (delegated providers do not own a provider-side label store).
+func ClaimLeaseForRepoProviderPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, "", pond, repoRoot, idleTimeout, reclaim)
+}
+
+// ClaimLeaseForRepoProviderScopePond combines a provider scope (e.g. Docker
+// context for local-container claim isolation) with the pond label so both
+// features coexist in the same claim sidecar without one overwriting the other.
+func ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
+}
+
 func ResolveLeaseClaim(identifier string) (LeaseClaim, bool, error) {
 	return resolveLeaseClaim(identifier)
 }

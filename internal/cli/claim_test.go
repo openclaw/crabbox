@@ -26,6 +26,62 @@ func TestClaimLeaseForRepoWritesAndUpdatesClaim(t *testing.T) {
 	}
 }
 
+func TestClaimLeaseTargetForRepoConfigStoresEndpointMetadata(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.Pond = "Alpha Pond"
+	server := Server{
+		Provider: "aws",
+		Labels: map[string]string{
+			"tailscale":      "true",
+			"tailscale_ipv4": "100.64.1.10",
+			"slug":           "web",
+			pondLabelKey:     "alpha-pond",
+		},
+	}
+	target := SSHTarget{Host: "203.0.113.10", Port: "2222"}
+
+	if err := claimLeaseTargetForRepoConfig("cbx_123", "web", cfg, server, target, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := readLeaseClaim("cbx_123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Pond != "alpha-pond" || claim.TailscaleIPv4 != "100.64.1.10" || claim.SSHHost != "203.0.113.10" || claim.SSHPort != 2222 {
+		t.Fatalf("unexpected claim endpoint metadata: %#v", claim)
+	}
+	if claim.Labels[pondLabelKey] != "alpha-pond" {
+		t.Fatalf("claim labels=%#v", claim.Labels)
+	}
+}
+
+func TestClaimLeaseForRepoProviderStoresPond(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := claimLeaseForRepoProviderWithPond("isb_crabbox-test", "web", "islo", "Alpha Pond", repo, 30*time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := readLeaseClaim("isb_crabbox-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Pond != "alpha-pond" {
+		t.Fatalf("pond=%q want alpha-pond", claim.Pond)
+	}
+	if err := claimLeaseForRepoProvider("isb_crabbox-test", "web", "islo", repo, 30*time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err = readLeaseClaim("isb_crabbox-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Pond != "alpha-pond" {
+		t.Fatalf("pond should be preserved when omitted, got %q", claim.Pond)
+	}
+}
+
 func TestClaimLeaseForRepoConfigScopesProviderClaims(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")

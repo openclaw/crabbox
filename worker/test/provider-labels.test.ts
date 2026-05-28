@@ -70,6 +70,7 @@ describe("provider labels", () => {
       desktop: true,
       desktopEnv: "wayland",
       browser: true,
+      code: true,
       tailscale: true,
       tailscaleTags: ["tag:crabbox"],
       tailscaleHostname: "crabbox-blue-lobster",
@@ -113,11 +114,114 @@ describe("provider labels", () => {
     expect(labels.desktop).toBe("true");
     expect(labels.desktop_env).toBe("wayland");
     expect(labels.browser).toBe("true");
+    expect(labels.code).toBe("true");
     expect(labels.tailscale).toBe("true");
     expect(labels.tailscale_hostname).toBe("crabbox-blue-lobster");
     expect(labels.tailscale_tags).toBe("tag_crabbox");
     expect(labels.tailscale_exit_node).toBe("mac-studio.tailnet.ts.net");
     expect(labels.tailscale_exit_node_allow_lan_access).toBe("true");
     expect(Object.values(labels).join(" ")).not.toContain("tskey-secret");
+  });
+
+  it("includes the pond label when the lease is tagged", () => {
+    const config: LeaseConfig = {
+      provider: "aws",
+      target: "linux",
+      windowsMode: "normal",
+      desktop: false,
+      browser: false,
+      tailscale: false,
+      tailscaleTags: ["tag:crabbox"],
+      tailscaleHostname: "",
+      tailscaleAuthKey: "",
+      tailscaleExitNode: "",
+      tailscaleExitNodeAllowLanAccess: false,
+      profile: "default",
+      class: "beast",
+      serverType: "c7a.48xlarge",
+      image: "ami",
+      location: "eu-west-1",
+      sshUser: "crabbox",
+      sshPort: "2222",
+      sshFallbackPorts: ["22"],
+      awsRegion: "eu-west-1",
+      awsRootGB: 400,
+      awsAMI: "",
+      awsSGID: "",
+      awsSubnetID: "",
+      awsProfile: "",
+      capacityMarket: "spot",
+      capacityStrategy: "most-available",
+      capacityFallback: "on-demand-after-120s",
+      capacityRegions: [],
+      capacityAvailabilityZones: [],
+      providerKey: "crabbox-cbx-123",
+      workRoot: "/work/crabbox",
+      ttlSeconds: 600,
+      idleTimeoutSeconds: 7200,
+      keep: false,
+      sshPublicKey: "ssh-ed25519 test",
+      pond: "alpha",
+    } as LeaseConfig;
+    const labels = leaseProviderLabels(
+      config,
+      "cbx_123",
+      "blue-lobster",
+      "peter@example.com",
+      "aws",
+      new Date("2026-05-01T12:00:00Z"),
+    );
+    expect(labels.pond).toBe("alpha");
+  });
+
+  it("omits the pond label when the lease has no pond", () => {
+    const config: LeaseConfig = {
+      provider: "aws",
+      target: "linux",
+      windowsMode: "normal",
+      desktop: false,
+      browser: false,
+      tailscale: false,
+      tailscaleTags: ["tag:crabbox"],
+      tailscaleHostname: "",
+      tailscaleAuthKey: "",
+      tailscaleExitNode: "",
+      tailscaleExitNodeAllowLanAccess: false,
+      profile: "default",
+      class: "beast",
+      serverType: "c7a.48xlarge",
+      image: "ami",
+      location: "eu-west-1",
+      sshUser: "crabbox",
+      sshPort: "2222",
+      sshFallbackPorts: ["22"],
+      awsRegion: "eu-west-1",
+      awsRootGB: 400,
+      awsAMI: "",
+      awsSGID: "",
+      awsSubnetID: "",
+      awsProfile: "",
+      capacityMarket: "spot",
+      capacityStrategy: "most-available",
+      capacityFallback: "on-demand-after-120s",
+      capacityRegions: [],
+      capacityAvailabilityZones: [],
+      providerKey: "crabbox-cbx-123",
+      workRoot: "/work/crabbox",
+      ttlSeconds: 600,
+      idleTimeoutSeconds: 7200,
+      keep: false,
+      sshPublicKey: "ssh-ed25519 test",
+      pond: "",
+    } as LeaseConfig;
+    const labels = leaseProviderLabels(
+      config,
+      "cbx_123",
+      "blue-lobster",
+      "peter@example.com",
+      "aws",
+      new Date("2026-05-01T12:00:00Z"),
+    );
+    expect(labels.pond).toBeUndefined();
   });
 });

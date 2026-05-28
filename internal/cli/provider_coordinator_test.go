@@ -199,6 +199,27 @@ func TestLeaseToServerTargetPreservesCoordinatorWorkRoot(t *testing.T) {
 	}
 }
 
+func TestLeaseToServerTargetPreservesPondExposedPorts(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+
+	server, _, _ := leaseToServerTarget(CoordinatorLease{
+		ID:           "cbx_123",
+		Slug:         "web",
+		Provider:     "aws",
+		Pond:         "alpha",
+		ExposedPorts: []string{"8080", "9090"},
+		Host:         "203.0.113.10",
+	}, cfg)
+
+	if server.Labels[pondLabelKey] != "alpha" {
+		t.Fatalf("pond label=%q want alpha", server.Labels[pondLabelKey])
+	}
+	if server.Labels[pondExposedPortsLabelKey] != "8080-9090" {
+		t.Fatalf("exposed ports label=%q want 8080-9090", server.Labels[pondExposedPortsLabelKey])
+	}
+}
+
 func TestLeaseToServerTargetPreservesDesktopEnvLabel(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"

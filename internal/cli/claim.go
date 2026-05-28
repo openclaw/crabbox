@@ -5,25 +5,33 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type leaseClaim struct {
-	LeaseID            string `json:"leaseID"`
-	Slug               string `json:"slug,omitempty"`
-	Provider           string `json:"provider,omitempty"`
-	ProviderScope      string `json:"providerScope,omitempty"`
-	StaticHost         string `json:"staticHost,omitempty"`
-	StaticUser         string `json:"staticUser,omitempty"`
-	StaticPort         string `json:"staticPort,omitempty"`
-	StaticWorkRoot     string `json:"staticWorkRoot,omitempty"`
-	TargetOS           string `json:"targetOS,omitempty"`
-	WindowsMode        string `json:"windowsMode,omitempty"`
-	RepoRoot           string `json:"repoRoot"`
-	ClaimedAt          string `json:"claimedAt"`
-	LastUsedAt         string `json:"lastUsedAt"`
-	IdleTimeoutSeconds int    `json:"idleTimeoutSeconds,omitempty"`
+	LeaseID            string            `json:"leaseID"`
+	Slug               string            `json:"slug,omitempty"`
+	Provider           string            `json:"provider,omitempty"`
+	ProviderScope      string            `json:"providerScope,omitempty"`
+	StaticHost         string            `json:"staticHost,omitempty"`
+	StaticUser         string            `json:"staticUser,omitempty"`
+	StaticPort         string            `json:"staticPort,omitempty"`
+	StaticWorkRoot     string            `json:"staticWorkRoot,omitempty"`
+	TargetOS           string            `json:"targetOS,omitempty"`
+	WindowsMode        string            `json:"windowsMode,omitempty"`
+	Pond               string            `json:"pond,omitempty"`
+	RepoRoot           string            `json:"repoRoot"`
+	ClaimedAt          string            `json:"claimedAt"`
+	LastUsedAt         string            `json:"lastUsedAt"`
+	IdleTimeoutSeconds int               `json:"idleTimeoutSeconds,omitempty"`
+	TailscaleIPv4      string            `json:"tailscaleIPv4,omitempty"`
+	TailscaleFQDN      string            `json:"tailscaleFQDN,omitempty"`
+	SSHHost            string            `json:"sshHost,omitempty"`
+	SSHPort            int               `json:"sshPort,omitempty"`
+	BridgeURL          string            `json:"bridgeURL,omitempty"`
+	Labels             map[string]string `json:"labels,omitempty"`
 }
 
 func claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
@@ -44,15 +52,30 @@ func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, 
 			WindowsMode: strings.TrimSpace(cfg.WindowsMode),
 		}
 	}
-	return claimLeaseForRepoProviderScopeDetails(leaseID, slug, provider, providerClaimScope(provider, cfg), staticDetails, repoRoot, idleTimeout, reclaim)
+	return claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim)
+}
+
+func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	if err := claimLeaseForRepoConfig(leaseID, slug, cfg, repoRoot, idleTimeout, reclaim); err != nil {
+		return err
+	}
+	return updateLeaseClaimEndpoint(leaseID, server, target)
 }
 
 func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return claimLeaseForRepoProviderScope(leaseID, slug, provider, "", repoRoot, idleTimeout, reclaim)
+	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, "", "", repoRoot, idleTimeout, reclaim)
 }
 
 func claimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return claimLeaseForRepoProviderScopeDetails(leaseID, slug, provider, providerScope, staticClaimDetails{}, repoRoot, idleTimeout, reclaim)
+	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, "", repoRoot, idleTimeout, reclaim)
+}
+
+func claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, "", pond, repoRoot, idleTimeout, reclaim)
+}
+
+func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim)
 }
 
 type staticClaimDetails struct {
@@ -66,6 +89,10 @@ type staticClaimDetails struct {
 }
 
 func claimLeaseForRepoProviderScopeDetails(leaseID, slug, provider, providerScope string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, "", staticDetails, repoRoot, idleTimeout, reclaim)
+}
+
+func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	if leaseID == "" || repoRoot == "" {
 		return nil
 	}
@@ -92,6 +119,9 @@ func claimLeaseForRepoProviderScopeDetails(leaseID, slug, provider, providerScop
 	if providerScope != "" {
 		existing.ProviderScope = providerScope
 	}
+	if pond = normalizePondName(pond); pond != "" {
+		existing.Pond = pond
+	}
 	if staticDetails.Present {
 		existing.StaticHost = staticDetails.Host
 		existing.StaticUser = staticDetails.User
@@ -116,6 +146,51 @@ func claimLeaseForRepoProviderScopeDetails(leaseID, slug, provider, providerScop
 		return exit(2, "create claim directory: %v", err)
 	}
 	data, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return exit(2, "write claim %s: %v", path, err)
+	}
+	return nil
+}
+
+func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
+	if leaseID == "" {
+		return nil
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		return err
+	}
+	if claim.LeaseID == "" {
+		return nil
+	}
+	if len(server.Labels) > 0 {
+		claim.Labels = cloneStringMap(server.Labels)
+	}
+	meta := serverTailscaleMetadata(server)
+	if meta.IPv4 != "" {
+		claim.TailscaleIPv4 = meta.IPv4
+	}
+	if meta.FQDN != "" {
+		claim.TailscaleFQDN = meta.FQDN
+	}
+	if target.NetworkKind == NetworkTailscale && target.Host != "" && claim.TailscaleFQDN == "" && claim.TailscaleIPv4 == "" {
+		claim.TailscaleFQDN = target.Host
+	}
+	if target.Host != "" {
+		claim.SSHHost = target.Host
+	}
+	if port, err := strconv.Atoi(strings.TrimSpace(target.Port)); err == nil && port > 0 {
+		claim.SSHPort = port
+	}
+	data, err := json.MarshalIndent(claim, "", "  ")
 	if err != nil {
 		return err
 	}

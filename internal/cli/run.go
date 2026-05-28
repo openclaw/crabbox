@@ -91,7 +91,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	}
 	server, target, leaseID := lease.Server, lease.SSH, lease.LeaseID
 	applyResolvedServerConfig(&cfg, server)
-	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 		a.releaseBackendLeaseBestEffort(ctx, sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 		return err
 	}
@@ -99,6 +99,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 		target = bootstrapNetworkTarget(cfg, server, target)
 		if err := waitForSSHReady(ctx, &target, a.Stderr, "tailscale metadata", 2*time.Minute); err == nil {
 			a.refreshTailscaleMetadata(ctx, cfg, lease.Coordinator, lease.Coordinator != nil, &server, target, leaseID)
+			_ = updateLeaseClaimEndpoint(leaseID, server, target)
 		} else {
 			fmt.Fprintf(a.Stderr, "warning: tailscale metadata wait failed: %v\n", err)
 		}
@@ -108,6 +109,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 		return err
 	} else {
 		target = resolved.Target
+		_ = updateLeaseClaimEndpoint(leaseID, server, target)
 		if resolved.FallbackReason != "" {
 			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 		}
@@ -560,7 +562,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			fmt.Fprintf(a.Stderr, "lease cleanup stopped=true policy=%s lease=%s slug=%s\n", blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"))
 		}
 	}()
-	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 		return recordFailure(err)
 	}
 	if !useCoordinator && leaseID != "" {
@@ -777,7 +779,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			recorder.AttachLease(leaseID, serverSlug(server), cfg)
 			startRunHeartbeat(nil)
 		}
-		if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 			return true, err
 		}
 		workdir = remoteJoin(cfg, leaseID, repo.Name)
@@ -814,10 +816,12 @@ retrySync:
 			return recordFailure(err)
 		}
 		a.refreshTailscaleMetadata(ctx, cfg, coord, useCoordinator, &server, target, leaseID)
+		_ = updateLeaseClaimEndpoint(leaseID, server, target)
 		if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
 			return recordFailure(err)
 		} else {
 			target = resolved.Target
+			_ = updateLeaseClaimEndpoint(leaseID, server, target)
 			if resolved.FallbackReason != "" {
 				fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 			}
@@ -1046,10 +1050,12 @@ afterSync:
 		return recordFailure(err)
 	}
 	a.refreshTailscaleMetadata(ctx, cfg, coord, useCoordinator, &server, target, leaseID)
+	_ = updateLeaseClaimEndpoint(leaseID, server, target)
 	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
 		return recordFailure(err)
 	} else {
 		target = resolved.Target
+		_ = updateLeaseClaimEndpoint(leaseID, server, target)
 		if resolved.FallbackReason != "" {
 			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 		}

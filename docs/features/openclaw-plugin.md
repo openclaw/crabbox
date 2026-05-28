@@ -107,8 +107,9 @@ inner remote command.
 
 ## What Belongs In The CLI Instead
 
-History, log inspection, attach, results, usage, and admin operations are
-intentionally not plugin tools. They are best run from a shell-capable agent:
+History, log inspection, attach, results, usage, pond orchestration, and admin
+operations are intentionally not plugin tools. They are best run from a
+shell-capable agent:
 
 ```sh
 crabbox history --lease cbx_...
@@ -117,6 +118,8 @@ crabbox attach run_...
 crabbox logs run_...
 crabbox results run_...
 crabbox usage --scope user
+crabbox pond peers --pond alpha
+crabbox pond connect alpha --export
 crabbox admin leases --state active
 crabbox cleanup --dry-run
 ```
@@ -125,6 +128,8 @@ Reasons for keeping these out of the plugin:
 
 - they often produce more output than `maxOutputBytes` can usefully capture;
 - agents tend to want raw logs they can grep, not trimmed model output;
+- `pond` is transport-aware preview orchestration and may update operator
+  Tailscale policy or start SSH tunnels, so it stays CLI-led for now;
 - admin tools are easier to gate at the shell level (env, allowlists) than
   through plugin config;
 - `crabbox attach` is interactive by design.
@@ -135,7 +140,10 @@ The plugin schema constrains the `provider` argument to the providers
 Crabbox actually supports:
 
 ```text
-aws | azure | azure-dynamic-sessions | hetzner | ssh | blacksmith-testbox | blacksmith | namespace-devbox | namespace | semaphore | sprites | daytona | islo | e2b
+aws | azure | gcp | google | google-cloud | hetzner | proxmox | ssh |
+static | static-ssh | blacksmith-testbox | blacksmith | namespace-devbox |
+namespace | namespace-devboxes | semaphore | sem | sprites | daytona | islo |
+e2b | modal | tensorlake | tl | tensorlake-sbx | cloudflare | cf
 ```
 
 Adding a provider to the CLI requires updating this list in `index.js` and

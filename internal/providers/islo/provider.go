@@ -22,7 +22,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "islo",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    nil,
+		Features:    core.FeatureSet{core.FeatureURLBridge},
 		Coordinator: core.CoordinatorNever,
 	}
 }

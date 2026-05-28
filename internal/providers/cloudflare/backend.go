@@ -398,7 +398,7 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 	if err != nil {
 		return "", cloudflareContainer{}, "", err
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, providerName, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		_ = client.destroySandbox(context.Background(), sandbox.ID)
 		return "", cloudflareContainer{}, "", err
 	}

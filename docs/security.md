@@ -121,6 +121,36 @@ Tailscale does not replace this SSH model in v1. Crabbox still uses OpenSSH,
 per-lease keys, scoped known_hosts, SSH tunnels, lease expiry, and cleanup.
 Tailscale only changes which host the SSH client dials.
 
+## Pond Networking
+
+`--pond` is a trusted-operator preview surface. A pond is a lease grouping plus
+transport metadata, not a new isolation boundary. When `--tailscale` is used on
+a direct Tailscale-capable provider, the local CLI may add a concrete
+`tag:cbx-pond-<owner>-<pond>` tag owner and a same-tag allow rule to the
+operator's tailnet policy only when both `TS_API_KEY` and
+`CRABBOX_POND_ACL_BOOTSTRAP=1` are set. `TS_API_KEY` alone is used for
+read-only `doctor --pond` verification. The broker never receives the Tailscale
+API key.
+
+Brokered leases keep using the Worker's configured `CRABBOX_TAILSCALE_TAGS`
+allowlist and do not receive generated `tag:cbx-pond-*` tags in this preview.
+Admins who want brokered tailnet reachability must configure and review that
+policy explicitly in the coordinator.
+
+Security posture:
+
+- Same-pond Tailscale members can reach each other by default once the policy
+  row exists.
+- URL bridge peers expose only provider-native HTTP(S) ingress; they do not get
+  arbitrary TCP/UDP reachability into the tailnet.
+- SSH-mesh is operator-side `ssh -L` forwarding. It does not create
+  lease-to-lease networking.
+- Do not use one pond for mutually untrusted tenants. Per-member or per-agent
+  isolation is future work.
+- Removing a pond does not automatically remove historical Tailscale policy
+  rows; operators should audit and prune stale `tag:cbx-pond-*` entries when
+  rotating preview environments.
+
 Managed VNC remains tunnel-only even on Tailscale-enabled leases. Do not bind
 Crabbox-managed VNC to public interfaces or to the Tailscale 100.x interface.
 

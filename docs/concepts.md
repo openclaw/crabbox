@@ -30,6 +30,12 @@ is talking about leases as a product (in which case "box" reads better).
 **Pool** - the set of currently active runners visible to a user, org, or
 the whole fleet. `crabbox list` and `/v1/pool` both expose it.
 
+**Pond** - a user-created logical group of leases for one test environment or
+workflow. A pond is metadata (`pond=<name>`) plus local claim sidecars, not
+fleet inventory and not a central cluster object. Use `crabbox pond peers`,
+`crabbox pond connect`, and `crabbox pond release` when you want to operate on
+that group.
+
 **Slug** - the friendly name for a lease. Looks like `blue-lobster`.
 Generated from a stable hash of the lease ID; collisions append a 4-hex
 suffix. See [Identifiers](features/identifiers.md).
