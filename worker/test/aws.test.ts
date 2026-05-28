@@ -394,6 +394,165 @@ describe("aws provider", () => {
     expect(calls).not.toContain("RevokeSecurityGroupIngress:sg-fixed:2222:203.0.113.10/32");
   });
 
+  it("compacts legacy managed AWS SSH ingress when security group rules are exhausted", async () => {
+    const calls: string[] = [];
+    let authorizeAttempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        calls.push(
+          [
+            action,
+            params.get("GroupId") ?? params.get("GroupId.1") ?? "",
+            params.get("IpPermissions.1.FromPort") ?? "",
+            params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "",
+          ].join(":"),
+        );
+        if (action === "DescribeSecurityGroups") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <securityGroupInfo>
+    <item>
+      <groupId>sg-fixed</groupId>
+      <groupName>crabbox-runners</groupName>
+      <tagSet><item><key>crabbox</key><value>true</value></item></tagSet>
+      <ipPermissions>
+        <item>
+          <ipProtocol>tcp</ipProtocol>
+          <fromPort>22</fromPort>
+          <toPort>22</toPort>
+          <ipRanges><item><cidrIp>203.0.113.10/32</cidrIp></item></ipRanges>
+        </item>
+      </ipPermissions>
+    </item>
+  </securityGroupInfo>
+</DescribeSecurityGroupsResponse>`);
+        }
+        if (action === "RevokeSecurityGroupIngress") {
+          return ec2XMLResponse("<RevokeSecurityGroupIngressResponse />");
+        }
+        if (action === "AuthorizeSecurityGroupIngress") {
+          authorizeAttempts += 1;
+          if (authorizeAttempts === 1) {
+            return ec2XMLResponse(
+              `<Response><Errors><Error><Code>RulesPerSecurityGroupLimitExceeded</Code><Message>The maximum number of rules per security group has been reached.</Message></Error></Errors></Response>`,
+              400,
+            );
+          }
+          return ec2XMLResponse("<AuthorizeSecurityGroupIngressResponse />");
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-fixed",
+      } as never,
+      "eu-west-1",
+    );
+
+    await client.refreshSSHIngress(
+      leaseConfig({
+        provider: "aws",
+        target: "linux",
+        awsSSHCIDRs: ["198.51.100.77/32"],
+        sshFallbackPorts: [],
+        sshPort: "22",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    );
+
+    expect(calls).toContain("RevokeSecurityGroupIngress:sg-fixed:22:203.0.113.10/32");
+    expect(
+      calls.filter((call) => call === "AuthorizeSecurityGroupIngress:sg-fixed:22:198.51.100.77/32"),
+    ).toHaveLength(2);
+  });
+
+  it("does not compact AWS SSH ingress after a rule-limit error in additive mode", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        calls.push(
+          [
+            action,
+            params.get("GroupId") ?? params.get("GroupId.1") ?? "",
+            params.get("IpPermissions.1.FromPort") ?? "",
+            params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "",
+          ].join(":"),
+        );
+        if (action === "DescribeSecurityGroups") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <securityGroupInfo>
+    <item>
+      <groupId>sg-fixed</groupId>
+      <groupName>crabbox-runners</groupName>
+      <tagSet><item><key>crabbox</key><value>true</value></item></tagSet>
+      <ipPermissions>
+        <item>
+          <ipProtocol>tcp</ipProtocol>
+          <fromPort>22</fromPort>
+          <toPort>22</toPort>
+          <ipRanges><item><cidrIp>203.0.113.10/32</cidrIp></item></ipRanges>
+        </item>
+      </ipPermissions>
+    </item>
+  </securityGroupInfo>
+</DescribeSecurityGroupsResponse>`);
+        }
+        if (action === "RevokeSecurityGroupIngress") {
+          return ec2XMLResponse("<RevokeSecurityGroupIngressResponse />");
+        }
+        if (action === "AuthorizeSecurityGroupIngress") {
+          return ec2XMLResponse(
+            `<Response><Errors><Error><Code>RulesPerSecurityGroupLimitExceeded</Code><Message>The maximum number of rules per security group has been reached.</Message></Error></Errors></Response>`,
+            400,
+          );
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-fixed",
+      } as never,
+      "eu-west-1",
+    );
+
+    await expect(
+      client.refreshSSHIngress(
+        leaseConfig({
+          provider: "aws",
+          target: "linux",
+          awsSSHCIDRs: ["198.51.100.77/32"],
+          sshFallbackPorts: [],
+          sshPort: "22",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+        { reconcile: "additive" },
+      ),
+    ).rejects.toThrow("RulesPerSecurityGroupLimitExceeded");
+
+    expect(calls).not.toContain("RevokeSecurityGroupIngress:sg-fixed:22:203.0.113.10/32");
+  });
+
   it("enables Fast Snapshot Restore for AMI snapshots in selected zones", async () => {
     const calls: Array<Record<string, string>> = [];
     vi.stubGlobal(

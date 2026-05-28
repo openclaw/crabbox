@@ -25,6 +25,7 @@ const ec2Version = "2016-11-15";
 const stsVersion = "2011-06-15";
 const awsSpotQuotaCode = "L-34B43A08";
 const awsOnDemandQuotaCode = "L-1216C47A";
+const awsSSHIngressDescription = "Crabbox SSH";
 const awsMacHostQuotaSpecs: Record<string, { quotaCode: string; quotaName: string }> = {
   mac1: { quotaCode: "L-A8448DC5", quotaName: "Running Dedicated mac1 Hosts" },
   mac2: { quotaCode: "L-5D8DADF5", quotaName: "Running Dedicated mac2 Hosts" },
@@ -163,6 +164,8 @@ type SSHIngressRule = {
   family: "ipv4" | "ipv6";
   port: string;
 };
+
+type DescribedSSHIngressRule = SSHIngressRule & { description: string };
 
 interface AWSIngressOptions {
   reconcile?: "authoritative" | "additive";
@@ -1199,6 +1202,7 @@ export class EC2SpotClient {
     if (options.reconcile !== "additive") {
       await this.pruneStaleSSHIngress(groupID, group, ports, cidrs);
     }
+    let compactedAfterRuleLimit = false;
     for (const port of ports) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup is per port.
       await this.revokeWorldTCP(groupID, port).catch((error: unknown) => {
@@ -1211,9 +1215,29 @@ export class EC2SpotClient {
         // oxlint-disable-next-line eslint/no-await-in-loop -- duplicate ingress handling is per CIDR.
         await this.allowTCP(groupID, port, cidr).catch((error: unknown) => {
           const message = error instanceof Error ? error.message : String(error);
-          if (!message.includes("InvalidPermission.Duplicate")) {
-            throw error;
+          if (message.includes("InvalidPermission.Duplicate")) {
+            return;
           }
+          if (
+            options.reconcile !== "additive" &&
+            !compactedAfterRuleLimit &&
+            isAWSSecurityGroupRuleLimitError(message)
+          ) {
+            compactedAfterRuleLimit = true;
+            return this.compactSSHIngressForRuleLimit(groupID, ports, cidrs).then((compacted) => {
+              if (!compacted) {
+                throw error;
+              }
+              return this.allowTCP(groupID, port, cidr).catch((retryError: unknown) => {
+                const retryMessage =
+                  retryError instanceof Error ? retryError.message : String(retryError);
+                if (!retryMessage.includes("InvalidPermission.Duplicate")) {
+                  throw retryError;
+                }
+              });
+            });
+          }
+          throw error;
         });
       }
     }
@@ -1331,6 +1355,28 @@ export class EC2SpotClient {
         }
       });
     }
+  }
+
+  private async compactSSHIngressForRuleLimit(
+    groupID: string,
+    ports: string[],
+    cidrs: string[],
+  ): Promise<boolean> {
+    const existing = await this.ec2("DescribeSecurityGroups", {
+      "GroupId.1": groupID,
+    });
+    const group = items(record(existing["securityGroupInfo"])["item"])[0];
+    const rules = reclaimableCrabboxSSHIngressRules(group, ports, cidrs);
+    for (const rule of rules) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- revoke calls are per exact rule.
+      await this.revokeTCP(groupID, rule).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes("InvalidPermission.NotFound")) {
+          throw error;
+        }
+      });
+    }
+    return rules.length > 0;
   }
 
   private async securityGroupVPC(config: LeaseConfig): Promise<string> {
@@ -1774,7 +1820,7 @@ function assignSSHIngressRange(
   const family = sshIngressRangeFamily(ingressFamily(cidr));
   params[family.param] = cidr;
   if (describe) {
-    params[family.descriptionParam] = "Crabbox SSH";
+    params[family.descriptionParam] = awsSSHIngressDescription;
   }
 }
 
@@ -1791,8 +1837,34 @@ function sshIngressRangeFamily(family: SSHIngressRule["family"]) {
 }
 
 export function crabboxSSHIngressRules(group: unknown, ports: string[]): SSHIngressRule[] {
+  return sshIngressRules(group, ports)
+    .filter((rule) => rule.description === awsSSHIngressDescription)
+    .map(stripSSHIngressRuleDescription);
+}
+
+export function reclaimableCrabboxSSHIngressRules(
+  group: unknown,
+  ports: string[],
+  cidrs: string[],
+): SSHIngressRule[] {
+  const desired = new Set(cidrs.map((cidr) => cidr.trim()).filter(Boolean));
+  const includeLegacyUnlabeled = isCrabboxManagedSecurityGroup(group);
+  return sshIngressRules(group, ports)
+    .filter((rule) => {
+      if (desired.has(rule.cidr)) {
+        return false;
+      }
+      return (
+        rule.description === awsSSHIngressDescription ||
+        (includeLegacyUnlabeled && rule.description === "")
+      );
+    })
+    .map(stripSSHIngressRuleDescription);
+}
+
+function sshIngressRules(group: unknown, ports: string[]): DescribedSSHIngressRule[] {
   const wantedPorts = new Set(ports);
-  const rules: SSHIngressRule[] = [];
+  const rules: DescribedSSHIngressRule[] = [];
   for (const permission of items(record(record(group)["ipPermissions"])["item"])) {
     const entry = record(permission);
     const protocol = asString(entry["ipProtocol"]);
@@ -1804,17 +1876,24 @@ export function crabboxSSHIngressRules(group: unknown, ports: string[]): SSHIngr
     for (const family of sshIngressRangeFamilies) {
       for (const range of items(record(entry[family.rangesField])["item"])) {
         const value = record(range);
-        if (asString(value["description"]) === "Crabbox SSH") {
-          rules.push({
-            cidr: asString(value[family.cidrField]),
-            family: family.family,
-            port: fromPort,
-          });
-        }
+        rules.push({
+          cidr: asString(value[family.cidrField]),
+          description: asString(value["description"]),
+          family: family.family,
+          port: fromPort,
+        });
       }
     }
   }
   return rules.filter((rule) => rule.cidr);
+}
+
+function stripSSHIngressRuleDescription(rule: DescribedSSHIngressRule): SSHIngressRule {
+  return {
+    cidr: rule.cidr,
+    family: rule.family,
+    port: rule.port,
+  };
 }
 
 export function staleCrabboxSSHIngressRules(
@@ -1824,6 +1903,20 @@ export function staleCrabboxSSHIngressRules(
 ): SSHIngressRule[] {
   const desired = new Set(cidrs.map((cidr) => cidr.trim()).filter(Boolean));
   return crabboxSSHIngressRules(group, ports).filter((rule) => !desired.has(rule.cidr));
+}
+
+function isCrabboxManagedSecurityGroup(group: unknown): boolean {
+  const entry = record(group);
+  const tags = tagMap(entry["tagSet"]);
+  return (
+    asString(entry["groupName"]) === "crabbox-runners" ||
+    tags["crabbox"] === "true" ||
+    tags["created_by"] === "crabbox"
+  );
+}
+
+function isAWSSecurityGroupRuleLimitError(message: string): boolean {
+  return message.includes("RulesPerSecurityGroupLimitExceeded");
 }
 
 export function awsLaunchCandidates(
