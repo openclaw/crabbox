@@ -509,6 +509,71 @@ describe("fleet lease identity and idle", () => {
     expect(sweep?.candidates[0]).toMatchObject({ action: "terminated" });
   });
 
+  it("releases stale pending EC2 Mac hosts during the AWS orphan sweep", async () => {
+    const storage = new MemoryStorage();
+    const actions: string[] = [];
+    let releaseHostID = "";
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async (input, init) => {
+        const params = new URLSearchParams(await requestBodyForTest(input, init));
+        const action = params.get("Action") ?? "";
+        actions.push(action);
+        if (action === "DescribeHosts") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+          <DescribeHostsResponse>
+            <hostSet>
+              <item>
+                <hostId>h-stale</hostId>
+                <hostState>pending</hostState>
+                <availabilityZone>eu-west-1a</availabilityZone>
+                <autoPlacement>off</autoPlacement>
+                <allocationTime>2026-05-01T00:00:00Z</allocationTime>
+                <hostProperties><instanceType>mac2.metal</instanceType></hostProperties>
+                <tagSet><item><key>crabbox</key><value>true</value></item></tagSet>
+              </item>
+            </hostSet>
+          </DescribeHostsResponse>`);
+        }
+        if (action === "ReleaseHosts") {
+          releaseHostID = params.get("HostId.1") ?? "";
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+          <ReleaseHostsResponse>
+            <successful><item>h-stale</item></successful>
+          </ReleaseHostsResponse>`);
+        }
+        return ec2XMLResponse("<ErrorResponse />", 500);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const fleet = testFleet(
+      storage,
+      { aws: fakeProvider(undefined, { provider: "aws", servers: [] }) },
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_ORPHAN_SWEEP_DELETE: "1",
+        CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE: "1",
+        CRABBOX_AWS_REGION: "eu-west-1",
+      },
+    );
+
+    await fleet.alarm();
+
+    const sweep = storage.value<{
+      macHostsScanned: number;
+      macHostsReleased: number;
+      macHostCandidates: Array<Record<string, unknown>>;
+    }>("aws-orphan-sweep:last");
+    expect(actions).toEqual(["DescribeHosts", "ReleaseHosts"]);
+    expect(releaseHostID).toBe("h-stale");
+    expect(sweep).toMatchObject({ macHostsScanned: 1, macHostsReleased: 1 });
+    expect(sweep?.macHostCandidates[0]).toMatchObject({
+      hostID: "h-stale",
+      reason: "stale-pending-mac-host",
+      action: "released",
+    });
+  });
+
   it("does not terminate an active AWS lease just because launch tags are stale", async () => {
     const storage = new MemoryStorage();
     const deleted: string[] = [];
