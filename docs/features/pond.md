@@ -68,7 +68,10 @@ So `pond connect` works against any provider that includes `ssh` in its
 `transports` list — including Hetzner / Azure / GCP / AWS, not just the
 old SSH-only class. Tailscale stays the recommended path when it's also
 available; SSH-mesh is an explicit operator-side plane for providers that
-advertise SSH.
+advertise SSH. `pond connect --export` daemon mode is macOS/Linux-only in this
+preview because cleanup validates local daemon process commands before stopping
+them; Windows operators can use foreground `pond connect` until a Windows
+process validator ships.
 
 ## Three simple use cases
 

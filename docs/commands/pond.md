@@ -117,6 +117,9 @@ Flags:
 With `--export`, the command starts SSH tunnels as daemon processes, prints
 `export CRABBOX_POND_<NAME>_<PORT>=127.0.0.1:<local>` lines to stdout,
 records the daemon PIDs under `~/.crabbox/pond/<name>/daemon.json`, and exits.
+In this preview, `--export` daemon mode is supported on macOS and Linux
+operator hosts only; Windows operator hosts should run `pond connect` without
+`--export`.
 Use as:
 
 ```bash
@@ -142,7 +145,10 @@ entries are not lease-to-lease DNS:
 
 `crabbox pond disconnect <name>` stops the daemonized SSH tunnels recorded by
 the last `pond connect <name> --export` run. It only reads the per-pond state
-file and does not scan unrelated SSH processes.
+file, validates each recorded process before stopping it, and does not scan
+unrelated SSH processes. Because `--export` is disabled on Windows operator
+hosts in this preview, `pond disconnect` is only meaningful for macOS/Linux
+export daemons.
 
 ## `doctor --pond`
 

@@ -2,11 +2,14 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -413,6 +416,70 @@ func TestRunPondMeshForwardsLaunchesPerForwardAndTearsDown(t *testing.T) {
 	}
 	if gotTargetsBySpec["127.0.0.1:60001:127.0.0.1:3000"] != "ubuntu@lease-worker.example" {
 		t.Fatalf("worker forward target=%q", gotTargetsBySpec["127.0.0.1:60001:127.0.0.1:3000"])
+	}
+}
+
+func TestIsPondMeshDaemonCommandRequiresForwardSpec(t *testing.T) {
+	fwd := pondMeshForward{LocalPort: 51820, RemotePort: 8080}
+	command := "ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:51820:127.0.0.1:8080 ubuntu@example"
+	if !isPondMeshDaemonCommand(command, fwd) {
+		t.Fatalf("expected pond ssh tunnel command to match")
+	}
+	if isPondMeshDaemonCommand("sleep 600", fwd) {
+		t.Fatalf("sleep command must not match")
+	}
+	if isPondMeshDaemonCommand("ssh -N -L 127.0.0.1:51821:127.0.0.1:8080 ubuntu@example", fwd) {
+		t.Fatalf("ssh command for a different local port must not match")
+	}
+}
+
+func TestPondMeshDaemonSupported(t *testing.T) {
+	if pondMeshDaemonSupported("windows") {
+		t.Fatalf("Windows export daemons should stay disabled until command validation is platform-aware")
+	}
+	if !pondMeshDaemonSupported("linux") || !pondMeshDaemonSupported("darwin") {
+		t.Fatalf("Unix-like operator hosts should support export daemons")
+	}
+}
+
+func TestStopPondMeshDaemonStateDropsNonMatchingPID(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ps command validation is Unix-only in this test")
+	}
+	home := t.TempDir()
+	path, err := pondMeshDaemonStatePath(home, "alpha", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := pondMeshDaemonState{
+		Pond: "alpha",
+		Processes: []pondMeshDaemonProcess{{
+			PID:     os.Getpid(),
+			Command: "sleep 600",
+			Forward: pondMeshForward{
+				Peer:       "web",
+				LocalPort:  51820,
+				RemotePort: 8080,
+				LeaseID:    "cbx_web",
+			},
+		}},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := stopPondMeshDaemonState(home, "alpha")
+	if err != nil {
+		t.Fatalf("stopPondMeshDaemonState: %v", err)
+	}
+	if stopped != 0 {
+		t.Fatalf("stopped=%d want 0", stopped)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("daemon state should be removed, stat err=%v", err)
 	}
 }
 

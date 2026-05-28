@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -246,10 +247,17 @@ type pondMeshSummary struct {
 }
 
 type pondMeshDaemonState struct {
-	Pond      string            `json:"pond"`
-	StartedAt string            `json:"startedAt"`
-	PIDs      []int             `json:"pids"`
-	Forwards  []pondMeshForward `json:"forwards"`
+	Pond      string                  `json:"pond"`
+	StartedAt string                  `json:"startedAt"`
+	PIDs      []int                   `json:"pids"`
+	Processes []pondMeshDaemonProcess `json:"processes,omitempty"`
+	Forwards  []pondMeshForward       `json:"forwards"`
+}
+
+type pondMeshDaemonProcess struct {
+	PID     int             `json:"pid"`
+	Command string          `json:"command,omitempty"`
+	Forward pondMeshForward `json:"forward"`
 }
 
 // pondConnectOptions bundles the dependencies the orchestration needs.
@@ -330,6 +338,9 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 		return json.NewEncoder(a.Stdout).Encode(summary)
 	}
 	if *exportOnly {
+		if !pondMeshDaemonSupported(runtime.GOOS) {
+			return exit(2, "pond connect --export is not supported on Windows operator hosts yet; run without --export or from macOS/Linux")
+		}
 		// Start daemons before emitting exports so shell evals never see
 		// assignments for tunnels that failed to start.
 		if _, err := stopPondMeshDaemonState(opts.HomeDir, pond); err != nil {
@@ -743,7 +754,11 @@ func writePondMeshStateFile(path, body string) error {
 func stopDaemonHandles(handles []pondMeshHandle) {
 	for _, h := range handles {
 		if proc := h.Process(); proc != nil {
-			_ = proc.Kill()
+			if osProc, ok := proc.(*os.Process); ok {
+				_ = stopDaemonProcess(osProc, h.PID())
+			} else {
+				_ = proc.Kill()
+			}
 		}
 	}
 }
@@ -754,15 +769,22 @@ func writePondMeshDaemonState(home, pond string, summary pondMeshSummary, handle
 		return err
 	}
 	pids := make([]int, 0, len(handles))
-	for _, handle := range handles {
+	processes := make([]pondMeshDaemonProcess, 0, len(handles))
+	for i, handle := range handles {
 		if pid := handle.PID(); pid > 0 {
 			pids = append(pids, pid)
+			process := pondMeshDaemonProcess{PID: pid, Command: handle.String()}
+			if i < len(summary.Forwards) {
+				process.Forward = summary.Forwards[i]
+			}
+			processes = append(processes, process)
 		}
 	}
 	state := pondMeshDaemonState{
 		Pond:      pond,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 		PIDs:      pids,
+		Processes: processes,
 		Forwards:  summary.Forwards,
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -785,20 +807,27 @@ func stopPondMeshDaemonState(home, pond string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if !pondMeshDaemonSupported(runtime.GOOS) {
+		return 0, exit(2, "pond disconnect is not supported on Windows operator hosts because exported SSH-mesh daemons are disabled")
+	}
 	var state pondMeshDaemonState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return 0, exit(2, "parse pond daemon state %s: %v", path, err)
 	}
 	stopped := 0
-	for _, pid := range state.PIDs {
-		if pid <= 0 {
+	for _, entry := range pondMeshDaemonProcesses(state) {
+		if entry.PID <= 0 {
 			continue
 		}
-		proc, err := os.FindProcess(pid)
+		command, alive := pondMeshDaemonProcessCommand(entry.PID)
+		if !alive || !isPondMeshDaemonCommand(command, entry.Forward) {
+			continue
+		}
+		proc, err := os.FindProcess(entry.PID)
 		if err != nil {
 			continue
 		}
-		if err := proc.Kill(); err == nil {
+		if err := stopDaemonProcess(proc, entry.PID); err == nil {
 			stopped++
 		}
 	}
@@ -806,6 +835,47 @@ func stopPondMeshDaemonState(home, pond string) (int, error) {
 		return stopped, err
 	}
 	return stopped, nil
+}
+
+func pondMeshDaemonProcesses(state pondMeshDaemonState) []pondMeshDaemonProcess {
+	if len(state.Processes) > 0 {
+		return state.Processes
+	}
+	out := make([]pondMeshDaemonProcess, 0, len(state.PIDs))
+	for i, pid := range state.PIDs {
+		process := pondMeshDaemonProcess{PID: pid}
+		if i < len(state.Forwards) {
+			process.Forward = state.Forwards[i]
+		}
+		out = append(out, process)
+	}
+	return out
+}
+
+func pondMeshDaemonProcessCommand(pid int) (string, bool) {
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return "", false
+	}
+	command := strings.TrimSpace(string(out))
+	return command, command != ""
+}
+
+func pondMeshDaemonSupported(goos string) bool {
+	return goos != "windows"
+}
+
+func isPondMeshDaemonCommand(command string, fwd pondMeshForward) bool {
+	command = strings.TrimSpace(command)
+	if command == "" || fwd.LocalPort <= 0 || fwd.RemotePort <= 0 {
+		return false
+	}
+	lower := strings.ToLower(command)
+	if !strings.Contains(lower, "ssh") || !strings.Contains(command, "-L") {
+		return false
+	}
+	forward := fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", fwd.LocalPort, fwd.RemotePort)
+	return strings.Contains(command, forward)
 }
 
 func pondSSHTargetsByLease(members []pondMember) map[string]SSHTarget {
