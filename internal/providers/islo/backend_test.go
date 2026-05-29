@@ -159,6 +159,13 @@ func TestResolveIsloLeaseIDIgnoresSyntheticSlugCollision(t *testing.T) {
 	}
 }
 
+func TestIsloCleanupCommandQuotesLeaseID(t *testing.T) {
+	got := isloCleanupCommand("isb_crabbox-repo-a;touch")
+	if got != "crabbox stop --provider islo 'isb_crabbox-repo-a;touch'" {
+		t.Fatalf("cleanup command=%q", got)
+	}
+}
+
 func TestIsloWorkspacePathDefaultsUnderWorkspace(t *testing.T) {
 	if got, err := isloWorkspacePath(Config{}); err != nil || got != "/workspace/crabbox" {
 		t.Fatalf("workspace=%q err=%v", got, err)
@@ -226,7 +233,7 @@ func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	if got.Provider != isloProvider || got.LeaseID != "isb_crabbox-repo-abcdef" || got.Slug == "" || got.Reused || !got.Kept {
 		t.Fatalf("session=%#v", got)
 	}
-	if got.CleanupCommand != "crabbox stop --provider islo isb_crabbox-repo-abcdef" {
+	if got.CleanupCommand != "crabbox stop --provider islo 'isb_crabbox-repo-abcdef'" {
 		t.Fatalf("cleanup command=%q", got.CleanupCommand)
 	}
 }

@@ -191,7 +191,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			Slug:           slug,
 			Reused:         !acquired,
 			Kept:           !shouldStop,
-			CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", isloProvider, leaseID),
+			CleanupCommand: isloCleanupCommand(leaseID),
 		},
 	}
 	finishResult := func() RunResult {
@@ -434,6 +434,10 @@ func resolveIsloLeaseID(id, repoRoot string, reclaim bool) (string, string, stri
 	}
 	leaseID := isloLeasePrefix + id
 	return leaseID, id, newLeaseSlug(leaseID), nil
+}
+
+func isloCleanupCommand(leaseID string) string {
+	return fmt.Sprintf("crabbox stop --provider %s %s", isloProvider, shellQuote(leaseID))
 }
 
 func resolveIsloClaim(id string) (core.LeaseClaim, bool, error) {
