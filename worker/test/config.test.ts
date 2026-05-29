@@ -373,6 +373,28 @@ describe("lease config", () => {
     expect(config.serverType).toBe("c7g.16xlarge");
   });
 
+  it("infers Azure ARM architecture from explicit ARM VM sizes", () => {
+    const config = leaseConfig({
+      provider: "azure",
+      serverType: "Standard_D32ps_v6",
+      os: "ubuntu:24.04",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(config.architecture).toBe("arm64");
+    expect(config.serverType).toBe("Standard_D32ps_v6");
+    expect(config.azureImage).toBe("Canonical:ubuntu-24_04-lts:server-arm64:latest");
+  });
+
+  it("infers AWS ARM architecture from explicit Graviton instance types", () => {
+    const config = leaseConfig({
+      provider: "aws",
+      serverType: "c7g.16xlarge",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(config.architecture).toBe("arm64");
+    expect(config.serverType).toBe("c7g.16xlarge");
+  });
+
   it("rejects ARM leases outside supported Linux providers", () => {
     expect(() =>
       leaseConfig({

@@ -101,11 +101,15 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     throw new Error(`unsupported provider: ${String(provider)}`);
   }
   const target = normalizeTarget(input.target ?? input.targetOS ?? "linux");
-  const architecture = normalizeArchitecture(input.architecture);
+  const requestedArchitecture = normalizeArchitecture(input.architecture);
+  const architectureExplicit = Boolean(input.architecture?.trim());
   const os = normalizeOSImage(input.os);
   const osExplicit = Boolean(input.os?.trim());
   const linuxOSImage = target === "linux" ? osImageSpec(os) : undefined;
   const windowsMode = normalizeWindowsMode(input.windowsMode ?? "normal");
+  const architecture = architectureExplicit
+    ? requestedArchitecture
+    : inferArchitectureForServerType(provider, target, input.serverType, requestedArchitecture);
   if (
     target !== "linux" &&
     !(provider === "aws" && target === "windows") &&
@@ -297,6 +301,24 @@ export function normalizeArchitecture(value: string | undefined): Architecture {
     default:
       throw new Error("architecture must be amd64 or arm64");
   }
+}
+
+function inferArchitectureForServerType(
+  provider: Provider,
+  target: TargetOS,
+  serverType: string | undefined,
+  fallback: Architecture,
+): Architecture {
+  if (target !== "linux" || !serverType) {
+    return fallback;
+  }
+  if (provider === "azure" && azureVMSizeIsARM64(serverType)) {
+    return "arm64";
+  }
+  if (provider === "aws" && awsInstanceTypeIsARM64(serverType)) {
+    return "arm64";
+  }
+  return fallback;
 }
 
 export function awsPromotedAMIConfigKey(region: string, serverType: string): string {
@@ -652,6 +674,16 @@ export function azureARM64VMSizeCandidatesForClass(machineClass: string): string
   }
 }
 
+export function azureVMSizeIsARM64(vmSize: string): boolean {
+  const normalized = vmSize.trim().toLowerCase();
+  return (
+    normalized.includes("ps_v6") ||
+    normalized.includes("pds_v6") ||
+    normalized.includes("pls_v6") ||
+    normalized.includes("plds_v6")
+  );
+}
+
 export function azureWindowsVMSizeCandidatesForClass(machineClass: string): string[] {
   switch (machineClass) {
     case "standard":
@@ -810,6 +842,11 @@ export function awsARM64InstanceTypeCandidatesForClass(machineClass: string): st
     default:
       return [machineClass];
   }
+}
+
+export function awsInstanceTypeIsARM64(instanceType: string): boolean {
+  const family = instanceType.trim().toLowerCase().split(".")[0] ?? "";
+  return /[0-9]+g[dn]?$/.test(family);
 }
 
 function clampTTL(ttlSeconds: number): number {
