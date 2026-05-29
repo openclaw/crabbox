@@ -85,6 +85,7 @@ jobs:
   test-wsl2:
     provider: aws
     target: windows
+    architecture: amd64
     windows:
       mode: wsl2
     class: beast
@@ -110,7 +111,7 @@ jobs:
 
 Routing and lease creation:
 
-- `provider`, `target` (or `targetOS`), `windows.mode`, `profile`, `class`.
+- `provider`, `target` (or `targetOS`), `windows.mode`, `profile`, `class`, `architecture`.
 - `type` (or `serverType`), `market` (or `capacity.market`).
 - `ttl`, `idleTimeout`, `desktop`, `desktopEnv`, `browser`, `code`, `network`.
 

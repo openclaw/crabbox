@@ -24,7 +24,7 @@ project-specific parallelism.
 
 Belongs in a Crabbox job:
 
-- provider, target OS, Windows mode, profile, class/type, market, network;
+- provider, target OS, architecture, Windows mode, profile, class/type, market, network;
 - lease TTL, idle timeout, and stop policy;
 - whether to run Actions hydration and how long to wait for it;
 - the remote command and whether it runs through a shell;
@@ -142,6 +142,7 @@ windows:
   mode: wsl2           # normal | wsl2; sets --windows-mode
 profile: project-check
 class: beast
+architecture: amd64    # amd64 | arm64; arm64 is Linux-only on AWS/Azure
 type: m8i.4xlarge      # alias: serverType
 market: on-demand      # alias: capacity.market
 network: auto

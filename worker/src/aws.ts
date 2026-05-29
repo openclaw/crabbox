@@ -1135,11 +1135,13 @@ export class EC2SpotClient {
       return this.resolveLatestAmazonAMI(query.name, query.architecture);
     }
     const os = osImageSpec(config.os);
+    const architecture = config.architecture === "arm64" ? "arm64" : "x86_64";
+    const name = config.architecture === "arm64" ? os.awsArm64Name : os.awsName;
     return this.resolveLatestAMI(
       awsUbuntuOwner,
-      os.awsName,
-      "x86_64",
-      `no ${os.awsLabel} x86_64 AMI found in ${this.region}`,
+      name,
+      architecture,
+      `no ${os.awsLabel} ${architecture} AMI found in ${this.region}`,
     );
   }
 
@@ -1981,7 +1983,7 @@ function isAWSInsufficientCapacityOnHostError(message: string): boolean {
 export function awsLaunchCandidates(
   config: Pick<
     LeaseConfig,
-    "serverType" | "serverTypeExplicit" | "class" | "target" | "windowsMode"
+    "serverType" | "serverTypeExplicit" | "class" | "target" | "windowsMode" | "architecture"
   >,
 ): string[] {
   if (config.serverTypeExplicit) {
@@ -1990,7 +1992,12 @@ export function awsLaunchCandidates(
   if (config.target === "macos") {
     return uniqueStrings([
       config.serverType,
-      ...awsInstanceTypeCandidatesForTargetClass(config.target, config.class),
+      ...awsInstanceTypeCandidatesForTargetClass(
+        config.target,
+        config.class,
+        config.windowsMode,
+        config.architecture,
+      ),
     ]);
   }
   const policyFallback =
@@ -1998,10 +2005,17 @@ export function awsLaunchCandidates(
       ? config.windowsMode === "wsl2"
         ? "m8i.large"
         : "t3.large"
-      : "t3.small";
+      : config.architecture === "arm64"
+        ? "t4g.small"
+        : "t3.small";
   return uniqueStrings([
     config.serverType,
-    ...awsInstanceTypeCandidatesForTargetClass(config.target, config.class, config.windowsMode),
+    ...awsInstanceTypeCandidatesForTargetClass(
+      config.target,
+      config.class,
+      config.windowsMode,
+      config.architecture,
+    ),
     policyFallback,
   ]);
 }
@@ -2135,7 +2149,13 @@ export function awsQuotaPreflightAttempt(
 
 type AWSCapacityReadinessConfig = Pick<
   LeaseConfig,
-  "target" | "windowsMode" | "class" | "serverType" | "capacityMarket" | "capacityFallback"
+  | "target"
+  | "windowsMode"
+  | "architecture"
+  | "class"
+  | "serverType"
+  | "capacityMarket"
+  | "capacityFallback"
 >;
 
 export function awsCapacityReadinessCheckForQuota(
@@ -2215,7 +2235,7 @@ function awsCapacityReadinessMessage(prefix: string, details: Record<string, str
 }
 
 function awsRecommendedClassForQuota(
-  config: Pick<LeaseConfig, "target" | "windowsMode">,
+  config: Pick<LeaseConfig, "target" | "windowsMode" | "architecture">,
   limitVCPUs: number,
 ): { machineClass: string; serverType: string } | undefined {
   if (limitVCPUs <= 0) {
@@ -2226,6 +2246,7 @@ function awsRecommendedClassForQuota(
       config.target,
       machineClass,
       config.windowsMode,
+      config.architecture,
     );
     if (serverType && (awsInstanceTypeVCPUs(serverType) ?? 0) <= limitVCPUs) {
       return { machineClass, serverType };
@@ -2235,6 +2256,7 @@ function awsRecommendedClassForQuota(
     config.target,
     "standard",
     config.windowsMode,
+    config.architecture,
   )) {
     if ((awsInstanceTypeVCPUs(serverType) ?? 0) <= limitVCPUs) {
       return { machineClass: "standard", serverType };

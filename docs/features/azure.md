@@ -34,6 +34,7 @@ dynamic-sessions`; see the [providers overview](providers.md).
 
 ```sh
 crabbox warmup --provider azure --class beast
+crabbox warmup --provider azure --arch arm64 --class fast
 crabbox warmup --provider azure --class beast --azure-os-disk ephemeral
 crabbox run --provider azure --class standard -- pnpm test
 crabbox warmup --provider azure --target windows --class standard
@@ -56,6 +57,16 @@ standard  Standard_D32ads_v6, Standard_D32ds_v6, Standard_F32s_v2, then D/F 16-v
 fast      Standard_D64ads_v6, Standard_D64ds_v6, Standard_F64s_v2, then D/F 48- and 32-vCPU fallbacks
 large     Standard_D96ads_v6, Standard_D96ds_v6, then D/F 64- and 48-vCPU fallbacks
 beast     Standard_D192ds_v6, Standard_D128ds_v6, then D/F 96- and 64-vCPU fallbacks
+```
+
+Linux ARM64 classes use Azure Cobalt Dpsv6/Dpdsv6 candidates and ARM64 Ubuntu
+Marketplace images:
+
+```text
+standard  Standard_D32pds_v6, Standard_D32ps_v6, then 16-vCPU fallbacks
+fast      Standard_D64pds_v6, Standard_D64ps_v6, then 48/32-vCPU fallbacks
+large     Standard_D96pds_v6, Standard_D96ps_v6, then 64/48-vCPU fallbacks
+beast     Standard_D96pds_v6, Standard_D96ps_v6, then 64-vCPU fallbacks
 ```
 
 Native Windows and WSL2 use a smaller scale, and the default candidates support
@@ -174,6 +185,9 @@ existing vnet and NSG, or pick distinct `azure.vnet`, `azure.subnet`, and
 The default location is `eastus`. The default Linux image is
 `Canonical:ubuntu-26_04-lts:server:latest`; native Windows defaults to
 `MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest`.
+With `architecture: arm64` or `--arch arm64`, Linux defaults switch to
+`Canonical:ubuntu-26_04-lts:server-arm64:latest` or the matching
+`ubuntu-24_04-lts:server-arm64` image when `--os ubuntu:24.04` is set.
 Set `azure.image` / `CRABBOX_AZURE_IMAGE` as a `Publisher:Offer:SKU:Version`
 reference to override.
 

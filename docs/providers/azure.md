@@ -34,6 +34,7 @@ Azure supports both execution modes:
 
 ```sh
 crabbox warmup --provider azure --class beast
+crabbox warmup --provider azure --arch arm64 --class fast
 crabbox warmup --provider azure --class beast --azure-os-disk ephemeral
 crabbox run --provider azure --class standard -- pnpm test
 crabbox run --provider azure --azure-backend dynamic-sessions -- pnpm test
@@ -67,6 +68,7 @@ Azure-family backend:
 ```yaml
 provider: azure
 target: linux
+architecture: amd64
 class: beast
 azure:
   backend: vm
@@ -87,6 +89,11 @@ azure:
 `subscriptionId`, `tenantId`, and `clientId` may be set in config or sourced from
 environment variables. The client secret is never read from config — it must come
 from the environment.
+
+Set `architecture: arm64` or pass `--arch arm64` for Linux ARM leases. Crabbox
+then switches class fallback to Azure Cobalt Dpsv6/Dpdsv6 sizes and uses the
+matching Ubuntu ARM64 Marketplace image unless `azure.image` is explicitly set.
+ARM64 is not supported for native Windows, WSL2, or macOS targets.
 
 `azure.network` selects which IP the CLI uses for SSH: `public` (default) uses the
 VM public IP, `private` uses the NIC private IP from the vnet. Use `private` when

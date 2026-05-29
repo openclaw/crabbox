@@ -165,6 +165,7 @@ describe("aws provider", () => {
     const check = awsCapacityReadinessCheckForQuota(
       {
         target: "linux",
+        architecture: "amd64",
         windowsMode: "normal",
         class: "beast",
         serverType: "c7a.48xlarge",
@@ -196,6 +197,7 @@ describe("aws provider", () => {
     const check = awsCapacityReadinessCheckForQuota(
       {
         target: "linux",
+        architecture: "amd64",
         windowsMode: "normal",
         class: "beast",
         serverType: "c7a.48xlarge",
@@ -911,11 +913,22 @@ describe("aws provider", () => {
       awsLaunchCandidates({
         class: "standard",
         target: "windows",
+        architecture: "amd64",
         windowsMode: "wsl2",
         serverType: "m8i.large",
         serverTypeExplicit: false,
       }),
     ).not.toContain("t3.large");
+    expect(
+      awsLaunchCandidates({
+        class: "beast",
+        target: "linux",
+        architecture: "arm64",
+        windowsMode: "normal",
+        serverType: "c7g.16xlarge",
+        serverTypeExplicit: false,
+      }),
+    ).toContain("t4g.small");
   });
 
   it("builds ordered AWS region and availability-zone candidates", () => {

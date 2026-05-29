@@ -10,6 +10,7 @@ crabbox warmup --class beast
 crabbox warmup --provider aws --class beast --market on-demand
 crabbox warmup --provider aws --os ubuntu:26.04 --desktop --browser --desktop-env wayland
 crabbox warmup --provider azure --class beast
+crabbox warmup --provider azure --arch arm64 --class fast
 crabbox warmup --browser
 crabbox warmup --tailscale
 crabbox warmup --slug update-flow-smoke
@@ -189,6 +190,7 @@ warmup, because it also dispatches the workflow and waits for the ready marker.
 --provider <name>                  provider (see crabbox providers); default hetzner
 --profile <name>                   configuration profile
 --class <name>                     machine class; default beast
+--arch amd64|arm64                 CPU architecture; arm64 is Linux-only on AWS/Azure
 --os ubuntu:26.04|ubuntu:24.04     portable Linux OS image selector
 --type <provider-type>             provider server/instance type
 --market spot|on-demand            capacity market (AWS)

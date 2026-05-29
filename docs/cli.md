@@ -426,6 +426,7 @@ CRABBOX_ORG                        owning org
 CRABBOX_PROFILE                    default profile
 CRABBOX_CONFIG                     path to an explicit config file
 CRABBOX_DEFAULT_CLASS              default machine class
+CRABBOX_ARCH                       default CPU architecture (amd64|arm64)
 CRABBOX_SERVER_TYPE                provider server/instance type override
 CRABBOX_IDLE_TIMEOUT               idle expiry
 CRABBOX_TTL                        max lease lifetime

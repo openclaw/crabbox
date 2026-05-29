@@ -1757,20 +1757,21 @@ func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
 	enabled := true
 	disabled := false
 	job := applyFileJobConfig(JobConfig{}, fileJobConfig{
-		Provider:    "aws",
-		TargetOS:    targetLinux,
-		Windows:     &fileWindowsConfig{Mode: windowsModeWSL2},
-		Profile:     "ci",
-		Class:       "large",
-		Type:        "m8i.large",
-		Capacity:    &fileCapacityConfig{Market: "spot"},
-		Market:      "on-demand",
-		TTL:         "45m",
-		IdleTimeout: "5m",
-		Desktop:     &enabled,
-		Browser:     &disabled,
-		Code:        &enabled,
-		Network:     "tailscale",
+		Provider:     "aws",
+		TargetOS:     targetLinux,
+		Windows:      &fileWindowsConfig{Mode: windowsModeWSL2},
+		Profile:      "ci",
+		Class:        "large",
+		Architecture: "arm64",
+		Type:         "m8i.large",
+		Capacity:     &fileCapacityConfig{Market: "spot"},
+		Market:       "on-demand",
+		TTL:          "45m",
+		IdleTimeout:  "5m",
+		Desktop:      &enabled,
+		Browser:      &disabled,
+		Code:         &enabled,
+		Network:      "tailscale",
 		Hydrate: &fileJobHydrateConfig{
 			Actions:          &enabled,
 			GitHubRunner:     &enabled,
@@ -1794,7 +1795,7 @@ func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
 		Downloads:      []string{"out=out", "out=out"},
 		Stop:           "always",
 	})
-	if job.Provider != "aws" || job.Target != targetLinux || job.WindowsMode != windowsModeWSL2 || job.Profile != "ci" || job.Class != "large" || job.ServerType != "m8i.large" || job.Market != "on-demand" {
+	if job.Provider != "aws" || job.Target != targetLinux || job.WindowsMode != windowsModeWSL2 || job.Profile != "ci" || job.Class != "large" || job.Architecture != "arm64" || job.ServerType != "m8i.large" || job.Market != "on-demand" {
 		t.Fatalf("basic job fields not applied: %#v", job)
 	}
 	if job.TTL != 45*time.Minute || job.IdleTimeout != 5*time.Minute {

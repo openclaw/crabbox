@@ -10,6 +10,7 @@ crabbox run --id swift-crab -- pnpm test:changed
 crabbox run --class beast -- pnpm check
 crabbox run --provider aws --class beast --market on-demand -- pnpm check
 crabbox run --provider azure --class beast -- pnpm check
+crabbox run --provider azure --arch arm64 --class fast -- go test ./...
 crabbox run --tailscale -- pnpm check
 crabbox run --id swift-crab --network tailscale -- pnpm test
 crabbox run --browser -- google-chrome --headless --version
@@ -381,6 +382,7 @@ lease-acting commands):
 --provider <name>            See `crabbox providers` for the full list.
 --profile <name>
 --class <name>
+--arch amd64|arm64           CPU architecture; arm64 is Linux-only on AWS/Azure.
 --os <selector>              Portable Linux OS image, e.g. ubuntu:26.04
 --type <provider-type>
 --market spot|on-demand

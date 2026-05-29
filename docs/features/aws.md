@@ -28,6 +28,7 @@ Mac. AWS is one of the four brokerable providers, so it can run two ways:
 
 ```sh
 crabbox warmup --provider aws --class beast
+crabbox warmup --provider aws --arch arm64 --class fast
 crabbox run --provider aws --class beast --market on-demand -- pnpm check
 crabbox warmup --provider aws --target windows --desktop
 crabbox warmup --provider aws --target windows --windows-mode wsl2
@@ -83,6 +84,12 @@ fast      c7a.16xlarge, c7i.16xlarge, m7a.16xlarge, m7i.16xlarge, c7a.12xlarge, 
 large     c7a.24xlarge, c7i.24xlarge, m7a.24xlarge, m7i.24xlarge, r7a.24xlarge, c7a.16xlarge, c7a.12xlarge
 beast     c7a.48xlarge, c7i.48xlarge, m7a.48xlarge, m7i.48xlarge, r7a.48xlarge, c7a.32xlarge, c7i.32xlarge, m7a.32xlarge, c7a.24xlarge, c7a.16xlarge
 
+AWS Linux ARM64 (--arch arm64)
+standard  c7g.8xlarge, m7g.8xlarge, r7g.8xlarge, c7g.4xlarge
+fast      c7g.16xlarge, m7g.16xlarge, r7g.16xlarge, c7g.12xlarge, c7g.8xlarge
+large     c7g.16xlarge, m7g.16xlarge, r7g.16xlarge, c7g.12xlarge
+beast     c7g.16xlarge, m7g.16xlarge, r7g.16xlarge, c7g.12xlarge
+
 AWS Windows
 standard  m7i.large, m7a.large, t3.large
 fast      m7i.xlarge, m7a.xlarge, t3.xlarge
@@ -106,9 +113,10 @@ from the C8i/M8i/M8i-flex/R8i families; Crabbox rejects unsupported families
 
 ## Images
 
-- **Linux** resolves the latest Ubuntu 26.04 x86_64 AMI from Canonical. Pass
-  `--os ubuntu:24.04` for the previous LTS. Supported selectors: `ubuntu:26.04`
-  and `ubuntu:24.04`.
+- **Linux** resolves the latest Ubuntu 26.04 AMI from Canonical for the selected
+  architecture. Pass `--arch arm64` for Graviton/ARM64 capacity and
+  `--os ubuntu:24.04` for the previous LTS. Supported selectors:
+  `ubuntu:26.04` and `ubuntu:24.04`.
 - **Windows** resolves the latest Windows Server 2022 English Full Base AMI.
 - **macOS** resolves the matching Amazon EC2 macOS AMI for the chosen instance
   family (arm64 for Apple silicon, x86_64 for `mac1.metal`).

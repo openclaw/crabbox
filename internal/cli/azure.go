@@ -19,19 +19,21 @@ import (
 )
 
 const (
-	azureAddressSpace         = "10.42.0.0/16"
-	azureSubnetCIDR           = "10.42.0.0/24"
-	azureProviderTag          = "crabbox"
-	AzureOSDiskAuto           = "auto"
-	AzureOSDiskEphemeral      = "ephemeral"
-	AzureOSDiskManaged        = "managed"
-	defaultAzureLinuxImage    = "Canonical:ubuntu-26_04-lts:server:latest"
-	azureNobleLinuxImage      = "Canonical:ubuntu-24_04-lts:server:latest"
-	legacyAzureJammyImage     = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest"
-	legacyAzureNobleGen2Image = "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest"
-	defaultAzureWindowsImage  = "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest"
-	azureDeleteRetryDelay     = 15 * time.Second
-	azureDeleteRetryAttempts  = 13
+	azureAddressSpace           = "10.42.0.0/16"
+	azureSubnetCIDR             = "10.42.0.0/24"
+	azureProviderTag            = "crabbox"
+	AzureOSDiskAuto             = "auto"
+	AzureOSDiskEphemeral        = "ephemeral"
+	AzureOSDiskManaged          = "managed"
+	defaultAzureLinuxImage      = "Canonical:ubuntu-26_04-lts:server:latest"
+	defaultAzureLinuxARM64Image = "Canonical:ubuntu-26_04-lts:server-arm64:latest"
+	azureNobleLinuxImage        = "Canonical:ubuntu-24_04-lts:server:latest"
+	azureNobleLinuxARM64Image   = "Canonical:ubuntu-24_04-lts:server-arm64:latest"
+	legacyAzureJammyImage       = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest"
+	legacyAzureNobleGen2Image   = "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest"
+	defaultAzureWindowsImage    = "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest"
+	azureDeleteRetryDelay       = 15 * time.Second
+	azureDeleteRetryAttempts    = 13
 )
 
 type AzureClient struct {
@@ -146,6 +148,12 @@ func azureImageForConfig(cfg Config) string {
 	if cfg.TargetOS == targetWindows && (cfg.AzureImage == "" || isAzureDefaultLinuxImage(cfg.AzureImage)) {
 		return defaultAzureWindowsImage
 	}
+	if cfg.TargetOS == targetLinux && effectiveArchitectureForConfig(cfg) == ArchitectureARM64 && (cfg.AzureImage == "" || isAzureDefaultLinuxImage(cfg.AzureImage)) {
+		if cfg.OSImage == "ubuntu:24.04" {
+			return azureNobleLinuxARM64Image
+		}
+		return defaultAzureLinuxARM64Image
+	}
 	if cfg.AzureImage == "" {
 		return defaultAzureLinuxImage
 	}
@@ -154,21 +162,17 @@ func azureImageForConfig(cfg Config) string {
 
 func isAzureDefaultLinuxImage(image string) bool {
 	switch strings.TrimSpace(image) {
-	case defaultAzureLinuxImage, azureNobleLinuxImage, legacyAzureJammyImage, legacyAzureNobleGen2Image:
+	case defaultAzureLinuxImage, defaultAzureLinuxARM64Image, azureNobleLinuxImage, azureNobleLinuxARM64Image, legacyAzureJammyImage, legacyAzureNobleGen2Image:
 		return true
 	default:
 		return false
 	}
 }
 
-func azureVMSizeCandidatesForConfig(cfg Config) []string {
-	return azureVMSizeCandidatesForTargetModeClass(cfg.TargetOS, cfg.WindowsMode, cfg.Class)
-}
-
 func azureVMSizeCandidatesForTargetModeClass(target, windowsMode, class string) []string {
 	switch target {
 	case targetLinux:
-		return azureVMSizeCandidatesForClass(class)
+		return azureVMSizeCandidatesForArchitectureClass(ArchitectureAMD64, class)
 	case targetWindows:
 		if windowsMode == windowsModeNormal || windowsMode == windowsModeWSL2 {
 			return azureWindowsVMSizeCandidatesForClass(class)
@@ -180,6 +184,31 @@ func azureVMSizeCandidatesForTargetModeClass(target, windowsMode, class string) 
 }
 
 func azureVMSizeCandidatesForClass(class string) []string {
+	return azureVMSizeCandidatesForArchitectureClass(ArchitectureAMD64, class)
+}
+
+func azureVMSizeCandidatesForConfig(cfg Config) []string {
+	return azureVMSizeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, effectiveArchitectureForConfig(cfg), cfg.Class)
+}
+
+func azureVMSizeCandidatesForTargetModeArchitectureClass(target, windowsMode, architecture, class string) []string {
+	switch target {
+	case targetLinux:
+		return azureVMSizeCandidatesForArchitectureClass(architecture, class)
+	case targetWindows:
+		if windowsMode == windowsModeNormal || windowsMode == windowsModeWSL2 {
+			return azureWindowsVMSizeCandidatesForClass(class)
+		}
+		return []string{class}
+	default:
+		return []string{class}
+	}
+}
+
+func azureVMSizeCandidatesForArchitectureClass(architecture, class string) []string {
+	if architecture == ArchitectureARM64 {
+		return azureARM64VMSizeCandidatesForClass(class)
+	}
 	switch class {
 	case "standard":
 		return []string{"Standard_D32ads_v6", "Standard_D32ds_v6", "Standard_F32s_v2", "Standard_D32ads_v5", "Standard_D32ds_v5", "Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_F16s_v2"}
@@ -192,6 +221,26 @@ func azureVMSizeCandidatesForClass(class string) []string {
 	default:
 		return []string{class}
 	}
+}
+
+func azureARM64VMSizeCandidatesForClass(class string) []string {
+	switch class {
+	case "standard":
+		return []string{"Standard_D32pds_v6", "Standard_D32ps_v6", "Standard_D16pds_v6", "Standard_D16ps_v6"}
+	case "fast":
+		return []string{"Standard_D64pds_v6", "Standard_D64ps_v6", "Standard_D48pds_v6", "Standard_D48ps_v6", "Standard_D32pds_v6", "Standard_D32ps_v6"}
+	case "large":
+		return []string{"Standard_D96pds_v6", "Standard_D96ps_v6", "Standard_D64pds_v6", "Standard_D64ps_v6", "Standard_D48pds_v6", "Standard_D48ps_v6"}
+	case "beast":
+		return []string{"Standard_D96pds_v6", "Standard_D96ps_v6", "Standard_D64pds_v6", "Standard_D64ps_v6"}
+	default:
+		return []string{class}
+	}
+}
+
+func azureVMSizeIsARM64(vmSize string) bool {
+	normalized := strings.ToLower(vmSize)
+	return strings.Contains(normalized, "ps_v6") || strings.Contains(normalized, "pds_v6") || strings.Contains(normalized, "pls_v6") || strings.Contains(normalized, "plds_v6")
 }
 
 func azureWindowsVMSizeCandidatesForClass(class string) []string {
@@ -212,6 +261,9 @@ func azureWindowsVMSizeCandidatesForClass(class string) []string {
 func azureSupportsEphemeralOS(vmSize string) bool {
 	normalized := strings.ToLower(vmSize)
 	if strings.HasPrefix(normalized, "standard_f") && strings.HasSuffix(normalized, "s_v2") {
+		return true
+	}
+	if strings.Contains(normalized, "pds_v6") || strings.Contains(normalized, "plds_v6") {
 		return true
 	}
 	if (strings.HasPrefix(normalized, "standard_d") || strings.HasPrefix(normalized, "standard_e")) &&

@@ -95,6 +95,7 @@ export interface LeaseRequest {
   provider?: Provider;
   target?: TargetOS;
   targetOS?: TargetOS;
+  architecture?: string;
   os?: string;
   windowsMode?: WindowsMode;
   desktop?: boolean;

@@ -16,7 +16,9 @@ const DELETE_RETRY_ATTEMPTS = 13;
 const DELETE_RETRY_DELAY_MS = 15_000;
 const MIN_LRO_POLL_INTERVAL_MS = 15_000;
 const DEFAULT_AZURE_LINUX_IMAGE = "Canonical:ubuntu-26_04-lts:server:latest";
+const DEFAULT_AZURE_LINUX_ARM64_IMAGE = "Canonical:ubuntu-26_04-lts:server-arm64:latest";
 const AZURE_NOBLE_LINUX_IMAGE = "Canonical:ubuntu-24_04-lts:server:latest";
+const AZURE_NOBLE_LINUX_ARM64_IMAGE = "Canonical:ubuntu-24_04-lts:server-arm64:latest";
 const LEGACY_AZURE_JAMMY_IMAGE = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest";
 const LEGACY_AZURE_NOBLE_GEN2_IMAGE =
   "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest";
@@ -218,7 +220,12 @@ export class AzureClient {
         ? [config.serverType]
         : prependUnique(
             config.serverType,
-            azureVMSizeCandidatesForTargetClass(config.target, config.class, config.windowsMode),
+            azureVMSizeCandidatesForTargetClass(
+              config.target,
+              config.class,
+              config.windowsMode,
+              config.architecture,
+            ),
           );
     const failures: string[] = [];
     const attempts: ProvisioningAttempt[] = [];
@@ -622,6 +629,15 @@ export class AzureClient {
 
   private imageForConfig(config: LeaseConfig): string {
     const image = config.azureImage || this.image;
+    if (
+      config.target === "linux" &&
+      config.architecture === "arm64" &&
+      isAzureDefaultLinuxImage(image)
+    ) {
+      return config.os === "ubuntu:24.04"
+        ? AZURE_NOBLE_LINUX_ARM64_IMAGE
+        : DEFAULT_AZURE_LINUX_ARM64_IMAGE;
+    }
     if (config.target === "windows" && isAzureDefaultLinuxImage(image)) {
       return DEFAULT_AZURE_WINDOWS_IMAGE;
     }
@@ -1246,6 +1262,9 @@ export function azureSupportsEphemeralOS(vmSize: string): boolean {
   if (normalized.startsWith("standard_f") && normalized.endsWith("s_v2")) {
     return true;
   }
+  if (normalized.includes("pds_v6") || normalized.includes("plds_v6")) {
+    return true;
+  }
   if (
     (normalized.startsWith("standard_d") || normalized.startsWith("standard_e")) &&
     (normalized.includes("ds_v5") || normalized.includes("ds_v6"))
@@ -1364,7 +1383,9 @@ function parseAzureStatusMessage(message: string): string {
 function isAzureDefaultLinuxImage(image: string): boolean {
   return (
     image.trim() === DEFAULT_AZURE_LINUX_IMAGE ||
+    image.trim() === DEFAULT_AZURE_LINUX_ARM64_IMAGE ||
     image.trim() === AZURE_NOBLE_LINUX_IMAGE ||
+    image.trim() === AZURE_NOBLE_LINUX_ARM64_IMAGE ||
     image.trim() === LEGACY_AZURE_JAMMY_IMAGE ||
     image.trim() === LEGACY_AZURE_NOBLE_GEN2_IMAGE
   );

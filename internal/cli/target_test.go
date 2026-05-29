@@ -77,6 +77,37 @@ func TestValidateProviderTargetRejectsAWSWSL2ExactTypeWithoutNestedVirtualizatio
 	}
 }
 
+func TestValidateProviderTargetRejectsArchitectureTypeMismatch(t *testing.T) {
+	tests := []struct {
+		name         string
+		provider     string
+		architecture string
+		serverType   string
+		want         string
+	}{
+		{name: "aws arm with x86 type", provider: "aws", architecture: ArchitectureARM64, serverType: "c7a.48xlarge", want: "requires an ARM64 AWS instance type"},
+		{name: "aws amd64 with arm type", provider: "aws", architecture: ArchitectureAMD64, serverType: "c7g.16xlarge", want: "requires an amd64 AWS instance type"},
+		{name: "azure arm with x86 size", provider: "azure", architecture: ArchitectureARM64, serverType: "Standard_D96ds_v6", want: "requires an ARM64 Azure VM size"},
+		{name: "azure amd64 with arm size", provider: "azure", architecture: ArchitectureAMD64, serverType: "Standard_D96pds_v6", want: "requires an amd64 Azure VM size"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = tc.provider
+			cfg.TargetOS = targetLinux
+			cfg.Architecture = tc.architecture
+			cfg.architectureExplicit = true
+			cfg.ServerType = tc.serverType
+			cfg.ServerTypeExplicit = true
+
+			err := validateProviderTarget(cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateProviderTargetAllowsAzureWindowsModes(t *testing.T) {
 	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
 		t.Run(mode, func(t *testing.T) {

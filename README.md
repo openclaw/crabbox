@@ -238,6 +238,7 @@ AWS Linux  standard  c7a/c7i/m7a/m7i.8xlarge family
            fast      …16xlarge family
            large     …24xlarge family
            beast     …48xlarge family, falling back to 32x/24x/16x
+           arm64     c7g/m7g/r7g families with --arch arm64
 
 AWS Win    standard  m7i.large, m7a.large, t3.large
            fast      m7i.xlarge, m7a.xlarge, t3.xlarge
@@ -255,6 +256,7 @@ Azure      standard  Standard_D32ads_v6, Standard_D32ds_v6, Standard_F32s_v2, th
            fast      Standard_D64ads_v6, Standard_D64ds_v6, Standard_F64s_v2, then 48/32-vCPU fallbacks
            large     Standard_D96ads_v6, Standard_D96ds_v6, then 64/48-vCPU fallbacks
            beast     Standard_D192ds_v6, Standard_D128ds_v6, then 96/64-vCPU fallbacks
+           arm64     Standard_D*ps_v6 / D*pds_v6 Cobalt families with --arch arm64
 
 Azure Win/
 WSL2       standard  Standard_D2ads_v6, Standard_D2ds_v6, Standard_D2ads_v5, Standard_D2ds_v5, Standard_D2as_v6
@@ -273,7 +275,9 @@ Cloudflare standard  standard-4
            beast     standard-4
 ```
 
-Override with `--type` or `CRABBOX_SERVER_TYPE` for a specific instance.
+Override with `--type` or `CRABBOX_SERVER_TYPE` for a specific instance. Use
+`--arch arm64` / `architecture: arm64` for Linux ARM capacity on Azure or AWS;
+explicit ARM provider types also select ARM images when no custom image is set.
 Cloudflare also accepts `lite`, `basic`, `standard-1`, `standard-2`, and
 `standard-3` as smaller explicit `--type` values; `standard-4` is the default.
 Providers without a row either use provider-native capacity settings or reject

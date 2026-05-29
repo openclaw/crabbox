@@ -614,6 +614,7 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"profile":                         cfg.Profile,
 		"provider":                        cfg.Provider,
 		"target":                          cfg.TargetOS,
+		"architecture":                    effectiveArchitectureForConfig(cfg),
 		"windowsMode":                     cfg.WindowsMode,
 		"desktop":                         cfg.Desktop,
 		"desktopEnv":                      normalizedDesktopEnv(cfg.DesktopEnv),

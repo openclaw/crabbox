@@ -30,6 +30,7 @@ Prefer [Hetzner](./hetzner.md) for cheaper Linux-only capacity, or
 
 ```sh
 crabbox warmup --provider aws --class standard
+crabbox warmup --provider aws --arch arm64 --class fast
 crabbox run --provider aws --class fast -- pnpm test
 crabbox run --provider aws --market on-demand -- pnpm check
 crabbox warmup --provider aws --target windows --desktop
@@ -63,6 +64,7 @@ class is `beast`.
 ```yaml
 provider: aws
 target: linux
+architecture: amd64
 class: beast
 market: spot
 aws:
@@ -75,6 +77,11 @@ aws:
   sshCIDRs: []             # allowed SSH source ranges
   macHostId: ""            # pin an EC2 Mac Dedicated Host
 ```
+
+Set `architecture: arm64` or pass `--arch arm64` for Linux Graviton leases.
+Crabbox switches class fallback to C7g/M7g/R7g families and resolves Canonical
+Ubuntu ARM64 AMIs unless `aws.ami` is pinned. ARM64 is not supported for managed
+Windows or WSL2 targets.
 
 ### Environment variables (direct mode)
 

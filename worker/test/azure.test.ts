@@ -35,6 +35,7 @@ function testLeaseConfig(overrides: Partial<LeaseConfig> = {}): LeaseConfig {
   return {
     provider: "azure",
     target: "linux",
+    architecture: "amd64",
     windowsMode: "normal",
     desktop: false,
     desktopEnv: "xfce",

@@ -17,6 +17,8 @@ type Config struct {
 	Profile                     string
 	Provider                    string
 	TargetOS                    string
+	Architecture                string
+	architectureExplicit        bool
 	OSImage                     string
 	osImageExplicit             bool
 	osImageProviderDefaults     string
@@ -472,6 +474,7 @@ type JobConfig struct {
 	WindowsMode    string
 	Profile        string
 	Class          string
+	Architecture   string
 	ServerType     string
 	Market         string
 	TTL            time.Duration
@@ -559,6 +562,11 @@ func canonicalizeConfigProvider(cfg *Config) {
 }
 
 func applyProviderConfigDefaults(cfg *Config) error {
+	if normalized, err := normalizeArchitecture(cfg.Architecture); err != nil {
+		return err
+	} else {
+		cfg.Architecture = normalized
+	}
 	if normalized, err := normalizeOSImage(cfg.OSImage); err != nil {
 		return err
 	} else {
@@ -620,7 +628,7 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	if normalizeTargetOS(cfg.TargetOS) != targetLinux {
 		return
 	}
-	hetznerImage, azureImage, gcpImage, isloImage, containerImage, err := osImageDefaultProviderImages(cfg.OSImage)
+	hetznerImage, azureImage, gcpImage, isloImage, containerImage, err := osImageDefaultProviderImagesForArchitecture(cfg.OSImage, effectiveArchitectureForConfig(*cfg))
 	if err != nil {
 		return
 	}
@@ -667,6 +675,7 @@ func baseConfig() Config {
 		Profile:            "default",
 		Provider:           provider,
 		TargetOS:           "linux",
+		Architecture:       ArchitectureAMD64,
 		OSImage:            osImage,
 		WindowsMode:        "normal",
 		DesktopEnv:         desktopEnvXFCE,
@@ -831,6 +840,7 @@ type fileConfig struct {
 	Provider             string                             `yaml:"provider,omitempty"`
 	Target               string                             `yaml:"target,omitempty"`
 	TargetOS             string                             `yaml:"targetOS,omitempty"`
+	Architecture         string                             `yaml:"architecture,omitempty"`
 	OSImage              string                             `yaml:"os,omitempty"`
 	Windows              *fileWindowsConfig                 `yaml:"windows,omitempty"`
 	Desktop              *bool                              `yaml:"desktop,omitempty"`
@@ -1377,6 +1387,7 @@ type fileJobConfig struct {
 	Windows        *fileWindowsConfig    `yaml:"windows,omitempty"`
 	Profile        string                `yaml:"profile,omitempty"`
 	Class          string                `yaml:"class,omitempty"`
+	Architecture   string                `yaml:"architecture,omitempty"`
 	ServerType     string                `yaml:"serverType,omitempty"`
 	Type           string                `yaml:"type,omitempty"`
 	Capacity       *fileCapacityConfig   `yaml:"capacity,omitempty"`
@@ -1524,6 +1535,10 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 	}
 	if file.TargetOS != "" {
 		cfg.TargetOS = file.TargetOS
+	}
+	if file.Architecture != "" {
+		cfg.Architecture = file.Architecture
+		cfg.architectureExplicit = true
 	}
 	if file.OSImage != "" {
 		cfg.OSImage = file.OSImage
@@ -2507,6 +2522,9 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 	if file.Class != "" {
 		job.Class = file.Class
 	}
+	if file.Architecture != "" {
+		job.Architecture = file.Architecture
+	}
 	if file.ServerType != "" {
 		job.ServerType = file.ServerType
 	}
@@ -2616,6 +2634,10 @@ func applyEnv(cfg *Config) {
 	cfg.Profile = getenv("CRABBOX_PROFILE", cfg.Profile)
 	cfg.Provider = getenv("CRABBOX_PROVIDER", cfg.Provider)
 	cfg.TargetOS = getenv("CRABBOX_TARGET", getenv("CRABBOX_TARGET_OS", cfg.TargetOS))
+	if arch := os.Getenv("CRABBOX_ARCH"); arch != "" {
+		cfg.Architecture = arch
+		cfg.architectureExplicit = true
+	}
 	if osImage := os.Getenv("CRABBOX_OS"); osImage != "" {
 		cfg.OSImage = osImage
 		cfg.osImageExplicit = true
@@ -3344,10 +3366,14 @@ func awsInstanceTypeCandidatesForTargetClass(target, class string) []string {
 }
 
 func awsInstanceTypeCandidatesForConfig(cfg Config) []string {
-	return awsInstanceTypeCandidatesForTargetModeClass(cfg.TargetOS, cfg.WindowsMode, cfg.Class)
+	return awsInstanceTypeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, effectiveArchitectureForConfig(cfg), cfg.Class)
 }
 
 func awsInstanceTypeCandidatesForTargetModeClass(target, windowsMode, class string) []string {
+	return awsInstanceTypeCandidatesForTargetModeArchitectureClass(target, windowsMode, ArchitectureAMD64, class)
+}
+
+func awsInstanceTypeCandidatesForTargetModeArchitectureClass(target, windowsMode, architecture, class string) []string {
 	switch target {
 	case targetMacOS:
 		return awsMacOSInstanceTypeCandidates()
@@ -3379,7 +3405,7 @@ func awsInstanceTypeCandidatesForTargetModeClass(target, windowsMode, class stri
 			return []string{class}
 		}
 	default:
-		return awsInstanceTypeCandidatesForClass(class)
+		return awsInstanceTypeCandidatesForArchitectureClass(architecture, class)
 	}
 }
 
@@ -3398,6 +3424,13 @@ func awsMacOSInstanceTypeCandidates() []string {
 }
 
 func awsInstanceTypeCandidatesForClass(class string) []string {
+	return awsInstanceTypeCandidatesForArchitectureClass(ArchitectureAMD64, class)
+}
+
+func awsInstanceTypeCandidatesForArchitectureClass(architecture, class string) []string {
+	if architecture == ArchitectureARM64 {
+		return awsARM64InstanceTypeCandidatesForClass(class)
+	}
 	switch class {
 	case "standard":
 		return []string{"c7a.8xlarge", "c7i.8xlarge", "m7a.8xlarge", "m7i.8xlarge", "c7a.4xlarge"}
@@ -3409,6 +3442,51 @@ func awsInstanceTypeCandidatesForClass(class string) []string {
 		return []string{"c7a.48xlarge", "c7i.48xlarge", "m7a.48xlarge", "m7i.48xlarge", "r7a.48xlarge", "c7a.32xlarge", "c7i.32xlarge", "m7a.32xlarge", "c7a.24xlarge", "c7a.16xlarge"}
 	default:
 		return []string{class}
+	}
+}
+
+func awsARM64InstanceTypeCandidatesForClass(class string) []string {
+	switch class {
+	case "standard":
+		return []string{"c7g.8xlarge", "m7g.8xlarge", "r7g.8xlarge", "c7g.4xlarge"}
+	case "fast":
+		return []string{"c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge", "c7g.8xlarge"}
+	case "large":
+		return []string{"c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge"}
+	case "beast":
+		return []string{"c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge"}
+	default:
+		return []string{class}
+	}
+}
+
+func awsInstanceTypeIsARM64(instanceType string) bool {
+	name := strings.ToLower(strings.SplitN(instanceType, ".", 2)[0])
+	switch name {
+	case "a1", "g5g", "hpc7g", "i4g", "im4gn", "is4gen", "t4g", "x2gd":
+		return true
+	}
+	for _, prefix := range []string{"c", "m", "r"} {
+		if strings.HasPrefix(name, prefix) && awsGravitonFamilySuffix(strings.TrimPrefix(name, prefix)) {
+			return true
+		}
+	}
+	return false
+}
+
+func awsGravitonFamilySuffix(value string) bool {
+	digitEnd := 0
+	for digitEnd < len(value) && value[digitEnd] >= '0' && value[digitEnd] <= '9' {
+		digitEnd++
+	}
+	if digitEnd == 0 {
+		return false
+	}
+	switch value[digitEnd:] {
+	case "g", "gd", "gn":
+		return true
+	default:
+		return false
 	}
 }
 

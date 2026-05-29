@@ -4563,6 +4563,10 @@ function legacyPromotedAWSImageKey(): string {
   return promotedAWSImagePrefix();
 }
 
+function legacyPromotedAWSImageCompatible(image: Pick<ProviderImage, "architecture">): boolean {
+  return !image.architecture || image.architecture === "x86_64";
+}
+
 function promotedAWSLinuxOSImageKey(image: Pick<ProviderImage, "architecture" | "os">): string {
   const architecture = image.architecture ?? awsImageArchitectureForTarget("linux", "");
   return `image:aws:promoted:linux:${architecture}:${sanitizePromotedAWSImageKeyPart(image.os ?? "")}`;
@@ -4682,6 +4686,17 @@ function awsImageArchitectureForTarget(target: TargetOS, serverType: string): st
     return serverType.startsWith("mac1.") ? "x86_64_mac" : "arm64_mac";
   }
   return "x86_64";
+}
+
+function awsImageArchitectureForLease(
+  target: TargetOS,
+  serverType: string,
+  architecture?: string,
+): string {
+  if (target === "linux" && architecture === "arm64") {
+    return "arm64";
+  }
+  return awsImageArchitectureForTarget(target, serverType);
 }
 
 function sanitizeAWSRegion(value: string): string {
@@ -7353,7 +7368,11 @@ class AWSProvider implements CloudProvider {
     if (target === "linux" && promoted.os) {
       await this.storage.put(promotedAWSLinuxOSImageKey(promoted), promoted);
     }
-    if (target === "linux" && (!promoted.os || promoted.os === "ubuntu:24.04")) {
+    if (
+      target === "linux" &&
+      (!promoted.os || promoted.os === "ubuntu:24.04") &&
+      legacyPromotedAWSImageCompatible(promoted)
+    ) {
       await this.storage.put(legacyPromotedAWSImageKey(), promoted);
     }
     return { image: promoted };
@@ -7374,15 +7393,21 @@ class AWSProvider implements CloudProvider {
 
   private async promotedImage(config: {
     target: TargetOS;
+    architecture?: string;
     os?: string;
     serverType: string;
     awsRegion: string;
   }): Promise<PromotedImageRecord | undefined> {
+    const architecture = awsImageArchitectureForLease(
+      config.target,
+      config.serverType,
+      config.architecture,
+    );
     const scoped = await this.storage.get<PromotedImageRecord>(
       promotedAWSImageKey({
         target: config.target,
         ...(config.os ? { os: config.os } : {}),
-        architecture: awsImageArchitectureForTarget(config.target, config.serverType),
+        architecture,
         serverType: config.serverType,
         region: config.awsRegion,
       }),
@@ -7394,7 +7419,7 @@ class AWSProvider implements CloudProvider {
       return this.storage.get<PromotedImageRecord>(
         legacyScopedPromotedAWSImageKey({
           target: config.target,
-          architecture: awsImageArchitectureForTarget(config.target, config.serverType),
+          architecture,
           region: config.awsRegion,
         }),
       );
@@ -7406,15 +7431,18 @@ class AWSProvider implements CloudProvider {
       const osScoped = await this.storage.get<PromotedImageRecord>(
         promotedAWSLinuxOSImageKey({
           os: config.os,
-          architecture: awsImageArchitectureForTarget(config.target, config.serverType),
+          architecture,
         }),
       );
       if (osScoped) {
         return osScoped;
       }
     }
-    if (!config.os || config.os === "ubuntu:24.04") {
-      return this.storage.get<PromotedImageRecord>(legacyPromotedAWSImageKey());
+    if ((!config.os || config.os === "ubuntu:24.04") && architecture === "x86_64") {
+      const legacy = await this.storage.get<PromotedImageRecord>(legacyPromotedAWSImageKey());
+      if (legacy && legacyPromotedAWSImageCompatible(legacy)) {
+        return legacy;
+      }
     }
     return undefined;
   }
@@ -7426,6 +7454,7 @@ class AWSProvider implements CloudProvider {
         // oxlint-disable-next-line eslint/no-await-in-loop -- storage reads preserve deterministic fallback key construction.
         const promoted = await this.promotedImage({
           target: config.target,
+          architecture: config.architecture,
           os: config.os,
           serverType,
           awsRegion: region,

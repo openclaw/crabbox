@@ -104,7 +104,7 @@ func (c *AWSClient) SpotPlacementScores(ctx context.Context, cfg Config) ([]type
 	if len(regions) == 0 {
 		return nil, nil
 	}
-	candidates := awsInstanceTypeCandidatesForClass(cfg.Class)
+	candidates := awsInstanceTypeCandidatesForConfig(cfg)
 	if cfg.ServerType != "" {
 		candidates = appendUniqueStrings([]string{cfg.ServerType}, candidates...)
 	}
@@ -650,14 +650,15 @@ func (c *AWSClient) resolveAMI(ctx context.Context, cfg Config) (string, error) 
 		name, architecture := awsMacOSAMIQueryForInstanceType(cfg.ServerType)
 		return c.resolveLatestAmazonAMI(ctx, name, architecture)
 	}
-	name, label, err := awsLinuxAMIQueryForOS(cfg.OSImage)
+	architecture := awsLinuxImageArchitecture(effectiveArchitectureForConfig(cfg))
+	name, label, err := awsLinuxAMIQueryForOS(cfg.OSImage, effectiveArchitectureForConfig(cfg))
 	if err != nil {
 		return "", err
 	}
 	out, err := c.ec2.DescribeImages(ctx, &ec2.DescribeImagesInput{
 		Owners: []string{awsUbuntuOwner},
 		Filters: []types.Filter{
-			{Name: aws.String("architecture"), Values: []string{"x86_64"}},
+			{Name: aws.String("architecture"), Values: []string{architecture}},
 			{Name: aws.String("name"), Values: []string{name}},
 			{Name: aws.String("root-device-type"), Values: []string{"ebs"}},
 			{Name: aws.String("virtualization-type"), Values: []string{"hvm"}},
@@ -667,12 +668,19 @@ func (c *AWSClient) resolveAMI(ctx context.Context, cfg Config) (string, error) 
 		return "", err
 	}
 	if len(out.Images) == 0 {
-		return "", exit(3, "no %s x86_64 AMI found in %s; set CRABBOX_AWS_AMI", label, cfg.AWSRegion)
+		return "", exit(3, "no %s %s AMI found in %s; set CRABBOX_AWS_AMI", label, architecture, cfg.AWSRegion)
 	}
 	sort.Slice(out.Images, func(i, j int) bool {
 		return aws.ToString(out.Images[i].CreationDate) > aws.ToString(out.Images[j].CreationDate)
 	})
 	return aws.ToString(out.Images[0].ImageId), nil
+}
+
+func awsLinuxImageArchitecture(architecture string) string {
+	if architecture == ArchitectureARM64 {
+		return "arm64"
+	}
+	return "x86_64"
 }
 
 func awsMacOSAMIQueryForInstanceType(instanceType string) (string, string) {
@@ -1024,6 +1032,9 @@ func awsLaunchCandidates(cfg Config) []string {
 		return appendUniqueStrings([]string{cfg.ServerType}, awsInstanceTypeCandidatesForConfig(cfg)...)
 	}
 	fallback := "t3.small"
+	if cfg.TargetOS == targetLinux && effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
+		fallback = "t4g.small"
+	}
 	if cfg.TargetOS == targetWindows {
 		fallback = "t3.large"
 		if cfg.WindowsMode == windowsModeWSL2 {
@@ -1147,9 +1158,10 @@ func awsRecommendedClassForQuota(cfg Config, limitVCPUs int) (string, string) {
 	if limitVCPUs <= 0 {
 		return "", ""
 	}
+	architecture := effectiveArchitectureForConfig(cfg)
 	classes := []string{"beast", "large", "fast", "standard"}
 	for _, class := range classes {
-		candidates := awsInstanceTypeCandidatesForTargetModeClass(cfg.TargetOS, cfg.WindowsMode, class)
+		candidates := awsInstanceTypeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, architecture, class)
 		if len(candidates) == 0 {
 			continue
 		}
@@ -1157,7 +1169,7 @@ func awsRecommendedClassForQuota(cfg Config, limitVCPUs int) (string, string) {
 			return class, candidates[0]
 		}
 	}
-	for _, serverType := range awsInstanceTypeCandidatesForTargetModeClass(cfg.TargetOS, cfg.WindowsMode, "standard") {
+	for _, serverType := range awsInstanceTypeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, architecture, "standard") {
 		if awsInstanceTypeVCPUs(serverType) <= limitVCPUs {
 			return "standard", serverType
 		}

@@ -14,6 +14,7 @@ type leaseCreateFlagValues struct {
 	Provider      *string
 	Profile       *string
 	Class         *string
+	Architecture  *string
 	OSImage       *string
 	ServerType    *string
 	Market        *string
@@ -38,6 +39,7 @@ func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlag
 		Provider:      fs.String("provider", defaults.Provider, providerHelpAll()),
 		Profile:       fs.String("profile", defaults.Profile, "profile"),
 		Class:         fs.String("class", defaults.Class, "machine class"),
+		Architecture:  fs.String("arch", defaults.Architecture, "CPU architecture: amd64 or arm64"),
 		OSImage:       fs.String("os", defaults.OSImage, "portable Linux OS image selector, for example ubuntu:26.04"),
 		ServerType:    fs.String("type", getenv("CRABBOX_SERVER_TYPE", ""), "provider server/instance type"),
 		Market:        fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand"),
@@ -64,6 +66,14 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 	cfg.Provider = *values.Provider
 	cfg.Profile = *values.Profile
 	cfg.Class = *values.Class
+	if flagWasSet(fs, "arch") {
+		arch, err := normalizeArchitecture(*values.Architecture)
+		if err != nil {
+			return err
+		}
+		cfg.Architecture = arch
+		cfg.architectureExplicit = true
+	}
 	if flagWasSet(fs, "pond") {
 		pond, err := requestedPondName(*values.Pond)
 		if err != nil {

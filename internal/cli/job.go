@@ -198,6 +198,9 @@ func jobLeaseCreateArgs(job JobConfig) []string {
 	if job.Class != "" {
 		args = append(args, "--class", job.Class)
 	}
+	if job.Architecture != "" {
+		args = append(args, "--arch", job.Architecture)
+	}
 	if job.ServerType != "" {
 		args = append(args, "--type", job.ServerType)
 	}

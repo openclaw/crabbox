@@ -77,6 +77,7 @@ broker:
 
 provider: aws            # default provider when --provider is unset
 target: linux            # default target OS: linux | macos | windows
+architecture: amd64      # amd64 | arm64; arm64 is Linux-only on AWS/Azure
 os: ubuntu:26.04         # OS image; resolved to per-provider images for linux
 windows:
   mode: normal           # normal | wsl2 when target=windows
@@ -176,6 +177,7 @@ jobs:
   windows-wsl2:
     provider: aws
     target: windows
+    architecture: amd64
     windows:
       mode: wsl2
     class: beast
@@ -679,6 +681,10 @@ Class-to-type mappings live in [Providers](providers.md). When you set
 ignored. The `serverType:` and `--type` paths intentionally do not fall back;
 they fail loud if the provider rejects the type.
 
+Set `architecture: arm64` (or `--arch arm64`) for Linux ARM capacity on AWS or
+Azure. Explicit ARM provider types also select matching ARM Linux images when
+no provider-specific image override is set.
+
 ## Environment variables
 
 Most YAML keys have a matching `CRABBOX_*` env override that takes precedence
@@ -694,6 +700,7 @@ CRABBOX_ACCESS_CLIENT_ID        Cloudflare Access service-token id
 CRABBOX_ACCESS_CLIENT_SECRET    Cloudflare Access service-token secret
 CRABBOX_PROVIDER                default provider
 CRABBOX_TARGET                  default target OS
+CRABBOX_ARCH                    default architecture: amd64 or arm64
 CRABBOX_OS                      default OS image
 CRABBOX_PROFILE                 default profile
 CRABBOX_DEFAULT_CLASS           default machine class
@@ -726,7 +733,7 @@ MODAL_TOKEN_ID / MODAL_TOKEN_SECRET
 | Setting | User config | Repo config | Profile | Notes |
 |:--------|:------------|:------------|:--------|:------|
 | `broker.url` and `broker.token` | yes | no | no | Per-machine identity. |
-| `provider`, `class`, `serverType` | optional default | yes | yes | Per-repo defaults; profiles for lanes. |
+| `provider`, `class`, `architecture`, `serverType` | optional default | yes | yes | Per-repo defaults; profiles for lanes. |
 | `sync.exclude`, `sync.fingerprint`, `sync.baseRef` | no | yes | yes | Lives with the repo. |
 | `env.allow` | no | yes | yes | Repo decides what is safe to forward. |
 | Per-user SSH key path | yes | no | no | Personal preference. |
