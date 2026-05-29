@@ -183,26 +183,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			removeLeaseClaim(leaseID)
 		}()
 	}
-	fmt.Fprintf(b.rt.Stderr, "provider=islo lease=%s sandbox=%s\n", leaseID, name)
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		var err error
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, name, req)
-		if err != nil {
-			return RunResult{}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, name, workspace); err != nil {
-		return RunResult{}, err
-	}
-	commandStart := b.now()
-	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, req.Env)
-	commandDuration := b.now().Sub(commandStart)
 	result := RunResult{
-		ExitCode:      exitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
 		SyncDelegated: true,
 		Session: &core.RunSessionHandle{
 			Provider:       isloProvider,
@@ -213,6 +194,30 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", isloProvider, leaseID),
 		},
 	}
+	finishResult := func() RunResult {
+		result.Total = b.now().Sub(started)
+		result.Session.Kept = !shouldStop
+		return result
+	}
+	fmt.Fprintf(b.rt.Stderr, "provider=islo lease=%s sandbox=%s\n", leaseID, name)
+	syncDuration := time.Duration(0)
+	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
+	if !req.NoSync {
+		var err error
+		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, name, req)
+		if err != nil {
+			return finishResult(), err
+		}
+		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
+	} else if err := b.prepareWorkspace(ctx, client, name, workspace); err != nil {
+		return finishResult(), err
+	}
+	commandStart := b.now()
+	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, req.Env)
+	commandDuration := b.now().Sub(commandStart)
+	result.ExitCode = exitCode
+	result.Command = commandDuration
+	result.Total = b.now().Sub(started)
 	if req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "islo run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
 	} else {
@@ -440,8 +445,11 @@ func resolveIsloClaim(id string) (core.LeaseClaim, bool, error) {
 		return core.LeaseClaim{}, false, nil
 	}
 	claim, ok, err = resolveLeaseClaim(isloLeasePrefix + id)
-	if err != nil || (ok && claim.Provider == isloProvider) {
+	if err != nil {
 		return claim, ok, err
+	}
+	if ok && claim.Provider == isloProvider && claim.LeaseID == isloLeasePrefix+id {
+		return claim, true, nil
 	}
 	return core.LeaseClaim{}, false, nil
 }

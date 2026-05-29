@@ -143,6 +143,22 @@ func TestResolveIsloLeaseIDPreservesClaimSlug(t *testing.T) {
 	}
 }
 
+func TestResolveIsloLeaseIDIgnoresSyntheticSlugCollision(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	if err := claimLeaseForRepoProvider("isb_crabbox-other-abcdef", "isb-crabbox-repo-abcdef", isloProvider, root, time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	leaseID, name, slug, err := resolveIsloLeaseID("crabbox-repo-abcdef", root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaseID != "isb_crabbox-repo-abcdef" || name != "crabbox-repo-abcdef" || slug == "isb-crabbox-repo-abcdef" {
+		t.Fatalf("lease=%q name=%q slug=%q", leaseID, name, slug)
+	}
+}
+
 func TestIsloWorkspacePathDefaultsUnderWorkspace(t *testing.T) {
 	if got, err := isloWorkspacePath(Config{}); err != nil || got != "/workspace/crabbox" {
 		t.Fatalf("workspace=%q err=%v", got, err)
@@ -212,6 +228,36 @@ func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	}
 	if got.CleanupCommand != "crabbox stop --provider islo isb_crabbox-repo-abcdef" {
 		t.Fatalf("cleanup command=%q", got.CleanupCommand)
+	}
+}
+
+func TestIsloRunReturnsSessionHandleWhenPrepareFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{
+		createName: "crabbox-repo-abcdef",
+		execErr:    errors.New("prepare failed"),
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+		Keep:    true,
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err == nil {
+		t.Fatal("expected prepare error")
+	}
+	if result.Session == nil {
+		t.Fatal("missing session handle")
+	}
+	if result.Session.LeaseID != "isb_crabbox-repo-abcdef" || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
 	}
 }
 
@@ -527,6 +573,7 @@ type fakeIsloSyncClient struct {
 	uploadPath        string
 	uploaded          bytes.Buffer
 	uploadErr         error
+	execErr           error
 	closeUploadReader bool
 	createRequest     *gosdk.SandboxCreate
 	createName        string
@@ -570,6 +617,9 @@ func (f *fakeIsloSyncClient) UploadArchive(_ context.Context, _ string, targetPa
 func (f *fakeIsloSyncClient) ExecStream(_ context.Context, _ string, req *gosdk.ExecRequest, _, _ io.Writer) (int, error) {
 	f.execRequests = append(f.execRequests, req)
 	f.prepareCommands = append(f.prepareCommands, strings.Join(req.GetCommand(), " "))
+	if f.execErr != nil {
+		return 1, f.execErr
+	}
 	return 0, nil
 }
 
