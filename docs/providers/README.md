@@ -61,6 +61,7 @@ Each page below maps to an adapter under `internal/providers/<dir>`. The
 | [Namespace Devbox](namespace-devbox.md) | `namespace-devbox` | `namespace`, `namespace-devboxes` | Linux | no (direct) |
 | [Semaphore](semaphore.md) | `semaphore` | `sem` | Linux | no (direct) |
 | [Sprites](sprites.md) | `sprites` | — | Linux | no (direct) |
+| [Tenki](tenki.md) | `tenki` | — | Linux | no (direct) |
 | [Daytona](daytona.md) | `daytona` | — | Linux | no (direct) |
 | [RunPod](runpod.md) | `runpod` | `run-pod`, `runpodio` | Linux | no (direct) |
 | [ASCII Box](ascii-box.md) | `ascii-box` | `ascii`, `asciibox` | Linux | no (direct) |

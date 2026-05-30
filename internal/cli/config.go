@@ -110,6 +110,7 @@ type Config struct {
 	Wandb                       WandbConfig
 	Islo                        IsloConfig
 	isloImageExplicit           bool
+	Tenki                       TenkiConfig
 	Tensorlake                  TensorlakeConfig
 	Modal                       ModalConfig
 	UpstashBox                  UpstashBoxConfig
@@ -284,6 +285,20 @@ type IsloConfig struct {
 	VCPUs          int
 	MemoryMB       int
 	DiskGB         int
+}
+
+type TenkiConfig struct {
+	CLIPath   string
+	Endpoint  string
+	Gateway   string
+	Workspace string
+	Project   string
+	Image     string
+	Snapshot  string
+	WorkRoot  string
+	CPUs      int
+	MemoryMB  int
+	DiskGB    int
 }
 
 type TensorlakeConfig struct {
@@ -785,6 +800,10 @@ func baseConfig() Config {
 			MemoryMB: 4096,
 			DiskGB:   20,
 		},
+		Tenki: TenkiConfig{
+			CLIPath:  "tenki",
+			WorkRoot: "/home/tenki/crabbox",
+		},
 		Tensorlake: TensorlakeConfig{
 			APIURL:   "https://api.tensorlake.ai",
 			CLIPath:  "tensorlake",
@@ -889,6 +908,7 @@ type fileConfig struct {
 	Runpod               *fileRunpodConfig                  `yaml:"runpod,omitempty"`
 	Wandb                *fileWandbConfig                   `yaml:"wandb,omitempty"`
 	Islo                 *fileIsloConfig                    `yaml:"islo,omitempty"`
+	Tenki                *fileTenkiConfig                   `yaml:"tenki,omitempty"`
 	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
 	UpstashBox           *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
@@ -1175,6 +1195,20 @@ type fileIsloConfig struct {
 	VCPUs          int    `yaml:"vcpus,omitempty"`
 	MemoryMB       int    `yaml:"memoryMB,omitempty"`
 	DiskGB         int    `yaml:"diskGB,omitempty"`
+}
+
+type fileTenkiConfig struct {
+	CLIPath   string `yaml:"cliPath,omitempty"`
+	Endpoint  string `yaml:"endpoint,omitempty"`
+	Gateway   string `yaml:"gateway,omitempty"`
+	Workspace string `yaml:"workspace,omitempty"`
+	Project   string `yaml:"project,omitempty"`
+	Image     string `yaml:"image,omitempty"`
+	Snapshot  string `yaml:"snapshot,omitempty"`
+	WorkRoot  string `yaml:"workRoot,omitempty"`
+	CPUs      int    `yaml:"cpus,omitempty"`
+	MemoryMB  int    `yaml:"memoryMB,omitempty"`
+	DiskGB    int    `yaml:"diskGB,omitempty"`
 }
 
 type fileTensorlakeConfig struct {
@@ -2157,6 +2191,41 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Islo.DiskGB = file.Islo.DiskGB
 		}
 	}
+	if file.Tenki != nil {
+		if file.Tenki.CLIPath != "" {
+			cfg.Tenki.CLIPath = file.Tenki.CLIPath
+		}
+		if file.Tenki.Endpoint != "" {
+			cfg.Tenki.Endpoint = file.Tenki.Endpoint
+		}
+		if file.Tenki.Gateway != "" {
+			cfg.Tenki.Gateway = file.Tenki.Gateway
+		}
+		if file.Tenki.Workspace != "" {
+			cfg.Tenki.Workspace = file.Tenki.Workspace
+		}
+		if file.Tenki.Project != "" {
+			cfg.Tenki.Project = file.Tenki.Project
+		}
+		if file.Tenki.Image != "" {
+			cfg.Tenki.Image = file.Tenki.Image
+		}
+		if file.Tenki.Snapshot != "" {
+			cfg.Tenki.Snapshot = file.Tenki.Snapshot
+		}
+		if file.Tenki.WorkRoot != "" {
+			cfg.Tenki.WorkRoot = file.Tenki.WorkRoot
+		}
+		if file.Tenki.CPUs > 0 {
+			cfg.Tenki.CPUs = file.Tenki.CPUs
+		}
+		if file.Tenki.MemoryMB > 0 {
+			cfg.Tenki.MemoryMB = file.Tenki.MemoryMB
+		}
+		if file.Tenki.DiskGB > 0 {
+			cfg.Tenki.DiskGB = file.Tenki.DiskGB
+		}
+	}
 	if file.Tensorlake != nil {
 		if file.Tensorlake.APIURL != "" {
 			cfg.Tensorlake.APIURL = file.Tensorlake.APIURL
@@ -2916,6 +2985,17 @@ func applyEnv(cfg *Config) {
 	cfg.Islo.VCPUs = getenvInt("CRABBOX_ISLO_VCPUS", cfg.Islo.VCPUs)
 	cfg.Islo.MemoryMB = getenvInt("CRABBOX_ISLO_MEMORY_MB", cfg.Islo.MemoryMB)
 	cfg.Islo.DiskGB = getenvInt("CRABBOX_ISLO_DISK_GB", cfg.Islo.DiskGB)
+	cfg.Tenki.CLIPath = getenv("CRABBOX_TENKI_CLI", getenv("TENKI_CLI", cfg.Tenki.CLIPath))
+	cfg.Tenki.Endpoint = getenv("CRABBOX_TENKI_ENDPOINT", getenv("TENKI_ENDPOINT", cfg.Tenki.Endpoint))
+	cfg.Tenki.Gateway = getenv("CRABBOX_TENKI_GATEWAY", getenv("TENKI_GATEWAY", cfg.Tenki.Gateway))
+	cfg.Tenki.Workspace = getenv("CRABBOX_TENKI_WORKSPACE", cfg.Tenki.Workspace)
+	cfg.Tenki.Project = getenv("CRABBOX_TENKI_PROJECT", cfg.Tenki.Project)
+	cfg.Tenki.Image = getenv("CRABBOX_TENKI_IMAGE", cfg.Tenki.Image)
+	cfg.Tenki.Snapshot = getenv("CRABBOX_TENKI_SNAPSHOT", cfg.Tenki.Snapshot)
+	cfg.Tenki.WorkRoot = getenv("CRABBOX_TENKI_WORK_ROOT", cfg.Tenki.WorkRoot)
+	cfg.Tenki.CPUs = getenvInt("CRABBOX_TENKI_CPUS", cfg.Tenki.CPUs)
+	cfg.Tenki.MemoryMB = getenvInt("CRABBOX_TENKI_MEMORY_MB", cfg.Tenki.MemoryMB)
+	cfg.Tenki.DiskGB = getenvInt("CRABBOX_TENKI_DISK_GB", cfg.Tenki.DiskGB)
 	cfg.Tensorlake.APIKey = getenv("CRABBOX_TENSORLAKE_API_KEY", getenv("TENSORLAKE_API_KEY", cfg.Tensorlake.APIKey))
 	cfg.Tensorlake.APIURL = getenv("CRABBOX_TENSORLAKE_API_URL", getenv("TENSORLAKE_API_URL", cfg.Tensorlake.APIURL))
 	cfg.Tensorlake.CLIPath = getenv("CRABBOX_TENSORLAKE_CLI", cfg.Tensorlake.CLIPath)

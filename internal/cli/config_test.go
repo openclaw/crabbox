@@ -86,6 +86,20 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ISLO_VCPUS",
 		"CRABBOX_ISLO_MEMORY_MB",
 		"CRABBOX_ISLO_DISK_GB",
+		"CRABBOX_TENKI_CLI",
+		"TENKI_CLI",
+		"CRABBOX_TENKI_ENDPOINT",
+		"TENKI_ENDPOINT",
+		"CRABBOX_TENKI_GATEWAY",
+		"TENKI_GATEWAY",
+		"CRABBOX_TENKI_WORKSPACE",
+		"CRABBOX_TENKI_PROJECT",
+		"CRABBOX_TENKI_IMAGE",
+		"CRABBOX_TENKI_SNAPSHOT",
+		"CRABBOX_TENKI_WORK_ROOT",
+		"CRABBOX_TENKI_CPUS",
+		"CRABBOX_TENKI_MEMORY_MB",
+		"CRABBOX_TENKI_DISK_GB",
 		"CRABBOX_TENSORLAKE_API_KEY",
 		"TENSORLAKE_API_KEY",
 		"CRABBOX_TENSORLAKE_API_URL",
@@ -513,6 +527,17 @@ islo:
   vcpus: 4
   memoryMB: 8192
   diskGB: 40
+tenki:
+  cliPath: /usr/local/bin/tenki
+  endpoint: https://api.tenki.example.test
+  gateway: wss://gateway.tenki.example.test
+  workspace: ws_file
+  project: proj_file
+  image: ubuntu:tenki
+  workRoot: /home/tenki/test
+  cpus: 4
+  memoryMB: 8192
+  diskGB: 40
 tensorlake:
   apiUrl: https://api.tensorlake.example.test
   cliPath: /usr/local/bin/tl
@@ -672,6 +697,9 @@ ssh:
 	}
 	if cfg.Islo.BaseURL != "https://islo.example.test" || cfg.Islo.Image != "docker.io/library/ubuntu:24.04" || cfg.Islo.Workdir != "crabbox" || cfg.Islo.GatewayProfile != "default" || cfg.Islo.SnapshotName != "snap-ready" || cfg.Islo.VCPUs != 4 || cfg.Islo.MemoryMB != 8192 || cfg.Islo.DiskGB != 40 {
 		t.Fatalf("islo config not loaded: %#v", cfg.Islo)
+	}
+	if cfg.Tenki.CLIPath != "/usr/local/bin/tenki" || cfg.Tenki.Endpoint != "https://api.tenki.example.test" || cfg.Tenki.Gateway != "wss://gateway.tenki.example.test" || cfg.Tenki.Workspace != "ws_file" || cfg.Tenki.Project != "proj_file" || cfg.Tenki.Image != "ubuntu:tenki" || cfg.Tenki.WorkRoot != "/home/tenki/test" || cfg.Tenki.CPUs != 4 || cfg.Tenki.MemoryMB != 8192 || cfg.Tenki.DiskGB != 40 {
+		t.Fatalf("tenki config not loaded: %#v", cfg.Tenki)
 	}
 	if cfg.Tensorlake.APIURL != "https://api.tensorlake.example.test" || cfg.Tensorlake.CLIPath != "/usr/local/bin/tl" || cfg.Tensorlake.Image != "ubuntu-22.04" || cfg.Tensorlake.Snapshot != "snap-tl" || cfg.Tensorlake.OrganizationID != "org-tl" || cfg.Tensorlake.ProjectID != "proj-tl" || cfg.Tensorlake.Namespace != "ns-tl" || cfg.Tensorlake.Workdir != "/workspace/crabbox-test" || cfg.Tensorlake.CPUs != 4 || cfg.Tensorlake.MemoryMB != 8192 || cfg.Tensorlake.DiskMB != 30000 || cfg.Tensorlake.TimeoutSecs != 1800 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("tensorlake config not loaded: %#v", cfg.Tensorlake)
@@ -928,6 +956,19 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_ISLO_VCPUS", "8")
 	t.Setenv("CRABBOX_ISLO_MEMORY_MB", "16384")
 	t.Setenv("CRABBOX_ISLO_DISK_GB", "80")
+	t.Setenv("TENKI_CLI", "/usr/bin/tenki-file")
+	t.Setenv("CRABBOX_TENKI_CLI", "/opt/tenki/bin/tenki")
+	t.Setenv("TENKI_ENDPOINT", "https://api.tenki-file.example")
+	t.Setenv("CRABBOX_TENKI_ENDPOINT", "https://api.tenki-env.example")
+	t.Setenv("TENKI_GATEWAY", "wss://gateway.tenki-file.example")
+	t.Setenv("CRABBOX_TENKI_GATEWAY", "wss://gateway.tenki-env.example")
+	t.Setenv("CRABBOX_TENKI_WORKSPACE", "ws_env")
+	t.Setenv("CRABBOX_TENKI_PROJECT", "proj_env")
+	t.Setenv("CRABBOX_TENKI_IMAGE", "ubuntu:tenki-env")
+	t.Setenv("CRABBOX_TENKI_WORK_ROOT", "/home/tenki/env")
+	t.Setenv("CRABBOX_TENKI_CPUS", "8")
+	t.Setenv("CRABBOX_TENKI_MEMORY_MB", "16384")
+	t.Setenv("CRABBOX_TENKI_DISK_GB", "80")
 	t.Setenv("TENSORLAKE_API_KEY", "tl-api-file")
 	t.Setenv("CRABBOX_TENSORLAKE_API_KEY", "tl-api-env")
 	t.Setenv("TENSORLAKE_API_URL", "https://api.tl-file.example")
@@ -1090,6 +1131,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Islo.APIKey != "islo-api-env" || cfg.Islo.BaseURL != "https://islo-env.example" || cfg.Islo.Image != "ubuntu:env" || cfg.Islo.Workdir != "env-workdir" || cfg.Islo.GatewayProfile != "env-gateway" || cfg.Islo.SnapshotName != "env-snapshot" || cfg.Islo.VCPUs != 8 || cfg.Islo.MemoryMB != 16384 || cfg.Islo.DiskGB != 80 {
 		t.Fatalf("unexpected islo env: %#v", cfg.Islo)
+	}
+	if cfg.Tenki.CLIPath != "/opt/tenki/bin/tenki" || cfg.Tenki.Endpoint != "https://api.tenki-env.example" || cfg.Tenki.Gateway != "wss://gateway.tenki-env.example" || cfg.Tenki.Workspace != "ws_env" || cfg.Tenki.Project != "proj_env" || cfg.Tenki.Image != "ubuntu:tenki-env" || cfg.Tenki.WorkRoot != "/home/tenki/env" || cfg.Tenki.CPUs != 8 || cfg.Tenki.MemoryMB != 16384 || cfg.Tenki.DiskGB != 80 {
+		t.Fatalf("unexpected tenki env: %#v", cfg.Tenki)
 	}
 	if cfg.Tensorlake.APIKey != "tl-api-env" || cfg.Tensorlake.APIURL != "https://api.tl-env.example" || cfg.Tensorlake.CLIPath != "/opt/tl/bin/tensorlake" || cfg.Tensorlake.Image != "ubuntu:tl-env" || cfg.Tensorlake.Snapshot != "snap-tl-env" || cfg.Tensorlake.OrganizationID != "org-tl-env" || cfg.Tensorlake.ProjectID != "proj-tl-env" || cfg.Tensorlake.Namespace != "ns-tl-env" || cfg.Tensorlake.Workdir != "/workspace/tl-env" || cfg.Tensorlake.CPUs != 2.5 || cfg.Tensorlake.MemoryMB != 4096 || cfg.Tensorlake.DiskMB != 20480 || cfg.Tensorlake.TimeoutSecs != 900 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("unexpected tensorlake env: %#v", cfg.Tensorlake)

@@ -112,6 +112,7 @@ wandb                   Weights & Biases run sandboxes
 - [RunPod](../providers/runpod.md): RunPod GPU pods over public SSH.
 - [Semaphore](../providers/semaphore.md): Semaphore CI job leases.
 - [Sprites](../providers/sprites.md): Sprites microVM SSH leases through `sprite proxy`.
+- [Tenki](../providers/tenki.md): Tenki sandbox VM SSH leases through `tenki sandbox ssh-proxy`.
 - [Cloudflare](../providers/cloudflare.md): delegated Cloudflare Containers execution.
 - [Islo](../providers/islo.md): delegated Islo sandbox execution.
 - [E2B](../providers/e2b.md): delegated E2B sandbox execution.
