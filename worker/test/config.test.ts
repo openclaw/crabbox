@@ -381,6 +381,16 @@ describe("lease config", () => {
       sshPublicKey: "ssh-ed25519 test",
     });
     expect(windows.serverType).toBe("Standard_D8ads_v6");
+    const snapshot = leaseConfig({
+      provider: "azure",
+      target: "windows",
+      class: "standard",
+      azureSnapshot:
+        "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/snapshots/checkpoint-azure",
+      azureOSDisk: "ephemeral-preview",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(snapshot.serverType).toBe("Standard_D2ads_v6");
   });
 
   it("uses AWS ARM defaults when requested", () => {

@@ -157,9 +157,18 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
   }
   const machineClass = input.class ?? "beast";
   const azureOSDisk = normalizeAzureOSDiskMode(input.azureOSDisk ?? defaults.azureOSDisk);
+  const azureSnapshot = input.azureSnapshot ?? "";
+  const serverTypeAzureOSDisk = azureSnapshot ? "managed" : azureOSDisk;
   const serverType =
     input.serverType ??
-    serverTypeForConfig(provider, target, windowsMode, machineClass, architecture, azureOSDisk);
+    serverTypeForConfig(
+      provider,
+      target,
+      windowsMode,
+      machineClass,
+      architecture,
+      serverTypeAzureOSDisk,
+    );
   if (input.serverType) {
     validateArchitectureServerType(
       provider,
@@ -222,7 +231,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
           ? (linuxOSImage?.azureArm64Image ?? "")
           : (linuxOSImage?.azureImage ?? "")
         : ""),
-    azureSnapshot: input.azureSnapshot ?? "",
+    azureSnapshot,
     azureOSDisk,
     gcpProject: input.gcpProject ?? "",
     gcpZone: input.gcpZone ?? "",

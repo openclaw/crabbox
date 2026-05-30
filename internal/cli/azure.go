@@ -199,6 +199,9 @@ func azureVMSizeCandidatesForClass(class string) []string {
 func azureVMSizeCandidatesForConfig(cfg Config) []string {
 	candidates := azureVMSizeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, effectiveArchitectureForConfig(cfg), cfg.Class)
 	mode, err := NormalizeAzureOSDiskMode(cfg.AzureOSDisk)
+	if cfg.AzureSnapshot != "" {
+		mode = AzureOSDiskManaged
+	}
 	if err != nil || !azureOSDiskUsesFullCaching(mode) {
 		return candidates
 	}
