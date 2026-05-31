@@ -372,13 +372,16 @@ func harnessPlanHash(cfg HarnessConfig, repo Repo, harnessPath string) (string, 
 	if planFile == "" {
 		return "", nil
 	}
-	path := planFile
-	if !filepath.IsAbs(path) {
-		base := filepath.Dir(harnessPath)
-		if base == "." && repo.Root != "" {
-			base = repo.Root
-		}
-		path = filepath.Join(base, path)
+	if !safeHarnessRepoRelativePath(planFile) {
+		return "", exit(2, "harness plan_file must be repo-relative without absolute or parent segments: %s", planFile)
+	}
+	base := filepath.Dir(harnessPath)
+	if base == "." && repo.Root != "" {
+		base = repo.Root
+	}
+	path := filepath.Join(base, planFile)
+	if repo.Root != "" && !pathWithinDirectory(repo.Root, path) {
+		return "", exit(2, "harness plan_file must stay within the repository: %s", planFile)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -386,6 +389,39 @@ func harnessPlanHash(cfg HarnessConfig, repo Repo, harnessPath string) (string, 
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func safeHarnessRepoRelativePath(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || filepath.IsAbs(value) || strings.HasPrefix(value, "~") || strings.HasPrefix(value, `\`) || windowsDriveAbsolutePath(value) {
+		return false
+	}
+	for _, segment := range strings.FieldsFunc(value, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func windowsDriveAbsolutePath(value string) bool {
+	return len(value) >= 3 && ((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z')) && value[1] == ':' && (value[2] == '\\' || value[2] == '/')
+}
+
+func pathWithinDirectory(root, path string) bool {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func buildHarnessGrounding(repo Repo, doc *harnessDocument, index string, command []string, job, label string, noSync, syncOnly, checksum bool) harnessGrounding {

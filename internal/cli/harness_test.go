@@ -56,6 +56,39 @@ Run the regression suite.
 	}
 }
 
+func TestLoadHarnessDocumentRejectsUnsafePlanFile(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "secret.md")
+	if err := os.WriteFile(secret, []byte("secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		planFile string
+	}{
+		{name: "absolute", planFile: secret},
+		{name: "parent relative", planFile: "../secret.md"},
+		{name: "home relative", planFile: "~/secret.md"},
+		{name: "windows absolute", planFile: `C:\Users\secret.md`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			harnessDir := filepath.Join(dir, tc.name)
+			if err := os.MkdirAll(harnessDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(harnessDir, "HARNESS.md")
+			content := "---\nplan_file: '" + strings.ReplaceAll(tc.planFile, "'", "''") + "'\n---\nbody\n"
+			if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := loadHarnessDocument(HarnessConfig{Path: path}, Repo{Root: dir})
+			if err == nil || !strings.Contains(err.Error(), "harness plan_file must be repo-relative") {
+				t.Fatalf("expected unsafe plan_file error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestHarnessValidateRejectsUnknownFrontmatter(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "HARNESS.md")
