@@ -94,6 +94,33 @@ CRABBOX_TENKI_DISK_GB
 
 `tenki.image` and `tenki.snapshot` are mutually exclusive.
 
+## Sizing
+
+Set sandbox size per run with Tenki-specific flags:
+
+```sh
+crabbox run \
+  --provider tenki \
+  --tenki-cpus 4 \
+  --tenki-memory-mb 8192 \
+  --tenki-disk-gb 40 \
+  -- pnpm test
+```
+
+For reusable leases, pass the same flags to `warmup`:
+
+```sh
+crabbox warmup \
+  --provider tenki \
+  --slug big-tenki-box \
+  --tenki-cpus 8 \
+  --tenki-memory-mb 16384 \
+  --tenki-disk-gb 80
+```
+
+These map to Tenki create flags as `--cpu`, `--memory-mb`, and
+`--disk-size-gb`.
+
 ## Lifecycle
 
 1. Run `tenki sandbox create` with Crabbox metadata and tags.
