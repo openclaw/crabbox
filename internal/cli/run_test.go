@@ -702,6 +702,7 @@ func TestRunCommandTimingJSONSurfacesCleanupFailure(t *testing.T) {
 func TestRunCommandHarnessComplianceFailureUpdatesTimingExit(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
+	t.Chdir(dir)
 	sshPath := filepath.Join(dir, "ssh")
 	logPath := filepath.Join(dir, "ssh.log")
 	script := `#!/bin/sh
@@ -745,6 +746,44 @@ exit 0
 	}
 	if report.ExitCode != 8 {
 		t.Fatalf("timing exitCode=%d, want 8; report=%#v", report.ExitCode, report)
+	}
+	if report.Harness == nil || report.Harness.Status != "failed" {
+		t.Fatalf("harness metadata=%#v, want failed", report.Harness)
+	}
+	if report.BlockedStage != "harness-compliance" {
+		t.Fatalf("blockedStage=%q, want harness-compliance", report.BlockedStage)
+	}
+}
+
+func TestDelegatedRunHarnessComplianceFailureUpdatesTimingExit(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	harnessPath := filepath.Join(dir, "HARNESS.md")
+	if err := os.WriteFile(harnessPath, []byte("---\ncompliance:\n  required_artifacts:\n    - screenshots\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "islo",
+		"--timing-json",
+		"--harness", harnessPath,
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 8 {
+		t.Fatalf("error=%v, want harness exit 8\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	last := lines[len(lines)-1]
+	var report TimingReport
+	if err := json.Unmarshal([]byte(last), &report); err != nil {
+		t.Fatalf("last stderr line is not timing JSON: %q\nfull stderr:\n%s", last, stderr.String())
+	}
+	if report.ExitCode != 8 || !report.SyncDelegated {
+		t.Fatalf("timing report=%#v, want delegated exit 8", report)
 	}
 	if report.Harness == nil || report.Harness.Status != "failed" {
 		t.Fatalf("harness metadata=%#v, want failed", report.Harness)

@@ -426,7 +426,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		Command:          command,
 		Label:            runLabelValue,
 		RequestedSlug:    requestedSlug,
-		TimingJSON:       *timingJSON,
+		TimingJSON:       *timingJSON && harnessDoc == nil,
 		ArtifactGlobs:    expansion.ArtifactGlobs,
 		EmitProof:        strings.TrimSpace(*emitProof),
 		ProofTemplate:    strings.TrimSpace(*proofTemplate),
@@ -473,8 +473,40 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			for _, artifact := range harnessArtifacts {
 				fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
 			}
-			if runErr == nil && meta != nil && meta.Status != "passed" {
+			harnessFailed := meta != nil && meta.Status != "passed"
+			if runErr == nil && harnessFailed {
 				runErr = exit(8, "harness compliance failed")
+			}
+			if *timingJSON {
+				effectiveCode := harnessExitCode
+				classification := FailureClassification{}
+				if harnessFailed {
+					effectiveCode = 8
+					classification = harnessComplianceFailureClassification()
+				} else if runErr != nil && effectiveCode == 0 {
+					effectiveCode = 1
+				}
+				report := timingReport{
+					Provider:      firstNonBlank(result.Provider, cfg.Provider),
+					LeaseID:       result.LeaseID,
+					Slug:          result.Slug,
+					SyncDelegated: true,
+					CommandMs:     result.Command.Milliseconds(),
+					TotalMs:       result.Total.Milliseconds(),
+					ExitCode:      effectiveCode,
+					ActionsRunURL: result.ActionsURL,
+					Label:         runLabelValue,
+					Artifacts:     append(append([]runArtifact{}, result.Artifacts...), harnessArtifacts...),
+					Harness:       meta,
+					BlockedStage:  classification.BlockedStage,
+					RetryLikely:   classification.RetryLikely,
+				}
+				if result.Session != nil {
+					report.RunID = result.Session.RunID
+				}
+				if err := writeTimingJSON(a.Stderr, report); err != nil && runErr == nil {
+					return err
+				}
 			}
 		}
 		return runErr
