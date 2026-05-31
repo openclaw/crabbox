@@ -62,7 +62,7 @@ function readConfig(api) {
     maxOutputBytes: readPositiveInteger(raw, "maxOutputBytes", DEFAULT_MAX_OUTPUT_BYTES),
     timeoutSeconds: readPositiveInteger(raw, "timeoutSeconds", DEFAULT_TIMEOUT_SECONDS),
     allowRun: readBoolean(raw, "allowRun", true),
-    allowHarness: readBoolean(raw, "allowHarness", true),
+    allowHarness: readBoolean(raw, "allowHarness", false),
     allowWarmup: readBoolean(raw, "allowWarmup", true),
     allowStop: readBoolean(raw, "allowStop", true),
   };
@@ -97,6 +97,30 @@ function readStringArray(source, key) {
     return item;
   });
   return next;
+}
+
+function readHarnessPath(source, key) {
+  const value = readString(source, key);
+  if (!value) {
+    throw new Error(`${key} must be a non-empty string`);
+  }
+  if (!safeRepoRelativePath(value)) {
+    throw new Error(`${key} must be a repo-relative path without absolute or parent segments`);
+  }
+  return value;
+}
+
+function safeRepoRelativePath(value) {
+  if (
+    value.startsWith("/") ||
+    value.startsWith("\\") ||
+    value.startsWith("~") ||
+    /^[A-Za-z]:[\\/]/.test(value)
+  ) {
+    return false;
+  }
+  const segments = value.split(/[\\/]+/);
+  return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
 function readEnv(source) {
@@ -320,7 +344,7 @@ function registerHarnessValidate(api, config) {
       }
       const args = ["harness", "validate"];
       maybePushBool(args, "--json", params?.json);
-      args.push(readString(params, "path"));
+      args.push(readHarnessPath(params, "path"));
       return execute(config, args, params, signal);
     },
   });
@@ -387,7 +411,7 @@ function registerJobRunWithHarness(api, config) {
       maybePushBool(args, "--no-hydrate", params?.noHydrate);
       maybePushBool(args, "--github-runner", params?.githubRunner);
       maybePush(args, "--stop", readString(params, "stop"));
-      maybePush(args, "--harness", readString(params, "harness"));
+      maybePush(args, "--harness", readHarnessPath(params, "harness"));
       maybePush(args, "--index", readString(params, "index"));
       maybePushBool(args, "--dry-run", params?.dryRun);
       args.push(readString(params, "job"));

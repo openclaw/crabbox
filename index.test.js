@@ -137,7 +137,7 @@ test("crabbox_run passes selected provider", async () => {
 
 test("crabbox_harness_validate executes bounded validate argv", async () => {
   const fake = createFakeCrabbox();
-  const tools = registerWithConfig({ binary: fake.file });
+  const tools = registerWithConfig({ binary: fake.file, allowHarness: true });
   const result = await getTool(tools, "crabbox_harness_validate").execute("call-1", {
     path: "HARNESS.md",
     json: true,
@@ -146,9 +146,20 @@ test("crabbox_harness_validate executes bounded validate argv", async () => {
   assert.deepEqual(JSON.parse(result.details.stdout).argv, ["harness", "validate", "--json", "HARNESS.md"]);
 });
 
+test("crabbox_harness_validate rejects paths outside the repo", async () => {
+  const fake = createFakeCrabbox();
+  const tools = registerWithConfig({ binary: fake.file, allowHarness: true });
+  await assert.rejects(
+    getTool(tools, "crabbox_harness_validate").execute("call-1", {
+      path: "/tmp/HARNESS.md",
+    }),
+    /repo-relative path/,
+  );
+});
+
 test("crabbox_job_run_with_harness executes bounded job argv", async () => {
   const fake = createFakeCrabbox();
-  const tools = registerWithConfig({ binary: fake.file });
+  const tools = registerWithConfig({ binary: fake.file, allowHarness: true });
   const result = await getTool(tools, "crabbox_job_run_with_harness").execute("call-1", {
     job: "full-ci",
     harness: "HARNESS.md",
@@ -169,6 +180,18 @@ test("crabbox_job_run_with_harness executes bounded job argv", async () => {
     "light",
     "full-ci",
   ]);
+});
+
+test("crabbox_job_run_with_harness rejects parent-relative harness paths", async () => {
+  const fake = createFakeCrabbox();
+  const tools = registerWithConfig({ binary: fake.file, allowHarness: true });
+  await assert.rejects(
+    getTool(tools, "crabbox_job_run_with_harness").execute("call-1", {
+      job: "full-ci",
+      harness: "../HARNESS.md",
+    }),
+    /repo-relative path/,
+  );
 });
 
 test("crabbox_status includes optional flags", async () => {

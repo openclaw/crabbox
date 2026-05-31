@@ -35,7 +35,7 @@
       "allowHarness": {
         "type": "boolean",
         "description": "Allow harness validation and harness job run tools.",
-        "default": true
+        "default": false
       },
       "allowWarmup": {
         "type": "boolean",

@@ -103,7 +103,8 @@ Runs `crabbox run --id <id> [flags] -- <command...>`.
 ### `crabbox_harness_validate`
 
 Runs `crabbox harness validate [--json] <path>`. Parameters: `path` (required),
-`json`, `timeoutSeconds`.
+`json`, `timeoutSeconds`. `path` must be repo-relative and cannot be absolute or
+parent-relative.
 
 ### `crabbox_job_run_with_harness`
 
@@ -112,7 +113,7 @@ Runs `crabbox job run [flags] --harness <path> <job>`.
 | Parameter | Type | Maps to |
 |:----------|:-----|:--------|
 | `job` (required) | string | positional job name |
-| `harness` (required) | string | `--harness` |
+| `harness` (required) | repo-relative string | `--harness` |
 | `id` | string | `--id` |
 | `index` | enum | `--index none\|light` |
 | `noHydrate` | boolean | `--no-hydrate` |
@@ -156,10 +157,10 @@ Runs `crabbox stop [--provider <p>] <id>`. Parameters: `id` (required),
 
 ## Tool Gating
 
-`crabbox_run`, the harness tools, `crabbox_warmup`, and `crabbox_stop` can be
-disabled per install by setting `allowRun`, `allowHarness`, `allowWarmup`, or
-`allowStop` to `false` in plugin config. A disabled tool is still registered,
-but its `execute` throws
+`crabbox_run`, `crabbox_warmup`, and `crabbox_stop` can be disabled per install
+by setting `allowRun`, `allowWarmup`, or `allowStop` to `false` in plugin
+config. Harness tools are opt-in and require `allowHarness: true`. A disabled
+tool is still registered, but its `execute` throws
 (`"... is disabled by plugin config"`) before the binary is invoked.
 `crabbox_status` and `crabbox_list` are read-only and always allowed.
 
@@ -174,7 +175,7 @@ The plugin accepts seven optional config keys; the schema sets
 | `maxOutputBytes` | number | `60000` | Cap on captured stdout/stderr returned to the model per stream. |
 | `timeoutSeconds` | number | `1800` | Default wrapper timeout for a Crabbox CLI invocation. |
 | `allowRun` | boolean | `true` | Gate `crabbox_run`. |
-| `allowHarness` | boolean | `true` | Gate harness validation and harness job tools. |
+| `allowHarness` | boolean | `false` | Opt into harness validation and harness job tools. |
 | `allowWarmup` | boolean | `true` | Gate `crabbox_warmup`. |
 | `allowStop` | boolean | `true` | Gate `crabbox_stop`. |
 
