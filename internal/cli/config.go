@@ -2649,7 +2649,12 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 		job.Downloads = appendUniqueStrings(nil, file.Downloads...)
 	}
 	if file.Harness != nil {
-		job.Harness = applyFileHarnessConfig(job.Harness, *file.Harness)
+		if file.Harness.Path != "" {
+			job.Harness.Path = file.Harness.Path
+		}
+		if file.Harness.Index != "" {
+			job.Harness.Index = file.Harness.Index
+		}
 	}
 	if file.Stop != "" {
 		job.Stop = file.Stop

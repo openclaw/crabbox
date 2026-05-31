@@ -1053,7 +1053,7 @@ afterSync:
 			return recordFailure(err)
 		}
 	}
-	if harnessDoc != nil && harnessCfg.Index != harnessIndexNone {
+	if !*noSync && harnessDoc != nil && harnessCfg.Index != harnessIndexNone {
 		if err := writeHarnessRemoteEvidence(ctx, target, workdir, harnessDoc, harnessGround); err != nil {
 			return recordFailure(err)
 		}
@@ -1121,6 +1121,11 @@ afterSync:
 		}
 		if err := runSSHQuiet(ctx, target, mkdirCommand); err != nil {
 			return recordFailure(exit(7, "create remote workdir: %v", err))
+		}
+	}
+	if *noSync && harnessDoc != nil && harnessCfg.Index != harnessIndexNone {
+		if err := writeHarnessRemoteEvidence(ctx, target, workdir, harnessDoc, harnessGround); err != nil {
+			return recordFailure(err)
 		}
 	}
 	if err := preflightRawJSRuntime(target); err != nil {

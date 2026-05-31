@@ -126,7 +126,7 @@ Actions hydration:
 Command and sync:
 
 - `shell`, `command`, `noSync`, `syncOnly`, `checksum`, `forceSyncLarge`, `junit`, `downloads`.
-- `harness.path`, `harness.index`, `harness.template`, `harness.plan_file`, `harness.scope`, `harness.compliance`.
+- `harness.path`, `harness.index`.
 - `stop`: `auto`, `always`, `success`, `failure`, or `never`.
 
 ### Command execution

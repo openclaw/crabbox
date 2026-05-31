@@ -199,9 +199,6 @@ downloads:
 harness:
   path: HARNESS.md
   index: light
-  compliance:
-    require_plan: true
-    require_junit: true
 stop: auto
 ```
 
@@ -212,10 +209,12 @@ whitespace and executed directly. Each `downloads` entry is a
 
 ### Harness
 
-Jobs may define `harness:` defaults, and `crabbox job run --harness` can
-override the file for one invocation. The nested `run` receives `--harness` and
-`--index`, then writes harness, grounding, and compliance evidence under
-`.crabbox/runs/<run-or-lease>/`. See [Harnesses](harness.md).
+Jobs may define `harness.path` and `harness.index` defaults, and
+`crabbox job run --harness` can override the file for one invocation. Harness
+plan, scope, and compliance requirements live in the harness Markdown file. The
+nested `run` receives `--harness` and `--index`, then writes harness, grounding,
+and compliance evidence under `.crabbox/runs/<run-or-lease>/`. See
+[Harnesses](harness.md).
 
 ## Related
 
