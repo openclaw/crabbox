@@ -272,6 +272,59 @@ func TestProfileEnvConfigYAMLRejectsNonMapping(t *testing.T) {
 	}
 }
 
+func TestRepoConfigClearsInheritedCacheVolumes(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	userPath := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte("cache:\n  volumes:\n    - key: user-cache\n      path: /var/cache/crabbox/user\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".crabbox.yaml", []byte("cache:\n  volumes: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Cache.Volumes) != 0 {
+		t.Fatalf("repo config did not clear inherited cache volumes: %#v", cfg.Cache.Volumes)
+	}
+}
+
+func TestCacheVolumesOmittedKeepsInheritedConfig(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Cache.Volumes = []CacheVolumeConfig{{Key: "user-cache", Path: "/var/cache/crabbox/user"}}
+	pnpm := false
+	file := fileConfig{Cache: &fileCacheConfig{Pnpm: &pnpm}}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Cache.Volumes) != 1 || cfg.Cache.Volumes[0].Key != "user-cache" {
+		t.Fatalf("omitted cache volumes should keep inherited value: %#v", cfg.Cache.Volumes)
+	}
+}
+
 func TestApplyFileParallelsTemplateConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -576,6 +629,12 @@ cache:
   git: true
   maxGB: 120
   purgeOnRelease: true
+  volumes:
+    - name: pnpm-store
+      key: my-app-linux-amd64-node24-pnpm10-lock
+      path: /var/cache/crabbox/pnpm
+      sizeGB: 80
+      required: true
 ssh:
   key: ~/.ssh/crabbox
   fallbackPorts:
@@ -699,6 +758,9 @@ ssh:
 	}
 	if !cfg.Cache.Pnpm || cfg.Cache.Npm || !cfg.Cache.Docker || !cfg.Cache.Git || cfg.Cache.MaxGB != 120 || !cfg.Cache.PurgeOnRelease {
 		t.Fatalf("cache config not loaded: %#v", cfg.Cache)
+	}
+	if len(cfg.Cache.Volumes) != 1 || cfg.Cache.Volumes[0].Name != "pnpm-store" || cfg.Cache.Volumes[0].Key != "my-app-linux-amd64-node24-pnpm10-lock" || cfg.Cache.Volumes[0].Path != "/var/cache/crabbox/pnpm" || cfg.Cache.Volumes[0].SizeGB != 80 || !cfg.Cache.Volumes[0].Required {
+		t.Fatalf("cache volumes config not loaded: %#v", cfg.Cache.Volumes)
 	}
 }
 
@@ -1005,6 +1067,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_CACHE_DOCKER", "true")
 	t.Setenv("CRABBOX_CACHE_GIT", "false")
 	t.Setenv("CRABBOX_CACHE_PURGE_ON_RELEASE", "true")
+	t.Setenv("CRABBOX_CACHE_VOLUMES", "pnpm=env-pnpm:/var/cache/crabbox/pnpm,npm-cache:/var/cache/crabbox/npm")
 	t.Setenv("CRABBOX_SYNC_CHECKSUM", "true")
 	t.Setenv("CRABBOX_SYNC_DELETE", "false")
 	t.Setenv("CRABBOX_SYNC_GIT_SEED", "false")
@@ -1123,6 +1186,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Cache.Pnpm || cfg.Cache.Npm || !cfg.Cache.Docker || cfg.Cache.Git || !cfg.Cache.PurgeOnRelease {
 		t.Fatalf("unexpected cache env: %#v", cfg.Cache)
+	}
+	if len(cfg.Cache.Volumes) != 2 || cfg.Cache.Volumes[0].Name != "pnpm" || cfg.Cache.Volumes[0].Key != "env-pnpm" || cfg.Cache.Volumes[1].Key != "npm-cache" {
+		t.Fatalf("unexpected cache volume env: %#v", cfg.Cache.Volumes)
 	}
 	if !cfg.Sync.Checksum || cfg.Sync.Delete || cfg.Sync.GitSeed || cfg.Sync.Fingerprint || cfg.Sync.Timeout != 45*time.Minute || !cfg.Sync.AllowLarge {
 		t.Fatalf("unexpected sync env: %#v", cfg.Sync)

@@ -101,6 +101,10 @@ func RemoveLeaseClaim(leaseID string) {
 	removeLeaseClaim(leaseID)
 }
 
+func UpdateLeaseClaimCacheVolumes(leaseID string, specs []string) error {
+	return updateLeaseClaimCacheVolumes(leaseID, specs)
+}
+
 func ListLeaseClaims() ([]LeaseClaim, error) {
 	return listLeaseClaims()
 }

@@ -8,6 +8,7 @@ to clear.
 ```sh
 crabbox cache stats --id swift-crab
 crabbox cache stats --id swift-crab --json
+crabbox cache volumes
 crabbox cache warm  --id swift-crab -- pnpm install --frozen-lockfile
 crabbox cache purge --id swift-crab --kind pnpm --force
 ```
@@ -17,11 +18,12 @@ crabbox cache purge --id swift-crab --kind pnpm --force
 ```text
 cache stats   show usage for each enabled cache kind on the lease
 cache list    alias for cache stats
+cache volumes list configured provider-backed cache volumes
 cache warm    run a command in the synced workdir to populate caches
 cache purge   delete one or all cache kinds (requires --force)
 ```
 
-Every subcommand resolves `--id` to a box and connects over SSH. `--id`
+`stats`, `list`, `warm`, and `purge` resolve `--id` to a box and connect over SSH. `--id`
 accepts the canonical `cbx_...` lease ID or an active friendly slug
 (for example `swift-crab`). If you omit the flag, `stats` and `purge`
 fall back to the first positional argument.
@@ -48,6 +50,14 @@ Repo config toggles `cache.pnpm`, `cache.npm`, `cache.docker`, and
 from `stats`, are not removed by `purge --kind all`, and purging a
 disabled specific kind fails early with `cache kind "<kind>" is disabled
 by config`.
+
+`cache.volumes` define provider-backed persistent cache mounts. They are keyed
+speed hints, not checkpoints; the provider may attach them during lease warmup
+when it advertises `cache-volume` support. Use `--cache-volume [name=]key:path`
+on `warmup` or a fresh `run` to require a volume for that lease; reused
+`run --id` leases require local claim metadata proving the volume was attached
+during warmup. See [Cache volumes](../features/cache-volumes.md) for the full
+contract.
 
 `cache.maxGB` (default `80`) caps total cache size on the runner; the box
 trims the oldest entries automatically once caches exceed the cap, so
@@ -91,6 +101,19 @@ Use `warm` for one-off cache priming when you do not want to record a
 full run-history entry. The command exits with the remote command's exit
 code.
 
+## volumes
+
+```sh
+crabbox cache volumes
+crabbox cache volumes --json
+```
+
+Prints configured `cache.volumes` for the current repo. This command does not
+connect to a lease; it is a config view that helps confirm which provider cache
+volumes will be requested by future `warmup` or one-shot `run` commands. See
+[Cache volumes](../features/cache-volumes.md) for provider support and reuse
+rules.
+
 ## purge
 
 ```sh
@@ -117,7 +140,7 @@ command exits with `cache purge requires --force`. For `pnpm`, `npm`, and
 
 `stats`/`list` accept `--id`, `--reclaim`, and `--json`. `purge` accepts
 `--id`, `--kind`, `--force`, and `--reclaim`. `warm` accepts `--id` and
-`--reclaim`, followed by the command to run.
+`--reclaim`, followed by the command to run. `volumes` accepts only `--json`.
 
 ## When to use cache
 
@@ -130,6 +153,8 @@ always optional.
   that run many short commands.
 - Use `cache purge` when a corrupt cache is poisoning a build (rare;
   usually the underlying tool's own cache reset clears it first).
+- Use `cache.volumes` when the provider can persist rebuildable cache
+  directories beyond a single lease lifetime.
 
 Disposable leases lose cache state when the box is deleted; kept leases
 (see [warmup](warmup.md)) reuse cache state across repeated runs. For

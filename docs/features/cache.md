@@ -30,6 +30,14 @@ authoritative. A disposable lease loses all cache state when its VM is deleted;
 only a kept lease (see [`lifecycle-cleanup.md`](lifecycle-cleanup.md)) carries
 cache state forward.
 
+## Cache volumes
+
+Provider-backed cache volumes persist rebuildable cache state across fresh
+leases. They are configured under `cache.volumes`, requested with
+`--cache-volume [name=]key:path`, and inspected with `crabbox cache volumes`.
+See [Cache volumes](cache-volumes.md) for the full feature contract, provider
+support rules, and the boundary with images and checkpoints.
+
 ## Config
 
 Set the cache policy in any [config file](configuration.md) under `cache:`:
@@ -55,6 +63,7 @@ also has an environment override:
 | `git`            | `CRABBOX_CACHE_GIT`              |
 | `maxGB`          | `CRABBOX_CACHE_MAX_GB`           |
 | `purgeOnRelease` | `CRABBOX_CACHE_PURGE_ON_RELEASE` |
+| `volumes`        | `CRABBOX_CACHE_VOLUMES`          |
 
 The per-kind toggles drive `cache stats` and `cache purge`: a disabled kind is
 omitted from stats output and is skipped by `--kind all`. Asking to purge a
@@ -97,6 +106,18 @@ Flags: `--id`, `--reclaim`. The command after `--` runs in the synced repo
 directory (or the GitHub Actions workspace if the lease was hydrated via
 [Actions hydration](actions-hydration.md)), with profile-allowed environment
 applied.
+
+### `cache volumes`
+
+List configured cache volumes for the current repo:
+
+```sh
+crabbox cache volumes
+crabbox cache volumes --json
+```
+
+This is a configuration view. Provider-specific attach/mount state is reported
+by the provider run output or future provider diagnostics.
 
 ### `cache purge`
 

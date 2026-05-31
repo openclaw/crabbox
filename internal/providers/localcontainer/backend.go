@@ -2,6 +2,7 @@ package localcontainer
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -111,6 +112,12 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, err
 	}
 	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		if !req.Keep {
+			_ = b.removeContainer(context.Background(), containerID)
+		}
+		return core.LeaseTarget{}, err
+	}
+	if err := core.UpdateLeaseClaimCacheVolumes(leaseID, core.CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
 		if !req.Keep {
 			_ = b.removeContainer(context.Background(), containerID)
 		}
@@ -359,6 +366,10 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		labels["host_work_root"] = hostWorkRoot
 	}
 	labels["work_root"] = containerWorkRoot
+	cacheVolumeMounts, err := localContainerCacheVolumeMounts(cfg.Cache.Volumes)
+	if err != nil {
+		return "", err
+	}
 	args := []string{
 		"run", "-d",
 		"--name", name,
@@ -374,6 +385,9 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		"-e", "CRABBOX_DESKTOP_ENV=" + core.NormalizedDesktopEnv(cfg.DesktopEnv),
 		"-e", "CRABBOX_BROWSER=" + boolEnv(cfg.Browser),
 		"-e", "CRABBOX_DOCKER_SOCKET=" + boolEnv(cfg.LocalContainer.DockerSocket),
+	}
+	for i, volume := range cfg.Cache.Volumes {
+		args = append(args, "-e", fmt.Sprintf("CRABBOX_CACHE_VOLUME_PATH_%d=%s", i, strings.TrimSpace(volume.Path)))
 	}
 	for key, value := range labels {
 		args = append(args, "--label", key+"="+value)
@@ -405,6 +419,9 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		}
 		args = append(args, "-v", socketPath+":"+dockerSocketInGuest)
 	}
+	for _, mount := range cacheVolumeMounts {
+		args = append(args, "-v", mount)
+	}
 	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "-lc", bootstrapScript)
 	result, err := b.docker(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
@@ -415,6 +432,56 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		return "", core.Exit(2, "%s run did not return a container id", cfg.LocalContainer.Runtime)
 	}
 	return id, nil
+}
+
+func localContainerCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]string, error) {
+	mounts := make([]string, 0, len(volumes))
+	for _, volume := range volumes {
+		key := strings.TrimSpace(volume.Key)
+		path := strings.TrimSpace(volume.Path)
+		if key == "" {
+			return nil, core.Exit(2, "cache volume key is required")
+		}
+		if strings.Contains(key, ":") {
+			return nil, core.Exit(2, "cache volume key %q must not contain ':'", key)
+		}
+		if path == "" {
+			return nil, core.Exit(2, "cache volume path is required")
+		}
+		if !strings.HasPrefix(path, "/") {
+			return nil, core.Exit(2, "cache volume path %q must be absolute", path)
+		}
+		mounts = append(mounts, localContainerCacheVolumeName(key)+":"+path)
+	}
+	return mounts, nil
+}
+
+func localContainerCacheVolumeName(key string) string {
+	key = strings.TrimSpace(key)
+	sum := sha256.Sum256([]byte(key))
+	var safe strings.Builder
+	for _, r := range key {
+		switch {
+		case r >= 'a' && r <= 'z':
+			safe.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			safe.WriteRune(r + ('a' - 'A'))
+		case r >= '0' && r <= '9':
+			safe.WriteRune(r)
+		case r == '.' || r == '_' || r == '-':
+			safe.WriteRune(r)
+		default:
+			safe.WriteByte('-')
+		}
+		if safe.Len() >= 80 {
+			break
+		}
+	}
+	name := strings.Trim(safe.String(), ".-_")
+	if name == "" {
+		name = "volume"
+	}
+	return fmt.Sprintf("crabbox-cache-%s-%x", name, sum[:6])
 }
 
 func (b *backend) dockerSocketMountPath(ctx context.Context) (string, error) {
@@ -1066,7 +1133,7 @@ if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && [ -S /var/run/docker.sock ]; then
     fi
   fi
 fi
-mkdir -p /run/sshd "$work_root" "$home_dir/.ssh"
+mkdir -p /run/sshd "$work_root" "$home_dir/.ssh" /var/cache/crabbox/pnpm /var/cache/crabbox/npm
 printf '%s\n' "$CRABBOX_AUTHORIZED_KEY" > "$home_dir/.ssh/authorized_keys"
 chmod 700 "$home_dir/.ssh"
 chmod 600 "$home_dir/.ssh/authorized_keys"
@@ -1075,6 +1142,12 @@ if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ]; then
 else
   chown -R "$user" "$home_dir/.ssh" "$work_root"
 fi
+chown -R "$user" /var/cache/crabbox
+env | sed -n 's/^CRABBOX_CACHE_VOLUME_PATH_[0-9][0-9]*=//p' | while IFS= read -r cache_path; do
+  [ -n "$cache_path" ] || continue
+  mkdir -p "$cache_path"
+  chown -R "$user" "$cache_path"
+done
 if command -v sudo >/dev/null 2>&1; then
   printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$user" > /etc/sudoers.d/crabbox
   chmod 440 /etc/sudoers.d/crabbox

@@ -569,7 +569,7 @@ crabbox station status|logs|stop &lt;id-or-slug&gt;</code></pre>
             <li><code>config.go</code>: <code>HarnessConfig</code> and <code>JobConfig.Harness</code>.</li>
             <li><code>job.go</code> / <code>run.go</code>: <code>--harness</code>, <code>--index none|light</code>, grounding upload, compliance artifacts.</li>
             <li><code>timing.go</code>: harness metadata and artifact kinds.</li>
-            <li><code>index.js</code> + <code>openclaw.plugin.json</code>: two bounded plugin tools.</li>
+            <li>Agent/plugin tools can follow once the CLI contract is stable.</li>
           </ul>
         </div>
         <div class="card">
@@ -602,7 +602,7 @@ crabbox station status|logs|stop &lt;id-or-slug&gt;</code></pre>
         <div class="step"><h3>Job and run plumbing</h3><p><code>JobConfig.Harness</code>, <code>--harness</code>, <code>--index</code>, dry-run output, merge tests. No exit-code change yet.</p></div>
         <div class="step"><h3>Grounding artifacts</h3><p>Local grounding, upload to remote, copy into <code>.crabbox/runs/&lt;id&gt;/</code>, timing JSON metadata.</p></div>
         <div class="step"><h3>Compliance enforcement</h3><p>Markdown/JSON reports for success and failure; missing required evidence becomes a nonzero result.</p></div>
-        <div class="step"><h3>Agent tools and docs</h3><p><code>crabbox_harness_validate</code>, <code>crabbox_job_run_with_harness</code>, plugin tests, harness docs.</p></div>
+        <div class="step"><h3>Agent tools later</h3><p>Expose bounded agent/plugin tools only after the CLI harness contract is accepted.</p></div>
       </div>
     </section>
 

@@ -162,7 +162,7 @@ Commands:
   events      Print recorded run events
   attach      Follow recorded events for an active run
   results     Show recorded test result summaries
-  cache       Inspect, purge, or warm remote caches
+  cache       Inspect, purge, warm, or list remote cache volumes
   status      Show lease state; add --wait to block until ready
   list        List Crabbox machines
   share       Share a lease with users or the owning org
@@ -216,6 +216,7 @@ Common Flows:
   crabbox attach run_123
   crabbox results run_123
   crabbox cache stats --id blue-lobster
+  crabbox cache volumes
   crabbox usage --scope org
   crabbox admin leases --state active
   crabbox admin lease-audit --state expired --provider aws

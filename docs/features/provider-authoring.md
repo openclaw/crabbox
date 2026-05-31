@@ -454,7 +454,7 @@ Run at least:
 go test -count=1 ./internal/cli ./internal/providers/...
 go test -race ./...
 go vet ./...
-npm run docs:check
+scripts/check-docs.sh
 ```
 
 Add a live smoke only when the provider can be exercised cheaply with explicit
@@ -481,7 +481,7 @@ Also add the provider to:
 - the index in `docs/features/README.md` if you added a feature page;
 - the related-doc lists at the bottom of any pages you cross-link from.
 
-Run `npm run docs:check` before pushing — it builds the CLI, validates the
+Run `scripts/check-docs.sh` before pushing — it builds the CLI, validates the
 command/help surface, checks every internal link, and rebuilds the docs site.
 
 ## Step 11. Ship The PR

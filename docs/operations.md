@@ -23,7 +23,8 @@ Run these before a release or after changing secrets:
 go test ./...
 npm run check --prefix worker
 npm test --prefix worker
-npm run docs:check
+node --test scripts/*.test.js
+scripts/check-docs.sh
 bin/crabbox doctor
 bin/crabbox whoami
 bin/crabbox list --json
@@ -349,14 +350,15 @@ Cost is an estimate for compute leases, not an invoice. See [Cost and Usage](fea
 Before tagging a release:
 
 - Reorder `CHANGELOG.md` with the user-facing changes first, date the release section, and keep contributor thanks / co-author notes intact.
-- Update package metadata that carries the project version, including `package.json`, `worker/package.json`, and `worker/package-lock.json`.
+- Update package metadata that carries the project version, including `worker/package.json` and `worker/package-lock.json`.
 - `go vet ./...`
 - `go test -race ./...`
 - `scripts/test-go-modules.sh`
 - `go build -trimpath -o bin/crabbox ./cmd/crabbox`
 - `scripts/check-go-coverage.sh 90.0`
 - Worker gate: `npm run format:check --prefix worker && npm run lint --prefix worker && npm run check --prefix worker && npm test --prefix worker && npm run build --prefix worker`
-- `npm run docs:check`
+- `node --test scripts/*.test.js`
+- `scripts/check-docs.sh`
 - `git diff --check`
 - Live smoke at least one coordinator-backed `crabbox run`, then verify `crabbox attach`, `crabbox events`, `crabbox logs`, and lease cleanup.
 - Push, pull, and wait for CI green on the release commit.

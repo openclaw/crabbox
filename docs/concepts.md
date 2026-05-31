@@ -83,10 +83,10 @@ providers that hand Crabbox a real SSH target it provisions and connects to, and
 **Operator** - a person with broker-side access (admin token, Cloudflare
 config). Operators run `crabbox admin` commands and image bake/promote flows.
 
-**Agent** - an LLM-backed process invoking Crabbox through the CLI or the
-OpenClaw plugin. Agents are first-class users of Crabbox; the docs are written
-for both humans and agents. Crabbox gives an agent a governed workspace with
-sync, logs, artifacts, sharing, cleanup, and review evidence.
+**Agent** - an LLM-backed process invoking Crabbox through the CLI. Agents are
+first-class users of Crabbox; the docs are written for both humans and agents.
+Crabbox gives an agent a governed workspace with sync, logs, artifacts, sharing,
+cleanup, and review evidence.
 
 ## Modes
 
@@ -277,6 +277,11 @@ box's traffic through the operator's machine over a WebSocket. See
 **Checkpoint** - saved VM-or-workspace state you can restore or fork from, with
 IDs `chk_...`. Kinds include workspace archives, recipes, and provider-native
 snapshots/images. See [Checkpoints](features/checkpoints.md).
+
+**Cache volume** - provider-backed persistent mount point for speed-only state,
+keyed by repo/runtime/platform inputs and mounted at an absolute cache path.
+Unlike a checkpoint, it is not a forkable scenario handle and the worktree
+remains the source of truth. See [Cache Controls](features/cache.md).
 
 **Capsule** - a portable, replayable failure bundle captured from a GitHub
 Actions run (`crabbox capsule from-actions`) and re-run with `crabbox capsule

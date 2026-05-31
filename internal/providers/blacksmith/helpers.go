@@ -84,6 +84,9 @@ func blacksmithWarmupArgs(cfg Config, publicKey string) ([]string, error) {
 	if publicKey != "" {
 		args = append(args, "--ssh-public-key", publicKey)
 	}
+	for _, spec := range core.CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes) {
+		args = append(args, "--sticky-disk", spec)
+	}
 	args = append(args, "--idle-timeout", fmt.Sprint(durationMinutesCeil(blacksmithIdleTimeout(cfg))))
 	return args, nil
 }

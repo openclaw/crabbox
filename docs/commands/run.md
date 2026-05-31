@@ -406,6 +406,8 @@ lease-acting commands):
 --slug <slug>                Only when creating a fresh lease.
 --pond <name>
 --expose <port>              Repeatable; SSH-mesh-reachable TCP port.
+--cache-volume [name=]key:path
+                             Require a provider cache volume.
 --ttl <duration>             Default 90m.
 --idle-timeout <duration>    Default 30m.
 --desktop

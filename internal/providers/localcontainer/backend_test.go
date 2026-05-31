@@ -80,6 +80,9 @@ func TestProviderAliases(t *testing.T) {
 	if !spec.Features.Has(core.FeatureCleanup) {
 		t.Fatalf("local-container features=%v, want cleanup", spec.Features)
 	}
+	if !spec.Features.Has(core.FeatureCacheVolume) {
+		t.Fatalf("local-container features=%v, want cache-volume", spec.Features)
+	}
 }
 
 func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
@@ -157,6 +160,48 @@ func TestCreateContainerPassesDesktopEnv(t *testing.T) {
 		if !strings.Contains(args, want) {
 			t.Fatalf("docker run args missing %q:\n%s", want, args)
 		}
+	}
+}
+
+func TestCreateContainerMountsCacheVolumes(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.Cache.Volumes = []core.CacheVolumeConfig{
+		{Key: "my-app/linux node24 lock", Path: "/var/cache/crabbox/pnpm"},
+		{Key: "npm-cache", Path: "/var/cache/crabbox/npm"},
+	}
+	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
+
+	if _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true); err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "run")
+	for _, volume := range cfg.Cache.Volumes {
+		want := "-v\n" + localContainerCacheVolumeName(volume.Key) + ":" + volume.Path
+		if !strings.Contains(args, want) {
+			t.Fatalf("cache volume mount missing %q:\n%s", want, args)
+		}
+	}
+	for i, volume := range cfg.Cache.Volumes {
+		want := "-e\nCRABBOX_CACHE_VOLUME_PATH_" + strconv.Itoa(i) + "=" + volume.Path
+		if !strings.Contains(args, want) {
+			t.Fatalf("cache volume path env missing %q:\n%s", want, args)
+		}
+	}
+}
+
+func TestLocalContainerCacheVolumeNameIsStableAndDockerSafe(t *testing.T) {
+	got := localContainerCacheVolumeName("My App/linux node24 lock")
+	again := localContainerCacheVolumeName("My App/linux node24 lock")
+	if got != again {
+		t.Fatalf("cache volume name unstable: %q then %q", got, again)
+	}
+	if !strings.HasPrefix(got, "crabbox-cache-my-app-linux-node24-lock-") {
+		t.Fatalf("cache volume name=%q, want sanitized prefix", got)
+	}
+	if strings.ContainsAny(got, " /:") {
+		t.Fatalf("cache volume name contains unsafe characters: %q", got)
 	}
 }
 

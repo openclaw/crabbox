@@ -21,6 +21,7 @@ type leaseCreateFlagValues struct {
 	Slug          *string
 	Pond          *string
 	Expose        *stringListFlag
+	CacheVolumes  *stringListFlag
 	TTL           *time.Duration
 	Idle          *time.Duration
 	Desktop       *bool
@@ -34,7 +35,9 @@ type leaseCreateFlagValues struct {
 
 func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlagValues {
 	expose := stringListFlag{}
+	cacheVolumes := stringListFlag{}
 	fs.Var(&expose, "expose", "declare a TCP port this lease wants reachable over the SSH-mesh plane; repeatable")
+	fs.Var(&cacheVolumes, "cache-volume", "provider-backed cache volume [name=]key:path; repeatable")
 	return leaseCreateFlagValues{
 		Provider:      fs.String("provider", defaults.Provider, providerHelpAll()),
 		Profile:       fs.String("profile", defaults.Profile, "profile"),
@@ -46,6 +49,7 @@ func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlag
 		Slug:          fs.String("slug", "", "request a friendly slug for a new lease"),
 		Pond:          fs.String("pond", defaults.Pond, "tag this lease with a pond name so peers can be selected with --pond"),
 		Expose:        &expose,
+		CacheVolumes:  &cacheVolumes,
 		TTL:           fs.Duration("ttl", defaults.TTL, "maximum lease lifetime"),
 		Idle:          fs.Duration("idle-timeout", defaults.IdleTimeout, "idle timeout"),
 		Desktop:       fs.Bool("desktop", defaults.Desktop, "provision or require a visible desktop/VNC session"),
@@ -126,7 +130,23 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 	if err := applyProviderFlags(cfg, fs, values.ProviderFlags); err != nil {
 		return err
 	}
+	if flagWasSet(fs, "cache-volume") {
+		volumes, err := ParseCacheVolumeSpecs(*values.CacheVolumes)
+		if err != nil {
+			return err
+		}
+		for i := range volumes {
+			volumes[i].Required = true
+		}
+		cfg.Cache.Volumes = mergeCacheVolumes(cfg.Cache.Volumes, volumes)
+	}
+	if err := validateCacheVolumesForLeaseReuse(*cfg, existingLeaseID); err != nil {
+		return err
+	}
 	if err := applyProviderConfigDefaults(cfg); err != nil {
+		return err
+	}
+	if err := validateCacheVolumesForProvider(*cfg); err != nil {
 		return err
 	}
 	if err := validateProviderTarget(*cfg); err != nil {
@@ -156,6 +176,67 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 		}
 	}
 	return nil
+}
+
+func validateCacheVolumesForLeaseReuse(cfg Config, existingLeaseID string) error {
+	if existingLeaseID == "" {
+		return nil
+	}
+	required := CacheVolumeStickyDiskSpecs(requiredCacheVolumes(cfg.Cache.Volumes))
+	if len(required) == 0 {
+		return nil
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(existingLeaseID, canonicalClaimProvider(cfg.Provider))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return exit(2, "required cache volumes cannot be verified for existing lease %s; warm a new lease instead", existingLeaseID)
+	}
+	attached := map[string]struct{}{}
+	for _, spec := range claim.CacheVolumes {
+		attached[spec] = struct{}{}
+	}
+	for _, spec := range required {
+		if _, ok := attached[spec]; !ok {
+			return exit(2, "required cache volume %q is not recorded on existing lease %s; warm a new lease instead", spec, existingLeaseID)
+		}
+	}
+	return nil
+}
+
+func requiredCacheVolumes(volumes []CacheVolumeConfig) []CacheVolumeConfig {
+	required := []CacheVolumeConfig{}
+	for _, volume := range volumes {
+		if volume.Required {
+			required = append(required, volume)
+		}
+	}
+	return required
+}
+
+func mergeCacheVolumes(base, additions []CacheVolumeConfig) []CacheVolumeConfig {
+	merged := append([]CacheVolumeConfig(nil), base...)
+	for _, addition := range additions {
+		matched := false
+		for i := range merged {
+			if merged[i].Key == addition.Key && merged[i].Path == addition.Path {
+				if addition.Name != "" {
+					merged[i].Name = addition.Name
+				}
+				merged[i].Required = merged[i].Required || addition.Required
+				if addition.SizeGB > 0 {
+					merged[i].SizeGB = addition.SizeGB
+				}
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			merged = append(merged, addition)
+		}
+	}
+	return merged
 }
 
 const pondACLAutoBootstrapEnvVar = "CRABBOX_POND_ACL_BOOTSTRAP"

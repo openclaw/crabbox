@@ -171,13 +171,6 @@ Provider docs:
 - Worker package scripts and dependencies: `worker/package.json`
 - Worker deployment config: `worker/wrangler.jsonc`, `worker/wrangler.cloudflare.jsonc`
 
-## OpenClaw Plugin
-
-- Plugin metadata and config schema: `package.json`, `openclaw.plugin.json`
-- Tool registration and CLI wrapper behavior: `index.js`
-- Plugin tests: `index.test.js`
-- Plugin feature doc: `docs/features/openclaw-plugin.md`
-
 ## Cross-cutting Feature Docs
 
 - Configuration precedence and YAML schema: `docs/features/configuration.md` (code: `internal/cli/config.go`, `internal/cli/config_cmd.go`)

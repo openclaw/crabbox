@@ -520,6 +520,10 @@ func (b *blacksmithBackend) warmupLease(ctx context.Context, repo Repo, reclaim 
 		_ = b.Stop(ctx, StopRequest{ID: leaseID})
 		return "", "", err
 	}
+	if err := core.UpdateLeaseClaimCacheVolumes(leaseID, core.CacheVolumeStickyDiskSpecs(b.cfg.Cache.Volumes)); err != nil {
+		_ = b.Stop(ctx, StopRequest{ID: leaseID})
+		return "", "", err
+	}
 	cleanupKeyID = ""
 	return leaseID, slug, nil
 }

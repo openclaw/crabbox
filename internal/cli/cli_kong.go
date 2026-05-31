@@ -308,10 +308,11 @@ type artifactsPullKongCmd struct {
 }
 
 type cacheKongCmd struct {
-	List  cacheListKongCmd  `cmd:"" passthrough:"" help:"Show remote cache usage."`
-	Stats cacheStatsKongCmd `cmd:"" passthrough:"" help:"Show remote cache usage."`
-	Purge cachePurgeKongCmd `cmd:"" passthrough:"" help:"Remove selected cache content."`
-	Warm  cacheWarmKongCmd  `cmd:"" passthrough:"" help:"Run a command that populates caches."`
+	List    cacheListKongCmd    `cmd:"" passthrough:"" help:"Show remote cache usage."`
+	Stats   cacheStatsKongCmd   `cmd:"" passthrough:"" help:"Show remote cache usage."`
+	Purge   cachePurgeKongCmd   `cmd:"" passthrough:"" help:"Remove selected cache content."`
+	Warm    cacheWarmKongCmd    `cmd:"" passthrough:"" help:"Run a command that populates caches."`
+	Volumes cacheVolumesKongCmd `cmd:"" passthrough:"" help:"List configured provider cache volumes."`
 }
 type cacheListKongCmd struct {
 	Args []string `arg:"" optional:""`
@@ -323,6 +324,9 @@ type cachePurgeKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type cacheWarmKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type cacheVolumesKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 
@@ -614,6 +618,9 @@ func (c *cachePurgeKongCmd) Run(ctx context.Context, app App) error {
 	return app.cachePurge(ctx, c.Args)
 }
 func (c *cacheWarmKongCmd) Run(ctx context.Context, app App) error { return app.cacheWarm(ctx, c.Args) }
+func (c *cacheVolumesKongCmd) Run(ctx context.Context, app App) error {
+	return app.cacheVolumes(ctx, c.Args)
+}
 
 func (c *imageCreateKongCmd) Run(ctx context.Context, app App) error {
 	return app.imageCreate(ctx, c.Args)

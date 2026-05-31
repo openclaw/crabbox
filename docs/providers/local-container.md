@@ -43,6 +43,14 @@ crabbox ssh --provider docker --id local-smoke
 crabbox stop --provider docker local-smoke
 ```
 
+Cache volume smoke:
+
+```sh
+crabbox run --provider local-container \
+  --cache-volume pnpm-store=my-app-linux-pnpm:/var/cache/crabbox/pnpm \
+  -- pnpm test
+```
+
 Desktop and browser smoke:
 
 ```sh
@@ -161,6 +169,8 @@ metadata updates.
   as a remote VM or microVM.
 - The current checkout is synced into the container by default rather than
   bind-mounted; the Docker socket is mounted only when explicitly enabled.
+- Cache volumes persist as Docker named volumes after a container is stopped.
+  Remove them with the Docker-compatible runtime when the cache key is obsolete.
 - The default `debian:bookworm` image bootstraps packages on first start. Use a
   prebuilt image with SSH/Git/rsync/desktop/browser packages when startup time
   matters.
@@ -170,6 +180,7 @@ metadata updates.
 The backend relies on standard Docker-compatible behavior:
 
 - `docker run`, `docker ps`, `docker inspect`, `docker rm`;
+- Docker named volumes;
 - container labels;
 - loopback port publishing.
 

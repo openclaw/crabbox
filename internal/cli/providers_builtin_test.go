@@ -542,7 +542,7 @@ func (testBlacksmithProvider) Spec() ProviderSpec {
 		Name:        "blacksmith-testbox",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureRunProof},
+		Features:    FeatureSet{FeatureCacheVolume, FeatureRunProof, FeatureRunSession},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -937,7 +937,7 @@ func (testLocalContainerProvider) Spec() ProviderSpec {
 		Name:        "local-container",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCacheVolume},
 		Coordinator: CoordinatorNever,
 	}
 }

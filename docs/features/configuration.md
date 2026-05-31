@@ -597,7 +597,16 @@ cache:
   git: true
   maxGB: 80
   purgeOnRelease: false
+  volumes:
+    - name: pnpm-store
+      key: my-app-linux-amd64-node24-pnpm10-lockhash
+      path: /var/cache/crabbox/pnpm
+      sizeGB: 80
+      required: false
 ```
+
+See [Cache volumes](cache-volumes.md) for key design, provider support, and
+existing-lease reuse rules.
 
 ### Results
 

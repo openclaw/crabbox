@@ -110,4 +110,3 @@ proof.
 - [run command](../commands/run.md)
 - [job command](../commands/job.md)
 - [Jobs](jobs.md)
-- [OpenClaw plugin](openclaw-plugin.md)

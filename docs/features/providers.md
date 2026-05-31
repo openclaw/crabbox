@@ -250,8 +250,8 @@ list, and cleanup.
   expose the matching SSH contract. Configure with `CRABBOX_PARALLELS_*`.
 - **local-container** (alias `docker`) — starts a labeled container on a local
   Docker-compatible runtime, publishes SSH on loopback, syncs over SSH, and
-  removes it on `stop`. It does not bind-mount the repo or the Docker socket by
-  default. Reads `DOCKER_HOST`.
+  removes it on `stop`. Cache volumes use Docker named volumes. It does not
+  bind-mount the repo or the Docker socket by default. Reads `DOCKER_HOST`.
 - **daytona** — creates a sandbox from `daytona.snapshot`, syncs and runs through
   Daytona's SDK/toolbox APIs, and mints short-lived SSH tokens only for explicit
   `crabbox ssh` access.

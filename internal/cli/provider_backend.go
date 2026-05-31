@@ -167,6 +167,7 @@ const (
 	FeatureFork        Feature = "workspace-fork"
 	FeatureRestore     Feature = "workspace-restore"
 	FeatureSnapshot    Feature = "provider-snapshot"
+	FeatureCacheVolume Feature = "cache-volume"
 	FeatureRunProof    Feature = "run-proof"
 	FeatureRunSession  Feature = "run-session"
 )

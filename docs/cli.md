@@ -113,6 +113,7 @@ See [media](commands/media.md), [artifacts](commands/artifacts.md).
 crabbox cache list|stats --id <id>            show remote cache usage
 crabbox cache purge --id <id> --kind <kind>   remove cache content
 crabbox cache warm --id <id> -- <command...>  run a cache-populating command
+crabbox cache volumes [--json]                list configured provider cache volumes
 ```
 
 See [cache](commands/cache.md).
@@ -322,6 +323,10 @@ cache:
   git: true
   maxGB: 80
   purgeOnRelease: false
+  volumes:
+    - name: pnpm-store
+      key: my-app-linux-amd64-node24-pnpm10-lockhash
+      path: /var/cache/crabbox/pnpm
 ```
 
 ### Targets
@@ -502,6 +507,7 @@ CRABBOX_ENV_ALLOW
 CRABBOX_CACHE_PNPM / _NPM / _DOCKER / _GIT
 CRABBOX_CACHE_MAX_GB
 CRABBOX_CACHE_PURGE_ON_RELEASE
+CRABBOX_CACHE_VOLUMES
 ```
 
 Tailscale:
