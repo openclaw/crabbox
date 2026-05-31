@@ -327,6 +327,33 @@ func validateHarnessFrontmatterKeys(raw string) error {
 			return fmt.Errorf("unknown frontmatter key %q", key)
 		}
 	}
+	if err := validateHarnessNestedKeys(top, "validate", map[string]bool{"commands": true}); err != nil {
+		return err
+	}
+	if err := validateHarnessNestedKeys(top, "compliance", map[string]bool{
+		"require_plan":       true,
+		"require_junit":      true,
+		"required_artifacts": true,
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateHarnessNestedKeys(top map[string]any, section string, allowed map[string]bool) error {
+	raw, ok := top[section]
+	if !ok || raw == nil {
+		return nil
+	}
+	values, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	for key := range values {
+		if !allowed[key] {
+			return fmt.Errorf("unknown frontmatter key %q", section+"."+key)
+		}
+	}
 	return nil
 }
 
@@ -491,7 +518,7 @@ func buildHarnessComplianceReport(doc *harnessDocument, meta HarnessMetadata, ex
 		}
 	}
 	if len(doc.Config.Compliance.RequiredArtifacts) > 0 {
-		for _, artifact := range missingRequiredArtifacts(doc.Config.Compliance.RequiredArtifacts, artifacts) {
+		for _, artifact := range missingRequiredArtifacts(doc.Config.Compliance.RequiredArtifacts, artifacts, results) {
 			missing = append(missing, "artifact "+artifact)
 		}
 	}
@@ -523,11 +550,11 @@ func buildHarnessComplianceReport(doc *harnessDocument, meta HarnessMetadata, ex
 	}
 }
 
-func missingRequiredArtifacts(required []string, artifacts []runArtifact) []string {
+func missingRequiredArtifacts(required []string, artifacts []runArtifact, results *TestResultSummary) []string {
 	missing := make([]string, 0, len(required))
 	for _, requiredArtifact := range required {
 		requiredArtifact = strings.TrimSpace(requiredArtifact)
-		if requiredArtifact == "" || hasRunArtifact(artifacts, requiredArtifact) {
+		if requiredArtifact == "" || hasRunArtifact(artifacts, requiredArtifact, results) {
 			continue
 		}
 		missing = append(missing, requiredArtifact)
@@ -535,10 +562,29 @@ func missingRequiredArtifacts(required []string, artifacts []runArtifact) []stri
 	return missing
 }
 
-func hasRunArtifact(artifacts []runArtifact, required string) bool {
+func hasRunArtifact(artifacts []runArtifact, required string, results *TestResultSummary) bool {
+	if results != nil && requiredMatchesJUnitResult(required, results) {
+		return true
+	}
 	for _, artifact := range artifacts {
 		if artifactMatchesRequired(artifact, required) {
 			return true
+		}
+	}
+	return false
+}
+
+func requiredMatchesJUnitResult(required string, results *TestResultSummary) bool {
+	for _, candidate := range []string{"junit", "junit evidence", results.Format} {
+		if strings.EqualFold(strings.TrimSpace(candidate), required) {
+			return true
+		}
+	}
+	for _, file := range results.Files {
+		for _, candidate := range []string{file, filepath.Base(file)} {
+			if strings.EqualFold(strings.TrimSpace(candidate), required) {
+				return true
+			}
 		}
 	}
 	return false

@@ -67,6 +67,17 @@ func TestHarnessValidateRejectsUnknownFrontmatter(t *testing.T) {
 	}
 }
 
+func TestHarnessValidateRejectsUnknownNestedFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "HARNESS.md")
+	if err := os.WriteFile(path, []byte("---\ncompliance:\n  require_junti: true\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadHarnessDocument(HarnessConfig{Path: path}, Repo{Root: dir}); err == nil || !strings.Contains(err.Error(), "unknown frontmatter key \"compliance.require_junti\"") {
+		t.Fatalf("expected nested unknown key error, got %v", err)
+	}
+}
+
 func TestHarnessValidateJSONCommand(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "HARNESS.md")
@@ -145,6 +156,30 @@ func TestBuildHarnessComplianceReportMatchesRequiredArtifacts(t *testing.T) {
 	)
 	if report.Status != "passed" || len(report.Missing) != 0 {
 		t.Fatalf("expected matching artifacts to pass, got %#v", report)
+	}
+}
+
+func TestBuildHarnessComplianceReportMatchesRequiredJUnitArtifact(t *testing.T) {
+	doc := &harnessDocument{
+		Config: HarnessConfig{
+			Path: "HARNESS.md",
+			Compliance: HarnessComplianceConfig{
+				RequiredArtifacts: []string{"junit", "results.xml"},
+			},
+		},
+		HarnessHash: "abc",
+	}
+	report := buildHarnessComplianceReport(
+		doc,
+		HarnessMetadata{Path: "HARNESS.md", HarnessHash: "abc"},
+		0,
+		"pnpm test",
+		"",
+		nil,
+		&TestResultSummary{Format: "junit", Files: []string{"/work/results.xml"}},
+	)
+	if report.Status != "passed" || len(report.Missing) != 0 {
+		t.Fatalf("expected junit artifact evidence to pass, got %#v", report)
 	}
 }
 

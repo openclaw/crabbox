@@ -447,18 +447,6 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		if runErr == nil || result.Command > 0 || result.Total > 0 {
 			a.syncExternalRunnersBestEffort(ctx, cfg, backend)
 		}
-		if harnessDoc != nil {
-			harnessArtifacts, meta, harnessErr := writeHarnessLocalEvidence(repo.Root, "", result.LeaseID, harnessDoc, harnessGround, result.ExitCode, result.CommandText, result.ActionsURL, result.Artifacts, nil)
-			if harnessErr != nil && runErr == nil {
-				return harnessErr
-			}
-			for _, artifact := range harnessArtifacts {
-				fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
-			}
-			if runErr == nil && meta != nil && meta.Status != "passed" {
-				runErr = exit(8, "harness compliance failed")
-			}
-		}
 		if err := writeRunLeaseOutput(strings.TrimSpace(*leaseOutput), result.Session); err != nil {
 			if runErr == nil {
 				return err
@@ -470,7 +458,24 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			if err != nil {
 				return err
 			}
+			result.Artifacts = append(result.Artifacts, proof)
 			fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
+		}
+		if harnessDoc != nil {
+			harnessExitCode := result.ExitCode
+			if runErr != nil && harnessExitCode == 0 {
+				harnessExitCode = 1
+			}
+			harnessArtifacts, meta, harnessErr := writeHarnessLocalEvidence(repo.Root, "", result.LeaseID, harnessDoc, harnessGround, harnessExitCode, result.CommandText, result.ActionsURL, result.Artifacts, nil)
+			if harnessErr != nil && runErr == nil {
+				return harnessErr
+			}
+			for _, artifact := range harnessArtifacts {
+				fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
+			}
+			if runErr == nil && meta != nil && meta.Status != "passed" {
+				runErr = exit(8, "harness compliance failed")
+			}
 		}
 		return runErr
 	}
@@ -1324,18 +1329,6 @@ afterSync:
 	report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, code, actionsURL)
 	populateRunTimingMetadata(&report, cfg, repo, server, leaseID, recorder.runID, workdir, runArtifacts)
 	report.Label = runLabelValue
-	harnessArtifacts, harnessMeta, harnessErr := writeHarnessLocalEvidence(repo.Root, recorder.runID, leaseID, harnessDoc, harnessGround, code, commandDisplay, actionsURL, runArtifacts, results)
-	if harnessErr != nil {
-		return recordFailure(harnessErr)
-	}
-	if len(harnessArtifacts) > 0 {
-		runArtifacts = append(runArtifacts, harnessArtifacts...)
-		report.Artifacts = runArtifacts
-		for _, artifact := range harnessArtifacts {
-			fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
-		}
-	}
-	report.Harness = harnessMeta
 	if strings.TrimSpace(*emitProof) != "" && code == 0 {
 		template := cfg.ProofTemplates[strings.TrimSpace(*proofTemplate)]
 		proof, err := writeRunProof(strings.TrimSpace(*emitProof), strings.TrimSpace(*proofTemplate), proofRenderInput{
@@ -1360,6 +1353,18 @@ afterSync:
 		report.Artifacts = runArtifacts
 		fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
 	}
+	harnessArtifacts, harnessMeta, harnessErr := writeHarnessLocalEvidence(repo.Root, recorder.runID, leaseID, harnessDoc, harnessGround, code, commandDisplay, actionsURL, runArtifacts, results)
+	if harnessErr != nil {
+		return recordFailure(harnessErr)
+	}
+	if len(harnessArtifacts) > 0 {
+		runArtifacts = append(runArtifacts, harnessArtifacts...)
+		report.Artifacts = runArtifacts
+		for _, artifact := range harnessArtifacts {
+			fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
+		}
+	}
+	report.Harness = harnessMeta
 	recorder.Finish(ctx, target, code, timings.sync, timings.command, logBuffer.String(), logBuffer.Truncated(), results, classification)
 	fmt.Fprintf(a.Stderr, "command complete in %s total=%s\n", timings.command.Round(time.Millisecond), total.Round(time.Millisecond))
 	fmt.Fprintln(a.Stderr, formatRunSummary(timings, total, code))

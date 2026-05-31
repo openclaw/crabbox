@@ -28,7 +28,7 @@ compliance:
   require_plan: true
   require_junit: true
   required_artifacts:
-    - junit
+    - artifact-glob
 ---
 
 ## Plan
@@ -39,7 +39,9 @@ screenshots.
 
 Supported frontmatter keys are `version`, `template`, `job`, `plan_file`,
 `scope`, `validate`, and `compliance`. Unknown top-level keys fail validation so
-agents do not silently misspell evidence requirements.
+agents do not silently misspell evidence requirements. `require_junit` checks
+parsed JUnit results; `required_artifacts` matches collected Crabbox artifacts by
+kind, path, basename, or proof template.
 
 ## CLI
 

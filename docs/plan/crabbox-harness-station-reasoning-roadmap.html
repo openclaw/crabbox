@@ -376,7 +376,7 @@
       <span class="eyebrow">Roadmap thesis</span>
       <h1>Crabbox is the proof substrate first, and a reasoning host only by explicit choice.</h1>
       <p class="subtitle">
-        Sell trust in remote work, not another agent brain. Make every Codex, OpenClaw, maintainer, and CI-like run
+        Sell trust in remote work, not another agent brain. Make every maintainer, agent, and CI-like run
         more grounded, replayable, and billable. A box that reasons is just an explicit station workload with evidence,
         budgets, policy, and teardown.
       </p>
@@ -393,7 +393,7 @@
       <h2>The decision</h2>
       <div class="callout good">
         <strong>Keep the default contract small:</strong> lease a box, sync the real checkout, run a command, stream
-        output, capture visual and file evidence, release. That is the Peter-aligned core.
+        output, capture visual and file evidence, release. That is the thin-substrate core.
       </div>
       <p>
         Reasoning is valid, but it belongs in an explicit station workload chosen by the repo or user. Crabbox owns
@@ -423,11 +423,11 @@
     </section>
 
     <section class="section">
-      <h2>Principles (Peter test)</h2>
+      <h2>Design principles</h2>
       <div class="grid">
         <div class="card">
           <h3>Crabbox is not the brain</h3>
-          <p class="muted">Codex, OpenClaw, Claude, and repo workflows reason and plan. Crabbox provides grounded execution and evidence.</p>
+          <p class="muted">External tools, maintainers, and repo workflows reason and plan. Crabbox provides grounded execution and evidence.</p>
         </div>
         <div class="card">
           <h3>The repo owns runtime weight</h3>
@@ -443,7 +443,7 @@
         </div>
       </div>
       <div class="callout">
-        <strong>Peter test:</strong> if a feature does not make the existing remote loop faster, more trustworthy, easier
+        <strong>Design test:</strong> if a feature does not make the existing remote loop faster, more trustworthy, easier
         to review, cheaper, or more billable, it does not belong in the next milestone.
       </div>
     </section>
@@ -526,6 +526,7 @@ crabbox run --harness HARNESS.md -- npm test</code></pre>
         explicit long-lived lease around a repo-owned command; a reasoning station adds scoped model access under policy.
         Neither adds an LLM runtime to Crabbox core.
       </p>
+      <p class="muted">Proposed future syntax:</p>
       <pre><code>crabbox station start --job agent-loop --harness HARNESS.md \
   --command "scripts/agent-loop.sh" --ttl 10h --idle-timeout 45m
 crabbox station status|logs|stop &lt;id-or-slug&gt;</code></pre>
@@ -601,15 +602,15 @@ crabbox station status|logs|stop &lt;id-or-slug&gt;</code></pre>
         <div class="step"><h3>Job and run plumbing</h3><p><code>JobConfig.Harness</code>, <code>--harness</code>, <code>--index</code>, dry-run output, merge tests. No exit-code change yet.</p></div>
         <div class="step"><h3>Grounding artifacts</h3><p>Local grounding, upload to remote, copy into <code>.crabbox/runs/&lt;id&gt;/</code>, timing JSON metadata.</p></div>
         <div class="step"><h3>Compliance enforcement</h3><p>Markdown/JSON reports for success and failure; missing required evidence becomes a nonzero result.</p></div>
-        <div class="step"><h3>OpenClaw tools and docs</h3><p><code>crabbox_harness_validate</code>, <code>crabbox_job_run_with_harness</code>, plugin tests, harness docs.</p></div>
+        <div class="step"><h3>Agent tools and docs</h3><p><code>crabbox_harness_validate</code>, <code>crabbox_job_run_with_harness</code>, plugin tests, harness docs.</p></div>
       </div>
     </section>
 
     <section class="section">
-      <h2>Milestone gates and revenue</h2>
+      <h2>Milestone gates</h2>
       <table>
         <thead>
-          <tr><th>Milestone</th><th>Ship only if</th><th>Stop if</th><th>Sells</th></tr>
+          <tr><th>Milestone</th><th>Ship only if</th><th>Stop if</th><th>Value</th></tr>
         </thead>
         <tbody>
           <tr>
@@ -642,7 +643,7 @@ crabbox station status|logs|stop &lt;id-or-slug&gt;</code></pre>
           <ul>
             <li>No hidden agents: no implicit LLM runtime or default model credentials in ordinary boxes.</li>
             <li>No thicker default box for users who only need sync, run, proof, release.</li>
-            <li>OpenClaw stays an integration, not the product identity.</li>
+            <li>Agent integrations stay integrations, not the product identity.</li>
             <li>Station means a warm lease with controls, not autonomy.</li>
           </ul>
         </div>
@@ -658,7 +659,7 @@ crabbox station status|logs|stop &lt;id-or-slug&gt;</code></pre>
         </div>
       </div>
       <p class="footer-note">
-        Bottom line: ship harness jobs to monetize proof in the existing flow; add station for reliable long runs; add
+        Bottom line: ship harness jobs to strengthen proof in the existing flow; add station for reliable long runs; add
         reasoning station last as an explicit, policy-bound profile &mdash; without turning Crabbox into the brain.
       </p>
     </section>

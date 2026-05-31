@@ -165,7 +165,7 @@ but its `execute` throws
 
 ## Config
 
-The plugin accepts six optional config keys; the schema sets
+The plugin accepts seven optional config keys; the schema sets
 `additionalProperties: false`, so unknown keys are rejected:
 
 | Key | Type | Default | Effect |
@@ -296,5 +296,3 @@ Related docs:
 - [run command](../commands/run.md) — what `crabbox_run` ultimately invokes.
 - [warmup command](../commands/warmup.md) — what `crabbox_warmup` invokes.
 - [stop command](../commands/stop.md) — what `crabbox_stop` invokes.
-</content>
-</invoke>
