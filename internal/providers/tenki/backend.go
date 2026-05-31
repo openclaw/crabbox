@@ -231,7 +231,6 @@ func (b *tenkiBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 		return err
 	}
 	removeLeaseClaim(req.Lease.LeaseID)
-	removeStoredTestboxKey(req.Lease.LeaseID)
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s tenki_session=%s\n", req.Lease.LeaseID, sessionID)
 	return nil
 }
@@ -304,6 +303,10 @@ func (b *tenkiBackend) createSession(ctx context.Context, cfg Config, name, leas
 }
 
 func (b *tenkiBackend) prepareLease(ctx context.Context, cfg Config, session tenkiSession, leaseID, slug string, keep bool, waitSSH bool) (LeaseTarget, error) {
+	session, err := b.ensureSessionReadyForSSH(ctx, cfg, session)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
 	keyPath, certPath, err := b.waitForTenkiSSHMaterial(ctx, session.ID, bootstrapWaitTimeout(cfg))
 	if err != nil {
 		return LeaseTarget{}, err
@@ -330,6 +333,117 @@ func (b *tenkiBackend) getSession(ctx context.Context, sessionID string) (tenkiS
 		return tenkiSession{}, fmt.Errorf("parse tenki sandbox get JSON: %w", err)
 	}
 	return session, nil
+}
+
+func (b *tenkiBackend) ensureSessionReadyForSSH(ctx context.Context, cfg Config, session tenkiSession) (tenkiSession, error) {
+	state := tenkiNormalizedState(session.State)
+	switch state {
+	case "", "ready", "running", "creating":
+		return session, nil
+	case "paused":
+		if err := b.resumeSession(ctx, session.ID); err != nil {
+			return tenkiSession{}, err
+		}
+		return b.waitForSessionReady(ctx, session.ID, bootstrapWaitTimeout(cfg))
+	case "pausing":
+		session, err := b.waitForSessionPausedOrReady(ctx, session.ID, bootstrapWaitTimeout(cfg))
+		if err != nil {
+			return tenkiSession{}, err
+		}
+		if tenkiSessionReady(session) {
+			return session, nil
+		}
+		if err := b.resumeSession(ctx, session.ID); err != nil {
+			return tenkiSession{}, err
+		}
+		return b.waitForSessionReady(ctx, session.ID, bootstrapWaitTimeout(cfg))
+	case "resuming":
+		return b.waitForSessionReady(ctx, session.ID, bootstrapWaitTimeout(cfg))
+	case "terminating", "terminated":
+		return tenkiSession{}, exit(4, "tenki session %s is %s", session.ID, state)
+	default:
+		return session, nil
+	}
+}
+
+func (b *tenkiBackend) resumeSession(ctx context.Context, sessionID string) error {
+	args := b.sandboxArgs("resume")
+	args = append(args, "--session", sessionID)
+	result, err := b.runTenki(ctx, args, nil, b.rt.Stderr)
+	if err != nil {
+		return ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox resume failed: %v%s", err, tenkiCommandOutputDetail(result))}
+	}
+	return nil
+}
+
+func (b *tenkiBackend) waitForSessionPausedOrReady(ctx context.Context, sessionID string, timeout time.Duration) (tenkiSession, error) {
+	return b.waitForSessionState(ctx, sessionID, timeout, func(session tenkiSession) (bool, error) {
+		switch tenkiNormalizedState(session.State) {
+		case "ready", "running", "paused":
+			return true, nil
+		case "terminating", "terminated":
+			return false, exit(4, "tenki session %s is %s while waiting to resume", sessionID, tenkiNormalizedState(session.State))
+		default:
+			return false, nil
+		}
+	})
+}
+
+func (b *tenkiBackend) waitForSessionReady(ctx context.Context, sessionID string, timeout time.Duration) (tenkiSession, error) {
+	return b.waitForSessionState(ctx, sessionID, timeout, func(session tenkiSession) (bool, error) {
+		switch tenkiNormalizedState(session.State) {
+		case "ready", "running":
+			return true, nil
+		case "paused":
+			if msg := strings.TrimSpace(session.LastResumeError); msg != "" {
+				return false, exit(5, "tenki session %s failed to resume: %s", sessionID, msg)
+			}
+		case "terminating", "terminated":
+			return false, exit(4, "tenki session %s is %s while waiting for resume", sessionID, tenkiNormalizedState(session.State))
+		}
+		return false, nil
+	})
+}
+
+func (b *tenkiBackend) waitForSessionState(ctx context.Context, sessionID string, timeout time.Duration, done func(tenkiSession) (bool, error)) (tenkiSession, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	deadline := time.Now().Add(timeout)
+	var last tenkiSession
+	var lastErr error
+	for {
+		session, err := b.getSession(ctx, sessionID)
+		if err == nil {
+			last = session
+			ok, stateErr := done(session)
+			if stateErr != nil {
+				return tenkiSession{}, stateErr
+			}
+			if ok {
+				return session, nil
+			}
+			lastErr = nil
+		} else {
+			lastErr = err
+		}
+
+		if ctx.Err() != nil {
+			if lastErr != nil {
+				return tenkiSession{}, exit(5, "timed out waiting for Tenki session %s to become ready: %v", sessionID, lastErr)
+			}
+			return tenkiSession{}, exit(5, "timed out waiting for Tenki session %s to become ready; last state=%s", sessionID, last.State)
+		}
+		fmt.Fprintf(b.rt.Stderr, "waiting for tenki session=%s state=%s remaining=%s\n", sessionID, blank(last.State, "unknown"), time.Until(deadline).Round(time.Second))
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return tenkiSession{}, exit(5, "timed out waiting for Tenki session %s to become ready: %v", sessionID, lastErr)
+			}
+			return tenkiSession{}, exit(5, "timed out waiting for Tenki session %s to become ready; last state=%s", sessionID, last.State)
+		case <-time.After(5 * time.Second):
+		}
+	}
 }
 
 func (b *tenkiBackend) listSessions(ctx context.Context, all bool) ([]tenkiSession, error) {
@@ -578,7 +692,6 @@ func (b *tenkiBackend) sessionToServer(cfg Config, session tenkiSession, leaseID
 		Labels:   labels,
 	}
 	server.ServerType.Name = tenkiServerType(cfg, session)
-	server.PublicNet.IPv4.IP = session.ID
 	return server
 }
 
@@ -626,6 +739,7 @@ type tenkiSession struct {
 	Sticky           bool              `json:"sticky"`
 	SourceImageRef   string            `json:"source_image_ref"`
 	SourceSnapshotID string            `json:"source_snapshot_id"`
+	LastResumeError  string            `json:"last_resume_error"`
 	Metadata         map[string]string `json:"metadata"`
 	Tags             []string          `json:"tags"`
 }
@@ -662,7 +776,7 @@ func isCrabboxTenkiSession(session tenkiSession) bool {
 }
 
 func tenkiState(state string) string {
-	state = strings.ToLower(strings.TrimSpace(state))
+	state = tenkiNormalizedState(state)
 	if state == "" {
 		return "unknown"
 	}
@@ -671,6 +785,19 @@ func tenkiState(state string) string {
 		return "ready"
 	default:
 		return state
+	}
+}
+
+func tenkiNormalizedState(state string) string {
+	return strings.ToLower(strings.TrimSpace(state))
+}
+
+func tenkiSessionReady(session tenkiSession) bool {
+	switch tenkiNormalizedState(session.State) {
+	case "ready", "running":
+		return true
+	default:
+		return false
 	}
 }
 

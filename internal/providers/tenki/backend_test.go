@@ -86,6 +86,62 @@ func TestTenkiCreateRequiresParsedSessionID(t *testing.T) {
 	}
 }
 
+func TestTenkiEnsureSessionReadyResumesPausedSession(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		runner.calls = append(runner.calls, req)
+		switch strings.Join(req.Args, " ") {
+		case "sandbox resume --session session-1":
+			return LocalCommandResult{ExitCode: 0}, nil
+		case "sandbox get --json session-1":
+			return LocalCommandResult{Stdout: `{"id":"session-1","state":"RUNNING"}`}, nil
+		default:
+			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	session, err := backend.ensureSessionReadyForSSH(context.Background(), backend.configForRun(), tenkiSession{ID: "session-1", State: "PAUSED"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.State != "RUNNING" {
+		t.Fatalf("state=%q", session.State)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls=%d want 2", len(runner.calls))
+	}
+}
+
+func TestTenkiEnsureSessionReadySurfacesResumeFailure(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		runner.calls = append(runner.calls, req)
+		switch strings.Join(req.Args, " ") {
+		case "sandbox resume --session session-1":
+			return LocalCommandResult{ExitCode: 0}, nil
+		case "sandbox get --json session-1":
+			return LocalCommandResult{Stdout: `{"id":"session-1","state":"PAUSED","last_resume_error":"capacity unavailable"}`}, nil
+		default:
+			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	_, err := backend.ensureSessionReadyForSSH(context.Background(), backend.configForRun(), tenkiSession{ID: "session-1", State: "PAUSED"})
+	if err == nil || !strings.Contains(err.Error(), "capacity unavailable") {
+		t.Fatalf("err=%v, want resume failure", err)
+	}
+}
+
 func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 	backend := &tenkiBackend{cfg: Config{Tenki: TenkiConfig{
 		CLIPath:  "/opt/Tenki CLI/tenki",
@@ -108,6 +164,17 @@ func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 		if !strings.Contains(target.ProxyCommand, want) {
 			t.Fatalf("proxy command %q missing %q", target.ProxyCommand, want)
 		}
+	}
+}
+
+func TestTenkiSessionToServerDoesNotExposeSessionIDAsIP(t *testing.T) {
+	backend := &tenkiBackend{}
+	server := backend.sessionToServer(Config{}, tenkiSession{ID: "session-1", Name: "crabbox-blue", State: "RUNNING"}, "cbx_123", "blue", true)
+	if server.PublicNet.IPv4.IP != "" {
+		t.Fatalf("ip=%q, want empty", server.PublicNet.IPv4.IP)
+	}
+	if server.CloudID != "session-1" || server.Labels["tenki_session_id"] != "session-1" {
+		t.Fatalf("session id not preserved in server metadata: %#v", server)
 	}
 }
 

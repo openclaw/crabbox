@@ -84,18 +84,6 @@ func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
 }
 
-func ensureTestboxKey(leaseID string) (string, string, error) {
-	return core.EnsureTestboxKey(leaseID)
-}
-
-func testboxKeyPath(leaseID string) (string, error) {
-	return core.TestboxKeyPath(leaseID)
-}
-
-func removeStoredTestboxKey(leaseID string) {
-	core.RemoveStoredTestboxKey(leaseID)
-}
-
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
 }
