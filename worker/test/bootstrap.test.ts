@@ -116,10 +116,20 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain('ThemeName" type="string" value="$gtk_theme');
     expect(got).toContain("$config_dir/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml");
     expect(got).toContain('theme" type="string" value="$xfwm_theme');
+    expect(got).toContain('box_move" type="bool" value="false');
+    expect(got).toContain('box_resize" type="bool" value="false');
+    expect(got).toContain('move_opacity" type="int" value="100');
+    expect(got).toContain('resize_opacity" type="int" value="100');
+    expect(got).toContain('use_compositing" type="bool" value="false');
     expect(got).toContain("gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini");
     expect(got).toContain('mkdir -p "$config_dir/xfce4/xfconf/xfce-perchannel-xml"');
     expect(got).toContain("xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme");
     expect(got).toContain("xfconf-query -c xfwm4 -p /general/theme");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/box_move");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/box_resize");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/move_opacity");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/resize_opacity");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/use_compositing");
     expect(got).toContain("xfconf-query -c xfce4-panel -p /panels/dark-mode");
     expect(got).toContain("/panels/$panel_id/background-rgba");
     expect(got).toContain("desktop-background-$mode.svg");
@@ -135,7 +145,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain('pgrep -u "$user_id" -x xfce4-panel');
     expect(got).toContain("sleep 1");
     expect(got).toContain("xfce4-panel --disable-wm-check");
-    expect(got).toContain("xfwm4 --replace");
+    expect(got).toContain("xfwm4 --replace --compositor=off");
     expect(got).toContain('xsetroot -solid "$root_color"');
     expect(got).toContain("crabbox-xfdesktop-$user.log");
     expect(got).toContain(

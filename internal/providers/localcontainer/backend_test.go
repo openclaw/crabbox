@@ -425,12 +425,17 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 		`gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini`,
 		`xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme`,
 		`xfconf-query -c xfwm4 -p /general/theme`,
+		`xfconf-query -c xfwm4 -p /general/box_move`,
+		`xfconf-query -c xfwm4 -p /general/box_resize`,
+		`xfconf-query -c xfwm4 -p /general/move_opacity`,
+		`xfconf-query -c xfwm4 -p /general/resize_opacity`,
+		`xfconf-query -c xfwm4 -p /general/use_compositing`,
 		`xfconf-query -c xfce4-panel -p /panels/dark-mode`,
 		`/panels/$panel_id/background-rgba`,
 		`crabbox desktop theme start`,
 		`crabbox-xfce4-panel-$user.log`,
 		`pkill -TERM -x xfce4-panel`,
-		`xfwm4 --replace`,
+		`xfwm4 --replace --compositor=off`,
 		`gsettings set org.gnome.desktop.interface color-scheme '$gsettings_scheme'`,
 	} {
 		if !strings.Contains(bootstrapScript, want) {

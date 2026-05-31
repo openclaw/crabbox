@@ -726,6 +726,11 @@ func cloudInitOptionalWriteFiles(cfg Config) string {
       <channel name="xfwm4" version="1.0">
         <property name="general" type="empty">
           <property name="theme" type="string" value="$xfwm_theme"/>
+          <property name="box_move" type="bool" value="false"/>
+          <property name="box_resize" type="bool" value="false"/>
+          <property name="move_opacity" type="int" value="100"/>
+          <property name="resize_opacity" type="int" value="100"/>
+          <property name="use_compositing" type="bool" value="false"/>
         </property>
       </channel>
       XML
@@ -804,6 +809,11 @@ func cloudInitOptionalWriteFiles(cfg Config) string {
         xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s Adwaita >/dev/null 2>&1 || true
         xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme -n -t bool -s "$gtk_prefer_dark" >/dev/null 2>&1 || true
         xfconf-query -c xfwm4 -p /general/theme -n -t string -s "$xfwm_theme" >/dev/null 2>&1 || true
+        xfconf-query -c xfwm4 -p /general/box_move -n -t bool -s false >/dev/null 2>&1 || true
+        xfconf-query -c xfwm4 -p /general/box_resize -n -t bool -s false >/dev/null 2>&1 || true
+        xfconf-query -c xfwm4 -p /general/move_opacity -n -t int -s 100 >/dev/null 2>&1 || true
+        xfconf-query -c xfwm4 -p /general/resize_opacity -n -t int -s 100 >/dev/null 2>&1 || true
+        xfconf-query -c xfwm4 -p /general/use_compositing -n -t bool -s false >/dev/null 2>&1 || true
         xfconf-query -c xfce4-panel -p /panels/dark-mode -n -t bool -s "$gtk_prefer_dark" >/dev/null 2>&1 || true
         set -- $panel_rgba
         for panel_id in panel-1 panel-2; do
@@ -816,7 +826,7 @@ func cloudInitOptionalWriteFiles(cfg Config) string {
         else
           pkill -USR1 -x xfce4-panel >/dev/null 2>&1 || true
         fi
-        xfwm4 --replace >"/tmp/crabbox-xfwm4-replace-$user.log" 2>&1 &
+        xfwm4 --replace --compositor=off >"/tmp/crabbox-xfwm4-replace-$user.log" 2>&1 &
       fi
       if [ -n "${DISPLAY:-}" ] && command -v xsetroot >/dev/null 2>&1; then
         xsetroot -solid "$root_color" || true
