@@ -102,7 +102,7 @@ Runs `crabbox run --id <id> [flags] -- <command...>`.
 
 ### `crabbox_harness_validate`
 
-Runs `crabbox harness validate <path> [--json]`. Parameters: `path` (required),
+Runs `crabbox harness validate [--json] <path>`. Parameters: `path` (required),
 `json`, `timeoutSeconds`.
 
 ### `crabbox_job_run_with_harness`

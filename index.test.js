@@ -143,7 +143,7 @@ test("crabbox_harness_validate executes bounded validate argv", async () => {
     json: true,
   });
   assert.equal(result.details.code, 0);
-  assert.deepEqual(JSON.parse(result.details.stdout).argv, ["harness", "validate", "HARNESS.md", "--json"]);
+  assert.deepEqual(JSON.parse(result.details.stdout).argv, ["harness", "validate", "--json", "HARNESS.md"]);
 });
 
 test("crabbox_job_run_with_harness executes bounded job argv", async () => {

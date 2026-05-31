@@ -47,7 +47,7 @@ Validate a harness without leasing a box:
 
 ```sh
 crabbox harness validate HARNESS.md
-crabbox harness validate HARNESS.md --json
+crabbox harness validate --json HARNESS.md
 ```
 
 Attach a harness to a direct run:
@@ -59,7 +59,7 @@ crabbox run --harness HARNESS.md -- pnpm test
 Attach a harness to a job:
 
 ```sh
-crabbox job run full-ci --harness HARNESS.md
+crabbox job run --harness HARNESS.md full-ci
 ```
 
 When a harness is present, `--index` defaults to `light`. Use `--index none` to

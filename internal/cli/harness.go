@@ -196,7 +196,7 @@ func applyFileHarnessConfig(h HarnessConfig, file fileHarnessConfig) HarnessConf
 
 func (a App) harness(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return exit(2, "usage: crabbox harness validate HARNESS.md [--json]")
+		return exit(2, "usage: crabbox harness validate [--json] HARNESS.md")
 	}
 	switch args[0] {
 	case "validate":
@@ -213,7 +213,7 @@ func (a App) harnessValidate(_ context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox harness validate HARNESS.md [--json]")
+		return exit(2, "usage: crabbox harness validate [--json] HARNESS.md")
 	}
 	doc, err := loadHarnessDocument(HarnessConfig{Path: fs.Arg(0)}, Repo{})
 	if err != nil {
@@ -490,8 +490,8 @@ func buildHarnessComplianceReport(doc *harnessDocument, meta HarnessMetadata, ex
 			missing = append(missing, "passing junit evidence")
 		}
 	}
-	if len(doc.Config.Compliance.RequiredArtifacts) > 0 && len(artifacts) == 0 {
-		for _, artifact := range doc.Config.Compliance.RequiredArtifacts {
+	if len(doc.Config.Compliance.RequiredArtifacts) > 0 {
+		for _, artifact := range missingRequiredArtifacts(doc.Config.Compliance.RequiredArtifacts, artifacts) {
 			missing = append(missing, "artifact "+artifact)
 		}
 	}
@@ -521,6 +521,36 @@ func buildHarnessComplianceReport(doc *harnessDocument, meta HarnessMetadata, ex
 		Command:       commandDisplay,
 		ActionsRunURL: actionsURL,
 	}
+}
+
+func missingRequiredArtifacts(required []string, artifacts []runArtifact) []string {
+	missing := make([]string, 0, len(required))
+	for _, requiredArtifact := range required {
+		requiredArtifact = strings.TrimSpace(requiredArtifact)
+		if requiredArtifact == "" || hasRunArtifact(artifacts, requiredArtifact) {
+			continue
+		}
+		missing = append(missing, requiredArtifact)
+	}
+	return missing
+}
+
+func hasRunArtifact(artifacts []runArtifact, required string) bool {
+	for _, artifact := range artifacts {
+		if artifactMatchesRequired(artifact, required) {
+			return true
+		}
+	}
+	return false
+}
+
+func artifactMatchesRequired(artifact runArtifact, required string) bool {
+	for _, candidate := range []string{artifact.Kind, artifact.Path, filepath.Base(artifact.Path), artifact.Template} {
+		if strings.EqualFold(strings.TrimSpace(candidate), required) {
+			return true
+		}
+	}
+	return false
 }
 
 func renderHarnessComplianceMarkdown(report harnessComplianceReport) string {

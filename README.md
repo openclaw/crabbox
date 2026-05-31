@@ -94,7 +94,7 @@ crabbox run -- pnpm test
 
 # named repo workflow from .crabbox.yaml
 crabbox job run full-ci
-crabbox job run full-ci --harness HARNESS.md
+crabbox job run --harness HARNESS.md full-ci
 
 # or warm a box once, then reuse it
 crabbox warmup                                       # prints cbx_... + a slug
@@ -162,7 +162,7 @@ and authoring guide.
   optional Actions hydration, run command, and cleanup policy in `.crabbox.yaml`.
   See [Jobs](docs/features/jobs.md).
 - **Harness evidence.** `crabbox run --harness HARNESS.md` and
-  `crabbox job run <name> --harness HARNESS.md` attach intent, grounding, and
+  `crabbox job run --harness HARNESS.md <name>` attach intent, grounding, and
   compliance reports to ordinary runs. See [Harnesses](docs/features/harness.md).
 - **Local-first workspace sync.** No clean-checkout requirement. Tracked and
   nonignored files only, fingerprint skip on no-op runs, sanity checks against

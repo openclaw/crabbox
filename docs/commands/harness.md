@@ -4,7 +4,7 @@ Validate harness files used by proof-aware Crabbox runs.
 
 ```sh
 crabbox harness validate HARNESS.md
-crabbox harness validate HARNESS.md --json
+crabbox harness validate --json HARNESS.md
 ```
 
 `crabbox harness validate` parses the Markdown file, validates YAML
@@ -15,7 +15,7 @@ Harness files can be attached to runs with:
 
 ```sh
 crabbox run --harness HARNESS.md -- pnpm test
-crabbox job run full-ci --harness HARNESS.md
+crabbox job run --harness HARNESS.md full-ci
 ```
 
 See [Harnesses](../features/harness.md) for the file format, evidence outputs,

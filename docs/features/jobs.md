@@ -89,7 +89,7 @@ crabbox job run test-live
 Attach a harness for proof-aware execution:
 
 ```sh
-crabbox job run test-live --harness HARNESS.md
+crabbox job run --harness HARNESS.md test-live
 ```
 
 Reuse an existing lease instead of warming a new one:

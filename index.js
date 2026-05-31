@@ -318,8 +318,9 @@ function registerHarnessValidate(api, config) {
       if (!config.allowHarness) {
         throw new Error("crabbox_harness_validate is disabled by plugin config");
       }
-      const args = ["harness", "validate", readString(params, "path")];
+      const args = ["harness", "validate"];
       maybePushBool(args, "--json", params?.json);
+      args.push(readString(params, "path"));
       return execute(config, args, params, signal);
     },
   });

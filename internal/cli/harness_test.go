@@ -87,6 +87,18 @@ func TestHarnessValidateJSONCommand(t *testing.T) {
 	}
 }
 
+func TestHarnessValidateJSONFlagAfterPathFailsUsage(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "HARNESS.md")
+	if err := os.WriteFile(path, []byte("---\nversion: \"1\"\ntemplate: smoke\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.harnessValidate(context.Background(), []string{path, "--json"}); err == nil || !strings.Contains(err.Error(), "usage: crabbox harness validate [--json] HARNESS.md") {
+		t.Fatalf("expected positional flag usage error, got %v", err)
+	}
+}
+
 func TestBuildHarnessComplianceReportFailsMissingRequiredEvidence(t *testing.T) {
 	doc := &harnessDocument{
 		Config: HarnessConfig{
@@ -105,6 +117,129 @@ func TestBuildHarnessComplianceReportFailsMissingRequiredEvidence(t *testing.T) 
 	}
 	if len(report.Missing) != 3 {
 		t.Fatalf("expected three missing evidence entries, got %#v", report.Missing)
+	}
+}
+
+func TestBuildHarnessComplianceReportMatchesRequiredArtifacts(t *testing.T) {
+	doc := &harnessDocument{
+		Config: HarnessConfig{
+			Path: "HARNESS.md",
+			Compliance: HarnessComplianceConfig{
+				RequiredArtifacts: []string{"screenshots", "proof.md"},
+			},
+		},
+		HarnessHash: "abc",
+	}
+	report := buildHarnessComplianceReport(
+		doc,
+		HarnessMetadata{Path: "HARNESS.md", HarnessHash: "abc"},
+		0,
+		"pnpm test",
+		"",
+		[]runArtifact{
+			{Kind: "artifact-glob", Path: "/tmp/artifacts.tgz"},
+			{Kind: "screenshots", Path: "/tmp/screenshots.tgz"},
+			{Kind: "proof", Path: "/tmp/proof.md"},
+		},
+		nil,
+	)
+	if report.Status != "passed" || len(report.Missing) != 0 {
+		t.Fatalf("expected matching artifacts to pass, got %#v", report)
+	}
+}
+
+func TestBuildHarnessComplianceReportFailsSpecificMissingArtifact(t *testing.T) {
+	doc := &harnessDocument{
+		Config: HarnessConfig{
+			Path: "HARNESS.md",
+			Compliance: HarnessComplianceConfig{
+				RequiredArtifacts: []string{"screenshots"},
+			},
+		},
+		HarnessHash: "abc",
+	}
+	report := buildHarnessComplianceReport(
+		doc,
+		HarnessMetadata{Path: "HARNESS.md", HarnessHash: "abc"},
+		0,
+		"pnpm test",
+		"",
+		[]runArtifact{{Kind: "artifact-glob", Path: "/tmp/artifacts.tgz"}},
+		nil,
+	)
+	if report.Status != "failed" || len(report.Missing) != 1 || report.Missing[0] != "artifact screenshots" {
+		t.Fatalf("expected specific missing artifact, got %#v", report)
+	}
+}
+
+func TestWriteHarnessLocalEvidenceWritesFilesAndFailedMetadata(t *testing.T) {
+	dir := t.TempDir()
+	doc := &harnessDocument{
+		Config: HarnessConfig{
+			Path: "HARNESS.md",
+			Compliance: HarnessComplianceConfig{
+				RequiredArtifacts: []string{"screenshots"},
+			},
+		},
+		Content:     []byte("# Harness\n"),
+		HarnessHash: "abc",
+	}
+	grounding := harnessGrounding{
+		Version: "1",
+		Harness: HarnessMetadata{
+			Path:        "HARNESS.md",
+			HarnessHash: "abc",
+			Index:       "light",
+			Status:      "pending",
+		},
+	}
+	artifacts, meta, err := writeHarnessLocalEvidence(
+		dir,
+		"run_123",
+		"",
+		doc,
+		grounding,
+		0,
+		"pnpm test",
+		"",
+		[]runArtifact{{Kind: "artifact-glob", Path: "/tmp/artifacts.tgz"}},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta == nil || meta.Status != "failed" {
+		t.Fatalf("expected failed harness metadata, got %#v", meta)
+	}
+	expectedKinds := []string{"harness", "grounding", "compliance-json", "compliance-report"}
+	if len(artifacts) != len(expectedKinds) {
+		t.Fatalf("expected harness artifacts, got %#v", artifacts)
+	}
+	for i, kind := range expectedKinds {
+		if artifacts[i].Kind != kind {
+			t.Fatalf("artifact %d kind=%q want %q", i, artifacts[i].Kind, kind)
+		}
+	}
+	reportPath := filepath.Join(dir, ".crabbox", "runs", "run_123", "compliance-report.json")
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report harnessComplianceReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "failed" || len(report.Missing) != 1 || report.Missing[0] != "artifact screenshots" {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".crabbox", "runs", "run_123", "harness.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".crabbox", "runs", "run_123", "grounding.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".crabbox", "runs", "run_123", "compliance-report.md")); err != nil {
+		t.Fatal(err)
 	}
 }
 
