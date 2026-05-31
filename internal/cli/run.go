@@ -1066,16 +1066,24 @@ afterSync:
 		if harnessErr != nil {
 			return recordFailure(harnessErr)
 		}
+		effectiveCode := 0
+		classification := FailureClassification{}
+		if harnessMeta != nil && harnessMeta.Status != "passed" {
+			effectiveCode = 8
+			classification = harnessComplianceFailureClassification()
+			timings.blockedStage = classification.BlockedStage
+			timings.retryLikely = classification.RetryLikely
+		}
 		if *timingJSON {
 			total := time.Since(timings.started)
-			report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, 0, actionsURL)
+			report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, effectiveCode, actionsURL)
 			populateRunTimingMetadata(&report, cfg, repo, server, leaseID, recorder.runID, workdir, runArtifacts)
 			report.Harness = harnessMeta
 			report.Label = runLabelValue
 			finalTimingReport = &report
 		}
-		recorder.Finish(ctx, target, 0, timings.sync, 0, "", false, nil, FailureClassification{})
-		if harnessMeta != nil && harnessMeta.Status != "passed" {
+		recorder.Finish(ctx, target, effectiveCode, timings.sync, 0, "", false, nil, classification)
+		if effectiveCode != 0 {
 			return recordFailure(exit(8, "harness compliance failed"))
 		}
 		return nil
@@ -1370,9 +1378,19 @@ afterSync:
 		}
 	}
 	report.Harness = harnessMeta
-	recorder.Finish(ctx, target, code, timings.sync, timings.command, logBuffer.String(), logBuffer.Truncated(), results, classification)
+	effectiveCode := code
+	if effectiveCode == 0 && harnessMeta != nil && harnessMeta.Status != "passed" {
+		effectiveCode = 8
+		classification = harnessComplianceFailureClassification()
+		timings.blockedStage = classification.BlockedStage
+		timings.retryLikely = classification.RetryLikely
+		report.BlockedStage = classification.BlockedStage
+		report.RetryLikely = classification.RetryLikely
+	}
+	report.ExitCode = effectiveCode
+	recorder.Finish(ctx, target, effectiveCode, timings.sync, timings.command, logBuffer.String(), logBuffer.Truncated(), results, classification)
 	fmt.Fprintf(a.Stderr, "command complete in %s total=%s\n", timings.command.Round(time.Millisecond), total.Round(time.Millisecond))
-	fmt.Fprintln(a.Stderr, formatRunSummary(timings, total, code))
+	fmt.Fprintln(a.Stderr, formatRunSummary(timings, total, effectiveCode))
 	labelField := ""
 	if runLabelValue != "" {
 		labelField = fmt.Sprintf(" label=%q", runLabelValue)
@@ -1381,7 +1399,7 @@ afterSync:
 	if *timingJSON {
 		finalTimingReport = &report
 	}
-	if code != 0 {
+	if effectiveCode != 0 {
 		printRunFailureDigest(a.Stderr, runFailureDigestInput{
 			Provider:       cfg.Provider,
 			TargetOS:       cfg.TargetOS,
@@ -1405,7 +1423,7 @@ afterSync:
 			Slug:           serverSlug(server),
 			RunID:          recorder.runID,
 			Workdir:        workdir,
-			ExitCode:       code,
+			ExitCode:       effectiveCode,
 			ActionsRunURL:  actionsURL,
 			Timing:         report,
 			EnvAllow:       cfg.EnvAllow,
@@ -1433,12 +1451,16 @@ afterSync:
 		printCommandNotFoundHint(a.Stderr, cfg, target, leaseID, command, *shellMode, code, hydratedByActions, hydrateSuggestion)
 		printFailureTail(a.Stderr, "stdout", stdoutTail, *captureStdout)
 		printFailureTail(a.Stderr, "stderr", stderrTail, *captureStderr)
-		return recordFailure(ExitError{Code: code, Message: fmt.Sprintf("remote command exited %d", code)})
-	}
-	if harnessMeta != nil && harnessMeta.Status != "passed" {
+		if code != 0 {
+			return recordFailure(ExitError{Code: code, Message: fmt.Sprintf("remote command exited %d", code)})
+		}
 		return recordFailure(exit(8, "harness compliance failed"))
 	}
 	return nil
+}
+
+func harnessComplianceFailureClassification() FailureClassification {
+	return FailureClassification{BlockedStage: "harness-compliance", RetryLikely: "unknown"}
 }
 
 func writeRunLeaseOutput(path string, session *RunSessionHandle) error {

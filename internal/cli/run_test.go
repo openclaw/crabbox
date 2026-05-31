@@ -699,6 +699,61 @@ func TestRunCommandTimingJSONSurfacesCleanupFailure(t *testing.T) {
 	}
 }
 
+func TestRunCommandHarnessComplianceFailureUpdatesTimingExit(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	logPath := filepath.Join(dir, "ssh.log")
+	script := `#!/bin/sh
+cmd=""
+for arg do
+  cmd="$arg"
+done
+printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	harnessPath := filepath.Join(dir, "HARNESS.md")
+	if err := os.WriteFile(harnessPath, []byte("---\ncompliance:\n  required_artifacts:\n    - screenshots\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--timing-json",
+		"--harness", harnessPath,
+		"--index", "none",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 8 {
+		t.Fatalf("error=%v, want harness exit 8\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	last := lines[len(lines)-1]
+	var report TimingReport
+	if err := json.Unmarshal([]byte(last), &report); err != nil {
+		t.Fatalf("last stderr line is not timing JSON: %q\nfull stderr:\n%s", last, stderr.String())
+	}
+	if report.ExitCode != 8 {
+		t.Fatalf("timing exitCode=%d, want 8; report=%#v", report.ExitCode, report)
+	}
+	if report.Harness == nil || report.Harness.Status != "failed" {
+		t.Fatalf("harness metadata=%#v, want failed", report.Harness)
+	}
+	if report.BlockedStage != "harness-compliance" {
+		t.Fatalf("blockedStage=%q, want harness-compliance", report.BlockedStage)
+	}
+}
+
 func TestRunCommandCleansEnvProfileWhenProbeFails(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
