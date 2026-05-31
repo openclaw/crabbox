@@ -21,19 +21,21 @@ import (
 )
 
 type SSHTarget struct {
-	User            string
-	Host            string
-	Key             string
-	Port            string
-	FallbackPorts   []string
-	TargetOS        string
-	WindowsMode     string
-	ReadyCheck      string
-	AuthSecret      bool
-	NoControlMaster bool
-	NetworkKind     NetworkMode
-	SSHConfigProxy  bool
-	ProxyCommand    string
+	User                   string
+	Host                   string
+	Key                    string
+	CertificateFile        string
+	Port                   string
+	FallbackPorts          []string
+	TargetOS               string
+	WindowsMode            string
+	ReadyCheck             string
+	AuthSecret             bool
+	NoControlMaster        bool
+	DisableHostKeyChecking bool
+	NetworkKind            NetworkMode
+	SSHConfigProxy         bool
+	ProxyCommand           string
 }
 
 func isLocalMacTarget(target SSHTarget) bool {
@@ -485,13 +487,23 @@ func sshBaseArgs(target SSHTarget) []string {
 func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts string) []string {
 	args := []string{
 		"-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=accept-new",
-		"-o", "UserKnownHostsFile=" + sshConfigFileValue(knownHostsFile(target)),
 		"-o", "ConnectTimeout=" + connectTimeout,
 		"-o", "ConnectionAttempts=" + connectionAttempts,
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=2",
 		"-p", target.Port,
+	}
+	if target.DisableHostKeyChecking {
+		args = append(args,
+			"-o", "StrictHostKeyChecking=no",
+			"-o", "UserKnownHostsFile=/dev/null",
+			"-o", "LogLevel=ERROR",
+		)
+	} else {
+		args = append(args,
+			"-o", "StrictHostKeyChecking=accept-new",
+			"-o", "UserKnownHostsFile="+sshConfigFileValue(knownHostsFile(target)),
+		)
 	}
 	if target.AuthSecret || target.NoControlMaster {
 		args = append(args, "-o", "ControlMaster=no")
@@ -509,6 +521,9 @@ func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts
 	}
 	if target.Key != "" {
 		args = append([]string{"-i", target.Key, "-o", "IdentitiesOnly=yes"}, args...)
+	}
+	if target.CertificateFile != "" {
+		args = append(args, "-o", "CertificateFile="+target.CertificateFile)
 	}
 	if target.ProxyCommand != "" {
 		args = append(args, "-o", "ProxyCommand="+target.ProxyCommand)

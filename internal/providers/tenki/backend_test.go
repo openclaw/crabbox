@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,12 +21,12 @@ func TestTenkiProviderSpec(t *testing.T) {
 	}
 }
 
-func TestTenkiCreateInjectsCrabboxKeyAndMetadata(t *testing.T) {
+func TestTenkiCreateAddsMetadata(t *testing.T) {
 	runner := &fakeRunner{}
 	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
 		switch strings.Join(req.Args, " ") {
-		case "sandbox create --endpoint https://api.tenki.test --workspace ws_1 --project proj_1 --no-wait --name crabbox-blue --authorized-key ssh-ed25519 AAA test --metadata crabbox_provider=tenki --metadata crabbox_lease_id=cbx_123 --metadata crabbox_slug=blue --tags crabbox,crabbox-provider-tenki --sticky --max-duration 1h0m0s --idle-timeout 30m0s --cpu 4 --memory-mb 8192 --disk-size-gb 40 --image ubuntu:tenki":
+		case "sandbox create --endpoint https://api.tenki.test --workspace ws_1 --project proj_1 --no-wait --name crabbox-blue --metadata crabbox_provider=tenki --metadata crabbox_lease_id=cbx_123 --metadata crabbox_slug=blue --tags crabbox,crabbox-provider-tenki --sticky --max-duration 1h0m0s --idle-timeout 30m0s --cpu 4 --memory-mb 8192 --disk-size-gb 40 --image ubuntu:tenki":
 			return LocalCommandResult{Stdout: "id: 00000000-0000-0000-0000-000000000001\n", ExitCode: 0}, nil
 		case "sandbox get --endpoint https://api.tenki.test --json 00000000-0000-0000-0000-000000000001":
 			return LocalCommandResult{Stdout: `{"id":"00000000-0000-0000-0000-000000000001","name":"crabbox-blue","state":"RUNNING","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}`}, nil
@@ -52,7 +54,7 @@ func TestTenkiCreateInjectsCrabboxKeyAndMetadata(t *testing.T) {
 		rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	session, err := backend.createSession(context.Background(), backend.configForRun(), "crabbox-blue", "cbx_123", "blue", "ssh-ed25519 AAA test", true)
+	session, err := backend.createSession(context.Background(), backend.configForRun(), "crabbox-blue", "cbx_123", "blue", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,9 +72,12 @@ func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 		Endpoint: "https://api.tenki.test",
 		Gateway:  "wss://gateway.tenki.test",
 	}}}
-	target := backend.sshTarget("00000000-0000-0000-0000-000000000001", "/tmp/id_ed25519")
-	if !target.SSHConfigProxy || target.Host != "sandbox" || target.User != "tenki" || target.Key != "/tmp/id_ed25519" {
+	target := backend.sshTarget("00000000-0000-0000-0000-000000000001", "/tmp/id_ed25519", "/tmp/session-cert.pub")
+	if !target.SSHConfigProxy || target.Host != "sandbox" || target.User != "tenki" || target.Key != "/tmp/id_ed25519" || target.CertificateFile != "/tmp/session-cert.pub" {
 		t.Fatalf("unexpected target: %#v", target)
+	}
+	if !target.NoControlMaster || !target.DisableHostKeyChecking {
+		t.Fatalf("tenki target should disable SSH mux and persistent host keys: %#v", target)
 	}
 	for _, want := range []string{
 		"'/opt/Tenki CLI/tenki' sandbox ssh-proxy",
@@ -86,23 +91,28 @@ func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 	}
 }
 
-func TestTenkiUpdateSSHKeysPlacesEndpointOnSetCommand(t *testing.T) {
-	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
-		runner.calls = append(runner.calls, req)
-		return LocalCommandResult{ExitCode: 0}, nil
-	}
-	backend := &tenkiBackend{
-		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki", Endpoint: "https://api.tenki.test"}},
-		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
-	}
-	if err := backend.updateSSHKeys(context.Background(), "session-1", "ssh-ed25519 AAA test"); err != nil {
+func TestTenkiSSHMaterialPathsUsesManagedTenkiState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".config", "tenki", "ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(runner.calls[0].Args, " ")
-	want := "sandbox ssh-keys set --endpoint https://api.tenki.test --session session-1 --key ssh-ed25519 AAA test"
-	if got != want {
-		t.Fatalf("args=%q want %q", got, want)
+	pubKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest tenki-test\n"
+	if err := os.WriteFile(filepath.Join(sshDir, "id_ed25519.pub"), []byte(pubKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	keyPath, certPath, err := tenkiSSHMaterialPaths("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyPath != filepath.Join(sshDir, "id_ed25519") {
+		t.Fatalf("keyPath=%q", keyPath)
+	}
+	wantPrefix := filepath.Join(home, ".config", "tenki", "ssh-certs", "session-1") + string(os.PathSeparator)
+	if !strings.HasPrefix(certPath, wantPrefix) || !strings.HasSuffix(certPath, "-cert.pub") {
+		t.Fatalf("certPath=%q want prefix %q and -cert.pub suffix", certPath, wantPrefix)
 	}
 }
 

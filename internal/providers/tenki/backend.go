@@ -2,12 +2,15 @@ package tenki
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -142,30 +145,23 @@ func (b *tenkiBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTa
 		return LeaseTarget{}, err
 	}
 	name := leaseProviderName(leaseID, slug)
-	keyPath, publicKey, err := ensureTestboxKey(leaseID)
-	if err != nil {
-		return LeaseTarget{}, err
-	}
 
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=tenki lease=%s slug=%s session=%s keep=%v\n", leaseID, slug, name, req.Keep)
-	session, err := b.createSession(ctx, cfg, name, leaseID, slug, publicKey, req.Keep)
+	session, err := b.createSession(ctx, cfg, name, leaseID, slug, req.Keep)
 	if err != nil {
-		removeStoredTestboxKey(leaseID)
 		return LeaseTarget{}, err
 	}
-	lease, err := b.prepareLease(ctx, cfg, session, leaseID, slug, req.Keep, keyPath, true)
+	lease, err := b.prepareLease(ctx, cfg, session, leaseID, slug, req.Keep, true)
 	if err != nil {
 		if !req.Keep {
 			_ = b.terminateSession(context.Background(), session.ID)
 		}
-		removeStoredTestboxKey(leaseID)
 		return LeaseTarget{}, err
 	}
 	if err := claimLeaseForRepoProvider(leaseID, slug, tenkiProvider, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
 			_ = b.terminateSession(context.Background(), session.ID)
 		}
-		removeStoredTestboxKey(leaseID)
 		return LeaseTarget{}, err
 	}
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s tenki_session=%s state=ready\n", leaseID, session.ID)
@@ -181,18 +177,7 @@ func (b *tenkiBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 	if req.ReleaseOnly {
 		return LeaseTarget{Server: b.sessionToServer(cfg, session, leaseID, slug, true), LeaseID: leaseID}, nil
 	}
-	keyPath, err := testboxKeyPath(leaseID)
-	keyExists := err == nil && fileExists(keyPath) && fileExists(keyPath+".pub")
-	keyPath, publicKey, err := ensureTestboxKey(leaseID)
-	if err != nil {
-		return LeaseTarget{}, err
-	}
-	if !keyExists {
-		if err := b.updateSSHKeys(ctx, session.ID, publicKey); err != nil {
-			return LeaseTarget{}, err
-		}
-	}
-	lease, err := b.prepareLease(ctx, cfg, session, leaseID, slug, true, keyPath, true)
+	lease, err := b.prepareLease(ctx, cfg, session, leaseID, slug, true, true)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -274,13 +259,12 @@ func (b *tenkiBackend) configForRun() Config {
 	return cfg
 }
 
-func (b *tenkiBackend) createSession(ctx context.Context, cfg Config, name, leaseID, slug, publicKey string, keep bool) (tenkiSession, error) {
+func (b *tenkiBackend) createSession(ctx context.Context, cfg Config, name, leaseID, slug string, keep bool) (tenkiSession, error) {
 	args := b.sandboxArgs("create")
 	args = b.appendScopeArgs(args)
 	args = append(args,
 		"--no-wait",
 		"--name", name,
-		"--authorized-key", publicKey,
 		"--metadata", tenkiMetadataProvider+"="+tenkiProvider,
 		"--metadata", tenkiMetadataLease+"="+leaseID,
 		"--metadata", tenkiMetadataSlug+"="+slug,
@@ -321,8 +305,12 @@ func (b *tenkiBackend) createSession(ctx context.Context, cfg Config, name, leas
 	return b.getSession(ctx, sessionID)
 }
 
-func (b *tenkiBackend) prepareLease(ctx context.Context, cfg Config, session tenkiSession, leaseID, slug string, keep bool, keyPath string, waitSSH bool) (LeaseTarget, error) {
-	target := b.sshTarget(session.ID, keyPath)
+func (b *tenkiBackend) prepareLease(ctx context.Context, cfg Config, session tenkiSession, leaseID, slug string, keep bool, waitSSH bool) (LeaseTarget, error) {
+	keyPath, certPath, err := b.waitForTenkiSSHMaterial(ctx, session.ID, bootstrapWaitTimeout(cfg))
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	target := b.sshTarget(session.ID, keyPath, certPath)
 	target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null"
 	server := b.sessionToServer(cfg, session, leaseID, slug, keep)
 	if waitSSH {
@@ -442,29 +430,114 @@ func (b *tenkiBackend) terminateSession(ctx context.Context, sessionID string) e
 	return nil
 }
 
-func (b *tenkiBackend) updateSSHKeys(ctx context.Context, sessionID, publicKey string) error {
-	args := []string{"sandbox", "ssh-keys", "set"}
-	if b.cfg.Tenki.Endpoint != "" {
-		args = append(args, "--endpoint", b.cfg.Tenki.Endpoint)
+func (b *tenkiBackend) waitForTenkiSSHMaterial(ctx context.Context, sessionID string, timeout time.Duration) (string, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		args := b.sandboxArgs("ssh")
+		args = append(args,
+			"--session", sessionID,
+			"--user", "tenki",
+			"--batch-mode",
+			"--connect-timeout", "10s",
+		)
+		if b.cfg.Tenki.Gateway != "" {
+			args = append(args, "--gateway", b.cfg.Tenki.Gateway)
+		}
+		args = append(args, "--", "true")
+
+		result, err := b.runTenki(ctx, args, nil, nil)
+		if err == nil {
+			keyPath, certPath, materialErr := tenkiSSHMaterialPaths(sessionID)
+			if materialErr == nil && fileExists(keyPath) && fileExists(certPath) {
+				return keyPath, certPath, nil
+			}
+			lastErr = materialErr
+			if lastErr == nil {
+				lastErr = fmt.Errorf("tenki ssh material missing key=%s cert=%s", keyPath, certPath)
+			}
+		} else {
+			lastErr = ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox ssh readiness failed: %v%s", err, tenkiCommandOutputDetail(result))}
+		}
+
+		if ctx.Err() != nil {
+			return "", "", exit(5, "timed out waiting for Tenki SSH cert for session %s: %v", sessionID, lastErr)
+		}
+		fmt.Fprintf(b.rt.Stderr, "waiting for tenki ssh cert session=%s remaining=%s last=%v\n", sessionID, time.Until(deadline).Round(time.Second), lastErr)
+		select {
+		case <-ctx.Done():
+			return "", "", exit(5, "timed out waiting for Tenki SSH cert for session %s: %v", sessionID, lastErr)
+		case <-time.After(5 * time.Second):
+		}
 	}
-	args = append(args, "--session", sessionID, "--key", publicKey)
-	result, err := b.runTenki(ctx, args, nil, b.rt.Stderr)
-	if err != nil {
-		return ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox ssh-keys set failed: %v", err)}
-	}
-	return nil
 }
 
-func (b *tenkiBackend) sshTarget(sessionID, keyPath string) SSHTarget {
+func tenkiCommandOutputDetail(result LocalCommandResult) string {
+	output := strings.TrimSpace(result.Stderr)
+	if output == "" {
+		output = strings.TrimSpace(result.Stdout)
+	}
+	if output == "" {
+		return ""
+	}
+	return ": " + output
+}
+
+func tenkiSSHMaterialPaths(sessionID string) (string, string, error) {
+	sshDir, err := tenkiSSHStateDir("ssh")
+	if err != nil {
+		return "", "", err
+	}
+	keyPath := filepath.Join(sshDir, "id_ed25519")
+	pubBytes, err := os.ReadFile(keyPath + ".pub")
+	if err != nil {
+		return keyPath, "", fmt.Errorf("read Tenki SSH public key %s.pub: %w", keyPath, err)
+	}
+	certPath, err := tenkiSSHCertPath(sessionID, pubBytes)
+	if err != nil {
+		return keyPath, "", err
+	}
+	return keyPath, certPath, nil
+}
+
+func tenkiSSHCertPath(sessionID string, pubKey []byte) (string, error) {
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return "", fmt.Errorf("session id is required for Tenki SSH cert cache")
+	}
+	certDir, err := tenkiSSHStateDir(filepath.Join("ssh-certs", sid))
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(strings.TrimSpace(string(pubKey))))
+	return filepath.Join(certDir, hex.EncodeToString(sum[:])+"-cert.pub"), nil
+}
+
+func tenkiSSHStateDir(elem ...string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	parts := append([]string{home, ".config", "tenki"}, elem...)
+	return filepath.Join(parts...), nil
+}
+
+func (b *tenkiBackend) sshTarget(sessionID, keyPath, certPath string) SSHTarget {
 	return SSHTarget{
-		User:           "tenki",
-		Host:           "sandbox",
-		Key:            keyPath,
-		Port:           "22",
-		TargetOS:       targetLinux,
-		NetworkKind:    networkPublic,
-		SSHConfigProxy: true,
-		ProxyCommand:   b.proxyCommand(sessionID),
+		User:                   "tenki",
+		Host:                   "sandbox",
+		Key:                    keyPath,
+		CertificateFile:        certPath,
+		Port:                   "22",
+		TargetOS:               targetLinux,
+		NoControlMaster:        true,
+		DisableHostKeyChecking: true,
+		NetworkKind:            networkPublic,
+		SSHConfigProxy:         true,
+		ProxyCommand:           b.proxyCommand(sessionID),
 	}
 }
 

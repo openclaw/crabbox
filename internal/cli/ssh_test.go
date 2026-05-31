@@ -387,6 +387,43 @@ func TestSSHArgsIncludeReliabilityOptions(t *testing.T) {
 	}
 }
 
+func TestSSHArgsIncludeCertificateFile(t *testing.T) {
+	t.Setenv("HOME", "/tmp/crabbox-home")
+	got := strings.Join(sshArgs(SSHTarget{
+		User:            "tenki",
+		Host:            "sandbox",
+		Key:             "/tmp/tenki/id_ed25519",
+		CertificateFile: "/tmp/tenki/session-cert.pub",
+		Port:            "22",
+	}, "true"), "\n")
+	if !strings.Contains(got, "CertificateFile=/tmp/tenki/session-cert.pub") {
+		t.Fatalf("sshArgs() missing CertificateFile: %q", got)
+	}
+}
+
+func TestSSHArgsDisableHostKeyChecking(t *testing.T) {
+	t.Setenv("HOME", "/tmp/crabbox-home")
+	got := strings.Join(sshArgs(SSHTarget{
+		User:                   "tenki",
+		Host:                   "sandbox",
+		Key:                    "/tmp/tenki/id_ed25519",
+		Port:                   "22",
+		DisableHostKeyChecking: true,
+	}, "true"), "\n")
+	for _, want := range []string{
+		"StrictHostKeyChecking=no",
+		"UserKnownHostsFile=/dev/null",
+		"LogLevel=ERROR",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("sshArgs() missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "accept-new") || strings.Contains(got, "/tmp/tenki/known_hosts") {
+		t.Fatalf("sshArgs() should not use persistent known_hosts: %q", got)
+	}
+}
+
 func TestSSHArgsAllowTokenUserWithoutIdentityFile(t *testing.T) {
 	t.Setenv("HOME", "/tmp/crabbox-home")
 	got := strings.Join(sshArgs(SSHTarget{

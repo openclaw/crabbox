@@ -7,9 +7,9 @@ Read when:
 - changing `internal/providers/tenki`.
 
 Tenki is an SSH-lease provider. Crabbox asks the Tenki CLI to create and delete
-sandbox sessions, injects Crabbox's per-lease SSH public key at create time, and
-then runs normal Crabbox sync/commands over SSH through Tenki's sandbox SSH
-WebSocket proxy.
+sandbox sessions, then runs normal Crabbox sync/commands over SSH through
+Tenki's sandbox SSH WebSocket proxy using the Tenki-managed SSH key and
+per-session cert.
 
 ## When To Use
 
@@ -96,16 +96,17 @@ CRABBOX_TENKI_DISK_GB
 
 ## Lifecycle
 
-1. Generate a Crabbox per-lease SSH key.
-2. Run `tenki sandbox create --authorized-key <public-key>` with Crabbox
-   metadata and tags.
+1. Run `tenki sandbox create` with Crabbox metadata and tags.
+2. Run `tenki sandbox ssh --session <session-id> -- true` to let the Tenki CLI
+   resolve `~/.config/tenki/ssh/id_ed25519` and mint the session cert under
+   `~/.config/tenki/ssh-certs/<session-id>/`.
 3. Return an SSH target using `ProxyCommand tenki sandbox ssh-proxy --session
-   <session-id>`.
+   <session-id>` plus OpenSSH `CertificateFile=<cert-path>`.
 4. Let core Crabbox perform rsync, command execution, `ssh`, and artifacts.
 5. Run `tenki sandbox terminate <session-id>` on release.
 
 The provider does not expose Tenki's internal node-agent, mesh IPs, or guest IPs.
-All SSH traffic goes through Tenki's supported `ssh-proxy` path.
+All SSH traffic goes through Tenki's supported cert-backed `ssh-proxy` path.
 
 ## Capabilities
 
