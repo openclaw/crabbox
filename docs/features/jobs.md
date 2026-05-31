@@ -86,6 +86,12 @@ Run it:
 crabbox job run test-live
 ```
 
+Attach a harness for proof-aware execution:
+
+```sh
+crabbox job run test-live --harness HARNESS.md
+```
+
 Reuse an existing lease instead of warming a new one:
 
 ```sh
@@ -190,6 +196,12 @@ junit:
   - reports/junit.xml
 downloads:
   - out/report.json=artifacts/report.json
+harness:
+  path: HARNESS.md
+  index: light
+  compliance:
+    require_plan: true
+    require_junit: true
 stop: auto
 ```
 
@@ -197,6 +209,13 @@ With `shell: true` the command is passed to a remote shell verbatim (so `&&`,
 pipes, and environment assignments work). Without it, the command is split on
 whitespace and executed directly. Each `downloads` entry is a
 `remote=local` pair pulled back after the run.
+
+### Harness
+
+Jobs may define `harness:` defaults, and `crabbox job run --harness` can
+override the file for one invocation. The nested `run` receives `--harness` and
+`--index`, then writes harness, grounding, and compliance evidence under
+`.crabbox/runs/<run-or-lease>/`. See [Harnesses](harness.md).
 
 ## Related
 

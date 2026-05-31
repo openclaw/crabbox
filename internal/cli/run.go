@@ -176,6 +176,8 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	applyLocalPatch := fs.Bool("apply-local-patch", false, "apply the local git diff on top of --fresh-pr checkout")
 	envHelper := fs.String("env-helper", "", "persist profile env as a reusable remote helper name under .crabbox/env/")
 	runLabel := fs.String("label", "", "human-readable label for this run")
+	harnessPath := fs.String("harness", "", "harness Markdown file to attach to this run")
+	harnessIndex := fs.String("index", "", "harness grounding index mode: none or light")
 	presetName := fs.String("preset", "", "configured profile preset to expand into a command")
 	scenario := fs.String("scenario", "", "preset variable shorthand for --preset-var scenario=<value>")
 	emitProof := fs.String("emit-proof", "", "write a generated proof block after a successful run")
@@ -318,6 +320,19 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	harnessCfg := HarnessConfig{Path: strings.TrimSpace(*harnessPath), Index: strings.TrimSpace(*harnessIndex)}
+	harnessCfg.Index = effectiveHarnessIndex(harnessCfg.Path, harnessCfg.Index)
+	if err := validateHarnessIndex(harnessCfg.Index); err != nil {
+		return err
+	}
+	harnessDoc, err := loadHarnessDocument(harnessCfg, repo)
+	if err != nil {
+		return err
+	}
+	var harnessGround harnessGrounding
+	if harnessDoc != nil {
+		harnessGround = buildHarnessGrounding(repo, harnessDoc, harnessCfg.Index, command, "", runLabelValue, *noSync, *syncOnly, cfg.Sync.Checksum)
+	}
 	freshPR, err := parseFreshPRSpec(*freshPRValue, repo)
 	if err != nil {
 		return err
@@ -431,6 +446,18 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		result, runErr := delegated.Run(ctx, runReq)
 		if runErr == nil || result.Command > 0 || result.Total > 0 {
 			a.syncExternalRunnersBestEffort(ctx, cfg, backend)
+		}
+		if harnessDoc != nil {
+			harnessArtifacts, meta, harnessErr := writeHarnessLocalEvidence(repo.Root, "", result.LeaseID, harnessDoc, harnessGround, result.ExitCode, result.CommandText, result.ActionsURL, result.Artifacts, nil)
+			if harnessErr != nil && runErr == nil {
+				return harnessErr
+			}
+			for _, artifact := range harnessArtifacts {
+				fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
+			}
+			if runErr == nil && meta != nil && meta.Status != "passed" {
+				runErr = exit(8, "harness compliance failed")
+			}
 		}
 		if err := writeRunLeaseOutput(strings.TrimSpace(*leaseOutput), result.Session); err != nil {
 			if runErr == nil {
@@ -1021,18 +1048,31 @@ afterSync:
 			return recordFailure(err)
 		}
 	}
+	if harnessDoc != nil && harnessCfg.Index != harnessIndexNone {
+		if err := writeHarnessRemoteEvidence(ctx, target, workdir, harnessDoc, harnessGround); err != nil {
+			return recordFailure(err)
+		}
+	}
 	if *syncOnly {
 		printPreflight(target)
 		fmt.Fprintf(a.Stdout, "synced %s\n", workdir)
 		fmt.Fprintln(a.Stderr, formatRunSummary(timings, time.Since(timings.started), 0))
+		runArtifacts, harnessMeta, harnessErr := writeHarnessLocalEvidence(repo.Root, recorder.runID, leaseID, harnessDoc, harnessGround, 0, "sync-only", actionsURL, nil, nil)
+		if harnessErr != nil {
+			return recordFailure(harnessErr)
+		}
 		if *timingJSON {
 			total := time.Since(timings.started)
 			report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, 0, actionsURL)
-			populateRunTimingMetadata(&report, cfg, repo, server, leaseID, recorder.runID, workdir, nil)
+			populateRunTimingMetadata(&report, cfg, repo, server, leaseID, recorder.runID, workdir, runArtifacts)
+			report.Harness = harnessMeta
 			report.Label = runLabelValue
 			finalTimingReport = &report
 		}
 		recorder.Finish(ctx, target, 0, timings.sync, 0, "", false, nil, FailureClassification{})
+		if harnessMeta != nil && harnessMeta.Status != "passed" {
+			return recordFailure(exit(8, "harness compliance failed"))
+		}
 		return nil
 	}
 
@@ -1284,6 +1324,18 @@ afterSync:
 	report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, code, actionsURL)
 	populateRunTimingMetadata(&report, cfg, repo, server, leaseID, recorder.runID, workdir, runArtifacts)
 	report.Label = runLabelValue
+	harnessArtifacts, harnessMeta, harnessErr := writeHarnessLocalEvidence(repo.Root, recorder.runID, leaseID, harnessDoc, harnessGround, code, commandDisplay, actionsURL, runArtifacts, results)
+	if harnessErr != nil {
+		return recordFailure(harnessErr)
+	}
+	if len(harnessArtifacts) > 0 {
+		runArtifacts = append(runArtifacts, harnessArtifacts...)
+		report.Artifacts = runArtifacts
+		for _, artifact := range harnessArtifacts {
+			fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
+		}
+	}
+	report.Harness = harnessMeta
 	if strings.TrimSpace(*emitProof) != "" && code == 0 {
 		template := cfg.ProofTemplates[strings.TrimSpace(*proofTemplate)]
 		proof, err := writeRunProof(strings.TrimSpace(*emitProof), strings.TrimSpace(*proofTemplate), proofRenderInput{
@@ -1372,6 +1424,9 @@ afterSync:
 		printFailureTail(a.Stderr, "stdout", stdoutTail, *captureStdout)
 		printFailureTail(a.Stderr, "stderr", stderrTail, *captureStderr)
 		return recordFailure(ExitError{Code: code, Message: fmt.Sprintf("remote command exited %d", code)})
+	}
+	if harnessMeta != nil && harnessMeta.Status != "passed" {
+		return recordFailure(exit(8, "harness compliance failed"))
 	}
 	return nil
 }

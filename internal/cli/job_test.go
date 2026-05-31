@@ -140,6 +140,33 @@ func TestJobRunDryRunPropagatesArchitecture(t *testing.T) {
 	}
 }
 
+func TestJobRunDryRunPropagatesHarness(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	if err := os.WriteFile(filepath.Join(dir, ".crabbox.yaml"), []byte(`jobs:
+  test:
+    command: pnpm test
+    harness:
+      path: HARNESS.md
+      index: light
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run(context.Background(), []string{"job", "run", "--dry-run", "--id", "blue-lobster", "test"}); err != nil {
+		t.Fatalf("job dry-run failed: %v\nstderr=%s", err, stderr.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "crabbox run --id blue-lobster --no-hydrate --harness HARNESS.md --index light -- pnpm test") {
+		t.Fatalf("harness should be passed to nested run:\n%s", got)
+	}
+}
+
 func TestJobRunDryRunNoHydratePropagatesToRun(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()

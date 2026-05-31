@@ -66,6 +66,7 @@ Provider deep-dives that live here in `features/`:
 
 - [Sync](sync.md): Git file-list manifests, rsync, fingerprints, excludes, guardrails, and sanity checks.
 - [Jobs](jobs.md): named repo-local warmup, hydrate, run, and cleanup workflows.
+- [Harnesses](harness.md): attach intent, grounding, and compliance evidence to runs and jobs.
 - [Actions hydration](actions-hydration.md): let GitHub Actions prepare a runner, then sync local work into that workspace.
 - [Capsules](capsules.md): local-first replay manifests for GitHub Actions failures.
 - [Checkpoints](checkpoints.md): save, restore, and fork reusable remote workspaces.
@@ -94,6 +95,7 @@ Provider deep-dives that live here in `features/`:
 ### Lease lifecycle
 - [warmup](../commands/warmup.md) — provision a warm box
 - [run](../commands/run.md) — sync and run a command
+- [harness](../commands/harness.md) — validate harness files
 - [job](../commands/job.md) — run a named repo job
 - [status](../commands/status.md) — show lease status
 - [list](../commands/list.md) — list active leases

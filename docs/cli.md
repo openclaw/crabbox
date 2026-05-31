@@ -59,11 +59,13 @@ See [warmup](commands/warmup.md), [run](commands/run.md),
 
 ```text
 crabbox sync-plan [--limit <n>]              preview local sync manifest size hotspots
+crabbox harness validate HARNESS.md          validate a harness file
 crabbox job list                              list repo-local configured jobs
 crabbox job run <name>                        run a configured job
 ```
 
-See [sync-plan](commands/sync-plan.md), [job](commands/job.md).
+See [sync-plan](commands/sync-plan.md), [harness](commands/harness.md), and
+[job](commands/job.md).
 
 ### Observability
 

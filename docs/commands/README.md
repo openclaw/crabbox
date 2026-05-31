@@ -15,6 +15,7 @@ same order as the CLI help.
 - [doctor](doctor.md)
 - [warmup](warmup.md)
 - [run](run.md)
+- [harness](harness.md)
 - [job](job.md)
 - [desktop](desktop.md)
 - [media](media.md)

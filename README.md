@@ -94,6 +94,7 @@ crabbox run -- pnpm test
 
 # named repo workflow from .crabbox.yaml
 crabbox job run full-ci
+crabbox job run full-ci --harness HARNESS.md
 
 # or warm a box once, then reuse it
 crabbox warmup                                       # prints cbx_... + a slug
@@ -160,6 +161,9 @@ and authoring guide.
 - **Named repo jobs.** `crabbox job run <name>` lets repos define warmup,
   optional Actions hydration, run command, and cleanup policy in `.crabbox.yaml`.
   See [Jobs](docs/features/jobs.md).
+- **Harness evidence.** `crabbox run --harness HARNESS.md` and
+  `crabbox job run <name> --harness HARNESS.md` attach intent, grounding, and
+  compliance reports to ordinary runs. See [Harnesses](docs/features/harness.md).
 - **Local-first workspace sync.** No clean-checkout requirement. Tracked and
   nonignored files only, fingerprint skip on no-op runs, sanity checks against
   suspicious mass deletions, optional shallow base-ref hydration for
@@ -397,8 +401,9 @@ and the [provider docs](docs/providers/README.md).
 The repo root is a native OpenClaw plugin package. Once installed, it exposes
 Crabbox as agent tools:
 
-- `crabbox_run`, `crabbox_warmup`, `crabbox_status`, `crabbox_list`,
-  `crabbox_stop`
+- `crabbox_run`, `crabbox_harness_validate`,
+  `crabbox_job_run_with_harness`, `crabbox_warmup`, `crabbox_status`,
+  `crabbox_list`, `crabbox_stop`
 
 The plugin shells out to the configured `crabbox` binary with argv arrays, so
 local config, broker login, repo claims, and sync behavior stay owned by the

@@ -43,7 +43,15 @@ test("registers the Crabbox tool surface", () => {
   const tools = registerWithConfig({});
   assert.deepEqual(
     tools.map((tool) => tool.name).sort(),
-    ["crabbox_list", "crabbox_run", "crabbox_status", "crabbox_stop", "crabbox_warmup"],
+    [
+      "crabbox_harness_validate",
+      "crabbox_job_run_with_harness",
+      "crabbox_list",
+      "crabbox_run",
+      "crabbox_status",
+      "crabbox_stop",
+      "crabbox_warmup",
+    ],
   );
 });
 
@@ -127,6 +135,42 @@ test("crabbox_run passes selected provider", async () => {
   ]);
 });
 
+test("crabbox_harness_validate executes bounded validate argv", async () => {
+  const fake = createFakeCrabbox();
+  const tools = registerWithConfig({ binary: fake.file });
+  const result = await getTool(tools, "crabbox_harness_validate").execute("call-1", {
+    path: "HARNESS.md",
+    json: true,
+  });
+  assert.equal(result.details.code, 0);
+  assert.deepEqual(JSON.parse(result.details.stdout).argv, ["harness", "validate", "HARNESS.md", "--json"]);
+});
+
+test("crabbox_job_run_with_harness executes bounded job argv", async () => {
+  const fake = createFakeCrabbox();
+  const tools = registerWithConfig({ binary: fake.file });
+  const result = await getTool(tools, "crabbox_job_run_with_harness").execute("call-1", {
+    job: "full-ci",
+    harness: "HARNESS.md",
+    id: "blue-lobster",
+    index: "light",
+    noHydrate: true,
+  });
+  assert.equal(result.details.code, 0);
+  assert.deepEqual(JSON.parse(result.details.stdout).argv, [
+    "job",
+    "run",
+    "--id",
+    "blue-lobster",
+    "--no-hydrate",
+    "--harness",
+    "HARNESS.md",
+    "--index",
+    "light",
+    "full-ci",
+  ]);
+});
+
 test("crabbox_status includes optional flags", async () => {
   const fake = createFakeCrabbox();
   const tools = registerWithConfig({ binary: fake.file });
@@ -171,6 +215,17 @@ test("disabled run tool fails before invoking crabbox", async () => {
     getTool(tools, "crabbox_run").execute("call-1", {
       id: "blue-lobster",
       command: ["go", "test", "./..."],
+    }),
+    /disabled/,
+  );
+});
+
+test("disabled harness tools fail before invoking crabbox", async () => {
+  const fake = createFakeCrabbox();
+  const tools = registerWithConfig({ binary: fake.file, allowHarness: false });
+  await assert.rejects(
+    getTool(tools, "crabbox_harness_validate").execute("call-1", {
+      path: "HARNESS.md",
     }),
     /disabled/,
   );

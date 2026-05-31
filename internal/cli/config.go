@@ -502,6 +502,7 @@ type JobConfig struct {
 	ForceSyncLarge bool
 	JUnit          []string
 	Downloads      []string
+	Harness        HarnessConfig
 	Stop           string
 }
 
@@ -1429,6 +1430,7 @@ type fileJobConfig struct {
 	ForceSyncLarge *bool                 `yaml:"forceSyncLarge,omitempty"`
 	JUnit          []string              `yaml:"junit,omitempty"`
 	Downloads      []string              `yaml:"downloads,omitempty"`
+	Harness        *fileHarnessConfig    `yaml:"harness,omitempty"`
 	Stop           string                `yaml:"stop,omitempty"`
 }
 
@@ -2645,6 +2647,9 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 	}
 	if len(file.Downloads) > 0 {
 		job.Downloads = appendUniqueStrings(nil, file.Downloads...)
+	}
+	if file.Harness != nil {
+		job.Harness = applyFileHarnessConfig(job.Harness, *file.Harness)
 	}
 	if file.Stop != "" {
 		job.Stop = file.Stop

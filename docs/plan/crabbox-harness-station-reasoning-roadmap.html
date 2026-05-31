@@ -1,0 +1,1093 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crabbox Harness, Station, and Reasoning Box Roadmap</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0d1117;
+      --panel: #151b23;
+      --panel-2: #1f2937;
+      --text: #e6edf3;
+      --muted: #9da7b3;
+      --line: #30363d;
+      --accent: #58a6ff;
+      --accent-2: #7ee787;
+      --warn: #f2cc60;
+      --danger: #ff7b72;
+      --shadow: rgba(0, 0, 0, 0.25);
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f6f8fa;
+        --panel: #ffffff;
+        --panel-2: #f1f6ff;
+        --text: #24292f;
+        --muted: #57606a;
+        --line: #d0d7de;
+        --accent: #0969da;
+        --accent-2: #1a7f37;
+        --warn: #9a6700;
+        --danger: #cf222e;
+        --shadow: rgba(31, 35, 40, 0.12);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    main {
+      max-width: 1160px;
+      margin: 0 auto;
+      padding: 48px 24px 72px;
+    }
+
+    h1,
+    h2,
+    h3 {
+      line-height: 1.12;
+      margin: 0;
+    }
+
+    h1 {
+      max-width: 940px;
+      font-size: clamp(2.4rem, 6vw, 5.25rem);
+      letter-spacing: -0.055em;
+    }
+
+    h2 {
+      margin-bottom: 18px;
+      font-size: clamp(1.65rem, 3vw, 2.45rem);
+      letter-spacing: -0.03em;
+    }
+
+    h3 {
+      margin-bottom: 10px;
+      font-size: 1.12rem;
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    ul,
+    ol {
+      margin: 0;
+      padding-left: 22px;
+    }
+
+    li + li {
+      margin-top: 8px;
+    }
+
+    code {
+      padding: 0.12rem 0.3rem;
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--panel-2) 86%, transparent);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 16px 0 0;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--bg) 80%, #000 20%);
+    }
+
+    pre code {
+      padding: 0;
+      background: transparent;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      font-size: 0.95rem;
+    }
+
+    th,
+    td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: color-mix(in srgb, var(--panel-2) 88%, transparent);
+      color: var(--text);
+      font-weight: 650;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .hero {
+      display: grid;
+      gap: 28px;
+      margin-bottom: 36px;
+      padding: 34px;
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      background:
+        radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 24%, transparent), transparent 34rem),
+        linear-gradient(145deg, color-mix(in srgb, var(--panel) 96%, transparent), color-mix(in srgb, var(--panel-2) 82%, transparent));
+      box-shadow: 0 24px 60px var(--shadow);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      width: fit-content;
+      gap: 8px;
+      align-items: center;
+      padding: 7px 12px;
+      border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+      border-radius: 999px;
+      color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .subtitle {
+      max-width: 880px;
+      color: var(--muted);
+      font-size: 1.18rem;
+    }
+
+    .section {
+      margin-top: 28px;
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      box-shadow: 0 12px 30px var(--shadow);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .card {
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: color-mix(in srgb, var(--panel-2) 66%, transparent);
+    }
+
+    .card strong {
+      color: var(--text);
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .callout {
+      margin: 18px 0;
+      padding: 18px 20px;
+      border-left: 4px solid var(--accent);
+      border-radius: 16px;
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+    }
+
+    .callout.good {
+      border-left-color: var(--accent-2);
+      background: color-mix(in srgb, var(--accent-2) 10%, transparent);
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: color-mix(in srgb, var(--warn) 12%, transparent);
+    }
+
+    .callout.danger {
+      border-left-color: var(--danger);
+      background: color-mix(in srgb, var(--danger) 10%, transparent);
+    }
+
+    .verdict {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      margin-bottom: 12px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--accent-2) 12%, transparent);
+      color: var(--accent-2);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .verdict.risk {
+      background: color-mix(in srgb, var(--danger) 10%, transparent);
+      color: var(--danger);
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .pill {
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--panel-2) 78%, transparent);
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 14px;
+      counter-reset: step;
+    }
+
+    .step {
+      position: relative;
+      padding: 18px 18px 18px 58px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: color-mix(in srgb, var(--panel-2) 58%, transparent);
+    }
+
+    .step::before {
+      counter-increment: step;
+      content: counter(step);
+      position: absolute;
+      left: 18px;
+      top: 18px;
+      width: 26px;
+      height: 26px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #ffffff;
+      font-size: 0.84rem;
+      font-weight: 800;
+    }
+
+    .diagram {
+      display: grid;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .lane {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .node {
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--panel-2) 70%, transparent);
+      text-align: center;
+      font-weight: 650;
+    }
+
+    .arrow {
+      color: var(--muted);
+      font-weight: 800;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .footer-note {
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+
+    @media (max-width: 850px) {
+      main {
+        padding: 24px 14px 48px;
+      }
+
+      .hero,
+      .section {
+        padding: 22px;
+        border-radius: 20px;
+      }
+
+      .grid,
+      .grid-3,
+      .split {
+        grid-template-columns: 1fr;
+      }
+
+      .lane {
+        grid-template-columns: 1fr;
+      }
+
+      .arrow {
+        transform: rotate(90deg);
+        text-align: center;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <span class="eyebrow">Roadmap thesis</span>
+      <h1>Crabbox should be the proof substrate first, and a reasoning host only by explicit choice.</h1>
+      <p class="subtitle">
+        The strongest path is to sell trust in remote work, not to cosplay as another agent brain. Crabbox should make
+        every Codex, OpenClaw, maintainer, and CI-like run more grounded, observable, replayable, and billable. A box
+        that can reason is useful only when it is an explicit station workload with evidence, budgets, policy, and
+        teardown.
+      </p>
+      <div class="pill-row" aria-label="Roadmap keywords">
+        <span class="pill">thin control plane</span>
+        <span class="pill">harness-aware jobs</span>
+        <span class="pill">station leases</span>
+        <span class="pill">opt-in reasoning access</span>
+        <span class="pill">proof and compliance</span>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>The decision</h2>
+      <div class="callout good">
+        <strong>Keep the default Crabbox contract small:</strong> lease a box, sync the real checkout, run a command,
+        stream output, capture visual and file evidence, and release. That is the Peter-aligned product core.
+      </div>
+      <p>
+        The new idea is valid: some boxes should be able to reason. The important distinction is where that capability
+        lives. Reasoning belongs in an explicit station workload selected by the repo or user. Crabbox core should own
+        lifecycle, policy, spend, sync, logs, screenshots, artifacts, and compliance evidence. It should not own the
+        model loop, prompt loop, or agent brain.
+      </p>
+      <div class="callout danger">
+        <strong>The trap:</strong> if "reasoning box" becomes the default story, Crabbox starts competing with the
+        agents it should amplify. That makes the product heavier, harder to trust, harder to secure, and less obviously
+        useful to today's users.
+      </div>
+      <div class="diagram" aria-label="Roadmap flow diagram">
+        <div class="lane">
+          <div class="node">Harness intent</div>
+          <div class="arrow">to</div>
+          <div class="node">Crabbox control plane</div>
+          <div class="arrow">to</div>
+          <div class="node">Proof artifacts</div>
+        </div>
+        <div class="lane">
+          <div class="node">Default runner</div>
+          <div class="arrow">or</div>
+          <div class="node">Station lease</div>
+          <div class="arrow">or</div>
+          <div class="node">Reasoning station</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>What is good, what is bad</h2>
+      <div class="grid">
+        <div class="card">
+          <span class="verdict">Good</span>
+          <h3>Harness as proof wrapper</h3>
+          <p class="muted">
+            This fits Crabbox. It wraps existing runs with intent, scope, grounding, and compliance without changing
+            what a box is. It makes current workflows more valuable immediately.
+          </p>
+        </div>
+        <div class="card">
+          <span class="verdict">Good</span>
+          <h3>Station as warm lease</h3>
+          <p class="muted">
+            This also fits. It is a lifecycle product: keep the workspace warm, supervise a repo command, collect
+            evidence, and stop cleanly.
+          </p>
+        </div>
+        <div class="card">
+          <span class="verdict risk">Bad</span>
+          <h3>LLM inside core</h3>
+          <p class="muted">
+            This is the product fork to avoid. If Crabbox owns prompts, agent state, model routing, and reasoning
+            policy by default, it stops being the neutral substrate.
+          </p>
+        </div>
+        <div class="card">
+          <span class="verdict risk">Bad</span>
+          <h3>Heavy default boxes</h3>
+          <p class="muted">
+            Baking model clients, project runtimes, vector stores, or agent supervisors into ordinary boxes slows down
+            the main value loop and creates support burden before revenue proves it is worth it.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Peter's school of thought</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>1. Crabbox is not the brain</h3>
+          <p class="muted">
+            Codex, OpenClaw, Claude, custom scripts, and repo workflows do reasoning and planning. Crabbox provides
+            grounded execution and evidence.
+          </p>
+        </div>
+        <div class="card">
+          <h3>2. The repo owns runtime weight</h3>
+          <p class="muted">
+            Project dependencies, services, devcontainers, Nix, mise/asdf, CI hydration, and agent loops remain
+            repo-owned choices. Default boxes stay light.
+          </p>
+        </div>
+        <div class="card">
+          <h3>3. Dirty sync is the moat</h3>
+          <p class="muted">
+            Crabbox should excel at running the exact local checkout, including uncommitted changes, on real remote
+            capacity with fast feedback and reproducible evidence.
+          </p>
+        </div>
+        <div class="card">
+          <h3>4. Proof beats autonomy theater</h3>
+          <p class="muted">
+            The product should make every run more reviewable: command, logs, timing, screenshots, JUnit, artifacts,
+            harness, grounding, and compliance reports.
+          </p>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>Peter test:</strong> if a feature does not make today's remote execution loop faster, more trustworthy,
+        easier to review, cheaper to operate, or more billable, it should not be in the next milestone.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Two product lanes</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Lane A: Proof substrate</h3>
+          <p>
+            This ships first. Harness-aware jobs add intent, plan, scope, validation, grounding, and compliance
+            evidence around the existing <code>job run</code> and <code>run</code> flow.
+          </p>
+          <ul>
+            <li>Generic <code>harness</code> language, not <code>ai_harness</code>.</li>
+            <li>Light grounding by default when a harness is present.</li>
+            <li>Compliance reports become first-class run artifacts.</li>
+            <li>OpenClaw gets two bounded tools, not raw shell passthrough.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Lane B: Reasoning station</h3>
+          <p>
+            This comes later and remains opt-in. It is a kept-warm station lease with explicit reasoning access and
+            a repo-owned long-running command.
+          </p>
+          <ul>
+            <li>Crabbox can host reasoning workloads without becoming the reasoning product.</li>
+            <li>The user or repo chooses the model client and loop command.</li>
+            <li>Crabbox enforces policy, budgets, lifecycle, evidence, and shutdown.</li>
+            <li>No coordinator credentials or implicit model credentials live in default boxes.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Phase 1: Harness-aware jobs</h2>
+      <div class="split">
+        <div>
+          <p>
+            This is the highest-value move because it improves the current flow immediately. It gives maintainers and
+            agents a structured way to say what is being tested, why it matters, what files are in scope, and what
+            evidence must exist before a run counts as successful.
+          </p>
+          <div class="callout">
+            <strong>Revenue value:</strong> better run yield, stronger PR evidence, fewer wasted long runs, and a clear
+            paid tier around compliance history, branded reports, and searchable proof.
+          </div>
+        </div>
+        <div>
+          <pre><code>crabbox harness validate HARNESS.md
+crabbox job run regression --harness HARNESS.md --index light
+crabbox run --harness HARNESS.md -- npm test</code></pre>
+        </div>
+      </div>
+      <div class="grid-3" style="margin-top: 18px;">
+        <div class="card">
+          <h3>Harness file</h3>
+          <p class="muted">
+            Markdown with YAML frontmatter: <code>version</code>, <code>template</code>, <code>job</code>,
+            <code>plan_file</code>, <code>scope</code>, <code>validate</code>, and <code>compliance</code>.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Grounding</h3>
+          <p class="muted">
+            Write hashes, git state, branch, dirty summary, sync scope, selected paths, command metadata, and job
+            metadata under <code>.crabbox/grounding/</code>.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Evidence</h3>
+          <p class="muted">
+            Copy <code>harness.md</code>, <code>grounding.json</code>, <code>compliance-report.md</code>, and
+            <code>compliance-report.json</code> into local run artifacts.
+          </p>
+        </div>
+      </div>
+      <div class="callout warn">
+        <strong>MVP cut line:</strong> no vector index, no LLM judging, no scenario database, no autonomous state
+        machine, no agent memory, and no new remote daemon. The first release should be boring: parse, validate,
+        ground, run, collect, report.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Phase 2: Station mode</h2>
+      <p>
+        Station mode should not be a hidden change to <code>run</code>. It should be an explicit long-lived lease with
+        a harness workspace, repo-owned command, heartbeats, logs, WebVNC, artifacts, and compliance reports.
+      </p>
+      <pre><code>crabbox station start \
+  --job agent-loop \
+  --harness HARNESS.md \
+  --command "scripts/agent-loop.sh" \
+  --ttl 10h \
+  --idle-timeout 45m
+
+crabbox station status &lt;id-or-slug&gt;
+crabbox station logs &lt;id-or-slug&gt;
+crabbox station stop &lt;id-or-slug&gt;</code></pre>
+      <div class="callout warn">
+        <strong>Station guardrail:</strong> station is lifecycle infrastructure. It does not add an LLM runtime to
+        Crabbox core. The long-running process is repo-owned and auditable.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Phase 3: Reasoning station</h2>
+      <p>
+        A reasoning station is the safe version of the "box that can think" idea. It is a station profile where the
+        box may receive model credentials or access to a model gateway under explicit policy. The reasoner is a
+        workload, not a Crabbox subsystem.
+      </p>
+      <div class="grid">
+        <div class="card">
+          <h3>What Crabbox owns</h3>
+          <ul>
+            <li>Lease lifecycle, warm pools, and teardown.</li>
+            <li>Dirty sync and workspace preparation.</li>
+            <li>Credential delivery policy and redaction boundaries.</li>
+            <li>Spend caps, TTL, idle timeout, and heartbeats.</li>
+            <li>Logs, screenshots, artifacts, timing, and compliance reports.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>What the workload owns</h3>
+          <ul>
+            <li>Model choice and prompt loop.</li>
+            <li>Planning, tool use, code edits, and review strategy.</li>
+            <li>Repo-specific setup and long-running command.</li>
+            <li>Failure recovery inside the agent loop.</li>
+            <li>How to interpret test failures and propose fixes.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>Recommended naming:</strong> use <code>reasoning-station</code>, <code>agent-station</code>, or
+        <code>profile: reasoning</code>. Avoid making "reasoning box" the default product name because it weakens the
+        thin-substrate story.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>The reasoning station contract</h2>
+      <p>
+        The best version of the reasoning box is not a magic box. It is a normal station with one extra capability:
+        explicit access to a reasoning service under policy. That capability should be visible in config, visible in
+        run evidence, limited by budget, and removable without changing ordinary Crabbox behavior.
+      </p>
+      <div class="grid-3">
+        <div class="card">
+          <h3>Inputs</h3>
+          <ul>
+            <li><code>--harness</code> with scope and compliance expectations.</li>
+            <li>A repo-owned loop command such as <code>scripts/agent-loop.sh</code>.</li>
+            <li>An explicit model access profile or gateway token.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Controls</h3>
+          <ul>
+            <li>TTL, idle timeout, spend cap, and max log volume.</li>
+            <li>Egress allowlist and secret redaction boundaries.</li>
+            <li>Manual stop, heartbeat failure stop, and compliance failure status.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Outputs</h3>
+          <ul>
+            <li>Plan versions, command log, screenshots, and artifacts.</li>
+            <li>Model access receipts without leaking secrets.</li>
+            <li>Compliance report tying the loop back to harness scope.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout danger">
+        <strong>Non-negotiable:</strong> coordinator credentials never enter the box. Model credentials, if used, are
+        scoped workload credentials with explicit TTL, redaction, and audit metadata.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Decision matrix</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Mode</th>
+            <th>Use when</th>
+            <th>Crabbox provides</th>
+            <th>Must not provide by default</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Default runner</strong></td>
+            <td>One command, short to medium feedback, CI-like validation, screenshots, artifacts.</td>
+            <td>Lease, sync, run, logs, timing, artifacts, release.</td>
+            <td>Agent brain, model credentials, long-lived scenario state.</td>
+          </tr>
+          <tr>
+            <td><strong>Harness job</strong></td>
+            <td>A run needs intent, scope, plan evidence, required artifacts, and compliance status.</td>
+            <td>Harness validation, light grounding, compliance report, proof artifacts.</td>
+            <td>Interpretation of the plan as autonomous agent policy.</td>
+          </tr>
+          <tr>
+            <td><strong>Station</strong></td>
+            <td>A repo-owned process needs a warm lease for hours with logs and evidence.</td>
+            <td>Lifecycle, heartbeats, WebVNC, logs, artifacts, TTL, idle timeout.</td>
+            <td>Bundled LLM runtime or hidden orchestration.</td>
+          </tr>
+          <tr>
+            <td><strong>Reasoning station</strong></td>
+            <td>A chosen agent/runtime should run close to the workspace with bounded access.</td>
+            <td>Explicit reasoning access policy, audit trail, spend controls, compliance evidence.</td>
+            <td>Unbounded model access, coordinator credentials, or default bootstrap weight.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>Implementation roadmap</h2>
+      <div class="timeline">
+        <div class="step">
+          <h3>Harness schema and validation</h3>
+          <p>
+            Add frontmatter parsing, validation, and config merge from job defaults plus file frontmatter. Keep the
+            first schema small and generic.
+          </p>
+        </div>
+        <div class="step">
+          <h3>Run integration and light grounding</h3>
+          <p>
+            Add <code>--harness</code> and <code>--index none|light</code> to <code>run</code> and <code>job run</code>.
+            Upload lightweight grounding metadata to the remote workdir and copy it back into local run artifacts.
+          </p>
+        </div>
+        <div class="step">
+          <h3>Compliance reporting</h3>
+          <p>
+            Produce Markdown and JSON compliance reports. Required harness evidence, required artifacts, JUnit, and
+            plan evidence decide whether a successful command remains successful.
+          </p>
+        </div>
+        <div class="step">
+          <h3>OpenClaw plugin tools</h3>
+          <p>
+            Add <code>crabbox_harness_validate</code> and <code>crabbox_job_run_with_harness</code> with typed schemas,
+            disabled-tool guards, timeout handling, and capped output.
+          </p>
+        </div>
+        <div class="step">
+          <h3>Station preview</h3>
+          <p>
+            Add the minimal station lifecycle once harness jobs prove useful: start, status, logs, stop, TTL, idle
+            timeout, and repo-owned command execution.
+          </p>
+        </div>
+        <div class="step">
+          <h3>Reasoning station preview</h3>
+          <p>
+            Add an explicit station profile that can receive model access under policy. Treat this as a premium
+            capability and keep all model/runtime choices outside Crabbox core.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>How to build it</h2>
+      <p>
+        Build the feature as a thin layer over the existing run pipeline. The harness should not create a second
+        executor. It should resolve intent before the run, upload small grounding files after the workspace exists,
+        and write compliance evidence after command/results/artifact collection.
+      </p>
+      <div class="grid">
+        <div class="card">
+          <h3>New core files</h3>
+          <ul>
+            <li><code>internal/cli/harness.go</code>: parse Markdown frontmatter, validate schema, compute hashes.</li>
+            <li><code>internal/cli/harness_grounding.go</code>: build light grounding JSON from repo, git state, sync scope, command, and job metadata.</li>
+            <li><code>internal/cli/harness_compliance.go</code>: evaluate required evidence and render Markdown/JSON reports.</li>
+            <li><code>internal/cli/harness_test.go</code>: parser, validation, merge, and report tests.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Existing files to extend</h3>
+          <ul>
+            <li><code>internal/cli/config.go</code>: add <code>HarnessConfig</code> and <code>JobConfig.Harness</code>.</li>
+            <li><code>internal/cli/job.go</code>: add <code>--harness</code>, <code>--index</code>, dry-run expansion, and job-default merge.</li>
+            <li><code>internal/cli/run.go</code>: add <code>--harness</code>, resolve harness, upload grounding, collect compliance artifacts.</li>
+            <li><code>internal/cli/timing.go</code>: add harness metadata and artifact kinds.</li>
+            <li><code>index.js</code> and <code>openclaw.plugin.json</code>: add two bounded plugin tools.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Harness execution flow</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Stage</th>
+            <th>Where</th>
+            <th>Behavior</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>1. Parse</strong></td>
+            <td><code>harness validate</code>, <code>run</code>, <code>job run</code></td>
+            <td>Read Markdown, split YAML frontmatter from plan body, validate known fields, reject unknown critical fields.</td>
+          </tr>
+          <tr>
+            <td><strong>2. Merge</strong></td>
+            <td><code>job.go</code></td>
+            <td>Merge job-level <code>harness:</code> defaults with file frontmatter. CLI flags win over job defaults.</td>
+          </tr>
+          <tr>
+            <td><strong>3. Ground</strong></td>
+            <td><code>run.go</code></td>
+            <td>Default <code>--index light</code> when a harness is present. Record git SHA, branch, dirty summary, selected paths, hashes, command, job, run label, and sync settings.</td>
+          </tr>
+          <tr>
+            <td><strong>4. Upload</strong></td>
+            <td><code>run.go</code> using the existing SSH input/upload pattern</td>
+            <td>After <code>workdir</code> is known and sync completes, upload <code>harness.md</code> and <code>grounding.json</code> under remote <code>.crabbox/grounding/</code>.</td>
+          </tr>
+          <tr>
+            <td><strong>5. Run</strong></td>
+            <td>existing command path</td>
+            <td>Do not change command execution semantics. Harness wraps the run; it does not interpret or mutate the command.</td>
+          </tr>
+          <tr>
+            <td><strong>6. Evaluate</strong></td>
+            <td>after JUnit/results/artifact collection</td>
+            <td>Check command exit, required plan file, required artifacts, JUnit status, and evidence presence. Failed commands still write reports when context exists.</td>
+          </tr>
+          <tr>
+            <td><strong>7. Report</strong></td>
+            <td><code>run_artifacts.go</code> / local artifact path helpers</td>
+            <td>Write local harness artifacts and append <code>harness</code>, <code>grounding</code>, <code>compliance-report</code>, and <code>compliance-json</code> entries to timing metadata.</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="callout">
+        <strong>Exit rule:</strong> with a harness, command exit <code>0</code> is necessary but not sufficient. Missing required evidence should convert the CLI result to nonzero after writing the compliance report.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Data model</h2>
+      <pre><code>type HarnessConfig struct {
+    Path       string
+    Template   string
+    PlanFile   string
+    Scope      []string
+    Validate   HarnessValidateConfig
+    Compliance HarnessComplianceConfig
+}
+
+type HarnessMetadata struct {
+    Path        string `json:"path"`
+    Template    string `json:"template,omitempty"`
+    HarnessHash string `json:"harnessHash"`
+    PlanHash    string `json:"planHash,omitempty"`
+    Index       string `json:"index"`
+    Status      string `json:"status"`
+}
+
+type TimingReport struct {
+    // existing fields...
+    Harness *HarnessMetadata `json:"harness,omitempty"`
+}</code></pre>
+      <p class="muted">
+        Keep the public schema small. More fields can be added to JSON later, but removing or renaming proof fields will
+        hurt agent workflows and dashboards.
+      </p>
+    </section>
+
+    <section class="section">
+      <h2>PR sequence</h2>
+      <div class="timeline">
+        <div class="step">
+          <h3>PR 1: Harness parser and validator</h3>
+          <p>
+            Add the data types, Markdown/frontmatter parser, validation rules, hash helpers, <code>crabbox harness validate</code>,
+            and tests. No run behavior changes yet.
+          </p>
+        </div>
+        <div class="step">
+          <h3>PR 2: Job and run flag plumbing</h3>
+          <p>
+            Add <code>JobConfig.Harness</code>, <code>--harness</code>, <code>--index none|light</code>, dry-run output, and config merge tests.
+            Still no compliance exit-code change.
+          </p>
+        </div>
+        <div class="step">
+          <h3>PR 3: Grounding artifacts</h3>
+          <p>
+            Generate local grounding, upload it to remote <code>.crabbox/grounding/</code>, copy harness/grounding into
+            <code>.crabbox/runs/&lt;id&gt;/</code>, and add timing JSON metadata.
+          </p>
+        </div>
+        <div class="step">
+          <h3>PR 4: Compliance enforcement</h3>
+          <p>
+            Write Markdown/JSON compliance reports for success and failure. Enforce missing required artifacts/JUnit/plan
+            evidence as a nonzero CLI result.
+          </p>
+        </div>
+        <div class="step">
+          <h3>PR 5: OpenClaw tools and docs</h3>
+          <p>
+            Add <code>crabbox_harness_validate</code> and <code>crabbox_job_run_with_harness</code>, update plugin tests,
+            and document harness examples.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Station build path</h2>
+      <p>
+        Station should be implemented only after harness runs are useful, and it should reuse the same harness and
+        compliance model. Technically, the first station can be a supervised composition of existing primitives:
+        <code>warmup --keep</code>, optional hydration, remote command start, heartbeats/status, logs, and stop.
+      </p>
+      <div class="grid">
+        <div class="card">
+          <h3>First implementation</h3>
+          <ul>
+            <li>Create a lease with existing warmup/acquire code.</li>
+            <li>Resolve harness and upload grounding exactly like <code>run</code>.</li>
+            <li>Start a repo-owned command with a generated station ID and log path.</li>
+            <li>Expose status/logs/stop by reading lease/run state and remote log files.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Defer deliberately</h3>
+          <ul>
+            <li>No new daemon in the first station release.</li>
+            <li>No semantic task scheduler.</li>
+            <li>No model-specific orchestration.</li>
+            <li>No hidden restart policy beyond explicit user settings.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Reasoning station build path</h2>
+      <p>
+        Implement reasoning station as policy and credential plumbing on top of station, not as a new executor. The
+        initial version can be a named profile that allows a scoped model gateway token to be exposed to the repo-owned
+        command.
+      </p>
+      <div class="grid-3">
+        <div class="card">
+          <h3>Config</h3>
+          <p class="muted">
+            <code>station.reasoning.enabled</code>, model gateway name, allowed env vars, egress profile, max TTL, max
+            spend, and required harness compliance.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Runtime</h3>
+          <p class="muted">
+            Inject only scoped workload credentials. Record that access was granted, but never write token values to
+            logs, timing JSON, reports, or artifacts.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Evidence</h3>
+          <p class="muted">
+            Compliance reports should say which reasoning profile was used, which command ran, which budget applied,
+            and whether required proof was produced.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Milestone gates</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Milestone</th>
+            <th>Ship only if</th>
+            <th>Stop if</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Harness-aware jobs</strong></td>
+            <td>Existing users can attach intent and get better PR evidence with no workflow rewrite.</td>
+            <td>The design requires a daemon, model call, remote database, or new box bootstrap weight.</td>
+          </tr>
+          <tr>
+            <td><strong>Station mode</strong></td>
+            <td>Harness runs show demand for long-lived workspaces and users ask for logs/status/stop around them.</td>
+            <td>Station becomes an agent framework instead of lease supervision and evidence capture.</td>
+          </tr>
+          <tr>
+            <td><strong>Reasoning station</strong></td>
+            <td>Power users already run agent loops manually and will pay for safer lifecycle, policy, and proof.</td>
+            <td>The feature requires Crabbox to choose the model, own prompts, or interpret task success semantically.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>Revenue sequence</h2>
+      <div class="grid-3">
+        <div class="card">
+          <h3>Now: proof and compliance</h3>
+          <p class="muted">
+            Sell better evidence for PRs, autoreview, maintainers, and teams. The package is trust: searchable run
+            history, compliance reports, branded proof, and fewer ambiguous failures.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Next: reliable long runs</h3>
+          <p class="muted">
+            Station mode increases lease duration and user trust for multi-hour workflows. The package is control:
+            status, logs, WebVNC, stop, replayable artifacts, and spend boundaries.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Later: reasoning access</h3>
+          <p class="muted">
+            Reasoning stations can be priced around long-lived compute, warm pools, model-access policy, audit logs,
+            and high-value agent workloads. The package is safe autonomy hosting, not another chatbot.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Anti-goals</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Do not ship hidden agents</h3>
+          <p class="muted">
+            No implicit LLM runtime, hidden coordinator, or default model credentials inside ordinary Crabbox boxes.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Do not thicken the default box</h3>
+          <p class="muted">
+            Avoid increasing bootstrap weight for users who only need sync, run, proof, and release.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Do not make OpenClaw the product identity</h3>
+          <p class="muted">
+            OpenClaw should remain an important integration. Crabbox should be generic infrastructure for maintainers
+            and agents.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Do not confuse station with autonomy</h3>
+          <p class="muted">
+            Station means a kept-warm lease with lifecycle controls. Autonomy is supplied by the repo-owned command.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Test plan for the first implementation phase</h2>
+      <ul>
+        <li>Go tests for harness frontmatter parsing, validation errors, and config merge from job defaults plus file frontmatter.</li>
+        <li>Go tests for <code>job run --dry-run --harness</code> command expansion and <code>run --harness</code> option validation.</li>
+        <li>Fake-SSH run tests for success, command failure, missing required artifact, missing plan file, and JUnit failure.</li>
+        <li>Timing JSON tests proving harness metadata and artifact entries are included.</li>
+        <li>Plugin tests for tool registration, schemas, argv shape, timeout behavior, and disabled-tool guard behavior.</li>
+        <li>Docs checks covering harness files, compliance reports, and station mode preview.</li>
+      </ul>
+    </section>
+
+    <p class="footer-note">
+      Bottom line: ship Harness-Aware Jobs first because they monetize trust and proof in the existing flow. Add Station
+      next because it monetizes reliable long-running work. Add Reasoning Station later as an explicit, policy-bound
+      station profile for users who want boxes that can reason without turning Crabbox itself into the brain.
+    </p>
+  </main>
+</body>
+</html>

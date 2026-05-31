@@ -1827,7 +1827,19 @@ func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
 		ForceSyncLarge: &enabled,
 		JUnit:          []string{"junit.xml", "junit.xml"},
 		Downloads:      []string{"out=out", "out=out"},
-		Stop:           "always",
+		Harness: &fileHarnessConfig{
+			Path:     "HARNESS.md",
+			Index:    harnessIndexLight,
+			Template: "regression",
+			PlanFile: "PLAN.md",
+			Scope:    yamlStringList{"internal/cli/**"},
+			Compliance: &fileHarnessComplianceConfig{
+				RequirePlan:       &enabled,
+				RequireJUnit:      &enabled,
+				RequiredArtifacts: yamlStringList{"junit"},
+			},
+		},
+		Stop: "always",
 	})
 	if job.Provider != "aws" || job.Target != targetLinux || job.WindowsMode != windowsModeWSL2 || job.Profile != "ci" || job.Class != "large" || job.Architecture != "arm64" || job.ServerType != "m8i.large" || job.Market != "on-demand" {
 		t.Fatalf("basic job fields not applied: %#v", job)
@@ -1846,5 +1858,8 @@ func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
 	}
 	if !job.Shell || job.Command != "pnpm test" || !job.NoSync || job.SyncOnly || job.Checksum == nil || !*job.Checksum || !job.ForceSyncLarge || len(job.JUnit) != 1 || len(job.Downloads) != 1 || job.Stop != "always" {
 		t.Fatalf("command/sync fields not applied: %#v", job)
+	}
+	if job.Harness.Path != "HARNESS.md" || job.Harness.Index != harnessIndexLight || job.Harness.Template != "regression" || job.Harness.PlanFile != "PLAN.md" || !job.Harness.Compliance.RequirePlan || !job.Harness.Compliance.RequireJUnit || len(job.Harness.Compliance.RequiredArtifacts) != 1 {
+		t.Fatalf("harness not applied: %#v", job.Harness)
 	}
 }

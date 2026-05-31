@@ -62,6 +62,7 @@ function readConfig(api) {
     maxOutputBytes: readPositiveInteger(raw, "maxOutputBytes", DEFAULT_MAX_OUTPUT_BYTES),
     timeoutSeconds: readPositiveInteger(raw, "timeoutSeconds", DEFAULT_TIMEOUT_SECONDS),
     allowRun: readBoolean(raw, "allowRun", true),
+    allowHarness: readBoolean(raw, "allowHarness", true),
     allowWarmup: readBoolean(raw, "allowWarmup", true),
     allowStop: readBoolean(raw, "allowStop", true),
   };
@@ -290,6 +291,110 @@ function registerRun(api, config) {
   });
 }
 
+function registerHarnessValidate(api, config) {
+  api.registerTool({
+    name: "crabbox_harness_validate",
+    description: "Validate a Crabbox harness Markdown file.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["path"],
+      properties: {
+        path: {
+          type: "string",
+          description: "Path to a harness Markdown file.",
+        },
+        json: {
+          type: "boolean",
+          description: "Pass --json.",
+        },
+        timeoutSeconds: {
+          type: "number",
+          description: "Local wrapper timeout for this Crabbox CLI invocation.",
+        },
+      },
+    },
+    async execute(_toolCallId, params, signal) {
+      if (!config.allowHarness) {
+        throw new Error("crabbox_harness_validate is disabled by plugin config");
+      }
+      const args = ["harness", "validate", readString(params, "path")];
+      maybePushBool(args, "--json", params?.json);
+      return execute(config, args, params, signal);
+    },
+  });
+}
+
+function registerJobRunWithHarness(api, config) {
+  api.registerTool({
+    name: "crabbox_job_run_with_harness",
+    description: "Run a configured Crabbox job with an explicit harness file.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["job", "harness"],
+      properties: {
+        job: {
+          type: "string",
+          description: "Configured Crabbox job name.",
+        },
+        harness: {
+          type: "string",
+          description: "Path to a harness Markdown file.",
+        },
+        id: {
+          type: "string",
+          description: "Existing Crabbox lease ID or friendly slug.",
+        },
+        index: {
+          type: "string",
+          enum: ["none", "light"],
+          description: "Harness grounding index mode.",
+        },
+        noHydrate: {
+          type: "boolean",
+          description: "Pass --no-hydrate.",
+        },
+        githubRunner: {
+          type: "boolean",
+          description: "Pass --github-runner.",
+        },
+        stop: {
+          type: "string",
+          enum: ["auto", "always", "success", "failure", "never"],
+          description: "Stop policy.",
+        },
+        dryRun: {
+          type: "boolean",
+          description: "Pass --dry-run.",
+        },
+        timeoutSeconds: {
+          type: "number",
+          description: "Local wrapper timeout for this Crabbox CLI invocation.",
+        },
+      },
+    },
+    async execute(_toolCallId, params, signal) {
+      if (!config.allowHarness) {
+        throw new Error("crabbox_job_run_with_harness is disabled by plugin config");
+      }
+      if (!config.allowRun) {
+        throw new Error("crabbox_job_run_with_harness requires allowRun=true");
+      }
+      const args = ["job", "run"];
+      maybePush(args, "--id", readString(params, "id"));
+      maybePushBool(args, "--no-hydrate", params?.noHydrate);
+      maybePushBool(args, "--github-runner", params?.githubRunner);
+      maybePush(args, "--stop", readString(params, "stop"));
+      maybePush(args, "--harness", readString(params, "harness"));
+      maybePush(args, "--index", readString(params, "index"));
+      maybePushBool(args, "--dry-run", params?.dryRun);
+      args.push(readString(params, "job"));
+      return execute(config, args, params, signal);
+    },
+  });
+}
+
 function registerWarmup(api, config) {
   api.registerTool({
     name: "crabbox_warmup",
@@ -450,6 +555,8 @@ export default {
   register(api) {
     const config = readConfig(api);
     registerRun(api, config);
+    registerHarnessValidate(api, config);
+    registerJobRunWithHarness(api, config);
     registerWarmup(api, config);
     registerStatus(api, config);
     registerList(api, config);

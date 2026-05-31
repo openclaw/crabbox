@@ -6,7 +6,7 @@
     "onStartup": true
   },
   "contracts": {
-    "tools": ["crabbox_run", "crabbox_warmup", "crabbox_status", "crabbox_list", "crabbox_stop"]
+    "tools": ["crabbox_run", "crabbox_harness_validate", "crabbox_job_run_with_harness", "crabbox_warmup", "crabbox_status", "crabbox_list", "crabbox_stop"]
   },
   "configSchema": {
     "type": "object",
@@ -30,6 +30,11 @@
       "allowRun": {
         "type": "boolean",
         "description": "Allow the crabbox_run tool.",
+        "default": true
+      },
+      "allowHarness": {
+        "type": "boolean",
+        "description": "Allow harness validation and harness job run tools.",
         "default": true
       },
       "allowWarmup": {

@@ -37,6 +37,7 @@ crabbox job run <name>
 crabbox job run --dry-run <name>
 crabbox job run --id <lease-or-slug> <name>
 crabbox job run --stop never <name>
+crabbox job run --harness HARNESS.md <name>
 crabbox job run --github-runner <name>
 ```
 
@@ -55,6 +56,8 @@ supplied, the job runs against that existing lease.
 | `--no-hydrate` | Skip configured Actions hydration for this run. |
 | `--github-runner` | Hydrate by registering a GitHub self-hosted runner instead of local SSH execution. Forces `--github-runner` on the nested `actions hydrate` call. |
 | `--stop <policy>` | Override the job's stop policy: `auto`, `always`, `success`, `failure`, or `never`. |
+| `--harness <path>` | Attach a harness Markdown file to the nested `run`. |
+| `--index none\|light` | Override harness grounding index mode. Defaults to `light` when a harness is present. |
 | `--dry-run` | Print the planned `crabbox` commands without running them. |
 
 ### Stop policies
@@ -123,6 +126,7 @@ Actions hydration:
 Command and sync:
 
 - `shell`, `command`, `noSync`, `syncOnly`, `checksum`, `forceSyncLarge`, `junit`, `downloads`.
+- `harness.path`, `harness.index`, `harness.template`, `harness.plan_file`, `harness.scope`, `harness.compliance`.
 - `stop`: `auto`, `always`, `success`, `failure`, or `never`.
 
 ### Command execution

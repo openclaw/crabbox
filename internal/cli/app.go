@@ -64,6 +64,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.warmup(ctx, helpArgs), true
 	case "run":
 		return a.runCommand(ctx, helpArgs), true
+	case "harness":
+		return nil, false
 	case "job":
 		return nil, false
 	case "sync-plan":
@@ -148,6 +150,7 @@ Commands:
   doctor      Check local and broker/provider readiness
   warmup      Lease a box and wait until it is ready
   run         Sync the repo, run a remote command, stream output
+  harness     Validate harness files used by proof-aware runs
   job         Run named repo-local Crabbox jobs
   desktop     Launch apps into a visible desktop session
   media       Create preview artifacts from recorded desktop videos

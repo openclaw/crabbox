@@ -44,6 +44,8 @@ activation, and the config schema:
   "contracts": {
     "tools": [
       "crabbox_run",
+      "crabbox_harness_validate",
+      "crabbox_job_run_with_harness",
       "crabbox_warmup",
       "crabbox_status",
       "crabbox_list",
@@ -55,21 +57,23 @@ activation, and the config schema:
 ```
 
 The runtime entrypoint is `index.js`; its default export exposes
-`register(api)`, which reads plugin config and registers the five tools. Tests
+`register(api)`, which reads plugin config and registers the tools. Tests
 in `index.test.js` lock the tool set, the provider enum, argv shapes, env
 passing, and the disabled-tool guard, so a refactor cannot silently change the
 agent-facing contract.
 
 ## Tools
 
-The plugin registers exactly five tools:
+The plugin registers a bounded tool surface:
 
 ```text
-crabbox_run      run a command on an existing lease after syncing the repo
-crabbox_warmup   provision or reuse a lease and wait until it is ready
-crabbox_status   read the current state of a lease
-crabbox_list     list current machines for the owner/org
-crabbox_stop     stop a kept lease by ID or slug
+crabbox_run                   run a command on an existing lease after syncing the repo
+crabbox_harness_validate      validate a harness Markdown file
+crabbox_job_run_with_harness  run a configured job with an explicit harness
+crabbox_warmup                provision or reuse a lease and wait until it is ready
+crabbox_status                read the current state of a lease
+crabbox_list                  list current machines for the owner/org
+crabbox_stop                  stop a kept lease by ID or slug
 ```
 
 Unlike a generic shell tool, each tool takes a **typed parameter object** (not
@@ -94,6 +98,27 @@ Runs `crabbox run --id <id> [flags] -- <command...>`.
 | `debug` | boolean | `--debug` |
 | `reclaim` | boolean | `--reclaim` |
 | `junit` | string | `--junit` (comma-separated remote paths) |
+| `timeoutSeconds` | number | per-call wrapper timeout |
+
+### `crabbox_harness_validate`
+
+Runs `crabbox harness validate <path> [--json]`. Parameters: `path` (required),
+`json`, `timeoutSeconds`.
+
+### `crabbox_job_run_with_harness`
+
+Runs `crabbox job run [flags] --harness <path> <job>`.
+
+| Parameter | Type | Maps to |
+|:----------|:-----|:--------|
+| `job` (required) | string | positional job name |
+| `harness` (required) | string | `--harness` |
+| `id` | string | `--id` |
+| `index` | enum | `--index none\|light` |
+| `noHydrate` | boolean | `--no-hydrate` |
+| `githubRunner` | boolean | `--github-runner` |
+| `stop` | enum | `--stop` |
+| `dryRun` | boolean | `--dry-run` |
 | `timeoutSeconds` | number | per-call wrapper timeout |
 
 ### `crabbox_warmup`
@@ -131,9 +156,10 @@ Runs `crabbox stop [--provider <p>] <id>`. Parameters: `id` (required),
 
 ## Tool Gating
 
-`crabbox_run`, `crabbox_warmup`, and `crabbox_stop` can be disabled per install
-by setting `allowRun`, `allowWarmup`, or `allowStop` to `false` in plugin
-config. A disabled tool is still registered, but its `execute` throws
+`crabbox_run`, the harness tools, `crabbox_warmup`, and `crabbox_stop` can be
+disabled per install by setting `allowRun`, `allowHarness`, `allowWarmup`, or
+`allowStop` to `false` in plugin config. A disabled tool is still registered,
+but its `execute` throws
 (`"... is disabled by plugin config"`) before the binary is invoked.
 `crabbox_status` and `crabbox_list` are read-only and always allowed.
 
@@ -148,6 +174,7 @@ The plugin accepts six optional config keys; the schema sets
 | `maxOutputBytes` | number | `60000` | Cap on captured stdout/stderr returned to the model per stream. |
 | `timeoutSeconds` | number | `1800` | Default wrapper timeout for a Crabbox CLI invocation. |
 | `allowRun` | boolean | `true` | Gate `crabbox_run`. |
+| `allowHarness` | boolean | `true` | Gate harness validation and harness job tools. |
 | `allowWarmup` | boolean | `true` | Gate `crabbox_warmup`. |
 | `allowStop` | boolean | `true` | Gate `crabbox_stop`. |
 

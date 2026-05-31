@@ -7,30 +7,31 @@ import (
 )
 
 type TimingReport struct {
-	Provider      string        `json:"provider"`
-	LeaseID       string        `json:"leaseId,omitempty"`
-	Slug          string        `json:"slug,omitempty"`
-	SyncMs        int64         `json:"syncMs"`
-	SyncPhases    []TimingPhase `json:"syncPhases,omitempty"`
-	SyncSkipped   bool          `json:"syncSkipped"`
-	SyncDelegated bool          `json:"syncDelegated,omitempty"`
-	CommandMs     int64         `json:"commandMs"`
-	CommandPhases []TimingPhase `json:"commandPhases,omitempty"`
-	TotalMs       int64         `json:"totalMs"`
-	ExitCode      int           `json:"exitCode"`
-	ActionsRunURL string        `json:"actionsRunUrl,omitempty"`
-	RunID         string        `json:"runId,omitempty"`
-	Label         string        `json:"label,omitempty"`
-	MachineType   string        `json:"machineType,omitempty"`
-	RepoPath      string        `json:"repoPath,omitempty"`
-	Workdir       string        `json:"workdir,omitempty"`
-	StopCommand   string        `json:"stopCommand,omitempty"`
-	IdleTimeout   string        `json:"idleTimeout,omitempty"`
-	BlockedStage  string        `json:"blockedStage,omitempty"`
-	RetryLikely   string        `json:"retryLikely,omitempty"`
-	Artifacts     []runArtifact `json:"artifacts,omitempty"`
-	LeaseStopped  *bool         `json:"leaseStopped,omitempty"`
-	LeaseStopErr  string        `json:"leaseStopError,omitempty"`
+	Provider      string           `json:"provider"`
+	LeaseID       string           `json:"leaseId,omitempty"`
+	Slug          string           `json:"slug,omitempty"`
+	SyncMs        int64            `json:"syncMs"`
+	SyncPhases    []TimingPhase    `json:"syncPhases,omitempty"`
+	SyncSkipped   bool             `json:"syncSkipped"`
+	SyncDelegated bool             `json:"syncDelegated,omitempty"`
+	CommandMs     int64            `json:"commandMs"`
+	CommandPhases []TimingPhase    `json:"commandPhases,omitempty"`
+	TotalMs       int64            `json:"totalMs"`
+	ExitCode      int              `json:"exitCode"`
+	ActionsRunURL string           `json:"actionsRunUrl,omitempty"`
+	RunID         string           `json:"runId,omitempty"`
+	Label         string           `json:"label,omitempty"`
+	MachineType   string           `json:"machineType,omitempty"`
+	RepoPath      string           `json:"repoPath,omitempty"`
+	Workdir       string           `json:"workdir,omitempty"`
+	StopCommand   string           `json:"stopCommand,omitempty"`
+	IdleTimeout   string           `json:"idleTimeout,omitempty"`
+	BlockedStage  string           `json:"blockedStage,omitempty"`
+	RetryLikely   string           `json:"retryLikely,omitempty"`
+	Artifacts     []runArtifact    `json:"artifacts,omitempty"`
+	Harness       *HarnessMetadata `json:"harness,omitempty"`
+	LeaseStopped  *bool            `json:"leaseStopped,omitempty"`
+	LeaseStopErr  string           `json:"leaseStopError,omitempty"`
 }
 
 type TimingPhase struct {

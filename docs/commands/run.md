@@ -23,6 +23,7 @@ crabbox run --slug update-flow-smoke -- pnpm test:changed
 crabbox run --pond alpha --slug web -- pnpm test:integration
 crabbox run --fresh-pr example-org/my-app#123 --script ./scripts/e2e-smoke.sh
 crabbox run --id cbx_abcdef123456 --junit junit.xml -- go test ./...
+crabbox run --harness HARNESS.md --index light -- pnpm test
 crabbox run --provider ssh --target macos --static-host mac-studio.local -- xcodebuild test
 crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local -- dotnet test
 crabbox run --profile live-qa --preset qa-live --scenario login-regression --emit-proof /tmp/proof.md --stop-after success
@@ -31,6 +32,20 @@ crabbox run --profile live-qa --preset qa-live --scenario login-regression --emi
 The trailing command after `--` is sent to the box verbatim as argv. Use
 `--shell` to run it through the remote shell instead, for multi-statement
 snippets, pipes, or shell expansion.
+
+## Harnesses
+
+Pass `--harness HARNESS.md` to attach intent, scope, grounding, and compliance
+evidence to a run. When a harness is present, `--index` defaults to `light`,
+which writes lightweight grounding metadata locally and, for SSH-backed runs,
+uploads `harness.md` and `grounding.json` under remote `.crabbox/grounding/`.
+
+Completed harness runs write `harness.md`, `grounding.json`,
+`compliance-report.md`, and `compliance-report.json` under
+`.crabbox/runs/<run-or-lease>/`. A harness can make an otherwise successful
+command fail the CLI when required plan, JUnit, or artifact evidence is missing.
+Use `crabbox harness validate HARNESS.md` to check the file before spending
+capacity. See [Harnesses](../features/harness.md).
 
 ## Leasing model
 

@@ -56,6 +56,8 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 	noHydrate := fs.Bool("no-hydrate", false, "skip configured Actions hydration")
 	githubRunner := fs.Bool("github-runner", false, "hydrate by registering a GitHub self-hosted runner instead of local SSH execution")
 	stopOverride := fs.String("stop", "", "stop policy: auto, always, success, failure, never")
+	harnessPath := fs.String("harness", "", "harness Markdown file to attach to the run")
+	indexMode := fs.String("index", "", "harness grounding index mode: none or light")
 	dryRun := fs.Bool("dry-run", false, "print the planned Crabbox commands without running them")
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -73,6 +75,16 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 		return exit(2, "job %q is not configured", name)
 	}
 	if err := validateJobConfig(name, job); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*harnessPath) != "" {
+		job.Harness.Path = strings.TrimSpace(*harnessPath)
+	}
+	if strings.TrimSpace(*indexMode) != "" {
+		job.Harness.Index = strings.TrimSpace(*indexMode)
+	}
+	job.Harness.Index = effectiveHarnessIndex(job.Harness.Path, job.Harness.Index)
+	if err := validateHarnessIndex(job.Harness.Index); err != nil {
 		return err
 	}
 	stopPolicy := normalizeJobStopPolicy(job.Stop, *stopOverride)
@@ -298,6 +310,12 @@ func jobRunArgs(job JobConfig, leaseID string, noHydrate bool) []string {
 	}
 	if len(job.JUnit) > 0 {
 		args = append(args, "--junit", strings.Join(job.JUnit, ","))
+	}
+	if strings.TrimSpace(job.Harness.Path) != "" {
+		args = append(args, "--harness", strings.TrimSpace(job.Harness.Path))
+	}
+	if strings.TrimSpace(job.Harness.Index) != "" {
+		args = append(args, "--index", strings.TrimSpace(job.Harness.Index))
 	}
 	for _, download := range job.Downloads {
 		args = append(args, "--download", download)
