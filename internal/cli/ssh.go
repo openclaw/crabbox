@@ -854,7 +854,7 @@ func remoteCommandWithEnvFiles(workdir string, env map[string]string, envFiles [
 	var b strings.Builder
 	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
 	b.WriteString("bash -lc ")
-	b.WriteString(shellQuote(`exec "$@"`))
+	b.WriteString(shellQuote("cd " + shellQuote(workdir) + ` && exec "$@"`))
 	b.WriteString(" bash")
 	for _, word := range command {
 		b.WriteByte(' ')
@@ -875,7 +875,7 @@ func remoteShellCommandWithEnvFiles(workdir string, env map[string]string, envFi
 	var b strings.Builder
 	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
 	b.WriteString("bash -lc ")
-	b.WriteString(shellQuote(script))
+	b.WriteString(shellQuote("cd " + shellQuote(workdir) + " && " + script))
 	return b.String()
 }
 

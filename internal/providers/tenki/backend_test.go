@@ -26,9 +26,9 @@ func TestTenkiCreateAddsMetadata(t *testing.T) {
 	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
 		switch strings.Join(req.Args, " ") {
-		case "sandbox create --endpoint https://api.tenki.test --workspace ws_1 --project proj_1 --no-wait --name crabbox-blue --metadata crabbox_provider=tenki --metadata crabbox_lease_id=cbx_123 --metadata crabbox_slug=blue --tags crabbox,crabbox-provider-tenki --sticky --max-duration 1h0m0s --idle-timeout 30m0s --cpu 4 --memory-mb 8192 --disk-size-gb 40 --image ubuntu:tenki":
-			return LocalCommandResult{Stdout: "id: 00000000-0000-0000-0000-000000000001\n", ExitCode: 0}, nil
-		case "sandbox get --endpoint https://api.tenki.test --json 00000000-0000-0000-0000-000000000001":
+		case "sandbox create --endpoint https://api.tenki.test --workspace ws_1 --project proj_1 --no-wait --output json --name crabbox-blue --metadata crabbox_provider=tenki --metadata crabbox_lease_id=cbx_123 --metadata crabbox_slug=blue --tags crabbox,crabbox-provider-tenki --sticky --max-duration 1h0m0s --idle-timeout 30m0s --cpu 4 --memory-mb 8192 --disk-size-gb 40 --image ubuntu:tenki":
+			return LocalCommandResult{Stdout: `{"id":"00000000-0000-0000-0000-000000000001"}`, ExitCode: 0}, nil
+		case "sandbox get --endpoint https://api.tenki.test --output json 00000000-0000-0000-0000-000000000001":
 			return LocalCommandResult{Stdout: `{"id":"00000000-0000-0000-0000-000000000001","name":"crabbox-blue","state":"RUNNING","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}`}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
@@ -66,7 +66,7 @@ func TestTenkiCreateAddsMetadata(t *testing.T) {
 	}
 }
 
-func TestTenkiCreateRequiresParsedSessionID(t *testing.T) {
+func TestTenkiCreateRequiresJSONSessionID(t *testing.T) {
 	runner := &fakeRunner{}
 	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
@@ -80,8 +80,8 @@ func TestTenkiCreateRequiresParsedSessionID(t *testing.T) {
 		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
 	}
 	if _, err := backend.createSession(context.Background(), backend.configForRun(), "crabbox-blue", "cbx_123", "blue", true); err == nil {
-		t.Fatal("expected createSession to reject unparsable create output")
-	} else if !strings.Contains(err.Error(), "did not return a session id") {
+		t.Fatal("expected createSession to reject invalid create output")
+	} else if !strings.Contains(err.Error(), "parse tenki sandbox create JSON") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -93,7 +93,7 @@ func TestTenkiEnsureSessionReadyResumesPausedSession(t *testing.T) {
 		switch strings.Join(req.Args, " ") {
 		case "sandbox resume --session session-1":
 			return LocalCommandResult{ExitCode: 0}, nil
-		case "sandbox get --json session-1":
+		case "sandbox get --output json session-1":
 			return LocalCommandResult{Stdout: `{"id":"session-1","state":"RUNNING"}`}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
@@ -124,7 +124,7 @@ func TestTenkiEnsureSessionReadySurfacesResumeFailure(t *testing.T) {
 		switch strings.Join(req.Args, " ") {
 		case "sandbox resume --session session-1":
 			return LocalCommandResult{ExitCode: 0}, nil
-		case "sandbox get --json session-1":
+		case "sandbox get --output json session-1":
 			return LocalCommandResult{Stdout: `{"id":"session-1","state":"PAUSED","last_resume_error":"capacity unavailable"}`}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
@@ -148,7 +148,15 @@ func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 		Endpoint: "https://api.tenki.test",
 		Gateway:  "wss://gateway.tenki.test",
 	}}}
-	target := backend.sshTarget("00000000-0000-0000-0000-000000000001", "/tmp/id_ed25519", "/tmp/session-cert.pub")
+	target := backend.sshTarget(tenkiSSHCommandOutput{
+		SessionID:       "00000000-0000-0000-0000-000000000001",
+		User:            "tenki",
+		Host:            "sandbox",
+		Port:            22,
+		IdentityFile:    "/tmp/id_ed25519",
+		CertificateFile: "/tmp/session-cert.pub",
+		ProxyCommand:    "'/opt/Tenki CLI/tenki' sandbox ssh-proxy --session 00000000-0000-0000-0000-000000000001 --endpoint https://api.tenki.test --gateway wss://gateway.tenki.test",
+	})
 	if !target.SSHConfigProxy || target.Host != "sandbox" || target.User != "tenki" || target.Key != "/tmp/id_ed25519" || target.CertificateFile != "/tmp/session-cert.pub" {
 		t.Fatalf("unexpected target: %#v", target)
 	}
@@ -156,7 +164,7 @@ func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 		t.Fatalf("tenki target should keep SSH mux enabled and disable persistent host keys: %#v", target)
 	}
 	for _, want := range []string{
-		"'/opt/Tenki CLI/tenki' sandbox ssh-proxy",
+		`"/opt/Tenki CLI/tenki" sandbox ssh-proxy`,
 		"--session 00000000-0000-0000-0000-000000000001",
 		"--endpoint https://api.tenki.test",
 		"--gateway wss://gateway.tenki.test",
@@ -164,6 +172,14 @@ func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 		if !strings.Contains(target.ProxyCommand, want) {
 			t.Fatalf("proxy command %q missing %q", target.ProxyCommand, want)
 		}
+	}
+}
+
+func TestTenkiOpenSSHProxyCommandNormalizesSingleQuotes(t *testing.T) {
+	got := tenkiOpenSSHProxyCommand(`'/opt/Tenki CLI/tenki' 'sandbox' 'ssh-proxy' '--session' 'session-1' '--gateway' 'wss://edge.example/v1/ssh/session-1'`)
+	want := `"/opt/Tenki CLI/tenki" sandbox ssh-proxy --session session-1 --gateway wss://edge.example/v1/ssh/session-1`
+	if got != want {
+		t.Fatalf("proxy=%q want %q", got, want)
 	}
 }
 
@@ -178,45 +194,37 @@ func TestTenkiSessionToServerDoesNotExposeSessionIDAsIP(t *testing.T) {
 	}
 }
 
-func TestTenkiSSHMaterialPathsUsesManagedTenkiState(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	sshDir := filepath.Join(home, ".config", "tenki", "ssh")
-	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+func TestTenkiWaitForSSHCommandUsesStructuredOutput(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "id_ed25519")
+	certPath := filepath.Join(dir, "id_ed25519-cert.pub")
+	if err := os.WriteFile(keyPath, []byte("key"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	certDir := filepath.Join(home, ".config", "tenki", "ssh-certs", "session-1")
-	if err := os.MkdirAll(certDir, 0o700); err != nil {
+	if err := os.WriteFile(certPath, []byte("cert"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	oldCert := filepath.Join(certDir, "old-cert.pub")
-	newCert := filepath.Join(certDir, "new-cert.pub")
-	for _, certPath := range []string{oldCert, newCert} {
-		if err := os.WriteFile(certPath, []byte("cert"), 0o600); err != nil {
-			t.Fatal(err)
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		runner.calls = append(runner.calls, req)
+		switch strings.Join(req.Args, " ") {
+		case "sandbox ssh-command --output json --session session-1 --user tenki --batch-mode --connect-timeout 10s":
+			return LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","proxy_command":"tenki sandbox ssh-proxy --session session-1"}`}, nil
+		default:
+			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
 		}
+		return LocalCommandResult{}, nil
 	}
-	oldTime := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(oldCert, oldTime, oldTime); err != nil {
-		t.Fatal(err)
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
 	}
-
-	keyPath, certPath, err := tenkiSSHMaterialPaths("session-1")
+	output, err := backend.waitForTenkiSSHCommand(context.Background(), "session-1", time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if keyPath != filepath.Join(sshDir, "id_ed25519") {
-		t.Fatalf("keyPath=%q", keyPath)
-	}
-	if certPath != newCert {
-		t.Fatalf("certPath=%q want newest cert %q", certPath, newCert)
-	}
-}
-
-func TestParseTenkiCreateSessionIDStripsANSI(t *testing.T) {
-	got := parseTenkiCreateSessionID("\x1b[1mid:\x1b[0m 00000000-0000-0000-0000-000000000001\n")
-	if got != "00000000-0000-0000-0000-000000000001" {
-		t.Fatalf("id=%q", got)
+	if output.IdentityFile != keyPath || output.CertificateFile != certPath || output.ProxyCommand == "" {
+		t.Fatalf("unexpected ssh-command output: %#v", output)
 	}
 }
 

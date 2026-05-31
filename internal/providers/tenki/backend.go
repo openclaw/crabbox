@@ -8,8 +8,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -261,6 +259,7 @@ func (b *tenkiBackend) createSession(ctx context.Context, cfg Config, name, leas
 	args = b.appendScopeArgs(args)
 	args = append(args,
 		"--no-wait",
+		"--output", "json",
 		"--name", name,
 		"--metadata", tenkiMetadataProvider+"="+tenkiProvider,
 		"--metadata", tenkiMetadataLease+"="+leaseID,
@@ -293,13 +292,16 @@ func (b *tenkiBackend) createSession(ctx context.Context, cfg Config, name, leas
 	}
 	result, err := b.runTenki(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
-		return tenkiSession{}, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox create failed: %v", err)}
+		return tenkiSession{}, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox create failed: %v%s", err, tenkiCommandOutputDetail(result))}
 	}
-	sessionID := parseTenkiCreateSessionID(result.Stdout)
-	if sessionID == "" {
-		return tenkiSession{}, exit(5, "tenki sandbox create did not return a session id in expected `id: <session-id>` output")
+	var created tenkiSession
+	if err := json.Unmarshal([]byte(result.Stdout), &created); err != nil {
+		return tenkiSession{}, fmt.Errorf("parse tenki sandbox create JSON: %w", err)
 	}
-	return b.getSession(ctx, sessionID)
+	if strings.TrimSpace(created.ID) == "" {
+		return tenkiSession{}, exit(5, "tenki sandbox create JSON did not include a session id")
+	}
+	return b.getSession(ctx, created.ID)
 }
 
 func (b *tenkiBackend) prepareLease(ctx context.Context, cfg Config, session tenkiSession, leaseID, slug string, keep bool, waitSSH bool) (LeaseTarget, error) {
@@ -307,11 +309,11 @@ func (b *tenkiBackend) prepareLease(ctx context.Context, cfg Config, session ten
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	keyPath, certPath, err := b.waitForTenkiSSHMaterial(ctx, session.ID, bootstrapWaitTimeout(cfg))
+	sshCommand, err := b.waitForTenkiSSHCommand(ctx, session.ID, bootstrapWaitTimeout(cfg))
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	target := b.sshTarget(session.ID, keyPath, certPath)
+	target := b.sshTarget(sshCommand)
 	target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null"
 	server := b.sessionToServer(cfg, session, leaseID, slug, keep)
 	if waitSSH {
@@ -323,7 +325,7 @@ func (b *tenkiBackend) prepareLease(ctx context.Context, cfg Config, session ten
 }
 
 func (b *tenkiBackend) getSession(ctx context.Context, sessionID string) (tenkiSession, error) {
-	args := append(b.sandboxArgs("get"), "--json", sessionID)
+	args := append(b.sandboxArgs("get"), "--output", "json", sessionID)
 	result, err := b.runTenki(ctx, args, nil, nil)
 	if err != nil {
 		return tenkiSession{}, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox get failed: %v", err)}
@@ -449,7 +451,7 @@ func (b *tenkiBackend) waitForSessionState(ctx context.Context, sessionID string
 func (b *tenkiBackend) listSessions(ctx context.Context, all bool) ([]tenkiSession, error) {
 	args := b.sandboxArgs("list")
 	args = b.appendScopeArgs(args)
-	args = append(args, "--json", "--tags", "crabbox,crabbox-provider-tenki")
+	args = append(args, "--output", "json", "--tags", "crabbox,crabbox-provider-tenki")
 	if all {
 		args = append(args, "--all")
 	}
@@ -542,15 +544,16 @@ func (b *tenkiBackend) terminateSession(ctx context.Context, sessionID string) e
 	return nil
 }
 
-func (b *tenkiBackend) waitForTenkiSSHMaterial(ctx context.Context, sessionID string, timeout time.Duration) (string, string, error) {
+func (b *tenkiBackend) waitForTenkiSSHCommand(ctx context.Context, sessionID string, timeout time.Duration) (tenkiSSHCommandOutput, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for {
-		args := b.sandboxArgs("ssh")
+		args := b.sandboxArgs("ssh-command")
 		args = append(args,
+			"--output", "json",
 			"--session", sessionID,
 			"--user", "tenki",
 			"--batch-mode",
@@ -559,29 +562,28 @@ func (b *tenkiBackend) waitForTenkiSSHMaterial(ctx context.Context, sessionID st
 		if b.cfg.Tenki.Gateway != "" {
 			args = append(args, "--gateway", b.cfg.Tenki.Gateway)
 		}
-		args = append(args, "--", "true")
 
 		result, err := b.runTenki(ctx, args, nil, nil)
 		if err == nil {
-			keyPath, certPath, materialErr := tenkiSSHMaterialPaths(sessionID)
-			if materialErr == nil && fileExists(keyPath) && fileExists(certPath) {
-				return keyPath, certPath, nil
-			}
-			lastErr = materialErr
-			if lastErr == nil {
-				lastErr = fmt.Errorf("tenki ssh material missing key=%s cert=%s", keyPath, certPath)
+			var output tenkiSSHCommandOutput
+			if materialErr := json.Unmarshal([]byte(result.Stdout), &output); materialErr != nil {
+				lastErr = fmt.Errorf("parse tenki sandbox ssh-command JSON: %w", materialErr)
+			} else if materialErr := output.validate(sessionID); materialErr != nil {
+				lastErr = materialErr
+			} else {
+				return output, nil
 			}
 		} else {
-			lastErr = ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox ssh readiness failed: %v%s", err, tenkiCommandOutputDetail(result))}
+			lastErr = ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox ssh-command failed: %v%s", err, tenkiCommandOutputDetail(result))}
 		}
 
 		if ctx.Err() != nil {
-			return "", "", exit(5, "timed out waiting for Tenki SSH cert for session %s: %v", sessionID, lastErr)
+			return tenkiSSHCommandOutput{}, exit(5, "timed out waiting for Tenki SSH command for session %s: %v", sessionID, lastErr)
 		}
-		fmt.Fprintf(b.rt.Stderr, "waiting for tenki ssh cert session=%s remaining=%s last=%v\n", sessionID, time.Until(deadline).Round(time.Second), lastErr)
+		fmt.Fprintf(b.rt.Stderr, "waiting for tenki ssh command session=%s remaining=%s last=%v\n", sessionID, time.Until(deadline).Round(time.Second), lastErr)
 		select {
 		case <-ctx.Done():
-			return "", "", exit(5, "timed out waiting for Tenki SSH cert for session %s: %v", sessionID, lastErr)
+			return tenkiSSHCommandOutput{}, exit(5, "timed out waiting for Tenki SSH command for session %s: %v", sessionID, lastErr)
 		case <-time.After(5 * time.Second):
 		}
 	}
@@ -598,81 +600,139 @@ func tenkiCommandOutputDetail(result LocalCommandResult) string {
 	return ": " + output
 }
 
-func tenkiSSHMaterialPaths(sessionID string) (string, string, error) {
-	// Matches the Tenki CLI managed SSH state layout. A future Tenki CLI
-	// machine-readable ssh-info command should replace this filesystem lookup.
-	sshDir, err := tenkiSSHStateDir("ssh")
-	if err != nil {
-		return "", "", err
-	}
-	keyPath := filepath.Join(sshDir, "id_ed25519")
-	certDir, err := tenkiSSHCertDir(sessionID)
-	if err != nil {
-		return keyPath, "", err
-	}
-	certPath, err := newestTenkiSSHCert(certDir)
-	if err != nil {
-		return keyPath, "", err
-	}
-	return keyPath, certPath, nil
+type tenkiSSHCommandOutput struct {
+	SessionID       string `json:"session_id"`
+	User            string `json:"user"`
+	Host            string `json:"host"`
+	Port            int    `json:"port"`
+	IdentityFile    string `json:"identity_file"`
+	CertificateFile string `json:"certificate_file"`
+	ProxyCommand    string `json:"proxy_command"`
 }
 
-func tenkiSSHCertDir(sessionID string) (string, error) {
-	sid := strings.TrimSpace(sessionID)
-	if sid == "" {
-		return "", fmt.Errorf("session id is required for Tenki SSH cert cache")
+func (o tenkiSSHCommandOutput) validate(sessionID string) error {
+	if strings.TrimSpace(o.SessionID) != strings.TrimSpace(sessionID) {
+		return fmt.Errorf("tenki ssh-command session mismatch got=%q want=%q", o.SessionID, sessionID)
 	}
-	return tenkiSSHStateDir(filepath.Join("ssh-certs", sid))
+	if strings.TrimSpace(o.IdentityFile) == "" {
+		return fmt.Errorf("tenki ssh-command did not return identity_file")
+	}
+	if strings.TrimSpace(o.CertificateFile) == "" {
+		return fmt.Errorf("tenki ssh-command did not return certificate_file")
+	}
+	if strings.TrimSpace(o.ProxyCommand) == "" {
+		return fmt.Errorf("tenki ssh-command did not return proxy_command")
+	}
+	if !fileExists(o.IdentityFile) {
+		return fmt.Errorf("tenki ssh-command identity_file missing: %s", o.IdentityFile)
+	}
+	if !fileExists(o.CertificateFile) {
+		return fmt.Errorf("tenki ssh-command certificate_file missing: %s", o.CertificateFile)
+	}
+	return nil
 }
 
-func newestTenkiSSHCert(certDir string) (string, error) {
-	matches, err := filepath.Glob(filepath.Join(certDir, "*-cert.pub"))
-	if err != nil {
-		return "", err
+func (b *tenkiBackend) sshTarget(output tenkiSSHCommandOutput) SSHTarget {
+	port := "22"
+	if output.Port > 0 {
+		port = strconv.Itoa(output.Port)
 	}
-	if len(matches) == 0 {
-		return "", fmt.Errorf("no Tenki SSH cert found in %s", certDir)
-	}
-	newest := ""
-	var newestMod time.Time
-	for _, match := range matches {
-		info, err := os.Stat(match)
-		if err != nil {
-			continue
-		}
-		if newest == "" || info.ModTime().After(newestMod) {
-			newest = match
-			newestMod = info.ModTime()
-		}
-	}
-	if newest == "" {
-		return "", fmt.Errorf("no readable Tenki SSH cert found in %s", certDir)
-	}
-	return newest, nil
-}
-
-func tenkiSSHStateDir(elem ...string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	parts := append([]string{home, ".config", "tenki"}, elem...)
-	return filepath.Join(parts...), nil
-}
-
-func (b *tenkiBackend) sshTarget(sessionID, keyPath, certPath string) SSHTarget {
 	return SSHTarget{
-		User:                   "tenki",
-		Host:                   "sandbox",
-		Key:                    keyPath,
-		CertificateFile:        certPath,
-		Port:                   "22",
+		User:                   blank(strings.TrimSpace(output.User), "tenki"),
+		Host:                   blank(strings.TrimSpace(output.Host), "sandbox"),
+		Key:                    output.IdentityFile,
+		CertificateFile:        output.CertificateFile,
+		Port:                   port,
 		TargetOS:               targetLinux,
 		DisableHostKeyChecking: true,
 		NetworkKind:            networkPublic,
 		SSHConfigProxy:         true,
-		ProxyCommand:           b.proxyCommand(sessionID),
+		ProxyCommand:           tenkiOpenSSHProxyCommand(output.ProxyCommand),
 	}
+}
+
+func tenkiOpenSSHProxyCommand(command string) string {
+	words, err := splitTenkiShellWords(command)
+	if err != nil || len(words) == 0 {
+		return command
+	}
+	out := make([]string, 0, len(words))
+	for _, word := range words {
+		out = append(out, quoteOpenSSHProxyWord(word))
+	}
+	return strings.Join(out, " ")
+}
+
+func splitTenkiShellWords(command string) ([]string, error) {
+	var words []string
+	var b strings.Builder
+	var quote rune
+	escaped := false
+	inWord := false
+	for _, r := range command {
+		if escaped {
+			b.WriteRune(r)
+			inWord = true
+			escaped = false
+			continue
+		}
+		if quote == '\'' {
+			if r == '\'' {
+				quote = 0
+			} else {
+				b.WriteRune(r)
+			}
+			inWord = true
+			continue
+		}
+		if quote == '"' {
+			switch r {
+			case '"':
+				quote = 0
+			case '\\':
+				escaped = true
+			default:
+				b.WriteRune(r)
+			}
+			inWord = true
+			continue
+		}
+		switch {
+		case r == '\\':
+			escaped = true
+			inWord = true
+		case r == '\'' || r == '"':
+			quote = r
+			inWord = true
+		case r == ' ' || r == '\t' || r == '\n':
+			if inWord {
+				words = append(words, b.String())
+				b.Reset()
+				inWord = false
+			}
+		default:
+			b.WriteRune(r)
+			inWord = true
+		}
+	}
+	if escaped || quote != 0 {
+		return nil, fmt.Errorf("unterminated quoted proxy command")
+	}
+	if inWord {
+		words = append(words, b.String())
+	}
+	return words, nil
+}
+
+func quoteOpenSSHProxyWord(word string) string {
+	if word != "" && strings.IndexFunc(word, func(r rune) bool {
+		return !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') ||
+			r == '_' || r == '-' || r == '.' || r == '/' || r == ':' || r == ',' || r == '@' || r == '%' || r == '+' || r == '=')
+	}) == -1 {
+		return word
+	}
+	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`, "`", "\\`").Replace(word)
+	return `"` + escaped + `"`
 }
 
 func (b *tenkiBackend) sessionToServer(cfg Config, session tenkiSession, leaseID, slug string, keep bool) Server {
@@ -711,17 +771,6 @@ func (b *tenkiBackend) appendScopeArgs(args []string) []string {
 		args = append(args, "--project", b.cfg.Tenki.Project)
 	}
 	return args
-}
-
-func (b *tenkiBackend) proxyCommand(sessionID string) string {
-	args := []string{tenkiCLIPath(b.cfg), "sandbox", "ssh-proxy", "--session", sessionID}
-	if b.cfg.Tenki.Endpoint != "" {
-		args = append(args, "--endpoint", b.cfg.Tenki.Endpoint)
-	}
-	if b.cfg.Tenki.Gateway != "" {
-		args = append(args, "--gateway", b.cfg.Tenki.Gateway)
-	}
-	return shellJoin(args...)
 }
 
 func (b *tenkiBackend) runTenki(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, error) {
@@ -840,39 +889,6 @@ func cleanTenkiWorkRoot(workRoot string) error {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
-var tenkiIDLineRE = regexp.MustCompile(`(?m)^\s*id\s*:\s*(\S+)`)
-
-func parseTenkiCreateSessionID(output string) string {
-	clean := ansiRE.ReplaceAllString(output, "")
-	match := tenkiIDLineRE.FindStringSubmatch(clean)
-	if len(match) < 2 {
-		return ""
-	}
-	return strings.TrimSpace(match[1])
-}
-
-func shellJoin(args ...string) string {
-	quoted := make([]string, 0, len(args))
-	for _, arg := range args {
-		quoted = append(quoted, shellQuote(arg))
-	}
-	return strings.Join(quoted, " ")
-}
-
-func shellQuote(arg string) string {
-	if arg == "" {
-		return "''"
-	}
-	if strings.IndexFunc(arg, func(r rune) bool {
-		return !(r == '_' || r == '-' || r == '.' || r == '/' || r == ':' || r == '=' ||
-			(r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z'))
-	}) == -1 {
-		return arg
-	}
-	return "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
 }
 
 var waitForSSHReadyFunc = waitForSSHReady

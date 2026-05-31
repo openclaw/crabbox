@@ -35,7 +35,7 @@ func TestRemoteCommandQuotesWorkdirEnvAndArgs(t *testing.T) {
 		"cd '/work/crabbox/cbx_1/openclaw'",
 		"NODE_OPTIONS='--max-old-space-size=8192'",
 		"bash -lc",
-		"'exec \"$@\"' bash 'pnpm' 'check:changed'",
+		`bash -lc 'cd '\''/work/crabbox/cbx_1/openclaw'\'' && exec "$@"' bash 'pnpm' 'check:changed'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommand() missing %q in %q", want, got)
@@ -48,7 +48,7 @@ func TestRemoteShellCommandRunsScript(t *testing.T) {
 	for _, want := range []string{
 		"cd '/work/crabbox/cbx_1/repo'",
 		"CI='1'",
-		"bash -lc 'pnpm install && pnpm test'",
+		`bash -lc 'cd '\''/work/crabbox/cbx_1/repo'\'' && pnpm install && pnpm test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteShellCommand() missing %q in %q", want, got)
@@ -70,7 +70,7 @@ func TestRemoteCommandSourcesActionsEnvFile(t *testing.T) {
 		"cd '/home/runner/work/repo/repo'",
 		"if [ -f '/home/runner/.crabbox/actions/cbx-123.env.sh' ]; then . '/home/runner/.crabbox/actions/cbx-123.env.sh'; fi",
 		"CI='1'",
-		"'exec \"$@\"' bash 'pnpm' 'test'",
+		`bash -lc 'cd '\''/home/runner/work/repo/repo'\'' && exec "$@"' bash 'pnpm' 'test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommandWithEnvFile() missing %q in %q", want, got)
@@ -87,7 +87,7 @@ func TestRemoteCommandSourcesMultipleEnvFilesWithoutInlineSecret(t *testing.T) {
 		"if [ -f '/home/runner/.crabbox/actions/cbx-123.env.sh' ]; then . '/home/runner/.crabbox/actions/cbx-123.env.sh'; fi",
 		"if [ -f '.crabbox/env/run.env.sh' ]; then . '.crabbox/env/run.env.sh'; fi",
 		"CI='1'",
-		"'exec \"$@\"' bash 'pnpm' 'test'",
+		`bash -lc 'cd '\''/work/repo'\'' && exec "$@"' bash 'pnpm' 'test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommandWithEnvFiles() missing %q in %q", want, got)
