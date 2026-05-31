@@ -66,6 +66,26 @@ func TestTenkiCreateAddsMetadata(t *testing.T) {
 	}
 }
 
+func TestTenkiCreateRequiresParsedSessionID(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		runner.calls = append(runner.calls, req)
+		if strings.Contains(strings.Join(req.Args, " "), "sandbox get") {
+			t.Fatalf("unexpected get after unparsable create output: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{Stdout: "created sandbox\n", ExitCode: 0}, nil
+	}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+	if _, err := backend.createSession(context.Background(), backend.configForRun(), "crabbox-blue", "cbx_123", "blue", true); err == nil {
+		t.Fatal("expected createSession to reject unparsable create output")
+	} else if !strings.Contains(err.Error(), "did not return a session id") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 	backend := &tenkiBackend{cfg: Config{Tenki: TenkiConfig{
 		CLIPath:  "/opt/Tenki CLI/tenki",
@@ -76,8 +96,8 @@ func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 	if !target.SSHConfigProxy || target.Host != "sandbox" || target.User != "tenki" || target.Key != "/tmp/id_ed25519" || target.CertificateFile != "/tmp/session-cert.pub" {
 		t.Fatalf("unexpected target: %#v", target)
 	}
-	if !target.NoControlMaster || !target.DisableHostKeyChecking {
-		t.Fatalf("tenki target should disable SSH mux and persistent host keys: %#v", target)
+	if target.NoControlMaster || !target.DisableHostKeyChecking {
+		t.Fatalf("tenki target should keep SSH mux enabled and disable persistent host keys: %#v", target)
 	}
 	for _, want := range []string{
 		"'/opt/Tenki CLI/tenki' sandbox ssh-proxy",
@@ -98,8 +118,19 @@ func TestTenkiSSHMaterialPathsUsesManagedTenkiState(t *testing.T) {
 	if err := os.MkdirAll(sshDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	pubKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest tenki-test\n"
-	if err := os.WriteFile(filepath.Join(sshDir, "id_ed25519.pub"), []byte(pubKey), 0o600); err != nil {
+	certDir := filepath.Join(home, ".config", "tenki", "ssh-certs", "session-1")
+	if err := os.MkdirAll(certDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldCert := filepath.Join(certDir, "old-cert.pub")
+	newCert := filepath.Join(certDir, "new-cert.pub")
+	for _, certPath := range []string{oldCert, newCert} {
+		if err := os.WriteFile(certPath, []byte("cert"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(oldCert, oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
 
@@ -110,9 +141,8 @@ func TestTenkiSSHMaterialPathsUsesManagedTenkiState(t *testing.T) {
 	if keyPath != filepath.Join(sshDir, "id_ed25519") {
 		t.Fatalf("keyPath=%q", keyPath)
 	}
-	wantPrefix := filepath.Join(home, ".config", "tenki", "ssh-certs", "session-1") + string(os.PathSeparator)
-	if !strings.HasPrefix(certPath, wantPrefix) || !strings.HasSuffix(certPath, "-cert.pub") {
-		t.Fatalf("certPath=%q want prefix %q and -cert.pub suffix", certPath, wantPrefix)
+	if certPath != newCert {
+		t.Fatalf("certPath=%q want newest cert %q", certPath, newCert)
 	}
 }
 

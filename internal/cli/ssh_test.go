@@ -399,6 +399,9 @@ func TestSSHArgsIncludeCertificateFile(t *testing.T) {
 	if !strings.Contains(got, "CertificateFile=/tmp/tenki/session-cert.pub") {
 		t.Fatalf("sshArgs() missing CertificateFile: %q", got)
 	}
+	if !strings.Contains(got, "ControlMaster=auto") {
+		t.Fatalf("sshArgs() should keep ControlMaster enabled for cert auth: %q", got)
+	}
 }
 
 func TestSSHArgsDisableHostKeyChecking(t *testing.T) {
@@ -670,6 +673,26 @@ func TestSSHControlPathIsScopedByKey(t *testing.T) {
 	}
 	if !strings.HasPrefix(filepath.Base(left), "crabbox-ssh-") || !strings.HasSuffix(left, "-%C") {
 		t.Fatalf("unexpected control path %q", left)
+	}
+}
+
+func TestSSHControlPathIsScopedByProxyAndCertificate(t *testing.T) {
+	base := SSHTarget{
+		User:            "tenki",
+		Host:            "sandbox",
+		Key:             "/tmp/tenki/id_ed25519",
+		CertificateFile: "/tmp/tenki/ssh-certs/session-a/cert.pub",
+		ProxyCommand:    "tenki sandbox ssh-proxy --session session-a",
+	}
+	otherCert := base
+	otherCert.CertificateFile = "/tmp/tenki/ssh-certs/session-b/cert.pub"
+	otherProxy := base
+	otherProxy.ProxyCommand = "tenki sandbox ssh-proxy --session session-b"
+	if sshControlPath(base) == sshControlPath(otherCert) {
+		t.Fatal("control paths should differ for different certificate files")
+	}
+	if sshControlPath(base) == sshControlPath(otherProxy) {
+		t.Fatal("control paths should differ for different proxy commands")
 	}
 }
 

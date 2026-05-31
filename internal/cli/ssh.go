@@ -553,10 +553,12 @@ func sshConfigFileValue(path string) string {
 }
 
 func sshControlPath(target SSHTarget) string {
-	scope := target.Key
-	if scope == "" {
-		scope = target.User
-	}
+	scope := strings.Join([]string{
+		target.User,
+		target.Key,
+		target.CertificateFile,
+		target.ProxyCommand,
+	}, "\x00")
 	sum := sha1.Sum([]byte(scope))
 	return filepath.Join("/tmp", "crabbox-ssh-"+hex.EncodeToString(sum[:4])+"-%C")
 }

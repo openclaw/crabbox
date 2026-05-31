@@ -2,8 +2,6 @@ package tenki
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -300,7 +298,7 @@ func (b *tenkiBackend) createSession(ctx context.Context, cfg Config, name, leas
 	}
 	sessionID := parseTenkiCreateSessionID(result.Stdout)
 	if sessionID == "" {
-		sessionID = name
+		return tenkiSession{}, exit(5, "tenki sandbox create did not return a session id in expected `id: <session-id>` output")
 	}
 	return b.getSession(ctx, sessionID)
 }
@@ -487,33 +485,56 @@ func tenkiCommandOutputDetail(result LocalCommandResult) string {
 }
 
 func tenkiSSHMaterialPaths(sessionID string) (string, string, error) {
+	// Matches the Tenki CLI managed SSH state layout. A future Tenki CLI
+	// machine-readable ssh-info command should replace this filesystem lookup.
 	sshDir, err := tenkiSSHStateDir("ssh")
 	if err != nil {
 		return "", "", err
 	}
 	keyPath := filepath.Join(sshDir, "id_ed25519")
-	pubBytes, err := os.ReadFile(keyPath + ".pub")
+	certDir, err := tenkiSSHCertDir(sessionID)
 	if err != nil {
-		return keyPath, "", fmt.Errorf("read Tenki SSH public key %s.pub: %w", keyPath, err)
+		return keyPath, "", err
 	}
-	certPath, err := tenkiSSHCertPath(sessionID, pubBytes)
+	certPath, err := newestTenkiSSHCert(certDir)
 	if err != nil {
 		return keyPath, "", err
 	}
 	return keyPath, certPath, nil
 }
 
-func tenkiSSHCertPath(sessionID string, pubKey []byte) (string, error) {
+func tenkiSSHCertDir(sessionID string) (string, error) {
 	sid := strings.TrimSpace(sessionID)
 	if sid == "" {
 		return "", fmt.Errorf("session id is required for Tenki SSH cert cache")
 	}
-	certDir, err := tenkiSSHStateDir(filepath.Join("ssh-certs", sid))
+	return tenkiSSHStateDir(filepath.Join("ssh-certs", sid))
+}
+
+func newestTenkiSSHCert(certDir string) (string, error) {
+	matches, err := filepath.Glob(filepath.Join(certDir, "*-cert.pub"))
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256([]byte(strings.TrimSpace(string(pubKey))))
-	return filepath.Join(certDir, hex.EncodeToString(sum[:])+"-cert.pub"), nil
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no Tenki SSH cert found in %s", certDir)
+	}
+	newest := ""
+	var newestMod time.Time
+	for _, match := range matches {
+		info, err := os.Stat(match)
+		if err != nil {
+			continue
+		}
+		if newest == "" || info.ModTime().After(newestMod) {
+			newest = match
+			newestMod = info.ModTime()
+		}
+	}
+	if newest == "" {
+		return "", fmt.Errorf("no readable Tenki SSH cert found in %s", certDir)
+	}
+	return newest, nil
 }
 
 func tenkiSSHStateDir(elem ...string) (string, error) {
@@ -533,7 +554,6 @@ func (b *tenkiBackend) sshTarget(sessionID, keyPath, certPath string) SSHTarget 
 		CertificateFile:        certPath,
 		Port:                   "22",
 		TargetOS:               targetLinux,
-		NoControlMaster:        true,
 		DisableHostKeyChecking: true,
 		NetworkKind:            networkPublic,
 		SSHConfigProxy:         true,
