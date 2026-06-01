@@ -24,6 +24,7 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 	waitTimeout := fs.Duration("wait-timeout", 20*time.Minute, "time to wait for Actions hydration")
 	keepAliveMinutes := fs.Int("keep-alive-minutes", 90, "minutes for workflow to keep a GitHub runner job alive")
 	probeCommand := fs.String("probe-command", "", "optional shell command to prove the hydrated box is test-ready")
+	poolKey := fs.String("pool", "", "register the hydrated lease in a broker ready pool")
 	dryRun := fs.Bool("dry-run", false, "print the planned Crabbox commands without running them")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
@@ -61,6 +62,10 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
+	}
+	readyPoolKey := strings.TrimSpace(*poolKey)
+	if readyPoolKey != "" && backendCoordinator(backend) == nil {
+		return exit(2, "--pool requires a coordinator-backed SSH lease provider")
 	}
 	leaseArgs := prewarmWarmupArgs(args)
 	if backend.Spec().Kind == ProviderKindDelegatedRun && isBlacksmithProvider(cfg.Provider) {
@@ -114,6 +119,12 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 		}
 		probeMs = time.Since(probeStarted).Milliseconds()
 	}
+	if readyPoolKey != "" {
+		if err := a.registerPrewarmedLeaseInReadyPool(ctx, cfg, leaseID, readyPoolKey, *githubRunner); err != nil {
+			a.releasePrewarmLeaseAfterPoolFailure(ctx, backend, cfg, leaseID, err)
+			return err
+		}
+	}
 	total := time.Since(started)
 	fmt.Fprintf(a.Stdout, "prewarm complete id=%s provider=%s hydration=%s warmup=%dms hydrate=%dms probe=%dms total=%s\n", leaseID, cfg.Provider, hydration, warmupMs, hydrateMs, probeMs, total.Round(time.Millisecond))
 	if *timingJSON {
@@ -166,7 +177,7 @@ func prewarmWarmupArgs(args []string) []string {
 	out := make([]string, 0, len(args)+1)
 	valueFlags := map[string]struct{}{
 		"repo": {}, "workflow": {}, "job": {}, "ref": {},
-		"wait-timeout": {}, "keep-alive-minutes": {}, "probe-command": {},
+		"wait-timeout": {}, "keep-alive-minutes": {}, "probe-command": {}, "pool": {},
 	}
 	boolFlags := map[string]struct{}{
 		"no-hydrate": {}, "github-runner": {}, "dry-run": {}, "timing-json": {},
@@ -194,6 +205,91 @@ func prewarmWarmupArgs(args []string) []string {
 	}
 	out = append(out, "--keep=true")
 	return out
+}
+
+func (a App) registerPrewarmedLeaseInReadyPool(ctx context.Context, cfg Config, leaseID, poolKey string, githubRunner bool) error {
+	repo, _ := findRepo()
+	input := map[string]any{"leaseID": leaseID}
+	if repoValue := firstNonBlank(cfg.Actions.Repo, bestEffortGitHubRepoSlug(repo, cfg)); repoValue != "" {
+		input["repo"] = repoValue
+	}
+	if refValue := firstNonBlank(cfg.Actions.Ref, repo.BaseRef); refValue != "" {
+		input["ref"] = refValue
+	}
+	if commit := prewarmReadyPoolCommit(cfg, repo, githubRunner); commit != "" {
+		input["commit"] = commit
+	}
+	addStringInput(input, "sshHost", readyPoolClaimSSHHost(leaseID))
+	addStringInput(input, "sshPort", readyPoolClaimSSHPort(leaseID))
+	addStringInput(input, "workRoot", readyPoolClaimWorkRoot(leaseID))
+	coord, err := readyPoolCoordinatorFromConfig(cfg)
+	if err != nil {
+		return err
+	}
+	res, err := coord.RegisterReadyPoolLease(ctx, poolKey, input)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.Stdout, "pool registered key=%s lease=%s state=%s\n", res.Entry.Key, res.Entry.LeaseID, res.Entry.State)
+	return nil
+}
+
+func (a App) releasePrewarmLeaseAfterPoolFailure(ctx context.Context, backend Backend, cfg Config, leaseID string, cause error) {
+	sshBackend, ok := backend.(SSHLeaseBackend)
+	if !ok {
+		return
+	}
+	lease, err := sshBackend.Resolve(ctx, ResolveRequest{
+		Repo:    Repo{},
+		Options: leaseOptionsFromConfig(cfg),
+		ID:      leaseID,
+	})
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "warning: pool registration failed for %s: %v; release skipped: %v\n", leaseID, cause, err)
+		return
+	}
+	if err := a.releaseBackendLeaseBestEffort(ctx, sshBackend, lease); err != nil {
+		fmt.Fprintf(a.Stderr, "warning: pool registration failed for %s: %v; release failed: %v\n", leaseID, cause, err)
+	}
+}
+
+func prewarmReadyPoolCommit(cfg Config, repo Repo, githubRunner bool) string {
+	ref := strings.TrimSpace(cfg.Actions.Ref)
+	if ref == "" {
+		if githubRunner {
+			return ""
+		}
+		return strings.TrimSpace(repo.Head)
+	}
+	if isGitCommitSHA(ref) {
+		if githubRunner || ref == strings.TrimSpace(repo.Head) {
+			return ref
+		}
+		return ""
+	}
+	if githubRunner {
+		return ""
+	}
+	if repo.Root == "" {
+		return ""
+	}
+	branch := strings.TrimSpace(gitOutput(repo.Root, "rev-parse", "--abbrev-ref", "HEAD"))
+	if branch != "" && (ref == branch || ref == "refs/heads/"+branch) {
+		return strings.TrimSpace(repo.Head)
+	}
+	return ""
+}
+
+func isGitCommitSHA(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, ch := range value {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func prewarmBlacksmithHydrationArgs(fs *flag.FlagSet, args []string, workflow, job, ref string) []string {

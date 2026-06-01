@@ -182,6 +182,8 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	proofTemplate := fs.String("proof-template", "", "proof template name from the selected profile")
 	stopAfter := fs.String("stop-after", "", "stop policy for the lease: success, always, failure, or never")
 	leaseOutput := fs.String("lease-output", "", "write a small JSON lease handle for orchestrators")
+	readyPool := fs.String("pool", "", "borrow a broker ready-pool lease")
+	readyPoolReturn := fs.String("pool-return", "auto", "ready-pool return policy: auto, ready, drain, release")
 	var downloads stringListFlag
 	var allowEnvFlags stringListFlag
 	var envProfileFlags stringListFlag
@@ -221,7 +223,22 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	if requestedSlug != "" && strings.TrimSpace(*leaseIDFlag) != "" {
 		return exit(2, "--slug only applies when creating a new lease; omit --id or use the existing slug")
 	}
+	if strings.TrimSpace(*readyPool) != "" && strings.TrimSpace(*leaseIDFlag) != "" {
+		return exit(2, "--pool borrows the lease id; omit --id")
+	}
+	if strings.TrimSpace(*readyPool) != "" && strings.TrimSpace(*stopAfter) != "" {
+		return exit(2, "--pool uses --pool-return for cleanup policy; omit --stop-after")
+	}
+	if strings.TrimSpace(*readyPool) != "" && (*keep || *keepOnFailure) {
+		return exit(2, "--pool uses --pool-return for lifecycle; omit --keep and --keep-on-failure")
+	}
+	if err := validateReadyPoolRunReturnPolicy(*readyPoolReturn); err != nil {
+		return err
+	}
 	fullResyncRequested := *fullResync || *freshSync
+	if strings.TrimSpace(*readyPool) != "" && fullResyncRequested {
+		return exit(2, "--pool cannot be combined with --full-resync or --fresh-sync")
+	}
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -376,6 +393,40 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	var server Server
+	var target SSHTarget
+	var leaseID string
+	var borrowedPool *CoordinatorReadyPoolResponse
+	var runFailure error
+	defer func() {
+		if borrowedPool == nil {
+			return
+		}
+		failure := runFailure
+		if failure == nil {
+			failure = err
+		}
+		result := readyPoolRunReturnResult(*readyPoolReturn, failure)
+		coord, coordErr := readyPoolCoordinatorFromConfig(cfg)
+		if coordErr != nil {
+			fmt.Fprintf(a.Stderr, "warning: ready-pool return skipped for %s: %v\n", borrowedPool.Entry.LeaseID, coordErr)
+			if failure == nil {
+				err = coordErr
+			}
+			return
+		}
+		if readyPoolReturnNeedsHydrationStop(result) {
+			a.writeActionsHydrationStopBestEffort(context.Background(), target, borrowedPool.Entry.LeaseID)
+		}
+		if _, returnErr := coord.ReturnReadyPoolLease(context.Background(), borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, result, readyPoolRunReturnReason(failure), borrowedPool.Entry.BorrowToken); returnErr != nil {
+			fmt.Fprintf(a.Stderr, "warning: ready-pool return failed for %s: %v\n", borrowedPool.Entry.LeaseID, returnErr)
+			if failure == nil {
+				err = returnErr
+			}
+			return
+		}
+		fmt.Fprintf(a.Stderr, "returned pool=%s lease=%s result=%s\n", borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, result)
+	}()
 	if strings.TrimSpace(*leaseOutput) != "" && !backend.Spec().Features.Has(FeatureRunSession) {
 		// TODO: Let other reusable delegated providers populate RunResult.Session
 		// and advertise FeatureRunSession once their lifecycle contract is covered.
@@ -419,6 +470,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		StopAfter:        strings.TrimSpace(*stopAfter),
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
+		if strings.TrimSpace(*readyPool) != "" {
+			return exit(2, "--pool requires a brokered SSH lease provider")
+		}
 		if expansion.Profile.Doctor.Enabled {
 			return exit(2, "%s delegates run execution; profile doctor is not supported", backend.Spec().Name)
 		}
@@ -451,6 +505,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	if !ok {
 		return exit(2, "provider=%s does not support run", backend.Spec().Name)
 	}
+	coord := backendCoordinator(backend)
 	var script *RunScriptSpec
 	if scriptRequested {
 		script, err = loadRunScript(*scriptPath, *scriptStdin, a.Stdin)
@@ -459,15 +514,30 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		}
 		runReq.Script = script
 	}
+	if strings.TrimSpace(*readyPool) != "" {
+		if coord == nil {
+			return exit(2, "--pool requires a coordinator-backed SSH lease provider")
+		}
+		repoSlug := cfg.Actions.Repo
+		if repoSlug == "" {
+			repoSlug = bestEffortGitHubRepoSlug(repo, cfg)
+		}
+		borrowInput, err := readyPoolRunBorrowInputForRun(cfg, repo, repoSlug, *noSync)
+		if err != nil {
+			return err
+		}
+		res, err := coord.BorrowReadyPoolLease(ctx, strings.TrimSpace(*readyPool), borrowInput)
+		if err != nil {
+			return err
+		}
+		borrowedPool = &res
+		*leaseIDFlag = res.Entry.LeaseID
+		fmt.Fprintf(a.Stderr, "borrowed pool=%s lease=%s\n", res.Entry.Key, res.Entry.LeaseID)
+	}
 
-	var server Server
-	var target SSHTarget
-	var leaseID string
 	acquired := false
-	coord := backendCoordinator(backend)
 	useCoordinator := coord != nil
 	recorder := &runRecorder{}
-	var runFailure error
 	failureClassificationPrinted := false
 	recordFailure := func(failure error) error {
 		if failure != nil && !failureClassificationPrinted {
@@ -492,6 +562,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		lease, err = sshBackend.Resolve(ctx, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+			if borrowedPool != nil {
+				target = applyReadyPoolEndpoint(target, borrowedPool.Entry)
+			}
 			if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
 				err = resolveErr
 			} else {
@@ -524,6 +597,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		return recordFailure(err)
 	}
 	applyResolvedServerConfig(&cfg, server)
+	if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
+		cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
+	}
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return recordFailure(err)
 	}
@@ -562,7 +638,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			fmt.Fprintf(a.Stderr, "lease cleanup stopped=true policy=%s lease=%s slug=%s\n", blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"))
 		}
 	}()
-	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim || borrowedPool != nil); err != nil {
 		return recordFailure(err)
 	}
 	if !useCoordinator && leaseID != "" {

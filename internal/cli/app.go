@@ -184,6 +184,7 @@ Commands:
   inspect     Print lease/provider details; add --json for scripts
   stop        Release a lease or delete a direct-provider machine
   cleanup     Sweep expired direct-provider machines or local provider state
+  pool        Manage ready-pool leases and list machine inventory aliases
   pond        Bridge plane peer discovery for delegated providers
   azure       Azure provider setup and login
   config      Show or update user config
@@ -219,6 +220,7 @@ Common Flows:
   crabbox results run_123
   crabbox cache stats --id blue-lobster
   crabbox cache volumes
+  crabbox pool ready
   crabbox usage --scope org
   crabbox admin leases --state active
   crabbox admin lease-audit --state expired --provider aws

@@ -47,6 +47,7 @@ same order as the CLI help.
 - [inspect](inspect.md)
 - [stop](stop.md)
 - [cleanup](cleanup.md)
+- [pool](pool.md)
 - [pond](pond.md)
 - [azure](azure.md)
 - [config](config.md)

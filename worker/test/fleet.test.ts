@@ -731,6 +731,299 @@ describe("fleet lease identity and idle", () => {
     expect(found.lease.slug).toBe("blue-lobster");
   });
 
+  it("registers, borrows, and returns ready-pool leases", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = {
+      "x-crabbox-owner": "peter@example.com",
+      "x-crabbox-org": "openclaw",
+    };
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "azure",
+        host: "192.0.2.22",
+        sshPort: "2222",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        provider: "azure",
+        host: "192.0.2.23",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const register = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/register", {
+        headers,
+        body: {
+          leaseID: "cbx_000000000001",
+          repo: "example/app",
+          ref: "main",
+          commit: "abc123",
+          sshUser: "ubuntu",
+          sshPort: "22",
+          workRoot: "/workspace/app",
+        },
+      }),
+    );
+    expect(register.status).toBe(200);
+    const registerBody = (await register.json()) as {
+      entry: { sshUser: string; workRoot: string };
+    };
+    expect(registerBody.entry.sshUser).toBe("ubuntu");
+    expect(registerBody.entry.workRoot).toBe("/workspace/app");
+
+    const slashRegister = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example%2Fapp%2Fmain/register", {
+        headers,
+        body: { leaseID: "cbx_000000000002" },
+      }),
+    );
+    expect(slashRegister.status).toBe(200);
+    const slashBody = (await slashRegister.json()) as { entry: { key: string } };
+    expect(slashBody.entry.key).toBe("example/app/main");
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        provider: "azure",
+        host: "192.0.2.23",
+        expiresAt: "2026-05-01T00:00:00.000Z",
+      }),
+    );
+    const allPools = await fleet.fetch(request("GET", "/v1/ready-pools", { headers }));
+    expect(allPools.status).toBe(200);
+    const allPoolsBody = (await allPools.json()) as {
+      pools: Array<{ key: string; state: string }>;
+    };
+    expect(allPoolsBody.pools.find((entry) => entry.key === "example/app/main")?.state).toBe(
+      "stale",
+    );
+
+    const borrow = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/borrow", {
+        headers,
+        body: { repo: "example/app", ref: "main" },
+      }),
+    );
+    expect(borrow.status).toBe(200);
+    const borrowed = (await borrow.json()) as {
+      entry: { state: string; sshPort: string; borrowToken: string };
+    };
+    expect(borrowed.entry.state).toBe("busy");
+    expect(borrowed.entry.sshPort).toBe("22");
+    expect(borrowed.entry.borrowToken).toBeTruthy();
+
+    const busyStatus = await fleet.fetch(request("GET", "/v1/ready-pools/example", { headers }));
+    expect(busyStatus.status).toBe(200);
+    const busyStatusBody = (await busyStatus.json()) as {
+      pool: Array<{ state: string; borrowToken?: string }>;
+    };
+    expect(busyStatusBody.pool.find((entry) => entry.state === "busy")?.borrowToken).toBe(
+      undefined,
+    );
+
+    const empty = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/borrow", {
+        headers,
+        body: { repo: "example/app", ref: "main" },
+      }),
+    );
+    expect(empty.status).toBe(409);
+
+    const returned = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/return", {
+        headers,
+        body: {
+          leaseID: "cbx_000000000001",
+          result: "ready",
+          borrowToken: borrowed.entry.borrowToken,
+        },
+      }),
+    );
+    expect(returned.status).toBe(200);
+    const returnedBody = (await returned.json()) as {
+      entry: { state: string; borrowedBy?: string };
+    };
+    expect(returnedBody.entry.state).toBe("ready");
+    expect(returnedBody.entry.borrowedBy).toBeUndefined();
+
+    const destructiveReadyReturn = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/return", {
+        headers: { "x-crabbox-owner": "friend@example.com", "x-crabbox-org": "openclaw" },
+        body: { leaseID: "cbx_000000000001", result: "drain" },
+      }),
+    );
+    expect(destructiveReadyReturn.status).toBe(404);
+
+    const sparseRegister = await fleet.fetch(
+      request("POST", "/v1/ready-pools/sparse/register", {
+        headers,
+        body: {
+          leaseID: "cbx_000000000001",
+          repo: "example/app",
+          ref: "main",
+          sshUser: "-oProxyCommand=bad",
+        },
+      }),
+    );
+    expect(sparseRegister.status).toBe(200);
+    const sparseBody = (await sparseRegister.json()) as { entry: { sshUser: string } };
+    expect(sparseBody.entry.sshUser).toBe("crabbox");
+
+    const staleCommitBorrow = await fleet.fetch(
+      request("POST", "/v1/ready-pools/sparse/borrow", {
+        headers,
+        body: { repo: "example/app", ref: "main", commit: "abc123" },
+      }),
+    );
+    expect(staleCommitBorrow.status).toBe(409);
+
+    const movePool = await fleet.fetch(
+      request("POST", "/v1/ready-pools/other/register", {
+        headers,
+        body: {
+          leaseID: "cbx_000000000001",
+          repo: "example/app",
+          ref: "main",
+          commit: "abc123",
+        },
+      }),
+    );
+    expect(movePool.status).toBe(200);
+
+    const oldPoolBorrow = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/borrow", {
+        headers,
+        body: { repo: "example/app", ref: "main" },
+      }),
+    );
+    expect(oldPoolBorrow.status).toBe(409);
+
+    const newPoolBorrow = await fleet.fetch(
+      request("POST", "/v1/ready-pools/other/borrow", {
+        headers,
+        body: { repo: "example/app", ref: "main" },
+      }),
+    );
+    expect(newPoolBorrow.status).toBe(200);
+    const newPoolBorrowBody = (await newPoolBorrow.json()) as {
+      entry: { borrowToken: string };
+    };
+
+    const busyMove = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/register", {
+        headers,
+        body: { leaseID: "cbx_000000000001" },
+      }),
+    );
+    expect(busyMove.status).toBe(409);
+
+    const staleReturn = await fleet.fetch(
+      request("POST", "/v1/ready-pools/other/return", {
+        headers,
+        body: { leaseID: "cbx_000000000001", result: "ready", borrowToken: "old-token" },
+      }),
+    );
+    expect(staleReturn.status).toBe(409);
+
+    const cleanReturn = await fleet.fetch(
+      request("POST", "/v1/ready-pools/other/return", {
+        headers,
+        body: {
+          leaseID: "cbx_000000000001",
+          result: "ready",
+          borrowToken: newPoolBorrowBody.entry.borrowToken,
+        },
+      }),
+    );
+    expect(cleanReturn.status).toBe(200);
+  });
+
+  it("requires manage access to borrow and drain ready-pool leases", async () => {
+    const storage = new MemoryStorage();
+    let deleted = "";
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, {}, async (id) => {
+        deleted = id;
+      }),
+    });
+    const ownerHeaders = {
+      "x-crabbox-owner": "peter@example.com",
+      "x-crabbox-org": "openclaw",
+    };
+    const friendHeaders = {
+      "x-crabbox-owner": "friend@example.com",
+      "x-crabbox-org": "openclaw",
+    };
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        share: { users: { "friend@example.com": "use" } },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const register = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/register", {
+        headers: ownerHeaders,
+        body: { leaseID: "cbx_000000000001" },
+      }),
+    );
+    expect(register.status).toBe(200);
+
+    const borrow = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/borrow", {
+        headers: friendHeaders,
+        body: {},
+      }),
+    );
+    expect(borrow.status).toBe(403);
+
+    const ownerBorrow = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/borrow", {
+        headers: ownerHeaders,
+        body: {},
+      }),
+    );
+    expect(ownerBorrow.status).toBe(200);
+    const ownerBorrowBody = (await ownerBorrow.json()) as { entry: { borrowToken: string } };
+
+    const friendDrain = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/return", {
+        headers: friendHeaders,
+        body: { leaseID: "cbx_000000000001", result: "drain" },
+      }),
+    );
+    expect(friendDrain.status).toBe(403);
+
+    const drain = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/return", {
+        headers: ownerHeaders,
+        body: {
+          leaseID: "cbx_000000000001",
+          result: "drain",
+          borrowToken: ownerBorrowBody.entry.borrowToken,
+        },
+      }),
+    );
+    expect(drain.status).toBe(200);
+    const drained = (await drain.json()) as {
+      entry: { state: string };
+      lease: { state: string };
+    };
+    expect(drained.entry.state).toBe("draining");
+    expect(drained.lease.state).toBe("released");
+    expect(deleted).toBe("123");
+  });
+
   it("shares leases with explicit users or the owning org", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -1590,6 +1883,8 @@ describe("fleet lease identity and idle", () => {
   it("scopes non-admin usage to the current owner", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
+    const createdAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
     storage.seed(
       "lease:cbx_000000000001",
       testLease({
@@ -1598,6 +1893,8 @@ describe("fleet lease identity and idle", () => {
         org: "openclaw",
         estimatedHourlyUSD: 1,
         maxEstimatedUSD: 1,
+        createdAt,
+        expiresAt,
       }),
     );
     storage.seed(
@@ -1608,6 +1905,8 @@ describe("fleet lease identity and idle", () => {
         org: "openclaw",
         estimatedHourlyUSD: 1,
         maxEstimatedUSD: 1,
+        createdAt,
+        expiresAt,
       }),
     );
     const usage = await fleet.fetch(

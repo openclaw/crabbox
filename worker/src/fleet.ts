@@ -60,6 +60,10 @@ import type {
   ProviderImage,
   ProviderMachine,
   ProvisioningAttempt,
+  ReadyPoolBorrowRequest,
+  ReadyPoolEntry,
+  ReadyPoolRegisterRequest,
+  ReadyPoolReturnRequest,
   PromotedImageRecord,
   RunCreateRequest,
   RunEventRecord,
@@ -98,6 +102,7 @@ const textDecoder = new TextDecoder();
 const awsOrphanSweepRecordKey = "aws-orphan-sweep:last";
 const awsOrphanSweepFirstAlarmKey = "aws-orphan-sweep:first-alarm";
 const azureDeferredCleanupPrefix = "azure-cleanup:";
+const readyPoolPrefix = "ready-pool:";
 
 interface WebVNCTicketRecord {
   ticket: string;
@@ -364,6 +369,7 @@ export class FleetDurableObject implements DurableObject {
   private readonly egressClients = new Map<string, WebSocket>();
   private readonly egressSessions = new Map<string, EgressSessionStatus>();
   private readonly controlSockets = new Map<string, WebSocket>();
+  private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly state: DurableObjectState,
@@ -401,6 +407,9 @@ export class FleetDurableObject implements DurableObject {
       }
       if (method === "GET" && parts.join("/") === "v1/pool") {
         return await this.pool(request);
+      }
+      if (parts[0] === "v1" && parts[1] === "ready-pools") {
+        return await this.readyPoolRoute(request, parts[2], parts[3]);
       }
       if (method === "GET" && parts.join("/") === "v1/usage") {
         return await this.usage(request);
@@ -3030,6 +3039,339 @@ export class FleetDurableObject implements DurableObject {
     return json({ machines });
   }
 
+  private async readyPoolRoute(
+    request: Request,
+    rawKey?: string,
+    action?: string,
+  ): Promise<Response> {
+    const method = request.method.toUpperCase();
+    if (method === "GET" && !rawKey) {
+      return json({ pools: await this.allReadyPoolStatus(request) });
+    }
+    const decodedKey = decodeReadyPoolRouteKey(rawKey ?? "");
+    const key = decodedKey === undefined ? "" : normalizeReadyPoolKey(decodedKey);
+    if (!key) {
+      return json({ error: "invalid_pool_key" }, { status: 400 });
+    }
+    if (method === "GET" && !action) {
+      return json({ pool: await this.readyPoolStatus(key, request) });
+    }
+    if (method === "POST" && action === "register") {
+      return await this.registerReadyPoolLease(request, key);
+    }
+    if (method === "POST" && action === "borrow") {
+      return await this.borrowReadyPoolLease(request, key);
+    }
+    if (method === "POST" && action === "return") {
+      return await this.returnReadyPoolLease(request, key);
+    }
+    return notFound();
+  }
+
+  private async readyPoolStatus(key: string, request: Request): Promise<ReadyPoolEntry[]> {
+    const entries = (await this.visibleReadyPoolEntries(request)).filter(
+      (entry) => entry.key === key,
+    );
+    await this.markStaleReadyPoolEntries(
+      entries,
+      new Map((await this.leaseRecords()).map((lease) => [lease.id, lease])),
+      Date.now(),
+    );
+    return (await this.visibleReadyPoolEntries(request)).filter((entry) => entry.key === key);
+  }
+
+  private async allReadyPoolStatus(request: Request): Promise<ReadyPoolEntry[]> {
+    const entries = await this.visibleReadyPoolEntries(request);
+    await this.markStaleReadyPoolEntries(
+      entries,
+      new Map((await this.leaseRecords()).map((lease) => [lease.id, lease])),
+      Date.now(),
+    );
+    return await this.visibleReadyPoolEntries(request);
+  }
+
+  private async visibleReadyPoolEntries(request: Request): Promise<ReadyPoolEntry[]> {
+    const entries = await this.readyPoolEntries();
+    const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
+    return entries
+      .filter((entry) =>
+        this.readyPoolEntryVisibleToRequest(entry, request, leases.get(entry.leaseID)),
+      )
+      .map((entry) => redactReadyPoolEntry(entry))
+      .toSorted((a, b) => a.key.localeCompare(b.key) || a.leaseID.localeCompare(b.leaseID));
+  }
+
+  private async registerReadyPoolLease(request: Request, key: string): Promise<Response> {
+    const input = await readJson<ReadyPoolRegisterRequest>(request);
+    const leaseID = input.leaseID ?? "";
+    if (!validLeaseID(leaseID)) {
+      return json({ error: "invalid_lease_id" }, { status: 400 });
+    }
+    const lease = await this.resolveLease(leaseID, request, isAdminRequest(request));
+    if (!lease) {
+      return notFound();
+    }
+    if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
+      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
+    }
+    if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
+      return json({ error: "lease_not_active" }, { status: 409 });
+    }
+    return await this.withReadyPoolBorrowLock(async () => {
+      const existingPoolEntries = (await this.readyPoolEntries()).filter(
+        (entry) => entry.leaseID === leaseID,
+      );
+      if (existingPoolEntries.some((entry) => entry.state === "busy")) {
+        return json(
+          {
+            error: "lease_pool_busy",
+            message: "lease is currently borrowed from a ready pool",
+          },
+          { status: 409 },
+        );
+      }
+      const now = new Date().toISOString();
+      const entry: ReadyPoolEntry = {
+        key,
+        leaseID,
+        state: "ready",
+        owner: lease.owner,
+        org: lease.org,
+        provider: lease.provider,
+        target: lease.target,
+        class: lease.class,
+        serverType: lease.serverType,
+        lastReadyAt: now,
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: lease.expiresAt,
+      };
+      addReadyPoolEntryString(entry, "repo", input.repo);
+      addReadyPoolEntryString(entry, "ref", input.ref);
+      addReadyPoolEntryString(entry, "commit", input.commit);
+      addReadyPoolEntryString(entry, "fingerprint", input.fingerprint);
+      addReadyPoolEntryString(entry, "image", input.image);
+      addReadyPoolEntryString(entry, "sshHost", readyPoolLeaseSSHHost(lease, input.sshHost));
+      addReadyPoolEntryString(entry, "sshUser", readyPoolLeaseSSHUser(lease, input.sshUser));
+      addReadyPoolEntryString(entry, "sshPort", readyPoolLeaseSSHPort(lease, input.sshPort));
+      addReadyPoolEntryString(entry, "workRoot", readyPoolLeaseWorkRoot(lease, input.workRoot));
+      if (lease.windowsMode) {
+        entry.windowsMode = lease.windowsMode;
+      }
+      await Promise.all(
+        existingPoolEntries
+          .filter((existing) => existing.key !== key)
+          .map((existing) => this.deleteReadyPoolEntry(existing)),
+      );
+      await this.putReadyPoolEntry(entry);
+      return json({ entry, lease });
+    });
+  }
+
+  private async borrowReadyPoolLease(request: Request, key: string): Promise<Response> {
+    const input = await readJson<ReadyPoolBorrowRequest>(request);
+    return await this.withReadyPoolBorrowLock(async () => {
+      const entries = (await this.readyPoolStatus(key, request)).filter((entry) =>
+        readyPoolEntryMatches(entry, input),
+      );
+      const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
+      const nowMs = Date.now();
+      const candidates: Array<{ entry: ReadyPoolEntry; lease: LeaseRecord }> = [];
+      let blockedByManageAccess = false;
+      for (const entry of entries) {
+        const lease = leases.get(entry.leaseID);
+        if (
+          lease &&
+          entry.state === "ready" &&
+          lease.state === "active" &&
+          Date.parse(lease.expiresAt) > nowMs
+        ) {
+          if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
+            blockedByManageAccess = true;
+            continue;
+          }
+          candidates.push({ entry, lease });
+        }
+      }
+      const ready = candidates.toSorted(
+        (a, b) =>
+          Date.parse(a.entry.lastReadyAt ?? a.entry.createdAt) -
+          Date.parse(b.entry.lastReadyAt ?? b.entry.createdAt),
+      );
+      if (ready.length === 0) {
+        await this.markStaleReadyPoolEntries(entries, leases, nowMs);
+        if (blockedByManageAccess) {
+          return json(
+            { error: "forbidden", message: "lease manage access required" },
+            { status: 403 },
+          );
+        }
+        return json(
+          { error: "no_ready_lease", message: "no matching ready lease in pool" },
+          { status: 409 },
+        );
+      }
+      const first = ready[0];
+      if (!first) {
+        await this.markStaleReadyPoolEntries(entries, leases, nowMs);
+        if (blockedByManageAccess) {
+          return json(
+            { error: "forbidden", message: "lease manage access required" },
+            { status: 403 },
+          );
+        }
+        return json(
+          { error: "no_ready_lease", message: "no matching ready lease in pool" },
+          { status: 409 },
+        );
+      }
+      const { entry, lease } = first;
+      const now = new Date().toISOString();
+      const borrowed: ReadyPoolEntry = {
+        ...entry,
+        state: "busy",
+        borrowedBy: requestOwner(request),
+        borrowedAt: now,
+        borrowToken: crypto.randomUUID(),
+        lastUsedAt: now,
+        updatedAt: now,
+        expiresAt: lease.expiresAt,
+      };
+      await this.putReadyPoolEntry(borrowed);
+      return json({ entry: borrowed, lease });
+    });
+  }
+
+  private async returnReadyPoolLease(request: Request, key: string): Promise<Response> {
+    const input = await readJson<ReadyPoolReturnRequest>(request);
+    const leaseID = input.leaseID ?? "";
+    if (!validLeaseID(leaseID)) {
+      return json({ error: "invalid_lease_id" }, { status: 400 });
+    }
+    return await this.withReadyPoolBorrowLock(async () => {
+      const current = await this.getReadyPoolEntry(key, leaseID);
+      if (!current) {
+        return notFound();
+      }
+      const lease = await this.getLease(leaseID);
+      if (!this.readyPoolEntryVisibleToRequest(current, request, lease)) {
+        return notFound();
+      }
+      const canManage =
+        isAdminRequest(request) ||
+        Boolean(lease && this.leaseManageableByRequest(lease, request, false));
+      if (current.state !== "busy" && !canManage) {
+        return json(
+          { error: "not_borrowed", message: "pool entry is not borrowed" },
+          { status: 409 },
+        );
+      }
+      if (current.borrowedBy && current.borrowedBy !== requestOwner(request) && !canManage) {
+        return json(
+          { error: "forbidden", message: "lease is borrowed by another user" },
+          { status: 403 },
+        );
+      }
+      if (
+        current.state === "busy" &&
+        current.borrowToken &&
+        nonSecretString(input.borrowToken) !== current.borrowToken
+      ) {
+        return json(
+          { error: "borrow_token_mismatch", message: "borrow token does not match current borrow" },
+          { status: 409 },
+        );
+      }
+      const result = String(input.result ?? "ready");
+      if (result !== "ready" && result !== "drain" && result !== "release") {
+        return json(
+          { error: "invalid_result", message: "result must be ready, drain, or release" },
+          { status: 400 },
+        );
+      }
+      if (result === "release" || result === "drain") {
+        if (!canManage) {
+          return json(
+            { error: "forbidden", message: "lease manage access required" },
+            { status: 403 },
+          );
+        }
+        const drained = this.nextReturnedReadyPoolEntry(current, lease, "draining", input.reason);
+        await this.putReadyPoolEntry(drained);
+        if (lease && lease.state === "active") {
+          return json({
+            entry: drained,
+            lease: await this.releaseResolvedLease(lease, { deleteServer: true, keep: false }),
+          });
+        }
+        return json({ entry: drained, lease });
+      }
+      if (!lease || lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
+        const stale = this.nextReturnedReadyPoolEntry(current, lease, "stale", input.reason);
+        await this.putReadyPoolEntry(stale);
+        return json({ entry: stale, lease });
+      }
+      const returned = this.nextReturnedReadyPoolEntry(current, lease, "ready", input.reason);
+      await this.putReadyPoolEntry(returned);
+      return json({ entry: returned, lease });
+    });
+  }
+
+  private nextReturnedReadyPoolEntry(
+    current: ReadyPoolEntry,
+    lease: LeaseRecord | undefined,
+    state: ReadyPoolEntry["state"],
+    reason?: string,
+  ): ReadyPoolEntry {
+    const now = new Date().toISOString();
+    const failures = state === "ready" ? 0 : (current.failureCount ?? 0) + 1;
+    const {
+      borrowedAt: _borrowedAt,
+      borrowedBy: _borrowedBy,
+      borrowToken: _borrowToken,
+      ...base
+    } = current;
+    void _borrowedAt;
+    void _borrowedBy;
+    void _borrowToken;
+    const returned: ReadyPoolEntry = {
+      ...base,
+      state,
+      lastResult: nonSecretString(reason) || state,
+      failureCount: failures,
+      updatedAt: now,
+      expiresAt: lease?.expiresAt ?? current.expiresAt,
+    };
+    if (state === "ready") {
+      returned.lastReadyAt = now;
+    } else if (current.lastReadyAt) {
+      returned.lastReadyAt = current.lastReadyAt;
+    }
+    return returned;
+  }
+
+  private async markStaleReadyPoolEntries(
+    entries: ReadyPoolEntry[],
+    leases: Map<string, LeaseRecord>,
+    nowMs: number,
+  ): Promise<void> {
+    await Promise.all(
+      entries
+        .filter((entry) => {
+          const lease = leases.get(entry.leaseID);
+          return !lease || lease.state !== "active" || Date.parse(lease.expiresAt) <= nowMs;
+        })
+        .map((entry) =>
+          this.putReadyPoolEntry({
+            ...entry,
+            state: "stale",
+            updatedAt: new Date().toISOString(),
+            lastResult: "lease expired or missing",
+          }),
+        ),
+    );
+  }
+
   private async listLeases(request: Request): Promise<Response> {
     const leases = isAdminRequest(request)
       ? this.filterLeases(await this.leaseRecords(), request)
@@ -4272,6 +4614,41 @@ export class FleetDurableObject implements DurableObject {
     return active;
   }
 
+  private async readyPoolEntries(): Promise<ReadyPoolEntry[]> {
+    const entries = await this.state.storage.list<ReadyPoolEntry>({ prefix: readyPoolPrefix });
+    return [...entries.values()];
+  }
+
+  private async getReadyPoolEntry(
+    key: string,
+    leaseID: string,
+  ): Promise<ReadyPoolEntry | undefined> {
+    return this.state.storage.get<ReadyPoolEntry>(readyPoolKey(key, leaseID));
+  }
+
+  private async putReadyPoolEntry(entry: ReadyPoolEntry): Promise<void> {
+    await this.state.storage.put(readyPoolKey(entry.key, entry.leaseID), entry);
+  }
+
+  private async deleteReadyPoolEntry(entry: ReadyPoolEntry): Promise<void> {
+    await this.state.storage.delete(readyPoolKey(entry.key, entry.leaseID));
+  }
+
+  private async withReadyPoolBorrowLock<T>(operation: () => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const previous = this.readyPoolBorrowQueue.catch(() => {});
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.readyPoolBorrowQueue = previous.then(() => next);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   private async runRecords(): Promise<RunRecord[]> {
     const runs = await this.state.storage.list<RunRecord>({ prefix: "run:" });
     return [...runs.values()];
@@ -4310,6 +4687,17 @@ export class FleetDurableObject implements DurableObject {
 
   private leaseVisibleToRequest(lease: LeaseRecord, request: Request, admin: boolean): boolean {
     return this.leaseAccessRole(lease, request, admin) !== undefined;
+  }
+
+  private readyPoolEntryVisibleToRequest(
+    entry: ReadyPoolEntry,
+    request: Request,
+    lease: LeaseRecord | undefined,
+  ): boolean {
+    if (isAdminRequest(request)) {
+      return true;
+    }
+    return Boolean(lease && this.leaseVisibleToRequest(lease, request, false));
   }
 
   private leaseManageableByRequest(lease: LeaseRecord, request: Request, admin: boolean): boolean {
@@ -4579,6 +4967,90 @@ function providerAccessPrefix(): string {
 
 function providerAccessKey(leaseID: string): string {
   return `${providerAccessPrefix()}${leaseID}`;
+}
+
+function normalizeReadyPoolKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._/-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function decodeReadyPoolRouteKey(value: string): string | undefined {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function readyPoolEntryMatches(entry: ReadyPoolEntry, input: ReadyPoolBorrowRequest): boolean {
+  return (
+    readyPoolFieldMatches(entry.repo, input.repo) &&
+    readyPoolFieldMatches(entry.ref, input.ref) &&
+    readyPoolFieldMatches(entry.commit, input.commit, input.allowMissingCommit === true) &&
+    readyPoolFieldMatches(entry.fingerprint, input.fingerprint) &&
+    readyPoolFieldMatches(entry.provider, input.provider) &&
+    readyPoolFieldMatches(entry.target, input.target)
+  );
+}
+
+function addReadyPoolEntryString(
+  entry: ReadyPoolEntry,
+  key: keyof ReadyPoolEntry,
+  value: unknown,
+): void {
+  const text = nonSecretString(value);
+  if (text) {
+    (entry as unknown as Record<string, unknown>)[key] = text;
+  }
+}
+
+function readyPoolLeaseSSHHost(lease: LeaseRecord, requested: unknown): string {
+  const host = nonSecretString(requested);
+  const allowed = new Set(
+    [lease.host, lease.tailscale?.fqdn, lease.tailscale?.ipv4].filter((value): value is string =>
+      Boolean(value),
+    ),
+  );
+  return host && allowed.has(host) ? host : lease.host;
+}
+
+function readyPoolLeaseSSHUser(lease: LeaseRecord, requested: unknown): string {
+  const user = nonSecretString(requested);
+  return safeReadyPoolSSHUser(user) ? user : lease.sshUser;
+}
+
+function safeReadyPoolSSHUser(value: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/.test(value);
+}
+
+function readyPoolLeaseSSHPort(lease: LeaseRecord, requested: unknown): string {
+  const port = nonSecretString(requested);
+  const allowed = new Set([lease.sshPort, ...(lease.sshFallbackPorts ?? [])]);
+  return port && allowed.has(port) ? port : lease.sshPort;
+}
+
+function readyPoolLeaseWorkRoot(lease: LeaseRecord, requested: unknown): string {
+  return nonSecretString(requested) || lease.workRoot;
+}
+
+function readyPoolFieldMatches(
+  stored: string | undefined,
+  requested: string | undefined,
+  allowMissing = false,
+): boolean {
+  const want = nonSecretString(requested);
+  if (!want) {
+    return true;
+  }
+  const got = nonSecretString(stored);
+  return got === want || (allowMissing && got === "");
+}
+
+function readyPoolKey(key: string, leaseID: string): string {
+  return `${readyPoolPrefix}${key}:${leaseID}`;
 }
 
 function runKey(runID: string): string {
@@ -7566,4 +8038,10 @@ function isRetryableAWSRegionProvisioningError(message: string): boolean {
     message.includes("quota ") ||
     message.includes("capacity")
   );
+}
+
+function redactReadyPoolEntry(entry: ReadyPoolEntry): ReadyPoolEntry {
+  const { borrowToken: _borrowToken, ...redacted } = entry;
+  void _borrowToken;
+  return redacted;
 }

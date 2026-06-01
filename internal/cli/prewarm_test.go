@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -92,6 +93,111 @@ cache:
 	if !strings.Contains(got, "crabbox run --blacksmith-workflow testbox.yml --blacksmith-job check --provider blacksmith-testbox") ||
 		!strings.Contains(got, "--no-sync --no-hydrate --shell -- 'node -v'") {
 		t.Fatalf("blacksmith prewarm should still run explicit probe:\n%s", got)
+	}
+}
+
+func TestPrewarmPoolRequiresCoordinatorBeforeWarmup(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	if err := os.WriteFile(filepath.Join(dir, ".crabbox.yaml"), []byte(`provider: azure
+target: linux
+class: standard
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	err := app.Run(context.Background(), []string{"prewarm", "--dry-run", "--provider", "azure", "--pool", "example"})
+	if err == nil {
+		t.Fatalf("prewarm --pool without coordinator succeeded; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(err.Error(), "--pool requires a coordinator-backed SSH lease provider") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(stdout.String(), "crabbox warmup") {
+		t.Fatalf("prewarm --pool planned warmup before broker validation:\n%s", stdout.String())
+	}
+}
+
+func TestPrewarmReadyPoolCommitUsesOnlyKnownHydratedSHA(t *testing.T) {
+	repo := Repo{Root: t.TempDir(), Head: strings.Repeat("a", 40), BaseRef: "main"}
+	cfg := Config{}
+	if got := prewarmReadyPoolCommit(cfg, repo, false); got != repo.Head {
+		t.Fatalf("empty actions ref should use local head: %q", got)
+	}
+	if got := prewarmReadyPoolCommit(cfg, repo, true); got != "" {
+		t.Fatalf("github-runner default ref should omit commit, got %q", got)
+	}
+
+	cfg.Actions.Ref = strings.Repeat("b", 40)
+	if got := prewarmReadyPoolCommit(cfg, repo, true); got != cfg.Actions.Ref {
+		t.Fatalf("sha actions ref should be registered as commit: %q", got)
+	}
+	if got := prewarmReadyPoolCommit(cfg, repo, false); got != "" {
+		t.Fatalf("local hydration should not register non-head sha as commit: %q", got)
+	}
+
+	cfg.Actions.Ref = "main"
+	if got := prewarmReadyPoolCommit(cfg, repo, true); got != "" {
+		t.Fatalf("github-runner branch ref should omit commit, got %q", got)
+	}
+	if got := prewarmReadyPoolCommit(cfg, repo, false); got != "" {
+		t.Fatalf("non-checked-out actions ref should omit commit, got %q", got)
+	}
+}
+
+func TestReadyPoolRunBorrowCommitOmitsBranchRef(t *testing.T) {
+	repo := Repo{Head: strings.Repeat("a", 40)}
+	cfg := Config{}
+	if got := readyPoolRunBorrowCommit(cfg, repo); got != repo.Head {
+		t.Fatalf("empty actions ref should borrow exact local head: %q", got)
+	}
+	if !readyPoolRunAllowsMissingCommit(cfg, repo) {
+		t.Fatalf("empty actions ref should allow ref-only hydrated entries")
+	}
+
+	cfg.Actions.Ref = "main"
+	if got := readyPoolRunBorrowCommit(cfg, repo); got != "" {
+		t.Fatalf("branch actions ref should borrow by ref only, got %q", got)
+	}
+
+	cfg.Actions.Ref = strings.Repeat("b", 40)
+	if got := readyPoolRunBorrowCommit(cfg, repo); got != repo.Head {
+		t.Fatalf("sha actions ref should keep local commit filter: %q", got)
+	}
+	if readyPoolRunAllowsMissingCommit(cfg, repo) {
+		t.Fatalf("sha actions ref should require exact commit")
+	}
+
+	dir := t.TempDir()
+	runPrewarmGit(t, dir, "init", "-b", "main")
+	runPrewarmGit(t, dir, "config", "user.email", "test@example.com")
+	runPrewarmGit(t, dir, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("ready\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPrewarmGit(t, dir, "add", "README.md")
+	runPrewarmGit(t, dir, "commit", "-m", "initial")
+	head := gitOutput(dir, "rev-parse", "HEAD")
+	cfg.Actions.Ref = "main"
+	if got := readyPoolRunBorrowCommit(cfg, Repo{Root: dir, Head: head}); got != head {
+		t.Fatalf("checked-out actions branch should borrow exact head: %q", got)
+	}
+	if !readyPoolRunAllowsMissingCommit(cfg, Repo{Root: dir, Head: head}) {
+		t.Fatalf("checked-out actions branch should allow GitHub-runner ref-only entries")
+	}
+}
+
+func runPrewarmGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }
 
