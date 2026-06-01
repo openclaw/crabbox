@@ -84,7 +84,9 @@ Providers advertise cache volume support with the `cache-volume` feature.
 Blacksmith Testbox implements the feature by forwarding each resolved volume as
 a `blacksmith testbox warmup --sticky-disk key:path` argument. Local Container
 implements it with Docker named volumes mounted at the configured paths; the
-Docker volume name is derived from the cache key.
+Docker volume name is derived from the cache key. Apple Container implements it
+with host cache directories under the local user cache directory mounted with
+Apple's `--volume` flag.
 
 Providers that do not advertise `cache-volume` ignore non-required configured
 volumes. Required volumes fail early when the selected provider cannot honor

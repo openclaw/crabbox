@@ -17,6 +17,17 @@ func ClassifyRunFailure(exitCode int, text string, phases []TimingPhase) Failure
 	}
 	lower := strings.ToLower(stripANSI(text))
 	switch {
+	case strings.Contains(lower, "blacksmith") &&
+		strings.Contains(lower, "backend.blacksmith.sh") &&
+		(strings.Contains(lower, "shutdown") || strings.Contains(lower, "lookup") || strings.Contains(lower, "no such host")):
+		return FailureClassification{BlockedStage: "cleanup", RetryLikely: "true"}
+	case strings.Contains(lower, "blacksmith") &&
+		strings.Contains(lower, "sync did not print a completion marker"):
+		return FailureClassification{BlockedStage: "sync", RetryLikely: "true"}
+	case isBlacksmithActionsCancelled(lower):
+		return FailureClassification{BlockedStage: "actions_cancelled", RetryLikely: "true"}
+	case isBlacksmithPostReadyStall(lower):
+		return FailureClassification{BlockedStage: "testbox_stalled_after_ready", RetryLikely: "true"}
 	case strings.Contains(lower, "timed out waiting for ssh"):
 		return FailureClassification{BlockedStage: "ssh", RetryLikely: "true"}
 	case isKnownHTMLAuthBody(lower):
@@ -39,6 +50,25 @@ func ClassifyRunFailure(exitCode int, text string, phases []TimingPhase) Failure
 		return FailureClassification{BlockedStage: "install", RetryLikely: "unknown"}
 	}
 	return FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"}
+}
+
+func isBlacksmithActionsCancelled(lower string) bool {
+	if !strings.Contains(lower, "testbox ready") {
+		return false
+	}
+	return strings.Contains(lower, "github actions run cancelled") ||
+		strings.Contains(lower, "github actions run canceled") ||
+		strings.Contains(lower, "workflow run cancelled") ||
+		strings.Contains(lower, "workflow run canceled")
+}
+
+func isBlacksmithPostReadyStall(lower string) bool {
+	if !strings.Contains(lower, "blacksmith") || !strings.Contains(lower, "testbox ready") {
+		return false
+	}
+	return strings.Contains(lower, "stalled after ready") ||
+		strings.Contains(lower, "post-ready stall") ||
+		strings.Contains(lower, "no output after ready")
 }
 
 func ApplyFailureClassification(report *TimingReport, classification FailureClassification) {

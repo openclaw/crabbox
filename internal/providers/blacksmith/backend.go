@@ -133,7 +133,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 				return
 			}
 			if err := b.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: blacksmith stop failed for %s: %v\n", leaseID, err)
+				fmt.Fprintf(b.rt.Stderr, "warning: blacksmith cleanup failed stage=cleanup lease=%s retry_likely=true: %v\n", leaseID, err)
 				return
 			}
 			removeLeaseClaim(leaseID)

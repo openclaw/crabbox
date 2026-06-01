@@ -249,6 +249,14 @@ func TestValidateActionsRunnerCapabilityRejectsLocalContainer(t *testing.T) {
 	}
 }
 
+func TestValidateActionsRunnerCapabilityRejectsAppleContainer(t *testing.T) {
+	backend := testSSHBackend{spec: ProviderSpec{Name: "apple-container"}}
+	err := validateActionsRunnerCapability(backend, Config{Provider: "apple-container", TargetOS: targetLinux})
+	if err == nil || !strings.Contains(err.Error(), "provider=apple-container") {
+		t.Fatalf("apple-container actions runner error=%v", err)
+	}
+}
+
 func TestLocalActionsWorkflowPathRequiresRepoWorkflowFile(t *testing.T) {
 	root := t.TempDir()
 	workflow := filepath.Join(root, ".github", "workflows", "hydrate.yml")

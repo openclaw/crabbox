@@ -31,6 +31,8 @@ SSH-lease providers further differ by how they reach the cloud:
   provisioning, no cleanup.
 - **Local container** — `local-container` starts a labeled Linux container
   through a Docker-compatible local runtime (Docker Desktop, OrbStack, Colima).
+  `apple-container` is the equivalent for Apple's native `container` runtime on
+  Apple silicon macOS.
 - **Delegated sandbox** — managed sandbox/proof runners that execute remotely
   without an SSH lease (e.g. `e2b`, `modal`, `islo`, `cloudflare`,
   `azure-dynamic-sessions`).
@@ -57,6 +59,7 @@ Each page below maps to an adapter under `internal/providers/<dir>`. The
 | [Parallels](parallels.md) | `parallels` | — | Linux, macOS, Windows | no (direct) |
 | [Static SSH](ssh.md) | `ssh` | `static`, `static-ssh` | Linux, macOS, Windows | no (static) |
 | [Local Container](local-container.md) | `local-container` | `docker`, `container`, `local-docker` | Linux | no (local) |
+| [Apple Container](apple-container.md) | `apple-container` | `apple`, `applecontainer` | Linux | no (local) |
 | [exe.dev](exe-dev.md) | `exe-dev` | `exe`, `exedev` | Linux | no (direct) |
 | [Namespace Devbox](namespace-devbox.md) | `namespace-devbox` | `namespace`, `namespace-devboxes` | Linux | no (direct) |
 | [Semaphore](semaphore.md) | `semaphore` | `sem` | Linux | no (direct) |

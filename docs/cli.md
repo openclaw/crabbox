@@ -40,6 +40,7 @@ Commands are grouped here for orientation. Each links to its detailed page under
 ```text
 crabbox warmup [lease flags]                 lease a box and wait until ready
 crabbox run -- <command...>                  sync, run a remote command, stream output
+crabbox run --pool <key> -- <command...>     borrow a hydrated ready-pool lease
 crabbox status --id <id>                     show lease state (--wait to block)
 crabbox inspect --id <id>                     print lease/provider details
 crabbox list                                  list machines (alias: crabbox pool list)
@@ -47,13 +48,14 @@ crabbox share --id <id> [--user|--org]        grant access to a lease
 crabbox unshare --id <id> [--user|--org|--all]
 crabbox stop <id-or-slug>                     end a lease (alias: crabbox release)
 crabbox cleanup [--dry-run]                   sweep expired direct-provider machines
+crabbox pool ready [key]                      list hydrated broker ready-pool leases
 ```
 
 See [warmup](commands/warmup.md), [run](commands/run.md),
 [status](commands/status.md), [inspect](commands/inspect.md),
 [list](commands/list.md), [share](commands/share.md),
 [unshare](commands/unshare.md), [stop](commands/stop.md),
-[cleanup](commands/cleanup.md).
+[cleanup](commands/cleanup.md), [pool](commands/pool.md).
 
 ### Run helpers and jobs
 

@@ -112,6 +112,13 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ASCII_BOX_CLI",
 		"BOX_CLI",
 		"CRABBOX_ASCII_BOX_WORKDIR",
+		"CRABBOX_APPLE_CONTAINER_CLI",
+		"CRABBOX_APPLE_CONTAINER_IMAGE",
+		"CRABBOX_APPLE_CONTAINER_USER",
+		"CRABBOX_APPLE_CONTAINER_WORK_ROOT",
+		"CRABBOX_APPLE_CONTAINER_CPUS",
+		"CRABBOX_APPLE_CONTAINER_MEMORY",
+		"CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS",
 		"CRABBOX_WANDB_API_KEY",
 		"WANDB_API_KEY",
 		"CRABBOX_WANDB_DEFAULT_IMAGE",
@@ -203,6 +210,41 @@ func TestAsciiBoxConfigDefaultsFileAndEnv(t *testing.T) {
 	applyEnv(&cfg)
 	if cfg.AsciiBox.APIKey != "override-key" || cfg.AsciiBox.BaseURL != "https://override.example.test" || cfg.AsciiBox.CLIPath != "/opt/box" || cfg.AsciiBox.Workdir != "/home/user/env-project" {
 		t.Fatalf("env asciiBox config not applied: %#v", cfg.AsciiBox)
+	}
+}
+
+func TestAppleContainerConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.AppleContainer.CLIPath != "container" || cfg.AppleContainer.User != "crabbox" {
+		t.Fatalf("apple container defaults not applied: %#v", cfg.AppleContainer)
+	}
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "apple-container",
+		AppleContainer: &fileAppleContainerConfig{
+			CLIPath:      "/opt/bin/container",
+			Image:        "example-org/my-app:test",
+			User:         "runner",
+			WorkRoot:     "/work/example",
+			CPUs:         4,
+			Memory:       "8g",
+			ExtraRunArgs: []string{"--mount", "type=virtiofs,source=/tmp,target=/tmp"},
+		},
+	})
+	if cfg.Provider != "apple-container" || cfg.AppleContainer.CLIPath != "/opt/bin/container" || cfg.AppleContainer.Image != "example-org/my-app:test" || cfg.AppleContainer.User != "runner" || cfg.AppleContainer.WorkRoot != "/work/example" || cfg.AppleContainer.CPUs != 4 || cfg.AppleContainer.Memory != "8g" || len(cfg.AppleContainer.ExtraRunArgs) != 2 {
+		t.Fatalf("file appleContainer config not applied: %#v", cfg.AppleContainer)
+	}
+
+	t.Setenv("CRABBOX_APPLE_CONTAINER_CLI", "/usr/local/bin/container")
+	t.Setenv("CRABBOX_APPLE_CONTAINER_IMAGE", "example-org/other:live")
+	t.Setenv("CRABBOX_APPLE_CONTAINER_USER", "env-user")
+	t.Setenv("CRABBOX_APPLE_CONTAINER_WORK_ROOT", "/work/env")
+	t.Setenv("CRABBOX_APPLE_CONTAINER_CPUS", "6")
+	t.Setenv("CRABBOX_APPLE_CONTAINER_MEMORY", "12g")
+	t.Setenv("CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS", "--dns 1.1.1.1")
+	applyEnv(&cfg)
+	if cfg.AppleContainer.CLIPath != "/usr/local/bin/container" || cfg.AppleContainer.Image != "example-org/other:live" || cfg.AppleContainer.User != "env-user" || cfg.AppleContainer.WorkRoot != "/work/env" || cfg.AppleContainer.CPUs != 6 || cfg.AppleContainer.Memory != "12g" || len(cfg.AppleContainer.ExtraRunArgs) != 2 {
+		t.Fatalf("env appleContainer config not applied: %#v", cfg.AppleContainer)
 	}
 }
 
@@ -1252,6 +1294,48 @@ os: ubuntu:24.04
 	}
 }
 
+func TestAppleContainerImageFollowsOSImageDefault(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("target: linux\nos: ubuntu:24.04\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// apple-container must track the OS image default the same way local-container does.
+	if cfg.AppleContainer.Image == "" || cfg.AppleContainer.Image != cfg.LocalContainer.Image {
+		t.Fatalf("apple-container image should follow the os default like local-container: apple=%q local=%q", cfg.AppleContainer.Image, cfg.LocalContainer.Image)
+	}
+	if cfg.AppleContainer.Image == baseConfig().AppleContainer.Image {
+		t.Fatalf("--os did not update apple-container image: still base %q", cfg.AppleContainer.Image)
+	}
+}
+
+func TestAppleContainerExplicitImageSurvivesOSDefault(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("target: linux\nos: ubuntu:24.04\nappleContainer:\n  image: my-org/custom:tag\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleContainer.Image != "my-org/custom:tag" {
+		t.Fatalf("explicit apple-container image was overwritten by --os: %q", cfg.AppleContainer.Image)
+	}
+}
+
 func TestPortableOSHigherPrecedenceOverridesEarlierPortableDefaults(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
@@ -1367,6 +1451,32 @@ func TestProviderAliasCanonicalizedBeforeDefaults(t *testing.T) {
 	}
 	if cfg.Provider != "gcp" || cfg.ServerType != "c4-standard-192" {
 		t.Fatalf("provider=%q type=%q want gcp c4-standard-192", cfg.Provider, cfg.ServerType)
+	}
+}
+
+func TestConfigFileServerTypeIsExplicit(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	path := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("provider: gcp\nserverType: c4-standard-192\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServerType != "c4-standard-192" || !cfg.ServerTypeExplicit {
+		t.Fatalf("serverType=%q explicit=%t, want explicit c4-standard-192", cfg.ServerType, cfg.ServerTypeExplicit)
+	}
+	if largeDefaultServerType(cfg) {
+		t.Fatalf("explicit config serverType should not warn as a large default")
 	}
 }
 

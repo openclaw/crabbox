@@ -27,6 +27,7 @@ crabbox run --harness HARNESS.md --index light -- pnpm test
 crabbox run --provider ssh --target macos --static-host mac-studio.local -- xcodebuild test
 crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local -- dotnet test
 crabbox run --profile live-qa --preset qa-live --scenario login-regression --emit-proof /tmp/proof.md --stop-after success
+crabbox run --pool example/app/main/aws/linux/c6i.2xlarge -- pnpm test
 ```
 
 The trailing command after `--` is sent to the box verbatim as argv. Use
@@ -53,6 +54,16 @@ If `--id` is omitted, Crabbox creates a fresh, non-kept lease and releases it
 when the command exits. With `--id` it reuses an existing lease; `--id` accepts
 either the stable `cbx_...` ID or the active friendly slug (see
 [identifiers](../features/identifiers.md)).
+
+With `--pool <key>`, Crabbox borrows one hydrated broker ready-pool lease,
+uses the pool-recorded SSH endpoint, runs the command, and returns the lease.
+The default `--pool-return auto` returns successful runs to the pool and drains
+failed runs so a bad machine is not reused. Use
+`--pool-return ready|drain|release` to override that policy for one run. See
+[Broker ready pools](../spec/broker.md).
+Pooled runs reject `--full-resync`/`--fresh-sync`. With `--no-sync`, pooled
+borrows require an exact commit match. Pooled runs also reject `--keep` and
+`--keep-on-failure`; use `--pool-return ready|drain|release` for lifecycle.
 
 On coordinator-backed one-shot runs, if SSH becomes unavailable after a
 successful sync but before the command starts, Crabbox stops that stale lease,

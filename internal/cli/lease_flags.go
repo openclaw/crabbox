@@ -67,6 +67,10 @@ func applyLeaseCreateFlags(cfg *Config, fs *flag.FlagSet, values leaseCreateFlag
 }
 
 func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCreateFlagValues, existingLeaseID string) error {
+	return applyLeaseCreateFlagsForLeaseMode(cfg, fs, values, existingLeaseID, true)
+}
+
+func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values leaseCreateFlagValues, existingLeaseID string, mutateExternal bool) error {
 	cfg.Provider = *values.Provider
 	cfg.Profile = *values.Profile
 	cfg.Class = *values.Class
@@ -169,7 +173,7 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 		dynamicTailscaleTagAllowed := pondDynamicTailscaleTagAllowed(*cfg)
 		appendPondTailscaleTag(cfg, dynamicTailscaleTagAllowed)
 		// Reuse paths do not mutate ACL state.
-		if existingLeaseID == "" && dynamicTailscaleTagAllowed {
+		if mutateExternal && existingLeaseID == "" && dynamicTailscaleTagAllowed {
 			if err := maybeBootstrapPondACL(context.Background(), *cfg); err != nil {
 				return err
 			}

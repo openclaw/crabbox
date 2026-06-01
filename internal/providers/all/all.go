@@ -1,6 +1,7 @@
 package all
 
 import (
+	_ "github.com/openclaw/crabbox/internal/providers/applecontainer"
 	_ "github.com/openclaw/crabbox/internal/providers/asciibox"
 	_ "github.com/openclaw/crabbox/internal/providers/aws"
 	_ "github.com/openclaw/crabbox/internal/providers/azure"

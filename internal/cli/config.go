@@ -119,6 +119,8 @@ type Config struct {
 	Sprites                     SpritesConfig
 	LocalContainer              LocalContainerConfig
 	localContainerImageExplicit bool
+	AppleContainer              AppleContainerConfig
+	appleContainerImageExplicit bool
 	Tailscale                   TailscaleConfig
 	Static                      StaticConfig
 	Results                     ResultsConfig
@@ -416,6 +418,16 @@ type LocalContainerConfig struct {
 	Memory       string
 	Network      string
 	DockerSocket bool
+}
+
+type AppleContainerConfig struct {
+	CLIPath      string
+	Image        string
+	User         string
+	WorkRoot     string
+	CPUs         int
+	Memory       string
+	ExtraRunArgs []string
 }
 
 type StaticConfig struct {
@@ -785,6 +797,9 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	if force || cfg.LocalContainer.Image == "" || (!cfg.localContainerImageExplicit && (cfg.LocalContainer.Image == base.LocalContainer.Image || wasOSDefault)) {
 		cfg.LocalContainer.Image = containerImage
 	}
+	if force || cfg.AppleContainer.Image == "" || (!cfg.appleContainerImageExplicit && (cfg.AppleContainer.Image == base.AppleContainer.Image || wasOSDefault)) {
+		cfg.AppleContainer.Image = containerImage
+	}
 	cfg.osImageProviderDefaults = cfg.OSImage
 }
 
@@ -794,6 +809,10 @@ func MarkIsloImageExplicit(cfg *Config) {
 
 func MarkLocalContainerImageExplicit(cfg *Config) {
 	cfg.localContainerImageExplicit = true
+}
+
+func MarkAppleContainerImageExplicit(cfg *Config) {
+	cfg.appleContainerImageExplicit = true
 }
 
 func baseConfig() Config {
@@ -961,6 +980,12 @@ func baseConfig() Config {
 			User:    "crabbox",
 			Network: "bridge",
 		},
+		AppleContainer: AppleContainerConfig{
+			CLIPath:  "container",
+			Image:    containerImage,
+			User:     "crabbox",
+			WorkRoot: "/work/crabbox",
+		},
 		Tailscale: TailscaleConfig{
 			Tags:             []string{"tag:crabbox"},
 			HostnameTemplate: "crabbox-{slug}",
@@ -1025,6 +1050,7 @@ type fileConfig struct {
 	Semaphore            *fileSemaphoreConfig               `yaml:"semaphore,omitempty"`
 	Sprites              *fileSpritesConfig                 `yaml:"sprites,omitempty"`
 	LocalContainer       *fileLocalContainerConfig          `yaml:"localContainer,omitempty"`
+	AppleContainer       *fileAppleContainerConfig          `yaml:"appleContainer,omitempty"`
 	Tailscale            *fileTailscaleConfig               `yaml:"tailscale,omitempty"`
 	Static               *fileStaticConfig                  `yaml:"static,omitempty"`
 	Results              *fileResultsConfig                 `yaml:"results,omitempty"`
@@ -1388,6 +1414,16 @@ type fileLocalContainerConfig struct {
 	DockerSocket *bool  `yaml:"dockerSocket,omitempty"`
 }
 
+type fileAppleContainerConfig struct {
+	CLIPath      string   `yaml:"cliPath,omitempty"`
+	Image        string   `yaml:"image,omitempty"`
+	User         string   `yaml:"user,omitempty"`
+	WorkRoot     string   `yaml:"workRoot,omitempty"`
+	CPUs         int      `yaml:"cpus,omitempty"`
+	Memory       string   `yaml:"memory,omitempty"`
+	ExtraRunArgs []string `yaml:"extraRunArgs,omitempty"`
+}
+
 type fileTailscaleConfig struct {
 	Enabled                *bool    `yaml:"enabled,omitempty"`
 	Network                string   `yaml:"network,omitempty"`
@@ -1728,6 +1764,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	}
 	if file.ServerType != "" {
 		cfg.ServerType = file.ServerType
+		cfg.ServerTypeExplicit = true
 	}
 	if file.Coordinator != "" {
 		cfg.Coordinator = file.Coordinator
@@ -2433,6 +2470,30 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.LocalContainer.DockerSocket = *file.LocalContainer.DockerSocket
 		}
 	}
+	if file.AppleContainer != nil {
+		if file.AppleContainer.CLIPath != "" {
+			cfg.AppleContainer.CLIPath = file.AppleContainer.CLIPath
+		}
+		if file.AppleContainer.Image != "" {
+			cfg.AppleContainer.Image = file.AppleContainer.Image
+			cfg.appleContainerImageExplicit = true
+		}
+		if file.AppleContainer.User != "" {
+			cfg.AppleContainer.User = file.AppleContainer.User
+		}
+		if file.AppleContainer.WorkRoot != "" {
+			cfg.AppleContainer.WorkRoot = file.AppleContainer.WorkRoot
+		}
+		if file.AppleContainer.CPUs > 0 {
+			cfg.AppleContainer.CPUs = file.AppleContainer.CPUs
+		}
+		if file.AppleContainer.Memory != "" {
+			cfg.AppleContainer.Memory = file.AppleContainer.Memory
+		}
+		if len(file.AppleContainer.ExtraRunArgs) > 0 {
+			cfg.AppleContainer.ExtraRunArgs = append([]string(nil), file.AppleContainer.ExtraRunArgs...)
+		}
+	}
 	if file.Tailscale != nil {
 		if file.Tailscale.Enabled != nil {
 			cfg.Tailscale.Enabled = *file.Tailscale.Enabled
@@ -3125,6 +3186,18 @@ func applyEnv(cfg *Config) error {
 	cfg.LocalContainer.Network = getenv("CRABBOX_LOCAL_CONTAINER_NETWORK", cfg.LocalContainer.Network)
 	if value, ok := getenvBool("CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET"); ok {
 		cfg.LocalContainer.DockerSocket = value
+	}
+	cfg.AppleContainer.CLIPath = getenv("CRABBOX_APPLE_CONTAINER_CLI", cfg.AppleContainer.CLIPath)
+	if image := os.Getenv("CRABBOX_APPLE_CONTAINER_IMAGE"); image != "" {
+		cfg.AppleContainer.Image = image
+		cfg.appleContainerImageExplicit = true
+	}
+	cfg.AppleContainer.User = getenv("CRABBOX_APPLE_CONTAINER_USER", cfg.AppleContainer.User)
+	cfg.AppleContainer.WorkRoot = getenv("CRABBOX_APPLE_CONTAINER_WORK_ROOT", cfg.AppleContainer.WorkRoot)
+	cfg.AppleContainer.CPUs = getenvInt("CRABBOX_APPLE_CONTAINER_CPUS", cfg.AppleContainer.CPUs)
+	cfg.AppleContainer.Memory = getenv("CRABBOX_APPLE_CONTAINER_MEMORY", cfg.AppleContainer.Memory)
+	if extra := strings.Fields(os.Getenv("CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS")); len(extra) > 0 {
+		cfg.AppleContainer.ExtraRunArgs = extra
 	}
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value

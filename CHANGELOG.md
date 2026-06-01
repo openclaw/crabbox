@@ -4,7 +4,32 @@
 
 ### Added
 
+- Added `provider: apple-container` for local Apple silicon macOS Linux leases, including SSH sync/run lifecycle and provider-backed cache volumes. Thanks @zozo123.
+- Added a repo-local Blacksmith Testbox workflow and Crabbox config so delegated Testbox validation has workflow/job defaults.
+- Added `crabbox prewarm` to lease and hydrate reusable test-ready boxes from configured GitHub Actions, with provider-owned handling for delegated runners such as Blacksmith Testbox.
+- Added broker ready pools for hydrated reusable leases, including `prewarm --pool`, `run --pool`, `pool ready/register/borrow/return/ensure`, and the broker ready-pool API.
+- Added `crabbox doctor --all --prepare-check` to report provider matrix readiness, resolved test machine types, and hydration workflow/job setup without creating leases.
+- Added `crabbox webvnc daemon list` to show alive and stale local WebVNC helper daemons after agent runs.
+
+### Changed
+
+- Raised the coordinator fleet-wide and org-wide reserved monthly caps while keeping per-owner and active lease limits in place, so trusted operators are not blocked by stale reserved-cost accounting.
+- Tuned XFCE/WebVNC desktops for smoother interactive use with low-latency `x11vnc`, 60fps WayVNC, and low-compression noVNC defaults.
+- Updated Go and Worker dependencies, including Wrangler, Vitest, oxlint, Cloudflare Workers types, AWS SDK, Daytona SDK, Google API modules, OpenTelemetry, and the Go toolchain.
+
 ### Fixed
+
+- Fixed GNOME desktop leases to follow the same persisted light/dark theme selection as XFCE, including GTK settings, panel restart, and browser color-scheme flags.
+- Fixed GNOME theme toggles to restart the desktop panel inside the active session so the top and bottom bars stay visible.
+- Fixed WebVNC GNOME theme switching on existing leases without the dynamic helper, including black GNOME Terminal profiles for dark mode.
+- Fixed GNOME WebVNC terminal title bars to follow light/dark theme changes by updating labwc window decorations.
+- Fixed GNOME WebVNC terminal menubars to follow light/dark theme changes and added a generated desktop background for GNOME sessions.
+- Fixed XFCE desktop leases to drag and resize windows opaquely instead of using the wireframe destination box, with full move/resize opacity and XFWM compositing disabled for the Xvfb/VNC path.
+- Fixed Apple Container bootstrap on hosts whose runtime does not inherit DNS by passing detected host resolvers while preserving explicit `--apple-container-extra-run-args --dns` overrides.
+- Fixed Apple Container runs to fail as soon as the container exits during SSH bootstrap and include a short container log tail instead of waiting for the full SSH timeout.
+- Classified Blacksmith Testbox cleanup, sync-marker, cancelled Actions, and post-ready stall failures as retryable infra stages instead of generic unknown failures.
+- Fixed Azure VM provisioning so slow creates time out quickly, continue through SKU/region fallback, and use a Worker Azure region list separate from AWS regions.
+- Fixed local Actions hydration after warmup SSH port fallback so prewarmed SSH-backed boxes reuse the resolved reachable endpoint instead of retrying the configured port.
 
 ### Removed
 

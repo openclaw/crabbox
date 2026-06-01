@@ -98,6 +98,7 @@ crabbox job run --harness HARNESS.md full-ci
 
 # or warm a box once, then reuse it
 crabbox warmup                                       # prints cbx_... + a slug
+crabbox prewarm                                      # lease + Actions hydration
 crabbox run --id blue-lobster -- pnpm test:changed
 crabbox ssh --id blue-lobster
 crabbox stop blue-lobster
@@ -127,6 +128,7 @@ Targets: **L**inux, **M**acOS, **W**indows.
 | [Proxmox](docs/providers/proxmox.md) | `proxmox` | L | direct | Clone Linux QEMU templates on a private Proxmox VE cluster. |
 | [Static SSH](docs/providers/ssh.md) | `ssh` (`static`, `static-ssh`) | L / M / W | direct | Existing machines; no provisioning. |
 | [Local Container](docs/providers/local-container.md) | `local-container` (`docker`, `container`, `local-docker`) | L | direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima). |
+| [Apple Container](docs/providers/apple-container.md) | `apple-container` (`apple`, `applecontainer`) | L | direct | Apple's native `container` runtime on Apple silicon macOS. |
 | [exe.dev](docs/providers/exe-dev.md) | `exe-dev` (`exe`, `exedev`) | L | direct | exe.dev VMs exposed as public SSH leases. |
 | [Namespace Devbox](docs/providers/namespace-devbox.md) | `namespace-devbox` (`namespace`, `namespace-devboxes`) | L | direct | Namespace.so Devboxes over SSH. |
 | [Semaphore](docs/providers/semaphore.md) | `semaphore` (`sem`) | L | direct | A Semaphore CI job leased as a testbox. |
@@ -156,8 +158,10 @@ and authoring guide.
 ## Highlights
 
 - **One-shot or warm workspaces.** `crabbox run` for fire-and-forget;
-  `crabbox warmup` + `--id` for repeated runs against the same box. See
-  [warmup](docs/commands/warmup.md) and [run](docs/commands/run.md).
+  `crabbox warmup` + `--id` for raw reusable leases, or `crabbox prewarm` when
+  the box should be hydrated before the first test command. See
+  [warmup](docs/commands/warmup.md), [prewarm](docs/commands/prewarm.md), and
+  [run](docs/commands/run.md).
 - **Named repo jobs.** `crabbox job run <name>` lets repos define warmup,
   optional Actions hydration, run command, and cleanup policy in `.crabbox.yaml`.
   See [Jobs](docs/features/jobs.md).
@@ -215,7 +219,7 @@ and authoring guide.
   autonomous work reviewable instead of only ephemeral terminal output. See
   [Artifacts](docs/features/artifacts.md) and
   [Telemetry](docs/features/telemetry.md).
-- **Stable timing records.** `--timing-json` on `run`, `warmup`, and
+- **Stable timing records.** `--timing-json` on `run`, `warmup`, `prewarm`, and
   `actions hydrate` gives scripts one machine-readable sync/command/total
   timing schema across providers.
 - **Hardened coordinator auth.** GitHub browser login, owner-scoped leases,

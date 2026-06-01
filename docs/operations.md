@@ -190,6 +190,12 @@ CRABBOX_MAX_MONTHLY_USD_PER_ORG
 CRABBOX_DEFAULT_ORG
 ```
 
+Monthly cost checks use reserved cost, not only elapsed runtime. Long TTLs,
+prewarmed leases, and failed provisioning attempts can therefore consume budget
+headroom faster than the provider bill. Keep active-lease and per-owner limits
+as the primary safety rails, and size fleet/org monthly caps with enough room
+for TTL-based reservations during busy test bursts.
+
 ## Routes And Access
 
 A deployment typically exposes two routes pointing at the same Worker:

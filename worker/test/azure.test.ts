@@ -105,8 +105,23 @@ describe("azure provider", () => {
     expect(isRetryableProvisioningError("AllocationFailed")).toBe(true);
     expect(isRetryableProvisioningError("OverconstrainedAllocationRequest")).toBe(true);
     expect(isRetryableProvisioningError("NotAvailableForSubscription")).toBe(true);
+    expect(isRetryableProvisioningError("azure long-running operation timed out after 120s")).toBe(
+      true,
+    );
     expect(isRetryableProvisioningError("ResourceNotFound")).toBe(false);
     expect(isRetryableProvisioningError("")).toBe(false);
+  });
+
+  it("bounds Azure Spot provisioning even when on-demand fallback is disabled", () => {
+    expect(azureSpotFallbackTimeoutMs(testLeaseConfig({ capacityFallback: "spot-only" }))).toBe(
+      120_000,
+    );
+    expect(azureSpotFallbackTimeoutMs(testLeaseConfig({ capacityFallback: "none" }))).toBe(120_000);
+    expect(
+      azureSpotFallbackTimeoutMs(
+        testLeaseConfig({ capacityFallback: "spot-only", capacityMarket: "on-demand" }),
+      ),
+    ).toBeUndefined();
   });
 
   it("orders Azure region candidates from defaults, env, and capacity regions", () => {
@@ -1146,6 +1161,78 @@ describe("azure provider", () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
+  it("skips Azure NSG writes when SSH rules already match", async () => {
+    const client = new AzureClient(baseEnv);
+    const nsgWrites: string[] = [];
+    const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (isAzureLoginURL(url)) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), { status: 200 }),
+        );
+      }
+      if (url.includes("/resourceGroups/crabbox-leases?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ tags: { managed_by: "crabbox" } }), { status: 200 }),
+        );
+      }
+      if (url.includes("/virtualNetworks/crabbox-vnet?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ tags: { managed_by: "crabbox" } }), { status: 200 }),
+        );
+      }
+      if (url.includes("/networkSecurityGroups/crabbox-nsg?") && init?.method === "GET") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              tags: { managed_by: "crabbox" },
+              properties: {
+                securityRules: [
+                  {
+                    name: "crabbox-ssh-2222-0",
+                    properties: {
+                      priority: 100,
+                      direction: "Inbound",
+                      access: "Allow",
+                      protocol: "Tcp",
+                      sourceAddressPrefix: "0.0.0.0/0",
+                      sourcePortRange: "*",
+                      destinationAddressPrefix: "*",
+                      destinationPortRange: "2222",
+                    },
+                  },
+                  {
+                    name: "crabbox-ssh-22-0",
+                    properties: {
+                      priority: 101,
+                      direction: "Inbound",
+                      access: "Allow",
+                      protocol: "Tcp",
+                      sourceAddressPrefix: "0.0.0.0/0",
+                      sourcePortRange: "*",
+                      destinationAddressPrefix: "*",
+                      destinationPortRange: "22",
+                    },
+                  },
+                ],
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.includes("/networkSecurityGroups/crabbox-nsg?") && init?.method === "PUT") {
+        nsgWrites.push(url);
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as typeof fetch;
+    client.fetcher = fakeFetch;
+
+    await client.ensureSharedInfra("eastus", testLeaseConfig());
+
+    expect(nsgWrites).toEqual([]);
+  });
+
   it("uses regional shared network names when defaults already exist elsewhere", async () => {
     const client = new AzureClient({ ...baseEnv, CRABBOX_AZURE_LOCATION: "westus3" });
     let puts: string[] = [];
@@ -1424,6 +1511,125 @@ describe("azure provider", () => {
       expect(spotCleanupStarted).toBe(true);
       expect(vmPutPaths).toHaveLength(2);
       expect(vmPutPaths[1]).not.toBe(vmPutPaths[0]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds stalled Azure on-demand VM creates so SKU fallback can continue", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new AzureClient(baseEnv);
+      const vmSizes: string[] = [];
+      const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = typeof input === "string" ? input : input.toString();
+        const pathname = new URL(url).pathname;
+        if (isAzureLoginURL(url)) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), {
+              status: 200,
+            }),
+          );
+        }
+        if (url === "https://management.azure.com/on-demand-op") {
+          return Promise.resolve(new Response(JSON.stringify({ status: "InProgress" })));
+        }
+        if (pathname.endsWith("/resourceGroups/crabbox-leases")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ tags: { managed_by: "crabbox" } }), { status: 200 }),
+          );
+        }
+        if (pathname.endsWith("/virtualNetworks/crabbox-vnet")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ tags: { managed_by: "crabbox" } }), { status: 200 }),
+          );
+        }
+        if (pathname.endsWith("/networkSecurityGroups/crabbox-nsg") && init?.method === "GET") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                tags: { managed_by: "crabbox" },
+                properties: { securityRules: [] },
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (init?.method === "GET" && pathname.includes("/publicIPAddresses/")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ properties: { ipAddress: "192.0.2.10" } }), {
+              status: 200,
+            }),
+          );
+        }
+        if (init?.method === "GET" && pathname.includes("/virtualMachines/")) {
+          const name = pathname.split("/").pop() ?? "crabbox-blue-lobster";
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                name,
+                tags: { crabbox: "true" },
+                properties: {
+                  provisioningState: "Succeeded",
+                  hardwareProfile: { vmSize: vmSizes.at(-1) ?? "Standard_D32ds_v6" },
+                },
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (init?.method === "PUT" && pathname.includes("/virtualMachines/")) {
+          const body = init.body ? JSON.parse(String(init.body)) : {};
+          const vmSize = String(body.properties?.hardwareProfile?.vmSize ?? "");
+          vmSizes.push(vmSize);
+          const name = pathname.split("/").pop() ?? "crabbox-blue-lobster";
+          if (vmSizes.length === 1) {
+            return Promise.resolve(
+              new Response("", {
+                status: 202,
+                headers: { "azure-asyncoperation": "https://management.azure.com/on-demand-op" },
+              }),
+            );
+          }
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                name,
+                tags: { crabbox: "true" },
+                properties: {
+                  provisioningState: "Succeeded",
+                  hardwareProfile: { vmSize },
+                },
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+      client.fetcher = fakeFetch;
+
+      const create = client.createServerWithFallback(
+        testLeaseConfig({
+          capacityMarket: "on-demand",
+          serverType: "Standard_D32ads_v6",
+          serverTypeExplicit: false,
+        }),
+        "cbx_123456789abc",
+        "blue-lobster",
+        "owner",
+      );
+      await vi.advanceTimersByTimeAsync(180_000);
+      const result = await create;
+
+      expect(result.market).toBe("on-demand");
+      expect(result.serverType).toBe("Standard_D32ds_v6");
+      expect(vmSizes.slice(0, 2)).toEqual(["Standard_D32ads_v6", "Standard_D32ds_v6"]);
+      expect(result.attempts?.[0]).toMatchObject({
+        market: "on-demand",
+        serverType: "Standard_D32ads_v6",
+        category: "capacity",
+      });
     } finally {
       vi.useRealTimers();
     }

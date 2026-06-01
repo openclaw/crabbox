@@ -1016,6 +1016,9 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
           if (target === "macos") {
             rfb.compressionLevel = 1;
             rfb.qualityLevel = 2;
+          } else {
+            rfb.compressionLevel = 0;
+            rfb.qualityLevel = 6;
           }
           rfb.addEventListener("connect", () => {
             connected = true;

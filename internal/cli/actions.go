@@ -109,7 +109,21 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	}
 	applyResolvedServerConfig(&cfg, server)
 	target = targetWithConfigDefaults(target, cfg)
-	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := claimLeaseForRepoConfig(leaseID, slug, cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+		return err
+	}
+	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
+		return err
+	} else {
+		target = resolved.Target
+		if resolved.FallbackReason != "" {
+			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+		}
+	}
+	if err := waitForSSHReady(ctx, &target, a.Stderr, "actions hydrate", 2*time.Minute); err != nil {
+		return err
+	}
+	if err := updateLeaseClaimEndpoint(leaseID, server, target); err != nil {
 		return err
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))

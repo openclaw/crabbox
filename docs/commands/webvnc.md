@@ -12,6 +12,7 @@ crabbox webvnc --id swift-crab --open
 crabbox webvnc --id swift-crab --open --take-control
 crabbox webvnc daemon start --id swift-crab --open
 crabbox webvnc daemon status --id swift-crab
+crabbox webvnc daemon list
 crabbox webvnc daemon stop --id swift-crab
 crabbox webvnc status --id swift-crab
 crabbox webvnc reset --id swift-crab --open
@@ -87,7 +88,7 @@ The runner VNC service stays bound to loopback.
 Leave it running while the browser tab is open. With `--open` it opens the
 portal page once the bridge reports connected.
 
-### daemon start / status / stop
+### daemon start / status / list / stop
 
 Use the `daemon` subcommands to run the bridge in the background without a tmux
 or foreground shell:
@@ -95,6 +96,7 @@ or foreground shell:
 ```sh
 crabbox webvnc daemon start --id <lease-id-or-slug> --open
 crabbox webvnc daemon status --id <lease-id-or-slug>
+crabbox webvnc daemon list
 crabbox webvnc daemon stop --id <lease-id-or-slug>
 ```
 
@@ -103,8 +105,10 @@ directory (`webvnc/<lease>.log` and `.pid`), truncates the log on each start,
 and prints `webvnc daemon: ready` once the bridge reports connected (otherwise it
 prints a hint to check `webvnc status`). A background supervisor restarts the
 child bridge if it exits. `daemon status` reports the local pid/log and whether
-the process is alive or stale. `daemon stop` terminates both the supervisor and
-the active child bridge, but only after verifying the recorded pid is a Crabbox
+the process is alive or stale. `daemon list` scans all recorded local WebVNC pid
+files and prints alive/stale state for each bridge, which is useful after agent
+runs leave helpers behind. `daemon stop` terminates both the supervisor and the
+active child bridge, but only after verifying the recorded pid is a Crabbox
 WebVNC process.
 
 The older `crabbox webvnc --id <lease> --daemon`, `--background`, `--status`,

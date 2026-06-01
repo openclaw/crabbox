@@ -116,10 +116,28 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain('ThemeName" type="string" value="$gtk_theme');
     expect(got).toContain("$config_dir/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml");
     expect(got).toContain('theme" type="string" value="$xfwm_theme');
+    expect(got).toContain('box_move" type="bool" value="false');
+    expect(got).toContain('box_resize" type="bool" value="false');
+    expect(got).toContain('move_opacity" type="int" value="100');
+    expect(got).toContain('resize_opacity" type="int" value="100');
+    expect(got).toContain('snap_to_border" type="bool" value="false');
+    expect(got).toContain('snap_width" type="int" value="0');
+    expect(got).toContain('tile_on_move" type="bool" value="false');
+    expect(got).toContain('use_compositing" type="bool" value="false');
+    expect(got).toContain('wrap_windows" type="bool" value="false');
     expect(got).toContain("gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini");
     expect(got).toContain('mkdir -p "$config_dir/xfce4/xfconf/xfce-perchannel-xml"');
     expect(got).toContain("xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme");
     expect(got).toContain("xfconf-query -c xfwm4 -p /general/theme");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/box_move");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/box_resize");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/move_opacity");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/resize_opacity");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/snap_to_border");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/snap_width");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/tile_on_move");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/use_compositing");
+    expect(got).toContain("xfconf-query -c xfwm4 -p /general/wrap_windows");
     expect(got).toContain("xfconf-query -c xfce4-panel -p /panels/dark-mode");
     expect(got).toContain("/panels/$panel_id/background-rgba");
     expect(got).toContain("desktop-background-$mode.svg");
@@ -135,7 +153,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain('pgrep -u "$user_id" -x xfce4-panel');
     expect(got).toContain("sleep 1");
     expect(got).toContain("xfce4-panel --disable-wm-check");
-    expect(got).toContain("xfwm4 --replace");
+    expect(got).toContain("xfwm4 --replace --compositor=off");
     expect(got).toContain('xsetroot -solid "$root_color"');
     expect(got).toContain("crabbox-xfdesktop-$user.log");
     expect(got).toContain(
@@ -152,6 +170,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("xterm -title 'Crabbox Desktop'");
     expect(got).toContain("(umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)");
     expect(got).toContain("-rfbauth /var/lib/crabbox/vnc.pass");
+    expect(got).toContain("-wait 16 -defer 8 -nowait_bog");
     expect(got).toContain("ss -ltn | grep -q '127.0.0.1:5900'");
     expect(got).toContain("systemctl disable --now crabbox-wayvnc.service 2>/dev/null || true");
     expect(got).toContain(
@@ -178,7 +197,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain('for socket in "$XDG_RUNTIME_DIR"/wayland-*');
     expect(got).toContain('WAYLAND_DISPLAY="${socket##*/}"');
     expect(got).toContain(
-      'wayvnc --config "$HOME/.config/wayvnc/config" --render-cursor --max-fps=30',
+      'wayvnc --config "$HOME/.config/wayvnc/config" --render-cursor --max-fps=60',
     );
     expect(got).toContain("systemctl is-active --quiet crabbox-wayvnc.service");
     expect(got).toContain(
@@ -201,7 +220,10 @@ describe("cloud-init bootstrap", () => {
 
   it("adds GNOME Wayland desktop services when requested", () => {
     const got = cloudInit({ ...config, desktop: true, desktopEnv: "gnome", browser: true });
-    expect(got).toContain("labwc wayvnc gnome-panel wlr-randr grim slurp wtype wl-clipboard");
+    expect(got).toContain(
+      "labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard",
+    );
+    expect(got).toContain("swaybg librsvg2-common");
     expect(got).toContain("dbus-user-session xwayland");
     expect(got).toContain("gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme");
     expect(got).toContain("/usr/local/bin/crabbox-start-wayland-desktop");
@@ -211,6 +233,35 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("exec dbus-run-session labwc");
     expect(got).toContain("export GDK_BACKEND=x11");
     expect(got).toContain("export MOZ_ENABLE_WAYLAND=0");
+    expect(got).toContain('theme="$(cat "$HOME/.config/crabbox/desktop-theme"');
+    expect(got).toContain("gsettings set org.gnome.desktop.interface color-scheme prefer-dark");
+    expect(got).toContain("/usr/local/bin/crabbox-configure-desktop-theme");
+    expect(got).toContain(
+      "CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme",
+    );
+    expect(got).toContain('if [ "$(id -u)" -eq 0 ]; then');
+    expect(got).toContain(
+      'mkdir -p "$config_dir/crabbox" "$config_dir/gtk-3.0" "$config_dir/gtk-4.0" "$config_dir/labwc"',
+    );
+    expect(got).toContain('dbus_address="${DBUS_SESSION_BUS_ADDRESS:-}"');
+    expect(got).toContain(
+      "DBUS_SESSION_BUS_ADDRESS='$dbus_address' GDK_BACKEND=x11 gsettings set org.gnome.desktop.interface color-scheme",
+    );
+    expect(got).toContain(
+      'DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="$dbus_address" GDK_BACKEND=x11 gsettings set org.gnome.desktop.interface color-scheme "$gsettings_scheme"',
+    );
+    expect(got).toContain('"$config_dir/labwc/themerc-override"');
+    expect(got).toContain("window.active.title.bg.color");
+    expect(got).toContain("window.active.button.unpressed.image.color");
+    expect(got).toContain('LABWC_PID="$labwc_pid"');
+    expect(got).toContain("labwc --reconfigure");
+    expect(got).toContain('kill -HUP "$labwc_pid"');
+    expect(got).toContain('"$config_dir/gtk-3.0/gtk.css"');
+    expect(got).toContain("menubar menuitem");
+    expect(got).toContain("desktop-background-$mode.svg");
+    expect(got).toContain('swaybg -i "$wallpaper_file" -m fill');
+    expect(got).toContain("nohup gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &");
+    expect(got).toContain('elif [ "$(id -u)" -ne 0 ] && pgrep -x gnome-panel');
     expect(got).toContain("gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &");
     expect(got).toContain("gnome-terminal -- bash -l");
     expect(got).toContain("nautilus --new-window");
@@ -218,6 +269,10 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("/etc/systemd/system/crabbox-wayvnc.service");
     expect(got).toContain("--user-data-dir=");
     expect(got).toContain("--ozone-platform=x11");
+    expect(got).toContain(
+      "--force-dark-mode --enable-features=WebUIDarkMode --blink-settings=preferredColorScheme=2",
+    );
+    expect(got).toContain("--blink-settings=preferredColorScheme=1");
     expect(got).not.toContain("startxfce4");
     expect(got).not.toContain("x11vnc -storepasswd");
     expect(got).not.toContain("gnome-shell");
@@ -225,6 +280,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain("QT_QPA_PLATFORM=xcb");
     expect(got).not.toContain("waybar");
     expect(got).not.toContain('"wlr/taskbar"');
+    expect(got).not.toContain("\n#!/bin/sh\nset -eu\nrequested_mode=");
   });
 
   it("starts ssh before optional desktop and browser bootstrap", () => {
@@ -282,8 +338,6 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain("<<'EOF'");
     expect(got).not.toContain("<<EOF");
     expect(got).not.toContain("\nEOF");
-    expect(got).not.toContain("--force-dark-mode");
-    expect(got).not.toContain("preferredColorScheme=2");
   });
 
   it("adds code-server setup only when requested", () => {
