@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/openclaw/crabbox/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/openclaw/crabbox/actions/workflows/ci.yml)
 [![Release](https://github.com/openclaw/crabbox/actions/workflows/release.yml/badge.svg?event=push)](https://github.com/openclaw/crabbox/actions/workflows/release.yml)
-[![Latest release](https://img.shields.io/github/v/release/openclaw/crabbox?sort=semver)](https://github.com/openclaw/crabbox/releases/latest)
+[![Latest release](https://badgen.net/github/release/openclaw/crabbox/stable)](https://github.com/openclaw/crabbox/releases/latest)
 
 **Warm a box, sync the diff, run the suite.**
 
