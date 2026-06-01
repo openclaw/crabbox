@@ -879,6 +879,8 @@ func cleanTenkiWorkRoot(workRoot string) error {
 	if clean == "" || !strings.HasPrefix(clean, "/") {
 		return exit(2, "tenki.workRoot %q must resolve to an absolute path", workRoot)
 	}
+	// This denylist prevents obvious footguns; the sandbox VM boundary is the
+	// actual isolation layer for provider-controlled paths.
 	switch clean {
 	case "/", "/bin", "/dev", "/etc", "/home", "/home/tenki", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var":
 		return exit(2, "tenki.workRoot %q is too broad; choose a dedicated subdirectory", clean)
