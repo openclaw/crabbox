@@ -1910,7 +1910,7 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     const usage = await fleet.fetch(
-      request("GET", "/v1/usage?scope=all&owner=peter@example.com&month=2026-05", {
+      request("GET", `/v1/usage?scope=all&owner=peter@example.com&month=${createdAt.slice(0, 7)}`, {
         headers: {
           "x-crabbox-owner": "friend@example.com",
           "x-crabbox-org": "openclaw",
