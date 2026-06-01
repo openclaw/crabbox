@@ -532,14 +532,14 @@ type pondReleaseKongCmd struct {
 
 type versionKongCmd struct{}
 
-func (c *initKongCmd) Run(ctx context.Context, app App) error      { return app.initProject(ctx, c.Args) }
-func (c *loginKongCmd) Run(ctx context.Context, app App) error     { return app.login(ctx, c.Args) }
-func (c *logoutKongCmd) Run(ctx context.Context, app App) error    { return app.logout(ctx, c.Args) }
-func (c *whoamiKongCmd) Run(ctx context.Context, app App) error    { return app.whoami(ctx, c.Args) }
-func (c *doctorKongCmd) Run(ctx context.Context, app App) error    { return app.doctor(ctx, c.Args) }
-func (c *warmupKongCmd) Run(ctx context.Context, app App) error    { return app.warmup(ctx, c.Args) }
-func (c *prewarmKongCmd) Run(ctx context.Context, app App) error   { return app.prewarm(ctx, c.Args) }
-func (c *runKongCmd) Run(ctx context.Context, app App) error       { return app.runCommand(ctx, c.Args) }
+func (c *initKongCmd) Run(ctx context.Context, app App) error    { return app.initProject(ctx, c.Args) }
+func (c *loginKongCmd) Run(ctx context.Context, app App) error   { return app.login(ctx, c.Args) }
+func (c *logoutKongCmd) Run(ctx context.Context, app App) error  { return app.logout(ctx, c.Args) }
+func (c *whoamiKongCmd) Run(ctx context.Context, app App) error  { return app.whoami(ctx, c.Args) }
+func (c *doctorKongCmd) Run(ctx context.Context, app App) error  { return app.doctor(ctx, c.Args) }
+func (c *warmupKongCmd) Run(ctx context.Context, app App) error  { return app.warmup(ctx, c.Args) }
+func (c *prewarmKongCmd) Run(ctx context.Context, app App) error { return app.prewarm(ctx, c.Args) }
+func (c *runKongCmd) Run(ctx context.Context, app App) error     { return app.runCommand(ctx, c.Args) }
 func (c *harnessValidateKongCmd) Run(ctx context.Context, app App) error {
 	return app.harnessValidate(ctx, c.Args)
 }
