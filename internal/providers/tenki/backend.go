@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
+	posixpath "path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -638,17 +639,26 @@ func (b *tenkiBackend) sshTarget(output tenkiSSHCommandOutput) SSHTarget {
 		port = strconv.Itoa(output.Port)
 	}
 	return SSHTarget{
-		User:                   blank(strings.TrimSpace(output.User), "tenki"),
-		Host:                   blank(strings.TrimSpace(output.Host), "sandbox"),
-		Key:                    output.IdentityFile,
-		CertificateFile:        output.CertificateFile,
-		Port:                   port,
-		TargetOS:               targetLinux,
-		DisableHostKeyChecking: true,
-		NetworkKind:            networkPublic,
-		SSHConfigProxy:         true,
-		ProxyCommand:           tenkiOpenSSHProxyCommand(output.ProxyCommand),
+		User:            blank(strings.TrimSpace(output.User), "tenki"),
+		Host:            blank(strings.TrimSpace(output.Host), "sandbox"),
+		Key:             output.IdentityFile,
+		CertificateFile: output.CertificateFile,
+		KnownHostsFile:  tenkiKnownHostsFile(output),
+		Port:            port,
+		TargetOS:        targetLinux,
+		NetworkKind:     networkPublic,
+		SSHConfigProxy:  true,
+		ProxyCommand:    tenkiOpenSSHProxyCommand(output.ProxyCommand),
 	}
+}
+
+func tenkiKnownHostsFile(output tenkiSSHCommandOutput) string {
+	dir := filepath.Dir(output.IdentityFile)
+	session := normalizeLeaseSlug(output.SessionID)
+	if session == "" {
+		session = "sandbox"
+	}
+	return filepath.Join(dir, "known_hosts_"+session)
 }
 
 func tenkiOpenSSHProxyCommand(command string) string {
@@ -875,7 +885,8 @@ func tenkiCLIPath(cfg Config) string {
 }
 
 func cleanTenkiWorkRoot(workRoot string) error {
-	clean := path.Clean(strings.TrimSpace(workRoot))
+	// Tenki workRoot is a remote Linux path even when Crabbox runs on another OS.
+	clean := posixpath.Clean(strings.TrimSpace(workRoot))
 	if clean == "" || !strings.HasPrefix(clean, "/") {
 		return exit(2, "tenki.workRoot %q must resolve to an absolute path", workRoot)
 	}

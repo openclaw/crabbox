@@ -394,10 +394,14 @@ func TestSSHArgsIncludeCertificateFile(t *testing.T) {
 		Host:            "sandbox",
 		Key:             "/tmp/tenki/id_ed25519",
 		CertificateFile: "/tmp/tenki/session-cert.pub",
+		KnownHostsFile:  "/tmp/tenki/known_hosts_session",
 		Port:            "22",
 	}, "true"), "\n")
 	if !strings.Contains(got, "CertificateFile=/tmp/tenki/session-cert.pub") {
 		t.Fatalf("sshArgs() missing CertificateFile: %q", got)
+	}
+	if !strings.Contains(got, "UserKnownHostsFile=/tmp/tenki/known_hosts_session") {
+		t.Fatalf("sshArgs() missing KnownHostsFile: %q", got)
 	}
 	if !strings.Contains(got, "ControlMaster=auto") {
 		t.Fatalf("sshArgs() should keep ControlMaster enabled for cert auth: %q", got)

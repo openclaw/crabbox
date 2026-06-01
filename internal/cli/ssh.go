@@ -25,6 +25,7 @@ type SSHTarget struct {
 	Host                   string
 	Key                    string
 	CertificateFile        string
+	KnownHostsFile         string
 	Port                   string
 	FallbackPorts          []string
 	TargetOS               string
@@ -539,6 +540,9 @@ func minDuration(left, right time.Duration) time.Duration {
 }
 
 func knownHostsFile(target SSHTarget) string {
+	if target.KnownHostsFile != "" {
+		return target.KnownHostsFile
+	}
 	if target.Key != "" {
 		return filepath.Join(filepath.Dir(target.Key), "known_hosts")
 	}
@@ -557,6 +561,7 @@ func sshControlPath(target SSHTarget) string {
 		target.User,
 		target.Key,
 		target.CertificateFile,
+		target.KnownHostsFile,
 		target.ProxyCommand,
 	}, "\x00")
 	sum := sha1.Sum([]byte(scope))
@@ -854,7 +859,7 @@ func remoteCommandWithEnvFiles(workdir string, env map[string]string, envFiles [
 	var b strings.Builder
 	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
 	b.WriteString("bash -lc ")
-	b.WriteString(shellQuote("cd " + shellQuote(workdir) + ` && exec "$@"`))
+	b.WriteString(shellQuote(remoteBashLoginScript(workdir, `exec "$@"`)))
 	b.WriteString(" bash")
 	for _, word := range command {
 		b.WriteByte(' ')
@@ -875,8 +880,15 @@ func remoteShellCommandWithEnvFiles(workdir string, env map[string]string, envFi
 	var b strings.Builder
 	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
 	b.WriteString("bash -lc ")
-	b.WriteString(shellQuote("cd " + shellQuote(workdir) + " && " + script))
+	b.WriteString(shellQuote(remoteBashLoginScript(workdir, script)))
 	return b.String()
+}
+
+func remoteBashLoginScript(workdir, script string) string {
+	// Some sandbox images run bash startup files that cd back to $HOME for
+	// login shells. Keep the outer cd for env-file loading, then restore cwd
+	// inside bash -lc before the user command runs.
+	return "cd " + shellQuote(workdir) + " && " + script
 }
 
 func shellScriptFromArgv(command []string) string {
