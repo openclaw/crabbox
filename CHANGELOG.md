@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Fixed the README latest-release badge to use Badgen so GitHub release status does not depend on Shields' token pool. Thanks @zozo123.
+
 ### Removed
 
 ## 0.25.0 - 2026-06-01
