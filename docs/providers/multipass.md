@@ -16,7 +16,28 @@ The provider is local only. It never uses the coordinator or cloud credentials.
 
 **Targets:** Linux.
 
+**Hosts:** macOS, Linux, or Windows workstations with the Multipass CLI and
+daemon installed.
+
 **Capabilities:** SSH, Crabbox sync, cleanup, cache volumes.
+
+## Host Requirements
+
+Install Canonical Multipass before selecting this provider:
+
+```sh
+multipass version
+multipass list --format json
+```
+
+On macOS, install from Canonical's installer or with Homebrew:
+
+```sh
+brew install --cask multipass
+```
+
+The first Crabbox run may take longer while Multipass downloads the selected
+Ubuntu image and initializes the local VM backend.
 
 ## When To Use It
 
@@ -35,6 +56,12 @@ or [Hetzner](hetzner.md) when you need larger machines, non-Linux targets,
 desktop/browser/code surfaces, native snapshots, tailnet reachability, or shared
 team infrastructure.
 
+Multipass is not a Docker replacement in Crabbox. Docker-compatible providers
+run containers that share a host kernel; Multipass runs a full Ubuntu VM with
+its own kernel, systemd, cloud-init, SSH daemon, disk, and network identity.
+Choose Multipass when the test needs VM-like behavior. Choose Local Container
+when the test only needs a fast disposable Linux userland.
+
 ## Quick Start
 
 ```sh
@@ -44,6 +71,7 @@ multipass list --format json
 crabbox run --provider multipass -- go test ./...
 
 crabbox warmup --provider mp --slug multipass-smoke
+crabbox status --provider mp --id multipass-smoke
 crabbox run --provider mp --id multipass-smoke -- uname -a
 crabbox ssh --provider mp --id multipass-smoke
 crabbox stop --provider mp multipass-smoke
@@ -111,8 +139,11 @@ CRABBOX_MULTIPASS_LAUNCH_TIMEOUT
 1. `warmup` or a fresh `run` creates a per-lease SSH key.
 2. The provider writes a temporary cloud-init file using Crabbox's Linux
    bootstrap and launches an instance with `multipass launch --name ...`.
-3. Optional cache volumes are host directories under the Crabbox user cache and
-   are passed to Multipass with repeated `--mount host:guest` arguments.
+3. Optional cache volumes are host directories under the Crabbox user cache.
+   On macOS with the QEMU driver, Crabbox launches the VM, stops it, attaches
+   each cache with `multipass mount --type native`, then starts it again.
+   Other drivers use Multipass classic launch mounts with repeated
+   `--mount host:guest` arguments.
 4. Crabbox reads instance details with `multipass info --format json`, waits for
    SSH readiness on port `22`, syncs the checkout to `multipass.workRoot`, then
    runs the command over the normal SSH path.
@@ -140,6 +171,9 @@ instances are ignored by `list` unless their name starts with `crabbox-`, and
   VM smoke tests, or a remote SSH provider for GitHub runner registration.
 - Cache volumes are host directories, not provider-managed disks. Remove stale
   directories under the user cache when a cache key is obsolete.
+- On macOS with the default QEMU driver, Crabbox uses Multipass native mounts
+  for cache volumes. Other Multipass drivers use the standard classic mount
+  path.
 - Startup time depends on Multipass image availability, the host hypervisor, and
   first-boot package setup.
 
@@ -148,8 +182,12 @@ instances are ignored by `list` unless their name starts with `crabbox-`, and
 The backend relies on the standard Multipass CLI:
 
 - `multipass version`
+- `multipass get local.driver`
 - `multipass launch --name <name> --cloud-init <file> --cpus <n> --memory <size>
-  --disk <size> --timeout <seconds> --mount <host>:<guest> <image>`
+  --disk <size> --timeout <seconds> [--mount <host>:<guest>] <image>`
+- `multipass stop <name>`
+- `multipass mount --type native <host> <name>:<guest>`
+- `multipass start <name>`
 - `multipass list --format json`
 - `multipass info --format json <name>`
 - `multipass delete --purge <name>`

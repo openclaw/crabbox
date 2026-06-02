@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,8 @@ type backend struct {
 	cfg  Config
 	rt   Runtime
 }
+
+var multipassHostOS = runtime.GOOS
 
 type listResponse struct {
 	List []multipassInstance `json:"list"`
@@ -125,6 +128,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	name := leaseProviderName(leaseID, slug)
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%s disk=%s keep=%v\n", providerName, leaseID, slug, cfg.Multipass.Image, cfg.Multipass.CPUs, blank(cfg.Multipass.Memory, "-"), blank(cfg.Multipass.Disk, "-"), req.Keep)
 	if err := b.createInstance(ctx, cfg, name, leaseID, slug, publicKey); err != nil {
+		_ = b.removeInstance(context.Background(), name)
 		return LeaseTarget{}, err
 	}
 	info, err := b.inspectInstance(ctx, name)
@@ -375,18 +379,67 @@ func (b *backend) createInstance(ctx context.Context, cfg Config, name, leaseID,
 	if cfg.Multipass.LaunchTimeout > 0 {
 		args = append(args, "--timeout", strconv.Itoa(durationSecondsCeil(cfg.Multipass.LaunchTimeout)))
 	}
-	for _, mount := range mounts {
-		args = append(args, "--mount", mount)
+	useNativeMounts := len(mounts) > 0 && b.useNativeMounts(ctx)
+	if !useNativeMounts {
+		for _, mount := range mounts {
+			args = append(args, "--mount", mount.arg())
+		}
 	}
 	args = append(args, cfg.Multipass.Image)
 	result, err := b.multipass(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
 		return commandError("multipass launch", result, err)
 	}
+	if useNativeMounts {
+		if err := b.attachNativeMounts(ctx, name, mounts); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func multipassCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]string, error) {
+type multipassCacheMount struct {
+	hostPath  string
+	guestPath string
+}
+
+func (m multipassCacheMount) arg() string {
+	return m.hostPath + ":" + m.guestPath
+}
+
+func (b *backend) useNativeMounts(ctx context.Context) bool {
+	if multipassHostOS != "darwin" {
+		return false
+	}
+	result, err := b.multipass(ctx, []string{"get", "local.driver"}, nil, io.Discard)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(result.Stdout) == "qemu"
+}
+
+func (b *backend) attachNativeMounts(ctx context.Context, name string, mounts []multipassCacheMount) error {
+	if len(mounts) == 0 {
+		return nil
+	}
+	result, err := b.multipass(ctx, []string{"stop", name}, nil, b.rt.Stderr)
+	if err != nil {
+		return commandError("multipass stop", result, err)
+	}
+	for _, mount := range mounts {
+		result, err := b.multipass(ctx, []string{"mount", "--type", "native", mount.hostPath, name + ":" + mount.guestPath}, nil, b.rt.Stderr)
+		if err != nil {
+			return commandError("multipass mount", result, err)
+		}
+	}
+	result, err = b.multipass(ctx, []string{"start", name}, nil, b.rt.Stderr)
+	if err != nil {
+		return commandError("multipass start", result, err)
+	}
+	return nil
+}
+
+func multipassCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]multipassCacheMount, error) {
 	if len(volumes) == 0 {
 		return nil, nil
 	}
@@ -394,7 +447,7 @@ func multipassCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]string, err
 	if err != nil {
 		return nil, err
 	}
-	mounts := make([]string, 0, len(volumes))
+	mounts := make([]multipassCacheMount, 0, len(volumes))
 	for _, volume := range volumes {
 		key := strings.TrimSpace(volume.Key)
 		path := strings.TrimSpace(volume.Path)
@@ -417,7 +470,7 @@ func multipassCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]string, err
 		if err := os.Chmod(hostPath, 0o777); err != nil {
 			return nil, exit(2, "make multipass cache volume writable %s: %v", hostPath, err)
 		}
-		mounts = append(mounts, hostPath+":"+path)
+		mounts = append(mounts, multipassCacheMount{hostPath: hostPath, guestPath: path})
 	}
 	return mounts, nil
 }

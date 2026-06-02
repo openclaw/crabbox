@@ -124,10 +124,16 @@ func TestApplyDefaults(t *testing.T) {
 }
 
 func TestCreateInstanceBuildsLaunchArgsAndCloudInit(t *testing.T) {
+	oldHostOS := multipassHostOS
+	multipassHostOS = "darwin"
+	t.Cleanup(func() { multipassHostOS = oldHostOS })
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{"launch": {}}}
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"get", "local.driver"}): {Stdout: "qemu\n"},
+		"launch": {},
+	}}
 	b := testBackend(runner)
 	cfg := b.configForRun()
 	cfg.Cache.Volumes = []core.CacheVolumeConfig{
@@ -137,14 +143,15 @@ func TestCreateInstanceBuildsLaunchArgsAndCloudInit(t *testing.T) {
 	if err := b.createInstance(context.Background(), cfg, "crabbox-blue-1234abcd", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test"); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("calls=%d", len(runner.calls))
+	if len(runner.calls) == 0 {
+		t.Fatal("no commands recorded")
 	}
+	launchArgs := recordedArgsForCommand(t, runner, "launch")
 	call := runner.calls[0]
 	if call.Name != "multipass" {
 		t.Fatalf("binary=%q want multipass", call.Name)
 	}
-	args := strings.Join(call.Args, "\n")
+	args := launchArgs
 	root, err := multipassCacheRoot()
 	if err != nil {
 		t.Fatal(err)
@@ -155,11 +162,19 @@ func TestCreateInstanceBuildsLaunchArgsAndCloudInit(t *testing.T) {
 		"--memory\n8G",
 		"--disk\n40G",
 		"--timeout\n600",
-		"--mount\n" + filepath.Join(root, multipassCacheVolumeName("my-app/linux node24 lock")) + ":/var/cache/crabbox/pnpm",
 		"24.04",
 	} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("launch args missing %q:\n%s", want, args)
+		}
+	}
+	if strings.Contains(args, "--mount") {
+		t.Fatalf("darwin qemu launch should not include --mount:\n%s", args)
+	}
+	mountArgs := recordedArgsForCommand(t, runner, "mount")
+	for _, want := range []string{"mount\n--type\nnative", filepath.Join(root, multipassCacheVolumeName("my-app/linux node24 lock")), "crabbox-blue-1234abcd:/var/cache/crabbox/pnpm"} {
+		if !strings.Contains(mountArgs, want) {
+			t.Fatalf("native mount args missing %q:\n%s", want, mountArgs)
 		}
 	}
 	cloudInit := runner.cloudInit
@@ -171,6 +186,40 @@ func TestCreateInstanceBuildsLaunchArgsAndCloudInit(t *testing.T) {
 	} {
 		if !strings.Contains(cloudInit, want) {
 			t.Fatalf("cloud-init missing %q:\n%s", want, cloudInit)
+		}
+	}
+}
+
+func TestCreateInstanceFallsBackToClassicMountsForDarwinVirtualBox(t *testing.T) {
+	oldHostOS := multipassHostOS
+	multipassHostOS = "darwin"
+	t.Cleanup(func() { multipassHostOS = oldHostOS })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"get", "local.driver"}): {Stdout: "virtualbox\n"},
+		"launch": {},
+	}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.Cache.Volumes = []core.CacheVolumeConfig{{Key: "gomod", Path: "/var/cache/crabbox/go"}}
+
+	if err := b.createInstance(context.Background(), cfg, "crabbox-blue-1234abcd", "cbx_123", "blue-lobster", "PUB"); err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "launch")
+	root, err := multipassCacheRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mountArg := filepath.Join(root, multipassCacheVolumeName("gomod")) + ":/var/cache/crabbox/go"
+	if !strings.Contains(args, "--mount\n"+mountArg) {
+		t.Fatalf("virtualbox launch args missing classic mount %q:\n%s", mountArg, args)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && call.Args[0] == "mount" {
+			t.Fatalf("virtualbox should not use native mount command: %#v", call.Args)
 		}
 	}
 }
@@ -264,6 +313,29 @@ func TestRemoveInstanceUsesDeletePurge(t *testing.T) {
 	args := recordedArgsForCommand(t, runner, "delete")
 	if !strings.Contains(args, "delete\n--purge\ncrabbox-blue-1234abcd") {
 		t.Fatalf("delete args=%q", args)
+	}
+}
+
+func TestAcquireCleansUpLaunchFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--format", "json"}): {Stdout: `{"list":[]}`},
+			"launch": {Stderr: "launch failed"},
+		},
+		errors: map[string]error{"launch": errors.New("launch failed")},
+	}
+	b := testBackend(runner)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true})
+	if err == nil || !strings.Contains(err.Error(), "multipass launch failed") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	deleteArgs := recordedArgsForCommand(t, runner, "delete")
+	if !strings.Contains(deleteArgs, "delete\n--purge\ncrabbox-") {
+		t.Fatalf("delete not recorded after launch failure:\n%s", deleteArgs)
 	}
 }
 
