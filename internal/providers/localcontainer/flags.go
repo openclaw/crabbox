@@ -2,6 +2,8 @@ package localcontainer
 
 import (
 	"flag"
+	"fmt"
+	"os"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -77,8 +79,11 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.FlagWasSet(fs, "local-container-docker-socket") {
 		cfg.LocalContainer.DockerSocket = *v.DockerSocket
 	}
+	// Debug: always log volume state
+	fmt.Fprintf(os.Stderr, "debug: applyFlags volumes=%v len=%d\n", v.Volumes, len(v.Volumes))
 	if len(v.Volumes) > 0 {
 		cfg.LocalContainer.Volumes = []string(v.Volumes)
+		fmt.Fprintf(os.Stderr, "debug: set cfg.LocalContainer.Volumes=%v\n", cfg.LocalContainer.Volumes)
 	}
 	if cfg.Provider == providerName || cfg.Provider == "docker" || cfg.Provider == "container" || cfg.Provider == "local-docker" {
 		applyDefaults(cfg)
