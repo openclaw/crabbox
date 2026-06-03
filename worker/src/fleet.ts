@@ -1275,9 +1275,16 @@ export class FleetDurableObject implements DurableObject {
       return lease ? json({ lease }) : notFound();
     }
     if (method === "POST" && action === "heartbeat") {
-      const lease = await this.resolveLease(leaseID, request, false);
+      const admin = isAdminRequest(request);
+      const lease = await this.resolveLease(leaseID, request, admin);
       if (!lease) {
         return notFound();
+      }
+      if (!this.leaseManageableByRequest(lease, request, admin)) {
+        return json(
+          { error: "forbidden", message: "lease manage access required" },
+          { status: 403 },
+        );
       }
       const body = await optionalJson<{
         idleTimeoutSeconds?: number;
@@ -1287,9 +1294,16 @@ export class FleetDurableObject implements DurableObject {
       return json({ lease: updatedLease });
     }
     if (method === "POST" && action === "tailscale") {
-      const lease = await this.resolveLease(leaseID, request, false);
+      const admin = isAdminRequest(request);
+      const lease = await this.resolveLease(leaseID, request, admin);
       if (!lease) {
         return notFound();
+      }
+      if (!this.leaseManageableByRequest(lease, request, admin)) {
+        return json(
+          { error: "forbidden", message: "lease manage access required" },
+          { status: 403 },
+        );
       }
       const input = await readJson<Partial<TailscaleMetadata>>(request);
       lease.tailscale = mergeTailscaleMetadata(lease.tailscale, input);

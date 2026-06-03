@@ -1277,6 +1277,48 @@ describe("fleet lease identity and idle", () => {
     expect(stranger.status).toBe(404);
   });
 
+  it("requires manage access for lease metadata writes", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const viewerHeaders = {
+      "x-crabbox-owner": "viewer@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "shared-run",
+        owner: "alice@example.com",
+        org: "example-org",
+        share: { users: { "viewer@example.com": "use" } },
+        tailscale: { enabled: true, state: "requested" },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const heartbeat = await fleet.fetch(
+      request("POST", "/v1/leases/shared-run/heartbeat", {
+        headers: viewerHeaders,
+        body: { idleTimeoutSeconds: 3600 },
+      }),
+    );
+    expect(heartbeat.status).toBe(403);
+
+    const tailscale = await fleet.fetch(
+      request("POST", "/v1/leases/shared-run/tailscale", {
+        headers: viewerHeaders,
+        body: { enabled: true, ipv4: "100.64.0.99", state: "ready" },
+      }),
+    );
+    expect(tailscale.status).toBe(403);
+
+    const stored = storage.value<LeaseRecord>("lease:cbx_000000000001");
+    expect(stored?.idleTimeoutSeconds).not.toBe(3600);
+    expect(stored?.tailscale?.ipv4).toBeUndefined();
+    expect(stored?.tailscale?.state).toBe("requested");
+  });
+
   it("mints brokered Tailscale keys, records non-secret metadata, and accepts readiness updates", async () => {
     const storage = new MemoryStorage();
     let providerConfig:
