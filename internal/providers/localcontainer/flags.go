@@ -77,7 +77,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.FlagWasSet(fs, "local-container-docker-socket") {
 		cfg.LocalContainer.DockerSocket = *v.DockerSocket
 	}
-	if core.FlagWasSet(fs, "local-container-volume") {
+	if len(v.Volumes) > 0 {
 		cfg.LocalContainer.Volumes = []string(v.Volumes)
 	}
 	if cfg.Provider == providerName || cfg.Provider == "docker" || cfg.Provider == "container" || cfg.Provider == "local-docker" {
