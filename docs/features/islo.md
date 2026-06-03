@@ -10,9 +10,10 @@ Read when:
 command transport, while Crabbox owns local config, repo claims, the sync
 manifest and its guardrails, slugs, timing summaries, and normalized
 `list`/`status` rendering. Crabbox uses the Islo Go SDK for auth and sandbox
-lifecycle (create, list, status, stop) and a small SSE reader for the
-`POST /sandboxes/{name}/exec/stream` endpoint, since the SDK's exec helper
-coalesces streamed output.
+lifecycle (create, list, status) and calls the HTTP API directly for stop (an
+empty-body `DELETE`), archive upload, shares, and command output — the last via
+a small SSE reader for the `POST /sandboxes/{name}/exec/stream` endpoint, since
+the SDK's exec helper coalesces streamed output.
 
 Sandboxes are Linux-only. There is no Crabbox-managed SSH lease; commands run
 through Islo's streaming exec endpoint, not through `crabbox ssh`/rsync.
@@ -81,10 +82,10 @@ crabbox stop --provider islo blue-lobster
   `/workspace/<islo.workdir>`, streams stdout/stderr from Islo's SSE exec
   endpoint, and returns the remote exit code. A stream is only treated as
   successful once an exit event arrives.
-- **list**, **status**, and **stop** go through the Islo SDK and only act on
-  Crabbox-created sandboxes. Identifiers may be a Crabbox slug, an `isb_...`
-  lease ID, or a Crabbox-created sandbox name; non-Crabbox sandboxes are
-  rejected.
+- **list** and **status** go through the Islo SDK; **stop** issues a direct
+  `DELETE`. All three act only on Crabbox-created sandboxes. Identifiers may be a
+  Crabbox slug, an `isb_...` lease ID, or a Crabbox-created sandbox name;
+  non-Crabbox sandboxes are rejected.
 - The sandbox is deleted on release unless kept. `--keep-on-failure` keeps a
   newly created failed sandbox until an explicit `stop` or provider-side expiry.
 
