@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -28,25 +27,20 @@ func syncWindowsNative(ctx context.Context, target SSHTarget, repo Repo, cfg Con
 			return exit(6, "prune seeded Windows sync paths: %v", err)
 		}
 	}
-	var input bytes.Buffer
-	input.Write(manifest.NUL())
-	cmd := exec.CommandContext(ctx, "tar", "-czf", "-", "-C", repo.Root, "--null", "-T", "-")
-	cmd.Stdin = &input
-	cmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
-	var archive bytes.Buffer
-	cmd.Stdout = &archive
-	cmd.Stderr = stderr
-	start := time.Now()
-	if err := cmd.Run(); err != nil {
-		return exit(6, "create sync archive: %v", err)
+	archive, err := CreateSyncArchive(ctx, repo, manifest, "crabbox-windows-sync-*.tgz")
+	if err != nil {
+		return err
 	}
+	defer os.Remove(archive.Name())
+	defer archive.Close()
+	start := time.Now()
 	if opts.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
 		defer cancel()
 	}
 	stopHeartbeat := startSyncHeartbeat(stderr, start, opts.HeartbeatInterval)
-	err := runSSHInput(ctx, target, windowsExtractArchive(workdir), &archive, stdout, stderr)
+	err = runSSHInput(ctx, target, windowsExtractArchive(workdir), archive, stdout, stderr)
 	stopHeartbeat()
 	if ctx.Err() == context.DeadlineExceeded {
 		return exit(6, "archive sync timed out after %s", opts.Timeout)

@@ -1,8 +1,10 @@
 package tensorlake
 
 import (
+	"context"
 	"flag"
 	"io"
+	"os"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -129,6 +131,10 @@ func checkSyncPreflight(manifest core.SyncManifest, cfg Config, force bool, stde
 }
 
 type SyncManifest = core.SyncManifest
+
+func createPortableSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
+	return core.CreateSyncArchive(ctx, repo, manifest, tempPattern)
+}
 
 func cliDoctorResult(provider string, leases int, runtime string) DoctorResult {
 	return core.CLIDoctorResult(provider, leases, runtime)
