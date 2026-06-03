@@ -105,8 +105,32 @@ func (c *isloSDKClient) ListSandboxes(ctx context.Context) ([]*gosdk.SandboxResp
 }
 
 func (c *isloSDKClient) DeleteSandbox(ctx context.Context, name string) error {
-	_, err := c.sdk.Sandboxes.DeleteSandbox(ctx, &gosdk.DeleteSandboxRequest{SandboxName: name})
-	return err
+	// The Islo delete endpoint returns an empty body (202/204), which the
+	// generated SDK decoder rejects ("expected a response, but the server
+	// responded with nothing"). Issue the DELETE directly so an empty success
+	// body is handled correctly, and treat an already-gone sandbox (404) as a
+	// successful idempotent delete.
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/sandboxes/"+url.PathEscape(name), nil)
+	if err != nil {
+		return err
+	}
+	token, err := c.auth.Token(ctx)
+	if err != nil {
+		return fmt.Errorf("islo auth: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 300 || resp.StatusCode == http.StatusNotFound {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	return fmt.Errorf("islo delete sandbox %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
 }
 
 func (c *isloSDKClient) UploadArchive(ctx context.Context, name, targetPath string, archive io.Reader) error {
