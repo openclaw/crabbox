@@ -34,7 +34,7 @@ provider: islo
 target: linux
 islo:
   baseUrl: https://api.islo.dev
-  image: docker.io/library/ubuntu:24.04
+  image: docker.io/library/ubuntu:26.04
   workdir: crabbox
   gatewayProfile: ""
   snapshotName: ""
@@ -45,7 +45,7 @@ islo:
 
 Defaults: `baseUrl` `https://api.islo.dev`, `workdir` `crabbox`, `vcpus` `2`,
 `memoryMB` `4096`, `diskGB` `20`. The image default comes from the resolved OS
-target.
+target (the default OS `ubuntu:26.04` resolves to `docker.io/library/ubuntu:26.04`).
 
 `islo.workdir` is a relative directory name under `/workspace`. Absolute paths
 and `..` escapes are rejected before Crabbox prepares or syncs the workspace, so
@@ -66,7 +66,7 @@ variable:
 | `diskGB`         | `--islo-disk-gb`         | `CRABBOX_ISLO_DISK_GB`         |
 
 ```sh
-crabbox warmup --provider islo --islo-image docker.io/library/ubuntu:24.04
+crabbox warmup --provider islo --islo-image docker.io/library/ubuntu:26.04
 crabbox run --provider islo -- pnpm test
 crabbox status --provider islo --id blue-lobster
 crabbox stop --provider islo blue-lobster

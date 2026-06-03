@@ -303,6 +303,7 @@ func parseIsloSSE(r io.Reader, stdout, stderr io.Writer) (int, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	exitCode := 0
 	seenExit := false
+	streamErr := ""
 	event := ""
 	var data []string
 	flush := func() error {
@@ -322,6 +323,14 @@ func parseIsloSSE(r io.Reader, stdout, stderr io.Writer) (int, error) {
 			}
 			exitCode = n
 			seenExit = true
+		case "error":
+			// The Islo exec SSE stream emits an "error" event for stream or
+			// VM-level failures. Capture the last one so we can surface a
+			// meaningful message instead of a generic missing-exit error when
+			// the stream ends without an exit event.
+			if msg := strings.TrimSpace(payload); msg != "" {
+				streamErr = msg
+			}
 		}
 		event = ""
 		data = data[:0]
@@ -358,6 +367,9 @@ func parseIsloSSE(r io.Reader, stdout, stderr io.Writer) (int, error) {
 		return 1, err
 	}
 	if !seenExit {
+		if streamErr != "" {
+			return 1, fmt.Errorf("islo exec stream error: %s", streamErr)
+		}
 		return 1, fmt.Errorf("islo exec stream ended without exit event")
 	}
 	return exitCode, nil
