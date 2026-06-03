@@ -1051,3 +1051,66 @@ func markTestLocalContainerWorkRoot(t *testing.T, root string) {
 		t.Fatal(err)
 	}
 }
+
+func TestCreateContainerMountsHostVolumes(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.Volumes = []string{
+		"/home/user/.openclaw:/home/crabbox/.openclaw:ro",
+		"/tmp/data:/data",
+	}
+	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
+
+	if _, err := b.createContainer(context.Background(), cfg, "crabbox-test", "cbx_vol", "vol-test", "ssh-ed25519 AAAA test", true); err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "run")
+	for _, vol := range cfg.LocalContainer.Volumes {
+		want := "-v\n" + vol
+		if !strings.Contains(args, want) {
+			t.Fatalf("host volume mount missing %q:\n%s", want, args)
+		}
+	}
+}
+
+func TestCreateContainerNoVolumesWhenEmpty(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.Volumes = nil
+	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
+
+	if _, err := b.createContainer(context.Background(), cfg, "crabbox-test", "cbx_novol", "novol-test", "ssh-ed25519 AAAA test", true); err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "run")
+	lines := strings.Split(args, "\n")
+	for i, line := range lines {
+		if line == "-v" && i+1 < len(lines) {
+			mount := lines[i+1]
+			if !strings.Contains(mount, "docker.sock") && !strings.HasPrefix(mount, "crabbox-cache-") {
+				t.Fatalf("unexpected volume mount when Volumes is empty: %s", mount)
+			}
+		}
+	}
+}
+
+func TestVolumeListFlagParsesRepeated(t *testing.T) {
+	var vols volumeListFlag
+	if err := vols.Set("/host/a:/guest/a:ro"); err != nil {
+		t.Fatal(err)
+	}
+	if err := vols.Set("/host/b:/guest/b"); err != nil {
+		t.Fatal(err)
+	}
+	if len(vols) != 2 {
+		t.Fatalf("expected 2 volumes, got %d", len(vols))
+	}
+	if vols[0] != "/host/a:/guest/a:ro" {
+		t.Fatalf("volume[0]=%q", vols[0])
+	}
+	if vols[1] != "/host/b:/guest/b" {
+		t.Fatalf("volume[1]=%q", vols[1])
+	}
+}
