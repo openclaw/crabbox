@@ -1057,8 +1057,8 @@ func TestCreateContainerMountsHostVolumes(t *testing.T) {
 	b := testBackend(runner)
 	cfg := b.configForRun()
 	cfg.LocalContainer.Volumes = []string{
-		"/home/user/.openclaw:/home/crabbox/.openclaw:ro",
-		"/tmp/data:/data",
+		"/home/user/.config/myapp:/home/crabbox/.config/myapp:ro",
+		"/var/cache/models:/cache",
 	}
 	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
 

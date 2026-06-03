@@ -94,7 +94,17 @@ Provider flags:
 --local-container-memory <size>
 --local-container-network <network>
 --local-container-docker-socket
+--local-container-volume host:container[:ro]   (repeatable)
 ```
+
+`--local-container-volume` bind-mounts a host directory into the container.
+Repeatable for multiple mounts. Passes through to Docker `-v`. Read-only
+mounts use the `:ro` suffix.
+
+**Security:** This flag is CLI-only. It is intentionally not loaded from
+repo-local `.crabbox.yaml` because bind mounts expose host paths and must
+be an explicit operator action, not something an untrusted checkout can
+request.
 
 Environment overrides:
 

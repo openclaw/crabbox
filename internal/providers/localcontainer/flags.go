@@ -41,6 +41,9 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 			"mount /var/run/docker.sock into local-container leases so docker commands use the host daemon"),
 		Volumes: &volumes,
 	}
+	// CLI-only: bind mounts expose host paths and must be an explicit
+	// operator action. Not loaded from repo-local .crabbox.yaml — see
+	// the comment in config.go where YAML ingestion is blocked.
 	fs.Var(&volumes, "local-container-volume",
 		"bind-mount a host path into the container; host:container[:ro]; repeatable")
 	return v
