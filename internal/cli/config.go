@@ -420,6 +420,7 @@ type LocalContainerConfig struct {
 	Memory       string
 	Network      string
 	DockerSocket bool
+	Volumes      []string
 }
 
 type AppleContainerConfig struct {
@@ -1439,14 +1440,15 @@ type fileSpritesConfig struct {
 }
 
 type fileLocalContainerConfig struct {
-	Runtime      string `yaml:"runtime,omitempty"`
-	Image        string `yaml:"image,omitempty"`
-	User         string `yaml:"user,omitempty"`
-	WorkRoot     string `yaml:"workRoot,omitempty"`
-	CPUs         int    `yaml:"cpus,omitempty"`
-	Memory       string `yaml:"memory,omitempty"`
-	Network      string `yaml:"network,omitempty"`
-	DockerSocket *bool  `yaml:"dockerSocket,omitempty"`
+	Runtime      string   `yaml:"runtime,omitempty"`
+	Image        string   `yaml:"image,omitempty"`
+	User         string   `yaml:"user,omitempty"`
+	WorkRoot     string   `yaml:"workRoot,omitempty"`
+	CPUs         int      `yaml:"cpus,omitempty"`
+	Memory       string   `yaml:"memory,omitempty"`
+	Network      string   `yaml:"network,omitempty"`
+	DockerSocket *bool    `yaml:"dockerSocket,omitempty"`
+	Volumes      []string `yaml:"volumes,omitempty"`
 }
 
 type fileAppleContainerConfig struct {
@@ -2513,6 +2515,9 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.LocalContainer.DockerSocket != nil {
 			cfg.LocalContainer.DockerSocket = *file.LocalContainer.DockerSocket
+		}
+		if len(file.LocalContainer.Volumes) > 0 {
+			cfg.LocalContainer.Volumes = append(cfg.LocalContainer.Volumes, file.LocalContainer.Volumes...)
 		}
 	}
 	if file.AppleContainer != nil {

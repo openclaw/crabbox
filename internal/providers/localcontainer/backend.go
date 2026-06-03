@@ -422,6 +422,9 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	for _, mount := range cacheVolumeMounts {
 		args = append(args, "-v", mount)
 	}
+	for _, vol := range cfg.LocalContainer.Volumes {
+		args = append(args, "-v", vol)
+	}
 	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "-lc", bootstrapScript)
 	result, err := b.docker(ctx, args, nil, b.rt.Stderr)
 	if err != nil {

@@ -2,9 +2,18 @@ package localcontainer
 
 import (
 	"flag"
+	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+type volumeListFlag []string
+
+func (f *volumeListFlag) String() string { return strings.Join(*f, ",") }
+func (f *volumeListFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
 
 type flagValues struct {
 	Runtime      *string
@@ -15,10 +24,11 @@ type flagValues struct {
 	Memory       *string
 	Network      *string
 	DockerSocket *bool
+	Volumes      volumeListFlag
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return flagValues{
+	v := flagValues{
 		Runtime:  fs.String("local-container-runtime", defaults.LocalContainer.Runtime, "Docker-compatible CLI to use for local containers"),
 		Image:    fs.String("local-container-image", defaults.LocalContainer.Image, "container image for local-container leases"),
 		User:     fs.String("local-container-user", defaults.LocalContainer.User, "SSH user created inside local-container leases"),
@@ -29,6 +39,10 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 		DockerSocket: fs.Bool("local-container-docker-socket", defaults.LocalContainer.DockerSocket,
 			"mount /var/run/docker.sock into local-container leases so docker commands use the host daemon"),
 	}
+	v.Volumes = volumeListFlag(defaults.LocalContainer.Volumes)
+	fs.Var(&v.Volumes, "local-container-volume",
+		"bind-mount a host path into the container; host:container[:ro]; repeatable")
+	return v
 }
 
 func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
@@ -62,6 +76,9 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "local-container-docker-socket") {
 		cfg.LocalContainer.DockerSocket = *v.DockerSocket
+	}
+	if core.FlagWasSet(fs, "local-container-volume") {
+		cfg.LocalContainer.Volumes = []string(v.Volumes)
 	}
 	if cfg.Provider == providerName || cfg.Provider == "docker" || cfg.Provider == "container" || cfg.Provider == "local-docker" {
 		applyDefaults(cfg)
