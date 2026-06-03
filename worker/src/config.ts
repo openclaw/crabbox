@@ -268,11 +268,32 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
 // `pond` label is a reserved provider-label key that groups leases for
 // peer discovery and lifecycle commands.
 export function normalizePondName(value: string): string {
-  return value
-    .toLowerCase()
-    .trim()
-    .replaceAll(/[^a-z0-9]+/g, "-")
-    .replaceAll(/^-+|-+$/g, "");
+  const normalized = value.toLowerCase().trim();
+  const output: string[] = [];
+  let lastDash = false;
+  for (const char of normalized) {
+    const code = char.charCodeAt(0);
+    const isLetter = code >= 97 && code <= 122;
+    const isDigit = code >= 48 && code <= 57;
+    if (isLetter || isDigit) {
+      output.push(char);
+      lastDash = false;
+      continue;
+    }
+    if (!lastDash) {
+      output.push("-");
+      lastDash = true;
+    }
+  }
+  let start = 0;
+  let end = output.length;
+  while (output[start] === "-") {
+    start += 1;
+  }
+  while (end > start && output[end - 1] === "-") {
+    end -= 1;
+  }
+  return output.slice(start, end).join("");
 }
 
 function requestedPondName(value: string): string {
