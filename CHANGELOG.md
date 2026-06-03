@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added repeatable `--local-container-volume host:container[:ro]` bind mounts for explicit local-container runs. Thanks @anagnorisis2peripeteia.
+
 ### Changed
 
 ### Fixed

@@ -952,9 +952,15 @@ type testLocalContainerFlagValues struct {
 	Memory       *string
 	Network      *string
 	DockerSocket *bool
+	Volumes      *[]string
 }
 
 func (testLocalContainerProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	volumes := append([]string(nil), defaults.LocalContainer.Volumes...)
+	fs.Func("local-container-volume", "container volume", func(value string) error {
+		volumes = append(volumes, value)
+		return nil
+	})
 	return testLocalContainerFlagValues{
 		Runtime:      fs.String("local-container-runtime", defaults.LocalContainer.Runtime, "Docker-compatible CLI"),
 		Image:        fs.String("local-container-image", defaults.LocalContainer.Image, "container image"),
@@ -964,6 +970,7 @@ func (testLocalContainerProvider) RegisterFlags(fs *flag.FlagSet, defaults Confi
 		Memory:       fs.String("local-container-memory", defaults.LocalContainer.Memory, "container memory"),
 		Network:      fs.String("local-container-network", defaults.LocalContainer.Network, "container network"),
 		DockerSocket: fs.Bool("local-container-docker-socket", defaults.LocalContainer.DockerSocket, "container Docker socket"),
+		Volumes:      &volumes,
 	}
 }
 func (testLocalContainerProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
@@ -997,6 +1004,9 @@ func (testLocalContainerProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, valu
 	}
 	if flagWasSet(fs, "local-container-docker-socket") {
 		cfg.LocalContainer.DockerSocket = *v.DockerSocket
+	}
+	if v.Volumes != nil && len(*v.Volumes) > 0 {
+		cfg.LocalContainer.Volumes = append([]string(nil), (*v.Volumes)...)
 	}
 	if cfg.Provider == "docker" || cfg.Provider == "container" || cfg.Provider == "local-docker" {
 		cfg.Provider = "local-container"

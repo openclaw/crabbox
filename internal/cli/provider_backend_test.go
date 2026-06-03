@@ -310,6 +310,8 @@ func TestProviderFlagsApplyLocalContainerWithoutCoreEdits(t *testing.T) {
 		"--local-container-memory", "8g",
 		"--local-container-network", "bridge",
 		"--local-container-docker-socket",
+		"--local-container-volume", "/host/cache:/cache:ro",
+		"--local-container-volume", "/host/tmp:/tmp/host",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +320,7 @@ func TestProviderFlagsApplyLocalContainerWithoutCoreEdits(t *testing.T) {
 	if err := applyProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "local-container" || cfg.LocalContainer.Runtime != "docker" || cfg.LocalContainer.Image != "ubuntu:24.04" || cfg.LocalContainer.User != "runner" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/workspace/crabbox" || cfg.LocalContainer.CPUs != 4 || cfg.LocalContainer.Memory != "8g" || cfg.LocalContainer.Network != "bridge" || !cfg.LocalContainer.DockerSocket {
+	if cfg.Provider != "local-container" || cfg.LocalContainer.Runtime != "docker" || cfg.LocalContainer.Image != "ubuntu:24.04" || cfg.LocalContainer.User != "runner" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/workspace/crabbox" || cfg.LocalContainer.CPUs != 4 || cfg.LocalContainer.Memory != "8g" || cfg.LocalContainer.Network != "bridge" || !cfg.LocalContainer.DockerSocket || len(cfg.LocalContainer.Volumes) != 2 || cfg.LocalContainer.Volumes[0] != "/host/cache:/cache:ro" || cfg.LocalContainer.Volumes[1] != "/host/tmp:/tmp/host" {
 		t.Fatalf("local-container flags not applied: provider=%s cfg=%#v", cfg.Provider, cfg.LocalContainer)
 	}
 }

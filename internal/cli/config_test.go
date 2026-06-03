@@ -1317,6 +1317,30 @@ localContainer:
 	}
 }
 
+func TestRepoConfigDoesNotApplyLocalContainerVolumes(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte(`
+provider: local-container
+localContainer:
+  volumes:
+    - /host/secret:/container/secret:ro
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.LocalContainer.Volumes) != 0 {
+		t.Fatalf("repo config applied local-container volumes: %#v", cfg.LocalContainer.Volumes)
+	}
+}
+
 func TestPortableOSDefaultsRespectTargetAlias(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

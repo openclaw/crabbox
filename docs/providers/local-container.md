@@ -119,6 +119,10 @@ CRABBOX_LOCAL_CONTAINER_NETWORK
 CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET
 ```
 
+Host bind mounts must be passed explicitly with `--local-container-volume`.
+Crabbox intentionally ignores `localContainer.volumes` from config files because
+repo-local config can come from untrusted checkouts.
+
 The active runtime is selected from the standard `DOCKER_HOST` / Docker context;
 remote Docker contexts are not the intended path because Crabbox connects to the
 published SSH port from the local machine.
