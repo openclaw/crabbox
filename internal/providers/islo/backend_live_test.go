@@ -1,3 +1,5 @@
+//go:build smoke
+
 package islo
 
 import (
@@ -16,10 +18,15 @@ import (
 // actually returns today. It is skipped unless ISLO_API_KEY is set, so it never
 // runs in CI without credentials.
 //
+//	go test -tags smoke -run TestLiveIsloStatusClassification -v ./internal/providers/islo
+//
 // This is the live guard for the M1/M2 alignment: the API reports
 // running/paused/failed/etc., never the legacy "ready"/"started"/"active"
 // values crabbox previously treated as ready.
 func TestLiveIsloStatusClassification(t *testing.T) {
+	if testing.Short() {
+		t.Skip("live Islo e2e skipped in -short mode")
+	}
 	apiKey := strings.TrimSpace(os.Getenv("ISLO_API_KEY"))
 	if apiKey == "" {
 		t.Skip("ISLO_API_KEY not set; skipping live Islo e2e")
