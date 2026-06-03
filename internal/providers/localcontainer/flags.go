@@ -2,8 +2,6 @@ package localcontainer
 
 import (
 	"flag"
-	"fmt"
-	"os"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -26,10 +24,11 @@ type flagValues struct {
 	Memory       *string
 	Network      *string
 	DockerSocket *bool
-	Volumes      volumeListFlag
+	Volumes      *volumeListFlag
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
+	volumes := volumeListFlag(defaults.LocalContainer.Volumes)
 	v := flagValues{
 		Runtime:  fs.String("local-container-runtime", defaults.LocalContainer.Runtime, "Docker-compatible CLI to use for local containers"),
 		Image:    fs.String("local-container-image", defaults.LocalContainer.Image, "container image for local-container leases"),
@@ -40,9 +39,9 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 		Network:  fs.String("local-container-network", defaults.LocalContainer.Network, "container network for local-container leases"),
 		DockerSocket: fs.Bool("local-container-docker-socket", defaults.LocalContainer.DockerSocket,
 			"mount /var/run/docker.sock into local-container leases so docker commands use the host daemon"),
+		Volumes: &volumes,
 	}
-	v.Volumes = volumeListFlag(defaults.LocalContainer.Volumes)
-	fs.Var(&v.Volumes, "local-container-volume",
+	fs.Var(&volumes, "local-container-volume",
 		"bind-mount a host path into the container; host:container[:ro]; repeatable")
 	return v
 }
@@ -79,11 +78,8 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.FlagWasSet(fs, "local-container-docker-socket") {
 		cfg.LocalContainer.DockerSocket = *v.DockerSocket
 	}
-	// Debug: always log volume state
-	fmt.Fprintf(os.Stderr, "debug: applyFlags volumes=%v len=%d\n", v.Volumes, len(v.Volumes))
-	if len(v.Volumes) > 0 {
-		cfg.LocalContainer.Volumes = []string(v.Volumes)
-		fmt.Fprintf(os.Stderr, "debug: set cfg.LocalContainer.Volumes=%v\n", cfg.LocalContainer.Volumes)
+	if v.Volumes != nil && len(*v.Volumes) > 0 {
+		cfg.LocalContainer.Volumes = []string(*v.Volumes)
 	}
 	if cfg.Provider == providerName || cfg.Provider == "docker" || cfg.Provider == "container" || cfg.Provider == "local-docker" {
 		applyDefaults(cfg)

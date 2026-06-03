@@ -422,11 +422,7 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	for _, mount := range cacheVolumeMounts {
 		args = append(args, "-v", mount)
 	}
-	if len(cfg.LocalContainer.Volumes) > 0 {
-		fmt.Fprintf(b.rt.Stderr, "local-container: mounting %d volume(s)\n", len(cfg.LocalContainer.Volumes))
-	}
 	for _, vol := range cfg.LocalContainer.Volumes {
-		fmt.Fprintf(b.rt.Stderr, "local-container: -v %s\n", vol)
 		args = append(args, "-v", vol)
 	}
 	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "-lc", bootstrapScript)
