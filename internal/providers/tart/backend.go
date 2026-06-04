@@ -382,9 +382,6 @@ func (b *backend) configureVM(ctx context.Context, cfg Config, name string) erro
 // startVM starts the VM headless in the background.
 func (b *backend) startVM(ctx context.Context, cfg Config, name string) error {
 	args := []string{"run", name, "--no-graphics"}
-	if cfg.WorkRoot != "" {
-		args = append(args, "--dir", fmt.Sprintf("work:%s", cfg.WorkRoot))
-	}
 	cmd := exec.CommandContext(ctx, "tart", args...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
@@ -540,6 +537,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst tartInstanc
 	target := sshTargetFromConfig(cfg, ip)
 	target.Port = sshPort
 	target.FallbackPorts = []string{}
+	target.ReadyCheck = "uname -s && test -d ~"
 	if wait {
 		if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "tart ssh", bootstrapWaitTimeout(cfg)); err != nil {
 			return LeaseTarget{}, err
