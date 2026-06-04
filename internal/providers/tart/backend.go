@@ -431,15 +431,11 @@ func (b *backend) injectSSHKey(ctx context.Context, name string, publicKey strin
 		return exit(5, "tart instance %s has no IP address for SSH key injection", name)
 	}
 
-	sshCmd := fmt.Sprintf(
-		`sshpass -p admin ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@%s "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '%s' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"`,
-		ip, strings.TrimSpace(publicKey),
+	injectScript := fmt.Sprintf(
+		`mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '%s' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`,
+		strings.TrimSpace(publicKey),
 	)
-	injectResult, err := b.rt.Exec.Run(ctx, LocalCommandRequest{
-		Name:   "bash",
-		Args:   []string{"-c", sshCmd},
-		Stderr: b.rt.Stderr,
-	})
+	injectResult, err := b.tart(ctx, []string{"exec", name, "bash", "-c", injectScript}, nil, b.rt.Stderr)
 	if err != nil {
 		return commandError("ssh key injection", injectResult, err)
 	}
