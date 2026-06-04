@@ -286,6 +286,9 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	now := time.Now().UTC()
 	removed := 0
 	for _, inst := range instances {
+		if !strings.HasPrefix(inst.Name, "crabbox-") {
+			continue
+		}
 		claim := claims[inst.Name]
 		if claim.LeaseID != "" {
 			live[claim.LeaseID] = struct{}{}

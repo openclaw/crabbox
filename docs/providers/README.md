@@ -32,7 +32,8 @@ SSH-lease providers further differ by how they reach the cloud:
 - **Local runtime** — `local-container` starts a labeled Linux container through
   a Docker-compatible local runtime (Docker Desktop, OrbStack, Colima),
   `apple-container` uses Apple's native `container` runtime on Apple silicon
-  macOS, and `multipass` launches local Ubuntu VMs through Canonical Multipass.
+  macOS, `multipass` launches local Ubuntu VMs through Canonical Multipass,
+  and `tart` runs macOS VMs on Apple Silicon via Cirrus Labs tart.
 - **Delegated sandbox** — managed sandbox/proof runners that execute remotely
   without an SSH lease (e.g. `e2b`, `modal`, `islo`, `cloudflare`,
   `azure-dynamic-sessions`).
@@ -61,6 +62,7 @@ Each page below maps to an adapter under `internal/providers/<dir>`. The
 | [Local Container](local-container.md) | `local-container` | `docker`, `container`, `local-docker` | Linux | no (local) |
 | [Apple Container](apple-container.md) | `apple-container` | `apple`, `applecontainer` | Linux | no (local) |
 | [Multipass](multipass.md) | `multipass` | `mp`, `canonical-multipass` | Linux | no (local) |
+| [Tart](tart.md) | `tart` | `local-tart`, `macos-vm` | macOS | no (local) |
 | [exe.dev](exe-dev.md) | `exe-dev` | `exe`, `exedev` | Linux | no (direct) |
 | [Namespace Devbox](namespace-devbox.md) | `namespace-devbox` | `namespace`, `namespace-devboxes` | Linux | no (direct) |
 | [Semaphore](semaphore.md) | `semaphore` | `sem` | Linux | no (direct) |
