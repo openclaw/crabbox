@@ -534,6 +534,9 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst tartInstanc
 	if ip == "" {
 		return LeaseTarget{}, exit(5, "tart instance %s has no IP address", inst.Name)
 	}
+	// Publish the resolved VM IP as the server's public host so status/inspect
+	// (which read Server.PublicNet.IPv4.IP) report the lease host, not just SSH.
+	server.PublicNet.IPv4.IP = ip
 	if claim.LeaseID != "" {
 		keyPath, err := testboxKeyPath(claim.LeaseID)
 		if err == nil {
@@ -727,4 +730,3 @@ func firstNonBlank(values ...string) string {
 	}
 	return ""
 }
-

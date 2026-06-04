@@ -148,6 +148,25 @@ func TestApplyDefaults(t *testing.T) {
 	}
 }
 
+func TestPrepareLeaseSetsPublicHost(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	runner := &recordingRunner{}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	inst := tartInstance{Name: "crabbox-blue-1234abcd", State: "running"}
+	lt, err := b.prepareLease(context.Background(), cfg, inst, "192.0.2.10", core.LeaseClaim{LeaseID: "cbx_test"}, false)
+	if err != nil {
+		t.Fatalf("prepareLease: %v", err)
+	}
+	if lt.Server.PublicNet.IPv4.IP != "192.0.2.10" {
+		t.Fatalf("Server.PublicNet.IPv4.IP = %q, want 192.0.2.10 (status/inspect read this)", lt.Server.PublicNet.IPv4.IP)
+	}
+	if lt.SSH.Host != "192.0.2.10" {
+		t.Fatalf("SSH.Host = %q, want 192.0.2.10", lt.SSH.Host)
+	}
+}
+
 func TestListInstancesFiltersCrabboxPrefix(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
 		commandKey([]string{"list", "--format", "json"}): {Stdout: sampleListJSON()},
@@ -180,8 +199,8 @@ func TestListJSONDecode(t *testing.T) {
 
 func TestDoctorReady(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
-		commandKey([]string{"--version"}):                  {Stdout: "tart 2.12.0\n"},
-		commandKey([]string{"list", "--format", "json"}):   {Stdout: `[]`},
+		commandKey([]string{"--version"}):                {Stdout: "tart 2.12.0\n"},
+		commandKey([]string{"list", "--format", "json"}): {Stdout: `[]`},
 	}}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
