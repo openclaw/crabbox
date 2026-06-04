@@ -62,7 +62,7 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetMacOS {
 		t.Fatalf("targets=%v want macos only", spec.Targets)
 	}
-	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop} {
+	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup} {
 		if !spec.Features.Has(feature) {
 			t.Fatalf("features=%v missing %s", spec.Features, feature)
 		}

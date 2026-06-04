@@ -1103,7 +1103,7 @@ func (testTartProvider) Spec() ProviderSpec {
 		Family:      "local-vm",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetMacOS}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
 		Coordinator: CoordinatorNever,
 	}
 }
