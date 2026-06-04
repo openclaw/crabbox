@@ -153,4 +153,5 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 
 ## Related docs
 
+- [Crabbox setup guide](https://upstash.com/docs/box/guides/crabbox-setup) — Upstash's walkthrough for running Crabbox on Upstash Box.
 - [Provider backends](../provider-backends.md)
