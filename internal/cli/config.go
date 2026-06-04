@@ -135,6 +135,7 @@ type Config struct {
 	tartDiskExplicit              bool
 	tartCPUsExplicit              bool
 	tartMemoryExplicit            bool
+	HyperV                        HyperVConfig
 	Tailscale                     TailscaleConfig
 	Static                        StaticConfig
 	Results                       ResultsConfig
@@ -580,6 +581,16 @@ type TartConfig struct {
 	CPUs     int
 	Memory   int
 	Disk     int
+}
+
+type HyperVConfig struct {
+	Image    string
+	User     string
+	WorkRoot string
+	CPUs     int
+	Memory   int
+	Disk     int
+	Switch   string
 }
 
 type StaticConfig struct {
@@ -1282,6 +1293,14 @@ func baseConfig() Config {
 			CPUs:     4,
 			Memory:   8192,
 		},
+		HyperV: HyperVConfig{
+			User:     "crabbox",
+			WorkRoot: defaultWindowsWorkRoot,
+			CPUs:     4,
+			Memory:   8192,
+			Disk:     50,
+			Switch:   "Default Switch",
+		},
 		Tailscale: TailscaleConfig{
 			Tags:             []string{"tag:crabbox"},
 			HostnameTemplate: "crabbox-{slug}",
@@ -1354,6 +1373,7 @@ type fileConfig struct {
 	AppleContainer       *fileAppleContainerConfig          `yaml:"appleContainer,omitempty"`
 	Multipass            *fileMultipassConfig               `yaml:"multipass,omitempty"`
 	Tart                 *fileTartConfig                    `yaml:"tart,omitempty"`
+	HyperV               *fileHyperVConfig                  `yaml:"hyperv,omitempty"`
 	Tailscale            *fileTailscaleConfig               `yaml:"tailscale,omitempty"`
 	Static               *fileStaticConfig                  `yaml:"static,omitempty"`
 	Results              *fileResultsConfig                 `yaml:"results,omitempty"`
@@ -1821,6 +1841,16 @@ type fileTartConfig struct {
 	CPUs     *int   `yaml:"cpus,omitempty"`
 	Memory   *int   `yaml:"memory,omitempty"`
 	Disk     *int   `yaml:"disk,omitempty"`
+}
+
+type fileHyperVConfig struct {
+	Image    string `yaml:"image,omitempty"`
+	User     string `yaml:"user,omitempty"`
+	WorkRoot string `yaml:"workRoot,omitempty"`
+	CPUs     int    `yaml:"cpus,omitempty"`
+	Memory   int    `yaml:"memory,omitempty"`
+	Disk     int    `yaml:"disk,omitempty"`
+	Switch   string `yaml:"switch,omitempty"`
 }
 
 type fileTailscaleConfig struct {
@@ -3138,6 +3168,29 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.tartDiskExplicit = true
 		}
 	}
+	if file.HyperV != nil {
+		if file.HyperV.Image != "" {
+			cfg.HyperV.Image = file.HyperV.Image
+		}
+		if file.HyperV.User != "" {
+			cfg.HyperV.User = file.HyperV.User
+		}
+		if file.HyperV.WorkRoot != "" {
+			cfg.HyperV.WorkRoot = file.HyperV.WorkRoot
+		}
+		if file.HyperV.CPUs > 0 {
+			cfg.HyperV.CPUs = file.HyperV.CPUs
+		}
+		if file.HyperV.Memory > 0 {
+			cfg.HyperV.Memory = file.HyperV.Memory
+		}
+		if file.HyperV.Disk > 0 {
+			cfg.HyperV.Disk = file.HyperV.Disk
+		}
+		if file.HyperV.Switch != "" {
+			cfg.HyperV.Switch = file.HyperV.Switch
+		}
+	}
 	if file.Tailscale != nil {
 		if file.Tailscale.Enabled != nil {
 			cfg.Tailscale.Enabled = *file.Tailscale.Enabled
@@ -3955,6 +4008,13 @@ func applyEnv(cfg *Config) error {
 		cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
 		cfg.tartDiskExplicit = true
 	}
+	cfg.HyperV.Image = getenv("CRABBOX_HYPERV_IMAGE", cfg.HyperV.Image)
+	cfg.HyperV.User = getenv("CRABBOX_HYPERV_USER", cfg.HyperV.User)
+	cfg.HyperV.WorkRoot = getenv("CRABBOX_HYPERV_WORK_ROOT", cfg.HyperV.WorkRoot)
+	cfg.HyperV.CPUs = getenvInt("CRABBOX_HYPERV_CPUS", cfg.HyperV.CPUs)
+	cfg.HyperV.Memory = getenvInt("CRABBOX_HYPERV_MEMORY", cfg.HyperV.Memory)
+	cfg.HyperV.Disk = getenvInt("CRABBOX_HYPERV_DISK", cfg.HyperV.Disk)
+	cfg.HyperV.Switch = getenv("CRABBOX_HYPERV_SWITCH", cfg.HyperV.Switch)
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value
 	}

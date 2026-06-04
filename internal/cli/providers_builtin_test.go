@@ -31,6 +31,7 @@ func init() {
 	RegisterProvider(testDockerSandboxProvider{})
 	RegisterProvider(testMultipassProvider{})
 	RegisterProvider(testTartProvider{})
+	RegisterProvider(testHyperVProvider{})
 	RegisterProvider(testParallelsProvider{})
 	RegisterProvider(testWandbProvider{})
 	RegisterProvider(testServiceControlProvider{})
@@ -1226,6 +1227,64 @@ func (testTartProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	return nil
 }
 func (p testTartProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testHyperVProvider struct{}
+
+func (testHyperVProvider) Name() string      { return "hyperv" }
+func (testHyperVProvider) Aliases() []string { return nil }
+func (testHyperVProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "hyperv",
+		Family:      "local-vm",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetWindows, WindowsMode: windowsModeNormal}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testHyperVFlagValues struct {
+	Image  *string
+	CPUs   *int
+	Memory *int
+	Disk   *int
+	Switch *string
+}
+
+func (testHyperVProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testHyperVFlagValues{
+		Image:  fs.String("hyperv-image", defaults.HyperV.Image, "Hyper-V image"),
+		CPUs:   fs.Int("hyperv-cpu", defaults.HyperV.CPUs, "Hyper-V CPUs"),
+		Memory: fs.Int("hyperv-memory", defaults.HyperV.Memory, "Hyper-V memory MB"),
+		Disk:   fs.Int("hyperv-disk", defaults.HyperV.Disk, "Hyper-V disk GB"),
+		Switch: fs.String("hyperv-switch", defaults.HyperV.Switch, "Hyper-V switch"),
+	}
+}
+func (testHyperVProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testHyperVFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "hyperv-image") {
+		cfg.HyperV.Image = *v.Image
+	}
+	if flagWasSet(fs, "hyperv-cpu") {
+		cfg.HyperV.CPUs = *v.CPUs
+	}
+	if flagWasSet(fs, "hyperv-memory") {
+		cfg.HyperV.Memory = *v.Memory
+	}
+	if flagWasSet(fs, "hyperv-disk") {
+		cfg.HyperV.Disk = *v.Disk
+	}
+	if flagWasSet(fs, "hyperv-switch") {
+		cfg.HyperV.Switch = *v.Switch
+	}
+	return nil
+}
+func (p testHyperVProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
