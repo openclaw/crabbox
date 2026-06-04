@@ -379,16 +379,20 @@ func (b *backend) configureVM(ctx context.Context, cfg Config, name string) erro
 	return nil
 }
 
+// startVMArgs returns the tart run arguments for starting a VM headless.
+func startVMArgs(name string) []string {
+	return []string{"run", name, "--no-graphics"}
+}
+
 // startVM starts the VM headless in the background.
 func (b *backend) startVM(ctx context.Context, cfg Config, name string) error {
-	args := []string{"run", name, "--no-graphics"}
+	args := startVMArgs(name)
 	cmd := exec.CommandContext(ctx, "tart", args...)
 	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	cmd.Stderr = b.rt.Stderr
 	if err := cmd.Start(); err != nil {
 		return exit(2, "tart run %s: %v", name, err)
 	}
-	// Release the process so it survives after we return.
 	go func() { _ = cmd.Wait() }()
 	return nil
 }
