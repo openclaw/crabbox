@@ -226,5 +226,5 @@ func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
 }
 
 func sampleListJSON() string {
-	return `[{"Name":"crabbox-blue-1234abcd","State":"Running","Disk":50,"Size":"15 GB","Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"},{"Name":"my-dev-vm","State":"Stopped","Disk":50,"Size":"12 GB","Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"}]`
+	return `[{"Name":"crabbox-blue-1234abcd","State":"running","Running":true,"Disk":50,"Size":15,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"},{"Name":"my-dev-vm","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"}]`
 }

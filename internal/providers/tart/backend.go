@@ -21,11 +21,12 @@ type backend struct {
 }
 
 type tartInstance struct {
-	Name   string `json:"Name"`
-	State  string `json:"State"`
-	Disk   int    `json:"Disk"`
-	Size   string `json:"Size"`
-	Source string `json:"Source"`
+	Name    string      `json:"Name"`
+	State   string      `json:"State"`
+	Running bool        `json:"Running"`
+	Disk    int         `json:"Disk"`
+	Size    json.Number `json:"Size"`
+	Source  string      `json:"Source"`
 }
 
 func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
