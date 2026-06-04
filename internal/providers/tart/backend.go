@@ -117,7 +117,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
-	if err := b.startVM(ctx, name); err != nil {
+	if err := b.startVM(ctx, cfg, name); err != nil {
 		if !req.Keep {
 			_ = b.deleteVM(context.Background(), name)
 		}
@@ -380,10 +380,12 @@ func (b *backend) configureVM(ctx context.Context, cfg Config, name string) erro
 }
 
 // startVM starts the VM headless in the background.
-func (b *backend) startVM(ctx context.Context, name string) error {
-	// tart run is a blocking command, so we start it in the background.
-	// We use exec.CommandContext directly to avoid waiting for it.
-	cmd := exec.CommandContext(ctx, "tart", "run", name, "--no-graphics")
+func (b *backend) startVM(ctx context.Context, cfg Config, name string) error {
+	args := []string{"run", name, "--no-graphics"}
+	if cfg.WorkRoot != "" {
+		args = append(args, "--dir", fmt.Sprintf("work:%s", cfg.WorkRoot))
+	}
+	cmd := exec.CommandContext(ctx, "tart", args...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
