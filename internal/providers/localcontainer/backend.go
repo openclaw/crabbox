@@ -422,7 +422,20 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	for _, mount := range cacheVolumeMounts {
 		args = append(args, "-v", mount)
 	}
-	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "-lc", bootstrapScript)
+	bootstrapFile, err := os.CreateTemp("", "crabbox-bootstrap-*.sh")
+	if err != nil {
+		return "", core.Exit(2, "create bootstrap script file: %v", err)
+	}
+	defer os.Remove(bootstrapFile.Name())
+	if _, err := bootstrapFile.WriteString(bootstrapScript); err != nil {
+		bootstrapFile.Close()
+		return "", core.Exit(2, "write bootstrap script: %v", err)
+	}
+	if err := bootstrapFile.Close(); err != nil {
+		return "", core.Exit(2, "close bootstrap script: %v", err)
+	}
+	args = append(args, "-v", bootstrapFile.Name()+":/tmp/crabbox-bootstrap.sh:ro")
+	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "/tmp/crabbox-bootstrap.sh")
 	result, err := b.docker(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
 		return "", commandError("container run", result, err)
