@@ -45,9 +45,6 @@ func applyDefaults(cfg *Config) {
 		cfg.WindowsMode = core.WindowsModeNormal
 	}
 	cfg.SSHFallbackPorts = []string{}
-	if cfg.HyperV.Image == "" {
-		cfg.HyperV.Image = ""
-	}
 	if cfg.HyperV.User == "" {
 		cfg.HyperV.User = "crabbox"
 	}
@@ -119,12 +116,11 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		}
 	}()
 	cfg.SSHKey = keyPath
-	_ = publicKey
 	name := leaseProviderName(leaseID, slug)
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB disk=%dGB switch=%s keep=%v\n",
 		providerName, leaseID, slug, cfg.HyperV.Image, cfg.HyperV.CPUs, cfg.HyperV.Memory, cfg.HyperV.Disk, cfg.HyperV.Switch, req.Keep)
 
-	if err := b.createVM(ctx, cfg, name); err != nil {
+	if err := b.createVM(ctx, cfg, name, publicKey); err != nil {
 		_ = b.removeVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
@@ -181,7 +177,10 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	if claim.LeaseID == "" {
 		return LeaseTarget{}, exit(4, "hyperv instance %q has no Crabbox lease claim; use `crabbox stop --provider hyperv %s` to delete it or warm a new lease", inst.Name, inst.Name)
 	}
-	ip := b.getIPFromClaim(claim)
+	ip := b.queryLiveIP(ctx, inst.Name)
+	if ip == "" {
+		ip = b.getIPFromClaim(claim)
+	}
 	lease, err := b.prepareLease(ctx, cfg, inst, ip, claim, false)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -245,14 +244,11 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	}
 	name := strings.TrimSpace(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]))
 	if name == "" && lease.LeaseID != "" {
-		inst, claim, err := b.resolveInstance(ctx, lease.LeaseID)
+		inst, _, err := b.resolveInstance(ctx, lease.LeaseID)
 		if err != nil {
 			return err
 		}
 		name = inst.Name
-		if lease.LeaseID == "" {
-			lease.LeaseID = claim.LeaseID
-		}
 	}
 	if name == "" {
 		return exit(2, "provider=%s release requires a Hyper-V VM name", providerName)
@@ -347,19 +343,53 @@ func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 	return server, nil
 }
 
-// createVM creates and starts a Hyper-V VM with the configured settings.
-func (b *backend) createVM(ctx context.Context, cfg Config, name string) error {
+// createVM creates and starts a Hyper-V VM from the configured image and
+// injects the SSH public key via PowerShell Direct.
+func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey string) error {
 	vhdDir := hypervVHDDir()
+	if err := os.MkdirAll(vhdDir, 0o755); err != nil {
+		return exit(2, "create VHD directory %s: %v", vhdDir, err)
+	}
 	vhdPath := filepath.Join(vhdDir, name+".vhdx")
 
-	memBytes := int64(cfg.HyperV.Memory) * 1024 * 1024
-	diskBytes := int64(cfg.HyperV.Disk) * 1024 * 1024 * 1024
-
-	createScript := fmt.Sprintf(
-		`New-VM -Name '%s' -MemoryStartupBytes %d -Generation 2 -NewVHDPath '%s' -NewVHDSizeBytes %d`,
-		escapePSString(name), memBytes, escapePSString(vhdPath), diskBytes,
+	switchCheck := fmt.Sprintf(
+		`if (-not (Get-VMSwitch -Name '%s' -ErrorAction SilentlyContinue)) { throw 'Hyper-V switch not found: %s' }`,
+		escapePSString(cfg.HyperV.Switch), escapePSString(cfg.HyperV.Switch),
 	)
-	result, err := b.powershell(ctx, createScript)
+	result, err := b.powershell(ctx, switchCheck)
+	if err != nil {
+		return commandError("switch validation", result, err)
+	}
+
+	imageLower := strings.ToLower(cfg.HyperV.Image)
+	isISO := strings.HasSuffix(imageLower, ".iso")
+
+	memBytes := int64(cfg.HyperV.Memory) * 1024 * 1024
+
+	var createScript string
+	if isISO {
+		diskBytes := int64(cfg.HyperV.Disk) * 1024 * 1024 * 1024
+		createScript = fmt.Sprintf(
+			`New-VM -Name '%s' -MemoryStartupBytes %d -Generation 2 -NewVHDPath '%s' -NewVHDSizeBytes %d`,
+			escapePSString(name), memBytes, escapePSString(vhdPath), diskBytes,
+		)
+	} else {
+		copyScript := fmt.Sprintf(`Copy-Item -LiteralPath '%s' -Destination '%s'`, escapePSString(cfg.HyperV.Image), escapePSString(vhdPath))
+		result, err = b.powershell(ctx, copyScript)
+		if err != nil {
+			return commandError("copy VHDX template", result, err)
+		}
+		if cfg.HyperV.Disk > 0 {
+			resizeScript := fmt.Sprintf(`Resize-VHD -Path '%s' -SizeBytes %d -ErrorAction SilentlyContinue`,
+				escapePSString(vhdPath), int64(cfg.HyperV.Disk)*1024*1024*1024)
+			b.powershell(ctx, resizeScript) //nolint:errcheck
+		}
+		createScript = fmt.Sprintf(
+			`New-VM -Name '%s' -MemoryStartupBytes %d -Generation 2 -VHDPath '%s'`,
+			escapePSString(name), memBytes, escapePSString(vhdPath),
+		)
+	}
+	result, err = b.powershell(ctx, createScript)
 	if err != nil {
 		return commandError("New-VM", result, err)
 	}
@@ -379,12 +409,50 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name string) error {
 		return commandError("Connect-VMNetworkAdapter", result, err)
 	}
 
+	if isISO {
+		dvdScript := fmt.Sprintf(`Add-VMDvdDrive -VMName '%s' -Path '%s'`, escapePSString(name), escapePSString(cfg.HyperV.Image))
+		result, err = b.powershell(ctx, dvdScript)
+		if err != nil {
+			return commandError("Add-VMDvdDrive", result, err)
+		}
+	}
+
 	startScript := fmt.Sprintf(`Start-VM -Name '%s'`, escapePSString(name))
 	result, err = b.powershell(ctx, startScript)
 	if err != nil {
 		return commandError("Start-VM", result, err)
 	}
 
+	if publicKey != "" {
+		if err := b.injectSSHKey(ctx, name, cfg.HyperV.User, publicKey); err != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: SSH key injection via PowerShell Direct failed: %v (image may need pre-configured SSH)\n", err)
+		}
+	}
+
+	return nil
+}
+
+// injectSSHKey writes the SSH public key into the VM via PowerShell Direct
+// (Invoke-Command -VMName). This requires the VM to have booted and the guest
+// user to exist. It is best-effort: if the image already has SSH pre-configured
+// the key injection may be redundant.
+func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey string) error {
+	script := fmt.Sprintf(
+		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString 'crabbox' -AsPlainText -Force)); `+
+			`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { `+
+			`$sshDir = Join-Path $env:USERPROFILE '.ssh'; `+
+			`New-Item -ItemType Directory -Force -Path $sshDir | Out-Null; `+
+			`$akPath = Join-Path $sshDir 'authorized_keys'; `+
+			`Add-Content -Encoding ASCII -Path $akPath -Value '%s'; `+
+			`$adminAK = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'; `+
+			`if (Test-Path (Split-Path $adminAK)) { Add-Content -Encoding ASCII -Path $adminAK -Value '%s' } `+
+			`}`,
+		escapePSString(user), escapePSString(vmName), escapePSString(publicKey), escapePSString(publicKey),
+	)
+	result, err := b.powershell(ctx, script)
+	if err != nil {
+		return commandError("SSH key injection", result, err)
+	}
 	return nil
 }
 
@@ -442,7 +510,11 @@ func (b *backend) resolveInstance(ctx context.Context, identifier string) (hyper
 		if name == "" {
 			return hypervVM{}, core.LeaseClaim{}, exit(4, "hyperv lease %s has no instance name in its claim", claim.LeaseID)
 		}
-		return hypervVM{Name: name, State: 2}, claim, nil
+		vm, queryErr := b.queryVM(ctx, name)
+		if queryErr != nil {
+			return hypervVM{Name: name, State: 2}, claim, nil
+		}
+		return vm, claim, nil
 	}
 	instances, err := b.listInstances(ctx)
 	if err != nil {
@@ -501,19 +573,76 @@ func (b *backend) removeVM(ctx context.Context, name string) error {
 	if !strings.HasPrefix(name, "crabbox-") {
 		return exit(2, "refusing to remove non-Crabbox Hyper-V VM %q", name)
 	}
-	stopScript := fmt.Sprintf(`Stop-VM -Name '%s' -Force -ErrorAction SilentlyContinue`, escapePSString(name))
+
+	vhdPaths := b.queryVHDPaths(ctx, name)
+
+	stopScript := fmt.Sprintf(`Stop-VM -Name '%s' -Force -Confirm:$false -ErrorAction SilentlyContinue`, escapePSString(name))
 	b.powershell(ctx, stopScript) //nolint:errcheck
 
-	removeScript := fmt.Sprintf(`Remove-VM -Name '%s' -Force`, escapePSString(name))
+	removeScript := fmt.Sprintf(`Remove-VM -Name '%s' -Force -Confirm:$false`, escapePSString(name))
 	result, err := b.powershell(ctx, removeScript)
 	if err != nil {
 		return commandError("Remove-VM", result, err)
 	}
 
-	vhdPath := filepath.Join(hypervVHDDir(), name+".vhdx")
-	os.Remove(vhdPath) //nolint:errcheck
+	if len(vhdPaths) > 0 {
+		for _, p := range vhdPaths {
+			os.Remove(p) //nolint:errcheck
+		}
+	} else {
+		vhdPath := filepath.Join(hypervVHDDir(), name+".vhdx")
+		os.Remove(vhdPath) //nolint:errcheck
+	}
 
 	return nil
+}
+
+func (b *backend) queryVM(ctx context.Context, name string) (hypervVM, error) {
+	script := fmt.Sprintf(`Get-VM -Name '%s' | Select-Object Name, State | ConvertTo-Json -Compress`, escapePSString(name))
+	result, err := b.powershell(ctx, script)
+	if err != nil {
+		return hypervVM{}, commandError("Get-VM query", result, err)
+	}
+	stdout := strings.TrimSpace(result.Stdout)
+	if stdout == "" || stdout == "null" {
+		return hypervVM{}, exit(4, "hyperv VM %s not found", name)
+	}
+	var vm hypervVM
+	if err := json.Unmarshal([]byte(stdout), &vm); err != nil {
+		return hypervVM{}, exit(2, "parse hyperv VM %s: %v", name, err)
+	}
+	return vm, nil
+}
+
+func (b *backend) queryLiveIP(ctx context.Context, name string) string {
+	script := fmt.Sprintf(
+		`Get-VMNetworkAdapter -VMName '%s' | Select-Object -ExpandProperty IPAddresses | ConvertTo-Json`,
+		escapePSString(name),
+	)
+	result, err := b.powershell(ctx, script)
+	if err != nil {
+		return ""
+	}
+	return parseFirstIPv4(result.Stdout)
+}
+
+func (b *backend) queryVHDPaths(ctx context.Context, name string) []string {
+	script := fmt.Sprintf(
+		`Get-VMHardDiskDrive -VMName '%s' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path`,
+		escapePSString(name),
+	)
+	result, err := b.powershell(ctx, script)
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths
 }
 
 func (b *backend) serverFromInstance(inst hypervVM, claim core.LeaseClaim, cfg Config) Server {

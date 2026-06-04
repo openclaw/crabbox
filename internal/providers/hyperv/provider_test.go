@@ -382,6 +382,124 @@ func TestServerFromInstanceLabels(t *testing.T) {
 	}
 }
 
+func TestCreateVMCopiesVHDXTemplate(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+		errors:    map[string]error{},
+	}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.HyperV.Image = `C:\Images\windows.vhdx`
+
+	err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", "ssh-ed25519 AAAA test")
+	if err != nil {
+		t.Fatalf("createVM: %v", err)
+	}
+
+	var foundCopy, foundNewVM, foundStart, foundInject bool
+	for _, call := range runner.calls {
+		script := call.Args[len(call.Args)-1]
+		if strings.Contains(script, "Copy-Item") && strings.Contains(script, "windows.vhdx") {
+			foundCopy = true
+		}
+		if strings.Contains(script, "New-VM") && strings.Contains(script, "-VHDPath") && !strings.Contains(script, "-NewVHDPath") {
+			foundNewVM = true
+		}
+		if strings.Contains(script, "Start-VM") {
+			foundStart = true
+		}
+		if strings.Contains(script, "Invoke-Command") && strings.Contains(script, "authorized_keys") {
+			foundInject = true
+		}
+	}
+	if !foundCopy {
+		t.Error("createVM did not copy the VHDX template")
+	}
+	if !foundNewVM {
+		t.Error("createVM did not use -VHDPath (existing VHD)")
+	}
+	if !foundStart {
+		t.Error("createVM did not start the VM")
+	}
+	if !foundInject {
+		t.Error("createVM did not inject SSH key via PowerShell Direct")
+	}
+}
+
+func TestCreateVMISOAttachesDVD(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+		errors:    map[string]error{},
+	}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.HyperV.Image = `C:\Images\win-server.iso`
+
+	err := b.createVM(context.Background(), cfg, "crabbox-red-5678", "ssh-ed25519 AAAA test")
+	if err != nil {
+		t.Fatalf("createVM: %v", err)
+	}
+
+	var foundNewVHD, foundDVD bool
+	for _, call := range runner.calls {
+		script := call.Args[len(call.Args)-1]
+		if strings.Contains(script, "New-VM") && strings.Contains(script, "-NewVHDPath") {
+			foundNewVHD = true
+		}
+		if strings.Contains(script, "Add-VMDvdDrive") && strings.Contains(script, "win-server.iso") {
+			foundDVD = true
+		}
+	}
+	if !foundNewVHD {
+		t.Error("ISO mode should create a new blank VHD")
+	}
+	if !foundDVD {
+		t.Error("ISO mode should attach the ISO as a DVD drive")
+	}
+}
+
+func TestQueryVMParsesSingle(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
+				`Get-VM -Name 'crabbox-blue-1234' | Select-Object Name, State | ConvertTo-Json -Compress`}): {
+				Stdout: `{"Name":"crabbox-blue-1234","State":3}`,
+			},
+		},
+	}
+	b := testBackend(runner)
+	vm, err := b.queryVM(context.Background(), "crabbox-blue-1234")
+	if err != nil {
+		t.Fatalf("queryVM: %v", err)
+	}
+	if vm.State != 3 {
+		t.Fatalf("state=%d want 3 (off)", vm.State)
+	}
+}
+
+func TestRemoveVMQueriesActualVHDPaths(t *testing.T) {
+	customPath := `D:\VMs\crabbox-blue-1234.vhdx`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
+		`Get-VMHardDiskDrive -VMName 'crabbox-blue-1234' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path`})] =
+		core.LocalCommandResult{Stdout: customPath + "\n"}
+	b := testBackend(runner)
+	_ = b.removeVM(context.Background(), "crabbox-blue-1234")
+
+	var foundVHDQuery bool
+	for _, call := range runner.calls {
+		script := call.Args[len(call.Args)-1]
+		if strings.Contains(script, "Get-VMHardDiskDrive") {
+			foundVHDQuery = true
+		}
+	}
+	if !foundVHDQuery {
+		t.Error("removeVM did not query actual VHD paths before deletion")
+	}
+}
+
 func TestConfigureRejectsWSL2Mode(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
