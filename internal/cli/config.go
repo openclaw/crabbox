@@ -135,6 +135,7 @@ type Config struct {
 
 type SyncConfig struct {
 	Excludes    []string
+	Includes    []string
 	Delete      bool
 	Checksum    bool
 	GitSeed     bool
@@ -1233,6 +1234,8 @@ type fileSSHConfig struct {
 type fileSyncConfig struct {
 	Exclude     []string `yaml:"exclude,omitempty"`
 	Excludes    []string `yaml:"excludes,omitempty"`
+	Include     []string `yaml:"include,omitempty"`
+	Includes    []string `yaml:"includes,omitempty"`
 	Delete      *bool    `yaml:"delete,omitempty"`
 	Checksum    *bool    `yaml:"checksum,omitempty"`
 	GitSeed     *bool    `yaml:"gitSeed,omitempty"`
@@ -2102,6 +2105,8 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if file.Sync != nil {
 		cfg.Sync.Excludes = appendUniqueStrings(cfg.Sync.Excludes, file.Sync.Exclude...)
 		cfg.Sync.Excludes = appendUniqueStrings(cfg.Sync.Excludes, file.Sync.Excludes...)
+		cfg.Sync.Includes = appendUniqueStrings(cfg.Sync.Includes, file.Sync.Include...)
+		cfg.Sync.Includes = appendUniqueStrings(cfg.Sync.Includes, file.Sync.Includes...)
 		if file.Sync.Delete != nil {
 			cfg.Sync.Delete = *file.Sync.Delete
 		}

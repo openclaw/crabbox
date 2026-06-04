@@ -495,7 +495,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	if err != nil {
 		return err
 	}
-	manifest, err := syncManifest(repo.Root, excludes)
+	manifest, err := syncManifestFiltered(repo.Root, excludes, syncIncludes(cfg))
 	if err != nil {
 		return exit(6, "build sync file list: %v", err)
 	}

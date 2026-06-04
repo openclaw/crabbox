@@ -43,6 +43,53 @@ func TestSyncManifestUsesGitFilesAndIgnoresIgnoredJunk(t *testing.T) {
 	}
 }
 
+func TestSyncManifestIncludeWhitelist(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "src", "main.go"), "package main\n")
+	writeFile(t, filepath.Join(dir, "scripts", "build.sh"), "echo hi\n")
+	writeFile(t, filepath.Join(dir, "package.json"), "{}\n")
+	writeFile(t, filepath.Join(dir, "data", "huge.bin"), strings.Repeat("x", 4096))
+	writeFile(t, filepath.Join(dir, "notes.txt"), "ignore me\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+
+	manifest, err := syncManifestFiltered(dir, configuredExcludes(baseConfig()), []string{"src", "scripts", "package.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(manifest.Files, ",")
+	for _, want := range []string{"src/main.go", "scripts/build.sh", "package.json"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("include whitelist dropped wanted path %q: %q", want, got)
+		}
+	}
+	for _, notWant := range []string{"data/huge.bin", "notes.txt"} {
+		if strings.Contains(got, notWant) {
+			t.Fatalf("include whitelist kept non-included path %q: %q", notWant, got)
+		}
+	}
+}
+
+func TestPathIncluded(t *testing.T) {
+	if !pathIncluded("anything/at/all.txt", nil) {
+		t.Fatal("empty includes should keep all paths")
+	}
+	includes := []string{"src", "scripts/proof", "package.json"}
+	for _, in := range []string{"src/a.go", "src/deep/b.go", "scripts/proof/run.sh", "package.json"} {
+		if !pathIncluded(in, includes) {
+			t.Fatalf("expected %q to be included", in)
+		}
+	}
+	for _, out := range []string{"data/x.bin", "scripts/other.sh", "package.lock"} {
+		if pathIncluded(out, includes) {
+			t.Fatalf("expected %q to be excluded by whitelist", out)
+		}
+	}
+}
+
 func TestSyncManifestPrunesNestedDefaultExcludes(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")

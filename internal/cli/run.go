@@ -966,7 +966,7 @@ retrySync:
 			return recordFailure(err)
 		}
 		stepStart = time.Now()
-		manifest, err := syncManifest(repo.Root, excludes)
+		manifest, err := syncManifestFiltered(repo.Root, excludes, syncIncludes(cfg))
 		if err != nil {
 			return recordFailure(exit(6, "build sync file list: %v", err))
 		}
