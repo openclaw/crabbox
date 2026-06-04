@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -109,6 +110,10 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB disk=%dGB keep=%v\n", providerName, leaseID, slug, cfg.Tart.Image, cfg.Tart.CPUs, cfg.Tart.Memory, cfg.Tart.Disk, req.Keep)
 
 	if err := b.cloneVM(ctx, cfg, name); err != nil {
+		_ = b.deleteVM(context.Background(), name)
+		return LeaseTarget{}, err
+	}
+	if err := b.configureVM(ctx, cfg, name); err != nil {
 		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
@@ -350,6 +355,26 @@ func (b *backend) cloneVM(ctx context.Context, cfg Config, name string) error {
 	result, err := b.tart(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
 		return commandError("tart clone", result, err)
+	}
+	return nil
+}
+
+// configureVM applies CPU, memory, and disk settings to the cloned VM before boot.
+func (b *backend) configureVM(ctx context.Context, cfg Config, name string) error {
+	if cfg.Tart.CPUs > 0 {
+		if _, err := b.tart(ctx, []string{"set", name, "--cpu", strconv.Itoa(cfg.Tart.CPUs)}, nil, b.rt.Stderr); err != nil {
+			return fmt.Errorf("tart set --cpu: %w", err)
+		}
+	}
+	if cfg.Tart.Memory > 0 {
+		if _, err := b.tart(ctx, []string{"set", name, "--memory", strconv.Itoa(cfg.Tart.Memory)}, nil, b.rt.Stderr); err != nil {
+			return fmt.Errorf("tart set --memory: %w", err)
+		}
+	}
+	if cfg.Tart.Disk > 0 {
+		if _, err := b.tart(ctx, []string{"set", name, "--disk-size", strconv.Itoa(cfg.Tart.Disk)}, nil, b.rt.Stderr); err != nil {
+			return fmt.Errorf("tart set --disk-size: %w", err)
+		}
 	}
 	return nil
 }
