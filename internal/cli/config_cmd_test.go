@@ -127,3 +127,40 @@ func TestConfigShowIncludesCloudflareWithoutSecret(t *testing.T) {
 		t.Fatalf("config show json leaked Cloudflare token: %q", stdout.String())
 	}
 }
+
+func TestConfigShowIncludesSyncInclude(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte("sync:\n  include:\n    - src\n    - scripts\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "includes=2") {
+		t.Fatalf("config show text missing includes count: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Sync struct {
+			Include []string `json:"include"`
+		} `json:"sync"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sync.Include) != 2 || got.Sync.Include[0] != "src" || got.Sync.Include[1] != "scripts" {
+		t.Fatalf("config show json sync.include = %#v, want [src scripts]", got.Sync.Include)
+	}
+}
