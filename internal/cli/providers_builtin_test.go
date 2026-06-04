@@ -25,6 +25,7 @@ func init() {
 	RegisterProvider(testSpritesProvider{})
 	RegisterProvider(testLocalContainerProvider{})
 	RegisterProvider(testMultipassProvider{})
+	RegisterProvider(testTartProvider{})
 	RegisterProvider(testParallelsProvider{})
 	RegisterProvider(testWandbProvider{})
 }
@@ -1087,6 +1088,65 @@ func (testMultipassProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values an
 	return nil
 }
 func (p testMultipassProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testTartProvider struct{}
+
+func (testTartProvider) Name() string { return "tart" }
+func (testTartProvider) Aliases() []string {
+	return []string{"local-tart", "macos-vm"}
+}
+func (testTartProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "tart",
+		Family:      "local-vm",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetMacOS}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testTartFlagValues struct {
+	Image  *string
+	CPUs   *int
+	Memory *int
+	Disk   *int
+}
+
+func (testTartProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testTartFlagValues{
+		Image:  fs.String("tart-image", defaults.Tart.Image, "tart base image"),
+		CPUs:   fs.Int("tart-cpu", defaults.Tart.CPUs, "tart CPUs"),
+		Memory: fs.Int("tart-memory", defaults.Tart.Memory, "tart memory MB"),
+		Disk:   fs.Int("tart-disk", defaults.Tart.Disk, "tart disk GB"),
+	}
+}
+func (testTartProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testTartFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "tart-image") {
+		cfg.Tart.Image = *v.Image
+		cfg.tartImageExplicit = true
+	}
+	if flagWasSet(fs, "tart-cpu") {
+		cfg.Tart.CPUs = *v.CPUs
+	}
+	if flagWasSet(fs, "tart-memory") {
+		cfg.Tart.Memory = *v.Memory
+	}
+	if flagWasSet(fs, "tart-disk") {
+		cfg.Tart.Disk = *v.Disk
+	}
+	if cfg.Provider == "local-tart" || cfg.Provider == "macos-vm" {
+		cfg.Provider = "tart"
+	}
+	return nil
+}
+func (p testTartProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

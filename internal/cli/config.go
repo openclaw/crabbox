@@ -123,6 +123,8 @@ type Config struct {
 	appleContainerImageExplicit bool
 	Multipass                   MultipassConfig
 	multipassImageExplicit      bool
+	Tart                        TartConfig
+	tartImageExplicit           bool
 	Tailscale                   TailscaleConfig
 	Static                      StaticConfig
 	Results                     ResultsConfig
@@ -441,6 +443,15 @@ type MultipassConfig struct {
 	Memory        string
 	Disk          string
 	LaunchTimeout time.Duration
+}
+
+type TartConfig struct {
+	Image    string
+	User     string
+	WorkRoot string
+	CPUs     int
+	Memory   int
+	Disk     int
 }
 
 type StaticConfig struct {
@@ -838,6 +849,10 @@ func MarkMultipassImageExplicit(cfg *Config) {
 	cfg.multipassImageExplicit = true
 }
 
+func MarkTartImageExplicit(cfg *Config) {
+	cfg.tartImageExplicit = true
+}
+
 func baseConfig() Config {
 	home, _ := os.UserHomeDir()
 	sshKey := ""
@@ -1019,6 +1034,14 @@ func baseConfig() Config {
 			Memory:        "8G",
 			Disk:          "30G",
 			LaunchTimeout: 20 * time.Minute,
+		},
+		Tart: TartConfig{
+			Image:    "ghcr.io/cirruslabs/macos-sequoia-base:latest",
+			User:     "admin",
+			WorkRoot: "/Users/admin/crabbox",
+			CPUs:     4,
+			Memory:   8192,
+			Disk:     50,
 		},
 		Tailscale: TailscaleConfig{
 			Tags:             []string{"tag:crabbox"},
