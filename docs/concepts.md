@@ -72,7 +72,7 @@ release runners on a backing service. Crabbox ships adapters for managed clouds
 Parallels, Local Container, static SSH), managed dev sandboxes reached over SSH
 (Daytona, Namespace Devbox, Semaphore, Sprites, exe.dev, RunPod, Railway), and
 delegated execution sandboxes (Blacksmith Testbox, E2B, Modal, Islo, Tensorlake,
-Upstash Box, Cloudflare, Azure Dynamic Sessions, W&B). See the
+[Upstash Box](https://upstash.com/docs/box/overall/quickstart), Cloudflare, Azure Dynamic Sessions, W&B). See the
 [Provider reference](providers/README.md).
 
 **Backend** - the Go interface a provider implements: `SSHLeaseBackend` for
