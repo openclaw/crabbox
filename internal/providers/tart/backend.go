@@ -119,24 +119,18 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		return LeaseTarget{}, err
 	}
 	if err := b.startVM(ctx, cfg, name, req.Keep); err != nil {
-		if !req.Keep {
-			_ = b.deleteVM(context.Background(), name)
-		}
+		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
 	ip, err := b.waitForIP(ctx, name)
 	if err != nil {
-		if !req.Keep {
-			_ = b.stopVM(context.Background(), name)
-			_ = b.deleteVM(context.Background(), name)
-		}
+		_ = b.stopVM(context.Background(), name)
+		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
 	if err := b.injectSSHKey(ctx, name, publicKey); err != nil {
-		if !req.Keep {
-			_ = b.stopVM(context.Background(), name)
-			_ = b.deleteVM(context.Background(), name)
-		}
+		_ = b.stopVM(context.Background(), name)
+		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
 
@@ -151,24 +145,18 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	inst := tartInstance{Name: name, State: "running"}
 	lease, err := b.prepareLease(ctx, cfg, inst, ip, claim, true)
 	if err != nil {
-		if !req.Keep {
-			_ = b.stopVM(context.Background(), name)
-			_ = b.deleteVM(context.Background(), name)
-		}
+		_ = b.stopVM(context.Background(), name)
+		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
 	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		if !req.Keep {
-			_ = b.stopVM(context.Background(), name)
-			_ = b.deleteVM(context.Background(), name)
-		}
+		_ = b.stopVM(context.Background(), name)
+		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
 	if err := updateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
-		if !req.Keep {
-			_ = b.stopVM(context.Background(), name)
-			_ = b.deleteVM(context.Background(), name)
-		}
+		_ = b.stopVM(context.Background(), name)
+		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
 	cleanupKey = false
