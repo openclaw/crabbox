@@ -126,9 +126,9 @@ func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
 		"--label\nslug=blue-lobster",
 		"--label\nssh_user=runner",
 		"--label\nwork_root=/workspace/crabbox",
+		":/tmp/crabbox-bootstrap.sh:ro",
 		"ubuntu:24.04",
-		"/bin/sh",
-		"-lc",
+		"/bin/sh\n/tmp/crabbox-bootstrap.sh",
 	} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("docker run args missing %q:\n%s", want, args)
