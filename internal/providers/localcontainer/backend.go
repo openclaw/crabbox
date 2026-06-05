@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -308,7 +309,27 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 func (b *backend) configForRun() core.Config {
 	cfg := b.cfg
 	applyDefaults(&cfg)
+	b.detectContainerRuntime(&cfg)
 	return cfg
+}
+
+func (b *backend) detectContainerRuntime(cfg *core.Config) {
+	runtimeName := strings.TrimSpace(cfg.LocalContainer.Runtime)
+	if runtimeName != "" && runtimeName != "docker" {
+		return
+	}
+	if commandAvailable("docker") {
+		cfg.LocalContainer.Runtime = "docker"
+		return
+	}
+	if commandAvailable("podman") {
+		cfg.LocalContainer.Runtime = "podman"
+	}
+}
+
+func commandAvailable(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 func applyDefaults(cfg *core.Config) {
@@ -418,6 +439,9 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 			return "", err
 		}
 		args = append(args, "-v", socketPath+":"+dockerSocketInGuest)
+		if isPodmanRuntime(cfg.LocalContainer.Runtime) {
+			args = append(args, "--security-opt", "label=disable")
+		}
 	}
 	for _, mount := range cacheVolumeMounts {
 		args = append(args, "-v", mount)
@@ -527,7 +551,7 @@ func dockerSocketMountPathFromHostForGOOS(host, goos string) (string, error) {
 	}
 	path, ok := localDockerSocketPath(host)
 	if !ok {
-		return "", core.Exit(2, "local-container docker socket requested but active Docker host %q is not a local Unix socket", host)
+		return "", core.Exit(2, "local-container socket pass-through requested but DOCKER_HOST %q is not a local Unix socket", host)
 	}
 	if goos != "linux" {
 		return dockerSocketInGuest, nil
@@ -589,10 +613,10 @@ func localDockerSocketPath(host string) (string, bool) {
 func validateDockerSocketMountPath(path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", core.Exit(2, "local-container docker socket requested but %s is not available: %v", path, err)
+		return "", core.Exit(2, "local-container socket pass-through requested but %s is not available: %v", path, err)
 	}
 	if info.Mode()&os.ModeSocket == 0 {
-		return "", core.Exit(2, "local-container docker socket requested but %s is not a socket", path)
+		return "", core.Exit(2, "local-container socket pass-through requested but %s is not a socket", path)
 	}
 	return path, nil
 }
@@ -876,6 +900,10 @@ func commandError(action string, result core.LocalCommandResult, err error) erro
 	return core.Exit(code, "%s failed: %v", action, err)
 }
 
+func isPodmanRuntime(runtimeName string) bool {
+	return filepath.Base(strings.TrimSpace(runtimeName)) == "podman"
+}
+
 func shortID(id string) string {
 	if len(id) > 12 {
 		return id[:12]
@@ -1116,7 +1144,7 @@ if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker >/dev/null 2>&
   fi
 fi
 if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker >/dev/null 2>&1; then
-  echo "docker socket requested but docker CLI is not installed; use a Debian/Ubuntu-compatible image or preinstall docker" >&2
+  echo "Docker-compatible socket requested but docker CLI is not installed; use a Debian/Ubuntu-compatible image or preinstall docker" >&2
   exit 127
 fi
 if ! command -v /usr/sbin/sshd >/dev/null 2>&1; then
