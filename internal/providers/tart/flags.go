@@ -2,6 +2,7 @@ package tart
 
 import (
 	"flag"
+	"os"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -42,10 +43,13 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		cfg.Tart.Disk = *v.Disk
 	}
 	if isTartProviderName(cfg.Provider) {
-		if flagWasSet(fs, "target") && cfg.TargetOS != targetMacOS {
-			return exit(2, "provider=%s supports target=%s only (got --%s %s)", providerName, targetMacOS, "target", cfg.TargetOS)
+		targetExplicit := flagWasSet(fs, "target") ||
+			os.Getenv("CRABBOX_TARGET") != "" ||
+			os.Getenv("CRABBOX_TARGET_OS") != ""
+		if targetExplicit && cfg.TargetOS != targetMacOS {
+			return exit(2, "provider=%s supports target=%s only (got %s)", providerName, targetMacOS, cfg.TargetOS)
 		}
-		if !flagWasSet(fs, "target") && cfg.TargetOS == "linux" {
+		if !targetExplicit && cfg.TargetOS == "linux" {
 			cfg.TargetOS = targetMacOS
 		}
 		applyDefaults(cfg)

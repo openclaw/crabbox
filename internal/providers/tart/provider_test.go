@@ -302,6 +302,36 @@ func TestApplyFlagsDefaultsLinuxToMacOS(t *testing.T) {
 	}
 }
 
+func TestApplyFlagsRejectsEnvTargetLinux(t *testing.T) {
+	t.Setenv("CRABBOX_TARGET", "linux")
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
+
+	err := applyFlags(&cfg, fs, flagValues{})
+	if err == nil {
+		t.Fatal("applyFlags should reject CRABBOX_TARGET=linux")
+	}
+}
+
+func TestApplyFlagsRejectsEnvTargetOSLinux(t *testing.T) {
+	t.Setenv("CRABBOX_TARGET_OS", "linux")
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
+
+	err := applyFlags(&cfg, fs, flagValues{})
+	if err == nil {
+		t.Fatal("applyFlags should reject CRABBOX_TARGET_OS=linux")
+	}
+}
+
 func TestApplyFlagsAcceptsExplicitMacOS(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
