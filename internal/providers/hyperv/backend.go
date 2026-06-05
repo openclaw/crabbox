@@ -3,6 +3,7 @@ package hyperv
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,8 +39,12 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 
 func applyDefaults(cfg *Config) {
 	cfg.Provider = providerName
-	cfg.TargetOS = targetWindows
-	cfg.WindowsMode = core.WindowsModeNormal
+	if cfg.TargetOS == "" || cfg.TargetOS == "linux" {
+		cfg.TargetOS = targetWindows
+	}
+	if cfg.WindowsMode == "" {
+		cfg.WindowsMode = core.WindowsModeNormal
+	}
 	cfg.SSHFallbackPorts = []string{}
 	if cfg.HyperV.User == "" {
 		cfg.HyperV.User = "crabbox"
@@ -275,6 +280,10 @@ func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	cfg := b.configForRun()
 	instances, err := b.listInstances(ctx)
+	if errors.Is(err, errNotWindows) {
+		fmt.Fprintf(b.rt.Stderr, "skip cleanup: %v\n", err)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -489,9 +498,11 @@ func (b *backend) waitForIP(ctx context.Context, name string, timeout time.Durat
 	}
 }
 
+var errNotWindows = fmt.Errorf("hyper-v inventory unavailable: host OS is %s (not windows)", hypervHostOS)
+
 func (b *backend) listInstances(ctx context.Context) ([]hypervVM, error) {
 	if hypervHostOS != "windows" {
-		return nil, nil
+		return nil, errNotWindows
 	}
 	script := `Get-VM | Where-Object { $_.Name -like 'crabbox-*' } | Select-Object Name, State | ConvertTo-Json -Compress`
 	result, err := b.powershell(ctx, script)

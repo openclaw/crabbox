@@ -3,6 +3,7 @@ package hyperv
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -569,5 +570,42 @@ func TestConfigureRejectsWSL2Mode(t *testing.T) {
 	cfg.WindowsMode = core.WindowsModeWSL2
 	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
 		t.Fatal("Configure accepted WSL2 mode")
+	}
+}
+
+func TestCleanupNoOpOnNonWindows(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	oldOS := hypervHostOS
+	hypervHostOS = "linux"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	err := b.Cleanup(context.Background(), core.CleanupRequest{})
+	if err != nil {
+		t.Fatalf("Cleanup on non-Windows should succeed (skip), got: %v", err)
+	}
+}
+
+func TestListInstancesErrorOnNonWindows(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	oldOS := hypervHostOS
+	hypervHostOS = "linux"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	_, err := b.listInstances(context.Background())
+	if err == nil {
+		t.Fatal("listInstances should return error on non-Windows")
+	}
+	if !errors.Is(err, errNotWindows) {
+		t.Fatalf("expected errNotWindows, got: %v", err)
+	}
+}
+
+func TestApplyDefaultsPreservesExplicitTarget(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.TargetOS = core.TargetWindows
+	cfg.WindowsMode = core.WindowsModeNormal
+	applyDefaults(&cfg)
+	if cfg.TargetOS != core.TargetWindows {
+		t.Fatalf("applyDefaults changed explicit TargetOS to %s", cfg.TargetOS)
 	}
 }
