@@ -378,6 +378,78 @@ func TestInjectSSHKeyDoesNotCallTartIP(t *testing.T) {
 	}
 }
 
+func TestGetIPFiltersDashDash(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"ip", "crabbox-test-vm"}): {Stdout: "--\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	ip := b.getIP(context.Background(), "crabbox-test-vm")
+	if ip != "" {
+		t.Fatalf("getIP returned %q for sentinel \"--\", want empty string", ip)
+	}
+}
+
+func TestGetIPReturnsValidIP(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"ip", "crabbox-test-vm"}): {Stdout: "192.168.64.5\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	ip := b.getIP(context.Background(), "crabbox-test-vm")
+	if ip != "192.168.64.5" {
+		t.Fatalf("getIP=%q want 192.168.64.5", ip)
+	}
+}
+
+func TestPreparLeaseRejectsDashDashIP(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	runner := &recordingRunner{}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	inst := tartInstance{Name: "crabbox-blue-1234abcd", State: "running"}
+	_, err := b.prepareLease(context.Background(), cfg, inst, "--", core.LeaseClaim{LeaseID: "cbx_test"}, false)
+	if err == nil {
+		t.Fatal("prepareLease should reject IP \"--\"")
+	}
+}
+
+func TestResolveInstanceUsesRealState(t *testing.T) {
+	listJSON := `[{"Name":"crabbox-blue-abc123","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-blue-abc123"}): {Stdout: "192.168.64.5\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	inst, ip, _, err := b.resolveInstance(context.Background(), "crabbox-blue-abc123")
+	if err != nil {
+		t.Fatalf("resolveInstance: %v", err)
+	}
+	if inst.State != "stopped" {
+		t.Fatalf("resolveInstance returned State=%q, want \"stopped\" (real tart state, not fabricated)", inst.State)
+	}
+	if inst.Running {
+		t.Fatal("resolveInstance returned Running=true for a stopped VM")
+	}
+	if ip != "192.168.64.5" {
+		t.Fatalf("ip=%q want 192.168.64.5", ip)
+	}
+}
+
 func sampleListJSON() string {
 	return `[{"Name":"crabbox-blue-1234abcd","State":"running","Running":true,"Disk":50,"Size":15,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"},{"Name":"my-dev-vm","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"}]`
 }

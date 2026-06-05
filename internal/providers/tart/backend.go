@@ -142,7 +142,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	labels["work_root"] = cfg.Tart.WorkRoot
 	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
 
-	inst := tartInstance{Name: name, State: "running"}
+	inst := tartInstance{Name: name, State: "running", Running: true, Source: cfg.Tart.Image}
 	lease, err := b.prepareLease(ctx, cfg, inst, ip, claim, true)
 	if err != nil {
 		_ = b.stopVM(context.Background(), name)
@@ -483,8 +483,17 @@ func (b *backend) resolveInstance(ctx context.Context, identifier string) (tartI
 		if name == "" {
 			return tartInstance{}, "", core.LeaseClaim{}, exit(4, "tart lease %s has no instance name in its claim", claim.LeaseID)
 		}
-		ip := b.getIP(ctx, name)
-		return tartInstance{Name: name, State: "running"}, ip, claim, nil
+		instances, listErr := b.listInstances(ctx)
+		if listErr != nil {
+			return tartInstance{}, "", core.LeaseClaim{}, listErr
+		}
+		for _, inst := range instances {
+			if inst.Name == name {
+				ip := b.getIP(ctx, name)
+				return inst, ip, claim, nil
+			}
+		}
+		return tartInstance{}, "", core.LeaseClaim{}, exit(4, "tart lease %s references instance %q but it no longer exists", claim.LeaseID, name)
 	}
 	instances, err := b.listInstances(ctx)
 	if err != nil {
@@ -510,7 +519,11 @@ func (b *backend) getIP(ctx context.Context, name string) string {
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(result.Stdout)
+	ip := strings.TrimSpace(result.Stdout)
+	if ip == "--" {
+		return ""
+	}
+	return ip
 }
 
 func (b *backend) prepareLease(ctx context.Context, cfg Config, inst tartInstance, ip string, claim core.LeaseClaim, wait bool) (LeaseTarget, error) {
@@ -523,7 +536,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst tartInstanc
 		cfg.Tart.WorkRoot = root
 		cfg.WorkRoot = root
 	}
-	if ip == "" {
+	if ip == "" || ip == "--" {
 		return LeaseTarget{}, exit(5, "tart instance %s has no IP address", inst.Name)
 	}
 	// Publish the resolved VM IP as the server's public host so status/inspect
