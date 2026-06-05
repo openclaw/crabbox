@@ -569,7 +569,6 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst hypervVM, i
 	target := sshTargetFromConfig(cfg, ip)
 	target.Port = sshPort
 	target.FallbackPorts = []string{}
-	target.ReadyCheck = core.PowershellCommand(`$PSVersionTable.PSVersion | Out-Null`)
 	if wait {
 		if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "hyperv ssh", bootstrapWaitTimeout(cfg)); err != nil {
 			return LeaseTarget{}, err

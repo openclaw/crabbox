@@ -109,8 +109,8 @@ match the password baked into your VHDX template. Default: `crabbox`.
 - VHD files are stored in `%USERPROFILE%\Hyper-V\Virtual Hard Disks\` by
   default. Only the provider-created boot disk is cleaned up on release; other
   attached disks are preserved.
-- The SSH ready check uses `powershell -Command "$PSVersionTable.PSVersion |
-  Out-Null"` to verify the Windows guest is responsive.
+- The SSH ready check uses the shared native-Windows readiness probe, which
+  verifies that `git`, `tar`, and the work root are available in the guest.
 - There is no `tart exec` or `prlctl exec` equivalent for Hyper-V; all guest
   interaction after bootstrap happens over SSH.
 
