@@ -244,6 +244,13 @@ func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
 	}
 }
 
+func TestStartVMArgsHeadless(t *testing.T) {
+	args := startVMArgs("crabbox-blue-1234abcd")
+	if len(args) != 3 || args[0] != "run" || args[2] != "--no-graphics" {
+		t.Fatalf("startVMArgs=%v want [run <name> --no-graphics]", args)
+	}
+}
+
 func sampleListJSON() string {
 	return `[{"Name":"crabbox-blue-1234abcd","State":"running","Running":true,"Disk":50,"Size":15,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"},{"Name":"my-dev-vm","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"}]`
 }

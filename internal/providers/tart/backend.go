@@ -118,7 +118,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
-	if err := b.startVM(ctx, cfg, name); err != nil {
+	if err := b.startVM(ctx, cfg, name, req.Keep); err != nil {
 		if !req.Keep {
 			_ = b.deleteVM(context.Background(), name)
 		}
@@ -389,15 +389,28 @@ func startVMArgs(name string) []string {
 }
 
 // startVM starts the VM headless in the background.
-func (b *backend) startVM(ctx context.Context, cfg Config, name string) error {
+// When keep is true the tart process is fully detached so it survives
+// crabbox exit, matching how docker run -d keeps containers alive.
+func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep bool) error {
 	args := startVMArgs(name)
-	cmd := exec.CommandContext(ctx, "tart", args...)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = b.rt.Stderr
+	var cmd *exec.Cmd
+	if keep {
+		cmd = exec.Command("tart", args...)
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+	} else {
+		cmd = exec.CommandContext(ctx, "tart", args...)
+		cmd.Stdout = io.Discard
+		cmd.Stderr = b.rt.Stderr
+	}
 	if err := cmd.Start(); err != nil {
 		return exit(2, "tart run %s: %v", name, err)
 	}
-	go func() { _ = cmd.Wait() }()
+	if keep {
+		_ = cmd.Process.Release()
+	} else {
+		go func() { _ = cmd.Wait() }()
+	}
 	return nil
 }
 
