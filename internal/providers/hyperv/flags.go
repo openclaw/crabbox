@@ -46,6 +46,12 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		cfg.HyperV.Switch = *v.Switch
 	}
 	if isHyperVProviderName(cfg.Provider) {
+		if flagWasSet(fs, "target") && cfg.TargetOS != targetWindows {
+			return exit(2, "provider=%s supports target=%s only (got --%s %s)", providerName, targetWindows, "target", cfg.TargetOS)
+		}
+		if !flagWasSet(fs, "target") && cfg.TargetOS == "linux" {
+			cfg.TargetOS = targetWindows
+		}
 		applyDefaults(cfg)
 	}
 	return nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"strings"
@@ -141,6 +142,7 @@ func TestConfigureAcceptsEmpty(t *testing.T) {
 func TestApplyDefaults(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
+	cfg.TargetOS = ""
 	cfg.HyperV = core.HyperVConfig{}
 	applyDefaults(&cfg)
 	if cfg.TargetOS != core.TargetWindows {
@@ -607,5 +609,75 @@ func TestApplyDefaultsPreservesExplicitTarget(t *testing.T) {
 	applyDefaults(&cfg)
 	if cfg.TargetOS != core.TargetWindows {
 		t.Fatalf("applyDefaults changed explicit TargetOS to %s", cfg.TargetOS)
+	}
+}
+
+func TestApplyFlagsRejectsExplicitLinuxTarget(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
+	if err := fs.Set("target", "linux"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := applyFlags(&cfg, fs, flagValues{})
+	if err == nil {
+		t.Fatal("applyFlags should reject explicit --target linux")
+	}
+}
+
+func TestApplyFlagsRejectsExplicitMacOSTarget(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetMacOS
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
+	if err := fs.Set("target", "macos"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := applyFlags(&cfg, fs, flagValues{})
+	if err == nil {
+		t.Fatal("applyFlags should reject explicit --target macos")
+	}
+}
+
+func TestApplyFlagsDefaultsLinuxToWindows(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
+
+	err := applyFlags(&cfg, fs, flagValues{})
+	if err != nil {
+		t.Fatalf("applyFlags failed: %v", err)
+	}
+	if cfg.TargetOS != core.TargetWindows {
+		t.Fatalf("TargetOS=%s want windows (should default baseConfig linux to windows)", cfg.TargetOS)
+	}
+}
+
+func TestApplyFlagsAcceptsExplicitWindows(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetWindows
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
+	if err := fs.Set("target", "windows"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := applyFlags(&cfg, fs, flagValues{})
+	if err != nil {
+		t.Fatalf("applyFlags should accept explicit --target windows: %v", err)
+	}
+	if cfg.TargetOS != core.TargetWindows {
+		t.Fatalf("TargetOS=%s want windows", cfg.TargetOS)
 	}
 }
