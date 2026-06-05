@@ -136,6 +136,12 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		return LeaseTarget{}, err
 	}
 
+	if publicKey != "" {
+		if retryErr := b.injectSSHKey(ctx, name, cfg.HyperV.User, publicKey); retryErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "post-boot SSH key injection failed: %v (image must have pre-configured SSH)\n", retryErr)
+		}
+	}
+
 	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
 	labels["instance"] = name
 	labels["image"] = cfg.HyperV.Image
@@ -382,6 +388,7 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 	)
 	result, err = b.powershell(ctx, createScript)
 	if err != nil {
+		os.Remove(vhdPath) //nolint:errcheck
 		return commandError("New-VM", result, err)
 	}
 
