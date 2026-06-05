@@ -8,10 +8,10 @@ import (
 )
 
 type flagValues struct {
-	Image    *string
-	CPUs     *int
-	Memory   *int
-	Disk     *int
+	Image  *string
+	CPUs   *int
+	Memory *int
+	Disk   *int
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
