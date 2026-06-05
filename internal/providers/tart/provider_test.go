@@ -427,7 +427,7 @@ func TestResolveInstanceUsesRealState(t *testing.T) {
 	listJSON := `[{"Name":"crabbox-blue-abc123","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"list", "--format", "json"}):  {Stdout: listJSON},
 			commandKey([]string{"ip", "crabbox-blue-abc123"}): {Stdout: "192.168.64.5\n"},
 		},
 	}
