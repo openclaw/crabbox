@@ -430,15 +430,6 @@ func (b *backend) waitForIP(ctx context.Context, name string) (string, error) {
 // injectSSHKey injects the public key into the VM using the default
 // password-based SSH credentials (Cirrus tart images use admin:admin).
 func (b *backend) injectSSHKey(ctx context.Context, name string, publicKey string) error {
-	result, err := b.tart(ctx, []string{"ip", name}, nil, nil)
-	if err != nil {
-		return commandError("tart ip", result, err)
-	}
-	ip := strings.TrimSpace(result.Stdout)
-	if ip == "" {
-		return exit(5, "tart instance %s has no IP address for SSH key injection", name)
-	}
-
 	injectScript := fmt.Sprintf(
 		`mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '%s' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`,
 		strings.TrimSpace(publicKey),

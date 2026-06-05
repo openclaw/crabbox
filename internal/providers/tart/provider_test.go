@@ -356,6 +356,28 @@ func TestApplyFlagsAcceptsExplicitMacOS(t *testing.T) {
 	}
 }
 
+func TestInjectSSHKeyDoesNotCallTartIP(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"exec", "crabbox-blue-1234", "bash", "-c", "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo 'ssh-ed25519 AAAA test' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"}): {},
+		},
+		errors: map[string]error{},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err := b.injectSSHKey(context.Background(), "crabbox-blue-1234", "ssh-ed25519 AAAA test")
+	if err != nil {
+		t.Fatalf("injectSSHKey: %v", err)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) >= 2 && call.Args[0] == "ip" {
+			t.Fatal("injectSSHKey should not call tart ip; tart exec connects by VM name")
+		}
+	}
+}
+
 func sampleListJSON() string {
 	return `[{"Name":"crabbox-blue-1234abcd","State":"running","Running":true,"Disk":50,"Size":15,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"},{"Name":"my-dev-vm","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"}]`
 }
