@@ -139,7 +139,10 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 
 	if publicKey != "" {
 		if retryErr := b.injectSSHKey(ctx, name, cfg.HyperV.User, publicKey); retryErr != nil {
-			fmt.Fprintf(b.rt.Stderr, "post-boot SSH key injection failed: %v (image must have pre-configured SSH)\n", retryErr)
+			if !req.Keep {
+				_ = b.removeVM(context.Background(), name)
+			}
+			return LeaseTarget{}, fmt.Errorf("post-boot SSH key injection failed: %w", retryErr)
 		}
 	}
 
