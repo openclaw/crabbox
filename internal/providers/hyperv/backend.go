@@ -86,7 +86,10 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	}
 	cfg := b.configForRun()
 	if cfg.HyperV.Image == "" {
-		return LeaseTarget{}, exit(2, "provider=%s requires --hyperv-image (VHDX or ISO path)", providerName)
+		return LeaseTarget{}, exit(2, "provider=%s requires --hyperv-image (path to a VHDX template with OpenSSH pre-configured)", providerName)
+	}
+	if strings.HasSuffix(strings.ToLower(cfg.HyperV.Image), ".iso") {
+		return LeaseTarget{}, exit(2, "provider=%s does not support ISO images; provide a pre-configured VHDX template with OpenSSH and a known user", providerName)
 	}
 	leaseID := newLeaseID()
 	instances, err := b.listInstances(ctx)
@@ -361,34 +364,22 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 		return commandError("switch validation", result, err)
 	}
 
-	imageLower := strings.ToLower(cfg.HyperV.Image)
-	isISO := strings.HasSuffix(imageLower, ".iso")
-
 	memBytes := int64(cfg.HyperV.Memory) * 1024 * 1024
 
-	var createScript string
-	if isISO {
-		diskBytes := int64(cfg.HyperV.Disk) * 1024 * 1024 * 1024
-		createScript = fmt.Sprintf(
-			`New-VM -Name '%s' -MemoryStartupBytes %d -Generation 2 -NewVHDPath '%s' -NewVHDSizeBytes %d`,
-			escapePSString(name), memBytes, escapePSString(vhdPath), diskBytes,
-		)
-	} else {
-		copyScript := fmt.Sprintf(`Copy-Item -LiteralPath '%s' -Destination '%s'`, escapePSString(cfg.HyperV.Image), escapePSString(vhdPath))
-		result, err = b.powershell(ctx, copyScript)
-		if err != nil {
-			return commandError("copy VHDX template", result, err)
-		}
-		if cfg.HyperV.Disk > 0 {
-			resizeScript := fmt.Sprintf(`Resize-VHD -Path '%s' -SizeBytes %d -ErrorAction SilentlyContinue`,
-				escapePSString(vhdPath), int64(cfg.HyperV.Disk)*1024*1024*1024)
-			b.powershell(ctx, resizeScript) //nolint:errcheck
-		}
-		createScript = fmt.Sprintf(
-			`New-VM -Name '%s' -MemoryStartupBytes %d -Generation 2 -VHDPath '%s'`,
-			escapePSString(name), memBytes, escapePSString(vhdPath),
-		)
+	copyScript := fmt.Sprintf(`Copy-Item -LiteralPath '%s' -Destination '%s'`, escapePSString(cfg.HyperV.Image), escapePSString(vhdPath))
+	result, err = b.powershell(ctx, copyScript)
+	if err != nil {
+		return commandError("copy VHDX template", result, err)
 	}
+	if cfg.HyperV.Disk > 0 {
+		resizeScript := fmt.Sprintf(`Resize-VHD -Path '%s' -SizeBytes %d -ErrorAction SilentlyContinue`,
+			escapePSString(vhdPath), int64(cfg.HyperV.Disk)*1024*1024*1024)
+		b.powershell(ctx, resizeScript) //nolint:errcheck
+	}
+	createScript := fmt.Sprintf(
+		`New-VM -Name '%s' -MemoryStartupBytes %d -Generation 2 -VHDPath '%s'`,
+		escapePSString(name), memBytes, escapePSString(vhdPath),
+	)
 	result, err = b.powershell(ctx, createScript)
 	if err != nil {
 		return commandError("New-VM", result, err)
@@ -409,14 +400,6 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 		return commandError("Connect-VMNetworkAdapter", result, err)
 	}
 
-	if isISO {
-		dvdScript := fmt.Sprintf(`Add-VMDvdDrive -VMName '%s' -Path '%s'`, escapePSString(name), escapePSString(cfg.HyperV.Image))
-		result, err = b.powershell(ctx, dvdScript)
-		if err != nil {
-			return commandError("Add-VMDvdDrive", result, err)
-		}
-	}
-
 	startScript := fmt.Sprintf(`Start-VM -Name '%s'`, escapePSString(name))
 	result, err = b.powershell(ctx, startScript)
 	if err != nil {
@@ -425,7 +408,7 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 
 	if publicKey != "" {
 		if err := b.injectSSHKey(ctx, name, cfg.HyperV.User, publicKey); err != nil {
-			fmt.Fprintf(b.rt.Stderr, "warning: SSH key injection via PowerShell Direct failed: %v (image may need pre-configured SSH)\n", err)
+			fmt.Fprintf(b.rt.Stderr, "warning: SSH key injection via PowerShell Direct failed (will retry during SSH wait): %v\n", err)
 		}
 	}
 
@@ -433,12 +416,18 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 }
 
 // injectSSHKey writes the SSH public key into the VM via PowerShell Direct
-// (Invoke-Command -VMName). This requires the VM to have booted and the guest
-// user to exist. It is best-effort: if the image already has SSH pre-configured
-// the key injection may be redundant.
+// (Invoke-Command -VMName). Retries up to 5 times with backoff to allow the
+// guest OS to boot. The VHDX template must have the configured user with the
+// password matching CRABBOX_HYPERV_GUEST_PASSWORD (default: from config or
+// image-level convention). This is best-effort: images with pre-configured
+// authorized_keys and OpenSSH will work without injection.
 func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey string) error {
+	guestPassword := b.cfg.HyperV.GuestPassword
+	if guestPassword == "" {
+		guestPassword = "crabbox"
+	}
 	script := fmt.Sprintf(
-		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString 'crabbox' -AsPlainText -Force)); `+
+		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString '%s' -AsPlainText -Force)); `+
 			`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { `+
 			`$sshDir = Join-Path $env:USERPROFILE '.ssh'; `+
 			`New-Item -ItemType Directory -Force -Path $sshDir | Out-Null; `+
@@ -447,13 +436,26 @@ func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey stri
 			`$adminAK = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'; `+
 			`if (Test-Path (Split-Path $adminAK)) { Add-Content -Encoding ASCII -Path $adminAK -Value '%s' } `+
 			`}`,
-		escapePSString(user), escapePSString(vmName), escapePSString(publicKey), escapePSString(publicKey),
+		escapePSString(user), escapePSString(guestPassword), escapePSString(vmName),
+		escapePSString(publicKey), escapePSString(publicKey),
 	)
-	result, err := b.powershell(ctx, script)
-	if err != nil {
-		return commandError("SSH key injection", result, err)
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt*5) * time.Second):
+			}
+			fmt.Fprintf(b.rt.Stderr, "retrying SSH key injection (%d/5)...\n", attempt+1)
+		}
+		result, err := b.powershell(ctx, script)
+		if err == nil {
+			return nil
+		}
+		lastErr = commandError("SSH key injection", result, err)
 	}
-	return nil
+	return lastErr
 }
 
 // waitForIP polls Get-VMNetworkAdapter until an IPv4 address appears.
@@ -512,7 +514,7 @@ func (b *backend) resolveInstance(ctx context.Context, identifier string) (hyper
 		}
 		vm, queryErr := b.queryVM(ctx, name)
 		if queryErr != nil {
-			return hypervVM{Name: name, State: 2}, claim, nil
+			return hypervVM{}, claim, exit(4, "hyperv VM %s from claim %s not reachable: %v", name, claim.LeaseID, queryErr)
 		}
 		return vm, claim, nil
 	}
@@ -585,13 +587,15 @@ func (b *backend) removeVM(ctx context.Context, name string) error {
 		return commandError("Remove-VM", result, err)
 	}
 
+	expectedVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
 	if len(vhdPaths) > 0 {
 		for _, p := range vhdPaths {
-			os.Remove(p) //nolint:errcheck
+			if strings.EqualFold(filepath.Clean(p), filepath.Clean(expectedVHD)) {
+				os.Remove(p) //nolint:errcheck
+			}
 		}
 	} else {
-		vhdPath := filepath.Join(hypervVHDDir(), name+".vhdx")
-		os.Remove(vhdPath) //nolint:errcheck
+		os.Remove(expectedVHD) //nolint:errcheck
 	}
 
 	return nil

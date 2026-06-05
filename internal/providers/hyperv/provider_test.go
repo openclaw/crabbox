@@ -426,35 +426,16 @@ func TestCreateVMCopiesVHDXTemplate(t *testing.T) {
 	}
 }
 
-func TestCreateVMISOAttachesDVD(t *testing.T) {
-	runner := &recordingRunner{
-		responses: map[string]core.LocalCommandResult{},
-		errors:    map[string]error{},
-	}
-	b := testBackend(runner)
-	cfg := b.configForRun()
-	cfg.HyperV.Image = `C:\Images\win-server.iso`
+func TestAcquireRejectsISO(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
 
-	err := b.createVM(context.Background(), cfg, "crabbox-red-5678", "ssh-ed25519 AAAA test")
-	if err != nil {
-		t.Fatalf("createVM: %v", err)
-	}
-
-	var foundNewVHD, foundDVD bool
-	for _, call := range runner.calls {
-		script := call.Args[len(call.Args)-1]
-		if strings.Contains(script, "New-VM") && strings.Contains(script, "-NewVHDPath") {
-			foundNewVHD = true
-		}
-		if strings.Contains(script, "Add-VMDvdDrive") && strings.Contains(script, "win-server.iso") {
-			foundDVD = true
-		}
-	}
-	if !foundNewVHD {
-		t.Error("ISO mode should create a new blank VHD")
-	}
-	if !foundDVD {
-		t.Error("ISO mode should attach the ISO as a DVD drive")
+	b.cfg.HyperV.Image = `C:\Images\win-server.iso`
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "does not support ISO") {
+		t.Fatalf("Acquire should reject ISO images, got: %v", err)
 	}
 }
 
@@ -474,6 +455,32 @@ func TestQueryVMParsesSingle(t *testing.T) {
 	}
 	if vm.State != 3 {
 		t.Fatalf("state=%d want 3 (off)", vm.State)
+	}
+}
+
+func TestResolveInstancePropagatesQueryError(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+		errors:    map[string]error{},
+	}
+	runner.errors[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
+		`Get-VM -Name 'crabbox-blue-1234' | Select-Object Name, State | ConvertTo-Json -Compress`})] =
+		fmt.Errorf("powershell exec failed")
+	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
+		`Get-VM -Name 'crabbox-blue-1234' | Select-Object Name, State | ConvertTo-Json -Compress`})] =
+		core.LocalCommandResult{Stderr: "VM not found"}
+
+	b := testBackend(runner)
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	_, _, err := b.resolveInstance(context.Background(), "crabbox-blue-1234")
+	if err == nil {
+		t.Fatal("resolveInstance should propagate VM query failure, not return synthetic State=2")
+	}
+	if !strings.Contains(err.Error(), "not reachable") && !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

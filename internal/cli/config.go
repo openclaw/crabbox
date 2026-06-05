@@ -584,13 +584,14 @@ type TartConfig struct {
 }
 
 type HyperVConfig struct {
-	Image    string
-	User     string
-	WorkRoot string
-	CPUs     int
-	Memory   int
-	Disk     int
-	Switch   string
+	Image         string
+	User          string
+	WorkRoot      string
+	CPUs          int
+	Memory        int
+	Disk          int
+	Switch        string
+	GuestPassword string
 }
 
 type StaticConfig struct {
@@ -1844,13 +1845,14 @@ type fileTartConfig struct {
 }
 
 type fileHyperVConfig struct {
-	Image    string `yaml:"image,omitempty"`
-	User     string `yaml:"user,omitempty"`
-	WorkRoot string `yaml:"workRoot,omitempty"`
-	CPUs     int    `yaml:"cpus,omitempty"`
-	Memory   int    `yaml:"memory,omitempty"`
-	Disk     int    `yaml:"disk,omitempty"`
-	Switch   string `yaml:"switch,omitempty"`
+	Image         string `yaml:"image,omitempty"`
+	User          string `yaml:"user,omitempty"`
+	WorkRoot      string `yaml:"workRoot,omitempty"`
+	CPUs          int    `yaml:"cpus,omitempty"`
+	Memory        int    `yaml:"memory,omitempty"`
+	Disk          int    `yaml:"disk,omitempty"`
+	Switch        string `yaml:"switch,omitempty"`
+	GuestPassword string `yaml:"guestPassword,omitempty"`
 }
 
 type fileTailscaleConfig struct {
@@ -3190,6 +3192,9 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.HyperV.Switch != "" {
 			cfg.HyperV.Switch = file.HyperV.Switch
 		}
+		if file.HyperV.GuestPassword != "" {
+			cfg.HyperV.GuestPassword = file.HyperV.GuestPassword
+		}
 	}
 	if file.Tailscale != nil {
 		if file.Tailscale.Enabled != nil {
@@ -4015,6 +4020,7 @@ func applyEnv(cfg *Config) error {
 	cfg.HyperV.Memory = getenvInt("CRABBOX_HYPERV_MEMORY", cfg.HyperV.Memory)
 	cfg.HyperV.Disk = getenvInt("CRABBOX_HYPERV_DISK", cfg.HyperV.Disk)
 	cfg.HyperV.Switch = getenv("CRABBOX_HYPERV_SWITCH", cfg.HyperV.Switch)
+	cfg.HyperV.GuestPassword = getenv("CRABBOX_HYPERV_GUEST_PASSWORD", cfg.HyperV.GuestPassword)
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value
 	}
