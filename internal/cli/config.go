@@ -17,6 +17,7 @@ type Config struct {
 	Profile                     string
 	Provider                    string
 	TargetOS                    string
+	targetExplicit              bool
 	Architecture                string
 	architectureExplicit        bool
 	OSImage                     string
@@ -851,6 +852,14 @@ func MarkMultipassImageExplicit(cfg *Config) {
 
 func MarkTartImageExplicit(cfg *Config) {
 	cfg.tartImageExplicit = true
+}
+
+func IsTargetExplicit(cfg *Config) bool {
+	return cfg.targetExplicit
+}
+
+func MarkTargetExplicit(cfg *Config) {
+	cfg.targetExplicit = true
 }
 
 func baseConfig() Config {
@@ -1803,9 +1812,11 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	}
 	if file.Target != "" {
 		cfg.TargetOS = file.Target
+		cfg.targetExplicit = true
 	}
 	if file.TargetOS != "" {
 		cfg.TargetOS = file.TargetOS
+		cfg.targetExplicit = true
 	}
 	if file.Architecture != "" {
 		cfg.Architecture = file.Architecture
@@ -2996,7 +3007,13 @@ func applyLeaseDuration(target *time.Duration, value string) {
 func applyEnv(cfg *Config) error {
 	cfg.Profile = getenv("CRABBOX_PROFILE", cfg.Profile)
 	cfg.Provider = getenv("CRABBOX_PROVIDER", cfg.Provider)
-	cfg.TargetOS = getenv("CRABBOX_TARGET", getenv("CRABBOX_TARGET_OS", cfg.TargetOS))
+	if t := os.Getenv("CRABBOX_TARGET"); t != "" {
+		cfg.TargetOS = t
+		cfg.targetExplicit = true
+	} else if t := os.Getenv("CRABBOX_TARGET_OS"); t != "" {
+		cfg.TargetOS = t
+		cfg.targetExplicit = true
+	}
 	if arch := os.Getenv("CRABBOX_ARCH"); arch != "" {
 		cfg.Architecture = arch
 		cfg.architectureExplicit = true

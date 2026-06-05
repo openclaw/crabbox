@@ -256,6 +256,7 @@ func TestApplyFlagsRejectsExplicitLinuxTarget(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
+	core.MarkTargetExplicit(&cfg)
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
@@ -273,6 +274,7 @@ func TestApplyFlagsRejectsExplicitWindowsTarget(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetWindows
+	core.MarkTargetExplicit(&cfg)
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
@@ -302,33 +304,34 @@ func TestApplyFlagsDefaultsLinuxToMacOS(t *testing.T) {
 	}
 }
 
-func TestApplyFlagsRejectsEnvTargetLinux(t *testing.T) {
+func TestApplyFlagsRejectsExplicitTargetFromEnv(t *testing.T) {
 	t.Setenv("CRABBOX_TARGET", "linux")
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
+	core.MarkTargetExplicit(&cfg)
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
 
 	err := applyFlags(&cfg, fs, flagValues{})
 	if err == nil {
-		t.Fatal("applyFlags should reject CRABBOX_TARGET=linux")
+		t.Fatal("applyFlags should reject explicit target=linux from env")
 	}
 }
 
-func TestApplyFlagsRejectsEnvTargetOSLinux(t *testing.T) {
-	t.Setenv("CRABBOX_TARGET_OS", "linux")
+func TestApplyFlagsRejectsExplicitTargetFromYAML(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
+	core.MarkTargetExplicit(&cfg)
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
 
 	err := applyFlags(&cfg, fs, flagValues{})
 	if err == nil {
-		t.Fatal("applyFlags should reject CRABBOX_TARGET_OS=linux")
+		t.Fatal("applyFlags should reject explicit target=linux from YAML")
 	}
 }
 
@@ -336,6 +339,7 @@ func TestApplyFlagsAcceptsExplicitMacOS(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetMacOS
+	core.MarkTargetExplicit(&cfg)
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
