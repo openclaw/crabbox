@@ -558,6 +558,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst hypervVM, i
 	if ip == "" {
 		return LeaseTarget{}, exit(5, "hyperv instance %s has no IPv4 address", inst.Name)
 	}
+	server.PublicNet.IPv4.IP = ip
 	if claim.LeaseID != "" {
 		keyPath, err := testboxKeyPath(claim.LeaseID)
 		if err == nil {
@@ -704,6 +705,9 @@ func (b *backend) serverFromInstance(inst hypervVM, claim core.LeaseClaim, cfg C
 		Labels:   labels,
 	}
 	server.ServerType.Name = "hyperv"
+	if claim.SSHHost != "" {
+		server.PublicNet.IPv4.IP = claim.SSHHost
+	}
 	return server
 }
 

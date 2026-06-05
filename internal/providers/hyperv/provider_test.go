@@ -383,6 +383,30 @@ func TestServerFromInstanceLabels(t *testing.T) {
 	}
 }
 
+func TestServerFromInstancePopulatesIPFromClaim(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	server := b.serverFromInstance(
+		hypervVM{Name: "crabbox-blue-1234", State: 2},
+		core.LeaseClaim{SSHHost: "192.168.1.50"},
+		b.configForRun(),
+	)
+	if server.PublicNet.IPv4.IP != "192.168.1.50" {
+		t.Fatalf("PublicNet.IPv4.IP=%q want 192.168.1.50", server.PublicNet.IPv4.IP)
+	}
+}
+
+func TestServerFromInstanceNoIPWithoutClaim(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	server := b.serverFromInstance(
+		hypervVM{Name: "crabbox-blue-1234", State: 2},
+		core.LeaseClaim{},
+		b.configForRun(),
+	)
+	if server.PublicNet.IPv4.IP != "" {
+		t.Fatalf("PublicNet.IPv4.IP=%q want empty", server.PublicNet.IPv4.IP)
+	}
+}
+
 func TestCreateVMCopiesVHDXTemplate(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
