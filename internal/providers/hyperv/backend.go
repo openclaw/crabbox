@@ -427,9 +427,7 @@ func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey stri
 		guestPassword = "crabbox"
 	}
 	script := fmt.Sprintf(
-		`$pw = $env:CRABBOX_HYPERV_GUEST_PASSWORD; `+
-			`if (-not $pw) { $pw = '%s' }; `+
-			`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $pw -AsPlainText -Force)); `+
+		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
 			`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { `+
 			`$sshDir = Join-Path $env:USERPROFILE '.ssh'; `+
 			`New-Item -ItemType Directory -Force -Path $sshDir | Out-Null; `+
@@ -438,9 +436,11 @@ func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey stri
 			`$adminAK = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'; `+
 			`if (Test-Path (Split-Path $adminAK)) { Add-Content -Encoding ASCII -Path $adminAK -Value '%s' } `+
 			`}`,
-		escapePSString(guestPassword), escapePSString(user), escapePSString(vmName),
+		escapePSString(user), escapePSString(vmName),
 		escapePSString(publicKey), escapePSString(publicKey),
 	)
+	env := os.Environ()
+	env = append(env, "_CRABBOX_GP="+guestPassword)
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
 		if attempt > 0 {
@@ -451,7 +451,7 @@ func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey stri
 			}
 			fmt.Fprintf(b.rt.Stderr, "retrying SSH key injection (%d/5)...\n", attempt+1)
 		}
-		result, err := b.powershell(ctx, script)
+		result, err := b.powershellWithEnv(ctx, script, env)
 		if err == nil {
 			return nil
 		}
@@ -712,6 +712,14 @@ func (b *backend) powershell(ctx context.Context, script string) (LocalCommandRe
 	return b.rt.Exec.Run(ctx, LocalCommandRequest{
 		Name: "powershell",
 		Args: []string{"-NoProfile", "-NonInteractive", "-Command", script},
+	})
+}
+
+func (b *backend) powershellWithEnv(ctx context.Context, script string, env []string) (LocalCommandResult, error) {
+	return b.rt.Exec.Run(ctx, LocalCommandRequest{
+		Name: "powershell",
+		Args: []string{"-NoProfile", "-NonInteractive", "-Command", script},
+		Env:  env,
 	})
 }
 

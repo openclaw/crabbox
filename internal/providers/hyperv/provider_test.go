@@ -459,6 +459,36 @@ func TestQueryVMParsesSingle(t *testing.T) {
 	}
 }
 
+func TestInjectSSHKeyPasswordNotInArgs(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	b := testBackend(runner)
+	b.cfg.HyperV.GuestPassword = "s3cret-pa$$word"
+
+	_ = b.injectSSHKey(context.Background(), "crabbox-blue-1234", "crabbox", "ssh-ed25519 AAAA test")
+
+	for _, call := range runner.calls {
+		for _, arg := range call.Args {
+			if strings.Contains(arg, "s3cret-pa$$word") {
+				t.Fatal("guest password found in command args; should be passed via environment only")
+			}
+		}
+		if len(call.Env) == 0 {
+			t.Fatal("injectSSHKey should pass password via Env, not Args")
+		}
+		var foundEnv bool
+		for _, e := range call.Env {
+			if strings.Contains(e, "_CRABBOX_GP=s3cret-pa$$word") {
+				foundEnv = true
+			}
+		}
+		if !foundEnv {
+			t.Fatal("_CRABBOX_GP env var not found in command Env")
+		}
+	}
+}
+
 func TestResolveInstancePropagatesQueryError(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
