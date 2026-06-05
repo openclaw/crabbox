@@ -42,6 +42,12 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		cfg.Tart.Disk = *v.Disk
 	}
 	if isTartProviderName(cfg.Provider) {
+		if flagWasSet(fs, "target") && cfg.TargetOS != targetMacOS {
+			return exit(2, "provider=%s supports target=%s only (got --%s %s)", providerName, targetMacOS, "target", cfg.TargetOS)
+		}
+		if !flagWasSet(fs, "target") && cfg.TargetOS == "linux" {
+			cfg.TargetOS = targetMacOS
+		}
 		applyDefaults(cfg)
 	}
 	return nil

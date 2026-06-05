@@ -36,7 +36,7 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 
 func applyDefaults(cfg *Config) {
 	cfg.Provider = providerName
-	if cfg.TargetOS == "" || cfg.TargetOS == "linux" {
+	if cfg.TargetOS == "" {
 		cfg.TargetOS = targetMacOS
 	}
 	cfg.WindowsMode = ""

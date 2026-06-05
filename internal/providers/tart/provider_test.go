@@ -3,6 +3,7 @@ package tart
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"io"
 	"strings"
 	"testing"
@@ -248,6 +249,76 @@ func TestStartVMArgsHeadless(t *testing.T) {
 	args := startVMArgs("crabbox-blue-1234abcd")
 	if len(args) != 3 || args[0] != "run" || args[2] != "--no-graphics" {
 		t.Fatalf("startVMArgs=%v want [run <name> --no-graphics]", args)
+	}
+}
+
+func TestApplyFlagsRejectsExplicitLinuxTarget(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
+	if err := fs.Set("target", "linux"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := applyFlags(&cfg, fs, flagValues{})
+	if err == nil {
+		t.Fatal("applyFlags should reject explicit --target linux")
+	}
+}
+
+func TestApplyFlagsRejectsExplicitWindowsTarget(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetWindows
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
+	if err := fs.Set("target", "windows"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := applyFlags(&cfg, fs, flagValues{})
+	if err == nil {
+		t.Fatal("applyFlags should reject explicit --target windows")
+	}
+}
+
+func TestApplyFlagsDefaultsLinuxToMacOS(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
+
+	err := applyFlags(&cfg, fs, flagValues{})
+	if err != nil {
+		t.Fatalf("applyFlags failed: %v", err)
+	}
+	if cfg.TargetOS != core.TargetMacOS {
+		t.Fatalf("TargetOS=%s want macos (should default baseConfig linux to macos)", cfg.TargetOS)
+	}
+}
+
+func TestApplyFlagsAcceptsExplicitMacOS(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetMacOS
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
+	if err := fs.Set("target", "macos"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := applyFlags(&cfg, fs, flagValues{})
+	if err != nil {
+		t.Fatalf("applyFlags should accept explicit --target macos: %v", err)
+	}
+	if cfg.TargetOS != core.TargetMacOS {
+		t.Fatalf("TargetOS=%s want macos", cfg.TargetOS)
 	}
 }
 
