@@ -259,6 +259,11 @@ describe("lease config", () => {
     expect(empty.pond).toBe("");
     const tagged = leaseConfig({ sshPublicKey: "ssh-ed25519 test", pond: " Alpha Pond " });
     expect(tagged.pond).toBe("alpha-pond");
+    const symbolRun = leaseConfig({
+      sshPublicKey: "ssh-ed25519 test",
+      pond: `alpha${"_".repeat(10_000)}pond`,
+    });
+    expect(symbolRun.pond).toBe("alpha-pond");
     expect(() => leaseConfig({ sshPublicKey: "ssh-ed25519 test", pond: " --- " })).toThrow(
       "pond must contain at least one letter or digit",
     );
