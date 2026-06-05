@@ -427,7 +427,9 @@ func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey stri
 		guestPassword = "crabbox"
 	}
 	script := fmt.Sprintf(
-		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString '%s' -AsPlainText -Force)); `+
+		`$pw = $env:CRABBOX_HYPERV_GUEST_PASSWORD; `+
+			`if (-not $pw) { $pw = '%s' }; `+
+			`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $pw -AsPlainText -Force)); `+
 			`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { `+
 			`$sshDir = Join-Path $env:USERPROFILE '.ssh'; `+
 			`New-Item -ItemType Directory -Force -Path $sshDir | Out-Null; `+
@@ -436,7 +438,7 @@ func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey stri
 			`$adminAK = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'; `+
 			`if (Test-Path (Split-Path $adminAK)) { Add-Content -Encoding ASCII -Path $adminAK -Value '%s' } `+
 			`}`,
-		escapePSString(user), escapePSString(guestPassword), escapePSString(vmName),
+		escapePSString(guestPassword), escapePSString(user), escapePSString(vmName),
 		escapePSString(publicKey), escapePSString(publicKey),
 	)
 	var lastErr error

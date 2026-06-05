@@ -17,7 +17,7 @@ type flagValues struct {
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		Image:  fs.String("hyperv-image", defaults.HyperV.Image, "Windows VHDX or ISO path for Hyper-V VM creation"),
+		Image:  fs.String("hyperv-image", defaults.HyperV.Image, "Windows VHDX template path for Hyper-V VM creation"),
 		CPUs:   fs.Int("hyperv-cpu", defaults.HyperV.CPUs, "CPU count for Hyper-V leases"),
 		Memory: fs.Int("hyperv-memory", defaults.HyperV.Memory, "memory in MB for Hyper-V leases"),
 		Disk:   fs.Int("hyperv-disk", defaults.HyperV.Disk, "disk size in GB for Hyper-V leases"),

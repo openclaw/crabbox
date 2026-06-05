@@ -3,6 +3,7 @@ package hyperv
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
