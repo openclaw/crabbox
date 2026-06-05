@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Fixed local-container warmup on Windows by mounting the generated bootstrap script instead of passing it inline to Docker. Thanks @anagnorisis2peripeteia.
+
 ### Removed
 
 ## 0.26.0 - 2026-06-02
