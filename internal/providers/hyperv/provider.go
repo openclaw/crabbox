@@ -14,9 +14,7 @@ type Provider struct{}
 
 func (Provider) Name() string { return providerName }
 
-func (Provider) Aliases() []string {
-	return []string{"local-hyperv", "hyper-v", "windows-vm"}
-}
+func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{

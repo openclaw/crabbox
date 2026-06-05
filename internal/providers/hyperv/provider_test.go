@@ -81,7 +81,7 @@ func TestProviderSpecAndAliases(t *testing.T) {
 }
 
 func TestProviderAliasesResolve(t *testing.T) {
-	for _, alias := range []string{"hyperv", "local-hyperv", "hyper-v", "windows-vm"} {
+	for _, alias := range []string{"hyperv"} {
 		got, err := core.ProviderFor(alias)
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)

@@ -1,7 +1,6 @@
 # Hyper-V
 
 Provider id: `hyperv`
-Aliases: `local-hyperv`, `hyper-v`, `windows-vm`
 Kind: SSH lease
 Targets: Windows (native)
 Family: `local-vm`

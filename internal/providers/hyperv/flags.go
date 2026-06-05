@@ -53,7 +53,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 
 func isHyperVProviderName(provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "local-hyperv", "hyper-v", "windows-vm":
+	case providerName:
 		return true
 	default:
 		return false
