@@ -146,11 +146,11 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	}
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=xcp-ng lease=%s slug=%s template=%s keep=%v\n",
 		leaseID, slug, resolved.templateRef.value(), keep)
-	server, configDrive, err := b.createAndBoot(ctx, client, cfg, resolved, leaseID, slug, publicKey, keep, labels)
+	server, configDrive, vmRef, err := b.createAndBoot(ctx, client, cfg, resolved, leaseID, slug, publicKey, keep, labels)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	ip, err := b.waitForGuestIPv4(ctx, client, xapiRef(server.CloudID), bootstrapWaitTimeout(cfg))
+	ip, err := b.waitForGuestIPv4(ctx, client, vmRef, bootstrapWaitTimeout(cfg))
 	if err != nil {
 		b.cleanupFailedLease(context.Background(), client, server.CloudID, configDrive)
 		return LeaseTarget{}, err
@@ -200,7 +200,7 @@ func (b *leaseBackend) resolvePlacement(ctx context.Context, client lifecycleCli
 	return xcpNgPlacement{templateRef: templateRef, srRef: srRef, networkRef: networkRef, hostRef: hostRef}, nil
 }
 
-func (b *leaseBackend) createAndBoot(ctx context.Context, client lifecycleClient, cfg Config, placement xcpNgPlacement, leaseID, slug, publicKey string, keep bool, labels map[string]string) (Server, xcpNgConfigDrive, error) {
+func (b *leaseBackend) createAndBoot(ctx context.Context, client lifecycleClient, cfg Config, placement xcpNgPlacement, leaseID, slug, publicKey string, keep bool, labels map[string]string) (Server, xcpNgConfigDrive, xapiRef, error) {
 	vm, err := client.CloneVM(ctx, xcpNgCloneRequest{
 		Config:      cfg,
 		TemplateRef: placement.templateRef,
@@ -214,24 +214,24 @@ func (b *leaseBackend) createAndBoot(ctx context.Context, client lifecycleClient
 		Labels:      labels,
 	})
 	if err != nil {
-		return Server{}, xcpNgConfigDrive{}, err
+		return Server{}, xcpNgConfigDrive{}, "", err
 	}
 	server := xcpNgVMToServer(vm, labels, "")
 	payload, err := newCloudInitPayload(cfg, leaseID, slug, publicKey)
 	if err != nil {
 		b.cleanupFailedLease(context.Background(), client, server.CloudID, xcpNgConfigDrive{})
-		return Server{}, xcpNgConfigDrive{}, err
+		return Server{}, xcpNgConfigDrive{}, "", err
 	}
 	configDrive, err := client.AttachConfigDrive(ctx, xcpNgConfigDriveRequest{VMRef: xapiRef(vm.Ref), SRRef: placement.srRef, LeaseID: leaseID, Slug: slug, Payload: payload, Labels: labels})
 	if err != nil {
 		b.cleanupFailedLease(context.Background(), client, server.CloudID, xcpNgConfigDrive{})
-		return Server{}, xcpNgConfigDrive{}, err
+		return Server{}, xcpNgConfigDrive{}, "", err
 	}
 	if err := client.StartVM(ctx, xapiRef(vm.Ref)); err != nil {
 		b.cleanupFailedLease(context.Background(), client, server.CloudID, configDrive)
-		return Server{}, xcpNgConfigDrive{}, err
+		return Server{}, xcpNgConfigDrive{}, "", err
 	}
-	return server, configDrive, nil
+	return server, configDrive, xapiRef(vm.Ref), nil
 }
 
 func (b *leaseBackend) waitForGuestIPv4(ctx context.Context, client lifecycleClient, vmRef xapiRef, timeout time.Duration) (string, error) {
@@ -296,9 +296,8 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		return LeaseTarget{}, err
 	} else if leaseID != "" {
 		if firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP) == "" {
-			if ip, err := client.GuestIPv4(ctx, xapiRef(server.CloudID)); err == nil {
-				server.PublicNet.IPv4.IP = ip
-				server.PrivateNet.IPv4.IP = ip
+			if refreshed, err := client.GetServer(ctx, server.CloudID); err == nil {
+				server = refreshed
 			} else if !req.ReleaseOnly {
 				return LeaseTarget{}, err
 			}
@@ -487,7 +486,7 @@ func xcpNgVMToServer(vm xapiVM, labels map[string]string, ip string) Server {
 	}
 	server := Server{
 		Provider: "xcp-ng",
-		CloudID:  vm.Ref,
+		CloudID:  firstNonBlank(vm.UUID, vm.Ref),
 		Name:     vm.Name,
 		Status:   vm.PowerState,
 		Labels:   labels,

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -158,7 +159,12 @@ func (c *xapiClient) CloneVM(ctx context.Context, req xcpNgCloneRequest) (xapiVM
 		_ = c.DeleteServer(context.Background(), ref)
 		return xapiVM{}, err
 	}
-	return xapiVM{Ref: ref, Name: name, PowerState: "halted", Labels: req.Labels}, nil
+	uuid, err := c.callString(ctx, "VM.get_uuid", c.session, ref)
+	if err != nil {
+		_ = c.DeleteServer(context.Background(), ref)
+		return xapiVM{}, err
+	}
+	return xapiVM{Ref: ref, UUID: uuid, Name: name, PowerState: "halted", Labels: req.Labels}, nil
 }
 
 func (c *xapiClient) AttachConfigDrive(ctx context.Context, req xcpNgConfigDriveRequest) (xcpNgConfigDrive, error) {
@@ -237,13 +243,9 @@ func (c *xapiClient) GuestIPv4(ctx context.Context, ref xapiRef) (string, error)
 }
 
 func (c *xapiClient) GetServer(ctx context.Context, id string) (Server, error) {
-	ref := id
-	if looksLikeUUID(id) {
-		resolved, err := c.getByUUID(ctx, "VM", id)
-		if err != nil {
-			return Server{}, err
-		}
-		ref = resolved.value()
+	ref, err := c.vmRefForID(ctx, id)
+	if err != nil {
+		return Server{}, err
 	}
 	record, err := c.vmRecord(ctx, ref)
 	if err != nil {
@@ -254,11 +256,18 @@ func (c *xapiClient) GetServer(ctx context.Context, id string) (Server, error) {
 }
 
 func (c *xapiClient) SetLabels(ctx context.Context, id string, labels map[string]string) error {
-	return c.setVMLabels(ctx, id, labels)
+	ref, err := c.vmRefForID(ctx, id)
+	if err != nil {
+		return err
+	}
+	return c.setVMLabels(ctx, ref, labels)
 }
 
 func (c *xapiClient) DeleteServer(ctx context.Context, id string) error {
-	ref := id
+	ref, err := c.vmRefForID(ctx, id)
+	if err != nil {
+		return err
+	}
 	var drives []xcpNgConfigDrive
 	var disks []xcpNgConfigDrive
 	if server, err := c.GetServer(ctx, ref); err == nil && isCrabboxLease(server) {
@@ -360,6 +369,36 @@ func (c *xapiClient) DeleteConfigDrive(ctx context.Context, drive xcpNgConfigDri
 	return nil
 }
 
+func (c *xapiClient) vmRefForID(ctx context.Context, id string) (string, error) {
+	if looksLikeUUID(id) {
+		resolved, err := c.getByUUID(ctx, "VM", id)
+		if err != nil {
+			return "", err
+		}
+		return resolved.value(), nil
+	}
+	return id, nil
+}
+
+func redactedURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	redacted := *u
+	q := redacted.Query()
+	if q.Has("session_id") {
+		q.Set("session_id", "<redacted>")
+		redacted.RawQuery = q.Encode()
+	}
+	return redacted.String()
+}
+
+var sessionIDTextPattern = regexp.MustCompile(`(?i)(session_id=)[^&\s]+`)
+
+func redactSessionIDText(text string) string {
+	return sessionIDTextPattern.ReplaceAllString(text, `${1}<redacted>`)
+}
+
 func (c *xapiClient) configDrivesForLease(ctx context.Context, leaseID string) ([]xcpNgConfigDrive, error) {
 	if strings.TrimSpace(leaseID) == "" {
 		return nil, nil
@@ -441,7 +480,7 @@ func (c *xapiClient) importRawVDI(ctx context.Context, vdiRef string, image []by
 	req.Header.Set("Content-Type", "application/octet-stream")
 	res, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("upload xcp-ng config-drive %s to %s: %s", vdiRef, redactedURL(u), redactSessionIDText(err.Error()))
 	}
 	defer res.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))

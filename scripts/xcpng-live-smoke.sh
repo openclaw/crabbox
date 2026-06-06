@@ -83,7 +83,7 @@ dst = Path(sys.argv[2])
 text = src.read_text(encoding="utf-8", errors="replace")
 text = re.sub(r"https://[^\"'\s]+", "https://xcp-pool.example.test", text)
 
-secret_key = r"(?:password|token|secret)"
+secret_key = r"(?:password|token|secret|session_id)"
 patterns = [
     (re.compile(rf"((?:\"?{secret_key}\"?)\s*:\s*\")([^\"\r\n]*)(\")", re.I), r"\1<redacted>\3"),
     (re.compile(rf"((?:'?{secret_key}'?)\s*:\s*')([^'\r\n]*)(')", re.I), r"\1<redacted>\3"),

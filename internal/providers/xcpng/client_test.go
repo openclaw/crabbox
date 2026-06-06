@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -189,6 +190,8 @@ func TestCloneVMUsesCopyForSRAndRewiresVIFsForNetwork(t *testing.T) {
 			writeXMLRPCString(t, w, "true")
 		case "VM.provision":
 			writeXMLRPCString(t, w, "true")
+		case "VM.get_uuid":
+			writeXMLRPCString(t, w, xcpNgTestVMUUID)
 		case "VM.remove_from_other_config":
 			writeXMLRPCFault(t, w, "MAP_KEY_NOT_FOUND")
 		case "VM.add_to_other_config":
@@ -199,7 +202,7 @@ func TestCloneVMUsesCopyForSRAndRewiresVIFsForNetwork(t *testing.T) {
 	}))
 	defer server.Close()
 	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
-	_, err := client.CloneVM(context.Background(), xcpNgCloneRequest{
+	vm, err := client.CloneVM(context.Background(), xcpNgCloneRequest{
 		TemplateRef: "OpaqueRef:tpl",
 		SRRef:       "OpaqueRef:sr",
 		NetworkRef:  "OpaqueRef:net",
@@ -211,8 +214,11 @@ func TestCloneVMUsesCopyForSRAndRewiresVIFsForNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if vm.Ref != "OpaqueRef:vm" || vm.UUID != xcpNgTestVMUUID {
+		t.Fatalf("vm=%#v", vm)
+	}
 	got := strings.Join(methods, ",")
-	for _, want := range []string{"VM.copy", "VM.set_affinity", "VM.get_VIFs", "VIF.set_network", "VM.remove_from_other_config", "VM.add_to_other_config", "VM.provision"} {
+	for _, want := range []string{"VM.copy", "VM.set_affinity", "VM.get_VIFs", "VIF.set_network", "VM.remove_from_other_config", "VM.add_to_other_config", "VM.provision", "VM.get_uuid"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("methods=%s missing %s", got, want)
 		}
@@ -272,6 +278,46 @@ func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 	}
 }
 
+func TestGetServerAndSetLabelsResolveUUIDToFreshRef(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VM.get_by_uuid":
+			writeXMLRPCString(t, w, "OpaqueRef:vm-fresh")
+		case "VM.get_record":
+			writeXMLRPCVMRecord(t, w, "cbx_lease")
+		case "VM.get_guest_metrics":
+			writeXMLRPCFault(t, w, "HANDLE_INVALID")
+		case "VM.remove_from_other_config":
+			if !strings.Contains(strings.Join(methods, ","), "VM.get_by_uuid") {
+				t.Fatalf("set labels did not resolve UUID first; methods=%v", methods)
+			}
+			writeXMLRPCFault(t, w, "MAP_KEY_NOT_FOUND")
+		case "VM.add_to_other_config":
+			writeXMLRPCString(t, w, "true")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	serverView, err := client.GetServer(context.Background(), xcpNgTestVMUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if serverView.CloudID != xcpNgTestVMUUID {
+		t.Fatalf("server=%#v", serverView)
+	}
+	if err := client.SetLabels(context.Background(), xcpNgTestVMUUID, map[string]string{"lease": "cbx_lease"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(methods, ","); !strings.Contains(got, "VM.get_by_uuid,VM.get_record") || !strings.Contains(got, "VM.get_by_uuid,VM.remove_from_other_config") {
+		t.Fatalf("methods=%s", got)
+	}
+}
+
 func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 	var methods []string
 	powerStateChecks := 0
@@ -279,6 +325,8 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 		method := readXMLRPCMethod(t, r)
 		methods = append(methods, method)
 		switch method {
+		case "VM.get_by_uuid":
+			writeXMLRPCString(t, w, "OpaqueRef:vm")
 		case "VM.get_record":
 			writeXMLRPCVMRecord(t, w, "cbx_lease")
 		case "VM.get_guest_metrics":
@@ -316,11 +364,11 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 	xcpNgShutdownPollInterval = time.Millisecond
 	t.Cleanup(func() { xcpNgShutdownPollInterval = oldPoll })
 	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
-	if err := client.DeleteServer(context.Background(), "OpaqueRef:vm"); err != nil {
+	if err := client.DeleteServer(context.Background(), xcpNgTestVMUUID); err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Join(methods, ",")
-	for _, want := range []string{"VM.get_record", "VDI.get_all_records", "VBD.unplug", "VBD.destroy", "VDI.destroy", "VM.get_power_state", "VM.clean_shutdown", "VM.destroy"} {
+	for _, want := range []string{"VM.get_by_uuid", "VM.get_record", "VDI.get_all_records", "VBD.unplug", "VBD.destroy", "VDI.destroy", "VM.get_power_state", "VM.clean_shutdown", "VM.destroy"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("methods=%s missing %s", got, want)
 		}
@@ -377,6 +425,27 @@ func TestShutdownVMFallsBackToHardShutdown(t *testing.T) {
 	}
 }
 
+func TestImportRawVDIRedactsSessionTokenFromTransportError(t *testing.T) {
+	client := &xapiClient{
+		endpoint: "http://xcp-ng.example.test/",
+		session:  "OpaqueRef:secret-session",
+		http: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, errors.New("dial failed for " + req.URL.String())
+		})},
+	}
+	err := client.importRawVDI(context.Background(), "OpaqueRef:vdi", []byte("image"))
+	if err == nil {
+		t.Fatal("expected upload error")
+	}
+	text := err.Error()
+	if strings.Contains(text, "OpaqueRef:secret-session") || strings.Contains(text, "secret-session") {
+		t.Fatalf("error leaked session token: %s", text)
+	}
+	if !strings.Contains(text, "session_id") || !strings.Contains(text, "redacted") {
+		t.Fatalf("error did not preserve redacted upload context: %s", text)
+	}
+}
+
 func readXMLRPCMethod(t *testing.T, r *http.Request) string {
 	t.Helper()
 	method, _ := readXMLRPCBodyAndMethod(t, r)
@@ -396,6 +465,12 @@ func readXMLRPCBodyAndMethod(t *testing.T, r *http.Request) (string, string) {
 		t.Fatal(err)
 	}
 	return req.Method, string(body)
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func countMethod(methods []string, want string) int {
@@ -446,7 +521,7 @@ func writeXMLRPCVMRecord(t *testing.T, w http.ResponseWriter, leaseID string) {
 	t.Helper()
 	labels := "crabbox=true\ncreated_by=crabbox\nprovider=xcp-ng\nlease=" + leaseID + "\nslug=xmlrpc\nstate=ready\n"
 	response := `<?xml version="1.0"?><methodResponse><params><param><value><struct>
-<member><name>uuid</name><value>vm-uuid</value></member>
+<member><name>uuid</name><value>` + xcpNgTestVMUUID + `</value></member>
 <member><name>name_label</name><value>crabbox-xmlrpc</value></member>
 <member><name>power_state</name><value>Running</value></member>
 <member><name>other_config</name><value><struct><member><name>crabbox:labels</name><value><string>` + labels + `</string></value></member></struct></value></member>
@@ -511,7 +586,7 @@ func writeXMLRPCVMRecords(t *testing.T, w http.ResponseWriter) {
 	labels := "crabbox=true\ncreated_by=crabbox\nprovider=xcp-ng\nlease=cbx_xmlrpc\nslug=xmlrpc\nstate=ready\n"
 	response := `<?xml version="1.0"?><methodResponse><params><param><value><struct>
 <member><name>OpaqueRef:vm-1</name><value><struct>
-<member><name>uuid</name><value><string>vm-uuid</string></value></member>
+<member><name>uuid</name><value><string>` + xcpNgTestVMUUID + `</string></value></member>
 <member><name>name_label</name><value><string>crabbox-xmlrpc</string></value></member>
 <member><name>power_state</name><value><string>Running</string></value></member>
 <member><name>is_a_template</name><value><boolean>0</boolean></value></member>

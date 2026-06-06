@@ -13,6 +13,8 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+const xcpNgTestVMUUID = "11111111-1111-1111-1111-111111111111"
+
 type fakeLifecycleClient struct {
 	calls       []string
 	servers     []Server
@@ -93,6 +95,9 @@ func (f *fakeLifecycleClient) CloneVM(_ context.Context, req xcpNgCloneRequest) 
 	if vm.Ref == "" {
 		vm.Ref = "OpaqueRef:vm-1"
 	}
+	if vm.UUID == "" {
+		vm.UUID = xcpNgTestVMUUID
+	}
 	if vm.Name == "" {
 		vm.Name = leaseVMName(req.LeaseID, req.Slug)
 	}
@@ -136,6 +141,11 @@ func (f *fakeLifecycleClient) GetServer(_ context.Context, id string) (Server, e
 	f.record("get")
 	if f.getServer != nil {
 		if server, ok := f.getServer[id]; ok {
+			if firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP) == "" {
+				if err := f.fail("guest-ip"); err != nil {
+					return Server{}, err
+				}
+			}
 			return server, nil
 		}
 	}
@@ -204,7 +214,10 @@ func TestAcquireLifecycleCallOrderAndTarget(t *testing.T) {
 	if !reflect.DeepEqual(fake.calls, wantCalls) {
 		t.Fatalf("calls=%v want %v", fake.calls, wantCalls)
 	}
-	if labels := fake.setLabels["OpaqueRef:vm-1"]; labels["state"] != "ready" || labels["lease"] != "cbx_testlease" || labels["provider"] != "xcp-ng" {
+	if lease.Server.CloudID != xcpNgTestVMUUID {
+		t.Fatalf("lease server should expose durable UUID cloud id, got %#v", lease.Server)
+	}
+	if labels := fake.setLabels[xcpNgTestVMUUID]; labels["state"] != "ready" || labels["lease"] != "cbx_testlease" || labels["provider"] != "xcp-ng" {
 		t.Fatalf("labels=%#v", labels)
 	}
 }
@@ -219,7 +232,7 @@ func TestAcquireCleansUpVMAndConfigDriveOnGuestIPFailure(t *testing.T) {
 	if _, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "blue"}); err == nil {
 		t.Fatal("expected guest IP failure")
 	}
-	if !reflect.DeepEqual(fake.deleted, []string{"OpaqueRef:vm-1"}) {
+	if !reflect.DeepEqual(fake.deleted, []string{xcpNgTestVMUUID}) {
 		t.Fatalf("deleted=%v", fake.deleted)
 	}
 	if len(fake.deletedCD) != 1 || fake.deletedCD[0].VDIRef != "OpaqueRef:vdi" {
@@ -236,12 +249,13 @@ func TestResolveRejectsExistingNonCrabboxVM(t *testing.T) {
 }
 
 func TestResolveByAliasReturnsGuestIPLookupErrorWhenHostMissing(t *testing.T) {
-	managed := crabboxServer("OpaqueRef:vm-1", "cbx_lease", "ready", time.Now().Add(time.Hour))
+	managed := crabboxServer(xcpNgTestVMUUID, "cbx_lease", "ready", time.Now().Add(time.Hour))
 	managed.PublicNet.IPv4.IP = ""
 	managed.PrivateNet.IPv4.IP = ""
 	fake := &fakeLifecycleClient{
-		servers: []Server{managed},
-		errOn:   map[string]error{"guest-ip": errors.New("guest metrics unavailable")},
+		servers:   []Server{managed},
+		getServer: map[string]Server{xcpNgTestVMUUID: managed},
+		errOn:     map[string]error{"guest-ip": errors.New("guest metrics unavailable")},
 	}
 	backend := newTestBackend(t, fake)
 	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "lease"}); err == nil || !strings.Contains(err.Error(), "guest metrics unavailable") {
@@ -253,7 +267,7 @@ func TestResolveByAliasReturnsGuestIPLookupErrorWhenHostMissing(t *testing.T) {
 }
 
 func TestListResolveTouchReleaseUseOnlyCrabboxMetadata(t *testing.T) {
-	managed := crabboxServer("OpaqueRef:vm-1", "cbx_lease", "ready", time.Now().Add(time.Hour))
+	managed := crabboxServer(xcpNgTestVMUUID, "cbx_lease", "ready", time.Now().Add(time.Hour))
 	unmanaged := Server{CloudID: "OpaqueRef:vm-2", Name: "crabbox-prefix-only", Labels: map[string]string{"provider": "xcp-ng"}}
 	fake := &fakeLifecycleClient{
 		servers: []Server{managed, unmanaged},
@@ -266,7 +280,7 @@ func TestListResolveTouchReleaseUseOnlyCrabboxMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(servers) != 1 || servers[0].CloudID != "OpaqueRef:vm-1" {
+	if len(servers) != 1 || servers[0].CloudID != xcpNgTestVMUUID {
 		t.Fatalf("servers=%#v", servers)
 	}
 	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_lease"})
@@ -286,7 +300,7 @@ func TestListResolveTouchReleaseUseOnlyCrabboxMetadata(t *testing.T) {
 	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(fake.deleted, []string{"OpaqueRef:vm-1"}) {
+	if !reflect.DeepEqual(fake.deleted, []string{xcpNgTestVMUUID}) {
 		t.Fatalf("deleted=%v", fake.deleted)
 	}
 }
