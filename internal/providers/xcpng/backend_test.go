@@ -302,12 +302,42 @@ func TestAcquireCleansUpVMAndConfigDriveOnGuestIPFailure(t *testing.T) {
 	}
 }
 
+func TestAcquireRetriesFreshLeaseWhenGuestIPNeverAppears(t *testing.T) {
+	fake := &fakeLifecycleClient{
+		templateRef: "OpaqueRef:tpl",
+		srRef:       "OpaqueRef:sr",
+		networkRef:  "OpaqueRef:net",
+		hostRef:     "OpaqueRef:host",
+		drive:       xcpNgConfigDrive{VDIRef: "OpaqueRef:vdi", VBDRef: "OpaqueRef:vbd", Name: "drive"},
+	}
+	backend := newTestBackend(t, fake)
+	if _, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "blue"}); err == nil || !strings.Contains(err.Error(), "timed out waiting for XCP-ng guest IPv4") {
+		t.Fatalf("err=%v, want guest IPv4 timeout", err)
+	}
+	if got := countCalls(fake.calls, "clone"); got != 2 {
+		t.Fatalf("clone calls=%d want 2 after retry, calls=%v", got, fake.calls)
+	}
+	if got := countCalls(fake.calls, "delete"); got != 2 {
+		t.Fatalf("delete calls=%d want 2 after retry, calls=%v", got, fake.calls)
+	}
+}
+
 func TestResolveRejectsExistingNonCrabboxVM(t *testing.T) {
 	fake := &fakeLifecycleClient{getServer: map[string]Server{"OpaqueRef:user": {CloudID: "OpaqueRef:user", Name: "user-vm", Labels: map[string]string{"crabbox": "false"}}}}
 	backend := newTestBackend(t, fake)
 	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "OpaqueRef:user"}); err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
 		t.Fatalf("err=%v", err)
 	}
+}
+
+func countCalls(calls []string, want string) int {
+	var count int
+	for _, call := range calls {
+		if call == want {
+			count++
+		}
+	}
+	return count
 }
 
 func TestResolveByAliasReturnsGuestIPLookupErrorWhenHostMissing(t *testing.T) {

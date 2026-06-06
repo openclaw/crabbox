@@ -2307,7 +2307,8 @@ func isBootstrapWaitError(err error) bool {
 	var exitErr ExitError
 	return AsExitError(err, &exitErr) &&
 		exitErr.Code == 5 &&
-		strings.Contains(exitErr.Message, "timed out waiting for SSH")
+		(strings.Contains(exitErr.Message, "timed out waiting for SSH") ||
+			strings.Contains(exitErr.Message, "timed out waiting for XCP-ng guest IPv4"))
 }
 
 func IsBootstrapWaitError(err error) bool {

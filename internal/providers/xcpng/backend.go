@@ -248,7 +248,7 @@ func (b *leaseBackend) waitForGuestIPv4(ctx context.Context, client lifecycleCli
 			if lastErr != nil {
 				return "", lastErr
 			}
-			return "", errors.New("timed out waiting for XCP-ng guest IPv4")
+			return "", exit(5, "timed out waiting for XCP-ng guest IPv4")
 		}
 		select {
 		case <-ctx.Done():
