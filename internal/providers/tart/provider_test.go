@@ -503,10 +503,10 @@ func TestPreparLeaseRejectsDashDashIP(t *testing.T) {
 	applyDefaults(&cfg)
 	runner := &recordingRunner{}
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	inst := tartInstance{Name: "crabbox-blue-1234abcd", State: "running"}
+	inst := tartInstance{Name: "crabbox-blue-1234abcd", State: "running", Running: true}
 	_, err := b.prepareLease(context.Background(), cfg, inst, "--", core.LeaseClaim{LeaseID: "cbx_test"}, false)
 	if err == nil {
-		t.Fatal("prepareLease should reject IP \"--\"")
+		t.Fatal("prepareLease should reject IP \"--\" for running VM")
 	}
 }
 
@@ -979,8 +979,9 @@ func TestApplyFlagsRejectsNonPositiveResources(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"zero cpu", []string{"--tart-cpu", "0"}, "--tart-cpu must be a positive integer"},
-		{"negative cpu", []string{"--tart-cpu", "-1"}, "--tart-cpu must be a positive integer"},
+		{"zero cpu", []string{"--tart-cpu", "0"}, "--tart-cpu must be at least 4"},
+		{"negative cpu", []string{"--tart-cpu", "-1"}, "--tart-cpu must be at least 4"},
+		{"below minimum cpu", []string{"--tart-cpu", "2"}, "--tart-cpu must be at least 4"},
 		{"zero memory", []string{"--tart-memory", "0"}, "--tart-memory must be a positive integer"},
 		{"negative memory", []string{"--tart-memory", "-1"}, "--tart-memory must be a positive integer"},
 		{"zero disk", []string{"--tart-disk", "0"}, "--tart-disk must be a positive integer"},
@@ -1041,7 +1042,7 @@ func TestApplyFlagsNegativeFromConfigRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for negative CPU from config")
 	}
-	if !strings.Contains(err.Error(), "tart cpu count must be positive") {
+	if !strings.Contains(err.Error(), "tart cpu count must be at least 4") {
 		t.Fatalf("error %q does not contain expected message", err.Error())
 	}
 }
@@ -1072,6 +1073,31 @@ func TestDoctorHappyPath(t *testing.T) {
 	}
 	if !strings.Contains(result.Message, "leases=1") {
 		t.Fatalf("Message missing leases=1: %q", result.Message)
+	}
+}
+
+func TestDoctorCountsOnlyCrabboxVMs(t *testing.T) {
+	listJSON := `[
+		{"Name":"crabbox-blue-1234","State":"running","Running":true,"Disk":50,"Size":15,"Source":"ghcr.io/test:latest"},
+		{"Name":"my-personal-vm","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/other:latest"},
+		{"Name":"sequoia-base","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"}
+	]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"--version"}):                                     {Stdout: "2.32.1\n"},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	if !strings.Contains(result.Message, "leases=1") {
+		t.Fatalf("Doctor should count only crabbox- VMs (want leases=1): %q", result.Message)
 	}
 }
 
@@ -1433,16 +1459,34 @@ func TestPrepareLeaseMissingIP(t *testing.T) {
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
-	inst := tartInstance{Name: "crabbox-blue-1234", State: "running"}
 
-	_, err := b.prepareLease(context.Background(), cfg, inst, "", core.LeaseClaim{LeaseID: "cbx_test"}, false)
+	running := tartInstance{Name: "crabbox-blue-1234", State: "running", Running: true}
+	_, err := b.prepareLease(context.Background(), cfg, running, "", core.LeaseClaim{LeaseID: "cbx_test"}, false)
 	if err == nil {
-		t.Fatal("prepareLease should fail with empty IP")
+		t.Fatal("prepareLease should fail with empty IP for running VM")
 	}
-
-	_, err = b.prepareLease(context.Background(), cfg, inst, "--", core.LeaseClaim{LeaseID: "cbx_test"}, false)
+	_, err = b.prepareLease(context.Background(), cfg, running, "--", core.LeaseClaim{LeaseID: "cbx_test"}, false)
 	if err == nil {
-		t.Fatal("prepareLease should fail with '--' IP")
+		t.Fatal("prepareLease should fail with '--' IP for running VM")
+	}
+}
+
+func TestPrepareLeaseStoppedVMReturnsState(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+
+	stopped := tartInstance{Name: "crabbox-blue-1234", State: "stopped", Running: false}
+	lt, err := b.prepareLease(context.Background(), cfg, stopped, "", core.LeaseClaim{LeaseID: "cbx_test"}, false)
+	if err != nil {
+		t.Fatalf("prepareLease should return stopped state, not error: %v", err)
+	}
+	if lt.Server.Status != "stopped" {
+		t.Fatalf("Server.Status = %q, want stopped", lt.Server.Status)
+	}
+	if lt.SSH.Host != "" {
+		t.Fatalf("SSH.Host should be empty for stopped VM, got %q", lt.SSH.Host)
 	}
 }
 

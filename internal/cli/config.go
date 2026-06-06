@@ -785,6 +785,9 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if !IsTargetExplicit(cfg) && (cfg.TargetOS == "" || cfg.TargetOS == targetLinux) {
 			cfg.TargetOS = targetMacOS
 		}
+		if !cfg.ServerTypeExplicit && cfg.Tart.Image != "" {
+			cfg.ServerType = cfg.Tart.Image
+		}
 		return nil
 	}
 	if cfg.Provider != "proxmox" {

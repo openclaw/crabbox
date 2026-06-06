@@ -33,8 +33,8 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		core.MarkTartImageExplicit(cfg)
 	}
 	if flagWasSet(fs, "tart-cpu") {
-		if *v.CPUs <= 0 {
-			return exit(2, "--tart-cpu must be a positive integer (got %d)", *v.CPUs)
+		if *v.CPUs < 4 {
+			return exit(2, "--tart-cpu must be at least 4 (got %d)", *v.CPUs)
 		}
 		cfg.Tart.CPUs = *v.CPUs
 	}
@@ -58,8 +58,8 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		if !core.IsTargetExplicit(cfg) && cfg.TargetOS == "linux" {
 			cfg.TargetOS = targetMacOS
 		}
-		if cfg.Tart.CPUs < 0 {
-			return exit(2, "tart cpu count must be positive (got %d)", cfg.Tart.CPUs)
+		if cfg.Tart.CPUs < 0 || (cfg.Tart.CPUs > 0 && cfg.Tart.CPUs < 4) {
+			return exit(2, "tart cpu count must be at least 4 (got %d)", cfg.Tart.CPUs)
 		}
 		if cfg.Tart.Memory < 0 {
 			return exit(2, "tart memory must be positive (got %d)", cfg.Tart.Memory)

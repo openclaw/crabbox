@@ -92,6 +92,9 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	}
 	servers := make([]Server, 0, len(instances))
 	for _, inst := range instances {
+		if !strings.HasPrefix(inst.Name, "crabbox-") {
+			continue
+		}
 		servers = append(servers, b.serverFromInstance(inst, claims[inst.Name], cfg))
 	}
 	slug, err := allocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
@@ -221,11 +224,17 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	if err != nil {
 		return DoctorResult{}, err
 	}
+	leases := 0
+	for _, inst := range instances {
+		if strings.HasPrefix(inst.Name, "crabbox-") {
+			leases++
+		}
+	}
 	probe := "unchecked"
 	if req.ProbeSSH {
 		probe = "requires_running_lease"
 	}
-	msg := fmt.Sprintf("cli=ready control_plane=local inventory=ready api=list mutation=false leases=%d runtime=%s image=%s ssh_probe=%s", len(instances), firstLine(version.Stdout+version.Stderr), cfg.Tart.Image, probe)
+	msg := fmt.Sprintf("cli=ready control_plane=local inventory=ready api=list mutation=false leases=%d runtime=%s image=%s ssh_probe=%s", leases, firstLine(version.Stdout+version.Stderr), cfg.Tart.Image, probe)
 	return DoctorResult{Provider: providerName, Message: msg}, nil
 }
 
@@ -458,9 +467,10 @@ func (b *backend) injectSSHKey(ctx context.Context, name string, user string, pu
 		return exit(2, "tart.user %q is not a valid POSIX account name", user)
 	}
 	sshDir := fmt.Sprintf("~%s/.ssh", user)
+	safeKey := strings.ReplaceAll(strings.TrimSpace(publicKey), "'", "'\\''")
 	injectScript := fmt.Sprintf(
 		`mkdir -p %s && chmod 700 %s && echo '%s' >> %s/authorized_keys && chmod 600 %s/authorized_keys`,
-		sshDir, sshDir, strings.TrimSpace(publicKey), sshDir, sshDir,
+		sshDir, sshDir, safeKey, sshDir, sshDir,
 	)
 	injectResult, err := b.tart(ctx, []string{"exec", name, "bash", "-c", injectScript}, nil, b.rt.Stderr)
 	if err != nil {
@@ -556,7 +566,7 @@ func (b *backend) getIP(ctx context.Context, name string) string {
 
 func (b *backend) prepareLease(ctx context.Context, cfg Config, inst tartInstance, ip string, claim core.LeaseClaim, wait bool) (LeaseTarget, error) {
 	server := b.serverFromInstance(inst, claim, cfg)
-	if user := strings.TrimSpace(server.Labels["ssh_user"]); user != "" {
+	if user := strings.TrimSpace(server.Labels["ssh_user"]); user != "" && validPOSIXUser.MatchString(user) {
 		cfg.Tart.User = user
 		cfg.SSHUser = user
 	}
@@ -565,10 +575,13 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst tartInstanc
 		cfg.WorkRoot = root
 	}
 	if ip == "" || ip == "--" {
+		if !inst.Running {
+			server.Status = inst.State
+			server.Labels["state"] = tartState(inst.State)
+			return LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
+		}
 		return LeaseTarget{}, exit(5, "tart instance %s has no IP address", inst.Name)
 	}
-	// Publish the resolved VM IP as the server's public host so status/inspect
-	// (which read Server.PublicNet.IPv4.IP) report the lease host, not just SSH.
 	server.PublicNet.IPv4.IP = ip
 	if claim.LeaseID != "" {
 		keyPath, err := testboxKeyPath(claim.LeaseID)
