@@ -747,6 +747,13 @@ func TestRejectRunOptionsAndCreateRepoValidation(t *testing.T) {
 	if err := validateCreateRepo(cfg, Repo{Root: t.TempDir()}); err == nil || !strings.Contains(err.Error(), "--clone requires") {
 		t.Fatalf("clone validation err=%v", err)
 	}
+	worktreeRoot := t.TempDir()
+	if err := os.WriteFile(filepathJoin(worktreeRoot, ".git"), []byte("gitdir: ../.git/worktrees/example\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateCreateRepo(cfg, Repo{Root: worktreeRoot}); err == nil || !strings.Contains(err.Error(), ".git is not a directory") {
+		t.Fatalf("clone worktree validation err=%v", err)
+	}
 }
 
 func TestDockerSandboxWorkdirAndNameHelpers(t *testing.T) {

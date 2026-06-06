@@ -379,8 +379,12 @@ func validateCreateRepo(cfg Config, repo Repo) error {
 		return exit(2, "provider=%s requires a local workspace", providerName)
 	}
 	if cfg.DockerSandbox.Clone {
-		if _, err := os.Stat(filepath.Join(repo.Root, ".git")); err != nil {
+		info, err := os.Stat(filepath.Join(repo.Root, ".git"))
+		if err != nil {
 			return exit(2, "docker-sandbox --clone requires a normal Git repository workspace: %v", err)
+		}
+		if !info.IsDir() {
+			return exit(2, "docker-sandbox --clone requires a normal Git repository workspace: .git is not a directory")
 		}
 	}
 	return nil
