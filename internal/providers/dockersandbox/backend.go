@@ -15,6 +15,9 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+var randomBytes = rand.Read
+var statusPollInterval = 2 * time.Second
+
 type backend struct {
 	spec ProviderSpec
 	cfg  Config
@@ -274,7 +277,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		select {
 		case <-ctx.Done():
 			return StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(statusPollInterval):
 		}
 	}
 }
@@ -445,7 +448,7 @@ func newSandboxName(repo Repo) string {
 
 func randomSuffix() string {
 	var b [3]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	if _, err := randomBytes(b[:]); err != nil {
 		value := fmt.Sprintf("%x", time.Now().UnixNano())
 		if len(value) > sandboxNameSuffixLen {
 			return value[:sandboxNameSuffixLen]
