@@ -179,6 +179,8 @@ func TestXAPICallReconnectsOnHostIsSlaveRedirect(t *testing.T) {
 			writeXMLRPCString(t, w, "OpaqueRef:slave-session")
 		case "VM.get_all_records":
 			writeXAPIStatusFailure(t, w, []string{"HOST_IS_SLAVE", masterHost})
+		case "session.logout":
+			writeXMLRPCString(t, w, "true")
 		default:
 			t.Fatalf("unexpected slave method %s", method)
 		}
@@ -200,7 +202,7 @@ func TestXAPICallReconnectsOnHostIsSlaveRedirect(t *testing.T) {
 	if err := client.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(slaveMethods, ","); got != "session.login_with_password,VM.get_all_records" {
+	if got := strings.Join(slaveMethods, ","); got != "session.login_with_password,VM.get_all_records,session.logout" {
 		t.Fatalf("slave methods=%s", got)
 	}
 	if got := strings.Join(masterMethods, ","); got != "session.login_with_password,VM.get_all_records,session.logout" {

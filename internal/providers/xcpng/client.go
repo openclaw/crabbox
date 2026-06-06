@@ -772,6 +772,11 @@ func (c *xapiClient) call(ctx context.Context, method string, params ...any) (xm
 		return xmlRPCValue{}, fmt.Errorf("xcp-ng pool master redirect %q: %w", master, redirectErr)
 	}
 	oldSession := c.session
+	if oldSession != "" {
+		logoutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _ = c.callRaw(logoutCtx, "session.logout", oldSession)
+		cancel()
+	}
 	c.endpoint = redirected
 	c.session = ""
 	if loginErr := c.login(ctx); loginErr != nil {
