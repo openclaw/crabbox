@@ -2017,7 +2017,7 @@ func TestResolveReleaseOnlyRejectsUnclaimedVM(t *testing.T) {
 
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
 		commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: sampleListJSON()},
-		commandKey([]string{"ip", "crabbox-blue-1234abcd"}):                  {Stdout: "192.168.64.5\n"},
+		commandKey([]string{"ip", "crabbox-blue-1234abcd"}):                   {Stdout: "192.168.64.5\n"},
 	}}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
