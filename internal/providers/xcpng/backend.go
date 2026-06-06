@@ -115,6 +115,9 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTa
 }
 
 func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (LeaseTarget, error) {
+	if err := validateXCPNgProvisioningConfig(xcpNgProviderConfig(b.Cfg)); err != nil {
+		return LeaseTarget{}, err
+	}
 	client, err := newLifecycleClient(ctx, b.Cfg)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -179,8 +182,8 @@ type xcpNgPlacement struct {
 
 func (b *leaseBackend) resolvePlacement(ctx context.Context, client lifecycleClient) (xcpNgPlacement, error) {
 	cfg := xcpNgProviderConfig(b.Cfg)
-	if strings.TrimSpace(cfg.SR) == "" && strings.TrimSpace(cfg.SRUUID) == "" {
-		return xcpNgPlacement{}, exit(3, "xcp-ng sr or sr UUID is required for acquire/config-drive creation")
+	if err := validateXCPNgProvisioningConfig(cfg); err != nil {
+		return xcpNgPlacement{}, err
 	}
 	templateRef, err := client.ResolveTemplate(ctx, cfg)
 	if err != nil {
@@ -246,7 +249,7 @@ func (b *leaseBackend) waitForGuestIPv4(ctx context.Context, client lifecycleCli
 		lastErr = err
 		if currentTime(b.RT).After(deadline) {
 			if lastErr != nil {
-				return "", lastErr
+				return "", exit(5, "timed out waiting for XCP-ng guest IPv4: %v", lastErr)
 			}
 			return "", exit(5, "timed out waiting for XCP-ng guest IPv4")
 		}
@@ -433,6 +436,21 @@ func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.D
 			}},
 		}, nil
 	}
+	if err := validateXCPNgProvisioningConfig(cfg); err != nil {
+		return core.DoctorResult{
+			Provider: "xcp-ng",
+			Message:  "auth=configuration-incomplete control_plane=unchecked inventory=unchecked mutation=false runtime=unchecked",
+			Status:   "failed",
+			Checks: []core.DoctorCheck{{
+				Status:  "failed",
+				Check:   "configuration",
+				Message: err.Error(),
+				Details: map[string]string{
+					"mutation": "false",
+				},
+			}},
+		}, nil
+	}
 	client, err := newLifecycleClient(ctx, b.Cfg)
 	if err != nil {
 		return core.DoctorResult{}, err
@@ -466,10 +484,8 @@ func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.D
 }
 
 func (b *leaseBackend) resolveDoctorPlacement(ctx context.Context, client lifecycleClient, cfg xcpNgConfig) error {
-	if strings.TrimSpace(cfg.Template) != "" || strings.TrimSpace(cfg.TemplateUUID) != "" {
-		if _, err := client.ResolveTemplate(ctx, cfg); err != nil {
-			return err
-		}
+	if _, err := client.ResolveTemplate(ctx, cfg); err != nil {
+		return err
 	}
 	if _, err := client.ResolveSR(ctx, cfg); err != nil {
 		return err
@@ -526,6 +542,14 @@ func validateXCPNgConfig(cfg xcpNgConfig) error {
 	if strings.TrimSpace(cfg.Password) == "" {
 		missing = append(missing, "xcpNg.password or CRABBOX_XCP_NG_PASSWORD")
 	}
+	if len(missing) > 0 {
+		return exit(3, "xcp-ng configuration is incomplete: missing %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func validateXCPNgProvisioningConfig(cfg xcpNgConfig) error {
+	var missing []string
 	if strings.TrimSpace(cfg.Template) == "" && strings.TrimSpace(cfg.TemplateUUID) == "" {
 		missing = append(missing, "xcpNg.template/xcpNg.templateUuid or CRABBOX_XCP_NG_TEMPLATE/CRABBOX_XCP_NG_TEMPLATE_UUID")
 	}

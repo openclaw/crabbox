@@ -314,10 +314,10 @@ func TestAcquireCleansUpVMAndConfigDriveOnGuestIPFailure(t *testing.T) {
 	if _, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "blue"}); err == nil {
 		t.Fatal("expected guest IP failure")
 	}
-	if !reflect.DeepEqual(fake.deleted, []string{xcpNgTestVMUUID}) {
+	if !reflect.DeepEqual(fake.deleted, []string{xcpNgTestVMUUID, xcpNgTestVMUUID}) {
 		t.Fatalf("deleted=%v", fake.deleted)
 	}
-	if len(fake.deletedCD) != 1 || fake.deletedCD[0].VDIRef != "OpaqueRef:vdi" {
+	if len(fake.deletedCD) != 2 || fake.deletedCD[0].VDIRef != "OpaqueRef:vdi" || fake.deletedCD[1].VDIRef != "OpaqueRef:vdi" {
 		t.Fatalf("deleted config drives=%#v", fake.deletedCD)
 	}
 }
@@ -339,6 +339,18 @@ func TestAcquireRetriesFreshLeaseWhenGuestIPNeverAppears(t *testing.T) {
 	}
 	if got := countCalls(fake.calls, "delete"); got != 2 {
 		t.Fatalf("delete calls=%d want 2 after retry, calls=%v", got, fake.calls)
+	}
+}
+
+func TestWaitForGuestIPv4ClassifiesGuestMetricsNoIPAsBootstrapTimeout(t *testing.T) {
+	fake := &fakeLifecycleClient{errOn: map[string]error{"guest-ip": errors.New("no guest ipv4 address reported by XCP-ng guest metrics")}}
+	backend := newTestBackend(t, fake)
+	_, err := backend.waitForGuestIPv4(context.Background(), fake, "OpaqueRef:vm", 0)
+	if err == nil || !core.IsBootstrapWaitError(err) {
+		t.Fatalf("err=%v, want retry-classified bootstrap timeout", err)
+	}
+	if !strings.Contains(err.Error(), "no guest ipv4 address reported by XCP-ng guest metrics") {
+		t.Fatalf("err=%v, want guest metrics context", err)
 	}
 }
 
@@ -388,6 +400,10 @@ func TestListResolveTouchReleaseUseOnlyCrabboxMetadata(t *testing.T) {
 		},
 	}
 	backend := newTestBackend(t, fake)
+	backend.Cfg.XCPNg.Template = ""
+	backend.Cfg.XCPNg.TemplateUUID = ""
+	backend.Cfg.XCPNg.SR = ""
+	backend.Cfg.XCPNg.SRUUID = ""
 	servers, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -450,6 +466,10 @@ func TestCleanupIsMetadataAndExpiryGated(t *testing.T) {
 		{CloudID: "OpaqueRef:prefix", Name: "crabbox-prefix-only", Labels: map[string]string{"provider": "xcp-ng"}},
 	}}
 	backend := newTestBackend(t, fake)
+	backend.Cfg.XCPNg.Template = ""
+	backend.Cfg.XCPNg.TemplateUUID = ""
+	backend.Cfg.XCPNg.SR = ""
+	backend.Cfg.XCPNg.SRUUID = ""
 	backend.RT.Clock = fixedClock{t: now}
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
@@ -469,6 +489,20 @@ func TestCleanupDryRunDoesNotDelete(t *testing.T) {
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("dry-run deleted=%v", fake.deleted)
+	}
+}
+
+func TestValidationSplitsConnectionFromProvisioningPlacement(t *testing.T) {
+	cfg := xcpNgProviderConfig(testConfig())
+	cfg.Template = ""
+	cfg.TemplateUUID = ""
+	cfg.SR = ""
+	cfg.SRUUID = ""
+	if err := validateXCPNgConfig(cfg); err != nil {
+		t.Fatalf("connection validation should not require placement config: %v", err)
+	}
+	if err := validateXCPNgProvisioningConfig(cfg); err == nil || !strings.Contains(err.Error(), "xcpNg.template/xcpNg.templateUuid") || !strings.Contains(err.Error(), "xcpNg.sr/xcpNg.srUuid") {
+		t.Fatalf("provisioning validation err=%v", err)
 	}
 }
 
