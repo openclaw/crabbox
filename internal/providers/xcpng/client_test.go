@@ -350,7 +350,7 @@ func TestCloneVMUsesCopyForSRAndRewiresVIFsForNetwork(t *testing.T) {
 			writeXMLRPCString(t, w, "true")
 		case "VM.get_VIFs":
 			writeXMLRPCStringArray(t, w, []string{"OpaqueRef:vif"})
-		case "VIF.set_network":
+		case "VIF.move":
 			writeXMLRPCString(t, w, "true")
 		case "VM.provision":
 			writeXMLRPCString(t, w, "true")
@@ -382,7 +382,7 @@ func TestCloneVMUsesCopyForSRAndRewiresVIFsForNetwork(t *testing.T) {
 		t.Fatalf("vm=%#v", vm)
 	}
 	got := strings.Join(methods, ",")
-	for _, want := range []string{"VM.copy", "VM.set_affinity", "VM.get_VIFs", "VIF.set_network", "VM.remove_from_other_config", "VM.add_to_other_config", "VM.provision", "VM.get_uuid"} {
+	for _, want := range []string{"VM.copy", "VM.set_affinity", "VM.get_VIFs", "VIF.move", "VM.remove_from_other_config", "VM.add_to_other_config", "VM.provision", "VM.get_uuid"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("methods=%s missing %s", got, want)
 		}
@@ -807,6 +807,54 @@ func TestDeleteConfigDriveTreatsAlreadyDetachedVBDAsCleanedUp(t *testing.T) {
 	}
 }
 
+func TestDeleteConfigDriveTreatsHaltedPowerStateUnplugFaultAsCleanedUp(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VBD.unplug":
+			writeXAPIStatusFailure(t, w, []string{"VM_BAD_POWER_STATE", "OpaqueRef:vm", "running", "halted"})
+		case "VBD.destroy", "VDI.destroy":
+			writeXMLRPCString(t, w, "true")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	if err := client.DeleteConfigDrive(context.Background(), xcpNgConfigDrive{VBDRef: "OpaqueRef:vbd", VDIRef: "OpaqueRef:vdi"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(methods, ","); got != "VBD.unplug,VBD.destroy,VDI.destroy" {
+		t.Fatalf("methods=%s", got)
+	}
+}
+
+func TestDeleteConfigDriveTreatsNotUnpluggableVBDAsDestroyable(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VBD.unplug":
+			writeXAPIStatusFailure(t, w, []string{"VBD_NOT_UNPLUGGABLE", "OpaqueRef:vbd"})
+		case "VBD.destroy", "VDI.destroy":
+			writeXMLRPCString(t, w, "true")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	if err := client.DeleteConfigDrive(context.Background(), xcpNgConfigDrive{VBDRef: "OpaqueRef:vbd", VDIRef: "OpaqueRef:vdi"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(methods, ","); got != "VBD.unplug,VBD.destroy,VDI.destroy" {
+		t.Fatalf("methods=%s", got)
+	}
+}
+
 func TestXMLRPCHTTPErrorRedactsLoginPassword(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -896,6 +944,39 @@ func TestShutdownVMFallsBackToHardShutdown(t *testing.T) {
 	}
 	if strings.Index(got, "VM.hard_shutdown") > strings.LastIndex(got, "VM.get_power_state") {
 		t.Fatalf("methods=%s did not verify halted state after hard shutdown", got)
+	}
+}
+
+func TestShutdownVMTreatsBadPowerStateAsHaltedWhenStateConfirms(t *testing.T) {
+	var methods []string
+	powerStateChecks := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VM.get_power_state":
+			powerStateChecks++
+			if powerStateChecks == 1 {
+				writeXMLRPCString(t, w, "Running")
+			} else {
+				writeXMLRPCString(t, w, "Halted")
+			}
+		case "VM.clean_shutdown":
+			writeXAPIStatusFailure(t, w, []string{"VM_BAD_POWER_STATE", "OpaqueRef:vm", "running", "halted"})
+		case "VM.hard_shutdown":
+			t.Fatal("hard shutdown should not run once XAPI reports the VM is already halted")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	if err := client.shutdownVM(context.Background(), "OpaqueRef:vm"); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(methods, ",")
+	if got != "VM.get_power_state,VM.clean_shutdown,VM.get_power_state" {
+		t.Fatalf("methods=%s", got)
 	}
 }
 

@@ -23,6 +23,44 @@ never accepts or forwards an XCP-ng password as an argument.
 USAGE
 }
 
+load_xcpng_env_file() {
+  local file="$1"
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+    if [[ "$line" == export[[:space:]]* ]]; then
+      line="${line#export }"
+      line="${line#"${line%%[![:space:]]*}"}"
+    fi
+    [[ "$line" == *"="* ]] || continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    case "$key" in
+      CRABBOX_XCP_NG_API_URL|CRABBOX_XCP_NG_USERNAME|CRABBOX_XCP_NG_PASSWORD|\
+      CRABBOX_XCP_NG_TEMPLATE|CRABBOX_XCP_NG_TEMPLATE_UUID|\
+      CRABBOX_XCP_NG_SR|CRABBOX_XCP_NG_SR_UUID|\
+      CRABBOX_XCP_NG_NETWORK|CRABBOX_XCP_NG_NETWORK_UUID|\
+      CRABBOX_XCP_NG_HOST|CRABBOX_XCP_NG_USER|CRABBOX_XCP_NG_WORK_ROOT|\
+      CRABBOX_XCP_NG_INSECURE_TLS)
+        ;;
+      *)
+        continue
+        ;;
+    esac
+    if [[ "$value" == \"*\" && "$value" == *\" && "${#value}" -ge 2 ]]; then
+      value="${value:1:${#value}-2}"
+    elif [[ "$value" == \'*\' && "${#value}" -ge 2 ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+    printf -v "$key" '%s' "$value"
+    export "$key"
+  done <"$file"
+}
+
 mode="read-only"
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -48,6 +86,11 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+env_file="${CRABBOX_XCP_NG_ENV_FILE:-.crabbox/xcpng.env}"
+if [[ -f "$env_file" ]]; then
+  load_xcpng_env_file "$env_file"
+fi
 
 crabbox_bin="${CRABBOX_BIN:-}"
 if [[ -z "$crabbox_bin" ]]; then

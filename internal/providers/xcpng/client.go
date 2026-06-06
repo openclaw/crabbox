@@ -381,6 +381,15 @@ func (c *xapiClient) shutdownVM(ctx context.Context, ref string) error {
 			cleanErr = err
 		}
 	}
+	if isXAPIFault(cleanErr, "VM_BAD_POWER_STATE") {
+		state, err := c.callString(ctx, "VM.get_power_state", c.session, ref)
+		if err != nil {
+			return err
+		}
+		if state == "Halted" {
+			return nil
+		}
+	}
 	if err := c.callDiscard(ctx, "VM.hard_shutdown", c.session, ref); err != nil {
 		return fmt.Errorf("xcp-ng clean shutdown failed: %v; hard shutdown failed: %w", cleanErr, err)
 	}
@@ -413,7 +422,7 @@ func (c *xapiClient) waitForPowerState(ctx context.Context, ref, want string, ti
 
 func (c *xapiClient) DeleteConfigDrive(ctx context.Context, drive xcpNgConfigDrive) error {
 	if drive.VBDRef != "" {
-		if err := c.callDiscard(ctx, "VBD.unplug", c.session, drive.VBDRef); err != nil && !isNotFound(err) && !isAlreadyDetached(err) {
+		if err := c.callDiscard(ctx, "VBD.unplug", c.session, drive.VBDRef); err != nil && !isNotFound(err) && !isAlreadyDetached(err) && !isNotUnpluggable(err) && !isXAPIHaltedPowerStateFault(err) {
 			return err
 		}
 		if err := c.callDiscard(ctx, "VBD.destroy", c.session, drive.VBDRef); err != nil && !isNotFound(err) {
@@ -716,7 +725,7 @@ func (c *xapiClient) setVMNetwork(ctx context.Context, vmRef, networkRef string)
 		return err
 	}
 	for _, vifRef := range xmlValueToStrings(value) {
-		if _, err := c.call(ctx, "VIF.set_network", c.session, vifRef, networkRef); err != nil {
+		if _, err := c.call(ctx, "VIF.move", c.session, vifRef, networkRef); err != nil {
 			return err
 		}
 	}
@@ -907,6 +916,44 @@ func isAlreadyDetached(err error) bool {
 	}
 	text := err.Error()
 	return strings.Contains(text, "DEVICE_ALREADY_DETACHED") || strings.Contains(text, "already detached")
+}
+
+func isNotUnpluggable(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	return strings.Contains(text, "VBD_NOT_UNPLUGGABLE") || strings.Contains(text, "not unpluggable")
+}
+
+func isXAPIFault(err error, code string) bool {
+	if err == nil || code == "" {
+		return false
+	}
+	var statusErr xapiStatusError
+	if errors.As(err, &statusErr) {
+		for _, value := range xmlValueToStrings(statusErr.Fields["ErrorDescription"]) {
+			if value == code {
+				return true
+			}
+		}
+	}
+	var faultErr xapiFaultError
+	if errors.As(err, &faultErr) {
+		fields := xmlValueToStringMap(faultErr.Value)
+		if strings.Contains(fields["faultString"], code) {
+			return true
+		}
+	}
+	return strings.Contains(err.Error(), code)
+}
+
+func isXAPIHaltedPowerStateFault(err error) bool {
+	if !isXAPIFault(err, "VM_BAD_POWER_STATE") {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "halted")
 }
 
 func xapiEndpoint(raw string) (string, error) {
