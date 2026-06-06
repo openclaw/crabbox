@@ -1126,6 +1126,257 @@ func TestReleaseLeaseMessage(t *testing.T) {
 	}
 }
 
+func TestReleaseLeaseInfersLeaseIDFromLabels(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"stop", "crabbox-blue-1234"}):   {},
+			commandKey([]string{"delete", "crabbox-blue-1234"}): {},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{
+			Server: core.Server{
+				CloudID: "crabbox-blue-1234",
+				Labels:  map[string]string{"instance": "crabbox-blue-1234", "lease": "cbx_inferred"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReleaseLease with inferred LeaseID: %v", err)
+	}
+}
+
+func TestReleaseLeaseDeleteError(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"stop", "crabbox-blue-1234"}):   {},
+			commandKey([]string{"delete", "crabbox-blue-1234"}): {ExitCode: 1, Stderr: "VM not found"},
+		},
+		errors: map[string]error{
+			commandKey([]string{"delete", "crabbox-blue-1234"}): fmt.Errorf("exit status 1"),
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{
+			LeaseID: "cbx_test123",
+			Server:  core.Server{CloudID: "crabbox-blue-1234"},
+		},
+	})
+	if err == nil {
+		t.Fatal("ReleaseLease should propagate deleteVM error")
+	}
+}
+
+func TestCleanupSkipsNonCrabboxVMs(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	listJSON := `[{"Name":"my-dev-vm","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"},{"Name":"crabbox-old-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--format", "json"}):   {Stdout: listJSON},
+			commandKey([]string{"stop", "crabbox-old-1234"}):   {},
+			commandKey([]string{"delete", "crabbox-old-1234"}): {},
+		},
+	}
+	var stdout strings.Builder
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &stdout, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err := b.Cleanup(context.Background(), core.CleanupRequest{})
+	if err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	output := stdout.String()
+	if strings.Contains(output, "my-dev-vm") {
+		t.Fatal("Cleanup should not mention non-crabbox VMs in output")
+	}
+	if !strings.Contains(output, "removed=1") {
+		t.Fatalf("expected removed=1 in output: %q", output)
+	}
+}
+
+func TestCleanupDeleteError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	listJSON := `[{"Name":"crabbox-broken-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--format", "json"}):      {Stdout: listJSON},
+			commandKey([]string{"stop", "crabbox-broken-1234"}):   {},
+			commandKey([]string{"delete", "crabbox-broken-1234"}): {ExitCode: 1, Stderr: "busy"},
+		},
+		errors: map[string]error{
+			commandKey([]string{"delete", "crabbox-broken-1234"}): fmt.Errorf("exit status 1"),
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err := b.Cleanup(context.Background(), core.CleanupRequest{})
+	if err == nil {
+		t.Fatal("Cleanup should propagate deleteVM error")
+	}
+}
+
+func TestCleanupRemovesOrphanedClaims(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_orphan", "orphan-slug", providerName, "instance:crabbox-gone-9999", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup orphan claim: %v", err)
+	}
+	listJSON := `[]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--format", "json"}): {Stdout: listJSON},
+		},
+	}
+	var stdout strings.Builder
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &stdout, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err = b.Cleanup(context.Background(), core.CleanupRequest{})
+	if err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "missing instance") {
+		t.Fatalf("should report orphaned claim removal: %q", output)
+	}
+	if !strings.Contains(output, "claims_removed=1") {
+		t.Fatalf("should report claims_removed=1: %q", output)
+	}
+}
+
+func TestResolveInstanceByDirectName(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	listJSON := `[{"Name":"crabbox-blue-def456","State":"running","Running":true,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--format", "json"}):  {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-blue-def456"}): {Stdout: "192.168.64.7\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	inst, ip, _, err := b.resolveInstance(context.Background(), "crabbox-blue-def456")
+	if err != nil {
+		t.Fatalf("resolveInstance by name: %v", err)
+	}
+	if inst.Name != "crabbox-blue-def456" {
+		t.Fatalf("inst.Name = %q", inst.Name)
+	}
+	if ip != "192.168.64.7" {
+		t.Fatalf("ip = %q", ip)
+	}
+}
+
+func TestResolveInstanceNotFound(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	listJSON := `[{"Name":"crabbox-blue-1234","State":"running","Running":true,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--format", "json"}): {Stdout: listJSON},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	_, _, _, err := b.resolveInstance(context.Background(), "nonexistent")
+	if err == nil {
+		t.Fatal("resolveInstance should fail for nonexistent identifier")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error should mention not found: %v", err)
+	}
+}
+
+func TestResolveInstanceEmptyIdentifier(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+
+	_, _, _, err := b.resolveInstance(context.Background(), "")
+	if err == nil {
+		t.Fatal("resolveInstance should fail for empty identifier")
+	}
+	if !strings.Contains(err.Error(), "requires --id") {
+		t.Fatalf("error should mention --id: %v", err)
+	}
+}
+
+func TestPrepareLeaseAppliesSSHUserFromLabel(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	runner := &recordingRunner{}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	inst := tartInstance{Name: "crabbox-blue-1234", State: "running"}
+	claim := core.LeaseClaim{
+		LeaseID: "cbx_test",
+		Labels: map[string]string{
+			"ssh_user": "root",
+		},
+	}
+	lt, err := b.prepareLease(context.Background(), cfg, inst, "192.0.2.10", claim, false)
+	if err != nil {
+		t.Fatalf("prepareLease: %v", err)
+	}
+	if lt.SSH.User != "root" {
+		t.Fatalf("SSH.User = %q, want root", lt.SSH.User)
+	}
+}
+
+func TestPrepareLeaseMissingIP(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+	inst := tartInstance{Name: "crabbox-blue-1234", State: "running"}
+
+	_, err := b.prepareLease(context.Background(), cfg, inst, "", core.LeaseClaim{LeaseID: "cbx_test"}, false)
+	if err == nil {
+		t.Fatal("prepareLease should fail with empty IP")
+	}
+
+	_, err = b.prepareLease(context.Background(), cfg, inst, "--", core.LeaseClaim{LeaseID: "cbx_test"}, false)
+	if err == nil {
+		t.Fatal("prepareLease should fail with '--' IP")
+	}
+}
+
+func TestApplyDefaultsPreservesExplicitTarget(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.TargetOS = "macos"
+	applyDefaults(&cfg)
+	if cfg.TargetOS != "macos" {
+		t.Fatalf("applyDefaults overrode explicit macos target: %q", cfg.TargetOS)
+	}
+}
+
+func TestApplyDefaultsConvertsEmptyTarget(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.TargetOS = ""
+	applyDefaults(&cfg)
+	if cfg.TargetOS != "macos" {
+		t.Fatalf("applyDefaults should set empty target to macos: %q", cfg.TargetOS)
+	}
+}
+
 func TestCleanupRemovesStoppedCrabboxVMs(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	listJSON := `[{"Name":"crabbox-old-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"},{"Name":"my-personal-vm","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
