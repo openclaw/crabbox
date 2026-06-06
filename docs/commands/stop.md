@@ -42,6 +42,9 @@ Crabbox lease ID and local slug:
   sandbox ID in raw or `e2b_<sandboxID>` form and deletes the E2B sandbox.
 - `ssh` (static hosts) — removes the local claim for the configured static
   target; it never deletes the host.
+- `xcp-ng` — accepts a Crabbox lease ID or local slug for a Crabbox-managed VM,
+  deletes the attached config drive when present, and refuses to touch VMs that
+  are not labeled as Crabbox-managed XCP-ng leases.
 
 ## Behavior by provider mode
 

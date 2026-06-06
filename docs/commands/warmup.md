@@ -130,6 +130,16 @@ Managed Hetzner provisioning supports Linux only. For managed Windows, use
 `--provider aws --target windows` or `--provider azure --target windows`; for an
 existing Hetzner Windows host, use `--provider ssh --target windows`.
 
+### xcp-ng
+
+`--provider xcp-ng` clones a configured Linux template through direct XAPI,
+attaches a per-lease config-drive cloud-init ISO, waits for XCP-ng guest metrics
+to report an IPv4 address, and then uses the normal SSH bootstrap. Run
+`crabbox doctor --provider xcp-ng --json` first; it is non-mutating and reports
+`mutation=false`. A template name or UUID, storage repository, API URL,
+username, and password must come from config or environment before warmup can
+create a lease.
+
 ### aws — Windows
 
 `--provider aws --target windows --windows-mode normal --desktop` creates a real

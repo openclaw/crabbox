@@ -72,6 +72,7 @@ SSH-lease providers:
 - Hetzner Cloud: `internal/providers/hetzner`, with CLI helpers in `internal/cli/hcloud.go`
 - Parallels (macOS VM host): `internal/providers/parallels`, with CLI helpers in `internal/cli/parallels.go`
 - Proxmox VE: `internal/providers/proxmox`, with CLI helpers in `internal/cli/proxmox.go`
+- XCP-ng (`xcp-ng`): `internal/providers/xcpng`
 - Static/BYO SSH host: `internal/providers/ssh`, with target mapping in `internal/cli/static.go`
 - Local Docker container: `internal/providers/localcontainer`
 - Canonical Multipass local Ubuntu VM: `internal/providers/multipass`

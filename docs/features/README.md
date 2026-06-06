@@ -37,6 +37,7 @@ Read when:
 - [Capacity and fallback](capacity-fallback.md): class chains, market spot/on-demand, and region/AZ routing.
 - [Provider backends](../provider-backends.md): contract reference for backend interfaces and registration.
 - [Authoring a provider](provider-authoring.md): step-by-step guide to writing a new provider.
+- [XCP-ng](../providers/xcp-ng.md): direct XCP-ng Linux VM clones through XAPI and config-drive cloud-init.
 
 Provider deep-dives that live here in `features/`:
 

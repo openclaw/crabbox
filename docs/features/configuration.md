@@ -331,6 +331,51 @@ proxmox:
 Put `tokenSecret` in a private config file or use
 `CRABBOX_PROXMOX_TOKEN_SECRET`; do not pass it as a command-line flag.
 
+### XCP-ng
+
+```yaml
+provider: xcp-ng
+target: linux
+xcpNg:
+  apiUrl: https://xcp-pool.example.test
+  username: crabbox@example.test
+  password: <api-password>
+  template: crabbox-ubuntu-2404
+  templateUuid: ""
+  sr: default-sr
+  srUuid: ""
+  network: pool-network
+  networkUuid: ""
+  host: ""
+  user: crabbox
+  workRoot: /work/crabbox
+  insecureTLS: false
+```
+
+`apiUrl`, `username`, `password`, and either `sr` or `srUuid` are required for
+XCP-ng doctor and lifecycle commands. `template` or `templateUuid` is required
+before `warmup` or `run` can create a lease. The password must come from private
+config or `CRABBOX_XCP_NG_PASSWORD`; there is intentionally no
+XCP-ng password command-line flag.
+
+Environment overrides:
+
+```text
+CRABBOX_XCP_NG_API_URL
+CRABBOX_XCP_NG_USERNAME
+CRABBOX_XCP_NG_PASSWORD
+CRABBOX_XCP_NG_TEMPLATE
+CRABBOX_XCP_NG_TEMPLATE_UUID
+CRABBOX_XCP_NG_SR
+CRABBOX_XCP_NG_SR_UUID
+CRABBOX_XCP_NG_NETWORK
+CRABBOX_XCP_NG_NETWORK_UUID
+CRABBOX_XCP_NG_HOST
+CRABBOX_XCP_NG_USER
+CRABBOX_XCP_NG_WORK_ROOT
+CRABBOX_XCP_NG_INSECURE_TLS
+```
+
 ### Static SSH
 
 ```yaml
