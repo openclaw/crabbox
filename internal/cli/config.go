@@ -771,6 +771,22 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		}
 		return nil
 	}
+	if cfg.Provider == "tart" || cfg.Provider == "local-tart" || cfg.Provider == "macos-vm" {
+		if cfg.Tart.User != "" {
+			cfg.SSHUser = cfg.Tart.User
+		}
+		if cfg.SSHPort == "" || cfg.SSHPort == baseConfig().SSHPort {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		if cfg.Tart.WorkRoot != "" {
+			cfg.WorkRoot = cfg.Tart.WorkRoot
+		}
+		if !IsTargetExplicit(cfg) && (cfg.TargetOS == "" || cfg.TargetOS == targetLinux) {
+			cfg.TargetOS = targetMacOS
+		}
+		return nil
+	}
 	if cfg.Provider != "proxmox" {
 		if cfg.Provider != "parallels" {
 			return nil

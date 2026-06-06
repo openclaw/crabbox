@@ -33,12 +33,21 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		core.MarkTartImageExplicit(cfg)
 	}
 	if flagWasSet(fs, "tart-cpu") {
+		if *v.CPUs <= 0 {
+			return exit(2, "--tart-cpu must be a positive integer (got %d)", *v.CPUs)
+		}
 		cfg.Tart.CPUs = *v.CPUs
 	}
 	if flagWasSet(fs, "tart-memory") {
+		if *v.Memory <= 0 {
+			return exit(2, "--tart-memory must be a positive integer (got %d)", *v.Memory)
+		}
 		cfg.Tart.Memory = *v.Memory
 	}
 	if flagWasSet(fs, "tart-disk") {
+		if *v.Disk <= 0 {
+			return exit(2, "--tart-disk must be a positive integer (got %d)", *v.Disk)
+		}
 		cfg.Tart.Disk = *v.Disk
 		core.MarkTartDiskExplicit(cfg)
 	}
@@ -48,6 +57,15 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		}
 		if !core.IsTargetExplicit(cfg) && cfg.TargetOS == "linux" {
 			cfg.TargetOS = targetMacOS
+		}
+		if cfg.Tart.CPUs < 0 {
+			return exit(2, "tart cpu count must be positive (got %d)", cfg.Tart.CPUs)
+		}
+		if cfg.Tart.Memory < 0 {
+			return exit(2, "tart memory must be positive (got %d)", cfg.Tart.Memory)
+		}
+		if cfg.Tart.Disk < 0 {
+			return exit(2, "tart disk size must be positive (got %d)", cfg.Tart.Disk)
 		}
 		applyDefaults(cfg)
 	}

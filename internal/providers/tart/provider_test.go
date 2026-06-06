@@ -374,7 +374,7 @@ func TestApplyFlagsAcceptsExplicitMacOS(t *testing.T) {
 func TestInjectSSHKeyDoesNotCallTartIP(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"exec", "crabbox-blue-1234", "bash", "-c", "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo 'ssh-ed25519 AAAA test' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"}): {},
+			commandKey([]string{"exec", "crabbox-blue-1234", "bash", "-c", "mkdir -p ~admin/.ssh && chmod 700 ~admin/.ssh && echo 'ssh-ed25519 AAAA test' >> ~admin/.ssh/authorized_keys && chmod 600 ~admin/.ssh/authorized_keys"}): {},
 		},
 		errors: map[string]error{},
 	}
@@ -382,7 +382,7 @@ func TestInjectSSHKeyDoesNotCallTartIP(t *testing.T) {
 	cfg.Provider = providerName
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 
-	err := b.injectSSHKey(context.Background(), "crabbox-blue-1234", "ssh-ed25519 AAAA test")
+	err := b.injectSSHKey(context.Background(), "crabbox-blue-1234", "admin", "ssh-ed25519 AAAA test")
 	if err != nil {
 		t.Fatalf("injectSSHKey: %v", err)
 	}
@@ -390,6 +390,33 @@ func TestInjectSSHKeyDoesNotCallTartIP(t *testing.T) {
 		if len(call.Args) >= 2 && call.Args[0] == "ip" {
 			t.Fatal("injectSSHKey should not call tart ip; tart exec connects by VM name")
 		}
+	}
+}
+
+func TestInjectSSHKeyTargetsConfiguredUser(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"exec", "crabbox-blue-1234", "bash", "-c", "mkdir -p ~root/.ssh && chmod 700 ~root/.ssh && echo 'ssh-ed25519 AAAA test' >> ~root/.ssh/authorized_keys && chmod 600 ~root/.ssh/authorized_keys"}): {},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err := b.injectSSHKey(context.Background(), "crabbox-blue-1234", "root", "ssh-ed25519 AAAA test")
+	if err != nil {
+		t.Fatalf("injectSSHKey: %v", err)
+	}
+	found := false
+	for _, call := range runner.calls {
+		for _, arg := range call.Args {
+			if strings.Contains(arg, "~root/.ssh") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("injectSSHKey should target ~root/.ssh when user is root")
 	}
 }
 
@@ -898,6 +925,79 @@ func TestResolveInstanceBySlug(t *testing.T) {
 	}
 	if ip != "192.168.64.6" {
 		t.Fatalf("ip = %q, want 192.168.64.6", ip)
+	}
+}
+
+func TestApplyFlagsRejectsNonPositiveResources(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"zero cpu", []string{"--tart-cpu", "0"}, "--tart-cpu must be a positive integer"},
+		{"negative cpu", []string{"--tart-cpu", "-1"}, "--tart-cpu must be a positive integer"},
+		{"zero memory", []string{"--tart-memory", "0"}, "--tart-memory must be a positive integer"},
+		{"negative memory", []string{"--tart-memory", "-1"}, "--tart-memory must be a positive integer"},
+		{"zero disk", []string{"--tart-disk", "0"}, "--tart-disk must be a positive integer"},
+		{"negative disk", []string{"--tart-disk", "-1"}, "--tart-disk must be a positive integer"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			vals := registerFlags(fs, cfg)
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			err := applyFlags(&cfg, fs, vals)
+			if err == nil {
+				t.Fatal("expected error for non-positive resource flag")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestApplyFlagsAcceptsPositiveResources(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--tart-cpu", "4", "--tart-memory", "8192", "--tart-disk", "100"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := applyFlags(&cfg, fs, vals); err != nil {
+		t.Fatalf("applyFlags: %v", err)
+	}
+	if cfg.Tart.CPUs != 4 {
+		t.Fatalf("CPUs = %d, want 4", cfg.Tart.CPUs)
+	}
+	if cfg.Tart.Memory != 8192 {
+		t.Fatalf("Memory = %d, want 8192", cfg.Tart.Memory)
+	}
+	if cfg.Tart.Disk != 100 {
+		t.Fatalf("Disk = %d, want 100", cfg.Tart.Disk)
+	}
+}
+
+func TestApplyFlagsNegativeFromConfigRejected(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tart.CPUs = -2
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	err := applyFlags(&cfg, fs, vals)
+	if err == nil {
+		t.Fatal("expected error for negative CPU from config")
+	}
+	if !strings.Contains(err.Error(), "tart cpu count must be positive") {
+		t.Fatalf("error %q does not contain expected message", err.Error())
 	}
 }
 

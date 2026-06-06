@@ -129,7 +129,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
-	if err := b.injectSSHKey(ctx, name, publicKey); err != nil {
+	if err := b.injectSSHKey(ctx, name, cfg.Tart.User, publicKey); err != nil {
 		_ = b.stopVM(context.Background(), name)
 		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
@@ -442,12 +442,11 @@ func (b *backend) waitForIP(ctx context.Context, name string) (string, error) {
 	}
 }
 
-// injectSSHKey injects the public key into the VM using the default
-// password-based SSH credentials (Cirrus tart images use admin:admin).
-func (b *backend) injectSSHKey(ctx context.Context, name string, publicKey string) error {
+func (b *backend) injectSSHKey(ctx context.Context, name string, user string, publicKey string) error {
+	sshDir := fmt.Sprintf("~%s/.ssh", user)
 	injectScript := fmt.Sprintf(
-		`mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '%s' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`,
-		strings.TrimSpace(publicKey),
+		`mkdir -p %s && chmod 700 %s && echo '%s' >> %s/authorized_keys && chmod 600 %s/authorized_keys`,
+		sshDir, sshDir, strings.TrimSpace(publicKey), sshDir, sshDir,
 	)
 	injectResult, err := b.tart(ctx, []string{"exec", name, "bash", "-c", injectScript}, nil, b.rt.Stderr)
 	if err != nil {
