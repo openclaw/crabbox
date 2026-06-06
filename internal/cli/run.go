@@ -966,7 +966,7 @@ retrySync:
 			return recordFailure(err)
 		}
 		stepStart = time.Now()
-		manifest, err := syncManifest(repo.Root, excludes)
+		manifest, err := syncManifestFiltered(repo.Root, excludes, syncIncludes(cfg))
 		if err != nil {
 			return recordFailure(exit(6, "build sync file list: %v", err))
 		}
@@ -1025,7 +1025,7 @@ retrySync:
 			recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s mode=archive", timings.sync.Round(time.Millisecond)))
 			goto afterSync
 		}
-		if cfg.Sync.GitSeed && remoteGitSeedCandidate(repo) {
+		if syncGitSeedEnabled(cfg, repo) {
 			stepStart = time.Now()
 			if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
@@ -1071,7 +1071,7 @@ retrySync:
 		}
 		stepStart = time.Now()
 		finalizeCommand := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
-			AllowMassDeletions: hydratedByActions || os.Getenv("CRABBOX_ALLOW_MASS_DELETIONS") == "1",
+			AllowMassDeletions: allowRemoteSyncMassDeletions(cfg, hydratedByActions),
 			HydrateGit:         hydrateGit,
 			BaseRef:            cfg.Sync.BaseRef,
 			BaseSHA:            baseSHA,
@@ -1729,6 +1729,10 @@ func shouldPruneRemoteSync(deleteEnabled, fullResync bool) bool {
 
 func shouldSeedRemotePruneManifest(hydratedByActions, fullResync bool) bool {
 	return hydratedByActions || fullResync
+}
+
+func allowRemoteSyncMassDeletions(cfg Config, hydratedByActions bool) bool {
+	return hydratedByActions || len(syncIncludes(cfg)) > 0 || os.Getenv("CRABBOX_ALLOW_MASS_DELETIONS") == "1"
 }
 
 func commandNeedsHydrationHint(command []string, shellMode bool) bool {

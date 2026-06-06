@@ -19,7 +19,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client api, boxID string, r
 		return nil, 0, err
 	}
 	manifestStarted := b.now()
-	manifest, err := syncManifest(req.Repo.Root, excludes)
+	manifest, err := syncManifest(req.Repo.Root, excludes, b.cfg.Sync.Includes)
 	if err != nil {
 		return nil, 0, exit(6, "build sync file list: %v", err)
 	}

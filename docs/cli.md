@@ -308,6 +308,13 @@ sync:
     - node_modules
     - .turbo
     - dist
+  # include (root-relative whitelist): when set, ONLY these paths are synced (after excludes).
+  # Sync a few paths out of a large repo instead of blacklisting everything else.
+  include:
+    - src
+    - scripts
+    - package.json
+    - pnpm-lock.yaml
 env:
   allow:
     - CI
