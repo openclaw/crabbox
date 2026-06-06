@@ -2,6 +2,7 @@ package tart
 
 import (
 	"flag"
+	"os"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -66,6 +67,15 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		}
 		if cfg.Tart.Disk < 0 {
 			return exit(2, "tart disk size must be positive (got %d)", cfg.Tart.Disk)
+		}
+		if os.Getenv("CRABBOX_TART_CPUS") == "0" {
+			return exit(2, "CRABBOX_TART_CPUS must be at least 4 (got 0)")
+		}
+		if os.Getenv("CRABBOX_TART_MEMORY") == "0" {
+			return exit(2, "CRABBOX_TART_MEMORY must be at least 4096 MB (got 0)")
+		}
+		if os.Getenv("CRABBOX_TART_DISK") == "0" {
+			return exit(2, "CRABBOX_TART_DISK must be a positive integer (got 0)")
 		}
 		applyDefaults(cfg)
 	}

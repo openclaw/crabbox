@@ -1048,6 +1048,37 @@ func TestApplyFlagsNegativeFromConfigRejected(t *testing.T) {
 	}
 }
 
+func TestApplyFlagsRejectsZeroFromEnv(t *testing.T) {
+	cases := []struct {
+		name    string
+		envName string
+		want    string
+	}{
+		{"zero cpu from env", "CRABBOX_TART_CPUS", "CRABBOX_TART_CPUS must be at least 4"},
+		{"zero memory from env", "CRABBOX_TART_MEMORY", "CRABBOX_TART_MEMORY must be at least 4096"},
+		{"zero disk from env", "CRABBOX_TART_DISK", "CRABBOX_TART_DISK must be a positive integer"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(tc.envName, "0")
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			vals := registerFlags(fs, cfg)
+			if err := fs.Parse(nil); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			err := applyFlags(&cfg, fs, vals)
+			if err == nil {
+				t.Fatalf("expected error for %s=0", tc.envName)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
 func TestDoctorHappyPath(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
