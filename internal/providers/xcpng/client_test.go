@@ -98,6 +98,116 @@ func TestClientDoctorInventoryUsesListOnly(t *testing.T) {
 	}
 }
 
+func TestNewXAPIClientFollowsHostIsSlaveMasterRedirect(t *testing.T) {
+	var slaveMethods []string
+	var masterMethods []string
+	var masterHost string
+	master := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		masterMethods = append(masterMethods, method)
+		switch method {
+		case "session.login_with_password":
+			writeXMLRPCString(t, w, "OpaqueRef:master-session")
+		case "VM.get_all_records":
+			writeXMLRPCVMRecords(t, w)
+		case "session.logout":
+			writeXMLRPCString(t, w, "true")
+		default:
+			t.Fatalf("unexpected master method %s", method)
+		}
+	}))
+	defer master.Close()
+	masterHost = strings.TrimPrefix(master.URL, "http://")
+	slave := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		slaveMethods = append(slaveMethods, method)
+		if method != "session.login_with_password" {
+			t.Fatalf("unexpected slave method %s", method)
+		}
+		writeXAPIStatusFailure(t, w, []string{"HOST_IS_SLAVE", masterHost})
+	}))
+	defer slave.Close()
+
+	cfg := testConfig()
+	cfg.XCPNg.APIURL = slave.URL
+	client, err := newXAPIClient(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := client.endpoint; got != master.URL+"/" {
+		t.Fatalf("endpoint=%q want %q", got, master.URL+"/")
+	}
+	if _, err := client.DoctorInventory(context.Background(), xcpNgProviderConfig(cfg)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(slaveMethods, ","); got != "session.login_with_password" {
+		t.Fatalf("slave methods=%s", got)
+	}
+	if got := strings.Join(masterMethods, ","); got != "session.login_with_password,VM.get_all_records,session.logout" {
+		t.Fatalf("master methods=%s", got)
+	}
+}
+
+func TestXAPICallReconnectsOnHostIsSlaveRedirect(t *testing.T) {
+	var slaveMethods []string
+	var masterMethods []string
+	var masterHost string
+	master := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		masterMethods = append(masterMethods, method)
+		switch method {
+		case "session.login_with_password":
+			writeXMLRPCString(t, w, "OpaqueRef:master-session")
+		case "VM.get_all_records":
+			writeXMLRPCVMRecords(t, w)
+		case "session.logout":
+			writeXMLRPCString(t, w, "true")
+		default:
+			t.Fatalf("unexpected master method %s", method)
+		}
+	}))
+	defer master.Close()
+	masterHost = strings.TrimPrefix(master.URL, "http://")
+	slave := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		slaveMethods = append(slaveMethods, method)
+		switch method {
+		case "session.login_with_password":
+			writeXMLRPCString(t, w, "OpaqueRef:slave-session")
+		case "VM.get_all_records":
+			writeXAPIStatusFailure(t, w, []string{"HOST_IS_SLAVE", masterHost})
+		default:
+			t.Fatalf("unexpected slave method %s", method)
+		}
+	}))
+	defer slave.Close()
+
+	cfg := testConfig()
+	cfg.XCPNg.APIURL = slave.URL
+	client, err := newXAPIClient(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.DoctorInventory(context.Background(), xcpNgProviderConfig(cfg)); err != nil {
+		t.Fatal(err)
+	}
+	if got := client.endpoint; got != master.URL+"/" {
+		t.Fatalf("endpoint=%q want %q", got, master.URL+"/")
+	}
+	if err := client.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(slaveMethods, ","); got != "session.login_with_password,VM.get_all_records" {
+		t.Fatalf("slave methods=%s", got)
+	}
+	if got := strings.Join(masterMethods, ","); got != "session.login_with_password,VM.get_all_records,session.logout" {
+		t.Fatalf("master methods=%s", got)
+	}
+}
+
 func TestGuestIPv4SkipsLoopbackAndNonIPv4(t *testing.T) {
 	client := &xapiClient{session: "OpaqueRef:session"}
 	value := xmlRPCValue{Struct: []xmlRPCMember{
@@ -926,6 +1036,24 @@ func writeXMLRPCFault(t *testing.T, w http.ResponseWriter, message string) {
 		`<member><name>faultString</name><value><string>` + message + `</string></value></member>` +
 		`</struct></value></fault></methodResponse>`
 	if _, err := w.Write([]byte(response)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeXAPIStatusFailure(t *testing.T, w http.ResponseWriter, values []string) {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0"?><methodResponse><params><param><value><struct>`)
+	b.WriteString(`<member><name>Status</name><value><string>Failure</string></value></member>`)
+	b.WriteString(`<member><name>ErrorDescription</name><value><array><data>`)
+	for _, value := range values {
+		b.WriteString(`<value><string>`)
+		b.WriteString(value)
+		b.WriteString(`</string></value>`)
+	}
+	b.WriteString(`</data></array></value></member>`)
+	b.WriteString(`</struct></value></param></params></methodResponse>`)
+	if _, err := w.Write([]byte(b.String())); err != nil {
 		t.Fatal(err)
 	}
 }

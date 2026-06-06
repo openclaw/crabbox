@@ -122,6 +122,10 @@ doctor and lifecycle commands. A template name or UUID is required before
 optional placement hints. `user` becomes the cloud-init SSH user, and
 `workRoot` becomes the remote workspace root.
 
+Point `apiUrl` at the pool master when possible. If it points at a pool member
+that returns XAPI `HOST_IS_SLAVE` during login, Crabbox retries login once
+against the master address reported by XAPI.
+
 Keep the password in a private config file with `0600` permissions, in an
 environment variable, or in a secret manager. Do not pass it on argv. Crabbox
 intentionally has no XCP-ng password command-line flag, so the password does not

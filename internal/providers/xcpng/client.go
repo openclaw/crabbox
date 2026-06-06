@@ -22,6 +22,8 @@ import (
 type xapiClient struct {
 	endpoint string
 	session  string
+	username string
+	password string
 	http     *http.Client
 }
 
@@ -50,13 +52,30 @@ func newXAPIClient(ctx context.Context, cfg Config) (*xapiClient, error) {
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: xcfg.InsecureTLS}, //nolint:gosec // explicit private-lab opt-in.
 	}
 	httpClient := &http.Client{Timeout: 60 * time.Second, Transport: transport}
-	c := &xapiClient{endpoint: endpoint, http: httpClient}
-	session, err := c.callString(ctx, "session.login_with_password", xcfg.Username, xcfg.Password, "1.0", "crabbox")
-	if err != nil {
+	c := &xapiClient{endpoint: endpoint, username: xcfg.Username, password: xcfg.Password, http: httpClient}
+	if err := c.login(ctx); err != nil {
 		return nil, err
 	}
-	c.session = session
 	return c, nil
+}
+
+func (c *xapiClient) login(ctx context.Context) error {
+	session, err := c.callRawString(ctx, "session.login_with_password", c.username, c.password, "1.0", "crabbox")
+	if err != nil {
+		if master := xapiMasterAddress(err); master != "" {
+			redirected, redirectErr := xapiEndpointForMaster(c.endpoint, master)
+			if redirectErr != nil {
+				return fmt.Errorf("xcp-ng pool master redirect %q: %w", master, redirectErr)
+			}
+			c.endpoint = redirected
+			session, err = c.callRawString(ctx, "session.login_with_password", c.username, c.password, "1.0", "crabbox")
+		}
+	}
+	if err != nil {
+		return err
+	}
+	c.session = session
+	return nil
 }
 
 func (c *xapiClient) Close(ctx context.Context) error {
@@ -730,6 +749,42 @@ func (c *xapiClient) callDiscard(ctx context.Context, method string, params ...a
 }
 
 func (c *xapiClient) call(ctx context.Context, method string, params ...any) (xmlRPCValue, error) {
+	value, err := c.callRaw(ctx, method, params...)
+	if err == nil || method == "session.login_with_password" || method == "session.logout" {
+		return value, err
+	}
+	master := xapiMasterAddress(err)
+	if master == "" {
+		return value, err
+	}
+	redirected, redirectErr := xapiEndpointForMaster(c.endpoint, master)
+	if redirectErr != nil {
+		return xmlRPCValue{}, fmt.Errorf("xcp-ng pool master redirect %q: %w", master, redirectErr)
+	}
+	oldSession := c.session
+	c.endpoint = redirected
+	c.session = ""
+	if loginErr := c.login(ctx); loginErr != nil {
+		return xmlRPCValue{}, loginErr
+	}
+	retryParams := append([]any(nil), params...)
+	if len(retryParams) > 0 {
+		if session, ok := retryParams[0].(string); ok && session == oldSession {
+			retryParams[0] = c.session
+		}
+	}
+	return c.callRaw(ctx, method, retryParams...)
+}
+
+func (c *xapiClient) callRawString(ctx context.Context, method string, params ...any) (string, error) {
+	value, err := c.callRaw(ctx, method, params...)
+	if err != nil {
+		return "", err
+	}
+	return xmlValueToString(value), nil
+}
+
+func (c *xapiClient) callRaw(ctx context.Context, method string, params ...any) (xmlRPCValue, error) {
 	body, err := encodeXMLRPCRequest(method, params...)
 	if err != nil {
 		return xmlRPCValue{}, err
@@ -875,6 +930,28 @@ func xapiEndpoint(raw string) (string, error) {
 	return u.String(), nil
 }
 
+func xapiEndpointForMaster(current, master string) (string, error) {
+	currentURL, err := url.Parse(current)
+	if err != nil {
+		return "", err
+	}
+	master = strings.Trim(strings.TrimSpace(master), " \t\r\n,;[]()")
+	if master == "" {
+		return "", exit(3, "xcp-ng pool master redirect did not include a host")
+	}
+	if strings.Contains(master, "://") {
+		return xapiEndpoint(master)
+	}
+	if !hostPortHasPort(master) && currentURL.Port() != "" {
+		master = net.JoinHostPort(master, currentURL.Port())
+	}
+	currentURL.Host = master
+	if currentURL.Scheme == "http" && !isLoopbackHost(hostnameForEndpointHost(master)) {
+		currentURL.Scheme = "https"
+	}
+	return xapiEndpoint(currentURL.String())
+}
+
 func isLoopbackHost(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if host == "localhost" {
@@ -882,6 +959,54 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+func hostnameForEndpointHost(host string) string {
+	u, err := url.Parse("//" + host)
+	if err == nil && u.Hostname() != "" {
+		return u.Hostname()
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
+func hostPortHasPort(host string) bool {
+	u, err := url.Parse("//" + host)
+	return err == nil && u.Port() != ""
+}
+
+func xapiMasterAddress(err error) string {
+	var statusErr xapiStatusError
+	if errors.As(err, &statusErr) {
+		values := xmlValueToStrings(statusErr.Fields["ErrorDescription"])
+		if len(values) >= 2 && values[0] == "HOST_IS_SLAVE" {
+			return strings.TrimSpace(values[1])
+		}
+		if value := parseHostIsSlaveMaster(strings.Join(values, " ")); value != "" {
+			return value
+		}
+	}
+	var faultErr xapiFaultError
+	if errors.As(err, &faultErr) {
+		fields := xmlValueToStringMap(faultErr.Value)
+		if value := parseHostIsSlaveMaster(fields["faultString"]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func parseHostIsSlaveMaster(text string) string {
+	fields := strings.Fields(text)
+	for i, field := range fields {
+		field = strings.Trim(field, " \t\r\n:,;[]()")
+		if field == "HOST_IS_SLAVE" && i+1 < len(fields) {
+			return strings.Trim(fields[i+1], " \t\r\n,;[]()")
+		}
+	}
+	return ""
 }
 
 func leaseVMName(leaseID, slug string) string {

@@ -356,7 +356,8 @@ xcpNg:
 XCP-ng doctor and lifecycle commands. `template` or `templateUuid` is required
 before `warmup` or `run` can create a lease. The password must come from private
 config or `CRABBOX_XCP_NG_PASSWORD`; there is intentionally no
-XCP-ng password command-line flag.
+XCP-ng password command-line flag. Prefer a pool-master `apiUrl`; if XAPI
+returns `HOST_IS_SLAVE`, Crabbox retries login once against the reported master.
 
 Environment overrides:
 

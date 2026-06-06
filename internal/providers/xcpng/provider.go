@@ -42,7 +42,7 @@ type flagValues struct {
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		APIURL:       fs.String("xcp-ng-api-url", defaults.XCPNg.APIURL, "XCP-ng pool master API URL"),
+		APIURL:       fs.String("xcp-ng-api-url", defaults.XCPNg.APIURL, "XCP-ng pool API URL"),
 		Username:     fs.String("xcp-ng-username", defaults.XCPNg.Username, "XCP-ng API username"),
 		Template:     fs.String("xcp-ng-template", defaults.XCPNg.Template, "XCP-ng VM template name"),
 		TemplateUUID: fs.String("xcp-ng-template-uuid", defaults.XCPNg.TemplateUUID, "XCP-ng VM template UUID"),
