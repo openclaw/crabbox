@@ -526,7 +526,7 @@ export function validCIDRs(values: string[]): string[] {
   return cidrs.filter(isValidCIDR);
 }
 
-function validatedCIDRs(values: string[], fieldName: string): string[] {
+export function validatedCIDRs(values: string[], fieldName: string): string[] {
   const cidrs = values.map((value) => value.trim()).filter(Boolean);
   const valid = cidrs.filter(isValidCIDR);
   if (valid.length !== cidrs.length) {
