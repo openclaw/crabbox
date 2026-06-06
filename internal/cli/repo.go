@@ -102,6 +102,10 @@ func syncIncludes(cfg Config) []string {
 	return out
 }
 
+func syncGitSeedEnabled(cfg Config, repo Repo) bool {
+	return cfg.Sync.GitSeed && len(syncIncludes(cfg)) == 0 && remoteGitSeedCandidate(repo)
+}
+
 func SyncExcludes(root string, cfg Config) ([]string, error) {
 	return syncExcludes(root, cfg)
 }
@@ -581,12 +585,25 @@ func pathExcluded(rel string, excludes []string) bool {
 }
 
 // pathIncluded reports whether rel should be kept under a sync include
-// (whitelist). With no includes everything is kept; otherwise rel must match an
-// include pattern. Matching mirrors pathExcluded: an include of "src" keeps "src"
-// and everything under it, a file path keeps that exact file, and globs match.
+// whitelist. Includes are root-relative: "src" keeps only the top-level src
+// tree, "package.json" keeps only that root file, and globs match the
+// root-relative path.
 func pathIncluded(rel string, includes []string) bool {
 	if len(includes) == 0 {
 		return true
 	}
-	return pathExcluded(rel, includes)
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	for _, include := range includes {
+		include = strings.Trim(filepath.ToSlash(strings.TrimSpace(include)), "/")
+		if include == "" {
+			continue
+		}
+		if rel == include || strings.HasPrefix(rel, include+"/") {
+			return true
+		}
+		if ok, _ := filepath.Match(include, rel); ok {
+			return true
+		}
+	}
+	return false
 }

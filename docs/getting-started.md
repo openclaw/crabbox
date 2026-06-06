@@ -119,9 +119,9 @@ matter for your repo:
 - `profile`: a name for this lane (the template uses `<repo>-check`);
 - `class`: `standard`, `fast`, `large`, or `beast` (the template uses `beast`);
 - `sync.exclude`: directories that should never be sent to the runner;
-- `sync.include`: an optional whitelist — when set, **only** these paths are
-  synced (after excludes), so you can ship a few paths out of a large repo
-  instead of blacklisting everything else;
+- `sync.include`: an optional root-relative whitelist — when set, **only** these
+  paths are synced (after excludes), so you can ship a few paths out of a large
+  repo instead of blacklisting everything else;
 - `env.allow`: environment variables the remote command is allowed to see.
 
 Pass `--detect` to scan the repo for test commands and write a `jobs.detected`

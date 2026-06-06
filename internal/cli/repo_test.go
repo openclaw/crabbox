@@ -83,10 +83,51 @@ func TestPathIncluded(t *testing.T) {
 			t.Fatalf("expected %q to be included", in)
 		}
 	}
-	for _, out := range []string{"data/x.bin", "scripts/other.sh", "package.lock"} {
+	for _, out := range []string{"data/x.bin", "scripts/other.sh", "package.lock", "packages/app/src/main.go", "examples/package.json"} {
 		if pathIncluded(out, includes) {
 			t.Fatalf("expected %q to be excluded by whitelist", out)
 		}
+	}
+	globIncludes := []string{"*.go", "docs/*.md"}
+	for _, in := range []string{"main.go", "docs/readme.md"} {
+		if !pathIncluded(in, globIncludes) {
+			t.Fatalf("expected glob to include %q", in)
+		}
+	}
+	for _, out := range []string{"src/main.go", "docs/nested/readme.md"} {
+		if pathIncluded(out, globIncludes) {
+			t.Fatalf("expected root-relative glob to exclude %q", out)
+		}
+	}
+}
+
+func TestSyncGitSeedDisabledByIncludeWhitelist(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "src", "main.go"), "package main\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+	head := gitOutput(dir, "rev-parse", "HEAD")
+	repo := Repo{Root: dir, RemoteURL: "https://github.com/example-org/my-app.git", Head: head}
+
+	cfg := baseConfig()
+	if !syncGitSeedEnabled(cfg, repo) {
+		t.Fatal("seedable repo without includes should use git seed")
+	}
+	cfg.Sync.Includes = []string{"src"}
+	if syncGitSeedEnabled(cfg, repo) {
+		t.Fatal("sync.include should disable full-repo git seed")
+	}
+	cfg.Sync.Includes = []string{" "}
+	if !syncGitSeedEnabled(cfg, repo) {
+		t.Fatal("blank include entries should not disable git seed")
+	}
+	cfg.Sync.GitSeed = false
+	if syncGitSeedEnabled(cfg, repo) {
+		t.Fatal("gitSeed=false should disable git seed")
 	}
 }
 
