@@ -982,8 +982,9 @@ func TestApplyFlagsRejectsNonPositiveResources(t *testing.T) {
 		{"zero cpu", []string{"--tart-cpu", "0"}, "--tart-cpu must be at least 4"},
 		{"negative cpu", []string{"--tart-cpu", "-1"}, "--tart-cpu must be at least 4"},
 		{"below minimum cpu", []string{"--tart-cpu", "2"}, "--tart-cpu must be at least 4"},
-		{"zero memory", []string{"--tart-memory", "0"}, "--tart-memory must be a positive integer"},
-		{"negative memory", []string{"--tart-memory", "-1"}, "--tart-memory must be a positive integer"},
+		{"zero memory", []string{"--tart-memory", "0"}, "--tart-memory must be at least 4096 MB"},
+		{"negative memory", []string{"--tart-memory", "-1"}, "--tart-memory must be at least 4096 MB"},
+		{"below minimum memory", []string{"--tart-memory", "1"}, "--tart-memory must be at least 4096 MB"},
 		{"zero disk", []string{"--tart-disk", "0"}, "--tart-disk must be a positive integer"},
 		{"negative disk", []string{"--tart-disk", "-1"}, "--tart-disk must be a positive integer"},
 	}

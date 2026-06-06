@@ -39,8 +39,8 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		cfg.Tart.CPUs = *v.CPUs
 	}
 	if flagWasSet(fs, "tart-memory") {
-		if *v.Memory <= 0 {
-			return exit(2, "--tart-memory must be a positive integer (got %d)", *v.Memory)
+		if *v.Memory < 4096 {
+			return exit(2, "--tart-memory must be at least 4096 MB (got %d)", *v.Memory)
 		}
 		cfg.Tart.Memory = *v.Memory
 	}
@@ -61,8 +61,8 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		if cfg.Tart.CPUs < 0 || (cfg.Tart.CPUs > 0 && cfg.Tart.CPUs < 4) {
 			return exit(2, "tart cpu count must be at least 4 (got %d)", cfg.Tart.CPUs)
 		}
-		if cfg.Tart.Memory < 0 {
-			return exit(2, "tart memory must be positive (got %d)", cfg.Tart.Memory)
+		if cfg.Tart.Memory < 0 || (cfg.Tart.Memory > 0 && cfg.Tart.Memory < 4096) {
+			return exit(2, "tart memory must be at least 4096 MB (got %d)", cfg.Tart.Memory)
 		}
 		if cfg.Tart.Disk < 0 {
 			return exit(2, "tart disk size must be positive (got %d)", cfg.Tart.Disk)
