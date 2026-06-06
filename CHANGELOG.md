@@ -4,10 +4,13 @@
 
 ### Added
 
+- Added `sync.include` / `sync.includes` whitelists for root-relative sync plans, SSH sync, native Windows sync, local Actions hydration, and archive-sync providers. Thanks @anagnorisis2peripeteia.
+
 ### Changed
 
 ### Fixed
 
+- Fixed malformed AWS, Azure, and GCP SSH CIDR configuration to fail closed instead of falling back to broad SSH access. Thanks @coygeek.
 - Fixed local-container warmup on Windows by mounting the generated bootstrap script instead of passing it inline to Docker. Thanks @anagnorisis2peripeteia.
 - Fixed brokered Azure lease creation to persist in-flight leases before VM provisioning, keep failed creates visible, and sweep orphaned Azure VMs from coordinator maintenance. Fixes https://github.com/openclaw/crabbox/issues/215.
 
