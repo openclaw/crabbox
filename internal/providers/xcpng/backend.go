@@ -533,6 +533,17 @@ func isCrabboxLease(server Server) bool {
 	return strings.TrimSpace(server.Labels["lease"]) != ""
 }
 
+func isCrabboxVMDisk(labels map[string]string, leaseID string) bool {
+	if labels == nil {
+		return false
+	}
+	return labels["crabbox"] == "true" &&
+		labels["created_by"] == "crabbox" &&
+		labels["provider"] == "xcp-ng" &&
+		labels["lease"] == leaseID &&
+		labels["resource"] == "vm-disk"
+}
+
 func closeClient(ctx context.Context, client lifecycleClient, stderr io.Writer) {
 	if err := client.Close(ctx); err != nil {
 		fmt.Fprintf(stderr, "warning: close xcp-ng session: %v\n", err)

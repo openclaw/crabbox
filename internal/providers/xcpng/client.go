@@ -139,6 +139,10 @@ func (c *xapiClient) CloneVM(ctx context.Context, req xcpNgCloneRequest) (xapiVM
 	if err != nil {
 		return xapiVM{}, err
 	}
+	if err := c.markAttachedUserDisks(ctx, ref, vmDiskLabels(req.Labels)); err != nil {
+		_ = c.deleteServer(context.Background(), ref, true)
+		return xapiVM{}, err
+	}
 	if req.HostRef != "" {
 		if _, err := c.call(ctx, "VM.set_affinity", c.session, ref, req.HostRef.value()); err != nil && req.HostRef != "" {
 			_ = c.deleteServer(context.Background(), ref, true)
@@ -301,7 +305,7 @@ func (c *xapiClient) deleteServer(ctx context.Context, id string, forceDisks boo
 					skipVDIs[drive.VDIRef] = struct{}{}
 				}
 			}
-			disks, err = c.attachedDestroyableDisks(ctx, ref, skipVDIs)
+			disks, err = c.attachedDestroyableDisks(ctx, ref, skipVDIs, server.Labels["lease"])
 			if err != nil {
 				return err
 			}
@@ -310,7 +314,7 @@ func (c *xapiClient) deleteServer(ctx context.Context, id string, forceDisks boo
 		}
 	}
 	if forceDisks && !managed {
-		disks, err = c.attachedDestroyableDisks(ctx, ref, map[string]struct{}{})
+		disks, err = c.attachedDestroyableDisks(ctx, ref, map[string]struct{}{}, "")
 		if err != nil {
 			return err
 		}
@@ -467,7 +471,7 @@ func (c *xapiClient) configDrivesForLease(ctx context.Context, leaseID string) (
 	return drives, nil
 }
 
-func (c *xapiClient) attachedDestroyableDisks(ctx context.Context, vmRef string, skipVDIs map[string]struct{}) ([]xcpNgConfigDrive, error) {
+func (c *xapiClient) attachedDestroyableDisks(ctx context.Context, vmRef string, skipVDIs map[string]struct{}, requiredLease string) ([]xcpNgConfigDrive, error) {
 	value, err := c.call(ctx, "VM.get_VBDs", c.session, vmRef)
 	if err != nil {
 		return nil, err
@@ -497,12 +501,41 @@ func (c *xapiClient) attachedDestroyableDisks(ctx context.Context, vmRef string,
 		if xmlStructString(vdi, "read_only") == "true" || xmlStructString(vdi, "sharable") == "true" || xmlStructString(vdi, "type") != "user" {
 			continue
 		}
-		if xmlStructStringMap(vdi, "other_config")["resource"] == "config-drive" {
+		labels := xmlStructStringMap(vdi, "other_config")
+		if labels["resource"] == "config-drive" {
+			continue
+		}
+		if requiredLease != "" && !isCrabboxVMDisk(labels, requiredLease) {
 			continue
 		}
 		disks = append(disks, xcpNgConfigDrive{VDIRef: vdiRef, VBDRef: vbdRef, Name: xmlStructString(vdi, "name_label")})
 	}
 	return disks, nil
+}
+
+func (c *xapiClient) markAttachedUserDisks(ctx context.Context, vmRef string, labels map[string]string) error {
+	disks, err := c.attachedDestroyableDisks(ctx, vmRef, map[string]struct{}{}, "")
+	if err != nil {
+		return err
+	}
+	for _, disk := range disks {
+		if err := c.setVDIOtherConfig(ctx, disk.VDIRef, labels); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *xapiClient) setVDIOtherConfig(ctx context.Context, ref string, values map[string]string) error {
+	for key, value := range values {
+		if err := c.callDiscard(ctx, "VDI.remove_from_other_config", c.session, ref, key); err != nil && !isMissingMapKey(err) {
+			return err
+		}
+		if _, err := c.call(ctx, "VDI.add_to_other_config", c.session, ref, key, value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *xapiClient) importRawVDI(ctx context.Context, vdiRef string, image []byte) error {

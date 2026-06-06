@@ -182,6 +182,16 @@ func TestCloneVMUsesCopyForSRAndRewiresVIFsForNetwork(t *testing.T) {
 		switch method {
 		case "VM.copy":
 			writeXMLRPCString(t, w, "OpaqueRef:vm")
+		case "VM.get_VBDs":
+			writeXMLRPCStringArray(t, w, []string{"OpaqueRef:root-vbd"})
+		case "VBD.get_record":
+			writeXMLRPCVBDRecord(t, w, "OpaqueRef:root-vdi")
+		case "VDI.get_record":
+			writeXMLRPCVDIRecord(t, w, "crabbox-root")
+		case "VDI.remove_from_other_config":
+			writeXMLRPCFault(t, w, "MAP_KEY_NOT_FOUND")
+		case "VDI.add_to_other_config":
+			writeXMLRPCString(t, w, "true")
 		case "VM.set_affinity":
 			writeXMLRPCString(t, w, "true")
 		case "VM.get_VIFs":
@@ -248,6 +258,10 @@ func TestCloneVMRollbackDestroysCopiedDiskBeforeLabels(t *testing.T) {
 			writeXMLRPCVBDRecord(t, w, "OpaqueRef:root-vdi")
 		case "VDI.get_record":
 			writeXMLRPCVDIRecord(t, w, "crabbox-root")
+		case "VDI.remove_from_other_config":
+			writeXMLRPCFault(t, w, "MAP_KEY_NOT_FOUND")
+		case "VDI.add_to_other_config":
+			writeXMLRPCString(t, w, "true")
 		case "VM.get_power_state":
 			writeXMLRPCString(t, w, "Halted")
 		case "VBD.unplug", "VBD.destroy", "VDI.destroy", "VM.destroy":
@@ -416,15 +430,22 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 		case "VDI.get_all_records":
 			writeXMLRPCVDIRecords(t, w)
 		case "VM.get_VBDs":
-			writeXMLRPCStringArray(t, w, []string{"OpaqueRef:vbd", "OpaqueRef:root-vbd"})
+			writeXMLRPCStringArray(t, w, []string{"OpaqueRef:vbd", "OpaqueRef:root-vbd", "OpaqueRef:external-vbd"})
 		case "VBD.get_record":
-			if strings.Count(strings.Join(methods, ","), "VBD.get_record") == 1 {
+			switch countMethod(methods, "VBD.get_record") {
+			case 1:
 				writeXMLRPCVBDRecord(t, w, "OpaqueRef:vdi")
-			} else {
+			case 2:
 				writeXMLRPCVBDRecord(t, w, "OpaqueRef:root-vdi")
+			default:
+				writeXMLRPCVBDRecord(t, w, "OpaqueRef:external-vdi")
 			}
 		case "VDI.get_record":
-			writeXMLRPCVDIRecord(t, w, "crabbox-root")
+			if countMethod(methods, "VDI.get_record") == 1 {
+				writeXMLRPCOwnedVDIRecord(t, w, "crabbox-root", "cbx_lease")
+			} else {
+				writeXMLRPCVDIRecord(t, w, "external-disk")
+			}
 		case "VM.get_power_state":
 			powerStateChecks++
 			if powerStateChecks == 1 {
@@ -462,7 +483,7 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 		t.Fatalf("methods=%s unplugged config drive before shutdown", got)
 	}
 	if countMethod(methods, "VDI.destroy") != 2 {
-		t.Fatalf("methods=%s should destroy config drive and cloned root VDI", got)
+		t.Fatalf("methods=%s should destroy config drive and owned cloned root VDI only", got)
 	}
 }
 
@@ -774,6 +795,26 @@ func writeXMLRPCVDIRecord(t *testing.T, w http.ResponseWriter, name string) {
 <member><name>sharable</name><value><boolean>0</boolean></value></member>
 <member><name>type</name><value><string>user</string></value></member>
 <member><name>other_config</name><value><struct></struct></value></member>
+</struct></value></param></params></methodResponse>`
+	if _, err := w.Write([]byte(response)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeXMLRPCOwnedVDIRecord(t *testing.T, w http.ResponseWriter, name, leaseID string) {
+	t.Helper()
+	response := `<?xml version="1.0"?><methodResponse><params><param><value><struct>
+<member><name>name_label</name><value><string>` + name + `</string></value></member>
+<member><name>read_only</name><value><boolean>0</boolean></value></member>
+<member><name>sharable</name><value><boolean>0</boolean></value></member>
+<member><name>type</name><value><string>user</string></value></member>
+<member><name>other_config</name><value><struct>
+<member><name>crabbox</name><value>true</value></member>
+<member><name>created_by</name><value>crabbox</value></member>
+<member><name>provider</name><value>xcp-ng</value></member>
+<member><name>lease</name><value>` + leaseID + `</value></member>
+<member><name>resource</name><value>vm-disk</value></member>
+</struct></value></member>
 </struct></value></param></params></methodResponse>`
 	if _, err := w.Write([]byte(response)); err != nil {
 		t.Fatal(err)
