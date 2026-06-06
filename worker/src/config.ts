@@ -180,8 +180,14 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
   }
   const ttlSeconds = clampTTL(input.ttlSeconds ?? 5400);
   const idleTimeoutSeconds = clampIdleTimeout(input.idleTimeoutSeconds ?? 1800);
-  const awsSSHCIDRs = validatedCIDRs(input.awsSSHCIDRs ?? [], "awsSSHCIDRs");
-  const gcpSSHCIDRs = validatedCIDRs(input.gcpSSHCIDRs ?? [], "gcpSSHCIDRs");
+  const awsSSHCIDRs =
+    provider === "aws"
+      ? validatedCIDRs(input.awsSSHCIDRs ?? [], "awsSSHCIDRs")
+      : validCIDRs(input.awsSSHCIDRs ?? []);
+  const gcpSSHCIDRs =
+    provider === "gcp"
+      ? validatedCIDRs(input.gcpSSHCIDRs ?? [], "gcpSSHCIDRs")
+      : validCIDRs(input.gcpSSHCIDRs ?? []);
   const sshPublicKey = input.sshPublicKey?.trim() ?? "";
   if (!sshPublicKey) {
     throw new Error("sshPublicKey is required");

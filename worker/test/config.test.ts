@@ -303,6 +303,30 @@ describe("lease config", () => {
         gcpSSHCIDRs: ["::::/128"],
       }),
     ).toThrow("gcpSSHCIDRs entries must be valid");
+    expect(
+      leaseConfig({
+        provider: "gcp",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["999.999.999.999/32", "198.51.100.77/32"],
+        gcpSSHCIDRs: ["2001:db8::2/128"],
+      }).awsSSHCIDRs,
+    ).toEqual(["198.51.100.77/32"]);
+    expect(
+      leaseConfig({
+        provider: "aws",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["198.51.100.77/32"],
+        gcpSSHCIDRs: ["::::/128", "2001:db8::2/128"],
+      }).gcpSSHCIDRs,
+    ).toEqual(["2001:db8::2/128"]);
+    expect(
+      leaseConfig({
+        provider: "hetzner",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["999.999.999.999/32"],
+        gcpSSHCIDRs: ["::::/128"],
+      }),
+    ).toMatchObject({ awsSSHCIDRs: [], gcpSSHCIDRs: [] });
   });
 
   it("allows capacity hints to be disabled per lease", () => {
