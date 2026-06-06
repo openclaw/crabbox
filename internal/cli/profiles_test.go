@@ -600,6 +600,52 @@ func TestRunStopCommandIncludesProviderRoutingFlags(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) {
+	got := runStopCommand(Config{
+		Provider: "xcp-ng",
+		TargetOS: targetLinux,
+		XCPNg: XCPNgConfig{
+			APIURL:       "https://xcp-ng.example.test",
+			Username:     "root",
+			Password:     "xcp-ng-secret",
+			Template:     "ubuntu template",
+			TemplateUUID: "tpl-0001",
+			SR:           "default sr",
+			SRUUID:       "sr-0001",
+			Network:      "pool network",
+			NetworkUUID:  "net-0001",
+			Host:         "host-0001",
+			User:         "runner",
+			WorkRoot:     "/work/xcp-ng",
+			InsecureTLS:  true,
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"--provider xcp-ng",
+		"--target linux",
+		"--xcp-ng-api-url https://xcp-ng.example.test",
+		"--xcp-ng-username root",
+		"--xcp-ng-template 'ubuntu template'",
+		"--xcp-ng-template-uuid tpl-0001",
+		"--xcp-ng-sr 'default sr'",
+		"--xcp-ng-sr-uuid sr-0001",
+		"--xcp-ng-network 'pool network'",
+		"--xcp-ng-network-uuid net-0001",
+		"--xcp-ng-host host-0001",
+		"--xcp-ng-user runner",
+		"--xcp-ng-work-root /work/xcp-ng",
+		"--xcp-ng-insecure-tls",
+		"cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "xcp-ng-secret") || strings.Contains(got, "password") {
+		t.Fatalf("stop command leaked password material:\n%s", got)
+	}
+}
+
 func TestRunStopCommandIncludesSemaphoreRoutingFlags(t *testing.T) {
 	got := runStopCommand(Config{
 		Provider: "semaphore",
