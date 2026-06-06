@@ -300,7 +300,7 @@ func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut && r.URL.Path == "/import_raw_vdi/" {
 			imported = true
-			if r.URL.Query().Get("format") != "raw" || r.URL.Query().Get("vdi") != "OpaqueRef:vdi" {
+			if r.URL.Query().Get("format") != "raw" || r.URL.Query().Get("vdi") != "OpaqueRef:vdi" || r.URL.Query().Get("task_id") != "OpaqueRef:task" {
 				t.Fatalf("import query=%s", r.URL.RawQuery)
 			}
 			w.WriteHeader(http.StatusOK)
@@ -314,6 +314,12 @@ func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 				t.Fatalf("VDI.create must stay writable for raw import, body=%s", body)
 			}
 			writeXMLRPCString(t, w, "OpaqueRef:vdi")
+		case "task.create":
+			writeXMLRPCString(t, w, "OpaqueRef:task")
+		case "task.get_status":
+			writeXMLRPCString(t, w, "success")
+		case "task.destroy":
+			writeXMLRPCString(t, w, "true")
 		case "VBD.create":
 			if !strings.Contains(body, "<name>mode</name><value><string>RO</string>") {
 				t.Fatalf("VBD.create must attach config drive read-only, body=%s", body)
@@ -339,7 +345,7 @@ func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 	if drive.VDIRef != "OpaqueRef:vdi" || drive.VBDRef != "OpaqueRef:vbd" || !imported {
 		t.Fatalf("drive=%#v imported=%v", drive, imported)
 	}
-	if got := strings.Join(methods, ","); got != "VDI.create,VBD.create" {
+	if got := strings.Join(methods, ","); got != "VDI.create,task.create,task.get_status,task.destroy,VBD.create" {
 		t.Fatalf("methods=%s", got)
 	}
 }
@@ -629,6 +635,9 @@ func TestImportRawVDIRedactsSessionTokenFromTransportError(t *testing.T) {
 		endpoint: "http://xcp-ng.example.test/",
 		session:  "OpaqueRef:secret-session",
 		http: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodPost {
+				return xmlRPCHTTPResponse("OpaqueRef:task"), nil
+			}
 			return nil, errors.New("dial failed for " + req.URL.String())
 		})},
 	}
@@ -647,6 +656,10 @@ func TestImportRawVDIRedactsSessionTokenFromTransportError(t *testing.T) {
 
 func TestImportRawVDIRedactsSessionTokenFromHTTPErrorBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			writeXMLRPCString(t, w, "OpaqueRef:task")
+			return
+		}
 		http.Error(w, "failed request "+r.URL.String(), http.StatusBadGateway)
 	}))
 	defer server.Close()
@@ -693,6 +706,15 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func xmlRPCHTTPResponse(value string) *http.Response {
+	body := `<?xml version="1.0"?><methodResponse><params><param><value><string>` + value + `</string></value></param></params></methodResponse>`
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
 }
 
 func countMethod(methods []string, want string) int {

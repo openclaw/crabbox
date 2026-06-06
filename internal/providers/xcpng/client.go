@@ -28,6 +28,8 @@ type xapiClient struct {
 var (
 	xcpNgShutdownPollInterval = 2 * time.Second
 	xcpNgShutdownTimeout      = 5 * time.Minute
+	xcpNgTaskPollInterval     = 1 * time.Second
+	xcpNgTaskTimeout          = 1 * time.Minute
 )
 
 func newXAPIClient(ctx context.Context, cfg Config) (*xapiClient, error) {
@@ -139,10 +141,6 @@ func (c *xapiClient) CloneVM(ctx context.Context, req xcpNgCloneRequest) (xapiVM
 	if err != nil {
 		return xapiVM{}, err
 	}
-	if err := c.markAttachedUserDisks(ctx, ref, vmDiskLabels(req.Labels)); err != nil {
-		_ = c.deleteServer(context.Background(), ref, true)
-		return xapiVM{}, err
-	}
 	if req.HostRef != "" {
 		if _, err := c.call(ctx, "VM.set_affinity", c.session, ref, req.HostRef.value()); err != nil && req.HostRef != "" {
 			_ = c.deleteServer(context.Background(), ref, true)
@@ -160,6 +158,10 @@ func (c *xapiClient) CloneVM(ctx context.Context, req xcpNgCloneRequest) (xapiVM
 		return xapiVM{}, err
 	}
 	if _, err := c.call(ctx, "VM.provision", c.session, ref); err != nil {
+		_ = c.deleteServer(context.Background(), ref, true)
+		return xapiVM{}, err
+	}
+	if err := c.markAttachedUserDisks(ctx, ref, vmDiskLabels(req.Labels)); err != nil {
 		_ = c.deleteServer(context.Background(), ref, true)
 		return xapiVM{}, err
 	}
@@ -539,6 +541,12 @@ func (c *xapiClient) setVDIOtherConfig(ctx context.Context, ref string, values m
 }
 
 func (c *xapiClient) importRawVDI(ctx context.Context, vdiRef string, image []byte) error {
+	taskRef, err := c.callString(ctx, "task.create", c.session, "crabbox import config drive", "Import Crabbox cloud-init config drive")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = c.callDiscard(context.Background(), "task.destroy", c.session, taskRef) }()
+
 	u, err := url.Parse(c.endpoint)
 	if err != nil {
 		return err
@@ -546,6 +554,7 @@ func (c *xapiClient) importRawVDI(ctx context.Context, vdiRef string, image []by
 	u.Path = "/import_raw_vdi/"
 	q := u.Query()
 	q.Set("session_id", c.session)
+	q.Set("task_id", taskRef)
 	q.Set("vdi", vdiRef)
 	q.Set("format", "raw")
 	u.RawQuery = q.Encode()
@@ -563,7 +572,39 @@ func (c *xapiClient) importRawVDI(ctx context.Context, vdiRef string, image []by
 	if res.StatusCode < 200 || res.StatusCode > 299 {
 		return xapiHTTPError{StatusCode: res.StatusCode, Body: redactXAPISensitiveText(strings.TrimSpace(string(data)), c.session)}
 	}
-	return nil
+	return c.waitForTaskSuccess(ctx, taskRef)
+}
+
+func (c *xapiClient) waitForTaskSuccess(ctx context.Context, taskRef string) error {
+	deadline := time.Now().Add(xcpNgTaskTimeout)
+	for {
+		status, err := c.callString(ctx, "task.get_status", c.session, taskRef)
+		if err != nil {
+			return err
+		}
+		switch status {
+		case "success":
+			return nil
+		case "failure", "cancelled":
+			value, err := c.call(ctx, "task.get_error_info", c.session, taskRef)
+			if err != nil {
+				return fmt.Errorf("xcp-ng upload task %s: %s", taskRef, status)
+			}
+			info := strings.Join(xmlValueToStrings(value), ": ")
+			if info == "" {
+				info = xmlValueToString(value)
+			}
+			return fmt.Errorf("xcp-ng upload task %s: %s %s", taskRef, status, info)
+		}
+		if time.Now().After(deadline) {
+			return exit(5, "timed out waiting for xcp-ng upload task %s", taskRef)
+		}
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-time.After(xcpNgTaskPollInterval):
+		}
+	}
 }
 
 func (c *xapiClient) getByUUID(ctx context.Context, class, uuid string) (xapiRef, error) {
