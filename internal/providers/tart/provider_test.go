@@ -540,6 +540,367 @@ func TestConfigureVMAppliesExplicitDiskSize(t *testing.T) {
 	}
 }
 
+func TestServerFromInstanceDefaultsLabels(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+
+	inst := tartInstance{Name: "crabbox-blue-abc123", State: "running", Source: "ghcr.io/test:latest"}
+	claim := core.LeaseClaim{LeaseID: "cbx_test", Slug: "my-slug"}
+	server := b.serverFromInstance(inst, claim, cfg)
+
+	checks := map[string]string{
+		"crabbox":     "true",
+		"provider":    providerName,
+		"instance":    "crabbox-blue-abc123",
+		"lease":       "cbx_test",
+		"slug":        "my-slug",
+		"state":       "running",
+		"server_type": "ghcr.io/test:latest",
+		"image":       cfg.Tart.Image,
+		"ssh_user":    cfg.Tart.User,
+		"ssh_port":    sshPort,
+	}
+	for key, want := range checks {
+		if got := server.Labels[key]; got != want {
+			t.Errorf("label %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestServerFromInstancePreservesExistingLabels(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+
+	inst := tartInstance{Name: "crabbox-blue-abc123", State: "running"}
+	claim := core.LeaseClaim{
+		LeaseID: "cbx_test",
+		Labels: map[string]string{
+			"ssh_user":  "customuser",
+			"ssh_port":  "2222",
+			"work_root": "/custom/root",
+			"state":     "ready",
+		},
+	}
+	server := b.serverFromInstance(inst, claim, cfg)
+	if server.Labels["ssh_user"] != "customuser" {
+		t.Fatalf("ssh_user = %q, want customuser (should preserve existing)", server.Labels["ssh_user"])
+	}
+	if server.Labels["ssh_port"] != "2222" {
+		t.Fatalf("ssh_port = %q, want 2222 (should preserve existing)", server.Labels["ssh_port"])
+	}
+	if server.Labels["work_root"] != "/custom/root" {
+		t.Fatalf("work_root = %q, want /custom/root (should preserve existing)", server.Labels["work_root"])
+	}
+}
+
+func TestServerFromInstancePromotesRunningReady(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+
+	inst := tartInstance{Name: "crabbox-blue-abc123", State: "running"}
+	claim := core.LeaseClaim{LeaseID: "cbx_test", Labels: map[string]string{"state": "ready"}}
+	server := b.serverFromInstance(inst, claim, cfg)
+	if server.Status != "ready" {
+		t.Fatalf("Status = %q, want ready (running instance with state=ready label)", server.Status)
+	}
+}
+
+func TestServerFromInstanceDoesNotPromoteStoppedReady(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+
+	inst := tartInstance{Name: "crabbox-blue-abc123", State: "stopped"}
+	claim := core.LeaseClaim{LeaseID: "cbx_test", Labels: map[string]string{"state": "ready"}}
+	server := b.serverFromInstance(inst, claim, cfg)
+	if server.Status == "ready" {
+		t.Fatal("Status = ready for stopped instance, should not promote")
+	}
+}
+
+func TestPrepareLeaseSetsUserFromLabel(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+
+	inst := tartInstance{Name: "crabbox-blue-abc123", State: "running"}
+	claim := core.LeaseClaim{LeaseID: "cbx_test", Labels: map[string]string{"ssh_user": "customuser"}}
+	lt, err := b.prepareLease(context.Background(), cfg, inst, "192.0.2.10", claim, false)
+	if err != nil {
+		t.Fatalf("prepareLease: %v", err)
+	}
+	if lt.SSH.User != "customuser" {
+		t.Fatalf("SSH.User = %q, want customuser (label should override default)", lt.SSH.User)
+	}
+}
+
+func TestPrepareLeaseDoesNotOverrideUserWithEmpty(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+
+	inst := tartInstance{Name: "crabbox-blue-abc123", State: "running"}
+	claim := core.LeaseClaim{LeaseID: "cbx_test", Labels: map[string]string{}}
+	lt, err := b.prepareLease(context.Background(), cfg, inst, "192.0.2.10", claim, false)
+	if err != nil {
+		t.Fatalf("prepareLease: %v", err)
+	}
+	if lt.SSH.User != "admin" {
+		t.Fatalf("SSH.User = %q, want admin (empty label should not override config)", lt.SSH.User)
+	}
+}
+
+func TestPrepareLeaseSetsWorkRootFromLabel(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+
+	inst := tartInstance{Name: "crabbox-blue-abc123", State: "running"}
+	claim := core.LeaseClaim{LeaseID: "cbx_test", Labels: map[string]string{"work_root": "/custom/work"}}
+	lt, err := b.prepareLease(context.Background(), cfg, inst, "192.0.2.10", claim, false)
+	if err != nil {
+		t.Fatalf("prepareLease: %v", err)
+	}
+	if lt.Server.Labels["work_root"] != "/custom/work" {
+		t.Fatalf("work_root label = %q, want /custom/work", lt.Server.Labels["work_root"])
+	}
+}
+
+func TestPrepareLeaseDoesNotOverrideWorkRootWithEmpty(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+
+	inst := tartInstance{Name: "crabbox-blue-abc123", State: "running"}
+	claim := core.LeaseClaim{LeaseID: "cbx_test", Labels: map[string]string{}}
+	lt, err := b.prepareLease(context.Background(), cfg, inst, "192.0.2.10", claim, false)
+	if err != nil {
+		t.Fatalf("prepareLease: %v", err)
+	}
+	if lt.Server.Labels["work_root"] != cfg.Tart.WorkRoot {
+		t.Fatalf("work_root = %q, want %q (empty label should not override config)", lt.Server.Labels["work_root"], cfg.Tart.WorkRoot)
+	}
+}
+
+func TestApplyDefaultsPreservesTargetOS(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.TargetOS = core.TargetMacOS
+	applyDefaults(&cfg)
+	if cfg.TargetOS != core.TargetMacOS {
+		t.Fatalf("TargetOS = %q, want macos (should preserve non-empty)", cfg.TargetOS)
+	}
+}
+
+func TestApplyDefaultsPreservesWorkRoot(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.WorkRoot = "/custom/work"
+	applyDefaults(&cfg)
+	if cfg.Tart.WorkRoot != "/custom/work" {
+		t.Fatalf("Tart.WorkRoot = %q, want /custom/work (should preserve non-empty)", cfg.Tart.WorkRoot)
+	}
+}
+
+func TestConfigureVMAppliesCPUAndMemory(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 16384
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	if err := b.configureVM(context.Background(), cfg, "crabbox-test"); err != nil {
+		t.Fatalf("configureVM: %v", err)
+	}
+	foundCPU, foundMem := false, false
+	for _, call := range runner.calls {
+		for i, arg := range call.Args {
+			if arg == "--cpu" && i+1 < len(call.Args) && call.Args[i+1] == "8" {
+				foundCPU = true
+			}
+			if arg == "--memory" && i+1 < len(call.Args) && call.Args[i+1] == "16384" {
+				foundMem = true
+			}
+		}
+	}
+	if !foundCPU {
+		t.Fatal("configureVM should apply --cpu when CPUs > 0")
+	}
+	if !foundMem {
+		t.Fatal("configureVM should apply --memory when Memory > 0")
+	}
+}
+
+func TestConfigureVMSkipsZeroCPUAndMemory(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tart.CPUs = 0
+	cfg.Tart.Memory = 0
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	if err := b.configureVM(context.Background(), cfg, "crabbox-test"); err != nil {
+		t.Fatalf("configureVM: %v", err)
+	}
+	for _, call := range runner.calls {
+		for _, arg := range call.Args {
+			if arg == "--cpu" {
+				t.Fatal("configureVM should not apply --cpu when CPUs == 0")
+			}
+			if arg == "--memory" {
+				t.Fatal("configureVM should not apply --memory when Memory == 0")
+			}
+		}
+	}
+}
+
+func TestShouldCleanupStoppedInstance(t *testing.T) {
+	server := Server{Status: "stopped", Labels: map[string]string{}}
+	ok, reason := shouldCleanup(server, core.LeaseClaim{}, true, time.Now())
+	if !ok || reason != "instance state=stopped" {
+		t.Fatalf("cleanup=%v reason=%q, want true/instance state=stopped", ok, reason)
+	}
+}
+
+func TestShouldCleanupZeroIdleTimeout(t *testing.T) {
+	server := Server{Status: "running", Labels: map[string]string{}}
+	claim := core.LeaseClaim{
+		LeaseID:            "cbx_123",
+		LastUsedAt:         time.Now().Add(-48 * time.Hour).Format(time.RFC3339),
+		IdleTimeoutSeconds: 0,
+	}
+	ok, reason := shouldCleanup(server, claim, true, time.Now())
+	if ok {
+		t.Fatalf("cleanup=%v reason=%q; zero idle timeout should keep claim active", ok, reason)
+	}
+	if reason != "claim active" {
+		t.Fatalf("reason=%q, want \"claim active\"", reason)
+	}
+}
+
+func TestFirstLineNewlineAtStart(t *testing.T) {
+	got := firstLine("\nfoo")
+	if got != "foo" {
+		t.Fatalf("firstLine(\"\\nfoo\") = %q, want \"foo\"", got)
+	}
+}
+
+func TestConfigureVMSkipsExplicitZeroDisk(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tart.Disk = 0
+	core.MarkTartDiskExplicit(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	if err := b.configureVM(context.Background(), cfg, "crabbox-test"); err != nil {
+		t.Fatalf("configureVM: %v", err)
+	}
+	for _, call := range runner.calls {
+		for _, arg := range call.Args {
+			if arg == "--disk-size" {
+				t.Fatal("configureVM should not apply --disk-size 0 even when explicit")
+			}
+		}
+	}
+}
+
+func TestShouldCleanupGracePeriodNotExpired(t *testing.T) {
+	server := Server{Status: "running", Labels: map[string]string{}}
+	now := time.Now()
+	claim := core.LeaseClaim{
+		LeaseID:            "cbx_123",
+		LastUsedAt:         now.Add(-2 * time.Hour).Format(time.RFC3339),
+		IdleTimeoutSeconds: int((1 * time.Hour).Seconds()),
+	}
+	ok, reason := shouldCleanup(server, claim, true, now)
+	if ok {
+		t.Fatalf("cleanup=%v reason=%q; idle expired but 12h grace period should keep it active", ok, reason)
+	}
+	if reason != "claim active" {
+		t.Fatalf("reason=%q, want \"claim active\"", reason)
+	}
+}
+
+func TestResolveInstanceByLeaseID(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_claim123", "my-slug", providerName, "instance:crabbox-blue-abc123", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup claim: %v", err)
+	}
+
+	listJSON := `[{"Name":"crabbox-blue-abc123","State":"running","Running":true,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--format", "json"}):  {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-blue-abc123"}): {Stdout: "192.168.64.5\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	inst, ip, claim, err := b.resolveInstance(context.Background(), "cbx_claim123")
+	if err != nil {
+		t.Fatalf("resolveInstance by LeaseID: %v", err)
+	}
+	if inst.Name != "crabbox-blue-abc123" {
+		t.Fatalf("inst.Name = %q, want crabbox-blue-abc123", inst.Name)
+	}
+	if ip != "192.168.64.5" {
+		t.Fatalf("ip = %q, want 192.168.64.5", ip)
+	}
+	if claim.LeaseID != "cbx_claim123" {
+		t.Fatalf("claim.LeaseID = %q, want cbx_claim123", claim.LeaseID)
+	}
+}
+
+func TestResolveInstanceBySlug(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_slug456", "test-slug", providerName, "instance:crabbox-blue-def456", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup claim: %v", err)
+	}
+
+	listJSON := `[{"Name":"crabbox-blue-def456","State":"running","Running":true,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--format", "json"}):  {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-blue-def456"}): {Stdout: "192.168.64.6\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	inst, ip, _, err := b.resolveInstance(context.Background(), "test-slug")
+	if err != nil {
+		t.Fatalf("resolveInstance by slug: %v", err)
+	}
+	if inst.Name != "crabbox-blue-def456" {
+		t.Fatalf("inst.Name = %q, want crabbox-blue-def456", inst.Name)
+	}
+	if ip != "192.168.64.6" {
+		t.Fatalf("ip = %q, want 192.168.64.6", ip)
+	}
+}
+
 func sampleListJSON() string {
 	return `[{"Name":"crabbox-blue-1234abcd","State":"running","Running":true,"Disk":50,"Size":15,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"},{"Name":"my-dev-vm","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"}]`
 }
