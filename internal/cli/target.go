@@ -120,12 +120,9 @@ func validateTargetConfig(cfg Config) error {
 }
 
 func validateProviderTarget(cfg Config) error {
-	provider, err := ProviderFor(cfg.Provider)
+	provider, err := validateProviderTargetSupport(cfg)
 	if err != nil {
 		return err
-	}
-	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
-		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
 	if cfg.Architecture == ArchitectureARM64 {
 		if cfg.TargetOS != targetLinux {
@@ -164,6 +161,17 @@ func validateProviderTarget(cfg Config) error {
 		return nil
 	}
 	return nil
+}
+
+func validateProviderTargetSupport(cfg Config) (Provider, error) {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
+		return nil, exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
+	}
+	return provider, nil
 }
 
 func validateArchitectureServerType(kind string, cfg Config, serverTypeARM64 bool) error {

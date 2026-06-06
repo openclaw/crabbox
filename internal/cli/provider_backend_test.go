@@ -695,6 +695,35 @@ xcpNg:
 	}
 }
 
+func TestLoadLeaseTargetConfigAllowsAWSMacOSWithoutProvisioningHost(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_HOST_ID", "")
+	t.Setenv("CRABBOX_AWS_MAC_HOST_ID", "")
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	if err := os.WriteFile(configPath, []byte(`provider: aws
+aws:
+  region: us-east-1
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := defaultConfig()
+	fs := newFlagSet("test", io.Discard)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, []string{"--target", "macos"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadLeaseTargetConfig(fs, "aws", targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: "i-1234567890abcdef0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetMacOS || cfg.Provider != "aws" {
+		t.Fatalf("cfg provider=%q target=%q", cfg.Provider, cfg.TargetOS)
+	}
+}
+
 func TestLeaseCreateFlagsRejectSnapshotSandboxResourceNoops(t *testing.T) {
 	defaults := baseConfig()
 	for _, tc := range []struct {

@@ -344,7 +344,7 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 	if !cfg.ServerTypeExplicit {
 		cfg.ServerType = serverTypeForConfig(cfg)
 	}
-	if err := validateProviderTarget(cfg); err != nil {
+	if _, err := validateProviderTargetSupport(cfg); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
