@@ -320,7 +320,7 @@ func (b *daytonaLeaseBackend) syncDaytonaToolbox(ctx context.Context, sandbox *s
 		return nil, err
 	}
 	manifestStarted := time.Now()
-	manifest, err := syncManifest(req.Repo.Root, excludes)
+	manifest, err := syncManifest(req.Repo.Root, excludes, b.cfg.Sync.Includes)
 	if err != nil {
 		return nil, exit(6, "build sync file list: %v", err)
 	}

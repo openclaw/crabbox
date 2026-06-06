@@ -310,6 +310,10 @@ func BuildSyncManifest(root string, excludes []string) (SyncManifest, error) {
 	return syncManifest(root, excludes)
 }
 
+func BuildSyncManifestFiltered(root string, excludes, includes []string) (SyncManifest, error) {
+	return syncManifestFiltered(root, excludes, includes)
+}
+
 func (m SyncManifest) NUL() []byte {
 	var b bytes.Buffer
 	for _, rel := range m.Files {

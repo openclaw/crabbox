@@ -127,8 +127,8 @@ func syncExcludes(root string, cfg Config) ([]string, error) {
 	return core.SyncExcludes(root, cfg)
 }
 
-func syncManifest(root string, excludes []string) (SyncManifest, error) {
-	return core.BuildSyncManifest(root, excludes)
+func syncManifest(root string, excludes, includes []string) (SyncManifest, error) {
+	return core.BuildSyncManifestFiltered(root, excludes, includes)
 }
 
 func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {

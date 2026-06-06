@@ -1071,7 +1071,7 @@ retrySync:
 		}
 		stepStart = time.Now()
 		finalizeCommand := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
-			AllowMassDeletions: hydratedByActions || os.Getenv("CRABBOX_ALLOW_MASS_DELETIONS") == "1",
+			AllowMassDeletions: allowRemoteSyncMassDeletions(cfg, hydratedByActions),
 			HydrateGit:         hydrateGit,
 			BaseRef:            cfg.Sync.BaseRef,
 			BaseSHA:            baseSHA,
@@ -1729,6 +1729,10 @@ func shouldPruneRemoteSync(deleteEnabled, fullResync bool) bool {
 
 func shouldSeedRemotePruneManifest(hydratedByActions, fullResync bool) bool {
 	return hydratedByActions || fullResync
+}
+
+func allowRemoteSyncMassDeletions(cfg Config, hydratedByActions bool) bool {
+	return hydratedByActions || len(syncIncludes(cfg)) > 0 || os.Getenv("CRABBOX_ALLOW_MASS_DELETIONS") == "1"
 }
 
 func commandNeedsHydrationHint(command []string, shellMode bool) bool {
