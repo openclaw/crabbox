@@ -83,7 +83,8 @@ SSH-lease providers:
 Delegated-run providers (no SSH lease):
 
 - Cloudflare Containers: `internal/providers/cloudflare`, with the Worker runtime in `worker/src/cloudflare-container-runner.ts`
-- E2B, Islo, Modal, Tensorlake, Upstash, Blacksmith, W&B:
+- Docker Sandbox, E2B, Islo, Modal, Tensorlake, Upstash, Blacksmith, W&B:
+  `internal/providers/dockersandbox`,
   `internal/providers/e2b`, `internal/providers/islo`, `internal/providers/modal`,
   `internal/providers/tensorlake`, `internal/providers/upstashbox`,
   `internal/providers/blacksmith`, `internal/providers/wandb`

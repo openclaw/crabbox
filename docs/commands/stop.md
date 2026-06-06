@@ -40,6 +40,9 @@ Crabbox lease ID and local slug:
   slug and deletes the Islo sandbox.
 - `e2b` — accepts a Crabbox lease ID, a local slug, or a Crabbox-owned E2B
   sandbox ID in raw or `e2b_<sandboxID>` form and deletes the E2B sandbox.
+- `docker-sandbox` — accepts only a Crabbox lease ID or local slug backed by a
+  `provider=docker-sandbox` local claim, then removes the sandbox with
+  `sbx rm --force`.
 - `ssh` (static hosts) — removes the local claim for the configured static
   target; it never deletes the host.
 

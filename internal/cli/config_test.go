@@ -105,6 +105,16 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_TENSORLAKE_DISK_MB",
 		"CRABBOX_TENSORLAKE_TIMEOUT_SECS",
 		"CRABBOX_TENSORLAKE_NO_INTERNET",
+		"CRABBOX_DOCKER_SANDBOX_CLI",
+		"CRABBOX_DOCKER_SANDBOX_AGENT",
+		"CRABBOX_DOCKER_SANDBOX_TEMPLATE",
+		"CRABBOX_DOCKER_SANDBOX_CPUS",
+		"CRABBOX_DOCKER_SANDBOX_MEMORY",
+		"CRABBOX_DOCKER_SANDBOX_CLONE",
+		"CRABBOX_DOCKER_SANDBOX_WORKDIR",
+		"CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES",
+		"CRABBOX_DOCKER_SANDBOX_MCP",
+		"CRABBOX_DOCKER_SANDBOX_KIT",
 		"CRABBOX_ASCII_BOX_API_KEY",
 		"ASCII_BOX_API_KEY",
 		"CRABBOX_ASCII_BOX_BASE_URL",
@@ -191,6 +201,78 @@ func clearConfigEnv(t *testing.T) {
 		"RAILWAY_ENVIRONMENT_ID",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.DockerSandbox.CLIPath != "sbx" || cfg.DockerSandbox.Agent != "shell" || cfg.DockerSandbox.Workdir != "" {
+		t.Fatalf("dockerSandbox defaults not applied: %#v", cfg.DockerSandbox)
+	}
+	clone := true
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "docker-sandbox",
+		DockerSandbox: &fileDockerSandboxConfig{
+			CLIPath:         "/opt/sbx",
+			Agent:           "shell",
+			Template:        "ubuntu",
+			CPUs:            2.5,
+			Memory:          "6g",
+			Clone:           &clone,
+			Workdir:         "/workspace/my-app",
+			ExtraWorkspaces: []string{"/tmp/extra"},
+			MCP:             []string{"context7"},
+			Kit:             []string{"example-org/base"},
+		},
+	})
+	if cfg.Provider != "docker-sandbox" || cfg.DockerSandbox.CLIPath != "/opt/sbx" || cfg.DockerSandbox.Template != "ubuntu" || cfg.DockerSandbox.CPUs != 2.5 || cfg.DockerSandbox.Memory != "6g" || !cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/my-app" {
+		t.Fatalf("file dockerSandbox config not applied: %#v", cfg.DockerSandbox)
+	}
+	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7" || strings.Join(cfg.DockerSandbox.Kit, ",") != "example-org/base" {
+		t.Fatalf("file dockerSandbox list config not applied: %#v", cfg.DockerSandbox)
+	}
+
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CLI", "/usr/local/bin/sbx")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_AGENT", "shell")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_TEMPLATE", "debian")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CPUS", "4")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_MEMORY", "8g")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CLONE", "false")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_WORKDIR", "/workspace/env-app")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES", "/tmp/a,/tmp/b")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_MCP", "one,two")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_KIT", "kit-a,kit-b")
+	applyEnv(&cfg)
+	if cfg.DockerSandbox.CLIPath != "/usr/local/bin/sbx" || cfg.DockerSandbox.Template != "debian" || cfg.DockerSandbox.CPUs != 4 || cfg.DockerSandbox.Memory != "8g" || cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/env-app" {
+		t.Fatalf("env dockerSandbox config not applied: %#v", cfg.DockerSandbox)
+	}
+	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/a,/tmp/b" || strings.Join(cfg.DockerSandbox.MCP, ",") != "one,two" || strings.Join(cfg.DockerSandbox.Kit, ",") != "kit-a,kit-b" {
+		t.Fatalf("env dockerSandbox list config not applied: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDockerSandboxEmptyFileConfigDoesNotClearExistingValues(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.DockerSandbox = DockerSandboxConfig{
+		CLIPath:         "/opt/sbx",
+		Agent:           "shell",
+		Template:        "ubuntu",
+		CPUs:            2,
+		Memory:          "4g",
+		Clone:           true,
+		Workdir:         "/workspace/my-app",
+		ExtraWorkspaces: []string{"/tmp/extra"},
+		MCP:             []string{"context7"},
+		Kit:             []string{"example-org/base"},
+	}
+	applyFileConfig(&cfg, fileConfig{DockerSandbox: &fileDockerSandboxConfig{}})
+	if cfg.DockerSandbox.CLIPath != "/opt/sbx" || cfg.DockerSandbox.Agent != "shell" || cfg.DockerSandbox.Template != "ubuntu" || cfg.DockerSandbox.CPUs != 2 || cfg.DockerSandbox.Memory != "4g" || !cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/my-app" {
+		t.Fatalf("empty file dockerSandbox config cleared existing scalar values: %#v", cfg.DockerSandbox)
+	}
+	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7" || strings.Join(cfg.DockerSandbox.Kit, ",") != "example-org/base" {
+		t.Fatalf("empty file dockerSandbox config cleared existing list values: %#v", cfg.DockerSandbox)
 	}
 }
 

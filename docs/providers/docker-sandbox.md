@@ -1,0 +1,176 @@
+# Docker Sandbox Provider
+
+Read when:
+
+- choosing `provider: docker-sandbox`;
+- configuring Docker Sandboxes through the standalone `sbx` CLI;
+- changing `internal/providers/dockersandbox`.
+
+Docker Sandbox is a delegated-run provider. Crabbox shells out to the standalone
+`sbx` CLI for sandbox lifecycle and command execution. Docker owns the sandbox
+runtime and transport; Crabbox owns provider selection, local config, friendly
+slugs, local ownership claims, timing summaries, and normalized list/status
+rendering.
+
+This provider is intentionally separate from
+[Local Container](local-container.md). `docker-sandbox` has no aliases, and the
+existing `docker`, `container`, and `local-docker` aliases continue to resolve
+to `local-container`.
+
+## When To Use
+
+Use Docker Sandbox when you want a Docker-managed Linux sandbox and command
+execution through `sbx exec`. Use Local Container when you want a local
+Docker-compatible container with Crabbox-managed SSH, rsync, desktop/browser
+surfaces, or local Docker socket pass-through.
+
+## Prerequisites
+
+- The standalone `sbx` CLI must be on `PATH`, or configured with
+  `--docker-sandbox-cli` / `dockerSandbox.cliPath`.
+- Run `sbx login` before Crabbox lifecycle commands when your Docker Sandbox
+  account requires authentication.
+- The host must satisfy Docker Sandbox virtualization requirements. Doctor
+  surfaces KVM, hypervisor, or virtualization errors when the CLI reports them.
+
+## Commands
+
+```sh
+crabbox doctor --provider docker-sandbox
+crabbox warmup --provider docker-sandbox --slug live-smoke
+crabbox run --provider docker-sandbox -- echo ok
+crabbox run --provider docker-sandbox --id live-smoke -- pwd
+crabbox list --provider docker-sandbox --json
+crabbox status --provider docker-sandbox --id live-smoke
+crabbox stop --provider docker-sandbox live-smoke
+```
+
+## Config
+
+```yaml
+provider: docker-sandbox
+target: linux
+dockerSandbox:
+  cliPath: sbx
+  agent: shell
+  template: ""
+  cpus: 0
+  memory: ""
+  clone: false
+  workdir: ""        # empty means the current repo root path inside the sandbox
+  extraWorkspaces: []
+  mcp: []
+  kit: []
+```
+
+Provider flags:
+
+```text
+--docker-sandbox-cli
+--docker-sandbox-agent
+--docker-sandbox-template
+--docker-sandbox-cpus
+--docker-sandbox-memory
+--docker-sandbox-clone
+--docker-sandbox-workdir
+--docker-sandbox-extra-workspace
+--docker-sandbox-mcp
+--docker-sandbox-kit
+```
+
+Environment overrides:
+
+```text
+CRABBOX_DOCKER_SANDBOX_CLI
+CRABBOX_DOCKER_SANDBOX_AGENT
+CRABBOX_DOCKER_SANDBOX_TEMPLATE
+CRABBOX_DOCKER_SANDBOX_CPUS
+CRABBOX_DOCKER_SANDBOX_MEMORY
+CRABBOX_DOCKER_SANDBOX_CLONE
+CRABBOX_DOCKER_SANDBOX_WORKDIR
+CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES
+CRABBOX_DOCKER_SANDBOX_MCP
+CRABBOX_DOCKER_SANDBOX_KIT
+```
+
+`extraWorkspaces`, `mcp`, and `kit` environment values are comma-separated.
+
+## Lifecycle
+
+1. `warmup` or `run` without `--id` creates a Crabbox-owned sandbox name such as
+   `crabbox-my-app-1a2b3c`.
+2. Crabbox runs `sbx create --name <name> ... shell <repo-root>` and records a
+   local claim as `dsbx_<sandbox-name>`.
+3. `run` executes through `sbx exec --workdir <repo-root> <sandbox-name> <cmd>`
+   by default, matching the workspace path passed to `sbx create shell`. Set
+   `dockerSandbox.workdir` only when your template mounts the workspace
+   somewhere else. Commands with shell operators, leading environment
+   assignments, or `--shell` are wrapped as `sh -lc`.
+4. `list`, `status`, and `stop` intersect `sbx ls --json` with local Crabbox
+   claims for `provider=docker-sandbox`. Sandboxes without a local Crabbox claim
+   are not listed and cannot be stopped by Crabbox.
+5. `crabbox stop --provider docker-sandbox <slug>` maps to
+   `sbx rm --force <sandbox-name>` and removes the local claim. Crabbox does
+   not map stop to `sbx stop`, because Crabbox stop means provider resource
+   cleanup, while `sbx stop` retains sandbox state.
+
+## Doctor
+
+`crabbox doctor --provider docker-sandbox` is non-mutating. It runs:
+
+- `sbx version`
+- `sbx ls --json`
+- `sbx diagnose --output json` as optional diagnostic enrichment
+
+Common blockers:
+
+| Symptom | Action |
+| --- | --- |
+| `sbx` not found | Install the standalone Docker Sandbox CLI or set `dockerSandbox.cliPath`. |
+| Authentication failure | Run `sbx login` and retry. |
+| Virtualization, KVM, or hypervisor error | Fix host virtualization prerequisites for Docker Sandboxes. |
+| Malformed `sbx ls --json` output | Upgrade or inspect the installed `sbx` CLI; Crabbox parses common array and object wrapper shapes. |
+
+## Capabilities
+
+- Target: Linux.
+- Kind: delegated-run.
+- Coordinator: never. Docker Sandbox always runs direct from the CLI.
+- Aliases: none.
+- SSH, desktop, browser, code-server, Tailscale, Actions hydration, VNC, and
+  Crabbox rsync are not supported in v1.
+- `--lease-output` is supported for run cleanup metadata; the cleanup command
+  points back to `crabbox stop --provider docker-sandbox <slug>`.
+- Agent: `shell` only. Other `dockerSandbox.agent` values are rejected until
+  Crabbox has a stable non-shell agent contract.
+
+## Safety Notes
+
+- Crabbox never passes Docker credentials as command-line arguments.
+- `list`, `status`, and `stop` operate only on local Crabbox claims for
+  `provider=docker-sandbox`.
+- `--docker-sandbox-clone` requires a normal Git repository workspace before
+  Crabbox calls `sbx create --clone`.
+- Forwarded environment values are shell-exported for the delegated command.
+  Use the normal Crabbox allowlist and avoid broad wildcard forwarding.
+
+## Live Smoke
+
+When the host has a usable `sbx` CLI, run:
+
+```sh
+scripts/live-docker-sandbox-smoke.sh
+```
+
+The script builds `bin/crabbox`, checks `sbx version` and `sbx ls --json`,
+creates a unique Crabbox-owned sandbox, runs `echo ok` and `pwd`, lists it, and
+then stops it. If `sbx` is missing, logged out, or blocked by host prerequisites,
+the script reports `environment_blocked` with the failing command.
+
+Related docs:
+
+- [Provider reference](README.md)
+- [Local Container](local-container.md)
+- [Provider backends](../provider-backends.md)
+- [run](../commands/run.md)
+- [stop](../commands/stop.md)
