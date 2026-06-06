@@ -191,6 +191,9 @@ func (c *xapiClient) AttachConfigDrive(ctx context.Context, req xcpNgConfigDrive
 		"type":             "user",
 		"sharable":         false,
 		"read_only":        false,
+		"xenstore_data":    map[string]string{},
+		"sm_config":        map[string]string{},
+		"tags":             []string{},
 		"other_config":     labels,
 	})
 	if err != nil {
@@ -202,15 +205,18 @@ func (c *xapiClient) AttachConfigDrive(ctx context.Context, req xcpNgConfigDrive
 		return xcpNgConfigDrive{}, err
 	}
 	vbdRef, err := c.callString(ctx, "VBD.create", c.session, map[string]any{
-		"VM":           req.VMRef.value(),
-		"VDI":          vdiRef,
-		"userdevice":   "autodetect",
-		"bootable":     false,
-		"mode":         "RO",
-		"type":         "Disk",
-		"empty":        false,
-		"unpluggable":  true,
-		"other_config": labels,
+		"VM":                       req.VMRef.value(),
+		"VDI":                      vdiRef,
+		"userdevice":               "autodetect",
+		"bootable":                 false,
+		"mode":                     "RO",
+		"type":                     "Disk",
+		"empty":                    false,
+		"unpluggable":              true,
+		"qos_algorithm_type":       "",
+		"qos_algorithm_params":     map[string]string{},
+		"qos_supported_algorithms": []string{},
+		"other_config":             labels,
 	})
 	if err != nil {
 		_ = c.DeleteConfigDrive(context.Background(), drive)
@@ -960,6 +966,14 @@ func encodeXMLRPCValue(b *bytes.Buffer, value any) {
 		} else {
 			b.WriteString("<boolean>0</boolean>")
 		}
+	case []string:
+		b.WriteString("<array><data>")
+		for _, item := range v {
+			b.WriteString("<value>")
+			encodeXMLRPCValue(b, item)
+			b.WriteString("</value>")
+		}
+		b.WriteString("</data></array>")
 	case map[string]string:
 		b.WriteString("<struct>")
 		keys := make([]string, 0, len(v))

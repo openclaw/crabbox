@@ -414,6 +414,11 @@ func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 			if !strings.Contains(body, "<name>read_only</name><value><boolean>0</boolean>") {
 				t.Fatalf("VDI.create must stay writable for raw import, body=%s", body)
 			}
+			for _, want := range []string{"xenstore_data", "sm_config", "tags"} {
+				if !strings.Contains(body, "<name>"+want+"</name>") {
+					t.Fatalf("VDI.create missing %s, body=%s", want, body)
+				}
+			}
 			writeXMLRPCString(t, w, "OpaqueRef:vdi")
 		case "task.create":
 			writeXMLRPCString(t, w, "OpaqueRef:task")
@@ -424,6 +429,11 @@ func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 		case "VBD.create":
 			if !strings.Contains(body, "<name>mode</name><value><string>RO</string>") {
 				t.Fatalf("VBD.create must attach config drive read-only, body=%s", body)
+			}
+			for _, want := range []string{"qos_algorithm_type", "qos_algorithm_params", "qos_supported_algorithms"} {
+				if !strings.Contains(body, "<name>"+want+"</name>") {
+					t.Fatalf("VBD.create missing %s, body=%s", want, body)
+				}
 			}
 			writeXMLRPCString(t, w, "OpaqueRef:vbd")
 		default:
