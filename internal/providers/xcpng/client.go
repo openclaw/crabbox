@@ -637,6 +637,7 @@ func (c *xapiClient) waitForTaskSuccess(ctx context.Context, taskRef string) err
 			if info == "" {
 				info = xmlValueToString(value)
 			}
+			info = redactXAPISensitiveText(info, c.xapiSecrets("task.get_error_info", c.session, taskRef)...)
 			return fmt.Errorf("xcp-ng upload task %s: %s %s", taskRef, status, info)
 		}
 		if time.Now().After(deadline) {

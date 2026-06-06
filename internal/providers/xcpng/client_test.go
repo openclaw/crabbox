@@ -575,6 +575,36 @@ func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 	}
 }
 
+func TestStartVMCallsXAPIStartWithPausedAndForceFlagsFalse(t *testing.T) {
+	var body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, requestBody := readXMLRPCBodyAndMethod(t, r)
+		body = requestBody
+		if method != "VM.start" {
+			t.Fatalf("method=%s", method)
+		}
+		writeXMLRPCString(t, w, "true")
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	if err := client.StartVM(context.Background(), "OpaqueRef:vm"); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"<methodName>VM.start</methodName>",
+		"<string>OpaqueRef:session</string>",
+		"<string>OpaqueRef:vm</string>",
+		"<boolean>0</boolean>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %s: %s", want, body)
+		}
+	}
+	if strings.Count(body, "<boolean>0</boolean>") != 2 {
+		t.Fatalf("VM.start should pass paused=false and force=false, body=%s", body)
+	}
+}
+
 func TestGetServerAndSetLabelsResolveUUIDToFreshRef(t *testing.T) {
 	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -645,6 +675,150 @@ func TestGuestIPv4ForIDResolvesUUIDToFreshRef(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateSRAndNetworkChooseUUIDNameOrEmpty(t *testing.T) {
+	tests := []struct {
+		name       string
+		resolve    func(context.Context, *xapiClient) (xapiRef, error)
+		wantMethod string
+		wantRef    xapiRef
+		wantErr    string
+	}{
+		{
+			name: "template uuid",
+			resolve: func(ctx context.Context, client *xapiClient) (xapiRef, error) {
+				return client.ResolveTemplate(ctx, xcpNgConfig{TemplateUUID: xcpNgTestVMUUID, Template: "ignored"})
+			},
+			wantMethod: "VM.get_by_uuid",
+			wantRef:    "OpaqueRef:by-uuid",
+		},
+		{
+			name: "template name",
+			resolve: func(ctx context.Context, client *xapiClient) (xapiRef, error) {
+				return client.ResolveTemplate(ctx, xcpNgConfig{Template: "Ubuntu Ready"})
+			},
+			wantMethod: "VM.get_by_name_label",
+			wantRef:    "OpaqueRef:by-name",
+		},
+		{
+			name: "missing template",
+			resolve: func(ctx context.Context, client *xapiClient) (xapiRef, error) {
+				return client.ResolveTemplate(ctx, xcpNgConfig{})
+			},
+			wantErr: "template or template UUID is required",
+		},
+		{
+			name: "sr uuid",
+			resolve: func(ctx context.Context, client *xapiClient) (xapiRef, error) {
+				return client.ResolveSR(ctx, xcpNgConfig{SRUUID: "33333333-3333-3333-3333-333333333333", SR: "ignored"})
+			},
+			wantMethod: "SR.get_by_uuid",
+			wantRef:    "OpaqueRef:by-uuid",
+		},
+		{
+			name: "sr name",
+			resolve: func(ctx context.Context, client *xapiClient) (xapiRef, error) {
+				return client.ResolveSR(ctx, xcpNgConfig{SR: "default-sr"})
+			},
+			wantMethod: "SR.get_by_name_label",
+			wantRef:    "OpaqueRef:by-name",
+		},
+		{
+			name: "missing sr",
+			resolve: func(ctx context.Context, client *xapiClient) (xapiRef, error) {
+				return client.ResolveSR(ctx, xcpNgConfig{})
+			},
+			wantErr: "sr or sr UUID is required",
+		},
+		{
+			name: "network uuid",
+			resolve: func(ctx context.Context, client *xapiClient) (xapiRef, error) {
+				return client.ResolveNetwork(ctx, xcpNgConfig{NetworkUUID: "44444444-4444-4444-4444-444444444444", Network: "ignored"})
+			},
+			wantMethod: "network.get_by_uuid",
+			wantRef:    "OpaqueRef:by-uuid",
+		},
+		{
+			name: "network name",
+			resolve: func(ctx context.Context, client *xapiClient) (xapiRef, error) {
+				return client.ResolveNetwork(ctx, xcpNgConfig{Network: "pool-network"})
+			},
+			wantMethod: "network.get_by_name_label",
+			wantRef:    "OpaqueRef:by-name",
+		},
+		{
+			name: "missing optional network",
+			resolve: func(ctx context.Context, client *xapiClient) (xapiRef, error) {
+				return client.ResolveNetwork(ctx, xcpNgConfig{})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var methods []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				method := readXMLRPCMethod(t, r)
+				methods = append(methods, method)
+				switch method {
+				case "VM.get_by_uuid", "SR.get_by_uuid", "network.get_by_uuid":
+					writeXMLRPCString(t, w, "OpaqueRef:by-uuid")
+				case "VM.get_by_name_label", "SR.get_by_name_label", "network.get_by_name_label":
+					writeXMLRPCStringArray(t, w, []string{"OpaqueRef:by-name"})
+				default:
+					t.Fatalf("unexpected method %s", method)
+				}
+			}))
+			defer server.Close()
+			client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+			ref, err := tt.resolve(context.Background(), client)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err=%v want %q", err, tt.wantErr)
+				}
+				if len(methods) != 0 {
+					t.Fatalf("methods=%v, want none", methods)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ref != tt.wantRef {
+				t.Fatalf("ref=%q want %q", ref, tt.wantRef)
+			}
+			if got := strings.Join(methods, ","); got != tt.wantMethod {
+				t.Fatalf("methods=%s want %s", got, tt.wantMethod)
+			}
+		})
+	}
+}
+
+func TestResolveByNameRejectsMissingAndAmbiguousMatches(t *testing.T) {
+	tests := []struct {
+		name    string
+		refs    []string
+		wantErr string
+	}{
+		{name: "missing", refs: nil, wantErr: "not found by name"},
+		{name: "ambiguous", refs: []string{"OpaqueRef:one", "OpaqueRef:two"}, wantErr: "name is ambiguous"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if method := readXMLRPCMethod(t, r); method != "VM.get_by_name_label" {
+					t.Fatalf("method=%s", method)
+				}
+				writeXMLRPCStringArray(t, w, tt.refs)
+			}))
+			defer server.Close()
+			client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+			_, err := client.ResolveTemplate(context.Background(), xcpNgConfig{Template: "Ubuntu Ready"})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err=%v want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestResolveHostUsesUUIDOnlyForStrictUUIDs(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -683,6 +857,83 @@ func TestResolveHostUsesUUIDOnlyForStrictUUIDs(t *testing.T) {
 				t.Fatal("expected host ref")
 			}
 		})
+	}
+}
+
+func TestWaitForTaskSuccessReportsFailureInfo(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "task.get_status":
+			writeXMLRPCString(t, w, "failure")
+		case "task.get_error_info":
+			writeXMLRPCStringArray(t, w, []string{"SR_BACKEND_FAILURE", "disk full"})
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	err := client.waitForTaskSuccess(context.Background(), "OpaqueRef:task")
+	if err == nil || !strings.Contains(err.Error(), "failure SR_BACKEND_FAILURE: disk full") {
+		t.Fatalf("err=%v", err)
+	}
+	if got := strings.Join(methods, ","); got != "task.get_status,task.get_error_info" {
+		t.Fatalf("methods=%s", got)
+	}
+}
+
+func TestWaitForTaskSuccessRedactsSessionFromTaskErrorInfo(t *testing.T) {
+	var methods []string
+	session := "OpaqueRef:session-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "task.get_status":
+			writeXMLRPCString(t, w, "failure")
+		case "task.get_error_info":
+			writeXMLRPCStringArray(t, w, []string{"UPLOAD_FAILED", "session_id=" + session, "raw=" + session})
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: session, http: server.Client()}
+	err := client.waitForTaskSuccess(context.Background(), "OpaqueRef:task")
+	if err == nil {
+		t.Fatal("expected task failure")
+	}
+	if strings.Contains(err.Error(), session) {
+		t.Fatalf("task error leaked session: %v", err)
+	}
+	for _, want := range []string{"UPLOAD_FAILED", "session_id=<redacted>", "raw=<redacted>"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%v missing %q", err, want)
+		}
+	}
+	if got := strings.Join(methods, ","); got != "task.get_status,task.get_error_info" {
+		t.Fatalf("methods=%s", got)
+	}
+}
+
+func TestWaitForTaskSuccessTimesOutWithoutSleeping(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if method := readXMLRPCMethod(t, r); method != "task.get_status" {
+			t.Fatalf("method=%s", method)
+		}
+		writeXMLRPCString(t, w, "pending")
+	}))
+	defer server.Close()
+	oldTimeout := xcpNgTaskTimeout
+	xcpNgTaskTimeout = 0
+	t.Cleanup(func() { xcpNgTaskTimeout = oldTimeout })
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	err := client.waitForTaskSuccess(context.Background(), "OpaqueRef:task")
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for xcp-ng upload task OpaqueRef:task") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
