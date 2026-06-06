@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -110,12 +111,18 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
+	envFile := ""
 	if len(req.Env) > 0 {
-		command = wrapCommandWithEnv(command, req.Env)
+		var cleanup func()
+		envFile, cleanup, err = writeDockerSandboxEnvFile(req.Env)
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer cleanup()
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s sync_delegated=true\n", providerName, leaseID, sandboxName, workdir)
 	commandStart := b.now()
-	exitCode, runErr := cli.execStream(ctx, sandboxName, workdir, command, b.rt.Stdout, b.rt.Stderr)
+	exitCode, runErr := cli.execStream(ctx, sandboxName, workdir, envFile, command, b.rt.Stdout, b.rt.Stderr)
 	commandDuration := b.now().Sub(commandStart)
 	result := RunResult{
 		ExitCode:      exitCode,
@@ -358,8 +365,8 @@ func rejectRunOptions(spec ProviderSpec, req RunRequest) error {
 	if req.Options.Desktop || req.Options.Browser || req.Options.Code {
 		return exit(2, "provider=%s does not support desktop, browser, or code-server options in v1", providerName)
 	}
-	if req.Options.Tailscale.Enabled || req.Options.SSHKey != "" || req.Options.SSHPort != "" || req.Options.SSHUser != "" {
-		return exit(2, "provider=%s is delegated-run only and does not support SSH-only options", providerName)
+	if req.Options.Tailscale.Enabled {
+		return exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
 	if !req.ApplyLocalPatch && strings.TrimSpace(req.Repo.Root) == "" {
 		return exit(2, "provider=%s requires a local workspace", providerName)
@@ -387,17 +394,6 @@ func buildCommand(command []string, shellMode bool) ([]string, error) {
 		return []string{"sh", "-lc", shellScriptFromArgv(command)}, nil
 	}
 	return command, nil
-}
-
-func wrapCommandWithEnv(command []string, env map[string]string) []string {
-	if len(env) == 0 {
-		return command
-	}
-	assignments := make([]string, 0, len(env))
-	for key, value := range env {
-		assignments = append(assignments, key+"="+shellQuote(value))
-	}
-	return []string{"sh", "-lc", strings.Join(assignments, " ") + " exec " + shellScriptFromArgv(command)}
 }
 
 func dockerSandboxAgent(cfg Config) string {
@@ -546,4 +542,65 @@ func (b *backend) now() time.Time {
 		return b.rt.Clock.Now()
 	}
 	return time.Now()
+}
+
+func writeDockerSandboxEnvFile(env map[string]string) (string, func(), error) {
+	file, err := os.CreateTemp("", "crabbox-docker-sandbox-env-*.env")
+	if err != nil {
+		return "", nil, fmt.Errorf("create docker-sandbox env file: %w", err)
+	}
+	localPath := file.Name()
+	cleanup := func() { _ = os.Remove(localPath) }
+	keep := false
+	defer func() {
+		_ = file.Close()
+		if !keep {
+			cleanup()
+		}
+	}()
+	body, err := formatDockerSandboxEnvFile(env)
+	if err != nil {
+		return "", nil, err
+	}
+	if _, err := file.WriteString(body); err != nil {
+		return "", nil, fmt.Errorf("write docker-sandbox env file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", nil, fmt.Errorf("close docker-sandbox env file: %w", err)
+	}
+	keep = true
+	return localPath, cleanup, nil
+}
+
+func formatDockerSandboxEnvFile(env map[string]string) (string, error) {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		if !validDockerSandboxEnvName(key) {
+			return "", exit(2, "docker-sandbox env name %q is not a valid shell environment name", key)
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, key := range keys {
+		value := env[key]
+		if strings.ContainsAny(value, "\x00\r\n") {
+			return "", exit(2, "docker-sandbox env value for %s cannot contain NUL or newlines when forwarded through sbx --env-file", key)
+		}
+		fmt.Fprintf(&b, "%s=%s\n", key, value)
+	}
+	return b.String(), nil
+}
+
+func validDockerSandboxEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (i > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }

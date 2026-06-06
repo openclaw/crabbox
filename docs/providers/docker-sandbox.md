@@ -106,6 +106,9 @@ CRABBOX_DOCKER_SANDBOX_KIT
    `dockerSandbox.workdir` only when your template mounts the workspace
    somewhere else. Commands with shell operators, leading environment
    assignments, or `--shell` are wrapped as `sh -lc`.
+   Crabbox forwards selected `--allow-env` / `--env-from-profile` values through
+   a temporary `sbx exec --env-file` so values do not appear in local process
+   arguments.
 4. `list`, `status`, and `stop` intersect `sbx ls --json` with local Crabbox
    claims for `provider=docker-sandbox`. Sandboxes without a local Crabbox claim
    are not listed and cannot be stopped by Crabbox.
@@ -138,11 +141,13 @@ Common blockers:
 - Coordinator: never. Docker Sandbox always runs direct from the CLI.
 - Aliases: none.
 - SSH, desktop, browser, code-server, Tailscale, Actions hydration, VNC, and
-  Crabbox rsync are not supported in v1.
+  Crabbox rsync are not supported in v1. Inherited global SSH config is ignored
+  for delegated `sbx exec` runs.
 - `--lease-output` is supported for run cleanup metadata; the cleanup command
   points back to `crabbox stop --provider docker-sandbox <slug>`.
 - Agent: `shell` only. Other `dockerSandbox.agent` values are rejected until
   Crabbox has a stable non-shell agent contract.
+- Forwarded env: supported through `sbx exec --env-file`.
 
 ## Safety Notes
 
@@ -151,8 +156,9 @@ Common blockers:
   `provider=docker-sandbox`.
 - `--docker-sandbox-clone` requires a normal Git repository workspace before
   Crabbox calls `sbx create --clone`.
-- Forwarded environment values are shell-exported for the delegated command.
-  Use the normal Crabbox allowlist and avoid broad wildcard forwarding.
+- Forwarded environment values are written to a temporary local env file and
+  passed with `sbx exec --env-file`; Crabbox does not place selected values in
+  local `sbx exec` process arguments.
 
 ## Live Smoke
 

@@ -140,7 +140,7 @@ func TestRunCreatesExecsAndRemovesEphemeralSandbox(t *testing.T) {
 	}
 }
 
-func TestRunBuildsConfiguredCreateCommandAndEnvWrappedExec(t *testing.T) {
+func TestRunBuildsConfiguredCreateCommandAndExec(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := newTestConfig()
 	cfg.DockerSandbox.Template = "ubuntu"
@@ -162,9 +162,9 @@ func TestRunBuildsConfiguredCreateCommandAndEnvWrappedExec(t *testing.T) {
 	}, nil)
 	backend := newTestBackend(cfg, runner, io.Discard, io.Discard)
 	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: repoRoot},
-		Env:     map[string]string{"GREETING": "hello world"},
-		Command: []string{"echo", "$GREETING"},
+		Repo:      Repo{Name: "my-app", Root: repoRoot},
+		Command:   []string{"echo", "hello"},
+		ShellMode: true,
 	})
 	if err != nil {
 		t.Fatalf("Run err=%v", err)
@@ -187,8 +187,70 @@ func TestRunBuildsConfiguredCreateCommandAndEnvWrappedExec(t *testing.T) {
 			t.Fatalf("exec args=%v missing %q", execCall.Args, want)
 		}
 	}
-	if got := strings.Join(execCall.Args, " "); !strings.Contains(got, "GREETING='hello world'") || !strings.Contains(got, " exec ") {
-		t.Fatalf("exec args=%v missing env wrapper", execCall.Args)
+	if got := strings.Join(execCall.Args, " "); strings.Contains(got, "GREETING=") || strings.Contains(got, " exec ") {
+		t.Fatalf("exec args=%v should not include env wrapper", execCall.Args)
+	}
+}
+
+func TestRunForwardsEnvViaSBXEnvFile(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var stderr bytes.Buffer
+	runner := newRunner(map[string]scriptedReply{
+		"create": {stdout: ""},
+		"exec":   {stdout: "ok\n"},
+		"rm":     {stdout: ""},
+	}, nil)
+	backend := newTestBackend(newTestConfig(), runner, io.Discard, &stderr)
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:       Repo{Name: "my-app", Root: t.TempDir()},
+		Command:    []string{"printenv", "SECRET_TOKEN"},
+		Env:        map[string]string{"SECRET_TOKEN": "secret-token-value"},
+		EnvSummary: true,
+		Options:    core.LeaseOptions{EnvAllow: []string{"SECRET_TOKEN"}},
+	})
+	if err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	out := stderr.String()
+	for _, want := range []string{"provider=docker-sandbox", "behavior=forwarded", "SECRET_TOKEN=set len=18 secret=true"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stderr missing %q in %q", want, out)
+		}
+	}
+	if strings.Contains(out, "secret-token-value") {
+		t.Fatalf("stderr leaked env value: %q", out)
+	}
+	execCall := findCall(runner, "exec")
+	if execCall == nil {
+		t.Fatal("missing exec call")
+	}
+	if !containsArg(execCall.Args, "--env-file") {
+		t.Fatalf("exec args=%v missing --env-file", execCall.Args)
+	}
+	if strings.Contains(strings.Join(execCall.Args, " "), "secret-token-value") {
+		t.Fatalf("secret leaked in exec argv: %v", execCall.Args)
+	}
+	if strings.Contains(strings.Join(execCall.Args, " "), "SECRET_TOKEN=secret-token-value") {
+		t.Fatalf("env assignment leaked in exec argv: %v", execCall.Args)
+	}
+}
+
+func TestFormatDockerSandboxEnvFile(t *testing.T) {
+	got, err := formatDockerSandboxEnvFile(map[string]string{
+		"Z_FLAG":       "last",
+		"SECRET_TOKEN": "secret value",
+	})
+	if err != nil {
+		t.Fatalf("formatDockerSandboxEnvFile err=%v", err)
+	}
+	if got != "SECRET_TOKEN=secret value\nZ_FLAG=last\n" {
+		t.Fatalf("env file=%q", got)
+	}
+	if _, err := formatDockerSandboxEnvFile(map[string]string{"BAD-NAME": "x"}); err == nil || !strings.Contains(err.Error(), "valid shell environment name") {
+		t.Fatalf("bad name err=%v", err)
+	}
+	if _, err := formatDockerSandboxEnvFile(map[string]string{"SECRET_TOKEN": "line\nbreak"}); err == nil || !strings.Contains(err.Error(), "newlines") {
+		t.Fatalf("newline err=%v", err)
 	}
 }
 
@@ -518,15 +580,19 @@ func TestDoctorWarnsWhenOptionalDiagnoseFailsAndReportsListParse(t *testing.T) {
 	}
 }
 
-func TestUnsupportedAgentAndSSHOptionsRejectClearly(t *testing.T) {
+func TestUnsupportedAgentAndTailscaleOptionsRejectClearly(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.DockerSandbox.Agent = "codex"
 	if _, err := (Provider{}).Configure(cfg, Runtime{Exec: newRunner(nil, nil)}); err == nil || !strings.Contains(err.Error(), "v1 supports shell only") {
 		t.Fatalf("Configure err=%v, want unsupported agent rejection", err)
 	}
-	err := rejectRunOptions(Provider{}.Spec(), RunRequest{Repo: Repo{Root: t.TempDir()}, Options: core.LeaseOptions{SSHUser: "root"}})
-	if err == nil || !strings.Contains(err.Error(), "SSH-only") {
-		t.Fatalf("rejectRunOptions err=%v, want SSH-only rejection", err)
+	err := rejectRunOptions(Provider{}.Spec(), RunRequest{Repo: Repo{Root: t.TempDir()}, Options: core.LeaseOptions{Tailscale: core.TailscaleConfig{Enabled: true}}})
+	if err == nil || !strings.Contains(err.Error(), "Tailscale") {
+		t.Fatalf("rejectRunOptions err=%v, want Tailscale rejection", err)
+	}
+	err = rejectRunOptions(Provider{}.Spec(), RunRequest{Repo: Repo{Root: t.TempDir()}, Options: core.LeaseOptions{SSHUser: "root", SSHPort: "2222", SSHKey: "/tmp/key"}})
+	if err != nil {
+		t.Fatalf("inherited SSH config should be ignored for delegated sbx provider, got %v", err)
 	}
 }
 
@@ -839,7 +905,7 @@ func TestSBXErrorClassifiesTimeoutAndStreamedErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, err := cli.execStream(context.Background(), "sandbox", "", []string{"true"}, io.Discard, io.Discard)
+	code, err := cli.execStream(context.Background(), "sandbox", "", "", []string{"true"}, io.Discard, io.Discard)
 	if code != 0 || err == nil || !strings.Contains(err.Error(), "broken pipe") {
 		t.Fatalf("streamed err code=%d err=%v", code, err)
 	}
@@ -850,7 +916,7 @@ func TestSBXErrorClassifiesTimeoutAndStreamedErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, err = cli.execStream(context.Background(), "sandbox", "", []string{"false"}, io.Discard, io.Discard)
+	code, err = cli.execStream(context.Background(), "sandbox", "", "", []string{"false"}, io.Discard, io.Discard)
 	if code != 4 || err != nil {
 		t.Fatalf("nonzero streamed result code=%d err=%v", code, err)
 	}

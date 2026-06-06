@@ -106,10 +106,13 @@ func (c *sbxCLI) create(ctx context.Context, name string, repo Repo) error {
 	return err
 }
 
-func (c *sbxCLI) execStream(ctx context.Context, name, workdir string, command []string, stdout, stderr io.Writer) (int, error) {
+func (c *sbxCLI) execStream(ctx context.Context, name, workdir, envFile string, command []string, stdout, stderr io.Writer) (int, error) {
 	args := []string{"exec"}
 	if strings.TrimSpace(workdir) != "" {
 		args = append(args, "--workdir", workdir)
+	}
+	if strings.TrimSpace(envFile) != "" {
+		args = append(args, "--env-file", envFile)
 	}
 	args = append(args, name)
 	args = append(args, command...)
