@@ -12,7 +12,19 @@ func TestCloudInitPayloadIncludesSSHUserKeyAndBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"#cloud-config", "name: crabbox", "ssh-ed25519 AAAATEST crabbox", "NOPASSWD", "openssh-server", "/work/crabbox"} {
+	for _, want := range []string{
+		"#cloud-config",
+		"name: crabbox",
+		"ssh-ed25519 AAAATEST crabbox",
+		"NOPASSWD",
+		"openssh-server",
+		"jq",
+		"/work/crabbox",
+		"/usr/local/bin/crabbox-ready",
+		"test -w '/work/crabbox'",
+		"/var/lib/crabbox/bootstrapped",
+		"/var/cache/crabbox/pnpm",
+	} {
 		if !strings.Contains(payload.UserData, want) {
 			t.Fatalf("user-data missing %q:\n%s", want, payload.UserData)
 		}

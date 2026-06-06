@@ -23,6 +23,7 @@ func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgClou
 	if publicKey == "" {
 		return xcpNgCloudInitPayload{}, exit(2, "xcp-ng cloud-init public key is required")
 	}
+	workRoot := core.Blank(cfg.XCPNg.WorkRoot, cfg.WorkRoot)
 	var userData bytes.Buffer
 	fmt.Fprintf(&userData, "#cloud-config\n")
 	fmt.Fprintf(&userData, "users:\n")
@@ -37,12 +38,31 @@ func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgClou
 	fmt.Fprintf(&userData, "  - git\n")
 	fmt.Fprintf(&userData, "  - curl\n")
 	fmt.Fprintf(&userData, "  - rsync\n")
+	fmt.Fprintf(&userData, "  - jq\n")
 	fmt.Fprintf(&userData, "  - openssh-server\n")
+	fmt.Fprintf(&userData, "write_files:\n")
+	fmt.Fprintf(&userData, "  - path: /usr/local/bin/crabbox-ready\n")
+	fmt.Fprintf(&userData, "    permissions: '0755'\n")
+	fmt.Fprintf(&userData, "    content: |\n")
+	fmt.Fprintf(&userData, "      #!/usr/bin/env bash\n")
+	fmt.Fprintf(&userData, "      set -euo pipefail\n")
+	fmt.Fprintf(&userData, "      git --version >/dev/null\n")
+	fmt.Fprintf(&userData, "      rsync --version >/dev/null\n")
+	fmt.Fprintf(&userData, "      curl --version >/dev/null\n")
+	fmt.Fprintf(&userData, "      jq --version >/dev/null\n")
+	fmt.Fprintf(&userData, "      test -w %s\n", shellQuote(workRoot))
 	fmt.Fprintf(&userData, "runcmd:\n")
+	fmt.Fprintf(&userData, "  - [mkdir, -p, %s, /var/cache/crabbox/pnpm, /var/cache/crabbox/npm, /var/lib/crabbox]\n", shellSafeCloudInitScalar(workRoot))
+	fmt.Fprintf(&userData, "  - [chown, -R, %s:%s, %s, /var/cache/crabbox]\n", shellSafeCloudInitScalar(user), shellSafeCloudInitScalar(user), shellSafeCloudInitScalar(workRoot))
 	fmt.Fprintf(&userData, "  - [systemctl, enable, --now, ssh]\n")
-	fmt.Fprintf(&userData, "  - [mkdir, -p, %s]\n", shellSafeCloudInitScalar(core.Blank(cfg.XCPNg.WorkRoot, cfg.WorkRoot)))
+	fmt.Fprintf(&userData, "  - [touch, /var/lib/crabbox/bootstrapped]\n")
+	fmt.Fprintf(&userData, "  - [/usr/local/bin/crabbox-ready]\n")
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: crabbox-%s\n", shellSafeCloudInitScalar(leaseID), shellSafeCloudInitScalar(slug))
 	return xcpNgCloudInitPayload{UserData: userData.String(), MetaData: metaData}, nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func shellSafeCloudInitScalar(value string) string {
