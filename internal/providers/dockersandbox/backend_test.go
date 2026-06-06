@@ -38,6 +38,44 @@ func TestProviderSpecIsDelegatedLinuxAndAliasFree(t *testing.T) {
 	}
 }
 
+func TestProviderWrappersConfigureBackendAndDoctor(t *testing.T) {
+	provider := Provider{}
+	cfg := newTestConfig()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := provider.RegisterFlags(fs, cfg)
+	if err := fs.Parse([]string{"--docker-sandbox-cli", "/opt/sbx", "--docker-sandbox-memory", "8g"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatalf("ApplyFlags err=%v", err)
+	}
+	if cfg.DockerSandbox.CLIPath != "/opt/sbx" || cfg.DockerSandbox.Memory != "8g" {
+		t.Fatalf("cfg=%#v", cfg.DockerSandbox)
+	}
+
+	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: newRunner(nil, nil)}
+	configured, err := provider.Configure(cfg, rt)
+	if err != nil {
+		t.Fatalf("Configure err=%v", err)
+	}
+	if configured.Spec().Name != providerName {
+		t.Fatalf("backend spec=%#v", configured.Spec())
+	}
+	doctor, err := provider.ConfigureDoctor(cfg, rt)
+	if err != nil {
+		t.Fatalf("ConfigureDoctor err=%v", err)
+	}
+	if _, ok := doctor.(*backend); !ok {
+		t.Fatalf("doctor backend type=%T", doctor)
+	}
+
+	badCfg := cfg
+	badCfg.DockerSandbox.Agent = "codex"
+	if _, err := provider.Configure(badCfg, rt); err == nil || !strings.Contains(err.Error(), "v1 supports shell only") {
+		t.Fatalf("Configure invalid err=%v", err)
+	}
+}
+
 func TestParseSandboxListToleratesArraysAndWrappers(t *testing.T) {
 	for _, input := range []string{
 		`[{"id":"abc","name":"crabbox-my-app-123abc","status":"running","agent":"shell","workspace":"/workspace"}]`,
@@ -252,6 +290,30 @@ func TestFormatDockerSandboxEnvFile(t *testing.T) {
 	if _, err := formatDockerSandboxEnvFile(map[string]string{"SECRET_TOKEN": "line\nbreak"}); err == nil || !strings.Contains(err.Error(), "newlines") {
 		t.Fatalf("newline err=%v", err)
 	}
+	if _, err := formatDockerSandboxEnvFile(map[string]string{"SECRET_TOKEN": "carriage\rreturn"}); err == nil || !strings.Contains(err.Error(), "newlines") {
+		t.Fatalf("carriage return err=%v", err)
+	}
+	if !validDockerSandboxEnvName("_OK_1") || validDockerSandboxEnvName("1_BAD") || validDockerSandboxEnvName("BAD.NAME") || validDockerSandboxEnvName("") {
+		t.Fatal("validDockerSandboxEnvName accepted or rejected the wrong names")
+	}
+}
+
+func TestWriteDockerSandboxEnvFileCreatesAndCleansUpFile(t *testing.T) {
+	path, cleanup, err := writeDockerSandboxEnvFile(map[string]string{"SECRET_TOKEN": "secret value"})
+	if err != nil {
+		t.Fatalf("writeDockerSandboxEnvFile err=%v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read env file err=%v", err)
+	}
+	if string(data) != "SECRET_TOKEN=secret value\n" {
+		t.Fatalf("env file body=%q", data)
+	}
+	cleanup()
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("env file still exists or unexpected stat err=%v", err)
+	}
 }
 
 func TestRunEnvSummaryTimingAndNoEnvBranches(t *testing.T) {
@@ -374,6 +436,76 @@ func TestRunKeepsClaimOnKeepAndCleansUpAfterCommandBuildFailure(t *testing.T) {
 	}
 	if got, want := callVerbs(runner), []string{"create", "rm"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("verbs=%v want cleanup after command-build failure %v", got, want)
+	}
+}
+
+func TestCreateSandboxRemovesSandboxWhenClaimSetupFails(t *testing.T) {
+	repoRoot := t.TempDir()
+	oldRandomBytes := randomBytes
+	defer func() { randomBytes = oldRandomBytes }()
+	randomBytes = func(b []byte) (int, error) {
+		for i := range b {
+			b[i] = byte(i + 1)
+		}
+		return len(b), nil
+	}
+
+	for _, tt := range []struct {
+		name          string
+		requestedSlug string
+		setupState    func(t *testing.T)
+		want          string
+	}{
+		{
+			name:          "slug allocation",
+			requestedSlug: "wanted",
+			setupState: func(t *testing.T) {
+				stateFile := filepathJoin(t.TempDir(), "state-file")
+				if err := os.WriteFile(stateFile, []byte("not a directory"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("XDG_STATE_HOME", stateFile)
+			},
+			want: "read claims directory",
+		},
+		{
+			name:          "claim persistence",
+			requestedSlug: "",
+			setupState: func(t *testing.T) {
+				stateDir := t.TempDir()
+				claimsDir := filepathJoin(stateDir, "crabbox", "claims")
+				if err := os.MkdirAll(claimsDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(claimsDir, 0o500); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(claimsDir, 0o700) })
+				t.Setenv("XDG_STATE_HOME", stateDir)
+			},
+			want: "write claim",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.setupState(t)
+			runner := newRunner(map[string]scriptedReply{
+				"create": {stdout: ""},
+				"rm":     {stdout: ""},
+			}, nil)
+			backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+			cli := &sbxCLI{cfg: backend.cfg, rt: backend.rt}
+			_, _, _, err := backend.createSandbox(context.Background(), cli, Repo{Name: "my-app", Root: repoRoot}, false, tt.requestedSlug)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("createSandbox err=%v want %q", err, tt.want)
+			}
+			if got, want := callVerbs(runner), []string{"create", "rm"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("verbs=%v want cleanup verbs %v", got, want)
+			}
+			rm := findCall(runner, "rm")
+			if rm == nil || !reflect.DeepEqual(rm.Args, []string{"rm", "--force", "crabbox-my-app-010203"}) {
+				t.Fatalf("rm args=%v", rm.Args)
+			}
+		})
 	}
 }
 
@@ -742,6 +874,22 @@ func TestFlagApplicationAndValidation(t *testing.T) {
 	}
 	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7" || strings.Join(cfg.DockerSandbox.Kit, ",") != "example-org/base" {
 		t.Fatalf("list cfg=%#v", cfg.DockerSandbox)
+	}
+
+	for _, flagName := range []string{"class", "type"} {
+		t.Run("rejects "+flagName, func(t *testing.T) {
+			cfg := newTestConfig()
+			fs := flag.NewFlagSet("docker-sandbox-"+flagName, flag.ContinueOnError)
+			fs.String(flagName, "", "")
+			values := RegisterDockerSandboxProviderFlags(fs, cfg)
+			if err := fs.Parse([]string{"--" + flagName, "standard"}); err != nil {
+				t.Fatal(err)
+			}
+			err := ApplyDockerSandboxProviderFlags(&cfg, fs, values)
+			if err == nil || !strings.Contains(err.Error(), "--"+flagName+" is not supported") {
+				t.Fatalf("ApplyDockerSandboxProviderFlags %s err=%v", flagName, err)
+			}
+		})
 	}
 
 	otherProvider := newTestConfig()
