@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -362,6 +364,31 @@ func TestListResolveTouchReleaseUseOnlyCrabboxMetadata(t *testing.T) {
 	}
 	if !reflect.DeepEqual(fake.deleted, []string{xcpNgTestVMUUID}) {
 		t.Fatalf("deleted=%v", fake.deleted)
+	}
+}
+
+func TestReleaseRemovesStoredKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	managed := crabboxServer(xcpNgTestVMUUID, "cbx_release", "ready", time.Now().Add(time.Hour))
+	fake := &fakeLifecycleClient{getServer: map[string]Server{"cbx_release": managed}}
+	backend := newTestBackend(t, fake)
+	keyPath, err := core.TestboxKeyPath("cbx_release")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte("private-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{Server: managed, LeaseID: "cbx_release"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("stored key still exists or stat failed with unexpected error: %v", err)
 	}
 }
 

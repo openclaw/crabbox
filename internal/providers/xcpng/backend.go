@@ -364,6 +364,7 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 		return err
 	}
 	removeLeaseClaim(req.Lease.LeaseID)
+	core.RemoveStoredTestboxKey(req.Lease.LeaseID)
 	return nil
 }
 
