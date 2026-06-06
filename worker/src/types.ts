@@ -36,6 +36,10 @@ export interface Env {
   CRABBOX_AZURE_SUBNET?: string;
   CRABBOX_AZURE_NSG?: string;
   CRABBOX_AZURE_SSH_CIDRS?: string;
+  CRABBOX_AZURE_ORPHAN_SWEEP_ENABLED?: string;
+  CRABBOX_AZURE_ORPHAN_SWEEP_DELETE?: string;
+  CRABBOX_AZURE_ORPHAN_SWEEP_INTERVAL_SECONDS?: string;
+  CRABBOX_AZURE_ORPHAN_SWEEP_GRACE_SECONDS?: string;
   GCP_PROJECT_ID?: string;
   GCP_CLIENT_EMAIL?: string;
   GCP_PRIVATE_KEY?: string;
@@ -230,7 +234,7 @@ export interface LeaseRecord {
   idleTimeoutSeconds?: number;
   estimatedHourlyUSD: number;
   maxEstimatedUSD: number;
-  state: "active" | "released" | "expired" | "failed";
+  state: "provisioning" | "active" | "released" | "expired" | "failed";
   createdAt: string;
   updatedAt: string;
   lastTouchedAt?: string;

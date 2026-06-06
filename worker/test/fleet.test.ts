@@ -509,6 +509,100 @@ describe("fleet lease identity and idle", () => {
     expect(sweep?.candidates[0]).toMatchObject({ action: "terminated" });
   });
 
+  it("terminates Azure orphan sweep candidates only when delete is enabled", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
+    storage.seed(
+      "lease:cbx_000000000777",
+      testLease({
+        id: "cbx_000000000777",
+        provider: "azure",
+        cloudID: "vm-provisioning",
+        region: "eastus",
+        state: "provisioning",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(
+          undefined,
+          {
+            provider: "azure",
+            servers: [
+              testMachine({
+                provider: "azure",
+                cloudID: "vm-orphan",
+                name: "vm-orphan",
+                labels: {
+                  crabbox: "true",
+                  lease: "cbx_missing",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+              testMachine({
+                provider: "azure",
+                cloudID: "vm-kept",
+                name: "vm-kept",
+                labels: {
+                  crabbox: "true",
+                  keep: "true",
+                  lease: "cbx_missing",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+              testMachine({
+                provider: "azure",
+                cloudID: "vm-provisioning",
+                name: "vm-provisioning",
+                labels: {
+                  crabbox: "true",
+                  lease: "cbx_000000000777",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+            ],
+          },
+          async (id) => {
+            deleted.push(id);
+          },
+        ),
+      },
+      {
+        AZURE_TENANT_ID: "tenant",
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: "secret",
+        AZURE_SUBSCRIPTION_ID: "subscription",
+        CRABBOX_AZURE_LOCATION: "eastus",
+        CRABBOX_AZURE_ORPHAN_SWEEP_DELETE: "1",
+        CRABBOX_AZURE_ORPHAN_SWEEP_GRACE_SECONDS: "1",
+      },
+    );
+
+    await fleet.alarm();
+
+    const sweep = storage.value<{
+      mode: string;
+      terminated: number;
+      candidates: Array<Record<string, unknown>>;
+    }>("azure-orphan-sweep:last");
+    expect(deleted).toEqual(["vm-orphan"]);
+    expect(sweep).toMatchObject({ mode: "delete", terminated: 1 });
+    expect(sweep?.candidates).toEqual([
+      expect.objectContaining({
+        cloudID: "vm-orphan",
+        leaseID: "cbx_missing",
+        reason: "expired-provider-tag",
+        action: "terminated",
+      }),
+    ]);
+  });
+
   it("releases stale pending EC2 Mac hosts during the AWS orphan sweep", async () => {
     const storage = new MemoryStorage();
     const actions: string[] = [];
@@ -1282,6 +1376,128 @@ describe("fleet lease identity and idle", () => {
     expect(updated.lease.tailscale?.state).toBe("ready");
   });
 
+  it("persists brokered leases as provisioning before provider create returns", async () => {
+    const storage = new MemoryStorage();
+    let storedDuringCreate: LeaseRecord | undefined;
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        () => {
+          storedDuringCreate = structuredClone(storage.value("lease:cbx_abcdef123456"));
+        },
+        { provider: "azure", cloudID: "vm-cbx-abcdef123456", region: "eastus" },
+      ),
+    });
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(create.status).toBe(201);
+    expect(storedDuringCreate).toMatchObject({
+      id: "cbx_abcdef123456",
+      provider: "azure",
+      state: "provisioning",
+      cloudID: "",
+    });
+    const { lease } = (await create.json()) as { lease: LeaseRecord };
+    expect(lease).toMatchObject({
+      id: "cbx_abcdef123456",
+      provider: "azure",
+      state: "active",
+      cloudID: "vm-cbx-abcdef123456",
+    });
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.state).toBe("active");
+  });
+
+  it("marks provisioning leases failed when provider create fails", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        () => {
+          throw new Error("azure create timed out after VM request");
+        },
+        { provider: "azure", region: "eastus" },
+      ),
+    });
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(create.status).toBe(500);
+    const lease = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
+    expect(lease).toMatchObject({
+      id: "cbx_abcdef123456",
+      provider: "azure",
+      state: "failed",
+      cleanupError: "azure create timed out after VM request",
+    });
+    expect(lease?.endedAt).toBeTruthy();
+  });
+
+  it("can release a provisioning lease before cloud resources are known", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(undefined, { provider: "azure" }, async (id) => {
+        deleted.push(id);
+      }),
+    });
+    storage.seed(
+      "lease:cbx_abcdef123456",
+      testLease({
+        id: "cbx_abcdef123456",
+        slug: "slow-azure",
+        provider: "azure",
+        cloudID: "",
+        region: "eastus",
+        state: "provisioning",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const release = await fleet.fetch(
+      request("POST", "/v1/leases/slow-azure/release", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+
+    expect(release.status).toBe(200);
+    expect(deleted).toEqual([]);
+    const { lease } = (await release.json()) as { lease: LeaseRecord };
+    expect(lease.state).toBe("released");
+  });
+
   it("rejects brokered Tailscale tags outside the coordinator allowlist", async () => {
     const fleet = testFleet(
       new MemoryStorage(),
@@ -1435,7 +1651,7 @@ describe("fleet lease identity and idle", () => {
     expect(create.status).toBe(201);
     expect(awsCIDRs).toEqual(["198.51.100.44/32", "203.0.113.7/32"]);
     expect(reconcile).toBe("authoritative");
-    expect(inFlightLeaseVisible).toBe(false);
+    expect(inFlightLeaseVisible).toBe(true);
     expect(inFlightCIDRs).toEqual(["203.0.113.7/32"]);
     expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.network?.sshSourceCIDRs).toEqual([
       "203.0.113.7/32",
@@ -6440,6 +6656,64 @@ describe("fleet identity", () => {
     };
     expect(body.audits).toMatchObject([
       { leaseID: "cbx_000000000004", cloudStatus: "missing", cloudState: "terminated" },
+      { leaseID: "cbx_000000000002", cloudStatus: "missing" },
+      { leaseID: "cbx_000000000001", cloudStatus: "found", cloudState: "running" },
+    ]);
+  });
+
+  it("audits expired Azure leases against cloud state", async () => {
+    const storage = new MemoryStorage();
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "live-azure",
+        provider: "azure",
+        cloudID: "vm-live",
+        region: "eastus",
+        state: "expired",
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        slug: "gone-azure",
+        provider: "azure",
+        cloudID: "vm-gone",
+        region: "eastus",
+        state: "expired",
+        createdAt: "2026-05-01T00:01:00.000Z",
+      }),
+    );
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(undefined, {
+        provider: "azure",
+        servers: [
+          testMachine({
+            provider: "azure",
+            cloudID: "vm-live",
+            name: "vm-live",
+            status: "running",
+            serverType: "Standard_D16ads_v5",
+            host: "192.0.2.30",
+            labels: { crabbox: "true", lease: "cbx_000000000001" },
+          }),
+        ],
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("GET", "/v1/admin/lease-audit?state=expired&provider=azure", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      audits: Array<{ leaseID: string; cloudStatus: string; cloudState?: string }>;
+    };
+    expect(body.audits).toMatchObject([
       { leaseID: "cbx_000000000002", cloudStatus: "missing" },
       { leaseID: "cbx_000000000001", cloudStatus: "found", cloudState: "running" },
     ]);

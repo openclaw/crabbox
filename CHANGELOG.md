@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed local-container warmup on Windows by mounting the generated bootstrap script instead of passing it inline to Docker. Thanks @anagnorisis2peripeteia.
+- Fixed brokered Azure lease creation to persist in-flight leases before VM provisioning, keep failed creates visible, and sweep orphaned Azure VMs from coordinator maintenance. Fixes https://github.com/openclaw/crabbox/issues/215.
 
 ### Removed
 

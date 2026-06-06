@@ -1347,6 +1347,7 @@ function toMachine(vm: AzureVM, ip: string): ProviderMachine {
     provider: "azure",
     id: 0,
     cloudID: vm.name ?? "",
+    ...(vm.location ? { region: vm.location } : {}),
     name: vm.name ?? "",
     status: vm.properties?.provisioningState ?? "",
     serverType: vm.properties?.hardwareProfile?.vmSize ?? "",

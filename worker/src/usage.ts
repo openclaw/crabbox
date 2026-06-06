@@ -236,7 +236,7 @@ function leaseMatchesUsageFilter(lease: LeaseRecord, filter: UsageFilter): boole
 function leaseUsage(lease: LeaseRecord, now: Date): UsageAccumulator {
   const created = parseTime(lease.createdAt, now);
   const ended = parseTime(lease.endedAt || lease.releasedAt || "", now);
-  const stop = lease.state === "active" ? now : ended;
+  const stop = isLiveLease(lease) ? now : ended;
   const runtimeSeconds = Math.max(0, Math.trunc((stop.getTime() - created.getTime()) / 1000));
   const estimatedUSD = roundUSD((runtimeSeconds / 3600) * (lease.estimatedHourlyUSD || 0));
   return {
@@ -249,7 +249,11 @@ function leaseUsage(lease: LeaseRecord, now: Date): UsageAccumulator {
 }
 
 function isActiveLease(lease: LeaseRecord, now: Date): boolean {
-  return lease.state === "active" && Date.parse(lease.expiresAt) > now.getTime();
+  return isLiveLease(lease) && Date.parse(lease.expiresAt) > now.getTime();
+}
+
+function isLiveLease(lease: LeaseRecord): boolean {
+  return lease.state === "active" || lease.state === "provisioning";
 }
 
 function mapAccumulator(map: Map<string, UsageAccumulator>, key: string): UsageAccumulator {
