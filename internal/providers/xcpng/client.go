@@ -740,13 +740,14 @@ func (c *xapiClient) call(ctx context.Context, method string, params ...any) (xm
 	if err := xml.Unmarshal(data, &response); err != nil {
 		return xmlRPCValue{}, err
 	}
+	secrets := c.xapiSecrets(method, params...)
 	if response.Fault != nil {
-		return xmlRPCValue{}, xapiFaultError{Value: response.Fault.Value}
+		return xmlRPCValue{}, xapiFaultError{Value: response.Fault.Value, Secrets: secrets}
 	}
 	if len(response.Params) == 0 {
 		return xmlRPCValue{}, nil
 	}
-	return unwrapXAPIResponse(response.Params[0].Value)
+	return unwrapXAPIResponse(response.Params[0].Value, secrets)
 }
 
 func (c *xapiClient) xapiSecrets(method string, params ...any) []string {
@@ -769,39 +770,44 @@ func (e xapiHTTPError) Error() string {
 }
 
 type xapiFaultError struct {
-	Value xmlRPCValue
+	Value   xmlRPCValue
+	Secrets []string
 }
 
 func (e xapiFaultError) Error() string {
 	fields := xmlValueToStringMap(e.Value)
 	if text := fields["faultString"]; text != "" {
-		return "xcp-ng fault: " + text
+		return "xcp-ng fault: " + redactXAPISensitiveText(text, e.Secrets...)
 	}
 	return "xcp-ng fault"
 }
 
 type xapiStatusError struct {
-	Fields map[string]xmlRPCValue
+	Fields  map[string]xmlRPCValue
+	Secrets []string
 }
 
 func (e xapiStatusError) Error() string {
+	var text string
 	if values := xmlValueToStrings(e.Fields["ErrorDescription"]); len(values) > 0 {
-		return "xcp-ng failure: " + strings.Join(values, ": ")
+		text = strings.Join(values, ": ")
+	} else {
+		text = xmlValueToString(e.Fields["ErrorDescription"])
 	}
-	if text := xmlValueToString(e.Fields["ErrorDescription"]); text != "" {
-		return "xcp-ng failure: " + text
+	if text == "" {
+		return "xcp-ng failure"
 	}
-	return "xcp-ng failure"
+	return "xcp-ng failure: " + redactXAPISensitiveText(text, e.Secrets...)
 }
 
-func unwrapXAPIResponse(value xmlRPCValue) (xmlRPCValue, error) {
+func unwrapXAPIResponse(value xmlRPCValue, secrets []string) (xmlRPCValue, error) {
 	fields := xmlValueToStruct(value)
 	status := xmlValueToString(fields["Status"])
 	if status == "" {
 		return value, nil
 	}
 	if status != "Success" {
-		return xmlRPCValue{}, xapiStatusError{Fields: fields}
+		return xmlRPCValue{}, xapiStatusError{Fields: fields, Secrets: secrets}
 	}
 	return fields["Value"], nil
 }

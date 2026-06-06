@@ -21,6 +21,7 @@ func TestCloudInitPayloadIncludesSSHUserKeyAndBootstrap(t *testing.T) {
 		"jq",
 		"/work/crabbox",
 		"/usr/local/bin/crabbox-ready",
+		"test -f /var/lib/crabbox/bootstrapped",
 		"test -w '/work/crabbox'",
 		"/var/lib/crabbox/bootstrapped",
 		"/var/cache/crabbox/pnpm",

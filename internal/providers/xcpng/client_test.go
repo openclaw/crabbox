@@ -129,12 +129,33 @@ func TestXMLRPCFaultReturnsError(t *testing.T) {
 	}
 }
 
+func TestXMLRPCFaultRedactsSecrets(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeXMLRPCFault(t, w, "debug echo secret-password")
+	}))
+	defer server.Close()
+	cfg := testConfig()
+	cfg.XCPNg.APIURL = server.URL
+	cfg.XCPNg.Password = "secret-password"
+	_, err := newXAPIClient(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected XML-RPC fault")
+	}
+	text := err.Error()
+	if strings.Contains(text, cfg.XCPNg.Password) {
+		t.Fatalf("fault leaked password: %s", text)
+	}
+	if !strings.Contains(text, "<redacted>") {
+		t.Fatalf("fault did not preserve redacted context: %s", text)
+	}
+}
+
 func TestXAPIStatusEnvelopeUnwrapsValueAndFailure(t *testing.T) {
 	success := xmlRPCValue{Struct: []xmlRPCMember{
 		{Name: "Status", Value: xmlRPCValue{CharData: "Success"}},
 		{Name: "Value", Value: xmlRPCValue{CharData: "OpaqueRef:vm"}},
 	}}
-	value, err := unwrapXAPIResponse(success)
+	value, err := unwrapXAPIResponse(success, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,8 +166,27 @@ func TestXAPIStatusEnvelopeUnwrapsValueAndFailure(t *testing.T) {
 		{Name: "Status", Value: xmlRPCValue{CharData: "Failure"}},
 		{Name: "ErrorDescription", Value: xmlRPCValue{Array: []xmlRPCValue{{CharData: "HANDLE_INVALID"}, {CharData: "VM"}}}},
 	}}
-	if _, err := unwrapXAPIResponse(failure); err == nil || !strings.Contains(err.Error(), "HANDLE_INVALID: VM") {
+	if _, err := unwrapXAPIResponse(failure, nil); err == nil || !strings.Contains(err.Error(), "HANDLE_INVALID: VM") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestXAPIStatusEnvelopeRedactsSecrets(t *testing.T) {
+	client := &xapiClient{session: "OpaqueRef:secret-session"}
+	failure := xmlRPCValue{Struct: []xmlRPCMember{
+		{Name: "Status", Value: xmlRPCValue{CharData: "Failure"}},
+		{Name: "ErrorDescription", Value: xmlRPCValue{Array: []xmlRPCValue{{CharData: "HANDLE_INVALID"}, {CharData: "OpaqueRef:secret-session"}}}},
+	}}
+	_, err := unwrapXAPIResponse(failure, client.xapiSecrets("VM.get_record", client.session, "OpaqueRef:vm"))
+	if err == nil {
+		t.Fatal("expected status failure")
+	}
+	text := err.Error()
+	if strings.Contains(text, "OpaqueRef:secret-session") || strings.Contains(text, "secret-session") {
+		t.Fatalf("status error leaked session token: %s", text)
+	}
+	if !strings.Contains(text, "<redacted>") {
+		t.Fatalf("status error did not preserve redacted context: %s", text)
 	}
 }
 

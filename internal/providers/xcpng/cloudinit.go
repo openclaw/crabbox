@@ -50,6 +50,7 @@ func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgClou
 	fmt.Fprintf(&userData, "      rsync --version >/dev/null\n")
 	fmt.Fprintf(&userData, "      curl --version >/dev/null\n")
 	fmt.Fprintf(&userData, "      jq --version >/dev/null\n")
+	fmt.Fprintf(&userData, "      test -f /var/lib/crabbox/bootstrapped\n")
 	fmt.Fprintf(&userData, "      test -w %s\n", shellQuote(workRoot))
 	fmt.Fprintf(&userData, "runcmd:\n")
 	fmt.Fprintf(&userData, "  - [mkdir, -p, %s, /var/cache/crabbox/pnpm, /var/cache/crabbox/npm, /var/lib/crabbox]\n", shellSafeCloudInitScalar(workRoot))
