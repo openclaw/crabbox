@@ -164,3 +164,76 @@ func TestConfigShowIncludesSyncInclude(t *testing.T) {
 		t.Fatalf("config show json sync.include = %#v, want [src scripts]", got.Sync.Include)
 	}
 }
+
+func TestConfigShowIncludesDockerSandbox(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte("profile: default\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CLI", "/opt/docker-sbx")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_AGENT", "shell")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_TEMPLATE", "ubuntu")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CPUS", "2.5")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_MEMORY", "6g")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CLONE", "true")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_WORKDIR", "/workspace/my-app")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES", "/tmp/extra")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_MCP", "context7")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_KIT", "example-org/base")
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	for _, want := range []string{
+		"docker_sandbox cli=/opt/docker-sbx agent=shell template=ubuntu cpus=2.5 memory=6g clone=true workdir=/workspace/my-app",
+		"extra_workspaces=/tmp/extra",
+		"mcp=context7",
+		"kit=example-org/base",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("config show missing %q in %q", want, text)
+		}
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		DockerSandbox struct {
+			CLIPath         string   `json:"cliPath"`
+			Agent           string   `json:"agent"`
+			Template        string   `json:"template"`
+			CPUs            float64  `json:"cpus"`
+			Memory          string   `json:"memory"`
+			Clone           bool     `json:"clone"`
+			Workdir         string   `json:"workdir"`
+			ExtraWorkspaces []string `json:"extraWorkspaces"`
+			MCP             []string `json:"mcp"`
+			Kit             []string `json:"kit"`
+		} `json:"dockerSandbox"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DockerSandbox.CLIPath != "/opt/docker-sbx" ||
+		got.DockerSandbox.Agent != "shell" ||
+		got.DockerSandbox.Template != "ubuntu" ||
+		got.DockerSandbox.CPUs != 2.5 ||
+		got.DockerSandbox.Memory != "6g" ||
+		!got.DockerSandbox.Clone ||
+		got.DockerSandbox.Workdir != "/workspace/my-app" ||
+		strings.Join(got.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" ||
+		strings.Join(got.DockerSandbox.MCP, ",") != "context7" ||
+		strings.Join(got.DockerSandbox.Kit, ",") != "example-org/base" {
+		t.Fatalf("unexpected dockerSandbox json: %#v", got.DockerSandbox)
+	}
+}
