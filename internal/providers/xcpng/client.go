@@ -283,22 +283,30 @@ func (c *xapiClient) deleteServer(ctx context.Context, id string, forceDisks boo
 	var drives []xcpNgConfigDrive
 	var disks []xcpNgConfigDrive
 	managed := false
-	if server, err := c.GetServer(ctx, ref); err == nil && isCrabboxLease(server) {
-		managed = true
-		found, err := c.configDrivesForLease(ctx, server.Labels["lease"])
-		if err != nil {
-			return err
-		}
-		drives = found
-		skipVDIs := map[string]struct{}{}
-		for _, drive := range drives {
-			if drive.VDIRef != "" {
-				skipVDIs[drive.VDIRef] = struct{}{}
+	server, getErr := c.GetServer(ctx, ref)
+	if getErr != nil && !forceDisks {
+		return getErr
+	}
+	if getErr == nil {
+		if isCrabboxLease(server) {
+			managed = true
+			found, err := c.configDrivesForLease(ctx, server.Labels["lease"])
+			if err != nil {
+				return err
 			}
-		}
-		disks, err = c.attachedDestroyableDisks(ctx, ref, skipVDIs)
-		if err != nil {
-			return err
+			drives = found
+			skipVDIs := map[string]struct{}{}
+			for _, drive := range drives {
+				if drive.VDIRef != "" {
+					skipVDIs[drive.VDIRef] = struct{}{}
+				}
+			}
+			disks, err = c.attachedDestroyableDisks(ctx, ref, skipVDIs)
+			if err != nil {
+				return err
+			}
+		} else if !forceDisks {
+			return exit(4, "refusing to delete non-Crabbox xcp-ng VM: %s", id)
 		}
 	}
 	if forceDisks && !managed {
@@ -419,6 +427,21 @@ func redactSessionIDText(text string) string {
 	return sessionIDTextPattern.ReplaceAllString(text, `${1}<redacted>`)
 }
 
+func redactXAPISensitiveText(text string, secrets ...string) string {
+	text = redactSessionIDText(text)
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, secret, "<redacted>")
+		if escaped := url.QueryEscape(secret); escaped != secret {
+			text = strings.ReplaceAll(text, escaped, "<redacted>")
+		}
+	}
+	return text
+}
+
 func (c *xapiClient) configDrivesForLease(ctx context.Context, leaseID string) ([]xcpNgConfigDrive, error) {
 	if strings.TrimSpace(leaseID) == "" {
 		return nil, nil
@@ -500,12 +523,12 @@ func (c *xapiClient) importRawVDI(ctx context.Context, vdiRef string, image []by
 	req.Header.Set("Content-Type", "application/octet-stream")
 	res, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("upload xcp-ng config-drive %s to %s: %s", vdiRef, redactedURL(u), redactSessionIDText(err.Error()))
+		return fmt.Errorf("upload xcp-ng config-drive %s to %s: %s", vdiRef, redactedURL(u), redactXAPISensitiveText(err.Error(), c.session))
 	}
 	defer res.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return xapiHTTPError{StatusCode: res.StatusCode, Body: redactSessionIDText(strings.TrimSpace(string(data)))}
+		return xapiHTTPError{StatusCode: res.StatusCode, Body: redactXAPISensitiveText(strings.TrimSpace(string(data)), c.session)}
 	}
 	return nil
 }
@@ -637,7 +660,7 @@ func (c *xapiClient) call(ctx context.Context, method string, params ...any) (xm
 		return xmlRPCValue{}, err
 	}
 	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return xmlRPCValue{}, xapiHTTPError{StatusCode: res.StatusCode, Body: strings.TrimSpace(string(data))}
+		return xmlRPCValue{}, xapiHTTPError{StatusCode: res.StatusCode, Body: redactXAPISensitiveText(strings.TrimSpace(string(data)), c.xapiSecrets(method, params...)...)}
 	}
 	var response xmlRPCResponse
 	if err := xml.Unmarshal(data, &response); err != nil {
@@ -650,6 +673,16 @@ func (c *xapiClient) call(ctx context.Context, method string, params ...any) (xm
 		return xmlRPCValue{}, nil
 	}
 	return unwrapXAPIResponse(response.Params[0].Value)
+}
+
+func (c *xapiClient) xapiSecrets(method string, params ...any) []string {
+	secrets := []string{c.session}
+	if method == "session.login_with_password" && len(params) > 1 {
+		if password, ok := params[1].(string); ok {
+			secrets = append(secrets, password)
+		}
+	}
+	return secrets
 }
 
 type xapiHTTPError struct {

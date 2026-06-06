@@ -466,6 +466,30 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 	}
 }
 
+func TestDeleteServerRefusesDestroyWhenMetadataLookupFails(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VM.get_record":
+			writeXMLRPCFault(t, w, "INTERNAL_ERROR")
+		case "VM.destroy":
+			t.Fatal("VM.destroy must not run when metadata lookup fails")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	if err := client.DeleteServer(context.Background(), "OpaqueRef:vm"); err == nil || !strings.Contains(err.Error(), "INTERNAL_ERROR") {
+		t.Fatalf("err=%v", err)
+	}
+	if got := strings.Join(methods, ","); got != "VM.get_record" {
+		t.Fatalf("methods=%s", got)
+	}
+}
+
 func TestDeleteConfigDriveTreatsAlreadyDetachedVBDAsCleanedUp(t *testing.T) {
 	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -487,6 +511,54 @@ func TestDeleteConfigDriveTreatsAlreadyDetachedVBDAsCleanedUp(t *testing.T) {
 	}
 	if got := strings.Join(methods, ","); got != "VBD.unplug,VBD.destroy,VDI.destroy" {
 		t.Fatalf("methods=%s", got)
+	}
+}
+
+func TestXMLRPCHTTPErrorRedactsLoginPassword(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		http.Error(w, "debug echo "+string(body), http.StatusBadGateway)
+	}))
+	defer server.Close()
+	cfg := testConfig()
+	cfg.XCPNg.APIURL = server.URL
+	cfg.XCPNg.Password = "secret-password"
+	_, err := newXAPIClient(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected login HTTP error")
+	}
+	text := err.Error()
+	if strings.Contains(text, cfg.XCPNg.Password) {
+		t.Fatalf("error leaked password: %s", text)
+	}
+	if !strings.Contains(text, "<redacted>") {
+		t.Fatalf("error did not preserve redacted context: %s", text)
+	}
+}
+
+func TestXMLRPCHTTPErrorRedactsSessionToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		http.Error(w, "debug echo "+string(body), http.StatusBadGateway)
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:secret-session", http: server.Client()}
+	_, err := client.call(context.Background(), "VM.get_record", client.session, "OpaqueRef:vm")
+	if err == nil {
+		t.Fatal("expected XML-RPC HTTP error")
+	}
+	text := err.Error()
+	if strings.Contains(text, "OpaqueRef:secret-session") || strings.Contains(text, "secret-session") {
+		t.Fatalf("error leaked session token: %s", text)
+	}
+	if !strings.Contains(text, "<redacted>") {
+		t.Fatalf("error did not preserve redacted context: %s", text)
 	}
 }
 
