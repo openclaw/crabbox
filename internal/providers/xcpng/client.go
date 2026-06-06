@@ -178,7 +178,7 @@ func (c *xapiClient) AttachConfigDrive(ctx context.Context, req xcpNgConfigDrive
 		"virtual_size":     len(image),
 		"type":             "user",
 		"sharable":         false,
-		"read_only":        true,
+		"read_only":        false,
 		"other_config":     labels,
 	})
 	if err != nil {
@@ -259,19 +259,21 @@ func (c *xapiClient) SetLabels(ctx context.Context, id string, labels map[string
 
 func (c *xapiClient) DeleteServer(ctx context.Context, id string) error {
 	ref := id
+	var drives []xcpNgConfigDrive
 	if server, err := c.GetServer(ctx, ref); err == nil && isCrabboxLease(server) {
-		drives, err := c.configDrivesForLease(ctx, server.Labels["lease"])
+		found, err := c.configDrivesForLease(ctx, server.Labels["lease"])
 		if err != nil {
 			return err
 		}
-		for _, drive := range drives {
-			if err := c.DeleteConfigDrive(ctx, drive); err != nil {
-				return err
-			}
-		}
+		drives = found
 	}
 	if err := c.shutdownVM(ctx, ref); err != nil {
 		return err
+	}
+	for _, drive := range drives {
+		if err := c.DeleteConfigDrive(ctx, drive); err != nil {
+			return err
+		}
 	}
 	if _, err := c.call(ctx, "VM.destroy", c.session, ref); err != nil {
 		return err

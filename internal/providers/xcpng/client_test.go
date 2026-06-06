@@ -1,8 +1,10 @@
 package xcpng
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -232,12 +234,18 @@ func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		method := readXMLRPCMethod(t, r)
+		method, body := readXMLRPCBodyAndMethod(t, r)
 		methods = append(methods, method)
 		switch method {
 		case "VDI.create":
+			if !strings.Contains(body, "<name>read_only</name><value><boolean>0</boolean>") {
+				t.Fatalf("VDI.create must stay writable for raw import, body=%s", body)
+			}
 			writeXMLRPCString(t, w, "OpaqueRef:vdi")
 		case "VBD.create":
+			if !strings.Contains(body, "<name>mode</name><value><string>RO</string>") {
+				t.Fatalf("VBD.create must attach config drive read-only, body=%s", body)
+			}
 			writeXMLRPCString(t, w, "OpaqueRef:vbd")
 		default:
 			t.Fatalf("unexpected method %s", method)
@@ -310,6 +318,9 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 	if strings.Index(got, "VM.clean_shutdown") > strings.Index(got, "VM.destroy") {
 		t.Fatalf("methods=%s destroyed before clean shutdown", got)
 	}
+	if strings.Index(got, "VM.clean_shutdown") > strings.Index(got, "VBD.unplug") {
+		t.Fatalf("methods=%s unplugged config drive before shutdown", got)
+	}
 }
 
 func TestShutdownVMFallsBackToHardShutdown(t *testing.T) {
@@ -355,13 +366,23 @@ func TestShutdownVMFallsBackToHardShutdown(t *testing.T) {
 
 func readXMLRPCMethod(t *testing.T, r *http.Request) string {
 	t.Helper()
+	method, _ := readXMLRPCBodyAndMethod(t, r)
+	return method
+}
+
+func readXMLRPCBodyAndMethod(t *testing.T, r *http.Request) (string, string) {
+	t.Helper()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var req struct {
 		Method string `xml:"methodName"`
 	}
-	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := xml.NewDecoder(bytes.NewReader(body)).Decode(&req); err != nil {
 		t.Fatal(err)
 	}
-	return req.Method
+	return req.Method, string(body)
 }
 
 func writeXMLRPCString(t *testing.T, w http.ResponseWriter, value string) {
