@@ -394,7 +394,10 @@ func buildCommand(command []string, shellMode bool) ([]string, error) {
 	if len(command) == 0 {
 		return nil, errors.New("missing command")
 	}
-	if shellMode || shouldUseShell(command) || leadingEnvAssignment(command) {
+	if shellMode {
+		return []string{"sh", "-lc", strings.Join(command, " ")}, nil
+	}
+	if shouldUseShell(command) || leadingEnvAssignment(command) {
 		return []string{"sh", "-lc", shellScriptFromArgv(command)}, nil
 	}
 	return command, nil

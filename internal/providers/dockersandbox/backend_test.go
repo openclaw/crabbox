@@ -856,6 +856,17 @@ func TestDockerSandboxSmallHelpers(t *testing.T) {
 	}
 }
 
+func TestBuildCommandShellModePreservesShellScript(t *testing.T) {
+	got, err := buildCommand([]string{"echo one && echo two"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"sh", "-lc", "echo one && echo two"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("command=%#v want %#v", got, want)
+	}
+}
+
 func TestSBXErrorFormattingEdges(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	stderr.WriteString("plain failure")
