@@ -319,9 +319,13 @@ func writeBrokerLogin(brokerURL, token, provider string) (string, Config, error)
 	}
 	file.Broker.URL = brokerURL
 	file.Broker.Token = token
-	if provider != "" {
-		file.Broker.Provider = provider
-		file.Provider = provider
+	brokerProvider, err := validateBrokerProvider(provider)
+	if err != nil {
+		return "", Config{}, err
+	}
+	if brokerProvider != "" {
+		file.Broker.Provider = brokerProvider
+		file.Provider = brokerProvider
 	}
 	written, err := writeUserFileConfig(file)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,6 +54,25 @@ func TestWriteBrokerLoginHonorsExplicitConfigPath(t *testing.T) {
 	}
 	if cfg.Coordinator != "https://crabbox.example.test" || cfg.CoordToken != "secret" {
 		t.Fatalf("unexpected config: %#v", cfg)
+	}
+}
+
+func TestWriteBrokerLoginRejectsDirectOnlyProvider(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+
+	_, _, err := writeBrokerLogin("https://crabbox.example.test", "secret", "xcp-ng")
+	if err == nil || !strings.Contains(err.Error(), "cannot be used with a broker") {
+		t.Fatalf("err=%v, want brokered provider rejection", err)
+	}
+	if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+		t.Fatalf("config file exists after rejected provider: %v", statErr)
 	}
 }
 

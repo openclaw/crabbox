@@ -46,6 +46,25 @@ func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
 	}
 }
 
+func TestConfigSetBrokerRejectsDirectOnlyProvider(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	err := app.configSetBroker([]string{"--url", "https://broker.example.test", "--provider", "xcp-ng"})
+	if err == nil || !strings.Contains(err.Error(), "cannot be used with a broker") {
+		t.Fatalf("err=%v, want brokered provider rejection", err)
+	}
+	if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+		t.Fatalf("config file exists after rejected provider: %v", statErr)
+	}
+}
+
 func TestConfigShowIncludesJobHydrateGitHubRunner(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

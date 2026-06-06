@@ -370,6 +370,10 @@ func (a App) configSetBroker(args []string) error {
 	if *url == "" {
 		return exit(2, "config set-broker requires --url")
 	}
+	brokerProvider, err := validateBrokerProvider(*provider)
+	if err != nil {
+		return err
+	}
 	var token string
 	if *tokenStdin {
 		data, err := io.ReadAll(os.Stdin)
@@ -410,9 +414,9 @@ func (a App) configSetBroker(args []string) error {
 	if adminToken != "" {
 		file.Broker.AdminToken = adminToken
 	}
-	if *provider != "" {
-		file.Broker.Provider = *provider
-		file.Provider = *provider
+	if brokerProvider != "" {
+		file.Broker.Provider = brokerProvider
+		file.Provider = brokerProvider
 	}
 	written, err := writeUserFileConfig(file)
 	if err != nil {
@@ -420,6 +424,22 @@ func (a App) configSetBroker(args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "wrote %s broker=%s auth=%s admin_auth=%s\n", written, *url, tokenState(file.Broker.Token), tokenState(file.Broker.AdminToken))
 	return nil
+}
+
+func validateBrokerProvider(provider string) (string, error) {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return "", nil
+	}
+	resolved, err := ProviderFor(provider)
+	if err != nil {
+		return "", err
+	}
+	spec := resolved.Spec()
+	if spec.Coordinator != CoordinatorSupported {
+		return "", exit(2, "provider %q cannot be used with a broker; supported broker providers are aws, azure, gcp, and hetzner", provider)
+	}
+	return resolved.Name(), nil
 }
 
 func tokenState(token string) string {
