@@ -4731,9 +4731,7 @@ export class FleetDurableObject implements DurableObject {
     for (const region of config.regions) {
       try {
         // oxlint-disable-next-line eslint/no-await-in-loop -- regions are swept independently.
-        const machines = (await this.provider("azure", region).listCrabboxServers()).filter(
-          (machine) => !machine.region || machine.region === region,
-        );
+        const machines = await this.provider("azure", region).listCrabboxServers();
         for (const machine of machines) {
           const cloudID = machine.cloudID || machine.name || String(machine.id);
           if (seenCloudIDs.has(cloudID)) {
@@ -4741,11 +4739,12 @@ export class FleetDurableObject implements DurableObject {
           }
           seenCloudIDs.add(cloudID);
           scanned += 1;
+          const candidateRegion = machine.region || region;
           const candidate = cloudOrphanSweepCandidate(
             machine,
             liveLeases,
             liveCloudIDs,
-            region,
+            candidateRegion,
             config.graceSeconds,
           );
           if (!candidate) {
@@ -4754,7 +4753,9 @@ export class FleetDurableObject implements DurableObject {
           if (config.deleteEnabled) {
             try {
               // oxlint-disable-next-line eslint/no-await-in-loop -- delete failures must stay attached to the candidate.
-              await this.provider("azure", region).deleteServer(machine.cloudID || machine.name);
+              await this.provider("azure", candidateRegion).deleteServer(
+                machine.cloudID || machine.name,
+              );
               candidate.action = "terminated";
             } catch (error) {
               candidate.action = "terminate_failed";

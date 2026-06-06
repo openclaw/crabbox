@@ -535,6 +535,7 @@ describe("fleet lease identity and idle", () => {
               testMachine({
                 provider: "azure",
                 cloudID: "vm-orphan",
+                region: "westus2",
                 name: "vm-orphan",
                 labels: {
                   crabbox: "true",
@@ -596,6 +597,7 @@ describe("fleet lease identity and idle", () => {
     expect(sweep?.candidates).toEqual([
       expect.objectContaining({
         cloudID: "vm-orphan",
+        region: "westus2",
         leaseID: "cbx_missing",
         reason: "expired-provider-tag",
         action: "terminated",
