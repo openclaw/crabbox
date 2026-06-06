@@ -433,7 +433,10 @@ func redactedURL(u *url.URL) string {
 	return redacted.String()
 }
 
-var sessionIDTextPattern = regexp.MustCompile(`(?i)(session_id=)[^&\s]+`)
+var (
+	sessionIDTextPattern = regexp.MustCompile(`(?i)(session_id=)[^&\s]+`)
+	uuidTextPattern      = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+)
 
 func redactSessionIDText(text string) string {
 	return sessionIDTextPattern.ReplaceAllString(text, `${1}<redacted>`)
@@ -894,7 +897,7 @@ func looksLikeUUID(value string) bool {
 	if strings.HasPrefix(value, "OpaqueRef:") {
 		return false
 	}
-	return len(value) >= 32 && strings.Count(value, "-") >= 4
+	return uuidTextPattern.MatchString(value)
 }
 
 func usableIPv4(value string) string {

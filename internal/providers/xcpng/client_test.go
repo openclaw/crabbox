@@ -535,6 +535,47 @@ func TestGuestIPv4ForIDResolvesUUIDToFreshRef(t *testing.T) {
 	}
 }
 
+func TestResolveHostUsesUUIDOnlyForStrictUUIDs(t *testing.T) {
+	tests := []struct {
+		name       string
+		host       string
+		wantMethod string
+	}{
+		{name: "strict UUID", host: xcpNgTestVMUUID, wantMethod: "host.get_by_uuid"},
+		{name: "long hyphenated name", host: "pool-master-11111111-1111-1111-1111-node", wantMethod: "host.get_by_name_label"},
+		{name: "opaque ref shaped like UUID", host: "OpaqueRef:22222222-2222-2222-2222-222222222222", wantMethod: "host.get_by_name_label"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var methods []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				method := readXMLRPCMethod(t, r)
+				methods = append(methods, method)
+				switch method {
+				case "host.get_by_uuid":
+					writeXMLRPCString(t, w, "OpaqueRef:host-by-uuid")
+				case "host.get_by_name_label":
+					writeXMLRPCStringArray(t, w, []string{"OpaqueRef:host-by-name"})
+				default:
+					t.Fatalf("unexpected method %s", method)
+				}
+			}))
+			defer server.Close()
+			client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+			ref, err := client.ResolveHost(context.Background(), xcpNgConfig{Host: tt.host})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(methods, ","); got != tt.wantMethod {
+				t.Fatalf("methods=%s want %s", got, tt.wantMethod)
+			}
+			if ref == "" {
+				t.Fatal("expected host ref")
+			}
+		})
+	}
+}
+
 func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 	var methods []string
 	powerStateChecks := 0

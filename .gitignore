@@ -8,3 +8,6 @@ node_modules/
 *.test
 coverage.out
 crabbox
+.gomu_history.json
+mutation-report.*
+reports/mutation/
