@@ -408,6 +408,27 @@ func TestRunWithExistingIDReusesClaimedSandbox(t *testing.T) {
 	}
 }
 
+func TestRunWithExistingIDClassifiesMissingSBXCLI(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repoRoot := t.TempDir()
+	leaseID := leasePrefix + "crabbox-my-app-missing-cli"
+	if err := claimLeaseForRepoProviderPond(leaseID, "missing-cli", providerName, "", repoRoot, time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	runner := newRunner(map[string]scriptedReply{
+		"exec": {stderr: "not found", exitCode: 1, err: os.ErrNotExist},
+	}, nil)
+	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: repoRoot},
+		ID:      "missing-cli",
+		Command: []string{"pwd"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "install the Docker Sandbox sbx CLI") {
+		t.Fatalf("Run missing sbx err=%v", err)
+	}
+}
+
 func TestRunKeepsClaimOnKeepAndCleansUpAfterCommandBuildFailure(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	runner := newRunner(map[string]scriptedReply{

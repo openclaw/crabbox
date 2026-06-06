@@ -58,6 +58,10 @@ func (c *sbxCLI) runStreamed(ctx context.Context, args []string, stdout, stderr 
 		Stdout: stdout,
 		Stderr: stderr,
 	})
+	if isMissingExecutableError(err) {
+		var stdoutBuf, stderrBuf bytes.Buffer
+		return res.ExitCode, sbxError(args, res.ExitCode, &stdoutBuf, &stderrBuf, err)
+	}
 	if err != nil && res.ExitCode == 0 {
 		return res.ExitCode, fmt.Errorf("sbx %s: %w", strings.Join(args, " "), err)
 	}
@@ -239,7 +243,7 @@ func sbxError(args []string, exitCode int, stdout, stderr *bytes.Buffer, runErr 
 
 func classifySBXError(action, text string, runErr error) string {
 	lower := strings.ToLower(text + " " + action)
-	if runErr != nil && (errors.Is(runErr, os.ErrNotExist) || strings.Contains(strings.ToLower(runErr.Error()), "no such file")) {
+	if isMissingExecutableError(runErr) {
 		return "install the Docker Sandbox sbx CLI or set dockerSandbox.cliPath / --docker-sandbox-cli"
 	}
 	if strings.Contains(lower, "not logged in") || strings.Contains(lower, "login required") || strings.Contains(lower, "unauthorized") || strings.Contains(lower, "authentication") {
@@ -252,6 +256,10 @@ func classifySBXError(action, text string, runErr error) string {
 		return "Docker Sandbox control plane did not respond before the command timeout"
 	}
 	return ""
+}
+
+func isMissingExecutableError(err error) bool {
+	return err != nil && (errors.Is(err, os.ErrNotExist) || strings.Contains(strings.ToLower(err.Error()), "no such file"))
 }
 
 func firstNonEmptyLine(value string) string {
