@@ -444,6 +444,12 @@ func redactXAPISensitiveText(text string, secrets ...string) string {
 		if escaped := url.QueryEscape(secret); escaped != secret {
 			text = strings.ReplaceAll(text, escaped, "<redacted>")
 		}
+		var xmlEscaped bytes.Buffer
+		if err := xml.EscapeText(&xmlEscaped, []byte(secret)); err == nil {
+			if escaped := xmlEscaped.String(); escaped != secret {
+				text = strings.ReplaceAll(text, escaped, "<redacted>")
+			}
+		}
 	}
 	return text
 }

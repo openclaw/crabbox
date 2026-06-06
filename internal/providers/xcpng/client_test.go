@@ -653,7 +653,7 @@ func TestXMLRPCHTTPErrorRedactsLoginPassword(t *testing.T) {
 	defer server.Close()
 	cfg := testConfig()
 	cfg.XCPNg.APIURL = server.URL
-	cfg.XCPNg.Password = "secret-password"
+	cfg.XCPNg.Password = "pa&<ss"
 	_, err := newXAPIClient(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("expected login HTTP error")
@@ -661,6 +661,9 @@ func TestXMLRPCHTTPErrorRedactsLoginPassword(t *testing.T) {
 	text := err.Error()
 	if strings.Contains(text, cfg.XCPNg.Password) {
 		t.Fatalf("error leaked password: %s", text)
+	}
+	if strings.Contains(text, "pa&amp;&lt;ss") {
+		t.Fatalf("error leaked XML-escaped password: %s", text)
 	}
 	if !strings.Contains(text, "<redacted>") {
 		t.Fatalf("error did not preserve redacted context: %s", text)
