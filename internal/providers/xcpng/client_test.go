@@ -552,6 +552,29 @@ func TestImportRawVDIRedactsSessionTokenFromTransportError(t *testing.T) {
 	}
 }
 
+func TestImportRawVDIRedactsSessionTokenFromHTTPErrorBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "failed request "+r.URL.String(), http.StatusBadGateway)
+	}))
+	defer server.Close()
+	client := &xapiClient{
+		endpoint: server.URL,
+		session:  "OpaqueRef:secret-session",
+		http:     server.Client(),
+	}
+	err := client.importRawVDI(context.Background(), "OpaqueRef:vdi", []byte("image"))
+	if err == nil {
+		t.Fatal("expected upload error")
+	}
+	text := err.Error()
+	if strings.Contains(text, "OpaqueRef:secret-session") || strings.Contains(text, "secret-session") {
+		t.Fatalf("error leaked session token: %s", text)
+	}
+	if !strings.Contains(text, "session_id") || !strings.Contains(text, "redacted") {
+		t.Fatalf("error did not preserve redacted upload context: %s", text)
+	}
+}
+
 func readXMLRPCMethod(t *testing.T, r *http.Request) string {
 	t.Helper()
 	method, _ := readXMLRPCBodyAndMethod(t, r)
