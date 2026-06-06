@@ -181,7 +181,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	if claim.LeaseID == "" {
 		return LeaseTarget{}, exit(4, "tart instance %q has no Crabbox lease claim; use `crabbox stop --provider tart %s` to delete it or warm a new lease", inst.Name, inst.Name)
 	}
-	if !inst.Running && req.Repo.Root != "" {
+	if !inst.Running && !req.StatusOnly {
 		return LeaseTarget{}, exit(5, "tart instance %s is stopped; start a new lease with `crabbox run` or clean up with `crabbox cleanup --provider tart`", inst.Name)
 	}
 	lease, err := b.prepareLease(ctx, cfg, inst, ip, claim, false)

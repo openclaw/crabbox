@@ -1453,11 +1453,10 @@ func TestResolveRejectsStoppedVMForRun(t *testing.T) {
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 
 	_, err = b.Resolve(context.Background(), core.ResolveRequest{
-		ID:   "cbx_stopped",
-		Repo: core.Repo{Root: "/some/repo"},
+		ID: "cbx_stopped",
 	})
 	if err == nil {
-		t.Fatal("Resolve should reject stopped VM when Repo.Root is set (run path)")
+		t.Fatal("Resolve should reject stopped VM by default (SSH-target commands)")
 	}
 	if !strings.Contains(err.Error(), "stopped") {
 		t.Fatalf("error should mention stopped: %v", err)
@@ -1483,12 +1482,42 @@ func TestResolveAllowsStoppedVMForStatus(t *testing.T) {
 	}
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 
-	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_stopped2"})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_stopped2", StatusOnly: true})
 	if err != nil {
-		t.Fatalf("Resolve should allow stopped VM for status (no Repo.Root): %v", err)
+		t.Fatalf("Resolve should allow stopped VM for status (StatusOnly=true): %v", err)
 	}
 	if lease.Server.Status != "stopped" {
 		t.Fatalf("Server.Status = %q, want stopped", lease.Server.Status)
+	}
+}
+
+func TestResolveRejectsStoppedVMForSSHTargetCommands(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	listJSON := `[{"Name":"crabbox-stopped-abc","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-stopped-abc"}):                     {Stdout: "\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_stopped3", "stopped3", providerName, "instance:crabbox-stopped-abc", "", t.TempDir(), 0, false,
+	)
+	if err != nil {
+		t.Fatalf("setup claim: %v", err)
+	}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	// SSH-target commands (ssh, vnc, code, cache, egress) call Resolve without
+	// Repo.Root and without StatusOnly. They must still be rejected for stopped VMs.
+	_, err = b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_stopped3"})
+	if err == nil {
+		t.Fatal("Resolve should reject stopped VM for SSH-target commands (no StatusOnly)")
+	}
+	if !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("error should mention stopped: %v", err)
 	}
 }
 
