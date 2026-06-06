@@ -54,7 +54,7 @@ func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgClou
 	fmt.Fprintf(&userData, "      test -w %s\n", shellQuote(workRoot))
 	fmt.Fprintf(&userData, "runcmd:\n")
 	fmt.Fprintf(&userData, "  - [mkdir, -p, %s, /var/cache/crabbox/pnpm, /var/cache/crabbox/npm, /var/lib/crabbox]\n", yamlSingleQuotedScalar(workRoot))
-	fmt.Fprintf(&userData, "  - [chown, -R, %s:%s, %s, /var/cache/crabbox]\n", yamlSingleQuotedScalar(user), yamlSingleQuotedScalar(user), yamlSingleQuotedScalar(workRoot))
+	fmt.Fprintf(&userData, "  - [chown, -R, %s, %s, /var/cache/crabbox]\n", yamlSingleQuotedScalar(user+":"+user), yamlSingleQuotedScalar(workRoot))
 	fmt.Fprintf(&userData, "  - [systemctl, enable, --now, ssh]\n")
 	fmt.Fprintf(&userData, "  - [touch, /var/lib/crabbox/bootstrapped]\n")
 	fmt.Fprintf(&userData, "  - [/usr/local/bin/crabbox-ready]\n")

@@ -47,7 +47,7 @@ func TestCloudInitPayloadQuotesWorkRootInRunCommands(t *testing.T) {
 	}
 	for _, want := range []string{
 		"  - [mkdir, -p, '/work/crabbox,with-comma', /var/cache/crabbox/pnpm, /var/cache/crabbox/npm, /var/lib/crabbox]",
-		"  - [chown, -R, 'crabbox':'crabbox', '/work/crabbox,with-comma', /var/cache/crabbox]",
+		"  - [chown, -R, 'crabbox:crabbox', '/work/crabbox,with-comma', /var/cache/crabbox]",
 		"test -w '/work/crabbox,with-comma'",
 	} {
 		if !strings.Contains(payload.UserData, want) {
