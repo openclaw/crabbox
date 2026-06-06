@@ -177,7 +177,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		return LeaseTarget{}, err
 	}
 	if claim.LeaseID == "" {
-		return LeaseTarget{}, exit(4, "tart instance %q has no Crabbox lease claim; use `crabbox stop --provider tart %s` to delete it or warm a new lease", inst.Name, inst.Name)
+		return LeaseTarget{}, exit(4, "tart instance %q has no Crabbox lease claim; remove it with `tart stop %s && tart delete %s` or warm a new lease with `crabbox run`", inst.Name, inst.Name, inst.Name)
 	}
 	if req.ReleaseOnly {
 		return LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil

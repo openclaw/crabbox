@@ -2033,6 +2033,12 @@ func TestResolveReleaseOnlyRejectsUnclaimedVM(t *testing.T) {
 	if !strings.Contains(err.Error(), "no Crabbox lease claim") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if strings.Contains(err.Error(), "crabbox stop") {
+		t.Fatalf("unclaimed VM error must not suggest crabbox stop (circular path): %v", err)
+	}
+	if !strings.Contains(err.Error(), "tart stop") {
+		t.Fatalf("unclaimed VM error must suggest tart stop as the direct cleanup path: %v", err)
+	}
 }
 
 func sampleListJSON() string {
