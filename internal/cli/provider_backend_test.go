@@ -668,6 +668,33 @@ proxmox:
 	}
 }
 
+func TestLoadLeaseTargetConfigRejectsUnsupportedProviderTarget(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte(`provider: xcp-ng
+xcpNg:
+  apiUrl: https://xcp.example.test
+  username: root
+  password: secret
+  template: ubuntu
+  sr: local
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := defaultConfig()
+	fs := newFlagSet("test", io.Discard)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, []string{"--target", "macos"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadLeaseTargetConfig(fs, "xcp-ng", targetFlags, networkFlags, leaseTargetConfigOptions{})
+	if err == nil || !strings.Contains(err.Error(), "provider=xcp-ng managed provisioning supports target=linux only") {
+		t.Fatalf("err=%v, want xcp-ng target validation", err)
+	}
+}
+
 func TestLeaseCreateFlagsRejectSnapshotSandboxResourceNoops(t *testing.T) {
 	defaults := baseConfig()
 	for _, tc := range []struct {
