@@ -1973,6 +1973,30 @@ func TestConfigureDoctor(t *testing.T) {
 	}
 }
 
+func TestResolveReleaseOnlyRejectsUnclaimedVM(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: sampleListJSON()},
+		commandKey([]string{"ip", "crabbox-blue-1234abcd"}):                  {Stdout: "192.168.64.5\n"},
+	}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	_, err := b.Resolve(context.Background(), core.ResolveRequest{
+		ID:          "crabbox-blue-1234abcd",
+		ReleaseOnly: true,
+	})
+	if err == nil {
+		t.Fatal("Resolve(ReleaseOnly) must reject an unclaimed VM, but returned nil error")
+	}
+	if !strings.Contains(err.Error(), "no Crabbox lease claim") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func sampleListJSON() string {
 	return `[{"Name":"crabbox-blue-1234abcd","State":"running","Running":true,"Disk":50,"Size":15,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"},{"Name":"my-dev-vm","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"}]`
 }

@@ -176,11 +176,11 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	if req.ReleaseOnly {
-		return LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil
-	}
 	if claim.LeaseID == "" {
 		return LeaseTarget{}, exit(4, "tart instance %q has no Crabbox lease claim; use `crabbox stop --provider tart %s` to delete it or warm a new lease", inst.Name, inst.Name)
+	}
+	if req.ReleaseOnly {
+		return LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil
 	}
 	if !inst.Running && !req.StatusOnly {
 		return LeaseTarget{}, exit(5, "tart instance %s is stopped; start a new lease with `crabbox run` or clean up with `crabbox cleanup --provider tart`", inst.Name)
