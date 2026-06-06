@@ -40,6 +40,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "tart-disk") {
 		cfg.Tart.Disk = *v.Disk
+		core.MarkTartDiskExplicit(cfg)
 	}
 	if isTartProviderName(cfg.Provider) {
 		if core.IsTargetExplicit(cfg) && cfg.TargetOS != targetMacOS {

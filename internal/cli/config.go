@@ -126,6 +126,7 @@ type Config struct {
 	multipassImageExplicit      bool
 	Tart                        TartConfig
 	tartImageExplicit           bool
+	tartDiskExplicit            bool
 	Tailscale                   TailscaleConfig
 	Static                      StaticConfig
 	Results                     ResultsConfig
@@ -852,6 +853,14 @@ func MarkMultipassImageExplicit(cfg *Config) {
 
 func MarkTartImageExplicit(cfg *Config) {
 	cfg.tartImageExplicit = true
+}
+
+func IsTartDiskExplicit(cfg *Config) bool {
+	return cfg.tartDiskExplicit
+}
+
+func MarkTartDiskExplicit(cfg *Config) {
+	cfg.tartDiskExplicit = true
 }
 
 func IsTargetExplicit(cfg *Config) bool {
@@ -2629,6 +2638,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.Tart.Disk > 0 {
 			cfg.Tart.Disk = file.Tart.Disk
+			cfg.tartDiskExplicit = true
 		}
 	}
 	if file.Tailscale != nil {
@@ -3355,7 +3365,10 @@ func applyEnv(cfg *Config) error {
 	cfg.Tart.WorkRoot = getenv("CRABBOX_TART_WORK_ROOT", cfg.Tart.WorkRoot)
 	cfg.Tart.CPUs = getenvInt("CRABBOX_TART_CPUS", cfg.Tart.CPUs)
 	cfg.Tart.Memory = getenvInt("CRABBOX_TART_MEMORY", cfg.Tart.Memory)
-	cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
+	if v := os.Getenv("CRABBOX_TART_DISK"); v != "" {
+		cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
+		cfg.tartDiskExplicit = true
+	}
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value
 	}

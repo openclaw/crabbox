@@ -364,7 +364,7 @@ func (b *backend) configureVM(ctx context.Context, cfg Config, name string) erro
 			return fmt.Errorf("tart set --memory: %w", err)
 		}
 	}
-	if cfg.Tart.Disk > 0 {
+	if cfg.Tart.Disk > 0 && core.IsTartDiskExplicit(&cfg) {
 		if _, err := b.tart(ctx, []string{"set", name, "--disk-size", strconv.Itoa(cfg.Tart.Disk)}, nil, b.rt.Stderr); err != nil {
 			return fmt.Errorf("tart set --disk-size: %w", err)
 		}
@@ -428,6 +428,10 @@ func (b *backend) waitForIP(ctx context.Context, name string) (string, error) {
 		case <-ticker.C:
 			result, err := b.tart(ctx, []string{"ip", name}, nil, nil)
 			if err != nil {
+				stderr := strings.ToLower(strings.TrimSpace(result.Stderr))
+				if strings.Contains(stderr, "is your vm running") || strings.Contains(stderr, "not running") {
+					return "", exit(2, "tart ip %s: %s", name, strings.TrimSpace(result.Stderr))
+				}
 				continue
 			}
 			ip := strings.TrimSpace(result.Stdout)

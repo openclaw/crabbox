@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -461,6 +462,81 @@ func TestResolveInstanceUsesRealState(t *testing.T) {
 	}
 	if ip != "192.168.64.5" {
 		t.Fatalf("ip=%q want 192.168.64.5", ip)
+	}
+}
+
+func TestWaitForIPDetectsStoppedVM(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"ip", "crabbox-stopped"}): {Stderr: "no IP address found, is your VM running?\n", ExitCode: 1},
+		},
+		errors: map[string]error{
+			commandKey([]string{"ip", "crabbox-stopped"}): fmt.Errorf("exit status 1"),
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := b.waitForIP(ctx, "crabbox-stopped")
+	if err == nil {
+		t.Fatal("waitForIP should fail fast for a stopped VM")
+	}
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "is your VM running") {
+		t.Fatalf("waitForIP error = %q, want tart's stopped-VM diagnostic", errMsg)
+	}
+}
+
+func TestConfigureVMSkipsImplicitDiskSize(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err := b.configureVM(context.Background(), cfg, "crabbox-test")
+	if err != nil {
+		t.Fatalf("configureVM: %v", err)
+	}
+	for _, call := range runner.calls {
+		for i, arg := range call.Args {
+			if arg == "--disk-size" {
+				t.Fatalf("configureVM called tart set --disk-size %s with implicit default; would break images with larger disks", call.Args[i+1])
+			}
+		}
+	}
+}
+
+func TestConfigureVMAppliesExplicitDiskSize(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tart.Disk = 200
+	core.MarkTartDiskExplicit(&cfg)
+	applyDefaults(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err := b.configureVM(context.Background(), cfg, "crabbox-test")
+	if err != nil {
+		t.Fatalf("configureVM: %v", err)
+	}
+	found := false
+	for _, call := range runner.calls {
+		for _, arg := range call.Args {
+			if arg == "--disk-size" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("configureVM should apply tart set --disk-size when explicitly set")
 	}
 }
 
