@@ -1259,6 +1259,48 @@ func TestCleanupRemovesOrphanedClaims(t *testing.T) {
 	}
 }
 
+func TestCleanupRemovesMalformedClaimsWithNoInstance(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_noinstance", "no-instance", providerName, "", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup malformed claim: %v", err)
+	}
+	err = core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_missingvm", "missing-vm", providerName, "instance:crabbox-missing-abc123", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup normal orphan claim: %v", err)
+	}
+	listJSON := `[]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--format", "json"}): {Stdout: listJSON},
+		},
+	}
+	var stdout strings.Builder
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &stdout, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err = b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true})
+	if err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "cbx_noinstance") {
+		t.Fatalf("malformed claim with no instance should be reported: %q", output)
+	}
+	if !strings.Contains(output, "malformed claim") {
+		t.Fatalf("should use 'malformed claim' reason: %q", output)
+	}
+	if !strings.Contains(output, "cbx_missingvm") {
+		t.Fatalf("normal orphan claim should also be reported: %q", output)
+	}
+}
+
 func TestResolveInstanceByDirectName(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	listJSON := `[{"Name":"crabbox-blue-def456","State":"running","Running":true,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`

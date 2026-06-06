@@ -305,18 +305,26 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		removed++
 	}
 	claimsRemoved := 0
-	for _, claim := range claims {
-		if claim.LeaseID == "" {
+	allClaims, claimErr := listLeaseClaims()
+	if claimErr != nil {
+		return claimErr
+	}
+	for _, claim := range allClaims {
+		if claim.Provider != providerName || claim.LeaseID == "" {
 			continue
 		}
 		if _, ok := live[claim.LeaseID]; ok {
 			continue
 		}
+		reason := "missing instance"
+		if instanceNameFromClaim(claim) == "" {
+			reason = "malformed claim (no instance)"
+		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, blank(claim.Slug, "-"))
+			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
 			continue
 		}
-		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, blank(claim.Slug, "-"))
+		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
 		removeLeaseClaim(claim.LeaseID)
 		removeStoredTestboxKey(claim.LeaseID)
 		claimsRemoved++
