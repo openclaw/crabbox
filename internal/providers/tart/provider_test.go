@@ -185,7 +185,7 @@ func TestPrepareLeaseSetsPublicHost(t *testing.T) {
 
 func TestListInstancesFiltersCrabboxPrefix(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
-		commandKey([]string{"list", "--format", "json"}): {Stdout: sampleListJSON()},
+		commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: sampleListJSON()},
 	}}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -215,8 +215,8 @@ func TestListJSONDecode(t *testing.T) {
 
 func TestDoctorReady(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
-		commandKey([]string{"--version"}):                {Stdout: "tart 2.12.0\n"},
-		commandKey([]string{"list", "--format", "json"}): {Stdout: `[]`},
+		commandKey([]string{"--version"}):                                     {Stdout: "tart 2.12.0\n"},
+		commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: `[]`},
 	}}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -420,6 +420,51 @@ func TestInjectSSHKeyTargetsConfiguredUser(t *testing.T) {
 	}
 }
 
+func TestInjectSSHKeyRejectsShellInjection(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	badUsers := []string{
+		"admin; echo injected #",
+		"$(whoami)",
+		"user`id`",
+		"root && rm -rf /",
+		"",
+		"user name",
+	}
+	for _, user := range badUsers {
+		err := b.injectSSHKey(context.Background(), "crabbox-test", user, "ssh-ed25519 AAAA test")
+		if err == nil {
+			t.Errorf("injectSSHKey should reject user=%q", user)
+		}
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("no tart commands should be issued for invalid users, got %d calls", len(runner.calls))
+	}
+}
+
+func TestInstanceNameFromScopeRequiresPrefix(t *testing.T) {
+	cases := []struct {
+		scope string
+		want  string
+	}{
+		{"instance:crabbox-blue-1234", "crabbox-blue-1234"},
+		{"instance:", ""},
+		{"", ""},
+		{"http://not-instance", ""},
+		{"crabbox-blue-1234", ""},
+		{"  instance:crabbox-x  ", "crabbox-x"},
+	}
+	for _, tc := range cases {
+		got := instanceNameFromScope(tc.scope)
+		if got != tc.want {
+			t.Errorf("instanceNameFromScope(%q) = %q, want %q", tc.scope, got, tc.want)
+		}
+	}
+}
+
 func TestGetIPFiltersDashDash(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
@@ -469,8 +514,8 @@ func TestResolveInstanceUsesRealState(t *testing.T) {
 	listJSON := `[{"Name":"crabbox-blue-abc123","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}):  {Stdout: listJSON},
-			commandKey([]string{"ip", "crabbox-blue-abc123"}): {Stdout: "192.168.64.5\n"},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-blue-abc123"}):                     {Stdout: "192.168.64.5\n"},
 		},
 	}
 	cfg := core.BaseConfig()
@@ -872,8 +917,8 @@ func TestResolveInstanceByLeaseID(t *testing.T) {
 	listJSON := `[{"Name":"crabbox-blue-abc123","State":"running","Running":true,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}):  {Stdout: listJSON},
-			commandKey([]string{"ip", "crabbox-blue-abc123"}): {Stdout: "192.168.64.5\n"},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-blue-abc123"}):                     {Stdout: "192.168.64.5\n"},
 		},
 	}
 	cfg := core.BaseConfig()
@@ -908,8 +953,8 @@ func TestResolveInstanceBySlug(t *testing.T) {
 	listJSON := `[{"Name":"crabbox-blue-def456","State":"running","Running":true,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}):  {Stdout: listJSON},
-			commandKey([]string{"ip", "crabbox-blue-def456"}): {Stdout: "192.168.64.6\n"},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-blue-def456"}):                     {Stdout: "192.168.64.6\n"},
 		},
 	}
 	cfg := core.BaseConfig()
@@ -1004,8 +1049,8 @@ func TestApplyFlagsNegativeFromConfigRejected(t *testing.T) {
 func TestDoctorHappyPath(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"--version"}):                {Stdout: "2.32.1\n"},
-			commandKey([]string{"list", "--format", "json"}): {Stdout: `[{"Name":"crabbox-blue-1234","State":"running","Running":true,"Disk":50,"Size":15,"Source":"ghcr.io/test:latest"}]`},
+			commandKey([]string{"--version"}):                                     {Stdout: "2.32.1\n"},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: `[{"Name":"crabbox-blue-1234","State":"running","Running":true,"Disk":50,"Size":15,"Source":"ghcr.io/test:latest"}]`},
 		},
 	}
 	cfg := core.BaseConfig()
@@ -1180,9 +1225,9 @@ func TestCleanupSkipsNonCrabboxVMs(t *testing.T) {
 	listJSON := `[{"Name":"my-dev-vm","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"},{"Name":"crabbox-old-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}):   {Stdout: listJSON},
-			commandKey([]string{"stop", "crabbox-old-1234"}):   {},
-			commandKey([]string{"delete", "crabbox-old-1234"}): {},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"stop", "crabbox-old-1234"}):                      {},
+			commandKey([]string{"delete", "crabbox-old-1234"}):                    {},
 		},
 	}
 	var stdout strings.Builder
@@ -1208,9 +1253,9 @@ func TestCleanupDeleteError(t *testing.T) {
 	listJSON := `[{"Name":"crabbox-broken-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}):      {Stdout: listJSON},
-			commandKey([]string{"stop", "crabbox-broken-1234"}):   {},
-			commandKey([]string{"delete", "crabbox-broken-1234"}): {ExitCode: 1, Stderr: "busy"},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"stop", "crabbox-broken-1234"}):                   {},
+			commandKey([]string{"delete", "crabbox-broken-1234"}):                 {ExitCode: 1, Stderr: "busy"},
 		},
 		errors: map[string]error{
 			commandKey([]string{"delete", "crabbox-broken-1234"}): fmt.Errorf("exit status 1"),
@@ -1238,7 +1283,7 @@ func TestCleanupRemovesOrphanedClaims(t *testing.T) {
 	listJSON := `[]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
 		},
 	}
 	var stdout strings.Builder
@@ -1277,7 +1322,7 @@ func TestCleanupRemovesMalformedClaimsWithNoInstance(t *testing.T) {
 	listJSON := `[]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
 		},
 	}
 	var stdout strings.Builder
@@ -1306,8 +1351,8 @@ func TestResolveInstanceByDirectName(t *testing.T) {
 	listJSON := `[{"Name":"crabbox-blue-def456","State":"running","Running":true,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}):  {Stdout: listJSON},
-			commandKey([]string{"ip", "crabbox-blue-def456"}): {Stdout: "192.168.64.7\n"},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-blue-def456"}):                     {Stdout: "192.168.64.7\n"},
 		},
 	}
 	cfg := core.BaseConfig()
@@ -1331,7 +1376,7 @@ func TestResolveInstanceNotFound(t *testing.T) {
 	listJSON := `[{"Name":"crabbox-blue-1234","State":"running","Running":true,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
 		},
 	}
 	cfg := core.BaseConfig()
@@ -1424,9 +1469,9 @@ func TestCleanupRemovesStoppedCrabboxVMs(t *testing.T) {
 	listJSON := `[{"Name":"crabbox-old-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"},{"Name":"my-personal-vm","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}):   {Stdout: listJSON},
-			commandKey([]string{"stop", "crabbox-old-1234"}):   {},
-			commandKey([]string{"delete", "crabbox-old-1234"}): {},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"stop", "crabbox-old-1234"}):                      {},
+			commandKey([]string{"delete", "crabbox-old-1234"}):                    {},
 		},
 	}
 	var stdout strings.Builder
@@ -1459,7 +1504,7 @@ func TestCleanupDryRunDoesNotDelete(t *testing.T) {
 	listJSON := `[{"Name":"crabbox-old-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
 		},
 	}
 	var stdout strings.Builder
@@ -1569,7 +1614,7 @@ func TestListInstances(t *testing.T) {
 	listJSON := `[{"Name":"vm1","State":"running","Running":true,"Disk":50,"Size":15,"Source":"img1"},{"Name":"vm2","State":"stopped","Running":false,"Disk":30,"Size":10,"Source":"img2"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
 		},
 	}
 	cfg := core.BaseConfig()
@@ -1591,7 +1636,7 @@ func TestListInstances(t *testing.T) {
 func TestListInstancesParseError(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--format", "json"}): {Stdout: "not json"},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: "not json"},
 		},
 	}
 	cfg := core.BaseConfig()
@@ -1648,8 +1693,8 @@ func TestInstanceNameFromScope(t *testing.T) {
 	if got := instanceNameFromScope("instance:crabbox-blue-1234"); got != "crabbox-blue-1234" {
 		t.Fatalf("instanceNameFromScope = %q", got)
 	}
-	if got := instanceNameFromScope("something-else"); got != "something-else" {
-		t.Fatalf("instanceNameFromScope no prefix = %q", got)
+	if got := instanceNameFromScope("something-else"); got != "" {
+		t.Fatalf("instanceNameFromScope without prefix should return empty, got %q", got)
 	}
 }
 

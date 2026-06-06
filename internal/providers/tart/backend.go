@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -450,7 +451,12 @@ func (b *backend) waitForIP(ctx context.Context, name string) (string, error) {
 	}
 }
 
+var validPOSIXUser = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9._-]*$`)
+
 func (b *backend) injectSSHKey(ctx context.Context, name string, user string, publicKey string) error {
+	if !validPOSIXUser.MatchString(user) {
+		return exit(2, "tart.user %q is not a valid POSIX account name", user)
+	}
 	sshDir := fmt.Sprintf("~%s/.ssh", user)
 	injectScript := fmt.Sprintf(
 		`mkdir -p %s && chmod 700 %s && echo '%s' >> %s/authorized_keys && chmod 600 %s/authorized_keys`,
@@ -482,7 +488,7 @@ func (b *backend) deleteVM(ctx context.Context, name string) error {
 }
 
 func (b *backend) listInstances(ctx context.Context) ([]tartInstance, error) {
-	result, err := b.tart(ctx, []string{"list", "--format", "json"}, nil, nil)
+	result, err := b.tart(ctx, []string{"list", "--source", "local", "--format", "json"}, nil, nil)
 	if err != nil {
 		return nil, commandError("tart list", result, err)
 	}
@@ -674,7 +680,11 @@ func instanceNameFromClaim(claim core.LeaseClaim) string {
 }
 
 func instanceNameFromScope(scope string) string {
-	return strings.TrimPrefix(strings.TrimSpace(scope), "instance:")
+	scope = strings.TrimSpace(scope)
+	if !strings.HasPrefix(scope, "instance:") {
+		return ""
+	}
+	return strings.TrimPrefix(scope, "instance:")
 }
 
 func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
