@@ -38,6 +38,24 @@ func TestCloudInitPayloadIncludesSSHUserKeyAndBootstrap(t *testing.T) {
 	}
 }
 
+func TestCloudInitPayloadQuotesWorkRootInRunCommands(t *testing.T) {
+	cfg := testConfig()
+	cfg.XCPNg.WorkRoot = "/work/crabbox,with-comma"
+	payload, err := newCloudInitPayload(cfg, "cbx_lease", "blue", "ssh-ed25519 AAAATEST crabbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"  - [mkdir, -p, '/work/crabbox,with-comma', /var/cache/crabbox/pnpm, /var/cache/crabbox/npm, /var/lib/crabbox]",
+		"  - [chown, -R, 'crabbox':'crabbox', '/work/crabbox,with-comma', /var/cache/crabbox]",
+		"test -w '/work/crabbox,with-comma'",
+	} {
+		if !strings.Contains(payload.UserData, want) {
+			t.Fatalf("user-data missing %q:\n%s", want, payload.UserData)
+		}
+	}
+}
+
 func TestCloudInitPayloadRejectsMissingUserOrKey(t *testing.T) {
 	cfg := testConfig()
 	cfg.XCPNg.User = ""

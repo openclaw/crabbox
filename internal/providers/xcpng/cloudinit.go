@@ -53,8 +53,8 @@ func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgClou
 	fmt.Fprintf(&userData, "      test -f /var/lib/crabbox/bootstrapped\n")
 	fmt.Fprintf(&userData, "      test -w %s\n", shellQuote(workRoot))
 	fmt.Fprintf(&userData, "runcmd:\n")
-	fmt.Fprintf(&userData, "  - [mkdir, -p, %s, /var/cache/crabbox/pnpm, /var/cache/crabbox/npm, /var/lib/crabbox]\n", shellSafeCloudInitScalar(workRoot))
-	fmt.Fprintf(&userData, "  - [chown, -R, %s:%s, %s, /var/cache/crabbox]\n", shellSafeCloudInitScalar(user), shellSafeCloudInitScalar(user), shellSafeCloudInitScalar(workRoot))
+	fmt.Fprintf(&userData, "  - [mkdir, -p, %s, /var/cache/crabbox/pnpm, /var/cache/crabbox/npm, /var/lib/crabbox]\n", yamlSingleQuotedScalar(workRoot))
+	fmt.Fprintf(&userData, "  - [chown, -R, %s:%s, %s, /var/cache/crabbox]\n", yamlSingleQuotedScalar(user), yamlSingleQuotedScalar(user), yamlSingleQuotedScalar(workRoot))
 	fmt.Fprintf(&userData, "  - [systemctl, enable, --now, ssh]\n")
 	fmt.Fprintf(&userData, "  - [touch, /var/lib/crabbox/bootstrapped]\n")
 	fmt.Fprintf(&userData, "  - [/usr/local/bin/crabbox-ready]\n")
@@ -71,6 +71,11 @@ func shellSafeCloudInitScalar(value string) string {
 	value = strings.ReplaceAll(value, "\r", "")
 	value = strings.ReplaceAll(value, "\n", " ")
 	return value
+}
+
+func yamlSingleQuotedScalar(value string) string {
+	value = shellSafeCloudInitScalar(value)
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func configDriveLabels(base map[string]string) map[string]string {
