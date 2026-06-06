@@ -284,12 +284,13 @@ func TestCloneVMUsesCopyForSRAndRewiresVIFsForNetwork(t *testing.T) {
 
 func TestCloneVMRollbackDestroysCopiedDiskBeforeLabels(t *testing.T) {
 	var methods []string
+	uuidShapedRef := "OpaqueRef:22222222-2222-2222-2222-222222222222"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		method := readXMLRPCMethod(t, r)
 		methods = append(methods, method)
 		switch method {
 		case "VM.copy":
-			writeXMLRPCString(t, w, "OpaqueRef:vm")
+			writeXMLRPCString(t, w, uuidShapedRef)
 		case "VM.set_affinity":
 			writeXMLRPCFault(t, w, "HOST_NOT_LIVE")
 		case "VM.get_record":
@@ -335,6 +336,9 @@ func TestCloneVMRollbackDestroysCopiedDiskBeforeLabels(t *testing.T) {
 	}
 	if strings.Index(got, "VDI.destroy") > strings.Index(got, "VM.destroy") {
 		t.Fatalf("methods=%s destroyed VM before copied VDI", got)
+	}
+	if strings.Contains(got, "VM.get_by_uuid") {
+		t.Fatalf("methods=%s unexpectedly resolved UUID-shaped OpaqueRef as UUID", got)
 	}
 }
 

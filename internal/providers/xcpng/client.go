@@ -891,6 +891,9 @@ func configDriveName(leaseID, slug string) string {
 
 func looksLikeUUID(value string) bool {
 	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "OpaqueRef:") {
+		return false
+	}
 	return len(value) >= 32 && strings.Count(value, "-") >= 4
 }
 
