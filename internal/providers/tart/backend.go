@@ -113,7 +113,11 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	}()
 	cfg.SSHKey = keyPath
 	name := leaseProviderName(leaseID, slug)
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB disk=%dGB keep=%v\n", providerName, leaseID, slug, cfg.Tart.Image, cfg.Tart.CPUs, cfg.Tart.Memory, cfg.Tart.Disk, req.Keep)
+	diskLabel := "clone-default"
+	if core.IsTartDiskExplicit(&cfg) {
+		diskLabel = fmt.Sprintf("%dGB", cfg.Tart.Disk)
+	}
+	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB disk=%s keep=%v\n", providerName, leaseID, slug, cfg.Tart.Image, cfg.Tart.CPUs, cfg.Tart.Memory, diskLabel, req.Keep)
 
 	if err := b.cloneVM(ctx, cfg, name); err != nil {
 		_ = b.deleteVM(context.Background(), name)

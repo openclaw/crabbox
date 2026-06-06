@@ -27,7 +27,7 @@ CLI flags:
 | `--tart-image` | `ghcr.io/cirruslabs/macos-sequoia-base:latest` | OCI base image to clone |
 | `--tart-cpu` | 4 | Guest CPU count |
 | `--tart-memory` | 8192 | Guest memory in MB |
-| `--tart-disk` | 50 | Guest disk size in GB |
+| `--tart-disk` | (clone default) | Guest disk size in GB; only applied when explicitly set |
 
 YAML (`.crabbox.yaml`):
 
@@ -38,7 +38,7 @@ tart:
   workRoot: /Users/admin/crabbox
   cpus: 4
   memory: 8192
-  disk: 50
+  # disk: 80  # only set to resize beyond the base image default
 ```
 
 Environment variables: `CRABBOX_TART_IMAGE`, `CRABBOX_TART_USER`,
@@ -48,7 +48,7 @@ Environment variables: `CRABBOX_TART_IMAGE`, `CRABBOX_TART_USER`,
 ## How it works
 
 1. `tart clone <image> crabbox-<slug>` creates a new VM from the base image.
-2. `tart set crabbox-<slug> --cpu N --memory N --disk-size N` configures resources.
+2. `tart set crabbox-<slug> --cpu N --memory N` configures resources (disk size is only resized when `--tart-disk` is explicitly set).
 3. `tart run crabbox-<slug> --no-graphics` starts the VM headless.
 4. `tart ip crabbox-<slug>` polls for the guest IP (DHCP, typically ~10s).
 5. `tart exec crabbox-<slug> bash -c "..."` injects the SSH public key.
