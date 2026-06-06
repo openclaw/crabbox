@@ -1,6 +1,7 @@
 package tart
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -381,25 +382,35 @@ func startVMArgs(name string) []string {
 // crabbox exit, matching how docker run -d keeps containers alive.
 func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep bool) error {
 	args := startVMArgs(name)
+	var stderrBuf bytes.Buffer
 	var cmd *exec.Cmd
 	if keep {
 		cmd = exec.Command("tart", args...)
 		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
+		cmd.Stderr = &stderrBuf
 	} else {
 		cmd = exec.CommandContext(ctx, "tart", args...)
 		cmd.Stdout = io.Discard
-		cmd.Stderr = b.rt.Stderr
+		cmd.Stderr = io.MultiWriter(&stderrBuf, b.rt.Stderr)
 	}
 	if err := cmd.Start(); err != nil {
 		return exit(2, "tart run %s: %v", name, err)
 	}
-	if keep {
-		_ = cmd.Process.Release()
-	} else {
-		go func() { _ = cmd.Wait() }()
+	exitCh := make(chan error, 1)
+	go func() { exitCh <- cmd.Wait() }()
+	select {
+	case err := <-exitCh:
+		detail := strings.TrimSpace(stderrBuf.String())
+		if detail != "" {
+			return exit(2, "tart run %s failed during startup: %s", name, detail)
+		}
+		if err != nil {
+			return exit(2, "tart run %s failed during startup: %v", name, err)
+		}
+		return exit(2, "tart run %s exited unexpectedly during startup", name)
+	case <-time.After(startupObserveTimeout):
+		return nil
 	}
-	return nil
 }
 
 // waitForIP polls `tart ip` until the VM has an IP address.

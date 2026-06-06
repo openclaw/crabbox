@@ -29,9 +29,10 @@ type LocalCommandRequest = core.LocalCommandRequest
 type LocalCommandResult = core.LocalCommandResult
 
 const (
-	providerName = "tart"
-	targetMacOS  = core.TargetMacOS
-	sshPort      = "22"
+	providerName          = "tart"
+	targetMacOS           = core.TargetMacOS
+	sshPort               = "22"
+	startupObserveTimeout = 2 * time.Second
 )
 
 func exit(code int, format string, args ...any) core.ExitError {
