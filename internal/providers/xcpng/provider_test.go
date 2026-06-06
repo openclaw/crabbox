@@ -90,6 +90,13 @@ func TestConfigureDoctorReturnsNonMutatingBackend(t *testing.T) {
 	cfg.XCPNg.APIURL = "https://xcp-ng.example.test"
 	cfg.XCPNg.Username = "root"
 	cfg.XCPNg.Password = "secret"
+	cfg.XCPNg.SRUUID = "sr-uuid"
+	fake := &fakeLifecycleClient{}
+	old := newLifecycleClient
+	newLifecycleClient = func(context.Context, core.Config) (lifecycleClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newLifecycleClient = old })
 	doctor, err := Provider{}.ConfigureDoctor(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +105,7 @@ func TestConfigureDoctorReturnsNonMutatingBackend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Provider != "xcp-ng" || !strings.Contains(result.Message, "auth=configured") || !strings.Contains(result.Message, "mutation=false") {
+	if result.Provider != "xcp-ng" || !strings.Contains(result.Message, "auth=ready") || !strings.Contains(result.Message, "mutation=false") {
 		t.Fatalf("result=%#v", result)
 	}
 	if strings.Contains(result.Message, cfg.XCPNg.Password) {

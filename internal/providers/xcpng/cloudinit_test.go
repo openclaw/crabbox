@@ -1,0 +1,67 @@
+package xcpng
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestCloudInitPayloadIncludesSSHUserKeyAndBootstrap(t *testing.T) {
+	cfg := testConfig()
+	cfg.XCPNg.Password = "credential-value"
+	payload, err := newCloudInitPayload(cfg, "cbx_lease", "blue", "ssh-ed25519 AAAATEST crabbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"#cloud-config", "name: crabbox", "ssh-ed25519 AAAATEST crabbox", "NOPASSWD", "openssh-server", "/work/crabbox"} {
+		if !strings.Contains(payload.UserData, want) {
+			t.Fatalf("user-data missing %q:\n%s", want, payload.UserData)
+		}
+	}
+	if !strings.Contains(payload.MetaData, "instance-id: cbx_lease") || !strings.Contains(payload.MetaData, "local-hostname: crabbox-blue") {
+		t.Fatalf("meta-data=%q", payload.MetaData)
+	}
+	if strings.Contains(payload.UserData, cfg.XCPNg.Password) || strings.Contains(payload.MetaData, cfg.XCPNg.Password) {
+		t.Fatal("cloud-init payload leaked XCP-ng API password")
+	}
+}
+
+func TestCloudInitPayloadRejectsMissingUserOrKey(t *testing.T) {
+	cfg := testConfig()
+	cfg.XCPNg.User = ""
+	cfg.SSHUser = ""
+	if _, err := newCloudInitPayload(cfg, "cbx_lease", "blue", "ssh-ed25519 AAAATEST crabbox"); err == nil {
+		t.Fatal("expected missing user error")
+	}
+	cfg.XCPNg.User = "crabbox"
+	if _, err := newCloudInitPayload(cfg, "cbx_lease", "blue", ""); err == nil {
+		t.Fatal("expected missing public key error")
+	}
+}
+
+func TestConfigDriveLabelsRequireCrabboxOwnership(t *testing.T) {
+	labels := configDriveLabels(map[string]string{
+		"crabbox":    "true",
+		"created_by": "crabbox",
+		"provider":   "xcp-ng",
+		"lease":      "cbx_lease",
+	})
+	if labels["resource"] != "config-drive" || labels["cleanup_with_vm"] != "true" || labels["lease"] != "cbx_lease" {
+		t.Fatalf("labels=%#v", labels)
+	}
+}
+
+func TestBuildConfigDriveImageContainsNoCloudFilesAndLabel(t *testing.T) {
+	image, err := buildConfigDriveImage(xcpNgCloudInitPayload{UserData: "#cloud-config\n", MetaData: "instance-id: cbx_lease\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(image)
+	for _, want := range []string{"CIDATA", "#cloud-config", "instance-id: cbx_lease"} {
+		if !strings.Contains(strings.ToLower(text), strings.ToLower(want)) {
+			t.Fatalf("config-drive image missing %q", want)
+		}
+	}
+	if !strings.Contains(text, "CRAB0001TXT") || !strings.Contains(text, "CRAB0002TXT") {
+		t.Fatal("config-drive image missing file directory aliases")
+	}
+}
