@@ -1405,16 +1405,16 @@ type fileTensorlakeConfig struct {
 }
 
 type fileDockerSandboxConfig struct {
-	CLIPath         string   `yaml:"cliPath,omitempty"`
-	Agent           string   `yaml:"agent,omitempty"`
-	Template        string   `yaml:"template,omitempty"`
-	CPUs            float64  `yaml:"cpus,omitempty"`
-	Memory          string   `yaml:"memory,omitempty"`
-	Clone           *bool    `yaml:"clone,omitempty"`
-	Workdir         string   `yaml:"workdir,omitempty"`
-	ExtraWorkspaces []string `yaml:"extraWorkspaces,omitempty"`
-	MCP             []string `yaml:"mcp,omitempty"`
-	Kit             []string `yaml:"kit,omitempty"`
+	CLIPath         string    `yaml:"cliPath,omitempty"`
+	Agent           string    `yaml:"agent,omitempty"`
+	Template        string    `yaml:"template,omitempty"`
+	CPUs            float64   `yaml:"cpus,omitempty"`
+	Memory          string    `yaml:"memory,omitempty"`
+	Clone           *bool     `yaml:"clone,omitempty"`
+	Workdir         string    `yaml:"workdir,omitempty"`
+	ExtraWorkspaces *[]string `yaml:"extraWorkspaces,omitempty"`
+	MCP             *[]string `yaml:"mcp,omitempty"`
+	Kit             *[]string `yaml:"kit,omitempty"`
 }
 
 type fileModalConfig struct {
@@ -2476,14 +2476,14 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.DockerSandbox.Workdir != "" {
 			cfg.DockerSandbox.Workdir = file.DockerSandbox.Workdir
 		}
-		if len(file.DockerSandbox.ExtraWorkspaces) > 0 {
-			cfg.DockerSandbox.ExtraWorkspaces = append([]string(nil), file.DockerSandbox.ExtraWorkspaces...)
+		if file.DockerSandbox.ExtraWorkspaces != nil {
+			cfg.DockerSandbox.ExtraWorkspaces = append([]string(nil), (*file.DockerSandbox.ExtraWorkspaces)...)
 		}
-		if len(file.DockerSandbox.MCP) > 0 {
-			cfg.DockerSandbox.MCP = append([]string(nil), file.DockerSandbox.MCP...)
+		if file.DockerSandbox.MCP != nil {
+			cfg.DockerSandbox.MCP = append([]string(nil), (*file.DockerSandbox.MCP)...)
 		}
-		if len(file.DockerSandbox.Kit) > 0 {
-			cfg.DockerSandbox.Kit = append([]string(nil), file.DockerSandbox.Kit...)
+		if file.DockerSandbox.Kit != nil {
+			cfg.DockerSandbox.Kit = append([]string(nil), (*file.DockerSandbox.Kit)...)
 		}
 	}
 	if file.Modal != nil {

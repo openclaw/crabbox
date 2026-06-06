@@ -211,6 +211,9 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 		t.Fatalf("dockerSandbox defaults not applied: %#v", cfg.DockerSandbox)
 	}
 	clone := true
+	extraWorkspaces := []string{"/tmp/extra"}
+	mcp := []string{"context7"}
+	kit := []string{"example-org/base"}
 	applyFileConfig(&cfg, fileConfig{
 		Provider: "docker-sandbox",
 		DockerSandbox: &fileDockerSandboxConfig{
@@ -221,9 +224,9 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 			Memory:          "6g",
 			Clone:           &clone,
 			Workdir:         "/workspace/my-app",
-			ExtraWorkspaces: []string{"/tmp/extra"},
-			MCP:             []string{"context7"},
-			Kit:             []string{"example-org/base"},
+			ExtraWorkspaces: &extraWorkspaces,
+			MCP:             &mcp,
+			Kit:             &kit,
 		},
 	})
 	if cfg.Provider != "docker-sandbox" || cfg.DockerSandbox.CLIPath != "/opt/sbx" || cfg.DockerSandbox.Template != "ubuntu" || cfg.DockerSandbox.CPUs != 2.5 || cfg.DockerSandbox.Memory != "6g" || !cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/my-app" {
@@ -273,6 +276,30 @@ func TestDockerSandboxEmptyFileConfigDoesNotClearExistingValues(t *testing.T) {
 	}
 	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7" || strings.Join(cfg.DockerSandbox.Kit, ",") != "example-org/base" {
 		t.Fatalf("empty file dockerSandbox config cleared existing list values: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDockerSandboxFileConfigCanClearInheritedLists(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.DockerSandbox.ExtraWorkspaces = []string{"/tmp/inherited"}
+	cfg.DockerSandbox.MCP = []string{"context7"}
+	cfg.DockerSandbox.Kit = []string{"example-org/base"}
+
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+dockerSandbox:
+  extraWorkspaces: []
+  mcp: []
+  kit: []
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatalf("applyFileConfig err=%v", err)
+	}
+	if len(cfg.DockerSandbox.ExtraWorkspaces) != 0 || len(cfg.DockerSandbox.MCP) != 0 || len(cfg.DockerSandbox.Kit) != 0 {
+		t.Fatalf("repo dockerSandbox empty lists did not clear inherited values: %#v", cfg.DockerSandbox)
 	}
 }
 
