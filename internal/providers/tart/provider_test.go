@@ -1433,6 +1433,65 @@ func TestResolveInstanceEmptyIdentifier(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsStoppedVMForRun(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	listJSON := `[{"Name":"crabbox-stopped-abc","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-stopped-abc"}):                     {Stdout: "\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_stopped", "stopped", providerName, "instance:crabbox-stopped-abc", "", t.TempDir(), 0, false,
+	)
+	if err != nil {
+		t.Fatalf("setup claim: %v", err)
+	}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	_, err = b.Resolve(context.Background(), core.ResolveRequest{
+		ID:   "cbx_stopped",
+		Repo: core.Repo{Root: "/some/repo"},
+	})
+	if err == nil {
+		t.Fatal("Resolve should reject stopped VM when Repo.Root is set (run path)")
+	}
+	if !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("error should mention stopped: %v", err)
+	}
+}
+
+func TestResolveAllowsStoppedVMForStatus(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	listJSON := `[{"Name":"crabbox-stopped-abc","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-stopped-abc"}):                     {Stdout: "\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_stopped2", "stopped2", providerName, "instance:crabbox-stopped-abc", "", t.TempDir(), 0, false,
+	)
+	if err != nil {
+		t.Fatalf("setup claim: %v", err)
+	}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_stopped2"})
+	if err != nil {
+		t.Fatalf("Resolve should allow stopped VM for status (no Repo.Root): %v", err)
+	}
+	if lease.Server.Status != "stopped" {
+		t.Fatalf("Server.Status = %q, want stopped", lease.Server.Status)
+	}
+}
+
 func TestPrepareLeaseAppliesSSHUserFromLabel(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
