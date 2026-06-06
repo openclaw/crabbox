@@ -19,7 +19,7 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 		Image:  fs.String("tart-image", defaults.Tart.Image, "tart base image to clone from"),
 		CPUs:   fs.Int("tart-cpu", defaults.Tart.CPUs, "CPU count for tart VMs"),
 		Memory: fs.Int("tart-memory", defaults.Tart.Memory, "memory in MB for tart VMs"),
-		Disk:   fs.Int("tart-disk", defaults.Tart.Disk, "disk size in GB for tart VMs"),
+		Disk:   fs.Int("tart-disk", defaults.Tart.Disk, "disk size in GB for tart VMs (0 = use clone default)"),
 	}
 }
 

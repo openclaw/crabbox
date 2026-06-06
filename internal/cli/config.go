@@ -1078,7 +1078,6 @@ func baseConfig() Config {
 			WorkRoot: "/Users/admin/crabbox",
 			CPUs:     4,
 			Memory:   8192,
-			Disk:     50,
 		},
 		Tailscale: TailscaleConfig{
 			Tags:             []string{"tag:crabbox"},

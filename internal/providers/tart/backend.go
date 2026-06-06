@@ -62,9 +62,6 @@ func applyDefaults(cfg *Config) {
 	if cfg.Tart.Memory <= 0 {
 		cfg.Tart.Memory = 8192
 	}
-	if cfg.Tart.Disk <= 0 {
-		cfg.Tart.Disk = 50
-	}
 	cfg.SSHUser = cfg.Tart.User
 	cfg.SSHPort = sshPort
 	cfg.WorkRoot = cfg.Tart.WorkRoot

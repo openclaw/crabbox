@@ -156,8 +156,8 @@ func TestApplyDefaults(t *testing.T) {
 	if cfg.Tart.Memory != 8192 {
 		t.Fatalf("default memory=%d", cfg.Tart.Memory)
 	}
-	if cfg.Tart.Disk != 50 {
-		t.Fatalf("default disk=%d", cfg.Tart.Disk)
+	if cfg.Tart.Disk != 0 {
+		t.Fatalf("default disk=%d, want 0 (clone default)", cfg.Tart.Disk)
 	}
 	if cfg.SSHUser != "admin" || cfg.SSHPort != sshPort {
 		t.Fatalf("derived SSH fields wrong: user=%s port=%s", cfg.SSHUser, cfg.SSHPort)
