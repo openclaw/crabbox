@@ -303,6 +303,26 @@ dockerSandbox:
 	}
 }
 
+func TestDockerSandboxFileConfigRejectsNegativeCPUs(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+provider: docker-sandbox
+dockerSandbox:
+  cpus: -1
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	err := applyFileConfig(&cfg, file)
+	if err == nil {
+		t.Fatal("applyConfigFile err=<nil>, want negative dockerSandbox cpus rejection")
+	}
+	if !strings.Contains(err.Error(), "docker-sandbox cpus must be non-negative") {
+		t.Fatalf("applyConfigFile err=%v, want negative dockerSandbox cpus rejection", err)
+	}
+}
+
 func TestAsciiBoxConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

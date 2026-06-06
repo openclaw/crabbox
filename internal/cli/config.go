@@ -2464,6 +2464,9 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.DockerSandbox.Template != "" {
 			cfg.DockerSandbox.Template = file.DockerSandbox.Template
 		}
+		if file.DockerSandbox.CPUs < 0 {
+			return exit(2, "docker-sandbox cpus must be non-negative")
+		}
 		if file.DockerSandbox.CPUs > 0 {
 			cfg.DockerSandbox.CPUs = file.DockerSandbox.CPUs
 		}
