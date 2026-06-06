@@ -90,6 +90,7 @@ func TestConfigureDoctorReturnsNonMutatingBackend(t *testing.T) {
 	cfg.XCPNg.APIURL = "https://xcp-ng.example.test"
 	cfg.XCPNg.Username = "root"
 	cfg.XCPNg.Password = "secret"
+	cfg.XCPNg.Template = "ubuntu-template"
 	cfg.XCPNg.SRUUID = "sr-uuid"
 	fake := &fakeLifecycleClient{}
 	old := newLifecycleClient

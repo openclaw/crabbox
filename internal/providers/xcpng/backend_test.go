@@ -256,6 +256,26 @@ func TestDoctorReportsPlacementFailureWithoutInventory(t *testing.T) {
 	}
 }
 
+func TestDoctorFailsConfigurationWhenTemplateMissing(t *testing.T) {
+	fake := &fakeLifecycleClient{}
+	backend := newTestBackend(t, fake)
+	backend.Cfg.XCPNg.Template = ""
+	backend.Cfg.XCPNg.TemplateUUID = ""
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "failed" || !strings.Contains(result.Message, "auth=configuration-incomplete") {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(result.Checks) != 1 || result.Checks[0].Check != "configuration" || result.Checks[0].Status != "failed" || !strings.Contains(result.Checks[0].Message, "xcpNg.template/xcpNg.templateUuid") {
+		t.Fatalf("checks=%#v", result.Checks)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("doctor should fail before opening XAPI session, calls=%v", fake.calls)
+	}
+}
+
 func TestAcquireLifecycleCallOrderAndTarget(t *testing.T) {
 	fake := &fakeLifecycleClient{
 		templateRef: "OpaqueRef:tpl",

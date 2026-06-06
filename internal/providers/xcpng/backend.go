@@ -526,6 +526,9 @@ func validateXCPNgConfig(cfg xcpNgConfig) error {
 	if strings.TrimSpace(cfg.Password) == "" {
 		missing = append(missing, "xcpNg.password or CRABBOX_XCP_NG_PASSWORD")
 	}
+	if strings.TrimSpace(cfg.Template) == "" && strings.TrimSpace(cfg.TemplateUUID) == "" {
+		missing = append(missing, "xcpNg.template/xcpNg.templateUuid or CRABBOX_XCP_NG_TEMPLATE/CRABBOX_XCP_NG_TEMPLATE_UUID")
+	}
 	if strings.TrimSpace(cfg.SR) == "" && strings.TrimSpace(cfg.SRUUID) == "" {
 		missing = append(missing, "xcpNg.sr/xcpNg.srUuid or CRABBOX_XCP_NG_SR/CRABBOX_XCP_NG_SR_UUID")
 	}
