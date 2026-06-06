@@ -42,6 +42,7 @@ type lifecycleClient interface {
 	AttachConfigDrive(context.Context, xcpNgConfigDriveRequest) (xcpNgConfigDrive, error)
 	StartVM(context.Context, xapiRef) error
 	GuestIPv4(context.Context, xapiRef) (string, error)
+	GuestIPv4ForID(context.Context, string) (string, error)
 	GetServer(context.Context, string) (Server, error)
 	SetLabels(context.Context, string, map[string]string) error
 	DeleteServer(context.Context, string) error
@@ -282,6 +283,10 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 			if !isCrabboxLease(server) {
 				return LeaseTarget{}, exit(4, "lease/server not found: %s (VM exists but is not Crabbox-managed)", req.ID)
 			}
+			server, err = b.ensureServerIP(ctx, client, server, req.ReleaseOnly)
+			if err != nil {
+				return LeaseTarget{}, err
+			}
 			return b.targetForServer(server), nil
 		}
 		if !isNotFound(err) {
@@ -295,18 +300,36 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 	if server, leaseID, err := findServerByAlias(servers, req.ID); err != nil {
 		return LeaseTarget{}, err
 	} else if leaseID != "" {
-		if firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP) == "" {
-			if refreshed, err := client.GetServer(ctx, server.CloudID); err == nil {
-				server = refreshed
-			} else if !req.ReleaseOnly {
-				return LeaseTarget{}, err
-			}
+		if refreshed, err := client.GetServer(ctx, server.CloudID); err == nil {
+			server = refreshed
+		} else if !req.ReleaseOnly {
+			return LeaseTarget{}, err
+		}
+		server, err = b.ensureServerIP(ctx, client, server, req.ReleaseOnly)
+		if err != nil {
+			return LeaseTarget{}, err
 		}
 		target := b.targetForServer(server)
 		target.LeaseID = leaseID
 		return target, nil
 	}
 	return LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
+}
+
+func (b *leaseBackend) ensureServerIP(ctx context.Context, client lifecycleClient, server Server, releaseOnly bool) (Server, error) {
+	if firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP) != "" || releaseOnly {
+		return server, nil
+	}
+	ip, err := client.GuestIPv4ForID(ctx, server.CloudID)
+	if err != nil {
+		return Server{}, err
+	}
+	if ip == "" {
+		return Server{}, errors.New("no guest ipv4 address reported by XCP-ng guest metrics")
+	}
+	server.PublicNet.IPv4.IP = ip
+	server.PrivateNet.IPv4.IP = ip
+	return server, nil
 }
 
 func (b *leaseBackend) targetForServer(server Server) LeaseTarget {

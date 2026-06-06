@@ -137,15 +137,18 @@ func (f *fakeLifecycleClient) GuestIPv4(context.Context, xapiRef) (string, error
 	return f.guestIP, nil
 }
 
+func (f *fakeLifecycleClient) GuestIPv4ForID(context.Context, string) (string, error) {
+	f.record("guest-ip-by-id")
+	if err := f.fail("guest-ip"); err != nil {
+		return "", err
+	}
+	return f.guestIP, nil
+}
+
 func (f *fakeLifecycleClient) GetServer(_ context.Context, id string) (Server, error) {
 	f.record("get")
 	if f.getServer != nil {
 		if server, ok := f.getServer[id]; ok {
-			if firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP) == "" {
-				if err := f.fail("guest-ip"); err != nil {
-					return Server{}, err
-				}
-			}
 			return server, nil
 		}
 	}

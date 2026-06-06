@@ -242,6 +242,14 @@ func (c *xapiClient) GuestIPv4(ctx context.Context, ref xapiRef) (string, error)
 	return "", errors.New("no guest ipv4 address reported by XCP-ng guest metrics")
 }
 
+func (c *xapiClient) GuestIPv4ForID(ctx context.Context, id string) (string, error) {
+	ref, err := c.vmRefForID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return c.GuestIPv4(ctx, xapiRef(ref))
+}
+
 func (c *xapiClient) GetServer(ctx context.Context, id string) (Server, error) {
 	ref, err := c.vmRefForID(ctx, id)
 	if err != nil {
@@ -366,7 +374,7 @@ func (c *xapiClient) waitForPowerState(ctx context.Context, ref, want string, ti
 
 func (c *xapiClient) DeleteConfigDrive(ctx context.Context, drive xcpNgConfigDrive) error {
 	if drive.VBDRef != "" {
-		if err := c.callDiscard(ctx, "VBD.unplug", c.session, drive.VBDRef); err != nil && !isNotFound(err) {
+		if err := c.callDiscard(ctx, "VBD.unplug", c.session, drive.VBDRef); err != nil && !isNotFound(err) && !isAlreadyDetached(err) {
 			return err
 		}
 		if err := c.callDiscard(ctx, "VBD.destroy", c.session, drive.VBDRef); err != nil && !isNotFound(err) {
@@ -708,6 +716,14 @@ func isMissingMapKey(err error) bool {
 	}
 	text := err.Error()
 	return strings.Contains(text, "MAP_KEY_NOT_FOUND") || strings.Contains(text, "key not found")
+}
+
+func isAlreadyDetached(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	return strings.Contains(text, "DEVICE_ALREADY_DETACHED") || strings.Contains(text, "already detached")
 }
 
 func xapiEndpoint(raw string) (string, error) {

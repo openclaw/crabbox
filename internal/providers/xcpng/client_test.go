@@ -370,6 +370,36 @@ func TestGetServerAndSetLabelsResolveUUIDToFreshRef(t *testing.T) {
 	}
 }
 
+func TestGuestIPv4ForIDResolvesUUIDToFreshRef(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VM.get_by_uuid":
+			writeXMLRPCString(t, w, "OpaqueRef:vm-fresh")
+		case "VM.get_guest_metrics":
+			writeXMLRPCString(t, w, "OpaqueRef:metrics")
+		case "VM_guest_metrics.get_networks":
+			writeXMLRPCNetworks(t, w, "192.0.2.55")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	ip, err := client.GuestIPv4ForID(context.Background(), xcpNgTestVMUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ip != "192.0.2.55" {
+		t.Fatalf("ip=%q", ip)
+	}
+	if got := strings.Join(methods, ","); got != "VM.get_by_uuid,VM.get_guest_metrics,VM_guest_metrics.get_networks" {
+		t.Fatalf("methods=%s", got)
+	}
+}
+
 func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 	var methods []string
 	powerStateChecks := 0
@@ -433,6 +463,30 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 	}
 	if countMethod(methods, "VDI.destroy") != 2 {
 		t.Fatalf("methods=%s should destroy config drive and cloned root VDI", got)
+	}
+}
+
+func TestDeleteConfigDriveTreatsAlreadyDetachedVBDAsCleanedUp(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VBD.unplug":
+			writeXMLRPCFault(t, w, "DEVICE_ALREADY_DETACHED")
+		case "VBD.destroy", "VDI.destroy":
+			writeXMLRPCString(t, w, "true")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	if err := client.DeleteConfigDrive(context.Background(), xcpNgConfigDrive{VBDRef: "OpaqueRef:vbd", VDIRef: "OpaqueRef:vdi"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(methods, ","); got != "VBD.unplug,VBD.destroy,VDI.destroy" {
+		t.Fatalf("methods=%s", got)
 	}
 }
 
@@ -554,6 +608,16 @@ func writeXMLRPCStringArray(t *testing.T, w http.ResponseWriter, values []string
 	}
 	b.WriteString(`</data></array></value></param></params></methodResponse>`)
 	if _, err := w.Write([]byte(b.String())); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeXMLRPCNetworks(t *testing.T, w http.ResponseWriter, ip string) {
+	t.Helper()
+	response := `<?xml version="1.0"?><methodResponse><params><param><value><struct>
+<member><name>0/ip</name><value><string>` + ip + `</string></value></member>
+</struct></value></param></params></methodResponse>`
+	if _, err := w.Write([]byte(response)); err != nil {
 		t.Fatal(err)
 	}
 }
