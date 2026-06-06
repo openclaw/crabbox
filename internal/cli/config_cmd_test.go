@@ -164,3 +164,75 @@ func TestConfigShowIncludesSyncInclude(t *testing.T) {
 		t.Fatalf("config show json sync.include = %#v, want [src scripts]", got.Sync.Include)
 	}
 }
+
+func TestConfigShowIncludesXCPNgWithoutSecret(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	config := []byte(`xcpNg:
+  apiUrl: https://xcp-ng.example.test
+  username: root
+  password: xcp-ng-secret
+  template: ubuntu-template
+  templateUuid: tpl-0001
+  sr: default-sr
+  srUuid: sr-0001
+  network: pool-network
+  networkUuid: net-0001
+  host: host-0001
+  user: runner
+  workRoot: /work/xcp-ng
+  insecureTLS: true
+`)
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	wantText := "xcp_ng api_url=https://xcp-ng.example.test username=root template=ubuntu-template template_uuid=tpl-0001 sr=default-sr sr_uuid=sr-0001 network=pool-network network_uuid=net-0001 host=host-0001 user=runner work_root=/work/xcp-ng insecure_tls=true auth=configured"
+	if !strings.Contains(text, wantText) {
+		t.Fatalf("config show missing xcp-ng summary: %q", text)
+	}
+	if strings.Contains(text, "xcp-ng-secret") {
+		t.Fatalf("config show leaked XCP-ng password: %q", text)
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		XCPNg struct {
+			APIURL       string `json:"apiUrl"`
+			Username     string `json:"username"`
+			Auth         string `json:"auth"`
+			Template     string `json:"template"`
+			TemplateUUID string `json:"templateUuid"`
+			SR           string `json:"sr"`
+			SRUUID       string `json:"srUuid"`
+			Network      string `json:"network"`
+			NetworkUUID  string `json:"networkUuid"`
+			Host         string `json:"host"`
+			User         string `json:"user"`
+			WorkRoot     string `json:"workRoot"`
+			InsecureTLS  bool   `json:"insecureTLS"`
+		} `json:"xcpNg"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.XCPNg.APIURL != "https://xcp-ng.example.test" || got.XCPNg.Username != "root" || got.XCPNg.Auth != "configured" || got.XCPNg.Template != "ubuntu-template" || got.XCPNg.TemplateUUID != "tpl-0001" || got.XCPNg.SR != "default-sr" || got.XCPNg.SRUUID != "sr-0001" || got.XCPNg.Network != "pool-network" || got.XCPNg.NetworkUUID != "net-0001" || got.XCPNg.Host != "host-0001" || got.XCPNg.User != "runner" || got.XCPNg.WorkRoot != "/work/xcp-ng" || !got.XCPNg.InsecureTLS {
+		t.Fatalf("unexpected xcp-ng json: %#v", got.XCPNg)
+	}
+	if strings.Contains(stdout.String(), "xcp-ng-secret") {
+		t.Fatalf("config show json leaked XCP-ng password: %q", stdout.String())
+	}
+}

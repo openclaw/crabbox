@@ -4,10 +4,6 @@
 
 ### Added
 
-- Added `provider: xcp-ng` docs for direct XAPI Linux VM leases, including
-  config-drive cloud-init setup, command references, cleanup guidance, and a
-  guarded live-smoke helper.
-
 ### Changed
 
 ### Fixed
