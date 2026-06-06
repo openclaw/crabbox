@@ -260,18 +260,34 @@ func (c *xapiClient) SetLabels(ctx context.Context, id string, labels map[string
 func (c *xapiClient) DeleteServer(ctx context.Context, id string) error {
 	ref := id
 	var drives []xcpNgConfigDrive
+	var disks []xcpNgConfigDrive
 	if server, err := c.GetServer(ctx, ref); err == nil && isCrabboxLease(server) {
 		found, err := c.configDrivesForLease(ctx, server.Labels["lease"])
 		if err != nil {
 			return err
 		}
 		drives = found
+		skipVDIs := map[string]struct{}{}
+		for _, drive := range drives {
+			if drive.VDIRef != "" {
+				skipVDIs[drive.VDIRef] = struct{}{}
+			}
+		}
+		disks, err = c.attachedDestroyableDisks(ctx, ref, skipVDIs)
+		if err != nil {
+			return err
+		}
 	}
 	if err := c.shutdownVM(ctx, ref); err != nil {
 		return err
 	}
 	for _, drive := range drives {
 		if err := c.DeleteConfigDrive(ctx, drive); err != nil {
+			return err
+		}
+	}
+	for _, disk := range disks {
+		if err := c.DeleteConfigDrive(ctx, disk); err != nil {
 			return err
 		}
 	}
@@ -367,6 +383,44 @@ func (c *xapiClient) configDrivesForLease(ctx context.Context, leaseID string) (
 		drives = append(drives, drive)
 	}
 	return drives, nil
+}
+
+func (c *xapiClient) attachedDestroyableDisks(ctx context.Context, vmRef string, skipVDIs map[string]struct{}) ([]xcpNgConfigDrive, error) {
+	value, err := c.call(ctx, "VM.get_VBDs", c.session, vmRef)
+	if err != nil {
+		return nil, err
+	}
+	disks := make([]xcpNgConfigDrive, 0)
+	for _, vbdRef := range xmlValueToStrings(value) {
+		recordValue, err := c.call(ctx, "VBD.get_record", c.session, vbdRef)
+		if err != nil {
+			return nil, err
+		}
+		record := xmlValueToStruct(recordValue)
+		if xmlStructString(record, "empty") == "true" {
+			continue
+		}
+		vdiRef := xmlStructString(record, "VDI")
+		if vdiRef == "" || vdiRef == "OpaqueRef:NULL" {
+			continue
+		}
+		if _, skip := skipVDIs[vdiRef]; skip {
+			continue
+		}
+		vdiValue, err := c.call(ctx, "VDI.get_record", c.session, vdiRef)
+		if err != nil {
+			return nil, err
+		}
+		vdi := xmlValueToStruct(vdiValue)
+		if xmlStructString(vdi, "read_only") == "true" || xmlStructString(vdi, "sharable") == "true" || xmlStructString(vdi, "type") != "user" {
+			continue
+		}
+		if xmlStructStringMap(vdi, "other_config")["resource"] == "config-drive" {
+			continue
+		}
+		disks = append(disks, xcpNgConfigDrive{VDIRef: vdiRef, VBDRef: vbdRef, Name: xmlStructString(vdi, "name_label")})
+	}
+	return disks, nil
 }
 
 func (c *xapiClient) importRawVDI(ctx context.Context, vdiRef string, image []byte) error {

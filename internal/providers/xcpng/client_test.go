@@ -285,6 +285,16 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 			writeXMLRPCFault(t, w, "HANDLE_INVALID")
 		case "VDI.get_all_records":
 			writeXMLRPCVDIRecords(t, w)
+		case "VM.get_VBDs":
+			writeXMLRPCStringArray(t, w, []string{"OpaqueRef:vbd", "OpaqueRef:root-vbd"})
+		case "VBD.get_record":
+			if strings.Count(strings.Join(methods, ","), "VBD.get_record") == 1 {
+				writeXMLRPCVBDRecord(t, w, "OpaqueRef:vdi")
+			} else {
+				writeXMLRPCVBDRecord(t, w, "OpaqueRef:root-vdi")
+			}
+		case "VDI.get_record":
+			writeXMLRPCVDIRecord(t, w, "crabbox-root")
 		case "VM.get_power_state":
 			powerStateChecks++
 			if powerStateChecks == 1 {
@@ -320,6 +330,9 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 	}
 	if strings.Index(got, "VM.clean_shutdown") > strings.Index(got, "VBD.unplug") {
 		t.Fatalf("methods=%s unplugged config drive before shutdown", got)
+	}
+	if countMethod(methods, "VDI.destroy") != 2 {
+		t.Fatalf("methods=%s should destroy config drive and cloned root VDI", got)
 	}
 }
 
@@ -385,6 +398,16 @@ func readXMLRPCBodyAndMethod(t *testing.T, r *http.Request) (string, string) {
 	return req.Method, string(body)
 }
 
+func countMethod(methods []string, want string) int {
+	count := 0
+	for _, method := range methods {
+		if method == want {
+			count++
+		}
+	}
+	return count
+}
+
 func writeXMLRPCString(t *testing.T, w http.ResponseWriter, value string) {
 	t.Helper()
 	_, err := w.Write([]byte(`<?xml version="1.0"?><methodResponse><params><param><value><string>` + value + `</string></value></param></params></methodResponse>`))
@@ -427,6 +450,31 @@ func writeXMLRPCVMRecord(t *testing.T, w http.ResponseWriter, leaseID string) {
 <member><name>name_label</name><value>crabbox-xmlrpc</value></member>
 <member><name>power_state</name><value>Running</value></member>
 <member><name>other_config</name><value><struct><member><name>crabbox:labels</name><value><string>` + labels + `</string></value></member></struct></value></member>
+</struct></value></param></params></methodResponse>`
+	if _, err := w.Write([]byte(response)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeXMLRPCVBDRecord(t *testing.T, w http.ResponseWriter, vdiRef string) {
+	t.Helper()
+	response := `<?xml version="1.0"?><methodResponse><params><param><value><struct>
+<member><name>empty</name><value><boolean>0</boolean></value></member>
+<member><name>VDI</name><value><string>` + vdiRef + `</string></value></member>
+</struct></value></param></params></methodResponse>`
+	if _, err := w.Write([]byte(response)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeXMLRPCVDIRecord(t *testing.T, w http.ResponseWriter, name string) {
+	t.Helper()
+	response := `<?xml version="1.0"?><methodResponse><params><param><value><struct>
+<member><name>name_label</name><value><string>` + name + `</string></value></member>
+<member><name>read_only</name><value><boolean>0</boolean></value></member>
+<member><name>sharable</name><value><boolean>0</boolean></value></member>
+<member><name>type</name><value><string>user</string></value></member>
+<member><name>other_config</name><value><struct></struct></value></member>
 </struct></value></param></params></methodResponse>`
 	if _, err := w.Write([]byte(response)); err != nil {
 		t.Fatal(err)
