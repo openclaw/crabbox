@@ -228,6 +228,58 @@ func TestCloneVMUsesCopyForSRAndRewiresVIFsForNetwork(t *testing.T) {
 	}
 }
 
+func TestCloneVMRollbackDestroysCopiedDiskBeforeLabels(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VM.copy":
+			writeXMLRPCString(t, w, "OpaqueRef:vm")
+		case "VM.set_affinity":
+			writeXMLRPCFault(t, w, "HOST_NOT_LIVE")
+		case "VM.get_record":
+			writeXMLRPCUnmanagedVMRecord(t, w)
+		case "VM.get_guest_metrics":
+			writeXMLRPCFault(t, w, "HANDLE_INVALID")
+		case "VM.get_VBDs":
+			writeXMLRPCStringArray(t, w, []string{"OpaqueRef:root-vbd"})
+		case "VBD.get_record":
+			writeXMLRPCVBDRecord(t, w, "OpaqueRef:root-vdi")
+		case "VDI.get_record":
+			writeXMLRPCVDIRecord(t, w, "crabbox-root")
+		case "VM.get_power_state":
+			writeXMLRPCString(t, w, "Halted")
+		case "VBD.unplug", "VBD.destroy", "VDI.destroy", "VM.destroy":
+			writeXMLRPCString(t, w, "true")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	_, err := client.CloneVM(context.Background(), xcpNgCloneRequest{
+		TemplateRef: "OpaqueRef:tpl",
+		SRRef:       "OpaqueRef:sr",
+		HostRef:     "OpaqueRef:bad-host",
+		LeaseID:     "cbx_lease",
+		Slug:        "blue",
+		Labels:      map[string]string{"crabbox": "true", "created_by": "crabbox", "provider": "xcp-ng", "lease": "cbx_lease"},
+	})
+	if err == nil {
+		t.Fatal("expected host affinity failure")
+	}
+	got := strings.Join(methods, ",")
+	for _, want := range []string{"VM.copy", "VM.set_affinity", "VM.get_record", "VM.get_VBDs", "VBD.get_record", "VDI.get_record", "VBD.unplug", "VBD.destroy", "VDI.destroy", "VM.destroy"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("methods=%s missing %s", got, want)
+		}
+	}
+	if strings.Index(got, "VDI.destroy") > strings.Index(got, "VM.destroy") {
+		t.Fatalf("methods=%s destroyed VM before copied VDI", got)
+	}
+}
+
 func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 	var methods []string
 	var imported bool
@@ -525,6 +577,19 @@ func writeXMLRPCVMRecord(t *testing.T, w http.ResponseWriter, leaseID string) {
 <member><name>name_label</name><value>crabbox-xmlrpc</value></member>
 <member><name>power_state</name><value>Running</value></member>
 <member><name>other_config</name><value><struct><member><name>crabbox:labels</name><value><string>` + labels + `</string></value></member></struct></value></member>
+</struct></value></param></params></methodResponse>`
+	if _, err := w.Write([]byte(response)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeXMLRPCUnmanagedVMRecord(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	response := `<?xml version="1.0"?><methodResponse><params><param><value><struct>
+<member><name>uuid</name><value>` + xcpNgTestVMUUID + `</value></member>
+<member><name>name_label</name><value>crabbox-unlabeled</value></member>
+<member><name>power_state</name><value>Halted</value></member>
+<member><name>other_config</name><value><struct></struct></value></member>
 </struct></value></param></params></methodResponse>`
 	if _, err := w.Write([]byte(response)); err != nil {
 		t.Fatal(err)

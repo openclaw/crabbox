@@ -141,27 +141,27 @@ func (c *xapiClient) CloneVM(ctx context.Context, req xcpNgCloneRequest) (xapiVM
 	}
 	if req.HostRef != "" {
 		if _, err := c.call(ctx, "VM.set_affinity", c.session, ref, req.HostRef.value()); err != nil && req.HostRef != "" {
-			_ = c.DeleteServer(context.Background(), ref)
+			_ = c.deleteServer(context.Background(), ref, true)
 			return xapiVM{}, err
 		}
 	}
 	if req.NetworkRef != "" {
 		if err := c.setVMNetwork(ctx, ref, req.NetworkRef.value()); err != nil {
-			_ = c.DeleteServer(context.Background(), ref)
+			_ = c.deleteServer(context.Background(), ref, true)
 			return xapiVM{}, err
 		}
 	}
 	if err := c.setVMLabels(ctx, ref, req.Labels); err != nil {
-		_ = c.DeleteServer(context.Background(), ref)
+		_ = c.deleteServer(context.Background(), ref, true)
 		return xapiVM{}, err
 	}
 	if _, err := c.call(ctx, "VM.provision", c.session, ref); err != nil {
-		_ = c.DeleteServer(context.Background(), ref)
+		_ = c.deleteServer(context.Background(), ref, true)
 		return xapiVM{}, err
 	}
 	uuid, err := c.callString(ctx, "VM.get_uuid", c.session, ref)
 	if err != nil {
-		_ = c.DeleteServer(context.Background(), ref)
+		_ = c.deleteServer(context.Background(), ref, true)
 		return xapiVM{}, err
 	}
 	return xapiVM{Ref: ref, UUID: uuid, Name: name, PowerState: "halted", Labels: req.Labels}, nil
@@ -264,13 +264,19 @@ func (c *xapiClient) SetLabels(ctx context.Context, id string, labels map[string
 }
 
 func (c *xapiClient) DeleteServer(ctx context.Context, id string) error {
+	return c.deleteServer(ctx, id, false)
+}
+
+func (c *xapiClient) deleteServer(ctx context.Context, id string, forceDisks bool) error {
 	ref, err := c.vmRefForID(ctx, id)
 	if err != nil {
 		return err
 	}
 	var drives []xcpNgConfigDrive
 	var disks []xcpNgConfigDrive
+	managed := false
 	if server, err := c.GetServer(ctx, ref); err == nil && isCrabboxLease(server) {
+		managed = true
 		found, err := c.configDrivesForLease(ctx, server.Labels["lease"])
 		if err != nil {
 			return err
@@ -283,6 +289,12 @@ func (c *xapiClient) DeleteServer(ctx context.Context, id string) error {
 			}
 		}
 		disks, err = c.attachedDestroyableDisks(ctx, ref, skipVDIs)
+		if err != nil {
+			return err
+		}
+	}
+	if forceDisks && !managed {
+		disks, err = c.attachedDestroyableDisks(ctx, ref, map[string]struct{}{})
 		if err != nil {
 			return err
 		}
