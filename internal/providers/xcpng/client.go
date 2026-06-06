@@ -287,10 +287,21 @@ func (c *xapiClient) shutdownVM(ctx context.Context, ref string) error {
 	if state == "Halted" {
 		return nil
 	}
-	if err := c.callDiscard(ctx, "VM.clean_shutdown", c.session, ref); err != nil {
-		return err
+	cleanErr := c.callDiscard(ctx, "VM.clean_shutdown", c.session, ref)
+	if cleanErr == nil {
+		if err := c.waitForPowerState(ctx, ref, "Halted", xcpNgShutdownTimeout); err == nil {
+			return nil
+		} else {
+			cleanErr = err
+		}
 	}
-	return c.waitForPowerState(ctx, ref, "Halted", xcpNgShutdownTimeout)
+	if err := c.callDiscard(ctx, "VM.hard_shutdown", c.session, ref); err != nil {
+		return fmt.Errorf("xcp-ng clean shutdown failed: %v; hard shutdown failed: %w", cleanErr, err)
+	}
+	if err := c.waitForPowerState(ctx, ref, "Halted", xcpNgShutdownTimeout); err != nil {
+		return fmt.Errorf("xcp-ng clean shutdown failed: %v; hard shutdown wait failed: %w", cleanErr, err)
+	}
+	return nil
 }
 
 func (c *xapiClient) waitForPowerState(ctx context.Context, ref, want string, timeout time.Duration) error {

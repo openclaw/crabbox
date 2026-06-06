@@ -312,6 +312,47 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 	}
 }
 
+func TestShutdownVMFallsBackToHardShutdown(t *testing.T) {
+	var methods []string
+	powerStateChecks := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VM.get_power_state":
+			powerStateChecks++
+			if powerStateChecks == 1 {
+				writeXMLRPCString(t, w, "Running")
+			} else {
+				writeXMLRPCString(t, w, "Halted")
+			}
+		case "VM.clean_shutdown":
+			writeXMLRPCFault(t, w, "VM_LACKS_FEATURE_SHUTDOWN")
+		case "VM.hard_shutdown":
+			writeXMLRPCString(t, w, "true")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	oldPoll := xcpNgShutdownPollInterval
+	xcpNgShutdownPollInterval = time.Millisecond
+	t.Cleanup(func() { xcpNgShutdownPollInterval = oldPoll })
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	if err := client.shutdownVM(context.Background(), "OpaqueRef:vm"); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(methods, ",")
+	for _, want := range []string{"VM.get_power_state", "VM.clean_shutdown", "VM.hard_shutdown"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("methods=%s missing %s", got, want)
+		}
+	}
+	if strings.Index(got, "VM.hard_shutdown") > strings.LastIndex(got, "VM.get_power_state") {
+		t.Fatalf("methods=%s did not verify halted state after hard shutdown", got)
+	}
+}
+
 func readXMLRPCMethod(t *testing.T, r *http.Request) string {
 	t.Helper()
 	var req struct {
