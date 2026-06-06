@@ -215,6 +215,11 @@ known. If credentials, host access, or template configuration are missing, stop
 at the read-only doctor output and classify live validation as
 `environment_blocked`; do not claim live provisioning success.
 
+The doctor path is non-mutating: it opens a XAPI session, resolves configured
+placement resources, lists Crabbox-managed leases, and reports
+`mutation=false`. Template, SR, network, or host typos fail before doctor
+reports ready.
+
 ## Troubleshooting
 
 `xcp-ng configuration is incomplete`

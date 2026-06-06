@@ -437,19 +437,53 @@ func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.D
 		return core.DoctorResult{}, err
 	}
 	defer closeClient(ctx, client, b.RT.Stderr)
+	if err := b.resolveDoctorPlacement(ctx, client, cfg); err != nil {
+		return core.DoctorResult{
+			Provider: "xcp-ng",
+			Message:  "auth=ready control_plane=ready placement=failed inventory=unchecked mutation=false runtime=unchecked",
+			Status:   "failed",
+			Checks: []core.DoctorCheck{
+				{Status: "ok", Check: "auth", Message: "XAPI session established", Details: map[string]string{"mutation": "false"}},
+				{Status: "failed", Check: "placement", Message: err.Error(), Details: map[string]string{"mutation": "false"}},
+			},
+		}, nil
+	}
 	servers, err := client.DoctorInventory(ctx, cfg)
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
 	return core.DoctorResult{
 		Provider: "xcp-ng",
-		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready api=list mutation=false leases=%d runtime=unchecked", len(servers)),
+		Message:  fmt.Sprintf("auth=ready control_plane=ready placement=ready inventory=ready api=list mutation=false leases=%d runtime=unchecked", len(servers)),
 		Status:   "ok",
 		Checks: []core.DoctorCheck{
 			{Status: "ok", Check: "auth", Message: "XAPI session established", Details: map[string]string{"mutation": "false"}},
+			{Status: "ok", Check: "placement", Message: "configured placement resources resolved", Details: map[string]string{"mutation": "false"}},
 			{Status: "ok", Check: "inventory", Message: fmt.Sprintf("listed %d Crabbox-managed leases", len(servers)), Details: map[string]string{"mutation": "false"}},
 		},
 	}, nil
+}
+
+func (b *leaseBackend) resolveDoctorPlacement(ctx context.Context, client lifecycleClient, cfg xcpNgConfig) error {
+	if strings.TrimSpace(cfg.Template) != "" || strings.TrimSpace(cfg.TemplateUUID) != "" {
+		if _, err := client.ResolveTemplate(ctx, cfg); err != nil {
+			return err
+		}
+	}
+	if _, err := client.ResolveSR(ctx, cfg); err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.Network) != "" || strings.TrimSpace(cfg.NetworkUUID) != "" {
+		if _, err := client.ResolveNetwork(ctx, cfg); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(cfg.Host) != "" {
+		if _, err := client.ResolveHost(ctx, cfg); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func xcpNgServerTypeForConfig(cfg core.Config) string {

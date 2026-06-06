@@ -179,21 +179,78 @@ func (f *fakeLifecycleClient) DeleteConfigDrive(_ context.Context, drive xcpNgCo
 	return f.fail("delete-config-drive")
 }
 
-func TestDoctorUsesReadOnlyInventory(t *testing.T) {
-	fake := &fakeLifecycleClient{servers: []Server{crabboxServer("OpaqueRef:vm-1", "cbx_lease", "ready", time.Now().Add(time.Hour))}}
+func TestDoctorUsesReadOnlyPlacementAndInventory(t *testing.T) {
+	fake := &fakeLifecycleClient{
+		servers:     []Server{crabboxServer("OpaqueRef:vm-1", "cbx_lease", "ready", time.Now().Add(time.Hour))},
+		templateRef: "OpaqueRef:tpl",
+		srRef:       "OpaqueRef:sr",
+	}
 	backend := newTestBackend(t, fake)
 	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Provider != "xcp-ng" || !strings.Contains(result.Message, "mutation=false") || !strings.Contains(result.Message, "leases=1") {
+	if result.Provider != "xcp-ng" || !strings.Contains(result.Message, "placement=ready") || !strings.Contains(result.Message, "mutation=false") || !strings.Contains(result.Message, "leases=1") {
 		t.Fatalf("result=%#v", result)
 	}
 	if fake.mutated {
 		t.Fatal("doctor mutated provider state")
 	}
-	if got, want := fake.calls, []string{"doctor-inventory", "close"}; !reflect.DeepEqual(got, want) {
+	if got, want := fake.calls, []string{"resolve-template", "resolve-sr", "doctor-inventory", "close"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("calls=%v want %v", got, want)
+	}
+}
+
+func TestDoctorValidatesOptionalPlacementReadOnly(t *testing.T) {
+	fake := &fakeLifecycleClient{
+		templateRef: "OpaqueRef:tpl",
+		srRef:       "OpaqueRef:sr",
+		networkRef:  "OpaqueRef:net",
+		hostRef:     "OpaqueRef:host",
+	}
+	backend := newTestBackend(t, fake)
+	backend.Cfg.XCPNg.Network = "pool-network"
+	backend.Cfg.XCPNg.Host = "host-a"
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "ok" || !strings.Contains(result.Message, "placement=ready") {
+		t.Fatalf("result=%#v", result)
+	}
+	if fake.mutated {
+		t.Fatal("doctor mutated provider state")
+	}
+	wantCalls := []string{"resolve-template", "resolve-sr", "resolve-network", "resolve-host", "doctor-inventory", "close"}
+	if !reflect.DeepEqual(fake.calls, wantCalls) {
+		t.Fatalf("calls=%v want %v", fake.calls, wantCalls)
+	}
+}
+
+func TestDoctorReportsPlacementFailureWithoutInventory(t *testing.T) {
+	fake := &fakeLifecycleClient{
+		templateRef: "OpaqueRef:tpl",
+		srRef:       "OpaqueRef:sr",
+		errOn:       map[string]error{"resolve-network": errors.New("network not found")},
+	}
+	backend := newTestBackend(t, fake)
+	backend.Cfg.XCPNg.Network = "missing-network"
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "failed" || !strings.Contains(result.Message, "placement=failed") || !strings.Contains(result.Message, "inventory=unchecked") {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(result.Checks) != 2 || result.Checks[1].Check != "placement" || result.Checks[1].Status != "failed" || !strings.Contains(result.Checks[1].Message, "network not found") {
+		t.Fatalf("checks=%#v", result.Checks)
+	}
+	if fake.mutated {
+		t.Fatal("doctor mutated provider state")
+	}
+	wantCalls := []string{"resolve-template", "resolve-sr", "resolve-network", "close"}
+	if !reflect.DeepEqual(fake.calls, wantCalls) {
+		t.Fatalf("calls=%v want %v", fake.calls, wantCalls)
 	}
 }
 
