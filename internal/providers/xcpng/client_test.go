@@ -103,7 +103,8 @@ func TestGuestIPv4SkipsLoopbackAndNonIPv4(t *testing.T) {
 	value := xmlRPCValue{Struct: []xmlRPCMember{
 		{Name: "0/ip", Value: xmlRPCValue{String: "127.0.0.1"}},
 		{Name: "1/ip", Value: xmlRPCValue{String: "2001:db8::1"}},
-		{Name: "2/ip", Value: xmlRPCValue{String: "192.0.2.55"}},
+		{Name: "2/ip", Value: xmlRPCValue{String: "169.254.10.20"}},
+		{Name: "3/ip", Value: xmlRPCValue{String: "192.0.2.55"}},
 	}}
 	networks := xmlValueToStringMap(value)
 	if ip := usableIPv4(networks["0/ip"]); ip != "" {
@@ -112,7 +113,10 @@ func TestGuestIPv4SkipsLoopbackAndNonIPv4(t *testing.T) {
 	if ip := usableIPv4(networks["1/ip"]); ip != "" {
 		t.Fatalf("ipv6 ip=%s", ip)
 	}
-	if ip := usableIPv4(networks["2/ip"]); ip != "192.0.2.55" {
+	if ip := usableIPv4("169.254.10.20"); ip != "" {
+		t.Fatalf("link-local ip=%s", ip)
+	}
+	if ip := usableIPv4(networks["3/ip"]); ip != "192.0.2.55" {
 		t.Fatalf("ip=%s", ip)
 	}
 	_ = client

@@ -888,7 +888,7 @@ func usableIPv4(value string) string {
 		return ""
 	}
 	ip := net.ParseIP(value)
-	if ip == nil || ip.To4() == nil || ip.IsLoopback() || ip.IsUnspecified() {
+	if ip == nil || ip.To4() == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
 		return ""
 	}
 	return value
