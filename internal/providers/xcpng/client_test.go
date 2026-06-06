@@ -294,6 +294,63 @@ func TestCloneVMRollbackDestroysCopiedDiskBeforeLabels(t *testing.T) {
 	}
 }
 
+func TestCloneVMProvisionRollbackDestroysUnlabeledCopiedDisk(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VM.copy":
+			writeXMLRPCString(t, w, "OpaqueRef:vm")
+		case "VM.remove_from_other_config":
+			writeXMLRPCFault(t, w, "MAP_KEY_NOT_FOUND")
+		case "VM.add_to_other_config":
+			writeXMLRPCString(t, w, "true")
+		case "VM.provision":
+			writeXMLRPCFault(t, w, "SR_BACKEND_FAILURE")
+		case "VM.get_record":
+			writeXMLRPCVMRecord(t, w, "cbx_lease")
+		case "VM.get_guest_metrics":
+			writeXMLRPCFault(t, w, "HANDLE_INVALID")
+		case "VDI.get_all_records":
+			writeXMLRPCEmptyRecordMap(t, w)
+		case "VM.get_VBDs":
+			writeXMLRPCStringArray(t, w, []string{"OpaqueRef:root-vbd"})
+		case "VBD.get_record":
+			writeXMLRPCVBDRecord(t, w, "OpaqueRef:root-vdi")
+		case "VDI.get_record":
+			writeXMLRPCVDIRecord(t, w, "crabbox-root")
+		case "VM.get_power_state":
+			writeXMLRPCString(t, w, "Halted")
+		case "VBD.unplug", "VBD.destroy", "VDI.destroy", "VM.destroy":
+			writeXMLRPCString(t, w, "true")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	_, err := client.CloneVM(context.Background(), xcpNgCloneRequest{
+		TemplateRef: "OpaqueRef:tpl",
+		SRRef:       "OpaqueRef:sr",
+		LeaseID:     "cbx_lease",
+		Slug:        "blue",
+		Labels:      map[string]string{"crabbox": "true", "created_by": "crabbox", "provider": "xcp-ng", "lease": "cbx_lease"},
+	})
+	if err == nil {
+		t.Fatal("expected provision failure")
+	}
+	got := strings.Join(methods, ",")
+	for _, want := range []string{"VM.provision", "VDI.get_all_records", "VM.get_VBDs", "VDI.get_record", "VDI.destroy", "VM.destroy"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("methods=%s missing %s", got, want)
+		}
+	}
+	if strings.Index(got, "VDI.destroy") > strings.Index(got, "VM.destroy") {
+		t.Fatalf("methods=%s destroyed VM before copied VDI", got)
+	}
+}
+
 func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 	var methods []string
 	var imported bool
@@ -863,6 +920,14 @@ func writeXMLRPCVDIRecords(t *testing.T, w http.ResponseWriter) {
 <member><name>other_config</name><value><struct><member><name>lease</name><value>cbx_lease</value></member></struct></value></member>
 </struct></value></member>
 </struct></value></param></params></methodResponse>`
+	if _, err := w.Write([]byte(response)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeXMLRPCEmptyRecordMap(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	response := `<?xml version="1.0"?><methodResponse><params><param><value><struct></struct></value></param></params></methodResponse>`
 	if _, err := w.Write([]byte(response)); err != nil {
 		t.Fatal(err)
 	}

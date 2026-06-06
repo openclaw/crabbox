@@ -288,34 +288,34 @@ func (c *xapiClient) deleteServer(ctx context.Context, id string, forceDisks boo
 	}
 	var drives []xcpNgConfigDrive
 	var disks []xcpNgConfigDrive
-	managed := false
+	skipVDIs := map[string]struct{}{}
 	server, getErr := c.GetServer(ctx, ref)
 	if getErr != nil && !forceDisks {
 		return getErr
 	}
 	if getErr == nil {
 		if isCrabboxLease(server) {
-			managed = true
 			found, err := c.configDrivesForLease(ctx, server.Labels["lease"])
 			if err != nil {
 				return err
 			}
 			drives = found
-			skipVDIs := map[string]struct{}{}
 			for _, drive := range drives {
 				if drive.VDIRef != "" {
 					skipVDIs[drive.VDIRef] = struct{}{}
 				}
 			}
-			disks, err = c.attachedDestroyableDisks(ctx, ref, skipVDIs, server.Labels["lease"])
-			if err != nil {
-				return err
+			if !forceDisks {
+				disks, err = c.attachedDestroyableDisks(ctx, ref, skipVDIs, server.Labels["lease"])
+				if err != nil {
+					return err
+				}
 			}
 		} else if !forceDisks {
 			return exit(4, "refusing to delete non-Crabbox xcp-ng VM: %s", id)
 		}
 	}
-	if forceDisks && !managed {
+	if forceDisks {
 		disks, err = c.attachedDestroyableDisks(ctx, ref, map[string]struct{}{}, "")
 		if err != nil {
 			return err
