@@ -39,7 +39,10 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetMacOS {
-		return nil, core.Exit(2, "provider=%s supports target=macos only", providerName)
+		if core.IsTargetExplicit(&cfg) {
+			return nil, core.Exit(2, "provider=%s supports target=macos only", providerName)
+		}
+		cfg.TargetOS = core.TargetMacOS
 	}
 	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
 		return nil, core.Exit(2, "--tailscale is not supported for provider=%s; use a remote SSH provider when tailnet reachability is required", providerName)

@@ -73,19 +73,33 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	}
 }
 
-func TestConfigureRejectsNonMacOS(t *testing.T) {
+func TestConfigureRejectsExplicitNonMacOS(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
+	core.MarkTargetExplicit(&cfg)
 	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
-		t.Fatal("Configure accepted non-macos target")
+		t.Fatal("Configure accepted explicit linux target")
 	}
 
 	cfg = core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetWindows
+	core.MarkTargetExplicit(&cfg)
 	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
-		t.Fatal("Configure accepted windows target")
+		t.Fatal("Configure accepted explicit windows target")
+	}
+}
+
+func TestConfigureDefaultsImplicitLinuxToMacOS(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatalf("Configure rejected implicit linux target (e.g. doctor --provider tart): %v", err)
+	}
+	if backend == nil {
+		t.Fatal("Configure returned nil backend")
 	}
 }
 
