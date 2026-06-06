@@ -85,6 +85,7 @@ type Config struct {
 	gcpRootGBExplicit           bool
 	GCPServiceAccount           string
 	Proxmox                     ProxmoxConfig
+	XCPNg                       XCPNgConfig
 	Parallels                   ParallelsConfig
 	parallelsTemplateApplied    bool
 	SSHUser                     string
@@ -350,6 +351,22 @@ type ProxmoxConfig struct {
 	WorkRoot    string
 	FullClone   bool
 	InsecureTLS bool
+}
+
+type XCPNgConfig struct {
+	APIURL       string
+	Username     string
+	Password     string
+	Template     string
+	TemplateUUID string
+	SR           string
+	SRUUID       string
+	Network      string
+	NetworkUUID  string
+	Host         string
+	User         string
+	WorkRoot     string
+	InsecureTLS  bool
 }
 
 type ParallelsConfig struct {
@@ -760,6 +777,15 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		return nil
 	}
 	if cfg.Provider != "proxmox" {
+		if cfg.Provider == "xcp-ng" {
+			if cfg.XCPNg.User != "" {
+				cfg.SSHUser = cfg.XCPNg.User
+			}
+			if cfg.XCPNg.WorkRoot != "" {
+				cfg.WorkRoot = cfg.XCPNg.WorkRoot
+			}
+			return nil
+		}
 		if cfg.Provider != "parallels" {
 			return nil
 		}
@@ -990,6 +1016,10 @@ func baseConfig() Config {
 			WorkRoot:  defaultPOSIXWorkRoot,
 			FullClone: true,
 		},
+		XCPNg: XCPNgConfig{
+			User:     "crabbox",
+			WorkRoot: defaultPOSIXWorkRoot,
+		},
 		Parallels: ParallelsConfig{
 			CloneMode:      "linked",
 			User:           "crabbox",
@@ -1061,6 +1091,7 @@ type fileConfig struct {
 	AzureDynamicSessions *fileAzureDynamicSessionsConfig    `yaml:"azureDynamicSessions,omitempty"`
 	GCP                  *fileGCPConfig                     `yaml:"gcp,omitempty"`
 	Proxmox              *fileProxmoxConfig                 `yaml:"proxmox,omitempty"`
+	XCPNg                *fileXCPNgConfig                   `yaml:"xcpNg,omitempty"`
 	Parallels            *fileParallelsConfig               `yaml:"parallels,omitempty"`
 	SSH                  *fileSSHConfig                     `yaml:"ssh,omitempty"`
 	Sync                 *fileSyncConfig                    `yaml:"sync,omitempty"`
@@ -1177,6 +1208,22 @@ type fileProxmoxConfig struct {
 	WorkRoot    string `yaml:"workRoot,omitempty"`
 	FullClone   *bool  `yaml:"fullClone,omitempty"`
 	InsecureTLS *bool  `yaml:"insecureTLS,omitempty"`
+}
+
+type fileXCPNgConfig struct {
+	APIURL       string `yaml:"apiUrl,omitempty"`
+	Username     string `yaml:"username,omitempty"`
+	Password     string `yaml:"password,omitempty"`
+	Template     string `yaml:"template,omitempty"`
+	TemplateUUID string `yaml:"templateUuid,omitempty"`
+	SR           string `yaml:"sr,omitempty"`
+	SRUUID       string `yaml:"srUuid,omitempty"`
+	Network      string `yaml:"network,omitempty"`
+	NetworkUUID  string `yaml:"networkUuid,omitempty"`
+	Host         string `yaml:"host,omitempty"`
+	User         string `yaml:"user,omitempty"`
+	WorkRoot     string `yaml:"workRoot,omitempty"`
+	InsecureTLS  *bool  `yaml:"insecureTLS,omitempty"`
 }
 
 type fileParallelsConfig struct {
@@ -2020,6 +2067,47 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.Proxmox.InsecureTLS != nil {
 			cfg.Proxmox.InsecureTLS = *file.Proxmox.InsecureTLS
+		}
+	}
+	if file.XCPNg != nil {
+		if file.XCPNg.APIURL != "" {
+			cfg.XCPNg.APIURL = file.XCPNg.APIURL
+		}
+		if file.XCPNg.Username != "" {
+			cfg.XCPNg.Username = file.XCPNg.Username
+		}
+		if file.XCPNg.Password != "" {
+			cfg.XCPNg.Password = file.XCPNg.Password
+		}
+		if file.XCPNg.Template != "" {
+			cfg.XCPNg.Template = file.XCPNg.Template
+		}
+		if file.XCPNg.TemplateUUID != "" {
+			cfg.XCPNg.TemplateUUID = file.XCPNg.TemplateUUID
+		}
+		if file.XCPNg.SR != "" {
+			cfg.XCPNg.SR = file.XCPNg.SR
+		}
+		if file.XCPNg.SRUUID != "" {
+			cfg.XCPNg.SRUUID = file.XCPNg.SRUUID
+		}
+		if file.XCPNg.Network != "" {
+			cfg.XCPNg.Network = file.XCPNg.Network
+		}
+		if file.XCPNg.NetworkUUID != "" {
+			cfg.XCPNg.NetworkUUID = file.XCPNg.NetworkUUID
+		}
+		if file.XCPNg.Host != "" {
+			cfg.XCPNg.Host = file.XCPNg.Host
+		}
+		if file.XCPNg.User != "" {
+			cfg.XCPNg.User = file.XCPNg.User
+		}
+		if file.XCPNg.WorkRoot != "" {
+			cfg.XCPNg.WorkRoot = file.XCPNg.WorkRoot
+		}
+		if file.XCPNg.InsecureTLS != nil {
+			cfg.XCPNg.InsecureTLS = *file.XCPNg.InsecureTLS
 		}
 	}
 	if file.Parallels != nil {
@@ -3085,6 +3173,21 @@ func applyEnv(cfg *Config) error {
 	}
 	if value, ok := getenvBool("CRABBOX_PROXMOX_INSECURE_TLS"); ok {
 		cfg.Proxmox.InsecureTLS = value
+	}
+	cfg.XCPNg.APIURL = getenv("CRABBOX_XCP_NG_API_URL", cfg.XCPNg.APIURL)
+	cfg.XCPNg.Username = getenv("CRABBOX_XCP_NG_USERNAME", cfg.XCPNg.Username)
+	cfg.XCPNg.Password = getenv("CRABBOX_XCP_NG_PASSWORD", cfg.XCPNg.Password)
+	cfg.XCPNg.Template = getenv("CRABBOX_XCP_NG_TEMPLATE", cfg.XCPNg.Template)
+	cfg.XCPNg.TemplateUUID = getenv("CRABBOX_XCP_NG_TEMPLATE_UUID", cfg.XCPNg.TemplateUUID)
+	cfg.XCPNg.SR = getenv("CRABBOX_XCP_NG_SR", cfg.XCPNg.SR)
+	cfg.XCPNg.SRUUID = getenv("CRABBOX_XCP_NG_SR_UUID", cfg.XCPNg.SRUUID)
+	cfg.XCPNg.Network = getenv("CRABBOX_XCP_NG_NETWORK", cfg.XCPNg.Network)
+	cfg.XCPNg.NetworkUUID = getenv("CRABBOX_XCP_NG_NETWORK_UUID", cfg.XCPNg.NetworkUUID)
+	cfg.XCPNg.Host = getenv("CRABBOX_XCP_NG_HOST", cfg.XCPNg.Host)
+	cfg.XCPNg.User = getenv("CRABBOX_XCP_NG_USER", cfg.XCPNg.User)
+	cfg.XCPNg.WorkRoot = getenv("CRABBOX_XCP_NG_WORK_ROOT", cfg.XCPNg.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_XCP_NG_INSECURE_TLS"); ok {
+		cfg.XCPNg.InsecureTLS = value
 	}
 	cfg.Parallels.Source = getenv("CRABBOX_PARALLELS_SOURCE", cfg.Parallels.Source)
 	cfg.Parallels.SourceID = getenv("CRABBOX_PARALLELS_SOURCE_ID", cfg.Parallels.SourceID)

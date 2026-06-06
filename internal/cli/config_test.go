@@ -684,6 +684,20 @@ proxmox:
   workRoot: /work/proxmox
   fullClone: false
   insecureTLS: true
+xcpNg:
+  apiUrl: https://xcp-ng.example.test
+  username: root
+  password: xcp-ng-secret
+  template: ubuntu-template
+  templateUuid: tpl-0001
+  sr: default-sr
+  srUuid: sr-0001
+  network: pool-network
+  networkUuid: net-0001
+  host: host-0001
+  user: runner
+  workRoot: /work/xcp-ng
+  insecureTLS: true
 semaphore:
   host: semaphore.example.test
   token: semaphore-token
@@ -827,6 +841,9 @@ ssh:
 	}
 	if cfg.Proxmox.APIURL != "https://pve.example.test:8006" || cfg.Proxmox.TokenID != "crabbox@pve!test" || cfg.Proxmox.TokenSecret != "proxmox-secret" || cfg.Proxmox.Node != "pve1" || cfg.Proxmox.TemplateID != 9000 || cfg.Proxmox.Storage != "local-lvm" || cfg.Proxmox.Pool != "crabbox" || cfg.Proxmox.Bridge != "vmbr1" || cfg.Proxmox.User != "runner" || cfg.Proxmox.WorkRoot != "/work/proxmox" || cfg.Proxmox.FullClone || !cfg.Proxmox.InsecureTLS {
 		t.Fatalf("proxmox config not loaded: %#v", cfg.Proxmox)
+	}
+	if cfg.XCPNg.APIURL != "https://xcp-ng.example.test" || cfg.XCPNg.Username != "root" || cfg.XCPNg.Password != "xcp-ng-secret" || cfg.XCPNg.Template != "ubuntu-template" || cfg.XCPNg.TemplateUUID != "tpl-0001" || cfg.XCPNg.SR != "default-sr" || cfg.XCPNg.SRUUID != "sr-0001" || cfg.XCPNg.Network != "pool-network" || cfg.XCPNg.NetworkUUID != "net-0001" || cfg.XCPNg.Host != "host-0001" || cfg.XCPNg.User != "runner" || cfg.XCPNg.WorkRoot != "/work/xcp-ng" || !cfg.XCPNg.InsecureTLS {
+		t.Fatalf("xcpNg config not loaded: %#v", cfg.XCPNg)
 	}
 	if cfg.Semaphore.Host != "semaphore.example.test" || cfg.Semaphore.Token != "semaphore-token" || cfg.Semaphore.Project != "crabbox" || cfg.Semaphore.Machine != "f1-standard-4" || cfg.Semaphore.OSImage != "ubuntu2404" || cfg.Semaphore.IdleTimeout != "15m" {
 		t.Fatalf("semaphore config not loaded: %#v", cfg.Semaphore)
@@ -1111,6 +1128,19 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_PROXMOX_WORK_ROOT", "/work/proxmox-env")
 	t.Setenv("CRABBOX_PROXMOX_FULL_CLONE", "false")
 	t.Setenv("CRABBOX_PROXMOX_INSECURE_TLS", "true")
+	t.Setenv("CRABBOX_XCP_NG_API_URL", "https://xcp-ng-env.example.test")
+	t.Setenv("CRABBOX_XCP_NG_USERNAME", "root-env")
+	t.Setenv("CRABBOX_XCP_NG_PASSWORD", "xcp-ng-env-secret")
+	t.Setenv("CRABBOX_XCP_NG_TEMPLATE", "template-env")
+	t.Setenv("CRABBOX_XCP_NG_TEMPLATE_UUID", "tpl-env")
+	t.Setenv("CRABBOX_XCP_NG_SR", "sr-env")
+	t.Setenv("CRABBOX_XCP_NG_SR_UUID", "sr-uuid-env")
+	t.Setenv("CRABBOX_XCP_NG_NETWORK", "network-env")
+	t.Setenv("CRABBOX_XCP_NG_NETWORK_UUID", "network-uuid-env")
+	t.Setenv("CRABBOX_XCP_NG_HOST", "host-env")
+	t.Setenv("CRABBOX_XCP_NG_USER", "runner-xcp-env")
+	t.Setenv("CRABBOX_XCP_NG_WORK_ROOT", "/work/xcp-ng-env")
+	t.Setenv("CRABBOX_XCP_NG_INSECURE_TLS", "true")
 	t.Setenv("SEMAPHORE_HOST", "semaphore-file.example.test")
 	t.Setenv("CRABBOX_SEMAPHORE_HOST", "semaphore-env.example.test")
 	t.Setenv("SEMAPHORE_API_TOKEN", "semaphore-token-file")
@@ -1249,6 +1279,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Proxmox.APIURL != "https://pve-env.example:8006" || cfg.Proxmox.TokenID != "runner@pve!env" || cfg.Proxmox.TokenSecret != "proxmox-env-secret" || cfg.Proxmox.Node != "pve-env" || cfg.Proxmox.TemplateID != 9100 || cfg.Proxmox.Storage != "ceph-env" || cfg.Proxmox.Pool != "pool-env" || cfg.Proxmox.Bridge != "vmbr2" || cfg.Proxmox.User != "runner-env" || cfg.Proxmox.WorkRoot != "/work/proxmox-env" || cfg.Proxmox.FullClone || !cfg.Proxmox.InsecureTLS {
 		t.Fatalf("unexpected proxmox env: %#v", cfg.Proxmox)
+	}
+	if cfg.XCPNg.APIURL != "https://xcp-ng-env.example.test" || cfg.XCPNg.Username != "root-env" || cfg.XCPNg.Password != "xcp-ng-env-secret" || cfg.XCPNg.Template != "template-env" || cfg.XCPNg.TemplateUUID != "tpl-env" || cfg.XCPNg.SR != "sr-env" || cfg.XCPNg.SRUUID != "sr-uuid-env" || cfg.XCPNg.Network != "network-env" || cfg.XCPNg.NetworkUUID != "network-uuid-env" || cfg.XCPNg.Host != "host-env" || cfg.XCPNg.User != "runner-xcp-env" || cfg.XCPNg.WorkRoot != "/work/xcp-ng-env" || !cfg.XCPNg.InsecureTLS {
+		t.Fatalf("unexpected xcp-ng env: %#v", cfg.XCPNg)
 	}
 	if cfg.Semaphore.Host != "semaphore-env.example.test" || cfg.Semaphore.Token != "semaphore-token-env" || cfg.Semaphore.Project != "semaphore-project-env" || cfg.Semaphore.Machine != "f1-standard-env" || cfg.Semaphore.OSImage != "ubuntu-env" || cfg.Semaphore.IdleTimeout != "22m" {
 		t.Fatalf("unexpected semaphore env: %#v", cfg.Semaphore)

@@ -38,6 +38,7 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		{name: "google", canonical: "gcp"},
 		{name: "google-cloud", canonical: "gcp"},
 		{name: "proxmox", canonical: "proxmox"},
+		{name: "xcp-ng", canonical: "xcp-ng"},
 		{name: "ssh", canonical: "ssh"},
 		{name: "static", canonical: "ssh"},
 		{name: "static-ssh", canonical: "ssh"},
@@ -211,6 +212,15 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 		t.Fatalf("backend=%T, want ssh lease backend", backend)
 	}
 
+	cfg.Provider = "xcp-ng"
+	backend, err = loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	if err != nil {
+		t.Fatalf("load xcp-ng backend: %v", err)
+	}
+	if _, ok := backend.(SSHLeaseBackend); !ok {
+		t.Fatalf("backend=%T, want ssh lease backend", backend)
+	}
+
 	cfg.Provider = "e2b"
 	backend, err = loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
 	if err != nil {
@@ -349,6 +359,47 @@ func TestProviderFlagsApplyProxmoxWithoutSecrets(t *testing.T) {
 	}
 	if cfg.ServerType != "template-9000" {
 		t.Fatalf("server type=%q want template-9000", cfg.ServerType)
+	}
+}
+
+func TestProviderFlagsApplyXCPNgWithoutPasswordFlag(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	values := registerProviderFlags(fs, defaults)
+	if fs.Lookup("xcp-ng-password") != nil {
+		t.Fatal("xcp-ng password must not be registered as an argv flag")
+	}
+	if err := parseFlags(fs, []string{
+		"--provider", "xcp-ng",
+		"--xcp-ng-api-url", "https://xcp-ng.example.test",
+		"--xcp-ng-username", "root",
+		"--xcp-ng-template", "ubuntu-template",
+		"--xcp-ng-template-uuid", "tpl-0001",
+		"--xcp-ng-sr", "default-sr",
+		"--xcp-ng-sr-uuid", "sr-0001",
+		"--xcp-ng-network", "pool-network",
+		"--xcp-ng-network-uuid", "net-0001",
+		"--xcp-ng-host", "host-0001",
+		"--xcp-ng-user", "runner",
+		"--xcp-ng-work-root", "/work/xcp-ng",
+		"--xcp-ng-insecure-tls",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = *provider
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.XCPNg.APIURL != "https://xcp-ng.example.test" || cfg.XCPNg.Username != "root" || cfg.XCPNg.Template != "ubuntu-template" || cfg.XCPNg.TemplateUUID != "tpl-0001" || cfg.XCPNg.SR != "default-sr" || cfg.XCPNg.SRUUID != "sr-0001" || cfg.XCPNg.Network != "pool-network" || cfg.XCPNg.NetworkUUID != "net-0001" || cfg.XCPNg.Host != "host-0001" || cfg.XCPNg.User != "runner" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/work/xcp-ng" || !cfg.XCPNg.InsecureTLS {
+		t.Fatalf("xcp-ng flags not applied: %#v", cfg.XCPNg)
+	}
+	if cfg.XCPNg.Password != "" {
+		t.Fatalf("xcp-ng password unexpectedly set from flags: %q", cfg.XCPNg.Password)
+	}
+	if cfg.ServerType != "template-tpl-0001" {
+		t.Fatalf("server type=%q want template-tpl-0001", cfg.ServerType)
 	}
 }
 
@@ -533,6 +584,34 @@ func TestLeaseCreateFlagsReapplyProxmoxDefaultsAfterProviderOverride(t *testing.
 	}
 	if cfg.ServerType != "template-9000" {
 		t.Fatalf("server type=%q want template-9000", cfg.ServerType)
+	}
+}
+
+func TestLeaseCreateFlagsReapplyXCPNgDefaultsAfterProviderOverride(t *testing.T) {
+	defaults := baseConfig()
+	defaults.Provider = "hetzner"
+	defaults.XCPNg.Template = "Ubuntu Ready"
+	defaults.XCPNg.User = "runner"
+	defaults.XCPNg.WorkRoot = "/work/xcp-ng"
+	defaults.ServerType = serverTypeForConfig(defaults)
+
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "xcp-ng"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHUser != "runner" {
+		t.Fatalf("ssh user=%q want xcp-ng default", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/work/xcp-ng" {
+		t.Fatalf("work root=%q want xcp-ng default", cfg.WorkRoot)
+	}
+	if cfg.ServerType != "template-ubuntu-ready" {
+		t.Fatalf("server type=%q want template-ubuntu-ready", cfg.ServerType)
 	}
 }
 
