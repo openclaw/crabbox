@@ -45,6 +45,29 @@ func TestProviderForResolvesCanonicalOnly(t *testing.T) {
 	}
 }
 
+func TestProviderServerTypeUsesTemplateIdentity(t *testing.T) {
+	provider := Provider{}
+	tests := []struct {
+		name string
+		cfg  core.Config
+		want string
+	}{
+		{name: "default", cfg: core.Config{}, want: "template"},
+		{name: "template name", cfg: core.Config{XCPNg: core.XCPNgConfig{Template: "Ubuntu Ready 22.04"}}, want: "template-ubuntu-ready-22-04"},
+		{name: "template uuid wins", cfg: core.Config{XCPNg: core.XCPNgConfig{Template: "Ubuntu Ready", TemplateUUID: xcpNgTestVMUUID}}, want: "template-" + xcpNgTestVMUUID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := provider.ServerTypeForConfig(tt.cfg); got != tt.want {
+				t.Fatalf("ServerTypeForConfig=%q want %q", got, tt.want)
+			}
+		})
+	}
+	if got := provider.ServerTypeForClass("linux-small"); got != "template" {
+		t.Fatalf("ServerTypeForClass=%q want template", got)
+	}
+}
+
 func TestFlagsApplyNonSecretConfigOnly(t *testing.T) {
 	defaults := core.Config{}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
