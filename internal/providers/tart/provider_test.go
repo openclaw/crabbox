@@ -1048,19 +1048,26 @@ func TestApplyFlagsNegativeFromConfigRejected(t *testing.T) {
 	}
 }
 
-func TestApplyFlagsRejectsZeroFromEnv(t *testing.T) {
+func TestApplyFlagsRejectsInvalidEnvValues(t *testing.T) {
 	cases := []struct {
 		name    string
 		envName string
+		value   string
 		want    string
 	}{
-		{"zero cpu from env", "CRABBOX_TART_CPUS", "CRABBOX_TART_CPUS must be at least 4"},
-		{"zero memory from env", "CRABBOX_TART_MEMORY", "CRABBOX_TART_MEMORY must be at least 4096"},
-		{"zero disk from env", "CRABBOX_TART_DISK", "CRABBOX_TART_DISK must be a positive integer"},
+		{"zero cpu from env", "CRABBOX_TART_CPUS", "0", "tart cpu count must be at least 4"},
+		{"zero memory from env", "CRABBOX_TART_MEMORY", "0", "tart memory must be at least 4096"},
+		{"zero disk from env", "CRABBOX_TART_DISK", "0", "tart disk size must be a positive integer"},
+		{"non-integer cpu from env", "CRABBOX_TART_CPUS", "abc", "CRABBOX_TART_CPUS must be a valid integer"},
+		{"non-integer memory from env", "CRABBOX_TART_MEMORY", "4.5g", "CRABBOX_TART_MEMORY must be a valid integer"},
+		{"non-integer disk from env", "CRABBOX_TART_DISK", "fifty", "CRABBOX_TART_DISK must be a valid integer"},
+		{"below-floor cpu from env", "CRABBOX_TART_CPUS", "2", "tart cpu count must be at least 4"},
+		{"below-floor memory from env", "CRABBOX_TART_MEMORY", "1024", "tart memory must be at least 4096"},
+		{"negative disk from env", "CRABBOX_TART_DISK", "-1", "tart disk size must be a positive integer"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(tc.envName, "0")
+			t.Setenv(tc.envName, tc.value)
 			cfg := core.BaseConfig()
 			cfg.Provider = providerName
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
@@ -1070,7 +1077,7 @@ func TestApplyFlagsRejectsZeroFromEnv(t *testing.T) {
 			}
 			err := applyFlags(&cfg, fs, vals)
 			if err == nil {
-				t.Fatalf("expected error for %s=0", tc.envName)
+				t.Fatalf("expected error for %s=%s", tc.envName, tc.value)
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)

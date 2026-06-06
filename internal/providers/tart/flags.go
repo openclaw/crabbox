@@ -3,6 +3,7 @@ package tart
 import (
 	"flag"
 	"os"
+	"strconv"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -59,25 +60,55 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		if !core.IsTargetExplicit(cfg) && cfg.TargetOS == "linux" {
 			cfg.TargetOS = targetMacOS
 		}
-		if cfg.Tart.CPUs < 0 || (cfg.Tart.CPUs > 0 && cfg.Tart.CPUs < 4) {
+		if cfg.Tart.CPUs < 0 || (cfg.Tart.CPUs > 0 && cfg.Tart.CPUs < 4) || (cfg.Tart.CPUs == 0 && core.IsTartCPUsExplicit(cfg)) {
 			return exit(2, "tart cpu count must be at least 4 (got %d)", cfg.Tart.CPUs)
 		}
-		if cfg.Tart.Memory < 0 || (cfg.Tart.Memory > 0 && cfg.Tart.Memory < 4096) {
+		if cfg.Tart.Memory < 0 || (cfg.Tart.Memory > 0 && cfg.Tart.Memory < 4096) || (cfg.Tart.Memory == 0 && core.IsTartMemoryExplicit(cfg)) {
 			return exit(2, "tart memory must be at least 4096 MB (got %d)", cfg.Tart.Memory)
 		}
-		if cfg.Tart.Disk < 0 {
+		if cfg.Tart.Disk < 0 || (cfg.Tart.Disk == 0 && core.IsTartDiskExplicit(cfg)) {
 			return exit(2, "tart disk size must be positive (got %d)", cfg.Tart.Disk)
 		}
-		if os.Getenv("CRABBOX_TART_CPUS") == "0" {
-			return exit(2, "CRABBOX_TART_CPUS must be at least 4 (got 0)")
+		if err := validateTartEnvInt("CRABBOX_TART_CPUS", 4, "tart cpu count must be at least 4"); err != nil {
+			return err
 		}
-		if os.Getenv("CRABBOX_TART_MEMORY") == "0" {
-			return exit(2, "CRABBOX_TART_MEMORY must be at least 4096 MB (got 0)")
+		if err := validateTartEnvInt("CRABBOX_TART_MEMORY", 4096, "tart memory must be at least 4096 MB"); err != nil {
+			return err
 		}
-		if os.Getenv("CRABBOX_TART_DISK") == "0" {
-			return exit(2, "CRABBOX_TART_DISK must be a positive integer (got 0)")
+		if err := validateTartEnvIntPositive("CRABBOX_TART_DISK", "tart disk size must be a positive integer"); err != nil {
+			return err
 		}
 		applyDefaults(cfg)
+	}
+	return nil
+}
+
+func validateTartEnvInt(name string, floor int, floorMsg string) error {
+	v := os.Getenv(name)
+	if v == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return exit(2, "%s must be a valid integer (got %q)", name, v)
+	}
+	if n < floor {
+		return exit(2, "%s (got %d)", floorMsg, n)
+	}
+	return nil
+}
+
+func validateTartEnvIntPositive(name string, msg string) error {
+	v := os.Getenv(name)
+	if v == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return exit(2, "%s must be a valid integer (got %q)", name, v)
+	}
+	if n <= 0 {
+		return exit(2, "%s (got %d)", msg, n)
 	}
 	return nil
 }

@@ -338,6 +338,71 @@ func TestTartConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestTartConfigYAMLExplicitZeroPreserved(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	file := fileConfig{}
+	zero := 0
+	negative := -1
+	file.Tart = &fileTartConfig{
+		CPUs:   &zero,
+		Memory: &zero,
+		Disk:   &negative,
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tart.CPUs != 0 {
+		t.Fatalf("Tart.CPUs=%d, want 0 (explicit YAML zero must be preserved)", cfg.Tart.CPUs)
+	}
+	if cfg.Tart.Memory != 0 {
+		t.Fatalf("Tart.Memory=%d, want 0 (explicit YAML zero must be preserved)", cfg.Tart.Memory)
+	}
+	if cfg.Tart.Disk != -1 {
+		t.Fatalf("Tart.Disk=%d, want -1 (explicit YAML negative must be preserved)", cfg.Tart.Disk)
+	}
+	if !IsTartCPUsExplicit(&cfg) {
+		t.Fatal("tartCPUsExplicit must be true after YAML sets cpus")
+	}
+	if !IsTartMemoryExplicit(&cfg) {
+		t.Fatal("tartMemoryExplicit must be true after YAML sets memory")
+	}
+}
+
+func TestTartConfigYAMLMissingFieldsNotOverwritten(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 16384
+	file := fileConfig{}
+	file.Tart = &fileTartConfig{
+		Image: "ghcr.io/test:latest",
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tart.CPUs != 8 {
+		t.Fatalf("Tart.CPUs=%d, want 8 (missing YAML field must not overwrite)", cfg.Tart.CPUs)
+	}
+	if cfg.Tart.Memory != 16384 {
+		t.Fatalf("Tart.Memory=%d, want 16384 (missing YAML field must not overwrite)", cfg.Tart.Memory)
+	}
+}
+
+func TestTartEnvExplicitFlags(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	t.Setenv("CRABBOX_TART_CPUS", "8")
+	t.Setenv("CRABBOX_TART_MEMORY", "16384")
+	applyEnv(&cfg)
+	if !IsTartCPUsExplicit(&cfg) {
+		t.Fatal("tartCPUsExplicit must be true after env sets CRABBOX_TART_CPUS")
+	}
+	if !IsTartMemoryExplicit(&cfg) {
+		t.Fatal("tartMemoryExplicit must be true after env sets CRABBOX_TART_MEMORY")
+	}
+}
+
 func TestRepoConfigBareEnvWildcardDoesNotForwardEveryLocalVariable(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

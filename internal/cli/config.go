@@ -127,6 +127,8 @@ type Config struct {
 	Tart                        TartConfig
 	tartImageExplicit           bool
 	tartDiskExplicit            bool
+	tartCPUsExplicit            bool
+	tartMemoryExplicit          bool
 	Tailscale                   TailscaleConfig
 	Static                      StaticConfig
 	Results                     ResultsConfig
@@ -882,6 +884,22 @@ func MarkTartDiskExplicit(cfg *Config) {
 	cfg.tartDiskExplicit = true
 }
 
+func IsTartCPUsExplicit(cfg *Config) bool {
+	return cfg.tartCPUsExplicit
+}
+
+func MarkTartCPUsExplicit(cfg *Config) {
+	cfg.tartCPUsExplicit = true
+}
+
+func IsTartMemoryExplicit(cfg *Config) bool {
+	return cfg.tartMemoryExplicit
+}
+
+func MarkTartMemoryExplicit(cfg *Config) {
+	cfg.tartMemoryExplicit = true
+}
+
 func IsTargetExplicit(cfg *Config) bool {
 	return cfg.targetExplicit
 }
@@ -1534,9 +1552,9 @@ type fileTartConfig struct {
 	Image    string `yaml:"image,omitempty"`
 	User     string `yaml:"user,omitempty"`
 	WorkRoot string `yaml:"workRoot,omitempty"`
-	CPUs     int    `yaml:"cpus,omitempty"`
-	Memory   int    `yaml:"memory,omitempty"`
-	Disk     int    `yaml:"disk,omitempty"`
+	CPUs     *int   `yaml:"cpus,omitempty"`
+	Memory   *int   `yaml:"memory,omitempty"`
+	Disk     *int   `yaml:"disk,omitempty"`
 }
 
 type fileTailscaleConfig struct {
@@ -2648,14 +2666,16 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.Tart.WorkRoot != "" {
 			cfg.Tart.WorkRoot = file.Tart.WorkRoot
 		}
-		if file.Tart.CPUs > 0 {
-			cfg.Tart.CPUs = file.Tart.CPUs
+		if file.Tart.CPUs != nil {
+			cfg.Tart.CPUs = *file.Tart.CPUs
+			cfg.tartCPUsExplicit = true
 		}
-		if file.Tart.Memory > 0 {
-			cfg.Tart.Memory = file.Tart.Memory
+		if file.Tart.Memory != nil {
+			cfg.Tart.Memory = *file.Tart.Memory
+			cfg.tartMemoryExplicit = true
 		}
-		if file.Tart.Disk > 0 {
-			cfg.Tart.Disk = file.Tart.Disk
+		if file.Tart.Disk != nil {
+			cfg.Tart.Disk = *file.Tart.Disk
 			cfg.tartDiskExplicit = true
 		}
 	}
@@ -3381,8 +3401,14 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.Tart.User = getenv("CRABBOX_TART_USER", cfg.Tart.User)
 	cfg.Tart.WorkRoot = getenv("CRABBOX_TART_WORK_ROOT", cfg.Tart.WorkRoot)
-	cfg.Tart.CPUs = getenvInt("CRABBOX_TART_CPUS", cfg.Tart.CPUs)
-	cfg.Tart.Memory = getenvInt("CRABBOX_TART_MEMORY", cfg.Tart.Memory)
+	if v := os.Getenv("CRABBOX_TART_CPUS"); v != "" {
+		cfg.Tart.CPUs = getenvInt("CRABBOX_TART_CPUS", cfg.Tart.CPUs)
+		cfg.tartCPUsExplicit = true
+	}
+	if v := os.Getenv("CRABBOX_TART_MEMORY"); v != "" {
+		cfg.Tart.Memory = getenvInt("CRABBOX_TART_MEMORY", cfg.Tart.Memory)
+		cfg.tartMemoryExplicit = true
+	}
 	if v := os.Getenv("CRABBOX_TART_DISK"); v != "" {
 		cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
 		cfg.tartDiskExplicit = true
