@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestXMLRPCRequestEncodingKeepsCredentialOutOfURL(t *testing.T) {
@@ -265,6 +266,7 @@ func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 
 func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 	var methods []string
+	powerStateChecks := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		method := readXMLRPCMethod(t, r)
 		methods = append(methods, method)
@@ -275,22 +277,38 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 			writeXMLRPCFault(t, w, "HANDLE_INVALID")
 		case "VDI.get_all_records":
 			writeXMLRPCVDIRecords(t, w)
+		case "VM.get_power_state":
+			powerStateChecks++
+			if powerStateChecks == 1 {
+				writeXMLRPCString(t, w, "Running")
+			} else {
+				writeXMLRPCString(t, w, "Halted")
+			}
 		case "VBD.unplug", "VBD.destroy", "VDI.destroy", "VM.clean_shutdown", "VM.destroy":
+			if method == "VM.destroy" && powerStateChecks < 2 {
+				t.Fatalf("VM.destroy called before halted state was observed; methods=%v", methods)
+			}
 			writeXMLRPCString(t, w, "true")
 		default:
 			t.Fatalf("unexpected method %s", method)
 		}
 	}))
 	defer server.Close()
+	oldPoll := xcpNgShutdownPollInterval
+	xcpNgShutdownPollInterval = time.Millisecond
+	t.Cleanup(func() { xcpNgShutdownPollInterval = oldPoll })
 	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
 	if err := client.DeleteServer(context.Background(), "OpaqueRef:vm"); err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Join(methods, ",")
-	for _, want := range []string{"VM.get_record", "VDI.get_all_records", "VBD.unplug", "VBD.destroy", "VDI.destroy", "VM.destroy"} {
+	for _, want := range []string{"VM.get_record", "VDI.get_all_records", "VBD.unplug", "VBD.destroy", "VDI.destroy", "VM.get_power_state", "VM.clean_shutdown", "VM.destroy"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("methods=%s missing %s", got, want)
 		}
+	}
+	if strings.Index(got, "VM.clean_shutdown") > strings.Index(got, "VM.destroy") {
+		t.Fatalf("methods=%s destroyed before clean shutdown", got)
 	}
 }
 

@@ -24,6 +24,11 @@ type xapiClient struct {
 	http     *http.Client
 }
 
+var (
+	xcpNgShutdownPollInterval = 2 * time.Second
+	xcpNgShutdownTimeout      = 5 * time.Minute
+)
+
 func newXAPIClient(ctx context.Context, cfg Config) (*xapiClient, error) {
 	xcfg := xcpNgProviderConfig(cfg)
 	if err := validateXCPNgConfig(xcfg); err != nil {
@@ -265,11 +270,48 @@ func (c *xapiClient) DeleteServer(ctx context.Context, id string) error {
 			}
 		}
 	}
-	_ = c.callDiscard(ctx, "VM.clean_shutdown", c.session, ref)
+	if err := c.shutdownVM(ctx, ref); err != nil {
+		return err
+	}
 	if _, err := c.call(ctx, "VM.destroy", c.session, ref); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (c *xapiClient) shutdownVM(ctx context.Context, ref string) error {
+	state, err := c.callString(ctx, "VM.get_power_state", c.session, ref)
+	if err != nil {
+		return err
+	}
+	if state == "Halted" {
+		return nil
+	}
+	if err := c.callDiscard(ctx, "VM.clean_shutdown", c.session, ref); err != nil {
+		return err
+	}
+	return c.waitForPowerState(ctx, ref, "Halted", xcpNgShutdownTimeout)
+}
+
+func (c *xapiClient) waitForPowerState(ctx context.Context, ref, want string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		state, err := c.callString(ctx, "VM.get_power_state", c.session, ref)
+		if err != nil {
+			return err
+		}
+		if state == want {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return exit(5, "timed out waiting for xcp-ng VM %s power_state=%s", ref, want)
+		}
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-time.After(xcpNgShutdownPollInterval):
+		}
+	}
 }
 
 func (c *xapiClient) DeleteConfigDrive(ctx context.Context, drive xcpNgConfigDrive) error {
