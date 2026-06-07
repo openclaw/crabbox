@@ -41,6 +41,9 @@ type lifecycleClient interface {
 	ResolveISOMedia(context.Context, xcpNgConfig, string) (xcpNgISOMediaRef, error)
 	CloneVM(context.Context, xcpNgCloneRequest) (xapiVM, error)
 	CreateFreshVM(context.Context, xcpNgFreshVMRequest) (xcpNgFreshVMResult, error)
+	SetVMBootOrder(context.Context, xapiRef, string) error
+	ImportISO(context.Context, xcpNgImportISORequest) (xcpNgConfigDrive, error)
+	AttachDisk(context.Context, xcpNgDiskAttachRequest) (xcpNgConfigDrive, error)
 	AttachConfigDrive(context.Context, xcpNgConfigDriveRequest) (xcpNgConfigDrive, error)
 	AttachISO(context.Context, xcpNgISOAttachRequest) (xcpNgConfigDrive, error)
 	StartVM(context.Context, xapiRef) error

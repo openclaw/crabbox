@@ -17,8 +17,10 @@ Read-only mode:
 
 Mutating mode:
   - requires --mutate and CRABBOX_XCP_NG_ISO_E2E_MUTATE=1
-  - creates a fresh blank VM, attaches installer media, boots once, and cleans up
-  - does not attempt a full Linux or Windows install in this harness foundation
+  - on --os linux, generates NoCloud answer media, imports local ISO media when needed,
+    installs Ubuntu Server to a blank disk, proves first boot over SSH, and cleans up
+  - on --os windows, preserves the shared foundation behavior only: create a fresh VM,
+    attach installer media, start once, classify, and clean up
 
 Secrets must come from private config or environment variables. This script
 never accepts or forwards an XCP-ng password as an argument.
@@ -70,7 +72,7 @@ os_name=""
 iso_value=""
 answer_iso=""
 name_prefix="crabbox-xcpng-iso-e2e"
-timeout_value="20m"
+timeout_value="90m"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

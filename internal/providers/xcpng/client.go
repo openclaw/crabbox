@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -362,6 +364,110 @@ func (c *xapiClient) CreateFreshVM(ctx context.Context, req xcpNgFreshVMRequest)
 	return result, nil
 }
 
+func (c *xapiClient) ImportISO(ctx context.Context, req xcpNgImportISORequest) (xcpNgConfigDrive, error) {
+	if req.SRRef == "" {
+		return xcpNgConfigDrive{}, exit(3, "xcp-ng sr or sr UUID is required for ISO import")
+	}
+	path := strings.TrimSpace(req.Path)
+	if path == "" {
+		return xcpNgConfigDrive{}, exit(3, "xcp-ng ISO import path is required")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return xcpNgConfigDrive{}, exit(4, "xcp-ng ISO file not found: %s", path)
+		}
+		return xcpNgConfigDrive{}, exit(3, "stat xcp-ng ISO file %s: %v", path, err)
+	}
+	if info.IsDir() {
+		return xcpNgConfigDrive{}, exit(4, "xcp-ng ISO path must be a file: %s", path)
+	}
+	labels := isoMediaLabels(req.Labels)
+	name := firstNonBlank(strings.TrimSpace(req.Name), filepath.Base(path))
+	description := firstNonBlank(strings.TrimSpace(req.Description), "Crabbox imported installer media")
+	vdiRef, err := c.callString(ctx, "VDI.create", c.session, map[string]any{
+		"name_label":       name,
+		"name_description": description,
+		"SR":               req.SRRef.value(),
+		"virtual_size":     info.Size(),
+		"type":             "user",
+		"sharable":         false,
+		"read_only":        false,
+		"xenstore_data":    map[string]string{},
+		"sm_config":        map[string]string{},
+		"tags":             []string{},
+		"other_config":     labels,
+	})
+	if err != nil {
+		return xcpNgConfigDrive{}, err
+	}
+	drive := xcpNgConfigDrive{VDIRef: vdiRef, Name: name, Labels: labels, DestroyVDI: req.DestroyVDI}
+	if err := c.importFileVDI(ctx, vdiRef, path, info.Size(), "crabbox import ISO", "Import Crabbox installer ISO"); err != nil {
+		_ = c.DeleteConfigDrive(context.Background(), xcpNgConfigDrive{VDIRef: vdiRef, DestroyVDI: true})
+		return xcpNgConfigDrive{}, err
+	}
+	if req.MarkReadOnly {
+		if _, err := c.call(ctx, "VDI.set_read_only", c.session, vdiRef, true); err != nil {
+			_ = c.DeleteConfigDrive(context.Background(), xcpNgConfigDrive{VDIRef: vdiRef, DestroyVDI: true})
+			return xcpNgConfigDrive{}, err
+		}
+	}
+	return drive, nil
+}
+
+func (c *xapiClient) AttachDisk(ctx context.Context, req xcpNgDiskAttachRequest) (xcpNgConfigDrive, error) {
+	if req.VMRef == "" {
+		return xcpNgConfigDrive{}, exit(3, "xcp-ng VM ref is required for disk attachment")
+	}
+	if req.SRRef == "" {
+		return xcpNgConfigDrive{}, exit(3, "xcp-ng sr or sr UUID is required for disk attachment")
+	}
+	sizeBytes := req.SizeBytes
+	if sizeBytes <= 0 {
+		sizeBytes = 20 * 1024 * 1024 * 1024
+	}
+	labels := vmDiskLabels(req.Labels)
+	name := firstNonBlank(strings.TrimSpace(req.Name), "crabbox-iso-install-disk")
+	description := firstNonBlank(strings.TrimSpace(req.Description), "Crabbox ISO install disk")
+	vdiRef, err := c.callString(ctx, "VDI.create", c.session, map[string]any{
+		"name_label":       name,
+		"name_description": description,
+		"SR":               req.SRRef.value(),
+		"virtual_size":     sizeBytes,
+		"type":             "user",
+		"sharable":         false,
+		"read_only":        false,
+		"xenstore_data":    map[string]string{},
+		"sm_config":        map[string]string{},
+		"tags":             []string{},
+		"other_config":     labels,
+	})
+	if err != nil {
+		return xcpNgConfigDrive{}, err
+	}
+	drive := xcpNgConfigDrive{VDIRef: vdiRef, Name: name, Labels: labels, DestroyVDI: req.DestroyVDI}
+	vbdRef, err := c.callString(ctx, "VBD.create", c.session, map[string]any{
+		"VM":                       req.VMRef.value(),
+		"VDI":                      vdiRef,
+		"userdevice":               firstNonBlank(req.UserDevice, "0"),
+		"bootable":                 true,
+		"mode":                     "RW",
+		"type":                     "Disk",
+		"empty":                    false,
+		"unpluggable":              req.Unpluggable,
+		"qos_algorithm_type":       "",
+		"qos_algorithm_params":     map[string]string{},
+		"qos_supported_algorithms": []string{},
+		"other_config":             labels,
+	})
+	if err != nil {
+		_ = c.DeleteConfigDrive(context.Background(), xcpNgConfigDrive{VDIRef: vdiRef, DestroyVDI: true})
+		return xcpNgConfigDrive{}, err
+	}
+	drive.VBDRef = vbdRef
+	return drive, nil
+}
+
 func (c *xapiClient) AttachConfigDrive(ctx context.Context, req xcpNgConfigDriveRequest) (xcpNgConfigDrive, error) {
 	if req.SRRef == "" {
 		return xcpNgConfigDrive{}, exit(3, "xcp-ng sr or sr UUID is required for config-drive creation")
@@ -444,6 +550,18 @@ func (c *xapiClient) AttachISO(ctx context.Context, req xcpNgISOAttachRequest) (
 
 func (c *xapiClient) StartVM(ctx context.Context, ref xapiRef) error {
 	_, err := c.call(ctx, "VM.start", c.session, ref.value(), false, false)
+	return err
+}
+
+func (c *xapiClient) SetVMBootOrder(ctx context.Context, ref xapiRef, order string) error {
+	order = strings.TrimSpace(order)
+	if order == "" {
+		return exit(3, "xcp-ng VM boot order is required")
+	}
+	if err := c.callDiscard(ctx, "VM.remove_from_HVM_boot_params", c.session, ref.value(), "order"); err != nil && !isMissingMapKey(err) {
+		return err
+	}
+	_, err := c.call(ctx, "VM.add_to_HVM_boot_params", c.session, ref.value(), "order", order)
 	return err
 }
 
@@ -818,7 +936,20 @@ func (c *xapiClient) setVDIOtherConfig(ctx context.Context, ref string, values m
 }
 
 func (c *xapiClient) importRawVDI(ctx context.Context, vdiRef string, image []byte) error {
-	taskRef, err := c.callString(ctx, "task.create", c.session, "crabbox import config drive", "Import Crabbox cloud-init config drive")
+	return c.importReaderVDI(ctx, vdiRef, bytes.NewReader(image), int64(len(image)), "crabbox import config drive", "Import Crabbox cloud-init config drive")
+}
+
+func (c *xapiClient) importFileVDI(ctx context.Context, vdiRef, path string, size int64, taskName, taskDescription string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return exit(3, "open xcp-ng import file %s: %v", path, err)
+	}
+	defer file.Close()
+	return c.importReaderVDI(ctx, vdiRef, file, size, taskName, taskDescription)
+}
+
+func (c *xapiClient) importReaderVDI(ctx context.Context, vdiRef string, reader io.Reader, size int64, taskName, taskDescription string) error {
+	taskRef, err := c.callString(ctx, "task.create", c.session, firstNonBlank(taskName, "crabbox import config drive"), firstNonBlank(taskDescription, "Import Crabbox cloud-init config drive"))
 	if err != nil {
 		return err
 	}
@@ -835,11 +966,14 @@ func (c *xapiClient) importRawVDI(ctx context.Context, vdiRef string, image []by
 	q.Set("vdi", vdiRef)
 	q.Set("format", "raw")
 	u.RawQuery = q.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), bytes.NewReader(image))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), reader)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
+	if size >= 0 {
+		req.ContentLength = size
+	}
 	res, err := c.http.Do(req)
 	if err != nil {
 		secrets := append([]string{c.session}, urlUserinfoSecrets(u)...)

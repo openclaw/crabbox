@@ -14,6 +14,11 @@ type xcpNgCloudInitPayload struct {
 	MetaData string
 }
 
+type xcpNgLinuxAutoinstallPayload struct {
+	UserData string
+	MetaData string
+}
+
 func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgCloudInitPayload, error) {
 	user := strings.TrimSpace(core.Blank(cfg.XCPNg.User, cfg.SSHUser))
 	if user == "" {
@@ -24,10 +29,6 @@ func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgClou
 		return xcpNgCloudInitPayload{}, exit(2, "xcp-ng cloud-init public key is required")
 	}
 	workRoot := core.Blank(cfg.XCPNg.WorkRoot, cfg.WorkRoot)
-	portLines := ""
-	for _, port := range xcpNgSSHPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts) {
-		portLines += fmt.Sprintf("      Port %s\n", port)
-	}
 	var userData bytes.Buffer
 	fmt.Fprintf(&userData, "#cloud-config\n")
 	fmt.Fprintf(&userData, "users:\n")
@@ -43,19 +44,12 @@ func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgClou
 	fmt.Fprintf(&userData, "  - path: /etc/ssh/sshd_config.d/99-crabbox-port.conf\n")
 	fmt.Fprintf(&userData, "    permissions: '0644'\n")
 	fmt.Fprintf(&userData, "    content: |\n")
-	fmt.Fprintf(&userData, "%s", portLines)
+	fmt.Fprintf(&userData, "%s", cloudInitSSHPortConfig(cfg))
 	fmt.Fprintf(&userData, "      PasswordAuthentication no\n")
 	fmt.Fprintf(&userData, "  - path: /usr/local/bin/crabbox-ready\n")
 	fmt.Fprintf(&userData, "    permissions: '0755'\n")
 	fmt.Fprintf(&userData, "    content: |\n")
-	fmt.Fprintf(&userData, "      #!/usr/bin/env bash\n")
-	fmt.Fprintf(&userData, "      set -euo pipefail\n")
-	fmt.Fprintf(&userData, "      git --version >/dev/null\n")
-	fmt.Fprintf(&userData, "      rsync --version >/dev/null\n")
-	fmt.Fprintf(&userData, "      curl --version >/dev/null\n")
-	fmt.Fprintf(&userData, "      jq --version >/dev/null\n")
-	fmt.Fprintf(&userData, "      test -f /var/lib/crabbox/bootstrapped\n")
-	fmt.Fprintf(&userData, "      test -w %s\n", shellQuote(workRoot))
+	fmt.Fprintf(&userData, "%s", indentMultiline(cloudInitReadyScript(workRoot), "      "))
 	fmt.Fprintf(&userData, "runcmd:\n")
 	fmt.Fprintf(&userData, "  - |\n")
 	fmt.Fprintf(&userData, "    bash -euxo pipefail <<'BOOT'\n")
@@ -87,6 +81,96 @@ func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgClou
 	fmt.Fprintf(&userData, "  - [/usr/local/bin/crabbox-ready]\n")
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: crabbox-%s\n", shellSafeCloudInitScalar(leaseID), shellSafeCloudInitScalar(slug))
 	return xcpNgCloudInitPayload{UserData: userData.String(), MetaData: metaData}, nil
+}
+
+func newLinuxAutoinstallPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgLinuxAutoinstallPayload, error) {
+	user := strings.TrimSpace(core.Blank(cfg.XCPNg.User, cfg.SSHUser))
+	if user == "" {
+		return xcpNgLinuxAutoinstallPayload{}, exit(2, "xcp-ng linux autoinstall user is required")
+	}
+	publicKey = strings.TrimSpace(publicKey)
+	if publicKey == "" {
+		return xcpNgLinuxAutoinstallPayload{}, exit(2, "xcp-ng linux autoinstall public key is required")
+	}
+	workRoot := core.Blank(cfg.XCPNg.WorkRoot, cfg.WorkRoot)
+	var userData bytes.Buffer
+	fmt.Fprintf(&userData, "#cloud-config\n")
+	fmt.Fprintf(&userData, "autoinstall:\n")
+	fmt.Fprintf(&userData, "  version: 1\n")
+	fmt.Fprintf(&userData, "  source:\n")
+	fmt.Fprintf(&userData, "    id: ubuntu-server\n")
+	fmt.Fprintf(&userData, "  storage:\n")
+	fmt.Fprintf(&userData, "    layout:\n")
+	fmt.Fprintf(&userData, "      name: direct\n")
+	fmt.Fprintf(&userData, "  ssh:\n")
+	fmt.Fprintf(&userData, "    install-server: true\n")
+	fmt.Fprintf(&userData, "    allow-pw: false\n")
+	fmt.Fprintf(&userData, "  packages:\n")
+	for _, pkg := range []string{"ca-certificates", "curl", "git", "jq", "rsync", "xe-guest-utilities"} {
+		fmt.Fprintf(&userData, "    - %s\n", pkg)
+	}
+	fmt.Fprintf(&userData, "  user-data:\n")
+	fmt.Fprintf(&userData, "    package_update: false\n")
+	fmt.Fprintf(&userData, "    package_upgrade: false\n")
+	fmt.Fprintf(&userData, "    users:\n")
+	fmt.Fprintf(&userData, "      - default\n")
+	fmt.Fprintf(&userData, "      - name: %s\n", shellSafeCloudInitScalar(user))
+	fmt.Fprintf(&userData, "        gecos: Crabbox ISO E2E\n")
+	fmt.Fprintf(&userData, "        groups: [adm, sudo]\n")
+	fmt.Fprintf(&userData, "        shell: /bin/bash\n")
+	fmt.Fprintf(&userData, "        sudo: ['ALL=(ALL) NOPASSWD:ALL']\n")
+	fmt.Fprintf(&userData, "        lock_passwd: true\n")
+	fmt.Fprintf(&userData, "        ssh_authorized_keys:\n")
+	fmt.Fprintf(&userData, "          - %s\n", shellSafeCloudInitScalar(publicKey))
+	fmt.Fprintf(&userData, "    write_files:\n")
+	fmt.Fprintf(&userData, "      - path: /etc/ssh/sshd_config.d/99-crabbox-port.conf\n")
+	fmt.Fprintf(&userData, "        permissions: '0644'\n")
+	fmt.Fprintf(&userData, "        content: |\n")
+	fmt.Fprintf(&userData, "%s", indentMultiline(strings.TrimRight(cloudInitSSHPortConfig(cfg), "\n")+"\n      PasswordAuthentication no", "          "))
+	fmt.Fprintf(&userData, "      - path: /usr/local/bin/crabbox-ready\n")
+	fmt.Fprintf(&userData, "        permissions: '0755'\n")
+	fmt.Fprintf(&userData, "        content: |\n")
+	fmt.Fprintf(&userData, "%s", indentMultiline(cloudInitReadyScript(workRoot), "          "))
+	fmt.Fprintf(&userData, "    runcmd:\n")
+	fmt.Fprintf(&userData, "      - [mkdir, -p, %s, /var/cache/crabbox/pnpm, /var/cache/crabbox/npm, /var/lib/crabbox]\n", yamlSingleQuotedScalar(workRoot))
+	fmt.Fprintf(&userData, "      - [chown, -R, %s, %s, /var/cache/crabbox]\n", yamlSingleQuotedScalar(user+":"+user), yamlSingleQuotedScalar(workRoot))
+	fmt.Fprintf(&userData, "      - |\n")
+	fmt.Fprintf(&userData, "        systemctl enable ssh || true\n")
+	fmt.Fprintf(&userData, "        timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true\n")
+	fmt.Fprintf(&userData, "      - |\n")
+	fmt.Fprintf(&userData, "        systemctl enable xe-linux-distribution || true\n")
+	fmt.Fprintf(&userData, "        timeout 30s systemctl restart xe-linux-distribution || true\n")
+	fmt.Fprintf(&userData, "      - [touch, /var/lib/crabbox/bootstrapped]\n")
+	fmt.Fprintf(&userData, "      - [/usr/local/bin/crabbox-ready]\n")
+	fmt.Fprintf(&userData, "  late-commands:\n")
+	fmt.Fprintf(&userData, "    - curtin in-target -- systemctl enable xe-linux-distribution || true\n")
+	fmt.Fprintf(&userData, "  shutdown: reboot\n")
+	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: crabbox-%s\n", shellSafeCloudInitScalar(leaseID), shellSafeCloudInitScalar(slug))
+	return xcpNgLinuxAutoinstallPayload{UserData: userData.String(), MetaData: metaData}, nil
+}
+
+func cloudInitSSHPortConfig(cfg Config) string {
+	portLines := ""
+	for _, port := range xcpNgSSHPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts) {
+		portLines += fmt.Sprintf("      Port %s\n", port)
+	}
+	return portLines
+}
+
+func cloudInitReadyScript(workRoot string) string {
+	return fmt.Sprintf("#!/usr/bin/env bash\nset -euo pipefail\ngit --version >/dev/null\nrsync --version >/dev/null\ncurl --version >/dev/null\njq --version >/dev/null\ntest -f /var/lib/crabbox/bootstrapped\ntest -w %s\n", shellQuote(workRoot))
+}
+
+func indentMultiline(text, indent string) string {
+	text = strings.TrimRight(text, "\n")
+	if text == "" {
+		return indent + "\n"
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = indent + line
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func xcpNgSSHPortCandidates(port string, fallbackPorts []string) []string {
