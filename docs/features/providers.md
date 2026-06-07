@@ -262,8 +262,11 @@ list, and cleanup.
   expose the matching SSH contract. Configure with `CRABBOX_PARALLELS_*`.
 - **local-container** (alias `docker`) — starts a labeled container on a local
   Docker-compatible runtime, publishes SSH on loopback, syncs over SSH, and
-  removes it on `stop`. Cache volumes use Docker named volumes. It does not
-  bind-mount the repo or the Docker socket by default. Reads `DOCKER_HOST`.
+  removes it on `stop`. It detects an installed `docker` or `podman` CLI; if
+  both are present, `docker` is selected unless `localContainer.runtime` is set
+  explicitly. Cache volumes use named volumes. It does not bind-mount the repo
+  or the Docker-compatible socket by default. Reads `DOCKER_HOST` for socket
+  pass-through.
 - **multipass** (alias `mp`) — launches a local Ubuntu VM through Canonical
   Multipass with cloud-init, resolves the VM IP through `multipass info`, syncs
   over SSH, and deletes the VM with `multipass delete --purge`. Cache volumes

@@ -66,6 +66,8 @@ providers resolve access lazily or wrap the connection:
 --static-user <user>        Static target user (provider=ssh).
 --static-port <port>        Static target SSH port (provider=ssh).
 --static-work-root <path>   Static target work root (provider=ssh).
+--local-container-runtime <path-or-name>
+                              Local container CLI override (provider=local-container).
 --network auto|tailscale|public
 --reclaim                   Claim this lease for the current repo before touching it.
 --show-secret               Print secret auth material for token-based SSH providers.

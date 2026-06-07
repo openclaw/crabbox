@@ -1,15 +1,12 @@
 package azuredynamicsessions
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -44,7 +41,7 @@ func (b *azureDynamicSessionsBackend) syncWorkspace(ctx context.Context, client 
 	}
 	prepareDuration := b.now().Sub(prepareStarted)
 	archiveStarted := b.now()
-	archive, err := createAzureDynamicSessionsSyncArchive(req.Repo, manifest)
+	archive, err := createAzureDynamicSessionsSyncArchive(syncCtx, req.Repo, manifest)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -98,78 +95,8 @@ func (b *azureDynamicSessionsBackend) execShell(ctx context.Context, client azur
 	return nil
 }
 
-func createAzureDynamicSessionsSyncArchive(repo Repo, manifest SyncManifest) (*os.File, error) {
-	archive, err := os.CreateTemp("", "crabbox-azds-sync-*.tgz")
-	if err != nil {
-		return nil, fmt.Errorf("create sync archive temp file: %w", err)
-	}
-	keep := false
-	defer func() {
-		if !keep {
-			name := archive.Name()
-			_ = archive.Close()
-			_ = os.Remove(name)
-		}
-	}()
-	gz := gzip.NewWriter(archive)
-	tw := tar.NewWriter(gz)
-	for _, rel := range manifest.Files {
-		if err := appendArchiveMember(tw, repo.Root, rel); err != nil {
-			_ = tw.Close()
-			_ = gz.Close()
-			return nil, err
-		}
-	}
-	if err := tw.Close(); err != nil {
-		return nil, fmt.Errorf("create sync archive: %w", err)
-	}
-	if err := gz.Close(); err != nil {
-		return nil, fmt.Errorf("create sync archive: %w", err)
-	}
-	if _, err := archive.Seek(0, 0); err != nil {
-		return nil, fmt.Errorf("rewind sync archive: %w", err)
-	}
-	keep = true
-	return archive, nil
-}
-
-func appendArchiveMember(tw *tar.Writer, root, rel string) error {
-	clean := path.Clean(filepath.ToSlash(rel))
-	if clean == "." || clean != filepath.ToSlash(rel) || path.IsAbs(clean) || strings.HasPrefix(clean, "../") {
-		return exit(6, "unsafe sync path %q", rel)
-	}
-	full := filepath.Join(root, filepath.FromSlash(clean))
-	info, err := os.Lstat(full)
-	if err != nil {
-		return fmt.Errorf("stat sync path %s: %w", rel, err)
-	}
-	linkname := ""
-	if info.Mode()&os.ModeSymlink != 0 {
-		linkname, err = os.Readlink(full)
-		if err != nil {
-			return fmt.Errorf("read symlink %s: %w", rel, err)
-		}
-	}
-	header, err := tar.FileInfoHeader(info, linkname)
-	if err != nil {
-		return fmt.Errorf("archive header %s: %w", rel, err)
-	}
-	header.Name = clean
-	if err := tw.WriteHeader(header); err != nil {
-		return fmt.Errorf("archive header %s: %w", rel, err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil
-	}
-	file, err := os.Open(full)
-	if err != nil {
-		return fmt.Errorf("open sync path %s: %w", rel, err)
-	}
-	defer file.Close()
-	if _, err := io.Copy(tw, file); err != nil {
-		return fmt.Errorf("archive path %s: %w", rel, err)
-	}
-	return nil
+func createAzureDynamicSessionsSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest) (*os.File, error) {
+	return createPortableSyncArchive(ctx, repo, manifest, "crabbox-azds-sync-*.tgz")
 }
 
 func azureDynamicSessionsWorkspace(cfg Config) (string, error) {
