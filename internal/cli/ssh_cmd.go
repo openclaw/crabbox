@@ -13,6 +13,7 @@ func (a App) ssh(ctx context.Context, args []string) error {
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	showSecret := fs.Bool("show-secret", false, "print secret auth material for token-based SSH providers")
+	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -21,6 +22,9 @@ func (a App) ssh(ctx context.Context, args []string) error {
 	setIDFromFirstArg(fs, id)
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 	if err != nil {
+		return err
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	if err := requireLeaseID(*id, "crabbox ssh --id <lease-id-or-slug>", cfg); err != nil {

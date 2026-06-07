@@ -648,6 +648,37 @@ func TestSSHCommandLineRedactsSecretAuthUser(t *testing.T) {
 	}
 }
 
+func TestSSHRegistersProviderRoutingFlags(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("ssh", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	id := fs.String("id", "", "")
+	providerFlags := registerProviderFlags(fs, defaults)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "proxmox",
+		"--proxmox-api-url", "https://pve.example.test:8006",
+		"--proxmox-node", "pve1",
+		"--proxmox-template-id", "9000",
+		"--proxmox-user", "runner",
+		"--proxmox-work-root", "/work/test",
+		"--id", "cbx_123",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "proxmox" || cfg.Proxmox.APIURL != "https://pve.example.test:8006" || cfg.Proxmox.Node != "pve1" || cfg.Proxmox.TemplateID != 9000 || cfg.SSHUser != "runner" || cfg.WorkRoot != "/work/test" {
+		t.Fatalf("provider routing flags not applied for ssh: provider=%q proxmox=%#v", cfg.Provider, cfg.Proxmox)
+	}
+}
+
 func TestSSHTransportProbeDoesNotRequireCrabboxReady(t *testing.T) {
 	got := sshTransportProbeCommand(SSHTarget{Host: "100.64.0.10", Port: "2222"})
 	if strings.Contains(got, "crabbox-ready") || strings.Contains(got, "git --version") || strings.Contains(got, "/work/crabbox") {

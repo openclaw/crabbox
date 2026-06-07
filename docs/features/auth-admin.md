@@ -107,6 +107,7 @@ GET  /v1/leases                  own and shared leases only
 GET  /v1/leases/{id-or-slug}     resolves only if visible to the caller
 POST /v1/leases/{id}/heartbeat   owner, manage share, or admin
 POST /v1/leases/{id}/release     owner, manage share, or admin
+POST /v1/leases/{id}/tailscale   owner, manage share, or admin
 PUT/DELETE /v1/leases/{id}/share owner, manage share, or admin
 GET  /v1/runs and logs/events    own runs only
 GET  /v1/usage                   own usage only
@@ -125,7 +126,8 @@ Sharing grants broker and portal access to a lease without distributing the
 shared bearer or admin token. Roles:
 
 - **use** — see the lease and open visible portal bridges (WebVNC, code).
-- **manage** — everything `use` allows, plus change sharing and stop the lease.
+- **manage** — everything `use` allows, plus heartbeat/touch the lease, update
+  non-secret Tailscale metadata, change sharing, and stop the lease.
 
 ```sh
 crabbox share --id swift-crab --user alice@example.com           # default role: use
