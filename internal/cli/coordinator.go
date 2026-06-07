@@ -1619,7 +1619,7 @@ func (c *CoordinatorClient) curlConfig(method, path string, data []byte, hasBody
 	curlConfigValue(&cfg, "url", c.BaseURL+path)
 	curlConfigValue(&cfg, "request", method)
 	curlConfigValue(&cfg, "connect-timeout", "10")
-	curlConfigValue(&cfg, "max-time", "300")
+	curlConfigValue(&cfg, "max-time", strconv.Itoa(int(coordinatorHTTPTimeout/time.Second)))
 	curlConfigFlag(&cfg, "silent")
 	curlConfigFlag(&cfg, "show-error")
 	curlConfigFlag(&cfg, "location")

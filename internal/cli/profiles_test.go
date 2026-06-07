@@ -638,6 +638,89 @@ func TestRunStopCommandIncludesExeDevRoutingFlags(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandIncludesKubeVirtRoutingFlags(t *testing.T) {
+	got := runStopCommand(Config{
+		Provider: "kubevirt",
+		TargetOS: targetLinux,
+		KubeVirt: KubeVirtConfig{
+			Kubectl:         "/opt/bin/kubectl",
+			Virtctl:         "/opt/bin/virtctl",
+			Kubeconfig:      "/tmp/kube config",
+			Context:         "dev",
+			Namespace:       "team-vms",
+			Template:        "/tmp/vm template.yaml",
+			DeleteOnRelease: false,
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"--provider kubevirt",
+		"--kubevirt-kubectl /opt/bin/kubectl",
+		"--kubevirt-virtctl /opt/bin/virtctl",
+		"--kubevirt-kubeconfig '/tmp/kube config'",
+		"--kubevirt-context dev",
+		"--kubevirt-namespace team-vms",
+		"--kubevirt-template '/tmp/vm template.yaml'",
+		"--kubevirt-delete-on-release=false",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunStopCommandIncludesInheritedKubeconfigForKubeVirt(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/tmp/base.yaml:/tmp/cluster.yaml")
+	got := runStopCommand(Config{
+		Provider: "kubevirt",
+		TargetOS: targetLinux,
+		KubeVirt: KubeVirtConfig{
+			Kubectl:   "kubectl",
+			Virtctl:   "virtctl",
+			Context:   "dev",
+			Namespace: "team-vms",
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox stop",
+		"--provider kubevirt",
+		"--kubevirt-context dev",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunStopCommandIncludesExternalRoutingFlags(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	got := runStopCommand(Config{
+		Provider: "external",
+		TargetOS: targetLinux,
+		External: ExternalConfig{
+			Command:  "node",
+			Args:     []string{"/tmp/provider script.mjs", "--token", "secret-arg"},
+			Config:   map[string]any{"namespace": "team-vms", "token": "secret-config"},
+			WorkRoot: "/home/dev/crabbox",
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"--provider external",
+		"--external-routing-file",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+	for _, secret := range []string{"provider script.mjs", "secret-arg", "secret-config"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("stop command leaked %q:\n%s", secret, got)
+		}
+	}
+}
+
 func TestPopulateRunTimingMetadata(t *testing.T) {
 	report := timingReportFromRunWithActionsURL("aws", "cbx_123", "blue-lobster", runTimings{}, 0, 0, "https://example.test/actions")
 	populateRunTimingMetadata(&report,

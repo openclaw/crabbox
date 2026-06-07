@@ -1,13 +1,11 @@
 package islo
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path"
 	"strings"
 	"time"
@@ -35,7 +33,7 @@ func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name st
 		return nil, 0, err
 	}
 	manifestStarted := b.now()
-	manifest, err := syncManifest(req.Repo.Root, excludes)
+	manifest, err := syncManifest(req.Repo.Root, excludes, b.cfg.Sync.Includes)
 	if err != nil {
 		return nil, 0, exit(6, "build sync file list: %v", err)
 	}
@@ -142,31 +140,8 @@ func (b *isloBackend) execShell(ctx context.Context, client isloAPI, name, comma
 	return nil
 }
 
-func createIsloSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, stderr io.Writer) (*os.File, error) {
-	var input bytes.Buffer
-	input.Write(manifest.NUL())
-	archive, err := os.CreateTemp("", "crabbox-islo-sync-*.tgz")
-	if err != nil {
-		return nil, fmt.Errorf("create sync archive temp file: %w", err)
-	}
-	keep := false
-	defer func() {
-		if !keep {
-			name := archive.Name()
-			_ = archive.Close()
-			_ = os.Remove(name)
-		}
-	}()
-	cmd := exec.CommandContext(ctx, "tar", "--no-xattrs", "-czf", "-", "-C", repo.Root, "--null", "-T", "-")
-	cmd.Stdin = &input
-	cmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
-	cmd.Stdout = archive
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		return nil, exit(6, "create sync archive: %v", err)
-	}
-	keep = true
-	return archive, nil
+func createIsloSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, _ io.Writer) (*os.File, error) {
+	return core.CreateSyncArchive(ctx, repo, manifest, "crabbox-islo-sync-*.tgz")
 }
 
 func isloWorkspacePath(cfg Config) (string, error) {

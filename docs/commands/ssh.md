@@ -50,6 +50,10 @@ providers resolve access lazily or wrap the connection:
   pasteable command in a trusted terminal.
 - **Proxy-based providers** (for example `sprites`) print an `ssh` command with
   a provider `ProxyCommand` rather than a direct host connection.
+- **Provider-routed direct providers** accept the same provider-specific routing
+  flags here as `status` and `stop`; for example `--kubevirt-context` or
+  `--external-routing-file` can select the exact lease backend when config
+  defaults are not enough.
 
 ## Flags
 
@@ -62,6 +66,8 @@ providers resolve access lazily or wrap the connection:
 --static-user <user>        Static target user (provider=ssh).
 --static-port <port>        Static target SSH port (provider=ssh).
 --static-work-root <path>   Static target work root (provider=ssh).
+--local-container-runtime <path-or-name>
+                              Local container CLI override (provider=local-container).
 --network auto|tailscale|public
 --reclaim                   Claim this lease for the current repo before touching it.
 --show-secret               Print secret auth material for token-based SSH providers.

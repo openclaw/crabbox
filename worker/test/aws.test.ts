@@ -120,6 +120,45 @@ describe("aws provider", () => {
     );
   });
 
+  it("rejects invalid configured AWS SSH CIDRs before changing ingress", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(typeof init?.body === "string" ? init.body : String(input));
+        return new Response(
+          `<DescribeSecurityGroupsResponse>
+  <securityGroupInfo>
+    <item>
+      <groupId>sg-123</groupId>
+      <ipPermissions/>
+    </item>
+  </securityGroupInfo>
+</DescribeSecurityGroupsResponse>`,
+        );
+      }),
+    );
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "999.999.999.999/32",
+      } as never,
+      "us-east-1",
+    );
+
+    await expect(
+      client.refreshSSHIngress(
+        leaseConfig({
+          provider: "aws",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+      ),
+    ).rejects.toThrow("CRABBOX_AWS_SSH_CIDRS entries must be valid");
+    expect(calls).toHaveLength(1);
+  });
+
   it("waits through transient EC2 instance visibility after RunInstances", async () => {
     vi.useFakeTimers();
     const client = new EC2SpotClient(

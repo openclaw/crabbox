@@ -31,6 +31,12 @@ Each adapter declares a `Spec` that drives how Crabbox treats it:
 feature flags; `internal/cli/config.go` holds the per-provider config sections
 and the class-to-machine-type maps.
 
+When an SSH-lease provider can be exercised from local credentials, add a
+provider-specific path in `scripts/live-smoke.sh`. The smoke should use explicit
+`--provider` routing for `warmup`, `status`, `run`, `list`, and `stop`, and its
+remote command should not assume a particular project language unless it is
+provider-specific.
+
 ## Brokered providers
 
 Four providers can be brokered through the Worker. Brokering adds lease records,
@@ -69,6 +75,8 @@ local-container  Local Docker-compatible containers       Linux
 multipass        Canonical Multipass local Ubuntu VMs     Linux
 daytona          Daytona sandboxes (short-lived SSH)      Linux
 exe-dev          exe.dev managed VMs (public SSH)         Linux
+kubevirt         Generic KubeVirt virtual machines        Linux
+external         Configured executable provider           Linux
 namespace-devbox Namespace Devboxes                       Linux
 runpod           RunPod GPU pods (public SSH)             Linux
 semaphore        Semaphore CI jobs                        Linux
@@ -109,6 +117,8 @@ wandb                   Weights & Biases run sandboxes
 - [Multipass](../providers/multipass.md): local Ubuntu VMs through Canonical Multipass.
 - [Daytona](../providers/daytona.md): Daytona SDK/toolbox sandbox leases.
 - [exe.dev](../providers/exe-dev.md): exe.dev VMs exposed as SSH leases.
+- [KubeVirt](../providers/kubevirt.md): generic KubeVirt VMs over Kubernetes control-plane forwarding.
+- [External](../providers/external.md): configured executable provider protocol for private integrations.
 - [Namespace Devbox](../providers/namespace-devbox.md): Namespace Devbox SSH leases.
 - [Railway](../providers/railway.md): delegated Railway service redeploys.
 - [RunPod](../providers/runpod.md): RunPod GPU pods over public SSH.
@@ -252,8 +262,11 @@ list, and cleanup.
   expose the matching SSH contract. Configure with `CRABBOX_PARALLELS_*`.
 - **local-container** (alias `docker`) — starts a labeled container on a local
   Docker-compatible runtime, publishes SSH on loopback, syncs over SSH, and
-  removes it on `stop`. Cache volumes use Docker named volumes. It does not
-  bind-mount the repo or the Docker socket by default. Reads `DOCKER_HOST`.
+  removes it on `stop`. It detects an installed `docker` or `podman` CLI; if
+  both are present, `docker` is selected unless `localContainer.runtime` is set
+  explicitly. Cache volumes use named volumes. It does not bind-mount the repo
+  or the Docker-compatible socket by default. Reads `DOCKER_HOST` for socket
+  pass-through.
 - **multipass** (alias `mp`) — launches a local Ubuntu VM through Canonical
   Multipass with cloud-init, resolves the VM IP through `multipass info`, syncs
   over SSH, and deletes the VM with `multipass delete --purge`. Cache volumes
@@ -264,6 +277,12 @@ list, and cleanup.
 - **exe-dev** — exe.dev owns auth and lifecycle through `ssh exe.dev`; Crabbox
   treats the returned `ssh_dest` as a normal Linux SSH lease (public SSH only, no
   Tailscale).
+- **kubevirt** — applies a standard KubeVirt `VirtualMachine`, controls it with
+  `virtctl`, and carries SSH, rsync, and desktop tunnels through
+  `virtctl port-forward --stdio`.
+- **external** — invokes a configured executable for lifecycle operations and
+  consumes the returned SSH target. Provider-specific logic and credentials
+  remain outside Crabbox.
 - **namespace-devbox** — Namespace owns Devbox auth and lifecycle through the
   `devbox` CLI; Crabbox treats the prepared Devbox as a normal Linux SSH lease.
 - **runpod** — leases a RunPod GPU pod with public SSH (no Tailscale); auth from

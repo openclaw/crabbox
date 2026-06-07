@@ -966,7 +966,7 @@ retrySync:
 			return recordFailure(err)
 		}
 		stepStart = time.Now()
-		manifest, err := syncManifest(repo.Root, excludes)
+		manifest, err := syncManifestFiltered(repo.Root, excludes, syncIncludes(cfg))
 		if err != nil {
 			return recordFailure(exit(6, "build sync file list: %v", err))
 		}
@@ -1025,7 +1025,7 @@ retrySync:
 			recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s mode=archive", timings.sync.Round(time.Millisecond)))
 			goto afterSync
 		}
-		if cfg.Sync.GitSeed && remoteGitSeedCandidate(repo) {
+		if syncGitSeedEnabled(cfg, repo) {
 			stepStart = time.Now()
 			if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
@@ -1071,7 +1071,7 @@ retrySync:
 		}
 		stepStart = time.Now()
 		finalizeCommand := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
-			AllowMassDeletions: hydratedByActions || os.Getenv("CRABBOX_ALLOW_MASS_DELETIONS") == "1",
+			AllowMassDeletions: allowRemoteSyncMassDeletions(cfg, hydratedByActions),
 			HydrateGit:         hydrateGit,
 			BaseRef:            cfg.Sync.BaseRef,
 			BaseSHA:            baseSHA,
@@ -1406,8 +1406,8 @@ afterSync:
 			CommandDisplay: commandDisplay,
 			ShellMode:      *shellMode || useShell,
 			ScriptMode:     script != nil,
-			RoutingArgs:    runFailureDigestRoutingArgs(cfg),
-			SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg),
+			RoutingArgs:    runFailureDigestRoutingArgs(cfg, leaseID),
+			SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg, leaseID),
 			StopCommand:    report.StopCommand,
 			Classification: classification,
 			Phases:         timings.commandPhases,
@@ -1509,7 +1509,11 @@ func populateRunTimingMetadata(report *timingReport, cfg Config, repo Repo, serv
 	report.MachineType = server.ServerType.Name
 	report.RepoPath = repo.Root
 	report.Workdir = workdir
-	report.StopCommand = runStopCommand(cfg, firstNonBlank(serverSlug(server), leaseID))
+	stopID := firstNonBlank(serverSlug(server), leaseID)
+	if normalizeProviderName(cfg.Provider) == "external" {
+		stopID = leaseID
+	}
+	report.StopCommand = runStopCommand(cfg, stopID)
 	report.IdleTimeout = cfg.IdleTimeout.String()
 	report.Artifacts = artifacts
 }
@@ -1588,14 +1592,14 @@ func runStopCommand(cfg Config, id string) string {
 	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
 		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
 	}
-	args = appendProviderStopRoutingArgs(args, cfg)
+	args = appendProviderStopRoutingArgs(args, cfg, id)
 	if strings.TrimSpace(id) != "" {
 		args = append(args, "--id", id)
 	}
-	return strings.Join(readableShellWords(args), " ")
+	return readableShellCommand(args)
 }
 
-func appendProviderStopRoutingArgs(args []string, cfg Config) []string {
+func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []string {
 	switch normalizeProviderName(cfg.Provider) {
 	case "proxmox":
 		if strings.TrimSpace(cfg.Proxmox.APIURL) != "" {
@@ -1638,6 +1642,39 @@ func appendProviderStopRoutingArgs(args []string, cfg Config) []string {
 	case "exe-dev":
 		if strings.TrimSpace(cfg.ExeDev.ControlHost) != "" {
 			args = append(args, "--exe-dev-control-host", cfg.ExeDev.ControlHost)
+		}
+	case "kubevirt":
+		if strings.TrimSpace(cfg.KubeVirt.Kubectl) != "" {
+			args = append(args, "--kubevirt-kubectl", cfg.KubeVirt.Kubectl)
+		}
+		if strings.TrimSpace(cfg.KubeVirt.Virtctl) != "" {
+			args = append(args, "--kubevirt-virtctl", cfg.KubeVirt.Virtctl)
+		}
+		if strings.TrimSpace(cfg.KubeVirt.Kubeconfig) != "" {
+			args = append(args, "--kubevirt-kubeconfig", cfg.KubeVirt.Kubeconfig)
+		} else if value := strings.TrimSpace(os.Getenv("KUBECONFIG")); value != "" {
+			args = append([]string{"KUBECONFIG=" + value}, args...)
+		}
+		if strings.TrimSpace(cfg.KubeVirt.Context) != "" {
+			args = append(args, "--kubevirt-context", cfg.KubeVirt.Context)
+		}
+		if strings.TrimSpace(cfg.KubeVirt.Namespace) != "" {
+			args = append(args, "--kubevirt-namespace", cfg.KubeVirt.Namespace)
+		}
+		if strings.TrimSpace(cfg.KubeVirt.Template) != "" {
+			args = append(args, "--kubevirt-template", cfg.KubeVirt.Template)
+		}
+		args = append(args, fmt.Sprintf("--kubevirt-delete-on-release=%t", cfg.KubeVirt.DeleteOnRelease))
+	case "external":
+		if path, err := ExternalRoutingPath(id); err == nil {
+			args = append(args, "--external-routing-file", path)
+		} else {
+			if strings.TrimSpace(cfg.External.Command) != "" {
+				args = append(args, "--external-command", cfg.External.Command)
+			}
+			if strings.TrimSpace(cfg.External.WorkRoot) != "" {
+				args = append(args, "--external-work-root", cfg.External.WorkRoot)
+			}
 		}
 	}
 	return args
@@ -1729,6 +1766,10 @@ func shouldPruneRemoteSync(deleteEnabled, fullResync bool) bool {
 
 func shouldSeedRemotePruneManifest(hydratedByActions, fullResync bool) bool {
 	return hydratedByActions || fullResync
+}
+
+func allowRemoteSyncMassDeletions(cfg Config, hydratedByActions bool) bool {
+	return hydratedByActions || len(syncIncludes(cfg)) > 0 || os.Getenv("CRABBOX_ALLOW_MASS_DELETIONS") == "1"
 }
 
 func commandNeedsHydrationHint(command []string, shellMode bool) bool {

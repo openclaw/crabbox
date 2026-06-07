@@ -126,9 +126,11 @@ Targets: **L**inux, **M**acOS, **W**indows.
 | [Parallels](docs/providers/parallels.md) | `parallels` | L / M / W | direct | Local or remote macOS host; checkpoint/fork/restore/snapshot. |
 | [Proxmox](docs/providers/proxmox.md) | `proxmox` | L | direct | Clone Linux QEMU templates on a private Proxmox VE cluster. |
 | [Static SSH](docs/providers/ssh.md) | `ssh` (`static`, `static-ssh`) | L / M / W | direct | Existing machines; no provisioning. |
-| [Local Container](docs/providers/local-container.md) | `local-container` (`docker`, `container`, `local-docker`) | L | direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima). |
+| [Local Container](docs/providers/local-container.md) | `local-container` (`docker`, `container`, `local-docker`) | L | direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima, Podman). |
 | [Apple Container](docs/providers/apple-container.md) | `apple-container` (`apple`, `applecontainer`) | L | direct | Apple's native `container` runtime on Apple silicon macOS. |
 | [exe.dev](docs/providers/exe-dev.md) | `exe-dev` (`exe`, `exedev`) | L | direct | exe.dev VMs exposed as public SSH leases. |
+| [KubeVirt](docs/providers/kubevirt.md) | `kubevirt` (`kubernetes-vm`) | L | direct | Generic KubeVirt VMs through `kubectl`, `virtctl`, and control-plane SSH forwarding. |
+| [External](docs/providers/external.md) | `external` (`exec-provider`) | L | direct | Configured executable implementing the Crabbox provider protocol. |
 | [Namespace Devbox](docs/providers/namespace-devbox.md) | `namespace-devbox` (`namespace`, `namespace-devboxes`) | L | direct | Namespace.so Devboxes over SSH. |
 | [Semaphore](docs/providers/semaphore.md) | `semaphore` (`sem`) | L | direct | A Semaphore CI job leased as a testbox. |
 | [Sprites](docs/providers/sprites.md) | `sprites` | L | direct | Sprites microVMs through `sprite proxy`. |
@@ -366,7 +368,7 @@ static:
 ```
 
 ```yaml
-# Local container (alias: docker; works with OrbStack as the active context)
+# Local container (alias: docker; detects docker or podman)
 provider: local-container
 localContainer:
   runtime: docker

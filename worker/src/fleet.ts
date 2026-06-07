@@ -9,7 +9,7 @@ import {
   isRetryableAWSProvisioningError,
   type AWSMacHost,
 } from "./aws";
-import { AzureClient, type AzureDeferredCleanupRequest } from "./azure";
+import { AzureClient, azureRegionCandidates, type AzureDeferredCleanupRequest } from "./azure";
 import {
   awsPromotedAMIConfigKey,
   azureLocationFor,
@@ -91,8 +91,11 @@ const codeTicketTTLSeconds = 120;
 const egressTicketTTLSeconds = 120;
 const leaseCleanupRetryDelayMs = 5 * 60 * 1000;
 const awsOrphanSweepInitialDelayMs = 60 * 1000;
+const azureOrphanSweepInitialDelayMs = 60 * 1000;
 const defaultAWSOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAWSOrphanSweepGraceSeconds = 15 * 60;
+const defaultAzureOrphanSweepIntervalSeconds = 60 * 60;
+const defaultAzureOrphanSweepGraceSeconds = 15 * 60;
 const providerAccessReservationTTLMS = 15 * 60 * 1000;
 const maxPendingWebVNCBytes = 1024 * 1024;
 const maxCodeRequestBytes = 10 * 1024 * 1024;
@@ -101,6 +104,8 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 const awsOrphanSweepRecordKey = "aws-orphan-sweep:last";
 const awsOrphanSweepFirstAlarmKey = "aws-orphan-sweep:first-alarm";
+const azureOrphanSweepRecordKey = "azure-orphan-sweep:last";
+const azureOrphanSweepFirstAlarmKey = "azure-orphan-sweep:first-alarm";
 const azureDeferredCleanupPrefix = "azure-cleanup:";
 const readyPoolPrefix = "ready-pool:";
 
@@ -250,6 +255,14 @@ interface AWSOrphanSweepConfig {
   regions: string[];
 }
 
+interface AzureOrphanSweepConfig {
+  enabled: boolean;
+  deleteEnabled: boolean;
+  intervalSeconds: number;
+  graceSeconds: number;
+  regions: string[];
+}
+
 interface AzureDeferredCleanupRecord extends AzureDeferredCleanupRequest {
   attempts: number;
   updatedAt: string;
@@ -257,7 +270,7 @@ interface AzureDeferredCleanupRecord extends AzureDeferredCleanupRequest {
   lastError?: string;
 }
 
-interface AWSOrphanSweepCandidate {
+interface CloudOrphanSweepCandidate {
   region: string;
   cloudID: string;
   name: string;
@@ -274,6 +287,9 @@ interface AWSOrphanSweepCandidate {
   action: "reported" | "terminated" | "terminate_failed";
   error?: string;
 }
+
+type AWSOrphanSweepCandidate = CloudOrphanSweepCandidate;
+type AzureOrphanSweepCandidate = CloudOrphanSweepCandidate;
 
 interface AWSMacHostSweepCandidate {
   region: string;
@@ -303,6 +319,20 @@ interface AWSOrphanSweepRecord {
   macHostsReleased?: number;
   errors: Array<{ region: string; message: string }>;
   nextRunAt?: string;
+}
+
+interface AzureOrphanSweepRecord {
+  startedAt: string;
+  finishedAt: string;
+  mode: "report" | "delete";
+  trigger: "alarm" | "admin";
+  enabled: boolean;
+  regions: string[];
+  scanned: number;
+  candidates: AzureOrphanSweepCandidate[];
+  terminated: number;
+  errors: Array<{ region: string; message: string }>;
+  nextRunAt: string;
 }
 
 type BridgeAttachment =
@@ -452,6 +482,12 @@ export class FleetDurableObject implements DurableObject {
         parts.join("/") === "v1/admin/aws-orphan-sweep"
       ) {
         return await this.adminAWSOrphanSweep(request);
+      }
+      if (
+        (method === "GET" || method === "POST") &&
+        parts.join("/") === "v1/admin/azure-orphan-sweep"
+      ) {
+        return await this.adminAzureOrphanSweep(request);
       }
       if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "leases" && parts[3]) {
         return await this.adminLeaseRoute(request, parts[3], parts[4]);
@@ -975,6 +1011,7 @@ export class FleetDurableObject implements DurableObject {
     await this.expireLeases();
     await this.runAzureDeferredCleanups();
     await this.runAWSOrphanSweepIfDue("alarm");
+    await this.runAzureOrphanSweepIfDue("alarm");
     await this.scheduleAlarm();
   }
 
@@ -1046,6 +1083,10 @@ export class FleetDurableObject implements DurableObject {
       providerHourlyUSD,
     );
     const now = new Date();
+    const providerProject = providerProjectForConfig(config);
+    const providerRegion = ["aws", "azure", "gcp"].includes(config.provider)
+      ? providerRegionForConfig(config)
+      : undefined;
     let record: LeaseRecord = {
       id: leaseID,
       slug,
@@ -1076,7 +1117,7 @@ export class FleetDurableObject implements DurableObject {
       idleTimeoutSeconds: config.idleTimeoutSeconds,
       estimatedHourlyUSD: cost.hourlyUSD,
       maxEstimatedUSD: cost.maxUSD,
-      state: "active",
+      state: "provisioning",
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
       lastTouchedAt: now.toISOString(),
@@ -1087,6 +1128,12 @@ export class FleetDurableObject implements DurableObject {
         config.idleTimeoutSeconds,
       ).toISOString(),
     };
+    if (providerProject) {
+      record.providerProject = providerProject;
+    }
+    if (providerRegion) {
+      record.region = providerRegion;
+    }
     const requestedHostID = config.hostID || config.awsMacHostID;
     if (requestedHostID) {
       record.hostId = requestedHostID;
@@ -1133,14 +1180,43 @@ export class FleetDurableObject implements DurableObject {
     if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
       await this.putProviderAccess(providerAccessReservation(record, now));
     }
+    await this.putLease(record);
+    await this.scheduleAlarm();
     const { server, serverType, market, attempts } = await provider
       .createServerWithFallback(config, leaseID, slug, owner, prepared?.provisioning)
       .catch(async (error: unknown) => {
         if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
           await this.deleteProviderAccess(record.id);
         }
+        const current = await this.getLease(record.id);
+        if (!current || current.state !== "provisioning") {
+          await this.scheduleAlarm();
+          throw error;
+        }
+        const failedAt = new Date().toISOString();
+        record = { ...current };
+        record.state = "failed";
+        record.updatedAt = failedAt;
+        record.endedAt = failedAt;
+        record.cleanupFailedAt = failedAt;
+        record.cleanupError = errorMessage(error);
+        await this.putLease(record);
+        await this.scheduleAlarm();
         throw error;
       });
+    let current = await this.getLease(record.id);
+    if (!current || current.state !== "provisioning") {
+      return this.abortProvisionedLeaseAfterStateChange(
+        current,
+        record,
+        config,
+        server,
+        serverType,
+        Boolean(prepared?.provisioning?.publishAccessBeforeProvisioning),
+      );
+    }
+    record = { ...current };
+    record.state = "active";
     record.cloudID = server.cloudID;
     record.serverType = serverType;
     if (server.hostID) {
@@ -1172,6 +1248,18 @@ export class FleetDurableObject implements DurableObject {
     );
     record.estimatedHourlyUSD = finalCost.hourlyUSD;
     record.maxEstimatedUSD = finalCost.maxUSD;
+    current = await this.getLease(record.id);
+    if (!current || current.state !== "provisioning") {
+      return this.abortProvisionedLeaseAfterStateChange(
+        current,
+        record,
+        config,
+        server,
+        serverType,
+        Boolean(prepared?.provisioning?.publishAccessBeforeProvisioning),
+      );
+    }
+    record = { ...current, ...record };
     await this.putLease(record);
     if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
       await this.deleteProviderAccess(record.id);
@@ -1187,9 +1275,16 @@ export class FleetDurableObject implements DurableObject {
       return lease ? json({ lease }) : notFound();
     }
     if (method === "POST" && action === "heartbeat") {
-      const lease = await this.resolveLease(leaseID, request, false);
+      const admin = isAdminRequest(request);
+      const lease = await this.resolveLease(leaseID, request, admin);
       if (!lease) {
         return notFound();
+      }
+      if (!this.leaseManageableByRequest(lease, request, admin)) {
+        return json(
+          { error: "forbidden", message: "lease manage access required" },
+          { status: 403 },
+        );
       }
       const body = await optionalJson<{
         idleTimeoutSeconds?: number;
@@ -1199,9 +1294,16 @@ export class FleetDurableObject implements DurableObject {
       return json({ lease: updatedLease });
     }
     if (method === "POST" && action === "tailscale") {
-      const lease = await this.resolveLease(leaseID, request, false);
+      const admin = isAdminRequest(request);
+      const lease = await this.resolveLease(leaseID, request, admin);
       if (!lease) {
         return notFound();
+      }
+      if (!this.leaseManageableByRequest(lease, request, admin)) {
+        return json(
+          { error: "forbidden", message: "lease manage access required" },
+          { status: 403 },
+        );
       }
       const input = await readJson<Partial<TailscaleMetadata>>(request);
       lease.tailscale = mergeTailscaleMetadata(lease.tailscale, input);
@@ -3386,11 +3488,11 @@ export class FleetDurableObject implements DurableObject {
   private async adminLeaseAudit(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const provider = (url.searchParams.get("provider") ?? "aws").trim().toLowerCase();
-    if (provider !== "aws") {
+    if (provider !== "aws" && provider !== "azure") {
       return json(
         {
           error: "unsupported_provider",
-          message: "lease audit currently supports provider=aws",
+          message: "lease audit currently supports provider=aws or provider=azure",
         },
         { status: 400 },
       );
@@ -3400,14 +3502,18 @@ export class FleetDurableObject implements DurableObject {
     const org = url.searchParams.get("org") ?? "";
     const limit = clampLimit(url.searchParams.get("limit"), 100);
     const leases = (await this.leaseRecords())
-      .filter((lease) => lease.provider === "aws")
+      .filter((lease) => lease.provider === provider)
       .filter((lease) => !state || lease.state === state)
       .filter((lease) => !owner || lease.owner === owner)
       .filter((lease) => !org || lease.org === org)
       .filter((lease) => Boolean(lease.cloudID))
       .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit);
-    const audits = await Promise.all(leases.map((lease) => this.auditAWSLeaseCloud(lease)));
+    const audits = await Promise.all(
+      leases.map((lease) =>
+        provider === "aws" ? this.auditAWSLeaseCloud(lease) : this.auditAzureLeaseCloud(lease),
+      ),
+    );
     return json({ audits });
   }
 
@@ -3648,6 +3754,29 @@ export class FleetDurableObject implements DurableObject {
     return json({ config, sweep });
   }
 
+  private async adminAzureOrphanSweep(request: Request): Promise<Response> {
+    const config = this.azureOrphanSweepConfig();
+    const lastRun =
+      (await this.state.storage.get<AzureOrphanSweepRecord>(azureOrphanSweepRecordKey)) ?? null;
+    if (request.method.toUpperCase() === "GET") {
+      return json({ config, lastRun });
+    }
+    if (!config.enabled) {
+      return json(
+        {
+          error: "azure_orphan_sweep_disabled",
+          message: "Azure orphan sweep is disabled or Azure broker credentials are not configured",
+          config,
+          lastRun,
+        },
+        { status: 409 },
+      );
+    }
+    const sweep = await this.runAzureOrphanSweep("admin", config);
+    await this.scheduleAlarm();
+    return json({ config, sweep });
+  }
+
   private async auditAWSLeaseCloud(lease: LeaseRecord): Promise<LeaseCloudAudit> {
     const audit: LeaseCloudAudit = {
       leaseID: lease.id,
@@ -3716,6 +3845,66 @@ export class FleetDurableObject implements DurableObject {
       throw new Error(`aws instance not found: ${lease.cloudID}`);
     }
     return server;
+  }
+
+  private async auditAzureLeaseCloud(lease: LeaseRecord): Promise<LeaseCloudAudit> {
+    const audit: LeaseCloudAudit = {
+      leaseID: lease.id,
+      provider: lease.provider,
+      state: lease.state,
+      target: lease.target,
+      owner: lease.owner,
+      org: lease.org,
+      cloudID: lease.cloudID,
+      host: lease.host,
+      serverType: lease.serverType,
+      expiresAt: lease.expiresAt,
+      cloudStatus: "error",
+    };
+    if (lease.slug) {
+      audit.slug = lease.slug;
+    }
+    if (lease.region) {
+      audit.region = lease.region;
+    }
+    if (lease.cleanupAttempts !== undefined) {
+      audit.cleanupAttempts = lease.cleanupAttempts;
+    }
+    if (lease.cleanupError) {
+      audit.cleanupError = lease.cleanupError;
+    }
+    if (lease.cleanupRetryAt) {
+      audit.cleanupRetryAt = lease.cleanupRetryAt;
+    }
+    try {
+      const machines = await this.provider("azure", lease.region).listCrabboxServers();
+      const server = machines.find(
+        (machine) =>
+          machine.cloudID === lease.cloudID ||
+          machine.name === lease.cloudID ||
+          machine.labels?.["lease"] === lease.id,
+      );
+      if (!server) {
+        return {
+          ...audit,
+          cloudStatus: "missing",
+          message: `azure virtual machine not found: ${lease.cloudID}`,
+        };
+      }
+      return {
+        ...audit,
+        cloudStatus: "found",
+        cloudState: server.status,
+        cloudHost: server.host,
+        cloudServerType: server.serverType,
+      };
+    } catch (error) {
+      const message = errorMessage(error);
+      if (isCloudNotFoundError(message)) {
+        return { ...audit, cloudStatus: "missing", message };
+      }
+      return { ...audit, cloudStatus: "error", message };
+    }
   }
 
   private async adminLeaseRoute(
@@ -4251,9 +4440,7 @@ export class FleetDurableObject implements DurableObject {
   private async expireLeases(): Promise<void> {
     const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
     const now = Date.now();
-    const expired = [...leases.values()].filter(
-      (lease) => lease.state === "active" && Date.parse(lease.expiresAt) <= now,
-    );
+    const expired = [...leases.values()].filter((lease) => leaseNeedsCleanup(lease, now));
     await Promise.all(
       expired.map(async (lease) => {
         const retryAt = Date.parse(lease.cleanupRetryAt ?? "");
@@ -4261,6 +4448,15 @@ export class FleetDurableObject implements DurableObject {
           return;
         }
         const nowISO = new Date().toISOString();
+        if (lease.state === "provisioning" && !lease.cloudID) {
+          lease.state = "failed";
+          lease.updatedAt = nowISO;
+          lease.endedAt = nowISO;
+          lease.cleanupFailedAt = nowISO;
+          lease.cleanupError = "lease expired before provider returned a cloud resource";
+          await this.putLease(lease);
+          return;
+        }
         try {
           await this.deleteLeaseServer(lease);
         } catch (error) {
@@ -4275,9 +4471,10 @@ export class FleetDurableObject implements DurableObject {
           );
           return;
         }
-        lease.state = "expired";
+        lease.state = leaseIsLive(lease) ? "expired" : lease.state;
         lease.updatedAt = nowISO;
         lease.endedAt = nowISO;
+        delete lease.releaseDeletesServer;
         clearLeaseCleanupMetadata(lease);
         await this.putLease(lease);
       }),
@@ -4286,13 +4483,18 @@ export class FleetDurableObject implements DurableObject {
 
   private async scheduleAlarm(): Promise<void> {
     const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
+    const now = Date.now();
     const alarmTimes = [...leases.values()]
-      .filter((lease) => lease.state === "active")
+      .filter((lease) => leaseIsLive(lease) || leaseNeedsCleanup(lease, now))
       .map((lease) => nextLeaseAlarmTime(lease))
       .filter((time) => Number.isFinite(time));
     const orphanSweepAlarm = await this.nextAWSOrphanSweepAlarmTime();
     if (orphanSweepAlarm !== undefined) {
       alarmTimes.push(orphanSweepAlarm);
+    }
+    const azureOrphanSweepAlarm = await this.nextAzureOrphanSweepAlarmTime();
+    if (azureOrphanSweepAlarm !== undefined) {
+      alarmTimes.push(azureOrphanSweepAlarm);
     }
     const azureCleanupAlarm = await this.nextAzureDeferredCleanupAlarmTime();
     if (azureCleanupAlarm !== undefined) {
@@ -4394,7 +4596,7 @@ export class FleetDurableObject implements DurableObject {
     const startedAt = new Date().toISOString();
     const leases = [...(await this.state.storage.list<LeaseRecord>({ prefix: "lease:" })).values()];
     const activeAWSLeases = leases.filter(
-      (lease) => lease.provider === "aws" && lease.state === "active",
+      (lease) => lease.provider === "aws" && leaseIsLive(lease),
     );
     const activeLeases = new Map(activeAWSLeases.map((lease) => [lease.id, lease]));
     const activeCloudIDs = new Set(activeAWSLeases.map((lease) => lease.cloudID).filter(Boolean));
@@ -4528,6 +4730,155 @@ export class FleetDurableObject implements DurableObject {
     };
   }
 
+  private async nextAzureOrphanSweepAlarmTime(): Promise<number | undefined> {
+    const config = this.azureOrphanSweepConfig();
+    if (!config.enabled) {
+      return undefined;
+    }
+    const lastRun = await this.state.storage.get<AzureOrphanSweepRecord>(azureOrphanSweepRecordKey);
+    const lastFinishedAt = Date.parse(lastRun?.finishedAt ?? "");
+    const now = Date.now();
+    if (!Number.isFinite(lastFinishedAt)) {
+      const stored = await this.state.storage.get<number>(azureOrphanSweepFirstAlarmKey);
+      if (typeof stored === "number" && Number.isFinite(stored)) {
+        return Math.max(now + 1000, stored);
+      }
+      const next = now + Math.min(config.intervalSeconds * 1000, azureOrphanSweepInitialDelayMs);
+      await this.state.storage.put(azureOrphanSweepFirstAlarmKey, next);
+      return next;
+    }
+    return Math.max(now + 1000, lastFinishedAt + config.intervalSeconds * 1000);
+  }
+
+  private async runAzureOrphanSweepIfDue(trigger: "alarm" | "admin"): Promise<void> {
+    const config = this.azureOrphanSweepConfig();
+    if (!config.enabled) {
+      return;
+    }
+    const lastRun = await this.state.storage.get<AzureOrphanSweepRecord>(azureOrphanSweepRecordKey);
+    const lastFinishedAt = Date.parse(lastRun?.finishedAt ?? "");
+    if (
+      trigger !== "admin" &&
+      Number.isFinite(lastFinishedAt) &&
+      Date.now() < lastFinishedAt + config.intervalSeconds * 1000
+    ) {
+      return;
+    }
+    await this.runAzureOrphanSweep(trigger, config);
+  }
+
+  private async runAzureOrphanSweep(
+    trigger: "alarm" | "admin",
+    config = this.azureOrphanSweepConfig(),
+  ): Promise<AzureOrphanSweepRecord> {
+    const startedAt = new Date().toISOString();
+    const leases = [...(await this.state.storage.list<LeaseRecord>({ prefix: "lease:" })).values()];
+    const liveAzureLeases = leases.filter(
+      (lease) => lease.provider === "azure" && leaseIsLive(lease),
+    );
+    const liveLeases = new Map(liveAzureLeases.map((lease) => [lease.id, lease]));
+    const liveCloudIDs = new Set(liveAzureLeases.map((lease) => lease.cloudID).filter(Boolean));
+    const candidates: AzureOrphanSweepCandidate[] = [];
+    const errors: AzureOrphanSweepRecord["errors"] = [];
+    const seenCloudIDs = new Set<string>();
+    let scanned = 0;
+    for (const region of config.regions) {
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- regions are swept independently.
+        const machines = await this.provider("azure", region).listCrabboxServers();
+        for (const machine of machines) {
+          const cloudID = machine.cloudID || machine.name || String(machine.id);
+          if (seenCloudIDs.has(cloudID)) {
+            continue;
+          }
+          seenCloudIDs.add(cloudID);
+          scanned += 1;
+          const candidateRegion = machine.region || region;
+          const candidate = cloudOrphanSweepCandidate(
+            machine,
+            liveLeases,
+            liveCloudIDs,
+            candidateRegion,
+            config.graceSeconds,
+          );
+          if (!candidate) {
+            continue;
+          }
+          if (config.deleteEnabled) {
+            try {
+              // oxlint-disable-next-line eslint/no-await-in-loop -- delete failures must stay attached to the candidate.
+              await this.provider("azure", candidateRegion).deleteServer(
+                machine.cloudID || machine.name,
+              );
+              candidate.action = "terminated";
+            } catch (error) {
+              candidate.action = "terminate_failed";
+              candidate.error = errorMessage(error);
+              console.warn(
+                `azure orphan sweep terminate failed region=${region} cloud=${machine.cloudID}: ${candidate.error}`,
+              );
+            }
+          }
+          candidates.push(candidate);
+        }
+      } catch (error) {
+        const message = errorMessage(error);
+        errors.push({ region, message });
+        console.warn(`azure orphan sweep failed region=${region}: ${message}`);
+      }
+    }
+    const finishedAt = new Date().toISOString();
+    const record: AzureOrphanSweepRecord = {
+      startedAt,
+      finishedAt,
+      mode: config.deleteEnabled ? "delete" : "report",
+      trigger,
+      enabled: config.enabled,
+      regions: config.regions,
+      scanned,
+      candidates,
+      terminated: candidates.filter((candidate) => candidate.action === "terminated").length,
+      errors,
+      nextRunAt: new Date(Date.parse(finishedAt) + config.intervalSeconds * 1000).toISOString(),
+    };
+    await this.state.storage.put(azureOrphanSweepRecordKey, record);
+    await this.state.storage.delete(azureOrphanSweepFirstAlarmKey);
+    if (candidates.length > 0 || errors.length > 0) {
+      console.warn(
+        `azure orphan sweep mode=${record.mode} scanned=${record.scanned} candidates=${candidates.length} terminated=${record.terminated} errors=${errors.length}`,
+      );
+    }
+    return record;
+  }
+
+  private azureOrphanSweepConfig(): AzureOrphanSweepConfig {
+    const hasAzureCredentials = Boolean(
+      this.env.AZURE_TENANT_ID &&
+      this.env.AZURE_CLIENT_ID &&
+      this.env.AZURE_CLIENT_SECRET &&
+      this.env.AZURE_SUBSCRIPTION_ID,
+    );
+    const enabled =
+      hasAzureCredentials && !envFlagDisabled(this.env.CRABBOX_AZURE_ORPHAN_SWEEP_ENABLED);
+    return {
+      enabled,
+      deleteEnabled: enabled && envFlagEnabled(this.env.CRABBOX_AZURE_ORPHAN_SWEEP_DELETE),
+      intervalSeconds: positiveEnvInt(
+        this.env.CRABBOX_AZURE_ORPHAN_SWEEP_INTERVAL_SECONDS,
+        defaultAzureOrphanSweepIntervalSeconds,
+      ),
+      graceSeconds: positiveEnvInt(
+        this.env.CRABBOX_AZURE_ORPHAN_SWEEP_GRACE_SECONDS,
+        defaultAzureOrphanSweepGraceSeconds,
+      ),
+      regions: azureRegionCandidates(
+        { azureLocation: "", capacityRegions: [] },
+        this.env,
+        this.env.CRABBOX_AZURE_LOCATION || "eastus",
+      ),
+    };
+  }
+
   private async getLease(leaseID: string): Promise<LeaseRecord | undefined> {
     return this.state.storage.get<LeaseRecord>(leaseKey(leaseID));
   }
@@ -4548,7 +4899,7 @@ export class FleetDurableObject implements DurableObject {
     const now = Date.now();
     let matches = (await this.leaseRecords()).filter(
       (lease) =>
-        lease.state === "active" &&
+        leaseIsLive(lease) &&
         Date.parse(lease.expiresAt) > now &&
         normalizeLeaseSlug(lease.slug) === slug,
     );
@@ -4578,7 +4929,7 @@ export class FleetDurableObject implements DurableObject {
     const now = Date.now();
     const matches = (await this.leaseRecords()).filter(
       (lease) =>
-        lease.state === "active" &&
+        leaseIsLive(lease) &&
         Date.parse(lease.expiresAt) > now &&
         normalizeLeaseSlug(lease.slug) === slug &&
         this.leaseVisibleToControl(lease, attachment),
@@ -4841,7 +5192,7 @@ export class FleetDurableObject implements DurableObject {
       );
     }
     if (provider === "azure") {
-      return new AzureProvider(this.env, this.state.storage);
+      return new AzureProvider(this.env, this.state.storage, region);
     }
     if (provider === "gcp") {
       return new GCPProvider(this.env, region, project);
@@ -4853,19 +5204,88 @@ export class FleetDurableObject implements DurableObject {
     await this.provider(lease.provider, lease.region, lease.providerProject).releaseLease(lease);
   }
 
+  private async abortProvisionedLeaseAfterStateChange(
+    current: LeaseRecord | undefined,
+    record: LeaseRecord,
+    config: LeaseConfig,
+    server: ProviderMachine,
+    serverType: string,
+    deletePublishedAccess: boolean,
+  ): Promise<Response> {
+    if (deletePublishedAccess) {
+      await this.deleteProviderAccess(record.id);
+    }
+    const cleanupLease = provisionedLeaseRecord(current ?? record, config, server, serverType);
+    if (current?.state === "released" && current.releaseDeletesServer === false) {
+      cleanupLease.state = "released";
+      cleanupLease.keep = true;
+      clearLeaseCleanupMetadata(cleanupLease);
+      await this.putLease(cleanupLease);
+      await this.scheduleAlarm();
+      return json(
+        {
+          error: "lease_state_changed",
+          message: "lease changed state while provider provisioning was in progress",
+          lease: cleanupLease,
+        },
+        { status: 409 },
+      );
+    }
+    try {
+      await this.deleteLeaseServer(cleanupLease);
+    } catch (error) {
+      const failedAt = new Date().toISOString();
+      cleanupLease.state = current?.state ?? "active";
+      if (cleanupLease.state === "released") {
+        cleanupLease.releaseDeletesServer = true;
+      }
+      cleanupLease.cleanupAttempts = (cleanupLease.cleanupAttempts ?? 0) + 1;
+      cleanupLease.cleanupFailedAt = failedAt;
+      cleanupLease.cleanupError = errorMessage(error);
+      cleanupLease.cleanupRetryAt = new Date(Date.now() + leaseCleanupRetryDelayMs).toISOString();
+      cleanupLease.expiresAt = failedAt;
+      cleanupLease.updatedAt = failedAt;
+      await this.putLease(cleanupLease);
+      await this.scheduleAlarm();
+      throw error;
+    }
+    await this.scheduleAlarm();
+    return json(
+      {
+        error: "lease_state_changed",
+        message: "lease changed state while provider provisioning was in progress",
+        lease: current,
+      },
+      { status: 409 },
+    );
+  }
+
   private async releaseResolvedLease(
     lease: LeaseRecord,
     options: { deleteServer: boolean; keep?: boolean },
   ): Promise<LeaseRecord> {
     this.clearEgressLease(lease.id);
-    if (options.deleteServer && lease.state === "active") {
+    if (
+      options.deleteServer &&
+      lease.cloudID &&
+      (leaseIsLive(lease) || lease.releaseDeletesServer !== undefined || lease.cleanupError)
+    ) {
       await this.deleteLeaseServer(lease);
     }
+    const wasUnprovisionedRelease =
+      !lease.cloudID && (lease.state === "provisioning" || lease.state === "released");
     const now = new Date().toISOString();
     lease.state = "released";
     lease.updatedAt = now;
     lease.releasedAt = now;
     lease.endedAt = now;
+    if (wasUnprovisionedRelease) {
+      lease.releaseDeletesServer = options.deleteServer;
+    } else if (lease.releaseDeletesServer === false && !options.deleteServer) {
+      lease.releaseDeletesServer = false;
+    } else {
+      delete lease.releaseDeletesServer;
+    }
     clearLeaseCleanupMetadata(lease);
     if (options.keep !== undefined) {
       lease.keep = options.keep;
@@ -5632,6 +6052,12 @@ function isAdminRoute(method: string, parts: string[]): boolean {
     return true;
   }
   if ((method === "GET" || method === "POST") && parts.join("/") === "v1/admin/aws-orphan-sweep") {
+    return true;
+  }
+  if (
+    (method === "GET" || method === "POST") &&
+    parts.join("/") === "v1/admin/azure-orphan-sweep"
+  ) {
     return true;
   }
   if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "leases" && Boolean(parts[3])) {
@@ -6627,12 +7053,44 @@ function activeSlugCollision(
   const now = Date.now();
   return leases.some(
     (lease) =>
-      lease.state === "active" &&
+      leaseIsLive(lease) &&
       Date.parse(lease.expiresAt) > now &&
       lease.owner === owner &&
       lease.org === org &&
       normalizeLeaseSlug(lease.slug) === slug,
   );
+}
+
+function leaseIsLive(lease: LeaseRecord): boolean {
+  return lease.state === "active" || lease.state === "provisioning";
+}
+
+function leaseNeedsCleanup(lease: LeaseRecord, now: number): boolean {
+  if (leaseIsLive(lease) && Date.parse(lease.expiresAt) <= now) {
+    return true;
+  }
+  return Boolean(!leaseIsLive(lease) && lease.cloudID && lease.cleanupError);
+}
+
+function provisionedLeaseRecord(
+  lease: LeaseRecord,
+  config: LeaseConfig,
+  server: ProviderMachine,
+  serverType: string,
+): LeaseRecord {
+  const providerProject = lease.providerProject ?? providerProjectForConfig(config);
+  return {
+    ...lease,
+    state: "active",
+    cloudID: server.cloudID,
+    serverID: server.id,
+    serverName: server.name,
+    serverType,
+    host: server.host,
+    region: server.region ?? lease.region ?? providerRegionForConfig(config) ?? "",
+    ...(providerProject ? { providerProject } : {}),
+    ...(server.hostID ? { hostId: server.hostID } : {}),
+  };
 }
 
 function nextLeaseAlarmTime(lease: LeaseRecord): number {
@@ -6851,9 +7309,7 @@ function withLeaseSSHSourceCIDRs(
 function activeAWSSSHSourceCIDRs(leases: LeaseRecord[], cidrs: string[]): string[] {
   return uniqueNonEmpty([
     ...leases.flatMap((lease) =>
-      lease.provider === "aws" && lease.state === "active"
-        ? (lease.network?.sshSourceCIDRs ?? [])
-        : [],
+      lease.provider === "aws" && leaseIsLive(lease) ? (lease.network?.sshSourceCIDRs ?? []) : [],
     ),
     ...cidrs,
   ]);
@@ -6863,7 +7319,7 @@ function hasUnknownActiveAWSSSHSource(leases: LeaseRecord[]): boolean {
   return leases.some(
     (lease) =>
       lease.provider === "aws" &&
-      lease.state === "active" &&
+      leaseIsLive(lease) &&
       (lease.network?.sshSourceCIDRs?.length ?? 0) === 0 &&
       !lease.network?.sshSourceCIDRsComplete,
   );
@@ -6876,6 +7332,16 @@ function awsOrphanSweepCandidate(
   region: string,
   graceSeconds: number,
 ): AWSOrphanSweepCandidate | undefined {
+  return cloudOrphanSweepCandidate(machine, activeLeases, activeCloudIDs, region, graceSeconds);
+}
+
+function cloudOrphanSweepCandidate(
+  machine: ProviderMachine,
+  activeLeases: Map<string, LeaseRecord>,
+  activeCloudIDs: Set<string>,
+  region: string,
+  graceSeconds: number,
+): CloudOrphanSweepCandidate | undefined {
   const cloudID = machine.cloudID || String(machine.id);
   if (activeCloudIDs.has(cloudID)) {
     return undefined;
@@ -6908,7 +7374,7 @@ function awsOrphanSweepCandidate(
   if (!reason) {
     return undefined;
   }
-  const candidate: AWSOrphanSweepCandidate = {
+  const candidate: CloudOrphanSweepCandidate = {
     region,
     cloudID,
     name: machine.name,
@@ -7187,10 +7653,12 @@ class AzureProvider implements CloudProvider {
   constructor(
     private readonly env: Env,
     private readonly storage?: DurableObjectStorage,
+    private readonly location?: string,
   ) {}
 
   private get client(): AzureClient {
     this.clientValue ??= new AzureClient(this.env, {
+      ...(this.location ? { location: this.location } : {}),
       deferredCleanup: (request) => this.recordDeferredCleanup(request),
     });
     return this.clientValue;

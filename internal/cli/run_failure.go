@@ -414,7 +414,7 @@ func printFailureDigestResults(w io.Writer, results *TestResultSummary) {
 	}
 }
 
-func runFailureDigestRoutingArgs(cfg Config) []string {
+func runFailureDigestRoutingArgs(cfg Config, leaseID string) []string {
 	args := []string{}
 	if strings.TrimSpace(cfg.Provider) != "" {
 		args = append(args, "--provider", cfg.Provider)
@@ -437,10 +437,10 @@ func runFailureDigestRoutingArgs(cfg Config) []string {
 	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
 		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
 	}
-	return appendProviderStopRoutingArgs(args, cfg)
+	return appendProviderStopRoutingArgs(args, cfg, leaseID)
 }
 
-func runFailureDigestSSHRoutingArgs(cfg Config) []string {
+func runFailureDigestSSHRoutingArgs(cfg Config, leaseID string) []string {
 	args := []string{}
 	if strings.TrimSpace(cfg.Provider) != "" {
 		args = append(args, "--provider", cfg.Provider)
@@ -463,7 +463,7 @@ func runFailureDigestSSHRoutingArgs(cfg Config) []string {
 	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
 		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
 	}
-	return args
+	return appendProviderStopRoutingArgs(args, cfg, leaseID)
 }
 
 func fallbackFailureDigestRoutingArgs(input runFailureDigestInput) []string {
@@ -481,7 +481,25 @@ func fallbackFailureDigestRoutingArgs(input runFailureDigestInput) []string {
 }
 
 func crabboxCommandString(args []string) string {
-	return "crabbox " + strings.Join(readableShellWords(args), " ")
+	env := []string{}
+	rest := make([]string, 0, len(args))
+	index := 0
+	for index < len(args) && isShellEnvAssignment(args[index]) {
+		env = append(env, args[index])
+		index++
+	}
+	if index < len(args) {
+		rest = append(rest, args[index])
+		index++
+	}
+	for index < len(args) && isShellEnvAssignment(args[index]) {
+		env = append(env, args[index])
+		index++
+	}
+	rest = append(rest, args[index:]...)
+	command := append(env, "crabbox")
+	command = append(command, rest...)
+	return readableShellCommand(command)
 }
 
 func canSuggestRunRetry(commandDisplay string) bool {

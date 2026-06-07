@@ -64,6 +64,8 @@ Each page below maps to an adapter under `internal/providers/<dir>`. The
 | [Multipass](multipass.md) | `multipass` | `mp`, `canonical-multipass` | Linux | no (local) |
 | [Tart](tart.md) | `tart` | `local-tart`, `macos-vm` | macOS | no (local) |
 | [exe.dev](exe-dev.md) | `exe-dev` | `exe`, `exedev` | Linux | no (direct) |
+| [KubeVirt](kubevirt.md) | `kubevirt` | `kubernetes-vm` | Linux | no (direct) |
+| [External](external.md) | `external` | `exec-provider` | Linux | no (direct) |
 | [Namespace Devbox](namespace-devbox.md) | `namespace-devbox` | `namespace`, `namespace-devboxes` | Linux | no (direct) |
 | [Semaphore](semaphore.md) | `semaphore` | `sem` | Linux | no (direct) |
 | [Sprites](sprites.md) | `sprites` | — | Linux | no (direct) |

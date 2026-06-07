@@ -2,6 +2,7 @@ package localcontainer
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -48,6 +49,18 @@ func recordedArgsForCommand(t *testing.T, runner *recordingRunner, command strin
 	return ""
 }
 
+func listenUnixSocketOrSkip(t *testing.T, path string) net.Listener {
+	t.Helper()
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) || strings.Contains(err.Error(), "invalid argument") {
+			t.Skipf("unix sockets are not permitted in this environment: %v", err)
+		}
+		t.Fatal(err)
+	}
+	return listener
+}
+
 func testBackend(runner *recordingRunner) *backend {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -86,6 +99,9 @@ func TestProviderAliases(t *testing.T) {
 }
 
 func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
+	dir := t.TempDir()
+	writeExecutable(t, filepath.Join(dir, "docker"))
+	t.Setenv("PATH", dir)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
 	}
@@ -126,9 +142,9 @@ func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
 		"--label\nslug=blue-lobster",
 		"--label\nssh_user=runner",
 		"--label\nwork_root=/workspace/crabbox",
+		":/tmp/crabbox-bootstrap.sh:ro",
 		"ubuntu:24.04",
-		"/bin/sh",
-		"-lc",
+		"/bin/sh\n/tmp/crabbox-bootstrap.sh",
 	} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("docker run args missing %q:\n%s", want, args)
@@ -136,6 +152,98 @@ func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
 	}
 	if strings.Contains(args, "-v\n/var/run/docker.sock:/var/run/docker.sock") {
 		t.Fatalf("docker socket should be opt-in:\n%s", args)
+	}
+}
+
+func TestConfigForRunFallsBackToPodmanWhenDockerIsUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	writeExecutable(t, filepath.Join(dir, "podman"))
+	t.Setenv("PATH", dir)
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	got := b.configForRun()
+	if got.LocalContainer.Runtime != "podman" {
+		t.Fatalf("runtime=%q, want podman", got.LocalContainer.Runtime)
+	}
+}
+
+func TestConfigForRunPrefersDockerWhenBothRuntimesExist(t *testing.T) {
+	dir := t.TempDir()
+	writeExecutable(t, filepath.Join(dir, "docker"))
+	writeExecutable(t, filepath.Join(dir, "podman"))
+	t.Setenv("PATH", dir)
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	got := b.configForRun()
+	if got.LocalContainer.Runtime != "docker" {
+		t.Fatalf("runtime=%q, want docker", got.LocalContainer.Runtime)
+	}
+}
+
+func TestConfigForRunHonorsExplicitRuntime(t *testing.T) {
+	dir := t.TempDir()
+	writeExecutable(t, filepath.Join(dir, "docker"))
+	t.Setenv("PATH", dir)
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	b.cfg.LocalContainer.Runtime = "podman"
+	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+	got := b.configForRun()
+	if got.LocalContainer.Runtime != "podman" {
+		t.Fatalf("runtime=%q, want explicit podman", got.LocalContainer.Runtime)
+	}
+}
+
+func TestConfigForRunHonorsExplicitDockerRuntime(t *testing.T) {
+	dir := t.TempDir()
+	writeExecutable(t, filepath.Join(dir, "podman"))
+	t.Setenv("PATH", dir)
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	b.cfg.LocalContainer.Runtime = "docker"
+	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+	got := b.configForRun()
+	if got.LocalContainer.Runtime != "docker" {
+		t.Fatalf("runtime=%q, want explicit docker", got.LocalContainer.Runtime)
+	}
+}
+
+func TestClaimScopeSkipsDockerContextForPodman(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	b.cfg.LocalContainer.Runtime = "podman"
+
+	scope := b.claimScope(context.Background())
+	if scope != "runtime:podman/context:default" {
+		t.Fatalf("scope=%q, want podman default scope", scope)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && call.Args[0] == "context" {
+			t.Fatalf("podman claim scope should not call context command: %#v", call.Args)
+		}
+	}
+}
+
+func TestRuntimeInfoSkipsDockerContextForPodman(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"version", "--format", "{{.Client.Version}}"}): {Stdout: "5.8.2\n"},
+		},
+	}
+	b := testBackend(runner)
+	b.cfg.LocalContainer.Runtime = "podman"
+
+	version, contextName := b.runtimeInfo(context.Background())
+	if version != "5.8.2" || contextName != "default" {
+		t.Fatalf("version=%q context=%q", version, contextName)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && call.Args[0] == "context" {
+			t.Fatalf("podman runtime info should not call context command: %#v", call.Args)
+		}
+	}
+}
+
+func writeExecutable(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -238,16 +346,9 @@ func TestCreateContainerCanMountDockerSocket(t *testing.T) {
 }
 
 func TestCreateContainerMountsDockerHostUnixSocket(t *testing.T) {
-	socketDir, err := os.MkdirTemp("/tmp", "cbx-sock-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(socketDir)
+	socketDir := t.TempDir()
 	socketPath := filepath.Join(socketDir, "docker.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	listener := listenUnixSocketOrSkip(t, socketPath)
 	defer listener.Close()
 	t.Setenv("DOCKER_HOST", "unix://"+socketPath)
 	runner := &recordingRunner{
@@ -291,6 +392,42 @@ func TestCreateContainerMountsDockerHostUnixSocket(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o777 {
 		t.Fatalf("lease work root mode=%#o want 0777", info.Mode().Perm())
+	}
+}
+
+func TestCreateContainerMountsPodmanSocketWithSecurityOpt(t *testing.T) {
+	socketDir := t.TempDir()
+	socketPath := filepath.Join(socketDir, "podman.sock")
+	listener := listenUnixSocketOrSkip(t, socketPath)
+	defer listener.Close()
+	t.Setenv("DOCKER_HOST", "unix://"+socketPath)
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.Runtime = "podman"
+	cfg.LocalContainer.DockerSocket = true
+	cfg.LocalContainer.WorkRoot = t.TempDir()
+	cfg.WorkRoot = cfg.LocalContainer.WorkRoot
+	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
+
+	_, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "run")
+	wantSocketPath := socketPath
+	if runtime.GOOS != "linux" {
+		wantSocketPath = "/var/run/docker.sock"
+	}
+	for _, want := range []string{
+		"-v\n" + wantSocketPath + ":/var/run/docker.sock",
+		"--security-opt\nlabel=disable",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("podman socket run args missing %q:\n%s", want, args)
+		}
 	}
 }
 
@@ -406,6 +543,10 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 	for _, want := range []string{
 		`home_dir="$(getent passwd "$user" | cut -d: -f6)"`,
 		`"$home_dir/.ssh/authorized_keys"`,
+		`sed -i 's/^[#[:space:]]*UsePAM[[:space:]].*/UsePAM no/' /etc/ssh/sshd_config`,
+		`printf '\nUsePAM no\n' >> /etc/ssh/sshd_config`,
+		`sed -i 's/^[#[:space:]]*PasswordAuthentication[[:space:]].*/PasswordAuthentication no/' /etc/ssh/sshd_config`,
+		`passwd -d "$user" >/dev/null 2>&1 || true`,
 		`if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ]; then`,
 		`chown -R "$user" "$home_dir/.ssh"`,
 		`chown -R "$user" "$home_dir/.ssh" "$work_root"`,
@@ -561,7 +702,7 @@ func TestBootstrapScriptSupportsDockerSocketCLI(t *testing.T) {
 		`rm -f /etc/apt/sources.list.d/docker.list`,
 		`apt-get install -y --no-install-recommends docker-ce-cli`,
 		`apt-get install -y --no-install-recommends docker.io`,
-		`docker socket requested but docker CLI is not installed`,
+		`Docker-compatible socket requested but docker CLI is not installed`,
 		`stat -c '%g' /var/run/docker.sock`,
 		`usermod -aG "$socket_group" "$user"`,
 	} {

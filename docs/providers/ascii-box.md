@@ -15,7 +15,7 @@ endpoints.
 ## When To Use
 
 Use ASCII Box when commands should run in ASCII-managed Ubuntu sandboxes through
-the `box` CLI's SSH endpoint. Use a delegated provider such as Upstash Box,
+the `box` CLI's SSH endpoint. Use a delegated provider such as [Upstash Box](https://upstash.com/docs/box/overall/quickstart),
 Modal, E2B, Islo, or Cloudflare when the provider owns command execution instead
 of exposing SSH.
 

@@ -139,6 +139,7 @@ Pick whichever matches your intent:
   [Static SSH](providers/ssh.md), [Railway](providers/railway.md),
   [RunPod](providers/runpod.md),
   [Blacksmith Testbox](providers/blacksmith-testbox.md),
+  [KubeVirt](providers/kubevirt.md), [External](providers/external.md),
   [Namespace Devbox](providers/namespace-devbox.md),
   [Semaphore](providers/semaphore.md), [Sprites](providers/sprites.md),
   [Daytona](providers/daytona.md), [Islo](providers/islo.md),

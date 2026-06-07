@@ -448,6 +448,12 @@ describe("azure provider", () => {
     expect(client.defaultLocation).toBe("eastus");
   });
 
+  it("rejects invalid configured Azure SSH CIDRs", () => {
+    expect(
+      () => new AzureClient({ ...baseEnv, CRABBOX_AZURE_SSH_CIDRS: "999.999.999.999/32" }),
+    ).toThrow("CRABBOX_AZURE_SSH_CIDRS entries must be valid");
+  });
+
   it("creates Windows VMs with Windows OS profile and bootstrap extension", async () => {
     const client = new AzureClient(baseEnv);
     const bodies: unknown[] = [];

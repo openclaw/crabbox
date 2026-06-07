@@ -7,7 +7,7 @@ Read this when you:
   directory;
 - change `internal/providers/upstashbox`.
 
-Upstash Box is a **delegated-run** provider. Crabbox calls the Upstash Box REST
+[Upstash Box](https://upstash.com/docs/box/overall/quickstart) is a **delegated-run** provider. Crabbox calls the Upstash Box REST
 API to manage Box lifecycle (create, get, list, delete), upload files, and run
 commands over its exec / exec-stream endpoints. Upstash owns the sandbox state
 and process transport; Crabbox owns local config, repo claims, archive sync and
@@ -153,4 +153,5 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 
 ## Related docs
 
+- [Crabbox setup guide](https://upstash.com/docs/box/guides/crabbox-setup) — Upstash's walkthrough for running Crabbox on Upstash Box.
 - [Provider backends](../provider-backends.md)

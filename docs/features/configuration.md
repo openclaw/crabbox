@@ -362,12 +362,14 @@ localContainer:
 
 `provider: docker`, `provider: container`, and `provider: local-docker` are
 aliases for `local-container`. The backend uses Docker-compatible CLI commands,
-so Docker Desktop, OrbStack, Colima, and similar local runtimes work when their
-Docker context is active. Set `dockerSocket: true` only when commands inside
-the lease must use the host Docker daemon; Crabbox then mounts the active local
-Unix Docker socket and rejects remote Docker contexts. With the socket enabled
-and no explicit work root, Crabbox chooses a host-visible cache work root so
-nested Docker bind mounts can see the synced checkout.
+so Docker Desktop, OrbStack, Colima, Podman, and similar local runtimes work.
+Crabbox detects an installed `docker` or `podman` CLI and uses that runtime; if
+both are present, `docker` is selected unless `localContainer.runtime` is set
+explicitly. Set `dockerSocket: true` only when commands inside the lease must
+use the host Docker-compatible API; Crabbox then mounts the active local Unix
+socket from `DOCKER_HOST` or the Docker context and rejects remote TCP contexts.
+With the socket enabled and no explicit work root, Crabbox chooses a host-visible
+cache work root so nested bind mounts can see the synced checkout.
 
 Use `--desktop --browser` to bootstrap Xvfb, XFCE, x11vnc, noVNC/websockify,
 desktop input tools, screenshot tools, ffmpeg, and a packaged browser inside
@@ -421,6 +423,50 @@ namespace:
   workRoot: /workspaces/crabbox
   deleteOnRelease: false
 ```
+
+### KubeVirt
+
+```yaml
+provider: kubevirt
+kubevirt:
+  kubectl: kubectl
+  virtctl: virtctl
+  kubeconfig: ""
+  context: ""
+  namespace: default
+  template: ./kubevirt-vm.yaml
+  sshUser: crabbox
+  sshKey: ""
+  sshPublicKey: ""
+  sshPort: "22"
+  workRoot: /home/crabbox/crabbox
+  deleteOnRelease: true
+```
+
+The template must be one KubeVirt `VirtualMachine` using `runStrategy: Manual`.
+Crabbox sets its name, namespace, and lease labels, replaces documented
+placeholders, applies it with `kubectl`, and starts it with `virtctl`.
+
+### External provider
+
+```yaml
+provider: external
+external:
+  command: node
+  args:
+    - /absolute/path/provider.mjs
+  config:
+    backend: vm
+    namespace: team-devboxes
+  workRoot: /workspaces/crabbox
+  routingFile: ""
+```
+
+The executable receives one versioned JSON request on stdin per lifecycle
+operation and returns one JSON response on stdout. This keeps internal control
+plane logic outside Crabbox while preserving normal SSH sync, rsync, WebVNC,
+and command execution. Crabbox writes private per-lease routing state for
+generated stop commands; `routingFile` is normally set only by those commands.
 
 ### Daytona
 

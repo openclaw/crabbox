@@ -6,7 +6,7 @@ import {
   awsPromotedAMIConfigKey,
   awsInstanceTypeCandidatesForTargetClass,
   sshPorts,
-  validCIDRs,
+  validatedCIDRs,
   type LeaseConfig,
 } from "./config";
 import { osImageSpec } from "./os-image";
@@ -1626,7 +1626,7 @@ export class EC2SpotClient {
 
 function awsSSHCIDRs(config: LeaseConfig, env: Env): string[] {
   const configured = [...config.awsSSHCIDRs, ...(env.CRABBOX_AWS_SSH_CIDRS ?? "").split(",")];
-  const cidrs = validCIDRs(configured);
+  const cidrs = validatedCIDRs(configured, "CRABBOX_AWS_SSH_CIDRS");
   if (cidrs.length === 0) {
     throw new Error(
       "AWS SSH source CIDR is required; set CRABBOX_AWS_SSH_CIDRS or use Cloudflare request IP forwarding",
