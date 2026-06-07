@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -1613,7 +1614,7 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		}
 	case "xcp-ng":
 		if strings.TrimSpace(cfg.XCPNg.APIURL) != "" {
-			args = append(args, "--xcp-ng-api-url", cfg.XCPNg.APIURL)
+			args = append(args, "--xcp-ng-api-url", routingSafeURL(cfg.XCPNg.APIURL))
 		}
 		if strings.TrimSpace(cfg.XCPNg.Username) != "" {
 			args = append(args, "--xcp-ng-username", cfg.XCPNg.Username)
@@ -1715,6 +1716,27 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		}
 	}
 	return args
+}
+
+func routingSafeURL(value string) string {
+	raw := strings.TrimSpace(value)
+	addedScheme := false
+	parseValue := raw
+	if parseValue != "" && !strings.Contains(parseValue, "://") {
+		parseValue = "https://" + parseValue
+		addedScheme = true
+	}
+	u, err := url.Parse(parseValue)
+	if err != nil || u.User == nil {
+		return value
+	}
+	safe := *u
+	safe.User = nil
+	out := safe.String()
+	if addedScheme {
+		out = strings.TrimPrefix(out, "https://")
+	}
+	return out
 }
 
 type runTimings struct {

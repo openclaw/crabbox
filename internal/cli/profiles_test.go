@@ -605,7 +605,7 @@ func TestRunStopCommandIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) {
 		Provider: "xcp-ng",
 		TargetOS: targetLinux,
 		XCPNg: XCPNgConfig{
-			APIURL:       "https://xcp-ng.example.test",
+			APIURL:       "https://pool-user:pool-pass@xcp-ng.example.test/path?view=1",
 			Username:     "root",
 			Password:     "xcp-ng-secret",
 			Template:     "ubuntu template",
@@ -623,7 +623,7 @@ func TestRunStopCommandIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) {
 	for _, want := range []string{
 		"--provider xcp-ng",
 		"--target linux",
-		"--xcp-ng-api-url https://xcp-ng.example.test",
+		"--xcp-ng-api-url 'https://xcp-ng.example.test/path?view=1'",
 		"--xcp-ng-username root",
 		"--xcp-ng-template 'ubuntu template'",
 		"--xcp-ng-template-uuid tpl-0001",
@@ -641,8 +641,10 @@ func TestRunStopCommandIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) {
 			t.Fatalf("stop command missing %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "xcp-ng-secret") || strings.Contains(got, "password") {
-		t.Fatalf("stop command leaked password material:\n%s", got)
+	for _, secret := range []string{"xcp-ng-secret", "pool-user", "pool-pass", "password"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("stop command leaked %q:\n%s", secret, got)
+		}
 	}
 }
 

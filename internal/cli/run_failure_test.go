@@ -432,7 +432,7 @@ func TestRunFailureDigestIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) 
 		Provider: "xcp-ng",
 		TargetOS: targetLinux,
 		XCPNg: XCPNgConfig{
-			APIURL:       "https://xcp-ng.example.test",
+			APIURL:       "pool-user:pool-pass@xcp-ng.example.test/path?view=1",
 			Username:     "root",
 			Password:     "xcp-ng-secret",
 			Template:     "ubuntu template",
@@ -451,7 +451,7 @@ func TestRunFailureDigestIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) 
 	for _, want := range []string{
 		"--provider xcp-ng",
 		"--target linux",
-		"--xcp-ng-api-url https://xcp-ng.example.test",
+		"--xcp-ng-api-url xcp-ng.example.test/path?view=1",
 		"--xcp-ng-username root",
 		"--xcp-ng-template ubuntu template",
 		"--xcp-ng-template-uuid tpl-0001",
@@ -468,8 +468,10 @@ func TestRunFailureDigestIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) 
 			t.Fatalf("failure digest routing missing %q:\n%v", want, args)
 		}
 	}
-	if strings.Contains(joined, "xcp-ng-secret") || strings.Contains(joined, "password") {
-		t.Fatalf("failure digest routing leaked password material: %v", args)
+	for _, secret := range []string{"xcp-ng-secret", "pool-user", "pool-pass", "password"} {
+		if strings.Contains(joined, secret) {
+			t.Fatalf("failure digest routing leaked %q: %v", secret, args)
+		}
 	}
 }
 
