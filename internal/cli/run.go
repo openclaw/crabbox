@@ -1407,7 +1407,7 @@ afterSync:
 			ShellMode:      *shellMode || useShell,
 			ScriptMode:     script != nil,
 			RoutingArgs:    runFailureDigestRoutingArgs(cfg, leaseID),
-			SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg),
+			SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg, leaseID),
 			StopCommand:    report.StopCommand,
 			Classification: classification,
 			Phases:         timings.commandPhases,

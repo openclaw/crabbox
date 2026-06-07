@@ -2277,13 +2277,13 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	}
 	if file.KubeVirt != nil {
 		if file.KubeVirt.Kubectl != "" {
-			cfg.KubeVirt.Kubectl = file.KubeVirt.Kubectl
+			cfg.KubeVirt.Kubectl = expandUserPath(file.KubeVirt.Kubectl)
 		}
 		if file.KubeVirt.Virtctl != "" {
-			cfg.KubeVirt.Virtctl = file.KubeVirt.Virtctl
+			cfg.KubeVirt.Virtctl = expandUserPath(file.KubeVirt.Virtctl)
 		}
 		if file.KubeVirt.Kubeconfig != "" {
-			cfg.KubeVirt.Kubeconfig = file.KubeVirt.Kubeconfig
+			cfg.KubeVirt.Kubeconfig = expandUserPath(file.KubeVirt.Kubeconfig)
 		}
 		if file.KubeVirt.Context != "" {
 			cfg.KubeVirt.Context = file.KubeVirt.Context
@@ -2292,16 +2292,16 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.KubeVirt.Namespace = file.KubeVirt.Namespace
 		}
 		if file.KubeVirt.Template != "" {
-			cfg.KubeVirt.Template = file.KubeVirt.Template
+			cfg.KubeVirt.Template = expandUserPath(file.KubeVirt.Template)
 		}
 		if file.KubeVirt.SSHUser != "" {
 			cfg.KubeVirt.SSHUser = file.KubeVirt.SSHUser
 		}
 		if file.KubeVirt.SSHKey != "" {
-			cfg.KubeVirt.SSHKey = file.KubeVirt.SSHKey
+			cfg.KubeVirt.SSHKey = expandUserPath(file.KubeVirt.SSHKey)
 		}
 		if file.KubeVirt.SSHPublicKey != "" {
-			cfg.KubeVirt.SSHPublicKey = file.KubeVirt.SSHPublicKey
+			cfg.KubeVirt.SSHPublicKey = expandUserPath(file.KubeVirt.SSHPublicKey)
 		}
 		if file.KubeVirt.SSHPort != "" {
 			cfg.KubeVirt.SSHPort = file.KubeVirt.SSHPort
@@ -3247,15 +3247,15 @@ func applyEnv(cfg *Config) error {
 	cfg.Blacksmith.Workflow = getenv("CRABBOX_BLACKSMITH_WORKFLOW", cfg.Blacksmith.Workflow)
 	cfg.Blacksmith.Job = getenv("CRABBOX_BLACKSMITH_JOB", cfg.Blacksmith.Job)
 	cfg.Blacksmith.Ref = getenv("CRABBOX_BLACKSMITH_REF", cfg.Blacksmith.Ref)
-	cfg.KubeVirt.Kubectl = getenv("CRABBOX_KUBEVIRT_KUBECTL", cfg.KubeVirt.Kubectl)
-	cfg.KubeVirt.Virtctl = getenv("CRABBOX_KUBEVIRT_VIRTCTL", cfg.KubeVirt.Virtctl)
-	cfg.KubeVirt.Kubeconfig = getenv("CRABBOX_KUBEVIRT_KUBECONFIG", cfg.KubeVirt.Kubeconfig)
+	cfg.KubeVirt.Kubectl = expandUserPath(getenv("CRABBOX_KUBEVIRT_KUBECTL", cfg.KubeVirt.Kubectl))
+	cfg.KubeVirt.Virtctl = expandUserPath(getenv("CRABBOX_KUBEVIRT_VIRTCTL", cfg.KubeVirt.Virtctl))
+	cfg.KubeVirt.Kubeconfig = expandUserPath(getenv("CRABBOX_KUBEVIRT_KUBECONFIG", cfg.KubeVirt.Kubeconfig))
 	cfg.KubeVirt.Context = getenv("CRABBOX_KUBEVIRT_CONTEXT", cfg.KubeVirt.Context)
 	cfg.KubeVirt.Namespace = getenv("CRABBOX_KUBEVIRT_NAMESPACE", cfg.KubeVirt.Namespace)
-	cfg.KubeVirt.Template = getenv("CRABBOX_KUBEVIRT_TEMPLATE", cfg.KubeVirt.Template)
+	cfg.KubeVirt.Template = expandUserPath(getenv("CRABBOX_KUBEVIRT_TEMPLATE", cfg.KubeVirt.Template))
 	cfg.KubeVirt.SSHUser = getenv("CRABBOX_KUBEVIRT_SSH_USER", cfg.KubeVirt.SSHUser)
-	cfg.KubeVirt.SSHKey = getenv("CRABBOX_KUBEVIRT_SSH_KEY", cfg.KubeVirt.SSHKey)
-	cfg.KubeVirt.SSHPublicKey = getenv("CRABBOX_KUBEVIRT_SSH_PUBLIC_KEY", cfg.KubeVirt.SSHPublicKey)
+	cfg.KubeVirt.SSHKey = expandUserPath(getenv("CRABBOX_KUBEVIRT_SSH_KEY", cfg.KubeVirt.SSHKey))
+	cfg.KubeVirt.SSHPublicKey = expandUserPath(getenv("CRABBOX_KUBEVIRT_SSH_PUBLIC_KEY", cfg.KubeVirt.SSHPublicKey))
 	cfg.KubeVirt.SSHPort = getenv("CRABBOX_KUBEVIRT_SSH_PORT", cfg.KubeVirt.SSHPort)
 	cfg.KubeVirt.WorkRoot = getenv("CRABBOX_KUBEVIRT_WORK_ROOT", cfg.KubeVirt.WorkRoot)
 	if value, ok := getenvBool("CRABBOX_KUBEVIRT_DELETE_ON_RELEASE"); ok {

@@ -12,8 +12,8 @@ and reaches guest SSH through:
 virtctl port-forward --stdio=true vm/<name>/<namespace> %p
 ```
 
-That ProxyCommand is used by normal SSH, rsync, command execution, and WebVNC
-tunnels. The guest does not need a public IP or Kubernetes `Service`.
+That ProxyCommand is used by normal SSH, rsync, command execution, and native
+VNC forwarding. The guest does not need a public IP or Kubernetes `Service`.
 
 ## Prerequisites
 
@@ -49,11 +49,16 @@ kubevirt:
 ```
 
 When `sshKey` is empty, Crabbox generates a per-lease key. When it is set,
-`sshPublicKey` may contain the matching public key; otherwise Crabbox reads
-`<sshKey>.pub`.
+`sshPublicKey` may contain the matching public key text or a public-key file
+path; otherwise Crabbox reads `<sshKey>.pub`.
 
 Provider flags use the `--kubevirt-*` prefix. Environment overrides use the
 `CRABBOX_KUBEVIRT_*` prefix.
+
+Local path fields expand `~` from config files, environment overrides, and
+flags. This applies to `kubectl`, `virtctl`, `kubeconfig`, `template`,
+`sshKey`, and file-form `sshPublicKey`. `workRoot` is a guest path and is not
+shell-expanded.
 
 Local lease claims are scoped by the same kubeconfig, context, and namespace
 tuple that Crabbox passes to `kubectl` and `virtctl`. `kubevirt.context` is

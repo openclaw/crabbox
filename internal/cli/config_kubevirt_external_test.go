@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -47,6 +48,70 @@ external:
 	}
 	if cfg.External.Command != "node" || len(cfg.External.Args) != 3 || cfg.External.Config["sku"] != "cpu32" || cfg.External.WorkRoot != "/workspaces/project" || cfg.External.RoutingFile != "/tmp/external-routing.json" {
 		t.Fatalf("external=%#v", cfg.External)
+	}
+}
+
+func TestLoadKubeVirtConfigExpandsUserPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := `kubevirt:
+  kubectl: ~/bin/kubectl
+  virtctl: ~/bin/virtctl
+  kubeconfig: ~/.kube/config
+  template: ~/templates/vm.yaml
+  sshKey: ~/.ssh/id_ed25519
+  sshPublicKey: ~/.ssh/id_ed25519.pub
+`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := readFileConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	for label, got := range map[string]string{
+		"kubectl":      cfg.KubeVirt.Kubectl,
+		"virtctl":      cfg.KubeVirt.Virtctl,
+		"kubeconfig":   cfg.KubeVirt.Kubeconfig,
+		"template":     cfg.KubeVirt.Template,
+		"sshKey":       cfg.KubeVirt.SSHKey,
+		"sshPublicKey": cfg.KubeVirt.SSHPublicKey,
+	} {
+		if !filepath.IsAbs(got) || !strings.HasPrefix(got, home+string(os.PathSeparator)) {
+			t.Fatalf("%s path=%q home=%q", label, got, home)
+		}
+	}
+}
+
+func TestKubeVirtEnvExpandsUserPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CRABBOX_KUBEVIRT_KUBECTL", "~/bin/kubectl")
+	t.Setenv("CRABBOX_KUBEVIRT_VIRTCTL", "~/bin/virtctl")
+	t.Setenv("CRABBOX_KUBEVIRT_KUBECONFIG", "~/.kube/config")
+	t.Setenv("CRABBOX_KUBEVIRT_TEMPLATE", "~/templates/vm.yaml")
+	t.Setenv("CRABBOX_KUBEVIRT_SSH_KEY", "~/.ssh/id_ed25519")
+	t.Setenv("CRABBOX_KUBEVIRT_SSH_PUBLIC_KEY", "~/.ssh/id_ed25519.pub")
+	cfg := baseConfig()
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	for label, got := range map[string]string{
+		"kubectl":      cfg.KubeVirt.Kubectl,
+		"virtctl":      cfg.KubeVirt.Virtctl,
+		"kubeconfig":   cfg.KubeVirt.Kubeconfig,
+		"template":     cfg.KubeVirt.Template,
+		"sshKey":       cfg.KubeVirt.SSHKey,
+		"sshPublicKey": cfg.KubeVirt.SSHPublicKey,
+	} {
+		if !filepath.IsAbs(got) || !strings.HasPrefix(got, home+string(os.PathSeparator)) {
+			t.Fatalf("%s path=%q home=%q", label, got, home)
+		}
 	}
 }
 

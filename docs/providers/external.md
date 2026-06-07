@@ -7,7 +7,8 @@ provider-specific code in Crabbox.
 
 The executable owns provisioning, inventory, resume, release, and any private
 authentication. It returns an SSH target; Crabbox then owns dirty-tree sync,
-rsync, commands, results, SSH sessions, and WebVNC tunnels.
+rsync, commands, results, SSH sessions, and native VNC forwarding when the
+provider returns desktop metadata.
 
 ## Configuration
 
@@ -28,10 +29,12 @@ external:
 
 `external.config` is arbitrary YAML passed as JSON to the executable. Keep
 secrets in the executable's normal credential store or environment rather than
-the Crabbox config file. Generated stop commands store resolved command,
-arguments, and config in a private per-lease routing file and print only that
-file's opaque path. Routing files use mode `0600` and are removed after
-successful release.
+the Crabbox config file. Generated SSH, retry, and stop commands store resolved
+command, arguments, and config in a private per-lease routing file and print
+only that file's opaque path. Kept acquisition failures persist this routing
+before the SSH readiness wait, so the printed recovery commands can still
+resolve or release the lease. Routing files use mode `0600` and are removed
+after successful release.
 
 Local claims are scoped to a fingerprint of `external.command`, `external.args`,
 and `external.config`. This lets multiple external backends or namespaces reuse

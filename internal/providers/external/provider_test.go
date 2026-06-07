@@ -366,6 +366,33 @@ func TestResolvePersistsRoutingBeforeSSHReadiness(t *testing.T) {
 	}
 }
 
+func TestAcquirePersistsRoutingBeforeSSHReadinessForKeptLease(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	runner := &sequenceRunner{responses: []string{
+		`{"protocolVersion":1,"lease":{"slug":"shared","name":"devbox-shared","ssh":{"host":"127.0.0.1","user":"tester","port":"1"}}}`,
+	}}
+	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := backend.Acquire(ctx, core.AcquireRequest{RequestedSlug: "shared", Keep: true}); err == nil {
+		t.Fatal("expected canceled SSH readiness")
+	}
+	if len(runner.requests) == 0 || runner.requests[0].Desired == nil {
+		t.Fatalf("requests=%#v", runner.requests)
+	}
+	leaseID := runner.requests[0].Desired.LeaseID
+	path, err := core.ExternalRoutingPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("routing state missing for %s: %v", leaseID, err)
+	}
+	if len(runner.operations) != 1 || runner.operations[0] != "acquire" {
+		t.Fatalf("operations=%#v", runner.operations)
+	}
+}
+
 func TestResolvePreservesClaimedLifecycleLabels(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	repo := t.TempDir()
@@ -506,6 +533,7 @@ func (processRunner) Run(ctx context.Context, req core.LocalCommandRequest) (cor
 type sequenceRunner struct {
 	responses  []string
 	operations []string
+	requests   []protocolRequest
 }
 
 func (r *sequenceRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
@@ -514,6 +542,7 @@ func (r *sequenceRunner) Run(_ context.Context, req core.LocalCommandRequest) (c
 		return core.LocalCommandResult{}, err
 	}
 	r.operations = append(r.operations, request.Operation)
+	r.requests = append(r.requests, request)
 	response := r.responses[0]
 	r.responses = r.responses[1:]
 	return core.LocalCommandResult{Stdout: response}, nil

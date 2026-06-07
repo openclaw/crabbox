@@ -47,13 +47,13 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		return nil
 	}
 	if core.FlagWasSet(fs, "kubevirt-kubectl") {
-		cfg.KubeVirt.Kubectl = *v.Kubectl
+		cfg.KubeVirt.Kubectl = core.ExpandUserPath(*v.Kubectl)
 	}
 	if core.FlagWasSet(fs, "kubevirt-virtctl") {
-		cfg.KubeVirt.Virtctl = *v.Virtctl
+		cfg.KubeVirt.Virtctl = core.ExpandUserPath(*v.Virtctl)
 	}
 	if core.FlagWasSet(fs, "kubevirt-kubeconfig") {
-		cfg.KubeVirt.Kubeconfig = *v.Kubeconfig
+		cfg.KubeVirt.Kubeconfig = core.ExpandUserPath(*v.Kubeconfig)
 	}
 	if core.FlagWasSet(fs, "kubevirt-context") {
 		cfg.KubeVirt.Context = *v.Context
@@ -62,16 +62,16 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		cfg.KubeVirt.Namespace = *v.Namespace
 	}
 	if core.FlagWasSet(fs, "kubevirt-template") {
-		cfg.KubeVirt.Template = *v.Template
+		cfg.KubeVirt.Template = core.ExpandUserPath(*v.Template)
 	}
 	if core.FlagWasSet(fs, "kubevirt-ssh-user") {
 		cfg.KubeVirt.SSHUser = *v.SSHUser
 	}
 	if core.FlagWasSet(fs, "kubevirt-ssh-key") {
-		cfg.KubeVirt.SSHKey = *v.SSHKey
+		cfg.KubeVirt.SSHKey = core.ExpandUserPath(*v.SSHKey)
 	}
 	if core.FlagWasSet(fs, "kubevirt-ssh-public-key") {
-		cfg.KubeVirt.SSHPublicKey = *v.SSHPublicKey
+		cfg.KubeVirt.SSHPublicKey = core.ExpandUserPath(*v.SSHPublicKey)
 	}
 	if core.FlagWasSet(fs, "kubevirt-ssh-port") {
 		cfg.KubeVirt.SSHPort = *v.SSHPort

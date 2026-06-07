@@ -2,6 +2,7 @@ package kubevirt
 
 import (
 	"context"
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
@@ -145,6 +146,60 @@ func TestAcquireRequiresProvisioningTemplate(t *testing.T) {
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("calls=%#v", runner.calls)
+	}
+}
+
+func TestFlagsExpandKubeVirtUserPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := testConfig(t)
+	fs := flag.NewFlagSet("kubevirt", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{
+		"--kubevirt-kubectl=~/bin/kubectl",
+		"--kubevirt-virtctl=~/bin/virtctl",
+		"--kubevirt-kubeconfig=~/.kube/config",
+		"--kubevirt-template=~/templates/vm.yaml",
+		"--kubevirt-ssh-key=~/.ssh/id_ed25519",
+		"--kubevirt-ssh-public-key=~/.ssh/id_ed25519.pub",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	for label, got := range map[string]string{
+		"kubectl":      cfg.KubeVirt.Kubectl,
+		"virtctl":      cfg.KubeVirt.Virtctl,
+		"kubeconfig":   cfg.KubeVirt.Kubeconfig,
+		"template":     cfg.KubeVirt.Template,
+		"sshKey":       cfg.KubeVirt.SSHKey,
+		"sshPublicKey": cfg.KubeVirt.SSHPublicKey,
+	} {
+		if !filepath.IsAbs(got) || !strings.HasPrefix(got, home+string(os.PathSeparator)) {
+			t.Fatalf("%s path=%q home=%q", label, got, home)
+		}
+	}
+}
+
+func TestSSHKeyReadsFileFormPublicKey(t *testing.T) {
+	cfg := testConfig(t)
+	dir := t.TempDir()
+	privateKey := filepath.Join(dir, "id_ed25519")
+	publicKeyPath := privateKey + ".pub"
+	const publicKey = "ssh-ed25519 AAAA from-file"
+	if err := os.WriteFile(publicKeyPath, []byte(publicKey+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.KubeVirt.SSHKey = privateKey
+	cfg.KubeVirt.SSHPublicKey = publicKeyPath
+	backend := &leaseBackend{cfg: cfg}
+	keyPath, gotPublicKey, err := backend.sshKey("cbx_123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyPath != privateKey || gotPublicKey != publicKey {
+		t.Fatalf("keyPath=%q publicKey=%q", keyPath, gotPublicKey)
 	}
 }
 

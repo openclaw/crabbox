@@ -488,17 +488,69 @@ func (b *leaseBackend) sshKey(leaseID string) (string, string, error) {
 		return core.EnsureTestboxKey(leaseID)
 	}
 	if publicKey != "" {
+		resolved, err := kubeVirtPublicKeyValue(publicKey)
+		if err != nil {
+			return "", "", err
+		}
+		publicKey = resolved
+		if publicKey == "" {
+			return "", "", core.Exit(2, "KubeVirt SSH public key is empty")
+		}
 		return keyPath, publicKey, nil
 	}
-	data, err := os.ReadFile(keyPath + ".pub")
+	publicKey, err := readKubeVirtPublicKeyFile(keyPath + ".pub")
 	if err != nil {
-		return "", "", core.Exit(2, "read KubeVirt SSH public key %s.pub: %v", keyPath, err)
-	}
-	publicKey = strings.TrimSpace(string(data))
-	if publicKey == "" {
-		return "", "", core.Exit(2, "KubeVirt SSH public key %s.pub is empty", keyPath)
+		return "", "", err
 	}
 	return keyPath, publicKey, nil
+}
+
+func kubeVirtPublicKeyValue(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || looksLikeInlineSSHPublicKey(value) {
+		return value, nil
+	}
+	if publicKey, err := readKubeVirtPublicKeyFile(value); err == nil {
+		return publicKey, nil
+	} else if looksLikePublicKeyPath(value) {
+		return "", err
+	}
+	return value, nil
+}
+
+func readKubeVirtPublicKeyFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", core.Exit(2, "read KubeVirt SSH public key %s: %v", path, err)
+	}
+	publicKey := strings.TrimSpace(string(data))
+	if publicKey == "" {
+		return "", core.Exit(2, "KubeVirt SSH public key %s is empty", path)
+	}
+	return publicKey, nil
+}
+
+func looksLikeInlineSSHPublicKey(value string) bool {
+	fields := strings.Fields(value)
+	if len(fields) < 2 {
+		return false
+	}
+	switch fields[0] {
+	case "ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com":
+		return true
+	default:
+		return false
+	}
+}
+
+func looksLikePublicKeyPath(value string) bool {
+	if strings.HasPrefix(value, "/") || strings.HasPrefix(value, "./") || strings.HasPrefix(value, "../") || strings.HasPrefix(value, "~/") {
+		return true
+	}
+	if strings.ContainsAny(value, " \t\r\n") {
+		return false
+	}
+	return strings.Contains(value, string(os.PathSeparator)) || strings.HasSuffix(value, ".pub")
 }
 
 func (b *leaseBackend) resolveSSHKey(leaseID string) (string, error) {

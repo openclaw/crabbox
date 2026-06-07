@@ -54,20 +54,21 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 		}
 		return core.LeaseTarget{}, err
 	}
-	if err := core.WaitForSSHReady(ctx, &lease.SSH, b.rt.Stderr, "external provider SSH", core.BootstrapWaitTimeout(b.cfg)); err != nil {
-		if !req.Keep {
-			_, _ = b.invoke(context.Background(), protocolRequest{Operation: "release", Lease: leaseForProtocol(lease)})
-		}
-		return core.LeaseTarget{}, err
-	}
-	lease.Server.Status = "ready"
-	lease.Server.Labels["state"] = "ready"
 	if _, err := core.PersistExternalRouting(lease.LeaseID, b.cfg.External); err != nil {
 		if !req.Keep {
 			_, _ = b.invoke(context.Background(), protocolRequest{Operation: "release", Lease: leaseForProtocol(lease)})
 		}
 		return core.LeaseTarget{}, core.Exit(2, "%v", err)
 	}
+	if err := core.WaitForSSHReady(ctx, &lease.SSH, b.rt.Stderr, "external provider SSH", core.BootstrapWaitTimeout(b.cfg)); err != nil {
+		if !req.Keep {
+			_, _ = b.invoke(context.Background(), protocolRequest{Operation: "release", Lease: leaseForProtocol(lease)})
+			core.RemoveExternalRouting(lease.LeaseID)
+		}
+		return core.LeaseTarget{}, err
+	}
+	lease.Server.Status = "ready"
+	lease.Server.Labels["state"] = "ready"
 	if err := b.claimLeaseForRepo(lease.LeaseID, leaseSlugForClaim(lease, slug), req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
 			_, _ = b.invoke(context.Background(), protocolRequest{Operation: "release", Lease: leaseForProtocol(lease)})
