@@ -34,14 +34,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! command -v sbx >/dev/null 2>&1; then
-  classify_blocker "command -v sbx" 127 "sbx not found on PATH"
-  exit 127
-fi
-
-run_capture "sbx version" sbx version >/dev/null
-run_capture "sbx ls --json" sbx ls --json >/dev/null
-
 go build -trimpath -o bin/crabbox ./cmd/crabbox
 
 bin/crabbox doctor --provider docker-sandbox

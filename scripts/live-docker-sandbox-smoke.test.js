@@ -1,0 +1,81 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import test from "node:test";
+
+const root = path.resolve(import.meta.dirname, "..");
+
+function writeExecutable(file, body) {
+  fs.writeFileSync(file, body, "utf8");
+  fs.chmodSync(file, 0o755);
+}
+
+test("live docker sandbox smoke honors configured alternate sbx path", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-sbx-smoke-"));
+  const bin = path.join(dir, "bin");
+  const tempRoot = path.join(dir, "repo");
+  const tempScripts = path.join(tempRoot, "scripts");
+  const fakeSbx = path.join(dir, "fake-sbx");
+  const calls = path.join(dir, "calls.log");
+  fs.mkdirSync(bin);
+  fs.mkdirSync(tempScripts, { recursive: true });
+  fs.copyFileSync(
+    path.join(root, "scripts", "live-docker-sandbox-smoke.sh"),
+    path.join(tempScripts, "live-docker-sandbox-smoke.sh"),
+  );
+  fs.chmodSync(path.join(tempScripts, "live-docker-sandbox-smoke.sh"), 0o755);
+
+  writeExecutable(
+    fakeSbx,
+    `#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+`,
+  );
+
+  writeExecutable(
+    path.join(bin, "go"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p bin
+cat <<'EOF' > bin/crabbox
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${calls}"
+if [[ "$1" == "doctor" ]]; then
+  if [[ -z "\${CRABBOX_DOCKER_SANDBOX_CLI:-}" || ! -x "\${CRABBOX_DOCKER_SANDBOX_CLI}" ]]; then
+    printf 'missing configured docker sandbox cli\n' >&2
+    exit 92
+  fi
+fi
+exit 0
+EOF
+chmod +x bin/crabbox
+`,
+  );
+
+  const result = spawnSync("bash", [path.join(tempScripts, "live-docker-sandbox-smoke.sh")], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}/bin${path.delimiter}/usr/bin`,
+      CRABBOX_DOCKER_SANDBOX_CLI: fakeSbx,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /classification=live_sbx_smoke_passed/);
+  assert.doesNotMatch(result.stderr, /sbx not found on PATH/);
+
+  const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
+  assert.equal(seen.length, 6, JSON.stringify(seen));
+  assert.equal(seen[0], "doctor --provider docker-sandbox");
+  assert.match(seen[1], /^warmup --provider docker-sandbox --slug docker-sandbox-smoke-\d{14}-\d+ --keep$/);
+  assert.match(seen[2], /^run --provider docker-sandbox --id docker-sandbox-smoke-\d{14}-\d+ -- echo ok$/);
+  assert.match(seen[3], /^run --provider docker-sandbox --id docker-sandbox-smoke-\d{14}-\d+ -- pwd$/);
+  assert.match(seen[4], /^list --provider docker-sandbox --json$/);
+  assert.match(seen[5], /^stop --provider docker-sandbox docker-sandbox-smoke-\d{14}-\d+$/);
+});

@@ -165,15 +165,18 @@ Common blockers:
 
 ## Live Smoke
 
-When the host has a usable `sbx` CLI, run:
+When the host has a usable Docker Sandbox provider configuration, run:
 
 ```sh
 scripts/live-docker-sandbox-smoke.sh
 ```
 
-The script builds `bin/crabbox`, checks `sbx version` and `sbx ls --json`,
-creates a unique Crabbox-owned sandbox, runs `echo ok` and `pwd`, lists it, and
-then stops it. If `sbx` is missing, logged out, or blocked by host prerequisites,
+The script builds `bin/crabbox`, runs `crabbox doctor --provider docker-sandbox`
+as the authoritative preflight, creates a unique Crabbox-owned sandbox, runs
+`echo ok` and `pwd`, lists it, and then stops it. The doctor step honors
+`dockerSandbox.cliPath`, `--docker-sandbox-cli`, and
+`CRABBOX_DOCKER_SANDBOX_CLI`, so the smoke script works even when `sbx` is not on
+`PATH`. If the provider is missing, logged out, or blocked by host prerequisites,
 the script reports `environment_blocked` with the failing command.
 
 Related docs:
