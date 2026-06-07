@@ -38,6 +38,31 @@ func TestCloudInitPayloadIncludesSSHUserKeyAndBootstrap(t *testing.T) {
 	}
 }
 
+func TestCloudInitPayloadConfiguresSSHPortContract(t *testing.T) {
+	cfg := testConfig()
+	cfg.SSHPort = "2222"
+	cfg.SSHFallbackPorts = []string{"22"}
+	payload, err := newCloudInitPayload(cfg, "cbx_lease", "blue", "ssh-ed25519 AAAATEST crabbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"/etc/ssh/sshd_config.d/99-crabbox-port.conf",
+		"Port 2222",
+		"Port 22",
+		"PasswordAuthentication no",
+		"systemctl enable ssh || true",
+		"timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true",
+	} {
+		if !strings.Contains(payload.UserData, want) {
+			t.Fatalf("user-data missing %q:\n%s", want, payload.UserData)
+		}
+	}
+	if strings.Contains(payload.UserData, "systemctl, enable, --now, ssh") {
+		t.Fatalf("user-data still uses blocking ssh enable command:\n%s", payload.UserData)
+	}
+}
+
 func TestCloudInitPayloadQuotesWorkRootInRunCommands(t *testing.T) {
 	cfg := testConfig()
 	cfg.XCPNg.WorkRoot = "/work/crabbox,with-comma"

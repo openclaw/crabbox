@@ -24,6 +24,10 @@ func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgClou
 		return xcpNgCloudInitPayload{}, exit(2, "xcp-ng cloud-init public key is required")
 	}
 	workRoot := core.Blank(cfg.XCPNg.WorkRoot, cfg.WorkRoot)
+	portLines := ""
+	for _, port := range xcpNgSSHPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts) {
+		portLines += fmt.Sprintf("      Port %s\n", port)
+	}
 	var userData bytes.Buffer
 	fmt.Fprintf(&userData, "#cloud-config\n")
 	fmt.Fprintf(&userData, "users:\n")
@@ -41,6 +45,11 @@ func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgClou
 	fmt.Fprintf(&userData, "  - jq\n")
 	fmt.Fprintf(&userData, "  - openssh-server\n")
 	fmt.Fprintf(&userData, "write_files:\n")
+	fmt.Fprintf(&userData, "  - path: /etc/ssh/sshd_config.d/99-crabbox-port.conf\n")
+	fmt.Fprintf(&userData, "    permissions: '0644'\n")
+	fmt.Fprintf(&userData, "    content: |\n")
+	fmt.Fprintf(&userData, "%s", portLines)
+	fmt.Fprintf(&userData, "      PasswordAuthentication no\n")
 	fmt.Fprintf(&userData, "  - path: /usr/local/bin/crabbox-ready\n")
 	fmt.Fprintf(&userData, "    permissions: '0755'\n")
 	fmt.Fprintf(&userData, "    content: |\n")
@@ -55,11 +64,30 @@ func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgClou
 	fmt.Fprintf(&userData, "runcmd:\n")
 	fmt.Fprintf(&userData, "  - [mkdir, -p, %s, /var/cache/crabbox/pnpm, /var/cache/crabbox/npm, /var/lib/crabbox]\n", yamlSingleQuotedScalar(workRoot))
 	fmt.Fprintf(&userData, "  - [chown, -R, %s, %s, /var/cache/crabbox]\n", yamlSingleQuotedScalar(user+":"+user), yamlSingleQuotedScalar(workRoot))
-	fmt.Fprintf(&userData, "  - [systemctl, enable, --now, ssh]\n")
+	fmt.Fprintf(&userData, "  - |\n")
+	fmt.Fprintf(&userData, "    systemctl enable ssh || true\n")
+	fmt.Fprintf(&userData, "    timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true\n")
 	fmt.Fprintf(&userData, "  - [touch, /var/lib/crabbox/bootstrapped]\n")
 	fmt.Fprintf(&userData, "  - [/usr/local/bin/crabbox-ready]\n")
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: crabbox-%s\n", shellSafeCloudInitScalar(leaseID), shellSafeCloudInitScalar(slug))
 	return xcpNgCloudInitPayload{UserData: userData.String(), MetaData: metaData}, nil
+}
+
+func xcpNgSSHPortCandidates(port string, fallbackPorts []string) []string {
+	if fallbackPorts == nil {
+		fallbackPorts = []string{"22"}
+	}
+	seen := make(map[string]bool, len(fallbackPorts)+1)
+	out := make([]string, 0, len(fallbackPorts)+1)
+	for _, candidate := range append([]string{port}, fallbackPorts...) {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		out = append(out, candidate)
+	}
+	return out
 }
 
 func shellQuote(value string) string {
