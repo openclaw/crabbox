@@ -1217,6 +1217,106 @@ func TestStopRemovesStaleClaimWhenSandboxIsAlreadyGone(t *testing.T) {
 	}
 }
 
+func TestDockerSandboxPorts(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := leasePrefix + "crabbox-my-app-ports"
+	if err := claimLeaseForRepoProviderPond(leaseID, "ports", providerName, "", t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	runner := newRunner(map[string]scriptedReply{
+		"ports": {stdout: "127.0.0.1:41000->3000/tcp\n"},
+	}, nil)
+	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+	out, err := backend.Ports(context.Background(), PortsRequest{ID: "ports", Publish: []string{"3000"}})
+	if err != nil {
+		t.Fatalf("Ports err=%v", err)
+	}
+	if out != "127.0.0.1:41000->3000/tcp" {
+		t.Fatalf("ports output=%q", out)
+	}
+	call := findCall(runner, "ports")
+	if call == nil || !reflect.DeepEqual(call.Args, []string{"ports", "crabbox-my-app-ports", "--publish", "3000"}) {
+		t.Fatalf("ports call=%#v", call)
+	}
+
+	runner = newRunner(map[string]scriptedReply{
+		"ports": {stdout: "[]\n"},
+	}, nil)
+	backend = newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+	_, err = backend.Ports(context.Background(), PortsRequest{ID: leaseID, JSON: true, Unpublish: []string{"41000:3000"}})
+	if err != nil {
+		t.Fatalf("Ports json err=%v", err)
+	}
+	call = findCall(runner, "ports")
+	if call == nil || !reflect.DeepEqual(call.Args, []string{"ports", "crabbox-my-app-ports", "--json", "--unpublish", "41000:3000"}) {
+		t.Fatalf("ports json call=%#v", call)
+	}
+
+	_, err = backend.Ports(context.Background(), PortsRequest{ID: "user-owned"})
+	if err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
+		t.Fatalf("unclaimed ports err=%v", err)
+	}
+}
+
+func TestDockerSandboxCopy(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := leasePrefix + "crabbox-my-app-copy"
+	if err := claimLeaseForRepoProviderPond(leaseID, "copy", providerName, "", t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	runner := newRunner(map[string]scriptedReply{
+		"cp": {stdout: ""},
+	}, nil)
+	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+	err := backend.Copy(context.Background(), CopyRequest{ID: "copy", Source: "./coverage.xml", Destination: "SANDBOX:/tmp/coverage.xml", FollowLink: true})
+	if err != nil {
+		t.Fatalf("Copy err=%v", err)
+	}
+	call := findCall(runner, "cp")
+	if call == nil || !reflect.DeepEqual(call.Args, []string{"cp", "-L", "./coverage.xml", "crabbox-my-app-copy:/tmp/coverage.xml"}) {
+		t.Fatalf("copy call=%#v", call)
+	}
+
+	runner = newRunner(map[string]scriptedReply{
+		"cp": {stdout: ""},
+	}, nil)
+	backend = newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+	err = backend.Copy(context.Background(), CopyRequest{ID: leaseID, Source: "SANDBOX:/tmp/output.log", Destination: "./output.log"})
+	if err != nil {
+		t.Fatalf("Copy download err=%v", err)
+	}
+	call = findCall(runner, "cp")
+	if call == nil || !reflect.DeepEqual(call.Args, []string{"cp", "crabbox-my-app-copy:/tmp/output.log", "./output.log"}) {
+		t.Fatalf("copy download call=%#v", call)
+	}
+
+	runner = newRunner(map[string]scriptedReply{
+		"cp": {stdout: ""},
+	}, nil)
+	backend = newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+	err = backend.Copy(context.Background(), CopyRequest{ID: leaseID, Source: "C:\\tmp\\output.log", Destination: "SANDBOX:/tmp/output.log"})
+	if err != nil {
+		t.Fatalf("Copy windows path err=%v", err)
+	}
+	call = findCall(runner, "cp")
+	if call == nil || !reflect.DeepEqual(call.Args, []string{"cp", "C:\\tmp\\output.log", "crabbox-my-app-copy:/tmp/output.log"}) {
+		t.Fatalf("copy windows path call=%#v", call)
+	}
+
+	err = backend.Copy(context.Background(), CopyRequest{ID: leaseID, Source: "./a", Destination: "./b"})
+	if err == nil || !strings.Contains(err.Error(), "requires one side to use SANDBOX:PATH") {
+		t.Fatalf("missing sandbox path err=%v", err)
+	}
+	err = backend.Copy(context.Background(), CopyRequest{ID: leaseID, Source: "SANDBOX:/a", Destination: "SANDBOX:/b"})
+	if err == nil || !strings.Contains(err.Error(), "sandbox-to-sandbox") {
+		t.Fatalf("double sandbox err=%v", err)
+	}
+	err = backend.Copy(context.Background(), CopyRequest{ID: leaseID, Source: "OTHER:/a", Destination: "./b"})
+	if err == nil || !strings.Contains(err.Error(), "requires one side to use SANDBOX:PATH") {
+		t.Fatalf("bad source err=%v", err)
+	}
+}
+
 func TestConfigureDoctorRejectsInvalidConfig(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.DockerSandbox.Agent = "codex"

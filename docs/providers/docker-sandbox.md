@@ -59,6 +59,8 @@ Crabbox currently depends on these `sbx` commands and flags:
 - `sbx diagnose --output json` as optional doctor enrichment
 - `sbx create --name <name> [--template ...] [--cpus ...] [--memory ...] [--clone] shell <repo-root> [extra-workspaces...]`
 - `sbx exec [--workdir ...] [--env-file ...] <sandbox-name> <command...>`
+- `sbx ports <sandbox-name> [--json] [--publish ...] [--unpublish ...]`
+- `sbx cp [-L] <src> <dst>`
 - `sbx rm --force <sandbox-name>`
 
 These calls match the official Docker Sandboxes docs. The public starting
@@ -71,6 +73,9 @@ checkout also includes exact CLI references:
 PATH` mounts the workspace path inside the sandbox, and
 `../docs/data/sbx_cli/sbx_exec.yaml` documents that `sbx exec` receives a
 sandbox name, command arguments, `--workdir`, and `--env-file`.
+`../docs/data/sbx_cli/sbx_ports.yaml` documents the publish/list/unpublish port
+surface, and `../docs/data/sbx_cli/sbx_cp.yaml` documents `sbx cp` with
+`SANDBOX:PATH` syntax.
 
 `sbx ls --json` compatibility currently accepts either a top-level array or an
 object wrapper containing arrays under `sandboxes`, `items`, `data`, or
@@ -87,6 +92,8 @@ crabbox doctor --provider docker-sandbox
 crabbox warmup --provider docker-sandbox --slug live-smoke
 crabbox run --provider docker-sandbox -- echo ok
 crabbox run --provider docker-sandbox --id live-smoke -- pwd
+crabbox ports --provider docker-sandbox --id live-smoke --publish 3000
+crabbox cp --provider docker-sandbox --id live-smoke SANDBOX:/tmp/output.log ./output.log
 crabbox list --provider docker-sandbox --json
 crabbox status --provider docker-sandbox --id live-smoke
 crabbox stop --provider docker-sandbox live-smoke
@@ -159,15 +166,20 @@ CRABBOX_DOCKER_SANDBOX_KIT
 4. `list`, `status`, and `stop` intersect `sbx ls --json` with local Crabbox
    claims for `provider=docker-sandbox`. Sandboxes without a local Crabbox claim
    are not listed and cannot be stopped by Crabbox.
-5. When `dockerSandbox.clone` / `--docker-sandbox-clone` is enabled, Crabbox
+5. `crabbox ports` resolves a Crabbox-owned claim, then maps directly to
+   `sbx ports` for listing, publishing, or unpublishing host port forwards.
+6. `crabbox cp` resolves a Crabbox-owned claim, rewrites the special
+   `SANDBOX:PATH` side to the real sandbox name, and then calls `sbx cp` for
+   host-to-sandbox or sandbox-to-host copies.
+7. When `dockerSandbox.clone` / `--docker-sandbox-clone` is enabled, Crabbox
    requires the current workspace to be the main checkout of a normal Git
    repository. Linked Git worktrees are rejected before `sbx create --clone`,
    matching Docker Sandbox upstream clone restrictions.
-6. Fresh one-shot `run` calls in clone mode keep the newly created sandbox after
+8. Fresh one-shot `run` calls in clone mode keep the newly created sandbox after
    a successful command, even without `--keep`, so unfetched in-sandbox commits
    are not discarded by automatic cleanup. Crabbox prints the matching manual
    cleanup command instead of calling `sbx rm --force` on success.
-7. `crabbox stop --provider docker-sandbox <slug>` maps to
+9. `crabbox stop --provider docker-sandbox <slug>` maps to
    `sbx rm --force <sandbox-name>` and removes the local claim. Crabbox does
    not map stop to `sbx stop`, because Crabbox stop means provider resource
    cleanup, while `sbx stop` retains sandbox state.
@@ -200,6 +212,8 @@ Common blockers:
   for delegated `sbx exec` runs.
 - `--lease-output` is supported for run cleanup metadata; the cleanup command
   points back to `crabbox stop --provider docker-sandbox <slug>`.
+- `crabbox ports` and `crabbox cp` are supported for Crabbox-owned Docker
+  Sandbox leases only.
 - Agent: `shell` only. Other `dockerSandbox.agent` values are rejected until
   Crabbox has a stable non-shell agent contract.
 - MCP attachments: supported as create-time passthrough. Crabbox forwards
@@ -223,6 +237,8 @@ Common blockers:
   prerequisites, and sandbox-internal Docker runtime.
 - `list`, `status`, and `stop` operate only on local Crabbox claims for
   `provider=docker-sandbox`.
+- `ports` and `cp` also operate only on local Crabbox claims for
+  `provider=docker-sandbox`; they do not cross into user-created sandboxes.
 - `--docker-sandbox-clone` requires the main checkout of a normal Git
   repository before Crabbox calls `sbx create --clone`; linked Git worktrees
   are rejected.
@@ -268,7 +284,6 @@ Use this matrix when proving a fresh install or upgrade:
 | Alternate `sbx` path | `CRABBOX_DOCKER_SANDBOX_CLI=/path/to/sbx scripts/live-docker-sandbox-smoke.sh` | Doctor honors the configured CLI path instead of requiring `sbx` on `PATH`. |
 | Missing CLI or login | `crabbox doctor --provider docker-sandbox` | Fails with guidance to install/configure `sbx` or run `sbx login`. |
 | Host/runtime blockers | `crabbox doctor --provider docker-sandbox` | Surfaces virtualization, hypervisor, KVM, control-plane, quota, or capacity blockers without claiming live success. |
-<<<<<<< HEAD
 | Clone mode | `crabbox warmup --provider docker-sandbox --docker-sandbox-clone ...` | Requires the main checkout of a normal Git repository workspace before calling `sbx create --clone`; linked Git worktrees are rejected. |
 | Unsupported delegated flags | Docker Sandbox run flags and config validation | Rejects unsupported agent, desktop, Tailscale, `--class`, and `--type` surfaces clearly while allowing create-time MCP passthrough. |
 | Live lifecycle | `scripts/live-docker-sandbox-smoke.sh` | Prints `classification=live_sbx_smoke_passed ... cleanup=complete` only after create, run, list, and stop complete. |
@@ -280,4 +295,6 @@ Related docs:
 - [Local Container](local-container.md)
 - [Provider backends](../provider-backends.md)
 - [run](../commands/run.md)
+- [ports](../commands/ports.md)
+- [cp](../commands/cp.md)
 - [stop](../commands/stop.md)

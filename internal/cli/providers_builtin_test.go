@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"math"
 )
@@ -1125,11 +1126,13 @@ func (p testDockerSandboxProvider) Configure(cfg Config, rt Runtime) (Backend, e
 	if err := p.ValidateConfig(cfg); err != nil {
 		return nil, err
 	}
-	return testDelegatedBackend{spec: p.Spec()}, nil
+	return testDelegatedBackend{spec: p.Spec(), portsOutput: "127.0.0.1:41000->3000/tcp\n", copyErr: nil}, nil
 }
 
 type testDelegatedBackend struct {
-	spec ProviderSpec
+	spec        ProviderSpec
+	portsOutput string
+	copyErr     error
 }
 
 func (b testDelegatedBackend) Spec() ProviderSpec { return b.spec }
@@ -1153,6 +1156,20 @@ func (b testDelegatedBackend) Status(context.Context, StatusRequest) (StatusView
 }
 func (b testDelegatedBackend) Stop(context.Context, StopRequest) error {
 	return nil
+}
+func (b testDelegatedBackend) Ports(_ context.Context, req PortsRequest) (string, error) {
+	if req.JSON {
+		payload := []map[string]string{{"mapping": "127.0.0.1:41000->3000/tcp"}}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+	return b.portsOutput, nil
+}
+func (b testDelegatedBackend) Copy(context.Context, CopyRequest) error {
+	return b.copyErr
 }
 
 type testDoctorDelegatedBackend struct {
