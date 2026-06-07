@@ -961,6 +961,13 @@ func isXAPIHaltedPowerStateFault(err error) bool {
 	if !isXAPIFault(err, "VM_BAD_POWER_STATE") {
 		return false
 	}
+	var statusErr xapiStatusError
+	if errors.As(err, &statusErr) {
+		values := xmlValueToStrings(statusErr.Fields["ErrorDescription"])
+		if len(values) > 0 {
+			return strings.EqualFold(values[len(values)-1], "halted")
+		}
+	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "halted")
 }

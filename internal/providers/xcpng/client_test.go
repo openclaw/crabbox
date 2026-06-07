@@ -1123,6 +1123,46 @@ func TestDeleteConfigDriveTreatsHaltedPowerStateUnplugFaultAsCleanedUp(t *testin
 	}
 }
 
+func TestHaltedPowerStateFaultRequiresActualHaltedState(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "actual halted",
+			err: xapiStatusError{Fields: map[string]xmlRPCValue{
+				"ErrorDescription": {Array: []xmlRPCValue{
+					{String: "VM_BAD_POWER_STATE"},
+					{String: "OpaqueRef:vm"},
+					{String: "running"},
+					{String: "halted"},
+				}},
+			}},
+			want: true,
+		},
+		{
+			name: "actual running",
+			err: xapiStatusError{Fields: map[string]xmlRPCValue{
+				"ErrorDescription": {Array: []xmlRPCValue{
+					{String: "VM_BAD_POWER_STATE"},
+					{String: "OpaqueRef:vm"},
+					{String: "halted"},
+					{String: "running"},
+				}},
+			}},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isXAPIHaltedPowerStateFault(tt.err); got != tt.want {
+				t.Fatalf("isXAPIHaltedPowerStateFault()=%v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDeleteConfigDriveTreatsNotUnpluggableVBDAsDestroyable(t *testing.T) {
 	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
