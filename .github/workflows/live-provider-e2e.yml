@@ -121,6 +121,7 @@ jobs:
           cache: false
 
       - name: Install common tools
+        if: ${{ inputs.runner_label == 'ubuntu-latest' || startsWith(inputs.runner_label, 'ubuntu-') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -168,6 +169,7 @@ jobs:
           AZURE_CLIENT_SECRET: ${{ contains(fromJSON('["azure","azure-dynamic-sessions"]'), matrix.provider) && secrets.AZURE_CLIENT_SECRET || '' }}
           CRABBOX_AZURE_LOCATION: ${{ matrix.provider == 'azure' && secrets.CRABBOX_AZURE_LOCATION || '' }}
           CRABBOX_AZURE_RESOURCE_GROUP: ${{ matrix.provider == 'azure' && secrets.CRABBOX_AZURE_RESOURCE_GROUP || '' }}
+          CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN: ${{ matrix.provider == 'azure-dynamic-sessions' && secrets.CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN || '' }}
           CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT: ${{ matrix.provider == 'azure-dynamic-sessions' && secrets.CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT || '' }}
           CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL: ${{ matrix.provider == 'azure-dynamic-sessions' && secrets.CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL || '' }}
           GOOGLE_CLOUD_PROJECT: ${{ matrix.provider == 'gcp' && secrets.GOOGLE_CLOUD_PROJECT || '' }}

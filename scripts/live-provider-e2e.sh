@@ -265,8 +265,9 @@ preflight_provider() {
       ;;
 	azure-dynamic-sessions)
 		need_env CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT
-		need_env_pair AZURE_CLIENT_ID AZURE_CLIENT_SECRET
-		need_env_pair AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID
+		if [[ -z "${CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN:-}" ]]; then
+			need_tool az
+		fi
 		;;
     proxmox)
       need_env CRABBOX_PROXMOX_API_URL

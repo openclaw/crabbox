@@ -35,6 +35,7 @@ not actually sensitive can still be stored as secrets to keep setup uniform.
 | Brokered AWS/Azure/GCP/Hetzner | `CRABBOX_COORDINATOR`, `CRABBOX_COORDINATOR_TOKEN` |
 | AWS direct | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, `AWS_REGION` or `CRABBOX_AWS_REGION` |
 | Azure direct | `AZURE_SUBSCRIPTION_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, optional `CRABBOX_AZURE_LOCATION`, `CRABBOX_AZURE_RESOURCE_GROUP` |
+| Azure Dynamic Sessions | `CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT`; either `CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN` or an authenticated `az` CLI able to request `https://dynamicsessions.io` tokens |
 | GCP direct | `GCP_SERVICE_ACCOUNT_JSON`, `GOOGLE_CLOUD_PROJECT` or `GCP_PROJECT_ID`, optional `CRABBOX_GCP_ZONE` |
 | Hetzner direct | `HCLOUD_TOKEN` or `HETZNER_TOKEN` |
 | Proxmox | `CRABBOX_PROXMOX_API_URL`, `CRABBOX_PROXMOX_TOKEN_ID`, `CRABBOX_PROXMOX_TOKEN_SECRET`, `CRABBOX_PROXMOX_NODE`, `CRABBOX_PROXMOX_TEMPLATE_ID`, optional storage, bridge, user, and TLS secrets |
