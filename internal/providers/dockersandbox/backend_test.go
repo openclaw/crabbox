@@ -79,21 +79,71 @@ func TestProviderWrappersConfigureBackendAndDoctor(t *testing.T) {
 }
 
 func TestParseSandboxListToleratesArraysAndWrappers(t *testing.T) {
-	for _, input := range []string{
-		`[{"id":"abc","name":"crabbox-my-app-123abc","status":"running","agent":"shell","workspace":"/workspace"}]`,
-		`{"sandboxes":[{"sandbox_id":"abc","sandbox_name":"crabbox-my-app-123abc","state":"ready","working_dir":"/workspace"}]}`,
-		`{"items":[{"Name":"crabbox-my-app-123abc","Status":"Started"}]}`,
-	} {
-		records, err := parseSandboxList(input)
-		if err != nil {
-			t.Fatalf("parseSandboxList(%s): %v", input, err)
-		}
-		if len(records) != 1 {
-			t.Fatalf("records=%#v want one", records)
-		}
-		if records[0].Name != "crabbox-my-app-123abc" {
-			t.Fatalf("record name=%q", records[0].Name)
-		}
+	tests := []struct {
+		name      string
+		input     string
+		wantID    string
+		wantName  string
+		wantState string
+		wantAgent string
+		wantWork  string
+	}{
+		{
+			name:      "top level array canonical fields",
+			input:     `[{"id":"abc","name":"crabbox-my-app-123abc","status":"running","agent":"shell","workspace":"/workspace"}]`,
+			wantID:    "abc",
+			wantName:  "crabbox-my-app-123abc",
+			wantState: "running",
+			wantAgent: "shell",
+			wantWork:  "/workspace",
+		},
+		{
+			name:      "sandboxes wrapper snake case aliases",
+			input:     `{"sandboxes":[{"sandbox_id":"snake-id","sandbox_name":"crabbox-my-app-snake","state":"ready","working_dir":"/snake"}]}`,
+			wantID:    "snake-id",
+			wantName:  "crabbox-my-app-snake",
+			wantState: "ready",
+			wantWork:  "/snake",
+		},
+		{
+			name:      "items wrapper title case aliases",
+			input:     `{"items":[{"ID":"title-id","Name":"crabbox-my-app-title","Status":"Started","Agent":"shell"}]}`,
+			wantID:    "title-id",
+			wantName:  "crabbox-my-app-title",
+			wantState: "started",
+			wantAgent: "shell",
+		},
+		{
+			name:      "data wrapper camel case aliases",
+			input:     `{"data":[{"sandboxId":"camel-id","sandboxName":"crabbox-my-app-camel","status":"ACTIVE","workingDir":"/camel"}]}`,
+			wantID:    "camel-id",
+			wantName:  "crabbox-my-app-camel",
+			wantState: "active",
+			wantWork:  "/camel",
+		},
+		{
+			name:      "results wrapper workdir alias",
+			input:     `{"results":[{"id":"results-id","name":"crabbox-my-app-results","state":"provisioning","workdir":"/results"}]}`,
+			wantID:    "results-id",
+			wantName:  "crabbox-my-app-results",
+			wantState: "provisioning",
+			wantWork:  "/results",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			records, err := parseSandboxList(tt.input)
+			if err != nil {
+				t.Fatalf("parseSandboxList(%s): %v", tt.input, err)
+			}
+			if len(records) != 1 {
+				t.Fatalf("records=%#v want one", records)
+			}
+			got := records[0]
+			if got.ID != tt.wantID || got.Name != tt.wantName || got.State != tt.wantState || got.Agent != tt.wantAgent || got.Workspace != tt.wantWork {
+				t.Fatalf("record=%#v want id=%q name=%q state=%q agent=%q workspace=%q", got, tt.wantID, tt.wantName, tt.wantState, tt.wantAgent, tt.wantWork)
+			}
+		})
 	}
 }
 
