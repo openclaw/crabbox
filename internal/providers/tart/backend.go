@@ -159,18 +159,24 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	inst := tartInstance{Name: name, State: "running", Running: true, Source: cfg.Tart.Image}
 	lease, err := b.prepareLease(ctx, cfg, inst, ip, claim, true)
 	if err != nil {
-		_ = b.stopVM(context.Background(), name)
-		_ = b.deleteVM(context.Background(), name)
+		if !req.Keep {
+			_ = b.stopVM(context.Background(), name)
+			_ = b.deleteVM(context.Background(), name)
+		}
 		return LeaseTarget{}, err
 	}
 	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		_ = b.stopVM(context.Background(), name)
-		_ = b.deleteVM(context.Background(), name)
+		if !req.Keep {
+			_ = b.stopVM(context.Background(), name)
+			_ = b.deleteVM(context.Background(), name)
+		}
 		return LeaseTarget{}, err
 	}
 	if err := updateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
-		_ = b.stopVM(context.Background(), name)
-		_ = b.deleteVM(context.Background(), name)
+		if !req.Keep {
+			_ = b.stopVM(context.Background(), name)
+			_ = b.deleteVM(context.Background(), name)
+		}
 		return LeaseTarget{}, err
 	}
 	cleanupKey = false
