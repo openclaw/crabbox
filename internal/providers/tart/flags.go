@@ -47,11 +47,13 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		cfg.Tart.Memory = *v.Memory
 	}
 	if flagWasSet(fs, "tart-disk") {
-		if *v.Disk <= 0 {
-			return exit(2, "--tart-disk must be a positive integer (got %d)", *v.Disk)
+		if *v.Disk < 0 {
+			return exit(2, "--tart-disk must be non-negative (got %d)", *v.Disk)
 		}
 		cfg.Tart.Disk = *v.Disk
-		core.MarkTartDiskExplicit(cfg)
+		if *v.Disk > 0 {
+			core.MarkTartDiskExplicit(cfg)
+		}
 	}
 	if isTartProviderName(cfg.Provider) {
 		if core.IsTargetExplicit(cfg) && cfg.TargetOS != targetMacOS {
@@ -66,8 +68,8 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		if cfg.Tart.Memory < 0 || (cfg.Tart.Memory > 0 && cfg.Tart.Memory < 4096) || (cfg.Tart.Memory == 0 && core.IsTartMemoryExplicit(cfg)) {
 			return exit(2, "tart memory must be at least 4096 MB (got %d)", cfg.Tart.Memory)
 		}
-		if cfg.Tart.Disk < 0 || (cfg.Tart.Disk == 0 && core.IsTartDiskExplicit(cfg)) {
-			return exit(2, "tart disk size must be positive (got %d)", cfg.Tart.Disk)
+		if cfg.Tart.Disk < 0 {
+			return exit(2, "tart disk size must be non-negative (got %d)", cfg.Tart.Disk)
 		}
 		if err := validateTartEnvInt("CRABBOX_TART_CPUS", 4, "tart cpu count must be at least 4"); err != nil {
 			return err

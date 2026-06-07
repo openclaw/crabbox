@@ -47,7 +47,11 @@ func applyDefaults(cfg *Config) {
 		cfg.Tart.Image = "ghcr.io/cirruslabs/macos-sequoia-base:latest"
 	}
 	if cfg.Tart.User == "" {
-		cfg.Tart.User = "admin"
+		if cfg.SSHUser != "" && cfg.SSHUser != "crabbox" {
+			cfg.Tart.User = cfg.SSHUser
+		} else {
+			cfg.Tart.User = "admin"
+		}
 	}
 	if cfg.Tart.WorkRoot == "" {
 		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
@@ -130,13 +134,17 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	}
 	ip, err := b.waitForIP(ctx, name)
 	if err != nil {
-		_ = b.stopVM(context.Background(), name)
-		_ = b.deleteVM(context.Background(), name)
+		if !req.Keep {
+			_ = b.stopVM(context.Background(), name)
+			_ = b.deleteVM(context.Background(), name)
+		}
 		return LeaseTarget{}, err
 	}
 	if err := b.injectSSHKey(ctx, name, cfg.Tart.User, publicKey); err != nil {
-		_ = b.stopVM(context.Background(), name)
-		_ = b.deleteVM(context.Background(), name)
+		if !req.Keep {
+			_ = b.stopVM(context.Background(), name)
+			_ = b.deleteVM(context.Background(), name)
+		}
 		return LeaseTarget{}, err
 	}
 
@@ -182,7 +190,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	if req.ReleaseOnly {
 		return LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil
 	}
-	if !inst.Running && !req.StatusOnly {
+	if !inst.Running && !instanceRunning(inst.State) && !req.StatusOnly {
 		return LeaseTarget{}, exit(5, "tart instance %s is stopped; start a new lease with `crabbox run` or clean up with `crabbox cleanup --provider tart`", inst.Name)
 	}
 	lease, err := b.prepareLease(ctx, cfg, inst, ip, claim, false)
@@ -262,9 +270,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		return exit(2, "provider=%s release requires a tart instance name", providerName)
 	}
 	_ = b.stopVM(ctx, name)
-	if err := b.deleteVM(ctx, name); err != nil {
-		return err
-	}
+	_ = b.deleteVM(ctx, name)
 	if lease.LeaseID != "" {
 		removeLeaseClaim(lease.LeaseID)
 		removeStoredTestboxKey(lease.LeaseID)
@@ -407,6 +413,9 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep boo
 	var stderrBuf bytes.Buffer
 	var cmd *exec.Cmd
 	if keep {
+		if err := ctx.Err(); err != nil {
+			return exit(2, "tart run %s: context already cancelled", name)
+		}
 		cmd = exec.Command("tart", args...)
 		cmd.Stdout = io.Discard
 		cmd.Stderr = &stderrBuf
@@ -421,6 +430,11 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep boo
 	exitCh := make(chan error, 1)
 	go func() { exitCh <- cmd.Wait() }()
 	select {
+	case <-ctx.Done():
+		if !keep {
+			_ = cmd.Process.Kill()
+		}
+		return exit(2, "tart run %s: context cancelled during startup", name)
 	case err := <-exitCh:
 		detail := strings.TrimSpace(stderrBuf.String())
 		if detail != "" {
@@ -535,7 +549,7 @@ func (b *backend) resolveInstance(ctx context.Context, identifier string) (tartI
 				return inst, ip, claim, nil
 			}
 		}
-		return tartInstance{}, "", core.LeaseClaim{}, exit(4, "tart lease %s references instance %q but it no longer exists", claim.LeaseID, name)
+		return tartInstance{Name: name, State: "missing"}, "", claim, nil
 	}
 	instances, err := b.listInstances(ctx)
 	if err != nil {

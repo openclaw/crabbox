@@ -783,6 +783,28 @@ func TestApplyDefaultsPreservesWorkRoot(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultsInheritsExplicitSSHUser(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.SSHUser = "deployment"
+	cfg.Tart = core.TartConfig{}
+	applyDefaults(&cfg)
+	if cfg.Tart.User != "deployment" {
+		t.Fatalf("Tart.User = %q, want deployment (should inherit non-default SSHUser)", cfg.Tart.User)
+	}
+	if cfg.SSHUser != "deployment" {
+		t.Fatalf("SSHUser = %q, want deployment", cfg.SSHUser)
+	}
+}
+
+func TestApplyDefaultsIgnoresBaseSSHUser(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart = core.TartConfig{}
+	applyDefaults(&cfg)
+	if cfg.Tart.User != "admin" {
+		t.Fatalf("Tart.User = %q, want admin (should not inherit base-config SSHUser 'crabbox')", cfg.Tart.User)
+	}
+}
+
 func TestConfigureVMAppliesCPUAndMemory(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	cfg := core.BaseConfig()
@@ -940,6 +962,41 @@ func TestResolveInstanceByLeaseID(t *testing.T) {
 	}
 }
 
+func TestResolveInstanceMissingVMReturnsClaim(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_stale999", "stale-slug", providerName, "instance:crabbox-gone-xyz", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup claim: %v", err)
+	}
+
+	listJSON := `[]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	inst, _, claim, err := b.resolveInstance(context.Background(), "cbx_stale999")
+	if err != nil {
+		t.Fatalf("resolveInstance should return stale claim, got error: %v", err)
+	}
+	if inst.Name != "crabbox-gone-xyz" {
+		t.Fatalf("inst.Name = %q, want crabbox-gone-xyz", inst.Name)
+	}
+	if inst.State != "missing" {
+		t.Fatalf("inst.State = %q, want missing", inst.State)
+	}
+	if claim.LeaseID != "cbx_stale999" {
+		t.Fatalf("claim.LeaseID = %q, want cbx_stale999", claim.LeaseID)
+	}
+}
+
 func TestResolveInstanceBySlug(t *testing.T) {
 	stateDir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateDir)
@@ -985,8 +1042,7 @@ func TestApplyFlagsRejectsNonPositiveResources(t *testing.T) {
 		{"zero memory", []string{"--tart-memory", "0"}, "--tart-memory must be at least 4096 MB"},
 		{"negative memory", []string{"--tart-memory", "-1"}, "--tart-memory must be at least 4096 MB"},
 		{"below minimum memory", []string{"--tart-memory", "1"}, "--tart-memory must be at least 4096 MB"},
-		{"zero disk", []string{"--tart-disk", "0"}, "--tart-disk must be a positive integer"},
-		{"negative disk", []string{"--tart-disk", "-1"}, "--tart-disk must be a positive integer"},
+		{"negative disk", []string{"--tart-disk", "-1"}, "--tart-disk must be non-negative"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1027,6 +1083,25 @@ func TestApplyFlagsAcceptsPositiveResources(t *testing.T) {
 	}
 	if cfg.Tart.Disk != 100 {
 		t.Fatalf("Disk = %d, want 100", cfg.Tart.Disk)
+	}
+}
+
+func TestApplyFlagsDiskZeroUsesCloneDefault(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--tart-disk", "0"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := applyFlags(&cfg, fs, vals); err != nil {
+		t.Fatalf("applyFlags should accept --tart-disk 0 (clone default): %v", err)
+	}
+	if cfg.Tart.Disk != 0 {
+		t.Fatalf("Disk = %d, want 0", cfg.Tart.Disk)
+	}
+	if core.IsTartDiskExplicit(&cfg) {
+		t.Fatal("disk=0 should not be marked explicit")
 	}
 }
 
@@ -1280,8 +1355,8 @@ func TestReleaseLeaseDeleteError(t *testing.T) {
 			Server:  core.Server{CloudID: "crabbox-blue-1234"},
 		},
 	})
-	if err == nil {
-		t.Fatal("ReleaseLease should propagate deleteVM error")
+	if err != nil {
+		t.Fatalf("ReleaseLease should tolerate deleteVM failure for stale claim pruning, got: %v", err)
 	}
 }
 
