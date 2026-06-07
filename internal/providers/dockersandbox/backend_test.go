@@ -322,6 +322,42 @@ func TestRunForwardsEnvViaSBXEnvFile(t *testing.T) {
 	}
 }
 
+func TestRunCleansUpEnvFileAfterExecFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	runner := newRunner(map[string]scriptedReply{
+		"create": {stdout: ""},
+		"exec":   {exitCode: 7, stderr: "failed\n"},
+		"rm":     {stdout: ""},
+	}, nil)
+	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: t.TempDir()},
+		Command: []string{"printenv", "SECRET_TOKEN"},
+		Env:     map[string]string{"SECRET_TOKEN": "secret-token-value"},
+	})
+	var exitErr core.ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("Run err=%v want exit 7", err)
+	}
+	execCall := findCall(runner, "exec")
+	if execCall == nil {
+		t.Fatal("missing exec call")
+	}
+	envFile := ""
+	for i, arg := range execCall.Args {
+		if arg == "--env-file" && i+1 < len(execCall.Args) {
+			envFile = execCall.Args[i+1]
+			break
+		}
+	}
+	if envFile == "" {
+		t.Fatalf("exec args=%v missing --env-file path", execCall.Args)
+	}
+	if _, err := os.Stat(envFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("env file %q still exists or unexpected stat err=%v", envFile, err)
+	}
+}
+
 func TestFormatDockerSandboxEnvFile(t *testing.T) {
 	got, err := formatDockerSandboxEnvFile(map[string]string{
 		"Z_FLAG":       "last",
