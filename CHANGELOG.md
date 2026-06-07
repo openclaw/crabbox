@@ -4,6 +4,12 @@
 
 ### Added
 
+- Added `provider: docker-sandbox` for delegated Linux runs through Docker
+  Sandboxes using the standalone `sbx` CLI, including provider discovery,
+  config/env overrides, local claim filtering, `doctor`, `warmup`, `run`,
+  `list`, `status`, `stop`, docs, and a live smoke script. Fixes
+  https://github.com/openclaw/crabbox/issues/219.
+
 ### Changed
 
 ### Fixed
