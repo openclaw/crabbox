@@ -4,11 +4,6 @@
 
 ### Added
 
-- Added `provider: docker-sandbox` for delegated Linux runs through Docker
-  Sandboxes using the standalone `sbx` CLI, including provider discovery,
-  config/env overrides, local claim filtering, `doctor`, `warmup`, `run`,
-  `list`, `status`, `stop`, docs, and a live smoke script. Fixes
-  https://github.com/openclaw/crabbox/issues/219.
 - Added Podman runtime compatibility for `provider: local-container`, including runtime selection, provider flags on SSH commands, and Podman-safe local lease claim scopes. Thanks @sallyom.
 - Added `sync.include` / `sync.includes` whitelists for root-relative sync plans, SSH sync, native Windows sync, local Actions hydration, and archive-sync providers. Thanks @anagnorisis2peripeteia.
 
