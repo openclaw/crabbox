@@ -1,6 +1,7 @@
 package external
 
 import (
+	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -147,12 +148,14 @@ func (p protocolLease) target(cfg core.Config, keep bool) core.LeaseTarget {
 		target.Key = p.SSH.Key
 		target.Port = core.Blank(p.SSH.Port, "22")
 		target.FallbackPorts = p.SSH.FallbackPorts
-		target.ReadyCheck = p.SSH.ReadyCheck
+		target.ReadyCheck = core.Blank(p.SSH.ReadyCheck, externalDefaultReadyCheck)
 		target.AuthSecret = p.SSH.AuthSecret
 		target.NoControlMaster = p.SSH.NoControlMaster
-		target.SSHConfigProxy = p.SSH.SSHConfigProxy
 		target.ProxyCommand = p.SSH.ProxyCommand
+		target.SSHConfigProxy = p.SSH.SSHConfigProxy || strings.TrimSpace(target.ProxyCommand) != ""
 		server.PublicNet.IPv4.IP = target.Host
 	}
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
 }
+
+const externalDefaultReadyCheck = "command -v bash >/dev/null && command -v python3 >/dev/null && command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"

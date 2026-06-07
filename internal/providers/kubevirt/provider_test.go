@@ -76,6 +76,41 @@ func TestRouteConfigUsesProviderWorkRoot(t *testing.T) {
 	}
 }
 
+func TestConfigurePreservesExplicitTopLevelWorkRoot(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.WorkRoot = "/workspace/top-level"
+	cfg.KubeVirt.WorkRoot = core.BaseConfig().KubeVirt.WorkRoot
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backend.(*leaseBackend).cfg.WorkRoot; got != "/workspace/top-level" {
+		t.Fatalf("work root=%q", got)
+	}
+}
+
+func TestConfigureProviderWorkRootOverridesTopLevelWorkRoot(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.WorkRoot = "/workspace/top-level"
+	cfg.KubeVirt.WorkRoot = "/workspace/provider"
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backend.(*leaseBackend).cfg.WorkRoot; got != "/workspace/provider" {
+		t.Fatalf("work root=%q", got)
+	}
+}
+
+func TestConfigureRejectsUnsafeTopLevelWorkRoot(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.WorkRoot = "/tmp"
+	cfg.KubeVirt.WorkRoot = core.BaseConfig().KubeVirt.WorkRoot
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}}); err == nil || !strings.Contains(err.Error(), "too broad") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestConfigureDoesNotRequireProvisioningTemplate(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.KubeVirt.Template = ""

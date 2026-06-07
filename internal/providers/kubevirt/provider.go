@@ -2,6 +2,7 @@ package kubevirt
 
 import (
 	"flag"
+	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -45,6 +46,12 @@ func (Provider) RouteConfig(cfg *core.Config, _ *flag.FlagSet, _ any) error {
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
+	}
+	base := core.BaseConfig()
+	explicitTopLevelWorkRoot := strings.TrimSpace(cfg.WorkRoot) != "" && cfg.WorkRoot != base.WorkRoot
+	providerWorkRootDefault := strings.TrimSpace(cfg.KubeVirt.WorkRoot) == "" || cfg.KubeVirt.WorkRoot == base.KubeVirt.WorkRoot
+	if explicitTopLevelWorkRoot && providerWorkRootDefault {
+		cfg.KubeVirt.WorkRoot = cfg.WorkRoot
 	}
 	if err := validateConfig(cfg); err != nil {
 		return nil, err

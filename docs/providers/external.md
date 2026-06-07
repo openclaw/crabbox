@@ -142,7 +142,12 @@ Successful lease response:
 
 `sshConfigProxy: true` supports an SSH alias already installed in the user's
 SSH config. `proxyCommand` supports control-plane tunnels directly. Either path
-is automatically reused by rsync and WebVNC.
+is automatically reused by rsync and WebVNC. A non-empty `proxyCommand` implies
+proxy-backed SSH even if `sshConfigProxy` is omitted.
+
+When `readyCheck` is omitted, Crabbox uses a generic Linux tool check for
+`bash`, `python3`, `git`, `rsync`, and `tar`. Return an explicit `readyCheck`
+when the external provider needs a stronger guest bootstrap signal.
 
 `list` returns `{"protocolVersion":1,"leases":[...]}`. `doctor` may return a
 human-readable `message`. Any operation may return `{"error":"..."}`.

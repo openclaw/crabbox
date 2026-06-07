@@ -49,6 +49,41 @@ func TestRouteConfigUsesProviderWorkRoot(t *testing.T) {
 	}
 }
 
+func TestConfigurePreservesExplicitTopLevelWorkRoot(t *testing.T) {
+	cfg := testConfig()
+	cfg.WorkRoot = "/workspace/top-level"
+	cfg.External.WorkRoot = core.BaseConfig().External.WorkRoot
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backend.(*leaseBackend).cfg.WorkRoot; got != "/workspace/top-level" {
+		t.Fatalf("work root=%q", got)
+	}
+}
+
+func TestConfigureProviderWorkRootOverridesTopLevelWorkRoot(t *testing.T) {
+	cfg := testConfig()
+	cfg.WorkRoot = "/workspace/top-level"
+	cfg.External.WorkRoot = "/workspace/provider"
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backend.(*leaseBackend).cfg.WorkRoot; got != "/workspace/provider" {
+		t.Fatalf("work root=%q", got)
+	}
+}
+
+func TestConfigureRejectsUnsafeTopLevelWorkRoot(t *testing.T) {
+	cfg := testConfig()
+	cfg.WorkRoot = "/tmp"
+	cfg.External.WorkRoot = core.BaseConfig().External.WorkRoot
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}}); err == nil || !strings.Contains(err.Error(), "too broad") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestFlagsOverrideArgsAndConfigJSON(t *testing.T) {
 	cfg := testConfig()
 	fs := flag.NewFlagSet("external", flag.ContinueOnError)
@@ -141,6 +176,39 @@ func TestProtocolLeaseMapsProxyAndServer(t *testing.T) {
 	}
 	if !lease.SSH.SSHConfigProxy || lease.SSH.ProxyCommand != "provider proxy %h %p" {
 		t.Fatalf("ssh=%#v", lease.SSH)
+	}
+}
+
+func TestProtocolLeaseProxyCommandImpliesProxyMode(t *testing.T) {
+	lease := protocolLease{
+		LeaseID: "cbx_abcdef123456",
+		Slug:    "test",
+		Name:    "devbox-test",
+		SSH: &protocolSSH{
+			User:         "tester",
+			Host:         "devbox-test",
+			ProxyCommand: "provider proxy devbox-test %p",
+		},
+	}.target(testConfig(), true)
+	if !lease.SSH.SSHConfigProxy {
+		t.Fatalf("ssh=%#v", lease.SSH)
+	}
+}
+
+func TestProtocolLeaseDefaultsReadyCheck(t *testing.T) {
+	lease := protocolLease{
+		LeaseID: "cbx_abcdef123456",
+		Slug:    "test",
+		Name:    "devbox-test",
+		SSH: &protocolSSH{
+			User: "tester",
+			Host: "devbox-test",
+		},
+	}.target(testConfig(), true)
+	for _, want := range []string{"bash", "python3", "git", "rsync", "tar"} {
+		if !strings.Contains(lease.SSH.ReadyCheck, want) {
+			t.Fatalf("ready check %q missing %q", lease.SSH.ReadyCheck, want)
+		}
 	}
 }
 

@@ -47,12 +47,20 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
 	}
+	loadedRouting := false
 	if path := strings.TrimSpace(cfg.External.RoutingFile); path != "" {
 		routing, err := core.LoadExternalRouting(path)
 		if err != nil {
 			return nil, core.Exit(2, "%v", err)
 		}
 		cfg.External = routing
+		loadedRouting = true
+	}
+	base := core.BaseConfig()
+	explicitTopLevelWorkRoot := !loadedRouting && strings.TrimSpace(cfg.WorkRoot) != "" && cfg.WorkRoot != base.WorkRoot
+	providerWorkRootDefault := strings.TrimSpace(cfg.External.WorkRoot) == "" || cfg.External.WorkRoot == base.External.WorkRoot
+	if explicitTopLevelWorkRoot && providerWorkRootDefault {
+		cfg.External.WorkRoot = cfg.WorkRoot
 	}
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
