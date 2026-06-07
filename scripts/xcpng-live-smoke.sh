@@ -126,7 +126,7 @@ from pathlib import Path
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
 text = src.read_text(encoding="utf-8", errors="replace")
-text = re.sub(r"https://[^\"'\s]+", "https://xcp-pool.example.test", text)
+text = re.sub(r"https?://[^\"'\s]+", "https://xcp-pool.example.test", text)
 
 secret_key = r"(?:password|token|secret|session_id)"
 patterns = [

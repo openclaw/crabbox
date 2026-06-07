@@ -65,3 +65,45 @@ process.stdout.write(JSON.stringify({
     /current-env-user/,
   );
 });
+
+test("xcpng live smoke redacts http pool URLs in evidence", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-xcpng-live-smoke-"));
+  const evidence = path.join(dir, "evidence");
+  const fakeCrabbox = path.join(dir, "crabbox");
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == "doctor --provider xcp-ng --json" ]]; then
+  printf 'doctor failed for http://private-pool.example.test/jsonrpc password=pool-secret\\n' >&2
+  exit 4
+fi
+exit 0
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/xcpng-live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_XCP_NG_SMOKE_DIR: evidence,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=environment_blocked/);
+
+  const doctorLogs = fs
+    .readdirSync(evidence)
+    .filter((name) => name.endsWith("-doctor.json"));
+  assert.equal(doctorLogs.length, 1);
+
+  const doctorLog = fs.readFileSync(path.join(evidence, doctorLogs[0]), "utf8");
+  assert.match(doctorLog, /https:\/\/xcp-pool\.example\.test/);
+  assert.doesNotMatch(doctorLog, /private-pool/);
+  assert.doesNotMatch(doctorLog, /pool-secret/);
+  assert.match(doctorLog, /password=<redacted>/);
+});
