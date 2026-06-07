@@ -149,9 +149,9 @@ local `tensorlake` process argv.
 
 - `--sync-only` and `--checksum` are rejected because Tensorlake does not expose
   Crabbox's rsync semantics. Other transport-owning flags (such as local
-  stdout/stderr captures and `--download`) are rejected by the core
-  delegated-sync gate. Use `--no-sync` with an explicit `--id` if the sandbox is
-  already primed.
+  stdout/stderr captures, `--download`, `--artifact-glob`, and
+  `--require-artifact`) are rejected by the core delegated-sync gate. Use
+  `--no-sync` with an explicit `--id` if the sandbox is already primed.
 - Large-sync guardrails still apply; pass `--force-sync-large` when a large
   archive sync is intentional.
 - `--shell` wraps the command as `bash -lc '<joined args>'`. Plain commands that
