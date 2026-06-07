@@ -120,13 +120,25 @@ redact_file() {
   local dst="$2"
   python3 - "$src" "$dst" <<'PY'
 import re
+import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
 text = src.read_text(encoding="utf-8", errors="replace")
-text = re.sub(r"https?://[^\"'\s]+", "https://xcp-pool.example.test", text)
+
+api_url = os.environ.get("CRABBOX_XCP_NG_API_URL", "").strip()
+if api_url:
+    parsed = urlparse(api_url if "://" in api_url else f"//{api_url}")
+    if parsed.hostname:
+        host = re.escape(parsed.hostname)
+        pool_url_pattern = re.compile(
+            rf"\bhttps?://{host}(?=[:/?#\"'\s]|$)(?::[0-9]+)?[^\"'\s]*",
+            re.I,
+        )
+        text = pool_url_pattern.sub("https://xcp-pool.example.test", text)
 
 secret_key = r"(?:password|token|secret|session_id)"
 patterns = [
