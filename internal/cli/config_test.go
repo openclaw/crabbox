@@ -1776,6 +1776,20 @@ func TestInvalidNetworkEnvFails(t *testing.T) {
 	}
 }
 
+func TestInvalidDockerSandboxCPUEnvFailsDuringLoad(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "docker-sandbox")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CPUS", "2.5")
+
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "docker-sandbox cpus must be a whole number") {
+		t.Fatalf("loadConfig err=%v, want docker-sandbox whole-number validation", err)
+	}
+}
+
 func TestAccessAuthState(t *testing.T) {
 	for name, tc := range map[string]struct {
 		access AccessConfig

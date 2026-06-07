@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"flag"
+	"math"
 )
 
 func init() {
@@ -24,6 +25,7 @@ func init() {
 	RegisterProvider(testCloudflareProvider{})
 	RegisterProvider(testSpritesProvider{})
 	RegisterProvider(testLocalContainerProvider{})
+	RegisterProvider(testDockerSandboxProvider{})
 	RegisterProvider(testMultipassProvider{})
 	RegisterProvider(testParallelsProvider{})
 	RegisterProvider(testWandbProvider{})
@@ -1088,6 +1090,42 @@ func (testMultipassProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values an
 }
 func (p testMultipassProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testDockerSandboxProvider struct{}
+
+func (testDockerSandboxProvider) Name() string      { return "docker-sandbox" }
+func (testDockerSandboxProvider) Aliases() []string { return nil }
+func (testDockerSandboxProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "docker-sandbox",
+		Family:      "docker-sandbox",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureRunSession},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testDockerSandboxProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return struct{ CPUs *float64 }{CPUs: fs.Float64("docker-sandbox-cpus", defaults.DockerSandbox.CPUs, "")}
+}
+func (testDockerSandboxProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	if v, ok := values.(struct{ CPUs *float64 }); ok && flagWasSet(fs, "docker-sandbox-cpus") && v.CPUs != nil {
+		cfg.DockerSandbox.CPUs = *v.CPUs
+	}
+	return testDockerSandboxProvider{}.ValidateConfig(*cfg)
+}
+func (testDockerSandboxProvider) ValidateConfig(cfg Config) error {
+	if cfg.DockerSandbox.CPUs != math.Trunc(cfg.DockerSandbox.CPUs) {
+		return exit(2, "docker-sandbox cpus must be a whole number")
+	}
+	return nil
+}
+func (p testDockerSandboxProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	if err := p.ValidateConfig(cfg); err != nil {
+		return nil, err
+	}
+	return testDelegatedBackend{spec: p.Spec()}, nil
 }
 
 type testDelegatedBackend struct {

@@ -26,6 +26,10 @@ type ProviderRouter interface {
 	RouteConfig(cfg *Config, fs *flag.FlagSet, values any) error
 }
 
+type ProviderConfigValidator interface {
+	ValidateConfig(cfg Config) error
+}
+
 type ProviderRoutingFlagProvider interface {
 	RoutingFlagNames() []string
 }

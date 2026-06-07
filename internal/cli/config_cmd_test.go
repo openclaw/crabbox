@@ -165,13 +165,14 @@ func TestConfigShowIncludesSyncInclude(t *testing.T) {
 	}
 }
 
-func TestConfigShowIncludesDockerSandbox(t *testing.T) {
+func TestConfigShowRejectsInvalidDockerSandboxCPUConfig(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
 	configPath := filepath.Join(home, "config.yaml")
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "docker-sandbox")
 	if err := os.WriteFile(configPath, []byte("profile: default\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -187,49 +188,12 @@ func TestConfigShowIncludesDockerSandbox(t *testing.T) {
 
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-	if err := app.configShow(nil); err != nil {
-		t.Fatal(err)
-	}
-	text := stdout.String()
-	for _, want := range []string{
-		"docker_sandbox cli=/opt/docker-sbx agent=shell template=ubuntu cpus=2.5 memory=6g clone=true workdir=/workspace/my-app",
-		"extra_workspaces=/tmp/extra",
-		"kit=example-org/base",
-	} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("config show missing %q in %q", want, text)
-		}
+	if err := app.configShow(nil); err == nil || !strings.Contains(err.Error(), "docker-sandbox cpus must be a whole number") {
+		t.Fatalf("configShow err=%v, want docker-sandbox whole-number validation", err)
 	}
 
 	stdout.Reset()
-	if err := app.configShow([]string{"--json"}); err != nil {
-		t.Fatal(err)
-	}
-	var got struct {
-		DockerSandbox struct {
-			CLIPath         string   `json:"cliPath"`
-			Agent           string   `json:"agent"`
-			Template        string   `json:"template"`
-			CPUs            float64  `json:"cpus"`
-			Memory          string   `json:"memory"`
-			Clone           bool     `json:"clone"`
-			Workdir         string   `json:"workdir"`
-			ExtraWorkspaces []string `json:"extraWorkspaces"`
-			Kit             []string `json:"kit"`
-		} `json:"dockerSandbox"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.DockerSandbox.CLIPath != "/opt/docker-sbx" ||
-		got.DockerSandbox.Agent != "shell" ||
-		got.DockerSandbox.Template != "ubuntu" ||
-		got.DockerSandbox.CPUs != 2.5 ||
-		got.DockerSandbox.Memory != "6g" ||
-		!got.DockerSandbox.Clone ||
-		got.DockerSandbox.Workdir != "/workspace/my-app" ||
-		strings.Join(got.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" ||
-		strings.Join(got.DockerSandbox.Kit, ",") != "example-org/base" {
-		t.Fatalf("unexpected dockerSandbox json: %#v", got.DockerSandbox)
+	if err := app.configShow([]string{"--json"}); err == nil || !strings.Contains(err.Error(), "docker-sandbox cpus must be a whole number") {
+		t.Fatalf("configShow --json err=%v, want docker-sandbox whole-number validation", err)
 	}
 }

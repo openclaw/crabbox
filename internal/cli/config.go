@@ -716,6 +716,13 @@ func loadConfig() (Config, error) {
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
 		return Config{}, err
 	}
+	if provider, err := ProviderFor(cfg.Provider); err != nil {
+		return Config{}, err
+	} else if validator, ok := provider.(ProviderConfigValidator); ok {
+		if err := validator.ValidateConfig(cfg); err != nil {
+			return Config{}, err
+		}
+	}
 	normalizeTargetConfig(&cfg)
 	if err := validateTargetConfig(cfg); err != nil {
 		return Config{}, err

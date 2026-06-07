@@ -35,8 +35,12 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	return ApplyDockerSandboxProviderFlags(cfg, fs, values)
 }
 
+func (Provider) ValidateConfig(cfg core.Config) error {
+	return validateConfig(cfg)
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
-	if err := validateConfig(cfg); err != nil {
+	if err := p.ValidateConfig(cfg); err != nil {
 		return nil, err
 	}
 	return NewBackend(p.Spec(), cfg, rt), nil
