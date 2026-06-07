@@ -313,11 +313,23 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	if err := cli.remove(ctx, sandboxName); err != nil {
-		return err
+		if !dockerSandboxRemoveNotFoundError(err) {
+			return err
+		}
 	}
 	removeLeaseClaim(leaseID)
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, sandboxName)
 	return nil
+}
+
+func dockerSandboxRemoveNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "not found") ||
+		strings.Contains(text, "no such sandbox") ||
+		strings.Contains(text, "no such container")
 }
 
 func (b *backend) createSandbox(ctx context.Context, cli *sbxCLI, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
