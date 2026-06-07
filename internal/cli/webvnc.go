@@ -1279,7 +1279,8 @@ func (a App) localContainerWebVNCReset(ctx context.Context, cfg Config, id strin
 	if openViewer {
 		return a.localContainerWebVNC(ctx, cfg, leaseID, "", true, takeControl, false)
 	}
-	fmt.Fprintf(a.Stdout, "webvnc: run crabbox webvnc --provider local-container --id %s\n", leaseID)
+	command := append([]string{"crabbox", "webvnc"}, webVNCBridgeArgs(cfg, target, leaseID, false, false)...)
+	fmt.Fprintf(a.Stdout, "webvnc: run %s\n", readableShellCommand(command))
 	return nil
 }
 

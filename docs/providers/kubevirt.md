@@ -182,7 +182,7 @@ start a retained VM before waiting for SSH.
 crabbox doctor --provider kubevirt
 crabbox warmup --provider kubevirt --slug vm-smoke
 crabbox run --provider kubevirt --id vm-smoke -- go test ./...
-crabbox webvnc --provider kubevirt --id vm-smoke
+crabbox vnc --provider kubevirt --id vm-smoke --open
 crabbox stop --provider kubevirt vm-smoke
 ```
 
