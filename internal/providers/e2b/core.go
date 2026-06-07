@@ -1,8 +1,10 @@
 package e2b
 
 import (
+	"context"
 	"flag"
 	"io"
+	"os"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -133,6 +135,10 @@ func syncManifest(root string, excludes, includes []string) (SyncManifest, error
 
 func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
 	return core.CheckSyncPreflight(manifest, cfg, force, stderr)
+}
+
+func createPortableSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
+	return core.CreateSyncArchive(ctx, repo, manifest, tempPattern)
 }
 
 func summarizeJSON(data []byte) string {

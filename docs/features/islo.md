@@ -10,9 +10,10 @@ Read when:
 command transport, while Crabbox owns local config, repo claims, the sync
 manifest and its guardrails, slugs, timing summaries, and normalized
 `list`/`status` rendering. Crabbox uses the Islo Go SDK for auth and sandbox
-lifecycle (create, list, status, stop) and a small SSE reader for the
-`POST /sandboxes/{name}/exec/stream` endpoint, since the SDK's exec helper
-coalesces streamed output.
+lifecycle (create, list, status) and calls the HTTP API directly for stop (an
+empty-body `DELETE`), archive upload, shares, and command output — the last via
+a small SSE reader for the `POST /sandboxes/{name}/exec/stream` endpoint, since
+the SDK's exec helper coalesces streamed output.
 
 Sandboxes are Linux-only. There is no Crabbox-managed SSH lease; commands run
 through Islo's streaming exec endpoint, not through `crabbox ssh`/rsync.
@@ -34,7 +35,7 @@ provider: islo
 target: linux
 islo:
   baseUrl: https://api.islo.dev
-  image: docker.io/library/ubuntu:24.04
+  image: docker.io/library/ubuntu:26.04
   workdir: crabbox
   gatewayProfile: ""
   snapshotName: ""
@@ -45,7 +46,7 @@ islo:
 
 Defaults: `baseUrl` `https://api.islo.dev`, `workdir` `crabbox`, `vcpus` `2`,
 `memoryMB` `4096`, `diskGB` `20`. The image default comes from the resolved OS
-target.
+target (the default OS `ubuntu:26.04` resolves to `docker.io/library/ubuntu:26.04`).
 
 `islo.workdir` is a relative directory name under `/workspace`. Absolute paths
 and `..` escapes are rejected before Crabbox prepares or syncs the workspace, so
@@ -66,7 +67,7 @@ variable:
 | `diskGB`         | `--islo-disk-gb`         | `CRABBOX_ISLO_DISK_GB`         |
 
 ```sh
-crabbox warmup --provider islo --islo-image docker.io/library/ubuntu:24.04
+crabbox warmup --provider islo --islo-image docker.io/library/ubuntu:26.04
 crabbox run --provider islo -- pnpm test
 crabbox status --provider islo --id blue-lobster
 crabbox stop --provider islo blue-lobster
@@ -81,10 +82,10 @@ crabbox stop --provider islo blue-lobster
   `/workspace/<islo.workdir>`, streams stdout/stderr from Islo's SSE exec
   endpoint, and returns the remote exit code. A stream is only treated as
   successful once an exit event arrives.
-- **list**, **status**, and **stop** go through the Islo SDK and only act on
-  Crabbox-created sandboxes. Identifiers may be a Crabbox slug, an `isb_...`
-  lease ID, or a Crabbox-created sandbox name; non-Crabbox sandboxes are
-  rejected.
+- **list** and **status** go through the Islo SDK; **stop** issues a direct
+  `DELETE`. All three act only on Crabbox-created sandboxes. Identifiers may be a
+  Crabbox slug, an `isb_...` lease ID, or a Crabbox-created sandbox name;
+  non-Crabbox sandboxes are rejected.
 - The sandbox is deleted on release unless kept. `--keep-on-failure` keeps a
   newly created failed sandbox until an explicit `stop` or provider-side expiry.
 

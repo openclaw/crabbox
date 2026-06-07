@@ -4,6 +4,7 @@ import {
   azureSupportsEphemeralOS,
   azureVMSizeCandidatesForTargetClass,
   sshPorts,
+  validatedCIDRs,
   type LeaseConfig,
 } from "./config";
 import { leaseProviderLabels } from "./provider-labels";
@@ -146,10 +147,10 @@ export class AzureClient {
     this.subnet = env.CRABBOX_AZURE_SUBNET?.trim() || "crabbox-subnet";
     this.nsg = options.nsg || env.CRABBOX_AZURE_NSG?.trim() || "crabbox-nsg";
     this.image = env.CRABBOX_AZURE_IMAGE?.trim() || DEFAULT_AZURE_LINUX_IMAGE;
-    this.sshCIDRs = (env.CRABBOX_AZURE_SSH_CIDRS ?? "")
-      .split(",")
-      .map((value) => value.trim())
-      .filter(Boolean);
+    this.sshCIDRs = validatedCIDRs(
+      (env.CRABBOX_AZURE_SSH_CIDRS ?? "").split(","),
+      "CRABBOX_AZURE_SSH_CIDRS",
+    );
     if (this.sshCIDRs.length === 0) this.sshCIDRs.push("0.0.0.0/0");
     this.defaultLocation = options.location || env.CRABBOX_AZURE_LOCATION?.trim() || "eastus";
     this.deferredCleanup = options.deferredCleanup;

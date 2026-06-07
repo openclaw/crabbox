@@ -245,6 +245,7 @@ export interface LeaseRecord {
   cleanupError?: string;
   cleanupFailedAt?: string;
   cleanupRetryAt?: string;
+  releaseDeletesServer?: boolean;
   releasedAt?: string;
   endedAt?: string;
 }

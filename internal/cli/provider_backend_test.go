@@ -333,6 +333,30 @@ func TestProviderFlagsApplyLocalContainerWithoutCoreEdits(t *testing.T) {
 	}
 }
 
+func TestSSHCommandConfigAppliesProviderFlags(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("ssh", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	id := fs.String("id", "", "")
+	providerFlags := registerProviderFlags(fs, defaults)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "local-container",
+		"--local-container-runtime", "podman",
+		"--id", "example-podman",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadSSHCommandConfig(fs, *provider, providerFlags, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "local-container" || cfg.LocalContainer.Runtime != "podman" {
+		t.Fatalf("ssh config did not apply local-container runtime: provider=%s runtime=%s", cfg.Provider, cfg.LocalContainer.Runtime)
+	}
+}
+
 func TestProviderFlagsApplyProxmoxWithoutSecrets(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)

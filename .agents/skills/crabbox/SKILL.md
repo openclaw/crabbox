@@ -118,6 +118,23 @@ Stop boxes you created before handoff:
 crabbox stop <cbx_id-or-slug>
 ```
 
+## Local Container
+
+Use `local-container` for fast local proof when the host has Docker or Podman.
+Run Crabbox from the repo you want synced. `warmup` does not sync; for an
+interactive synced container, use:
+
+```sh
+crabbox run --provider local-container --keep --slug local-smoke --sync-only
+eval "$(crabbox ssh --provider local-container --id local-smoke)"
+```
+
+Pass `--local-container-runtime docker` or `--local-container-runtime podman`
+when the engine matters, and keep that flag on reused lease commands such as
+`run --id`, `ssh`, `status`, and `stop`. `crabbox ssh` prints the SSH command;
+use `eval "$(crabbox ssh ...)"` to connect. After login, `cd` into the workdir
+printed by `run --sync-only`.
+
 ## Scripts, Secrets, And Fresh PRs
 
 Prefer uploaded scripts for multi-line commands. This avoids giant quoted shell

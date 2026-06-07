@@ -408,12 +408,14 @@ localContainer:
 
 `provider: docker`, `provider: container`, and `provider: local-docker` are
 aliases for `local-container`. The backend uses Docker-compatible CLI commands,
-so Docker Desktop, OrbStack, Colima, and similar local runtimes work when their
-Docker context is active. Set `dockerSocket: true` only when commands inside
-the lease must use the host Docker daemon; Crabbox then mounts the active local
-Unix Docker socket and rejects remote Docker contexts. With the socket enabled
-and no explicit work root, Crabbox chooses a host-visible cache work root so
-nested Docker bind mounts can see the synced checkout.
+so Docker Desktop, OrbStack, Colima, Podman, and similar local runtimes work.
+Crabbox detects an installed `docker` or `podman` CLI and uses that runtime; if
+both are present, `docker` is selected unless `localContainer.runtime` is set
+explicitly. Set `dockerSocket: true` only when commands inside the lease must
+use the host Docker-compatible API; Crabbox then mounts the active local Unix
+socket from `DOCKER_HOST` or the Docker context and rejects remote TCP contexts.
+With the socket enabled and no explicit work root, Crabbox chooses a host-visible
+cache work root so nested bind mounts can see the synced checkout.
 
 Use `--desktop --browser` to bootstrap Xvfb, XFCE, x11vnc, noVNC/websockify,
 desktop input tools, screenshot tools, ffmpeg, and a packaged browser inside
