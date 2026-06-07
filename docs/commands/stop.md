@@ -41,8 +41,9 @@ Crabbox lease ID and local slug:
 - `e2b` — accepts a Crabbox lease ID, a local slug, or a Crabbox-owned E2B
   sandbox ID in raw or `e2b_<sandboxID>` form and deletes the E2B sandbox.
 - `docker-sandbox` — accepts only a Crabbox lease ID or local slug backed by a
-  `provider=docker-sandbox` local claim, then removes the sandbox with
-  `sbx rm --force`.
+   `provider=docker-sandbox` local claim, then removes the sandbox with
+   `sbx rm --force`. This remains the manual cleanup path for clone-mode
+   Docker Sandbox runs that Crabbox keeps after a successful one-shot command.
 - `ssh` (static hosts) — removes the local claim for the configured static
   target; it never deletes the host.
 

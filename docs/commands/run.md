@@ -86,6 +86,14 @@ sync limitations.
 `--azure-backend dynamic-sessions` keeps `--provider azure` as the family
 selector while routing to the `azure-dynamic-sessions` delegated backend.
 
+`--provider docker-sandbox --docker-sandbox-clone` has one provider-local
+exception to the default one-shot cleanup rule: if Crabbox creates a fresh
+clone-mode sandbox for the run and the command succeeds, Crabbox keeps that
+sandbox even without `--keep`. This preserves unfetched in-sandbox commits.
+Crabbox prints the exact `crabbox stop --provider docker-sandbox <slug>`
+command for manual cleanup. Reused `--id` Docker Sandbox runs keep their
+existing lifecycle behavior.
+
 ## Sync
 
 Sync builds a file manifest with `git ls-files --cached --others
