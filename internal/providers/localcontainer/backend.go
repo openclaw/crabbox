@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -308,7 +309,30 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 func (b *backend) configForRun() core.Config {
 	cfg := b.cfg
 	applyDefaults(&cfg)
+	b.detectContainerRuntime(&cfg)
 	return cfg
+}
+
+func (b *backend) detectContainerRuntime(cfg *core.Config) {
+	if core.LocalContainerRuntimeExplicit(*cfg) {
+		return
+	}
+	runtimeName := strings.TrimSpace(cfg.LocalContainer.Runtime)
+	if runtimeName != "" && runtimeName != "docker" {
+		return
+	}
+	if commandAvailable("docker") {
+		cfg.LocalContainer.Runtime = "docker"
+		return
+	}
+	if commandAvailable("podman") {
+		cfg.LocalContainer.Runtime = "podman"
+	}
+}
+
+func commandAvailable(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 func applyDefaults(cfg *core.Config) {
@@ -418,6 +442,9 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 			return "", err
 		}
 		args = append(args, "-v", socketPath+":"+dockerSocketInGuest)
+		if isPodmanRuntime(cfg.LocalContainer.Runtime) {
+			args = append(args, "--security-opt", "label=disable")
+		}
 	}
 	for _, mount := range cacheVolumeMounts {
 		args = append(args, "-v", mount)
@@ -527,7 +554,7 @@ func dockerSocketMountPathFromHostForGOOS(host, goos string) (string, error) {
 	}
 	path, ok := localDockerSocketPath(host)
 	if !ok {
-		return "", core.Exit(2, "local-container docker socket requested but active Docker host %q is not a local Unix socket", host)
+		return "", core.Exit(2, "local-container socket pass-through requested but DOCKER_HOST %q is not a local Unix socket", host)
 	}
 	if goos != "linux" {
 		return dockerSocketInGuest, nil
@@ -589,10 +616,10 @@ func localDockerSocketPath(host string) (string, bool) {
 func validateDockerSocketMountPath(path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", core.Exit(2, "local-container docker socket requested but %s is not available: %v", path, err)
+		return "", core.Exit(2, "local-container socket pass-through requested but %s is not available: %v", path, err)
 	}
 	if info.Mode()&os.ModeSocket == 0 {
-		return "", core.Exit(2, "local-container docker socket requested but %s is not a socket", path)
+		return "", core.Exit(2, "local-container socket pass-through requested but %s is not a socket", path)
 	}
 	return path, nil
 }
@@ -729,14 +756,18 @@ func (b *backend) removeContainer(ctx context.Context, id string) error {
 }
 
 func (b *backend) runtimeInfo(ctx context.Context) (string, string) {
+	cfg := b.configForRun()
 	version, err := b.docker(ctx, []string{"version", "--format", "{{.Client.Version}}"}, nil, nil)
 	if err != nil {
 		return "unknown", ""
 	}
-	return strings.TrimSpace(version.Stdout), b.runtimeContext(ctx)
+	return strings.TrimSpace(version.Stdout), b.runtimeContext(ctx, cfg.LocalContainer.Runtime)
 }
 
-func (b *backend) runtimeContext(ctx context.Context) string {
+func (b *backend) runtimeContext(ctx context.Context, runtimeName string) string {
+	if isPodmanRuntime(runtimeName) {
+		return "default"
+	}
 	contextName, err := b.docker(ctx, []string{"context", "show"}, nil, nil)
 	if err != nil {
 		return ""
@@ -745,7 +776,12 @@ func (b *backend) runtimeContext(ctx context.Context) string {
 }
 
 func (b *backend) claimScope(ctx context.Context) string {
-	return localContainerClaimScope(b.configForRun().LocalContainer.Runtime, b.runtimeContext(ctx), b.runtimeHost(ctx))
+	cfg := b.configForRun()
+	return localContainerClaimScope(
+		cfg.LocalContainer.Runtime,
+		b.runtimeContext(ctx, cfg.LocalContainer.Runtime),
+		b.runtimeHost(ctx, cfg.LocalContainer.Runtime),
+	)
 }
 
 func localContainerClaimScope(runtimeName, contextName string, hostValues ...string) string {
@@ -765,9 +801,12 @@ func localContainerClaimScope(runtimeName, contextName string, hostValues ...str
 	return scope
 }
 
-func (b *backend) runtimeHost(ctx context.Context) string {
+func (b *backend) runtimeHost(ctx context.Context, runtimeName string) string {
 	if host := strings.TrimSpace(os.Getenv("DOCKER_HOST")); host != "" {
 		return host
+	}
+	if isPodmanRuntime(runtimeName) {
+		return ""
 	}
 	result, err := b.docker(ctx, []string{"context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"}, nil, nil)
 	if err != nil {
@@ -874,6 +913,10 @@ func commandError(action string, result core.LocalCommandResult, err error) erro
 		return core.Exit(code, "%s failed: %v: %s", action, err, detail)
 	}
 	return core.Exit(code, "%s failed: %v", action, err)
+}
+
+func isPodmanRuntime(runtimeName string) bool {
+	return filepath.Base(strings.TrimSpace(runtimeName)) == "podman"
 }
 
 func shortID(id string) string {
@@ -1116,12 +1159,24 @@ if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker >/dev/null 2>&
   fi
 fi
 if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker >/dev/null 2>&1; then
-  echo "docker socket requested but docker CLI is not installed; use a Debian/Ubuntu-compatible image or preinstall docker" >&2
+  echo "Docker-compatible socket requested but docker CLI is not installed; use a Debian/Ubuntu-compatible image or preinstall docker" >&2
   exit 127
 fi
 if ! command -v /usr/sbin/sshd >/dev/null 2>&1; then
   echo "missing /usr/sbin/sshd; use a Debian/Ubuntu-compatible image or a prebuilt Crabbox runner image" >&2
   exit 127
+fi
+if [ -f /etc/ssh/sshd_config ]; then
+  if grep -qE '^[#[:space:]]*UsePAM[[:space:]]+' /etc/ssh/sshd_config; then
+    sed -i 's/^[#[:space:]]*UsePAM[[:space:]].*/UsePAM no/' /etc/ssh/sshd_config
+  else
+    printf '\nUsePAM no\n' >> /etc/ssh/sshd_config
+  fi
+  if grep -qE '^[#[:space:]]*PasswordAuthentication[[:space:]]+' /etc/ssh/sshd_config; then
+    sed -i 's/^[#[:space:]]*PasswordAuthentication[[:space:]].*/PasswordAuthentication no/' /etc/ssh/sshd_config
+  else
+    printf '\nPasswordAuthentication no\n' >> /etc/ssh/sshd_config
+  fi
 fi
 user="${CRABBOX_SSH_USER:-crabbox}"
 work_root="${CRABBOX_WORK_ROOT:-/work/crabbox}"
@@ -1129,6 +1184,7 @@ ssh_port="${CRABBOX_SSH_PORT:-2222}"
 if ! id "$user" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$user"
 fi
+passwd -d "$user" >/dev/null 2>&1 || true
 home_dir="$(getent passwd "$user" | cut -d: -f6)"
 if [ -z "$home_dir" ]; then
   home_dir="/home/$user"

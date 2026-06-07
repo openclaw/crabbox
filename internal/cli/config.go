@@ -14,124 +14,125 @@ import (
 )
 
 type Config struct {
-	Profile                     string
-	Provider                    string
-	TargetOS                    string
-	Architecture                string
-	architectureExplicit        bool
-	OSImage                     string
-	osImageExplicit             bool
-	osImageProviderDefaults     string
-	WindowsMode                 string
-	Desktop                     bool
-	DesktopEnv                  string
-	Browser                     bool
-	Code                        bool
-	Network                     NetworkMode
-	Class                       string
-	Pond                        string
-	ExposedPorts                []string
-	ServerType                  string
-	ServerTypeExplicit          bool
-	Coordinator                 string
-	CoordToken                  string
-	CoordAdminToken             string
-	HostID                      string
-	Access                      AccessConfig
-	Location                    string
-	Image                       string
-	imageExplicit               bool
-	AWSRegion                   string
-	AWSAMI                      string
-	AWSSnapshot                 string
-	AWSSGID                     string
-	AWSSubnetID                 string
-	AWSProfile                  string
-	AWSRootGB                   int32
-	AWSSSHCIDRs                 []string
-	AWSMacHostID                string
-	AzureSubscription           string
-	AzureTenant                 string
-	AzureClientID               string
-	AzureLocation               string
-	AzureBackend                string
-	AzureResourceGroup          string
-	AzureImage                  string
-	azureImageExplicit          bool
-	AzureSnapshot               string
-	AzureOSDisk                 string
-	AzureOSDiskExplicit         bool
-	AzureVNet                   string
-	AzureSubnet                 string
-	AzureNSG                    string
-	AzureSSHCIDRs               []string
-	AzureNetwork                string
-	AzureDynamicSessions        AzureDynamicSessionsConfig
-	GCPProject                  string
-	gcpProjectExplicit          bool
-	GCPZone                     string
-	gcpZoneExplicit             bool
-	GCPImage                    string
-	gcpImageExplicit            bool
-	GCPMachineImage             string
-	GCPSnapshot                 string
-	GCPNetwork                  string
-	gcpNetworkExplicit          bool
-	GCPSubnet                   string
-	GCPTags                     []string
-	gcpTagsExplicit             bool
-	GCPSSHCIDRs                 []string
-	GCPRootGB                   int64
-	gcpRootGBExplicit           bool
-	GCPServiceAccount           string
-	Proxmox                     ProxmoxConfig
-	Parallels                   ParallelsConfig
-	parallelsTemplateApplied    bool
-	SSHUser                     string
-	SSHKey                      string
-	SSHPort                     string
-	SSHFallbackPorts            []string
-	ProviderKey                 string
-	WorkRoot                    string
-	TTL                         time.Duration
-	IdleTimeout                 time.Duration
-	Sync                        SyncConfig
-	Run                         RunConfig
-	EnvAllow                    []string
-	Capacity                    CapacityConfig
-	Actions                     ActionsConfig
-	Blacksmith                  BlacksmithConfig
-	Namespace                   NamespaceConfig
-	Daytona                     DaytonaConfig
-	E2B                         E2BConfig
-	ExeDev                      ExeDevConfig
-	Railway                     RailwayConfig
-	Runpod                      RunpodConfig
-	Wandb                       WandbConfig
-	Islo                        IsloConfig
-	isloImageExplicit           bool
-	Tensorlake                  TensorlakeConfig
-	DockerSandbox               DockerSandboxConfig
-	Modal                       ModalConfig
-	UpstashBox                  UpstashBoxConfig
-	AsciiBox                    AsciiBoxConfig
-	Cloudflare                  CloudflareConfig
-	Semaphore                   SemaphoreConfig
-	Sprites                     SpritesConfig
-	LocalContainer              LocalContainerConfig
-	localContainerImageExplicit bool
-	AppleContainer              AppleContainerConfig
-	appleContainerImageExplicit bool
-	Multipass                   MultipassConfig
-	multipassImageExplicit      bool
-	Tailscale                   TailscaleConfig
-	Static                      StaticConfig
-	Results                     ResultsConfig
-	Cache                       CacheConfig
-	Profiles                    map[string]ProfileConfig
-	Presets                     map[string]PresetConfig
-	ProofTemplates              map[string]ProofTemplateConfig
-	Jobs                        map[string]JobConfig
+	Profile                       string
+	Provider                      string
+	TargetOS                      string
+	Architecture                  string
+	architectureExplicit          bool
+	OSImage                       string
+	osImageExplicit               bool
+	osImageProviderDefaults       string
+	WindowsMode                   string
+	Desktop                       bool
+	DesktopEnv                    string
+	Browser                       bool
+	Code                          bool
+	Network                       NetworkMode
+	Class                         string
+	Pond                          string
+	ExposedPorts                  []string
+	ServerType                    string
+	ServerTypeExplicit            bool
+	Coordinator                   string
+	CoordToken                    string
+	CoordAdminToken               string
+	HostID                        string
+	Access                        AccessConfig
+	Location                      string
+	Image                         string
+	imageExplicit                 bool
+	AWSRegion                     string
+	AWSAMI                        string
+	AWSSnapshot                   string
+	AWSSGID                       string
+	AWSSubnetID                   string
+	AWSProfile                    string
+	AWSRootGB                     int32
+	AWSSSHCIDRs                   []string
+	AWSMacHostID                  string
+	AzureSubscription             string
+	AzureTenant                   string
+	AzureClientID                 string
+	AzureLocation                 string
+	AzureBackend                  string
+	AzureResourceGroup            string
+	AzureImage                    string
+	azureImageExplicit            bool
+	AzureSnapshot                 string
+	AzureOSDisk                   string
+	AzureOSDiskExplicit           bool
+	AzureVNet                     string
+	AzureSubnet                   string
+	AzureNSG                      string
+	AzureSSHCIDRs                 []string
+	AzureNetwork                  string
+	AzureDynamicSessions          AzureDynamicSessionsConfig
+	GCPProject                    string
+	gcpProjectExplicit            bool
+	GCPZone                       string
+	gcpZoneExplicit               bool
+	GCPImage                      string
+	gcpImageExplicit              bool
+	GCPMachineImage               string
+	GCPSnapshot                   string
+	GCPNetwork                    string
+	gcpNetworkExplicit            bool
+	GCPSubnet                     string
+	GCPTags                       []string
+	gcpTagsExplicit               bool
+	GCPSSHCIDRs                   []string
+	GCPRootGB                     int64
+	gcpRootGBExplicit             bool
+	GCPServiceAccount             string
+	Proxmox                       ProxmoxConfig
+	Parallels                     ParallelsConfig
+	parallelsTemplateApplied      bool
+	SSHUser                       string
+	SSHKey                        string
+	SSHPort                       string
+	SSHFallbackPorts              []string
+	ProviderKey                   string
+	WorkRoot                      string
+	TTL                           time.Duration
+	IdleTimeout                   time.Duration
+	Sync                          SyncConfig
+	Run                           RunConfig
+	EnvAllow                      []string
+	Capacity                      CapacityConfig
+	Actions                       ActionsConfig
+	Blacksmith                    BlacksmithConfig
+	Namespace                     NamespaceConfig
+	Daytona                       DaytonaConfig
+	E2B                           E2BConfig
+	ExeDev                        ExeDevConfig
+	Railway                       RailwayConfig
+	Runpod                        RunpodConfig
+	Wandb                         WandbConfig
+	Islo                          IsloConfig
+	isloImageExplicit             bool
+	Tensorlake                    TensorlakeConfig
+	DockerSandbox                 DockerSandboxConfig
+	Modal                         ModalConfig
+	UpstashBox                    UpstashBoxConfig
+	AsciiBox                      AsciiBoxConfig
+	Cloudflare                    CloudflareConfig
+	Semaphore                     SemaphoreConfig
+	Sprites                       SpritesConfig
+	LocalContainer                LocalContainerConfig
+	localContainerRuntimeExplicit bool
+	localContainerImageExplicit   bool
+	AppleContainer                AppleContainerConfig
+	appleContainerImageExplicit   bool
+	Multipass                     MultipassConfig
+	multipassImageExplicit        bool
+	Tailscale                     TailscaleConfig
+	Static                        StaticConfig
+	Results                       ResultsConfig
+	Cache                         CacheConfig
+	Profiles                      map[string]ProfileConfig
+	Presets                       map[string]PresetConfig
+	ProofTemplates                map[string]ProofTemplateConfig
+	Jobs                          map[string]JobConfig
 }
 
 type SyncConfig struct {
@@ -850,6 +851,14 @@ func MarkIsloImageExplicit(cfg *Config) {
 
 func MarkLocalContainerImageExplicit(cfg *Config) {
 	cfg.localContainerImageExplicit = true
+}
+
+func MarkLocalContainerRuntimeExplicit(cfg *Config) {
+	cfg.localContainerRuntimeExplicit = true
+}
+
+func LocalContainerRuntimeExplicit(cfg Config) bool {
+	return cfg.localContainerRuntimeExplicit
 }
 
 func MarkAppleContainerImageExplicit(cfg *Config) {
@@ -2573,6 +2582,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if file.LocalContainer != nil {
 		if file.LocalContainer.Runtime != "" {
 			cfg.LocalContainer.Runtime = file.LocalContainer.Runtime
+			cfg.localContainerRuntimeExplicit = true
 		}
 		if file.LocalContainer.Image != "" {
 			cfg.LocalContainer.Image = file.LocalContainer.Image
@@ -3347,7 +3357,10 @@ func applyEnv(cfg *Config) error {
 	cfg.Sprites.Token = getenv("CRABBOX_SPRITES_TOKEN", getenv("SPRITES_TOKEN", getenv("SPRITE_TOKEN", getenv("SETUP_SPRITE_TOKEN", cfg.Sprites.Token))))
 	cfg.Sprites.APIURL = getenv("CRABBOX_SPRITES_API_URL", getenv("SPRITES_API_URL", cfg.Sprites.APIURL))
 	cfg.Sprites.WorkRoot = getenv("CRABBOX_SPRITES_WORK_ROOT", cfg.Sprites.WorkRoot)
-	cfg.LocalContainer.Runtime = getenv("CRABBOX_LOCAL_CONTAINER_RUNTIME", cfg.LocalContainer.Runtime)
+	if runtimeName := os.Getenv("CRABBOX_LOCAL_CONTAINER_RUNTIME"); runtimeName != "" {
+		cfg.LocalContainer.Runtime = runtimeName
+		cfg.localContainerRuntimeExplicit = true
+	}
 	if image := os.Getenv("CRABBOX_LOCAL_CONTAINER_IMAGE"); image != "" {
 		cfg.LocalContainer.Image = image
 		cfg.localContainerImageExplicit = true

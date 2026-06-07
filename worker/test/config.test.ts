@@ -17,6 +17,7 @@ import {
   serverTypeForClass,
   serverTypeForProviderClass,
   sshPorts,
+  validCIDRs,
 } from "../src/config";
 
 describe("machine class config", () => {
@@ -232,6 +233,100 @@ describe("lease config", () => {
     expect(config.browser).toBe(false);
     expect(config.code).toBe(false);
     expect(config.ttlSeconds).toBe(86_400);
+    expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: 0 }).ttlSeconds).toBe(5400);
+    expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: -1 }).ttlSeconds).toBe(5400);
+    expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: 42.9 }).ttlSeconds).toBe(42);
+    expect(
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: 0 }).idleTimeoutSeconds,
+    ).toBe(1800);
+    expect(
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: -1 }).idleTimeoutSeconds,
+    ).toBe(1800);
+    expect(
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: 999_999 })
+        .idleTimeoutSeconds,
+    ).toBe(86_400);
+    expect(
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: 42.9 })
+        .idleTimeoutSeconds,
+    ).toBe(42);
+  });
+
+  it("filters invalid SSH CIDR values before provider config", () => {
+    expect(
+      validCIDRs([
+        " 203.0.113.7/32 ",
+        "0.0.0.0/0",
+        "255.255.255.255/32",
+        "2001:db8::1/128",
+        "::/0",
+        "999.999.999.999/32",
+        "256.0.0.1/32",
+        "1.2.3/24",
+        "1.2.3.4.5/24",
+        "203.0.113.7/33",
+        "203.0.113.7/-1",
+        "203.0.113.7/x",
+        "203.0.113.7",
+        "203.0.113.7/32/extra",
+        "::::/128",
+        "::1]#junk/128",
+        "::1]@[::2/128",
+        "::\n1/128",
+        "2001:db8::\t1/128",
+        "2001:db8::1/129",
+        "2001:db8::1/-1",
+        "2001:db8::1/x",
+        "not-a-cidr",
+      ]),
+    ).toEqual(["203.0.113.7/32", "0.0.0.0/0", "255.255.255.255/32", "2001:db8::1/128", "::/0"]);
+
+    const config = leaseConfig({
+      provider: "aws",
+      sshPublicKey: "ssh-ed25519 test",
+      awsSSHCIDRs: ["198.51.100.77/32"],
+      gcpSSHCIDRs: ["2001:db8::2/128"],
+    });
+    expect(config.awsSSHCIDRs).toEqual(["198.51.100.77/32"]);
+    expect(config.gcpSSHCIDRs).toEqual(["2001:db8::2/128"]);
+    expect(() =>
+      leaseConfig({
+        provider: "aws",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["198.51.100.77/32", "999.999.999.999/32"],
+      }),
+    ).toThrow("awsSSHCIDRs entries must be valid");
+    expect(() =>
+      leaseConfig({
+        provider: "gcp",
+        sshPublicKey: "ssh-ed25519 test",
+        gcpSSHCIDRs: ["::::/128"],
+      }),
+    ).toThrow("gcpSSHCIDRs entries must be valid");
+    expect(
+      leaseConfig({
+        provider: "gcp",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["999.999.999.999/32", "198.51.100.77/32"],
+        gcpSSHCIDRs: ["2001:db8::2/128"],
+      }).awsSSHCIDRs,
+    ).toEqual(["198.51.100.77/32"]);
+    expect(
+      leaseConfig({
+        provider: "aws",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["198.51.100.77/32"],
+        gcpSSHCIDRs: ["::::/128", "2001:db8::2/128"],
+      }).gcpSSHCIDRs,
+    ).toEqual(["2001:db8::2/128"]);
+    expect(
+      leaseConfig({
+        provider: "hetzner",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["999.999.999.999/32"],
+        gcpSSHCIDRs: ["::::/128"],
+      }),
+    ).toMatchObject({ awsSSHCIDRs: [], gcpSSHCIDRs: [] });
   });
 
   it("allows capacity hints to be disabled per lease", () => {

@@ -180,6 +180,14 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
   }
   const ttlSeconds = clampTTL(input.ttlSeconds ?? 5400);
   const idleTimeoutSeconds = clampIdleTimeout(input.idleTimeoutSeconds ?? 1800);
+  const awsSSHCIDRs =
+    provider === "aws"
+      ? validatedCIDRs(input.awsSSHCIDRs ?? [], "awsSSHCIDRs")
+      : validCIDRs(input.awsSSHCIDRs ?? []);
+  const gcpSSHCIDRs =
+    provider === "gcp"
+      ? validatedCIDRs(input.gcpSSHCIDRs ?? [], "gcpSSHCIDRs")
+      : validCIDRs(input.gcpSSHCIDRs ?? []);
   const sshPublicKey = input.sshPublicKey?.trim() ?? "";
   if (!sshPublicKey) {
     throw new Error("sshPublicKey is required");
@@ -221,7 +229,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     awsSubnetID: input.awsSubnetID ?? "",
     awsProfile: input.awsProfile ?? "",
     awsRootGB: input.awsRootGB ?? 400,
-    awsSSHCIDRs: validCIDRs(input.awsSSHCIDRs ?? []),
+    awsSSHCIDRs,
     awsMacHostID: input.awsMacHostID ?? "",
     azureLocation: input.azureLocation ?? "",
     azureImage:
@@ -241,7 +249,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     gcpNetwork: input.gcpNetwork ?? "",
     gcpSubnet: input.gcpSubnet ?? "",
     gcpTags: uniqueStrings(input.gcpTags ?? []),
-    gcpSSHCIDRs: validCIDRs(input.gcpSSHCIDRs ?? []),
+    gcpSSHCIDRs,
     gcpRootGB: input.gcpRootGB ?? 0,
     gcpServiceAccount: input.gcpServiceAccount ?? "",
     capacityMarket: input.capacity?.market ?? "spot",
@@ -515,11 +523,69 @@ export function sshPorts(config: Pick<LeaseConfig, "sshPort" | "sshFallbackPorts
 
 export function validCIDRs(values: string[]): string[] {
   const cidrs = values.map((value) => value.trim()).filter(Boolean);
-  return cidrs.filter(
-    (cidr) =>
-      /^(\d{1,3}\.){3}\d{1,3}\/([0-9]|[1-2][0-9]|3[0-2])$/.test(cidr) ||
-      /^[0-9a-f:]+\/([0-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])$/i.test(cidr),
+  return cidrs.filter(isValidCIDR);
+}
+
+export function validatedCIDRs(values: string[], fieldName: string): string[] {
+  const cidrs = values.map((value) => value.trim()).filter(Boolean);
+  const valid = cidrs.filter(isValidCIDR);
+  if (valid.length !== cidrs.length) {
+    throw new Error(`${fieldName} entries must be valid IPv4 or IPv6 CIDR ranges`);
+  }
+  return valid;
+}
+
+function isValidCIDR(cidr: string): boolean {
+  const firstSlash = cidr.indexOf("/");
+  if (firstSlash <= 0 || firstSlash !== cidr.lastIndexOf("/")) {
+    return false;
+  }
+  const address = cidr.slice(0, firstSlash);
+  const prefixText = cidr.slice(firstSlash + 1);
+  if (!/^[0-9]+$/.test(prefixText)) {
+    return false;
+  }
+  const prefix = Number(prefixText);
+  if (address.includes(":")) {
+    return prefix >= 0 && prefix <= 128 && isValidIPv6Address(address);
+  }
+  return prefix >= 0 && prefix <= 32 && isValidIPv4Address(address);
+}
+
+function isValidIPv4Address(address: string): boolean {
+  const parts = address.split(".");
+  return (
+    parts.length === 4 &&
+    parts.every((part) => {
+      if (!/^[0-9]{1,3}$/.test(part)) {
+        return false;
+      }
+      const octet = Number(part);
+      return Number.isInteger(octet) && octet >= 0 && octet <= 255;
+    })
   );
+}
+
+function isValidIPv6Address(address: string): boolean {
+  if (!/^[0-9A-Fa-f:.]+$/.test(address)) {
+    return false;
+  }
+  if (["[", "]", "@", "/", "?", "#"].some((delimiter) => address.includes(delimiter))) {
+    return false;
+  }
+  try {
+    const parsed = new URL(`http://[${address}]/`);
+    return (
+      parsed.hostname !== "" &&
+      parsed.username === "" &&
+      parsed.password === "" &&
+      parsed.search === "" &&
+      parsed.hash === "" &&
+      parsed.pathname === "/"
+    );
+  } catch {
+    return false;
+  }
 }
 
 function validPorts(values: string[]): string[] {

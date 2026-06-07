@@ -1083,6 +1083,10 @@ export class FleetDurableObject implements DurableObject {
       providerHourlyUSD,
     );
     const now = new Date();
+    const providerProject = providerProjectForConfig(config);
+    const providerRegion = ["aws", "azure", "gcp"].includes(config.provider)
+      ? providerRegionForConfig(config)
+      : undefined;
     let record: LeaseRecord = {
       id: leaseID,
       slug,
@@ -1124,6 +1128,12 @@ export class FleetDurableObject implements DurableObject {
         config.idleTimeoutSeconds,
       ).toISOString(),
     };
+    if (providerProject) {
+      record.providerProject = providerProject;
+    }
+    if (providerRegion) {
+      record.region = providerRegion;
+    }
     const requestedHostID = config.hostID || config.awsMacHostID;
     if (requestedHostID) {
       record.hostId = requestedHostID;
@@ -1178,7 +1188,13 @@ export class FleetDurableObject implements DurableObject {
         if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
           await this.deleteProviderAccess(record.id);
         }
+        const current = await this.getLease(record.id);
+        if (!current || current.state !== "provisioning") {
+          await this.scheduleAlarm();
+          throw error;
+        }
         const failedAt = new Date().toISOString();
+        record = { ...current };
         record.state = "failed";
         record.updatedAt = failedAt;
         record.endedAt = failedAt;
@@ -1188,6 +1204,18 @@ export class FleetDurableObject implements DurableObject {
         await this.scheduleAlarm();
         throw error;
       });
+    let current = await this.getLease(record.id);
+    if (!current || current.state !== "provisioning") {
+      return this.abortProvisionedLeaseAfterStateChange(
+        current,
+        record,
+        config,
+        server,
+        serverType,
+        Boolean(prepared?.provisioning?.publishAccessBeforeProvisioning),
+      );
+    }
+    record = { ...current };
     record.state = "active";
     record.cloudID = server.cloudID;
     record.serverType = serverType;
@@ -1220,6 +1248,18 @@ export class FleetDurableObject implements DurableObject {
     );
     record.estimatedHourlyUSD = finalCost.hourlyUSD;
     record.maxEstimatedUSD = finalCost.maxUSD;
+    current = await this.getLease(record.id);
+    if (!current || current.state !== "provisioning") {
+      return this.abortProvisionedLeaseAfterStateChange(
+        current,
+        record,
+        config,
+        server,
+        serverType,
+        Boolean(prepared?.provisioning?.publishAccessBeforeProvisioning),
+      );
+    }
+    record = { ...current, ...record };
     await this.putLease(record);
     if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
       await this.deleteProviderAccess(record.id);
@@ -4386,9 +4426,7 @@ export class FleetDurableObject implements DurableObject {
   private async expireLeases(): Promise<void> {
     const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
     const now = Date.now();
-    const expired = [...leases.values()].filter(
-      (lease) => leaseIsLive(lease) && Date.parse(lease.expiresAt) <= now,
-    );
+    const expired = [...leases.values()].filter((lease) => leaseNeedsCleanup(lease, now));
     await Promise.all(
       expired.map(async (lease) => {
         const retryAt = Date.parse(lease.cleanupRetryAt ?? "");
@@ -4419,9 +4457,10 @@ export class FleetDurableObject implements DurableObject {
           );
           return;
         }
-        lease.state = "expired";
+        lease.state = leaseIsLive(lease) ? "expired" : lease.state;
         lease.updatedAt = nowISO;
         lease.endedAt = nowISO;
+        delete lease.releaseDeletesServer;
         clearLeaseCleanupMetadata(lease);
         await this.putLease(lease);
       }),
@@ -4430,8 +4469,9 @@ export class FleetDurableObject implements DurableObject {
 
   private async scheduleAlarm(): Promise<void> {
     const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
+    const now = Date.now();
     const alarmTimes = [...leases.values()]
-      .filter((lease) => leaseIsLive(lease))
+      .filter((lease) => leaseIsLive(lease) || leaseNeedsCleanup(lease, now))
       .map((lease) => nextLeaseAlarmTime(lease))
       .filter((time) => Number.isFinite(time));
     const orphanSweepAlarm = await this.nextAWSOrphanSweepAlarmTime();
@@ -5150,19 +5190,88 @@ export class FleetDurableObject implements DurableObject {
     await this.provider(lease.provider, lease.region, lease.providerProject).releaseLease(lease);
   }
 
+  private async abortProvisionedLeaseAfterStateChange(
+    current: LeaseRecord | undefined,
+    record: LeaseRecord,
+    config: LeaseConfig,
+    server: ProviderMachine,
+    serverType: string,
+    deletePublishedAccess: boolean,
+  ): Promise<Response> {
+    if (deletePublishedAccess) {
+      await this.deleteProviderAccess(record.id);
+    }
+    const cleanupLease = provisionedLeaseRecord(current ?? record, config, server, serverType);
+    if (current?.state === "released" && current.releaseDeletesServer === false) {
+      cleanupLease.state = "released";
+      cleanupLease.keep = true;
+      clearLeaseCleanupMetadata(cleanupLease);
+      await this.putLease(cleanupLease);
+      await this.scheduleAlarm();
+      return json(
+        {
+          error: "lease_state_changed",
+          message: "lease changed state while provider provisioning was in progress",
+          lease: cleanupLease,
+        },
+        { status: 409 },
+      );
+    }
+    try {
+      await this.deleteLeaseServer(cleanupLease);
+    } catch (error) {
+      const failedAt = new Date().toISOString();
+      cleanupLease.state = current?.state ?? "active";
+      if (cleanupLease.state === "released") {
+        cleanupLease.releaseDeletesServer = true;
+      }
+      cleanupLease.cleanupAttempts = (cleanupLease.cleanupAttempts ?? 0) + 1;
+      cleanupLease.cleanupFailedAt = failedAt;
+      cleanupLease.cleanupError = errorMessage(error);
+      cleanupLease.cleanupRetryAt = new Date(Date.now() + leaseCleanupRetryDelayMs).toISOString();
+      cleanupLease.expiresAt = failedAt;
+      cleanupLease.updatedAt = failedAt;
+      await this.putLease(cleanupLease);
+      await this.scheduleAlarm();
+      throw error;
+    }
+    await this.scheduleAlarm();
+    return json(
+      {
+        error: "lease_state_changed",
+        message: "lease changed state while provider provisioning was in progress",
+        lease: current,
+      },
+      { status: 409 },
+    );
+  }
+
   private async releaseResolvedLease(
     lease: LeaseRecord,
     options: { deleteServer: boolean; keep?: boolean },
   ): Promise<LeaseRecord> {
     this.clearEgressLease(lease.id);
-    if (options.deleteServer && leaseIsLive(lease) && lease.cloudID) {
+    if (
+      options.deleteServer &&
+      lease.cloudID &&
+      (leaseIsLive(lease) || lease.releaseDeletesServer !== undefined || lease.cleanupError)
+    ) {
       await this.deleteLeaseServer(lease);
     }
+    const wasUnprovisionedRelease =
+      !lease.cloudID && (lease.state === "provisioning" || lease.state === "released");
     const now = new Date().toISOString();
     lease.state = "released";
     lease.updatedAt = now;
     lease.releasedAt = now;
     lease.endedAt = now;
+    if (wasUnprovisionedRelease) {
+      lease.releaseDeletesServer = options.deleteServer;
+    } else if (lease.releaseDeletesServer === false && !options.deleteServer) {
+      lease.releaseDeletesServer = false;
+    } else {
+      delete lease.releaseDeletesServer;
+    }
     clearLeaseCleanupMetadata(lease);
     if (options.keep !== undefined) {
       lease.keep = options.keep;
@@ -6940,6 +7049,34 @@ function activeSlugCollision(
 
 function leaseIsLive(lease: LeaseRecord): boolean {
   return lease.state === "active" || lease.state === "provisioning";
+}
+
+function leaseNeedsCleanup(lease: LeaseRecord, now: number): boolean {
+  if (leaseIsLive(lease) && Date.parse(lease.expiresAt) <= now) {
+    return true;
+  }
+  return Boolean(!leaseIsLive(lease) && lease.cloudID && lease.cleanupError);
+}
+
+function provisionedLeaseRecord(
+  lease: LeaseRecord,
+  config: LeaseConfig,
+  server: ProviderMachine,
+  serverType: string,
+): LeaseRecord {
+  const providerProject = lease.providerProject ?? providerProjectForConfig(config);
+  return {
+    ...lease,
+    state: "active",
+    cloudID: server.cloudID,
+    serverID: server.id,
+    serverName: server.name,
+    serverType,
+    host: server.host,
+    region: server.region ?? lease.region ?? providerRegionForConfig(config) ?? "",
+    ...(providerProject ? { providerProject } : {}),
+    ...(server.hostID ? { hostId: server.hostID } : {}),
+  };
 }
 
 function nextLeaseAlarmTime(lease: LeaseRecord): number {
