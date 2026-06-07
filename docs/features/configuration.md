@@ -359,6 +359,16 @@ config or `CRABBOX_XCP_NG_PASSWORD`; there is intentionally no
 XCP-ng password command-line flag. Prefer a pool-master `apiUrl`; if XAPI
 returns `HOST_IS_SLAVE`, Crabbox retries login once against the reported master.
 
+`network`, `networkUuid`, and `host` are optional placement hints. When
+`network` or `networkUuid` is set, Crabbox moves all VIFs on the copied VM to
+that network. Prefer a single-NIC template for Crabbox-managed VMs, or leave
+both unset when the template's existing network topology should be preserved.
+
+The current SR-backed lifecycle uses `VM.copy`, then `VM.provision`, and then
+attaches a FAT16 `CIDATA` config-drive image. Keep `apiUrl` on an
+administrator-only management network or VPN, prefer trusted certificates, and
+limit `insecureTLS` to private lab environments.
+
 Environment overrides:
 
 ```text

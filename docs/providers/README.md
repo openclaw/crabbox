@@ -101,8 +101,9 @@ reports.
 - ASCII Box is an SSH-lease provider. Crabbox uses the documented `box --json`
   CLI for lifecycle/status/delete, then runs normal sync and commands over SSH.
 - XCP-ng is a direct SSH-lease provider. Crabbox talks to XAPI from the CLI,
-  clones Linux templates, injects cloud-init through a config drive, and uses
-  guest metrics for IPv4 discovery.
+  uses `VM.copy` plus `VM.provision` for Linux templates, injects cloud-init
+  through a FAT16 `CIDATA` config drive, optionally moves all VIFs to the
+  configured network, and uses guest metrics for IPv4 discovery.
 - Capability flags (`--desktop`, `--browser`, `--code`, VNC) are validated
   against each provider's declared feature set. Among the SSH-lease providers,
   desktop/browser/code surfaces are richest on `aws`, `azure`, `hetzner`,

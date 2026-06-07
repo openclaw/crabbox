@@ -9,8 +9,9 @@ Read this when you:
 - change `internal/providers/xcpng`.
 
 XCP-ng is a direct SSH-lease provider for Linux VMs on a self-hosted XCP-ng
-pool. For each lease Crabbox talks directly to the XAPI endpoint, clones a
-configured template, attaches a temporary config-drive ISO with per-lease
+pool. For each lease Crabbox talks directly to the XAPI endpoint, copies the
+configured template to the selected SR with `VM.copy`, calls `VM.provision`,
+attaches a temporary FAT16 `CIDATA` config-drive image with per-lease
 cloud-init SSH access, waits for XCP-ng guest metrics to report the VM IPv4
 address, runs the Crabbox Linux bootstrap over SSH, and then uses the normal
 SSH sync/run/release path.
@@ -56,19 +57,29 @@ The configured template must be a Linux VM template with:
 
 For each lease Crabbox:
 
-1. clones `xcpNg.template` or `xcpNg.templateUuid`;
-2. resolves the storage repository and optional network/host placement;
-3. writes Crabbox lease labels on the VM;
-4. builds a per-lease config-drive ISO containing cloud-init user-data and
-   metadata;
-5. attaches the config drive to the clone;
-6. starts the VM;
-7. waits for guest metrics to report an IPv4 address;
-8. runs the normal Linux SSH bootstrap.
+1. copies `xcpNg.template` or `xcpNg.templateUuid` to the configured SR with
+   `VM.copy`;
+2. resolves optional network and host placement, then writes Crabbox lease
+   labels on the copied VM;
+3. if `xcpNg.network` or `networkUuid` is set, moves all VIFs on the copied VM
+   to that network;
+4. calls `VM.provision`;
+5. builds a per-lease FAT16 `CIDATA` config-drive image containing cloud-init
+   user-data and metadata;
+6. attaches the config drive to the VM;
+7. starts the VM;
+8. waits for guest metrics to report an IPv4 address;
+9. runs the normal Linux SSH bootstrap.
 
 If the guest tools never report an IPv4 address, or SSH does not come up so the
 bootstrap can run, provisioning fails and Crabbox attempts to delete both the
-clone and its config drive.
+VM and its config drive.
+
+Because `VM.copy` creates full disk copies on the selected SR, template disk
+size and SR placement directly affect warmup and run latency. Crabbox is
+happiest with a single-NIC template. If you need a custom multi-NIC topology,
+leave `xcpNg.network` and `networkUuid` unset so Crabbox preserves the
+template's existing network layout.
 
 ## Quick start
 
@@ -91,9 +102,11 @@ crabbox stop --provider xcp-ng xcp-ng-smoke
 crabbox cleanup --provider xcp-ng --dry-run
 ```
 
-For self-signed private pools, set `CRABBOX_XCP_NG_INSECURE_TLS=1` or pass
-`--xcp-ng-insecure-tls`. That only disables certificate verification; the API
-URL must still use HTTPS.
+Keep `CRABBOX_XCP_NG_API_URL` on an administrator-only management network or
+VPN, and prefer trusted certificates. Set `CRABBOX_XCP_NG_INSECURE_TLS=1` or
+pass `--xcp-ng-insecure-tls` only for private lab pools where you control the
+network and certificate issuance. That only disables certificate verification;
+the API URL must still use HTTPS.
 
 ## Configuration
 
@@ -122,9 +135,16 @@ doctor and lifecycle commands. A template name or UUID is required before
 optional placement hints. `user` becomes the cloud-init SSH user, and
 `workRoot` becomes the remote workspace root.
 
-Point `apiUrl` at the pool master when possible. If it points at a pool member
-that returns XAPI `HOST_IS_SLAVE` during login, Crabbox retries login once
-against the master address reported by XAPI.
+When `network` or `networkUuid` is set, Crabbox moves all VIFs on the copied VM
+to the selected network. Use a single-NIC template for Crabbox-managed VMs, or
+leave the setting unset when the template's network topology should be
+preserved.
+
+Point `apiUrl` at the pool master on an administrator-only management network
+or VPN when possible. Prefer trusted certificates. `insecureTLS` is a
+private-lab escape hatch, not a general deployment mode. If `apiUrl` points at
+a pool member that returns XAPI `HOST_IS_SLAVE` during login, Crabbox retries
+login once against the master address reported by XAPI.
 
 Keep the password in a private config file with `0600` permissions, in an
 environment variable, or in a secret manager. Do not pass it on argv. Crabbox
@@ -181,15 +201,23 @@ classification for CI and local setup probes: `environment_blocked`.
 1. Allocate a Crabbox lease ID and friendly slug.
 2. Resolve the configured template, storage repository, optional network, and
    optional host.
-3. Clone the template and label the clone as Crabbox-managed.
-4. Generate cloud-init user-data and metadata with the per-lease SSH public key.
-5. Build and attach a config-drive ISO on the configured storage repository.
-6. Start the VM and wait for XCP-ng guest metrics to report a non-loopback IPv4
+3. Copy the template to the selected SR with `VM.copy`, label the copied VM as
+   Crabbox-managed, and apply optional host affinity.
+4. If `xcpNg.network` or `networkUuid` is set, move all VIFs on the copied VM
+   to that network.
+5. Call `VM.provision` on the copied VM.
+6. Generate cloud-init user-data and metadata with the per-lease SSH public key.
+7. Build and attach a FAT16 `CIDATA` config-drive image on the configured
+   storage repository.
+8. Start the VM and wait for XCP-ng guest metrics to report a non-loopback IPv4
    address.
-7. Wait for SSH, then run the Crabbox Linux bootstrap.
-8. Sync the checkout and run commands over SSH.
-9. Touch lease labels during runs; on release, delete the config drive and VM
-   unless the lease is kept.
+9. Wait for SSH, then run the Crabbox Linux bootstrap.
+10. Sync the checkout and run commands over SSH.
+11. Touch lease labels during runs; on release, delete the config drive and VM
+    unless the lease is kept.
+
+This is full-copy provisioning, not a cheap CoW clone path, so SR throughput
+and template disk size are part of the user-visible provisioning contract.
 
 Cleanup lists XCP-ng inventory and only acts on resources labeled as
 Crabbox-managed leases. Use `crabbox cleanup --provider xcp-ng --dry-run`
@@ -233,8 +261,9 @@ password belongs in private config or env, never in a command-line flag.
 
 `xcp-ng api URL must use https`
 
-Use an HTTPS XAPI endpoint. `insecureTLS` permits self-signed certificates but
-does not allow plain HTTP.
+Use an HTTPS XAPI endpoint on a private management network or VPN. Prefer
+trusted certificates. `insecureTLS` permits self-signed certificates but should
+stay limited to private lab use; it does not allow plain HTTP.
 
 `xcp-ng template not found by name` / `xcp-ng template name is ambiguous`
 
