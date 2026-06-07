@@ -188,13 +188,24 @@ Common blockers:
 ## Safety Notes
 
 - Crabbox never passes Docker credentials as command-line arguments.
+- Docker Sandbox is inside the runtime trust boundary for this provider:
+  `sbx exec` receives the command, workspace path, and any environment values
+  explicitly selected by Crabbox env-forwarding rules.
+- Crabbox-owned controls are provider selection, config validation, env
+  allowlist selection, diagnostic redaction, temporary env-file creation and
+  cleanup, local process-argument avoidance for forwarded values, and local
+  claim filtering.
+- Docker-owned controls are the `sbx` client/server contract, account
+  authentication, command transport, microVM isolation, virtualization
+  prerequisites, and sandbox-internal Docker runtime.
 - `list`, `status`, and `stop` operate only on local Crabbox claims for
   `provider=docker-sandbox`.
 - `--docker-sandbox-clone` requires a normal Git repository workspace before
   Crabbox calls `sbx create --clone`.
 - Forwarded environment values are written to a temporary local env file and
   passed with `sbx exec --env-file`; Crabbox does not place selected values in
-  local `sbx exec` process arguments.
+  local `sbx exec` process arguments, and the temporary file is removed after
+  the run returns.
 
 ## Live Smoke
 
