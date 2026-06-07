@@ -103,6 +103,30 @@ if [[ -z "$crabbox_bin" ]]; then
   fi
 fi
 
+resolve_configured_xcpng_api_url() {
+  "$crabbox_bin" config show --json 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+value = data.get("xcpNg", {}).get("apiUrl", "")
+if isinstance(value, str) and value.strip():
+    print(value.strip())
+'
+}
+
+if [[ -z "${CRABBOX_XCP_NG_API_URL:-}" ]]; then
+  configured_api_url="$(resolve_configured_xcpng_api_url || true)"
+  if [[ -n "$configured_api_url" ]]; then
+    CRABBOX_XCP_NG_API_URL="$configured_api_url"
+    export CRABBOX_XCP_NG_API_URL
+  fi
+fi
+
 evidence_dir="${CRABBOX_XCP_NG_SMOKE_DIR:-.crabbox/xcpng-live-smoke}"
 mkdir -p "$evidence_dir"
 chmod 700 "$evidence_dir"
