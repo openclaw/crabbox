@@ -121,3 +121,13 @@ func TestBuildConfigDriveImageContainsNoCloudFilesAndLabel(t *testing.T) {
 		t.Fatal("config-drive image missing file directory aliases")
 	}
 }
+
+func TestBuildConfigDriveImageRejectsOversizedPayload(t *testing.T) {
+	payload := xcpNgCloudInitPayload{
+		UserData: strings.Repeat("u", 11<<20),
+		MetaData: "instance-id: cbx_lease\n",
+	}
+	if _, err := buildConfigDriveImage(payload); err == nil || !strings.Contains(err.Error(), "config-drive payload is too large") {
+		t.Fatalf("err=%v, want oversized payload validation", err)
+	}
+}

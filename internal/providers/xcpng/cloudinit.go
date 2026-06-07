@@ -151,6 +151,9 @@ func buildFAT16Image(label string, files []fatFile) ([]byte, error) {
 	)
 	rootDirSectors := rootEntries * 32 / bytesPerSector
 	firstDataSector := reservedSectors + fatCount*sectorsPerFAT + rootDirSectors
+	clusterSize := sectorsPerCluster * bytesPerSector
+	dataClusters := (totalSectors - firstDataSector) / sectorsPerCluster
+	fatEntries := sectorsPerFAT * bytesPerSector / 2
 	image := make([]byte, totalSectors*bytesPerSector)
 	boot := image[:bytesPerSector]
 	boot[0] = 0xeb
@@ -181,7 +184,7 @@ func buildFAT16Image(label string, files []fatFile) ([]byte, error) {
 	fat := image[fatStart : fatStart+sectorsPerFAT*bytesPerSector]
 	binary.LittleEndian.PutUint16(fat[0:2], 0xfff8)
 	binary.LittleEndian.PutUint16(fat[2:4], 0xffff)
-	nextCluster := uint16(2)
+	nextCluster := 2
 	rootOffset := 0
 	root := image[rootStart : rootStart+rootDirSectors*bytesPerSector]
 	labelEntry := root[rootOffset : rootOffset+32]
@@ -193,22 +196,29 @@ func buildFAT16Image(label string, files []fatFile) ([]byte, error) {
 			return nil, exit(2, "config-drive file name is required")
 		}
 		cluster := nextCluster
-		clusterCount := uint16((len(file.Data) + sectorsPerCluster*bytesPerSector - 1) / (sectorsPerCluster * bytesPerSector))
+		clusterCount := (len(file.Data) + clusterSize - 1) / clusterSize
 		if clusterCount == 0 {
 			clusterCount = 1
 		}
-		for c := uint16(0); c < clusterCount; c++ {
-			entry := (cluster + c) * 2
-			next := uint16(0xffff)
-			if c+1 < clusterCount {
-				next = cluster + c + 1
-			}
-			binary.LittleEndian.PutUint16(fat[entry:entry+2], next)
+		if cluster-2+clusterCount > dataClusters || cluster+clusterCount > fatEntries {
+			return nil, exit(2, "config-drive payload is too large")
 		}
-		copy(image[dataStart+int(cluster-2)*sectorsPerCluster*bytesPerSector:], file.Data)
 		short := fmt.Sprintf("CRAB%04dTXT", i+1)
 		checksum := fatShortChecksum([]byte(short))
 		lfnEntries := fatLongNameEntries(file.Name, checksum)
+		if rootOffset+(len(lfnEntries)+1)*32 > len(root) {
+			return nil, exit(2, "config-drive directory is too large")
+		}
+		for c := 0; c < clusterCount; c++ {
+			entry := (cluster + c) * 2
+			next := uint16(0xffff)
+			if c+1 < clusterCount {
+				next = uint16(cluster + c + 1)
+			}
+			binary.LittleEndian.PutUint16(fat[entry:entry+2], next)
+		}
+		dataOffset := dataStart + (cluster-2)*clusterSize
+		copy(image[dataOffset:dataOffset+len(file.Data)], file.Data)
 		for _, entry := range lfnEntries {
 			copy(root[rootOffset:rootOffset+32], entry[:])
 			rootOffset += 32
@@ -216,7 +226,7 @@ func buildFAT16Image(label string, files []fatFile) ([]byte, error) {
 		entry := root[rootOffset : rootOffset+32]
 		copy(entry[0:11], []byte(short))
 		entry[11] = 0x20
-		binary.LittleEndian.PutUint16(entry[26:28], cluster)
+		binary.LittleEndian.PutUint16(entry[26:28], uint16(cluster))
 		binary.LittleEndian.PutUint32(entry[28:32], uint32(len(file.Data)))
 		rootOffset += 32
 		nextCluster += clusterCount
