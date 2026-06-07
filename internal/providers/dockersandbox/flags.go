@@ -41,7 +41,7 @@ func RegisterDockerSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	mcp := stringListFlag(append([]string(nil), defaults.DockerSandbox.MCP...))
 	kit := stringListFlag(append([]string(nil), defaults.DockerSandbox.Kit...))
 	fs.Var(&extraWorkspaces, "docker-sandbox-extra-workspace", "additional host workspace path for Docker Sandbox; repeatable")
-	fs.Var(&mcp, "docker-sandbox-mcp", "Docker Sandbox MCP server reference; currently unsupported")
+	fs.Var(&mcp, "docker-sandbox-mcp", "Docker Sandbox MCP server reference; repeatable")
 	fs.Var(&kit, "docker-sandbox-kit", "Docker Sandbox kit reference to attach; repeatable")
 	return flagValues{
 		CLIPath:         fs.String("docker-sandbox-cli", defaults.DockerSandbox.CLIPath, "path to the sbx CLI binary"),
@@ -142,9 +142,6 @@ func validateConfig(cfg Config) error {
 				return fmt.Errorf("docker-sandbox %s entries must not be empty", field.name)
 			}
 		}
-	}
-	if len(cfg.DockerSandbox.MCP) > 0 {
-		return exit(2, "docker-sandbox mcp is not supported until sbx create accepts MCP attachments")
 	}
 	return nil
 }

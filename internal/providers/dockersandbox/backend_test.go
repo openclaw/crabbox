@@ -268,8 +268,9 @@ func TestRunBuildsConfiguredCreateCommandAndExec(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := newTestConfig()
 	cfg.DockerSandbox.Template = "ubuntu"
-	cfg.DockerSandbox.CPUs = 2.25
+	cfg.DockerSandbox.CPUs = 2
 	cfg.DockerSandbox.Memory = "6g"
+	cfg.DockerSandbox.MCP = []string{"context7", "all"}
 	cfg.DockerSandbox.Kit = []string{"example-org/base"}
 	cfg.DockerSandbox.Clone = true
 	cfg.DockerSandbox.ExtraWorkspaces = []string{"/tmp/extra"}
@@ -294,7 +295,7 @@ func TestRunBuildsConfiguredCreateCommandAndExec(t *testing.T) {
 	if create == nil {
 		t.Fatal("missing create call")
 	}
-	for _, want := range []string{"--template", "ubuntu", "--cpus", "2.25", "--memory", "6g", "--kit", "example-org/base", "--clone", "shell", repoRoot, "/tmp/extra"} {
+	for _, want := range []string{"--template", "ubuntu", "--cpus", "2", "--memory", "6g", "--mcp", "context7", "all", "--kit", "example-org/base", "--clone", "shell", repoRoot, "/tmp/extra"} {
 		if !containsArg(create.Args, want) {
 			t.Fatalf("create args=%v missing %q", create.Args, want)
 		}
@@ -1138,8 +1139,11 @@ func TestFlagApplicationAndValidation(t *testing.T) {
 	if err := mcpFS.Parse([]string{"--docker-sandbox-mcp", "context7"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyDockerSandboxProviderFlags(&mcpCfg, mcpFS, mcpValues); err == nil || !strings.Contains(err.Error(), "not supported") {
+	if err := ApplyDockerSandboxProviderFlags(&mcpCfg, mcpFS, mcpValues); err != nil {
 		t.Fatalf("ApplyDockerSandboxProviderFlags mcp err=%v", err)
+	}
+	if strings.Join(mcpCfg.DockerSandbox.MCP, ",") != "context7" {
+		t.Fatalf("ApplyDockerSandboxProviderFlags mcp cfg=%#v", mcpCfg.DockerSandbox)
 	}
 
 	for _, flagName := range []string{"class", "type"} {
@@ -1189,11 +1193,6 @@ func TestFlagApplicationAndValidation(t *testing.T) {
 	bad.DockerSandbox.Workdir = "/"
 	if err := validateConfig(bad); err == nil || !strings.Contains(err.Error(), "too broad") {
 		t.Fatalf("root workdir err=%v", err)
-	}
-	bad = newTestConfig()
-	bad.DockerSandbox.MCP = []string{"context7"}
-	if err := validateConfig(bad); err == nil || !strings.Contains(err.Error(), "not supported") {
-		t.Fatalf("mcp err=%v", err)
 	}
 	bad = newTestConfig()
 	bad.DockerSandbox.MCP = []string{""}
