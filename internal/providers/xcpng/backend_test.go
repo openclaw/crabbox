@@ -18,21 +18,22 @@ import (
 const xcpNgTestVMUUID = "11111111-1111-1111-1111-111111111111"
 
 type fakeLifecycleClient struct {
-	calls       []string
-	servers     []Server
-	templateRef string
-	srRef       string
-	networkRef  string
-	hostRef     string
-	cloneVM     xapiVM
-	drive       xcpNgConfigDrive
-	guestIP     string
-	getServer   map[string]Server
-	errOn       map[string]error
-	mutated     bool
-	deleted     []string
-	deletedCD   []xcpNgConfigDrive
-	setLabels   map[string]map[string]string
+	calls        []string
+	servers      []Server
+	templateRef  string
+	srRef        string
+	networkRef   string
+	hostRef      string
+	cloneVM      xapiVM
+	drive        xcpNgConfigDrive
+	guestIP      string
+	getServer    map[string]Server
+	errOn        map[string]error
+	mutated      bool
+	deleted      []string
+	deletedCD    []xcpNgConfigDrive
+	setLabels    map[string]map[string]string
+	afterGuestIP func()
 }
 
 func (f *fakeLifecycleClient) record(call string) {
@@ -135,6 +136,9 @@ func (f *fakeLifecycleClient) GuestIPv4(context.Context, xapiRef) (string, error
 	f.record("guest-ip")
 	if err := f.fail("guest-ip"); err != nil {
 		return "", err
+	}
+	if f.afterGuestIP != nil {
+		f.afterGuestIP()
 	}
 	return f.guestIP, nil
 }
@@ -301,6 +305,37 @@ func TestAcquireLifecycleCallOrderAndTarget(t *testing.T) {
 	}
 	if labels := fake.setLabels[xcpNgTestVMUUID]; labels["state"] != "ready" || labels["lease"] != "cbx_testlease" || labels["provider"] != "xcp-ng" {
 		t.Fatalf("labels=%#v", labels)
+	}
+}
+
+func TestAcquireRefreshesReadyLeaseTouchTimeAfterBootstrap(t *testing.T) {
+	start := time.Unix(1700000000, 0).UTC()
+	ready := start.Add(15 * time.Minute)
+	clock := mutableClock{t: start}
+	fake := &fakeLifecycleClient{
+		templateRef: "OpaqueRef:tpl",
+		srRef:       "OpaqueRef:sr",
+		networkRef:  "OpaqueRef:net",
+		hostRef:     "OpaqueRef:host",
+		guestIP:     "192.0.2.44",
+		afterGuestIP: func() {
+			clock.t = ready
+		},
+	}
+	backend := newTestBackend(t, fake)
+	backend.RT.Clock = &clock
+
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "blue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := fake.setLabels[xcpNgTestVMUUID]
+	if labels["last_touched_at"] != core.LeaseLabelTime(ready) {
+		t.Fatalf("last_touched_at=%q want %q labels=%#v", labels["last_touched_at"], core.LeaseLabelTime(ready), labels)
+	}
+	wantExpires := core.LeaseLabelTime(ready.Add(time.Hour))
+	if labels["expires_at"] != wantExpires {
+		t.Fatalf("expires_at=%q want %q labels=%#v", labels["expires_at"], wantExpires, labels)
 	}
 }
 
@@ -577,3 +612,7 @@ func crabboxServer(id, lease, state string, expires time.Time) Server {
 type fixedClock struct{ t time.Time }
 
 func (c fixedClock) Now() time.Time { return c.t }
+
+type mutableClock struct{ t time.Time }
+
+func (c *mutableClock) Now() time.Time { return c.t }

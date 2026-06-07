@@ -165,7 +165,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		b.cleanupFailedLease(context.Background(), client, server.CloudID, configDrive)
 		return LeaseTarget{}, err
 	}
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", now)
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", currentTime(b.RT).UTC())
 	if err := client.SetLabels(ctx, server.CloudID, server.Labels); err != nil {
 		fmt.Fprintf(b.RT.Stderr, "warning: set xcp-ng labels: %v\n", err)
 	}
