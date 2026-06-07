@@ -105,8 +105,32 @@ func (c *isloSDKClient) ListSandboxes(ctx context.Context) ([]*gosdk.SandboxResp
 }
 
 func (c *isloSDKClient) DeleteSandbox(ctx context.Context, name string) error {
-	_, err := c.sdk.Sandboxes.DeleteSandbox(ctx, &gosdk.DeleteSandboxRequest{SandboxName: name})
-	return err
+	// The Islo delete endpoint returns an empty body (202/204), which the
+	// generated SDK decoder rejects ("expected a response, but the server
+	// responded with nothing"). Issue the DELETE directly so an empty success
+	// body is handled correctly, and treat an already-gone sandbox (404) as a
+	// successful idempotent delete.
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/sandboxes/"+url.PathEscape(name), nil)
+	if err != nil {
+		return err
+	}
+	if err := c.authorize(ctx, httpReq); err != nil {
+		return err
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	// Mirror the >=400 failure convention used by the other raw endpoints, with
+	// 404 carved out so an already-gone sandbox is an idempotent success.
+	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("islo delete sandbox %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }
 
 func (c *isloSDKClient) UploadArchive(ctx context.Context, name, targetPath string, archive io.Reader) error {
@@ -303,6 +327,7 @@ func parseIsloSSE(r io.Reader, stdout, stderr io.Writer) (int, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	exitCode := 0
 	seenExit := false
+	streamErr := ""
 	event := ""
 	var data []string
 	flush := func() error {
@@ -322,6 +347,14 @@ func parseIsloSSE(r io.Reader, stdout, stderr io.Writer) (int, error) {
 			}
 			exitCode = n
 			seenExit = true
+		case "error":
+			// The Islo exec SSE stream emits an "error" event for stream or
+			// VM-level failures. Capture the last one so we can surface a
+			// meaningful message instead of a generic missing-exit error when
+			// the stream ends without an exit event.
+			if msg := strings.TrimSpace(payload); msg != "" {
+				streamErr = msg
+			}
 		}
 		event = ""
 		data = data[:0]
@@ -358,6 +391,9 @@ func parseIsloSSE(r io.Reader, stdout, stderr io.Writer) (int, error) {
 		return 1, err
 	}
 	if !seenExit {
+		if streamErr != "" {
+			return 1, fmt.Errorf("islo exec stream error: %s", streamErr)
+		}
 		return 1, fmt.Errorf("islo exec stream ended without exit event")
 	}
 	return exitCode, nil
