@@ -106,7 +106,7 @@ dockerSandbox:
   clone: false
   workdir: ""        # empty means the current repo root path inside the sandbox
   extraWorkspaces: []
-  mcp: []            # reserved for future sbx support; non-empty values are rejected today
+  mcp: []            # optional sbx MCP server names; repeated values pass through to sbx create --mcp
   kit: []
 ```
 
@@ -121,7 +121,7 @@ Provider flags:
 --docker-sandbox-clone
 --docker-sandbox-workdir
 --docker-sandbox-extra-workspace
---docker-sandbox-mcp   # currently rejected until sbx create supports MCP attachments
+--docker-sandbox-mcp   # repeatable; forwarded to sbx create --mcp in order
 --docker-sandbox-kit
 ```
 
@@ -136,11 +136,11 @@ CRABBOX_DOCKER_SANDBOX_MEMORY
 CRABBOX_DOCKER_SANDBOX_CLONE
 CRABBOX_DOCKER_SANDBOX_WORKDIR
 CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES
-CRABBOX_DOCKER_SANDBOX_MCP   # currently rejected until sbx create supports MCP attachments
+CRABBOX_DOCKER_SANDBOX_MCP   # comma-separated MCP server names; forwarded to sbx create --mcp
 CRABBOX_DOCKER_SANDBOX_KIT
 ```
 
-`extraWorkspaces` and `kit` environment values are comma-separated. `mcp` is reserved for future `sbx` support and non-empty values are rejected today.
+`extraWorkspaces`, `mcp`, and `kit` environment values are comma-separated. Crabbox passes non-empty `mcp` entries through unchanged to repeatable `sbx create --mcp` flags.
 
 ## Lifecycle
 
@@ -194,9 +194,10 @@ Common blockers:
   points back to `crabbox stop --provider docker-sandbox <slug>`.
 - Agent: `shell` only. Other `dockerSandbox.agent` values are rejected until
   Crabbox has a stable non-shell agent contract.
-- MCP attachments: not supported yet. Crabbox rejects non-empty
+- MCP attachments: supported as create-time passthrough. Crabbox forwards
   `dockerSandbox.mcp` / `--docker-sandbox-mcp` / `CRABBOX_DOCKER_SANDBOX_MCP`
-  until `sbx create` exposes a supported MCP attachment flag.
+  entries to repeatable `sbx create --mcp` flags without additional runtime
+  discovery semantics.
 - Forwarded env: supported through `sbx exec --env-file`.
 
 ## Safety Notes
@@ -252,12 +253,12 @@ Use this matrix when proving a fresh install or upgrade:
 | --- | --- | --- |
 | Fresh local CLI build | `go build -trimpath -o bin/crabbox ./cmd/crabbox` | `bin/crabbox` builds without generated files in git. |
 | Provider discovery | `bin/crabbox providers --json` | Includes `docker-sandbox`, family `docker-sandbox`, kind `delegated-run`, target `linux`, coordinator `never`, and feature `run-session`. |
-| Config upgrade surface | `crabbox config show --json` | Includes `dockerSandbox.cliPath`, `agent`, runtime sizing, `clone`, `workdir`, `extraWorkspaces`, and `kit`. |
+| Config upgrade surface | `crabbox config show --json` | Includes `dockerSandbox.cliPath`, `agent`, runtime sizing, `clone`, `workdir`, `extraWorkspaces`, `mcp`, and `kit`. |
 | Alternate `sbx` path | `CRABBOX_DOCKER_SANDBOX_CLI=/path/to/sbx scripts/live-docker-sandbox-smoke.sh` | Doctor honors the configured CLI path instead of requiring `sbx` on `PATH`. |
 | Missing CLI or login | `crabbox doctor --provider docker-sandbox` | Fails with guidance to install/configure `sbx` or run `sbx login`. |
 | Host/runtime blockers | `crabbox doctor --provider docker-sandbox` | Surfaces virtualization, hypervisor, KVM, control-plane, quota, or capacity blockers without claiming live success. |
 | Clone mode | `crabbox warmup --provider docker-sandbox --docker-sandbox-clone ...` | Requires a normal Git repository workspace before calling `sbx create --clone`. |
-| Unsupported delegated flags | Docker Sandbox run flags and config validation | Rejects unsupported agent, MCP attachment, desktop, Tailscale, `--class`, and `--type` surfaces clearly. |
+| Unsupported delegated flags | Docker Sandbox run flags and config validation | Rejects unsupported agent, desktop, Tailscale, `--class`, and `--type` surfaces clearly while allowing create-time MCP passthrough. |
 | Live lifecycle | `scripts/live-docker-sandbox-smoke.sh` | Prints `classification=live_sbx_smoke_passed ... cleanup=complete` only after create, run, list, and stop complete. |
 | Trust boundary handoff | `scripts/docker-sandbox-trust-boundary-smoke.sh` | Uses a fake `sbx` at the process boundary to prove Crabbox sends the workspace path, user command, and `--env-file`, while the forwarded value stays out of local argv and is present only in the env-file handoff. |
 

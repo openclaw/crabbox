@@ -186,6 +186,7 @@ dockerSandbox:
 		t.Fatal(err)
 	}
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES", "/tmp/extra")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_MCP", "context7,all")
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_KIT", "example-org/base")
 
 	var stdout bytes.Buffer
@@ -198,6 +199,7 @@ dockerSandbox:
 		"provider=docker-sandbox",
 		"docker_sandbox cli=/opt/sbx agent=shell template=ubuntu cpus=2 memory=4g clone=true workdir=/workspace/my-app",
 		"extra_workspaces=/tmp/extra",
+		"mcp=context7,all",
 		"kit=example-org/base",
 	} {
 		if !strings.Contains(text, want) {
@@ -220,6 +222,7 @@ dockerSandbox:
 			Clone           bool     `json:"clone"`
 			Workdir         string   `json:"workdir"`
 			ExtraWorkspaces []string `json:"extraWorkspaces"`
+			MCP             []string `json:"mcp"`
 			Kit             []string `json:"kit"`
 		} `json:"dockerSandbox"`
 	}
@@ -229,7 +232,7 @@ dockerSandbox:
 	if got.Provider != "docker-sandbox" || got.DockerSandbox.CLIPath != "/opt/sbx" || got.DockerSandbox.Agent != "shell" || got.DockerSandbox.Template != "ubuntu" || got.DockerSandbox.CPUs != 2 || got.DockerSandbox.Memory != "4g" || !got.DockerSandbox.Clone || got.DockerSandbox.Workdir != "/workspace/my-app" {
 		t.Fatalf("unexpected dockerSandbox json: %#v", got)
 	}
-	if strings.Join(got.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(got.DockerSandbox.Kit, ",") != "example-org/base" {
+	if strings.Join(got.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(got.DockerSandbox.MCP, ",") != "context7,all" || strings.Join(got.DockerSandbox.Kit, ",") != "example-org/base" {
 		t.Fatalf("unexpected dockerSandbox lists: %#v", got.DockerSandbox)
 	}
 }
