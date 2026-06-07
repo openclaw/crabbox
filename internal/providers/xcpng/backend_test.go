@@ -27,6 +27,7 @@ type fakeLifecycleClient struct {
 	iso          xcpNgISOMediaRef
 	cloneVM      xapiVM
 	freshVM      xcpNgFreshVMResult
+	freshReq     xcpNgFreshVMRequest
 	drive        xcpNgConfigDrive
 	importedISO  xcpNgConfigDrive
 	attachedDisk xcpNgConfigDrive
@@ -123,6 +124,7 @@ func (f *fakeLifecycleClient) CloneVM(_ context.Context, req xcpNgCloneRequest) 
 func (f *fakeLifecycleClient) CreateFreshVM(_ context.Context, req xcpNgFreshVMRequest) (xcpNgFreshVMResult, error) {
 	f.record("create-fresh-vm")
 	f.mutated = true
+	f.freshReq = req
 	if err := f.fail("create-fresh-vm"); err != nil {
 		return xcpNgFreshVMResult{}, err
 	}
@@ -642,6 +644,192 @@ func TestRunISOE2ELinuxReadOnlyAcceptsLocalInstallerPath(t *testing.T) {
 	}
 }
 
+func TestRunISOE2EWindowsReadOnlyBlocksARMInstaller(t *testing.T) {
+	dir := t.TempDir()
+	isoDir := filepath.Join(dir, "ISOs-ARM")
+	if err := os.MkdirAll(isoDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	isoPath := filepath.Join(isoDir, "Win11_Arm64.iso")
+	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeLifecycleClient{srRef: "OpaqueRef:sr", networkRef: "OpaqueRef:net", hostRef: "OpaqueRef:host", iso: xcpNgISOMediaRef{Source: "local-file", NameLabel: isoPath}}
+	oldClient := newLifecycleClient
+	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
+	t.Cleanup(func() { newLifecycleClient = oldClient })
+	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "read-only", OS: "windows", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence")})
+	if err == nil {
+		t.Fatal("expected arm installer requirements blocker")
+	}
+	if summary.Classification != "windows_requirements_blocked" || summary.Phase != "installer_iso" {
+		t.Fatalf("summary=%#v err=%v", summary, err)
+	}
+}
+
+func TestRunISOE2EWindowsMutatePassesWithGeneratedBootstrap(t *testing.T) {
+	dir := t.TempDir()
+	isoPath := filepath.Join(dir, "Win11_25H2_English_x64_v2.iso")
+	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeLifecycleClient{
+		srRef:        "OpaqueRef:sr",
+		networkRef:   "OpaqueRef:net",
+		hostRef:      "OpaqueRef:host",
+		iso:          xcpNgISOMediaRef{Source: "local-file", NameLabel: isoPath},
+		guestIP:      "192.0.2.60",
+		importedISO:  xcpNgConfigDrive{VDIRef: "OpaqueRef:imported-vdi", Name: "installer.iso", DestroyVDI: true},
+		attachedDisk: xcpNgConfigDrive{VDIRef: "OpaqueRef:disk-vdi", VBDRef: "OpaqueRef:disk-vbd", Name: "install-disk", DestroyVDI: true},
+	}
+	oldClient := newLifecycleClient
+	oldWait := isoE2EWaitForSSHReady
+	oldRunSSH := isoE2ERunSSHQuiet
+	oldEnsure := isoE2EEnsureTestboxKey
+	oldNow := isoE2ECurrentTime
+	oldWriteWindows := isoE2EWriteWindowsAnswerISO
+	oldGenerate := isoE2EGenerateWindowsPassword
+	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
+	isoE2EWaitForSSHReady = func(context.Context, *core.SSHTarget, string, time.Duration) error { return nil }
+	isoE2ERunSSHQuiet = func(_ context.Context, target core.SSHTarget, remote string) error {
+		if target.TargetOS != "windows" || target.WindowsMode != "normal" || target.Key == "" {
+			t.Fatalf("target=%#v", target)
+		}
+		if !strings.Contains(remote, "windows-iso-e2e-ok") {
+			t.Fatalf("remote=%q", remote)
+		}
+		return nil
+	}
+	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) {
+		return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil
+	}
+	isoE2ECurrentTime = func() time.Time { return time.Unix(1700001000, 0).UTC() }
+	isoE2EGenerateWindowsPassword = func() (string, error) { return "TempPass1!", nil }
+	isoE2EWriteWindowsAnswerISO = func(_ context.Context, _ string, payload xcpNgWindowsAutounattendPayload) (string, error) {
+		if !strings.Contains(payload.AnswerXML, "<Username>crabbox</Username>") {
+			t.Fatalf("answer xml=%s", payload.AnswerXML)
+		}
+		if !strings.Contains(payload.BootstrapPowerShell, "install-sshd.ps1") {
+			t.Fatalf("bootstrap=%s", payload.BootstrapPowerShell)
+		}
+		answerPath := filepath.Join(dir, "answer.iso")
+		if err := os.WriteFile(answerPath, []byte("answer"), 0o600); err != nil {
+			return "", err
+		}
+		return answerPath, nil
+	}
+	t.Cleanup(func() {
+		newLifecycleClient = oldClient
+		isoE2EWaitForSSHReady = oldWait
+		isoE2ERunSSHQuiet = oldRunSSH
+		isoE2EEnsureTestboxKey = oldEnsure
+		isoE2ECurrentTime = oldNow
+		isoE2EWriteWindowsAnswerISO = oldWriteWindows
+		isoE2EGenerateWindowsPassword = oldGenerate
+	})
+	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "mutate", OS: "windows", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence"), MutateGate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Classification != "windows_install_passed" || summary.Phase != "windows_command_ok" || summary.Cleanup != "cleaned" {
+		t.Fatalf("summary=%#v", summary)
+	}
+	if !fake.freshReq.SecureBoot || fake.freshReq.HVMBoot["order"] != "dc" {
+		t.Fatalf("fresh request=%#v", fake.freshReq)
+	}
+	calls := strings.Join(fake.calls, ",")
+	if strings.Count(calls, "import-iso") < 2 {
+		t.Fatalf("calls=%v", fake.calls)
+	}
+	for _, want := range []string{"create-fresh-vm", "attach-disk", "attach-iso", "start", "set-boot-order", "guest-ip", "delete", "delete-config-drive"} {
+		if !strings.Contains(calls, want) {
+			t.Fatalf("calls=%v missing %s", fake.calls, want)
+		}
+	}
+	if summary.Details["first_boot_ip"] != "192.0.2.60" {
+		t.Fatalf("summary=%#v", summary)
+	}
+}
+
+func TestRunISOE2EWindowsMutateFallsBackToSourceUncoveredWithProvidedAnswerISO(t *testing.T) {
+	dir := t.TempDir()
+	isoPath := filepath.Join(dir, "Win11_25H2_English_x64_v2.iso")
+	answerPath := filepath.Join(dir, "provided-answer.iso")
+	for _, file := range []string{isoPath, answerPath} {
+		if err := os.WriteFile(file, []byte("iso"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fake := &fakeLifecycleClient{
+		srRef:        "OpaqueRef:sr",
+		networkRef:   "OpaqueRef:net",
+		hostRef:      "OpaqueRef:host",
+		iso:          xcpNgISOMediaRef{Source: "local-file", NameLabel: isoPath},
+		guestIP:      "192.0.2.61",
+		importedISO:  xcpNgConfigDrive{VDIRef: "OpaqueRef:imported-vdi", Name: "installer.iso", DestroyVDI: true},
+		attachedDisk: xcpNgConfigDrive{VDIRef: "OpaqueRef:disk-vdi", VBDRef: "OpaqueRef:disk-vbd", Name: "install-disk", DestroyVDI: true},
+	}
+	oldClient := newLifecycleClient
+	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
+	t.Cleanup(func() { newLifecycleClient = oldClient })
+	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "mutate", OS: "windows", ISO: isoPath, AnswerISO: answerPath, EvidenceDir: filepath.Join(dir, "evidence"), MutateGate: true})
+	if err == nil {
+		t.Fatal("expected source uncovered classification")
+	}
+	if summary.Classification != "source_uncovered" || summary.Phase != "windows_first_boot" || summary.Cleanup != "cleaned" {
+		t.Fatalf("summary=%#v err=%v", summary, err)
+	}
+	if !strings.Contains(summary.Reason, "remote command proof remains uncovered") {
+		t.Fatalf("summary=%#v", summary)
+	}
+}
+
+func TestRunISOE2EWindowsMutateClassifiesGuestMetricsBlocker(t *testing.T) {
+	dir := t.TempDir()
+	isoPath := filepath.Join(dir, "Win11_25H2_English_x64_v2.iso")
+	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeLifecycleClient{
+		srRef:        "OpaqueRef:sr",
+		networkRef:   "OpaqueRef:net",
+		hostRef:      "OpaqueRef:host",
+		iso:          xcpNgISOMediaRef{Source: "local-file", NameLabel: isoPath},
+		importedISO:  xcpNgConfigDrive{VDIRef: "OpaqueRef:imported-vdi", Name: "installer.iso", DestroyVDI: true},
+		attachedDisk: xcpNgConfigDrive{VDIRef: "OpaqueRef:disk-vdi", VBDRef: "OpaqueRef:disk-vbd", Name: "install-disk", DestroyVDI: true},
+		errOn:        map[string]error{"guest-ip": errors.New("no guest ipv4 address reported by XCP-ng guest metrics")},
+	}
+	oldClient := newLifecycleClient
+	oldEnsure := isoE2EEnsureTestboxKey
+	oldWriteWindows := isoE2EWriteWindowsAnswerISO
+	oldGenerate := isoE2EGenerateWindowsPassword
+	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
+	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) {
+		return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil
+	}
+	isoE2EGenerateWindowsPassword = func() (string, error) { return "TempPass1!", nil }
+	isoE2EWriteWindowsAnswerISO = func(_ context.Context, _ string, _ xcpNgWindowsAutounattendPayload) (string, error) {
+		answerPath := filepath.Join(dir, "answer.iso")
+		if err := os.WriteFile(answerPath, []byte("answer"), 0o600); err != nil {
+			return "", err
+		}
+		return answerPath, nil
+	}
+	t.Cleanup(func() {
+		newLifecycleClient = oldClient
+		isoE2EEnsureTestboxKey = oldEnsure
+		isoE2EWriteWindowsAnswerISO = oldWriteWindows
+		isoE2EGenerateWindowsPassword = oldGenerate
+	})
+	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "mutate", OS: "windows", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence"), Timeout: 25 * time.Second, MutateGate: true})
+	if err == nil {
+		t.Fatal("expected guest metrics blocker")
+	}
+	if summary.Classification != "environment_blocked" || summary.Phase != "windows_install_complete" {
+		t.Fatalf("summary=%#v err=%v", summary, err)
+	}
+}
+
 func TestRunISOE2ELinuxMutatePassesWithImportedMediaAndSSHProof(t *testing.T) {
 	dir := t.TempDir()
 	isoPath := filepath.Join(dir, "ubuntu.iso")
@@ -667,7 +855,9 @@ func TestRunISOE2ELinuxMutatePassesWithImportedMediaAndSSHProof(t *testing.T) {
 	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
 	isoE2EWaitForSSHReady = func(context.Context, *core.SSHTarget, string, time.Duration) error { return nil }
 	isoE2ERunSSHQuiet = func(context.Context, core.SSHTarget, string) error { return nil }
-	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) { return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil }
+	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) {
+		return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil
+	}
 	isoE2ECurrentTime = func() time.Time { return time.Unix(1700000000, 0).UTC() }
 	isoE2ERemasterUbuntuISO = func(context.Context, string, string) (string, error) { return isoPath, nil }
 	isoE2EWriteLinuxSeedISO = func(context.Context, string, xcpNgLinuxAutoinstallPayload) (string, error) {
@@ -723,7 +913,9 @@ func TestRunISOE2ELinuxMutateClassifiesGuestMetricsBlocker(t *testing.T) {
 	oldRemaster := isoE2ERemasterUbuntuISO
 	oldSeed := isoE2EWriteLinuxSeedISO
 	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
-	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) { return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil }
+	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) {
+		return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil
+	}
 	isoE2ERemasterUbuntuISO = func(context.Context, string, string) (string, error) { return isoPath, nil }
 	isoE2EWriteLinuxSeedISO = func(context.Context, string, xcpNgLinuxAutoinstallPayload) (string, error) {
 		seedPath := filepath.Join(dir, "seed.iso")
@@ -769,7 +961,9 @@ func TestRunISOE2ELinuxMutateCleansImportedInstallerWhenAttachFails(t *testing.T
 	oldRemaster := isoE2ERemasterUbuntuISO
 	oldSeed := isoE2EWriteLinuxSeedISO
 	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
-	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) { return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil }
+	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) {
+		return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil
+	}
 	isoE2ERemasterUbuntuISO = func(context.Context, string, string) (string, error) { return isoPath, nil }
 	isoE2EWriteLinuxSeedISO = func(context.Context, string, xcpNgLinuxAutoinstallPayload) (string, error) {
 		seedPath := filepath.Join(dir, "seed.iso")
