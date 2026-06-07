@@ -38,6 +38,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "local-container-runtime") {
 		cfg.LocalContainer.Runtime = *v.Runtime
+		core.MarkLocalContainerRuntimeExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "local-container-image") {
 		cfg.LocalContainer.Image = *v.Image

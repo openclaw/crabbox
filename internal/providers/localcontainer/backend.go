@@ -314,6 +314,9 @@ func (b *backend) configForRun() core.Config {
 }
 
 func (b *backend) detectContainerRuntime(cfg *core.Config) {
+	if core.LocalContainerRuntimeExplicit(*cfg) {
+		return
+	}
 	runtimeName := strings.TrimSpace(cfg.LocalContainer.Runtime)
 	if runtimeName != "" && runtimeName != "docker" {
 		return
@@ -753,14 +756,18 @@ func (b *backend) removeContainer(ctx context.Context, id string) error {
 }
 
 func (b *backend) runtimeInfo(ctx context.Context) (string, string) {
+	cfg := b.configForRun()
 	version, err := b.docker(ctx, []string{"version", "--format", "{{.Client.Version}}"}, nil, nil)
 	if err != nil {
 		return "unknown", ""
 	}
-	return strings.TrimSpace(version.Stdout), b.runtimeContext(ctx)
+	return strings.TrimSpace(version.Stdout), b.runtimeContext(ctx, cfg.LocalContainer.Runtime)
 }
 
-func (b *backend) runtimeContext(ctx context.Context) string {
+func (b *backend) runtimeContext(ctx context.Context, runtimeName string) string {
+	if isPodmanRuntime(runtimeName) {
+		return "default"
+	}
 	contextName, err := b.docker(ctx, []string{"context", "show"}, nil, nil)
 	if err != nil {
 		return ""
@@ -769,7 +776,12 @@ func (b *backend) runtimeContext(ctx context.Context) string {
 }
 
 func (b *backend) claimScope(ctx context.Context) string {
-	return localContainerClaimScope(b.configForRun().LocalContainer.Runtime, b.runtimeContext(ctx), b.runtimeHost(ctx))
+	cfg := b.configForRun()
+	return localContainerClaimScope(
+		cfg.LocalContainer.Runtime,
+		b.runtimeContext(ctx, cfg.LocalContainer.Runtime),
+		b.runtimeHost(ctx, cfg.LocalContainer.Runtime),
+	)
 }
 
 func localContainerClaimScope(runtimeName, contextName string, hostValues ...string) string {
@@ -789,9 +801,12 @@ func localContainerClaimScope(runtimeName, contextName string, hostValues ...str
 	return scope
 }
 
-func (b *backend) runtimeHost(ctx context.Context) string {
+func (b *backend) runtimeHost(ctx context.Context, runtimeName string) string {
 	if host := strings.TrimSpace(os.Getenv("DOCKER_HOST")); host != "" {
 		return host
+	}
+	if isPodmanRuntime(runtimeName) {
+		return ""
 	}
 	result, err := b.docker(ctx, []string{"context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"}, nil, nil)
 	if err != nil {
@@ -1151,12 +1166,25 @@ if ! command -v /usr/sbin/sshd >/dev/null 2>&1; then
   echo "missing /usr/sbin/sshd; use a Debian/Ubuntu-compatible image or a prebuilt Crabbox runner image" >&2
   exit 127
 fi
+if [ -f /etc/ssh/sshd_config ]; then
+  if grep -qE '^[#[:space:]]*UsePAM[[:space:]]+' /etc/ssh/sshd_config; then
+    sed -i 's/^[#[:space:]]*UsePAM[[:space:]].*/UsePAM no/' /etc/ssh/sshd_config
+  else
+    printf '\nUsePAM no\n' >> /etc/ssh/sshd_config
+  fi
+  if grep -qE '^[#[:space:]]*PasswordAuthentication[[:space:]]+' /etc/ssh/sshd_config; then
+    sed -i 's/^[#[:space:]]*PasswordAuthentication[[:space:]].*/PasswordAuthentication no/' /etc/ssh/sshd_config
+  else
+    printf '\nPasswordAuthentication no\n' >> /etc/ssh/sshd_config
+  fi
+fi
 user="${CRABBOX_SSH_USER:-crabbox}"
 work_root="${CRABBOX_WORK_ROOT:-/work/crabbox}"
 ssh_port="${CRABBOX_SSH_PORT:-2222}"
 if ! id "$user" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$user"
 fi
+passwd -d "$user" >/dev/null 2>&1 || true
 home_dir="$(getent passwd "$user" | cut -d: -f6)"
 if [ -z "$home_dir" ]; then
   home_dir="/home/$user"

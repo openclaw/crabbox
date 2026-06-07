@@ -334,7 +334,7 @@ func TestSSHCommandConfigAppliesProviderFlags(t *testing.T) {
 	if err := parseFlags(fs, []string{
 		"--provider", "local-container",
 		"--local-container-runtime", "podman",
-		"--id", "openclaw-podman",
+		"--id", "example-podman",
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -53,7 +53,7 @@ func listenUnixSocketOrSkip(t *testing.T, path string) net.Listener {
 	t.Helper()
 	listener, err := net.Listen("unix", path)
 	if err != nil {
-		if errors.Is(err, os.ErrPermission) {
+		if errors.Is(err, os.ErrPermission) || strings.Contains(err.Error(), "invalid argument") {
 			t.Skipf("unix sockets are not permitted in this environment: %v", err)
 		}
 		t.Fatal(err)
@@ -184,9 +184,59 @@ func TestConfigForRunHonorsExplicitRuntime(t *testing.T) {
 	t.Setenv("PATH", dir)
 	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
 	b.cfg.LocalContainer.Runtime = "podman"
+	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
 	got := b.configForRun()
 	if got.LocalContainer.Runtime != "podman" {
 		t.Fatalf("runtime=%q, want explicit podman", got.LocalContainer.Runtime)
+	}
+}
+
+func TestConfigForRunHonorsExplicitDockerRuntime(t *testing.T) {
+	dir := t.TempDir()
+	writeExecutable(t, filepath.Join(dir, "podman"))
+	t.Setenv("PATH", dir)
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	b.cfg.LocalContainer.Runtime = "docker"
+	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+	got := b.configForRun()
+	if got.LocalContainer.Runtime != "docker" {
+		t.Fatalf("runtime=%q, want explicit docker", got.LocalContainer.Runtime)
+	}
+}
+
+func TestClaimScopeSkipsDockerContextForPodman(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	b.cfg.LocalContainer.Runtime = "podman"
+
+	scope := b.claimScope(context.Background())
+	if scope != "runtime:podman/context:default" {
+		t.Fatalf("scope=%q, want podman default scope", scope)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && call.Args[0] == "context" {
+			t.Fatalf("podman claim scope should not call context command: %#v", call.Args)
+		}
+	}
+}
+
+func TestRuntimeInfoSkipsDockerContextForPodman(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"version", "--format", "{{.Client.Version}}"}): {Stdout: "5.8.2\n"},
+		},
+	}
+	b := testBackend(runner)
+	b.cfg.LocalContainer.Runtime = "podman"
+
+	version, contextName := b.runtimeInfo(context.Background())
+	if version != "5.8.2" || contextName != "default" {
+		t.Fatalf("version=%q context=%q", version, contextName)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && call.Args[0] == "context" {
+			t.Fatalf("podman runtime info should not call context command: %#v", call.Args)
+		}
 	}
 }
 
@@ -493,6 +543,10 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 	for _, want := range []string{
 		`home_dir="$(getent passwd "$user" | cut -d: -f6)"`,
 		`"$home_dir/.ssh/authorized_keys"`,
+		`sed -i 's/^[#[:space:]]*UsePAM[[:space:]].*/UsePAM no/' /etc/ssh/sshd_config`,
+		`printf '\nUsePAM no\n' >> /etc/ssh/sshd_config`,
+		`sed -i 's/^[#[:space:]]*PasswordAuthentication[[:space:]].*/PasswordAuthentication no/' /etc/ssh/sshd_config`,
+		`passwd -d "$user" >/dev/null 2>&1 || true`,
 		`if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ]; then`,
 		`chown -R "$user" "$home_dir/.ssh"`,
 		`chown -R "$user" "$home_dir/.ssh" "$work_root"`,
