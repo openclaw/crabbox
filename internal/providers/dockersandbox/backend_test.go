@@ -7,6 +7,7 @@ import (
 	"flag"
 	"io"
 	"os"
+	"os/exec"
 	"reflect"
 	"strings"
 	"sync"
@@ -190,9 +191,7 @@ func TestRunBuildsConfiguredCreateCommandAndExec(t *testing.T) {
 	cfg.DockerSandbox.ExtraWorkspaces = []string{"/tmp/extra"}
 	cfg.DockerSandbox.Workdir = "/workspace/my-app"
 	repoRoot := t.TempDir()
-	if err := os.Mkdir(filepathJoin(repoRoot, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	runGit(t, repoRoot, "init", "-q")
 	runner := newRunner(map[string]scriptedReply{
 		"create": {stdout: ""},
 		"exec":   {stdout: "ok\n"},
@@ -815,8 +814,33 @@ func TestRejectRunOptionsAndCreateRepoValidation(t *testing.T) {
 	if err := os.WriteFile(filepathJoin(worktreeRoot, ".git"), []byte("gitdir: ../.git/worktrees/example\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateCreateRepo(cfg, Repo{Root: worktreeRoot}); err == nil || !strings.Contains(err.Error(), ".git is not a directory") {
-		t.Fatalf("clone worktree validation err=%v", err)
+	if err := validateCreateRepo(cfg, Repo{Root: worktreeRoot}); err == nil || !strings.Contains(err.Error(), "--clone requires") {
+		t.Fatalf("fake worktree validation err=%v", err)
+	}
+}
+
+func TestValidateCreateRepoCloneAcceptsGitWorktree(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.DockerSandbox.Clone = true
+
+	parent := t.TempDir()
+	repoRoot := filepathJoin(parent, "repo")
+	worktreeRoot := filepathJoin(parent, "wt")
+	if err := os.Mkdir(repoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoRoot, "init", "-q")
+	runGit(t, repoRoot, "config", "user.email", "alice@example.com")
+	runGit(t, repoRoot, "config", "user.name", "Alice")
+	if err := os.WriteFile(filepathJoin(repoRoot, "tracked.txt"), []byte("tracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoRoot, "add", "tracked.txt")
+	runGit(t, repoRoot, "commit", "-q", "-m", "init")
+	runGit(t, repoRoot, "worktree", "add", "-q", worktreeRoot)
+
+	if err := validateCreateRepo(cfg, Repo{Root: worktreeRoot}); err != nil {
+		t.Fatalf("validateCreateRepo rejected valid Git worktree: %v", err)
 	}
 }
 
@@ -1115,6 +1139,15 @@ func containsArg(args []string, want string) bool {
 
 func filepathJoin(elem ...string) string {
 	return strings.Join(elem, string(os.PathSeparator))
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)
+	}
 }
 
 func TestSBXErrorClassifiesVirtualization(t *testing.T) {

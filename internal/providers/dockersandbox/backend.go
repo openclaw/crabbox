@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -393,12 +393,14 @@ func validateCreateRepo(cfg Config, repo Repo) error {
 		return exit(2, "provider=%s requires a local workspace", providerName)
 	}
 	if cfg.DockerSandbox.Clone {
-		info, err := os.Stat(filepath.Join(repo.Root, ".git"))
+		cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+		cmd.Dir = repo.Root
+		output, err := cmd.CombinedOutput()
 		if err != nil {
-			return exit(2, "docker-sandbox --clone requires a normal Git repository workspace: %v", err)
+			return exit(2, "docker-sandbox --clone requires a normal Git repository workspace: %v: %s", err, strings.TrimSpace(string(output)))
 		}
-		if !info.IsDir() {
-			return exit(2, "docker-sandbox --clone requires a normal Git repository workspace: .git is not a directory")
+		if strings.TrimSpace(string(output)) != "true" {
+			return exit(2, "docker-sandbox --clone requires a normal Git repository workspace: git rev-parse --is-inside-work-tree returned %q", strings.TrimSpace(string(output)))
 		}
 	}
 	return nil
