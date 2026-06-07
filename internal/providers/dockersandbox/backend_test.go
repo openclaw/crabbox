@@ -808,7 +808,7 @@ func TestWarmupRejectsActionsRunnerAndEmitsTiming(t *testing.T) {
 
 func TestDoctorSuccessAndErrorGuidance(t *testing.T) {
 	success := newRunner(map[string]scriptedReply{
-		"version":  {stdout: "sbx version 0.1.0\n"},
+		"version":  {stdout: "Client Version:  v0.31.3 fake\n"},
 		"ls":       {stdout: `[]`},
 		"diagnose": {stdout: `{}`},
 	}, nil)
@@ -818,6 +818,9 @@ func TestDoctorSuccessAndErrorGuidance(t *testing.T) {
 	}
 	if okResult.Status != "ok" || !strings.Contains(okResult.Message, "mutation=false") {
 		t.Fatalf("doctor result=%#v", okResult)
+	}
+	if len(okResult.Checks) != 4 || okResult.Checks[1].Check != "sbx_compatibility" || okResult.Checks[1].Status != "ok" || okResult.Checks[1].Details["baseline"] != baselineSBX {
+		t.Fatalf("doctor compatibility checks=%#v", okResult.Checks)
 	}
 
 	missing := newRunner(map[string]scriptedReply{
@@ -847,7 +850,7 @@ func TestDoctorWarnsWhenOptionalDiagnoseFailsAndReportsListParse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Doctor optional diagnose err=%v", err)
 	}
-	if len(result.Checks) != 3 || result.Checks[2].Status != "warn" || result.Checks[2].Details["optional"] != "true" {
+	if len(result.Checks) != 4 || result.Checks[1].Status != "warn" || result.Checks[1].Check != "sbx_compatibility" || result.Checks[3].Status != "warn" || result.Checks[3].Details["optional"] != "true" {
 		t.Fatalf("doctor checks=%#v", result.Checks)
 	}
 
@@ -1006,6 +1009,9 @@ func TestDockerSandboxSmallHelpers(t *testing.T) {
 	}
 	if got := firstNonEmptyLine(" \n\t"); got != "" {
 		t.Fatalf("blank first line got=%q", got)
+	}
+	if !sbxVersionMatchesBaseline("Client Version:  v0.31.3 fake") || !sbxVersionMatchesBaseline("sbx version 0.31.3") || sbxVersionMatchesBaseline("sbx version 0.31.4") || sbxVersionMatchesBaseline("") {
+		t.Fatal("sbxVersionMatchesBaseline accepted or rejected wrong versions")
 	}
 }
 

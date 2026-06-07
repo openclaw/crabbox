@@ -234,6 +234,9 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	result := DoctorResult{Provider: providerName}
 	version, versionErr := cli.version(ctx)
 	result.Checks = append(result.Checks, doctorCheck("sbx_version", versionErr, map[string]string{"version": version}))
+	if versionErr == nil {
+		result.Checks = append(result.Checks, dockerSandboxCompatibilityCheck(version))
+	}
 	records, listErr := cli.list(ctx)
 	result.Checks = append(result.Checks, doctorCheck("sbx_inventory", listErr, map[string]string{"leases": fmt.Sprint(len(records))}))
 	if _, diagnoseErr := cli.diagnose(ctx); diagnoseErr == nil {
@@ -582,6 +585,43 @@ func doctorCheck(name string, err error, details map[string]string) DoctorCheck 
 		return DoctorCheck{Status: "error", Check: name, Message: err.Error(), Details: details}
 	}
 	return DoctorCheck{Status: "ok", Check: name, Message: "ready", Details: details}
+}
+
+func dockerSandboxCompatibilityCheck(version string) DoctorCheck {
+	details := map[string]string{
+		"mutation": "false",
+		"baseline": baselineSBX,
+		"version":  version,
+	}
+	if sbxVersionMatchesBaseline(version) {
+		return DoctorCheck{
+			Status:  "ok",
+			Check:   "sbx_compatibility",
+			Message: fmt.Sprintf("matches documented compatibility baseline %s", baselineSBX),
+			Details: details,
+		}
+	}
+	return DoctorCheck{
+		Status:  "warn",
+		Check:   "sbx_compatibility",
+		Message: fmt.Sprintf("best-effort compatibility; validated baseline is %s", baselineSBX),
+		Details: details,
+	}
+}
+
+func sbxVersionMatchesBaseline(version string) bool {
+	text := strings.TrimSpace(version)
+	if text == "" {
+		return false
+	}
+	baseline := strings.TrimPrefix(baselineSBX, "v")
+	for _, field := range strings.Fields(text) {
+		field = strings.Trim(field, " ,;()[]{}")
+		if strings.TrimPrefix(field, "v") == baseline {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *backend) now() time.Time {

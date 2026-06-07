@@ -38,6 +38,7 @@ const (
 	namePrefix     = "crabbox-"
 	defaultCLIPath = "sbx"
 	defaultAgent   = "shell"
+	baselineSBX    = "v0.31.3"
 	defaultWorkdir = "/workspace"
 	targetLinux    = core.TargetLinux
 	NetworkPublic  = core.NetworkPublic

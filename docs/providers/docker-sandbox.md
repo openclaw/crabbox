@@ -48,6 +48,9 @@ This is the validated compatibility baseline, not a promise that older or newer
 best-effort compatible only when they preserve the command and JSON contract
 below. When Docker changes this contract, update this document and the
 provider-local tests in `internal/providers/dockersandbox` in the same change.
+`crabbox doctor --provider docker-sandbox` reports `sbx_compatibility=ok` when
+the installed `sbx` version matches this baseline and a warning when it is a
+best-effort version.
 
 Crabbox currently depends on these `sbx` commands and flags:
 
