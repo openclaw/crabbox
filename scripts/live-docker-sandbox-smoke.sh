@@ -36,12 +36,12 @@ trap cleanup EXIT
 
 go build -trimpath -o bin/crabbox ./cmd/crabbox
 
-bin/crabbox doctor --provider docker-sandbox
-bin/crabbox warmup --provider docker-sandbox --slug "$slug" --keep
+run_capture "bin/crabbox doctor --provider docker-sandbox" bin/crabbox doctor --provider docker-sandbox
+run_capture "bin/crabbox warmup --provider docker-sandbox --slug $slug --keep" bin/crabbox warmup --provider docker-sandbox --slug "$slug" --keep >/dev/null
 created=1
-bin/crabbox run --provider docker-sandbox --id "$slug" -- echo ok
-bin/crabbox run --provider docker-sandbox --id "$slug" -- pwd
-bin/crabbox list --provider docker-sandbox --json
-bin/crabbox stop --provider docker-sandbox "$slug"
+run_capture "bin/crabbox run --provider docker-sandbox --id $slug -- echo ok" bin/crabbox run --provider docker-sandbox --id "$slug" -- echo ok >/dev/null
+run_capture "bin/crabbox run --provider docker-sandbox --id $slug -- pwd" bin/crabbox run --provider docker-sandbox --id "$slug" -- pwd >/dev/null
+run_capture "bin/crabbox list --provider docker-sandbox --json" bin/crabbox list --provider docker-sandbox --json
+run_capture "bin/crabbox stop --provider docker-sandbox $slug" bin/crabbox stop --provider docker-sandbox "$slug" >/dev/null
 created=0
 printf 'classification=live_sbx_smoke_passed slug=%s cleanup=complete\n' "$slug"

@@ -5,7 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-const root = path.resolve(import.meta.dirname, "..");
+const repoRoot = path.resolve(import.meta.dirname, "..");
 
 function writeExecutable(file, body) {
   fs.writeFileSync(file, body, "utf8");
@@ -22,7 +22,7 @@ test("live docker sandbox smoke honors configured alternate sbx path", () => {
   fs.mkdirSync(bin);
   fs.mkdirSync(tempScripts, { recursive: true });
   fs.copyFileSync(
-    path.join(root, "scripts", "live-docker-sandbox-smoke.sh"),
+    path.join(repoRoot, "scripts", "live-docker-sandbox-smoke.sh"),
     path.join(tempScripts, "live-docker-sandbox-smoke.sh"),
   );
   fs.chmodSync(path.join(tempScripts, "live-docker-sandbox-smoke.sh"), 0o755);
@@ -78,4 +78,54 @@ chmod +x bin/crabbox
   assert.match(seen[3], /^run --provider docker-sandbox --id docker-sandbox-smoke-\d{14}-\d+ -- pwd$/);
   assert.match(seen[4], /^list --provider docker-sandbox --json$/);
   assert.match(seen[5], /^stop --provider docker-sandbox docker-sandbox-smoke-\d{14}-\d+$/);
+});
+
+test("live docker sandbox smoke classifies provider preflight failures", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-docker-sandbox-"));
+  const binDir = path.join(dir, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeExecutable(
+    path.join(binDir, "go"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then
+    out="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1 $2 $3" == "doctor --provider docker-sandbox" ]]; then
+  printf 'virtualization unavailable\n' >&2
+  exit 23
+fi
+printf 'unexpected crabbox args: %s\n' "$*" >&2
+exit 99
+SCRIPT
+chmod +x "$out"
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-docker-sandbox-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      HOME: process.env.HOME ?? dir,
+      TMPDIR: process.env.TMPDIR ?? os.tmpdir(),
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 23, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=environment_blocked/);
+  assert.match(result.stderr, /doctor\\ --provider\\ docker-sandbox/);
+  assert.match(result.stderr, /virtualization unavailable/);
 });
