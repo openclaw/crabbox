@@ -196,12 +196,18 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return core.Exit(2, "provider=%s release requires a container id", providerName)
 	}
 	hostLeaseRoot := hostLeaseWorkRoot(lease)
+	bootstrapDir := strings.TrimSpace(lease.Server.Labels["bootstrap_dir"])
 	if err := b.removeContainer(ctx, id); err != nil {
 		return err
 	}
 	var cleanupErr error
 	if hostLeaseRoot != "" {
 		cleanupErr = os.RemoveAll(hostLeaseRoot)
+	}
+	if bootstrapDir != "" {
+		if err := os.RemoveAll(bootstrapDir); err != nil && cleanupErr == nil {
+			cleanupErr = err
+		}
 	}
 	core.RemoveLeaseClaim(lease.LeaseID)
 	core.RemoveStoredTestboxKey(lease.LeaseID)
@@ -254,6 +260,12 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		hostLeaseRoot := hostLeaseWorkRootFromLabels(leaseID, server.Labels)
 		if hostLeaseRoot != "" {
 			cleanupErr = os.RemoveAll(hostLeaseRoot)
+		}
+		bootstrapDir := strings.TrimSpace(server.Labels["bootstrap_dir"])
+		if bootstrapDir != "" {
+			if err := os.RemoveAll(bootstrapDir); err != nil && cleanupErr == nil {
+				cleanupErr = err
+			}
 		}
 		if leaseID != "" {
 			core.RemoveLeaseClaim(leaseID)
@@ -449,26 +461,26 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	for _, mount := range cacheVolumeMounts {
 		args = append(args, "-v", mount)
 	}
-	bootstrapFile, err := os.CreateTemp("", "crabbox-bootstrap-*.sh")
+	bootstrapDir, err := os.MkdirTemp("", "crabbox-bootstrap-*")
 	if err != nil {
-		return "", core.Exit(2, "create bootstrap script file: %v", err)
+		return "", core.Exit(2, "create bootstrap script directory: %v", err)
 	}
-	defer os.Remove(bootstrapFile.Name())
-	if _, err := bootstrapFile.WriteString(bootstrapScript); err != nil {
-		bootstrapFile.Close()
+	bootstrapPath := filepath.Join(bootstrapDir, "bootstrap.sh")
+	if err := os.WriteFile(bootstrapPath, []byte(bootstrapScript), 0o644); err != nil {
+		os.RemoveAll(bootstrapDir)
 		return "", core.Exit(2, "write bootstrap script: %v", err)
 	}
-	if err := bootstrapFile.Close(); err != nil {
-		return "", core.Exit(2, "close bootstrap script: %v", err)
-	}
-	args = append(args, "-v", bootstrapFile.Name()+":/tmp/crabbox-bootstrap.sh:ro")
-	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "/tmp/crabbox-bootstrap.sh")
+	args = append(args, "--label", "bootstrap_dir="+bootstrapDir)
+	args = append(args, "-v", bootstrapDir+":/tmp/crabbox-bootstrap:ro")
+	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "/tmp/crabbox-bootstrap/bootstrap.sh")
 	result, err := b.docker(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
+		os.RemoveAll(bootstrapDir)
 		return "", commandError("container run", result, err)
 	}
 	id := strings.TrimSpace(result.Stdout)
 	if id == "" {
+		os.RemoveAll(bootstrapDir)
 		return "", core.Exit(2, "%s run did not return a container id", cfg.LocalContainer.Runtime)
 	}
 	return id, nil
