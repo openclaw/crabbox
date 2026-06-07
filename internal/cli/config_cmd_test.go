@@ -310,3 +310,58 @@ func TestConfigShowRedactsXCPNgAPIURLUserinfo(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigShowRedactsSchemeLessXCPNgAPIURLUserinfo(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	config := []byte(`xcpNg:
+  apiUrl: pool-user:pool-pass@xcp-ng.example.test/path?view=1
+  username: root
+  password: xcp-ng-secret
+`)
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	wantURL := "<redacted>@xcp-ng.example.test/path?view=1"
+	if !strings.Contains(text, "xcp_ng api_url="+wantURL) {
+		t.Fatalf("config show text missing redacted scheme-less XCP-ng API URL: %q", text)
+	}
+	for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass", "xcp-ng-secret"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("config show text leaked %q: %q", secret, text)
+		}
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		XCPNg struct {
+			APIURL string `json:"apiUrl"`
+			Auth   string `json:"auth"`
+		} `json:"xcpNg"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.XCPNg.APIURL != wantURL || got.XCPNg.Auth != "configured" {
+		t.Fatalf("unexpected xcp-ng json: %#v", got.XCPNg)
+	}
+	for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass", "xcp-ng-secret"} {
+		if strings.Contains(stdout.String(), secret) {
+			t.Fatalf("config show json leaked %q: %q", secret, stdout.String())
+		}
+	}
+}

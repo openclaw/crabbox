@@ -299,13 +299,24 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 }
 
 func redactedConfigURL(value string) string {
-	u, err := url.Parse(value)
+	raw := strings.TrimSpace(value)
+	addedScheme := false
+	parseValue := raw
+	if parseValue != "" && !strings.Contains(parseValue, "://") {
+		parseValue = "https://" + parseValue
+		addedScheme = true
+	}
+	u, err := url.Parse(parseValue)
 	if err != nil || u.User == nil {
 		return value
 	}
 	redacted := *u
 	redacted.User = url.User("<redacted>")
-	return strings.ReplaceAll(redacted.String(), "%3Credacted%3E", "<redacted>")
+	out := strings.ReplaceAll(redacted.String(), "%3Credacted%3E", "<redacted>")
+	if addedScheme {
+		out = strings.TrimPrefix(out, "https://")
+	}
+	return out
 }
 
 func jobConfigViews(jobs map[string]JobConfig) map[string]any {
