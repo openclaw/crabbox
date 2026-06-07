@@ -277,7 +277,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			return StatusView{}, exit(4, "docker-sandbox sandbox %q is not present in sbx inventory", sandboxName)
 		}
 		view := statusFromRecord(leaseID, slug, record)
-		if !req.Wait || view.Ready {
+		if !req.Wait || view.Ready || dockerSandboxTerminalState(view.State) {
 			return view, nil
 		}
 		if b.now().After(deadline) {
@@ -522,6 +522,15 @@ func findRecord(records []sandboxRecord, name string) (sandboxRecord, bool) {
 func isReadyState(state string) bool {
 	switch strings.TrimSpace(strings.ToLower(state)) {
 	case "running", "ready", "started", "active":
+		return true
+	default:
+		return false
+	}
+}
+
+func dockerSandboxTerminalState(state string) bool {
+	switch strings.TrimSpace(strings.ToLower(state)) {
+	case "expired", "failed", "released", "stopped", "stopped_with_code", "terminated":
 		return true
 	default:
 		return false

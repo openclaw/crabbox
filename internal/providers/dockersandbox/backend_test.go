@@ -584,18 +584,16 @@ func TestStatusReadyMissingWaitAndTimeout(t *testing.T) {
 		t.Fatalf("missing status err=%v", err)
 	}
 
-	timeoutRunner := newRunner(map[string]scriptedReply{
+	terminalRunner := newRunner(map[string]scriptedReply{
 		"ls": {stdout: `[{"name":"crabbox-my-app-status","status":"stopped"}]`},
 	}, nil)
-	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer timeoutCancel()
-	_, err = newTestBackend(newTestConfig(), timeoutRunner, io.Discard, io.Discard).Status(timeoutCtx, StatusRequest{
+	view, err = newTestBackend(newTestConfig(), terminalRunner, io.Discard, io.Discard).Status(context.Background(), StatusRequest{
 		ID:          "status",
 		Wait:        true,
 		WaitTimeout: time.Nanosecond,
 	})
-	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
-		t.Fatalf("timeout status err=%v", err)
+	if err != nil || view.Ready || view.State != "stopped" {
+		t.Fatalf("terminal stopped status view=%#v err=%v", view, err)
 	}
 
 	oldPoll := statusPollInterval
@@ -603,7 +601,7 @@ func TestStatusReadyMissingWaitAndTimeout(t *testing.T) {
 	defer func() { statusPollInterval = oldPoll }()
 	waitRunner := newRunner(nil, map[string][]scriptedReply{
 		"ls": {
-			{stdout: `[{"name":"crabbox-my-app-status","status":"stopped"}]`},
+			{stdout: `[{"name":"crabbox-my-app-status","status":"provisioning"}]`},
 			{stdout: `[{"name":"crabbox-my-app-status","status":"running"}]`},
 		},
 	})
@@ -614,6 +612,20 @@ func TestStatusReadyMissingWaitAndTimeout(t *testing.T) {
 	})
 	if err != nil || !view.Ready {
 		t.Fatalf("wait ready view=%#v err=%v", view, err)
+	}
+
+	timeoutRunner := newRunner(map[string]scriptedReply{
+		"ls": {stdout: `[{"name":"crabbox-my-app-status","status":"provisioning"}]`},
+	}, nil)
+	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer timeoutCancel()
+	_, err = newTestBackend(newTestConfig(), timeoutRunner, io.Discard, io.Discard).Status(timeoutCtx, StatusRequest{
+		ID:          "status",
+		Wait:        true,
+		WaitTimeout: time.Nanosecond,
+	})
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
+		t.Fatalf("timeout status err=%v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
