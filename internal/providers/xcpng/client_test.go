@@ -1133,7 +1133,7 @@ func TestDeleteConfigDriveTreatsAlreadyDetachedVBDAsCleanedUp(t *testing.T) {
 	}))
 	defer server.Close()
 	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
-	if err := client.DeleteConfigDrive(context.Background(), xcpNgConfigDrive{VBDRef: "OpaqueRef:vbd", VDIRef: "OpaqueRef:vdi"}); err != nil {
+	if err := client.DeleteConfigDrive(context.Background(), xcpNgConfigDrive{VBDRef: "OpaqueRef:vbd", VDIRef: "OpaqueRef:vdi", DestroyVDI: true}); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(methods, ","); got != "VBD.unplug,VBD.destroy,VDI.destroy" {
@@ -1157,7 +1157,7 @@ func TestDeleteConfigDriveTreatsHaltedPowerStateUnplugFaultAsCleanedUp(t *testin
 	}))
 	defer server.Close()
 	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
-	if err := client.DeleteConfigDrive(context.Background(), xcpNgConfigDrive{VBDRef: "OpaqueRef:vbd", VDIRef: "OpaqueRef:vdi"}); err != nil {
+	if err := client.DeleteConfigDrive(context.Background(), xcpNgConfigDrive{VBDRef: "OpaqueRef:vbd", VDIRef: "OpaqueRef:vdi", DestroyVDI: true}); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(methods, ","); got != "VBD.unplug,VBD.destroy,VDI.destroy" {
@@ -1221,7 +1221,7 @@ func TestDeleteConfigDriveTreatsNotUnpluggableVBDAsDestroyable(t *testing.T) {
 	}))
 	defer server.Close()
 	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
-	if err := client.DeleteConfigDrive(context.Background(), xcpNgConfigDrive{VBDRef: "OpaqueRef:vbd", VDIRef: "OpaqueRef:vdi"}); err != nil {
+	if err := client.DeleteConfigDrive(context.Background(), xcpNgConfigDrive{VBDRef: "OpaqueRef:vbd", VDIRef: "OpaqueRef:vdi", DestroyVDI: true}); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(methods, ","); got != "VBD.unplug,VBD.destroy,VDI.destroy" {

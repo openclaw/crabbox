@@ -12,6 +12,10 @@ func BaseConfig() Config {
 	return baseConfig()
 }
 
+func LoadConfig() (Config, error) {
+	return loadConfig()
+}
+
 func NormalizeTargetConfig(cfg *Config) {
 	normalizeTargetConfig(cfg)
 }

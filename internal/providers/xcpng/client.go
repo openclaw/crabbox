@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -151,6 +152,59 @@ func (c *xapiClient) ResolveHost(ctx context.Context, cfg xcpNgConfig) (xapiRef,
 	return c.getUniqueByName(ctx, "host", cfg.Host)
 }
 
+func (c *xapiClient) ResolveISOMedia(ctx context.Context, cfg xcpNgConfig, value string) (xcpNgISOMediaRef, error) {
+	_ = cfg
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return xcpNgISOMediaRef{}, exit(3, "xcp-ng installer ISO is required")
+	}
+	if strings.HasPrefix(value, "OpaqueRef:") {
+		return c.isoByRef(ctx, value, value)
+	}
+	if looksLikeUUID(value) {
+		ref, err := c.getByUUID(ctx, "VDI", value)
+		if err != nil {
+			return xcpNgISOMediaRef{}, err
+		}
+		return c.isoByRef(ctx, ref.value(), value)
+	}
+	if fileExists(value) {
+		return xcpNgISOMediaRef{Source: "local-file", NameLabel: value}, nil
+	}
+	ref, err := c.getUniqueByName(ctx, "VDI", value)
+	if err != nil {
+		return xcpNgISOMediaRef{}, err
+	}
+	return c.isoByRef(ctx, ref.value(), value)
+}
+
+func (c *xapiClient) isoByRef(ctx context.Context, ref, requested string) (xcpNgISOMediaRef, error) {
+	value, err := c.call(ctx, "VDI.get_record", c.session, ref)
+	if err != nil {
+		return xcpNgISOMediaRef{}, err
+	}
+	record := xmlValueToStruct(value)
+	iso := xcpNgISOMediaRef{
+		VDIRef:    ref,
+		UUID:      xmlStructString(record, "uuid"),
+		NameLabel: xmlStructString(record, "name_label"),
+		Source:    "sr-vdi",
+	}
+	if iso.NameLabel == "" {
+		iso.NameLabel = requested
+	}
+	if xmlStructString(record, "is_tools_iso") == "true" {
+		return xcpNgISOMediaRef{}, exit(4, "xcp-ng installer ISO must not be the Xen tools ISO: %s", requested)
+	}
+	if xmlStructString(record, "type") == "system" {
+		return xcpNgISOMediaRef{}, exit(4, "xcp-ng installer ISO VDI is not user media: %s", requested)
+	}
+	if xmlStructString(record, "read_only") != "true" {
+		return xcpNgISOMediaRef{}, exit(4, "xcp-ng installer ISO VDI must be read-only media: %s", requested)
+	}
+	return iso, nil
+}
+
 func (c *xapiClient) CloneVM(ctx context.Context, req xcpNgCloneRequest) (xapiVM, error) {
 	name := leaseVMName(req.LeaseID, req.Slug)
 	cloneMethod := "VM.clone"
@@ -195,6 +249,119 @@ func (c *xapiClient) CloneVM(ctx context.Context, req xcpNgCloneRequest) (xapiVM
 	return xapiVM{Ref: ref, UUID: uuid, Name: name, PowerState: "halted", Labels: req.Labels}, nil
 }
 
+func (c *xapiClient) CreateFreshVM(ctx context.Context, req xcpNgFreshVMRequest) (xcpNgFreshVMResult, error) {
+	memoryBytes := req.MemoryBytes
+	if memoryBytes <= 0 {
+		memoryBytes = 4 * 1024 * 1024 * 1024
+	}
+	vcpusMax := req.VCPUsMax
+	if vcpusMax <= 0 {
+		vcpusMax = 2
+	}
+	vcpusStartup := req.VCPUsStart
+	if vcpusStartup <= 0 {
+		vcpusStartup = vcpusMax
+	}
+	domainType := strings.TrimSpace(req.DomainType)
+	if domainType == "" {
+		domainType = "hvm"
+	}
+	hvmBootPolicy := "BIOS order"
+	if req.SecureBoot {
+		hvmBootPolicy = "UEFI"
+	}
+	hvmBootParams := map[string]string{"order": "dc"}
+	for key, value := range req.HVMBoot {
+		hvmBootParams[key] = value
+	}
+	platform := map[string]string{}
+	for key, value := range req.Platform {
+		platform[key] = value
+	}
+	if req.SecureBoot {
+		platform["secureboot"] = "true"
+	}
+	affinity := "OpaqueRef:NULL"
+	if req.Affinity != "" {
+		affinity = req.Affinity.value()
+	} else if req.HostRef != "" {
+		affinity = req.HostRef.value()
+	}
+	ref, err := c.callString(ctx, "VM.create", c.session, map[string]any{
+		"name_label":             req.Name,
+		"name_description":       req.Description,
+		"user_version":           1,
+		"is_a_template":          false,
+		"affinity":               affinity,
+		"memory_static_max":      memoryBytes,
+		"memory_dynamic_max":     memoryBytes,
+		"memory_dynamic_min":     memoryBytes,
+		"memory_static_min":      memoryBytes,
+		"VCPUs_params":           map[string]string{},
+		"VCPUs_max":              vcpusMax,
+		"VCPUs_at_startup":       vcpusStartup,
+		"actions_after_shutdown": "preserve",
+		"actions_after_reboot":   "restart",
+		"actions_after_crash":    "restart",
+		"PV_bootloader":          "",
+		"PV_kernel":              "",
+		"PV_ramdisk":             "",
+		"PV_args":                req.PVArgs,
+		"PV_bootloader_args":     "",
+		"PV_legacy_args":         "",
+		"HVM_boot_policy":        hvmBootPolicy,
+		"HVM_boot_params":        hvmBootParams,
+		"platform":               platform,
+		"PCI_bus":                "",
+		"other_config":           req.Labels,
+		"recommendations":        "",
+		"xenstore_data":          map[string]string{},
+		"tags":                   []string{},
+		"domain_type":            domainType,
+		"ha_restart_priority":    "",
+		"is_default_template":    false,
+	})
+	if err != nil {
+		return xcpNgFreshVMResult{}, err
+	}
+	result := xcpNgFreshVMResult{VM: xapiVM{Ref: ref, Name: req.Name, PowerState: "halted", Labels: req.Labels}}
+	if err := c.setVMLabels(ctx, ref, req.Labels); err != nil {
+		_ = c.deleteServer(context.Background(), ref, true)
+		return xcpNgFreshVMResult{}, err
+	}
+	if req.HostRef != "" {
+		if _, err := c.call(ctx, "VM.set_affinity", c.session, ref, req.HostRef.value()); err != nil {
+			_ = c.deleteServer(context.Background(), ref, true)
+			return xcpNgFreshVMResult{}, err
+		}
+	}
+	if req.Network != nil && req.Network.NetworkRef != "" {
+		vifRef, err := c.callString(ctx, "VIF.create", c.session, map[string]any{
+			"device":               firstNonBlank(req.Network.Device, "0"),
+			"network":              req.Network.NetworkRef.value(),
+			"VM":                   ref,
+			"MAC":                  firstNonBlank(req.Network.MAC, ""),
+			"MTU":                  req.Network.MTU,
+			"other_config":         req.Network.Labels,
+			"currently_attached":   false,
+			"qos_algorithm_type":   "",
+			"qos_algorithm_params": map[string]string{},
+		})
+		if err != nil {
+			_ = c.deleteServer(context.Background(), ref, true)
+			return xcpNgFreshVMResult{}, err
+		}
+		result.VIFRef = vifRef
+	}
+	uuid, err := c.callString(ctx, "VM.get_uuid", c.session, ref)
+	if err != nil {
+		_ = c.deleteServer(context.Background(), ref, true)
+		return xcpNgFreshVMResult{}, err
+	}
+	result.VM.UUID = uuid
+	return result, nil
+}
+
 func (c *xapiClient) AttachConfigDrive(ctx context.Context, req xcpNgConfigDriveRequest) (xcpNgConfigDrive, error) {
 	if req.SRRef == "" {
 		return xcpNgConfigDrive{}, exit(3, "xcp-ng sr or sr UUID is required for config-drive creation")
@@ -221,7 +388,7 @@ func (c *xapiClient) AttachConfigDrive(ctx context.Context, req xcpNgConfigDrive
 	if err != nil {
 		return xcpNgConfigDrive{}, err
 	}
-	drive := xcpNgConfigDrive{VDIRef: vdiRef, Name: name, Labels: labels}
+	drive := xcpNgConfigDrive{VDIRef: vdiRef, Name: name, Labels: labels, DestroyVDI: true}
 	if err := c.importRawVDI(ctx, vdiRef, image); err != nil {
 		_ = c.DeleteConfigDrive(context.Background(), drive)
 		return xcpNgConfigDrive{}, err
@@ -245,7 +412,34 @@ func (c *xapiClient) AttachConfigDrive(ctx context.Context, req xcpNgConfigDrive
 		return xcpNgConfigDrive{}, err
 	}
 	drive.VBDRef = vbdRef
+	drive.DestroyVDI = true
 	return drive, nil
+}
+
+func (c *xapiClient) AttachISO(ctx context.Context, req xcpNgISOAttachRequest) (xcpNgConfigDrive, error) {
+	labels := isoMediaLabels(req.Labels)
+	vdiRef := req.ISO.VDIRef
+	if req.Empty {
+		vdiRef = "OpaqueRef:NULL"
+	}
+	vbdRef, err := c.callString(ctx, "VBD.create", c.session, map[string]any{
+		"VM":                       req.VMRef.value(),
+		"VDI":                      vdiRef,
+		"userdevice":               firstNonBlank(req.UserDevice, "3"),
+		"bootable":                 req.Bootable,
+		"mode":                     "RO",
+		"type":                     "CD",
+		"empty":                    req.Empty,
+		"unpluggable":              req.Unpluggable,
+		"qos_algorithm_type":       "",
+		"qos_algorithm_params":     map[string]string{},
+		"qos_supported_algorithms": []string{},
+		"other_config":             labels,
+	})
+	if err != nil {
+		return xcpNgConfigDrive{}, err
+	}
+	return xcpNgConfigDrive{VDIRef: req.ISO.VDIRef, VBDRef: vbdRef, Name: req.ISO.NameLabel, Labels: labels, DestroyVDI: false}, nil
 }
 
 func (c *xapiClient) StartVM(ctx context.Context, ref xapiRef) error {
@@ -425,6 +619,11 @@ func (c *xapiClient) waitForPowerState(ctx context.Context, ref, want string, ti
 
 func (c *xapiClient) DeleteConfigDrive(ctx context.Context, drive xcpNgConfigDrive) error {
 	if drive.VBDRef != "" {
+		if drive.Labels["resource"] == "installer-media" {
+			if err := c.callDiscard(ctx, "VBD.eject", c.session, drive.VBDRef); err != nil && !isNotFound(err) && !isAlreadyDetached(err) && !isXAPIFault(err, "VBD_IS_EMPTY") && !isXAPIFault(err, "VBD_NOT_REMOVABLE_MEDIA") {
+				return err
+			}
+		}
 		if err := c.callDiscard(ctx, "VBD.unplug", c.session, drive.VBDRef); err != nil && !isNotFound(err) && !isAlreadyDetached(err) && !isNotUnpluggable(err) && !isXAPIHaltedPowerStateFault(err) {
 			return err
 		}
@@ -432,12 +631,24 @@ func (c *xapiClient) DeleteConfigDrive(ctx context.Context, drive xcpNgConfigDri
 			return err
 		}
 	}
-	if drive.VDIRef != "" {
+	if drive.DestroyVDI && drive.VDIRef != "" {
 		if err := c.callDiscard(ctx, "VDI.destroy", c.session, drive.VDIRef); err != nil && !isNotFound(err) {
 			return err
 		}
 	}
 	return nil
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (c *xapiClient) vmRefForID(ctx context.Context, id string) (string, error) {
@@ -533,6 +744,7 @@ func (c *xapiClient) configDrivesForLease(ctx context.Context, leaseID string) (
 		if len(vbds) > 0 {
 			drive.VBDRef = vbds[0]
 		}
+		drive.DestroyVDI = true
 		drives = append(drives, drive)
 	}
 	return drives, nil
@@ -575,7 +787,7 @@ func (c *xapiClient) attachedDestroyableDisks(ctx context.Context, vmRef string,
 		if requiredLease != "" && !isCrabboxVMDisk(labels, requiredLease) {
 			continue
 		}
-		disks = append(disks, xcpNgConfigDrive{VDIRef: vdiRef, VBDRef: vbdRef, Name: xmlStructString(vdi, "name_label")})
+		disks = append(disks, xcpNgConfigDrive{VDIRef: vdiRef, VBDRef: vbdRef, Name: xmlStructString(vdi, "name_label"), DestroyVDI: true})
 	}
 	return disks, nil
 }
