@@ -58,6 +58,17 @@ Crabbox currently depends on these `sbx` commands and flags:
 - `sbx exec [--workdir ...] [--env-file ...] <sandbox-name> <command...>`
 - `sbx rm --force <sandbox-name>`
 
+These calls match the official Docker Sandboxes docs. The public starting
+point is <https://docs.docker.com/ai/sandboxes/>; the matching local scrape is
+`../docs/content/manuals/ai/sandboxes/_index.md`. The install and first-run
+walkthrough lives at <https://docs.docker.com/ai/sandboxes/get-started/> and
+`../docs/content/manuals/ai/sandboxes/get-started.md`. The sibling Docker docs
+checkout also includes exact CLI references:
+`../docs/data/sbx_cli/sbx_create_shell.yaml` documents that `sbx create shell
+PATH` mounts the workspace path inside the sandbox, and
+`../docs/data/sbx_cli/sbx_exec.yaml` documents that `sbx exec` receives a
+sandbox name, command arguments, `--workdir`, and `--env-file`.
+
 `sbx ls --json` compatibility currently accepts either a top-level array or an
 object wrapper containing arrays under `sandboxes`, `items`, `data`, or
 `results`. Per-item field parsing accepts common variants: `id`, `ID`,
@@ -206,6 +217,11 @@ Common blockers:
   passed with `sbx exec --env-file`; Crabbox does not place selected values in
   local `sbx exec` process arguments, and the temporary file is removed after
   the run returns.
+- The official Docker Sandboxes docs describe direct workspace mounts as part
+  of the sandbox trust model and recommend stored secrets over raw environment
+  variables. Crabbox's `--allow-env` forwarding remains an explicit operator
+  choice, and Docker Sandbox remains inside the runtime trust boundary for
+  those forwarded values.
 
 ## Live Smoke
 
@@ -240,6 +256,7 @@ Use this matrix when proving a fresh install or upgrade:
 | Clone mode | `crabbox warmup --provider docker-sandbox --docker-sandbox-clone ...` | Requires a normal Git repository workspace before calling `sbx create --clone`. |
 | Unsupported delegated flags | Docker Sandbox run flags and config validation | Rejects unsupported agent, MCP attachment, desktop, Tailscale, `--class`, and `--type` surfaces clearly. |
 | Live lifecycle | `scripts/live-docker-sandbox-smoke.sh` | Prints `classification=live_sbx_smoke_passed ... cleanup=complete` only after create, run, list, and stop complete. |
+| Trust boundary handoff | `scripts/docker-sandbox-trust-boundary-smoke.sh` | Uses a fake `sbx` at the process boundary to prove Crabbox sends the workspace path, user command, and `--env-file`, while the forwarded value stays out of local argv and is present only in the env-file handoff. |
 
 Related docs:
 
