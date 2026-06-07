@@ -2575,6 +2575,37 @@ func TestResolveRunningVMByStateNotBool(t *testing.T) {
 	}
 }
 
+func TestResolveRunningVMByStateEmptyIPErrors(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_noip1", "noip-slug", providerName, "instance:crabbox-noip-vm", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup claim: %v", err)
+	}
+
+	listJSON := `[{"Name":"crabbox-noip-vm","State":"running","Disk":50,"Size":10,"Source":"test"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-noip-vm"}):                        {Stdout: "\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	_, err = b.Resolve(context.Background(), core.ResolveRequest{
+		ID: "cbx_noip1",
+	})
+	if err == nil {
+		t.Fatal("Resolve should fail when State=running but IP is empty")
+	}
+	if !strings.Contains(err.Error(), "no IP address") {
+		t.Fatalf("error should mention no IP address, got: %v", err)
+	}
+}
+
 func TestServerFromInstanceLabels(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

@@ -453,6 +453,9 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep boo
 		}
 		return exit(2, "tart run %s exited unexpectedly during startup", name)
 	case <-time.After(startupObserveTimeout):
+		if keep {
+			_ = cmd.Process.Release()
+		}
 		return nil
 	}
 }
@@ -601,7 +604,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst tartInstanc
 		cfg.WorkRoot = root
 	}
 	if ip == "" || ip == "--" {
-		if !inst.Running {
+		if !instanceRunning(inst.State) {
 			server.Status = inst.State
 			server.Labels["state"] = tartState(inst.State)
 			return LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
