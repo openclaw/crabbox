@@ -641,7 +641,7 @@ func TestServerFromInstanceDefaultsLabels(t *testing.T) {
 	}
 }
 
-func TestServerFromInstancePreservesExistingLabels(t *testing.T) {
+func TestServerFromInstanceClaimLabelsPreserved(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
@@ -1794,7 +1794,7 @@ func TestStopVMAndDeleteVM(t *testing.T) {
 	}
 }
 
-func TestStopVMError(t *testing.T) {
+func TestStopVMErrorPropagation(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"stop", "test-vm"}): {ExitCode: 1, Stderr: "VM not running"},
@@ -1833,7 +1833,7 @@ func TestCloneVM(t *testing.T) {
 	}
 }
 
-func TestCloneVMError(t *testing.T) {
+func TestCloneVMErrorPropagation(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"clone", "ghcr.io/test:latest", "crabbox-blue-1234"}): {ExitCode: 1, Stderr: "image not found"},
@@ -1879,7 +1879,7 @@ func TestListInstances(t *testing.T) {
 	}
 }
 
-func TestListInstancesParseError(t *testing.T) {
+func TestListInstancesInvalidJSONError(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: "not json"},
@@ -2744,5 +2744,1223 @@ func TestValidateTartEnvInt(t *testing.T) {
 	err = validateTartEnvInt("CRABBOX_TART_CPUS", 4, "cpu must be at least 4")
 	if err != nil {
 		t.Fatalf("should skip empty env: %v", err)
+	}
+}
+
+// --- Mutation round 3: error propagation, boundary conditions, helper coverage ---
+
+func TestConfigureVMCPUSetError(t *testing.T) {
+	runner := &recordingRunner{
+		errors: map[string]error{
+			commandKey([]string{"set", "test-vm", "--cpu", "8"}): fmt.Errorf("cpu set failed"),
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Tart.CPUs = 8
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	err := b.configureVM(context.Background(), cfg, "test-vm")
+	if err == nil {
+		t.Fatal("configureVM should propagate CPU set error")
+	}
+	if !strings.Contains(err.Error(), "tart set --cpu") {
+		t.Fatalf("error should mention tart set --cpu: %v", err)
+	}
+}
+
+func TestConfigureVMMemorySetError(t *testing.T) {
+	runner := &recordingRunner{
+		errors: map[string]error{
+			commandKey([]string{"set", "test-vm", "--memory", "8192"}): fmt.Errorf("memory set failed"),
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Tart.CPUs = 0
+	cfg.Tart.Memory = 8192
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	err := b.configureVM(context.Background(), cfg, "test-vm")
+	if err == nil {
+		t.Fatal("configureVM should propagate memory set error")
+	}
+	if !strings.Contains(err.Error(), "tart set --memory") {
+		t.Fatalf("error should mention tart set --memory: %v", err)
+	}
+}
+
+func TestConfigureVMDiskSetError(t *testing.T) {
+	runner := &recordingRunner{
+		errors: map[string]error{
+			commandKey([]string{"set", "test-vm", "--disk-size", "100"}): fmt.Errorf("disk set failed"),
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Tart.CPUs = 0
+	cfg.Tart.Memory = 0
+	cfg.Tart.Disk = 100
+	core.MarkTartDiskExplicit(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	err := b.configureVM(context.Background(), cfg, "test-vm")
+	if err == nil {
+		t.Fatal("configureVM should propagate disk set error")
+	}
+	if !strings.Contains(err.Error(), "tart set --disk-size") {
+		t.Fatalf("error should mention tart set --disk-size: %v", err)
+	}
+}
+
+func TestConfigureVMAllSettingsApplied(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	cfg := core.BaseConfig()
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 16384
+	cfg.Tart.Disk = 200
+	core.MarkTartDiskExplicit(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	err := b.configureVM(context.Background(), cfg, "test-vm")
+	if err != nil {
+		t.Fatalf("configureVM: %v", err)
+	}
+	cpuSet, memSet, diskSet := false, false, false
+	for _, call := range runner.calls {
+		if len(call.Args) >= 4 && call.Args[0] == "set" {
+			switch call.Args[2] {
+			case "--cpu":
+				cpuSet = true
+				if call.Args[3] != "8" {
+					t.Fatalf("CPU value = %s, want 8", call.Args[3])
+				}
+			case "--memory":
+				memSet = true
+				if call.Args[3] != "16384" {
+					t.Fatalf("memory value = %s, want 16384", call.Args[3])
+				}
+			case "--disk-size":
+				diskSet = true
+				if call.Args[3] != "200" {
+					t.Fatalf("disk value = %s, want 200", call.Args[3])
+				}
+			}
+		}
+	}
+	if !cpuSet {
+		t.Fatal("configureVM did not set CPU")
+	}
+	if !memSet {
+		t.Fatal("configureVM did not set memory")
+	}
+	if !diskSet {
+		t.Fatal("configureVM did not set disk")
+	}
+}
+
+func TestConfigureVMSkipsZeroValues(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	cfg := core.BaseConfig()
+	cfg.Tart.CPUs = 0
+	cfg.Tart.Memory = 0
+	cfg.Tart.Disk = 0
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	err := b.configureVM(context.Background(), cfg, "test-vm")
+	if err != nil {
+		t.Fatalf("configureVM: %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("configureVM should make no calls with zero values, got %d", len(runner.calls))
+	}
+}
+
+func TestCloneVMErrorDetail(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"clone", "ghcr.io/test:latest", "test-vm"}): {Stderr: "disk full"},
+		},
+		errors: map[string]error{
+			commandKey([]string{"clone", "ghcr.io/test:latest", "test-vm"}): fmt.Errorf("clone failed"),
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "ghcr.io/test:latest"
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	err := b.cloneVM(context.Background(), cfg, "test-vm")
+	if err == nil {
+		t.Fatal("cloneVM should return error on failure")
+	}
+	if !strings.Contains(err.Error(), "tart clone") {
+		t.Fatalf("error should mention tart clone: %v", err)
+	}
+}
+
+func TestCloneVMSuccess(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"clone", "ghcr.io/test:latest", "test-vm"}): {},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "ghcr.io/test:latest"
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	err := b.cloneVM(context.Background(), cfg, "test-vm")
+	if err != nil {
+		t.Fatalf("cloneVM should succeed: %v", err)
+	}
+}
+
+func TestStopVMErrorMessage(t *testing.T) {
+	runner := &recordingRunner{
+		errors: map[string]error{
+			commandKey([]string{"stop", "test-vm"}): fmt.Errorf("stop failed"),
+		},
+	}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	err := b.stopVM(context.Background(), "test-vm")
+	if err == nil {
+		t.Fatal("stopVM should return error on failure")
+	}
+	if !strings.Contains(err.Error(), "tart stop") {
+		t.Fatalf("error should mention tart stop: %v", err)
+	}
+}
+
+func TestDeleteVMError(t *testing.T) {
+	runner := &recordingRunner{
+		errors: map[string]error{
+			commandKey([]string{"delete", "test-vm"}): fmt.Errorf("delete failed"),
+		},
+	}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	err := b.deleteVM(context.Background(), "test-vm")
+	if err == nil {
+		t.Fatal("deleteVM should return error on failure")
+	}
+	if !strings.Contains(err.Error(), "tart delete") {
+		t.Fatalf("error should mention tart delete: %v", err)
+	}
+}
+
+func TestInjectSSHKeyInvalidUser(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	err := b.injectSSHKey(context.Background(), "test-vm", "invalid user!", "ssh-rsa AAAA")
+	if err == nil {
+		t.Fatal("injectSSHKey should reject invalid POSIX username")
+	}
+	if !strings.Contains(err.Error(), "not a valid POSIX") {
+		t.Fatalf("error should mention POSIX validation: %v", err)
+	}
+}
+
+func TestInjectSSHKeyValidUser(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	err := b.injectSSHKey(context.Background(), "test-vm", "admin", "ssh-rsa AAAA")
+	if err != nil {
+		t.Fatalf("injectSSHKey should accept valid user: %v", err)
+	}
+	found := false
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && call.Args[0] == "exec" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("injectSSHKey should call tart exec")
+	}
+}
+
+func TestInjectSSHKeyExecError(t *testing.T) {
+	runner := &recordingRunner{
+		errors: map[string]error{
+			"exec": fmt.Errorf("exec failed"),
+		},
+		responses: map[string]core.LocalCommandResult{
+			"exec": {Stderr: "permission denied"},
+		},
+	}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	err := b.injectSSHKey(context.Background(), "test-vm", "admin", "ssh-rsa AAAA")
+	if err == nil {
+		t.Fatal("injectSSHKey should propagate exec error")
+	}
+	if !strings.Contains(err.Error(), "ssh key injection") {
+		t.Fatalf("error should mention ssh key injection: %v", err)
+	}
+}
+
+func TestCommandErrorWithStderr(t *testing.T) {
+	result := core.LocalCommandResult{ExitCode: 5, Stderr: "some detail\n"}
+	err := commandError("test-action", result, fmt.Errorf("wrapped"))
+	if err == nil {
+		t.Fatal("commandError should return non-nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "test-action failed") {
+		t.Fatalf("should mention action: %s", msg)
+	}
+	if !strings.Contains(msg, "some detail") {
+		t.Fatalf("should include stderr detail: %s", msg)
+	}
+}
+
+func TestCommandErrorWithStdoutFallback(t *testing.T) {
+	result := core.LocalCommandResult{ExitCode: 0, Stderr: "", Stdout: "stdout detail\n"}
+	err := commandError("test-action", result, fmt.Errorf("wrapped"))
+	if err == nil {
+		t.Fatal("commandError should return non-nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "stdout detail") {
+		t.Fatalf("should fallback to stdout: %s", msg)
+	}
+}
+
+func TestCommandErrorNoDetail(t *testing.T) {
+	result := core.LocalCommandResult{ExitCode: 0, Stderr: "", Stdout: ""}
+	err := commandError("test-action", result, fmt.Errorf("original"))
+	if err == nil {
+		t.Fatal("commandError should return non-nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "test-action failed") {
+		t.Fatalf("should mention action: %s", msg)
+	}
+	if !strings.Contains(msg, "original") {
+		t.Fatalf("should include original error: %s", msg)
+	}
+}
+
+func TestCommandErrorZeroExitCodeBecomesOne(t *testing.T) {
+	result := core.LocalCommandResult{ExitCode: 0}
+	err := commandError("action", result, fmt.Errorf("err"))
+	var exitErr core.ExitError
+	if !core.AsExitError(err, &exitErr) {
+		t.Fatalf("expected ExitError, got %T", err)
+	}
+	if exitErr.Code == 0 {
+		t.Fatal("exit code 0 should become non-zero")
+	}
+}
+
+func TestFirstLineEmpty(t *testing.T) {
+	if got := firstLine(""); got != "unknown" {
+		t.Fatalf("firstLine(\"\") = %q, want \"unknown\"", got)
+	}
+	if got := firstLine("   "); got != "unknown" {
+		t.Fatalf("firstLine(\"   \") = %q, want \"unknown\"", got)
+	}
+}
+
+func TestFirstLineSingleLine(t *testing.T) {
+	if got := firstLine("hello world"); got != "hello world" {
+		t.Fatalf("firstLine(\"hello world\") = %q", got)
+	}
+}
+
+func TestFirstLineMultiLine(t *testing.T) {
+	if got := firstLine("first\nsecond\nthird"); got != "first" {
+		t.Fatalf("firstLine multiline = %q, want \"first\"", got)
+	}
+}
+
+func TestFirstNonBlankAllEmpty(t *testing.T) {
+	if got := firstNonBlank("", "  ", "\t"); got != "" {
+		t.Fatalf("firstNonBlank all empty = %q, want \"\"", got)
+	}
+}
+
+func TestFirstNonBlankFindsFirst(t *testing.T) {
+	if got := firstNonBlank("", "hello", "world"); got != "hello" {
+		t.Fatalf("firstNonBlank = %q, want \"hello\"", got)
+	}
+}
+
+func TestFirstNonBlankSingleValue(t *testing.T) {
+	if got := firstNonBlank("only"); got != "only" {
+		t.Fatalf("firstNonBlank(\"only\") = %q", got)
+	}
+}
+
+func TestTartStateNormalization(t *testing.T) {
+	cases := []struct {
+		input, want string
+	}{
+		{"Running", "running"},
+		{"STOPPED", "stopped"},
+		{"  Ready  ", "ready"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := tartState(tc.input); got != tc.want {
+			t.Fatalf("tartState(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestInstanceRunningVariousStates(t *testing.T) {
+	cases := []struct {
+		state string
+		want  bool
+	}{
+		{"running", true},
+		{"Running", true},
+		{"  running  ", true},
+		{"ready", true},
+		{"Ready", true},
+		{"stopped", false},
+		{"suspended", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := instanceRunning(tc.state); got != tc.want {
+			t.Fatalf("instanceRunning(%q) = %v, want %v", tc.state, got, tc.want)
+		}
+	}
+}
+
+func TestGetIPDashDashReturnsEmpty(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"ip", "test-vm"}): {Stdout: "--\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	ip := b.getIP(context.Background(), "test-vm")
+	if ip != "" {
+		t.Fatalf("getIP should return empty for '--', got %q", ip)
+	}
+}
+
+func TestGetIPValidAddress(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"ip", "test-vm"}): {Stdout: "192.168.64.5\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	ip := b.getIP(context.Background(), "test-vm")
+	if ip != "192.168.64.5" {
+		t.Fatalf("getIP = %q, want 192.168.64.5", ip)
+	}
+}
+
+func TestGetIPErrorReturnsEmpty(t *testing.T) {
+	runner := &recordingRunner{
+		errors: map[string]error{
+			commandKey([]string{"ip", "test-vm"}): fmt.Errorf("not running"),
+		},
+	}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	ip := b.getIP(context.Background(), "test-vm")
+	if ip != "" {
+		t.Fatalf("getIP should return empty on error, got %q", ip)
+	}
+}
+
+func TestConfigureTailscaleRejected(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tailscale.Enabled = true
+	_, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
+	if err == nil {
+		t.Fatal("Configure should reject tailscale-enabled config")
+	}
+	if !strings.Contains(err.Error(), "tailscale") {
+		t.Fatalf("error should mention tailscale: %v", err)
+	}
+}
+
+func TestConfigureTailscaleNetwork(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Network = core.NetworkTailscale
+	_, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
+	if err == nil {
+		t.Fatal("Configure should reject network=tailscale")
+	}
+}
+
+func TestApplyFlagsCPUExact4Accepted(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--tart-cpu", "4"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := applyFlags(&cfg, fs, vals); err != nil {
+		t.Fatalf("CPU=4 should be accepted: %v", err)
+	}
+	if cfg.Tart.CPUs != 4 {
+		t.Fatalf("CPUs = %d, want 4", cfg.Tart.CPUs)
+	}
+}
+
+func TestApplyFlagsMemoryExact4096Accepted(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--tart-memory", "4096"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := applyFlags(&cfg, fs, vals); err != nil {
+		t.Fatalf("Memory=4096 should be accepted: %v", err)
+	}
+	if cfg.Tart.Memory != 4096 {
+		t.Fatalf("Memory = %d, want 4096", cfg.Tart.Memory)
+	}
+}
+
+func TestApplyFlagsCPU3Rejected(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--tart-cpu", "3"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	err := applyFlags(&cfg, fs, vals)
+	if err == nil {
+		t.Fatal("CPU=3 should be rejected (minimum is 4)")
+	}
+}
+
+func TestApplyFlagsMemory4095Rejected(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--tart-memory", "4095"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	err := applyFlags(&cfg, fs, vals)
+	if err == nil {
+		t.Fatal("Memory=4095 should be rejected (minimum is 4096)")
+	}
+}
+
+func TestApplyFlagsWrongTypeIgnored(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	err := applyFlags(&cfg, fs, "not-a-flagValues")
+	if err != nil {
+		t.Fatalf("applyFlags with wrong type should be no-op, got: %v", err)
+	}
+}
+
+func TestApplyFlagsImageExplicit(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--tart-image", "ghcr.io/custom:v2"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := applyFlags(&cfg, fs, vals); err != nil {
+		t.Fatalf("applyFlags: %v", err)
+	}
+	if cfg.Tart.Image != "ghcr.io/custom:v2" {
+		t.Fatalf("Image = %q, want ghcr.io/custom:v2", cfg.Tart.Image)
+	}
+	if cfg.Tart.Image != "ghcr.io/custom:v2" {
+		t.Fatal("image should be set to custom value")
+	}
+}
+
+func TestApplyDefaultsTargetOS(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.TargetOS = ""
+	cfg.Tart.Image = "test-image"
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 8192
+	applyDefaults(&cfg)
+	if cfg.TargetOS != targetMacOS {
+		t.Fatalf("TargetOS = %q, want %q", cfg.TargetOS, targetMacOS)
+	}
+}
+
+func TestApplyDefaultsImageFallback(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = ""
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 8192
+	applyDefaults(&cfg)
+	if cfg.Tart.Image == "" {
+		t.Fatal("applyDefaults should set a default image when empty")
+	}
+}
+
+func TestApplyDefaultsCPUFallback(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test"
+	cfg.Tart.CPUs = 0
+	cfg.Tart.Memory = 8192
+	applyDefaults(&cfg)
+	if cfg.Tart.CPUs <= 0 {
+		t.Fatalf("applyDefaults should set positive default CPUs, got %d", cfg.Tart.CPUs)
+	}
+}
+
+func TestApplyDefaultsMemoryFallback(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test"
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 0
+	applyDefaults(&cfg)
+	if cfg.Tart.Memory <= 0 {
+		t.Fatalf("applyDefaults should set positive default memory, got %d", cfg.Tart.Memory)
+	}
+}
+
+func TestApplyDefaultsWorkRootFallback(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test"
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 8192
+	cfg.Tart.WorkRoot = ""
+	cfg.WorkRoot = "/custom/root"
+	applyDefaults(&cfg)
+	if cfg.Tart.WorkRoot == "" {
+		t.Fatal("applyDefaults should set Tart.WorkRoot from WorkRoot or default")
+	}
+}
+
+func TestServerFromInstanceDefaultLabels(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test-image"
+	cfg.Tart.User = "admin"
+	cfg.Tart.WorkRoot = "/tmp"
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	inst := tartInstance{Name: "crabbox-test-1234", State: "running", Running: true, Source: "test-image"}
+	claim := core.LeaseClaim{LeaseID: "lease-1", Slug: "test-slug"}
+	server := b.serverFromInstance(inst, claim, cfg)
+	if server.Labels["crabbox"] != "true" {
+		t.Fatalf("label crabbox = %q, want true", server.Labels["crabbox"])
+	}
+	if server.Labels["provider"] != providerName {
+		t.Fatalf("label provider = %q, want %s", server.Labels["provider"], providerName)
+	}
+	if server.Labels["instance"] != "crabbox-test-1234" {
+		t.Fatalf("label instance = %q", server.Labels["instance"])
+	}
+	if server.Labels["lease"] != "lease-1" {
+		t.Fatalf("label lease = %q", server.Labels["lease"])
+	}
+	if server.Labels["slug"] != "test-slug" {
+		t.Fatalf("label slug = %q", server.Labels["slug"])
+	}
+	if server.Labels["ssh_user"] != "admin" {
+		t.Fatalf("label ssh_user = %q", server.Labels["ssh_user"])
+	}
+	if server.Labels["ssh_port"] != sshPort {
+		t.Fatalf("label ssh_port = %q", server.Labels["ssh_port"])
+	}
+}
+
+func TestServerFromInstanceExistingLabelsRetained(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "new-image"
+	cfg.Tart.User = "new-user"
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	inst := tartInstance{Name: "test-vm", State: "running", Running: true}
+	claim := core.LeaseClaim{
+		Labels: map[string]string{
+			"crabbox":  "true",
+			"provider": "other",
+			"instance": "other-vm",
+			"ssh_user": "existing-user",
+		},
+	}
+	server := b.serverFromInstance(inst, claim, cfg)
+	if server.Labels["provider"] != "other" {
+		t.Fatalf("should preserve existing provider label, got %q", server.Labels["provider"])
+	}
+	if server.Labels["instance"] != "other-vm" {
+		t.Fatalf("should preserve existing instance label, got %q", server.Labels["instance"])
+	}
+	if server.Labels["ssh_user"] != "existing-user" {
+		t.Fatalf("should preserve existing ssh_user label, got %q", server.Labels["ssh_user"])
+	}
+}
+
+func TestServerFromInstanceRunningReadyStatus(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	inst := tartInstance{Name: "test-vm", State: "running", Running: true}
+	claim := core.LeaseClaim{Labels: map[string]string{"state": "ready"}}
+	server := b.serverFromInstance(inst, claim, cfg)
+	if server.Status != "ready" {
+		t.Fatalf("running + state=ready should produce status=ready, got %q", server.Status)
+	}
+}
+
+func TestServerFromInstanceStoppedStatus(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	inst := tartInstance{Name: "test-vm", State: "stopped", Running: false}
+	claim := core.LeaseClaim{Labels: map[string]string{"state": "ready"}}
+	server := b.serverFromInstance(inst, claim, cfg)
+	if server.Status == "ready" {
+		t.Fatal("stopped instance should not have ready status")
+	}
+}
+
+func TestListInstancesBadJSONPropagatesError(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: "not json"},
+		},
+	}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	_, err := b.listInstances(context.Background())
+	if err == nil {
+		t.Fatal("listInstances should return error on invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "parse tart list") {
+		t.Fatalf("error should mention parse: %v", err)
+	}
+}
+
+func TestListInstancesCommandError(t *testing.T) {
+	runner := &recordingRunner{
+		errors: map[string]error{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): fmt.Errorf("tart not found"),
+		},
+	}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	_, err := b.listInstances(context.Background())
+	if err == nil {
+		t.Fatal("listInstances should return error on command failure")
+	}
+}
+
+func TestApplyFlagsConfigCPUZeroWithExplicit(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tart.CPUs = 0
+	core.MarkTartCPUsExplicit(&cfg)
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	err := applyFlags(&cfg, fs, vals)
+	if err == nil {
+		t.Fatal("CPU=0 with explicit mark should be rejected")
+	}
+}
+
+func TestApplyFlagsConfigMemoryZeroWithExplicit(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tart.Memory = 0
+	core.MarkTartMemoryExplicit(&cfg)
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	err := applyFlags(&cfg, fs, vals)
+	if err == nil {
+		t.Fatal("Memory=0 with explicit mark should be rejected")
+	}
+}
+
+func TestShouldCleanupUnparseableLastUsedAt(t *testing.T) {
+	server := Server{
+		Status: "running",
+		Labels: map[string]string{"state": "ready"},
+	}
+	claim := core.LeaseClaim{
+		LeaseID:            "test-lease",
+		LastUsedAt:         "not-a-date",
+		IdleTimeoutSeconds: 3600,
+	}
+	shouldDelete, reason := shouldCleanup(server, claim, true, time.Now())
+	if shouldDelete {
+		t.Fatalf("should not delete with unparseable LastUsedAt, reason=%s", reason)
+	}
+	if reason != "claim active" {
+		t.Fatalf("reason = %q, want 'claim active'", reason)
+	}
+}
+
+func TestShouldCleanupZeroLastUsedAt(t *testing.T) {
+	server := Server{
+		Status: "running",
+		Labels: map[string]string{"state": "ready"},
+	}
+	claim := core.LeaseClaim{
+		LeaseID:            "test-lease",
+		LastUsedAt:         "0001-01-01T00:00:00Z",
+		IdleTimeoutSeconds: 3600,
+	}
+	shouldDelete, reason := shouldCleanup(server, claim, true, time.Now())
+	if shouldDelete {
+		t.Fatalf("should not delete with zero LastUsedAt, reason=%s", reason)
+	}
+}
+
+func TestConfigureDoctorError(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tailscale.Enabled = true
+	_, err := (Provider{}).ConfigureDoctor(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
+	if err == nil {
+		t.Fatal("ConfigureDoctor should propagate Configure error")
+	}
+}
+
+func TestReleaseLeaseMessageFormat(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	lease := LeaseTarget{
+		LeaseID: "test-lease-id",
+		Server: Server{
+			CloudID: "crabbox-test-vm",
+			Labels:  map[string]string{},
+		},
+	}
+	msg := b.ReleaseLeaseMessage(lease)
+	if !strings.Contains(msg, "test-lease-id") {
+		t.Fatalf("message should contain lease ID: %q", msg)
+	}
+	if !strings.Contains(msg, "crabbox-test-vm") {
+		t.Fatalf("message should contain instance name: %q", msg)
+	}
+}
+
+func TestReleaseLeaseMessageNoCloudID(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	lease := LeaseTarget{
+		LeaseID: "test-lease-id",
+		Server: Server{
+			Labels: map[string]string{"instance": "from-labels"},
+		},
+	}
+	msg := b.ReleaseLeaseMessage(lease)
+	if !strings.Contains(msg, "from-labels") {
+		t.Fatalf("should fallback to labels[instance]: %q", msg)
+	}
+}
+
+func TestReleaseLeaseMessageEmptyBoth(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	lease := LeaseTarget{
+		LeaseID: "test-lease-id",
+		Server: Server{
+			Labels: map[string]string{},
+		},
+	}
+	msg := b.ReleaseLeaseMessage(lease)
+	if !strings.Contains(msg, "-") {
+		t.Fatalf("should show dash for missing instance: %q", msg)
+	}
+}
+
+func TestValidPOSIXUserRegex(t *testing.T) {
+	valid := []string{"admin", "root", "_test", "user-name", "user.name", "user_01"}
+	for _, u := range valid {
+		if !validPOSIXUser.MatchString(u) {
+			t.Fatalf("validPOSIXUser should match %q", u)
+		}
+	}
+	invalid := []string{"", "user name", "123start", "user@host", "user!", "a b"}
+	for _, u := range invalid {
+		if validPOSIXUser.MatchString(u) {
+			t.Fatalf("validPOSIXUser should NOT match %q", u)
+		}
+	}
+}
+
+// --- Mutation round 4: applyDefaults edge cases, flags boundary, resolve/cleanup ---
+
+func TestApplyDefaultsKeepsCustomTargetOS(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.TargetOS = "custom-os"
+	cfg.Tart.Image = "test"
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 8192
+	applyDefaults(&cfg)
+	if cfg.TargetOS != "custom-os" {
+		t.Fatalf("TargetOS = %q, should preserve non-empty value", cfg.TargetOS)
+	}
+}
+
+func TestApplyDefaultsWorkRootInheritsNonDefault(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test"
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 8192
+	cfg.Tart.WorkRoot = ""
+	cfg.WorkRoot = "/custom/work/root"
+	applyDefaults(&cfg)
+	if cfg.Tart.WorkRoot != "/custom/work/root" {
+		t.Fatalf("Tart.WorkRoot = %q, want /custom/work/root", cfg.Tart.WorkRoot)
+	}
+}
+
+func TestApplyDefaultsWorkRootUsesHardcodedDefault(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test"
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 8192
+	cfg.Tart.WorkRoot = ""
+	applyDefaults(&cfg)
+	if cfg.Tart.WorkRoot != "/Users/admin/crabbox" {
+		t.Fatalf("Tart.WorkRoot = %q, want /Users/admin/crabbox", cfg.Tart.WorkRoot)
+	}
+}
+
+func TestApplyDefaultsKeepsExplicitWorkRoot(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test"
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 8192
+	cfg.Tart.WorkRoot = "/already/set"
+	cfg.WorkRoot = "/other"
+	applyDefaults(&cfg)
+	if cfg.Tart.WorkRoot != "/already/set" {
+		t.Fatalf("Tart.WorkRoot = %q, should preserve existing", cfg.Tart.WorkRoot)
+	}
+}
+
+func TestApplyDefaultsKeepsPositiveCPUs(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test"
+	cfg.Tart.CPUs = 16
+	cfg.Tart.Memory = 8192
+	applyDefaults(&cfg)
+	if cfg.Tart.CPUs != 16 {
+		t.Fatalf("CPUs = %d, should preserve existing 16", cfg.Tart.CPUs)
+	}
+}
+
+func TestApplyDefaultsKeepsPositiveMemory(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test"
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 32768
+	applyDefaults(&cfg)
+	if cfg.Tart.Memory != 32768 {
+		t.Fatalf("Memory = %d, should preserve existing 32768", cfg.Tart.Memory)
+	}
+}
+
+func TestApplyDefaultsSyncsSSHUserFromTart(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test"
+	cfg.Tart.User = "deploy"
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 8192
+	applyDefaults(&cfg)
+	if cfg.SSHUser != "deploy" {
+		t.Fatalf("SSHUser = %q, should be set to Tart.User", cfg.SSHUser)
+	}
+}
+
+func TestApplyDefaultsSyncsSSHPort(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test"
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 8192
+	applyDefaults(&cfg)
+	if cfg.SSHPort != sshPort {
+		t.Fatalf("SSHPort = %q, want %q", cfg.SSHPort, sshPort)
+	}
+}
+
+func TestApplyDefaultsSyncsServerType(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "my-image:v2"
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 8192
+	applyDefaults(&cfg)
+	if cfg.ServerType != "my-image:v2" {
+		t.Fatalf("ServerType = %q, want my-image:v2", cfg.ServerType)
+	}
+}
+
+func TestApplyDefaultsResetsWindowsMode(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test"
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 8192
+	cfg.WindowsMode = "something"
+	applyDefaults(&cfg)
+	if cfg.WindowsMode != "" {
+		t.Fatalf("WindowsMode = %q, should be cleared", cfg.WindowsMode)
+	}
+}
+
+func TestApplyDefaultsResetsFallbackPorts(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test"
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 8192
+	cfg.SSHFallbackPorts = []string{"2222", "2223"}
+	applyDefaults(&cfg)
+	if len(cfg.SSHFallbackPorts) != 0 {
+		t.Fatalf("SSHFallbackPorts = %v, should be empty", cfg.SSHFallbackPorts)
+	}
+}
+
+func TestApplyFlagsConfigCPU1Rejected(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tart.CPUs = 1
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	err := applyFlags(&cfg, fs, vals)
+	if err == nil {
+		t.Fatal("CPU=1 from config should be rejected (between 0 and 4)")
+	}
+}
+
+func TestApplyFlagsConfigMemory2048Rejected(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tart.Memory = 2048
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	err := applyFlags(&cfg, fs, vals)
+	if err == nil {
+		t.Fatal("Memory=2048 from config should be rejected (between 0 and 4096)")
+	}
+}
+
+func TestApplyFlagsConfigDiskNegativeRejected(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tart.Disk = -5
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	err := applyFlags(&cfg, fs, vals)
+	if err == nil {
+		t.Fatal("Disk=-5 from config should be rejected")
+	}
+}
+
+func TestServerFromInstanceNilClaimLabels(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "test-image"
+	cfg.Tart.User = "admin"
+	cfg.Tart.WorkRoot = "/tmp"
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	inst := tartInstance{Name: "crabbox-vm-1", State: "stopped", Running: false}
+	claim := core.LeaseClaim{}
+	server := b.serverFromInstance(inst, claim, cfg)
+	if server.Labels["provider"] != providerName {
+		t.Fatalf("label provider = %q, should default to %s", server.Labels["provider"], providerName)
+	}
+	if server.Labels["instance"] != "crabbox-vm-1" {
+		t.Fatalf("label instance should default to inst.Name")
+	}
+	if server.Status == "ready" {
+		t.Fatal("stopped instance should not show ready")
+	}
+}
+
+func TestServerFromInstanceSourceFallback(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "fallback-image"
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	inst := tartInstance{Name: "crabbox-vm-1", State: "running", Running: true, Source: ""}
+	claim := core.LeaseClaim{}
+	server := b.serverFromInstance(inst, claim, cfg)
+	if server.Labels["server_type"] != "fallback-image" {
+		t.Fatalf("server_type should fallback to cfg.Tart.Image when Source is empty, got %q", server.Labels["server_type"])
+	}
+}
+
+func TestServerFromInstanceSourcePreferred(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	cfg.Tart.Image = "config-image"
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	inst := tartInstance{Name: "crabbox-vm-1", State: "running", Running: true, Source: "source-image"}
+	claim := core.LeaseClaim{}
+	server := b.serverFromInstance(inst, claim, cfg)
+	if server.Labels["server_type"] != "source-image" {
+		t.Fatalf("server_type should prefer inst.Source, got %q", server.Labels["server_type"])
+	}
+}
+
+func TestStartVMArgsFormat(t *testing.T) {
+	args := startVMArgs("test-vm-name")
+	if len(args) != 3 {
+		t.Fatalf("startVMArgs len = %d, want 3", len(args))
+	}
+	if args[0] != "run" {
+		t.Fatalf("args[0] = %q, want run", args[0])
+	}
+	if args[1] != "test-vm-name" {
+		t.Fatalf("args[1] = %q, want test-vm-name", args[1])
+	}
+	if args[2] != "--no-graphics" {
+		t.Fatalf("args[2] = %q, want --no-graphics", args[2])
+	}
+}
+
+func TestShouldCleanupNegativeIdleTimeout(t *testing.T) {
+	server := Server{
+		Status: "running",
+		Labels: map[string]string{"state": "ready"},
+	}
+	claim := core.LeaseClaim{
+		LeaseID:            "test-lease",
+		LastUsedAt:         time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339),
+		IdleTimeoutSeconds: -1,
+	}
+	shouldDelete, reason := shouldCleanup(server, claim, true, time.Now())
+	if shouldDelete {
+		t.Fatalf("negative idle timeout should not trigger cleanup, reason=%s", reason)
+	}
+}
+
+func TestShouldCleanupNotRunningNotReady(t *testing.T) {
+	server := Server{
+		Status: "suspended",
+		Labels: map[string]string{"state": "suspended"},
+	}
+	claim := core.LeaseClaim{LeaseID: "test"}
+	shouldDelete, reason := shouldCleanup(server, claim, true, time.Now())
+	if !shouldDelete {
+		t.Fatalf("suspended instance should be cleaned up, reason=%s", reason)
+	}
+	if !strings.Contains(reason, "state=") {
+		t.Fatalf("reason should include state: %s", reason)
+	}
+}
+
+func TestShouldCleanupEmptyStatus(t *testing.T) {
+	server := Server{
+		Status: "",
+		Labels: map[string]string{},
+	}
+	claim := core.LeaseClaim{LeaseID: "test"}
+	shouldDelete, reason := shouldCleanup(server, claim, true, time.Now())
+	if !shouldDelete {
+		t.Fatalf("empty status should trigger cleanup, reason=%s", reason)
+	}
+}
+
+func TestBlankHelper(t *testing.T) {
+	if got := blank("value", "fallback"); got != "value" {
+		t.Fatalf("blank(\"value\", \"fallback\") = %q", got)
+	}
+	if got := blank("", "fallback"); got != "fallback" {
+		t.Fatalf("blank(\"\", \"fallback\") = %q", got)
+	}
+}
+
+func TestInstanceScopeBlankInput(t *testing.T) {
+	if got := instanceScope(""); got != "" {
+		t.Fatalf("instanceScope(\"\") = %q, want \"\"", got)
+	}
+	if got := instanceScope("  "); got != "" {
+		t.Fatalf("instanceScope(\"  \") = %q, want \"\"", got)
+	}
+}
+
+func TestInstanceScopePrefixAdded(t *testing.T) {
+	if got := instanceScope("my-vm"); got != "instance:my-vm" {
+		t.Fatalf("instanceScope(\"my-vm\") = %q", got)
+	}
+}
+
+func TestInstanceNameFromScopeRejectsNonInstance(t *testing.T) {
+	if got := instanceNameFromScope(""); got != "" {
+		t.Fatalf("empty scope should return \"\"")
+	}
+	if got := instanceNameFromScope("pod:abc"); got != "" {
+		t.Fatalf("non-instance scope should return \"\"")
+	}
+	if got := instanceNameFromScope("   "); got != "" {
+		t.Fatalf("whitespace scope should return \"\"")
+	}
+}
+
+func TestInstanceNameFromScopeExtractsName(t *testing.T) {
+	if got := instanceNameFromScope("instance:my-vm"); got != "my-vm" {
+		t.Fatalf("instanceNameFromScope = %q, want my-vm", got)
+	}
+}
+
+func TestInstanceNameFromClaimPrefersLabel(t *testing.T) {
+	claim := core.LeaseClaim{
+		Labels:        map[string]string{"instance": "from-label"},
+		ProviderScope: "instance:from-scope",
+	}
+	if got := instanceNameFromClaim(claim); got != "from-label" {
+		t.Fatalf("instanceNameFromClaim should prefer label, got %q", got)
+	}
+}
+
+func TestInstanceNameFromClaimUsesScope(t *testing.T) {
+	claim := core.LeaseClaim{
+		Labels:        map[string]string{},
+		ProviderScope: "instance:from-scope",
+	}
+	if got := instanceNameFromClaim(claim); got != "from-scope" {
+		t.Fatalf("instanceNameFromClaim should fallback to scope, got %q", got)
+	}
+}
+
+func TestInstanceNameFromClaimReturnsEmptyForMissing(t *testing.T) {
+	claim := core.LeaseClaim{
+		Labels:        map[string]string{},
+		ProviderScope: "",
+	}
+	if got := instanceNameFromClaim(claim); got != "" {
+		t.Fatalf("instanceNameFromClaim should return empty, got %q", got)
+	}
+}
+
+func TestNormalizeLeaseSlugEmpty(t *testing.T) {
+	if got := normalizeLeaseSlug(""); got != "" {
+		t.Fatalf("normalizeLeaseSlug(\"\") = %q", got)
+	}
+}
+
+func TestNormalizeLeaseSlugWithPrefix(t *testing.T) {
+	result := normalizeLeaseSlug("my-slug")
+	if result == "" {
+		t.Fatal("normalizeLeaseSlug should return non-empty for valid slug")
 	}
 }
