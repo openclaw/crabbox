@@ -1,21 +1,34 @@
 # Test Results
 
-Read when:
+Read this when you are:
 
-- adding result formats;
-- changing how failed tests are summarized;
-- debugging why `crabbox results` has no data.
+- adding or extending a result format;
+- changing how failed cases are summarized or capped;
+- debugging why [`crabbox results`](../commands/results.md) shows no data.
 
-Crabbox can attach JUnit XML summaries to coordinator run history. The agent uses this so a failed run can answer "which tests failed?" without scraping a large raw log.
+Crabbox can attach a parsed JUnit XML summary to a recorded run so a failed run
+can answer "which tests failed?" without scraping a large raw log. The CLI reads
+the remote JUnit files after your command exits, parses them locally, and sends
+only the compact summary to the coordinator. Raw XML is never uploaded or
+stored.
 
-Configure per run:
+This page is the conceptual companion to the command reference; for invocation,
+flags, and example output see [`results`](../commands/results.md).
+
+## Pointing a run at result files
+
+Results attach only when `crabbox run` knows where to find remote JUnit XML in
+the workdir. There are three ways to tell it.
+
+Per run, on the command line:
 
 ```sh
 crabbox run --id cbx_... --junit junit.xml -- go test ./...
+crabbox run --id cbx_... --junit junit.xml,reports/junit.xml -- go test ./...
 crabbox run --id cbx_... --results-auto -- go test ./...
 ```
 
-Or per repo:
+Per repo, in any [config file](configuration.md):
 
 ```yaml
 results:
@@ -25,22 +38,86 @@ results:
     - reports/junit.xml
 ```
 
-After the command exits, the CLI reads configured remote files from the workdir, or scans common JUnit XML names when auto discovery is enabled. Auto discovery only considers reports written after the command starts, using Crabbox metadata when the workdir is a Git checkout so clean-worktree checks are not dirtied, and `.crabbox` metadata otherwise. It skips dependency and Git directories, sniffs for JUnit XML before counting a file, prioritizes reports with failures or errors, and caps remote reads before parsing. It parses JUnit and sends only the summary to the coordinator. Raw XML is not stored. The coordinator caps stored file lists, failed-case entries, and long strings so a huge report cannot exceed Durable Object storage or response limits.
+Or through the environment: `CRABBOX_RESULTS_JUNIT` (comma-separated paths) and
+`CRABBOX_RESULTS_AUTO` (boolean). The `--junit` path also flows through
+[`crabbox job run`](jobs.md) (from a job's `junit:` list) and
+[`crabbox capsule replay`](capsules.md).
 
-Use:
+## What happens after the command exits
+
+`crabbox run` collects results only when `--results-auto` is set or at least one
+explicit `--junit` path is configured.
+
+For explicit `--junit` paths, the CLI reads each listed file from the workdir
+(Windows-native targets use a PowerShell variant) and parses it.
+
+Auto discovery (`--results-auto`) is freshness-aware so it never reports stale
+reports from an earlier run:
+
+1. Before the command runs, the CLI writes a results-start marker. In a Git
+   checkout it lives under the repo's Git dir (so the worktree stays clean);
+   otherwise it falls back to `.crabbox/results-start` in the workdir.
+2. After the command, it walks the workdir for `junit*.xml`, `TEST-*.xml`, and
+   `results.xml`, pruning `node_modules` and `.git`.
+3. Each candidate must be newer than the marker, must sniff as JUnit XML (the
+   leading bytes contain `<testsuite`/`<testsuites`), and reports that contain
+   failures or errors are prioritized over passing ones.
+4. Reads are capped before parsing: at most 50 files, each truncated to 1 MiB.
+
+Explicit `--junit` files and auto-discovered files are merged (de-duplicated by
+normalized workdir-relative path), so a multi-report setup still produces one
+result record. The CLI prints a one-line summary to stderr and includes the
+parsed summary in the run's `finish` payload; a collection failure is a
+non-fatal warning and does not fail the run.
+
+## The parsed summary
+
+Parsing produces a `TestResultSummary` (`internal/cli/results_parse.go`): the
+format (`junit`), the source file list, aggregate counters (suites, tests,
+failures, errors, skipped, total time in seconds), and a `failed` list of
+individual failing cases. Each `TestFailure` records its suite, test name,
+optional classname/file, the first failure or error message, the JUnit `type`,
+and a `kind` of `failure` or `error`. The parser accepts both `<testsuites>` and
+a bare `<testsuite>` root and derives counts from case elements when suite
+attributes are absent.
+
+## Coordinator storage limits
+
+The coordinator bounds the stored record so a huge report cannot blow past
+Durable Object storage or slow the run and lease detail pages
+(`worker/src/fleet.ts`, `boundedTestResults`):
+
+- aggregate counters are kept verbatim;
+- the failed-case list is capped at 100 entries;
+- the file list is capped at 50 paths;
+- every stored string (file, suite, test, message, type) is truncated to
+  4096 bytes.
+
+## Reading results back
 
 ```sh
 crabbox history --lease cbx_...
 crabbox results run_...
 ```
 
-Current format support:
+[`crabbox results`](../commands/results.md) reads the stored summary from the
+recorded run, so a coordinator must be configured. It is distinct from
+[`crabbox logs`](history-logs.md): `results` is the structured pass/fail
+summary, `logs` is the retained command output.
+
+## Supported formats
 
 - JUnit XML.
 
-Future useful additions:
+Possible future additions tracked for this feature: Vitest JSON, Go
+`test2json`, flaky-test history across runs, and changed-file correlation.
 
-- Vitest JSON;
-- Go `test2json`;
-- flaky history across runs;
-- changed-file correlation.
+## Source
+
+- CLI command and output: `internal/cli/results.go`
+- JUnit parsing: `internal/cli/results_parse.go`
+- Remote collection, auto discovery, freshness marker: `internal/cli/results_remote.go`
+- Run integration: `internal/cli/run.go`
+- Config keys and env overrides: `internal/cli/config.go`
+- Summary types: `internal/cli/coordinator.go`, `worker/src/types.ts`
+- Storage bounds: `worker/src/fleet.ts`

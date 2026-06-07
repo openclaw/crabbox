@@ -3,30 +3,41 @@
 Read when:
 
 - choosing `provider: islo`;
-- configuring Islo sandbox image, size, snapshot, or gateway profile;
+- configuring the Islo sandbox image, sizing, snapshot, or gateway profile;
 - changing `internal/providers/islo`.
 
-Islo is a delegated run provider. Crabbox uses the Islo SDK for sandbox
-lifecycle and a streaming exec endpoint for command output. Islo owns sandbox
-state and command transport; Crabbox owns local config, repo claims, sync
-manifests and guardrails, slugs, timing summaries, and normalized list/status
-rendering.
+Islo is a delegated-run provider. Crabbox uses the Islo Go SDK for sandbox
+lifecycle (create, list, status) and calls the HTTP API directly for delete (an
+empty-body `DELETE`), archive upload, shares, and command output — reading a
+Server-Sent Events stream from the `POST /sandboxes/{name}/exec/stream` endpoint. Islo
+owns sandbox state and command transport; Crabbox owns local config, repo
+claims, sync manifests and guardrails, slugs, timing summaries, and normalized
+`list`/`status` rendering. There is no Crabbox SSH lease and no broker
+coordinator — the CLI talks to Islo directly.
 
-## When To Use
+## When to use
 
-Use Islo when the remote sandbox should be owned by Islo and command execution
-should happen through Islo's API. Use AWS, Hetzner, Static SSH, or Daytona when
-you need Crabbox SSH access.
+Use Islo when the remote Linux sandbox should be owned by Islo and commands run
+through Islo's API. Choose AWS, Hetzner, Static SSH, or Daytona instead when you
+need Crabbox-managed SSH access to the box.
+
+Islo is Linux-only. Desktop, browser, code, Actions hydration, and SSH-based run
+options are not available.
 
 ## Commands
 
 ```sh
-crabbox warmup --provider islo --islo-image docker.io/library/ubuntu:24.04
+crabbox warmup --provider islo --islo-image docker.io/library/ubuntu:26.04
 crabbox run --provider islo -- pnpm test
-crabbox run --provider islo --id blue-lobster --shell 'pnpm install && pnpm test'
-crabbox status --provider islo --id blue-lobster
-crabbox stop --provider islo blue-lobster
+crabbox run --provider islo --id swift-crab --shell 'pnpm install && pnpm test'
+crabbox status --provider islo --id swift-crab --wait
+crabbox stop --provider islo swift-crab
+crabbox list --provider islo --json
 ```
+
+`warmup` keeps the sandbox until an explicit `stop`. The lease ID, slug, or
+Crabbox-created sandbox name printed by `warmup`/`run` can be passed to later
+commands via `--id`.
 
 ## Auth
 
@@ -34,8 +45,11 @@ crabbox stop --provider islo blue-lobster
 export ISLO_API_KEY=ak_...
 ```
 
-`ISLO_BASE_URL` or `islo.baseUrl` can override the default
-`https://api.islo.dev`.
+`CRABBOX_ISLO_API_KEY` is also accepted and takes precedence over
+`ISLO_API_KEY`. Do not pass the key as a command-line argument.
+
+`ISLO_BASE_URL` (or `CRABBOX_ISLO_BASE_URL`, or `islo.baseUrl`) overrides the
+default API base URL `https://api.islo.dev`.
 
 ## Config
 
@@ -44,7 +58,7 @@ provider: islo
 target: linux
 islo:
   baseUrl: https://api.islo.dev
-  image: docker.io/library/ubuntu:24.04
+  image: docker.io/library/ubuntu:26.04
   workdir: crabbox
   gatewayProfile: ""
   snapshotName: ""
@@ -53,7 +67,7 @@ islo:
   diskGB: 20
 ```
 
-Provider flags:
+Provider flags (each overrides the matching `islo.*` config key):
 
 ```text
 --islo-base-url
@@ -66,64 +80,67 @@ Provider flags:
 --islo-disk-gb
 ```
 
-`--islo-workdir` / `islo.workdir` is interpreted as a relative directory below
-`/workspace`. Crabbox rejects absolute paths and `..` escapes before workspace
-preparation and sync.
+Every key also reads a `CRABBOX_ISLO_*` environment variable, which takes
+precedence over the config file: `CRABBOX_ISLO_BASE_URL`, `CRABBOX_ISLO_IMAGE`,
+`CRABBOX_ISLO_WORKDIR`, `CRABBOX_ISLO_GATEWAY_PROFILE`,
+`CRABBOX_ISLO_SNAPSHOT_NAME`, `CRABBOX_ISLO_VCPUS`, `CRABBOX_ISLO_MEMORY_MB`,
+and `CRABBOX_ISLO_DISK_GB`.
+
+The default image follows the selected `--os` (default `ubuntu:26.04` resolves
+to `docker.io/library/ubuntu:26.04`). `vcpus`, `memoryMB`, and `diskGB` are only
+sent to Islo when greater than zero; otherwise the sandbox uses Islo's defaults.
+
+### Workdir resolution
+
+`--islo-workdir` / `islo.workdir` is a relative directory below `/workspace`
+(default `crabbox`, so the workspace is `/workspace/crabbox`). Absolute paths and
+`..` escapes are rejected before workspace preparation and sync.
 
 ## Lifecycle
 
-1. Create or resolve a Crabbox-owned Islo sandbox.
-2. Store a local lease ID with the `isb_` prefix and a friendly slug.
-3. Validate the Islo workdir, build the Crabbox sync manifest, and upload a
-   gzipped archive into `/workspace/<islo.workdir>`.
-4. Execute commands through Islo's streaming exec endpoint in that workdir.
-5. Require an exit event before treating a stream as successful.
-6. Delete the sandbox on release unless kept.
+1. Create or resolve a Crabbox-owned Islo sandbox. New sandboxes are named
+   `crabbox-<repo>-<hex>`; the local lease ID is the sandbox name prefixed with
+   `isb_`, paired with a friendly slug.
+2. Write a local repo claim binding the lease to the current checkout.
+3. Validate the workdir, build the Crabbox sync manifest, and upload a gzipped
+   archive into `/workspace/<workdir>` through Islo's files-archive API. If that
+   upload fails, Crabbox falls back to a base64 chunked upload over the exec
+   endpoint.
+4. Execute the command through Islo's streaming exec endpoint in that workdir.
+5. Require an `exit` event before treating a stream as successful.
+6. Delete the sandbox on release unless the lease is kept.
 
 ## Capabilities
 
-- SSH: not driven by Crabbox. Islo sandboxes are reachable from the host with
-  the OS `ssh` client via the `<sandbox-name>.islo` host alias after a one-time
-  `islo ssh --setup` (see [SSH access](#ssh-access) below). Crabbox itself does
-  not yet route `crabbox ssh`, sync, or run through that path.
-- Crabbox sync: yes, archive sync through the Islo API or chunked exec fallback.
-- Provider sync: no separate Islo CLI sync.
-- Desktop/browser/code: no Crabbox VNC/code surface.
+- SSH: not driven by Crabbox. `crabbox ssh`, rsync, and SSH-based run options are
+  not available for `provider: islo`.
+- Crabbox sync: yes, archive sync through the Islo files-archive API, with a
+  base64 exec-upload fallback.
+- URL bridge: yes. Exposed ports become public HTTPS shares through Islo's
+  `/sandboxes/{name}/shares` API, surfaced by `--expose` and the pond bridge
+  plane. Share creation is idempotent per port.
+- Desktop / browser / code: no.
 - Actions hydration: no.
-- Coordinator: no.
-
-## SSH access
-
-Islo provisions a per-sandbox SSH endpoint and configures `~/.ssh/config` for
-you. The sandbox name (the Crabbox-created `crabbox-...` name, or any other
-slug shown by `islo ls`) is the SSH host:
-
-```sh
-islo ssh --setup            # one-time, idempotent; edits ~/.ssh/config
-ssh <sandbox-name>.islo     # interactive shell on the sandbox
-ssh <sandbox-name>.islo pnpm test       # one-shot remote command
-```
-
-This is useful for ad-hoc inspection of a Crabbox-created Islo sandbox while
-`provider: islo` still uses the streaming exec endpoint for `crabbox run`.
-Certificates are minted automatically and cached by the Islo CLI; no key files
-need to be plumbed into Crabbox.
+- Coordinator (broker): no — always direct from the CLI.
 
 ## Gotchas
 
-- `--sync-only` and `--checksum` are rejected because the `provider: islo`
-  backend does not yet expose a Crabbox-managed SSH/rsync target, even though
-  the sandbox is independently reachable with `ssh <sandbox-name>.islo`.
-- `--script`, `--script-stdin`, `--fresh-pr`, local stdout/stderr captures,
-  `--capture-on-fail`, and `--download` are rejected because Islo owns command
-  transport in `provider: islo` mode.
-- `--keep-on-failure` keeps a newly created failed sandbox until explicit stop
-  or provider-side expiry.
-- Large-sync guardrails still apply. Use `--force-sync-large` when a large Islo
-  archive sync is intentional.
-- `--shell` passes the raw shell string to the remote shell path.
-- IDs can be Crabbox slugs, `isb_...` lease IDs, or Crabbox-created sandbox
-  names. Non-Crabbox Islo sandboxes are rejected.
+- `--sync-only` and `--checksum` are rejected because the backend does not expose
+  a Crabbox-managed SSH/rsync target.
+- `--full-resync`, `--force-sync-large`, `--script`, `--script-stdin`,
+  `--fresh-pr`, `--env-helper`, local stdout/stderr captures,
+  `--capture-on-fail`, `--download`, `--artifact-glob`, `--emit-proof`, and
+  `--stop-after` are rejected because Islo owns sync and command transport in
+  delegated-run mode.
+- `--keep-on-failure` keeps a newly created failed sandbox until an explicit
+  `stop` or provider-side expiry.
+- Large-sync guardrails still apply. Because `--force-sync-large` is rejected,
+  trim the checkout (more `.gitignore`/sync excludes) when a sync trips the
+  large-archive guardrail.
+- `--shell` passes the raw shell string to `bash -lc` in the workdir.
+- `--id` accepts a Crabbox slug, an `isb_<name>` lease ID, or a Crabbox-created
+  sandbox name (one starting with `crabbox-`). Sandboxes not created by Crabbox
+  are rejected.
 
 Related docs:
 

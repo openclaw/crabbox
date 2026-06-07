@@ -57,6 +57,8 @@ type CoordinatorLease struct {
 	Share                *CoordinatorShare     `json:"share,omitempty"`
 	Profile              string                `json:"profile"`
 	Class                string                `json:"class"`
+	Pond                 string                `json:"pond,omitempty"`
+	ExposedPorts         []string              `json:"exposedPorts,omitempty"`
 	ServerType           string                `json:"serverType"`
 	RequestedServerType  string                `json:"requestedServerType,omitempty"`
 	HostID               string                `json:"hostId,omitempty"`
@@ -400,6 +402,43 @@ type CoordinatorExternalRunnerSyncResponse struct {
 	Stale   []CoordinatorExternalRunner `json:"stale"`
 }
 
+type CoordinatorReadyPoolEntry struct {
+	Key          string `json:"key"`
+	LeaseID      string `json:"leaseID"`
+	State        string `json:"state"`
+	Owner        string `json:"owner"`
+	Org          string `json:"org"`
+	Repo         string `json:"repo,omitempty"`
+	Ref          string `json:"ref,omitempty"`
+	Commit       string `json:"commit,omitempty"`
+	Fingerprint  string `json:"fingerprint,omitempty"`
+	Image        string `json:"image,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	TargetOS     string `json:"target,omitempty"`
+	WindowsMode  string `json:"windowsMode,omitempty"`
+	Class        string `json:"class,omitempty"`
+	ServerType   string `json:"serverType,omitempty"`
+	SSHHost      string `json:"sshHost,omitempty"`
+	SSHUser      string `json:"sshUser,omitempty"`
+	SSHPort      string `json:"sshPort,omitempty"`
+	WorkRoot     string `json:"workRoot,omitempty"`
+	BorrowedBy   string `json:"borrowedBy,omitempty"`
+	BorrowedAt   string `json:"borrowedAt,omitempty"`
+	BorrowToken  string `json:"borrowToken,omitempty"`
+	LastReadyAt  string `json:"lastReadyAt,omitempty"`
+	LastUsedAt   string `json:"lastUsedAt,omitempty"`
+	LastResult   string `json:"lastResult,omitempty"`
+	FailureCount int    `json:"failureCount,omitempty"`
+	CreatedAt    string `json:"createdAt"`
+	UpdatedAt    string `json:"updatedAt"`
+	ExpiresAt    string `json:"expiresAt"`
+}
+
+type CoordinatorReadyPoolResponse struct {
+	Entry CoordinatorReadyPoolEntry `json:"entry"`
+	Lease CoordinatorLease          `json:"lease"`
+}
+
 type CoordinatorRunEventResponse struct {
 	Event CoordinatorRunEvent `json:"event"`
 }
@@ -519,12 +558,14 @@ type CoordinatorUsageGroup struct {
 }
 
 type CoordinatorCostLimits struct {
-	MaxActiveLeases         int     `json:"maxActiveLeases"`
-	MaxActiveLeasesPerOwner int     `json:"maxActiveLeasesPerOwner"`
-	MaxActiveLeasesPerOrg   int     `json:"maxActiveLeasesPerOrg"`
-	MaxMonthlyUSD           float64 `json:"maxMonthlyUSD"`
-	MaxMonthlyUSDPerOwner   float64 `json:"maxMonthlyUSDPerOwner"`
-	MaxMonthlyUSDPerOrg     float64 `json:"maxMonthlyUSDPerOrg"`
+	MaxActiveLeases                 int      `json:"maxActiveLeases"`
+	MaxActiveLeasesPerOwner         int      `json:"maxActiveLeasesPerOwner"`
+	MaxActiveLeasesPerOrg           int      `json:"maxActiveLeasesPerOrg"`
+	CapacityAdminOwners             []string `json:"capacityAdminOwners,omitempty"`
+	MaxActiveLeasesPerCapacityAdmin int      `json:"maxActiveLeasesPerCapacityAdmin,omitempty"`
+	MaxMonthlyUSD                   float64  `json:"maxMonthlyUSD"`
+	MaxMonthlyUSDPerOwner           float64  `json:"maxMonthlyUSDPerOwner"`
+	MaxMonthlyUSDPerOrg             float64  `json:"maxMonthlyUSDPerOrg"`
 }
 
 type CoordinatorID string
@@ -612,6 +653,7 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"profile":                         cfg.Profile,
 		"provider":                        cfg.Provider,
 		"target":                          cfg.TargetOS,
+		"architecture":                    effectiveArchitectureForConfig(cfg),
 		"windowsMode":                     cfg.WindowsMode,
 		"desktop":                         cfg.Desktop,
 		"desktopEnv":                      normalizedDesktopEnv(cfg.DesktopEnv),
@@ -650,6 +692,8 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"idleTimeoutSeconds":              int(cfg.IdleTimeout.Seconds()),
 		"keep":                            keep,
 		"sshPublicKey":                    publicKey,
+		"pond":                            cfg.Pond,
+		"exposedPorts":                    cfg.ExposedPorts,
 	}
 	if len(capacity) > 0 {
 		req["capacity"] = capacity
@@ -836,6 +880,50 @@ func (c *CoordinatorClient) Leases(ctx context.Context, state string, limit int)
 	}
 	err := c.do(ctx, http.MethodGet, path, nil, &res)
 	return res.Leases, err
+}
+
+func (c *CoordinatorClient) ReadyPools(ctx context.Context) ([]CoordinatorReadyPoolEntry, error) {
+	var res struct {
+		Pools []CoordinatorReadyPoolEntry `json:"pools"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/ready-pools", nil, &res)
+	return res.Pools, err
+}
+
+func (c *CoordinatorClient) ReadyPool(ctx context.Context, key string) ([]CoordinatorReadyPoolEntry, error) {
+	var res struct {
+		Pool []CoordinatorReadyPoolEntry `json:"pool"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/ready-pools/"+url.PathEscape(key), nil, &res)
+	return res.Pool, err
+}
+
+func (c *CoordinatorClient) RegisterReadyPoolLease(ctx context.Context, key string, input map[string]any) (CoordinatorReadyPoolResponse, error) {
+	var res CoordinatorReadyPoolResponse
+	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/register", input, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) BorrowReadyPoolLease(ctx context.Context, key string, input map[string]any) (CoordinatorReadyPoolResponse, error) {
+	var res CoordinatorReadyPoolResponse
+	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/borrow", input, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) ReturnReadyPoolLease(ctx context.Context, key, leaseID, result, reason, borrowToken string) (CoordinatorReadyPoolResponse, error) {
+	var res CoordinatorReadyPoolResponse
+	body := map[string]any{"leaseID": leaseID}
+	if result != "" {
+		body["result"] = result
+	}
+	if reason != "" {
+		body["reason"] = reason
+	}
+	if borrowToken != "" {
+		body["borrowToken"] = borrowToken
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/return", body, &res)
+	return res, err
 }
 
 func (c *CoordinatorClient) Usage(ctx context.Context, scope, owner, org, month string) (CoordinatorUsageResponse, error) {
@@ -1440,7 +1528,7 @@ func (c *CoordinatorClient) do(ctx context.Context, method, path string, body an
 		}
 	}
 	err = c.doHTTP(ctx, method, path, data, body != nil, out)
-	if err == nil || !isCoordinatorTransportError(err) {
+	if err == nil || !shouldUseCoordinatorCurlFallback(method, body != nil, err) {
 		return err
 	}
 	if curlErr := c.doCurl(ctx, method, path, data, body != nil, out); curlErr == nil {
@@ -1531,7 +1619,7 @@ func (c *CoordinatorClient) curlConfig(method, path string, data []byte, hasBody
 	curlConfigValue(&cfg, "url", c.BaseURL+path)
 	curlConfigValue(&cfg, "request", method)
 	curlConfigValue(&cfg, "connect-timeout", "10")
-	curlConfigValue(&cfg, "max-time", "300")
+	curlConfigValue(&cfg, "max-time", strconv.Itoa(int(coordinatorHTTPTimeout/time.Second)))
 	curlConfigFlag(&cfg, "silent")
 	curlConfigFlag(&cfg, "show-error")
 	curlConfigFlag(&cfg, "location")
@@ -1621,8 +1709,23 @@ func isCoordinatorTransportError(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	var urlErr *url.Error
 	return errors.As(err, &urlErr)
+}
+
+func shouldUseCoordinatorCurlFallback(method string, hasBody bool, err error) bool {
+	if hasBody {
+		return false
+	}
+	switch method {
+	case http.MethodGet, http.MethodHead:
+		return isCoordinatorTransportError(err)
+	default:
+		return false
+	}
 }
 
 func localCoordinatorOwner() string {
@@ -1663,6 +1766,12 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 			"last_touched_at":   lease.LastTouchedAt,
 			"idle_timeout_secs": fmt.Sprint(lease.IdleTimeoutSeconds),
 		},
+	}
+	if pond := normalizePondName(lease.Pond); pond != "" {
+		server.Labels[pondLabelKey] = pond
+	}
+	if exposedPorts := renderExposedPortsLabel(lease.ExposedPorts); exposedPorts != "" {
+		server.Labels[pondExposedPortsLabelKey] = exposedPorts
 	}
 	if lease.Tailscale != nil {
 		applyTailscaleMetadataToServer(&server, *lease.Tailscale)

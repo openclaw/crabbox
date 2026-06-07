@@ -3,87 +3,153 @@
 Read when:
 
 - choosing `provider: wandb` (alias `weights-and-biases`);
-- pointing crabbox at a [Weights & Biases Serverless Sandbox](https://docs.wandb.ai/sandboxes);
+- pointing Crabbox at a [Weights & Biases Sandbox](https://docs.wandb.ai/sandboxes);
 - changing `internal/providers/wandb`.
 
-## What it is
+W&B Sandboxes are managed, isolated Linux containers backed by
+[CoreWeave Sandboxes](https://docs.coreweave.com/products/sandboxes). The
+provider talks to the CoreWeave gateway over gRPC
+(`coreweave.sandbox.v1beta2`) using the W&B API key as the
+`x-wandb-api-key` metadata header, so a caller who has already run
+`wandb login` does not need a new provider-specific credential.
 
-**[wandb.ai](https://wandb.ai/) is the brand the AI/ML research community
-already trusts.** Used in production by OpenAI, Anthropic, Meta AI, Mistral
-(launch customer of Sandboxes), and every major academic ML lab — for
-experiment tracking, sweep orchestration, model registry, and now compute.
+This is a delegated-run provider: Crabbox does not provision an SSH box and
+does not go through the broker coordinator. The CLI starts a sandbox, runs a
+single command in it via the unary `Exec` RPC, and stops it again. There is
+no workspace sync, so `crabbox run` requires `--no-sync`.
 
-W&B Serverless Sandboxes are the Weights & Biases-branded surface on
-[CoreWeave Sandboxes](https://docs.coreweave.com/products/sandboxes), since
-CoreWeave's [2025 acquisition](https://www.coreweave.com/news/coreweave-completes-acquisition-of-weights-biases)
-of W&B. Sandboxes run as managed, isolated containers on CoreWeave's GPU
-fleet via CKS (CoreWeave Kubernetes Service). The Python `wandb.sandbox`
-package is a thin auth-wrapper over CoreWeave's open-source
-[`cwsandbox`](https://github.com/coreweave/cwsandbox-client) gRPC client;
-the protos are published at [buf.build/coreweave/sandbox](https://buf.build/coreweave/sandbox).
-
-> **Experimental.** Upstream API is `coreweave.sandbox.v1beta2` and
-> Serverless Sandboxes is in public preview. Expect field renames and
-> breaking changes until upstream cuts `v1`. Pin via `buf.lock` in
+> **Experimental.** The upstream API is `coreweave.sandbox.v1beta2` and W&B
+> Sandboxes are in preview. Expect field renames and breaking changes until
+> upstream cuts a stable `v1`; the protos are pinned via `buf.lock` in
 > `internal/providers/wandb/proto/`.
-
-## Why this provider exists
-
-Every other crabbox provider asks the user for a new provider-specific
-credential. **This one doesn't.** Every AI/ML practitioner who has ever run
-`wandb login` — researchers, sweep operators, eval harness builders — already
-has the W&B API key CoreWeave Sandboxes accepts as the `x-wandb-api-key` gRPC
-metadata header. The key is sitting in `~/.netrc` from a year ago; the caller
-must also set `WANDB_ENTITY_NAME` so the sandbox gateway knows the W&B entity
-scope.
-
-That is the wedge. **`crabbox run --provider wandb -- python train.py`
-warms a CoreWeave GPU sandbox using the W&B identity the researcher
-already has** — zero new accounts, no provider-specific token, zero billing
-setup. For the AI research persona, this is the lowest-friction provider in
-the tree.
-
-## Lifecycle
-
-`crabbox run`:
-
-1. With `--id <sandbox-id>` → `Exec` against the existing sandbox.
-2. Otherwise: `Start` (with idle keep-alive command), poll `Get` with
-   200 ms → 1.5× → 2 s backoff until `SANDBOX_STATUS_RUNNING`, then `Exec`
-   the user command, then `Stop` unless `--keep`.
-
-`Status` calls `Get` and renders the proto status enum (`SANDBOX_STATUS_RUNNING`,
-`…_COMPLETED`, `…_FAILED`, …). `List` paginates `List` filtered by the
-`crabbox` tag. `Stop` issues a graceful `Stop` (10 s default). `Warmup` is
-rejected — sandboxes are acquired per run, there is no separate provisioning
-phase.
 
 ## When to use
 
-- You already use W&B and want zero-credential onboarding.
-- You want to run on CoreWeave GPUs without provisioning your own runner.
-- You want sandbox activity to show up under the same auth identity as your
-  W&B runs.
+Use W&B Sandboxes when you already have W&B credentials and want a managed
+Linux sandbox without provisioning your own runner or creating a new account.
+Pick a provider with SSH (AWS, Hetzner, Static SSH, Daytona) instead when you
+need direct shell access or a persistent dev box — this provider is exec-only
+by design.
 
-Pick a different provider for SSH sessions or persistent dev boxes — this
-provider is exec-only by design.
+W&B Sandboxes are Linux-only. Desktop, browser, code, SSH, Actions hydration,
+and the broker coordinator are not available.
 
 ## Commands
 
 ```sh
 crabbox run    --provider wandb --no-sync -- python eval.py
-crabbox run    --provider wandb --no-sync --id $WANDB_SANDBOX_ID -- pnpm test
-crabbox status --provider wandb --id $WANDB_SANDBOX_ID
-crabbox stop   --provider wandb $WANDB_SANDBOX_ID
+crabbox run    --provider wandb --no-sync --id swift-crab -- pnpm test
+crabbox status --provider wandb --id swift-crab
+crabbox stop   --provider wandb swift-crab
 crabbox list   --provider wandb
 crabbox doctor --provider wandb
 ```
 
-## Live Smoke
+Without `--id`, `run` acquires a new sandbox, runs the command, and stops the
+sandbox afterwards. With `--id <sandbox-id>` it execs into the existing
+sandbox and leaves it running. `warmup` is rejected — sandboxes are acquired
+per run, with no separate provisioning phase.
 
-Keep the API key in `CRABBOX_WANDB_API_KEY` or `WANDB_API_KEY`; do not pass it
-on the command line. Set `WANDB_ENTITY_NAME` to the W&B entity/team that owns
-the sandbox runs.
+## Auth
+
+Resolve the W&B API key in this precedence (first match wins):
+
+1. `CRABBOX_WANDB_API_KEY` — explicit override, CI-friendly.
+2. `wandb.apiKey` — config-file value.
+3. `WANDB_API_KEY` — canonical env var written by `wandb login`.
+4. `~/.netrc` — the `machine api.wandb.ai` (or `.com`) entry written by
+   `wandb login`.
+
+`WANDB_ENTITY_NAME` is also required; it is sent as the `x-entity-id` gRPC
+header. `WANDB_PROJECT` is optional and, when set, is sent as
+`x-project-name`.
+
+```sh
+export CRABBOX_WANDB_API_KEY=wandb_v1_...
+export WANDB_ENTITY_NAME=my-team
+```
+
+The API key is never exposed as a CLI flag; do not pass secrets on the command
+line.
+
+## Config
+
+```yaml
+provider: wandb
+target: linux
+wandb:
+  defaultImage: ubuntu:24.04
+  maxLifetimeSeconds: 1800   # 30 min; W&B reclaims the sandbox at this limit
+```
+
+Defaults applied when unset: `defaultImage` is `ubuntu:24.04` and
+`maxLifetimeSeconds` is `1800`.
+
+Provider flags (each overrides the matching `wandb.*` config key):
+
+```text
+--wandb-image           # container image used when acquiring a new sandbox
+--wandb-max-lifetime    # maximum sandbox lifetime in seconds
+```
+
+Environment overrides:
+
+- `defaultImage` also reads `CRABBOX_WANDB_DEFAULT_IMAGE`, then
+  `WANDB_DEFAULT_IMAGE`.
+- `maxLifetimeSeconds` also reads `CRABBOX_WANDB_MAX_LIFETIME_SECONDS`, then
+  `WANDB_MAX_LIFETIME_SECONDS`.
+- `CWSANDBOX_BASE_URL` overrides the gateway endpoint (default
+  `api.cwsandbox.com:443`); the `https://` / `http://` scheme is stripped if
+  present.
+
+## Lifecycle
+
+`crabbox run`:
+
+1. With `--id <sandbox-id>`, `Exec` against the existing sandbox and leave it
+   running.
+2. Otherwise, `Start` a sandbox with an idle keep-alive command, poll until it
+   reaches `RUNNING` (200 ms backoff, ×1.5, capped at 2 s), `Exec` the
+   command, then `Stop` it unless `--keep` is set.
+
+`status` renders the sandbox state (for example `running`; a `COMPLETED`
+sandbox is reported as `stopped` so `status --wait` treats it as terminal).
+`list` paginates sandboxes tagged `crabbox`. `stop` issues a graceful stop
+(15 s timeout). Acquire and exec apply a startup timeout that is the lesser of
+five minutes and the sandbox lifetime.
+
+## Capabilities
+
+- SSH: no — gRPC `Exec` only.
+- Crabbox sync: no — `--no-sync` is required.
+- Desktop / browser / code: no.
+- Actions hydration: no.
+- Coordinator (broker): no — always direct from the CLI.
+
+## Gotchas
+
+- `maxLifetimeSeconds` is the main billing-safety limit. Crabbox defaults to
+  30 minutes; raise it with `--wandb-max-lifetime` only when needed. A lease
+  TTL shorter than the configured lifetime narrows it further.
+- `Exec` is the unary RPC, so command output is buffered server-side and
+  returned at completion rather than streamed; there is no interactive PTY.
+- Environment variables are applied at `Start` time only. When you target an
+  existing sandbox with `--id`, env vars cannot be forwarded onto it (the
+  `Exec` RPC has no env field), so an `--id` run with `--allow-env` is
+  rejected.
+- `--reclaim`, `--shell`, `--sync-only`, `--checksum`, `--force-sync-large`,
+  and `--full-resync` are rejected: W&B owns the sandbox lifecycle and there is
+  no Crabbox SSH/rsync target.
+- `--keep` retains a newly acquired sandbox after the run; `--keep-on-failure`
+  retains it only when the command fails, so you can debug.
+- gRPC failures map to sysexits-aligned exit codes:
+  `77` (unauthenticated / permission denied), `4` (not found), `124`
+  (deadline exceeded), `69` (unavailable / resource exhausted).
+
+## Live smoke
+
+Run a live smoke when changing W&B lifecycle, exec, status, or auth code. Keep
+the API key in the environment; never pass it as an argument.
 
 ```sh
 export CRABBOX_WANDB_API_KEY=wandb_v1_...
@@ -94,82 +160,11 @@ bin/crabbox doctor --provider wandb
 bin/crabbox run --provider wandb --no-sync --wandb-max-lifetime 60 -- echo crabbox-wandb-ok
 ```
 
-Or the standalone script (no coordinator required):
-
-```sh
-CRABBOX_LIVE=1 CRABBOX_WANDB_API_KEY=wandb_v1_... WANDB_ENTITY_NAME=my-team scripts/wandb-smoke.sh
-```
-
-Or the Go smoke test (Acquire → Exec → Stop):
+Or the Go smoke test (acquire, exec, stop):
 
 ```sh
 go test -tags smoke -run TestSmokeVersionAndExec -v ./internal/providers/wandb/
 ```
-
-## Auth
-
-Credential precedence (first match wins):
-
-1. `CRABBOX_WANDB_API_KEY` — explicit override, CI-friendly.
-2. `cfg.wandb.apiKey` — config file value.
-3. `WANDB_API_KEY` — canonical env var written by `wandb login`.
-4. `~/.netrc` — machine `api.wandb.ai` entry, written by `wandb login`.
-
-Required W&B scoping:
-
-- `WANDB_ENTITY_NAME` → sent as `x-entity-id`.
-
-Optional W&B scoping:
-
-- `WANDB_PROJECT`     → sent as `x-project-name`.
-
-The API key is never exposed as a CLI flag — secrets do not belong on
-`argv`.
-
-## Config
-
-```yaml
-provider: wandb
-target: linux
-wandb:
-  defaultImage: ubuntu:24.04
-  maxLifetimeSeconds: 1800   # 30 min — billing safety, server enforces
-```
-
-Provider flags:
-
-```text
---wandb-image
---wandb-max-lifetime
-```
-
-Endpoint override (matches the upstream cwsandbox SDK behaviour):
-
-```text
-CWSANDBOX_BASE_URL    # default: https://api.cwsandbox.com
-```
-
-## Capabilities
-
-- SSH: no (gRPC `Exec` only; PTY via `StreamExec` deferred to v2).
-- crabbox sync: no. `--no-sync` is required.
-- Desktop / browser / code: no.
-- Coordinator: no.
-
-## Gotchas
-
-- `max_lifetime_seconds` is the **single most important billing-safety knob**.
-  crabbox defaults to 30 min; raise via `--wandb-max-lifetime` only when you
-  know you need it.
-- `Exec` is the unary RPC, not the bidi `StreamExec`. Output is buffered
-  server-side and returned at completion. Streaming PTY is a follow-up.
-- `AddFile` (unary file upload) caps near 100 MB. For large source trees use
-  the upstream's `S3Mount` at `Start` — supported by the proto but not yet
-  exposed as a crabbox flag.
-- `--reclaim`, `--shell`, `--class`, `--type` are rejected — CoreWeave owns
-  sandbox lifecycle and shape.
-- gRPC errors are surfaced as `*wandbAPIError` with sysexits.h-aligned exit
-  codes (`77 EX_NOPERM`, `69 EX_UNAVAILABLE`, `124` GNU timeout).
 
 ## Regenerating the proto stubs
 
@@ -179,11 +174,12 @@ buf dep update          # refresh buf.lock
 buf generate            # regenerate ../gen/
 ```
 
-Bump the BSR commit pin in `buf.lock` only via a dedicated PR titled
-`proto: bump cwsandbox to <sha>` so the diff is auditable.
+Bump the BSR commit pin in `buf.lock` only via a dedicated, auditable PR.
 
 Related docs:
 
 - [Provider backends](../provider-backends.md)
-- [W&B Serverless Sandboxes docs](https://docs.wandb.ai/sandboxes)
+- [W&B Sandboxes docs](https://docs.wandb.ai/sandboxes)
 - [CoreWeave Sandboxes docs](https://docs.coreweave.com/products/sandboxes)
+</content>
+</invoke>

@@ -33,6 +33,12 @@ describe("gcp provider", () => {
     expect(new GCPClient(env, undefined, "request-project").project).toBe("request-project");
   });
 
+  it("rejects invalid configured GCP SSH CIDRs", () => {
+    expect(() => new GCPClient({ ...env, CRABBOX_GCP_SSH_CIDRS: "::::/128" })).toThrow(
+      "CRABBOX_GCP_SSH_CIDRS entries must be valid",
+    );
+  });
+
   it("lists Crabbox machines across aggregated GCP zones", async () => {
     const client = new GCPClient(env);
     (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {

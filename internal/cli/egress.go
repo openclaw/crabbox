@@ -184,7 +184,7 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	if err := validateEgressListen(*listen); err != nil {
 		return err
 	}
-	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{})
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 	if err != nil {
 		return err
 	}
@@ -289,7 +289,7 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, cfgErr := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{})
+	cfg, cfgErr := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 	if cfgErr == nil {
 		if _, target, leaseID, resolveErr := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false); resolveErr == nil {
 			_ = runSSHQuiet(ctx, target, "pkill -f '[c]rabbox-egress-client egress client' >/dev/null 2>&1 || true")

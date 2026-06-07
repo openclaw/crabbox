@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCoordinatorListFallsBackToUserLeasesWhenAdminTokenUnauthorized(t *testing.T) {
@@ -160,6 +161,63 @@ func TestCoordinatorAcquireSendsTailscaleHostnameTemplate(t *testing.T) {
 	}
 }
 
+func TestCoordinatorCreateLeaseTimesOutWithDiagnostics(t *testing.T) {
+	oldTimeout := coordinatorCreateLeaseTimeoutForConfig
+	oldInterval := coordinatorCreateLeaseProgressInterval
+	coordinatorCreateLeaseTimeoutForConfig = func(Config) time.Duration { return 80 * time.Millisecond }
+	coordinatorCreateLeaseProgressInterval = 10 * time.Millisecond
+	defer func() {
+		coordinatorCreateLeaseTimeoutForConfig = oldTimeout
+		coordinatorCreateLeaseProgressInterval = oldInterval
+	}()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases" {
+			http.NotFound(w, r)
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_timeout"}})
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "azure"
+	cfg.TargetOS = targetLinux
+	cfg.ServerType = "Standard_D32ads_v6"
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = backend.createCoordinatorLeaseWithProgress(ctx, cfg, "ssh-rsa test", false, "cbx_timeout", "crimson-lobster")
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	for _, want := range []string{
+		"timed out waiting for coordinator lease",
+		"provider=azure",
+		"target=linux",
+		"type=Standard_D32ads_v6",
+		"slug=crimson-lobster",
+		"lease=cbx_timeout",
+		"next_action=check coordinator/cloud logs and retry",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%q missing %q", err, want)
+		}
+	}
+	if !strings.Contains(stderr.String(), "waiting for coordinator lease provider=azure slug=crimson-lobster") {
+		t.Fatalf("missing progress output: %q", stderr.String())
+	}
+}
+
 func TestLeaseToServerTargetPreservesCoordinatorWorkRoot(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"
@@ -196,6 +254,27 @@ func TestLeaseToServerTargetPreservesCoordinatorWorkRoot(t *testing.T) {
 	applyResolvedServerConfig(&cfg, server)
 	if cfg.WorkRoot != defaultMacOSWorkRoot {
 		t.Fatalf("workRoot=%q want %q", cfg.WorkRoot, defaultMacOSWorkRoot)
+	}
+}
+
+func TestLeaseToServerTargetPreservesPondExposedPorts(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+
+	server, _, _ := leaseToServerTarget(CoordinatorLease{
+		ID:           "cbx_123",
+		Slug:         "web",
+		Provider:     "aws",
+		Pond:         "alpha",
+		ExposedPorts: []string{"8080", "9090"},
+		Host:         "203.0.113.10",
+	}, cfg)
+
+	if server.Labels[pondLabelKey] != "alpha" {
+		t.Fatalf("pond label=%q want alpha", server.Labels[pondLabelKey])
+	}
+	if server.Labels[pondExposedPortsLabelKey] != "8080-9090" {
+		t.Fatalf("exposed ports label=%q want 8080-9090", server.Labels[pondExposedPortsLabelKey])
 	}
 }
 

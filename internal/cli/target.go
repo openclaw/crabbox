@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"flag"
 	"path"
 	"strings"
 )
@@ -126,6 +127,26 @@ func validateProviderTarget(cfg Config) error {
 	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
 		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
+	if cfg.Architecture == ArchitectureARM64 {
+		if cfg.TargetOS != targetLinux {
+			return exit(2, "architecture=arm64 currently supports target=linux only")
+		}
+		if provider.Name() != "azure" && provider.Name() != "aws" {
+			return exit(2, "architecture=arm64 currently supports provider=azure or provider=aws")
+		}
+	}
+	if cfg.TargetOS == targetLinux && strings.TrimSpace(cfg.ServerType) != "" {
+		switch provider.Name() {
+		case "aws":
+			if err := validateArchitectureServerType("AWS instance type", cfg, awsInstanceTypeIsARM64(cfg.ServerType)); err != nil {
+				return err
+			}
+		case "azure":
+			if err := validateArchitectureServerType("Azure VM size", cfg, azureVMSizeIsARM64(cfg.ServerType)); err != nil {
+				return err
+			}
+		}
+	}
 	if provider.Name() == "aws" &&
 		cfg.TargetOS == targetWindows &&
 		cfg.WindowsMode == windowsModeWSL2 &&
@@ -141,6 +162,17 @@ func validateProviderTarget(cfg Config) error {
 			return exit(2, "provider=aws target=macos requires --market on-demand; EC2 Mac instances are not Spot")
 		}
 		return nil
+	}
+	return nil
+}
+
+func validateArchitectureServerType(kind string, cfg Config, serverTypeARM64 bool) error {
+	architecture := effectiveArchitectureForConfig(cfg)
+	if architecture == ArchitectureARM64 && !serverTypeARM64 {
+		return exit(2, "architecture=arm64 requires an ARM64 %s; %s is not ARM64", kind, cfg.ServerType)
+	}
+	if cfg.architectureExplicit && cfg.Architecture == ArchitectureAMD64 && serverTypeARM64 {
+		return exit(2, "architecture=amd64 requires an amd64 %s; %s is ARM64", kind, cfg.ServerType)
 	}
 	return nil
 }
@@ -193,6 +225,64 @@ func isStaticProvider(provider string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// staticLeaseIDPrefix is the prefix `staticLease` stamps on lease IDs it
+// synthesises from a static SSH host.
+const staticLeaseIDPrefix = "static_"
+
+// autoRouteStaticLease infers `--provider ssh` from a `static_<slug>` lease ID
+// and restores the original static host from the local claim when the caller
+// did not already pass --static-host.
+func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
+	suffix, ok := strings.CutPrefix(strings.TrimSpace(id), staticLeaseIDPrefix)
+	if !ok || suffix == "" {
+		return nil
+	}
+	if !flagWasSet(fs, "provider") {
+		cfg.Provider = staticProvider
+	}
+	if !isStaticProvider(cfg.Provider) {
+		return nil
+	}
+	claim, ok, err := staticLeaseClaim(id)
+	if err != nil {
+		return err
+	}
+	if ok {
+		restoreStaticClaimTarget(cfg, fs, claim)
+	}
+	normalizeTargetConfig(cfg)
+	return validateTargetConfig(*cfg)
+}
+
+func staticLeaseClaim(id string) (leaseClaim, bool, error) {
+	claim, ok, err := resolveLeaseClaim(id)
+	if err != nil || !ok || !isStaticProvider(claim.Provider) {
+		return leaseClaim{}, false, err
+	}
+	return claim, true, nil
+}
+
+func restoreStaticClaimTarget(cfg *Config, fs *flag.FlagSet, claim leaseClaim) {
+	if !flagWasSet(fs, "static-host") && strings.TrimSpace(claim.StaticHost) != "" {
+		cfg.Static.Host = strings.TrimSpace(claim.StaticHost)
+	}
+	if !flagWasSet(fs, "static-user") && strings.TrimSpace(claim.StaticUser) != "" {
+		cfg.Static.User = strings.TrimSpace(claim.StaticUser)
+	}
+	if !flagWasSet(fs, "static-port") && strings.TrimSpace(claim.StaticPort) != "" {
+		cfg.Static.Port = strings.TrimSpace(claim.StaticPort)
+	}
+	if !flagWasSet(fs, "static-work-root") && strings.TrimSpace(claim.StaticWorkRoot) != "" {
+		cfg.Static.WorkRoot = strings.TrimSpace(claim.StaticWorkRoot)
+	}
+	if !flagWasSet(fs, "target") && strings.TrimSpace(claim.TargetOS) != "" {
+		cfg.TargetOS = strings.TrimSpace(claim.TargetOS)
+	}
+	if !flagWasSet(fs, "windows-mode") && strings.TrimSpace(claim.WindowsMode) != "" {
+		cfg.WindowsMode = strings.TrimSpace(claim.WindowsMode)
 	}
 }
 

@@ -1,26 +1,28 @@
 # How Crabbox Works
 
-Read when:
-
-- you are new to Crabbox;
-- you want the end-to-end mental model;
-- you need to know which component owns a behavior before changing code.
+Read this when you are new to Crabbox, want the end-to-end mental model, or
+need to know which component owns a behavior before you change code.
 
 ## TL;DR
 
-Crabbox is an agent workspace control plane built around remote testboxes and
-sandboxes. Two sides cooperate:
+Crabbox is a remote software testing and execution control plane built around
+short-lived testboxes and sandboxes. Two sides cooperate:
 
-- The **CLI** keeps the developer story simple: lease a machine, sync the dirty checkout, run a command, stream output, clean up.
-- The **broker** (a Cloudflare Worker plus one Durable Object) keeps shared capacity safe: it owns provider credentials, lease state, expiry, cleanup, usage, and cost guardrails.
+- The **CLI** (`cmd/crabbox`, `internal/cli`) keeps the developer story simple:
+  lease a box, sync your dirty checkout, run a command, stream output, clean up.
+- The **broker** — a Cloudflare Worker plus a single Fleet Durable Object
+  (`worker/src`) — keeps shared capacity safe: it holds provider credentials and
+  owns lease state, expiry, cleanup, usage accounting, and cost guardrails.
 
-Cloud machines are vanilla Ubuntu runners that hold no broker secrets. They are leaves: provisioned, used, deleted. Higher-level workspace evidence such as run records, logs, telemetry, screenshots, and artifacts stays with Crabbox.
+The leased machines are vanilla runners that hold no broker secrets. They are
+leaves: provisioned, used, deleted. Durable evidence — run records, logs,
+telemetry, screenshots, artifacts — stays with Crabbox, not on the box.
 
-## The Pieces
+## The pieces
 
 ```text
 ┌──────────────────────┐   HTTPS / JSON   ┌──────────────────────┐
-│ your laptop          │ ───────────────► │ Cloudflare Worker    │
+│ your machine         │ ───────────────► │ Cloudflare Worker    │
 │ crabbox CLI          │  bearer + owner  │ Fleet Durable Object │
 │ repo checkout        │                  │ provider creds       │
 │ per-lease SSH key    │                  │ lease + usage state  │
@@ -28,46 +30,70 @@ Cloud machines are vanilla Ubuntu runners that hold no broker secrets. They are 
            │                                         │ provider API
            │                                         ▼
            │                          ┌──────────────────────────────┐
-           │ SSH (primary + fallback) │ Hetzner Cloud / AWS EC2      │
-           └────────── rsync ────────►│ Ubuntu runner                │
-                                      │ /work/crabbox/<lease>/<repo> │
+           │ SSH (primary + fallback) │ Hetzner / AWS / Azure / GCP   │
+           └────────── rsync ────────►│ runner host                   │
+                                      │ /work/crabbox/<lease>/<repo>  │
                                       └──────────────────────────────┘
 ```
 
-The CLI talks to the broker over HTTPS, then talks **directly** to the leased runner over SSH and rsync. The runner never calls the broker; that path stays one-way.
+The CLI talks to the broker over HTTPS, then talks **directly** to the leased
+runner over SSH and rsync. The runner never calls the broker; that path stays
+one-way. The broker manages leases, not the data plane — your files, commands,
+and output never traverse the Worker.
 
-For long-lived coordinator interactions, newer CLIs also open one authenticated
-WebSocket to the Fleet Durable Object at `/v1/control`. That socket carries
-run-event attach streams and lease heartbeats so high-latency links do less
-request polling. HTTPS endpoints remain canonical storage and compatibility
-fallbacks, so older CLIs and older brokers still work.
+For long-lived interactions the CLI may also open one authenticated WebSocket to
+the Fleet Durable Object at `/v1/control`. That socket carries run-event attach
+streams and lease heartbeats, so high-latency links do less request polling. The
+HTTPS endpoints remain canonical storage and a compatibility fallback, so older
+CLIs and brokers still interoperate.
 
 ## Ownership
 
-| Layer       | Owns                                                                                                                                                            |
-|:------------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **CLI** | config + flags; per-lease SSH key; SSH readiness; Git seeding + rsync; sync fingerprints + sanity checks; remote command + streaming; control WebSocket when available; HTTP fallback; release |
-| **Broker** | request auth + identity; serialized lease state; provider credentials; machine create/delete; lease expiry; pool/status/inspect; usage; spend caps |
-| **Provider** | raw compute: Hetzner Cloud servers or AWS EC2 instances |
-| **Runner** | nothing durable for brokered boxes: Linux prepared by cloud-init with SSH, Git, rsync, curl, jq, `/work/crabbox`; AWS Windows/WSL2/macOS targets have provider-specific bootstrap; static targets are existing SSH hosts; project runtimes come from repo-owned setup |
+| Layer | Owns |
+|:------|:-----|
+| **CLI** | config + flags; per-lease SSH key; SSH readiness; Git seeding + rsync; sync fingerprints and sanity checks; remote command + streaming; the control WebSocket when available, with HTTP fallback; release |
+| **Broker** | request auth + identity; serialized lease state; provider credentials; machine create/delete; lease expiry; pool/status/inspect; run records, logs, events, telemetry; usage; spend caps |
+| **Provider** | raw compute: the per-provider adapter creates and deletes hosts (Hetzner servers, AWS EC2 instances, Azure VMs, GCP instances, and others) |
+| **Runner** | nothing durable on a brokered box: Linux is prepared with SSH, Git, rsync, and a work root; non-Linux targets get provider-specific bootstrap; static targets are existing SSH hosts; project runtimes come from repo-owned setup |
 
 ## What `crabbox run` does
 
-A single `crabbox run` command walks through five phases:
+A single `crabbox run` walks through five phases.
 
-**1. Plan.** Load config (flags -> env -> repo -> user -> defaults). Mint a temporary lease ID and per-lease SSH key.
+**1. Plan.** Load config in precedence order (flags → env → repo config → user
+config → defaults). Mint a temporary lease ID (`cbx_` + 12 hex chars) and a
+per-lease SSH key under `<user-config>/crabbox/testboxes/<lease>/id_ed25519`
+(RSA for AWS/Azure Windows targets).
 
-**2. Lease.** `POST /v1/leases` to the broker with class, provider, TTL, idle timeout, slug, bootstrap options, and the SSH public key. Worker authenticates, then forwards to the Fleet Durable Object. Durable Object enforces active-lease and monthly spend caps, asks the provider for live pricing, reserves the worst-case TTL cost, provisions the machine, and returns host / SSH user / port / work root / expiry / lease ID / slug. CLI re-keys its local key dir if the broker assigned a different final lease ID.
+**2. Lease.** `POST /v1/leases` to the broker with class, provider, target, TTL,
+idle timeout, slug, requested capabilities, and the SSH public key. The Worker
+authenticates and forwards to the Fleet Durable Object. The Durable Object
+enforces active-lease and monthly spend caps, asks the provider for live
+pricing, reserves the worst-case TTL cost, provisions the machine (with region
+and market fallback), and returns the host, SSH user/port, work root, expiry,
+final lease ID, and slug. If the broker assigned a different final lease ID, the
+CLI re-keys its local key directory to match.
 
-**3. Sync.** Wait for SSH and the target readiness probe. Seed remote Git when possible. Compare local and remote sync fingerprints; skip rsync if nothing changed. Otherwise rsync the dirty checkout into `/work/crabbox/<lease>/<repo>` for POSIX targets, or send a manifest tar archive for native Windows, then run sanity checks and hydrate the configured base ref when supported.
+**3. Sync.** Wait for SSH and the readiness probe. Seed remote Git from the
+configured origin and base ref when possible. Compare local and remote sync
+fingerprints and skip rsync if nothing changed. Otherwise rsync the dirty
+checkout into the work root (`/work/crabbox/<lease>/<repo>` on Linux) for POSIX
+targets, or send a manifest tar archive for native Windows. Then run sanity
+checks and hydrate the configured base ref where supported.
 
-**4. Run.** Start heartbeats in the background. Run the requested command over SSH and stream stdout/stderr.
+**4. Run.** Start heartbeats in the background. Run the requested command over
+SSH and stream stdout/stderr back. When brokered, mirror progress to the broker
+as a run record with phased events.
 
-**5. Release.** Release the lease unless `--keep` is set. The broker terminates the runner and frees provider-side state. If bootstrap never reached SSH readiness on a fresh non-kept lease, `crabbox run` retries once with a new machine; it never duplicates commands on kept or explicitly reused leases.
+**5. Release.** Release the lease unless `--keep` is set. The broker deletes the
+runner and frees provider-side state. If bootstrap never reached SSH readiness on
+a fresh, non-kept lease, `crabbox run` replaces the machine once and retries; it
+never duplicates the command on kept or explicitly reused leases.
 
-## Warm Machines And Reuse
+## Warm boxes and reuse
 
-`crabbox warmup` follows the same lease creation path, then keeps the box ready for later use. Reuse is explicit:
+`crabbox warmup` follows the same lease-creation path, then keeps the box ready
+for later use instead of running a command. Reuse is explicit, by slug or ID:
 
 ```sh
 crabbox warmup --profile project-check
@@ -76,9 +102,14 @@ crabbox ssh --id blue-lobster
 crabbox stop blue-lobster
 ```
 
-While the CLI is using a lease it sends heartbeats; the Durable Object updates `lastTouchedAt` and recomputes idle expiry. If a warm lease goes untouched for the idle timeout, the alarm releases it.
+Every lease gets a friendly slug (an `<adjective>-<noun>` pair derived from the
+lease ID, e.g. `blue-lobster` or `swift-crab`) alongside its canonical `cbx_…`
+ID; most commands accept either via `--id`. While the CLI is using a lease it
+sends heartbeats, and the Durable Object updates `lastTouchedAt` and recomputes
+idle expiry. If a warm lease goes untouched past its idle timeout, the alarm
+releases it.
 
-## Brokered vs Direct Provider
+## Brokered vs. direct provider
 
 The **brokered path** is normal operation:
 
@@ -87,24 +118,35 @@ CLI -> Cloudflare Worker -> Durable Object -> provider API
 CLI -> runner over SSH/rsync
 ```
 
-Use it when maintainers or agents share infrastructure. Provider secrets stay off local machines; cleanup, usage, and cost control all flow through the broker.
+Use it when people or agents share infrastructure. Provider secrets stay off
+local machines; cleanup, usage, and cost control all flow through the broker.
+Brokering is available for the managed cloud providers (`hetzner`, `aws`,
+`azure`, `gcp`) and is engaged only when a broker URL is configured
+(`CRABBOX_COORDINATOR` or `config set-broker`).
 
-The **direct path** is a debug fallback:
+The **direct path** is the fallback when no broker is configured:
 
 ```text
 CLI -> provider API
 CLI -> runner over SSH/rsync
 ```
 
-Direct mode needs local provider credentials (AWS SDK chain or `HCLOUD_TOKEN`). It has no central usage history and no brokered heartbeat. It is handy for diagnosing the broker itself, not for day-to-day work.
+Direct mode needs local provider credentials (for example the AWS SDK chain or a
+Hetzner token). It keeps no central usage history and no brokered heartbeat. It
+is useful for diagnosing the broker itself, and it is the only mode for the many
+direct-only adapters (sandbox runners, static SSH hosts, local containers, and
+the rest of the provider set).
 
-Static SSH targets use `provider: ssh` and bypass the broker even when a broker
-URL exists in config. macOS and Windows WSL2 use the POSIX rsync contract;
-native Windows uses PowerShell plus tar archive sync.
+Static SSH targets (`provider: ssh`) point at a preexisting machine and bypass
+the broker even when a broker URL exists in config. macOS and Windows WSL2
+targets use the POSIX rsync contract; native Windows uses a PowerShell plus tar
+archive sync.
 
-## Auth And Identity
+## Auth and identity
 
-The broker accepts signed GitHub login tokens for normal users and shared bearer tokens for trusted automation. Fallback routes can also sit behind Cloudflare Access before the Worker sees the request. Bearer-token CLI requests send:
+The broker accepts signed GitHub login tokens for normal users and shared bearer
+tokens for trusted automation; routes may additionally sit behind Cloudflare
+Access. Bearer-token CLI requests send:
 
 ```text
 Authorization: Bearer <token>
@@ -112,22 +154,28 @@ X-Crabbox-Owner: <email>
 X-Crabbox-Org: <org>
 ```
 
-Owner is resolved from the signed GitHub token for `crabbox login` users. In shared-token mode, owner comes from `CRABBOX_OWNER`, the Git email env, or `git config user.email`; `CRABBOX_ORG` sets the org. Raw Cloudflare Access identity headers are ignored; only a verified Access JWT email can become the bearer-token owner.
+For `crabbox login` users, the owner is resolved from the signed GitHub token. In
+shared-token mode the owner comes from `CRABBOX_OWNER`, the Git email env, or
+`git config user.email`, and `CRABBOX_ORG` sets the org. Raw Cloudflare Access
+identity headers are ignored; only a verified Access JWT email can become the
+bearer-token owner. See [Security](security.md) for the full trust model.
 
-## Sync Model
+## Sync model
 
-Crabbox sync is intentionally local-first: it does not require a clean checkout. The sync layer:
+Crabbox sync is intentionally local-first and does not require a clean checkout.
+The sync layer:
 
-- seeds remote Git from the configured origin/base ref when possible;
-- overlays local dirty files with rsync (with a checksum mode for reliability);
+- seeds remote Git from the configured origin and base ref when possible;
+- overlays local dirty files with rsync (with an optional checksum mode);
 - skips no-op syncs via fingerprints;
 - excludes heavy directories from repo config;
-- guards against suspicious mass tracked deletions;
+- guards against suspicious mass deletions of tracked files;
 - hydrates base-ref history for changed-test workflows.
 
-Same loop for agents and humans: edit locally, run remotely.
+The same loop serves agents and humans: edit locally, run remotely. Use
+`crabbox sync-plan` for a read-only preview of the manifest before a run.
 
-## Cost And Usage
+## Cost and usage
 
 The broker tracks two cost numbers per lease:
 
@@ -139,35 +187,40 @@ reservedUSD    worst-case TTL cost reserved before provisioning
 Hourly price source order:
 
 ```text
-1. CRABBOX_COST_RATES_JSON  explicit override
-2. provider live pricing    EC2 Spot history / Hetzner server-type prices
-3. built-in fallback rates  last-resort defaults
+1. CRABBOX_COST_RATES_JSON   explicit override
+2. provider live pricing     e.g. EC2 spot history, Hetzner server-type prices
+3. built-in fallback rates   last-resort defaults
 ```
 
-Hetzner pricing converts via `CRABBOX_EUR_TO_USD`. `crabbox usage` queries `GET /v1/usage` and groups by user, org, provider, and server type.
+Hetzner pricing converts to USD via `CRABBOX_EUR_TO_USD`. Cost caps are set with
+the `CRABBOX_MAX_*` env vars (active-lease counts and monthly USD, globally and
+per owner/org); exceeding them fails creation with HTTP 429. `crabbox usage`
+queries `GET /v1/usage` and groups spend by user, org, provider, and server
+type.
 
-## Failure And Cleanup
+## Failure and cleanup
 
-Crabbox assumes failures are normal: CLIs crash, SSH disconnects, cloud-init fails, provider calls partially succeed, Cloudflare retries, machines outlive local processes.
-
-The design response:
+Crabbox assumes failure is normal: CLIs crash, SSH disconnects, cloud-init
+fails, provider calls partially succeed, Cloudflare retries, and machines
+outlive local processes. The design response:
 
 - one Durable Object serializes fleet decisions;
 - lease creation is idempotent where practical;
-- provider resources carry Crabbox tags/labels;
+- provider resources carry Crabbox tags or labels;
 - release is safe to call repeatedly;
-- stale leases expire by alarm;
+- stale leases expire via a Durable Object alarm (and a cron sweep);
 - direct cleanup is conservative;
 - brokered cleanup is broker-owned.
 
-`crabbox cleanup` refuses to sweep provider resources when a coordinator is configured, because brokered cleanup belongs to the Durable Object.
+`crabbox cleanup` refuses to sweep provider resources when a coordinator is
+configured, because brokered cleanup belongs to the Durable Object.
 
-## Where To Go Next
+## Where to go next
 
 - [Architecture](architecture.md): component model, API, state, and failure model.
 - [Orchestrator](orchestrator.md): broker responsibilities, lifecycle, cleanup, cost, and usage.
 - [CLI](cli.md): command surface, config, output, and exit codes.
 - [Features](features/README.md): one page per feature area.
 - [Commands](commands/README.md): one page per command.
-- [Infrastructure](infrastructure.md): Cloudflare, DNS, Hetzner, and AWS setup.
+- [Infrastructure](infrastructure.md): Cloudflare, DNS, and provider setup.
 - [Security](security.md): auth, secrets, SSH, cleanup, and trust boundaries.

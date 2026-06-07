@@ -1,162 +1,202 @@
 # Browser Portal
 
-Read when:
+Read this when:
 
-- using the web UI to inspect leases or runs;
-- changing portal pages or page-level routes;
-- deciding whether a feature should land in the CLI, the API, or the portal.
+- using the web UI to inspect leases, runs, or external runners;
+- changing portal pages, page-level routes, or bridge proxies;
+- deciding whether a feature belongs in the CLI, the `/v1` API, or the portal.
 
-The browser portal is a small server-rendered web UI hosted by the same
-Cloudflare Worker that backs the Crabbox API. It is not a separate frontend
-or single-page app: every page is HTML rendered by the Worker, with light
-client-side JavaScript only for filtering, sorting, and clipboard copy.
+The browser portal is a server-rendered web UI hosted by the same Cloudflare
+Worker that backs the Crabbox API. It is not a separate frontend or
+single-page app: every page is HTML rendered by the Worker, with light
+client-side JavaScript only for filtering, sorting, clipboard copy, theme
+switching, and the live VNC viewer. Because the portal and the API serve the
+same Fleet Durable Object state, the two surfaces cannot drift apart.
 
-## URL Map
+## URL map
+
+The portal lives under `/portal`. Authenticated pages return HTML; a few
+endpoints are bridges or raw data feeds rather than pages.
 
 ```text
-GET  /portal
-GET  /portal/leases/{id-or-slug}
-GET  /portal/leases/{id-or-slug}/share
-POST /portal/leases/{id-or-slug}/share
-POST /portal/leases/{id-or-slug}/release
-GET  /portal/leases/{id-or-slug}/vnc
-GET  /portal/leases/{id-or-slug}/code/
-GET  /portal/runs/{run-id}
-GET  /portal/runs/{run-id}/logs
-GET  /portal/runs/{run-id}/events
-GET  /portal/runners/{provider}/{runner-id}
+GET  /portal                                    lease / runner / host index
+GET  /portal/leases/{id-or-slug}                lease detail
+GET  /portal/leases/{id-or-slug}/share          share page
+POST /portal/leases/{id-or-slug}/share          add/remove user, set org, clear
+POST /portal/leases/{id-or-slug}/release        stop the lease
+GET  /portal/leases/{id-or-slug}/vnc            WebVNC viewer page
+GET  /portal/leases/{id-or-slug}/code/...       code-server bridge (HTTP/WS proxy)
+GET  /portal/runs/{run-id}                       run detail
+GET  /portal/runs/{run-id}/logs                  retained log (text/plain)
+GET  /portal/runs/{run-id}/events                events (JSON)
+GET  /portal/runners/{provider}/{runner-id}      external runner detail
+GET  /portal/hosts/{provider}/{host-id}          dedicated host detail
+POST /portal/hosts/{provider}/{host-id}/vnc      enable VNC on the host's lease
+GET  /portal/login                               GitHub OAuth login redirect
+GET  /portal/logout                              clear the session cookie
 ```
 
-Portal authentication uses a browser session cookie minted after a successful
-GitHub login through the same OAuth flow as `crabbox login`. The cookie
-carries owner/org claims; the Worker scopes every page to that identity. Raw
-Cloudflare Access headers are not trusted - only a verified Access JWT email
-can become the portal owner.
+The WebVNC viewer page also drives a small set of bridge sub-routes that the
+browser calls directly: `/vnc/viewer` (the noVNC WebSocket), `/vnc/status`,
+`/vnc/control` (take control), and `/vnc/theme` (sync the desktop theme).
+Static assets, including the noVNC client at `/portal/assets/novnc/rfb.js`,
+are served from the Worker's asset binding.
 
-## Lease Index `/portal`
+A `GET /` redirects to `/portal` (while `GET /v1/health` returns a JSON
+health payload). When
+`CRABBOX_PUBLIC_URL` is set and a portal request arrives on a non-canonical
+origin (for example a `*.workers.dev` preview URL), the Worker redirects to
+the canonical host first.
 
-The index renders a searchable, paginated, sortable lease grid. Columns
-include compact provider/target badges, icon-only access capabilities (SSH,
-VNC, code, browser), relative time cells, dense rows, and sticky column
-headers. Filters at the top of the page select active, ended, provider,
-target, or all.
+## Authentication and scope
+
+Portal pages use a browser session cookie (`crabbox_session`) minted after a
+successful GitHub login through the same OAuth flow as `crabbox login`. The
+Worker converts the cookie to a `Bearer` token internally; an unauthenticated
+GET request to a portal page is redirected to `/portal/login` with a
+`returnTo` parameter. The session carries owner/org claims, and the Worker
+scopes every page to that identity.
+
+```text
+session  authenticated GitHub user (owner / org embedded in the token)
+admin    sessions whose token carries the admin role
+```
+
+- Lease index, lease detail, run detail: a user sees their own leases and
+  runs, plus leases shared directly with them or with their org.
+- Admin sessions additionally see non-owned (system) leases and external
+  runners.
+- VNC and code bridges open only when the lease is active, carries the
+  matching capability (`desktop` for VNC, `code` for the editor), and the
+  session can access the lease.
+
+Tokens for `/v1/...` API calls are separate from the portal cookie. The
+portal never echoes a bearer token or a bridge ticket back to the browser.
+Raw Cloudflare Access headers are not trusted on their own: only a verified
+Access JWT email can become the portal owner.
+
+## Index `/portal`
+
+The index renders a searchable, paginated, sortable grid that mixes three row
+kinds:
+
+- **Leases** — Crabbox-managed boxes with compact provider/target badges,
+  state pills, the lease class, icon-only access capabilities (SSH, VNC,
+  code, browser), and relative time cells.
+- **External runners** — visibility-only rows for Blacksmith Testboxes synced
+  from `crabbox list` output. They render as muted, disabled rows with status
+  badges, inferred GitHub Actions run/workflow links, `stuck` markers for
+  long-queued or long-running Actions, a copyable local stop command, and
+  `stale` markers when a previously visible runner no longer appears in the
+  next sync.
+- **Dedicated hosts** — when AWS credentials and a region are configured, EC2
+  Mac Dedicated Hosts appear as capacity rows, each linking to a host detail
+  page and (when attached) its active macOS lease.
 
 Default view rules:
 
-- Defaults to active leases when any are active.
-- Falls back to all visible leases when the active list is empty.
-- Normal browser sessions see their own leases plus leases shared directly
-  with them or with their org.
-- Admin sessions also see non-owned runner leases. `mine` and `system`
-  filters distinguish personal leases from external runners (Blacksmith
-  Testboxes synced from CLI list output) so external rows do not leak to
-  normal users.
+- Defaults to the active filter when any leases, runners, or hosts are active.
+- Falls back to showing everything when nothing is active.
+- Admin sessions get extra `mine` / `system` filters so personal leases stay
+  distinct from external runners and other owners' leases.
 
-External runner rows render in the same grid as muted, disabled rows. They
-include status/provider filters, inferred GitHub Actions run/workflow links,
-status badges, `stuck` markers for long-queued or long-running Actions
-owners, a copyable local stop command, and stale markers when the next
-runner sync no longer sees a previously visible runner. Clicking an
-external runner opens `/portal/runners/{provider}/{runner-id}`, a
-visibility-only detail page.
+Clicking a lease opens its detail page; clicking an external runner or
+dedicated host opens the matching visibility-only detail page.
 
-## Lease Detail `/portal/leases/{id-or-slug}`
+## Lease detail `/portal/leases/{id-or-slug}`
 
 The lease detail page shows:
 
 - compact provider/target badges and the lease state pill;
-- bridge status for the WebVNC, code-server, and mediated egress bridges,
-  including host/client connection state for an active egress session;
-- the latest Linux telemetry sample as gauges, with sparklines when multiple
-  samples are present;
-- stale-telemetry, high-load, high-memory, and high-disk status pills when
-  thresholds are exceeded;
+- a status card with host, SSH endpoint, work root, expiry, and the latest
+  Linux telemetry sample as gauges (with sparklines and high-load /
+  high-memory / high-disk / stale-telemetry pills when thresholds are
+  exceeded);
+- a bridge panel reporting connection state for the WebVNC, code-server, and
+  mediated egress bridges, including host/client state for an active egress
+  session;
 - an access panel with copy-to-clipboard commands for `crabbox ssh`,
-  `crabbox run`, `crabbox webvnc`, `crabbox code`, and (when an egress
-  session is active) `crabbox egress status` / `crabbox egress stop`;
+  `crabbox run`, the WebVNC bridge, the code bridge, and (when egress is
+  active) `crabbox egress status` / `crabbox egress stop`;
 - a viewport-fitted "recent runs" grid with state filters;
-- a stop action when the lease is releasable.
+- a stop button when the session can manage the lease.
 
-Owners and users with `manage` access see a share control in the top-right
-lease header. The share page can add individual users, set org-wide access, or
-clear sharing. `use` shares can open visible lease pages and portal bridges;
-`manage` shares can also change sharing and stop the lease.
+Owners and users with `manage` access see a share control in the lease
+header. The share page (`/share`) adds or removes individual users, sets
+org-wide access (`use`, `manage`, or off), or clears sharing entirely; it can
+also render embedded (`?embed=1`) inside the VNC viewer's share dialog. A
+`use` share can open visible lease pages and portal bridges; a `manage` share
+can also change sharing and stop the lease.
 
-`/portal/leases/{id-or-slug}/vnc` and `/portal/leases/{id-or-slug}/code/`
-are bridges, not portal pages. They proxy WebSocket and HTTP traffic to the
-matching capability on the lease so a user does not need an SSH tunnel to
-open the desktop or editor. The mediated egress bridge has its own
-ticketed websocket route under `/v1/leases/{id-or-slug}/egress/...` rather
-than a portal path, because egress is operator-driven and never opens an
-HTML view. See [Interactive desktop and VNC](interactive-desktop-vnc.md),
+`/portal/leases/{id-or-slug}/vnc` and `/portal/leases/{id-or-slug}/code/` are
+not ordinary pages. VNC opens a noVNC viewer that talks to the lease's desktop
+over a WebSocket; the code path proxies code-server HTTP and WebSocket traffic
+straight through. Both remove the need for a local SSH tunnel to reach the
+desktop or editor. Mediated egress has no portal page — it is operator-driven
+and never opens an HTML view, so it lives under the ticketed
+`/v1/leases/{id-or-slug}/egress/...` routes instead. See
+[Interactive desktop and VNC](interactive-desktop-vnc.md),
 [code command](../commands/code.md), and [Mediated egress](egress.md).
 
-All bridge tickets travel as `Authorization: Bearer ...` headers on the
-agent websocket upgrade, with a `?ticket=` query string fallback for older
-CLIs. The portal never echoes ticket values back to the browser.
+Bridge tickets travel as `Authorization: Bearer ...` headers on the agent
+WebSocket upgrade, with a `?ticket=` query-string fallback for older CLIs.
 
-## Run Detail `/portal/runs/{run-id}`
+## Run detail `/portal/runs/{run-id}`
 
-Run detail mirrors the `/v1/runs/...` resources but uses the browser session
-cookie, so users can inspect logs and events without copying a bearer token
-into the browser. The page renders:
+Run detail mirrors the `/v1/runs/...` resources but reads through the browser
+session cookie, so a run can be inspected without pasting a bearer token into
+the browser. The page renders:
 
-- the command, owner, lease, provider metadata, and exit status;
-- a JUnit summary when the run attached results;
-- a searchable, paginated event table with event-type filters;
+- the command, owner, lease, provider/target metadata, exit status, phase,
+  duration, and log size;
+- the blocked stage and retry hint when the run was classified;
+- a JUnit summary and a failure list when the run attached results;
 - a copyable retained log tail;
+- a searchable, paginated event table with event-type filters;
 - bounded load, memory, and disk trend lines for longer Linux runs that
   attached mid-run telemetry samples.
 
-`/portal/runs/{run-id}/logs` returns the retained log as plain text.
-`/portal/runs/{run-id}/events` returns the events as JSON. Both stay raw on
-purpose so they are easy to copy or pipe.
+`/portal/runs/{run-id}/logs` returns the retained log as `text/plain`, and
+`/portal/runs/{run-id}/events` returns events as JSON (with `after` and
+`limit` query parameters). Both stay raw on purpose so they are easy to copy
+or pipe.
 
-## Runner Detail `/portal/runners/{provider}/{runner-id}`
+## External runner detail `/portal/runners/{provider}/{runner-id}`
 
-External runner detail is visibility-only. It shows:
+External runner detail is visibility-only. It shows owner/org, inferred GitHub
+Actions ownership (repo, workflow, run id, status), lifecycle timestamps, a
+copyable local stop command, and a boundary note explaining that Crabbox does
+not own the machine. These runners do not heartbeat through Crabbox and do not
+participate in Crabbox lease expiry, cleanup, telemetry, or cost accounting.
+The page exists so operators have a single URL to share when an external
+runner looks stuck.
 
-- owner/org;
-- inferred GitHub Actions ownership (workflow, run id, status);
-- lifecycle timestamps;
-- boundary notes that explain Crabbox cannot stop or release the runner;
-- a copyable local stop command for the operator's terminal.
+## Dedicated host detail `/portal/hosts/{provider}/{host-id}`
 
-External runners do not heartbeat through Crabbox and do not participate in
-Crabbox lease expiry, cleanup, or cost accounting. The detail page exists so
-operators have a single URL to share when an external runner is stuck.
+When the broker can list EC2 Mac Dedicated Hosts, each host has a detail page
+showing its state, region, zone, instance type, and placement. If an active
+macOS lease is attached, the page surfaces that lease's SSH endpoint and
+access bridges and links to its VNC/code views; the VNC POST route can enable
+VNC on the attached lease. With no active lease, the page offers a copyable
+host-pinned `crabbox run` command so the host can still be used as macOS
+capacity.
 
-## Authentication And Scope
-
-```text
-session  authenticated GitHub user (owner/org embedded)
-admin    portal sessions with the admin token role
-```
-
-Per-route scope rules:
-
-- Lease index, lease detail, run detail: own leases/runs only.
-- Admin filters and external runner visibility: admin sessions only.
-- VNC and code bridges: only when the lease has the matching capability and
-  the session owns the lease.
-
-Tokens for `/v1/...` API calls are separate. The portal never echoes a
-bearer token back to the browser.
-
-## Why Server-Rendered
+## Why server-rendered
 
 The portal is intentionally a thin server-rendered surface, not a SPA:
 
-- the Worker already owns lease and run data; rendering at the edge avoids a
-  separate API/UI deployment;
-- pages stay copy-pasteable - URLs deep-link to a specific lease or run;
+- the Worker already owns lease and run data, so rendering at the edge avoids
+  a separate API/UI deployment;
+- pages stay copy-pasteable, and URLs deep-link to a specific lease, run,
+  runner, or host;
 - there is no build step, no JavaScript framework, and no offline session
   management to maintain;
 - the portal cannot drift from the API because both serve the same Durable
   Object state.
 
 Adding a portal feature usually means a new render in `worker/src/portal.ts`,
-a new endpoint in `worker/src/fleet.ts`, and a doc update here.
+a new route in `worker/src/fleet.ts` (often a matching `/v1` endpoint), and a
+doc update here.
 
 Related docs:
 

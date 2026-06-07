@@ -19,9 +19,10 @@ func (Provider) Aliases() []string {
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:        "islo",
+		Family:      "islo",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    nil,
+		Features:    core.FeatureSet{core.FeatureURLBridge, core.FeatureRunSession},
 		Coordinator: core.CoordinatorNever,
 	}
 }

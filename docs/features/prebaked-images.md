@@ -1,87 +1,148 @@
 # Prebaked Runner Images
 
-Read when:
+A prebaked image is a provider machine image (AWS AMI, Hetzner snapshot, and so
+on) with the stable parts of a runner already installed, so a lease boots ready
+instead of installing tooling on every warmup.
 
-- creating or promoting Crabbox runner images;
-- speeding up desktop/browser QA leases;
-- deciding whether state belongs in a provider image, a warm lease, or a repo cache.
+Read this when you are:
 
-Prebaked images store machine capabilities, not scenario state.
+- deciding what belongs in a provider image versus a warm lease or a repo cache;
+- speeding up `crabbox warmup` and `crabbox run` for desktop or browser QA;
+- planning to bake or promote a Crabbox runner image.
 
-## Where Images Live
+The guiding rule: **prebaked images store machine capabilities, not scenario
+state.** Tools, browsers, and OS patches go in the image. Checkouts, dependency
+caches, credentials, and login state stay out.
 
-Provider-owned image storage is the source of truth:
+For the exact AWS bake, smoke, promotion, rollback, and cleanup commands, follow
+the [Image bake runbook](image-bake-runbook.md). This page covers the underlying
+model.
 
-- AWS: AMIs plus their EBS snapshots live in the AWS account. `crabbox image
-  promote` stores the selected AMI id in coordinator metadata so future AWS
-  brokered leases can use it.
-- Hetzner: snapshots/images live in the Hetzner project. Crabbox can already
-  boot a configured image through `image`/`CRABBOX_HETZNER_IMAGE`, but
-  create/promote lifecycle commands are not implemented for Hetzner yet.
-- Blacksmith Testbox: images are owned by Blacksmith/GitHub runner
-  infrastructure, not Crabbox.
+## Where images live
 
-Do not store image bytes in git, release artifacts, or coordinator durable
-state. The coordinator should hold only the current provider image identifier,
-promotion metadata, and enough tags to explain provenance.
+Provider-owned image storage is always the source of truth for image bytes:
 
-## Bake Into Images
+- **AWS** — AMIs and their backing EBS snapshots live in the AWS account.
+  `crabbox image create` builds a candidate AMI from a lease, and
+  `crabbox image promote` records the selected AMI as the default for matching
+  brokered AWS leases. Promotion is scoped by target, architecture, and region,
+  so a macOS AMI never replaces the Linux or Windows default.
+- **Azure / GCP** — managed images and disk snapshots live in the cloud project.
+  `crabbox image create` can capture them and `crabbox image delete` can remove
+  them (`--provider azure|gcp`).
+- **Hetzner** — snapshots live in the Hetzner project. Crabbox can already boot a
+  configured image (via config or `CRABBOX_HETZNER_IMAGE`), but the
+  create/promote lifecycle commands are not implemented for Hetzner. Manage
+  Hetzner snapshots with Hetzner tooling, then point Crabbox at the result.
+- **Delegated runners** (for example Blacksmith) — images are owned by the
+  provider's runner infrastructure, not by Crabbox.
 
-Good prebake contents:
+The coordinator stores only the current provider image identifier, promotion
+metadata, and enough tags to explain provenance. Do not store image bytes in
+git, release artifacts, or coordinator durable state.
 
-- OS patches and base packages;
-- SSH, Git, rsync, curl, jq, and readiness helpers;
-- desktop/browser capabilities for `--desktop --browser` leases;
-- screenshot and recording tools such as `scrot`, `ffmpeg`, `xdotool`, and VNC;
-- Node 24, corepack/pnpm, build-essential, Python, and common native-addon
-  headers when the image targets browser/channel QA;
-- Docker Engine and common container plugin support when the target platform
-  supports headless Docker;
+## What to bake
+
+Bake stable machine capabilities:
+
+- current OS security updates and base packages;
+- core access tooling: SSH, Git, rsync, curl, jq, and the readiness helpers;
+- desktop and browser capabilities for `--desktop --browser` leases (Xvfb, a
+  slim XFCE, x11vnc, Chrome or Chromium);
+- capture tools such as `ffmpeg`, `ffprobe`, `scrot`, and `xdotool`;
+- language and build toolchains the image targets: Node 24 with corepack/pnpm,
+  `build-essential`, Python, and common native-addon headers;
+- Docker Engine and supporting plugins where the platform runs headless Docker;
 - empty shared cache directories such as `/var/cache/crabbox/pnpm`.
 
-Bad prebake contents:
+Do not bake scenario state:
 
-- personal or CI secrets;
-- browser profiles, Slack/Discord/WhatsApp login state, cookies, or OAuth
-  tokens;
-- repository checkouts, `node_modules`, built product `dist/`, or PR artifacts;
-- one-off debugging files.
+- secrets, tokens, or provider credentials;
+- browser profiles, cookies, OAuth state, or chat/login sessions;
+- repository checkouts, `node_modules`, built `dist/`, or PR artifacts;
+- one-off operator notes or debugging files.
 
-## Runtime Caches
+Anything that varies per repository, per lockfile, or per run does not belong in
+a shared image.
 
-Runtime caches belong outside the image:
+## Runtime caches belong outside the image
 
-- warm leases can keep `/var/cache/crabbox/pnpm` and browser profiles for
-  short-lived operator sessions;
-- GitHub Actions should cache candidate pnpm stores by lockfile and platform;
-- product-specific runtime bundles and evidence artifacts belong in the repo
-  workflow workspace, for example under `.artifacts/qa-e2e/...`;
-- long-lived reusable volumes should be keyed by repo, lockfile, Node version,
+Dependency state changes far more often than machine capabilities, so it lives
+outside the image:
+
+- a **warm lease** can keep `/var/cache/crabbox/pnpm` and browser profiles for a
+  short-lived operator session;
+- **GitHub Actions** should cache candidate pnpm stores by lockfile and platform;
+- product-specific runtime bundles and evidence belong in the workflow
+  workspace, for example under `.artifacts/`;
+- long-lived reusable volumes should be keyed by repo, lockfile, runtime version,
   platform, and image id before Crabbox mounts them into leases.
 
-This split keeps images reusable across repositories while still letting slow QA
-systems skip repeated dependency work when they deliberately reuse a warm lease
-or a keyed external cache.
+This split keeps one image reusable across many repositories while still letting
+slow QA lanes skip repeated dependency work when they deliberately reuse a warm
+lease or a keyed external cache.
 
-## Operator Flow
+## Operator flow
 
-Use the [Image bake runbook](image-bake-runbook.md) for the exact AWS bake,
-candidate smoke, promotion, rollback, and cleanup commands. At a high level:
+The [Image bake runbook](image-bake-runbook.md) has the precise commands and
+guard scripts. At a high level, an AWS bake is:
 
-1. Warm a fresh `--desktop --browser` AWS lease.
-2. Verify the machine capability contract on that lease.
-3. Create an AMI with `crabbox image create --wait`.
-4. Boot the AMI explicitly through an image override and smoke it.
-5. Promote the AMI with `crabbox image promote`.
-6. Run a normal brokered lease and the relevant QA lane.
+1. Warm a fresh source lease with the capabilities the image must provide:
+
+   ```bash
+   crabbox warmup --provider aws --class standard --desktop --browser \
+     --ttl 2h --idle-timeout 30m
+   ```
+
+2. Verify the machine capability contract on that lease (tools, browser,
+   directories) over `crabbox run --no-sync --shell`.
+3. Create a candidate AMI from the lease's canonical `cbx_...` id:
+
+   ```bash
+   crabbox image create --id <cbx_id> --name my-org-linux-desktop-YYYYMMDD-HHMM \
+     --wait --json
+   ```
+
+4. Boot the candidate explicitly through an image override and smoke it:
+
+   ```bash
+   CRABBOX_AWS_AMI=ami-1234567890abcdef0 \
+     crabbox warmup --provider aws --class standard --desktop --browser \
+     --ttl 30m --idle-timeout 10m
+   ```
+
+5. Promote the candidate once the smoke passes:
+
+   ```bash
+   crabbox image promote ami-1234567890abcdef0 --json
+   ```
+
+6. Run a normal brokered lease (no override) plus the relevant QA lane to confirm
+   the promoted image is selected and healthy.
 7. Keep the previous known-good AMI until the new image has real QA proof.
 
-Image bake success is not just "Chrome exists." A useful image must reduce
-`crabbox.warmup` or `crabbox.remote_run` time in timing evidence while keeping
-project credentials, browser login state, and repository artifacts outside the
-image.
+A successful bake is not just "the browser exists." A useful image measurably
+reduces `crabbox warmup` and `crabbox run` time in your timing evidence while
+keeping credentials, login state, and repository artifacts out of the image.
 
-Related docs:
+## Image commands
+
+All image commands require coordinator admin auth and can create paid
+provider-side artifacts.
+
+- `crabbox image create --id <cbx_id> --name <name> [--wait]` — capture a
+  provider image from a lease (`--no-reboot` defaults to true on AWS).
+- `crabbox image promote <ami-id> [--target linux|macos|windows] [--region <r>]`
+  — set the default brokered AWS image; supports `--fast-snapshot-restore` with
+  `--fsr-az <az>`.
+- `crabbox image fsr-status <ami-id|snapshot-id>` — AWS Fast Snapshot Restore
+  status.
+- `crabbox image delete <image-id> [--provider aws|azure|gcp]` — remove a
+  provider image.
+
+See the [image command reference](../commands/image.md) for full flags.
+
+## Related docs
 
 - [Image bake runbook](image-bake-runbook.md)
 - [image command](../commands/image.md)

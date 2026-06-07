@@ -2,106 +2,134 @@
 
 Read when:
 
-- changing Hetzner, AWS, Azure, Google Cloud, Proxmox, or Blacksmith Testbox provisioning;
-- adding a backend;
+- changing Hetzner, AWS, Azure, or Google Cloud provisioning;
+- adding or wiring a new backend;
 - adjusting machine classes, fallback order, regions, or images.
 
-Crabbox currently supports four brokered providers:
+A *provider* is the backend that supplies the remote box a lease runs on. Crabbox
+selects one with `--provider <name>` or the `provider:` config key, normalizing
+aliases on the way in. Every built-in adapter lives under
+`internal/providers/<name>` and is registered for its side effects in
+`internal/providers/all/all.go`; the source-of-truth list of identifiers and
+aliases is each adapter's `provider.go` (`Name()`, `Aliases()`, `Spec()`).
+
+## How a provider is wired
+
+Each adapter declares a `Spec` that drives how Crabbox treats it:
+
+- **Kind** — `ssh-lease` (Crabbox provisions or connects to an SSH-reachable box
+  and owns the full lifecycle, sync, run, and release) or `delegated-run` (the
+  provider owns sync and execution; there is no SSH lease).
+- **Coordinator** — `supported` means the provider *may* be brokered through the
+  Cloudflare Worker; `never` means it always runs direct from the CLI. Only
+  `aws`, `azure`, `gcp`, and `hetzner` are `supported`, and even those run direct
+  unless a broker URL and token are configured (see
+  [Configuration](configuration.md) and `crabbox config set-broker`).
+- **Targets** — which of Linux, macOS, and Windows the provider can lease.
+
+`internal/cli/provider_backend.go` defines the kinds, coordinator modes, and
+feature flags; `internal/cli/config.go` holds the per-provider config sections
+and the class-to-machine-type maps.
+
+## Brokered providers
+
+Four providers can be brokered through the Worker. Brokering adds lease records,
+cost guardrails, usage accounting, scheduled cleanup, and the web portal; the
+data plane (SSH, rsync, command execution) still runs directly from the CLI to
+the box.
 
 ```text
-hetzner     Hetzner Cloud servers
-aws         AWS EC2 instances
-azure       Azure Virtual Machines
-gcp         Google Cloud Compute Engine instances
+hetzner   Hetzner Cloud servers          (Linux)
+aws       AWS EC2 instances              (Linux, native Windows, Windows WSL2, EC2 Mac)
+azure     Azure Virtual Machines         (Linux, native Windows, Windows WSL2)
+gcp       Google Cloud Compute Engine    (Linux)
 ```
 
-Brokered Hetzner leases are Linux targets. Brokered AWS supports Linux, native
-Windows Server, Windows WSL2, and EC2 Mac when a Dedicated Host is configured.
-Brokered Azure supports Linux, native Windows, and Windows WSL2 SSH/sync/run.
-Brokered GCP supports Linux SSH/sync/run. Static SSH still
-exists for reusing existing macOS and Windows machines:
+The `azure` family can also route to the delegated Azure Container Apps Dynamic
+Sessions backend with `azure.backend: dynamic-sessions` or
+`--azure-backend dynamic-sessions`.
+
+When no coordinator is configured, these providers still work in **direct mode**:
+the CLI talks to the cloud API itself using local credentials (AWS SDK chain,
+Azure credentials, Google Application Default Credentials, or
+`HCLOUD_TOKEN`/`HETZNER_TOKEN`). Direct mode has no Durable Object alarm; cleanup
+is best-effort through provider labels and manual `crabbox cleanup`. Prefer the
+brokered path when a broker is available.
+
+## Direct SSH-lease providers
+
+These provision or attach an SSH-reachable box and use the standard Crabbox SSH
+sync/run/release path. None of them go through the Worker.
 
 ```text
-ssh         Existing SSH host selected by static.host
+ssh              Existing SSH host (no provisioning)      Linux, macOS, Windows
+parallels        Parallels Desktop linked clones          Linux, macOS, Windows
+proxmox          Proxmox VE QEMU VM clones                Linux
+local-container  Local Docker-compatible containers       Linux
+multipass        Canonical Multipass local Ubuntu VMs     Linux
+daytona          Daytona sandboxes (short-lived SSH)      Linux
+exe-dev          exe.dev managed VMs (public SSH)         Linux
+namespace-devbox Namespace Devboxes                       Linux
+runpod           RunPod GPU pods (public SSH)             Linux
+semaphore        Semaphore CI jobs                        Linux
+sprites          Sprites microVMs through sprite proxy    Linux
 ```
 
-Direct provider backends can also run without the Crabbox coordinator:
+## Delegated-run providers
+
+These run the command inside a managed sandbox; Crabbox does not lease or SSH
+into a box. Local sync options (`--no-sync`, rsync flags) are rejected — the
+provider owns sync. All are Linux-only.
 
 ```text
-proxmox    Proxmox VE QEMU VM clones exposed as SSH leases
-parallels  Parallels Desktop linked clones exposed as SSH leases
-local-container  Local Linux containers and desktop/browser smoke boxes
-exe-dev    exe.dev VMs exposed as SSH leases
-semaphore  Semaphore CI jobs exposed as SSH leases
-namespace  Namespace Devboxes exposed as SSH leases
-sprites    Sprites microVMs exposed as SSH leases through sprite proxy
-daytona    Daytona sandboxes with SDK/toolbox run and short-lived SSH access
-islo       Islo sandboxes with delegated command execution
-e2b        E2B sandboxes with delegated command execution
-modal      Modal Sandboxes with delegated command execution
-tensorlake Tensorlake Firecracker sandboxes with delegated command execution
+cloudflare              Cloudflare Containers (Worker runtime)
+azure-dynamic-sessions  Azure Container Apps custom-container Dynamic Sessions
+e2b                     E2B Firecracker sandboxes
+islo                    Islo sandboxes
+modal                   Modal Sandboxes
+railway                 Railway service redeploys
+tensorlake              Tensorlake Firecracker sandboxes
+upstash-box             Upstash sandboxes
+blacksmith-testbox      Blacksmith CI test runner (proof/session)
+wandb                   Weights & Biases run sandboxes
 ```
 
-## Provider Pages
+## Provider pages
 
 - [Provider reference](../providers/README.md): one page per built-in backend.
-- [AWS](../providers/aws.md): EC2 Linux, Windows, WSL2, EC2 Mac, capacity, AMIs, and security groups.
-- [Azure](../providers/azure.md): Azure Linux/native Windows, shared infra, capacity, and cleanup.
-- [Google Cloud](../providers/gcp.md): GCP Compute Engine Linux SSH leases.
-- [Hetzner](../providers/hetzner.md): Linux-only managed provider behavior, classes, and cleanup.
-- [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
-- [Parallels](../providers/parallels.md): direct local or remote Mac Parallels Desktop VM clones, named VM snapshot templates, and small Mac fleets.
-- [Local Container](../providers/local-container.md): local Linux containers and desktop/browser smoke boxes through Docker-compatible runtimes.
+- [AWS](../providers/aws.md): EC2 Linux, Windows, WSL2, EC2 Mac, capacity, AMIs, security groups.
+- [Azure](../providers/azure.md): Azure Linux/native Windows, shared infra, capacity, cleanup.
+- [Azure Dynamic Sessions](../providers/azure-dynamic-sessions.md): delegated Azure Container Apps sandbox execution.
+- [Google Cloud](../providers/gcp.md): GCP Compute Engine SSH leases.
+- [Hetzner](../providers/hetzner.md): Linux-only managed provider, classes, cleanup.
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
-- [exe.dev](../providers/exe-dev.md): exe.dev VMs exposed as SSH leases.
-- [Blacksmith Testbox](../providers/blacksmith-testbox.md): delegated Testbox backend behavior.
-- [Namespace Devbox](../providers/namespace-devbox.md): Namespace Devbox SSH leases with Crabbox sync/run.
-- [Semaphore](../providers/semaphore.md): Semaphore CI job leases with Crabbox SSH sync/run.
-- [Sprites](../providers/sprites.md): Sprites microVM SSH leases through `sprite proxy`.
+- [Parallels](../providers/parallels.md): local or remote Mac Parallels Desktop VM clones and small Mac fleets.
+- [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
+- [Local Container](../providers/local-container.md): local Linux containers through Docker-compatible runtimes.
+- [Multipass](../providers/multipass.md): local Ubuntu VMs through Canonical Multipass.
 - [Daytona](../providers/daytona.md): Daytona SDK/toolbox sandbox leases.
+- [exe.dev](../providers/exe-dev.md): exe.dev VMs exposed as SSH leases.
+- [Namespace Devbox](../providers/namespace-devbox.md): Namespace Devbox SSH leases.
+- [Railway](../providers/railway.md): delegated Railway service redeploys.
+- [RunPod](../providers/runpod.md): RunPod GPU pods over public SSH.
+- [Semaphore](../providers/semaphore.md): Semaphore CI job leases.
+- [Sprites](../providers/sprites.md): Sprites microVM SSH leases through `sprite proxy`.
+- [Cloudflare](../providers/cloudflare.md): delegated Cloudflare Containers execution.
 - [Islo](../providers/islo.md): delegated Islo sandbox execution.
 - [E2B](../providers/e2b.md): delegated E2B sandbox execution.
 - [Modal](../providers/modal.md): delegated Modal Sandbox execution.
 - [Tensorlake](../providers/tensorlake.md): delegated Tensorlake Firecracker sandbox execution.
-- [Provider backends](../provider-backends.md): implementation guide for adding a new provider/backend/plugin.
+- [Upstash Box](../providers/upstash-box.md): delegated Upstash sandbox execution.
+- [Blacksmith Testbox](../providers/blacksmith-testbox.md): delegated Blacksmith CI runner.
+- [Weights & Biases](../providers/wandb.md): delegated W&B run sandbox execution.
+- [Provider backends](../provider-backends.md): guide for adding a new provider/backend/plugin.
 
-## Hetzner Summary
+## Machine classes
 
-- imports or reuses the lease SSH key;
-- creates a server with Crabbox labels;
-- uses configured image and location;
-- falls back across class server types when capacity or quota rejects a request;
-- fetches server-type hourly prices when cost estimates need provider pricing.
-
-## AWS Summary
-
-- signs EC2 Query API calls inside the Worker;
-- imports or reuses an EC2 key pair;
-- creates or reuses the `crabbox-runners` security group with SSH ingress limited to configured CIDRs or the request source IP;
-- launches one-time Linux Spot or On-Demand instances;
-- launches AWS Windows Server leases with EC2Launch PowerShell user data, then a
-  post-SSH Crabbox bootstrap for OpenSSH/Git/user setup; `--desktop` adds
-  TightVNC, auto-logon, and first-network flyout suppression;
-- launches EC2 Mac leases on available Dedicated Hosts with On-Demand capacity,
-  optionally pinned by `CRABBOX_HOST_ID` or `hostId`; `CRABBOX_AWS_MAC_HOST_ID`
-  and `aws.macHostId` remain AWS compatibility aliases;
-- tags instances, volumes, and Spot requests;
-- falls back across broad C/M/R instance families for class requests, including account policy and capacity rejections;
-- can fall back to a small burstable type when account policy rejects the high-core class candidates;
-- preflights applied Spot or On-Demand vCPU quotas in brokered mode when Service Quotas allows it, then records skipped candidates as quota attempts;
-- supports `--market spot|on-demand` on `warmup` and `run` for one-off capacity-market overrides;
-- uses Spot placement score across configured regions in direct AWS mode;
-- can fall back to On-Demand after Spot capacity/quota failures when configured;
-- fetches Spot price history when cost estimates need provider pricing.
-
-Explicit `--type` requests are treated as exact provider type requests. If that type is rejected, Crabbox fails clearly instead of silently choosing a different instance type. Remove `--type` and use a machine class when fallback is desired.
-
-`crabbox list` marks brokered provider machines as `orphan=no-active-lease`
-when their provider label references a lease that is no longer active in the
-coordinator. This is an operator hint only; `keep=true` machines are not
-deleted automatically.
-
-Machine classes map to provider-specific types:
+`--class standard|fast|large|beast` (default `beast`) maps to an ordered list of
+provider machine types. Crabbox tries each in turn, falling back when capacity or
+quota rejects a request. The maps below come from `internal/cli/config.go` and
+`internal/cli/gcp.go`:
 
 ```text
 Hetzner
@@ -110,13 +138,13 @@ fast      ccx43, cpx62, cx53
 large     ccx53, ccx43, cpx62, cx53
 beast     ccx63, ccx53, ccx43, cpx62, cx53
 
-AWS
+AWS (Linux)
 standard  c7a.8xlarge, c7i.8xlarge, m7a.8xlarge, m7i.8xlarge, c7a.4xlarge
 fast      c7a.16xlarge, c7i.16xlarge, m7a.16xlarge, m7i.16xlarge, c7a.12xlarge, c7a.8xlarge
 large     c7a.24xlarge, c7i.24xlarge, m7a.24xlarge, m7i.24xlarge, r7a.24xlarge, c7a.16xlarge, c7a.12xlarge
 beast     c7a.48xlarge, c7i.48xlarge, m7a.48xlarge, m7i.48xlarge, r7a.48xlarge, c7a.32xlarge, c7i.32xlarge, m7a.32xlarge, c7a.24xlarge, c7a.16xlarge
 
-AWS Windows
+AWS Windows (normal)
 standard  m7i.large, m7a.large, t3.large
 fast      m7i.xlarge, m7a.xlarge, t3.xlarge
 large     m7i.2xlarge, m7a.2xlarge, t3.2xlarge
@@ -128,8 +156,10 @@ fast      m8i.xlarge, m8i-flex.xlarge, c8i.xlarge, r8i.xlarge
 large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge
 beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge
 
-AWS macOS
-all       mac2.metal, mac2-m2.metal, mac2-m2pro.metal, mac-m4.metal, mac-m4pro.metal, mac-m4max.metal, mac2-m1ultra.metal, mac-m3ultra.metal, then mac1.metal unless `--type` is set
+AWS macOS (all classes)
+mac2.metal, mac2-m2.metal, mac2-m2pro.metal, mac-m4.metal, mac-m4pro.metal,
+mac-m4max.metal, mac2-m1ultra.metal, mac-m3ultra.metal, then mac1.metal unless
+`--type` is set
 
 Google Cloud
 standard  c4-standard-32, c3-standard-22, n2-standard-32, n2d-standard-32
@@ -142,15 +172,61 @@ standard  S
 fast      M
 large     L
 beast     XL
+
+Cloudflare Containers (any class -> standard-4)
+lite, basic, standard-1, standard-2, standard-3, standard-4
 ```
 
-Direct provider mode still exists when no coordinator is configured. It uses local AWS credentials, Azure credentials, Google Application Default Credentials, Proxmox API tokens, or `HCLOUD_TOKEN`/`HETZNER_TOKEN` and should stay secondary to the brokered path when a brokered provider is available.
+An explicit `--type` is treated as an exact provider type request. If that type
+is rejected, Crabbox fails clearly instead of silently choosing a different
+instance type. Drop `--type` and use a class when you want fallback. See
+[Capacity and fallback](capacity-fallback.md) for the full fallback model.
 
-Tailscale is not a provider. Use `--tailscale` to add tailnet reachability to
-new managed Linux leases, or set a static host to a MagicDNS name/100.x address
-when the existing host is already on a tailnet. See [Tailscale](tailscale.md).
+## Brokered provider behavior
 
-Direct smoke shape:
+### Hetzner
+
+- imports or reuses the lease SSH key;
+- creates a server with Crabbox labels;
+- uses the configured image and location;
+- falls back across class server types when capacity or quota rejects a request;
+- fetches server-type hourly prices when cost estimates need provider pricing.
+
+### AWS
+
+- signs EC2 Query API calls inside the Worker;
+- imports or reuses an EC2 key pair;
+- creates or reuses the `crabbox-runners` security group with SSH ingress limited
+  to configured CIDRs or the request source IP;
+- launches one-time Linux Spot or On-Demand instances;
+- launches native Windows Server leases with EC2Launch PowerShell user data, then
+  a post-SSH bootstrap for OpenSSH/Git/user setup; `--desktop` adds TightVNC,
+  auto-logon, and first-network flyout suppression;
+- launches EC2 Mac leases on available Dedicated Hosts with On-Demand capacity,
+  optionally pinned by `CRABBOX_HOST_ID` or `hostId` (`CRABBOX_AWS_MAC_HOST_ID`
+  and `aws.macHostId` remain compatibility aliases);
+- tags instances, volumes, and Spot requests;
+- falls back across broad C/M/R instance families, including account-policy and
+  capacity rejections, and can fall back to a small burstable type when policy
+  rejects high-core candidates;
+- preflights applied Spot/On-Demand vCPU quotas in brokered mode when Service
+  Quotas allows it, recording skipped candidates as quota attempts;
+- honors `--market spot|on-demand` on `warmup` and `run` for one-off overrides;
+- uses Spot placement score across configured regions in direct mode and can fall
+  back to On-Demand after Spot capacity/quota failures when configured;
+- fetches Spot price history when cost estimates need provider pricing.
+
+`crabbox list` marks brokered machines as `orphan=no-active-lease` when their
+provider label references a lease no longer active in the coordinator. This is an
+operator hint only; `keep=true` machines are never deleted automatically.
+
+The structured quota preflight and `provisioningAttempts` metadata belong to the
+brokered Worker path; direct AWS fallback can still retry provider types but
+without that telemetry.
+
+## Direct provider notes
+
+A minimal direct (no-coordinator) smoke looks like this:
 
 ```sh
 tmp="$(mktemp)"
@@ -161,77 +237,56 @@ CRABBOX_CONFIG="$tmp" CRABBOX_COORDINATOR= crabbox stop --provider hetzner <slug
 rm -f "$tmp"
 ```
 
-Use `--provider aws` with AWS SDK credentials for direct AWS smoke, or
-`--provider gcp` with Google Application Default Credentials for direct GCP
-smoke. The direct GCP path uses Google's Compute Go SDK and project-wide
-aggregated instance listing for resolve, list, and cleanup. Direct mode
-has no Durable Object alarm; cleanup is best-effort through provider labels and
-manual `crabbox cleanup`. Direct AWS fallback can retry provider types, but the
-structured quota preflight and `provisioningAttempts` metadata belong to the
-brokered Worker path.
+Swap `--provider aws` (AWS SDK credentials) or `--provider gcp` (Google
+Application Default Credentials) for direct cloud smoke. The direct GCP path uses
+Google's Compute Go SDK and project-wide aggregated instance listing for resolve,
+list, and cleanup.
 
-Use `--provider proxmox` with `CRABBOX_PROXMOX_*` config for direct Proxmox
-smoke. Proxmox clones a configured Linux QEMU template, injects SSH via
-cloud-init, discovers the IP and bootstraps the VM through the QEMU guest agent,
-then uses normal Crabbox SSH sync/run/release.
+- **proxmox** — clones a configured Linux QEMU template, injects SSH via
+  cloud-init, discovers the IP and bootstraps through the QEMU guest agent, then
+  uses normal Crabbox SSH sync/run/release. Configure with `CRABBOX_PROXMOX_*` /
+  the `proxmox` config section.
+- **parallels** — creates a linked clone from a configured source VM and optional
+  snapshot, starts it, discovers the guest IP through `prlctl`, then uses normal
+  SSH sync/run/release. Supports Linux, macOS, and Windows guests that already
+  expose the matching SSH contract. Configure with `CRABBOX_PARALLELS_*`.
+- **local-container** (alias `docker`) — starts a labeled container on a local
+  Docker-compatible runtime, publishes SSH on loopback, syncs over SSH, and
+  removes it on `stop`. It detects an installed `docker` or `podman` CLI; if
+  both are present, `docker` is selected unless `localContainer.runtime` is set
+  explicitly. Cache volumes use named volumes. It does not bind-mount the repo
+  or the Docker-compatible socket by default. Reads `DOCKER_HOST` for socket
+  pass-through.
+- **multipass** (alias `mp`) — launches a local Ubuntu VM through Canonical
+  Multipass with cloud-init, resolves the VM IP through `multipass info`, syncs
+  over SSH, and deletes the VM with `multipass delete --purge`. Cache volumes
+  are host directories mounted into the VM.
+- **daytona** — creates a sandbox from `daytona.snapshot`, syncs and runs through
+  Daytona's SDK/toolbox APIs, and mints short-lived SSH tokens only for explicit
+  `crabbox ssh` access.
+- **exe-dev** — exe.dev owns auth and lifecycle through `ssh exe.dev`; Crabbox
+  treats the returned `ssh_dest` as a normal Linux SSH lease (public SSH only, no
+  Tailscale).
+- **namespace-devbox** — Namespace owns Devbox auth and lifecycle through the
+  `devbox` CLI; Crabbox treats the prepared Devbox as a normal Linux SSH lease.
+- **runpod** — leases a RunPod GPU pod with public SSH (no Tailscale); auth from
+  `RUNPOD_API_KEY`.
+- **semaphore** — creates a standalone Semaphore job, waits for host/port metadata
+  and a debug SSH key, then runs the standard SSH path. Use it to run in the same
+  machine image, secret context, and cache plane as Semaphore CI.
+- **sprites** — creates a sprite, installs OpenSSH and rsync inside it, and reaches
+  SSH through `sprite proxy` for a fast Linux microVM on the standard SSH path.
 
-Use `--provider parallels` with `CRABBOX_PARALLELS_*` config for direct
-Parallels smoke. Parallels creates a linked clone from a configured source VM
-and optional snapshot, starts it, discovers the guest IP through `prlctl`, then
-uses normal Crabbox SSH sync/run/release. It supports Linux, macOS, and Windows
-templates when the guest already exposes the matching SSH contract.
+Delegated-run providers (`cloudflare`, `azure-dynamic-sessions`, `e2b`, `islo`,
+`modal`, `tensorlake`, `upstash-box`, `blacksmith-testbox`, `wandb`) do not use
+the broker or an SSH lease; each owns sandbox lifecycle and command execution and
+syncs through its own API (gzipped archive upload for most). See the linked
+provider pages for per-provider auth and configuration.
 
-Use `--provider local-container` or `--provider docker` with a local
-Docker-compatible runtime for zero-cloud Linux smoke tests. The provider starts
-a labeled container, publishes SSH on loopback, syncs into the container over
-SSH, and removes it on `stop`. It does not bind-mount the repo or the Docker
-socket by default.
+## Static SSH targets
 
-Crabbox can also wrap Blacksmith Testboxes with `provider: blacksmith-testbox`. That backend does not use the Crabbox broker or direct cloud credentials. It shells out to the authenticated Blacksmith CLI for `testbox warmup`, `run`, `status`, `list`, and `stop`, while Crabbox keeps local slugs, repo claims, config, and timing summaries. See [Blacksmith Testbox](blacksmith-testbox.md).
-
-Crabbox can use Namespace Devboxes with `provider: namespace-devbox`. Namespace
-owns Devbox auth and lifecycle through the `devbox` CLI, while Crabbox treats
-the prepared Devbox as a normal Linux SSH lease and owns rsync, run, status,
-and timing. See [Namespace Devbox](namespace-devbox.md).
-
-Crabbox can use exe.dev VMs with `provider: exe-dev`. exe.dev owns auth and
-lifecycle through `ssh exe.dev`, while Crabbox treats the returned `ssh_dest`
-as a normal Linux SSH lease and owns rsync, run, status, and timing. See
-[exe.dev](../providers/exe-dev.md).
-
-Crabbox can use Semaphore CI jobs with `provider: semaphore`. Semaphore is an
-SSH lease backend: the provider creates a standalone Semaphore job, waits until
-the job exposes host/port metadata and a debug SSH key, then Crabbox performs
-normal SSH sync and command execution. Use it when the test should run in the
-same machine image, project secret context, and cache plane as Semaphore CI. It
-does not use the Crabbox coordinator. See [Semaphore](semaphore.md).
-
-Crabbox can use Sprites microVMs with `provider: sprites`. Sprites is an SSH
-lease backend: Crabbox creates a sprite, installs OpenSSH and rsync inside it,
-then reaches SSH through `sprite proxy`. Use it when you want a fast Linux
-microVM while keeping Crabbox's standard SSH sync/run path and `crabbox ssh`.
-It does not use the Crabbox coordinator. See [Sprites](sprites.md).
-
-Crabbox can use Daytona sandboxes with `provider: daytona`. Crabbox creates a
-sandbox from `daytona.snapshot`, syncs and executes `run` through Daytona's
-SDK/toolbox APIs, and mints short-lived SSH tokens only for explicit `ssh`
-access. See [Daytona](daytona.md).
-
-Crabbox can use Islo sandboxes with `provider: islo`. Islo is a delegated run
-backend: the Islo Go SDK owns sandbox lifecycle and Crabbox streams command
-output from Islo's exec SSE endpoint. See [Islo](islo.md).
-
-Crabbox can use E2B sandboxes with `provider: e2b`. E2B is a delegated run
-backend: Crabbox creates E2B sandboxes, syncs a gzipped archive through the
-sandbox file API, and streams command output from E2B's process API. See
-[E2B](e2b.md).
-
-Crabbox can use Modal Sandboxes with `provider: modal`. Modal is a delegated run
-backend: Crabbox creates Modal Sandboxes through the local Python client, syncs a
-gzipped archive through Sandbox exec, and streams command output from Modal's
-process API. See [Modal](../providers/modal.md).
-
-Static SSH targets:
+`provider: ssh` (aliases `static`, `static-ssh`) attaches to a preexisting host —
+no provisioning, no cleanup:
 
 ```yaml
 provider: ssh
@@ -255,30 +310,30 @@ static:
   workRoot: C:\crabbox
 ```
 
-`target: windows` supports `windows.mode: normal` and `windows.mode: wsl2`.
-Normal mode uses PowerShell over OpenSSH and syncs the manifest as a tar archive.
-WSL2 mode requires AWS nested virtualization, so managed AWS WSL2 leases use
-C8i, M8i, or R8i families and enable nested virtualization at launch. Static
-WSL2 hosts keep the POSIX SSH contract: commands run through
-`wsl.exe --exec bash -lc`, rsync uses `wsl.exe rsync`, and `static.workRoot`
-should be a WSL path such as `/home/peter/crabbox`. macOS also uses the POSIX
-contract and needs `git`, `rsync`, `tar`, and SSH.
+`target: windows` supports `windows.mode: normal` and `windows.mode: wsl2`:
 
-Related docs:
+- **normal** uses PowerShell over OpenSSH and syncs the manifest as a tar archive.
+- **wsl2** keeps the POSIX SSH contract: commands run through
+  `wsl.exe --exec bash -lc`, rsync uses `wsl.exe rsync`, and `static.workRoot`
+  should be a WSL path such as `/home/alice/crabbox`. Managed AWS WSL2 leases need
+  nested virtualization, so they use the C8i/M8i/R8i families and enable nested
+  virtualization at launch.
+
+macOS also uses the POSIX contract and needs `git`, `rsync`, `tar`, and SSH.
+
+## Tailscale is not a provider
+
+Use `--tailscale` to add tailnet reachability to new managed Linux leases, or
+point a static host at a MagicDNS name / `100.x` address when the host is already
+on a tailnet. See [Tailscale](tailscale.md).
+
+## Related docs
 
 - [Infrastructure](../infrastructure.md)
+- [Configuration](configuration.md)
+- [Capacity and fallback](capacity-fallback.md)
 - [Provider reference](../providers/README.md)
-- [AWS](../providers/aws.md)
-- [Hetzner](../providers/hetzner.md)
-- [Proxmox](../providers/proxmox.md)
+- [Provider backends](../provider-backends.md)
 - [Tailscale](tailscale.md)
-- [Blacksmith Testbox](../providers/blacksmith-testbox.md)
-- [Namespace Devbox](../providers/namespace-devbox.md)
-- [Semaphore](../providers/semaphore.md)
-- [Sprites](../providers/sprites.md)
-- [Daytona](../providers/daytona.md)
-- [Islo](../providers/islo.md)
-- [E2B](../providers/e2b.md)
-- [Modal](../providers/modal.md)
 - [Runner bootstrap](runner-bootstrap.md)
 - [Cost and usage](cost-usage.md)

@@ -1,95 +1,142 @@
 # Observability
 
-Read when:
+Read this when you need to:
 
-- debugging a failed or slow run;
-- checking who used capacity this month;
-- finding a remote machine for SSH inspection;
-- correlating Actions hydration with the remote workspace.
+- debug a failed or slow run;
+- check who used capacity this month;
+- find a remote machine to SSH into for live inspection;
+- correlate Actions hydration with the remote workspace.
 
-Crabbox exposes operational visibility through CLI commands, coordinator usage summaries, retained run history/logs, provider labels, GitHub Actions run links, and Worker logs. The reliable path is to keep the lease ID and run ID together.
+Crabbox surfaces operational visibility through CLI commands, coordinator usage
+summaries, retained run history and logs, provider labels, GitHub Actions run
+links, and Worker logs. The single most useful habit is to keep the **lease ID**
+(`cbx_...`) and the **run ID** (`run_...`) together — most debugging paths start
+from one of those two identifiers. See [Identifiers](features/identifiers.md) for
+the full ID scheme.
 
-## Lease State
+## Lease state
 
-Use `status`, `list`, and `inspect`:
+Inspect a lease with `status`, `list`, and `inspect`:
 
 ```sh
-bin/crabbox status --id blue-lobster
-bin/crabbox list --json
-bin/crabbox inspect --id blue-lobster --json
+crabbox status --id swift-crab
+crabbox list --json
+crabbox inspect --id swift-crab --json
 ```
 
-Important fields:
+Fields worth checking:
 
 - lease ID and slug;
 - owner and org;
 - provider and server type;
-- state;
-- `createdAt`, `lastTouchedAt`, `idleTimeoutSeconds`, `ttlSeconds`, and `expiresAt`;
+- state (`active`, `released`, `expired`, `failed`);
+- `createdAt`, `lastTouchedAt`, `idleTimeoutSeconds`, `ttlSeconds`, `expiresAt`;
 - public address;
 - SSH user and port;
 - keep/delete behavior.
 
-Provider machines are labeled with Crabbox metadata so cloud consoles can be correlated back to the lease.
+`status` accepts `--wait` (with `--wait-timeout`, default 5m) to block until the
+lease reaches a stable state. Provider machines are tagged with Crabbox metadata,
+so a cloud console can be correlated back to the lease that owns the instance.
 
-## Usage And Cost
+## Usage and cost
 
-Use `usage` for monthly summaries:
+`usage` reports monthly cost and capacity summaries from the coordinator:
 
 ```sh
-bin/crabbox usage
-bin/crabbox usage --scope user --user alice@example.com
-bin/crabbox usage --scope org --org example-org
-bin/crabbox usage --scope all --json
+crabbox usage
+crabbox usage --scope user --user alice@example.com
+crabbox usage --scope org --org example-org
+crabbox usage --scope all --json
 ```
 
-Reports include lease count, active lease count, elapsed runtime, estimated elapsed cost, reserved worst-case cost, and breakdowns by owner, org, provider, and server type.
+Scope is `user` (default), `org`, or `all`; `--month YYYY-MM` selects the
+reporting month (defaults to the current UTC month). Reports include lease count,
+active lease count, elapsed runtime, estimated elapsed cost, reserved worst-case
+cost, and breakdowns by owner, org, provider, and server type. `usage` requires a
+configured coordinator. See [Cost & usage](features/cost-usage.md) for how the
+Worker computes rates and enforces budget caps.
 
-## Run History And Logs
+## Run history and logs
 
 Coordinator-backed `crabbox run` creates a durable run record before leasing
-starts, appends lifecycle events while the CLI progresses, and finishes the run
-with exit code, timing, and retained command output.
-
-Use:
+begins, appends lifecycle events as the CLI progresses, and finishes the run with
+exit code, timing, and retained command output. Inspect those records with:
 
 ```sh
-bin/crabbox history
-bin/crabbox history --lease cbx_...
-bin/crabbox history --owner alice@example.com --json
-bin/crabbox events run_...
-bin/crabbox attach run_...
-bin/crabbox logs run_...
-bin/crabbox results run_...
+crabbox history
+crabbox history --lease cbx_...
+crabbox history --owner alice@example.com --json
+crabbox logs run_...
+crabbox events run_...
+crabbox attach run_...
+crabbox results run_...
 ```
 
-History is for command debugging, not unlimited log archival. Events are ordered
-phase and output chunks for reconnect/inspection, and `attach` can follow those
-events while the original CLI is still alive. Logs are bounded retained remote
-stdout/stderr captures. `run --capture-stdout <path>` stores stdout only in the
-local file and leaves coordinator logs/events to stderr plus lifecycle events.
-`run --capture-stderr <path>` does the same for remote stderr. Failed runs write
-a local `.crabbox/captures/*.tar.gz` bundle by default. SSH-backed runs include
-the uploaded script, redacted env/config summaries, timing JSON, command
-stdout/stderr, common test/report/log paths, and a generic gateway log tail when
-present. Blacksmith delegated runs include stdout/stderr plus timing and
-redacted env/config metadata. Successful Blacksmith runs also support
-`--emit-proof`; when requested, Crabbox writes bounded stdout/stderr, timing,
-metadata, and the generated proof block as local run artifacts. Implicit
-stdout/stderr files inside automatic failure bundles are capped; use
-`--capture-stdout` / `--capture-stderr` when a full local stream file is
-required. `--capture-on-fail` remains accepted for older scripts. Crabbox does
-not redact captured files, so treat them as secret-bearing until reviewed.
-`run --download remote=local` copies successful-run artifacts back to the local
-machine without adding file bytes to coordinator logs.
+- **`history`** lists recorded runs. Filter with `--lease`, `--owner`, `--org`,
+  `--state`, and `--limit` (default 50). It is intended for command debugging,
+  not unbounded log archival.
+- **`logs <run-id>`** prints the retained remote stdout/stderr capture for a run.
+  Use `--tail N` for the last N lines. Logs are stored in 64 KiB chunks with an
+  8 MiB cap, so very long output is truncated.
+- **`events <run-id>`** prints the ordered phase and output events for a run.
+  Filter with `--type`, `--phase`, `--after N`, and `--limit` (default 500).
+- **`attach <run-id>`** follows events for a still-active run, polling every
+  `--poll` interval (default 1s), so you can watch a run another CLI started.
+- **`results <run-id>`** prints structured test-result summaries. See
+  [Test results](features/test-results.md).
+
+The run ID is `run_<hex>`; the lease ID is `cbx_<12 hex>`. `history`, `logs`,
+`events`, `attach`, and `results` all accept the run ID as a positional argument
+or via `--id`.
+
+### Capturing run output locally
+
+By default, coordinator logs and events go to the broker and live progress goes
+to your terminal. To redirect streams into local files:
+
+- `run --capture-stdout <path>` writes remote stdout to the file and leaves
+  coordinator logs/events plus lifecycle progress on stderr.
+- `run --capture-stderr <path>` does the same for remote stderr.
+
+Failed runs write a local failure bundle to `.crabbox/captures/*.tar.gz` by
+default. SSH-backed runs bundle the uploaded script, redacted env/config
+summaries, timing JSON, command stdout/stderr, common test/report/log paths, and
+a generic gateway log tail when present. Blacksmith delegated runs bundle
+stdout/stderr plus timing and redacted env/config metadata. The stdout/stderr
+files captured inside automatic failure bundles are size-capped — pass
+`--capture-stdout` / `--capture-stderr` when you need a complete local stream
+file. `--capture-on-fail` is still accepted as a compatibility alias; failure
+bundles are saved automatically on non-zero exit regardless.
+
+Crabbox does **not** redact captured files. Treat every bundle and capture file
+as secret-bearing until you have reviewed it.
+
+To pull successful-run artifacts back without routing file bytes through the
+coordinator log, use `--download remote=local` (repeatable):
+
+```sh
+crabbox run --id swift-crab \
+  --download dist/report.xml=./report.xml \
+  -- pnpm test
+```
+
 Test results are stored as structured summaries when `--junit`,
 `--results-auto`, `results.junit`, or `results.auto` is configured.
 
-`--timing-json` includes sync phases and command phases. Failed runs add
-`blockedStage` and `retryLikely` when Crabbox can classify the likely blocker;
-the human run summary prints the same values as `blocked_stage` and
-`retry_likely`. Commands can add user-defined phases by printing marker lines
-to stdout or stderr:
+Successful Blacksmith runs additionally support `--emit-proof <path>`: when
+requested, Crabbox writes bounded stdout/stderr, timing, metadata, and the
+generated proof block as local run artifacts.
+
+### Timing and phases
+
+`--timing-json` prints final timing as JSON, including sync phases and command
+phases. Failed runs add `blockedStage` and `retryLikely` when Crabbox can
+classify the likely blocker; the human-readable run summary prints the same
+values as `blocked_stage` and `retry_likely`.
+
+Commands can define their own phases by printing marker lines to stdout or
+stderr:
 
 ```sh
 echo CRABBOX_PHASE:install
@@ -100,11 +147,12 @@ echo CRABBOX_PHASE:test
 pnpm test
 ```
 
+### Forwarding live secrets
+
 When local `CRABBOX_ENV_ALLOW` is set, `run` prints the variable names selected
-for forwarding plus safe metadata such as whether secret-looking names are set
-and their value length. Values are never printed. Delegated Testbox providers
-print that this forwarding is unsupported and that secrets belong in the
-provider workflow.
+for forwarding plus safe metadata (whether secret-looking names are set and their
+value length). Values are never printed. Delegated Testbox providers report that
+forwarding is unsupported, because secrets belong in the provider workflow.
 
 For one-off live secrets, avoid hand-written `source` boilerplate:
 
@@ -120,8 +168,11 @@ Crabbox parses simple `export NAME=value` and `NAME=value` profile lines without
 executing the profile. Only names selected by `--allow-env`, `env.allow`, or
 `CRABBOX_ENV_ALLOW` are forwarded, and summaries show presence/length metadata
 for secret-looking names rather than values. On native Windows, the profile
-handoff file is uploaded as UTF-8 and imported with PowerShell UTF-8 decoding,
-so non-ASCII token material and paths do not depend on the system code page.
+handoff file is uploaded as UTF-8 and imported with PowerShell UTF-8 decoding, so
+non-ASCII token material and paths do not depend on the system code page. See
+[Env forwarding](features/env-forwarding.md).
+
+### Running scripts instead of argv
 
 Use `--script <file>` or `--script-stdin` when the remote command is more than a
 small argv:
@@ -138,12 +189,10 @@ The script is uploaded under `.crabbox/scripts/` in the remote workdir and is
 included in failure bundles. POSIX SSH providers support this path; delegated
 providers reject it before reading stdin because they own command transport.
 Native Windows targets upload scripts too and run them through Windows
-PowerShell; use `--shell` for short snippets and `--script <file.ps1>` for
+PowerShell — use `--shell` for short snippets and `--script <file.ps1>` for
 longer runs. Crabbox writes Windows scripts as UTF-8 with a byte-order mark when
-the input has no BOM, which keeps Windows PowerShell 5.1 from mojibaking
-non-ASCII script source.
-
-Native Windows example:
+the input has none, which keeps Windows PowerShell 5.1 from mojibaking non-ASCII
+script source:
 
 ```sh
 crabbox run \
@@ -156,27 +205,27 @@ crabbox run \
   -- -Mode smoke
 ```
 
-For PR debugging that should not inherit local dependency churn, use a fresh
-remote checkout:
+For PR debugging that should not inherit local dependency churn, run against a
+fresh remote checkout:
 
 ```sh
 crabbox run \
-  --fresh-pr acme/app#123 \
+  --fresh-pr example-org/my-app#123 \
   --script ./scripts/e2e-smoke.sh
 ```
 
 Add `--apply-local-patch` only when the local diff should be applied on top of
 the PR checkout. PR URLs must be on `github.com`; non-GitHub and GitHub
-Enterprise PR URLs are rejected instead of being rewritten to a public clone.
-Numeric shorthand uses the current repository's GitHub origin.
+Enterprise PR URLs are rejected rather than rewritten to a public clone. The
+numeric shorthand uses the current repository's GitHub origin.
 
-## Remote Debugging
+## Remote debugging
 
-Use SSH for live process and filesystem inspection:
+SSH in for live process and filesystem inspection:
 
 ```sh
-bin/crabbox ssh --id blue-lobster
-bin/crabbox inspect --id blue-lobster --json
+crabbox ssh --id swift-crab
+crabbox inspect --id swift-crab --json
 ```
 
 Useful remote checks:
@@ -189,31 +238,36 @@ free -h
 ps aux --sort=-%cpu | head
 ```
 
-If a lease was created with `--keep`, SSH remains available until `crabbox stop`, idle expiry, or the TTL cap removes it. For one-shot E2E debugging, add `--keep-on-failure`; Crabbox releases successful runs normally, but on failure it prints inspect, SSH, and stop commands for the exact failed lease and lets idle/TTL expiry clean it up later.
+A lease created with `--keep` stays reachable over SSH until `crabbox stop`, idle
+expiry, or the TTL cap removes it. For one-shot E2E debugging, add
+`--keep-on-failure`: Crabbox releases successful runs normally, but on failure it
+prints the inspect, SSH, and stop commands for the exact failed lease and leaves
+idle/TTL expiry to clean it up later.
+
+### Preflight capability snapshot
 
 For a concise pre-command capability snapshot, add `--preflight`:
 
 ```sh
-bin/crabbox run --id blue-lobster --preflight -- pnpm test:changed
+crabbox run --id swift-crab --preflight -- pnpm test:changed
 ```
 
-The preflight prints a target-specific capability snapshot from the same
-command workdir. It sources the Actions handoff env file when present, and
-marks the workspace as raw or Actions-hydrated. Raw workspaces with Actions
-hydration configured print the exact hydrate command suggestion and whether the
+Preflight prints a target-specific capability snapshot from the same workdir the
+command will run in. It sources the Actions handoff env file when present and
+marks the workspace as raw or Actions-hydrated. A raw workspace that has Actions
+hydration configured prints the exact hydrate command suggestion and whether the
 selected provider/target supports hydration.
 
 Preflight is a probe layer, not an installer. Missing tools print
 `tool=missing`; Crabbox does not run `apt install`, `corepack prepare`,
-`bun install`, or any other setup. Install toolchains through Actions
-hydration, a prebaked image, devcontainer/Nix/mise/asdf setup, or the uploaded
+`bun install`, or any other setup. Install toolchains through Actions hydration,
+a prebaked image, a devcontainer/Nix/mise/asdf setup, or the uploaded
 script/command itself.
 
-The default built-in probes cover common toolchains: `git`, `tar`, `node`,
-`npm`, `corepack`, `pnpm`, `yarn`, `bun`, `docker`, plus target-specific probes
+The built-in probes cover common toolchains — `git`, `tar`, `node`, `npm`,
+`corepack`, `pnpm`, `yarn`, `bun`, `docker`, `uv` — plus target-specific probes
 such as `sudo`, `apt`, `bubblewrap`, `powershell`, `execution_policy`,
-`longpaths`, `temp`, and `pwsh`. `uv` is available as an additional built-in.
-Override the list per run:
+`longpaths`, `temp`, and `pwsh`. Override the probe list per run:
 
 ```sh
 crabbox run --preflight --preflight-tools node,bun,docker -- bun test
@@ -229,30 +283,34 @@ run:
     - docker
 ```
 
-## Actions Hydration
+## Actions hydration
 
-`crabbox actions hydrate` runs the configured workflow setup locally over SSH by default and waits for a ready marker. The marker path is the key local correlation point; `--github-runner` also reports the workflow run URL when Crabbox uses the GitHub runner fallback.
-
-Use:
+`crabbox actions hydrate` populates a lease's workspace by driving the repo's
+configured workflow setup over SSH by default, waiting for a ready marker. The
+marker path is the key local correlation point; `--github-runner` instead
+registers the box as a self-hosted runner and reports the workflow run URL.
 
 ```sh
-bin/crabbox actions hydrate --id blue-lobster
-bin/crabbox inspect --id blue-lobster --json
+crabbox actions hydrate --id swift-crab --workflow .github/workflows/hydrate.yml
+crabbox inspect --id swift-crab --json
 ```
 
-The hydrated run writes non-secret handoff data for later `crabbox run --id blue-lobster` commands. Secrets and OIDC tokens remain workflow-step scoped unless the workflow intentionally writes its own short-lived handoff.
+A hydrated run writes non-secret handoff data for later
+`crabbox run --id swift-crab` commands. Secrets and OIDC tokens stay
+workflow-step scoped unless the workflow intentionally writes its own short-lived
+handoff. See [Actions hydration](features/actions-hydration.md).
 
-## Live Provider Debugging
+## Live provider debugging
 
-For live provider or end-to-end test runs, prefer an Actions-hydrated lease
-when tests need Node, pnpm, Docker services, repository secrets, or GitHub OIDC:
+For live provider or end-to-end test runs, prefer an Actions-hydrated lease when
+tests need Node, pnpm, Docker services, repository secrets, or GitHub OIDC:
 
 ```sh
 crabbox warmup --provider aws --class beast --keep
-crabbox actions hydrate --id blue-lobster --workflow .github/workflows/hydrate.yml
+crabbox actions hydrate --id swift-crab --workflow .github/workflows/hydrate.yml
 mkdir -p .crabbox/logs
 CRABBOX_ENV_ALLOW=OPENAI_API_KEY,OPENAI_BASE_URL \
-  crabbox run --id blue-lobster \
+  crabbox run --id swift-crab \
   --preflight \
   --timing-json \
   --capture-stdout .crabbox/logs/live-provider.stdout.log \
@@ -262,8 +320,8 @@ CRABBOX_ENV_ALLOW=OPENAI_API_KEY,OPENAI_BASE_URL \
 ```
 
 For Blacksmith Testbox comparison runs, keep secrets in the Testbox workflow
-environment. Crabbox will show that `CRABBOX_ENV_ALLOW` forwarding is
-unsupported because Blacksmith owns command execution:
+environment. Crabbox reports that `CRABBOX_ENV_ALLOW` forwarding is unsupported,
+because Blacksmith owns command execution:
 
 ```sh
 CRABBOX_ENV_ALLOW=OPENAI_API_KEY \
@@ -274,21 +332,25 @@ CRABBOX_ENV_ALLOW=OPENAI_API_KEY \
   -- pnpm test:live:providers
 ```
 
-## Worker Logs
+## Worker logs
 
-When the coordinator path fails before SSH, check Worker logs and Durable Object errors. The symptoms usually group into:
+When the coordinator path fails before SSH is established, check Worker logs and
+Durable Object errors. The symptoms usually fall into a few groups:
 
 - auth failure;
 - cost limit rejection;
 - provider quota or capacity rejection;
 - provider API failure;
-- Durable Object alarm or state transition bug.
+- Durable Object alarm or state-transition bug.
 
-Keep the lease ID, owner, org, provider, class, and request time when comparing CLI output to Worker logs.
+Keep the lease ID, owner, org, provider, class, and request time on hand when
+comparing CLI output to Worker logs. See [How it works](how-it-works.md) and the
+[coordinator](features/coordinator.md) reference for the request flow.
 
 ## Gaps
 
-Current Crabbox observability is enough for maintainer operations, but not yet a full analytics product. Missing pieces:
+Crabbox observability is sufficient for maintainer operations but is not yet a
+full analytics product. Notably missing:
 
 - alerting on budget or failure-rate thresholds;
-- dashboard UI.
+- a dashboard UI.

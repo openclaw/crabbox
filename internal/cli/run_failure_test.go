@@ -30,6 +30,56 @@ func TestClassifyRunFailureStages(t *testing.T) {
 	}
 }
 
+func TestClassifyRunFailureBlacksmithInfraStages(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		text  string
+		stage string
+	}{
+		{
+			name:  "shutdown dns",
+			text:  "warning: blacksmith stop failed for tbx_1: request failed: Post https://backend.blacksmith.sh/api/shutdown: dial tcp: lookup backend.blacksmith.sh: i/o timeout",
+			stage: "cleanup",
+		},
+		{
+			name:  "sync guard",
+			text:  "Blacksmith Testbox sync did not print a completion marker for 10m0s; terminating local runner.",
+			stage: "sync",
+		},
+		{
+			name:  "actions cancelled",
+			text:  "Testbox ready\nGitHub Actions run cancelled",
+			stage: "actions_cancelled",
+		},
+		{
+			name:  "stalled after ready",
+			text:  "Blacksmith Testbox ready\nBlacksmith post-ready stall: no output after ready",
+			stage: "testbox_stalled_after_ready",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifyRunFailure(255, tt.text, nil)
+			if got.BlockedStage != tt.stage || got.RetryLikely != "true" {
+				t.Fatalf("ClassifyRunFailure()=%#v, want stage=%q retry=true", got, tt.stage)
+			}
+		})
+	}
+}
+
+func TestClassifyRunFailureDoesNotTreatUserTimeoutsAsBlacksmithInfra(t *testing.T) {
+	got := ClassifyRunFailure(1, "Testbox ready\nFAIL ui.spec.ts\nError: Test timeout of 30000ms exceeded", nil)
+	if got.BlockedStage != "unknown" {
+		t.Fatalf("ClassifyRunFailure()=%#v, want unknown", got)
+	}
+}
+
+func TestClassifyRunFailureDoesNotTreatUserCancellationAsBlacksmithInfra(t *testing.T) {
+	got := ClassifyRunFailure(1, "Testbox ready\nFAIL queue.test.ts\nexpected canceled job state", nil)
+	if got.BlockedStage != "unknown" {
+		t.Fatalf("ClassifyRunFailure()=%#v, want unknown", got)
+	}
+}
+
 func TestClassifyRunFailureUsesFinalPhaseAfterErrorSignatures(t *testing.T) {
 	got := ClassifyRunFailure(1, "pnpm install completed\nunit tests failed", []TimingPhase{
 		{Name: "install"},

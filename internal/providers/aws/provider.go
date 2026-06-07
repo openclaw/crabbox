@@ -16,8 +16,9 @@ func (Provider) Name() string      { return "aws" }
 func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name: "aws",
-		Kind: core.ProviderKindSSHLease,
+		Name:   "aws",
+		Family: "aws",
+		Kind:   core.ProviderKindSSHLease,
 		Targets: []core.TargetSpec{
 			{OS: core.TargetLinux},
 			{OS: core.TargetWindows, WindowsMode: "normal"},
@@ -32,6 +33,15 @@ func (Provider) RegisterFlags(*flag.FlagSet, core.Config) any { return core.NoPr
 func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 	return nil
 }
+
+func (Provider) ServerTypeForConfig(cfg core.Config) string {
+	return core.AWSInstanceTypeCandidatesForConfig(cfg)[0]
+}
+
+func (Provider) ServerTypeForClass(class string) string {
+	return core.AWSInstanceTypeCandidatesForClass(class)[0]
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewAWSLeaseBackend(p.Spec(), cfg, rt), nil
 }

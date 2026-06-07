@@ -35,12 +35,21 @@ export function leaseProviderLabels(
   if (config.target === "windows") {
     labels["windows_mode"] = config.windowsMode;
   }
+  if (config.pond) {
+    labels["pond"] = config.pond;
+  }
+  if (config.exposedPorts && config.exposedPorts.length > 0) {
+    labels["crabbox_exposed_ports"] = config.exposedPorts.join("-");
+  }
   if (config.desktop) {
     labels["desktop"] = "true";
     labels["desktop_env"] = config.desktopEnv;
   }
   if (config.browser) {
     labels["browser"] = "true";
+  }
+  if (config.code) {
+    labels["code"] = "true";
   }
   if (config.tailscale) {
     labels["tailscale"] = "true";

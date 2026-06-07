@@ -9,69 +9,84 @@ crabbox logs run_abcdef123456 --tail 80
 crabbox logs run_abcdef123456 --json
 ```
 
-## What Gets Stored
+Run IDs have the form `run_<hex>`. Get them from [`history`](history.md), or
+from the `run.started` event in [`events`](events.md).
 
-When `crabbox run` runs against a coordinator, it streams remote stdout and
-stderr to the local terminal *and* records a bounded copy on the
-coordinator. The CLI keeps up to 8 MiB of capture per run; the coordinator
-stores larger captures in chunks so a noisy parallel run does not exceed
-Durable Object storage limits.
+## What gets stored
 
-Output beyond the cap is truncated with an `output.truncated` marker on the
-last event so the consumer knows the tail is missing.
+When `crabbox run` executes against a coordinator, it streams the remote
+process stdout and stderr to your terminal *and* records a bounded copy on the
+coordinator. The retained log is the combined command output, capped at 8 MiB
+per run; the coordinator stores it in 64 KiB chunks so a noisy parallel run
+does not blow past Durable Object storage limits.
 
-Runs started with `--capture-stdout <path>` intentionally omit stdout from
-retained logs and output events. Stderr is still streamed and retained. Use this
-mode for binary stdout, Sixel frames, archives, or any output that should not be
-stored as text in the coordinator. Files copied with `run --download
-remote=local` are local artifacts and are not stored in coordinator logs.
+Output beyond the cap is dropped and the run is flagged as truncated, so a
+consumer can tell the tail is missing.
+
+Runs started with `run --capture-stdout <path>` intentionally omit stdout from
+the retained log and from output events; stderr is still streamed and retained.
+Use that mode for binary stdout, Sixel frames, archives, or anything that
+should not be stored as text on the coordinator. Files pulled with `run
+--download remote=local` are local artifacts and never appear in coordinator
+logs.
 
 ## Output
 
-The plain form writes the log text to stdout. Add `--tail N` to print only the
-last N retained log lines. Logs are stored as combined command output; stdout
-and stderr are not separately indexed in the retained log, so stream filtering
-belongs on `events`.
+The default form writes the log text to stdout, unmodified. Add `--tail N` to
+print only the last N lines of the retained log.
 
-`--json` returns run metadata plus the log:
+Logs are stored as combined output; stdout and stderr are not separately
+indexed in the retained log, so per-stream filtering belongs on
+[`events`](events.md) instead.
+
+`--json` prints the full run record alongside the log:
 
 ```json
 {
-  "runId": "run_abcdef123456",
-  "leaseId": "cbx_abcdef123456",
-  "exitCode": 0,
-  "truncated": false,
+  "run": {
+    "id": "run_abcdef123456",
+    "leaseID": "cbx_abcdef123456",
+    "state": "succeeded",
+    "exitCode": 0,
+    "logBytes": 4096,
+    "logTruncated": false
+  },
   "log": "..."
 }
 ```
 
-`--json` is stable enough for scripts that filter by exit code and want the
-log text in one payload.
+The `run` object carries the same fields you get from [`history`](history.md)
+(provider, target, timings, `exitCode`, `logBytes`, `logTruncated`, parsed
+`results`, and more); the `log` field holds the retained text after any
+`--tail` trim. Scripts that want exit code plus log text in one payload should
+read `run.exitCode` and `log`.
 
 ## Flags
 
 ```text
---id <run-id>       run id (also accepted as a positional argument)
---tail <n>          print only the last N log lines
---json              print JSON with metadata and log text
+--id <run-id>   run id (also accepted as a positional argument)
+--tail <n>      print only the last N log lines (must be >= 0)
+--json          print JSON: the run record plus the log text
 ```
 
-## When To Use Logs vs Events vs Attach
+## When to use logs vs events vs attach
 
-- `logs` returns the retained command output. Use when you want the full
-  bounded transcript after the run finished.
-- `events` returns ordered run events (lease, sync, command, output chunks,
-  finish). Use when you need to know *what happened* and *when*.
-- `attach` follows live events. Use when the run is still active and you
-  want to watch it without re-attaching the original CLI.
+- [`logs`](logs.md) returns the retained command output. Use it when you want
+  the full bounded transcript after a run finished.
+- [`events`](events.md) returns ordered run events (lease, sync, command,
+  output chunks, finish). Use it when you need to know *what happened* and
+  *when*.
+- [`attach`](attach.md) follows live events. Use it while a run is still active
+  and you want to watch it without re-running the original CLI.
 
-Logs and events are independent surfaces - logs stay focused on command
-output, events stay focused on lifecycle.
+Logs and events are independent surfaces: logs stay focused on command output,
+events stay focused on lifecycle.
 
-## Direct Mode
+## Direct mode
 
-Direct-provider mode does not record runs centrally, so `crabbox logs` has
-nothing to fetch. Use shell output or the local terminal log instead.
+Direct-provider runs (no coordinator configured) are not recorded centrally, so
+`crabbox logs` has nothing to fetch and reports that no coordinator is
+configured. Use the local terminal output instead.
 
 Related docs:
 

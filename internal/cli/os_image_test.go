@@ -30,11 +30,18 @@ func TestNormalizeOSImage(t *testing.T) {
 
 func TestAWSLinuxAMIQueryForOS(t *testing.T) {
 	t.Parallel()
-	name, label, err := awsLinuxAMIQueryForOS("ubuntu:26.04")
+	name, label, err := awsLinuxAMIQueryForOS("ubuntu:26.04", ArchitectureAMD64)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if name != "ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-*" || label != "Ubuntu 26.04" {
 		t.Fatalf("query name=%q label=%q", name, label)
+	}
+	name, label, err = awsLinuxAMIQueryForOS("ubuntu:24.04", ArchitectureARM64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*" || label != "Ubuntu 24.04" {
+		t.Fatalf("arm query name=%q label=%q", name, label)
 	}
 }

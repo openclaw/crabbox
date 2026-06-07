@@ -33,6 +33,12 @@ func clearConfigEnv(t *testing.T) {
 		"CF_ACCESS_CLIENT_ID",
 		"CF_ACCESS_CLIENT_SECRET",
 		"CF_ACCESS_TOKEN",
+		"CRABBOX_AZURE_BACKEND",
+		"CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT",
+		"CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL",
+		"CRABBOX_AZURE_DYNAMIC_SESSIONS_API_VERSION",
+		"CRABBOX_AZURE_DYNAMIC_SESSIONS_WORKDIR",
+		"CRABBOX_AZURE_DYNAMIC_SESSIONS_TIMEOUT_SECS",
 		"CRABBOX_GCP_PROJECT",
 		"GOOGLE_CLOUD_PROJECT",
 		"GCP_PROJECT_ID",
@@ -99,6 +105,28 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_TENSORLAKE_DISK_MB",
 		"CRABBOX_TENSORLAKE_TIMEOUT_SECS",
 		"CRABBOX_TENSORLAKE_NO_INTERNET",
+		"CRABBOX_ASCII_BOX_API_KEY",
+		"ASCII_BOX_API_KEY",
+		"CRABBOX_ASCII_BOX_BASE_URL",
+		"ASCII_BOX_BASE_URL",
+		"CRABBOX_ASCII_BOX_CLI",
+		"BOX_CLI",
+		"CRABBOX_ASCII_BOX_WORKDIR",
+		"CRABBOX_APPLE_CONTAINER_CLI",
+		"CRABBOX_APPLE_CONTAINER_IMAGE",
+		"CRABBOX_APPLE_CONTAINER_USER",
+		"CRABBOX_APPLE_CONTAINER_WORK_ROOT",
+		"CRABBOX_APPLE_CONTAINER_CPUS",
+		"CRABBOX_APPLE_CONTAINER_MEMORY",
+		"CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS",
+		"CRABBOX_MULTIPASS_CLI",
+		"CRABBOX_MULTIPASS_IMAGE",
+		"CRABBOX_MULTIPASS_USER",
+		"CRABBOX_MULTIPASS_WORK_ROOT",
+		"CRABBOX_MULTIPASS_CPUS",
+		"CRABBOX_MULTIPASS_MEMORY",
+		"CRABBOX_MULTIPASS_DISK",
+		"CRABBOX_MULTIPASS_LAUNCH_TIMEOUT",
 		"CRABBOX_WANDB_API_KEY",
 		"WANDB_API_KEY",
 		"CRABBOX_WANDB_DEFAULT_IMAGE",
@@ -166,6 +194,105 @@ func clearConfigEnv(t *testing.T) {
 	}
 }
 
+func TestAsciiBoxConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "ascii-box",
+		AsciiBox: &fileAsciiBoxConfig{
+			BaseURL: "https://box.example.test",
+			CLIPath: "/tmp/box",
+			Workdir: "/home/user/project",
+		},
+	})
+	if cfg.Provider != "ascii-box" || cfg.AsciiBox.BaseURL != "https://box.example.test" || cfg.AsciiBox.CLIPath != "/tmp/box" || cfg.AsciiBox.Workdir != "/home/user/project" {
+		t.Fatalf("file asciiBox config not applied: %#v", cfg.AsciiBox)
+	}
+
+	t.Setenv("ASCII_BOX_API_KEY", "fallback-key")
+	t.Setenv("ASCII_BOX_BASE_URL", "https://fallback.example.test")
+	t.Setenv("CRABBOX_ASCII_BOX_API_KEY", "override-key")
+	t.Setenv("CRABBOX_ASCII_BOX_BASE_URL", "https://override.example.test")
+	t.Setenv("CRABBOX_ASCII_BOX_CLI", "/opt/box")
+	t.Setenv("CRABBOX_ASCII_BOX_WORKDIR", "/home/user/env-project")
+	applyEnv(&cfg)
+	if cfg.AsciiBox.APIKey != "override-key" || cfg.AsciiBox.BaseURL != "https://override.example.test" || cfg.AsciiBox.CLIPath != "/opt/box" || cfg.AsciiBox.Workdir != "/home/user/env-project" {
+		t.Fatalf("env asciiBox config not applied: %#v", cfg.AsciiBox)
+	}
+}
+
+func TestAppleContainerConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.AppleContainer.CLIPath != "container" || cfg.AppleContainer.User != "crabbox" {
+		t.Fatalf("apple container defaults not applied: %#v", cfg.AppleContainer)
+	}
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "apple-container",
+		AppleContainer: &fileAppleContainerConfig{
+			CLIPath:      "/opt/bin/container",
+			Image:        "example-org/my-app:test",
+			User:         "runner",
+			WorkRoot:     "/work/example",
+			CPUs:         4,
+			Memory:       "8g",
+			ExtraRunArgs: []string{"--mount", "type=virtiofs,source=/tmp,target=/tmp"},
+		},
+	})
+	if cfg.Provider != "apple-container" || cfg.AppleContainer.CLIPath != "/opt/bin/container" || cfg.AppleContainer.Image != "example-org/my-app:test" || cfg.AppleContainer.User != "runner" || cfg.AppleContainer.WorkRoot != "/work/example" || cfg.AppleContainer.CPUs != 4 || cfg.AppleContainer.Memory != "8g" || len(cfg.AppleContainer.ExtraRunArgs) != 2 {
+		t.Fatalf("file appleContainer config not applied: %#v", cfg.AppleContainer)
+	}
+
+	t.Setenv("CRABBOX_APPLE_CONTAINER_CLI", "/usr/local/bin/container")
+	t.Setenv("CRABBOX_APPLE_CONTAINER_IMAGE", "example-org/other:live")
+	t.Setenv("CRABBOX_APPLE_CONTAINER_USER", "env-user")
+	t.Setenv("CRABBOX_APPLE_CONTAINER_WORK_ROOT", "/work/env")
+	t.Setenv("CRABBOX_APPLE_CONTAINER_CPUS", "6")
+	t.Setenv("CRABBOX_APPLE_CONTAINER_MEMORY", "12g")
+	t.Setenv("CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS", "--dns 1.1.1.1")
+	applyEnv(&cfg)
+	if cfg.AppleContainer.CLIPath != "/usr/local/bin/container" || cfg.AppleContainer.Image != "example-org/other:live" || cfg.AppleContainer.User != "env-user" || cfg.AppleContainer.WorkRoot != "/work/env" || cfg.AppleContainer.CPUs != 6 || cfg.AppleContainer.Memory != "12g" || len(cfg.AppleContainer.ExtraRunArgs) != 2 {
+		t.Fatalf("env appleContainer config not applied: %#v", cfg.AppleContainer)
+	}
+}
+
+func TestMultipassConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.Multipass.CLIPath != "multipass" || cfg.Multipass.Image != "26.04" || cfg.Multipass.User != "crabbox" {
+		t.Fatalf("multipass defaults not applied: %#v", cfg.Multipass)
+	}
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "multipass",
+		Multipass: &fileMultipassConfig{
+			CLIPath:       "/opt/bin/multipass",
+			Image:         "24.04",
+			User:          "runner",
+			WorkRoot:      "/work/example",
+			CPUs:          4,
+			Memory:        "8G",
+			Disk:          "40G",
+			LaunchTimeout: "7m",
+		},
+	})
+	if cfg.Provider != "multipass" || cfg.Multipass.CLIPath != "/opt/bin/multipass" || cfg.Multipass.Image != "24.04" || cfg.Multipass.User != "runner" || cfg.Multipass.WorkRoot != "/work/example" || cfg.Multipass.CPUs != 4 || cfg.Multipass.Memory != "8G" || cfg.Multipass.Disk != "40G" || cfg.Multipass.LaunchTimeout != 7*time.Minute {
+		t.Fatalf("file multipass config not applied: %#v", cfg.Multipass)
+	}
+
+	t.Setenv("CRABBOX_MULTIPASS_CLI", "/usr/local/bin/multipass")
+	t.Setenv("CRABBOX_MULTIPASS_IMAGE", "26.04")
+	t.Setenv("CRABBOX_MULTIPASS_USER", "env-user")
+	t.Setenv("CRABBOX_MULTIPASS_WORK_ROOT", "/work/env")
+	t.Setenv("CRABBOX_MULTIPASS_CPUS", "6")
+	t.Setenv("CRABBOX_MULTIPASS_MEMORY", "12G")
+	t.Setenv("CRABBOX_MULTIPASS_DISK", "80G")
+	t.Setenv("CRABBOX_MULTIPASS_LAUNCH_TIMEOUT", "11m")
+	applyEnv(&cfg)
+	if cfg.Multipass.CLIPath != "/usr/local/bin/multipass" || cfg.Multipass.Image != "26.04" || cfg.Multipass.User != "env-user" || cfg.Multipass.WorkRoot != "/work/env" || cfg.Multipass.CPUs != 6 || cfg.Multipass.Memory != "12G" || cfg.Multipass.Disk != "80G" || cfg.Multipass.LaunchTimeout != 11*time.Minute {
+		t.Fatalf("env multipass config not applied: %#v", cfg.Multipass)
+	}
+}
+
 func TestRepoConfigBareEnvWildcardDoesNotForwardEveryLocalVariable(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
@@ -229,6 +356,59 @@ func TestProfileEnvConfigYAMLRejectsNonMapping(t *testing.T) {
 	err := yaml.Unmarshal([]byte("- CI=1\n"), &env)
 	if err == nil || !strings.Contains(err.Error(), "profile env must be a mapping") {
 		t.Fatalf("error=%v want profile env mapping error", err)
+	}
+}
+
+func TestRepoConfigClearsInheritedCacheVolumes(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	userPath := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte("cache:\n  volumes:\n    - key: user-cache\n      path: /var/cache/crabbox/user\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".crabbox.yaml", []byte("cache:\n  volumes: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Cache.Volumes) != 0 {
+		t.Fatalf("repo config did not clear inherited cache volumes: %#v", cfg.Cache.Volumes)
+	}
+}
+
+func TestCacheVolumesOmittedKeepsInheritedConfig(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Cache.Volumes = []CacheVolumeConfig{{Key: "user-cache", Path: "/var/cache/crabbox/user"}}
+	pnpm := false
+	file := fileConfig{Cache: &fileCacheConfig{Pnpm: &pnpm}}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Cache.Volumes) != 1 || cfg.Cache.Volumes[0].Key != "user-cache" {
+		t.Fatalf("omitted cache volumes should keep inherited value: %#v", cfg.Cache.Volumes)
 	}
 }
 
@@ -439,6 +619,12 @@ daytona:
   workRoot: /home/daytona/crabbox
   sshGatewayHost: ssh.daytona.example.test
   sshAccessMinutes: 12
+azureDynamicSessions:
+  endpoint: https://pool.env.eastus.azurecontainerapps.io
+  pool: pool
+  apiVersion: 2025-02-02-preview
+  workdir: /workspace/file
+  timeoutSecs: 120
 e2b:
   apiUrl: https://api.e2b.example.test
   domain: e2b.example.test
@@ -530,6 +716,12 @@ cache:
   git: true
   maxGB: 120
   purgeOnRelease: true
+  volumes:
+    - name: pnpm-store
+      key: my-app-linux-amd64-node24-pnpm10-lock
+      path: /var/cache/crabbox/pnpm
+      sizeGB: 80
+      required: true
 ssh:
   key: ~/.ssh/crabbox
   fallbackPorts:
@@ -612,6 +804,9 @@ ssh:
 	if cfg.Daytona.APIURL != "https://daytona.example.test/api" || cfg.Daytona.Snapshot != "crabbox-ready" || cfg.Daytona.Target != "us" || cfg.Daytona.User != "daytona" || cfg.Daytona.WorkRoot != "/home/daytona/crabbox" || cfg.Daytona.SSHGatewayHost != "ssh.daytona.example.test" || cfg.Daytona.SSHAccessMinutes != 12 {
 		t.Fatalf("daytona config not loaded: %#v", cfg.Daytona)
 	}
+	if cfg.AzureDynamicSessions.Endpoint != "https://pool.env.eastus.azurecontainerapps.io" || cfg.AzureDynamicSessions.Pool != "pool" || cfg.AzureDynamicSessions.Workdir != "/workspace/file" || cfg.AzureDynamicSessions.TimeoutSecs != 120 {
+		t.Fatalf("azure dynamic sessions config not loaded: %#v", cfg.AzureDynamicSessions)
+	}
 	if cfg.E2B.APIURL != "https://api.e2b.example.test" || cfg.E2B.Domain != "e2b.example.test" || cfg.E2B.Template != "crabbox-ready" || cfg.E2B.Workdir != "work/repo" || cfg.E2B.User != "sandbox" {
 		t.Fatalf("e2b config not loaded: %#v", cfg.E2B)
 	}
@@ -650,6 +845,9 @@ ssh:
 	}
 	if !cfg.Cache.Pnpm || cfg.Cache.Npm || !cfg.Cache.Docker || !cfg.Cache.Git || cfg.Cache.MaxGB != 120 || !cfg.Cache.PurgeOnRelease {
 		t.Fatalf("cache config not loaded: %#v", cfg.Cache)
+	}
+	if len(cfg.Cache.Volumes) != 1 || cfg.Cache.Volumes[0].Name != "pnpm-store" || cfg.Cache.Volumes[0].Key != "my-app-linux-amd64-node24-pnpm10-lock" || cfg.Cache.Volumes[0].Path != "/var/cache/crabbox/pnpm" || cfg.Cache.Volumes[0].SizeGB != 80 || !cfg.Cache.Volumes[0].Required {
+		t.Fatalf("cache volumes config not loaded: %#v", cfg.Cache.Volumes)
 	}
 }
 
@@ -693,6 +891,48 @@ func TestLoadConfigExeDevWorkRootDefaults(t *testing.T) {
 				t.Fatalf("workRoot=%q exeDev.workRoot=%q", cfg.WorkRoot, cfg.ExeDev.WorkRoot)
 			}
 		})
+	}
+}
+
+func TestLoadConfigRoutesAzureBackendToDynamicSessions(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "config.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte(`
+provider: azure
+azure:
+  backend: dynamic-sessions
+azureDynamicSessions:
+  endpoint: http://127.0.0.1:8787/
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "azure-dynamic-sessions" || cfg.AzureBackend != AzureBackendDynamicSessions || cfg.ServerType != "" {
+		t.Fatalf("provider=%q azureBackend=%q serverType=%q", cfg.Provider, cfg.AzureBackend, cfg.ServerType)
+	}
+}
+
+func TestLoadConfigRoutesAzureBackendFromEnv(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(home, "missing.yaml"))
+	t.Setenv("CRABBOX_PROVIDER", "azure")
+	t.Setenv("CRABBOX_AZURE_BACKEND", "azds")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "azure-dynamic-sessions" || cfg.AzureBackend != AzureBackendDynamicSessions {
+		t.Fatalf("provider=%q azureBackend=%q", cfg.Provider, cfg.AzureBackend)
 	}
 }
 
@@ -751,6 +991,11 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_AWS_SSH_CIDRS", "198.51.100.7/32,203.0.113.8/32")
 	t.Setenv("CRABBOX_AZURE_OS_DISK", "managed")
 	t.Setenv("CRABBOX_AZURE_SSH_CIDRS", "198.51.100.9/32,203.0.113.10/32")
+	t.Setenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT", "https://env-pool.env.westus.azurecontainerapps.io")
+	t.Setenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL", "env-pool")
+	t.Setenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_API_VERSION", "2025-02-02-preview")
+	t.Setenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_WORKDIR", "/workspace/env")
+	t.Setenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_TIMEOUT_SECS", "90")
 	t.Setenv("CRABBOX_GCP_PROJECT", "crabbox-project")
 	t.Setenv("CRABBOX_GCP_ZONE", "europe-west2-b")
 	t.Setenv("CRABBOX_GCP_IMAGE", "projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64")
@@ -909,6 +1154,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_CACHE_DOCKER", "true")
 	t.Setenv("CRABBOX_CACHE_GIT", "false")
 	t.Setenv("CRABBOX_CACHE_PURGE_ON_RELEASE", "true")
+	t.Setenv("CRABBOX_CACHE_VOLUMES", "pnpm=env-pnpm:/var/cache/crabbox/pnpm,npm-cache:/var/cache/crabbox/npm")
 	t.Setenv("CRABBOX_SYNC_CHECKSUM", "true")
 	t.Setenv("CRABBOX_SYNC_DELETE", "false")
 	t.Setenv("CRABBOX_SYNC_GIT_SEED", "false")
@@ -946,6 +1192,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if !cfg.AzureOSDiskExplicit {
 		t.Fatal("AzureOSDiskExplicit=false, want true")
+	}
+	if cfg.AzureDynamicSessions.Endpoint != "https://env-pool.env.westus.azurecontainerapps.io" || cfg.AzureDynamicSessions.Pool != "env-pool" || cfg.AzureDynamicSessions.Workdir != "/workspace/env" || cfg.AzureDynamicSessions.TimeoutSecs != 90 {
+		t.Fatalf("unexpected azure dynamic sessions env: %#v", cfg.AzureDynamicSessions)
 	}
 	if cfg.GCPProject != "crabbox-project" || cfg.GCPZone != "europe-west2-b" || cfg.GCPNetwork != "crabbox-net" || cfg.GCPSubnet != "crabbox-subnet" || cfg.GCPRootGB != 900 || cfg.GCPServiceAccount != "runner@crabbox-project.iam.gserviceaccount.com" {
 		t.Fatalf("unexpected gcp env: project=%s zone=%s network=%s subnet=%s root=%d service=%s", cfg.GCPProject, cfg.GCPZone, cfg.GCPNetwork, cfg.GCPSubnet, cfg.GCPRootGB, cfg.GCPServiceAccount)
@@ -1025,6 +1274,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if cfg.Cache.Pnpm || cfg.Cache.Npm || !cfg.Cache.Docker || cfg.Cache.Git || !cfg.Cache.PurgeOnRelease {
 		t.Fatalf("unexpected cache env: %#v", cfg.Cache)
 	}
+	if len(cfg.Cache.Volumes) != 2 || cfg.Cache.Volumes[0].Name != "pnpm" || cfg.Cache.Volumes[0].Key != "env-pnpm" || cfg.Cache.Volumes[1].Key != "npm-cache" {
+		t.Fatalf("unexpected cache volume env: %#v", cfg.Cache.Volumes)
+	}
 	if !cfg.Sync.Checksum || cfg.Sync.Delete || cfg.Sync.GitSeed || cfg.Sync.Fingerprint || cfg.Sync.Timeout != 45*time.Minute || !cfg.Sync.AllowLarge {
 		t.Fatalf("unexpected sync env: %#v", cfg.Sync)
 	}
@@ -1084,6 +1336,86 @@ os: ubuntu:24.04
 	}
 	if cfg.TargetOS != targetLinux || cfg.Image != "ubuntu-24.04" || cfg.AzureImage != "Canonical:ubuntu-24_04-lts:server:latest" {
 		t.Fatalf("portable os defaults not applied through target alias: target=%q image=%q azure=%q", cfg.TargetOS, cfg.Image, cfg.AzureImage)
+	}
+}
+
+func TestAppleContainerImageFollowsOSImageDefault(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("target: linux\nos: ubuntu:24.04\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// apple-container must track the OS image default the same way local-container does.
+	if cfg.AppleContainer.Image == "" || cfg.AppleContainer.Image != cfg.LocalContainer.Image {
+		t.Fatalf("apple-container image should follow the os default like local-container: apple=%q local=%q", cfg.AppleContainer.Image, cfg.LocalContainer.Image)
+	}
+	if cfg.AppleContainer.Image == baseConfig().AppleContainer.Image {
+		t.Fatalf("--os did not update apple-container image: still base %q", cfg.AppleContainer.Image)
+	}
+}
+
+func TestAppleContainerExplicitImageSurvivesOSDefault(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("target: linux\nos: ubuntu:24.04\nappleContainer:\n  image: my-org/custom:tag\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleContainer.Image != "my-org/custom:tag" {
+		t.Fatalf("explicit apple-container image was overwritten by --os: %q", cfg.AppleContainer.Image)
+	}
+}
+
+func TestMultipassImageFollowsOSImageDefault(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("target: linux\nos: ubuntu:24.04\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Multipass.Image != "24.04" {
+		t.Fatalf("multipass image should follow --os default: %q", cfg.Multipass.Image)
+	}
+}
+
+func TestMultipassExplicitImageSurvivesOSDefault(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("target: linux\nos: ubuntu:24.04\nmultipass:\n  image: daily:26.04\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Multipass.Image != "daily:26.04" {
+		t.Fatalf("explicit multipass image was overwritten by --os: %q", cfg.Multipass.Image)
 	}
 }
 
@@ -1202,6 +1534,32 @@ func TestProviderAliasCanonicalizedBeforeDefaults(t *testing.T) {
 	}
 	if cfg.Provider != "gcp" || cfg.ServerType != "c4-standard-192" {
 		t.Fatalf("provider=%q type=%q want gcp c4-standard-192", cfg.Provider, cfg.ServerType)
+	}
+}
+
+func TestConfigFileServerTypeIsExplicit(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	path := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("provider: gcp\nserverType: c4-standard-192\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServerType != "c4-standard-192" || !cfg.ServerTypeExplicit {
+		t.Fatalf("serverType=%q explicit=%t, want explicit c4-standard-192", cfg.ServerType, cfg.ServerTypeExplicit)
+	}
+	if largeDefaultServerType(cfg) {
+		t.Fatalf("explicit config serverType should not warn as a large default")
 	}
 }
 
@@ -1649,6 +2007,13 @@ func TestApplyFileConfigCloudProviderBranches(t *testing.T) {
 			SSHCIDRs:       []string{"198.51.100.2/32"},
 			Network:        "public",
 		},
+		AzureDynamicSessions: &fileAzureDynamicSessionsConfig{
+			Endpoint:    "https://pool.env.eastus.azurecontainerapps.io",
+			Pool:        "pool",
+			APIVersion:  "2025-02-02-preview",
+			Workdir:     "/workspace/file",
+			TimeoutSecs: 120,
+		},
 		GCP: &fileGCPConfig{
 			Project:        "project",
 			Zone:           "europe-west1-b",
@@ -1673,6 +2038,9 @@ func TestApplyFileConfigCloudProviderBranches(t *testing.T) {
 	if cfg.AzureOSDisk != "ephemeral" || !cfg.AzureOSDiskExplicit || cfg.AzureNetwork != "public" {
 		t.Fatalf("azure config not applied: %#v", cfg)
 	}
+	if cfg.AzureDynamicSessions.Pool != "pool" || cfg.AzureDynamicSessions.Workdir != "/workspace/file" || cfg.AzureDynamicSessions.TimeoutSecs != 120 {
+		t.Fatalf("azure dynamic sessions config not applied: %#v", cfg.AzureDynamicSessions)
+	}
 	if cfg.GCPProject != "project" || !cfg.gcpProjectExplicit || cfg.GCPRootGB != 456 || cfg.GCPServiceAccount == "" {
 		t.Fatalf("gcp config not applied: %#v", cfg)
 	}
@@ -1682,20 +2050,21 @@ func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
 	enabled := true
 	disabled := false
 	job := applyFileJobConfig(JobConfig{}, fileJobConfig{
-		Provider:    "aws",
-		TargetOS:    targetLinux,
-		Windows:     &fileWindowsConfig{Mode: windowsModeWSL2},
-		Profile:     "ci",
-		Class:       "large",
-		Type:        "m8i.large",
-		Capacity:    &fileCapacityConfig{Market: "spot"},
-		Market:      "on-demand",
-		TTL:         "45m",
-		IdleTimeout: "5m",
-		Desktop:     &enabled,
-		Browser:     &disabled,
-		Code:        &enabled,
-		Network:     "tailscale",
+		Provider:     "aws",
+		TargetOS:     targetLinux,
+		Windows:      &fileWindowsConfig{Mode: windowsModeWSL2},
+		Profile:      "ci",
+		Class:        "large",
+		Architecture: "arm64",
+		Type:         "m8i.large",
+		Capacity:     &fileCapacityConfig{Market: "spot"},
+		Market:       "on-demand",
+		TTL:          "45m",
+		IdleTimeout:  "5m",
+		Desktop:      &enabled,
+		Browser:      &disabled,
+		Code:         &enabled,
+		Network:      "tailscale",
 		Hydrate: &fileJobHydrateConfig{
 			Actions:          &enabled,
 			GitHubRunner:     &enabled,
@@ -1719,7 +2088,7 @@ func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
 		Downloads:      []string{"out=out", "out=out"},
 		Stop:           "always",
 	})
-	if job.Provider != "aws" || job.Target != targetLinux || job.WindowsMode != windowsModeWSL2 || job.Profile != "ci" || job.Class != "large" || job.ServerType != "m8i.large" || job.Market != "on-demand" {
+	if job.Provider != "aws" || job.Target != targetLinux || job.WindowsMode != windowsModeWSL2 || job.Profile != "ci" || job.Class != "large" || job.Architecture != "arm64" || job.ServerType != "m8i.large" || job.Market != "on-demand" {
 		t.Fatalf("basic job fields not applied: %#v", job)
 	}
 	if job.TTL != 45*time.Minute || job.IdleTimeout != 5*time.Minute {

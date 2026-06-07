@@ -1,79 +1,79 @@
 # sync-plan
 
-`crabbox sync-plan` prints the local sync manifest without leasing a box.
-Use it to preview what `crabbox run` would send before paying for a cold
-sync, or after editing `.crabboxignore` to confirm artifacts dropped out
-of the manifest.
+`crabbox sync-plan` prints the local sync manifest and its size hotspots
+without leasing a box. Use it to preview what `crabbox run` would upload
+before paying for a cold sync, or to confirm that artifacts dropped out of
+the manifest after editing `.crabboxignore`.
 
 ```sh
 crabbox sync-plan
 crabbox sync-plan --limit 10
-crabbox sync-plan --limit 25 --json
 ```
 
-## What It Reads
+The command reads only your local Git checkout. It does not require a
+lease, does not call the broker, and does not call any provider API.
 
-`sync-plan` uses the same Git file-list manifest, `.crabboxignore`, and
-`sync.exclude` rules as `crabbox run`:
+## What it reads
 
-- tracked files from `git ls-files --cached`;
-- nonignored untracked files from
-  `git ls-files --others --exclude-standard`;
+`sync-plan` builds the same manifest `crabbox run` uses, so the file set
+matches what an actual sync would ship:
+
+- files reported by `git ls-files --cached --others --exclude-standard`
+  (tracked files plus non-ignored untracked files);
 - root `.crabboxignore` patterns;
-- repo-local `sync.exclude` patterns;
-- Crabbox's default cache/build excludes.
+- `sync.exclude` patterns from config;
+- Crabbox's built-in cache/build excludes.
 
-It does not require a lease, does not call the broker, and does not call
-any provider API.
+Files matching any exclude are removed from the candidate set before the
+size accounting runs.
 
 ## Output
 
-Default output prints:
-
-- candidate file count and total bytes;
-- tracked deletes that would be applied remotely;
-- the largest files;
-- the largest first or second-level directories.
+The first line reports the candidate file count and total size. If the
+checkout has tracked files that were deleted locally (and would be pruned
+on the remote), a `deleted tracked paths` line follows. Then `sync-plan`
+prints the largest files and the largest top-level or second-level
+directories.
 
 ```text
-files: 1843
-bytes: 312.5MiB
-tracked deletes: 0
-
-largest files:
-  84.5MiB  assets/demo.mp4
-  12.4MiB  fixtures/sample-data.json
+sync candidate: 1843 files, 312.5 MiB
+deleted tracked paths: 2
+top files:
+  84.5 MiB   assets/demo.mp4
+  12.4 MiB   fixtures/sample-data.json
   ...
-
-largest directories:
-  140.2MiB  assets
-   80.1MiB  fixtures
-   ...
+top dirs:
+  140.2 MiB  assets
+  80.1 MiB   fixtures
+  ...
 ```
+
+Directories are grouped at one level deep for top-level paths and two
+levels deep for nested paths (for example `internal/cli`), so deeply
+nested hotspots still roll up to a meaningful prefix.
 
 ## Flags
 
 ```text
---limit <n>   show this many files and directories in each top list (default 5)
---json        print structured JSON output
+--limit <n>   number of top files and directories to print (default 20)
 ```
 
-`--limit 0` shows the full lists (use sparingly; large repos produce big
-output).
+`--limit` must be positive; `--limit 0` (or any non-positive value) is
+rejected with an error. There is no `--json` output for this command.
 
-## Use Cases
+## Use cases
 
-- preview a first sync before warming a beast-class lease;
-- find sneaky directories that grew (`.cache/`, `dist/`, generated assets);
-- audit `.crabboxignore` after adding new excludes;
-- compare repo footprint over time as part of repo health checks.
+- preview a first sync before warming a lease;
+- find directories that quietly grew (`.cache/`, `dist/`, generated
+  assets);
+- audit `.crabboxignore` and `sync.exclude` after adding new patterns.
 
-The numbers `sync-plan` prints are upper bounds; rsync's actual transfer
-size depends on what is already on the remote runner. Repeat sync after a
+The numbers `sync-plan` prints are upper bounds. The actual rsync transfer
+depends on what already exists on the remote runner: a repeat sync after a
 warmup is much smaller because the manifest matches the remote fingerprint
 and rsync ships only changed bytes.
 
-Related docs:
+## Related docs
 
 - [run](run.md)
 - [Sync](../features/sync.md)

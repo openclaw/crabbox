@@ -2,8 +2,11 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -11,10 +14,14 @@ type leaseCreateFlagValues struct {
 	Provider      *string
 	Profile       *string
 	Class         *string
+	Architecture  *string
 	OSImage       *string
 	ServerType    *string
 	Market        *string
 	Slug          *string
+	Pond          *string
+	Expose        *stringListFlag
+	CacheVolumes  *stringListFlag
 	TTL           *time.Duration
 	Idle          *time.Duration
 	Desktop       *bool
@@ -27,14 +34,22 @@ type leaseCreateFlagValues struct {
 }
 
 func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlagValues {
+	expose := stringListFlag{}
+	cacheVolumes := stringListFlag{}
+	fs.Var(&expose, "expose", "declare a TCP port this lease wants reachable over the SSH-mesh plane; repeatable")
+	fs.Var(&cacheVolumes, "cache-volume", "provider-backed cache volume [name=]key:path; repeatable")
 	return leaseCreateFlagValues{
 		Provider:      fs.String("provider", defaults.Provider, providerHelpAll()),
 		Profile:       fs.String("profile", defaults.Profile, "profile"),
 		Class:         fs.String("class", defaults.Class, "machine class"),
+		Architecture:  fs.String("arch", defaults.Architecture, "CPU architecture: amd64 or arm64"),
 		OSImage:       fs.String("os", defaults.OSImage, "portable Linux OS image selector, for example ubuntu:26.04"),
 		ServerType:    fs.String("type", getenv("CRABBOX_SERVER_TYPE", ""), "provider server/instance type"),
 		Market:        fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand"),
 		Slug:          fs.String("slug", "", "request a friendly slug for a new lease"),
+		Pond:          fs.String("pond", defaults.Pond, "tag this lease with a pond name so peers can be selected with --pond"),
+		Expose:        &expose,
+		CacheVolumes:  &cacheVolumes,
 		TTL:           fs.Duration("ttl", defaults.TTL, "maximum lease lifetime"),
 		Idle:          fs.Duration("idle-timeout", defaults.IdleTimeout, "idle timeout"),
 		Desktop:       fs.Bool("desktop", defaults.Desktop, "provision or require a visible desktop/VNC session"),
@@ -52,12 +67,40 @@ func applyLeaseCreateFlags(cfg *Config, fs *flag.FlagSet, values leaseCreateFlag
 }
 
 func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCreateFlagValues, existingLeaseID string) error {
+	return applyLeaseCreateFlagsForLeaseMode(cfg, fs, values, existingLeaseID, true)
+}
+
+func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values leaseCreateFlagValues, existingLeaseID string, mutateExternal bool) error {
 	cfg.Provider = *values.Provider
 	cfg.Profile = *values.Profile
 	cfg.Class = *values.Class
+	if flagWasSet(fs, "arch") {
+		arch, err := normalizeArchitecture(*values.Architecture)
+		if err != nil {
+			return err
+		}
+		cfg.Architecture = arch
+		cfg.architectureExplicit = true
+	}
+	if flagWasSet(fs, "pond") {
+		pond, err := requestedPondName(*values.Pond)
+		if err != nil {
+			return err
+		}
+		cfg.Pond = pond
+	} else if cfg.Pond != "" {
+		pond, err := requestedPondName(cfg.Pond)
+		if err != nil {
+			return err
+		}
+		cfg.Pond = pond
+	}
 	applyCapabilityFlags(cfg, *values.Desktop, *values.Browser, *values.Code)
 	cfg.DesktopEnv = *values.DesktopEnv
 	if err := applyTargetFlagOverrides(cfg, fs, values.Target); err != nil {
+		return err
+	}
+	if err := autoRouteStaticLease(cfg, fs, existingLeaseID); err != nil {
 		return err
 	}
 	if flagWasSet(fs, "os") {
@@ -70,6 +113,9 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 		applyOSImageProviderDefaults(cfg, false)
 	}
 	if err := applyNetworkFlagOverrides(cfg, fs, values.Network); err != nil {
+		return err
+	}
+	if err := applyProviderRoutingFlags(cfg, fs, values.ProviderFlags); err != nil {
 		return err
 	}
 	if existingLeaseID != "" && cfg.Provider == "aws" && cfg.TargetOS == targetMacOS && !flagWasSet(fs, "market") {
@@ -88,7 +134,23 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 	if err := applyProviderFlags(cfg, fs, values.ProviderFlags); err != nil {
 		return err
 	}
+	if flagWasSet(fs, "cache-volume") {
+		volumes, err := ParseCacheVolumeSpecs(*values.CacheVolumes)
+		if err != nil {
+			return err
+		}
+		for i := range volumes {
+			volumes[i].Required = true
+		}
+		cfg.Cache.Volumes = mergeCacheVolumes(cfg.Cache.Volumes, volumes)
+	}
+	if err := validateCacheVolumesForLeaseReuse(*cfg, existingLeaseID); err != nil {
+		return err
+	}
 	if err := applyProviderConfigDefaults(cfg); err != nil {
+		return err
+	}
+	if err := validateCacheVolumesForProvider(*cfg); err != nil {
 		return err
 	}
 	if err := validateProviderTarget(*cfg); err != nil {
@@ -97,7 +159,134 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 	if err := validateRequestedCapabilities(*cfg); err != nil {
 		return err
 	}
-	return validateLeaseDurations(*cfg)
+	if values.Expose != nil && len(*values.Expose) > 0 {
+		ports, err := requestedExposedPorts(*values.Expose)
+		if err != nil {
+			return err
+		}
+		cfg.ExposedPorts = ports
+	}
+	if err := validateLeaseDurations(*cfg); err != nil {
+		return err
+	}
+	if cfg.Pond != "" {
+		dynamicTailscaleTagAllowed := pondDynamicTailscaleTagAllowed(*cfg)
+		appendPondTailscaleTag(cfg, dynamicTailscaleTagAllowed)
+		// Reuse paths do not mutate ACL state.
+		if mutateExternal && existingLeaseID == "" && dynamicTailscaleTagAllowed {
+			if err := maybeBootstrapPondACL(context.Background(), *cfg); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateCacheVolumesForLeaseReuse(cfg Config, existingLeaseID string) error {
+	if existingLeaseID == "" {
+		return nil
+	}
+	required := CacheVolumeStickyDiskSpecs(requiredCacheVolumes(cfg.Cache.Volumes))
+	if len(required) == 0 {
+		return nil
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(existingLeaseID, canonicalClaimProvider(cfg.Provider))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return exit(2, "required cache volumes cannot be verified for existing lease %s; warm a new lease instead", existingLeaseID)
+	}
+	attached := map[string]struct{}{}
+	for _, spec := range claim.CacheVolumes {
+		attached[spec] = struct{}{}
+	}
+	for _, spec := range required {
+		if _, ok := attached[spec]; !ok {
+			return exit(2, "required cache volume %q is not recorded on existing lease %s; warm a new lease instead", spec, existingLeaseID)
+		}
+	}
+	return nil
+}
+
+func requiredCacheVolumes(volumes []CacheVolumeConfig) []CacheVolumeConfig {
+	required := []CacheVolumeConfig{}
+	for _, volume := range volumes {
+		if volume.Required {
+			required = append(required, volume)
+		}
+	}
+	return required
+}
+
+func mergeCacheVolumes(base, additions []CacheVolumeConfig) []CacheVolumeConfig {
+	merged := append([]CacheVolumeConfig(nil), base...)
+	for _, addition := range additions {
+		matched := false
+		for i := range merged {
+			if merged[i].Key == addition.Key && merged[i].Path == addition.Path {
+				if addition.Name != "" {
+					merged[i].Name = addition.Name
+				}
+				merged[i].Required = merged[i].Required || addition.Required
+				if addition.SizeGB > 0 {
+					merged[i].SizeGB = addition.SizeGB
+				}
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			merged = append(merged, addition)
+		}
+	}
+	return merged
+}
+
+const pondACLAutoBootstrapEnvVar = "CRABBOX_POND_ACL_BOOTSTRAP"
+
+// maybeBootstrapPondACL self-bootstraps the pond tag's tagOwners + grants
+// rows on the operator tailnet when explicitly enabled. TS_API_KEY alone is
+// not consent to edit a tailnet policy; operators must also set
+// CRABBOX_POND_ACL_BOOTSTRAP=1. When disabled, when the key is absent, when
+// the provider lacks Tailscale, or when the row is already present, this is a
+// silent no-op so doctor still owns the manual-snippet fallback path. Failures
+// from the live API are surfaced so the lease is not created against a tailnet
+// that cannot actually carry pond traffic.
+func maybeBootstrapPondACL(ctx context.Context, cfg Config) error {
+	if cfg.Pond == "" || !cfg.Tailscale.Enabled {
+		return nil
+	}
+	if !pondDynamicTailscaleTagAllowed(cfg) {
+		return nil
+	}
+	if !truthyEnv(os.Getenv(pondACLAutoBootstrapEnvVar)) {
+		return nil
+	}
+	apiKey := strings.TrimSpace(os.Getenv("TS_API_KEY"))
+	if apiKey == "" {
+		return nil
+	}
+	// Don't mutate tailnet ACLs if no Tailscale auth key is configured
+	// for the lease itself — provisioning will fail later, and we'd leave
+	// a dangling policy mutation behind.
+	if cfg.Tailscale.AuthKey == "" && os.Getenv("CRABBOX_TAILSCALE_AUTH_KEY") == "" {
+		return nil
+	}
+	client := pondTailnetACLClientFactory(apiKey)
+	if client == nil {
+		return nil
+	}
+	tailnet := strings.TrimSpace(os.Getenv("TS_TAILNET"))
+	owner := localCoordinatorOwner()
+	err := pondACLEnsure(ctx, client, tailnet, owner, cfg.Pond)
+	// A self-hosted control plane (e.g. Headscale) without a Tailscale-shaped
+	// policy API must not block lease creation. Doctor surfaces the same
+	// condition to the operator with the manual-snippet pointer.
+	if errors.Is(err, ErrPondACLAutoBootstrapUnavailable) {
+		return nil
+	}
+	return err
 }
 
 func validateLeaseDurations(cfg Config) error {
@@ -110,8 +299,22 @@ func validateLeaseDurations(cfg Config) error {
 	return nil
 }
 
+func truthyEnv(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 type leaseTargetConfigOptions struct {
 	Desktop bool
+	// LeaseID is the resolved lease id/slug from the command's --id flag (or
+	// equivalent positional). When set, `static_<host>` ids auto-route to the
+	// ssh provider so callers don't have to re-pass --provider / --static-host
+	// that warmup already implied.
+	LeaseID string
 }
 
 func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags targetFlagValues, networkFlags networkModeFlagValues, opts leaseTargetConfigOptions) (Config, error) {
@@ -126,7 +329,13 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return Config{}, err
 	}
+	if err := autoRouteStaticLease(&cfg, fs, opts.LeaseID); err != nil {
+		return Config{}, err
+	}
 	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
+		return Config{}, err
+	}
+	if err := routeConfiguredProvider(&cfg); err != nil {
 		return Config{}, err
 	}
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
@@ -164,20 +373,21 @@ func (a App) resolveNetworkLeaseTarget(ctx context.Context, cfg Config, id strin
 	if target.Host != "" {
 		_ = probeSSHTransport(ctx, &target, 4*time.Second)
 	}
+	_ = updateLeaseClaimEndpoint(leaseID, server, target)
 	if printFallback && resolved.FallbackReason != "" {
 		fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 	}
 	return server, target, leaseID, nil
 }
 
-func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server Server, leaseID string, reclaim bool) error {
+func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID string, reclaim bool) error {
 	repo, err := findRepo()
 	if err != nil {
 		return err
 	}
-	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
 		return err
 	}
-	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, LeaseID: leaseID}, "")
+	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
 	return nil
 }

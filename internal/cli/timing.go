@@ -14,6 +14,8 @@ type TimingReport struct {
 	SyncPhases    []TimingPhase `json:"syncPhases,omitempty"`
 	SyncSkipped   bool          `json:"syncSkipped"`
 	SyncDelegated bool          `json:"syncDelegated,omitempty"`
+	HydrateMs     int64         `json:"hydrateMs,omitempty"`
+	ProbeMs       int64         `json:"probeMs,omitempty"`
 	CommandMs     int64         `json:"commandMs"`
 	CommandPhases []TimingPhase `json:"commandPhases,omitempty"`
 	TotalMs       int64         `json:"totalMs"`

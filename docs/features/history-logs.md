@@ -2,69 +2,124 @@
 
 Read when:
 
-- changing run recording;
-- debugging failed remote commands;
-- deciding what belongs in coordinator history.
+- changing how `crabbox run` records progress;
+- debugging a failed remote command after the fact;
+- deciding what belongs in coordinator-stored run history.
 
-Coordinator-backed `crabbox run` creates a durable `run_...` handle before
-leasing starts. As the CLI advances, it appends ordered events for leasing,
-bootstrap, sync, command start, stdout/stderr chunks, command finish, and lease
-release. Stdout/stderr events are capped at 64 KiB per run and followed by an
-`output.truncated` marker when the cap is reached. When the command exits, the
-CLI finishes that run with:
+History and logs are a **brokered-mode** feature. When `crabbox run` executes
+against a brokered provider (`aws`, `azure`, `gcp`, `hetzner` with a coordinator
+configured), the CLI mirrors the run into the broker's Fleet Durable Object as a
+durable, queryable record. Direct-provider runs and delegated runs do not
+produce central history — there you have only the live terminal output and any
+local captures you ask for.
+
+## What a recorded run contains
+
+The CLI creates a run handle (`run_<hex>`) before leasing starts, then appends
+ordered events as it advances:
+
+- `run.started`
+- `leasing.started`, `lease.created`, `lease.replace.started|finished|failed`
+- `bootstrap.waiting`
+- `sync.started`, `sync.finished`
+- `actions.hydrate.started|finished|failed` (when hydrating from a GitHub
+  Actions workflow)
+- `script.uploaded` (when running a `--script` file)
+- `command.started`, streamed `stdout`/`stderr` events, `command.finished`
+- `lease.released`
+- `run.failed` (if the run errors before the command finishes)
+
+Each event carries a sequence number, type, phase, and stream. Streamed output
+events are capped at **64 KiB total per run**; once the cap is hit the CLI emits
+a single `output.truncated` marker pointing you at `crabbox logs` for the full
+retained output.
+
+When the command exits, the CLI finishes the run with:
 
 - exit code;
-- sync duration;
-- command duration;
-- total duration;
+- sync duration, command duration, and total duration;
 - owner and org;
-- provider, class, and server type;
-- optional Linux telemetry snapshots for load, memory, disk, and uptime, including bounded mid-run samples for longer runs;
-- retained remote output.
+- provider, target, class, and server type;
+- the retained command log (capped — see below);
+- a parsed test-result summary when JUnit results are available;
+- a failure classification (`blockedStage`, `retryLikely`) on non-zero exits;
+- optional Linux telemetry: a start sample, bounded mid-run samples (every 15s,
+  up to 60 retained), and an end sample covering load, memory, disk, and uptime.
 
-Use:
+## Reading history
 
 ```sh
-crabbox history
-crabbox history --lease cbx_...
-crabbox events run_...
-crabbox attach run_...
-crabbox logs run_...
+crabbox history                      # recent runs
+crabbox history --lease cbx_abcdef01 # runs for one lease
+crabbox history --state failed       # filter by state
+crabbox logs run_a1b2c3d4            # full retained command log
+crabbox logs run_a1b2c3d4 --tail 80  # last 80 lines only
+crabbox events run_a1b2c3d4          # ordered run events
+crabbox events run_a1b2c3d4 --type stderr  # filter events by type
+crabbox attach run_a1b2c3d4          # follow an in-progress run live
 ```
 
+`crabbox attach` follows a still-running run, preferring the broker's live
+control WebSocket and falling back to polling. Use `attach` for active runs and
+`logs` for the retained output of a finished run. All four commands accept
+`--json`.
+
+## Storage limits
+
+History records, run events, and run logs all live in the Fleet Durable Object.
+Log text is stored separately from run metadata and is intentionally bounded so
+noisy commands cannot exhaust storage:
+
+- The CLI keeps the **last 8 MiB** of command output and reports
+  `logTruncated` when more was produced.
+- The broker stores the same **8 MiB** cap, chunked at **64 KiB** per storage
+  value and reassembled by `crabbox logs`.
+
+These caps are independent of the per-run **64 KiB** streamed-event budget
+described above; events are for live tailing, `logs` is for the full retained
+output.
+
+## Local debug artifacts
+
+For uncapped, local-only output, mirror the streams to files:
+
+```sh
+crabbox run --capture-stdout out.log --capture-stderr err.log -- ./test.sh
+```
+
+These captures are written on the operator's machine and bypass coordinator
+run-log storage entirely. Use distinct paths for stdout, stderr, and any
+`--download remote=local` artifacts — Crabbox rejects path collisions before the
+command runs.
+
+On a non-zero exit, SSH-backed and Blacksmith delegated runs also write a local
+failure bundle under `.crabbox/captures/` by default (the bundled streams are
+capped at 16 MiB each). `--capture-on-fail` is accepted as a no-op compatibility
+alias; bundles save automatically on failure. Treat captured logs and bundles as
+secret-bearing files unless you redact them before sharing.
+
+## Phase timings
+
+A command can annotate its own timeline by printing `CRABBOX_PHASE:<name>` on
+stdout or stderr. Phase markers surface in `crabbox run --timing-json` under
+`commandPhases`, and the failure digest reports the observed and final phases.
+The marker line stays in the normal output stream, so scripts and humans see the
+same text.
+
+## Portal view
+
 In the authenticated browser portal, `/portal/runs/<run-id>` renders the same
-run as a human page with command metadata, result summary, searchable/paginated
+run as a human page: command metadata, result summary, searchable and paginated
 recent events, compact resource deltas, short telemetry trend lines, and a
-copyable retained log tail.
-`/portal/runs/<run-id>/logs` stays a plain-text log endpoint, and
-`/portal/runs/<run-id>/events` stays JSON for copying or browser-side
-inspection.
+copyable retained log tail. `/portal/runs/<run-id>/logs` stays a plain-text log
+endpoint and `/portal/runs/<run-id>/events` stays JSON, both for easy copying or
+browser-side inspection.
 
-History records and run events live in the Fleet Durable Object. Log text is
-stored separately from run metadata and intentionally capped so noisy commands
-cannot exhaust storage. Logs larger than one storage value are chunked by the
-coordinator and reassembled by `crabbox logs`. Event output capture is also
-bounded; use `crabbox attach` for active run previews and `crabbox logs` for the
-retained command output.
-
-For local, uncapped debug artifacts, `crabbox run` can mirror streams with
-`--capture-stdout <path>` and `--capture-stderr <path>`. These captures are
-local-only and bypass coordinator run-log storage. Use distinct local paths for
-stdout, stderr, and `--download remote=local` artifacts; Crabbox rejects
-collisions before command execution. Failed SSH-backed and Blacksmith delegated
-runs write local `.crabbox/captures/*.tar.gz` bundles by default. Treat captured
-logs and bundles as secret-bearing files unless the caller redacts them.
-
-Commands can add timing detail by printing `CRABBOX_PHASE:<name>` on stdout or
-stderr. Phase markers appear in `--timing-json` as `commandPhases`; the marker
-line remains in normal output so scripts and humans see the same stream.
-
-Direct-provider mode does not have central history. Use shell output or local
-terminal logs there.
-
-Related docs:
+## Related docs
 
 - [history command](../commands/history.md)
-- [attach command](../commands/attach.md)
 - [logs command](../commands/logs.md)
+- [events command](../commands/events.md)
+- [attach command](../commands/attach.md)
+- [results command](../commands/results.md)
 - [Observability](../observability.md)

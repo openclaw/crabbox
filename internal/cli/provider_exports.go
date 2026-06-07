@@ -35,6 +35,26 @@ func ServerTypeForProviderClass(provider, class string) string {
 	return serverTypeForProviderClass(provider, class)
 }
 
+func AWSInstanceTypeCandidatesForConfig(cfg Config) []string {
+	return awsInstanceTypeCandidatesForConfig(cfg)
+}
+
+func AWSInstanceTypeCandidatesForClass(class string) []string {
+	return awsInstanceTypeCandidatesForClass(class)
+}
+
+func AzureVMSizeCandidatesForConfig(cfg Config) []string {
+	return azureVMSizeCandidatesForConfig(cfg)
+}
+
+func AzureVMSizeCandidatesForClass(class string) []string {
+	return azureVMSizeCandidatesForClass(class)
+}
+
+func GCPMachineTypeCandidatesForClass(class string) []string {
+	return gcpMachineTypeCandidatesForClass(class)
+}
+
 func ProxmoxServerTypeForConfig(cfg Config) string {
 	return proxmoxServerTypeForConfig(cfg)
 }
@@ -51,6 +71,24 @@ func ClaimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repo
 	return claimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repoRoot, idleTimeout, reclaim)
 }
 
+func ClaimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
+}
+
+// ClaimLeaseForRepoProviderPond is the pond-aware variant exposed for
+// delegated providers that need to persist the pond label in the local claim
+// sidecar (delegated providers do not own a provider-side label store).
+func ClaimLeaseForRepoProviderPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, "", pond, repoRoot, idleTimeout, reclaim)
+}
+
+// ClaimLeaseForRepoProviderScopePond combines a provider scope (e.g. Docker
+// context for local-container claim isolation) with the pond label so both
+// features coexist in the same claim sidecar without one overwriting the other.
+func ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
+}
+
 func ResolveLeaseClaim(identifier string) (LeaseClaim, bool, error) {
 	return resolveLeaseClaim(identifier)
 }
@@ -61,6 +99,14 @@ func ResolveLeaseClaimForProvider(identifier, provider string) (LeaseClaim, bool
 
 func RemoveLeaseClaim(leaseID string) {
 	removeLeaseClaim(leaseID)
+}
+
+func UpdateLeaseClaimCacheVolumes(leaseID string, specs []string) error {
+	return updateLeaseClaimCacheVolumes(leaseID, specs)
+}
+
+func UpdateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
+	return updateLeaseClaimEndpoint(leaseID, server, target)
 }
 
 func ListLeaseClaims() ([]LeaseClaim, error) {

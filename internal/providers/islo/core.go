@@ -62,6 +62,10 @@ func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTim
 	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
 }
 
+func claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return core.ClaimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
+}
+
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }
@@ -74,8 +78,8 @@ func syncExcludes(root string, cfg Config) ([]string, error) {
 	return core.SyncExcludes(root, cfg)
 }
 
-func syncManifest(root string, excludes []string) (core.SyncManifest, error) {
-	return core.BuildSyncManifest(root, excludes)
+func syncManifest(root string, excludes, includes []string) (core.SyncManifest, error) {
+	return core.BuildSyncManifestFiltered(root, excludes, includes)
 }
 
 func checkSyncPreflight(manifest core.SyncManifest, cfg Config, force bool, stderr io.Writer) error {

@@ -5,19 +5,34 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type leaseClaim struct {
-	LeaseID            string `json:"leaseID"`
-	Slug               string `json:"slug,omitempty"`
-	Provider           string `json:"provider,omitempty"`
-	ProviderScope      string `json:"providerScope,omitempty"`
-	RepoRoot           string `json:"repoRoot"`
-	ClaimedAt          string `json:"claimedAt"`
-	LastUsedAt         string `json:"lastUsedAt"`
-	IdleTimeoutSeconds int    `json:"idleTimeoutSeconds,omitempty"`
+	LeaseID            string            `json:"leaseID"`
+	Slug               string            `json:"slug,omitempty"`
+	Provider           string            `json:"provider,omitempty"`
+	ProviderScope      string            `json:"providerScope,omitempty"`
+	StaticHost         string            `json:"staticHost,omitempty"`
+	StaticUser         string            `json:"staticUser,omitempty"`
+	StaticPort         string            `json:"staticPort,omitempty"`
+	StaticWorkRoot     string            `json:"staticWorkRoot,omitempty"`
+	TargetOS           string            `json:"targetOS,omitempty"`
+	WindowsMode        string            `json:"windowsMode,omitempty"`
+	Pond               string            `json:"pond,omitempty"`
+	RepoRoot           string            `json:"repoRoot"`
+	ClaimedAt          string            `json:"claimedAt"`
+	LastUsedAt         string            `json:"lastUsedAt"`
+	IdleTimeoutSeconds int               `json:"idleTimeoutSeconds,omitempty"`
+	TailscaleIPv4      string            `json:"tailscaleIPv4,omitempty"`
+	TailscaleFQDN      string            `json:"tailscaleFQDN,omitempty"`
+	SSHHost            string            `json:"sshHost,omitempty"`
+	SSHPort            int               `json:"sshPort,omitempty"`
+	BridgeURL          string            `json:"bridgeURL,omitempty"`
+	CacheVolumes       []string          `json:"cacheVolumes,omitempty"`
+	Labels             map[string]string `json:"labels,omitempty"`
 }
 
 func claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
@@ -26,14 +41,62 @@ func claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration
 
 func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	provider := canonicalClaimProvider(cfg.Provider)
-	return claimLeaseForRepoProviderScope(leaseID, slug, provider, providerClaimScope(provider, cfg), repoRoot, idleTimeout, reclaim)
+	staticDetails := staticClaimDetails{}
+	if isStaticProvider(provider) {
+		staticDetails = staticClaimDetails{
+			Present:     true,
+			Host:        strings.TrimSpace(cfg.Static.Host),
+			User:        strings.TrimSpace(cfg.Static.User),
+			Port:        strings.TrimSpace(cfg.Static.Port),
+			WorkRoot:    strings.TrimSpace(cfg.Static.WorkRoot),
+			TargetOS:    strings.TrimSpace(cfg.TargetOS),
+			WindowsMode: strings.TrimSpace(cfg.WindowsMode),
+		}
+	}
+	if err := claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim); err != nil {
+		return err
+	}
+	return updateLeaseClaimCacheVolumes(leaseID, CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes))
+}
+
+func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	if err := claimLeaseForRepoConfig(leaseID, slug, cfg, repoRoot, idleTimeout, reclaim); err != nil {
+		return err
+	}
+	return updateLeaseClaimEndpoint(leaseID, server, target)
 }
 
 func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return claimLeaseForRepoProviderScope(leaseID, slug, provider, "", repoRoot, idleTimeout, reclaim)
+	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, "", "", repoRoot, idleTimeout, reclaim)
 }
 
 func claimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, "", repoRoot, idleTimeout, reclaim)
+}
+
+func claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, "", pond, repoRoot, idleTimeout, reclaim)
+}
+
+func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim)
+}
+
+type staticClaimDetails struct {
+	Present     bool
+	Host        string
+	User        string
+	Port        string
+	WorkRoot    string
+	TargetOS    string
+	WindowsMode string
+}
+
+func claimLeaseForRepoProviderScopeDetails(leaseID, slug, provider, providerScope string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, "", staticDetails, repoRoot, idleTimeout, reclaim)
+}
+
+func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	if leaseID == "" || repoRoot == "" {
 		return nil
 	}
@@ -60,6 +123,24 @@ func claimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repo
 	if providerScope != "" {
 		existing.ProviderScope = providerScope
 	}
+	if pond = normalizePondName(pond); pond != "" {
+		existing.Pond = pond
+	}
+	if staticDetails.Present {
+		existing.StaticHost = staticDetails.Host
+		existing.StaticUser = staticDetails.User
+		existing.StaticPort = staticDetails.Port
+		existing.StaticWorkRoot = staticDetails.WorkRoot
+		existing.TargetOS = staticDetails.TargetOS
+		existing.WindowsMode = staticDetails.WindowsMode
+	} else if provider != "" && !isStaticProvider(provider) {
+		existing.StaticHost = ""
+		existing.StaticUser = ""
+		existing.StaticPort = ""
+		existing.StaticWorkRoot = ""
+		existing.TargetOS = ""
+		existing.WindowsMode = ""
+	}
 	existing.RepoRoot = repoRoot
 	existing.LastUsedAt = now
 	if idleTimeout > 0 {
@@ -69,6 +150,78 @@ func claimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repo
 		return exit(2, "create claim directory: %v", err)
 	}
 	data, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return exit(2, "write claim %s: %v", path, err)
+	}
+	return nil
+}
+
+func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
+	if leaseID == "" {
+		return nil
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		return err
+	}
+	if claim.LeaseID == "" {
+		return nil
+	}
+	if len(server.Labels) > 0 {
+		claim.Labels = cloneStringMap(server.Labels)
+	}
+	meta := serverTailscaleMetadata(server)
+	if meta.IPv4 != "" {
+		claim.TailscaleIPv4 = meta.IPv4
+	}
+	if meta.FQDN != "" {
+		claim.TailscaleFQDN = meta.FQDN
+	}
+	if target.NetworkKind == NetworkTailscale && target.Host != "" && claim.TailscaleFQDN == "" && claim.TailscaleIPv4 == "" {
+		claim.TailscaleFQDN = target.Host
+	}
+	if target.Host != "" {
+		claim.SSHHost = target.Host
+	}
+	if port, err := strconv.Atoi(strings.TrimSpace(target.Port)); err == nil && port > 0 {
+		claim.SSHPort = port
+	}
+	data, err := json.MarshalIndent(claim, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return exit(2, "write claim %s: %v", path, err)
+	}
+	return nil
+}
+
+func updateLeaseClaimCacheVolumes(leaseID string, specs []string) error {
+	if leaseID == "" {
+		return nil
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		return err
+	}
+	if claim.LeaseID == "" {
+		return nil
+	}
+	claim.CacheVolumes = append([]string(nil), specs...)
+	data, err := json.MarshalIndent(claim, "", "  ")
 	if err != nil {
 		return err
 	}

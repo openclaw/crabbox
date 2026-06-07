@@ -1,25 +1,33 @@
 # Parallels Provider
 
-Read when:
+Read this when you:
 
-- choosing `provider: parallels`;
-- running Crabbox on local Parallels Desktop VMs;
-- cloning Linux, macOS, or Windows templates from known-good snapshots;
-- changing `internal/providers/parallels` or Parallels checkpoint behavior.
+- choose `provider: parallels`;
+- run Crabbox on local or remote Parallels Desktop VMs;
+- clone Linux, macOS, or Windows templates from known-good snapshots;
+- change `internal/providers/parallels` or Parallels checkpoint behavior.
 
-Parallels is a direct SSH lease provider. Crabbox asks `prlctl` to create a
-linked clone from a configured source VM and explicit snapshot, starts the
-clone, discovers the guest IP, injects the per-lease SSH key with Parallels
-Tools, then uses the normal Crabbox SSH sync/run/checkpoint path.
+Parallels is a direct SSH-lease provider (it never goes through the broker). To
+acquire a box, Crabbox asks `prlctl` to create a clone from a configured source
+VM and snapshot, starts the clone, discovers the guest IP, injects the per-lease
+SSH key through Parallels Tools, and then uses the normal Crabbox SSH
+sync/run/checkpoint path.
 
-The provider is local-first. Set `parallels.host` when the Parallels Desktop
-install lives on another Mac reachable over SSH.
+The provider is local-first: by default it drives the `prlctl` on the same Mac
+that runs Crabbox. Set `parallels.host` to drive a Parallels Desktop install on
+another Mac over SSH.
 
-The recommended operator UX is a named template alias. A template points at a
-source VM plus a known-good snapshot. Commands then use the same normal Crabbox
-flows without a separate Parallels command.
+**Targets:** Linux, macOS, and Windows (`--windows-mode normal` or
+`--windows-mode wsl2`).
 
-## Quick Start
+**Capabilities:** SSH, Crabbox sync, cleanup, desktop, browser, code, plus
+native checkpoint/fork/restore/snapshot support backed by Parallels snapshots.
+
+## Quick start
+
+The recommended operator UX is a named template alias: a template points at a
+source VM plus a known-good snapshot, so day-to-day commands run the normal
+Crabbox flows without juggling source/snapshot flags.
 
 ```sh
 crabbox warmup \
@@ -36,7 +44,7 @@ crabbox checkpoint fork chk_abc123 --provider parallels
 crabbox stop --provider parallels blue-lobster
 ```
 
-Template alias:
+With a template alias:
 
 ```sh
 crabbox checkpoint list --provider parallels --parallels-template tahoe-latest
@@ -44,35 +52,36 @@ crabbox checkpoint fork --provider parallels --parallels-template tahoe-latest -
 crabbox run --provider parallels --parallels-template tahoe-latest -- xcodebuild -version
 ```
 
-Use `--target linux`, `--target macos`, or `--target windows`. Windows can use
-`--windows-mode normal` for PowerShell/OpenSSH or `--windows-mode wsl2` when the
-template already exposes a working WSL2 environment through Windows OpenSSH.
+Use `--target linux`, `--target macos`, or `--target windows`. For Windows,
+choose `--windows-mode normal` for PowerShell/OpenSSH or `--windows-mode wsl2`
+when the template already exposes a working WSL2 environment through Windows
+OpenSSH.
 
-## Template Requirements
+## Template requirements
 
-Each template should already include:
+Each source VM should already include:
 
-- Parallels Tools;
+- Parallels Tools (used to discover the guest IP and inject the per-lease key);
 - a stable guest SSH user;
-- OpenSSH server listening on `ssh.port`;
+- an OpenSSH server listening on `ssh.port`;
 - Crabbox sync tools for the target OS (`git`, `rsync` or archive sync tools,
-  shell/PowerShell);
-- a known-good Parallels snapshot for fast linked clones.
+  and a shell/PowerShell);
+- a known-good power-off snapshot for fast linked clones.
 
 Linked clones require an explicit power-off snapshot. Crabbox rejects linked
 clone requests without `parallels.sourceSnapshot`/`sourceSnapshotId`, because
-otherwise `prlctl` creates a source-side "Snapshot for linked clone" on the
+otherwise `prlctl` would create a source-side "Snapshot for linked clone" on the
 template VM. Use `cloneMode: full` or `cloneMode: unlink` only when you
 intentionally want to clone the current source VM state without a snapshot.
 Parallels also refuses to clone from a busy source VM, so keep template VMs shut
-down when they are used as local fleet bases.
+down when they serve as local fleet bases.
 
 For macOS templates, use a user with SSH login permission and a writable
 `parallels.workRoot`, for example `/Users/<user>/crabbox`. For Windows native
 templates, configure OpenSSH Server and PowerShell. For Windows WSL2 templates,
 make sure `wsl.exe` works for the SSH user.
 
-## Config
+## Configuration
 
 ```yaml
 provider: parallels
@@ -88,7 +97,7 @@ parallels:
   startupTimeout: 15m
 ```
 
-Named templates:
+### Named templates
 
 ```yaml
 provider: parallels
@@ -108,12 +117,12 @@ parallels:
       workRoot: /work/crabbox
 ```
 
-Template values can set `source`, `sourceId`, `sourceSnapshot`,
-`sourceSnapshotId`, `target`, `windowsMode`, `cloneMode`, `host`, `hostUser`,
-`hostKey`, `vmRoot`, `user`, and `workRoot`. Explicit command-line flags
-override the template.
+A template may set `source`, `sourceId`, `sourceSnapshot`, `sourceSnapshotId`,
+`target`, `windowsMode`, `cloneMode`, `host`, `hostUser`, `hostKey`, `vmRoot`,
+`user`, and `workRoot`. Explicit command-line flags override the selected
+template.
 
-Remote Mac host:
+### Remote Mac host
 
 ```yaml
 provider: parallels
@@ -129,11 +138,11 @@ parallels:
 ```
 
 When `parallels.host` is set, Crabbox runs `prlctl` over SSH on that Mac and
-uses SSH `ProxyCommand` through the host to reach the guest IP. Normal SSH
-commands, desktop input helpers, screenshots, and VNC tunnels all use that same
+reaches the guest IP through an SSH `ProxyCommand` via the host. Normal SSH
+commands, desktop input helpers, screenshots, and VNC tunnels all use the same
 proxy path.
 
-Fleet hosts:
+### Fleet hosts
 
 ```yaml
 provider: parallels
@@ -155,11 +164,12 @@ parallels:
       user: alice
 ```
 
-When `hosts` is configured, Crabbox checks each matching host for the requested
-source VM and picks the first host below `maxVMs`. The host list works for
-`warmup`, `run`, `checkpoint fork`, `status`, `list`, `stop`, and `cleanup`.
+When `hosts` is configured, Crabbox checks each host whose `targets` match the
+requested target, looks for the requested source VM, and picks the first host
+below its `maxVMs` limit. Host selection applies to `warmup`, `run`,
+`checkpoint fork`, `status`, `list`, `stop`, and `cleanup`.
 
-Environment:
+### Environment variables
 
 ```text
 CRABBOX_PARALLELS_SOURCE
@@ -177,11 +187,13 @@ CRABBOX_PARALLELS_WORK_ROOT
 CRABBOX_PARALLELS_STARTUP_TIMEOUT
 ```
 
-Provider flags mirror the same fields and never carry passwords.
+Provider flags mirror the same fields (`--parallels-source`,
+`--parallels-source-snapshot`, `--parallels-template`, `--parallels-host`, and
+so on) and never carry passwords.
 
 ## Checkpoints
 
-Native Parallels checkpoints use Parallels snapshots:
+Native Parallels checkpoints are backed by Parallels snapshots:
 
 ```sh
 crabbox checkpoint list --provider parallels --id "macOS Tahoe"
@@ -193,7 +205,8 @@ crabbox checkpoint restore chk_abc123 --provider parallels --id blue-lobster
 crabbox checkpoint delete chk_abc123
 ```
 
-Existing Parallels snapshots do not need to be imported. Use them directly:
+Existing Parallels snapshots do not need to be imported; reference them directly
+by source VM and snapshot name:
 
 ```sh
 crabbox checkpoint fork --provider parallels --target macos --id "macOS Tahoe" --snapshot "macOS 26.4" --slug tahoe-test
@@ -203,11 +216,12 @@ crabbox checkpoint restore --provider parallels --id blue-lobster --snapshot "kn
 crabbox checkpoint delete --provider parallels --id blue-lobster --snapshot "crabbox-test-snap"
 ```
 
-`fork` creates a linked clone from the recorded source VM and snapshot.
-`restore` switches an existing Parallels lease back to the recorded snapshot.
-`delete` deletes only the recorded snapshot, not the source VM. Direct snapshot
-delete refuses non-`crabbox-` snapshot names unless `--yes` is supplied. This is
-intentional: known-good snapshots are usually hand-managed template state.
+- `fork` creates a linked clone from the recorded source VM and snapshot.
+- `restore` switches an existing Parallels lease back to the recorded snapshot.
+- `delete` removes only the recorded snapshot, not the source VM. Direct
+  snapshot delete refuses names that do not start with `crabbox-` unless `--yes`
+  is supplied, because known-good snapshots are usually hand-managed template
+  state.
 
 Linked clones depend on the source VM and snapshot. Keep known-good template VMs
 and their base snapshots while any checkpoint or clone depends on them.
@@ -218,11 +232,11 @@ Crabbox refuses to delete Parallels VMs unless their name starts with
 `crabbox-`. `stop` and `cleanup` are scoped to clones Crabbox created.
 
 Use `--dry-run` on direct fork, restore, and delete when validating a template
-or snapshot name. `checkpoint list` prints live Parallels state and marks whether
-each snapshot is forkable. Power-on snapshots can be restored in place; linked
-clone forks require a power-off snapshot.
+or snapshot name. `checkpoint list` prints live Parallels state and marks
+whether each snapshot is forkable: power-on snapshots can be restored in place,
+while linked-clone forks require a power-off snapshot.
 
-Related docs:
+## Related docs
 
 - [Provider overview](README.md)
 - [Checkpoints](../features/checkpoints.md)

@@ -1,10 +1,17 @@
 # CLI
 
+This is the command-surface overview for the `crabbox` binary. It maps the whole
+command tree, then documents the parts that are shared across commands: config
+files, environment variables, exit codes, and output rules.
+
+For per-command flags and examples, see [`commands/`](commands/README.md) — one
+page per top-level command. For the concepts behind the commands (leases, sync,
+checkpoints, ponds, and so on), see [`features/`](features/README.md).
+
 ## Name
 
-`crabbox`
-
-One-liner: lease shared remote test boxes, sync local work, run commands, and clean up.
+`crabbox` — lease a remote box, sync your dirty checkout, run a command, stream
+output, and clean up.
 
 ## Usage
 
@@ -15,488 +22,233 @@ crabbox [global flags] <command> [args]
 Global flags:
 
 ```text
--h, --help
---version
+-h, --help        show help; also: crabbox help <command>, crabbox <command> --help
+-v, --version     print version
 ```
 
-Primary output goes to stdout. Progress, diagnostics, and errors go to stderr. JSON output is stable enough for scripts.
+Primary results go to stdout. Progress, diagnostics, and errors go to stderr.
+`--json` is available on most read commands and produces output stable enough to
+script against. Progress lines are suppressed when stdout is not a TTY.
 
-## Commands
+## Command map
+
+Commands are grouped here for orientation. Each links to its detailed page under
+[`commands/`](commands/README.md).
+
+### Lease lifecycle
 
 ```text
-crabbox doctor
-crabbox login --url <url> [--provider hetzner|aws|azure|gcp] [--no-browser]
-crabbox login --url <url> --token-stdin [--provider hetzner|aws|azure|gcp]
-crabbox logout
-crabbox whoami [--json]
-crabbox init [--force]
-crabbox config show [--json]
-crabbox config path
-crabbox config set-broker --url <url> --token-stdin [--provider hetzner|aws|azure|gcp]
-crabbox warmup [--provider hetzner|aws|azure|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--code] [--tailscale] [--network auto|tailscale|public] [--profile <name>] [--slug <slug>] [--idle-timeout <duration>] [--timing-json]
-crabbox run [--id <lease-id-or-slug>] [--provider hetzner|aws|azure|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--desktop] [--browser] [--code] [--tailscale] [--network auto|tailscale|public] [--slug <slug>] [--label <text>] [--keep-on-failure] [--shell] [--script <file>|--script-stdin] [--fresh-pr <owner/repo#number>] [--no-hydrate] [--allow-env <name>] [--env-from-profile <file>] [--checksum] [--debug] [--force-sync-large] [--preflight] [--preflight-tools <tools>] [--capture-stdout <path>] [--capture-stderr <path>] [--capture-on-fail] [--download remote=local] [--timing-json] [--blacksmith-workflow <workflow>] -- <command...>
-crabbox job list
-crabbox job run [--id <lease-id-or-slug>] [--dry-run] [--no-hydrate] [--github-runner] [--stop auto|always|success|failure|never] <name>
-crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] [--egress <profile>] [--webvnc] [--open] [-- <command...>]
-crabbox desktop terminal --id <lease-id-or-slug> [--font-size <n>] [--cols <n>] [--rows <n>] [--sixel] [--screenshot <path>] [--record <path>] [--publish-pr <n>] [-- <command...>]
-crabbox desktop proof --id <lease-id-or-slug> [--output <dir>] [--publish-pr <n>] [-- <command...>]
-crabbox desktop doctor --id <lease-id-or-slug> [--network auto|tailscale|public]
-crabbox desktop click --id <lease-id-or-slug> --x <n> --y <n> [--network auto|tailscale|public]
-crabbox desktop paste --id <lease-id-or-slug> --text <text> [--network auto|tailscale|public]
-crabbox desktop paste --id <lease-id-or-slug> [--network auto|tailscale|public] < input.txt
-crabbox desktop type --id <lease-id-or-slug> --text <text> [--network auto|tailscale|public]
-crabbox desktop key --id <lease-id-or-slug> <keys> [--network auto|tailscale|public]
-crabbox code --id <lease-id-or-slug> [--open]
-crabbox egress start --id <lease-id-or-slug> [--profile <name>|--allow <hosts>] [--listen <addr>] [--coordinator <url>] [--daemon]
-crabbox egress host --id <lease-id-or-slug> [--profile <name>|--allow <hosts>]
-crabbox egress client --id <lease-id-or-slug> [--listen <addr>] [--ticket <ticket>] [--session <id>]
-crabbox egress status --id <lease-id-or-slug>
-crabbox egress stop --id <lease-id-or-slug>
-crabbox media preview --input <video> --output <preview.gif> [--trimmed-video-output <change.mp4>]
-crabbox artifacts collect --id <lease-id-or-slug> [--output <dir>] [--run <run-id>] [--all] [--screenshot] [--video] [--gif] [--doctor] [--webvnc-status] [--metadata] [--duration <duration>] [--fps <n>] [--gif-width <px>] [--gif-fps <n>] [--network auto|tailscale|public] [--json]
-crabbox artifacts video --id <lease-id-or-slug> [--output <path>] [--duration <duration>] [--fps <n>] [--no-contact-sheet]
-crabbox desktop record --id <lease-id-or-slug> [--output <path>] [--duration <duration>] [--fps <n>] [--no-contact-sheet]
-crabbox artifacts gif --input <video> --output <preview.gif> [--trimmed-video-output <change.mp4>]
-crabbox artifacts template openclaw|mantis [--summary <text>|--summary-file <path>] [--before <path>] [--after <path>] [--output <path>]
-crabbox artifacts publish --dir <dir> [--pr <n>] [--repo owner/name] [--storage auto|broker|s3|cloudflare|r2|local] [--bucket <name>] [--prefix <path>] [--base-url <url>] [--region <region>] [--profile <profile>] [--endpoint-url <url>] [--acl <acl>] [--presign] [--expires <duration>] [--dry-run] [--no-comment] [--skip-manifest]
-crabbox artifacts list <artifact-manifest.json|dir> [--json]
-crabbox artifacts pull <artifact-manifest.json|dir> --output <dir> [--overwrite] [--json]
-crabbox screenshot --id <lease-id-or-slug> [--output <path>]
-crabbox sync-plan [--limit <n>]
-crabbox providers [--json]
-crabbox history [--lease <lease-id>] [--owner <email>] [--org <name>] [--limit <n>] [--json]
-crabbox logs <run-id> [--tail <n>] [--json]
-crabbox events <run-id> [--after <seq>] [--limit <n>] [--type <kind>] [--phase <name>] [--json]
-crabbox attach <run-id> [--after <seq>] [--poll <duration>]
-crabbox results <run-id> [--failed-only] [--json]
-crabbox cache stats --id <lease-id-or-slug> [--json]
-crabbox cache purge --id <lease-id-or-slug> --kind pnpm|npm|docker|git|all --force
-crabbox cache warm --id <lease-id-or-slug> -- <command...>
-crabbox actions hydrate --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--workflow <file|name|id>] [--job <name>] [--github-runner] [--wait-timeout <duration>] [--timing-json]
-crabbox actions register --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--repo owner/name]
-crabbox actions dispatch [--workflow <file|name|id>] [-f key=value]
-crabbox capsule from-actions <run-url> --replay '<command>' [--output <dir>]
-crabbox capsule replay <capsule.yaml> [--keep]
-crabbox capsule inspect <capsule.yaml> [--json]
-crabbox capsule promote <capsule.yaml> --regression
-crabbox checkpoint create --id <lease-id-or-slug> [--name <name>] [--mode auto|native|archive] [--workdir <path>]
-crabbox checkpoint list [--json]
-crabbox checkpoint inspect <checkpoint-id> [--json]
-crabbox checkpoint restore <checkpoint-id> --id <lease-id-or-slug> [--clear=false]
-crabbox checkpoint fork <checkpoint-id> [--class <class>] [--slug <slug>] [--keep]
-crabbox checkpoint delete <checkpoint-id> [--local-only]
-crabbox status --id <lease-id-or-slug> [--network auto|tailscale|public] [--wait]
-crabbox list [--json]
-crabbox share --id <lease-id-or-slug> [--user <email>] [--org] [--role use|manage] [--list] [--json]
-crabbox unshare --id <lease-id-or-slug> [--user <email>] [--org] [--all] [--json]
-crabbox usage [--scope user|org|all] [--user <email>] [--org <name>] [--month YYYY-MM] [--json]
-crabbox admin leases [--state active|released|expired|failed] [--owner <email>] [--org <name>] [--json]
-crabbox admin lease-audit [--state expired] [--provider aws] [--fail-on-live] [--json]
-crabbox admin providers identity --provider aws [--region <region>] [--json]
-crabbox admin providers policy --provider aws [--target macos]
-crabbox admin hosts policy --provider aws --target macos
-crabbox admin hosts offerings --provider aws --target macos [--region <region>] [--type mac2.metal] [--json]
-crabbox admin hosts quota --provider aws --target macos [--region <region>] [--type mac2.metal] [--json]
-crabbox admin hosts list --provider aws --target macos [--region <region>] [--type <mac-type>] [--state <state>] [--json]
-crabbox admin hosts allocate --provider aws --target macos [--availability-zone <az>] [--region <region>] [--type mac2.metal] (--dry-run|--force)
-crabbox admin hosts release <host-id> --provider aws --target macos [--region <region>] --force
-crabbox admin release <lease-id-or-slug> [--delete]
-crabbox admin delete <lease-id-or-slug> --force
-crabbox ssh --id <lease-id-or-slug> [--network auto|tailscale|public]
-crabbox vnc --id <lease-id-or-slug> [--network auto|tailscale|public] [--open]
-crabbox webvnc --id <lease-id-or-slug> [--network auto|tailscale|public] [--open]
-crabbox webvnc daemon start --id <lease-id-or-slug> [--network auto|tailscale|public] [--open]
-crabbox webvnc daemon status --id <lease-id-or-slug>
-crabbox webvnc daemon stop --id <lease-id-or-slug>
-crabbox webvnc status --id <lease-id-or-slug> [--network auto|tailscale|public]
-crabbox webvnc reset --id <lease-id-or-slug> [--network auto|tailscale|public] [--open]
-crabbox inspect --id <lease-id-or-slug> [--network auto|tailscale|public] [--json]
-crabbox stop <lease-id-or-slug>
-crabbox cleanup [--dry-run]
+crabbox warmup [lease flags]                 lease a box and wait until ready
+crabbox run -- <command...>                  sync, run a remote command, stream output
+crabbox run --pool <key> -- <command...>     borrow a hydrated ready-pool lease
+crabbox status --id <id>                     show lease state (--wait to block)
+crabbox inspect --id <id>                     print lease/provider details
+crabbox list                                  list machines (alias: crabbox pool list)
+crabbox share --id <id> [--user|--org]        grant access to a lease
+crabbox unshare --id <id> [--user|--org|--all]
+crabbox stop <id-or-slug>                     end a lease (alias: crabbox release)
+crabbox cleanup [--dry-run]                   sweep expired direct-provider machines
+crabbox pool ready [key]                      list hydrated broker ready-pool leases
 ```
 
-## Common Flows
+See [warmup](commands/warmup.md), [run](commands/run.md),
+[status](commands/status.md), [inspect](commands/inspect.md),
+[list](commands/list.md), [share](commands/share.md),
+[unshare](commands/unshare.md), [stop](commands/stop.md),
+[cleanup](commands/cleanup.md), [pool](commands/pool.md).
 
-One-shot run:
+### Run helpers and jobs
 
-```sh
-crabbox run --profile project-check -- pnpm check:changed
+```text
+crabbox sync-plan [--limit <n>]              preview local sync manifest size hotspots
+crabbox job list                              list repo-local configured jobs
+crabbox job run <name>                        run a configured job
 ```
 
-AWS EC2 run:
+See [sync-plan](commands/sync-plan.md), [job](commands/job.md).
 
-```sh
-crabbox run --class beast -- pnpm check:changed
+### Observability
+
+```text
+crabbox history                               list recorded runs
+crabbox logs <run-id>                         print run logs
+crabbox events <run-id>                       print run events
+crabbox attach <run-id>                       follow events for an active run
+crabbox results <run-id>                      show test-result summaries
 ```
 
-Warm a box, then reuse it:
+See [history](commands/history.md), [logs](commands/logs.md),
+[events](commands/events.md), [attach](commands/attach.md),
+[results](commands/results.md).
 
-```sh
-crabbox warmup --profile project-check
-crabbox warmup --tailscale
-crabbox warmup --desktop --browser
-crabbox run --id blue-lobster -- pnpm test:changed
-crabbox vnc --id blue-lobster --open
-crabbox webvnc --id blue-lobster --open
-crabbox webvnc status --id blue-lobster
-crabbox webvnc daemon start --id blue-lobster --open
-crabbox code --id blue-lobster --open
-crabbox desktop launch --id blue-lobster --browser --url https://example.com --webvnc --open
-crabbox desktop terminal --id blue-lobster --sixel --record terminal.mp4 -- ./scripts/visual-smoke.sh
-crabbox desktop proof --id blue-lobster --output artifacts/blue-lobster-proof -- ./scripts/visual-smoke.sh
-crabbox desktop doctor --id blue-lobster
-crabbox desktop paste --id blue-lobster --text "peter@example.com"
-crabbox desktop key --id blue-lobster ctrl+l
-crabbox egress start --id blue-lobster --profile discord --daemon
-crabbox desktop launch --id blue-lobster --browser --url https://discord.com/login --egress discord --webvnc --open
-crabbox egress status --id blue-lobster
-crabbox egress stop --id blue-lobster
-crabbox share --id blue-lobster --user friend@example.com
-crabbox share --id blue-lobster --org
-crabbox screenshot --id blue-lobster --output desktop.png
-crabbox media preview --input desktop.mp4 --output desktop-preview.gif --trimmed-video-output desktop-change.mp4
-crabbox artifacts collect --id blue-lobster --all --output artifacts/blue-lobster
-crabbox artifacts publish --dir artifacts/blue-lobster --pr 123
-crabbox job run openclaw-wsl2
-crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
-crabbox stop blue-lobster
+### Access and desktop
+
+```text
+crabbox ssh --id <id>                          print the SSH command
+crabbox vnc --id <id> [--open]                 print/open SSH-tunneled VNC details
+crabbox webvnc --id <id> [--open]              bridge a desktop lease into the web portal
+crabbox code --id <id> [--open]                bridge a code lease into the web portal
+crabbox egress start --id <id>                 bridge lease traffic through this machine
+crabbox screenshot --id <id> [--output <png>]  capture a PNG from a desktop lease
+crabbox desktop launch|terminal|record|proof|doctor|click|paste|type|key
 ```
 
-Hydrate from the repo workflow, then run local dirty work in the hydrated workspace:
+See [ssh](commands/ssh.md), [vnc](commands/vnc.md),
+[webvnc](commands/webvnc.md), [code](commands/code.md),
+[egress](commands/egress.md), [screenshot](commands/screenshot.md),
+[desktop](commands/desktop.md).
 
-```sh
-crabbox warmup
-crabbox actions hydrate --id blue-lobster
-crabbox run --id blue-lobster -- pnpm test:changed
-crabbox stop blue-lobster
+### Media and artifacts
+
+```text
+crabbox media preview --input <video> --output <preview.gif>
+crabbox artifacts collect|video|gif|template|publish|list|pull
 ```
 
-Capture and replay a failed GitHub Actions run:
+See [media](commands/media.md), [artifacts](commands/artifacts.md).
 
-```sh
-crabbox capsule from-actions https://github.com/example-org/my-app/actions/runs/123 --replay 'go test ./...'
-crabbox capsule replay capsules/example-org-my-app-actions-123/capsule.yaml --keep
-crabbox ssh --id blue-lobster
-crabbox capsule promote capsules/example-org-my-app-actions-123/capsule.yaml --regression
+### Cache
+
+```text
+crabbox cache list|stats --id <id>            show remote cache usage
+crabbox cache purge --id <id> --kind <kind>   remove cache content
+crabbox cache warm --id <id> -- <command...>  run a cache-populating command
+crabbox cache volumes [--json]                list configured provider cache volumes
 ```
 
-Save and fork a prepared workspace:
+See [cache](commands/cache.md).
 
-```sh
-crabbox run --id blue-lobster --shell 'npm ci && npm test'
-crabbox checkpoint create --id blue-lobster --name after-npm-ci
-crabbox checkpoint fork chk_123 --class beast
+### Checkpoints, capsules, images, Actions
+
+```text
+crabbox checkpoint create|list|inspect|restore|fork|delete|prune
+crabbox capsule from-actions|replay|inspect|promote
+crabbox image create|promote|fsr-status|delete
+crabbox actions hydrate|register|dispatch
 ```
 
-Use Blacksmith Testboxes through the same Crabbox surface:
+See [checkpoint](commands/checkpoint.md), [capsule](commands/capsule.md),
+[image](commands/image.md), [actions](commands/actions.md).
 
-```sh
-blacksmith auth login
-crabbox warmup --provider blacksmith-testbox --blacksmith-workflow .github/workflows/ci-check-testbox.yml --blacksmith-job test
-crabbox run --provider blacksmith-testbox --id blue-lobster -- pnpm test:changed
-crabbox run --provider blacksmith-testbox --blacksmith-workflow .github/workflows/ci-check-testbox.yml --blacksmith-job test -- pnpm test
-crabbox stop --provider blacksmith-testbox blue-lobster
+### Pond (peer discovery / SSH-mesh)
+
+```text
+crabbox pond peers --pond <name>              list peer endpoints
+crabbox pond connect <pond>                   open SSH -L forwards to members' exposed ports
+crabbox pond disconnect <pond>                stop daemonized SSH-mesh forwards
+crabbox pond release <pond>                   stop every lease in the pond
 ```
 
-Use an existing macOS or Windows SSH host:
+See [pond](commands/pond.md) and the [pond feature](features/pond.md).
 
-```sh
-crabbox run --provider ssh --target macos --static-host mac-studio.local -- xcodebuild test
-crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local -- dotnet test
-crabbox run --provider ssh --target windows --windows-mode wsl2 --static-host win-dev.local -- pnpm test
+### Providers and admin
+
+```text
+crabbox providers                             show provider capabilities
+crabbox usage [--scope user|org|all]          cost and usage estimates
+crabbox admin leases|lease-audit|providers|hosts|release|delete
+crabbox admin aws-identity|aws-policy|mac-hosts
 ```
 
-Create managed cloud Windows boxes:
+See [providers](commands/providers.md), [usage](commands/usage.md),
+[admin](commands/admin.md).
 
-```sh
-crabbox warmup --provider aws --target windows --desktop
-crabbox warmup --provider azure --target windows --desktop
-crabbox warmup --provider aws --target windows --windows-mode wsl2
-crabbox warmup --provider azure --target windows --windows-mode wsl2
-crabbox warmup --provider aws --target macos --desktop --market on-demand
-crabbox vnc --id blue-lobster
-crabbox screenshot --id blue-lobster --output desktop.png
+### Config and auth
+
+```text
+crabbox login --url <url>                      GitHub login, store broker creds, verify
+crabbox logout                                 remove the stored broker token
+crabbox whoami                                 show broker identity
+crabbox doctor                                 check local and broker/provider readiness
+crabbox init                                   onboard the current repo
+crabbox version                                print version
+crabbox config path|show|set-broker
+crabbox azure login                            detect Azure subscription, validate, store
 ```
 
-Managed provider targets are intentionally narrow:
-
-- Hetzner managed provisioning supports Linux only.
-- AWS and Azure both support Linux, native Windows (`--target windows
-  --windows-mode normal`) with managed desktop/VNC, and Windows WSL2
-  (`--target windows --windows-mode wsl2`) for POSIX sync, run, and Actions
-  hydration. Use native Windows for desktop/VNC; use WSL2 for Linux tooling on
-  a Windows host.
-- AWS also supports EC2 Mac (`--target macos`) when an available Mac Dedicated
-  Host exists in the selected region. Brokered mode can discover an available
-  host; direct mode requires `CRABBOX_HOST_ID` or `hostId`.
-  `CRABBOX_AWS_MAC_HOST_ID` and `aws.macHostId` remain AWS compatibility aliases.
-  Azure does not have a managed macOS target.
-- Existing macOS and Windows machines belong on `provider=ssh`.
-
-Use Tailscale as an optional network plane:
-
-```sh
-crabbox warmup --tailscale
-crabbox ssh --id blue-lobster --network tailscale
-crabbox vnc --id blue-lobster --network tailscale --open
-```
-
-Inspect pool:
-
-```sh
-crabbox list
-crabbox list --json
-```
-
-Inspect local sync size:
-
-```sh
-crabbox sync-plan
-crabbox sync-plan --limit 10
-```
-
-Inspect usage and estimated cost:
-
-```sh
-crabbox usage
-crabbox usage --scope org --org openclaw
-crabbox usage --scope all --json
-```
-
-Cleanup direct-provider leftovers:
-
-```sh
-crabbox cleanup --dry-run
-crabbox cleanup
-```
-
-Cleanup is intentionally conservative: it skips kept machines, deletes expired ready/leased/active direct machines, and gives running/provisioning direct machines an extra stale safety window. When a coordinator is configured, brokered cleanup is owned by the Durable Object alarm instead of provider-side sweeping.
-
-Debug config:
-
-```sh
-crabbox doctor
-crabbox whoami
-crabbox config show
-crabbox config show --json
-```
-
-Inspect recorded runs:
-
-```sh
-crabbox run --id blue-lobster --junit junit.xml -- go test ./...
-crabbox history --lease cbx_abcdef123456
-crabbox logs run_123
-crabbox events run_123
-crabbox attach run_123
-crabbox results run_123
-```
-
-Inspect or warm caches on a kept box:
-
-```sh
-crabbox cache stats --id blue-lobster
-crabbox cache warm --id blue-lobster -- pnpm install --frozen-lockfile
-crabbox cache purge --id blue-lobster --kind pnpm --force
-```
-
-Trusted operator lease controls:
-
-```sh
-crabbox admin leases --state active
-crabbox admin lease-audit --state expired --provider aws --fail-on-live
-crabbox admin providers identity --provider aws --region eu-west-1
-crabbox admin hosts offerings --provider aws --target macos --region eu-west-1 --type mac2.metal
-crabbox admin hosts quota --provider aws --target macos --region eu-west-1 --type mac2.metal
-crabbox admin hosts list --provider aws --target macos --region eu-west-1
-crabbox admin hosts allocate --provider aws --target macos --region eu-west-1 --type mac2.metal --dry-run
-crabbox admin release blue-lobster
-crabbox admin delete cbx_abcdef123456 --force
-```
-
-Trusted operator image controls:
-
-```sh
-crabbox image create --id cbx_abcdef123456 --name openclaw-crabbox-20260501-1246 --wait
-crabbox image promote ami-1234567890abcdef0
-crabbox image promote ami-1234567890abcdef0 --target macos --region us-east-1 --type mac2.metal
-crabbox image delete ami-1234567890abcdef0 --region eu-west-1
-```
+See [login](commands/login.md), [logout](commands/logout.md),
+[whoami](commands/whoami.md), [doctor](commands/doctor.md),
+[init](commands/init.md), [config](commands/config.md),
+[azure](commands/azure.md).
 
 ## `run`
 
-`crabbox run` is the main command.
-
-Behavior:
+`crabbox run` is the main command. See [run](commands/run.md) for the full flag
+list. The behavior is, in order:
 
 1. Load config.
-2. Create a durable `run_...` handle when a coordinator is configured.
-3. Acquire a lease unless `--id` is provided.
+2. When a coordinator (broker) is configured, create a durable `run_…` handle.
+3. Acquire a lease unless `--id` is given.
 4. Verify SSH readiness.
-5. Use the GitHub Actions workspace when the lease has a hydration marker.
-6. Sync current repo, unless a matching sync fingerprint lets Crabbox skip rsync.
-7. Seed remote Git from the configured origin/base ref before first sync when possible.
-8. Run command over SSH.
-9. Stream remote output, append run events, and retain bounded command output in coordinator history.
-10. Heartbeat coordinator leases in the background.
-11. Release lease unless `--keep` is set.
-12. Exit with the remote command exit code.
+5. Use the GitHub Actions workspace when the lease carries a hydration marker.
+6. Sync the current repo, unless a matching sync fingerprint lets Crabbox skip
+   rsync entirely.
+7. Seed remote Git from the configured origin/base ref before the first sync when
+   possible, so rsync only ships diffs.
+8. Run the command over SSH.
+9. Stream remote output, append run events, and retain bounded command output in
+   coordinator history.
+10. Heartbeat brokered leases in the background.
+11. Release the lease unless `--keep` is set.
+12. Exit with the remote command's exit code.
 
-Fresh non-kept leases retry once with a new machine when bootstrap never reaches SSH readiness. Existing leases and `--keep` runs are not retried automatically, so commands are not duplicated on a machine the user asked to keep. Runner bootstrap retries apt and installs only Crabbox plumbing before `crabbox-ready` is allowed to pass.
+Fresh, non-kept leases retry once with a new machine when bootstrap never reaches
+SSH readiness. Existing leases and `--keep` runs are not retried automatically, so
+a command is never duplicated on a machine you asked to keep.
 
-Flags:
+Secrets are never accepted as flag values; environment forwarding is name-based
+only (see [env forwarding](features/env-forwarding.md)). Crabbox stores local
+lease claims under its state directory: `warmup` and first reuse claim the lease
+for the current repo, and later `run`, `ssh`, `cache`, and `actions hydrate`
+refuse a conflicting repo claim unless `--reclaim` is set (see
+[identifiers](features/identifiers.md)).
 
-```text
---id <lease-id-or-slug>  reuse an existing lease
---provider <name>        hetzner, aws, azure, gcp, proxmox, ssh, exe-dev, blacksmith-testbox, namespace-devbox, semaphore, sprites, daytona, islo, or e2b
---target <name>          linux, macos, or windows
---windows-mode <mode>    normal or wsl2
---static-host <host>     existing SSH host for provider=ssh
---static-user <user>     static SSH user override
---static-port <port>     static SSH port override
---static-work-root <path> static target work root
---profile <name>        profile to run on
---slug <slug>           request a friendly slug for a fresh lease
---label <text>          human-readable run history/timing label
---class <name>          machine class override
---type <name>           provider server or instance type override
---azure-os-disk <mode> Azure OS disk mode: managed, ephemeral, or auto
---market spot|on-demand AWS capacity market override
---ttl <duration>        maximum lease lifetime, default 90m
---idle-timeout <duration> idle expiry, default 30m
---desktop              provision or require visible desktop capability
---browser              provision or require browser capability
---code                 provision or require web code capability
---tailscale            join new managed Linux leases to the configured tailnet
---tailscale-tags <csv> Tailscale tags for new managed leases
---tailscale-hostname-template <template>
---tailscale-auth-key-env <env-var>
---tailscale-exit-node <name-or-100.x>
---tailscale-exit-node-allow-lan-access
---network auto|tailscale|public
---no-sync               run without syncing
---sync-only             sync and exit
---force-sync-large      allow a sync candidate above configured fail thresholds
---keep                  keep lease after command exits
---keep-on-failure       keep a newly acquired failed lease for SSH/debug until idle/TTL expiry
---shell                 run the command string through bash -lc
---script <file>         upload a local script file and run it remotely
---script-stdin          read a script from stdin, upload it, and run it remotely
---fresh-pr <spec>       clone and checkout a GitHub PR remotely instead of syncing the local tree
---apply-local-patch     apply the local git diff on top of --fresh-pr checkout
---allow-env <name>      allow an environment variable for this run; repeatable or comma-separated
---env-from-profile <file> load allowed environment values from a local profile file; repeatable
---checksum              use checksum rsync instead of size/time
---debug                 print sync timing and itemized rsync output
---junit <paths>         comma-separated remote JUnit XML paths to attach to run history
---preflight             print remote capability preflight before running the command
---preflight-tools <tools> comma-separated preflight tools to probe; overrides run.preflightTools
---capture-stdout <path> write remote stdout to a local file, skipping stdout run-log capture
---capture-stderr <path> write remote stderr to a local file, skipping stderr run-log capture
---capture-on-fail       compatibility alias; failure bundles are saved by default on non-zero exit
---download remote=local copy a remote file back after a successful command; repeatable
---reclaim              claim an existing lease for the current repo
---timing-json          print a final JSON timing record
---blacksmith-org <org>  Blacksmith organization
---blacksmith-workflow <file|name|id> Blacksmith Testbox workflow
---blacksmith-job <job>  Blacksmith Testbox workflow job
---blacksmith-ref <ref>  Blacksmith Testbox git ref
---namespace-image <image> Namespace Devbox image
---namespace-size <S|M|L|XL> Namespace Devbox size
---namespace-repository <repo> Namespace Devbox repository checkout
---namespace-site <site> Namespace Devbox site
---namespace-volume-size-gb <gb> Namespace Devbox volume size
---namespace-auto-stop-idle-timeout <duration> Namespace idle auto-stop timeout
---namespace-work-root <path> Namespace Crabbox work root
---namespace-delete-on-release delete Namespace Devbox on release
---semaphore-host <host> Semaphore organization host
---semaphore-project <project> Semaphore project name
---semaphore-machine <type> Semaphore machine type
---semaphore-os-image <image> Semaphore OS image
---semaphore-idle-timeout <duration> Semaphore keepalive idle timeout
---e2b-api-url <url>     E2B API URL override
---e2b-domain <domain>   E2B sandbox domain override
---e2b-template <id>     E2B sandbox template
---e2b-workdir <path>    E2B sandbox working directory
---e2b-user <user>       E2B sandbox user override
---modal-app <name>      Modal app name
---modal-image <image>   Modal sandbox registry image
---modal-workdir <path>  Modal sandbox working directory
---modal-python <path>   Python binary for the local Modal client
-```
+### Delegated providers
 
-Secrets must not be accepted as flag values. Env forwarding is name-based only.
+Some providers do not lease an SSH box; Crabbox delegates sync and command
+transport to the provider's own API or CLI. For these, SSH-specific options
+(`ssh`, `desktop`, `vnc`, `code`, Actions hydration, `--checksum`, `--sync-only`)
+are unavailable or partly restricted, and sync timing is reported as `delegated`.
+Examples include `blacksmith-testbox`, `azure-dynamic-sessions`, `e2b`, `modal`,
+`islo`, `cloudflare`, `upstash-box`, `tensorlake`, and `wandb`. See
+[providers](features/providers.md) for the full adapter list and which surface
+each one supports.
 
-Crabbox stores local lease claims under its state directory. `warmup` and first reuse claim the lease for the current repo; later `run`, `ssh`, `cache`, and `actions hydrate/register` refuse a conflicting repo claim unless `--reclaim` is set.
+## Exit codes
 
-With `provider: blacksmith-testbox`, Crabbox delegates machine setup, sync, and command transport to the Blacksmith CLI. `--sync-only` is unsupported, sync timing is reported as `sync=delegated`, and Blacksmith auth is handled by `blacksmith auth login`, not `crabbox login`.
-
-With `provider: namespace-devbox`, Crabbox creates or resolves a Namespace
-Devbox through the authenticated `devbox` CLI, reads the generated SSH config,
-then uses normal Crabbox SSH sync/run. `crabbox stop` shuts the Devbox down by
-default; set `namespace.deleteOnRelease` to delete it.
-
-With `provider: exe-dev`, Crabbox creates or resolves exe.dev VMs through the
-authenticated `ssh exe.dev` control API, then uses the returned VM SSH target
-for normal Crabbox sync/run. `crabbox stop` deletes the VM through the same
-control host.
-
-With `provider: semaphore`, Crabbox creates a Semaphore CI job, waits for the
-debug SSH endpoint, then uses the normal Crabbox SSH sync/run path. Auth comes
-from `CRABBOX_SEMAPHORE_TOKEN` or `SEMAPHORE_API_TOKEN`; host and project come
-from provider flags, env, or config.
-
-With `provider: daytona`, Crabbox creates Daytona sandboxes from
-`daytona.snapshot`, uploads workspaces through Daytona toolbox file APIs, and
-runs commands through Daytona toolbox process APIs. `crabbox ssh` mints
-short-lived Daytona SSH tokens and redacts those tokens from output. Daytona
-auth can come from `DAYTONA_API_KEY` / `DAYTONA_JWT_TOKEN` env or an
-authenticated Daytona CLI profile created by `daytona login --api-key`. With
-`provider: islo`, Crabbox delegates sandbox setup and command execution to the
-Islo Go SDK, uploads the Crabbox sync manifest as a gzipped archive into the
-Islo workdir, and rejects only the SSH/rsync-specific `--sync-only` and
-`--checksum` modes.
-
-With `provider: e2b`, Crabbox creates E2B sandboxes, uploads the sync archive
-through E2B file/envd APIs, and streams command output through E2B process APIs.
-Auth comes from `CRABBOX_E2B_API_KEY` or `E2B_API_KEY`. E2B is not an SSH lease,
-so `ssh`, `desktop`, `vnc`, `code`, Actions hydration, and `--checksum` are not
-supported.
-
-With `provider: modal`, Crabbox creates Modal Sandboxes through the local Modal
-Python client, uploads the sync archive through Sandbox exec, and streams command
-output through Modal process APIs. Auth comes from `python3 -m modal setup` or
-`MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`. Modal is not an SSH lease, so `ssh`,
-`desktop`, `vnc`, `code`, Actions hydration, and `--checksum` are not supported.
-
-## Exit Codes
+`crabbox` returns `0` on success. Non-zero codes fall into two buckets:
 
 ```text
-0   success
-1   generic Crabbox failure
-2   invalid usage or config
-3   auth failure
-4   no capacity
-5   provisioning failure
-6   sync failure
-7   SSH failure
-8   lease expired
-10+ remote command exit code when available
+0      success
+1–7    Crabbox itself failed before/around the command
+       (usage/config, auth, capacity, provisioning, sync, SSH, lease readiness)
+<code> the remote command's own exit code, passed through verbatim
 ```
 
-If the remote command exits with a code, `crabbox run` returns that code unless Crabbox itself failed first.
+When the remote command runs and exits non-zero, `crabbox run` returns that exact
+code. Crabbox-internal failures (bad usage, missing auth, no capacity, sync or SSH
+errors) are reported before the command runs and use the lower codes. There is no
+fixed numeric enum for the internal categories; scripts should branch on `0`
+versus non-zero and inspect stderr or `--json` for the reason.
 
-## Config Files
+## Config files
 
-The implemented config format is YAML. The default path is:
+Config is YAML. Crabbox merges, in increasing precedence: user config, repo
+config, environment variables, then flags.
+
+Default paths:
 
 ```text
-macOS: ~/.config/crabbox/config.yaml through XDG, or ~/Library/Application Support/crabbox/config.yaml
-Linux: ~/.config/crabbox/config.yaml
-repo:  crabbox.yaml or .crabbox.yaml
+macOS:  ~/.config/crabbox/config.yaml (XDG) or ~/Library/Application Support/crabbox/config.yaml
+Linux:  ~/.config/crabbox/config.yaml
+repo:   crabbox.yaml or .crabbox.yaml in the repo root
 ```
 
-User config:
+`crabbox config path` prints the active user config path. `crabbox config show`
+prints the merged config without secret values. See
+[configuration](features/configuration.md) for the complete schema.
+
+User config (machine-wide defaults and broker credentials):
 
 ```yaml
 broker:
@@ -528,69 +280,7 @@ ssh:
     - "22"
 ```
 
-Static macOS target:
-
-```yaml
-provider: ssh
-target: macos
-static:
-  host: mac-studio.local
-  user: steipete
-  port: "22"
-  workRoot: /Users/steipete/crabbox
-```
-
-Static Windows target:
-
-```yaml
-provider: ssh
-target: windows
-windows:
-  mode: normal # normal or wsl2
-static:
-  host: win-dev.local
-  user: Peter
-  port: "22"
-  workRoot: C:\crabbox
-```
-
-AWS EC2 Mac target:
-
-```yaml
-provider: aws
-target: macos
-hostId: h-0123456789abcdef0
-aws:
-capacity:
-  market: on-demand
-```
-
-`windows.mode: normal` runs native PowerShell over OpenSSH and syncs with a tar
-archive. `windows.mode: wsl2` runs commands through `wsl.exe --exec bash -lc`
-and uses rsync inside WSL2, so `static.workRoot` should be a WSL path.
-
-`crabbox warmup --market spot|on-demand` and `crabbox run --market spot|on-demand`
-override `capacity.market` for a single AWS lease. Use this for temporary quota
-or capacity shifts without rewriting repo config.
-
-Open GitHub browser login:
-
-```sh
-crabbox login --url https://broker.example.com
-```
-
-Trusted operators can still set shared-token broker auth without putting the token in shell history:
-
-```sh
-printf '%s' "$TOKEN" | crabbox login \
-  --url https://broker.example.com \
-  --provider aws \
-  --token-stdin
-```
-
-`crabbox config set-broker` remains available for scripts that only want to edit config without verifying identity.
-
-Repo-local config is YAML and should hold project-specific choices:
+Repo config (project-specific choices, committed with the repo):
 
 ```yaml
 profile: project-check
@@ -618,6 +308,13 @@ sync:
     - node_modules
     - .turbo
     - dist
+  # include (root-relative whitelist): when set, ONLY these paths are synced (after excludes).
+  # Sync a few paths out of a large repo instead of blacklisting everything else.
+  include:
+    - src
+    - scripts
+    - package.json
+    - pnpm-lock.yaml
 env:
   allow:
     - CI
@@ -633,108 +330,141 @@ cache:
   git: true
   maxGB: 80
   purgeOnRelease: false
+  volumes:
+    - name: pnpm-store
+      key: my-app-linux-amd64-node24-pnpm10-lockhash
+      path: /var/cache/crabbox/pnpm
 ```
 
-Blacksmith Testbox config:
+### Targets
+
+Managed provider targets are intentionally narrow:
+
+- Hetzner managed provisioning supports Linux only.
+- AWS and Azure support Linux, native Windows (`--target windows --windows-mode
+  normal`) with managed desktop/VNC, and Windows WSL2 (`--target windows
+  --windows-mode wsl2`) for POSIX sync, run, and Actions hydration. Use native
+  Windows for desktop/VNC; use WSL2 for Linux tooling on a Windows host.
+- AWS also supports EC2 Mac (`--target macos`) when an available Mac Dedicated
+  Host exists in the selected region. Brokered mode can discover an available
+  host; direct mode requires `CRABBOX_HOST_ID` or `hostId`. `CRABBOX_AWS_MAC_HOST_ID`
+  and `aws.macHostId` remain AWS compatibility aliases. Azure has no managed
+  macOS target.
+- Existing macOS and Windows machines belong on `provider: ssh`.
+
+Static macOS host:
 
 ```yaml
-provider: blacksmith-testbox
-blacksmith:
-  org: openclaw
-  workflow: .github/workflows/ci-check-testbox.yml
-  job: test
-  ref: main
-  idleTimeout: 90m
-  debug: false
+provider: ssh
+target: macos
+static:
+  host: mac-studio.example.internal
+  user: alice
+  port: "22"
+  workRoot: /Users/alice/crabbox
 ```
 
-Namespace Devbox config:
+Static Windows host:
 
 ```yaml
-provider: namespace-devbox
-namespace:
-  image: builtin:base
-  size: M
-  workRoot: /workspaces/crabbox
+provider: ssh
+target: windows
+windows:
+  mode: normal # normal or wsl2
+static:
+  host: win-dev.example.internal
+  user: alice
+  port: "22"
+  workRoot: C:\crabbox
 ```
 
-exe.dev config:
+`windows.mode: normal` runs native PowerShell over OpenSSH and syncs with a tar
+archive. `windows.mode: wsl2` runs commands through `wsl.exe --exec bash -lc` and
+uses rsync inside WSL2, so `static.workRoot` should be a WSL path.
+
+AWS EC2 Mac:
 
 ```yaml
-provider: exe-dev
-exeDev:
-  controlHost: exe.dev
-  image: ubuntu:24.04
-  cpus: 2
-  memory: 4GB
-  disk: 10GB
-  workRoot: /tmp/crabbox
-  noEmail: true
+provider: aws
+target: macos
+hostId: h-0123456789abcdef0
+capacity:
+  market: on-demand
 ```
 
-Semaphore config:
+`crabbox warmup --market spot|on-demand` and `crabbox run --market spot|on-demand`
+override `capacity.market` for a single AWS lease, for temporary quota or capacity
+shifts without rewriting repo config.
 
-```yaml
-provider: semaphore
-semaphore:
-  host: myorg.semaphoreci.com
-  project: my-app
-  machine: f1-standard-2
-  osImage: ubuntu2204
-  idleTimeout: 30m
+### Broker auth
+
+Open GitHub browser login:
+
+```sh
+crabbox login --url https://broker.example.com
 ```
 
-Keep the token in `CRABBOX_SEMAPHORE_TOKEN` or `SEMAPHORE_API_TOKEN`.
+Trusted operators can set shared-token broker auth without putting the token in
+shell history:
 
-E2B config:
-
-```yaml
-provider: e2b
-e2b:
-  template: base
-  workdir: crabbox
-  apiUrl: https://api.e2b.app
-  domain: e2b.app
+```sh
+printf '%s' "$TOKEN" | crabbox login \
+  --url https://broker.example.com \
+  --provider aws \
+  --token-stdin
 ```
 
-Keep the token in `CRABBOX_E2B_API_KEY` or `E2B_API_KEY`.
+`crabbox config set-broker` edits config without verifying identity, for scripts.
 
-## Environment Variables
+## Environment variables
+
+This is the canonical environment-variable reference. The most common ones:
 
 ```text
-CRABBOX_COORDINATOR
-CRABBOX_COORDINATOR_TOKEN
-CRABBOX_COORDINATOR_ADMIN_TOKEN
+CRABBOX_COORDINATOR                broker URL (enables brokered mode for supported providers)
+CRABBOX_COORDINATOR_TOKEN          broker user/shared token
+CRABBOX_COORDINATOR_ADMIN_TOKEN    broker admin token
 CRABBOX_ADMIN_TOKEN                alias for CRABBOX_COORDINATOR_ADMIN_TOKEN
-CRABBOX_ACCESS_CLIENT_ID
-CRABBOX_ACCESS_CLIENT_SECRET
-CRABBOX_ACCESS_TOKEN
-CRABBOX_PROVIDER
-CRABBOX_TARGET
+CRABBOX_ACCESS_CLIENT_ID           Cloudflare Access service-token id
+CRABBOX_ACCESS_CLIENT_SECRET       Cloudflare Access service-token secret
+CRABBOX_ACCESS_TOKEN               Cloudflare Access token
+CRABBOX_PROVIDER                   default provider
+CRABBOX_TARGET                     default target (linux|macos|windows)
 CRABBOX_TARGET_OS                  alias for CRABBOX_TARGET
-CRABBOX_WINDOWS_MODE
-CRABBOX_DESKTOP
-CRABBOX_BROWSER
-CRABBOX_NETWORK
+CRABBOX_WINDOWS_MODE               normal|wsl2
+CRABBOX_DESKTOP                    request the desktop capability
+CRABBOX_BROWSER                    request the browser capability
+CRABBOX_NETWORK                    auto|tailscale|public
+CRABBOX_OWNER                      lease owner email
+CRABBOX_ORG                        owning org
+CRABBOX_PROFILE                    default profile
+CRABBOX_CONFIG                     path to an explicit config file
+CRABBOX_DEFAULT_CLASS              default machine class
+CRABBOX_ARCH                       default CPU architecture (amd64|arm64)
+CRABBOX_SERVER_TYPE                provider server/instance type override
+CRABBOX_IDLE_TIMEOUT               idle expiry
+CRABBOX_TTL                        max lease lifetime
+CRABBOX_WORK_ROOT                  remote work root
+```
+
+Static / SSH host:
+
+```text
 CRABBOX_STATIC_ID
 CRABBOX_STATIC_NAME
 CRABBOX_STATIC_HOST
 CRABBOX_STATIC_USER
 CRABBOX_STATIC_PORT
 CRABBOX_STATIC_WORK_ROOT
-CRABBOX_OWNER
-CRABBOX_ORG
-CRABBOX_PROFILE
-CRABBOX_CONFIG
-CRABBOX_DEFAULT_CLASS
-CRABBOX_SERVER_TYPE
-CRABBOX_IDLE_TIMEOUT
-CRABBOX_TTL
 CRABBOX_SSH_KEY
 CRABBOX_SSH_USER
 CRABBOX_SSH_PORT
-CRABBOX_SSH_FALLBACK_PORTS       comma-separated fallback ports, or none
-CRABBOX_WORK_ROOT
+CRABBOX_SSH_FALLBACK_PORTS         comma-separated fallback ports, or none
+```
+
+Capacity and AWS:
+
+```text
 CRABBOX_AWS_REGION
 CRABBOX_AWS_AMI
 CRABBOX_AWS_SECURITY_GROUP_ID
@@ -743,7 +473,7 @@ CRABBOX_AWS_INSTANCE_PROFILE
 CRABBOX_AWS_ROOT_GB
 CRABBOX_AWS_SSH_CIDRS
 CRABBOX_HOST_ID
-CRABBOX_AWS_MAC_HOST_ID legacy AWS alias
+CRABBOX_AWS_MAC_HOST_ID            legacy AWS alias
 CRABBOX_CAPACITY_MARKET
 CRABBOX_CAPACITY_STRATEGY
 CRABBOX_CAPACITY_FALLBACK
@@ -751,6 +481,11 @@ CRABBOX_CAPACITY_REGIONS
 CRABBOX_CAPACITY_AVAILABILITY_ZONES
 CRABBOX_CAPACITY_HINTS
 CRABBOX_CAPACITY_LARGE_CLASSES
+```
+
+Actions hydration:
+
+```text
 CRABBOX_ACTIONS_WORKFLOW
 CRABBOX_ACTIONS_JOB
 CRABBOX_ACTIONS_REF
@@ -758,36 +493,11 @@ CRABBOX_ACTIONS_REPO
 CRABBOX_ACTIONS_RUNNER_VERSION
 CRABBOX_ACTIONS_RUNNER_LABELS
 CRABBOX_ACTIONS_EPHEMERAL
-CRABBOX_BLACKSMITH_ORG
-CRABBOX_BLACKSMITH_WORKFLOW
-CRABBOX_BLACKSMITH_JOB
-CRABBOX_BLACKSMITH_REF
-CRABBOX_BLACKSMITH_IDLE_TIMEOUT
-CRABBOX_BLACKSMITH_DEBUG
-CRABBOX_NAMESPACE_IMAGE
-CRABBOX_NAMESPACE_SIZE
-CRABBOX_NAMESPACE_REPOSITORY
-CRABBOX_NAMESPACE_SITE
-CRABBOX_NAMESPACE_VOLUME_SIZE_GB
-CRABBOX_NAMESPACE_AUTO_STOP_IDLE_TIMEOUT
-CRABBOX_NAMESPACE_WORK_ROOT
-CRABBOX_NAMESPACE_DELETE_ON_RELEASE
-CRABBOX_SEMAPHORE_HOST
-CRABBOX_SEMAPHORE_TOKEN
-CRABBOX_SEMAPHORE_PROJECT
-CRABBOX_SEMAPHORE_MACHINE
-CRABBOX_SEMAPHORE_OS_IMAGE
-CRABBOX_SEMAPHORE_IDLE_TIMEOUT
-CRABBOX_E2B_API_KEY
-CRABBOX_E2B_API_URL
-CRABBOX_E2B_DOMAIN
-CRABBOX_E2B_TEMPLATE
-CRABBOX_E2B_WORKDIR
-CRABBOX_E2B_USER
-CRABBOX_MODAL_APP
-CRABBOX_MODAL_IMAGE
-CRABBOX_MODAL_WORKDIR
-CRABBOX_MODAL_PYTHON
+```
+
+Sync, env, results, cache:
+
+```text
 CRABBOX_RESULTS_JUNIT
 CRABBOX_SYNC_CHECKSUM
 CRABBOX_SYNC_DELETE
@@ -801,17 +511,28 @@ CRABBOX_SYNC_FAIL_FILES
 CRABBOX_SYNC_FAIL_BYTES
 CRABBOX_SYNC_ALLOW_LARGE
 CRABBOX_ENV_ALLOW
-CRABBOX_CACHE_PNPM/NPM/DOCKER/GIT
+CRABBOX_CACHE_PNPM / _NPM / _DOCKER / _GIT
 CRABBOX_CACHE_MAX_GB
 CRABBOX_CACHE_PURGE_ON_RELEASE
+CRABBOX_CACHE_VOLUMES
+```
+
+Tailscale:
+
+```text
 CRABBOX_TAILSCALE
 CRABBOX_TAILSCALE_TAGS
 CRABBOX_TAILSCALE_HOSTNAME_TEMPLATE
 CRABBOX_TAILSCALE_AUTH_KEY_ENV
-CRABBOX_TAILSCALE_AUTH_KEY        direct-provider only, via auth-key env
+CRABBOX_TAILSCALE_AUTH_KEY                    direct-provider only, via auth-key env
 CRABBOX_TAILSCALE_EXIT_NODE
 CRABBOX_TAILSCALE_EXIT_NODE_ALLOW_LAN_ACCESS
-CRABBOX_ARTIFACTS_STORAGE          default --storage for artifacts publish
+```
+
+Artifact publishing defaults (override `crabbox artifacts publish` flags):
+
+```text
+CRABBOX_ARTIFACTS_STORAGE
 CRABBOX_ARTIFACTS_BUCKET
 CRABBOX_ARTIFACTS_PREFIX
 CRABBOX_ARTIFACTS_BASE_URL
@@ -823,45 +544,63 @@ CRABBOX_ARTIFACTS_PRESIGN
 CRABBOX_ARTIFACTS_EXPIRES
 ```
 
-Provider/deploy variables live outside normal CLI operation:
+Provider-specific (read by individual adapters; see each provider page under
+[features/](features/README.md)):
+
+```text
+CRABBOX_BLACKSMITH_*               Blacksmith Testbox
+CRABBOX_NAMESPACE_*                Namespace Devbox
+CRABBOX_SEMAPHORE_* / SEMAPHORE_*  Semaphore
+CRABBOX_E2B_API_KEY / E2B_*        E2B
+CRABBOX_MODAL_* / MODAL_*          Modal
+CRABBOX_AZURE_DYNAMIC_SESSIONS_*   Azure Dynamic Sessions
+CRABBOX_WANDB_API_KEY / WANDB_*    Weights & Biases
+HCLOUD_TOKEN / HETZNER_TOKEN       Hetzner
+DAYTONA_API_KEY / DAYTONA_*        Daytona
+RUNPOD_API_KEY                     RunPod
+AWS_PROFILE / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN
+GITHUB_TOKEN                       GitHub API access for Actions/capsules
+```
+
+Worker/deploy variables (used to operate the broker itself, not for normal CLI
+runs):
 
 ```text
 CRABBOX_CLOUDFLARE_API_TOKEN
 CRABBOX_CLOUDFLARE_ACCOUNT_ID
-CRABBOX_CLOUDFLARE_ZONE_ID
-CRABBOX_CLOUDFLARE_ZONE_NAME
-CRABBOX_DOMAIN
-CRABBOX_FALLBACK_DOMAIN
-HCLOUD_TOKEN/HETZNER_TOKEN
-AWS_PROFILE/AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN
-SEMAPHORE_HOST/SEMAPHORE_API_TOKEN/SEMAPHORE_PROJECT
-E2B_API_KEY/E2B_API_URL/E2B_DOMAIN
-MODAL_TOKEN_ID/MODAL_TOKEN_SECRET
-GITHUB_TOKEN
 ```
 
-## Output Rules
+## Output rules
 
-Human output:
+Human output streams progress to stderr and the command's own output to stdout:
 
 ```text
 acquiring lease profile=project-check ttl=90m
-leased cbx_abcdef123456 slug=blue-lobster provider=aws server=i-0123 type=c7a.48xlarge ip=203.0.113.10 idle_timeout=30m0s expires=2026-05-01T17:30:00Z
-syncing 184 files -> /work/crabbox/cbx_abcdef123456/openclaw
+leased cbx_abcdef123456 slug=swift-crab provider=aws server=i-0123 type=c7a.48xlarge ip=203.0.113.10 idle_timeout=30m0s expires=2026-05-01T17:30:00Z
+syncing 184 files -> /work/crabbox/cbx_abcdef123456/my-app
 running pnpm check:changed
 ...
 released cbx_abcdef123456
 ```
 
-JSON output:
+JSON output (with `--json` where supported):
 
 ```json
 {
   "leaseId": "cbx_abcdef123456",
-  "machineId": "hz-ccx33-01",
+  "machineId": "i-0123456789abcdef0",
   "state": "released",
   "exitCode": 0
 }
 ```
 
 No progress bars when stdout is not a TTY.
+
+## See also
+
+- [Commands](commands/README.md) — per-command flags and examples.
+- [Configuration](features/configuration.md) — full config schema.
+- [Getting started](getting-started.md) — first run walkthrough.
+- [How it works](how-it-works.md) and [Architecture](architecture.md) — the
+  CLI / broker / runner split.
+- [Providers](features/providers.md) — adapter list and per-provider surface.

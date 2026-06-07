@@ -26,10 +26,78 @@ func TestClaimLeaseForRepoWritesAndUpdatesClaim(t *testing.T) {
 	}
 }
 
+func TestClaimLeaseTargetForRepoConfigStoresEndpointMetadata(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.Pond = "Alpha Pond"
+	cfg.Cache.Volumes = []CacheVolumeConfig{{
+		Key:  "repo-linux-node24-lock",
+		Path: "/var/cache/crabbox/pnpm",
+	}}
+	server := Server{
+		Provider: "aws",
+		Labels: map[string]string{
+			"tailscale":      "true",
+			"tailscale_ipv4": "100.64.1.10",
+			"slug":           "web",
+			pondLabelKey:     "alpha-pond",
+		},
+	}
+	target := SSHTarget{Host: "203.0.113.10", Port: "2222"}
+
+	if err := claimLeaseTargetForRepoConfig("cbx_123", "web", cfg, server, target, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := readLeaseClaim("cbx_123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Pond != "alpha-pond" || claim.TailscaleIPv4 != "100.64.1.10" || claim.SSHHost != "203.0.113.10" || claim.SSHPort != 2222 {
+		t.Fatalf("unexpected claim endpoint metadata: %#v", claim)
+	}
+	if len(claim.CacheVolumes) != 1 || claim.CacheVolumes[0] != "repo-linux-node24-lock:/var/cache/crabbox/pnpm" {
+		t.Fatalf("cache volumes not stored in claim: %#v", claim.CacheVolumes)
+	}
+	if claim.Labels[pondLabelKey] != "alpha-pond" {
+		t.Fatalf("claim labels=%#v", claim.Labels)
+	}
+}
+
+func TestClaimLeaseForRepoProviderStoresPond(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := claimLeaseForRepoProviderWithPond("isb_crabbox-test", "web", "islo", "Alpha Pond", repo, 30*time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := readLeaseClaim("isb_crabbox-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Pond != "alpha-pond" {
+		t.Fatalf("pond=%q want alpha-pond", claim.Pond)
+	}
+	if err := claimLeaseForRepoProvider("isb_crabbox-test", "web", "islo", repo, 30*time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err = readLeaseClaim("isb_crabbox-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Pond != "alpha-pond" {
+		t.Fatalf("pond should be preserved when omitted, got %q", claim.Pond)
+	}
+}
+
 func TestClaimLeaseForRepoConfigScopesProviderClaims(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")
 	cfg := Config{Provider: "ssh"}
+	cfg.Static.Host = "mac-mini.local"
+	cfg.Static.User = "agent"
+	cfg.Static.Port = "2222"
+	cfg.Static.WorkRoot = "/work/crabbox"
+	cfg.TargetOS = targetMacOS
 	if err := claimLeaseForRepoConfig("cbx_static", "mac-mini", cfg, repo, 10*time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
@@ -39,6 +107,26 @@ func TestClaimLeaseForRepoConfigScopesProviderClaims(t *testing.T) {
 	}
 	if claim.Provider != staticProvider {
 		t.Fatalf("provider=%q want %q", claim.Provider, staticProvider)
+	}
+	if claim.StaticHost != "mac-mini.local" {
+		t.Fatalf("staticHost=%q want mac-mini.local", claim.StaticHost)
+	}
+	if claim.StaticUser != "agent" || claim.StaticPort != "2222" || claim.StaticWorkRoot != "/work/crabbox" || claim.TargetOS != targetMacOS {
+		t.Fatalf("static claim details not stored: %#v", claim)
+	}
+
+	cfg.Static.User = ""
+	cfg.Static.Port = ""
+	cfg.Static.WorkRoot = ""
+	if err := claimLeaseForRepoConfig("cbx_static", "mac-mini", cfg, repo, 10*time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err = readLeaseClaim("cbx_static")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.StaticUser != "" || claim.StaticPort != "" || claim.StaticWorkRoot != "" {
+		t.Fatalf("static claim details should be cleared on update: %#v", claim)
 	}
 
 	cfg.Provider = "aws"

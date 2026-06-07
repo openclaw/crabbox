@@ -295,7 +295,7 @@ func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo 
 	if sandbox.ID == "" {
 		return "", modalSandbox{}, "", exit(5, "modal create sandbox returned no sandbox id")
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, providerName, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
 		_ = client.Terminate(context.Background(), sandbox.ID)
 		return "", modalSandbox{}, "", err
 	}

@@ -32,6 +32,7 @@ func configShowView(cfg Config) map[string]any {
 		"profile":            cfg.Profile,
 		"provider":           cfg.Provider,
 		"target":             cfg.TargetOS,
+		"architecture":       effectiveArchitectureForConfig(cfg),
 		"os":                 cfg.OSImage,
 		"windowsMode":        cfg.WindowsMode,
 		"class":              cfg.Class,
@@ -48,6 +49,7 @@ func configShowView(cfg Config) map[string]any {
 		"workRoot":           cfg.WorkRoot,
 		"sync": map[string]any{
 			"exclude":     configuredExcludes(cfg),
+			"include":     syncIncludes(cfg),
 			"delete":      cfg.Sync.Delete,
 			"checksum":    cfg.Sync.Checksum,
 			"gitSeed":     cfg.Sync.GitSeed,
@@ -91,6 +93,13 @@ func configShowView(cfg Config) map[string]any {
 			"network":       cfg.AzureNetwork,
 			"sshCIDRs":      cfg.AzureSSHCIDRs,
 		},
+		"azureDynamicSessions": map[string]any{
+			"endpoint":    cfg.AzureDynamicSessions.Endpoint,
+			"pool":        cfg.AzureDynamicSessions.Pool,
+			"apiVersion":  cfg.AzureDynamicSessions.APIVersion,
+			"workdir":     cfg.AzureDynamicSessions.Workdir,
+			"timeoutSecs": cfg.AzureDynamicSessions.TimeoutSecs,
+		},
 		"blacksmith": map[string]any{
 			"org":         cfg.Blacksmith.Org,
 			"workflow":    cfg.Blacksmith.Workflow,
@@ -129,6 +138,30 @@ func configShowView(cfg Config) map[string]any {
 			"workdir":   cfg.UpstashBox.Workdir,
 			"keepAlive": cfg.UpstashBox.KeepAlive,
 		},
+		"asciiBox": map[string]any{
+			"baseUrl": cfg.AsciiBox.BaseURL,
+			"auth":    tokenState(cfg.AsciiBox.APIKey),
+			"cliPath": cfg.AsciiBox.CLIPath,
+			"workdir": cfg.AsciiBox.Workdir,
+		},
+		"appleContainer": map[string]any{
+			"cliPath":  cfg.AppleContainer.CLIPath,
+			"image":    cfg.AppleContainer.Image,
+			"user":     cfg.AppleContainer.User,
+			"workRoot": cfg.AppleContainer.WorkRoot,
+			"cpus":     cfg.AppleContainer.CPUs,
+			"memory":   cfg.AppleContainer.Memory,
+		},
+		"multipass": map[string]any{
+			"cliPath":       cfg.Multipass.CLIPath,
+			"image":         cfg.Multipass.Image,
+			"user":          cfg.Multipass.User,
+			"workRoot":      cfg.Multipass.WorkRoot,
+			"cpus":          cfg.Multipass.CPUs,
+			"memory":        cfg.Multipass.Memory,
+			"disk":          cfg.Multipass.Disk,
+			"launchTimeout": cfg.Multipass.LaunchTimeout.String(),
+		},
 		"static": map[string]any{
 			"id":       cfg.Static.ID,
 			"name":     cfg.Static.Name,
@@ -148,6 +181,7 @@ func configShowView(cfg Config) map[string]any {
 			"git":            cfg.Cache.Git,
 			"maxGB":          cfg.Cache.MaxGB,
 			"purgeOnRelease": cfg.Cache.PurgeOnRelease,
+			"volumes":        cfg.Cache.Volumes,
 		},
 		"jobs": jobConfigViews(cfg.Jobs),
 		"hetzner": map[string]any{
@@ -211,11 +245,11 @@ func configShowView(cfg Config) map[string]any {
 
 func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "config=%s\n", userConfigPath())
-	fmt.Fprintf(w, "provider=%s target=%s os=%s windows_mode=%s class=%s type=%s profile=%s\n", cfg.Provider, cfg.TargetOS, cfg.OSImage, cfg.WindowsMode, cfg.Class, cfg.ServerType, cfg.Profile)
+	fmt.Fprintf(w, "provider=%s target=%s arch=%s os=%s windows_mode=%s class=%s type=%s profile=%s\n", cfg.Provider, cfg.TargetOS, effectiveArchitectureForConfig(cfg), cfg.OSImage, cfg.WindowsMode, cfg.Class, cfg.ServerType, cfg.Profile)
 	fmt.Fprintf(w, "broker=%s auth=%s admin_auth=%s\n", blank(cfg.Coordinator, "-"), tokenState(cfg.CoordToken), tokenState(cfg.CoordAdminToken))
 	fmt.Fprintf(w, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(w, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)
-	fmt.Fprintf(w, "sync delete=%t checksum=%t git_seed=%t fingerprint=%t base_ref=%s excludes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg)), cfg.Sync.Timeout)
+	fmt.Fprintf(w, "sync delete=%t checksum=%t git_seed=%t fingerprint=%t base_ref=%s excludes=%d includes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg)), len(syncIncludes(cfg)), cfg.Sync.Timeout)
 	fmt.Fprintf(w, "env allow=%s\n", strings.Join(cfg.EnvAllow, ","))
 	fmt.Fprintf(w, "run preflight_tools=%s\n", blank(strings.Join(cfg.Run.PreflightTools, ","), "-"))
 	fmt.Fprintf(w, "capacity market=%s strategy=%s fallback=%s regions=%s hints=%t\n", cfg.Capacity.Market, cfg.Capacity.Strategy, cfg.Capacity.Fallback, blank(strings.Join(cfg.Capacity.Regions, ","), "-"), cfg.Capacity.Hints)
@@ -224,10 +258,13 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "namespace image=%s size=%s repository=%s site=%s volume_size_gb=%d auto_stop_idle_timeout=%s work_root=%s delete_on_release=%t\n", cfg.Namespace.Image, blank(cfg.Namespace.Size, "-"), blank(cfg.Namespace.Repository, "-"), blank(cfg.Namespace.Site, "-"), cfg.Namespace.VolumeSizeGB, cfg.Namespace.AutoStopIdleTimeout, cfg.Namespace.WorkRoot, cfg.Namespace.DeleteOnRelease)
 	fmt.Fprintf(w, "e2b api_url=%s domain=%s template=%s workdir=%s user=%s\n", cfg.E2B.APIURL, cfg.E2B.Domain, cfg.E2B.Template, cfg.E2B.Workdir, blank(cfg.E2B.User, "-"))
 	fmt.Fprintf(w, "upstash_box base_url=%s runtime=%s size=%s workdir=%s keep_alive=%t auth=%s\n", cfg.UpstashBox.BaseURL, cfg.UpstashBox.Runtime, cfg.UpstashBox.Size, cfg.UpstashBox.Workdir, cfg.UpstashBox.KeepAlive, tokenState(cfg.UpstashBox.APIKey))
+	fmt.Fprintf(w, "ascii_box base_url=%s cli=%s workdir=%s auth=%s\n", cfg.AsciiBox.BaseURL, cfg.AsciiBox.CLIPath, cfg.AsciiBox.Workdir, tokenState(cfg.AsciiBox.APIKey))
+	fmt.Fprintf(w, "apple_container cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s\n", cfg.AppleContainer.CLIPath, cfg.AppleContainer.Image, cfg.AppleContainer.User, cfg.AppleContainer.WorkRoot, cfg.AppleContainer.CPUs, blank(cfg.AppleContainer.Memory, "-"))
+	fmt.Fprintf(w, "multipass cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s disk=%s launch_timeout=%s\n", cfg.Multipass.CLIPath, cfg.Multipass.Image, cfg.Multipass.User, cfg.Multipass.WorkRoot, cfg.Multipass.CPUs, blank(cfg.Multipass.Memory, "-"), blank(cfg.Multipass.Disk, "-"), cfg.Multipass.LaunchTimeout)
 	fmt.Fprintf(w, "cloudflare api_url=%s workdir=%s auth=%s\n", blank(cfg.Cloudflare.APIURL, "-"), cfg.Cloudflare.Workdir, tokenState(cfg.Cloudflare.Token))
 	fmt.Fprintf(w, "static id=%s name=%s host=%s user=%s port=%s work_root=%s\n", blank(cfg.Static.ID, "-"), blank(cfg.Static.Name, "-"), blank(cfg.Static.Host, "-"), blank(cfg.Static.User, "-"), blank(cfg.Static.Port, "-"), blank(cfg.Static.WorkRoot, "-"))
 	fmt.Fprintf(w, "results junit=%s auto=%t\n", blank(strings.Join(cfg.Results.JUnit, ","), "-"), cfg.Results.Auto)
-	fmt.Fprintf(w, "cache pnpm=%t npm=%t docker=%t git=%t max_gb=%d purge_on_release=%t\n", cfg.Cache.Pnpm, cfg.Cache.Npm, cfg.Cache.Docker, cfg.Cache.Git, cfg.Cache.MaxGB, cfg.Cache.PurgeOnRelease)
+	fmt.Fprintf(w, "cache pnpm=%t npm=%t docker=%t git=%t max_gb=%d purge_on_release=%t volumes=%d\n", cfg.Cache.Pnpm, cfg.Cache.Npm, cfg.Cache.Docker, cfg.Cache.Git, cfg.Cache.MaxGB, cfg.Cache.PurgeOnRelease, len(cfg.Cache.Volumes))
 	if len(cfg.Jobs) > 0 {
 		names := make([]string, 0, len(cfg.Jobs))
 		for name := range cfg.Jobs {
@@ -238,6 +275,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	}
 	fmt.Fprintf(w, "aws region=%s root_gb=%d ssh_cidrs=%s\n", cfg.AWSRegion, cfg.AWSRootGB, blank(strings.Join(cfg.AWSSSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "azure location=%s resource_group=%s os_disk=%s network=%s ssh_cidrs=%s\n", cfg.AzureLocation, cfg.AzureResourceGroup, cfg.AzureOSDisk, blank(cfg.AzureNetwork, "-"), blank(strings.Join(cfg.AzureSSHCIDRs, ","), "-"))
+	fmt.Fprintf(w, "azure_dynamic_sessions endpoint=%s pool=%s api_version=%s workdir=%s timeout_secs=%d\n", blank(cfg.AzureDynamicSessions.Endpoint, "-"), blank(cfg.AzureDynamicSessions.Pool, "-"), cfg.AzureDynamicSessions.APIVersion, cfg.AzureDynamicSessions.Workdir, cfg.AzureDynamicSessions.TimeoutSecs)
 	fmt.Fprintf(w, "gcp project=%s zone=%s image=%s network=%s subnet=%s root_gb=%d ssh_cidrs=%s\n", blank(cfg.GCPProject, "-"), cfg.GCPZone, cfg.GCPImage, cfg.GCPNetwork, blank(cfg.GCPSubnet, "-"), cfg.GCPRootGB, blank(strings.Join(cfg.GCPSSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "proxmox api_url=%s node=%s template_id=%d storage=%s pool=%s bridge=%s user=%s work_root=%s full_clone=%t auth=%s\n", blank(cfg.Proxmox.APIURL, "-"), blank(cfg.Proxmox.Node, "-"), cfg.Proxmox.TemplateID, blank(cfg.Proxmox.Storage, "-"), blank(cfg.Proxmox.Pool, "-"), blank(cfg.Proxmox.Bridge, "-"), cfg.Proxmox.User, cfg.Proxmox.WorkRoot, cfg.Proxmox.FullClone, tokenState(cfg.Proxmox.TokenSecret))
 	fmt.Fprintf(w, "parallels template=%s source=%s source_id=%s snapshot=%s snapshot_id=%s clone_mode=%s host=%s user=%s work_root=%s startup_timeout=%s templates=%d hosts=%d\n", blank(cfg.Parallels.Template, "-"), blank(cfg.Parallels.Source, "-"), blank(cfg.Parallels.SourceID, "-"), blank(cfg.Parallels.SourceSnapshot, "-"), blank(cfg.Parallels.SourceSnapshotID, "-"), cfg.Parallels.CloneMode, blank(cfg.Parallels.Host, "local"), cfg.Parallels.User, cfg.Parallels.WorkRoot, cfg.Parallels.StartupTimeout, len(cfg.Parallels.Templates), len(cfg.Parallels.Hosts))
@@ -255,6 +293,7 @@ func jobConfigViews(jobs map[string]JobConfig) map[string]any {
 			"windowsMode":    job.WindowsMode,
 			"profile":        job.Profile,
 			"class":          job.Class,
+			"architecture":   job.Architecture,
 			"serverType":     job.ServerType,
 			"market":         job.Market,
 			"desktop":        job.Desktop,

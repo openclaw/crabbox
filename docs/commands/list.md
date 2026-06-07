@@ -1,61 +1,95 @@
 # list
 
-`crabbox list` shows current Crabbox machines.
+`crabbox list` shows the current Crabbox machines (leases) for a provider. It is
+read-only and never provisions or releases anything.
 
 ```sh
 crabbox list
 crabbox list --provider aws
 crabbox list --provider ssh --target macos --static-host mac-studio.local
-crabbox list --provider blacksmith-testbox
-crabbox list --provider exe-dev
-crabbox list --provider namespace-devbox
-crabbox list --provider semaphore
-crabbox list --provider sprites
-crabbox list --provider daytona
-crabbox list --provider islo
-crabbox list --provider e2b
 crabbox list --provider cloudflare --refresh
+crabbox list --pond alpha
 crabbox list --json
 ```
 
-`--refresh` asks providers with local claims, such as Cloudflare, to check live
-runner state before printing the list. Without it, Cloudflare list stays
-credential-free and reports local claims only.
+`crabbox pool list` is a compatibility alias for the same command.
 
-`crabbox pool list` remains as a compatibility alias.
+## What it lists
 
-In `provider=ssh` mode this prints the configured static target.
+The shape of the output depends on the selected `--provider`:
 
-In `blacksmith-testbox` mode this reads `blacksmith testbox list` and renders the
-same Crabbox list shape as other providers. `--json` keeps the compatibility
-shape parsed from the Blacksmith table: id, status, repo, workflow, job, ref,
-and created time when the upstream table exposes those columns.
-When coordinator auth is configured, the same list command also refreshes
-owner-scoped external runner rows in the portal lease table from the current
-all-status Blacksmith list. Crabbox also attempts to infer the matching GitHub
-Actions run/workflow from the row's repo, workflow, ref, and created time.
-The portal shows that Actions status, tags long-queued or long-running workflow
-owners as `stuck`, exposes a copyable local stop command, and links each row to
-a visibility-only runner detail page. Missing runners from later syncs are
-marked stale rather than treated as Crabbox leases.
+- **Coordinator-backed providers** (`hetzner`, `aws`, `azure`, `gcp` with a broker
+  configured) list the leases the broker tracks for you.
+- **Direct cloud / hypervisor / static providers** list the machines the provider
+  itself reports. In `provider=ssh` mode this prints the single configured static
+  target.
+- **Delegated and sandbox providers** (`exe-dev`, `namespace-devbox`, `semaphore`,
+  `sprites`, `daytona`, `islo`, `e2b`, and similar) render through the core lease
+  view, so both human output and `--json` use the normalized Crabbox lease shape.
 
-In `exe-dev`, `namespace-devbox`, `semaphore`, `sprites`, `daytona`, `islo`,
-and `e2b` modes, rendering is core-owned: human output and `--json` use the
-normalized Crabbox lease view.
+Providers that do not implement listing exit with an error.
 
-Flags:
+## Refreshing provider state
+
+`--refresh` asks providers that keep local claims to check live runner state before
+printing. Without it, those providers report only their local claims and stay
+credential-free. For example, `crabbox list --provider cloudflare` reports local
+claims by default; add `--refresh` to query live container state.
+
+## Filtering by pond
+
+`--pond <name>` keeps only leases tagged with the requested pond. Pond names are
+normalized like slugs (lowercased, non-alphanumeric runs collapsed to single
+dashes), so `--pond "Alpha Pond"` matches a lease created with `--pond alpha-pond`.
+See [pond](pond.md) and [docs/features/pond.md](../features/pond.md).
+
+In `--json` mode the pond filter is applied to the same payload the backend emits;
+backends whose entries carry no labels return an empty list rather than an
+unfiltered one.
+
+## Blacksmith external runners
+
+In `blacksmith-testbox` mode, `list` reads `blacksmith testbox list` and renders the
+same Crabbox list shape as other providers. With `--json` it preserves the
+compatibility fields parsed from the Blacksmith table — id, status, repo, workflow,
+job, ref, and created time — when the upstream table exposes those columns.
+
+When a coordinator is configured, the same command also refreshes owner-scoped
+external runner rows in the portal lease table from the current all-status
+Blacksmith list, and best-effort infers the matching GitHub Actions run/workflow
+from each row's repo, workflow, ref, and created time. The portal then shows that
+Actions status, tags long-queued or long-running workflow owners as `stuck`,
+exposes a copyable local stop command, and links each row to a read-only runner
+detail page. Runners missing from a later sync are marked stale rather than treated
+as Crabbox leases.
+
+## Flags
 
 ```text
---provider hetzner|aws|azure|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b
+--provider <name>        provider to list (see crabbox providers for the full set)
 --target linux|macos|windows
 --windows-mode normal|wsl2
---static-host <host>
---static-user <user>
---static-port <port>
---static-work-root <path>
---json
+--static-host <host>     provider=ssh: host of the static target
+--static-user <user>     provider=ssh: SSH user
+--static-port <port>     provider=ssh: SSH port
+--static-work-root <path> provider=ssh: remote work root
+--refresh                query live provider state where supported
+--pond <name>            only list leases tagged with this pond
+--json                   print JSON
+```
+
+Provider-specific connection overrides are also accepted when listing that
+provider, including:
+
+```text
 --exe-dev-control-host <host>
 --sprites-api-url <url>
+--azure-dynamic-sessions-endpoint <url>
+--azure-dynamic-sessions-pool <name>
+--azure-dynamic-sessions-api-version <version>
 --e2b-api-url <url>
 --e2b-domain <domain>
 ```
+
+The `--provider` value accepts any registered provider name or alias; run
+[`crabbox providers`](providers.md) to see the full set.

@@ -1,216 +1,298 @@
 # Security
 
+Read this when you are standing up a shared broker, deciding what secrets to
+forward, or reasoning about who can reach a leased box.
+
+Crabbox spans three trust layers, and each owns a different part of the security
+posture:
+
+```text
+local CLI -> Cloudflare Worker / Fleet Durable Object -> provider VM
+```
+
+The CLI owns local config, per-lease SSH keys, sync, and remote command
+execution. The Worker (the broker) owns authentication, authorization, lease
+state, provider credentials, cost guardrails, and cleanup. Providers own VM
+creation, network reachability, and deletion.
+
 ## Trust Model
 
-MVP is for trusted team members, not arbitrary untrusted users.
+Crabbox is built for trusted operators on a shared team, not for arbitrary
+untrusted tenants. Assume:
 
-Assumptions:
+- Operators can run arbitrary commands on the boxes they lease.
+- A box may observe any local environment value the CLI forwards to it.
+- Operators are trusted not to attack each other deliberately.
+- Bugs and crashes still happen, so cleanup must be defensive and idempotent.
 
-- Users can run arbitrary commands on leased machines.
-- Machines may see forwarded local env values.
-- Users are trusted not to attack other users intentionally.
-- Bugs and crashes still happen, so cleanup must be defensive.
+Do not place mutually untrusted tenants on the same broker, in the same
+[pond](features/pond.md), or behind a single shared token. Per-lease and
+per-tenant isolation is not the current security boundary.
 
 ## Authentication
 
-Cloudflare Access can protect custom coordinator routes. The Worker also enforces auth for every non-health route.
+Every non-health route on the Worker requires a Bearer token; requests without
+one are rejected `401 unauthorized`. The only unauthenticated routes are
+`GET /v1/health` and the portal login/logout endpoints. Authentication is
+resolved in `worker/src/auth.ts` in this precedence:
 
-The Access-protected coordinator route is a defense-in-depth layer, not a
-replacement for Crabbox auth. `broker-access.example.com` first requires
-Cloudflare Access service-token credentials at the edge. After that, the same
-Worker still requires a Crabbox signed user token or shared operator bearer
-token before lease, run, log, usage, or admin routes are allowed.
+1. **Admin token** — the request token equals the Worker secret
+   `CRABBOX_ADMIN_TOKEN`. Grants admin scope.
+2. **Shared operator token** — the token equals `CRABBOX_SHARED_TOKEN`. Grants a
+   non-admin shared identity for automation.
+3. **Signed user token** — a `cbxu_`-prefixed token issued by GitHub browser
+   login. It is an HMAC-SHA256 signature (verified in constant time) over a
+   base64url payload signed with `CRABBOX_SESSION_SECRET` (falling back to
+   `CRABBOX_SHARED_TOKEN`). The payload carries `owner`, `org`, and GitHub
+   `login`, has a default 30-day expiry, and is rejected if it carries an
+   `admin` claim — browser login can never mint admin tokens.
 
-MVP:
+### GitHub browser login
 
-- One-time PIN Access remains available for early fallback.
-- GitHub Access IdP is configured for your allowed GitHub org.
-- `broker-access.example.com` is service-token-only and the policy is scoped to the local Crabbox CLI service token.
-- `crabbox login --url <broker-url>` opens GitHub, receives a signed user token from the coordinator, and stores it in local config.
-- Automation can still use a shared bearer token via `crabbox login --url <broker-url> --token-stdin`.
-- Admin routes require a separate admin bearer token configured as `CRABBOX_ADMIN_TOKEN` in the Worker and `broker.adminToken` or `CRABBOX_COORDINATOR_ADMIN_TOKEN` locally.
-- The CLI sends owner/org headers only for shared-token automation; GitHub login tokens carry owner/org inside the signed token.
-- `CRABBOX_GITHUB_ALLOWED_TEAMS` can restrict browser-login tokens to selected GitHub team slugs after allowed-org membership passes.
-- GitHub browser-login tokens are user tokens, not admin tokens. They can only see and mutate leases, runs, logs, and usage for their own owner/org identity.
-- The Worker forwards signed GitHub token owner/org identity to the Fleet Durable Object and strips caller-supplied Access identity headers from that forwarded request.
-- Raw Cloudflare Access identity headers are not trusted. If the Worker uses an Access identity, it first verifies `Cf-Access-Jwt-Assertion` against the configured Access team certs and application audience.
-- Missing shared-token config fails closed for non-health coordinator routes.
+`crabbox login --url <broker-url>` opens a GitHub OAuth flow and stores the
+returned signed user token in local config. Authorization during login is gated
+by Worker config:
 
-Target:
+- `CRABBOX_GITHUB_ALLOWED_ORG` / `CRABBOX_GITHUB_ALLOWED_ORGS` restrict login to
+  members of the listed GitHub org(s).
+- `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) further
+  narrows access to selected team slugs after org membership passes.
 
-- Keep GitHub org membership as the normal access path.
-- Optional team allowlist for narrower browser-login access.
+User tokens can only see and mutate leases, runs, logs, and usage for their own
+`owner`/`org` identity. See [auth and admin](features/auth-admin.md) and
+[broker auth routing](features/broker-auth-routing.md) for the full flow.
+
+### Cloudflare Access (optional defense-in-depth)
+
+Cloudflare Access can sit in front of a custom broker hostname (for example
+`broker.example.com`) as an edge layer. It does **not** replace Crabbox auth: a
+request must clear Access at the edge *and* present a valid Crabbox token before
+any lease, run, log, usage, or admin route is reached.
+
+The Worker never trusts raw Access identity headers. If it uses an
+Access-provided email, it first verifies the `cf-access-jwt-assertion` JWT
+(RS256, key fetched from `https://<team-domain>/cdn-cgi/access/certs`) against
+`CRABBOX_ACCESS_TEAM_DOMAIN` and `CRABBOX_ACCESS_AUD`, checking issuer,
+audience, and expiry. Before forwarding any request to the Fleet Durable Object,
+the Worker strips caller-supplied `cf-access-authenticated-user-email` and
+`cf-access-jwt-assertion` headers and injects its own derived identity
+(`x-crabbox-auth`, `-admin`, `-owner`, `-org`, `-github-login`).
+
+The local service-token credentials `CRABBOX_ACCESS_CLIENT_ID` and
+`CRABBOX_ACCESS_CLIENT_SECRET` only satisfy the Access edge; they authorize no
+Crabbox action by themselves. Store them in user config or env, never in repo
+config.
 
 ## Authorization
 
-Roles:
+There are three effective roles:
 
 ```text
-user: acquire, heartbeat, release own leases, list own leases/runs/logs/usage
-maintainer: shared warm pool access
-admin: drain machines, cleanup, view all leases/runs/pool/usage, deploy
+user        acquire/heartbeat/release own leases; read own leases/runs/logs/usage
+operator    shared automation identity via a shared bearer token
+admin       view all leases/runs/pool/usage; drain/delete machines; image lifecycle
 ```
 
-Admin identity uses a separate admin token. Shared operator tokens are for normal automation. Browser-login users can optionally be limited by GitHub team slug in Worker config.
+Admin scope comes only from `CRABBOX_ADMIN_TOKEN`; locally, admin commands send
+it via `CRABBOX_COORDINATOR_ADMIN_TOKEN` or `broker.adminToken`. Shared-operator
+requests do **not** trust caller-supplied `X-Crabbox-Owner` / `X-Crabbox-Org`
+headers — pin that automation's identity with `CRABBOX_SHARED_OWNER`
+(and `CRABBOX_DEFAULT_ORG`), or prefer per-user signed tokens / verified Access
+identity instead. Missing shared-token config fails closed for non-health
+routes.
 
 ## Secrets
 
-No central project secret store in MVP.
+There is no central project secret store. Secrets stay on the operator's
+machine and are forwarded to a box only when explicitly allowed.
 
-Rules:
+Handling rules:
 
-- Secrets stay local.
-- CLI forwards env only by allowlist.
-- Users can opt in additional env names with repo-local `env.allow` config.
-- Never accept secret values as command-line flag values.
-- Never log env values.
-- Redact known secret-looking strings in diagnostics.
-- `CRABBOX_SHARED_TOKEN` is stored as a Worker secret for trusted operator automation; local automation can use `CRABBOX_COORDINATOR_TOKEN`. Shared-token requests do not trust caller-supplied `X-Crabbox-Owner` or `X-Crabbox-Org`; configure a fixed `CRABBOX_SHARED_OWNER` for that automation identity, or use verified Cloudflare Access / signed browser tokens for per-user identity.
-- `CRABBOX_ADMIN_TOKEN` is stored as a Worker secret for admin and image lifecycle routes; local admin commands use `CRABBOX_COORDINATOR_ADMIN_TOKEN` or `broker.adminToken`.
-- `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`, and `CRABBOX_SESSION_SECRET` are Worker secrets for browser login.
-- `CRABBOX_TAILSCALE_CLIENT_ID` and `CRABBOX_TAILSCALE_CLIENT_SECRET` are
-  Worker secrets for minting one-off Tailscale auth keys when brokered
-  `--tailscale` leases are requested.
+- The CLI forwards environment variables only by allowlist. The default allow
+  list is `CI` and `NODE_OPTIONS`; extend it with repo-local `env.allow` config
+  (or a profile's `env.allow`).
+- Never pass a secret value as a command-line flag.
+- Never log environment values; redact secret-looking strings in diagnostics.
+- User config files are written `0600`. `crabbox doctor` flags any local config
+  whose permissions are broader, because broker tokens may live there.
+
+Example `env.allow` in `.crabbox.yaml`:
+
+```yaml
+env:
+  allow:
+    - CI
+    - NODE_OPTIONS
+    - PROJECT_*
+```
+
+See [environment forwarding](features/env-forwarding.md) for matching and
+profile behavior.
+
+### Worker secrets and config
+
+Stored as Worker **secrets** (never in the repo):
+
+- `CRABBOX_ADMIN_TOKEN` — admin and image-lifecycle routes.
+- `CRABBOX_SHARED_TOKEN` — trusted operator automation; also the fallback
+  signing key when `CRABBOX_SESSION_SECRET` is unset.
+- `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,
+  `CRABBOX_SESSION_SECRET` — GitHub browser login and user-token signing.
+- `CRABBOX_TAILSCALE_CLIENT_ID`, `CRABBOX_TAILSCALE_CLIENT_SECRET` — minting
+  one-off Tailscale auth keys for brokered `--tailscale` leases.
 - `CRABBOX_ARTIFACTS_ACCESS_KEY_ID`, `CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY`,
-  and optional `CRABBOX_ARTIFACTS_SESSION_TOKEN` are Worker secrets for
-  brokered artifact publishing. They should be scoped to the artifact
-  bucket/prefix and used only to sign short-lived upload/read URLs.
+  and optional `CRABBOX_ARTIFACTS_SESSION_TOKEN` — brokered artifact publishing.
+  Scope these to the artifact bucket/prefix and use them only to sign
+  short-lived upload/read URLs.
+
+Worker **config** values (not secret material):
+
+- `CRABBOX_GITHUB_ALLOWED_ORG(S)`, `CRABBOX_GITHUB_ALLOWED_TEAMS` —
+  browser-login authorization.
+- `CRABBOX_TAILSCALE_TAGS` — allowlist/default for requested Tailscale ACL tags.
+  Do not allow arbitrary user-supplied tags.
+- `CRABBOX_ACCESS_TEAM_DOMAIN`, `CRABBOX_ACCESS_AUD` — Access JWT verification.
 - `CRABBOX_ARTIFACTS_BACKEND`, `CRABBOX_ARTIFACTS_BUCKET`,
   `CRABBOX_ARTIFACTS_PREFIX`, `CRABBOX_ARTIFACTS_BASE_URL`,
   `CRABBOX_ARTIFACTS_REGION`, `CRABBOX_ARTIFACTS_ENDPOINT_URL`,
-  `CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS`, and
-  `CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS` are Worker config values, not secret
-  material.
-- `CRABBOX_GITHUB_ALLOWED_ORG(S)` and `CRABBOX_GITHUB_ALLOWED_TEAMS` are Worker config values for browser-login authorization.
-- `CRABBOX_TAILSCALE_TAGS` is the coordinator allowlist/default for requested
-  Tailscale ACL tags. Do not allow arbitrary user-supplied tags.
-- `CRABBOX_ACCESS_TEAM_DOMAIN` and `CRABBOX_ACCESS_AUD` let the Worker verify Cloudflare Access JWTs before using Access-provided identity.
-- `CRABBOX_ACCESS_CLIENT_ID` and `CRABBOX_ACCESS_CLIENT_SECRET` are local Cloudflare Access service-token credentials. Store them only in user config or env, never repo config. They only satisfy Cloudflare Access; they do not authorize Crabbox actions by themselves.
-- `CRABBOX_TAILSCALE_AUTH_KEY` is local direct-provider-only. Do not forward it
-  to commands, print it, or store it in repo config.
-- User config files are written `0600`; `crabbox doctor` reports overly broad local config permissions because broker tokens may be stored there.
+  `CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS`,
+  `CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS` — artifact storage settings.
 
-Project allowlist example:
-
-```json
-{
-  "env": {
-    "allow": ["CI", "NODE_OPTIONS", "PROJECT_*"]
-  }
-}
-```
+Local-only direct-provider secret: `CRABBOX_TAILSCALE_AUTH_KEY`. Do not forward
+it to commands, print it, or store it in repo config.
 
 ## SSH
 
-MVP SSH posture:
+SSH is the control and data path to a leased box; the broker manages leases but
+never proxies SSH traffic. The posture:
 
-- SSH allowed only for worker machines.
-- AWS security groups use `CRABBOX_AWS_SSH_CIDRS` when configured. Brokered leases otherwise use the CLI-detected outbound IPv4 CIDR or, as a fallback, the Cloudflare request source IP for the lease request.
-- Hetzner direct mode still relies on provider networking/firewall defaults unless a profile supplies tighter controls.
-- Key-only authentication.
-- Dedicated `crabbox` user.
-- No password login.
-- No root login.
-- SSH listens on the configured primary port, default `2222`, plus configured fallback ports, default `22`, because port 22 is not reliable from every operator network path.
-- The CLI generates per-lease SSH keys under the user config directory for new leases.
-- Matching cloud SSH keys/key pairs are removed when Crabbox deletes the machine.
-- Work happens under `/work/crabbox`.
-- Machines are disposable or cleanable.
+- Key-only authentication. No password login, no root login.
+- A dedicated `crabbox` user; work happens under the platform work root
+  (`/work/crabbox` on Linux).
+- The CLI generates a per-lease key under the user config directory
+  (`<user-config>/crabbox/testboxes/<lease-id>/id_ed25519`; RSA for AWS/Azure
+  Windows). Matching cloud key pairs are removed when Crabbox deletes the box.
+  See [SSH keys](features/ssh-keys.md).
+- SSH listens on the configured primary port (default `2222`) plus configured
+  fallback ports (default `22`), because port 22 is not reliably reachable from
+  every operator network.
+- AWS security groups use `CRABBOX_AWS_SSH_CIDRS` when set. Brokered leases
+  otherwise scope ingress to the CLI-detected outbound IPv4 CIDR, falling back
+  to the Cloudflare request source IP for the lease. Hetzner direct mode relies
+  on provider firewall defaults unless a profile tightens them.
+- Machines are disposable and cleanable; boot-time cleanup clears stale
+  work-root directories.
 
-Tailscale does not replace this SSH model in v1. Crabbox still uses OpenSSH,
-per-lease keys, scoped known_hosts, SSH tunnels, lease expiry, and cleanup.
-Tailscale only changes which host the SSH client dials.
+[Tailscale](features/tailscale.md) does not change this model. Crabbox still
+uses OpenSSH, per-lease keys, scoped `known_hosts`, SSH tunnels, lease expiry,
+and cleanup — Tailscale only changes which host the SSH client dials.
 
-Managed VNC remains tunnel-only even on Tailscale-enabled leases. Do not bind
-Crabbox-managed VNC to public interfaces or to the Tailscale 100.x interface.
+Hardening worth applying before first shared use:
 
-MVP hardening before first shared use:
+- Keep long-lived operator keys out of machine images.
+- Restrict provider firewalls to known callers where practical.
+- Treat profiles that forward secrets as higher risk, and prefer ephemeral
+  machines for them.
 
-- Keep long-lived maintainer keys out of machine images.
-- Restrict Hetzner firewalls to known callers when practical.
-- Redact command diagnostics before printing.
-- Treat profiles that forward secrets as higher risk; prefer ephemeral machines for those profiles.
+## Pond Networking
 
-Later hardening:
+[Ponds](features/pond.md) are a trusted-operator surface. A pond is a lease
+grouping plus transport metadata, not an isolation boundary.
 
-- Cloudflare Tunnel or Access SSH.
-- SSH CA with short-lived certs.
-- Per-lease Unix users.
-- Per-lease workdir ownership and cleanup.
+- With `--tailscale` on a direct, Tailscale-capable provider, the local CLI may
+  add a `tag:cbx-pond-<owner>-<pond>` tag owner and a same-tag allow rule to the
+  operator's tailnet policy — but only when both `TS_API_KEY` and
+  `CRABBOX_POND_ACL_BOOTSTRAP=1` are set. `TS_API_KEY` alone enables read-only
+  `doctor --pond` verification. The broker never receives the Tailscale API key.
+- Brokered leases keep using the Worker's `CRABBOX_TAILSCALE_TAGS` allowlist and
+  do not receive generated `tag:cbx-pond-*` tags. Admins who want brokered
+  tailnet reachability must configure and review that policy explicitly.
+
+Security notes:
+
+- Same-pond Tailscale members can reach each other by default once the policy
+  row exists. Do not share a pond across mutually untrusted tenants.
+- URL-bridge peers expose only provider-native HTTP(S) ingress, not arbitrary
+  TCP/UDP reachability into the tailnet.
+- The SSH-mesh is operator-side `ssh -L` forwarding; it does not create
+  lease-to-lease networking.
+- Removing a pond does not prune historical Tailscale policy rows. Audit and
+  remove stale `tag:cbx-pond-*` entries when rotating preview environments.
+
+Managed VNC stays tunnel-only even on Tailscale-enabled leases. Do not bind
+Crabbox-managed VNC to public interfaces or to the Tailscale `100.x` interface.
 
 ## Cleanup
 
-Cleanup is security-sensitive.
+Cleanup is security-sensitive: a leaked box keeps spending money and stays
+reachable. See [lifecycle and cleanup](features/lifecycle-cleanup.md).
 
-Required:
+Layered protections:
 
-- Lease TTL cap.
-- Idle timeout and heartbeat/touch deadline.
-- Explicit release.
-- Durable Object alarm cleanup.
-- Durable Object AWS orphan sweep for current broker credentials and capacity regions.
-- Provider label sweep for clearly expired, inactive orphan machines.
-- Boot-time cleanup of stale `/work/crabbox/*` dirs.
+- A lease TTL cap and an idle timeout enforced against a heartbeat/touch
+  deadline.
+- Explicit release (`crabbox stop` / `release`).
+- A Durable Object alarm that expires leases and reschedules itself for the
+  soonest pending deadline.
+- A coordinator-side AWS orphan sweep over current broker credentials and
+  capacity regions.
+- A provider-label sweep for clearly expired, inactive orphan machines.
 
-Direct-CLI cleanup uses provider labels. It skips kept machines, deletes expired ready/leased/active machines, and only removes running/provisioning machines after the extra stale safety window. When a coordinator is configured, provider-side cleanup is disabled because the Durable Object alarm owns brokered cleanup.
+In direct-CLI mode, cleanup runs from the CLI using provider labels: it skips
+`keep` machines, deletes expired ready/leased/active machines, and only removes
+running/provisioning machines after an extra stale-safety window. When a
+coordinator is configured, provider-side cleanup is disabled — the Durable
+Object alarm owns brokered cleanup.
 
-Brokered AWS cleanup includes a coordinator-side orphan sweep. The sweep uses
-live Durable Object lease state as the authority and only uses provider tags
-after a matching active lease is absent or points at a different cloud instance.
-It skips `keep=true` provider resources and has a grace window before acting on
-missing labels or stale lease mappings.
+The brokered AWS orphan sweep treats live Durable Object lease state as the
+authority and only acts on provider tags after a matching active lease is absent
+or points at a different cloud instance. It skips `keep=true` resources and
+applies a grace window before acting on missing labels or stale lease mappings.
 
-Release must be idempotent. Delete must tolerate already-deleted provider resources.
+Release is idempotent, and delete tolerates already-deleted provider resources.
 
 ## AWS Account Guardrails
 
-Crabbox AWS accounts should use low-cost default-deny guardrails before relying
-on lease cleanup alone:
+For AWS accounts, apply low-cost default-deny guardrails rather than relying on
+lease cleanup alone:
 
-- Enable account-level S3 Block Public Access with all four settings. This is an
-  account-level S3 control that applies across regions after propagation.
+- Enable account-level S3 Block Public Access (all four settings). This applies
+  across regions after propagation.
 - Set an IAM account password policy when IAM users exist. Prefer SSO for human
-  access, but do not leave IAM user passwords on the AWS default policy.
-- Create IAM Access Analyzer external-access analyzers in every AWS region where
-  Crabbox can allocate resources. External analyzers are regional; a single
-  analyzer in the primary launch region does not cover the full capacity pool.
+  access; do not leave IAM user passwords on the AWS default policy.
+- Create IAM Access Analyzer external-access analyzers in every region where
+  Crabbox can allocate resources — external analyzers are regional, so one in
+  the launch region does not cover the full capacity pool.
 
-For the default brokered AWS capacity pool, run Access Analyzer in
-`eu-west-1`, `eu-west-2`, `eu-central-1`, `us-east-1`, and `us-west-2`.
-Review active findings before deleting trusts: SSO roles and deliberately scoped
-artifact-publishing roles can appear as expected cross-account access.
+For a default brokered AWS capacity pool, run Access Analyzer in `eu-west-1`,
+`eu-west-2`, `eu-central-1`, `us-east-1`, and `us-west-2`. Review active findings
+before deleting trusts: SSO roles and deliberately scoped artifact-publishing
+roles can appear as expected cross-account access.
 
 ## Data Retention
 
-Store only operational metadata:
+The coordinator stores only operational metadata:
 
-- lease ID.
-- owner identity.
-- machine ID.
-- profile.
-- timestamps.
-- state transitions.
-- command string, unless disabled.
+- lease ID, owner identity, machine ID, profile;
+- timestamps and state transitions;
+- the command string, unless disabled.
 
-Do not store:
+The coordinator does **not** store unbounded logs, environment values, file
+contents, or SSH keys. Run records keep bounded stdout/stderr captures (chunked,
+with a stored cap) and optional structured JUnit summaries for debugging.
 
-- unbounded stdout/stderr logs in the coordinator;
-- env values;
-- file contents;
-- SSH keys.
+For binary or sensitive-by-format output, use `crabbox run --capture-stdout
+<path>` or `--capture-stderr <path>` so the stream is written to a local file
+and skipped by coordinator log/event capture. Failed SSH-backed and Blacksmith
+delegated runs write local failure bundles by default, and `run --download
+remote=local` keeps successful binary proof files local. Crabbox does not redact
+those local files — review them before sharing.
 
-Coordinator run records keep bounded stdout/stderr captures and optional
-structured JUnit summaries for debugging. For binary or sensitive-by-format
-stdout/stderr, use `crabbox run --capture-stdout <path>` or
-`--capture-stderr <path>` so the stream is written to a local file and skipped
-by coordinator log/event capture. Failed SSH-backed and Blacksmith delegated
-runs write local failure bundles by default, and `run --download remote=local`
-keeps successful binary proof files local. Crabbox does not redact those local
-files; review before sharing.
+## Audit Trail
 
-## Future Audit Trail
-
-Durable Object run and lease records already provide operational history. A fuller event audit trail should record:
+Durable Object run and lease records already provide operational history for
+debugging and cleanup (not compliance). A fuller event audit trail would record
+lease and machine lifecycle events such as:
 
 ```text
 lease.created
@@ -223,5 +305,3 @@ machine.drained
 machine.deleted
 provider.error
 ```
-
-The audit trail is for debugging and cleanup, not compliance.

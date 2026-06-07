@@ -1,74 +1,49 @@
 # actions
 
-`crabbox actions` prepares a leased Crabbox machine from repo-owned Actions workflow setup.
+`crabbox actions` prepares a leased box from your repository's own GitHub
+Actions workflow, so repo-owned setup (toolchains, dependencies, caches,
+services) runs the same way CI does before `crabbox run` attaches.
 
-Default hydration runs the local hydrate workflow over SSH on the leased box. It reads the local workflow file from `.github/workflows/`, syncs the current checkout when invoked manually, executes supported setup steps in the persistent Crabbox workspace, and waits for the usual ready marker. That path does not need GitHub repository write access.
+Hydration has two modes:
 
-GitHub runner hydration remains available as a fallback:
+- **Local hydration (default)** runs the hydrate workflow over SSH on the leased
+  box. Crabbox reads the workflow file from `.github/workflows/`, syncs the
+  current checkout, executes supported setup steps in the persistent workspace,
+  and waits for the ready marker. This path needs no GitHub repository write
+  access.
+- **GitHub runner hydration (`--github-runner`)** registers the box as a
+  self-hosted runner, dispatches the configured workflow with the canonical
+  lease label, and waits for the workflow to write the marker. Use it when the
+  workflow needs full GitHub Actions semantics — repository secrets, OIDC,
+  service containers, or unsupported actions.
 
-- `actions hydrate --github-runner` registers the runner, dispatches the configured workflow with the canonical lease label, waits for the workflow to write the hydrated workspace marker, and then returns.
-- `actions register` gets a repository runner registration token through `gh api`, installs the official `actions/runner` package on an existing box, and starts it with systemd on Linux/WSL2 or a detached PowerShell runner on native Windows.
-- `actions dispatch` calls `gh workflow run` for the configured workflow.
+The companion commands `actions register` and `actions dispatch` expose the
+runner-registration and workflow-dispatch steps directly.
 
-Blacksmith Testbox IDs (`tbx_...`) and `--provider blacksmith-testbox` are skipped because Blacksmith owns Testbox workflow hydration. Run commands against those boxes with `crabbox run --provider blacksmith-testbox --id <tbx_id> -- ...`.
-
-For `actions hydrate`, Crabbox inspects the selected workflow's `workflow_dispatch.inputs` when the workflow path is available under `.github/workflows/`. It only sends declared inputs, requires `crabbox_id`, `crabbox_runner_label`, and `crabbox_keep_alive_minutes`, and treats `crabbox_job` as optional. If the GitHub fallback rejects `crabbox_job` as an unexpected input, Crabbox retries once without it so older workflow refs remain usable.
-
-Runner names and extra labels use the friendly slug when available, but workflow inputs and state-file paths keep using the canonical `cbx_...` ID.
-
-Local hydration supports Linux and Windows WSL2 targets. GitHub runner hydration
-also supports native Windows targets with `--github-runner`, so the repository's
-real workflow can install Node, pnpm, browser tooling, services, or other
-project-owned setup before `crabbox run` attaches to the hydrated workspace.
-Static macOS hosts can run commands through `provider=ssh`, but Actions
-hydration still needs Linux, Windows WSL2, or native Windows with
-`--github-runner`.
-
-On success, `actions hydrate` prints a concise total duration line. Add `--timing-json` to emit a final JSON timing record with provider, lease ID, slug, total duration, exit code, and the GitHub Actions run URL when the GitHub fallback marker reports a run ID.
-
-```sh
-crabbox warmup --actions-runner
-crabbox warmup --provider aws --target windows --windows-mode wsl2
-crabbox actions hydrate --provider aws --target windows --windows-mode wsl2 --id blue-lobster
-crabbox actions register --id blue-lobster
-crabbox actions dispatch -f testbox_id=cbx_abcdef123456
-crabbox run --id blue-lobster -- pnpm test
-```
-
-Subcommands:
+## Subcommands
 
 ```text
-hydrate --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--repo owner/name] [--workflow <file|name|id>] [--job <name>] [--ref <ref>] [--github-runner] [--wait-timeout 20m] [--keep-alive-minutes 90] [--reclaim] [--timing-json] [-f key=value] [--field key=value]
-register --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows] [--windows-mode normal|wsl2] [--repo owner/name] [--name <runner-name>] [--labels <csv>] [--version latest] [--ephemeral=true] [--reclaim]
+hydrate  --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows]
+         [--windows-mode normal|wsl2] [--repo owner/name] [--workflow <file|name|id>]
+         [--job <name>] [--ref <ref>] [--github-runner] [--wait-timeout 20m]
+         [--keep-alive-minutes 90] [--reclaim] [--timing-json] [-f key=value] [--field key=value]
+
+register --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows]
+         [--windows-mode normal|wsl2] [--repo owner/name] [--name <runner-name>]
+         [--labels <csv>] [--version latest] [--ephemeral=true] [--reclaim]
+
 dispatch [--repo owner/name] [--workflow <file|name|id>] [--ref <ref>] [-f key=value] [--field key=value]
 ```
 
-Hydrate/register validate the local repo claim before touching the lease. Use `--reclaim` when intentionally moving a lease to the current repo.
-Pass the same provider/target routing flags used to create the lease when local defaults point at another backend.
+`hydrate` and `register` validate the current repo's lease claim before touching
+the box. Pass `--reclaim` to intentionally move a lease to the current repo.
+When local defaults point at another backend, repeat the same provider/target
+routing flags used to create the lease.
 
-Config:
+### hydrate
 
-```yaml
-actions:
-  repo: owner/name
-  workflow: .github/workflows/crabbox.yml
-  job: hydrate
-  ref: main
-  fields:
-    - crabbox_docker_cache=true
-  runnerLabels:
-    - crabbox
-  runnerVersion: latest
-  ephemeral: true
-```
-
-Workflow jobs should target the dynamic label printed by registration, for example `crabbox-cbx-123`, plus any static labels configured for the project.
-When `actions.job` is set and the workflow declares `crabbox_job`, Crabbox sends it and verifies that the ready marker came from that job. For local hydration, Crabbox runs the YAML job named `hydrate` when present, or the only job in a single-job workflow; `actions.job` is marker input, not the YAML job selector. Older workflows can omit both.
-Use `actions.fields` for repository-specific workflow inputs that should be sent on every hydration. CLI `-f key=value` / `--field key=value` values override matching configured fields for that dispatch.
-
-## Hydration Flow
-
-Use hydration when CI already knows how to prepare the repository and an agent needs a fast local-style loop:
+Populates a lease's workspace from the configured workflow. Requires `--id` and
+either `--workflow` or `actions.workflow`.
 
 ```sh
 crabbox warmup
@@ -76,11 +51,60 @@ crabbox actions hydrate --id blue-lobster
 crabbox run --id blue-lobster -- pnpm test:changed
 ```
 
-The Actions workflow owns repository-specific setup: checkout, dependency install, caches, and any project tools. The local default supports `run` steps plus common setup actions such as basic `actions/checkout`, `actions/setup-node`, `actions/setup-go`, and `actions/setup-python`; checkout options that change repository, path, submodules, or LFS fail locally so callers can rerun with `--github-runner` when they need full GitHub Actions semantics, repository secrets, OIDC, or service containers.
+Local hydration supports Linux and Windows WSL2 targets. With
+`--github-runner`, native Windows is also supported. Static macOS hosts can run
+commands through `provider=ssh`, but Actions hydration still requires Linux,
+Windows WSL2, or native Windows with `--github-runner`.
 
-Every `-f` / `--field` value must be `key=value`. Local hydration resolves simple `${{ inputs.name }}`, `${{ env.NAME }}`, `${{ github.workspace }}`, and runner temp/toolcache expressions in env, run steps, working directories, and supported setup action inputs.
+Blacksmith Testbox IDs (`tbx_...`) and `--provider blacksmith-testbox` are
+skipped, because Blacksmith owns Testbox hydration. Run commands against those
+boxes directly with `crabbox run --provider blacksmith-testbox --id <tbx_id> -- ...`.
 
-Hydrate workflows must accept these inputs:
+On success, `hydrate` prints a workspace summary and a total-duration line. Add
+`--timing-json` to emit a final JSON timing record (stderr) with provider, lease
+ID, slug, total duration, exit code, and — for the GitHub fallback — the Actions
+run URL when the marker reports a run ID.
+
+### register
+
+Registers an existing box as a GitHub Actions self-hosted runner. Crabbox
+obtains a repository registration token through `gh api`, installs the official
+`actions/runner` package, and starts it under systemd on Linux/WSL2 or a
+detached PowerShell process on native Windows. Supports Linux and Windows
+targets only.
+
+```sh
+crabbox actions register --id blue-lobster
+```
+
+Each runner gets the labels `crabbox`, the canonical lease label
+`crabbox-<lease-id>`, profile/class labels, the slug label when available, and
+any labels from `actions.runnerLabels` or `--labels`. Runner names use the
+friendly slug when available; workflow inputs and state-file paths keep using the
+canonical `cbx_...` ID.
+
+### dispatch
+
+Dispatches the configured workflow via `gh workflow run`. Requires `--workflow`
+or `actions.workflow`.
+
+```sh
+crabbox actions dispatch -f testbox_id=cbx_abcdef123456
+```
+
+## Workflow inputs
+
+Every `-f` / `--field` value must be `key=value`. CLI values override matching
+`actions.fields` entries for that dispatch.
+
+Crabbox inspects the selected workflow's `workflow_dispatch.inputs` (when the
+workflow path is available under `.github/workflows/`). It sends only declared
+inputs and requires `crabbox_id`, `crabbox_runner_label`, and
+`crabbox_keep_alive_minutes`; `crabbox_job` is optional. If a GitHub dispatch
+rejects `crabbox_job` as an unexpected input, Crabbox retries once without it so
+older workflow refs stay usable.
+
+A hydrate workflow must accept these inputs:
 
 ```yaml
 on:
@@ -102,13 +126,64 @@ on:
         type: string
 ```
 
-The hydrate job should be named `hydrate` for local hydration, or be the only job in the workflow. For `--github-runner`, it should run on the dynamic label:
+For local hydration, Crabbox runs the YAML job named `hydrate` when present, or
+the only job in a single-job workflow. `actions.job` is the marker-input value,
+not the YAML job selector; older workflows can omit both. When `actions.job` is
+set and the workflow declares `crabbox_job`, Crabbox sends it and verifies the
+ready marker came from that job. For `--github-runner`, the job should target the
+dynamic lease label:
 
 ```yaml
 runs-on: [self-hosted, "${{ inputs.crabbox_runner_label }}"]
 ```
 
-After checkout and dependency/service setup, the workflow writes the ready marker:
+## Config
+
+```yaml
+actions:
+  repo: example-org/my-app
+  workflow: .github/workflows/crabbox.yml
+  job: hydrate
+  ref: main
+  fields:
+    - crabbox_docker_cache=true
+  runnerLabels:
+    - crabbox
+  runnerVersion: latest
+  ephemeral: true
+```
+
+Use `actions.fields` for repository-specific workflow inputs that should be sent
+on every hydration.
+
+## Hydration flow
+
+Use hydration when CI already knows how to prepare the repository and you want a
+fast local-style loop:
+
+```sh
+crabbox warmup
+crabbox actions hydrate --id blue-lobster
+crabbox run --id blue-lobster -- pnpm test:changed
+```
+
+The workflow owns repository-specific setup: checkout, dependency install,
+caches, and project tools. Local hydration supports `run` steps plus common
+setup actions: `actions/checkout`, `actions/setup-node`, `actions/setup-go`,
+`actions/setup-python`, and `actions/cache/restore|save` (cache restore reports a
+miss; save is skipped). Repo-local composite actions (`./path`) are supported.
+Job containers and service containers are not; `actions/checkout` options that
+change the repository, path, submodules, or LFS fail locally so you can rerun
+with `--github-runner` when you need full GitHub Actions semantics.
+
+Local hydration resolves simple expressions in env, run steps, working
+directories, and supported action inputs: `${{ inputs.name }}`,
+`${{ env.NAME }}`, `${{ github.workspace }}`, `${{ hashFiles(...) }}`, and
+runner temp/toolcache references. Unsupported or complex expressions fail with a
+suggestion to use `--github-runner`.
+
+After checkout and setup, the workflow writes the ready marker under
+`$HOME/.crabbox/actions/`:
 
 ```sh
 mkdir -p "$HOME/.crabbox/actions"
@@ -126,4 +201,32 @@ services_file="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.services"
 mv "${state}.tmp" "$state"
 ```
 
-`crabbox run --id <lease-id-or-slug>` reads that marker, syncs into the hydrated `$GITHUB_WORKSPACE`, and sources the non-secret env file when present. If no marker exists and `actions.workflow` is configured, `run` performs local Actions hydration automatically after sync unless `--no-hydrate` or `--no-sync` is set. The env file should contain stable GitHub/runner context such as `GITHUB_WORKSPACE`, `GITHUB_RUN_ID`, `GITHUB_JOB`, `RUNNER_TEMP`, and `RUNNER_TOOL_CACHE`; do not persist secrets or OIDC request tokens there. Keep the workflow job alive only when using `--github-runner` and service containers or job-scoped setup must remain running for the remote command loop. `crabbox stop <lease-id-or-slug>` writes the `.stop` marker before releasing the box.
+`crabbox run --id <lease-id-or-slug>` reads that marker, syncs into the hydrated
+`$GITHUB_WORKSPACE`, and sources the non-secret env file when present. If no
+marker exists and `actions.workflow` is configured, `run` performs local
+hydration automatically after sync unless `--no-hydrate` or `--no-sync` is set.
+The env file should hold stable GitHub/runner context such as
+`GITHUB_WORKSPACE`, `GITHUB_RUN_ID`, `GITHUB_JOB`, `RUNNER_TEMP`, and
+`RUNNER_TOOL_CACHE` — never secrets or OIDC request tokens. Keep the workflow job
+alive (via `--keep-alive-minutes`) only when using `--github-runner` and service
+containers or job-scoped setup must stay running for the remote command loop.
+`crabbox stop <lease-id-or-slug>` writes the `.stop` marker before releasing the
+box.
+
+## Warm with a runner
+
+`crabbox warmup --actions-runner` leases a box and registers it as an ephemeral
+runner in one step:
+
+```sh
+crabbox warmup --actions-runner
+crabbox warmup --provider aws --target windows --windows-mode wsl2
+crabbox actions hydrate --provider aws --target windows --windows-mode wsl2 --id blue-lobster
+crabbox run --id blue-lobster -- pnpm test
+```
+
+## See also
+
+- [run](run.md) — sync and run commands against a lease.
+- [warmup](warmup.md) — lease and ready a box.
+- [capsule](capsule.md) — capture and replay failures from Actions runs.

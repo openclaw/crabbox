@@ -69,6 +69,84 @@ func TestInitProjectWritesExpectedFiles(t *testing.T) {
 	}
 }
 
+func TestInitProjectDetectsRepoCommands(t *testing.T) {
+	dir := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldwd)
+	})
+
+	mustWrite := func(path, content string) {
+		t.Helper()
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite("go.mod", "module example.com/my-app\n\ngo 1.24\n")
+	mustWrite("package.json", `{"scripts":{"check":"node --test ./test/*.js"}}`)
+	mustWrite("worker/package.json", `{"scripts":{"test":"vitest run"}}`)
+	mustWrite("worker/package-lock.json", `{"lockfileVersion": 3}`)
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run(context.Background(), []string{"init", "--detect"}); err != nil {
+		t.Fatalf("init --detect error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "detected job: crabbox job run detected") {
+		t.Fatalf("stdout missing detected job hint:\n%s", stdout.String())
+	}
+	config, err := os.ReadFile(filepath.Join(dir, ".crabbox.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configText := string(config)
+	for _, want := range []string{
+		"run:\n  preflightTools:",
+		"- go",
+		"- node",
+		"- npm",
+		"jobs:\n  detected:",
+		"shell: true",
+		"go test ./...",
+		"npm install && npm run 'check' &&",
+		"(cd 'worker' && npm ci && npm test)",
+	} {
+		if !strings.Contains(configText, want) {
+			t.Fatalf("detected config missing %q:\n%s", want, configText)
+		}
+	}
+	skill, err := os.ReadFile(filepath.Join(dir, ".agents/skills/crabbox/SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(skill), "crabbox job run detected") {
+		t.Fatalf("skill missing detected job hint:\n%s", skill)
+	}
+
+	fileCfg, err := readFileConfig(filepath.Join(dir, ".crabbox.yaml"))
+	if err != nil {
+		t.Fatalf("generated config should parse: %v", err)
+	}
+	loaded := baseConfig()
+	applyFileConfig(&loaded, fileCfg)
+	if _, ok := loaded.Jobs["detected"]; !ok {
+		t.Fatalf("generated config missing detected job: %#v", loaded.Jobs)
+	}
+	if err := validatePreflightTools(loaded.Run.PreflightTools); err != nil {
+		t.Fatalf("generated preflight tools should validate: %v", err)
+	}
+}
+
 func TestWriteInitFileBranches(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "file.txt")
 	if err := writeInitFile(path, "first", false); err != nil {

@@ -62,6 +62,9 @@ func TestBlacksmithWarmupArgs(t *testing.T) {
 		Ref:         "main",
 		IdleTimeout: 90*time.Minute + 10*time.Second,
 	}
+	cfg.Cache.Volumes = []core.CacheVolumeConfig{
+		{Name: "pnpm-store", Key: "my-app-linux-node24-lock", Path: "/var/cache/crabbox/pnpm"},
+	}
 	got, err := blacksmithWarmupArgs(cfg, "ssh-ed25519 AAAA")
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +75,7 @@ func TestBlacksmithWarmupArgs(t *testing.T) {
 		"--job", "check",
 		"--ref", "main",
 		"--ssh-public-key", "ssh-ed25519 AAAA",
+		"--sticky-disk", "my-app-linux-node24-lock:/var/cache/crabbox/pnpm",
 		"--idle-timeout", "91",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -79,16 +83,90 @@ func TestBlacksmithWarmupArgs(t *testing.T) {
 	}
 }
 
-func TestBlacksmithWarmupArgsFallsBackToActionsConfig(t *testing.T) {
+func TestBlacksmithWarmupArgsFallsBackToTestboxActionsConfig(t *testing.T) {
 	cfg := baseConfig()
-	cfg.Actions.Workflow = ".github/workflows/ci.yml"
-	cfg.Actions.Job = "hydrate"
+	cfg.Actions.Workflow = ".github/workflows/ci-check-testbox.yml"
+	cfg.Actions.Job = "check"
 	cfg.Actions.Ref = "trunk"
 	got, err := blacksmithWarmupArgs(cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{".github/workflows/ci.yml", "--job", "hydrate", "--ref", "trunk"} {
+	for _, want := range []string{".github/workflows/ci-check-testbox.yml", "--job", "check", "--ref", "trunk"} {
+		if !containsString(got, want) {
+			t.Fatalf("args missing %q: %#v", want, got)
+		}
+	}
+}
+
+func TestBlacksmithWarmupArgsFallsBackToArbitraryActionsWorkflowName(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Actions.Workflow = ".github/workflows/ci.yml"
+	cfg.Actions.Job = "integration"
+	cfg.Actions.Ref = "trunk"
+	got, err := blacksmithWarmupArgs(cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{".github/workflows/ci.yml", "--job", "integration", "--ref", "trunk"} {
+		if !containsString(got, want) {
+			t.Fatalf("args missing %q: %#v", want, got)
+		}
+	}
+}
+
+func TestBlacksmithWarmupArgsDoesNotUseGenericActionsHydrateWorkflow(t *testing.T) {
+	for _, workflow := range []string{
+		"Crabbox Hydrate",
+		".github/workflows/crabbox.yml",
+		".github/workflows/crabbox-hydrate.yml",
+		".github/workflows/hydrate.yml",
+	} {
+		cfg := baseConfig()
+		cfg.Actions.Workflow = workflow
+		cfg.Actions.Job = "hydrate"
+		cfg.Actions.Ref = "main"
+		_, err := blacksmithWarmupArgs(cfg, "")
+		if err == nil || !strings.Contains(err.Error(), "requires blacksmith.workflow") {
+			t.Fatalf("expected workflow error for %s, got %v", workflow, err)
+		}
+	}
+}
+
+func TestBlacksmithWarmupArgsPrefersExplicitConfigOverGenericActionsConfig(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Actions.Workflow = ".github/workflows/crabbox-hydrate.yml"
+	cfg.Actions.Job = "hydrate"
+	cfg.Actions.Ref = "actions-ref"
+	cfg.Blacksmith.Workflow = ".github/workflows/ci-check-testbox.yml"
+	cfg.Blacksmith.Job = "check"
+	cfg.Blacksmith.Ref = "testbox-ref"
+	got, err := blacksmithWarmupArgs(cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"testbox", "warmup", ".github/workflows/ci-check-testbox.yml",
+		"--job", "check",
+		"--ref", "testbox-ref",
+		"--idle-timeout", "30",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args=%#v want %#v", got, want)
+	}
+}
+
+func TestBlacksmithWarmupArgsExplicitWorkflowCanInheritActionsJobAndRef(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Actions.Workflow = ".github/workflows/crabbox.yml"
+	cfg.Actions.Job = "check"
+	cfg.Actions.Ref = "trunk"
+	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	got, err := blacksmithWarmupArgs(cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{".github/workflows/testbox.yml", "--job", "check", "--ref", "trunk"} {
 		if !containsString(got, want) {
 			t.Fatalf("args missing %q: %#v", want, got)
 		}

@@ -1,42 +1,82 @@
 # share
 
-`crabbox share` grants access to an existing coordinator lease.
+`crabbox share` grants other people access to an existing lease through the
+coordinator. It manages who may see a lease and use its portal bridges; it does
+not move SSH private keys between machines.
+
+Sharing requires a configured coordinator. Without one, the command exits with
+`share requires a configured coordinator`.
+
+## Usage
 
 ```sh
-crabbox share --id blue-lobster --user friend@example.com
-crabbox share --id blue-lobster --user friend@example.com --role manage
-crabbox share --id blue-lobster --org
-crabbox share --id blue-lobster --org --role manage
-crabbox share --id blue-lobster --list
-crabbox share blue-lobster --list --json
+# Share with a specific user (defaults to role "use")
+crabbox share --id swift-crab --user alice@example.com
+
+# Grant manage access
+crabbox share --id swift-crab --user alice@example.com --role manage
+
+# Share with everyone in the lease's org
+crabbox share --id swift-crab --org
+crabbox share --id swift-crab --org --role manage
+
+# Show the current sharing for a lease
+crabbox share --id swift-crab --list
+crabbox share swift-crab --list --json
 ```
 
-Roles:
+The lease can be addressed by its canonical id (`cbx_…`) or its slug, either via
+`--id` or as the first positional argument.
+
+When you pass neither `--user` nor `--org` (or pass `--list`), the command prints
+the current sharing instead of changing it.
+
+## Roles
 
 ```text
-use     see the lease and use visible portal bridges such as WebVNC/code
+use     see the lease and use visible portal bridges such as WebVNC and code
 manage  use access plus changing sharing and stopping the lease
 ```
 
-`--org` shares with authenticated users whose org matches the lease org.
-`--user` is repeatable and stores normalized lowercase email addresses.
+A role applies to every `--user` and to `--org` named in the same invocation.
+`--role` defaults to `use`.
 
-SSH-based commands still require a local private key accepted by the runner.
-Sharing grants coordinator and portal access; it does not copy SSH private keys
-between people.
+## Targets
 
-Flags:
+- `--user <email>` is repeatable. Addresses are stored normalized to lowercase
+  and trimmed; an empty value is rejected.
+- `--org` shares with authenticated users whose org matches the lease's org.
+
+## Output
+
+Without `--json`, the resulting share state prints one line per scope:
 
 ```text
---id <lease-id-or-slug>
---user <email>
---org
---role use|manage
---list
---json
+org=use
+user=alice@example.com role=use
 ```
 
-Related docs:
+`org` is `off` when no org sharing is set, and `users=none` when no users are
+shared. With `--json`, the share record is emitted under a `share` key.
+
+## Flags
+
+```text
+--id <lease-id-or-slug>   lease to share (or first positional arg)
+--user <email>            user email to share with; repeatable
+--org                     share with the lease org
+--role use|manage         role to grant (default: use)
+--list                    print current sharing without changing it
+--json                    print JSON
+```
+
+## Notes
+
+Sharing grants coordinator and portal access only. SSH-based commands still
+require a local private key the runner accepts; sharing does not copy SSH private
+keys between people.
+
+## Related docs
 
 - [unshare](unshare.md)
 - [Auth and admin](../features/auth-admin.md)

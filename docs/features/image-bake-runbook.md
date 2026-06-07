@@ -1,18 +1,64 @@
 # Image Bake Runbook
 
-Read when:
+Read this when you:
 
-- baking a new Crabbox AWS image;
-- promoting or rolling back the default AWS image;
-- preparing a desktop/browser image for UI QA;
-- checking whether state belongs in the image or in a warm lease.
+- bake a new AWS image (AMI) for Crabbox leases;
+- promote or roll back the default AWS image;
+- prepare a desktop or browser image for UI QA;
+- decide whether some state belongs in the image or in a warm lease.
 
-This runbook is for trusted operators. Image commands need coordinator admin
-auth and can create provider-side artifacts that cost money until cleaned up.
+This runbook is for trusted operators. Image commands require coordinator admin
+auth (`configuredAdminCoordinator`) and create provider-side artifacts that cost
+money until you clean them up.
+
+## How image selection works
+
+Crabbox boots a lease from a provider image. For AWS, `crabbox image promote`
+registers an AMI as the default for a given **target**, **architecture**, and
+**region**, so ordinary brokered leases pick it up automatically. Promotions are
+scoped: a macOS promotion is only selected by `target=macos` leases and never
+replaces the Linux or Windows default.
+
+Two ways to point a lease at a specific image during testing:
+
+- Set the provider override env var, for example `CRABBOX_AWS_AMI=ami-...`, to
+  boot one candidate without touching the promoted default.
+- Promote the AMI so every matching brokered lease uses it.
+
+The lifecycle below moves stable setup *into* the image and keeps per-lease
+bootstrap small, which is what produces fast boots.
+
+## What to bake (and what not to)
+
+Bake **machine capabilities** that are stable across runs:
+
+- current OS security updates;
+- SSH, Git, rsync, curl, jq, and the readiness helpers;
+- Xvfb / slim XFCE / VNC for desktop leases;
+- Chrome or Chromium for browser leases;
+- `ffmpeg`, `ffprobe`, `scrot`, `xdotool`, and other capture helpers;
+- Node 24, npm, corepack, pnpm;
+- Docker Engine plus the Compose and buildx plugins where the platform supports
+  them;
+- build-essential, Python, and common native-addon headers;
+- empty cache directories such as `/var/cache/crabbox/pnpm`.
+
+Never bake **scenario state**:
+
+- secrets, tokens, or provider credentials;
+- browser profiles, cookies, chat/OAuth sessions, or login state;
+- source checkouts, `node_modules`, `dist`, PR artifacts, screenshots, or
+  videos;
+- operator notes or one-off debugging files.
+
+Bake OS patches, developer tools, Docker, browser bits, cache directories,
+service enablement, and first-run suppression. Leave repository checkouts,
+lockfile-specific installs, login state, and secrets to the warm lease.
 
 ## Naming
 
-Use names that identify owner, purpose, and UTC bake time:
+Use names that make owner, purpose, target, architecture, and UTC bake time
+human-auditable in the AWS console:
 
 ```text
 crabbox-linux-desktop-browser-YYYYMMDD-HHMM
@@ -21,36 +67,12 @@ crabbox-windows-devtools-YYYYMMDD-HHMM
 crabbox-macos-arm64-YYYYMMDD-HHMM
 ```
 
-Use names that make the target and architecture obvious. A promoted macOS AMI
-is scoped separately from Linux and Windows images, but the name should still be
-human-auditable in the AWS console.
+## Bake a Linux candidate AMI by hand
 
-## What To Bake
+The steps below are the manual path. For generic developer images, prefer the
+guarded wrapper in [Developer-image wrappers](#developer-image-wrappers).
 
-Bake machine capabilities:
-
-- current OS security updates;
-- SSH, Git, rsync, curl, jq, and readiness helpers;
-- Xvfb/slim XFCE/VNC for desktop leases;
-- Chrome/Chromium for browser leases;
-- `ffmpeg`, `ffprobe`, `scrot`, `xdotool`, and other capture helpers;
-- Node 24, npm, corepack, pnpm;
-- Docker Engine plus the Compose and buildx plugins where the platform supports
-  them;
-- build-essential, Python, and common native-addon headers;
-- empty cache directories such as `/var/cache/crabbox/pnpm`.
-
-Do not bake scenario state:
-
-- secrets, tokens, or provider credentials;
-- browser profiles, cookies, Slack/Discord/WhatsApp sessions, or OAuth state;
-- source checkouts, `node_modules`, `dist`, PR artifacts, screenshots, or
-  videos;
-- local operator notes or one-off debugging files.
-
-## Create A Candidate AMI
-
-Warm a source lease:
+### 1. Warm a source lease
 
 ```bash
 crabbox warmup \
@@ -62,10 +84,10 @@ crabbox warmup \
   --idle-timeout 30m
 ```
 
-Capture the lease id from the output. Use the canonical `cbx_...` id for image
-commands, not only the friendly slug.
+Capture the lease id from the output and use the canonical `cbx_...` id for
+image commands, not only the friendly slug.
 
-Verify the source lease:
+### 2. Verify the source lease
 
 ```bash
 crabbox run \
@@ -89,7 +111,7 @@ crabbox run \
    sudo chmod 1777 /var/cache/crabbox /var/cache/crabbox/pnpm'
 ```
 
-Create the candidate image:
+### 3. Create the candidate image
 
 ```bash
 crabbox image create \
@@ -99,13 +121,14 @@ crabbox image create \
   --json
 ```
 
-Keep the JSON output. At minimum, record the AMI id, name, source lease id,
-creation time, and operator.
+`--wait` polls until the provider image reports `available` (timeout
+`--wait-timeout`, default 45m); `--no-reboot` is on by default to avoid
+rebooting the source AWS instance during AMI capture. Keep the JSON output and
+record at least the AMI id, name, source lease id, creation time, and operator.
 
-## Smoke Candidate Before Promotion
+## Smoke the candidate before promotion
 
-Boot the candidate explicitly. Use the provider image override supported by the
-current environment, for example:
+Boot the candidate explicitly with the provider image override:
 
 ```bash
 CRABBOX_AWS_AMI=ami-1234567890abcdef0 \
@@ -137,14 +160,14 @@ crabbox run \
    test -d /work/crabbox'
 ```
 
-For desktop/browser images, also run a real desktop/browser proof:
+For desktop or browser images, also capture a real desktop proof:
 
 ```bash
 crabbox screenshot --provider aws --id <candidate-cbx_id-or-slug> --output /tmp/crabbox-image-smoke.png
 ```
 
-Do not promote if SSH readiness, browser startup, screenshot capture, or the
-package/tool checks fail.
+Do not promote if SSH readiness, browser startup, screenshot capture, or any
+tool check fails.
 
 ## Promote
 
@@ -154,7 +177,7 @@ Promote only after a candidate smoke passes:
 crabbox image promote ami-1234567890abcdef0 --json
 ```
 
-Then verify a normal brokered lease without overrides uses the promoted image:
+Then confirm a normal brokered lease, with no override, uses the promoted image:
 
 ```bash
 crabbox warmup \
@@ -176,7 +199,64 @@ crabbox run \
 Keep the previous promoted AMI available until at least one normal brokered
 lease and one relevant QA lane pass on the new image.
 
-## Linux And Windows Developer Images
+When promoting an AMI that was **not** created through `crabbox image create`,
+pass the scope explicitly so it lands in the right slot — for example
+`--target macos --region us-east-1`, plus `--architecture` and `--type` when the
+provider cannot infer them. Use `--os` to scope a promoted Linux AMI to a
+portable selector such as `ubuntu:26.04`.
+
+## Roll back
+
+Rollback is just another promotion to a known-good AMI:
+
+```bash
+crabbox image promote ami-previous-good --json
+```
+
+Run the normal brokered smoke again. Do not delete the failed AMI immediately;
+keep it long enough to inspect tags, logs, and source-lease details.
+
+## Cleanup
+
+Promotion does not delete old AMIs or EBS snapshots. Cleanup is a provider
+operator task:
+
+- keep the current promoted AMI;
+- keep the previous known-good AMI until the new one has real QA proof;
+- deregister stale failed or candidate AMIs after investigation, e.g.
+  `crabbox image delete <ami-id> --provider aws --region <region>`;
+- delete their orphaned EBS snapshots in the AWS account.
+
+Do not treat Crabbox coordinator state as the source of truth for old image
+storage costs. Check AWS directly.
+
+## Fast Snapshot Restore (cold-start tuning)
+
+An AMI alone is not always enough for low cold-start variance on AWS. EBS
+snapshots hydrate lazily by default, so new regions or availability zones can
+still pay first-read penalties. For hot lanes:
+
+- keep launch capacity in the same region as the promoted AMI;
+- track the wrapper timing logs (below);
+- enable AWS Fast Snapshot Restore (FSR) on the backing snapshots only in the
+  availability zones where the image must boot immediately.
+
+Enable FSR at promotion time, or check status afterward:
+
+```bash
+crabbox image promote ami-1234567890abcdef0 \
+  --fast-snapshot-restore \
+  --fsr-az us-west-2a \
+  --fsr-az us-west-2b \
+  --json
+
+crabbox image fsr-status ami-1234567890abcdef0 --region us-west-2 --json
+```
+
+FSR is AWS-only. Treat snapshot warmup as a separate provider-cost decision; do
+not enable it casually for every candidate.
+
+## Developer-image wrappers
 
 For generic AWS Linux and Windows developer AMIs, use the guarded wrapper
 instead of hand-running the prep and image commands:
@@ -186,8 +266,9 @@ scripts/mint-aws-devtools-image.sh --target linux
 scripts/mint-aws-devtools-image.sh --target windows
 ```
 
-The default is a no-spend plan. Add `--run` only when the selected AWS account,
-region, quotas, and image name are correct:
+The default is a no-spend plan that prints what it would do and stops. Add
+`--run` only when the selected AWS account, region, quotas, and image name are
+correct:
 
 ```bash
 scripts/mint-aws-devtools-image.sh \
@@ -206,8 +287,8 @@ scripts/mint-aws-devtools-image.sh \
   --run
 ```
 
-For hot maintainer lanes that need lower first-boot variance, enable Fast
-Snapshot Restore only in the availability zones you will actually launch from:
+Enable FSR for hot lanes that need lower first-boot variance, in the AZs you
+actually launch from:
 
 ```bash
 scripts/mint-aws-devtools-image.sh \
@@ -220,23 +301,27 @@ scripts/mint-aws-devtools-image.sh \
   --run
 ```
 
-The Linux prep script installs common CLI/build tooling, GitHub CLI, Node 24,
-corepack/pnpm, Chrome or Chromium for browser lanes, desktop/VNC helpers, Docker
-Engine, Compose, buildx, and a small default Docker image set. The Windows prep
-script installs common CLI/build tooling, GitHub CLI, Node 24, corepack/pnpm,
-and Windows Server container support with Docker Engine. It deliberately avoids
-Docker Desktop because headless image bakes should not depend on a user-session
-desktop app or Docker Desktop licensing.
+### What the prep scripts install
+
+- **Linux** (`scripts/install-linux-developer-tools.sh`): common CLI/build
+  tooling, GitHub CLI, Node 24, corepack/pnpm, Chrome or Chromium for browser
+  lanes, desktop/VNC helpers, Docker Engine, Compose, buildx, and a small
+  default Docker image set.
+- **Windows** (`scripts/install-windows-developer-tools.ps1`): common CLI/build
+  tooling, GitHub CLI, Node 24, corepack/pnpm, and Windows Server container
+  support with Docker Engine. It deliberately avoids Docker Desktop because
+  headless image bakes should not depend on a user-session desktop app or
+  Docker Desktop licensing.
+
 Windows developer bakes are headless by default for faster boot and fewer
-desktop-bootstrap moving parts. Pass `--desktop` only when the image is meant
-to back interactive desktop leases.
+desktop-bootstrap moving parts. Pass `--desktop` only when the image must back
+interactive desktop leases. Windows container support can require one reboot
+before Docker starts; the wrapper detects the prep script's reboot marker,
+reboots the source lease, waits for Crabbox readiness, reruns the prep script to
+pull the configured Docker images, and only then runs the source smoke and AMI
+capture.
 
-Windows container support can require one reboot before Docker starts. The
-wrapper detects the prep script's reboot marker, reboots the source lease,
-waits for Crabbox readiness, reruns the prep script to pull the configured
-Docker images, and only then runs the source smoke and AMI capture.
-
-Tune the default prebake set with environment variables:
+### Tuning the prebake set
 
 ```bash
 CRABBOX_LINUX_DOCKER_IMAGES='hello-world ubuntu:24.04 node:24-bookworm'
@@ -246,36 +331,22 @@ CRABBOX_LINUX_DESKTOP_TOOLS=0
 CRABBOX_WINDOWS_INSTALL_DOCKER=0
 ```
 
+### Wrapper behavior
+
 The wrapper defaults to `--class standard` even when an explicit instance type
-is provided, so image bakes do not accidentally consume the high-pressure beast
-class. It always proves the source lease, candidate AMI, and promoted AMI before
-declaring success unless `--no-promote` is set. It writes warmup timing logs
-under `.crabbox/image-mint-<image-name>-*.log`, which is the evidence to compare
-before and after each bake.
+is given, so bakes do not consume the high-pressure beast class. It proves the
+source lease, candidate AMI, and promoted AMI before declaring success unless
+`--no-promote` is set, and writes warmup timing logs under
+`.crabbox/image-mint-<image-name>-*.log` — the evidence to compare before and
+after each bake.
 
-## Fast Boot Expectations
+## macOS images
 
-Fast images come from moving stable machine setup into the AMI and keeping
-per-lease bootstrap tiny. Bake OS patches, developer tools, Docker, browser
-bits, cache directories, service enablement, and first-run suppression. Do not
-bake repository checkouts, package installs tied to one lockfile, browser login
-state, or secrets.
+macOS images use the same `crabbox image create` command, but the source lease
+must be an AWS EC2 Mac lease on an allocated Dedicated Host. The host lifecycle
+adds extra IAM, quota, and scrubbing constraints, so prefer the guarded scripts.
 
-For Blacksmith-like cold-start times on AWS, an AMI alone is not always enough.
-EBS snapshots hydrate lazily by default, so new regions or availability zones
-can still pay first-read penalties. For hot production lanes, keep capacity in
-the same region as the promoted AMI, track the wrapper timing logs, and enable
-AWS Fast Snapshot Restore on the backing snapshots in the availability zones
-where the image must boot immediately. Use `crabbox image promote
---fast-snapshot-restore --fsr-az <az>` directly or pass
-`--fast-snapshot-restore --fsr-az <az>` to the AWS developer-image wrapper.
-Treat snapshot warmup as a separate provider-cost decision; do not enable it
-casually for every candidate image.
-
-## macOS Images
-
-macOS images use the same `image create` command, but the source lease must be
-an AWS EC2 Mac lease on an allocated Dedicated Host:
+### Inspect and allocate hosts
 
 ```bash
 crabbox admin hosts offerings --provider aws --target macos --region eu-west-1 --type mac2.metal
@@ -283,7 +354,7 @@ crabbox admin hosts quota --provider aws --target macos --region eu-west-1 --typ
 crabbox admin hosts list --provider aws --target macos --region eu-west-1
 ```
 
-If no suitable host is available, allocate one explicitly before warmup:
+If no suitable host is available, dry-run an allocation first:
 
 ```bash
 crabbox admin hosts allocate \
@@ -294,10 +365,12 @@ crabbox admin hosts allocate \
   --dry-run
 ```
 
+### Resolve IAM before paid allocation
+
 If dry-run reports `UnauthorizedOperation`, update the coordinator AWS identity
-with the EC2 Mac host lifecycle policy in [admin](../commands/admin.md#hosts)
-before doing the real allocation. Confirm the caller identity and print the
-copy-pasteable combined policy with:
+with the EC2 Mac host lifecycle policy (see [admin hosts](../commands/admin.md#hosts))
+before the real allocation. Confirm the caller identity and print the combined
+policy:
 
 ```bash
 crabbox admin providers identity --provider aws --region eu-west-1 --json > /tmp/crabbox-provider-identity.json
@@ -310,10 +383,10 @@ scripts/apply-macos-image-iam-policy.sh \
   --profile auto
 ```
 
-The apply helper dry-runs first. With `--profile auto`, it scans local AWS
-profiles and selects the one whose account matches the coordinator account. If
-the dry-run is pointed at the right account and target, attach the combined
-policy to the coordinator AWS principal before rerunning the preflight:
+The apply helper dry-runs first. With `--profile auto` it scans local AWS
+profiles and selects the one whose account matches the coordinator account. Once
+the dry-run targets the right account and target, attach the combined policy and
+rerun the preflight:
 
 ```bash
 scripts/apply-macos-image-iam-policy.sh \
@@ -324,45 +397,41 @@ scripts/apply-macos-image-iam-policy.sh \
 ```
 
 For assumed-role identities, attach the policy to the underlying role name from
-the ARN rather than to the session name. `admin providers identity --provider aws --json` includes
-`policyTarget.type` and `policyTarget.name` when Crabbox can derive the IAM
-attachment target from the ARN.
+the ARN, not the session name. `admin providers identity --provider aws --json`
+includes `policyTarget.type` and `policyTarget.name` when Crabbox can derive the
+IAM attachment target from the ARN.
 
-If dry-run succeeds, run
-`crabbox admin hosts quota --provider aws --target macos --region eu-west-1 --type mac2.metal`
-before real allocation. It prints the selected EC2 Mac Dedicated Host quota
-from AWS Service Quotas, which is the next useful no-spend blocker after IAM.
-For a single artifact bundle that captures identity, IAM policy, quota,
-allocation dry-run, local AWS profile matching, and quota request dry-run
-evidence, run:
+The host policy only unblocks Dedicated Host allocation and release. The full
+paid lifecycle also needs the baseline AWS provider permissions in
+[Infrastructure](../infrastructure.md#aws-ec2) for key pairs, security groups,
+macOS `RunInstances`, AMI creation, candidate boot, promotion, snapshot cleanup,
+and lease termination. Print the baseline policy with
+`crabbox admin providers policy --provider aws`, or the combined provider plus
+Dedicated Host policy with `crabbox admin providers policy --provider aws --target macos`.
+
+### No-spend audit bundle
+
+For a single artifact bundle covering identity, IAM policy, quota, allocation
+dry-run, profile matching, and quota-request dry-run evidence:
 
 ```bash
 scripts/macos-coordinator-remediation-audit.sh --region eu-west-1 --type mac2.metal --profile auto
 ```
 
 The audit writes `summary.json` with `blocked` or `ready-for-paid-smoke`,
-artifact-relative evidence paths, blocker names, and exact remediation
-commands.
+artifact-relative evidence paths, blocker names, and exact remediation commands.
+After IAM clears, the next useful no-spend blocker is host quota — confirm it
+with `crabbox admin hosts quota ...` before any real allocation.
 
-Do not treat that host policy as the whole image bake policy. It only unblocks
-Dedicated Host allocation and release. The full paid lifecycle also needs the
-normal AWS provider permissions in [Infrastructure](../infrastructure.md#aws-ec2)
-for key pairs, security groups, macOS `RunInstances`, AMI creation, candidate
-boot, promotion, snapshot cleanup, and lease termination. Print the baseline
-provider policy with `crabbox admin providers policy --provider aws`, or the
-combined provider plus Dedicated Host policy with
-`crabbox admin providers policy --provider aws --target macos`.
-
-For an end-to-end guarded run, use the repository smoke script:
+### End-to-end lifecycle smoke
 
 ```bash
 scripts/macos-image-lifecycle-smoke.sh
 ```
 
-By default it only runs host offering/list/dry-run checks and stops before paid
-allocation or lease creation. The dry-run is parsed from the command's JSON
-output so the script only continues when at least one availability zone reports
-`ok: true`. After the dry-run succeeds, opt in to the paid lifecycle
+By default it runs host offering/list/dry-run checks and stops before paid
+allocation or lease creation. It continues only when the dry-run JSON reports at
+least one availability zone with `ok: true`. Opt in to the paid lifecycle
 explicitly:
 
 ```bash
@@ -371,42 +440,40 @@ CRABBOX_MACOS_PROMOTE=1 \
 scripts/macos-image-lifecycle-smoke.sh
 ```
 
-The script warms a macOS desktop lease, verifies SSH/sync/VNC prerequisites,
-requires an active Apple developer tools directory, a macOS SDK through
-`xcrun`, Swift, Homebrew, Node/npm/corepack/pnpm, and Python 3, starts WebVNC,
-waits for the portal bridge to report `connected=true`, collects desktop
-artifacts, creates a candidate AMI with a rebooting image capture, boots and
-smokes the candidate, then promotes and smokes the promoted image when
-`CRABBOX_MACOS_PROMOTE=1`. The generic lifecycle defaults to Command Line
-Tools-compatible checks; set `CRABBOX_MACOS_REQUIRE_XCODE=1` when the image must
-run SwiftPM, app, or SDK lanes that depend on Xcode.app. For `mac2*` families
-the default gates are macOS 14+ and Swift tools 6.0+ because those are the
-launchable hosts commonly available today. For newer `mac-m*` families the
-defaults are macOS 15+ and Swift tools 6.2+, which matches Swift package lanes
-that require `swift-tools-version: 6.2` and macOS 15 SDKs. Tune the toolchain
-gates with `CRABBOX_MACOS_REQUIRED_MAJOR` and
-`CRABBOX_MACOS_REQUIRED_SWIFT_TOOLS`. Tune the WebVNC bridge wait with
-`CRABBOX_MACOS_WEBVNC_WAIT_TIMEOUT` and
-`CRABBOX_MACOS_WEBVNC_WAIT_INTERVAL`; tune the post-start grace period with
-`CRABBOX_MACOS_WEBVNC_START_GRACE`. EC2 Mac Dedicated Hosts have
-provider-side billing and release constraints; the script stops each lease's
-local WebVNC daemon before lease cleanup, waits for the host to return to
-`available` between macOS boots, and releases the host only when
+When allowed to run paid work, the script warms a macOS desktop lease, verifies
+SSH/sync/VNC prerequisites and a developer toolchain (Apple developer tools
+directory, a macOS SDK via `xcrun`, Swift, Homebrew, Node/npm/corepack/pnpm,
+Python 3), starts WebVNC, waits for the portal bridge to report
+`connected=true`, collects desktop artifacts, creates a candidate AMI with a
+rebooting capture, boots and smokes the candidate, then promotes and smokes the
+promoted image when `CRABBOX_MACOS_PROMOTE=1`.
+
+Toolchain gating defaults to Command Line Tools-compatible checks; set
+`CRABBOX_MACOS_REQUIRE_XCODE=1` for SwiftPM, app, or SDK lanes that need
+Xcode.app. For `mac2*` families the defaults are macOS 14+ and Swift tools 6.0+;
+for newer `mac-m*` families the defaults are macOS 15+ and Swift tools 6.2+.
+Tune with `CRABBOX_MACOS_REQUIRED_MAJOR` and `CRABBOX_MACOS_REQUIRED_SWIFT_TOOLS`.
+Tune the WebVNC bridge wait with `CRABBOX_MACOS_WEBVNC_WAIT_TIMEOUT`,
+`CRABBOX_MACOS_WEBVNC_WAIT_INTERVAL`, and the post-start grace period with
+`CRABBOX_MACOS_WEBVNC_START_GRACE`.
+
+EC2 Mac Dedicated Hosts have provider-side billing and release constraints. The
+script stops each lease's local WebVNC daemon before cleanup, waits for the host
+to return to `available` between macOS boots, and releases the host only when
 `CRABBOX_MACOS_RELEASE_HOST=1`. Host release is honored for source-only,
-candidate-only, and promoted-image runs; the script refuses to release a
+candidate-only, and promoted-image runs, but it refuses to release a
 pre-existing host unless `CRABBOX_MACOS_RELEASE_EXISTING_HOST=1` is also set.
-Every run writes `.crabbox/macos-image-smoke/<image-name>/summary.json` with
-the current phase, host id, lease ids, AMI id when available, blocker
-remediation commands when blocked, and artifact paths. It also preserves the
-baseline AWS provider policy, EC2 Mac host policy, combined macOS image policy,
-host offering/list/dry-run, allocation, image create, image promotion, host
-wait, warmup, WebVNC daemon, and WebVNC status evidence under the run's
-`evidence/` directory.
-Override the directory with
+
+Every run writes `.crabbox/macos-image-smoke/<image-name>/summary.json` with the
+current phase, host id, lease ids, AMI id when available, blocker remediation
+commands, and artifact paths, and preserves baseline policy, host
+offering/list/dry-run, allocation, image create/promote, host wait, warmup, and
+WebVNC evidence under the run's `evidence/` directory. Override the location with
 `CRABBOX_MACOS_ARTIFACT_DIR`.
 
-If the source lease needs operator-specific setup before smoking, pass a local
-prep script:
+### Operator-specific source prep
+
+If the source lease needs setup before smoking, pass a local prep script:
 
 ```bash
 CRABBOX_MACOS_SOURCE_PREP_SCRIPT=scripts/install-macos-developer-tools.sh \
@@ -414,44 +481,39 @@ CRABBOX_MACOS_ALLOCATE=1 \
 scripts/macos-image-lifecycle-smoke.sh
 ```
 
-The bundled developer-tool prep script keeps the image generic: it verifies
-Command Line Tools by default, or selects an installed `/Applications/Xcode*.app`
-developer directory when `CRABBOX_MACOS_REQUIRE_XCODE=1`. It installs Homebrew
-when missing, installs common developer packages such as Git, GitHub CLI, jq/yq,
-ripgrep, fd, ShellCheck, shfmt, Python, Node 24, and activates pnpm through
-corepack. It also creates `/usr/local/bin` shims so non-login SSH commands can
-find those tools after the AMI boots. The script does not download Xcode;
-install Xcode in a private prep hook first if the base image does not already
-contain it. Do not put Apple credentials, download tokens, or private package
+The bundled prep script (`scripts/install-macos-developer-tools.sh`) keeps the
+image generic: it verifies Command Line Tools by default, or selects an
+installed `/Applications/Xcode*.app` developer directory when
+`CRABBOX_MACOS_REQUIRE_XCODE=1`. It installs Homebrew when missing, installs
+common developer packages (Git, GitHub CLI, jq/yq, ripgrep, fd, ShellCheck,
+shfmt, Python, Node 24, pnpm via corepack), and creates `/usr/local/bin` shims
+so non-login SSH commands find those tools after the AMI boots. It does not
+download Xcode — install Xcode in a private prep hook first if the base image
+lacks it. Do not put Apple credentials, download tokens, or private package
 mirrors in this repository or in baked images.
 
-For the generic developer-tools image, prefer the small wrapper instead of
-remembering the lifecycle environment by hand:
+### Generic developer-tools wrapper
 
 ```bash
 scripts/mint-macos-devtools-image.sh
 ```
 
-That default is no-spend: it runs coordinator, IAM, offering, quota, host list,
-and allocation dry-run checks, writes the usual lifecycle summary, and stops
-before lease creation. The wrapper is intentionally stricter than the generic
-lifecycle: it defaults to `mac-m4.metal`, macOS 15+, Swift tools 6.2+, and full
-Xcode.app via `CRABBOX_MACOS_REQUIRE_XCODE=1`. For an older CLT-only image, set
+The default is no-spend: it runs coordinator, IAM, offering, quota, host list,
+and allocation dry-run checks, writes the lifecycle summary, and stops before
+lease creation. The wrapper is stricter than the generic lifecycle: it defaults
+to `mac-m4.metal`, macOS 15+, Swift tools 6.2+, and full Xcode.app via
+`CRABBOX_MACOS_REQUIRE_XCODE=1`. For an older CLT-only image set
 `CRABBOX_MACOS_TYPE=mac2.metal`, `CRABBOX_MACOS_REQUIRED_MAJOR=14`,
-`CRABBOX_MACOS_REQUIRED_SWIFT_TOOLS=6.0`, and
-`CRABBOX_MACOS_REQUIRE_XCODE=0` explicitly. To mint from an already available
-host:
+`CRABBOX_MACOS_REQUIRED_SWIFT_TOOLS=6.0`, and `CRABBOX_MACOS_REQUIRE_XCODE=0`.
+
+Mint from an already available host, or allow paid allocation when none exists:
 
 ```bash
 scripts/mint-macos-devtools-image.sh \
   --region us-west-2 \
   --type mac-m4.metal \
   --use-existing
-```
 
-To allow paid host allocation when no reusable host exists:
-
-```bash
 scripts/mint-macos-devtools-image.sh \
   --region us-west-2 \
   --type mac-m4.metal \
@@ -461,21 +523,20 @@ scripts/mint-macos-devtools-image.sh \
 The wrapper sets `CRABBOX_MACOS_SOURCE_PREP_SCRIPT` to
 `scripts/install-macos-developer-tools.sh`, names images with the
 `crabbox-macos-devtools-<timestamp>` prefix, promotes the AMI after candidate
-proof, and keeps checkpoint fork proof enabled by default. Use
-`--no-promote` for a candidate-only run, `--no-checkpoint` to skip checkpoint
-fork proof, and `--release-host` only when the AWS Dedicated Host can be
-released safely.
-
-If an available EC2 Mac Dedicated Host already exists, the script still stops
-after preflight unless `CRABBOX_MACOS_RUN=1` or `CRABBOX_MACOS_ALLOCATE=1` is
-set.
+proof, and keeps checkpoint fork proof on by default. Use `--no-promote` for a
+candidate-only run, `--no-checkpoint` to skip checkpoint fork proof, and
+`--release-host` only when the AWS Dedicated Host can be released safely. Even
+with an available host, the script stops after preflight unless
+`CRABBOX_MACOS_RUN=1` or `CRABBOX_MACOS_ALLOCATE=1` is set.
 
 Stopping or terminating an EC2 Mac instance starts the AWS host scrubbing
-workflow. The script waits up to `CRABBOX_MACOS_HOST_WAIT_TIMEOUT` before each
-next macOS boot; the default is `5h` because Apple silicon scrubbing can take
-up to 4.5 hours. Override `CRABBOX_MACOS_HOST_WAIT_INTERVAL` to change the poll
-interval. If the host existed before the script started, `CRABBOX_MACOS_RELEASE_HOST=1`
-will not release it unless `CRABBOX_MACOS_RELEASE_EXISTING_HOST=1` is also set.
+workflow. The script waits up to `CRABBOX_MACOS_HOST_WAIT_TIMEOUT` (default `5h`,
+because Apple silicon scrubbing can take up to 4.5 hours) before each next macOS
+boot; override `CRABBOX_MACOS_HOST_WAIT_INTERVAL` to change the poll interval.
+
+### Manual macOS bake (advanced)
+
+To force allocation and warm a Mac lease directly:
 
 ```bash
 crabbox admin hosts allocate \
@@ -484,9 +545,7 @@ crabbox admin hosts allocate \
   --region eu-west-1 \
   --type mac2.metal \
   --force
-```
 
-```bash
 crabbox warmup \
   --provider aws \
   --target macos \
@@ -529,36 +588,7 @@ crabbox image create \
 crabbox image promote ami-1234567890abcdef0 --target macos --region us-east-1 --json
 ```
 
-Crabbox scopes promoted AWS images by target, architecture, and region. A macOS
-promotion is only selected by matching `target=macos` leases, so it will not
-replace the Linux or Windows default. If you promote an AMI that was not created
-through `crabbox image create`, pass both `--target macos` and `--region`.
-
-## Roll Back
-
-Rollback is another promotion:
-
-```bash
-crabbox image promote ami-previous-good --json
-```
-
-Run the normal brokered smoke again. Do not delete the failed AMI immediately;
-keep it long enough to inspect tags, logs, and source-lease details.
-
-## Cleanup
-
-Promotion does not delete old AMIs or EBS snapshots. Cleanup is a provider
-operator task:
-
-- keep the current promoted AMI;
-- keep the previous known-good AMI until the new one has real QA proof;
-- deregister stale failed/candidate AMIs after investigation;
-- delete their orphaned EBS snapshots in the AWS account.
-
-Do not rely on Crabbox coordinator state as the source of truth for old image
-storage costs. Check AWS directly.
-
-## Hetzner Status
+## Hetzner status
 
 Hetzner image bytes belong in the Hetzner project. Crabbox can boot a configured
 image through `image` or `CRABBOX_HETZNER_IMAGE`, but Hetzner image
@@ -566,7 +596,7 @@ create/promote lifecycle commands are not implemented yet. Until then, create
 and manage Hetzner snapshots with Hetzner tooling, then configure Crabbox to use
 the selected image.
 
-Related docs:
+## Related docs
 
 - [Prebaked runner images](prebaked-images.md)
 - [image command](../commands/image.md)

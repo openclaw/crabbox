@@ -18,6 +18,7 @@ export interface Env {
   CRABBOX_AWS_ORPHAN_SWEEP_DELETE?: string;
   CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS?: string;
   CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS?: string;
+  CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE?: string;
   CRABBOX_CAPACITY_REGIONS?: string;
   CRABBOX_CAPACITY_AVAILABILITY_ZONES?: string;
   CRABBOX_CAPACITY_HINTS?: string;
@@ -35,6 +36,10 @@ export interface Env {
   CRABBOX_AZURE_SUBNET?: string;
   CRABBOX_AZURE_NSG?: string;
   CRABBOX_AZURE_SSH_CIDRS?: string;
+  CRABBOX_AZURE_ORPHAN_SWEEP_ENABLED?: string;
+  CRABBOX_AZURE_ORPHAN_SWEEP_DELETE?: string;
+  CRABBOX_AZURE_ORPHAN_SWEEP_INTERVAL_SECONDS?: string;
+  CRABBOX_AZURE_ORPHAN_SWEEP_GRACE_SECONDS?: string;
   GCP_PROJECT_ID?: string;
   GCP_CLIENT_EMAIL?: string;
   GCP_PRIVATE_KEY?: string;
@@ -66,6 +71,8 @@ export interface Env {
   CRABBOX_MAX_ACTIVE_LEASES?: string;
   CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER?: string;
   CRABBOX_MAX_ACTIVE_LEASES_PER_ORG?: string;
+  CRABBOX_CAPACITY_ADMIN_OWNERS?: string;
+  CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN?: string;
   CRABBOX_MAX_MONTHLY_USD?: string;
   CRABBOX_MAX_MONTHLY_USD_PER_OWNER?: string;
   CRABBOX_MAX_MONTHLY_USD_PER_ORG?: string;
@@ -94,6 +101,7 @@ export interface LeaseRequest {
   provider?: Provider;
   target?: TargetOS;
   targetOS?: TargetOS;
+  architecture?: string;
   os?: string;
   windowsMode?: WindowsMode;
   desktop?: boolean;
@@ -154,6 +162,8 @@ export interface LeaseRequest {
   idleTimeoutSeconds?: number;
   keep?: boolean;
   sshPublicKey?: string;
+  pond?: string;
+  exposedPorts?: string[];
 }
 
 export type Provider = "hetzner" | "aws" | "azure" | "gcp";
@@ -204,6 +214,8 @@ export interface LeaseRecord {
   class: string;
   serverType: string;
   requestedServerType?: string;
+  pond?: string;
+  exposedPorts?: string[];
   hostId?: string;
   hostID?: string;
   market?: string;
@@ -222,7 +234,7 @@ export interface LeaseRecord {
   idleTimeoutSeconds?: number;
   estimatedHourlyUSD: number;
   maxEstimatedUSD: number;
-  state: "active" | "released" | "expired" | "failed";
+  state: "provisioning" | "active" | "released" | "expired" | "failed";
   createdAt: string;
   updatedAt: string;
   lastTouchedAt?: string;
@@ -233,8 +245,73 @@ export interface LeaseRecord {
   cleanupError?: string;
   cleanupFailedAt?: string;
   cleanupRetryAt?: string;
+  releaseDeletesServer?: boolean;
   releasedAt?: string;
   endedAt?: string;
+}
+
+export type ReadyPoolEntryState = "ready" | "busy" | "draining" | "stale";
+
+export interface ReadyPoolEntry {
+  key: string;
+  leaseID: string;
+  state: ReadyPoolEntryState;
+  owner: string;
+  org: string;
+  repo?: string;
+  ref?: string;
+  commit?: string;
+  fingerprint?: string;
+  image?: string;
+  provider?: Provider;
+  target?: TargetOS;
+  windowsMode?: WindowsMode;
+  class?: string;
+  serverType?: string;
+  sshHost?: string;
+  sshUser?: string;
+  sshPort?: string;
+  workRoot?: string;
+  borrowedBy?: string;
+  borrowedAt?: string;
+  borrowToken?: string;
+  lastReadyAt?: string;
+  lastUsedAt?: string;
+  lastResult?: string;
+  failureCount?: number;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+}
+
+export interface ReadyPoolRegisterRequest {
+  leaseID?: string;
+  repo?: string;
+  ref?: string;
+  commit?: string;
+  fingerprint?: string;
+  image?: string;
+  sshHost?: string;
+  sshUser?: string;
+  sshPort?: string;
+  workRoot?: string;
+}
+
+export interface ReadyPoolBorrowRequest {
+  repo?: string;
+  ref?: string;
+  commit?: string;
+  allowMissingCommit?: boolean;
+  fingerprint?: string;
+  provider?: Provider;
+  target?: TargetOS;
+}
+
+export interface ReadyPoolReturnRequest {
+  leaseID?: string;
+  result?: "ready" | "drain" | "release";
+  reason?: string;
+  borrowToken?: string;
 }
 
 export interface LeaseNetworkState {

@@ -1,8 +1,11 @@
 package all
 
 import (
+	_ "github.com/openclaw/crabbox/internal/providers/applecontainer"
+	_ "github.com/openclaw/crabbox/internal/providers/asciibox"
 	_ "github.com/openclaw/crabbox/internal/providers/aws"
 	_ "github.com/openclaw/crabbox/internal/providers/azure"
+	_ "github.com/openclaw/crabbox/internal/providers/azuredynamicsessions"
 	_ "github.com/openclaw/crabbox/internal/providers/blacksmith"
 	_ "github.com/openclaw/crabbox/internal/providers/cloudflare"
 	_ "github.com/openclaw/crabbox/internal/providers/daytona"
@@ -13,6 +16,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/islo"
 	_ "github.com/openclaw/crabbox/internal/providers/localcontainer"
 	_ "github.com/openclaw/crabbox/internal/providers/modal"
+	_ "github.com/openclaw/crabbox/internal/providers/multipass"
 	_ "github.com/openclaw/crabbox/internal/providers/namespace"
 	_ "github.com/openclaw/crabbox/internal/providers/parallels"
 	_ "github.com/openclaw/crabbox/internal/providers/proxmox"

@@ -1,6 +1,33 @@
 # Orchestrator
 
-Crabbox has one orchestrator: the Cloudflare Worker plus Fleet Durable Object. The CLI can still talk directly to Hetzner or AWS for debugging, but normal operation should go through the coordinator.
+Crabbox has one orchestrator: the Cloudflare Worker fronting a single Fleet
+Durable Object. It is the control plane for brokered leases — it owns lease
+identity, provider credentials, server lifecycle, expiry, cost guardrails, and
+usage accounting. The CLI still performs all data-plane work (SSH, rsync,
+command execution) directly against the runner host, even in brokered mode.
+
+For the broader request flow and the Worker's internals, see
+[Architecture](architecture.md) and the
+[Coordinator](features/coordinator.md) feature doc.
+
+## Brokered vs direct
+
+How a command reaches a provider is decided by `loadBackend`
+(`internal/cli/provider_backend.go`):
+
+- **Brokered.** The provider's spec advertises coordinator support (`aws`,
+  `azure`, `gcp`, `hetzner`) *and* a broker URL is configured
+  (`CRABBOX_COORDINATOR` or `config set-broker`). Lease lifecycle calls go
+  through the Worker over HTTP; the CLI still opens SSH and runs commands
+  directly against the box.
+- **Direct.** A coordinator-capable provider with no broker configured, or any
+  other SSH-lease provider. The CLI talks to the cloud API itself; there is no
+  central control plane.
+- **Delegated.** Sandbox/run providers that own sync and execution end to end.
+  The CLI never opens its own SSH or rsync session.
+
+The four brokerable providers run direct unless a broker is configured, so
+"brokered" is a deployment choice, not a property of the provider alone.
 
 ## Responsibilities
 
@@ -12,81 +39,129 @@ The orchestrator owns:
 - idle expiry and heartbeat renewal;
 - pool listing;
 - cost controls and usage estimates;
-- status lookup.
+- status and audit lookups.
 
 The CLI owns:
 
-- local config;
+- local config and claims;
 - per-lease SSH key creation;
 - SSH readiness waits;
 - rsync of the dirty working tree;
 - remote command execution;
 - output streaming.
 
-## Lease States
+## Lease states
 
-Current user-facing states:
+The Worker stores brokered leases in one of four states:
 
 ```text
-provisioning
 active
-ready
-running
 released
 expired
 failed
 ```
 
-The Worker stores coordinator leases as `active`, `released`, `expired`, or `failed`. Provider labels add finer local runner state such as `leased`, `ready`, and `running`.
+Provider runner labels carry finer machine-level states such as `leased`,
+`ready`, and `running`; these are used by direct-mode cleanup and the portal
+grid but are not the coordinator's authoritative lease state.
 
-## Heartbeats And Idle Timeout
+## Heartbeats and idle timeout
 
-`crabbox warmup --idle-timeout 30m` and `crabbox run --idle-timeout 30m` set inactivity expiry. `--ttl` is a separate maximum wall-clock lifetime. The CLI sends coordinator heartbeats while a lease is in use; each heartbeat updates `lastTouchedAt` and recomputes `expiresAt = min(createdAt + ttl, lastTouchedAt + idleTimeout)`.
+A lease expires at the earlier of its wall-clock TTL and its idle window:
 
-For Linux leases, heartbeats also attach best-effort telemetry when SSH is reachable. The Durable Object keeps the latest sanitized load, memory, disk, uptime, source, and capture timestamp on the lease record, plus a bounded `telemetryHistory` ring of the latest 60 samples for compact portal trends. Active runs can append their own bounded telemetry samples through the run telemetry endpoint, so longer commands show short load, memory, and disk trends on the run detail page instead of only start/end deltas.
+```text
+expiresAt = min(createdAt + ttl, lastTouchedAt + idleTimeout)
+```
 
-Direct-provider mode does not have a central heartbeat or alarm. It labels machines with `created_at`, `last_touched_at`, `idle_timeout_secs`, `expires_at`, `state`, `lease`, and `slug`; `crabbox cleanup` uses those labels conservatively.
+`--ttl` is the maximum lifetime; `--idle-timeout` is the inactivity window.
+Defaults are a 5400 s TTL (capped at 86400 s) and a 1800 s idle timeout. Set
+them per command, for example:
 
-Delegated external runners, such as Blacksmith Testboxes, are visibility-only
-records in the coordinator. `crabbox list --provider blacksmith-testbox` syncs
-the current all-status Blacksmith table into muted `/portal` lease-grid rows,
-adds inferred GitHub Actions run/workflow links and status/conclusion badges
-when available, and a later sync marks missing runners stale. Long-queued or
-long-running Actions owners are tagged as `stuck`, and each row can open a
-visibility-only runner detail page. These rows do not heartbeat and do not
-participate in Crabbox lease expiry, cleanup, or cost accounting.
+```bash
+crabbox warmup --ttl 2h --idle-timeout 30m
+crabbox run --idle-timeout 30m -- ./run-tests.sh
+```
+
+While a lease is in use the CLI sends `POST /v1/leases/{id}/heartbeat`. Each
+heartbeat bumps `lastTouchedAt`, recomputes `expiresAt`, clears any pending
+cleanup metadata, refreshes provider SSH access when source CIDRs are known,
+and reschedules the Durable Object alarm.
+
+For Linux leases the heartbeat also carries best-effort telemetry whenever SSH
+is reachable (source `ssh-linux`): load, memory, disk, and uptime. The Durable
+Object keeps the latest sanitized sample on the lease plus a bounded
+`telemetryHistory` ring of the 60 most recent samples for compact portal
+trends. Active runs can append their own samples through the run telemetry
+endpoint, so longer commands show short trend lines on the run detail page
+instead of only start/end deltas. See [Telemetry](features/telemetry.md).
+
+Direct-provider mode has no central heartbeat or alarm. It labels machines with
+`created_at`, `last_touched_at`, `idle_timeout_secs`, `expires_at`, `state`,
+`lease`, and `slug`; `crabbox cleanup` reads those labels conservatively.
+
+Delegated external runners (for example Blacksmith Testboxes) are
+visibility-only records. `crabbox list --provider blacksmith-testbox` syncs the
+current runner table into muted portal rows with inferred GitHub Actions
+run/workflow links and status badges, and a later sync marks missing runners
+stale. These rows do not heartbeat and do not participate in lease expiry,
+cleanup, or cost accounting.
 
 ## Cleanup
 
-Brokered cleanup is owned by the Durable Object alarm. `crabbox cleanup` refuses to run when a coordinator is configured, because sweeping provider resources behind the coordinator can delete live leases. When provider deletion fails during TTL cleanup, the coordinator keeps the lease active with cleanup retry metadata and schedules another alarm instead of marking the lease expired while the machine may still exist.
+Brokered cleanup is owned by the Durable Object alarm, which also runs on the
+scheduled cron. `crabbox cleanup` refuses to run when a coordinator is
+configured — sweeping provider resources from the CLI could delete live
+brokered leases. When provider deletion fails during TTL cleanup, the
+coordinator keeps the lease `active`, records `cleanupAttempts`,
+`cleanupError`, and `cleanupRetryAt`, and reschedules the alarm (retry after
+5 minutes) rather than marking the lease `expired` while the machine may still
+exist. On success the lease moves to `expired`.
+
+The alarm fires at the earliest of all active-lease expiry times and the next
+AWS orphan-sweep time. The orphan sweep (report or delete mode, gated by
+`CRABBOX_AWS_ORPHAN_SWEEP_*`) terminates untracked instances and releases idle
+Mac dedicated hosts.
 
 Direct cleanup only deletes machines that are clearly safe:
 
 - `keep=true` is skipped;
-- running and provisioning states are skipped until the extra stale window;
-- expired ready/leased/active direct machines can be cleaned up manually;
-- expired inactive machines can be deleted;
-- stale active states older than expiry plus 12 hours can be deleted.
+- `running` and `provisioning` are skipped until past expiry plus 12 hours;
+- expired `ready`/`leased`/`active` machines are deleted once past expiry;
+- `failed`/`released`/`expired` machines are deleted;
+- a machine with no labels or no `expires_at` is left alone.
 
-Direct AWS security-group maintenance also prunes Crabbox-owned SSH ingress rules before adding the current source CIDRs, including old fallback ports that are no longer configured. It leaves non-Crabbox rules untouched.
+Direct AWS security-group maintenance prunes Crabbox-owned SSH ingress rules
+before adding the current source CIDRs, including old fallback ports that are
+no longer configured, and leaves non-Crabbox rules untouched.
 
-## Cost Control
+See [Lifecycle and cleanup](features/lifecycle-cleanup.md) for the full
+runner-state model.
 
-The orchestrator estimates cost before creating a machine. It fetches live provider pricing when possible, multiplies the hourly rate by lease TTL, and reserves that worst-case amount for the current month. This is a guardrail, not a billing export.
+## Cost control
 
-Provider-backed pricing:
+Before creating a machine the orchestrator estimates its worst-case cost,
+multiplies the hourly rate by the lease TTL, and reserves that amount for the
+current month. This is a guardrail, not a billing export.
 
-- AWS: `DescribeSpotPriceHistory` for the requested instance type and region.
-- Hetzner: Cloud API server-type prices for the requested location; hourly EUR prices are converted with `CRABBOX_EUR_TO_USD`, default `1.08`.
+The hourly rate is resolved in this order:
 
-Static defaults remain as fallback values for provider API failures. Explicit overrides win over provider-fetched prices:
+1. an explicit override from `CRABBOX_COST_RATES_JSON` (key `provider:type`);
+2. live provider pricing when available;
+3. a built-in static default (final fallback ~`$3`/h for AWS, `$0.50`/h
+   otherwise).
+
+Live pricing today:
+
+- **AWS:** `DescribeSpotPriceHistory` for the requested instance type and region.
+- **Hetzner:** Cloud API server-type prices for the requested location; hourly
+  EUR prices are converted with `CRABBOX_EUR_TO_USD` (default `1.08`).
 
 ```text
 CRABBOX_COST_RATES_JSON='{"aws:c7a.48xlarge":9,"hetzner:ccx63":1.08}'
 CRABBOX_EUR_TO_USD=1.08
 ```
 
-Supported limits:
+Limits are read from the Worker environment:
 
 ```text
 CRABBOX_MAX_ACTIVE_LEASES
@@ -98,18 +173,41 @@ CRABBOX_MAX_MONTHLY_USD_PER_ORG
 CRABBOX_DEFAULT_ORG
 ```
 
-For signed GitHub login tokens, owner/org is embedded in the token that the Worker forwards to the Fleet Durable Object. In shared-token automation, the CLI sends `X-Crabbox-Owner` from `CRABBOX_OWNER`, Git author/committer email env, or local `git config user.email`, and sends `X-Crabbox-Org` from `CRABBOX_ORG` when set. Raw Cloudflare Access identity headers are ignored; only a verified Access JWT email can become the bearer-token owner.
+Owner and org identity drives the per-owner and per-org limits. For signed
+GitHub login tokens, owner/org is embedded in the bearer token and forwarded to
+the Durable Object. In shared-token automation the CLI sends `X-Crabbox-Owner`
+from `CRABBOX_OWNER`, then `GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL`, then local
+`git config user.email`; it sends `X-Crabbox-Org` from `CRABBOX_ORG` when set.
+Raw Cloudflare Access identity headers are ignored — only a verified Access JWT
+email can become the bearer-token owner.
 
-If a new lease would exceed a configured active-lease or monthly reserved-cost limit, the coordinator returns `cost_limit_exceeded` and does not provision the machine.
+If a new lease would exceed any configured active-lease count or monthly
+reserved-cost budget, the create call returns HTTP 429 `cost_limit_exceeded`
+and no machine is provisioned. See [Cost and usage](features/cost-usage.md).
 
-## Usage Statistics
+## Usage statistics
 
-The coordinator exposes `GET /v1/usage`. `crabbox usage` can show a single user, an org, or the whole fleet for a month.
+The coordinator exposes `GET /v1/usage`. `crabbox usage` reports a single user,
+an org, or the whole fleet for a month:
 
-Usage reports include lease count, active lease count, elapsed runtime, estimated elapsed cost, reserved worst-case cost, and breakdowns by owner, org, provider, and server type.
+```bash
+crabbox usage --scope user --user alice@example.com --month 2026-05
+crabbox usage --scope org --org example-org
+crabbox usage --scope all --json
+```
 
-## Actions Parity Boundary
+A report includes lease count, active-lease count, elapsed runtime, estimated
+elapsed cost, reserved worst-case cost, and breakdowns by owner, org, provider,
+and server type.
 
-Actions-backed lanes can use local SSH hydration for ordinary repository setup. They should run inside a real GitHub Actions job when they need Actions secrets, OIDC, service containers, or unsupported `uses:` steps.
+## Actions parity boundary
 
-The current bridge is `crabbox init`: generate repo-local workflow and agent instructions so warmup/run can hydrate the same dependencies the real CI uses. The GitHub fallback registers ephemeral self-hosted runners or dispatches a configured workflow for full secrets/OIDC parity.
+Actions-backed lanes can use local SSH hydration for ordinary repository setup.
+They need a real GitHub Actions job only when they require Actions secrets,
+OIDC, service containers, or unsupported `uses:` steps.
+
+The bridge is `crabbox init`, which generates a repo-local workflow and agent
+instructions so `warmup`/`run` can hydrate the same dependencies CI uses. The
+GitHub fallback registers ephemeral self-hosted runners or dispatches a
+configured workflow for full secrets/OIDC parity. See
+[Actions hydration](features/actions-hydration.md).

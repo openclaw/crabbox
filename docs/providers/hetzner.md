@@ -1,20 +1,29 @@
 # Hetzner Provider
 
-Read when:
+Read this when you are:
 
 - choosing `provider: hetzner`;
 - debugging Hetzner capacity, quotas, images, locations, or SSH readiness;
-- changing `internal/providers/hetzner` or brokered Hetzner provisioning.
+- changing `internal/providers/hetzner` or brokered Hetzner provisioning in the
+  Worker (`worker/src/hetzner.ts`).
 
-Hetzner is the Linux-only managed provider. It is an SSH lease backend: Hetzner
-creates the server, then Crabbox owns SSH readiness, sync, command execution,
-VNC tunnels, results, and cleanup.
+Hetzner is the Linux-only managed provider and the simplest managed path for
+Crabbox. It is an **SSH lease** backend: Hetzner Cloud provisions the server,
+and Crabbox then owns SSH readiness, sync, command execution, VNC tunnels, test
+results, and cleanup.
 
-## When To Use
+## When to use it
 
-Use Hetzner for fast Linux CI-style work when you do not need managed Windows,
-macOS, or EC2-specific capacity controls. It is the simplest managed path for
-Linux desktop/browser leases.
+Reach for Hetzner for fast, low-overhead Linux work — CI-style runs, desktop and
+browser leases, code-server leases — when you do not need managed Windows or
+macOS targets or cloud-specific capacity controls. For non-Linux targets or
+provider-native snapshots, use [AWS](aws.md), [GCP](gcp.md), [Azure](azure.md),
+or a container/sandbox provider instead.
+
+Hetzner is one of the four brokerable providers: it runs **direct from the CLI**
+by default and goes **through the Worker broker** only when a coordinator URL and
+token are configured. See [Provider backends](../provider-backends.md) for the
+brokered-vs-direct model.
 
 ## Commands
 
@@ -22,11 +31,13 @@ Linux desktop/browser leases.
 crabbox warmup --provider hetzner --class beast
 crabbox run --provider hetzner --class standard -- pnpm test
 crabbox warmup --provider hetzner --desktop --browser
-crabbox ssh --provider hetzner --id blue-lobster
-crabbox stop --provider hetzner blue-lobster
+crabbox ssh --provider hetzner --id swift-crab
+crabbox stop --provider hetzner swift-crab
 ```
 
-## Config
+`--id` accepts either the canonical lease id (`cbx_…`) or the friendly slug.
+
+## Configuration
 
 ```yaml
 provider: hetzner
@@ -38,35 +49,53 @@ hetzner:
   sshKey: ""
 ```
 
-Important direct-mode environment:
+Config keys (under `hetzner:`):
+
+| Key        | Maps to        | Default                       | Notes |
+|------------|----------------|-------------------------------|-------|
+| `location` | `cfg.Location` | `fsn1`                        | Hetzner datacenter location. |
+| `image`    | `cfg.Image`    | resolved from `--os` selector | Hetzner image slug. |
+| `sshKey`   | provider key   | per-lease key                 | Optional named Hetzner SSH key; otherwise Crabbox manages one. |
+
+### Direct-mode environment
+
+Direct mode authenticates from the environment:
 
 ```text
-HCLOUD_TOKEN
-HETZNER_TOKEN
-CRABBOX_HETZNER_IMAGE
-CRABBOX_HETZNER_LOCATION
-CRABBOX_HETZNER_SSH_KEY
+HCLOUD_TOKEN            Hetzner Cloud API token (preferred)
+HETZNER_TOKEN           Alternate name; used if HCLOUD_TOKEN is unset
+CRABBOX_HETZNER_IMAGE   Override the image slug
+CRABBOX_HETZNER_LOCATION Override the location
+CRABBOX_HETZNER_SSH_KEY  Use a named Hetzner SSH key
 ```
 
-Brokered Hetzner credentials belong in the Worker.
+One of `HCLOUD_TOKEN` or `HETZNER_TOKEN` is required for direct mode; without it
+provisioning fails fast. In brokered mode the API token lives in the Worker, not
+on the client.
 
-## OS Selector
+## OS selector
 
-Crabbox accepts the portable Linux selector `--os ubuntu:26.04`, but Hetzner's
-current public image catalog does not expose an Ubuntu 26.04 image slug. Until
-that exists, `ubuntu:26.04` leases on Hetzner provision `ubuntu-24.04`. Use AWS,
-GCP, Azure, or a container provider when proof must actually run on Ubuntu 26.04.
+Crabbox accepts the portable Linux selector `--os` (default `ubuntu:26.04`, also
+`ubuntu:24.04`). Hetzner's public image catalog does not expose an Ubuntu 26.04
+slug yet, so **both** `ubuntu:26.04` and `ubuntu:24.04` currently resolve to the
+Hetzner image `ubuntu-24.04`. If proof must actually run on Ubuntu 26.04, use
+AWS, GCP, Azure, or a container provider, whose image maps already point at a
+26.04 image.
 
 ## Lifecycle
 
-1. Import or reuse the lease SSH key.
-2. Pick the configured location, image, and class server-type candidates.
-3. Create a Hetzner server with Crabbox labels.
-4. Wait for SSH and `crabbox-ready`.
-5. Let core sync and run over SSH.
-6. Delete on release, cleanup, or coordinator expiry.
+1. Generate or reuse the per-lease SSH key; register it with Hetzner.
+2. Pick the configured location, image, and the class's server-type candidates.
+3. Create the server with Crabbox labels (with region/capacity fallback).
+4. Wait for an IP, then for SSH and the `crabbox-ready` bootstrap marker.
+5. Mark the server `state=ready` and hand off to core sync/run over SSH.
+6. Delete the server (and managed SSH key) on release, `cleanup`, or — in
+   brokered mode — coordinator expiry.
 
-## Classes
+## Classes and server types
+
+Classes expand to an ordered list of Hetzner server types; provisioning tries
+each in turn until one has capacity:
 
 ```text
 standard  ccx33, cpx62, cx53
@@ -75,27 +104,32 @@ large     ccx53, ccx43, cpx62, cx53
 beast     ccx63, ccx53, ccx43, cpx62, cx53
 ```
 
-Explicit `--type` is exact. Class-based provisioning can fall back across the
-candidate list when Hetzner rejects capacity or quota.
+The default class is `beast`. An explicit `--type` pins one exact server type
+with no fallback; class-based provisioning falls back across the candidate list
+when Hetzner reports a capacity or quota error.
 
 ## Capabilities
 
-- SSH: yes.
-- Crabbox sync: yes.
-- Desktop/browser/code: Linux only.
-- Tailscale: Linux managed leases.
-- Actions hydration: yes, Linux SSH leases.
-- Coordinator: yes.
+- **SSH** and **Crabbox sync**: yes.
+- **Desktop / browser / code**: yes, Linux-only (`--desktop`, `--browser`,
+  `--code`). See [Linux VNC](../features/vnc-linux.md).
+- **Tailscale**: yes on managed Linux leases. Direct `--tailscale` requires a
+  Tailscale auth key in the configured `authKeyEnv`; brokered mode uses
+  coordinator-side OAuth secrets.
+- **Actions hydration**: yes (Linux SSH leases).
+- **Cleanup**: yes.
+- **Coordinator**: supported (brokerable through the Worker).
 
 ## Gotchas
 
-- Hetzner does not provide managed Windows or macOS targets in Crabbox.
-- Dedicated-core types can hit account quota. Use class fallback before pinning
-  exact types.
-- Direct mode has no coordinator alarm; use `crabbox cleanup`.
+- No managed Windows or macOS targets — Hetzner is Linux-only in Crabbox.
+- Dedicated-core types (`ccx*`) can hit account quota. Prefer class fallback over
+  pinning an exact `--type`.
+- Direct mode has no coordinator alarm to reap expired boxes; run
+  `crabbox cleanup --provider hetzner` (or `crabbox stop`) to release servers.
 
-Related docs:
+## Related docs
 
-- [Feature: Hetzner](../features/hetzner.md)
-- [Linux VNC](../features/vnc-linux.md)
 - [Provider backends](../provider-backends.md)
+- [Linux VNC](../features/vnc-linux.md)
+- [AWS](aws.md), [GCP](gcp.md), [Azure](azure.md)

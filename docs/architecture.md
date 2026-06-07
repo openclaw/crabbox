@@ -1,196 +1,326 @@
 # Architecture
 
-Crabbox is a generic remote execution layer for software testing. It gives a
-local CLI a short-lived machine, syncs the current checkout, runs commands, and
-returns logs, timing, and artifacts without making project-specific setup part
-of the base image. The core boundary is simple: Crabbox owns leasing,
+Crabbox is a generic remote execution layer for software testing. A local CLI
+leases a short-lived machine, syncs the current checkout, runs commands, and
+returns logs, timing, results, and artifacts — without baking project-specific
+setup into the base image. The boundary is deliberate: Crabbox owns leasing,
 connectivity, sync, run recording, and cleanup; the repository under test owns
 language runtimes, dependencies, services, and secrets through its own setup,
-hydration workflow, devcontainer, Nix/mise/asdf config, or shell scripts.
+[Actions hydration](features/actions-hydration.md), devcontainer, Nix/mise/asdf
+config, or shell scripts.
 
-The architecture deliberately separates the control plane from command
-execution. The coordinator serializes leases and provider state, while the CLI
-keeps SSH keys local and streams command I/O directly between the developer
-machine and the leased runner. That keeps provider credentials out of the
-runner, keeps user secrets out of coordinator state, and leaves enough room for
-both plain SSH providers and delegated runner systems.
+The architecture separates the *control plane* from *command execution*. The
+broker serializes lease and provider state, while the CLI keeps SSH keys local
+and streams command I/O directly between the developer machine and the leased
+box. That keeps provider credentials out of the box, keeps user secrets out of
+broker state, and leaves room for both plain-SSH providers and delegated runner
+systems.
 
 ## System Overview
 
-Crabbox has three main parts:
+Crabbox has three parts:
 
-- CLI: local Go binary used by developers, CI operators, and agents.
-- Coordinator: Cloudflare Worker plus Durable Object state.
-- Workers: managed cloud or SSH-accessible machines that run commands.
+- **CLI** — a local Go binary (`cmd/crabbox`, `internal/cli`) used by
+  developers, CI operators, and agents.
+- **Broker** — a Cloudflare Worker plus a single Durable Object that holds all
+  lease, run, and usage state (`worker/src`).
+- **Runners** — managed cloud machines, self-hosted VMs, BYO SSH hosts, or
+  delegated sandboxes that actually run commands. See the
+  [provider reference](features/providers.md).
 
-The coordinator leases machines. The CLI executes work. Machines do not need to call back to the coordinator in the MVP.
+The broker manages leases. The CLI executes work. Runners do not call back to
+the broker; lease bridges (WebVNC, code-server, egress) are the only paths that
+route runner traffic through the Worker, and only on demand.
 
 ```text
-developer laptop
-  crabbox CLI
-    |
-    | HTTPS JSON API, Crabbox auth
-    v
-Cloudflare Worker
-  Durable Object lease state
-    |
-    | Hetzner API or AWS EC2 API
-    v
-cloud machines
-
-developer laptop
-  |
-  | SSH + rsync
-  v
-leased machine
+developer machine
+  crabbox CLI ----------- SSH + rsync (data plane) ----------> leased box
+    |                                                              ^
+    | HTTPS JSON, Bearer auth (control plane)                      |
+    v                                                  provider cloud API
+Cloudflare Worker  ------------------------------------------>  (provision)
+  Fleet Durable Object
+  (lease / run / usage state, cleanup alarms, live bridges)
 ```
 
-## Lease Flow
+## Execution Modes
 
-1. CLI loads config and authenticates with a signed GitHub login token or shared operator token.
-2. CLI creates a per-lease SSH key.
-3. CLI sends `POST /v1/leases` with lease ID, slug, profile, TTL, idle timeout, desired machine class, and SSH public key.
-4. Coordinator validates identity and policy.
-5. Durable Object chooses a provider from config and creates a Hetzner server or AWS EC2 instance.
-6. Coordinator returns lease ID, slug, machine address, SSH user, workdir, and expiry.
-7. CLI waits for `crabbox-ready`.
-8. CLI seeds remote Git when possible, compares sync fingerprints, and syncs changed files with `rsync --delete`.
-9. CLI runs sync sanity and configured base-ref hydration.
-10. CLI runs the command over SSH and streams stdout/stderr, or writes stdout
-    to a local file when `--capture-stdout` is set.
-11. CLI heartbeats while the command runs; heartbeats touch `lastTouchedAt`, recompute idle expiry up to the TTL cap, and attach a best-effort latest Linux telemetry snapshot when SSH is reachable.
-12. CLI releases the lease when done.
-13. Durable Object alarm cleans up stale leases and expired machines.
+The CLI picks one of three modes per provider in `loadBackend`
+(`internal/cli/provider_backend.go`):
 
-## Coordinator API
+- **Brokered (coordinator) mode** — chosen when the provider declares
+  `Coordinator: supported` *and* a broker URL is configured
+  (`CRABBOX_COORDINATOR` or `config set-broker`). The provider's SSH backend is
+  wrapped in a `coordinatorLeaseBackend`: lease lifecycle goes through the
+  Worker over HTTPS, but the CLI still drives SSH, rsync, and command execution
+  **directly** to the runner. The brokered set is exactly the four managed cloud
+  providers: `aws`, `azure`, `gcp`, `hetzner`.
+- **Direct SSH mode** — the provider returns an SSH lease backend but no broker
+  is configured. The CLI provisions and connects against the cloud or host API
+  itself; no Worker is involved. The four brokerable providers fall back to this
+  when no broker URL is set, and every other SSH-lease provider (`ssh`,
+  `parallels`, `proxmox`, `daytona`, `runpod`, and so on) always runs here.
+- **Delegated mode** — the provider implements a delegated-run backend (e.g.
+  `e2b`, `modal`, `cloudflare`, `azure-dynamic-sessions`). The provider owns
+  sync and execution end to end; the CLI calls `Warmup`/`Run` and never performs
+  its own rsync. Delegated providers reject local-sync flags.
 
-Implemented endpoints:
+Provider kinds, coordinator modes, and feature sets are declared in each
+adapter's `Spec()`; the type definitions live in
+`internal/cli/provider_backend.go`.
+
+## Lease Flow (brokered SSH provider)
+
+1. The CLI loads config and authenticates with a signed GitHub login token or a
+   shared/admin operator token.
+2. The CLI generates a per-lease SSH key under
+   `<user-config>/crabbox/testboxes/<lease-id>/id_ed25519` (RSA for AWS/Azure
+   Windows).
+3. The CLI sends `POST /v1/leases` with the lease ID (`cbx_<12 hex>`), slug,
+   provider, target, machine class, TTL, idle timeout, the SSH public key, and
+   provider-specific fields.
+4. The Worker validates identity and policy, checks provider readiness, and
+   enforces cost/spend caps.
+5. The Fleet Durable Object provisions the machine through the provider adapter
+   (with region/market fallback) and persists the lease record.
+6. The broker returns the lease ID, slug, host, SSH user/port, work root, and
+   expiry.
+7. The CLI waits for the `crabbox-ready` bootstrap marker.
+8. The CLI seeds the remote Git tree when possible, compares sync fingerprints,
+   and rsyncs changed files (see [Sync](#sync-and-hydration)).
+9. The CLI hydrates the worktree against the base ref, optionally via
+   [Actions hydration](features/actions-hydration.md).
+10. The CLI runs the command over SSH, streaming stdout/stderr (or capturing to
+    a local file with `--capture-stdout`).
+11. The CLI heartbeats while work runs: each `POST .../heartbeat` touches
+    `lastTouchedAt`, recomputes idle expiry up to the TTL cap, and attaches a
+    best-effort Linux telemetry snapshot when SSH is reachable.
+12. The CLI releases the lease unless `--keep` is set.
+13. A Durable Object alarm reaps expired leases and orphaned cloud resources.
+
+## Broker: Worker Entry and Auth
+
+`worker/src/index.ts` handles every request and forwards to a single Durable
+Object instance (`FLEET.idFromName("default")`):
+
+- `GET /v1/health` returns liveness; `GET /` redirects to `/portal`.
+- `/v1/auth/*`, `/portal/login`, `/portal/logout`, and WebSocket upgrades for
+  the live bridges go straight to the DO.
+- `/v1/internal/*` is 404 externally; the cron handler reaches it internally
+  with the `x-crabbox-internal: scheduled` header.
+- Everything else passes through `authenticateRequest` and is forwarded with
+  auth context injected via `requestWithAuthContext`.
+
+Auth (`worker/src/auth.ts`) requires a Bearer token, matched in order:
+`CRABBOX_ADMIN_TOKEN` (admin), `CRABBOX_SHARED_TOKEN` (non-admin shared), then a
+signed user token (prefix `cbxu_`, HMAC-SHA256, 30-day default expiry) minted
+after GitHub OAuth login verifies allowed org membership. An optional Cloudflare
+Access JWT (`cf-access-jwt-assertion`) can supply the owner identity. The
+broker injects `x-crabbox-auth`, `-admin`, `-owner`, `-org`, and `-github-login`
+headers. The portal converts a `crabbox_session` cookie into a Bearer token.
+
+## Fleet Durable Object
+
+One global DO (`worker/src/fleet.ts`) holds all state in DO storage and owns:
+
+- **Lease state** — `lease:*` records (`LeaseRecord` in `worker/src/types.ts`):
+  provider, target, class/server type, cloud ID, host, SSH user/port, owner/org,
+  sharing, TTL/idle timeout, cost estimates, state
+  (`active|released|expired|failed`), telemetry history, cleanup metadata, and
+  optional Tailscale/pond/exposed-port fields.
+- **Cost and spend caps** (`worker/src/usage.ts`) — `enforceCostLimits` checks
+  active-lease counts and monthly reserved-USD budgets (global / per-owner /
+  per-org) from `CRABBOX_MAX_*` env. Over-limit requests get HTTP 429
+  `cost_limit_exceeded`. Cost = hourly rate × TTL, where the rate comes from a
+  `CRABBOX_COST_RATES_JSON` override, then a provider live price, then built-in
+  defaults.
+- **Usage accounting** — `usageSummary` aggregates leases per
+  owner/org/provider/server type for the month; served at `GET /v1/usage`.
+- **Cleanup and expiry** — `alarm()` and the cron both run maintenance:
+  `expireLeases` deletes the cloud server for active leases past `expiresAt`
+  (retrying after a 5-minute backoff on failure), then an optional AWS orphan
+  sweep, then `scheduleAlarm` arms the next alarm at the soonest pending expiry.
+- **Runs, run events, run logs, and telemetry** — see
+  [What Flows on a Run](#what-flows-on-a-run).
+- **Live bridges** — WebSocket relays for WebVNC (agent ↔ viewer), the
+  code-server proxy, and egress (host ↔ client), plus a `/v1/control` socket for
+  run-event subscriptions and lease heartbeats. Bridge sockets survive
+  hibernation.
+- **Provider operations** — per-provider adapters (`aws.ts`, `azure.ts`,
+  `gcp.ts`, `hetzner.ts`) handle provision/release/images/identity/capacity. The
+  core stays provider-neutral through hooks such as `prepareLeaseCreate`,
+  `createServerWithFallback`, `finalizeLeaseCreate`, and `hourlyPriceUSD`.
+
+## Coordinator HTTP API
+
+Lease lifecycle:
 
 ```text
-GET  /v1/health
-GET  /v1/pool
-GET  /v1/providers/{provider}/readiness
-GET  /v1/whoami
-POST /v1/leases
 GET  /v1/leases
 GET  /v1/leases/{id-or-slug}
+POST /v1/leases
 POST /v1/leases/{id-or-slug}/heartbeat
 POST /v1/leases/{id-or-slug}/release
+POST /v1/leases/{id-or-slug}/tailscale
+GET|PUT|DELETE /v1/leases/{id-or-slug}/share
+```
+
+Runs and observability:
+
+```text
 GET  /v1/runs
 POST /v1/runs
 GET  /v1/runs/{run-id}
 GET  /v1/runs/{run-id}/logs
+POST /v1/runs/{run-id}/events
+POST /v1/runs/{run-id}/telemetry
 POST /v1/runs/{run-id}/finish
-GET  /v1/usage
-GET  /v1/admin/leases
-POST /v1/admin/leases/{id-or-slug}/release
-POST /v1/admin/leases/{id-or-slug}/delete
 ```
 
-Admin endpoints and `GET /v1/pool` require the separate admin token. GitHub browser-login tokens are user tokens for normal lease operations and are minted only after allowed GitHub org membership is verified. User-token list, exact-ID lookup, slug lookup, heartbeat, release, run history, logs, and usage are scoped to the token owner/org.
-
-Heartbeat bodies may include a `telemetry` object. The coordinator stores the latest sanitized snapshot on the lease record and retains a bounded `telemetryHistory` ring of the latest 60 samples for portal trend charts. Current CLI snapshots include Linux load average, memory use, root-disk use, uptime, source, and capture timestamp. Runs also accept `POST /v1/runs/{run-id}/telemetry` samples while they are active, and completed run records keep bounded start/mid/end Linux telemetry so history can show resource deltas and short trends without keeping an unbounded time series.
-
-## Durable Object State
-
-Use one fleet Durable Object for MVP. It owns all atomic scheduling decisions.
-
-Core stored records:
-
-```sql
-leases(id, slug, provider, cloud_id, region, owner, org, profile, class, server_type, server_id, server_name, provider_key, host, ssh_user, ssh_port, work_root, keep, ttl_seconds, idle_timeout_seconds, estimated_hourly_usd, max_estimated_usd, state, telemetry_json, telemetry_history_json, created_at, updated_at, last_touched_at, expires_at, released_at, ended_at)
-runs(id, lease_id, slug, owner, org, provider, class, server_type, command_json, state, exit_code, sync_ms, command_ms, duration_ms, log_bytes, log_truncated, results_json, telemetry_json, started_at, ended_at)
-runlog(run_id, bounded_stdout_stderr_capture)
-```
-
-State transitions:
+Live bridges and tickets:
 
 ```text
-machine: provisioning -> idle -> leased -> idle
-machine: provisioning -> failed
-machine: leased -> draining -> idle|deleted
-lease: pending -> active -> released
-lease: pending|active -> expired
-lease: active -> failed
+.../webvnc/ticket | status | reset | agent
+.../code/ticket | agent
+.../egress/ticket | host | client | status
 ```
 
-## Backends
+Service and admin:
 
-Owned backends:
+```text
+GET  /v1/health
+GET  /v1/whoami
+GET  /v1/usage
+GET  /v1/pool
+GET  /v1/providers/{provider}/readiness
+GET  /v1/runners
+POST /v1/runners/sync
+POST /v1/images
+POST /v1/images/{id}/promote | fast-snapshot-restore
+POST /v1/artifacts/uploads
+GET  /v1/admin/leases
+POST /v1/admin/lease-audit
+POST /v1/admin/leases/{id-or-slug}/release | delete
+GET  /v1/admin/hosts
+POST /v1/admin/aws-orphan-sweep
+```
 
-- `hetzner-static`: pre-created warm machines.
-- `hetzner-ephemeral`: created per lease or overflow.
-- `aws`: one-time EC2 instances for burst capacity, managed Windows/WSL2, and EC2 Mac.
-- `azure`: one-time Azure VMs for Linux and managed Windows/WSL2, including optional native Windows desktop/VNC.
-- `ssh-static`: manually managed machines reachable by SSH.
+`GET /v1/pool` and `/v1/admin/*` require the admin token. User tokens scope
+list, lookup, heartbeat, release, run history, logs, and usage to the token's
+owner/org. The CLI client wraps these in `internal/cli/coordinator.go`; when a
+user request 404s or 401s, an admin-token fallback re-resolves and retries as
+admin.
 
-Brokered backends, later:
+## What Flows on a Run
 
-- `github-actions`: register or dispatch real Actions-backed runner work when workflow parity is required.
-- `external-runner`: adapter boundary for other hosted runner systems if needed.
+`crabbox run` (`internal/cli/run.go`). In brokered mode a run recorder mirrors
+progress to the broker so the portal and `history`/`logs`/`events`/`results`
+commands can read it back:
 
-The current broker implements `hetzner-ephemeral`, `aws`, and `azure`, and leaves interfaces ready for `hetzner-static`.
+- `POST /v1/runs` creates a `RunRecord` in state `running`.
+- `POST /v1/runs/{id}/events` streams phase-tagged events: `run.started`,
+  `leasing.started`, `bootstrap.waiting`, `sync.started`/`finished`,
+  `actions.hydrate.*`, `command.started`, stdout/stderr chunks,
+  `command.finished`, `lease.released`.
+- `POST /v1/runs/{id}/telemetry` posts periodic host samples.
+- `POST /v1/runs/{id}/finish` reports exit code, sync/command durations, the log
+  (chunked at 64 KiB, capped at 8 MiB), and parsed [results](features/test-results.md).
+  The Worker computes `durationMs`, sets state `succeeded`/`failed`, and records
+  classification (`blockedStage`, `retryLikely`).
+
+The command itself, file sync, and I/O streaming all happen **directly
+CLI → runner over SSH** and never traverse the broker.
+
+## Sync and Hydration
+
+Sync runs only for SSH backends; delegated providers reject local-sync flags.
+The high-level flow in `run.go`:
+
+1. **Manifest** — `syncManifest` builds a NUL-delimited list of changed and
+   deleted files from the local Git repo, size-checked by `checkSyncPreflight`.
+   `crabbox sync-plan` previews this manifest without touching a box.
+2. **Fingerprint short-circuit** — when enabled, a local fingerprint is compared
+   to the remote one; identical fingerprints skip the sync entirely.
+3. **Optional reset** — `--full-resync` / `--fresh-sync` resets the remote
+   workdir first.
+4. **Git seed** — the remote clones/fetches the base tree so rsync only ships
+   the diff.
+5. **rsync** — files transfer with `--files-from` against the manifest (Windows
+   uses a native path); deleted paths are pruned.
+6. **Finalize** — the remote Git-hydrates the worktree against the base
+   ref/SHA, applies a mass-deletion guard, and records the new fingerprint.
+
+Alternative seeding paths: `--fresh-pr` does a remote fresh checkout of a GitHub
+PR (optionally applying the local patch), and
+[Actions hydration](features/actions-hydration.md) reconstructs a workspace from
+a GitHub Actions run.
 
 ## Machine Bootstrap
 
-Bootstrap should produce machines with:
+Bootstrap produces a minimal, neutral box: a `crabbox` user, SSH key-only auth,
+Git, rsync, curl, jq, and a writable work root (default `/work/crabbox` on
+Linux, `C:\crabbox` on Windows, `/Users/<user>/crabbox` on macOS). Readiness is
+signaled by the `crabbox-ready` marker.
 
-- `crabbox` user.
-- SSH key-only auth.
-- Git.
-- rsync.
-- curl.
-- jq.
-- writable `/work/crabbox`.
-
-Language runtimes, Docker, services, dependencies, and secrets are project setup, not Crabbox base bootstrap. Use GitHub Actions hydration, devcontainers, Nix, mise/asdf, or repository scripts for that layer.
-
-Prefer snapshots/images once bootstrap is proven. Cloud-init is acceptable for first pass.
+Language runtimes, Docker, services, dependencies, and secrets are *project*
+setup, not base bootstrap. Use [Actions hydration](features/actions-hydration.md),
+devcontainers, Nix, mise/asdf, or repository scripts for that layer. Prefer
+provider snapshots/images once bootstrap is proven; cloud-init is fine for a
+first pass.
 
 ## Config Sources
 
-Config precedence:
+Precedence, highest first:
 
 ```text
 flags > env > repo-local crabbox.yaml/.crabbox.yaml > user config > defaults
 ```
 
-User config is YAML and can define:
+User config (YAML) can define the broker URL and token, profiles, machine
+classes, provider defaults, sync excludes and behavior (checksum mode, Git
+seeding, fingerprint skipping), env allowlists, capacity market/region strategy,
+Actions hints, and trusted projects. See the [configuration reference](features/configuration.md).
 
-- coordinator URL.
-- coordinator bearer token.
-- profiles.
-- machine classes.
-- backend defaults.
-- sync excludes.
-- env allowlists.
-- capacity market/strategy/fallback.
-- Actions workflow/job/ref hints.
-- trusted projects.
-- sync behavior such as checksum mode, Git seeding, and fingerprint skipping.
+Config must **not** store live leases, SSH private keys, or provider secrets.
+Per-lease SSH private keys live under the user-config directory, outside repo
+config. Provider secrets live in the broker environment (Cloudflare Worker
+secrets) for brokered providers; for direct providers they come from the local
+SDK credential chain.
 
-It must not store:
+## Defaults
 
-- live leases.
-- SSH private keys.
-- provider secrets.
-
-Per-lease SSH private keys live under the user config directory, outside repo config. Provider secrets live in the broker environment, such as Cloudflare Worker secrets for AWS and Hetzner.
+| Setting | Default |
+| --- | --- |
+| Lease ID format | `cbx_<12 hex>` |
+| User token prefix | `cbxu_` |
+| TTL | 5400 s (capped at 86400 s) |
+| Idle timeout | 1800 s |
+| SSH port | 2222, fallback 22 |
+| Machine class | `beast` |
+| Work root | `/work/crabbox` (Linux) |
+| Run log | 64 KiB chunks, 8 MiB stored cap |
+| Cleanup retry | 5 min |
+| Bridge ticket TTL | 120 s |
 
 ## Failure Model
 
-Assume:
+Assume the CLI can crash, SSH can disconnect, machines can fail to boot,
+provider API calls can race or partially complete, and the Worker can retry
+requests. Therefore:
 
-- CLI can crash.
-- SSH can disconnect.
-- Machines can fail boot.
-- Hetzner API calls can race or partially complete.
-- Cloudflare Worker can retry requests.
+- Lease creation is idempotent where practical.
+- TTL/idle cleanup in the Durable Object is authoritative.
+- Provider resources carry labels so orphan sweeps can find them.
+- Release is safe to call repeatedly.
+- Machine delete tolerates already-deleted resources.
 
-Therefore:
+## Source of Truth
 
-- Lease creation must be idempotent where practical.
-- TTL cleanup must be authoritative.
-- Provider resources need labels for orphan cleanup.
-- Release should be safe to call multiple times.
-- Machine delete should tolerate already-deleted resources.
+| Concern | Files |
+| --- | --- |
+| CLI command tree and flags | `internal/cli/cli_kong.go`, `internal/cli/app.go` |
+| Backend selection / modes | `internal/cli/provider_backend.go` |
+| Broker client | `internal/cli/coordinator.go`, `provider_coordinator.go` |
+| Run / sync / lease | `internal/cli/run.go`, `lease.go` |
+| Worker entry / auth | `worker/src/index.ts`, `auth.ts` |
+| Fleet state / endpoints | `worker/src/fleet.ts`, `types.ts`, `config.ts`, `usage.ts` |

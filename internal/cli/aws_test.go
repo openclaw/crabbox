@@ -68,6 +68,25 @@ func TestAWSCapacityDoctorCheckWarnsWhenQuotaBelowDefaultClass(t *testing.T) {
 	}
 }
 
+func TestAWSCapacityDoctorCheckRecommendsARM64Types(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Class = "beast"
+	cfg.Architecture = ArchitectureARM64
+	cfg.architectureExplicit = true
+	cfg.ServerType = serverTypeForConfig(cfg)
+
+	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 32, true, nil)
+
+	if check.Status != "warning" {
+		t.Fatalf("status=%q, want warning", check.Status)
+	}
+	if check.Details["recommended_class"] != "standard" || check.Details["recommended_type"] != "c7g.8xlarge" {
+		t.Fatalf("recommendation=(%q,%q), want standard/c7g.8xlarge", check.Details["recommended_class"], check.Details["recommended_type"])
+	}
+}
+
 func TestAWSCapacityDoctorCheckPassesWhenQuotaCoversDefaultClass(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Provider = "aws"

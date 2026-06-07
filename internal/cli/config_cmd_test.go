@@ -53,7 +53,7 @@ func TestConfigShowIncludesJobHydrateGitHubRunner(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("CRABBOX_CONFIG", configPath)
-	if err := os.WriteFile(configPath, []byte("jobs:\n  smoke:\n    hydrate:\n      actions: true\n      githubRunner: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("jobs:\n  smoke:\n    architecture: arm64\n    hydrate:\n      actions: true\n      githubRunner: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -64,7 +64,8 @@ func TestConfigShowIncludesJobHydrateGitHubRunner(t *testing.T) {
 	}
 	var got struct {
 		Jobs map[string]struct {
-			Hydrate struct {
+			Architecture string `json:"architecture"`
+			Hydrate      struct {
 				GitHubRunner bool `json:"githubRunner"`
 			} `json:"hydrate"`
 		} `json:"jobs"`
@@ -74,6 +75,9 @@ func TestConfigShowIncludesJobHydrateGitHubRunner(t *testing.T) {
 	}
 	if !got.Jobs["smoke"].Hydrate.GitHubRunner {
 		t.Fatalf("json jobs.smoke.hydrate.githubRunner=false in %s", stdout.String())
+	}
+	if got.Jobs["smoke"].Architecture != "arm64" {
+		t.Fatalf("json jobs.smoke.architecture=%q in %s", got.Jobs["smoke"].Architecture, stdout.String())
 	}
 }
 
@@ -121,5 +125,42 @@ func TestConfigShowIncludesCloudflareWithoutSecret(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "cloudflare-secret-token") {
 		t.Fatalf("config show json leaked Cloudflare token: %q", stdout.String())
+	}
+}
+
+func TestConfigShowIncludesSyncInclude(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte("sync:\n  include:\n    - src\n    - scripts\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "includes=2") {
+		t.Fatalf("config show text missing includes count: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Sync struct {
+			Include []string `json:"include"`
+		} `json:"sync"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sync.Include) != 2 || got.Sync.Include[0] != "src" || got.Sync.Include[1] != "scripts" {
+		t.Fatalf("config show json sync.include = %#v, want [src scripts]", got.Sync.Include)
 	}
 }

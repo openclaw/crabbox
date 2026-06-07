@@ -1,82 +1,65 @@
 # 🦀 📦 Crabbox
 
+![Crabbox banner](docs/assets/readme-banner.jpg)
+
 [![CI](https://github.com/openclaw/crabbox/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/openclaw/crabbox/actions/workflows/ci.yml)
-[![Release](https://github.com/openclaw/crabbox/actions/workflows/release.yml/badge.svg)](https://github.com/openclaw/crabbox/actions/workflows/release.yml)
-[![Latest release](https://img.shields.io/github/v/release/openclaw/crabbox?sort=semver)](https://github.com/openclaw/crabbox/releases/latest)
+[![Release](https://github.com/openclaw/crabbox/actions/workflows/release.yml/badge.svg?event=push)](https://github.com/openclaw/crabbox/actions/workflows/release.yml)
+[![Latest release](https://badgen.net/github/release/openclaw/crabbox/stable)](https://github.com/openclaw/crabbox/releases/latest)
 
 **Warm a box, sync the diff, run the suite.**
 
-Crabbox is an open-source agent workspace control plane for maintainers and AI
-agents. Lease fast managed cloud capacity, point at an existing SSH host, or use
-an agent sandbox provider, then sync your dirty checkout, run commands remotely,
-stream output, collect evidence, and release. Local edit-save-run loop,
-cloud-grade compute, agent-ready observability.
+Crabbox is a remote software testing and execution control plane for maintainers
+and AI agents. Lease fast managed cloud capacity, point at an existing SSH host,
+or use an agent sandbox provider — then sync your dirty checkout, run commands
+remotely, stream output, collect evidence, and release. Local edit-save-run
+loop, cloud-grade compute, agent-ready observability.
 
 ```sh
 crabbox run -- pnpm test
 ```
 
-Behind that single command: a Go CLI on your laptop, a Cloudflare Worker broker
+Behind that one command: a Go CLI on your laptop, a Cloudflare Worker broker
 that owns provider credentials and lease state, and a managed or delegated
 runner.
 
-Supported providers:
+## How it works
 
-- [AWS EC2](docs/providers/aws.md) (`provider: aws`): brokered or direct Linux,
-  native Windows, Windows WSL2, and EC2 Mac.
-- [Azure](docs/providers/azure.md) (`provider: azure`): brokered or direct
-  Linux, native Windows, and Windows WSL2 VMs.
-- [Google Cloud](docs/providers/gcp.md) (`provider: gcp`): brokered or direct
-  Linux Compute Engine VMs.
-- [Hetzner Cloud](docs/providers/hetzner.md) (`provider: hetzner`): brokered or
-  direct Linux VMs.
-- [Proxmox](docs/providers/proxmox.md) (`provider: proxmox`): direct Linux QEMU
-  VM clones from private Proxmox VE templates.
-- [Local Container](docs/providers/local-container.md)
-  (`provider: local-container`, alias `docker`): local Linux containers through
-  a Docker-compatible runtime such as Docker Desktop, OrbStack, or Colima.
-- [Static SSH](docs/providers/ssh.md) (`provider: ssh`): existing Linux, macOS,
-  Windows, or WSL2 hosts.
-- [exe.dev](docs/providers/exe-dev.md) (`provider: exe-dev`): exe.dev VMs
-  exposed as normal SSH leases.
-- [Blacksmith Testbox](docs/providers/blacksmith-testbox.md)
-  (`provider: blacksmith-testbox`): delegated Testbox lifecycle and execution.
-- [Namespace Devbox](docs/providers/namespace-devbox.md)
-  (`provider: namespace-devbox`): Namespace-managed Devboxes over SSH.
-- [Semaphore CI testbox](docs/providers/semaphore.md) (`provider: semaphore`):
-  Semaphore jobs leased as SSH testboxes.
-- [Sprites](docs/providers/sprites.md) (`provider: sprites`): Sprites
-  microVMs exposed as SSH leases through `sprite proxy`.
-- [Daytona](docs/providers/daytona.md) (`provider: daytona`): Daytona
-  SDK/toolbox sandbox execution.
-- [Islo](docs/providers/islo.md) (`provider: islo`): delegated Islo sandbox
-  execution.
-- [E2B](docs/providers/e2b.md) (`provider: e2b`): delegated E2B sandbox
-  execution.
-- [Modal](docs/providers/modal.md) (`provider: modal`): delegated Modal
-  Sandbox execution through the local Python client.
-- [Upstash Box](docs/providers/upstash-box.md) (`provider: upstash-box`):
-  delegated Upstash Box execution through the Box REST API.
-- [Tensorlake](docs/providers/tensorlake.md) (`provider: tensorlake`):
-  delegated Tensorlake Firecracker sandbox execution through the Tensorlake CLI.
-- [Cloudflare](docs/providers/cloudflare.md)
-  (`provider: cloudflare`): delegated Cloudflare execution through a Worker and
-  container runner.
-- [Railway](docs/providers/railway.md) (`provider: railway`): delegated
-  redeploy-and-stream execution against a pre-existing Railway service through
-  the [Railway](https://railway.com) GraphQL API.
-- [RunPod](docs/providers/runpod.md) (`provider: runpod`): RunPod pods
-  provisioned through the [RunPod](https://runpod.io) REST API and exposed as
-  normal SSH leases with Crabbox sync.
-- [W&B Sandboxes](docs/providers/wandb.md) (`provider: wandb`, alias
-  `weights-and-biases`): [Weights & Biases](https://wandb.ai/) Sandboxes —
-  managed by CoreWeave post-2025 acquisition — the sandbox provider the
-  AI/ML research community already has credentials for. ML engineers can use
-  the `wandb login` API key already in `~/.netrc` plus `WANDB_ENTITY_NAME`:
-  zero new accounts, no provider-specific token. Native Go gRPC client against
-  `coreweave.sandbox.v1beta2`; no Python in the binary.
+```text
+your laptop                Cloudflare Worker            cloud provider
+-------------              ------------------           --------------
+crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS / Azure / GCP
+   |                         lease + cost state              |
+   |                                                         |
+   +------------ SSH + rsync to leased runner <--------------+
+```
 
----
+- **CLI** — Go binary. Loads config, mints a per-lease SSH key, asks the broker
+  for a lease, waits for SSH, seeds remote Git, rsyncs the dirty checkout (with
+  a fingerprint skip when nothing changed), runs the command, streams output,
+  releases.
+- **Broker** — Cloudflare Worker plus a single Fleet Durable Object. Owns
+  provider credentials, serializes lease state, enforces active-lease and
+  monthly spend caps, and expires stale leases by alarm. Auth is GitHub browser
+  login or a shared bearer token.
+- **Runner** — a throwaway machine reachable over SSH on the primary port
+  (default `2222`) plus configured fallback ports, prepared with Crabbox's
+  sync/run prerequisites. Linux uses Ubuntu with cloud-init and `/work/crabbox`;
+  native Windows uses OpenSSH, Git for Windows, and `C:\crabbox`. No broker
+  credentials live on the box. Project runtimes (Go, Node, Docker, services,
+  secrets) come from your repo's GitHub Actions hydration, devcontainer, Nix,
+  mise/asdf, or setup scripts — not from Crabbox.
+
+The data plane — SSH, rsync, command execution — always runs directly from the
+CLI to the runner. The broker only manages leases, cost, and observability.
+
+Only `aws`, `azure`, `gcp`, and `hetzner` can be brokered through the Worker,
+and even those run direct from the CLI when no broker URL is configured. Every
+other provider always runs direct. A direct-provider mode
+(`--provider hetzner|aws|azure|gcp|proxmox` with local credentials) exists for
+debugging the broker itself or using private infrastructure.
+
+For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For
+the doc-to-code map, see [Source Map](docs/source-map.md).
 
 ## Install
 
@@ -85,17 +68,18 @@ brew install openclaw/tap/crabbox
 crabbox --version
 ```
 
-No Homebrew? Grab a [GoReleaser archive](https://github.com/openclaw/crabbox/releases) for macOS, Linux, or Windows.
+No Homebrew? Grab a [GoReleaser archive](https://github.com/openclaw/crabbox/releases)
+for macOS, Linux, or Windows.
 
-Prerequisites on the laptop: `git`, `ssh`, `ssh-keygen`, `rsync`, `curl`.
+Laptop prerequisites: `git`, `ssh`, `ssh-keygen`, `rsync`, `curl`.
 
 ## Quick start
 
 Broker access is deployment-specific. Use a coordinator URL from your team, use
 direct-provider mode for a personal cloud account, or self-host the Worker
-broker with your own provider credentials and spend caps. See [Getting
-started](docs/getting-started.md#broker-access) and
-[Infrastructure](docs/infrastructure.md#self-hosted-broker-minimum) for the
+broker with your own provider credentials and spend caps. See
+[Getting started](docs/getting-started.md#choosing-an-access-path) and
+[Infrastructure](docs/infrastructure.md#self-hosted-broker-minimum-setup) for the
 setup paths.
 
 ```sh
@@ -113,68 +97,132 @@ crabbox job run full-ci
 
 # or warm a box once, then reuse it
 crabbox warmup                                       # prints cbx_... + a slug
+crabbox prewarm                                      # lease + Actions hydration
 crabbox run --id blue-lobster -- pnpm test:changed
 crabbox ssh --id blue-lobster
 crabbox stop blue-lobster
 ```
 
-Every lease has a stable `cbx_...` ID and a friendly crustacean slug (`blue-lobster`, `swift-hermit`, …). Either works wherever an `--id` is accepted. Use `--slug <name>` on fresh leases when a specific reusable slug helps, and `--label <text>` on `run` when the history entry needs a human-readable name.
+Every lease has a stable `cbx_...` ID and a friendly crustacean slug
+(`blue-lobster`, `swift-hermit`, …). Either works wherever an `--id` is
+accepted. Use `--slug <name>` on fresh leases when a specific reusable slug
+helps, and `--label <text>` on `run` when the history entry needs a
+human-readable name.
 
-## How it works
+## Providers
 
-```text
-your laptop                Cloudflare Worker            cloud provider
--------------              ------------------           --------------
-crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS / Azure / GCP
-   |                         lease + cost state              |
-   |                                                         |
-   +------------ SSH + rsync to leased runner <--------------+
-```
+`Coordinator: brokered` providers can run through the Worker (or direct when no
+broker is configured); every other provider always runs direct from the CLI.
+Targets: **L**inux, **M**acOS, **W**indows.
 
-- **CLI** — Go binary. Loads config, mints a per-lease SSH key, asks the broker for a lease, waits for SSH, seeds remote Git, rsyncs the dirty checkout (with fingerprint skip when nothing changed), runs the command, streams output, releases.
-- **Broker** — Cloudflare Worker plus a single Durable Object. Owns provider credentials, serializes lease state, enforces active-lease and monthly spend caps, and expires stale leases by alarm. Auth is GitHub login or a shared bearer token.
-- **Runner** — a throwaway SSH machine prepared with SSH on the primary port, default `2222`, plus configured fallback ports and Crabbox's sync/run prerequisites. Linux uses Ubuntu with cloud-init and `/work/crabbox`; native Windows uses OpenSSH, Git for Windows, and `C:\crabbox`. No broker credentials live on the box. Project runtimes (Go, Node, Docker, services, secrets) come from your repo's GitHub Actions hydration, devcontainer, Nix, mise/asdf, or setup scripts — not from Crabbox.
+### SSH-lease providers (provision or connect a box, full lifecycle)
 
-A direct-provider mode (`--provider hetzner|aws|azure|gcp|proxmox` with local credentials) exists for debugging the broker itself or using private infrastructure; the brokered path is the default where supported.
+| Provider | `provider:` (aliases) | Targets | Coordinator | Notes |
+| --- | --- | --- | --- | --- |
+| [AWS EC2](docs/providers/aws.md) | `aws` | L / M / W | brokered | EC2 instances and EC2 Mac; native AMI/EBS checkpoints. |
+| [Azure](docs/providers/azure.md) | `azure` | L / W | brokered | VMs with Tailscale support; native Windows and WSL2. |
+| [Google Cloud](docs/providers/gcp.md) | `gcp` (`google`, `google-cloud`) | L | brokered | Linux Compute Engine VMs with Tailscale support. |
+| [Hetzner Cloud](docs/providers/hetzner.md) | `hetzner` | L | brokered | Linux VMs with desktop/browser/code and Tailscale. |
+| [Parallels](docs/providers/parallels.md) | `parallels` | L / M / W | direct | Local or remote macOS host; checkpoint/fork/restore/snapshot. |
+| [Proxmox](docs/providers/proxmox.md) | `proxmox` | L | direct | Clone Linux QEMU templates on a private Proxmox VE cluster. |
+| [Static SSH](docs/providers/ssh.md) | `ssh` (`static`, `static-ssh`) | L / M / W | direct | Existing machines; no provisioning. |
+| [Local Container](docs/providers/local-container.md) | `local-container` (`docker`, `container`, `local-docker`) | L | direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima, Podman). |
+| [Apple Container](docs/providers/apple-container.md) | `apple-container` (`apple`, `applecontainer`) | L | direct | Apple's native `container` runtime on Apple silicon macOS. |
+| [exe.dev](docs/providers/exe-dev.md) | `exe-dev` (`exe`, `exedev`) | L | direct | exe.dev VMs exposed as public SSH leases. |
+| [Namespace Devbox](docs/providers/namespace-devbox.md) | `namespace-devbox` (`namespace`, `namespace-devboxes`) | L | direct | Namespace.so Devboxes over SSH. |
+| [Semaphore](docs/providers/semaphore.md) | `semaphore` (`sem`) | L | direct | A Semaphore CI job leased as a testbox. |
+| [Sprites](docs/providers/sprites.md) | `sprites` | L | direct | Sprites microVMs through `sprite proxy`. |
+| [Daytona](docs/providers/daytona.md) | `daytona` | L | direct | Daytona-managed dev sandbox over SSH. |
+| [RunPod](docs/providers/runpod.md) | `runpod` (`run-pod`, `runpodio`) | L | direct | RunPod GPU pods with public SSH. |
+| [ASCII Box](docs/providers/ascii-box.md) | `ascii-box` (`ascii`, `asciibox`) | L | direct | ASCII Box Ubuntu sandboxes exposed as SSH leases. |
 
-For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For the doc-to-code map, see [Source Map](docs/source-map.md).
+### Delegated-run providers (sandbox/proof runners, no SSH lease)
+
+| Provider | `provider:` (aliases) | Targets | Notes |
+| --- | --- | --- | --- |
+| [Cloudflare](docs/providers/cloudflare.md) | `cloudflare` (`cf`) | L | Cloudflare Containers via the Worker runtime. |
+| [E2B](docs/providers/e2b.md) | `e2b` | L | E2B Firecracker sandbox. |
+| [Islo](docs/providers/islo.md) | `islo` | L | Islo sandbox. |
+| [Modal](docs/providers/modal.md) | `modal` | L | Modal Sandbox through the local Python client. |
+| [Railway](docs/providers/railway.md) | `railway` (`rail`, `railwayapp`) | L | Redeploy and stream an existing Railway service. |
+| [Tensorlake](docs/providers/tensorlake.md) | `tensorlake` (`tl`, `tensorlake-sbx`) | L | Tensorlake Firecracker sandbox via the Tensorlake CLI. |
+| [Upstash Box](docs/providers/upstash-box.md) | `upstash-box` (`upstash`, `box`, `upstashbox`) | L | Upstash Box through the Box REST API. |
+| [Azure Dynamic Sessions](docs/providers/azure-dynamic-sessions.md) | `azure-dynamic-sessions` | L | Azure Container Apps dynamic sessions. |
+| [Blacksmith Testbox](docs/providers/blacksmith-testbox.md) | `blacksmith-testbox` (`blacksmith`) | L | Delegated Blacksmith CI Testbox lifecycle and execution. |
+| [W&B Sandboxes](docs/providers/wandb.md) | `wandb` (`weights-and-biases`) | L | Weights & Biases Sandboxes; reuses `wandb login` credentials. |
+
+See [Providers](docs/providers/README.md) for the full reference, capabilities,
+and authoring guide.
 
 ## Highlights
 
-- **One-shot or warm workspaces.** `crabbox run` for fire-and-forget; `crabbox warmup` + `--id` for repeated runs against the same box. See [warmup](docs/commands/warmup.md) and [run](docs/commands/run.md).
-- **Named repo jobs.** `crabbox job run <name>` lets repos define warmup, optional Actions hydration, run command, and cleanup policy in `.crabbox.yaml`. See [Jobs](docs/features/jobs.md).
-- **Run observability.** Every coordinator-backed run gets an early `run_...` handle. Use `crabbox attach <run-id>` while it is active, `crabbox events <run-id> --after <seq> --limit <n>` for durable lifecycle/output events, and `crabbox logs <run-id>` for retained output after completion. See [History and logs](docs/features/history-logs.md) and [Observability](docs/observability.md).
-- **Stable timing records.** `--timing-json` on `run`, `warmup`, and `actions hydrate` gives scripts one machine-readable sync/command/total timing schema across AWS, Hetzner, and Blacksmith Testboxes.
-- **Local-first workspace sync.** No clean-checkout requirement. Tracked + nonignored files only, fingerprint skip on no-op runs, sanity checks against suspicious mass deletions, optional shallow base-ref hydration for changed-test workflows. See [Sync](docs/features/sync.md).
-- **Brokered cloud.** Maintainers and agents share infra without sharing provider tokens. Hetzner, AWS EC2, Azure, and Google Cloud are managed providers; AWS owns EC2 Mac targets. Linux defaults to Spot unless capacity config says otherwise. Providers fall back across compatible instance families when capacity or quota rejects a request. See [Coordinator](docs/features/coordinator.md) and [Capacity fallback](docs/features/capacity-fallback.md).
-- **Azure Linux and Windows.** `provider: azure` provisions Linux, native Windows, and Windows WSL2 VMs in a configurable Azure subscription using `DefaultAzureCredential` in direct mode or service-principal secrets in the broker. Crabbox creates a shared resource group, vnet, subnet, and NSG on first use, then per-lease public IPs, NICs, and VMs. Linux uses cloud-init; Windows uses VM Agent Custom Script Extension to install OpenSSH/Git and configure the Crabbox user, with optional post-SSH desktop/VNC or WSL2 bootstrap. See [Azure provider](docs/providers/azure.md).
-- **macOS and Windows static hosts.** `provider: ssh` reuses existing machines; it does not create macOS or Windows Crabbox boxes. macOS and Windows WSL2 use the POSIX rsync path; native Windows uses PowerShell plus tar archive sync. See [Static SSH provider](docs/providers/ssh.md).
-- **exe.dev SSH leases.** Set `provider: exe-dev` to create exe.dev VMs through the exe.dev SSH API, then let Crabbox sync and run commands over the returned VM SSH target. See [exe.dev](docs/providers/exe-dev.md).
-- **Blacksmith Testbox wrapper.** Set `provider: blacksmith-testbox` to delegate warmup/run/list/status/stop to the Blacksmith CLI while Crabbox keeps local slugs, repo claims, timing summaries, config conventions, and portal visibility for active external runners. See [Blacksmith Testbox](docs/providers/blacksmith-testbox.md).
-- **Namespace Devbox SSH leases.** Set `provider: namespace-devbox` to create or reuse Namespace Devboxes through the `devbox` CLI, then let Crabbox sync the dirty checkout and run commands over SSH. See [Namespace Devbox](docs/providers/namespace-devbox.md).
-- **Semaphore CI testbox.** Set `provider: semaphore` to lease a Semaphore CI job as a testbox. Same environment as your real pipelines. See [Semaphore](docs/providers/semaphore.md).
-- **Proxmox VM clones.** Set `provider: proxmox` to clone Linux QEMU templates on a private Proxmox VE cluster, bootstrap them through the QEMU guest agent, and use normal Crabbox SSH sync/run/cleanup. See [Proxmox](docs/providers/proxmox.md).
-- **Sprites SSH leases.** Set `provider: sprites` to create a Sprites microVM, bootstrap OpenSSH inside it, and let Crabbox sync/run through `sprite proxy` with `crabbox ssh` support. See [Sprites](docs/providers/sprites.md).
-- **Delegated sandbox providers.** Set `provider: daytona` for Daytona
-  SDK/toolbox execution from a snapshot with explicit SSH access when needed,
-  `provider: islo` for delegated Islo sandbox execution through the Islo Go SDK,
-  `provider: e2b` for delegated E2B sandbox execution through E2B sandbox APIs,
-  `provider: modal` for Modal Sandbox execution through the local Python client,
-  `provider: upstash-box` for delegated Upstash Box execution through the Box
-  REST API,
-  or `provider: tensorlake` for Tensorlake Firecracker sandbox execution through
-  the Tensorlake CLI. See [Daytona](docs/providers/daytona.md), [Islo](docs/providers/islo.md), [E2B](docs/providers/e2b.md), [Modal](docs/providers/modal.md), [Upstash Box](docs/providers/upstash-box.md), and [Tensorlake](docs/providers/tensorlake.md).
-- **Cloudflare.** Set `provider: cloudflare` for delegated execution through a Worker runner and custom container image. See [Cloudflare](docs/providers/cloudflare.md).
-- **Trusted AWS images.** Operators can create AMIs from active brokered AWS leases and promote a known-good image as the coordinator default. See [Image bake runbook](docs/features/image-bake-runbook.md) and [Prebaked images](docs/features/prebaked-images.md).
-- **Cost guardrails.** Per-lease and monthly spend caps. Live pricing from EC2 Spot history or Hetzner server-type prices, with static fallbacks. `crabbox usage` summarizes spend by user, org, provider, and type. See [Cost and usage](docs/features/cost-usage.md).
-- **GitHub Actions hydration.** `crabbox actions hydrate` runs supported setup steps from the repo's workflow locally over SSH, so leased boxes get the same runtimes and project tooling without GitHub write access. Use `--github-runner` only when setup needs full Actions semantics such as repository secrets, OIDC, service containers, or unsupported `uses:` steps. See [Actions hydration](docs/features/actions-hydration.md).
-- **Interactive desktop and browser leases.** `--browser` provisions Chrome or Chromium for headless automation, `--desktop` provisions visible UI with tunnel-only VNC takeover on managed Linux, native Windows on AWS or Azure, and AWS EC2 Mac targets. `crabbox desktop doctor` checks session, VNC, input tooling, browser, ffmpeg, screen size, screenshot capture, and WebVNC portal state; `desktop click/paste/type/key` provide first-class input helpers so agents do not hand-roll brittle `xdotool` snippets. `desktop proof` launches a terminal smoke and captures metadata, screenshot, diagnostics, MP4, and a contact-sheet PNG in one bundle that can be published to a PR; MP4 capture is Linux/native Windows only for now. QA systems such as Mantis own scenario logic, screenshots, and PR evidence. Windows WSL2 is for POSIX sync/run/actions hydration, not a separate VNC desktop; existing Windows hosts belong on `provider: ssh`. See [Interactive desktop and VNC](docs/features/interactive-desktop-vnc.md).
-- **Authenticated web portal.** Browser login opens owner-scoped and explicitly shared lease/run views with searchable, paginated tables, muted external-runner rows, compact provider/OS/access icons, relative sortable times, recent run logs/events, WebVNC, code-server, and Linux lease/run telemetry charts. `crabbox share` can grant a lease to one user or the owning org, and the lease page exposes the same sharing controls for owners/managers. WebVNC is preferred for human demos because it preloads the VNC password; `webvnc status` reports local daemon, tunnel, target reachability, bridge/viewer state, recent events, URL/password, and native VNC fallback, while `webvnc reset` restarts only the selected lease's WebVNC/input stack. Admin sessions can also see non-owned runner leases behind `mine`/`system` filters. See [Portal](docs/features/portal.md).
-- **Agent workspace evidence.** History, logs, events, telemetry, JUnit summaries, screenshots, recordings, artifacts, and PR publishing make autonomous work reviewable instead of only ephemeral terminal output. See [Artifacts](docs/features/artifacts.md) and [Telemetry](docs/features/telemetry.md).
-- **Hardened coordinator auth.** GitHub browser login, owner-scoped leases, admin-only routes, optional GitHub team allowlists, Cloudflare Access JWT verification, and service-token support keep normal use and operator automation separate. See [Auth and admin](docs/features/auth-admin.md) and [Security](docs/security.md).
-- **OpenClaw plugin.** The repo root is a native OpenClaw plugin for box lifecycle operations: `crabbox_run`, `crabbox_warmup`, `crabbox_status`, `crabbox_list`, and `crabbox_stop`. Run inspection stays in the CLI and Crabbox skill. See [OpenClaw plugin](docs/features/openclaw-plugin.md).
-- **Operator surface.** `doctor`, `init`, `status`, `inspect`, `list`, `usage`, `history`, `logs`, `results`, `cache`, `admin`, `cleanup`, plus `--json` output where it matters. Brokered `doctor` checks provider secret readiness before users discover missing Worker config through a failed lease. See [Operations](docs/operations.md).
-
+- **One-shot or warm workspaces.** `crabbox run` for fire-and-forget;
+  `crabbox warmup` + `--id` for raw reusable leases, or `crabbox prewarm` when
+  the box should be hydrated before the first test command. See
+  [warmup](docs/commands/warmup.md), [prewarm](docs/commands/prewarm.md), and
+  [run](docs/commands/run.md).
+- **Named repo jobs.** `crabbox job run <name>` lets repos define warmup,
+  optional Actions hydration, run command, and cleanup policy in `.crabbox.yaml`.
+  See [Jobs](docs/features/jobs.md).
+- **Local-first workspace sync.** No clean-checkout requirement. Tracked and
+  nonignored files only, fingerprint skip on no-op runs, sanity checks against
+  suspicious mass deletions, optional shallow base-ref hydration for
+  changed-test workflows. See [Sync](docs/features/sync.md).
+- **Run observability.** Every coordinator-backed run gets an early `run_...`
+  handle. Use `crabbox attach <run-id>` while it is active,
+  `crabbox events <run-id>` for durable lifecycle/output events, and
+  `crabbox logs <run-id>` for retained output after completion. See
+  [History and logs](docs/features/history-logs.md) and
+  [Observability](docs/observability.md).
+- **GitHub Actions hydration.** `crabbox actions hydrate` runs supported setup
+  steps from the repo's workflow locally over SSH, so leased boxes get the same
+  runtimes and tooling without GitHub write access. Use `--github-runner` only
+  when setup needs full Actions semantics such as repository secrets, OIDC,
+  service containers, or unsupported `uses:` steps. See
+  [Actions hydration](docs/features/actions-hydration.md).
+- **Failure capsules.** `crabbox capsule from-actions <run-url>` captures a
+  failing CI run into a portable, replayable bundle; `capsule replay` reruns it.
+  See [Capsules](docs/features/capsules.md).
+- **Checkpoints.** Save VM-or-workspace state and `restore`/`fork` from it, via
+  workspace archives or provider-native snapshots/images. See
+  [Checkpoints](docs/features/checkpoints.md).
+- **Pond peer groups.** Leases that share a `--pond <name>` label form an
+  emergent peer group with discovery (`pond peers`), an SSH-mesh of
+  `ssh -L` forwards to members' `--expose` ports (`pond connect`), and bulk
+  `pond release`. See [Pond](docs/features/pond.md).
+- **Brokered cloud with cost guardrails.** Maintainers and agents share infra
+  without sharing provider tokens. Hetzner, AWS, Azure, and Google Cloud are
+  the managed providers; per-lease and monthly spend caps reject over-budget
+  leases. Providers fall back across compatible instance families when capacity
+  or quota rejects a request. `crabbox usage` summarizes spend by user, org,
+  provider, and type. See [Coordinator](docs/features/coordinator.md),
+  [Capacity fallback](docs/features/capacity-fallback.md), and
+  [Cost and usage](docs/features/cost-usage.md).
+- **Interactive desktop, browser, and code leases.** `--browser` provisions
+  Chrome/Chromium for headless automation, `--desktop` provisions a visible UI
+  with tunnel-only VNC takeover, and `--code` provisions code-server on managed
+  Linux. `crabbox desktop click/paste/type/key` provide first-class input
+  helpers; `desktop proof` captures metadata, screenshot, diagnostics, MP4, and
+  a contact-sheet PNG in one publishable bundle. See
+  [Interactive desktop and VNC](docs/features/interactive-desktop-vnc.md).
+- **Authenticated web portal.** Browser login opens owner-scoped and shared
+  lease/run views with run logs/events, WebVNC, code-server, and telemetry
+  charts. `crabbox webvnc`/`crabbox code` bridge a lease into the portal;
+  `crabbox share` grants a lease to a user or the owning org. See
+  [Portal](docs/features/portal.md).
+- **Agent workspace evidence.** History, logs, events, telemetry, JUnit
+  summaries, screenshots, recordings, artifacts, and PR publishing make
+  autonomous work reviewable instead of only ephemeral terminal output. See
+  [Artifacts](docs/features/artifacts.md) and
+  [Telemetry](docs/features/telemetry.md).
+- **Stable timing records.** `--timing-json` on `run`, `warmup`, `prewarm`, and
+  `actions hydrate` gives scripts one machine-readable sync/command/total
+  timing schema across providers.
+- **Hardened coordinator auth.** GitHub browser login, owner-scoped leases,
+  admin-only routes, optional GitHub team allowlists, Cloudflare Access JWT
+  verification, and service-token support keep normal use and operator
+  automation separate. See [Auth and admin](docs/features/auth-admin.md) and
+  [Security](docs/security.md).
 ## Machine classes
 
 `beast` is the default for providers that expose class-based managed capacity.
@@ -191,6 +239,7 @@ AWS Linux  standard  c7a/c7i/m7a/m7i.8xlarge family
            fast      …16xlarge family
            large     …24xlarge family
            beast     …48xlarge family, falling back to 32x/24x/16x
+           arm64     c7g/m7g/r7g families with --arch arm64
 
 AWS Win    standard  m7i.large, m7a.large, t3.large
            fast      m7i.xlarge, m7a.xlarge, t3.xlarge
@@ -208,6 +257,7 @@ Azure      standard  Standard_D32ads_v6, Standard_D32ds_v6, Standard_F32s_v2, th
            fast      Standard_D64ads_v6, Standard_D64ds_v6, Standard_F64s_v2, then 48/32-vCPU fallbacks
            large     Standard_D96ads_v6, Standard_D96ds_v6, then 64/48-vCPU fallbacks
            beast     Standard_D192ds_v6, Standard_D128ds_v6, then 96/64-vCPU fallbacks
+           arm64     Standard_D*ps_v6 / D*pds_v6 Cobalt families with --arch arm64
 
 Azure Win/
 WSL2       standard  Standard_D2ads_v6, Standard_D2ds_v6, Standard_D2ads_v5, Standard_D2ds_v5, Standard_D2as_v6
@@ -226,7 +276,9 @@ Cloudflare standard  standard-4
            beast     standard-4
 ```
 
-Override with `--type` or `CRABBOX_SERVER_TYPE` for a specific instance.
+Override with `--type` or `CRABBOX_SERVER_TYPE` for a specific instance. Use
+`--arch arm64` / `architecture: arm64` for Linux ARM capacity on Azure or AWS;
+explicit ARM provider types also select ARM images when no custom image is set.
 Cloudflare also accepts `lite`, `basic`, `standard-1`, `standard-2`, and
 `standard-3` as smaller explicit `--type` values; `standard-4` is the default.
 Providers without a row either use provider-native capacity settings or reject
@@ -234,7 +286,8 @@ class/type selection.
 
 ## Configuration
 
-Config resolves in order: flags → env → repo `.crabbox.yaml` → user `~/.config/crabbox/config.yaml` → defaults.
+Config resolves in order: flags → env → repo `.crabbox.yaml` → user
+`~/.config/crabbox/config.yaml` → defaults.
 
 ```yaml
 broker:
@@ -262,169 +315,20 @@ ssh:
     - "22"
 ```
 
-Optional Blacksmith Testbox wrapper:
+Forwarded environment is intentionally narrow: `NODE_OPTIONS` and `CI`. Do not
+pass secrets as command-line arguments. For live-secret smoke tests, use
+`crabbox run --env-from-profile <file> --allow-env NAME` so Crabbox forwards
+only selected names and prints redacted presence/length metadata. For stale warm
+boxes, `--full-resync` (alias `--fresh-sync`) resets the remote workdir before
+syncing. For larger commands, use `--script <file>` or `--script-stdin` so the
+remote runner executes an uploaded file instead of a giant quoted shell string.
 
-```yaml
-provider: blacksmith-testbox
-blacksmith:
-  org: openclaw
-  workflow: .github/workflows/ci-check-testbox.yml
-  job: test
-  ref: main
-  idleTimeout: 90m
-```
-
-`crabbox list --provider blacksmith-testbox` also refreshes muted external
-runner rows in the portal lease table from the current all-status Testbox list
-when coordinator auth is configured. When GitHub is reachable, Crabbox also
-links those rows back to the inferred Actions run and workflow, surfaces the
-Actions status/conclusion, flags long-queued or long-running rows as `stuck`,
-and exposes a copyable local `crabbox stop --provider blacksmith-testbox ...`
-command. Clicking an external row opens a visibility-only runner detail page
-with owner, workflow, timestamps, boundary notes, and the same stop command.
-Those rows are visibility-only records for Blacksmith-owned Testboxes, not
-Crabbox leases.
-
-Optional Namespace Devbox:
-
-```yaml
-provider: namespace-devbox
-namespace:
-  image: builtin:base
-  size: M
-  workRoot: /workspaces/crabbox
-```
-
-Optional Daytona sandbox:
-
-```yaml
-provider: daytona
-daytona:
-  snapshot: crabbox-ready
-  workRoot: /home/daytona/crabbox
-```
-
-Optional exe.dev VM:
-
-```yaml
-provider: exe-dev
-exeDev:
-  cpus: 2
-  memory: 4GB
-  disk: 10GB
-  workRoot: /tmp/crabbox
-```
-
-Authenticate with `ssh exe.dev`; VM creation requires an active exe.dev plan.
-
-Optional local container:
-
-```yaml
-provider: local-container
-localContainer:
-  runtime: docker
-  image: debian:bookworm
-  workRoot: /work/crabbox
-```
-
-`provider: docker` is an alias for `local-container`; the backend uses standard
-Docker-compatible CLI commands, so OrbStack works when it is the active Docker
-context. Add `--desktop --browser` for local Xvfb/XFCE/x11vnc/noVNC browser
-smoke tests before moving the same workflow to remote capacity.
-
-Optional Islo sandbox:
-
-```yaml
-provider: islo
-islo:
-  image: docker.io/library/ubuntu:24.04
-  workdir: crabbox
-```
-
-Optional E2B sandbox:
-
-```yaml
-provider: e2b
-e2b:
-  template: base
-  workdir: crabbox
-```
-
-Optional Modal sandbox:
-
-```yaml
-provider: modal
-modal:
-  app: crabbox
-  image: python:3.13-slim
-  workdir: /workspace/crabbox
-```
-
-Optional Upstash Box sandbox:
-
-```yaml
-provider: upstash-box
-upstashBox:
-  runtime: node
-  size: small
-  workdir: /workspace/home/crabbox
-```
-
-Optional Tensorlake sandbox:
-
-```yaml
-provider: tensorlake
-tensorlake:
-  image: ubuntu-minimal
-  workdir: /workspace/crabbox
-```
-
-Optional Semaphore CI testbox:
-
-```yaml
-provider: semaphore
-semaphore:
-  host: myorg.semaphoreci.com
-  project: my-app
-  machine: f1-standard-2
-  osImage: ubuntu2204
-  idleTimeout: 30m
-```
-
-Keep the token in `CRABBOX_SEMAPHORE_TOKEN` or `SEMAPHORE_API_TOKEN`, not in
-repo config.
-
-Optional Sprites microVM:
-
-```yaml
-provider: sprites
-sprites:
-  workRoot: /home/sprite/crabbox
-```
-
-Keep the token in `CRABBOX_SPRITES_TOKEN`, `SPRITES_TOKEN`, `SPRITE_TOKEN`, or
-`SETUP_SPRITE_TOKEN`; the authenticated `sprite` CLI must also be on `PATH`.
-
-Optional static macOS or Windows target:
-
-```yaml
-provider: ssh
-target: windows
-windows:
-  mode: normal # or wsl2
-static:
-  host: win-dev.local
-  user: Peter
-  port: "22"
-  workRoot: C:\crabbox
-```
-
-OpenClaw WSL2 test helper:
-
-```sh
-CRABBOX_LIVE=1 scripts/openclaw-wsl2-tests.sh
-CRABBOX_LIVE=1 CRABBOX_OPENCLAW_WSL2_ID=blue-lobster scripts/openclaw-wsl2-tests.sh
-```
+For binary or terminal-hostile output, use `crabbox run --capture-stdout <path>`
+or `--capture-stderr <path>`. Add `--preflight` for a remote capability
+snapshot, `--keep-on-failure` to SSH into the exact failed one-shot lease, or
+`--download remote=local` to copy a successful-run artifact back. Failed
+SSH-backed and Blacksmith delegated runs save local `.crabbox/captures/*.tar.gz`
+bundles by default. Captured files are not redacted by Crabbox.
 
 Optional Tailscale reachability for managed Linux leases:
 
@@ -444,88 +348,98 @@ Tailscale is a network plane, not a provider. `--tailscale` joins new managed
 Linux leases to the tailnet; `--network auto|tailscale|public` chooses how SSH
 and VNC tunnel commands resolve the host. Brokered mode uses Worker OAuth
 secrets to mint one-off keys; direct-provider mode reads the auth key from the
-configured env var. `exitNode` is opt-in per lease for routing outbound internet
-through an approved tailnet exit node. See [Tailscale](docs/features/tailscale.md).
+configured env var. See [Tailscale](docs/features/tailscale.md).
 
-Forwarded environment is intentionally narrow: `NODE_OPTIONS` and `CI`. Do not pass secrets as command-line arguments. Full env-var reference and per-command flags are in [docs/cli.md](docs/cli.md) and [docs/commands/](docs/commands/README.md).
+A few provider-specific config snippets:
 
-For live-secret smoke tests, use `crabbox run --env-from-profile <file>
---allow-env NAME` so Crabbox forwards only selected names and prints redacted
-presence/length metadata, including a remote probe after upload. Add
-`--env-helper live` on POSIX SSH leases when follow-up commands should reuse a
-remote `.crabbox/env/live` wrapper. For stale warm boxes, `--full-resync`
-(alias `--fresh-sync`) resets the remote workdir before syncing instead of
-trusting the fingerprint fast path. For larger commands, use `--script <file>`
-or `--script-stdin` so the remote runner executes an uploaded file instead of
-a giant quoted shell string.
-Delegated providers may own their command transport. Blacksmith Testbox cannot
-forward CLI-side env values; Crabbox prints an explicit unsupported warning and
-the workflow should provide required secrets.
+```yaml
+# Static macOS or Windows target (existing machine, no provisioning)
+provider: ssh
+target: windows
+windows:
+  mode: normal # or wsl2
+static:
+  host: win-dev.local
+  user: alice
+  port: "22"
+  workRoot: C:\crabbox
+```
 
-For binary or terminal-hostile output, use `crabbox run --capture-stdout <path>`
-or `--capture-stderr <path>` so remote streams are written directly to local
-files and omitted from retained run-log previews. Add `--preflight` for a
-remote capability snapshot, `--keep-on-failure` to SSH into the exact failed
-one-shot lease, or `--download remote=local` to copy a successful-run artifact
-back. Failed SSH-backed and Blacksmith delegated runs save local
-`.crabbox/captures/*.tar.gz` bundles by default. Captured files are not redacted
-by Crabbox.
+```yaml
+# Local container (alias: docker; detects docker or podman)
+provider: local-container
+localContainer:
+  runtime: docker
+  image: debian:bookworm
+  workRoot: /work/crabbox
+```
 
-## OpenClaw plugin
+```yaml
+# Delegated Blacksmith CI Testbox
+provider: blacksmith-testbox
+blacksmith:
+  org: example-org
+  workflow: .github/workflows/ci-check-testbox.yml
+  job: test
+  ref: main
+  idleTimeout: 90m
+```
 
-The repo root is a native OpenClaw plugin package. Once installed, it exposes Crabbox as agent tools:
-
-- `crabbox_run`, `crabbox_warmup`, `crabbox_status`, `crabbox_list`, `crabbox_stop`
-
-The plugin shells out to the configured `crabbox` binary, so local config, broker login, repo claims, and sync behavior stay owned by the CLI. Set `plugins.entries.crabbox.config.binary` if `crabbox` is not on `PATH`.
-
-Durable run inspection is intentionally CLI/skill-led instead of additional plugin tools: use `crabbox history`, `crabbox events --after --limit`, `crabbox attach`, `crabbox logs`, `crabbox results`, and `crabbox usage` from a shell-capable agent.
+Keep provider tokens in environment variables, not repo config (for example
+`CRABBOX_SEMAPHORE_TOKEN`, `CRABBOX_SPRITES_TOKEN`, `RUNPOD_API_KEY`,
+`ASCII_BOX_API_KEY`, `E2B_API_KEY`, `DAYTONA_API_KEY`). The full env-var
+reference, per-provider sections, and per-command flags are in
+[docs/cli.md](docs/cli.md), [Configuration](docs/features/configuration.md),
+and the [provider docs](docs/providers/README.md).
 
 ## Development
 
 ```sh
 # Go CLI
-go build -o bin/crabbox ./cmd/crabbox
+go build -trimpath -o bin/crabbox ./cmd/crabbox
+go vet ./...
 go test -race ./...
-scripts/test-go-modules.sh
-scripts/check-go-coverage.sh 85.0
 
-# Cloudflare Worker
-# Use Node 22+ for local Worker checks; CI currently runs Node 24.
+# Cloudflare Worker (Node 22+ locally; CI runs Node 24)
 npm ci --prefix worker
 npm test --prefix worker
 npm run build --prefix worker
 
+# Repository scripts
+node --test scripts/*.test.js
+
 # Docs
-npm run docs:check
+scripts/check-docs.sh
 
 # Optional live smoke, when broker/provider credentials are available
 CRABBOX_LIVE=1 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
-# Add Blacksmith only for repos with a Testbox workflow.
-CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=blacksmith-testbox CRABBOX_BLACKSMITH_WORKFLOW=.github/workflows/testbox.yml scripts/live-smoke.sh
-# Cloudflare Containers deploy plus live smoke, when Cloudflare credentials are available.
-scripts/deploy-cloudflare-smoke.sh
 ```
 
-CI runs the full gate (gofmt, vet, race tests, all Go modules, coverage threshold, docs link/build check, GoReleaser snapshot, and Worker lint/typecheck/tests/build) on every push and PR. Tagged pushes matching `v*` publish Go archives via GoReleaser and bump the Homebrew formula at [openclaw/homebrew-tap](https://github.com/openclaw/homebrew-tap).
+CI runs the full gate (gofmt, vet, race tests, all Go modules, coverage
+threshold, repository script tests, docs link/build check, GoReleaser snapshot, and Worker
+lint/typecheck/tests/build) on every push and PR. Tagged pushes matching `v*`
+publish Go archives via GoReleaser and bump the Homebrew formula at
+[openclaw/homebrew-tap](https://github.com/openclaw/homebrew-tap).
 
-Worker deployment, required secrets, and DNS routing live in [docs/infrastructure.md](docs/infrastructure.md).
+Worker deployment, required secrets, and DNS routing live in
+[docs/infrastructure.md](docs/infrastructure.md).
 
 ## Docs
 
 - **Get the model:** [How Crabbox Works](docs/how-it-works.md), [Architecture](docs/architecture.md), [Concepts](docs/concepts.md), [Orchestrator](docs/orchestrator.md)
 - **Use the CLI:** [CLI](docs/cli.md), [Commands](docs/commands/README.md), [Features](docs/features/README.md), [Configuration](docs/features/configuration.md)
 - **Choose a provider:** [Providers](docs/providers/README.md), [AWS](docs/providers/aws.md), [Azure](docs/providers/azure.md), [GCP](docs/providers/gcp.md), [Hetzner](docs/providers/hetzner.md)
-- **Advanced features:** [Actions hydration](docs/features/actions-hydration.md), [Capsules](docs/features/capsules.md), [Checkpoints](docs/features/checkpoints.md), [Jobs](docs/features/jobs.md)
+- **Advanced features:** [Actions hydration](docs/features/actions-hydration.md), [Capsules](docs/features/capsules.md), [Checkpoints](docs/features/checkpoints.md), [Jobs](docs/features/jobs.md), [Pond](docs/features/pond.md)
 - **Interactive QA:** [Interactive Desktop and VNC](docs/features/interactive-desktop-vnc.md), [Artifacts](docs/features/artifacts.md), [Portal](docs/features/portal.md)
 - **Operate it:** [Operations](docs/operations.md), [Observability](docs/observability.md), [Troubleshooting](docs/troubleshooting.md), [Performance](docs/performance.md)
 - **Set it up or audit it:** [Infrastructure](docs/infrastructure.md), [Security](docs/security.md), [Getting Started](docs/getting-started.md), [Source Map](docs/source-map.md)
 - **Changes:** [CHANGELOG.md](CHANGELOG.md)
 
-The GitHub Pages site at <https://openclaw.github.io/crabbox/> is generated from the `docs/` Markdown:
+The GitHub Pages site at <https://openclaw.github.io/crabbox/> is generated from
+the `docs/` Markdown:
 
 ```sh
-npm run docs:check
+scripts/check-docs.sh
 open dist/docs-site/index.html
 ```
 

@@ -1,0 +1,40 @@
+name: Blacksmith Testbox
+on:
+  workflow_dispatch:
+    inputs:
+      testbox_id:
+        type: string
+        description: "Testbox session ID"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -mod=readonly -trimpath
+  GOTOOLCHAIN: local
+
+jobs:
+  go:
+    name: Go
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+
+    steps:
+      - name: Begin Testbox
+        uses: useblacksmith/begin-testbox@v2
+        with:
+          testbox_id: ${{ inputs.testbox_id }}
+
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run Testbox
+        uses: useblacksmith/run-testbox@v2
+        if: always()

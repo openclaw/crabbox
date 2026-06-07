@@ -1,59 +1,60 @@
 # usage
 
-`crabbox usage` shows orchestrator usage and estimated cost.
+`crabbox usage` reports lease cost and usage estimates from the broker, broken down by user, organization, or the whole fleet.
 
-Usage is the command page for cost visibility. Keep command-specific behavior here; keep fleet policy and provider internals in [../orchestrator.md](../orchestrator.md) and [../features/cost-usage.md](../features/cost-usage.md).
+This page is the command reference for cost visibility. Keep command-specific behavior here; broker policy and provider internals live in [../orchestrator.md](../orchestrator.md) and [../features/cost-usage.md](../features/cost-usage.md).
 
 ```sh
 crabbox usage
-crabbox usage --scope org --org openclaw
-crabbox usage --scope user --user peter@example.com --month 2026-05
+crabbox usage --scope org --org example-org
+crabbox usage --scope user --user alice@example.com --month 2026-05
 crabbox usage --scope all --json
 ```
 
-Usage requires a configured coordinator. Direct-provider mode has no central history to query.
-
-Lease ownership comes from the signed GitHub login token for normal users. In shared bearer-token mode, the CLI sends `CRABBOX_OWNER`, Git email env, or local `git config user.email`; set `CRABBOX_ORG` to group leases under an org. Raw Cloudflare Access identity headers are ignored; only a verified Access JWT email can become the bearer-token owner.
-
-GitHub browser-login users see their own owner/org usage regardless of requested `--scope`, `--user`, or `--org`. Fleet-wide `--scope org` and `--scope all` views require admin-token auth.
-
-## Scopes
-
-Scopes:
-
-```text
-user    one owner email; default
-org     one organization
-all     whole fleet
-```
+`crabbox usage` requires a configured broker (coordinator). Direct-provider mode keeps no central lease history to query, so the command exits with `usage requires a configured coordinator`.
 
 ## Flags
 
-Flags:
+```text
+--scope user|org|all   reporting scope (default user)
+--user <email>         owner email to report (admin only for other owners)
+--org <name>           organization to report
+--month YYYY-MM        billing month to summarize (default current UTC month)
+--json                 print the raw summary and limits as JSON
+```
+
+`--scope` must be `user`, `org`, or `all`; any other value exits with code 2. `--month` defaults to the current month in UTC.
+
+## Scopes and authorization
 
 ```text
---scope user|org|all
---user <email>
---org <name>
---month YYYY-MM
---json
+user    a single owner email (default)
+org     a single organization
+all     the entire fleet
 ```
+
+The broker decides what you may see based on how you authenticated:
+
+- GitHub browser-login users always see their own owner/org usage. Requested `--scope`, `--user`, and `--org` values that widen visibility are ignored: the broker forces `scope=user` and reports the logged-in owner.
+- Admin-token auth honors `--scope org` and `--scope all`, and may target another owner with `--user` or another org with `--org`.
+
+Owner identity for shared bearer-token mode comes from `CRABBOX_OWNER`, then Git author/committer email env (`GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_EMAIL`), then local `git config user.email`. Set `CRABBOX_ORG` to group leases under an organization. Only a verified Cloudflare Access JWT email can supply the bearer-token owner; raw Access identity headers are ignored.
 
 ## Output
 
-Human output prints one total row, then group rows when present:
+Human output prints one total row, then any non-empty group breakdowns (owners, orgs, providers, server types), then the active limits:
 
 ```text
-usage month=2026-05 scope=user user=steipete@gmail.com org=openclaw
+usage month=2026-05 scope=user user=alice@example.com org=example-org
 total leases=2 active=0 runtime=12m41s estimated=$0.13 reserved=$4.57
 owners:
-  steipete@gmail.com       leases=2   active=0   runtime=12m41s    estimated=$0.13     reserved=$4.57
+  alice@example.com        leases=2   active=0   runtime=12m41s    estimated=$0.13     reserved=$4.57
 limits:
   active leases: fleet=off user=off org=off
   monthly usd:   fleet=off user=off org=off
 ```
 
-`--json` returns the same summary and limit data for scripts:
+`--json` emits the same summary and limit data for scripting:
 
 ```json
 {
@@ -74,6 +75,8 @@ limits:
     "maxActiveLeases": 0,
     "maxActiveLeasesPerOwner": 0,
     "maxActiveLeasesPerOrg": 0,
+    "capacityAdminOwners": [],
+    "maxActiveLeasesPerCapacityAdmin": 0,
     "maxMonthlyUSD": 0,
     "maxMonthlyUSDPerOwner": 0,
     "maxMonthlyUSDPerOrg": 0
@@ -81,21 +84,27 @@ limits:
 }
 ```
 
-## Cost Estimates
+## Estimated vs reserved cost
 
-Cost values are estimates for compute leases, not provider invoice reconciliation. They do not yet fully model provider extras such as static public IP charges, egress, storage, snapshots, taxes, credits, or discounts.
+`estimatedUSD` is the elapsed-runtime cost for leases in the selected month.
 
-The coordinator chooses the hourly rate in this order:
+`reservedUSD` is the worst-case cost based on each lease's TTL. The broker computes reserved cost before provisioning so monthly spend guardrails can reject a lease before any machine is created.
+
+Cost values are estimates for compute leases, not provider invoice reconciliation. They do not fully model provider extras such as static public IP charges, egress, storage, snapshots, taxes, credits, or discounts.
+
+## How rates are chosen
+
+The broker resolves the hourly rate for each lease in this order:
 
 ```text
-1. CRABBOX_COST_RATES_JSON explicit override.
+1. CRABBOX_COST_RATES_JSON explicit override (per provider and server type).
 2. Provider live pricing:
    - AWS: EC2 Spot price history for the requested instance type.
    - Hetzner: Cloud server-type hourly price for the requested location.
 3. Built-in static fallback rates.
 ```
 
-Explicit rates are useful for budget policy or conservative accounting. Example:
+Explicit overrides are useful for budget policy or conservative accounting:
 
 ```sh
 export CRABBOX_COST_RATES_JSON='{
@@ -108,25 +117,21 @@ export CRABBOX_COST_RATES_JSON='{
 }'
 ```
 
-Hetzner prices are returned in EUR. Crabbox converts them to USD with `CRABBOX_EUR_TO_USD`, default `1.08`.
-
-## Estimated vs Reserved
-
-`estimatedUSD` is elapsed runtime cost for leases in the selected month.
-
-`reservedUSD` is worst-case reserved cost based on each lease TTL. The coordinator uses reserved cost before provisioning so monthly spend guardrails can reject a lease before it creates a machine.
+Hetzner prices are returned in EUR. The broker converts them to USD using `CRABBOX_EUR_TO_USD` (default `1.08`).
 
 ## Limits
 
-The `limits` block mirrors active coordinator guardrails:
+The `limits` block mirrors the broker's active cost guardrails, read from these environment variables on the Worker:
 
 ```text
 CRABBOX_MAX_ACTIVE_LEASES
 CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER
 CRABBOX_MAX_ACTIVE_LEASES_PER_ORG
+CRABBOX_CAPACITY_ADMIN_OWNERS
+CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN
 CRABBOX_MAX_MONTHLY_USD
 CRABBOX_MAX_MONTHLY_USD_PER_OWNER
 CRABBOX_MAX_MONTHLY_USD_PER_ORG
 ```
 
-`0` means off and prints as `off`.
+A value of `0` (or unset) means the limit is off and prints as `off`.

@@ -1,43 +1,43 @@
 # Capacity And Fallback
 
-Read when:
+Read this when:
 
 - adding or changing machine classes;
 - debugging "why did Crabbox pick this instance type?";
-- working on AWS spot/on-demand fallback or Hetzner location fallback;
-- configuring multi-region or multi-AZ capacity for AWS.
+- working on AWS or Azure Spot/on-demand failover;
+- configuring multi-region or multi-AZ capacity for AWS or Azure.
 
-Crabbox cares about capacity in three ways:
+Crabbox treats capacity in three layers:
 
-1. **Class fallback** - the ordered list of provider types that satisfy a
-   class request.
-2. **Market fallback** - AWS-specific Spot to On-Demand failover within a
-   class.
-3. **Region/AZ routing** - where the broker tries to provision when capacity
-   is tight in a single zone.
+1. **Class fallback** — the ordered list of provider instance types that a
+   class request expands into.
+2. **Market fallback** — AWS/Azure Spot-to-On-Demand failover within a class.
+3. **Region/AZ routing** — where the brokered AWS or Azure path may launch when
+   one region or zone is configured against several.
 
-Hetzner only deals with class fallback. AWS deals with all three. Static
-SSH, Blacksmith, Daytona, and Islo do not have capacity fallback because
-the operator or external service controls the underlying resources.
+Hetzner only exercises class fallback. AWS exercises all three; Azure exercises
+class, market, and region fallback for VM leases. Static SSH and the delegated
+runners (Blacksmith, Daytona, Islo, E2B, Modal, and the rest) have no capacity
+fallback because the operator or the external service owns the underlying
+resource.
 
 ## Classes
 
-Class names are provider-agnostic intent labels:
+Class names are provider-neutral intent labels:
 
 ```text
 standard  typical CI lane
-fast      ~2x more cores than standard for parallel-friendly suites
+fast      more cores for parallel-friendly suites
 large     memory-heavy or many-process workloads
-beast     maximum capacity within the provider's burstable family
+beast     maximum capacity within the provider's family
 ```
 
 Each provider maps the four class names to an ordered list of concrete
-instance types. The list is the fallback chain: try the first; if rejected,
-try the second; and so on.
+instance types. That list *is* the fallback chain: try the first; if it is
+rejected, try the next; and so on until one succeeds or the chain is exhausted.
 
-The full Hetzner and AWS class tables live in
-[Providers](providers.md#hetzner-summary). The table also lists the AWS
-Windows, Windows WSL2, and macOS class maps.
+The full per-provider class tables (including AWS Windows, Windows WSL2, and
+macOS) live in [Providers](providers.md#machine-classes).
 
 ## When Class Fallback Triggers
 
@@ -47,43 +47,48 @@ Hetzner falls back when:
 - the project quota rejects the request;
 - the API returns a transient capacity error.
 
-AWS falls back when:
+AWS and Azure fall back when a candidate is rejected by:
 
-- the instance type is rejected by capacity in the chosen Availability Zone;
-- the account policy denies the type (e.g. quota = 0 vCPUs);
-- the spot request is rejected by capacity.
+- insufficient instance capacity (`InsufficientInstanceCapacity`);
+- a vCPU or Spot quota limit (`VcpuLimitExceeded`, `MaxSpotInstanceCountExceeded`);
+- an unsupported type or account policy (e.g. Free-Tier restrictions).
 
-Quota rejections are detected from the API error code rather than scraped
-from the message string, so the fallback is deterministic. The next
-candidate in the chain is tried until either one succeeds or the chain is
-exhausted.
+Crabbox classifies each provider rejection (capacity, quota, unsupported,
+policy, region) rather than guessing, then advances to the next candidate type.
+Azure VM leases also bound slow long-running create operations so requests can
+advance through the candidate chain instead of waiting on a stalled allocation.
+Non-retryable failures stop the chain immediately so a genuine misconfiguration
+fails fast instead of churning through every type.
 
-When the chain is exhausted, Crabbox returns exit code 4 (`no capacity`) and
-the error includes `provisioningAttempts` that record which types were
-tried, why each failed, and where (region/AZ for AWS). The same metadata is
-attached to the failed lease record on the coordinator so operators can
-inspect what went wrong without rerunning the workflow.
+When the chain is exhausted the command fails. On the brokered (Worker) path
+the failure carries `provisioningAttempts` — one record per type tried, with
+its region, market, failure category, and message — and the same metadata is
+attached to the failed lease record on the coordinator, so an operator can see
+what went wrong without rerunning the workflow:
+
+```sh
+crabbox history --lease cbx_...
+```
 
 ## Explicit Type Override
 
-`--type c7a.16xlarge` and the matching `type:` config key skip the class
-fallback chain and request that specific instance type. The contract is
-"give me this exact type, not a fallback". If the provider rejects it,
-Crabbox fails loudly with exit code 4 and does not silently choose a
-different type.
+`--type c7a.16xlarge` (and the matching `type:` config key) pins one exact
+instance type and skips the class fallback chain. The contract is "give me this
+type, not a substitute": if the provider rejects it, Crabbox fails loudly rather
+than silently choosing a different type.
 
 Use `--type` when:
 
-- you want deterministic capacity for benchmarks;
-- you are pinning a specific generation for a known-bug workaround;
+- you want deterministic capacity for a benchmark;
+- you are pinning a specific generation to work around a known issue;
 - you are debugging the capacity layer itself.
 
-For everything else, prefer a class - the fallback chain handles transient
+For everything else, prefer a class so the fallback chain absorbs transient
 rejections without operator intervention.
 
-## AWS Market Fallback
+## AWS And Azure Market Fallback
 
-AWS supports two markets: `spot` and `on-demand`.
+AWS and Azure support two markets: `spot` and `on-demand`.
 
 ```yaml
 capacity:
@@ -91,10 +96,20 @@ capacity:
   fallback: on-demand-after-120s
 ```
 
-`capacity.market: spot` requests Spot capacity first. `capacity.fallback:
-on-demand-after-120s` falls back to On-Demand for the same instance type
-when Spot fails to come up within 120 seconds. Set `fallback` to `none` (or
-omit it) to never fall back to On-Demand.
+`capacity.market: spot` (the default) requests Spot capacity first.
+`capacity.fallback` controls whether a rejected Spot request retries the same
+class on On-Demand. Any value that starts with `on-demand` (the shipped default
+is `on-demand-after-120s`) enables the On-Demand retry pass; set it to `none`
+(or leave it empty) to never fall back.
+
+The On-Demand pass runs after every Spot candidate in the class chain has been
+tried and rejected — it reruns the same chain on On-Demand. AWS fallback fires
+on provider rejection. Azure also treats a slow Spot VM provisioning operation
+as a capacity miss after the configured `on-demand-after-*` duration, or after
+the default 120 seconds when on-demand fallback is disabled with `spot-only` or
+`none`.
+Slow Azure On-Demand creates are bounded too, so the coordinator can keep trying
+the class chain before the CLI lease wait expires.
 
 Per-command overrides:
 
@@ -103,39 +118,41 @@ crabbox warmup --market spot
 crabbox run --market on-demand -- pnpm test
 ```
 
-The `--market` flag overrides `capacity.market` for one lease without
-rewriting repo config. Use it when an account is temporarily out of Spot
-quota or when Spot interruption rates spike.
+`--market` overrides `capacity.market` for one lease without editing repo
+config. It must be `spot` or `on-demand`. Reach for it when an account is
+temporarily out of Spot quota or when Spot interruption rates spike. The same
+value is also available as the `CRABBOX_CAPACITY_MARKET` environment variable.
 
 ## AWS Capacity Hints
 
-The brokered AWS path uses Service Quotas and EC2 placement scoring to
-preflight large requests:
+The brokered AWS path can preflight large requests against Service Quotas:
 
 ```yaml
 capacity:
   hints: true
-  largeClasses:
-    - large
-    - beast
 ```
 
-When `hints: true` and the class is in `largeClasses`:
+When `hints` is enabled (the shipped default), the broker checks the applied
+Spot or On-Demand vCPU quota for each candidate type before launching it.
+Candidates that exceed the quota are recorded as a quota attempt and skipped, so
+the chain spends launch attempts only on types the account can actually run.
+Brokered failures also emit advisory `CapacityHint` records (for example, when a
+large class is under capacity pressure) alongside `provisioningAttempts`.
 
-- the broker calls Service Quotas to check applied Spot or On-Demand vCPU
-  limits;
-- candidates that exceed quota are recorded as quota attempts and skipped;
-- remaining candidates are scored with `GetSpotPlacementScores` (Spot mode)
-  to pick the most-available region/AZ.
+The set of classes treated as high-pressure for hint purposes is controlled on
+the broker by the `CRABBOX_CAPACITY_LARGE_CLASSES` environment variable
+(comma-separated, default `beast`); it is not a repo config key.
 
-The result is a single provisioning attempt that picks the best location
-and skips known-rejected types instead of letting the chain stumble through
-them sequentially.
+Hints apply only on the brokered path. Direct AWS mode still walks the class
+chain but runs no quota preflight. To preflight quota before the first warmup in
+either mode, run:
 
-Hints apply only on the brokered (Worker) path. Direct AWS mode still falls
-back through the class chain but does not run quota or placement preflight.
-`crabbox doctor --provider aws` can run the EC2 vCPU quota preflight before the
-first warmup in both direct and brokered setups.
+```sh
+crabbox doctor --provider aws
+```
+
+It reports the applied EC2 vCPU quota for the relevant market(s) and warns when
+the default class needs more vCPUs than the account is allowed.
 
 ## Region And Availability Zone Routing
 
@@ -149,63 +166,62 @@ capacity:
     - eu-west-1b
 ```
 
-`regions` is the ordered list of AWS regions the broker considers when
-multiple regions are configured. Single-region setups use `aws.region` and
-leave `capacity.regions` empty; multi-region setups list every region the
-broker may launch into.
+`regions` is the ordered list of brokered AWS regions the coordinator considers.
+Single-region setups use `aws.region` and leave `capacity.regions` empty;
+multi-region setups list every region the broker may launch into. Regions are
+tried in order: when every candidate type in a region is rejected for a
+retryable reason, Crabbox advances to the next region.
 
-`availabilityZones` narrows the per-region zone selection. The broker uses
-Spot placement scoring across the listed AZs and picks the highest-scoring
-zone that has capacity.
+Brokered Azure uses `CRABBOX_AZURE_REGIONS` on the Worker for its Azure-specific
+region list, so AWS and Azure do not accidentally share incompatible region
+names. The CLI-level `capacity.regions` list is still included in Azure lease
+requests for direct or explicitly shared setups.
 
-Regions are tried in order; AZs within a region are scored. If every AZ in
-a region rejects the request, Crabbox advances to the next region.
+`availabilityZones` narrows zone selection within a region (used today mainly
+for EC2 Mac Dedicated Host allocation). Zones that do not belong to the active
+region are ignored.
 
-## Fallback Strategies
+Both keys also accept comma-separated values from the
+`CRABBOX_CAPACITY_REGIONS` and `CRABBOX_CAPACITY_AVAILABILITY_ZONES`
+environment variables.
+
+## Capacity Strategy
 
 ```yaml
 capacity:
   strategy: most-available
 ```
 
-| Value | Behavior |
-|:------|:---------|
-| `most-available` (default) | use placement scoring or class chain order |
-| `cheapest` | prefer types with the lowest live hourly price (when known) |
-| `provider-default` | follow the provider's own placement defaults |
-
-`cheapest` is currently honored on the brokered AWS path that has live
-pricing. Hetzner does not differentiate strategies because its server-type
-prices are consistent across locations.
+`capacity.strategy` is accepted and persisted (it is one of `most-available`
+[default], `price-capacity-optimized`, `capacity-optimized`, or `sequential`),
+and it shows up in `crabbox config show`. It does not yet change provisioning
+behavior: both direct and brokered AWS provisioning currently follow the class
+chain in order. Treat the field as forward-looking configuration rather than a
+behavior switch, and prefer ordering the class chain itself when you need a
+specific preference today.
 
 ## Direct Mode Differences
 
-Direct provider mode (no coordinator) supports class fallback but has no
-quota preflight, no placement score, no `provisioningAttempts` metadata, and
-no central history. Direct AWS still respects `--market` and the `fallback`
-config key, so spot-to-on-demand failover works locally - just without the
-diagnostic richness the broker provides.
-
-If a direct AWS run exits with code 4, run the same command through the
-broker once to get structured `provisioningAttempts` evidence; then go back
-to direct mode for the rest of the iteration loop.
+Direct provider mode (no coordinator) supports class fallback and the
+spot-to-on-demand failover above, but has no Service Quotas preflight, no
+`provisioningAttempts` metadata, and no central run history. If a direct AWS run
+fails to provision, rerun it once through the broker to capture structured
+`provisioningAttempts` evidence, then return to direct mode for the rest of the
+iteration loop.
 
 ## Failure Surface
 
-Capacity failures map to:
+`crabbox` returns `0` on success. Crabbox-internal failures — including capacity
+exhaustion, provisioning that never reached SSH, and a lease that expired during
+a long warmup — are reported before the remote command runs and exit non-zero;
+when the remote command does run, its own exit code is passed through verbatim.
+There is no fixed numeric enum for the internal categories (see the
+[CLI exit codes](../cli.md#exit-codes) reference); branch on `0` versus non-zero
+and read stderr or `--json` for the reason.
 
-```text
-exit 4   no capacity     every candidate in the chain was rejected
-exit 5   provisioning failed   a candidate was accepted but never reached SSH
-exit 8   lease expired   long warmup exceeded the configured TTL before SSH
-```
-
-The accompanying error message names the chain, the markets that were
-tried, and (for brokered runs) `provisioningAttempts` you can inspect with:
-
-```sh
-crabbox history --lease cbx_...
-```
+The error message names the class chain, the markets that were tried, and — for
+brokered runs — the `provisioningAttempts` you can inspect with `crabbox history
+--lease cbx_...`.
 
 Related docs:
 

@@ -18,8 +18,9 @@ func (Provider) Aliases() []string {
 }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name: "gcp",
-		Kind: core.ProviderKindSSHLease,
+		Name:   "gcp",
+		Family: "gcp",
+		Kind:   core.ProviderKindSSHLease,
 		Targets: []core.TargetSpec{
 			{OS: core.TargetLinux},
 		},
@@ -31,6 +32,15 @@ func (Provider) RegisterFlags(*flag.FlagSet, core.Config) any { return core.NoPr
 func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 	return nil
 }
+
+func (Provider) ServerTypeForConfig(cfg core.Config) string {
+	return core.GCPMachineTypeCandidatesForClass(cfg.Class)[0]
+}
+
+func (Provider) ServerTypeForClass(class string) string {
+	return core.GCPMachineTypeCandidatesForClass(class)[0]
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewGCPLeaseBackend(p.Spec(), cfg, rt), nil
 }

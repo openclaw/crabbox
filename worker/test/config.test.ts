@@ -4,8 +4,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   awsMacOSInstanceTypeCandidates,
+  awsARM64InstanceTypeCandidatesForClass,
   awsInstanceTypeCandidatesForClass,
   awsInstanceTypeCandidatesForTargetClass,
+  azureARM64VMSizeCandidatesForClass,
   azureWindowsVMSizeCandidatesForClass,
   azureVMSizeCandidatesForClass,
   azureVMSizeCandidatesForTargetClass,
@@ -15,6 +17,7 @@ import {
   serverTypeForClass,
   serverTypeForProviderClass,
   sshPorts,
+  validCIDRs,
 } from "../src/config";
 
 describe("machine class config", () => {
@@ -64,6 +67,9 @@ describe("machine class config", () => {
     expect(azureVMSizeCandidatesForTargetClass("linux", "standard")).toEqual(
       azureVMSizeCandidatesForClass("standard"),
     );
+    expect(azureVMSizeCandidatesForTargetClass("linux", "standard", "normal", "arm64")).toEqual(
+      azureARM64VMSizeCandidatesForClass("standard"),
+    );
     expect(azureVMSizeCandidatesForTargetClass("windows", "standard")).toEqual(
       azureWindowsVMSizeCandidatesForClass("standard"),
     );
@@ -88,6 +94,9 @@ describe("machine class config", () => {
       "m7a.large",
       "t3.large",
     ]);
+    expect(awsInstanceTypeCandidatesForTargetClass("linux", "standard", "normal", "arm64")).toEqual(
+      awsARM64InstanceTypeCandidatesForClass("standard"),
+    );
     expect(awsInstanceTypeCandidatesForTargetClass("macos", "standard")).toEqual([
       ...awsMacOSInstanceTypeCandidates,
     ]);
@@ -100,16 +109,22 @@ describe("machine class config", () => {
     const classes = ["standard", "fast", "large", "beast"];
     const hetzner = parseGoStringArrayCases(goFunctionBody(go, "serverTypeCandidatesForClass"));
     const awsLinux = parseGoStringArrayCases(
-      goFunctionBody(go, "awsInstanceTypeCandidatesForClass"),
+      goFunctionBody(go, "awsInstanceTypeCandidatesForArchitectureClass"),
     );
     const azureLinux = parseGoStringArrayCases(
-      goFunctionBody(goAzure, "azureVMSizeCandidatesForClass"),
+      goFunctionBody(goAzure, "azureVMSizeCandidatesForArchitectureClass"),
+    );
+    const azureLinuxARM64 = parseGoStringArrayCases(
+      goFunctionBody(goAzure, "azureARM64VMSizeCandidatesForClass"),
     );
     const azureWindows = parseGoStringArrayCases(
       goFunctionBody(goAzure, "azureWindowsVMSizeCandidatesForClass"),
     );
+    const awsLinuxARM64 = parseGoStringArrayCases(
+      goFunctionBody(go, "awsARM64InstanceTypeCandidatesForClass"),
+    );
     const gcp = parseGoStringArrayCases(goFunctionBody(goGCP, "gcpMachineTypeCandidatesForClass"));
-    const awsTarget = goFunctionBody(go, "awsInstanceTypeCandidatesForTargetModeClass");
+    const awsTarget = goFunctionBody(go, "awsInstanceTypeCandidatesForTargetModeArchitectureClass");
     const awsWSL2 = parseGoStringArrayCases(
       goSwitchAfter(awsTarget, "if windowsMode == windowsModeWSL2"),
     );
@@ -118,7 +133,9 @@ describe("machine class config", () => {
     for (const name of classes) {
       expect(serverTypeCandidatesForClass(name)).toEqual(hetzner[name]);
       expect(awsInstanceTypeCandidatesForClass(name)).toEqual(awsLinux[name]);
+      expect(awsARM64InstanceTypeCandidatesForClass(name)).toEqual(awsLinuxARM64[name]);
       expect(azureVMSizeCandidatesForClass(name)).toEqual(azureLinux[name]);
+      expect(azureARM64VMSizeCandidatesForClass(name)).toEqual(azureLinuxARM64[name]);
       expect(azureWindowsVMSizeCandidatesForClass(name)).toEqual(azureWindows[name]);
       expect(azureVMSizeCandidatesForTargetClass("windows", name)).toEqual(azureWindows[name]);
       expect(azureVMSizeCandidatesForTargetClass("windows", name, "wsl2")).toEqual(
@@ -216,6 +233,100 @@ describe("lease config", () => {
     expect(config.browser).toBe(false);
     expect(config.code).toBe(false);
     expect(config.ttlSeconds).toBe(86_400);
+    expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: 0 }).ttlSeconds).toBe(5400);
+    expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: -1 }).ttlSeconds).toBe(5400);
+    expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: 42.9 }).ttlSeconds).toBe(42);
+    expect(
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: 0 }).idleTimeoutSeconds,
+    ).toBe(1800);
+    expect(
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: -1 }).idleTimeoutSeconds,
+    ).toBe(1800);
+    expect(
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: 999_999 })
+        .idleTimeoutSeconds,
+    ).toBe(86_400);
+    expect(
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: 42.9 })
+        .idleTimeoutSeconds,
+    ).toBe(42);
+  });
+
+  it("filters invalid SSH CIDR values before provider config", () => {
+    expect(
+      validCIDRs([
+        " 203.0.113.7/32 ",
+        "0.0.0.0/0",
+        "255.255.255.255/32",
+        "2001:db8::1/128",
+        "::/0",
+        "999.999.999.999/32",
+        "256.0.0.1/32",
+        "1.2.3/24",
+        "1.2.3.4.5/24",
+        "203.0.113.7/33",
+        "203.0.113.7/-1",
+        "203.0.113.7/x",
+        "203.0.113.7",
+        "203.0.113.7/32/extra",
+        "::::/128",
+        "::1]#junk/128",
+        "::1]@[::2/128",
+        "::\n1/128",
+        "2001:db8::\t1/128",
+        "2001:db8::1/129",
+        "2001:db8::1/-1",
+        "2001:db8::1/x",
+        "not-a-cidr",
+      ]),
+    ).toEqual(["203.0.113.7/32", "0.0.0.0/0", "255.255.255.255/32", "2001:db8::1/128", "::/0"]);
+
+    const config = leaseConfig({
+      provider: "aws",
+      sshPublicKey: "ssh-ed25519 test",
+      awsSSHCIDRs: ["198.51.100.77/32"],
+      gcpSSHCIDRs: ["2001:db8::2/128"],
+    });
+    expect(config.awsSSHCIDRs).toEqual(["198.51.100.77/32"]);
+    expect(config.gcpSSHCIDRs).toEqual(["2001:db8::2/128"]);
+    expect(() =>
+      leaseConfig({
+        provider: "aws",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["198.51.100.77/32", "999.999.999.999/32"],
+      }),
+    ).toThrow("awsSSHCIDRs entries must be valid");
+    expect(() =>
+      leaseConfig({
+        provider: "gcp",
+        sshPublicKey: "ssh-ed25519 test",
+        gcpSSHCIDRs: ["::::/128"],
+      }),
+    ).toThrow("gcpSSHCIDRs entries must be valid");
+    expect(
+      leaseConfig({
+        provider: "gcp",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["999.999.999.999/32", "198.51.100.77/32"],
+        gcpSSHCIDRs: ["2001:db8::2/128"],
+      }).awsSSHCIDRs,
+    ).toEqual(["198.51.100.77/32"]);
+    expect(
+      leaseConfig({
+        provider: "aws",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["198.51.100.77/32"],
+        gcpSSHCIDRs: ["::::/128", "2001:db8::2/128"],
+      }).gcpSSHCIDRs,
+    ).toEqual(["2001:db8::2/128"]);
+    expect(
+      leaseConfig({
+        provider: "hetzner",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["999.999.999.999/32"],
+        gcpSSHCIDRs: ["::::/128"],
+      }),
+    ).toMatchObject({ awsSSHCIDRs: [], gcpSSHCIDRs: [] });
   });
 
   it("allows capacity hints to be disabled per lease", () => {
@@ -236,6 +347,44 @@ describe("lease config", () => {
     expect(config.desktop).toBe(true);
     expect(config.browser).toBe(true);
     expect(config.code).toBe(true);
+  });
+
+  it("normalizes the optional pond label and defaults it to empty", () => {
+    const empty = leaseConfig({ sshPublicKey: "ssh-ed25519 test" });
+    expect(empty.pond).toBe("");
+    const tagged = leaseConfig({ sshPublicKey: "ssh-ed25519 test", pond: " Alpha Pond " });
+    expect(tagged.pond).toBe("alpha-pond");
+    const symbolRun = leaseConfig({
+      sshPublicKey: "ssh-ed25519 test",
+      pond: `alpha${"_".repeat(10_000)}pond`,
+    });
+    expect(symbolRun.pond).toBe("alpha-pond");
+    expect(() => leaseConfig({ sshPublicKey: "ssh-ed25519 test", pond: " --- " })).toThrow(
+      "pond must contain at least one letter or digit",
+    );
+    expect(() => leaseConfig({ sshPublicKey: "ssh-ed25519 test", pond: "a".repeat(42) })).toThrow(
+      "pond must be 41 characters or fewer",
+    );
+  });
+
+  it("validates and normalizes exposed ports", () => {
+    const config = leaseConfig({
+      sshPublicKey: "ssh-ed25519 test",
+      exposedPorts: ["9090", "8080,443", "8080"],
+    });
+    expect(config.exposedPorts).toEqual(["443", "8080", "9090"]);
+    expect(() => leaseConfig({ sshPublicKey: "ssh-ed25519 test", exposedPorts: ["abc"] })).toThrow(
+      "must be a TCP port",
+    );
+    expect(() =>
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", exposedPorts: ["70000"] }),
+    ).toThrow("must be a TCP port");
+    expect(() =>
+      leaseConfig({
+        sshPublicKey: "ssh-ed25519 test",
+        exposedPorts: Array.from({ length: 11 }, (_, index) => String(8000 + index)),
+      }),
+    ).toThrow("at most 10 distinct ports");
   });
 
   it("validates desktop environment", () => {
@@ -303,6 +452,142 @@ describe("lease config", () => {
     expect(config.azureOSDisk).toBe("managed");
   });
 
+  it("uses Azure ARM defaults when requested", () => {
+    const config = leaseConfig({
+      provider: "azure",
+      architecture: "arm64",
+      os: "ubuntu:26.04",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(config.architecture).toBe("arm64");
+    expect(config.serverType).toBe("Standard_D96pds_v6");
+    expect(config.azureImage).toBe("Canonical:ubuntu-26_04-lts:server-arm64:latest");
+  });
+
+  it("filters Azure defaults for ephemeral-preview full caching", () => {
+    const arm = leaseConfig({
+      provider: "azure",
+      architecture: "arm64",
+      class: "standard",
+      azureOSDisk: "ephemeral-preview",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(arm.serverType).toBe("Standard_D32pds_v6");
+    const windows = leaseConfig({
+      provider: "azure",
+      target: "windows",
+      class: "standard",
+      azureOSDisk: "ephemeral-preview",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(windows.serverType).toBe("Standard_D8ads_v6");
+    const snapshot = leaseConfig({
+      provider: "azure",
+      target: "windows",
+      class: "standard",
+      azureSnapshot:
+        "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/snapshots/checkpoint-azure",
+      azureOSDisk: "ephemeral-preview",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(snapshot.serverType).toBe("Standard_D2ads_v6");
+  });
+
+  it("uses AWS ARM defaults when requested", () => {
+    const config = leaseConfig({
+      provider: "aws",
+      architecture: "arm64",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(config.serverType).toBe("c7g.16xlarge");
+  });
+
+  it("infers Azure ARM architecture from explicit ARM VM sizes", () => {
+    const config = leaseConfig({
+      provider: "azure",
+      serverType: "Standard_D32ps_v6",
+      os: "ubuntu:24.04",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(config.architecture).toBe("arm64");
+    expect(config.serverType).toBe("Standard_D32ps_v6");
+    expect(config.azureImage).toBe("Canonical:ubuntu-24_04-lts:server-arm64:latest");
+  });
+
+  it("infers AWS ARM architecture from explicit Graviton instance types", () => {
+    for (const serverType of [
+      "a1.large",
+      "c7g.16xlarge",
+      "c7gd.16xlarge",
+      "c7gn.16xlarge",
+      "g5g.xlarge",
+      "hpc7g.16xlarge",
+      "im4gn.16xlarge",
+      "is4gen.16xlarge",
+    ]) {
+      const config = leaseConfig({
+        provider: "aws",
+        serverType,
+        sshPublicKey: "ssh-ed25519 test",
+      });
+      expect(config.architecture).toBe("arm64");
+      expect(config.serverType).toBe(serverType);
+    }
+  });
+
+  it("rejects ARM leases outside supported Linux providers", () => {
+    expect(() =>
+      leaseConfig({
+        provider: "azure",
+        target: "windows",
+        architecture: "arm64",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("architecture=arm64 currently supports target=linux only");
+    expect(() =>
+      leaseConfig({
+        provider: "hetzner",
+        architecture: "arm64",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("architecture=arm64 currently supports provider=azure or provider=aws");
+  });
+
+  it("rejects explicit server types that do not match the requested architecture", () => {
+    expect(() =>
+      leaseConfig({
+        provider: "aws",
+        architecture: "arm64",
+        serverType: "c7a.48xlarge",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("architecture=arm64 requires an ARM64 AWS instance type");
+    expect(() =>
+      leaseConfig({
+        provider: "aws",
+        architecture: "amd64",
+        serverType: "c7g.16xlarge",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("architecture=amd64 requires an amd64 AWS instance type");
+    expect(() =>
+      leaseConfig({
+        provider: "azure",
+        architecture: "arm64",
+        serverType: "Standard_D96ds_v6",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("architecture=arm64 requires an ARM64 Azure VM size");
+    expect(() =>
+      leaseConfig({
+        provider: "azure",
+        architecture: "amd64",
+        serverType: "Standard_D96pds_v6",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("architecture=amd64 requires an amd64 Azure VM size");
+  });
+
   it("normalizes Azure OS disk requests", () => {
     expect(
       leaseConfig({
@@ -311,6 +596,13 @@ describe("lease config", () => {
         sshPublicKey: "ssh-ed25519 test",
       }).azureOSDisk,
     ).toBe("managed");
+    expect(
+      leaseConfig({
+        provider: "azure",
+        azureOSDisk: "ephemeral-preview",
+        sshPublicKey: "ssh-ed25519 test",
+      }).azureOSDisk,
+    ).toBe("ephemeral-preview");
     expect(
       leaseConfig({
         provider: "azure",
@@ -324,7 +616,7 @@ describe("lease config", () => {
         azureOSDisk: "premium",
         sshPublicKey: "ssh-ed25519 test",
       }),
-    ).toThrow("azureOSDisk must be auto, managed, or ephemeral");
+    ).toThrow("azureOSDisk must be auto, managed, ephemeral, or ephemeral-preview");
   });
 
   it("uses Worker Azure OS disk defaults when the request omits one", () => {

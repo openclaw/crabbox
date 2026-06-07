@@ -1,43 +1,57 @@
 # Jobs
 
-Crabbox jobs are named repo-local workflows. They let a repository describe a
-repeatable remote validation flow once, then run it with:
+Jobs are named, repo-local validation flows. A repository describes a repeatable
+remote run once in config, then anyone with the repo checked out runs it with a
+single command:
 
 ```sh
 crabbox job run <name>
 ```
 
-Jobs are intentionally generic. Crabbox owns cloud lease lifecycle, optional
-Actions hydration, dirty checkout sync, command execution, timing/log
-output, and cleanup. The repository owns the command string, package-manager
-setup, test environment variables, workflow names, and project-specific
-parallelism.
+A job expands into the same primitives you would invoke by hand — `warmup`,
+`actions hydrate`, `run`, and `stop` — with all the routing and run options
+filled in from config. Reach for a job when a flow needs more than one plain
+`crabbox run` invocation, especially when it must warm a lease and run Actions
+hydration before the actual command.
 
-Use jobs when a flow needs more than a single `crabbox run` command, especially
-when it needs a warmed lease plus Actions hydration before the actual command.
+The split of responsibilities is deliberate. Crabbox owns the cloud lease
+lifecycle, optional Actions hydration, dirty-checkout sync, command execution,
+timing and log output, and cleanup. The repository owns the command string,
+package-manager setup, test environment, workflow names, and any
+project-specific parallelism.
 
 ## Boundary
 
 Belongs in a Crabbox job:
 
-- provider, target OS, Windows mode, class/type, market, network;
-- lease timeout and stop policy;
-- whether to run Actions hydration and how long to wait;
-- the remote command and whether it should run through the shell;
+- provider, target OS, architecture, Windows mode, profile, class/type, market, network;
+- lease TTL, idle timeout, and stop policy;
+- whether to run Actions hydration and how long to wait for it;
+- the remote command and whether it runs through a shell;
 - command-adjacent options such as JUnit paths, downloads, and sync flags.
 
 Belongs in the repository command or workflow:
 
-- `pnpm install`, `npm ci`, `go test`, `xcodebuild`, or similar setup;
+- `pnpm install`, `npm ci`, `go test`, or similar dependency and build setup;
 - service startup, database setup, and secrets;
 - test sharding and project-specific environment variables;
-- any dependency on a particular package-manager lockfile.
+- anything tied to a particular package-manager lockfile.
+
+## Listing jobs
+
+```sh
+crabbox job list
+```
+
+Each line prints the job name plus its `provider`, `target`,
+`hydrate_actions`, and resolved `stop` policy. With no jobs configured it prints
+`no jobs configured`.
 
 ## Example
 
 ```yaml
 jobs:
-  openclaw-wsl2:
+  test-live:
     provider: aws
     target: windows
     windows:
@@ -56,90 +70,103 @@ jobs:
     command: >
       corepack enable &&
       pnpm install --frozen-lockfile &&
-      CI=1 NODE_OPTIONS=--max-old-space-size=4096
-      OPENCLAW_TEST_PROJECTS_PARALLEL=6
-      OPENCLAW_VITEST_MAX_WORKERS=1
-      pnpm test
+      CI=1 NODE_OPTIONS=--max-old-space-size=4096 pnpm test
     stop: always
 ```
 
-Inspect before running:
+Preview the planned commands without touching a box:
 
 ```sh
-crabbox job run --dry-run openclaw-wsl2
+crabbox job run --dry-run test-live
 ```
 
-Then run:
+Run it:
 
 ```sh
-crabbox job run openclaw-wsl2
+crabbox job run test-live
 ```
 
-Reuse an existing lease:
+Reuse an existing lease instead of warming a new one:
 
 ```sh
-crabbox job run --id blue-lobster openclaw-wsl2
+crabbox job run --id swift-crab test-live
 ```
 
 ## Lifecycle
 
-`crabbox job run` expands a job into normal Crabbox commands:
+`crabbox job run` expands the job into ordinary Crabbox commands and runs them in
+order:
 
-1. `warmup` creates a lease when `--id` is omitted.
-2. `actions hydrate` runs when `hydrate.actions: true`.
+1. `warmup` creates a lease when `--id` is omitted (it is reused when supplied).
+2. `actions hydrate` runs when `hydrate.actions: true` and `--no-hydrate` is not
+   set.
 3. `run` syncs the local checkout and executes the configured command.
 4. `stop` runs according to the stop policy.
 
-Set `hydrate.githubRunner: true` or pass `job run --github-runner` when the
-hydrate workflow needs repository secrets, OIDC, services, job containers, or
-unsupported Actions features.
-
-Omitting `hydrate.actions` is an explicit opt-out for that job. The nested
-`run` receives `--no-hydrate` so a global `actions.workflow` does not
+When the job omits `hydrate.actions`, that is an explicit opt-out: the nested
+`run` is passed `--no-hydrate` so a global `actions.workflow` does not
 auto-hydrate unexpectedly.
 
-The default stop policy is `auto`:
+Set `hydrate.githubRunner: true`, or pass `crabbox job run --github-runner`, when
+the hydrate workflow needs repository secrets, OIDC, services, job containers, or
+other Actions features that local SSH execution cannot reproduce. This registers
+the box as a GitHub self-hosted runner instead of driving the workflow over SSH.
 
-- created leases are stopped after the job;
-- existing leases passed with `--id` are left running.
+### Stop policy
 
-Other policies:
+The default policy is `auto`. Override it per run with `--stop`. Behavior
+depends on whether the job warmed a new lease or reused one passed with `--id`:
 
-- `always`: stop after success or failure.
-- `success`: stop only after success.
-- `failure`: stop only after failure.
-- `never`: leave the lease running.
+| Policy    | New lease (no `--id`)          | Existing lease (`--id`)        |
+| --------- | ------------------------------ | ------------------------------ |
+| `auto`    | stop after the run             | leave running                  |
+| `always`  | stop after success or failure  | stop after success or failure  |
+| `success` | stop only after success        | stop only after success        |
+| `failure` | stop only after failure        | stop only after failure        |
+| `never`   | leave running                  | leave running                  |
 
-## Config Fields
+A new lease created by the job is stopped under `auto`; a lease you supplied is
+left running so you can keep iterating against it.
 
-Target and capacity:
+## Config fields
+
+A job requires either a `command` or `syncOnly: true`; otherwise it fails to
+validate.
+
+### Target and capacity
 
 ```yaml
 provider: aws
-target: windows
+target: windows        # alias: targetOS
 windows:
-  mode: wsl2
+  mode: wsl2           # normal | wsl2; sets --windows-mode
 profile: project-check
 class: beast
-type: m8i.4xlarge
-market: on-demand
+architecture: amd64    # amd64 | arm64; arm64 is Linux-only on AWS/Azure
+type: m8i.4xlarge      # alias: serverType
+market: on-demand      # alias: capacity.market
 network: auto
 ttl: 6h
 idleTimeout: 240m
 desktop: false
+desktopEnv: xfce       # xfce | wayland | gnome
 browser: false
 code: false
 ```
 
-Hydration:
+`desktop`, `browser`, and `code` are tri-state: omit them to leave the default,
+or set `true`/`false` to force the capability on or off for the lease.
+
+### Hydration
 
 ```yaml
 hydrate:
   actions: true
+  githubRunner: false
   waitTimeout: 45m
   keepAliveMinutes: 240
 actions:
-  repo: owner/name
+  repo: example-org/my-app
   workflow: hydrate.yml
   job: hydrate
   ref: main
@@ -147,7 +174,10 @@ actions:
     - suite=full
 ```
 
-Run options:
+Each entry under `actions.fields` is passed to `actions hydrate` as a
+`--field key=value` workflow input.
+
+### Run options
 
 ```yaml
 shell: true
@@ -155,13 +185,18 @@ command: pnpm test
 noSync: false
 syncOnly: false
 checksum: false
-forceSyncLarge: true
+forceSyncLarge: false
 junit:
   - reports/junit.xml
 downloads:
   - out/report.json=artifacts/report.json
 stop: auto
 ```
+
+With `shell: true` the command is passed to a remote shell verbatim (so `&&`,
+pipes, and environment assignments work). Without it, the command is split on
+whitespace and executed directly. Each `downloads` entry is a
+`remote=local` pair pulled back after the run.
 
 ## Related
 
@@ -170,3 +205,5 @@ stop: auto
 - [Actions hydration](actions-hydration.md)
 - [Sync](sync.md)
 - [Run command](../commands/run.md)
+</content>
+</invoke>

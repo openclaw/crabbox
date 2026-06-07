@@ -97,8 +97,8 @@ jobs:
         run: npm run build
         working-directory: worker
 
-  plugin:
-    name: Plugin
+  scripts:
+    name: Scripts
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -111,8 +111,8 @@ jobs:
         with:
           node-version: 24
 
-      - name: Check
-        run: npm run check
+      - name: Test
+        run: node --test scripts/*.test.js
 
   docs:
     name: Docs
@@ -135,7 +135,7 @@ jobs:
           cache: false
 
       - name: Check docs
-        run: npm run docs:check
+        run: scripts/check-docs.sh
 
   release-check:
     name: Release Check

@@ -21,9 +21,10 @@ func (Provider) Aliases() []string {
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:        providerName,
+		Family:      "container",
 		Kind:        core.ProviderKindSSHLease,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser},
+		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCacheVolume},
 		Coordinator: core.CoordinatorNever,
 	}
 }

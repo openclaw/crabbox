@@ -3,59 +3,39 @@
 Read when:
 
 - choosing `provider: e2b`;
-- configuring E2B templates or sandbox workdirs;
+- configuring E2B templates, sandbox users, or workdirs;
 - changing `internal/providers/e2b`.
 
-E2B is a delegated run provider. Crabbox uses E2B's public sandbox REST API for
-sandbox lifecycle and the sandbox envd APIs for file upload and command
+E2B is a delegated-run provider. Crabbox uses E2B's public sandbox REST API for
+sandbox lifecycle and the per-sandbox `envd` APIs for file upload and command
 execution. E2B owns sandbox state and process transport; Crabbox owns local
 config, repo claims, sync manifests and guardrails, slugs, timing summaries, and
-normalized list/status rendering.
+normalized `list`/`status` rendering. There is no Crabbox SSH lease and no broker
+coordinator — the CLI talks to E2B directly.
 
-## When To Use
+## When to use
 
-Use E2B when the remote Linux sandbox should be owned by E2B and commands can
-run through the E2B sandbox APIs. Use AWS, Hetzner, Static SSH, or Daytona when
-you need Crabbox SSH access.
+Use E2B when the remote Linux sandbox should be owned by E2B and commands run
+through the E2B sandbox APIs. Choose AWS, Hetzner, Static SSH, or Daytona instead
+when you need direct SSH access to the box.
+
+E2B is Linux-only. Desktop, browser, code, Actions hydration, and SSH-based run
+options are not available.
 
 ## Commands
 
 ```sh
 crabbox warmup --provider e2b --e2b-template base
 crabbox run --provider e2b -- pnpm test
-crabbox run --provider e2b --id blue-lobster --shell 'pnpm install && pnpm test'
-crabbox status --provider e2b --id blue-lobster
-crabbox stop --provider e2b blue-lobster
+crabbox run --provider e2b --id swift-crab --shell 'pnpm install && pnpm test'
+crabbox status --provider e2b --id swift-crab --wait
+crabbox stop --provider e2b swift-crab
+crabbox list --provider e2b --json
 ```
 
-## Live Smoke
-
-Use a live smoke when changing E2B lifecycle, sync, status, or process-stream
-code. Keep the API key in `E2B_API_KEY`; do not pass it as a command-line
-argument.
-
-```sh
-export E2B_API_KEY=e2b_...
-go build -trimpath -o bin/crabbox ./cmd/crabbox
-
-bin/crabbox warmup --provider e2b --e2b-template base --timing-json
-lease=<slug-or-cbx_id-from-warmup-output>
-
-bin/crabbox status --provider e2b --id "$lease" --wait
-bin/crabbox run --provider e2b --id "$lease" --no-sync -- echo crabbox-e2b-ok
-bin/crabbox stop --provider e2b "$lease"
-```
-
-Expected results:
-
-- `warmup` prints `provider=e2b`, the Crabbox lease ID, slug, and E2B sandbox
-  ID.
-- `status --wait` reports the sandbox as ready.
-- The no-sync run prints `crabbox-e2b-ok`.
-- `stop` deletes the sandbox and removes the local lease claim.
-
-E2B currently caps sandbox timeouts at one hour. Crabbox clamps longer local
-lease TTLs to that provider limit when creating or connecting to an E2B sandbox.
+`warmup` always keeps the sandbox until an explicit `stop`. The lease ID, slug,
+or E2B sandbox ID printed by `warmup`/`run` can be passed to later commands via
+`--id`.
 
 ## Auth
 
@@ -63,11 +43,15 @@ lease TTLs to that provider limit when creating or connecting to an E2B sandbox.
 export E2B_API_KEY=e2b_...
 ```
 
-`CRABBOX_E2B_API_KEY` is also accepted and wins over `E2B_API_KEY`.
+`CRABBOX_E2B_API_KEY` is also accepted and takes precedence over `E2B_API_KEY`.
+Do not pass the key as a command-line argument.
 
-`E2B_API_URL` or `e2b.apiUrl` can override the default
-`https://api.e2b.app`. `E2B_DOMAIN` or `e2b.domain` can override the default
-sandbox domain `e2b.app`.
+Endpoint overrides:
+
+- `CRABBOX_E2B_API_URL` / `E2B_API_URL` or `e2b.apiUrl` override the default API
+  URL `https://api.e2b.app`.
+- `CRABBOX_E2B_DOMAIN` / `E2B_DOMAIN` or `e2b.domain` override the default sandbox
+  domain `e2b.app`.
 
 ## Config
 
@@ -82,13 +66,7 @@ e2b:
   user: ""
 ```
 
-Relative `e2b.workdir` values resolve inside the selected E2B user's home. The
-default user home is `/home/user`, `user: ubuntu` resolves under `/home/ubuntu`,
-and `user: root` resolves under `/root`. Absolute workdirs are used as-is.
-`e2b.user` must be a login name, not a path; values such as `../tmp` or
-`team/dev` are rejected before sandbox or process calls.
-
-Provider flags:
+Provider flags (each overrides the matching `e2b.*` config key):
 
 ```text
 --e2b-api-url
@@ -98,47 +76,91 @@ Provider flags:
 --e2b-user
 ```
 
+`template` also reads `CRABBOX_E2B_TEMPLATE`, `workdir` reads
+`CRABBOX_E2B_WORKDIR`, and `user` reads `CRABBOX_E2B_USER`.
+
+### Workdir and user resolution
+
+A relative `e2b.workdir` resolves inside the selected E2B user's home: the
+default user home is `/home/user`, `user: ubuntu` resolves under `/home/ubuntu`,
+and `user: root` resolves under `/root`. An absolute `workdir` is used as-is.
+
+`e2b.user` must be a login name, not a path. Values containing `/`, `\`, `.`,
+`..`, or a null byte (for example `../tmp` or `team/dev`) are rejected before any
+sandbox or process call.
+
+The resolved workdir must be a dedicated subdirectory. Broad system roots such as
+`/`, `/home`, `/tmp`, `/root`, `/usr`, `/var`, `/etc`, and similar are rejected
+before sandbox creation and before any sync that creates, deletes, or extracts
+files.
+
 ## Lifecycle
 
-1. Create or resolve a Crabbox-owned E2B sandbox from `e2b.template`.
-2. Store Crabbox metadata and a local repo claim.
+1. Create or resolve a Crabbox-owned E2B sandbox from `e2b.template` (default
+   `base`), with internet access enabled.
+2. Store Crabbox metadata on the sandbox and write a local repo claim.
 3. Build the Crabbox sync manifest, upload a gzipped archive into `/tmp`, and
-   extract it into `<e2b user home>/<e2b.workdir>` or an absolute configured
-   workdir.
-4. Execute commands through E2B's process stream in that workdir.
+   extract it into the resolved workdir.
+4. Execute the command through the E2B process stream in that workdir.
 5. Delete the sandbox on release unless the lease is kept.
+
+E2B caps sandbox timeouts at one hour. Crabbox clamps a longer local lease TTL to
+that limit when creating or connecting to a sandbox, and a TTL of zero falls back
+to five minutes.
 
 ## Capabilities
 
 - SSH: no.
-- Crabbox sync: yes, archive sync through E2B file and command APIs.
-- Desktop/browser/code: no Crabbox VNC/code surface.
+- Crabbox sync: yes, archive sync through the E2B file and process APIs.
+- Desktop / browser / code: no.
 - Actions hydration: no.
-- Coordinator: no.
+- Coordinator (broker): no — always direct from the CLI.
+
+## Live smoke
+
+Run a live smoke when changing E2B lifecycle, sync, status, or process-stream
+code. Keep the API key in the environment; never pass it as an argument.
+
+```sh
+export E2B_API_KEY=e2b_...
+go build -trimpath -o bin/crabbox ./cmd/crabbox
+
+bin/crabbox warmup --provider e2b --e2b-template base --timing-json
+lease=<slug-or-cbx_id-from-warmup-output>
+
+bin/crabbox status --provider e2b --id "$lease" --wait
+bin/crabbox run --provider e2b --id "$lease" --no-sync -- echo crabbox-e2b-ok
+bin/crabbox stop --provider e2b "$lease"
+bin/crabbox list --provider e2b --json
+```
+
+Expected results:
+
+- `warmup` prints `provider=e2b`, the Crabbox lease ID, slug, and E2B sandbox ID.
+- `status --wait` reports the sandbox as ready.
+- The no-sync run prints `crabbox-e2b-ok`.
+- `stop` deletes the sandbox and removes the local lease claim.
+- The final `list` shows no Crabbox-owned sandbox remaining.
 
 ## Gotchas
 
-- IDs can be Crabbox slugs, `cbx_...` lease IDs, or E2B sandbox IDs in raw or
-  `e2b_<sandboxID>` form.
-- Raw and synthetic E2B sandbox IDs are accepted only when the sandbox metadata
-  marks it as Crabbox-owned.
-- `--class` and `--type` are rejected because E2B template contents own sandbox
-  resources.
-- E2B workdirs must resolve to dedicated absolute directories. Broad roots such
-  as `/`, `/home`, and `/tmp` are rejected before sandbox creation or before
-  sync creates, deletes, or extracts files.
-- `--checksum` is rejected because E2B does not expose a Crabbox SSH/rsync
-  target. Large-sync guardrails still apply, and `--force-sync-large` is
-  honored for intentional large archive syncs.
-- Use `--sync-only` when you want to pre-upload the archive into a kept sandbox
-  before a later command.
-- `--script`, `--script-stdin`, `--fresh-pr`, local stdout/stderr captures,
-  `--capture-on-fail`, and `--download` are rejected because E2B owns command
-  transport and Crabbox has no SSH target for those paths.
-- `--keep-on-failure` keeps a newly created failed sandbox instead of deleting
-  it after the command, subject to the sandbox timeout.
-- If a live smoke should prove cleanup, run `crabbox list --provider e2b --json`
-  after `stop` or a non-kept run and verify no Crabbox-owned sandbox remains.
+- `--id` accepts a Crabbox slug, a `cbx_...` lease ID, or an E2B sandbox ID in
+  raw or `e2b_<sandboxID>` form. Raw and synthetic sandbox IDs are honored only
+  when the sandbox metadata marks it as Crabbox-owned.
+- `--class` and `--type` are rejected; the E2B template owns sandbox resources.
+- `--checksum` is rejected because there is no Crabbox SSH/rsync target. Large-
+  sync preflight guardrails still apply.
+- Because E2B does not declare archive-sync as a generic feature, the shared
+  delegated guards reject `--sync-only` and `--force-sync-large`, along with
+  `--full-resync`, `--script`/`--script-stdin`, `--fresh-pr`, `--env-helper`,
+  local stdout/stderr captures (`--capture-stdout`, `--capture-stderr`,
+  `--capture-on-fail`), `--download`, `--artifact-glob`, `--emit-proof`, and
+  `--stop-after`. Crabbox owns command transport for E2B and has no SSH target
+  for those paths.
+- `--keep-on-failure` keeps a newly created sandbox after a failed command
+  instead of deleting it, subject to the one-hour sandbox timeout.
+- To prove cleanup in a smoke, run `crabbox list --provider e2b --json` after a
+  `stop` or a non-kept run and confirm no Crabbox-owned sandbox remains.
 
 Related docs:
 

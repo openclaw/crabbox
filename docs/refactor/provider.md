@@ -2,75 +2,53 @@
 
 Read when:
 
-- refactoring provider dispatch, direct lifecycle, or delegated run behavior;
-- rebasing the Daytona or Islo provider pull requests;
+- refactoring provider dispatch, direct lifecycle, or delegated-run behavior;
 - adding a new provider backend;
 - changing provider config, provider flags, coordinator routing, list/status/stop,
   cleanup, or capability validation.
 
 For step-by-step implementation guidance, read
-[Provider Backends](../provider-backends.md). This document captures design
-context and migration notes; the authoring guide is the handrail for new code.
+[Provider Backends](../provider-backends.md). This document captures the design
+intent behind the provider seam and records what has shipped versus what is still
+proposed. The authoring guide is the handrail for new code; this file is the
+rationale and the migration ledger.
+
+> Status note: the provider seam described here has landed. The 24 built-in
+> provider packages under `internal/providers/<name>` all register through
+> `internal/providers/all`, and the core interfaces live in
+> `internal/cli/provider_backend.go`. Sections below mark what shipped, what
+> shipped differently than first sketched, and what remains a future option.
 
 ## Context
 
 Crabbox has two real execution models.
 
-The first model is SSH lease execution. Hetzner, AWS, and static SSH produce a
-machine reachable through SSH. Crabbox owns the workflow: claim, sync, command
-wrapping, stdout/stderr streaming, result collection, timing, heartbeat, and
-release.
+The first is **SSH-lease execution**. A provider hands Crabbox a machine
+reachable over SSH; Crabbox owns the workflow: claim, sync, command wrapping,
+stdout/stderr streaming, result collection, timing, heartbeat, and release.
+Hetzner, AWS, Azure, GCP, static SSH, and several managed-sandbox providers
+(Daytona, Namespace, RunPod, and others) fit this shape.
 
-The second model is delegated execution. Blacksmith Testboxes, Daytona `run`,
-and Islo own machine setup or file/workspace transport, command execution, and
-output streaming. Crabbox keeps provider selection, config, local claims/slugs,
-and timing summaries, but it does not rsync into these providers.
+The second is **delegated execution**. The provider owns machine setup or
+file/workspace transport, command execution, and output streaming. Crabbox keeps
+provider selection, config, local claims/slugs, and timing summaries, but it does
+not rsync into these providers. Blacksmith Testbox, Islo, Modal, E2B, and the
+other sandbox/proof runners fit this shape.
 
-Relevant pull requests:
+The original problem was provider-name branching spread through command handlers
+and helper paths. Adding `isDaytonaProvider`/`isIsloProvider`-style branches would
+have worked short term, but every new provider would touch `run`, `warmup`,
+`list`, `status`, `stop`, `cleanup`, config, capability validation, and docs.
 
-- Daytona provider: https://github.com/openclaw/crabbox/pull/32
-- Islo SDK provider: https://github.com/openclaw/crabbox/pull/24
-- older Islo CLI provider: https://github.com/openclaw/crabbox/pull/16
-
-SDK/source checks:
-
-- Daytona upstream ships a generated Go API client at
-  `github.com/daytonaio/daytona/libs/api-client-go` and a toolbox SDK at
-  `github.com/daytonaio/daytona/libs/sdk-go`. Use both through narrow
-  Crabbox-owned adapters: the generated client for list/get/start/delete,
-  labels, last activity, and SSH access; the SDK/toolbox for sandbox create,
-  file upload, and command execution.
-- Daytona snapshot creation does not accept CPU/memory/disk resources. Resource
-  fields live on image creation. Snapshot-only mode must not expose resource
-  flags that become no-ops.
-- Daytona JWT auth uses an organization header in the generated client. Require
-  `DAYTONA_ORGANIZATION_ID` for JWT auth unless upstream docs prove the selected
-  account flow does not need it.
-- Islo's Go SDK is young, low-adoption, generated, and has no tagged versions in
-  the checked source. It is acceptable behind a narrow Crabbox-owned adapter only
-  if the provider is accepted at all.
-- Islo's SDK execution stream does not expose a clean typed streaming iterator
-  today. Keep the custom SSE consumer from the PR until upstream provides a
-  usable stream API.
-- https://github.com/openclaw/crabbox/pull/24 superseded
-  https://github.com/openclaw/crabbox/pull/16 but was closed for product-fit and
-  scope concerns. Rebase it only as a delegated backend, not as an SSH-like
-  provider.
-
-The current implementation has provider checks spread through command handlers
-and helper paths. More `isDaytonaProvider` and `isIsloProvider` branches would
-work short term, but every new provider would touch `run`, `warmup`, `list`,
-`status`, `stop`, `cleanup`, config, capability validation, and docs.
-
-The refactor should make providers supply small backends while Crabbox core owns
-the workflows.
+The refactor makes providers supply small backends while Crabbox core owns the
+workflows.
 
 ## Design Principle
 
 Providers do not own commands. Providers configure backends. Core commands own
 workflow orchestration.
 
-The command flow should look like this:
+The command flow looks like this:
 
 ```go
 backend, err := loadBackend(cfg, runtime)
@@ -94,55 +72,54 @@ default:
 }
 ```
 
-Provider implementations should not receive `App`. They receive a narrow
-runtime and typed request structs.
+Provider implementations do not receive the CLI `App`. They receive a narrow
+`Runtime` and typed request structs.
 
 ## Goals
 
-- Keep all current providers working.
-- Rebase Daytona as an SSH lease backend.
-- Rebase Islo as a delegated run backend.
-- Keep Hetzner/AWS broker behavior intact when a coordinator is configured.
-- Make coordinator routing a wrapper around SSH lease backends, not provider
-  branching inside each command.
+- Keep every provider working without per-command provider branches.
+- Make coordinator (broker) routing a wrapper around SSH-lease backends, not a
+  conditional baked into each command.
 - Register built-in provider flags before parsing so provider-specific flags do
   not fail before provider selection.
-- Keep built-in providers compiled into the Go binary.
-- Avoid Go dynamic plugins.
-- Leave an external process plugin protocol as a later extension point.
+- Keep built-in providers compiled into the Go binary; avoid Go dynamic plugins.
+- Leave an external-process plugin protocol as a later extension point.
 - Keep provider credentials out of repo config and command arguments.
 
 ## Current Implementation State
 
-The first landing implements the provider seam for the existing services:
+The provider seam has shipped for the full provider set.
 
 - `warmup`, `run`, `list`, `status`, `stop`, `cleanup`, lease resolution, and
-  best-effort touch now load a backend instead of branching on provider names.
+  best-effort touch all load a backend through `loadBackend` instead of branching
+  on provider names.
 - Built-in providers live under `internal/providers/<name>` and are imported by
-  `cmd/crabbox` through `internal/providers/all`.
-- Hetzner, AWS, static SSH, and the coordinator wrapper implement
-  `SSHLeaseBackend`.
-- Blacksmith implements `DelegatedRunBackend` and uses injected
-  `CommandRunner` instead of package-level `exec.Command`.
-- Command rendering for `list` and `status` is core-owned for both backend
-  kinds.
-- `App` no longer owns direct Hetzner/AWS/static acquire or resolve helpers.
+  `cmd/crabbox` through the blank-import barrel `internal/providers/all`.
+- SSH-lease providers (Hetzner, AWS, Azure, GCP, static SSH, Daytona, and others)
+  implement `SSHLeaseBackend`. The coordinator wrapper also implements it.
+- Delegated providers (Blacksmith Testbox, Islo, Modal, E2B, and others)
+  implement `DelegatedRunBackend` and use the injected `CommandRunner` instead of
+  package-level `exec.Command`.
+- Command rendering for `list` and `status` is core-owned for both backend kinds.
+
+For the up-to-date provider/capability matrix, run `crabbox providers` or
+`crabbox providers --json`; the user-facing inventory lives in
+[Providers](../features/providers.md).
 
 ## Non-Goals
 
 - No runtime-loaded Go `.so` plugins.
 - No provider marketplace in this refactor.
-- No coordinator support for Daytona or Islo in the first pass.
 - No generic remote filesystem abstraction.
-- No attempt to make Islo look like SSH unless Islo later ships a stable SSH
-  contract.
-- No VNC, screenshot, desktop, browser, code portal, or Actions runner support
-  for Daytona/Islo unless a provider backend explicitly implements those
-  features later.
+- No attempt to make a delegated provider look like SSH unless it later ships a
+  stable SSH contract.
+- No VNC/screenshot/desktop/browser/code-portal/Actions-runner support for a
+  provider unless its backend explicitly declares the matching feature.
 
 ## Provider And Backend Interfaces
 
-`Provider` is the registration and configuration layer:
+`Provider` is the registration and configuration layer
+(`internal/cli/provider_backend.go`):
 
 ```go
 type Provider interface {
@@ -165,9 +142,9 @@ type Backend interface {
 }
 ```
 
-Only two backend shapes are needed initially.
+Two backend shapes carry the core lifecycle.
 
-### SSH Lease Backend
+### SSH-Lease Backend
 
 ```go
 type SSHLeaseBackend interface {
@@ -181,10 +158,10 @@ type SSHLeaseBackend interface {
 }
 ```
 
-This is for providers that can hand Crabbox an SSH target. Core owns sync and
-command execution after acquisition.
+For providers that can hand Crabbox an SSH target. Core owns sync and command
+execution after acquisition.
 
-### Delegated Run Backend
+### Delegated-Run Backend
 
 ```go
 type DelegatedRunBackend interface {
@@ -198,38 +175,51 @@ type DelegatedRunBackend interface {
 }
 ```
 
-This is for providers that own execution. Core does not call SSH, rsync, or
-remote command wrapping for these providers. Delegated providers may stream
+For providers that own execution. Core does not call SSH, rsync, or remote
+command wrapping for these providers. Delegated providers may stream
 stdout/stderr during `Run`, but they should not own normal `list` or `status`
-rendering when a normalized value can describe the result. If a provider has a
+rendering when a normalized view can describe the result. If a provider has a
 lossy or native-only status shape, keep that loss inside its backend and return
-the closest status view instead of printing directly from command code.
+the closest `StatusView` instead of printing directly from command code.
 
 ### Optional Backend Interfaces
 
-Cleanup should be optional:
+Several capabilities are opt-in: a provider implements an extra interface only
+when it supports that feature. These have shipped alongside the two core shapes:
 
 ```go
 type CleanupBackend interface {
 	Backend
-
 	Cleanup(ctx context.Context, req CleanupRequest) error
 }
-```
 
-Provider pricing can be added later as another optional interface:
+type DoctorProvider interface {
+	Provider
+	ConfigureDoctor(cfg Config, rt Runtime) (DoctorBackend, error)
+}
 
-```go
-type PricingBackend interface {
+type DoctorBackend interface {
 	Backend
+	Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, error)
+}
 
-	Price(ctx context.Context, req PriceRequest) (HourlyPrice, error)
+// JSONListBackend is a narrow compatibility escape hatch for existing
+// script-facing JSON schemas (coordinator pool machines, Blacksmith table rows).
+type JSONListBackend interface {
+	Backend
+	ListJSON(ctx context.Context, req ListRequest) (any, error)
 }
 ```
+
+Provider-native checkpoints/images are also expressed through optional hooks
+(`NativeCheckpointProvider`, `NativeCheckpointForkProvider`) rather than core
+provider-name checks, and config routing/server-type defaults through
+`ProviderRouter` and `ProviderServerTypeProvider`. New providers implement only
+the interfaces they need.
 
 ## Runtime
 
-Backends should receive a narrow runtime instead of `App`:
+Backends receive a narrow runtime instead of `App`:
 
 ```go
 type Runtime struct {
@@ -260,23 +250,25 @@ type LocalCommandResult struct {
 }
 ```
 
-Provider modules should not reach into command state, global command handlers,
-or `App` methods. If they need a helper, move that helper into a small shared
-package or pass it through a request/runtime field.
+Provider modules do not reach into command state, global command handlers, or
+`App` methods. If they need a helper, it is moved into a small shared package or
+passed through a request/runtime field.
 
-Tests can then inject writers, clocks, fake HTTP clients, and fake backends
+This lets tests inject writers, clocks, fake HTTP clients, and fake backends
 without constructing a full CLI app. `CommandRunner` is the seam for delegated
-CLI providers such as Blacksmith so tests do not depend on package-level
-`exec.Command` hooks.
+CLI providers such as Blacksmith, so tests do not depend on package-level
+`exec.Command` hooks. `loadBackend` fills in real defaults (`io.Discard` writers,
+`realClock`, an `exec`-backed runner) when fields are left nil.
 
 ## Provider Spec
 
-Provider capabilities should be declarative and typed, not a growing list of
+Provider capabilities are declarative and typed, not a growing list of
 provider-name checks.
 
 ```go
 type ProviderSpec struct {
 	Name        string
+	Family      string
 	Kind        ProviderKind
 	Targets     []TargetSpec
 	Features    FeatureSet
@@ -301,55 +293,65 @@ type TargetSpec struct {
 	OS          string
 	WindowsMode string
 }
+```
 
-type Feature string
+`Family` groups related adapters (for example `azure` and the Azure dynamic
+sessions adapter share `Family: "azure"`).
 
+The feature set has grown beyond the original sketch as new product surfaces
+landed:
+
+```go
 const (
 	FeatureSSH         Feature = "ssh"
 	FeatureCrabboxSync Feature = "crabbox-sync"
+	FeatureArchiveSync Feature = "archive-sync"
 	FeatureCleanup     Feature = "cleanup"
 	FeatureDesktop     Feature = "desktop"
 	FeatureBrowser     Feature = "browser"
 	FeatureCode        Feature = "code"
 	FeatureTailscale   Feature = "tailscale"
+	FeatureURLBridge   Feature = "url-bridge"
+	FeatureCheckpoint  Feature = "workspace-checkpoint"
+	FeatureFork        Feature = "workspace-fork"
+	FeatureRestore     Feature = "workspace-restore"
+	FeatureSnapshot    Feature = "provider-snapshot"
+	FeatureRunProof    Feature = "run-proof"
+	FeatureRunSession  Feature = "run-session"
 )
 ```
 
-Do not model Actions runner hydration as an AWS provider feature. That workflow
-is core-over-SSH after a Linux lease exists. Validate `--actions-runner` as
-"requires `SSHLeaseBackend`, target Linux, and not delegated" unless the provider
-later owns a distinct hosted-runner product.
+Actions-runner hydration is **not** modeled as a provider feature. That workflow
+is core-over-SSH after a Linux or Windows lease exists, so `--actions-runner`
+validates as "requires `SSHLeaseBackend`, target linux or windows, and not
+`local-container`" rather than as a provider capability.
 
-Initial provider matrix:
-
-```text
-provider            kind           coordinator  features
-hetzner             ssh-lease      supported    ssh, crabbox-sync, cleanup, tailscale
-aws                 ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code
-ssh                 ssh-lease      never        ssh, crabbox-sync, desktop, browser, code
-daytona             ssh-lease      never        ssh, crabbox-sync
-blacksmith-testbox  delegated-run  never        delegated execution
-islo                delegated-run  never        delegated execution
-```
-
-Initial target matrix:
+The shipped matrix is authoritative in code (each adapter's `Spec()`); a
+representative slice:
 
 ```text
-hetzner             linux
-aws                 linux, windows/normal, windows/wsl2, macos
-ssh                 linux, windows/normal, windows/wsl2, macos
-daytona             linux
-blacksmith-testbox  provider-owned linux
-islo                provider-owned linux
+provider                kind           coordinator  features
+hetzner                 ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code, tailscale
+aws                     ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code
+azure                   ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code, tailscale
+gcp                     ssh-lease      supported    ssh, crabbox-sync, cleanup, tailscale
+ssh                     ssh-lease      never        ssh, crabbox-sync, desktop, browser, code
+daytona                 ssh-lease      never        ssh, crabbox-sync
+blacksmith-testbox      delegated-run  never        run-proof, run-session
+islo                    delegated-run  never        url-bridge
 ```
 
-Capability errors should come from `ProviderSpec` plus provider-specific
-validation:
+Target lists are declarative too: Hetzner is Linux-only; AWS, Azure, GCP, and
+static SSH declare Linux plus Windows (normal + wsl2) and macOS; the delegated
+sandbox providers are Linux-only.
+
+Capability errors come from `ProviderSpec` plus provider-specific validation, for
+example:
 
 ```text
 provider=daytona managed provisioning supports target=linux only
-desktop/VNC is not supported for provider=islo; islo sandboxes are headless
---actions-runner requires an SSH lease provider with target=linux
+desktop/VNC is not supported for provider=islo
+--actions-runner requires an SSH lease provider
 ```
 
 ## Registry
@@ -382,68 +384,56 @@ func ProviderFor(name string) (Provider, error) {
 }
 ```
 
-Canonical provider names:
+Each provider package registers itself in its `init`, and
+`internal/providers/all` blank-imports every package so a single import of `all`
+wires the whole registry. Canonical names and compatibility aliases come from
+`Name()`/`Aliases()`, for example:
 
 ```text
-hetzner
-aws
-ssh
-blacksmith-testbox
-daytona
-islo
-```
-
-Compatibility aliases:
-
-```text
-static       -> ssh
-static-ssh   -> ssh
-blacksmith   -> blacksmith-testbox
+ssh                 # aliases: static, static-ssh
+blacksmith-testbox  # alias: blacksmith
+gcp                 # aliases: google, google-cloud
+local-container     # aliases: docker, container, local-docker
 ```
 
 Docs should use canonical names.
 
 ## On-Disk Layout
 
-Use one folder per provider for registration, provider-specific flags, provider
-specs, and backend configuration:
+One folder per provider for registration, provider-specific flags, the provider
+spec, and backend configuration:
 
 ```text
-internal/providers/all                 # imports every built-in provider
-internal/providers/hetzner             # Hetzner provider registration/spec
-internal/providers/aws                 # AWS provider registration/spec
-internal/providers/ssh                 # static SSH provider registration/spec
-internal/providers/blacksmith          # Blacksmith provider registration/spec
-internal/providers/daytona             # Daytona provider registration/spec
-internal/providers/islo                # Islo provider registration/spec
+internal/providers/all                 # blank-imports every built-in provider
+internal/providers/hetzner             # Hetzner provider + SSH lease backend
+internal/providers/aws                 # AWS provider + SSH lease backend
+internal/providers/azure               # Azure provider + SSH lease backend
+internal/providers/gcp                 # GCP provider + SSH lease backend
+internal/providers/ssh                 # static SSH provider + backend
+internal/providers/blacksmith          # delegated Blacksmith backend
+internal/providers/daytona             # Daytona SSH lease + delegated run backend
+internal/providers/islo                # Islo delegated backend
+internal/providers/shared              # shared direct SSH backend helpers
+...                                     # one folder per remaining adapter
 internal/cli/provider_backend.go       # core interfaces, registry, requests
 internal/cli/provider_coordinator.go   # brokered coordinator lease backend
-internal/providers/shared              # shared direct SSH backend helpers
-internal/providers/aws/backend.go      # AWS SSH lease backend implementation
-internal/providers/hetzner/backend.go  # Hetzner SSH lease backend implementation
-internal/providers/ssh/backend.go      # static SSH lease backend implementation
-internal/providers/blacksmith          # delegated Blacksmith backend implementation
-internal/providers/daytona             # Daytona SSH + delegated SDK backend
-internal/providers/islo                # Islo delegated backend implementation
-internal/cli/hcloud.go                 # Hetzner API client
-internal/cli/aws.go                    # AWS API client
-internal/cli/static.go                 # static SSH target mapping and flags
 ```
 
-The backend implementations now live with their provider packages. The exported
-contract between provider folders and CLI stays deliberately small: `Provider`,
-`ProviderSpec`, request/result/view types, `Runtime`, and narrow helpers for
-claims, labels, sync preflight, SSH key storage, and timing output. Keep command
-orchestration in `internal/cli`; move provider lifecycle/client code into the
-provider folder.
+The exported contract between provider folders and the CLI stays deliberately
+small: `Provider`, `ProviderSpec`, the request/result/view types, `Runtime`, and
+narrow helpers for claims, labels, sync preflight, SSH-key storage, and timing
+output. Command orchestration stays in `internal/cli`; provider lifecycle and
+client code lives in the provider folder. Daytona, for example, keeps its
+generated API client and toolbox upload entirely inside
+`internal/providers/daytona`.
 
 ## Flag Parsing
 
-Go's `flag` package rejects unknown flags during parse. This means
-provider-specific flags must be registered before `flag.Parse`, even though the
-selected provider is only known after config and flags are merged.
+Go's `flag` package rejects unknown flags during parse, so provider-specific
+flags must be registered before `flag.Parse`, even though the selected provider
+is only known after config and flags are merged.
 
-Use this first-pass strategy for built-in providers:
+The first-pass strategy for built-in providers:
 
 1. register common command flags;
 2. iterate over all registered built-in providers and call `RegisterFlags`;
@@ -454,211 +444,139 @@ Use this first-pass strategy for built-in providers:
 7. apply only the selected provider's parsed flag values;
 8. configure the backend.
 
-Example:
+Flags for non-selected providers are parsed but ignored. Provider `ApplyFlags`
+must mutate config only for flags actually present in argv (using `flagWasSet` or
+equivalent): the values returned by `RegisterFlags` exist so the parser and help
+text know the flag shape, and they must not overwrite repo config just because
+every built-in provider flag was registered up front.
 
-```go
-providerFlagValues := RegisterAllProviderFlags(fs, defaults)
-if err := parseFlags(fs, args); err != nil {
-	return err
-}
+A two-pass parser is reserved for a future where external-process providers
+define flags dynamically: pass one would parse only safe global selectors such as
+`--provider` and `--config`, load provider metadata, register provider flags, and
+pass two would parse the original args.
 
-cfg, err := loadConfig()
-if err != nil {
-	return err
-}
-applyCommonFlags(&cfg, fs, commonValues)
-
-provider, err := ProviderFor(cfg.Provider)
-if err != nil {
-	return err
-}
-if err := ApplySelectedProviderFlags(provider, &cfg, fs, providerFlagValues); err != nil {
-	return err
-}
-
-backend, err := provider.Configure(cfg, runtime)
-```
-
-Flags for non-selected providers are parsed but ignored.
-
-Provider `ApplyFlags` methods must only mutate config for flags that were
-actually present in argv, using `flagWasSet` or equivalent. The values passed to
-`RegisterFlags` exist so the parser and help text know the flag shape; they must
-not overwrite repo config just because every built-in provider flag was
-registered up front.
-
-A two-pass parser should only be introduced if external process providers need
-to define flags dynamically. In that future design, pass one parses only safe
-global selectors such as `--provider` and `--config`, loads provider metadata,
-registers provider flags, and pass two parses the original args.
-
-Provider-specific flags:
-
-```text
---blacksmith-org
---blacksmith-workflow
---blacksmith-job
---blacksmith-ref
-
---daytona-snapshot
---daytona-target
---daytona-user
---daytona-work-root
---daytona-ssh-access-minutes
-
---islo-image
---islo-workdir
---islo-gateway-profile
-```
-
-Avoid exposing provider flags that cannot work. For Daytona, do not expose
+Provider flags follow a `--<provider>-<field>` convention, for example
+`--daytona-snapshot`, `--blacksmith-workflow`, `--islo-image`. Providers should
+not expose flags that cannot work; Daytona, for instance, does not expose
 CPU/memory/disk overrides while the integration is snapshot-only and Daytona
-rejects resource fields with snapshots. Either implement image mode fully or
-hide resource overrides.
+rejects resource fields on snapshots.
 
 ## Backend Loading
 
-All commands should use the same loading shape:
+All commands use the same loading shape (`loadBackend` in
+`internal/cli/provider_backend.go`):
 
 ```go
 func loadBackend(cfg Config, rt Runtime) (Backend, error) {
+	// rt defaults (writers, clock, exec runner) filled in here when nil.
 	provider, err := ProviderFor(cfg.Provider)
 	if err != nil {
 		return nil, err
 	}
+	cfg.Provider = provider.Name()
 	backend, err := provider.Configure(cfg, rt)
 	if err != nil {
 		return nil, err
 	}
 	if ssh, ok := backend.(SSHLeaseBackend); ok && shouldUseCoordinator(cfg, provider.Spec()) {
-		coord, err := newCoordinatorClientForBackend(cfg)
+		coord, _, err := newCoordinatorClient(cfg)
 		if err != nil {
 			return nil, err
 		}
-		return NewCoordinatorLeaseBackend(coord, ssh, rt), nil
+		return &coordinatorLeaseBackend{spec: provider.Spec(), cfg: cfg, direct: ssh, coord: coord, rt: rt}, nil
 	}
 	return backend, nil
 }
 ```
 
 `Configure` builds direct provider clients and validates provider auth early.
-Provider flag registration and `ApplyFlags` happen before this function, during
-normal config assembly. `loadBackend` should not know about `flag.FlagSet` or
-raw argv.
-Examples:
-
-- Hetzner reads `HCLOUD_TOKEN` / `HETZNER_TOKEN`.
-- AWS loads AWS SDK config.
-- Daytona reads `DAYTONA_API_KEY` or `DAYTONA_JWT_TOKEN`.
-- Islo validates `ISLO_API_KEY` before SDK use.
-- Blacksmith verifies enough local config to build CLI args.
+Provider flag registration and `ApplyFlags` happen earlier, during config
+assembly; `loadBackend` never sees `flag.FlagSet` or raw argv. Examples of what
+`Configure` validates: Hetzner reads `HCLOUD_TOKEN` / `HETZNER_TOKEN`; AWS loads
+SDK config; Daytona reads `DAYTONA_API_KEY` or `DAYTONA_JWT_TOKEN`; Islo
+validates its API key before SDK use; Blacksmith verifies enough local config to
+build CLI args.
 
 ## Coordinator Wrapper
 
-Coordinator routing should be a wrapper around `SSHLeaseBackend`, not a special
+Coordinator (broker) routing is a wrapper around `SSHLeaseBackend`, not a special
 provider path inside every command.
 
 ```go
 func shouldUseCoordinator(cfg Config, spec ProviderSpec) bool {
-	if spec.Coordinator != CoordinatorSupported {
-		return false
-	}
-	return cfg.Coordinator != ""
+	return spec.Coordinator == CoordinatorSupported && strings.TrimSpace(cfg.Coordinator) != ""
 }
 ```
 
-Wrapper shape:
+The wrapper (`coordinatorLeaseBackend`, `internal/cli/provider_coordinator.go`)
+implements `SSHLeaseBackend`:
 
-```go
-type CoordinatorLeaseBackend struct {
-	Coord  *CoordinatorClient
-	Direct SSHLeaseBackend
-	RT     Runtime
-}
-
-func NewCoordinatorLeaseBackend(coord *CoordinatorClient, direct SSHLeaseBackend, rt Runtime) SSHLeaseBackend {
-	return CoordinatorLeaseBackend{Coord: coord, Direct: direct, RT: rt}
-}
-```
-
-The wrapper implements `SSHLeaseBackend`:
-
-- `Acquire` calls the coordinator lease API and maps `CoordinatorLease` to
+- `Acquire` calls the coordinator lease API and maps the coordinator lease to a
   `LeaseTarget`;
-- `Resolve` calls coordinator get/slug lookup and maps to `LeaseTarget`;
+- `Resolve` calls coordinator get/slug lookup;
 - `ReleaseLease` calls coordinator release;
-- `Touch` calls heartbeat or idle update paths as appropriate;
-- `List` can call coordinator pool/admin routes when available.
+- `Touch` calls heartbeat or idle-update paths;
+- `List` calls coordinator pool/admin routes.
 
-In brokered mode, the wrapper owns key creation, coordinator lease creation,
-lease lookup, heartbeat, run recorder attachment, and lease release. It must not
-fall through to direct Hetzner/AWS acquire, resolve, touch, release, list, or
-cleanup calls after the coordinator is selected. The wrapped direct backend
-exists only to carry the provider spec and direct-mode implementation for the
-non-brokered path.
+In brokered mode the wrapper owns key creation, coordinator lease creation, lease
+lookup, heartbeat, run-recorder attachment, and lease release. It must not fall
+through to the direct provider's acquire/resolve/touch/release/list/cleanup once
+the coordinator is selected; the wrapped direct backend exists only to carry the
+provider spec and the non-brokered implementation. Brokered list/pool still
+enforces the existing admin-token requirement; the wrapper must not silently
+downgrade brokered pool/list to a direct provider listing.
 
-Brokered list/pool commands still need the existing admin-token enforcement.
-Either the command validates that before calling `List`, or
-`CoordinatorLeaseBackend.List` returns the same missing-admin-token error. The
-wrapper must not silently downgrade brokered pool/list to direct provider list.
-
-Initial coordinator modes:
-
-```text
-hetzner             supported
-aws                 supported
-ssh                 never
-daytona             never
-blacksmith-testbox  never
-islo                never
-```
-
-Daytona and Islo can gain broker support later by changing their spec and
-implementing Worker-side provider support. That is out of scope for rebasing
-the current PRs.
+Only `hetzner`, `aws`, `azure`, and `gcp` declare `Coordinator: supported`; every
+other adapter is `Coordinator: never` and always runs direct-from-CLI. Even the
+four brokerable providers run direct unless a broker URL is configured
+(`CRABBOX_COORDINATOR` / `config set-broker`). Adding broker support to another
+provider means changing its spec and implementing Worker-side support.
 
 ## Request And Result Types
 
-`Provider.Configure` is the only place that should receive full `Config`.
-Provider modules should decode their typed config, create provider clients, and
-store those on the configured backend. Requests then carry command intent, repo
-state, and options. They should not carry `App`, and they should not carry full
-`Config` unless a migration step still needs compatibility with old helpers.
+`Provider.Configure` is the only place that receives the full `Config`. Provider
+modules decode their typed config, create clients, and store them on the backend.
+Requests then carry command intent, repo state, and options — not `App` and not
+`Config`.
 
 ```go
 type LeaseOptions struct {
-	TargetOS        string
-	WindowsMode     string
-	Class           string
-	ServerType      string
-	IdleTimeout     time.Duration
-	TTL             time.Duration
-	Desktop         bool
-	Browser         bool
-	Code            bool
-	ActionsRunner   bool
-	Tailscale       TailscaleConfig
-	WorkRoot        string
-	SSHUser         string
-	SSHPort         string
-	SSHKey          string
-	Sync            SyncConfig
-	Results         ResultsConfig
-	EnvAllow        []string
+	TargetOS      string
+	WindowsMode   string
+	Class         string
+	Pond          string
+	ServerType    string
+	IdleTimeout   time.Duration
+	TTL           time.Duration
+	Desktop       bool
+	DesktopEnv    string
+	Browser       bool
+	Code          bool
+	Tailscale     TailscaleConfig
+	WorkRoot      string
+	SSHUser       string
+	SSHPort       string
+	SSHKey        string
+	Sync          SyncConfig
+	Results       ResultsConfig
+	EnvAllow      []string
+	ActionsRunner bool
 }
 
 type AcquireRequest struct {
-	Repo    Repo
-	Options LeaseOptions
-	Keep    bool
-	Reclaim bool
+	Repo          Repo
+	Options       LeaseOptions
+	Keep          bool
+	Reclaim       bool
+	RequestedSlug string
 }
 
 type ResolveRequest struct {
-	Repo    Repo
-	Options LeaseOptions
-	ID      string
-	Reclaim bool
+	Repo        Repo
+	Options     LeaseOptions
+	ID          string
+	Reclaim     bool
+	ReleaseOnly bool
 }
 
 type ReleaseLeaseRequest struct {
@@ -671,76 +589,27 @@ type TouchRequest struct {
 	State       string
 	IdleTimeout time.Duration
 }
-
-type ListRequest struct {
-	Options LeaseOptions
-}
-
-type RunRequest struct {
-	Repo            Repo
-	ID              string
-	Options         LeaseOptions
-	Keep            bool
-	Reclaim         bool
-	NoSync          bool
-	SyncOnly        bool
-	DebugSync       bool
-	ShellMode       bool
-	ChecksumSync    bool
-	ForceSyncLarge  bool
-	Command         []string
-	TimingJSON      bool
-}
-
-type WarmupRequest struct {
-	Repo          Repo
-	Options       LeaseOptions
-	Keep          bool
-	Reclaim       bool
-	ActionsRunner bool
-	TimingJSON    bool
-}
-
-type StatusRequest struct {
-	Options     LeaseOptions
-	ID          string
-	Wait        bool
-	WaitTimeout time.Duration
-}
-
-type StopRequest struct {
-	Options LeaseOptions
-	ID      string
-}
-
-type RunResult struct {
-	ExitCode      int
-	Command       time.Duration
-	Total         time.Duration
-	SyncDelegated bool
-}
 ```
 
-Core command code is responsible for converting CLI/config state into
-`LeaseOptions` once. Backends should not re-read global command state or decode
+`RunRequest`, `WarmupRequest`, `StatusRequest`, `StopRequest`, `ListRequest`, and
+`RunResult` follow the same pattern (see `provider_backend.go` for the current
+fields). Core command code converts CLI/config state into `LeaseOptions` once
+(`leaseOptionsFromConfig`); backends do not re-read global command state or decode
 raw provider config maps after `Configure`.
 
-`LeaseOptions` is intentionally broad for the migration. Direct provisioning
-backends should usually care only about the provisioning subset, while the shared
-SSH workflow consumes sync, result, and environment options. After the provider
-split lands, consider splitting this into `ProvisionOptions` and `RunOptions`.
+`LeaseOptions` is intentionally broad for the migration. Provisioning backends
+usually care only about the provisioning subset, while the shared SSH workflow
+consumes sync, result, and environment options. Splitting this into
+`ProvisionOptions` and `RunOptions` remains a possible cleanup.
 
-`LeaseView` and `StatusView` are command-facing view models. They can wrap or
-alias existing core structs during migration, but they must carry redaction
-metadata for secret-bearing auth. Rendering is core-owned for
-both backend kinds: `ListRequest` and `StatusRequest` do not carry JSON or human
-format flags because backends return normalized views and core renders them.
-`JSONListBackend` is a narrow compatibility escape hatch for existing
-script-facing JSON schemas such as coordinator pool machines and Blacksmith
-table rows; new providers should not need it.
+`LeaseView` and `StatusView` are command-facing view models. Rendering is
+core-owned for both backend kinds: `ListRequest` and `StatusRequest` carry no
+JSON/human format flags, because backends return normalized views and core
+renders them. `JSONListBackend` is the narrow escape hatch for existing
+script-facing JSON schemas; new providers should not need it.
 
-Delegated providers should reject irrelevant sync options through a shared
-helper:
+Delegated providers reject irrelevant sync options through a shared helper so the
+error wording stays consistent:
 
 ```go
 func rejectDelegatedSyncOptions(provider string, req RunRequest) error {
@@ -759,7 +628,7 @@ func rejectDelegatedSyncOptions(provider string, req RunRequest) error {
 
 ## Shared SSH Workflow
 
-`runCommand` should lose the provider lifecycle details and call one shared SSH
+`runCommand` does not carry provider lifecycle details; it calls one shared SSH
 workflow:
 
 ```go
@@ -778,22 +647,22 @@ This workflow owns:
 - local claim/reclaim checks;
 - coordinator recorder attachment when the backend is coordinator-wrapped;
 - heartbeat/touch lifecycle through `backend.Touch`;
-- Actions hydration marker detection;
+- Actions-hydration marker detection;
 - sync manifest creation, preflight, git seed, rsync/archive transfer, remote
   prune, and sync finalize;
-- POSIX/native Windows/WSL2 command wrapping;
-- stdout/stderr streaming and run log buffering;
+- POSIX / native-Windows / WSL2 command wrapping;
+- stdout/stderr streaming and run-log buffering;
 - JUnit result collection;
 - timing summary and timing JSON;
 - release through `backend.ReleaseLease` when `acquired && !req.Keep`.
 
-Providers must not copy this workflow. Daytona, Hetzner, AWS, and static SSH all
-reuse it.
+Providers must not copy this workflow. Daytona, Hetzner, AWS, Azure, GCP, and
+static SSH all reuse it.
 
 `ReleaseLease` means "tear down the lease/resource for this specific command or
 explicit stop." Background TTL/orphan cleanup is separate and belongs to
-`CleanupBackend`. Static SSH can implement `ReleaseLease` as a no-op, but it
-must not opt into cleanup.
+`CleanupBackend`. Static SSH implements `ReleaseLease` as a no-op and does not opt
+into cleanup.
 
 ## Lease Target And SSH Target
 
@@ -808,74 +677,41 @@ type LeaseTarget struct {
 }
 ```
 
-`Server` stays as the neutral provider resource for this refactor:
-
-```go
-type Server struct {
-	CloudID string
-	Provider string
-	ID int64
-	Name string
-	Status string
-	Labels map[string]string
-	PublicNet struct { IPv4 struct { IP string } }
-	ServerType struct { Name string }
-}
-```
-
-`SSHTarget` needs explicit metadata for secret-bearing auth:
+`Server` stays the neutral provider resource. `SSHTarget` carries explicit
+metadata for secret-bearing auth:
 
 ```go
 type SSHTarget struct {
-	User string
-	Host string
-	Key string
-	Port string
+	User          string
+	Host          string
+	Key           string
+	Port          string
 	FallbackPorts []string
-	TargetOS string
-	WindowsMode string
-	ReadyCheck string
-	AuthSecret bool
-	NetworkKind NetworkMode
+	TargetOS      string
+	WindowsMode   string
+	ReadyCheck    string
+	AuthSecret    bool
+	NetworkKind   NetworkMode
 }
 ```
 
-SSH rendering must omit `-i` when `Key == ""`. Human-readable status, list,
-timing output, and normal JSON output must redact `User` when `AuthSecret` is
-true. The only intended token-revealing surface is an explicit connect action
-such as `crabbox ssh --provider daytona --id ...`.
+SSH rendering omits `-i` when `Key == ""`. Human-readable status, list, timing,
+and normal JSON output redact `User` when `AuthSecret` is true. The only intended
+token-revealing surface is an explicit connect action such as
+`crabbox ssh --provider daytona --id <lease>`.
 
-Daytona target example:
-
-```go
-SSHTarget{
-	User: token,
-	Host: parsedHostFromSSHCommand,
-	Port: parsedPortFromSSHCommand,
-	Key: "",
-	TargetOS: "linux",
-	ReadyCheck: "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null",
-	AuthSecret: true,
-	NetworkKind: NetworkPublic,
-}
-```
-
-Normal output:
+Daytona is the canonical example: its SSH target parses the API-returned SSH
+command, uses an empty key with a secret user over a public relay, and supplies a
+ready check. Normal output then reads:
 
 ```text
 ready ssh=<redacted>@<daytona-ssh-host>:<daytona-ssh-port> network=public workroot=/home/daytona/crabbox
 ```
 
-The actual interactive `crabbox ssh --provider daytona --id ...` command may
-print a token-bearing connect command only because the user explicitly asked
-for SSH access.
-
 ## Provider State Contract
 
-Direct SSH lease providers should map provider resources into `Server` and use
-Crabbox labels/tags when the provider supports metadata.
-
-Required labels:
+Direct SSH-lease providers map provider resources into `Server` and use Crabbox
+labels/tags when the provider supports metadata. Required labels:
 
 ```text
 crabbox=true
@@ -894,104 +730,74 @@ ttl_secs=<seconds>
 expires_at=<unix-seconds>
 ```
 
-Current direct providers write Unix seconds. The parser also accepts RFC3339
-and RFC3339Nano for compatibility with old or external records. Moving labels
-to RFC3339 would be a behavior change and must update Hetzner/AWS tests and
-docs together.
+Direct providers write Unix seconds. The parser also accepts RFC3339 and
+RFC3339Nano for compatibility with old or external records; moving labels to
+RFC3339 would be a behavior change requiring matching test and doc updates.
 
-Provider-specific labels must be documented:
+Provider-specific labels are documented per provider, for example:
 
 ```text
-provider_key=<ssh-key-name>        # Hetzner/AWS direct key cleanup
-market=spot|on-demand             # AWS
-work_root=<remote-work-root>       # Daytona restore/reuse path
+provider_key=<ssh-key-name>   # Hetzner/AWS direct key cleanup
+market=spot|on-demand         # AWS
+work_root=<remote-work-root>  # Daytona restore/reuse path
 ```
 
-If a provider lacks labels/tags, it must implement equivalent lookup and cleanup
-semantics before enabling `FeatureCleanup`.
+A provider without labels/tags must implement equivalent lookup and cleanup
+semantics before declaring `FeatureCleanup`.
 
 ## Config Model
 
-Long term, avoid adding a new top-level `FooConfig` field for every provider.
-Use a provider config bag:
+> Shipped differently than first proposed. The original sketch favored a generic
+> `Providers map[string]ProviderConfig` bag. In practice each provider ships a
+> **typed config section** on the central `Config` (for example `Daytona`,
+> `Islo`, `AWS`, `Azure`, `Proxmox`, `Parallels`), populated from a matching YAML
+> block and from flags. There is no generic `providers:` map. This keeps config
+> decoding type-safe and discoverable at the cost of one field per provider.
 
-```go
-type Config struct {
-	Provider  string
-	Providers map[string]ProviderConfig
-
-	// Compatibility fields kept while migrating existing config.
-	Blacksmith BlacksmithConfig
-	Static     StaticConfig
-}
-
-type ProviderConfig map[string]any
-```
-
-YAML:
+Each provider's config lives under its own YAML key:
 
 ```yaml
 provider: daytona
 
-providers:
-  daytona:
-    snapshot: crabbox-ready
-    target: us
-    user: daytona
-    workRoot: /home/daytona/crabbox
-    sshTokenMinutes: 15
+daytona:
+  snapshot: crabbox-ready
+  user: daytona
+  workRoot: /home/daytona/crabbox
 
-  islo:
-    image: docker.io/library/ubuntu:24.04
-    workdir: /workspace/crabbox
-    gatewayProfile: default
+islo:
+  image: docker.io/library/ubuntu:24.04
+  workdir: /workspace/crabbox
 ```
 
-Compatibility:
-
-- Keep `blacksmith:` while existing configs migrate.
-- Keep `static:` because static SSH is already documented and special.
-- Daytona and Islo should prefer `providers.daytona` and `providers.islo`.
-- Provider modules should expose typed config accessors so command code never
-  decodes raw maps.
-
-Example helper shape:
-
-```go
-func DecodeProviderConfig(cfg Config, name string, defaults any, out any) error {
-	raw := cfg.Providers[name]
-	if raw == nil {
-		return copyDefaultProviderConfig(defaults, out)
-	}
-	return decodeProviderConfig(raw, defaults, out)
-}
-```
-
-Provider credentials stay in environment or native provider auth stores, not
-repo YAML:
+Provider credentials stay in environment or native provider auth stores, not repo
+YAML. Confirmed env credentials include:
 
 ```text
 HCLOUD_TOKEN
 HETZNER_TOKEN
-AWS_PROFILE
-AWS_REGION
 DAYTONA_API_KEY
 DAYTONA_JWT_TOKEN
 DAYTONA_ORGANIZATION_ID
-DAYTONA_API_URL
 ISLO_API_KEY
-ISLO_BASE_URL
 ```
+
+`ISLO_BASE_URL` is also read from the environment, but it is a base-URL override
+rather than a credential.
+
+AWS, Azure, and GCP rely on their native SDK credential chains (profile,
+`az`/gcloud, ADC) rather than Crabbox-specific env vars.
 
 ## Built-In vs External Plugins
 
-The first refactor keeps providers compiled into the Go binary.
+The refactor keeps providers compiled into the Go binary.
 
-Do not use Go `plugin.Open`. Go plugins require matching Go versions, module
-versions, architecture, and build flags. They cannot be unloaded, init code runs
-on load, and cross-platform support is poor.
+Do not use Go `plugin.Open`: Go plugins require matching Go versions, module
+versions, architecture, and build flags; they cannot be unloaded, run init on
+load, and have poor cross-platform support.
 
-If runtime extension is needed later, use an external process protocol:
+If runtime extension is needed later, the chosen direction is an external-process
+protocol — a child process speaking JSON over stdio for `spec`/`warmup`/`run`/
+`status`/`stop`:
 
 ```yaml
 provider: my-runner
@@ -1001,406 +807,149 @@ providers:
     command: crabbox-provider-my-runner
 ```
 
-The adapter can speak JSON over stdio:
-
-```json
-{"method":"spec","params":{}}
-{"method":"warmup","params":{"config":{},"keep":true}}
-{"method":"run","params":{"id":"...","command":["go","test","./..."]}}
-{"method":"status","params":{"id":"...","wait":false}}
-{"method":"stop","params":{"id":"..."}}
-```
-
-This lets TypeScript or Python SDK adapters exist later without making the core
-binary load native plugins.
+This would let TypeScript or Python SDK adapters exist without making the core
+binary load native plugins. It is not implemented today.
 
 ## Provider Mapping
 
-### Hetzner
-
-Backend: `SSHLeaseBackend`
-
-Spec:
-
-```text
-kind=ssh-lease
-coordinator=supported
-targets=linux
-features=ssh, crabbox-sync, cleanup, tailscale
-```
-
-Owns direct mode:
-
-- `HCLOUD_TOKEN` / `HETZNER_TOKEN` auth;
-- SSH key import/delete;
-- server create/list/get/delete;
-- labels;
-- class fallback;
-- direct cleanup.
-
-Reuses core:
-
-- coordinator wrapper when configured;
-- SSH sync/run;
-- claims;
-- status rendering;
-- cleanup policy.
-
-### AWS
-
-Backend: `SSHLeaseBackend`
-
-Spec:
-
-```text
-kind=ssh-lease
-coordinator=supported
-targets=linux, windows/normal, windows/wsl2, macos
-features=ssh, crabbox-sync, cleanup, desktop, browser, code
-```
-
-Owns direct mode:
-
-- AWS SDK config and region selection;
-- key pair import/delete;
-- AMI resolution;
-- security group setup;
-- EC2 launch/list/get/terminate;
-- Spot/On-Demand fallback;
-- Windows/macOS launch options;
-- tags;
-- direct cleanup.
-
-Reuses core:
-
-- coordinator wrapper when configured;
-- SSH sync/run;
-- native Windows archive sync and command wrapping;
-- claims;
-- status rendering;
-- cleanup policy.
-
-### Static SSH
-
-Backend: `SSHLeaseBackend`
-
-Spec:
-
-```text
-kind=ssh-lease
-coordinator=never
-targets=linux, windows/normal, windows/wsl2, macos
-features=ssh, crabbox-sync, desktop, browser, code
-```
-
-Owns:
-
-- static config to `LeaseTarget` mapping;
-- static claim behavior;
-- no-op release.
-
-Does not support provider cleanup or coordinator.
-
-### Daytona
-
-Backend: hybrid `SSHLeaseBackend` + `DelegatedRunBackend`
-
-Spec:
-
-```text
-kind=ssh-lease
-coordinator=never
-targets=linux
-features=ssh, crabbox-sync
-```
-
-Owns:
-
-- Daytona generated Go API client auth and organization header;
-- Daytona SDK/toolbox auth;
-- sandbox create/list/get/start/stop/delete;
-- labels and last-activity touch;
-- SSH access token minting;
-- toolbox archive upload and command execution for `run`;
-- Daytona sandbox to `Server` mapping;
-- secret SSH user and public relay target metadata.
-
-Reuses core:
-
-- sync manifest and guardrails;
-- claims;
-- status rendering;
-- explicit release/stop.
-
-Initial constraints:
-
-- Linux only.
-- No coordinator.
-- No Tailscale.
-- No VNC/screenshot/desktop/browser/code portal.
-- Actions runner hydration is not supported for Daytona warmup.
-- Snapshot mode only unless image mode is implemented fully.
-
-Rebase notes for https://github.com/openclaw/crabbox/pull/32:
-
-- Implement `Provider.Configure` returning a Daytona backend that supports
-  delegated `run` plus explicit SSH access.
-- Use Daytona's generated Go API client and SDK/toolbox; do not duplicate REST
-  plumbing in Crabbox.
-- Keep start-before-SSH for stopped sandboxes.
-- Require `DAYTONA_ORGANIZATION_ID` when JWT auth is used unless Daytona docs
-  prove it is optional for the account shape.
-- Do not expose CPU/memory/disk flags while snapshot mode makes them unusable.
-- Keep token redaction tests.
-
-### Blacksmith Testbox
-
-Backend: `DelegatedRunBackend`
-
-Spec:
-
-```text
-kind=delegated-run
-coordinator=never
-targets=provider-owned linux
-features=delegated execution
-```
-
-Owns:
-
-- Blacksmith CLI command construction;
-- warmup/run/list/status/stop;
-- Testbox SSH key storage for Blacksmith CLI, through injected filesystem/runtime
-  helpers;
-- provider-specific claim ID resolution;
-- delegated timing summaries.
-
-Does not support Crabbox rsync, `--sync-only`, VNC/screenshot/desktop through
-Crabbox, or coordinator.
-
-### Islo
-
-Backend: `DelegatedRunBackend`
-
-Spec:
-
-```text
-kind=delegated-run
-coordinator=never
-targets=provider-owned linux
-features=delegated execution
-```
-
-Owns:
-
-- SDK auth and token refresh;
-- sandbox create/list/get/delete;
-- command execution through provider API;
-- SSE parsing for live stdout/stderr;
-- Islo lease ID and sandbox name mapping;
-- delegated timing summaries.
-
-Does not support Crabbox rsync, `--sync-only`, `--checksum`,
-`--force-sync-large`, VNC/screenshot/desktop/browser through Crabbox, Actions
-runner, or coordinator.
-
-Rebase notes for https://github.com/openclaw/crabbox/pull/24:
-
-- Implement `Provider.Configure` returning an Islo `DelegatedRunBackend`.
-- Keep the small Go SDK dependency if the provider is accepted.
-- Keep the custom SSE consumer; the SDK stream method does not expose a clean
-  streaming API today.
-- Validate `ISLO_API_KEY` before SDK calls.
-- Keep `ISLO_BASE_URL` as the only base URL override.
-- Keep delegated option rejection tests.
-
-## Migration Plan
-
-### Phase 1: Registry And Specs
-
-- Add provider registry.
-- Add `Provider`, `Backend`, `ProviderSpec`, and feature/target types.
-- Register existing providers as built-ins.
-- Keep current command behavior.
-- Register all built-in provider flags before `flag.Parse`.
-
-Expected behavior change: none.
-
-Status: implemented for existing built-in providers in
-`internal/providers/<name>`.
-
-### Phase 2: Backend Loading
-
-- Add `Runtime`.
-- Add `Provider.Configure`.
-- Add `loadBackend`.
-- Add fake backend tests for command dispatch.
-- Keep old provider helper functions temporarily.
-
-Expected behavior change: none.
-
-Status: implemented. `loadBackend(cfg Config, rt Runtime)` intentionally does
-not accept `flag.FlagSet` or raw command args.
-
-### Phase 3: Coordinator Wrapper
-
-- Add `CoordinatorLeaseBackend`.
-- Wrap Hetzner/AWS SSH lease backends when coordinator is configured.
-- Prove logged-in/configured users still go through the broker.
-- Keep direct Hetzner/AWS when coordinator is disabled.
-
-Expected behavior change: none.
-
-Status: implemented for Hetzner/AWS coordinator-backed leases.
-
-### Phase 4: Extract Shared SSH Workflow
-
-- Extract `runOverSSHLease`.
-- Route Hetzner, AWS, and static SSH through `SSHLeaseBackend`.
-- Preserve heartbeat, recorder, release, sync, Windows archive sync, and JUnit
-  behavior.
-- Add fake SSH backend tests before rebasing any new provider. These tests should
-  prove acquire, resolve-by-id, claim/reclaim, sync-only, heartbeat/touch,
-  timing JSON, release-on-non-keep, and run-recorder behavior without hitting a
-  real provider.
-
-Expected behavior change: none.
-
-Status: implemented for existing SSH providers. New provider PRs should add fake
-backend tests before adding live-only coverage.
-
-### Phase 5: Convert Delegated Providers
-
-- Move Blacksmith into a `DelegatedRunBackend`.
-- Centralize delegated sync-option rejection.
-- Dispatch `warmup`, `run`, `list`, `status`, and `stop` through backend shape.
-
-Expected behavior change: none.
-
-Status: implemented for Blacksmith Testbox.
-
-### Phase 6: Provider Config Bag
-
-- Add `providers:` YAML parsing.
-- Add typed provider config decoders.
-- Keep existing `blacksmith:` and `static:` compatibility.
-- Prefer `providers.<name>` for new providers and docs.
-
-Expected behavior change: none for existing configs.
-
-### Phase 7: Rebase Daytona
-
-- Rebase https://github.com/openclaw/crabbox/pull/32 onto a hybrid Daytona
-  backend: delegated SDK/toolbox `run`, explicit SSH access for `ssh`.
-- Keep Daytona SDK access isolated behind the backend adapter.
-- Add tests for acquire/resolve/list/release/touch plus delegated backend
-  selection.
-- Add redaction tests for secret SSH user output.
-- Add live smoke behind explicit env gates only.
-
-Expected behavior change: new provider.
-
-### Phase 8: Rebase Islo
-
-- Rebase https://github.com/openclaw/crabbox/pull/24 onto
-  `DelegatedRunBackend`.
-- Keep SDK seam injectable.
-- Keep SSE parser tests.
-- Add delegated option rejection tests.
-- Add live smoke behind explicit env gates only.
-
-Expected behavior change: new provider if product decision is yes.
-
-### Phase 9: Remove Compatibility Branches
-
-- Remove direct command references to `isBlacksmithProvider`,
-  `isDaytonaProvider`, and `isIsloProvider`.
-- Replace remaining static checks with canonical provider/spec checks where
-  practical.
-- Update `docs/source-map.md` and provider feature docs.
-
-Expected behavior change: none.
+The mappings below describe ownership boundaries for the most architecturally
+distinct providers. Specs are authoritative in each adapter's `Spec()`.
+
+### Hetzner — `SSHLeaseBackend`
+
+Coordinator supported, Linux only, features ssh/crabbox-sync/cleanup/desktop/
+browser/code/tailscale. Owns `HCLOUD_TOKEN`/`HETZNER_TOKEN` auth, SSH key
+import/delete, server lifecycle, labels, class fallback, and direct cleanup.
+Reuses the coordinator wrapper, the shared SSH sync/run workflow, claims, status
+rendering, and cleanup policy.
+
+### AWS — `SSHLeaseBackend`
+
+Coordinator supported, targets Linux + Windows (normal/wsl2) + macOS, features
+ssh/crabbox-sync/cleanup/desktop/browser/code. Owns SDK config and region
+selection, key-pair import/delete, AMI resolution, security-group setup, EC2
+lifecycle, spot/on-demand fallback, Windows/macOS launch options, tags, and
+direct cleanup. Also implements native checkpoint hooks (AMI / EBS snapshots).
+Reuses the coordinator wrapper, shared SSH workflow (including native-Windows
+archive sync and command wrapping), claims, status rendering, and cleanup policy.
+
+### Azure / GCP — `SSHLeaseBackend`
+
+Coordinator supported, multi-target, with native checkpoint/image hooks. Azure
+adds tailscale; both reuse the coordinator wrapper and shared workflow. The Azure
+dynamic-sessions adapter shares `Family: "azure"` but is a delegated-run sandbox.
+
+### Static SSH — `SSHLeaseBackend`
+
+Coordinator never, multi-target, features ssh/crabbox-sync/desktop/browser/code.
+Owns static-config-to-`LeaseTarget` mapping, static claim behavior, and a no-op
+release. No provider cleanup, no coordinator.
+
+### Daytona — `SSHLeaseBackend` with delegated `Run`
+
+> Shipped (`internal/providers/daytona`). Daytona registered as a single
+> SSH-lease backend whose `Run` uses Daytona's toolbox upload + command execution
+> rather than the generic rsync path, while `ssh` access uses the parsed SSH
+> command. This is functionally the "hybrid" model from the original plan,
+> expressed as one backend implementing both shapes' relevant methods.
+
+Coordinator never, Linux only, features ssh/crabbox-sync. Owns the Daytona
+generated Go API client (auth + organization header), the SDK/toolbox, sandbox
+lifecycle, labels and last-activity touch, SSH-access token minting, toolbox
+archive upload and command execution for `run`, sandbox-to-`Server` mapping, and
+secret SSH-user metadata. Reuses sync guardrails, claims, status rendering, and
+explicit release/stop. Constraints: Linux only, no coordinator, no Tailscale, no
+desktop/VNC/browser/code portal, no Actions-runner hydration, snapshot mode only.
+
+### Blacksmith Testbox — `DelegatedRunBackend`
+
+Coordinator never, Linux only, features run-proof/run-session. Owns Blacksmith
+CLI command construction, warmup/run/list/status/stop, Testbox SSH-key storage
+through injected filesystem/runtime helpers, provider-specific claim-ID
+resolution, and delegated timing summaries. No Crabbox rsync, `--sync-only`, VNC/
+screenshot/desktop, or coordinator.
+
+### Islo — `DelegatedRunBackend`
+
+> Shipped (`internal/providers/islo`). Despite the product-fit concerns recorded
+> for the earlier PRs, Islo landed as a delegated-run backend.
+
+Coordinator never, Linux only, features url-bridge. Owns SDK auth and token
+refresh, sandbox lifecycle, command execution through the provider API, SSE
+parsing for live stdout/stderr, and Islo lease-ID/sandbox-name mapping. Keeps the
+custom SSE consumer (the SDK stream method has no clean streaming API), validates
+the API key before SDK calls, and accepts a base-URL override (`--islo-base-url`,
+`CRABBOX_ISLO_BASE_URL`/`ISLO_BASE_URL`, or the `islo.baseUrl` config key;
+defaults to `https://api.islo.dev`). No Crabbox rsync, `--sync-only`, `--checksum`, `--force-sync-large`,
+desktop/browser, Actions runner, or coordinator.
+
+The remaining sandbox/proof adapters (Modal, E2B, Tensorlake, Upstash, Cloudflare,
+Azure dynamic sessions, W&B) follow the Islo pattern: delegated-run, Linux-only,
+with a feature subset of archive-sync/url-bridge as appropriate.
+
+## Migration Ledger
+
+The seam landed in phases. All phases below have shipped:
+
+1. **Registry and specs** — provider registry, `Provider`/`Backend`/
+   `ProviderSpec`, feature/target types, built-in registration, flags registered
+   before `flag.Parse`. No behavior change.
+2. **Backend loading** — `Runtime`, `Provider.Configure`, `loadBackend`
+   (intentionally not accepting `flag.FlagSet` or raw args), fake-backend tests.
+3. **Coordinator wrapper** — `coordinatorLeaseBackend` wraps brokerable SSH
+   backends when a coordinator is configured; direct mode otherwise.
+4. **Shared SSH workflow** — `runOverSSHLease` extracted; Hetzner, AWS, Azure,
+   GCP, and static SSH route through `SSHLeaseBackend`; fake SSH-backend tests
+   cover acquire/resolve/claim/reclaim/sync-only/touch/timing/release/recorder.
+5. **Delegated providers** — Blacksmith and the sandbox runners moved to
+   `DelegatedRunBackend`, with centralized sync-option rejection.
+6. **Provider config** — typed per-provider config sections (not the generic bag
+   originally sketched), with `blacksmith:`/`static:` compatibility preserved.
+7. **Daytona** — landed as an SSH-lease backend with delegated `run`.
+8. **Islo** — landed as a `DelegatedRunBackend`.
+9. **Compatibility cleanup** — provider-name branches in commands replaced by
+   spec/feature checks; docs and the source map updated.
+
+New provider PRs should add fake-backend tests before any live-only coverage.
 
 ## Tests
 
-Registry and flag tests:
+Representative coverage that any provider change should preserve:
 
-- canonical lookup;
-- alias lookup;
-- duplicate registration panic;
-- unknown provider error;
-- provider help string includes built-ins;
-- built-in provider flags are accepted before provider selection;
-- non-selected provider flags parse but are ignored.
-
-Spec and capability tests:
-
-- target OS and Windows mode validation per provider;
-- unsupported desktop/browser/code provider features and Actions runner
-  capability errors;
-- coordinator wrapper selected for Hetzner/AWS when configured;
-- direct backend selected for static, Daytona, and coordinator-disabled
-  Hetzner/AWS.
-
-SSH workflow tests:
-
-- fake SSH backend acquire path enters shared sync/run;
-- fake SSH backend resolve path enters shared sync/run;
-- touch transitions go through backend;
-- release happens on acquired non-keep lease;
-- no provider-specific command branch is needed for fake SSH backend.
-
-Delegated backend tests:
-
-- fake delegated backend receives warmup/run/list/status/stop requests;
-- delegated sync flags are rejected;
-- nonzero exit code propagates;
-- Blacksmith command execution goes through injected `CommandRunner`, not
-  package-level `exec.Command`;
-- Blacksmith Testbox SSH key storage goes through injected filesystem/runtime
-  helpers where practical.
-
-Daytona tests:
-
-- auth env validation;
-- organization header behavior;
-- create body shape;
-- labels body shape;
-- snapshot mode omits unusable resource overrides;
-- stopped sandbox starts before SSH target creation;
-- SSH target parses the API-returned `sshCommand`, uses empty key, secret user,
-  public network, and ready check;
-- list/status/timing output, including JSON, redacts token-bearing user;
-- release removes local claim.
-
-Islo tests:
-
-- SDK factory rejects missing `ISLO_API_KEY`;
-- SDK client maps create/get/list/delete;
-- SSE parser handles stdout/stderr/exit events;
-- run streams output and propagates exit code;
-- status wait polls and times out;
-- stop removes local claim.
-
-Docs tests:
-
-- provider docs link from `docs/features/providers.md`;
-- `docs/source-map.md` lists provider implementation files;
-- command docs mention provider list consistently.
+- **Registry/flags** — canonical and alias lookup; duplicate-registration panic;
+  unknown-provider error; help string includes built-ins; provider flags accepted
+  before selection; non-selected provider flags parse but are ignored.
+- **Spec/capability** — target-OS and Windows-mode validation per provider;
+  unsupported desktop/browser/code and Actions-runner errors; coordinator wrapper
+  selected for brokerable providers only when configured; direct backend selected
+  otherwise.
+- **SSH workflow** — fake SSH backend enters the shared sync/run path on both
+  acquire and resolve; touch transitions go through the backend; release on
+  acquired non-keep lease; no provider-specific command branch needed.
+- **Delegated** — fake delegated backend receives warmup/run/list/status/stop;
+  sync flags rejected; nonzero exit propagates; Blacksmith executes through the
+  injected `CommandRunner`, not package-level `exec.Command`.
+- **Daytona** — auth/org-header behavior; create/labels body shape; snapshot mode
+  omits unusable resource overrides; stopped sandbox starts before SSH-target
+  creation; SSH target parses the API `sshCommand` with empty key/secret user/
+  public network/ready check; list/status/timing output (including JSON) redacts
+  the token-bearing user; release removes the local claim.
+- **Islo** — SDK factory rejects a missing API key; create/get/list/delete
+  mapping; SSE parser handles stdout/stderr/exit events; run streams output and
+  propagates exit code; status wait polls and times out; stop removes the local
+  claim.
+- **Docs** — provider docs link from [Providers](../features/providers.md);
+  [`docs/source-map.md`](../source-map.md) lists provider implementation files.
 
 ## Acceptance Criteria
 
 - `go test ./...` passes.
-- Existing providers keep working:
-  - `crabbox warmup --provider hetzner`
-  - `crabbox run --provider aws`
-  - `crabbox run --provider ssh`
-  - `crabbox run --provider blacksmith-testbox`
-- A fake SSH lease backend can be tested without editing command handlers.
-- A fake delegated backend can be tested without editing command handlers.
-- Hetzner/AWS still use the coordinator when configured.
-- Daytona can be rebased by implementing the hybrid backend.
-- Islo can be rebased by implementing `DelegatedRunBackend`.
+- Existing providers keep working, e.g. `crabbox warmup --provider hetzner`,
+  `crabbox run --provider aws`, `crabbox run --provider ssh`,
+  `crabbox run --provider blacksmith-testbox`.
+- A fake SSH-lease backend and a fake delegated backend can each be tested
+  without editing command handlers.
+- Brokerable providers still use the coordinator when one is configured.
 - No new provider requires touching the main command flow unless it adds a new
   top-level Crabbox feature.
 - Normal list/status/timing output, including JSON, never prints secret SSH users
@@ -1408,13 +957,9 @@ Docs tests:
 
 ## Open Questions
 
-- Should `Server` become `Machine` after providers no longer all create
-  servers?
-- Should `providers.<name>` become the only provider config namespace in a
-  future major release?
-- Should external command providers use a small Crabbox JSON protocol or MCP?
-  The smaller JSON protocol is preferred for now.
-- Should Daytona support image mode and resource overrides, or stay snapshot
-  only?
-- Should Islo be accepted as a built-in provider at all, given the product-fit
-  concerns from the closed PRs?
+- Should `Server` become `Machine` now that not every provider creates a server?
+- Should the typed per-provider config sections eventually gain a generic
+  `providers.<name>` namespace, or stay one typed field each?
+- Should an external command-provider protocol be a small Crabbox JSON protocol
+  or MCP? The smaller JSON protocol is preferred for now.
+- Should Daytona support image mode and resource overrides, or stay snapshot only?

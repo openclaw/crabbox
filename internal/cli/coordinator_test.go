@@ -729,6 +729,20 @@ func TestCoordinatorLeaseWatchCancelsWhenLeaseReleased(t *testing.T) {
 	}
 }
 
+func TestCoordinatorCurlFallbackSkipsNonIdempotentAndTimeouts(t *testing.T) {
+	transportErr := &url.Error{Op: "Get", URL: "https://broker.example.test/v1/leases", Err: io.ErrUnexpectedEOF}
+	if !shouldUseCoordinatorCurlFallback(http.MethodGet, false, transportErr) {
+		t.Fatal("GET transport error should use curl fallback")
+	}
+	if shouldUseCoordinatorCurlFallback(http.MethodPost, true, transportErr) {
+		t.Fatal("POST with body should not use curl fallback")
+	}
+	timeoutErr := &url.Error{Op: "Get", URL: "https://broker.example.test/v1/leases", Err: context.DeadlineExceeded}
+	if shouldUseCoordinatorCurlFallback(http.MethodGet, false, timeoutErr) {
+		t.Fatal("deadline exceeded should not use curl fallback")
+	}
+}
+
 func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	var body struct {
 		Provider           string   `json:"provider"`

@@ -1,33 +1,36 @@
 # webvnc
 
 `crabbox webvnc` bridges a desktop lease into the authenticated coordinator
-portal.
-
-Use it when you want the same VNC desktop that `crabbox vnc` opens, but inside
-a browser tab instead of a native VNC client.
+portal. Use it when you want the same VNC desktop that `crabbox vnc` opens, but
+inside a browser tab instead of a native VNC client.
 
 ```sh
 crabbox warmup --desktop
-crabbox webvnc --id blue-lobster
-crabbox webvnc --id blue-lobster --network tailscale
-crabbox webvnc --id blue-lobster --open
-crabbox webvnc --id blue-lobster --open --take-control
-crabbox webvnc daemon start --id blue-lobster --open
-crabbox webvnc daemon status --id blue-lobster
-crabbox webvnc daemon stop --id blue-lobster
-crabbox webvnc status --id blue-lobster
-crabbox webvnc status --id blue-lobster --network tailscale
-crabbox webvnc reset --id blue-lobster --open
+crabbox webvnc --id swift-crab
+crabbox webvnc --id swift-crab --network tailscale
+crabbox webvnc --id swift-crab --open
+crabbox webvnc --id swift-crab --open --take-control
+crabbox webvnc daemon start --id swift-crab --open
+crabbox webvnc daemon status --id swift-crab
+crabbox webvnc daemon list
+crabbox webvnc daemon stop --id swift-crab
+crabbox webvnc status --id swift-crab
+crabbox webvnc reset --id swift-crab --open
 ```
 
-## How It Works
+The lease must have the `desktop` capability. Reusing a lease for WebVNC
+requires that capability to be present (see
+[Capabilities](../features/capabilities.md)).
 
-The command resolves the lease like `crabbox vnc`, verifies that the lease has
-`desktop=true`, starts the normal SSH tunnel to the runner's loopback VNC
-service, mints a short-lived bridge ticket over the authenticated coordinator
-API, and opens a websocket bridge to the coordinator with that ticket. The
-browser connects to `/portal/leases/<lease>/vnc` after GitHub portal auth, and
-the Durable Object pairs that browser websocket with the local bridge process.
+## How it works
+
+`webvnc` resolves the lease the same way `crabbox vnc` does, verifies the
+`desktop` capability, probes the runner's loopback VNC service
+(`127.0.0.1:5900`) over SSH, starts an SSH tunnel to it, mints a short-lived
+bridge ticket over the authenticated coordinator API, and opens a WebSocket
+bridge to the coordinator with that ticket. After portal authentication the
+browser connects to `/portal/leases/<lease>/vnc`, and the coordinator Durable
+Object pairs that browser WebSocket with the local bridge process.
 
 The data path is:
 
@@ -39,118 +42,142 @@ browser noVNC
   <-> runner 127.0.0.1:5900
 ```
 
-That means the local `crabbox webvnc` process is not just a launcher. It is the
-live bridge between the browser and the SSH-tunneled VNC socket. Keep it
-running while the browser tab is open. If the browser tab reloads or drops, the
-command re-registers a fresh bridge so the portal retry can reconnect.
+The local `crabbox webvnc` process is not just a launcher; it is the live
+bridge between the browser and the SSH-tunneled VNC socket. Keep it running
+while the browser tab is open. If the browser tab reloads or drops, the bridge
+re-registers so the portal retry can reconnect.
 
-## Security Boundary
+The bridge opens a small warm pool of backend sessions (4 slots for Linux and
+Windows targets, 2 for macOS). That pool is what the `slots=` field in
+`webvnc status` reports, and it lets multiple portal viewers join the same
+lease: one viewer is the controller, later viewers join in observer mode, and
+any viewer can press **take over** to become the controller. The prior
+controller stays connected as an observer and can reclaim control the same way.
+Observer mode is a collaboration UX for trusted shared leases; it relies on the
+portal noVNC client staying read-only and is not a hostile-client isolation
+boundary.
 
-This keeps the security boundary the same as `crabbox vnc`:
+`--take-control` writes `control=take` into the portal URL fragment, asking the
+viewer to request control once it connects. It is a viewer hint, not a new
+permission boundary; portal auth and lease sharing still decide who can open the
+session.
 
-- VNC stays bound to runner loopback.
+## Security boundary
+
+WebVNC keeps the same security boundary as `crabbox vnc`:
+
+- VNC stays bound to the runner's loopback interface.
 - The cloud provider does not open public VNC ingress.
-- The coordinator authenticates the browser through portal auth and the bridge
-  through a one-use short-lived ticket. The CLI sends the ticket as an
-  `Authorization: Bearer ...` header so it stays out of websocket URLs and
-  proxy/access logs; the coordinator falls back to a `?ticket=` query string
-  for older CLIs.
+- The coordinator authenticates the browser through portal auth, and the bridge
+  through a single-use short-lived ticket. The CLI sends the ticket as an
+  `Authorization: Bearer ...` header so it stays out of WebSocket URLs and
+  proxy/access logs; the coordinator falls back to a `?ticket=` query string for
+  older CLIs.
 - The noVNC client is served from the coordinator origin, not a third-party CDN.
 - The local `crabbox webvnc` process must keep running while the browser uses
   the desktop.
 
-Use `crabbox webvnc daemon start --id <lease> --open` to keep the bridge
-running without a tmux or foreground shell. Crabbox writes the bridge log and
-pid file under its local state directory, starts each daemon with a fresh log,
-and prints `webvnc daemon: ready` once the bridge reports connected. Use
-`crabbox webvnc daemon status --id <lease>` for the local pid/log check, and
-`crabbox webvnc daemon stop --id <lease>` to kill the background bridge for
-that lease. Shutdown terminates both the daemon supervisor and the active child
-bridge process.
+`--network tailscale` changes only the SSH endpoint used for the local tunnel.
+The runner VNC service stays bound to loopback.
 
-The bridge keeps a warm pool of backend VNC sessions open (default 4 slots,
-which is what the `slots=` field in `webvnc status` reports). That lets
-multiple portal viewers join the same lease: one viewer is the controller,
-later viewers start in observer mode, and any viewer can press **take over**
-to become the controller — including the prior controller, who stays connected
-as an observer and can reclaim control the same way. Observer mode is a
-collaboration UX for trusted shared leases; it relies on the portal noVNC
-client staying read-only and is not a hostile-client isolation boundary.
-Use `--take-control` when opening or printing a handoff URL for someone who
-should immediately drive the session; the portal will request control once
-after that viewer connects.
+## Subcommands
+
+### Foreground bridge
+
+`crabbox webvnc --id <lease-id-or-slug>` runs the bridge in the foreground.
+Leave it running while the browser tab is open. With `--open` it opens the
+portal page once the bridge reports connected.
+
+### daemon start / status / list / stop
+
+Use the `daemon` subcommands to run the bridge in the background without a tmux
+or foreground shell:
+
+```sh
+crabbox webvnc daemon start --id <lease-id-or-slug> --open
+crabbox webvnc daemon status --id <lease-id-or-slug>
+crabbox webvnc daemon list
+crabbox webvnc daemon stop --id <lease-id-or-slug>
+```
+
+`daemon start` writes a per-lease log and pid file under the local Crabbox state
+directory (`webvnc/<lease>.log` and `.pid`), truncates the log on each start,
+and prints `webvnc daemon: ready` once the bridge reports connected (otherwise it
+prints a hint to check `webvnc status`). A background supervisor restarts the
+child bridge if it exits. `daemon status` reports the local pid/log and whether
+the process is alive or stale. `daemon list` scans all recorded local WebVNC pid
+files and prints alive/stale state for each bridge, which is useful after agent
+runs leave helpers behind. `daemon stop` terminates both the supervisor and the
+active child bridge, but only after verifying the recorded pid is a Crabbox
+WebVNC process.
 
 The older `crabbox webvnc --id <lease> --daemon`, `--background`, `--status`,
 and `--stop` forms remain accepted as compatibility aliases, but new docs and
 automation should use the explicit `daemon` subcommands.
 
-Use `crabbox webvnc status --id <lease>` for the full health view: local daemon
-pid/log, SSH tunnel command, target VNC reachability, coordinator bridge/viewer
-state, recent bridge events, portal URL/password, and the exact native VNC
-fallback command. If status or reset is run with `--network public` or
-`--network tailscale`, the printed native VNC fallback carries the same network
-selection.
+### status
 
-Typical status output is meant to be directly actionable:
+`crabbox webvnc status --id <lease-id-or-slug>` prints the full health view:
+local daemon pid/log, the SSH tunnel command, target VNC reachability, the
+coordinator bridge/viewer state, recent bridge log events, the portal URL and
+password, and the exact native VNC fallback command.
 
 ```text
+lease: cbx_0123456789ab slug=swift-crab provider=aws target=linux
 webvnc daemon: pid=12345 log=...
 vnc target: reachable 127.0.0.1:5900 managed=true
 ssh tunnel: ssh ... -L 5901:127.0.0.1:5900 ...
 portal bridge: connected=true viewers=2 observers=1 slots=2
-portal controller: peter
+portal controller: alice
 event: 2026-05-07T12:00:00Z bridge_connected
 webvnc: https://broker.example.com/portal/leases/cbx_.../vnc#password=...
 fallback: crabbox vnc --provider aws --target linux --network tailscale --id cbx_... --open
 ```
 
-When a layer is unhealthy, the CLI prints `problem:`, optional `detail:`, and
+When a layer is unhealthy, the CLI prints `problem:`, an optional `detail:`, and
 one or more exact `rescue:` commands in the command output, not only in docs.
 Common problems include `VNC bridge disconnected`, `WebVNC daemon not running`,
 `waiting for an available WebVNC observer slot`, and `VNC target unreachable`.
-If the browser portal path looks unhealthy but the target VNC service is
-reachable, the output also prints the native `crabbox vnc ... --open` fallback
-command with the same provider/target/network flags.
+If the portal path looks unhealthy but the target VNC service is reachable, the
+output also prints the native `crabbox vnc ... --open` fallback with the same
+provider/target/network flags. Running `status` with `--network public` or
+`--network tailscale` carries that same network selection into the printed
+fallback.
 
-Use `crabbox webvnc reset --id <lease> --open` when the portal is stuck on a
-stale bridge/viewer/session. Reset closes only that lease's coordinator
-WebVNC sockets, stops only that lease's local daemon pid after verifying it is
-a Crabbox WebVNC process, restarts the target desktop helper/VNC services, then
-starts a fresh background bridge and prints the new portal URL.
+### reset
 
-`--network tailscale` changes only the SSH endpoint used for the local tunnel.
-The runner VNC service stays bound to loopback.
+`crabbox webvnc reset --id <lease-id-or-slug> --open` recovers a portal that is
+stuck on a stale bridge, viewer, or session. Reset closes that lease's
+coordinator WebVNC sockets, stops that lease's local daemon (after verifying it
+is a Crabbox WebVNC process), restarts the target desktop helper/VNC services,
+starts a fresh background bridge, and prints the new portal URL. As with
+`status`, the printed native fallback reflects `--network`.
 
-## Portal And Passwords
+## Portal and passwords
 
-`--open` opens the portal page after the bridge starts. If the VNC password is
+`--open` opens the portal page after the bridge starts. When the VNC password is
 available, the command also places it in the URL fragment for the local browser
-tab. URL fragments are not sent to the coordinator, and Crabbox preserves
-special characters such as `!` when building the fragment. If the portal login
-flow redirects first, the page may still prompt for the VNC password; use the
-password printed by the command. If an old browser tab is retrying with a stale
+tab and prints it on stdout. URL fragments are not sent to the coordinator, and
+Crabbox preserves special characters such as `!` when building the fragment. For
+macOS targets the lease username is also surfaced. If the portal login flow
+redirects first, the page may still prompt for the VNC password; use the
+password printed by the command. If an old tab is retrying with a stale
 fragment, close it before opening the new bridge URL.
-`--take-control` also writes `control=take` into the URL fragment. That is a
-viewer hint, not a new permission boundary; portal auth and lease sharing still
-decide who can open the session.
 
-The portal page may show `WebVNC daemon not running` or `waiting for VNC
-bridge` until the local command has connected. If you opened the portal first,
-start:
+The portal page may show `WebVNC daemon not running` or `waiting for VNC bridge`
+until the local command has connected. If you opened the portal first, start the
+bridge in a terminal and leave it running:
 
 ```sh
 crabbox webvnc --id <lease-id-or-slug>
 ```
 
-in a terminal and leave it running.
-
 For human demos, prefer WebVNC over native VNC because `crabbox webvnc --open`
 preloads the per-lease password in the local browser URL fragment. Use native
-VNC only as the fallback printed by `crabbox webvnc status` or
-`crabbox webvnc reset`.
+VNC only as the fallback printed by `webvnc status` or `webvnc reset`.
 
 The WebVNC toolbar includes clipboard controls. The paste control reads the
-local browser clipboard, sends it through noVNC, and then sends the target paste
+local browser clipboard, sends it through noVNC, then sends the target paste
 shortcut: Command-V for macOS targets, Ctrl-V for Linux and Windows targets.
 When the remote VNC server publishes clipboard text, the copy-remote control is
 enabled; click it to write that remote text into the local browser clipboard.
@@ -159,10 +186,8 @@ explicit instead of fully automatic.
 
 ## Flags
 
-Flags:
-
 ```text
---id <lease-id-or-slug>
+--id <lease-id-or-slug>     lease to bridge (also accepted as the first positional arg)
 --provider hetzner|aws|azure
 --target linux|macos|windows
 --windows-mode normal|wsl2
@@ -171,24 +196,24 @@ Flags:
 --static-port <port>
 --static-work-root <path>
 --network auto|tailscale|public
---local-port <port>
---open
---take-control
-status
-reset
-daemon start
-daemon status
-daemon stop
---reclaim
+--local-port <port>         local VNC tunnel port (auto-selected when unset)
+--open                      open the portal VNC page once the bridge connects
+--take-control              ask the portal viewer to request control after connecting
+--reclaim                   claim this lease for the current repo
 ```
 
-## Limitations
+Subcommands: `status`, `reset`, and `daemon start|status|stop`. The bridge,
+`status`, and `reset` forms share the bridge flags above; the `daemon status`
+and `daemon stop` forms take only `--id`.
 
-Limitations:
+## Supported providers
 
-- Coordinator-backed Hetzner, AWS, and Azure Linux desktop leases are supported,
-  along with coordinator-backed AWS macOS desktop leases.
-- Static SSH hosts are intentionally not supported yet because the portal cannot
+- Coordinator-backed Hetzner, AWS, and Azure Linux desktop leases, plus
+  coordinator-backed AWS macOS desktop leases.
+- The local Docker container provider (`--provider local-container`) is also
+  supported. It serves noVNC locally over an SSH tunnel rather than through the
+  coordinator portal, so it needs no coordinator login.
+- Static SSH hosts are intentionally not supported, because the portal cannot
   prove that host-managed VNC credentials and prompts are safe to expose.
 - Blacksmith Testbox still owns its own machine connectivity.
 
@@ -196,8 +221,9 @@ Limitations:
 
 `webvnc requires a configured coordinator login`
 
-Run `crabbox login --url <broker-url>` for the coordinator you are using. WebVNC needs both the CLI
-bridge and the browser portal to authenticate with the coordinator.
+Run `crabbox login --url <broker-url>` for the coordinator you are using. WebVNC
+needs both the CLI bridge and the browser portal to authenticate with the
+coordinator. (The local container provider is the exception and needs no login.)
 
 `webvnc currently supports coordinator-backed hetzner/aws/azure desktop leases`
 
@@ -214,10 +240,11 @@ and retry.
 The portal keeps saying `WebVNC daemon not running` or `waiting for VNC bridge`
 
 The browser can reach the coordinator, but no local bridge is currently paired
-with that lease. Start or restart `crabbox webvnc daemon start --id <lease>
---open`, or run `crabbox webvnc reset --id <lease> --open` when stale tabs or
-session state are likely. If the command is still running, wait for the portal
-retry or reload the browser tab.
+with the lease. Start or restart
+`crabbox webvnc daemon start --id <lease> --open`, or run
+`crabbox webvnc reset --id <lease> --open` when stale tabs or session state are
+likely. If the command is already running, wait for the portal retry or reload
+the browser tab.
 
 `waiting for an available WebVNC observer slot`
 
@@ -238,7 +265,7 @@ Use the password printed by `crabbox webvnc`. With `--open`, the command tries
 to pass the password in the browser URL fragment, but a portal login redirect
 can lose that fragment before noVNC sees it.
 
-Related docs:
+## Related docs
 
 - [Interactive desktop and VNC](../features/interactive-desktop-vnc.md)
 - [Linux VNC](../features/vnc-linux.md)

@@ -1,37 +1,41 @@
 # Provider Backends
 
-Read when:
+This is the contract reference for Crabbox provider backends: the interfaces a
+provider implements, how it registers, what core owns versus what the backend
+owns, and the checklist to land a new one. For the step-by-step walkthrough,
+read [Authoring a provider](features/provider-authoring.md) first, then use this
+page as the reference and review checklist.
+
+Read this when you are:
 
 - adding a new Crabbox provider;
-- deciding between an SSH lease backend and a delegated run backend;
+- choosing between an SSH lease backend and a delegated run backend;
 - adding provider-specific flags or config;
 - reviewing a provider PR for the right ownership boundary;
 - designing a future external provider plugin protocol.
 
-Crabbox providers are built around one rule:
+Every provider follows one rule:
 
-Providers configure backends. Core commands own workflows.
+**Providers configure backends. Core commands own workflows.**
 
-That keeps `crabbox run`, `warmup`, `list`, `status`, `stop`, `cleanup`,
-Actions hydration, sync, result collection, rendering, and timing consistent
-across providers. A provider should describe what it can do and return a backend
-object. It should not fork the command surface.
+That keeps `crabbox run`, `warmup`, `list`, `status`, `stop`, `cleanup`, Actions
+hydration, sync, result collection, rendering, and timing consistent across
+providers. A provider describes what it can do and returns a backend object. It
+does not fork the command surface.
 
-## Choose The Backend Shape
+## Choose the backend shape
 
-Start by choosing the execution model.
+Start by picking the execution model. A provider's `Configure` returns a
+`Backend`, and core inspects which interfaces that value implements.
 
-### SSH Lease Backend
+### SSH lease backend
 
-Use `SSHLeaseBackend` when the provider can hand Crabbox an SSH target.
+Use `SSHLeaseBackend` when the provider can hand Crabbox a reachable SSH target.
 
-Examples:
+Examples: Hetzner Cloud, AWS EC2, GCP Compute Engine, Azure VMs, Proxmox, a
+local Docker container, and static BYO SSH hosts.
 
-- Hetzner Cloud
-- AWS EC2
-- static SSH hosts
-
-Crabbox core owns the normal workflow after acquisition:
+Core owns the entire workflow after acquisition:
 
 - claim and slug handling;
 - SSH readiness checks;
@@ -43,7 +47,7 @@ Crabbox core owns the normal workflow after acquisition:
 - heartbeat/touch;
 - release.
 
-The backend owns only provider lifecycle:
+The backend owns only the provider lifecycle:
 
 ```go
 type SSHLeaseBackend interface {
@@ -60,22 +64,26 @@ type SSHLeaseBackend interface {
 Implement this when `LeaseTarget.SSH` can be populated with host, port, user,
 key, work root, target OS, and Windows mode.
 
-### Delegated Run Backend
+When the provider's spec sets `Coordinator: CoordinatorSupported` and a broker
+URL is configured (`CRABBOX_COORDINATOR`), core wraps your `SSHLeaseBackend` in
+a coordinator lease backend automatically (`loadBackend` in
+`internal/cli/provider_backend.go`). Lease lifecycle then flows through the
+broker over HTTP, while sync and command execution still happen directly from
+the CLI to the SSH host. You do not implement that wrapper; you only provide the
+direct backend.
 
-Use `DelegatedRunBackend` when the provider owns execution instead of exposing
-Crabbox-managed SSH.
+### Delegated run backend
 
-Examples:
+Use `DelegatedRunBackend` when the provider owns execution itself instead of
+exposing a Crabbox-managed SSH target.
 
-- Blacksmith Testbox
-- Islo sandboxes, where Islo owns workspace setup and command streaming
-- Daytona sandboxes for `run`, where Daytona toolbox owns file upload and
-  process execution while `crabbox ssh` still uses short-lived SSH tokens
-- a future external runner service that accepts a command and streams output
+Examples: Blacksmith Testbox, E2B, Islo, Modal, Tensorlake, [Upstash Box](https://upstash.com/docs/box/overall/quickstart), and
+Azure Container Apps dynamic sessions, where the provider owns workspace setup
+and command streaming.
 
 The delegated backend owns warmup, command execution, output streaming, and
-stop. Crabbox core still owns provider selection, config loading, local claims,
-friendly slugs, timing summaries, and normalized list/status rendering.
+stop. Core still owns provider selection, config loading, local claims, friendly
+slugs, timing summaries, and normalized list/status rendering.
 
 ```go
 type DelegatedRunBackend interface {
@@ -89,7 +97,7 @@ type DelegatedRunBackend interface {
 }
 ```
 
-Delegated backends return normalized `StatusView` values. Rendering remains
+Delegated backends return normalized `StatusView` values. Rendering stays
 core-owned, so provider packages should not print their own `status` or `list`
 tables unless a compatibility interface explicitly asks for native output.
 
@@ -102,17 +110,21 @@ if err := cli.RejectDelegatedSyncOptions(providerName, req); err != nil {
 }
 ```
 
-That helper rejects sync-only options, checksum sync, forced large sync,
-local stdout/stderr captures, failure bundles, downloads, uploaded scripts, and
-fresh PR checkouts. Do not pretend a delegated provider is SSH-like unless the
-provider has a stable SSH contract. If Crabbox cannot run rsync and remote
-commands itself, use `DelegatedRunBackend`.
+Providers that declare `FeatureArchiveSync` (an archive upload of the checkout)
+can use `cli.RejectDelegatedSyncOptionsForSpec(spec, req)` so that `--sync-only`
+and `--force-sync-large` are allowed while the rest stay rejected. Both helpers
+reject checksum sync, full resync, local stdout/stderr captures, capture-on-fail,
+downloads, artifact globs, uploaded scripts, env helpers, `--stop-after`, fresh
+PR checkouts, and `--emit-proof` (unless the provider declares `FeatureRunProof`).
+Do not pretend a delegated provider is SSH-like unless it has a stable SSH
+contract. If Crabbox cannot run rsync and remote commands itself, use
+`DelegatedRunBackend`.
 
-### Optional Interfaces
+### Optional interfaces
 
 Add optional capabilities as small interfaces instead of widening every backend.
 
-Cleanup is already optional:
+Cleanup is optional:
 
 ```go
 type CleanupBackend interface {
@@ -133,8 +145,8 @@ type JSONListBackend interface {
 ```
 
 `JSONListBackend` is a compatibility escape hatch for script-facing JSON shapes.
-Use it only when an existing provider already exposed a different JSON schema
-than the normalized `[]LeaseView` shape.
+Use it only when an existing provider already exposed a JSON schema different
+from the normalized `[]LeaseView` shape. Do not use it for new providers.
 
 Provider doctor checks are optional for direct providers that can prove cheap,
 non-mutating readiness:
@@ -147,12 +159,12 @@ type DoctorBackend interface {
 }
 ```
 
-Use `DoctorBackend` when a provider owns direct credentials or a delegated
-runner outside the coordinator. The check must validate provider-specific
-readiness without creating resources, and it must not treat unrelated
-coordinator health as proof that the provider itself is configured correctly.
-Expose it through the matching provider-level hook so `doctor` does not
-configure every provider just to discover the optional capability:
+Use `DoctorBackend` when a provider owns direct credentials or a delegated runner
+outside the coordinator. The check must validate provider-specific readiness
+without creating resources, and it must not treat unrelated coordinator health as
+proof that the provider itself is configured correctly. Expose it through the
+matching provider-level hook so `doctor` does not configure every provider just
+to discover the optional capability:
 
 ```go
 type DoctorProvider interface {
@@ -162,31 +174,45 @@ type DoctorProvider interface {
 }
 ```
 
-Future provider-specific capability areas should follow the same pattern, for
-example pricing or image management.
+Native checkpoint and fork support follow the same pattern through
+`NativeCheckpointProvider` and `NativeCheckpointForkProvider`. Future
+provider-specific capability areas, such as pricing or image management, should
+add similarly narrow interfaces rather than widening the base backend.
 
-## Package Layout
+## Package layout
 
-Built-in providers live under `internal/providers/<name>`:
+Built-in providers live under `internal/providers/<name>`. The registry is
+populated by side-effect `init()` registration, gathered in
+`internal/providers/all`:
 
 ```text
-internal/providers/all
-internal/providers/hetzner
-internal/providers/aws
-internal/providers/azure
-internal/providers/gcp
-internal/providers/proxmox
-internal/providers/localcontainer
-internal/providers/ssh
-internal/providers/blacksmith
-internal/providers/namespace
-internal/providers/sprites
-internal/providers/daytona
-internal/providers/islo
-internal/providers/e2b
-internal/providers/modal
-internal/providers/semaphore
-internal/providers/tensorlake
+internal/providers/all                  # side-effect imports of every provider
+internal/providers/shared               # shared direct SSH retry/touch/cleanup helpers
+internal/providers/aws                  # AWS EC2 SSH lease backend (coordinator)
+internal/providers/azure                # Azure VM SSH lease backend (coordinator)
+internal/providers/azuredynamicsessions # Azure Container Apps delegated runner
+internal/providers/gcp                  # GCP Compute Engine SSH lease backend (coordinator)
+internal/providers/hetzner              # Hetzner Cloud SSH lease backend (coordinator)
+internal/providers/proxmox              # Proxmox VE SSH lease backend
+internal/providers/parallels            # Parallels macOS VM host SSH lease backend
+internal/providers/localcontainer       # local Docker container SSH backend
+internal/providers/multipass            # Canonical Multipass local Ubuntu VM SSH backend
+internal/providers/ssh                  # static / BYO SSH backend
+internal/providers/daytona              # Daytona SSH lease + delegated SDK backend
+internal/providers/namespace            # Namespace devbox SSH backend
+internal/providers/semaphore            # Semaphore SSH lease backend
+internal/providers/sprites              # Sprites SSH backend
+internal/providers/exedev               # exe.dev SSH backend
+internal/providers/runpod               # RunPod GPU pod SSH backend
+internal/providers/railway              # Railway.app delegated backend
+internal/providers/blacksmith           # Blacksmith Testbox delegated backend
+internal/providers/e2b                  # E2B delegated backend
+internal/providers/islo                 # Islo delegated backend
+internal/providers/modal                # Modal delegated backend
+internal/providers/tensorlake           # Tensorlake delegated backend
+internal/providers/upstashbox           # Upstash Box delegated backend
+internal/providers/cloudflare           # Cloudflare Containers delegated backend
+internal/providers/wandb                # Weights & Biases delegated backend
 ```
 
 Each provider package owns registration, provider name, aliases, spec,
@@ -201,38 +227,20 @@ import (
 )
 ```
 
-The core provider contract remains in `internal/cli`; built-in implementations
-live in their provider folders:
+The core provider contract lives in `internal/cli`:
 
 ```text
-internal/cli/provider_backend.go          # interfaces, registry, request/result types
-internal/cli/provider_coordinator.go      # brokered coordinator lease wrapper
-internal/cli/provider_labels.go           # shared direct-provider label helpers
-internal/providers/shared                 # shared direct SSH retry/touch/cleanup helpers
-internal/providers/aws                    # AWS SSH lease backend
-internal/providers/azure                  # Azure SSH lease backend
-internal/providers/gcp                    # Google Cloud SSH lease backend
-internal/providers/hetzner                # Hetzner SSH lease backend
-internal/providers/proxmox                # Proxmox VE SSH lease backend
-internal/providers/localcontainer         # local Docker-compatible container SSH backend
-internal/providers/ssh                    # static SSH backend
-internal/providers/blacksmith             # Blacksmith delegated backend
-internal/providers/namespace              # Namespace Devbox SSH backend
-internal/providers/sprites                # Sprites SSH backend
-internal/providers/daytona                # Daytona SSH + delegated SDK backend
-internal/providers/islo                   # Islo delegated backend
-internal/providers/e2b                    # E2B delegated backend
-internal/providers/modal                 # Modal delegated Python-client backend
-internal/providers/semaphore              # Semaphore SSH lease backend
-internal/providers/tensorlake             # Tensorlake delegated CLI backend
+internal/cli/provider_backend.go      # interfaces, registry, request/result types
+internal/cli/provider_coordinator.go  # brokered coordinator lease wrapper
+internal/cli/provider_labels.go       # shared direct-provider label helpers
 ```
 
-Provider packages may use small exported core helpers for claims, labels,
-sync preflight, timing JSON, and SSH key storage. Keep that helper surface
-narrow: if a provider needs broad command orchestration, the behavior probably
-belongs in core instead.
+Provider packages may use small exported core helpers for claims, labels, sync
+preflight, timing JSON, and SSH key storage. Keep that helper surface narrow: if
+a provider needs broad command orchestration, the behavior probably belongs in
+core instead.
 
-## Provider Registration
+## Provider registration
 
 A provider implements `cli.Provider`:
 
@@ -249,7 +257,7 @@ type Provider interface {
 }
 ```
 
-Minimal SSH provider package:
+A minimal SSH provider package:
 
 ```go
 package example
@@ -266,7 +274,7 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return "example" }
+func (Provider) Name() string      { return "example" }
 func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() cli.ProviderSpec {
@@ -301,7 +309,7 @@ func (p Provider) Configure(cfg cli.Config, rt cli.Runtime) (cli.Backend, error)
 provider. Existing providers use constructors such as `NewAWSLeaseBackend` and
 `NewBlacksmithBackend`.
 
-Then add the provider to `internal/providers/all/all.go`:
+Then add the side-effect import in `internal/providers/all/all.go`:
 
 ```go
 import _ "github.com/openclaw/crabbox/internal/providers/example"
@@ -311,13 +319,14 @@ Tests in `internal/cli` do not import `internal/providers/all`, because that
 would create an import cycle. Register test providers from a same-package test
 file when testing core dispatch.
 
-## Provider Spec
+## Provider spec
 
 `ProviderSpec` is command-facing metadata:
 
 ```go
 type ProviderSpec struct {
 	Name        string
+	Family      string
 	Kind        ProviderKind
 	Targets     []TargetSpec
 	Features    FeatureSet
@@ -325,43 +334,50 @@ type ProviderSpec struct {
 }
 ```
 
-Use canonical provider names in docs and config. Aliases are for compatibility.
+Use canonical provider names in docs and config. Aliases are for compatibility
+only. `Family` groups related providers so a flag set by one can route to a
+sibling (for example, the Azure family covers `azure` and
+`azure-dynamic-sessions`); leave it empty to default to the provider name.
 
 Pick `Kind` carefully:
 
 - `ProviderKindSSHLease`: provider returns SSH targets and Crabbox owns sync/run.
 - `ProviderKindDelegatedRun`: provider owns execution and output streaming.
 
-Targets should describe what the provider can actually satisfy. Do not list
+`Targets` should describe what the provider can actually satisfy. Do not list
 `windows`, `macos`, `desktop`, `browser`, or `code` unless the backend supports
 that path end to end.
 
-Feature flags should be concrete:
+Feature flags are concrete capability declarations:
 
 ```go
-cli.FeatureSSH
-cli.FeatureCrabboxSync
-cli.FeatureCleanup
-cli.FeatureDesktop
-cli.FeatureBrowser
-cli.FeatureCode
-cli.FeatureTailscale
-cli.FeatureCheckpoint
-cli.FeatureFork
-cli.FeatureRestore
-cli.FeatureSnapshot
-cli.FeatureRunProof
+cli.FeatureSSH          // "ssh"
+cli.FeatureCrabboxSync  // "crabbox-sync"
+cli.FeatureArchiveSync  // "archive-sync"
+cli.FeatureCleanup      // "cleanup"
+cli.FeatureDesktop      // "desktop"
+cli.FeatureBrowser      // "browser"
+cli.FeatureCode         // "code"
+cli.FeatureTailscale    // "tailscale"
+cli.FeatureURLBridge    // "url-bridge"
+cli.FeatureCheckpoint   // "workspace-checkpoint"
+cli.FeatureFork         // "workspace-fork"
+cli.FeatureRestore      // "workspace-restore"
+cli.FeatureSnapshot     // "provider-snapshot"
+cli.FeatureCacheVolume  // "cache-volume"
+cli.FeatureRunProof     // "run-proof"
+cli.FeatureRunSession   // "run-session"
 ```
 
 Actions runner hydration is intentionally not a provider feature. It is a core
-SSH-over-Linux workflow. It requires:
+SSH-over-Linux/Windows workflow that requires an SSH lease backend, a
+`linux`/`windows` target, and no delegated execution.
 
-- an SSH lease backend;
-- `target=linux`;
-- no delegated execution.
-
-Only set `CoordinatorSupported` when the Crabbox coordinator can provision that
-provider. A direct-only SSH provider should use `CoordinatorNever`.
+Set `CoordinatorSupported` only when the Crabbox broker can provision that
+provider. Today that is the managed cloud set (`aws`, `azure`, `gcp`,
+`hetzner`). A direct-only SSH provider should use `CoordinatorNever`. Even a
+`CoordinatorSupported` provider runs direct from the CLI until a broker URL/token
+is configured.
 
 Checkpoint-related features are reserved for versioned workspaces:
 
@@ -370,21 +386,29 @@ Checkpoint-related features are reserved for versioned workspaces:
 - `FeatureRestore`: provider can restore an existing workspace to a checkpoint.
 - `FeatureSnapshot`: provider can expose a native snapshot id for Crabbox
   metadata.
-- `FeatureRunProof`: delegated provider can return bounded stream/timing
-  metadata for core `crabbox run --emit-proof` rendering.
+- `FeatureCacheVolume`: provider can mount keyed rebuildable cache volumes on
+  warmup/run.
+- `FeatureRunProof`: delegated provider can return bounded stream/timing metadata
+  for core `crabbox run --emit-proof` rendering.
+- `FeatureRunSession`: delegated proof/session runner that exposes a run session
+  handle.
+- `FeatureArchiveSync`: provider syncs the checkout as an uploaded archive rather
+  than over rsync.
+- `FeatureURLBridge`: delegated provider can expose a lease's port through the
+  broker URL bridge.
 
-Do not set these flags for plain SSH access alone. Generic Git/archive/log
-checkpoints are core-owned and should work even when the provider advertises no
-native checkpoint features.
+Do not set the checkpoint flags for plain SSH access alone. Generic
+Git/archive/log checkpoints are core-owned and work even when a provider
+advertises no native checkpoint features.
 
-## Flags And Config
+## Flags and config
 
 Provider flags are registered before parsing because Go's `flag` package rejects
 unknown flags. `RegisterFlags` must be cheap and side-effect free. It returns an
-opaque values struct that is passed back into `ApplyFlags` only after config and
-common flags select the provider.
+opaque values struct passed back into `ApplyFlags` only after config and common
+flags select the provider.
 
-Pattern, when the provider has an exported flag helper or lives in `internal/cli`:
+Pattern for a provider with typed config fields:
 
 ```go
 type exampleFlagValues struct {
@@ -409,20 +433,16 @@ func (Provider) ApplyFlags(cfg *cli.Config, fs *flag.FlagSet, values any) error 
 }
 ```
 
-`Config` does not yet have a generic provider config bag. New provider packages
-should either:
-
-- add typed config fields and use `cli.FlagWasSet` from the provider package; or
-- expose a small provider-specific flag helper from `internal/cli`, as
-  Blacksmith does, when the config type is not ready to export cleanly.
+`Config` does not have a generic provider config bag. New provider packages
+should either add typed config fields and use `cli.FlagWasSet` from the provider
+package, or expose a small provider-specific flag helper from `internal/cli` (as
+Blacksmith does) when the config type is not ready to export cleanly.
 
 If a provider needs durable config, add typed config fields in `Config` and env
-overrides in `config.go`. Keep compatibility shims for existing top-level
-provider config, but prefer `providers.<name>` for new provider families once
-that config bag lands.
+overrides in `config.go`.
 
 Never pass provider secrets as command-line arguments. Use environment variables,
-local SDK config, the coordinator, or a credential store outside repo config.
+local SDK config, the broker, or a credential store outside repo config.
 
 ## Runtime
 
@@ -452,14 +472,12 @@ result, err := rt.Exec.Run(ctx, cli.LocalCommandRequest{
 ```
 
 This gives tests a fake command runner and avoids package-level
-`exec.CommandContext` seams.
+`exec.CommandContext` seams. Use `Runtime.Clock` for timing and `Runtime.Stdout`
+/ `Runtime.Stderr` for streaming and warnings.
 
-Use `Runtime.Clock` for timing in backend code. Use `Runtime.Stdout` and
-`Runtime.Stderr` for streaming and warnings.
+## Implementing an SSH lease backend
 
-## Implementing An SSH Lease Backend
-
-An SSH lease backend should return a complete `LeaseTarget`:
+An SSH lease backend returns a complete `LeaseTarget`:
 
 ```go
 type LeaseTarget struct {
@@ -482,9 +500,9 @@ type LeaseTarget struct {
 8. mark provider labels/tags as ready;
 9. return `LeaseTarget`.
 
-`Resolve` should accept canonical lease IDs, provider IDs, names, and slugs
-where the provider can support them. It should return the stored per-lease SSH
-key when available.
+`Resolve` should accept canonical lease IDs, provider IDs, names, and slugs where
+the provider can support them. It should return the stored per-lease SSH key when
+available.
 
 `List` returns normalized `LeaseView` values. Do not print from `List`; command
 rendering belongs to core.
@@ -492,14 +510,14 @@ rendering belongs to core.
 `Touch` should update provider labels/tags with idle and state metadata when the
 provider supports it. Static providers can update only the in-memory view.
 
-`ReleaseLease` should be idempotent where practical. Remove local claims after
-the provider release succeeds or is known to be unnecessary.
+`ReleaseLease` should be idempotent where practical. Remove local claims after the
+provider release succeeds or is known to be unnecessary.
 
 If cleanup is meaningful, implement `CleanupBackend`. Cleanup should honor
 `DryRun`, log skip/delete decisions to stderr, and use provider labels to avoid
 deleting unrelated machines.
 
-## Implementing A Delegated Run Backend
+## Implementing a delegated run backend
 
 A delegated backend should preserve Crabbox ergonomics while letting the provider
 own the remote workflow.
@@ -521,8 +539,8 @@ own the remote workflow.
 5. return `RunResult`;
 6. stop temporary resources when `Keep` is false.
 
-`List` and `Status` should return normalized views. If the provider only offers
-a table or lossy native status shape, keep that parsing inside the backend.
+`List` and `Status` should return normalized views. If the provider only offers a
+table or lossy native status shape, keep that parsing inside the backend.
 
 `Stop` should stop the provider resource, remove local claims, and remove local
 per-resource keys if the backend created them.
@@ -538,26 +556,20 @@ Backends return values. Core renders output.
 `ListRequest` and `StatusRequest` intentionally do not carry JSON flags. The
 command handler decides whether to render human output or JSON.
 
-`JSONListBackend` is the exception for compatibility with older script-facing
-JSON schemas. It should not be used for new providers.
+`JSONListBackend` is the only exception, for compatibility with older
+script-facing JSON schemas. It should not be used for new providers.
 
-That rule keeps:
+That rule keeps `crabbox list --json`, `crabbox status --json`, human tables, and
+future UI/plugin consumers consistent across backend kinds.
 
-- `crabbox list --json`;
-- `crabbox status --json`;
-- human tables;
-- future UI/plugin consumers;
-
-consistent across backend kinds.
-
-## External Provider Plugins
+## External provider plugins
 
 External process plugins are not implemented yet. Do not add a provider that
 depends on an undocumented stdio protocol.
 
 The intended direction is:
 
-- a built-in Go provider package discovers/configures the external process;
+- a built-in Go provider package discovers and configures the external process;
 - the process speaks JSON over stdio;
 - the Go side adapts it to `SSHLeaseBackend` or `DelegatedRunBackend`;
 - core commands still render list/status and own SSH workflows where applicable.
@@ -602,7 +614,7 @@ For SSH lease backends:
 
 For delegated run backends:
 
-- sync-only/checksum/force-large options are rejected;
+- sync-only/checksum/force-large options are rejected as the spec dictates;
 - new run acquires, claims, streams, and stops when `Keep=false`;
 - existing id/slug resolves and claims correctly;
 - list/status parse provider output into normalized views;
@@ -618,7 +630,7 @@ Run at least:
 go test -count=1 ./internal/cli ./internal/providers/...
 go test -count=1 ./...
 go vet ./...
-npm run docs:check
+scripts/check-docs.sh
 ```
 
 For high-risk provider changes, also run:
@@ -630,7 +642,7 @@ go build -trimpath -o bin/crabbox ./cmd/crabbox
 
 Add live smoke only when credentials and cost boundaries are explicit.
 
-## Review Checklist
+## Review checklist
 
 Before landing a new backend:
 
@@ -639,12 +651,19 @@ Before landing a new backend:
 - `Name` is canonical and docs use that name.
 - Compatibility aliases are intentional and tested.
 - `ProviderSpec.Kind` matches the real execution model.
+- `Family` is set when the provider routes flags to a sibling.
 - Targets and features describe implemented behavior only.
-- Coordinator mode is `CoordinatorNever` unless the coordinator can provision it.
+- Coordinator mode is `CoordinatorNever` unless the broker can provision it.
 - Provider flags are registered before parse and applied only after selection.
 - Secrets are not stored in repo config or passed in argv.
 - `list` and `status` return normalized values instead of printing.
 - Delegated providers reject unsupported sync options.
 - SSH providers do not own core sync/run/rendering.
 - Tests cover command dispatch and backend behavior without live credentials.
-- Docs and source map are updated.
+- Docs and the [source map](source-map.md) are updated.
+
+## See also
+
+- [Authoring a provider](features/provider-authoring.md): step-by-step guide.
+- [Providers overview](features/providers.md): the full provider catalog.
+- [Concepts](concepts.md): how providers fit the lease/run model.

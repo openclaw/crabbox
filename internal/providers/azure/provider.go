@@ -12,15 +12,20 @@ func init() {
 
 type Provider struct{}
 type flagValues struct {
-	OSDisk *string
+	Backend *string
+	OSDisk  *string
 }
 
 func (Provider) Name() string      { return "azure" }
 func (Provider) Aliases() []string { return nil }
+func (Provider) RoutingFlagNames() []string {
+	return []string{"azure-backend"}
+}
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name: "azure",
-		Kind: core.ProviderKindSSHLease,
+		Name:   "azure",
+		Family: "azure",
+		Kind:   core.ProviderKindSSHLease,
 		Targets: []core.TargetSpec{
 			{OS: core.TargetLinux},
 			{OS: core.TargetWindows, WindowsMode: "normal"},
@@ -32,10 +37,39 @@ func (Provider) Spec() core.ProviderSpec {
 }
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		OSDisk: fs.String("azure-os-disk", defaults.AzureOSDisk, "Azure OS disk mode: managed, ephemeral, or auto"),
+		Backend: fs.String("azure-backend", defaults.AzureBackend, "Azure backend: vm or dynamic-sessions"),
+		OSDisk:  fs.String("azure-os-disk", defaults.AzureOSDisk, "Azure OS disk mode: managed, ephemeral, ephemeral-preview, or auto"),
 	}
 }
-func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
+
+func (Provider) RouteConfig(cfg *core.Config, fs *flag.FlagSet, values any) error {
+	backend := cfg.AzureBackend
+	if fs != nil && core.FlagWasSet(fs, "azure-backend") {
+		flags, _ := values.(flagValues)
+		if flags.Backend != nil {
+			backend = *flags.Backend
+		}
+	}
+	normalized, err := core.NormalizeAzureBackend(backend)
+	if err != nil {
+		return core.Exit(2, "%s", err)
+	}
+	cfg.AzureBackend = normalized
+	if normalized == core.AzureBackendDynamicSessions {
+		cfg.Provider = "azure-dynamic-sessions"
+	} else {
+		cfg.Provider = "azure"
+	}
+	return nil
+}
+
+func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
+	if err := p.RouteConfig(cfg, fs, values); err != nil {
+		return err
+	}
+	if cfg.Provider != p.Name() {
+		return nil
+	}
 	flags, _ := values.(flagValues)
 	if core.FlagWasSet(fs, "azure-os-disk") && flags.OSDisk != nil {
 		mode, err := core.NormalizeAzureOSDiskMode(*flags.OSDisk)
@@ -55,6 +89,15 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	}
 	return nil
 }
+
+func (Provider) ServerTypeForConfig(cfg core.Config) string {
+	return core.AzureVMSizeCandidatesForConfig(cfg)[0]
+}
+
+func (Provider) ServerTypeForClass(class string) string {
+	return core.AzureVMSizeCandidatesForClass(class)[0]
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewAzureLeaseBackend(p.Spec(), cfg, rt), nil
 }

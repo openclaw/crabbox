@@ -14,6 +14,30 @@ type cacheEntry struct {
 	Note  string `json:"note,omitempty"`
 }
 
+func (a App) cacheVolumes(ctx context.Context, args []string) error {
+	_ = ctx
+	fs := newFlagSet("cache volumes", a.Stderr)
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(cfg.Cache.Volumes)
+	}
+	if len(cfg.Cache.Volumes) == 0 {
+		fmt.Fprintln(a.Stdout, "no cache volumes configured")
+		return nil
+	}
+	for _, volume := range cfg.Cache.Volumes {
+		fmt.Fprintf(a.Stdout, "%-20s %-48s %s\n", blank(volume.Name, volume.Key), volume.Key, volume.Path)
+	}
+	return nil
+}
+
 func (a App) cacheStats(ctx context.Context, args []string) error {
 	fs := newFlagSet("cache stats", a.Stderr)
 	id := fs.String("id", "", "lease id or slug")
@@ -144,7 +168,7 @@ func (a App) cacheTarget(ctx context.Context, id string, reclaim bool) (SSHTarge
 		if repoErr != nil {
 			return SSHTarget{}, Config{}, "", repoErr
 		}
-		if claimErr := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, reclaim); claimErr != nil {
+		if claimErr := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, reclaim); claimErr != nil {
 			return SSHTarget{}, Config{}, "", claimErr
 		}
 		a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")

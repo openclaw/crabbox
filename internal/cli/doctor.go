@@ -34,12 +34,19 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	profile := fs.String("profile", defaults.Profile, "configured profile for remote prerequisite checks")
 	id := fs.String("id", "", "remote lease id to inspect")
 	fromRun := fs.String("from-run", "", "recorded run id to use for provider, target, lease, and phase context")
+	pond := fs.String("pond", defaults.Pond, "verify Tailscale ACL setup for this pond")
 	jsonOut := fs.Bool("json", false, "print JSON")
+	allProviders := fs.Bool("all", false, "check the provider test-runner matrix")
+	providersFlag := fs.String("providers", "blacksmith-testbox,aws,azure,gcp", "comma-separated providers for --all")
+	prepareCheck := fs.Bool("prepare-check", false, "include test-preparation readiness checks")
 	probeSSH := fs.Bool("doctor-probe-ssh", false, "probe static SSH reachability during doctor")
 	targetFlags := registerTargetFlags(fs, defaults)
 	providerFlags := registerProviderFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if *allProviders {
+		return a.doctorAll(ctx, doctorAllOptions{Providers: splitCommaList(*providersFlag), JSON: *jsonOut, PrepareCheck: *prepareCheck})
 	}
 
 	cfg, err := loadConfig()
@@ -49,6 +56,13 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	cfg.Profile = strings.TrimSpace(*profile)
 	if err := applySelectedProfileConfig(&cfg); err != nil {
 		return err
+	}
+	if flagWasSet(fs, "pond") {
+		pondName, err := requestedPondName(*pond)
+		if err != nil {
+			return err
+		}
+		cfg.Pond = pondName
 	}
 	resolvedDoctorID := strings.TrimSpace(*id)
 	ok := true
@@ -100,6 +114,12 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		}
 	}
 	finish := func() error {
+		if status, message, details := doctorPondSummary(ctx, cfg); status != "" {
+			if status == "failed" {
+				ok = false
+			}
+			record(status, "pond", message, details)
+		}
 		if *jsonOut {
 			if err := json.NewEncoder(a.Stdout).Encode(doctorJSONOutput{OK: ok, Provider: cfg.Provider, Checks: checks}); err != nil {
 				return err
@@ -204,6 +224,9 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	}
 	if os.Getenv("CRABBOX_SERVER_TYPE") == "" {
 		applyServerTypeFlagOverrides(&cfg, fs, "")
+	}
+	if largeDefaultServerType(cfg) {
+		record("warning", "capacity", fmt.Sprintf("provider=%s class=%s type=%s large_default=true hint=set class/type in .crabbox.yaml for routine tests", cfg.Provider, cfg.Class, cfg.ServerType), map[string]string{"provider": cfg.Provider, "class": cfg.Class, "type": cfg.ServerType, "large_default": "true"})
 	}
 	useCoordinator := false
 	if shouldUseCoordinator(cfg, providerDef.Spec()) {

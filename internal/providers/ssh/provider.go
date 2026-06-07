@@ -18,8 +18,9 @@ func (Provider) Aliases() []string {
 }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name: "ssh",
-		Kind: core.ProviderKindSSHLease,
+		Name:   "ssh",
+		Family: "ssh",
+		Kind:   core.ProviderKindSSHLease,
 		Targets: []core.TargetSpec{
 			{OS: core.TargetLinux},
 			{OS: core.TargetWindows, WindowsMode: "normal"},

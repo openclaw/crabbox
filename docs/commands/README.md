@@ -1,8 +1,12 @@
-# Commands
+# Command reference
 
-Crabbox is the testbox. Commands stay top-level rather than nested under `testbox`.
+Crabbox is a single CLI (`crabbox`). Commands are top-level, not nested under a
+`testbox` subcommand. Each page below documents one top-level command, its flags,
+and its behavior; subcommands such as `desktop launch` and `pond connect` are
+covered inside their parent page.
 
-Command docs live here, one file per top-level command. Keep `docs/cli.md` as the command-surface overview and link here for command details; do not add parallel command pages under `docs/cli/`.
+For the command-surface overview, see [CLI](../cli.md). Keep this list in the
+same order as the CLI help.
 
 - [init](init.md)
 - [login](login.md)
@@ -10,6 +14,7 @@ Command docs live here, one file per top-level command. Keep `docs/cli.md` as th
 - [whoami](whoami.md)
 - [doctor](doctor.md)
 - [warmup](warmup.md)
+- [prewarm](prewarm.md)
 - [run](run.md)
 - [job](job.md)
 - [desktop](desktop.md)
@@ -42,5 +47,7 @@ Command docs live here, one file per top-level command. Keep `docs/cli.md` as th
 - [inspect](inspect.md)
 - [stop](stop.md)
 - [cleanup](cleanup.md)
+- [pool](pool.md)
+- [pond](pond.md)
 - [azure](azure.md)
 - [config](config.md)

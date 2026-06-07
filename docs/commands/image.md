@@ -1,93 +1,101 @@
 # image
 
-`crabbox image` contains trusted operator controls for provider images. Use it
-for base runner images and explicit image cleanup, not per-scenario checkpoints.
-If you want to save one prepared lease and fork that exact scenario later, use
+`crabbox image` holds the trusted-operator controls for provider base images:
+creating runner images, promoting an AWS AMI as the brokered default, inspecting
+Fast Snapshot Restore, and deleting stale images. Use it for shared base images
+and explicit image cleanup, not for per-scenario state. To save one prepared
+lease and fork that exact scenario later, use
 [`crabbox checkpoint`](checkpoint.md).
 
 ```sh
-crabbox image create --id cbx_... --name crabbox-runner-20260501-1246 --wait
-crabbox image promote ami-...
-crabbox image promote ami-... --target macos --region us-east-1 --type mac1.metal
-crabbox image promote ami-... --json
-crabbox image fsr-status ami-... --region us-west-2 --fsr-az us-west-2a
-crabbox image delete ami-... --region eu-west-1
-crabbox image delete my-azure-image --provider azure --region westeurope
-crabbox image delete my-gcp-image --provider gcp --region europe-west1-b --project example-project
+crabbox image create --id cbx_... --name my-runner-20260501-1246 --wait
+crabbox image promote ami-1234567890abcdef0
+crabbox image promote ami-1234567890abcdef0 --target macos --region us-east-1 --type mac2.metal
+crabbox image fsr-status ami-1234567890abcdef0 --region us-west-2 --fsr-az us-west-2a
+crabbox image delete ami-1234567890abcdef0 --region eu-west-1
+crabbox image delete my-managed-image --provider azure --region westeurope
+crabbox image delete my-machine-image --provider gcp --region europe-west1-b --project example-project
 ```
 
-Image commands require a configured coordinator and admin-token auth. Set
-`broker.adminToken` or `CRABBOX_COORDINATOR_ADMIN_TOKEN` locally; the Worker
-checks `CRABBOX_ADMIN_TOKEN`.
-They are intentionally not available to normal GitHub browser-login users.
+Every `image` subcommand requires a configured coordinator (broker) **and**
+admin-token auth. Set `broker.adminToken` or `CRABBOX_COORDINATOR_ADMIN_TOKEN`
+locally; the Worker validates it against `CRABBOX_ADMIN_TOKEN`. Without an admin
+token the command exits early with `admin command requires broker.adminToken or
+CRABBOX_COORDINATOR_ADMIN_TOKEN`. These commands are intentionally unavailable
+to normal GitHub browser-login users.
 
-Image bytes live in the provider account, not in git or coordinator durable
-state. AWS images are AMIs backed by EBS snapshots. Azure images are managed
-images. GCP images are Compute Engine machine images. Crabbox stores promoted
-AWS AMI metadata per target, architecture, and region so future AWS leases can
-resolve a matching default image. Hetzner snapshots/images should live in the
-Hetzner project and be selected through `image`/`CRABBOX_HETZNER_IMAGE` until
-Crabbox grows Hetzner create/promote lifecycle commands.
-
-An AMI is AWS's bootable machine image format. EBS snapshots are the stored disk
-snapshots that back the AMI. Deleting an AWS candidate image should remove both
-the AMI registration and its EBS snapshots.
+Image bytes live in the provider account, never in git or coordinator durable
+state. AWS images are AMIs backed by EBS snapshots; Azure images are managed
+images; GCP images are Compute Engine machine images. Crabbox stores promoted
+AWS AMI metadata per target, architecture, and region so future brokered AWS
+leases can resolve a matching default. Hetzner snapshots/images live in the
+Hetzner project and are selected through `image`/`CRABBOX_HETZNER_IMAGE`;
+Crabbox has no Hetzner create/promote lifecycle commands yet.
 
 ## create
 
-Create a provider image from an active brokered AWS or GCP lease. Active Azure
-leases use `crabbox checkpoint` disk snapshots; Azure managed-image capture
-requires a stopped/generalized source VM.
+Create a provider image from an active brokered lease.
+
+```sh
+crabbox image create --id cbx_abc123def456 --name my-runner-20260501-1246 --wait
+```
+
+The source lease must still be active in the coordinator. The Worker calls the
+provider image API against the backing cloud VM and tags the image as
+Crabbox-owned. AWS uses the `CreateImage` API; the same flow applies to other
+brokered providers that support image capture. Note that Azure managed-image
+capture requires a stopped, generalized source VM, so for active Azure leases
+prefer [`crabbox checkpoint`](checkpoint.md) disk snapshots instead.
 
 Flags:
 
 ```text
---id <cbx_id>        source lease; must be a canonical lease ID
---name <name>        provider image name
---wait               poll until the provider image is available
---wait-timeout <d>   default 45m
---no-reboot          AWS AMI CreateImage NoReboot, default true
---json               print JSON
+--id <cbx_id>        source lease (canonical lease ID, required)
+--name <name>        provider image name (required)
+--wait               poll until the provider image is available (default false)
+--wait-timeout <d>   maximum wait duration (default 45m)
+--no-reboot          AWS CreateImage NoReboot (default true)
+--json               print the image record as JSON
 ```
 
-The source lease must still be active in the coordinator. The Worker calls the
-provider image API from the backing cloud VM id and tags the image as
-Crabbox-owned.
+Without `--json`, output is a single line:
 
-Recommended bake flow:
+```text
+image=ami-... name=my-runner-20260501-1246 state=available region=eu-west-1
+```
+
+Recommended bake flow — warm a fresh lease, smoke-test it, then capture:
 
 ```sh
 crabbox warmup --provider aws --class standard --ttl 2h --idle-timeout 30m
 crabbox run --id <slug> --shell -- 'command -v ssh git rsync curl jq && test -d /work/crabbox'
-crabbox image create --id <cbx_id> --name crabbox-runner-YYYYMMDD-HHMM --wait
+crabbox image create --id cbx_... --name my-runner-YYYYMMDD-HHMM --wait
 ```
 
 Use a fresh, intentionally warmed lease as the source. Do not bake personal
 workspace state, local secrets, repository checkouts, or one-off debugging
-artifacts into the image.
-For desktop/browser images, follow the full [Image bake runbook](../features/image-bake-runbook.md)
-instead of relying only on the short smoke above.
+artifacts into the image. For desktop/browser images, follow the full
+[Image bake runbook](../features/image-bake-runbook.md) rather than relying on
+the short smoke above.
 
 Failure handling:
 
-- If `--wait` times out, run `crabbox image create ... --json` or inspect the
+- If `--wait` times out, re-run `crabbox image create ... --json` or inspect the
   provider image state before retrying. Provider image creation can continue
   after the CLI stops polling.
-- If the image enters a failed state, leave the current promoted AWS image in
-  place and create a new image from a fresh lease.
+- If the image enters a failed state, leave the current promoted image in place
+  and create a new image from a fresh lease.
 - If the source lease disappears, create a new warm lease and restart the bake;
-  image creation requires the backing cloud VM ID.
+  image creation requires the backing cloud VM.
 - If the baked image boots but never reaches `crabbox-ready`, do not promote it.
   Keep the previous promoted AMI and debug bootstrap on a normal lease first.
-- Cleanup of stale candidate images is an operator task. Promotion does not
-  delete old images or snapshots. Use `crabbox image delete` for explicit
-  cleanup.
-- If a timing report does not improve after promotion, treat that as a failed
-  performance bake even if the AMI boots.
+- Promotion does not delete old images or snapshots. Cleanup of stale candidate
+  images is an operator task; use `crabbox image delete`.
 
 ## promote
 
-Promote an available AMI as the coordinator's default AWS image:
+Promote an available AMI as the coordinator's default AWS image. Promotion is
+AWS-only.
 
 ```sh
 crabbox image promote ami-1234567890abcdef0
@@ -96,22 +104,23 @@ crabbox image promote ami-1234567890abcdef0
 Flags:
 
 ```text
---target <name>          linux, macos, or windows when promoting an existing AMI
---region <name>          AWS region for AMI lookup when promoting an existing AMI
---type <instance-type>   instance type the AMI boots on, for example mac1.metal
+--target <name>          linux, macos, or windows
+--os <selector>          portable Linux OS selector for Linux AMIs (ubuntu:26.04 | ubuntu:24.04)
+--region <name>          AWS region containing the AMI
+--type <instance-type>   instance type the AMI boots on, for example mac2.metal
 --server-type <type>     alias for --type
 --architecture <arch>    AWS AMI architecture, for example x86_64_mac or arm64_mac
---fast-snapshot-restore  enable AWS Fast Snapshot Restore for backing snapshots
---fsr-az <az>            availability zone for Fast Snapshot Restore; repeatable
---json                   print JSON
+--fast-snapshot-restore  enable AWS Fast Snapshot Restore for the backing snapshots
+--fsr-az <az>            availability zone for Fast Snapshot Restore (repeatable)
+--json                   print the promoted image record as JSON
 ```
 
 Add `--target` and `--region` when promoting an AMI that was not created through
-`crabbox image create`; created images inherit target and region metadata from
-their source lease. For external macOS AMIs, Crabbox reads the AMI architecture
-from AWS and also accepts `--type` or `--architecture` when you want to pin the
-promotion metadata explicitly. Add `--json` to print the promoted image record
-for automation.
+`crabbox image create`; images created by Crabbox inherit target and region
+metadata from their source lease. For external macOS AMIs, Crabbox reads the
+architecture from AWS but also accepts `--type` or `--architecture` to pin the
+promotion metadata explicitly. Use `--os` to record the portable Linux selector
+for a promoted Linux AMI.
 
 Add `--fast-snapshot-restore` plus one or more `--fsr-az` values when the
 promoted image backs hot lanes that need immediate EBS snapshot reads:
@@ -126,28 +135,15 @@ crabbox image promote \
   ami-1234567890abcdef0
 ```
 
-Fast Snapshot Restore is provider-billed per snapshot and availability zone.
-Use it for known hot zones, not every candidate bake.
-
-Check the live AWS Fast Snapshot Restore state after promotion:
-
-```sh
-crabbox image fsr-status \
-  --region us-west-2 \
-  --fsr-az us-west-2a \
-  ami-1234567890abcdef0
-```
-
-`fsr-status` describes the AMI backing snapshots in AWS and returns the current
-state for each matching snapshot/AZ pair. Omit `--fsr-az` to return all Fast
-Snapshot Restore records AWS reports for the image snapshots.
+Fast Snapshot Restore is provider-billed per snapshot and availability zone. Use
+it for known hot zones, not every candidate bake.
 
 Future brokered AWS leases use the promoted image when the request does not set
-an explicit `awsAMI` or `CRABBOX_AWS_AMI` override. Promotion stores coordinator
-metadata only; it does not copy or modify the AMI. A macOS promotion is only
-used by matching macOS leases and will not become the Linux or Windows default.
+an explicit `awsAMI`/`CRABBOX_AWS_AMI` override. Promotion stores coordinator
+metadata only; it does not copy or modify the AMI. A macOS promotion is scoped
+to matching macOS leases and never becomes the Linux or Windows default.
 
-Promotion and rollback:
+Promote, smoke-test, and roll back if needed:
 
 ```sh
 crabbox image promote ami-new
@@ -166,13 +162,41 @@ crabbox stop <slug>
 ```
 
 If the smoke fails, promote the previous known-good AMI again. The coordinator
-stores only scoped selected AMI IDs, so rollback is another `image promote`
-call for the same target and region. Keep the previous AMI available until at
-least one brokered AWS smoke succeeds on the new image.
+stores only scoped selected AMI IDs, so rollback is just another `image promote`
+for the same target and region. Keep the previous AMI available until at least
+one brokered AWS smoke succeeds on the new image.
+
+## fsr-status
+
+Show the live AWS Fast Snapshot Restore state for an image's backing snapshots.
+This subcommand is AWS-only.
+
+```sh
+crabbox image fsr-status ami-1234567890abcdef0 --region us-west-2 --fsr-az us-west-2a
+```
+
+Flags:
+
+```text
+--provider <name>   image provider; aws only (default aws)
+--region <name>     AWS region containing the AMI or snapshot
+--fsr-az <az>       availability zone to report; repeatable
+--json              print the image record as JSON
+```
+
+The argument may be an AMI ID or a snapshot ID. Omit `--fsr-az` to return every
+Fast Snapshot Restore record AWS reports for the image snapshots. Output lists a
+summary line plus one line per snapshot/AZ pair (or `fsr none` when there are no
+records):
+
+```text
+image=ami-... state=available region=us-west-2 fsr=2
+fsr snapshot=snap-... az=us-west-2a state=enabled reason=-
+```
 
 ## delete
 
-Delete a provider image:
+Delete a provider image.
 
 ```sh
 crabbox image delete ami-1234567890abcdef0 --region eu-west-1
@@ -180,11 +204,19 @@ crabbox image delete my-managed-image --provider azure --region westeurope
 crabbox image delete my-machine-image --provider gcp --region europe-west1-b --project example-project
 ```
 
-AWS deletion deregisters the AMI, then deletes the EBS snapshots referenced by
-its block device mappings. Azure deletion removes the managed image. GCP
-deletion removes the machine image. It requires admin-token auth.
+Flags:
 
-Related docs:
+```text
+--provider <name>   image provider: aws, azure, or gcp (default aws)
+--region <name>     region, location, or zone containing the image
+--project <name>    GCP project containing the image
+```
+
+AWS deletion deregisters the AMI and then deletes the EBS snapshots referenced by
+its block-device mappings. Azure deletion removes the managed image. GCP deletion
+removes the machine image. Any other `--provider` value is rejected.
+
+## Related docs
 
 - [Image bake runbook](../features/image-bake-runbook.md)
 - [Prebaked runner images](../features/prebaked-images.md)

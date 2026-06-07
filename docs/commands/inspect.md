@@ -1,68 +1,91 @@
 # inspect
 
-`crabbox inspect` prints detailed lease and provider metadata. Use it for
-debugging coordinator state, provider labels, expiry, SSH target details,
-and Tailscale metadata.
+`crabbox inspect` prints the full record for a single lease: state, provider,
+server identity, the resolved SSH command, idle/expiry timing, Tailscale
+metadata, and the provider labels attached to the box. Reach for it when
+something looks wrong and you want every detail in one place.
 
 ```sh
 crabbox inspect --id blue-lobster
 crabbox inspect --id blue-lobster --network tailscale
 crabbox inspect --id blue-lobster --json
 crabbox inspect --provider namespace-devbox --id blue-lobster
-crabbox inspect --provider semaphore --id blue-lobster
-crabbox inspect --provider sprites --id blue-lobster
 crabbox inspect --provider ssh --target windows --windows-mode wsl2 --static-host win-dev.local
+```
+
+You can also pass the lease id or slug as a positional argument instead of
+`--id`:
+
+```sh
+crabbox inspect blue-lobster
 ```
 
 ## Output
 
-Human output prints lease state, provider, server type, public IP, work
-root, owner, org, idle timeout, TTL, expiry, last touched, the resolved
-SSH command for the selected network mode, and any Tailscale metadata the
-lease carries.
+Human output prints one `key=value` line per field, followed by any Tailscale
+metadata (when the lease has Tailscale enabled) and one `label.<name>=<value>`
+line per provider label.
 
 ```text
-lease=cbx_abcdef123456 slug=blue-lobster
-state=active provider=aws server=i-0abcdef0123456789 type=c7a.48xlarge
-host=203.0.113.10 user=crabbox port=2222 work_root=/work/crabbox
-owner=alex@example.com org=openclaw
-idle_timeout=30m0s ttl=90m0s
-created_at=2026-05-07T07:42:18Z last_touched=2026-05-07T07:55:12Z expires_at=2026-05-07T08:25:12Z
-ssh: ssh -i ~/.config/crabbox/testboxes/cbx_abcdef123456/id_ed25519 -p 2222 crabbox@203.0.113.10
-tailscale: state=ok ipv4=100.64.0.5 fqdn=blue-lobster.tail-scale.ts.net tags=tag:crabbox
+id=cbx_abcdef123456
+slug=blue-lobster
+provider=aws
+target=linux
+windows_mode=-
+state=active
+server=i-0abcdef0123456789
+host=203.0.113.10
+network=public
+ssh=~/.config/crabbox/testboxes/cbx_abcdef123456/id_ed25519 -p 2222 crabbox@203.0.113.10
+ssh_fallback_ports=22
+idle_for=12m4s
+idle_timeout=30m0s
+last_touched=2026-05-07T07:55:12Z
+expires=2026-05-07T08:25:12Z
+tailscale.state=ok
+tailscale.hostname=blue-lobster
+tailscale.fqdn=blue-lobster.tail-scale.ts.net
+tailscale.ipv4=100.64.0.5
+tailscale.tags=tag:crabbox
+label.target=linux
+label.state=active
 ```
 
-JSON output returns the structured record, including non-secret Tailscale
-metadata. Secrets (broker tokens, provider keys, VNC passwords) are never
-included.
+The `ssh=` line shows the connection for the selected `--network` mode (the
+key path, port, user, and host). Empty fields render as `-`.
+
+`--json` prints the structured status record (the same shape returned by
+[`status`](status.md)), including non-secret Tailscale metadata and the full
+label map. Secrets such as broker tokens, provider keys, and VNC passwords are
+never included in either output mode.
 
 ## Flags
 
 ```text
---id <lease-id-or-slug>      lease to inspect; required for managed providers
---provider hetzner|aws|azure|gcp|proxmox|ssh|namespace-devbox|semaphore|sprites|daytona   override the configured provider
---target linux|macos|windows
---windows-mode normal|wsl2
---static-host <host>         static SSH host for provider=ssh
+--id <lease-id-or-slug>      lease to inspect (required); also accepted as a positional argument
+--provider <name>            override the configured provider (e.g. aws, hetzner, ssh, namespace-devbox)
+--target linux|macos|windows target OS
+--windows-mode normal|wsl2   Windows execution mode
+--static-host <host>         static SSH host (provider=ssh)
 --static-user <user>         static SSH user override
 --static-port <port>         static SSH port override
 --static-work-root <path>    static target work root
---network auto|tailscale|public  select which address inspect prints
---json                       print JSON
+--network auto|tailscale|public  which address the resolved SSH line prints
+--json                       print the structured JSON record
 ```
 
-## Inspect vs Status vs List
+## inspect vs status vs list
 
-- `inspect` is the long-form record for one lease, including provider
-  metadata, label state, and the resolved SSH command;
-- `status` is the shorter "is this lease healthy right now" check, with
-  optional `--wait` and bounded telemetry;
-- `list` is the table view across many leases, scoped by owner/org or
-  fleet-wide for admins.
+- `inspect` is the long-form record for one lease, including provider labels
+  and the resolved SSH command.
+- [`status`](status.md) is the shorter "is this lease healthy right now"
+  check, with optional `--wait` and bounded telemetry.
+- [`list`](list.md) is the table view across many leases, scoped by owner/org
+  or fleet-wide for admins.
 
-Use `inspect` when something is unexpected and you want all the detail in
-one place. Use `status` when an automation needs a quick liveness check.
-Use `list` when you are looking for a specific lease across the pool.
+Use `inspect` when something is unexpected and you want all the detail at once.
+Use `status` when an automation needs a quick liveness check. Use `list` when
+you are hunting for a specific lease across the pool.
 
 Related docs:
 

@@ -1,11 +1,20 @@
 # artifacts
 
-`crabbox artifacts` collects desktop QA evidence into a durable bundle, creates
-trimmed review media, and publishes inline-ready assets for pull requests.
+`crabbox artifacts` turns a desktop lease into durable QA evidence: it collects
+screenshots, video, logs, doctor output, and metadata into a bundle, makes
+trimmed review media, writes QA summary markdown, and publishes inline-ready
+assets to a pull request.
 
-Use it when a desktop/WebVNC issue or UI fix needs more than a one-off
-screenshot: MP4 recording, trimmed GIF, logs, doctor output, WebVNC status, and
-metadata in one directory.
+Reach for it when a desktop/WebVNC issue or UI fix needs more than a one-off
+screenshot. Subcommands:
+
+- `collect` — gather a full evidence bundle into a directory.
+- `video` — record an MP4 from a desktop lease.
+- `gif` — make a trimmed GIF from a recorded video (alias for
+  [`crabbox media preview`](media.md)).
+- `template` — write QA summary markdown.
+- `publish` — upload a bundle and optionally comment on a PR.
+- `list` / `pull` — read or download files from a published manifest.
 
 ## Collect
 
@@ -23,12 +32,16 @@ By default `collect` writes:
 - `webvnc-status.json` when a coordinator login is configured
 - `logs.txt` and `run.json` when `--run <run-id>` is provided
 
-`--all` also records `screen.mp4`, writes `screen.contact.png`, creates
-`screen.trimmed.gif`, and writes `screen.trimmed.mp4` using the same motion
-window. Linux video uses remote `ffmpeg`/X11 capture. Native Windows video
-captures frames in the interactive console session and encodes the MP4 locally
-with `ffmpeg`. MP4 capture is currently supported for Linux and native Windows
-desktop targets.
+`--all` enables `--video` and `--gif`, so the bundle also records `screen.mp4`,
+writes a `screen.contact.png` contact sheet, and produces a trimmed
+`screen.trimmed.gif`. `--gif` requires `--video` (or `--all`). Linux video uses
+remote `ffmpeg`/X11 capture; native Windows captures frames in the interactive
+console session and encodes the MP4 locally with `ffmpeg`. MP4 capture is
+supported for Linux and native Windows desktop targets only.
+
+When the output directory is omitted, Crabbox derives one from the lease ID and
+slug. The bundle is not collected for static (BYO) hosts on non-Linux targets,
+or for the Blacksmith provider, which owns its own connectivity.
 
 Useful flags:
 
@@ -37,34 +50,34 @@ Useful flags:
 --output <dir>
 --run <run-id>
 --all
---screenshot
+--screenshot                  default true
 --video
 --gif
---doctor
---webvnc-status
---metadata
---duration <duration> default 10s
---fps <n>             default 15
---gif-width <px>      default 1000
---gif-fps <n>         default 24
---contact-sheet       default true
+--doctor                      default true
+--webvnc-status               default true
+--metadata                    default true
+--duration <duration>         default 10s
+--fps <n>                     default 15
+--gif-width <px>              default 1000
+--gif-fps <n>                 default 24
+--contact-sheet               default true
 --no-contact-sheet
---contact-sheet-output <path>
---contact-sheet-frames <n> default 5
---contact-sheet-cols <n>   default 5
---contact-sheet-width <px> default 320
+--contact-sheet-frames <n>    default 5
+--contact-sheet-cols <n>      default 5
+--contact-sheet-width <px>    default 320
 --provider <name>
 --network auto|public|tailscale
+--reclaim
 --json
 ```
 
 When collection hits an unhealthy desktop, WebVNC, VNC, or input layer, it
-prints the same inline `problem:`, `detail:`, and `rescue:` commands used by the
-desktop and WebVNC commands. With `--json`, stdout remains valid JSON and those
-same repair hints are returned in the `warnings` array instead of being printed
-as text before the JSON document. If a capture step fails after the bundle has
-started, the command still exits nonzero and includes an `error` object with a
-stable code and message.
+prints the same inline `problem:`, `detail:`, and `rescue:` hints used by the
+[`desktop`](desktop.md) and [`webvnc`](webvnc.md) commands. With `--json`,
+stdout stays valid JSON and those hints are returned in the `warnings` array
+instead. If a capture step fails after the bundle has started, the command
+still exits nonzero and includes an `error` object with a stable code and
+message.
 
 ## Video
 
@@ -73,11 +86,23 @@ crabbox artifacts video --id blue-lobster --duration 15s --output screen.mp4
 ```
 
 `video` records an MP4 from a desktop lease and writes a sampled
-`*.contact.png` contact sheet beside it by default. It is useful when you want
-to keep capture separate from bundle collection. Disable the sidecar with
-`--contact-sheet=false` or `--no-contact-sheet`, or set
-`--contact-sheet-output <path>`. Like `collect --video`, it supports Linux and
-native Windows desktop targets.
+`*.contact.png` contact sheet beside it by default. Use it when you want capture
+separate from a full bundle. Disable the sidecar with `--contact-sheet=false` or
+`--no-contact-sheet`, or set `--contact-sheet-output <path>`. Like
+`collect --video`, it supports Linux and native Windows desktop targets.
+
+```text
+--id <lease-id-or-slug>
+--output <path>
+--duration <duration>         default 10s
+--fps <n>                     default 15
+--contact-sheet               default true
+--no-contact-sheet
+--contact-sheet-output <path>
+--contact-sheet-frames <n>    default 5
+--contact-sheet-cols <n>      default 5
+--contact-sheet-width <px>    default 320
+```
 
 ## GIF
 
@@ -88,10 +113,10 @@ crabbox artifacts gif \
   --trimmed-video-output screen.trimmed.mp4
 ```
 
-`gif` is an alias for the same local motion-trimmed preview logic as
-[`crabbox media preview`](media.md).
+`gif` runs the same local motion-trimmed preview logic as
+[`crabbox media preview`](media.md); see that page for the full flag list.
 
-## Templates
+## Template
 
 ```sh
 crabbox artifacts template openclaw \
@@ -103,8 +128,19 @@ crabbox artifacts template openclaw \
 crabbox artifacts template mantis --summary-file qa-notes.md
 ```
 
-Templates write Markdown with `Summary`, `Before / After`, and `Evidence`
-sections sized for Mantis/OpenClaw QA comments.
+`template` writes Markdown with `Summary`, `Before / After`, and `Evidence`
+sections sized for QA comments. The kind (`openclaw` or `mantis`) is taken from
+the first positional argument or `--kind`. Output goes to stdout unless
+`--output <path>` is set.
+
+```text
+--kind openclaw|mantis
+--before <url-or-path>
+--after <url-or-path>
+--summary <text>
+--summary-file <path>
+--output <path>
+```
 
 ## Publish
 
@@ -133,44 +169,83 @@ crabbox artifacts publish \
 `publish` uploads bundle files, writes and publishes `artifact-manifest.json`,
 writes `published-artifacts.md`, and comments on the PR with inline images/GIFs
 plus links to videos, logs, metadata, and the manifest. Use `--dry-run` to
-generate markdown and print intended actions without upload or comment side
-effects. Pass `--skip-manifest` only when a caller explicitly wants the old
-markdown-only publish output.
-
-Storage backends:
-
-- `--storage auto` is the default. When a coordinator is configured, Crabbox
-  asks the broker for upload URLs and the broker-owned artifact backend handles
-  storage credentials. Without a coordinator, auto falls back to local markdown.
-- `--storage broker` requires a configured coordinator and uploads through
-  broker-minted URLs.
-- `--storage s3` uses the AWS CLI and uploads to `s3://<bucket>/<prefix>/...`.
-- `--storage cloudflare` uses `wrangler r2 object put --remote`.
-- `--storage r2` uses the AWS CLI against an S3-compatible R2 endpoint.
-- `--storage local` writes markdown only. For `--pr`, local publishing needs a
-  `--base-url` that already serves the files, otherwise the PR would contain
-  unusable local paths.
-
-S3 flags:
+generate markdown and print intended actions without uploading or commenting.
+Pass `--skip-manifest` only when you explicitly want the old markdown-only
+output.
 
 ```text
+--dir <dir>
+--storage auto|broker|local|s3|cloudflare|r2   default auto
 --bucket <name>
 --prefix <path>
 --base-url <url>
+--pr <n>
+--repo <owner/name>
+--template openclaw|mantis    default openclaw
+--summary <text>
+--summary-file <path>
 --region <region>
 --profile <profile>
 --endpoint-url <url>
 --acl <acl>
 --presign
---expires <duration> default 168h
+--expires <duration>          default 168h (7d)
+--dry-run
+--no-comment
 --skip-manifest
---no-manifest alias for --skip-manifest
+--no-manifest                 alias for --skip-manifest
 ```
+
+Most flags default from `CRABBOX_ARTIFACTS_*` environment variables (see
+[Environment defaults](#environment-defaults)).
+
+### Storage backends
+
+- `--storage auto` (default): when a coordinator is configured, Crabbox asks
+  the broker for upload URLs and the broker-owned artifact backend handles
+  storage credentials. Without a coordinator, auto falls back to `local`.
+- `--storage broker` requires a configured coordinator and uploads through
+  broker-minted URLs.
+- `--storage s3` uses the AWS CLI and uploads to `s3://<bucket>/<prefix>/...`.
+- `--storage cloudflare` uses `wrangler r2 object put --remote`.
+- `--storage r2` uses the AWS CLI against an S3-compatible R2 endpoint; requires
+  `--endpoint-url` (or `CRABBOX_ARTIFACTS_R2_ENDPOINT_URL`).
+- `--storage local` writes markdown only. For `--pr`, local publishing needs a
+  `--base-url` that already serves the files, otherwise the PR would contain
+  unusable local paths.
+
+`s3`, `cloudflare`, and `r2` all require `--bucket`. For `cloudflare`/`r2`, a
+`--pr` comment also requires `--base-url` so the inline assets resolve.
 
 When `--base-url` is supplied, published links use that public URL. Otherwise
 `--presign` generates temporary AWS/R2 S3 URLs after upload.
 
-## Manifest, List, And Pull
+For native Cloudflare publishing, `publish` runs `wrangler` with
+`CRABBOX_ARTIFACTS_CLOUDFLARE_*` when present, then the generic `CLOUDFLARE_*`
+environment. For S3-compatible R2 publishing, pass
+`--storage r2 --endpoint-url <r2-endpoint> --profile <r2-profile>`; when set,
+`CRABBOX_ARTIFACTS_R2_ENDPOINT_URL`, `CRABBOX_ARTIFACTS_R2_AWS_PROFILE`, and
+`CRABBOX_ARTIFACTS_R2_AWS_REGION` are used before generic AWS defaults. Prefer
+brokered publishing for shared teams so Cloudflare and object-store secrets stay
+on the coordinator.
+
+`publish --pr` shells out to `gh issue comment <pr> --body-file ...`, so the
+current checkout must be authenticated with GitHub. Pass `--repo owner/name`
+when the working directory is not inside the target repository.
+
+### Brokered publishing
+
+For brokered publishing, the CLI never receives object-store credentials. It
+sends artifact names, sizes, content types, and hashes to
+`POST /v1/artifacts/uploads`; the coordinator returns one short-lived upload URL
+per file plus the final URL to place in Markdown. Upload grants are signed with
+the declared `content-length`, so the object store rejects oversized PUTs during
+the grant window, and the broker caps each upload request at 5 GiB total before
+signing grants. When `--prefix` is omitted for hosted publishing, the CLI
+derives a unique prefix from the PR number, bundle directory, and current time
+so later QA comments do not overwrite earlier evidence.
+
+## Manifest, list, and pull
 
 Every publish writes and publishes an `artifact-manifest.json` by default. The
 manifest is the durable handoff for PR proof and contains one entry per
@@ -201,29 +276,25 @@ crabbox artifacts list artifacts/blue-lobster --json
 crabbox artifacts pull artifacts/blue-lobster/artifact-manifest.json --output /tmp/blue-lobster-proof
 ```
 
-`pull` downloads URLs or copies local manifest paths, preserves nested artifact
-names, and verifies SHA256 and size when the manifest provides them. Existing
-output files are rejected unless `--overwrite` is set.
+`list` accepts a manifest file or a bundle directory and prints one line per
+file (kind, name, size, sha256, content type, access policy, location), or the
+raw manifest with `--json`.
 
-Cloudflare R2 flags:
+`pull` requires `--output` and downloads URLs or copies local manifest paths,
+preserving nested artifact names and verifying SHA256 and size when the manifest
+provides them. Existing output files are rejected unless `--overwrite` is set.
 
 ```text
---bucket <name>
---prefix <path>
---base-url <url>     required for --pr inline-ready links
+crabbox artifacts list [<manifest-or-dir>] [--json]
+crabbox artifacts pull [<manifest-or-dir>] --output <dir> [--overwrite] [--json]
 ```
 
-For native Cloudflare publishing, `publish` runs `wrangler` with
-`CRABBOX_ARTIFACTS_CLOUDFLARE_*` when present, then the generic
-`CLOUDFLARE_*` environment. Prefer brokered publishing for shared teams so
-Cloudflare and object-store secrets stay on the coordinator.
+## Coordinator artifact backend
 
-For S3-compatible R2 publishing, pass `--storage r2 --endpoint-url <r2-endpoint>
---profile <r2-profile>`. When present, Crabbox uses
-`CRABBOX_ARTIFACTS_R2_ENDPOINT_URL` and `CRABBOX_ARTIFACTS_R2_AWS_PROFILE`
-before falling back to generic AWS defaults.
+When publishing through a coordinator, configure the artifact backend on the
+Worker. These values split into non-secret Worker vars and Worker secrets.
 
-Coordinator artifact backend configuration:
+Worker vars (where artifacts go and how long URLs live):
 
 ```text
 CRABBOX_ARTIFACTS_BACKEND=s3|r2
@@ -232,45 +303,28 @@ CRABBOX_ARTIFACTS_PREFIX
 CRABBOX_ARTIFACTS_BASE_URL
 CRABBOX_ARTIFACTS_REGION
 CRABBOX_ARTIFACTS_ENDPOINT_URL
-CRABBOX_ARTIFACTS_ACCESS_KEY_ID
-CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY
-CRABBOX_ARTIFACTS_SESSION_TOKEN
 CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS
 CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS
 ```
 
-For brokered publishing, the CLI never receives object-store credentials. It
-sends artifact names, sizes, content types, and hashes to
-`POST /v1/artifacts/uploads`; the coordinator returns one short-lived upload URL
-per file plus the final URL to place in Markdown. Upload grants are signed with
-the declared `content-length`, so the object store rejects oversized PUTs during
-the grant window; the broker also caps each upload request at 5 GiB total before
-signing grants. When `--prefix` is omitted for hosted publishing, the CLI derives
-a unique prefix from the PR number, bundle directory, and current time so later
-QA comments do not overwrite earlier evidence.
-
-Coordinator artifact values split into two groups:
-
-- Worker vars: `CRABBOX_ARTIFACTS_BACKEND`, `CRABBOX_ARTIFACTS_BUCKET`,
-  `CRABBOX_ARTIFACTS_PREFIX`, `CRABBOX_ARTIFACTS_BASE_URL`,
-  `CRABBOX_ARTIFACTS_REGION`, `CRABBOX_ARTIFACTS_ENDPOINT_URL`,
-  `CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS`, and
-  `CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS`. These describe where artifacts go and
-  how long URLs should live.
-- Worker secrets: `CRABBOX_ARTIFACTS_ACCESS_KEY_ID`,
-  `CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY`, and optional
-  `CRABBOX_ARTIFACTS_SESSION_TOKEN`. These are S3-compatible object-store keys
-  used only by the coordinator to sign artifact upload/read URLs.
-
-Our deployed coordinator currently uses R2-compatible storage with public final
-URLs on `https://artifacts.example.com`, bucket
-`openclaw-crabbox-artifacts`, and object prefix `crabbox-artifacts`. The actual
-R2 access key id and secret access key are Worker secrets; they are not required
-on developer machines for normal `crabbox artifacts publish`.
-
-Environment defaults:
+Worker secrets (S3-compatible object-store keys used only by the coordinator to
+sign upload/read URLs):
 
 ```text
+CRABBOX_ARTIFACTS_ACCESS_KEY_ID
+CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY
+CRABBOX_ARTIFACTS_SESSION_TOKEN
+```
+
+These secrets are not required on developer machines for normal
+`crabbox artifacts publish`.
+
+## Environment defaults
+
+`publish` flags default from these client-side variables:
+
+```text
+CRABBOX_ARTIFACTS_DIR
 CRABBOX_ARTIFACTS_STORAGE
 CRABBOX_ARTIFACTS_BUCKET
 CRABBOX_ARTIFACTS_PREFIX
@@ -283,6 +337,7 @@ CRABBOX_ARTIFACTS_PRESIGN
 CRABBOX_ARTIFACTS_EXPIRES
 ```
 
-`publish --pr` uses `gh issue comment <pr> --body-file ...`, so the current
-checkout must be authenticated with GitHub. Pass `--repo owner/name` when the
-working directory is not inside the target repository.
+For S3-compatible R2 publishing, `CRABBOX_ARTIFACTS_R2_ENDPOINT_URL`,
+`CRABBOX_ARTIFACTS_R2_AWS_PROFILE`, and `CRABBOX_ARTIFACTS_R2_AWS_REGION`
+override the generic AWS defaults when `--storage r2` is used and the matching
+flag is not passed.

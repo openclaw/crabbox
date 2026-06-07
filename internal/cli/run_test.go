@@ -1012,6 +1012,26 @@ func TestFullResyncSeedsPruneManifestFromGit(t *testing.T) {
 	}
 }
 
+func TestAllowRemoteSyncMassDeletionsForIncludeWhitelist(t *testing.T) {
+	cfg := baseConfig()
+	t.Setenv("CRABBOX_ALLOW_MASS_DELETIONS", "")
+	if allowRemoteSyncMassDeletions(cfg, false) {
+		t.Fatal("ordinary sync should keep mass deletion guard enabled")
+	}
+	if !allowRemoteSyncMassDeletions(cfg, true) {
+		t.Fatal("hydrated actions workspace should allow mass deletions")
+	}
+	cfg.Sync.Includes = []string{"src"}
+	if !allowRemoteSyncMassDeletions(cfg, false) {
+		t.Fatal("sync.include should allow intentional whitelist pruning")
+	}
+	cfg.Sync.Includes = nil
+	t.Setenv("CRABBOX_ALLOW_MASS_DELETIONS", "1")
+	if !allowRemoteSyncMassDeletions(cfg, false) {
+		t.Fatal("env override should allow mass deletions")
+	}
+}
+
 func TestRunCommandRejectsApplyLocalPatchWithoutFreshPR(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{"--apply-local-patch", "--", "true"})
@@ -1956,6 +1976,12 @@ func TestCommandRuntimePreflightToolsFocusesEntrypoint(t *testing.T) {
 	}
 	if got := strings.Join(commandRuntimePreflightTools([]string{"bash", "-lc", "source ~/.nvm/nvm.sh && pnpm test"}, false), ","); got != "" {
 		t.Fatalf("bash setup wrapper should not be preflight-blocked, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"powershell -NoProfile -Command \"$env:Path = 'C:\\node;' + $env:Path; node -v\""}, true), ","); got != "" {
+		t.Fatalf("PowerShell wrapper should not be preflight-blocked, got %q", got)
+	}
+	if got := strings.Join(commandRuntimePreflightTools([]string{"pwsh.exe", "-NoProfile", "-Command", "$env:Path = 'C:\\node;' + $env:Path; pnpm test"}, false), ","); got != "" {
+		t.Fatalf("pwsh wrapper should not be preflight-blocked, got %q", got)
 	}
 	if got := strings.Join(commandRuntimePreflightTools([]string{"sudo apt-get update && sudo apt-get install -y nodejs npm && npm test"}, true), ","); got != "" {
 		t.Fatalf("sudo runtime setup command should not be preflight-blocked, got %q", got)

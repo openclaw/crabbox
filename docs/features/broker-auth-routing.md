@@ -1,100 +1,150 @@
-# Broker Auth And Routing
+# Broker Auth and Routing
 
-Read when:
+Read this when you are:
 
-- changing coordinator authentication;
-- changing Cloudflare routes or Access policy;
-- debugging bearer-token automation or GitHub browser login.
+- changing how the coordinator (broker) authenticates callers;
+- adding or moving a Cloudflare Worker route, or putting Cloudflare Access in front of one;
+- debugging bearer-token automation, service-token access, or the GitHub browser login.
 
-The broker is exposed through Cloudflare Workers routes:
+The broker is the Cloudflare Worker coordinator. The CLI talks to it over HTTPS for
+lease lifecycle, runs, usage, and admin operations; SSH, rsync, and command execution
+still go straight from the CLI to the runner host and never traverse the broker.
+
+## Routes
+
+A typical deployment publishes the same Worker on more than one hostname:
 
 ```text
-https://broker.example.com
-https://broker-access.example.com
-https://crabbox-coordinator.example.workers.dev
-fallback.example.com/*
+https://broker.example.com                       # public CLI + browser-login route
+https://broker-access.example.com                # same Worker, behind Cloudflare Access
+https://crabbox-coordinator.example.workers.dev   # workers.dev fallback
+https://fallback.example.com                       # additional fallback
 ```
 
-## Route Model
+`https://broker.example.com` is the canonical route. It is reachable at the Cloudflare
+edge without any outer gate so `crabbox login` can complete a browser GitHub OAuth flow.
+The Worker itself still requires Crabbox auth on every API route; the unauthenticated
+exceptions are `GET /v1/health`, the GitHub login/OAuth routes (`/v1/auth/*`,
+`/portal/login`, `/portal/logout`), and the per-lease websocket agent upgrades that
+authenticate via short-lived bridge tickets instead.
 
-`https://broker.example.com` is the normal coordinator route. It is public at
-the Cloudflare edge so `crabbox login` can complete a browser-based GitHub
-OAuth flow. The Worker still requires Crabbox auth for every non-health route.
+`https://broker-access.example.com` is the **same** Worker fronted by a Cloudflare Access
+application. It exists for automation and for proving that Crabbox works when an operator
+wants an outer Cloudflare gate. Requests there clear two independent checks:
 
-`https://broker-access.example.com` is the same Worker behind a Cloudflare
-Access application. It exists for automation and proof that Crabbox works when
-an operator wants an outer Cloudflare gate in front of the coordinator. Requests
-to this route must pass two checks:
+1. **Cloudflare Access** accepts the service-token headers before the request reaches the
+   Worker.
+2. The **Worker** accepts one of: the shared operator bearer token, the separate admin
+   bearer token (for admin routes), or a signed Crabbox user token.
 
-1. Cloudflare Access accepts the service-token headers before the request
-   reaches the Worker.
-2. The Crabbox Worker accepts either the shared operator bearer token, the
-   separate admin bearer token for admin routes, or a signed Crabbox user token.
+A Cloudflare Access service token is therefore not a Crabbox admin token. It only gets the
+HTTP request past Cloudflare Access; the Worker still decides what the caller may do. Use a
+`non_identity` (service-token-only) Access policy scoped to the specific Crabbox CLI service
+token rather than any token in the account, so automated clients prove both layers
+independently.
 
-That means the Access service token is not a Crabbox admin token. It only gets
-the HTTP request through Cloudflare Access. The Worker still decides what the
-caller can do.
+## How the Worker authenticates a request
 
-The current Access app is `Crabbox Coordinator Service Token` on
-`broker-access.example.com`. Its policy is `non_identity` service-token auth,
-scoped to the local Crabbox CLI service token rather than any token in the
-account.
+Every authenticated route requires a `Authorization: Bearer <token>` header. The Worker
+matches the token in this precedence (`worker/src/auth.ts`):
 
-Normal users run `crabbox login --url <broker-url>` for first login, which opens GitHub and stores a signed Crabbox user token. The coordinator needs a GitHub OAuth app with callback:
+1. **Admin token** — equals `CRABBOX_ADMIN_TOKEN`. Grants admin. The only way to reach
+   admin routes.
+2. **Shared token** — equals `CRABBOX_SHARED_TOKEN`. Authorized but not admin; this is
+   normal trusted automation.
+3. **Signed user token** — a token with the `cbxu_` prefix, an HMAC-SHA256 signature over a
+   base64url payload, verified with `CRABBOX_SESSION_SECRET` (falling back to
+   `CRABBOX_SHARED_TOKEN`). Minted by `crabbox login`, authorized but never admin, with a
+   default 30-day expiry.
+
+Anything else returns `401 unauthorized`.
+
+After a successful match the Worker forwards the request to the Fleet Durable Object with a
+trusted identity injected as `x-crabbox-auth`, `x-crabbox-admin`, `x-crabbox-owner`,
+`x-crabbox-org`, and (for user tokens) `x-crabbox-github-login`. Any inbound
+`cf-access-authenticated-user-email` / `cf-access-jwt-assertion` headers are stripped before
+forwarding, so raw Access headers can never spoof identity.
+
+### Owner and org on a request
+
+The CLI computes a local owner email (`localCoordinatorOwner`) in this order and sends it as
+`x-crabbox-owner`, with `CRABBOX_ORG` as `x-crabbox-org`:
+
+```text
+CRABBOX_OWNER
+GIT_AUTHOR_EMAIL
+GIT_COMMITTER_EMAIL
+git config user.email
+```
+
+How the Worker resolves owner/org depends on the token:
+
+- **Admin token** — owner comes from the CLI's `x-crabbox-owner` header (falling back to
+  `unknown`); org comes from `x-crabbox-org` (falling back to `CRABBOX_DEFAULT_ORG`).
+- **Shared token** — owner comes from the Worker's own `CRABBOX_SHARED_OWNER` env (not the
+  CLI header); org comes from `CRABBOX_DEFAULT_ORG`.
+- **Signed user token** — owner/org come from the signed GitHub user token, not from CLI
+  headers.
+
+The one override: when the Worker can verify a Cloudflare Access JWT and that JWT carries an
+email, the verified Access email becomes the request owner for bearer (admin or shared)
+callers. Raw, unverified Cloudflare Access email headers are stripped and never set identity.
+
+## GitHub browser login
+
+`crabbox login --url <broker-url>` opens GitHub, runs the OAuth flow, and stores a signed
+Crabbox user token locally. The coordinator needs a GitHub OAuth app whose callback URL is
+the public Worker origin plus the callback path:
 
 ```text
 https://broker.example.com/v1/auth/github/callback
 ```
 
-Self-hosted coordinators need their own GitHub OAuth app. The callback URL on
-that app must exactly match the public Worker URL plus
-`/v1/auth/github/callback`, and the Worker `CRABBOX_PUBLIC_URL` must use that
-same public origin.
+The OAuth app requests the scopes `read:user user:email read:org`. A self-hosted coordinator
+needs its own OAuth app: the callback URL must exactly match the public origin, and the
+Worker `CRABBOX_PUBLIC_URL` must use that same origin (it is used to build the callback and
+to canonicalize portal redirects).
 
-Worker secrets:
+Login is gated by GitHub org membership before a user token is minted:
+
+- The allowed org set comes from `CRABBOX_GITHUB_ALLOWED_ORG` or comma-separated
+  `CRABBOX_GITHUB_ALLOWED_ORGS`; if neither is set, it falls back to `CRABBOX_DEFAULT_ORG`.
+  If no allowed org resolves, login is rejected.
+- The user must be an **active** member of an allowed org.
+- If `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) is set, the user must
+  also belong to at least one listed team after org membership passes. Entries are team
+  slugs: use `team-slug` for the resolved org, or `org/team-slug` to qualify the org.
+
+### Worker secrets for login
 
 ```text
 CRABBOX_GITHUB_CLIENT_ID
 CRABBOX_GITHUB_CLIENT_SECRET
-CRABBOX_GITHUB_ALLOWED_ORG
-CRABBOX_GITHUB_ALLOWED_ORGS
-CRABBOX_GITHUB_ALLOWED_TEAMS
-CRABBOX_SESSION_SECRET
+CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separated)
+CRABBOX_GITHUB_ALLOWED_TEAMS     # optional; comma-separated team slugs
+CRABBOX_SESSION_SECRET           # signs user tokens; falls back to CRABBOX_SHARED_TOKEN
 ```
 
-GitHub browser login requires active membership in the allowed GitHub org before
-the coordinator mints a Crabbox user token. Set `CRABBOX_GITHUB_ALLOWED_ORG` or
-comma-separated `CRABBOX_GITHUB_ALLOWED_ORGS`; if unset, the Worker falls back
-to `CRABBOX_DEFAULT_ORG`, then rejects login if no allowed org is configured. The OAuth app must request
-`read:user user:email read:org`.
+## Sending Cloudflare Access credentials from the CLI
 
-Set comma-separated `CRABBOX_GITHUB_ALLOWED_TEAMS` to require membership in at
-least one team after org membership passes. Entries are GitHub team slugs. Use
-`team-slug` for the selected org or `org/team-slug` when multiple orgs are
-allowed.
+When a route is also protected by Cloudflare Access, the CLI must satisfy Access before the
+Worker sees the request. Configure either a service token or a pre-minted JWT:
 
-Trusted automation can still use the shared operator bearer token configured in the CLI and Worker. Shared-token callers are normal automation, not admin callers. The CLI sends:
+- `CRABBOX_ACCESS_CLIENT_ID` + `CRABBOX_ACCESS_CLIENT_SECRET` — sent as the
+  `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers (service token).
+- `CRABBOX_ACCESS_TOKEN` — an already-minted Access JWT, forwarded as the `cf-access-token`
+  header.
 
-```text
-Authorization: Bearer <token>
-X-Crabbox-Owner: <email>
-X-Crabbox-Org: <org>
-```
+(`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`, and `CF_ACCESS_TOKEN` are accepted as
+fallbacks.) These credentials satisfy Cloudflare Access only — the Worker still requires the
+Crabbox bearer or signed user token.
 
-If the coordinator route is also protected by Cloudflare Access, the CLI can
-send Access credentials before the Worker receives the request. Configure
-`CRABBOX_ACCESS_CLIENT_ID` and `CRABBOX_ACCESS_CLIENT_SECRET` for a Cloudflare
-Access service token, or `CRABBOX_ACCESS_TOKEN` to forward an already minted
-Access JWT as `cf-access-token`. These Access credentials only satisfy
-Cloudflare Access; the Worker still requires the Crabbox bearer token or a
-signed Crabbox user token. When `CRABBOX_ACCESS_TEAM_DOMAIN` and
-`CRABBOX_ACCESS_AUD` are configured, the Worker verifies
-`Cf-Access-Jwt-Assertion` against Cloudflare Access certs before using any
-Access identity. Raw `cf-access-authenticated-user-email` headers are ignored.
+Server-side, when `CRABBOX_ACCESS_TEAM_DOMAIN` and `CRABBOX_ACCESS_AUD` are configured, the
+Worker verifies the `Cf-Access-Jwt-Assertion` header against Cloudflare Access certs (RS256,
+matching `aud`, `iss`, and expiry) before trusting any Access identity. Without both
+configured, Access identity is ignored.
 
-An Access-protected route such as `https://broker-access.example.com` can use a service-token-only (`non_identity`) Access app, so automated clients can prove both layers independently: first Cloudflare Access, then the Worker bearer or signed user token.
-
-Local config shape:
+## Local config
 
 ```yaml
 broker:
@@ -107,49 +157,44 @@ broker:
 provider: aws
 ```
 
-Set `CRABBOX_COORDINATOR=https://broker-access.example.com` when you want a
-command to use the Access-protected route without changing the default public
-broker URL. `crabbox config show` reports the Access credential state as
-`access_auth=service-token` without printing secrets.
+Set `CRABBOX_COORDINATOR=https://broker-access.example.com` to point a single command at the
+Access-protected route without changing the default `broker.url`. `crabbox config show`
+reports the Access credential state as `access_auth=service-token` (or similar) without
+printing secrets.
 
-Useful proof commands:
+## Proof commands
 
 ```sh
+# Should fail at Cloudflare Access without credentials.
 curl -i https://broker-access.example.com/v1/health
+
+# Should pass once Access creds + shared + admin broker auth are configured.
 CRABBOX_COORDINATOR=https://broker-access.example.com bin/crabbox doctor
 CRABBOX_COORDINATOR=https://broker-access.example.com bin/crabbox whoami
-CRABBOX_LIVE=1 CRABBOX_AUTH_SMOKE_ACCESS=1 CRABBOX_COORDINATOR=https://broker-access.example.com CRABBOX_BIN=bin/crabbox scripts/live-auth-smoke.sh
-CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=aws CRABBOX_COORDINATOR=https://broker-access.example.com CRABBOX_BIN=bin/crabbox scripts/live-smoke.sh
+
+# End-to-end auth and provider smoke against the Access route.
+CRABBOX_LIVE=1 CRABBOX_AUTH_SMOKE_ACCESS=1 \
+  CRABBOX_COORDINATOR=https://broker-access.example.com \
+  CRABBOX_BIN=bin/crabbox scripts/live-auth-smoke.sh
+
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=aws \
+  CRABBOX_COORDINATOR=https://broker-access.example.com \
+  CRABBOX_BIN=bin/crabbox scripts/live-smoke.sh
 ```
 
-The first command should fail at Cloudflare Access without credentials. The auth
-smoke should pass when local Access credentials, shared broker auth, and admin
-broker auth are configured. The provider smoke additionally proves the same
-route can lease, run, and release a real machine.
+The auth smoke proves both layers (Access plus the Worker bearer/admin tokens); the provider
+smoke additionally proves the same route can lease, run, and release a real machine.
 
-Owner selection for bearer-token requests:
+## Summary
 
-```text
-CRABBOX_OWNER
-GIT_AUTHOR_EMAIL
-GIT_COMMITTER_EMAIL
-git config user.email
-```
+- `broker.example.com/*` is the canonical CLI and browser-login endpoint.
+- `broker-access.example.com/*` is the service-token-protected endpoint; the workers.dev and
+  `fallback.example.com/*` hosts are fallbacks.
+- The Access service token only clears Cloudflare Access; it is not a Crabbox admin token.
+- Signed GitHub user tokens are never admin tokens — admin routes require the separate admin
+  token.
 
-`CRABBOX_ORG` sets the org header. Raw Cloudflare Access email headers do not
-override CLI-provided owner/org headers. If the Worker can verify an Access JWT
-and that JWT contains an email, that verified Access email becomes the bearer
-request owner. Normal `crabbox login` requests use the signed GitHub token
-identity.
-
-GitHub user tokens are signed by the Worker and are not admin tokens. Admin
-routes require the separate admin token. The `broker.example.com/*` route is
-the canonical CLI and browser-login endpoint. `broker-access.example.com/*` is
-the service-token-protected endpoint.
-`https://crabbox-coordinator.example.workers.dev` and `fallback.example.com/*`
-are fallbacks.
-
-Related docs:
+## Related docs
 
 - [Coordinator](coordinator.md)
 - [Security](../security.md)

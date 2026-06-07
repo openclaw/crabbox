@@ -18,6 +18,7 @@ type crabboxKongCLI struct {
 	Whoami     whoamiKongCmd     `cmd:"" passthrough:"" help:"Show broker identity."`
 	Doctor     doctorKongCmd     `cmd:"" passthrough:"" help:"Check local and broker/provider readiness."`
 	Warmup     warmupKongCmd     `cmd:"" passthrough:"" help:"Lease a box and wait until it is ready."`
+	Prewarm    prewarmKongCmd    `cmd:"" passthrough:"" help:"Lease and hydrate a reusable test-ready box."`
 	Run        runKongCmd        `cmd:"" passthrough:"" help:"Sync the repo, run a remote command, stream output."`
 	Job        jobKongCmd        `cmd:"" help:"Run named repo-local Crabbox jobs."`
 	Desktop    desktopKongCmd    `cmd:"" help:"Launch apps into a visible desktop session."`
@@ -55,6 +56,7 @@ type crabboxKongCLI struct {
 	Config     configKongCmd     `cmd:"" help:"Show or update user config."`
 	Pool       poolKongCmd       `cmd:"" help:"Alias commands for machine pools."`
 	Machine    machineKongCmd    `cmd:"" help:"Alias commands for direct-provider machines."`
+	Pond       pondKongCmd       `cmd:"" help:"Pond bridge plane: peer discovery for delegated providers."`
 }
 
 type kongExit struct {
@@ -117,7 +119,7 @@ func normalizeKongHelpArgs(args []string) []string {
 
 func isKongCommandGroup(command string) bool {
 	switch command {
-	case "actions", "admin", "artifacts", "azure", "cache", "capsule", "checkpoint", "config", "desktop", "image", "job", "machine", "media", "pool":
+	case "actions", "admin", "artifacts", "azure", "cache", "capsule", "checkpoint", "config", "pond", "desktop", "image", "job", "machine", "media", "pool":
 		return true
 	default:
 		return false
@@ -140,6 +142,9 @@ type doctorKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type warmupKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type prewarmKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type runKongCmd struct {
@@ -300,10 +305,11 @@ type artifactsPullKongCmd struct {
 }
 
 type cacheKongCmd struct {
-	List  cacheListKongCmd  `cmd:"" passthrough:"" help:"Show remote cache usage."`
-	Stats cacheStatsKongCmd `cmd:"" passthrough:"" help:"Show remote cache usage."`
-	Purge cachePurgeKongCmd `cmd:"" passthrough:"" help:"Remove selected cache content."`
-	Warm  cacheWarmKongCmd  `cmd:"" passthrough:"" help:"Run a command that populates caches."`
+	List    cacheListKongCmd    `cmd:"" passthrough:"" help:"Show remote cache usage."`
+	Stats   cacheStatsKongCmd   `cmd:"" passthrough:"" help:"Show remote cache usage."`
+	Purge   cachePurgeKongCmd   `cmd:"" passthrough:"" help:"Remove selected cache content."`
+	Warm    cacheWarmKongCmd    `cmd:"" passthrough:"" help:"Run a command that populates caches."`
+	Volumes cacheVolumesKongCmd `cmd:"" passthrough:"" help:"List configured provider cache volumes."`
 }
 type cacheListKongCmd struct {
 	Args []string `arg:"" optional:""`
@@ -315,6 +321,9 @@ type cachePurgeKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type cacheWarmKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type cacheVolumesKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 
@@ -462,9 +471,29 @@ type configSetBrokerKongCmd struct {
 }
 
 type poolKongCmd struct {
-	List poolListKongCmd `cmd:"" passthrough:"" help:"Alias for list."`
+	List     poolListKongCmd     `cmd:"" passthrough:"" help:"List machine inventory."`
+	Ready    poolReadyKongCmd    `cmd:"" passthrough:"" help:"List ready-pool leases."`
+	Register poolRegisterKongCmd `cmd:"" passthrough:"" help:"Register a hydrated lease in a ready pool."`
+	Borrow   poolBorrowKongCmd   `cmd:"" passthrough:"" help:"Borrow a ready-pool lease."`
+	Return   poolReturnKongCmd   `cmd:"" passthrough:"" help:"Return or drain a ready-pool lease."`
+	Ensure   poolEnsureKongCmd   `cmd:"" passthrough:"" help:"Ensure ready-pool capacity."`
 }
 type poolListKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type poolReadyKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type poolRegisterKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type poolBorrowKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type poolReturnKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type poolEnsureKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 
@@ -472,6 +501,25 @@ type machineKongCmd struct {
 	Cleanup machineCleanupKongCmd `cmd:"" passthrough:"" help:"Alias for cleanup."`
 }
 type machineCleanupKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+
+type pondKongCmd struct {
+	Peers      pondPeersKongCmd      `cmd:"" passthrough:"" help:"List peer endpoints for a pond on a delegated provider."`
+	Connect    pondConnectKongCmd    `cmd:"" passthrough:"" help:"Open SSH -L forwards to every pond member that declared --expose ports."`
+	Disconnect pondDisconnectKongCmd `cmd:"" passthrough:"" help:"Stop daemonized SSH-mesh forwards for a pond."`
+	Release    pondReleaseKongCmd    `cmd:"" passthrough:"" help:"Stop every lease in the named pond and remove their claims."`
+}
+type pondPeersKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type pondConnectKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type pondDisconnectKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type pondReleaseKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 
@@ -483,6 +531,7 @@ func (c *logoutKongCmd) Run(ctx context.Context, app App) error    { return app.
 func (c *whoamiKongCmd) Run(ctx context.Context, app App) error    { return app.whoami(ctx, c.Args) }
 func (c *doctorKongCmd) Run(ctx context.Context, app App) error    { return app.doctor(ctx, c.Args) }
 func (c *warmupKongCmd) Run(ctx context.Context, app App) error    { return app.warmup(ctx, c.Args) }
+func (c *prewarmKongCmd) Run(ctx context.Context, app App) error   { return app.prewarm(ctx, c.Args) }
 func (c *runKongCmd) Run(ctx context.Context, app App) error       { return app.runCommand(ctx, c.Args) }
 func (c *jobListKongCmd) Run(ctx context.Context, app App) error   { return app.jobList(ctx, c.Args) }
 func (c *jobRunKongCmd) Run(ctx context.Context, app App) error    { return app.jobRun(ctx, c.Args) }
@@ -510,6 +559,15 @@ func (c *inspectKongCmd) Run(ctx context.Context, app App) error { return app.in
 func (c *stopKongCmd) Run(ctx context.Context, app App) error    { return app.stop(ctx, c.Args) }
 func (c *releaseKongCmd) Run(ctx context.Context, app App) error { return app.stop(ctx, c.Args) }
 func (c *cleanupKongCmd) Run(ctx context.Context, app App) error { return app.cleanup(ctx, c.Args) }
+func (c *pondConnectKongCmd) Run(ctx context.Context, app App) error {
+	return app.pondConnect(ctx, stripKongCommandPath(c.Args, "pond", "connect"))
+}
+func (c *pondDisconnectKongCmd) Run(ctx context.Context, app App) error {
+	return app.pondDisconnect(ctx, stripKongCommandPath(c.Args, "pond", "disconnect"))
+}
+func (c *pondReleaseKongCmd) Run(ctx context.Context, app App) error {
+	return app.pondRelease(ctx, stripKongCommandPath(c.Args, "pond", "release"))
+}
 
 func (c *desktopLaunchKongCmd) Run(ctx context.Context, app App) error {
 	return app.desktopLaunch(ctx, c.Args)
@@ -575,6 +633,9 @@ func (c *cachePurgeKongCmd) Run(ctx context.Context, app App) error {
 	return app.cachePurge(ctx, c.Args)
 }
 func (c *cacheWarmKongCmd) Run(ctx context.Context, app App) error { return app.cacheWarm(ctx, c.Args) }
+func (c *cacheVolumesKongCmd) Run(ctx context.Context, app App) error {
+	return app.cacheVolumes(ctx, c.Args)
+}
 
 func (c *imageCreateKongCmd) Run(ctx context.Context, app App) error {
 	return app.imageCreate(ctx, c.Args)
@@ -684,8 +745,27 @@ func (c *azureLoginKongCmd) Run(ctx context.Context, app App) error {
 func (c *poolListKongCmd) Run(ctx context.Context, app App) error {
 	return app.list(ctx, c.Args)
 }
+func (c *poolReadyKongCmd) Run(ctx context.Context, app App) error {
+	return app.readyPoolList(ctx, stripKongCommandPath(c.Args, "pool", "ready"))
+}
+func (c *poolRegisterKongCmd) Run(ctx context.Context, app App) error {
+	return app.readyPoolRegister(ctx, stripKongCommandPath(c.Args, "pool", "register"))
+}
+func (c *poolBorrowKongCmd) Run(ctx context.Context, app App) error {
+	return app.readyPoolBorrow(ctx, stripKongCommandPath(c.Args, "pool", "borrow"))
+}
+func (c *poolReturnKongCmd) Run(ctx context.Context, app App) error {
+	return app.readyPoolReturn(ctx, stripKongCommandPath(c.Args, "pool", "return"))
+}
+func (c *poolEnsureKongCmd) Run(ctx context.Context, app App) error {
+	return app.readyPoolEnsure(ctx, stripKongCommandPath(c.Args, "pool", "ensure"))
+}
 func (c *machineCleanupKongCmd) Run(ctx context.Context, app App) error {
 	return app.cleanup(ctx, c.Args)
+}
+
+func (c *pondPeersKongCmd) Run(ctx context.Context, app App) error {
+	return app.pondPeers(ctx, stripKongCommandPath(c.Args, "pond", "peers"))
 }
 
 func (c *versionKongCmd) Run(app App) error {

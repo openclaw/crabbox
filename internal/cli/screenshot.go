@@ -24,7 +24,7 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 		return err
 	}
 	setIDFromFirstArg(fs, id)
-	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{Desktop: true})
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
 		return err
 	}
@@ -44,7 +44,7 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
-	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, leaseID, *reclaim); err != nil {
+	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, *reclaim); err != nil {
 		return err
 	}
 	if err := waitForLoopbackVNC(ctx, &target); err != nil {

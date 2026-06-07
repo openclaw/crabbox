@@ -23,6 +23,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	if aws.Kind != ProviderKindSSHLease {
 		t.Fatalf("aws kind=%q", aws.Kind)
 	}
+	if aws.Family != "aws" {
+		t.Fatalf("aws family=%q", aws.Family)
+	}
 	if !containsString(aws.Targets, targetLinux) || !containsString(aws.Targets, targetMacOS) {
 		t.Fatalf("aws targets=%v", aws.Targets)
 	}
@@ -58,7 +61,7 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 		t.Fatalf("providers error=%v stderr=%q", err, stderr.String())
 	}
 	text := stdout.String()
-	for _, want := range []string{"aws\n", "  kind: ssh-lease\n", "  features: "} {
+	for _, want := range []string{"aws\n", "  family: aws\n", "  kind: ssh-lease\n", "  features: "} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers output missing %q:\n%s", want, text)
 		}

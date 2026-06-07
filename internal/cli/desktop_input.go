@@ -170,7 +170,7 @@ func (a App) desktopCommandTarget(ctx context.Context, name string, args []strin
 		return SSHTarget{}, Config{}, "", err
 	}
 	setIDFromFirstArg(fs, id)
-	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{Desktop: true})
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
 		return SSHTarget{}, Config{}, "", err
 	}

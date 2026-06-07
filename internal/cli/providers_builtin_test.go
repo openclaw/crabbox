@@ -9,10 +9,12 @@ func init() {
 	RegisterProvider(testHetznerProvider{})
 	RegisterProvider(testAWSProvider{})
 	RegisterProvider(testAzureProvider{})
+	RegisterProvider(testAzureDynamicSessionsProvider{})
 	RegisterProvider(testGCPProvider{})
 	RegisterProvider(testProxmoxProvider{})
 	RegisterProvider(testStaticSSHProvider{})
 	RegisterProvider(testExeDevProvider{})
+	RegisterProvider(testRunPodProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
 	RegisterProvider(testDaytonaProvider{})
@@ -22,17 +24,23 @@ func init() {
 	RegisterProvider(testCloudflareProvider{})
 	RegisterProvider(testSpritesProvider{})
 	RegisterProvider(testLocalContainerProvider{})
+	RegisterProvider(testMultipassProvider{})
 	RegisterProvider(testParallelsProvider{})
+	RegisterProvider(testWandbProvider{})
 }
 
 type testAzureProvider struct{}
 
 func (testAzureProvider) Name() string      { return "azure" }
 func (testAzureProvider) Aliases() []string { return nil }
+func (testAzureProvider) RoutingFlagNames() []string {
+	return []string{"azure-backend"}
+}
 func (testAzureProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name: "azure",
-		Kind: ProviderKindSSHLease,
+		Name:   "azure",
+		Family: "azure",
+		Kind:   ProviderKindSSHLease,
 		Targets: []TargetSpec{
 			{OS: targetLinux},
 			{OS: targetWindows, WindowsMode: windowsModeNormal},
@@ -42,9 +50,39 @@ func (testAzureProvider) Spec() ProviderSpec {
 		Coordinator: CoordinatorSupported,
 	}
 }
-func (testAzureProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
-func (testAzureProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+func (testAzureProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return struct{ Backend *string }{
+		Backend: fs.String("azure-backend", defaults.AzureBackend, ""),
+	}
+}
+func (testAzureProvider) RouteConfig(cfg *Config, fs *flag.FlagSet, values any) error {
+	backend := cfg.AzureBackend
+	if fs != nil && flagWasSet(fs, "azure-backend") {
+		flags, _ := values.(struct{ Backend *string })
+		if flags.Backend != nil {
+			backend = *flags.Backend
+		}
+	}
+	normalized, err := NormalizeAzureBackend(backend)
+	if err != nil {
+		return exit(2, "%s", err)
+	}
+	cfg.AzureBackend = normalized
+	if normalized == AzureBackendDynamicSessions {
+		cfg.Provider = "azure-dynamic-sessions"
+	} else {
+		cfg.Provider = "azure"
+	}
 	return nil
+}
+func (p testAzureProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	return p.RouteConfig(cfg, fs, values)
+}
+func (testAzureProvider) ServerTypeForConfig(cfg Config) string {
+	return azureVMSizeCandidatesForConfig(cfg)[0]
+}
+func (testAzureProvider) ServerTypeForClass(class string) string {
+	return azureVMSizeCandidatesForClass(class)[0]
 }
 func (p testAzureProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
@@ -82,6 +120,58 @@ func (testAzureProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointFor
 		req.Config.AzureOSDiskExplicit = true
 	}
 	return nil
+}
+
+type testAzureDynamicSessionsProvider struct{}
+
+func (testAzureDynamicSessionsProvider) Name() string      { return "azure-dynamic-sessions" }
+func (testAzureDynamicSessionsProvider) Aliases() []string { return nil }
+func (testAzureDynamicSessionsProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "azure-dynamic-sessions",
+		Family:      "azure",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureArchiveSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testAzureDynamicSessionsProvider) RouteConfig(cfg *Config, _ *flag.FlagSet, _ any) error {
+	cfg.AzureBackend = AzureBackendDynamicSessions
+	return nil
+}
+func (testAzureDynamicSessionsProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return noProviderFlags{}
+}
+func (testAzureDynamicSessionsProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (testAzureDynamicSessionsProvider) ServerTypeForConfig(Config) string { return "" }
+func (testAzureDynamicSessionsProvider) ServerTypeForClass(string) string  { return "" }
+func (p testAzureDynamicSessionsProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testDelegatedBackend{spec: p.Spec()}, nil
+}
+
+type testWandbProvider struct{}
+
+func (testWandbProvider) Name() string      { return "wandb" }
+func (testWandbProvider) Aliases() []string { return nil }
+func (testWandbProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "wandb",
+		Family:      "wandb",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureArchiveSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testWandbProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testWandbProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testWandbProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testDelegatedBackend{spec: p.Spec()}, nil
 }
 
 type testHetznerProvider struct{}
@@ -421,6 +511,27 @@ type testExeDevFlagValues struct {
 	WorkRoot    *string
 }
 
+type testRunPodProvider struct{}
+
+func (testRunPodProvider) Name() string      { return "runpod" }
+func (testRunPodProvider) Aliases() []string { return nil }
+func (testRunPodProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "runpod",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testRunPodProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testRunPodProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testRunPodProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
 type testBlacksmithProvider struct{}
 
 func (testBlacksmithProvider) Name() string { return "blacksmith-testbox" }
@@ -432,7 +543,7 @@ func (testBlacksmithProvider) Spec() ProviderSpec {
 		Name:        "blacksmith-testbox",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureRunProof},
+		Features:    FeatureSet{FeatureCacheVolume, FeatureRunProof, FeatureRunSession},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -587,7 +698,7 @@ func (testIsloProvider) Spec() ProviderSpec {
 		Name:        "islo",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    nil,
+		Features:    FeatureSet{FeatureURLBridge},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -635,7 +746,7 @@ func (testE2BProvider) Spec() ProviderSpec {
 		Name:        "e2b",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    nil,
+		Features:    FeatureSet{FeatureURLBridge},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -685,7 +796,7 @@ func (testModalProvider) Spec() ProviderSpec {
 		Name:        "modal",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureArchiveSync},
+		Features:    FeatureSet{FeatureArchiveSync, FeatureURLBridge},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -744,7 +855,7 @@ func (testCloudflareProvider) Spec() ProviderSpec {
 		Name:        "cloudflare",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureArchiveSync, FeatureCleanup},
+		Features:    FeatureSet{FeatureArchiveSync, FeatureCleanup, FeatureURLBridge},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -827,7 +938,7 @@ func (testLocalContainerProvider) Spec() ProviderSpec {
 		Name:        "local-container",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCacheVolume},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -893,6 +1004,89 @@ func (testLocalContainerProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, valu
 	return nil
 }
 func (p testLocalContainerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testMultipassProvider struct{}
+
+func (testMultipassProvider) Name() string { return "multipass" }
+func (testMultipassProvider) Aliases() []string {
+	return []string{"mp", "canonical-multipass"}
+}
+func (testMultipassProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "multipass",
+		Family:      "local-vm",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureCacheVolume},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testMultipassFlagValues struct {
+	CLIPath       *string
+	Image         *string
+	User          *string
+	WorkRoot      *string
+	CPUs          *int
+	Memory        *string
+	Disk          *string
+	LaunchTimeout *string
+}
+
+func (testMultipassProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testMultipassFlagValues{
+		CLIPath:       fs.String("multipass-cli", defaults.Multipass.CLIPath, "Multipass CLI"),
+		Image:         fs.String("multipass-image", defaults.Multipass.Image, "Multipass image"),
+		User:          fs.String("multipass-user", defaults.Multipass.User, "Multipass SSH user"),
+		WorkRoot:      fs.String("multipass-work-root", defaults.Multipass.WorkRoot, "Multipass work root"),
+		CPUs:          fs.Int("multipass-cpus", defaults.Multipass.CPUs, "Multipass CPUs"),
+		Memory:        fs.String("multipass-memory", defaults.Multipass.Memory, "Multipass memory"),
+		Disk:          fs.String("multipass-disk", defaults.Multipass.Disk, "Multipass disk"),
+		LaunchTimeout: fs.String("multipass-launch-timeout", defaults.Multipass.LaunchTimeout.String(), "Multipass launch timeout"),
+	}
+}
+func (testMultipassProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testMultipassFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "multipass-cli") {
+		cfg.Multipass.CLIPath = *v.CLIPath
+	}
+	if flagWasSet(fs, "multipass-image") {
+		cfg.Multipass.Image = *v.Image
+		cfg.multipassImageExplicit = true
+	}
+	if flagWasSet(fs, "multipass-user") {
+		cfg.Multipass.User = *v.User
+		cfg.SSHUser = *v.User
+	}
+	if flagWasSet(fs, "multipass-work-root") {
+		cfg.Multipass.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "multipass-cpus") {
+		cfg.Multipass.CPUs = *v.CPUs
+	}
+	if flagWasSet(fs, "multipass-memory") {
+		cfg.Multipass.Memory = *v.Memory
+	}
+	if flagWasSet(fs, "multipass-disk") {
+		cfg.Multipass.Disk = *v.Disk
+	}
+	if flagWasSet(fs, "multipass-launch-timeout") {
+		if err := ApplyLeaseDuration(&cfg.Multipass.LaunchTimeout, *v.LaunchTimeout); err != nil {
+			return err
+		}
+	}
+	if cfg.Provider == "mp" || cfg.Provider == "canonical-multipass" {
+		cfg.Provider = "multipass"
+	}
+	return nil
+}
+func (p testMultipassProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

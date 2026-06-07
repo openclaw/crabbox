@@ -1,12 +1,12 @@
 import { AwsClient } from "aws4fetch";
 import { XMLParser } from "fast-xml-parser";
 
-import { awsUserData } from "./bootstrap";
+import { awsRunInstancesUserData } from "./bootstrap";
 import {
   awsPromotedAMIConfigKey,
   awsInstanceTypeCandidatesForTargetClass,
   sshPorts,
-  validCIDRs,
+  validatedCIDRs,
   type LeaseConfig,
 } from "./config";
 import { osImageSpec } from "./os-image";
@@ -25,6 +25,7 @@ const ec2Version = "2016-11-15";
 const stsVersion = "2011-06-15";
 const awsSpotQuotaCode = "L-34B43A08";
 const awsOnDemandQuotaCode = "L-1216C47A";
+const awsSSHIngressDescription = "Crabbox SSH";
 const awsMacHostQuotaSpecs: Record<string, { quotaCode: string; quotaName: string }> = {
   mac1: { quotaCode: "L-A8448DC5", quotaName: "Running Dedicated mac1 Hosts" },
   mac2: { quotaCode: "L-5D8DADF5", quotaName: "Running Dedicated mac2 Hosts" },
@@ -60,6 +61,8 @@ export interface AWSMacHost {
   availabilityZone: string;
   instanceType: string;
   autoPlacement: string;
+  availableCapacity?: number;
+  availableVCpus?: number;
   allocationTime?: string;
   releaseTime?: string;
   tags: Record<string, string>;
@@ -163,6 +166,8 @@ type SSHIngressRule = {
   family: "ipv4" | "ipv6";
   port: string;
 };
+
+type DescribedSSHIngressRule = SSHIngressRule & { description: string };
 
 interface AWSIngressOptions {
   reconcile?: "authoritative" | "additive";
@@ -1035,6 +1040,7 @@ export class EC2SpotClient {
       config.target === "macos"
         ? await this.macHostAvailabilityZoneForLaunch(config, subnetID)
         : "";
+    let lastMacHostID = "";
     const run = async (macHostID: string): Promise<ProviderMachine> => {
       const params: Record<string, string> = {
         ClientToken: leaseID,
@@ -1043,7 +1049,7 @@ export class EC2SpotClient {
         KeyName: config.providerKey,
         MaxCount: "1",
         MinCount: "1",
-        UserData: btoa(awsUserData(config)),
+        UserData: await awsRunInstancesUserData(config),
         "BlockDeviceMapping.1.DeviceName": "/dev/sda1",
         "BlockDeviceMapping.1.Ebs.DeleteOnTermination": "true",
         "BlockDeviceMapping.1.Ebs.Encrypted": "true",
@@ -1072,6 +1078,7 @@ export class EC2SpotClient {
         const hostID =
           macHostID ||
           (await this.discoverMacHostID(config.serverType, "", macHostAvailabilityZone));
+        lastMacHostID = hostID;
         params["Placement.HostId"] = hostID;
         params["Placement.Tenancy"] = "host";
       } else if (!subnetID) {
@@ -1092,6 +1099,18 @@ export class EC2SpotClient {
       return await run(configuredMacHostID);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (
+        config.target === "macos" &&
+        ((configuredMacHostID && isAWSInvalidHostIDError(message)) ||
+          (!configuredMacHostID && isAWSInsufficientCapacityOnHostError(message)))
+      ) {
+        const discovered = await this.discoverMacHostID(
+          config.serverType,
+          configuredMacHostID || lastMacHostID,
+          macHostAvailabilityZone,
+        );
+        return run(discovered);
+      }
       if (config.target !== "macos" || !configuredMacHostID || !isAWSInvalidHostIDError(message)) {
         throw error;
       }
@@ -1116,11 +1135,13 @@ export class EC2SpotClient {
       return this.resolveLatestAmazonAMI(query.name, query.architecture);
     }
     const os = osImageSpec(config.os);
+    const architecture = config.architecture === "arm64" ? "arm64" : "x86_64";
+    const name = config.architecture === "arm64" ? os.awsArm64Name : os.awsName;
     return this.resolveLatestAMI(
       awsUbuntuOwner,
-      os.awsName,
-      "x86_64",
-      `no ${os.awsLabel} x86_64 AMI found in ${this.region}`,
+      name,
+      architecture,
+      `no ${os.awsLabel} ${architecture} AMI found in ${this.region}`,
     );
   }
 
@@ -1199,6 +1220,7 @@ export class EC2SpotClient {
     if (options.reconcile !== "additive") {
       await this.pruneStaleSSHIngress(groupID, group, ports, cidrs);
     }
+    let compactedAfterRuleLimit = false;
     for (const port of ports) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup is per port.
       await this.revokeWorldTCP(groupID, port).catch((error: unknown) => {
@@ -1211,9 +1233,29 @@ export class EC2SpotClient {
         // oxlint-disable-next-line eslint/no-await-in-loop -- duplicate ingress handling is per CIDR.
         await this.allowTCP(groupID, port, cidr).catch((error: unknown) => {
           const message = error instanceof Error ? error.message : String(error);
-          if (!message.includes("InvalidPermission.Duplicate")) {
-            throw error;
+          if (message.includes("InvalidPermission.Duplicate")) {
+            return;
           }
+          if (
+            options.reconcile !== "additive" &&
+            !compactedAfterRuleLimit &&
+            isAWSSecurityGroupRuleLimitError(message)
+          ) {
+            compactedAfterRuleLimit = true;
+            return this.compactSSHIngressForRuleLimit(groupID, ports, cidrs).then((compacted) => {
+              if (!compacted) {
+                throw error;
+              }
+              return this.allowTCP(groupID, port, cidr).catch((retryError: unknown) => {
+                const retryMessage =
+                  retryError instanceof Error ? retryError.message : String(retryError);
+                if (!retryMessage.includes("InvalidPermission.Duplicate")) {
+                  throw retryError;
+                }
+              });
+            });
+          }
+          throw error;
         });
       }
     }
@@ -1238,7 +1280,7 @@ export class EC2SpotClient {
       params["Filter.4.Value.1"] = availabilityZone;
     }
     const root = await this.ec2("DescribeHosts", params);
-    const hostID = awsMacHostIDFromDescribeHosts(root, excludedHostID);
+    const hostID = awsMacHostIDFromDescribeHosts(root, excludedHostID, serverType);
     if (!hostID) {
       const zoneHint = availabilityZone ? ` in ${availabilityZone}` : "";
       throw new Error(
@@ -1296,15 +1338,24 @@ export class EC2SpotClient {
   private macHostFromDescribeHost(input: unknown): AWSMacHost {
     const host = record(input);
     const properties = record(host["hostProperties"]);
+    const instanceType = asString(properties["instanceType"] ?? host["instanceType"]);
     const macHost: AWSMacHost = {
       id: asString(host["hostId"]),
       state: asString(host["hostState"] ?? host["state"]),
       region: this.region,
       availabilityZone: asString(host["availabilityZone"]),
-      instanceType: asString(properties["instanceType"] ?? host["instanceType"]),
+      instanceType,
       autoPlacement: asString(host["autoPlacement"]),
       tags: tagMap(host["tagSet"]),
     };
+    const availableCapacity = awsMacHostAvailableCapacity(host, instanceType);
+    if (availableCapacity !== undefined) {
+      macHost.availableCapacity = availableCapacity;
+    }
+    const availableVCpus = finiteNumber(record(host["availableCapacity"])["availableVCpus"]);
+    if (availableVCpus !== undefined) {
+      macHost.availableVCpus = availableVCpus;
+    }
     const allocationTime = asString(host["allocationTime"]);
     if (allocationTime) {
       macHost.allocationTime = allocationTime;
@@ -1331,6 +1382,28 @@ export class EC2SpotClient {
         }
       });
     }
+  }
+
+  private async compactSSHIngressForRuleLimit(
+    groupID: string,
+    ports: string[],
+    cidrs: string[],
+  ): Promise<boolean> {
+    const existing = await this.ec2("DescribeSecurityGroups", {
+      "GroupId.1": groupID,
+    });
+    const group = items(record(existing["securityGroupInfo"])["item"])[0];
+    const rules = reclaimableCrabboxSSHIngressRules(group, ports, cidrs);
+    for (const rule of rules) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- revoke calls are per exact rule.
+      await this.revokeTCP(groupID, rule).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes("InvalidPermission.NotFound")) {
+          throw error;
+        }
+      });
+    }
+    return rules.length > 0;
   }
 
   private async securityGroupVPC(config: LeaseConfig): Promise<string> {
@@ -1553,7 +1626,7 @@ export class EC2SpotClient {
 
 function awsSSHCIDRs(config: LeaseConfig, env: Env): string[] {
   const configured = [...config.awsSSHCIDRs, ...(env.CRABBOX_AWS_SSH_CIDRS ?? "").split(",")];
-  const cidrs = validCIDRs(configured);
+  const cidrs = validatedCIDRs(configured, "CRABBOX_AWS_SSH_CIDRS");
   if (cidrs.length === 0) {
     throw new Error(
       "AWS SSH source CIDR is required; set CRABBOX_AWS_SSH_CIDRS or use Cloudflare request IP forwarding",
@@ -1586,17 +1659,47 @@ function instanceToMachine(input: unknown): ProviderMachine {
 export function awsMacHostIDFromDescribeHosts(
   root: Record<string, unknown>,
   excludedHostID = "",
+  serverType = "",
 ): string {
-  const hosts = items(record(root["hostSet"])["item"])
+  const selectedHost = items(record(root["hostSet"])["item"])
     .map(record)
-    .filter((host) => {
+    .find((host) => {
       const hostID = asString(host["hostId"]);
-      return hostID && hostID !== excludedHostID;
+      return (
+        hostID &&
+        hostID !== excludedHostID &&
+        asString(host["hostState"] ?? host["state"]) === "available" &&
+        awsMacHostHasLaunchCapacity(host, serverType)
+      );
     });
-  const available = hosts.find(
-    (host) => asString(host["hostState"] ?? host["state"]) === "available",
-  );
-  return asString((available ?? hosts[0] ?? {})["hostId"]);
+  return asString(selectedHost?.["hostId"]);
+}
+
+function awsMacHostHasLaunchCapacity(host: Record<string, unknown>, serverType: string): boolean {
+  const availableCapacity = awsMacHostAvailableCapacity(host, serverType);
+  if (availableCapacity !== undefined) {
+    return availableCapacity > 0;
+  }
+  const availableVCpus = finiteNumber(record(host["availableCapacity"])["availableVCpus"]);
+  return availableVCpus === undefined || availableVCpus > 0;
+}
+
+function awsMacHostAvailableCapacity(
+  host: Record<string, unknown>,
+  serverType: string,
+): number | undefined {
+  if (!serverType) {
+    return undefined;
+  }
+  const capacity = record(host["availableCapacity"]);
+  const itemsSet = record(capacity["availableInstanceCapacity"]);
+  for (const item of items(itemsSet["item"]).map(record)) {
+    if (asString(item["instanceType"]) !== serverType) {
+      continue;
+    }
+    return finiteNumber(item["availableCapacity"]);
+  }
+  return undefined;
 }
 
 export function awsHostIDsFromSet(input: unknown): string[] {
@@ -1774,7 +1877,7 @@ function assignSSHIngressRange(
   const family = sshIngressRangeFamily(ingressFamily(cidr));
   params[family.param] = cidr;
   if (describe) {
-    params[family.descriptionParam] = "Crabbox SSH";
+    params[family.descriptionParam] = awsSSHIngressDescription;
   }
 }
 
@@ -1791,8 +1894,34 @@ function sshIngressRangeFamily(family: SSHIngressRule["family"]) {
 }
 
 export function crabboxSSHIngressRules(group: unknown, ports: string[]): SSHIngressRule[] {
+  return sshIngressRules(group, ports)
+    .filter((rule) => rule.description === awsSSHIngressDescription)
+    .map(stripSSHIngressRuleDescription);
+}
+
+export function reclaimableCrabboxSSHIngressRules(
+  group: unknown,
+  ports: string[],
+  cidrs: string[],
+): SSHIngressRule[] {
+  const desired = new Set(cidrs.map((cidr) => cidr.trim()).filter(Boolean));
+  const includeLegacyUnlabeled = isCrabboxManagedSecurityGroup(group);
+  return sshIngressRules(group, ports)
+    .filter((rule) => {
+      if (desired.has(rule.cidr)) {
+        return false;
+      }
+      return (
+        rule.description === awsSSHIngressDescription ||
+        (includeLegacyUnlabeled && rule.description === "")
+      );
+    })
+    .map(stripSSHIngressRuleDescription);
+}
+
+function sshIngressRules(group: unknown, ports: string[]): DescribedSSHIngressRule[] {
   const wantedPorts = new Set(ports);
-  const rules: SSHIngressRule[] = [];
+  const rules: DescribedSSHIngressRule[] = [];
   for (const permission of items(record(record(group)["ipPermissions"])["item"])) {
     const entry = record(permission);
     const protocol = asString(entry["ipProtocol"]);
@@ -1804,17 +1933,24 @@ export function crabboxSSHIngressRules(group: unknown, ports: string[]): SSHIngr
     for (const family of sshIngressRangeFamilies) {
       for (const range of items(record(entry[family.rangesField])["item"])) {
         const value = record(range);
-        if (asString(value["description"]) === "Crabbox SSH") {
-          rules.push({
-            cidr: asString(value[family.cidrField]),
-            family: family.family,
-            port: fromPort,
-          });
-        }
+        rules.push({
+          cidr: asString(value[family.cidrField]),
+          description: asString(value["description"]),
+          family: family.family,
+          port: fromPort,
+        });
       }
     }
   }
   return rules.filter((rule) => rule.cidr);
+}
+
+function stripSSHIngressRuleDescription(rule: DescribedSSHIngressRule): SSHIngressRule {
+  return {
+    cidr: rule.cidr,
+    family: rule.family,
+    port: rule.port,
+  };
 }
 
 export function staleCrabboxSSHIngressRules(
@@ -1826,10 +1962,28 @@ export function staleCrabboxSSHIngressRules(
   return crabboxSSHIngressRules(group, ports).filter((rule) => !desired.has(rule.cidr));
 }
 
+function isCrabboxManagedSecurityGroup(group: unknown): boolean {
+  const entry = record(group);
+  const tags = tagMap(entry["tagSet"]);
+  return (
+    asString(entry["groupName"]) === "crabbox-runners" ||
+    tags["crabbox"] === "true" ||
+    tags["created_by"] === "crabbox"
+  );
+}
+
+function isAWSSecurityGroupRuleLimitError(message: string): boolean {
+  return message.includes("RulesPerSecurityGroupLimitExceeded");
+}
+
+function isAWSInsufficientCapacityOnHostError(message: string): boolean {
+  return message.includes("InsufficientCapacityOnHost");
+}
+
 export function awsLaunchCandidates(
   config: Pick<
     LeaseConfig,
-    "serverType" | "serverTypeExplicit" | "class" | "target" | "windowsMode"
+    "serverType" | "serverTypeExplicit" | "class" | "target" | "windowsMode" | "architecture"
   >,
 ): string[] {
   if (config.serverTypeExplicit) {
@@ -1838,7 +1992,12 @@ export function awsLaunchCandidates(
   if (config.target === "macos") {
     return uniqueStrings([
       config.serverType,
-      ...awsInstanceTypeCandidatesForTargetClass(config.target, config.class),
+      ...awsInstanceTypeCandidatesForTargetClass(
+        config.target,
+        config.class,
+        config.windowsMode,
+        config.architecture,
+      ),
     ]);
   }
   const policyFallback =
@@ -1846,10 +2005,17 @@ export function awsLaunchCandidates(
       ? config.windowsMode === "wsl2"
         ? "m8i.large"
         : "t3.large"
-      : "t3.small";
+      : config.architecture === "arm64"
+        ? "t4g.small"
+        : "t3.small";
   return uniqueStrings([
     config.serverType,
-    ...awsInstanceTypeCandidatesForTargetClass(config.target, config.class, config.windowsMode),
+    ...awsInstanceTypeCandidatesForTargetClass(
+      config.target,
+      config.class,
+      config.windowsMode,
+      config.architecture,
+    ),
     policyFallback,
   ]);
 }
@@ -1983,7 +2149,13 @@ export function awsQuotaPreflightAttempt(
 
 type AWSCapacityReadinessConfig = Pick<
   LeaseConfig,
-  "target" | "windowsMode" | "class" | "serverType" | "capacityMarket" | "capacityFallback"
+  | "target"
+  | "windowsMode"
+  | "architecture"
+  | "class"
+  | "serverType"
+  | "capacityMarket"
+  | "capacityFallback"
 >;
 
 export function awsCapacityReadinessCheckForQuota(
@@ -2063,7 +2235,7 @@ function awsCapacityReadinessMessage(prefix: string, details: Record<string, str
 }
 
 function awsRecommendedClassForQuota(
-  config: Pick<LeaseConfig, "target" | "windowsMode">,
+  config: Pick<LeaseConfig, "target" | "windowsMode" | "architecture">,
   limitVCPUs: number,
 ): { machineClass: string; serverType: string } | undefined {
   if (limitVCPUs <= 0) {
@@ -2074,6 +2246,7 @@ function awsRecommendedClassForQuota(
       config.target,
       machineClass,
       config.windowsMode,
+      config.architecture,
     );
     if (serverType && (awsInstanceTypeVCPUs(serverType) ?? 0) <= limitVCPUs) {
       return { machineClass, serverType };
@@ -2083,6 +2256,7 @@ function awsRecommendedClassForQuota(
     config.target,
     "standard",
     config.windowsMode,
+    config.architecture,
   )) {
     if ((awsInstanceTypeVCPUs(serverType) ?? 0) <= limitVCPUs) {
       return { machineClass: "standard", serverType };
@@ -2134,8 +2308,7 @@ function finiteNumber(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-const opaqueAWSHTTP400XMLOnlyError =
-  /^(?:[^;]+:\s*)?aws [A-Za-z]+: http 400: <\?xml version="1\.0" encoding="UTF-8"\?>\s*(?:;\s*(?:[^;]+:\s*)?aws [A-Za-z]+: http 400: <\?xml version="1\.0" encoding="UTF-8"\?>\s*)*$/;
+const opaqueAWSHTTP400XMLDeclaration = '<?xml version="1.0" encoding="UTF-8"?>';
 
 export function awsProvisioningErrorCategory(message: string): string {
   if (message.includes("no available EC2 Mac Dedicated Host")) {
@@ -2144,7 +2317,10 @@ export function awsProvisioningErrorCategory(message: string): string {
   if (message.includes("no AWS AMI found")) {
     return "region";
   }
-  if (message.includes("InsufficientInstanceCapacity")) {
+  if (
+    message.includes("InsufficientInstanceCapacity") ||
+    isAWSInsufficientCapacityOnHostError(message)
+  ) {
     return "capacity";
   }
   if (message.includes("MaxSpotInstanceCountExceeded") || message.includes("VcpuLimitExceeded")) {
@@ -2162,10 +2338,55 @@ export function awsProvisioningErrorCategory(message: string): string {
   ) {
     return "policy";
   }
-  if (opaqueAWSHTTP400XMLOnlyError.test(message)) {
+  if (isOpaqueAWSHTTP400XMLOnlyError(message)) {
     return "capacity";
   }
   return "";
+}
+
+function isOpaqueAWSHTTP400XMLOnlyError(message: string): boolean {
+  const entries = message
+    .split(";")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return entries.length > 0 && entries.every(isOpaqueAWSHTTP400XMLEntry);
+}
+
+function isOpaqueAWSHTTP400XMLEntry(entry: string): boolean {
+  const awsIndex = entry.indexOf("aws ");
+  if (awsIndex < 0) {
+    return false;
+  }
+  if (awsIndex > 0 && !entry.slice(0, awsIndex).trimEnd().endsWith(":")) {
+    return false;
+  }
+
+  const payload = entry.slice(awsIndex);
+  const separator = ": http 400: ";
+  const separatorIndex = payload.indexOf(separator);
+  if (separatorIndex <= "aws ".length) {
+    return false;
+  }
+  const operation = payload.slice("aws ".length, separatorIndex);
+  if (!isAWSOperationName(operation)) {
+    return false;
+  }
+  return payload.slice(separatorIndex + separator.length).trim() === opaqueAWSHTTP400XMLDeclaration;
+}
+
+function isAWSOperationName(value: string): boolean {
+  if (!value) {
+    return false;
+  }
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    const isUpper = code >= 65 && code <= 90;
+    const isLower = code >= 97 && code <= 122;
+    if (!isUpper && !isLower) {
+      return false;
+    }
+  }
+  return true;
 }
 
 export function isRetryableAWSProvisioningError(message: string): boolean {

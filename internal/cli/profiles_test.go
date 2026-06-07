@@ -654,7 +654,7 @@ func TestPopulateRunTimingMetadata(t *testing.T) {
 	if report.RunID != "run_123" || report.MachineType != "cpx31" || report.RepoPath != "/repo/app" || report.Workdir != "/work/cbx_123/app" {
 		t.Fatalf("metadata not populated: %#v", report)
 	}
-	if report.StopCommand == "" || !strings.Contains(report.StopCommand, "crabbox stop --provider aws cbx_123") {
+	if report.StopCommand == "" || !strings.Contains(report.StopCommand, "crabbox stop --provider aws --id cbx_123") {
 		t.Fatalf("stop command=%q", report.StopCommand)
 	}
 	if len(report.Artifacts) != 1 || report.Artifacts[0].Path != "/tmp/proof.md" {

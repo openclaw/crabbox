@@ -1,289 +1,250 @@
 # Infrastructure
 
-## Example Setup
+Read this when you stand up, audit, or operate a self-hosted Crabbox broker: the
+Cloudflare Worker coordinator, its secrets, the brokered providers (Hetzner, AWS,
+Azure, GCP), and the DNS/Access front door.
 
-Canonical Worker endpoint:
+Crabbox runs in three modes (see [How It Works](how-it-works.md)). A *broker* is
+only required for **brokered mode**, where lease lifecycle, cost limits, cleanup,
+sharing, and `crabbox usage` are owned by the Worker. Direct and delegated
+providers run straight from the CLI and need none of this. The four brokerable
+providers are `hetzner`, `aws`, `azure`, and `gcp`; even those run direct unless a
+coordinator URL is configured.
 
-```text
-https://broker.example.com
-```
+Use neutral placeholders below — `broker.example.com`, `example-org`,
+`alice@example.com`. Replace them with your own values. Keep every secret out of
+the repository.
 
-Access-protected Worker endpoint:
+## Coordinator Endpoints
 
-```text
-https://broker-access.example.com
-```
-
-Optional fallback route:
-
-```text
-https://fallback.example.com
-```
-
-Workers.dev fallback endpoint:
+A typical deployment exposes the same Worker on a few routes:
 
 ```text
-https://crabbox-coordinator.example.workers.dev
+https://broker.example.com                          # canonical login + automation route
+https://broker-access.example.com                   # same Worker behind Cloudflare Access
+https://crabbox-coordinator.example.workers.dev     # workers.dev fallback for health checks
 ```
 
-The `broker.example.com/*` Worker route is the stable automation and browser-login endpoint. `broker-access.example.com/*` is the Cloudflare Access-protected route for service-token proof and hardened automation. A fallback custom route and the workers.dev URL can remain available for recovery.
+- `broker.example.com/*` is the stable route for browser login and automation.
+  It is public at the edge; the Worker still enforces Crabbox auth on every
+  non-health route.
+- `broker-access.example.com/*` is the same Worker behind a Cloudflare Access
+  application, for service-token automation behind an outer Cloudflare gate.
+- The workers.dev URL is useful for `/v1/health` checks if custom DNS is
+  disrupted.
+
+See [Broker Auth And Routing](features/broker-auth-routing.md) for the full route
+and auth model.
 
 ## Cloudflare
 
-Use Cloudflare for:
+The Worker coordinator runs entirely on Cloudflare and provides:
 
-- HTTPS coordinator.
-- Access auth.
-- Worker runtime.
-- Durable Object lease state.
-- DNS/custom domain routing.
+- the HTTPS coordinator endpoint and Worker runtime;
+- a single Durable Object (`FLEET`, `idFromName("default")`) holding all lease,
+  run, usage, and bridge state;
+- optional Cloudflare Access in front of the Access-protected route;
+- DNS and custom-domain routing.
 
-Known setup:
+The Worker entry, routing, and Durable Object responsibilities are documented in
+[Architecture](architecture.md). The cron trigger in `worker/wrangler.jsonc`
+(`*/15 * * * *`) wakes the Durable Object every 15 minutes so scheduled cleanup
+runs even when no leases are active.
 
-- Access org: `crabbox-team.cloudflareaccess.com`.
-- Access enabled.
-- Current IdPs: one-time PIN and GitHub.
-- GitHub IdP name: `GitHub`.
-- GitHub IdP restriction: your allowed org or teams.
-- Service-token Access app: `Crabbox Coordinator Service Token` on `broker-access.example.com`.
-- Service-token Access policy: `CLI service token`, `non_identity`, include the local Crabbox CLI service token.
+### GitHub browser login
 
-Required env:
+Browser login uses a GitHub OAuth app owned by your deployment org. Configure the
+app callback against your canonical coordinator host:
 
 ```text
-CRABBOX_CLOUDFLARE_API_TOKEN
-CRABBOX_CLOUDFLARE_ACCOUNT_ID
-CRABBOX_CLOUDFLARE_ZONE_ID
-CRABBOX_CLOUDFLARE_ZONE_NAME
-CRABBOX_DOMAIN
-CRABBOX_FALLBACK_DOMAIN
-CRABBOX_GITHUB_ALLOWED_ORG
-CRABBOX_GITHUB_ALLOWED_ORGS
-CRABBOX_GITHUB_ALLOWED_TEAMS
-```
-
-Crabbox browser login needs a GitHub OAuth app owned by your deployment org:
-
-```text
-GitHub org: example-org
-App name: Crabbox Access
+GitHub org:   example-org
+App name:     Crabbox Coordinator
 Homepage URL: https://broker.example.com
 Callback URL: https://broker.example.com/v1/auth/github/callback
 ```
 
-Store resulting values outside the repo:
+The Worker derives the callback from `CRABBOX_PUBLIC_URL` (falling back to the
+request origin). Store the OAuth app values as Worker secrets:
 
 ```text
-CRABBOX_GITHUB_OAUTH_CLIENT_ID
-CRABBOX_GITHUB_OAUTH_CLIENT_SECRET
 CRABBOX_GITHUB_CLIENT_ID
 CRABBOX_GITHUB_CLIENT_SECRET
-CRABBOX_GITHUB_ALLOWED_ORG
-CRABBOX_GITHUB_ALLOWED_TEAMS
-CRABBOX_SESSION_SECRET
+CRABBOX_SESSION_SECRET            # signs cbxu_ user tokens; falls back to CRABBOX_SHARED_TOKEN
+CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separated)
+CRABBOX_GITHUB_ALLOWED_TEAMS     # optional: restrict to org teams (alias CRABBOX_GITHUB_ALLOWED_TEAM)
 ```
 
-Optional Tailscale brokered reachability uses a Tailscale OAuth client with the
-`auth_keys` scope and only the tags Crabbox may assign, usually `tag:crabbox`.
-Store OAuth credentials as Worker secrets:
+### Cloudflare Access (optional)
+
+To gate the Access-protected route, create a service-token Access application on
+`broker-access.example.com` with a `non_identity` policy that includes the CLI
+service token. The Worker verifies the Access JWT against:
 
 ```text
-CRABBOX_TAILSCALE_CLIENT_ID
-CRABBOX_TAILSCALE_CLIENT_SECRET
+CRABBOX_ACCESS_TEAM_DOMAIN       # e.g. example-org.cloudflareaccess.com
+CRABBOX_ACCESS_AUD               # Access application AUD tag
 ```
 
-Optional Worker config:
+On the CLI side, store the service-token credentials locally as
+`CRABBOX_ACCESS_CLIENT_ID` and `CRABBOX_ACCESS_CLIENT_SECRET`, or pass an already
+minted Access JWT in `CRABBOX_ACCESS_TOKEN`.
+
+### Tailscale (optional)
+
+For brokered Tailscale reachability, the Worker mints one ephemeral, pre-approved
+auth key per lease and injects it only into cloud-init. Lease records store only
+non-secret Tailscale metadata (hostname, FQDN, 100.x address, state, tags).
+
+Create a Tailscale OAuth client with the `auth_keys` scope, limited to the tags
+Crabbox may assign (typically `tag:crabbox`), and store the credentials as Worker
+secrets:
 
 ```text
 CRABBOX_TAILSCALE_ENABLED=1
-CRABBOX_TAILSCALE_TAILNET=-              # or explicit tailnet/org
-CRABBOX_TAILSCALE_TAGS=tag:crabbox       # allowlist/default tags
+CRABBOX_TAILSCALE_CLIENT_ID
+CRABBOX_TAILSCALE_CLIENT_SECRET
+CRABBOX_TAILSCALE_TAILNET=-              # or an explicit tailnet/org
+CRABBOX_TAILSCALE_TAGS=tag:crabbox      # must match the OAuth client's allowed tags
 ```
 
-Operator checklist:
+Verify end to end with `crabbox warmup --tailscale --network tailscale`. See
+[Tailscale](features/tailscale.md).
 
-1. Create a Tailscale OAuth client with the `auth_keys` scope.
-2. Limit the OAuth client to tags Crabbox may assign, usually `tag:crabbox`.
-3. Store the client ID and secret as Worker secrets.
-4. Set `CRABBOX_TAILSCALE_TAGS` to the same allowed tag list.
-5. Verify with `crabbox warmup --tailscale --network tailscale`.
+### Deploy token scope
 
-The Worker mints one-off ephemeral pre-approved auth keys per lease and injects
-the key only into cloud-init. Lease records and provider labels store only
-non-secret Tailscale metadata such as hostname, FQDN, 100.x address, state, and
-tags.
+The Cloudflare token used to deploy the Worker should be scoped to the account
+and routes this deployment manages. It needs Workers scripts, Access
+applications, Access identity providers, Access keys, DNS records, and zone Worker
+routes.
 
-Current local status:
-
-- Core Cloudflare, Hetzner, and GitHub tokens are present in local `~/.profile`.
-- The Crabbox Cloudflare token is mirrored to MacBook Pro `~/.profile`.
-- `CRABBOX_COORDINATOR` and `CRABBOX_COORDINATOR_TOKEN` may be set in a local shell profile for operator workflows.
-- The GitHub OAuth client ID and secret may be stored locally as `CRABBOX_GITHUB_OAUTH_*` and deployed to the Worker as `CRABBOX_GITHUB_CLIENT_*`.
-- Cloudflare Access service-token CLI credentials can be stored locally as `CRABBOX_ACCESS_CLIENT_ID` and `CRABBOX_ACCESS_CLIENT_SECRET`; `CRABBOX_ACCESS_TOKEN` can carry an already minted Access JWT for protected fallback routes.
-- Crabbox browser-login OAuth secrets are deployed as Worker secrets `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`, and `CRABBOX_SESSION_SECRET`.
-- Worker routes are attached for your normal and Access-protected broker hosts.
-- `CRABBOX_COORDINATOR`, `CRABBOX_PROFILE`, `CRABBOX_CONFIG`, `CRABBOX_FLEET_CONFIG`, `CRABBOX_SSH_KEY`, `CRABBOX_NO_COLOR`, and `CRABBOX_LOG` are optional CLI defaults and are not required to build the MVP.
-
-The Cloudflare deploy token should be scoped to the account and routes this deployment manages. It needs access to Workers scripts, Access applications, Access identity providers, Access keys, DNS records, and zone Worker routes.
-
-## DNS State
+## DNS
 
 Custom-domain path:
 
-1. Keep the main website wherever it is hosted.
-2. Manage `broker.example.com` in the deployment Cloudflare account.
-3. Proxy `broker.example.com/*` and `broker-access.example.com/*` to the `crabbox-coordinator` Worker.
-4. Set `CRABBOX_PUBLIC_URL=https://broker.example.com`.
-5. Configure the GitHub OAuth callback on `https://broker.example.com/v1/auth/github/callback`.
+1. Manage `broker.example.com` (and `broker-access.example.com`) in the
+   deployment Cloudflare account.
+2. Proxy `broker.example.com/*` and `broker-access.example.com/*` to the
+   `crabbox-coordinator` Worker.
+3. Set `CRABBOX_PUBLIC_URL=https://broker.example.com`.
+4. Point the GitHub OAuth callback at
+   `https://broker.example.com/v1/auth/github/callback`.
 
-Fallback path:
+Fallback path: use the workers.dev URL for `/v1/health` checks if DNS is
+disrupted, and add a fallback custom route only when you need DNS recovery
+independent of the canonical host.
 
-1. Use the workers.dev URL for health checks if DNS is disrupted.
-2. Use a fallback custom route only when you need DNS recovery independent from the canonical host.
+## Brokered Providers
 
-## Hetzner
+Provider credentials live as Worker secrets, never in repo config. Configure at
+least one brokered provider before inviting users. Per-provider details are in
+[Hetzner](features/hetzner.md), [AWS](features/aws.md),
+[Azure](features/azure.md), and the [provider docs](providers/README.md).
 
-Use Hetzner Cloud for worker machines.
-
-Required env:
-
-```text
-HCLOUD_TOKEN
-HETZNER_TOKEN
-```
-
-Direct Hetzner defaults:
-
-```yaml
-provider: hetzner-main
-location: fsn1
-serverType: ccx63
-image: ubuntu-24.04
-sshUser: crabbox
-sshPort: "2222"
-# Ordered fallback ports tried after sshPort; use [] to disable fallback.
-sshFallbackPorts:
-  - "22"
-workdir: /work/crabbox
-```
-
-Machine labels:
+### Hetzner
 
 ```text
-crabbox=true
-profile=openclaw-check
-class=ccx33
-lease=cbx_...
-slug=blue-lobster
-owner=<github-login-or-email>
-created_at=<unix-seconds>
-last_touched_at=<unix-seconds>
-ttl_secs=<seconds>
-idle_timeout_secs=<seconds>
-expires_at=<unix-seconds>
+HETZNER_TOKEN                    # project that owns the disposable runners
 ```
 
-Current direct-CLI status:
+Linux-only. The Worker provisions through the Hetzner Cloud API directly; `hcloud`
+is not required. Default Linux image `ubuntu-24.04`, SSH user `crabbox`, primary
+SSH port `2222` with `22` as the ordered fallback. Cloud-init installs only
+Crabbox plumbing (OpenSSH, curl/CA certificates, Git, rsync, jq, and a retrying
+readiness probe); project runtimes come from Actions hydration or repo-owned
+setup. See [Runner Bootstrap](features/runner-bootstrap.md).
 
-- `crabbox warmup --profile openclaw-check --class beast --keep` provisions through the Hetzner API without requiring `hcloud`.
-- The `beast` class tries `ccx63`, `ccx53`, `ccx43`, `cpx62`, then `cx53`.
-- Dedicated-core types currently fail on the available account quota, so the verified runner used `cpx62`.
-- Cloud-init installs only Crabbox plumbing: OpenSSH, curl/CA certificates, Git, rsync, jq, and a readiness probe through a retrying bootstrap script. Project runtimes and services are supplied by Actions hydration or repo-owned setup.
-- SSH prefers the configured primary port, default `2222`, and then tries `ssh.fallbackPorts`, default `["22"]`. Set `ssh.fallbackPorts: []` or `CRABBOX_SSH_FALLBACK_PORTS=none` to disable fallback dialing/opening.
-- The verified kept lease was `cbx_f782c469c9ce` on server `128694755`, `cpx62`, `188.245.91.84`.
+### AWS EC2
 
-## AWS EC2
+AWS is the default burst backend. Brokered AWS launches EC2 Spot Linux by
+default, can launch managed Windows and WSL2 targets, and can launch EC2 Mac
+instances on an operator-provided Dedicated Host. The direct CLI provider remains
+available with `--provider aws` when no broker is configured.
 
-Use AWS as the first non-Hetzner burst backend. The Cloudflare coordinator brokers AWS EC2 Spot by default for Linux, can launch managed Windows and WSL2 targets, and can launch EC2 Mac instances on an operator-provided Dedicated Host. The CLI direct provider remains available with `--provider aws` when no broker is configured.
-
-Brokered AWS credentials live as Worker secrets:
+Brokered credentials and host pinning (Worker secrets):
 
 ```text
 AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY
-AWS_SESSION_TOKEN optional
-CRABBOX_HOST_ID optional; pins a brokered host such as an EC2 Mac Dedicated Host
-CRABBOX_AWS_MAC_HOST_ID optional legacy AWS alias for CRABBOX_HOST_ID
+AWS_SESSION_TOKEN                # optional
+CRABBOX_HOST_ID                  # optional; pins a brokered host such as an EC2 Mac Dedicated Host
+CRABBOX_AWS_MAC_HOST_ID          # optional legacy AWS alias for CRABBOX_HOST_ID
 ```
 
-Direct fallback env is whatever the AWS SDK can resolve, such as:
+AWS-specific Worker settings (all optional unless noted):
 
 ```text
-AWS_PROFILE
-AWS_ACCESS_KEY_ID
-AWS_SECRET_ACCESS_KEY
-AWS_SESSION_TOKEN
+CRABBOX_AWS_REGION                       # default eu-west-1
+CRABBOX_AWS_AMI                          # AMI override for the selected target
+CRABBOX_AWS_SECURITY_GROUP_ID            # bring your own SG (you own ingress)
+CRABBOX_AWS_SUBNET_ID
+CRABBOX_AWS_INSTANCE_PROFILE
+CRABBOX_AWS_ROOT_GB
+CRABBOX_AWS_SSH_CIDRS                     # comma-separated SSH source CIDRs
+CRABBOX_AWS_ORPHAN_SWEEP_ENABLED         # defaults on when AWS broker credentials exist
+CRABBOX_AWS_ORPHAN_SWEEP_DELETE          # set 1 to terminate confirmed orphan instances
+CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS
+CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS
 ```
 
-AWS-specific Crabbox env:
+When no security group is supplied, the AWS provider imports the local SSH public
+key as an EC2 key pair, creates or reuses a `crabbox-runners` security group,
+launches one-time instances, tags instances and volumes with lease metadata, and
+terminates non-kept instances after the command.
 
-```text
-CRABBOX_AWS_REGION               default eu-west-1
-CRABBOX_AWS_AMI                  optional AMI override for selected AWS target
-CRABBOX_AWS_SECURITY_GROUP_ID    optional security group override
-CRABBOX_AWS_SUBNET_ID            optional subnet override
-CRABBOX_AWS_INSTANCE_PROFILE     optional IAM instance profile name
-CRABBOX_AWS_ROOT_GB              default 400
-CRABBOX_AWS_SSH_CIDRS            optional comma-separated SSH source CIDRs
-CRABBOX_HOST_ID                  optional provider host id for target=macos; required for direct AWS macOS
-CRABBOX_AWS_MAC_HOST_ID          optional legacy AWS alias for CRABBOX_HOST_ID
-CRABBOX_AWS_ORPHAN_SWEEP_ENABLED defaults on when AWS broker credentials exist
-CRABBOX_AWS_ORPHAN_SWEEP_DELETE  set 1 to terminate confirmed orphan EC2 instances
-CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS default 3600
-CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS default 900
-CRABBOX_SSH_FALLBACK_PORTS       optional comma-separated SSH fallback ports, or none
-```
+SSH ingress is source-scoped. If `CRABBOX_AWS_SSH_CIDRS` is set, those CIDRs are
+added; otherwise the CLI sends its detected outbound IPv4 `/32`, and the Worker
+falls back to `CF-Connecting-IP` (`/32` or `/128`). Crabbox revokes any legacy
+managed `0.0.0.0/0` SSH rule when it touches the managed security group. Supplying
+`CRABBOX_AWS_SECURITY_GROUP_ID` makes network policy your responsibility.
 
-The deployed Worker includes a cron trigger that wakes the fleet Durable Object
-every 15 minutes to bootstrap scheduled cleanup even when no leases are active.
-
-The AWS provider imports the local SSH public key as an EC2 key pair when needed, creates or reuses a `crabbox-runners` security group when no security group is supplied, launches one-time EC2 instances, tags instances and volumes with Crabbox lease metadata, and terminates non-kept instances after the command.
+#### AWS IAM
 
 Grant the Worker AWS principal EC2 launch/list/tag/terminate permissions for
-instances, key pairs, and managed security groups, plus `CreateImage`,
-`DeregisterImage`, `RegisterImage`, `DescribeSnapshots`, `DeleteSnapshot`,
-`DescribeFastSnapshotRestores`, `EnableFastSnapshotRestores`, and
-`servicequotas:GetServiceQuota`. The image permissions are required for
-`crabbox image`, native AWS checkpoints, macOS image bake validation, and
-explicit Fast Snapshot Restore promotion for hot AMIs.
-Service Quotas access is best-effort: when it is available, Crabbox can skip
-known quota-impossible instance types before calling `RunInstances`; when it
-is missing, EC2 launch errors are still classified after the failed call.
-EC2 Mac image bakes also need the separate Dedicated Host lifecycle grant
-printed by `crabbox admin hosts policy --provider aws --target macos`, including
-direct Service Quotas lookups for the Mac host quota preflight and
-`servicequotas:ListServiceQuotas` as a fallback for future Mac families. Print the baseline provider
-policy with `crabbox admin providers policy --provider aws`, or the combined
-provider plus Dedicated Host policy with
-`crabbox admin providers policy --provider aws --target macos`.
+instances, key pairs, and managed security groups, plus the image lifecycle
+permissions (`CreateImage`, `DeregisterImage`, `RegisterImage`,
+`DescribeSnapshots`, `DeleteSnapshot`, `DescribeFastSnapshotRestores`,
+`EnableFastSnapshotRestores`) and `servicequotas:GetServiceQuota`. The image
+permissions cover `crabbox image`, native AWS checkpoints, macOS image bake
+validation, and Fast Snapshot Restore promotion. Service Quotas access is
+best-effort: when available, Crabbox skips known quota-impossible instance types
+before calling `RunInstances`; when missing, launch errors are still classified
+after the call.
 
-Before approving paid EC2 Mac host allocation, run the no-spend region
-preflight against the coordinator you intend to use:
-`CRABBOX_MACOS_REGIONS=eu-west-1,us-east-1,us-west-2 scripts/macos-host-region-preflight.sh`.
-It checks `mac2.metal` and then `mac1.metal` by default unless
-`CRABBOX_MACOS_TYPE` or `CRABBOX_MACOS_TYPES` is set. Set
-`CRABBOX_MACOS_TYPES=all` to sweep every known EC2 Mac Dedicated Host family.
-It looks for an existing reusable Dedicated Host first, then runs allocation
-dry-runs and Dedicated Mac host quota checks by region and type. It returns JSON
-with `ready-existing-host`, `ready-allocation`, or `blocked`; `ready-allocation`
-requires both a successful allocation dry-run and visible quota of at least one
-host for the selected type.
+Print the baseline provider policy with:
 
-When the coordinator is blocked and you need a handoff bundle for the AWS
-account owner, run:
+```sh
+crabbox admin providers policy --provider aws
+```
+
+EC2 Mac host bakes need the additional Dedicated Host lifecycle grant (including
+`servicequotas:ListServiceQuotas` fallback) printed by:
+
+```sh
+crabbox admin providers policy --provider aws --target macos
+```
+
+#### EC2 Mac host preflight (no spend)
+
+Before approving paid EC2 Mac host allocation, run the no-spend region preflight
+against the coordinator you intend to use:
+
+```sh
+CRABBOX_MACOS_REGIONS=eu-west-1,us-east-1,us-west-2 scripts/macos-host-region-preflight.sh
+```
+
+It checks `mac2.metal` then `mac1.metal` by default (override with
+`CRABBOX_MACOS_TYPE`/`CRABBOX_MACOS_TYPES`; set `CRABBOX_MACOS_TYPES=all` to sweep
+every known EC2 Mac family). It returns JSON with `ready-existing-host`,
+`ready-allocation`, or `blocked`. For deeper diagnosis, see the
+[Image Bake Runbook](features/image-bake-runbook.md) and the no-spend audit
+helper:
 
 ```sh
 scripts/macos-coordinator-remediation-audit.sh --region eu-west-1 --type mac2.metal --profile auto
 ```
 
-The audit is no-spend. It captures provider identity, the combined macOS IAM
-policy, EC2 Mac host quota, host allocation dry-run, guarded IAM apply dry-run,
-and guarded quota request dry-run evidence, then writes `summary.json` with the
-blockers and exact remediation commands.
-
-When the only blocker is Dedicated Mac host quota, capture the same quota and
-coordinator identity evidence, then dry-run the AWS quota request before
-submitting it:
+When the only blocker is Dedicated Mac host quota, capture evidence and dry-run
+the quota request before submitting:
 
 ```sh
 crabbox admin providers identity --provider aws --region eu-west-1 --json > provider-identity.json
@@ -293,123 +254,150 @@ scripts/request-macos-host-quota.sh --identity provider-identity.json --quota ma
 ```
 
 The helper refuses to submit unless the selected AWS profile belongs to the same
-account as the deployed coordinator identity. It exits without making an AWS
-request when the captured quota is already at or above the requested value.
+account as the deployed coordinator identity, and exits without an AWS request
+when the captured quota already meets the requested value.
 
-The guarded macOS image lifecycle smoke also runs that region preflight
-automatically when `CRABBOX_MACOS_REGIONS` or `CRABBOX_CAPACITY_REGIONS` is set
-and `CRABBOX_MACOS_REGION` is not set. It records the region-preflight JSON in
-`summary.json` evidence and continues with the selected region and instance type
-only when a reusable host or dry-run-ready allocation region is found. Set
-`CRABBOX_MACOS_REGION_PREFLIGHT=0` to skip this automatic selection, or set
-`CRABBOX_MACOS_REGION` to force one region.
+### Azure and GCP
 
-SSH ingress for AWS security groups is source-scoped. If `CRABBOX_AWS_SSH_CIDRS` is set, Crabbox adds those CIDRs. Otherwise, the CLI sends its detected outbound IPv4 `/32` to the broker; when that is unavailable, the Worker falls back to `CF-Connecting-IP` as `/32` or `/128`. Direct and brokered AWS open the primary SSH port plus configured fallback ports. Crabbox also revokes the old managed `0.0.0.0/0` SSH ingress rule when the broker touches the managed security group. Supplying `CRABBOX_AWS_SECURITY_GROUP_ID` makes network policy your responsibility.
+Azure and GCP are also brokerable. Their Worker secrets follow the same pattern —
+SDK credentials plus `CRABBOX_AZURE_*` / `CRABBOX_GCP_*` placement settings
+(location/region, resource group or project, image, network). See
+[Azure](features/azure.md) and the per-provider docs for the full set.
 
 ## Machine Classes
 
-Fleet config should define machine classes instead of hardcoding provider types. Current Hetzner direct defaults:
+Leases request a *class* rather than a hardcoded instance type; the broker
+resolves a class to an ordered candidate list per provider and target, then tries
+them in turn with region/market fallback (see [Capacity
+Fallback](features/capacity-fallback.md)). Profiles pick a default class; any
+command can override with `--class`. The default class is `beast`.
 
-```yaml
-classes:
-  standard:
-    provider: hetzner-main
-    serverTypes: [ccx33, cpx62, cx53]
-    cpu: 8
-    memory: 32gb
-  fast:
-    provider: hetzner-main
-    serverTypes: [ccx43, cpx62, cx53]
-    cpu: 16
-    memory: 64gb
-  large:
-    provider: hetzner-main
-    serverTypes: [ccx53, ccx43, cpx62, cx53]
-    cpu: 32
-    memory: 128gb
-  beast:
-    provider: hetzner-main
-    serverTypes: [ccx63, ccx53, ccx43, cpx62, cx53]
-    cpu: 48
-    memory: 192gb
-```
-
-Current AWS defaults:
+Hetzner server types per class:
 
 ```text
-AWS Linux
+standard  ccx33, cpx62, cx53
+fast      ccx43, cpx62, cx53
+large     ccx53, ccx43, cpx62, cx53
+beast     ccx63, ccx53, ccx43, cpx62, cx53
+```
+
+AWS instance types per class:
+
+```text
+Linux
 standard  c7a.8xlarge, c7i.8xlarge, m7a.8xlarge, m7i.8xlarge, c7a.4xlarge
 fast      c7a.16xlarge, c7i.16xlarge, m7a.16xlarge, m7i.16xlarge, c7a.12xlarge, c7a.8xlarge
 large     c7a.24xlarge, c7i.24xlarge, m7a.24xlarge, m7i.24xlarge, r7a.24xlarge, c7a.16xlarge, c7a.12xlarge
-beast     c7a.48xlarge, c7i.48xlarge, m7a.48xlarge, m7i.48xlarge, r7a.48xlarge, c7a.32xlarge, c7i.32xlarge, m7a.32xlarge, c7a.24xlarge, c7a.16xlarge
+beast     c7a.48xlarge, c7i.48xlarge, m7a.48xlarge, m7i.48xlarge, r7a.48xlarge, c7a.32xlarge, ...
 
-AWS Windows
+Windows
 standard  m7i.large, m7a.large, t3.large
 fast      m7i.xlarge, m7a.xlarge, t3.xlarge
 large     m7i.2xlarge, m7a.2xlarge, t3.2xlarge
 beast     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge
 
-AWS Windows WSL2
+Windows WSL2
 standard  m8i.large, m8i-flex.large, c8i.large, r8i.large
 fast      m8i.xlarge, m8i-flex.xlarge, c8i.xlarge, r8i.xlarge
 large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge
 beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge
 
-AWS macOS
-all       mac2.metal, mac2-m2.metal, mac2-m2pro.metal, mac-m4.metal, mac-m4pro.metal, mac-m4max.metal, mac2-m1ultra.metal, mac-m3ultra.metal, then mac1.metal unless `--type` is set
+macOS (class is ignored; ordered Mac families tried unless --type is set)
+mac2.metal, mac2-m2.metal, mac2-m2pro.metal, mac-m4.metal, mac-m4pro.metal,
+mac-m4max.metal, mac2-m1ultra.metal, mac-m3ultra.metal, then mac1.metal
 ```
 
-Profiles choose a default class, and commands can override with `--class`.
+Azure resolves classes to `Standard_*` VM sizes per target; GCP resolves to
+`c4`/`c3`/`n2` families. The authoritative lists live in `worker/src/config.ts`.
 
-## Self-Hosted Broker Minimum
+## Lease Defaults
 
-Use this path when you want your own broker-owned provider
-credentials, coordinator cleanup, active-lease limits, monthly spend caps, and
-`crabbox usage`.
+The Worker `LeaseConfig` applies these defaults (`worker/src/config.ts`):
 
-Minimum Cloudflare setup:
+```text
+provider       hetzner
+class          beast
+ttl            5400s   (capped at 86400s)
+idle timeout   1800s
+ssh port       2222    (fallback 22)
+work root      /work/crabbox (linux), C:\crabbox (windows normal),
+               /Users/<user>/crabbox (macos)
+```
+
+Lease IDs are `cbx_<12 hex>`; signed user tokens are prefixed `cbxu_`. See
+[Identifiers](features/identifiers.md).
+
+Each leased machine carries Crabbox label metadata so it is attributable and
+sweepable, for example:
+
+```text
+crabbox=true
+class=beast
+lease=cbx_...
+slug=swift-crab
+owner=<github-login-or-email>
+created_at=<unix-seconds>
+last_touched_at=<unix-seconds>
+ttl_secs=<seconds>
+idle_timeout_secs=<seconds>
+expires_at=<unix-seconds>
+```
+
+## Self-Hosted Broker: Minimum Setup
+
+Use this when you want broker-owned provider credentials, coordinator cleanup,
+active-lease limits, monthly spend caps, and `crabbox usage`.
+
+Cloudflare prerequisites:
 
 - a Cloudflare account with Workers and Durable Objects enabled;
 - a Worker route or workers.dev URL for the coordinator;
-- the Durable Object binding from `worker/wrangler.jsonc`;
-- Worker secrets for at least one brokered provider, for example Hetzner or AWS;
-- budget limits sized for the installation before inviting users.
+- the Durable Object binding from `worker/wrangler.jsonc` (`FLEET` ->
+  `FleetDurableObject`);
+- Worker secrets for at least one brokered provider;
+- budget limits sized before inviting users.
 
-Recommended small-installation limits:
+Pick an auth model:
+
+- **Browser login** — create the GitHub OAuth app (above) and set
+  `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,
+  `CRABBOX_SESSION_SECRET`, and `CRABBOX_GITHUB_ALLOWED_ORG[S]`.
+- **Shared-token automation** — set `CRABBOX_SHARED_TOKEN` and
+  `CRABBOX_SHARED_OWNER`. GitHub OAuth is not required if every caller runs
+  `crabbox login --url <your-url> --token-stdin`.
+- **Admin token** — set `CRABBOX_ADMIN_TOKEN` for admin routes and image
+  promotion.
+
+Recommended limits for a small installation:
 
 ```text
 CRABBOX_MAX_ACTIVE_LEASES=2
 CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER=1
+CRABBOX_CAPACITY_ADMIN_OWNERS=alice@example.com,bob@example.com
+CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN=4
 CRABBOX_MAX_MONTHLY_USD=25
 CRABBOX_MAX_MONTHLY_USD_PER_OWNER=10
 ```
 
-Required auth choice:
+Per-org caps (`CRABBOX_MAX_ACTIVE_LEASES_PER_ORG`,
+`CRABBOX_MAX_MONTHLY_USD_PER_ORG`) and elevated capacity-admin owner caps are
+also available. Over-limit lease creation returns HTTP 429
+`cost_limit_exceeded`. Cost is the hourly rate (`CRABBOX_COST_RATES_JSON`
+override -> provider live price -> built-in defaults) times TTL; see
+[Cost And Usage](features/cost-usage.md).
 
-- Browser login: create a GitHub OAuth app for your coordinator callback URL and
-  set `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,
-  `CRABBOX_SESSION_SECRET`, and `CRABBOX_GITHUB_ALLOWED_ORG` or
-  `CRABBOX_GITHUB_ALLOWED_ORGS`.
-- Shared-token automation: set `CRABBOX_SHARED_TOKEN` and
-  `CRABBOX_SHARED_OWNER`; GitHub OAuth is not required if every caller uses
-  `crabbox login --url <your-url> --token-stdin`.
-
-Provider secrets stay in the Worker, not in repo config. For AWS, start with
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and conservative AWS IAM
-permissions for the regions/classes you intend to use. For Hetzner, set
-`HETZNER_TOKEN` for the project that owns the disposable runners.
-
-After deployment, users point the CLI at the broker:
+After deployment, point the CLI at the broker:
 
 ```sh
-crabbox login --url https://<your-coordinator-host> --provider aws
+crabbox login --url https://broker.example.com --provider aws
 crabbox doctor
 crabbox usage
 ```
 
 ## Deployment
 
-Worker source lives in `worker/`. Build and deploy with the package scripts plus Wrangler:
+Worker source lives in `worker/`. Run the CI-equivalent gate, then deploy with
+Wrangler (use `npx wrangler` unless `wrangler` is installed globally):
 
 ```sh
 npm ci --prefix worker
@@ -421,95 +409,77 @@ npm run build --prefix worker
 npx wrangler deploy --config worker/wrangler.jsonc
 ```
 
-Deployment should:
+A full deploy should:
 
-1. Build Worker.
-2. Create/update Durable Object bindings.
-3. Set Worker secrets.
-4. Deploy Worker.
-5. Verify `/v1/health` on `workers.dev`.
-6. Configure route/custom domain on `broker.example.com`.
-7. Verify `/v1/health` on the canonical and fallback domains.
+1. build the Worker;
+2. create or update the Durable Object binding;
+3. set Worker secrets;
+4. deploy the Worker;
+5. verify `/v1/health` on the workers.dev URL;
+6. attach the route/custom domain on `broker.example.com`;
+7. verify `/v1/health` on the canonical and fallback domains.
 
-Use `npx wrangler` from the Worker package unless `wrangler` is installed globally. Do not assume `hcloud` is installed; the implementation can use the Hetzner API directly from Go or from the Worker.
+The `scripts/deploy-worker-smoke.sh` and `scripts/deploy-cloudflare-smoke.sh`
+helpers cover post-deploy verification.
 
-Example deployed coordinator:
-
-```text
-https://broker.example.com
-https://broker-access.example.com
-https://crabbox-coordinator.example.workers.dev
-fallback.example.com/* -> crabbox-coordinator fallback
-```
-
-Current Worker secrets and settings:
+### Worker secrets and settings reference
 
 ```text
+# Providers (at least one set)
 HETZNER_TOKEN
-AWS_ACCESS_KEY_ID
-AWS_SECRET_ACCESS_KEY
-AWS_SESSION_TOKEN optional
-CRABBOX_HOST_ID optional; pins a brokered host such as an EC2 Mac Dedicated Host
-CRABBOX_AWS_MAC_HOST_ID optional legacy AWS alias for CRABBOX_HOST_ID
-CRABBOX_SHARED_TOKEN
-CRABBOX_ADMIN_TOKEN optional; required for admin routes and image promotion
-CRABBOX_GITHUB_CLIENT_ID
-CRABBOX_GITHUB_CLIENT_SECRET
-CRABBOX_GITHUB_ALLOWED_ORG
-CRABBOX_GITHUB_ALLOWED_ORGS optional
-CRABBOX_GITHUB_ALLOWED_TEAMS optional
-CRABBOX_DEFAULT_ORG
+AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN (optional)
+CRABBOX_HOST_ID / CRABBOX_AWS_MAC_HOST_ID (optional; pin a Mac Dedicated Host)
+AZURE_* / CRABBOX_AZURE_* (Azure)
+GCP_* / CRABBOX_GCP_* (GCP)
+
+# Auth
+CRABBOX_SHARED_TOKEN, CRABBOX_SHARED_OWNER
+CRABBOX_ADMIN_TOKEN                       # admin routes + image promotion
+CRABBOX_GITHUB_CLIENT_ID, CRABBOX_GITHUB_CLIENT_SECRET
+CRABBOX_GITHUB_ALLOWED_ORG[S], CRABBOX_GITHUB_ALLOWED_TEAMS (optional)
 CRABBOX_SESSION_SECRET
-CRABBOX_ACCESS_TEAM_DOMAIN
-CRABBOX_ACCESS_AUD
-CRABBOX_TAILSCALE_ENABLED optional
-CRABBOX_TAILSCALE_CLIENT_ID optional; required for brokered --tailscale
-CRABBOX_TAILSCALE_CLIENT_SECRET optional; required for brokered --tailscale
-CRABBOX_TAILSCALE_TAILNET optional
-CRABBOX_TAILSCALE_TAGS optional
-CRABBOX_ARTIFACTS_BACKEND optional; currently r2
-CRABBOX_ARTIFACTS_BUCKET optional; currently openclaw-crabbox-artifacts
-CRABBOX_ARTIFACTS_PREFIX optional; currently crabbox-artifacts
-CRABBOX_ARTIFACTS_BASE_URL optional; currently https://artifacts.example.com
-CRABBOX_ARTIFACTS_REGION optional; currently auto
-CRABBOX_ARTIFACTS_ENDPOINT_URL optional; currently the R2 S3-compatible endpoint
-CRABBOX_ARTIFACTS_ACCESS_KEY_ID optional; Worker secret when artifacts backend is enabled
-CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY optional; Worker secret when artifacts backend is enabled
-CRABBOX_ARTIFACTS_SESSION_TOKEN optional; Worker secret for temporary credentials
-CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS optional
-CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS optional
+CRABBOX_DEFAULT_ORG
+CRABBOX_ACCESS_TEAM_DOMAIN, CRABBOX_ACCESS_AUD   # Cloudflare Access route
+CRABBOX_PUBLIC_URL                       # canonical coordinator URL for OAuth callback
+
+# Cost / limits
+CRABBOX_MAX_ACTIVE_LEASES[_PER_OWNER|_PER_ORG]
+CRABBOX_MAX_MONTHLY_USD[_PER_OWNER|_PER_ORG]
+CRABBOX_COST_RATES_JSON, CRABBOX_EUR_TO_USD
+
+# Tailscale (optional)
+CRABBOX_TAILSCALE_ENABLED
+CRABBOX_TAILSCALE_CLIENT_ID, CRABBOX_TAILSCALE_CLIENT_SECRET
+CRABBOX_TAILSCALE_TAILNET, CRABBOX_TAILSCALE_TAGS
+
+# Artifacts storage (optional; storage-only S3-compatible keys)
+CRABBOX_ARTIFACTS_BACKEND, CRABBOX_ARTIFACTS_BUCKET, CRABBOX_ARTIFACTS_PREFIX
+CRABBOX_ARTIFACTS_BASE_URL, CRABBOX_ARTIFACTS_REGION, CRABBOX_ARTIFACTS_ENDPOINT_URL
+CRABBOX_ARTIFACTS_ACCESS_KEY_ID, CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY
+CRABBOX_ARTIFACTS_SESSION_TOKEN (optional)
+CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS, CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS
 ```
 
-Artifact credentials on the coordinator are storage-only S3-compatible keys.
-They exist so the Worker can sign one upload URL per artifact and return the
-final asset URL. They are not Cloudflare deploy tokens, not Crabbox bearer/admin
-tokens, and not VM provider credentials. Keep direct local S3/R2 credentials as
-operator fallback only; normal artifact publishing should go through the
-coordinator.
+Artifact credentials on the coordinator are storage-only S3/R2-compatible keys.
+They let the Worker sign one upload URL per artifact and return the final asset
+URL; they are not Cloudflare deploy tokens, Crabbox bearer/admin tokens, or VM
+provider credentials. Normal artifact publishing should go through the
+coordinator; keep direct local S3/R2 credentials as an operator fallback only.
+See [Artifacts](features/artifacts.md).
 
-## Verified OpenClaw Run
+## Verification
 
-Historical warm-run command from an OpenClaw checkout through the Cloudflare coordinator:
+After a deployment or before broad changes, run the live smoke against a repo
+checkout you control:
 
 ```sh
-CI=1 /usr/bin/time -p /Users/steipete/Projects/crabbox/bin/crabbox run --id cbx_f60f47cbc879 -- pnpm test:changed:max
+CRABBOX_LIVE=1 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 ```
 
-Result:
+It exercises brokered AWS, direct Hetzner, a delegated runner, slug reuse,
+`status`/`inspect`/`cache`/`history`/`logs`, `stop`, and final active-lease
+cleanup. Auth- and doctor-only smokes are in `scripts/live-auth-smoke.sh` and
+`scripts/live-doctor-smoke.sh`.
 
-- 61 Vitest shards completed successfully.
-- End-to-end warm wall time: 93.66 seconds.
-- Runner class: requested `beast`, actual fallback `cpx62`.
-- Sync path: rsync overlay plus remote Git hydrate for shallow checkout merge-base support.
-
-Current live smoke command:
-
-```sh
-CRABBOX_LIVE=1 CRABBOX_LIVE_REPO=/Users/steipete/Projects/clawdbot6 /Users/steipete/Projects/crabbox/scripts/live-smoke.sh
-```
-
-The smoke covers brokered AWS, direct Hetzner, Blacksmith Testbox delegation, slug reuse, status/inspect/cache/history/logs, stop, and final active-lease cleanup checks.
-
-## Local, MacBook Pro, And Mac Studio
-
-The same required env should exist on the local machine, MacBook Pro, and Mac Studio. Do not commit these values.
+For operating the deployment day to day, see [Operations](operations.md),
+[Observability](observability.md), and [Troubleshooting](troubleshooting.md).

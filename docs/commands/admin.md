@@ -1,6 +1,12 @@
 # admin
 
-`crabbox admin` contains trusted operator controls for coordinator-backed leases.
+`crabbox admin` groups trusted operator controls for coordinator-backed leases and the cloud resources behind them. Use it to inspect every lease the broker tracks, reconcile expired leases against live cloud state, force-release or delete a backing server, print provider IAM policies, and manage host lifecycle resources.
+
+## Requirements
+
+Every `admin` subcommand needs both a configured coordinator and a separate admin bearer token. The token is read from `broker.adminToken` in config or the `CRABBOX_COORDINATOR_ADMIN_TOKEN` environment variable. The ordinary operator/shared token (`broker.token` / `CRABBOX_COORDINATOR_TOKEN`) is not sufficient for admin routes — commands fail with a configuration error when only the shared token is present.
+
+## At a glance
 
 ```sh
 crabbox admin leases
@@ -21,11 +27,7 @@ crabbox admin release blue-lobster --delete
 crabbox admin delete cbx_... --force
 ```
 
-Release/delete accept a canonical `cbx_...` ID or an active slug; use the canonical ID when an admin slug lookup is ambiguous. Add `--json` to print the updated lease record.
-
-Admin commands require a configured coordinator and a separate admin bearer token
-stored as `broker.adminToken` or `CRABBOX_COORDINATOR_ADMIN_TOKEN`. The shared
-operator token is not enough for admin routes.
+`release` and `delete` accept either a canonical `cbx_...` lease ID or an active slug, given positionally or via `--id`. Prefer the canonical ID when a slug lookup could be ambiguous. Add `--json` to any subcommand to print the structured record instead of the human-readable line.
 
 ## leases
 
@@ -35,131 +37,163 @@ Flags:
 
 ```text
 --state <state>     filter by active, released, expired, or failed
---owner <email>     filter by owner
+--owner <email>     filter by owner email
 --org <name>        filter by org
---limit <n>         default 100, maximum 500
+--limit <n>         maximum leases (default 100)
 --json              print JSON
 ```
+
+The text output prints one line per lease with ID, slug, provider, state, server type, host, owner, org, idle timeout, and expiry.
 
 ## lease-audit
 
-Check expired coordinator lease records against the backing cloud provider.
-The audit currently supports AWS leases and reports whether each expired
-`cloudID` is still present, missing, or could not be checked.
+Check coordinator lease records against the backing cloud provider. The audit currently reconciles AWS leases and reports, for each matching lease, whether its `cloudID` is still `found`, `missing`, or could not be checked (`error`). Each line also surfaces cleanup attempt counts and errors recorded by the broker's expiry sweep.
 
 Flags:
 
 ```text
---state <state>     default expired
---provider <name>   default aws
---owner <email>     filter by owner
+--state <state>     filter by state (default expired)
+--provider <name>   provider to audit (default aws)
+--owner <email>     filter by owner email
 --org <name>        filter by org
---limit <n>         default 100, maximum 500
---fail-on-live      exit non-zero for live cloud instances or audit errors
+--limit <n>         maximum leases (default 100)
+--fail-on-live      exit non-zero when expired leases still have live cloud instances or audit errors
 --json              print JSON
 ```
 
+Use `--fail-on-live` in CI or cron jobs to turn unreconciled instances into a failing exit code.
+
 ## providers
 
-Inspect provider identity and IAM policy requirements through provider-scoped
-commands. `providers identity` is a read-only diagnostic for attaching policy
-updates to the right cloud principal. `providers policy` prints the baseline
-provider policy, or a target-specific combined policy when `--target` is set.
+Inspect provider identity and IAM policy requirements through provider-scoped subcommands.
 
-Flags:
+```sh
+crabbox admin providers identity --provider aws --region eu-west-1
+crabbox admin providers policy --provider aws --target macos
+```
+
+### providers identity
+
+A read-only diagnostic that reports the cloud principal the coordinator authenticates as, so you can attach policy updates to the right identity. Currently supports `--provider aws`.
 
 ```text
-identity:
-  --provider <provider>   currently aws
-  --region <region>       provider region used by the identity endpoint
-  --json                  print JSON
-
-policy:
-  --provider <provider>   currently aws
-  --target <target>       optional; use macos for provider plus host lifecycle
+--provider <provider>   provider (currently aws)
+--region <region>       provider region used for the identity endpoint
+--json                  print JSON
 ```
+
+JSON output includes `policyTarget.type` and `policyTarget.name` when the coordinator ARN resolves to an IAM user, IAM role, or STS assumed-role ARN.
+
+### providers policy
+
+Print the baseline brokered AWS IAM policy. With `--target macos` (or `--host-lifecycle`), the output is combined with the EC2 Mac Dedicated Host lifecycle statements. Currently supports `--provider aws`.
+
+```text
+--provider <provider>   provider (currently aws)
+--target <target>       optional; macos combines provider plus host lifecycle policy
+--host-lifecycle        include provider host lifecycle permissions
+--mac-hosts             legacy alias for --host-lifecycle
+```
+
+The baseline AWS provider policy covers key pairs, instance launch and termination, managed security groups, image creation/promotion, snapshot cleanup, and Service Quotas reads. If you set `CRABBOX_AWS_INSTANCE_PROFILE`, add a separate scoped `iam:PassRole` grant for that role with `iam:PassedToService=ec2.amazonaws.com`.
 
 ## hosts
 
-Inspect and manage host lifecycle resources through provider- and target-scoped
-commands. `admin hosts --provider aws --target macos` maps to AWS EC2 Mac
-Dedicated Host operations today; the command shape is intentionally generic so
-other providers can add macOS host backends without introducing new top-level
-admin nouns. `policy`, `offerings`, `quota`, `list`, and `allocate --dry-run`
-are read-only. Real `allocate` and `release` require `--force` because host
-resources are billed separately from Crabbox leases and can have provider
-lifecycle constraints.
+Inspect and manage host lifecycle resources through provider- and target-scoped subcommands. Today `--provider aws --target macos` maps to AWS EC2 Mac Dedicated Host operations; the command shape is intentionally generic so other providers can add macOS host backends without introducing new top-level admin nouns.
 
-Flags:
+`policy`, `list`, `offerings`, `quota`, and `allocate --dry-run` are read-only. Real `allocate` and `release` require `--force`, because host resources are billed separately from leases and carry provider lifecycle constraints.
+
+All subcommands share the scope flags:
 
 ```text
-policy:
-  --provider <provider>   currently aws
-  --target <target>       currently macos
-  prints copy-pasteable provider IAM JSON for host lifecycle permissions
-
-list:
-  --provider <provider>   currently aws
-  --target <target>       currently macos
-  --region <region>       provider region
-  --type <type>           provider host type, for example mac1.metal or mac2.metal
-  --state <state>         filter by provider host state
-  --json                  print JSON
-
-offerings:
-  --provider <provider>   currently aws
-  --target <target>       currently macos
-  --region <region>       provider region
-  --type <type>           default mac2.metal
-  --json                  print JSON
-
-quota:
-  --provider <provider>   currently aws
-  --target <target>       currently macos
-  --region <region>       provider region
-  --type <type>           default mac2.metal
-  --json                  print JSON
-
-allocate:
-  --provider <provider>        currently aws
-  --target <target>            currently macos
-  --region <region>            provider region
-  --availability-zone <az>     optional; omitted means discover and try offered AZs
-  --type <type>                default mac2.metal
-  --dry-run                    validate the request without allocating a host
-  --force                      confirm host allocation
-  --json                       print JSON
-
-release:
-  --id <host-id> or positional host id
-  --provider <provider>   currently aws
-  --target <target>       currently macos
-  --region <region>
-  --force                 confirm host release
-  --json                  print JSON
+--provider <provider>   host provider (default aws; currently aws)
+--target <target>       host target OS (default macos; currently macos)
 ```
 
-## aws-identity
+### hosts policy
 
-Compatibility alias for `crabbox admin providers identity --provider aws`.
+Print copy-pasteable IAM JSON for host lifecycle permissions.
 
-## aws-policy
+### hosts list
 
-Compatibility alias for `crabbox admin providers policy --provider aws`.
-Use `crabbox admin providers policy --provider aws --target macos` for the
-combined AWS provider plus EC2 Mac Dedicated Host lifecycle policy.
+```text
+--region <region>   provider region
+--type <type>       filter by host type, for example mac1.metal or mac2.metal
+--state <state>     filter by provider host state
+--json              print JSON
+```
 
-The AWS provider policy covers key pairs, instance launch and termination,
-managed security groups, image creation/promotion, snapshot cleanup, and
-optional Service Quotas reads. If `CRABBOX_AWS_INSTANCE_PROFILE` is set, add a
-separate scoped `iam:PassRole` grant for that role with
-`iam:PassedToService=ec2.amazonaws.com`.
+### hosts offerings
 
-`--mac-hosts` remains supported as a legacy spelling for the combined macOS
-policy.
+```text
+--region <region>   provider region
+--type <type>       host type (default mac2.metal)
+--json              print JSON
+```
 
-For coordinator remediation, save the combined policy and attach it to the AWS
-principal returned by `admin providers identity --provider aws`:
+### hosts quota
+
+```text
+--region <region>   provider region
+--type <type>       host type (default mac2.metal)
+--json              print JSON
+```
+
+### hosts allocate
+
+```text
+--region <region>            provider region
+--availability-zone <az>     optional; if omitted, discover and try offered AZs
+--type <type>                host type (default mac2.metal)
+--dry-run                    validate the request without allocating a host
+--force                      confirm host allocation
+--json                       print JSON
+```
+
+`allocate` refuses to run unless either `--dry-run` or `--force` is set. The dry-run path summarizes the provider's validation result (for example, a `DryRunOperation` success or an `UnauthorizedOperation` permission gap) without billing a host.
+
+### hosts release
+
+```text
+--id <host-id>      host id (or pass it positionally)
+--region <region>   provider region
+--force             confirm host release
+--json              print JSON
+```
+
+Requires `--force`. The host id may be given positionally (for example, `crabbox admin hosts release h-0123456789abcdef0 --force`) or via `--id`.
+
+## release
+
+Mark a lease released. Add `--delete` to also delete the backing server while releasing.
+
+```text
+--id <lease-id-or-slug>   lease to release (or pass it positionally)
+--delete                  delete the backing server while releasing
+--json                    print JSON
+```
+
+## delete
+
+Delete the backing server for a lease and mark it released. Requires `--force`.
+
+```text
+--id <lease-id-or-slug>   lease to delete (or pass it positionally)
+--force                   confirm deletion
+--json                    print JSON
+```
+
+## Compatibility aliases
+
+These spellings remain for existing scripts and runbooks. Prefer the provider- and target-scoped forms in new work.
+
+- `crabbox admin aws-identity` — alias for `crabbox admin providers identity --provider aws`.
+- `crabbox admin aws-policy` — alias for `crabbox admin providers policy --provider aws`; supports `--mac-hosts` for the combined macOS policy.
+- `crabbox admin mac-hosts <list|offerings|quota|allocate|release|policy>` — alias for `crabbox admin hosts --provider aws --target macos`.
+
+## Applying a macOS IAM policy for coordinator remediation
+
+To fix coordinator permissions for paid macOS image work, save the combined policy and attach it to the AWS principal returned by `admin providers identity`:
 
 ```bash
 crabbox admin providers identity --provider aws --region eu-west-1 --json > /tmp/crabbox-provider-identity.json
@@ -177,32 +211,9 @@ scripts/apply-macos-image-iam-policy.sh \
   --apply
 ```
 
-The helper dry-runs by default. With `--profile auto`, it scans local AWS
-profiles and selects the one whose account matches the coordinator account.
-With an explicit `--profile`, it verifies that profile directly. It writes the
-inline role or user policy only when `--apply` is present. For assumed-role
-identities, it attaches the policy to the underlying role name, not the session
-name. JSON output includes
-`policyTarget.type` and `policyTarget.name` when the coordinator ARN is an IAM
-user, IAM role, or STS assumed-role ARN.
+The helper dry-runs by default. With `--profile auto`, it scans local AWS profiles and selects the one whose account matches the coordinator account; with an explicit `--profile`, it verifies that profile directly. It writes the inline role or user policy only when `--apply` is present. For assumed-role identities, it attaches the policy to the underlying role name, not the session name.
 
-Flags:
-
-```text
---mac-hosts    include EC2 Mac Dedicated Host lifecycle permissions
-```
-
-## mac-hosts
-
-Compatibility alias for `crabbox admin hosts --provider aws --target macos`.
-Prefer `admin hosts` in new scripts and runbooks.
-
-The coordinator AWS identity must allow `ec2:DescribeInstanceTypeOfferings`,
-`ec2:DescribeHosts`, `ec2:AllocateHosts`, `ec2:ReleaseHosts`, and
-`ec2:CreateTags` for host lifecycle work, plus
-`servicequotas:ListServiceQuotas` for the quota preflight. `AllocateHosts` uses
-create-time tags, so `CreateTags` should be allowed only when the EC2 create
-action is `AllocateHosts`:
+The EC2 Mac Dedicated Host lifecycle policy is intentionally limited to host operations and looks like this:
 
 ```json
 {
@@ -236,45 +247,19 @@ action is `AllocateHosts`:
     },
     {
       "Effect": "Allow",
-      "Action": "servicequotas:ListServiceQuotas",
+      "Action": [
+        "servicequotas:GetServiceQuota",
+        "servicequotas:ListServiceQuotas"
+      ],
       "Resource": "*"
     }
   ]
 }
 ```
 
-This policy is intentionally limited to EC2 Mac Dedicated Host lifecycle
-operations. End-to-end macOS image validation also needs the normal brokered
-AWS provider permissions for key pairs, security groups, `RunInstances`,
-`TerminateInstances`, image creation/promotion, snapshot cleanup, and baseline
-Service Quotas reads. See [Infrastructure](../infrastructure.md#aws-ec2) before
-running the paid macOS image smoke.
+`AllocateHosts` uses create-time tags, so `CreateTags` is scoped to the `AllocateHosts` create action. End-to-end macOS image validation also needs the normal brokered AWS provider permissions (key pairs, security groups, `RunInstances`/`TerminateInstances`, image creation/promotion, snapshot cleanup, and baseline Service Quotas reads); the combined `providers policy --target macos` output includes both sets. See [Infrastructure](../infrastructure.md#aws-ec2) before running the paid macOS image smoke.
 
-## release
-
-Mark a lease released. Add `--delete` to delete the backing server while releasing.
-
-Flags:
-
-```text
---id <lease-id-or-slug>
---delete
---json
-```
-
-## delete
-
-Delete the backing server for an active lease and mark it released. Requires `--force`.
-
-Flags:
-
-```text
---id <lease-id-or-slug>
---force
---json
-```
-
-Related docs:
+## Related docs
 
 - [Operations](../operations.md)
 - [Auth and admin](../features/auth-admin.md)

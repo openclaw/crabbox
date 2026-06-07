@@ -10,6 +10,7 @@ import (
 
 type providerMatrixEntry struct {
 	Provider    string       `json:"provider"`
+	Family      string       `json:"family"`
 	Aliases     []string     `json:"aliases,omitempty"`
 	Kind        ProviderKind `json:"kind"`
 	Targets     []string     `json:"targets"`
@@ -41,6 +42,7 @@ func providerMatrix() []providerMatrixEntry {
 		spec := provider.Spec()
 		entries = append(entries, providerMatrixEntry{
 			Provider:    firstNonBlank(spec.Name, provider.Name()),
+			Family:      firstNonBlank(spec.Family, provider.Name()),
 			Aliases:     append([]string(nil), provider.Aliases()...),
 			Kind:        spec.Kind,
 			Targets:     formatProviderTargets(spec.Targets),
@@ -54,6 +56,7 @@ func providerMatrix() []providerMatrixEntry {
 func printProviderMatrix(out io.Writer, entries []providerMatrixEntry) {
 	for _, entry := range entries {
 		fmt.Fprintf(out, "%s\n", entry.Provider)
+		fmt.Fprintf(out, "  family: %s\n", entry.Family)
 		fmt.Fprintf(out, "  kind: %s\n", entry.Kind)
 		fmt.Fprintf(out, "  targets: %s\n", commaOrDash(entry.Targets))
 		fmt.Fprintf(out, "  features: %s\n", commaOrDash(featuresToStrings(entry.Features)))

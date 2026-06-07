@@ -63,6 +63,70 @@ describe("usage accounting", () => {
     expect(error).toContain("monthly budget for owner exceeded");
   });
 
+  it("allows configured capacity admins to use the admin owner active cap", () => {
+    const now = new Date("2026-05-01T02:00:00Z");
+    const activeLeases = Array.from({ length: 4 }, (_, index) =>
+      testLease({
+        id: `cbx_admin_${index}`,
+        owner: "Admin@Example.com",
+        org: "openclaw",
+        expiresAt: "2026-05-01T03:00:00Z",
+      }),
+    );
+    const candidate = testLease({
+      id: "cbx_admin_next",
+      owner: "admin@example.com",
+      org: "openclaw",
+      createdAt: "2026-05-01T02:00:00Z",
+      expiresAt: "2026-05-01T03:00:00Z",
+    });
+    const limits = {
+      ...costLimits({
+        CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER: "4",
+        CRABBOX_CAPACITY_ADMIN_OWNERS: "admin@example.com",
+        CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN: "8",
+      } as never),
+      maxActiveLeases: 8,
+      maxActiveLeasesPerOrg: 8,
+    };
+
+    const error = enforceCostLimits(activeLeases, candidate, limits, now);
+
+    expect(error).toBe("");
+  });
+
+  it("keeps the regular owner active cap for non-admin owners", () => {
+    const now = new Date("2026-05-01T02:00:00Z");
+    const activeLeases = Array.from({ length: 4 }, (_, index) =>
+      testLease({
+        id: `cbx_user_${index}`,
+        owner: "user@example.com",
+        org: "openclaw",
+        expiresAt: "2026-05-01T03:00:00Z",
+      }),
+    );
+    const candidate = testLease({
+      id: "cbx_user_next",
+      owner: "user@example.com",
+      org: "openclaw",
+      createdAt: "2026-05-01T02:00:00Z",
+      expiresAt: "2026-05-01T03:00:00Z",
+    });
+    const limits = {
+      ...costLimits({
+        CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER: "4",
+        CRABBOX_CAPACITY_ADMIN_OWNERS: "admin@example.com",
+        CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN: "8",
+      } as never),
+      maxActiveLeases: 8,
+      maxActiveLeasesPerOrg: 8,
+    };
+
+    const error = enforceCostLimits(activeLeases, candidate, limits, now);
+
+    expect(error).toContain("active lease limit for owner exceeded: 5/4");
+  });
+
   it("supports cost rate overrides", () => {
     const cost = leaseCost(
       { CRABBOX_COST_RATES_JSON: '{"aws:c7a.48xlarge":12}' },

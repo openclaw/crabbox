@@ -18,9 +18,10 @@ func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:        providerName,
+		Family:      "modal",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureArchiveSync},
+		Features:    core.FeatureSet{core.FeatureArchiveSync, core.FeatureURLBridge},
 		Coordinator: core.CoordinatorNever,
 	}
 }

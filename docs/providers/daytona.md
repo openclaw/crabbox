@@ -1,45 +1,44 @@
 # Daytona Provider
 
-Read when:
+Read this when you are:
 
 - choosing `provider: daytona`;
 - configuring Daytona API auth, snapshots, or SSH access;
 - changing `internal/providers/daytona`.
 
-Daytona is a hybrid provider. `run` and `warmup` use Daytona SDK/toolbox APIs
-for sandbox lifecycle, archive upload, extraction, and process execution.
-Explicit `ssh` access mints a short-lived Daytona SSH token and then uses the
-normal Crabbox SSH client.
+Daytona is an SSH-lease provider with a delegated execution path. `run` and
+`warmup` create the sandbox from a Daytona snapshot and drive sync and command
+execution through the Daytona SDK/toolbox APIs (archive upload, extraction, and
+process execution) — they do not run over SSH. `crabbox ssh` mints a short-lived
+Daytona SSH access token, then connects through the normal Crabbox SSH client.
 
-## When To Use
+## When to use
 
-Use Daytona when the sandbox image should come from a Daytona snapshot and
-command execution should stay inside Daytona's toolbox APIs. Use AWS, Hetzner,
-or Static SSH when you need a normal long-lived SSH lease for Actions hydration
-or VNC/code workflows.
+Use Daytona when the box image should come from a Daytona snapshot and command
+execution should stay inside Daytona's toolbox APIs. Reach for AWS, Hetzner, or
+the static `ssh` provider instead when you need a normal long-lived SSH lease for
+Actions hydration, desktop/VNC, or `code` workflows.
 
 ## Commands
 
 ```sh
 crabbox warmup --provider daytona --daytona-snapshot crabbox-ready
 crabbox run --provider daytona --daytona-snapshot crabbox-ready -- pnpm test
-crabbox run --provider daytona --id blue-lobster -- pnpm test:changed
-crabbox ssh --provider daytona --id blue-lobster
-crabbox stop --provider daytona blue-lobster
+crabbox run --provider daytona --id swift-crab -- pnpm test:changed
+crabbox ssh --provider daytona --id swift-crab
+crabbox stop --provider daytona swift-crab
 ```
 
 ## Auth
 
-Use the Daytona CLI login:
+Crabbox reads the active Daytona CLI profile when no Daytona auth values are set
+in the environment or config:
 
 ```sh
 daytona login --api-key ...
 ```
 
-Crabbox reads the active Daytona CLI profile when no Daytona auth environment
-variables are set.
-
-You can also use explicit environment auth with an API key:
+You can also supply explicit API-key auth:
 
 ```sh
 export DAYTONA_API_KEY=...
@@ -52,8 +51,12 @@ export DAYTONA_JWT_TOKEN=...
 export DAYTONA_ORGANIZATION_ID=...
 ```
 
-`DAYTONA_ORGANIZATION_ID` is required with JWT auth.
-Explicit environment or Crabbox config values override the Daytona CLI profile.
+`DAYTONA_ORGANIZATION_ID` is required with JWT auth. Explicit environment values
+(or Crabbox config values) override the Daytona CLI profile.
+
+Each auth variable also has a `CRABBOX_`-prefixed form that takes precedence over
+the unprefixed one: `CRABBOX_DAYTONA_API_KEY`, `CRABBOX_DAYTONA_JWT_TOKEN`,
+`CRABBOX_DAYTONA_ORGANIZATION_ID`, and `CRABBOX_DAYTONA_API_URL`.
 
 ## Config
 
@@ -70,6 +73,9 @@ daytona:
   sshAccessMinutes: 30
 ```
 
+The values above are the built-in defaults except for `snapshot` and `target`,
+which are empty by default.
+
 Provider flags:
 
 ```text
@@ -82,39 +88,48 @@ Provider flags:
 --daytona-ssh-access-minutes
 ```
 
+The non-auth settings can also be set through environment variables:
+`CRABBOX_DAYTONA_SNAPSHOT`, `CRABBOX_DAYTONA_TARGET`, `CRABBOX_DAYTONA_USER`,
+`CRABBOX_DAYTONA_WORK_ROOT`, `CRABBOX_DAYTONA_SSH_GATEWAY_HOST`, and
+`CRABBOX_DAYTONA_SSH_ACCESS_MINUTES`.
+
 ## Lifecycle
 
 1. Create or resolve a Daytona sandbox from `daytona.snapshot`.
-2. Store Crabbox labels and local repo claims.
-3. For `run`, build the Crabbox sync manifest, create a gzipped tar archive,
-   stream the archive to Daytona toolbox upload, extract it, and execute through
-   Daytona process APIs.
-4. For `ssh`, request short-lived SSH access, parse Daytona's `sshCommand`, and
-   redact the token in normal output.
+2. Store Crabbox labels and a local repo claim for the lease.
+3. For `run`, build the Crabbox sync manifest, stream a gzipped tar archive to
+   the Daytona toolbox upload endpoint, extract it in the sandbox, and execute
+   the command through the Daytona process APIs.
+4. For `ssh`, request short-lived SSH access (TTL `daytona.sshAccessMinutes`),
+   parse Daytona's `sshCommand`, and redact the token in normal output.
 5. Delete the sandbox on release unless the lease is kept.
 
 ## Capabilities
 
-- SSH: yes, explicit short-lived token access.
-- Crabbox sync: yes, archive sync through Daytona toolbox.
-- Desktop/browser/code: no current Crabbox VNC/code surface.
+- Provider kind: SSH-lease (Linux only).
+- SSH: yes, via a short-lived Daytona SSH access token.
+- Crabbox sync: yes, archive sync through the Daytona toolbox.
+- Desktop / browser / code: no — Daytona has no Crabbox VNC or `code` surface.
 - Actions hydration: no.
-- Coordinator: no.
+- Coordinator (broker): no — Daytona always runs direct from the CLI.
 
 ## Gotchas
 
-- `daytona.snapshot` is required when creating a sandbox.
-- Snapshot contents own CPU, memory, disk, and installed tooling in this mode.
-- Daytona `run` is delegated to toolbox APIs; it is not the same as core-over-SSH
-  execution.
-- `--script`, `--script-stdin`, `--fresh-pr`, local stdout/stderr captures,
-  `--capture-on-fail`, and `--download` are rejected for Daytona `run` because
-  command transport is delegated to toolbox APIs.
-- `--keep-on-failure` keeps a newly created failed sandbox until Daytona
-  auto-stop or explicit `crabbox stop`.
+- `daytona.snapshot` (or `--daytona-snapshot`) is required to create a sandbox.
+  The snapshot owns CPU, memory, disk, and installed tooling.
+- `--class` and `--type` are rejected; size the sandbox through the snapshot.
+- `--id <sandbox-id-or-slug>` is required to address an existing sandbox.
+- Daytona `run` is delegated to the toolbox APIs; it is not core-over-SSH
+  execution. Because of that, the following `run` options are rejected:
+  `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync`,
+  `--fresh-pr`, `--script` / `--script-stdin`, `--env-helper`,
+  `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`, `--download`,
+  `--artifact-glob`, `--emit-proof`, and `--stop-after`.
 - `--actions-runner` is rejected because it needs a normal SSH lease host.
+- `--keep-on-failure` keeps a newly created failed sandbox until Daytona
+  auto-stop or an explicit `crabbox stop`.
 
-Related docs:
+## Related docs
 
 - [Feature: Daytona](../features/daytona.md)
 - [Provider backends](../provider-backends.md)

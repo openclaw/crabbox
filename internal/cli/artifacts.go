@@ -138,7 +138,7 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 		*contactSheet = false
 	}
 	needsDesktop := artifactCollectNeedsDesktop(*screenshot, *video, *doctor, *webvncStatus)
-	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{Desktop: needsDesktop})
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: needsDesktop})
 	if err != nil {
 		return err
 	}
@@ -158,7 +158,7 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
-	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, leaseID, *reclaim); err != nil {
+	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, *reclaim); err != nil {
 		return err
 	}
 	dir := strings.TrimSpace(*output)

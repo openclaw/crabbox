@@ -18,9 +18,10 @@ func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:        e2bProvider,
+		Family:      "e2b",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    nil,
+		Features:    core.FeatureSet{core.FeatureURLBridge},
 		Coordinator: core.CoordinatorNever,
 	}
 }

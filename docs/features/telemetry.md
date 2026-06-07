@@ -3,20 +3,20 @@
 Read when:
 
 - changing how Crabbox samples runner load, memory, disk, or uptime;
-- adding new metrics to lease records or run history;
+- adding metrics to lease records or run history;
 - debugging missing portal sparklines or stale telemetry pills;
-- understanding where telemetry stops and full observability begins.
+- deciding where telemetry stops and full observability begins.
 
 Crabbox captures lightweight runner telemetry so a lease detail page or run
 record can answer "is this box healthy right now?" and "did this command spike
 memory?" without standing up Prometheus or shipping a logging agent. Telemetry
-is best-effort, capped, and only exists for managed Linux leases.
+is best-effort, capped, and only collected for Linux leases.
 
-## What Gets Captured
+## What gets captured
 
-For Linux runners, the CLI runs a small remote script through the lease SSH
-target whenever it has a reason to talk to the box (heartbeat,
-warmup-complete, status check, mid-run sample). The script reads:
+For a Linux lease, the CLI runs a small read-only script over the lease's SSH
+connection whenever it already has a reason to talk to the box during a run (a
+run heartbeat or a mid-run sample). The script reads:
 
 - `load1`, `load5`, `load15` from `/proc/loadavg`;
 - `memoryTotalBytes`, `memoryUsedBytes`, `memoryPercent` derived from
@@ -31,7 +31,7 @@ Each sample is parsed into a `LeaseTelemetry` record:
   "capturedAt": "2026-05-07T07:42:18Z",
   "source": "ssh-linux",
   "load1": 0.42,
-  "load5": 0.30,
+  "load5": 0.3,
   "load15": 0.18,
   "memoryUsedBytes": 5368709120,
   "memoryTotalBytes": 16777216000,
@@ -43,101 +43,100 @@ Each sample is parsed into a `LeaseTelemetry` record:
 }
 ```
 
-Non-Linux targets (managed Windows, EC2 Mac, static SSH macOS/Windows) are
-intentionally excluded from telemetry capture today. The collector returns
-`nil` for non-Linux targets and the coordinator silently skips storing
-samples for them.
+The collector returns nothing for non-Linux targets and for hosts with no
+SSH address, so managed Windows, EC2 Mac, and static SSH macOS/Windows leases
+produce no telemetry. Delegated-run providers (sandbox/proof runners with no
+SSH lease) also produce none. Their lease records have no `telemetry` field,
+and parsing is strict: a sample with no usable numeric metric is dropped
+rather than stored as an empty record.
 
-## Where It Lives
+## Where it lives
 
-Telemetry lives in two places on the coordinator:
+Telemetry is stored in two places on the coordinator (the Cloudflare Worker
+broker):
 
-- **Lease record.** The Fleet Durable Object stores the most recent sanitized
-  snapshot on the lease (`telemetry`) and a bounded ring of the latest 60
-  samples (`telemetryHistory`). The ring is keyed by `capturedAt`; older
-  samples drop off as new ones arrive.
-- **Run record.** When a `run_...` is in progress, the CLI POSTs samples to
-  `/v1/runs/{run-id}/telemetry`. The run record keeps a bounded `start`,
-  `end`, and a small `samples[]` array so longer commands have a short
-  load/memory/disk trend instead of just two endpoints.
+- **Lease record.** The Fleet Durable Object keeps the most recent sanitized
+  snapshot on the lease (`telemetry`) plus a bounded ring of the latest
+  samples (`telemetryHistory`, capped at 60). Older samples drop off as new
+  ones arrive.
+- **Run record.** While a run is active, the CLI POSTs samples to
+  `POST /v1/runs/{run-id}/telemetry`. The run keeps a `RunTelemetrySummary`
+  with a `start` snapshot, an `end` snapshot, and a `samples[]` series (also
+  capped at 60) so longer commands show a load/memory/disk trend rather than
+  just two endpoints.
 
-Static SSH and delegated providers do not produce telemetry. Their lease
-records have no `telemetry` field; their portal rows render a quiet "no
-telemetry" pill.
+The sanitizer on the Worker only accepts the numeric fields above plus
+`source` (truncated to 32 characters). Raw `/proc` content, hostnames, kernel
+versions, mount points, and process tables never reach storage.
 
-## How Samples Get Sent
+## How samples get sent
 
-The CLI samples in three contexts:
+The CLI samples through `collectLeaseTelemetryBestEffort`, which wraps each
+collection in a 5-second timeout. A failed collection is never an error — it
+just means the box was busy or briefly unreachable, and the caller proceeds
+without a sample. Sampling happens in two contexts, both during a run:
 
-1. **Heartbeat.** While a command runs, the heartbeat goroutine asks for a
-   fresh sample with a short 5-second timeout, attaches it to the heartbeat
-   body, and lets the coordinator update the lease record and append to the
-   ring. Heartbeats that fail to collect just send no telemetry; the command
-   keeps running.
-2. **Warmup and status.** `crabbox warmup`, `crabbox status`, and
-   `crabbox inspect` collect a one-off sample so the user sees current load
-   on the same line that prints lease state.
-3. **Run telemetry.** Long commands periodically post samples through the run
-   telemetry endpoint while the command is active; the run record captures
-   start, end, and a trimmed series.
+1. **Heartbeat.** While a run is active, the heartbeat goroutine collects a
+   fresh sample, attaches it to the heartbeat body, and lets the coordinator
+   update the lease record's `telemetry` snapshot and append to the
+   `telemetryHistory` ring.
+2. **Run telemetry.** During the same run the recorder captures a `start`
+   snapshot, then samples on a 15-second ticker and posts each to
+   `POST /v1/runs/{run-id}/telemetry`. The summary is finalized on
+   `POST /v1/runs/{run-id}/finish`, which also records the `end` snapshot.
 
-All collection runs through `collectLeaseTelemetryBestEffort`, which wraps the
-collector in a 5-second timeout. A failed sample is never an error - it's a
-signal that the box was busy or temporarily unreachable.
+`crabbox status` does not collect a fresh sample itself — it displays the
+`telemetry` snapshot already stored on the lease record (most recently written
+by a run's heartbeat), so the trailing `telemetry=<age>` reflects how long ago
+that sample was captured.
 
-## What Shows Up Where
+## What shows up where
 
-- **`crabbox status --id ...`**: prints `load=0.42 mem=5.0GiB/16.0GiB
-  disk=20.0GiB/100.0GiB uptime=10h40m telemetry=2s` when a sample is
-  available. Older samples render as `telemetry=4m12s` so freshness is
-  obvious at a glance.
-- **`crabbox history`** and **`crabbox events`**: include start/end snapshots
-  plus a memory delta on completed runs.
-- **`/portal/leases/{id-or-slug}`**: shows the latest sample as gauges and
-  renders load, memory, and disk sparklines when more than one sample is
-  present. Stale samples (>5 minutes) get a `stale telemetry` pill;
-  high-resource samples get `high load`, `high memory`, or `high disk` pills
-  on the same row.
-- **`/portal/runs/{run-id}`**: renders a compact resource delta line and short
-  trend lines for runs with mid-run samples.
+- **`crabbox status --id ...`** appends, when a sample is available,
+  `load=0.42 mem=5.0GiB/16.0GiB disk=20.0GiB/100.0GiB uptime=10h40m
+  telemetry=2s`. The trailing `telemetry=<age>` shows how fresh the sample is.
+- **`crabbox history`** appends `resources=load=0.42 mem=32% disk=20%
+  mem_delta=+512.0MiB` for runs that carry telemetry. `mem_delta` is the
+  difference between the `start` and `end` memory snapshots.
+- **`/portal/leases/{id-or-slug}`** renders the latest sample as health pills
+  and draws load, memory, and disk sparklines once at least two samples exist
+  (until then each line reads "waiting for samples"). A sample older than
+  10 minutes shows a `stale <age>` pill; otherwise a `live` pill. Memory or
+  disk at or above 85% adds a `memory N%` / `disk N%` pill; `load1` at or
+  above 16 adds a `load N.N` pill. With no captured sample the strip shows a
+  single `no signal` pill.
+- **`/portal/runs/{run-id}`** renders a compact load/memory/disk panel from the
+  current snapshot, memory and disk deltas, and the sample count.
 
-The coordinator never serves raw `/proc` content - only the parsed numeric
-fields above. Tests assert that hostnames, kernel versions, mount points, and
-process tables never reach storage.
+## Limits and thresholds
 
-## Limits And Defaults
+- Sampler timeout: 5 seconds per collection.
+- Run telemetry interval: 15 seconds while a command runs.
+- Lease telemetry history ring: 60 samples.
+- Run telemetry samples ring: 60 samples.
+- Portal stale threshold: 10 minutes since `capturedAt`.
+- Portal pill thresholds: memory or disk percent ≥ 85, `load1` ≥ 16.
 
-- Sampler timeout: 5 seconds per call.
-- Lease telemetry ring: 60 samples per lease.
-- Run telemetry samples: bounded to a small ring (start, end, plus a small
-  middle series) and serialized once on `POST /v1/runs/{run-id}/finish`.
-- High-resource pill thresholds: load > number of CPUs, memory percent > 90,
-  disk percent > 90.
-- Stale telemetry threshold: 5 minutes since `capturedAt`.
+These thresholds are display hints, not alerts. Crabbox does not page or take
+automatic action on telemetry; use real observability tooling for that.
 
-These thresholds are operational hints, not alerts - Crabbox does not page or
-auto-action on telemetry. Use observability tooling for that.
+## When to use full observability instead
 
-## When To Use Full Observability Instead
-
-Telemetry is intentionally narrow. It is a "is the box healthy?" pulse, not a
+Telemetry is intentionally narrow: a "is the box healthy?" pulse, not a
 metrics pipeline. For per-process traces, per-command flame graphs, or
-historical correlations across many runs, scrape the runner with a real
-agent or ship logs to a real backend. Crabbox does not try to replace that
-layer; see [Observability](../observability.md) for what we plumb upstream.
+historical correlation across many runs, scrape the runner with a real agent
+or ship logs to a real backend. Crabbox does not try to replace that layer;
+see [Observability](../observability.md) for what it surfaces upstream.
 
-## Configuration
+## Extending the captured fields
 
-Telemetry has no user-facing toggle. Disabling it would not save meaningful
-runtime but would remove the most useful health signal in the portal. There
-is no env flag to silence sampling.
-
-If you need to extend the captured fields, add them in:
+Telemetry has no user-facing toggle; there is no env flag to silence sampling.
+To add a captured field, change all four layers:
 
 - the parser in `internal/cli/telemetry.go`;
-- the coordinator schema in `worker/src/types.ts`;
-- the lease/run portal renderers in `worker/src/portal.ts`;
-- the storage in `worker/src/fleet.ts`.
+- the schema in `worker/src/types.ts`;
+- the sanitizer and storage in `worker/src/fleet.ts`;
+- the lease and run renderers in `worker/src/portal.ts`.
 
 Keep new fields numeric, sanitized, and bounded. Free-form strings, hostnames,
 and process names do not belong on the telemetry record.

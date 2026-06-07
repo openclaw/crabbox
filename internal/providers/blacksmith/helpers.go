@@ -3,6 +3,7 @@ package blacksmith
 import (
 	"flag"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -82,6 +83,9 @@ func blacksmithWarmupArgs(cfg Config, publicKey string) ([]string, error) {
 	}
 	if publicKey != "" {
 		args = append(args, "--ssh-public-key", publicKey)
+	}
+	for _, spec := range core.CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes) {
+		args = append(args, "--sticky-disk", spec)
 	}
 	args = append(args, "--idle-timeout", fmt.Sprint(durationMinutesCeil(blacksmithIdleTimeout(cfg))))
 	return args, nil
@@ -168,15 +172,56 @@ func blacksmithBaseArgs(cfg Config) []string {
 }
 
 func blacksmithWorkflow(cfg Config) string {
-	return blank(cfg.Blacksmith.Workflow, cfg.Actions.Workflow)
+	if cfg.Blacksmith.Workflow != "" {
+		return cfg.Blacksmith.Workflow
+	}
+	if blacksmithCanFallbackToActionsWorkflow(cfg) {
+		return cfg.Actions.Workflow
+	}
+	return ""
 }
 
 func blacksmithJob(cfg Config) string {
-	return blank(cfg.Blacksmith.Job, cfg.Actions.Job)
+	if cfg.Blacksmith.Job != "" {
+		return cfg.Blacksmith.Job
+	}
+	if blacksmithCanFallbackToActionsField(cfg) {
+		return cfg.Actions.Job
+	}
+	return ""
 }
 
 func blacksmithRef(cfg Config) string {
-	return blank(cfg.Blacksmith.Ref, cfg.Actions.Ref)
+	if cfg.Blacksmith.Ref != "" {
+		return cfg.Blacksmith.Ref
+	}
+	if blacksmithCanFallbackToActionsField(cfg) {
+		return cfg.Actions.Ref
+	}
+	return ""
+}
+
+func blacksmithCanFallbackToActionsField(cfg Config) bool {
+	return strings.TrimSpace(cfg.Blacksmith.Workflow) != "" || blacksmithCanFallbackToActionsWorkflow(cfg)
+}
+
+func blacksmithCanFallbackToActionsWorkflow(cfg Config) bool {
+	workflow := strings.TrimSpace(cfg.Actions.Workflow)
+	if workflow == "" {
+		return false
+	}
+	return !blacksmithLooksLikeGenericHydrateWorkflow(workflow)
+}
+
+func blacksmithLooksLikeGenericHydrateWorkflow(workflow string) bool {
+	name := strings.TrimSpace(filepath.Base(workflow))
+	stem := strings.TrimSuffix(name, filepath.Ext(name))
+	normalized := strings.NewReplacer(" ", "", "-", "", "_", "").Replace(strings.ToLower(stem))
+	switch normalized {
+	case "hydrate", "crabbox", "crabboxhydrate":
+		return true
+	}
+	return false
 }
 
 func blacksmithIdleTimeout(cfg Config) time.Duration {

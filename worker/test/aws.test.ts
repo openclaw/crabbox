@@ -120,6 +120,45 @@ describe("aws provider", () => {
     );
   });
 
+  it("rejects invalid configured AWS SSH CIDRs before changing ingress", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(typeof init?.body === "string" ? init.body : String(input));
+        return new Response(
+          `<DescribeSecurityGroupsResponse>
+  <securityGroupInfo>
+    <item>
+      <groupId>sg-123</groupId>
+      <ipPermissions/>
+    </item>
+  </securityGroupInfo>
+</DescribeSecurityGroupsResponse>`,
+        );
+      }),
+    );
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "999.999.999.999/32",
+      } as never,
+      "us-east-1",
+    );
+
+    await expect(
+      client.refreshSSHIngress(
+        leaseConfig({
+          provider: "aws",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+      ),
+    ).rejects.toThrow("CRABBOX_AWS_SSH_CIDRS entries must be valid");
+    expect(calls).toHaveLength(1);
+  });
+
   it("waits through transient EC2 instance visibility after RunInstances", async () => {
     vi.useFakeTimers();
     const client = new EC2SpotClient(
@@ -165,6 +204,7 @@ describe("aws provider", () => {
     const check = awsCapacityReadinessCheckForQuota(
       {
         target: "linux",
+        architecture: "amd64",
         windowsMode: "normal",
         class: "beast",
         serverType: "c7a.48xlarge",
@@ -196,6 +236,7 @@ describe("aws provider", () => {
     const check = awsCapacityReadinessCheckForQuota(
       {
         target: "linux",
+        architecture: "amd64",
         windowsMode: "normal",
         class: "beast",
         serverType: "c7a.48xlarge",
@@ -394,6 +435,165 @@ describe("aws provider", () => {
     expect(calls).not.toContain("RevokeSecurityGroupIngress:sg-fixed:2222:203.0.113.10/32");
   });
 
+  it("compacts legacy managed AWS SSH ingress when security group rules are exhausted", async () => {
+    const calls: string[] = [];
+    let authorizeAttempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        calls.push(
+          [
+            action,
+            params.get("GroupId") ?? params.get("GroupId.1") ?? "",
+            params.get("IpPermissions.1.FromPort") ?? "",
+            params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "",
+          ].join(":"),
+        );
+        if (action === "DescribeSecurityGroups") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <securityGroupInfo>
+    <item>
+      <groupId>sg-fixed</groupId>
+      <groupName>crabbox-runners</groupName>
+      <tagSet><item><key>crabbox</key><value>true</value></item></tagSet>
+      <ipPermissions>
+        <item>
+          <ipProtocol>tcp</ipProtocol>
+          <fromPort>22</fromPort>
+          <toPort>22</toPort>
+          <ipRanges><item><cidrIp>203.0.113.10/32</cidrIp></item></ipRanges>
+        </item>
+      </ipPermissions>
+    </item>
+  </securityGroupInfo>
+</DescribeSecurityGroupsResponse>`);
+        }
+        if (action === "RevokeSecurityGroupIngress") {
+          return ec2XMLResponse("<RevokeSecurityGroupIngressResponse />");
+        }
+        if (action === "AuthorizeSecurityGroupIngress") {
+          authorizeAttempts += 1;
+          if (authorizeAttempts === 1) {
+            return ec2XMLResponse(
+              `<Response><Errors><Error><Code>RulesPerSecurityGroupLimitExceeded</Code><Message>The maximum number of rules per security group has been reached.</Message></Error></Errors></Response>`,
+              400,
+            );
+          }
+          return ec2XMLResponse("<AuthorizeSecurityGroupIngressResponse />");
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-fixed",
+      } as never,
+      "eu-west-1",
+    );
+
+    await client.refreshSSHIngress(
+      leaseConfig({
+        provider: "aws",
+        target: "linux",
+        awsSSHCIDRs: ["198.51.100.77/32"],
+        sshFallbackPorts: [],
+        sshPort: "22",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    );
+
+    expect(calls).toContain("RevokeSecurityGroupIngress:sg-fixed:22:203.0.113.10/32");
+    expect(
+      calls.filter((call) => call === "AuthorizeSecurityGroupIngress:sg-fixed:22:198.51.100.77/32"),
+    ).toHaveLength(2);
+  });
+
+  it("does not compact AWS SSH ingress after a rule-limit error in additive mode", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        calls.push(
+          [
+            action,
+            params.get("GroupId") ?? params.get("GroupId.1") ?? "",
+            params.get("IpPermissions.1.FromPort") ?? "",
+            params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "",
+          ].join(":"),
+        );
+        if (action === "DescribeSecurityGroups") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <securityGroupInfo>
+    <item>
+      <groupId>sg-fixed</groupId>
+      <groupName>crabbox-runners</groupName>
+      <tagSet><item><key>crabbox</key><value>true</value></item></tagSet>
+      <ipPermissions>
+        <item>
+          <ipProtocol>tcp</ipProtocol>
+          <fromPort>22</fromPort>
+          <toPort>22</toPort>
+          <ipRanges><item><cidrIp>203.0.113.10/32</cidrIp></item></ipRanges>
+        </item>
+      </ipPermissions>
+    </item>
+  </securityGroupInfo>
+</DescribeSecurityGroupsResponse>`);
+        }
+        if (action === "RevokeSecurityGroupIngress") {
+          return ec2XMLResponse("<RevokeSecurityGroupIngressResponse />");
+        }
+        if (action === "AuthorizeSecurityGroupIngress") {
+          return ec2XMLResponse(
+            `<Response><Errors><Error><Code>RulesPerSecurityGroupLimitExceeded</Code><Message>The maximum number of rules per security group has been reached.</Message></Error></Errors></Response>`,
+            400,
+          );
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-fixed",
+      } as never,
+      "eu-west-1",
+    );
+
+    await expect(
+      client.refreshSSHIngress(
+        leaseConfig({
+          provider: "aws",
+          target: "linux",
+          awsSSHCIDRs: ["198.51.100.77/32"],
+          sshFallbackPorts: [],
+          sshPort: "22",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+        { reconcile: "additive" },
+      ),
+    ).rejects.toThrow("RulesPerSecurityGroupLimitExceeded");
+
+    expect(calls).not.toContain("RevokeSecurityGroupIngress:sg-fixed:22:203.0.113.10/32");
+  });
+
   it("enables Fast Snapshot Restore for AMI snapshots in selected zones", async () => {
     const calls: Array<Record<string, string>> = [];
     vi.stubGlobal(
@@ -506,6 +706,11 @@ describe("aws provider", () => {
     ).toBe(true);
     expect(
       awsProvisioningErrorCategory(
+        `${" ".repeat(10_000)}aws RunInstances: http 400: <?xml version="1.0" encoding="UTF-8"?>`,
+      ),
+    ).toBe("capacity");
+    expect(
+      awsProvisioningErrorCategory(
         'c7a.48xlarge: aws RunInstances: http 400: <?xml version="1.0" encoding="UTF-8"?>; c7i.48xlarge: aws RunInstances: http 400: <?xml version="1.0" encoding="UTF-8"?><Response><Errors><Error><Code>InvalidGroup.NotFound</Code><Message>missing</Message></Error></Errors></Response>',
       ),
     ).toBe("");
@@ -588,6 +793,38 @@ describe("aws provider", () => {
         },
       }),
     ).toBe("h-live");
+    expect(
+      awsMacHostIDFromDescribeHosts(
+        {
+          hostSet: {
+            item: [
+              {
+                hostId: "h-occupied",
+                hostState: "available",
+                availableCapacity: {
+                  availableInstanceCapacity: {
+                    item: { instanceType: "mac2.metal", availableCapacity: 0 },
+                  },
+                  availableVCpus: 0,
+                },
+              },
+              {
+                hostId: "h-capacity",
+                hostState: "available",
+                availableCapacity: {
+                  availableInstanceCapacity: {
+                    item: { instanceType: "mac2.metal", availableCapacity: 1 },
+                  },
+                  availableVCpus: 12,
+                },
+              },
+            ],
+          },
+        },
+        "",
+        "mac2.metal",
+      ),
+    ).toBe("h-capacity");
   });
 
   it("parses EC2 host id sets from AllocateHosts responses", () => {
@@ -715,11 +952,22 @@ describe("aws provider", () => {
       awsLaunchCandidates({
         class: "standard",
         target: "windows",
+        architecture: "amd64",
         windowsMode: "wsl2",
         serverType: "m8i.large",
         serverTypeExplicit: false,
       }),
     ).not.toContain("t3.large");
+    expect(
+      awsLaunchCandidates({
+        class: "beast",
+        target: "linux",
+        architecture: "arm64",
+        windowsMode: "normal",
+        serverType: "c7g.16xlarge",
+        serverTypeExplicit: false,
+      }),
+    ).toContain("t4g.small");
   });
 
   it("builds ordered AWS region and availability-zone candidates", () => {
@@ -773,6 +1021,87 @@ describe("aws provider", () => {
     expect(isRetryableAWSProvisioningError(hostMiss)).toBe(true);
     expect(awsProvisioningErrorCategory(imageMiss)).toBe("region");
     expect(isRetryableAWSProvisioningError(imageMiss)).toBe(true);
+  });
+
+  it("sends compressed Linux cloud-init user data to RunInstances", async () => {
+    let userData = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+        if (securityGroupResponse) {
+          return securityGroupResponse;
+        }
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+        }
+        if (action === "DescribeImages") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>ami-linux</imageId>
+      <name>ubuntu</name>
+      <imageState>available</imageState>
+      <creationDate>2026-05-01T00:00:00.000Z</creationDate>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`);
+        }
+        if (action === "RunInstances") {
+          userData = params.get("UserData") ?? "";
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<RunInstancesResponse>
+  <instancesSet>
+    <item>
+      <instanceId>i-linux</instanceId>
+      <instanceType>c7a.8xlarge</instanceType>
+      <ipAddress>203.0.113.44</ipAddress>
+      <instanceState><name>pending</name></instanceState>
+    </item>
+  </instancesSet>
+</RunInstancesResponse>`);
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
+      } as never,
+      "us-east-1",
+    );
+    await client.createServerWithFallback(
+      leaseConfig({
+        provider: "aws",
+        target: "linux",
+        class: "standard",
+        desktop: true,
+        browser: true,
+        sshPublicKey: `ssh-rsa ${"a".repeat(724)}`,
+      }),
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(atob(userData).length).toBeLessThan(16 * 1024);
+    expect(await gunzipBase64(userData)).toContain("crabbox-configure-desktop-theme");
   });
 
   it("resolves macOS AMIs per fallback instance type", async () => {
@@ -892,6 +1221,190 @@ describe("aws provider", () => {
     expect(runImages).toEqual(["ami-x86-mac"]);
     expect(result.serverType).toBe("mac1.metal");
     expect(result.server.hostID).toBe("h-mac1");
+  });
+
+  it("retries macOS launch on another discovered host after host capacity is exhausted", async () => {
+    const runHosts: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+        if (securityGroupResponse) {
+          return securityGroupResponse;
+        }
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+        }
+        if (action === "DescribeImages") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>ami-arm-mac</imageId>
+      <name>macos</name>
+      <imageState>available</imageState>
+      <creationDate>2026-05-01T00:00:00.000Z</creationDate>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`);
+        }
+        if (action === "DescribeHosts") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeHostsResponse>
+  <hostSet>
+    <item>
+      <hostId>h-occupied</hostId>
+      <hostState>available</hostState>
+      <availabilityZone>eu-west-1a</availabilityZone>
+      <hostProperties><instanceType>mac2.metal</instanceType></hostProperties>
+    </item>
+    <item>
+      <hostId>h-spare</hostId>
+      <hostState>available</hostState>
+      <availabilityZone>eu-west-1a</availabilityZone>
+      <hostProperties><instanceType>mac2.metal</instanceType></hostProperties>
+    </item>
+  </hostSet>
+</DescribeHostsResponse>`);
+        }
+        if (action === "RunInstances") {
+          const hostID = params.get("Placement.HostId") ?? "";
+          runHosts.push(hostID);
+          if (hostID === "h-occupied") {
+            return ec2XMLResponse(
+              `<Response><Errors><Error><Code>InsufficientCapacityOnHost</Code><Message>Dedicated host h-occupied has insufficient capacity.</Message></Error></Errors></Response>`,
+              400,
+            );
+          }
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<RunInstancesResponse>
+  <instancesSet>
+    <item>
+      <instanceId>i-mac2</instanceId>
+      <instanceType>mac2.metal</instanceType>
+      <placement><hostId>${hostID}</hostId></placement>
+      <ipAddress>203.0.113.44</ipAddress>
+      <instanceState><name>pending</name></instanceState>
+      <tagSet><item><key>Name</key><value>crabbox-violet-prawn</value></item></tagSet>
+    </item>
+  </instancesSet>
+</RunInstancesResponse>`);
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
+      } as never,
+      "eu-west-1",
+    );
+    const result = await client.createServerWithFallback(
+      leaseConfig({
+        provider: "aws",
+        target: "macos",
+        capacity: { market: "on-demand" },
+        serverType: "mac2.metal",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(runHosts).toEqual(["h-occupied", "h-spare"]);
+    expect(result.server.hostID).toBe("h-spare");
+  });
+
+  it("does not fail over from an explicit macOS host pin after host capacity is exhausted", async () => {
+    const runHosts: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+        if (securityGroupResponse) {
+          return securityGroupResponse;
+        }
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+        }
+        if (action === "DescribeImages") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>ami-arm-mac</imageId>
+      <name>macos</name>
+      <imageState>available</imageState>
+      <creationDate>2026-05-01T00:00:00.000Z</creationDate>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`);
+        }
+        if (action === "RunInstances") {
+          runHosts.push(params.get("Placement.HostId") ?? "");
+          return ec2XMLResponse(
+            `<Response><Errors><Error><Code>InsufficientCapacityOnHost</Code><Message>Dedicated host h-occupied has insufficient capacity.</Message></Error></Errors></Response>`,
+            400,
+          );
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
+      } as never,
+      "eu-west-1",
+    );
+    await expect(
+      client.createServerWithFallback(
+        leaseConfig({
+          provider: "aws",
+          target: "macos",
+          capacity: { market: "on-demand" },
+          hostID: "h-occupied",
+          serverType: "mac2.metal",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+        "cbx_abcdef123456",
+        "violet-prawn",
+        "alice@example.com",
+      ),
+    ).rejects.toThrow("InsufficientCapacityOnHost");
+
+    expect(runHosts.length).toBeGreaterThan(0);
+    expect(new Set(runHosts)).toEqual(new Set(["h-occupied"]));
   });
 
   it("does not reuse a pinned macOS AMI after changing fallback host families", async () => {
@@ -1705,4 +2218,10 @@ function ec2ConfiguredSecurityGroupResponse(
 
 function ec2XMLResponse(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "application/xml" } });
+}
+
+async function gunzipBase64(value: string): Promise<string> {
+  const bytes = Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return await new Response(stream).text();
 }

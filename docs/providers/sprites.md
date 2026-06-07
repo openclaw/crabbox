@@ -1,38 +1,126 @@
 # Sprites Provider
 
-Read when:
+Read this when you:
 
-- choosing `provider: sprites`;
-- configuring Sprites tokens, API URL, or work root;
-- changing `internal/providers/sprites`.
+- pick `provider: sprites`;
+- configure a Sprites token, API URL, or work root;
+- change `internal/providers/sprites`.
 
-Sprites is an SSH lease provider for Linux microVMs. Crabbox creates a Sprites
-sprite through the Sprites API, bootstraps OpenSSH inside it, then uses
-`sprite proxy` as the SSH `ProxyCommand`. Crabbox owns slugs, local repo claims,
-per-lease SSH keys, rsync, command execution, timing summaries, and normalized
-list/status rendering.
+Sprites is an SSH-lease provider for short-lived Linux microVMs. Crabbox creates
+a sprite through the Sprites API, bootstraps OpenSSH inside it, and then reaches
+it over SSH using `sprite proxy` as the `ProxyCommand`. From there everything is
+the standard Crabbox SSH flow: Crabbox owns slugs, per-repo claims, per-lease SSH
+keys, rsync sync, command execution, and `list`/`status` rendering.
 
-## When To Use
+## When to use
 
-Use Sprites when you want a short-lived Linux microVM with normal Crabbox
-SSH/rsync behavior. Use AWS, Azure, or Hetzner when you need brokered fleet
-accounting, VNC/desktop/code, provider firewall control, or cloud images.
+Reach for Sprites when you want a quick, disposable Linux microVM with normal
+Crabbox sync-and-run behavior and no infrastructure of your own. Choose AWS,
+Azure, GCP, or Hetzner instead when you need brokered fleet accounting, a desktop
+or VNC, code-server, provider firewall control, or cloud images — Sprites
+supports none of those.
+
+## Capabilities
+
+| Capability | Supported |
+| --- | --- |
+| OS targets | Linux only |
+| SSH | Yes (via `sprite proxy`) |
+| Crabbox sync (rsync) | Yes |
+| Actions hydration | Yes (Linux SSH target) |
+| Desktop / browser / code | No |
+| Tailscale | No (SSH is exposed through `sprite proxy`) |
+| Coordinator (broker) | No (always direct from the CLI) |
+
+`--class`, `--type`, and `--tailscale` are rejected: Sprites owns VM sizing and
+exposes SSH only through its proxy. Only `target=linux` is accepted.
+
+## Auth
+
+Crabbox needs a Sprites API token. Keep it in the environment or user config;
+never pass it as a command-line argument.
+
+```sh
+export SPRITES_TOKEN=...
+```
+
+Token lookup, in priority order:
+
+1. `CRABBOX_SPRITES_TOKEN`
+2. `SPRITES_TOKEN`
+3. `SPRITE_TOKEN`
+4. `SETUP_SPRITE_TOKEN`
+
+`SPRITE_TOKEN` and `SETUP_SPRITE_TOKEN` exist for compatibility with the Sprites
+installer. A missing token fails the lease before any API call.
+
+The authenticated `sprite` CLI must also be on `PATH`: Crabbox runs
+`sprite --version` before creating a lease, and uses `sprite proxy` for SSH and
+`sprite exec` for the one-time SSH bootstrap.
+
+## Configuration
+
+```yaml
+provider: sprites
+target: linux
+sprites:
+  apiUrl: https://api.sprites.dev
+  workRoot: /home/sprite/crabbox
+```
+
+Defaults: API URL `https://api.sprites.dev`, work root `/home/sprite/crabbox`.
+
+Flags:
+
+- `--sprites-api-url` — Sprites API URL.
+- `--sprites-work-root` — remote work root.
+
+Environment variables:
+
+```text
+CRABBOX_SPRITES_TOKEN
+SPRITES_TOKEN
+SPRITE_TOKEN
+SETUP_SPRITE_TOKEN
+CRABBOX_SPRITES_API_URL
+SPRITES_API_URL
+CRABBOX_SPRITES_WORK_ROOT
+```
+
+`CRABBOX_SPRITES_API_URL` wins over `SPRITES_API_URL`. The work root must be a
+dedicated absolute path; broad roots such as `/`, `/home`, `/home/sprite`,
+`/tmp`, `/etc`, `/usr`, `/var`, and similar system directories are rejected
+before sync.
 
 ## Commands
 
 ```sh
 crabbox warmup --provider sprites
 crabbox run --provider sprites -- pnpm test
-crabbox ssh --provider sprites --id blue-lobster
-crabbox status --provider sprites --id blue-lobster
-crabbox stop --provider sprites blue-lobster
+crabbox ssh --provider sprites --id swift-crab
+crabbox status --provider sprites --id swift-crab
+crabbox stop --provider sprites swift-crab
+crabbox list --provider sprites
 ```
 
-## Live Smoke
+## Lifecycle
 
-Use a live smoke when changing Sprites lifecycle, SSH bootstrap, proxy command,
-or cleanup behavior. Keep the token in the environment or user config; do not
-pass it as a command-line argument.
+1. Verify the `sprite` CLI is present and authenticated (`sprite --version`).
+2. Create a sprite named `crabbox-<slug>`, labeled `crabbox`, `provider-sprites`,
+   `lease-<lease-id>`, and `slug-<slug>`.
+3. Generate a per-lease Crabbox SSH key.
+4. Bootstrap inside the sprite: install OpenSSH server, Git, rsync, tar, and
+   python3 if missing, add the public key for user `sprite`, and start `sshd`.
+5. Return an SSH target with `ProxyCommand=sprite proxy -s %h -W 22` and wait
+   until SSH is ready.
+6. Crabbox syncs the checkout and runs commands over SSH.
+7. On release, delete the sprite and remove the local claim and key (unless the
+   lease is kept).
+
+## Live smoke
+
+Run a live smoke when you change Sprites lifecycle, SSH bootstrap, the proxy
+command, or cleanup behavior.
 
 ```sh
 export SPRITES_TOKEN=...
@@ -50,84 +138,24 @@ bin/crabbox stop --provider sprites "$lease"
 
 Expected results:
 
-- `warmup` creates a `crabbox-...` sprite, prints `provider=sprites`, a
-  Crabbox lease ID, slug, and sprite name.
+- `warmup` creates a `crabbox-<slug>` sprite and prints `provider=sprites`, a
+  Crabbox lease ID, a slug, and the sprite name.
 - `status --wait` reports a running Linux lease.
-- `ssh` prints an SSH command that includes
-  `ProxyCommand=sprite proxy -s %h -W 22`.
-- The run prints `crabbox-sprites-ok`.
-- `stop` deletes the sprite and removes the local lease claim and key.
-
-## Auth
-
-```sh
-export SPRITES_TOKEN=...
-```
-
-`CRABBOX_SPRITES_TOKEN` is also accepted and wins over `SPRITES_TOKEN`.
-`SPRITE_TOKEN` and `SETUP_SPRITE_TOKEN` are accepted for compatibility with the
-Sprites installer.
-
-The authenticated `sprite` CLI must be on `PATH`; Crabbox validates it with
-`sprite --version` before creating a lease.
-
-## Configuration
-
-```yaml
-provider: sprites
-target: linux
-sprites:
-  apiUrl: https://api.sprites.dev
-  workRoot: /home/sprite/crabbox
-```
-
-Flags: `--sprites-api-url`, `--sprites-work-root`.
-
-Environment variables:
-
-```text
-CRABBOX_SPRITES_TOKEN
-SPRITES_TOKEN
-SPRITE_TOKEN
-SETUP_SPRITE_TOKEN
-CRABBOX_SPRITES_API_URL
-SPRITES_API_URL
-CRABBOX_SPRITES_WORK_ROOT
-```
-
-## Lifecycle
-
-1. Create a Sprites sprite named `crabbox-<slug>`.
-2. Generate a per-lease Crabbox SSH key.
-3. Install OpenSSH server, Git, rsync, tar, and python3 inside the sprite, add
-   the public key for user `sprite`, and start `sshd`.
-4. Return a normal Crabbox SSH target with
-   `ProxyCommand=sprite proxy -s %h -W 22`.
-5. Crabbox syncs and runs commands over SSH.
-6. Delete the sprite on release unless the lease is kept.
-
-## Capabilities
-
-- SSH: yes, through `sprite proxy`.
-- Crabbox sync: yes, standard SSH/rsync path.
-- Desktop/browser/code: no.
-- Actions hydration: yes, because Sprites returns a Linux SSH target.
-- Coordinator: no.
+- `ssh` prints a command that includes `ProxyCommand=sprite proxy -s %h -W 22`.
+- `run` prints `crabbox-sprites-ok`.
+- `list` shows Crabbox-owned sprites (those whose name starts with `crabbox-` or
+  that carry the `crabbox` / `lease-cbx-*` labels).
+- `stop` deletes the sprite and removes the local claim and key.
 
 ## Gotchas
 
-- IDs can be Crabbox lease IDs, local slugs, `spr_<sprite-name>` IDs, or raw
-  sprite names.
-- Existing raw sprites can be reclaimed only with `--reclaim`.
-- `--class` and `--type` are rejected because Sprites owns VM sizing.
-- Work roots must be dedicated absolute paths. Broad roots such as `/`,
-  `/home`, `/tmp`, and `/home/sprite` are rejected before sync.
-- SSH depends on the local `sprite` CLI. If `sprite proxy` cannot connect,
-  `status --wait`, `run`, and `ssh` fail even if the API can see the sprite.
-- `list` shows Crabbox-owned sprites whose names or labels start with
-  `crabbox-`.
+- An `--id` can be a Crabbox lease ID, a local slug, a `spr_<sprite-name>` ID, or
+  a raw sprite name.
+- A raw sprite that Crabbox did not create can only be adopted with `--reclaim`.
+- If `sprite proxy` cannot connect, `status --wait`, `run`, and `ssh` fail even
+  when the Sprites API can see the sprite — SSH depends on the local CLI.
 
-Related docs:
+## Related docs
 
 - [Feature: Sprites](../features/sprites.md)
 - [Provider backends](../provider-backends.md)

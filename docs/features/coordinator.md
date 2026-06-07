@@ -1,107 +1,234 @@
 # Coordinator
 
-Read when:
+Read this when you are:
 
 - changing brokered lease behavior;
-- debugging coordinator auth, health, pool, status, or usage;
-- deciding whether behavior belongs in the CLI or Worker.
+- debugging coordinator auth, health, pool, lease, run, or usage routes;
+- deciding whether a behavior belongs in the CLI or in the Worker.
 
-The coordinator is the Cloudflare Worker plus Fleet Durable Object. Normal Crabbox operation goes through this broker; direct provider mode is for debugging and escape hatches.
+## What the coordinator is
 
-Responsibilities:
+The coordinator is the Cloudflare Worker (`worker/src/index.ts`) plus a single
+Fleet Durable Object (`worker/src/fleet.ts`). Together they are the broker: an
+authenticated control plane that owns provider credentials, lease state, run
+records, usage accounting, and the live access bridges.
 
-- authenticate broker requests with signed GitHub user tokens, the shared operator token, or the separate admin token, with optional verified Cloudflare Access context on protected fallback routes;
-- serialize fleet state in one Durable Object;
-- create, heartbeat, release, expire, and look up leases;
-- own provider credentials;
-- own artifact storage credentials and mint scoped artifact upload URLs;
-- create and delete provider resources;
-- list the pool;
-- enforce cost and active-lease guardrails;
-- expose usage statistics.
+Only the brokerable providers go through the coordinator: `aws`, `azure`,
+`gcp`, and `hetzner`. Every other adapter runs direct from the CLI. Even a
+brokerable provider runs direct unless a broker URL is configured
+(`CRABBOX_COORDINATOR`, or `config set-broker --url`); the CLI selects brokered
+mode only when the provider's spec is `Coordinator: supported` **and** a broker
+URL is set (`internal/cli/provider_backend.go`, `loadBackend`).
 
-API surface:
+The coordinator brokers the **control plane**, not the data plane. Lease
+lifecycle, run recording, usage, and bridges flow through the Worker over HTTP.
+SSH readiness, rsync, command execution, and output streaming always happen
+directly from the CLI to the runner host and never traverse the Worker. See
+[Architecture](../architecture.md) for the full topology.
+
+## Responsibilities
+
+The Fleet Durable Object holds all state in DO storage and owns:
+
+- authentication of every broker request;
+- lease lifecycle: create, look up, heartbeat, release, expire, share;
+- provider credentials and provider operations (provision, release, images,
+  identity, Mac hosts, capacity fallback, orphan sweep);
+- cost and active-lease guardrails enforced at create time;
+- usage aggregation by owner, org, provider, and instance type;
+- run records, run events, run logs, and per-run telemetry;
+- live bridges (WebVNC, code-server, mediated egress) and the run-event control
+  socket;
+- artifact-upload credentials and scoped upload URLs;
+- expiry and cleanup, driven by a DO alarm and a scheduled cron.
+
+## Authentication
+
+Every request below the public health route requires a Bearer token, resolved in
+this order (`worker/src/auth.ts`):
+
+1. **Admin token** — matches `CRABBOX_ADMIN_TOKEN`. Grants admin scope.
+2. **Shared operator token** — matches `CRABBOX_SHARED_TOKEN`. Non-admin scope,
+   owner from `CRABBOX_SHARED_OWNER`.
+3. **Signed user token** — prefix `cbxu_`, an HMAC-SHA256 signature over a
+   base64url payload, keyed by `CRABBOX_SESSION_SECRET` (falling back to
+   `CRABBOX_SHARED_TOKEN`). Issued by GitHub OAuth login; default 30-day expiry.
+   Carries `owner`, `org`, and GitHub `login`.
+
+An optional Cloudflare Access JWT (`cf-access-jwt-assertion`, verified against
+`CRABBOX_ACCESS_TEAM_DOMAIN` and `CRABBOX_ACCESS_AUD`) supplies the verified
+owner email for admin and shared-token requests.
+
+After auth, the Worker strips inbound Access headers and injects a trusted
+context for the Durable Object: `x-crabbox-auth`, `x-crabbox-admin`,
+`x-crabbox-owner`, `x-crabbox-org`, and `x-crabbox-github-login`. The portal
+converts a `crabbox_session` cookie into a Bearer token so browser sessions reuse
+the same auth path.
+
+GitHub user tokens are scoped to their owner/org for lease, run, log, and usage
+routes. Admin scope (admin token, or shared token where allowed) is required for
+`GET /v1/pool`, all `/v1/admin/*` routes, `POST /v1/images`, and the image
+sub-routes.
+
+## API surface
+
+The Worker (`worker/src/index.ts`) answers `GET /v1/health` and redirects `/` to
+`/portal` directly, routes auth, portal-login, and bridge websocket upgrades to
+the Durable Object unauthenticated, rejects `/v1/internal/*` externally, and
+otherwise authenticates and forwards to the Durable Object. The cron handler
+posts `/v1/internal/scheduled` to the DO to run maintenance.
+
+Public and user-scoped routes:
 
 ```text
-GET  /v1/health
-GET  /v1/pool
-GET  /v1/whoami
-POST /v1/leases
-GET  /v1/leases
-GET  /v1/leases/{id-or-slug}
-POST /v1/leases/{id-or-slug}/heartbeat
-POST /v1/leases/{id-or-slug}/release
-GET  /v1/runs
-POST /v1/runs
-GET  /v1/runs/{run-id}
-GET  /v1/runs/{run-id}/logs
-POST /v1/runs/{run-id}/finish
-POST /v1/artifacts/uploads
-GET  /v1/runners
-POST /v1/runners/sync
-GET  /v1/usage
-GET  /v1/admin/leases
-GET  /v1/admin/lease-audit
-POST /v1/admin/leases/{id-or-slug}/release
-POST /v1/admin/leases/{id-or-slug}/delete
+GET    /v1/health
+GET    /v1/whoami
+GET    /v1/providers/{provider}/readiness
+GET    /v1/control                       (websocket: run events + heartbeats)
+POST   /v1/leases
+GET    /v1/leases
+GET    /v1/leases/{id-or-slug}
+POST   /v1/leases/{id-or-slug}/heartbeat
+POST   /v1/leases/{id-or-slug}/release
+POST   /v1/leases/{id-or-slug}/tailscale
+GET    /v1/leases/{id-or-slug}/share
+PUT    /v1/leases/{id-or-slug}/share
+DELETE /v1/leases/{id-or-slug}/share
+POST   /v1/runs
+GET    /v1/runs
+GET    /v1/runs/{run-id}
+GET    /v1/runs/{run-id}/logs
+GET    /v1/runs/{run-id}/events
+POST   /v1/runs/{run-id}/events
+POST   /v1/runs/{run-id}/telemetry
+POST   /v1/runs/{run-id}/finish
+POST   /v1/artifacts/uploads
+GET    /v1/runners
+POST   /v1/runners/sync
+GET    /v1/usage
 ```
 
-Browser portal surface:
+Bridge ticket and websocket routes (WebVNC, code-server, egress) live under
+`/v1/leases/{id-or-slug}/{webvnc|code|egress}/...`; see
+[Mediated egress](egress.md) and [Browser portal](portal.md).
+
+Admin-scoped routes:
 
 ```text
-GET  /portal
-GET  /portal/leases/{id-or-slug}
-POST /portal/leases/{id-or-slug}/release
-GET  /portal/leases/{id-or-slug}/vnc
-GET  /portal/leases/{id-or-slug}/code/
-GET  /portal/runs/{run-id}
-GET  /portal/runs/{run-id}/logs
-GET  /portal/runs/{run-id}/events
-GET  /portal/runners/{provider}/{runner-id}
+GET    /v1/pool
+GET    /v1/admin/leases
+GET    /v1/admin/lease-audit
+GET    /v1/admin/aws-identity
+GET    /v1/admin/providers/identity
+GET    /v1/admin/hosts/...
+GET    /v1/admin/mac-hosts/...
+GET    /v1/admin/aws-orphan-sweep
+POST   /v1/admin/aws-orphan-sweep
+POST   /v1/admin/leases/{id-or-slug}/release
+POST   /v1/admin/leases/{id-or-slug}/delete
+POST   /v1/images
+POST   /v1/images/{id}/promote
+GET    /v1/images/{id}/fast-snapshot-restore
 ```
 
-`/portal` renders a searchable/paginated/sortable lease data grid with compact
-provider/target badges, icon-only access capabilities, relative time cells,
-dense rows, sticky column headers, and active, ended, provider, target, and all
-filters. Normal browser sessions are owner/org scoped. Admin/operator sessions
-can also see non-owned runner leases, with `mine` and `system` filters so
-Blacksmith/Testbox-style coordinator leases are visible without leaking them to
-normal users. It defaults to active leases when any are active, and falls back to
-all visible leases when the active list is empty. External runner rows, currently
-Blacksmith Testboxes synced from the CLI's current all-status list, render in the
-same grid as muted, disabled rows with search, pagination, status/provider
-filters, inferred GitHub Actions run/workflow links and status badges when
-available, `stuck` markers for long-queued or long-running Actions owners, a
-copyable local stop command, and stale markers when the next sync no longer sees
-a previously visible runner. Clicking an external runner opens
-`/portal/runners/{provider}/{runner-id}`, a visibility-only detail page with
-owner/org, Actions ownership, lifecycle timestamps, boundary notes, and the local
-stop command.
+## Browser portal surface
 
-`/portal/leases/{id-or-slug}` is the authenticated lease detail page. It shows
-the lease state, bridge status, compact provider/target badges, latest Linux
-telemetry, access-panel copy commands for `ssh`, `run`, WebVNC, and code, a
-viewport-fitted recent runs grid with state filters, and a stop action for the
-visible lease. When multiple telemetry samples are present, the detail page
-adds load, memory, and disk sparklines plus stale/high-resource status pills.
-Portal run links mirror the `/v1/runs/...` resources but use the browser
-session cookie, so users can inspect logs and events without copying a bearer
-token into the browser. The run detail page at `/portal/runs/{run-id}` renders
-the command, owner, lease, provider metadata, exit status, JUnit summary when
-present, a searchable/paginated event table with event-type filters, and a
-copyable retained log tail. Longer Linux runs include bounded load, memory, and
-disk trend lines collected from run telemetry samples; `/logs` and `/events`
-remain raw/plain resources for copying and automation.
+The portal is the authenticated browser UI, served from the same Durable Object
+(`worker/src/portal.ts`). Login and logout are unauthenticated; everything else
+uses the `crabbox_session` cookie.
 
-GitHub browser-login tokens are owner/org scoped for lease, run, log, and usage routes. Shared-token admin auth is required for `GET /v1/pool`, admin lease routes, and fleet-wide usage/listing.
+```text
+GET    /portal
+GET    /portal/login
+GET    /portal/logout
+GET    /portal/leases/{id-or-slug}
+GET    /portal/leases/{id-or-slug}/share
+POST   /portal/leases/{id-or-slug}/share
+POST   /portal/leases/{id-or-slug}/release
+GET    /portal/leases/{id-or-slug}/vnc
+GET    /portal/runs/{run-id}
+GET    /portal/runners/{provider}/{runner-id}
+```
 
-Lease responses include the canonical `cbx_...` ID, friendly slug when present, provider metadata, owner/org, `createdAt`, `lastTouchedAt`, `idleTimeoutSeconds`, `ttlSeconds`, and computed `expiresAt`. Heartbeat is a touch and can update idle timeout only when the request explicitly sends `idleTimeoutSeconds`.
+`/portal` renders a searchable, sortable, paginated lease grid with
+provider/target badges, access-capability icons, and active/ended/provider/
+target filters. Owner/org sessions see their own leases; admin sessions also see
+non-owned runner leases, with `mine` and `system` filters so coordinator-managed
+runner leases stay visible without leaking to normal users. External runner rows
+(synced via `POST /v1/runners/sync`) render as muted rows with inferred GitHub
+Actions links and stale markers; clicking one opens its visibility-only detail
+page at `/portal/runners/{provider}/{runner-id}`.
 
-The CLI owns local config, per-lease SSH keys, SSH readiness, sync, command execution, output streaming, and local fallback handling.
+`/portal/leases/{id-or-slug}` shows lease state, bridge status, the latest Linux
+telemetry, copy-ready `ssh`/`run`/WebVNC/code commands, a recent-runs grid, and a
+stop action. `/portal/runs/{run-id}` shows the command, owner, lease, exit
+status, JUnit summary, an event table, and a log tail. The portal run pages mirror
+the `/v1/runs/...` resources but authenticate via the session cookie, so logs and
+events are inspectable without pasting a bearer token into the browser.
 
-Related docs:
+## Lease lifecycle through the broker
 
-- [Orchestrator](../orchestrator.md)
+**Create.** The CLI generates the lease ID (`cbx_<12 hex>`), allocates a slug,
+mints a per-lease SSH key, then `POST /v1/leases` with the full request.
+`createLease` (`worker/src/fleet.ts`) coerces the request into a `LeaseConfig`
+(`worker/src/config.ts`) with defaults: provider `hetzner`, TTL `5400`s (capped
+at `86400`), idle timeout `1800`s, SSH port `2222` (fallback `22`), class
+`beast`. It checks provider readiness (HTTP 424 if the provider is not
+configured), admin-gates native snapshot/image sources, enforces cost limits
+(HTTP 429 `cost_limit_exceeded` when over an active-lease count or monthly
+reserved-USD budget), provisions through the provider adapter with region/market
+fallback, persists the record, and returns 201 `{lease}`. The CLI then starts a
+heartbeat goroutine and a lease watch.
+
+**Heartbeat.** `POST /v1/leases/{id}/heartbeat` bumps `lastTouchedAt`,
+recomputes `expiresAt`, clears cleanup metadata, and reschedules the alarm. It
+updates the idle timeout **only** when the request explicitly sends a positive
+`idleTimeoutSeconds` (clamped to `86400`); telemetry samples may ride along in
+the same body.
+
+**Release.** `POST /v1/leases/{id}/release` (body `{delete?}`, defaulting to
+`!keep`) deletes the cloud server when the lease is still active and sets state
+`released`. The CLI client retries as admin when a user request 404s or 401s.
+
+**Expiry and cleanup.** A DO alarm and the cron both run maintenance:
+`expireLeases` deletes cloud servers for active leases past `expiresAt`
+(state `expired`), retrying after ~5 minutes on failure, and an AWS orphan sweep
+(report or delete, gated by `CRABBOX_AWS_ORPHAN_SWEEP_*`) terminates untracked
+instances and releases idle Mac dedicated hosts. The next alarm is scheduled for
+the soonest upcoming expiry or sweep time.
+
+Lease responses carry the canonical `cbx_...` ID, the friendly slug when present,
+provider metadata, owner/org, `createdAt`, `lastTouchedAt`, `idleTimeoutSeconds`,
+`ttlSeconds`, and the computed `expiresAt`.
+
+## What flows on a run
+
+In brokered mode, `crabbox run` mirrors progress to the Worker while executing
+directly against the runner over SSH:
+
+- `POST /v1/runs` creates a `RunRecord` (state `running`).
+- `POST /v1/runs/{id}/events` streams phase-tagged events (leasing, bootstrap,
+  sync, command start/finish, stdout/stderr chunks, lease release).
+- `POST /v1/runs/{id}/telemetry` posts periodic host samples.
+- `POST /v1/runs/{id}/finish` posts the exit code, sync/command timings, chunked
+  log (64 KiB chunks, 8 MiB stored cap), JUnit summary, and telemetry; the
+  Worker computes `durationMs` and sets state `succeeded` or `failed`.
+
+Read back with `GET /v1/runs`, `/v1/runs/{id}`, `/logs`, and `/events`. The
+`/v1/control` websocket lets clients subscribe to live run events and send lease
+heartbeats.
+
+## CLI responsibilities
+
+The CLI owns everything the broker does not: local config, per-lease SSH keys,
+SSH readiness, the git-manifest sync, command execution, output streaming, and
+local fallback handling. Provider operations that are coordinator-only (image
+bake/promote, Mac-host management, identity) are invoked through admin routes.
+
+## Related docs
+
 - [Architecture](../architecture.md)
+- [Orchestrator](../orchestrator.md)
 - [CLI](../cli.md)
+- [Browser portal](portal.md)
 - [usage command](../commands/usage.md)

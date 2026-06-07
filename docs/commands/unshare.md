@@ -1,29 +1,66 @@
 # unshare
 
-`crabbox unshare` removes sharing from an existing coordinator lease.
+`crabbox unshare` removes sharing rules from a coordinator-backed lease. It is
+the inverse of [`crabbox share`](share.md): use it to revoke access you granted
+to individual users, to the lease's org, or to clear every rule at once.
+
+Sharing lives on the broker, so `unshare` requires a configured coordinator. You
+must be the lease owner, hold a `manage` share on the lease, or use an admin
+session to change its sharing.
+
+## Usage
 
 ```sh
-crabbox unshare --id blue-lobster --user friend@example.com
-crabbox unshare --id blue-lobster --org
-crabbox unshare --id blue-lobster --all
-crabbox unshare blue-lobster --all --json
+crabbox unshare --id swift-crab --user alice@example.com
+crabbox unshare --id swift-crab --org
+crabbox unshare --id swift-crab --all
+crabbox unshare swift-crab --all --json
 ```
 
-Use `--user` to remove individual users, `--org` to remove org-wide access, or
-`--all` to clear every sharing rule. Only the lease owner, a `manage` share, or
-an admin session can change sharing.
+The lease is identified by `--id` (its `cbx_…` id or slug). As a convenience the
+first positional argument is treated as the id, so `crabbox unshare swift-crab`
+is equivalent to `--id swift-crab`.
 
-Flags:
+You must pass at least one of `--user`, `--org`, or `--all`; otherwise the
+command exits with a usage error.
+
+## What each flag removes
+
+- `--user <email>` revokes one user's access. Repeat the flag to remove several
+  users in a single call. Emails are matched case-insensitively.
+- `--org` removes org-wide access, so the lease is no longer shared with everyone
+  in the owning org.
+- `--all` clears every sharing rule (all users and any org grant) in one step.
+
+When `--all` is set the other selectors are ignored. Otherwise `--user` and
+`--org` can be combined to remove specific users and the org grant together.
+
+## Output
+
+`unshare` prints the resulting sharing state after the change. The text form
+lists the org grant followed by each remaining user:
 
 ```text
---id <lease-id-or-slug>
---user <email>
---org
---all
---json
+org=off
+user=bob@example.com role=use
 ```
 
-Related docs:
+`role` is `use` (run on the lease) or `manage` (run plus change sharing).
+`org=off` means no org-wide grant remains, and `users=none` is printed when no
+individual shares are left. Pass `--json` to emit the same state as a
+`{"share": …}` object for scripting.
+
+## Flags
+
+```text
+--id <lease-id-or-slug>   Lease to modify (or pass as the first positional arg).
+--user <email>            User to remove; repeatable.
+--org                     Remove the org-wide grant.
+--all                     Remove every sharing rule.
+--json                    Print the resulting share state as JSON.
+```
+
+## Related docs
 
 - [share](share.md)
 - [Auth and admin](../features/auth-admin.md)

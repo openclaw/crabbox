@@ -1,31 +1,35 @@
 # Proxmox Provider
 
-Read when:
+Read this when you:
 
-- choosing `provider: proxmox`;
-- setting up a Proxmox VE VM template for Crabbox;
-- debugging Proxmox API tokens, clone tasks, guest agent IP discovery, or cleanup;
-- changing `internal/providers/proxmox` or `internal/cli/proxmox.go`.
+- choose `provider: proxmox`;
+- set up a Proxmox VE VM template for Crabbox;
+- debug Proxmox API tokens, clone tasks, guest-agent IP discovery, or cleanup;
+- change `internal/providers/proxmox` or `internal/cli/proxmox.go`.
 
-Proxmox is a direct SSH lease provider for Linux QEMU VMs. Crabbox clones a
-configured Proxmox template, injects a per-lease SSH key through cloud-init,
-uses the QEMU guest agent to discover the VM IP and run the Crabbox bootstrap,
-then uses the normal SSH sync/run/release path.
+Proxmox is a direct SSH-lease provider for Linux QEMU VMs on a self-hosted
+Proxmox VE cluster. For each lease Crabbox clones a configured QEMU template,
+injects a per-lease SSH key through cloud-init, uses the QEMU guest agent to
+discover the VM's IPv4 address, runs the Crabbox Linux bootstrap over SSH, and
+then drives the normal SSH sync/run/release path.
 
-It is direct-only today. The Crabbox coordinator does not broker Proxmox
-credentials or capacity yet.
+The provider is direct-only: it talks to the Proxmox API straight from the CLI.
+The Crabbox coordinator (broker) does not provision or broker Proxmox capacity,
+so brokered shared-team leases are not available here. Proxmox supports the
+`ssh`, `crabbox-sync`, and `cleanup` features on `target=linux` only.
 
-## When To Use
+## When to use
 
 Use Proxmox when:
 
 - your test capacity lives on a private Proxmox VE cluster;
-- you want reusable local or lab infrastructure instead of public cloud VMs;
+- you want reusable lab infrastructure instead of public-cloud VMs;
 - your template already supports cloud-init and the QEMU guest agent.
 
-Use AWS, Azure, Google Cloud, or Hetzner when you need brokered shared-team
-leases. Use Static SSH when you already have a running host and do not want
-Crabbox to clone or delete VMs.
+Use [AWS](aws.md), [Azure](azure.md), [Google Cloud](gcp.md), or
+[Hetzner](hetzner.md) when you need brokered, cost-capped shared-team leases.
+Use the [Static SSH](ssh.md) provider when you already have a running host and
+do not want Crabbox to clone or delete VMs.
 
 Provider name:
 
@@ -33,33 +37,35 @@ Provider name:
 proxmox
 ```
 
-## Template Requirements
+## Template requirements
 
 The configured template must be a Linux QEMU VM template with:
 
-- cloud-init drive configured;
-- QEMU guest agent installed and enabled;
-- DHCP networking or equivalent IP config;
+- a cloud-init drive configured;
+- the QEMU guest agent installed and enabled;
+- DHCP networking (or an equivalent IP config the guest agent can report);
 - outbound package access for `apt-get`;
-- enough permissions for the guest agent to run bootstrap commands as root.
+- a cloud-init user with passwordless `sudo` so the bootstrap can run as root.
 
-Crabbox sets:
+For each lease Crabbox sets the following on the clone:
 
-- `ciuser` to `proxmox.user` or `CRABBOX_PROXMOX_USER`;
+- `ciuser` to the configured SSH user (`proxmox.user`, default `crabbox`);
 - `sshkeys` to the generated per-lease public key;
 - `ipconfig0=ip=dhcp`;
 - `agent=enabled=1`;
-- `description` with Crabbox lease labels for list/touch/cleanup;
+- `net0=virtio,bridge=<bridge>` when `proxmox.bridge` is set;
+- `description` carrying the Crabbox lease labels used for list/touch/cleanup;
 - `tags=crabbox`.
 
-If the guest agent does not report an IPv4 address or cannot execute the
-bootstrap script, provisioning fails and the cloned VM is deleted.
+If the guest agent never reports an IPv4 address, or SSH does not come up so the
+bootstrap can run, provisioning fails and the cloned VM is deleted.
 
-## Template Build Helper
+## Template build helper
 
-For a reproducible starting point, Crabbox includes a Proxmox-node helper that
-builds an Ubuntu 24.04 cloud-image template with cloud-init, OpenSSH, the QEMU
-guest agent, and common sync/runtime tools preinstalled.
+For a reproducible starting point, the repo ships
+`scripts/proxmox-build-template.sh`, which builds an Ubuntu 24.04 (Noble)
+cloud-image template with cloud-init, OpenSSH, the QEMU guest agent, and common
+sync/runtime tools preinstalled.
 
 Run it from a Crabbox checkout on a Proxmox VE node as root:
 
@@ -74,15 +80,34 @@ CRABBOX_PROXMOX_USER=crabbox \
 
 The helper downloads the public Ubuntu Noble cloud image, optionally verifies
 `CRABBOX_PROXMOX_IMAGE_SHA256`, customizes a local copy, imports it into the
-selected Proxmox storage, attaches a cloud-init drive, and converts the VM to a
+selected storage, attaches a cloud-init drive, and converts the VM to a
 template. It does not use Proxmox API tokens, Crabbox coordinator tokens, or
-lease SSH keys, and it does not bake secrets into the image.
+lease SSH keys, and it bakes no secrets into the image.
 
-If the VMID already exists, the helper stops before changing it. Set
+If the target VMID already exists, the helper stops before changing it. Set
 `CRABBOX_PROXMOX_REPLACE_TEMPLATE=1` only when you intentionally want to destroy
 and rebuild that local template.
 
-The resulting config looks like:
+Helper environment variables:
+
+```text
+CRABBOX_PROXMOX_TEMPLATE_ID        VMID to create (default: 9400)
+CRABBOX_PROXMOX_TEMPLATE_NAME      template name (default: crabbox-ubuntu-2404)
+CRABBOX_PROXMOX_STORAGE            target storage (default: local-lvm)
+CRABBOX_PROXMOX_BRIDGE             network bridge (default: vmbr0)
+CRABBOX_PROXMOX_USER               cloud-init user (default: crabbox)
+CRABBOX_PROXMOX_IMAGE_URL          cloud image URL (default: Ubuntu Noble cloudimg)
+CRABBOX_PROXMOX_IMAGE_SHA256       optional expected image sha256
+CRABBOX_PROXMOX_CORES              template vCPU count (default: 2)
+CRABBOX_PROXMOX_MEMORY_MB          template memory in MiB (default: 4096)
+CRABBOX_PROXMOX_DISK_SIZE          root disk size, qm syntax (default: 32G)
+CRABBOX_PROXMOX_REPLACE_TEMPLATE   destroy an existing VM/template first when 1
+```
+
+It requires Proxmox's `qm` and `pvesm` commands plus `qemu-img`,
+`virt-customize`, and either `curl` or `wget`.
+
+The resulting Crabbox config looks like:
 
 ```yaml
 provider: proxmox
@@ -94,42 +119,39 @@ proxmox:
   user: crabbox
 ```
 
-The helper requires Proxmox's `qm` and `pvesm` commands plus `qemu-img`,
-`virt-customize`, `sha256sum`, and either `curl` or `wget`.
+## Quick start
 
-## Quick Start
-
-Create an API token in Proxmox and give it permission to clone, configure,
-start, stop, delete, and inspect VMs on the target node/storage.
+Create an API token in Proxmox and grant it permission to clone, configure,
+start, stop, delete, and inspect VMs on the target node and storage.
 
 ```sh
-export CRABBOX_PROXMOX_API_URL=https://pve.example.test:8006
+export CRABBOX_PROXMOX_API_URL=https://pve.example.com:8006
 export CRABBOX_PROXMOX_TOKEN_ID='crabbox@pve!ci'
 export CRABBOX_PROXMOX_TOKEN_SECRET='<token-secret>'
 export CRABBOX_PROXMOX_NODE=pve1
-export CRABBOX_PROXMOX_TEMPLATE_ID=9000
+export CRABBOX_PROXMOX_TEMPLATE_ID=9400
 
 crabbox warmup --provider proxmox --keep
 crabbox run --provider proxmox --no-sync -- echo proxmox-ok
-crabbox ssh --provider proxmox --id blue-crab
-crabbox stop --provider proxmox blue-crab
+crabbox ssh --provider proxmox --id swift-crab
+crabbox stop --provider proxmox swift-crab
 crabbox cleanup --provider proxmox
 ```
 
 For self-signed private clusters, set `CRABBOX_PROXMOX_INSECURE_TLS=1` or pass
 `--proxmox-insecure-tls`.
 
-## Config
+## Configuration
 
 ```yaml
 provider: proxmox
 target: linux
 proxmox:
-  apiUrl: https://pve.example.test:8006
+  apiUrl: https://pve.example.com:8006
   tokenId: crabbox@pve!ci
   tokenSecret: <token-secret>
   node: pve1
-  templateId: 9000
+  templateId: 9400
   storage: local-lvm
   pool: crabbox
   bridge: vmbr0
@@ -139,11 +161,16 @@ proxmox:
   insecureTLS: false
 ```
 
-Secret values should live in `~/.profile`, a private config file with `0600`
-permissions, or your shell secret manager. Avoid passing token secrets as CLI
+`apiUrl`, `tokenId`, `tokenSecret`, `node`, and `templateId` are required; the
+CLI errors out if any is missing. `user` defaults to `crabbox`, `workRoot`
+defaults to `/work/crabbox`, and `fullClone` defaults to `true`. The API URL may
+include or omit a trailing `/api2/json`; Crabbox normalizes it.
+
+Keep secret values in a private config file with `0600` permissions, in
+`~/.profile`, or in a secret manager. Do not pass token secrets as CLI
 arguments.
 
-Environment:
+Environment variables (each overrides the matching config field):
 
 ```text
 CRABBOX_PROXMOX_API_URL
@@ -175,47 +202,57 @@ Provider flags mirror the non-secret config fields:
 --proxmox-insecure-tls
 ```
 
-`--proxmox-token-secret` is intentionally not a flag so secrets do not appear in
-shell history or process argv.
+There is intentionally no `--proxmox-token-secret` flag, so the token secret
+never appears in shell history or process arguments. Supply it through
+`CRABBOX_PROXMOX_TOKEN_SECRET` or the config file instead.
 
 ## Lifecycle
 
 1. Allocate a Crabbox lease ID and friendly slug.
-2. Ask Proxmox for the next VMID.
-3. Clone `proxmox.templateId` on `proxmox.node`.
-4. Configure cloud-init SSH user/key, DHCP, optional bridge/storage/pool, and
-   Crabbox labels in the VM description.
-5. Start the VM and wait for the QEMU guest agent.
-6. Discover the first non-loopback IPv4 address from the guest agent.
-7. Run the Crabbox Linux bootstrap through guest-agent exec.
-8. Wait for SSH and `/usr/local/bin/crabbox-ready`.
-9. Touch labels during runs and delete the VM on release unless the lease is kept.
+2. Ask Proxmox for the next free VMID (`/cluster/nextid`).
+3. Clone `proxmox.templateId` on `proxmox.node`, honoring `fullClone`,
+   `storage`, and `pool`.
+4. Configure cloud-init SSH user/key, DHCP, the optional `net0` bridge, the
+   guest agent, `tags=crabbox`, and Crabbox labels in the VM description.
+5. Start the VM and wait for the QEMU guest agent to report a non-loopback
+   IPv4 address (skipping `lo`, `docker*`, and `veth*` interfaces).
+6. Wait for SSH to come up, then run the Crabbox Linux bootstrap over SSH as
+   root: it installs `openssh-server`, `ca-certificates`, `curl`, `git`,
+   `rsync`, and `jq`, writes `/usr/local/bin/crabbox-ready`, and runs it.
+7. Sync the checkout and run commands over SSH.
+8. Touch the lease labels during runs; on release, delete the VM (stop, then
+   `DELETE ... ?purge=1`) unless the lease is kept.
 
-Cleanup reads Crabbox labels from VM descriptions and only deletes expired
-Crabbox-managed VMs.
+Cleanup reads the Crabbox labels from VM descriptions and only deletes expired,
+Crabbox-managed VMs (those named `crabbox-*` with `crabbox=true` and a matching
+`provider` label).
 
 ## Troubleshooting
 
-`proxmox tokenId/tokenSecret are required`
+`proxmox apiUrl is required` / `proxmox tokenId/tokenSecret are required` /
+`proxmox node is required` / `proxmox templateId is required`
 
-Set `CRABBOX_PROXMOX_TOKEN_ID` and `CRABBOX_PROXMOX_TOKEN_SECRET`, or put them
-under `proxmox:` in a private Crabbox config file.
+Set the corresponding `proxmox.*` config field or `CRABBOX_PROXMOX_*`
+environment variable. All four are mandatory.
 
-`timeout waiting for proxmox qemu guest agent`
-
-Install and enable `qemu-guest-agent` in the template, then shut down and convert
-the VM to a template again.
-
+`timeout waiting for proxmox qemu guest agent` /
 `no guest ipv4 address reported by qemu guest agent`
 
-Check DHCP, bridge selection, VLANs, and whether the guest agent can see the
-interface. If you override `--proxmox-bridge`, make sure the template NIC can
-boot on that bridge.
+The VM started but the guest agent did not report a usable IPv4 address. Install
+and enable `qemu-guest-agent` in the template, then check DHCP, bridge
+selection, and VLANs. If you override `--proxmox-bridge`, make sure the template
+NIC can boot on that bridge.
+
+`timeout waiting for proxmox ssh bootstrap transport`
+
+The VM has an IP but SSH never became reachable. Confirm `openssh-server` is in
+the template, the cloud-init user matches `proxmox.user`, and no firewall blocks
+the SSH port.
 
 `proxmox guest bootstrap exit=...`
 
-The VM booted and the guest agent ran, but apt/bootstrap failed. SSH into a kept
-lease if available, or check the Proxmox task and guest logs.
+SSH connected and the bootstrap ran but failed (typically an `apt-get` error).
+SSH into a kept lease if available, or check the Proxmox task and guest logs.
 
 ## Related
 

@@ -32,7 +32,7 @@ func applyServerTypeFlagOverrides(cfg *Config, fs *flag.FlagSet, serverType stri
 	if cfg.ServerTypeExplicit {
 		return
 	}
-	if cfg.ServerType == "" || flagWasSet(fs, "provider") || flagWasSet(fs, "class") || flagWasSet(fs, "target") || flagWasSet(fs, "windows-mode") {
+	if cfg.ServerType == "" || flagWasSet(fs, "provider") || flagWasSet(fs, "class") || flagWasSet(fs, "target") || flagWasSet(fs, "windows-mode") || flagWasSet(fs, "arch") {
 		cfg.ServerType = serverTypeForConfig(*cfg)
 	}
 }
@@ -91,7 +91,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	}
 	server, target, leaseID := lease.Server, lease.SSH, lease.LeaseID
 	applyResolvedServerConfig(&cfg, server)
-	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 		a.releaseBackendLeaseBestEffort(ctx, sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 		return err
 	}
@@ -99,6 +99,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 		target = bootstrapNetworkTarget(cfg, server, target)
 		if err := waitForSSHReady(ctx, &target, a.Stderr, "tailscale metadata", 2*time.Minute); err == nil {
 			a.refreshTailscaleMetadata(ctx, cfg, lease.Coordinator, lease.Coordinator != nil, &server, target, leaseID)
+			_ = updateLeaseClaimEndpoint(leaseID, server, target)
 		} else {
 			fmt.Fprintf(a.Stderr, "warning: tailscale metadata wait failed: %v\n", err)
 		}
@@ -108,6 +109,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 		return err
 	} else {
 		target = resolved.Target
+		_ = updateLeaseClaimEndpoint(leaseID, server, target)
 		if resolved.FallbackReason != "" {
 			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 		}
@@ -180,6 +182,8 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	proofTemplate := fs.String("proof-template", "", "proof template name from the selected profile")
 	stopAfter := fs.String("stop-after", "", "stop policy for the lease: success, always, failure, or never")
 	leaseOutput := fs.String("lease-output", "", "write a small JSON lease handle for orchestrators")
+	readyPool := fs.String("pool", "", "borrow a broker ready-pool lease")
+	readyPoolReturn := fs.String("pool-return", "auto", "ready-pool return policy: auto, ready, drain, release")
 	var downloads stringListFlag
 	var allowEnvFlags stringListFlag
 	var envProfileFlags stringListFlag
@@ -219,7 +223,22 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	if requestedSlug != "" && strings.TrimSpace(*leaseIDFlag) != "" {
 		return exit(2, "--slug only applies when creating a new lease; omit --id or use the existing slug")
 	}
+	if strings.TrimSpace(*readyPool) != "" && strings.TrimSpace(*leaseIDFlag) != "" {
+		return exit(2, "--pool borrows the lease id; omit --id")
+	}
+	if strings.TrimSpace(*readyPool) != "" && strings.TrimSpace(*stopAfter) != "" {
+		return exit(2, "--pool uses --pool-return for cleanup policy; omit --stop-after")
+	}
+	if strings.TrimSpace(*readyPool) != "" && (*keep || *keepOnFailure) {
+		return exit(2, "--pool uses --pool-return for lifecycle; omit --keep and --keep-on-failure")
+	}
+	if err := validateReadyPoolRunReturnPolicy(*readyPoolReturn); err != nil {
+		return err
+	}
 	fullResyncRequested := *fullResync || *freshSync
+	if strings.TrimSpace(*readyPool) != "" && fullResyncRequested {
+		return exit(2, "--pool cannot be combined with --full-resync or --fresh-sync")
+	}
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -374,6 +393,40 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	var server Server
+	var target SSHTarget
+	var leaseID string
+	var borrowedPool *CoordinatorReadyPoolResponse
+	var runFailure error
+	defer func() {
+		if borrowedPool == nil {
+			return
+		}
+		failure := runFailure
+		if failure == nil {
+			failure = err
+		}
+		result := readyPoolRunReturnResult(*readyPoolReturn, failure)
+		coord, coordErr := readyPoolCoordinatorFromConfig(cfg)
+		if coordErr != nil {
+			fmt.Fprintf(a.Stderr, "warning: ready-pool return skipped for %s: %v\n", borrowedPool.Entry.LeaseID, coordErr)
+			if failure == nil {
+				err = coordErr
+			}
+			return
+		}
+		if readyPoolReturnNeedsHydrationStop(result) {
+			a.writeActionsHydrationStopBestEffort(context.Background(), target, borrowedPool.Entry.LeaseID)
+		}
+		if _, returnErr := coord.ReturnReadyPoolLease(context.Background(), borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, result, readyPoolRunReturnReason(failure), borrowedPool.Entry.BorrowToken); returnErr != nil {
+			fmt.Fprintf(a.Stderr, "warning: ready-pool return failed for %s: %v\n", borrowedPool.Entry.LeaseID, returnErr)
+			if failure == nil {
+				err = returnErr
+			}
+			return
+		}
+		fmt.Fprintf(a.Stderr, "returned pool=%s lease=%s result=%s\n", borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, result)
+	}()
 	if strings.TrimSpace(*leaseOutput) != "" && !backend.Spec().Features.Has(FeatureRunSession) {
 		// TODO: Let other reusable delegated providers populate RunResult.Session
 		// and advertise FeatureRunSession once their lifecycle contract is covered.
@@ -417,6 +470,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		StopAfter:        strings.TrimSpace(*stopAfter),
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
+		if strings.TrimSpace(*readyPool) != "" {
+			return exit(2, "--pool requires a brokered SSH lease provider")
+		}
 		if expansion.Profile.Doctor.Enabled {
 			return exit(2, "%s delegates run execution; profile doctor is not supported", backend.Spec().Name)
 		}
@@ -449,6 +505,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	if !ok {
 		return exit(2, "provider=%s does not support run", backend.Spec().Name)
 	}
+	coord := backendCoordinator(backend)
 	var script *RunScriptSpec
 	if scriptRequested {
 		script, err = loadRunScript(*scriptPath, *scriptStdin, a.Stdin)
@@ -457,15 +514,30 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		}
 		runReq.Script = script
 	}
+	if strings.TrimSpace(*readyPool) != "" {
+		if coord == nil {
+			return exit(2, "--pool requires a coordinator-backed SSH lease provider")
+		}
+		repoSlug := cfg.Actions.Repo
+		if repoSlug == "" {
+			repoSlug = bestEffortGitHubRepoSlug(repo, cfg)
+		}
+		borrowInput, err := readyPoolRunBorrowInputForRun(cfg, repo, repoSlug, *noSync)
+		if err != nil {
+			return err
+		}
+		res, err := coord.BorrowReadyPoolLease(ctx, strings.TrimSpace(*readyPool), borrowInput)
+		if err != nil {
+			return err
+		}
+		borrowedPool = &res
+		*leaseIDFlag = res.Entry.LeaseID
+		fmt.Fprintf(a.Stderr, "borrowed pool=%s lease=%s\n", res.Entry.Key, res.Entry.LeaseID)
+	}
 
-	var server Server
-	var target SSHTarget
-	var leaseID string
 	acquired := false
-	coord := backendCoordinator(backend)
 	useCoordinator := coord != nil
 	recorder := &runRecorder{}
-	var runFailure error
 	failureClassificationPrinted := false
 	recordFailure := func(failure error) error {
 		if failure != nil && !failureClassificationPrinted {
@@ -490,6 +562,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		lease, err = sshBackend.Resolve(ctx, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+			if borrowedPool != nil {
+				target = applyReadyPoolEndpoint(target, borrowedPool.Entry)
+			}
 			if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
 				err = resolveErr
 			} else {
@@ -522,6 +597,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		return recordFailure(err)
 	}
 	applyResolvedServerConfig(&cfg, server)
+	if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
+		cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
+	}
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return recordFailure(err)
 	}
@@ -560,7 +638,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			fmt.Fprintf(a.Stderr, "lease cleanup stopped=true policy=%s lease=%s slug=%s\n", blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"))
 		}
 	}()
-	if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim || borrowedPool != nil); err != nil {
 		return recordFailure(err)
 	}
 	if !useCoordinator && leaseID != "" {
@@ -777,7 +855,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			recorder.AttachLease(leaseID, serverSlug(server), cfg)
 			startRunHeartbeat(nil)
 		}
-		if err := claimLeaseForRepoConfig(leaseID, serverSlug(server), cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
 			return true, err
 		}
 		workdir = remoteJoin(cfg, leaseID, repo.Name)
@@ -814,10 +892,12 @@ retrySync:
 			return recordFailure(err)
 		}
 		a.refreshTailscaleMetadata(ctx, cfg, coord, useCoordinator, &server, target, leaseID)
+		_ = updateLeaseClaimEndpoint(leaseID, server, target)
 		if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
 			return recordFailure(err)
 		} else {
 			target = resolved.Target
+			_ = updateLeaseClaimEndpoint(leaseID, server, target)
 			if resolved.FallbackReason != "" {
 				fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 			}
@@ -886,7 +966,7 @@ retrySync:
 			return recordFailure(err)
 		}
 		stepStart = time.Now()
-		manifest, err := syncManifest(repo.Root, excludes)
+		manifest, err := syncManifestFiltered(repo.Root, excludes, syncIncludes(cfg))
 		if err != nil {
 			return recordFailure(exit(6, "build sync file list: %v", err))
 		}
@@ -945,7 +1025,7 @@ retrySync:
 			recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s mode=archive", timings.sync.Round(time.Millisecond)))
 			goto afterSync
 		}
-		if cfg.Sync.GitSeed && remoteGitSeedCandidate(repo) {
+		if syncGitSeedEnabled(cfg, repo) {
 			stepStart = time.Now()
 			if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
@@ -991,7 +1071,7 @@ retrySync:
 		}
 		stepStart = time.Now()
 		finalizeCommand := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
-			AllowMassDeletions: hydratedByActions || os.Getenv("CRABBOX_ALLOW_MASS_DELETIONS") == "1",
+			AllowMassDeletions: allowRemoteSyncMassDeletions(cfg, hydratedByActions),
 			HydrateGit:         hydrateGit,
 			BaseRef:            cfg.Sync.BaseRef,
 			BaseSHA:            baseSHA,
@@ -1046,10 +1126,12 @@ afterSync:
 		return recordFailure(err)
 	}
 	a.refreshTailscaleMetadata(ctx, cfg, coord, useCoordinator, &server, target, leaseID)
+	_ = updateLeaseClaimEndpoint(leaseID, server, target)
 	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
 		return recordFailure(err)
 	} else {
 		target = resolved.Target
+		_ = updateLeaseClaimEndpoint(leaseID, server, target)
 		if resolved.FallbackReason != "" {
 			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 		}
@@ -1507,7 +1589,9 @@ func runStopCommand(cfg Config, id string) string {
 		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
 	}
 	args = appendProviderStopRoutingArgs(args, cfg)
-	args = append(args, id)
+	if strings.TrimSpace(id) != "" {
+		args = append(args, "--id", id)
+	}
 	return strings.Join(readableShellWords(args), " ")
 }
 
@@ -1647,6 +1731,10 @@ func shouldSeedRemotePruneManifest(hydratedByActions, fullResync bool) bool {
 	return hydratedByActions || fullResync
 }
 
+func allowRemoteSyncMassDeletions(cfg Config, hydratedByActions bool) bool {
+	return hydratedByActions || len(syncIncludes(cfg)) > 0 || os.Getenv("CRABBOX_ALLOW_MASS_DELETIONS") == "1"
+}
+
 func commandNeedsHydrationHint(command []string, shellMode bool) bool {
 	return len(commandRuntimePreflightTools(command, shellMode)) > 0
 }
@@ -1707,6 +1795,9 @@ func commandSegmentRuntimePreflightTool(words []string) (tool string, skip bool)
 		return "", true
 	}
 	base := commandBase(first)
+	if commandRunsForeignShell(base) {
+		return "", true
+	}
 	if commandSegmentSetsPath(base, words[1:]) {
 		return "", true
 	}
@@ -1723,6 +1814,14 @@ func commandSegmentRuntimePreflightTool(words []string) (tool string, skip bool)
 		return "", true
 	}
 	return "", false
+}
+
+func commandRunsForeignShell(base string) bool {
+	switch strings.ToLower(base) {
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+		return true
+	}
+	return false
 }
 
 func runEnvProvidesPath(env map[string]string, target SSHTarget) bool {
@@ -2428,13 +2527,16 @@ func (a App) stop(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("stop", a.Stderr)
 	provider := fs.String("provider", defaults.Provider, providerHelpAll())
+	id := fs.String("id", "", "lease id or slug")
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox stop <lease-or-server-id>")
+	idFlagSet := flagWasSet(fs, "id")
+	setIDFromFirstArg(fs, id)
+	if strings.TrimSpace(*id) == "" || fs.NArg() > 1 || (idFlagSet && fs.NArg() > 0) {
+		return exit(2, "usage: crabbox stop --id <lease-or-server-id>")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -2447,22 +2549,25 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
+	if err := autoRouteStaticLease(&cfg, fs, *id); err != nil {
+		return err
+	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
-		return delegated.Stop(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: fs.Arg(0)})
+		return delegated.Stop(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id})
 	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
 		return exit(2, "provider=%s does not support stop", backend.Spec().Name)
 	}
-	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: fs.Arg(0), ReleaseOnly: true})
+	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, ReleaseOnly: true})
 	if err != nil {
 		if backendCoordinator(backend) != nil {
 			fmt.Fprintf(a.Stderr, "warning: could not inspect lease before release: %v\n", err)
-			lease = LeaseTarget{LeaseID: fs.Arg(0)}
+			lease = LeaseTarget{LeaseID: *id}
 		} else {
 			return err
 		}

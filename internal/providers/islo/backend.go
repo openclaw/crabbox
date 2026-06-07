@@ -165,11 +165,10 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=islo sandbox=%s\n", leaseID, slug, name)
 		acquired = true
 	} else {
-		leaseID, name, err = resolveIsloLeaseID(req.ID, req.Repo.Root, req.Reclaim)
+		leaseID, name, slug, err = resolveIsloLeaseID(req.ID, req.Repo.Root, req.Reclaim)
 		if err != nil {
 			return RunResult{}, err
 		}
-		slug = newLeaseSlug(leaseID)
 	}
 	shouldStop := acquired && !req.Keep
 	if shouldStop {
@@ -184,6 +183,22 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			removeLeaseClaim(leaseID)
 		}()
 	}
+	result := RunResult{
+		SyncDelegated: true,
+		Session: &core.RunSessionHandle{
+			Provider:       isloProvider,
+			LeaseID:        leaseID,
+			Slug:           slug,
+			Reused:         !acquired,
+			Kept:           !shouldStop,
+			CleanupCommand: isloCleanupCommand(leaseID),
+		},
+	}
+	finishResult := func() RunResult {
+		result.Total = b.now().Sub(started)
+		result.Session.Kept = !shouldStop
+		return result
+	}
 	fmt.Fprintf(b.rt.Stderr, "provider=islo lease=%s sandbox=%s\n", leaseID, name)
 	syncDuration := time.Duration(0)
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
@@ -191,21 +206,18 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		var err error
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, name, req)
 		if err != nil {
-			return RunResult{}, err
+			return finishResult(), err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 	} else if err := b.prepareWorkspace(ctx, client, name, workspace); err != nil {
-		return RunResult{}, err
+		return finishResult(), err
 	}
 	commandStart := b.now()
 	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, req.Env)
 	commandDuration := b.now().Sub(commandStart)
-	result := RunResult{
-		ExitCode:      exitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
-	}
+	result.ExitCode = exitCode
+	result.Command = commandDuration
+	result.Total = b.now().Sub(started)
 	if req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "islo run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
 	} else {
@@ -229,10 +241,12 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	}
 	if runErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, isloProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		result.Session.Kept = !shouldStop
 		return result, ExitError{Code: 1, Message: fmt.Sprintf("islo run failed: %v", runErr)}
 	}
 	if exitCode != 0 {
 		handleDelegatedRunFailure(b.rt.Stderr, req, isloProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		result.Session.Kept = !shouldStop
 		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("islo run exited %d", exitCode)}
 	}
 	return result, nil
@@ -271,7 +285,7 @@ func (b *isloBackend) Status(ctx context.Context, req StatusRequest) (statusView
 	if err != nil {
 		return statusView{}, err
 	}
-	leaseID, name, err := resolveIsloLeaseID(req.ID, "", false)
+	leaseID, name, _, err := resolveIsloLeaseID(req.ID, "", false)
 	if err != nil {
 		return statusView{}, err
 	}
@@ -287,6 +301,9 @@ func (b *isloBackend) Status(ctx context.Context, req StatusRequest) (statusView
 		view := isloStatusView(leaseID, sandbox)
 		if !req.Wait || view.Ready {
 			return view, nil
+		}
+		if isloStatusTerminal(view.State) {
+			return statusView{}, exit(5, "sandbox %s entered terminal state %q before becoming ready", name, view.State)
 		}
 		if b.now().After(deadline) {
 			return statusView{}, exit(5, "timed out waiting for sandbox %s to become ready", name)
@@ -304,7 +321,7 @@ func (b *isloBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, name, err := resolveIsloLeaseID(req.ID, "", false)
+	leaseID, name, _, err := resolveIsloLeaseID(req.ID, "", false)
 	if err != nil {
 		return err
 	}
@@ -355,7 +372,7 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 		_ = client.DeleteSandbox(context.Background(), sandbox.GetName())
 		return "", "", "", err
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, isloProvider, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseForRepoProviderWithPond(leaseID, slug, isloProvider, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		_ = client.DeleteSandbox(context.Background(), sandbox.GetName())
 		return "", "", "", err
 	}
@@ -394,44 +411,85 @@ func isloExecCommand(command []string, shellMode bool) ([]string, error) {
 	return command, nil
 }
 
-func resolveIsloLeaseID(id, repoRoot string, reclaim bool) (string, string, error) {
+func resolveIsloLeaseID(id, repoRoot string, reclaim bool) (string, string, string, error) {
 	if id == "" {
-		return "", "", exit(2, "provider=islo requires a Crabbox-created sandbox name, lease id, or slug")
+		return "", "", "", exit(2, "provider=islo requires a Crabbox-created sandbox name, lease id, or slug")
 	}
 	if strings.HasPrefix(id, isloLeasePrefix) {
 		name := strings.TrimPrefix(id, isloLeasePrefix)
 		if !isCrabboxIsloSandboxName(name) {
-			return "", "", exit(4, "islo lease %q is not a Crabbox-owned sandbox", id)
+			return "", "", "", exit(4, "islo lease %q is not a Crabbox-owned sandbox", id)
 		}
-		return id, name, nil
+		if claim, ok, err := resolveExactIsloLeaseClaim(id); err != nil {
+			return "", "", "", err
+		} else if ok {
+			return claim.LeaseID, name, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), nil
+		}
+		return id, name, newLeaseSlug(id), nil
 	}
-	if claim, ok, err := resolveLeaseClaim(id); err != nil {
-		return "", "", err
-	} else if ok && claim.Provider == isloProvider {
+	if claim, ok, err := resolveIsloClaim(id); err != nil {
+		return "", "", "", err
+	} else if ok {
 		if repoRoot != "" {
 			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, isloProvider, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
-				return "", "", err
+				return "", "", "", err
 			}
 		}
-		return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, isloLeasePrefix), nil
+		return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, isloLeasePrefix), blank(claim.Slug, newLeaseSlug(claim.LeaseID)), nil
 	}
 	if !isCrabboxIsloSandboxName(id) {
-		return "", "", exit(4, "islo sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<crabbox-sandbox-name>", id, isloLeasePrefix)
+		return "", "", "", exit(4, "islo sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<crabbox-sandbox-name>", id, isloLeasePrefix)
 	}
-	return isloLeasePrefix + id, id, nil
+	leaseID := isloLeasePrefix + id
+	return leaseID, id, newLeaseSlug(leaseID), nil
+}
+
+func resolveExactIsloLeaseClaim(leaseID string) (core.LeaseClaim, bool, error) {
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil {
+		return claim, ok, err
+	}
+	if ok && claim.Provider == isloProvider && claim.LeaseID == leaseID {
+		return claim, true, nil
+	}
+	return core.LeaseClaim{}, false, nil
+}
+
+func isloCleanupCommand(leaseID string) string {
+	return fmt.Sprintf("crabbox stop --provider %s %s", isloProvider, shellQuote(leaseID))
+}
+
+func resolveIsloClaim(id string) (core.LeaseClaim, bool, error) {
+	claim, ok, err := resolveLeaseClaim(id)
+	if err != nil || (ok && claim.Provider == isloProvider) {
+		return claim, ok, err
+	}
+	if strings.HasPrefix(id, isloLeasePrefix) || !isCrabboxIsloSandboxName(id) {
+		return core.LeaseClaim{}, false, nil
+	}
+	claim, ok, err = resolveLeaseClaim(isloLeasePrefix + id)
+	if err != nil {
+		return claim, ok, err
+	}
+	if ok && claim.Provider == isloProvider && claim.LeaseID == isloLeasePrefix+id {
+		return claim, true, nil
+	}
+	return core.LeaseClaim{}, false, nil
 }
 
 func isloSandboxToServer(sandbox *gosdk.SandboxResponse) Server {
 	if sandbox == nil {
 		return Server{Provider: isloProvider, Labels: map[string]string{"provider": isloProvider}}
 	}
+	leaseID := isloLeasePrefix + sandbox.GetName()
 	labels := map[string]string{
 		"provider": isloProvider,
-		"lease":    isloLeasePrefix + sandbox.GetName(),
-		"slug":     newLeaseSlug(isloLeasePrefix + sandbox.GetName()),
+		"lease":    leaseID,
+		"slug":     newLeaseSlug(leaseID),
 		"target":   targetLinux,
 		"state":    sandbox.GetStatus(),
 	}
+	applyIsloClaimLabels(labels, leaseID)
 	return Server{
 		Provider: isloProvider,
 		CloudID:  sandbox.GetID(),
@@ -450,9 +508,16 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 		status = sandbox.GetStatus()
 		image = sandbox.GetImage()
 	}
+	labels := map[string]string{
+		"provider": isloProvider,
+		"lease":    leaseID,
+		"slug":     newLeaseSlug(leaseID),
+		"state":    status,
+	}
+	applyIsloClaimLabels(labels, leaseID)
 	return statusView{
 		ID:         leaseID,
-		Slug:       newLeaseSlug(leaseID),
+		Slug:       labels["slug"],
 		Provider:   isloProvider,
 		TargetOS:   targetLinux,
 		State:      status,
@@ -460,17 +525,42 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 		ServerType: image,
 		Network:    NetworkPublic,
 		Ready:      isloStatusReady(status),
-		Labels: map[string]string{
-			"provider": isloProvider,
-			"lease":    leaseID,
-			"state":    status,
-		},
+		Labels:     labels,
 	}
 }
 
+func applyIsloClaimLabels(labels map[string]string, leaseID string) {
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok {
+		return
+	}
+	if claim.Slug != "" {
+		labels["slug"] = normalizeLeaseSlug(claim.Slug)
+	}
+	if claim.Pond != "" {
+		labels["pond"] = claim.Pond
+	}
+}
+
+// isloStatusReady reports whether a sandbox is ready to accept commands.
+//
+// The Islo API reports exactly one ready state, "running"; the full set of
+// statuses it returns is starting/running/paused/stopping/stopped/failed/
+// deleted/unknown. The legacy "ready"/"started"/"active" values are no longer
+// emitted (a "ready" boot state is normalized to "running" server-side), so
+// matching them is unnecessary and misleading.
 func isloStatusReady(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), "running")
+}
+
+// isloStatusTerminal reports whether a sandbox status is a terminal state that
+// will never transition to ready, so callers can fail fast instead of polling
+// until a deadline. Mirrors the terminal states the Islo API can report:
+// "failed", "stopped", and "deleted" are terminal, and "stopping" is an
+// in-progress teardown that will not recover.
+func isloStatusTerminal(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "ready", "running", "started", "active":
+	case "failed", "stopped", "stopping", "deleted":
 		return true
 	default:
 		return false

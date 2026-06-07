@@ -21,18 +21,19 @@ import (
 )
 
 type SSHTarget struct {
-	User           string
-	Host           string
-	Key            string
-	Port           string
-	FallbackPorts  []string
-	TargetOS       string
-	WindowsMode    string
-	ReadyCheck     string
-	AuthSecret     bool
-	NetworkKind    NetworkMode
-	SSHConfigProxy bool
-	ProxyCommand   string
+	User            string
+	Host            string
+	Key             string
+	Port            string
+	FallbackPorts   []string
+	TargetOS        string
+	WindowsMode     string
+	ReadyCheck      string
+	AuthSecret      bool
+	NoControlMaster bool
+	NetworkKind     NetworkMode
+	SSHConfigProxy  bool
+	ProxyCommand    string
 }
 
 func isLocalMacTarget(target SSHTarget) bool {
@@ -349,6 +350,11 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
+		// Crabbox's SSH helpers intentionally execute commands assembled by
+		// typed remote-command builders. Callers must shell-quote user data
+		// before it reaches this boundary; see remoteCommand/shellQuote tests.
+		// codeql[go/command-injection]
+		// lgtm[go/command-injection]
 		cmd := exec.CommandContext(ctx, "ssh", sshArgs(probe, remote)...)
 		out, err := cmd.CombinedOutput()
 		if err == nil {
@@ -487,7 +493,7 @@ func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts
 		"-o", "ServerAliveCountMax=2",
 		"-p", target.Port,
 	}
-	if target.AuthSecret {
+	if target.AuthSecret || target.NoControlMaster {
 		args = append(args, "-o", "ControlMaster=no")
 	} else if runtime.GOOS == "windows" {
 		// Windows OpenSSH does not support Unix domain sockets for

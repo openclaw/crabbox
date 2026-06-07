@@ -1,6 +1,136 @@
 # Changelog
 
-## 0.21.1 - Unreleased
+## 0.26.1 - Unreleased
+
+### Added
+
+- Added Podman runtime compatibility for `provider: local-container`, including runtime selection, provider flags on SSH commands, and Podman-safe local lease claim scopes. Thanks @sallyom.
+- Added `sync.include` / `sync.includes` whitelists for root-relative sync plans, SSH sync, native Windows sync, local Actions hydration, and archive-sync providers. Thanks @anagnorisis2peripeteia.
+
+### Changed
+
+### Fixed
+
+- Fixed malformed AWS, Azure, and GCP SSH CIDR configuration to fail closed instead of falling back to broad SSH access. Thanks @coygeek.
+- Fixed local-container warmup on Windows by mounting the generated bootstrap script instead of passing it inline to Docker. Thanks @anagnorisis2peripeteia.
+- Fixed brokered Azure lease creation to persist in-flight leases before VM provisioning, keep failed creates visible, and sweep orphaned Azure VMs from coordinator maintenance. Fixes https://github.com/openclaw/crabbox/issues/215.
+- Fixed brokered lease release races so leases released while provisioning cannot be reactivated or lose cleanup retry state.
+- Fixed Islo provider status, streaming exec, archive upload, share, and delete handling for the current Islo API contract. Thanks @zozo123.
+- Restricted shared `use` viewers from mutating lease heartbeat or Tailscale metadata, and hardened archive sync for option-like filenames while preserving sync cancellation. Thanks @zozo123.
+
+### Removed
+
+## 0.26.0 - 2026-06-02
+
+### Added
+
+- Added `provider: multipass` for local Ubuntu VM SSH leases through Canonical Multipass, including cloud-init bootstrap, Crabbox sync/run lifecycle, cleanup, and cache-volume support. Thanks @jwmoss.
+
+### Changed
+
+### Fixed
+
+- Fixed the README latest-release badge to use Badgen so GitHub release status does not depend on Shields' token pool. Thanks @zozo123.
+
+### Removed
+
+## 0.25.0 - 2026-06-01
+
+### Added
+
+- Added `provider: apple-container` for local Apple silicon macOS Linux leases, including SSH sync/run lifecycle and provider-backed cache volumes. Thanks @zozo123.
+- Added a repo-local Blacksmith Testbox workflow and Crabbox config so delegated Testbox validation has workflow/job defaults.
+- Added `crabbox prewarm` to lease and hydrate reusable test-ready boxes from configured GitHub Actions, with provider-owned handling for delegated runners such as Blacksmith Testbox.
+- Added broker ready pools for hydrated reusable leases, including `prewarm --pool`, `run --pool`, `pool ready/register/borrow/return/ensure`, and the broker ready-pool API.
+- Added `crabbox doctor --all --prepare-check` to report provider matrix readiness, resolved test machine types, and hydration workflow/job setup without creating leases.
+- Added `crabbox webvnc daemon list` to show alive and stale local WebVNC helper daemons after agent runs.
+
+### Changed
+
+- Raised the coordinator fleet-wide and org-wide reserved monthly caps while keeping per-owner and active lease limits in place, so trusted operators are not blocked by stale reserved-cost accounting.
+- Tuned XFCE/WebVNC desktops for smoother interactive use with low-latency `x11vnc`, 60fps WayVNC, and low-compression noVNC defaults.
+- Updated Go and Worker dependencies, including Wrangler, Vitest, oxlint, Cloudflare Workers types, AWS SDK, Daytona SDK, Google API modules, OpenTelemetry, and the Go toolchain.
+
+### Fixed
+
+- Fixed GNOME desktop leases to follow the same persisted light/dark theme selection as XFCE, including GTK settings, panel restart, and browser color-scheme flags.
+- Fixed GNOME theme toggles to restart the desktop panel inside the active session so the top and bottom bars stay visible.
+- Fixed WebVNC GNOME theme switching on existing leases without the dynamic helper, including black GNOME Terminal profiles for dark mode.
+- Fixed GNOME WebVNC terminal title bars to follow light/dark theme changes by updating labwc window decorations.
+- Fixed GNOME WebVNC terminal menubars to follow light/dark theme changes and added a generated desktop background for GNOME sessions.
+- Fixed XFCE desktop leases to drag and resize windows opaquely instead of using the wireframe destination box, with full move/resize opacity and XFWM compositing disabled for the Xvfb/VNC path.
+- Fixed Apple Container bootstrap on hosts whose runtime does not inherit DNS by passing detected host resolvers while preserving explicit `--apple-container-extra-run-args --dns` overrides.
+- Fixed Apple Container runs to fail as soon as the container exits during SSH bootstrap and include a short container log tail instead of waiting for the full SSH timeout.
+- Classified Blacksmith Testbox cleanup, sync-marker, cancelled Actions, and post-ready stall failures as retryable infra stages instead of generic unknown failures.
+- Fixed Azure VM provisioning so slow creates time out quickly, continue through SKU/region fallback, and use a Worker Azure region list separate from AWS regions.
+- Fixed local Actions hydration after warmup SSH port fallback so prewarmed SSH-backed boxes reuse the resolved reachable endpoint instead of retrying the configured port.
+
+### Removed
+
+- Removed the stale root OpenClaw plugin package and its npm publish surface.
+
+## 0.24.0 - 2026-05-31
+
+### Added
+
+- Added provider-backed cache volumes for rebuildable dependency caches, including `cache.volumes`, `CRABBOX_CACHE_VOLUMES`, repeatable `--cache-volume [name=]key:path`, `crabbox cache volumes`, Blacksmith Testbox sticky-disk forwarding, Local Container Docker volume mounts, and claim-backed required-volume checks for reused leases.
+
+### Fixed
+
+- Scoped the README Release badge to `?event=push` so it reflects tag-push release runs instead of cancelled `workflow_dispatch` runs. Fixes https://github.com/openclaw/crabbox/issues/189. Thanks @zozo123.
+
+## 0.23.0 - 2026-05-30
+
+### Added
+
+- Added `provider: ascii-box` for [ASCII Box](https://box.ascii.dev) Ubuntu sandbox SSH leases, using the documented `box --json` CLI for create/list/status/stop/delete and standard Crabbox SSH sync/run. Thanks @zozo123.
+- Added Azure `--azure-os-disk ephemeral-preview` / `azure.osDisk: ephemeral-preview` for opt-in ephemeral OS disk full caching through Azure Compute API `2025-04-01`. Thanks @jwmoss.
+- Added configurable capacity-admin owner caps for coordinators that need elevated active lease limits for trusted operators.
+
+### Changed
+
+- Raised the default coordinator monthly budget caps so configured capacity pools are less likely to reject trusted brokered leases before provider quota is reached.
+
+### Fixed
+
+- Fixed brokered Azure Linux lease creation so a stalled coordinator request times out with a concrete cleanup/retry hint instead of sitting silently in the leasing phase for the full coordinator HTTP timeout.
+- Fixed brokered Azure Spot VM fallback so `on-demand-after-*` windows bound VM create waits, on-demand retries use separate VM names, and timed-out Spot cleanup is retried from Fleet maintenance.
+
+## 0.22.1 - 2026-05-29
+
+### Added
+
+- Added `--arch arm64` / `architecture: arm64` for Linux ARM leases on Azure and AWS, including Azure Dpsv6/Dpdsv6 and AWS Graviton class fallback plus matching Ubuntu ARM64 image resolution.
+
+### Fixed
+
+- Fixed brokered lease creation diagnostics so long coordinator requests print progress, timed-out create requests do not retry non-idempotent POSTs through curl, and Azure ARM errors preserve the useful conflict message.
+
+## 0.22.0 - 2026-05-29
+
+### Added
+
+- Added `provider: azure-dynamic-sessions` for delegated Linux runs through Microsoft Azure Container Apps custom container Dynamic Sessions, including a Crabbox runner image, archive sync, streaming commands, local claims, status/list/stop, and provider docs. Thanks @zozo123.
+- Added `crabbox pond` peer discovery, bridge, and SSH-mesh support for multi-lease networking, including bridge adapters for Cloudflare, E2B, Islo, Modal, Railway, and Tensorlake.
+- Added Azure backend routing so `provider: azure` can select `azure.backend: dynamic-sessions` or `--azure-backend dynamic-sessions` while still reporting the canonical `azure-dynamic-sessions` provider.
+- Added Islo delegated run session handles so `crabbox run --provider islo --keep --lease-output <file>` returns stable lease metadata and cleanup commands for orchestrators. Thanks @zozo123.
+- Added `crabbox init --detect` to scan common Go, Node, Rust, and Makefile project markers and generate a repo-local `jobs.detected` remote check plus matching preflight tools. Thanks @zozo123.
+
+### Fixed
+
+- Fixed Azure VM provisioning to automatically use region-scoped shared VNet/NSG names when a Crabbox-managed base network already exists in another Azure region.
+- Fixed brokered Azure regional fallback so region-scoped shared network names are computed per lease instead of mutating the Worker client's configured vnet/NSG names.
+- Hardened Azure Dynamic Sessions endpoint validation, claim boundaries, token destinations, missing-response handling, lifecycle edges, shell string preservation, and runner image behavior.
+- Fixed Islo run session handles to preserve resolved and claimed slugs, keep explicit lease IDs authoritative, return handles after lease creation, and quote cleanup commands safely.
+- Fixed `crabbox stop` to accept `--id <lease>` like every other lease command, and updated the stop hint that `crabbox run` prints so it can be pasted back verbatim. Thanks @edihasaj.
+- Fixed lease commands (`run`, `status`, `stop`, `ssh`, `inspect`, `screenshot`, `vnc`, `webvnc`, `actions`, `artifacts`, `checkpoint`, `egress`) to auto-route `--id static_<slug>` ids to `--provider ssh` and restore the original static host from the local lease claim, so static SSH leases no longer require repeating routing flags after `crabbox warmup`.
+- Fixed `crabbox init --detect` to run nested detected package checks from the package directory and validate generated preflight tools.
+- Fixed Blacksmith Testbox workflow fallback selection so generic Actions hydration workflows are not mistaken for Testbox workflows, and fixed native Windows wrapper commands so PowerShell-based Node bootstraps can run before JavaScript runtime preflight checks.
+- Fixed brokered AWS provisioning to compact stale Crabbox SSH ingress after EC2 reports the security group rule limit, then retry the current source rule before failing.
+- Fixed coordinator lease cleanup so expired AWS leases whose EC2 instance is already gone still clean provider keys before closing.
+- Fixed AWS EC2 Mac host cleanup and selection so stale pending hosts are released by the orphan sweep and hosts with no reported launch capacity are skipped.
+- Fixed Worker AWS Linux user-data compression and hardened command/security boundaries found by CodeQL.
+- Fixed provider documentation tables to match the registered provider capabilities for Azure, GCP, and Railway.
 
 ## 0.21.0 - 2026-05-27
 

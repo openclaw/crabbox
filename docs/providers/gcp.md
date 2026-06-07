@@ -1,31 +1,34 @@
 # Google Cloud Provider
 
-Read when:
+Read this when you:
 
-- choosing `provider: gcp`;
-- setting up Compute Engine credentials for Crabbox;
-- debugging GCP quotas, machine types, firewall rules, labels, or cleanup;
-- changing `internal/providers/gcp`, `internal/cli/gcp.go`, or `worker/src/gcp.ts`.
+- choose `provider: gcp`;
+- set up Compute Engine credentials for direct or brokered leases;
+- debug GCP quota, machine types, firewall rules, labels, or cleanup;
+- change `internal/providers/gcp`, `internal/cli/gcp.go`, or `worker/src/gcp.ts`.
 
-Google Cloud is a managed SSH lease provider for Linux Compute Engine VMs.
-Crabbox provisions the VM, SSH metadata, labels, boot disk, public IP, and a
-Crabbox-managed SSH firewall rule. After the VM exists, the normal Crabbox SSH
-path owns readiness, sync, command execution, results, touch labels, release,
-and cleanup.
+Google Cloud is a managed SSH-lease provider for Linux Compute Engine VMs.
+Crabbox provisions the instance, SSH metadata, labels, boot disk, public IP, and
+a Crabbox-managed SSH firewall rule. Once the VM exists, the standard SSH path
+owns readiness, sync, command execution, results, label touches, release, and
+cleanup. GCP can run direct from the CLI (Application Default Credentials) or
+brokered through the coordinator (`Coordinator: supported`).
 
-## When To Use
+## When to use
 
 Use GCP when:
 
-- your billing, quota, or compliance boundary is already in Google Cloud;
+- your billing, quota, or compliance boundary already lives in Google Cloud;
 - you want Linux Compute Engine capacity behind the shared coordinator;
-- you need direct local testing with Google Application Default Credentials.
+- you want direct local testing with Google Application Default Credentials.
 
-Use AWS for Windows, Windows WSL2, macOS, image bake/promote, or Linux desktop
-leases. GCP is Linux-only today and does not provide a Crabbox image
-bake/promote path yet.
+GCP is Linux-only. For Windows, WSL2, macOS, Linux desktop/browser/code leases,
+or the AMI-style image bake-and-promote workflow, use AWS instead. GCP does
+support [Tailscale](../features/tailscale.md) and native
+[checkpoints](../features/checkpoints.md) (machine-image and disk-snapshot
+fork/restore) — see below.
 
-Provider names:
+### Provider names
 
 ```text
 gcp
@@ -36,15 +39,15 @@ google-cloud
 `google` and `google-cloud` are aliases. Crabbox canonicalizes them to `gcp`
 before direct or brokered lease requests, including class default selection.
 
-## Quick Start
+## Quick start
 
-Direct local smoke:
+Direct local smoke test:
 
 ```sh
 gcloud auth application-default login
-gcloud services enable compute.googleapis.com --project <project-id>
+gcloud services enable compute.googleapis.com --project example-project-123
 
-export GOOGLE_CLOUD_PROJECT=<project-id>
+export GOOGLE_CLOUD_PROJECT=example-project-123
 export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"
 
 tmp="$(mktemp)"
@@ -56,7 +59,7 @@ env -u CRABBOX_COORDINATOR -u CRABBOX_COORDINATOR_TOKEN \
   echo gcp-ok
 ```
 
-Normal class-based lease:
+Normal class-based leases:
 
 ```sh
 crabbox warmup --provider gcp --class standard
@@ -66,10 +69,10 @@ crabbox stop --provider gcp blue-lobster
 crabbox cleanup --provider gcp
 ```
 
-`--type` is exact, for example `--type c4-standard-32` or `--type e2-micro`.
-Use `--class` when you want Crabbox to retry the provider's class candidates.
+`--type` is exact, for example `--type c4-standard-32` or `--type e2-micro`. Use
+`--class` to let Crabbox retry the provider's class candidates.
 
-## Config
+## Configuration
 
 ```yaml
 provider: gcp
@@ -88,12 +91,17 @@ gcp:
   serviceAccount: ""
 ```
 
-Project resolution order is `CRABBOX_GCP_PROJECT`, `gcp.project`,
-`GOOGLE_CLOUD_PROJECT`, then `GCP_PROJECT_ID`. Brokered requests only forward
-the Crabbox-specific project sources; ambient ADC project variables stay local
-so Worker defaults can apply.
+Defaults applied when a field is unset: `zone` `europe-west2-a`, `network`
+`default`, `tags` `[crabbox-ssh]`, `rootGB` `400`, and the Ubuntu 26.04 LTS image
+above. `project` and `zone` are required for a direct lease.
 
-Direct-mode environment:
+Project resolution order is `CRABBOX_GCP_PROJECT`, then `gcp.project`, then
+`GOOGLE_CLOUD_PROJECT`, then `GCP_PROJECT_ID`. Brokered requests forward only the
+Crabbox-specific project sources (`CRABBOX_GCP_PROJECT` / `gcp.project`); ambient
+ADC project variables (`GOOGLE_CLOUD_PROJECT`, `GCP_PROJECT_ID`) stay local so
+the Worker's own defaults apply.
+
+### Direct-mode environment
 
 ```text
 GOOGLE_APPLICATION_CREDENTIALS
@@ -110,7 +118,7 @@ CRABBOX_GCP_ROOT_GB
 CRABBOX_GCP_SERVICE_ACCOUNT
 ```
 
-Capacity environment:
+### Capacity environment
 
 ```text
 CRABBOX_CAPACITY_MARKET
@@ -118,10 +126,10 @@ CRABBOX_CAPACITY_FALLBACK
 CRABBOX_CAPACITY_AVAILABILITY_ZONES
 ```
 
-`capacity.availabilityZones` controls GCP zone fallback. `capacity.regions`
-does not expand into zones for GCP today.
+`capacity.availabilityZones` controls GCP zone fallback. `capacity.regions` does
+not expand into zones for GCP today.
 
-## Direct Auth
+## Direct auth
 
 Direct mode uses Google's official Compute Go SDK
 (`cloud.google.com/go/compute/apiv1`) and the credential sources supported by
@@ -138,81 +146,79 @@ gcloud auth application-default print-access-token >/dev/null
 Project setup:
 
 ```sh
-gcloud services enable compute.googleapis.com --project <project-id>
-gcloud compute zones list --project <project-id> --filter='name=europe-west2-a'
+gcloud services enable compute.googleapis.com --project example-project-123
+gcloud compute zones list --project example-project-123 --filter='name=europe-west2-a'
 ```
 
 Common blockers:
 
-- Compute Engine API disabled: enable `compute.googleapis.com`.
-- Billing disabled: attach billing before enabling Compute.
-- Missing IAM: the active account needs enough Compute permissions to create,
+- Compute Engine API disabled — enable `compute.googleapis.com`.
+- Billing disabled — attach billing before enabling Compute.
+- Missing IAM — the active account needs enough Compute permissions to create,
   label, list, and delete instances, plus permission to manage the shared
   firewall rule.
-- Service Usage denied: the account may still run Compute calls, but cannot
-  list or enable APIs.
+- Service Usage denied — the account may still run Compute calls but cannot list
+  or enable APIs.
 
-For a cheap live smoke, use `--type e2-micro --market on-demand
---no-sync --ttl 20m --idle-timeout 5m`. This proves instance creation, SSH
-metadata, cloud-init, SSH readiness, command execution, and release/delete
-without syncing a repository.
+For a cheap live smoke test, use
+`--type e2-micro --market on-demand --no-sync --ttl 20m --idle-timeout 5m`. This
+exercises instance creation, SSH metadata, cloud-init, SSH readiness, command
+execution, and release/delete without syncing a repository.
 
-## Brokered Auth
+## Brokered auth
 
-Brokered mode uses Worker-side service-account credentials. Developer machines
-do not need Google credentials when the coordinator owns provisioning.
-The Worker uses Compute REST calls with the configured service account and
-lists pool state through aggregated instance listing with partial success
-enabled, so one unhealthy zone does not hide healthy Crabbox VMs elsewhere.
+Brokered mode uses Worker-side service-account credentials, so developer
+machines do not need Google credentials when the coordinator owns provisioning.
+The Worker uses Compute REST calls with the configured service account and lists
+pool state through aggregated instance listing with partial success enabled, so
+one unhealthy zone does not hide healthy Crabbox VMs elsewhere.
 
 Required Worker secrets:
 
 ```text
-GCP_PROJECT_ID
+GCP_PROJECT_ID   (or CRABBOX_GCP_PROJECT)
 GCP_CLIENT_EMAIL
 GCP_PRIVATE_KEY
 ```
 
-Worker defaults:
+Optional Worker defaults (same names as the direct-mode environment):
 
 ```text
-CRABBOX_GCP_PROJECT
 CRABBOX_GCP_ZONE
 CRABBOX_GCP_IMAGE
 CRABBOX_GCP_NETWORK
-CRABBOX_GCP_SUBNET
 CRABBOX_GCP_TAGS
-CRABBOX_GCP_SSH_CIDRS
 CRABBOX_GCP_ROOT_GB
 CRABBOX_GCP_SERVICE_ACCOUNT
 ```
 
-Run:
+Verify configuration:
 
 ```sh
 crabbox doctor --provider gcp
 ```
 
-The readiness check reports missing secret names without exposing values.
-Lease creation fails with `provider_not_configured` until the Worker has the
+The readiness check reports missing secret names without exposing values. Lease
+creation fails with `provider_not_configured` until the Worker has the
 service-account credentials.
 
 ## Lifecycle
 
 1. Resolve project, zone, image, network, disk, tags, and credentials.
-2. Ensure a Crabbox-managed SSH firewall exists for the configured network,
-   SSH ports, CIDRs, and target tags.
-3. Create a Compute Engine instance with Ubuntu cloud-init, SSH metadata, and
-   Crabbox labels.
-4. Attach an optional service account when `gcp.serviceAccount` or
+2. Ensure a Crabbox-managed SSH firewall exists for the configured network, SSH
+   ports, CIDRs, and target tags.
+3. Create a Compute Engine instance with Ubuntu cloud-init, SSH metadata
+   (`enable-oslogin=FALSE`), and Crabbox labels.
+4. Attach a service account when `gcp.serviceAccount` or
    `CRABBOX_GCP_SERVICE_ACCOUNT` is set.
-5. For Spot leases, set GCP scheduling to `SPOT`, `TERMINATE`, and
-   termination action `DELETE`.
-6. Wait for the public IP, then wait for SSH and the Crabbox ready marker.
+5. For Spot leases, set scheduling to provisioning model `SPOT`, on-host
+   maintenance `TERMINATE`, automatic restart off, and termination action
+   `DELETE`.
+6. Wait for the public IP, then for SSH and the Crabbox ready marker.
 7. Touch labels during active runs.
 8. Delete the VM on release unless the lease is kept.
 
-## Machine Classes
+## Machine classes
 
 ```text
 standard  c4-standard-32, c3-standard-22, n2-standard-32, n2d-standard-32
@@ -221,46 +227,49 @@ large     c4-standard-96, c3-standard-88, n2-standard-80, n2d-standard-96, c4-st
 beast     c4-standard-192, c4-standard-96, c3-standard-176, c3-standard-88, n2d-standard-224, n2-standard-128
 ```
 
-`capacity.market: spot` maps to GCP Spot VMs. If `capacity.fallback` starts
-with `on-demand`, Crabbox retries the same zone/type candidates as on-demand
-after retryable Spot capacity or quota failures.
+`capacity.market: spot` maps to GCP Spot VMs. If `capacity.fallback` starts with
+`on-demand`, Crabbox retries the same zone and type candidates as on-demand after
+retryable Spot capacity or quota failures.
 
-Explicit `--type` disables class candidate fallback. Zone fallback and
+Explicit `--type` disables class-candidate fallback. Zone fallback and
 Spot-to-on-demand fallback still apply to the exact requested type when GCP
-returns a quota, capacity, rate-limit, or unavailable-type error.
+returns a quota, capacity, rate-limit, or unavailable-type error. See
+[Capacity and fallback](../features/capacity-fallback.md).
 
 ## Networking
 
 The provider uses `gcp.network` and optional `gcp.subnet`.
 
 - If either value is a full self link, Crabbox uses it as-is.
-- Otherwise `gcp.network` becomes
-  `projects/<project>/global/networks/<name>`.
+- Otherwise `gcp.network` becomes `projects/<project>/global/networks/<name>`.
 - Otherwise `gcp.subnet` becomes
-  `projects/<project>/regions/<region>/subnetworks/<name>`, where region is
+  `projects/<project>/regions/<region>/subnetworks/<name>`, where the region is
   derived from the zone.
 
 The default firewall allows SSH ingress from `0.0.0.0/0` when no CIDRs are
 configured. Set `gcp.sshCIDRs` or `CRABBOX_GCP_SSH_CIDRS` for tighter ingress.
-The default VPC/default ingress policy uses firewall rule `crabbox-ssh`;
-custom networks use `crabbox-ssh-<network>`. Non-default CIDRs, tags, or SSH
-ports add a policy hash suffix so leases with different ingress settings do
-not rewrite each other's SSH access.
+The default-network, default-policy rule is named `crabbox-ssh`; custom networks
+use `crabbox-ssh-<network>`. Non-default CIDRs, tags, or SSH ports append a
+policy-hash suffix so leases with different ingress settings do not rewrite each
+other's SSH access.
 
 Explicit `gcp.tags` or `CRABBOX_GCP_TAGS` replace the default target tags for
-that lease. They are not merged with the default `crabbox-ssh` tag.
+that lease; they are not merged with the default `crabbox-ssh` tag.
 
-Crabbox refuses to update an existing matching firewall unless its description
-marks it as Crabbox-managed. Rename the firewall, change tags, or adopt it
-intentionally if an older rule already exists.
+Crabbox refuses to update an existing firewall unless its description marks it as
+Crabbox-managed. Rename the firewall, change tags, or adopt it intentionally if
+an older rule already owns the name.
 
-## Labels And Cleanup
+For Tailscale-meshed leases, see [Tailscale](../features/tailscale.md). Direct
+`--tailscale` requires an auth key in the configured auth-key environment
+variable; brokered mode uses coordinator OAuth secrets.
+
+## Labels and cleanup
 
 GCP labels must be lowercase and label keys must start with a letter. Crabbox
-sanitizes keys separately from values so numeric lease metadata remains
-parseable.
+sanitizes keys separately from values so numeric lease metadata stays parseable.
 
-Important cleanup labels:
+Key cleanup labels:
 
 ```text
 crabbox=true
@@ -290,16 +299,37 @@ env -u CRABBOX_COORDINATOR -u CRABBOX_COORDINATOR_TOKEN \
   crabbox cleanup --provider gcp
 ```
 
-Cleanup lists Crabbox-labeled instances across the visible project zones by
-using aggregated instance listing with partial success enabled. It deletes
-expired or released leases in the zone recorded on the VM. Brokered cleanup is
-coordinator-owned; direct cleanup is best-effort label cleanup. GCP direct VMs
-set `maxRunDuration` with `DELETE` so the TTL hard cap is enforced by Compute
-Engine. They also install a guest-side `crabbox-gcp-expiry-guard` systemd timer.
-The timer reads live instance labels through the metadata service and Compute
-API, then self-deletes expired non-kept leases when the attached service account
-can delete the VM. Cleanup also removes stale local GCP claim files whose lease
-IDs no longer appear in provider inventory.
+Cleanup lists Crabbox-labeled instances across the project's visible zones using
+aggregated instance listing with partial success enabled, then deletes expired or
+released leases in the zone recorded on each VM. Brokered cleanup is
+coordinator-owned; direct cleanup is best-effort label cleanup.
+
+Three independent safety nets enforce expiry:
+
+- Direct GCP VMs set Compute Engine `maxRunDuration` with termination action
+  `DELETE`, so the TTL hard cap is enforced by the platform.
+- Each VM installs a guest-side `crabbox-gcp-expiry-guard` systemd timer that
+  reads live instance labels through the metadata service and Compute API, then
+  self-deletes expired non-kept leases when the attached service account can
+  delete the VM.
+- Cleanup removes stale local GCP claim files whose lease IDs no longer appear in
+  provider inventory.
+
+See [Lifecycle and cleanup](../features/lifecycle-cleanup.md) for the shared model.
+
+## Checkpoints
+
+Brokered Linux GCP leases support native [checkpoints](../features/checkpoints.md):
+
+- `--strategy image` captures a GCP machine image (`gcp-machine-image`).
+- The default strategy captures a disk snapshot (`gcp-disk-snapshot`).
+
+`checkpoint fork` and `checkpoint restore` rehydrate from either kind in the
+recorded project and zone. Native checkpoints require a coordinator and a known
+cloud instance ID; they are not available for direct-only leases.
+
+`crabbox image delete <image-id> --provider gcp` deletes a GCP image. GCP does
+not yet have the AWS-style `image promote` bake pipeline.
 
 ## Troubleshooting
 
@@ -308,7 +338,7 @@ IDs no longer appear in provider inventory.
 Enable the Compute API for the selected project:
 
 ```sh
-gcloud services enable compute.googleapis.com --project <project-id>
+gcloud services enable compute.googleapis.com --project example-project-123
 ```
 
 `Billing account ... is not found`
@@ -322,7 +352,7 @@ with Service Usage permissions, or ask a project admin to enable Compute.
 
 `get gcp firewall` or `create gcp firewall` fails
 
-Check network name, IAM, and whether a non-Crabbox firewall already owns the
+Check the network name, IAM, and whether a non-Crabbox firewall already owns the
 `crabbox-ssh`, `crabbox-ssh-<network>`, or policy-suffixed firewall name.
 
 SSH stays on port `22` and port `2222` never opens
@@ -339,16 +369,22 @@ temporary `CRABBOX_CONFIG` without broker settings for direct cleanup.
 
 ## Limitations
 
-- Linux only.
-- No GCP Windows, WSL2, macOS, VNC/browser/code, or image bake/promote yet.
-- No provider pricing lookup yet; cost uses the generic managed-provider
-  fallback rate.
-- OS Login must not block metadata SSH keys. Keep OS Login disabled for the
-  project or instance until Crabbox grows an OS Login integration.
+- Linux only — no GCP Windows, WSL2, or macOS.
+- No desktop, browser, code-server, or VNC capabilities.
+- No AWS-style image bake-and-promote pipeline (native checkpoints and
+  `image delete` are supported).
+- No provider pricing lookup yet; cost uses the generic managed-provider fallback
+  rate.
+- OS Login must not block metadata SSH keys. Crabbox sets `enable-oslogin=FALSE`
+  on each instance; keep OS Login from being force-enabled at the project or org
+  level until Crabbox grows an OS Login integration.
 
-Related docs:
+## Related docs
 
 - [Provider reference](README.md)
 - [Provider overview](../features/providers.md)
 - [Provider backends](../provider-backends.md)
 - [Capacity and fallback](../features/capacity-fallback.md)
+- [Tailscale](../features/tailscale.md)
+- [Checkpoints](../features/checkpoints.md)
+- [Lifecycle and cleanup](../features/lifecycle-cleanup.md)

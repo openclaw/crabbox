@@ -1,77 +1,90 @@
 # whoami
 
-`crabbox whoami` verifies broker auth and prints the identity the
-coordinator sees.
+`crabbox whoami` calls the broker's `/v1/whoami` endpoint and prints the
+identity the coordinator resolved for your request. Use it to confirm broker
+auth is working before starting any long-running workflow.
 
 ```sh
 crabbox whoami
 crabbox whoami --json
 ```
 
-## Human Output
+`whoami` requires a configured coordinator (broker URL plus a token). If none
+is configured it fails with exit code `2` and the message
+`whoami requires a configured coordinator`. See [login](login.md) and
+[config](config.md) for how the broker URL and token are stored.
+
+## Flags
+
+- `--json` - print the raw coordinator response as JSON instead of the
+  human-readable line.
+
+`whoami` takes no positional arguments.
+
+## Human output
 
 ```text
-user=alex@example.com org=openclaw auth=github broker=https://broker.example.com
+user=alice@example.com org=example-org auth=github broker=https://broker.example.com
 ```
 
 The fields:
 
-- `user` - the resolved owner email.
-- `org` - the organization namespace, when set.
-- `auth` - the authentication mode the coordinator accepted (`github` for
-  signed login tokens, `bearer` for shared automation tokens).
-- `broker` - the configured coordinator URL.
+- `user` - the resolved owner email, as the coordinator sees it.
+- `org` - the organization namespace, when set (empty otherwise).
+- `auth` - the auth mode the coordinator accepted: `github` for signed
+  login tokens, `bearer` for shared automation tokens.
+- `broker` - the coordinator URL the CLI is configured to use. This is a
+  local field added by the CLI from your config, not returned by the broker.
 
-## JSON Output
+## JSON output
 
 ```json
 {
-  "owner": "alex@example.com",
-  "org": "openclaw",
-  "auth": "github",
-  "broker": "https://broker.example.com",
-  "tokenSource": "user-config",
-  "accessJwtVerified": false
+  "owner": "alice@example.com",
+  "org": "example-org",
+  "auth": "github"
 }
 ```
 
-JSON output also reports the forwarded auth mode, where the token came
-from (`user-config`, `env`, `stdin`), and whether a verified Cloudflare
-Access JWT was present.
+The JSON form is exactly the coordinator's `/v1/whoami` response: `owner`,
+`org`, and `auth`. The broker URL is not included in JSON output.
 
-## Identity Sources
+## How identity is resolved
 
-Identity normally comes from the signed GitHub login token. The browser
-flow embeds the verified GitHub email and allowed-org membership in a
-short-lived signed token; the coordinator extracts owner/org from that
-token, not from headers.
+When you log in through the browser flow, the broker issues a signed user
+token (prefix `cbxu_`) that embeds your verified GitHub email and allowed-org
+membership. For requests carrying that token the coordinator derives
+`owner`/`org` from the token itself and reports `auth=github`.
 
-Shared bearer-token automation reports owner/org from `X-Crabbox-Owner` and
-`X-Crabbox-Org`. The CLI fills those headers from:
+Shared bearer-token automation has no embedded identity, so the broker reads
+`owner`/`org` from the `X-Crabbox-Owner` and `X-Crabbox-Org` request headers
+and reports `auth=bearer`. The CLI fills those headers from, in order of
+precedence:
 
-- `CRABBOX_OWNER` env (highest precedence);
-- `GIT_AUTHOR_EMAIL` or `GIT_COMMITTER_EMAIL` env;
-- `git config user.email`;
-- `CRABBOX_ORG` env for the org header.
+- `CRABBOX_OWNER` (owner header);
+- `GIT_AUTHOR_EMAIL`, then `GIT_COMMITTER_EMAIL`;
+- `git config --get user.email`;
+- `CRABBOX_ORG` (org header).
 
-Raw Cloudflare Access identity headers are ignored. Only a verified Access
-JWT email (with the JWT validated against the Cloudflare team's public
-keys) can become the bearer-token owner.
+A verified Cloudflare Access JWT (`cf-access-jwt-assertion`, validated against
+the team's public keys) can also supply the owner email on the broker side.
+Raw, unverified Access identity headers are ignored.
 
-## Exit Codes
+## Exit codes
 
 ```text
 0   identity resolved successfully
-2   broker URL or token missing
-3   auth failure (token rejected, GitHub org membership missing, etc.)
+1   request failed (token rejected, org membership missing, network error)
+2   no coordinator configured (broker URL or token missing)
 ```
 
-Use `whoami` in CI scripts before any long workflow to fail fast on auth
-issues.
+Run `whoami` early in CI scripts to fail fast on auth problems before
+provisioning any boxes.
 
-Related docs:
+## Related docs
 
 - [login](login.md)
 - [logout](logout.md)
+- [config](config.md)
 - [Auth and admin](../features/auth-admin.md)
 - [Broker auth and routing](../features/broker-auth-routing.md)

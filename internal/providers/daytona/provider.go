@@ -19,6 +19,7 @@ func (Provider) Aliases() []string {
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:        "daytona",
+		Family:      "daytona",
 		Kind:        core.ProviderKindSSHLease,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
 		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync},

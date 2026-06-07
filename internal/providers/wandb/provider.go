@@ -18,6 +18,7 @@ func (Provider) Aliases() []string { return []string{"weights-and-biases"} }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:        providerName,
+		Family:      "wandb",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
 		Features:    nil,

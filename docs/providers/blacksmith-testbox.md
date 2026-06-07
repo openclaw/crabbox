@@ -6,16 +6,23 @@ Read when:
 - wrapping an existing Blacksmith Testbox workflow with Crabbox;
 - changing `internal/providers/blacksmith`.
 
-Blacksmith Testbox is a delegated run provider. Crabbox does not provision,
+Blacksmith Testbox is a delegated-run provider. Crabbox does not provision,
 bootstrap, rsync, or expose VNC for the remote machine. It shells out to the
-authenticated Blacksmith CLI and keeps Crabbox ergonomics around IDs, slugs,
-repo claims, timing, and normalized output.
+authenticated `blacksmith` CLI and adds Crabbox ergonomics on top: stable lease
+IDs and slugs, repo claims, timing summaries, proof artifacts, and normalized
+`list`/`status` output. Target OS is Linux only.
 
-## When To Use
+Configured [`cache.volumes`](../features/cache-volumes.md) are forwarded
+as Blacksmith sticky disks during Testbox warmup. Use them for package-manager
+stores and other rebuildable dependency caches; keep secrets, checkout state,
+and proof artifacts out of sticky disks.
 
-Use Blacksmith when the repo already has a Testbox workflow and the remote
-workspace should be owned by Blacksmith. Use AWS, Hetzner, Static SSH, or Daytona
-when Crabbox must own SSH sync and interactive access.
+## When to use
+
+Use Blacksmith when the repository already has a Testbox workflow and the remote
+workspace should be owned and synced by Blacksmith. Choose AWS, Hetzner, Static
+SSH, or Daytona instead when Crabbox needs to own SSH sync, interactive access,
+or VNC/code surfaces.
 
 ## Commands
 
@@ -24,7 +31,7 @@ One-shot run:
 ```sh
 crabbox run \
   --provider blacksmith-testbox \
-  --blacksmith-org openclaw \
+  --blacksmith-org example-org \
   --blacksmith-workflow .github/workflows/ci-check-testbox.yml \
   --blacksmith-job test \
   --blacksmith-ref main \
@@ -32,7 +39,7 @@ crabbox run \
   -- pnpm test
 ```
 
-Reuse an existing Testbox:
+Reuse an existing Testbox by ID or slug:
 
 ```sh
 crabbox run --provider blacksmith-testbox --id tbx_123 -- pnpm test
@@ -40,7 +47,7 @@ crabbox status --provider blacksmith-testbox --id tbx_123
 crabbox stop --provider blacksmith-testbox tbx_123
 ```
 
-Reusable session handoff:
+Keep a Testbox between runs via a JSON session handle:
 
 ```sh
 crabbox run --provider blacksmith-testbox --keep --lease-output /tmp/session.json -- npm test
@@ -54,7 +61,7 @@ Warm a fresh Testbox:
 ```sh
 crabbox warmup \
   --provider blacksmith-testbox \
-  --blacksmith-org openclaw \
+  --blacksmith-org example-org \
   --blacksmith-workflow .github/workflows/ci-check-testbox.yml \
   --blacksmith-job test \
   --blacksmith-ref main
@@ -63,76 +70,107 @@ crabbox warmup \
 `blacksmith` is accepted as an alias, but docs and scripts should prefer
 `blacksmith-testbox`.
 
+## Auth
+
+Authentication lives entirely in the `blacksmith` CLI. Log in once before using
+the provider:
+
+```sh
+blacksmith auth login
+```
+
+Crabbox never handles Blacksmith credentials directly; it invokes the
+already-authenticated `blacksmith` binary on your PATH.
+
 ## Config
 
 ```yaml
 provider: blacksmith-testbox
 blacksmith:
-  org: openclaw
+  org: example-org
   workflow: .github/workflows/ci-check-testbox.yml
   job: test
   ref: main
   idleTimeout: 90m
+  debug: false
 ```
 
-Environment variables can provide the same defaults:
+Provider flags (override config):
+
+```text
+--blacksmith-org
+--blacksmith-workflow
+--blacksmith-job
+--blacksmith-ref
+```
+
+Environment variables supply the same defaults:
 
 ```text
 CRABBOX_BLACKSMITH_ORG
 CRABBOX_BLACKSMITH_WORKFLOW
 CRABBOX_BLACKSMITH_JOB
 CRABBOX_BLACKSMITH_REF
+CRABBOX_BLACKSMITH_IDLE_TIMEOUT
+CRABBOX_BLACKSMITH_DEBUG
 ```
 
-Blacksmith authentication stays in the Blacksmith CLI. Run
-`blacksmith auth login` before using this provider.
+`blacksmith.workflow` (or `actions.workflow`, when it is not a generic
+`hydrate`/`crabbox` workflow name) is required only to create a new Testbox.
+Reusing an existing ID or slug does not need it. `idleTimeout` falls back to the
+global `idleTimeout` when unset, and `debug` passes `--debug` through to the
+Blacksmith CLI.
 
-`--env-from-profile`, `--allow-env`, and `CRABBOX_ENV_ALLOW` are useful for
-direct SSH-backed Crabbox runs, but Blacksmith delegated runs cannot inject
-CLI-side environment values into the remote Testbox command. Crabbox fails
-before warmup with an explicit `env forwarding ... behavior=unsupported`
-summary when those knobs are present; put live secrets in the Blacksmith
-workflow instead.
+### Environment forwarding is unsupported
 
-Repo-level env allowlists are ignored for this provider. They can still support
-SSH-backed providers without blocking delegated Blacksmith Testbox runs.
+`--env-from-profile`, `--allow-env`, and `CRABBOX_ENV_ALLOW` help SSH-backed
+providers but cannot inject CLI-side environment values into a delegated Testbox
+command. When any of those knobs are present, Crabbox prints an
+`env forwarding ... unsupported` summary and exits before warmup. Put live
+secrets in the Blacksmith workflow instead. Repo-level env allowlists are
+ignored for this provider so they can still cover SSH-backed providers.
 
 ## Lifecycle
 
-Crabbox forwards:
+Crabbox forwards to the Blacksmith CLI:
 
 ```sh
-blacksmith testbox warmup ...
-blacksmith testbox run ...
+blacksmith testbox warmup <workflow> ...
+blacksmith testbox run --id <tbx-id> ...
 blacksmith testbox list
 blacksmith testbox list --all
-blacksmith testbox stop ...
+blacksmith testbox stop --id <tbx-id>
 ```
 
-If list/status calls work but new warmups sit `queued` with no IP, the
-Blacksmith service or organization is accepting requests but not assigning
-capacity. Stop queued IDs you created and use AWS, Hetzner, Static SSH, or
-Daytona until Blacksmith service, billing, or org limits are healthy again.
+On warmup, Crabbox generates a per-Testbox SSH key locally, passes the public
+key to `blacksmith testbox warmup --ssh-public-key`, parses the returned `tbx_`
+ID, claims the Testbox for the current repo, and assigns a friendly slug. Reusing
+a lease across repos needs `--reclaim`.
 
-Crabbox stores a per-Testbox SSH key locally, claims the Testbox for the current
-repo, maps IDs to friendly slugs, and prints a normal Crabbox timing summary.
-One-shot runs clean up the local claim/key and stop the Testbox after command
-completion unless `--keep` is set. Add `--keep-on-failure` when debugging live
-failures; successful runs still stop normally, while failed one-shot Testboxes
-remain available until idle timeout or explicit `crabbox stop`.
-Use `--lease-output <file>` with `crabbox run` to write a small JSON session
-handle for automation. The handle includes `leaseId`, reuse/keep state,
-detected Actions context, and a non-secret cleanup command.
-Failed runs save a local failure bundle with stdout/stderr, timing, and
-redacted env/config metadata even though remote file capture is delegated to
-Blacksmith. These implicit stream logs are capped so a verbose successful run
-does not fill local temp storage.
+One-shot runs stop the Testbox and remove the local claim and key after the
+command completes, unless `--keep` is set. `--keep-on-failure` keeps a failed
+one-shot Testbox alive for debugging; successful runs still stop normally. A
+failed Testbox otherwise remains available until idle timeout or an explicit
+`crabbox stop`.
 
-`--emit-proof <path>` is supported for successful Blacksmith runs. Crabbox
-renders the same proof block used by SSH-backed runs from the delegated
-stdout/stderr transcript, command timing, Testbox ID, and any GitHub Actions run
-URL found in the stream. When proof is requested, Crabbox also keeps bounded
-local transcript artifacts under `.crabbox/runs/<testbox-id>/`:
+If `list`/`status` work but new warmups sit `queued` with no IP, Blacksmith is
+accepting requests but not assigning capacity. Stop any queued IDs you created
+and fall back to AWS, Hetzner, Static SSH, or Daytona until Blacksmith service,
+billing, or org limits recover. A failed warmup triggers a best-effort cleanup
+sweep of newly created Testboxes that match your configured workflow/job/ref.
+
+### Failure bundles and proof
+
+Failed runs write a local failure bundle (stdout, stderr, timing, redacted
+env/config metadata) even though remote file capture is delegated to Blacksmith.
+Captured streams are size-capped so a verbose successful run does not fill local
+temp storage.
+
+`--emit-proof <path>` works for successful Blacksmith runs. Crabbox renders the
+same proof block used by SSH-backed runs from the delegated stdout/stderr
+transcript, command timing, the Testbox ID, and any GitHub Actions run URL found
+in the stream. When proof is requested, Crabbox also writes bounded transcript
+artifacts under `.crabbox/runs/<testbox-id>/`:
 
 ```text
 blacksmith.stdout.log
@@ -141,17 +179,22 @@ timing.json
 metadata.json
 ```
 
-Crabbox terminates a local Blacksmith CLI invocation that remains in the sync
-phase for five minutes without post-sync output. Set
-`CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS=0` to disable the guard, or set a larger
-millisecond value for intentionally huge local diffs.
+### Sync stall guard
+
+Crabbox terminates a local `blacksmith` invocation that stays in the sync phase
+for five minutes without printing a sync-completion marker. Set
+`CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS=0` to disable the guard, or a larger
+millisecond value for intentionally huge local diffs. (`OPENCLAW_TESTBOX_SYNC_TIMEOUT_MS`
+is also honored for legacy compatibility.)
+
+### Portal visibility
 
 When coordinator auth is configured, `crabbox list --provider blacksmith-testbox`
-also syncs visibility-only Testbox rows into the portal lease table. If Crabbox
-can infer the owning GitHub Actions run, the portal links the row to the run and
+syncs visibility-only Testbox rows into the portal lease table. If Crabbox can
+infer the owning GitHub Actions run, the portal links the row to the run and
 workflow, shows the Actions status/conclusion, flags long-queued or long-running
 rows as `stuck`, exposes a copyable local stop command, and provides a
-visibility-only detail page for the row.
+visibility-only detail page.
 
 ## Capabilities
 
@@ -159,20 +202,22 @@ visibility-only detail page for the row.
 - Crabbox sync: no.
 - Provider sync: yes, Blacksmith-owned.
 - Desktop/browser/code: no Crabbox VNC/code surface.
-- Proof: yes, from delegated stream/timing metadata.
-- Actions hydration: Blacksmith-owned workflow setup, not Crabbox SSH hydration.
-- Coordinator: no.
+- Proof: yes, from the delegated stream, timing, and metadata.
+- Actions hydration: Blacksmith owns workflow setup; not Crabbox SSH hydration.
+- Coordinator: no (always direct from the CLI).
 
 ## Gotchas
 
 - `--sync-only`, `--checksum`, and `--force-sync-large` do not apply because
   Blacksmith owns sync.
-- `--script`, `--script-stdin`, `--fresh-pr`, local captures, `--download`, and
-  `--artifact-glob` are rejected because Blacksmith owns command transport and
-  remote artifact handling. Use `--emit-proof` for PR-ready transcript proof.
+- `--script`, `--script-stdin`, `--fresh-pr`, local stdout/stderr captures,
+  `--download`, and `--artifact-glob` are rejected because Blacksmith owns
+  command transport and remote artifact handling. Use `--emit-proof` for
+  PR-ready transcript proof.
+- `--actions-runner` is rejected; Blacksmith owns runner hydration.
+- `--tailscale`, desktop helpers, screenshots, VNC, and `artifacts collect` are
+  rejected because Blacksmith owns machine connectivity.
 - `list` and `status` are core-rendered from parsed Blacksmith CLI output.
-- `blacksmith.workflow` is required only when Crabbox needs to create a Testbox.
-  Reusing an existing ID or slug does not need workflow config.
 
 Related docs:
 

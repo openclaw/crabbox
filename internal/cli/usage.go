@@ -76,6 +76,10 @@ func printCostLimits(out interface{ Write([]byte) (int, error) }, limits Coordin
 	fmt.Fprintln(out, "limits:")
 	fmt.Fprintf(out, "  active leases: fleet=%s user=%s org=%s\n",
 		formatIntLimit(limits.MaxActiveLeases), formatIntLimit(limits.MaxActiveLeasesPerOwner), formatIntLimit(limits.MaxActiveLeasesPerOrg))
+	if limits.MaxActiveLeasesPerCapacityAdmin > 0 || len(limits.CapacityAdminOwners) > 0 {
+		fmt.Fprintf(out, "  capacity admin: user=%s owners=%d\n",
+			formatIntLimit(limits.MaxActiveLeasesPerCapacityAdmin), len(limits.CapacityAdminOwners))
+	}
 	fmt.Fprintf(out, "  monthly usd:   fleet=%s user=%s org=%s\n",
 		formatUSDLimit(limits.MaxMonthlyUSD), formatUSDLimit(limits.MaxMonthlyUSDPerOwner), formatUSDLimit(limits.MaxMonthlyUSDPerOrg))
 }

@@ -1,106 +1,119 @@
 # code
 
-`crabbox code` bridges a code-server workspace for a Linux lease into the
-authenticated coordinator portal.
+`crabbox code` bridges a Linux lease's `code-server` workspace into the
+authenticated coordinator [portal](../features/portal.md), so you can edit the
+synced checkout in a browser VS Code without exposing the runner directly.
 
 ```sh
 crabbox warmup --code
-crabbox code --id blue-lobster
-crabbox code --id blue-lobster --open
+crabbox code --id swift-crab
+crabbox code --id swift-crab --open
 ```
 
-## How It Works
+## Prerequisites
 
-Create or reuse a lease with `code=true`:
+- A configured coordinator login. The command refuses to run without one:
+  `crabbox login --url broker.example.com` first.
+- A lease created with the `code` capability (`crabbox warmup --code`). The
+  Linux bootstrap installs `code-server` only for leases that request it, and
+  reusing a lease checks for the matching `code=true` label.
+- A coordinator-backed Linux lease on a provider that advertises the `code`
+  capability (`hetzner`, `aws`, `azure`). Static SSH hosts, Blacksmith Testbox,
+  Windows, and macOS leases are rejected.
 
-```sh
-crabbox warmup --code
-```
+## How it works
 
-The Linux bootstrap installs `code-server` only for leases that request the
-capability. `crabbox code` then resolves the lease, starts `code-server` on
-runner loopback, opens an SSH tunnel, mints a short-lived bridge ticket, and
-registers a local bridge with the coordinator.
-
-The editor opens the synced workspace by default. If you run `crabbox code`
-from a subdirectory inside the local checkout, Crabbox maps that relative path
-onto the remote workspace and opens the matching folder. Actions-hydrated
-leases use the hydration workspace instead of the default `/work/crabbox/...`
-path.
-
-The browser URL is lease-scoped:
-
-```text
-/portal/leases/<lease-id>/code/
-```
+`crabbox code` resolves the lease, ensures `code-server` is running on the
+runner's loopback interface (`127.0.0.1:8080`), opens an SSH tunnel to it, mints
+a short-lived bridge ticket from the coordinator, and registers a local bridge
+process. Keep the process running while you use the editor.
 
 The data path is:
 
 ```text
 browser
-  <-> coordinator /portal/leases/<lease>/code/
-  <-> local crabbox code process
+  <-> coordinator /portal/leases/<lease-id>/code/
+  <-> local crabbox code process (bridge)
   <-> SSH tunnel
-  <-> runner 127.0.0.1:8080
+  <-> runner 127.0.0.1:8080 (code-server)
 ```
 
-Keep the local `crabbox code` process running while using the editor. The
-coordinator authenticates the browser through portal auth and authenticates the
-local bridge with a one-use, short-lived ticket. The CLI sends the ticket as
+The coordinator authenticates the browser through portal auth and authenticates
+the local bridge with a one-use, short-lived ticket. The CLI sends the ticket as
 an `Authorization: Bearer ...` header so it stays out of websocket URLs and
-proxy/access logs; the coordinator accepts a `?ticket=` query string as a
-fallback for older CLIs.
+proxy/access logs; the coordinator accepts a `?ticket=` query string only as a
+fallback for older CLIs. Because the trusted boundary is the portal plus the
+bridge ticket, `code-server` runs with auth disabled on the runner side.
+
+The portal URL is lease-scoped:
+
+```text
+/portal/leases/<lease-id>/code/
+```
 
 If the browser opens before the local bridge connects, the Code portal renders a
-waiting state with the exact `crabbox code --id <lease> --open` command, copy
-and reload controls, and bridge status. Once the bridge is connected, the page
-automatically opens the mapped workspace.
+waiting state with the exact `crabbox code` command, copy/reload controls, and
+bridge status; it opens the workspace automatically once the bridge connects.
 
-Managed code-server starts with `Default Dark Modern` as the default theme. The
-bridge also chunks large HTTP responses and websocket frames so VS Code assets
-and extension-host traffic stay below coordinator websocket frame limits.
+### Folder mapping
+
+The editor opens the synced workspace by default. If you run `crabbox code` from
+a subdirectory of the local checkout, Crabbox maps that relative path onto the
+remote workspace and opens the matching folder. [Actions-hydrated](../features/actions-hydration.md)
+leases open the hydration workspace instead of the default
+`/work/crabbox/<repo>` path.
+
+### Resilience
+
+Managed `code-server` starts with `Default Dark Modern` as its theme. The bridge
+chunks large HTTP responses and websocket frames so VS Code assets and
+extension-host traffic stay under coordinator websocket frame limits, and it
+reconnects automatically on transient bridge errors.
 
 ## Flags
 
 ```text
---id <lease-id-or-slug>
---provider hetzner|aws|azure
---target linux
---network auto|tailscale|public
---local-port <port>
---open
---reclaim
+--id <lease-id-or-slug>     Lease to bridge (also accepted as a positional arg).
+--provider hetzner|aws|azure  Provider for the lease (default from config).
+--target linux              Lease target OS (code requires linux).
+--network auto|tailscale|public  Network mode used to reach the runner.
+--local-port <port>         Local code-server tunnel port (auto-selected 8081-8180 if unset).
+--open                      Open the portal Code page in a browser.
+--reclaim                   Claim this lease for the current repo checkout.
 ```
 
-## Limitations
-
-- Coordinator-backed Linux leases are supported.
-- Static SSH hosts, Windows, macOS, and Blacksmith Testbox are intentionally not
-  supported by this portal bridge yet.
-- `code-server` auth is disabled on the runner side because the trusted access
-  boundary is the authenticated coordinator portal plus the local bridge.
+Set `CRABBOX_CODE_DEBUG=1` to print bridge trace output to stderr.
 
 ## Troubleshooting
 
-`lease ... was not created with code=true`
-
-Warm a new lease with the code capability:
+**`lease ... was not created with code=true`** — warm a new lease with the
+capability:
 
 ```sh
 crabbox warmup --code
 ```
 
-The portal shows a bridge command
-
-The browser can reach the coordinator, but no local bridge is registered. Use
-the command shown by the portal, or start `crabbox code --id <lease> --open`
-locally and keep it running.
-
-Check bridge health with:
+**`code requires a configured coordinator login`** — log in to the broker:
 
 ```sh
-curl https://broker.example.com/portal/leases/<lease>/code/health
+crabbox login --url broker.example.com
 ```
 
-When authenticated, the health response includes whether the code bridge agent
-is currently connected.
+**The portal shows a bridge command** — the browser reached the coordinator but
+no local bridge is registered. Run the command the portal shows (or
+`crabbox code --id <lease> --open`) and keep it running.
+
+**Check bridge health:**
+
+```sh
+curl https://broker.example.com/portal/leases/<lease-id>/code/health
+```
+
+When authenticated, the health response reports whether the code bridge agent is
+currently connected.
+
+## See also
+
+- [`webvnc`](webvnc.md) — bridge a desktop lease into the portal.
+- [capabilities](../features/capabilities.md) — `--desktop`, `--browser`, `--code`.
+- [portal](../features/portal.md) — the authenticated browser UI.

@@ -453,7 +453,7 @@ func TestNewCheckpointRecordUsesResolvedVersion(t *testing.T) {
 }
 
 func TestNewCheckpointRecordStoresHostPinAndServerType(t *testing.T) {
-	cfg := defaultConfig()
+	cfg := baseConfig()
 	cfg.Provider = "aws"
 	cfg.TargetOS = targetMacOS
 	cfg.HostID = "h-000000000001"
@@ -489,7 +489,7 @@ func TestDefaultCheckpointRestoreWorkdirUsesTargetLease(t *testing.T) {
 }
 
 func TestCheckpointCreateModePrefersDiskSnapshotLinuxNative(t *testing.T) {
-	cfg := defaultConfig()
+	cfg := baseConfig()
 	cfg.Provider = "hetzner"
 	cfg.Coordinator = "https://coordinator.example"
 	cfg.TargetOS = targetLinux
@@ -1418,7 +1418,7 @@ func TestApplyNativeCheckpointForkConfigForParallelsPreservesLinkedCloneMode(t *
 	fs := newFlagSet("checkpoint fork", io.Discard)
 	_ = fs.String("type", "", "provider type")
 	_ = fs.String("parallels-clone-mode", "", "Parallels clone mode")
-	cfg := defaultConfig()
+	cfg := baseConfig()
 	cfg.Provider = "hetzner"
 	record := checkpointRecord{Kind: checkpointKindParallels, TargetOS: targetMacOS}
 	record.Native.ImageID = "{snap1}"
@@ -1436,7 +1436,7 @@ func TestApplyNativeCheckpointForkConfigForParallelsPreservesLinkedCloneMode(t *
 		t.Fatalf("snapshot forks should preserve linked clone mode, got %q", cfg.Parallels.CloneMode)
 	}
 
-	cfg = defaultConfig()
+	cfg = baseConfig()
 	cfg.Provider = "hetzner"
 	cfg.Parallels.CloneMode = "linked"
 	fs = newFlagSet("checkpoint fork", io.Discard)

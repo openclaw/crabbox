@@ -1,37 +1,71 @@
 # logout
 
-`crabbox logout` removes the stored broker token from user config.
+`crabbox logout` clears the stored broker token from your user config so the CLI
+no longer authenticates to the broker.
 
 ```sh
 crabbox logout
 crabbox logout --json
 ```
 
-The broker URL and provider stay in place so a later `crabbox login` or
-`crabbox login --token-stdin` can reuse the configured URL. Per-lease SSH keys, repo
-claims, and history records are unaffected.
+## What it changes
 
-After logout:
+Logout edits only the user config file (the path printed by
+[`crabbox config path`](config.md)). It clears both token fields the broker
+reads:
 
-- `crabbox whoami` exits with auth code 3 (`auth failure`);
-- `crabbox run` and `crabbox warmup` against the coordinator fail with the
-  same code;
-- direct-provider mode keeps working when local provider credentials
-  (AWS SDK, `HCLOUD_TOKEN`) are present, because direct mode does not need
-  the broker token.
+- the broker section's `token`, and
+- the top-level `coordinatorToken`.
 
-Use logout when:
+Everything else is left in place:
 
-- a token has leaked or you want to rotate it;
-- you are switching the operator identity on a shared workstation;
-- you are testing the unauthenticated path.
+- the broker `url` and `provider`, so a later [`crabbox login`](login.md) can
+  reuse the configured endpoint;
+- the broker **admin token** (`broker.adminToken`), if one is stored — logout
+  does not touch it;
+- per-lease SSH keys, repo claims, and recorded run history.
 
-To clear everything (URL, provider, token, profile defaults), edit the user
-config file directly. `crabbox config path` prints the location.
+On success it prints:
 
-Related docs:
+```text
+logged out config=/path/to/config.yaml broker_auth=missing
+```
+
+With `--json` it emits the resolved config path and the new auth state:
+
+```json
+{ "config": "/path/to/config.yaml", "brokerAuth": "missing" }
+```
+
+## Flags
+
+| Flag     | Description                |
+| -------- | -------------------------- |
+| `--json` | Print machine-readable JSON. |
+
+## After logout
+
+- Broker-backed commands such as [`crabbox whoami`](whoami.md), `crabbox run`,
+  and `crabbox warmup` fail to authenticate against the broker because no token
+  is sent. Re-run [`crabbox login`](login.md) (or `crabbox login --token-stdin`)
+  to restore access.
+- Direct-provider mode keeps working when local provider credentials are present
+  (for example AWS SDK credentials or `HCLOUD_TOKEN`), since direct mode talks to
+  the cloud API and does not need a broker token.
+
+## When to use it
+
+- A token has leaked or you want to rotate it.
+- You are switching the operator identity on a shared workstation.
+- You are exercising the unauthenticated path.
+
+To remove everything — broker URL, provider, both tokens, and profile defaults —
+edit the user config file directly.
+
+## Related
 
 - [login](login.md)
 - [whoami](whoami.md)
+- [config](config.md)
 - [Auth and admin](../features/auth-admin.md)
 - [Configuration](../features/configuration.md)

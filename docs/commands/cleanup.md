@@ -1,6 +1,8 @@
 # cleanup
 
-`crabbox cleanup` sweeps provider leftovers owned by Crabbox.
+`crabbox cleanup` sweeps direct-provider machines and local provider state that
+Crabbox created but no longer tracks. It is a safety net for direct (non-brokered)
+mode only; brokered fleets manage expiry through the coordinator instead.
 
 ```sh
 crabbox cleanup --dry-run
@@ -9,81 +11,117 @@ crabbox cleanup --provider namespace-devbox --dry-run
 crabbox cleanup --provider namespace-devbox
 ```
 
-`crabbox machine cleanup` is preserved as a compatibility alias.
+`crabbox machine cleanup` is preserved as a compatibility alias and behaves
+identically.
 
 ## Behavior
 
-Cleanup refuses to run when a coordinator is configured. Brokered cleanup
-belongs to the Durable Object alarm; sweeping provider resources behind the
-coordinator can race live brokered leases.
+Cleanup refuses to run when a coordinator is configured:
 
-For direct machine providers, cleanup is intentionally conservative:
+```text
+machine cleanup is disabled when a coordinator is configured; coordinator TTL alarms own brokered cleanup
+```
 
-- skip machines tagged `keep=true`;
-- skip machines in `running` or `provisioning` state until the extra stale
-  safety window passes (expiry plus 12 hours);
-- delete machines that are clearly expired in `ready`, `leased`, or
-  `active` states;
-- delete machines that have been inactive past expiry.
+Sweeping provider resources behind a coordinator can race live brokered leases,
+so brokered expiry is owned entirely by the coordinator's TTL alarm. See
+[Lifecycle cleanup](../features/lifecycle-cleanup.md).
 
-Selection is label-driven. Cleanup uses `lease`, `slug`, `expires_at`,
-`last_touched_at`, `state`, and `keep` labels written when the machine was
-created. Resources without Crabbox labels are never touched.
+What cleanup does depends on the selected provider:
 
-Static SSH targets are existing operator-owned hosts, so `provider=ssh`
-has nothing to sweep. Cleanup exits early for that provider.
+- **Direct cloud/VM providers** (for example `hetzner`, `aws`, `azure`, `gcp`,
+  `proxmox`, `parallels`, `cloudflare`, `local-container`, `multipass`)
+  enumerate the machines they own and decide, per machine, whether to delete it.
+- **`namespace-devbox`** removes only Crabbox-owned local Namespace SSH files;
+  it does not delete remote Devboxes.
+- Providers that have nothing to sweep return an error rather than acting. For
+  example `provider=ssh` (static / bring-your-own hosts) reports:
 
-For `provider=namespace-devbox`, cleanup only removes Crabbox-owned local
-Namespace SSH snippets and keys:
+  ```text
+  machine cleanup is not supported for provider=ssh
+  ```
+
+### Deletion decisions for direct machines
+
+Selection is label-driven. Cleanup reads the `keep`, `state`, `expires_at`, and
+`ttl` labels written when the machine was created. The decision is conservative:
+
+- skip machines labeled `keep=true`;
+- for `running` or `provisioning` machines, skip until well past expiry — delete
+  only once the expiry time plus a 12-hour stale window has elapsed;
+- for `leased`, `ready`, or `active` machines, delete once expired;
+- always delete machines in `failed`, `released`, or `expired` states;
+- for any other machine, delete only if `expires_at`/`ttl` parses and has passed;
+  skip if the expiry label is missing or still in the future.
+
+Resources without these labels are skipped (`reason=missing labels`), so
+non-Crabbox machines are never touched.
+
+### Namespace local cleanup
+
+For `provider=namespace-devbox`, cleanup removes only Crabbox-owned Namespace SSH
+snippets and keys under `~/.namespace/ssh/`:
 
 ```text
 ~/.namespace/ssh/crabbox-*.devbox.namespace.ssh
 ~/.namespace/ssh/crabbox-*.devbox.namespace.key
 ```
 
-It does not remove non-Crabbox Namespace entries and does not remove the
-global `Include ~/.namespace/ssh/*.ssh` line from `~/.ssh/config`, because
-that include may be used by operator-owned Devboxes.
+It does not remove non-Crabbox Namespace entries, and it does not touch the
+`Include ~/.namespace/ssh/*.ssh` line in `~/.ssh/config`, because that include
+may serve operator-owned Devboxes.
 
 ## Output
 
-`--dry-run` lists every decision without taking action:
+For direct machine providers, each candidate prints one decision line. `--dry-run`
+prints the same lines but makes no provider calls:
 
 ```text
-hetzner cx53 hz-12345 lease=cbx_abcdef123456 slug=blue-lobster keep=true skip=keep
-hetzner cx53 hz-67890 lease=cbx_abcdef234567 slug=amber-crab    expires_at=2026-05-01T17:30:00Z delete
+skip server id=12345 name=crabbox-blue-lobster reason=keep=true
+delete server id=67890 name=crabbox-amber-crab
 ```
 
-Without `--dry-run`, machine providers print the same lines but each
-`delete` is followed by `deleted` after the provider call returns. Namespace
-local cleanup prints each removed file. Failures print the provider error
-and continue with the next candidate.
+`skip` lines include a `reason=` (for example `keep=true`, `state=running`,
+`missing expires_at`, `not expired`). Without `--dry-run`, each `delete` line is
+followed by the actual provider delete call; a failed delete returns the provider
+error and stops the sweep.
+
+Namespace local cleanup prints one line per file. `--dry-run` reports the
+intended action instead of removing anything:
+
+```text
+namespace ssh cleanup would-delete /Users/alice/.namespace/ssh/crabbox-my-app.devbox.namespace.ssh
+namespace ssh cleanup delete /Users/alice/.namespace/ssh/crabbox-my-app.devbox.namespace.key
+```
+
+When no matching files exist:
+
+```text
+namespace ssh cleanup no crabbox files found
+```
 
 ## Flags
 
 ```text
---provider hetzner|aws|azure|gcp|proxmox|namespace-devbox  provider to sweep
---target linux|macos|windows  for AWS, restrict by target
---windows-mode normal|wsl2    when target=windows
---static-host <host>          ignored (provider=ssh has nothing to sweep)
---static-user <user>          ignored
---static-port <port>          ignored
---static-work-root <path>     ignored
---dry-run                     log decisions without making provider calls
+--provider hetzner|aws|azure|gcp|proxmox|namespace-devbox|cloudflare|multipass
+                                                                       provider to sweep (default from config)
+--dry-run                                                              print decisions without making provider calls
 ```
 
-## When To Run
+Provider and target flags (for example `--target`, `--windows-mode`,
+`--static-host`) are accepted for consistency with other commands but are not
+used to scope the sweep.
+
+## When to run
 
 - after a CLI process crashed mid-warmup and left a server behind;
-- when migrating from direct mode to brokered mode (sweep first, then
-  switch);
+- when migrating from direct mode to brokered mode (sweep first, then switch);
 - as a safety net after rotating provider credentials;
-- never as part of a brokered workflow - the coordinator owns that path.
+- never as part of a brokered workflow — the coordinator owns that path.
 
-For brokered fleets, audit `crabbox admin leases --state active` and use
-`crabbox admin release` instead.
+For brokered fleets, audit `crabbox admin leases --state active` and end leases
+with `crabbox admin release` instead.
 
-Related docs:
+## Related docs
 
 - [stop](stop.md)
 - [admin](admin.md)

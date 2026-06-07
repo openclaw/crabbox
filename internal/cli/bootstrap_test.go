@@ -107,16 +107,34 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 		"ThemeName\" type=\"string\" value=\"$gtk_theme",
 		"$config_dir/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml",
 		"theme\" type=\"string\" value=\"$xfwm_theme",
+		"box_move\" type=\"bool\" value=\"false",
+		"box_resize\" type=\"bool\" value=\"false",
+		"move_opacity\" type=\"int\" value=\"100",
+		"resize_opacity\" type=\"int\" value=\"100",
+		"snap_to_border\" type=\"bool\" value=\"false",
+		"snap_width\" type=\"int\" value=\"0",
+		"tile_on_move\" type=\"bool\" value=\"false",
+		"use_compositing\" type=\"bool\" value=\"false",
+		"wrap_windows\" type=\"bool\" value=\"false",
 		"gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini",
 		"mkdir -p \"$config_dir/xfce4/xfconf/xfce-perchannel-xml\"",
 		"xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme",
 		"xfconf-query -c xfwm4 -p /general/theme",
+		"xfconf-query -c xfwm4 -p /general/box_move",
+		"xfconf-query -c xfwm4 -p /general/box_resize",
+		"xfconf-query -c xfwm4 -p /general/move_opacity",
+		"xfconf-query -c xfwm4 -p /general/resize_opacity",
+		"xfconf-query -c xfwm4 -p /general/snap_to_border",
+		"xfconf-query -c xfwm4 -p /general/snap_width",
+		"xfconf-query -c xfwm4 -p /general/tile_on_move",
+		"xfconf-query -c xfwm4 -p /general/use_compositing",
+		"xfconf-query -c xfwm4 -p /general/wrap_windows",
 		"xfconf-query -c xfce4-panel -p /panels/dark-mode",
 		"/panels/$panel_id/background-rgba",
 		"crabbox desktop theme start",
 		"crabbox-xfce4-panel-$user.log",
 		"pkill -USR1 -x xfce4-panel",
-		"xfwm4 --replace",
+		"xfwm4 --replace --compositor=off",
 		`xsetroot -solid "$root_color"`,
 		`gsettings set org.gnome.desktop.interface color-scheme "$gsettings_scheme"`,
 		"CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme",
@@ -126,6 +144,7 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 		"(umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)",
 		"x11vnc -storepasswd",
 		"-rfbauth /var/lib/crabbox/vnc.pass",
+		"-wait 16 -defer 8 -nowait_bog",
 		"ss -ltn | grep -q '127.0.0.1:5900'",
 		"systemctl disable --now crabbox-wayvnc.service 2>/dev/null || true",
 		"systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service crabbox-x11vnc.service",
@@ -158,7 +177,7 @@ func TestCloudInitWaylandDesktopProfile(t *testing.T) {
 		"foot --title='Crabbox Desktop' >/tmp/crabbox-foot.log 2>&1 &",
 		`for socket in "$XDG_RUNTIME_DIR"/wayland-*`,
 		`WAYLAND_DISPLAY="${socket##*/}"`,
-		"wayvnc --config \"$HOME/.config/wayvnc/config\" --render-cursor --max-fps=30",
+		"wayvnc --config \"$HOME/.config/wayvnc/config\" --render-cursor --max-fps=60",
 		"systemctl is-active --quiet crabbox-wayvnc.service",
 		"systemctl disable --now crabbox-xvfb.service crabbox-desktop-session.service crabbox-x11vnc.service 2>/dev/null || true",
 		"systemctl enable crabbox-desktop.service crabbox-wayvnc.service",
@@ -193,7 +212,8 @@ func TestCloudInitGnomeDesktopProfile(t *testing.T) {
 	cfg.DesktopEnv = "gnome"
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
-		"labwc wayvnc gnome-panel wlr-randr grim slurp wtype wl-clipboard",
+		"labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard",
+		"swaybg librsvg2-common",
 		"dbus-user-session xwayland",
 		"gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme",
 		"/usr/local/bin/crabbox-start-wayland-desktop",
@@ -204,12 +224,35 @@ func TestCloudInitGnomeDesktopProfile(t *testing.T) {
 		"exec dbus-run-session labwc",
 		"export GDK_BACKEND=x11",
 		"export MOZ_ENABLE_WAYLAND=0",
+		`theme="$(cat "$HOME/.config/crabbox/desktop-theme"`,
+		"gsettings set org.gnome.desktop.interface color-scheme prefer-dark",
+		"/usr/local/bin/crabbox-configure-desktop-theme",
+		"CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme",
+		`if [ "$(id -u)" -eq 0 ]; then`,
+		`mkdir -p "$config_dir/crabbox" "$config_dir/gtk-3.0" "$config_dir/gtk-4.0" "$config_dir/labwc"`,
+		`dbus_address="${DBUS_SESSION_BUS_ADDRESS:-}"`,
+		`DBUS_SESSION_BUS_ADDRESS='$dbus_address' GDK_BACKEND=x11 gsettings set org.gnome.desktop.interface color-scheme`,
+		`DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="$dbus_address" GDK_BACKEND=x11 gsettings set org.gnome.desktop.interface color-scheme "$gsettings_scheme"`,
+		`"$config_dir/labwc/themerc-override"`,
+		"window.active.title.bg.color",
+		"window.active.button.unpressed.image.color",
+		`LABWC_PID="$labwc_pid"`,
+		`labwc --reconfigure`,
+		`kill -HUP "$labwc_pid"`,
+		`"$config_dir/gtk-3.0/gtk.css"`,
+		"menubar menuitem",
+		"desktop-background-$mode.svg",
+		`swaybg -i "$wallpaper_file" -m fill`,
+		`nohup gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &`,
+		`elif [ "$(id -u)" -ne 0 ] && pgrep -x gnome-panel`,
 		"gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &",
 		"gnome-terminal -- bash -l",
 		"nautilus --new-window",
 		"rm -f /var/lib/crabbox/display.env",
 		"--user-data-dir=",
 		"--ozone-platform=x11",
+		"--force-dark-mode --enable-features=WebUIDarkMode --blink-settings=preferredColorScheme=2",
+		"--blink-settings=preferredColorScheme=1",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloudInit(gnome desktop) missing %q", want)
@@ -223,6 +266,7 @@ func TestCloudInitGnomeDesktopProfile(t *testing.T) {
 		"QT_QPA_PLATFORM=xcb",
 		"waybar",
 		`"wlr/taskbar"`,
+		"\n#!/bin/sh\nset -eu\nrequested_mode=",
 	} {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("cloudInit(gnome desktop) contains %q", notWant)
@@ -259,8 +303,6 @@ func TestCloudInitBrowserWrapper(t *testing.T) {
 		"<<'EOF'",
 		"<<EOF",
 		"\nEOF",
-		"--force-dark-mode",
-		"preferredColorScheme=2",
 	} {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("cloudInit(browser) contains browser heredoc content %q", notWant)
@@ -315,6 +357,38 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	}
 	if strings.Contains(cloudInit(baseConfig(), "ssh-ed25519 test"), "tailscale up") {
 		t.Fatal("cloudInit should not install Tailscale by default")
+	}
+}
+
+// TestCloudInitTailscaleHonorsControlURL exercises the self-hosted control
+// plane path: when TS_CONTROL_URL is set in the operator shell, cloud-init
+// must forward it into the box so `tailscale up` registers against the
+// custom login server (e.g. Headscale) via --login-server. Unset means the
+// default Tailscale control plane and no new flag is introduced.
+func TestCloudInitTailscaleHonorsControlURL(t *testing.T) {
+	t.Setenv("TS_CONTROL_URL", "https://headscale.example.com")
+	cfg := baseConfig()
+	cfg.Tailscale.Enabled = true
+	cfg.Tailscale.AuthKey = "tskey-secret"
+	got := cloudInit(cfg, "ssh-ed25519 test")
+	for _, want := range []string{
+		"TS_LOGIN_SERVER='https://headscale.example.com'",
+		`${TS_LOGIN_SERVER:+--login-server="$TS_LOGIN_SERVER"}`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("cloudInit(TS_CONTROL_URL) missing %q\n--- got ---\n%s", want, got)
+		}
+	}
+
+	t.Setenv("TS_CONTROL_URL", "")
+	got = cloudInit(cfg, "ssh-ed25519 test")
+	if strings.Contains(got, "TS_LOGIN_SERVER=") {
+		t.Fatalf("cloudInit must not export TS_LOGIN_SERVER when TS_CONTROL_URL is unset:\n%s", got)
+	}
+	// The conditional shell expansion is still present so the box honors a
+	// downstream override, but no operator-supplied value should leak.
+	if !strings.Contains(got, `${TS_LOGIN_SERVER:+--login-server="$TS_LOGIN_SERVER"}`) {
+		t.Fatal("cloudInit must keep the conditional --login-server expansion even when unset")
 	}
 }
 

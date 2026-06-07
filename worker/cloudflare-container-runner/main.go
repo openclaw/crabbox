@@ -45,7 +45,7 @@ func main() {
 	mux.HandleFunc("/v1/exec", handleExec)
 
 	addr := ":8787"
-	log.Printf("crabbox cloudflare container runner listening on %s", addr)
+	log.Printf("crabbox container runner listening on %s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}

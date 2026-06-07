@@ -17,8 +17,9 @@ func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name: "parallels",
-		Kind: core.ProviderKindSSHLease,
+		Name:   "parallels",
+		Family: "parallels",
+		Kind:   core.ProviderKindSSHLease,
 		Targets: []core.TargetSpec{
 			{OS: core.TargetLinux},
 			{OS: core.TargetMacOS},

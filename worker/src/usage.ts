@@ -9,6 +9,8 @@ export interface CostLimits {
   maxActiveLeases: number;
   maxActiveLeasesPerOwner: number;
   maxActiveLeasesPerOrg: number;
+  capacityAdminOwners: string[];
+  maxActiveLeasesPerCapacityAdmin: number;
   maxMonthlyUSD: number;
   maxMonthlyUSDPerOwner: number;
   maxMonthlyUSDPerOrg: number;
@@ -100,6 +102,10 @@ export function costLimits(env: Env): CostLimits {
     maxActiveLeases: envInt(env.CRABBOX_MAX_ACTIVE_LEASES),
     maxActiveLeasesPerOwner: envInt(env.CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER),
     maxActiveLeasesPerOrg: envInt(env.CRABBOX_MAX_ACTIVE_LEASES_PER_ORG),
+    capacityAdminOwners: envList(env.CRABBOX_CAPACITY_ADMIN_OWNERS).map((owner) =>
+      owner.toLowerCase(),
+    ),
+    maxActiveLeasesPerCapacityAdmin: envInt(env.CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN),
     maxMonthlyUSD: envFloat(env.CRABBOX_MAX_MONTHLY_USD),
     maxMonthlyUSDPerOwner: envFloat(env.CRABBOX_MAX_MONTHLY_USD_PER_OWNER),
     maxMonthlyUSDPerOrg: envFloat(env.CRABBOX_MAX_MONTHLY_USD_PER_ORG),
@@ -118,11 +124,9 @@ export function enforceCostLimits(
   if (limits.maxActiveLeases > 0 && active.length + 1 > limits.maxActiveLeases) {
     return `active lease limit exceeded: ${active.length + 1}/${limits.maxActiveLeases}`;
   }
-  if (
-    limits.maxActiveLeasesPerOwner > 0 &&
-    ownerActive.length + 1 > limits.maxActiveLeasesPerOwner
-  ) {
-    return `active lease limit for owner exceeded: ${ownerActive.length + 1}/${limits.maxActiveLeasesPerOwner}`;
+  const ownerLimit = activeLeaseLimitForOwner(limits, candidate.owner);
+  if (ownerLimit > 0 && ownerActive.length + 1 > ownerLimit) {
+    return `active lease limit for owner exceeded: ${ownerActive.length + 1}/${ownerLimit}`;
   }
   if (limits.maxActiveLeasesPerOrg > 0 && orgActive.length + 1 > limits.maxActiveLeasesPerOrg) {
     return `active lease limit for org exceeded: ${orgActive.length + 1}/${limits.maxActiveLeasesPerOrg}`;
@@ -232,7 +236,7 @@ function leaseMatchesUsageFilter(lease: LeaseRecord, filter: UsageFilter): boole
 function leaseUsage(lease: LeaseRecord, now: Date): UsageAccumulator {
   const created = parseTime(lease.createdAt, now);
   const ended = parseTime(lease.endedAt || lease.releasedAt || "", now);
-  const stop = lease.state === "active" ? now : ended;
+  const stop = isLiveLease(lease) ? now : ended;
   const runtimeSeconds = Math.max(0, Math.trunc((stop.getTime() - created.getTime()) / 1000));
   const estimatedUSD = roundUSD((runtimeSeconds / 3600) * (lease.estimatedHourlyUSD || 0));
   return {
@@ -245,7 +249,11 @@ function leaseUsage(lease: LeaseRecord, now: Date): UsageAccumulator {
 }
 
 function isActiveLease(lease: LeaseRecord, now: Date): boolean {
-  return lease.state === "active" && Date.parse(lease.expiresAt) > now.getTime();
+  return isLiveLease(lease) && Date.parse(lease.expiresAt) > now.getTime();
+}
+
+function isLiveLease(lease: LeaseRecord): boolean {
+  return lease.state === "active" || lease.state === "provisioning";
 }
 
 function mapAccumulator(map: Map<string, UsageAccumulator>, key: string): UsageAccumulator {
@@ -302,6 +310,23 @@ function envInt(value: string | undefined): number {
 function envFloat(value: string | undefined): number {
   const parsed = Number.parseFloat(value ?? "");
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function envList(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function activeLeaseLimitForOwner(limits: CostLimits, owner: string): number {
+  if (
+    limits.maxActiveLeasesPerCapacityAdmin > 0 &&
+    limits.capacityAdminOwners.includes(owner.toLowerCase())
+  ) {
+    return Math.max(limits.maxActiveLeasesPerOwner, limits.maxActiveLeasesPerCapacityAdmin);
+  }
+  return limits.maxActiveLeasesPerOwner;
 }
 
 function overBudget(value: number, limit: number): boolean {
