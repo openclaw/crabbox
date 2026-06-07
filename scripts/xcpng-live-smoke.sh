@@ -56,7 +56,7 @@ load_xcpng_env_file() {
     elif [[ "$value" == \'*\' && "${#value}" -ge 2 ]]; then
       value="${value:1:${#value}-2}"
     fi
-    if [[ ! -v "$key" ]]; then
+    if [[ -z "${!key-}" ]]; then
       printf -v "$key" '%s' "$value"
       export "$key"
     fi
