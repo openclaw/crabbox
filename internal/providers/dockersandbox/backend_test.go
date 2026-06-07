@@ -1016,6 +1016,11 @@ func TestFlagApplicationAndValidation(t *testing.T) {
 		t.Fatalf("negative CPU err=%v", err)
 	}
 	bad = newTestConfig()
+	bad.DockerSandbox.CPUs = 2.25
+	if err := validateConfig(bad); err == nil || !strings.Contains(err.Error(), "whole number") {
+		t.Fatalf("fractional CPU err=%v", err)
+	}
+	bad = newTestConfig()
 	bad.DockerSandbox.Workdir = "/"
 	if err := validateConfig(bad); err == nil || !strings.Contains(err.Error(), "too broad") {
 		t.Fatalf("root workdir err=%v", err)

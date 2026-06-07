@@ -3,6 +3,7 @@ package dockersandbox
 import (
 	"flag"
 	"fmt"
+	"math"
 	"path"
 	"strings"
 )
@@ -112,6 +113,9 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.DockerSandbox.CPUs < 0 {
 		return exit(2, "docker-sandbox cpus must be greater than zero")
+	}
+	if cfg.DockerSandbox.CPUs != math.Trunc(cfg.DockerSandbox.CPUs) {
+		return exit(2, "docker-sandbox cpus must be a whole number")
 	}
 	if workdir := strings.TrimSpace(cfg.DockerSandbox.Workdir); workdir != "" {
 		clean := path.Clean(workdir)
