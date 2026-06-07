@@ -367,6 +367,41 @@ func TestFailureDigestUsesSSHCompatibleRouting(t *testing.T) {
 	}
 }
 
+func TestFailureDigestPreservesInheritedKubeconfigForKubeVirt(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/tmp/base.yaml:/tmp/cluster.yaml")
+	cfg := Config{
+		Provider: "kubevirt",
+		TargetOS: targetLinux,
+		KubeVirt: KubeVirtConfig{
+			Kubectl:   "kubectl",
+			Virtctl:   "virtctl",
+			Context:   "dev=west",
+			Namespace: "team-vms",
+		},
+	}
+	commands := failureDigestNextCommands(runFailureDigestInput{
+		Provider:       "kubevirt",
+		TargetOS:       targetLinux,
+		LeaseID:        "cbx_123",
+		CommandDisplay: "go test ./...",
+		RoutingArgs:    runFailureDigestRoutingArgs(cfg, "cbx_123"),
+		Classification: FailureClassification{RetryLikely: "unknown"},
+	}, "unknown")
+	joined := strings.Join(commands, "\n")
+	for _, want := range []string{
+		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox run --provider kubevirt",
+		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox stop --provider kubevirt",
+		"--kubevirt-context dev=west",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("commands missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "dev='west' crabbox") {
+		t.Fatalf("context value was hoisted as env assignment:\n%s", joined)
+	}
+}
+
 func TestFailureTailRedactsHTMLAuthBody(t *testing.T) {
 	tail := newStreamTailBuffer(40)
 	_, _ = tail.Write([]byte("<!doctype html><html><head><title>Cloudflare Access</title></head><body>login</body></html>\n"))

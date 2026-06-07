@@ -481,7 +481,25 @@ func fallbackFailureDigestRoutingArgs(input runFailureDigestInput) []string {
 }
 
 func crabboxCommandString(args []string) string {
-	return "crabbox " + strings.Join(readableShellWords(args), " ")
+	env := []string{}
+	rest := make([]string, 0, len(args))
+	index := 0
+	for index < len(args) && isShellEnvAssignment(args[index]) {
+		env = append(env, args[index])
+		index++
+	}
+	if index < len(args) {
+		rest = append(rest, args[index])
+		index++
+	}
+	for index < len(args) && isShellEnvAssignment(args[index]) {
+		env = append(env, args[index])
+		index++
+	}
+	rest = append(rest, args[index:]...)
+	command := append(env, "crabbox")
+	command = append(command, rest...)
+	return readableShellCommand(command)
 }
 
 func canSuggestRunRetry(commandDisplay string) bool {

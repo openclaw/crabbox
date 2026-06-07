@@ -936,6 +936,25 @@ func readableShellWords(words []string) []string {
 	return out
 }
 
+func readableShellCommand(words []string) string {
+	out := make([]string, 0, len(words))
+	seenCommand := false
+	for _, word := range words {
+		if !seenCommand && isShellEnvAssignment(word) {
+			key, value, _ := strings.Cut(word, "=")
+			out = append(out, key+"="+shellQuote(value))
+			continue
+		}
+		seenCommand = true
+		if shellBareWord(word) {
+			out = append(out, word)
+		} else {
+			out = append(out, shellQuote(word))
+		}
+	}
+	return strings.Join(out, " ")
+}
+
 func shellBareWord(value string) bool {
 	if value == "" {
 		return false

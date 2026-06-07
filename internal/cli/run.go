@@ -1596,7 +1596,7 @@ func runStopCommand(cfg Config, id string) string {
 	if strings.TrimSpace(id) != "" {
 		args = append(args, "--id", id)
 	}
-	return strings.Join(readableShellWords(args), " ")
+	return readableShellCommand(args)
 }
 
 func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []string {
@@ -1652,6 +1652,8 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		}
 		if strings.TrimSpace(cfg.KubeVirt.Kubeconfig) != "" {
 			args = append(args, "--kubevirt-kubeconfig", cfg.KubeVirt.Kubeconfig)
+		} else if value := strings.TrimSpace(os.Getenv("KUBECONFIG")); value != "" {
+			args = append([]string{"KUBECONFIG=" + value}, args...)
 		}
 		if strings.TrimSpace(cfg.KubeVirt.Context) != "" {
 			args = append(args, "--kubevirt-context", cfg.KubeVirt.Context)

@@ -61,7 +61,10 @@ required so claims cannot drift when a kubeconfig's current context changes.
 When `kubevirt.kubeconfig` is empty, the scope uses the inherited `KUBECONFIG`
 value; when both are empty it uses kubectl's default kubeconfig path. This
 allows the same slug to exist in different namespaces or clusters without
-`status`, `run`, `ssh`, or `stop` resolving the wrong VM.
+`status`, `run`, `ssh`, or `stop` resolving the wrong VM. Generated `stop` and
+failure-retry commands preserve that inherited `KUBECONFIG` value as an
+environment assignment so cleanup uses the same cluster later, including
+multi-file kubeconfig lists.
 
 Claims written by older Crabbox builds without a scope are treated as legacy
 state. New slug allocation checks the live VMs in the current namespace before

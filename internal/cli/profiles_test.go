@@ -669,6 +669,30 @@ func TestRunStopCommandIncludesKubeVirtRoutingFlags(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandIncludesInheritedKubeconfigForKubeVirt(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/tmp/base.yaml:/tmp/cluster.yaml")
+	got := runStopCommand(Config{
+		Provider: "kubevirt",
+		TargetOS: targetLinux,
+		KubeVirt: KubeVirtConfig{
+			Kubectl:   "kubectl",
+			Virtctl:   "virtctl",
+			Context:   "dev",
+			Namespace: "team-vms",
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox stop",
+		"--provider kubevirt",
+		"--kubevirt-context dev",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestRunStopCommandIncludesExternalRoutingFlags(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	got := runStopCommand(Config{
