@@ -49,6 +49,7 @@ if [[ "$1" == "doctor" ]]; then
     printf 'missing configured docker sandbox cli\n' >&2
     exit 92
   fi
+  printf 'ok      sbx_version provider=docker-sandbox version=sbx client fake\n'
 fi
 exit 0
 EOF
@@ -68,6 +69,7 @@ chmod +x bin/crabbox
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /classification=live_sbx_smoke_passed/);
+  assert.match(result.stdout, /sbx_version/);
   assert.doesNotMatch(result.stderr, /sbx not found on PATH/);
 
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
@@ -128,4 +130,53 @@ chmod +x "$out"
   assert.match(result.stderr, /classification=environment_blocked/);
   assert.match(result.stderr, /doctor\\ --provider\\ docker-sandbox/);
   assert.match(result.stderr, /virtualization unavailable/);
+});
+
+test("live docker sandbox smoke classifies quota-like provider blockers", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-docker-sandbox-quota-"));
+  const binDir = path.join(dir, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeExecutable(
+    path.join(binDir, "go"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then
+    out="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1 $2 $3" == "doctor --provider docker-sandbox" ]]; then
+  printf 'Docker Sandbox quota exceeded for this account\n' >&2
+  exit 29
+fi
+printf 'unexpected crabbox args: %s\n' "$*" >&2
+exit 99
+SCRIPT
+chmod +x "$out"
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-docker-sandbox-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      HOME: process.env.HOME ?? dir,
+      TMPDIR: process.env.TMPDIR ?? os.tmpdir(),
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 29, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=quota_blocked/);
+  assert.match(result.stderr, /quota exceeded/);
 });
