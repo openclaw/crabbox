@@ -1355,8 +1355,11 @@ func TestReleaseLeaseDeleteError(t *testing.T) {
 			Server:  core.Server{CloudID: "crabbox-blue-1234"},
 		},
 	})
-	if err != nil {
-		t.Fatalf("ReleaseLease should tolerate deleteVM failure for stale claim pruning, got: %v", err)
+	if err == nil {
+		t.Fatal("ReleaseLease should propagate deleteVM failure")
+	}
+	if !strings.Contains(err.Error(), "tart delete") {
+		t.Fatalf("error should mention tart delete: %v", err)
 	}
 }
 

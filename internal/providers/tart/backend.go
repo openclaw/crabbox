@@ -270,7 +270,9 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		return exit(2, "provider=%s release requires a tart instance name", providerName)
 	}
 	_ = b.stopVM(ctx, name)
-	_ = b.deleteVM(ctx, name)
+	if err := b.deleteVM(ctx, name); err != nil {
+		return err
+	}
 	if lease.LeaseID != "" {
 		removeLeaseClaim(lease.LeaseID)
 		removeStoredTestboxKey(lease.LeaseID)
