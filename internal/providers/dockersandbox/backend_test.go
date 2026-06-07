@@ -639,6 +639,37 @@ func TestStatusReadyMissingWaitAndTimeout(t *testing.T) {
 	}
 }
 
+func TestStatusWaitTimeoutDoesNotSleepPastDeadline(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := leasePrefix + "crabbox-my-app-short-timeout"
+	if err := claimLeaseForRepoProviderPond(leaseID, "short-timeout", providerName, "", t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPoll := statusPollInterval
+	statusPollInterval = 200 * time.Millisecond
+	defer func() { statusPollInterval = oldPoll }()
+
+	runner := newRunner(map[string]scriptedReply{
+		"ls": {stdout: `[{"name":"crabbox-my-app-short-timeout","status":"provisioning"}]`},
+	}, nil)
+	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+
+	start := time.Now()
+	_, err := backend.Status(context.Background(), StatusRequest{
+		ID:          "short-timeout",
+		Wait:        true,
+		WaitTimeout: 20 * time.Millisecond,
+	})
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
+		t.Fatalf("Status err=%v want timeout", err)
+	}
+	if elapsed >= statusPollInterval/2 {
+		t.Fatalf("status wait elapsed=%s, want it bounded by the 20ms wait timeout rather than the 200ms poll interval", elapsed)
+	}
+}
+
 func TestStopRejectsUnclaimedIDBeforeCallingRM(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	runner := newRunner(map[string]scriptedReply{"rm": {stdout: ""}}, nil)

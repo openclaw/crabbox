@@ -280,13 +280,25 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		if !req.Wait || view.Ready || dockerSandboxTerminalState(view.State) {
 			return view, nil
 		}
-		if b.now().After(deadline) {
+		remaining := deadline.Sub(b.now())
+		if remaining <= 0 {
 			return StatusView{}, exit(5, "timed out waiting for docker-sandbox sandbox %s to become ready", sandboxName)
 		}
+		sleepFor := statusPollInterval
+		if remaining < sleepFor {
+			sleepFor = remaining
+		}
+		timer := time.NewTimer(sleepFor)
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			return StatusView{}, ctx.Err()
-		case <-time.After(statusPollInterval):
+		case <-timer.C:
 		}
 	}
 }
