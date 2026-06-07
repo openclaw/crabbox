@@ -1336,6 +1336,35 @@ func TestImportRawVDIRedactsSessionTokenFromTransportError(t *testing.T) {
 	}
 }
 
+func TestImportRawVDIRedactsEndpointUserinfoFromTransportError(t *testing.T) {
+	client := &xapiClient{
+		endpoint: "http://api-user:api-password@xcp-ng.example.test/",
+		session:  "OpaqueRef:secret-session",
+		http: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodPost {
+				return xmlRPCHTTPResponse("OpaqueRef:task"), nil
+			}
+			return nil, errors.New("dial failed for " + req.URL.String())
+		})},
+	}
+	err := client.importRawVDI(context.Background(), "OpaqueRef:vdi", []byte("image"))
+	if err == nil {
+		t.Fatal("expected upload error")
+	}
+	text := err.Error()
+	for _, secret := range []string{"api-user", "api-password", "api-user:api-password"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("error leaked endpoint userinfo %q: %s", secret, text)
+		}
+	}
+	if strings.Contains(text, "***") {
+		t.Fatalf("error leaked masked password context instead of redacting userinfo: %s", text)
+	}
+	if !strings.Contains(text, "http://<redacted>@xcp-ng.example.test/import_raw_vdi/") {
+		t.Fatalf("error did not preserve redacted upload URL context: %s", text)
+	}
+}
+
 func TestImportRawVDIRedactsSessionTokenFromHTTPErrorBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {

@@ -456,18 +456,34 @@ func redactedURL(u *url.URL) string {
 		return ""
 	}
 	redacted := *u
+	if redacted.User != nil {
+		redacted.User = url.User("<redacted>")
+	}
 	q := redacted.Query()
 	if q.Has("session_id") {
 		q.Set("session_id", "<redacted>")
 		redacted.RawQuery = q.Encode()
 	}
-	return redacted.String()
+	text := redacted.String()
+	return strings.ReplaceAll(text, "%3Credacted%3E", "<redacted>")
 }
 
 var (
 	sessionIDTextPattern = regexp.MustCompile(`(?i)(session_id=)[^&\s]+`)
 	uuidTextPattern      = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 )
+
+func urlUserinfoSecrets(u *url.URL) []string {
+	if u == nil || u.User == nil {
+		return nil
+	}
+	secrets := []string{u.User.String()}
+	if password, ok := u.User.Password(); ok {
+		secrets = append(secrets, u.User.Username()+":***", password)
+	}
+	secrets = append(secrets, u.User.Username())
+	return secrets
+}
 
 func redactSessionIDText(text string) string {
 	return sessionIDTextPattern.ReplaceAllString(text, `${1}<redacted>`)
@@ -482,6 +498,9 @@ func redactXAPISensitiveText(text string, secrets ...string) string {
 		}
 		text = strings.ReplaceAll(text, secret, "<redacted>")
 		if escaped := url.QueryEscape(secret); escaped != secret {
+			text = strings.ReplaceAll(text, escaped, "<redacted>")
+		}
+		if escaped := url.PathEscape(secret); escaped != secret {
 			text = strings.ReplaceAll(text, escaped, "<redacted>")
 		}
 		var xmlEscaped bytes.Buffer
@@ -611,7 +630,8 @@ func (c *xapiClient) importRawVDI(ctx context.Context, vdiRef string, image []by
 	req.Header.Set("Content-Type", "application/octet-stream")
 	res, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("upload xcp-ng config-drive %s to %s: %s", vdiRef, redactedURL(u), redactXAPISensitiveText(err.Error(), c.session))
+		secrets := append([]string{c.session}, urlUserinfoSecrets(u)...)
+		return fmt.Errorf("upload xcp-ng config-drive %s to %s: %s", vdiRef, redactedURL(u), redactXAPISensitiveText(err.Error(), secrets...))
 	}
 	defer res.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
