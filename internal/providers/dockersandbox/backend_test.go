@@ -1020,6 +1020,28 @@ func TestBuildCommandShellModePreservesShellScript(t *testing.T) {
 	}
 }
 
+func TestBuildCommandSingleShellStringStaysRaw(t *testing.T) {
+	got, err := buildCommand([]string{"echo one && echo two"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"sh", "-lc", "echo one && echo two"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("command=%#v want %#v", got, want)
+	}
+}
+
+func TestBuildCommandLeadingEnvAssignmentQuotesArgv(t *testing.T) {
+	got, err := buildCommand([]string{"GREETING=hello world", "printf", "%s\n", "$GREETING"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"sh", "-lc", "GREETING='hello world' 'printf' '%s\n' '$GREETING'"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("command=%#v want %#v", got, want)
+	}
+}
+
 func TestSBXErrorFormattingEdges(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	stderr.WriteString("plain failure")
