@@ -49,3 +49,15 @@ external:
 		t.Fatalf("external=%#v", cfg.External)
 	}
 }
+
+func TestExternalArgEnvOverridesConfigArgs(t *testing.T) {
+	t.Setenv("CRABBOX_EXTERNAL_ARG", "--quick-smoke")
+	cfg := baseConfig()
+	cfg.External.Args = []string{"--profile", "dev"}
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.External.Args) != 1 || cfg.External.Args[0] != "--quick-smoke" {
+		t.Fatalf("external args=%#v", cfg.External.Args)
+	}
+}

@@ -39,9 +39,15 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 	if response.Lease == nil {
 		return core.LeaseTarget{}, core.Exit(5, "external provider acquire returned no lease")
 	}
+	if response.Lease.LeaseID != "" && response.Lease.LeaseID != desired.LeaseID {
+		if !req.Keep {
+			_, _ = b.invoke(context.Background(), protocolRequest{Operation: "release", Lease: response.Lease})
+		}
+		return core.LeaseTarget{}, core.Exit(4, "external provider lease identity changed: expected %s, found %s", desired.LeaseID, response.Lease.LeaseID)
+	}
 	fillDesired(response.Lease, desired)
 	lease := response.Lease.target(b.cfg, req.Keep)
-	if err := validateLease(lease, true); err != nil {
+	if err := validateLease(lease, true, true); err != nil {
 		if !req.Keep {
 			_, _ = b.invoke(context.Background(), protocolRequest{Operation: "release", Lease: leaseForProtocol(lease)})
 		}
@@ -116,7 +122,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 		return core.LeaseTarget{}, core.Exit(5, "external provider resolve returned no stable leaseId for %q", req.ID)
 	}
 	lease := response.Lease.target(b.cfg, keep)
-	if err := validateLease(lease, !req.ReleaseOnly); err != nil {
+	if err := validateLease(lease, !req.ReleaseOnly, !req.ReleaseOnly); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	if req.ReleaseOnly {
@@ -162,13 +168,18 @@ func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.D
 }
 
 func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	if err := validateExternalReleaseLeaseID(req.Lease.LeaseID); err != nil {
+		return err
+	}
 	_, err := b.invoke(ctx, protocolRequest{
 		Operation: "release",
 		Lease:     leaseForProtocol(req.Lease),
 		Force:     req.Force,
 	})
 	if err == nil {
-		core.RemoveLeaseClaim(req.Lease.LeaseID)
+		if externalLeaseIDSafeForClaimPath(req.Lease.LeaseID) {
+			core.RemoveLeaseClaim(req.Lease.LeaseID)
+		}
 		core.RemoveExternalRouting(req.Lease.LeaseID)
 	}
 	return err
@@ -343,9 +354,13 @@ func leaseSlugForClaim(lease core.LeaseTarget, fallback string) string {
 	return core.NormalizeLeaseSlug(fallback)
 }
 
-func validateLease(lease core.LeaseTarget, requireSSH bool) error {
-	if strings.TrimSpace(lease.LeaseID) == "" {
-		return core.Exit(5, "external provider leaseId is required")
+func validateLease(lease core.LeaseTarget, requireSSH, requireCanonicalLeaseID bool) error {
+	if requireCanonicalLeaseID {
+		if err := validateExternalCanonicalLeaseID(lease.LeaseID); err != nil {
+			return err
+		}
+	} else if err := validateExternalReleaseLeaseID(lease.LeaseID); err != nil {
+		return err
 	}
 	if strings.TrimSpace(lease.Server.Name) == "" {
 		return core.Exit(5, "external provider lease name is required")
@@ -356,4 +371,27 @@ func validateLease(lease core.LeaseTarget, requireSSH bool) error {
 		}
 	}
 	return nil
+}
+
+func validateExternalCanonicalLeaseID(leaseID string) error {
+	leaseID = strings.TrimSpace(leaseID)
+	if leaseID == "" {
+		return core.Exit(5, "external provider leaseId is required")
+	}
+	if !core.IsCanonicalLeaseID(leaseID) {
+		return core.Exit(5, "external provider leaseId %q must be the Crabbox-generated cbx_... id; put provider resource ids in cloudId", leaseID)
+	}
+	return nil
+}
+
+func validateExternalReleaseLeaseID(leaseID string) error {
+	if strings.TrimSpace(leaseID) == "" {
+		return core.Exit(5, "external provider leaseId is required")
+	}
+	return nil
+}
+
+func externalLeaseIDSafeForClaimPath(leaseID string) bool {
+	leaseID = strings.TrimSpace(leaseID)
+	return leaseID != "" && !strings.ContainsAny(leaseID, `/\`)
 }

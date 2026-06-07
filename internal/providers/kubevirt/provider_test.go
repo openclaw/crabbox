@@ -231,6 +231,52 @@ func TestStartVMIgnoresAlreadyRunningConflict(t *testing.T) {
 	}
 }
 
+func TestWaitForVMIReadyForSSHReturnsWhenRunning(t *testing.T) {
+	cfg := testConfig(t)
+	runner := &recordingRunner{stdout: `{"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.waitForVMIReadyForSSH(context.Background(), "vm-running", time.Second); err != nil {
+		t.Fatalf("waitForVMIReadyForSSH: %v", err)
+	}
+	if len(runner.calls) != 1 || !strings.Contains(runner.calls[0], "get virtualmachineinstances.kubevirt.io/vm-running") {
+		t.Fatalf("calls=%#v", runner.calls)
+	}
+}
+
+func TestWaitForVMIReadyForSSHAllowsScheduledStatus(t *testing.T) {
+	cfg := testConfig(t)
+	runner := &recordingRunner{stdout: `{"status":{"phase":"Scheduled","conditions":[{"type":"Ready","status":"False","reason":"GuestNotRunning","message":"Guest VM is not reported as running"}]}}`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	status, err := backend.waitForVMIReadyForSSH(context.Background(), "vm-scheduled", time.Second)
+	if err != nil {
+		t.Fatalf("waitForVMIReadyForSSH: %v", err)
+	}
+	if status.Phase != "Scheduled" {
+		t.Fatalf("phase=%q", status.Phase)
+	}
+}
+
+func TestWaitForVMIReadyForSSHReportsConditionsAndEvents(t *testing.T) {
+	cfg := testConfig(t)
+	runner := &recordingRunner{outputs: []string{
+		`{"status":{"phase":"Scheduling","conditions":[{"type":"Ready","status":"False","reason":"GuestNotRunning","message":"Guest VM is not reported as running"}]}}`,
+		`{"items":[{"type":"Normal","reason":"Created","message":"VirtualMachineInstance defined."}]}`,
+	}}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	_, err := backend.waitForVMIReadyForSSH(context.Background(), "vm-stuck", time.Nanosecond)
+	if err == nil {
+		t.Fatal("expected timeout")
+	}
+	for _, want := range []string{"GuestNotRunning", "Guest VM is not reported as running", "VirtualMachineInstance defined"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
+	}
+	if len(runner.calls) != 2 || !strings.Contains(runner.calls[1], "get events --field-selector involvedObject.name=vm-stuck") {
+		t.Fatalf("calls=%#v", runner.calls)
+	}
+}
+
 func TestReleaseDeletesGeneratedKey(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg := testConfig(t)
@@ -275,6 +321,61 @@ func TestReleaseRetainedVMPreservesClaimAndKey(t *testing.T) {
 	}
 	if claim, ok, err := core.ResolveLeaseClaimForProvider("retained", providerName); err != nil || !ok || claim.LeaseID != "cbx_retained" {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+}
+
+func TestStatusDoesNotStartRetainedStoppedVM(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig(t)
+	if err := core.ClaimLeaseForRepoProvider("cbx_retained", "retained", providerName, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	server := core.Server{Name: "vm-retained", Labels: map[string]string{"name": "vm-retained"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_retained", server, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{stdout: `{"metadata":{"name":"vm-retained","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_retained","crabbox.dev/slug":"retained"},"annotations":{"crabbox.dev/state":"ready"}},"status":{"printableStatus":"Stopped"}}`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "retained"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.State != "Stopped" || view.Ready {
+		t.Fatalf("status=%#v", view)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, " start ") {
+			t.Fatalf("status started VM: calls=%#v", runner.calls)
+		}
+	}
+}
+
+func TestStatusRequiresSSHProbeBeforeReady(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig(t)
+	if err := core.ClaimLeaseForRepoProvider("cbx_running", "running", providerName, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	server := core.Server{Name: "vm-running", Labels: map[string]string{"name": "vm-running"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_running", server, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{outputs: []string{
+		`{"metadata":{"name":"vm-running","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_running","crabbox.dev/slug":"running"},"annotations":{"crabbox.dev/state":"ready"}},"status":{"printableStatus":"Running"}}`,
+		`{"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}`,
+	}}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	view, err := backend.Status(ctx, core.StatusRequest{ID: "running"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Ready {
+		t.Fatalf("status=%#v", view)
+	}
+	if len(runner.calls) != 2 || !strings.Contains(runner.calls[1], "get virtualmachineinstances.kubevirt.io/vm-running") {
+		t.Fatalf("calls=%#v", runner.calls)
 	}
 }
 

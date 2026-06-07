@@ -10,6 +10,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cb="${CRABBOX_BIN:-$root/bin/crabbox}"
 repo="${CRABBOX_LIVE_REPO:-$PWD}"
 providers=",${CRABBOX_LIVE_PROVIDERS-aws,hetzner},"
+default_live_command='if [ -f go.mod ]; then test -f go.mod; elif [ -f package.json ]; then test -f package.json; else test -d .; fi; printf crabbox-live-ok; printf " pwd=%s\n" "$PWD"'
+live_command="${CRABBOX_LIVE_COMMAND:-$default_live_command}"
 config_paths=()
 
 run_in_repo() {
@@ -163,7 +165,7 @@ provider_smoke() {
 
   local runout
   # shellcheck disable=SC2016 # expanded by the remote shell.
-  capture_run runout run_in_repo "$cb" run --id "$slug" --shell -- 'test -f package.json && printf crabbox-live-ok && printf " pwd=%s\n" "$PWD"'
+  capture_run runout run_in_repo "$cb" run --id "$slug" --shell -- "$live_command"
   printf '%s\n' "$runout"
   local runid
   runid="$(printf '%s\n' "$runout" | rg -o 'run_[a-f0-9]{12}' | tail -1 || true)"
@@ -393,6 +395,118 @@ sprites_smoke() {
   lease=""
 }
 
+kubevirt_smoke() {
+  need_tool jq
+  need_tool rg
+  need_tool kubectl
+  need_tool virtctl
+
+  local template="${CRABBOX_LIVE_KUBEVIRT_TEMPLATE:-${CRABBOX_KUBEVIRT_TEMPLATE:-$(config_value kubevirt.template || true)}}"
+  if [[ -z "$template" ]]; then
+    echo "kubevirt smoke requires CRABBOX_LIVE_KUBEVIRT_TEMPLATE, CRABBOX_KUBEVIRT_TEMPLATE, or kubevirt.template" >&2
+    return 2
+  fi
+
+  local kubevirt_env=(CRABBOX_KUBEVIRT_TEMPLATE="$template")
+  local route_args=(--provider kubevirt)
+  if [[ -n "${CRABBOX_LIVE_KUBEVIRT_CONTEXT:-}" ]]; then
+    kubevirt_env+=(CRABBOX_KUBEVIRT_CONTEXT="$CRABBOX_LIVE_KUBEVIRT_CONTEXT")
+  fi
+  if [[ -n "${CRABBOX_LIVE_KUBEVIRT_NAMESPACE:-}" ]]; then
+    kubevirt_env+=(CRABBOX_KUBEVIRT_NAMESPACE="$CRABBOX_LIVE_KUBEVIRT_NAMESPACE")
+  fi
+  local lease_args=("${route_args[@]}" --ttl "${CRABBOX_LIVE_KUBEVIRT_TTL:-15m}" --idle-timeout "${CRABBOX_LIVE_KUBEVIRT_IDLE_TIMEOUT:-5m}")
+  kubevirt_run() {
+    (cd "$repo" && env "${kubevirt_env[@]}" "$cb" "$@")
+  }
+
+  local lease=""
+  local slug=""
+  cleanup() {
+    if [[ -n "$lease" ]]; then
+      if [[ -n "$slug" ]]; then
+        kubevirt_run stop "${route_args[@]}" "$slug" || kubevirt_run stop "${route_args[@]}" "$lease" || true
+      else
+        kubevirt_run stop "${route_args[@]}" "$lease" || true
+      fi
+    fi
+  }
+  trap cleanup RETURN
+
+  kubevirt_run doctor "${route_args[@]}"
+  local out
+  capture_run out kubevirt_run warmup "${lease_args[@]}" --slug "${CRABBOX_LIVE_KUBEVIRT_SLUG:-kv-smoke-$$}" --timing-json
+  printf '%s\n' "$out"
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  slug="$(printf '%s\n' "$out" | extract_slug)"
+  test -n "$lease"
+  test -n "$slug"
+
+  kubevirt_run status "${route_args[@]}" --id "$slug" --wait --wait-timeout "${CRABBOX_LIVE_KUBEVIRT_WAIT_TIMEOUT:-5m}"
+  kubevirt_run inspect "${route_args[@]}" --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
+  local runout
+  capture_run runout kubevirt_run run "${route_args[@]}" --id "$slug" --shell -- "$live_command"
+  printf '%s\n' "$runout"
+  kubevirt_run list "${route_args[@]}" --json | jq 'map({id:(.id // .CloudID),slug:(.slug // .labels.slug),provider:(.provider // .Provider // .labels.provider),state:(.state // .labels.state // .status)})'
+  kubevirt_run stop "${route_args[@]}" "$slug" || kubevirt_run stop "${route_args[@]}" "$lease"
+  lease=""
+}
+
+external_smoke() {
+  need_tool jq
+  need_tool rg
+
+  local command="${CRABBOX_LIVE_EXTERNAL_COMMAND:-${CRABBOX_EXTERNAL_COMMAND:-$(config_value external.command || true)}}"
+  if [[ -z "$command" ]]; then
+    echo "external smoke requires CRABBOX_LIVE_EXTERNAL_COMMAND, CRABBOX_EXTERNAL_COMMAND, or external.command" >&2
+    return 2
+  fi
+
+  local external_env=(CRABBOX_EXTERNAL_COMMAND="$command")
+  local route_args=(--provider external)
+  if [[ -n "${CRABBOX_LIVE_EXTERNAL_ARG:-}" ]]; then
+    external_env+=(CRABBOX_EXTERNAL_ARG="$CRABBOX_LIVE_EXTERNAL_ARG")
+  fi
+  if [[ -n "${CRABBOX_LIVE_EXTERNAL_WORK_ROOT:-}" ]]; then
+    external_env+=(CRABBOX_EXTERNAL_WORK_ROOT="$CRABBOX_LIVE_EXTERNAL_WORK_ROOT")
+  fi
+  local lease_args=("${route_args[@]}" --ttl "${CRABBOX_LIVE_EXTERNAL_TTL:-15m}" --idle-timeout "${CRABBOX_LIVE_EXTERNAL_IDLE_TIMEOUT:-5m}")
+  external_run() {
+    (cd "$repo" && env "${external_env[@]}" "$cb" "$@")
+  }
+
+  local lease=""
+  local slug=""
+  cleanup() {
+    if [[ -n "$lease" ]]; then
+      if [[ -n "$slug" ]]; then
+        external_run stop "${route_args[@]}" "$slug" || external_run stop "${route_args[@]}" "$lease" || true
+      else
+        external_run stop "${route_args[@]}" "$lease" || true
+      fi
+    fi
+  }
+  trap cleanup RETURN
+
+  external_run doctor "${route_args[@]}"
+  local out
+  capture_run out external_run warmup "${lease_args[@]}" --slug "${CRABBOX_LIVE_EXTERNAL_SLUG:-external-smoke-$$}" --timing-json
+  printf '%s\n' "$out"
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  slug="$(printf '%s\n' "$out" | extract_slug)"
+  test -n "$lease"
+  test -n "$slug"
+
+  external_run status "${route_args[@]}" --id "$slug" --wait --wait-timeout "${CRABBOX_LIVE_EXTERNAL_WAIT_TIMEOUT:-5m}"
+  external_run inspect "${route_args[@]}" --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
+  local runout
+  capture_run runout external_run run "${route_args[@]}" --id "$slug" --shell -- "$live_command"
+  printf '%s\n' "$runout"
+  external_run list "${route_args[@]}" --json | jq 'map({id:(.id // .CloudID),slug:(.slug // .labels.slug),provider:(.provider // .Provider // .labels.provider),state:(.state // .labels.state // .status)})'
+  external_run stop "${route_args[@]}" "$slug" || external_run stop "${route_args[@]}" "$lease"
+  lease=""
+}
+
 run_coordinator_preamble() {
   run_in_repo "$cb" whoami --json
   run_in_repo "$cb" doctor
@@ -400,7 +514,11 @@ run_coordinator_preamble() {
 }
 
 needs_coordinator_preamble() {
-  [[ "${CRABBOX_LIVE_COORDINATOR:-1}" == "1" ]]
+  case "${CRABBOX_LIVE_COORDINATOR:-auto}" in
+    0|false|no) return 1 ;;
+    1|true|yes) return 0 ;;
+  esac
+  has_provider aws || has_provider hetzner || has_provider blacksmith-testbox
 }
 
 if needs_coordinator_preamble; then
@@ -445,6 +563,14 @@ fi
 
 if has_provider wandb; then
   wandb_smoke
+fi
+
+if has_provider kubevirt; then
+  kubevirt_smoke
+fi
+
+if has_provider external; then
+  external_smoke
 fi
 
 admin_out="$(run_in_repo "$cb" admin leases --state active --json 2>&1)" || {

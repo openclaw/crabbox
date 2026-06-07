@@ -3262,6 +3262,9 @@ func applyEnv(cfg *Config) error {
 		cfg.KubeVirt.DeleteOnRelease = value
 	}
 	cfg.External.Command = getenv("CRABBOX_EXTERNAL_COMMAND", cfg.External.Command)
+	if arg := os.Getenv("CRABBOX_EXTERNAL_ARG"); arg != "" {
+		cfg.External.Args = []string{arg}
+	}
 	cfg.External.WorkRoot = getenv("CRABBOX_EXTERNAL_WORK_ROOT", cfg.External.WorkRoot)
 	cfg.External.RoutingFile = getenv("CRABBOX_EXTERNAL_ROUTING_FILE", cfg.External.RoutingFile)
 	cfg.Namespace.Image = getenv("CRABBOX_NAMESPACE_IMAGE", cfg.Namespace.Image)

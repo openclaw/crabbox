@@ -47,9 +47,27 @@ Environment:
 
 ```text
 CRABBOX_EXTERNAL_COMMAND
+CRABBOX_EXTERNAL_ARG
 CRABBOX_EXTERNAL_WORK_ROOT
 CRABBOX_EXTERNAL_ROUTING_FILE
 ```
+
+The repository live harness can exercise a configured external provider:
+
+```sh
+CRABBOX_LIVE=1 \
+CRABBOX_LIVE_COORDINATOR=0 \
+CRABBOX_LIVE_PROVIDERS=external \
+CRABBOX_LIVE_EXTERNAL_COMMAND=/absolute/path/provider \
+scripts/live-smoke.sh
+```
+
+The command may also come from `external.command` in the Crabbox config.
+`CRABBOX_LIVE_EXTERNAL_ARG` adds one command argument through
+`CRABBOX_EXTERNAL_ARG` for quick local smoke runs; use config `external.args`
+for repeatable multi-argument setups.
+`CRABBOX_LIVE_COMMAND` overrides the command executed inside the leased box.
+The live harness also needs `jq` and `rg` on the operator machine.
 
 ## Protocol
 
@@ -131,3 +149,10 @@ human-readable `message`. Any operation may return `{"error":"..."}`.
 
 For `acquire`, omitted `leaseId`, `slug`, or `name` fields inherit the
 corresponding values from `desired`.
+
+`leaseId` is Crabbox's local lease identity. For new `acquire` responses and
+non-release `resolve` responses, it must be the generated `cbx_...` value from
+`desired`. External systems should put their own resource identifier in
+`cloudId`; Crabbox persists claims and stop routing by `leaseId`. Release-only
+paths still accept older protocol-v1 provider IDs so existing leases can be
+stopped, but path-shaped legacy IDs are not used for local claim deletion.

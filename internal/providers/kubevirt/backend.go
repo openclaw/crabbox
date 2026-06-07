@@ -102,6 +102,14 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 	return lease, nil
 }
 
+func (b *leaseBackend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
+	item, name, leaseID, slug, err := b.resolveStatusItem(ctx, req.ID)
+	if err != nil {
+		return core.StatusView{}, err
+	}
+	return b.statusView(ctx, item, name, leaseID, slug), nil
+}
+
 func (b *leaseBackend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseView, error) {
 	items, err := b.listVMs(ctx)
 	if err != nil {
@@ -209,8 +217,12 @@ func (b *leaseBackend) prepareLease(ctx context.Context, name, leaseID, slug, ke
 		server.Labels[key] = value
 	}
 	server.PublicNet.IPv4.IP = name
-	if err := core.WaitForSSHReady(ctx, &target, b.rt.Stderr, "KubeVirt SSH", core.BootstrapWaitTimeout(b.cfg)); err != nil {
+	vmiStatus, err := b.waitForVMIReadyForSSH(ctx, name, kubeVirtStatusTimeout(b.cfg))
+	if err != nil {
 		return core.LeaseTarget{}, err
+	}
+	if err := core.WaitForSSHReady(ctx, &target, b.rt.Stderr, "KubeVirt SSH", core.BootstrapWaitTimeout(b.cfg)); err != nil {
+		return core.LeaseTarget{}, core.Exit(5, "%v; KubeVirt VMI diagnostics: %s", err, b.vmiDiagnostics(ctx, name, vmiStatus, nil))
 	}
 	server.Status = "ready"
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.cfg, "ready", time.Now().UTC())
@@ -307,6 +319,104 @@ func (b *leaseBackend) getVM(ctx context.Context, name string) (kubeVirtItem, er
 		return kubeVirtItem{}, core.Exit(5, "KubeVirt VM lookup returned invalid JSON: %v", err)
 	}
 	return item, nil
+}
+
+func (b *leaseBackend) getVMI(ctx context.Context, name string) (kubeVirtVMI, error) {
+	out, err := b.runKubectl(ctx, nil, "get", "virtualmachineinstances.kubevirt.io/"+name, "-o", "json")
+	if err != nil {
+		return kubeVirtVMI{}, err
+	}
+	var item kubeVirtVMI
+	if err := json.Unmarshal([]byte(out), &item); err != nil {
+		return kubeVirtVMI{}, core.Exit(5, "KubeVirt VMI lookup returned invalid JSON: %v", err)
+	}
+	return item, nil
+}
+
+func (b *leaseBackend) waitForVMIReadyForSSH(ctx context.Context, name string, timeout time.Duration) (kubeVirtVMIStatus, error) {
+	start := time.Now()
+	deadline := start.Add(timeout)
+	var last kubeVirtVMIStatus
+	var lastErr error
+	for {
+		if ctx.Err() != nil {
+			return last, context.Cause(ctx)
+		}
+		item, err := b.getVMI(ctx, name)
+		if err == nil {
+			lastErr = nil
+			last = item.Status
+			if vmiAllowsSSHProbe(last) {
+				return last, nil
+			}
+			if vmiTerminalPhase(last.Phase) {
+				return last, core.Exit(5, "KubeVirt VMI %s reached terminal phase before SSH: %s", name, b.vmiDiagnostics(ctx, name, last, nil))
+			}
+		} else if kubeVirtNotFound(err) {
+			lastErr = err
+		} else {
+			return last, err
+		}
+		if time.Now().After(deadline) {
+			return last, core.Exit(5, "timed out waiting for KubeVirt VMI %s to be scheduled for SSH probing: %s", name, b.vmiDiagnostics(ctx, name, last, lastErr))
+		}
+		if b.rt.Stderr != nil {
+			fmt.Fprintf(b.rt.Stderr, "waiting for KubeVirt VMI %s to be scheduled... elapsed=%s remaining=%s %s\n", name, time.Since(start).Round(time.Second), time.Until(deadline).Round(time.Second), vmiStatusSummary(last, lastErr))
+		}
+		timer := time.NewTimer(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return last, context.Cause(ctx)
+		case <-timer.C:
+		}
+	}
+}
+
+func (b *leaseBackend) vmiDiagnostics(ctx context.Context, name string, status kubeVirtVMIStatus, lastErr error) string {
+	parts := []string{vmiStatusSummary(status, lastErr)}
+	if events := b.eventSummary(ctx, name); events != "" {
+		parts = append(parts, "events="+events)
+	}
+	return strings.Join(parts, " ")
+}
+
+func (b *leaseBackend) eventSummary(ctx context.Context, name string) string {
+	out, err := b.runKubectl(ctx, nil, "get", "events", "--field-selector", "involvedObject.name="+name, "--sort-by=.lastTimestamp", "-o", "json")
+	if err != nil {
+		return ""
+	}
+	var list kubeVirtEventList
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		return ""
+	}
+	if len(list.Items) == 0 {
+		return ""
+	}
+	start := len(list.Items) - 5
+	if start < 0 {
+		start = 0
+	}
+	parts := make([]string, 0, len(list.Items)-start)
+	for _, item := range list.Items[start:] {
+		piece := strings.TrimSpace(item.Type)
+		if item.Reason != "" {
+			if piece != "" {
+				piece += "/"
+			}
+			piece += item.Reason
+		}
+		if item.Message != "" {
+			piece += ":" + item.Message
+		}
+		parts = append(parts, compactDiagnostic(piece, 240))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (b *leaseBackend) findVMByLabel(ctx context.Context, key, value string) (kubeVirtItem, bool, error) {
@@ -476,6 +586,80 @@ func (b *leaseBackend) itemToServer(item kubeVirtItem) core.Server {
 	return server
 }
 
+func (b *leaseBackend) statusView(ctx context.Context, item kubeVirtItem, name, leaseID, slug string) core.StatusView {
+	server := b.itemToServer(item)
+	if server.Labels == nil {
+		server.Labels = map[string]string{}
+	}
+	state := kubeVirtVMState(item, server)
+	server.Status = state
+	server.Labels["state"] = state
+	server.PublicNet.IPv4.IP = name
+	target := b.sshTarget(name, b.statusSSHKey(leaseID))
+	ready := false
+	if kubeVirtStatusReady(state) {
+		allowProbe := true
+		if vmi, err := b.getVMI(ctx, name); err == nil {
+			allowProbe = vmiAllowsSSHProbe(vmi.Status)
+		}
+		ready = allowProbe && core.ProbeSSHReady(ctx, &target, 4*time.Second)
+	}
+	return core.StatusView{
+		ID:               leaseID,
+		Slug:             slug,
+		Provider:         providerName,
+		TargetOS:         core.TargetLinux,
+		State:            state,
+		ServerID:         server.DisplayID(),
+		ServerType:       server.ServerType.Name,
+		Host:             server.PublicNet.IPv4.IP,
+		Pond:             server.Labels["pond"],
+		Network:          core.NetworkPublic,
+		SSHHost:          target.Host,
+		SSHUser:          target.User,
+		SSHPort:          target.Port,
+		SSHFallbackPorts: target.FallbackPorts,
+		SSHKey:           target.Key,
+		LastTouchedAt:    core.Blank(core.LeaseLabelTimeDisplay(server.Labels["last_touched_at"]), server.Labels["last_touched_at"]),
+		IdleFor:          core.IdleForString(server.Labels["last_touched_at"], time.Now()),
+		IdleTimeout:      core.LeaseLabelDurationDisplay(server.Labels["idle_timeout_secs"], server.Labels["idle_timeout"]),
+		ExpiresAt:        core.Blank(core.LeaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]),
+		Labels:           server.Labels,
+		HasHost:          target.Host != "",
+		Ready:            ready,
+	}
+}
+
+func (b *leaseBackend) statusSSHKey(leaseID string) string {
+	if keyPath := strings.TrimSpace(b.cfg.KubeVirt.SSHKey); keyPath != "" {
+		return keyPath
+	}
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		return ""
+	}
+	if _, err := os.Stat(keyPath); err == nil {
+		return keyPath
+	}
+	return ""
+}
+
+func kubeVirtVMState(item kubeVirtItem, server core.Server) string {
+	if state := strings.TrimSpace(item.Status.PrintableStatus); state != "" {
+		return state
+	}
+	return core.Blank(strings.TrimSpace(server.Labels["state"]), server.Status)
+}
+
+func kubeVirtStatusReady(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "ready", "running":
+		return true
+	default:
+		return false
+	}
+}
+
 type kubeVirtList struct {
 	Items []kubeVirtItem `json:"items"`
 }
@@ -490,6 +674,95 @@ type kubeVirtItem struct {
 	Status struct {
 		PrintableStatus string `json:"printableStatus"`
 	} `json:"status"`
+}
+
+type kubeVirtVMI struct {
+	Status kubeVirtVMIStatus `json:"status"`
+}
+
+type kubeVirtVMIStatus struct {
+	Phase      string              `json:"phase"`
+	Conditions []kubeVirtCondition `json:"conditions"`
+}
+
+type kubeVirtCondition struct {
+	Type    string `json:"type"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+}
+
+type kubeVirtEventList struct {
+	Items []kubeVirtEvent `json:"items"`
+}
+
+type kubeVirtEvent struct {
+	Type    string `json:"type"`
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+}
+
+func kubeVirtStatusTimeout(cfg core.Config) time.Duration {
+	timeout := core.BootstrapWaitTimeout(cfg)
+	if timeout > 10*time.Minute {
+		return 10 * time.Minute
+	}
+	return timeout
+}
+
+func vmiReportsRunning(status kubeVirtVMIStatus) bool {
+	if strings.EqualFold(status.Phase, "Running") {
+		return true
+	}
+	for _, condition := range status.Conditions {
+		if condition.Type == "Ready" && strings.EqualFold(condition.Status, "True") {
+			return true
+		}
+	}
+	return false
+}
+
+func vmiAllowsSSHProbe(status kubeVirtVMIStatus) bool {
+	return vmiReportsRunning(status) || strings.EqualFold(status.Phase, "Scheduled")
+}
+
+func vmiTerminalPhase(phase string) bool {
+	return strings.EqualFold(phase, "Failed") || strings.EqualFold(phase, "Succeeded")
+}
+
+func kubeVirtNotFound(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not found") || strings.Contains(message, "notfound")
+}
+
+func vmiStatusSummary(status kubeVirtVMIStatus, lastErr error) string {
+	if lastErr != nil {
+		return "lookup=" + compactDiagnostic(lastErr.Error(), 300)
+	}
+	phase := core.Blank(strings.TrimSpace(status.Phase), "unknown")
+	if len(status.Conditions) == 0 {
+		return "phase=" + phase + " conditions=none"
+	}
+	parts := make([]string, 0, len(status.Conditions))
+	for _, condition := range status.Conditions {
+		piece := condition.Type + "=" + condition.Status
+		if condition.Reason != "" {
+			piece += "/" + condition.Reason
+		}
+		if condition.Message != "" {
+			piece += ":" + condition.Message
+		}
+		parts = append(parts, compactDiagnostic(piece, 240))
+	}
+	return "phase=" + phase + " conditions=" + strings.Join(parts, ",")
+}
+
+func compactDiagnostic(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if limit > 0 && len(value) > limit {
+		return value[:limit] + "..."
+	}
+	return value
 }
 
 var crabboxNamePattern = regexp.MustCompile(`^crabbox-(.+)-[0-9a-f]{8}$`)
@@ -564,6 +837,60 @@ func (b *leaseBackend) resolveIdentity(ctx context.Context, identifier string) (
 		return "", "", "", false, err
 	}
 	return identityFromItem(item, identifier)
+}
+
+func (b *leaseBackend) resolveStatusItem(ctx context.Context, identifier string) (kubeVirtItem, string, string, string, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return kubeVirtItem{}, "", "", "", core.Exit(2, "provider=%s requires --id <vm-name-or-slug>", providerName)
+	}
+	if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName); err != nil {
+		return kubeVirtItem{}, "", "", "", err
+	} else if ok {
+		slug := core.Blank(claim.Slug, core.NewLeaseSlug(claim.LeaseID))
+		name := core.Blank(claim.Labels["name"], core.LeaseProviderName(claim.LeaseID, slug))
+		item, err := b.getVM(ctx, name)
+		if err != nil {
+			return kubeVirtItem{}, "", "", "", err
+		}
+		actualName, leaseID, actualSlug, _, err := identityFromItem(item, name)
+		if err != nil {
+			return kubeVirtItem{}, "", "", "", err
+		}
+		if leaseID != claim.LeaseID {
+			return kubeVirtItem{}, "", "", "", core.Exit(4, "KubeVirt VM %q lease identity changed: expected %s, found %s", actualName, claim.LeaseID, leaseID)
+		}
+		if actualSlug != core.NormalizeLeaseSlug(slug) {
+			return kubeVirtItem{}, "", "", "", core.Exit(4, "KubeVirt VM %q slug identity changed: expected %s, found %s", actualName, slug, actualSlug)
+		}
+		return item, actualName, leaseID, actualSlug, nil
+	}
+	if strings.HasPrefix(identifier, "cbx_") {
+		item, ok, err := b.findVMByLabel(ctx, leaseIDLabel, identifier)
+		if err != nil {
+			return kubeVirtItem{}, "", "", "", err
+		}
+		if !ok {
+			return kubeVirtItem{}, "", "", "", core.Exit(4, "KubeVirt lease %q was not found in namespace %s", identifier, b.cfg.KubeVirt.Namespace)
+		}
+		name, leaseID, slug, _, err := identityFromItem(item, identifier)
+		if err != nil {
+			return kubeVirtItem{}, "", "", "", err
+		}
+		if leaseID != identifier {
+			return kubeVirtItem{}, "", "", "", core.Exit(4, "KubeVirt VM %q lease identity changed: expected %s, found %s", name, identifier, leaseID)
+		}
+		return item, name, leaseID, slug, nil
+	}
+	item, err := b.findVMByNameOrSlug(ctx, identifier)
+	if err != nil {
+		return kubeVirtItem{}, "", "", "", err
+	}
+	name, leaseID, slug, _, err := identityFromItem(item, identifier)
+	if err != nil {
+		return kubeVirtItem{}, "", "", "", err
+	}
+	return item, name, leaseID, slug, nil
 }
 
 func (b *leaseBackend) findVMByNameOrSlug(ctx context.Context, identifier string) (kubeVirtItem, error) {

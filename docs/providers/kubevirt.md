@@ -19,8 +19,13 @@ tunnels. The guest does not need a public IP or Kubernetes `Service`.
 
 - a Kubernetes context with KubeVirt access;
 - `kubectl` and a compatible `virtctl`;
+- a KubeVirt release compatible with the Kubernetes minor version running in the
+  target cluster;
 - permission to create, list, start, stop, and delete `VirtualMachine`
   resources in the configured namespace;
+- permission to get `VirtualMachineInstance` resources and read namespace
+  events. Crabbox uses these while booting so KubeVirt scheduling or launcher
+  failures are reported before the SSH wait starts;
 - a Linux guest image with OpenSSH, `git`, `rsync`, and `tar`.
 
 ## Configuration
@@ -65,7 +70,7 @@ placeholders anywhere in the YAML:
 {{SSH_PUBLIC_KEY}}
 ```
 
-Minimal example:
+Minimal SSH-ready example:
 
 ```yaml
 apiVersion: kubevirt.io/v1
@@ -90,6 +95,13 @@ spec:
             - name: cloudinit
               disk:
                 bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+              ports:
+                - name: ssh
+                  port: 22
+                  protocol: TCP
       networks:
         - name: default
           pod: {}
@@ -101,33 +113,53 @@ spec:
           cloudInitNoCloud:
             userData: |
               #cloud-config
+              ssh_pwauth: false
               users:
                 - name: crabbox
                   sudo: ALL=(ALL) NOPASSWD:ALL
                   shell: /bin/bash
                   ssh_authorized_keys:
                     - {{SSH_PUBLIC_KEY}}
+              package_update: false
               packages:
                 - git
                 - openssh-server
                 - rsync
                 - tar
+              runcmd:
+                - systemctl enable --now ssh || systemctl enable --now sshd
+                - mkdir -p /home/crabbox/crabbox
+                - chown -R crabbox:crabbox /home/crabbox
 ```
 
-The cloud-init user must match `kubevirt.sshUser`.
+The cloud-init user must match `kubevirt.sshUser`. If the template uses
+`masquerade`, declare the SSH port under `interfaces[].ports`; otherwise
+`virtctl port-forward` can reach the VM object while the guest port still
+refuses connections.
 
 ## Lifecycle
 
 1. Render and apply the configured manifest.
 2. Run `virtctl start`.
-3. Wait for SSH through the Kubernetes API server forwarding path.
-4. Use the standard Crabbox SSH lease flow.
-5. On release, delete the VM by default. Set `deleteOnRelease: false` to run
+3. Wait for the `VirtualMachineInstance` to exist and reach a state that can be
+   SSH-probed. `Running` and `Ready` pass immediately; `Scheduled` also passes
+   because some KubeVirt clusters can leave the VMI phase stale while the
+   domain is already running and `virtctl port-forward` works.
+4. Wait for SSH through the Kubernetes API server forwarding path.
+   If SSH never becomes ready, Crabbox includes the latest VMI phase,
+   conditions, and recent KubeVirt events in the error.
+5. Use the standard Crabbox SSH lease flow.
+6. On release, delete the VM by default. Set `deleteOnRelease: false` to run
    `virtctl stop` and retain its storage.
 
 `crabbox cleanup --provider kubevirt` evaluates the persisted lease annotations
 with Crabbox's normal TTL/idle policy and deletes eligible labeled VMs. Use
 `--dry-run` to inspect decisions.
+
+`crabbox status` and `crabbox inspect` are read-only. They report the VM's
+KubeVirt printable status and do not start a stopped retained VM. Commands that
+need an SSH target, such as `run`, `ssh`, and `code`, resolve the lease and
+start a retained VM before waiting for SSH.
 
 ```sh
 crabbox doctor --provider kubevirt
@@ -136,3 +168,43 @@ crabbox run --provider kubevirt --id vm-smoke -- go test ./...
 crabbox webvnc --provider kubevirt --id vm-smoke
 crabbox stop --provider kubevirt vm-smoke
 ```
+
+For the repository live harness:
+
+```sh
+CRABBOX_LIVE=1 \
+CRABBOX_LIVE_COORDINATOR=0 \
+CRABBOX_LIVE_PROVIDERS=kubevirt \
+CRABBOX_LIVE_KUBEVIRT_TEMPLATE=./kubevirt-vm.yaml \
+scripts/live-smoke.sh
+```
+
+The live harness also needs `jq` and `rg` on the operator machine. Use
+`CRABBOX_LIVE_KUBEVIRT_CONTEXT` and
+`CRABBOX_LIVE_KUBEVIRT_NAMESPACE` when the kubeconfig default is not the target
+cluster or namespace. `CRABBOX_LIVE_COMMAND` overrides the remote smoke command;
+by default it accepts either a Go repo (`go.mod`) or a Node repo
+(`package.json`).
+
+## Troubleshooting
+
+- `timed out waiting for KubeVirt VMI ... to be scheduled for SSH probing`:
+  inspect the phase, Ready condition, and events printed by Crabbox. Common
+  causes are image pull failures, unschedulable resource requests, missing
+  KubeVirt permissions, and launcher/runtime problems.
+- `KubeVirt SSH did not become ready ... KubeVirt VMI diagnostics`: the VM was
+  schedulable, but SSH did not accept connections through `virtctl
+  port-forward`. Check the appended VMI diagnostics plus guest boot and
+  cloud-init logs.
+- `virtctl port-forward ... connect: connection refused`: the VM object exists
+  and the control-plane tunnel opened, but nothing is accepting on the target
+  guest port. Check the cloud-init user data, OpenSSH service, and
+  `interfaces[].ports` when using masquerade networking.
+- VMI phase remains stale while `virtctl port-forward` never returns an SSH
+  banner: check Kubernetes/KubeVirt version compatibility. Unsupported minor
+  combinations can prevent KubeVirt from updating VMI status and from wiring
+  port-forward correctly.
+- Local macOS ARM clusters may not be suitable for KubeVirt smoke tests. Some
+  kind/OrbStack setups cannot run x86_64 container disks and KubeVirt currently
+  restricts arm64 CPU model selection. Use a Linux node with `/dev/kvm`, or set
+  KubeVirt `useEmulation` only for slow CI diagnostics.

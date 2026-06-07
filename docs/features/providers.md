@@ -31,6 +31,12 @@ Each adapter declares a `Spec` that drives how Crabbox treats it:
 feature flags; `internal/cli/config.go` holds the per-provider config sections
 and the class-to-machine-type maps.
 
+When an SSH-lease provider can be exercised from local credentials, add a
+provider-specific path in `scripts/live-smoke.sh`. The smoke should use explicit
+`--provider` routing for `warmup`, `status`, `run`, `list`, and `stop`, and its
+remote command should not assume a particular project language unless it is
+provider-specific.
+
 ## Brokered providers
 
 Four providers can be brokered through the Worker. Brokering adds lease records,

@@ -120,7 +120,7 @@ func TestInvokeRejectsUnversionedResponse(t *testing.T) {
 func TestProtocolLeaseMapsProxyAndServer(t *testing.T) {
 	cfg := testConfig()
 	lease := protocolLease{
-		LeaseID:    "cbx_123",
+		LeaseID:    "cbx_000000000123",
 		Slug:       "test",
 		Name:       "devbox-test",
 		Status:     "running",
@@ -188,15 +188,15 @@ func TestAcquireReleasesInvalidLeaseResponse(t *testing.T) {
 func TestResolveRejectsReplacementLeaseIdentity(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	repo := t.TempDir()
-	if err := core.ClaimLeaseForRepoProvider("cbx_original", "shared", providerName, repo, time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_000000000001", "shared", providerName, repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	server := core.Server{Name: "devbox-shared", Labels: map[string]string{"name": "devbox-shared", "slug": "shared"}}
-	if err := core.UpdateLeaseClaimEndpoint("cbx_original", server, core.SSHTarget{}); err != nil {
+	if err := core.UpdateLeaseClaimEndpoint("cbx_000000000001", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	runner := &sequenceRunner{responses: []string{
-		`{"protocolVersion":1,"lease":{"leaseId":"cbx_replacement","slug":"shared","name":"devbox-shared"}}`,
+		`{"protocolVersion":1,"lease":{"leaseId":"cbx_000000000002","slug":"shared","name":"devbox-shared"}}`,
 	}}
 	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
 	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "shared", ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "lease identity changed") {
@@ -215,10 +215,35 @@ func TestResolveRejectsLeaseWithoutStableIdentity(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsNonCanonicalLeaseID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	runner := &sequenceRunner{responses: []string{
+		`{"protocolVersion":1,"lease":{"leaseId":"../../outside","slug":"shared","name":"devbox-shared"}}`,
+	}}
+	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "shared"}); err == nil || !strings.Contains(err.Error(), "cbx_") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestReleaseAllowsLegacyProviderLeaseID(t *testing.T) {
+	runner := &sequenceRunner{responses: []string{
+		`{"protocolVersion":1}`,
+	}}
+	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	lease := core.LeaseTarget{LeaseID: "provider-id", Server: core.Server{Name: "legacy-devbox"}}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.operations) != 1 || runner.operations[0] != "release" {
+		t.Fatalf("operations=%#v", runner.operations)
+	}
+}
+
 func TestResolvePersistsRoutingBeforeSSHReadiness(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	runner := &sequenceRunner{responses: []string{
-		`{"protocolVersion":1,"lease":{"leaseId":"provider-id","slug":"shared","name":"devbox-shared","ssh":{"host":"127.0.0.1","user":"tester","port":"1"}}}`,
+		`{"protocolVersion":1,"lease":{"leaseId":"cbx_abcdef123456","slug":"shared","name":"devbox-shared","ssh":{"host":"127.0.0.1","user":"tester","port":"1"}}}`,
 	}}
 	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -226,7 +251,7 @@ func TestResolvePersistsRoutingBeforeSSHReadiness(t *testing.T) {
 	if _, err := backend.Resolve(ctx, core.ResolveRequest{ID: "shared"}); err == nil {
 		t.Fatal("expected canceled SSH readiness")
 	}
-	path, err := core.ExternalRoutingPath("provider-id")
+	path, err := core.ExternalRoutingPath("cbx_abcdef123456")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +263,7 @@ func TestResolvePersistsRoutingBeforeSSHReadiness(t *testing.T) {
 func TestResolvePreservesClaimedLifecycleLabels(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	repo := t.TempDir()
-	if err := core.ClaimLeaseForRepoProvider("cbx_ephemeral", "ephemeral", providerName, repo, time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_000000000003", "ephemeral", providerName, repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	server := core.Server{Name: "devbox-ephemeral", Labels: map[string]string{
@@ -250,11 +275,11 @@ func TestResolvePreservesClaimedLifecycleLabels(t *testing.T) {
 		"ttl_secs":     "100",
 		"idle_timeout": "50",
 	}}
-	if err := core.UpdateLeaseClaimEndpoint("cbx_ephemeral", server, core.SSHTarget{}); err != nil {
+	if err := core.UpdateLeaseClaimEndpoint("cbx_000000000003", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	runner := &sequenceRunner{responses: []string{
-		`{"protocolVersion":1,"lease":{"leaseId":"cbx_ephemeral","slug":"ephemeral","name":"devbox-ephemeral"}}`,
+		`{"protocolVersion":1,"lease":{"leaseId":"cbx_000000000003","slug":"ephemeral","name":"devbox-ephemeral"}}`,
 	}}
 	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "ephemeral", ReleaseOnly: true})
@@ -269,15 +294,15 @@ func TestResolvePreservesClaimedLifecycleLabels(t *testing.T) {
 func TestCleanupReconcilesExternalClaims(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	repo := t.TempDir()
-	if err := core.ClaimLeaseForRepoProvider("cbx_live", "live", providerName, repo, time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_000000000004", "live", providerName, repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.ClaimLeaseForRepoProvider("cbx_stale", "stale", providerName, repo, time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_000000000005", "stale", providerName, repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &sequenceRunner{responses: []string{
 		`{"protocolVersion":1}`,
-		`{"protocolVersion":1,"leases":[{"leaseId":"cbx_live","slug":"live","name":"live"}]}`,
+		`{"protocolVersion":1,"leases":[{"leaseId":"cbx_000000000004","slug":"live","name":"live"}]}`,
 	}}
 	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
@@ -293,7 +318,7 @@ func TestCleanupReconcilesExternalClaims(t *testing.T) {
 
 func TestCleanupRejectsMalformedInventoryBeforeRemovingClaims(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	if err := core.ClaimLeaseForRepoProvider("cbx_live", "live", providerName, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_000000000006", "live", providerName, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &sequenceRunner{responses: []string{
