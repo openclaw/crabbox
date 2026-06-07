@@ -1122,3 +1122,32 @@ func TestRunPropagatesCommandExit(t *testing.T) {
 		t.Fatalf("err=%v want exit 7", err)
 	}
 }
+
+func TestRunKeepOnFailureMarksSessionKept(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var stderr bytes.Buffer
+	runner := newRunner(map[string]scriptedReply{
+		"create": {stdout: ""},
+		"exec":   {exitCode: 7, stderr: "failed\n"},
+		"rm":     {stdout: ""},
+	}, nil)
+	backend := newTestBackend(newTestConfig(), runner, io.Discard, &stderr)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:          Repo{Name: "my-app", Root: t.TempDir()},
+		Command:       []string{"false"},
+		KeepOnFailure: true,
+	})
+	var exitErr core.ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("err=%v want exit 7", err)
+	}
+	if result.Session == nil || !result.Session.Kept {
+		t.Fatalf("session=%#v, want kept after keep-on-failure", result.Session)
+	}
+	if got, want := callVerbs(runner), []string{"create", "exec"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("verbs=%v want kept sandbox without rm %v", got, want)
+	}
+	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=") {
+		t.Fatalf("stderr missing keep-on-failure hint: %s", stderr.String())
+	}
+}
