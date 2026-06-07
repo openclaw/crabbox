@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,15 @@ func testConfig() core.Config {
 		WorkRoot: "/home/tester/crabbox",
 	}
 	return cfg
+}
+
+func isolateCrabboxState(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	return home
 }
 
 func claimExternalLease(t *testing.T, cfg core.Config, leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) {
@@ -228,7 +238,7 @@ func TestProtocolLeaseDefaultsReadyCheck(t *testing.T) {
 }
 
 func TestAllocateLeaseSlugIgnoresOtherExternalScopes(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig()
 	otherCfg := testConfig()
 	otherCfg.External.Config = map[string]any{"namespace": "prod", "cpu": 32}
@@ -277,7 +287,7 @@ func TestDoctorExecutesProviderAsChildProcess(t *testing.T) {
 }
 
 func TestAcquireReleasesInvalidLeaseResponse(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	runner := &sequenceRunner{responses: []string{
 		`{"protocolVersion":1,"lease":{"name":"created-without-ssh"}}`,
 		`{"protocolVersion":1}`,
@@ -293,7 +303,7 @@ func TestAcquireReleasesInvalidLeaseResponse(t *testing.T) {
 }
 
 func TestResolveRejectsReplacementLeaseIdentity(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	repo := t.TempDir()
 	cfg := testConfig()
 	claimExternalLease(t, cfg, "cbx_000000000001", "shared", repo, time.Minute, false)
@@ -311,7 +321,7 @@ func TestResolveRejectsReplacementLeaseIdentity(t *testing.T) {
 }
 
 func TestResolveRejectsLeaseWithoutStableIdentity(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	runner := &sequenceRunner{responses: []string{
 		`{"protocolVersion":1,"lease":{"slug":"shared","name":"devbox-shared"}}`,
 	}}
@@ -322,7 +332,7 @@ func TestResolveRejectsLeaseWithoutStableIdentity(t *testing.T) {
 }
 
 func TestResolveRejectsNonCanonicalLeaseID(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	runner := &sequenceRunner{responses: []string{
 		`{"protocolVersion":1,"lease":{"leaseId":"../../outside","slug":"shared","name":"devbox-shared"}}`,
 	}}
@@ -347,7 +357,7 @@ func TestReleaseAllowsLegacyProviderLeaseID(t *testing.T) {
 }
 
 func TestResolvePersistsRoutingBeforeSSHReadiness(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	runner := &sequenceRunner{responses: []string{
 		`{"protocolVersion":1,"lease":{"leaseId":"cbx_abcdef123456","slug":"shared","name":"devbox-shared","ssh":{"host":"127.0.0.1","user":"tester","port":"1"}}}`,
 	}}
@@ -367,7 +377,7 @@ func TestResolvePersistsRoutingBeforeSSHReadiness(t *testing.T) {
 }
 
 func TestAcquirePersistsRoutingBeforeSSHReadinessForKeptLease(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	runner := &sequenceRunner{responses: []string{
 		`{"protocolVersion":1,"lease":{"slug":"shared","name":"devbox-shared","ssh":{"host":"127.0.0.1","user":"tester","port":"1"}}}`,
 	}}
@@ -394,7 +404,7 @@ func TestAcquirePersistsRoutingBeforeSSHReadinessForKeptLease(t *testing.T) {
 }
 
 func TestResolvePreservesClaimedLifecycleLabels(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	repo := t.TempDir()
 	cfg := testConfig()
 	claimExternalLease(t, cfg, "cbx_000000000003", "ephemeral", repo, time.Minute, false)
@@ -424,7 +434,7 @@ func TestResolvePreservesClaimedLifecycleLabels(t *testing.T) {
 }
 
 func TestCleanupReconcilesExternalClaims(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	repo := t.TempDir()
 	cfg := testConfig()
 	claimExternalLease(t, cfg, "cbx_000000000004", "live", repo, time.Minute, false)
@@ -446,7 +456,7 @@ func TestCleanupReconcilesExternalClaims(t *testing.T) {
 }
 
 func TestCleanupPreservesOtherExternalScopeClaims(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	repo := t.TempDir()
 	cfg := testConfig()
 	otherCfg := testConfig()
@@ -470,7 +480,7 @@ func TestCleanupPreservesOtherExternalScopeClaims(t *testing.T) {
 }
 
 func TestCleanupRejectsMalformedInventoryBeforeRemovingClaims(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig()
 	claimExternalLease(t, cfg, "cbx_000000000006", "live", t.TempDir(), time.Minute, false)
 	runner := &sequenceRunner{responses: []string{

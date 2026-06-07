@@ -54,6 +54,15 @@ spec:
 	return cfg
 }
 
+func isolateCrabboxState(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	return home
+}
+
 func claimKubeVirtLease(t *testing.T, cfg core.Config, leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) {
 	t.Helper()
 	backend := &leaseBackend{cfg: cfg}
@@ -150,8 +159,7 @@ func TestAcquireRequiresProvisioningTemplate(t *testing.T) {
 }
 
 func TestFlagsExpandKubeVirtUserPaths(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := isolateCrabboxState(t)
 	cfg := testConfig(t)
 	fs := flag.NewFlagSet("kubevirt", flag.ContinueOnError)
 	values := registerFlags(fs, cfg)
@@ -384,7 +392,7 @@ func TestWaitForVMIReadyForSSHReportsConditionsAndEvents(t *testing.T) {
 }
 
 func TestReleaseDeletesGeneratedKey(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	cfg.KubeVirt.SSHKey = ""
 	cfg.KubeVirt.SSHPublicKey = ""
@@ -404,7 +412,7 @@ func TestReleaseDeletesGeneratedKey(t *testing.T) {
 }
 
 func TestReleaseRetainedVMPreservesClaimAndKey(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	cfg.KubeVirt.SSHKey = ""
 	cfg.KubeVirt.SSHPublicKey = ""
@@ -429,7 +437,7 @@ func TestReleaseRetainedVMPreservesClaimAndKey(t *testing.T) {
 }
 
 func TestStatusDoesNotStartRetainedStoppedVM(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	claimKubeVirtLease(t, cfg, "cbx_retained", "retained", t.TempDir(), time.Minute, false)
 	server := core.Server{Name: "vm-retained", Labels: map[string]string{"name": "vm-retained"}}
@@ -453,7 +461,7 @@ func TestStatusDoesNotStartRetainedStoppedVM(t *testing.T) {
 }
 
 func TestStatusRequiresSSHProbeBeforeReady(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	claimKubeVirtLease(t, cfg, "cbx_running", "running", t.TempDir(), time.Minute, false)
 	server := core.Server{Name: "vm-running", Labels: map[string]string{"name": "vm-running"}}
@@ -480,7 +488,7 @@ func TestStatusRequiresSSHProbeBeforeReady(t *testing.T) {
 }
 
 func TestResolveNameUsesProviderScopedClaim(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	repo := t.TempDir()
 	if err := core.ClaimLeaseForRepoProvider("cbx_external", "shared", "external", repo, time.Minute, false); err != nil {
@@ -507,7 +515,7 @@ func TestResolveNameUsesProviderScopedClaim(t *testing.T) {
 }
 
 func TestClaimLeaseUsesKubeVirtScope(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	claimKubeVirtLease(t, cfg, "cbx_scoped", "scoped", t.TempDir(), time.Minute, false)
 	claim, err := core.ReadLeaseClaim("cbx_scoped")
@@ -532,7 +540,7 @@ func TestClaimScopeUsesInheritedKubeconfig(t *testing.T) {
 }
 
 func TestAllocateLeaseSlugIgnoresOtherKubeVirtScopes(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	otherScope := "kubeconfig:/other|context:test-context|namespace:test-ns"
 	if err := core.ClaimLeaseForRepoProviderScope("cbx_other", "shared", providerName, otherScope, t.TempDir(), time.Minute, false); err != nil {
@@ -557,7 +565,7 @@ func TestAllocateLeaseSlugIgnoresOtherKubeVirtScopes(t *testing.T) {
 }
 
 func TestAllocateLeaseSlugChecksLiveVMsForLegacyClaims(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	if err := core.ClaimLeaseForRepoProvider("cbx_legacy", "shared", providerName, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
@@ -596,7 +604,7 @@ func TestAllocateGeneratedSlugIgnoresMalformedClaims(t *testing.T) {
 }
 
 func TestResolveIdentityIgnoresKubeVirtClaimFromOtherScope(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	wrongScope := "kubeconfig:/other|context:test-context|namespace:test-ns"
 	if err := core.ClaimLeaseForRepoProviderScope("cbx_wrong", "shared", providerName, wrongScope, t.TempDir(), time.Minute, false); err != nil {
@@ -623,7 +631,7 @@ func TestResolveIdentityIgnoresKubeVirtClaimFromOtherScope(t *testing.T) {
 }
 
 func TestStatusIgnoresKubeVirtClaimFromOtherScope(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	if err := core.ClaimLeaseForRepoProviderScope("cbx_wrong", "shared", providerName, "kubeconfig:/other|context:test-context|namespace:test-ns", t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
@@ -673,7 +681,7 @@ func TestResolveIdentityExactClaimIgnoresMalformedUnrelatedClaim(t *testing.T) {
 }
 
 func TestResolveIdentityUsesClaimedClusterName(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	claimKubeVirtLease(t, cfg, "cbx_cluster", "cluster", t.TempDir(), time.Minute, false)
 	server := core.Server{Name: "actual-cluster-vm", Labels: map[string]string{"name": "actual-cluster-vm"}}
@@ -692,7 +700,7 @@ func TestResolveIdentityUsesClaimedClusterName(t *testing.T) {
 }
 
 func TestResolveIdentityRejectsStaleClaimForReusedVMName(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	claimKubeVirtLease(t, cfg, "cbx_original", "shared", t.TempDir(), time.Minute, false)
 	server := core.Server{Name: "reused-vm", Labels: map[string]string{"name": "reused-vm"}}
@@ -813,7 +821,7 @@ func TestPersistedVMLabelsPreserveTTLMetadata(t *testing.T) {
 }
 
 func TestResolveSSHKeyDoesNotGenerateMissingKey(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	cfg.KubeVirt.SSHKey = ""
 	backend := &leaseBackend{cfg: cfg}
@@ -874,7 +882,7 @@ func TestCleanupDeletesExpiredVMAndHonorsDryRun(t *testing.T) {
 }
 
 func TestCleanupDoesNotRemoveWrongScopeClaim(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	if err := core.ClaimLeaseForRepoProviderScope("cbx_old", "old", providerName, "kubeconfig:/other|context:test-context|namespace:test-ns", t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
@@ -896,7 +904,7 @@ func TestCleanupDoesNotRemoveWrongScopeClaim(t *testing.T) {
 }
 
 func TestCleanupRemovesLegacyUnscopedClaim(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	if err := core.ClaimLeaseForRepoProvider("cbx_old", "old", providerName, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
