@@ -205,12 +205,30 @@ scripts/live-docker-sandbox-smoke.sh
 ```
 
 The script builds `bin/crabbox`, runs `crabbox doctor --provider docker-sandbox`
-as the authoritative preflight, creates a unique Crabbox-owned sandbox, runs
-`echo ok` and `pwd`, lists it, and then stops it. The doctor step honors
-`dockerSandbox.cliPath`, `--docker-sandbox-cli`, and
-`CRABBOX_DOCKER_SANDBOX_CLI`, so the smoke script works even when `sbx` is not on
-`PATH`. If the provider is missing, logged out, or blocked by host prerequisites,
-the script reports `environment_blocked` with the failing command.
+as the authoritative preflight, confirms the doctor output includes
+`sbx_version`, creates a unique Crabbox-owned sandbox, runs `echo ok` and `pwd`,
+lists it, and then stops it. The doctor step honors `dockerSandbox.cliPath`,
+`--docker-sandbox-cli`, and `CRABBOX_DOCKER_SANDBOX_CLI`, so the smoke script
+works even when `sbx` is not on `PATH`. If the provider is missing, logged out,
+or blocked by host prerequisites, the script reports `environment_blocked` with
+the failing command. If Docker Sandbox capacity or account quota blocks the run,
+the script reports `quota_blocked`. If the doctor command succeeds but does not
+emit the expected version diagnostic, the script reports `diagnostic_only` and
+does not claim live success.
+
+Use this matrix when proving a fresh install or upgrade:
+
+| Proof row | Command or coverage | Expected result |
+| --- | --- | --- |
+| Fresh local CLI build | `go build -trimpath -o bin/crabbox ./cmd/crabbox` | `bin/crabbox` builds without generated files in git. |
+| Provider discovery | `bin/crabbox providers --json` | Includes `docker-sandbox`, family `docker-sandbox`, kind `delegated-run`, target `linux`, coordinator `never`, and feature `run-session`. |
+| Config upgrade surface | `crabbox config show --json` | Includes `dockerSandbox.cliPath`, `agent`, runtime sizing, `clone`, `workdir`, `extraWorkspaces`, and `kit`. |
+| Alternate `sbx` path | `CRABBOX_DOCKER_SANDBOX_CLI=/path/to/sbx scripts/live-docker-sandbox-smoke.sh` | Doctor honors the configured CLI path instead of requiring `sbx` on `PATH`. |
+| Missing CLI or login | `crabbox doctor --provider docker-sandbox` | Fails with guidance to install/configure `sbx` or run `sbx login`. |
+| Host/runtime blockers | `crabbox doctor --provider docker-sandbox` | Surfaces virtualization, hypervisor, KVM, control-plane, quota, or capacity blockers without claiming live success. |
+| Clone mode | `crabbox warmup --provider docker-sandbox --docker-sandbox-clone ...` | Requires a normal Git repository workspace before calling `sbx create --clone`. |
+| Unsupported delegated flags | Docker Sandbox run flags and config validation | Rejects unsupported agent, MCP attachment, desktop, Tailscale, `--class`, and `--type` surfaces clearly. |
+| Live lifecycle | `scripts/live-docker-sandbox-smoke.sh` | Prints `classification=live_sbx_smoke_passed ... cleanup=complete` only after create, run, list, and stop complete. |
 
 Related docs:
 

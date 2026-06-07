@@ -165,6 +165,75 @@ func TestConfigShowIncludesSyncInclude(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesDockerSandboxConfig(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	if err := os.WriteFile(configPath, []byte(`provider: docker-sandbox
+dockerSandbox:
+  cliPath: /opt/sbx
+  agent: shell
+  template: ubuntu
+  cpus: 2
+  memory: 4g
+  clone: true
+  workdir: /workspace/my-app
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES", "/tmp/extra")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_KIT", "example-org/base")
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	for _, want := range []string{
+		"provider=docker-sandbox",
+		"docker_sandbox cli=/opt/sbx agent=shell template=ubuntu cpus=2 memory=4g clone=true workdir=/workspace/my-app",
+		"extra_workspaces=/tmp/extra",
+		"kit=example-org/base",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("config show text missing %q: %q", want, text)
+		}
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Provider      string `json:"provider"`
+		DockerSandbox struct {
+			CLIPath         string   `json:"cliPath"`
+			Agent           string   `json:"agent"`
+			Template        string   `json:"template"`
+			CPUs            float64  `json:"cpus"`
+			Memory          string   `json:"memory"`
+			Clone           bool     `json:"clone"`
+			Workdir         string   `json:"workdir"`
+			ExtraWorkspaces []string `json:"extraWorkspaces"`
+			Kit             []string `json:"kit"`
+		} `json:"dockerSandbox"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Provider != "docker-sandbox" || got.DockerSandbox.CLIPath != "/opt/sbx" || got.DockerSandbox.Agent != "shell" || got.DockerSandbox.Template != "ubuntu" || got.DockerSandbox.CPUs != 2 || got.DockerSandbox.Memory != "4g" || !got.DockerSandbox.Clone || got.DockerSandbox.Workdir != "/workspace/my-app" {
+		t.Fatalf("unexpected dockerSandbox json: %#v", got)
+	}
+	if strings.Join(got.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(got.DockerSandbox.Kit, ",") != "example-org/base" {
+		t.Fatalf("unexpected dockerSandbox lists: %#v", got.DockerSandbox)
+	}
+}
+
 func TestConfigShowRejectsInvalidDockerSandboxCPUConfig(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

@@ -8,7 +8,20 @@ classify_blocker() {
   local command="$1"
   local status="$2"
   local output="$3"
-  printf 'classification=environment_blocked command=%q exit=%s\n' "$command" "$status" >&2
+  local classification="environment_blocked"
+  local lower
+  lower="$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$lower" == *quota* || "$lower" == *"rate limit"* || "$lower" == *capacity* ]]; then
+    classification="quota_blocked"
+  fi
+  printf 'classification=%s command=%q exit=%s\n' "$classification" "$command" "$status" >&2
+  printf '%s\n' "$output" >&2
+}
+
+classify_diagnostic() {
+  local command="$1"
+  local output="$2"
+  printf 'classification=diagnostic_only command=%q exit=0\n' "$command" >&2
   printf '%s\n' "$output" >&2
 }
 
@@ -36,7 +49,12 @@ trap cleanup EXIT
 
 go build -trimpath -o bin/crabbox ./cmd/crabbox
 
-run_capture "bin/crabbox doctor --provider docker-sandbox" bin/crabbox doctor --provider docker-sandbox
+doctor_output="$(run_capture "bin/crabbox doctor --provider docker-sandbox" bin/crabbox doctor --provider docker-sandbox)"
+printf '%s\n' "$doctor_output"
+if [[ "$doctor_output" != *sbx_version* ]]; then
+  classify_diagnostic "bin/crabbox doctor --provider docker-sandbox" "$doctor_output"
+  exit 1
+fi
 run_capture "bin/crabbox warmup --provider docker-sandbox --slug $slug --keep" bin/crabbox warmup --provider docker-sandbox --slug "$slug" --keep >/dev/null
 created=1
 run_capture "bin/crabbox run --provider docker-sandbox --id $slug -- echo ok" bin/crabbox run --provider docker-sandbox --id "$slug" -- echo ok >/dev/null
