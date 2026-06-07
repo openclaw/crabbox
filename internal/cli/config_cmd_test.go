@@ -183,7 +183,6 @@ func TestConfigShowIncludesDockerSandbox(t *testing.T) {
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_CLONE", "true")
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_WORKDIR", "/workspace/my-app")
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES", "/tmp/extra")
-	t.Setenv("CRABBOX_DOCKER_SANDBOX_MCP", "context7")
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_KIT", "example-org/base")
 
 	var stdout bytes.Buffer
@@ -195,7 +194,6 @@ func TestConfigShowIncludesDockerSandbox(t *testing.T) {
 	for _, want := range []string{
 		"docker_sandbox cli=/opt/docker-sbx agent=shell template=ubuntu cpus=2.5 memory=6g clone=true workdir=/workspace/my-app",
 		"extra_workspaces=/tmp/extra",
-		"mcp=context7",
 		"kit=example-org/base",
 	} {
 		if !strings.Contains(text, want) {
@@ -217,7 +215,6 @@ func TestConfigShowIncludesDockerSandbox(t *testing.T) {
 			Clone           bool     `json:"clone"`
 			Workdir         string   `json:"workdir"`
 			ExtraWorkspaces []string `json:"extraWorkspaces"`
-			MCP             []string `json:"mcp"`
 			Kit             []string `json:"kit"`
 		} `json:"dockerSandbox"`
 	}
@@ -232,7 +229,6 @@ func TestConfigShowIncludesDockerSandbox(t *testing.T) {
 		!got.DockerSandbox.Clone ||
 		got.DockerSandbox.Workdir != "/workspace/my-app" ||
 		strings.Join(got.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" ||
-		strings.Join(got.DockerSandbox.MCP, ",") != "context7" ||
 		strings.Join(got.DockerSandbox.Kit, ",") != "example-org/base" {
 		t.Fatalf("unexpected dockerSandbox json: %#v", got.DockerSandbox)
 	}

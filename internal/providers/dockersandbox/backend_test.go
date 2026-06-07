@@ -185,7 +185,6 @@ func TestRunBuildsConfiguredCreateCommandAndExec(t *testing.T) {
 	cfg.DockerSandbox.Template = "ubuntu"
 	cfg.DockerSandbox.CPUs = 2.25
 	cfg.DockerSandbox.Memory = "6g"
-	cfg.DockerSandbox.MCP = []string{"context7"}
 	cfg.DockerSandbox.Kit = []string{"example-org/base"}
 	cfg.DockerSandbox.Clone = true
 	cfg.DockerSandbox.ExtraWorkspaces = []string{"/tmp/extra"}
@@ -210,7 +209,7 @@ func TestRunBuildsConfiguredCreateCommandAndExec(t *testing.T) {
 	if create == nil {
 		t.Fatal("missing create call")
 	}
-	for _, want := range []string{"--template", "ubuntu", "--cpus", "2.25", "--memory", "6g", "--mcp", "context7", "--kit", "example-org/base", "--clone", "shell", repoRoot, "/tmp/extra"} {
+	for _, want := range []string{"--template", "ubuntu", "--cpus", "2.25", "--memory", "6g", "--kit", "example-org/base", "--clone", "shell", repoRoot, "/tmp/extra"} {
 		if !containsArg(create.Args, want) {
 			t.Fatalf("create args=%v missing %q", create.Args, want)
 		}
@@ -967,7 +966,6 @@ func TestFlagApplicationAndValidation(t *testing.T) {
 		"--docker-sandbox-clone",
 		"--docker-sandbox-workdir", "/repo",
 		"--docker-sandbox-extra-workspace", "/tmp/extra",
-		"--docker-sandbox-mcp", "context7",
 		"--docker-sandbox-kit", "example-org/base",
 	}); err != nil {
 		t.Fatal(err)
@@ -978,8 +976,18 @@ func TestFlagApplicationAndValidation(t *testing.T) {
 	if cfg.DockerSandbox.CLIPath != "/opt/sbx" || cfg.DockerSandbox.Template != "ubuntu" || cfg.DockerSandbox.CPUs != 2 || cfg.DockerSandbox.Memory != "4g" || !cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/repo" {
 		t.Fatalf("cfg=%#v", cfg.DockerSandbox)
 	}
-	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7" || strings.Join(cfg.DockerSandbox.Kit, ",") != "example-org/base" {
+	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(cfg.DockerSandbox.Kit, ",") != "example-org/base" {
 		t.Fatalf("list cfg=%#v", cfg.DockerSandbox)
+	}
+
+	mcpCfg := newTestConfig()
+	mcpFS := flag.NewFlagSet("docker-sandbox-mcp", flag.ContinueOnError)
+	mcpValues := RegisterDockerSandboxProviderFlags(mcpFS, mcpCfg)
+	if err := mcpFS.Parse([]string{"--docker-sandbox-mcp", "context7"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyDockerSandboxProviderFlags(&mcpCfg, mcpFS, mcpValues); err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("ApplyDockerSandboxProviderFlags mcp err=%v", err)
 	}
 
 	for _, flagName := range []string{"class", "type"} {
@@ -1026,9 +1034,30 @@ func TestFlagApplicationAndValidation(t *testing.T) {
 		t.Fatalf("root workdir err=%v", err)
 	}
 	bad = newTestConfig()
+	bad.DockerSandbox.MCP = []string{"context7"}
+	if err := validateConfig(bad); err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("mcp err=%v", err)
+	}
+	bad = newTestConfig()
 	bad.DockerSandbox.MCP = []string{""}
 	if err := validateConfig(bad); err == nil || !strings.Contains(err.Error(), "must not be empty") {
 		t.Fatalf("empty list err=%v", err)
+	}
+}
+
+func TestStopRemovesStaleClaimWhenSandboxIsAlreadyGone(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := leasePrefix + "crabbox-my-app-gone"
+	if err := claimLeaseForRepoProviderPond(leaseID, "gone", providerName, "", t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	runner := newRunner(map[string]scriptedReply{"rm": {stderr: "sandbox not found", exitCode: 1}}, nil)
+	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+	if err := backend.Stop(context.Background(), StopRequest{ID: "gone"}); err != nil {
+		t.Fatalf("Stop stale claim err=%v", err)
+	}
+	if _, ok, err := resolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
+		t.Fatalf("stale claim resolved after stop ok=%t err=%v", ok, err)
 	}
 }
 

@@ -2483,6 +2483,9 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.DockerSandbox.ExtraWorkspaces = append([]string(nil), (*file.DockerSandbox.ExtraWorkspaces)...)
 		}
 		if file.DockerSandbox.MCP != nil {
+			if len(*file.DockerSandbox.MCP) > 0 {
+				return exit(2, "docker-sandbox mcp is not supported until sbx create accepts MCP attachments")
+			}
 			cfg.DockerSandbox.MCP = append([]string(nil), (*file.DockerSandbox.MCP)...)
 		}
 		if file.DockerSandbox.Kit != nil {
@@ -3295,6 +3298,9 @@ func applyEnv(cfg *Config) error {
 		cfg.DockerSandbox.ExtraWorkspaces = values
 	}
 	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_MCP"); ok {
+		if len(values) > 0 {
+			return exit(2, "docker-sandbox mcp is not supported until sbx create accepts MCP attachments")
+		}
 		cfg.DockerSandbox.MCP = values
 	}
 	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_KIT"); ok {

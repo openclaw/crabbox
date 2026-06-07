@@ -216,7 +216,6 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	memory := "6g"
 	workdir := "/workspace/my-app"
 	extraWorkspaces := []string{"/tmp/extra"}
-	mcp := []string{"context7"}
 	kit := []string{"example-org/base"}
 	applyFileConfig(&cfg, fileConfig{
 		Provider: "docker-sandbox",
@@ -229,14 +228,13 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 			Clone:           &clone,
 			Workdir:         &workdir,
 			ExtraWorkspaces: &extraWorkspaces,
-			MCP:             &mcp,
 			Kit:             &kit,
 		},
 	})
 	if cfg.Provider != "docker-sandbox" || cfg.DockerSandbox.CLIPath != "/opt/sbx" || cfg.DockerSandbox.Template != "ubuntu" || cfg.DockerSandbox.CPUs != 2.5 || cfg.DockerSandbox.Memory != "6g" || !cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/my-app" {
 		t.Fatalf("file dockerSandbox config not applied: %#v", cfg.DockerSandbox)
 	}
-	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7" || strings.Join(cfg.DockerSandbox.Kit, ",") != "example-org/base" {
+	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(cfg.DockerSandbox.Kit, ",") != "example-org/base" {
 		t.Fatalf("file dockerSandbox list config not applied: %#v", cfg.DockerSandbox)
 	}
 
@@ -248,13 +246,14 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_CLONE", "false")
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_WORKDIR", "/workspace/env-app")
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES", "/tmp/a,/tmp/b")
-	t.Setenv("CRABBOX_DOCKER_SANDBOX_MCP", "one,two")
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_KIT", "kit-a,kit-b")
-	applyEnv(&cfg)
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
 	if cfg.DockerSandbox.CLIPath != "/usr/local/bin/sbx" || cfg.DockerSandbox.Template != "debian" || cfg.DockerSandbox.CPUs != 4 || cfg.DockerSandbox.Memory != "8g" || cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/env-app" {
 		t.Fatalf("env dockerSandbox config not applied: %#v", cfg.DockerSandbox)
 	}
-	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/a,/tmp/b" || strings.Join(cfg.DockerSandbox.MCP, ",") != "one,two" || strings.Join(cfg.DockerSandbox.Kit, ",") != "kit-a,kit-b" {
+	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/a,/tmp/b" || strings.Join(cfg.DockerSandbox.Kit, ",") != "kit-a,kit-b" {
 		t.Fatalf("env dockerSandbox list config not applied: %#v", cfg.DockerSandbox)
 	}
 }
@@ -350,6 +349,30 @@ dockerSandbox:
 	}
 	if !strings.Contains(err.Error(), "docker-sandbox cpus must be non-negative") {
 		t.Fatalf("applyConfigFile err=%v, want negative dockerSandbox cpus rejection", err)
+	}
+}
+
+func TestDockerSandboxConfigRejectsMCPFromFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+provider: docker-sandbox
+dockerSandbox:
+  mcp:
+    - context7
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	err := applyFileConfig(&cfg, file)
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("applyFileConfig mcp err=%v", err)
+	}
+
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_MCP", "one,two")
+	err = applyEnv(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("applyEnv mcp err=%v", err)
 	}
 }
 

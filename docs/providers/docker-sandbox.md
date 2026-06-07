@@ -59,7 +59,7 @@ dockerSandbox:
   clone: false
   workdir: ""        # empty means the current repo root path inside the sandbox
   extraWorkspaces: []
-  mcp: []
+  mcp: []            # reserved for future sbx support; non-empty values are rejected today
   kit: []
 ```
 
@@ -74,7 +74,7 @@ Provider flags:
 --docker-sandbox-clone
 --docker-sandbox-workdir
 --docker-sandbox-extra-workspace
---docker-sandbox-mcp
+--docker-sandbox-mcp   # currently rejected until sbx create supports MCP attachments
 --docker-sandbox-kit
 ```
 
@@ -89,11 +89,11 @@ CRABBOX_DOCKER_SANDBOX_MEMORY
 CRABBOX_DOCKER_SANDBOX_CLONE
 CRABBOX_DOCKER_SANDBOX_WORKDIR
 CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES
-CRABBOX_DOCKER_SANDBOX_MCP
+CRABBOX_DOCKER_SANDBOX_MCP   # currently rejected until sbx create supports MCP attachments
 CRABBOX_DOCKER_SANDBOX_KIT
 ```
 
-`extraWorkspaces`, `mcp`, and `kit` environment values are comma-separated.
+`extraWorkspaces` and `kit` environment values are comma-separated. `mcp` is reserved for future `sbx` support and non-empty values are rejected today.
 
 ## Lifecycle
 
@@ -147,6 +147,9 @@ Common blockers:
   points back to `crabbox stop --provider docker-sandbox <slug>`.
 - Agent: `shell` only. Other `dockerSandbox.agent` values are rejected until
   Crabbox has a stable non-shell agent contract.
+- MCP attachments: not supported yet. Crabbox rejects non-empty
+  `dockerSandbox.mcp` / `--docker-sandbox-mcp` / `CRABBOX_DOCKER_SANDBOX_MCP`
+  until `sbx create` exposes a supported MCP attachment flag.
 - Forwarded env: supported through `sbx exec --env-file`.
 
 ## Safety Notes
