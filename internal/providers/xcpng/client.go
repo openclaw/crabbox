@@ -1009,6 +1009,7 @@ func xapiEndpoint(raw string) (string, error) {
 	if u.Host == "" {
 		return "", exit(3, "xcp-ng api URL must include a host")
 	}
+	u.User = nil
 	if u.Path == "" || u.Path == "/" {
 		u.Path = "/"
 	}

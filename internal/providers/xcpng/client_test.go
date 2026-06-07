@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +57,47 @@ func TestXAPIEndpointNormalizesBareHostAndRejectsPlainHTTP(t *testing.T) {
 	}
 	if loopback != "http://127.0.0.1:8080/" {
 		t.Fatalf("loopback=%q", loopback)
+	}
+}
+
+func TestXAPIEndpointStripsUserinfoBeforeRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "full URL",
+			raw:  "https://api-user:api-password@xcp-ng.example.test/jsonrpc",
+			want: "https://xcp-ng.example.test/jsonrpc",
+		},
+		{
+			name: "scheme-less URL",
+			raw:  "api-user:api-password@xcp-ng.example.test",
+			want: "https://xcp-ng.example.test/",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint, err := xapiEndpoint(tc.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if endpoint != tc.want {
+				t.Fatalf("endpoint=%q want %q", endpoint, tc.want)
+			}
+			parsed, err := url.Parse(endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parsed.User != nil {
+				t.Fatalf("endpoint retained userinfo: %s", endpoint)
+			}
+			for _, secret := range []string{"api-user", "api-password", "api-user:api-password"} {
+				if strings.Contains(endpoint, secret) {
+					t.Fatalf("endpoint leaked %q: %s", secret, endpoint)
+				}
+			}
+		})
 	}
 }
 
