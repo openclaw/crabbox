@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -50,6 +51,16 @@ func TestCreateSyncArchiveRejectsUnsafePaths(t *testing.T) {
 	}
 }
 
+func TestCopySyncArchiveMemberStopsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer := &cancelAfterFirstWrite{cancel: cancel}
+	err := copySyncArchiveMember(ctx, writer, strings.NewReader(strings.Repeat("x", 256*1024)))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want context canceled", err)
+	}
+}
+
 func syncArchiveNames(t *testing.T, archive *os.File) map[string]bool {
 	t.Helper()
 	if _, err := archive.Seek(0, 0); err != nil {
@@ -72,4 +83,17 @@ func syncArchiveNames(t *testing.T, archive *os.File) map[string]bool {
 		}
 		got[header.Name] = true
 	}
+}
+
+type cancelAfterFirstWrite struct {
+	cancel func()
+	writes int
+}
+
+func (w *cancelAfterFirstWrite) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes == 1 {
+		w.cancel()
+	}
+	return len(p), nil
 }
