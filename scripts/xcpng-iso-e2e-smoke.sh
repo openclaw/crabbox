@@ -19,8 +19,9 @@ Mutating mode:
   - requires --mutate and CRABBOX_XCP_NG_ISO_E2E_MUTATE=1
   - on --os linux, generates NoCloud answer media, imports local ISO media when needed,
     installs Ubuntu Server to a blank disk, proves first boot over SSH, and cleans up
-  - on --os windows, preserves the shared foundation behavior only: create a fresh VM,
-    attach installer media, start once, classify, and clean up
+  - on --os windows, expects x64/x86 installer media, generates unattended answer media
+    when none is supplied, imports local ISO media when needed, and attempts first-boot
+    SSH proof; if only guest metrics are available it reports source_uncovered
 
 Secrets must come from private config or environment variables. This script
 never accepts or forwards an XCP-ng password as an argument.

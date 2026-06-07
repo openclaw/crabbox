@@ -195,6 +195,10 @@ func PowershellCommand(script string) string {
 	return powershellCommand(script)
 }
 
+func WindowsBootstrapPowerShell(cfg Config, publicKey string) string {
+	return windowsBootstrapPowerShell(cfg, publicKey)
+}
+
 func ValidCrabboxProviderKey(value string) bool {
 	return validCrabboxProviderKey(value)
 }

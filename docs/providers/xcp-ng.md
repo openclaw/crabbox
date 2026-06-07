@@ -300,23 +300,45 @@ The wrapper now defaults to `--timeout 90m`, which is intended for the full
 Linux install flow. Override it explicitly only when the lab is known to be
 faster or slower.
 
-Windows mutating mode still preserves the shared foundation-only behavior from
-PLAN-01. It creates a fresh VM, attaches installer media, starts once, writes a
-classification, and cleans up. Full Windows unattended install proof remains in
-the Windows-specific plan.
+Windows mutating mode now extends the shared harness for x86_64/x64 installer
+media:
+
+- blocks ARM-labelled Windows installer media with
+  `windows_requirements_blocked` because the current XCP-ng ISO E2E lab is
+  x86_64/x64;
+- generates a temporary `Autounattend.xml` ISO when `--answer-iso` is not
+  supplied and includes a Crabbox bootstrap PowerShell script that installs
+  OpenSSH with the per-run Crabbox SSH key; the generated answer media selects
+  Windows image index `1` by default, and `--answer-iso` remains the override
+  path when a different edition or custom answer file is required;
+- imports local installer and answer ISO paths into the configured SR when
+  needed;
+- creates a fresh secure-boot VM plus writable install disk, boots from the
+  Windows installer media first, then switches the next boot to the installed
+  disk;
+- waits for first-boot guest metrics and then attempts SSH proof with
+  `Write-Output windows-iso-e2e-ok`; and
+- falls back to `source_uncovered` after first-boot guest metrics when the
+  supplied answer media does not guarantee Crabbox SSH bootstrap.
 
 Current classifications:
 
 - `read_only_passed`: config and ISO references resolved without mutation.
 - `linux_install_passed`: the Linux installer completed, first boot reported a
   guest IPv4, and SSH proof succeeded.
-- `started_unverified`: Windows-only shared lifecycle classification. The VM was
-  created, media was attached, and `VM.start` succeeded, but Windows proof is
-  deferred to the Windows-specific plan.
+- `windows_install_passed`: the Windows installer completed, first boot
+  reported a guest IPv4, and SSH proof succeeded.
+- `windows_requirements_blocked`: the selected Windows installer media or lab
+  prerequisites do not match the current x86_64/x64 XCP-ng validation surface.
+- `source_uncovered`: the Windows guest reached first boot and reported guest
+  metrics, but only guest-metrics readiness was available; Crabbox command
+  proof remains uncovered for that answer-media path.
 - `environment_blocked`: lab prerequisites, ISO identity, auth, placement, or
   mutation gate blocked the run. For Linux this also includes exact phase
   blockers such as installer boot arg/remaster failure, guest-metrics timeout,
-  or SSH readiness failure.
+  or SSH readiness failure. For Windows this also includes answer-media
+  generation, installer-media import, guest-metrics timeout, and SSH readiness
+  failures after the bootstrap path is enabled.
 - `resource_cleanup_failed`: the shared lifecycle reached its target phase but
   cleanup left resources behind.
 - `test_failed`: local harness contract failure such as invalid arguments or
@@ -331,6 +353,16 @@ Linux mutating summaries use these phase values:
 - `linux_install_complete`
 - `linux_first_boot`
 - `linux_ssh_ok`
+
+Windows mutating summaries use these phase values:
+
+- `windows_answer_generation`
+- `windows_install_disk`
+- `windows_iso_attached`
+- `windows_setup_started`
+- `windows_install_complete`
+- `windows_first_boot`
+- `windows_command_ok`
 
 Every run writes a JSON summary with these stable keys:
 
@@ -347,6 +379,11 @@ temporary remaster/import steps itself. Existing SR-hosted Ubuntu installer ISOs
 are read-only validation inputs only unless they were already prepared with the
 required `autoinstall` boot argument outside this harness. Keep all
 `.crabbox/xcpng-iso-e2e/` artifacts local; do not commit them.
+
+Windows mutating mode expects x86_64/x64 installer media. `ISOs-ARM` style
+Windows media is a valid reference set for other local virtualization surfaces,
+but this XCP-ng harness treats ARM-labelled Windows installers as
+`windows_requirements_blocked`.
 
 ## Troubleshooting
 

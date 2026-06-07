@@ -43,42 +43,54 @@ type ISOE2ESummary struct {
 }
 
 type isoE2ERuntime struct {
-	client          lifecycleClient
-	placement       xcpNgPlacement
-	leaseID         string
-	labels          map[string]string
-	vm              xcpNgFreshVMResult
+	client            lifecycleClient
+	placement         xcpNgPlacement
+	leaseID           string
+	labels            map[string]string
+	vm                xcpNgFreshVMResult
 	importedInstaller xcpNgConfigDrive
 	importedAnswer    xcpNgConfigDrive
-	installerDrive  xcpNgConfigDrive
-	answerDrive     xcpNgConfigDrive
-	installDisk     xcpNgConfigDrive
-	remasteredISO   string
-	generatedSeed   string
-	keyPath         string
-	publicKey       string
-	sshTarget       core.SSHTarget
-	cleanupLocal    []string
-	keepLocal       map[string]struct{}
-	windowsFallback bool
+	installerDrive    xcpNgConfigDrive
+	answerDrive       xcpNgConfigDrive
+	installDisk       xcpNgConfigDrive
+	remasteredISO     string
+	generatedSeed     string
+	generatedAnswer   string
+	keyPath           string
+	publicKey         string
+	windowsUser       string
+	sshTarget         core.SSHTarget
+	cleanupLocal      []string
+	keepLocal         map[string]struct{}
+	windowsFallback   bool
 }
 
 const (
-	isoE2EDefaultTimeout      = 90 * time.Minute
-	isoE2EInstallerTimeout    = 55 * time.Minute
-	isoE2EGuestMetricsTimeout = 20 * time.Minute
-	isoE2EInstallDiskBytes    = 24 * 1024 * 1024 * 1024
+	isoE2EDefaultTimeout        = 90 * time.Minute
+	isoE2EInstallerTimeout      = 55 * time.Minute
+	isoE2EWindowsInstallTimeout = 70 * time.Minute
+	isoE2EGuestMetricsTimeout   = 20 * time.Minute
+	isoE2EInstallDiskBytes      = 24 * 1024 * 1024 * 1024
 )
 
 var (
-	isoE2ECurrentTime        = func() time.Time { return time.Now().UTC() }
-	isoE2EWaitForSSHReady    = func(ctx context.Context, target *core.SSHTarget, phase string, timeout time.Duration) error { return core.WaitForSSHReady(ctx, target, os.Stderr, phase, timeout) }
-	isoE2ERunSSHQuiet        = func(ctx context.Context, target core.SSHTarget, remote string) error { return core.RunSSHQuiet(ctx, target, remote) }
-	isoE2EEnsureTestboxKey   = func(cfg Config, leaseID string) (string, string, error) { return core.EnsureTestboxKeyForConfig(cfg, leaseID) }
-	isoE2EProviderKeyForLease = func(leaseID string) string { return core.ProviderKeyForLease(leaseID) }
-	isoE2ERemasterUbuntuISO  = remasterUbuntuAutoinstallISO
-	isoE2EWriteLinuxSeedISO  = writeLinuxSeedISO
-	isoE2EUbuntuLinuxLinePattern = regexp.MustCompile(`(?m)^(\s*linux\s+/casper/vmlinuz\s+)(.*?)(\s+---\s*)$`)
+	isoE2ECurrentTime     = func() time.Time { return time.Now().UTC() }
+	isoE2EWaitForSSHReady = func(ctx context.Context, target *core.SSHTarget, phase string, timeout time.Duration) error {
+		return core.WaitForSSHReady(ctx, target, os.Stderr, phase, timeout)
+	}
+	isoE2ERunSSHQuiet = func(ctx context.Context, target core.SSHTarget, remote string) error {
+		return core.RunSSHQuiet(ctx, target, remote)
+	}
+	isoE2EEnsureTestboxKey = func(cfg Config, leaseID string) (string, string, error) {
+		return core.EnsureTestboxKeyForConfig(cfg, leaseID)
+	}
+	isoE2EProviderKeyForLease     = func(leaseID string) string { return core.ProviderKeyForLease(leaseID) }
+	isoE2ERemasterUbuntuISO       = remasterUbuntuAutoinstallISO
+	isoE2EWriteLinuxSeedISO       = writeLinuxSeedISO
+	isoE2EWriteWindowsAnswerISO   = writeWindowsAnswerISO
+	isoE2EGenerateWindowsPassword = generateWindowsAutoLogonPassword
+	isoE2EUbuntuLinuxLinePattern  = regexp.MustCompile(`(?m)^(\s*linux\s+/casper/vmlinuz\s+)(.*?)(\s+---\s*)$`)
+	isoE2EWindowsARMLinePattern   = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(arm64|aarch64|arm)(?:[^a-z0-9]|$)`)
 )
 
 func RunISOE2E(ctx context.Context, opts ISOE2EOptions) (summary ISOE2ESummary, err error) {
@@ -146,7 +158,7 @@ func RunISOE2E(ctx context.Context, opts ISOE2EOptions) (summary ISOE2ESummary, 
 		return summary, core.Exit(3, "CRABBOX_XCP_NG_ISO_E2E_MUTATE=1 is required for --mutate")
 	}
 	if opts.OS == "windows" {
-		return runISOE2EWindowsFoundation(ctx, client, placement, opts, summary)
+		return runISOE2EWindows(ctx, client, placement, opts, summary)
 	}
 	return runISOE2ELinux(ctx, client, placement, opts, summary)
 }
@@ -159,6 +171,11 @@ func resolveISOE2EReadOnly(ctx context.Context, client lifecycleClient, placemen
 		summary.Reason = err.Error()
 		summary.Phase = "installer_iso"
 		return err
+	}
+	if opts.OS == "windows" {
+		if err := ensureWindowsInstallerSupported(opts.ISO, installer.NameLabel, summary); err != nil {
+			return err
+		}
 	}
 	summary.Details["installer_source"] = installer.Source
 	if installer.UUID != "" {
@@ -181,83 +198,121 @@ func resolveISOE2EReadOnly(ctx context.Context, client lifecycleClient, placemen
 	return nil
 }
 
-func runISOE2EWindowsFoundation(ctx context.Context, client lifecycleClient, placement xcpNgPlacement, opts ISOE2EOptions, summary ISOE2ESummary) (result ISOE2ESummary, err error) {
+func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcpNgPlacement, opts ISOE2EOptions, summary ISOE2ESummary) (result ISOE2ESummary, err error) {
 	result = summary
 	now := isoE2ECurrentTime()
 	leaseID := fmt.Sprintf("cbx_isoe2e_%d", now.Unix())
 	labels := core.DirectLeaseLabels(opts.Config, leaseID, strings.TrimPrefix(opts.NamePrefix, "crabbox-"), "xcp-ng", "", true, now)
-	installer, err := client.ResolveISOMedia(ctx, xcpNgProviderConfig(opts.Config), opts.ISO)
-	if err != nil {
-		result.Classification = "environment_blocked"
-		result.Reason = err.Error()
-		result.Phase = "installer_iso"
+	if err = ensureWindowsInstallerSupported(opts.ISO, "", &result); err != nil {
 		return result, err
 	}
-	if opts.Mode == "mutate" && installer.Source == "local-file" {
-		result.Classification = "environment_blocked"
-		result.Reason = "local ISO upload is not implemented yet for Windows; use an ISO VDI name, UUID, or OpaqueRef"
-		result.Phase = "installer_iso"
-		return result, core.Exit(3, "%s", result.Reason)
-	}
-	result.Details["installer_source"] = installer.Source
-	if installer.UUID != "" {
-		result.Details["installer_uuid"] = installer.UUID
-	}
-	if opts.AnswerISO != "" {
-		answerISO, resolveErr := client.ResolveISOMedia(ctx, xcpNgProviderConfig(opts.Config), opts.AnswerISO)
-		if resolveErr != nil {
-			result.Classification = "environment_blocked"
-			result.Reason = resolveErr.Error()
-			result.Phase = "answer_iso"
-			return result, resolveErr
-		}
-		if answerISO.Source == "local-file" {
-			result.Classification = "environment_blocked"
-			result.Reason = "local answer ISO upload is not implemented yet for Windows; use an ISO VDI name, UUID, or OpaqueRef"
-			result.Phase = "answer_iso"
-			return result, core.Exit(3, "%s", result.Reason)
-		}
-		result.Details["answer_iso_source"] = answerISO.Source
-		if answerISO.UUID != "" {
-			result.Details["answer_iso_uuid"] = answerISO.UUID
-		}
-	}
 	runtime := &isoE2ERuntime{
-		client:    client,
-		placement: placement,
-		leaseID:   leaseID,
-		labels:    labels,
+		client:       client,
+		placement:    placement,
+		leaseID:      leaseID,
+		labels:       labels,
+		cleanupLocal: []string{},
+		keepLocal:    map[string]struct{}{},
 	}
 	runtime.labels["workflow"] = "iso-e2e"
 	runtime.labels["os"] = opts.OS
 	runtime.labels["name_prefix"] = opts.NamePrefix
+	runtime.labels["provider_key"] = isoE2EProviderKeyForLease(runtime.leaseID)
+	if err = runtime.prepareWindowsAnswerMedia(ctx, opts, &result); err != nil {
+		return result, err
+	}
+	defer runtime.cleanupLocalArtifacts()
 	if err = runtime.createBaseVM(ctx, opts, &result); err != nil {
 		return result, err
 	}
 	defer runtime.cleanup(context.Background(), &result, &err)
-	if err = runtime.attachInstallerISO(ctx, installer, "3"); err != nil {
+	if err = runtime.attachInstallDisk(ctx); err != nil {
 		result.Classification = "environment_blocked"
+		result.Phase = "windows_install_disk"
 		result.Reason = err.Error()
 		return result, err
 	}
-	if opts.AnswerISO != "" {
-		answerISO, _ := client.ResolveISOMedia(ctx, xcpNgProviderConfig(opts.Config), opts.AnswerISO)
-		if answerISO.VDIRef != "" {
-			if err = runtime.attachAnswerISO(ctx, answerISO, "4"); err != nil {
-				result.Classification = "environment_blocked"
-				result.Reason = err.Error()
-				return result, err
-			}
-		}
+	installer, resolveErr := runtime.resolveInstallerMedia(ctx, &result)
+	if resolveErr != nil {
+		return result, resolveErr
 	}
+	if err = ensureWindowsInstallerSupported(opts.ISO, installer.NameLabel, &result); err != nil {
+		return result, err
+	}
+	if err = runtime.attachInstallerISO(ctx, installer, "3"); err != nil {
+		if result.Classification == "" {
+			result.Classification = "environment_blocked"
+			result.Reason = err.Error()
+		}
+		return result, err
+	}
+	if err = runtime.attachAnswerMedia(ctx, opts, &result); err != nil {
+		return result, err
+	}
+	result.Phase = "windows_iso_attached"
 	if err = runtime.startVM(ctx); err != nil {
 		result.Classification = "environment_blocked"
+		result.Phase = "windows_setup_started"
 		result.Reason = err.Error()
 		return result, err
 	}
-	result.Classification = "started_unverified"
-	result.Phase = "started_vm"
-	result.Reason = "VM.start succeeded, but Windows unattended install proof remains owned by PLAN-03"
+	result.Phase = "windows_setup_started"
+	result.Details["installer_boot"] = "started"
+	if err = runtime.client.SetVMBootOrder(ctx, xapiRef(runtime.vm.VM.Ref), "c"); err != nil {
+		result.Classification = "environment_blocked"
+		result.Phase = "windows_install_complete"
+		result.Reason = fmt.Sprintf("set installed-boot order: %v", err)
+		return result, err
+	}
+	installerDeadline := isoE2EWindowsInstallTimeout
+	if opts.Timeout > isoE2EGuestMetricsTimeout {
+		remaining := opts.Timeout - isoE2EGuestMetricsTimeout
+		if remaining > 0 && remaining < installerDeadline {
+			installerDeadline = remaining
+		}
+	}
+	installerCtx, installerCancel := context.WithTimeout(ctx, installerDeadline)
+	defer installerCancel()
+	firstBootIP, ipErr := runtime.waitForGuestIPv4(installerCtx, "Windows")
+	if ipErr != nil {
+		result.Classification = "environment_blocked"
+		result.Phase = "windows_install_complete"
+		result.Reason = ipErr.Error()
+		return result, ipErr
+	}
+	result.Phase = "windows_install_complete"
+	result.Details["first_boot_ip"] = firstBootIP
+	if runtime.windowsFallback {
+		result.Classification = "source_uncovered"
+		result.Phase = "windows_first_boot"
+		result.Details["readiness_probe"] = "guest-metrics"
+		result.Reason = "Windows guest reached first boot and reported guest metrics, but the supplied answer media does not guarantee Crabbox SSH bootstrap; remote command proof remains uncovered"
+		return result, core.Exit(4, "%s", result.Reason)
+	}
+	runtime.sshTarget = core.SSHTargetFromConfig(opts.Config, firstBootIP)
+	runtime.sshTarget.TargetOS = "windows"
+	runtime.sshTarget.WindowsMode = "normal"
+	runtime.sshTarget.Key = runtime.keyPath
+	runtime.sshTarget.User = firstNonBlank(runtime.windowsUser, runtime.sshTarget.User, opts.Config.XCPNg.User, opts.Config.SSHUser)
+	if runtime.sshTarget.Port == "" {
+		runtime.sshTarget.Port = firstNonBlank(opts.Config.SSHPort, "22")
+	}
+	if err = isoE2EWaitForSSHReady(ctx, &runtime.sshTarget, "windows_first_boot", minDuration(isoE2EGuestMetricsTimeout, opts.Timeout/3)); err != nil {
+		result.Classification = "environment_blocked"
+		result.Phase = "windows_first_boot"
+		result.Reason = err.Error()
+		return result, err
+	}
+	result.Phase = "windows_first_boot"
+	if err = isoE2ERunSSHQuiet(ctx, runtime.sshTarget, `Write-Output windows-iso-e2e-ok`); err != nil {
+		result.Classification = "environment_blocked"
+		result.Phase = "windows_command_ok"
+		result.Reason = err.Error()
+		return result, err
+	}
+	result.Classification = "windows_install_passed"
+	result.Phase = "windows_command_ok"
+	result.Reason = ""
 	return result, nil
 }
 
@@ -340,7 +395,7 @@ func runISOE2ELinux(ctx context.Context, client lifecycleClient, placement xcpNg
 	}
 	installerCtx, installerCancel := context.WithTimeout(ctx, installerDeadline)
 	defer installerCancel()
-	firstBootIP, ipErr := runtime.waitForGuestIPv4(installerCtx)
+	firstBootIP, ipErr := runtime.waitForGuestIPv4(installerCtx, "Linux")
 	if ipErr != nil {
 		result.Classification = "environment_blocked"
 		result.Phase = "linux_install_complete"
@@ -430,6 +485,52 @@ func (r *isoE2ERuntime) prepareInstallerMedia(ctx context.Context, opts ISOE2EOp
 	return nil
 }
 
+func (r *isoE2ERuntime) prepareWindowsAnswerMedia(ctx context.Context, opts ISOE2EOptions, summary *ISOE2ESummary) error {
+	if strings.TrimSpace(summary.AnswerISO) != "" {
+		r.windowsFallback = true
+		return nil
+	}
+	keyPath, publicKey, err := isoE2EEnsureTestboxKey(opts.Config, r.leaseID)
+	if err != nil {
+		summary.Classification = "test_failed"
+		summary.Phase = "windows_answer_generation"
+		summary.Reason = err.Error()
+		return err
+	}
+	password, err := isoE2EGenerateWindowsPassword()
+	if err != nil {
+		summary.Classification = "test_failed"
+		summary.Phase = "windows_answer_generation"
+		summary.Reason = err.Error()
+		return err
+	}
+	payload, err := newWindowsAutounattendPayload(opts.Config, r.leaseID, strings.TrimPrefix(r.leaseID, "cbx_"), publicKey, password)
+	if err != nil {
+		summary.Classification = "test_failed"
+		summary.Phase = "windows_answer_generation"
+		summary.Reason = err.Error()
+		return err
+	}
+	answerISO, err := isoE2EWriteWindowsAnswerISO(ctx, opts.EvidenceDir, payload)
+	if err != nil {
+		summary.Classification = "environment_blocked"
+		summary.Phase = "windows_answer_generation"
+		summary.Reason = err.Error()
+		return err
+	}
+	r.keyPath = keyPath
+	r.publicKey = publicKey
+	r.windowsUser = payload.Username
+	r.generatedAnswer = answerISO
+	r.cleanupLocal = append(r.cleanupLocal, answerISO)
+	summary.AnswerISO = answerISO
+	summary.Details["answer_iso_source"] = "generated-local-file"
+	summary.Details["windows_bootstrap"] = "openssh-key"
+	summary.Details["ssh_key"] = filepath.Base(keyPath)
+	summary.Phase = "windows_answer_generation"
+	return nil
+}
+
 func (r *isoE2ERuntime) createBaseVM(ctx context.Context, opts ISOE2EOptions, summary *ISOE2ESummary) error {
 	vmName := isoE2EVMName(opts)
 	created, err := r.client.CreateFreshVM(ctx, xcpNgFreshVMRequest{
@@ -493,7 +594,7 @@ func (r *isoE2ERuntime) resolveInstallerMedia(ctx context.Context, summary *ISOE
 		SRRef:        r.placement.srRef,
 		Path:         summary.ISO,
 		Name:         filepath.Base(summary.ISO),
-		Description:  "Crabbox imported Linux installer ISO",
+		Description:  fmt.Sprintf("Crabbox imported %s installer ISO", isoE2EOSLabel(summary.OS)),
 		Labels:       r.labels,
 		DestroyVDI:   true,
 		MarkReadOnly: true,
@@ -505,7 +606,7 @@ func (r *isoE2ERuntime) resolveInstallerMedia(ctx context.Context, summary *ISOE
 		return xcpNgISOMediaRef{}, importErr
 	}
 	r.importedInstaller = imported
-		summary.Evidence["installer_iso_imported"] = imported.Name
+	summary.Evidence["installer_iso_imported"] = imported.Name
 	return xcpNgISOMediaRef{VDIRef: imported.VDIRef, NameLabel: imported.Name, Source: "imported-local-file"}, nil
 }
 
@@ -514,7 +615,7 @@ func (r *isoE2ERuntime) attachInstallDisk(ctx context.Context) error {
 		VMRef:       xapiRef(r.vm.VM.Ref),
 		SRRef:       r.placement.srRef,
 		Name:        r.vm.VM.Name + "-install-disk",
-		Description: "Crabbox Linux ISO install disk",
+		Description: fmt.Sprintf("Crabbox %s ISO install disk", isoE2EOSLabel(r.labels["os"])),
 		SizeBytes:   isoE2EInstallDiskBytes,
 		UserDevice:  "0",
 		Labels:      r.labels,
@@ -573,7 +674,7 @@ func (r *isoE2ERuntime) attachAnswerMedia(ctx context.Context, opts ISOE2EOption
 		SRRef:        r.placement.srRef,
 		Path:         answerValue,
 		Name:         filepath.Base(answerValue),
-		Description:  "Crabbox Linux autoinstall seed ISO",
+		Description:  fmt.Sprintf("Crabbox %s answer ISO", isoE2EOSLabel(summary.OS)),
 		Labels:       r.labels,
 		DestroyVDI:   true,
 		MarkReadOnly: true,
@@ -612,7 +713,11 @@ func (r *isoE2ERuntime) startVM(ctx context.Context) error {
 	return r.client.StartVM(ctx, xapiRef(r.vm.VM.Ref))
 }
 
-func (r *isoE2ERuntime) waitForGuestIPv4(ctx context.Context) (string, error) {
+func (r *isoE2ERuntime) waitForGuestIPv4(ctx context.Context, installLabel string) (string, error) {
+	waitLabel := strings.ToLower(strings.TrimSpace(installLabel))
+	if waitLabel == "" {
+		waitLabel = "guest"
+	}
 	deadline := time.Now().Add(minDuration(isoE2EGuestMetricsTimeout, time.Until(time.Now().Add(isoE2EGuestMetricsTimeout))))
 	if dl, ok := ctx.Deadline(); ok {
 		deadline = dl
@@ -626,14 +731,14 @@ func (r *isoE2ERuntime) waitForGuestIPv4(ctx context.Context) (string, error) {
 		lastErr = err
 		if time.Now().After(deadline) {
 			if lastErr != nil {
-				return "", exit(5, "timed out waiting for XCP-ng guest IPv4 after Linux install: %v", lastErr)
+				return "", exit(5, "timed out waiting for XCP-ng guest IPv4 after %s install: %v", waitLabel, lastErr)
 			}
-			return "", exit(5, "timed out waiting for XCP-ng guest IPv4 after Linux install")
+			return "", exit(5, "timed out waiting for XCP-ng guest IPv4 after %s install", waitLabel)
 		}
 		select {
 		case <-ctx.Done():
 			if lastErr != nil && errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
-				return "", exit(5, "timed out waiting for XCP-ng guest IPv4 after Linux install: %v", lastErr)
+				return "", exit(5, "timed out waiting for XCP-ng guest IPv4 after %s install: %v", waitLabel, lastErr)
 			}
 			return "", context.Cause(ctx)
 		case <-time.After(5 * time.Second):
@@ -647,10 +752,16 @@ func (r *isoE2ERuntime) cleanup(ctx context.Context, summary *ISOE2ESummary, run
 		return
 	}
 	cleanupErr := r.client.DeleteServer(ctx, r.vm.VM.Ref)
+	seen := map[string]struct{}{}
 	for _, drive := range []xcpNgConfigDrive{r.answerDrive, r.installerDrive, r.importedAnswer, r.importedInstaller} {
 		if !drive.DestroyVDI || drive.VDIRef == "" {
 			continue
 		}
+		key := drive.VDIRef + "|" + drive.VBDRef
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
 		if err := r.client.DeleteConfigDrive(ctx, drive); err != nil && cleanupErr == nil {
 			cleanupErr = err
 		}
@@ -658,7 +769,7 @@ func (r *isoE2ERuntime) cleanup(ctx context.Context, summary *ISOE2ESummary, run
 	if cleanupErr != nil {
 		summary.Cleanup = "resource_cleanup_failed"
 		summary.Details["cleanup_error"] = cleanupErr.Error()
-		if summary.Classification == "linux_install_passed" || summary.Classification == "started_unverified" {
+		if summary.Classification == "linux_install_passed" || summary.Classification == "started_unverified" || summary.Classification == "windows_install_passed" || summary.Classification == "source_uncovered" {
 			summary.Classification = "resource_cleanup_failed"
 		}
 		if *runErr == nil {
@@ -701,6 +812,30 @@ func resolveISOE2EPlacement(ctx context.Context, client lifecycleClient, cfg Con
 	return xcpNgPlacement{srRef: srRef, networkRef: networkRef, hostRef: hostRef}, nil
 }
 
+func ensureWindowsInstallerSupported(isoValue, resolvedName string, summary *ISOE2ESummary) error {
+	for _, candidate := range []string{isoValue, resolvedName} {
+		if windowsInstallerLooksARM(candidate) {
+			summary.Classification = "windows_requirements_blocked"
+			summary.Phase = "installer_iso"
+			summary.Reason = "Windows ISO appears to target ARM, but the XCP-ng ISO E2E lab expects x86_64/x64 installer media"
+			return core.Exit(4, "%s", summary.Reason)
+		}
+	}
+	return nil
+}
+
+func windowsInstallerLooksARM(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	normalized := strings.ToLower(strings.ReplaceAll(value, "\\", "/"))
+	if strings.Contains(normalized, "/isos-arm/") {
+		return true
+	}
+	return isoE2EWindowsARMLinePattern.MatchString(filepath.Base(normalized))
+}
+
 func validateISOE2EOptions(opts *ISOE2EOptions) error {
 	if opts.Mode != "read-only" && opts.Mode != "mutate" {
 		return fmt.Errorf("mode must be read-only or mutate")
@@ -736,6 +871,13 @@ func WriteISOE2ESummary(path string, summary ISOE2ESummary) error {
 	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
+func isoE2EOSLabel(osName string) string {
+	if strings.EqualFold(osName, "windows") {
+		return "Windows"
+	}
+	return "Linux"
+}
+
 func writeLinuxSeedISO(ctx context.Context, evidenceDir string, payload xcpNgLinuxAutoinstallPayload) (string, error) {
 	workDir, err := os.MkdirTemp(evidenceDir, "linux-seed-")
 	if err != nil {
@@ -752,6 +894,26 @@ func writeLinuxSeedISO(ctx context.Context, evidenceDir string, payload xcpNgLin
 	args := []string{"makehybrid", "-quiet", "-o", path, workDir, "-iso", "-joliet", "-default-volume-name", "cidata"}
 	if out, err := exec.CommandContext(ctx, "/usr/bin/hdiutil", args...).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("build Linux seed ISO: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return path, nil
+}
+
+func writeWindowsAnswerISO(ctx context.Context, evidenceDir string, payload xcpNgWindowsAutounattendPayload) (string, error) {
+	workDir, err := os.MkdirTemp(evidenceDir, "windows-answer-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(workDir)
+	if err := os.WriteFile(filepath.Join(workDir, "Autounattend.xml"), []byte(payload.AnswerXML), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "crabbox-bootstrap.ps1"), []byte(payload.BootstrapPowerShell), 0o600); err != nil {
+		return "", err
+	}
+	path := filepath.Join(evidenceDir, fmt.Sprintf("%s-windows-answer.iso", isoE2ECurrentTime().Format("20060102t150405z")))
+	args := []string{"makehybrid", "-quiet", "-o", path, workDir, "-iso", "-joliet", "-default-volume-name", "CRABBOXWIN"}
+	if out, err := exec.CommandContext(ctx, "/usr/bin/hdiutil", args...).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("build Windows answer ISO: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return path, nil
 }
