@@ -83,8 +83,11 @@ func (c *xapiClient) Close(ctx context.Context) error {
 		return nil
 	}
 	_, err := c.call(ctx, "session.logout", c.session)
+	if err != nil {
+		return err
+	}
 	c.session = ""
-	return err
+	return nil
 }
 
 func (c *xapiClient) DoctorInventory(ctx context.Context, cfg xcpNgConfig) ([]Server, error) {

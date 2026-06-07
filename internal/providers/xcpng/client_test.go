@@ -59,6 +59,45 @@ func TestXAPIEndpointNormalizesBareHostAndRejectsPlainHTTP(t *testing.T) {
 	}
 }
 
+func TestCloseRetainsSessionWhenLogoutFailsSoItCanRetry(t *testing.T) {
+	var methods []string
+	client := &xapiClient{
+		endpoint: "http://xcp-ng.example.test/",
+		session:  "OpaqueRef:session",
+		http: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			method := readXMLRPCMethod(t, req)
+			methods = append(methods, method)
+			if method != "session.logout" {
+				t.Fatalf("unexpected method %s", method)
+			}
+			if len(methods) == 1 {
+				return &http.Response{
+					StatusCode: http.StatusBadGateway,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("temporary logout failure")),
+				}, nil
+			}
+			return xmlRPCHTTPResponse("true"), nil
+		})},
+	}
+
+	if err := client.Close(context.Background()); err == nil {
+		t.Fatal("expected failed logout")
+	}
+	if client.session != "OpaqueRef:session" {
+		t.Fatalf("failed logout cleared session %q", client.session)
+	}
+	if err := client.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if client.session != "" {
+		t.Fatalf("successful logout kept session %q", client.session)
+	}
+	if got := strings.Join(methods, ","); got != "session.logout,session.logout" {
+		t.Fatalf("methods=%s", got)
+	}
+}
+
 func TestClientDoctorInventoryUsesListOnly(t *testing.T) {
 	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
