@@ -501,6 +501,12 @@ func providerHelpSSH() string {
 	}), ", ")
 }
 
+func providerHelpCleanup() string {
+	return "provider: " + joinProviderNames(providerNamesForHelp(func(spec ProviderSpec) bool {
+		return spec.Features.Has(FeatureCleanup)
+	}))
+}
+
 func isBlacksmithProvider(provider string) bool {
 	return provider == "blacksmith-testbox" || provider == "blacksmith"
 }
