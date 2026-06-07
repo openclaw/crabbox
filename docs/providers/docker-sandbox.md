@@ -38,12 +38,18 @@ surfaces, or local Docker socket pass-through.
 Crabbox intentionally targets the standalone Docker Sandbox CLI surface, not an
 internal Docker API.
 
-Validated local proof for this PR used:
+Validated local proof for this PR used this `sbx` version pair:
 
 - `sbx` client `v0.31.3`
 - `sbx` server `v0.31.3`
 
-Crabbox currently depends on these `sbx` commands and shapes:
+This is the validated compatibility baseline, not a promise that older or newer
+`sbx` releases have the same behavior. Crabbox treats other `sbx` versions as
+best-effort compatible only when they preserve the command and JSON contract
+below. When Docker changes this contract, update this document and the
+provider-local tests in `internal/providers/dockersandbox` in the same change.
+
+Crabbox currently depends on these `sbx` commands and flags:
 
 - `sbx version`
 - `sbx ls --json`
@@ -54,12 +60,11 @@ Crabbox currently depends on these `sbx` commands and shapes:
 
 `sbx ls --json` compatibility currently accepts either a top-level array or an
 object wrapper containing arrays under `sandboxes`, `items`, `data`, or
-`results`. Per-item field parsing accepts common variants such as `id` /
-`sandbox_id`, `name` / `sandbox_name`, `state` / `status`, and `workspace` /
-`working_dir`.
-
-If Docker changes this CLI contract, Crabbox's Docker Sandbox provider will need
-an explicit compatibility update.
+`results`. Per-item field parsing accepts common variants: `id`, `ID`,
+`sandboxId`, and `sandbox_id`; `name`, `Name`, `sandboxName`, and
+`sandbox_name`; `state`, `status`, and `Status`; `agent` and `Agent`; and
+`workspace`, `workdir`, `workingDir`, and `working_dir`. Records without a name
+or id are ignored.
 
 ## Commands
 
