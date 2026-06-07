@@ -297,3 +297,60 @@ esac
   assert.doesNotMatch(doctorLog, /pool-secret/);
   assert.match(doctorLog, /password=<redacted>/);
 });
+
+test("xcpng live smoke classifies stop failures after a mutating run", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-xcpng-live-smoke-"));
+  const evidence = path.join(dir, "evidence");
+  const fakeCrabbox = path.join(dir, "crabbox");
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "doctor --provider xcp-ng --json")
+    printf '{"status":"ok"}\\n'
+    ;;
+  "warmup --provider xcp-ng --keep --slug xcp-ng-live-smoke --timing-json")
+    printf 'leased cbx_abcdef123456 slug=xcp-ng-live-smoke\\n'
+    ;;
+  "run --provider xcp-ng --id cbx_abcdef123456 --no-sync -- echo xcp-ng-ok")
+    printf 'xcp-ng-ok\\n'
+    ;;
+  "stop --provider xcp-ng cbx_abcdef123456")
+    printf 'stop failed password=stop-secret\\n' >&2
+    exit 4
+    ;;
+  *)
+    printf 'unexpected command: %s\\n' "$*" >&2
+    exit 2
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/xcpng-live-smoke.sh", "--mutate"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_XCP_NG_LIVE_MUTATE: "1",
+      CRABBOX_XCP_NG_SMOKE_DIR: evidence,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=environment_blocked/);
+  assert.match(result.stdout, /reason=stop_failed/);
+  assert.match(result.stdout, /^stop_log=.+-stop\.log$/m);
+
+  const stopLogs = fs
+    .readdirSync(evidence)
+    .filter((name) => name.endsWith("-stop.log"));
+  assert.equal(stopLogs.length, 1);
+
+  const stopLog = fs.readFileSync(path.join(evidence, stopLogs[0]), "utf8");
+  assert.match(stopLog, /password=<redacted>/);
+  assert.doesNotMatch(stopLog, /stop-secret/);
+});

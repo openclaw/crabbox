@@ -290,7 +290,21 @@ else
   exit 3
 fi
 
-"$crabbox_bin" stop --provider xcp-ng "$lease_id" >"$stop_log.tmp" 2>&1
+if "$crabbox_bin" stop --provider xcp-ng "$lease_id" >"$stop_log.tmp" 2>&1; then
+  :
+else
+  redact_tmp_if_present "$stop_log.tmp" "$stop_log"
+  {
+    echo "classification=environment_blocked"
+    echo "reason=stop_failed"
+    echo "doctor_log=$doctor_log"
+    echo "warmup_log=$warmup_log"
+    echo "run_log=$run_log"
+    echo "stop_log=$stop_log"
+  } > "$summary_log"
+  cat "$summary_log"
+  exit 3
+fi
 redact_tmp_if_present "$stop_log.tmp" "$stop_log"
 lease_id=""
 
