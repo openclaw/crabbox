@@ -175,7 +175,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
-	providerDef, err := ProviderFor(cfg.Provider)
+	providerDef, err := validateProviderTargetSupport(cfg)
 	if err != nil {
 		return err
 	}
