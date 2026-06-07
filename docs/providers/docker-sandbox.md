@@ -33,6 +33,34 @@ surfaces, or local Docker socket pass-through.
 - The host must satisfy Docker Sandbox virtualization requirements. Doctor
   surfaces KVM, hypervisor, or virtualization errors when the CLI reports them.
 
+## Supported `sbx` Contract
+
+Crabbox intentionally targets the standalone Docker Sandbox CLI surface, not an
+internal Docker API.
+
+Validated local proof for this PR used:
+
+- `sbx` client `v0.31.3`
+- `sbx` server `v0.31.3`
+
+Crabbox currently depends on these `sbx` commands and shapes:
+
+- `sbx version`
+- `sbx ls --json`
+- `sbx diagnose --output json` as optional doctor enrichment
+- `sbx create --name <name> [--template ...] [--cpus ...] [--memory ...] [--clone] shell <repo-root> [extra-workspaces...]`
+- `sbx exec [--workdir ...] [--env-file ...] <sandbox-name> <command...>`
+- `sbx rm --force <sandbox-name>`
+
+`sbx ls --json` compatibility currently accepts either a top-level array or an
+object wrapper containing arrays under `sandboxes`, `items`, `data`, or
+`results`. Per-item field parsing accepts common variants such as `id` /
+`sandbox_id`, `name` / `sandbox_name`, `state` / `status`, and `workspace` /
+`working_dir`.
+
+If Docker changes this CLI contract, Crabbox's Docker Sandbox provider will need
+an explicit compatibility update.
+
 ## Commands
 
 ```sh
