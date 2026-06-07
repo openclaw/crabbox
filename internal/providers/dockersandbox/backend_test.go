@@ -230,6 +230,40 @@ func TestRunCreatesExecsAndRemovesEphemeralSandbox(t *testing.T) {
 	}
 }
 
+func TestRunCloneModeKeepsSandboxAfterSuccess(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := newTestConfig()
+	cfg.DockerSandbox.Clone = true
+	repoRoot := t.TempDir()
+	runGit(t, repoRoot, "init", "-q")
+	var stderr bytes.Buffer
+	runner := newRunner(map[string]scriptedReply{
+		"create": {stdout: ""},
+		"exec":   {stdout: "ok\n"},
+		"rm":     {stdout: ""},
+	}, nil)
+	backend := newTestBackend(cfg, runner, io.Discard, &stderr)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: repoRoot},
+		Command: []string{"echo", "ok"},
+	})
+	if err != nil {
+		t.Fatalf("Run err=%v stderr=%s", err, stderr.String())
+	}
+	if result.Session == nil || !result.Session.Kept {
+		t.Fatalf("session=%#v, want clone-mode sandbox kept after success", result.Session)
+	}
+	if got, want := callVerbs(runner), []string{"create", "exec"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("verbs=%v want kept sandbox without rm %v", got, want)
+	}
+	if !strings.Contains(stderr.String(), "clone run kept sandbox") || !strings.Contains(stderr.String(), result.Session.CleanupCommand) {
+		t.Fatalf("stderr missing clone cleanup guidance: %s", stderr.String())
+	}
+	if claim, ok, err := resolveLeaseClaimForProvider(result.LeaseID, providerName); err != nil || !ok || claim.LeaseID == "" {
+		t.Fatalf("kept clone claim claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+}
+
 func TestRunBuildsConfiguredCreateCommandAndExec(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := newTestConfig()
@@ -908,7 +942,7 @@ func TestRejectRunOptionsAndCreateRepoValidation(t *testing.T) {
 	}
 }
 
-func TestValidateCreateRepoCloneAcceptsGitWorktree(t *testing.T) {
+func TestValidateCreateRepoCloneRejectsGitWorktree(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.DockerSandbox.Clone = true
 
@@ -928,8 +962,11 @@ func TestValidateCreateRepoCloneAcceptsGitWorktree(t *testing.T) {
 	runGit(t, repoRoot, "commit", "-q", "-m", "init")
 	runGit(t, repoRoot, "worktree", "add", "-q", worktreeRoot)
 
-	if err := validateCreateRepo(cfg, Repo{Root: worktreeRoot}); err != nil {
-		t.Fatalf("validateCreateRepo rejected valid Git worktree: %v", err)
+	if err := validateCreateRepo(cfg, Repo{Root: repoRoot}); err != nil {
+		t.Fatalf("validateCreateRepo rejected main Git checkout: %v", err)
+	}
+	if err := validateCreateRepo(cfg, Repo{Root: worktreeRoot}); err == nil || !strings.Contains(err.Error(), "linked Git worktrees are not supported") {
+		t.Fatalf("validateCreateRepo err=%v, want linked worktree rejection", err)
 	}
 }
 

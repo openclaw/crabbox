@@ -25,6 +25,13 @@ classify_diagnostic() {
   printf '%s\n' "$output" >&2
 }
 
+classify_clone_guard() {
+  local command="$1"
+  local output="$2"
+  printf 'classification=diagnostic_only clone_guard=manual command=%q exit=0\n' "$command" >&2
+  printf '%s\n' "$output" >&2
+}
+
 run_capture() {
   local command="$1"
   shift
@@ -47,6 +54,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
+mkdir -p bin
+rm -f bin/crabbox
 go build -trimpath -o bin/crabbox ./cmd/crabbox
 
 doctor_output="$(run_capture "bin/crabbox doctor --provider docker-sandbox" bin/crabbox doctor --provider docker-sandbox)"
@@ -54,6 +63,9 @@ printf '%s\n' "$doctor_output"
 if [[ "$doctor_output" != *sbx_version* ]]; then
   classify_diagnostic "bin/crabbox doctor --provider docker-sandbox" "$doctor_output"
   exit 1
+fi
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  classify_clone_guard "git rev-parse --is-inside-work-tree" "clone-mode live proof skipped outside a Git repository workspace"
 fi
 run_capture "bin/crabbox warmup --provider docker-sandbox --slug $slug --keep" bin/crabbox warmup --provider docker-sandbox --slug "$slug" --keep >/dev/null
 created=1

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -138,7 +139,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			LeaseID:        leaseID,
 			Slug:           slug,
 			Reused:         !acquired,
-			Kept:           req.Keep || !acquired,
+			Kept:           !shouldStop,
 			CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", providerName, slug),
 		}).handle(),
 	}
@@ -169,6 +170,12 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		result.Session.Kept = !shouldStop
 		return result, exit(exitCode, "docker-sandbox run exited %d", exitCode)
 	}
+	if acquired && b.cfg.DockerSandbox.Clone && !req.Keep {
+		shouldStop = false
+		result.Session.Kept = true
+		fmt.Fprintf(b.rt.Stderr, "docker-sandbox clone run kept sandbox to preserve unfetched commits; cleanup manually with: %s\n", result.Session.CleanupCommand)
+	}
+	result.Session.Kept = !shouldStop
 	return result, nil
 }
 
@@ -408,14 +415,25 @@ func validateCreateRepo(cfg Config, repo Repo) error {
 		return exit(2, "provider=%s requires a local workspace", providerName)
 	}
 	if cfg.DockerSandbox.Clone {
-		cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+		cmd := exec.Command("git", "rev-parse", "--git-dir", "--git-common-dir", "--is-inside-work-tree")
 		cmd.Dir = repo.Root
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return exit(2, "docker-sandbox --clone requires a normal Git repository workspace: %v: %s", err, strings.TrimSpace(string(output)))
 		}
-		if strings.TrimSpace(string(output)) != "true" {
-			return exit(2, "docker-sandbox --clone requires a normal Git repository workspace: git rev-parse --is-inside-work-tree returned %q", strings.TrimSpace(string(output)))
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		if len(lines) != 3 || strings.TrimSpace(lines[2]) != "true" {
+			return exit(2, "docker-sandbox --clone requires a normal Git repository workspace: git rev-parse output was %q", strings.TrimSpace(string(output)))
+		}
+		resolveGitPath := func(value string) string {
+			value = strings.TrimSpace(value)
+			if filepath.IsAbs(value) {
+				return filepath.Clean(value)
+			}
+			return filepath.Clean(filepath.Join(repo.Root, value))
+		}
+		if resolveGitPath(lines[0]) != resolveGitPath(lines[1]) {
+			return exit(2, "docker-sandbox --clone requires a normal Git repository workspace: linked Git worktrees are not supported")
 		}
 	}
 	return nil
