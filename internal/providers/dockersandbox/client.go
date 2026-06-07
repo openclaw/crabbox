@@ -128,6 +128,31 @@ func (c *sbxCLI) remove(ctx context.Context, name string) error {
 	return err
 }
 
+func (c *sbxCLI) ports(ctx context.Context, name string, publish, unpublish []string, jsonOut bool) (string, error) {
+	args := []string{"ports", name}
+	if jsonOut {
+		args = append(args, "--json")
+	}
+	for _, spec := range publish {
+		args = append(args, "--publish", strings.TrimSpace(spec))
+	}
+	for _, spec := range unpublish {
+		args = append(args, "--unpublish", strings.TrimSpace(spec))
+	}
+	out, _, err := c.runQuiet(ctx, args)
+	return out, err
+}
+
+func (c *sbxCLI) copy(ctx context.Context, src, dst string, followLink bool) error {
+	args := []string{"cp"}
+	if followLink {
+		args = append(args, "-L")
+	}
+	args = append(args, src, dst)
+	_, _, err := c.runQuiet(ctx, args)
+	return err
+}
+
 func (c *sbxCLI) list(ctx context.Context) ([]sandboxRecord, error) {
 	out, _, err := c.runQuiet(ctx, []string{"ls", "--json"})
 	if err != nil {

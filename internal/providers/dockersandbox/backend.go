@@ -332,6 +332,34 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	return nil
 }
 
+func (b *backend) Ports(ctx context.Context, req PortsRequest) (string, error) {
+	cli, err := newSBXCLI(b.cfg, b.rt)
+	if err != nil {
+		return "", err
+	}
+	_, sandboxName, _, err := resolveLeaseID(req.ID, "", false, 0)
+	if err != nil {
+		return "", err
+	}
+	return cli.ports(ctx, sandboxName, req.Publish, req.Unpublish, req.JSON)
+}
+
+func (b *backend) Copy(ctx context.Context, req CopyRequest) error {
+	cli, err := newSBXCLI(b.cfg, b.rt)
+	if err != nil {
+		return err
+	}
+	_, sandboxName, _, err := resolveLeaseID(req.ID, "", false, 0)
+	if err != nil {
+		return err
+	}
+	src, dst, err := rewriteSandboxCopyPaths(sandboxName, req.Source, req.Destination)
+	if err != nil {
+		return err
+	}
+	return cli.copy(ctx, src, dst, req.FollowLink)
+}
+
 func dockerSandboxRemoveNotFoundError(err error) bool {
 	if err == nil {
 		return false
@@ -340,6 +368,47 @@ func dockerSandboxRemoveNotFoundError(err error) bool {
 	return strings.Contains(text, "not found") ||
 		strings.Contains(text, "no such sandbox") ||
 		strings.Contains(text, "no such container")
+}
+
+func rewriteSandboxCopyPaths(sandboxName, src, dst string) (string, string, error) {
+	src = strings.TrimSpace(src)
+	dst = strings.TrimSpace(dst)
+	srcSandbox, srcPath := parseSandboxPathSpec(src)
+	dstSandbox, dstPath := parseSandboxPathSpec(dst)
+	if srcSandbox == "" && dstSandbox == "" {
+		return "", "", exit(2, "copy requires one side to use SANDBOX:PATH")
+	}
+	if srcSandbox != "" && dstSandbox != "" {
+		return "", "", exit(2, "copy does not support sandbox-to-sandbox transfers")
+	}
+	if srcSandbox != "" {
+		if !strings.EqualFold(srcSandbox, "SANDBOX") {
+			return "", "", exit(2, "copy source must use SANDBOX:PATH")
+		}
+		src = sandboxName + ":" + srcPath
+	}
+	if dstSandbox != "" {
+		if !strings.EqualFold(dstSandbox, "SANDBOX") {
+			return "", "", exit(2, "copy destination must use SANDBOX:PATH")
+		}
+		dst = sandboxName + ":" + dstPath
+	}
+	return src, dst, nil
+}
+
+func parseSandboxPathSpec(value string) (string, string) {
+	if len(value) < 2 {
+		return "", ""
+	}
+	idx := strings.IndexByte(value, ':')
+	if idx <= 0 {
+		return "", ""
+	}
+	prefix := strings.TrimSpace(value[:idx])
+	if !strings.EqualFold(prefix, "SANDBOX") {
+		return "", ""
+	}
+	return prefix, value[idx+1:]
 }
 
 func (b *backend) createSandbox(ctx context.Context, cli *sbxCLI, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {

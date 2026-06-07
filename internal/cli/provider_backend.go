@@ -71,6 +71,32 @@ type DelegatedRunBackend interface {
 	Stop(ctx context.Context, req StopRequest) error
 }
 
+type PortsRequest struct {
+	Options   LeaseOptions
+	ID        string
+	Publish   []string
+	Unpublish []string
+	JSON      bool
+}
+
+type CopyRequest struct {
+	Options     LeaseOptions
+	ID          string
+	Source      string
+	Destination string
+	FollowLink bool
+}
+
+type PortsBackend interface {
+	Backend
+	Ports(ctx context.Context, req PortsRequest) (string, error)
+}
+
+type CopyBackend interface {
+	Backend
+	Copy(ctx context.Context, req CopyRequest) error
+}
+
 type CleanupBackend interface {
 	Backend
 	Cleanup(ctx context.Context, req CleanupRequest) error
