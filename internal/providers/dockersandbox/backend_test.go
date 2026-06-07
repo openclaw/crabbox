@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"reflect"
@@ -1027,6 +1028,11 @@ func TestFlagApplicationAndValidation(t *testing.T) {
 	bad.DockerSandbox.CPUs = 2.25
 	if err := validateConfig(bad); err == nil || !strings.Contains(err.Error(), "whole number") {
 		t.Fatalf("fractional CPU err=%v", err)
+	}
+	bad = newTestConfig()
+	bad.DockerSandbox.CPUs = math.Inf(1)
+	if err := validateConfig(bad); err == nil || !strings.Contains(err.Error(), "finite") {
+		t.Fatalf("infinite CPU err=%v", err)
 	}
 	bad = newTestConfig()
 	bad.DockerSandbox.Workdir = "/"

@@ -111,6 +111,9 @@ func validateConfig(cfg Config) error {
 	if agent != defaultAgent {
 		return exit(2, "docker-sandbox agent %q is not supported yet; v1 supports shell only", agent)
 	}
+	if math.IsNaN(cfg.DockerSandbox.CPUs) || math.IsInf(cfg.DockerSandbox.CPUs, 0) {
+		return exit(2, "docker-sandbox cpus must be finite")
+	}
 	if cfg.DockerSandbox.CPUs < 0 {
 		return exit(2, "docker-sandbox cpus must be greater than zero")
 	}
