@@ -120,12 +120,6 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Set up Python
-        if: ${{ matrix.provider == 'modal' || matrix.provider == 'tensorlake' }}
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.x"
-
       - name: Install common tools
         shell: bash
         run: |
@@ -133,25 +127,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq ripgrep
 
-      - name: Install provider client
-        if: ${{ matrix.provider == 'modal' || matrix.provider == 'tensorlake' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          case "${{ matrix.provider }}" in
-            modal)
-              python -m pip install --user modal
-              ;;
-            tensorlake)
-              python -m pip install --user tensorlake
-              ;;
-          esac
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
       - name: Write secret files
         shell: bash
         env:
-          CRABBOX_SSH_PRIVATE_KEY: ${{ contains(fromJSON('["aws","azure","gcp","hetzner","proxmox","parallels","ssh","exe-dev"]'), matrix.provider) && secrets.CRABBOX_SSH_PRIVATE_KEY || '' }}
+          CRABBOX_SSH_PRIVATE_KEY: ${{ contains(fromJSON('["aws","azure","gcp","hetzner","proxmox","parallels","ssh","exe-dev","runpod"]'), matrix.provider) && secrets.CRABBOX_SSH_PRIVATE_KEY || '' }}
           GCP_SERVICE_ACCOUNT_JSON: ${{ matrix.provider == 'gcp' && secrets.GCP_SERVICE_ACCOUNT_JSON || '' }}
         run: |
           set -euo pipefail

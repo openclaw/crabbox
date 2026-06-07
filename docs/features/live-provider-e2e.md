@@ -40,6 +40,8 @@ not actually sensitive can still be stored as secrets to keep setup uniform.
 | Proxmox | `CRABBOX_PROXMOX_API_URL`, `CRABBOX_PROXMOX_TOKEN_ID`, `CRABBOX_PROXMOX_TOKEN_SECRET`, `CRABBOX_PROXMOX_NODE`, `CRABBOX_PROXMOX_TEMPLATE_ID`, optional storage, bridge, user, and TLS secrets |
 | Parallels | `CRABBOX_PARALLELS_TEMPLATE` or `CRABBOX_PARALLELS_SOURCE` plus `CRABBOX_PARALLELS_SOURCE_SNAPSHOT`; remote hosts also need `CRABBOX_PARALLELS_HOST`, `CRABBOX_PARALLELS_HOST_USER`, and `CRABBOX_SSH_PRIVATE_KEY` |
 | Local Container | No provider secret; the runner must have Docker available |
+| Apple Container | No provider secret; the runner must be macOS with the Apple `container` CLI, or set `CRABBOX_APPLE_CONTAINER_CLI` |
+| Multipass | No provider secret; the runner must have the `multipass` CLI, or set `CRABBOX_MULTIPASS_CLI` |
 | Static SSH | `CRABBOX_STATIC_HOST`, optional `CRABBOX_STATIC_USER`, `CRABBOX_STATIC_PORT`, `CRABBOX_STATIC_WORK_ROOT`, `CRABBOX_TARGET`, `CRABBOX_WINDOWS_MODE`, and `CRABBOX_SSH_PRIVATE_KEY` |
 | exe.dev | `CRABBOX_SSH_PRIVATE_KEY` for the SSH identity accepted by exe.dev; optional `CRABBOX_EXE_DEV_CONTROL_HOST`, `CRABBOX_EXE_DEV_IMAGE` |
 | Blacksmith Testbox | `CRABBOX_BLACKSMITH_ORG`, `CRABBOX_BLACKSMITH_WORKFLOW`, optional `CRABBOX_BLACKSMITH_JOB`, `CRABBOX_BLACKSMITH_REF`, plus the Blacksmith CLI auth secret expected by the runner |
@@ -49,9 +51,10 @@ not actually sensitive can still be stored as secrets to keep setup uniform.
 | Daytona | `DAYTONA_API_KEY` or `DAYTONA_JWT_TOKEN`, `CRABBOX_DAYTONA_SNAPSHOT`; JWT auth also needs `DAYTONA_ORGANIZATION_ID` |
 | Islo | `ISLO_API_KEY` |
 | E2B | `CRABBOX_E2B_API_KEY` or `E2B_API_KEY` |
-| Modal | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` |
+| Modal | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`; the runner must have an audited `modal` CLI preinstalled |
 | Upstash Box | `CRABBOX_UPSTASH_BOX_API_KEY` or `UPSTASH_BOX_API_KEY` |
-| Tensorlake | `CRABBOX_TENSORLAKE_API_KEY` or `TENSORLAKE_API_KEY`, optional `TENSORLAKE_ORGANIZATION_ID`, `TENSORLAKE_PROJECT_ID` |
+| Tensorlake | `CRABBOX_TENSORLAKE_API_KEY` or `TENSORLAKE_API_KEY`, optional `TENSORLAKE_ORGANIZATION_ID`, `TENSORLAKE_PROJECT_ID`; the runner must have an audited `tensorlake` CLI preinstalled |
+| ASCII Box | `CRABBOX_ASCII_BOX_API_KEY` or `ASCII_BOX_API_KEY`; the runner must have the `box` CLI, or set `CRABBOX_ASCII_BOX_CLI` |
 | Cloudflare | `CRABBOX_CLOUDFLARE_RUNNER_URL`, `CRABBOX_CLOUDFLARE_RUNNER_TOKEN` |
 | Railway | `CRABBOX_RAILWAY_API_TOKEN` or `RAILWAY_API_TOKEN`, `CRABBOX_RAILWAY_SERVICE_ID`, `CRABBOX_RAILWAY_PROJECT_ID`, `CRABBOX_RAILWAY_ENVIRONMENT_ID` |
 | RunPod | `CRABBOX_RUNPOD_API_KEY` or `RUNPOD_API_KEY`; the RunPod account must already trust the SSH public key matching `CRABBOX_SSH_PRIVATE_KEY` |
@@ -59,9 +62,9 @@ not actually sensitive can still be stored as secrets to keep setup uniform.
 
 ## Notes
 
-- The workflow installs `modal` and `tensorlake` Python packages for those
-  providers. Other providers that rely on a local CLI need that CLI available on
-  the selected runner before the job starts.
+- Provider clients such as `modal`, `tensorlake`, `box`, `multipass`, and
+  Apple `container` must be preinstalled on the selected runner. The workflow
+  does not install third-party provider clients in secret-bearing jobs.
 - `GCP_SERVICE_ACCOUNT_JSON` is written to a temporary file and exposed through
   `GOOGLE_APPLICATION_CREDENTIALS`.
 - `CRABBOX_SSH_PRIVATE_KEY` is written to a temporary `0600` file and exposed

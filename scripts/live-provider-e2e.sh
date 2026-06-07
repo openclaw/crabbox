@@ -322,6 +322,7 @@ preflight_provider() {
       need_any_env "E2B API key" CRABBOX_E2B_API_KEY E2B_API_KEY
       ;;
     modal)
+      need_tool modal
       need_env_pair MODAL_TOKEN_ID MODAL_TOKEN_SECRET
       ;;
     upstash-box)
