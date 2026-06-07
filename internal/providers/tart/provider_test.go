@@ -2119,3 +2119,630 @@ func TestResolveReleaseOnlyRejectsUnclaimedVM(t *testing.T) {
 func sampleListJSON() string {
 	return `[{"Name":"crabbox-blue-1234abcd","State":"running","Running":true,"Disk":50,"Size":15,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"},{"Name":"my-dev-vm","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/cirruslabs/macos-sequoia-base:latest"}]`
 }
+
+// --- Mutation-testing-driven error propagation tests ---
+
+func TestListPropagatesListInstancesError(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {ExitCode: 1, Stderr: "tart not found"},
+		},
+		errors: map[string]error{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): fmt.Errorf("exit status 1"),
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	_, err := b.List(context.Background(), core.ListRequest{})
+	if err == nil {
+		t.Fatal("List should propagate listInstances error")
+	}
+}
+
+func TestDoctorPropagatesVersionError(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"--version"}): {ExitCode: 1, Stderr: "not found"},
+		},
+		errors: map[string]error{
+			commandKey([]string{"--version"}): fmt.Errorf("exit status 1"),
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	_, err := b.Doctor(context.Background(), core.DoctorRequest{})
+	if err == nil {
+		t.Fatal("Doctor should propagate tart --version error")
+	}
+}
+
+func TestDoctorPropagatesListError(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"--version"}):                                     {Stdout: "2.32.1"},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {ExitCode: 1},
+		},
+		errors: map[string]error{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): fmt.Errorf("exit status 1"),
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	_, err := b.Doctor(context.Background(), core.DoctorRequest{})
+	if err == nil {
+		t.Fatal("Doctor should propagate listInstances error")
+	}
+}
+
+func TestDoctorCountsCrabboxVMs(t *testing.T) {
+	listJSON := `[{"Name":"crabbox-a-1","State":"running","Running":true,"Disk":50,"Size":10,"Source":"test"},{"Name":"crabbox-b-2","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"test"},{"Name":"my-vm","State":"running","Running":true,"Disk":50,"Size":10,"Source":"test"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"--version"}):                                     {Stdout: "2.32.1"},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	if !strings.Contains(result.Message, "leases=2") {
+		t.Fatalf("Doctor should count 2 crabbox VMs, got: %s", result.Message)
+	}
+}
+
+func TestDoctorProbeSSHFlag(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"--version"}):                                     {Stdout: "2.32.1"},
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: "[]"},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{ProbeSSH: true})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	if !strings.Contains(result.Message, "ssh_probe=requires_running_lease") {
+		t.Fatalf("Doctor(ProbeSSH=true) should report requires_running_lease, got: %s", result.Message)
+	}
+}
+
+func TestReleaseLeaseFallsBackToResolve(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_rel123", "slug", providerName, "instance:crabbox-rel-vm", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup claim: %v", err)
+	}
+
+	listJSON := `[{"Name":"crabbox-rel-vm","State":"running","Running":true,"Disk":50,"Size":10,"Source":"test"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-rel-vm"}):                          {Stdout: "192.168.64.10"},
+			commandKey([]string{"stop", "crabbox-rel-vm"}):                        {},
+			commandKey([]string{"delete", "crabbox-rel-vm"}):                      {},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{
+			LeaseID: "cbx_rel123",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReleaseLease fallback resolve: %v", err)
+	}
+}
+
+func TestReleaseLeaseEmptyName(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{},
+	})
+	if err == nil {
+		t.Fatal("ReleaseLease with empty name should error")
+	}
+	if !strings.Contains(err.Error(), "requires a tart instance name") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestReleaseLeaseFromLabels(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"stop", "crabbox-lab-vm"}):   {},
+			commandKey([]string{"delete", "crabbox-lab-vm"}): {},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{
+			LeaseID: "cbx_lab456",
+			Server:  core.Server{Labels: map[string]string{"instance": "crabbox-lab-vm", "lease": "cbx_lab456"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReleaseLease from labels: %v", err)
+	}
+}
+
+func TestReleaseLeaseIDFromLabel(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"stop", "crabbox-noid-vm"}):   {},
+			commandKey([]string{"delete", "crabbox-noid-vm"}): {},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{
+			Server: core.Server{
+				CloudID: "crabbox-noid-vm",
+				Labels:  map[string]string{"lease": "cbx_fromlab"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReleaseLease should derive leaseID from label: %v", err)
+	}
+}
+
+func TestShouldCleanupEdgeCases(t *testing.T) {
+	now := time.Now().UTC()
+
+	t.Run("keep=true prevents cleanup", func(t *testing.T) {
+		server := core.Server{Status: "stopped", Labels: map[string]string{"keep": "true"}}
+		shouldDelete, reason := shouldCleanup(server, core.LeaseClaim{}, false, now)
+		if shouldDelete {
+			t.Fatal("should not cleanup keep=true")
+		}
+		if reason != "keep=true" {
+			t.Fatalf("reason=%q want keep=true", reason)
+		}
+	})
+
+	t.Run("stopped VM without claim", func(t *testing.T) {
+		server := core.Server{Status: "stopped", Labels: map[string]string{}}
+		shouldDelete, _ := shouldCleanup(server, core.LeaseClaim{}, false, now)
+		if !shouldDelete {
+			t.Fatal("stopped VM without claim should be cleaned up")
+		}
+	})
+
+	t.Run("running VM without claim", func(t *testing.T) {
+		server := core.Server{Status: "running", Labels: map[string]string{}}
+		shouldDelete, reason := shouldCleanup(server, core.LeaseClaim{}, false, now)
+		if shouldDelete {
+			t.Fatalf("running VM without claim should not be cleaned up, reason=%s", reason)
+		}
+		if reason != "missing claim" {
+			t.Fatalf("reason=%q want missing claim", reason)
+		}
+	})
+
+	t.Run("expired claim", func(t *testing.T) {
+		expiredTime := now.Add(-24 * time.Hour).Format(time.RFC3339)
+		claim := core.LeaseClaim{
+			LeaseID:            "cbx_exp",
+			LastUsedAt:         expiredTime,
+			IdleTimeoutSeconds: 1800,
+		}
+		server := core.Server{Status: "running", Labels: map[string]string{}}
+		shouldDelete, reason := shouldCleanup(server, claim, true, now)
+		if !shouldDelete {
+			t.Fatal("expired claim should trigger cleanup")
+		}
+		if reason != "claim expired" {
+			t.Fatalf("reason=%q want claim expired", reason)
+		}
+	})
+
+	t.Run("active claim within idle window", func(t *testing.T) {
+		recentTime := now.Add(-5 * time.Minute).Format(time.RFC3339)
+		claim := core.LeaseClaim{
+			LeaseID:            "cbx_act",
+			LastUsedAt:         recentTime,
+			IdleTimeoutSeconds: 1800,
+		}
+		server := core.Server{Status: "running", Labels: map[string]string{}}
+		shouldDelete, reason := shouldCleanup(server, claim, true, now)
+		if shouldDelete {
+			t.Fatal("active claim should not trigger cleanup")
+		}
+		if reason != "claim active" {
+			t.Fatalf("reason=%q want claim active", reason)
+		}
+	})
+
+	t.Run("claim with zero idle timeout", func(t *testing.T) {
+		recentTime := now.Add(-1 * time.Hour).Format(time.RFC3339)
+		claim := core.LeaseClaim{
+			LeaseID:            "cbx_zero",
+			LastUsedAt:         recentTime,
+			IdleTimeoutSeconds: 0,
+		}
+		server := core.Server{Status: "running", Labels: map[string]string{}}
+		shouldDelete, reason := shouldCleanup(server, claim, true, now)
+		if shouldDelete {
+			t.Fatal("zero idle timeout should keep claim active")
+		}
+		if reason != "claim active" {
+			t.Fatalf("reason=%q want claim active", reason)
+		}
+	})
+
+	t.Run("claim with unparseable last_used_at", func(t *testing.T) {
+		claim := core.LeaseClaim{
+			LeaseID:            "cbx_bad",
+			LastUsedAt:         "not-a-date",
+			IdleTimeoutSeconds: 1800,
+		}
+		server := core.Server{Status: "running", Labels: map[string]string{}}
+		shouldDelete, reason := shouldCleanup(server, claim, true, now)
+		if shouldDelete {
+			t.Fatal("unparseable last_used_at should keep claim active")
+		}
+		if reason != "claim active" {
+			t.Fatalf("reason=%q want claim active", reason)
+		}
+	})
+}
+
+func TestInstanceRunningFunction(t *testing.T) {
+	cases := []struct {
+		state string
+		want  bool
+	}{
+		{"running", true},
+		{"ready", true},
+		{"stopped", false},
+		{"", false},
+		{"suspended", false},
+		{"unknown", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.state, func(t *testing.T) {
+			got := instanceRunning(tc.state)
+			if got != tc.want {
+				t.Fatalf("instanceRunning(%q) = %v, want %v", tc.state, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetIPNormalizesEmpty(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"ip", "test-vm"}): {Stdout: "--\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	ip := b.getIP(context.Background(), "test-vm")
+	if ip != "" {
+		t.Fatalf("getIP should normalize '--' to empty, got=%q", ip)
+	}
+}
+
+func TestListFiltersNonCrabboxWithoutClaim(t *testing.T) {
+	listJSON := `[{"Name":"my-dev-vm","State":"running","Running":true,"Disk":50,"Size":10,"Source":"test"},{"Name":"crabbox-x-1","State":"running","Running":true,"Disk":50,"Size":10,"Source":"test"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	views, err := b.List(context.Background(), core.ListRequest{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("List should return 1 VM (filtering out non-crabbox without claim), got %d", len(views))
+	}
+	if views[0].CloudID != "crabbox-x-1" {
+		t.Fatalf("unexpected VM: %s", views[0].CloudID)
+	}
+}
+
+func TestResolveStoppedVMForStatusOnly(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_stopped1", "stopped-slug", providerName, "instance:crabbox-stopped-vm", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup claim: %v", err)
+	}
+
+	listJSON := `[{"Name":"crabbox-stopped-vm","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"test"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-stopped-vm"}):                      {Stdout: ""},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{
+		ID:         "cbx_stopped1",
+		StatusOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("Resolve(StatusOnly) should succeed for stopped VM: %v", err)
+	}
+	if lease.LeaseID != "cbx_stopped1" {
+		t.Fatalf("lease.LeaseID=%q want cbx_stopped1", lease.LeaseID)
+	}
+}
+
+func TestResolveStoppedVMWithoutStatusOnlyErrors(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_stopped2", "stopped-slug2", providerName, "instance:crabbox-stopped-vm2", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup claim: %v", err)
+	}
+
+	listJSON := `[{"Name":"crabbox-stopped-vm2","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"test"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-stopped-vm2"}):                     {Stdout: ""},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	_, err = b.Resolve(context.Background(), core.ResolveRequest{
+		ID: "cbx_stopped2",
+	})
+	if err == nil {
+		t.Fatal("Resolve of stopped VM without StatusOnly should error")
+	}
+	if !strings.Contains(err.Error(), "is stopped") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveRunningVMByStateNotBool(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_nobool1", "nobool-slug", providerName, "instance:crabbox-nobool-vm", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup claim: %v", err)
+	}
+
+	listJSON := `[{"Name":"crabbox-nobool-vm","State":"running","Disk":50,"Size":10,"Source":"test"}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+			commandKey([]string{"ip", "crabbox-nobool-vm"}):                       {Stdout: "192.168.64.20\n"},
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{
+		ID: "cbx_nobool1",
+	})
+	if err != nil {
+		t.Fatalf("Resolve should succeed when Running omitted but State=running: %v", err)
+	}
+	if lease.LeaseID != "cbx_nobool1" {
+		t.Fatalf("lease.LeaseID=%q want cbx_nobool1", lease.LeaseID)
+	}
+}
+
+func TestServerFromInstanceLabels(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	runner := &recordingRunner{}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	inst := tartInstance{Name: "crabbox-lbl-test", State: "running", Running: true, Source: "test-image"}
+	claim := core.LeaseClaim{LeaseID: "cbx_lbl", Slug: "lbl-slug"}
+	server := b.serverFromInstance(inst, claim, cfg)
+
+	if server.Labels["provider"] != providerName {
+		t.Fatalf("provider=%q", server.Labels["provider"])
+	}
+	if server.Labels["instance"] != "crabbox-lbl-test" {
+		t.Fatalf("instance=%q", server.Labels["instance"])
+	}
+	if server.Labels["lease"] != "cbx_lbl" {
+		t.Fatalf("lease=%q", server.Labels["lease"])
+	}
+	if server.Labels["slug"] != "lbl-slug" {
+		t.Fatalf("slug=%q", server.Labels["slug"])
+	}
+	if server.Labels["ssh_user"] != "admin" {
+		t.Fatalf("ssh_user=%q", server.Labels["ssh_user"])
+	}
+	if server.Labels["ssh_port"] != sshPort {
+		t.Fatalf("ssh_port=%q", server.Labels["ssh_port"])
+	}
+}
+
+func TestProviderClaimsFiltersByProvider(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_tart1", "s1", providerName, "instance:crabbox-tart1", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	err = core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_other1", "s2", "hetzner", "server:htz1", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	claims, err := providerClaims()
+	if err != nil {
+		t.Fatalf("providerClaims: %v", err)
+	}
+	if _, ok := claims["crabbox-tart1"]; !ok {
+		t.Fatal("should include tart provider claim")
+	}
+	for name, claim := range claims {
+		if claim.Provider != providerName {
+			t.Fatalf("providerClaims included non-tart claim: %s provider=%s", name, claim.Provider)
+		}
+	}
+}
+
+func TestApplyDefaultsSetsAllFields(t *testing.T) {
+	cfg := core.Config{}
+	applyDefaults(&cfg)
+	if cfg.Provider != providerName {
+		t.Fatalf("Provider=%q", cfg.Provider)
+	}
+	if cfg.TargetOS != targetMacOS {
+		t.Fatalf("TargetOS=%q", cfg.TargetOS)
+	}
+	if cfg.WindowsMode != "" {
+		t.Fatalf("WindowsMode=%q", cfg.WindowsMode)
+	}
+	if len(cfg.SSHFallbackPorts) != 0 {
+		t.Fatalf("SSHFallbackPorts=%v", cfg.SSHFallbackPorts)
+	}
+	if cfg.Tart.CPUs != 4 {
+		t.Fatalf("CPUs=%d", cfg.Tart.CPUs)
+	}
+	if cfg.Tart.Memory != 8192 {
+		t.Fatalf("Memory=%d", cfg.Tart.Memory)
+	}
+	if cfg.SSHPort != sshPort {
+		t.Fatalf("SSHPort=%q", cfg.SSHPort)
+	}
+	if cfg.ServerType != cfg.Tart.Image {
+		t.Fatalf("ServerType=%q != Image=%q", cfg.ServerType, cfg.Tart.Image)
+	}
+}
+
+func TestApplyDefaultsPreservesTartUser(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Tart.User = "custom"
+	applyDefaults(&cfg)
+	if cfg.Tart.User != "custom" {
+		t.Fatalf("Tart.User should preserve explicit value, got=%q", cfg.Tart.User)
+	}
+	if cfg.SSHUser != "custom" {
+		t.Fatalf("SSHUser should match Tart.User, got=%q", cfg.SSHUser)
+	}
+}
+
+func TestApplyFlagsTargetOSConversion(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = "linux"
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := applyFlags(&cfg, fs, vals); err != nil {
+		t.Fatalf("applyFlags: %v", err)
+	}
+	if cfg.TargetOS != targetMacOS {
+		t.Fatalf("non-explicit linux should convert to macos, got=%q", cfg.TargetOS)
+	}
+}
+
+func TestConfigureVMSkipsDiskWhenNotExplicit(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tart.Disk = 100
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	if err := b.configureVM(context.Background(), cfg, "test-vm"); err != nil {
+		t.Fatalf("configureVM: %v", err)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) > 1 && call.Args[1] == "--disk-size" {
+			t.Fatal("configureVM should not set disk when not explicitly marked")
+		}
+	}
+}
+
+func TestValidateTartEnvIntPositive(t *testing.T) {
+	t.Setenv("CRABBOX_TART_DISK", "0")
+	err := validateTartEnvIntPositive("CRABBOX_TART_DISK", "disk must be positive")
+	if err == nil {
+		t.Fatal("validateTartEnvIntPositive should reject 0")
+	}
+
+	t.Setenv("CRABBOX_TART_DISK", "50")
+	err = validateTartEnvIntPositive("CRABBOX_TART_DISK", "disk must be positive")
+	if err != nil {
+		t.Fatalf("should accept 50: %v", err)
+	}
+
+	t.Setenv("CRABBOX_TART_DISK", "abc")
+	err = validateTartEnvIntPositive("CRABBOX_TART_DISK", "disk must be positive")
+	if err == nil {
+		t.Fatal("should reject non-integer")
+	}
+}
+
+func TestValidateTartEnvInt(t *testing.T) {
+	t.Setenv("CRABBOX_TART_CPUS", "2")
+	err := validateTartEnvInt("CRABBOX_TART_CPUS", 4, "cpu must be at least 4")
+	if err == nil {
+		t.Fatal("should reject value below floor")
+	}
+
+	t.Setenv("CRABBOX_TART_CPUS", "8")
+	err = validateTartEnvInt("CRABBOX_TART_CPUS", 4, "cpu must be at least 4")
+	if err != nil {
+		t.Fatalf("should accept 8: %v", err)
+	}
+
+	t.Setenv("CRABBOX_TART_CPUS", "")
+	err = validateTartEnvInt("CRABBOX_TART_CPUS", 4, "cpu must be at least 4")
+	if err != nil {
+		t.Fatalf("should skip empty env: %v", err)
+	}
+}
