@@ -208,6 +208,7 @@ type LocalCommandRequest struct {
 	Args   []string
 	Env    []string
 	Dir    string
+	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
 }
@@ -256,6 +257,7 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	cmd := exec.CommandContext(ctx, req.Name, req.Args...)
 	cmd.Env = req.Env
 	cmd.Dir = req.Dir
+	cmd.Stdin = req.Stdin
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if req.Stdout != nil {

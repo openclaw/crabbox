@@ -117,7 +117,7 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			return exit(5, "timed out waiting for SSH on %s during %s; %s", target.Host, phase, sshWaitNextAction(phase))
 		}
 		if target.SSHConfigProxy {
-			if runSSHQuietWithOptions(ctx, *target, sshReadyCommand(*target), "5", "1") == nil {
+			if runSSHQuietWithOptionsResolvePort(ctx, target, sshReadyCommand(*target), "5", "1") == nil {
 				return nil
 			}
 			lastPorts = "proxy"
@@ -203,7 +203,7 @@ func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if target.SSHConfigProxy {
-		return runSSHQuietWithOptions(ctx, *target, sshReadyCommand(*target), "2", "1") == nil
+		return runSSHQuietWithOptionsResolvePort(ctx, target, sshReadyCommand(*target), "2", "1") == nil
 	}
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := *target
@@ -230,7 +230,7 @@ func probeSSHTransport(ctx context.Context, target *SSHTarget, timeout time.Dura
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if target.SSHConfigProxy {
-		return runSSHQuietWithOptions(ctx, *target, sshTransportProbeCommand(*target), "2", "1") == nil
+		return runSSHQuietWithOptionsResolvePort(ctx, target, sshTransportProbeCommand(*target), "2", "1") == nil
 	}
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := *target
@@ -302,16 +302,22 @@ func RunSSHQuiet(ctx context.Context, target SSHTarget, remote string) error {
 }
 
 func runSSHQuietWithOptions(ctx context.Context, target SSHTarget, remote, connectTimeout, connectionAttempts string) error {
-	remote = wrapRemoteForTarget(target, remote)
+	return runSSHQuietWithOptionsResolvePort(ctx, &target, remote, connectTimeout, connectionAttempts)
+}
+
+func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, remote, connectTimeout, connectionAttempts string) error {
+	remote = wrapRemoteForTarget(*target, remote)
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := target
+		probe := *target
 		probe.Port = port
+		probe.FallbackPorts = []string{}
 		cmd := exec.CommandContext(ctx, "ssh", sshArgsWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
 		err := cmd.Run()
 		if err == nil {
+			target.Port = probe.Port
 			return nil
 		}
 		lastErr = err

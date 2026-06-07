@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -141,6 +142,10 @@ func NewLeaseSlug(leaseID string) string {
 	return newLeaseSlug(leaseID)
 }
 
+func SlugWithCollisionSuffix(base, seed string) string {
+	return slugWithCollisionSuffix(base, seed)
+}
+
 func NormalizeLeaseSlug(value string) string {
 	return normalizeLeaseSlug(value)
 }
@@ -176,6 +181,10 @@ func ApplyParallelsHostRefConfig(cfg *Config, hostRef string) {
 
 func IsCanonicalLeaseID(value string) bool {
 	return isCanonicalLeaseID(value)
+}
+
+func ProbeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration) bool {
+	return probeSSHReady(ctx, target, timeout)
 }
 
 func PowershellCommand(script string) string {

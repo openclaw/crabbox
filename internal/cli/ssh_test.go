@@ -498,6 +498,55 @@ exit 0
 	}
 }
 
+func TestWaitForSSHReadyRecordsProxyFallbackPort(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	portsPath := filepath.Join(dir, "ports")
+	script := `#!/bin/sh
+port=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    port="$1"
+  fi
+  shift
+done
+printf '%s\n' "$port" >> "$CRABBOX_FAKE_SSH_PORTS"
+if [ "$port" = "2222" ]; then
+  exit 255
+fi
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORTS", portsPath)
+
+	target := SSHTarget{
+		User:           "crabbox",
+		Host:           "private.example",
+		Port:           "2222",
+		FallbackPorts:  []string{"22"},
+		SSHConfigProxy: true,
+		ProxyCommand:   "provider proxy %h %p",
+		ReadyCheck:     "true",
+	}
+	if err := waitForSSHReady(context.Background(), &target, io.Discard, "test", time.Second); err != nil {
+		t.Fatalf("waitForSSHReady: %v", err)
+	}
+	if target.Port != "22" {
+		t.Fatalf("target.Port=%q want resolved fallback port 22", target.Port)
+	}
+	ports, err := os.ReadFile(portsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ports) != "2222\n22\n" {
+		t.Fatalf("ports=%q want fallback sequence", string(ports))
+	}
+}
+
 func TestWaitForLoopbackVNCRecordsResolvedFallbackPort(t *testing.T) {
 	dir := t.TempDir()
 	sshPath := filepath.Join(dir, "ssh")
@@ -596,6 +645,37 @@ func TestSSHCommandLineRedactsSecretAuthUser(t *testing.T) {
 	full := sshCommandLine(target, false)
 	if !strings.Contains(full, target.User+"@ssh.app.daytona.io") {
 		t.Fatalf("full command missing token user: %q", full)
+	}
+}
+
+func TestSSHRegistersProviderRoutingFlags(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("ssh", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	id := fs.String("id", "", "")
+	providerFlags := registerProviderFlags(fs, defaults)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "proxmox",
+		"--proxmox-api-url", "https://pve.example.test:8006",
+		"--proxmox-node", "pve1",
+		"--proxmox-template-id", "9000",
+		"--proxmox-user", "runner",
+		"--proxmox-work-root", "/work/test",
+		"--id", "cbx_123",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "proxmox" || cfg.Proxmox.APIURL != "https://pve.example.test:8006" || cfg.Proxmox.Node != "pve1" || cfg.Proxmox.TemplateID != 9000 || cfg.SSHUser != "runner" || cfg.WorkRoot != "/work/test" {
+		t.Fatalf("provider routing flags not applied for ssh: provider=%q proxmox=%#v", cfg.Provider, cfg.Proxmox)
 	}
 }
 

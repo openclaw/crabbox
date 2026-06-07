@@ -53,6 +53,10 @@ providers resolve access lazily or wrap the connection:
 - **`provider=xcp-ng`** resolves the VM IPv4 address from XCP-ng guest metrics
   during provisioning, then prints the normal per-lease SSH command for the
   cloud-init user.
+- **Provider-routed direct providers** accept the same provider-specific routing
+  flags here as `status` and `stop`; for example `--kubevirt-context` or
+  `--external-routing-file` can select the exact lease backend when config
+  defaults are not enough.
 
 ## Flags
 

@@ -936,6 +936,25 @@ func readableShellWords(words []string) []string {
 	return out
 }
 
+func readableShellCommand(words []string) string {
+	out := make([]string, 0, len(words))
+	seenCommand := false
+	for _, word := range words {
+		if !seenCommand && isShellEnvAssignment(word) {
+			key, value, _ := strings.Cut(word, "=")
+			out = append(out, key+"="+shellQuote(value))
+			continue
+		}
+		seenCommand = true
+		if shellBareWord(word) {
+			out = append(out, word)
+		} else {
+			out = append(out, shellQuote(word))
+		}
+	}
+	return strings.Join(out, " ")
+}
+
 func shellBareWord(value string) bool {
 	if value == "" {
 		return false
@@ -1260,7 +1279,8 @@ func (a App) localContainerWebVNCReset(ctx context.Context, cfg Config, id strin
 	if openViewer {
 		return a.localContainerWebVNC(ctx, cfg, leaseID, "", true, takeControl, false)
 	}
-	fmt.Fprintf(a.Stdout, "webvnc: run crabbox webvnc --provider local-container --id %s\n", leaseID)
+	command := append([]string{"crabbox", "webvnc"}, webVNCBridgeArgs(cfg, target, leaseID, false, false)...)
+	fmt.Fprintf(a.Stdout, "webvnc: run %s\n", readableShellCommand(command))
 	return nil
 }
 

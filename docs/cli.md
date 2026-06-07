@@ -549,6 +549,8 @@ Provider-specific (read by individual adapters; see each provider page under
 
 ```text
 CRABBOX_BLACKSMITH_*               Blacksmith Testbox
+CRABBOX_KUBEVIRT_*                 KubeVirt
+CRABBOX_EXTERNAL_*                 External executable provider
 CRABBOX_NAMESPACE_*                Namespace Devbox
 CRABBOX_SEMAPHORE_* / SEMAPHORE_*  Semaphore
 CRABBOX_E2B_API_KEY / E2B_*        E2B

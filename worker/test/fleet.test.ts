@@ -1277,6 +1277,82 @@ describe("fleet lease identity and idle", () => {
     expect(stranger.status).toBe(404);
   });
 
+  it("requires manage access for shared lease heartbeat and Tailscale metadata updates", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const useHeaders = {
+      "x-crabbox-owner": "viewer@example.com",
+      "x-crabbox-org": "openclaw",
+    };
+    const manageHeaders = {
+      "x-crabbox-owner": "manager@example.com",
+      "x-crabbox-org": "openclaw",
+    };
+    const now = new Date();
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "blue-lobster",
+        owner: "peter@example.com",
+        org: "openclaw",
+        tailscale: { enabled: true, hostname: "blue-lobster", tags: ["tag:ci"] },
+        share: {
+          users: {
+            "viewer@example.com": "use",
+            "manager@example.com": "manage",
+          },
+        },
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        lastTouchedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const visible = await fleet.fetch(
+      request("GET", "/v1/leases/blue-lobster", { headers: useHeaders }),
+    );
+    expect(visible.status).toBe(200);
+
+    const useHeartbeat = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/heartbeat", {
+        headers: useHeaders,
+        body: { idleTimeoutSeconds: 2400 },
+      }),
+    );
+    expect(useHeartbeat.status).toBe(403);
+
+    const useTailscale = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/tailscale", {
+        headers: useHeaders,
+        body: { ipv4: "100.64.0.10", state: "ready" },
+      }),
+    );
+    expect(useTailscale.status).toBe(403);
+
+    const manageHeartbeat = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/heartbeat", {
+        headers: manageHeaders,
+        body: { idleTimeoutSeconds: 2400 },
+      }),
+    );
+    expect(manageHeartbeat.status).toBe(200);
+    const heartbeatBody = (await manageHeartbeat.json()) as { lease: LeaseRecord };
+    expect(heartbeatBody.lease.idleTimeoutSeconds).toBe(2400);
+
+    const manageTailscale = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/tailscale", {
+        headers: manageHeaders,
+        body: { ipv4: "100.64.0.10", state: "ready" },
+      }),
+    );
+    expect(manageTailscale.status).toBe(200);
+    const tailscaleBody = (await manageTailscale.json()) as { lease: LeaseRecord };
+    expect(tailscaleBody.lease.tailscale?.ipv4).toBe("100.64.0.10");
+    expect(tailscaleBody.lease.tailscale?.state).toBe("ready");
+  });
+
   it("requires manage access for lease metadata writes", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
