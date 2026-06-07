@@ -292,9 +292,10 @@ WSL2.
 
 Use repeatable `--require-artifact <glob>` when a successful command must emit a
 proof file, manifest, report, or other evidence artifact. Required artifact globs
-are checked after the remote command exits 0 and are also collected into the run
-artifact tarball. If any required glob matches nothing, the run fails even though
-the command itself succeeded. The same SSH-run target limits as
+are checked after the remote command exits 0 and before `--download` files are
+written locally. They are also collected into the run artifact tarball. If any
+required glob matches nothing, the run fails even though the command itself
+succeeded. The same SSH-run target limits as
 `--artifact-glob` apply.
 
 Use repeatable `--download remote=local` when the command writes proof files on

@@ -26,9 +26,17 @@ Repeat `--require-artifact <glob>` when the run should fail unless a proof file,
 manifest, or report exists after the command exits successfully. Required
 artifacts use the same safe relative glob syntax and target limits as
 `--artifact-glob`; each required glob must match at least one file or symlink.
-Required artifacts are included in the run artifact tarball, so callers can pair
+Crabbox checks required artifacts before local `--download` outputs, then
+includes required artifacts in the run artifact tarball. Callers can pair
 `--require-artifact reports/data/manifest.json` with a broader
 `--artifact-glob reports/data/**`.
+
+`--require-artifact` is an existence guard, not manifest validation or a data
+safety scanner. Keep required artifacts bounded and scrubbed, such as manifests,
+summaries, screenshots, or QA reports. Do not use run artifacts for raw datasets,
+secrets, credentials, signed URLs, or unredacted customer rows. Delegated
+providers reject run artifact collection until they grow a bounded artifact
+retrieval capability.
 
 `--emit-proof <path>` renders proof as a derived artifact after a successful
 run. The proof block uses the selected profile's proof template, the expanded

@@ -1346,6 +1346,17 @@ afterSync:
 			fmt.Fprintln(a.Stderr, line)
 		}
 	}
+	var artifactFailure error
+	if code == 0 && len(requiredArtifactGlobs) > 0 {
+		requireOutput, err := requireRunArtifactGlobs(ctx, target, workdir, requiredArtifactGlobs)
+		if err != nil {
+			artifactFailure = err
+			code = 7
+		}
+		if strings.TrimSpace(requireOutput) != "" {
+			fmt.Fprintln(a.Stderr, strings.TrimSpace(requireOutput))
+		}
+	}
 	if code == 0 {
 		for _, spec := range downloads {
 			bytes, local, err := downloadRemoteFile(ctx, target, workdir, spec)
@@ -1356,15 +1367,6 @@ afterSync:
 		}
 	}
 	var runArtifacts []runArtifact
-	if code == 0 && len(requiredArtifactGlobs) > 0 {
-		requireOutput, err := requireRunArtifactGlobs(ctx, target, workdir, requiredArtifactGlobs)
-		if err != nil {
-			return recordFailure(err)
-		}
-		if strings.TrimSpace(requireOutput) != "" {
-			fmt.Fprintln(a.Stderr, strings.TrimSpace(requireOutput))
-		}
-	}
 	if code == 0 && len(runArtifactGlobs) > 0 {
 		collected, artifactOutput, err := collectRunArtifactGlobs(ctx, target, workdir, repo.Root, recorder.runID, leaseID, runArtifactGlobs)
 		if err != nil {
@@ -1381,7 +1383,11 @@ afterSync:
 	total := time.Since(timings.started)
 	classification := FailureClassification{}
 	if code != 0 {
-		classification = ClassifyRunFailure(code, logBuffer.String(), timings.commandPhases)
+		classificationLog := logBuffer.String()
+		if artifactFailure != nil {
+			classificationLog = strings.TrimSpace(classificationLog + "\n" + artifactFailure.Error())
+		}
+		classification = ClassifyRunFailure(code, classificationLog, timings.commandPhases)
 		timings.blockedStage = classification.BlockedStage
 		timings.retryLikely = classification.RetryLikely
 		failureClassificationPrinted = true
@@ -1476,6 +1482,9 @@ afterSync:
 		printCommandNotFoundHint(a.Stderr, cfg, target, leaseID, command, *shellMode, code, hydratedByActions, hydrateSuggestion)
 		printFailureTail(a.Stderr, "stdout", stdoutTail, *captureStdout)
 		printFailureTail(a.Stderr, "stderr", stderrTail, *captureStderr)
+		if artifactFailure != nil {
+			return recordFailure(artifactFailure)
+		}
 		return recordFailure(ExitError{Code: code, Message: fmt.Sprintf("remote command exited %d", code)})
 	}
 	return nil

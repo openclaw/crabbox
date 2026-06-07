@@ -141,17 +141,18 @@ func runArtifactRequireScript(workdir string, globs []string) string {
 	b.WriteString("shopt -s nullglob dotglob\n")
 	b.WriteString("missing=()\n")
 	b.WriteString("check_artifact_file() { local f=\"$1\" rel; { [ -f \"$f\" ] || [ -L \"$f\" ]; } || return 1; rel=${f#./}; case \"$rel\" in .git|.git/*|.crabbox|.crabbox/*) return 1;; esac; return 0; }\n")
+	b.WriteString("add_required_artifact_match() { local f=\"$1\" rel existing; check_artifact_file \"$f\" || return 0; rel=${f#./}; if [ ${#matches[@]} -gt 0 ]; then for existing in \"${matches[@]}\"; do [ \"$existing\" = \"$rel\" ] && return 0; done; fi; matches+=(\"$rel\"); }\n")
 	for _, glob := range globs {
-		b.WriteString("matched=0\n")
-		b.WriteString("for f in " + glob + "; do if check_artifact_file \"$f\"; then matched=$((matched+1)); fi; done\n")
+		b.WriteString("matches=()\n")
+		b.WriteString("for f in " + glob + "; do add_required_artifact_match \"$f\"; done\n")
 		if strings.Contains(glob, "**") {
 			if strings.Contains(glob, "**/") {
-				b.WriteString("for f in " + strings.Replace(glob, "**/", "", 1) + "; do if check_artifact_file \"$f\"; then matched=$((matched+1)); fi; done\n")
+				b.WriteString("for f in " + strings.Replace(glob, "**/", "", 1) + "; do add_required_artifact_match \"$f\"; done\n")
 			}
 			searchRoot := artifactGlobSearchRoot(glob)
-			b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(searchRoot) + "; if [ -e \"$artifact_root\" ]; then while IFS= read -r -d '' f; do rel=${f#./}; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then if check_artifact_file \"$f\"; then matched=$((matched+1)); fi; fi; done < <(find \"$artifact_root\" \\( -path './.git' -o -path './.git/*' -o -path './.crabbox' -o -path './.crabbox/*' -o -path '.git' -o -path '.git/*' -o -path '.crabbox' -o -path '.crabbox/*' \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
+			b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(searchRoot) + "; if [ -e \"$artifact_root\" ]; then while IFS= read -r -d '' f; do rel=${f#./}; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then add_required_artifact_match \"$f\"; fi; done < <(find \"$artifact_root\" \\( -path './.git' -o -path './.git/*' -o -path './.crabbox' -o -path './.crabbox/*' -o -path '.git' -o -path '.git/*' -o -path '.crabbox' -o -path '.crabbox/*' \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
 		}
-		b.WriteString("if [ \"$matched\" -eq 0 ]; then missing+=(" + shellQuote(glob) + "); else printf 'required artifact %s matched=%s\\n' " + shellQuote(glob) + " \"$matched\"; fi\n")
+		b.WriteString("if [ ${#matches[@]} -eq 0 ]; then missing+=(" + shellQuote(glob) + "); else printf 'required artifact %s matched=%s\\n' " + shellQuote(glob) + " \"${#matches[@]}\"; fi\n")
 	}
 	b.WriteString("if [ ${#missing[@]} -gt 0 ]; then for f in \"${missing[@]}\"; do printf 'missing required artifact: %s\\n' \"$f\" >&2; done; exit 8; fi\n")
 	return b.String()

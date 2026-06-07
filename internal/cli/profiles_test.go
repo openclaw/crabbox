@@ -858,7 +858,7 @@ func TestRunArtifactRequireScriptMatchesRequiredArtifacts(t *testing.T) {
 	}
 	for _, want := range []string{
 		"required artifact reports/data/manifest.json matched=1",
-		"required artifact reports/data/**/*.json matched=",
+		"required artifact reports/data/**/*.json matched=2",
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
