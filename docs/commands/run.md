@@ -78,10 +78,10 @@ the checkout through the provider's APIs, runs the command through the
 provider, and prints `sync=delegated` in the final timing summary. These
 providers reject the SSH-run-only features `--capture-stdout`,
 `--capture-stderr`, `--capture-on-fail`, `--download`, `--script`,
-`--script-stdin`, `--fresh-pr`, and `--artifact-glob`. `--keep-on-failure` is
-supported for one-shot delegated runs. See the per-provider docs under
-[providers](../features/providers.md) for how `--id` resolves and any extra
-sync limitations.
+`--script-stdin`, `--fresh-pr`, `--artifact-glob`, and `--require-artifact`.
+`--keep-on-failure` is supported for one-shot delegated runs. See the
+per-provider docs under [providers](../features/providers.md) for how `--id`
+resolves and any extra sync limitations.
 
 `--azure-backend dynamic-sessions` keeps `--provider azure` as the family
 selector while routing to the `azure-dynamic-sessions` delegated backend.
@@ -290,6 +290,13 @@ preset `artifactGlobs` are collected the same way. Delegated providers, and
 native Windows and macOS targets, reject artifact globs; use Linux or Windows
 WSL2.
 
+Use repeatable `--require-artifact <glob>` when a successful command must emit a
+proof file, manifest, report, or other evidence artifact. Required artifact globs
+are checked after the remote command exits 0 and are also collected into the run
+artifact tarball. If any required glob matches nothing, the run fails even though
+the command itself succeeded. The same SSH-run target limits as
+`--artifact-glob` apply.
+
 Use repeatable `--download remote=local` when the command writes proof files on
 the box. Downloads run only after a successful remote command, paths resolve
 relative to the remote workdir unless absolute, and Windows paths use `=`
@@ -465,6 +472,7 @@ Run-specific flags:
 --junit <comma-separated remote XML paths>
 --results-auto
 --artifact-glob <glob>       Repeatable.
+--require-artifact <glob>    Repeatable.
 --download <remote=local>    Repeatable.
 --capture-stdout <local path>
 --capture-stderr <local path>

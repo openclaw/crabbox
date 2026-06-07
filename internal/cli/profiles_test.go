@@ -840,6 +840,44 @@ func TestRunArtifactCollectScriptWarnsOnEmptyMatches(t *testing.T) {
 	}
 }
 
+func TestRunArtifactRequireScriptMatchesRequiredArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "reports", "data", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "reports", "data", "manifest.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "reports", "data", "nested", "quality.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := runArtifactRequireScript(dir, []string{"reports/data/manifest.json", "reports/data/**/*.json"})
+	out, err := exec.Command("bash", "-lc", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("require script failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"required artifact reports/data/manifest.json matched=1",
+		"required artifact reports/data/**/*.json matched=",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunArtifactRequireScriptFailsOnMissingArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	script := runArtifactRequireScript(dir, []string{"reports/data/manifest.json"})
+	out, err := exec.Command("bash", "-lc", script).CombinedOutput()
+	if err == nil {
+		t.Fatalf("require script unexpectedly passed:\n%s", out)
+	}
+	if !strings.Contains(string(out), "missing required artifact: reports/data/manifest.json") {
+		t.Fatalf("missing required artifact output:\n%s", out)
+	}
+}
+
 func TestRunArtifactCollectScriptRecursiveGlobIncludesZeroDepthMatches(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".artifacts", "nested"), 0o755); err != nil {

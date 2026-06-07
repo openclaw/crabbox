@@ -22,6 +22,14 @@ feed the same collector. The local tarball lands under
 the `--timing-json` artifact array. Native Windows and macOS targets reject this
 collector; use Linux or Windows WSL2.
 
+Repeat `--require-artifact <glob>` when the run should fail unless a proof file,
+manifest, or report exists after the command exits successfully. Required
+artifacts use the same safe relative glob syntax and target limits as
+`--artifact-glob`; each required glob must match at least one file or symlink.
+Required artifacts are included in the run artifact tarball, so callers can pair
+`--require-artifact reports/data/manifest.json` with a broader
+`--artifact-glob reports/data/**`.
+
 `--emit-proof <path>` renders proof as a derived artifact after a successful
 run. The proof block uses the selected profile's proof template, the expanded
 command, run metadata, copied live console output, artifact paths, and the

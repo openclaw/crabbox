@@ -335,40 +335,41 @@ type ListRequest struct {
 }
 
 type RunRequest struct {
-	Repo             Repo
-	ID               string
-	Options          LeaseOptions
-	Keep             bool
-	Reclaim          bool
-	NoSync           bool
-	SyncOnly         bool
-	DebugSync        bool
-	ShellMode        bool
-	ChecksumSync     bool
-	ForceSyncLarge   bool
-	FullResync       bool
-	EnvHelper        string
-	CaptureStdout    string
-	CaptureStderr    string
-	CaptureOnFail    bool
-	KeepOnFailure    bool
-	Preflight        bool
-	Downloads        []string
-	Env              map[string]string
-	EnvSummary       bool
-	ScriptRequested  bool
-	Script           *RunScriptSpec
-	FreshPR          FreshPRSpec
-	ApplyLocalPatch  bool
-	Command          []string
-	Label            string
-	RequestedSlug    string
-	TimingJSON       bool
-	ArtifactGlobs    []string
-	EmitProof        string
-	ProofTemplate    string
-	ProfileVariables map[string]string
-	StopAfter        string
+	Repo                  Repo
+	ID                    string
+	Options               LeaseOptions
+	Keep                  bool
+	Reclaim               bool
+	NoSync                bool
+	SyncOnly              bool
+	DebugSync             bool
+	ShellMode             bool
+	ChecksumSync          bool
+	ForceSyncLarge        bool
+	FullResync            bool
+	EnvHelper             string
+	CaptureStdout         string
+	CaptureStderr         string
+	CaptureOnFail         bool
+	KeepOnFailure         bool
+	Preflight             bool
+	Downloads             []string
+	Env                   map[string]string
+	EnvSummary            bool
+	ScriptRequested       bool
+	Script                *RunScriptSpec
+	FreshPR               FreshPRSpec
+	ApplyLocalPatch       bool
+	Command               []string
+	Label                 string
+	RequestedSlug         string
+	TimingJSON            bool
+	ArtifactGlobs         []string
+	RequiredArtifactGlobs []string
+	EmitProof             string
+	ProofTemplate         string
+	ProfileVariables      map[string]string
+	StopAfter             string
 }
 
 type WarmupRequest struct {
@@ -742,6 +743,9 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	}
 	if len(req.ArtifactGlobs) > 0 {
 		return exit(2, "%s delegates run execution; --artifact-glob is not supported", provider)
+	}
+	if len(req.RequiredArtifactGlobs) > 0 {
+		return exit(2, "%s delegates run execution; --require-artifact is not supported", provider)
 	}
 	if req.EmitProof != "" && !featureSetHas(spec.Features, FeatureRunProof) {
 		return exit(2, "%s delegates run execution; --emit-proof is not supported", provider)

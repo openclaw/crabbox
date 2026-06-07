@@ -329,6 +329,7 @@ func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
 		{name: "daytona download", provider: "daytona", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "daytona delegates run execution; --download is not supported"},
 		{name: "islo download", provider: "islo", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "islo delegates run execution; --download is not supported"},
 		{name: "e2b download", provider: "e2b", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "e2b delegates run execution; --download is not supported"},
+		{name: "islo require artifact", provider: "islo", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "islo delegates run execution; --require-artifact is not supported"},
 		{name: "e2b lease output", provider: "e2b", args: []string{"--lease-output", "session.json"}, want: "--lease-output is not supported for provider=e2b yet"},
 		{name: "e2b stop after", provider: "e2b", args: []string{"--stop-after", "never"}, want: "e2b delegates run execution; --stop-after is not supported"},
 		{name: "daytona script", provider: "daytona", args: []string{"--script", "testdata/missing.sh"}, want: "daytona delegates run execution; --script is not supported"},
@@ -484,6 +485,11 @@ func TestRunCommandRejectsProofAndArtifactsWithSyncOnly(t *testing.T) {
 			want: "--artifact-glob cannot be combined with --sync-only",
 		},
 		{
+			name: "require artifact",
+			args: []string{"--sync-only", "--require-artifact", "reports/data/manifest.json"},
+			want: "--require-artifact cannot be combined with --sync-only",
+		},
+		{
 			name: "emit proof",
 			args: []string{"--sync-only", "--emit-proof", filepath.Join(t.TempDir(), "proof.md")},
 			want: "--emit-proof cannot be combined with --sync-only",
@@ -518,6 +524,11 @@ func TestRunCommandRejectsTargetOnlyProfileOutputsBeforeLease(t *testing.T) {
 			name: "macos artifacts",
 			args: []string{"--provider", "ssh", "--target", "macos", "--artifact-glob", ".artifacts/**", "--", "true"},
 			want: "--artifact-glob is not supported for macOS targets",
+		},
+		{
+			name: "macos required artifact",
+			args: []string{"--provider", "ssh", "--target", "macos", "--require-artifact", "reports/data/manifest.json", "--", "true"},
+			want: "--require-artifact is not supported for macOS targets",
 		},
 		{
 			name: "native windows doctor",
@@ -696,6 +707,61 @@ func TestRunCommandTimingJSONSurfacesCleanupFailure(t *testing.T) {
 	}
 	if !strings.Contains(report.LeaseStopErr, "release API unavailable") {
 		t.Fatalf("leaseStopError=%q", report.LeaseStopErr)
+	}
+}
+
+func TestRunCommandRequireArtifactFailsAfterSuccessfulCommand(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+cmd=""
+for arg do cmd="$arg"; done
+case "$cmd" in
+  *"check_artifact_file()"*) printf 'missing required artifact: reports/data/manifest.json\n' >&2; exit 8 ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--require-artifact", "reports/data/manifest.json",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("error=%v, want exit 7\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"require artifacts", "missing required artifact: reports/data/manifest.json"} {
+		if !strings.Contains(exitErr.Message, want) {
+			t.Fatalf("message missing %q: %q", want, exitErr.Message)
+		}
 	}
 }
 
