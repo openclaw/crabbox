@@ -63,6 +63,30 @@ func TestCloudInitPayloadConfiguresSSHPortContract(t *testing.T) {
 	}
 }
 
+func TestCloudInitPayloadUsesRetryingPackageBootstrap(t *testing.T) {
+	payload, err := newCloudInitPayload(testConfig(), "cbx_lease", "blue", "ssh-ed25519 AAAATEST crabbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"package_update: false",
+		"package_upgrade: false",
+		"bash -euxo pipefail <<'BOOT'",
+		"Acquire::Retries \"8\";",
+		"Acquire::http::Timeout \"30\";",
+		"Acquire::https::Timeout \"30\";",
+		"retry apt-get update",
+		"retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq",
+	} {
+		if !strings.Contains(payload.UserData, want) {
+			t.Fatalf("user-data missing %q:\n%s", want, payload.UserData)
+		}
+	}
+	if strings.Contains(payload.UserData, "\npackages:\n") {
+		t.Fatalf("cloud-init payload must not use one-shot packages module:\n%s", payload.UserData)
+	}
+}
+
 func TestCloudInitPayloadQuotesWorkRootInRunCommands(t *testing.T) {
 	cfg := testConfig()
 	cfg.XCPNg.WorkRoot = "/work/crabbox,with-comma"
