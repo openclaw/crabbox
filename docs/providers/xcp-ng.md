@@ -252,6 +252,68 @@ placement resources, lists Crabbox-managed leases, and reports
 `mutation=false`. Template, SR, network, or host typos fail before doctor
 reports ready.
 
+## Guarded ISO E2E harness
+
+The repo also includes a separate guarded harness for fresh-installer ISO
+validation:
+
+```sh
+scripts/xcpng-iso-e2e-smoke.sh --read-only --os linux --iso ~/Desktop/xcp/ISOs/ubuntu-26.04-live-server-amd64.iso
+scripts/xcpng-iso-e2e-smoke.sh --read-only --os windows --iso ~/Desktop/xcp/ISOs/Win11_25H2_English_x64_v2.iso
+```
+
+This harness is intentionally separate from `scripts/xcpng-live-smoke.sh`.
+`xcpng-live-smoke.sh` preserves the normal PR 222 template-clone contract.
+`xcpng-iso-e2e-smoke.sh` is a quarantined acceptance helper for fresh blank VM
++ installer media lifecycle.
+
+Read-only mode:
+
+- loads the same private env file pattern as `xcpng-live-smoke.sh`;
+- validates XCP-ng auth plus placement prerequisites needed for ISO boot;
+- resolves the installer ISO as a local file path, VDI name, UUID, or
+  `OpaqueRef`;
+- writes redacted local evidence under `.crabbox/xcpng-iso-e2e/`; and
+- creates, changes, and deletes no XCP-ng resources.
+
+Mutating mode requires an explicit gate:
+
+```sh
+CRABBOX_XCP_NG_ISO_E2E_MUTATE=1 scripts/xcpng-iso-e2e-smoke.sh --mutate --os linux --iso <iso-vdi>
+```
+
+The foundation harness stops at shared lifecycle proof only: create a fresh VM,
+attach installer media, start the VM, classify the boot phase, and clean up.
+It does not perform a full Linux install, a full Windows install, or first-boot
+guest validation. Those flows belong to the later Linux and Windows ISO plans.
+
+Current classifications:
+
+- `read_only_passed`: config and ISO references resolved without mutation.
+- `started_unverified`: the shared lifecycle created the VM, attached media,
+  and `VM.start` succeeded, but installer-screen proof is deferred to later
+  OS-specific plans.
+- `environment_blocked`: lab prerequisites, ISO identity, auth, placement, or
+  mutation gate blocked the run.
+- `resource_cleanup_failed`: the shared lifecycle reached its target phase but
+  cleanup left resources behind.
+- `test_failed`: local harness contract failure such as invalid arguments or
+  malformed helper output.
+
+Every run writes a JSON summary with these stable keys:
+
+- `classification`
+- `mutation`
+- `os`
+- `iso`
+- `phase`
+- `cleanup`
+- `evidence`
+
+If you use mutating mode, prefer ISO VDIs already present in an ISO-capable SR.
+The foundation harness does not yet upload local ISO files into XCP-ng. Keep
+all `.crabbox/xcpng-iso-e2e/` artifacts local; do not commit them.
+
 ## Troubleshooting
 
 `xcp-ng configuration is incomplete`

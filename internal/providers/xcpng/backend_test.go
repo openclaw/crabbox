@@ -24,7 +24,9 @@ type fakeLifecycleClient struct {
 	srRef        string
 	networkRef   string
 	hostRef      string
+	iso          xcpNgISOMediaRef
 	cloneVM      xapiVM
+	freshVM      xcpNgFreshVMResult
 	drive        xcpNgConfigDrive
 	guestIP      string
 	getServer    map[string]Server
@@ -88,6 +90,14 @@ func (f *fakeLifecycleClient) ResolveHost(context.Context, xcpNgConfig) (xapiRef
 	return xapiRef(f.hostRef), f.fail("resolve-host")
 }
 
+func (f *fakeLifecycleClient) ResolveISOMedia(context.Context, xcpNgConfig, string) (xcpNgISOMediaRef, error) {
+	f.record("resolve-iso")
+	if err := f.fail("resolve-iso"); err != nil {
+		return xcpNgISOMediaRef{}, err
+	}
+	return f.iso, nil
+}
+
 func (f *fakeLifecycleClient) CloneVM(_ context.Context, req xcpNgCloneRequest) (xapiVM, error) {
 	f.record("clone")
 	f.mutated = true
@@ -108,6 +118,29 @@ func (f *fakeLifecycleClient) CloneVM(_ context.Context, req xcpNgCloneRequest) 
 	return vm, nil
 }
 
+func (f *fakeLifecycleClient) CreateFreshVM(_ context.Context, req xcpNgFreshVMRequest) (xcpNgFreshVMResult, error) {
+	f.record("create-fresh-vm")
+	f.mutated = true
+	if err := f.fail("create-fresh-vm"); err != nil {
+		return xcpNgFreshVMResult{}, err
+	}
+	result := f.freshVM
+	if result.VM.Ref == "" {
+		result.VM.Ref = "OpaqueRef:fresh-vm"
+	}
+	if result.VM.UUID == "" {
+		result.VM.UUID = xcpNgTestVMUUID
+	}
+	if result.VM.Name == "" {
+		result.VM.Name = req.Name
+	}
+	result.VM.Labels = req.Labels
+	if result.VIFRef == "" && req.Network != nil {
+		result.VIFRef = "OpaqueRef:vif"
+	}
+	return result, nil
+}
+
 func (f *fakeLifecycleClient) AttachConfigDrive(_ context.Context, req xcpNgConfigDriveRequest) (xcpNgConfigDrive, error) {
 	f.record("attach-config-drive")
 	f.mutated = true
@@ -122,6 +155,28 @@ func (f *fakeLifecycleClient) AttachConfigDrive(_ context.Context, req xcpNgConf
 		f.drive.Labels = configDriveLabels(req.Labels)
 	}
 	return f.drive, nil
+}
+
+func (f *fakeLifecycleClient) AttachISO(_ context.Context, req xcpNgISOAttachRequest) (xcpNgConfigDrive, error) {
+	f.record("attach-iso")
+	f.mutated = true
+	if err := f.fail("attach-iso"); err != nil {
+		return xcpNgConfigDrive{}, err
+	}
+	drive := f.drive
+	if drive.VDIRef == "" {
+		drive.VDIRef = req.ISO.VDIRef
+	}
+	if drive.Name == "" {
+		drive.Name = req.ISO.NameLabel
+	}
+	if drive.Labels == nil {
+		drive.Labels = isoMediaLabels(req.Labels)
+	}
+	if drive.VBDRef == "" {
+		drive.VBDRef = "OpaqueRef:iso-vbd"
+	}
+	return drive, nil
 }
 
 func (req xcpNgConfigDriveRequest) PublicKeyNotAvailableForTests() string { return "" }

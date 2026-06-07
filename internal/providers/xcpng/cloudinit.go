@@ -142,6 +142,16 @@ func vmDiskLabels(base map[string]string) map[string]string {
 	return labels
 }
 
+func isoMediaLabels(base map[string]string) map[string]string {
+	labels := make(map[string]string, len(base)+2)
+	for key, value := range base {
+		labels[key] = value
+	}
+	labels["resource"] = "installer-media"
+	labels["cleanup_with_vm"] = "true"
+	return labels
+}
+
 func buildConfigDriveImage(payload xcpNgCloudInitPayload) ([]byte, error) {
 	files := []fatFile{
 		{Name: "user-data", Data: []byte(payload.UserData)},
