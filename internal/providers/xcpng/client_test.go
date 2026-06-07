@@ -1417,6 +1417,39 @@ func TestImportRawVDIRedactsSessionTokenFromHTTPErrorBody(t *testing.T) {
 	}
 }
 
+func TestImportRawVDIRedactsEndpointUserinfoFromHTTPErrorBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			writeXMLRPCString(t, w, "OpaqueRef:task")
+			return
+		}
+		http.Error(w, "proxy echoed http://api-user:api-password@"+r.Host+r.URL.String(), http.StatusBadGateway)
+	}))
+	defer server.Close()
+	endpoint := strings.Replace(server.URL, "http://", "http://api-user:api-password@", 1)
+	client := &xapiClient{
+		endpoint: endpoint,
+		session:  "OpaqueRef:secret-session",
+		http:     server.Client(),
+	}
+	err := client.importRawVDI(context.Background(), "OpaqueRef:vdi", []byte("image"))
+	if err == nil {
+		t.Fatal("expected upload error")
+	}
+	text := err.Error()
+	for _, secret := range []string{"api-user", "api-password", "api-user:api-password", "OpaqueRef:secret-session", "secret-session"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("error leaked %q: %s", secret, text)
+		}
+	}
+	if strings.Contains(text, "***") {
+		t.Fatalf("error leaked masked password context instead of redacting userinfo: %s", text)
+	}
+	if !strings.Contains(text, "http://<redacted>@") || !strings.Contains(text, "session_id=<redacted>") {
+		t.Fatalf("error did not preserve redacted upload context: %s", text)
+	}
+}
+
 func readXMLRPCMethod(t *testing.T, r *http.Request) string {
 	t.Helper()
 	method, _ := readXMLRPCBodyAndMethod(t, r)

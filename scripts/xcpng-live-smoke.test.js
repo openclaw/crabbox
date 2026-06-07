@@ -298,6 +298,63 @@ esac
   assert.match(doctorLog, /password=<redacted>/);
 });
 
+test("xcpng live smoke does not export diagnostic-redacted config URL", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-xcpng-live-smoke-"));
+  const evidence = path.join(dir, "evidence");
+  const fakeCrabbox = path.join(dir, "crabbox");
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "config show --json")
+    printf '{"xcpNg":{"apiUrl":"<redacted>@private-pool.example.test/jsonrpc"}}\\n'
+    ;;
+  "doctor --provider xcp-ng --json")
+    if [[ -n "\${CRABBOX_XCP_NG_API_URL:-}" ]]; then
+      printf 'unexpected exported api url: %s\\n' "$CRABBOX_XCP_NG_API_URL" >&2
+      exit 2
+    fi
+    printf 'doctor failed for https://private-pool.example.test/jsonrpc password=pool-secret\\n' >&2
+    exit 4
+    ;;
+  *)
+    printf 'unexpected command: %s\\n' "$*" >&2
+    exit 2
+    ;;
+esac
+`,
+  );
+
+  const env = { ...process.env };
+  delete env.CRABBOX_XCP_NG_API_URL;
+  const result = spawnSync("bash", ["scripts/xcpng-live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_XCP_NG_SMOKE_DIR: evidence,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=environment_blocked/);
+  assert.doesNotMatch(result.stderr, /unexpected exported api url/);
+
+  const doctorLogs = fs
+    .readdirSync(evidence)
+    .filter((name) => name.endsWith("-doctor.json"));
+  assert.equal(doctorLogs.length, 1);
+
+  const doctorLog = fs.readFileSync(path.join(evidence, doctorLogs[0]), "utf8");
+  assert.match(doctorLog, /https:\/\/xcp-pool\.example\.test/);
+  assert.doesNotMatch(doctorLog, /private-pool/);
+  assert.doesNotMatch(doctorLog, /pool-secret/);
+  assert.match(doctorLog, /password=<redacted>/);
+});
+
 test("xcpng live smoke classifies stop failures after a mutating run", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-xcpng-live-smoke-"));
   const evidence = path.join(dir, "evidence");

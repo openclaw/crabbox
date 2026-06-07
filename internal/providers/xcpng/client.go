@@ -636,7 +636,8 @@ func (c *xapiClient) importRawVDI(ctx context.Context, vdiRef string, image []by
 	defer res.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return xapiHTTPError{StatusCode: res.StatusCode, Body: redactXAPISensitiveText(strings.TrimSpace(string(data)), c.session)}
+		secrets := append([]string{c.session}, urlUserinfoSecrets(u)...)
+		return xapiHTTPError{StatusCode: res.StatusCode, Body: redactXAPISensitiveText(strings.TrimSpace(string(data)), secrets...)}
 	}
 	return c.waitForTaskSuccess(ctx, taskRef)
 }

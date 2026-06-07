@@ -119,13 +119,11 @@ if isinstance(value, str) and value.strip():
 '
 }
 
-if [[ -z "${CRABBOX_XCP_NG_API_URL:-}" ]]; then
-  configured_api_url="$(resolve_configured_xcpng_api_url || true)"
-  if [[ -n "$configured_api_url" ]]; then
-    CRABBOX_XCP_NG_API_URL="$configured_api_url"
-    export CRABBOX_XCP_NG_API_URL
-  fi
+redaction_api_url="${CRABBOX_XCP_NG_API_URL:-}"
+if [[ -z "$redaction_api_url" ]]; then
+  redaction_api_url="$(resolve_configured_xcpng_api_url || true)"
 fi
+export CRABBOX_XCP_NG_REDACT_API_URL="$redaction_api_url"
 
 evidence_dir="${CRABBOX_XCP_NG_SMOKE_DIR:-.crabbox/xcpng-live-smoke}"
 mkdir -p "$evidence_dir"
@@ -153,7 +151,7 @@ src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
 text = src.read_text(encoding="utf-8", errors="replace")
 
-api_url = os.environ.get("CRABBOX_XCP_NG_API_URL", "").strip()
+api_url = os.environ.get("CRABBOX_XCP_NG_REDACT_API_URL", "").strip()
 if api_url:
     parsed = urlparse(api_url if "://" in api_url else f"//{api_url}")
     if parsed.hostname:
