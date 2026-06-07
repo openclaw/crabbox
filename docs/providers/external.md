@@ -33,6 +33,12 @@ arguments, and config in a private per-lease routing file and print only that
 file's opaque path. Routing files use mode `0600` and are removed after
 successful release.
 
+Local claims are scoped to a fingerprint of `external.command`, `external.args`,
+and `external.config`. This lets multiple external backends or namespaces reuse
+the same slug without cleanup for one configuration removing claims or routing
+files owned by another. Legacy unscoped claims are not reconciled by cleanup;
+stop them directly by lease ID or with the generated routing file.
+
 Flags:
 
 ```text
@@ -150,7 +156,8 @@ When `readyCheck` is omitted, Crabbox uses a generic Linux tool check for
 when the external provider needs a stronger guest bootstrap signal.
 
 `list` returns `{"protocolVersion":1,"leases":[...]}`. `doctor` may return a
-human-readable `message`. Any operation may return `{"error":"..."}`.
+human-readable `message`. Any operation may return `{"error":"..."}`; error-only
+responses do not need `protocolVersion`.
 
 For `acquire`, omitted `leaseId`, `slug`, or `name` fields inherit the
 corresponding values from `desired`.

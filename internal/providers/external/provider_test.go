@@ -26,6 +26,13 @@ func testConfig() core.Config {
 	return cfg
 }
 
+func claimExternalLease(t *testing.T, cfg core.Config, leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) {
+	t.Helper()
+	if err := core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, externalClaimScope(cfg), repoRoot, idleTimeout, reclaim); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProviderSpec(t *testing.T) {
 	spec := (Provider{}).Spec()
 	if spec.Name != providerName || spec.Family != "external" {
@@ -152,6 +159,14 @@ func TestInvokeRejectsUnversionedResponse(t *testing.T) {
 	}
 }
 
+func TestInvokeReportsErrorOnlyResponse(t *testing.T) {
+	runner := &recordingRunner{stdout: `{"error":"quota exhausted"}`}
+	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.invoke(context.Background(), protocolRequest{Operation: "doctor"}); err == nil || !strings.Contains(err.Error(), "quota exhausted") || strings.Contains(err.Error(), "protocol version") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestProtocolLeaseMapsProxyAndServer(t *testing.T) {
 	cfg := testConfig()
 	lease := protocolLease{
@@ -212,6 +227,30 @@ func TestProtocolLeaseDefaultsReadyCheck(t *testing.T) {
 	}
 }
 
+func TestAllocateLeaseSlugIgnoresOtherExternalScopes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig()
+	otherCfg := testConfig()
+	otherCfg.External.Config = map[string]any{"namespace": "prod", "cpu": 32}
+	claimExternalLease(t, otherCfg, "cbx_other", "shared", t.TempDir(), time.Minute, false)
+	backend := &leaseBackend{cfg: cfg}
+	slug, err := backend.allocateLeaseSlug("cbx_new", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slug != "shared" {
+		t.Fatalf("slug=%q, want shared when collision is outside scope", slug)
+	}
+	claimExternalLease(t, cfg, "cbx_current", "shared", t.TempDir(), time.Minute, false)
+	slug, err = backend.allocateLeaseSlug("cbx_next", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slug == "shared" || !strings.HasPrefix(slug, "shared-") {
+		t.Fatalf("slug=%q, want current-scope collision suffix", slug)
+	}
+}
+
 func TestLeaseSlugForClaimUsesProviderReturnedSlug(t *testing.T) {
 	lease := protocolLease{
 		LeaseID: "provider-id",
@@ -256,9 +295,8 @@ func TestAcquireReleasesInvalidLeaseResponse(t *testing.T) {
 func TestResolveRejectsReplacementLeaseIdentity(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	repo := t.TempDir()
-	if err := core.ClaimLeaseForRepoProvider("cbx_000000000001", "shared", providerName, repo, time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
+	cfg := testConfig()
+	claimExternalLease(t, cfg, "cbx_000000000001", "shared", repo, time.Minute, false)
 	server := core.Server{Name: "devbox-shared", Labels: map[string]string{"name": "devbox-shared", "slug": "shared"}}
 	if err := core.UpdateLeaseClaimEndpoint("cbx_000000000001", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
@@ -266,7 +304,7 @@ func TestResolveRejectsReplacementLeaseIdentity(t *testing.T) {
 	runner := &sequenceRunner{responses: []string{
 		`{"protocolVersion":1,"lease":{"leaseId":"cbx_000000000002","slug":"shared","name":"devbox-shared"}}`,
 	}}
-	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
 	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "shared", ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "lease identity changed") {
 		t.Fatalf("err=%v", err)
 	}
@@ -331,9 +369,8 @@ func TestResolvePersistsRoutingBeforeSSHReadiness(t *testing.T) {
 func TestResolvePreservesClaimedLifecycleLabels(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	repo := t.TempDir()
-	if err := core.ClaimLeaseForRepoProvider("cbx_000000000003", "ephemeral", providerName, repo, time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
+	cfg := testConfig()
+	claimExternalLease(t, cfg, "cbx_000000000003", "ephemeral", repo, time.Minute, false)
 	server := core.Server{Name: "devbox-ephemeral", Labels: map[string]string{
 		"name":         "devbox-ephemeral",
 		"slug":         "ephemeral",
@@ -349,7 +386,7 @@ func TestResolvePreservesClaimedLifecycleLabels(t *testing.T) {
 	runner := &sequenceRunner{responses: []string{
 		`{"protocolVersion":1,"lease":{"leaseId":"cbx_000000000003","slug":"ephemeral","name":"devbox-ephemeral"}}`,
 	}}
-	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "ephemeral", ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
@@ -362,17 +399,14 @@ func TestResolvePreservesClaimedLifecycleLabels(t *testing.T) {
 func TestCleanupReconcilesExternalClaims(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	repo := t.TempDir()
-	if err := core.ClaimLeaseForRepoProvider("cbx_000000000004", "live", providerName, repo, time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := core.ClaimLeaseForRepoProvider("cbx_000000000005", "stale", providerName, repo, time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
+	cfg := testConfig()
+	claimExternalLease(t, cfg, "cbx_000000000004", "live", repo, time.Minute, false)
+	claimExternalLease(t, cfg, "cbx_000000000005", "stale", repo, time.Minute, false)
 	runner := &sequenceRunner{responses: []string{
 		`{"protocolVersion":1}`,
 		`{"protocolVersion":1,"leases":[{"leaseId":"cbx_000000000004","slug":"live","name":"live"}]}`,
 	}}
-	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
@@ -384,16 +418,39 @@ func TestCleanupReconcilesExternalClaims(t *testing.T) {
 	}
 }
 
-func TestCleanupRejectsMalformedInventoryBeforeRemovingClaims(t *testing.T) {
+func TestCleanupPreservesOtherExternalScopeClaims(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	if err := core.ClaimLeaseForRepoProvider("cbx_000000000006", "live", providerName, t.TempDir(), time.Minute, false); err != nil {
+	repo := t.TempDir()
+	cfg := testConfig()
+	otherCfg := testConfig()
+	otherCfg.External.Config = map[string]any{"namespace": "prod", "cpu": 32}
+	claimExternalLease(t, cfg, "cbx_000000000007", "stale", repo, time.Minute, false)
+	claimExternalLease(t, otherCfg, "cbx_000000000008", "other", repo, time.Minute, false)
+	runner := &sequenceRunner{responses: []string{
+		`{"protocolVersion":1}`,
+		`{"protocolVersion":1,"leases":[]}`,
+	}}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("stale", providerName); err != nil || ok {
+		t.Fatalf("same-scope stale claim ok=%v err=%v", ok, err)
+	}
+	if claim, ok, err := core.ResolveLeaseClaimForProvider("other", providerName); err != nil || !ok || claim.LeaseID != "cbx_000000000008" {
+		t.Fatalf("other-scope claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+}
+
+func TestCleanupRejectsMalformedInventoryBeforeRemovingClaims(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig()
+	claimExternalLease(t, cfg, "cbx_000000000006", "live", t.TempDir(), time.Minute, false)
 	runner := &sequenceRunner{responses: []string{
 		`{"protocolVersion":1}`,
 		`{"protocolVersion":1,"leases":[{"name":"missing-id"}]}`,
 	}}
-	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "missing leaseId") {
 		t.Fatalf("err=%v", err)
 	}

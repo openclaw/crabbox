@@ -3,6 +3,7 @@ package external
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -21,7 +22,7 @@ func (b *leaseBackend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	leaseID := core.NewLeaseID()
-	slug, err := core.AllocateClaimLeaseSlug(leaseID, req.RequestedSlug)
+	slug, err := b.allocateLeaseSlug(leaseID, req.RequestedSlug)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -67,7 +68,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 		}
 		return core.LeaseTarget{}, core.Exit(2, "%v", err)
 	}
-	if err := core.ClaimLeaseForRepoProvider(lease.LeaseID, leaseSlugForClaim(lease, slug), providerName, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+	if err := b.claimLeaseForRepo(lease.LeaseID, leaseSlugForClaim(lease, slug), req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
 			_, _ = b.invoke(context.Background(), protocolRequest{Operation: "release", Lease: leaseForProtocol(lease)})
 			core.RemoveExternalRouting(lease.LeaseID)
@@ -90,7 +91,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 	var desired *desiredLease
 	var claimLabels map[string]string
 	keep := true
-	if claim, ok, err := core.ResolveLeaseClaimForProvider(req.ID, providerName); err != nil {
+	if claim, ok, err := b.resolveClaim(req.ID); err != nil {
 		return core.LeaseTarget{}, err
 	} else if ok {
 		name := core.Blank(claim.Labels["name"], core.LeaseProviderName(claim.LeaseID, claim.Slug))
@@ -136,7 +137,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 	}
 	if req.Repo.Root != "" {
 		slug := core.NormalizeLeaseSlug(lease.Server.Labels["slug"])
-		if err := core.ClaimLeaseForRepoProvider(lease.LeaseID, slug, providerName, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+		if err := b.claimLeaseForRepo(lease.LeaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		if err := core.UpdateLeaseClaimEndpoint(lease.LeaseID, lease.Server, lease.SSH); err != nil {
@@ -242,7 +243,7 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 		return err
 	}
 	for _, claim := range claims {
-		if claim.Provider != providerName {
+		if claim.Provider != providerName || strings.TrimSpace(claim.ProviderScope) != b.claimScope() {
 			continue
 		}
 		if _, ok := live[claim.LeaseID]; !ok {
@@ -277,13 +278,118 @@ func (b *leaseBackend) invoke(ctx context.Context, request protocolRequest) (pro
 	if err := json.Unmarshal([]byte(result.Stdout), &response); err != nil {
 		return protocolResponse{}, core.Exit(5, "external provider returned invalid JSON: %v", err)
 	}
-	if response.ProtocolVersion != protocolVersion {
-		return protocolResponse{}, core.Exit(5, "external provider protocol version %d is unsupported", response.ProtocolVersion)
-	}
 	if message := strings.TrimSpace(response.Error); message != "" {
 		return protocolResponse{}, core.Exit(5, "external provider: %s", message)
 	}
+	if response.ProtocolVersion != protocolVersion {
+		return protocolResponse{}, core.Exit(5, "external provider protocol version %d is unsupported", response.ProtocolVersion)
+	}
 	return response, nil
+}
+
+func (b *leaseBackend) claimScope() string {
+	return externalClaimScope(b.cfg)
+}
+
+type externalClaimScopeData struct {
+	Command string         `json:"command"`
+	Args    []string       `json:"args,omitempty"`
+	Config  map[string]any `json:"config,omitempty"`
+}
+
+func externalClaimScope(cfg core.Config) string {
+	data, err := json.Marshal(externalClaimScopeData{
+		Command: strings.TrimSpace(cfg.External.Command),
+		Args:    append([]string(nil), cfg.External.Args...),
+		Config:  cfg.External.Config,
+	})
+	if err != nil {
+		data = []byte(strings.TrimSpace(cfg.External.Command) + "\x00" + strings.Join(cfg.External.Args, "\x00"))
+	}
+	sum := sha256.Sum256(data)
+	return "sha256:" + fmt.Sprintf("%x", sum[:12])
+}
+
+func (b *leaseBackend) claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, b.claimScope(), repoRoot, idleTimeout, reclaim)
+}
+
+func (b *leaseBackend) allocateLeaseSlug(leaseID, requested string) (string, error) {
+	base := core.NormalizeLeaseSlug(requested)
+	checkClaims := base != ""
+	if base == "" {
+		base = core.NewLeaseSlug(leaseID)
+	}
+	slug := base
+	for attempt := 0; attempt < 20; attempt++ {
+		inUse := false
+		var err error
+		if checkClaims {
+			inUse, err = b.claimSlugInUse(slug, leaseID)
+		}
+		if err != nil {
+			return "", err
+		}
+		if !inUse {
+			return slug, nil
+		}
+		slug = core.SlugWithCollisionSuffix(base, fmt.Sprintf("%s-%d", leaseID, attempt))
+	}
+	return core.SlugWithCollisionSuffix(base, leaseID), nil
+}
+
+func (b *leaseBackend) claimSlugInUse(slug, leaseID string) (bool, error) {
+	slug = core.NormalizeLeaseSlug(slug)
+	if slug == "" {
+		return false, nil
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return false, err
+	}
+	scope := b.claimScope()
+	for _, claim := range claims {
+		if !externalClaimMatchesScope(claim, scope) {
+			continue
+		}
+		if claim.LeaseID != "" && claim.LeaseID != leaseID && core.NormalizeLeaseSlug(claim.Slug) == slug {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (b *leaseBackend) resolveClaim(identifier string) (core.LeaseClaim, bool, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return core.LeaseClaim{}, false, nil
+	}
+	scope := b.claimScope()
+	if claim, err := core.ReadLeaseClaim(identifier); err != nil {
+		return core.LeaseClaim{}, false, err
+	} else if externalClaimMatchesScope(claim, scope) {
+		return claim, true, nil
+	} else if claim.LeaseID != "" && strings.HasPrefix(identifier, "cbx_") {
+		return core.LeaseClaim{}, false, nil
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	slug := core.NormalizeLeaseSlug(identifier)
+	for _, claim := range claims {
+		if !externalClaimMatchesScope(claim, scope) {
+			continue
+		}
+		if claim.LeaseID == identifier || (slug != "" && core.NormalizeLeaseSlug(claim.Slug) == slug) {
+			return claim, true, nil
+		}
+	}
+	return core.LeaseClaim{}, false, nil
+}
+
+func externalClaimMatchesScope(claim core.LeaseClaim, scope string) bool {
+	return claim.LeaseID != "" && claim.Provider == providerName && strings.TrimSpace(claim.ProviderScope) == scope
 }
 
 func fillDesired(lease *protocolLease, desired *desiredLease) {
