@@ -1790,6 +1790,20 @@ func TestInvalidDockerSandboxCPUEnvFailsDuringLoad(t *testing.T) {
 	}
 }
 
+func TestInvalidDockerSandboxCPUEnvNonNumericFailsDuringLoad(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "docker-sandbox")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CPUS", "not-a-number")
+
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "CRABBOX_DOCKER_SANDBOX_CPUS") {
+		t.Fatalf("loadConfig err=%v, want docker-sandbox CPU env parse rejection", err)
+	}
+}
+
 func TestAccessAuthState(t *testing.T) {
 	for name, tc := range map[string]struct {
 		access AccessConfig

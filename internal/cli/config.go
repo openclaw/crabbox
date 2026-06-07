@@ -3295,7 +3295,13 @@ func applyEnv(cfg *Config) error {
 	cfg.DockerSandbox.CLIPath = getenv("CRABBOX_DOCKER_SANDBOX_CLI", cfg.DockerSandbox.CLIPath)
 	cfg.DockerSandbox.Agent = getenv("CRABBOX_DOCKER_SANDBOX_AGENT", cfg.DockerSandbox.Agent)
 	cfg.DockerSandbox.Template = getenv("CRABBOX_DOCKER_SANDBOX_TEMPLATE", cfg.DockerSandbox.Template)
-	cfg.DockerSandbox.CPUs = getenvFloat("CRABBOX_DOCKER_SANDBOX_CPUS", cfg.DockerSandbox.CPUs)
+	if cpus := os.Getenv("CRABBOX_DOCKER_SANDBOX_CPUS"); cpus != "" {
+		parsed, err := strconv.ParseFloat(cpus, 64)
+		if err != nil {
+			return fmt.Errorf("parse CRABBOX_DOCKER_SANDBOX_CPUS: %w", err)
+		}
+		cfg.DockerSandbox.CPUs = parsed
+	}
 	cfg.DockerSandbox.Memory = getenv("CRABBOX_DOCKER_SANDBOX_MEMORY", cfg.DockerSandbox.Memory)
 	if v, ok := getenvBool("CRABBOX_DOCKER_SANDBOX_CLONE"); ok {
 		cfg.DockerSandbox.Clone = v
