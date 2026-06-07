@@ -28,6 +28,8 @@ type fakeLifecycleClient struct {
 	cloneVM      xapiVM
 	freshVM      xcpNgFreshVMResult
 	drive        xcpNgConfigDrive
+	importedISO  xcpNgConfigDrive
+	attachedDisk xcpNgConfigDrive
 	guestIP      string
 	getServer    map[string]Server
 	errOn        map[string]error
@@ -141,6 +143,49 @@ func (f *fakeLifecycleClient) CreateFreshVM(_ context.Context, req xcpNgFreshVMR
 	return result, nil
 }
 
+func (f *fakeLifecycleClient) ImportISO(_ context.Context, req xcpNgImportISORequest) (xcpNgConfigDrive, error) {
+	f.record("import-iso")
+	f.mutated = true
+	if err := f.fail("import-iso"); err != nil {
+		return xcpNgConfigDrive{}, err
+	}
+	drive := f.importedISO
+	if drive.VDIRef == "" {
+		drive.VDIRef = "OpaqueRef:imported-iso-vdi"
+	}
+	if drive.Name == "" {
+		drive.Name = req.Name
+	}
+	if drive.Labels == nil {
+		drive.Labels = isoMediaLabels(req.Labels)
+	}
+	drive.DestroyVDI = req.DestroyVDI
+	return drive, nil
+}
+
+func (f *fakeLifecycleClient) AttachDisk(_ context.Context, req xcpNgDiskAttachRequest) (xcpNgConfigDrive, error) {
+	f.record("attach-disk")
+	f.mutated = true
+	if err := f.fail("attach-disk"); err != nil {
+		return xcpNgConfigDrive{}, err
+	}
+	drive := f.attachedDisk
+	if drive.VDIRef == "" {
+		drive.VDIRef = "OpaqueRef:disk-vdi"
+	}
+	if drive.VBDRef == "" {
+		drive.VBDRef = "OpaqueRef:disk-vbd"
+	}
+	if drive.Name == "" {
+		drive.Name = req.Name
+	}
+	if drive.Labels == nil {
+		drive.Labels = vmDiskLabels(req.Labels)
+	}
+	drive.DestroyVDI = req.DestroyVDI
+	return drive, nil
+}
+
 func (f *fakeLifecycleClient) AttachConfigDrive(_ context.Context, req xcpNgConfigDriveRequest) (xcpNgConfigDrive, error) {
 	f.record("attach-config-drive")
 	f.mutated = true
@@ -185,6 +230,12 @@ func (f *fakeLifecycleClient) StartVM(context.Context, xapiRef) error {
 	f.record("start")
 	f.mutated = true
 	return f.fail("start")
+}
+
+func (f *fakeLifecycleClient) SetVMBootOrder(context.Context, xapiRef, string) error {
+	f.record("set-boot-order")
+	f.mutated = true
+	return f.fail("set-boot-order")
 }
 
 func (f *fakeLifecycleClient) GuestIPv4(context.Context, xapiRef) (string, error) {
@@ -566,6 +617,179 @@ func TestCleanupIsMetadataAndExpiryGated(t *testing.T) {
 	}
 	if !reflect.DeepEqual(fake.deleted, []string{"OpaqueRef:expired"}) {
 		t.Fatalf("deleted=%v", fake.deleted)
+	}
+}
+
+func TestRunISOE2ELinuxReadOnlyAcceptsLocalInstallerPath(t *testing.T) {
+	dir := t.TempDir()
+	isoPath := filepath.Join(dir, "ubuntu.iso")
+	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeLifecycleClient{srRef: "OpaqueRef:sr", networkRef: "OpaqueRef:net", hostRef: "OpaqueRef:host", iso: xcpNgISOMediaRef{Source: "local-file", NameLabel: isoPath}}
+	oldClient := newLifecycleClient
+	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
+	t.Cleanup(func() { newLifecycleClient = oldClient })
+	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "read-only", OS: "linux", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Classification != "read_only_passed" || summary.Phase != "read_only_validation" {
+		t.Fatalf("summary=%#v", summary)
+	}
+	if summary.Details["installer_source"] != "local-file" {
+		t.Fatalf("summary details=%#v", summary.Details)
+	}
+}
+
+func TestRunISOE2ELinuxMutatePassesWithImportedMediaAndSSHProof(t *testing.T) {
+	dir := t.TempDir()
+	isoPath := filepath.Join(dir, "ubuntu.iso")
+	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeLifecycleClient{
+		srRef:        "OpaqueRef:sr",
+		networkRef:   "OpaqueRef:net",
+		hostRef:      "OpaqueRef:host",
+		iso:          xcpNgISOMediaRef{Source: "local-file", NameLabel: isoPath},
+		guestIP:      "192.0.2.50",
+		importedISO:  xcpNgConfigDrive{VDIRef: "OpaqueRef:imported-vdi", Name: "installer.iso", DestroyVDI: true},
+		attachedDisk: xcpNgConfigDrive{VDIRef: "OpaqueRef:disk-vdi", VBDRef: "OpaqueRef:disk-vbd", Name: "install-disk", DestroyVDI: true},
+	}
+	oldClient := newLifecycleClient
+	oldWait := isoE2EWaitForSSHReady
+	oldRunSSH := isoE2ERunSSHQuiet
+	oldEnsure := isoE2EEnsureTestboxKey
+	oldNow := isoE2ECurrentTime
+	oldRemaster := isoE2ERemasterUbuntuISO
+	oldSeed := isoE2EWriteLinuxSeedISO
+	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
+	isoE2EWaitForSSHReady = func(context.Context, *core.SSHTarget, string, time.Duration) error { return nil }
+	isoE2ERunSSHQuiet = func(context.Context, core.SSHTarget, string) error { return nil }
+	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) { return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil }
+	isoE2ECurrentTime = func() time.Time { return time.Unix(1700000000, 0).UTC() }
+	isoE2ERemasterUbuntuISO = func(context.Context, string, string) (string, error) { return isoPath, nil }
+	isoE2EWriteLinuxSeedISO = func(context.Context, string, xcpNgLinuxAutoinstallPayload) (string, error) {
+		seedPath := filepath.Join(dir, "seed.iso")
+		if err := os.WriteFile(seedPath, []byte("seed"), 0o600); err != nil {
+			return "", err
+		}
+		return seedPath, nil
+	}
+	t.Cleanup(func() {
+		newLifecycleClient = oldClient
+		isoE2EWaitForSSHReady = oldWait
+		isoE2ERunSSHQuiet = oldRunSSH
+		isoE2EEnsureTestboxKey = oldEnsure
+		isoE2ECurrentTime = oldNow
+		isoE2ERemasterUbuntuISO = oldRemaster
+		isoE2EWriteLinuxSeedISO = oldSeed
+	})
+	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "mutate", OS: "linux", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence"), MutateGate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Classification != "linux_install_passed" || summary.Phase != "linux_ssh_ok" || summary.Cleanup != "cleaned" {
+		t.Fatalf("summary=%#v", summary)
+	}
+	for _, want := range []string{"create-fresh-vm", "attach-disk", "import-iso", "attach-iso", "start", "set-boot-order", "guest-ip", "delete", "delete-config-drive"} {
+		if !strings.Contains(strings.Join(fake.calls, ","), want) {
+			t.Fatalf("calls=%v missing %s", fake.calls, want)
+		}
+	}
+	if summary.Details["first_boot_ip"] != "192.0.2.50" {
+		t.Fatalf("summary=%#v", summary)
+	}
+}
+
+func TestRunISOE2ELinuxMutateClassifiesGuestMetricsBlocker(t *testing.T) {
+	dir := t.TempDir()
+	isoPath := filepath.Join(dir, "ubuntu.iso")
+	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeLifecycleClient{
+		srRef:        "OpaqueRef:sr",
+		networkRef:   "OpaqueRef:net",
+		hostRef:      "OpaqueRef:host",
+		iso:          xcpNgISOMediaRef{Source: "local-file", NameLabel: isoPath},
+		importedISO:  xcpNgConfigDrive{VDIRef: "OpaqueRef:imported-vdi", Name: "installer.iso", DestroyVDI: true},
+		attachedDisk: xcpNgConfigDrive{VDIRef: "OpaqueRef:disk-vdi", VBDRef: "OpaqueRef:disk-vbd", Name: "install-disk", DestroyVDI: true},
+		errOn:        map[string]error{"guest-ip": errors.New("no guest ipv4 address reported by XCP-ng guest metrics")},
+	}
+	oldClient := newLifecycleClient
+	oldEnsure := isoE2EEnsureTestboxKey
+	oldRemaster := isoE2ERemasterUbuntuISO
+	oldSeed := isoE2EWriteLinuxSeedISO
+	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
+	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) { return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil }
+	isoE2ERemasterUbuntuISO = func(context.Context, string, string) (string, error) { return isoPath, nil }
+	isoE2EWriteLinuxSeedISO = func(context.Context, string, xcpNgLinuxAutoinstallPayload) (string, error) {
+		seedPath := filepath.Join(dir, "seed.iso")
+		if err := os.WriteFile(seedPath, []byte("seed"), 0o600); err != nil {
+			return "", err
+		}
+		return seedPath, nil
+	}
+	t.Cleanup(func() {
+		newLifecycleClient = oldClient
+		isoE2EEnsureTestboxKey = oldEnsure
+		isoE2ERemasterUbuntuISO = oldRemaster
+		isoE2EWriteLinuxSeedISO = oldSeed
+	})
+	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "mutate", OS: "linux", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence"), Timeout: 25 * time.Second, MutateGate: true})
+	if err == nil {
+		t.Fatal("expected guest metrics blocker")
+	}
+	if summary.Classification != "environment_blocked" || summary.Phase != "linux_install_complete" {
+		t.Fatalf("summary=%#v err=%v", summary, err)
+	}
+	if !strings.Contains(summary.Reason, "guest IPv4") && !strings.Contains(summary.Reason, "guest metrics") && !strings.Contains(summary.Reason, "timed out waiting") {
+		t.Fatalf("summary=%#v", summary)
+	}
+}
+
+func TestRunISOE2ELinuxMutateCleansImportedInstallerWhenAttachFails(t *testing.T) {
+	dir := t.TempDir()
+	isoPath := filepath.Join(dir, "ubuntu.iso")
+	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeLifecycleClient{
+		srRef:       "OpaqueRef:sr",
+		networkRef:  "OpaqueRef:net",
+		hostRef:     "OpaqueRef:host",
+		iso:         xcpNgISOMediaRef{Source: "local-file", NameLabel: isoPath},
+		importedISO: xcpNgConfigDrive{VDIRef: "OpaqueRef:imported-vdi", Name: "installer.iso", DestroyVDI: true},
+		errOn:       map[string]error{"attach-iso": errors.New("attach failed")},
+	}
+	oldClient := newLifecycleClient
+	oldEnsure := isoE2EEnsureTestboxKey
+	oldRemaster := isoE2ERemasterUbuntuISO
+	oldSeed := isoE2EWriteLinuxSeedISO
+	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
+	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) { return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil }
+	isoE2ERemasterUbuntuISO = func(context.Context, string, string) (string, error) { return isoPath, nil }
+	isoE2EWriteLinuxSeedISO = func(context.Context, string, xcpNgLinuxAutoinstallPayload) (string, error) {
+		seedPath := filepath.Join(dir, "seed.iso")
+		if err := os.WriteFile(seedPath, []byte("seed"), 0o600); err != nil {
+			return "", err
+		}
+		return seedPath, nil
+	}
+	t.Cleanup(func() {
+		newLifecycleClient = oldClient
+		isoE2EEnsureTestboxKey = oldEnsure
+		isoE2ERemasterUbuntuISO = oldRemaster
+		isoE2EWriteLinuxSeedISO = oldSeed
+	})
+	_, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "mutate", OS: "linux", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence"), MutateGate: true})
+	if err == nil || !strings.Contains(err.Error(), "attach failed") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fake.deletedCD) == 0 || fake.deletedCD[0].VDIRef != "OpaqueRef:imported-vdi" {
+		t.Fatalf("deleted config drives=%#v", fake.deletedCD)
 	}
 }
 

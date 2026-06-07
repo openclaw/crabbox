@@ -279,26 +279,58 @@ Read-only mode:
 Mutating mode requires an explicit gate:
 
 ```sh
-CRABBOX_XCP_NG_ISO_E2E_MUTATE=1 scripts/xcpng-iso-e2e-smoke.sh --mutate --os linux --iso <iso-vdi>
+CRABBOX_XCP_NG_ISO_E2E_MUTATE=1 scripts/xcpng-iso-e2e-smoke.sh --mutate --os linux --iso ~/Desktop/xcp/ISOs/ubuntu-26.04-live-server-amd64.iso
 ```
 
-The foundation harness stops at shared lifecycle proof only: create a fresh VM,
-attach installer media, start the VM, classify the boot phase, and clean up.
-It does not perform a full Linux install, a full Windows install, or first-boot
-guest validation. Those flows belong to the later Linux and Windows ISO plans.
+Linux mutating mode now performs the guarded Ubuntu Server acceptance flow:
+
+- generates a per-run NoCloud seed ISO with Ubuntu autoinstall user-data;
+- requires a local Ubuntu Server ISO path and remasters it under
+  `.crabbox/xcpng-iso-e2e/` to add the
+  required `autoinstall` kernel argument;
+- imports temporary installer and answer media into the configured SR when local
+  file paths are used;
+- creates a fresh blank VM plus writable install disk, boots the installer,
+  waits for the installed guest to reboot, and then waits for SSH on first boot;
+- proves first boot by running `printf linux-iso-e2e-ok` over SSH; and
+- removes the VM, install disk, and temporary imported media unless cleanup is
+  blocked by the environment.
+
+The wrapper now defaults to `--timeout 90m`, which is intended for the full
+Linux install flow. Override it explicitly only when the lab is known to be
+faster or slower.
+
+Windows mutating mode still preserves the shared foundation-only behavior from
+PLAN-01. It creates a fresh VM, attaches installer media, starts once, writes a
+classification, and cleans up. Full Windows unattended install proof remains in
+the Windows-specific plan.
 
 Current classifications:
 
 - `read_only_passed`: config and ISO references resolved without mutation.
-- `started_unverified`: the shared lifecycle created the VM, attached media,
-  and `VM.start` succeeded, but installer-screen proof is deferred to later
-  OS-specific plans.
+- `linux_install_passed`: the Linux installer completed, first boot reported a
+  guest IPv4, and SSH proof succeeded.
+- `started_unverified`: Windows-only shared lifecycle classification. The VM was
+  created, media was attached, and `VM.start` succeeded, but Windows proof is
+  deferred to the Windows-specific plan.
 - `environment_blocked`: lab prerequisites, ISO identity, auth, placement, or
-  mutation gate blocked the run.
+  mutation gate blocked the run. For Linux this also includes exact phase
+  blockers such as installer boot arg/remaster failure, guest-metrics timeout,
+  or SSH readiness failure.
 - `resource_cleanup_failed`: the shared lifecycle reached its target phase but
   cleanup left resources behind.
 - `test_failed`: local harness contract failure such as invalid arguments or
   malformed helper output.
+
+Linux mutating summaries use these phase values:
+
+- `linux_seed_generation`
+- `linux_install_disk`
+- `linux_iso_attached`
+- `linux_installer_booted`
+- `linux_install_complete`
+- `linux_first_boot`
+- `linux_ssh_ok`
 
 Every run writes a JSON summary with these stable keys:
 
@@ -310,9 +342,11 @@ Every run writes a JSON summary with these stable keys:
 - `cleanup`
 - `evidence`
 
-If you use mutating mode, prefer ISO VDIs already present in an ISO-capable SR.
-The foundation harness does not yet upload local ISO files into XCP-ng. Keep
-all `.crabbox/xcpng-iso-e2e/` artifacts local; do not commit them.
+Linux mutating mode requires a local Ubuntu Server ISO path and handles the
+temporary remaster/import steps itself. Existing SR-hosted Ubuntu installer ISOs
+are read-only validation inputs only unless they were already prepared with the
+required `autoinstall` boot argument outside this harness. Keep all
+`.crabbox/xcpng-iso-e2e/` artifacts local; do not commit them.
 
 ## Troubleshooting
 
