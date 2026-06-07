@@ -199,6 +199,8 @@ internal/providers/localcontainer       # local Docker container SSH backend
 internal/providers/multipass            # Canonical Multipass local Ubuntu VM SSH backend
 internal/providers/ssh                  # static / BYO SSH backend
 internal/providers/daytona              # Daytona SSH lease + delegated SDK backend
+internal/providers/kubevirt             # generic KubeVirt SSH backend
+internal/providers/external             # executable provider protocol
 internal/providers/namespace            # Namespace devbox SSH backend
 internal/providers/semaphore            # Semaphore SSH lease backend
 internal/providers/sprites              # Sprites SSH backend

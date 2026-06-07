@@ -5,6 +5,7 @@
 ### Added
 
 - Added `sync.include` / `sync.includes` whitelists for root-relative sync plans, SSH sync, native Windows sync, local Actions hydration, and archive-sync providers. Thanks @anagnorisis2peripeteia.
+- Added generic `kubevirt` SSH leases and a versioned `external` executable provider so private or proprietary VM/devbox control planes can integrate through configuration without provider-specific Crabbox forks.
 
 ### Changed
 

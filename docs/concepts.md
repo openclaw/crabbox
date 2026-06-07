@@ -70,7 +70,7 @@ emphasizing the trust boundary between the CLI and the provider.
 release runners on a backing service. Crabbox ships adapters for managed clouds
 (AWS, Azure, Google Cloud, Hetzner), self-hosted and local hosts (Proxmox,
 Parallels, Local Container, static SSH), managed dev sandboxes reached over SSH
-(Daytona, Namespace Devbox, Semaphore, Sprites, exe.dev, RunPod, Railway), and
+(Daytona, KubeVirt, External, Namespace Devbox, Semaphore, Sprites, exe.dev, RunPod, Railway), and
 delegated execution sandboxes (Blacksmith Testbox, E2B, Modal, Islo, Tensorlake,
 [Upstash Box](https://upstash.com/docs/box/overall/quickstart), Cloudflare, Azure Dynamic Sessions, W&B). See the
 [Provider reference](providers/README.md).

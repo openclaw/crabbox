@@ -191,6 +191,29 @@ func TestPrintRunFailureDigest(t *testing.T) {
 	}
 }
 
+func TestRunFailureDigestRoutingArgsUseExternalRoutingFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	args := runFailureDigestRoutingArgs(Config{
+		Provider: "external",
+		External: ExternalConfig{
+			Command: "provider-command",
+			Args:    []string{"--token", "secret-value"},
+			Config:  map[string]any{"token": "secret-config"},
+		},
+	}, "provider-id")
+	got := strings.Join(args, " ")
+	for _, want := range []string{"--provider external", "--external-routing-file"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("routing args missing %q: %s", want, got)
+		}
+	}
+	for _, secret := range []string{"provider-command", "secret-value", "secret-config"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("routing args leaked %q: %s", secret, got)
+		}
+	}
+}
+
 func TestPrintRunFailureDigestExplainsAndChainShortCircuit(t *testing.T) {
 	stderrTail := newStreamTailBuffer(40)
 	_, _ = stderrTail.Write([]byte("pnpm check failed\n"))

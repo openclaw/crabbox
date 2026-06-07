@@ -101,6 +101,8 @@ type Config struct {
 	Capacity                    CapacityConfig
 	Actions                     ActionsConfig
 	Blacksmith                  BlacksmithConfig
+	KubeVirt                    KubeVirtConfig
+	External                    ExternalConfig
 	Namespace                   NamespaceConfig
 	Daytona                     DaytonaConfig
 	E2B                         E2BConfig
@@ -180,6 +182,29 @@ type BlacksmithConfig struct {
 	Ref         string
 	IdleTimeout time.Duration
 	Debug       bool
+}
+
+type KubeVirtConfig struct {
+	Kubectl         string
+	Virtctl         string
+	Kubeconfig      string
+	Context         string
+	Namespace       string
+	Template        string
+	SSHUser         string
+	SSHKey          string
+	SSHPublicKey    string
+	SSHPort         string
+	WorkRoot        string
+	DeleteOnRelease bool
+}
+
+type ExternalConfig struct {
+	Command     string
+	Args        []string
+	Config      map[string]any
+	WorkRoot    string
+	RoutingFile string
 }
 
 type NamespaceConfig struct {
@@ -914,6 +939,18 @@ func baseConfig() Config {
 			RunnerVersion: "latest",
 			Ephemeral:     true,
 		},
+		KubeVirt: KubeVirtConfig{
+			Kubectl:         "kubectl",
+			Virtctl:         "virtctl",
+			Namespace:       "default",
+			SSHUser:         "crabbox",
+			SSHPort:         "22",
+			WorkRoot:        "/home/crabbox/crabbox",
+			DeleteOnRelease: true,
+		},
+		External: ExternalConfig{
+			WorkRoot: defaultPOSIXWorkRoot,
+		},
 		Namespace: NamespaceConfig{
 			Image:               "builtin:base",
 			WorkRoot:            "/workspaces/crabbox",
@@ -1069,6 +1106,8 @@ type fileConfig struct {
 	Capacity             *fileCapacityConfig                `yaml:"capacity,omitempty"`
 	Actions              *fileActionsConfig                 `yaml:"actions,omitempty"`
 	Blacksmith           *fileBlacksmithConfig              `yaml:"blacksmith,omitempty"`
+	KubeVirt             *fileKubeVirtConfig                `yaml:"kubevirt,omitempty"`
+	External             *fileExternalConfig                `yaml:"external,omitempty"`
 	Namespace            *fileNamespaceConfig               `yaml:"namespace,omitempty"`
 	Daytona              *fileDaytonaConfig                 `yaml:"daytona,omitempty"`
 	E2B                  *fileE2BConfig                     `yaml:"e2b,omitempty"`
@@ -1284,6 +1323,29 @@ type fileBlacksmithConfig struct {
 	Ref         string `yaml:"ref,omitempty"`
 	IdleTimeout string `yaml:"idleTimeout,omitempty"`
 	Debug       *bool  `yaml:"debug,omitempty"`
+}
+
+type fileKubeVirtConfig struct {
+	Kubectl         string `yaml:"kubectl,omitempty"`
+	Virtctl         string `yaml:"virtctl,omitempty"`
+	Kubeconfig      string `yaml:"kubeconfig,omitempty"`
+	Context         string `yaml:"context,omitempty"`
+	Namespace       string `yaml:"namespace,omitempty"`
+	Template        string `yaml:"template,omitempty"`
+	SSHUser         string `yaml:"sshUser,omitempty"`
+	SSHKey          string `yaml:"sshKey,omitempty"`
+	SSHPublicKey    string `yaml:"sshPublicKey,omitempty"`
+	SSHPort         string `yaml:"sshPort,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
+}
+
+type fileExternalConfig struct {
+	Command     string         `yaml:"command,omitempty"`
+	Args        []string       `yaml:"args,omitempty"`
+	Config      map[string]any `yaml:"config,omitempty"`
+	WorkRoot    string         `yaml:"workRoot,omitempty"`
+	RoutingFile string         `yaml:"routingFile,omitempty"`
 }
 
 type fileNamespaceConfig struct {
@@ -2213,6 +2275,61 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.Blacksmith.Debug = *file.Blacksmith.Debug
 		}
 	}
+	if file.KubeVirt != nil {
+		if file.KubeVirt.Kubectl != "" {
+			cfg.KubeVirt.Kubectl = file.KubeVirt.Kubectl
+		}
+		if file.KubeVirt.Virtctl != "" {
+			cfg.KubeVirt.Virtctl = file.KubeVirt.Virtctl
+		}
+		if file.KubeVirt.Kubeconfig != "" {
+			cfg.KubeVirt.Kubeconfig = file.KubeVirt.Kubeconfig
+		}
+		if file.KubeVirt.Context != "" {
+			cfg.KubeVirt.Context = file.KubeVirt.Context
+		}
+		if file.KubeVirt.Namespace != "" {
+			cfg.KubeVirt.Namespace = file.KubeVirt.Namespace
+		}
+		if file.KubeVirt.Template != "" {
+			cfg.KubeVirt.Template = file.KubeVirt.Template
+		}
+		if file.KubeVirt.SSHUser != "" {
+			cfg.KubeVirt.SSHUser = file.KubeVirt.SSHUser
+		}
+		if file.KubeVirt.SSHKey != "" {
+			cfg.KubeVirt.SSHKey = file.KubeVirt.SSHKey
+		}
+		if file.KubeVirt.SSHPublicKey != "" {
+			cfg.KubeVirt.SSHPublicKey = file.KubeVirt.SSHPublicKey
+		}
+		if file.KubeVirt.SSHPort != "" {
+			cfg.KubeVirt.SSHPort = file.KubeVirt.SSHPort
+		}
+		if file.KubeVirt.WorkRoot != "" {
+			cfg.KubeVirt.WorkRoot = file.KubeVirt.WorkRoot
+		}
+		if file.KubeVirt.DeleteOnRelease != nil {
+			cfg.KubeVirt.DeleteOnRelease = *file.KubeVirt.DeleteOnRelease
+		}
+	}
+	if file.External != nil {
+		if file.External.Command != "" {
+			cfg.External.Command = file.External.Command
+		}
+		if len(file.External.Args) > 0 {
+			cfg.External.Args = append([]string(nil), file.External.Args...)
+		}
+		if file.External.Config != nil {
+			cfg.External.Config = file.External.Config
+		}
+		if file.External.WorkRoot != "" {
+			cfg.External.WorkRoot = file.External.WorkRoot
+		}
+		if file.External.RoutingFile != "" {
+			cfg.External.RoutingFile = file.External.RoutingFile
+		}
+	}
 	if file.Namespace != nil {
 		if file.Namespace.Image != "" {
 			cfg.Namespace.Image = file.Namespace.Image
@@ -3130,6 +3247,23 @@ func applyEnv(cfg *Config) error {
 	cfg.Blacksmith.Workflow = getenv("CRABBOX_BLACKSMITH_WORKFLOW", cfg.Blacksmith.Workflow)
 	cfg.Blacksmith.Job = getenv("CRABBOX_BLACKSMITH_JOB", cfg.Blacksmith.Job)
 	cfg.Blacksmith.Ref = getenv("CRABBOX_BLACKSMITH_REF", cfg.Blacksmith.Ref)
+	cfg.KubeVirt.Kubectl = getenv("CRABBOX_KUBEVIRT_KUBECTL", cfg.KubeVirt.Kubectl)
+	cfg.KubeVirt.Virtctl = getenv("CRABBOX_KUBEVIRT_VIRTCTL", cfg.KubeVirt.Virtctl)
+	cfg.KubeVirt.Kubeconfig = getenv("CRABBOX_KUBEVIRT_KUBECONFIG", cfg.KubeVirt.Kubeconfig)
+	cfg.KubeVirt.Context = getenv("CRABBOX_KUBEVIRT_CONTEXT", cfg.KubeVirt.Context)
+	cfg.KubeVirt.Namespace = getenv("CRABBOX_KUBEVIRT_NAMESPACE", cfg.KubeVirt.Namespace)
+	cfg.KubeVirt.Template = getenv("CRABBOX_KUBEVIRT_TEMPLATE", cfg.KubeVirt.Template)
+	cfg.KubeVirt.SSHUser = getenv("CRABBOX_KUBEVIRT_SSH_USER", cfg.KubeVirt.SSHUser)
+	cfg.KubeVirt.SSHKey = getenv("CRABBOX_KUBEVIRT_SSH_KEY", cfg.KubeVirt.SSHKey)
+	cfg.KubeVirt.SSHPublicKey = getenv("CRABBOX_KUBEVIRT_SSH_PUBLIC_KEY", cfg.KubeVirt.SSHPublicKey)
+	cfg.KubeVirt.SSHPort = getenv("CRABBOX_KUBEVIRT_SSH_PORT", cfg.KubeVirt.SSHPort)
+	cfg.KubeVirt.WorkRoot = getenv("CRABBOX_KUBEVIRT_WORK_ROOT", cfg.KubeVirt.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_KUBEVIRT_DELETE_ON_RELEASE"); ok {
+		cfg.KubeVirt.DeleteOnRelease = value
+	}
+	cfg.External.Command = getenv("CRABBOX_EXTERNAL_COMMAND", cfg.External.Command)
+	cfg.External.WorkRoot = getenv("CRABBOX_EXTERNAL_WORK_ROOT", cfg.External.WorkRoot)
+	cfg.External.RoutingFile = getenv("CRABBOX_EXTERNAL_ROUTING_FILE", cfg.External.RoutingFile)
 	cfg.Namespace.Image = getenv("CRABBOX_NAMESPACE_IMAGE", cfg.Namespace.Image)
 	cfg.Namespace.Size = getenv("CRABBOX_NAMESPACE_SIZE", cfg.Namespace.Size)
 	cfg.Namespace.Repository = getenv("CRABBOX_NAMESPACE_REPOSITORY", cfg.Namespace.Repository)

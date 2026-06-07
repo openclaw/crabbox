@@ -69,6 +69,8 @@ local-container  Local Docker-compatible containers       Linux
 multipass        Canonical Multipass local Ubuntu VMs     Linux
 daytona          Daytona sandboxes (short-lived SSH)      Linux
 exe-dev          exe.dev managed VMs (public SSH)         Linux
+kubevirt         Generic KubeVirt virtual machines        Linux
+external         Configured executable provider           Linux
 namespace-devbox Namespace Devboxes                       Linux
 runpod           RunPod GPU pods (public SSH)             Linux
 semaphore        Semaphore CI jobs                        Linux
@@ -109,6 +111,8 @@ wandb                   Weights & Biases run sandboxes
 - [Multipass](../providers/multipass.md): local Ubuntu VMs through Canonical Multipass.
 - [Daytona](../providers/daytona.md): Daytona SDK/toolbox sandbox leases.
 - [exe.dev](../providers/exe-dev.md): exe.dev VMs exposed as SSH leases.
+- [KubeVirt](../providers/kubevirt.md): generic KubeVirt VMs over Kubernetes control-plane forwarding.
+- [External](../providers/external.md): configured executable provider protocol for private integrations.
 - [Namespace Devbox](../providers/namespace-devbox.md): Namespace Devbox SSH leases.
 - [Railway](../providers/railway.md): delegated Railway service redeploys.
 - [RunPod](../providers/runpod.md): RunPod GPU pods over public SSH.
@@ -264,6 +268,12 @@ list, and cleanup.
 - **exe-dev** — exe.dev owns auth and lifecycle through `ssh exe.dev`; Crabbox
   treats the returned `ssh_dest` as a normal Linux SSH lease (public SSH only, no
   Tailscale).
+- **kubevirt** — applies a standard KubeVirt `VirtualMachine`, controls it with
+  `virtctl`, and carries SSH, rsync, and desktop tunnels through
+  `virtctl port-forward --stdio`.
+- **external** — invokes a configured executable for lifecycle operations and
+  consumes the returned SSH target. Provider-specific logic and credentials
+  remain outside Crabbox.
 - **namespace-devbox** — Namespace owns Devbox auth and lifecycle through the
   `devbox` CLI; Crabbox treats the prepared Devbox as a normal Linux SSH lease.
 - **runpod** — leases a RunPod GPU pod with public SSH (no Tailscale); auth from

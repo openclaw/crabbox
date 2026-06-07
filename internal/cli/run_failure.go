@@ -414,7 +414,7 @@ func printFailureDigestResults(w io.Writer, results *TestResultSummary) {
 	}
 }
 
-func runFailureDigestRoutingArgs(cfg Config) []string {
+func runFailureDigestRoutingArgs(cfg Config, leaseID string) []string {
 	args := []string{}
 	if strings.TrimSpace(cfg.Provider) != "" {
 		args = append(args, "--provider", cfg.Provider)
@@ -437,7 +437,7 @@ func runFailureDigestRoutingArgs(cfg Config) []string {
 	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
 		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
 	}
-	return appendProviderStopRoutingArgs(args, cfg)
+	return appendProviderStopRoutingArgs(args, cfg, leaseID)
 }
 
 func runFailureDigestSSHRoutingArgs(cfg Config) []string {
