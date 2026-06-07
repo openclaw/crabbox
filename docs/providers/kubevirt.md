@@ -37,7 +37,7 @@ kubevirt:
   kubectl: kubectl
   virtctl: virtctl
   kubeconfig: ""
-  context: ""
+  context: my-cluster
   namespace: default
   template: ./kubevirt-vm.yaml
   sshUser: crabbox
@@ -54,6 +54,20 @@ When `sshKey` is empty, Crabbox generates a per-lease key. When it is set,
 
 Provider flags use the `--kubevirt-*` prefix. Environment overrides use the
 `CRABBOX_KUBEVIRT_*` prefix.
+
+Local lease claims are scoped by the same kubeconfig, context, and namespace
+tuple that Crabbox passes to `kubectl` and `virtctl`. `kubevirt.context` is
+required so claims cannot drift when a kubeconfig's current context changes.
+When `kubevirt.kubeconfig` is empty, the scope uses the inherited `KUBECONFIG`
+value; when both are empty it uses kubectl's default kubeconfig path. This
+allows the same slug to exist in different namespaces or clusters without
+`status`, `run`, `ssh`, or `stop` resolving the wrong VM.
+
+Claims written by older Crabbox builds without a scope are treated as legacy
+state. New slug allocation checks the live VMs in the current namespace before
+reusing a slug, so old claims attached to still-running VMs continue to prevent
+duplicates. Once the VM is deleted by `stop` or `cleanup`, Crabbox removes the
+legacy claim.
 
 ## VM template
 
@@ -180,11 +194,11 @@ scripts/live-smoke.sh
 ```
 
 The live harness also needs `jq` and `rg` on the operator machine. Use
-`CRABBOX_LIVE_KUBEVIRT_CONTEXT` and
-`CRABBOX_LIVE_KUBEVIRT_NAMESPACE` when the kubeconfig default is not the target
-cluster or namespace. `CRABBOX_LIVE_COMMAND` overrides the remote smoke command;
-by default it accepts either a Go repo (`go.mod`) or a Node repo
-(`package.json`).
+`CRABBOX_LIVE_KUBEVIRT_CONTEXT` or `kubevirt.context` must name the target
+Kubernetes context. Use `CRABBOX_LIVE_KUBEVIRT_NAMESPACE` when the configured
+namespace is not the target namespace. `CRABBOX_LIVE_COMMAND` overrides the
+remote smoke command; by default it accepts either a Go repo (`go.mod`) or a
+Node repo (`package.json`).
 
 ## Troubleshooting
 
@@ -204,6 +218,11 @@ by default it accepts either a Go repo (`go.mod`) or a Node repo
   banner: check Kubernetes/KubeVirt version compatibility. Unsupported minor
   combinations can prevent KubeVirt from updating VMI status and from wiring
   port-forward correctly.
+- A slug works in one namespace but not another: confirm the command uses the
+  intended `--kubevirt-kubeconfig` or `KUBECONFIG`,
+  `--kubevirt-context`, and `--kubevirt-namespace`. Local claims are scoped to
+  that routing tuple; a claim from a different tuple is intentionally ignored
+  and Crabbox falls back to the VM labels visible in the current namespace.
 - Local macOS ARM clusters may not be suitable for KubeVirt smoke tests. Some
   kind/OrbStack setups cannot run x86_64 container disks and KubeVirt currently
   restricts arm64 CPU model selection. Use a Linux node with `/dev/kvm`, or set

@@ -26,7 +26,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 		return core.LeaseTarget{}, err
 	}
 	leaseID := core.NewLeaseID()
-	slug, err := core.AllocateClaimLeaseSlug(leaseID, req.RequestedSlug)
+	slug, err := b.allocateLeaseSlug(ctx, leaseID, req.RequestedSlug)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -50,7 +50,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 		}
 		return core.LeaseTarget{}, err
 	}
-	if err := core.ClaimLeaseForRepoProvider(leaseID, slug, providerName, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+	if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
 			_ = b.deleteVM(context.Background(), name)
 			b.removeGeneratedKey(leaseID)
@@ -61,7 +61,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 		if !req.Keep {
 			_ = b.deleteVM(context.Background(), name)
 			b.removeGeneratedKey(leaseID)
-			core.RemoveLeaseClaim(leaseID)
+			b.removeLeaseClaim(leaseID)
 		}
 		return core.LeaseTarget{}, err
 	}
@@ -92,7 +92,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 		return core.LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" {
-		if err := core.ClaimLeaseForRepoProvider(leaseID, slug, providerName, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+		if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		if err := core.UpdateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
@@ -139,7 +139,7 @@ func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.D
 func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	name := strings.TrimSpace(req.Lease.Server.Name)
 	if name == "" {
-		name, _, _, _ = resolveName(req.Lease.LeaseID)
+		name, _, _, _ = b.resolveName(req.Lease.LeaseID)
 	}
 	if name == "" {
 		return core.Exit(2, "KubeVirt release requires a VM name")
@@ -158,7 +158,7 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRe
 		err = b.stopVM(ctx, name)
 	}
 	if err == nil && b.cfg.KubeVirt.DeleteOnRelease {
-		core.RemoveLeaseClaim(req.Lease.LeaseID)
+		b.removeLeaseClaim(req.Lease.LeaseID)
 		b.removeGeneratedKey(req.Lease.LeaseID)
 	}
 	return err
@@ -203,7 +203,7 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 			return err
 		}
 		if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
-			core.RemoveLeaseClaim(leaseID)
+			b.removeLeaseClaim(leaseID)
 			core.RemoveStoredTestboxKey(leaseID)
 		}
 	}
@@ -785,12 +785,153 @@ func leaseIDFromName(name string) string {
 	return "kv_" + slug
 }
 
-func resolveName(identifier string) (string, string, string, error) {
+func (b *leaseBackend) claimScope() string {
+	return kubeVirtClaimScope(b.cfg)
+}
+
+func kubeVirtClaimScope(cfg core.Config) string {
+	kubeconfig := strings.TrimSpace(cfg.KubeVirt.Kubeconfig)
+	if kubeconfig == "" {
+		kubeconfig = strings.TrimSpace(os.Getenv("KUBECONFIG"))
+	}
+	if kubeconfig == "" {
+		kubeconfig = "<default>"
+	}
+	contextName := strings.TrimSpace(cfg.KubeVirt.Context)
+	if contextName == "" {
+		contextName = "<current>"
+	}
+	namespace := strings.TrimSpace(cfg.KubeVirt.Namespace)
+	if namespace == "" {
+		namespace = "default"
+	}
+	return "kubeconfig:" + kubeconfig + "|context:" + contextName + "|namespace:" + namespace
+}
+
+func (b *leaseBackend) allocateLeaseSlug(ctx context.Context, leaseID, requested string) (string, error) {
+	items, err := b.listVMs(ctx)
+	if err != nil {
+		return "", err
+	}
+	base := core.NormalizeLeaseSlug(requested)
+	checkClaims := base != ""
+	if base == "" {
+		base = core.NewLeaseSlug(leaseID)
+	}
+	slug := base
+	for attempt := 0; attempt < 20; attempt++ {
+		inUse := kubeVirtSlugInUse(slug, leaseID, items)
+		if !inUse && checkClaims {
+			inUse, err = b.claimSlugInUse(slug, leaseID)
+		}
+		if err != nil {
+			return "", err
+		}
+		if !inUse {
+			return slug, nil
+		}
+		slug = core.SlugWithCollisionSuffix(base, fmt.Sprintf("%s-%d", leaseID, attempt))
+	}
+	return core.SlugWithCollisionSuffix(base, leaseID), nil
+}
+
+func kubeVirtSlugInUse(slug, leaseID string, items []kubeVirtItem) bool {
+	slug = core.NormalizeLeaseSlug(slug)
+	if slug == "" {
+		return false
+	}
+	for _, item := range items {
+		itemSlug := core.NormalizeLeaseSlug(item.Metadata.Labels[slugLabel])
+		if itemSlug == "" {
+			itemSlug = slugFromName(item.Metadata.Name)
+		}
+		itemLeaseID := strings.TrimSpace(item.Metadata.Labels[leaseIDLabel])
+		if itemLeaseID == "" {
+			itemLeaseID = leaseIDFromName(item.Metadata.Name)
+		}
+		if itemLeaseID != leaseID && itemSlug == slug {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *leaseBackend) claimSlugInUse(slug, leaseID string) (bool, error) {
+	slug = core.NormalizeLeaseSlug(slug)
+	if slug == "" {
+		return false, nil
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return false, err
+	}
+	scope := b.claimScope()
+	for _, claim := range claims {
+		if claim.Provider != providerName || strings.TrimSpace(claim.ProviderScope) != scope {
+			continue
+		}
+		if claim.LeaseID != "" && claim.LeaseID != leaseID && core.NormalizeLeaseSlug(claim.Slug) == slug {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (b *leaseBackend) claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, b.claimScope(), repoRoot, idleTimeout, reclaim)
+}
+
+func (b *leaseBackend) removeLeaseClaim(leaseID string) {
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil || claim.LeaseID == "" || claim.Provider != providerName {
+		return
+	}
+	scope := strings.TrimSpace(claim.ProviderScope)
+	if scope != "" && scope != b.claimScope() {
+		return
+	}
+	core.RemoveLeaseClaim(leaseID)
+}
+
+func (b *leaseBackend) resolveClaim(identifier string) (core.LeaseClaim, bool, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return core.LeaseClaim{}, false, nil
+	}
+	scope := b.claimScope()
+	if claim, err := core.ReadLeaseClaim(identifier); err != nil {
+		return core.LeaseClaim{}, false, err
+	} else if b.claimMatchesScope(claim, scope) {
+		return claim, true, nil
+	} else if claim.LeaseID != "" && strings.HasPrefix(identifier, "cbx_") {
+		return core.LeaseClaim{}, false, nil
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	slug := core.NormalizeLeaseSlug(identifier)
+	for _, claim := range claims {
+		if !b.claimMatchesScope(claim, scope) {
+			continue
+		}
+		if claim.LeaseID == identifier || (slug != "" && core.NormalizeLeaseSlug(claim.Slug) == slug) {
+			return claim, true, nil
+		}
+	}
+	return core.LeaseClaim{}, false, nil
+}
+
+func (b *leaseBackend) claimMatchesScope(claim core.LeaseClaim, scope string) bool {
+	return claim.LeaseID != "" && claim.Provider == providerName && strings.TrimSpace(claim.ProviderScope) == scope
+}
+
+func (b *leaseBackend) resolveName(identifier string) (string, string, string, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
 		return "", "", "", core.Exit(2, "provider=%s requires --id <vm-name-or-slug>", providerName)
 	}
-	if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName); err != nil {
+	if claim, ok, err := b.resolveClaim(identifier); err != nil {
 		return "", "", "", err
 	} else if ok {
 		slug := core.Blank(claim.Slug, core.NewLeaseSlug(claim.LeaseID))
@@ -810,7 +951,7 @@ func (b *leaseBackend) resolveIdentity(ctx context.Context, identifier string) (
 	if identifier == "" {
 		return "", "", "", false, core.Exit(2, "provider=%s requires --id <vm-name-or-slug>", providerName)
 	}
-	if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName); err != nil {
+	if claim, ok, err := b.resolveClaim(identifier); err != nil {
 		return "", "", "", false, err
 	} else if ok {
 		slug := core.Blank(claim.Slug, core.NewLeaseSlug(claim.LeaseID))
@@ -844,7 +985,7 @@ func (b *leaseBackend) resolveStatusItem(ctx context.Context, identifier string)
 	if identifier == "" {
 		return kubeVirtItem{}, "", "", "", core.Exit(2, "provider=%s requires --id <vm-name-or-slug>", providerName)
 	}
-	if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName); err != nil {
+	if claim, ok, err := b.resolveClaim(identifier); err != nil {
 		return kubeVirtItem{}, "", "", "", err
 	} else if ok {
 		slug := core.Blank(claim.Slug, core.NewLeaseSlug(claim.LeaseID))

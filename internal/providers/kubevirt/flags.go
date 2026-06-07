@@ -90,6 +90,7 @@ func validateConfig(cfg core.Config) error {
 	for label, value := range map[string]string{
 		"kubectl":   cfg.KubeVirt.Kubectl,
 		"virtctl":   cfg.KubeVirt.Virtctl,
+		"context":   cfg.KubeVirt.Context,
 		"namespace": cfg.KubeVirt.Namespace,
 		"ssh user":  cfg.KubeVirt.SSHUser,
 	} {

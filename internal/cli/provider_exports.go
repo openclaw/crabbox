@@ -142,6 +142,10 @@ func NewLeaseSlug(leaseID string) string {
 	return newLeaseSlug(leaseID)
 }
 
+func SlugWithCollisionSuffix(base, seed string) string {
+	return slugWithCollisionSuffix(base, seed)
+}
+
 func NormalizeLeaseSlug(value string) string {
 	return normalizeLeaseSlug(value)
 }

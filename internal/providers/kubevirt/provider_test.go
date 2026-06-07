@@ -53,6 +53,14 @@ spec:
 	return cfg
 }
 
+func claimKubeVirtLease(t *testing.T, cfg core.Config, leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) {
+	t.Helper()
+	backend := &leaseBackend{cfg: cfg}
+	if err := backend.claimLeaseForRepo(leaseID, slug, repoRoot, idleTimeout, reclaim); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProviderSpec(t *testing.T) {
 	spec := (Provider{}).Spec()
 	if spec.Name != providerName || spec.Family != "kubernetes" {
@@ -107,6 +115,14 @@ func TestConfigureRejectsUnsafeTopLevelWorkRoot(t *testing.T) {
 	cfg.WorkRoot = "/tmp"
 	cfg.KubeVirt.WorkRoot = core.BaseConfig().KubeVirt.WorkRoot
 	if _, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}}); err == nil || !strings.Contains(err.Error(), "too broad") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestConfigureRequiresExplicitContext(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.KubeVirt.Context = ""
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}}); err == nil || !strings.Contains(err.Error(), "context is required") {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -342,9 +358,7 @@ func TestReleaseRetainedVMPreservesClaimAndKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := core.ClaimLeaseForRepoProvider("cbx_retained", "retained", providerName, t.TempDir(), cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
+	claimKubeVirtLease(t, cfg, "cbx_retained", "retained", t.TempDir(), cfg.IdleTimeout, false)
 	runner := &recordingRunner{stdout: `{"metadata":{"name":"vm-retained","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_retained","crabbox.dev/slug":"retained"}}}`}
 	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	lease := core.LeaseTarget{LeaseID: "cbx_retained", Server: core.Server{Name: "vm-retained"}}
@@ -362,9 +376,7 @@ func TestReleaseRetainedVMPreservesClaimAndKey(t *testing.T) {
 func TestStatusDoesNotStartRetainedStoppedVM(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg := testConfig(t)
-	if err := core.ClaimLeaseForRepoProvider("cbx_retained", "retained", providerName, t.TempDir(), time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
+	claimKubeVirtLease(t, cfg, "cbx_retained", "retained", t.TempDir(), time.Minute, false)
 	server := core.Server{Name: "vm-retained", Labels: map[string]string{"name": "vm-retained"}}
 	if err := core.UpdateLeaseClaimEndpoint("cbx_retained", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
@@ -388,9 +400,7 @@ func TestStatusDoesNotStartRetainedStoppedVM(t *testing.T) {
 func TestStatusRequiresSSHProbeBeforeReady(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg := testConfig(t)
-	if err := core.ClaimLeaseForRepoProvider("cbx_running", "running", providerName, t.TempDir(), time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
+	claimKubeVirtLease(t, cfg, "cbx_running", "running", t.TempDir(), time.Minute, false)
 	server := core.Server{Name: "vm-running", Labels: map[string]string{"name": "vm-running"}}
 	if err := core.UpdateLeaseClaimEndpoint("cbx_running", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
@@ -416,13 +426,12 @@ func TestStatusRequiresSSHProbeBeforeReady(t *testing.T) {
 
 func TestResolveNameUsesProviderScopedClaim(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig(t)
 	repo := t.TempDir()
 	if err := core.ClaimLeaseForRepoProvider("cbx_external", "shared", "external", repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.ClaimLeaseForRepoProvider("cbx_kubevirt", "shared", providerName, repo, time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
+	claimKubeVirtLease(t, cfg, "cbx_kubevirt", "shared", repo, time.Minute, false)
 	runner := &recordingRunner{stdout: `{"metadata":{"name":"crabbox-shared-kubevirt","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_kubevirt","crabbox.dev/slug":"shared"}}}`}
 	if claim, ok, err := core.ResolveLeaseClaimForProvider("shared", providerName); err != nil || !ok {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
@@ -432,7 +441,7 @@ func TestResolveNameUsesProviderScopedClaim(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	backend := &leaseBackend{cfg: testConfig(t), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
 	_, leaseID, _, _, err := backend.resolveIdentity(context.Background(), "shared")
 	if err != nil {
 		t.Fatal(err)
@@ -442,12 +451,176 @@ func TestResolveNameUsesProviderScopedClaim(t *testing.T) {
 	}
 }
 
+func TestClaimLeaseUsesKubeVirtScope(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig(t)
+	claimKubeVirtLease(t, cfg, "cbx_scoped", "scoped", t.TempDir(), time.Minute, false)
+	claim, err := core.ReadLeaseClaim("cbx_scoped")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.ProviderScope != kubeVirtClaimScope(cfg) {
+		t.Fatalf("provider scope=%q, want %q", claim.ProviderScope, kubeVirtClaimScope(cfg))
+	}
+}
+
+func TestClaimScopeUsesInheritedKubeconfig(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.KubeVirt.Kubeconfig = ""
+	t.Setenv("KUBECONFIG", "/cluster-a")
+	scopeA := kubeVirtClaimScope(cfg)
+	t.Setenv("KUBECONFIG", "/cluster-b")
+	scopeB := kubeVirtClaimScope(cfg)
+	if scopeA == scopeB || !strings.Contains(scopeA, "kubeconfig:/cluster-a") || !strings.Contains(scopeB, "kubeconfig:/cluster-b") {
+		t.Fatalf("scopeA=%q scopeB=%q", scopeA, scopeB)
+	}
+}
+
+func TestAllocateLeaseSlugIgnoresOtherKubeVirtScopes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig(t)
+	otherScope := "kubeconfig:/other|context:test-context|namespace:test-ns"
+	if err := core.ClaimLeaseForRepoProviderScope("cbx_other", "shared", providerName, otherScope, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: &recordingRunner{stdout: `{"items":[]}`}}}
+	slug, err := backend.allocateLeaseSlug(context.Background(), "cbx_new", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slug != "shared" {
+		t.Fatalf("slug=%q, want shared when collision is outside scope", slug)
+	}
+	claimKubeVirtLease(t, cfg, "cbx_current", "shared", t.TempDir(), time.Minute, false)
+	slug, err = backend.allocateLeaseSlug(context.Background(), "cbx_next", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slug == "shared" || !strings.HasPrefix(slug, "shared-") {
+		t.Fatalf("slug=%q, want current-scope collision suffix", slug)
+	}
+}
+
+func TestAllocateLeaseSlugChecksLiveVMsForLegacyClaims(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig(t)
+	if err := core.ClaimLeaseForRepoProvider("cbx_legacy", "shared", providerName, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{stdout: `{"items":[{"metadata":{"name":"vm-legacy","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_legacy","crabbox.dev/slug":"shared"}},"status":{"printableStatus":"Stopped"}}]}`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	slug, err := backend.allocateLeaseSlug(context.Background(), "cbx_new", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slug == "shared" || !strings.HasPrefix(slug, "shared-") {
+		t.Fatalf("slug=%q, want live VM collision suffix", slug)
+	}
+}
+
+func TestAllocateGeneratedSlugIgnoresMalformedClaims(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+	claimsDir := filepath.Join(stateDir, "crabbox", "claims")
+	if err := os.MkdirAll(claimsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claimsDir, "bad.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(t)
+	runner := &recordingRunner{stdout: `{"items":[]}`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	slug, err := backend.allocateLeaseSlug(context.Background(), "cbx_new", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slug == "" {
+		t.Fatal("empty generated slug")
+	}
+}
+
+func TestResolveIdentityIgnoresKubeVirtClaimFromOtherScope(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig(t)
+	wrongScope := "kubeconfig:/other|context:test-context|namespace:test-ns"
+	if err := core.ClaimLeaseForRepoProviderScope("cbx_wrong", "shared", providerName, wrongScope, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	server := core.Server{Name: "wrong-scope-vm", Labels: map[string]string{"name": "wrong-scope-vm"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_wrong", server, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{stdout: `{"items":[{"metadata":{"name":"vm-current","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_current","crabbox.dev/slug":"shared"}},"status":{"printableStatus":"Stopped"}}]}`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	name, leaseID, slug, _, err := backend.resolveIdentity(context.Background(), "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "vm-current" || leaseID != "cbx_current" || slug != "shared" {
+		t.Fatalf("identity=%q %q %q", name, leaseID, slug)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "wrong-scope-vm") {
+			t.Fatalf("used wrong-scope claim: calls=%#v", runner.calls)
+		}
+	}
+}
+
+func TestStatusIgnoresKubeVirtClaimFromOtherScope(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig(t)
+	if err := core.ClaimLeaseForRepoProviderScope("cbx_wrong", "shared", providerName, "kubeconfig:/other|context:test-context|namespace:test-ns", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	server := core.Server{Name: "wrong-scope-vm", Labels: map[string]string{"name": "wrong-scope-vm"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_wrong", server, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{stdout: `{"items":[{"metadata":{"name":"vm-current","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_current","crabbox.dev/slug":"shared"}},"status":{"printableStatus":"Stopped"}}]}`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "shared"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.ID != "cbx_current" || view.Host != "vm-current" || view.Slug != "shared" {
+		t.Fatalf("status=%#v", view)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "wrong-scope-vm") {
+			t.Fatalf("used wrong-scope claim: calls=%#v", runner.calls)
+		}
+	}
+}
+
+func TestResolveIdentityExactClaimIgnoresMalformedUnrelatedClaim(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+	cfg := testConfig(t)
+	claimKubeVirtLease(t, cfg, "cbx_valid", "valid", t.TempDir(), time.Minute, false)
+	server := core.Server{Name: "vm-valid", Labels: map[string]string{"name": "vm-valid"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_valid", server, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	claimsDir := filepath.Join(stateDir, "crabbox", "claims")
+	if err := os.WriteFile(filepath.Join(claimsDir, "bad.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{stdout: `{"metadata":{"name":"vm-valid","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_valid","crabbox.dev/slug":"valid"}}}`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	name, leaseID, slug, _, err := backend.resolveIdentity(context.Background(), "cbx_valid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "vm-valid" || leaseID != "cbx_valid" || slug != "valid" {
+		t.Fatalf("identity=%q %q %q", name, leaseID, slug)
+	}
+}
+
 func TestResolveIdentityUsesClaimedClusterName(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg := testConfig(t)
-	if err := core.ClaimLeaseForRepoProvider("cbx_cluster", "cluster", providerName, t.TempDir(), time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
+	claimKubeVirtLease(t, cfg, "cbx_cluster", "cluster", t.TempDir(), time.Minute, false)
 	server := core.Server{Name: "actual-cluster-vm", Labels: map[string]string{"name": "actual-cluster-vm"}}
 	if err := core.UpdateLeaseClaimEndpoint("cbx_cluster", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
@@ -466,9 +639,7 @@ func TestResolveIdentityUsesClaimedClusterName(t *testing.T) {
 func TestResolveIdentityRejectsStaleClaimForReusedVMName(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg := testConfig(t)
-	if err := core.ClaimLeaseForRepoProvider("cbx_original", "shared", providerName, t.TempDir(), time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
+	claimKubeVirtLease(t, cfg, "cbx_original", "shared", t.TempDir(), time.Minute, false)
 	server := core.Server{Name: "reused-vm", Labels: map[string]string{"name": "reused-vm"}}
 	if err := core.UpdateLeaseClaimEndpoint("cbx_original", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
@@ -644,6 +815,50 @@ func TestCleanupDeletesExpiredVMAndHonorsDryRun(t *testing.T) {
 				t.Fatalf("delete calls=%#v", runner.calls)
 			}
 		})
+	}
+}
+
+func TestCleanupDoesNotRemoveWrongScopeClaim(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig(t)
+	if err := core.ClaimLeaseForRepoProviderScope("cbx_old", "old", providerName, "kubeconfig:/other|context:test-context|namespace:test-ns", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	inventory := `{"items":[{"metadata":{"name":"vm-old","labels":{"crabbox.dev/lease-id":"cbx_old","crabbox.dev/slug":"old"},"annotations":{"crabbox.dev/keep":"false","crabbox.dev/state":"ready","crabbox.dev/expires_at":"1"}},"status":{"printableStatus":"Stopped"}}]}`
+	item := `{"metadata":{"name":"vm-old","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_old","crabbox.dev/slug":"old"},"annotations":{"crabbox.dev/keep":"false","crabbox.dev/state":"ready","crabbox.dev/expires_at":"1"}},"status":{"printableStatus":"Stopped"}}`
+	runner := &recordingRunner{stdout: inventory, outputs: []string{inventory, item}}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim("cbx_old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.LeaseID == "" {
+		t.Fatal("wrong-scope claim was removed")
+	}
+}
+
+func TestCleanupRemovesLegacyUnscopedClaim(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig(t)
+	if err := core.ClaimLeaseForRepoProvider("cbx_old", "old", providerName, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	inventory := `{"items":[{"metadata":{"name":"vm-old","labels":{"crabbox.dev/lease-id":"cbx_old","crabbox.dev/slug":"old"},"annotations":{"crabbox.dev/keep":"false","crabbox.dev/state":"ready","crabbox.dev/expires_at":"1"}},"status":{"printableStatus":"Stopped"}}]}`
+	item := `{"metadata":{"name":"vm-old","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_old","crabbox.dev/slug":"old"},"annotations":{"crabbox.dev/keep":"false","crabbox.dev/state":"ready","crabbox.dev/expires_at":"1"}},"status":{"printableStatus":"Stopped"}}`
+	runner := &recordingRunner{stdout: inventory, outputs: []string{inventory, item}}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim("cbx_old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.LeaseID != "" {
+		t.Fatalf("legacy claim remains: %#v", claim)
 	}
 }
 
