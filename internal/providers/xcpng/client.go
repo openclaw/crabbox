@@ -834,7 +834,8 @@ func (c *xapiClient) callRaw(ctx context.Context, method string, params ...any) 
 	req.Header.Set("Content-Type", "text/xml")
 	res, err := c.http.Do(req)
 	if err != nil {
-		return xmlRPCValue{}, err
+		secrets := urlUserinfoSecrets(req.URL)
+		return xmlRPCValue{}, fmt.Errorf("xcp-ng XML-RPC %s to %s: %s", method, redactedURL(req.URL), redactXAPISensitiveText(err.Error(), secrets...))
 	}
 	defer res.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
