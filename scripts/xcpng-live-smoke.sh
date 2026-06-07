@@ -135,7 +135,7 @@ if api_url:
     if parsed.hostname:
         host = re.escape(parsed.hostname)
         pool_url_pattern = re.compile(
-            rf"\bhttps?://{host}(?=[:/?#\"'\s]|$)(?::[0-9]+)?[^\"'\s]*",
+            rf"\bhttps?://(?:[^/?#\"'\s@]+@)?{host}(?=[:/?#\"'\s]|$)(?::[0-9]+)?[^\"'\s]*",
             re.I,
         )
         text = pool_url_pattern.sub("https://xcp-pool.example.test", text)
