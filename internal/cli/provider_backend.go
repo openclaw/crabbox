@@ -253,9 +253,10 @@ func CLIDoctorResult(provider string, leases int, runtime string) DoctorResult {
 type execCommandRunner struct{}
 
 func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
-	cmd := exec.CommandContext(ctx, req.Name, req.Args...)
+	cmd := exec.Command(req.Name, req.Args...)
 	cmd.Env = req.Env
 	cmd.Dir = req.Dir
+	configureLocalCommand(cmd)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if req.Stdout != nil {
@@ -268,7 +269,23 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	} else {
 		cmd.Stderr = &stderr
 	}
-	err := cmd.Run()
+	err := cmd.Start()
+	if err == nil {
+		waitCh := make(chan error, 1)
+		go func() {
+			waitCh <- cmd.Wait()
+		}()
+		select {
+		case err = <-waitCh:
+		case <-ctx.Done():
+			if killErr := killLocalCommand(cmd); killErr != nil {
+				err = killErr
+			} else {
+				<-waitCh
+				err = ctx.Err()
+			}
+		}
+	}
 	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
 	if err == nil {
 		result.ExitCode = 0
