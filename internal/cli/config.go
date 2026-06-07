@@ -1407,11 +1407,11 @@ type fileTensorlakeConfig struct {
 type fileDockerSandboxConfig struct {
 	CLIPath         string    `yaml:"cliPath,omitempty"`
 	Agent           string    `yaml:"agent,omitempty"`
-	Template        string    `yaml:"template,omitempty"`
-	CPUs            float64   `yaml:"cpus,omitempty"`
-	Memory          string    `yaml:"memory,omitempty"`
+	Template        *string   `yaml:"template,omitempty"`
+	CPUs            *float64  `yaml:"cpus,omitempty"`
+	Memory          *string   `yaml:"memory,omitempty"`
 	Clone           *bool     `yaml:"clone,omitempty"`
-	Workdir         string    `yaml:"workdir,omitempty"`
+	Workdir         *string   `yaml:"workdir,omitempty"`
 	ExtraWorkspaces *[]string `yaml:"extraWorkspaces,omitempty"`
 	MCP             *[]string `yaml:"mcp,omitempty"`
 	Kit             *[]string `yaml:"kit,omitempty"`
@@ -2461,23 +2461,23 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.DockerSandbox.Agent != "" {
 			cfg.DockerSandbox.Agent = file.DockerSandbox.Agent
 		}
-		if file.DockerSandbox.Template != "" {
-			cfg.DockerSandbox.Template = file.DockerSandbox.Template
+		if file.DockerSandbox.Template != nil {
+			cfg.DockerSandbox.Template = *file.DockerSandbox.Template
 		}
-		if file.DockerSandbox.CPUs < 0 {
-			return exit(2, "docker-sandbox cpus must be non-negative")
+		if file.DockerSandbox.CPUs != nil {
+			if *file.DockerSandbox.CPUs < 0 {
+				return exit(2, "docker-sandbox cpus must be non-negative")
+			}
+			cfg.DockerSandbox.CPUs = *file.DockerSandbox.CPUs
 		}
-		if file.DockerSandbox.CPUs > 0 {
-			cfg.DockerSandbox.CPUs = file.DockerSandbox.CPUs
-		}
-		if file.DockerSandbox.Memory != "" {
-			cfg.DockerSandbox.Memory = file.DockerSandbox.Memory
+		if file.DockerSandbox.Memory != nil {
+			cfg.DockerSandbox.Memory = *file.DockerSandbox.Memory
 		}
 		if file.DockerSandbox.Clone != nil {
 			cfg.DockerSandbox.Clone = *file.DockerSandbox.Clone
 		}
-		if file.DockerSandbox.Workdir != "" {
-			cfg.DockerSandbox.Workdir = file.DockerSandbox.Workdir
+		if file.DockerSandbox.Workdir != nil {
+			cfg.DockerSandbox.Workdir = *file.DockerSandbox.Workdir
 		}
 		if file.DockerSandbox.ExtraWorkspaces != nil {
 			cfg.DockerSandbox.ExtraWorkspaces = append([]string(nil), (*file.DockerSandbox.ExtraWorkspaces)...)

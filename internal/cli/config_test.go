@@ -211,6 +211,10 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 		t.Fatalf("dockerSandbox defaults not applied: %#v", cfg.DockerSandbox)
 	}
 	clone := true
+	template := "ubuntu"
+	cpus := 2.5
+	memory := "6g"
+	workdir := "/workspace/my-app"
 	extraWorkspaces := []string{"/tmp/extra"}
 	mcp := []string{"context7"}
 	kit := []string{"example-org/base"}
@@ -219,11 +223,11 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 		DockerSandbox: &fileDockerSandboxConfig{
 			CLIPath:         "/opt/sbx",
 			Agent:           "shell",
-			Template:        "ubuntu",
-			CPUs:            2.5,
-			Memory:          "6g",
+			Template:        &template,
+			CPUs:            &cpus,
+			Memory:          &memory,
 			Clone:           &clone,
-			Workdir:         "/workspace/my-app",
+			Workdir:         &workdir,
 			ExtraWorkspaces: &extraWorkspaces,
 			MCP:             &mcp,
 			Kit:             &kit,
@@ -300,6 +304,32 @@ dockerSandbox:
 	}
 	if len(cfg.DockerSandbox.ExtraWorkspaces) != 0 || len(cfg.DockerSandbox.MCP) != 0 || len(cfg.DockerSandbox.Kit) != 0 {
 		t.Fatalf("repo dockerSandbox empty lists did not clear inherited values: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDockerSandboxFileConfigCanClearInheritedRuntimeDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.DockerSandbox.Template = "ubuntu"
+	cfg.DockerSandbox.CPUs = 4
+	cfg.DockerSandbox.Memory = "8g"
+	cfg.DockerSandbox.Workdir = "/workspace/inherited"
+
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+dockerSandbox:
+  template: ""
+  cpus: 0
+  memory: ""
+  workdir: ""
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatalf("applyFileConfig err=%v", err)
+	}
+	if cfg.DockerSandbox.Template != "" || cfg.DockerSandbox.CPUs != 0 || cfg.DockerSandbox.Memory != "" || cfg.DockerSandbox.Workdir != "" {
+		t.Fatalf("repo dockerSandbox runtime defaults did not clear inherited values: %#v", cfg.DockerSandbox)
 	}
 }
 
