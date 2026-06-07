@@ -70,23 +70,29 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	}
 	if core.FlagWasSet(fs, "xcp-ng-template") {
 		cfg.XCPNg.Template = *v.Template
+		cfg.XCPNg.TemplateUUID = ""
 		cfg.ServerType = xcpNgServerTypeForConfig(*cfg)
 	}
 	if core.FlagWasSet(fs, "xcp-ng-template-uuid") {
 		cfg.XCPNg.TemplateUUID = *v.TemplateUUID
+		cfg.XCPNg.Template = ""
 		cfg.ServerType = xcpNgServerTypeForConfig(*cfg)
 	}
 	if core.FlagWasSet(fs, "xcp-ng-sr") {
 		cfg.XCPNg.SR = *v.SR
+		cfg.XCPNg.SRUUID = ""
 	}
 	if core.FlagWasSet(fs, "xcp-ng-sr-uuid") {
 		cfg.XCPNg.SRUUID = *v.SRUUID
+		cfg.XCPNg.SR = ""
 	}
 	if core.FlagWasSet(fs, "xcp-ng-network") {
 		cfg.XCPNg.Network = *v.Network
+		cfg.XCPNg.NetworkUUID = ""
 	}
 	if core.FlagWasSet(fs, "xcp-ng-network-uuid") {
 		cfg.XCPNg.NetworkUUID = *v.NetworkUUID
+		cfg.XCPNg.Network = ""
 	}
 	if core.FlagWasSet(fs, "xcp-ng-host") {
 		cfg.XCPNg.Host = *v.Host

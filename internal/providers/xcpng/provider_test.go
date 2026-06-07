@@ -97,7 +97,7 @@ func TestFlagsApplyNonSecretConfigOnly(t *testing.T) {
 	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.XCPNg.APIURL != "https://xcp-ng.example.test" || cfg.XCPNg.Username != "root" || cfg.XCPNg.Template != "Ubuntu Ready" || cfg.XCPNg.TemplateUUID != "tpl-0001" || cfg.XCPNg.SR != "default-sr" || cfg.XCPNg.SRUUID != "sr-0001" || cfg.XCPNg.Network != "pool-network" || cfg.XCPNg.NetworkUUID != "net-0001" || cfg.XCPNg.Host != "host-0001" || cfg.XCPNg.User != "runner" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/work/xcp-ng" || !cfg.XCPNg.InsecureTLS {
+	if cfg.XCPNg.APIURL != "https://xcp-ng.example.test" || cfg.XCPNg.Username != "root" || cfg.XCPNg.Template != "" || cfg.XCPNg.TemplateUUID != "tpl-0001" || cfg.XCPNg.SR != "" || cfg.XCPNg.SRUUID != "sr-0001" || cfg.XCPNg.Network != "" || cfg.XCPNg.NetworkUUID != "net-0001" || cfg.XCPNg.Host != "host-0001" || cfg.XCPNg.User != "runner" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/work/xcp-ng" || !cfg.XCPNg.InsecureTLS {
 		t.Fatalf("flags not applied: %#v", cfg.XCPNg)
 	}
 	if cfg.XCPNg.Password != "" {
@@ -105,6 +105,69 @@ func TestFlagsApplyNonSecretConfigOnly(t *testing.T) {
 	}
 	if cfg.ServerType != "template-tpl-0001" {
 		t.Fatalf("server type=%q", cfg.ServerType)
+	}
+}
+
+func TestFlagsClearStaleNameUUIDCounterparts(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want core.XCPNgConfig
+	}{
+		{
+			name: "name flags clear stale uuids",
+			args: []string{
+				"--xcp-ng-template", "Ubuntu Ready",
+				"--xcp-ng-sr", "default-sr",
+				"--xcp-ng-network", "pool-network",
+			},
+			want: core.XCPNgConfig{
+				Template: "Ubuntu Ready",
+				SR:       "default-sr",
+				Network:  "pool-network",
+			},
+		},
+		{
+			name: "uuid flags clear stale names",
+			args: []string{
+				"--xcp-ng-template-uuid", xcpNgTestVMUUID,
+				"--xcp-ng-sr-uuid", "sr-0002",
+				"--xcp-ng-network-uuid", "net-0002",
+			},
+			want: core.XCPNgConfig{
+				TemplateUUID: xcpNgTestVMUUID,
+				SRUUID:       "sr-0002",
+				NetworkUUID:  "net-0002",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := core.Config{XCPNg: core.XCPNgConfig{
+				Template:     "Ubuntu Ready",
+				TemplateUUID: "11111111-1111-1111-1111-111111111111",
+				SR:           "default-sr",
+				SRUUID:       "sr-0001",
+				Network:      "pool-network",
+				NetworkUUID:  "net-0001",
+			}}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			values := Provider{}.RegisterFlags(fs, cfg)
+			if err := fs.Parse(tt.args); err != nil {
+				t.Fatal(err)
+			}
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.XCPNg.Template != tt.want.Template || cfg.XCPNg.TemplateUUID != tt.want.TemplateUUID || cfg.XCPNg.SR != tt.want.SR || cfg.XCPNg.SRUUID != tt.want.SRUUID || cfg.XCPNg.Network != tt.want.Network || cfg.XCPNg.NetworkUUID != tt.want.NetworkUUID {
+				t.Fatalf("placement flags did not clear stale counterpart: %#v", cfg.XCPNg)
+			}
+			if got := xcpNgServerTypeForConfig(cfg); got != cfg.ServerType {
+				t.Fatalf("server type=%q want %q", cfg.ServerType, got)
+			}
+		})
 	}
 }
 
