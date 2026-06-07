@@ -62,6 +62,11 @@ skip_or_fail() {
   exit 2
 }
 
+unknown_provider() {
+	echo "unknown provider=$provider" >&2
+	exit 2
+}
+
 need_tool() {
   command -v "$1" >/dev/null 2>&1 || skip_or_fail "tool $1 on PATH"
 }
@@ -258,6 +263,11 @@ preflight_provider() {
     aws | azure | gcp | hetzner)
       direct_or_coordinator_env || skip_or_fail "CRABBOX_COORDINATOR and CRABBOX_COORDINATOR_TOKEN, or direct $provider credentials"
       ;;
+	azure-dynamic-sessions)
+		need_env CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT
+		need_env_pair AZURE_CLIENT_ID AZURE_CLIENT_SECRET
+		need_env_pair AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID
+		;;
     proxmox)
       need_env CRABBOX_PROXMOX_API_URL
       need_env CRABBOX_PROXMOX_TOKEN_ID
@@ -277,6 +287,12 @@ preflight_provider() {
     local-container)
       need_tool "${CRABBOX_LOCAL_CONTAINER_RUNTIME:-docker}"
       ;;
+	apple-container)
+		need_tool "${CRABBOX_APPLE_CONTAINER_CLI:-container}"
+		;;
+	multipass)
+		need_tool "${CRABBOX_MULTIPASS_CLI:-multipass}"
+		;;
     ssh)
       need_env CRABBOX_STATIC_HOST
       ;;
@@ -315,6 +331,10 @@ preflight_provider() {
       need_tool tensorlake
       need_any_env "Tensorlake API key" CRABBOX_TENSORLAKE_API_KEY TENSORLAKE_API_KEY
       ;;
+	ascii-box)
+		need_tool "${CRABBOX_ASCII_BOX_CLI:-box}"
+		need_any_env "ASCII Box API key" CRABBOX_ASCII_BOX_API_KEY ASCII_BOX_API_KEY
+		;;
     cloudflare)
       need_env CRABBOX_CLOUDFLARE_RUNNER_URL
       need_env CRABBOX_CLOUDFLARE_RUNNER_TOKEN
@@ -326,8 +346,11 @@ preflight_provider() {
       ;;
     wandb)
       ;;
+	smolvm)
+		need_any_env "SmolVM API key" CRABBOX_SMOLVM_API_KEY SMOLMACHINES_API_KEY SMK_API_KEY
+		;;
     *)
-      skip_or_fail "unknown provider"
+		unknown_provider
       ;;
   esac
 }
@@ -350,7 +373,7 @@ case "$provider" in
   hetzner)
     ssh_lease_smoke --class "${CRABBOX_LIVE_HETZNER_CLASS:-standard}"
     ;;
-  proxmox | parallels | local-container | ssh | exe-dev | namespace-devbox | semaphore | sprites | runpod)
+	proxmox | parallels | local-container | apple-container | multipass | ssh | exe-dev | namespace-devbox | semaphore | sprites | runpod)
     ssh_lease_smoke
     ;;
   blacksmith-testbox)
@@ -359,7 +382,7 @@ case "$provider" in
   daytona)
     daytona_smoke
     ;;
-  islo | e2b | modal | upstash-box | tensorlake | cloudflare)
+	azure-dynamic-sessions | islo | e2b | modal | upstash-box | tensorlake | ascii-box | cloudflare | smolvm)
     delegated_run_smoke
     ;;
   railway)
@@ -368,4 +391,7 @@ case "$provider" in
   wandb)
     wandb_smoke
     ;;
+	*)
+	unknown_provider
+	;;
 esac

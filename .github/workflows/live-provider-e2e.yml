@@ -44,53 +44,44 @@ jobs:
       providers: ${{ steps.providers.outputs.providers }}
 
     steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
       - name: Build provider list
         id: providers
         shell: bash
         run: |
           set -euo pipefail
-          all='[
-            "aws",
-            "azure",
-            "gcp",
-            "hetzner",
-            "proxmox",
-            "parallels",
-            "local-container",
-            "ssh",
-            "exe-dev",
-            "blacksmith-testbox",
-            "namespace-devbox",
-            "semaphore",
-            "sprites",
-            "daytona",
-            "islo",
-            "e2b",
-            "modal",
-            "upstash-box",
-            "tensorlake",
-            "cloudflare",
-            "railway",
-            "runpod",
-            "wandb"
-          ]'
+          entries="$(go run ./cmd/crabbox providers --json)"
           providers="$(
-            jq -c -n --arg raw "${{ inputs.providers }}" --argjson all "$all" '
+            jq -c -n --arg raw "${{ inputs.providers }}" --argjson entries "$entries" '
               def trim: gsub("^\\s+|\\s+$"; "");
-              def canon:
+              def aliases:
+                ($entries | map({key: .provider, value: .provider}))
+                + ($entries | map(. as $p | (.aliases // [])[] | {key: ., value: $p.provider}))
+                | from_entries;
+              def canon($aliases):
                 if . == "docker" or . == "container" then "local-container"
                 elif . == "blacksmith" then "blacksmith-testbox"
                 elif . == "namespace" then "namespace-devbox"
                 elif . == "static" or . == "static-ssh" then "ssh"
                 elif . == "cf" then "cloudflare"
-                else .
-                end;
+                else . end
+                | . as $name
+                | ($aliases[$name] // error("unknown provider: " + $name));
               ($raw | ascii_downcase | trim) as $input
-              | if $input == "all" or $input == "" then $all
+              | (aliases) as $aliases
+              | if $input == "all" or $input == "" then ($entries | map(.provider))
                 else
                   $input
                   | split(",")
-                  | map(trim | canon)
+                  | map(trim | canon($aliases))
                   | map(select(length > 0))
                   | unique
                 end
@@ -118,95 +109,6 @@ jobs:
       CRABBOX_LIVE_SKIP_MISSING: ${{ inputs.allow_missing && '1' || '0' }}
       CRABBOX_PROVIDER_E2E_SYNC: ${{ inputs.sync_checkout && '1' || '0' }}
       CRABBOX_PROVIDER_E2E_LOG_DIR: ${{ github.workspace }}/.crabbox/live-provider-e2e
-      CRABBOX_COORDINATOR: ${{ secrets.CRABBOX_COORDINATOR }}
-      CRABBOX_COORDINATOR_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_TOKEN }}
-      CRABBOX_COORDINATOR_ADMIN_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_ADMIN_TOKEN }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
-      AWS_REGION: ${{ secrets.AWS_REGION }}
-      CRABBOX_AWS_REGION: ${{ secrets.CRABBOX_AWS_REGION }}
-      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-      CRABBOX_AZURE_LOCATION: ${{ secrets.CRABBOX_AZURE_LOCATION }}
-      CRABBOX_AZURE_RESOURCE_GROUP: ${{ secrets.CRABBOX_AZURE_RESOURCE_GROUP }}
-      GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
-      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-      GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
-      CRABBOX_GCP_ZONE: ${{ secrets.CRABBOX_GCP_ZONE }}
-      HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
-      HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
-      CRABBOX_PROXMOX_API_URL: ${{ secrets.CRABBOX_PROXMOX_API_URL }}
-      CRABBOX_PROXMOX_TOKEN_ID: ${{ secrets.CRABBOX_PROXMOX_TOKEN_ID }}
-      CRABBOX_PROXMOX_TOKEN_SECRET: ${{ secrets.CRABBOX_PROXMOX_TOKEN_SECRET }}
-      CRABBOX_PROXMOX_NODE: ${{ secrets.CRABBOX_PROXMOX_NODE }}
-      CRABBOX_PROXMOX_TEMPLATE_ID: ${{ secrets.CRABBOX_PROXMOX_TEMPLATE_ID }}
-      CRABBOX_PROXMOX_STORAGE: ${{ secrets.CRABBOX_PROXMOX_STORAGE }}
-      CRABBOX_PROXMOX_BRIDGE: ${{ secrets.CRABBOX_PROXMOX_BRIDGE }}
-      CRABBOX_PROXMOX_USER: ${{ secrets.CRABBOX_PROXMOX_USER }}
-      CRABBOX_PROXMOX_INSECURE_TLS: ${{ secrets.CRABBOX_PROXMOX_INSECURE_TLS }}
-      CRABBOX_PARALLELS_SOURCE: ${{ secrets.CRABBOX_PARALLELS_SOURCE }}
-      CRABBOX_PARALLELS_SOURCE_SNAPSHOT: ${{ secrets.CRABBOX_PARALLELS_SOURCE_SNAPSHOT }}
-      CRABBOX_PARALLELS_TEMPLATE: ${{ secrets.CRABBOX_PARALLELS_TEMPLATE }}
-      CRABBOX_PARALLELS_HOST: ${{ secrets.CRABBOX_PARALLELS_HOST }}
-      CRABBOX_PARALLELS_HOST_USER: ${{ secrets.CRABBOX_PARALLELS_HOST_USER }}
-      CRABBOX_PARALLELS_USER: ${{ secrets.CRABBOX_PARALLELS_USER }}
-      CRABBOX_PARALLELS_WORK_ROOT: ${{ secrets.CRABBOX_PARALLELS_WORK_ROOT }}
-      CRABBOX_STATIC_HOST: ${{ secrets.CRABBOX_STATIC_HOST }}
-      CRABBOX_STATIC_USER: ${{ secrets.CRABBOX_STATIC_USER }}
-      CRABBOX_STATIC_PORT: ${{ secrets.CRABBOX_STATIC_PORT }}
-      CRABBOX_STATIC_WORK_ROOT: ${{ secrets.CRABBOX_STATIC_WORK_ROOT }}
-      CRABBOX_TARGET: ${{ secrets.CRABBOX_TARGET }}
-      CRABBOX_WINDOWS_MODE: ${{ secrets.CRABBOX_WINDOWS_MODE }}
-      CRABBOX_SSH_PRIVATE_KEY: ${{ secrets.CRABBOX_SSH_PRIVATE_KEY }}
-      CRABBOX_EXE_DEV_CONTROL_HOST: ${{ secrets.CRABBOX_EXE_DEV_CONTROL_HOST }}
-      CRABBOX_EXE_DEV_IMAGE: ${{ secrets.CRABBOX_EXE_DEV_IMAGE }}
-      CRABBOX_BLACKSMITH_ORG: ${{ secrets.CRABBOX_BLACKSMITH_ORG }}
-      CRABBOX_BLACKSMITH_WORKFLOW: ${{ secrets.CRABBOX_BLACKSMITH_WORKFLOW }}
-      CRABBOX_BLACKSMITH_JOB: ${{ secrets.CRABBOX_BLACKSMITH_JOB }}
-      CRABBOX_BLACKSMITH_REF: ${{ secrets.CRABBOX_BLACKSMITH_REF }}
-      BLACKSMITH_API_TOKEN: ${{ secrets.BLACKSMITH_API_TOKEN }}
-      CRABBOX_NAMESPACE_IMAGE: ${{ secrets.CRABBOX_NAMESPACE_IMAGE }}
-      CRABBOX_NAMESPACE_SIZE: ${{ secrets.CRABBOX_NAMESPACE_SIZE }}
-      CRABBOX_NAMESPACE_REPOSITORY: ${{ secrets.CRABBOX_NAMESPACE_REPOSITORY }}
-      CRABBOX_NAMESPACE_SITE: ${{ secrets.CRABBOX_NAMESPACE_SITE }}
-      CRABBOX_NAMESPACE_DELETE_ON_RELEASE: ${{ secrets.CRABBOX_NAMESPACE_DELETE_ON_RELEASE }}
-      CRABBOX_SEMAPHORE_HOST: ${{ secrets.CRABBOX_SEMAPHORE_HOST }}
-      CRABBOX_SEMAPHORE_PROJECT: ${{ secrets.CRABBOX_SEMAPHORE_PROJECT }}
-      CRABBOX_SEMAPHORE_TOKEN: ${{ secrets.CRABBOX_SEMAPHORE_TOKEN }}
-      CRABBOX_SPRITES_TOKEN: ${{ secrets.CRABBOX_SPRITES_TOKEN }}
-      CRABBOX_DAYTONA_SNAPSHOT: ${{ secrets.CRABBOX_DAYTONA_SNAPSHOT }}
-      DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
-      DAYTONA_JWT_TOKEN: ${{ secrets.DAYTONA_JWT_TOKEN }}
-      DAYTONA_ORGANIZATION_ID: ${{ secrets.DAYTONA_ORGANIZATION_ID }}
-      ISLO_API_KEY: ${{ secrets.ISLO_API_KEY }}
-      CRABBOX_E2B_API_KEY: ${{ secrets.CRABBOX_E2B_API_KEY }}
-      E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
-      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      CRABBOX_UPSTASH_BOX_API_KEY: ${{ secrets.CRABBOX_UPSTASH_BOX_API_KEY }}
-      UPSTASH_BOX_API_KEY: ${{ secrets.UPSTASH_BOX_API_KEY }}
-      CRABBOX_TENSORLAKE_API_KEY: ${{ secrets.CRABBOX_TENSORLAKE_API_KEY }}
-      TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
-      TENSORLAKE_ORGANIZATION_ID: ${{ secrets.TENSORLAKE_ORGANIZATION_ID }}
-      TENSORLAKE_PROJECT_ID: ${{ secrets.TENSORLAKE_PROJECT_ID }}
-      CRABBOX_CLOUDFLARE_RUNNER_URL: ${{ secrets.CRABBOX_CLOUDFLARE_RUNNER_URL }}
-      CRABBOX_CLOUDFLARE_RUNNER_TOKEN: ${{ secrets.CRABBOX_CLOUDFLARE_RUNNER_TOKEN }}
-      CRABBOX_RAILWAY_API_TOKEN: ${{ secrets.CRABBOX_RAILWAY_API_TOKEN }}
-      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
-      CRABBOX_RAILWAY_SERVICE_ID: ${{ secrets.CRABBOX_RAILWAY_SERVICE_ID }}
-      CRABBOX_RAILWAY_PROJECT_ID: ${{ secrets.CRABBOX_RAILWAY_PROJECT_ID }}
-      CRABBOX_RAILWAY_ENVIRONMENT_ID: ${{ secrets.CRABBOX_RAILWAY_ENVIRONMENT_ID }}
-      CRABBOX_RUNPOD_API_KEY: ${{ secrets.CRABBOX_RUNPOD_API_KEY }}
-      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-      CRABBOX_RUNPOD_INSTANCE_ID: ${{ secrets.CRABBOX_RUNPOD_INSTANCE_ID }}
-      CRABBOX_RUNPOD_TEMPLATE_ID: ${{ secrets.CRABBOX_RUNPOD_TEMPLATE_ID }}
-      CRABBOX_WANDB_API_KEY: ${{ secrets.CRABBOX_WANDB_API_KEY }}
-      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      WANDB_ENTITY_NAME: ${{ secrets.WANDB_ENTITY_NAME }}
-      WANDB_PROJECT: ${{ secrets.WANDB_PROJECT }}
 
     steps:
       - name: Check out
@@ -248,6 +150,9 @@ jobs:
 
       - name: Write secret files
         shell: bash
+        env:
+          CRABBOX_SSH_PRIVATE_KEY: ${{ contains(fromJSON('["aws","azure","gcp","hetzner","proxmox","parallels","ssh","exe-dev"]'), matrix.provider) && secrets.CRABBOX_SSH_PRIVATE_KEY || '' }}
+          GCP_SERVICE_ACCOUNT_JSON: ${{ matrix.provider == 'gcp' && secrets.GCP_SERVICE_ACCOUNT_JSON || '' }}
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.ssh" "$RUNNER_TEMP/crabbox"
@@ -270,6 +175,103 @@ jobs:
 
       - name: Run provider smoke
         shell: bash
+        env:
+          CRABBOX_COORDINATOR: ${{ contains(fromJSON('["aws","azure","gcp","hetzner"]'), matrix.provider) && secrets.CRABBOX_COORDINATOR || '' }}
+          CRABBOX_COORDINATOR_TOKEN: ${{ contains(fromJSON('["aws","azure","gcp","hetzner"]'), matrix.provider) && secrets.CRABBOX_COORDINATOR_TOKEN || '' }}
+          AWS_ACCESS_KEY_ID: ${{ matrix.provider == 'aws' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          AWS_SECRET_ACCESS_KEY: ${{ matrix.provider == 'aws' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+          AWS_SESSION_TOKEN: ${{ matrix.provider == 'aws' && secrets.AWS_SESSION_TOKEN || '' }}
+          AWS_REGION: ${{ matrix.provider == 'aws' && secrets.AWS_REGION || '' }}
+          CRABBOX_AWS_REGION: ${{ matrix.provider == 'aws' && secrets.CRABBOX_AWS_REGION || '' }}
+          AZURE_SUBSCRIPTION_ID: ${{ contains(fromJSON('["azure","azure-dynamic-sessions"]'), matrix.provider) && secrets.AZURE_SUBSCRIPTION_ID || '' }}
+          AZURE_TENANT_ID: ${{ contains(fromJSON('["azure","azure-dynamic-sessions"]'), matrix.provider) && secrets.AZURE_TENANT_ID || '' }}
+          AZURE_CLIENT_ID: ${{ contains(fromJSON('["azure","azure-dynamic-sessions"]'), matrix.provider) && secrets.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ contains(fromJSON('["azure","azure-dynamic-sessions"]'), matrix.provider) && secrets.AZURE_CLIENT_SECRET || '' }}
+          CRABBOX_AZURE_LOCATION: ${{ matrix.provider == 'azure' && secrets.CRABBOX_AZURE_LOCATION || '' }}
+          CRABBOX_AZURE_RESOURCE_GROUP: ${{ matrix.provider == 'azure' && secrets.CRABBOX_AZURE_RESOURCE_GROUP || '' }}
+          CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT: ${{ matrix.provider == 'azure-dynamic-sessions' && secrets.CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT || '' }}
+          CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL: ${{ matrix.provider == 'azure-dynamic-sessions' && secrets.CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL || '' }}
+          GOOGLE_CLOUD_PROJECT: ${{ matrix.provider == 'gcp' && secrets.GOOGLE_CLOUD_PROJECT || '' }}
+          GCP_PROJECT_ID: ${{ matrix.provider == 'gcp' && secrets.GCP_PROJECT_ID || '' }}
+          CRABBOX_GCP_ZONE: ${{ matrix.provider == 'gcp' && secrets.CRABBOX_GCP_ZONE || '' }}
+          HCLOUD_TOKEN: ${{ matrix.provider == 'hetzner' && secrets.HCLOUD_TOKEN || '' }}
+          HETZNER_TOKEN: ${{ matrix.provider == 'hetzner' && secrets.HETZNER_TOKEN || '' }}
+          CRABBOX_PROXMOX_API_URL: ${{ matrix.provider == 'proxmox' && secrets.CRABBOX_PROXMOX_API_URL || '' }}
+          CRABBOX_PROXMOX_TOKEN_ID: ${{ matrix.provider == 'proxmox' && secrets.CRABBOX_PROXMOX_TOKEN_ID || '' }}
+          CRABBOX_PROXMOX_TOKEN_SECRET: ${{ matrix.provider == 'proxmox' && secrets.CRABBOX_PROXMOX_TOKEN_SECRET || '' }}
+          CRABBOX_PROXMOX_NODE: ${{ matrix.provider == 'proxmox' && secrets.CRABBOX_PROXMOX_NODE || '' }}
+          CRABBOX_PROXMOX_TEMPLATE_ID: ${{ matrix.provider == 'proxmox' && secrets.CRABBOX_PROXMOX_TEMPLATE_ID || '' }}
+          CRABBOX_PROXMOX_STORAGE: ${{ matrix.provider == 'proxmox' && secrets.CRABBOX_PROXMOX_STORAGE || '' }}
+          CRABBOX_PROXMOX_BRIDGE: ${{ matrix.provider == 'proxmox' && secrets.CRABBOX_PROXMOX_BRIDGE || '' }}
+          CRABBOX_PROXMOX_USER: ${{ matrix.provider == 'proxmox' && secrets.CRABBOX_PROXMOX_USER || '' }}
+          CRABBOX_PROXMOX_INSECURE_TLS: ${{ matrix.provider == 'proxmox' && secrets.CRABBOX_PROXMOX_INSECURE_TLS || '' }}
+          CRABBOX_PARALLELS_SOURCE: ${{ matrix.provider == 'parallels' && secrets.CRABBOX_PARALLELS_SOURCE || '' }}
+          CRABBOX_PARALLELS_SOURCE_SNAPSHOT: ${{ matrix.provider == 'parallels' && secrets.CRABBOX_PARALLELS_SOURCE_SNAPSHOT || '' }}
+          CRABBOX_PARALLELS_TEMPLATE: ${{ matrix.provider == 'parallels' && secrets.CRABBOX_PARALLELS_TEMPLATE || '' }}
+          CRABBOX_PARALLELS_HOST: ${{ matrix.provider == 'parallels' && secrets.CRABBOX_PARALLELS_HOST || '' }}
+          CRABBOX_PARALLELS_HOST_USER: ${{ matrix.provider == 'parallels' && secrets.CRABBOX_PARALLELS_HOST_USER || '' }}
+          CRABBOX_PARALLELS_USER: ${{ matrix.provider == 'parallels' && secrets.CRABBOX_PARALLELS_USER || '' }}
+          CRABBOX_PARALLELS_WORK_ROOT: ${{ matrix.provider == 'parallels' && secrets.CRABBOX_PARALLELS_WORK_ROOT || '' }}
+          CRABBOX_STATIC_HOST: ${{ matrix.provider == 'ssh' && secrets.CRABBOX_STATIC_HOST || '' }}
+          CRABBOX_STATIC_USER: ${{ matrix.provider == 'ssh' && secrets.CRABBOX_STATIC_USER || '' }}
+          CRABBOX_STATIC_PORT: ${{ matrix.provider == 'ssh' && secrets.CRABBOX_STATIC_PORT || '' }}
+          CRABBOX_STATIC_WORK_ROOT: ${{ matrix.provider == 'ssh' && secrets.CRABBOX_STATIC_WORK_ROOT || '' }}
+          CRABBOX_TARGET: ${{ matrix.provider == 'ssh' && secrets.CRABBOX_TARGET || '' }}
+          CRABBOX_WINDOWS_MODE: ${{ matrix.provider == 'ssh' && secrets.CRABBOX_WINDOWS_MODE || '' }}
+          CRABBOX_EXE_DEV_CONTROL_HOST: ${{ matrix.provider == 'exe-dev' && secrets.CRABBOX_EXE_DEV_CONTROL_HOST || '' }}
+          CRABBOX_EXE_DEV_IMAGE: ${{ matrix.provider == 'exe-dev' && secrets.CRABBOX_EXE_DEV_IMAGE || '' }}
+          CRABBOX_BLACKSMITH_ORG: ${{ matrix.provider == 'blacksmith-testbox' && secrets.CRABBOX_BLACKSMITH_ORG || '' }}
+          CRABBOX_BLACKSMITH_WORKFLOW: ${{ matrix.provider == 'blacksmith-testbox' && secrets.CRABBOX_BLACKSMITH_WORKFLOW || '' }}
+          CRABBOX_BLACKSMITH_JOB: ${{ matrix.provider == 'blacksmith-testbox' && secrets.CRABBOX_BLACKSMITH_JOB || '' }}
+          CRABBOX_BLACKSMITH_REF: ${{ matrix.provider == 'blacksmith-testbox' && secrets.CRABBOX_BLACKSMITH_REF || '' }}
+          BLACKSMITH_API_TOKEN: ${{ matrix.provider == 'blacksmith-testbox' && secrets.BLACKSMITH_API_TOKEN || '' }}
+          CRABBOX_NAMESPACE_IMAGE: ${{ matrix.provider == 'namespace-devbox' && secrets.CRABBOX_NAMESPACE_IMAGE || '' }}
+          CRABBOX_NAMESPACE_SIZE: ${{ matrix.provider == 'namespace-devbox' && secrets.CRABBOX_NAMESPACE_SIZE || '' }}
+          CRABBOX_NAMESPACE_REPOSITORY: ${{ matrix.provider == 'namespace-devbox' && secrets.CRABBOX_NAMESPACE_REPOSITORY || '' }}
+          CRABBOX_NAMESPACE_SITE: ${{ matrix.provider == 'namespace-devbox' && secrets.CRABBOX_NAMESPACE_SITE || '' }}
+          CRABBOX_NAMESPACE_DELETE_ON_RELEASE: ${{ matrix.provider == 'namespace-devbox' && secrets.CRABBOX_NAMESPACE_DELETE_ON_RELEASE || '' }}
+          CRABBOX_SEMAPHORE_HOST: ${{ matrix.provider == 'semaphore' && secrets.CRABBOX_SEMAPHORE_HOST || '' }}
+          CRABBOX_SEMAPHORE_PROJECT: ${{ matrix.provider == 'semaphore' && secrets.CRABBOX_SEMAPHORE_PROJECT || '' }}
+          CRABBOX_SEMAPHORE_TOKEN: ${{ matrix.provider == 'semaphore' && secrets.CRABBOX_SEMAPHORE_TOKEN || '' }}
+          CRABBOX_SPRITES_TOKEN: ${{ matrix.provider == 'sprites' && secrets.CRABBOX_SPRITES_TOKEN || '' }}
+          CRABBOX_DAYTONA_SNAPSHOT: ${{ matrix.provider == 'daytona' && secrets.CRABBOX_DAYTONA_SNAPSHOT || '' }}
+          DAYTONA_API_KEY: ${{ matrix.provider == 'daytona' && secrets.DAYTONA_API_KEY || '' }}
+          DAYTONA_JWT_TOKEN: ${{ matrix.provider == 'daytona' && secrets.DAYTONA_JWT_TOKEN || '' }}
+          DAYTONA_ORGANIZATION_ID: ${{ matrix.provider == 'daytona' && secrets.DAYTONA_ORGANIZATION_ID || '' }}
+          ISLO_API_KEY: ${{ matrix.provider == 'islo' && secrets.ISLO_API_KEY || '' }}
+          CRABBOX_E2B_API_KEY: ${{ matrix.provider == 'e2b' && secrets.CRABBOX_E2B_API_KEY || '' }}
+          E2B_API_KEY: ${{ matrix.provider == 'e2b' && secrets.E2B_API_KEY || '' }}
+          MODAL_TOKEN_ID: ${{ matrix.provider == 'modal' && secrets.MODAL_TOKEN_ID || '' }}
+          MODAL_TOKEN_SECRET: ${{ matrix.provider == 'modal' && secrets.MODAL_TOKEN_SECRET || '' }}
+          CRABBOX_UPSTASH_BOX_API_KEY: ${{ matrix.provider == 'upstash-box' && secrets.CRABBOX_UPSTASH_BOX_API_KEY || '' }}
+          UPSTASH_BOX_API_KEY: ${{ matrix.provider == 'upstash-box' && secrets.UPSTASH_BOX_API_KEY || '' }}
+          CRABBOX_TENSORLAKE_API_KEY: ${{ matrix.provider == 'tensorlake' && secrets.CRABBOX_TENSORLAKE_API_KEY || '' }}
+          TENSORLAKE_API_KEY: ${{ matrix.provider == 'tensorlake' && secrets.TENSORLAKE_API_KEY || '' }}
+          TENSORLAKE_ORGANIZATION_ID: ${{ matrix.provider == 'tensorlake' && secrets.TENSORLAKE_ORGANIZATION_ID || '' }}
+          TENSORLAKE_PROJECT_ID: ${{ matrix.provider == 'tensorlake' && secrets.TENSORLAKE_PROJECT_ID || '' }}
+          CRABBOX_CLOUDFLARE_RUNNER_URL: ${{ matrix.provider == 'cloudflare' && secrets.CRABBOX_CLOUDFLARE_RUNNER_URL || '' }}
+          CRABBOX_CLOUDFLARE_RUNNER_TOKEN: ${{ matrix.provider == 'cloudflare' && secrets.CRABBOX_CLOUDFLARE_RUNNER_TOKEN || '' }}
+          CRABBOX_RAILWAY_API_TOKEN: ${{ matrix.provider == 'railway' && secrets.CRABBOX_RAILWAY_API_TOKEN || '' }}
+          RAILWAY_API_TOKEN: ${{ matrix.provider == 'railway' && secrets.RAILWAY_API_TOKEN || '' }}
+          CRABBOX_RAILWAY_SERVICE_ID: ${{ matrix.provider == 'railway' && secrets.CRABBOX_RAILWAY_SERVICE_ID || '' }}
+          CRABBOX_RAILWAY_PROJECT_ID: ${{ matrix.provider == 'railway' && secrets.CRABBOX_RAILWAY_PROJECT_ID || '' }}
+          CRABBOX_RAILWAY_ENVIRONMENT_ID: ${{ matrix.provider == 'railway' && secrets.CRABBOX_RAILWAY_ENVIRONMENT_ID || '' }}
+          CRABBOX_RUNPOD_API_KEY: ${{ matrix.provider == 'runpod' && secrets.CRABBOX_RUNPOD_API_KEY || '' }}
+          RUNPOD_API_KEY: ${{ matrix.provider == 'runpod' && secrets.RUNPOD_API_KEY || '' }}
+          CRABBOX_RUNPOD_INSTANCE_ID: ${{ matrix.provider == 'runpod' && secrets.CRABBOX_RUNPOD_INSTANCE_ID || '' }}
+          CRABBOX_RUNPOD_TEMPLATE_ID: ${{ matrix.provider == 'runpod' && secrets.CRABBOX_RUNPOD_TEMPLATE_ID || '' }}
+          CRABBOX_WANDB_API_KEY: ${{ matrix.provider == 'wandb' && secrets.CRABBOX_WANDB_API_KEY || '' }}
+          WANDB_API_KEY: ${{ matrix.provider == 'wandb' && secrets.WANDB_API_KEY || '' }}
+          WANDB_ENTITY_NAME: ${{ matrix.provider == 'wandb' && secrets.WANDB_ENTITY_NAME || '' }}
+          WANDB_PROJECT: ${{ matrix.provider == 'wandb' && secrets.WANDB_PROJECT || '' }}
+          CRABBOX_ASCII_BOX_API_KEY: ${{ matrix.provider == 'ascii-box' && secrets.CRABBOX_ASCII_BOX_API_KEY || '' }}
+          ASCII_BOX_API_KEY: ${{ matrix.provider == 'ascii-box' && secrets.ASCII_BOX_API_KEY || '' }}
+          CRABBOX_ASCII_BOX_BASE_URL: ${{ matrix.provider == 'ascii-box' && secrets.CRABBOX_ASCII_BOX_BASE_URL || '' }}
+          ASCII_BOX_BASE_URL: ${{ matrix.provider == 'ascii-box' && secrets.ASCII_BOX_BASE_URL || '' }}
+          CRABBOX_ASCII_BOX_CLI: ${{ matrix.provider == 'ascii-box' && secrets.CRABBOX_ASCII_BOX_CLI || '' }}
+          CRABBOX_SMOLVM_API_KEY: ${{ matrix.provider == 'smolvm' && secrets.CRABBOX_SMOLVM_API_KEY || '' }}
+          SMOLMACHINES_API_KEY: ${{ matrix.provider == 'smolvm' && secrets.SMOLMACHINES_API_KEY || '' }}
+          SMK_API_KEY: ${{ matrix.provider == 'smolvm' && secrets.SMK_API_KEY || '' }}
         run: |
           set -euo pipefail
           mkdir -p "$CRABBOX_PROVIDER_E2E_LOG_DIR"
