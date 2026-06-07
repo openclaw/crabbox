@@ -167,6 +167,7 @@ const (
 	FeatureFork        Feature = "workspace-fork"
 	FeatureRestore     Feature = "workspace-restore"
 	FeatureSnapshot    Feature = "provider-snapshot"
+	FeatureCacheVolume Feature = "cache-volume"
 	FeatureRunProof    Feature = "run-proof"
 	FeatureRunSession  Feature = "run-session"
 )
@@ -207,6 +208,7 @@ type LocalCommandRequest struct {
 	Args   []string
 	Env    []string
 	Dir    string
+	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
 }
@@ -255,6 +257,7 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	cmd := exec.CommandContext(ctx, req.Name, req.Args...)
 	cmd.Env = req.Env
 	cmd.Dir = req.Dir
+	cmd.Stdin = req.Stdin
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if req.Stdout != nil {
@@ -689,8 +692,8 @@ func validateActionsRunnerCapability(backend Backend, cfg Config) error {
 	if _, ok := backend.(SSHLeaseBackend); !ok {
 		return exit(2, "--actions-runner requires an SSH lease provider")
 	}
-	if backend.Spec().Name == "local-container" {
-		return exit(2, "--actions-runner is not supported for provider=local-container; use normal crabbox run or a remote SSH provider")
+	if name := backend.Spec().Name; name == "local-container" || name == "apple-container" || name == "multipass" {
+		return exit(2, "--actions-runner is not supported for provider=%s; use normal crabbox run or a remote SSH provider", name)
 	}
 	if !supportsGitHubActionsRunnerTarget(SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}) {
 		return exit(2, "--actions-runner requires target=linux or target=windows")

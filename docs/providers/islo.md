@@ -7,8 +7,9 @@ Read when:
 - changing `internal/providers/islo`.
 
 Islo is a delegated-run provider. Crabbox uses the Islo Go SDK for sandbox
-lifecycle (create, list, status, delete) and reads a Server-Sent Events stream
-from the `POST /sandboxes/{name}/exec/stream` endpoint for command output. Islo
+lifecycle (create, list, status) and calls the HTTP API directly for delete (an
+empty-body `DELETE`), archive upload, shares, and command output — reading a
+Server-Sent Events stream from the `POST /sandboxes/{name}/exec/stream` endpoint. Islo
 owns sandbox state and command transport; Crabbox owns local config, repo
 claims, sync manifests and guardrails, slugs, timing summaries, and normalized
 `list`/`status` rendering. There is no Crabbox SSH lease and no broker

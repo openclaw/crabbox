@@ -15,6 +15,7 @@ crabbox doctor --id swift-crab
 crabbox doctor --profile live-qa --id swift-crab
 crabbox doctor --from-run run_abcdef123456
 crabbox doctor --pond my-pond
+crabbox doctor --all --prepare-check
 crabbox doctor --json
 ```
 
@@ -31,6 +32,7 @@ coord      coordinator URL is reachable and healthy (brokered providers)
 broker     signed token is valid and an identity resolves
 provider   provider readiness, with no mutation; broker secrets or a direct API probe
 admin      admin token can list the machine pool (only when an admin token is set)
+capacity   warns when the implicit default machine type is oversized for tests
 ssh-key    explicit SSH key path and matching .pub are readable
 pond       Tailscale policy row exists for a local pond (--pond)
 ```
@@ -115,6 +117,14 @@ policy API are skipped with a pointer to the manual snippet. Plain
 `crabbox doctor` never calls the Tailscale API. Verification needs only
 `TS_API_KEY`; automatic ACL edits also require `CRABBOX_POND_ACL_BOOTSTRAP=1`.
 
+### Provider matrix (`--all --prepare-check`)
+
+`crabbox doctor --all --prepare-check` checks the default test-runner provider
+matrix (`blacksmith-testbox,aws,azure,gcp`) and adds a `prepare` row for each
+provider. The prepare row reports the resolved class, machine type, and
+configured hydration workflow/job, without creating a lease. Use
+`--providers a,b,c` to override the matrix.
+
 For the full per-check breakdown of how each one decides between `ok`, `skip`,
 `warning`, and `failed`, see [Doctor checks](../features/doctor.md).
 
@@ -156,6 +166,9 @@ Exit codes:
 --id <lease-id-or-slug>       resolve a lease and run a remote SSH/tool probe
 --from-run <run-id>           load provider/target/lease/phase context from a recorded run
 --pond <name>                 verify Tailscale policy setup for this pond
+--all                         check the provider test-runner matrix
+--providers <list>            comma-separated providers for --all
+--prepare-check               include test-preparation readiness checks
 --doctor-probe-ssh            probe static SSH reachability without leasing
 --json                        print JSON
 --target linux|macos|windows  target OS (affects which checks apply)

@@ -59,6 +59,31 @@ func TestParseIsloSSERequiresExitEvent(t *testing.T) {
 	}
 }
 
+func TestParseIsloSSESurfacesErrorEvent(t *testing.T) {
+	// The Islo exec SSE stream can emit an "error" event for stream/VM-level
+	// failures and may end without an "exit" event. The error payload must
+	// surface instead of the generic missing-exit-event message.
+	body := strings.Join([]string{
+		"event: stdout",
+		"data: starting",
+		"",
+		"event: error",
+		"data: vm exec failed: out of memory",
+		"",
+	}, "\n")
+	var stdout, stderr bytes.Buffer
+	code, err := parseIsloSSE(strings.NewReader(body), &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "out of memory") {
+		t.Fatalf("code=%d err=%v, want surfaced error payload", code, err)
+	}
+	if strings.Contains(err.Error(), "without exit event") {
+		t.Fatalf("err=%v, should prefer the error payload over the generic message", err)
+	}
+	if stdout.String() != "starting" {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
 func TestParseIsloSSERejectsInvalidExitEvent(t *testing.T) {
 	body := strings.Join([]string{
 		"event: exit",
@@ -101,13 +126,31 @@ func TestLeadingEnvAssignmentUsesShell(t *testing.T) {
 }
 
 func TestIsloStatusReady(t *testing.T) {
-	for _, status := range []string{"ready", "running", "started", "active"} {
+	// The live Islo API emits exactly one ready state, "running" (case-insensitive).
+	for _, status := range []string{"running", "RUNNING", " running "} {
 		if !isloStatusReady(status) {
 			t.Fatalf("expected %q ready", status)
 		}
 	}
-	if isloStatusReady("stopped") {
-		t.Fatal("stopped should not be ready")
+	// Statuses Islo never reports as ready, including the legacy values crabbox
+	// used to accept ("ready", "started", "active") that the API no longer emits.
+	for _, status := range []string{"starting", "ready", "started", "active", "paused", "stopping", "stopped", "failed", "deleted", "unknown", ""} {
+		if isloStatusReady(status) {
+			t.Fatalf("status %q should not be ready", status)
+		}
+	}
+}
+
+func TestIsloStatusTerminal(t *testing.T) {
+	for _, status := range []string{"failed", "stopped", "stopping", "deleted", "DELETED", " failed "} {
+		if !isloStatusTerminal(status) {
+			t.Fatalf("expected %q terminal", status)
+		}
+	}
+	for _, status := range []string{"starting", "running", "paused", "unknown", ""} {
+		if isloStatusTerminal(status) {
+			t.Fatalf("status %q should not be terminal", status)
+		}
 	}
 }
 

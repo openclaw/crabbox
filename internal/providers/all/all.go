@@ -1,6 +1,7 @@
 package all
 
 import (
+	_ "github.com/openclaw/crabbox/internal/providers/applecontainer"
 	_ "github.com/openclaw/crabbox/internal/providers/asciibox"
 	_ "github.com/openclaw/crabbox/internal/providers/aws"
 	_ "github.com/openclaw/crabbox/internal/providers/azure"
@@ -10,11 +11,14 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/daytona"
 	_ "github.com/openclaw/crabbox/internal/providers/e2b"
 	_ "github.com/openclaw/crabbox/internal/providers/exedev"
+	_ "github.com/openclaw/crabbox/internal/providers/external"
 	_ "github.com/openclaw/crabbox/internal/providers/gcp"
 	_ "github.com/openclaw/crabbox/internal/providers/hetzner"
 	_ "github.com/openclaw/crabbox/internal/providers/islo"
+	_ "github.com/openclaw/crabbox/internal/providers/kubevirt"
 	_ "github.com/openclaw/crabbox/internal/providers/localcontainer"
 	_ "github.com/openclaw/crabbox/internal/providers/modal"
+	_ "github.com/openclaw/crabbox/internal/providers/multipass"
 	_ "github.com/openclaw/crabbox/internal/providers/namespace"
 	_ "github.com/openclaw/crabbox/internal/providers/parallels"
 	_ "github.com/openclaw/crabbox/internal/providers/proxmox"

@@ -302,6 +302,9 @@ func (b *isloBackend) Status(ctx context.Context, req StatusRequest) (statusView
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
+		if isloStatusTerminal(view.State) {
+			return statusView{}, exit(5, "sandbox %s entered terminal state %q before becoming ready", name, view.State)
+		}
 		if b.now().After(deadline) {
 			return statusView{}, exit(5, "timed out waiting for sandbox %s to become ready", name)
 		}
@@ -539,9 +542,25 @@ func applyIsloClaimLabels(labels map[string]string, leaseID string) {
 	}
 }
 
+// isloStatusReady reports whether a sandbox is ready to accept commands.
+//
+// The Islo API reports exactly one ready state, "running"; the full set of
+// statuses it returns is starting/running/paused/stopping/stopped/failed/
+// deleted/unknown. The legacy "ready"/"started"/"active" values are no longer
+// emitted (a "ready" boot state is normalized to "running" server-side), so
+// matching them is unnecessary and misleading.
 func isloStatusReady(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), "running")
+}
+
+// isloStatusTerminal reports whether a sandbox status is a terminal state that
+// will never transition to ready, so callers can fail fast instead of polling
+// until a deadline. Mirrors the terminal states the Islo API can report:
+// "failed", "stopped", and "deleted" are terminal, and "stopping" is an
+// in-progress teardown that will not recover.
+func isloStatusTerminal(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "ready", "running", "started", "active":
+	case "failed", "stopped", "stopping", "deleted":
 		return true
 	default:
 		return false

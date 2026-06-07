@@ -74,10 +74,10 @@ Provider deep-dives that live here in `features/`:
 - [Linux VNC](vnc-linux.md), [Windows VNC](vnc-windows.md), [macOS VNC](vnc-macos.md): OS-specific desktop setup and troubleshooting.
 - [Test results](test-results.md): JUnit summaries attached to recorded runs.
 - [Cache controls](cache.md): inspect, purge, and warm remote package/build caches.
+- [Cache volumes](cache-volumes.md): provider-backed persistent cache mounts for rebuildable speed state.
 
 ## Integrations
 
-- [OpenClaw plugin](openclaw-plugin.md): agent tools that wrap the CLI.
 - [Repository onboarding](repository-onboarding.md): `crabbox init`, repo config, workflow stub, and agent skill.
 - [Source map](../source-map.md): implementation files behind documented behavior.
 

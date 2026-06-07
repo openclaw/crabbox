@@ -362,16 +362,39 @@ localContainer:
 
 `provider: docker`, `provider: container`, and `provider: local-docker` are
 aliases for `local-container`. The backend uses Docker-compatible CLI commands,
-so Docker Desktop, OrbStack, Colima, and similar local runtimes work when their
-Docker context is active. Set `dockerSocket: true` only when commands inside
-the lease must use the host Docker daemon; Crabbox then mounts the active local
-Unix Docker socket and rejects remote Docker contexts. With the socket enabled
-and no explicit work root, Crabbox chooses a host-visible cache work root so
-nested Docker bind mounts can see the synced checkout.
+so Docker Desktop, OrbStack, Colima, Podman, and similar local runtimes work.
+Crabbox detects an installed `docker` or `podman` CLI and uses that runtime; if
+both are present, `docker` is selected unless `localContainer.runtime` is set
+explicitly. Set `dockerSocket: true` only when commands inside the lease must
+use the host Docker-compatible API; Crabbox then mounts the active local Unix
+socket from `DOCKER_HOST` or the Docker context and rejects remote TCP contexts.
+With the socket enabled and no explicit work root, Crabbox chooses a host-visible
+cache work root so nested bind mounts can see the synced checkout.
 
 Use `--desktop --browser` to bootstrap Xvfb, XFCE, x11vnc, noVNC/websockify,
 desktop input tools, screenshot tools, ffmpeg, and a packaged browser inside
 the container.
+
+### Multipass
+
+```yaml
+provider: multipass
+multipass:
+  cliPath: multipass
+  image: "26.04"
+  user: crabbox
+  workRoot: /work/crabbox
+  cpus: 4
+  memory: 8G
+  disk: 30G
+  launchTimeout: 20m
+```
+
+`provider: mp` and `provider: canonical-multipass` are aliases for `multipass`.
+The backend drives Canonical's `multipass` CLI on the local workstation, launches
+an Ubuntu VM with cloud-init, discovers the VM IP with `multipass info`, then
+uses the normal Crabbox SSH sync/run path. The Multipass image follows the
+portable `osImage` default unless `multipass.image` is set explicitly.
 
 ### Blacksmith Testbox
 
@@ -400,6 +423,50 @@ namespace:
   workRoot: /workspaces/crabbox
   deleteOnRelease: false
 ```
+
+### KubeVirt
+
+```yaml
+provider: kubevirt
+kubevirt:
+  kubectl: kubectl
+  virtctl: virtctl
+  kubeconfig: ""
+  context: ""
+  namespace: default
+  template: ./kubevirt-vm.yaml
+  sshUser: crabbox
+  sshKey: ""
+  sshPublicKey: ""
+  sshPort: "22"
+  workRoot: /home/crabbox/crabbox
+  deleteOnRelease: true
+```
+
+The template must be one KubeVirt `VirtualMachine` using `runStrategy: Manual`.
+Crabbox sets its name, namespace, and lease labels, replaces documented
+placeholders, applies it with `kubectl`, and starts it with `virtctl`.
+
+### External provider
+
+```yaml
+provider: external
+external:
+  command: node
+  args:
+    - /absolute/path/provider.mjs
+  config:
+    backend: vm
+    namespace: team-devboxes
+  workRoot: /workspaces/crabbox
+  routingFile: ""
+```
+
+The executable receives one versioned JSON request on stdin per lifecycle
+operation and returns one JSON response on stdout. This keeps internal control
+plane logic outside Crabbox while preserving normal SSH sync, rsync, WebVNC,
+and command execution. Crabbox writes private per-lease routing state for
+generated stop commands; `routingFile` is normally set only by those commands.
 
 ### Daytona
 
@@ -597,7 +664,16 @@ cache:
   git: true
   maxGB: 80
   purgeOnRelease: false
+  volumes:
+    - name: pnpm-store
+      key: my-app-linux-amd64-node24-pnpm10-lockhash
+      path: /var/cache/crabbox/pnpm
+      sizeGB: 80
+      required: false
 ```
+
+See [Cache volumes](cache-volumes.md) for key design, provider support, and
+existing-lease reuse rules.
 
 ### Results
 

@@ -402,6 +402,43 @@ type CoordinatorExternalRunnerSyncResponse struct {
 	Stale   []CoordinatorExternalRunner `json:"stale"`
 }
 
+type CoordinatorReadyPoolEntry struct {
+	Key          string `json:"key"`
+	LeaseID      string `json:"leaseID"`
+	State        string `json:"state"`
+	Owner        string `json:"owner"`
+	Org          string `json:"org"`
+	Repo         string `json:"repo,omitempty"`
+	Ref          string `json:"ref,omitempty"`
+	Commit       string `json:"commit,omitempty"`
+	Fingerprint  string `json:"fingerprint,omitempty"`
+	Image        string `json:"image,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	TargetOS     string `json:"target,omitempty"`
+	WindowsMode  string `json:"windowsMode,omitempty"`
+	Class        string `json:"class,omitempty"`
+	ServerType   string `json:"serverType,omitempty"`
+	SSHHost      string `json:"sshHost,omitempty"`
+	SSHUser      string `json:"sshUser,omitempty"`
+	SSHPort      string `json:"sshPort,omitempty"`
+	WorkRoot     string `json:"workRoot,omitempty"`
+	BorrowedBy   string `json:"borrowedBy,omitempty"`
+	BorrowedAt   string `json:"borrowedAt,omitempty"`
+	BorrowToken  string `json:"borrowToken,omitempty"`
+	LastReadyAt  string `json:"lastReadyAt,omitempty"`
+	LastUsedAt   string `json:"lastUsedAt,omitempty"`
+	LastResult   string `json:"lastResult,omitempty"`
+	FailureCount int    `json:"failureCount,omitempty"`
+	CreatedAt    string `json:"createdAt"`
+	UpdatedAt    string `json:"updatedAt"`
+	ExpiresAt    string `json:"expiresAt"`
+}
+
+type CoordinatorReadyPoolResponse struct {
+	Entry CoordinatorReadyPoolEntry `json:"entry"`
+	Lease CoordinatorLease          `json:"lease"`
+}
+
 type CoordinatorRunEventResponse struct {
 	Event CoordinatorRunEvent `json:"event"`
 }
@@ -843,6 +880,50 @@ func (c *CoordinatorClient) Leases(ctx context.Context, state string, limit int)
 	}
 	err := c.do(ctx, http.MethodGet, path, nil, &res)
 	return res.Leases, err
+}
+
+func (c *CoordinatorClient) ReadyPools(ctx context.Context) ([]CoordinatorReadyPoolEntry, error) {
+	var res struct {
+		Pools []CoordinatorReadyPoolEntry `json:"pools"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/ready-pools", nil, &res)
+	return res.Pools, err
+}
+
+func (c *CoordinatorClient) ReadyPool(ctx context.Context, key string) ([]CoordinatorReadyPoolEntry, error) {
+	var res struct {
+		Pool []CoordinatorReadyPoolEntry `json:"pool"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/ready-pools/"+url.PathEscape(key), nil, &res)
+	return res.Pool, err
+}
+
+func (c *CoordinatorClient) RegisterReadyPoolLease(ctx context.Context, key string, input map[string]any) (CoordinatorReadyPoolResponse, error) {
+	var res CoordinatorReadyPoolResponse
+	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/register", input, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) BorrowReadyPoolLease(ctx context.Context, key string, input map[string]any) (CoordinatorReadyPoolResponse, error) {
+	var res CoordinatorReadyPoolResponse
+	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/borrow", input, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) ReturnReadyPoolLease(ctx context.Context, key, leaseID, result, reason, borrowToken string) (CoordinatorReadyPoolResponse, error) {
+	var res CoordinatorReadyPoolResponse
+	body := map[string]any{"leaseID": leaseID}
+	if result != "" {
+		body["result"] = result
+	}
+	if reason != "" {
+		body["reason"] = reason
+	}
+	if borrowToken != "" {
+		body["borrowToken"] = borrowToken
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/return", body, &res)
+	return res, err
 }
 
 func (c *CoordinatorClient) Usage(ctx context.Context, scope, owner, org, month string) (CoordinatorUsageResponse, error) {
@@ -1538,7 +1619,7 @@ func (c *CoordinatorClient) curlConfig(method, path string, data []byte, hasBody
 	curlConfigValue(&cfg, "url", c.BaseURL+path)
 	curlConfigValue(&cfg, "request", method)
 	curlConfigValue(&cfg, "connect-timeout", "10")
-	curlConfigValue(&cfg, "max-time", "300")
+	curlConfigValue(&cfg, "max-time", strconv.Itoa(int(coordinatorHTTPTimeout/time.Second)))
 	curlConfigFlag(&cfg, "silent")
 	curlConfigFlag(&cfg, "show-error")
 	curlConfigFlag(&cfg, "location")

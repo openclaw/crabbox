@@ -31,6 +31,7 @@ type leaseClaim struct {
 	SSHHost            string            `json:"sshHost,omitempty"`
 	SSHPort            int               `json:"sshPort,omitempty"`
 	BridgeURL          string            `json:"bridgeURL,omitempty"`
+	CacheVolumes       []string          `json:"cacheVolumes,omitempty"`
 	Labels             map[string]string `json:"labels,omitempty"`
 }
 
@@ -52,7 +53,10 @@ func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, 
 			WindowsMode: strings.TrimSpace(cfg.WindowsMode),
 		}
 	}
-	return claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim)
+	if err := claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim); err != nil {
+		return err
+	}
+	return updateLeaseClaimCacheVolumes(leaseID, CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes))
 }
 
 func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
@@ -190,6 +194,33 @@ func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 	if port, err := strconv.Atoi(strings.TrimSpace(target.Port)); err == nil && port > 0 {
 		claim.SSHPort = port
 	}
+	data, err := json.MarshalIndent(claim, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return exit(2, "write claim %s: %v", path, err)
+	}
+	return nil
+}
+
+func updateLeaseClaimCacheVolumes(leaseID string, specs []string) error {
+	if leaseID == "" {
+		return nil
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		return err
+	}
+	if claim.LeaseID == "" {
+		return nil
+	}
+	claim.CacheVolumes = append([]string(nil), specs...)
 	data, err := json.MarshalIndent(claim, "", "  ")
 	if err != nil {
 		return err

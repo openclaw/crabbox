@@ -1,5 +1,10 @@
 import { cloudInit } from "./bootstrap";
-import { gcpMachineTypeCandidatesForClass, sshPorts, validCIDRs, type LeaseConfig } from "./config";
+import {
+  gcpMachineTypeCandidatesForClass,
+  sshPorts,
+  validatedCIDRs,
+  type LeaseConfig,
+} from "./config";
 import { leaseProviderLabels } from "./provider-labels";
 import { leaseProviderName } from "./slug";
 import type { Env, ProviderImage, ProviderMachine, ProvisioningAttempt } from "./types";
@@ -79,7 +84,10 @@ export class GCPClient {
     this.network = env.CRABBOX_GCP_NETWORK?.trim() || "default";
     this.subnet = env.CRABBOX_GCP_SUBNET?.trim() || "";
     this.tags = uniqueStrings((env.CRABBOX_GCP_TAGS ?? "crabbox-ssh").split(","));
-    this.sshCIDRs = validCIDRs((env.CRABBOX_GCP_SSH_CIDRS ?? "").split(","));
+    this.sshCIDRs = validatedCIDRs(
+      (env.CRABBOX_GCP_SSH_CIDRS ?? "").split(","),
+      "CRABBOX_GCP_SSH_CIDRS",
+    );
     if (this.sshCIDRs.length === 0) this.sshCIDRs.push("0.0.0.0/0");
     this.rootGB = numberFromEnv(env.CRABBOX_GCP_ROOT_GB, 400);
     this.serviceAccount = env.CRABBOX_GCP_SERVICE_ACCOUNT?.trim() || "";

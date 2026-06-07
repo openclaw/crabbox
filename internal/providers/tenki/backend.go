@@ -267,6 +267,13 @@ func (b *tenkiBackend) createSession(ctx context.Context, cfg Config, name, leas
 		"--metadata", tenkiMetadataSlug+"="+slug,
 		"--tags", "crabbox,crabbox-provider-tenki",
 	)
+	labels := directLeaseLabels(cfg, leaseID, slug, tenkiProvider, "", keep, tenkiNow().UTC())
+	labels["server_type"] = tenkiConfiguredServerType(cfg)
+	for _, item := range tenkiPersistedLabelMetadata {
+		if value := strings.TrimSpace(labels[item.label]); value != "" && value != "unknown" {
+			args = append(args, "--metadata", item.metadata+"="+value)
+		}
+	}
 	if keep {
 		args = append(args, "--sticky")
 	}
@@ -747,10 +754,16 @@ func quoteOpenSSHProxyWord(word string) string {
 
 func (b *tenkiBackend) sessionToServer(cfg Config, session tenkiSession, leaseID, slug string, keep bool) Server {
 	labels := directLeaseLabels(cfg, leaseID, slug, tenkiProvider, "", keep, time.Now().UTC())
+	for _, item := range tenkiPersistedLabelMetadata {
+		if value := strings.TrimSpace(session.Metadata[item.metadata]); value != "" {
+			labels[item.label] = value
+		}
+	}
 	labels["tenki_session_id"] = session.ID
 	labels["name"] = session.Name
 	labels["state"] = tenkiState(session.State)
 	labels["work_root"] = cfg.WorkRoot
+	labels["server_type"] = tenkiServerType(cfg, session)
 	if session.ProjectID != "" {
 		labels["project_id"] = session.ProjectID
 	}
@@ -808,6 +821,24 @@ const (
 	tenkiMetadataLease    = "crabbox_lease_id"
 	tenkiMetadataSlug     = "crabbox_slug"
 )
+
+var tenkiPersistedLabelMetadata = []struct {
+	label    string
+	metadata string
+}{
+	{label: "class", metadata: "crabbox_class"},
+	{label: "created_at", metadata: "crabbox_created_at"},
+	{label: "expires_at", metadata: "crabbox_expires_at"},
+	{label: "idle_timeout", metadata: "crabbox_idle_timeout"},
+	{label: "idle_timeout_secs", metadata: "crabbox_idle_timeout_secs"},
+	{label: "keep", metadata: "crabbox_keep"},
+	{label: "last_touched_at", metadata: "crabbox_last_touched_at"},
+	{label: "profile", metadata: "crabbox_profile"},
+	{label: "provider_key", metadata: "crabbox_provider_key"},
+	{label: "server_type", metadata: "crabbox_server_type"},
+	{label: "target", metadata: "crabbox_target"},
+	{label: "ttl_secs", metadata: "crabbox_ttl_secs"},
+}
 
 func tenkiLeaseMetadata(session tenkiSession) (string, string) {
 	leaseID := ""
@@ -876,6 +907,16 @@ func tenkiServerType(cfg Config, session tenkiSession) string {
 	return "sandbox"
 }
 
+func tenkiConfiguredServerType(cfg Config) string {
+	if cfg.Tenki.Image != "" {
+		return cfg.Tenki.Image
+	}
+	if cfg.Tenki.Snapshot != "" {
+		return "snapshot"
+	}
+	return "sandbox"
+}
+
 func tenkiWorkRoot(cfg Config) string {
 	return blank(strings.TrimSpace(cfg.Tenki.WorkRoot), "/home/tenki/crabbox")
 }
@@ -905,3 +946,5 @@ func fileExists(path string) bool {
 }
 
 var waitForSSHReadyFunc = waitForSSHReady
+
+var tenkiNow = time.Now

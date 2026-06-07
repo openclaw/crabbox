@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type recordingCommandRunner struct {
@@ -322,6 +323,30 @@ func TestProviderFlagsApplyLocalContainerWithoutCoreEdits(t *testing.T) {
 	}
 }
 
+func TestSSHCommandConfigAppliesProviderFlags(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("ssh", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	id := fs.String("id", "", "")
+	providerFlags := registerProviderFlags(fs, defaults)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "local-container",
+		"--local-container-runtime", "podman",
+		"--id", "example-podman",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadSSHCommandConfig(fs, *provider, providerFlags, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "local-container" || cfg.LocalContainer.Runtime != "podman" {
+		t.Fatalf("ssh config did not apply local-container runtime: provider=%s runtime=%s", cfg.Provider, cfg.LocalContainer.Runtime)
+	}
+}
+
 func TestProviderFlagsApplyProxmoxWithoutSecrets(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)
@@ -370,6 +395,140 @@ func TestLeaseCreateFlagsApplySelectedProviderFlags(t *testing.T) {
 	}
 	if cfg.Blacksmith.Org != "openclaw" || cfg.Blacksmith.Workflow != ".github/workflows/testbox.yml" || cfg.Blacksmith.Job != "test" || cfg.Blacksmith.Ref != "feature" {
 		t.Fatalf("blacksmith flags not applied through provider registry: %#v", cfg.Blacksmith)
+	}
+}
+
+func TestLeaseCreateFlagsApplyCacheVolumes(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "blacksmith-testbox",
+		"--blacksmith-workflow", ".github/workflows/testbox.yml",
+		"--cache-volume", "pnpm=repo-linux-node24-lock:/var/cache/crabbox/pnpm",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Cache.Volumes) != 1 || cfg.Cache.Volumes[0].Name != "pnpm" || !cfg.Cache.Volumes[0].Required {
+		t.Fatalf("cache volume flag not applied: %#v", cfg.Cache.Volumes)
+	}
+}
+
+func TestLeaseCreateFlagsMergeCacheVolumes(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "blacksmith-testbox",
+		"--cache-volume", "npm=repo-linux-node24-npm:/var/cache/crabbox/npm",
+		"--cache-volume", "pnpm=repo-linux-node24-pnpm:/var/cache/crabbox/pnpm",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Cache.Volumes = []CacheVolumeConfig{
+		{Name: "pnpm-store", Key: "repo-linux-node24-pnpm", Path: "/var/cache/crabbox/pnpm"},
+	}
+	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Cache.Volumes) != 2 {
+		t.Fatalf("cache volumes not merged: %#v", cfg.Cache.Volumes)
+	}
+	if cfg.Cache.Volumes[0].Name != "pnpm" || !cfg.Cache.Volumes[0].Required {
+		t.Fatalf("duplicate cache volume was not upgraded to required: %#v", cfg.Cache.Volumes)
+	}
+	if cfg.Cache.Volumes[1].Name != "npm" || cfg.Cache.Volumes[1].Key != "repo-linux-node24-npm" || !cfg.Cache.Volumes[1].Required {
+		t.Fatalf("new cache volume was not appended: %#v", cfg.Cache.Volumes)
+	}
+}
+
+func TestRequiredCacheVolumeRejectsUnsupportedProvider(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "aws",
+		"--cache-volume", "pnpm=repo-linux-node24-lock:/var/cache/crabbox/pnpm",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	err := applyLeaseCreateFlags(&cfg, fs, values)
+	if err == nil || !strings.Contains(err.Error(), "does not support required cache volume") {
+		t.Fatalf("err=%v, want unsupported cache volume", err)
+	}
+}
+
+func TestRequiredCacheVolumeRejectsExistingLease(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "blacksmith-testbox",
+		"--cache-volume", "pnpm=repo-linux-node24-lock:/var/cache/crabbox/pnpm",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	err := applyLeaseCreateFlagsForLease(&cfg, fs, values, "tbx_existing")
+	if err == nil || !strings.Contains(err.Error(), "cannot be verified for existing lease") {
+		t.Fatalf("err=%v, want existing lease cache volume rejection", err)
+	}
+}
+
+func TestConfiguredCacheVolumeAllowsExistingLeaseReuse(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "blacksmith-testbox"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Cache.Volumes = []CacheVolumeConfig{{
+		Name:     "pnpm",
+		Key:      "repo-linux-node24-lock",
+		Path:     "/var/cache/crabbox/pnpm",
+		Required: true,
+	}}
+	if err := claimLeaseForRepoProvider("tbx_existing", "existing", "blacksmith-testbox", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimCacheVolumes("tbx_existing", CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyLeaseCreateFlagsForLease(&cfg, fs, values, "tbx_existing"); err != nil {
+		t.Fatalf("configured cache volume should allow reuse: %v", err)
+	}
+}
+
+func TestConfiguredCacheVolumeRejectsExistingLeaseWithoutClaimedVolume(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "blacksmith-testbox"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Cache.Volumes = []CacheVolumeConfig{{
+		Name:     "pnpm",
+		Key:      "repo-linux-node24-lock",
+		Path:     "/var/cache/crabbox/pnpm",
+		Required: true,
+	}}
+	if err := claimLeaseForRepoProvider("tbx_existing", "existing", "blacksmith-testbox", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	err := applyLeaseCreateFlagsForLease(&cfg, fs, values, "tbx_existing")
+	if err == nil || !strings.Contains(err.Error(), "is not recorded on existing lease") {
+		t.Fatalf("err=%v, want missing cache volume claim rejection", err)
 	}
 }
 

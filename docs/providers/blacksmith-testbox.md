@@ -12,6 +12,11 @@ authenticated `blacksmith` CLI and adds Crabbox ergonomics on top: stable lease
 IDs and slugs, repo claims, timing summaries, proof artifacts, and normalized
 `list`/`status` output. Target OS is Linux only.
 
+Configured [`cache.volumes`](../features/cache-volumes.md) are forwarded
+as Blacksmith sticky disks during Testbox warmup. Use them for package-manager
+stores and other rebuildable dependency caches; keep secrets, checkout state,
+and proof artifacts out of sticky disks.
+
 ## When to use
 
 Use Blacksmith when the repository already has a Testbox workflow and the remote

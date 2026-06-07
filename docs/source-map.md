@@ -74,8 +74,9 @@ SSH-lease providers:
 - Proxmox VE: `internal/providers/proxmox`, with CLI helpers in `internal/cli/proxmox.go`
 - Static/BYO SSH host: `internal/providers/ssh`, with target mapping in `internal/cli/static.go`
 - Local Docker container: `internal/providers/localcontainer`
-- Daytona, exe.dev, Namespace devbox, RunPod, Semaphore, Sprites, Railway:
-  `internal/providers/daytona`, `internal/providers/exedev`, `internal/providers/namespace`,
+- Canonical Multipass local Ubuntu VM: `internal/providers/multipass`
+- Daytona, exe.dev, KubeVirt, External, Tenki, Namespace devbox, RunPod, Semaphore, Sprites, Railway:
+  `internal/providers/daytona`, `internal/providers/exedev`, `internal/providers/kubevirt`, `internal/providers/external`, `internal/providers/tenki`, `internal/providers/namespace`,
   `internal/providers/runpod`, `internal/providers/semaphore`, `internal/providers/sprites`,
   `internal/providers/railway`
 
@@ -170,13 +171,6 @@ Provider docs:
 - Usage aggregation, pricing fallback, owner/org limits, and cost guardrails: `worker/src/usage.ts`
 - Worker package scripts and dependencies: `worker/package.json`
 - Worker deployment config: `worker/wrangler.jsonc`, `worker/wrangler.cloudflare.jsonc`
-
-## OpenClaw Plugin
-
-- Plugin metadata and config schema: `package.json`, `openclaw.plugin.json`
-- Tool registration and CLI wrapper behavior: `index.js`
-- Plugin tests: `index.test.js`
-- Plugin feature doc: `docs/features/openclaw-plugin.md`
 
 ## Cross-cutting Feature Docs
 

@@ -118,6 +118,9 @@ sync:
   # Ordered fallback ports tried after ssh.port; use [] to disable fallback.
   fallbackPorts:
     - "22"
+cache:
+  # Optional provider-backed cache volumes. Keep paths outside the synced source tree.
+  volumes: []
 `)
 	if len(detected.Commands) > 0 {
 		b.WriteString("jobs:\n")
@@ -263,6 +266,7 @@ Workflow:
 - Warm early: crabbox warmup
 - Reuse the returned slug for interactive checks and keep the cbx_ id in scripts/logs.
 - Run checks with crabbox run --id <slug> -- <command>.
+- Use --cache-volume [name=]key:path only when the selected provider supports provider-backed cache volumes.
 - Use crabbox status --id <slug> --wait before broad gates if needed.
 - Use crabbox ssh --id <slug> to inspect the runner when a failure needs live context.
 - Stop with crabbox stop <slug> when finished.

@@ -59,3 +59,29 @@ func TestRemoteCacheWarmCommandSourcesHydrationEnvFile(t *testing.T) {
 		}
 	}
 }
+
+func TestParseCacheVolumeSpecs(t *testing.T) {
+	volumes, err := ParseCacheVolumeSpecs([]string{
+		"pnpm=repo-linux-node24-lock:/var/cache/crabbox/pnpm",
+		"npm-cache:/var/cache/crabbox/npm",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(volumes) != 2 {
+		t.Fatalf("volumes=%#v", volumes)
+	}
+	if volumes[0].Name != "pnpm" || volumes[0].Key != "repo-linux-node24-lock" || volumes[0].Path != "/var/cache/crabbox/pnpm" {
+		t.Fatalf("first volume=%#v", volumes[0])
+	}
+	if volumes[1].Name != "npm-cache" || volumes[1].Key != "npm-cache" || volumes[1].Path != "/var/cache/crabbox/npm" {
+		t.Fatalf("second volume=%#v", volumes[1])
+	}
+}
+
+func TestParseCacheVolumeSpecRequiresAbsolutePath(t *testing.T) {
+	_, err := ParseCacheVolumeSpec("pnpm:relative/cache")
+	if err == nil || !strings.Contains(err.Error(), "must be absolute") {
+		t.Fatalf("err=%v, want absolute path error", err)
+	}
+}

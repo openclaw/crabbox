@@ -43,6 +43,14 @@ crabbox ssh --provider docker --id local-smoke
 crabbox stop --provider docker local-smoke
 ```
 
+Cache volume smoke:
+
+```sh
+crabbox run --provider local-container \
+  --cache-volume pnpm-store=my-app-linux-pnpm:/var/cache/crabbox/pnpm \
+  -- pnpm test
+```
+
 Desktop and browser smoke:
 
 ```sh
@@ -53,27 +61,31 @@ crabbox desktop click --provider docker --id local-ui --x 120 --y 120
 crabbox webvnc --provider docker --id local-ui
 ```
 
-The provider talks only to the Docker-compatible CLI and daemon; it does not use
-Docker Desktop-specific APIs. OrbStack, Colima, and similar runtimes work when
-they are the active `docker` context.
+The provider talks only to a Docker-compatible CLI and daemon; it does not use
+Docker Desktop-specific APIs. Crabbox detects an installed `docker` or `podman`
+CLI and uses that runtime. Set `localContainer.runtime` when you need a specific
+CLI.
 
 ## Configuration
 
 ```yaml
 provider: local-container
 localContainer:
-  runtime: docker          # Docker-compatible CLI to invoke
+  runtime: docker          # Docker-compatible CLI to invoke; detects docker/podman by default
   image: debian:bookworm   # base image for the lease
   user: crabbox            # SSH user created inside the container
   workRoot: /work/crabbox  # remote Crabbox work root
   cpus: 0                  # CPU limit; 0 leaves the runtime default
   memory: ""               # memory limit, e.g. 8g
   network: bridge          # container network
-  dockerSocket: false      # mount the host Docker socket into the lease
+  dockerSocket: false      # mount the host Docker-compatible socket into the lease
 ```
 
 Defaults applied when unset: `runtime=docker`, `image=debian:bookworm`,
 `user=crabbox`, `network=bridge`, `workRoot=/work/crabbox`, SSH port `2222`.
+When `runtime` is unset or left at `docker`, Crabbox detects an installed
+container CLI. If both `docker` and `podman` are available, `docker` is selected
+unless `runtime` is set explicitly.
 
 Provider flags:
 
@@ -101,17 +113,20 @@ CRABBOX_LOCAL_CONTAINER_NETWORK
 CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET
 ```
 
-The active runtime is selected from the standard `DOCKER_HOST` / Docker context;
-remote Docker contexts are not the intended path because Crabbox connects to the
-published SSH port from the local machine.
+For runtimes that use Docker contexts or Docker-compatible API sockets, the
+active socket is selected from `DOCKER_HOST` or the Docker context when socket
+pass-through is enabled. Remote TCP contexts are not the intended path because
+Crabbox connects to the published SSH port from the local machine.
 
-### Docker socket pass-through
+### Socket pass-through
 
 Set `localContainer.dockerSocket: true` or
 `CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET=1` when commands inside the lease need to
-run `docker`. Crabbox mounts the active local Unix Docker socket into the
-container at `/var/run/docker.sock`, so in-lease `docker` commands run against
-the active local daemon. Remote Docker hosts are rejected in this mode.
+run `docker`. Crabbox mounts the active local Unix Docker-compatible socket into
+the container at `/var/run/docker.sock`, so in-lease `docker` commands run
+against the host engine. For Podman, point `DOCKER_HOST` at the Podman socket,
+for example `unix://$XDG_RUNTIME_DIR/podman/podman.sock`. Remote TCP hosts are
+rejected in this mode. Basic Podman leases do not require socket pass-through.
 
 When the socket is enabled and no work root is explicitly configured, Crabbox
 uses a host-visible cache work root so nested Docker bind mounts can see the
@@ -156,11 +171,14 @@ metadata updates.
 - No code-server, no Tailscale bootstrap, and no native checkpoint support.
 - `warmup --actions-runner` is not supported. Use plain `crabbox run` for local
   container smoke tests, or a remote SSH provider for GitHub runner registration.
-- Docker socket pass-through is opt-in and grants the lease access to the host
-  Docker daemon. Do not treat the container as the same host-isolation boundary
-  as a remote VM or microVM.
+- Socket pass-through is opt-in and grants the lease access to the host
+  container engine. Do not treat the container as the same host-isolation
+  boundary as a remote VM or microVM.
 - The current checkout is synced into the container by default rather than
-  bind-mounted; the Docker socket is mounted only when explicitly enabled.
+  bind-mounted; the engine socket is mounted only when explicitly enabled.
+- Cache volumes persist as Docker-compatible named volumes after a container is
+  stopped.
+  Remove them with the Docker-compatible runtime when the cache key is obsolete.
 - The default `debian:bookworm` image bootstraps packages on first start. Use a
   prebuilt image with SSH/Git/rsync/desktop/browser packages when startup time
   matters.
@@ -169,12 +187,13 @@ metadata updates.
 
 The backend relies on standard Docker-compatible behavior:
 
-- `docker run`, `docker ps`, `docker inspect`, `docker rm`;
+- `docker`/`podman run`, `ps`, `inspect`, and `rm`;
+- Docker-compatible named volumes;
 - container labels;
 - loopback port publishing.
 
-That keeps it portable across Docker Desktop, OrbStack, Colima, and other
-runtimes exposing the standard Docker CLI.
+That keeps it portable across Docker Desktop, OrbStack, Colima, Podman, and
+other runtimes exposing the standard Docker-compatible CLI.
 
 ## Related
 

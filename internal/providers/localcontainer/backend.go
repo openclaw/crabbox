@@ -2,11 +2,13 @@ package localcontainer
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -111,6 +113,12 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, err
 	}
 	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		if !req.Keep {
+			_ = b.removeContainer(context.Background(), containerID)
+		}
+		return core.LeaseTarget{}, err
+	}
+	if err := core.UpdateLeaseClaimCacheVolumes(leaseID, core.CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
 		if !req.Keep {
 			_ = b.removeContainer(context.Background(), containerID)
 		}
@@ -301,7 +309,30 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 func (b *backend) configForRun() core.Config {
 	cfg := b.cfg
 	applyDefaults(&cfg)
+	b.detectContainerRuntime(&cfg)
 	return cfg
+}
+
+func (b *backend) detectContainerRuntime(cfg *core.Config) {
+	if core.LocalContainerRuntimeExplicit(*cfg) {
+		return
+	}
+	runtimeName := strings.TrimSpace(cfg.LocalContainer.Runtime)
+	if runtimeName != "" && runtimeName != "docker" {
+		return
+	}
+	if commandAvailable("docker") {
+		cfg.LocalContainer.Runtime = "docker"
+		return
+	}
+	if commandAvailable("podman") {
+		cfg.LocalContainer.Runtime = "podman"
+	}
+}
+
+func commandAvailable(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 func applyDefaults(cfg *core.Config) {
@@ -359,6 +390,10 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		labels["host_work_root"] = hostWorkRoot
 	}
 	labels["work_root"] = containerWorkRoot
+	cacheVolumeMounts, err := localContainerCacheVolumeMounts(cfg.Cache.Volumes)
+	if err != nil {
+		return "", err
+	}
 	args := []string{
 		"run", "-d",
 		"--name", name,
@@ -374,6 +409,9 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		"-e", "CRABBOX_DESKTOP_ENV=" + core.NormalizedDesktopEnv(cfg.DesktopEnv),
 		"-e", "CRABBOX_BROWSER=" + boolEnv(cfg.Browser),
 		"-e", "CRABBOX_DOCKER_SOCKET=" + boolEnv(cfg.LocalContainer.DockerSocket),
+	}
+	for i, volume := range cfg.Cache.Volumes {
+		args = append(args, "-e", fmt.Sprintf("CRABBOX_CACHE_VOLUME_PATH_%d=%s", i, strings.TrimSpace(volume.Path)))
 	}
 	for key, value := range labels {
 		args = append(args, "--label", key+"="+value)
@@ -404,8 +442,27 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 			return "", err
 		}
 		args = append(args, "-v", socketPath+":"+dockerSocketInGuest)
+		if isPodmanRuntime(cfg.LocalContainer.Runtime) {
+			args = append(args, "--security-opt", "label=disable")
+		}
 	}
-	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "-lc", bootstrapScript)
+	for _, mount := range cacheVolumeMounts {
+		args = append(args, "-v", mount)
+	}
+	bootstrapFile, err := os.CreateTemp("", "crabbox-bootstrap-*.sh")
+	if err != nil {
+		return "", core.Exit(2, "create bootstrap script file: %v", err)
+	}
+	defer os.Remove(bootstrapFile.Name())
+	if _, err := bootstrapFile.WriteString(bootstrapScript); err != nil {
+		bootstrapFile.Close()
+		return "", core.Exit(2, "write bootstrap script: %v", err)
+	}
+	if err := bootstrapFile.Close(); err != nil {
+		return "", core.Exit(2, "close bootstrap script: %v", err)
+	}
+	args = append(args, "-v", bootstrapFile.Name()+":/tmp/crabbox-bootstrap.sh:ro")
+	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "/tmp/crabbox-bootstrap.sh")
 	result, err := b.docker(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
 		return "", commandError("container run", result, err)
@@ -415,6 +472,56 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		return "", core.Exit(2, "%s run did not return a container id", cfg.LocalContainer.Runtime)
 	}
 	return id, nil
+}
+
+func localContainerCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]string, error) {
+	mounts := make([]string, 0, len(volumes))
+	for _, volume := range volumes {
+		key := strings.TrimSpace(volume.Key)
+		path := strings.TrimSpace(volume.Path)
+		if key == "" {
+			return nil, core.Exit(2, "cache volume key is required")
+		}
+		if strings.Contains(key, ":") {
+			return nil, core.Exit(2, "cache volume key %q must not contain ':'", key)
+		}
+		if path == "" {
+			return nil, core.Exit(2, "cache volume path is required")
+		}
+		if !strings.HasPrefix(path, "/") {
+			return nil, core.Exit(2, "cache volume path %q must be absolute", path)
+		}
+		mounts = append(mounts, localContainerCacheVolumeName(key)+":"+path)
+	}
+	return mounts, nil
+}
+
+func localContainerCacheVolumeName(key string) string {
+	key = strings.TrimSpace(key)
+	sum := sha256.Sum256([]byte(key))
+	var safe strings.Builder
+	for _, r := range key {
+		switch {
+		case r >= 'a' && r <= 'z':
+			safe.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			safe.WriteRune(r + ('a' - 'A'))
+		case r >= '0' && r <= '9':
+			safe.WriteRune(r)
+		case r == '.' || r == '_' || r == '-':
+			safe.WriteRune(r)
+		default:
+			safe.WriteByte('-')
+		}
+		if safe.Len() >= 80 {
+			break
+		}
+	}
+	name := strings.Trim(safe.String(), ".-_")
+	if name == "" {
+		name = "volume"
+	}
+	return fmt.Sprintf("crabbox-cache-%s-%x", name, sum[:6])
 }
 
 func (b *backend) dockerSocketMountPath(ctx context.Context) (string, error) {
@@ -447,7 +554,7 @@ func dockerSocketMountPathFromHostForGOOS(host, goos string) (string, error) {
 	}
 	path, ok := localDockerSocketPath(host)
 	if !ok {
-		return "", core.Exit(2, "local-container docker socket requested but active Docker host %q is not a local Unix socket", host)
+		return "", core.Exit(2, "local-container socket pass-through requested but DOCKER_HOST %q is not a local Unix socket", host)
 	}
 	if goos != "linux" {
 		return dockerSocketInGuest, nil
@@ -509,10 +616,10 @@ func localDockerSocketPath(host string) (string, bool) {
 func validateDockerSocketMountPath(path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", core.Exit(2, "local-container docker socket requested but %s is not available: %v", path, err)
+		return "", core.Exit(2, "local-container socket pass-through requested but %s is not available: %v", path, err)
 	}
 	if info.Mode()&os.ModeSocket == 0 {
-		return "", core.Exit(2, "local-container docker socket requested but %s is not a socket", path)
+		return "", core.Exit(2, "local-container socket pass-through requested but %s is not a socket", path)
 	}
 	return path, nil
 }
@@ -649,14 +756,18 @@ func (b *backend) removeContainer(ctx context.Context, id string) error {
 }
 
 func (b *backend) runtimeInfo(ctx context.Context) (string, string) {
+	cfg := b.configForRun()
 	version, err := b.docker(ctx, []string{"version", "--format", "{{.Client.Version}}"}, nil, nil)
 	if err != nil {
 		return "unknown", ""
 	}
-	return strings.TrimSpace(version.Stdout), b.runtimeContext(ctx)
+	return strings.TrimSpace(version.Stdout), b.runtimeContext(ctx, cfg.LocalContainer.Runtime)
 }
 
-func (b *backend) runtimeContext(ctx context.Context) string {
+func (b *backend) runtimeContext(ctx context.Context, runtimeName string) string {
+	if isPodmanRuntime(runtimeName) {
+		return "default"
+	}
 	contextName, err := b.docker(ctx, []string{"context", "show"}, nil, nil)
 	if err != nil {
 		return ""
@@ -665,7 +776,12 @@ func (b *backend) runtimeContext(ctx context.Context) string {
 }
 
 func (b *backend) claimScope(ctx context.Context) string {
-	return localContainerClaimScope(b.configForRun().LocalContainer.Runtime, b.runtimeContext(ctx), b.runtimeHost(ctx))
+	cfg := b.configForRun()
+	return localContainerClaimScope(
+		cfg.LocalContainer.Runtime,
+		b.runtimeContext(ctx, cfg.LocalContainer.Runtime),
+		b.runtimeHost(ctx, cfg.LocalContainer.Runtime),
+	)
 }
 
 func localContainerClaimScope(runtimeName, contextName string, hostValues ...string) string {
@@ -685,9 +801,12 @@ func localContainerClaimScope(runtimeName, contextName string, hostValues ...str
 	return scope
 }
 
-func (b *backend) runtimeHost(ctx context.Context) string {
+func (b *backend) runtimeHost(ctx context.Context, runtimeName string) string {
 	if host := strings.TrimSpace(os.Getenv("DOCKER_HOST")); host != "" {
 		return host
+	}
+	if isPodmanRuntime(runtimeName) {
+		return ""
 	}
 	result, err := b.docker(ctx, []string{"context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"}, nil, nil)
 	if err != nil {
@@ -794,6 +913,10 @@ func commandError(action string, result core.LocalCommandResult, err error) erro
 		return core.Exit(code, "%s failed: %v: %s", action, err, detail)
 	}
 	return core.Exit(code, "%s failed: %v", action, err)
+}
+
+func isPodmanRuntime(runtimeName string) bool {
+	return filepath.Base(strings.TrimSpace(runtimeName)) == "podman"
 }
 
 func shortID(id string) string {
@@ -984,7 +1107,7 @@ if [ "${CRABBOX_DESKTOP:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
   apt-get update
   if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
     if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "gnome" ]; then
-      apt-get install -y --no-install-recommends labwc wayvnc gnome-panel wlr-randr grim slurp wtype wl-clipboard dbus-user-session xwayland xdg-desktop-portal-wlr xdg-desktop-portal-gtk gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme fonts-dejavu-core fonts-liberation iproute2 openssl procps netcat-openbsd novnc websockify
+      apt-get install -y --no-install-recommends labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard dbus-user-session xwayland xdg-desktop-portal-wlr xdg-desktop-portal-gtk gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme fonts-dejavu-core fonts-liberation iproute2 openssl procps netcat-openbsd novnc websockify
     else
       apt-get install -y --no-install-recommends labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps netcat-openbsd novnc websockify
     fi
@@ -1036,12 +1159,24 @@ if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker >/dev/null 2>&
   fi
 fi
 if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker >/dev/null 2>&1; then
-  echo "docker socket requested but docker CLI is not installed; use a Debian/Ubuntu-compatible image or preinstall docker" >&2
+  echo "Docker-compatible socket requested but docker CLI is not installed; use a Debian/Ubuntu-compatible image or preinstall docker" >&2
   exit 127
 fi
 if ! command -v /usr/sbin/sshd >/dev/null 2>&1; then
   echo "missing /usr/sbin/sshd; use a Debian/Ubuntu-compatible image or a prebuilt Crabbox runner image" >&2
   exit 127
+fi
+if [ -f /etc/ssh/sshd_config ]; then
+  if grep -qE '^[#[:space:]]*UsePAM[[:space:]]+' /etc/ssh/sshd_config; then
+    sed -i 's/^[#[:space:]]*UsePAM[[:space:]].*/UsePAM no/' /etc/ssh/sshd_config
+  else
+    printf '\nUsePAM no\n' >> /etc/ssh/sshd_config
+  fi
+  if grep -qE '^[#[:space:]]*PasswordAuthentication[[:space:]]+' /etc/ssh/sshd_config; then
+    sed -i 's/^[#[:space:]]*PasswordAuthentication[[:space:]].*/PasswordAuthentication no/' /etc/ssh/sshd_config
+  else
+    printf '\nPasswordAuthentication no\n' >> /etc/ssh/sshd_config
+  fi
 fi
 user="${CRABBOX_SSH_USER:-crabbox}"
 work_root="${CRABBOX_WORK_ROOT:-/work/crabbox}"
@@ -1049,6 +1184,7 @@ ssh_port="${CRABBOX_SSH_PORT:-2222}"
 if ! id "$user" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$user"
 fi
+passwd -d "$user" >/dev/null 2>&1 || true
 home_dir="$(getent passwd "$user" | cut -d: -f6)"
 if [ -z "$home_dir" ]; then
   home_dir="/home/$user"
@@ -1066,7 +1202,7 @@ if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && [ -S /var/run/docker.sock ]; then
     fi
   fi
 fi
-mkdir -p /run/sshd "$work_root" "$home_dir/.ssh"
+mkdir -p /run/sshd "$work_root" "$home_dir/.ssh" /var/cache/crabbox/pnpm /var/cache/crabbox/npm
 printf '%s\n' "$CRABBOX_AUTHORIZED_KEY" > "$home_dir/.ssh/authorized_keys"
 chmod 700 "$home_dir/.ssh"
 chmod 600 "$home_dir/.ssh/authorized_keys"
@@ -1075,6 +1211,12 @@ if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ]; then
 else
   chown -R "$user" "$home_dir/.ssh" "$work_root"
 fi
+chown -R "$user" /var/cache/crabbox
+env | sed -n 's/^CRABBOX_CACHE_VOLUME_PATH_[0-9][0-9]*=//p' | while IFS= read -r cache_path; do
+  [ -n "$cache_path" ] || continue
+  mkdir -p "$cache_path"
+  chown -R "$user" "$cache_path"
+done
 if command -v sudo >/dev/null 2>&1; then
   printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$user" > /etc/sudoers.d/crabbox
   chmod 440 /etc/sudoers.d/crabbox
@@ -1103,10 +1245,23 @@ for _ in $(seq 1 20); do
 done
 export XDG_CURRENT_DESKTOP=GNOME
 export XDG_SESSION_DESKTOP=gnome
-export GTK_THEME=Adwaita
+theme="$(cat "$HOME/.config/crabbox/desktop-theme" 2>/dev/null || printf dark)"
+if [ "$theme" = light ]; then
+  export GTK_THEME=Adwaita
+  gsettings set org.gnome.desktop.interface color-scheme prefer-light >/dev/null 2>&1 || true
+  gsettings set org.gnome.desktop.interface gtk-theme Adwaita >/dev/null 2>&1 || true
+else
+  export GTK_THEME=Adwaita-dark
+  gsettings set org.gnome.desktop.interface color-scheme prefer-dark >/dev/null 2>&1 || true
+  gsettings set org.gnome.desktop.interface gtk-theme Adwaita-dark >/dev/null 2>&1 || true
+fi
 export DISPLAY="${DISPLAY:-:0}"
 export GDK_BACKEND=x11
 export MOZ_ENABLE_WAYLAND=0
+wallpaper_file="$HOME/.config/crabbox/desktop-background-$theme.svg"
+if command -v swaybg >/dev/null 2>&1; then
+  (swaybg -i "$wallpaper_file" -m fill >/tmp/crabbox-swaybg.log 2>&1 || swaybg -c "#0d1117" >/tmp/crabbox-swaybg.log 2>&1) &
+fi
 gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &
 gnome-terminal -- bash -l >/tmp/crabbox-gnome-terminal.log 2>&1 &
 nautilus --new-window "$HOME" >/tmp/crabbox-nautilus.log 2>&1 &
@@ -1124,6 +1279,202 @@ port=5900
 enable_auth=false
 xkb_layout=us
 WAYVNC
+    if [ "$desktop_env" = "gnome" ]; then
+    cat >/usr/local/bin/crabbox-configure-desktop-theme <<'THEME'
+#!/bin/sh
+set -eu
+requested_mode="${1:-${CRABBOX_DESKTOP_THEME:-}}"
+user="${CRABBOX_DESKTOP_USER:-crabbox}"
+home_dir="$(getent passwd "$user" | cut -d: -f6)"
+if [ -z "$home_dir" ]; then
+  home_dir="/home/$user"
+fi
+config_dir="$home_dir/.config"
+mode="$requested_mode"
+if [ -z "$mode" ] && [ -f "$config_dir/crabbox/desktop-theme" ]; then
+  mode="$(cat "$config_dir/crabbox/desktop-theme" 2>/dev/null || true)"
+fi
+case "$mode" in
+  light|dark) ;;
+  *) mode=dark ;;
+esac
+if [ "$mode" = "light" ]; then
+  gtk_theme=Adwaita
+  gtk_prefer_dark_ini=0
+  gsettings_scheme=prefer-light
+  terminal_fg="#1f2937"
+  terminal_bg="#f8fafc"
+  labwc_title_bg="#f3f4f6"
+  labwc_title_fg="#111827"
+  labwc_inactive_title_bg="#e5e7eb"
+  labwc_inactive_title_fg="#374151"
+  labwc_border="#cbd5e1"
+  terminal_menu_bg="#f3f4f6"
+  terminal_menu_fg="#111827"
+  terminal_menu_hover_bg="#e5e7eb"
+  wallpaper_bg="#e7eef7"
+  wallpaper_panel="#d6e7f2"
+  wallpaper_accent="#0891b2"
+  wallpaper_grid="#b9c7d7"
+else
+  gtk_theme=Adwaita-dark
+  gtk_prefer_dark_ini=1
+  gsettings_scheme=prefer-dark
+  terminal_fg="#e5e7eb"
+  terminal_bg="#000000"
+  labwc_title_bg="#1f2329"
+  labwc_title_fg="#e5e7eb"
+  labwc_inactive_title_bg="#111827"
+  labwc_inactive_title_fg="#9ca3af"
+  labwc_border="#30363d"
+  terminal_menu_bg="#2b2f36"
+  terminal_menu_fg="#d1d5db"
+  terminal_menu_hover_bg="#374151"
+  wallpaper_bg="#0d1117"
+  wallpaper_panel="#111827"
+  wallpaper_accent="#22d3ee"
+  wallpaper_grid="#1f2937"
+fi
+if [ "$(id -u)" -eq 0 ]; then
+  install -d -m 0700 -o "$user" "$config_dir/crabbox" "$config_dir/gtk-3.0" "$config_dir/gtk-4.0"
+else
+  mkdir -p "$config_dir/crabbox" "$config_dir/gtk-3.0" "$config_dir/gtk-4.0" "$config_dir/labwc"
+  chmod 0700 "$config_dir" "$config_dir/crabbox" "$config_dir/gtk-3.0" "$config_dir/gtk-4.0" "$config_dir/labwc"
+fi
+printf '%s\n' "$mode" > "$config_dir/crabbox/desktop-theme"
+for gtk_dir in "$config_dir/gtk-3.0" "$config_dir/gtk-4.0"; do
+  cat > "$gtk_dir/settings.ini" <<EOF
+[Settings]
+gtk-theme-name=$gtk_theme
+gtk-icon-theme-name=Adwaita
+gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini
+EOF
+done
+cat > "$home_dir/.gtkrc-2.0" <<EOF
+gtk-theme-name="$gtk_theme"
+gtk-icon-theme-name="Adwaita"
+gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini
+EOF
+if [ "$(id -u)" -eq 0 ]; then
+  chown -R "$user" "$config_dir/crabbox" "$config_dir/gtk-3.0" "$config_dir/gtk-4.0" "$home_dir/.gtkrc-2.0"
+fi
+if [ -f /var/lib/crabbox/desktop.env ]; then
+  . /var/lib/crabbox/desktop.env
+fi
+display="${DISPLAY:-:0}"
+runtime="${XDG_RUNTIME_DIR:-/tmp/crabbox-runtime-$(id -u "$user")}"
+dbus_address="${DBUS_SESSION_BUS_ADDRESS:-}"
+if [ -z "$dbus_address" ]; then
+  labwc_pid="$(pgrep -u "$user" -n -x labwc 2>/dev/null || true)"
+  if [ -n "$labwc_pid" ] && [ -r "/proc/$labwc_pid/environ" ]; then
+    dbus_address="$(tr '\0' '\n' < "/proc/$labwc_pid/environ" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -n1)"
+  fi
+fi
+set_gnome_terminal_theme() {
+  profiles="$(gsettings get org.gnome.Terminal.ProfilesList list 2>/dev/null | tr -d "[],'" || true)"
+  default_profile="$(gsettings get org.gnome.Terminal.ProfilesList default 2>/dev/null | tr -d "'" || true)"
+  if [ -n "$default_profile" ] && ! printf ' %s ' "$profiles" | grep -q " $default_profile "; then
+    profiles="$profiles $default_profile"
+  fi
+  for profile in $profiles; do
+    [ -n "$profile" ] || continue
+    profile_path="/org/gnome/terminal/legacy/profiles:/:$profile/"
+    gsettings set "org.gnome.Terminal.Legacy.Profile:$profile_path" use-theme-colors false >/dev/null 2>&1 || true
+    gsettings set "org.gnome.Terminal.Legacy.Profile:$profile_path" foreground-color "$terminal_fg" >/dev/null 2>&1 || true
+    gsettings set "org.gnome.Terminal.Legacy.Profile:$profile_path" background-color "$terminal_bg" >/dev/null 2>&1 || true
+    gsettings set "org.gnome.Terminal.Legacy.Profile:$profile_path" use-transparent-background false >/dev/null 2>&1 || true
+  done
+}
+set_gtk_chrome_theme() {
+  cat > "$config_dir/gtk-3.0/gtk.css" <<EOF
+menubar, .menubar {
+  background-color: $terminal_menu_bg;
+  color: $terminal_menu_fg;
+}
+menubar menuitem, menubar menuitem label {
+  color: $terminal_menu_fg;
+}
+menubar menuitem:hover {
+  background-color: $terminal_menu_hover_bg;
+  color: $terminal_menu_fg;
+}
+EOF
+}
+set_labwc_theme() {
+  mkdir -p "$config_dir/labwc"
+  cat > "$config_dir/labwc/themerc-override" <<EOF
+window.active.title.bg.color: $labwc_title_bg
+window.active.label.text.color: $labwc_title_fg
+window.inactive.title.bg.color: $labwc_inactive_title_bg
+window.inactive.label.text.color: $labwc_inactive_title_fg
+window.active.border.color: $labwc_border
+window.inactive.border.color: $labwc_border
+window.active.button.unpressed.image.color: $labwc_title_fg
+window.inactive.button.unpressed.image.color: $labwc_inactive_title_fg
+window.active.button.hover.image.color: $labwc_title_fg
+window.inactive.button.hover.image.color: $labwc_inactive_title_fg
+window.active.button.pressed.image.color: $labwc_title_fg
+window.inactive.button.pressed.image.color: $labwc_inactive_title_fg
+EOF
+  if command -v labwc >/dev/null 2>&1; then
+    labwc_pid="$(pgrep -u "$user" -n -x labwc 2>/dev/null || true)"
+    if [ -n "$labwc_pid" ]; then
+      LABWC_PID="$labwc_pid" XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" labwc --reconfigure >/dev/null 2>&1 || kill -HUP "$labwc_pid" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+set_desktop_background() {
+  wallpaper_file="$config_dir/crabbox/desktop-background-$mode.svg"
+  cat > "$wallpaper_file" <<EOF
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080">
+  <rect width="1920" height="1080" fill="$wallpaper_bg"/>
+  <path d="M0 720 C360 620 520 760 860 650 C1210 540 1430 660 1920 520 L1920 1080 L0 1080 Z" fill="$wallpaper_panel"/>
+  <g stroke="$wallpaper_grid" stroke-width="1" opacity="0.45">
+    <path d="M0 180 H1920M0 360 H1920M0 540 H1920M0 720 H1920M0 900 H1920"/>
+    <path d="M240 0 V1080M480 0 V1080M720 0 V1080M960 0 V1080M1200 0 V1080M1440 0 V1080M1680 0 V1080"/>
+  </g>
+  <path d="M220 740 C520 520 790 910 1090 670 S1510 520 1710 700" fill="none" stroke="$wallpaper_accent" stroke-width="18" stroke-linecap="round" opacity="0.8"/>
+  <rect x="1320" y="180" width="360" height="170" rx="18" fill="$wallpaper_accent" opacity="0.12"/>
+</svg>
+EOF
+  if command -v swaybg >/dev/null 2>&1; then
+    pkill -u "$user" -x swaybg >/dev/null 2>&1 || true
+    (XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" swaybg -i "$wallpaper_file" -m fill >/tmp/crabbox-swaybg.log 2>&1 || XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" swaybg -c "$wallpaper_bg" >/tmp/crabbox-swaybg.log 2>&1) &
+  fi
+}
+target_uid="$(id -u "$user" 2>/dev/null || printf 0)"
+if [ "$(id -u)" -eq 0 ] && [ "$target_uid" -ne 0 ]; then
+  su "$user" -s /bin/sh -c "CRABBOX_DESKTOP_USER='$user' CRABBOX_DESKTOP_THEME='$mode' DISPLAY='$display' XDG_RUNTIME_DIR='$runtime' DBUS_SESSION_BUS_ADDRESS='$dbus_address' GDK_BACKEND=x11 /usr/local/bin/crabbox-configure-desktop-theme '$mode'" || true
+  exit 0
+fi
+if command -v gsettings >/dev/null 2>&1; then
+  if [ "$(id -u)" -eq 0 ]; then
+    su "$user" -s /bin/sh -c "DISPLAY='$display' XDG_RUNTIME_DIR='$runtime' DBUS_SESSION_BUS_ADDRESS='$dbus_address' GDK_BACKEND=x11 gsettings set org.gnome.desktop.interface color-scheme '$gsettings_scheme' >/dev/null 2>&1 || true"
+    su "$user" -s /bin/sh -c "DISPLAY='$display' XDG_RUNTIME_DIR='$runtime' DBUS_SESSION_BUS_ADDRESS='$dbus_address' GDK_BACKEND=x11 gsettings set org.gnome.desktop.interface gtk-theme '$gtk_theme' >/dev/null 2>&1 || true"
+  else
+    DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="$dbus_address" GDK_BACKEND=x11 gsettings set org.gnome.desktop.interface color-scheme "$gsettings_scheme" >/dev/null 2>&1 || true
+    DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="$dbus_address" GDK_BACKEND=x11 gsettings set org.gnome.desktop.interface gtk-theme "$gtk_theme" >/dev/null 2>&1 || true
+    DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="$dbus_address" GDK_BACKEND=x11 set_gnome_terminal_theme
+  fi
+fi
+set_gtk_chrome_theme
+set_labwc_theme
+set_desktop_background
+if [ "$(id -u)" -eq 0 ] && pgrep -u "$user" -x gnome-panel >/dev/null 2>&1; then
+  pkill -TERM -u "$user" -x gnome-panel >/dev/null 2>&1 || true
+  su "$user" -s /bin/sh -c "DISPLAY='$display' XDG_RUNTIME_DIR='$runtime' DBUS_SESSION_BUS_ADDRESS='$dbus_address' GDK_BACKEND=x11 GTK_THEME='$gtk_theme' nohup gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &" >/dev/null 2>&1 || true
+elif [ "$(id -u)" -ne 0 ] && pgrep -x gnome-panel >/dev/null 2>&1; then
+  pkill -TERM -x gnome-panel >/dev/null 2>&1 || true
+  DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="$dbus_address" GDK_BACKEND=x11 GTK_THEME="$gtk_theme" nohup gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &
+fi
+previous_terminal_theme="$(cat "$config_dir/crabbox/gnome-terminal-theme" 2>/dev/null || true)"
+printf '%s\n' "$mode" > "$config_dir/crabbox/gnome-terminal-theme"
+if [ "$(id -u)" -ne 0 ] && [ "$mode" = dark ] && command -v gnome-terminal >/dev/null 2>&1 && { [ "$previous_terminal_theme" != "$mode" ] || ! pgrep -u "$(id -u)" -f '/gnome-terminal-server' >/dev/null 2>&1; }; then
+  (sleep 0.4; DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="$dbus_address" GDK_BACKEND=x11 GTK_THEME="$gtk_theme" NO_AT_BRIDGE=1 gnome-terminal -- bash -l >/tmp/crabbox-gnome-terminal.log 2>&1 &) >/dev/null 2>&1 &
+fi
+THEME
+    chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
+    fi
     chown -R "$user" "$home_dir/.config"
     cat >/usr/local/bin/crabbox-start-desktop <<'DESKTOP'
 #!/bin/sh
@@ -1162,9 +1513,12 @@ if [ "$desktop_env" = "gnome" ]; then
 fi
 chown "$user" /var/lib/crabbox/desktop.env
 chmod 0644 /var/lib/crabbox/desktop.env
+if [ "$desktop_env" = "gnome" ]; then
+  CRABBOX_DESKTOP_USER="$user" /usr/local/bin/crabbox-configure-desktop-theme
+fi
 if ! ss -ltn | grep -q '127.0.0.1:5900'; then
   home_dir="$(getent passwd "$user" | cut -d: -f6)"
-  su "$user" -s /bin/sh -c "XDG_RUNTIME_DIR='$runtime' WAYLAND_DISPLAY='$display' wayvnc --config '$home_dir/.config/wayvnc/config' --render-cursor --max-fps=30 >/tmp/crabbox-wayvnc.log 2>&1 &"
+  su "$user" -s /bin/sh -c "XDG_RUNTIME_DIR='$runtime' WAYLAND_DISPLAY='$display' wayvnc --config '$home_dir/.config/wayvnc/config' --render-cursor --max-fps=60 >/tmp/crabbox-wayvnc.log 2>&1 &"
 fi
 DESKTOP
     chmod 0755 /usr/local/bin/crabbox-start-desktop
@@ -1237,6 +1591,17 @@ XML
 <channel name="xfwm4" version="1.0">
   <property name="general" type="empty">
     <property name="theme" type="string" value="$xfwm_theme"/>
+    <property name="box_move" type="bool" value="false"/>
+    <property name="box_resize" type="bool" value="false"/>
+    <property name="move_opacity" type="int" value="100"/>
+    <property name="resize_opacity" type="int" value="100"/>
+    <property name="snap_resist" type="bool" value="false"/>
+    <property name="snap_to_border" type="bool" value="false"/>
+    <property name="snap_to_windows" type="bool" value="false"/>
+    <property name="snap_width" type="int" value="0"/>
+    <property name="tile_on_move" type="bool" value="false"/>
+    <property name="use_compositing" type="bool" value="false"/>
+    <property name="wrap_windows" type="bool" value="false"/>
   </property>
 </channel>
 XML
@@ -1439,6 +1804,17 @@ if command -v xfconf-query >/dev/null 2>&1; then
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s Adwaita >/dev/null 2>&1 || true"
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme -n -t bool -s '$gtk_prefer_dark' >/dev/null 2>&1 || true"
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/theme -n -t string -s '$xfwm_theme' >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/box_move -n -t bool -s false >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/box_resize -n -t bool -s false >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/move_opacity -n -t int -s 100 >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/resize_opacity -n -t int -s 100 >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/snap_resist -n -t bool -s false >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/snap_to_border -n -t bool -s false >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/snap_to_windows -n -t bool -s false >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/snap_width -n -t int -s 0 >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/tile_on_move -n -t bool -s false >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/use_compositing -n -t bool -s false >/dev/null 2>&1 || true"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/wrap_windows -n -t bool -s false >/dev/null 2>&1 || true"
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfce4-panel -p /panels/dark-mode -n -t bool -s '$gtk_prefer_dark' >/dev/null 2>&1 || true"
   set -- $panel_rgba
   for panel_id in panel-1 panel-2; do
@@ -1447,7 +1823,7 @@ if command -v xfconf-query >/dev/null 2>&1; then
   done
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' pkill -TERM -x xfce4-panel >/dev/null 2>&1 || true"
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' sh -c 'sleep 0.4; xfce4-panel >/tmp/crabbox-xfce4-panel-$user.log 2>&1 &' >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfwm4 --replace >/tmp/crabbox-xfwm4-replace-'$user'.log 2>&1 &"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfwm4 --replace --compositor=off >/tmp/crabbox-xfwm4-replace-'$user'.log 2>&1 &"
 fi
 su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xsetroot -solid '$root_color' >/dev/null 2>&1 || true"
 if command -v gsettings >/dev/null 2>&1; then
@@ -1460,7 +1836,7 @@ elif command -v xterm >/dev/null 2>&1 && ! pgrep -u "$user" -f 'xterm -title Cra
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xterm -title 'Crabbox Desktop' -geometry 110x32+48+48 -bg '$terminal_bg' -fg '$terminal_fg' >/tmp/crabbox-terminal.log 2>&1 &" || true
 fi
 if ! ss -ltn | grep -q '127.0.0.1:5900'; then
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' x11vnc -display :99 -localhost -rfbport 5900 -forever -shared -rfbauth /var/lib/crabbox/vnc.pass -o /tmp/crabbox-x11vnc.log >/tmp/crabbox-x11vnc.stdout.log 2>&1 &"
+  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' x11vnc -display :99 -localhost -rfbport 5900 -forever -shared -rfbauth /var/lib/crabbox/vnc.pass -wait 16 -defer 8 -nowait_bog -o /tmp/crabbox-x11vnc.log >/tmp/crabbox-x11vnc.stdout.log 2>&1 &"
 fi
 DESKTOP
   chmod 0755 /usr/local/bin/crabbox-start-desktop
@@ -1492,7 +1868,7 @@ if [ "${CRABBOX_BROWSER:-0}" = "1" ]; then
       ;;
     *)
       if [ -f /var/lib/crabbox/desktop.env ] && grep -q '^CRABBOX_DESKTOP_ENV=gnome$' /var/lib/crabbox/desktop.env; then
-        printf '%s\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export DISPLAY="${DISPLAY:-:0}"' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY' 'export GDK_BACKEND=x11 MOZ_ENABLE_WAYLAND=0' 'profile="${CRABBOX_BROWSER_PROFILE:-$HOME/.cache/crabbox/browser-profile}"' 'umask 077' 'mkdir -p "$profile"' 'chmod 700 "$profile"' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --user-data-dir=\"\$profile\" --ozone-platform=x11 --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$browser_wrapper"
+        printf '%s\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export DISPLAY="${DISPLAY:-:0}"' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY' 'export GDK_BACKEND=x11 MOZ_ENABLE_WAYLAND=0' 'profile="${CRABBOX_BROWSER_PROFILE:-$HOME/.cache/crabbox/browser-profile}"' 'theme="$(cat "${CRABBOX_DESKTOP_THEME_FILE:-$HOME/.config/crabbox/desktop-theme}" 2>/dev/null || printf dark)"' 'umask 077' 'mkdir -p "$profile"' 'chmod 700 "$profile"' 'if [ "$theme" = light ]; then' "  exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --blink-settings=preferredColorScheme=1 --user-data-dir=\"\$profile\" --ozone-platform=x11 --window-size=1500,900 --window-position=80,80 \"\$@\"" 'fi' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --force-dark-mode --enable-features=WebUIDarkMode --blink-settings=preferredColorScheme=2 --user-data-dir=\"\$profile\" --ozone-platform=x11 --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$browser_wrapper"
       elif [ -f /var/lib/crabbox/desktop.env ] && grep -q '^CRABBOX_DESKTOP_ENV=wayland$' /var/lib/crabbox/desktop.env; then
         printf '%s\n' '#!/bin/sh' 'if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi' 'export XDG_RUNTIME_DIR WAYLAND_DISPLAY' 'export MOZ_ENABLE_WAYLAND=1' 'profile="${CRABBOX_BROWSER_PROFILE:-$HOME/.cache/crabbox/browser-profile}"' 'umask 077' 'mkdir -p "$profile"' 'chmod 700 "$profile"' "exec \"$browser_path\" --no-first-run --no-default-browser-check --disable-default-apps --hide-crash-restore-bubble --user-data-dir=\"\$profile\" --ozone-platform=wayland --window-size=1500,900 --window-position=80,80 \"\$@\"" > "$browser_wrapper"
       else

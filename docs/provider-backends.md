@@ -77,7 +77,7 @@ direct backend.
 Use `DelegatedRunBackend` when the provider owns execution itself instead of
 exposing a Crabbox-managed SSH target.
 
-Examples: Blacksmith Testbox, E2B, Islo, Modal, Tensorlake, Upstash Box, and
+Examples: Blacksmith Testbox, E2B, Islo, Modal, Tensorlake, [Upstash Box](https://upstash.com/docs/box/overall/quickstart), and
 Azure Container Apps dynamic sessions, where the provider owns workspace setup
 and command streaming.
 
@@ -196,8 +196,12 @@ internal/providers/hetzner              # Hetzner Cloud SSH lease backend (coord
 internal/providers/proxmox              # Proxmox VE SSH lease backend
 internal/providers/parallels            # Parallels macOS VM host SSH lease backend
 internal/providers/localcontainer       # local Docker container SSH backend
+internal/providers/multipass            # Canonical Multipass local Ubuntu VM SSH backend
 internal/providers/ssh                  # static / BYO SSH backend
 internal/providers/daytona              # Daytona SSH lease + delegated SDK backend
+internal/providers/kubevirt             # generic KubeVirt SSH backend
+internal/providers/external             # executable provider protocol
+internal/providers/tenki                # Tenki sandbox SSH backend
 internal/providers/namespace            # Namespace devbox SSH backend
 internal/providers/semaphore            # Semaphore SSH lease backend
 internal/providers/sprites              # Sprites SSH backend
@@ -363,6 +367,7 @@ cli.FeatureCheckpoint   // "workspace-checkpoint"
 cli.FeatureFork         // "workspace-fork"
 cli.FeatureRestore      // "workspace-restore"
 cli.FeatureSnapshot     // "provider-snapshot"
+cli.FeatureCacheVolume  // "cache-volume"
 cli.FeatureRunProof     // "run-proof"
 cli.FeatureRunSession   // "run-session"
 ```
@@ -384,6 +389,8 @@ Checkpoint-related features are reserved for versioned workspaces:
 - `FeatureRestore`: provider can restore an existing workspace to a checkpoint.
 - `FeatureSnapshot`: provider can expose a native snapshot id for Crabbox
   metadata.
+- `FeatureCacheVolume`: provider can mount keyed rebuildable cache volumes on
+  warmup/run.
 - `FeatureRunProof`: delegated provider can return bounded stream/timing metadata
   for core `crabbox run --emit-proof` rendering.
 - `FeatureRunSession`: delegated proof/session runner that exposes a run session
@@ -626,7 +633,7 @@ Run at least:
 go test -count=1 ./internal/cli ./internal/providers/...
 go test -count=1 ./...
 go vet ./...
-npm run docs:check
+scripts/check-docs.sh
 ```
 
 For high-risk provider changes, also run:

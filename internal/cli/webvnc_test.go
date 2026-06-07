@@ -65,7 +65,7 @@ func TestWebVNCURLs(t *testing.T) {
 	if values.Get("password") != "JVS/yMb%2B" {
 		t.Fatalf("decoded portal password=%q", values.Get("password"))
 	}
-	if got := localContainerWebVNCURL("5901", "p+a ss"); got != "http://127.0.0.1:5901/vnc.html?autoconnect=1&host=127.0.0.1&password=p%2Ba+ss&path=websockify&port=5901&resize=scale" {
+	if got := localContainerWebVNCURL("5901", "p+a ss"); got != "http://127.0.0.1:5901/vnc.html?autoconnect=1&compression=0&host=127.0.0.1&password=p%2Ba+ss&path=websockify&port=5901&quality=6&resize=scale" {
 		t.Fatalf("local container WebVNC URL=%q", got)
 	}
 	if !isLocalContainerProvider("docker") || !isLocalContainerProvider("local-container") {
@@ -159,9 +159,33 @@ func TestWebVNCDesktopThemeCommand(t *testing.T) {
 	got := webVNCDesktopThemeCommand("light", "demo user")
 	for _, want := range []string{
 		"/usr/local/bin/crabbox-configure-desktop-theme",
+		"grep -q 'desktop-theme' /usr/local/bin/crabbox-configure-desktop-theme",
 		"/usr/local/bin/crabbox-start-desktop",
+		"grep -q 'desktop-theme' /usr/local/bin/crabbox-start-desktop",
+		"/var/lib/crabbox/desktop.env",
+		"CRABBOX_DESKTOP_ENV=gnome",
 		"CRABBOX_DESKTOP_USER='demo user'",
 		"CRABBOX_SSH_USER='demo user'",
+		"theme='light'",
+		"prefer-light",
+		"org.gnome.Terminal.ProfilesList",
+		"background-color",
+		"#f8fafc",
+		"$config_dir/labwc/themerc-override",
+		"window.active.title.bg.color",
+		"window.active.button.unpressed.image.color",
+		`LABWC_PID="$labwc_pid"`,
+		"labwc --reconfigure",
+		`kill -HUP "$labwc_pid"`,
+		"$config_dir/gtk-3.0/gtk.css",
+		"menubar menuitem",
+		"desktop-background-$theme.svg",
+		`swaybg -i "$wallpaper_file" -m fill`,
+		"gnome-panel",
+		"gnome-terminal",
+		"gnome-terminal-theme",
+		"/gnome-terminal-server",
+		"NO_AT_BRIDGE=1",
 		"light",
 		"DISPLAY=:99",
 		"exit 127",
@@ -172,6 +196,20 @@ func TestWebVNCDesktopThemeCommand(t *testing.T) {
 	}
 	if strings.Contains(webVNCDesktopThemeCommand("neon", ""), "neon") {
 		t.Fatal("invalid theme should fall back to dark")
+	}
+}
+
+func TestWebVNCDesktopThemeCapabilityCommandAllowsLegacyGnome(t *testing.T) {
+	got := webVNCDesktopThemeCapabilityCommand()
+	for _, want := range []string{
+		"/usr/local/bin/crabbox-configure-desktop-theme",
+		"/usr/local/bin/crabbox-start-desktop",
+		"/var/lib/crabbox/desktop.env",
+		"CRABBOX_DESKTOP_ENV=gnome",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("capability command missing %q in %s", want, got)
+		}
 	}
 }
 

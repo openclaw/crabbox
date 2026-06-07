@@ -124,9 +124,9 @@ These map to Tenki create flags as `--cpu`, `--memory-mb`, and
 ## Lifecycle
 
 1. Run `tenki sandbox create` with Crabbox metadata and tags.
-2. Run `tenki sandbox ssh --session <session-id> -- true` to let the Tenki CLI
-   resolve `~/.config/tenki/ssh/id_ed25519` and mint the session cert under
-   `~/.config/tenki/ssh-certs/<session-id>/`.
+2. Run `tenki sandbox ssh-command --output json --session <session-id>` to let
+   the Tenki CLI resolve `~/.config/tenki/ssh/id_ed25519` and mint the session
+   cert under `~/.config/tenki/ssh-certs/<session-id>/`.
 3. Return an SSH target using `ProxyCommand tenki sandbox ssh-proxy --session
    <session-id>` plus OpenSSH `CertificateFile=<cert-path>`.
 4. Let core Crabbox perform rsync, command execution, `ssh`, and artifacts.
@@ -141,6 +141,8 @@ All SSH traffic goes through Tenki's supported cert-backed `ssh-proxy` path.
 - Crabbox sync: yes, normal SSH/rsync sync.
 - Desktop / browser / code: no.
 - Actions hydration: yes, as a normal Linux SSH lease.
+- Cleanup: no. Tenki TTL/idle timeout own stale-session cleanup; `stop`
+  terminates known Crabbox leases.
 - Coordinator (broker): no — always direct from the CLI.
 
 ## Live Smoke

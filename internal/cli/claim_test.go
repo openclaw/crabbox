@@ -31,6 +31,10 @@ func TestClaimLeaseTargetForRepoConfigStoresEndpointMetadata(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"
 	cfg.Pond = "Alpha Pond"
+	cfg.Cache.Volumes = []CacheVolumeConfig{{
+		Key:  "repo-linux-node24-lock",
+		Path: "/var/cache/crabbox/pnpm",
+	}}
 	server := Server{
 		Provider: "aws",
 		Labels: map[string]string{
@@ -51,6 +55,9 @@ func TestClaimLeaseTargetForRepoConfigStoresEndpointMetadata(t *testing.T) {
 	}
 	if claim.Pond != "alpha-pond" || claim.TailscaleIPv4 != "100.64.1.10" || claim.SSHHost != "203.0.113.10" || claim.SSHPort != 2222 {
 		t.Fatalf("unexpected claim endpoint metadata: %#v", claim)
+	}
+	if len(claim.CacheVolumes) != 1 || claim.CacheVolumes[0] != "repo-linux-node24-lock:/var/cache/crabbox/pnpm" {
+		t.Fatalf("cache volumes not stored in claim: %#v", claim.CacheVolumes)
 	}
 	if claim.Labels[pondLabelKey] != "alpha-pond" {
 		t.Fatalf("claim labels=%#v", claim.Labels)

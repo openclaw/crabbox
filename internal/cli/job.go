@@ -84,7 +84,7 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 	plannedLease := blank(leaseID, "<lease>")
 	runNoHydrate := *noHydrate || !job.Hydrate.Actions
 	if *dryRun {
-		for _, line := range jobPlanCommands(name, job, plannedLease, createdLease, runNoHydrate, *githubRunner, stopPolicy) {
+		for _, line := range jobPlanCommands(cfg, name, job, plannedLease, createdLease, runNoHydrate, *githubRunner, stopPolicy) {
 			fmt.Fprintln(a.Stdout, line)
 		}
 		return nil
@@ -92,7 +92,7 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 	if createdLease {
 		var out bytes.Buffer
 		warmupApp := App{Stdout: io.MultiWriter(a.Stdout, &out), Stderr: a.Stderr}
-		if err := warmupApp.warmup(ctx, append(jobLeaseCreateArgs(job), "--keep=true")); err != nil {
+		if err := warmupApp.warmup(ctx, append(jobLeaseCreateArgs(cfg, job), "--keep=true")); err != nil {
 			return err
 		}
 		leaseID = parseWarmupLeaseID(out.String())
@@ -127,7 +127,7 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 			return err
 		}
 	}
-	err = a.runCommand(ctx, jobRunArgs(job, leaseID, runNoHydrate))
+	err = a.runCommand(ctx, jobRunArgs(cfg, job, leaseID, runNoHydrate))
 	return err
 }
 
@@ -163,15 +163,15 @@ func parseWarmupLeaseID(out string) string {
 	return ""
 }
 
-func jobPlanCommands(name string, job JobConfig, leaseID string, createLease, noHydrate, githubRunner bool, stopPolicy string) []string {
+func jobPlanCommands(cfg Config, name string, job JobConfig, leaseID string, createLease, noHydrate, githubRunner bool, stopPolicy string) []string {
 	lines := []string{fmt.Sprintf("# job %s", name)}
 	if createLease {
-		lines = append(lines, "crabbox "+strings.Join(readableShellWords(append([]string{"warmup"}, append(jobLeaseCreateArgs(job), "--keep=true")...)), " "))
+		lines = append(lines, "crabbox "+strings.Join(readableShellWords(append([]string{"warmup"}, append(jobLeaseCreateArgs(cfg, job), "--keep=true")...)), " "))
 	}
 	if !noHydrate && job.Hydrate.Actions {
 		lines = append(lines, "crabbox "+strings.Join(readableShellWords(append([]string{"actions", "hydrate"}, jobActionsHydrateArgs(job, leaseID, githubRunner)...)), " "))
 	}
-	lines = append(lines, "crabbox "+strings.Join(readableShellWords(append([]string{"run"}, jobRunArgs(job, leaseID, noHydrate)...)), " "))
+	lines = append(lines, "crabbox "+strings.Join(readableShellWords(append([]string{"run"}, jobRunArgs(cfg, job, leaseID, noHydrate)...)), " "))
 	if shouldPlanJobStop(createLease, stopPolicy) {
 		lines = append(lines, "crabbox "+strings.Join(readableShellWords(append([]string{"stop"}, jobStopRoutingArgs(job)...)), " ")+" "+leaseID)
 	}
@@ -190,7 +190,11 @@ func shouldPlanJobStop(createdLease bool, stopPolicy string) bool {
 	}
 }
 
-func jobLeaseCreateArgs(job JobConfig) []string {
+func jobLeaseCreateArgs(cfg Config, job JobConfig) []string {
+	return jobLeaseCreateArgsFor(cfg, job, true)
+}
+
+func jobLeaseCreateArgsFor(cfg Config, job JobConfig, includeCacheVolumes bool) []string {
 	args := jobRoutingArgs(job, true)
 	if job.Profile != "" {
 		args = append(args, "--profile", job.Profile)
@@ -225,6 +229,12 @@ func jobLeaseCreateArgs(job JobConfig) []string {
 	}
 	if job.Code != nil {
 		args = append(args, "--code="+fmt.Sprint(*job.Code))
+	}
+	providerName := firstNonBlank(job.Provider, cfg.Provider)
+	if includeCacheVolumes && providerSupportsCacheVolumes(providerName) {
+		for _, volume := range CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes) {
+			args = append(args, "--cache-volume", volume)
+		}
 	}
 	return args
 }
@@ -279,8 +289,8 @@ func jobActionsHydrateArgs(job JobConfig, leaseID string, githubRunner bool) []s
 	return args
 }
 
-func jobRunArgs(job JobConfig, leaseID string, noHydrate bool) []string {
-	args := append(jobLeaseCreateArgs(job), "--id", leaseID)
+func jobRunArgs(cfg Config, job JobConfig, leaseID string, noHydrate bool) []string {
+	args := append(jobLeaseCreateArgsFor(cfg, job, false), "--id", leaseID)
 	if noHydrate {
 		args = append(args, "--no-hydrate")
 	}
@@ -312,4 +322,9 @@ func jobRunArgs(job JobConfig, leaseID string, noHydrate bool) []string {
 	args = append(args, "--")
 	args = append(args, strings.Fields(job.Command)...)
 	return args
+}
+
+func providerSupportsCacheVolumes(providerName string) bool {
+	provider, err := ProviderFor(providerName)
+	return err == nil && provider.Spec().Features.Has(FeatureCacheVolume)
 }

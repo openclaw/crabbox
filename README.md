@@ -3,8 +3,8 @@
 ![Crabbox banner](docs/assets/readme-banner.jpg)
 
 [![CI](https://github.com/openclaw/crabbox/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/openclaw/crabbox/actions/workflows/ci.yml)
-[![Release](https://github.com/openclaw/crabbox/actions/workflows/release.yml/badge.svg)](https://github.com/openclaw/crabbox/actions/workflows/release.yml)
-[![Latest release](https://img.shields.io/github/v/release/openclaw/crabbox?sort=semver)](https://github.com/openclaw/crabbox/releases/latest)
+[![Release](https://github.com/openclaw/crabbox/actions/workflows/release.yml/badge.svg?event=push)](https://github.com/openclaw/crabbox/actions/workflows/release.yml)
+[![Latest release](https://badgen.net/github/release/openclaw/crabbox/stable)](https://github.com/openclaw/crabbox/releases/latest)
 
 **Warm a box, sync the diff, run the suite.**
 
@@ -97,6 +97,7 @@ crabbox job run full-ci
 
 # or warm a box once, then reuse it
 crabbox warmup                                       # prints cbx_... + a slug
+crabbox prewarm                                      # lease + Actions hydration
 crabbox run --id blue-lobster -- pnpm test:changed
 crabbox ssh --id blue-lobster
 crabbox stop blue-lobster
@@ -125,11 +126,15 @@ Targets: **L**inux, **M**acOS, **W**indows.
 | [Parallels](docs/providers/parallels.md) | `parallels` | L / M / W | direct | Local or remote macOS host; checkpoint/fork/restore/snapshot. |
 | [Proxmox](docs/providers/proxmox.md) | `proxmox` | L | direct | Clone Linux QEMU templates on a private Proxmox VE cluster. |
 | [Static SSH](docs/providers/ssh.md) | `ssh` (`static`, `static-ssh`) | L / M / W | direct | Existing machines; no provisioning. |
-| [Local Container](docs/providers/local-container.md) | `local-container` (`docker`, `container`, `local-docker`) | L | direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima). |
+| [Local Container](docs/providers/local-container.md) | `local-container` (`docker`, `container`, `local-docker`) | L | direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima, Podman). |
+| [Apple Container](docs/providers/apple-container.md) | `apple-container` (`apple`, `applecontainer`) | L | direct | Apple's native `container` runtime on Apple silicon macOS. |
 | [exe.dev](docs/providers/exe-dev.md) | `exe-dev` (`exe`, `exedev`) | L | direct | exe.dev VMs exposed as public SSH leases. |
+| [KubeVirt](docs/providers/kubevirt.md) | `kubevirt` (`kubernetes-vm`) | L | direct | Generic KubeVirt VMs through `kubectl`, `virtctl`, and control-plane SSH forwarding. |
+| [External](docs/providers/external.md) | `external` (`exec-provider`) | L | direct | Configured executable implementing the Crabbox provider protocol. |
 | [Namespace Devbox](docs/providers/namespace-devbox.md) | `namespace-devbox` (`namespace`, `namespace-devboxes`) | L | direct | Namespace.so Devboxes over SSH. |
 | [Semaphore](docs/providers/semaphore.md) | `semaphore` (`sem`) | L | direct | A Semaphore CI job leased as a testbox. |
 | [Sprites](docs/providers/sprites.md) | `sprites` | L | direct | Sprites microVMs through `sprite proxy`. |
+| [Tenki](docs/providers/tenki.md) | `tenki` | L | direct | Tenki sandbox VMs through `tenki sandbox ssh-proxy`. |
 | [Daytona](docs/providers/daytona.md) | `daytona` | L | direct | Daytona-managed dev sandbox over SSH. |
 | [RunPod](docs/providers/runpod.md) | `runpod` (`run-pod`, `runpodio`) | L | direct | RunPod GPU pods with public SSH. |
 | [ASCII Box](docs/providers/ascii-box.md) | `ascii-box` (`ascii`, `asciibox`) | L | direct | ASCII Box Ubuntu sandboxes exposed as SSH leases. |
@@ -155,8 +160,10 @@ and authoring guide.
 ## Highlights
 
 - **One-shot or warm workspaces.** `crabbox run` for fire-and-forget;
-  `crabbox warmup` + `--id` for repeated runs against the same box. See
-  [warmup](docs/commands/warmup.md) and [run](docs/commands/run.md).
+  `crabbox warmup` + `--id` for raw reusable leases, or `crabbox prewarm` when
+  the box should be hydrated before the first test command. See
+  [warmup](docs/commands/warmup.md), [prewarm](docs/commands/prewarm.md), and
+  [run](docs/commands/run.md).
 - **Named repo jobs.** `crabbox job run <name>` lets repos define warmup,
   optional Actions hydration, run command, and cleanup policy in `.crabbox.yaml`.
   See [Jobs](docs/features/jobs.md).
@@ -211,7 +218,7 @@ and authoring guide.
   autonomous work reviewable instead of only ephemeral terminal output. See
   [Artifacts](docs/features/artifacts.md) and
   [Telemetry](docs/features/telemetry.md).
-- **Stable timing records.** `--timing-json` on `run`, `warmup`, and
+- **Stable timing records.** `--timing-json` on `run`, `warmup`, `prewarm`, and
   `actions hydrate` gives scripts one machine-readable sync/command/total
   timing schema across providers.
 - **Hardened coordinator auth.** GitHub browser login, owner-scoped leases,
@@ -219,10 +226,6 @@ and authoring guide.
   verification, and service-token support keep normal use and operator
   automation separate. See [Auth and admin](docs/features/auth-admin.md) and
   [Security](docs/security.md).
-- **OpenClaw plugin.** The repo root is a native OpenClaw plugin for box
-  lifecycle operations. See [OpenClaw plugin](#openclaw-plugin) below and
-  [OpenClaw plugin](docs/features/openclaw-plugin.md).
-
 ## Machine classes
 
 `beast` is the default for providers that expose class-based managed capacity.
@@ -366,7 +369,7 @@ static:
 ```
 
 ```yaml
-# Local container (alias: docker; works with OrbStack as the active context)
+# Local container (alias: docker; detects docker or podman)
 provider: local-container
 localContainer:
   runtime: docker
@@ -392,23 +395,6 @@ reference, per-provider sections, and per-command flags are in
 [docs/cli.md](docs/cli.md), [Configuration](docs/features/configuration.md),
 and the [provider docs](docs/providers/README.md).
 
-## OpenClaw plugin
-
-The repo root is a native OpenClaw plugin package. Once installed, it exposes
-Crabbox as agent tools:
-
-- `crabbox_run`, `crabbox_warmup`, `crabbox_status`, `crabbox_list`,
-  `crabbox_stop`
-
-The plugin shells out to the configured `crabbox` binary with argv arrays, so
-local config, broker login, repo claims, and sync behavior stay owned by the
-CLI. Set `plugins.entries.crabbox.config.binary` if `crabbox` is not on `PATH`.
-
-Durable run inspection is intentionally CLI/skill-led instead of additional
-plugin tools: use `crabbox history`, `crabbox events --after --limit`,
-`crabbox attach`, `crabbox logs`, `crabbox results`, and `crabbox usage` from a
-shell-capable agent. See [OpenClaw plugin](docs/features/openclaw-plugin.md).
-
 ## Development
 
 ```sh
@@ -422,15 +408,18 @@ npm ci --prefix worker
 npm test --prefix worker
 npm run build --prefix worker
 
+# Repository scripts
+node --test scripts/*.test.js
+
 # Docs
-npm run docs:check
+scripts/check-docs.sh
 
 # Optional live smoke, when broker/provider credentials are available
 CRABBOX_LIVE=1 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 ```
 
 CI runs the full gate (gofmt, vet, race tests, all Go modules, coverage
-threshold, docs link/build check, GoReleaser snapshot, and Worker
+threshold, repository script tests, docs link/build check, GoReleaser snapshot, and Worker
 lint/typecheck/tests/build) on every push and PR. Tagged pushes matching `v*`
 publish Go archives via GoReleaser and bump the Homebrew formula at
 [openclaw/homebrew-tap](https://github.com/openclaw/homebrew-tap).
@@ -453,7 +442,7 @@ The GitHub Pages site at <https://openclaw.github.io/crabbox/> is generated from
 the `docs/` Markdown:
 
 ```sh
-npm run docs:check
+scripts/check-docs.sh
 open dist/docs-site/index.html
 ```
 

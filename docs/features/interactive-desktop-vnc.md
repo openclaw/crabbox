@@ -110,8 +110,8 @@ crabbox vnc --id blue-lobster --open
 
 WebVNC is available on coordinator-backed Hetzner, AWS, and Azure desktop
 leases, and on local Docker container leases. It is not available for static
-hosts or Blacksmith. Native `crabbox vnc` works against every managed and
-host-managed desktop in the support matrix.
+hosts, direct KubeVirt/external leases, or Blacksmith. Native `crabbox vnc`
+works against every managed and host-managed desktop in the support matrix.
 
 ### Collaborative WebVNC
 
@@ -168,8 +168,9 @@ For human demos, launched browsers stay windowed so the desktop panel, title
 bar, and surrounding session remain visible. Use `--fullscreen` only when you
 want browser-only video or capture output. `--webvnc` (and its `--open` /
 `--take-control` companions) bridges the launched desktop into the portal and
-requires a coordinator-backed Hetzner, AWS, or Azure lease. `--egress` routes
-the launched browser through the lease-local egress proxy (default
+requires a coordinator-backed Hetzner, AWS, or Azure lease. The local container
+provider uses local noVNC over SSH. `--egress` routes the launched browser
+through the lease-local egress proxy (default
 `127.0.0.1:3128`) and currently requires `--browser`; see
 [mediated egress](egress.md).
 

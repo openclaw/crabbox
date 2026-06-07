@@ -62,6 +62,9 @@ func TestBlacksmithWarmupArgs(t *testing.T) {
 		Ref:         "main",
 		IdleTimeout: 90*time.Minute + 10*time.Second,
 	}
+	cfg.Cache.Volumes = []core.CacheVolumeConfig{
+		{Name: "pnpm-store", Key: "my-app-linux-node24-lock", Path: "/var/cache/crabbox/pnpm"},
+	}
 	got, err := blacksmithWarmupArgs(cfg, "ssh-ed25519 AAAA")
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +75,7 @@ func TestBlacksmithWarmupArgs(t *testing.T) {
 		"--job", "check",
 		"--ref", "main",
 		"--ssh-public-key", "ssh-ed25519 AAAA",
+		"--sticky-disk", "my-app-linux-node24-lock:/var/cache/crabbox/pnpm",
 		"--idle-timeout", "91",
 	}
 	if !reflect.DeepEqual(got, want) {

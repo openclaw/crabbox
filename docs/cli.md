@@ -40,6 +40,7 @@ Commands are grouped here for orientation. Each links to its detailed page under
 ```text
 crabbox warmup [lease flags]                 lease a box and wait until ready
 crabbox run -- <command...>                  sync, run a remote command, stream output
+crabbox run --pool <key> -- <command...>     borrow a hydrated ready-pool lease
 crabbox status --id <id>                     show lease state (--wait to block)
 crabbox inspect --id <id>                     print lease/provider details
 crabbox list                                  list machines (alias: crabbox pool list)
@@ -47,13 +48,14 @@ crabbox share --id <id> [--user|--org]        grant access to a lease
 crabbox unshare --id <id> [--user|--org|--all]
 crabbox stop <id-or-slug>                     end a lease (alias: crabbox release)
 crabbox cleanup [--dry-run]                   sweep expired direct-provider machines
+crabbox pool ready [key]                      list hydrated broker ready-pool leases
 ```
 
 See [warmup](commands/warmup.md), [run](commands/run.md),
 [status](commands/status.md), [inspect](commands/inspect.md),
 [list](commands/list.md), [share](commands/share.md),
 [unshare](commands/unshare.md), [stop](commands/stop.md),
-[cleanup](commands/cleanup.md).
+[cleanup](commands/cleanup.md), [pool](commands/pool.md).
 
 ### Run helpers and jobs
 
@@ -111,6 +113,7 @@ See [media](commands/media.md), [artifacts](commands/artifacts.md).
 crabbox cache list|stats --id <id>            show remote cache usage
 crabbox cache purge --id <id> --kind <kind>   remove cache content
 crabbox cache warm --id <id> -- <command...>  run a cache-populating command
+crabbox cache volumes [--json]                list configured provider cache volumes
 ```
 
 See [cache](commands/cache.md).
@@ -305,6 +308,13 @@ sync:
     - node_modules
     - .turbo
     - dist
+  # include (root-relative whitelist): when set, ONLY these paths are synced (after excludes).
+  # Sync a few paths out of a large repo instead of blacklisting everything else.
+  include:
+    - src
+    - scripts
+    - package.json
+    - pnpm-lock.yaml
 env:
   allow:
     - CI
@@ -320,6 +330,10 @@ cache:
   git: true
   maxGB: 80
   purgeOnRelease: false
+  volumes:
+    - name: pnpm-store
+      key: my-app-linux-amd64-node24-pnpm10-lockhash
+      path: /var/cache/crabbox/pnpm
 ```
 
 ### Targets
@@ -500,6 +514,7 @@ CRABBOX_ENV_ALLOW
 CRABBOX_CACHE_PNPM / _NPM / _DOCKER / _GIT
 CRABBOX_CACHE_MAX_GB
 CRABBOX_CACHE_PURGE_ON_RELEASE
+CRABBOX_CACHE_VOLUMES
 ```
 
 Tailscale:
@@ -534,6 +549,8 @@ Provider-specific (read by individual adapters; see each provider page under
 
 ```text
 CRABBOX_BLACKSMITH_*               Blacksmith Testbox
+CRABBOX_KUBEVIRT_*                 KubeVirt
+CRABBOX_EXTERNAL_*                 External executable provider
 CRABBOX_NAMESPACE_*                Namespace Devbox
 CRABBOX_SEMAPHORE_* / SEMAPHORE_*  Semaphore
 CRABBOX_E2B_API_KEY / E2B_*        E2B

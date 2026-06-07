@@ -102,31 +102,6 @@ Each lease has a canonical id (`cbx_<12 hex>`) and a friendly slug
 key availability before a long workflow, and `crabbox usage` to summarize recent
 spend by user, org, provider, and server type.
 
-## OpenClaw plugin
-
-The repository root is also a native OpenClaw plugin package
-(`@openclaw/crabbox-plugin`). When loaded in OpenClaw it registers five agent
-tools that shell out to the installed `crabbox` binary:
-
-- `crabbox_run`
-- `crabbox_warmup`
-- `crabbox_status`
-- `crabbox_list`
-- `crabbox_stop`
-
-The plugin embeds no CLI logic and duplicates no provider code: each tool maps a
-typed parameter object onto a fixed `crabbox` subcommand and a curated subset of
-flags, so an agent drives remote boxes through a bounded, allowlisted contract
-rather than arbitrary shell access. Local Crabbox config, broker login, repo
-claims, and sync behavior stay owned by the CLI; set
-`plugins.entries.crabbox.config.binary` if `crabbox` is not on `PATH`.
-
-History, log inspection, attach, results, usage, pond orchestration, and admin
-operations are intentionally CLI-only — run `crabbox history`, `crabbox events`,
-`crabbox attach`, `crabbox logs`, `crabbox results`, and `crabbox usage` from a
-shell-capable agent. See [OpenClaw plugin](features/openclaw-plugin.md) for the
-full tool, schema, and gating reference.
-
 ## Where to read next
 
 Pick whichever matches your intent:
@@ -160,9 +135,11 @@ Pick whichever matches your intent:
   [Google Cloud](providers/gcp.md), [Hetzner](providers/hetzner.md),
   [Proxmox](providers/proxmox.md), [Parallels](providers/parallels.md),
   [Local Container](providers/local-container.md),
+  [Multipass](providers/multipass.md),
   [Static SSH](providers/ssh.md), [Railway](providers/railway.md),
   [RunPod](providers/runpod.md),
   [Blacksmith Testbox](providers/blacksmith-testbox.md),
+  [KubeVirt](providers/kubevirt.md), [External](providers/external.md),
   [Namespace Devbox](providers/namespace-devbox.md),
   [Semaphore](providers/semaphore.md), [Sprites](providers/sprites.md),
   [Tenki](providers/tenki.md),
@@ -192,6 +169,6 @@ publish.
 Build and check the docs site locally:
 
 ```sh
-npm run docs:check
+scripts/check-docs.sh
 open dist/docs-site/index.html
 ```

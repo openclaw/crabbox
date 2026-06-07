@@ -199,6 +199,7 @@ warmup, because it also dispatches the workflow and waits for the ready marker.
 --slug <slug>                      request a friendly slug for a new lease
 --pond <name>                      tag this lease into a pond
 --expose <port>                    declare a TCP port reachable over the SSH-mesh plane; repeatable
+--cache-volume [name=]key:path     require a provider-backed cache volume; repeatable
 --ttl <duration>                   maximum lease lifetime; default 90m
 --idle-timeout <duration>          release after idle; default 30m
 --desktop                          provision/require a visible desktop + VNC

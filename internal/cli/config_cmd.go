@@ -49,6 +49,7 @@ func configShowView(cfg Config) map[string]any {
 		"workRoot":           cfg.WorkRoot,
 		"sync": map[string]any{
 			"exclude":     configuredExcludes(cfg),
+			"include":     syncIncludes(cfg),
 			"delete":      cfg.Sync.Delete,
 			"checksum":    cfg.Sync.Checksum,
 			"gitSeed":     cfg.Sync.GitSeed,
@@ -143,6 +144,24 @@ func configShowView(cfg Config) map[string]any {
 			"cliPath": cfg.AsciiBox.CLIPath,
 			"workdir": cfg.AsciiBox.Workdir,
 		},
+		"appleContainer": map[string]any{
+			"cliPath":  cfg.AppleContainer.CLIPath,
+			"image":    cfg.AppleContainer.Image,
+			"user":     cfg.AppleContainer.User,
+			"workRoot": cfg.AppleContainer.WorkRoot,
+			"cpus":     cfg.AppleContainer.CPUs,
+			"memory":   cfg.AppleContainer.Memory,
+		},
+		"multipass": map[string]any{
+			"cliPath":       cfg.Multipass.CLIPath,
+			"image":         cfg.Multipass.Image,
+			"user":          cfg.Multipass.User,
+			"workRoot":      cfg.Multipass.WorkRoot,
+			"cpus":          cfg.Multipass.CPUs,
+			"memory":        cfg.Multipass.Memory,
+			"disk":          cfg.Multipass.Disk,
+			"launchTimeout": cfg.Multipass.LaunchTimeout.String(),
+		},
 		"static": map[string]any{
 			"id":       cfg.Static.ID,
 			"name":     cfg.Static.Name,
@@ -162,6 +181,7 @@ func configShowView(cfg Config) map[string]any {
 			"git":            cfg.Cache.Git,
 			"maxGB":          cfg.Cache.MaxGB,
 			"purgeOnRelease": cfg.Cache.PurgeOnRelease,
+			"volumes":        cfg.Cache.Volumes,
 		},
 		"jobs": jobConfigViews(cfg.Jobs),
 		"hetzner": map[string]any{
@@ -229,7 +249,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "broker=%s auth=%s admin_auth=%s\n", blank(cfg.Coordinator, "-"), tokenState(cfg.CoordToken), tokenState(cfg.CoordAdminToken))
 	fmt.Fprintf(w, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(w, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)
-	fmt.Fprintf(w, "sync delete=%t checksum=%t git_seed=%t fingerprint=%t base_ref=%s excludes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg)), cfg.Sync.Timeout)
+	fmt.Fprintf(w, "sync delete=%t checksum=%t git_seed=%t fingerprint=%t base_ref=%s excludes=%d includes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg)), len(syncIncludes(cfg)), cfg.Sync.Timeout)
 	fmt.Fprintf(w, "env allow=%s\n", strings.Join(cfg.EnvAllow, ","))
 	fmt.Fprintf(w, "run preflight_tools=%s\n", blank(strings.Join(cfg.Run.PreflightTools, ","), "-"))
 	fmt.Fprintf(w, "capacity market=%s strategy=%s fallback=%s regions=%s hints=%t\n", cfg.Capacity.Market, cfg.Capacity.Strategy, cfg.Capacity.Fallback, blank(strings.Join(cfg.Capacity.Regions, ","), "-"), cfg.Capacity.Hints)
@@ -239,10 +259,12 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "e2b api_url=%s domain=%s template=%s workdir=%s user=%s\n", cfg.E2B.APIURL, cfg.E2B.Domain, cfg.E2B.Template, cfg.E2B.Workdir, blank(cfg.E2B.User, "-"))
 	fmt.Fprintf(w, "upstash_box base_url=%s runtime=%s size=%s workdir=%s keep_alive=%t auth=%s\n", cfg.UpstashBox.BaseURL, cfg.UpstashBox.Runtime, cfg.UpstashBox.Size, cfg.UpstashBox.Workdir, cfg.UpstashBox.KeepAlive, tokenState(cfg.UpstashBox.APIKey))
 	fmt.Fprintf(w, "ascii_box base_url=%s cli=%s workdir=%s auth=%s\n", cfg.AsciiBox.BaseURL, cfg.AsciiBox.CLIPath, cfg.AsciiBox.Workdir, tokenState(cfg.AsciiBox.APIKey))
+	fmt.Fprintf(w, "apple_container cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s\n", cfg.AppleContainer.CLIPath, cfg.AppleContainer.Image, cfg.AppleContainer.User, cfg.AppleContainer.WorkRoot, cfg.AppleContainer.CPUs, blank(cfg.AppleContainer.Memory, "-"))
+	fmt.Fprintf(w, "multipass cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s disk=%s launch_timeout=%s\n", cfg.Multipass.CLIPath, cfg.Multipass.Image, cfg.Multipass.User, cfg.Multipass.WorkRoot, cfg.Multipass.CPUs, blank(cfg.Multipass.Memory, "-"), blank(cfg.Multipass.Disk, "-"), cfg.Multipass.LaunchTimeout)
 	fmt.Fprintf(w, "cloudflare api_url=%s workdir=%s auth=%s\n", blank(cfg.Cloudflare.APIURL, "-"), cfg.Cloudflare.Workdir, tokenState(cfg.Cloudflare.Token))
 	fmt.Fprintf(w, "static id=%s name=%s host=%s user=%s port=%s work_root=%s\n", blank(cfg.Static.ID, "-"), blank(cfg.Static.Name, "-"), blank(cfg.Static.Host, "-"), blank(cfg.Static.User, "-"), blank(cfg.Static.Port, "-"), blank(cfg.Static.WorkRoot, "-"))
 	fmt.Fprintf(w, "results junit=%s auto=%t\n", blank(strings.Join(cfg.Results.JUnit, ","), "-"), cfg.Results.Auto)
-	fmt.Fprintf(w, "cache pnpm=%t npm=%t docker=%t git=%t max_gb=%d purge_on_release=%t\n", cfg.Cache.Pnpm, cfg.Cache.Npm, cfg.Cache.Docker, cfg.Cache.Git, cfg.Cache.MaxGB, cfg.Cache.PurgeOnRelease)
+	fmt.Fprintf(w, "cache pnpm=%t npm=%t docker=%t git=%t max_gb=%d purge_on_release=%t volumes=%d\n", cfg.Cache.Pnpm, cfg.Cache.Npm, cfg.Cache.Docker, cfg.Cache.Git, cfg.Cache.MaxGB, cfg.Cache.PurgeOnRelease, len(cfg.Cache.Volumes))
 	if len(cfg.Jobs) > 0 {
 		names := make([]string, 0, len(cfg.Jobs))
 		for name := range cfg.Jobs {

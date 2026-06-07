@@ -4,6 +4,7 @@ import {
   azureSupportsEphemeralOS,
   azureVMSizeCandidatesForTargetClass,
   sshPorts,
+  validatedCIDRs,
   type LeaseConfig,
 } from "./config";
 import { leaseProviderLabels } from "./provider-labels";
@@ -24,6 +25,8 @@ const COMPUTE_FULL_CACHING_PREVIEW_API_VERSION = "2025-04-01";
 const DELETE_RETRY_ATTEMPTS = 13;
 const DELETE_RETRY_DELAY_MS = 15_000;
 const MIN_LRO_POLL_INTERVAL_MS = 15_000;
+const DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS = 60_000;
+const DEFAULT_AZURE_VM_CREATE_TIMEOUT_MS = 180_000;
 const DEFAULT_AZURE_SPOT_FALLBACK_MS = 120_000;
 const DEFAULT_AZURE_LINUX_IMAGE = "Canonical:ubuntu-26_04-lts:server:latest";
 const DEFAULT_AZURE_LINUX_ARM64_IMAGE = "Canonical:ubuntu-26_04-lts:server-arm64:latest";
@@ -144,10 +147,10 @@ export class AzureClient {
     this.subnet = env.CRABBOX_AZURE_SUBNET?.trim() || "crabbox-subnet";
     this.nsg = options.nsg || env.CRABBOX_AZURE_NSG?.trim() || "crabbox-nsg";
     this.image = env.CRABBOX_AZURE_IMAGE?.trim() || DEFAULT_AZURE_LINUX_IMAGE;
-    this.sshCIDRs = (env.CRABBOX_AZURE_SSH_CIDRS ?? "")
-      .split(",")
-      .map((value) => value.trim())
-      .filter(Boolean);
+    this.sshCIDRs = validatedCIDRs(
+      (env.CRABBOX_AZURE_SSH_CIDRS ?? "").split(","),
+      "CRABBOX_AZURE_SSH_CIDRS",
+    );
     if (this.sshCIDRs.length === 0) this.sshCIDRs.push("0.0.0.0/0");
     this.defaultLocation = options.location || env.CRABBOX_AZURE_LOCATION?.trim() || "eastus";
     this.deferredCleanup = options.deferredCleanup;
@@ -256,7 +259,8 @@ export class AzureClient {
     const failures: string[] = [];
     const attempts: ProvisioningAttempt[] = [];
     let infra: AzureSharedInfraNames | undefined;
-    for (const vmSize of candidates) {
+    for (let index = 0; index < candidates.length; index += 1) {
+      const vmSize = candidates[index] ?? config.serverType;
       const nextConfig = { ...config, serverType: vmSize };
       if (!nextConfig.azureSnapshot) {
         // Validate preview-only OS disk requirements before allocating network resources.
@@ -269,7 +273,15 @@ export class AzureClient {
           infra = await this.ensureSharedInfra(location, config);
         }
         // oxlint-disable-next-line eslint/no-await-in-loop -- SKU fallback must stay sequential.
-        const server = await this.createVM(nextConfig, location, leaseID, slug, owner, infra);
+        const server = await this.createVM(
+          nextConfig,
+          location,
+          leaseID,
+          slug,
+          owner,
+          infra,
+          azureAttemptNameSeed(leaseID, location, config.capacityMarket, index),
+        );
         return attempts.length > 0
           ? { server, serverType: vmSize, market: config.capacityMarket, attempts }
           : { server, serverType: vmSize, market: config.capacityMarket };
@@ -287,7 +299,8 @@ export class AzureClient {
       }
     }
     if (config.capacityMarket === "spot" && config.capacityFallback.startsWith("on-demand")) {
-      for (const vmSize of candidates) {
+      for (let index = 0; index < candidates.length; index += 1) {
+        const vmSize = candidates[index] ?? config.serverType;
         const nextConfig: LeaseConfig = {
           ...config,
           capacityMarket: "on-demand",
@@ -310,7 +323,7 @@ export class AzureClient {
             slug,
             owner,
             infra,
-            `${leaseID}-on-demand`,
+            azureAttemptNameSeed(leaseID, location, "on-demand", index),
           );
           return attempts.length > 0
             ? { server, serverType: vmSize, market: "on-demand", attempts }
@@ -458,10 +471,16 @@ export class AzureClient {
         throw new Error(`azure resource group ${this.resourceGroup} is not Crabbox-managed`);
       }
     } else {
-      await this.arm("PUT", `/resourceGroups/${this.resourceGroup}`, API_VERSIONS.resources, {
-        location,
-        tags,
-      });
+      await this.arm(
+        "PUT",
+        `/resourceGroups/${this.resourceGroup}`,
+        API_VERSIONS.resources,
+        {
+          location,
+          tags,
+        },
+        { lroTimeoutMs: DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS },
+      );
     }
     const infra = await this.sharedInfraNamesForLocation(location);
     const vnet = await this.arm<{ tags?: Record<string, string>; location?: string }>(
@@ -494,6 +513,7 @@ export class AzureClient {
             subnets: [{ name: this.subnet, properties: { addressPrefix: SUBNET_CIDR } }],
           },
         },
+        { lroTimeoutMs: DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS },
       );
     }
     const nsg = await this.arm<{
@@ -518,7 +538,11 @@ export class AzureClient {
     }
     const preserved = preserveNonCrabboxRules(nsg?.properties?.securityRules ?? []);
     const usedPriorities = usedNSGPriorities(preserved);
-    const rules = [...preserved, ...this.buildSSHRules(config, usedPriorities)];
+    const sshRules = this.buildSSHRules(config, usedPriorities);
+    const rules = [...preserved, ...sshRules];
+    if (nsg && azureCrabboxSSHRulesMatch(nsg.properties?.securityRules ?? [], sshRules)) {
+      return infra;
+    }
     await this.arm(
       "PUT",
       networkPath(this.resourceGroup, "networkSecurityGroups", infra.nsg),
@@ -528,6 +552,7 @@ export class AzureClient {
         tags,
         properties: { securityRules: rules },
       },
+      { lroTimeoutMs: DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS },
     );
     return infra;
   }
@@ -608,7 +633,7 @@ export class AzureClient {
     try {
       return await this.createVMUnchecked(config, location, leaseID, slug, owner, name, infra);
     } catch (error) {
-      if (isAzureSpotFallbackTimeout(config, error)) {
+      if (isAzureVMCreateTimeout(error)) {
         await this.deferredCleanup?.({
           name,
           location: this.defaultLocation,
@@ -651,6 +676,7 @@ export class AzureClient {
         sku: { name: "Standard" },
         properties: { publicIPAllocationMethod: "Static" },
       },
+      { lroTimeoutMs: DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS },
     );
     const subnetID = `/subscriptions/${this.subscription}/resourceGroups/${this.resourceGroup}/providers/Microsoft.Network/virtualNetworks/${infra.vnet}/subnets/${this.subnet}`;
     const nsgID = `/subscriptions/${this.subscription}/resourceGroups/${this.resourceGroup}/providers/Microsoft.Network/networkSecurityGroups/${infra.nsg}`;
@@ -677,6 +703,7 @@ export class AzureClient {
           networkSecurityGroup: { id: nsgID },
         },
       },
+      { lroTimeoutMs: DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS },
     );
     const customData = btoa(
       config.target === "windows" ? azureWindowsBootstrapPowerShell(config) : cloudInit(config),
@@ -727,7 +754,7 @@ export class AzureClient {
       vmProperties["evictionPolicy"] = "Delete";
       vmProperties["billingProfile"] = { maxPrice: -1 };
     }
-    const vmLROTimeoutMs = azureSpotFallbackTimeoutMs(config);
+    const vmLROTimeoutMs = azureVMCreateTimeoutMs(config);
     await this.arm(
       "PUT",
       vmPath(this.resourceGroup, name),
@@ -1321,6 +1348,7 @@ function toMachine(vm: AzureVM, ip: string): ProviderMachine {
     provider: "azure",
     id: 0,
     cloudID: vm.name ?? "",
+    ...(vm.location ? { region: vm.location } : {}),
     name: vm.name ?? "",
     status: vm.properties?.provisioningState ?? "",
     serverType: vm.properties?.hardwareProfile?.vmSize ?? "",
@@ -1375,6 +1403,28 @@ export function isRetryableDeleteError(error: unknown): boolean {
 
 export function preserveNonCrabboxRules(rules: AzureSecurityRule[]): AzureSecurityRule[] {
   return rules.filter((rule) => !rule.name?.startsWith("crabbox-ssh-"));
+}
+
+function azureCrabboxSSHRulesMatch(existing: AzureSecurityRule[], desired: AzureSecurityRule[]) {
+  const existingCrabbox = existing.filter((rule) => rule.name?.startsWith("crabbox-ssh-"));
+  if (existingCrabbox.length !== desired.length) return false;
+  const existingKeys = new Set(existingCrabbox.map(azureSecurityRuleKey));
+  return desired.every((rule) => existingKeys.has(azureSecurityRuleKey(rule)));
+}
+
+function azureSecurityRuleKey(rule: AzureSecurityRule): string {
+  const properties = rule.properties ?? {};
+  return JSON.stringify({
+    name: rule.name ?? "",
+    priority: properties["priority"] ?? null,
+    direction: properties["direction"] ?? "",
+    access: properties["access"] ?? "",
+    protocol: properties["protocol"] ?? "",
+    sourceAddressPrefix: properties["sourceAddressPrefix"] ?? "",
+    sourcePortRange: properties["sourcePortRange"] ?? "",
+    destinationAddressPrefix: properties["destinationAddressPrefix"] ?? "",
+    destinationPortRange: properties["destinationPortRange"] ?? "",
+  });
 }
 
 function usedNSGPriorities(rules: AzureSecurityRule[]): Set<number> {
@@ -1453,6 +1503,7 @@ function azureSKUCapabilityTrue(
 export function isRetryableProvisioningError(message: string): boolean {
   return (
     message.includes("SkuNotAvailable") ||
+    message.includes("long-running operation timed out") ||
     message.includes("QuotaExceeded") ||
     message.includes("AllocationFailed") ||
     message.includes("ZonalAllocationFailed") ||
@@ -1520,6 +1571,9 @@ export function azureSpotFallbackTimeoutMs(
 ): number | undefined {
   if (config.capacityMarket !== "spot") return undefined;
   const fallback = config.capacityFallback.trim().toLowerCase();
+  if (fallback === "" || fallback === "none" || fallback === "spot-only") {
+    return DEFAULT_AZURE_SPOT_FALLBACK_MS;
+  }
   if (!fallback.startsWith("on-demand-after-")) return undefined;
   const duration = fallback.slice("on-demand-after-".length);
   const match = /^(\d+)(ms|s|m)?$/.exec(duration);
@@ -1532,11 +1586,22 @@ export function azureSpotFallbackTimeoutMs(
   return value * 1000;
 }
 
-function isAzureSpotFallbackTimeout(
+function azureVMCreateTimeoutMs(
   config: Pick<LeaseConfig, "capacityMarket" | "capacityFallback">,
-  error: unknown,
-): boolean {
-  if (azureSpotFallbackTimeoutMs(config) === undefined) return false;
+): number {
+  return azureSpotFallbackTimeoutMs(config) ?? DEFAULT_AZURE_VM_CREATE_TIMEOUT_MS;
+}
+
+function azureAttemptNameSeed(
+  leaseID: string,
+  location: string,
+  market: "spot" | "on-demand",
+  index: number,
+): string {
+  return `${leaseID}-${azureLocationKey(location)}-${market}-${index}`;
+}
+
+function isAzureVMCreateTimeout(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("azure long-running operation timed out after");
 }

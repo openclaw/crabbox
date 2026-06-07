@@ -17,6 +17,17 @@ func ClassifyRunFailure(exitCode int, text string, phases []TimingPhase) Failure
 	}
 	lower := strings.ToLower(stripANSI(text))
 	switch {
+	case strings.Contains(lower, "blacksmith") &&
+		strings.Contains(lower, "backend.blacksmith.sh") &&
+		(strings.Contains(lower, "shutdown") || strings.Contains(lower, "lookup") || strings.Contains(lower, "no such host")):
+		return FailureClassification{BlockedStage: "cleanup", RetryLikely: "true"}
+	case strings.Contains(lower, "blacksmith") &&
+		strings.Contains(lower, "sync did not print a completion marker"):
+		return FailureClassification{BlockedStage: "sync", RetryLikely: "true"}
+	case isBlacksmithActionsCancelled(lower):
+		return FailureClassification{BlockedStage: "actions_cancelled", RetryLikely: "true"}
+	case isBlacksmithPostReadyStall(lower):
+		return FailureClassification{BlockedStage: "testbox_stalled_after_ready", RetryLikely: "true"}
 	case strings.Contains(lower, "timed out waiting for ssh"):
 		return FailureClassification{BlockedStage: "ssh", RetryLikely: "true"}
 	case isKnownHTMLAuthBody(lower):
@@ -39,6 +50,25 @@ func ClassifyRunFailure(exitCode int, text string, phases []TimingPhase) Failure
 		return FailureClassification{BlockedStage: "install", RetryLikely: "unknown"}
 	}
 	return FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"}
+}
+
+func isBlacksmithActionsCancelled(lower string) bool {
+	if !strings.Contains(lower, "testbox ready") {
+		return false
+	}
+	return strings.Contains(lower, "github actions run cancelled") ||
+		strings.Contains(lower, "github actions run canceled") ||
+		strings.Contains(lower, "workflow run cancelled") ||
+		strings.Contains(lower, "workflow run canceled")
+}
+
+func isBlacksmithPostReadyStall(lower string) bool {
+	if !strings.Contains(lower, "blacksmith") || !strings.Contains(lower, "testbox ready") {
+		return false
+	}
+	return strings.Contains(lower, "stalled after ready") ||
+		strings.Contains(lower, "post-ready stall") ||
+		strings.Contains(lower, "no output after ready")
 }
 
 func ApplyFailureClassification(report *TimingReport, classification FailureClassification) {
@@ -384,7 +414,7 @@ func printFailureDigestResults(w io.Writer, results *TestResultSummary) {
 	}
 }
 
-func runFailureDigestRoutingArgs(cfg Config) []string {
+func runFailureDigestRoutingArgs(cfg Config, leaseID string) []string {
 	args := []string{}
 	if strings.TrimSpace(cfg.Provider) != "" {
 		args = append(args, "--provider", cfg.Provider)
@@ -407,10 +437,10 @@ func runFailureDigestRoutingArgs(cfg Config) []string {
 	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
 		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
 	}
-	return appendProviderStopRoutingArgs(args, cfg)
+	return appendProviderStopRoutingArgs(args, cfg, leaseID)
 }
 
-func runFailureDigestSSHRoutingArgs(cfg Config) []string {
+func runFailureDigestSSHRoutingArgs(cfg Config, leaseID string) []string {
 	args := []string{}
 	if strings.TrimSpace(cfg.Provider) != "" {
 		args = append(args, "--provider", cfg.Provider)
@@ -433,7 +463,7 @@ func runFailureDigestSSHRoutingArgs(cfg Config) []string {
 	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
 		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
 	}
-	return args
+	return appendProviderStopRoutingArgs(args, cfg, leaseID)
 }
 
 func fallbackFailureDigestRoutingArgs(input runFailureDigestInput) []string {
@@ -451,7 +481,25 @@ func fallbackFailureDigestRoutingArgs(input runFailureDigestInput) []string {
 }
 
 func crabboxCommandString(args []string) string {
-	return "crabbox " + strings.Join(readableShellWords(args), " ")
+	env := []string{}
+	rest := make([]string, 0, len(args))
+	index := 0
+	for index < len(args) && isShellEnvAssignment(args[index]) {
+		env = append(env, args[index])
+		index++
+	}
+	if index < len(args) {
+		rest = append(rest, args[index])
+		index++
+	}
+	for index < len(args) && isShellEnvAssignment(args[index]) {
+		env = append(env, args[index])
+		index++
+	}
+	rest = append(rest, args[index:]...)
+	command := append(env, "crabbox")
+	command = append(command, rest...)
+	return readableShellCommand(command)
 }
 
 func canSuggestRunRetry(commandDisplay string) bool {

@@ -131,3 +131,11 @@ func osImageDefaultProviderImagesForArchitecture(value string, architecture stri
 	}
 	return spec.HetznerImage, spec.AzureImage, spec.GCPImage, spec.DockerImage, spec.ContainerName, nil
 }
+
+func osImageDefaultMultipassImage(value string) (string, error) {
+	spec, err := osImageSpecFor(value)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimPrefix(spec.Selector, "ubuntu:"), nil
+}

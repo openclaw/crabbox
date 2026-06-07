@@ -14,124 +14,132 @@ import (
 )
 
 type Config struct {
-	Profile                     string
-	Provider                    string
-	TargetOS                    string
-	Architecture                string
-	architectureExplicit        bool
-	OSImage                     string
-	osImageExplicit             bool
-	osImageProviderDefaults     string
-	WindowsMode                 string
-	Desktop                     bool
-	DesktopEnv                  string
-	Browser                     bool
-	Code                        bool
-	Network                     NetworkMode
-	Class                       string
-	Pond                        string
-	ExposedPorts                []string
-	ServerType                  string
-	ServerTypeExplicit          bool
-	Coordinator                 string
-	CoordToken                  string
-	CoordAdminToken             string
-	HostID                      string
-	Access                      AccessConfig
-	Location                    string
-	Image                       string
-	imageExplicit               bool
-	AWSRegion                   string
-	AWSAMI                      string
-	AWSSnapshot                 string
-	AWSSGID                     string
-	AWSSubnetID                 string
-	AWSProfile                  string
-	AWSRootGB                   int32
-	AWSSSHCIDRs                 []string
-	AWSMacHostID                string
-	AzureSubscription           string
-	AzureTenant                 string
-	AzureClientID               string
-	AzureLocation               string
-	AzureBackend                string
-	AzureResourceGroup          string
-	AzureImage                  string
-	azureImageExplicit          bool
-	AzureSnapshot               string
-	AzureOSDisk                 string
-	AzureOSDiskExplicit         bool
-	AzureVNet                   string
-	AzureSubnet                 string
-	AzureNSG                    string
-	AzureSSHCIDRs               []string
-	AzureNetwork                string
-	AzureDynamicSessions        AzureDynamicSessionsConfig
-	GCPProject                  string
-	gcpProjectExplicit          bool
-	GCPZone                     string
-	gcpZoneExplicit             bool
-	GCPImage                    string
-	gcpImageExplicit            bool
-	GCPMachineImage             string
-	GCPSnapshot                 string
-	GCPNetwork                  string
-	gcpNetworkExplicit          bool
-	GCPSubnet                   string
-	GCPTags                     []string
-	gcpTagsExplicit             bool
-	GCPSSHCIDRs                 []string
-	GCPRootGB                   int64
-	gcpRootGBExplicit           bool
-	GCPServiceAccount           string
-	Proxmox                     ProxmoxConfig
-	Parallels                   ParallelsConfig
-	parallelsTemplateApplied    bool
-	SSHUser                     string
-	SSHKey                      string
-	SSHPort                     string
-	SSHFallbackPorts            []string
-	ProviderKey                 string
-	WorkRoot                    string
-	TTL                         time.Duration
-	IdleTimeout                 time.Duration
-	Sync                        SyncConfig
-	Run                         RunConfig
-	EnvAllow                    []string
-	Capacity                    CapacityConfig
-	Actions                     ActionsConfig
-	Blacksmith                  BlacksmithConfig
-	Namespace                   NamespaceConfig
-	Daytona                     DaytonaConfig
-	E2B                         E2BConfig
-	ExeDev                      ExeDevConfig
-	Railway                     RailwayConfig
-	Runpod                      RunpodConfig
-	Wandb                       WandbConfig
-	Islo                        IsloConfig
-	isloImageExplicit           bool
-	Tenki                       TenkiConfig
-	Tensorlake                  TensorlakeConfig
-	Modal                       ModalConfig
-	UpstashBox                  UpstashBoxConfig
-	AsciiBox                    AsciiBoxConfig
-	Cloudflare                  CloudflareConfig
-	Semaphore                   SemaphoreConfig
-	Sprites                     SpritesConfig
-	LocalContainer              LocalContainerConfig
-	localContainerImageExplicit bool
-	Tailscale                   TailscaleConfig
-	Static                      StaticConfig
-	Results                     ResultsConfig
-	Cache                       CacheConfig
-	Profiles                    map[string]ProfileConfig
-	Presets                     map[string]PresetConfig
-	ProofTemplates              map[string]ProofTemplateConfig
-	Jobs                        map[string]JobConfig
+	Profile                       string
+	Provider                      string
+	TargetOS                      string
+	Architecture                  string
+	architectureExplicit          bool
+	OSImage                       string
+	osImageExplicit               bool
+	osImageProviderDefaults       string
+	WindowsMode                   string
+	Desktop                       bool
+	DesktopEnv                    string
+	Browser                       bool
+	Code                          bool
+	Network                       NetworkMode
+	Class                         string
+	Pond                          string
+	ExposedPorts                  []string
+	ServerType                    string
+	ServerTypeExplicit            bool
+	Coordinator                   string
+	CoordToken                    string
+	CoordAdminToken               string
+	HostID                        string
+	Access                        AccessConfig
+	Location                      string
+	Image                         string
+	imageExplicit                 bool
+	AWSRegion                     string
+	AWSAMI                        string
+	AWSSnapshot                   string
+	AWSSGID                       string
+	AWSSubnetID                   string
+	AWSProfile                    string
+	AWSRootGB                     int32
+	AWSSSHCIDRs                   []string
+	AWSMacHostID                  string
+	AzureSubscription             string
+	AzureTenant                   string
+	AzureClientID                 string
+	AzureLocation                 string
+	AzureBackend                  string
+	AzureResourceGroup            string
+	AzureImage                    string
+	azureImageExplicit            bool
+	AzureSnapshot                 string
+	AzureOSDisk                   string
+	AzureOSDiskExplicit           bool
+	AzureVNet                     string
+	AzureSubnet                   string
+	AzureNSG                      string
+	AzureSSHCIDRs                 []string
+	AzureNetwork                  string
+	AzureDynamicSessions          AzureDynamicSessionsConfig
+	GCPProject                    string
+	gcpProjectExplicit            bool
+	GCPZone                       string
+	gcpZoneExplicit               bool
+	GCPImage                      string
+	gcpImageExplicit              bool
+	GCPMachineImage               string
+	GCPSnapshot                   string
+	GCPNetwork                    string
+	gcpNetworkExplicit            bool
+	GCPSubnet                     string
+	GCPTags                       []string
+	gcpTagsExplicit               bool
+	GCPSSHCIDRs                   []string
+	GCPRootGB                     int64
+	gcpRootGBExplicit             bool
+	GCPServiceAccount             string
+	Proxmox                       ProxmoxConfig
+	Parallels                     ParallelsConfig
+	parallelsTemplateApplied      bool
+	SSHUser                       string
+	SSHKey                        string
+	SSHPort                       string
+	SSHFallbackPorts              []string
+	ProviderKey                   string
+	WorkRoot                      string
+	TTL                           time.Duration
+	IdleTimeout                   time.Duration
+	Sync                          SyncConfig
+	Run                           RunConfig
+	EnvAllow                      []string
+	Capacity                      CapacityConfig
+	Actions                       ActionsConfig
+	Blacksmith                    BlacksmithConfig
+	KubeVirt                      KubeVirtConfig
+	External                      ExternalConfig
+	Namespace                     NamespaceConfig
+	Daytona                       DaytonaConfig
+	E2B                           E2BConfig
+	ExeDev                        ExeDevConfig
+	Railway                       RailwayConfig
+	Runpod                        RunpodConfig
+	Wandb                         WandbConfig
+	Islo                          IsloConfig
+	isloImageExplicit             bool
+	Tenki                         TenkiConfig
+	Tensorlake                    TensorlakeConfig
+	Modal                         ModalConfig
+	UpstashBox                    UpstashBoxConfig
+	AsciiBox                      AsciiBoxConfig
+	Cloudflare                    CloudflareConfig
+	Semaphore                     SemaphoreConfig
+	Sprites                       SpritesConfig
+	LocalContainer                LocalContainerConfig
+	localContainerRuntimeExplicit bool
+	localContainerImageExplicit   bool
+	AppleContainer                AppleContainerConfig
+	appleContainerImageExplicit   bool
+	Multipass                     MultipassConfig
+	multipassImageExplicit        bool
+	Tailscale                     TailscaleConfig
+	Static                        StaticConfig
+	Results                       ResultsConfig
+	Cache                         CacheConfig
+	Profiles                      map[string]ProfileConfig
+	Presets                       map[string]PresetConfig
+	ProofTemplates                map[string]ProofTemplateConfig
+	Jobs                          map[string]JobConfig
 }
 
 type SyncConfig struct {
 	Excludes    []string
+	Includes    []string
 	Delete      bool
 	Checksum    bool
 	GitSeed     bool
@@ -176,6 +184,29 @@ type BlacksmithConfig struct {
 	Ref         string
 	IdleTimeout time.Duration
 	Debug       bool
+}
+
+type KubeVirtConfig struct {
+	Kubectl         string
+	Virtctl         string
+	Kubeconfig      string
+	Context         string
+	Namespace       string
+	Template        string
+	SSHUser         string
+	SSHKey          string
+	SSHPublicKey    string
+	SSHPort         string
+	WorkRoot        string
+	DeleteOnRelease bool
+}
+
+type ExternalConfig struct {
+	Command     string
+	Args        []string
+	Config      map[string]any
+	WorkRoot    string
+	RoutingFile string
 }
 
 type NamespaceConfig struct {
@@ -433,6 +464,27 @@ type LocalContainerConfig struct {
 	DockerSocket bool
 }
 
+type AppleContainerConfig struct {
+	CLIPath      string
+	Image        string
+	User         string
+	WorkRoot     string
+	CPUs         int
+	Memory       string
+	ExtraRunArgs []string
+}
+
+type MultipassConfig struct {
+	CLIPath       string
+	Image         string
+	User          string
+	WorkRoot      string
+	CPUs          int
+	Memory        string
+	Disk          string
+	LaunchTimeout time.Duration
+}
+
 type StaticConfig struct {
 	ID       string
 	Name     string
@@ -454,6 +506,131 @@ type CacheConfig struct {
 	Git            bool
 	MaxGB          int
 	PurgeOnRelease bool
+	Volumes        []CacheVolumeConfig
+}
+
+type CacheVolumeConfig struct {
+	Name     string `json:"name,omitempty"`
+	Key      string `json:"key"`
+	Path     string `json:"path"`
+	SizeGB   int    `json:"sizeGB,omitempty"`
+	Required bool   `json:"required,omitempty"`
+}
+
+func ParseCacheVolumeSpecs(specs []string) ([]CacheVolumeConfig, error) {
+	volumes := []CacheVolumeConfig{}
+	for _, raw := range specs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		volume, err := ParseCacheVolumeSpec(raw)
+		if err != nil {
+			return nil, err
+		}
+		volumes = append(volumes, volume)
+	}
+	return volumes, nil
+}
+
+func ParseCacheVolumeSpec(spec string) (CacheVolumeConfig, error) {
+	spec = strings.TrimSpace(spec)
+	name := ""
+	if before, after, ok := strings.Cut(spec, "="); ok {
+		name = strings.TrimSpace(before)
+		spec = strings.TrimSpace(after)
+	}
+	key, path, ok := strings.Cut(spec, ":")
+	if !ok {
+		return CacheVolumeConfig{}, exit(2, "cache volume %q must use [name=]key:path", spec)
+	}
+	volume := CacheVolumeConfig{
+		Name: name,
+		Key:  strings.TrimSpace(key),
+		Path: strings.TrimSpace(path),
+	}
+	if err := validateCacheVolume(volume); err != nil {
+		return CacheVolumeConfig{}, err
+	}
+	if volume.Name == "" {
+		volume.Name = volume.Key
+	}
+	return volume, nil
+}
+
+func CacheVolumeStickyDiskSpecs(volumes []CacheVolumeConfig) []string {
+	specs := []string{}
+	for _, volume := range volumes {
+		if validateCacheVolume(volume) != nil {
+			continue
+		}
+		specs = append(specs, volume.Key+":"+volume.Path)
+	}
+	return specs
+}
+
+func normalizeFileCacheVolumes(files []fileCacheVolumeConfig) ([]CacheVolumeConfig, error) {
+	volumes := make([]CacheVolumeConfig, 0, len(files))
+	for _, file := range files {
+		volume := CacheVolumeConfig{
+			Name:   strings.TrimSpace(file.Name),
+			Key:    strings.TrimSpace(file.Key),
+			Path:   strings.TrimSpace(file.Path),
+			SizeGB: file.SizeGB,
+		}
+		if file.Required != nil {
+			volume.Required = *file.Required
+		}
+		if volume.Key == "" && volume.Name != "" {
+			volume.Key = volume.Name
+		}
+		if volume.Name == "" {
+			volume.Name = volume.Key
+		}
+		if err := validateCacheVolume(volume); err != nil {
+			return nil, err
+		}
+		volumes = append(volumes, volume)
+	}
+	return volumes, nil
+}
+
+func validateCacheVolume(volume CacheVolumeConfig) error {
+	if strings.TrimSpace(volume.Key) == "" {
+		return exit(2, "cache volume key is required")
+	}
+	if strings.Contains(volume.Key, ":") {
+		return exit(2, "cache volume key %q must not contain ':'", volume.Key)
+	}
+	if strings.TrimSpace(volume.Path) == "" {
+		return exit(2, "cache volume path is required")
+	}
+	if !strings.HasPrefix(volume.Path, "/") {
+		return exit(2, "cache volume path %q must be absolute", volume.Path)
+	}
+	if volume.SizeGB < 0 {
+		return exit(2, "cache volume sizeGB must be non-negative")
+	}
+	return nil
+}
+
+func validateCacheVolumesForProvider(cfg Config) error {
+	if len(cfg.Cache.Volumes) == 0 {
+		return nil
+	}
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return err
+	}
+	if provider.Spec().Features.Has(FeatureCacheVolume) {
+		return nil
+	}
+	for _, volume := range cfg.Cache.Volumes {
+		if volume.Required {
+			return exit(2, "provider=%s does not support required cache volume %q", cfg.Provider, firstNonBlank(volume.Name, volume.Key))
+		}
+	}
+	return nil
 }
 
 type ProfileConfig struct {
@@ -556,7 +733,9 @@ func loadConfig() (Config, error) {
 			return Config{}, err
 		}
 	}
-	applyEnv(&cfg)
+	if err := applyEnv(&cfg); err != nil {
+		return Config{}, err
+	}
 	canonicalizeConfigProvider(&cfg)
 	if err := routeConfiguredProvider(&cfg); err != nil {
 		return Config{}, err
@@ -655,6 +834,10 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	if err != nil {
 		return
 	}
+	multipassImage, err := osImageDefaultMultipassImage(cfg.OSImage)
+	if err != nil {
+		return
+	}
 	base := baseConfig()
 	wasOSDefault := cfg.osImageProviderDefaults != ""
 	if force || cfg.Image == "" || (!cfg.imageExplicit && (cfg.Image == base.Image || wasOSDefault)) {
@@ -672,6 +855,12 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	if force || cfg.LocalContainer.Image == "" || (!cfg.localContainerImageExplicit && (cfg.LocalContainer.Image == base.LocalContainer.Image || wasOSDefault)) {
 		cfg.LocalContainer.Image = containerImage
 	}
+	if force || cfg.AppleContainer.Image == "" || (!cfg.appleContainerImageExplicit && (cfg.AppleContainer.Image == base.AppleContainer.Image || wasOSDefault)) {
+		cfg.AppleContainer.Image = containerImage
+	}
+	if force || cfg.Multipass.Image == "" || (!cfg.multipassImageExplicit && (cfg.Multipass.Image == base.Multipass.Image || wasOSDefault)) {
+		cfg.Multipass.Image = multipassImage
+	}
 	cfg.osImageProviderDefaults = cfg.OSImage
 }
 
@@ -681,6 +870,22 @@ func MarkIsloImageExplicit(cfg *Config) {
 
 func MarkLocalContainerImageExplicit(cfg *Config) {
 	cfg.localContainerImageExplicit = true
+}
+
+func MarkLocalContainerRuntimeExplicit(cfg *Config) {
+	cfg.localContainerRuntimeExplicit = true
+}
+
+func LocalContainerRuntimeExplicit(cfg Config) bool {
+	return cfg.localContainerRuntimeExplicit
+}
+
+func MarkAppleContainerImageExplicit(cfg *Config) {
+	cfg.appleContainerImageExplicit = true
+}
+
+func MarkMultipassImageExplicit(cfg *Config) {
+	cfg.multipassImageExplicit = true
 }
 
 func baseConfig() Config {
@@ -694,6 +899,7 @@ func baseConfig() Config {
 	provider := "hetzner"
 	osImage := defaultOSImage
 	hetznerImage, azureImage, gcpImage, isloImage, containerImage, _ := osImageDefaultProviderImages(osImage)
+	multipassImage, _ := osImageDefaultMultipassImage(osImage)
 	return Config{
 		Profile:            "default",
 		Provider:           provider,
@@ -756,6 +962,18 @@ func baseConfig() Config {
 		Actions: ActionsConfig{
 			RunnerVersion: "latest",
 			Ephemeral:     true,
+		},
+		KubeVirt: KubeVirtConfig{
+			Kubectl:         "kubectl",
+			Virtctl:         "virtctl",
+			Namespace:       "default",
+			SSHUser:         "crabbox",
+			SSHPort:         "22",
+			WorkRoot:        "/home/crabbox/crabbox",
+			DeleteOnRelease: true,
+		},
+		External: ExternalConfig{
+			WorkRoot: defaultPOSIXWorkRoot,
 		},
 		Namespace: NamespaceConfig{
 			Image:               "builtin:base",
@@ -852,6 +1070,22 @@ func baseConfig() Config {
 			User:    "crabbox",
 			Network: "bridge",
 		},
+		AppleContainer: AppleContainerConfig{
+			CLIPath:  "container",
+			Image:    containerImage,
+			User:     "crabbox",
+			WorkRoot: "/work/crabbox",
+		},
+		Multipass: MultipassConfig{
+			CLIPath:       "multipass",
+			Image:         multipassImage,
+			User:          "crabbox",
+			WorkRoot:      defaultPOSIXWorkRoot,
+			CPUs:          4,
+			Memory:        "8G",
+			Disk:          "30G",
+			LaunchTimeout: 20 * time.Minute,
+		},
 		Tailscale: TailscaleConfig{
 			Tags:             []string{"tag:crabbox"},
 			HostnameTemplate: "crabbox-{slug}",
@@ -900,6 +1134,8 @@ type fileConfig struct {
 	Capacity             *fileCapacityConfig                `yaml:"capacity,omitempty"`
 	Actions              *fileActionsConfig                 `yaml:"actions,omitempty"`
 	Blacksmith           *fileBlacksmithConfig              `yaml:"blacksmith,omitempty"`
+	KubeVirt             *fileKubeVirtConfig                `yaml:"kubevirt,omitempty"`
+	External             *fileExternalConfig                `yaml:"external,omitempty"`
 	Namespace            *fileNamespaceConfig               `yaml:"namespace,omitempty"`
 	Daytona              *fileDaytonaConfig                 `yaml:"daytona,omitempty"`
 	E2B                  *fileE2BConfig                     `yaml:"e2b,omitempty"`
@@ -917,6 +1153,8 @@ type fileConfig struct {
 	Semaphore            *fileSemaphoreConfig               `yaml:"semaphore,omitempty"`
 	Sprites              *fileSpritesConfig                 `yaml:"sprites,omitempty"`
 	LocalContainer       *fileLocalContainerConfig          `yaml:"localContainer,omitempty"`
+	AppleContainer       *fileAppleContainerConfig          `yaml:"appleContainer,omitempty"`
+	Multipass            *fileMultipassConfig               `yaml:"multipass,omitempty"`
 	Tailscale            *fileTailscaleConfig               `yaml:"tailscale,omitempty"`
 	Static               *fileStaticConfig                  `yaml:"static,omitempty"`
 	Results              *fileResultsConfig                 `yaml:"results,omitempty"`
@@ -1064,6 +1302,8 @@ type fileSSHConfig struct {
 type fileSyncConfig struct {
 	Exclude     []string `yaml:"exclude,omitempty"`
 	Excludes    []string `yaml:"excludes,omitempty"`
+	Include     []string `yaml:"include,omitempty"`
+	Includes    []string `yaml:"includes,omitempty"`
 	Delete      *bool    `yaml:"delete,omitempty"`
 	Checksum    *bool    `yaml:"checksum,omitempty"`
 	GitSeed     *bool    `yaml:"gitSeed,omitempty"`
@@ -1112,6 +1352,29 @@ type fileBlacksmithConfig struct {
 	Ref         string `yaml:"ref,omitempty"`
 	IdleTimeout string `yaml:"idleTimeout,omitempty"`
 	Debug       *bool  `yaml:"debug,omitempty"`
+}
+
+type fileKubeVirtConfig struct {
+	Kubectl         string `yaml:"kubectl,omitempty"`
+	Virtctl         string `yaml:"virtctl,omitempty"`
+	Kubeconfig      string `yaml:"kubeconfig,omitempty"`
+	Context         string `yaml:"context,omitempty"`
+	Namespace       string `yaml:"namespace,omitempty"`
+	Template        string `yaml:"template,omitempty"`
+	SSHUser         string `yaml:"sshUser,omitempty"`
+	SSHKey          string `yaml:"sshKey,omitempty"`
+	SSHPublicKey    string `yaml:"sshPublicKey,omitempty"`
+	SSHPort         string `yaml:"sshPort,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
+}
+
+type fileExternalConfig struct {
+	Command     string         `yaml:"command,omitempty"`
+	Args        []string       `yaml:"args,omitempty"`
+	Config      map[string]any `yaml:"config,omitempty"`
+	WorkRoot    string         `yaml:"workRoot,omitempty"`
+	RoutingFile string         `yaml:"routingFile,omitempty"`
 }
 
 type fileNamespaceConfig struct {
@@ -1294,6 +1557,27 @@ type fileLocalContainerConfig struct {
 	DockerSocket *bool  `yaml:"dockerSocket,omitempty"`
 }
 
+type fileAppleContainerConfig struct {
+	CLIPath      string   `yaml:"cliPath,omitempty"`
+	Image        string   `yaml:"image,omitempty"`
+	User         string   `yaml:"user,omitempty"`
+	WorkRoot     string   `yaml:"workRoot,omitempty"`
+	CPUs         int      `yaml:"cpus,omitempty"`
+	Memory       string   `yaml:"memory,omitempty"`
+	ExtraRunArgs []string `yaml:"extraRunArgs,omitempty"`
+}
+
+type fileMultipassConfig struct {
+	CLIPath       string `yaml:"cliPath,omitempty"`
+	Image         string `yaml:"image,omitempty"`
+	User          string `yaml:"user,omitempty"`
+	WorkRoot      string `yaml:"workRoot,omitempty"`
+	CPUs          int    `yaml:"cpus,omitempty"`
+	Memory        string `yaml:"memory,omitempty"`
+	Disk          string `yaml:"disk,omitempty"`
+	LaunchTimeout string `yaml:"launchTimeout,omitempty"`
+}
+
 type fileTailscaleConfig struct {
 	Enabled                *bool    `yaml:"enabled,omitempty"`
 	Network                string   `yaml:"network,omitempty"`
@@ -1319,12 +1603,21 @@ type fileResultsConfig struct {
 }
 
 type fileCacheConfig struct {
-	Pnpm           *bool `yaml:"pnpm,omitempty"`
-	Npm            *bool `yaml:"npm,omitempty"`
-	Docker         *bool `yaml:"docker,omitempty"`
-	Git            *bool `yaml:"git,omitempty"`
-	MaxGB          int   `yaml:"maxGB,omitempty"`
-	PurgeOnRelease *bool `yaml:"purgeOnRelease,omitempty"`
+	Pnpm           *bool                    `yaml:"pnpm,omitempty"`
+	Npm            *bool                    `yaml:"npm,omitempty"`
+	Docker         *bool                    `yaml:"docker,omitempty"`
+	Git            *bool                    `yaml:"git,omitempty"`
+	MaxGB          int                      `yaml:"maxGB,omitempty"`
+	PurgeOnRelease *bool                    `yaml:"purgeOnRelease,omitempty"`
+	Volumes        *[]fileCacheVolumeConfig `yaml:"volumes,omitempty"`
+}
+
+type fileCacheVolumeConfig struct {
+	Name     string `yaml:"name,omitempty"`
+	Key      string `yaml:"key,omitempty"`
+	Path     string `yaml:"path,omitempty"`
+	SizeGB   int    `yaml:"sizeGB,omitempty"`
+	Required *bool  `yaml:"required,omitempty"`
 }
 
 type fileProfileConfig struct {
@@ -1573,11 +1866,10 @@ func applyConfigFile(cfg *Config, path string) error {
 	if err != nil {
 		return err
 	}
-	applyFileConfig(cfg, file)
-	return nil
+	return applyFileConfig(cfg, file)
 }
 
-func applyFileConfig(cfg *Config, file fileConfig) {
+func applyFileConfig(cfg *Config, file fileConfig) error {
 	if file.Profile != "" {
 		cfg.Profile = file.Profile
 	}
@@ -1625,6 +1917,7 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 	}
 	if file.ServerType != "" {
 		cfg.ServerType = file.ServerType
+		cfg.ServerTypeExplicit = true
 	}
 	if file.Coordinator != "" {
 		cfg.Coordinator = file.Coordinator
@@ -1917,6 +2210,8 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 	if file.Sync != nil {
 		cfg.Sync.Excludes = appendUniqueStrings(cfg.Sync.Excludes, file.Sync.Exclude...)
 		cfg.Sync.Excludes = appendUniqueStrings(cfg.Sync.Excludes, file.Sync.Excludes...)
+		cfg.Sync.Includes = appendUniqueStrings(cfg.Sync.Includes, file.Sync.Include...)
+		cfg.Sync.Includes = appendUniqueStrings(cfg.Sync.Includes, file.Sync.Includes...)
 		if file.Sync.Delete != nil {
 			cfg.Sync.Delete = *file.Sync.Delete
 		}
@@ -2021,6 +2316,61 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		applyLeaseDuration(&cfg.Blacksmith.IdleTimeout, file.Blacksmith.IdleTimeout)
 		if file.Blacksmith.Debug != nil {
 			cfg.Blacksmith.Debug = *file.Blacksmith.Debug
+		}
+	}
+	if file.KubeVirt != nil {
+		if file.KubeVirt.Kubectl != "" {
+			cfg.KubeVirt.Kubectl = expandUserPath(file.KubeVirt.Kubectl)
+		}
+		if file.KubeVirt.Virtctl != "" {
+			cfg.KubeVirt.Virtctl = expandUserPath(file.KubeVirt.Virtctl)
+		}
+		if file.KubeVirt.Kubeconfig != "" {
+			cfg.KubeVirt.Kubeconfig = expandUserPath(file.KubeVirt.Kubeconfig)
+		}
+		if file.KubeVirt.Context != "" {
+			cfg.KubeVirt.Context = file.KubeVirt.Context
+		}
+		if file.KubeVirt.Namespace != "" {
+			cfg.KubeVirt.Namespace = file.KubeVirt.Namespace
+		}
+		if file.KubeVirt.Template != "" {
+			cfg.KubeVirt.Template = expandUserPath(file.KubeVirt.Template)
+		}
+		if file.KubeVirt.SSHUser != "" {
+			cfg.KubeVirt.SSHUser = file.KubeVirt.SSHUser
+		}
+		if file.KubeVirt.SSHKey != "" {
+			cfg.KubeVirt.SSHKey = expandUserPath(file.KubeVirt.SSHKey)
+		}
+		if file.KubeVirt.SSHPublicKey != "" {
+			cfg.KubeVirt.SSHPublicKey = expandUserPath(file.KubeVirt.SSHPublicKey)
+		}
+		if file.KubeVirt.SSHPort != "" {
+			cfg.KubeVirt.SSHPort = file.KubeVirt.SSHPort
+		}
+		if file.KubeVirt.WorkRoot != "" {
+			cfg.KubeVirt.WorkRoot = file.KubeVirt.WorkRoot
+		}
+		if file.KubeVirt.DeleteOnRelease != nil {
+			cfg.KubeVirt.DeleteOnRelease = *file.KubeVirt.DeleteOnRelease
+		}
+	}
+	if file.External != nil {
+		if file.External.Command != "" {
+			cfg.External.Command = file.External.Command
+		}
+		if len(file.External.Args) > 0 {
+			cfg.External.Args = append([]string(nil), file.External.Args...)
+		}
+		if file.External.Config != nil {
+			cfg.External.Config = file.External.Config
+		}
+		if file.External.WorkRoot != "" {
+			cfg.External.WorkRoot = file.External.WorkRoot
+		}
+		if file.External.RoutingFile != "" {
+			cfg.External.RoutingFile = file.External.RoutingFile
 		}
 	}
 	if file.Namespace != nil {
@@ -2341,6 +2691,7 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 	if file.LocalContainer != nil {
 		if file.LocalContainer.Runtime != "" {
 			cfg.LocalContainer.Runtime = file.LocalContainer.Runtime
+			cfg.localContainerRuntimeExplicit = true
 		}
 		if file.LocalContainer.Image != "" {
 			cfg.LocalContainer.Image = file.LocalContainer.Image
@@ -2363,6 +2714,57 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		}
 		if file.LocalContainer.DockerSocket != nil {
 			cfg.LocalContainer.DockerSocket = *file.LocalContainer.DockerSocket
+		}
+	}
+	if file.AppleContainer != nil {
+		if file.AppleContainer.CLIPath != "" {
+			cfg.AppleContainer.CLIPath = file.AppleContainer.CLIPath
+		}
+		if file.AppleContainer.Image != "" {
+			cfg.AppleContainer.Image = file.AppleContainer.Image
+			cfg.appleContainerImageExplicit = true
+		}
+		if file.AppleContainer.User != "" {
+			cfg.AppleContainer.User = file.AppleContainer.User
+		}
+		if file.AppleContainer.WorkRoot != "" {
+			cfg.AppleContainer.WorkRoot = file.AppleContainer.WorkRoot
+		}
+		if file.AppleContainer.CPUs > 0 {
+			cfg.AppleContainer.CPUs = file.AppleContainer.CPUs
+		}
+		if file.AppleContainer.Memory != "" {
+			cfg.AppleContainer.Memory = file.AppleContainer.Memory
+		}
+		if len(file.AppleContainer.ExtraRunArgs) > 0 {
+			cfg.AppleContainer.ExtraRunArgs = append([]string(nil), file.AppleContainer.ExtraRunArgs...)
+		}
+	}
+	if file.Multipass != nil {
+		if file.Multipass.CLIPath != "" {
+			cfg.Multipass.CLIPath = file.Multipass.CLIPath
+		}
+		if file.Multipass.Image != "" {
+			cfg.Multipass.Image = file.Multipass.Image
+			cfg.multipassImageExplicit = true
+		}
+		if file.Multipass.User != "" {
+			cfg.Multipass.User = file.Multipass.User
+		}
+		if file.Multipass.WorkRoot != "" {
+			cfg.Multipass.WorkRoot = file.Multipass.WorkRoot
+		}
+		if file.Multipass.CPUs > 0 {
+			cfg.Multipass.CPUs = file.Multipass.CPUs
+		}
+		if file.Multipass.Memory != "" {
+			cfg.Multipass.Memory = file.Multipass.Memory
+		}
+		if file.Multipass.Disk != "" {
+			cfg.Multipass.Disk = file.Multipass.Disk
+		}
+		if file.Multipass.LaunchTimeout != "" {
+			applyLeaseDuration(&cfg.Multipass.LaunchTimeout, file.Multipass.LaunchTimeout)
 		}
 	}
 	if file.Tailscale != nil {
@@ -2435,6 +2837,13 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 		if file.Cache.PurgeOnRelease != nil {
 			cfg.Cache.PurgeOnRelease = *file.Cache.PurgeOnRelease
 		}
+		if file.Cache.Volumes != nil {
+			volumes, err := normalizeFileCacheVolumes(*file.Cache.Volumes)
+			if err != nil {
+				return err
+			}
+			cfg.Cache.Volumes = volumes
+		}
 	}
 	if len(file.Presets) > 0 {
 		if cfg.Presets == nil {
@@ -2481,6 +2890,7 @@ func applyFileConfig(cfg *Config, file fileConfig) {
 			cfg.Jobs[name] = applyFileJobConfig(cfg.Jobs[name], job)
 		}
 	}
+	return nil
 }
 
 func applyFileProfileConfig(profile ProfileConfig, file fileProfileConfig) ProfileConfig {
@@ -2730,7 +3140,7 @@ func applyLeaseDuration(target *time.Duration, value string) {
 	}
 }
 
-func applyEnv(cfg *Config) {
+func applyEnv(cfg *Config) error {
 	cfg.Profile = getenv("CRABBOX_PROFILE", cfg.Profile)
 	cfg.Provider = getenv("CRABBOX_PROVIDER", cfg.Provider)
 	cfg.TargetOS = getenv("CRABBOX_TARGET", getenv("CRABBOX_TARGET_OS", cfg.TargetOS))
@@ -2916,6 +3326,26 @@ func applyEnv(cfg *Config) {
 	cfg.Blacksmith.Workflow = getenv("CRABBOX_BLACKSMITH_WORKFLOW", cfg.Blacksmith.Workflow)
 	cfg.Blacksmith.Job = getenv("CRABBOX_BLACKSMITH_JOB", cfg.Blacksmith.Job)
 	cfg.Blacksmith.Ref = getenv("CRABBOX_BLACKSMITH_REF", cfg.Blacksmith.Ref)
+	cfg.KubeVirt.Kubectl = expandUserPath(getenv("CRABBOX_KUBEVIRT_KUBECTL", cfg.KubeVirt.Kubectl))
+	cfg.KubeVirt.Virtctl = expandUserPath(getenv("CRABBOX_KUBEVIRT_VIRTCTL", cfg.KubeVirt.Virtctl))
+	cfg.KubeVirt.Kubeconfig = expandUserPath(getenv("CRABBOX_KUBEVIRT_KUBECONFIG", cfg.KubeVirt.Kubeconfig))
+	cfg.KubeVirt.Context = getenv("CRABBOX_KUBEVIRT_CONTEXT", cfg.KubeVirt.Context)
+	cfg.KubeVirt.Namespace = getenv("CRABBOX_KUBEVIRT_NAMESPACE", cfg.KubeVirt.Namespace)
+	cfg.KubeVirt.Template = expandUserPath(getenv("CRABBOX_KUBEVIRT_TEMPLATE", cfg.KubeVirt.Template))
+	cfg.KubeVirt.SSHUser = getenv("CRABBOX_KUBEVIRT_SSH_USER", cfg.KubeVirt.SSHUser)
+	cfg.KubeVirt.SSHKey = expandUserPath(getenv("CRABBOX_KUBEVIRT_SSH_KEY", cfg.KubeVirt.SSHKey))
+	cfg.KubeVirt.SSHPublicKey = expandUserPath(getenv("CRABBOX_KUBEVIRT_SSH_PUBLIC_KEY", cfg.KubeVirt.SSHPublicKey))
+	cfg.KubeVirt.SSHPort = getenv("CRABBOX_KUBEVIRT_SSH_PORT", cfg.KubeVirt.SSHPort)
+	cfg.KubeVirt.WorkRoot = getenv("CRABBOX_KUBEVIRT_WORK_ROOT", cfg.KubeVirt.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_KUBEVIRT_DELETE_ON_RELEASE"); ok {
+		cfg.KubeVirt.DeleteOnRelease = value
+	}
+	cfg.External.Command = getenv("CRABBOX_EXTERNAL_COMMAND", cfg.External.Command)
+	if arg := os.Getenv("CRABBOX_EXTERNAL_ARG"); arg != "" {
+		cfg.External.Args = []string{arg}
+	}
+	cfg.External.WorkRoot = getenv("CRABBOX_EXTERNAL_WORK_ROOT", cfg.External.WorkRoot)
+	cfg.External.RoutingFile = getenv("CRABBOX_EXTERNAL_ROUTING_FILE", cfg.External.RoutingFile)
 	cfg.Namespace.Image = getenv("CRABBOX_NAMESPACE_IMAGE", cfg.Namespace.Image)
 	cfg.Namespace.Size = getenv("CRABBOX_NAMESPACE_SIZE", cfg.Namespace.Size)
 	cfg.Namespace.Repository = getenv("CRABBOX_NAMESPACE_REPOSITORY", cfg.Namespace.Repository)
@@ -3040,7 +3470,10 @@ func applyEnv(cfg *Config) {
 	cfg.Sprites.Token = getenv("CRABBOX_SPRITES_TOKEN", getenv("SPRITES_TOKEN", getenv("SPRITE_TOKEN", getenv("SETUP_SPRITE_TOKEN", cfg.Sprites.Token))))
 	cfg.Sprites.APIURL = getenv("CRABBOX_SPRITES_API_URL", getenv("SPRITES_API_URL", cfg.Sprites.APIURL))
 	cfg.Sprites.WorkRoot = getenv("CRABBOX_SPRITES_WORK_ROOT", cfg.Sprites.WorkRoot)
-	cfg.LocalContainer.Runtime = getenv("CRABBOX_LOCAL_CONTAINER_RUNTIME", cfg.LocalContainer.Runtime)
+	if runtimeName := os.Getenv("CRABBOX_LOCAL_CONTAINER_RUNTIME"); runtimeName != "" {
+		cfg.LocalContainer.Runtime = runtimeName
+		cfg.localContainerRuntimeExplicit = true
+	}
 	if image := os.Getenv("CRABBOX_LOCAL_CONTAINER_IMAGE"); image != "" {
 		cfg.LocalContainer.Image = image
 		cfg.localContainerImageExplicit = true
@@ -3052,6 +3485,31 @@ func applyEnv(cfg *Config) {
 	cfg.LocalContainer.Network = getenv("CRABBOX_LOCAL_CONTAINER_NETWORK", cfg.LocalContainer.Network)
 	if value, ok := getenvBool("CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET"); ok {
 		cfg.LocalContainer.DockerSocket = value
+	}
+	cfg.AppleContainer.CLIPath = getenv("CRABBOX_APPLE_CONTAINER_CLI", cfg.AppleContainer.CLIPath)
+	if image := os.Getenv("CRABBOX_APPLE_CONTAINER_IMAGE"); image != "" {
+		cfg.AppleContainer.Image = image
+		cfg.appleContainerImageExplicit = true
+	}
+	cfg.AppleContainer.User = getenv("CRABBOX_APPLE_CONTAINER_USER", cfg.AppleContainer.User)
+	cfg.AppleContainer.WorkRoot = getenv("CRABBOX_APPLE_CONTAINER_WORK_ROOT", cfg.AppleContainer.WorkRoot)
+	cfg.AppleContainer.CPUs = getenvInt("CRABBOX_APPLE_CONTAINER_CPUS", cfg.AppleContainer.CPUs)
+	cfg.AppleContainer.Memory = getenv("CRABBOX_APPLE_CONTAINER_MEMORY", cfg.AppleContainer.Memory)
+	if extra := strings.Fields(os.Getenv("CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS")); len(extra) > 0 {
+		cfg.AppleContainer.ExtraRunArgs = extra
+	}
+	cfg.Multipass.CLIPath = getenv("CRABBOX_MULTIPASS_CLI", cfg.Multipass.CLIPath)
+	if image := os.Getenv("CRABBOX_MULTIPASS_IMAGE"); image != "" {
+		cfg.Multipass.Image = image
+		cfg.multipassImageExplicit = true
+	}
+	cfg.Multipass.User = getenv("CRABBOX_MULTIPASS_USER", cfg.Multipass.User)
+	cfg.Multipass.WorkRoot = getenv("CRABBOX_MULTIPASS_WORK_ROOT", cfg.Multipass.WorkRoot)
+	cfg.Multipass.CPUs = getenvInt("CRABBOX_MULTIPASS_CPUS", cfg.Multipass.CPUs)
+	cfg.Multipass.Memory = getenv("CRABBOX_MULTIPASS_MEMORY", cfg.Multipass.Memory)
+	cfg.Multipass.Disk = getenv("CRABBOX_MULTIPASS_DISK", cfg.Multipass.Disk)
+	if timeout := os.Getenv("CRABBOX_MULTIPASS_LAUNCH_TIMEOUT"); timeout != "" {
+		applyLeaseDuration(&cfg.Multipass.LaunchTimeout, timeout)
 	}
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value
@@ -3108,6 +3566,13 @@ func applyEnv(cfg *Config) {
 	if value, ok := getenvBool("CRABBOX_CACHE_PURGE_ON_RELEASE"); ok {
 		cfg.Cache.PurgeOnRelease = value
 	}
+	if volumes := os.Getenv("CRABBOX_CACHE_VOLUMES"); volumes != "" {
+		parsed, err := ParseCacheVolumeSpecs(splitCommaList(volumes))
+		if err != nil {
+			return err
+		}
+		cfg.Cache.Volumes = parsed
+	}
 	if regions := os.Getenv("CRABBOX_CAPACITY_REGIONS"); regions != "" {
 		cfg.Capacity.Regions = splitCommaList(regions)
 	}
@@ -3145,6 +3610,7 @@ func applyEnv(cfg *Config) {
 	if tools := os.Getenv("CRABBOX_PREFLIGHT_TOOLS"); tools != "" {
 		cfg.Run.PreflightTools = normalizePreflightToolNames(splitCommaList(tools))
 	}
+	return nil
 }
 
 func expandUserPath(path string) string {
@@ -3174,7 +3640,7 @@ func serverTypeForConfig(cfg Config) string {
 			return typer.ServerTypeForConfig(cfg)
 		}
 	}
-	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) || cfg.Provider == "islo" || cfg.Provider == "sprites" || cfg.Provider == "local-container" {
+	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) || cfg.Provider == "islo" || cfg.Provider == "sprites" || cfg.Provider == "local-container" || cfg.Provider == "multipass" {
 		return ""
 	}
 	if cfg.Provider == "namespace-devbox" || cfg.Provider == "namespace" {
@@ -3223,7 +3689,7 @@ func serverTypeForProviderClass(provider, class string) string {
 			return typer.ServerTypeForClass(class)
 		}
 	}
-	if isBlacksmithProvider(provider) || isStaticProvider(provider) || provider == "islo" || provider == "sprites" || provider == "local-container" {
+	if isBlacksmithProvider(provider) || isStaticProvider(provider) || provider == "islo" || provider == "sprites" || provider == "local-container" || provider == "multipass" {
 		return ""
 	}
 	if provider == "namespace-devbox" || provider == "namespace" {

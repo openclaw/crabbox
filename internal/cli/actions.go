@@ -109,7 +109,21 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	}
 	applyResolvedServerConfig(&cfg, server)
 	target = targetWithConfigDefaults(target, cfg)
-	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := claimLeaseForRepoConfig(leaseID, slug, cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+		return err
+	}
+	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
+		return err
+	} else {
+		target = resolved.Target
+		if resolved.FallbackReason != "" {
+			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+		}
+	}
+	if err := waitForSSHReady(ctx, &target, a.Stderr, "actions hydrate", 2*time.Minute); err != nil {
+		return err
+	}
+	if err := updateLeaseClaimEndpoint(leaseID, server, target); err != nil {
 		return err
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
@@ -481,7 +495,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	if err != nil {
 		return err
 	}
-	manifest, err := syncManifest(repo.Root, excludes)
+	manifest, err := syncManifestFiltered(repo.Root, excludes, syncIncludes(cfg))
 	if err != nil {
 		return exit(6, "build sync file list: %v", err)
 	}
@@ -491,7 +505,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	if err := runSSHQuiet(ctx, target, remoteMkdir(workdir)); err != nil {
 		return exit(7, "create remote workdir: %v", err)
 	}
-	if cfg.Sync.GitSeed && remoteGitSeedCandidate(repo) {
+	if syncGitSeedEnabled(cfg, repo) {
 		if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
 			fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
 		}

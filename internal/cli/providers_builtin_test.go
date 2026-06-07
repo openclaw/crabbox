@@ -24,6 +24,7 @@ func init() {
 	RegisterProvider(testCloudflareProvider{})
 	RegisterProvider(testSpritesProvider{})
 	RegisterProvider(testLocalContainerProvider{})
+	RegisterProvider(testMultipassProvider{})
 	RegisterProvider(testParallelsProvider{})
 	RegisterProvider(testWandbProvider{})
 }
@@ -542,7 +543,7 @@ func (testBlacksmithProvider) Spec() ProviderSpec {
 		Name:        "blacksmith-testbox",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureRunProof},
+		Features:    FeatureSet{FeatureCacheVolume, FeatureRunProof, FeatureRunSession},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -937,7 +938,7 @@ func (testLocalContainerProvider) Spec() ProviderSpec {
 		Name:        "local-container",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCacheVolume},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -1003,6 +1004,89 @@ func (testLocalContainerProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, valu
 	return nil
 }
 func (p testLocalContainerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testMultipassProvider struct{}
+
+func (testMultipassProvider) Name() string { return "multipass" }
+func (testMultipassProvider) Aliases() []string {
+	return []string{"mp", "canonical-multipass"}
+}
+func (testMultipassProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "multipass",
+		Family:      "local-vm",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureCacheVolume},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testMultipassFlagValues struct {
+	CLIPath       *string
+	Image         *string
+	User          *string
+	WorkRoot      *string
+	CPUs          *int
+	Memory        *string
+	Disk          *string
+	LaunchTimeout *string
+}
+
+func (testMultipassProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testMultipassFlagValues{
+		CLIPath:       fs.String("multipass-cli", defaults.Multipass.CLIPath, "Multipass CLI"),
+		Image:         fs.String("multipass-image", defaults.Multipass.Image, "Multipass image"),
+		User:          fs.String("multipass-user", defaults.Multipass.User, "Multipass SSH user"),
+		WorkRoot:      fs.String("multipass-work-root", defaults.Multipass.WorkRoot, "Multipass work root"),
+		CPUs:          fs.Int("multipass-cpus", defaults.Multipass.CPUs, "Multipass CPUs"),
+		Memory:        fs.String("multipass-memory", defaults.Multipass.Memory, "Multipass memory"),
+		Disk:          fs.String("multipass-disk", defaults.Multipass.Disk, "Multipass disk"),
+		LaunchTimeout: fs.String("multipass-launch-timeout", defaults.Multipass.LaunchTimeout.String(), "Multipass launch timeout"),
+	}
+}
+func (testMultipassProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testMultipassFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "multipass-cli") {
+		cfg.Multipass.CLIPath = *v.CLIPath
+	}
+	if flagWasSet(fs, "multipass-image") {
+		cfg.Multipass.Image = *v.Image
+		cfg.multipassImageExplicit = true
+	}
+	if flagWasSet(fs, "multipass-user") {
+		cfg.Multipass.User = *v.User
+		cfg.SSHUser = *v.User
+	}
+	if flagWasSet(fs, "multipass-work-root") {
+		cfg.Multipass.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "multipass-cpus") {
+		cfg.Multipass.CPUs = *v.CPUs
+	}
+	if flagWasSet(fs, "multipass-memory") {
+		cfg.Multipass.Memory = *v.Memory
+	}
+	if flagWasSet(fs, "multipass-disk") {
+		cfg.Multipass.Disk = *v.Disk
+	}
+	if flagWasSet(fs, "multipass-launch-timeout") {
+		if err := ApplyLeaseDuration(&cfg.Multipass.LaunchTimeout, *v.LaunchTimeout); err != nil {
+			return err
+		}
+	}
+	if cfg.Provider == "mp" || cfg.Provider == "canonical-multipass" {
+		cfg.Provider = "multipass"
+	}
+	return nil
+}
+func (p testMultipassProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

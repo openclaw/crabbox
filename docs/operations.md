@@ -23,7 +23,8 @@ Run these before a release or after changing secrets:
 go test ./...
 npm run check --prefix worker
 npm test --prefix worker
-npm run docs:check
+node --test scripts/*.test.js
+scripts/check-docs.sh
 bin/crabbox doctor
 bin/crabbox whoami
 bin/crabbox list --json
@@ -56,6 +57,8 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-devbox  CRABBOX_LIVE_REPO=/path/
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=semaphore         CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=sprites           CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=wandb CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=kubevirt CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_KUBEVIRT_TEMPLATE=/path/to/vm.yaml scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=external CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_EXTERNAL_COMMAND=/path/to/provider scripts/live-smoke.sh
 ```
 
 Per-provider smoke prerequisites:
@@ -67,6 +70,8 @@ Per-provider smoke prerequisites:
 - **Daytona** — `CRABBOX_DAYTONA_SNAPSHOT`, `DAYTONA_SNAPSHOT`, or `daytona.snapshot`.
 - **Namespace** — the authenticated `devbox` CLI on `PATH`.
 - **Sprites** — the authenticated `sprite` CLI on `PATH` plus a Sprites token in the environment.
+- **KubeVirt** — `kubectl`, `virtctl`, a namespace with KubeVirt access, and an SSH-ready VM template.
+- **External** — a configured provider executable through `external.command` or `CRABBOX_LIVE_EXTERNAL_COMMAND`.
 - **W&B** — `WANDB_ENTITY_NAME` plus `CRABBOX_WANDB_API_KEY` or `WANDB_API_KEY` (from `wandb login`). `scripts/wandb-smoke.sh` is a coordinator-free, wandb-only gate.
 
 For a direct-provider smoke (no coordinator), disable the broker with a scratch config and run the same lease lifecycle manually:
@@ -188,6 +193,12 @@ CRABBOX_MAX_MONTHLY_USD_PER_OWNER
 CRABBOX_MAX_MONTHLY_USD_PER_ORG
 CRABBOX_DEFAULT_ORG
 ```
+
+Monthly cost checks use reserved cost, not only elapsed runtime. Long TTLs,
+prewarmed leases, and failed provisioning attempts can therefore consume budget
+headroom faster than the provider bill. Keep active-lease and per-owner limits
+as the primary safety rails, and size fleet/org monthly caps with enough room
+for TTL-based reservations during busy test bursts.
 
 ## Routes And Access
 
@@ -349,14 +360,15 @@ Cost is an estimate for compute leases, not an invoice. See [Cost and Usage](fea
 Before tagging a release:
 
 - Reorder `CHANGELOG.md` with the user-facing changes first, date the release section, and keep contributor thanks / co-author notes intact.
-- Update package metadata that carries the project version, including `package.json`, `worker/package.json`, and `worker/package-lock.json`.
+- Update package metadata that carries the project version, including `worker/package.json` and `worker/package-lock.json`.
 - `go vet ./...`
 - `go test -race ./...`
 - `scripts/test-go-modules.sh`
 - `go build -trimpath -o bin/crabbox ./cmd/crabbox`
 - `scripts/check-go-coverage.sh 90.0`
 - Worker gate: `npm run format:check --prefix worker && npm run lint --prefix worker && npm run check --prefix worker && npm test --prefix worker && npm run build --prefix worker`
-- `npm run docs:check`
+- `node --test scripts/*.test.js`
+- `scripts/check-docs.sh`
 - `git diff --check`
 - Live smoke at least one coordinator-backed `crabbox run`, then verify `crabbox attach`, `crabbox events`, `crabbox logs`, and lease cleanup.
 - Push, pull, and wait for CI green on the release commit.

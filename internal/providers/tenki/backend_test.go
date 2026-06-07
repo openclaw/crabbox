@@ -25,13 +25,35 @@ func TestTenkiCreateAddsMetadata(t *testing.T) {
 	runner := &fakeRunner{}
 	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
-		switch strings.Join(req.Args, " ") {
-		case "sandbox create --endpoint https://api.tenki.test --workspace ws_1 --project proj_1 --no-wait --output json --name crabbox-blue --metadata crabbox_provider=tenki --metadata crabbox_lease_id=cbx_123 --metadata crabbox_slug=blue --tags crabbox,crabbox-provider-tenki --sticky --max-duration 1h0m0s --idle-timeout 30m0s --cpu 4 --memory-mb 8192 --disk-size-gb 40 --image ubuntu:tenki":
+		args := strings.Join(req.Args, " ")
+		if strings.HasPrefix(args, "sandbox create --endpoint https://api.tenki.test --workspace ws_1 --project proj_1 --no-wait --output json --name crabbox-blue ") {
+			for _, want := range []string{
+				"--metadata crabbox_provider=tenki",
+				"--metadata crabbox_lease_id=cbx_123",
+				"--metadata crabbox_slug=blue",
+				"--metadata crabbox_idle_timeout_secs=1800",
+				"--metadata crabbox_ttl_secs=3600",
+				"--metadata crabbox_server_type=ubuntu:tenki",
+				"--tags crabbox,crabbox-provider-tenki",
+				"--sticky",
+				"--max-duration 1h0m0s",
+				"--idle-timeout 30m0s",
+				"--cpu 4",
+				"--memory-mb 8192",
+				"--disk-size-gb 40",
+				"--image ubuntu:tenki",
+			} {
+				if !strings.Contains(args, want) {
+					t.Fatalf("create args missing %q:\n%s", want, args)
+				}
+			}
 			return LocalCommandResult{Stdout: `{"id":"00000000-0000-0000-0000-000000000001"}`, ExitCode: 0}, nil
+		}
+		switch args {
 		case "sandbox get --endpoint https://api.tenki.test --output json 00000000-0000-0000-0000-000000000001":
 			return LocalCommandResult{Stdout: `{"id":"00000000-0000-0000-0000-000000000001","name":"crabbox-blue","state":"RUNNING","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}`}, nil
 		default:
-			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
+			t.Fatalf("unexpected command: %s %s", req.Name, args)
 		}
 		return LocalCommandResult{}, nil
 	}
@@ -194,6 +216,51 @@ func TestTenkiSessionToServerDoesNotExposeSessionIDAsIP(t *testing.T) {
 	}
 	if server.CloudID != "session-1" || server.Labels["tenki_session_id"] != "session-1" {
 		t.Fatalf("session id not preserved in server metadata: %#v", server)
+	}
+}
+
+func TestTenkiSessionToServerPreservesLeaseTimingMetadata(t *testing.T) {
+	backend := &tenkiBackend{}
+	server := backend.sessionToServer(Config{
+		Class:       "beast",
+		ProviderKey: "default-provider-key",
+		Tenki: TenkiConfig{
+			Image: "ubuntu:tenki",
+		},
+	}, tenkiSession{
+		ID:    "session-1",
+		Name:  "crabbox-blue",
+		State: "RUNNING",
+		Metadata: map[string]string{
+			tenkiMetadataProvider:       tenkiProvider,
+			tenkiMetadataLease:          "cbx_123",
+			tenkiMetadataSlug:           "blue",
+			"crabbox_created_at":        "1700000000",
+			"crabbox_expires_at":        "1700001800",
+			"crabbox_idle_timeout":      "600",
+			"crabbox_idle_timeout_secs": "600",
+			"crabbox_last_touched_at":   "1700000000",
+			"crabbox_provider_key":      "tenki-provider-key",
+			"crabbox_server_type":       "sandbox",
+			"crabbox_ttl_secs":          "1800",
+		},
+	}, "cbx_123", "blue", true)
+	for key, want := range map[string]string{
+		"created_at":        "1700000000",
+		"expires_at":        "1700001800",
+		"idle_timeout":      "600",
+		"idle_timeout_secs": "600",
+		"last_touched_at":   "1700000000",
+		"provider_key":      "tenki-provider-key",
+		"server_type":       "ubuntu:tenki",
+		"ttl_secs":          "1800",
+	} {
+		if got := server.Labels[key]; got != want {
+			t.Fatalf("label %s=%q want %q; labels=%#v", key, got, want, server.Labels)
+		}
+	}
+	if server.ServerType.Name != "ubuntu:tenki" {
+		t.Fatalf("server type=%q", server.ServerType.Name)
 	}
 }
 

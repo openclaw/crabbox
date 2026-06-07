@@ -83,9 +83,14 @@ failed run; see [Ownership boundary](#ownership-boundary)).
 | `--blacksmith-workflow` | Testbox workflow file, name, or id |
 | `--blacksmith-job` | Workflow job |
 | `--blacksmith-ref` | Git ref |
+| `--cache-volume` | Provider-backed cache volume, forwarded as a Blacksmith sticky disk |
 
 `--idle-timeout` (a core flag) sets the Testbox idle timeout; it is forwarded to
 `blacksmith testbox warmup` as whole minutes.
+
+Configured [`cache.volumes`](cache-volumes.md) are forwarded during warmup as
+Blacksmith sticky disks using `key:path`. The `--cache-volume [name=]key:path`
+flag is repeatable and marks the volume required for that run.
 
 ### Environment variables
 
@@ -133,7 +138,7 @@ Crabbox forwards lifecycle and run operations to the `blacksmith` CLI:
 
 ```sh
 blacksmith [--org <org>] testbox warmup <workflow> --job <job> --ref <ref> \
-  --ssh-public-key <key> --idle-timeout <minutes>
+  --ssh-public-key <key> --sticky-disk <key:path> --idle-timeout <minutes>
 blacksmith [--org <org>] testbox run --id <tbx_id> --ssh-private-key <key> [--debug] <command>
 blacksmith [--org <org>] testbox list
 blacksmith [--org <org>] testbox list --all

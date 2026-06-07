@@ -365,7 +365,7 @@ See [Actions hydration](features/actions-hydration.md).
 **Checks**
 
 ```sh
-npm run docs:check
+scripts/check-docs.sh
 gh run list --workflow pages.yml
 ```
 
