@@ -6,25 +6,36 @@
   "scripts": {
     "build": "wrangler deploy --dry-run --outdir dist",
     "build:cloudflare": "wrangler deploy --config wrangler.cloudflare.jsonc --dry-run --outdir dist-cloudflare",
+    "build:node": "node scripts/build-node.mjs",
     "check": "tsgo --noEmit",
+    "check:node": "tsgo --noEmit -p tsconfig.node.json",
     "deploy": "wrangler deploy",
     "deploy:cloudflare": "wrangler deploy --config wrangler.cloudflare.jsonc --containers-rollout=immediate",
     "prebuild": "node scripts/vendor-novnc.mjs",
+    "prebuild:node": "node scripts/vendor-novnc.mjs",
     "predeploy": "node scripts/vendor-novnc.mjs",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint --config .oxlintrc.json .",
+    "start:node": "node dist-node/server.mjs",
     "test": "vitest run"
   },
   "dependencies": {
     "@cloudflare/containers": "^0.3.5",
     "@novnc/novnc": "^1.7.0",
     "aws4fetch": "^1.0.20",
-    "fast-xml-parser": "^5.8.0"
+    "fast-xml-parser": "^5.8.0",
+    "pg": "^8.21.0",
+    "pg-boss": "^12.18.2",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260531.1",
+    "@types/node": "^22.19.19",
+    "@types/pg": "^8.20.0",
+    "@types/ws": "^8.18.1",
     "@typescript/native-preview": "^7.0.0-dev.20260527.2",
+    "esbuild": "^0.28.0",
     "oxfmt": "^0.52.0",
     "oxlint": "^1.67.0",
     "oxlint-tsgolint": "^0.23.0",
@@ -33,6 +44,6 @@
     "wrangler": "^4.95.0"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.12.0"
   }
 }

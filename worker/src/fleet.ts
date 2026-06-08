@@ -17,6 +17,11 @@ import {
   validCIDRs,
   type LeaseConfig,
 } from "./config";
+import {
+  CloudflareCoordinatorRuntime,
+  type CoordinatorRuntime,
+  type CoordinatorStorage,
+} from "./coordinator-runtime";
 import { GCPClient } from "./gcp";
 import { HetznerClient } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
@@ -384,7 +389,7 @@ interface WebVNCViewerSession {
   connectedAt: string;
 }
 
-export class FleetDurableObject implements DurableObject {
+export class FleetCoordinator {
   private readonly webVNCAgents = new Map<string, Map<string, WebSocket>>();
   private readonly webVNCAgentCapabilities = new Map<string, Map<string, Set<string>>>();
   private readonly webVNCViewers = new Map<string, Map<string, WebVNCViewerSession>>();
@@ -402,7 +407,7 @@ export class FleetDurableObject implements DurableObject {
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
 
   constructor(
-    private readonly state: DurableObjectState,
+    private readonly state: CoordinatorRuntime,
     private readonly env: Env,
     private readonly testProviders: Partial<Record<Provider, CloudProvider>> = {},
   ) {
@@ -622,7 +627,7 @@ export class FleetDurableObject implements DurableObject {
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    const attachment = bridgeAttachment(socket);
+    const attachment = this.bridgeAttachment(socket);
     if (!attachment) {
       return;
     }
@@ -638,11 +643,8 @@ export class FleetDurableObject implements DurableObject {
   }
 
   private restoreBridgeWebSockets(): void {
-    if (typeof this.state.getWebSockets !== "function") {
-      return;
-    }
     for (const socket of this.state.getWebSockets()) {
-      const attachment = bridgeAttachment(socket);
+      const attachment = this.bridgeAttachment(socket);
       if (!attachment || socket.readyState !== WebSocket.OPEN) {
         continue;
       }
@@ -651,21 +653,19 @@ export class FleetDurableObject implements DurableObject {
   }
 
   private acceptBridgeWebSocket(socket: WebSocket, attachment: BridgeAttachment): void {
-    if (typeof this.state.acceptWebSocket === "function") {
-      this.state.acceptWebSocket(socket, bridgeTags(attachment));
-      socket.serializeAttachment(attachment);
-    } else {
-      socket.accept();
-      socket.addEventListener("message", (event) => {
-        void this.handleBridgeMessage(socket, attachment, event.data);
-      });
-      socket.addEventListener("close", (event) => {
-        this.handleBridgeClose(socket, event.code, event.reason);
-      });
-      socket.addEventListener("error", () => {
+    this.state.acceptWebSocket(socket, attachment, bridgeTags(attachment), {
+      message: (data) => this.handleBridgeMessage(socket, attachment, data),
+      close: (code, reason) => {
+        this.handleBridgeClose(socket, code, reason);
+      },
+      error: () => {
         this.handleBridgeClose(socket, 1011, "bridge socket error");
-      });
-    }
+      },
+    });
+  }
+
+  private bridgeAttachment(socket: WebSocket): BridgeAttachment | undefined {
+    return bridgeAttachment(this.state.socketAttachment(socket));
   }
 
   private trackBridgeSocket(socket: WebSocket, attachment: BridgeAttachment): void {
@@ -771,9 +771,8 @@ export class FleetDurableObject implements DurableObject {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return json({ error: "websocket_required" }, { status: 426 });
     }
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
+    const upgrade = this.state.createWebSocketUpgrade();
+    const server = upgrade.socket;
     const attachment: BridgeAttachment = {
       kind: "control",
       clientID: crypto.randomUUID(),
@@ -789,7 +788,7 @@ export class FleetDurableObject implements DurableObject {
       protocol: 1,
       clientID: attachment.clientID,
     });
-    return new Response(null, { status: 101, webSocket: client });
+    return upgrade.response;
   }
 
   private async handleControlMessage(
@@ -898,9 +897,7 @@ export class FleetDurableObject implements DurableObject {
   }
 
   private serializeBridgeAttachment(socket: WebSocket, attachment: BridgeAttachment): void {
-    if (typeof socket.serializeAttachment === "function") {
-      socket.serializeAttachment(attachment);
-    }
+    this.state.setSocketAttachment(socket, attachment);
   }
 
   private async handleBridgeMessage(
@@ -964,7 +961,7 @@ export class FleetDurableObject implements DurableObject {
   }
 
   private handleBridgeClose(socket: WebSocket, code: number, reason: string): void {
-    const attachment = bridgeAttachment(socket);
+    const attachment = this.bridgeAttachment(socket);
     if (!attachment) {
       return;
     }
@@ -2057,9 +2054,8 @@ export class FleetDurableObject implements DurableObject {
     if (error) {
       return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
     }
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const agent = pair[1];
+    const upgrade = this.state.createWebSocketUpgrade();
+    const agent = upgrade.socket;
 
     const agentID = newWebVNCSessionID("agent");
     const capabilities = webVNCAgentCapabilities(request);
@@ -2071,7 +2067,7 @@ export class FleetDurableObject implements DurableObject {
       id: agentID,
       capabilities,
     });
-    return new Response(null, { status: 101, webSocket: client });
+    return upgrade.response;
   }
 
   private async createEgressTicket(request: Request, identifier: string): Promise<Response> {
@@ -2160,9 +2156,8 @@ export class FleetDurableObject implements DurableObject {
     if (lease.state !== "active") {
       return json({ error: "egress_unavailable", message: "lease is not active" }, { status: 409 });
     }
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const agent = pair[1];
+    const upgrade = this.state.createWebSocketUpgrade();
+    const agent = upgrade.socket;
     const attachment: BridgeAttachment = {
       kind: role === "host" ? "egress-host" : "egress-client",
       leaseID: lease.id,
@@ -2185,7 +2180,7 @@ export class FleetDurableObject implements DurableObject {
       this.egressClients.set(key, agent);
     }
     this.acceptBridgeWebSocket(agent, attachment);
-    return new Response(null, { status: 101, webSocket: client });
+    return upgrade.response;
   }
 
   private async egressStatus(request: Request, identifier: string): Promise<Response> {
@@ -2498,15 +2493,14 @@ export class FleetDurableObject implements DurableObject {
     if (error) {
       return json({ error: "code_unavailable", message: error }, { status: 409 });
     }
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const agent = pair[1];
+    const upgrade = this.state.createWebSocketUpgrade();
+    const agent = upgrade.socket;
 
     closeSocket(this.codeAgents.get(lease.id), 1012, "replaced by a newer code bridge");
     this.clearCodeLease(lease.id);
     this.codeAgents.set(lease.id, agent);
     this.acceptBridgeWebSocket(agent, { kind: "code-agent", leaseID: lease.id });
-    return new Response(null, { status: 101, webSocket: client });
+    return upgrade.response;
   }
 
   private async codePortalProxy(
@@ -2596,9 +2590,8 @@ export class FleetDurableObject implements DurableObject {
   }
 
   private codeViewerWebSocket(request: Request, lease: LeaseRecord, agent: WebSocket): Response {
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const viewer = pair[1];
+    const upgrade = this.state.createWebSocketUpgrade();
+    const viewer = upgrade.socket;
     const id = crypto.randomUUID();
     this.codeViewers.set(id, viewer);
     this.acceptBridgeWebSocket(viewer, { kind: "code-viewer", leaseID: lease.id, id });
@@ -2610,7 +2603,7 @@ export class FleetDurableObject implements DurableObject {
       headers: codeForwardHeaders(request.headers),
     };
     agent.send(JSON.stringify(open));
-    return new Response(null, { status: 101, webSocket: client });
+    return upgrade.response;
   }
 
   private sendCodeWebSocketData(agent: WebSocket, message: CodeWebSocketData): void {
@@ -2875,9 +2868,8 @@ export class FleetDurableObject implements DurableObject {
       ? requestedViewerID
       : newWebVNCSessionID("viewer");
 
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const viewer = pair[1];
+    const upgrade = this.state.createWebSocketUpgrade();
+    const viewer = upgrade.socket;
     const owner = requestOwner(request);
     const label = webVNCViewerLabel(owner);
 
@@ -2903,7 +2895,7 @@ export class FleetDurableObject implements DurableObject {
       label,
     });
     flushPendingWebVNC(this.pendingWebVNCToViewer, webVNCBufferKey(lease.id, agent.id), viewer);
-    return new Response(null, { status: 101, webSocket: client });
+    return upgrade.response;
   }
 
   private clearWebVNCAgent(leaseID: string, agentID: string, socket: WebSocket): void {
@@ -4501,10 +4493,10 @@ export class FleetDurableObject implements DurableObject {
       alarmTimes.push(azureCleanupAlarm);
     }
     if (alarmTimes.length === 0) {
-      await this.state.storage.deleteAlarm();
+      await this.state.clearAlarm();
       return;
     }
-    await this.state.storage.setAlarm(Math.min(...alarmTimes));
+    await this.state.scheduleAlarm(Math.min(...alarmTimes));
   }
 
   private async nextAzureDeferredCleanupAlarmTime(): Promise<number | undefined> {
@@ -5160,7 +5152,7 @@ export class FleetDurableObject implements DurableObject {
       if (socket.readyState !== WebSocket.OPEN) {
         continue;
       }
-      const attachment = bridgeAttachment(socket);
+      const attachment = this.bridgeAttachment(socket);
       if (!attachment || attachment.kind !== "control") {
         continue;
       }
@@ -5192,7 +5184,12 @@ export class FleetDurableObject implements DurableObject {
       );
     }
     if (provider === "azure") {
-      return new AzureProvider(this.env, this.state.storage, region);
+      return new AzureProvider(
+        this.env,
+        this.state.storage,
+        (time) => this.state.scheduleAlarm(time),
+        region,
+      );
     }
     if (provider === "gcp") {
       return new GCPProvider(this.env, region, project);
@@ -5292,6 +5289,16 @@ export class FleetDurableObject implements DurableObject {
     }
     await this.putLease(lease);
     return lease;
+  }
+}
+
+export class FleetDurableObject extends FleetCoordinator implements DurableObject {
+  constructor(
+    state: DurableObjectState,
+    env: Env,
+    testProviders: Partial<Record<Provider, CloudProvider>> = {},
+  ) {
+    super(new CloudflareCoordinatorRuntime(state), env, testProviders);
   }
 }
 
@@ -6303,8 +6310,8 @@ export function codeResponseHeaders(values: Record<string, string>): Headers {
   return headers;
 }
 
-function bridgeAttachment(socket: WebSocket): BridgeAttachment | undefined {
-  const attachment = socket.deserializeAttachment?.() as BridgeAttachment | undefined;
+function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
+  const attachment = value as BridgeAttachment | undefined;
   if (!attachment || typeof attachment !== "object") {
     return undefined;
   }
@@ -7652,7 +7659,8 @@ class AzureProvider implements CloudProvider {
 
   constructor(
     private readonly env: Env,
-    private readonly storage?: DurableObjectStorage,
+    private readonly storage?: CoordinatorStorage,
+    private readonly scheduleAlarm?: (time: number) => Promise<void>,
     private readonly location?: string,
   ) {}
 
@@ -7679,7 +7687,7 @@ class AzureProvider implements CloudProvider {
       record.lastError = current.lastError;
     }
     await this.storage.put(key, record);
-    await this.storage.setAlarm(Date.now() + 1000);
+    await this.scheduleAlarm?.(Date.now() + 1000);
   }
 
   listCrabboxServers(): Promise<ProviderMachine[]> {

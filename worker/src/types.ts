@@ -66,6 +66,8 @@ export interface Env {
   CRABBOX_DEFAULT_ORG?: string;
   CRABBOX_ACCESS_TEAM_DOMAIN?: string;
   CRABBOX_ACCESS_AUD?: string;
+  CRABBOX_TRUSTED_USER_HEADER?: string;
+  CRABBOX_TRUSTED_USER_ORG?: string;
   CRABBOX_COST_RATES_JSON?: string;
   CRABBOX_EUR_TO_USD?: string;
   CRABBOX_MAX_ACTIVE_LEASES?: string;

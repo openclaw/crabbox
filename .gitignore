@@ -1,6 +1,7 @@
 bin/
 dist/
 dist-cloudflare/
+dist-node/
 artifacts/
 .crabbox/
 node_modules/

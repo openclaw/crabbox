@@ -12,7 +12,13 @@
     "vitest": true,
     "worker": true
   },
-  "ignorePatterns": ["dist/**", "dist-cloudflare/**", "node_modules/**", "public/portal/assets/**"],
+  "ignorePatterns": [
+    "dist/**",
+    "dist-cloudflare/**",
+    "dist-node/**",
+    "node_modules/**",
+    "public/portal/assets/**"
+  ],
   "options": {
     "denyWarnings": true,
     "maxWarnings": 0,
