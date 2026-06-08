@@ -92,6 +92,7 @@ provider owns sync. All are Linux-only.
 ```text
 cloudflare              Cloudflare Containers (Worker runtime)
 azure-dynamic-sessions  Azure Container Apps custom-container Dynamic Sessions
+docker-sandbox          Docker Sandboxes through the standalone sbx CLI
 e2b                     E2B Firecracker sandboxes
 islo                    Islo sandboxes
 modal                   Modal Sandboxes
@@ -125,6 +126,7 @@ wandb                   Weights & Biases run sandboxes
 - [Semaphore](../providers/semaphore.md): Semaphore CI job leases.
 - [Sprites](../providers/sprites.md): Sprites microVM SSH leases through `sprite proxy`.
 - [Cloudflare](../providers/cloudflare.md): delegated Cloudflare Containers execution.
+- [Docker Sandbox](../providers/docker-sandbox.md): delegated Docker Sandbox execution through the standalone `sbx` CLI.
 - [Islo](../providers/islo.md): delegated Islo sandbox execution.
 - [E2B](../providers/e2b.md): delegated E2B sandbox execution.
 - [Modal](../providers/modal.md): delegated Modal Sandbox execution.

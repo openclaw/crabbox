@@ -13,7 +13,9 @@ local CLI -> Cloudflare Worker / Fleet Durable Object -> provider VM
 The CLI owns local config, per-lease SSH keys, sync, and remote command
 execution. The Worker (the broker) owns authentication, authorization, lease
 state, provider credentials, cost guardrails, and cleanup. Providers own VM
-creation, network reachability, and deletion.
+creation, network reachability, and deletion. Delegated-run providers such as
+Docker Sandbox also own the command transport and runtime that receive commands
+and explicitly forwarded environment values.
 
 ## Trust Model
 
@@ -113,6 +115,10 @@ Handling rules:
   (or a profile's `env.allow`).
 - Never pass a secret value as a command-line flag.
 - Never log environment values; redact secret-looking strings in diagnostics.
+- Treat delegated-run providers as part of the runtime trust boundary: when you
+  allow a variable for a Docker Sandbox run, Docker Sandbox receives that value
+  through its `sbx exec --env-file` path even though Crabbox keeps the value out
+  of local process arguments.
 - User config files are written `0600`. `crabbox doctor` flags any local config
   whose permissions are broader, because broker tokens may live there.
 

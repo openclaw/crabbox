@@ -114,6 +114,7 @@ type Config struct {
 	Islo                          IsloConfig
 	isloImageExplicit             bool
 	Tensorlake                    TensorlakeConfig
+	DockerSandbox                 DockerSandboxConfig
 	Modal                         ModalConfig
 	UpstashBox                    UpstashBoxConfig
 	AsciiBox                      AsciiBoxConfig
@@ -338,6 +339,19 @@ type TensorlakeConfig struct {
 	DiskMB         int
 	TimeoutSecs    int
 	NoInternet     bool
+}
+
+type DockerSandboxConfig struct {
+	CLIPath         string
+	Agent           string
+	Template        string
+	CPUs            float64
+	Memory          string
+	Clone           bool
+	Workdir         string
+	ExtraWorkspaces []string
+	MCP             []string
+	Kit             []string
 }
 
 type ModalConfig struct {
@@ -743,6 +757,13 @@ func loadConfig() (Config, error) {
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
 		return Config{}, err
 	}
+	if provider, err := ProviderFor(cfg.Provider); err != nil {
+		return Config{}, err
+	} else if validator, ok := provider.(ProviderConfigValidator); ok {
+		if err := validator.ValidateConfig(cfg); err != nil {
+			return Config{}, err
+		}
+	}
 	normalizeTargetConfig(&cfg)
 	if err := validateTargetConfig(cfg); err != nil {
 		return Config{}, err
@@ -1081,6 +1102,10 @@ func baseConfig() Config {
 			MemoryMB: 1024,
 			DiskMB:   10240,
 		},
+		DockerSandbox: DockerSandboxConfig{
+			CLIPath: "sbx",
+			Agent:   "shell",
+		},
 		Modal: ModalConfig{
 			App:     "crabbox",
 			Image:   "python:3.13-slim",
@@ -1203,6 +1228,7 @@ type fileConfig struct {
 	Wandb                *fileWandbConfig                   `yaml:"wandb,omitempty"`
 	Islo                 *fileIsloConfig                    `yaml:"islo,omitempty"`
 	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
+	DockerSandbox        *fileDockerSandboxConfig           `yaml:"dockerSandbox,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
 	UpstashBox           *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
 	AsciiBox             *fileAsciiBoxConfig                `yaml:"asciiBox,omitempty"`
@@ -1532,6 +1558,19 @@ type fileTensorlakeConfig struct {
 	DiskMB         int     `yaml:"diskMB,omitempty"`
 	TimeoutSecs    int     `yaml:"timeoutSecs,omitempty"`
 	NoInternet     *bool   `yaml:"noInternet,omitempty"`
+}
+
+type fileDockerSandboxConfig struct {
+	CLIPath         string    `yaml:"cliPath,omitempty"`
+	Agent           string    `yaml:"agent,omitempty"`
+	Template        *string   `yaml:"template,omitempty"`
+	CPUs            *float64  `yaml:"cpus,omitempty"`
+	Memory          *string   `yaml:"memory,omitempty"`
+	Clone           *bool     `yaml:"clone,omitempty"`
+	Workdir         *string   `yaml:"workdir,omitempty"`
+	ExtraWorkspaces *[]string `yaml:"extraWorkspaces,omitempty"`
+	MCP             *[]string `yaml:"mcp,omitempty"`
+	Kit             *[]string `yaml:"kit,omitempty"`
 }
 
 type fileModalConfig struct {
@@ -2637,6 +2676,41 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.Tensorlake.NoInternet = *file.Tensorlake.NoInternet
 		}
 	}
+	if file.DockerSandbox != nil {
+		if file.DockerSandbox.CLIPath != "" {
+			cfg.DockerSandbox.CLIPath = file.DockerSandbox.CLIPath
+		}
+		if file.DockerSandbox.Agent != "" {
+			cfg.DockerSandbox.Agent = file.DockerSandbox.Agent
+		}
+		if file.DockerSandbox.Template != nil {
+			cfg.DockerSandbox.Template = *file.DockerSandbox.Template
+		}
+		if file.DockerSandbox.CPUs != nil {
+			if *file.DockerSandbox.CPUs < 0 {
+				return exit(2, "docker-sandbox cpus must be non-negative")
+			}
+			cfg.DockerSandbox.CPUs = *file.DockerSandbox.CPUs
+		}
+		if file.DockerSandbox.Memory != nil {
+			cfg.DockerSandbox.Memory = *file.DockerSandbox.Memory
+		}
+		if file.DockerSandbox.Clone != nil {
+			cfg.DockerSandbox.Clone = *file.DockerSandbox.Clone
+		}
+		if file.DockerSandbox.Workdir != nil {
+			cfg.DockerSandbox.Workdir = *file.DockerSandbox.Workdir
+		}
+		if file.DockerSandbox.ExtraWorkspaces != nil {
+			cfg.DockerSandbox.ExtraWorkspaces = append([]string(nil), (*file.DockerSandbox.ExtraWorkspaces)...)
+		}
+		if file.DockerSandbox.MCP != nil {
+			cfg.DockerSandbox.MCP = append([]string(nil), (*file.DockerSandbox.MCP)...)
+		}
+		if file.DockerSandbox.Kit != nil {
+			cfg.DockerSandbox.Kit = append([]string(nil), (*file.DockerSandbox.Kit)...)
+		}
+	}
 	if file.Modal != nil {
 		if file.Modal.App != "" {
 			cfg.Modal.App = file.Modal.App
@@ -3480,6 +3554,30 @@ func applyEnv(cfg *Config) error {
 	cfg.Tensorlake.TimeoutSecs = getenvInt("CRABBOX_TENSORLAKE_TIMEOUT_SECS", cfg.Tensorlake.TimeoutSecs)
 	if v, ok := getenvBool("CRABBOX_TENSORLAKE_NO_INTERNET"); ok {
 		cfg.Tensorlake.NoInternet = v
+	}
+	cfg.DockerSandbox.CLIPath = getenv("CRABBOX_DOCKER_SANDBOX_CLI", cfg.DockerSandbox.CLIPath)
+	cfg.DockerSandbox.Agent = getenv("CRABBOX_DOCKER_SANDBOX_AGENT", cfg.DockerSandbox.Agent)
+	cfg.DockerSandbox.Template = getenv("CRABBOX_DOCKER_SANDBOX_TEMPLATE", cfg.DockerSandbox.Template)
+	if cpus := os.Getenv("CRABBOX_DOCKER_SANDBOX_CPUS"); cpus != "" {
+		parsed, err := strconv.ParseFloat(cpus, 64)
+		if err != nil {
+			return fmt.Errorf("parse CRABBOX_DOCKER_SANDBOX_CPUS: %w", err)
+		}
+		cfg.DockerSandbox.CPUs = parsed
+	}
+	cfg.DockerSandbox.Memory = getenv("CRABBOX_DOCKER_SANDBOX_MEMORY", cfg.DockerSandbox.Memory)
+	if v, ok := getenvBool("CRABBOX_DOCKER_SANDBOX_CLONE"); ok {
+		cfg.DockerSandbox.Clone = v
+	}
+	cfg.DockerSandbox.Workdir = getenv("CRABBOX_DOCKER_SANDBOX_WORKDIR", cfg.DockerSandbox.Workdir)
+	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES"); ok {
+		cfg.DockerSandbox.ExtraWorkspaces = values
+	}
+	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_MCP"); ok {
+		cfg.DockerSandbox.MCP = values
+	}
+	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_KIT"); ok {
+		cfg.DockerSandbox.Kit = values
 	}
 	cfg.Modal.App = getenv("CRABBOX_MODAL_APP", cfg.Modal.App)
 	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)

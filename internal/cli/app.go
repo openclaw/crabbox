@@ -90,6 +90,10 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.usage(ctx, helpArgs), true
 	case "ssh":
 		return a.ssh(ctx, helpArgs), true
+	case "ports":
+		return a.ports(ctx, helpArgs), true
+	case "cp":
+		return a.copyCommand(ctx, helpArgs), true
 	case "vnc":
 		return a.vnc(ctx, helpArgs), true
 	case "webvnc":
@@ -176,6 +180,8 @@ Commands:
   capsule     Capture and replay lightweight failure capsules
   checkpoint  Create, restore, and fork workspace checkpoints
   ssh         Print the SSH command for a lease
+  ports       Publish, list, or unpublish provider-native ports
+  cp          Copy files between host and a delegated sandbox
   vnc         Print or open VNC connection details for a desktop lease
   webvnc      Bridge a desktop lease into the authenticated web portal
   code        Bridge a code lease into the authenticated web portal
@@ -196,6 +202,8 @@ Common Flows:
   crabbox status --id blue-lobster --wait
   crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
   crabbox ssh --id blue-lobster
+  crabbox ports --id blue-lobster --publish 8080
+  crabbox cp --id blue-lobster ./coverage.xml SANDBOX:/tmp/coverage.xml
   crabbox vnc --id blue-lobster --open
   crabbox desktop launch --id blue-lobster --browser --url https://example.com --webvnc --open
   crabbox desktop proof --id blue-lobster --output artifacts/blue-lobster-proof -- ./scripts/visual-smoke.sh

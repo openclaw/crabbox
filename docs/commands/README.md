@@ -39,6 +39,8 @@ same order as the CLI help.
 - [capsule](capsule.md)
 - [checkpoint](checkpoint.md)
 - [ssh](ssh.md)
+- [ports](ports.md)
+- [cp](cp.md)
 - [vnc](vnc.md)
 - [webvnc](webvnc.md)
 - [code](code.md)
