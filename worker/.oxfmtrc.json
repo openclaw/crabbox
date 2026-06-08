@@ -3,7 +3,13 @@
   "arrowParens": "always",
   "bracketSpacing": true,
   "endOfLine": "lf",
-  "ignorePatterns": ["dist/**", "dist-cloudflare/**", "node_modules/**", "public/portal/assets/**"],
+  "ignorePatterns": [
+    "dist/**",
+    "dist-cloudflare/**",
+    "dist-node/**",
+    "node_modules/**",
+    "public/portal/assets/**"
+  ],
   "insertFinalNewline": true,
   "printWidth": 100,
   "semi": true,

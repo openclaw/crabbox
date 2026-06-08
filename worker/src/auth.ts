@@ -9,7 +9,7 @@ const accessKeyCache = new Map<string, CryptoKey>();
 export interface AuthContext {
   authorized: boolean;
   admin: boolean;
-  auth: "bearer" | "github";
+  auth: "bearer" | "github" | "proxy";
   owner: string;
   org: string;
   login?: string;
@@ -39,19 +39,23 @@ export async function authenticateRequest(
     | "CRABBOX_ACCESS_AUD"
     | "CRABBOX_GITHUB_ADMIN_OWNERS"
     | "CRABBOX_GITHUB_ADMIN_LOGINS"
+    | "CRABBOX_TRUSTED_USER_HEADER"
+    | "CRABBOX_TRUSTED_USER_ORG"
   >,
 ): Promise<AuthContext | undefined> {
   const token = bearerToken(request);
-  if (!token) {
-    return undefined;
-  }
+  const trustedIdentity = trustedProxyIdentity(request, env);
   const accessIdentity = await verifiedAccessIdentity(request, env).catch(() => undefined);
   if (env.CRABBOX_ADMIN_TOKEN && token === env.CRABBOX_ADMIN_TOKEN) {
     return {
       authorized: true,
       admin: true,
       auth: "bearer",
-      owner: accessIdentity?.email ?? request.headers.get("x-crabbox-owner") ?? "unknown",
+      owner:
+        accessIdentity?.email ??
+        trustedIdentity?.owner ??
+        request.headers.get("x-crabbox-owner") ??
+        "unknown",
       org: request.headers.get("x-crabbox-org") ?? env.CRABBOX_DEFAULT_ORG ?? "unknown",
     };
   }
@@ -60,23 +64,29 @@ export async function authenticateRequest(
       authorized: true,
       admin: false,
       auth: "bearer",
-      owner: accessIdentity?.email ?? env.CRABBOX_SHARED_OWNER?.trim() ?? "unknown",
+      owner:
+        accessIdentity?.email ??
+        trustedIdentity?.owner ??
+        env.CRABBOX_SHARED_OWNER?.trim() ??
+        "unknown",
       org: env.CRABBOX_DEFAULT_ORG ?? "unknown",
     };
   }
-  const payload = await verifyUserToken(token, env).catch(() => undefined);
-  if (!payload) {
-    return undefined;
+  if (token) {
+    const payload = await verifyUserToken(token, env).catch(() => undefined);
+    if (payload) {
+      return {
+        authorized: true,
+        admin: githubUserIsAdmin(payload, env),
+        auth: "github",
+        owner: payload.owner,
+        org: payload.org,
+        login: payload.login,
+        tokenExpiresAt: new Date(payload.exp * 1000).toISOString(),
+      };
+    }
   }
-  return {
-    authorized: true,
-    admin: githubUserIsAdmin(payload, env),
-    auth: "github",
-    owner: payload.owner,
-    org: payload.org,
-    login: payload.login,
-    tokenExpiresAt: new Date(payload.exp * 1000).toISOString(),
-  };
+  return trustedIdentity;
 }
 
 function githubUserIsAdmin(
@@ -216,6 +226,37 @@ function sessionSecret(env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_
 interface AccessIdentity {
   email?: string;
   subject?: string;
+}
+
+function trustedProxyIdentity(
+  request: Request,
+  env: Pick<Env, "CRABBOX_TRUSTED_USER_HEADER" | "CRABBOX_TRUSTED_USER_ORG">,
+): AuthContext | undefined {
+  const header = env.CRABBOX_TRUSTED_USER_HEADER?.trim();
+  if (!header || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(header)) {
+    return undefined;
+  }
+  const owner = request.headers.get(header)?.trim();
+  if (!owner || owner.length > 320 || hasControlCharacter(owner)) {
+    return undefined;
+  }
+  return {
+    authorized: true,
+    admin: false,
+    auth: "proxy",
+    owner,
+    org: env.CRABBOX_TRUSTED_USER_ORG?.trim() || "unknown",
+  };
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code <= 31 || code === 127) {
+      return true;
+    }
+  }
+  return false;
 }
 
 interface AccessJwtPayload {
