@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1941,7 +1942,7 @@ func TestInvalidNetworkEnvFails(t *testing.T) {
 	}
 }
 
-func TestInvalidDockerSandboxCPUEnvFailsDuringLoad(t *testing.T) {
+func TestDockerSandboxCPUEnvCanBeOverriddenByFlags(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1950,8 +1951,20 @@ func TestInvalidDockerSandboxCPUEnvFailsDuringLoad(t *testing.T) {
 	t.Setenv("CRABBOX_PROVIDER", "docker-sandbox")
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_CPUS", "2.5")
 
-	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "docker-sandbox cpus must be a whole number") {
-		t.Fatalf("loadConfig err=%v, want docker-sandbox whole-number validation", err)
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig err=%v, want command flags to get a chance to override provider config", err)
+	}
+	fs := newFlagSet("test", io.Discard)
+	values := registerProviderFlags(fs, cfg)
+	if err := parseFlags(fs, []string{"--docker-sandbox-cpus", "2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatalf("applyProviderFlags err=%v, want valid CLI override to win", err)
+	}
+	if cfg.DockerSandbox.CPUs != 2 {
+		t.Fatalf("cpus=%g, want CLI override 2", cfg.DockerSandbox.CPUs)
 	}
 }
 

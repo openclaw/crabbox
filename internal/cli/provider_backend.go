@@ -587,6 +587,17 @@ func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues
 	return after.ApplyFlags(cfg, fs, values[after.Name()])
 }
 
+func validateProviderConfig(cfg Config) error {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return err
+	}
+	if validator, ok := provider.(ProviderConfigValidator); ok {
+		return validator.ValidateConfig(cfg)
+	}
+	return nil
+}
+
 func routeProviderFlagOverride(cfg *Config, fs *flag.FlagSet, values providerFlagValues) (bool, error) {
 	if fs == nil {
 		return false, nil
