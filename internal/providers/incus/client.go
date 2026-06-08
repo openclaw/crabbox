@@ -160,6 +160,9 @@ func doctorConnectionInfoForConfig(cfg Config) (doctorConnectionInfo, error) {
 	if !ok {
 		return doctorConnectionInfo{}, core.Exit(2, "connect incus remote %q: remote not found", remoteName)
 	}
+	if strings.HasPrefix(configuredRemoteAddr(remote), "unix:") && runtime.GOOS != "linux" {
+		return doctorConnectionInfo{}, core.Exit(2, "provider=%s: incus.remote, incus.address, or incus.socket not configured for a reachable Linux Incus daemon (remote %q resolves to local unix socket on %s)", providerName, remoteName, runtime.GOOS)
+	}
 	info.Mode = "remote"
 	info.Protocol = core.Blank(strings.TrimSpace(remote.Protocol), "incus")
 	info.Endpoint = configuredRemoteAddr(remote)

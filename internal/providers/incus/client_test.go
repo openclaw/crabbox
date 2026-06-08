@@ -119,3 +119,29 @@ func TestConnectInstanceServerRejectsLocalUnixRemoteOnNonLinux(t *testing.T) {
 		t.Fatalf("connectInstanceServer err=%v", err)
 	}
 }
+
+func TestDoctorConnectionInfoRejectsLocalUnixRemoteOnNonLinux(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("local unix remote is valid on linux")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".config", "incus")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	config := "default-remote: local\nremotes:\n  local:\n    addr: unix://\n    protocol: incus\n"
+	if err := os.WriteFile(filepath.Join(configDir, "config.yml"), []byte(config), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.Remote = "local"
+	cfg.Incus.Project = ""
+
+	if _, err := doctorConnectionInfoForConfig(cfg); err == nil || !strings.Contains(err.Error(), "not configured for a reachable Linux Incus daemon") {
+		t.Fatalf("doctorConnectionInfoForConfig err=%v", err)
+	}
+}
