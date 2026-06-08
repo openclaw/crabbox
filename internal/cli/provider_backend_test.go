@@ -37,6 +37,7 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		{name: "gcp", canonical: "gcp"},
 		{name: "google", canonical: "gcp"},
 		{name: "google-cloud", canonical: "gcp"},
+		{name: "incus", canonical: "incus"},
 		{name: "proxmox", canonical: "proxmox"},
 		{name: "ssh", canonical: "ssh"},
 		{name: "static", canonical: "ssh"},
@@ -785,6 +786,34 @@ func TestProviderFlagsApplyDaytonaAndIsloWithoutCoreEdits(t *testing.T) {
 	}
 	if cfg.Sprites.APIURL != "https://sprites.example.test" || cfg.Sprites.WorkRoot != "/home/sprite/work" {
 		t.Fatalf("sprites flags not applied: %#v", cfg.Sprites)
+	}
+}
+
+func TestProviderFlagsApplyIncusWithoutCoreEdits(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	values := registerProviderFlags(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "incus",
+		"--incus-instance-type", "vm",
+		"--incus-image", "images:ubuntu/24.04/cloud",
+		"--incus-user", "ubuntu",
+		"--incus-work-root", "/workspace/incus",
+		"--incus-proxy-listen-port", "2201",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = *provider
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Incus.InstanceType != "virtual-machine" || cfg.Incus.User != "ubuntu" || cfg.Incus.WorkRoot != "/workspace/incus" {
+		t.Fatalf("incus flags not applied: %#v", cfg.Incus)
+	}
+	if cfg.SSHPort != "2201" || cfg.WorkRoot != "/workspace/incus" || cfg.ServerType != "virtual-machine:images:ubuntu/24.04/cloud" {
+		t.Fatalf("derived incus config wrong: sshPort=%q workRoot=%q serverType=%q", cfg.SSHPort, cfg.WorkRoot, cfg.ServerType)
 	}
 }
 

@@ -133,7 +133,7 @@ Pick whichever matches your intent:
   Per-provider: [AWS](providers/aws.md), [Azure](providers/azure.md),
   [Azure Dynamic Sessions](providers/azure-dynamic-sessions.md),
   [Google Cloud](providers/gcp.md), [Hetzner](providers/hetzner.md),
-  [Proxmox](providers/proxmox.md), [Parallels](providers/parallels.md),
+  [Proxmox](providers/proxmox.md), [Incus](providers/incus.md), [Parallels](providers/parallels.md),
   [Local Container](providers/local-container.md),
   [Multipass](providers/multipass.md),
   [Static SSH](providers/ssh.md), [Railway](providers/railway.md),

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"math"
+	"strings"
 )
 
 func init() {
@@ -13,6 +14,7 @@ func init() {
 	RegisterProvider(testAzureProvider{})
 	RegisterProvider(testAzureDynamicSessionsProvider{})
 	RegisterProvider(testGCPProvider{})
+	RegisterProvider(testIncusProvider{})
 	RegisterProvider(testProxmoxProvider{})
 	RegisterProvider(testStaticSSHProvider{})
 	RegisterProvider(testExeDevProvider{})
@@ -369,6 +371,73 @@ func (testParallelsProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpoin
 }
 
 type testProxmoxProvider struct{}
+
+type testIncusProvider struct{}
+
+func (testIncusProvider) Name() string      { return "incus" }
+func (testIncusProvider) Aliases() []string { return nil }
+func (testIncusProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "incus",
+		Family:      "local-vm",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testIncusProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testIncusFlagValues{
+		InstanceType:    fs.String("incus-instance-type", defaults.Incus.InstanceType, "Incus instance type"),
+		Image:           fs.String("incus-image", defaults.Incus.Image, "Incus image"),
+		User:            fs.String("incus-user", defaults.Incus.User, "Incus SSH user"),
+		WorkRoot:        fs.String("incus-work-root", defaults.Incus.WorkRoot, "Incus work root"),
+		ProxyListenPort: fs.String("incus-proxy-listen-port", defaults.Incus.ProxyListenPort, "Incus proxy listen port"),
+	}
+}
+func (testIncusProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testIncusFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "incus-instance-type") {
+		switch strings.ToLower(strings.TrimSpace(*v.InstanceType)) {
+		case "vm", "virtual-machine", "virtual_machine":
+			cfg.Incus.InstanceType = "virtual-machine"
+		default:
+			cfg.Incus.InstanceType = strings.ToLower(strings.TrimSpace(*v.InstanceType))
+		}
+		cfg.ServerType = incusServerTypeForConfig(*cfg)
+	}
+	if flagWasSet(fs, "incus-image") {
+		cfg.Incus.Image = *v.Image
+		cfg.ServerType = incusServerTypeForConfig(*cfg)
+	}
+	if flagWasSet(fs, "incus-user") {
+		cfg.Incus.User = *v.User
+		cfg.SSHUser = *v.User
+	}
+	if flagWasSet(fs, "incus-work-root") {
+		cfg.Incus.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "incus-proxy-listen-port") {
+		cfg.Incus.ProxyListenPort = *v.ProxyListenPort
+		cfg.SSHPort = blank(*v.ProxyListenPort, cfg.SSHPort)
+	}
+	return nil
+}
+func (p testIncusProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testIncusFlagValues struct {
+	InstanceType    *string
+	Image           *string
+	User            *string
+	WorkRoot        *string
+	ProxyListenPort *string
+}
 
 func (testProxmoxProvider) Name() string      { return "proxmox" }
 func (testProxmoxProvider) Aliases() []string { return nil }

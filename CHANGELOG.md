@@ -7,6 +7,7 @@
 - Added Podman runtime compatibility for `provider: local-container`, including runtime selection, provider flags on SSH commands, and Podman-safe local lease claim scopes. Thanks @sallyom.
 - Added `sync.include` / `sync.includes` whitelists for root-relative sync plans, SSH sync, native Windows sync, local Actions hydration, and archive-sync providers. Thanks @anagnorisis2peripeteia.
 - Added generic `kubevirt` SSH leases and a versioned `external` executable provider so private or proprietary VM/devbox control planes can integrate through configuration without provider-specific Crabbox forks.
+- Added `provider: incus` for direct Linux SSH leases through the official Incus Go client, including typed config/env/flag routing, provider-owned `user.crabbox.*` metadata, and deterministic fake-backed lifecycle coverage.
 
 ### Changed
 

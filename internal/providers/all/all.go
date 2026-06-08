@@ -15,6 +15,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/external"
 	_ "github.com/openclaw/crabbox/internal/providers/gcp"
 	_ "github.com/openclaw/crabbox/internal/providers/hetzner"
+	_ "github.com/openclaw/crabbox/internal/providers/incus"
 	_ "github.com/openclaw/crabbox/internal/providers/islo"
 	_ "github.com/openclaw/crabbox/internal/providers/kubevirt"
 	_ "github.com/openclaw/crabbox/internal/providers/localcontainer"

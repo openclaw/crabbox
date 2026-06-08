@@ -11,14 +11,20 @@ import (
 func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	entries := providerMatrix()
 	var aws *providerMatrixEntry
+	var incus *providerMatrixEntry
 	for i := range entries {
 		if entries[i].Provider == "aws" {
 			aws = &entries[i]
-			break
+		}
+		if entries[i].Provider == "incus" {
+			incus = &entries[i]
 		}
 	}
 	if aws == nil {
 		t.Fatal("aws provider not found")
+	}
+	if incus == nil {
+		t.Fatal("incus provider not found")
 	}
 	if aws.Kind != ProviderKindSSHLease {
 		t.Fatalf("aws kind=%q", aws.Kind)
@@ -31,6 +37,17 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if !containsFeature(aws.Features, FeatureSSH) || !containsFeature(aws.Features, FeatureDesktop) {
 		t.Fatalf("aws features=%v", aws.Features)
+	}
+	if incus.Kind != ProviderKindSSHLease || incus.Family != "local-vm" {
+		t.Fatalf("incus kind/family=%q/%q", incus.Kind, incus.Family)
+	}
+	if !containsString(incus.Targets, targetLinux) {
+		t.Fatalf("incus targets=%v", incus.Targets)
+	}
+	for _, feature := range []Feature{FeatureSSH, FeatureCrabboxSync, FeatureCleanup} {
+		if !containsFeature(incus.Features, feature) {
+			t.Fatalf("incus features=%v missing %s", incus.Features, feature)
+		}
 	}
 }
 
@@ -65,6 +82,9 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers output missing %q:\n%s", want, text)
 		}
+	}
+	if !strings.Contains(text, "incus\n") {
+		t.Fatalf("providers output missing incus:\n%s", text)
 	}
 }
 
