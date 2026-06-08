@@ -264,7 +264,7 @@ func TestConfigShowRedactsXCPNgAPIURLUserinfo(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("CRABBOX_CONFIG", configPath)
 	config := []byte(`xcpNg:
-  apiUrl: ***********************************************/path?view=1
+  apiUrl: https://pool-user:pool-pass@xcp-ng.example.test/path?view=1
   username: root
   password: xcp-ng-secret
 `)
