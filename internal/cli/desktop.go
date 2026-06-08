@@ -64,7 +64,7 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 		return err
 	}
 	if *webvnc && (isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider)) {
-		return exit(2, "desktop launch --webvnc currently supports coordinator-backed hetzner/aws/azure desktop leases")
+		return exit(2, "desktop launch --webvnc is unavailable for provider=%s", cfg.Provider)
 	}
 	if *id == "" && !isStaticProvider(cfg.Provider) {
 		return exit(2, "usage: crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] -- <command...>")

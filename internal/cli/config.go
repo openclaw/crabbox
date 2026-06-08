@@ -212,8 +212,45 @@ type ExternalConfig struct {
 	Command     string
 	Args        []string
 	Config      map[string]any
+	Lifecycle   ExternalLifecycleConfig
+	Connection  ExternalConnectionConfig
 	WorkRoot    string
 	RoutingFile string
+}
+
+type ExternalLifecycleConfig struct {
+	Doctor  ExternalLifecycleOperation `yaml:"doctor,omitempty" json:"doctor,omitempty"`
+	Acquire ExternalLifecycleOperation `yaml:"acquire,omitempty" json:"acquire,omitempty"`
+	Resolve ExternalLifecycleOperation `yaml:"resolve,omitempty" json:"resolve,omitempty"`
+	List    ExternalLifecycleOperation `yaml:"list,omitempty" json:"list,omitempty"`
+	Release ExternalLifecycleOperation `yaml:"release,omitempty" json:"release,omitempty"`
+	Touch   ExternalLifecycleOperation `yaml:"touch,omitempty" json:"touch,omitempty"`
+	Cleanup ExternalLifecycleOperation `yaml:"cleanup,omitempty" json:"cleanup,omitempty"`
+}
+
+type ExternalLifecycleOperation struct {
+	Argv   []string `yaml:"argv,omitempty" json:"argv,omitempty"`
+	Output string   `yaml:"output,omitempty" json:"output,omitempty"`
+}
+
+type ExternalConnectionConfig struct {
+	CloudID    string                      `yaml:"cloudId,omitempty" json:"cloudId,omitempty"`
+	ServerType string                      `yaml:"serverType,omitempty" json:"serverType,omitempty"`
+	Labels     map[string]string           `yaml:"labels,omitempty" json:"labels,omitempty"`
+	SSH        ExternalSSHConnectionConfig `yaml:"ssh,omitempty" json:"ssh,omitempty"`
+}
+
+type ExternalSSHConnectionConfig struct {
+	User            string   `yaml:"user,omitempty" json:"user,omitempty"`
+	Host            string   `yaml:"host,omitempty" json:"host,omitempty"`
+	Key             string   `yaml:"key,omitempty" json:"key,omitempty"`
+	Port            string   `yaml:"port,omitempty" json:"port,omitempty"`
+	FallbackPorts   []string `yaml:"fallbackPorts,omitempty" json:"fallbackPorts,omitempty"`
+	ReadyCheck      string   `yaml:"readyCheck,omitempty" json:"readyCheck,omitempty"`
+	AuthSecret      bool     `yaml:"authSecret,omitempty" json:"authSecret,omitempty"`
+	NoControlMaster bool     `yaml:"noControlMaster,omitempty" json:"noControlMaster,omitempty"`
+	SSHConfigProxy  bool     `yaml:"sshConfigProxy,omitempty" json:"sshConfigProxy,omitempty"`
+	ProxyCommand    string   `yaml:"proxyCommand,omitempty" json:"proxyCommand,omitempty"`
 }
 
 type NamespaceConfig struct {
@@ -1467,11 +1504,13 @@ type fileKubeVirtConfig struct {
 }
 
 type fileExternalConfig struct {
-	Command     string         `yaml:"command,omitempty"`
-	Args        []string       `yaml:"args,omitempty"`
-	Config      map[string]any `yaml:"config,omitempty"`
-	WorkRoot    string         `yaml:"workRoot,omitempty"`
-	RoutingFile string         `yaml:"routingFile,omitempty"`
+	Command     string                    `yaml:"command,omitempty"`
+	Args        []string                  `yaml:"args,omitempty"`
+	Config      map[string]any            `yaml:"config,omitempty"`
+	Lifecycle   *ExternalLifecycleConfig  `yaml:"lifecycle,omitempty"`
+	Connection  *ExternalConnectionConfig `yaml:"connection,omitempty"`
+	WorkRoot    string                    `yaml:"workRoot,omitempty"`
+	RoutingFile string                    `yaml:"routingFile,omitempty"`
 }
 
 type fileNamespaceConfig struct {
@@ -2486,6 +2525,12 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.External.Config != nil {
 			cfg.External.Config = file.External.Config
+		}
+		if file.External.Lifecycle != nil {
+			cfg.External.Lifecycle = *file.External.Lifecycle
+		}
+		if file.External.Connection != nil {
+			cfg.External.Connection = *file.External.Connection
 		}
 		if file.External.WorkRoot != "" {
 			cfg.External.WorkRoot = file.External.WorkRoot

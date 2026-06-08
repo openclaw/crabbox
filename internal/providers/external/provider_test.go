@@ -66,6 +66,14 @@ func TestRouteConfigUsesProviderWorkRoot(t *testing.T) {
 	}
 }
 
+func TestCommandRoutingArgsUsesPrivateLeaseState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	args := (Provider{}).CommandRoutingArgs(testConfig(), "cbx_abcdef123456")
+	if len(args) != 2 || args[0] != "--external-routing-file" || !strings.HasSuffix(args[1], ".json") {
+		t.Fatalf("args=%#v", args)
+	}
+}
+
 func TestConfigurePreservesExplicitTopLevelWorkRoot(t *testing.T) {
 	cfg := testConfig()
 	cfg.WorkRoot = "/workspace/top-level"
@@ -174,6 +182,165 @@ func TestInvokeReportsErrorOnlyResponse(t *testing.T) {
 	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
 	if _, err := backend.invoke(context.Background(), protocolRequest{Operation: "doctor"}); err == nil || !strings.Contains(err.Error(), "quota exhausted") || strings.Contains(err.Error(), "protocol version") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestInvokeDeclarativeLifecycleExpandsArgvAndBuildsLease(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Config: map[string]any{"size": "cpu16"},
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{
+				Argv: []string{"devboxctl", "new", "{{name}}", "--size", "{{config.size}}"},
+			},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list", "--format", "json"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{
+				Argv: []string{"devboxctl", "rm", "--yes", "{{name}}"},
+			},
+		},
+		Connection: core.ExternalConnectionConfig{
+			CloudID:    "devboxes/{{name}}",
+			ServerType: "{{config.size}}",
+			Labels:     map[string]string{"backend": "pod"},
+			SSH: core.ExternalSSHConnectionConfig{
+				User:           "developer",
+				Host:           "{{name}}",
+				SSHConfigProxy: true,
+			},
+		},
+		WorkRoot: "/home/developer/crabbox",
+	}
+	runner := &recordingRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	response, err := backend.invoke(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Desired: &desiredLease{
+			LeaseID: "cbx_abcdef123456",
+			Slug:    "fast-coral",
+			Name:    "crabbox-fast-coral-deadbeef",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.name != "devboxctl" || strings.Join(runner.args, "|") != "new|crabbox-fast-coral-deadbeef|--size|cpu16" {
+		t.Fatalf("command=%q args=%#v", runner.name, runner.args)
+	}
+	if response.Lease == nil || response.Lease.CloudID != "devboxes/crabbox-fast-coral-deadbeef" || response.Lease.ServerType != "cpu16" {
+		t.Fatalf("response=%#v", response)
+	}
+	if response.Lease.SSH == nil || response.Lease.SSH.User != "developer" || response.Lease.SSH.Host != "crabbox-fast-coral-deadbeef" || !response.Lease.SSH.SSHConfigProxy {
+		t.Fatalf("ssh=%#v", response.Lease.SSH)
+	}
+	if response.Lease.Labels["backend"] != "pod" {
+		t.Fatalf("labels=%#v", response.Lease.Labels)
+	}
+}
+
+func TestInvokeDeclarativeLifecycleParsesNameInventory(t *testing.T) {
+	isolateCrabboxState(t)
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{name}}"}},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list", "--format", "json"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{name}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}", SSHConfigProxy: true},
+		},
+		WorkRoot: "/home/developer/crabbox",
+	}
+	claimExternalLease(t, cfg, "cbx_abcdef123456", "fast-coral", t.TempDir(), time.Minute, false)
+	if err := core.UpdateLeaseClaimEndpoint(
+		"cbx_abcdef123456",
+		core.Server{Name: "devbox-fast-coral", Labels: map[string]string{"name": "devbox-fast-coral", "slug": "fast-coral"}},
+		core.SSHTarget{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{stdout: `["devbox-fast-coral","unclaimed-box"]`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	response, err := backend.invoke(context.Background(), protocolRequest{Operation: "list"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Leases) != 2 {
+		t.Fatalf("leases=%#v", response.Leases)
+	}
+	if response.Leases[0].LeaseID != "cbx_abcdef123456" || response.Leases[0].Slug != "fast-coral" {
+		t.Fatalf("claimed lease=%#v", response.Leases[0])
+	}
+	if response.Leases[1].LeaseID != "unclaimed-box" || response.Leases[1].Name != "unclaimed-box" {
+		t.Fatalf("unclaimed lease=%#v", response.Leases[1])
+	}
+}
+
+func TestDeclarativeLifecycleExpandsExplicitEnvironmentPlaceholder(t *testing.T) {
+	t.Setenv("DEVBOX_USER", "alice")
+	templateCtx, err := lifecycleContext(protocolRequest{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := expandLifecycleValue("{{env.DEVBOX_USER}}@{{name}}", templateCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "alice@" {
+		t.Fatalf("expanded=%q", got)
+	}
+	if _, err := expandLifecycleValue("{{env.MISSING_DEVBOX_USER}}", templateCtx); err == nil || !strings.Contains(err.Error(), "is not set") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestDeclarativeLifecycleIDFallsBackToLeaseID(t *testing.T) {
+	templateCtx, err := lifecycleContext(protocolRequest{
+		Lease: &protocolLease{
+			LeaseID: "cbx_abcdef123456",
+			Slug:    "fast-coral",
+			Name:    "devbox-fast-coral",
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := expandLifecycleValue("{{id}}", templateCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "cbx_abcdef123456" {
+		t.Fatalf("expanded=%q", got)
+	}
+}
+
+func TestValidateConfigRejectsMixedOrIncompleteDeclarativeModes(t *testing.T) {
+	cfg := testConfig()
+	cfg.External.Lifecycle.Acquire.Argv = []string{"devboxctl", "new", "{{name}}"}
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("mixed mode err=%v", err)
+	}
+	cfg.External.Command = ""
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "release.argv") {
+		t.Fatalf("missing release err=%v", err)
+	}
+	cfg.External.Lifecycle.Release.Argv = []string{"devboxctl", "rm", "{{name}}"}
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "list.argv") {
+		t.Fatalf("missing list err=%v", err)
+	}
+	cfg.External.Lifecycle.List = core.ExternalLifecycleOperation{
+		Argv:   []string{"devboxctl", "list"},
+		Output: lifecycleOutputJSONNameArray,
+	}
+	cfg.External.Lifecycle.Acquire.Output = lifecycleOutputJSONNameArray
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "only supported for list") {
+		t.Fatalf("non-list output err=%v", err)
 	}
 }
 

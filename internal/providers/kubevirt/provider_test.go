@@ -94,6 +94,30 @@ func TestRouteConfigUsesProviderWorkRoot(t *testing.T) {
 	}
 }
 
+func TestCommandRoutingArgsPreservesEffectiveConfig(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.KubeVirt.Kubeconfig = "/tmp/kube config"
+	cfg.KubeVirt.Template = "/tmp/vm.yaml"
+	cfg.KubeVirt.SSHKey = "/tmp/id_ed25519"
+	cfg.KubeVirt.SSHPublicKey = "/tmp/id_ed25519.pub"
+	cfg.KubeVirt.DeleteOnRelease = false
+	got := strings.Join((Provider{}).CommandRoutingArgs(cfg, "cbx_abcdef123456"), "\n")
+	for _, want := range []string{
+		"--kubevirt-kubectl\nkubectl-custom",
+		"--kubevirt-context\ntest-context",
+		"--kubevirt-namespace\ntest-ns",
+		"--kubevirt-kubeconfig\n/tmp/kube config",
+		"--kubevirt-template\n/tmp/vm.yaml",
+		"--kubevirt-ssh-key\n/tmp/id_ed25519",
+		"--kubevirt-ssh-public-key\n/tmp/id_ed25519.pub",
+		"--kubevirt-delete-on-release=false",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("routing args missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestConfigurePreservesExplicitTopLevelWorkRoot(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.WorkRoot = "/workspace/top-level"

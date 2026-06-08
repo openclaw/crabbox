@@ -145,3 +145,93 @@ esac
   assert.doesNotMatch(tenkiCalls, /sandbox resume/);
   assert.equal(fs.readFileSync(stateFile, "utf8").trim(), "PAUSED");
 });
+
+test("external live smoke accepts declarative lifecycle configuration", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-external-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  const crabboxLog = path.join(dir, "crabbox.log");
+  const config = path.join(dir, "crabbox.yaml");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(
+    config,
+    `provider: external
+external:
+  lifecycle:
+    acquire:
+      argv: [devboxctl, new, "{{name}}"]
+    list:
+      argv: [devboxctl, list]
+      output: json-name-array
+    release:
+      argv: [devboxctl, rm, "{{name}}"]
+  connection:
+    ssh:
+      user: developer
+      host: "{{name}}"
+`,
+    "utf8",
+  );
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf 'external_command=%s args=%s\\n' "\${CRABBOX_EXTERNAL_COMMAND:-}" "$*" >>"\${CRABBOX_FAKE_LOG:?}"
+case "$1" in
+  doctor)
+    printf 'ok provider=external\\n'
+    ;;
+  warmup)
+    printf 'provisioning provider=external lease=cbx_123456789abc slug=external-smoke-test\\n'
+    ;;
+  status)
+    printf 'lease=cbx_123456789abc slug=external-smoke-test provider=external state=ready ready=true\\n'
+    ;;
+  inspect)
+    printf '{"id":"cbx_123456789abc","slug":"external-smoke-test","provider":"external","state":"ready"}\\n'
+    ;;
+  run)
+    printf 'crabbox-live-ok\\n'
+    ;;
+  list)
+    printf '[{"id":"cbx_123456789abc","slug":"external-smoke-test","provider":"external","state":"ready"}]\\n'
+    ;;
+  stop)
+    printf 'stopped %s\\n' "\${*: -1}"
+    ;;
+  admin)
+    printf '[]\\n'
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: config,
+      CRABBOX_FAKE_LOG: crabboxLog,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "external",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /crabbox-live-ok/);
+  const crabboxCalls = fs.readFileSync(crabboxLog, "utf8");
+  assert.match(crabboxCalls, /args=doctor --provider external/);
+  assert.match(crabboxCalls, /args=warmup --provider external/);
+  assert.match(crabboxCalls, /args=stop --provider external external-smoke-test/);
+  assert.doesNotMatch(crabboxCalls, /external_command=[^ \n]+/);
+});
