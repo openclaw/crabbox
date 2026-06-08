@@ -38,8 +38,14 @@ type lifecycleClient interface {
 	ResolveSR(context.Context, xcpNgConfig) (xapiRef, error)
 	ResolveNetwork(context.Context, xcpNgConfig) (xapiRef, error)
 	ResolveHost(context.Context, xcpNgConfig) (xapiRef, error)
+	ResolveISOMedia(context.Context, xcpNgConfig, string) (xcpNgISOMediaRef, error)
 	CloneVM(context.Context, xcpNgCloneRequest) (xapiVM, error)
+	CreateFreshVM(context.Context, xcpNgFreshVMRequest) (xcpNgFreshVMResult, error)
+	SetVMBootOrder(context.Context, xapiRef, string) error
+	ImportISO(context.Context, xcpNgImportISORequest) (xcpNgConfigDrive, error)
+	AttachDisk(context.Context, xcpNgDiskAttachRequest) (xcpNgConfigDrive, error)
 	AttachConfigDrive(context.Context, xcpNgConfigDriveRequest) (xcpNgConfigDrive, error)
+	AttachISO(context.Context, xcpNgISOAttachRequest) (xcpNgConfigDrive, error)
 	StartVM(context.Context, xapiRef) error
 	GuestIPv4(context.Context, xapiRef) (string, error)
 	GuestIPv4ForID(context.Context, string) (string, error)
@@ -88,10 +94,11 @@ type xcpNgConfigDriveRequest struct {
 }
 
 type xcpNgConfigDrive struct {
-	VDIRef string
-	VBDRef string
-	Name   string
-	Labels map[string]string
+	VDIRef     string
+	VBDRef     string
+	Name       string
+	Labels     map[string]string
+	DestroyVDI bool
 }
 
 func NewLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {

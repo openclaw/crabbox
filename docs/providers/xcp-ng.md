@@ -252,6 +252,139 @@ placement resources, lists Crabbox-managed leases, and reports
 `mutation=false`. Template, SR, network, or host typos fail before doctor
 reports ready.
 
+## Guarded ISO E2E harness
+
+The repo also includes a separate guarded harness for fresh-installer ISO
+validation:
+
+```sh
+scripts/xcpng-iso-e2e-smoke.sh --read-only --os linux --iso ~/Desktop/xcp/ISOs/ubuntu-26.04-live-server-amd64.iso
+scripts/xcpng-iso-e2e-smoke.sh --read-only --os windows --iso ~/Desktop/xcp/ISOs/Win11_25H2_English_x64_v2.iso
+```
+
+This harness is intentionally separate from `scripts/xcpng-live-smoke.sh`.
+`xcpng-live-smoke.sh` preserves the normal PR 222 template-clone contract.
+`xcpng-iso-e2e-smoke.sh` is a quarantined acceptance helper for fresh blank VM
++ installer media lifecycle.
+
+Read-only mode:
+
+- loads the same private env file pattern as `xcpng-live-smoke.sh`;
+- validates XCP-ng auth plus placement prerequisites needed for ISO boot;
+- resolves the installer ISO as a local file path, VDI name, UUID, or
+  `OpaqueRef`;
+- writes redacted local evidence under `.crabbox/xcpng-iso-e2e/`; and
+- creates, changes, and deletes no XCP-ng resources.
+
+Mutating mode requires an explicit gate:
+
+```sh
+CRABBOX_XCP_NG_ISO_E2E_MUTATE=1 scripts/xcpng-iso-e2e-smoke.sh --mutate --os linux --iso ~/Desktop/xcp/ISOs/ubuntu-26.04-live-server-amd64.iso
+```
+
+Linux mutating mode now performs the guarded Ubuntu Server acceptance flow:
+
+- generates a per-run NoCloud seed ISO with Ubuntu autoinstall user-data;
+- requires a local Ubuntu Server ISO path and remasters it under
+  `.crabbox/xcpng-iso-e2e/` to add the
+  required `autoinstall` kernel argument;
+- imports temporary installer and answer media into the configured SR when local
+  file paths are used;
+- creates a fresh blank VM plus writable install disk, boots the installer,
+  waits for the installed guest to reboot, and then waits for SSH on first boot;
+- proves first boot by running `printf linux-iso-e2e-ok` over SSH; and
+- removes the VM, install disk, and temporary imported media unless cleanup is
+  blocked by the environment.
+
+The wrapper now defaults to `--timeout 90m`, which is intended for the full
+Linux install flow. Override it explicitly only when the lab is known to be
+faster or slower.
+
+Windows mutating mode now extends the shared harness for x86_64/x64 installer
+media:
+
+- blocks ARM-labelled Windows installer media with
+  `windows_requirements_blocked` because the current XCP-ng ISO E2E lab is
+  x86_64/x64;
+- generates a temporary `Autounattend.xml` ISO when `--answer-iso` is not
+  supplied and includes a Crabbox bootstrap PowerShell script that installs
+  OpenSSH with the per-run Crabbox SSH key; the generated answer media selects
+  Windows image index `1` by default, and `--answer-iso` remains the override
+  path when a different edition or custom answer file is required;
+- imports local installer and answer ISO paths into the configured SR when
+  needed;
+- creates a fresh secure-boot VM plus writable install disk, boots from the
+  Windows installer media first, then switches the next boot to the installed
+  disk;
+- waits for first-boot guest metrics and then attempts SSH proof with
+  `Write-Output windows-iso-e2e-ok`; and
+- falls back to `source_uncovered` after first-boot guest metrics when the
+  supplied answer media does not guarantee Crabbox SSH bootstrap.
+
+Current classifications:
+
+- `read_only_passed`: config and ISO references resolved without mutation.
+- `linux_install_passed`: the Linux installer completed, first boot reported a
+  guest IPv4, and SSH proof succeeded.
+- `windows_install_passed`: the Windows installer completed, first boot
+  reported a guest IPv4, and SSH proof succeeded.
+- `windows_requirements_blocked`: the selected Windows installer media or lab
+  prerequisites do not match the current x86_64/x64 XCP-ng validation surface.
+- `source_uncovered`: the Windows guest reached first boot and reported guest
+  metrics, but only guest-metrics readiness was available; Crabbox command
+  proof remains uncovered for that answer-media path.
+- `environment_blocked`: lab prerequisites, ISO identity, auth, placement, or
+  mutation gate blocked the run. For Linux this also includes exact phase
+  blockers such as installer boot arg/remaster failure, guest-metrics timeout,
+  or SSH readiness failure. For Windows this also includes answer-media
+  generation, installer-media import, guest-metrics timeout, and SSH readiness
+  failures after the bootstrap path is enabled.
+- `resource_cleanup_failed`: the shared lifecycle reached its target phase but
+  cleanup left resources behind.
+- `test_failed`: local harness contract failure such as invalid arguments or
+  malformed helper output.
+
+Linux mutating summaries use these phase values:
+
+- `linux_seed_generation`
+- `linux_install_disk`
+- `linux_iso_attached`
+- `linux_installer_booted`
+- `linux_install_complete`
+- `linux_first_boot`
+- `linux_ssh_ok`
+
+Windows mutating summaries use these phase values:
+
+- `windows_answer_generation`
+- `windows_install_disk`
+- `windows_iso_attached`
+- `windows_setup_started`
+- `windows_install_complete`
+- `windows_first_boot`
+- `windows_command_ok`
+
+Every run writes a JSON summary with these stable keys:
+
+- `classification`
+- `mutation`
+- `os`
+- `iso`
+- `phase`
+- `cleanup`
+- `evidence`
+
+Linux mutating mode requires a local Ubuntu Server ISO path and handles the
+temporary remaster/import steps itself. Existing SR-hosted Ubuntu installer ISOs
+are read-only validation inputs only unless they were already prepared with the
+required `autoinstall` boot argument outside this harness. Keep all
+`.crabbox/xcpng-iso-e2e/` artifacts local; do not commit them.
+
+Windows mutating mode expects x86_64/x64 installer media. `ISOs-ARM` style
+Windows media is a valid reference set for other local virtualization surfaces,
+but this XCP-ng harness treats ARM-labelled Windows installers as
+`windows_requirements_blocked`.
+
 ## Troubleshooting
 
 `xcp-ng configuration is incomplete`

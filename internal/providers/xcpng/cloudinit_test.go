@@ -155,3 +155,130 @@ func TestBuildConfigDriveImageRejectsOversizedPayload(t *testing.T) {
 		t.Fatalf("err=%v, want oversized payload validation", err)
 	}
 }
+
+func TestLinuxAutoinstallPayloadIncludesUbuntuServerContract(t *testing.T) {
+	payload, err := newLinuxAutoinstallPayload(testConfig(), "cbx_lease", "blue", "ssh-ed25519 AAAATEST crabbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"#cloud-config",
+		"autoinstall:",
+		"version: 1",
+		"id: ubuntu-server",
+		"name: direct",
+		"install-server: true",
+		"ssh_authorized_keys",
+		"xe-guest-utilities",
+		"/usr/local/bin/crabbox-ready",
+		"systemctl enable xe-linux-distribution || true",
+		"touch, /var/lib/crabbox/bootstrapped",
+		"shutdown: reboot",
+	} {
+		if !strings.Contains(payload.UserData, want) {
+			t.Fatalf("autoinstall user-data missing %q:\n%s", want, payload.UserData)
+		}
+	}
+	if !strings.Contains(payload.MetaData, "instance-id: cbx_lease") || !strings.Contains(payload.MetaData, "local-hostname: crabbox-blue") {
+		t.Fatalf("meta-data=%q", payload.MetaData)
+	}
+}
+
+func TestLinuxAutoinstallPayloadRejectsMissingUserOrKey(t *testing.T) {
+	cfg := testConfig()
+	cfg.XCPNg.User = ""
+	cfg.SSHUser = ""
+	if _, err := newLinuxAutoinstallPayload(cfg, "cbx_lease", "blue", "ssh-ed25519 AAAATEST crabbox"); err == nil {
+		t.Fatal("expected missing user error")
+	}
+	if _, err := newLinuxAutoinstallPayload(testConfig(), "cbx_lease", "blue", ""); err == nil {
+		t.Fatal("expected missing public key error")
+	}
+}
+
+func TestWindowsAutounattendPayloadIncludesBootstrapScriptAndAutoLogon(t *testing.T) {
+	cfg := testConfig()
+	cfg.XCPNg.Password = "credential-value"
+	cfg.WindowsMode = "wsl2"
+	cfg.WorkRoot = "/work/crabbox"
+	payload, err := newWindowsAutounattendPayload(cfg, "cbx_lease", "blue", "ssh-ed25519 AAAATEST crabbox", "TempPass1!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`<unattend xmlns="urn:schemas-microsoft-com:unattend"`,
+		`<AutoLogon>`,
+		`<Username>crabbox</Username>`,
+		`Crabbox Windows ISO E2E`,
+		`<Key>/IMAGE/INDEX</Key><Value>1</Value>`,
+		`powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand`,
+		`<ComputerName>CRABBOX-BLUE</ComputerName>`,
+	} {
+		if !strings.Contains(payload.AnswerXML, want) {
+			t.Fatalf("answer xml missing %q:\n%s", want, payload.AnswerXML)
+		}
+	}
+	for _, want := range []string{
+		`OpenSSH-Win64.zip`,
+		`install-sshd.ps1`,
+		`$workRoot = 'C:\crabbox'`,
+		`ssh-ed25519 AAAATEST crabbox`,
+	} {
+		if !strings.Contains(payload.BootstrapPowerShell, want) {
+			t.Fatalf("bootstrap powershell missing %q:\n%s", want, payload.BootstrapPowerShell)
+		}
+	}
+	if payload.Username != "crabbox" {
+		t.Fatalf("username=%q", payload.Username)
+	}
+	if strings.Contains(payload.AnswerXML, cfg.XCPNg.Password) || strings.Contains(payload.BootstrapPowerShell, cfg.XCPNg.Password) {
+		t.Fatal("windows unattended payload leaked XCP-ng API password")
+	}
+}
+
+func TestWindowsAutounattendPayloadRejectsMissingUserKeyOrPassword(t *testing.T) {
+	cfg := testConfig()
+	cfg.XCPNg.User = ""
+	cfg.SSHUser = ""
+	if _, err := newWindowsAutounattendPayload(cfg, "cbx_lease", "blue", "ssh-ed25519 AAAATEST crabbox", "TempPass1!"); err == nil {
+		t.Fatal("expected missing user error")
+	}
+	if _, err := newWindowsAutounattendPayload(testConfig(), "cbx_lease", "blue", "", "TempPass1!"); err == nil {
+		t.Fatal("expected missing public key error")
+	}
+	if _, err := newWindowsAutounattendPayload(testConfig(), "cbx_lease", "blue", "ssh-ed25519 AAAATEST crabbox", ""); err == nil {
+		t.Fatal("expected missing password error")
+	}
+}
+
+func TestUbuntuAutoinstallLinuxLinePatternAddsFlagAcrossSpacingVariants(t *testing.T) {
+	input := strings.Join([]string{
+		`menuentry "Try or Install Ubuntu Server" {`,
+		`    linux  /casper/vmlinuz  --- `,
+		`}`,
+		`menuentry "Already Has Args" {`,
+		`linux /casper/vmlinuz quiet splash ---`,
+		`}`,
+	}, "\n")
+	updated := isoE2EUbuntuLinuxLinePattern.ReplaceAllStringFunc(input, func(line string) string {
+		parts := isoE2EUbuntuLinuxLinePattern.FindStringSubmatch(line)
+		if len(parts) != 4 {
+			return line
+		}
+		middle := strings.TrimSpace(parts[2])
+		if middle == "" {
+			middle = "autoinstall"
+		} else {
+			middle = middle + " autoinstall"
+		}
+		return parts[1] + middle + parts[3]
+	})
+	for _, want := range []string{
+		`linux  /casper/vmlinuz autoinstall ---`,
+		`linux /casper/vmlinuz quiet splash autoinstall ---`,
+	} {
+		if !strings.Contains(updated, want) {
+			t.Fatalf("updated grub missing %q:\n%s", want, updated)
+		}
+	}
+}
