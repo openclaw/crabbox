@@ -41,6 +41,7 @@ SSH-lease providers further differ by how they reach the cloud:
   `azure-dynamic-sessions`, `docker-sandbox`, `smolvm`). `anthropic-sandbox-runtime` is
   the local macOS/Linux delegated-run exception: Anthropic's `srt` executes on
   the current machine while still owning sync/run policy end to end.
+  `windows-sandbox` is the local Windows delegated-run exception.
 
 Select a provider per command with `--provider <name>` (env `CRABBOX_PROVIDER`),
 or set `provider: <name>` in config. Provider flags are registered before
@@ -110,6 +111,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Tensorlake](tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux |
 | [Upstash Box](upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux |
 | [W&B Sandboxes](wandb.md) — `wandb` (`weights-and-biases`) | Linux |
+| [Windows Sandbox](windows-sandbox.md) — `windows-sandbox` (`wsb`, `windows-sandbox-provider`) | Windows |
 
 Run `crabbox providers` (`--json`) to see the live capability set the binary
 reports.

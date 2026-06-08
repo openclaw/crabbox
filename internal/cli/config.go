@@ -169,6 +169,7 @@ type Config struct {
 	tartCPUsExplicit              bool
 	tartMemoryExplicit            bool
 	HyperV                        HyperVConfig
+	WindowsSandbox                WindowsSandboxConfig
 	Tailscale                     TailscaleConfig
 	Static                        StaticConfig
 	Results                       ResultsConfig
@@ -761,6 +762,19 @@ type HyperVConfig struct {
 	InitPassword  bool
 }
 
+type WindowsSandboxConfig struct {
+	Workdir            string
+	TempRoot           string
+	Networking         string
+	VGPU               string
+	Clipboard          string
+	ProtectedClient    string
+	AudioInput         string
+	VideoInput         string
+	PrinterRedirection string
+	MemoryMB           int
+}
+
 type StaticConfig struct {
 	ID       string
 	Name     string
@@ -1152,6 +1166,23 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			cfg.WorkRoot = cfg.HyperV.WorkRoot
 		}
 		cfg.SSHPort = "22"
+		return nil
+	}
+	if cfg.Provider == "windows-sandbox" || cfg.Provider == "wsb" || cfg.Provider == "windows-sandbox-provider" {
+		if IsTargetExplicit(cfg) && normalizeTargetOS(cfg.TargetOS) != targetWindows {
+			return exit(2, "provider=windows-sandbox supports target=windows only")
+		}
+		if cfg.TargetOS == "" || (!IsTargetExplicit(cfg) && cfg.TargetOS == targetLinux) {
+			cfg.TargetOS = targetWindows
+		}
+		if cfg.explicitWindowsMode != "" && normalizeWindowsMode(cfg.explicitWindowsMode) != windowsModeNormal {
+			return exit(2, "provider=windows-sandbox supports windows.mode=normal only")
+		}
+		cfg.WindowsMode = windowsModeNormal
+		if cfg.WindowsSandbox.Workdir == "" {
+			cfg.WindowsSandbox.Workdir = `C:\crabbox-work`
+		}
+		cfg.WorkRoot = cfg.WindowsSandbox.Workdir
 		return nil
 	}
 	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
@@ -1796,6 +1827,16 @@ func baseConfig() Config {
 			Memory:   8192,
 			Switch:   "Default Switch",
 		},
+		WindowsSandbox: WindowsSandboxConfig{
+			Workdir:            `C:\crabbox-work`,
+			Networking:         "Enable",
+			VGPU:               "Disable",
+			Clipboard:          "Disable",
+			ProtectedClient:    "Default",
+			AudioInput:         "Disable",
+			VideoInput:         "Disable",
+			PrinterRedirection: "Disable",
+		},
 		Tailscale: TailscaleConfig{
 			Tags:             []string{"tag:crabbox"},
 			HostnameTemplate: "crabbox-{slug}",
@@ -1880,6 +1921,7 @@ type fileConfig struct {
 	Multipass            *fileMultipassConfig               `yaml:"multipass,omitempty"`
 	Tart                 *fileTartConfig                    `yaml:"tart,omitempty"`
 	HyperV               *fileHyperVConfig                  `yaml:"hyperv,omitempty"`
+	WindowsSandbox       *fileWindowsSandboxConfig          `yaml:"windowsSandbox,omitempty"`
 	Tailscale            *fileTailscaleConfig               `yaml:"tailscale,omitempty"`
 	Static               *fileStaticConfig                  `yaml:"static,omitempty"`
 	Results              *fileResultsConfig                 `yaml:"results,omitempty"`
@@ -2477,6 +2519,19 @@ type fileHyperVConfig struct {
 	Switch        string `yaml:"switch,omitempty"`
 	GuestPassword string `yaml:"guestPassword,omitempty"`
 	InitPassword  *bool  `yaml:"initPassword,omitempty"`
+}
+
+type fileWindowsSandboxConfig struct {
+	Workdir            string `yaml:"workdir,omitempty"`
+	TempRoot           string `yaml:"tempRoot,omitempty"`
+	Networking         string `yaml:"networking,omitempty"`
+	VGPU               string `yaml:"vgpu,omitempty"`
+	Clipboard          string `yaml:"clipboard,omitempty"`
+	ProtectedClient    string `yaml:"protectedClient,omitempty"`
+	AudioInput         string `yaml:"audioInput,omitempty"`
+	VideoInput         string `yaml:"videoInput,omitempty"`
+	PrinterRedirection string `yaml:"printerRedirection,omitempty"`
+	MemoryMB           int    `yaml:"memoryMB,omitempty"`
 }
 
 type fileTailscaleConfig struct {
@@ -4171,6 +4226,38 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.HyperV.InitPassword = *file.HyperV.InitPassword
 		}
 	}
+	if file.WindowsSandbox != nil {
+		if file.WindowsSandbox.Workdir != "" {
+			cfg.WindowsSandbox.Workdir = file.WindowsSandbox.Workdir
+		}
+		if file.WindowsSandbox.TempRoot != "" {
+			cfg.WindowsSandbox.TempRoot = expandUserPath(file.WindowsSandbox.TempRoot)
+		}
+		if file.WindowsSandbox.Networking != "" {
+			cfg.WindowsSandbox.Networking = file.WindowsSandbox.Networking
+		}
+		if file.WindowsSandbox.VGPU != "" {
+			cfg.WindowsSandbox.VGPU = file.WindowsSandbox.VGPU
+		}
+		if file.WindowsSandbox.Clipboard != "" {
+			cfg.WindowsSandbox.Clipboard = file.WindowsSandbox.Clipboard
+		}
+		if file.WindowsSandbox.ProtectedClient != "" {
+			cfg.WindowsSandbox.ProtectedClient = file.WindowsSandbox.ProtectedClient
+		}
+		if file.WindowsSandbox.AudioInput != "" {
+			cfg.WindowsSandbox.AudioInput = file.WindowsSandbox.AudioInput
+		}
+		if file.WindowsSandbox.VideoInput != "" {
+			cfg.WindowsSandbox.VideoInput = file.WindowsSandbox.VideoInput
+		}
+		if file.WindowsSandbox.PrinterRedirection != "" {
+			cfg.WindowsSandbox.PrinterRedirection = file.WindowsSandbox.PrinterRedirection
+		}
+		if file.WindowsSandbox.MemoryMB > 0 {
+			cfg.WindowsSandbox.MemoryMB = file.WindowsSandbox.MemoryMB
+		}
+	}
 	if file.Tailscale != nil {
 		if file.Tailscale.Enabled != nil {
 			cfg.Tailscale.Enabled = *file.Tailscale.Enabled
@@ -5227,6 +5314,16 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_HYPERV_INIT_PASSWORD"); ok {
 		cfg.HyperV.InitPassword = value
 	}
+	cfg.WindowsSandbox.Workdir = getenv("CRABBOX_WINDOWS_SANDBOX_WORKDIR", cfg.WindowsSandbox.Workdir)
+	cfg.WindowsSandbox.TempRoot = expandUserPath(getenv("CRABBOX_WINDOWS_SANDBOX_TEMP_ROOT", cfg.WindowsSandbox.TempRoot))
+	cfg.WindowsSandbox.Networking = getenv("CRABBOX_WINDOWS_SANDBOX_NETWORKING", cfg.WindowsSandbox.Networking)
+	cfg.WindowsSandbox.VGPU = getenv("CRABBOX_WINDOWS_SANDBOX_VGPU", cfg.WindowsSandbox.VGPU)
+	cfg.WindowsSandbox.Clipboard = getenv("CRABBOX_WINDOWS_SANDBOX_CLIPBOARD", cfg.WindowsSandbox.Clipboard)
+	cfg.WindowsSandbox.ProtectedClient = getenv("CRABBOX_WINDOWS_SANDBOX_PROTECTED_CLIENT", cfg.WindowsSandbox.ProtectedClient)
+	cfg.WindowsSandbox.AudioInput = getenv("CRABBOX_WINDOWS_SANDBOX_AUDIO_INPUT", cfg.WindowsSandbox.AudioInput)
+	cfg.WindowsSandbox.VideoInput = getenv("CRABBOX_WINDOWS_SANDBOX_VIDEO_INPUT", cfg.WindowsSandbox.VideoInput)
+	cfg.WindowsSandbox.PrinterRedirection = getenv("CRABBOX_WINDOWS_SANDBOX_PRINTER_REDIRECTION", cfg.WindowsSandbox.PrinterRedirection)
+	cfg.WindowsSandbox.MemoryMB = getenvInt("CRABBOX_WINDOWS_SANDBOX_MEMORY_MB", cfg.WindowsSandbox.MemoryMB)
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value
 	}

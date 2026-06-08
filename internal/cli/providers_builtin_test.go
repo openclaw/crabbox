@@ -43,6 +43,7 @@ func init() {
 	RegisterProvider(testParallelsProvider{})
 	RegisterProvider(testWandbProvider{})
 	RegisterProvider(testServiceControlProvider{})
+	RegisterProvider(testWindowsSandboxProvider{})
 }
 
 type testExternalProvider struct{}
@@ -233,6 +234,32 @@ func (testWandbProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testWandbProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testDelegatedBackend{spec: p.Spec()}, nil
+}
+
+type testWindowsSandboxProvider struct{}
+
+func (testWindowsSandboxProvider) Name() string { return "windows-sandbox" }
+func (testWindowsSandboxProvider) Aliases() []string {
+	return []string{"wsb", "windows-sandbox-provider"}
+}
+func (testWindowsSandboxProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "windows-sandbox",
+		Family:      "local-sandbox",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetWindows, WindowsMode: windowsModeNormal}},
+		Features:    FeatureSet{FeatureArchiveSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testWindowsSandboxProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return noProviderFlags{}
+}
+func (testWindowsSandboxProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testWindowsSandboxProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testDelegatedBackend{spec: p.Spec()}, nil
 }
 

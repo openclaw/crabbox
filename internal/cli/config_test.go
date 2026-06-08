@@ -190,6 +190,16 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_MULTIPASS_MEMORY",
 		"CRABBOX_MULTIPASS_DISK",
 		"CRABBOX_MULTIPASS_LAUNCH_TIMEOUT",
+		"CRABBOX_WINDOWS_SANDBOX_WORKDIR",
+		"CRABBOX_WINDOWS_SANDBOX_TEMP_ROOT",
+		"CRABBOX_WINDOWS_SANDBOX_NETWORKING",
+		"CRABBOX_WINDOWS_SANDBOX_VGPU",
+		"CRABBOX_WINDOWS_SANDBOX_CLIPBOARD",
+		"CRABBOX_WINDOWS_SANDBOX_PROTECTED_CLIENT",
+		"CRABBOX_WINDOWS_SANDBOX_AUDIO_INPUT",
+		"CRABBOX_WINDOWS_SANDBOX_VIDEO_INPUT",
+		"CRABBOX_WINDOWS_SANDBOX_PRINTER_REDIRECTION",
+		"CRABBOX_WINDOWS_SANDBOX_MEMORY_MB",
 		"CRABBOX_WANDB_API_KEY",
 		"WANDB_API_KEY",
 		"CRABBOX_WANDB_DEFAULT_IMAGE",
@@ -1629,6 +1639,70 @@ func TestTartEnvExplicitFlags(t *testing.T) {
 	}
 	if !IsTartMemoryExplicit(&cfg) {
 		t.Fatal("tartMemoryExplicit must be true after env sets CRABBOX_TART_MEMORY")
+	}
+}
+
+func TestWindowsSandboxConfigDefaultsFileEnvAndProviderTarget(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.WindowsSandbox.Workdir != `C:\crabbox-work` || cfg.WindowsSandbox.Networking != "Enable" || cfg.WindowsSandbox.VGPU != "Disable" {
+		t.Fatalf("windows sandbox defaults not applied: %#v", cfg.WindowsSandbox)
+	}
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "windows-sandbox",
+		WindowsSandbox: &fileWindowsSandboxConfig{
+			Workdir:            `C:\repo`,
+			TempRoot:           `C:\tmp\crabbox`,
+			Networking:         "disable",
+			VGPU:               "default",
+			Clipboard:          "disable",
+			ProtectedClient:    "enable",
+			AudioInput:         "disable",
+			VideoInput:         "disable",
+			PrinterRedirection: "disable",
+			MemoryMB:           8192,
+		},
+	})
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "windows-sandbox" || cfg.TargetOS != targetWindows || cfg.WindowsMode != windowsModeNormal || cfg.WorkRoot != `C:\repo` {
+		t.Fatalf("provider target/workroot not applied: provider=%s target=%s mode=%s workroot=%s", cfg.Provider, cfg.TargetOS, cfg.WindowsMode, cfg.WorkRoot)
+	}
+	if cfg.WindowsSandbox.Workdir != `C:\repo` || cfg.WindowsSandbox.TempRoot != `C:\tmp\crabbox` || cfg.WindowsSandbox.MemoryMB != 8192 {
+		t.Fatalf("file windowsSandbox config not applied: %#v", cfg.WindowsSandbox)
+	}
+
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_WORKDIR", `C:\env\repo`)
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_TEMP_ROOT", `C:\env\tmp`)
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_NETWORKING", "enable")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_VGPU", "disable")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_CLIPBOARD", "default")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_PROTECTED_CLIENT", "default")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_AUDIO_INPUT", "disable")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_VIDEO_INPUT", "disable")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_PRINTER_REDIRECTION", "disable")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_MEMORY_MB", "4096")
+	applyEnv(&cfg)
+	if cfg.WindowsSandbox.Workdir != `C:\env\repo` || cfg.WindowsSandbox.TempRoot != `C:\env\tmp` || cfg.WindowsSandbox.Networking != "enable" || cfg.WindowsSandbox.Clipboard != "default" || cfg.WindowsSandbox.MemoryMB != 4096 {
+		t.Fatalf("env windowsSandbox config not applied: %#v", cfg.WindowsSandbox)
+	}
+
+	badTarget := baseConfig()
+	badTarget.Provider = "windows-sandbox"
+	badTarget.TargetOS = targetLinux
+	badTarget.targetExplicit = true
+	if err := applyProviderConfigDefaults(&badTarget); err == nil || !strings.Contains(err.Error(), "target=windows") {
+		t.Fatalf("target linux err=%v, want windows-sandbox target rejection", err)
+	}
+
+	badMode := baseConfig()
+	badMode.Provider = "windows-sandbox"
+	badMode.TargetOS = targetWindows
+	badMode.WindowsMode = windowsModeWSL2
+	badMode.explicitWindowsMode = windowsModeWSL2
+	if err := applyProviderConfigDefaults(&badMode); err == nil || !strings.Contains(err.Error(), "windows.mode=normal") {
+		t.Fatalf("wsl2 err=%v, want windows-sandbox windows mode rejection", err)
 	}
 }
 
