@@ -34,6 +34,10 @@ type ProviderRoutingFlagProvider interface {
 	RoutingFlagNames() []string
 }
 
+type ProviderCommandRoutingArgs interface {
+	CommandRoutingArgs(cfg Config, leaseID string) []string
+}
+
 type ProviderServerTypeProvider interface {
 	ServerTypeForConfig(cfg Config) string
 	ServerTypeForClass(class string) string
@@ -597,6 +601,18 @@ func validateProviderConfig(cfg Config) error {
 		return validator.ValidateConfig(cfg)
 	}
 	return nil
+}
+
+func providerCommandRoutingArgs(cfg Config, leaseID string) []string {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return nil
+	}
+	router, ok := provider.(ProviderCommandRoutingArgs)
+	if !ok {
+		return nil
+	}
+	return router.CommandRoutingArgs(cfg, leaseID)
 }
 
 func routeProviderFlagOverride(cfg *Config, fs *flag.FlagSet, values providerFlagValues) (bool, error) {

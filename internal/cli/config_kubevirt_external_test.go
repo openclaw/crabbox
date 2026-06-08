@@ -126,3 +126,54 @@ func TestExternalArgEnvOverridesConfigArgs(t *testing.T) {
 		t.Fatalf("external args=%#v", cfg.External.Args)
 	}
 }
+
+func TestLoadDeclarativeExternalConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := `provider: external
+external:
+  lifecycle:
+    acquire:
+      argv: [devboxctl, new, "{{name}}", --size, "{{config.size}}"]
+    list:
+      argv: [devboxctl, list, --format, json]
+      output: json-name-array
+    release:
+      argv: [devboxctl, rm, --yes, "{{name}}"]
+  connection:
+    cloudId: devboxes/{{name}}
+    serverType: "{{config.size}}"
+    labels:
+      backend: pod
+    ssh:
+      user: "{{env.DEVBOX_USER}}"
+      host: "{{name}}"
+      port: "22"
+      sshConfigProxy: true
+  config:
+    size: cpu16
+  workRoot: /home/developer/crabbox
+`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := readFileConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.External.Lifecycle.Acquire.Argv, "|"); got != "devboxctl|new|{{name}}|--size|{{config.size}}" {
+		t.Fatalf("acquire argv=%q", got)
+	}
+	if cfg.External.Lifecycle.List.Output != "json-name-array" {
+		t.Fatalf("list=%#v", cfg.External.Lifecycle.List)
+	}
+	if cfg.External.Connection.SSH.User != "{{env.DEVBOX_USER}}" || !cfg.External.Connection.SSH.SSHConfigProxy {
+		t.Fatalf("connection=%#v", cfg.External.Connection)
+	}
+	if cfg.External.Config["size"] != "cpu16" || cfg.External.WorkRoot != "/home/developer/crabbox" {
+		t.Fatalf("external=%#v", cfg.External)
+	}
+}
