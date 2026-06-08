@@ -171,8 +171,8 @@ func (b *tenkiBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	if req.ReleaseOnly {
-		return LeaseTarget{Server: b.sessionToServer(cfg, session, leaseID, slug, true), LeaseID: leaseID}, nil
+	if req.ReleaseOnly || req.StatusOnly {
+		return LeaseTarget{Server: b.sessionToServer(cfg, session, leaseID, slug, session.Sticky), LeaseID: leaseID}, nil
 	}
 	lease, err := b.prepareLease(ctx, cfg, session, leaseID, slug, true, true)
 	if err != nil {
@@ -484,7 +484,7 @@ func (b *tenkiBackend) resolveSession(ctx context.Context, identifier string, re
 		if claim.Provider != "" && claim.Provider != tenkiProvider {
 			return tenkiSession{}, "", "", exit(4, "lease %q is claimed for provider=%s, not tenki", identifier, claim.Provider)
 		}
-		session, err := b.findSessionByLease(ctx, claim.LeaseID)
+		session, err := b.findSessionForClaim(ctx, claim)
 		if err != nil {
 			return tenkiSession{}, "", "", err
 		}
@@ -522,6 +522,17 @@ func (b *tenkiBackend) resolveSession(ctx context.Context, identifier string, re
 		}
 	}
 	return tenkiSession{}, "", "", exit(4, "tenki lease or session %q was not found", identifier)
+}
+
+func (b *tenkiBackend) findSessionForClaim(ctx context.Context, claim LeaseClaim) (tenkiSession, error) {
+	if claim.Labels != nil {
+		if sessionID := strings.TrimSpace(claim.Labels["tenki_session_id"]); sessionID != "" {
+			if session, err := b.getSession(ctx, sessionID); err == nil {
+				return session, nil
+			}
+		}
+	}
+	return b.findSessionByLease(ctx, claim.LeaseID)
 }
 
 func (b *tenkiBackend) findSessionByLease(ctx context.Context, leaseID string) (tenkiSession, error) {

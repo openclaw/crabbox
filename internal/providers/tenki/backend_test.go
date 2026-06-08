@@ -108,6 +108,69 @@ func TestTenkiCreateRequiresJSONSessionID(t *testing.T) {
 	}
 }
 
+func TestTenkiResolveStatusOnlyDoesNotPrepareSSH(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		runner.calls = append(runner.calls, req)
+		switch strings.Join(req.Args, " ") {
+		case "sandbox list --output json --tags crabbox,crabbox-provider-tenki":
+			return LocalCommandResult{Stdout: `[{"id":"session-1","name":"crabbox-blue","state":"PAUSED","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}]`}, nil
+		default:
+			t.Fatalf("status-only resolve should not prepare SSH, got command: %s %s", req.Name, strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_123", StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Status != "paused" || lease.SSH.Host != "" {
+		t.Fatalf("unexpected status-only lease: %#v", lease)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%d want 1", len(runner.calls))
+	}
+}
+
+func TestTenkiResolveClaimUsesStoredSessionID(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "tenki_session-1"
+	if err := claimLeaseForRepoProvider(leaseID, "adopted", tenkiProvider, t.TempDir(), time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimEndpoint(leaseID, Server{Labels: map[string]string{"tenki_session_id": "session-1"}}, SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		runner.calls = append(runner.calls, req)
+		switch strings.Join(req.Args, " ") {
+		case "sandbox get --output json session-1":
+			return LocalCommandResult{Stdout: `{"id":"session-1","name":"unmanaged","state":"RUNNING"}`}, nil
+		default:
+			t.Fatalf("claim resolve should use stored session id, got command: %s %s", req.Name, strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	session, gotLeaseID, slug, err := backend.resolveSession(context.Background(), "adopted", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.ID != "session-1" || gotLeaseID != leaseID || slug != "adopted" {
+		t.Fatalf("resolved session=%#v lease=%q slug=%q", session, gotLeaseID, slug)
+	}
+}
+
 func TestTenkiEnsureSessionReadyResumesPausedSession(t *testing.T) {
 	runner := &fakeRunner{}
 	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {

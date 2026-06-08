@@ -76,6 +76,10 @@ func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTim
 	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
 }
 
+func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
+	return core.UpdateLeaseClaimEndpoint(leaseID, server, target)
+}
+
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }
