@@ -261,6 +261,10 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if lease.LeaseID == "" {
 		lease.LeaseID = strings.TrimSpace(lease.Server.Labels["lease"])
 	}
+	if lease.LeaseID != "" && tartState(lease.Server.Status) == "missing" {
+		pruneLeaseState(lease.LeaseID)
+		return nil
+	}
 	name := strings.TrimSpace(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]))
 	if name == "" && lease.LeaseID != "" {
 		inst, _, claim, err := b.resolveInstance(ctx, lease.LeaseID)
@@ -272,8 +276,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 			lease.LeaseID = claim.LeaseID
 		}
 		if tartState(inst.State) == "missing" {
-			removeLeaseClaim(lease.LeaseID)
-			removeStoredTestboxKey(lease.LeaseID)
+			pruneLeaseState(lease.LeaseID)
 			return nil
 		}
 	}
@@ -285,10 +288,14 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		return err
 	}
 	if lease.LeaseID != "" {
-		removeLeaseClaim(lease.LeaseID)
-		removeStoredTestboxKey(lease.LeaseID)
+		pruneLeaseState(lease.LeaseID)
 	}
 	return nil
+}
+
+func pruneLeaseState(leaseID string) {
+	removeLeaseClaim(leaseID)
+	removeStoredTestboxKey(leaseID)
 }
 
 func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
