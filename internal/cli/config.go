@@ -17,6 +17,7 @@ type Config struct {
 	Profile                       string
 	Provider                      string
 	TargetOS                      string
+	targetExplicit                bool
 	Architecture                  string
 	architectureExplicit          bool
 	OSImage                       string
@@ -127,6 +128,11 @@ type Config struct {
 	appleContainerImageExplicit   bool
 	Multipass                     MultipassConfig
 	multipassImageExplicit        bool
+	Tart                          TartConfig
+	tartImageExplicit             bool
+	tartDiskExplicit              bool
+	tartCPUsExplicit              bool
+	tartMemoryExplicit            bool
 	Tailscale                     TailscaleConfig
 	Static                        StaticConfig
 	Results                       ResultsConfig
@@ -484,6 +490,15 @@ type MultipassConfig struct {
 	LaunchTimeout time.Duration
 }
 
+type TartConfig struct {
+	Image    string
+	User     string
+	WorkRoot string
+	CPUs     int
+	Memory   int
+	Disk     int
+}
+
 type StaticConfig struct {
 	ID       string
 	Name     string
@@ -806,6 +821,25 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		}
 		return nil
 	}
+	if cfg.Provider == "tart" || cfg.Provider == "local-tart" || cfg.Provider == "macos-vm" {
+		if cfg.Tart.User != "" {
+			cfg.SSHUser = cfg.Tart.User
+		}
+		if cfg.SSHPort == "" || cfg.SSHPort == baseConfig().SSHPort {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		if cfg.Tart.WorkRoot != "" {
+			cfg.WorkRoot = cfg.Tart.WorkRoot
+		}
+		if !IsTargetExplicit(cfg) && (cfg.TargetOS == "" || cfg.TargetOS == targetLinux) {
+			cfg.TargetOS = targetMacOS
+		}
+		if !cfg.ServerTypeExplicit && cfg.Tart.Image != "" {
+			cfg.ServerType = cfg.Tart.Image
+		}
+		return nil
+	}
 	if cfg.Provider != "proxmox" {
 		if cfg.Provider != "parallels" {
 			return nil
@@ -892,6 +926,42 @@ func MarkAppleContainerImageExplicit(cfg *Config) {
 
 func MarkMultipassImageExplicit(cfg *Config) {
 	cfg.multipassImageExplicit = true
+}
+
+func MarkTartImageExplicit(cfg *Config) {
+	cfg.tartImageExplicit = true
+}
+
+func IsTartDiskExplicit(cfg *Config) bool {
+	return cfg.tartDiskExplicit
+}
+
+func MarkTartDiskExplicit(cfg *Config) {
+	cfg.tartDiskExplicit = true
+}
+
+func IsTartCPUsExplicit(cfg *Config) bool {
+	return cfg.tartCPUsExplicit
+}
+
+func MarkTartCPUsExplicit(cfg *Config) {
+	cfg.tartCPUsExplicit = true
+}
+
+func IsTartMemoryExplicit(cfg *Config) bool {
+	return cfg.tartMemoryExplicit
+}
+
+func MarkTartMemoryExplicit(cfg *Config) {
+	cfg.tartMemoryExplicit = true
+}
+
+func IsTargetExplicit(cfg *Config) bool {
+	return cfg.targetExplicit
+}
+
+func MarkTargetExplicit(cfg *Config) {
+	cfg.targetExplicit = true
 }
 
 func baseConfig() Config {
@@ -1092,6 +1162,13 @@ func baseConfig() Config {
 			Disk:          "30G",
 			LaunchTimeout: 20 * time.Minute,
 		},
+		Tart: TartConfig{
+			Image:    "ghcr.io/cirruslabs/macos-sequoia-base:latest",
+			User:     "admin",
+			WorkRoot: "/Users/admin/crabbox",
+			CPUs:     4,
+			Memory:   8192,
+		},
 		Tailscale: TailscaleConfig{
 			Tags:             []string{"tag:crabbox"},
 			HostnameTemplate: "crabbox-{slug}",
@@ -1161,6 +1238,7 @@ type fileConfig struct {
 	LocalContainer       *fileLocalContainerConfig          `yaml:"localContainer,omitempty"`
 	AppleContainer       *fileAppleContainerConfig          `yaml:"appleContainer,omitempty"`
 	Multipass            *fileMultipassConfig               `yaml:"multipass,omitempty"`
+	Tart                 *fileTartConfig                    `yaml:"tart,omitempty"`
 	Tailscale            *fileTailscaleConfig               `yaml:"tailscale,omitempty"`
 	Static               *fileStaticConfig                  `yaml:"static,omitempty"`
 	Results              *fileResultsConfig                 `yaml:"results,omitempty"`
@@ -1583,6 +1661,15 @@ type fileMultipassConfig struct {
 	LaunchTimeout string `yaml:"launchTimeout,omitempty"`
 }
 
+type fileTartConfig struct {
+	Image    string `yaml:"image,omitempty"`
+	User     string `yaml:"user,omitempty"`
+	WorkRoot string `yaml:"workRoot,omitempty"`
+	CPUs     *int   `yaml:"cpus,omitempty"`
+	Memory   *int   `yaml:"memory,omitempty"`
+	Disk     *int   `yaml:"disk,omitempty"`
+}
+
 type fileTailscaleConfig struct {
 	Enabled                *bool    `yaml:"enabled,omitempty"`
 	Network                string   `yaml:"network,omitempty"`
@@ -1883,9 +1970,11 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	}
 	if file.Target != "" {
 		cfg.TargetOS = file.Target
+		cfg.targetExplicit = true
 	}
 	if file.TargetOS != "" {
 		cfg.TargetOS = file.TargetOS
+		cfg.targetExplicit = true
 	}
 	if file.Architecture != "" {
 		cfg.Architecture = file.Architecture
@@ -2772,6 +2861,30 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			applyLeaseDuration(&cfg.Multipass.LaunchTimeout, file.Multipass.LaunchTimeout)
 		}
 	}
+	if file.Tart != nil {
+		if file.Tart.Image != "" {
+			cfg.Tart.Image = file.Tart.Image
+			cfg.tartImageExplicit = true
+		}
+		if file.Tart.User != "" {
+			cfg.Tart.User = file.Tart.User
+		}
+		if file.Tart.WorkRoot != "" {
+			cfg.Tart.WorkRoot = file.Tart.WorkRoot
+		}
+		if file.Tart.CPUs != nil {
+			cfg.Tart.CPUs = *file.Tart.CPUs
+			cfg.tartCPUsExplicit = true
+		}
+		if file.Tart.Memory != nil {
+			cfg.Tart.Memory = *file.Tart.Memory
+			cfg.tartMemoryExplicit = true
+		}
+		if file.Tart.Disk != nil {
+			cfg.Tart.Disk = *file.Tart.Disk
+			cfg.tartDiskExplicit = true
+		}
+	}
 	if file.Tailscale != nil {
 		if file.Tailscale.Enabled != nil {
 			cfg.Tailscale.Enabled = *file.Tailscale.Enabled
@@ -3148,7 +3261,13 @@ func applyLeaseDuration(target *time.Duration, value string) {
 func applyEnv(cfg *Config) error {
 	cfg.Profile = getenv("CRABBOX_PROFILE", cfg.Profile)
 	cfg.Provider = getenv("CRABBOX_PROVIDER", cfg.Provider)
-	cfg.TargetOS = getenv("CRABBOX_TARGET", getenv("CRABBOX_TARGET_OS", cfg.TargetOS))
+	if t := os.Getenv("CRABBOX_TARGET"); t != "" {
+		cfg.TargetOS = t
+		cfg.targetExplicit = true
+	} else if t := os.Getenv("CRABBOX_TARGET_OS"); t != "" {
+		cfg.TargetOS = t
+		cfg.targetExplicit = true
+	}
 	if arch := os.Getenv("CRABBOX_ARCH"); arch != "" {
 		cfg.Architecture = arch
 		cfg.architectureExplicit = true
@@ -3528,6 +3647,24 @@ func applyEnv(cfg *Config) error {
 	cfg.Multipass.Disk = getenv("CRABBOX_MULTIPASS_DISK", cfg.Multipass.Disk)
 	if timeout := os.Getenv("CRABBOX_MULTIPASS_LAUNCH_TIMEOUT"); timeout != "" {
 		applyLeaseDuration(&cfg.Multipass.LaunchTimeout, timeout)
+	}
+	if image := os.Getenv("CRABBOX_TART_IMAGE"); image != "" {
+		cfg.Tart.Image = image
+		cfg.tartImageExplicit = true
+	}
+	cfg.Tart.User = getenv("CRABBOX_TART_USER", cfg.Tart.User)
+	cfg.Tart.WorkRoot = getenv("CRABBOX_TART_WORK_ROOT", cfg.Tart.WorkRoot)
+	if v := os.Getenv("CRABBOX_TART_CPUS"); v != "" {
+		cfg.Tart.CPUs = getenvInt("CRABBOX_TART_CPUS", cfg.Tart.CPUs)
+		cfg.tartCPUsExplicit = true
+	}
+	if v := os.Getenv("CRABBOX_TART_MEMORY"); v != "" {
+		cfg.Tart.Memory = getenvInt("CRABBOX_TART_MEMORY", cfg.Tart.Memory)
+		cfg.tartMemoryExplicit = true
+	}
+	if v := os.Getenv("CRABBOX_TART_DISK"); v != "" {
+		cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
+		cfg.tartDiskExplicit = true
 	}
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value

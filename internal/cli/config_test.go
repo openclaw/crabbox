@@ -485,6 +485,116 @@ func TestMultipassConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestTartConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	cfg.Tart.Image = "ghcr.io/test:latest"
+	cfg.Tart.User = "admin"
+	cfg.Tart.WorkRoot = "/Users/admin/work"
+	cfg.Tart.CPUs = 4
+	cfg.Tart.Memory = 8192
+	cfg.Tart.Disk = 50
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHUser != "admin" {
+		t.Fatalf("SSHUser=%q, want admin", cfg.SSHUser)
+	}
+	if cfg.SSHPort != "22" {
+		t.Fatalf("SSHPort=%q, want 22", cfg.SSHPort)
+	}
+	if cfg.SSHFallbackPorts != nil {
+		t.Fatalf("SSHFallbackPorts=%v, want nil", cfg.SSHFallbackPorts)
+	}
+	if cfg.WorkRoot != "/Users/admin/work" {
+		t.Fatalf("WorkRoot=%q, want /Users/admin/work", cfg.WorkRoot)
+	}
+	if cfg.TargetOS != "macos" {
+		t.Fatalf("TargetOS=%q, want macos", cfg.TargetOS)
+	}
+	if cfg.ServerType != "ghcr.io/test:latest" {
+		t.Fatalf("ServerType=%q, want ghcr.io/test:latest", cfg.ServerType)
+	}
+
+	// env overrides
+	t.Setenv("CRABBOX_TART_IMAGE", "ghcr.io/env:latest")
+	t.Setenv("CRABBOX_TART_USER", "env-user")
+	t.Setenv("CRABBOX_TART_WORK_ROOT", "/work/env")
+	t.Setenv("CRABBOX_TART_CPUS", "8")
+	t.Setenv("CRABBOX_TART_MEMORY", "16384")
+	t.Setenv("CRABBOX_TART_DISK", "100")
+	applyEnv(&cfg)
+	if cfg.Tart.Image != "ghcr.io/env:latest" || cfg.Tart.User != "env-user" || cfg.Tart.WorkRoot != "/work/env" || cfg.Tart.CPUs != 8 || cfg.Tart.Memory != 16384 || cfg.Tart.Disk != 100 {
+		t.Fatalf("env tart config not applied: %+v", cfg.Tart)
+	}
+}
+
+func TestTartConfigYAMLExplicitZeroPreserved(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	file := fileConfig{}
+	zero := 0
+	negative := -1
+	file.Tart = &fileTartConfig{
+		CPUs:   &zero,
+		Memory: &zero,
+		Disk:   &negative,
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tart.CPUs != 0 {
+		t.Fatalf("Tart.CPUs=%d, want 0 (explicit YAML zero must be preserved)", cfg.Tart.CPUs)
+	}
+	if cfg.Tart.Memory != 0 {
+		t.Fatalf("Tart.Memory=%d, want 0 (explicit YAML zero must be preserved)", cfg.Tart.Memory)
+	}
+	if cfg.Tart.Disk != -1 {
+		t.Fatalf("Tart.Disk=%d, want -1 (explicit YAML negative must be preserved)", cfg.Tart.Disk)
+	}
+	if !IsTartCPUsExplicit(&cfg) {
+		t.Fatal("tartCPUsExplicit must be true after YAML sets cpus")
+	}
+	if !IsTartMemoryExplicit(&cfg) {
+		t.Fatal("tartMemoryExplicit must be true after YAML sets memory")
+	}
+}
+
+func TestTartConfigYAMLMissingFieldsNotOverwritten(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 16384
+	file := fileConfig{}
+	file.Tart = &fileTartConfig{
+		Image: "ghcr.io/test:latest",
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tart.CPUs != 8 {
+		t.Fatalf("Tart.CPUs=%d, want 8 (missing YAML field must not overwrite)", cfg.Tart.CPUs)
+	}
+	if cfg.Tart.Memory != 16384 {
+		t.Fatalf("Tart.Memory=%d, want 16384 (missing YAML field must not overwrite)", cfg.Tart.Memory)
+	}
+}
+
+func TestTartEnvExplicitFlags(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	t.Setenv("CRABBOX_TART_CPUS", "8")
+	t.Setenv("CRABBOX_TART_MEMORY", "16384")
+	applyEnv(&cfg)
+	if !IsTartCPUsExplicit(&cfg) {
+		t.Fatal("tartCPUsExplicit must be true after env sets CRABBOX_TART_CPUS")
+	}
+	if !IsTartMemoryExplicit(&cfg) {
+		t.Fatal("tartMemoryExplicit must be true after env sets CRABBOX_TART_MEMORY")
+	}
+}
+
 func TestRepoConfigBareEnvWildcardDoesNotForwardEveryLocalVariable(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
