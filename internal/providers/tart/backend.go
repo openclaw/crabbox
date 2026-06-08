@@ -268,8 +268,13 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 			return err
 		}
 		name = inst.Name
-		if lease.LeaseID == "" {
+		if claim.LeaseID != "" {
 			lease.LeaseID = claim.LeaseID
+		}
+		if tartState(inst.State) == "missing" {
+			removeLeaseClaim(lease.LeaseID)
+			removeStoredTestboxKey(lease.LeaseID)
+			return nil
 		}
 	}
 	if name == "" {

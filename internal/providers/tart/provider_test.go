@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -2256,6 +2258,60 @@ func TestReleaseLeaseFallsBackToResolve(t *testing.T) {
 	}
 }
 
+func TestReleaseLeasePrunesMissingResolvedInstance(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	err := core.ClaimLeaseForRepoProviderScopePond(
+		"cbx_missingrel", "missing-rel", providerName, "instance:crabbox-missing-rel", "", t.TempDir(), 30*time.Minute, false,
+	)
+	if err != nil {
+		t.Fatalf("setup claim: %v", err)
+	}
+	keyPath, err := testboxKeyPath("cbx_missingrel")
+	if err != nil {
+		t.Fatalf("testbox key path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		t.Fatalf("create key dir: %v", err)
+	}
+	if err := os.WriteFile(keyPath, []byte("test-key"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: `[]`},
+		},
+		errors: map[string]error{
+			commandKey([]string{"delete", "crabbox-missing-rel"}): fmt.Errorf("delete should not be called"),
+		},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{
+			LeaseID: "missing-rel",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReleaseLease missing resolved instance: %v", err)
+	}
+	for _, call := range runner.calls {
+		if commandKey(call.Args) == commandKey([]string{"delete", "crabbox-missing-rel"}) {
+			t.Fatal("ReleaseLease should not delete an already-missing resolved VM")
+		}
+	}
+	if _, ok, err := resolveLeaseClaimForProvider("cbx_missingrel", providerName); err != nil {
+		t.Fatalf("resolve claim: %v", err)
+	} else if ok {
+		t.Fatal("ReleaseLease should prune the stale claim")
+	}
+	if _, err := os.Stat(filepath.Dir(keyPath)); !os.IsNotExist(err) {
+		t.Fatalf("ReleaseLease should remove stored key dir, stat err=%v", err)
+	}
+}
+
 func TestReleaseLeaseEmptyName(t *testing.T) {
 	runner := &recordingRunner{}
 	cfg := core.BaseConfig()
@@ -2588,7 +2644,7 @@ func TestResolveRunningVMByStateEmptyIPErrors(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
-			commandKey([]string{"ip", "crabbox-noip-vm"}):                        {Stdout: "\n"},
+			commandKey([]string{"ip", "crabbox-noip-vm"}):                         {Stdout: "\n"},
 		},
 	}
 	cfg := core.BaseConfig()
