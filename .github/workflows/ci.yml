@@ -45,6 +45,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Deadcode
+        run: go run golang.org/x/tools/cmd/deadcode@v0.45.0 -test ./...
+
       - name: Test
         run: go test -race ./...
 
