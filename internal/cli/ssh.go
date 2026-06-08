@@ -21,19 +21,22 @@ import (
 )
 
 type SSHTarget struct {
-	User            string
-	Host            string
-	Key             string
-	Port            string
-	FallbackPorts   []string
-	TargetOS        string
-	WindowsMode     string
-	ReadyCheck      string
-	AuthSecret      bool
-	NoControlMaster bool
-	NetworkKind     NetworkMode
-	SSHConfigProxy  bool
-	ProxyCommand    string
+	User                   string
+	Host                   string
+	Key                    string
+	CertificateFile        string
+	KnownHostsFile         string
+	Port                   string
+	FallbackPorts          []string
+	TargetOS               string
+	WindowsMode            string
+	ReadyCheck             string
+	AuthSecret             bool
+	NoControlMaster        bool
+	DisableHostKeyChecking bool
+	NetworkKind            NetworkMode
+	SSHConfigProxy         bool
+	ProxyCommand           string
 }
 
 func isLocalMacTarget(target SSHTarget) bool {
@@ -491,13 +494,23 @@ func sshBaseArgs(target SSHTarget) []string {
 func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts string) []string {
 	args := []string{
 		"-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=accept-new",
-		"-o", "UserKnownHostsFile=" + sshConfigFileValue(knownHostsFile(target)),
 		"-o", "ConnectTimeout=" + connectTimeout,
 		"-o", "ConnectionAttempts=" + connectionAttempts,
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=2",
 		"-p", target.Port,
+	}
+	if target.DisableHostKeyChecking {
+		args = append(args,
+			"-o", "StrictHostKeyChecking=no",
+			"-o", "UserKnownHostsFile=/dev/null",
+			"-o", "LogLevel=ERROR",
+		)
+	} else {
+		args = append(args,
+			"-o", "StrictHostKeyChecking=accept-new",
+			"-o", "UserKnownHostsFile="+sshConfigFileValue(knownHostsFile(target)),
+		)
 	}
 	if target.AuthSecret || target.NoControlMaster {
 		args = append(args, "-o", "ControlMaster=no")
@@ -516,6 +529,9 @@ func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts
 	if target.Key != "" {
 		args = append([]string{"-i", target.Key, "-o", "IdentitiesOnly=yes"}, args...)
 	}
+	if target.CertificateFile != "" {
+		args = append(args, "-o", "CertificateFile="+target.CertificateFile)
+	}
 	if target.ProxyCommand != "" {
 		args = append(args, "-o", "ProxyCommand="+target.ProxyCommand)
 	}
@@ -530,6 +546,9 @@ func minDuration(left, right time.Duration) time.Duration {
 }
 
 func knownHostsFile(target SSHTarget) string {
+	if target.KnownHostsFile != "" {
+		return target.KnownHostsFile
+	}
 	if target.Key != "" {
 		return filepath.Join(filepath.Dir(target.Key), "known_hosts")
 	}
@@ -544,10 +563,13 @@ func sshConfigFileValue(path string) string {
 }
 
 func sshControlPath(target SSHTarget) string {
-	scope := target.Key
-	if scope == "" {
-		scope = target.User
-	}
+	scope := strings.Join([]string{
+		target.User,
+		target.Key,
+		target.CertificateFile,
+		target.KnownHostsFile,
+		target.ProxyCommand,
+	}, "\x00")
 	sum := sha1.Sum([]byte(scope))
 	return filepath.Join("/tmp", "crabbox-ssh-"+hex.EncodeToString(sum[:4])+"-%C")
 }
@@ -843,7 +865,7 @@ func remoteCommandWithEnvFiles(workdir string, env map[string]string, envFiles [
 	var b strings.Builder
 	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
 	b.WriteString("bash -lc ")
-	b.WriteString(shellQuote(`exec "$@"`))
+	b.WriteString(shellQuote(remoteBashLoginScript(workdir, `exec "$@"`)))
 	b.WriteString(" bash")
 	for _, word := range command {
 		b.WriteByte(' ')
@@ -864,8 +886,15 @@ func remoteShellCommandWithEnvFiles(workdir string, env map[string]string, envFi
 	var b strings.Builder
 	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
 	b.WriteString("bash -lc ")
-	b.WriteString(shellQuote(script))
+	b.WriteString(shellQuote(remoteBashLoginScript(workdir, script)))
 	return b.String()
+}
+
+func remoteBashLoginScript(workdir, script string) string {
+	// Some sandbox images run bash startup files that cd back to $HOME for
+	// login shells. Keep the outer cd for env-file loading, then restore cwd
+	// inside bash -lc before the user command runs.
+	return "cd " + shellQuote(workdir) + " && " + script
 }
 
 func shellScriptFromArgv(command []string) string {

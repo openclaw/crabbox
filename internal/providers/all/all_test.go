@@ -72,6 +72,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"semaphore",
 		"sprites",
 		"ssh",
+		"tenki",
 		"tensorlake",
 		"upstash-box",
 		"ascii-box",

@@ -134,6 +134,7 @@ Targets: **L**inux, **M**acOS, **W**indows.
 | [Namespace Devbox](docs/providers/namespace-devbox.md) | `namespace-devbox` (`namespace`, `namespace-devboxes`) | L | direct | Namespace.so Devboxes over SSH. |
 | [Semaphore](docs/providers/semaphore.md) | `semaphore` (`sem`) | L | direct | A Semaphore CI job leased as a testbox. |
 | [Sprites](docs/providers/sprites.md) | `sprites` | L | direct | Sprites microVMs through `sprite proxy`. |
+| [Tenki](docs/providers/tenki.md) | `tenki` | L | direct | Tenki sandbox VMs through `tenki sandbox ssh-proxy`. |
 | [Daytona](docs/providers/daytona.md) | `daytona` | L | direct | Daytona-managed dev sandbox over SSH. |
 | [RunPod](docs/providers/runpod.md) | `runpod` (`run-pod`, `runpodio`) | L | direct | RunPod GPU pods with public SSH. |
 | [ASCII Box](docs/providers/ascii-box.md) | `ascii-box` (`ascii`, `asciibox`) | L | direct | ASCII Box Ubuntu sandboxes exposed as SSH leases. |

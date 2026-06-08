@@ -30,12 +30,12 @@ func TestVersion(t *testing.T) {
 }
 
 func TestRemoteCommandQuotesWorkdirEnvAndArgs(t *testing.T) {
-	got := remoteCommand("/work/crabbox/cbx_1/openclaw", map[string]string{"NODE_OPTIONS": "--max-old-space-size=8192"}, []string{"pnpm", "check:changed"})
+	got := remoteCommand("/work/crabbox/cbx_1/my-app", map[string]string{"NODE_OPTIONS": "--max-old-space-size=8192"}, []string{"pnpm", "check:changed"})
 	for _, want := range []string{
-		"cd '/work/crabbox/cbx_1/openclaw'",
+		"cd '/work/crabbox/cbx_1/my-app'",
 		"NODE_OPTIONS='--max-old-space-size=8192'",
 		"bash -lc",
-		"'exec \"$@\"' bash 'pnpm' 'check:changed'",
+		`bash -lc 'cd '\''/work/crabbox/cbx_1/my-app'\'' && exec "$@"' bash 'pnpm' 'check:changed'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommand() missing %q in %q", want, got)
@@ -48,7 +48,7 @@ func TestRemoteShellCommandRunsScript(t *testing.T) {
 	for _, want := range []string{
 		"cd '/work/crabbox/cbx_1/repo'",
 		"CI='1'",
-		"bash -lc 'pnpm install && pnpm test'",
+		`bash -lc 'cd '\''/work/crabbox/cbx_1/repo'\'' && pnpm install && pnpm test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteShellCommand() missing %q in %q", want, got)
@@ -70,7 +70,7 @@ func TestRemoteCommandSourcesActionsEnvFile(t *testing.T) {
 		"cd '/home/runner/work/repo/repo'",
 		"if [ -f '/home/runner/.crabbox/actions/cbx-123.env.sh' ]; then . '/home/runner/.crabbox/actions/cbx-123.env.sh'; fi",
 		"CI='1'",
-		"'exec \"$@\"' bash 'pnpm' 'test'",
+		`bash -lc 'cd '\''/home/runner/work/repo/repo'\'' && exec "$@"' bash 'pnpm' 'test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommandWithEnvFile() missing %q in %q", want, got)
@@ -87,7 +87,7 @@ func TestRemoteCommandSourcesMultipleEnvFilesWithoutInlineSecret(t *testing.T) {
 		"if [ -f '/home/runner/.crabbox/actions/cbx-123.env.sh' ]; then . '/home/runner/.crabbox/actions/cbx-123.env.sh'; fi",
 		"if [ -f '.crabbox/env/run.env.sh' ]; then . '.crabbox/env/run.env.sh'; fi",
 		"CI='1'",
-		"'exec \"$@\"' bash 'pnpm' 'test'",
+		`bash -lc 'cd '\''/work/repo'\'' && exec "$@"' bash 'pnpm' 'test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommandWithEnvFiles() missing %q in %q", want, got)
@@ -384,6 +384,50 @@ func TestSSHArgsIncludeReliabilityOptions(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("sshArgs() missing %q in %q", want, got)
 		}
+	}
+}
+
+func TestSSHArgsIncludeCertificateFile(t *testing.T) {
+	t.Setenv("HOME", "/tmp/crabbox-home")
+	got := strings.Join(sshArgs(SSHTarget{
+		User:            "tenki",
+		Host:            "sandbox",
+		Key:             "/tmp/tenki/id_ed25519",
+		CertificateFile: "/tmp/tenki/session-cert.pub",
+		KnownHostsFile:  "/tmp/tenki/known_hosts_session",
+		Port:            "22",
+	}, "true"), "\n")
+	if !strings.Contains(got, "CertificateFile=/tmp/tenki/session-cert.pub") {
+		t.Fatalf("sshArgs() missing CertificateFile: %q", got)
+	}
+	if !strings.Contains(got, "UserKnownHostsFile=/tmp/tenki/known_hosts_session") {
+		t.Fatalf("sshArgs() missing KnownHostsFile: %q", got)
+	}
+	if !strings.Contains(got, "ControlMaster=auto") {
+		t.Fatalf("sshArgs() should keep ControlMaster enabled for cert auth: %q", got)
+	}
+}
+
+func TestSSHArgsDisableHostKeyChecking(t *testing.T) {
+	t.Setenv("HOME", "/tmp/crabbox-home")
+	got := strings.Join(sshArgs(SSHTarget{
+		User:                   "tenki",
+		Host:                   "sandbox",
+		Key:                    "/tmp/tenki/id_ed25519",
+		Port:                   "22",
+		DisableHostKeyChecking: true,
+	}, "true"), "\n")
+	for _, want := range []string{
+		"StrictHostKeyChecking=no",
+		"UserKnownHostsFile=/dev/null",
+		"LogLevel=ERROR",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("sshArgs() missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "accept-new") || strings.Contains(got, "/tmp/tenki/known_hosts") {
+		t.Fatalf("sshArgs() should not use persistent known_hosts: %q", got)
 	}
 }
 
@@ -713,6 +757,26 @@ func TestSSHControlPathIsScopedByKey(t *testing.T) {
 	}
 	if !strings.HasPrefix(filepath.Base(left), "crabbox-ssh-") || !strings.HasSuffix(left, "-%C") {
 		t.Fatalf("unexpected control path %q", left)
+	}
+}
+
+func TestSSHControlPathIsScopedByProxyAndCertificate(t *testing.T) {
+	base := SSHTarget{
+		User:            "tenki",
+		Host:            "sandbox",
+		Key:             "/tmp/tenki/id_ed25519",
+		CertificateFile: "/tmp/tenki/ssh-certs/session-a/cert.pub",
+		ProxyCommand:    "tenki sandbox ssh-proxy --session session-a",
+	}
+	otherCert := base
+	otherCert.CertificateFile = "/tmp/tenki/ssh-certs/session-b/cert.pub"
+	otherProxy := base
+	otherProxy.ProxyCommand = "tenki sandbox ssh-proxy --session session-b"
+	if sshControlPath(base) == sshControlPath(otherCert) {
+		t.Fatal("control paths should differ for different certificate files")
+	}
+	if sshControlPath(base) == sshControlPath(otherProxy) {
+		t.Fatal("control paths should differ for different proxy commands")
 	}
 }
 

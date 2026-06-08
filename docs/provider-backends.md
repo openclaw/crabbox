@@ -201,6 +201,7 @@ internal/providers/ssh                  # static / BYO SSH backend
 internal/providers/daytona              # Daytona SSH lease + delegated SDK backend
 internal/providers/kubevirt             # generic KubeVirt SSH backend
 internal/providers/external             # executable provider protocol
+internal/providers/tenki                # Tenki sandbox SSH backend
 internal/providers/namespace            # Namespace devbox SSH backend
 internal/providers/semaphore            # Semaphore SSH lease backend
 internal/providers/sprites              # Sprites SSH backend

@@ -142,6 +142,7 @@ Pick whichever matches your intent:
   [KubeVirt](providers/kubevirt.md), [External](providers/external.md),
   [Namespace Devbox](providers/namespace-devbox.md),
   [Semaphore](providers/semaphore.md), [Sprites](providers/sprites.md),
+  [Tenki](providers/tenki.md),
   [Daytona](providers/daytona.md), [Islo](providers/islo.md),
   [E2B](providers/e2b.md), [Modal](providers/modal.md),
   [Tensorlake](providers/tensorlake.md), [Upstash Box](providers/upstash-box.md),

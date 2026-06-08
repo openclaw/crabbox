@@ -41,3 +41,4 @@ History uses Conventional Commit prefixes such as `feat:`, `fix:`, `docs:`, and 
 ## Security & Configuration Tips
 
 Keep provider and broker tokens out of the repository. Do not pass secrets as command-line arguments. Local config belongs in `~/.config/crabbox/config.yaml`, `~/Library/Application Support/crabbox/config.yaml`, `crabbox.yaml`, or `.crabbox.yaml` as documented.
+Tenki provider SSH uses `tenki sandbox ssh-proxy` with Tenki-managed key/cert files under `~/.config/tenki`; do not use Crabbox per-lease keys for gateway auth.
