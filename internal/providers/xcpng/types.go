@@ -48,15 +48,15 @@ type xcpNgImportISORequest struct {
 }
 
 type xcpNgDiskAttachRequest struct {
-	VMRef        xapiRef
-	SRRef        xapiRef
-	Name         string
-	Description  string
-	SizeBytes    int64
-	UserDevice   string
-	Labels       map[string]string
-	Unpluggable  bool
-	DestroyVDI   bool
+	VMRef       xapiRef
+	SRRef       xapiRef
+	Name        string
+	Description string
+	SizeBytes   int64
+	UserDevice  string
+	Labels      map[string]string
+	Unpluggable bool
+	DestroyVDI  bool
 }
 
 type xcpNgVIFSpec struct {
