@@ -23,6 +23,7 @@ const (
 	sshPort             = "2222"
 	workRootMarkerName  = ".crabbox-local-container-work-root"
 	dockerSocketInGuest = "/var/run/docker.sock"
+	rollbackTimeout     = 10 * time.Second
 )
 
 type backend struct {
@@ -96,16 +97,21 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s runtime=%s image=%s keep=%v\n", providerName, leaseID, slug, cfg.LocalContainer.Runtime, cfg.LocalContainer.Image, req.Keep)
 	containerID, bootstrapDir, err := b.createContainer(ctx, cfg, name, leaseID, slug, publicKey, req.Keep)
 	if err != nil {
+		if req.Keep && containerID != "" {
+			cleanupKey = false
+		}
 		return core.LeaseTarget{}, err
 	}
 	cleanupContainer := func() {
 		if req.Keep {
 			return
 		}
+		if err := b.removeContainer(context.Background(), containerID); err != nil {
+			return
+		}
 		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
 			_ = os.RemoveAll(bootstrapDir)
 		}
-		_ = b.removeContainer(context.Background(), containerID)
 	}
 	container, err := b.inspectContainer(ctx, containerID)
 	if err != nil {
@@ -476,12 +482,36 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "/tmp/crabbox-bootstrap/bootstrap.sh")
 	result, err := b.docker(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
-		os.RemoveAll(bootstrapDir)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+		defer cancel()
+		containerID, owned, inspectErr := b.ownedContainerID(cleanupCtx, leaseID, bootstrapDir)
+		if owned && keep {
+			return containerID, bootstrapDir, commandError("container run", result, err)
+		}
+		if owned {
+			if removeErr := b.removeContainer(cleanupCtx, containerID); removeErr == nil {
+				os.RemoveAll(bootstrapDir)
+			}
+		} else if inspectErr == nil {
+			os.RemoveAll(bootstrapDir)
+		}
 		return "", "", commandError("container run", result, err)
 	}
 	id := strings.TrimSpace(result.Stdout)
 	if id == "" {
-		os.RemoveAll(bootstrapDir)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+		defer cancel()
+		containerID, owned, inspectErr := b.ownedContainerID(cleanupCtx, leaseID, bootstrapDir)
+		if owned {
+			return containerID, bootstrapDir, nil
+		}
+		if inspectErr == nil {
+			os.RemoveAll(bootstrapDir)
+		} else if !keep {
+			if removeErr := b.removeContainer(cleanupCtx, name); removeErr == nil {
+				os.RemoveAll(bootstrapDir)
+			}
+		}
 		return "", "", core.Exit(2, "%s run did not return a container id", cfg.LocalContainer.Runtime)
 	}
 	return id, bootstrapDir, nil
@@ -766,6 +796,29 @@ func (b *backend) removeContainer(ctx context.Context, id string) error {
 		return commandError("container remove", result, err)
 	}
 	return nil
+}
+
+func (b *backend) ownedContainerID(ctx context.Context, leaseID, bootstrapDir string) (string, bool, error) {
+	result, err := b.docker(ctx, []string{"ps", "-aq", "--filter", "label=lease=" + leaseID}, nil, nil)
+	if err != nil {
+		return "", false, err
+	}
+	for _, id := range strings.Fields(result.Stdout) {
+		container, err := b.inspectContainer(ctx, id)
+		if err != nil {
+			return "", false, err
+		}
+		labels := container.Config.Labels
+		if labels["lease"] != leaseID || labels["bootstrap_dir"] != bootstrapDir {
+			continue
+		}
+		containerID := strings.TrimSpace(container.ID)
+		if containerID == "" {
+			containerID = id
+		}
+		return containerID, true, nil
+	}
+	return "", false, nil
 }
 
 func (b *backend) runtimeInfo(ctx context.Context) (string, string) {
