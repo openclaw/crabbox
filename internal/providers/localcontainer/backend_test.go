@@ -109,7 +109,7 @@ func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
 	cfg := b.configForRun()
 	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
 
-	id, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
+	id, _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestCreateContainerPassesDesktopEnv(t *testing.T) {
 	cfg.DesktopEnv = "wayland"
 	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
 
-	if _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true); err != nil {
+	if _, _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true); err != nil {
 		t.Fatal(err)
 	}
 	args := recordedArgsForCommand(t, runner, "run")
@@ -281,7 +281,7 @@ func TestCreateContainerMountsCacheVolumes(t *testing.T) {
 	}
 	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
 
-	if _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true); err != nil {
+	if _, _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true); err != nil {
 		t.Fatal(err)
 	}
 	args := recordedArgsForCommand(t, runner, "run")
@@ -327,7 +327,7 @@ func TestCreateContainerCanMountDockerSocket(t *testing.T) {
 	cfg.WorkRoot = cfg.LocalContainer.WorkRoot
 	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
 
-	_, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
+	_, _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func TestCreateContainerMountsDockerHostUnixSocket(t *testing.T) {
 	rootMode := rootInfo.Mode().Perm()
 	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
 
-	_, err = b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
+	_, _, err = b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +412,7 @@ func TestCreateContainerMountsPodmanSocketWithSecurityOpt(t *testing.T) {
 	cfg.WorkRoot = cfg.LocalContainer.WorkRoot
 	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
 
-	_, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
+	_, _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -778,10 +778,12 @@ func TestListAndResolveContainers(t *testing.T) {
 
 func TestTouchPreservesLocalContainerLabels(t *testing.T) {
 	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	bootstrapDir := filepath.Join(os.TempDir(), "crabbox-bootstrap-touchtest")
 	lease := core.LeaseTarget{
 		LeaseID: "cbx_touch",
 		Server: core.Server{
 			Labels: map[string]string{
+				"bootstrap_dir":  bootstrapDir,
 				"docker_socket":  "1",
 				"host_work_root": "/tmp/crabbox-local-container-work",
 				"work_root":      "/tmp/crabbox-local-container-work",
@@ -795,6 +797,9 @@ func TestTouchPreservesLocalContainerLabels(t *testing.T) {
 	}
 	if server.Labels["work_root"] != lease.Server.Labels["work_root"] || server.Labels["host_work_root"] != lease.Server.Labels["host_work_root"] || server.Labels["docker_socket"] != "1" || server.Labels["ssh_user"] != "runner" {
 		t.Fatalf("provider labels not preserved: %#v", server.Labels)
+	}
+	if server.Labels["bootstrap_dir"] != bootstrapDir {
+		t.Fatalf("bootstrap_dir not preserved through touch: got %q want %q", server.Labels["bootstrap_dir"], bootstrapDir)
 	}
 	if server.Labels["state"] != "running" {
 		t.Fatalf("state not touched: %#v", server.Labels)
