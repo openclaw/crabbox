@@ -84,7 +84,7 @@ type CopyRequest struct {
 	ID          string
 	Source      string
 	Destination string
-	FollowLink bool
+	FollowLink  bool
 }
 
 type PortsBackend interface {
