@@ -98,30 +98,33 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	cleanupContainer := func() {
+		if req.Keep {
+			return
+		}
+		if c, inspErr := b.inspectContainer(context.Background(), containerID); inspErr == nil {
+			if bd := strings.TrimSpace(c.Config.Labels["bootstrap_dir"]); bd != "" && trustedBootstrapDir(bd) {
+				_ = os.RemoveAll(bd)
+			}
+		}
+		_ = b.removeContainer(context.Background(), containerID)
+	}
 	container, err := b.inspectContainer(ctx, containerID)
 	if err != nil {
-		if !req.Keep {
-			_ = b.removeContainer(context.Background(), containerID)
-		}
+		cleanupContainer()
 		return core.LeaseTarget{}, err
 	}
 	lease, err := b.prepareLease(ctx, cfg, container, leaseID, slug, true)
 	if err != nil {
-		if !req.Keep {
-			_ = b.removeContainer(context.Background(), containerID)
-		}
+		cleanupContainer()
 		return core.LeaseTarget{}, err
 	}
 	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		if !req.Keep {
-			_ = b.removeContainer(context.Background(), containerID)
-		}
+		cleanupContainer()
 		return core.LeaseTarget{}, err
 	}
 	if err := core.UpdateLeaseClaimCacheVolumes(leaseID, core.CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
-		if !req.Keep {
-			_ = b.removeContainer(context.Background(), containerID)
-		}
+		cleanupContainer()
 		return core.LeaseTarget{}, err
 	}
 	cleanupKey = false
@@ -204,7 +207,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if hostLeaseRoot != "" {
 		cleanupErr = os.RemoveAll(hostLeaseRoot)
 	}
-	if bootstrapDir != "" {
+	if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
 		if err := os.RemoveAll(bootstrapDir); err != nil && cleanupErr == nil {
 			cleanupErr = err
 		}
@@ -262,7 +265,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			cleanupErr = os.RemoveAll(hostLeaseRoot)
 		}
 		bootstrapDir := strings.TrimSpace(server.Labels["bootstrap_dir"])
-		if bootstrapDir != "" {
+		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
 			if err := os.RemoveAll(bootstrapDir); err != nil && cleanupErr == nil {
 				cleanupErr = err
 			}
@@ -993,6 +996,19 @@ func safeLocalContainerLeaseID(leaseID string) bool {
 		return false
 	}
 	return true
+}
+
+func trustedBootstrapDir(dir string) bool {
+	dir = filepath.Clean(dir)
+	if !filepath.IsAbs(dir) {
+		return false
+	}
+	base := filepath.Base(dir)
+	if !strings.HasPrefix(base, "crabbox-bootstrap-") {
+		return false
+	}
+	parent := filepath.Dir(dir)
+	return parent == filepath.Clean(os.TempDir())
 }
 
 func trustedLocalContainerWorkRoot(root string) bool {

@@ -816,6 +816,26 @@ func TestHostLeaseWorkRootRequiresTrustedLabels(t *testing.T) {
 	}
 }
 
+func TestTrustedBootstrapDir(t *testing.T) {
+	tmpDir := os.TempDir()
+	good := filepath.Join(tmpDir, "crabbox-bootstrap-abc123")
+	if !trustedBootstrapDir(good) {
+		t.Fatalf("should trust %q", good)
+	}
+	for _, bad := range []string{
+		"",
+		"crabbox-bootstrap-abc123",
+		filepath.Join(tmpDir, "not-crabbox-dir"),
+		filepath.Join(tmpDir, "crabbox-bootstrap-abc123", ".."),
+		filepath.Join("/some/other/path", "crabbox-bootstrap-abc123"),
+		"/etc/passwd",
+	} {
+		if trustedBootstrapDir(bad) {
+			t.Fatalf("should reject %q", bad)
+		}
+	}
+}
+
 func TestFindContainerForClaimReturnsMatchedContainerIdentity(t *testing.T) {
 	inspectJSON := `[{
 		"Id":"newcontainer123456",
