@@ -37,6 +37,7 @@ Read when:
 - [Capacity and fallback](capacity-fallback.md): class chains, market spot/on-demand, and region/AZ routing.
 - [Provider backends](../provider-backends.md): contract reference for backend interfaces and registration.
 - [Authoring a provider](provider-authoring.md): step-by-step guide to writing a new provider.
+- [Incus local E2E testbed](../providers/incus.md): local Apple Silicon runbook and smoke contract for the future `incus` adapter.
 
 Provider deep-dives that live here in `features/`:
 

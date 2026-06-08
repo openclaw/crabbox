@@ -62,6 +62,12 @@ For a lease with no tailnet metadata, `auto` is just public mode.
 Static SSH targets behave the same way when the static host name is a MagicDNS
 name or a `100.x` address: `auto` defers to whatever `static.host` resolves to.
 
+The planned local Incus testbed is a special case worth keeping explicit:
+Crabbox does not reach the Incus-managed guest until the operator exposes that
+guest back out of the Linux host in a Mac-reachable way. On this Apple Silicon
+testbed, that usually means direct bridge reachability or an Incus-managed proxy
+or network-forward rule from the Linux host to guest port `22`.
+
 ## Public reachability
 
 Brokered AWS Linux/Windows/Mac, Azure Linux and native Windows, Google Cloud,
