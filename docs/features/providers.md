@@ -77,6 +77,7 @@ sync/run/release path. None of them go through the Worker.
 ssh              Existing SSH host (no provisioning)      Linux, macOS, Windows
 parallels        Parallels Desktop linked clones          Linux, macOS, Windows
 proxmox          Proxmox VE QEMU VM clones                Linux
+incus            Incus containers or VMs over SSH         Linux
 local-container  Local Docker-compatible containers       Linux
 multipass        Canonical Multipass local Ubuntu VMs     Linux
 daytona          Daytona sandboxes (short-lived SSH)      Linux
@@ -120,9 +121,9 @@ wandb                   Weights & Biases run sandboxes
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [Parallels](../providers/parallels.md): local or remote Mac Parallels Desktop VM clones and small Mac fleets.
 - [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
+- [Incus](../providers/incus.md): direct Incus Linux SSH leases plus the separate Apple Silicon local E2E contract.
 - [Local Container](../providers/local-container.md): local Linux containers through Docker-compatible runtimes.
 - [Multipass](../providers/multipass.md): local Ubuntu VMs through Canonical Multipass.
-- [Incus local E2E testbed](../providers/incus.md): planned-provider local Apple Silicon runbook for the future `incus` adapter.
 - [Daytona](../providers/daytona.md): Daytona SDK/toolbox sandbox leases.
 - [exe.dev](../providers/exe-dev.md): exe.dev VMs exposed as SSH leases.
 - [KubeVirt](../providers/kubevirt.md): generic KubeVirt VMs over Kubernetes control-plane forwarding.

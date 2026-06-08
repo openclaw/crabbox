@@ -48,10 +48,8 @@ the default. Most names accept aliases (listed below).
 Each page below maps to an adapter under `internal/providers/<dir>`. The
 **Provider id** is the canonical `--provider` value; **Aliases** also resolve.
 
-Planned-provider runbooks can live in this directory before an adapter is
-registered when they define a real environment contract that implementation work
-must target. Those pages are not part of the built-in provider tables until the
-adapter ships.
+Some provider pages also preserve environment-specific validation runbooks when
+the built-in adapter needs a separate local smoke contract.
 
 ### SSH lease
 
@@ -62,6 +60,7 @@ adapter ships.
 | [Google Cloud](gcp.md) | `gcp` | `google`, `google-cloud` | Linux | yes |
 | [Hetzner](hetzner.md) | `hetzner` | — | Linux | yes |
 | [Proxmox](proxmox.md) | `proxmox` | — | Linux | no (direct) |
+| [Incus](incus.md) | `incus` | — | Linux | no (direct) |
 | [Parallels](parallels.md) | `parallels` | — | Linux, macOS, Windows | no (direct) |
 | [Static SSH](ssh.md) | `ssh` | `static`, `static-ssh` | Linux, macOS, Windows | no (static) |
 | [Local Container](local-container.md) | `local-container` | `docker`, `container`, `local-docker` | Linux | no (local) |
@@ -98,12 +97,6 @@ adapter ships.
 Run `crabbox providers` (`--json`) to see the live capability set the binary
 reports.
 
-## Planned-provider runbooks
-
-- [Incus local E2E testbed](incus.md): local Apple Silicon runbook and smoke
-  contract for the future `incus` adapter. This page does not mean the provider
-  is registered in this branch.
-
 ## Notes on families and capabilities
 
 - The Azure family ships two backends: the default VM SSH lease
@@ -117,6 +110,10 @@ reports.
   Local Container aliases.
 - ASCII Box is an SSH-lease provider. Crabbox uses the documented `box --json`
   CLI for lifecycle/status/delete, then runs normal sync and commands over SSH.
+- `incus` is a direct Linux SSH-lease provider that stores Crabbox ownership and
+  expiry metadata in Incus `user.crabbox.*` instance config keys. Real Apple
+  Silicon smoke still follows the separate local testbed contract documented on
+  the provider page.
 - Capability flags (`--desktop`, `--browser`, `--code`, VNC) are validated
   against each provider's declared feature set. Among the SSH-lease providers,
   desktop/browser/code surfaces are richest on `aws`, `azure`, `hetzner`,

@@ -125,6 +125,7 @@ Targets: **L**inux, **M**acOS, **W**indows.
 | [Hetzner Cloud](docs/providers/hetzner.md) | `hetzner` | L | brokered | Linux VMs with desktop/browser/code and Tailscale. |
 | [Parallels](docs/providers/parallels.md) | `parallels` | L / M / W | direct | Local or remote macOS host; checkpoint/fork/restore/snapshot. |
 | [Proxmox](docs/providers/proxmox.md) | `proxmox` | L | direct | Clone Linux QEMU templates on a private Proxmox VE cluster. |
+| [Incus](docs/providers/incus.md) | `incus` | L | direct | Direct Incus Linux SSH leases through the official Incus Go client. |
 | [Static SSH](docs/providers/ssh.md) | `ssh` (`static`, `static-ssh`) | L / M / W | direct | Existing machines; no provisioning. |
 | [Local Container](docs/providers/local-container.md) | `local-container` (`docker`, `container`, `local-docker`) | L | direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima, Podman). |
 | [Apple Container](docs/providers/apple-container.md) | `apple-container` (`apple`, `applecontainer`) | L | direct | Apple's native `container` runtime on Apple silicon macOS. |

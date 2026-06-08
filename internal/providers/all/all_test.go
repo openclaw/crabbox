@@ -45,6 +45,16 @@ func TestDockerSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
+	provider, err := core.ProviderFor("incus")
+	if err != nil {
+		t.Fatalf("ProviderFor(incus): %v", err)
+	}
+	if provider.Name() != "incus" {
+		t.Fatalf("ProviderFor(incus).Name=%q", provider.Name())
+	}
+}
+
 func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 	providers := []string{
 		"apple-container",
@@ -60,6 +70,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"external",
 		"gcp",
 		"hetzner",
+		"incus",
 		"islo",
 		"kubevirt",
 		"local-container",
