@@ -2,6 +2,16 @@ import { EventEmitter } from "node:events";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+type OperationRunner = <T>(callback: () => Promise<T>) => Promise<T>;
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 const mocks = vi.hoisted(() => {
   const boss = {
     on: vi.fn<(...args: unknown[]) => unknown>(),
@@ -75,5 +85,86 @@ describe("NodeCoordinatorRuntime", () => {
       expect.any(Error),
     );
     errorLog.mockRestore();
+  });
+
+  it("lets code-agent replies bypass the lifecycle queue", async () => {
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    const socket = Object.assign(new EventEmitter(), {
+      close: vi.fn<(code?: number, reason?: string) => void>(),
+      terminate: vi.fn<() => void>(),
+    });
+    const operationRunner = vi.fn<OperationRunner>(
+      async <T>(_callback: () => Promise<T>): Promise<T> => await new Promise<T>(() => {}),
+    );
+    const message = vi.fn<() => Promise<void>>(async () => {});
+    runtime.setOperationRunner(operationRunner);
+
+    runtime.acceptWebSocket(socket as unknown as WebSocket, { kind: "code-agent" }, [], {
+      message,
+      close: vi.fn<(code: number, reason: string) => void>(),
+      error: vi.fn<() => void>(),
+    });
+    socket.emit("message", Buffer.from("{}"), false);
+
+    await vi.waitFor(() => {
+      expect(message).toHaveBeenCalledOnce();
+    });
+    expect(operationRunner).not.toHaveBeenCalled();
+  });
+
+  it("serializes control messages with lifecycle operations", async () => {
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    const socket = Object.assign(new EventEmitter(), {
+      close: vi.fn<(code?: number, reason?: string) => void>(),
+      terminate: vi.fn<() => void>(),
+    });
+    const operationRunner = vi.fn<OperationRunner>(
+      async <T>(callback: () => Promise<T>): Promise<T> => callback(),
+    );
+    const message = vi.fn<() => Promise<void>>(async () => {});
+    runtime.setOperationRunner(operationRunner);
+
+    runtime.acceptWebSocket(socket as unknown as WebSocket, { kind: "control" }, [], {
+      message,
+      close: vi.fn<(code: number, reason: string) => void>(),
+      error: vi.fn<() => void>(),
+    });
+    socket.emit("message", Buffer.from("{}"), false);
+
+    await vi.waitFor(() => {
+      expect(message).toHaveBeenCalledOnce();
+    });
+    expect(operationRunner).toHaveBeenCalledOnce();
+  });
+
+  it("keeps data-plane close callbacks behind earlier messages", async () => {
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    const socket = Object.assign(new EventEmitter(), {
+      close: vi.fn<(code?: number, reason?: string) => void>(),
+      terminate: vi.fn<() => void>(),
+    });
+    const order: string[] = [];
+    const messageDone = deferred<void>();
+
+    runtime.acceptWebSocket(socket as unknown as WebSocket, { kind: "code-agent" }, [], {
+      message: async () => {
+        order.push("message");
+        await messageDone.promise;
+      },
+      close: () => {
+        order.push("close");
+      },
+      error: vi.fn<() => void>(),
+    });
+    socket.emit("message", Buffer.from("{}"), false);
+    socket.emit("close", 1000, Buffer.from("done"));
+
+    await vi.waitFor(() => {
+      expect(order).toEqual(["message"]);
+    });
+    messageDone.resolve();
+    await vi.waitFor(() => {
+      expect(order).toEqual(["message", "close"]);
+    });
   });
 });

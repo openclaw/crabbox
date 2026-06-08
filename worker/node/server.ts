@@ -37,11 +37,11 @@ const port = positiveInt(process.env["PORT"], 8080);
 const env = process.env as unknown as Env;
 const runtime = new NodeCoordinatorRuntime(databaseURL);
 const coordinator = new FleetCoordinator(runtime, env);
-const mutationMutex = new AsyncMutex();
+const lifecycleMutex = new AsyncMutex();
 const publicDirectory = resolve(fileURLToPath(new URL("../public", import.meta.url)));
 
-runtime.setOperationRunner((callback) => mutationMutex.run(callback));
-await runtime.start(() => mutationMutex.run(() => coordinator.alarm()));
+runtime.setOperationRunner((callback) => lifecycleMutex.run(callback));
+await runtime.start(() => lifecycleMutex.run(() => coordinator.alarm()));
 
 const server = createServer(async (request, response) => {
   try {
@@ -101,7 +101,7 @@ process.on("SIGINT", () => {
 });
 
 async function runFleetRequest(request: Request): Promise<Response> {
-  return mutationMutex.run(() => coordinator.fetch(request));
+  return lifecycleMutex.run(() => coordinator.fetch(request));
 }
 
 async function shutdown(): Promise<void> {

@@ -14,6 +14,14 @@ import { PostgresCoordinatorStorage } from "./postgres-storage";
 
 const alarmQueue = "coordinator-alarm";
 const reconcileQueue = "coordinator-reconcile";
+const bridgeDataAttachmentKinds = new Set([
+  "webvnc-agent",
+  "webvnc-viewer",
+  "code-agent",
+  "code-viewer",
+  "egress-host",
+  "egress-client",
+]);
 
 export interface NodeUpgradeContext {
   request: IncomingMessage;
@@ -34,6 +42,7 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
   private readonly attachments = new WeakMap<WebSocket, unknown>();
   private readonly sockets = new Set<NodeWebSocket>();
   private readonly socketAlive = new WeakMap<NodeWebSocket, boolean>();
+  private readonly socketOperationTails = new WeakMap<NodeWebSocket, Promise<void>>();
   private alarmHandler?: () => Promise<void>;
   private operationRunner = async <T>(callback: () => Promise<T>): Promise<T> => callback();
   private alarmRun: Promise<void> = Promise.resolve();
@@ -151,30 +160,26 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
       this.socketAlive.set(nodeSocket, true);
     });
     nodeSocket.on("message", (data, isBinary) => {
-      void Promise.resolve()
-        .then(() =>
-          this.operationRunner(async () => {
-            await handlers.message(webSocketData(data, isBinary));
-          }),
-        )
-        .catch((error) => {
-          this.failSocket(nodeSocket, "message", error);
-        });
+      void this.runSocketOperation(nodeSocket, attachment, () =>
+        handlers.message(webSocketData(data, isBinary)),
+      ).catch((error) => {
+        this.failSocket(nodeSocket, "message", error);
+      });
     });
     nodeSocket.on("close", (code, reason) => {
       this.sockets.delete(nodeSocket);
-      try {
+      void this.runSocketOperation(nodeSocket, attachment, async () => {
         handlers.close(code, reason.toString());
-      } catch (error) {
+      }).catch((error) => {
         console.error("coordinator websocket close handler failed", error);
-      }
+      });
     });
     nodeSocket.on("error", () => {
-      try {
+      void this.runSocketOperation(nodeSocket, attachment, async () => {
         handlers.error();
-      } catch (error) {
+      }).catch((error) => {
         console.error("coordinator websocket error handler failed", error);
-      }
+      });
     });
   }
 
@@ -228,6 +233,29 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
       }
     }
   }
+
+  private runSocketOperation<T>(
+    socket: NodeWebSocket,
+    attachment: unknown,
+    callback: () => Promise<T> | T,
+  ): Promise<T> {
+    const operation = async () => callback();
+    // Data-plane frames and code-agent replies must be able to complete an HTTP
+    // request that currently owns the lifecycle queue. Control frames mutate
+    // lease state and stay serialized with HTTP requests and alarms.
+    if (!isBridgeDataAttachment(attachment)) {
+      return this.operationRunner(operation);
+    }
+    const run = (this.socketOperationTails.get(socket) ?? Promise.resolve()).then(operation);
+    this.socketOperationTails.set(
+      socket,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return run;
+  }
 }
 
 function webSocketData(data: RawData, isBinary: boolean): string | ArrayBuffer {
@@ -240,4 +268,11 @@ function webSocketData(data: RawData, isBinary: boolean): string | ArrayBuffer {
       ? Buffer.from(data)
       : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
   return Uint8Array.from(buffer).buffer;
+}
+
+function isBridgeDataAttachment(attachment: unknown): boolean {
+  if (!attachment || typeof attachment !== "object" || !("kind" in attachment)) {
+    return false;
+  }
+  return bridgeDataAttachmentKinds.has(String(attachment.kind));
 }
