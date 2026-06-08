@@ -2,7 +2,7 @@
 set -u -o pipefail
 
 bin="${CRABBOX_BIN:-./bin/crabbox}"
-providers=(
+default_providers=(
   aws
   azure
   blacksmith-testbox
@@ -21,6 +21,20 @@ providers=(
   ssh
   tensorlake
 )
+
+if [[ -n "${CRABBOX_LIVE_DOCTOR_PROVIDERS:-}" ]]; then
+  IFS=',' read -r -a providers <<<"${CRABBOX_LIVE_DOCTOR_PROVIDERS}"
+else
+  providers=("${default_providers[@]}")
+fi
+
+selected_providers=()
+for provider in "${providers[@]}"; do
+  provider="${provider//[[:space:]]/}"
+  [[ -n "$provider" ]] || continue
+  selected_providers+=("$provider")
+done
+providers=("${selected_providers[@]}")
 
 if [[ ! -x "$bin" ]]; then
   echo "missing crabbox binary: $bin" >&2

@@ -356,6 +356,80 @@ wandb_smoke() {
   run_in_repo "$cb" list --provider wandb --json | jq 'map({id:(.id // .CloudID),provider:(.provider // .Provider),state:(.status // .state)})'
 }
 
+incus_smoke() {
+  need_tool jq
+  need_tool rg
+
+  local delete_args=(--provider incus --incus-delete-on-release=true)
+  local delete_lease_args=("${delete_args[@]}" --ttl "${CRABBOX_LIVE_INCUS_TTL:-15m}" --idle-timeout "${CRABBOX_LIVE_INCUS_IDLE_TIMEOUT:-5m}")
+  local retain_args=(--provider incus --incus-delete-on-release=false)
+  local retain_lease_args=("${retain_args[@]}" --ttl "${CRABBOX_LIVE_INCUS_RETAIN_TTL:-15m}" --idle-timeout "${CRABBOX_LIVE_INCUS_RETAIN_IDLE_TIMEOUT:-5m}")
+  local retained_command="${CRABBOX_LIVE_INCUS_RETAIN_COMMAND:-$live_command}"
+
+  local lease=""
+  local slug=""
+  local retained_lease=""
+  local retained_slug=""
+  cleanup() {
+    if [[ -n "$retained_lease" ]]; then
+      if [[ -n "$retained_slug" ]]; then
+        run_in_repo "$cb" stop --provider incus --incus-delete-on-release=true "$retained_slug" || run_in_repo "$cb" stop --provider incus --incus-delete-on-release=true "$retained_lease" || true
+      else
+        run_in_repo "$cb" stop --provider incus --incus-delete-on-release=true "$retained_lease" || true
+      fi
+    fi
+    if [[ -n "$lease" ]]; then
+      if [[ -n "$slug" ]]; then
+        run_in_repo "$cb" stop "${delete_args[@]}" "$slug" || run_in_repo "$cb" stop "${delete_args[@]}" "$lease" || true
+      else
+        run_in_repo "$cb" stop "${delete_args[@]}" "$lease" || true
+      fi
+    fi
+  }
+  trap cleanup RETURN
+
+  local doctor_out
+  capture_run doctor_out run_in_repo "$cb" doctor --provider incus --json
+  printf '%s\n' "$doctor_out"
+  printf '%s\n' "$doctor_out" | jq '{ok,checks:[.checks[] | select(.check=="provider") | {status,details,message}]}'
+
+  local out
+  capture_run out run_in_repo "$cb" warmup "${delete_lease_args[@]}" --slug "${CRABBOX_LIVE_INCUS_SLUG:-incus-smoke-$$}" --timing-json
+  printf '%s\n' "$out"
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  slug="$(printf '%s\n' "$out" | extract_slug)"
+  test -n "$lease"
+  test -n "$slug"
+
+  run_in_repo "$cb" status "${delete_args[@]}" --id "$slug" --wait --wait-timeout "${CRABBOX_LIVE_INCUS_WAIT_TIMEOUT:-5m}"
+  run_in_repo "$cb" inspect "${delete_args[@]}" --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
+  local runout
+  capture_run runout run_in_repo "$cb" run "${delete_args[@]}" --id "$slug" --shell -- "$live_command"
+  printf '%s\n' "$runout"
+  run_in_repo "$cb" list --provider incus --json | jq 'map({id:(.id // .CloudID),slug:(.slug // .labels.slug),provider:(.provider // .Provider // .labels.provider),state:(.state // .labels.state // .status),host:(.host // .Host)})'
+  run_in_repo "$cb" stop "${delete_args[@]}" "$slug" || run_in_repo "$cb" stop "${delete_args[@]}" "$lease"
+  lease=""
+  slug=""
+
+  capture_run out run_in_repo "$cb" warmup "${retain_lease_args[@]}" --slug "${CRABBOX_LIVE_INCUS_RETAINED_SLUG:-incus-retain-smoke-$$}" --timing-json
+  printf '%s\n' "$out"
+  retained_lease="$(printf '%s\n' "$out" | extract_lease)"
+  retained_slug="$(printf '%s\n' "$out" | extract_slug)"
+  test -n "$retained_lease"
+  test -n "$retained_slug"
+
+  run_in_repo "$cb" status "${retain_args[@]}" --id "$retained_slug" --wait --wait-timeout "${CRABBOX_LIVE_INCUS_RETAIN_WAIT_TIMEOUT:-5m}"
+  capture_run runout run_in_repo "$cb" run "${retain_args[@]}" --id "$retained_slug" --shell -- "$live_command"
+  printf '%s\n' "$runout"
+  run_in_repo "$cb" stop "${retain_args[@]}" "$retained_slug" || run_in_repo "$cb" stop "${retain_args[@]}" "$retained_lease"
+  run_in_repo "$cb" status "${retain_args[@]}" --id "$retained_slug" --json | jq '{id,slug,state,ready,host}'
+  capture_run runout run_in_repo "$cb" run "${retain_args[@]}" --id "$retained_slug" --shell -- "$retained_command"
+  printf '%s\n' "$runout"
+  run_in_repo "$cb" stop --provider incus --incus-delete-on-release=true "$retained_slug" || run_in_repo "$cb" stop --provider incus --incus-delete-on-release=true "$retained_lease"
+  retained_lease=""
+  retained_slug=""
+}
+
 sprites_smoke() {
   need_tool jq
   need_tool rg
@@ -563,6 +637,10 @@ fi
 
 if has_provider wandb; then
   wandb_smoke
+fi
+
+if has_provider incus; then
+  incus_smoke
 fi
 
 if has_provider kubevirt; then

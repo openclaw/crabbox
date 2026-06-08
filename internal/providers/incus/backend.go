@@ -3,6 +3,7 @@ package incus
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -189,14 +190,55 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	if req.ReleaseOnly {
 		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
+	if req.StatusOnly {
+		state, _, err := client.GetInstanceState(inst.Name)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		server = serverFromInstance(inst, state, cfg)
+		if liveState := strings.ToLower(strings.TrimSpace(state.Status)); liveState != "" {
+			server.Status = liveState
+			labelState := strings.ToLower(strings.TrimSpace(server.Labels["state"]))
+			if liveState != "running" || (labelState != "ready" && labelState != "running") {
+				server.Labels["state"] = liveState
+			}
+		}
+	} else {
+		if !inst.IsActive() {
+			if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "start", Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
+				return LeaseTarget{}, err
+			}
+		}
+		instWithAddress, _, err := b.waitForAddress(ctx, client, inst.Name)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		inst = *instWithAddress
+		server = serverFromInstance(inst, nil, cfg)
+	}
 	target := core.SSHTargetFromConfig(cfg, sshTargetHost(server, cfg))
 	if leaseID != "" {
 		if keyPath, keyErr := core.TestboxKeyPath(leaseID); keyErr == nil {
 			target.Key = keyPath
 		}
 	}
+	if !req.StatusOnly {
+		if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "reuse", core.BootstrapWaitTimeout(cfg)); err != nil {
+			return LeaseTarget{}, err
+		}
+		server.Status = "ready"
+		server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", time.Now().UTC())
+		if err := setInstanceLabels(ctx, client, inst.Name, server.Labels); err != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: set incus labels: %v\n", err)
+		}
+	}
 	if req.Repo.Root != "" && leaseID != "" {
 		if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, server.Labels["slug"], providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	if !req.StatusOnly && leaseID != "" {
+		if err := core.UpdateLeaseClaimEndpoint(leaseID, server, target); err != nil {
 			return LeaseTarget{}, err
 		}
 	}
@@ -224,11 +266,37 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 }
 
 func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	cfg := b.configForRun()
+	info, err := doctorConnectionInfoForConfig(cfg)
+	if err != nil {
+		return core.DoctorResult{}, err
+	}
 	views, err := b.List(ctx, ListRequest{})
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
-	return core.CLIDoctorResult(providerName, len(views), "incus-client-config"), nil
+	fields := []string{
+		"cli=ready",
+		"inventory=ready",
+		"api=list",
+		"mutation=false",
+		fmt.Sprintf("leases=%d", len(views)),
+		"runtime=go_client",
+		"mode=" + info.Mode,
+		"protocol=" + info.Protocol,
+		"endpoint=" + core.Blank(info.Endpoint, "-"),
+		"project=" + info.Project,
+		"auth=" + info.Auth,
+	}
+	if info.Mode == "socket" {
+		fields = append(fields, "control_plane=local")
+	} else {
+		fields = append(fields, "control_plane=remote")
+	}
+	if info.Remote != "" {
+		fields = append(fields, "remote="+info.Remote)
+	}
+	return core.DoctorResult{Provider: providerName, Message: strings.Join(fields, " ")}, nil
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
@@ -253,6 +321,17 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: true, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
 			return err
 		}
+		labels := labelsFromInstance(inst)
+		labels["state"] = "stopped"
+		delete(labels, "host")
+		if err := setInstanceLabels(ctx, client, inst.Name, labels); err != nil {
+			return err
+		}
+		if leaseID != "" {
+			if err := core.UpdateLeaseClaimEndpoint(leaseID, core.Server{Labels: labels}, core.SSHTarget{}); err != nil {
+				return err
+			}
+		}
 	}
 	if leaseID != "" && deleteInstance {
 		core.RemoveLeaseClaim(leaseID)
@@ -262,7 +341,11 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 }
 
 func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
-	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, core.Blank(core.Blank(lease.Server.CloudID, lease.Server.Name), "-"))
+	instance := core.Blank(core.Blank(lease.Server.CloudID, lease.Server.Name), "-")
+	if b.configForRun().Incus.DeleteOnRelease {
+		return fmt.Sprintf("deleted lease=%s instance=%s", lease.LeaseID, instance)
+	}
+	return fmt.Sprintf("stopped lease=%s instance=%s retained=true", lease.LeaseID, instance)
 }
 
 func (b *backend) Touch(ctx context.Context, req TouchRequest) (core.Server, error) {
@@ -319,7 +402,8 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 }
 
 func (b *backend) waitForAddress(ctx context.Context, client instanceClient, name string) (*api.Instance, string, error) {
-	timeout := b.configForRun().Incus.StartTimeout
+	cfg := b.configForRun()
+	timeout := cfg.Incus.StartTimeout
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
 	}
@@ -333,7 +417,7 @@ func (b *backend) waitForAddress(ctx context.Context, client instanceClient, nam
 		if stateErr != nil {
 			return nil, "", stateErr
 		}
-		if host := bestAddress(*inst, state); host != "" {
+		if host := instanceHost(*inst, state, cfg); host != "" {
 			if inst.Config == nil {
 				inst.Config = map[string]string{}
 			}
@@ -463,8 +547,17 @@ func serverFromInstance(inst api.Instance, state *api.InstanceState, cfg Config)
 		Labels:   labelsFromInstance(inst),
 	}
 	server.ServerType.Name = core.Blank(server.Labels["server_type"], core.IncusServerTypeForConfig(cfg))
-	server.PublicNet.IPv4.IP = bestAddress(inst, state)
+	server.PublicNet.IPv4.IP = instanceHost(inst, state, cfg)
 	return server
+}
+
+func instanceHost(inst api.Instance, state *api.InstanceState, cfg Config) string {
+	if strings.TrimSpace(cfg.Incus.ProxyListenPort) != "" {
+		if host := sshHostForConfig(cfg); host != "" {
+			return host
+		}
+	}
+	return bestAddress(inst, state)
 }
 
 func sshTargetHost(server core.Server, cfg Config) string {
@@ -477,19 +570,33 @@ func sshTargetHost(server core.Server, cfg Config) string {
 }
 
 func bestAddress(inst api.Instance, state *api.InstanceState) string {
-	if port := labelValue(inst, "host"); port != "" {
-		return port
+	if host := bestStateAddress(state); host != "" {
+		return host
 	}
-	if state != nil {
-		for _, network := range state.Network {
-			for _, address := range network.Addresses {
-				if address.Family == "inet" && address.Scope == "global" && address.Address != "" {
-					return address.Address
-				}
+	if host := labelValue(inst, "host"); host != "" {
+		return host
+	}
+	return bestInstanceAddress(inst)
+}
+
+func bestStateAddress(state *api.InstanceState) string {
+	if state == nil || len(state.Network) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(state.Network))
+	for name := range state.Network {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		network := state.Network[name]
+		for _, address := range network.Addresses {
+			if address.Family == "inet" && address.Scope == "global" && address.Address != "" {
+				return address.Address
 			}
 		}
 	}
-	return bestInstanceAddress(inst)
+	return ""
 }
 
 func bestInstanceAddress(inst api.Instance) string {

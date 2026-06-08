@@ -16,19 +16,20 @@ import (
 )
 
 type fakeClient struct {
-	instances    map[string]*api.Instance
-	states       map[string]*api.InstanceState
-	deleted      []string
-	created      []api.InstancesPost
-	updated      []string
-	stateUpdates []string
-	getCalls     map[string]int
-	getErr       error
-	listErr      error
-	createErr    error
-	updateErr    error
-	stateErr     error
-	deleteErr    error
+	instances            map[string]*api.Instance
+	states               map[string]*api.InstanceState
+	deleted              []string
+	created              []api.InstancesPost
+	updated              []string
+	stateUpdates         []string
+	preserveEmptyNetwork bool
+	getCalls             map[string]int
+	getErr               error
+	listErr              error
+	createErr            error
+	updateErr            error
+	stateErr             error
+	deleteErr            error
 }
 
 func (f *fakeClient) ListInstances() ([]api.Instance, error) {
@@ -53,11 +54,6 @@ func (f *fakeClient) GetInstance(name string) (*api.Instance, string, error) {
 	inst, ok := f.instances[name]
 	if !ok {
 		return nil, "", core.Exit(4, "missing instance %s", name)
-	}
-	if state, ok := f.states[name]; ok {
-		if host := bestAddress(*inst, state); host != "" {
-			inst.Config[labelKey("host")] = host
-		}
 	}
 	copy := *inst
 	copy.Config = cloneMap(inst.Config)
@@ -126,7 +122,7 @@ func (f *fakeClient) SetInstanceState(name string, put api.InstanceStatePut, eta
 		inst.StatusCode = api.Running
 		state.Status = "Running"
 		state.StatusCode = api.Running
-		if len(state.Network) == 0 {
+		if len(state.Network) == 0 && !f.preserveEmptyNetwork {
 			state.Network = map[string]api.InstanceStateNetwork{
 				"eth0": {Addresses: []api.InstanceStateNetworkAddress{{Family: "inet", Scope: "global", Address: "198.51.100.24"}}},
 			}
@@ -272,6 +268,59 @@ func TestConnectionArgsForAddressLoadsTLSCertContents(t *testing.T) {
 	}
 	if args.TLSServerCert != "PEM-CONTENT" {
 		t.Fatalf("TLSServerCert=%q want PEM contents", args.TLSServerCert)
+	}
+}
+
+func TestDoctorReportsSocketModeWithoutMutation(t *testing.T) {
+	oldNewClient := newClient
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-doctor": {
+				Name:       "crabbox-doctor",
+				Status:     "Running",
+				StatusCode: api.Running,
+				InstancePut: api.InstancePut{
+					Config: map[string]string{
+						labelKey("crabbox"): "true",
+						labelKey("lease"):   "cbx_doctor1234",
+						labelKey("slug"):    "doctor-slug",
+					},
+				},
+			},
+		},
+		states: map[string]*api.InstanceState{},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.Socket = "/var/lib/incus/unix.socket"
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	for _, want := range []string{
+		"control_plane=local",
+		"leases=1",
+		"runtime=go_client",
+		"mode=socket",
+		"protocol=unix",
+		"endpoint=/var/lib/incus/unix.socket",
+		"project=default",
+		"auth=unix_socket",
+	} {
+		if !strings.Contains(result.Message, want) {
+			t.Fatalf("doctor message missing %q: %s", want, result.Message)
+		}
+	}
+	if len(fake.created) != 0 || len(fake.updated) != 0 || len(fake.stateUpdates) != 0 || len(fake.deleted) != 0 {
+		t.Fatalf("doctor mutated instance state: created=%d updated=%d stateUpdates=%d deleted=%d", len(fake.created), len(fake.updated), len(fake.stateUpdates), len(fake.deleted))
 	}
 }
 
@@ -473,6 +522,250 @@ func TestAcquireCleansUpPartialInstanceEvenWhenDeleteOnReleaseFalse(t *testing.T
 	}
 }
 
+func TestAcquireUsesProxyHostWhenGuestAddressUnavailable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	oldWait := waitForSSHReady
+	fake := &fakeClient{
+		instances:            map[string]*api.Instance{},
+		states:               map[string]*api.InstanceState{},
+		preserveEmptyNetwork: true,
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+		_ = ctx
+		_ = stderr
+		_ = phase
+		_ = timeout
+		if target.Host != "incus-host.example.test" || target.Port != "2222" {
+			t.Fatalf("target=%#v want incus proxy endpoint", target)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		newClient = oldNewClient
+		waitForSSHReady = oldWait
+	})
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.Address = "https://incus-host.example.test:8443"
+	cfg.Incus.ProxyListenPort = "2222"
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "proxy-only"})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if lease.SSH.Host != "incus-host.example.test" {
+		t.Fatalf("lease.SSH.Host=%q want incus-host.example.test", lease.SSH.Host)
+	}
+	if lease.Server.PublicNet.IPv4.IP != "incus-host.example.test" {
+		t.Fatalf("lease.Server.PublicNet.IPv4.IP=%q want incus-host.example.test", lease.Server.PublicNet.IPv4.IP)
+	}
+}
+
+func TestResolveStartsStoppedInstanceAndPersistsReadyLabels(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	oldWait := waitForSSHReady
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-retained": {
+				Name:       "crabbox-retained",
+				Status:     "Stopped",
+				StatusCode: api.Stopped,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_deadbeefcafe",
+					labelKey("slug"):    "retained-slug",
+					labelKey("state"):   "stopped",
+					labelKey("host"):    "192.0.2.10",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-retained": {Status: "Stopped", StatusCode: api.Stopped},
+		},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+		_ = ctx
+		_ = stderr
+		_ = phase
+		_ = timeout
+		if target.Host != "198.51.100.24" {
+			t.Fatalf("target.Host=%q want refreshed address", target.Host)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		newClient = oldNewClient
+		waitForSSHReady = oldWait
+	})
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, "cbx_deadbeefcafe"); err != nil {
+		t.Fatalf("EnsureTestboxKeyForConfig: %v", err)
+	}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_deadbeefcafe"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(fake.stateUpdates) == 0 || fake.stateUpdates[0] != "crabbox-retained:start" {
+		t.Fatalf("stateUpdates=%v want start", fake.stateUpdates)
+	}
+	if lease.SSH.Host != "198.51.100.24" {
+		t.Fatalf("lease.SSH.Host=%q want refreshed address", lease.SSH.Host)
+	}
+	if got := fake.instances["crabbox-retained"].Config[labelKey("host")]; got != "198.51.100.24" {
+		t.Fatalf("stored host=%q want refreshed address", got)
+	}
+	if got := fake.instances["crabbox-retained"].Config[labelKey("state")]; got != "ready" {
+		t.Fatalf("stored state=%q want ready", got)
+	}
+}
+
+func TestResolvePrefersLiveAddressOverStoredHost(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	oldWait := waitForSSHReady
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-running": {
+				Name:       "crabbox-running",
+				Status:     "Running",
+				StatusCode: api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_feedfaceb00c",
+					labelKey("slug"):    "running-slug",
+					labelKey("state"):   "ready",
+					labelKey("host"):    "192.0.2.10",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-running": {
+				Status:     "Running",
+				StatusCode: api.Running,
+				Network: map[string]api.InstanceStateNetwork{
+					"eth1": {Addresses: []api.InstanceStateNetworkAddress{{Family: "inet", Scope: "global", Address: "198.51.100.99"}}},
+					"eth0": {Addresses: []api.InstanceStateNetworkAddress{{Family: "inet", Scope: "global", Address: "198.51.100.24"}}},
+				},
+			},
+		},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+		_ = ctx
+		_ = stderr
+		_ = phase
+		_ = timeout
+		if target.Host != "198.51.100.24" {
+			t.Fatalf("target.Host=%q want deterministic live address", target.Host)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		newClient = oldNewClient
+		waitForSSHReady = oldWait
+	})
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, "cbx_feedfaceb00c"); err != nil {
+		t.Fatalf("EnsureTestboxKeyForConfig: %v", err)
+	}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_feedfaceb00c"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(fake.stateUpdates) != 0 {
+		t.Fatalf("stateUpdates=%v want no restart for running instance", fake.stateUpdates)
+	}
+	if lease.SSH.Host != "198.51.100.24" {
+		t.Fatalf("lease.SSH.Host=%q want deterministic live address", lease.SSH.Host)
+	}
+	if got := fake.instances["crabbox-running"].Config[labelKey("host")]; got != "198.51.100.24" {
+		t.Fatalf("stored host=%q want deterministic live address", got)
+	}
+}
+
+func TestResolveStatusOnlyUsesLiveStoppedState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-status": {
+				Name:       "crabbox-status",
+				Status:     "Running",
+				StatusCode: api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_0badf00dbeef",
+					labelKey("slug"):    "status-slug",
+					labelKey("state"):   "ready",
+					labelKey("host"):    "192.0.2.10",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-status": {Status: "Stopped", StatusCode: api.Stopped},
+		},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_0badf00dbeef", StatusOnly: true})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if lease.Server.Status != "stopped" {
+		t.Fatalf("server status=%q want stopped", lease.Server.Status)
+	}
+	if lease.Server.Labels["state"] != "stopped" {
+		t.Fatalf("label state=%q want stopped", lease.Server.Labels["state"])
+	}
+}
+
 func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -512,6 +805,9 @@ func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T
 	if err := core.ClaimLeaseForRepoProviderScopePond("cbx_retain123456", "retained-slug", providerName, "instance:crabbox-retained", "", t.TempDir(), cfg.IdleTimeout, false); err != nil {
 		t.Fatalf("ClaimLeaseForRepoProviderScopePond: %v", err)
 	}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_retain123456", core.Server{Labels: map[string]string{"state": "ready"}}, core.SSHTarget{Host: "198.51.100.24", Port: "22"}); err != nil {
+		t.Fatalf("UpdateLeaseClaimEndpoint: %v", err)
+	}
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	lease := core.LeaseTarget{LeaseID: "cbx_retain123456", Server: core.Server{Name: "crabbox-retained", CloudID: "crabbox-retained", Labels: map[string]string{"lease": "cbx_retain123456", "slug": "retained-slug"}}}
@@ -524,8 +820,45 @@ func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T
 	if len(fake.stateUpdates) == 0 || fake.stateUpdates[0] != "crabbox-retained:stop" {
 		t.Fatalf("stateUpdates=%v want stop", fake.stateUpdates)
 	}
+	if got := fake.instances["crabbox-retained"].Config[labelKey("state")]; got != "stopped" {
+		t.Fatalf("stored state=%q want stopped", got)
+	}
+	if got := fake.instances["crabbox-retained"].Config[labelKey("host")]; got != "" {
+		t.Fatalf("stored host=%q want cleared", got)
+	}
+	claim, err := core.ReadLeaseClaim("cbx_retain123456")
+	if err != nil {
+		t.Fatalf("ReadLeaseClaim: %v", err)
+	}
+	if claim.Labels["state"] != "stopped" {
+		t.Fatalf("claim state=%q want stopped", claim.Labels["state"])
+	}
+	if claim.SSHHost != "" || claim.SSHPort != 0 {
+		t.Fatalf("claim endpoint=%s:%d want cleared", claim.SSHHost, claim.SSHPort)
+	}
 	if _, err := core.TestboxKeyPath("cbx_retain123456"); err != nil {
 		t.Fatalf("expected retained lease key to remain available: %v", err)
+	}
+}
+
+func TestReleaseLeaseMessageReflectsDeleteAndRetainPaths(t *testing.T) {
+	lease := core.LeaseTarget{
+		LeaseID: "cbx_123456789abc",
+		Server:  core.Server{Name: "crabbox-retained", CloudID: "crabbox-retained"},
+	}
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.DeleteOnRelease = true
+	deleteBackend := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	if got := deleteBackend.ReleaseLeaseMessage(lease); got != "deleted lease=cbx_123456789abc instance=crabbox-retained" {
+		t.Fatalf("delete message=%q", got)
+	}
+
+	cfg.Incus.DeleteOnRelease = false
+	retainBackend := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	if got := retainBackend.ReleaseLeaseMessage(lease); got != "stopped lease=cbx_123456789abc instance=crabbox-retained retained=true" {
+		t.Fatalf("retain message=%q", got)
 	}
 }
 

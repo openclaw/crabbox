@@ -1,8 +1,9 @@
 package incus
 
 import (
-	"os"
 	"net/url"
+	"os"
+	"runtime"
 	"strings"
 
 	incusclient "github.com/lxc/incus/v7/client"
@@ -82,6 +83,15 @@ var newClient = func(cfg Config) (instanceClient, error) {
 	return &sdkClient{server: server}, nil
 }
 
+type doctorConnectionInfo struct {
+	Mode     string
+	Protocol string
+	Endpoint string
+	Project  string
+	Remote   string
+	Auth     string
+}
+
 func connectInstanceServer(cfg Config) (incusclient.InstanceServer, error) {
 	if socket := strings.TrimSpace(cfg.Incus.Socket); socket != "" {
 		server, err := incusclient.ConnectIncusUnix(socket, nil)
@@ -108,15 +118,55 @@ func connectInstanceServer(cfg Config) (incusclient.InstanceServer, error) {
 	if project := strings.TrimSpace(cfg.Incus.Project); project != "" {
 		clientConfig.ProjectOverride = project
 	}
-	remote := strings.TrimSpace(cfg.Incus.Remote)
-	if remote == "" {
-		remote = clientConfig.DefaultRemote
+	remote := configuredRemoteName(cfg, clientConfig)
+	if remoteConfig, ok := clientConfig.Remotes[remote]; ok && strings.HasPrefix(configuredRemoteAddr(remoteConfig), "unix:") && runtime.GOOS != "linux" {
+		return nil, core.Exit(2, "provider=%s: incus.remote, incus.address, or incus.socket not configured for a reachable Linux Incus daemon (remote %q resolves to local unix socket on %s)", providerName, remote, runtime.GOOS)
 	}
 	server, err := clientConfig.GetInstanceServer(remote)
 	if err != nil {
 		return nil, core.Exit(2, "connect incus remote %q: %v", remote, err)
 	}
 	return server, nil
+}
+
+func doctorConnectionInfoForConfig(cfg Config) (doctorConnectionInfo, error) {
+	info := doctorConnectionInfo{
+		Project: selectedProject(cfg, nil),
+	}
+	if socket := strings.TrimSpace(cfg.Incus.Socket); socket != "" {
+		info.Mode = "socket"
+		info.Protocol = "unix"
+		info.Endpoint = socket
+		info.Auth = "unix_socket"
+		return info, nil
+	}
+	if address := strings.TrimSpace(cfg.Incus.Address); address != "" {
+		auth, err := doctorAddressAuth(cfg)
+		if err != nil {
+			return doctorConnectionInfo{}, err
+		}
+		info.Mode = "address"
+		info.Protocol = "incus"
+		info.Endpoint = address
+		info.Auth = auth
+		return info, nil
+	}
+	clientConfig, err := cliconfig.LoadConfig("")
+	if err != nil {
+		return doctorConnectionInfo{}, core.Exit(2, "load incus client config: %v", err)
+	}
+	remoteName := configuredRemoteName(cfg, clientConfig)
+	remote, ok := clientConfig.Remotes[remoteName]
+	if !ok {
+		return doctorConnectionInfo{}, core.Exit(2, "connect incus remote %q: remote not found", remoteName)
+	}
+	info.Mode = "remote"
+	info.Protocol = core.Blank(strings.TrimSpace(remote.Protocol), "incus")
+	info.Endpoint = configuredRemoteAddr(remote)
+	info.Project = selectedProject(cfg, &remote)
+	info.Remote = remoteName
+	info.Auth = remoteAuthType(remote)
+	return info, nil
 }
 
 func connectionArgsForAddress(cfg Config) (*incusclient.ConnectionArgs, error) {
@@ -134,10 +184,7 @@ func connectionArgsForAddress(cfg Config) (*incusclient.ConnectionArgs, error) {
 	if err != nil {
 		return nil, core.Exit(2, "load incus client config for TLS credentials: %v", err)
 	}
-	remote := strings.TrimSpace(cfg.Incus.Remote)
-	if remote == "" {
-		remote = clientConfig.DefaultRemote
-	}
+	remote := configuredRemoteName(cfg, clientConfig)
 	if remote != "" {
 		cert, key, ca, certErr := clientConfig.GetClientCertificate(remote)
 		if certErr == nil {
@@ -150,6 +197,62 @@ func connectionArgsForAddress(cfg Config) (*incusclient.ConnectionArgs, error) {
 		return nil, core.Exit(2, "provider=%s address mode requires Incus TLS trust material or --incus-insecure-tls", providerName)
 	}
 	return args, nil
+}
+
+func doctorAddressAuth(cfg Config) (string, error) {
+	args, err := connectionArgsForAddress(cfg)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case args.InsecureSkipVerify:
+		return "insecure_tls", nil
+	case strings.TrimSpace(args.TLSClientCert) != "":
+		return "tls_client_cert", nil
+	case strings.TrimSpace(args.TLSServerCert) != "":
+		return "tls_server_cert", nil
+	default:
+		return "configured", nil
+	}
+}
+
+func configuredRemoteName(cfg Config, clientConfig *cliconfig.Config) string {
+	remote := strings.TrimSpace(cfg.Incus.Remote)
+	if remote == "" && clientConfig != nil {
+		remote = strings.TrimSpace(clientConfig.DefaultRemote)
+	}
+	return remote
+}
+
+func configuredRemoteAddr(remote cliconfig.Remote) string {
+	addr := strings.TrimSpace(remote.LastWorkingAddr)
+	if addr == "" && len(remote.Addrs) > 0 {
+		addr = strings.TrimSpace(remote.Addrs[0])
+	}
+	return addr
+}
+
+func selectedProject(cfg Config, remote *cliconfig.Remote) string {
+	if project := strings.TrimSpace(cfg.Incus.Project); project != "" {
+		return project
+	}
+	if remote != nil {
+		if project := strings.TrimSpace(remote.Project); project != "" {
+			return project
+		}
+	}
+	return "default"
+}
+
+func remoteAuthType(remote cliconfig.Remote) string {
+	switch {
+	case remote.Public:
+		return "public"
+	case strings.TrimSpace(remote.AuthType) != "":
+		return strings.TrimSpace(remote.AuthType)
+	default:
+		return "tls"
+	}
 }
 
 func useProject(server incusclient.InstanceServer, project string) incusclient.InstanceServer {
@@ -244,18 +347,12 @@ func sshHostForConfig(cfg Config) string {
 	if err != nil {
 		return ""
 	}
-	remoteName := strings.TrimSpace(cfg.Incus.Remote)
-	if remoteName == "" {
-		remoteName = clientConfig.DefaultRemote
-	}
+	remoteName := configuredRemoteName(cfg, clientConfig)
 	remote, ok := clientConfig.Remotes[remoteName]
 	if !ok {
 		return ""
 	}
-	addr := strings.TrimSpace(remote.LastWorkingAddr)
-	if addr == "" && len(remote.Addrs) > 0 {
-		addr = strings.TrimSpace(remote.Addrs[0])
-	}
+	addr := configuredRemoteAddr(remote)
 	if addr == "" {
 		return ""
 	}

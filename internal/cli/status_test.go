@@ -29,3 +29,17 @@ func TestStatusWaitTerminalErrorFailsNonReadyTerminalState(t *testing.T) {
 		t.Fatalf("non-terminal state returned error: %v", err)
 	}
 }
+
+func TestLeaseStatusStateCanBeReadyRejectsTerminalStates(t *testing.T) {
+	for _, state := range []string{"stopped", "released", "terminated"} {
+		if leaseStatusStateCanBeReady(LeaseTarget{}, state) {
+			t.Fatalf("leaseStatusStateCanBeReady(%q) = true, want false", state)
+		}
+	}
+	if leaseStatusStateCanBeReady(LeaseTarget{}, "provisioning") {
+		t.Fatal("leaseStatusStateCanBeReady(provisioning) = true, want false")
+	}
+	if !leaseStatusStateCanBeReady(LeaseTarget{}, "ready") {
+		t.Fatal("leaseStatusStateCanBeReady(ready) = false, want true")
+	}
+}

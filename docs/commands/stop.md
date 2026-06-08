@@ -56,9 +56,13 @@ The action `stop` takes depends on how the lease was created:
   configured broker) — releases the lease through the broker and prints
   `released lease=<id> server=<id>`. If the lease cannot be inspected first,
   `stop` warns and still attempts the release by ID.
-- **Direct cloud and local providers** — delete the backing server and print
-  `deleted lease=<id> server=<id> name=<name>` (some providers print a
-  provider-specific release message instead).
+- **Direct cloud and local providers** — usually delete the backing server and
+  print `deleted lease=<id> server=<id> name=<name>`, but retain-capable
+  providers such as `namespace-devbox`, `kubevirt`, and `incus` stop instead
+  when their `*.deleteOnRelease` setting is `false` (some providers print a
+  provider-specific release message instead, for example
+  `stopped lease=<id> instance=<name> retained=true` for retained Incus
+  instances).
 - **Delegated runners** — call the provider's own teardown for the resolved
   sandbox.
 

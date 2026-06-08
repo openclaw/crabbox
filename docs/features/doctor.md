@@ -125,6 +125,12 @@ provider timeout. Examples:
 Direct checks carry stable detail fields such as `timeout`, `api`, and
 `mutation` so scripts can tell what was probed.
 
+Direct Incus doctor follows this model: it resolves the selected
+socket/address/remote path through the official Go client, reports
+`mode`, `endpoint`, `project`, and `auth`, then performs a read-only list so
+operators can distinguish config/auth drift from guest reachability issues
+before running a live smoke.
+
 **No direct doctor.** Providers without a `DoctorProvider` implementation print
 `skip provider provider=<name> direct_doctor=unsupported`.
 
@@ -244,6 +250,11 @@ Rules for new checks:
 
 Add focused tests for new helpers or response parsing so future refactors do not
 silently regress the user-facing output.
+
+`scripts/live-doctor-smoke.sh` stays conservative by default. Local-only
+providers such as Incus participate only when explicitly selected (for example
+`CRABBOX_LIVE_DOCTOR_PROVIDERS=incus`) so machines without that local testbed do
+not fail the shared smoke matrix.
 
 Related docs:
 

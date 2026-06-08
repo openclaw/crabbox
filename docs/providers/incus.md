@@ -5,8 +5,8 @@ Read when you:
 - want a built-in local or self-hosted Linux SSH-lease provider backed by Incus;
 - need the `incus:` config keys, `CRABBOX_INCUS_*` env overrides, or `--incus-*`
   flags;
-- are validating the split between deterministic provider checks and the separate
-  Apple Silicon local E2E testbed contract.
+- are validating the deterministic doctor contract or the opt-in Apple Silicon /
+  local live smoke path.
 
 `provider: incus` is a direct `ssh-lease` backend. Crabbox talks to Incus
 through the official Go client, creates a Crabbox-managed instance, waits for a
@@ -41,6 +41,25 @@ Crabbox connects to Incus in this order:
 Named remote resolution uses the official Incus client config loader, so the
 provider can reuse `incus remote add ...`, project defaults, and local TLS
 material instead of shelling out to the `incus` CLI.
+
+## Doctor contract
+
+`crabbox doctor --provider incus` is read-only. It resolves the same
+socket/address/remote selection order as the provider, runs a cheap inventory
+list, and reports the selected connection context in the provider line:
+
+- `mode=socket|address|remote`
+- `control_plane=local|remote`
+- `endpoint=<socket-or-address>`
+- `project=<incus-project>`
+- `auth=unix_socket|tls_client_cert|tls_server_cert|insecure_tls|tls|oidc|public`
+- `remote=<name>` when named-remote mode is active
+
+The check stays non-mutating (`api=list mutation=false`). On a configured
+machine it should return `ok provider ... runtime=go_client ...`; on an
+unconfigured or broken machine it should fail with the normal doctor
+`class=config|auth|network|provider` contract instead of creating or changing
+Incus resources.
 
 ## Config
 
@@ -176,8 +195,8 @@ extra Incus-side service.
 On release:
 
 - default behavior deletes the instance;
-- if `incus.deleteOnRelease: false`, Crabbox stops the instance unless the stop
-  path is forced.
+- if `incus.deleteOnRelease: false`, Crabbox stops the instance and keeps the
+  retained lease reusable through later `--id` resolves.
 
 ## Examples
 
@@ -208,33 +227,49 @@ crabbox warmup \
 
 ## Deterministic verification
 
-Implementation-complete checks for this provider are deterministic and do not
-require a live Incus daemon:
+Implementation-complete checks for this provider are mostly deterministic; the
+final doctor probe stays read-only and validates the configured control-plane
+contract:
 
 ```sh
-go test -count=1 ./internal/cli ./internal/providers/...
+go test -count=1 ./internal/providers/incus ./internal/cli
 go test -count=1 ./...
 go vet ./...
+go build -trimpath -o bin/crabbox ./cmd/crabbox
 scripts/check-docs.sh
+go run ./cmd/crabbox doctor --provider incus --json
 ```
 
 These prove the built-in provider registration, typed config surface,
-fake-backed lifecycle behavior, and docs/catalog consistency.
+fake-backed lifecycle behavior, the hardened read-only doctor contract, and
+docs/catalog consistency. The doctor command should either emit explicit
+connection metadata or fail with the documented config/auth contract without
+mutating any Incus state.
 
-## Real local E2E
+## Opt-in live smoke
 
-Real Apple Silicon local smoke is a separate validation tier, not part of the
-deterministic provider gate. Use the preserved local testbed contract:
+The live Incus path stays opt-in because most maintainer machines do not have a
+reachable local daemon and guest route by default. The documented contract is:
 
-- preferred host route: Tart plus
-  `~/Desktop/xcp/ISOs-ARM/ubuntu-26.04-desktop-arm64.iso`
-- first acceptable proof: container-backed Incus guest reached from the Mac over
-  SSH
-- `scripts/live-smoke.sh` remains unchanged until that path is repeatable enough
-  to maintain
+- `crabbox doctor --provider incus` must pass first
+- Crabbox config or env must resolve one of `incus.socket`, `incus.address`, or
+  `incus.remote`
+- the Mac must reach the Incus-managed guest either directly over the bridge or
+  through an Incus-published SSH path such as `incus.proxyListenPort`
+- `CRABBOX_LIVE_REPO` must point at the repo you want the smoke to sync and run
 
-Treat local Incus smoke as complete only when the Mac reaches both the Incus
-daemon and an Incus-managed guest over SSH.
+The default live-smoke matrix still skips Incus. Opt in explicitly:
+
+```sh
+go build -trimpath -o bin/crabbox ./cmd/crabbox
+CRABBOX_BIN=bin/crabbox CRABBOX_LIVE_DOCTOR_PROVIDERS=incus scripts/live-doctor-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_BIN=bin/crabbox CRABBOX_LIVE_PROVIDERS=incus CRABBOX_LIVE_REPO=$PWD scripts/live-smoke.sh
+```
+
+The doctor smoke only proves daemon/control-plane readiness. The full live
+smoke proves `warmup`, `status --wait`, `run`, `list`, `stop`, and one retained
+reuse cycle from the Mac, then forces a final delete so repeat runs do not
+strand test instances.
 
 ## Limits
 
@@ -248,9 +283,15 @@ daemon and an Incus-managed guest over SSH.
 - `unknown provider "incus"`: the binary was built without the built-in provider
   registry import or from an older checkout
 - `provider=incus supports target=linux only`: remove a non-Linux target override
+- `provider=incus: incus.remote, incus.address, or incus.socket not configured ...`:
+  the default `local` Unix-socket remote is Linux-only; on macOS point Crabbox
+  at a reachable Linux Incus daemon instead of the local remote stub
 - `provider=incus address mode requires Incus TLS trust material or --incus-insecure-tls`:
   explicit HTTPS address mode needs trusted TLS material unless you intentionally
   opt into insecure TLS
+- `crabbox doctor --provider incus` now prints `mode`, `endpoint`, `project`,
+  and `auth`; use those fields to confirm Crabbox picked the intended socket,
+  explicit address, or named remote before blaming the live smoke path
 - timeout waiting for an Incus address: the guest started, but Crabbox could not
   derive a host-reachable address from runtime state or proxy-device settings
 - SSH bootstrap timeout: the instance is up, but the published SSH path is still
