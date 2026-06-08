@@ -147,12 +147,6 @@ func TestTenkiResolveReadyProbePreparesSSH(t *testing.T) {
 	if err := os.WriteFile(certPath, []byte("cert"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	oldWait := waitForSSHReadyFunc
-	waitForSSHReadyFunc = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
-		return nil
-	}
-	defer func() { waitForSSHReadyFunc = oldWait }()
-
 	runner := &fakeRunner{}
 	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
@@ -180,6 +174,35 @@ func TestTenkiResolveReadyProbePreparesSSH(t *testing.T) {
 	}
 	if len(runner.calls) != 2 {
 		t.Fatalf("calls=%d want 2", len(runner.calls))
+	}
+}
+
+func TestTenkiResolveReadyProbeDoesNotResumePausedSession(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		runner.calls = append(runner.calls, req)
+		switch strings.Join(req.Args, " ") {
+		case "sandbox list --output json --tags crabbox,crabbox-provider-tenki":
+			return LocalCommandResult{Stdout: `[{"id":"session-1","name":"crabbox-blue","state":"PAUSED","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}]`}, nil
+		default:
+			t.Fatalf("paused readiness probe mutated session: %s %s", req.Name, strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_123", StatusOnly: true, ReadyProbe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Status != "paused" || lease.SSH.Host != "" {
+		t.Fatalf("unexpected paused readiness probe lease: %#v", lease)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%d want 1", len(runner.calls))
 	}
 }
 
