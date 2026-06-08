@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -42,30 +43,38 @@ func (a App) status(ctx context.Context, args []string) error {
 	})
 	delegated, isDelegated := backend.(DelegatedRunBackend)
 	sshBackend, isSSH := backend.(SSHLeaseBackend)
-	deadline := time.Now().Add(*waitTimeout)
+	statusCtx := ctx
+	cancel := func() {}
+	if *wait {
+		statusCtx, cancel = context.WithTimeout(ctx, *waitTimeout)
+	}
+	defer cancel()
 	for {
 		var state statusView
 		var err error
 		if isStatus {
-			state, err = statusBackend.Status(ctx, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, Wait: *wait, WaitTimeout: *waitTimeout})
+			state, err = statusBackend.Status(statusCtx, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, Wait: *wait, WaitTimeout: *waitTimeout})
 		} else if isDelegated {
-			state, err = delegated.Status(ctx, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, Wait: *wait, WaitTimeout: *waitTimeout})
+			state, err = delegated.Status(statusCtx, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, Wait: *wait, WaitTimeout: *waitTimeout})
 		} else if isSSH {
 			var lease LeaseTarget
-			lease, err = sshBackend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, StatusOnly: true})
+			lease, err = sshBackend.Resolve(statusCtx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, StatusOnly: true, ReadyProbe: *wait})
 			if err == nil {
-				state, err = statusViewFromLeaseTarget(ctx, cfg, lease)
+				state, err = statusViewFromLeaseTarget(statusCtx, cfg, lease)
 				if err == nil && *wait {
-					_, touchErr := sshBackend.Touch(ctx, TouchRequest{Lease: lease, State: state.State, IdleTimeout: cfg.IdleTimeout})
+					_, touchErr := sshBackend.Touch(statusCtx, TouchRequest{Lease: lease, State: state.State, IdleTimeout: cfg.IdleTimeout})
 					if touchErr != nil {
 						fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", lease.LeaseID, touchErr)
 					}
 				}
 			}
 		} else {
-			state, err = a.leaseStatus(ctx, cfg, *id)
+			state, err = a.leaseStatus(statusCtx, cfg, *id)
 		}
 		if err != nil {
+			if *wait && errors.Is(statusCtx.Err(), context.DeadlineExceeded) {
+				return exit(5, "timed out waiting for %s to become ready", *id)
+			}
 			return err
 		}
 		if *jsonOut {
@@ -97,10 +106,14 @@ func (a App) status(ctx context.Context, args []string) error {
 		if !*wait || statusWaitDone(state) {
 			return nil
 		}
-		if time.Now().After(deadline) {
-			return exit(5, "timed out waiting for %s to become ready", *id)
+		select {
+		case <-statusCtx.Done():
+			if errors.Is(statusCtx.Err(), context.DeadlineExceeded) {
+				return exit(5, "timed out waiting for %s to become ready", *id)
+			}
+			return statusCtx.Err()
+		case <-time.After(5 * time.Second):
 		}
-		time.Sleep(5 * time.Second)
 	}
 }
 
