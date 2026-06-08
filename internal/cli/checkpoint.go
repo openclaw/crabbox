@@ -76,51 +76,6 @@ type checkpointRecord struct {
 	} `json:"repo"`
 }
 
-func (a App) checkpoint(ctx context.Context, args []string) error {
-	if len(args) == 0 || isHelpArg(args[0]) {
-		a.printCheckpointHelp()
-		if len(args) == 0 {
-			return exit(2, "missing checkpoint command")
-		}
-		return nil
-	}
-	switch args[0] {
-	case "create":
-		return a.checkpointCreate(ctx, args[1:])
-	case "list":
-		return a.checkpointList(ctx, args[1:])
-	case "inspect":
-		return a.checkpointInspect(ctx, args[1:])
-	case "restore":
-		return a.checkpointRestore(ctx, args[1:])
-	case "fork":
-		return a.checkpointFork(ctx, args[1:])
-	case "delete":
-		return a.checkpointDelete(ctx, args[1:])
-	case "prune":
-		return a.checkpointPrune(ctx, args[1:])
-	default:
-		return exit(2, "unknown checkpoint command %q", args[0])
-	}
-}
-
-func (a App) printCheckpointHelp() {
-	fmt.Fprintln(a.Stdout, `Usage:
-  crabbox checkpoint create --id <lease-id-or-slug> [--name <name>] [--mode auto|native|archive] [--strategy auto|disk-snapshot|image]
-  crabbox checkpoint list [--json]
-  crabbox checkpoint list --provider parallels --id <vm-name-or-id> [--json]
-  crabbox checkpoint inspect <checkpoint-id> [--json]
-  crabbox checkpoint restore <checkpoint-id> --id <lease-id-or-slug> [--clear=false]
-  crabbox checkpoint restore --provider parallels --id <vm-name-or-id> --snapshot <name-or-id>
-  crabbox checkpoint fork <checkpoint-id> [--class <class>] [--keep]
-  crabbox checkpoint fork --provider parallels --id <vm-name-or-id> --snapshot <name-or-id> [--slug <slug>]
-  crabbox checkpoint delete <checkpoint-id>
-  crabbox checkpoint delete --provider parallels --id <vm-name-or-id> --snapshot <name-or-id>
-  crabbox checkpoint prune --older-than <duration> [--kind native|archive] [--dry-run]
-
-Checkpoints use provider-native disk snapshots for brokered AWS Linux/macOS leases and Azure/GCP Linux leases, and portable workspace archives elsewhere.`)
-}
-
 func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	defaults := defaultConfig()
 	fs := newFlagSet("checkpoint create", a.Stderr)

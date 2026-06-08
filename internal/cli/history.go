@@ -261,23 +261,6 @@ func tailLogLines(text string, n int) string {
 	return strings.Join(lines[len(lines)-n:], "")
 }
 
-func filterRunEvents(events []CoordinatorRunEvent, eventType, phase string) []CoordinatorRunEvent {
-	if eventType == "" && phase == "" {
-		return events
-	}
-	filtered := events[:0]
-	for _, event := range events {
-		if eventType != "" && event.Type != eventType {
-			continue
-		}
-		if phase != "" && event.Phase != phase {
-			continue
-		}
-		filtered = append(filtered, event)
-	}
-	return filtered
-}
-
 func fetchFilteredRunEvents(ctx context.Context, coord *CoordinatorClient, runID string, after, limit int, eventType, phase string) ([]CoordinatorRunEvent, error) {
 	if eventType == "" && phase == "" {
 		return coord.RunEvents(ctx, runID, after, limit)

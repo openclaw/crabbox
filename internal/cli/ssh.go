@@ -916,10 +916,6 @@ func isShellEnvAssignment(word string) bool {
 	return true
 }
 
-func IsShellEnvAssignment(word string) bool {
-	return isShellEnvAssignment(word)
-}
-
 func isShellControlOperator(word string) bool {
 	switch word {
 	case "&&", "||", ";", "|", ">", ">>", "<", "2>", "2>>":
@@ -990,17 +986,6 @@ func remoteResetWorkdir(workdir string) string {
 	return "bash -lc " + shellQuote(script)
 }
 
-func remoteGitHydrate(workdir, baseRef string) string {
-	if baseRef == "" {
-		return "true"
-	}
-	refspec := "+refs/heads/" + baseRef + ":refs/remotes/origin/" + baseRef
-	return "cd " + shellQuote(workdir) + " && " +
-		"if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git remote get-url origin >/dev/null 2>&1; then " +
-		"git fetch --quiet --unshallow origin " + shellQuote(refspec) + " || git fetch --quiet --depth=1000 origin " + shellQuote(refspec) + " || git fetch --quiet origin " + shellQuote(refspec) + " || git fetch --quiet origin " + shellQuote(baseRef) + " || true; " +
-		"fi"
-}
-
 func remoteGitHydrateStatus(workdir, baseRef, expectedSHA string) string {
 	if baseRef == "" || expectedSHA == "" {
 		return "printf ''"
@@ -1022,14 +1007,6 @@ fi
 if [ -n "$remote_sha" ] && git merge-base --is-ancestor ` + shellQuote(expectedSHA) + ` "$remote_sha" >/dev/null 2>&1; then
   printf 'remote base contains local'
 fi`
-	return "bash -lc " + shellQuote(script)
-}
-
-func remoteWriteGitHydrateMarker(workdir, baseRef, expectedSHA string) string {
-	if baseRef == "" || expectedSHA == "" {
-		return "true"
-	}
-	script := "cd " + shellQuote(workdir) + " && " + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\" && printf %s " + shellQuote(baseRef+" "+expectedSHA+"\n") + " > \"$meta_dir/git-hydrate-base\""
 	return "bash -lc " + shellQuote(script)
 }
 
@@ -1059,11 +1036,6 @@ func normalizeGitRemoteURL(remoteURL string) string {
 
 func remoteReadSyncFingerprint(workdir string) string {
 	script := "cd " + shellQuote(workdir) + " && " + remoteSyncMetaDirScript() + "cat \"$meta_dir/sync-fingerprint\" 2>/dev/null || true"
-	return "bash -lc " + shellQuote(script)
-}
-
-func remoteWriteSyncFingerprint(workdir, fingerprint string) string {
-	script := "cd " + shellQuote(workdir) + " && " + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\" && printf %s " + shellQuote(fingerprint) + " > \"$meta_dir/sync-fingerprint\""
 	return "bash -lc " + shellQuote(script)
 }
 

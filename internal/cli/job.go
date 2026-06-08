@@ -11,20 +11,6 @@ import (
 	"time"
 )
 
-func (a App) job(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return a.jobList(ctx, nil)
-	}
-	switch args[0] {
-	case "list", "ls":
-		return a.jobList(ctx, args[1:])
-	case "run":
-		return a.jobRun(ctx, args[1:])
-	default:
-		return exit(2, "unknown job subcommand %q", args[0])
-	}
-}
-
 func (a App) jobList(_ context.Context, args []string) error {
 	fs := newFlagSet("job list", a.Stderr)
 	if err := parseFlags(fs, args); err != nil {

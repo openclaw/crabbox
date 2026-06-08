@@ -793,14 +793,6 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	return nil
 }
 
-func rejectDelegatedSyncOptions(provider string, req RunRequest) error {
-	return rejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: provider}, req)
-}
-
-func RejectDelegatedSyncOptions(provider string, req RunRequest) error {
-	return rejectDelegatedSyncOptions(provider, req)
-}
-
 func RejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {
 	return rejectDelegatedSyncOptionsForSpec(spec, req)
 }

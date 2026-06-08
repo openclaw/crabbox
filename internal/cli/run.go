@@ -2720,8 +2720,3 @@ func validCrabboxProviderKey(name string) bool {
 	}
 	return true
 }
-
-func repoExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}

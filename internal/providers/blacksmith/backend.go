@@ -832,24 +832,12 @@ func blacksmithWaitTimeoutMessage(identifier, state string) string {
 
 type statusView = core.StatusView
 
-func rejectDelegatedSyncOptions(provider string, req RunRequest) error {
-	return core.RejectDelegatedSyncOptions(provider, req)
-}
-
 func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
 }
 
 func newLeaseID() string {
 	return core.NewLeaseID()
-}
-
-func newLeaseSlug(leaseID string) string {
-	return core.NewLeaseSlug(leaseID)
-}
-
-func normalizeLeaseSlug(value string) string {
-	return core.NormalizeLeaseSlug(value)
 }
 
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {

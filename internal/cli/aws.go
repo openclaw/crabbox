@@ -963,10 +963,6 @@ func awsInstanceToServer(instance types.Instance) Server {
 	return server
 }
 
-func awsString(value *string) string {
-	return aws.ToString(value)
-}
-
 func awsTags(labels map[string]string) []types.Tag {
 	tags := make([]types.Tag, 0, len(labels))
 	for key, value := range labels {

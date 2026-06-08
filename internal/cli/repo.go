@@ -147,10 +147,6 @@ func allowedEnv(allow []string) map[string]string {
 	return out
 }
 
-func AllowedEnv(allow []string) map[string]string {
-	return allowedEnv(allow)
-}
-
 func envAllowed(name string, allow []string) bool {
 	for _, pattern := range allow {
 		pattern = strings.TrimSpace(pattern)
@@ -201,18 +197,6 @@ func defaultBaseRef(root string) string {
 		return branch
 	}
 	return ""
-}
-
-func syncFingerprint(repo Repo, cfg Config) (string, error) {
-	excludes, err := syncExcludes(repo.Root, cfg)
-	if err != nil {
-		return "", err
-	}
-	manifest, err := syncManifestFiltered(repo.Root, excludes, syncIncludes(cfg))
-	if err != nil {
-		return "", err
-	}
-	return syncFingerprintForManifest(repo, cfg, manifest, excludes)
 }
 
 func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, excludes []string) (string, error) {
@@ -304,10 +288,6 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 	}
 	manifest.Changed, manifest.ChangedBytes = changedPathSetBytes(root, changed)
 	return manifest, nil
-}
-
-func BuildSyncManifest(root string, excludes []string) (SyncManifest, error) {
-	return syncManifest(root, excludes)
 }
 
 func BuildSyncManifestFiltered(root string, excludes, includes []string) (SyncManifest, error) {

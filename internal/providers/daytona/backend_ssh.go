@@ -465,13 +465,3 @@ func daytonaSSHAccessMinutes(cfg Config) int {
 	}
 	return 30
 }
-
-func redactedSSHUser(cfg Config, server Server, target SSHTarget) string {
-	if target.AuthSecret {
-		return daytonaTokenRedacted
-	}
-	if cfg.Provider == daytonaProvider || server.Provider == daytonaProvider {
-		return daytonaTokenRedacted
-	}
-	return target.User
-}

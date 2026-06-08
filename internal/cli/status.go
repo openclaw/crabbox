@@ -283,11 +283,3 @@ func formatSecondsDuration(seconds int) string {
 	}
 	return (time.Duration(seconds) * time.Second).String()
 }
-
-func formatSecondsDurationString(value string) string {
-	duration, ok := parseDurationSecondsLabel(value)
-	if !ok {
-		return ""
-	}
-	return duration.String()
-}

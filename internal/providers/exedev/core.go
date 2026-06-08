@@ -88,10 +88,6 @@ func touchDirectLeaseLabels(labels map[string]string, cfg Config, state string, 
 	return core.TouchDirectLeaseLabels(labels, cfg, state, now)
 }
 
-func serverSlug(server Server) string {
-	return core.ServerSlug(server)
-}
-
 func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
 }
