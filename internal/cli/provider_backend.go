@@ -346,6 +346,7 @@ type ResolveRequest struct {
 	Reclaim     bool
 	ReleaseOnly bool
 	StatusOnly  bool
+	ReadyProbe  bool
 }
 
 type ReleaseLeaseRequest struct {

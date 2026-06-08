@@ -171,7 +171,7 @@ func (b *tenkiBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	if req.ReleaseOnly || req.StatusOnly {
+	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
 		return LeaseTarget{Server: b.sessionToServer(cfg, session, leaseID, slug, session.Sticky), LeaseID: leaseID}, nil
 	}
 	lease, err := b.prepareLease(ctx, cfg, session, leaseID, slug, true, true)

@@ -137,6 +137,52 @@ func TestTenkiResolveStatusOnlyDoesNotPrepareSSH(t *testing.T) {
 	}
 }
 
+func TestTenkiResolveReadyProbePreparesSSH(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "id_ed25519")
+	certPath := filepath.Join(dir, "id_ed25519-cert.pub")
+	if err := os.WriteFile(keyPath, []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certPath, []byte("cert"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldWait := waitForSSHReadyFunc
+	waitForSSHReadyFunc = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return nil
+	}
+	defer func() { waitForSSHReadyFunc = oldWait }()
+
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		runner.calls = append(runner.calls, req)
+		switch strings.Join(req.Args, " ") {
+		case "sandbox list --output json --tags crabbox,crabbox-provider-tenki":
+			return LocalCommandResult{Stdout: `[{"id":"session-1","name":"crabbox-blue","state":"RUNNING","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}]`}, nil
+		case "sandbox ssh-command --output json --session session-1 --user tenki --batch-mode --connect-timeout 10s":
+			return LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","proxy_command":"tenki sandbox ssh-proxy --session session-1"}`}, nil
+		default:
+			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_123", StatusOnly: true, ReadyProbe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.Host != "sandbox" || lease.SSH.Key != keyPath {
+		t.Fatalf("ready probe did not prepare SSH target: %#v", lease.SSH)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls=%d want 2", len(runner.calls))
+	}
+}
+
 func TestTenkiResolveClaimUsesStoredSessionID(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "tenki_session-1"

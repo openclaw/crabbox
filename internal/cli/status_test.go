@@ -36,7 +36,7 @@ func TestStatusWaitTerminalErrorFailsNonReadyTerminalState(t *testing.T) {
 	}
 }
 
-func TestStatusWaitUsesFullSSHResolve(t *testing.T) {
+func TestStatusWaitRequestsReadyProbe(t *testing.T) {
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
 	t.Setenv("CRABBOX_COORDINATOR", "")
 	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
@@ -54,6 +54,9 @@ func TestStatusWaitUsesFullSSHResolve(t *testing.T) {
 	if !backend.requests[0].StatusOnly {
 		t.Fatal("plain status should use status-only resolve")
 	}
+	if backend.requests[0].ReadyProbe {
+		t.Fatal("plain status should not request a readiness probe")
+	}
 
 	backend.requests = nil
 	err := app.status(context.Background(), []string{"--provider", "aws", "--id", "cbx_status", "--wait", "--wait-timeout", "1ns"})
@@ -64,8 +67,11 @@ func TestStatusWaitUsesFullSSHResolve(t *testing.T) {
 	if len(backend.requests) != 1 {
 		t.Fatalf("resolve calls=%d want 1", len(backend.requests))
 	}
-	if backend.requests[0].StatusOnly {
-		t.Fatal("status --wait should use full resolve so providers can return SSH readiness data")
+	if !backend.requests[0].StatusOnly {
+		t.Fatal("status --wait should still use status-only resolve")
+	}
+	if !backend.requests[0].ReadyProbe {
+		t.Fatal("status --wait should request SSH readiness data")
 	}
 }
 

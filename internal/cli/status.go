@@ -52,7 +52,7 @@ func (a App) status(ctx context.Context, args []string) error {
 			state, err = delegated.Status(ctx, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, Wait: *wait, WaitTimeout: *waitTimeout})
 		} else if isSSH {
 			var lease LeaseTarget
-			lease, err = sshBackend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, StatusOnly: !*wait})
+			lease, err = sshBackend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, StatusOnly: true, ReadyProbe: *wait})
 			if err == nil {
 				state, err = statusViewFromLeaseTarget(ctx, cfg, lease)
 				if err == nil && *wait {
