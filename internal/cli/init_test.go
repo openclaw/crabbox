@@ -194,7 +194,7 @@ func TestSubcommandHelpExitsZero(t *testing.T) {
 }
 
 func TestPassthroughCommandHelpExitsBeforeExecution(t *testing.T) {
-	for _, command := range []string{"warmup", "run", "status", "ssh", "vnc", "webvnc", "screenshot", "inspect", "stop"} {
+	for _, command := range []string{"warmup", "run", "status", "ssh", "ports", "cp", "vnc", "webvnc", "screenshot", "inspect", "stop"} {
 		t.Run(command, func(t *testing.T) {
 			var stderr bytes.Buffer
 			app := App{Stdout: &bytes.Buffer{}, Stderr: &stderr}

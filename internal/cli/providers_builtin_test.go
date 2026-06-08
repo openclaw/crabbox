@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
+	"math"
 )
 
 func init() {
@@ -25,6 +27,7 @@ func init() {
 	RegisterProvider(testCloudflareProvider{})
 	RegisterProvider(testSpritesProvider{})
 	RegisterProvider(testLocalContainerProvider{})
+	RegisterProvider(testDockerSandboxProvider{})
 	RegisterProvider(testMultipassProvider{})
 	RegisterProvider(testParallelsProvider{})
 	RegisterProvider(testWandbProvider{})
@@ -1201,8 +1204,46 @@ func (p testMultipassProvider) Configure(cfg Config, rt Runtime) (Backend, error
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
+type testDockerSandboxProvider struct{}
+
+func (testDockerSandboxProvider) Name() string      { return "docker-sandbox" }
+func (testDockerSandboxProvider) Aliases() []string { return nil }
+func (testDockerSandboxProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "docker-sandbox",
+		Family:      "docker-sandbox",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureRunSession},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testDockerSandboxProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return struct{ CPUs *float64 }{CPUs: fs.Float64("docker-sandbox-cpus", defaults.DockerSandbox.CPUs, "")}
+}
+func (testDockerSandboxProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	if v, ok := values.(struct{ CPUs *float64 }); ok && flagWasSet(fs, "docker-sandbox-cpus") && v.CPUs != nil {
+		cfg.DockerSandbox.CPUs = *v.CPUs
+	}
+	return testDockerSandboxProvider{}.ValidateConfig(*cfg)
+}
+func (testDockerSandboxProvider) ValidateConfig(cfg Config) error {
+	if cfg.DockerSandbox.CPUs != math.Trunc(cfg.DockerSandbox.CPUs) {
+		return exit(2, "docker-sandbox cpus must be a whole number")
+	}
+	return nil
+}
+func (p testDockerSandboxProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	if err := p.ValidateConfig(cfg); err != nil {
+		return nil, err
+	}
+	return testDelegatedBackend{spec: p.Spec(), portsOutput: "127.0.0.1:41000->3000/tcp\n", copyErr: nil}, nil
+}
+
 type testDelegatedBackend struct {
-	spec ProviderSpec
+	spec        ProviderSpec
+	portsOutput string
+	copyErr     error
 }
 
 func (b testDelegatedBackend) Spec() ProviderSpec { return b.spec }
@@ -1226,6 +1267,20 @@ func (b testDelegatedBackend) Status(context.Context, StatusRequest) (StatusView
 }
 func (b testDelegatedBackend) Stop(context.Context, StopRequest) error {
 	return nil
+}
+func (b testDelegatedBackend) Ports(_ context.Context, req PortsRequest) (string, error) {
+	if req.JSON {
+		payload := []map[string]string{{"mapping": "127.0.0.1:41000->3000/tcp"}}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+	return b.portsOutput, nil
+}
+func (b testDelegatedBackend) Copy(context.Context, CopyRequest) error {
+	return b.copyErr
 }
 
 type testDoctorDelegatedBackend struct {

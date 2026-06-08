@@ -154,9 +154,9 @@ Expected results:
   delegated guards reject `--sync-only` and `--force-sync-large`, along with
   `--full-resync`, `--script`/`--script-stdin`, `--fresh-pr`, `--env-helper`,
   local stdout/stderr captures (`--capture-stdout`, `--capture-stderr`,
-  `--capture-on-fail`), `--download`, `--artifact-glob`, `--emit-proof`, and
-  `--stop-after`. Crabbox owns command transport for E2B and has no SSH target
-  for those paths.
+  `--capture-on-fail`), `--download`, `--artifact-glob`, `--require-artifact`,
+  `--emit-proof`, and `--stop-after`. Crabbox owns command transport for E2B and
+  has no SSH target for those paths.
 - `--keep-on-failure` keeps a newly created sandbox after a failed command
   instead of deleting it, subject to the one-hour sandbox timeout.
 - To prove cleanup in a smoke, run `crabbox list --provider e2b --json` after a

@@ -833,6 +833,9 @@ func TestRejectDelegatedSyncOptionsAllowsArchiveSyncControls(t *testing.T) {
 	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{ChecksumSync: true}); err == nil {
 		t.Fatal("archive sync provider should still reject --checksum")
 	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{RequiredArtifactGlobs: []string{"reports/data/manifest.json"}}); err == nil {
+		t.Fatal("archive sync provider should reject --require-artifact")
+	}
 	if err := RejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: "islo"}, RunRequest{SyncOnly: true}); err == nil {
 		t.Fatal("plain delegated provider should reject --sync-only")
 	}

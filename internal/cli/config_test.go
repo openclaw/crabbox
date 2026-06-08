@@ -105,6 +105,16 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_TENSORLAKE_DISK_MB",
 		"CRABBOX_TENSORLAKE_TIMEOUT_SECS",
 		"CRABBOX_TENSORLAKE_NO_INTERNET",
+		"CRABBOX_DOCKER_SANDBOX_CLI",
+		"CRABBOX_DOCKER_SANDBOX_AGENT",
+		"CRABBOX_DOCKER_SANDBOX_TEMPLATE",
+		"CRABBOX_DOCKER_SANDBOX_CPUS",
+		"CRABBOX_DOCKER_SANDBOX_MEMORY",
+		"CRABBOX_DOCKER_SANDBOX_CLONE",
+		"CRABBOX_DOCKER_SANDBOX_WORKDIR",
+		"CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES",
+		"CRABBOX_DOCKER_SANDBOX_MCP",
+		"CRABBOX_DOCKER_SANDBOX_KIT",
 		"CRABBOX_ASCII_BOX_API_KEY",
 		"ASCII_BOX_API_KEY",
 		"CRABBOX_ASCII_BOX_BASE_URL",
@@ -191,6 +201,188 @@ func clearConfigEnv(t *testing.T) {
 		"RAILWAY_ENVIRONMENT_ID",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.DockerSandbox.CLIPath != "sbx" || cfg.DockerSandbox.Agent != "shell" || cfg.DockerSandbox.Workdir != "" {
+		t.Fatalf("dockerSandbox defaults not applied: %#v", cfg.DockerSandbox)
+	}
+	clone := true
+	template := "ubuntu"
+	cpus := 2.5
+	memory := "6g"
+	workdir := "/workspace/my-app"
+	extraWorkspaces := []string{"/tmp/extra"}
+	mcp := []string{"context7", "all"}
+	kit := []string{"example-org/base"}
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "docker-sandbox",
+		DockerSandbox: &fileDockerSandboxConfig{
+			CLIPath:         "/opt/sbx",
+			Agent:           "shell",
+			Template:        &template,
+			CPUs:            &cpus,
+			Memory:          &memory,
+			Clone:           &clone,
+			Workdir:         &workdir,
+			ExtraWorkspaces: &extraWorkspaces,
+			MCP:             &mcp,
+			Kit:             &kit,
+		},
+	})
+	if cfg.Provider != "docker-sandbox" || cfg.DockerSandbox.CLIPath != "/opt/sbx" || cfg.DockerSandbox.Template != "ubuntu" || cfg.DockerSandbox.CPUs != 2.5 || cfg.DockerSandbox.Memory != "6g" || !cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/my-app" {
+		t.Fatalf("file dockerSandbox config not applied: %#v", cfg.DockerSandbox)
+	}
+	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7,all" || strings.Join(cfg.DockerSandbox.Kit, ",") != "example-org/base" {
+		t.Fatalf("file dockerSandbox list config not applied: %#v", cfg.DockerSandbox)
+	}
+
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CLI", "/usr/local/bin/sbx")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_AGENT", "shell")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_TEMPLATE", "debian")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CPUS", "4")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_MEMORY", "8g")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CLONE", "false")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_WORKDIR", "/workspace/env-app")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES", "/tmp/a,/tmp/b")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_MCP", "context7,all")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_KIT", "kit-a,kit-b")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.DockerSandbox.CLIPath != "/usr/local/bin/sbx" || cfg.DockerSandbox.Template != "debian" || cfg.DockerSandbox.CPUs != 4 || cfg.DockerSandbox.Memory != "8g" || cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/env-app" {
+		t.Fatalf("env dockerSandbox config not applied: %#v", cfg.DockerSandbox)
+	}
+	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/a,/tmp/b" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7,all" || strings.Join(cfg.DockerSandbox.Kit, ",") != "kit-a,kit-b" {
+		t.Fatalf("env dockerSandbox list config not applied: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDockerSandboxEmptyFileConfigDoesNotClearExistingValues(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.DockerSandbox = DockerSandboxConfig{
+		CLIPath:         "/opt/sbx",
+		Agent:           "shell",
+		Template:        "ubuntu",
+		CPUs:            2,
+		Memory:          "4g",
+		Clone:           true,
+		Workdir:         "/workspace/my-app",
+		ExtraWorkspaces: []string{"/tmp/extra"},
+		MCP:             []string{"context7"},
+		Kit:             []string{"example-org/base"},
+	}
+	applyFileConfig(&cfg, fileConfig{DockerSandbox: &fileDockerSandboxConfig{}})
+	if cfg.DockerSandbox.CLIPath != "/opt/sbx" || cfg.DockerSandbox.Agent != "shell" || cfg.DockerSandbox.Template != "ubuntu" || cfg.DockerSandbox.CPUs != 2 || cfg.DockerSandbox.Memory != "4g" || !cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/my-app" {
+		t.Fatalf("empty file dockerSandbox config cleared existing scalar values: %#v", cfg.DockerSandbox)
+	}
+	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7" || strings.Join(cfg.DockerSandbox.Kit, ",") != "example-org/base" {
+		t.Fatalf("empty file dockerSandbox config cleared existing list values: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDockerSandboxFileConfigCanClearInheritedLists(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.DockerSandbox.ExtraWorkspaces = []string{"/tmp/inherited"}
+	cfg.DockerSandbox.MCP = []string{"context7"}
+	cfg.DockerSandbox.Kit = []string{"example-org/base"}
+
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+dockerSandbox:
+  extraWorkspaces: []
+  mcp: []
+  kit: []
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatalf("applyFileConfig err=%v", err)
+	}
+	if len(cfg.DockerSandbox.ExtraWorkspaces) != 0 || len(cfg.DockerSandbox.MCP) != 0 || len(cfg.DockerSandbox.Kit) != 0 {
+		t.Fatalf("repo dockerSandbox empty lists did not clear inherited values: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDockerSandboxFileConfigCanClearInheritedRuntimeDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.DockerSandbox.Template = "ubuntu"
+	cfg.DockerSandbox.CPUs = 4
+	cfg.DockerSandbox.Memory = "8g"
+	cfg.DockerSandbox.Workdir = "/workspace/inherited"
+
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+dockerSandbox:
+  template: ""
+  cpus: 0
+  memory: ""
+  workdir: ""
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatalf("applyFileConfig err=%v", err)
+	}
+	if cfg.DockerSandbox.Template != "" || cfg.DockerSandbox.CPUs != 0 || cfg.DockerSandbox.Memory != "" || cfg.DockerSandbox.Workdir != "" {
+		t.Fatalf("repo dockerSandbox runtime defaults did not clear inherited values: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDockerSandboxFileConfigRejectsNegativeCPUs(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+provider: docker-sandbox
+dockerSandbox:
+  cpus: -1
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	err := applyFileConfig(&cfg, file)
+	if err == nil {
+		t.Fatal("applyConfigFile err=<nil>, want negative dockerSandbox cpus rejection")
+	}
+	if !strings.Contains(err.Error(), "docker-sandbox cpus must be non-negative") {
+		t.Fatalf("applyConfigFile err=%v, want negative dockerSandbox cpus rejection", err)
+	}
+}
+
+func TestDockerSandboxConfigAcceptsMCPFromFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+provider: docker-sandbox
+dockerSandbox:
+  mcp:
+    - context7
+    - all
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	err := applyFileConfig(&cfg, file)
+	if err != nil {
+		t.Fatalf("applyFileConfig mcp err=%v", err)
+	}
+	if strings.Join(cfg.DockerSandbox.MCP, ",") != "context7,all" {
+		t.Fatalf("applyFileConfig mcp cfg=%#v", cfg.DockerSandbox)
+	}
+
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_MCP", "one,two")
+	err = applyEnv(&cfg)
+	if err != nil {
+		t.Fatalf("applyEnv mcp err=%v", err)
+	}
+	if strings.Join(cfg.DockerSandbox.MCP, ",") != "one,two" {
+		t.Fatalf("applyEnv mcp cfg=%#v", cfg.DockerSandbox)
 	}
 }
 
@@ -1624,6 +1816,34 @@ func TestInvalidNetworkEnvFails(t *testing.T) {
 
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("expected invalid CRABBOX_NETWORK to fail")
+	}
+}
+
+func TestInvalidDockerSandboxCPUEnvFailsDuringLoad(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "docker-sandbox")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CPUS", "2.5")
+
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "docker-sandbox cpus must be a whole number") {
+		t.Fatalf("loadConfig err=%v, want docker-sandbox whole-number validation", err)
+	}
+}
+
+func TestInvalidDockerSandboxCPUEnvNonNumericFailsDuringLoad(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "docker-sandbox")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CPUS", "not-a-number")
+
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "CRABBOX_DOCKER_SANDBOX_CPUS") {
+		t.Fatalf("loadConfig err=%v, want docker-sandbox CPU env parse rejection", err)
 	}
 }
 

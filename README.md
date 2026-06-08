@@ -143,6 +143,7 @@ Targets: **L**inux, **M**acOS, **W**indows.
 | Provider | `provider:` (aliases) | Targets | Notes |
 | --- | --- | --- | --- |
 | [Cloudflare](docs/providers/cloudflare.md) | `cloudflare` (`cf`) | L | Cloudflare Containers via the Worker runtime. |
+| [Docker Sandbox](docs/providers/docker-sandbox.md) | `docker-sandbox` | L | Docker Sandboxes through the standalone `sbx` CLI. |
 | [E2B](docs/providers/e2b.md) | `e2b` | L | E2B Firecracker sandbox. |
 | [Islo](docs/providers/islo.md) | `islo` | L | Islo sandbox. |
 | [Modal](docs/providers/modal.md) | `modal` | L | Modal Sandbox through the local Python client. |
