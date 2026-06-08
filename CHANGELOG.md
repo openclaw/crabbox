@@ -13,7 +13,7 @@
 ### Fixed
 
 - Fixed malformed AWS, Azure, and GCP SSH CIDR configuration to fail closed instead of falling back to broad SSH access. Thanks @coygeek.
-- Fixed local-container warmup on Windows by mounting the generated bootstrap script instead of passing it inline to Docker. Thanks @anagnorisis2peripeteia.
+- Fixed local-container warmup on Windows by mounting the generated bootstrap directory instead of passing the script inline to Docker. Thanks @anagnorisis2peripeteia.
 - Fixed brokered Azure lease creation to persist in-flight leases before VM provisioning, keep failed creates visible, and sweep orphaned Azure VMs from coordinator maintenance. Fixes https://github.com/openclaw/crabbox/issues/215.
 - Fixed brokered lease release races so leases released while provisioning cannot be reactivated or lose cleanup retry state.
 - Fixed Islo provider status, streaming exec, archive upload, share, and delete handling for the current Islo API contract. Thanks @zozo123.
