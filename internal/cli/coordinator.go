@@ -1798,18 +1798,3 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 func coordinatorLeaseHostID(lease CoordinatorLease) string {
 	return firstNonBlank(lease.HostID, lease.HostIDCompat)
 }
-
-func (a App) touchCoordinatorLeaseBestEffort(ctx context.Context, cfg Config, leaseID string) {
-	if leaseID == "" {
-		return
-	}
-	coord, ok, err := newCoordinatorClient(cfg)
-	if err != nil || !ok {
-		return
-	}
-	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	if _, err := coord.TouchLease(callCtx, leaseID); err != nil {
-		fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", leaseID, err)
-	}
-}

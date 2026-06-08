@@ -105,20 +105,19 @@ A delegated backend must reject run/sync options that Crabbox cannot honor
 without a Crabbox-managed SSH target:
 
 ```go
-if err := cli.RejectDelegatedSyncOptions(providerName, req); err != nil {
+if err := cli.RejectDelegatedSyncOptionsForSpec(spec, req); err != nil {
 	return RunResult{}, err
 }
 ```
 
 Providers that declare `FeatureArchiveSync` (an archive upload of the checkout)
-can use `cli.RejectDelegatedSyncOptionsForSpec(spec, req)` so that `--sync-only`
-and `--force-sync-large` are allowed while the rest stay rejected. Both helpers
-reject checksum sync, full resync, local stdout/stderr captures, capture-on-fail,
-downloads, artifact globs, uploaded scripts, env helpers, `--stop-after`, fresh
-PR checkouts, and `--emit-proof` (unless the provider declares `FeatureRunProof`).
-Do not pretend a delegated provider is SSH-like unless it has a stable SSH
-contract. If Crabbox cannot run rsync and remote commands itself, use
-`DelegatedRunBackend`.
+can declare that feature in `spec` so `--sync-only` and `--force-sync-large`
+are allowed while the rest stay rejected. The helper rejects checksum sync,
+full resync, local stdout/stderr captures, capture-on-fail, downloads, artifact
+globs, uploaded scripts, env helpers, `--stop-after`, fresh PR checkouts, and
+`--emit-proof` (unless the provider declares `FeatureRunProof`). Do not pretend
+a delegated provider is SSH-like unless it has a stable SSH contract. If
+Crabbox cannot run rsync and remote commands itself, use `DelegatedRunBackend`.
 
 ### Optional interfaces
 

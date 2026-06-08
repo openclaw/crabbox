@@ -103,10 +103,6 @@ func bootstrapWaitTimeout(cfg Config) time.Duration {
 	return core.BootstrapWaitTimeout(cfg)
 }
 
-func inventoryDoctorResult(provider string, leases int) DoctorResult {
-	return core.InventoryDoctorResult(provider, leases)
-}
-
 func now(rt Runtime) time.Time {
 	if rt.Clock != nil {
 		return rt.Clock.Now()

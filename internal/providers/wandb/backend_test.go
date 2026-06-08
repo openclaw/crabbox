@@ -21,14 +21,6 @@ type wandbRecordingRunner struct {
 	fn    func(LocalCommandRequest) (LocalCommandResult, error)
 }
 
-func (r *wandbRecordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
-	r.calls = append(r.calls, req)
-	if r.fn != nil {
-		return r.fn(req)
-	}
-	return LocalCommandResult{}, nil
-}
-
 func TestWandbProviderSpec(t *testing.T) {
 	spec := Provider{}.Spec()
 	if spec.Name != providerName {
