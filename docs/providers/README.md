@@ -48,6 +48,11 @@ the default. Most names accept aliases (listed below).
 Each page below maps to an adapter under `internal/providers/<dir>`. The
 **Provider id** is the canonical `--provider` value; **Aliases** also resolve.
 
+Planned-provider runbooks can live in this directory before an adapter is
+registered when they define a real environment contract that implementation work
+must target. Those pages are not part of the built-in provider tables until the
+adapter ships.
+
 ### SSH lease
 
 | Page | Provider id | Aliases | Targets | Brokered? |
@@ -92,6 +97,12 @@ Each page below maps to an adapter under `internal/providers/<dir>`. The
 
 Run `crabbox providers` (`--json`) to see the live capability set the binary
 reports.
+
+## Planned-provider runbooks
+
+- [Incus local E2E testbed](incus.md): local Apple Silicon runbook and smoke
+  contract for the future `incus` adapter. This page does not mean the provider
+  is registered in this branch.
 
 ## Notes on families and capabilities
 

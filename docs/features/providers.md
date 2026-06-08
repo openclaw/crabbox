@@ -37,6 +37,12 @@ provider-specific path in `scripts/live-smoke.sh`. The smoke should use explicit
 remote command should not assume a particular project language unless it is
 provider-specific.
 
+If the provider is still unimplemented or the only credible proof is an
+environment-specific local runbook, keep the smoke manual and document the real
+acceptance contract first. Do not add a placeholder `scripts/live-smoke.sh`
+branch that cannot run on a fresh operator machine with the documented
+prerequisites.
+
 ## Brokered providers
 
 Four providers can be brokered through the Worker. Brokering adds lease records,
@@ -116,6 +122,7 @@ wandb                   Weights & Biases run sandboxes
 - [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
 - [Local Container](../providers/local-container.md): local Linux containers through Docker-compatible runtimes.
 - [Multipass](../providers/multipass.md): local Ubuntu VMs through Canonical Multipass.
+- [Incus local E2E testbed](../providers/incus.md): planned-provider local Apple Silicon runbook for the future `incus` adapter.
 - [Daytona](../providers/daytona.md): Daytona SDK/toolbox sandbox leases.
 - [exe.dev](../providers/exe-dev.md): exe.dev VMs exposed as SSH leases.
 - [KubeVirt](../providers/kubevirt.md): generic KubeVirt VMs over Kubernetes control-plane forwarding.
