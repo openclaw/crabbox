@@ -1,6 +1,12 @@
 package cli
 
-import "testing"
+import (
+	"bytes"
+	"context"
+	"io"
+	"path/filepath"
+	"testing"
+)
 
 func TestStatusWaitDoneTreatsTerminalStatesAsDone(t *testing.T) {
 	for _, state := range []string{"expired", "failed", "released", "stopped", "stopped_with_code", "terminated"} {
@@ -28,4 +34,57 @@ func TestStatusWaitTerminalErrorFailsNonReadyTerminalState(t *testing.T) {
 	if err := statusWaitTerminalError("cbx_123", statusView{State: "provisioning"}); err != nil {
 		t.Fatalf("non-terminal state returned error: %v", err)
 	}
+}
+
+func TestStatusWaitUsesFullSSHResolve(t *testing.T) {
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	backend := &statusResolveRecordingBackend{}
+	testAWSBackendOverride = backend
+	defer func() { testAWSBackendOverride = nil }()
+
+	app := App{Stdout: io.Discard, Stderr: &bytes.Buffer{}}
+	if err := app.status(context.Background(), []string{"--provider", "aws", "--id", "cbx_status"}); err != nil {
+		t.Fatalf("status returned error: %v", err)
+	}
+	if len(backend.requests) != 1 {
+		t.Fatalf("resolve calls=%d want 1", len(backend.requests))
+	}
+	if !backend.requests[0].StatusOnly {
+		t.Fatal("plain status should use status-only resolve")
+	}
+
+	backend.requests = nil
+	err := app.status(context.Background(), []string{"--provider", "aws", "--id", "cbx_status", "--wait", "--wait-timeout", "1ns"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 5 {
+		t.Fatalf("status --wait error = %#v, want timeout exit 5", err)
+	}
+	if len(backend.requests) != 1 {
+		t.Fatalf("resolve calls=%d want 1", len(backend.requests))
+	}
+	if backend.requests[0].StatusOnly {
+		t.Fatal("status --wait should use full resolve so providers can return SSH readiness data")
+	}
+}
+
+type statusResolveRecordingBackend struct {
+	testSSHBackend
+	requests []ResolveRequest
+}
+
+func (b *statusResolveRecordingBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
+	b.requests = append(b.requests, req)
+	return LeaseTarget{
+		Server: Server{
+			Provider: "aws",
+			Status:   "running",
+			Labels: map[string]string{
+				"state":             "ready",
+				"idle_timeout_secs": "60",
+			},
+		},
+		LeaseID: "cbx_status",
+	}, nil
 }
