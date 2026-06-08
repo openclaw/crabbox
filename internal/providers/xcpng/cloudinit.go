@@ -192,7 +192,7 @@ func newWindowsAutounattendPayload(cfg Config, leaseID, slug, publicKey, initial
 	bootstrapCommand := core.PowershellCommand(`$volume = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'CRABBOXWIN' } | Select-Object -First 1
 if (-not $volume) { throw "Crabbox Windows answer media volume not found" }
 $scriptRoot = $volume.DriveLetter + ":\"
-$scriptPath = Join-Path $scriptRoot "crabbox-bootstrap.ps1"
+$scriptPath = Join-Path $scriptRoot "CRABBOX-BOOTSTRAP.PS1"
 if (-not (Test-Path -LiteralPath $scriptPath)) { throw "Crabbox bootstrap script not found on answer media" }
 & $scriptPath`)
 	computerName := windowsComputerName(slug)

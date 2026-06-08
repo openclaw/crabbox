@@ -266,10 +266,6 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 		}
 		return result, err
 	}
-	if err = runtime.attachAnswerMedia(ctx, opts, &result); err != nil {
-		return result, err
-	}
-	result.Phase = "windows_iso_attached"
 	if err = runtime.startVM(ctx); err != nil {
 		result.Classification = "environment_blocked"
 		result.Phase = "windows_setup_started"
@@ -284,6 +280,10 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 		result.Reason = fmt.Sprintf("set installed-boot order: %v", err)
 		return result, err
 	}
+	if err = runtime.attachAnswerMedia(ctx, opts, &result); err != nil {
+		return result, err
+	}
+	result.Phase = "windows_iso_attached"
 	installerDeadline := isoE2EWindowsInstallTimeout
 	if opts.Timeout > isoE2EGuestMetricsTimeout {
 		remaining := opts.Timeout - isoE2EGuestMetricsTimeout
@@ -540,48 +540,10 @@ func (r *isoE2ERuntime) prepareWindowsAnswerMedia(ctx context.Context, opts ISOE
 		summary.Phase = "windows_answer_generation"
 		return nil
 	}
-	keyPath, publicKey, err := isoE2EEnsureTestboxKey(opts.Config, r.leaseID)
-	if err != nil {
-		summary.Classification = "test_failed"
-		summary.Phase = "windows_answer_generation"
-		summary.Reason = err.Error()
-		return err
-	}
-	password, err := isoE2EGenerateWindowsPassword()
-	if err != nil {
-		summary.Classification = "test_failed"
-		summary.Phase = "windows_answer_generation"
-		summary.Reason = err.Error()
-		return err
-	}
-	payload, err := newWindowsAutounattendPayload(opts.Config, r.leaseID, strings.TrimPrefix(r.leaseID, "cbx_"), publicKey, password)
-	if err != nil {
-		summary.Classification = "test_failed"
-		summary.Phase = "windows_answer_generation"
-		summary.Reason = err.Error()
-		return err
-	}
-	answerISO, err := isoE2EWriteWindowsAnswerISO(ctx, opts.EvidenceDir, payload)
-	if err != nil {
-		summary.Classification = "environment_blocked"
-		summary.Phase = "windows_answer_generation"
-		summary.Reason = err.Error()
-		return err
-	}
-	r.keyPath = keyPath
-	r.publicKey = publicKey
-	r.windowsUser = payload.Username
-	r.generatedAnswer = answerISO
-	r.cleanupLocal = append(r.cleanupLocal, answerISO)
-	if isoE2EKeepGeneratedWindowsAnswer() {
-		r.keepLocal[answerISO] = struct{}{}
-	}
-	summary.AnswerISO = answerISO
-	summary.Details["answer_iso_source"] = "generated-local-file"
-	summary.Details["windows_bootstrap"] = "openssh-key"
-	summary.Details["ssh_key"] = filepath.Base(keyPath)
+	summary.Classification = "windows_requirements_blocked"
 	summary.Phase = "windows_answer_generation"
-	return nil
+	summary.Reason = "generated Windows answer ISO on XCP-ng is deferred until the auxiliary answer-media path has real live proof; supply prebuilt answer media or skip the Windows mutate ISO flow"
+	return core.Exit(4, "%s", summary.Reason)
 }
 
 func (r *isoE2ERuntime) createBaseVM(ctx context.Context, opts ISOE2EOptions, summary *ISOE2ESummary) error {
@@ -643,13 +605,12 @@ func (r *isoE2ERuntime) resolveInstallerMedia(ctx context.Context, summary *ISOE
 		return xcpNgISOMediaRef{}, err
 	}
 	imported, importErr := r.client.ImportISO(ctx, xcpNgImportISORequest{
-		SRRef:        r.placement.srRef,
-		Path:         summary.ISO,
-		Name:         filepath.Base(summary.ISO),
-		Description:  fmt.Sprintf("Crabbox imported %s installer ISO", isoE2EOSLabel(summary.OS)),
-		Labels:       r.labels,
-		DestroyVDI:   true,
-		MarkReadOnly: true,
+		SRRef:       r.placement.srRef,
+		Path:        summary.ISO,
+		Name:        filepath.Base(summary.ISO),
+		Description: fmt.Sprintf("Crabbox imported %s installer ISO", isoE2EOSLabel(summary.OS)),
+		Labels:      r.labels,
+		DestroyVDI:  true,
 	})
 	if importErr != nil {
 		summary.Classification = "environment_blocked"
@@ -742,13 +703,12 @@ func (r *isoE2ERuntime) attachAnswerMedia(ctx context.Context, opts ISOE2EOption
 		return err
 	}
 	imported, importErr := r.client.ImportISO(ctx, xcpNgImportISORequest{
-		SRRef:        r.placement.srRef,
-		Path:         answerValue,
-		Name:         filepath.Base(answerValue),
-		Description:  fmt.Sprintf("Crabbox %s answer ISO", isoE2EOSLabel(summary.OS)),
-		Labels:       r.labels,
-		DestroyVDI:   true,
-		MarkReadOnly: true,
+		SRRef:       r.placement.srRef,
+		Path:        answerValue,
+		Name:        filepath.Base(answerValue),
+		Description: fmt.Sprintf("Crabbox %s answer ISO", isoE2EOSLabel(summary.OS)),
+		Labels:      r.labels,
+		DestroyVDI:  true,
 	})
 	if importErr != nil {
 		summary.Classification = "environment_blocked"
@@ -1014,9 +974,8 @@ func writeLinuxSeedISO(ctx context.Context, evidenceDir string, payload xcpNgLin
 		return "", err
 	}
 	path := filepath.Join(evidenceDir, fmt.Sprintf("%s-linux-seed.iso", isoE2ECurrentTime().Format("20060102t150405z")))
-	args := []string{"makehybrid", "-quiet", "-o", path, workDir, "-iso", "-joliet", "-default-volume-name", "cidata"}
-	if out, err := exec.CommandContext(ctx, "/usr/bin/hdiutil", args...).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("build Linux seed ISO: %v: %s", err, strings.TrimSpace(string(out)))
+	if err := buildDataISO(ctx, path, workDir, "CIDATA"); err != nil {
+		return "", fmt.Errorf("build Linux seed ISO: %w", err)
 	}
 	return path, nil
 }
@@ -1027,18 +986,29 @@ func writeWindowsAnswerISO(ctx context.Context, evidenceDir string, payload xcpN
 		return "", err
 	}
 	defer os.RemoveAll(workDir)
-	if err := os.WriteFile(filepath.Join(workDir, "Autounattend.xml"), []byte(payload.AnswerXML), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(workDir, "AUTOUNATTEND.XML"), []byte(payload.AnswerXML), 0o600); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(workDir, "crabbox-bootstrap.ps1"), []byte(payload.BootstrapPowerShell), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(workDir, "CRABBOX-BOOTSTRAP.PS1"), []byte(payload.BootstrapPowerShell), 0o600); err != nil {
 		return "", err
 	}
 	path := filepath.Join(evidenceDir, fmt.Sprintf("%s-windows-answer.iso", isoE2ECurrentTime().Format("20060102t150405z")))
-	args := []string{"makehybrid", "-quiet", "-o", path, workDir, "-iso", "-joliet", "-default-volume-name", "CRABBOXWIN"}
-	if out, err := exec.CommandContext(ctx, "/usr/bin/hdiutil", args...).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("build Windows answer ISO: %v: %s", err, strings.TrimSpace(string(out)))
+	if err := buildDataISO(ctx, path, workDir, "CRABBOXWIN"); err != nil {
+		return "", fmt.Errorf("build Windows answer ISO: %w", err)
 	}
 	return path, nil
+}
+
+func buildDataISO(ctx context.Context, outputISO, inputDir, volumeName string) error {
+	xorriso, err := findXorrisoBinary()
+	if err != nil {
+		return err
+	}
+	args := dataISOArgs(outputISO, inputDir, volumeName)
+	if out, err := exec.CommandContext(ctx, xorriso, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func injectUbuntuAutoinstallIntoGrubConfig(data []byte) ([]byte, bool, error) {
@@ -1101,7 +1071,7 @@ func findXorrisoBinary() (string, error) {
 			return path, nil
 		}
 	}
-	return "", errors.New("xorriso not found; install xorriso to remaster Ubuntu autoinstall ISO")
+	return "", errors.New("xorriso not found; install xorriso to run XCP-ng ISO E2E media builders")
 }
 
 func ubuntuAutoinstallRemasterArgs(srcISO, outputISO string, mappings [][2]string) []string {
@@ -1116,6 +1086,18 @@ func ubuntuAutoinstallRemasterArgs(srcISO, outputISO string, mappings [][2]strin
 	}
 	args = append(args, "-commit", "-end")
 	return args
+}
+
+func dataISOArgs(outputISO, inputDir, volumeName string) []string {
+	return []string{
+		"-as", "mkisofs",
+		"-quiet",
+		"-o", outputISO,
+		"-J",
+		"-r",
+		"-V", volumeName,
+		inputDir,
+	}
 }
 
 func remasterUbuntuAutoinstallISO(ctx context.Context, srcISO, evidenceDir string) (string, error) {

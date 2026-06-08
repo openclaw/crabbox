@@ -316,3 +316,21 @@ func TestUbuntuAutoinstallRemasterArgsUseReplayMappings(t *testing.T) {
 		}
 	}
 }
+
+func TestDataISOArgsUseXorrisoMkisofsMode(t *testing.T) {
+	args := dataISOArgs("/tmp/output.iso", "/tmp/input", "CIDATA")
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"-as mkisofs",
+		"-quiet",
+		"-o /tmp/output.iso",
+		"-J",
+		"-r",
+		"-V CIDATA",
+		"/tmp/input",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args missing %q: %s", want, joined)
+		}
+	}
+}
