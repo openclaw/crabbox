@@ -545,14 +545,13 @@ func (r *isoE2ERuntime) createBaseVM(ctx context.Context, opts ISOE2EOptions, su
 		}(),
 		Labels:     r.labels,
 		SecureBoot: strings.EqualFold(opts.OS, "windows"),
-		HVMBoot: map[string]string{
-			"order": func() string {
-				if opts.OS == "linux" {
-					return "dc"
-				}
-				return "dc"
-			}(),
-		},
+		HVMBoot: func() map[string]string {
+			boot := map[string]string{"order": "dc"}
+			if strings.EqualFold(opts.OS, "windows") {
+				boot["firmware"] = "uefi"
+			}
+			return boot
+		}(),
 	})
 	if err != nil {
 		summary.Classification = "environment_blocked"
@@ -957,6 +956,9 @@ func remasterUbuntuAutoinstallISO(ctx context.Context, srcISO, evidenceDir strin
 	})
 	if updated == string(data) || !strings.Contains(updated, "autoinstall") {
 		return "", errors.New("autoinstall boot entry not found in installer grub config")
+	}
+	if err := os.Chmod(grubPath, 0o600); err != nil {
+		return "", fmt.Errorf("chmod installer grub config: %w", err)
 	}
 	if err := os.WriteFile(grubPath, []byte(updated), 0o600); err != nil {
 		return "", fmt.Errorf("write installer grub config: %w", err)

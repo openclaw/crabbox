@@ -207,6 +207,24 @@ func (c *xapiClient) isoByRef(ctx context.Context, ref, requested string) (xcpNg
 	return iso, nil
 }
 
+func (c *xapiClient) findBuiltinTemplate(ctx context.Context, nameLabel string) (string, error) {
+	refs, err := c.call(ctx, "VM.get_by_name_label", c.session, nameLabel)
+	if err != nil {
+		return "", fmt.Errorf("VM.get_by_name_label %q: %w", nameLabel, err)
+	}
+	strings_ := xmlValueToStrings(refs)
+	for _, ref := range strings_ {
+		isTemplate, err := c.callString(ctx, "VM.get_is_a_template", c.session, ref)
+		if err != nil {
+			continue
+		}
+		if isTemplate == "true" {
+			return ref, nil
+		}
+	}
+	return "", fmt.Errorf("no builtin template named %q found", nameLabel)
+}
+
 func (c *xapiClient) CloneVM(ctx context.Context, req xcpNgCloneRequest) (xapiVM, error) {
 	name := leaseVMName(req.LeaseID, req.Slug)
 	cloneMethod := "VM.clone"
@@ -264,78 +282,104 @@ func (c *xapiClient) CreateFreshVM(ctx context.Context, req xcpNgFreshVMRequest)
 	if vcpusStartup <= 0 {
 		vcpusStartup = vcpusMax
 	}
-	domainType := strings.TrimSpace(req.DomainType)
-	if domainType == "" {
-		domainType = "hvm"
-	}
-	hvmBootPolicy := "BIOS order"
-	if req.SecureBoot {
-		hvmBootPolicy = "UEFI"
-	}
 	hvmBootParams := map[string]string{"order": "dc"}
 	for key, value := range req.HVMBoot {
 		hvmBootParams[key] = value
 	}
-	platform := map[string]string{}
+	if req.SecureBoot && hvmBootParams["firmware"] == "" {
+		hvmBootParams["firmware"] = "uefi"
+	}
+	platformKeys := map[string]string{}
 	for key, value := range req.Platform {
-		platform[key] = value
+		platformKeys[key] = value
 	}
 	if req.SecureBoot {
-		platform["secureboot"] = "true"
+		platformKeys["secureboot"] = "true"
 	}
-	affinity := "OpaqueRef:NULL"
-	if req.Affinity != "" {
-		affinity = req.Affinity.value()
-	} else if req.HostRef != "" {
-		affinity = req.HostRef.value()
+	// Clone from the "Other install media" template instead of using VM.create,
+	// which requires Map(String,String) fields that trigger the XAPI XML-RPC
+	// hashtbl_xml unmarshaller. Setting individual keys via VM.add_to_* avoids
+	// the encoding mismatch entirely.
+	templateRef, err := c.findBuiltinTemplate(ctx, "Other install media")
+	if err != nil {
+		return xcpNgFreshVMResult{}, fmt.Errorf("find HVM template for fresh VM: %w", err)
 	}
-	ref, err := c.callString(ctx, "VM.create", c.session, map[string]any{
-		"name_label":             req.Name,
-		"name_description":       req.Description,
-		"user_version":           1,
-		"is_a_template":          false,
-		"affinity":               affinity,
-		"memory_static_max":      memoryBytes,
-		"memory_dynamic_max":     memoryBytes,
-		"memory_dynamic_min":     memoryBytes,
-		"memory_static_min":      memoryBytes,
-		"VCPUs_params":           map[string]string{},
-		"VCPUs_max":              vcpusMax,
-		"VCPUs_at_startup":       vcpusStartup,
-		"actions_after_shutdown": "preserve",
-		"actions_after_reboot":   "restart",
-		"actions_after_crash":    "restart",
-		"PV_bootloader":          "",
-		"PV_kernel":              "",
-		"PV_ramdisk":             "",
-		"PV_args":                req.PVArgs,
-		"PV_bootloader_args":     "",
-		"PV_legacy_args":         "",
-		"HVM_boot_policy":        hvmBootPolicy,
-		"HVM_boot_params":        hvmBootParams,
-		"platform":               platform,
-		"PCI_bus":                "",
-		"other_config":           req.Labels,
-		"recommendations":        "",
-		"xenstore_data":          map[string]string{},
-		"tags":                   []string{},
-		"domain_type":            domainType,
-		"ha_restart_priority":    "",
-		"is_default_template":    false,
-	})
+	ref, err := c.callString(ctx, "VM.clone", c.session, templateRef, req.Name)
 	if err != nil {
 		return xcpNgFreshVMResult{}, err
 	}
+	// If the template has no disks and we need an SR for provisioning, use VM.copy
+	// For now, VM.clone is sufficient since we attach disks separately.
 	result := xcpNgFreshVMResult{VM: xapiVM{Ref: ref, Name: req.Name, PowerState: "halted", Labels: req.Labels}}
-	if err := c.setVMLabels(ctx, ref, req.Labels); err != nil {
+	// Configure the cloned VM: set memory, VCPUs, boot params, and platform keys
+	if _, err := c.call(ctx, "VM.set_memory_static_max", c.session, ref, memoryBytes); err != nil {
 		_ = c.deleteServer(context.Background(), ref, true)
 		return xcpNgFreshVMResult{}, err
+	}
+	if _, err := c.call(ctx, "VM.set_memory_dynamic_max", c.session, ref, memoryBytes); err != nil {
+		_ = c.deleteServer(context.Background(), ref, true)
+		return xcpNgFreshVMResult{}, err
+	}
+	if _, err := c.call(ctx, "VM.set_memory_dynamic_min", c.session, ref, memoryBytes); err != nil {
+		_ = c.deleteServer(context.Background(), ref, true)
+		return xcpNgFreshVMResult{}, err
+	}
+	if _, err := c.call(ctx, "VM.set_memory_static_min", c.session, ref, memoryBytes); err != nil {
+		_ = c.deleteServer(context.Background(), ref, true)
+		return xcpNgFreshVMResult{}, err
+	}
+	if _, err := c.call(ctx, "VM.set_VCPUs_max", c.session, ref, vcpusMax); err != nil {
+		_ = c.deleteServer(context.Background(), ref, true)
+		return xcpNgFreshVMResult{}, err
+	}
+	if _, err := c.call(ctx, "VM.set_VCPUs_at_startup", c.session, ref, vcpusStartup); err != nil {
+		_ = c.deleteServer(context.Background(), ref, true)
+		return xcpNgFreshVMResult{}, err
+	}
+	// Remove default HVM boot params inherited from the template, then set our own
+	existingBootParams, err := c.callStringMap(ctx, "VM.get_HVM_boot_params", c.session, ref)
+	if err != nil {
+		_ = c.deleteServer(context.Background(), ref, true)
+		return xcpNgFreshVMResult{}, err
+	}
+	for key := range existingBootParams {
+		c.callDiscard(ctx, "VM.remove_from_HVM_boot_params", c.session, ref, key)
+	}
+	for key, value := range hvmBootParams {
+		if _, err := c.call(ctx, "VM.add_to_HVM_boot_params", c.session, ref, key, value); err != nil {
+			_ = c.deleteServer(context.Background(), ref, true)
+			return xcpNgFreshVMResult{}, err
+		}
+	}
+	existingPlatform, err := c.callStringMap(ctx, "VM.get_platform", c.session, ref)
+	if err != nil {
+		_ = c.deleteServer(context.Background(), ref, true)
+		return xcpNgFreshVMResult{}, err
+	}
+	for key := range existingPlatform {
+		c.callDiscard(ctx, "VM.remove_from_platform", c.session, ref, key)
+	}
+	for key, value := range platformKeys {
+		if _, err := c.call(ctx, "VM.add_to_platform", c.session, ref, key, value); err != nil {
+			_ = c.deleteServer(context.Background(), ref, true)
+			return xcpNgFreshVMResult{}, err
+		}
+	}
+	if req.SecureBoot {
+		if _, err := c.call(ctx, "VM.set_HVM_boot_policy", c.session, ref, "BIOS order"); err != nil {
+			_ = c.deleteServer(context.Background(), ref, true)
+			return xcpNgFreshVMResult{}, err
+		}
 	}
 	if req.HostRef != "" {
 		if _, err := c.call(ctx, "VM.set_affinity", c.session, ref, req.HostRef.value()); err != nil {
 			_ = c.deleteServer(context.Background(), ref, true)
 			return xcpNgFreshVMResult{}, err
 		}
+	}
+	if err := c.setVMLabels(ctx, ref, req.Labels); err != nil {
+		_ = c.deleteServer(context.Background(), ref, true)
+		return xcpNgFreshVMResult{}, err
 	}
 	if req.Network != nil && req.Network.NetworkRef != "" {
 		vifRef, err := c.callString(ctx, "VIF.create", c.session, map[string]any{
@@ -1126,6 +1170,14 @@ func (c *xapiClient) callString(ctx context.Context, method string, params ...an
 func (c *xapiClient) callDiscard(ctx context.Context, method string, params ...any) error {
 	_, err := c.call(ctx, method, params...)
 	return err
+}
+
+func (c *xapiClient) callStringMap(ctx context.Context, method string, params ...any) (map[string]string, error) {
+	value, err := c.call(ctx, method, params...)
+	if err != nil {
+		return nil, err
+	}
+	return xmlValueToStringMap(value), nil
 }
 
 func (c *xapiClient) call(ctx context.Context, method string, params ...any) (xmlRPCValue, error) {

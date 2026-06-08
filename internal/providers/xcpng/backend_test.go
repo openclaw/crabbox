@@ -734,7 +734,7 @@ func TestRunISOE2EWindowsMutatePassesWithGeneratedBootstrap(t *testing.T) {
 	if summary.Classification != "windows_install_passed" || summary.Phase != "windows_command_ok" || summary.Cleanup != "cleaned" {
 		t.Fatalf("summary=%#v", summary)
 	}
-	if !fake.freshReq.SecureBoot || fake.freshReq.HVMBoot["order"] != "dc" {
+	if !fake.freshReq.SecureBoot || fake.freshReq.HVMBoot["order"] != "dc" || fake.freshReq.HVMBoot["firmware"] != "uefi" {
 		t.Fatalf("fresh request=%#v", fake.freshReq)
 	}
 	calls := strings.Join(fake.calls, ",")
