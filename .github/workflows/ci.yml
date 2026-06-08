@@ -48,11 +48,13 @@ jobs:
       - name: Deadcode
         run: |
           output_file=$(mktemp)
+          normalized_file=$(mktemp)
           unexpected_file=$(mktemp)
           stale_file=$(mktemp)
           go run golang.org/x/tools/cmd/deadcode@v0.45.0 -test ./... > "$output_file"
-          grep -Fvx -f .github/deadcode.allow "$output_file" > "$unexpected_file" || true
-          grep -Fvx -f "$output_file" .github/deadcode.allow > "$stale_file" || true
+          sed -E 's/^([^:]+):[0-9]+:[0-9]+: (.*)$/\1: \2/' "$output_file" > "$normalized_file"
+          grep -Fvx -f .github/deadcode.allow "$normalized_file" > "$unexpected_file" || true
+          grep -Fvx -f "$normalized_file" .github/deadcode.allow > "$stale_file" || true
           if [ -s "$unexpected_file" ]; then
             echo "Unexpected deadcode findings:"
             cat "$unexpected_file"
