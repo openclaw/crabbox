@@ -79,8 +79,9 @@ Laptop prerequisites: `git`, `ssh`, `ssh-keygen`, `rsync`, `curl`.
 ## Quick start
 
 Broker access is deployment-specific. Use a coordinator URL from your team, use
-direct-provider mode for a personal cloud account, or self-host the Worker
-broker with your own provider credentials and spend caps. See
+direct-provider mode for a personal cloud account, or self-host the broker on
+Cloudflare or Node.js/PostgreSQL with your own provider credentials and spend
+caps. See
 [Getting started](docs/getting-started.md#choosing-an-access-path) and
 [Infrastructure](docs/infrastructure.md#self-hosted-broker-minimum-setup) for the
 setup paths.
