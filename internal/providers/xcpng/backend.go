@@ -55,6 +55,10 @@ type lifecycleClient interface {
 	DeleteConfigDrive(context.Context, xcpNgConfigDrive) error
 }
 
+type guestIPv4Discoverer interface {
+	DiscoverGuestIPv4(context.Context, xapiRef) (string, error)
+}
+
 type xcpNgConfig struct {
 	APIURL       string
 	Username     string
@@ -248,12 +252,23 @@ func (b *leaseBackend) createAndBoot(ctx context.Context, client lifecycleClient
 func (b *leaseBackend) waitForGuestIPv4(ctx context.Context, client lifecycleClient, vmRef xapiRef, timeout time.Duration) (string, error) {
 	deadline := currentTime(b.RT).Add(timeout)
 	var lastErr error
+	nextDiscover := time.Time{}
 	for {
 		ip, err := client.GuestIPv4(ctx, vmRef)
 		if err == nil && ip != "" {
 			return ip, nil
 		}
 		lastErr = err
+		if discoverer, ok := client.(guestIPv4Discoverer); ok && currentTime(b.RT).After(nextDiscover) {
+			nextDiscover = currentTime(b.RT).Add(guestIPDiscoverInterval)
+			discovered, discoverErr := discoverer.DiscoverGuestIPv4(ctx, vmRef)
+			if discoverErr == nil && discovered != "" {
+				return discovered, nil
+			}
+			if lastErr == nil && discoverErr != nil {
+				lastErr = discoverErr
+			}
+		}
 		if currentTime(b.RT).After(deadline) {
 			if lastErr != nil {
 				return "", exit(5, "timed out waiting for XCP-ng guest IPv4: %v", lastErr)
@@ -653,6 +668,7 @@ var waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Wri
 }
 var bootstrapWaitTimeout = func(cfg Config) time.Duration { return core.BootstrapWaitTimeout(cfg) }
 var guestIPPollInterval = 5 * time.Second
+var guestIPDiscoverInterval = 15 * time.Second
 var findServerByAlias = func(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)
 }

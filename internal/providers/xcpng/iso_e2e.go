@@ -56,6 +56,7 @@ type isoE2ERuntime struct {
 	remasteredISO     string
 	generatedSeed     string
 	generatedAnswer   string
+	linuxSeedPayload  xcpNgCloudInitPayload
 	keyPath           string
 	publicKey         string
 	windowsUser       string
@@ -92,6 +93,25 @@ var (
 	isoE2EUbuntuLinuxLinePattern  = regexp.MustCompile(`(?m)^(\s*linux\s+/casper/vmlinuz\s+)(.*?)(\s+---\s*)$`)
 	isoE2EWindowsARMLinePattern   = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(arm64|aarch64|arm)(?:[^a-z0-9]|$)`)
 )
+
+func isoE2ELeaseID(now time.Time) string {
+	if override := strings.TrimSpace(os.Getenv("CRABBOX_XCP_NG_ISO_E2E_LEASE_ID")); override != "" {
+		return override
+	}
+	return fmt.Sprintf("cbx_isoe2e_%d", now.Unix())
+}
+
+func isoE2EAllowImportedInstaller() bool {
+	return os.Getenv("CRABBOX_XCP_NG_ISO_E2E_ALLOW_IMPORTED_INSTALLER") == "1"
+}
+
+func isoE2EForceProvidedWindowsAnswerSSH() bool {
+	return os.Getenv("CRABBOX_XCP_NG_ISO_E2E_FORCE_WINDOWS_ANSWER_SSH") == "1"
+}
+
+func isoE2EKeepGeneratedWindowsAnswer() bool {
+	return os.Getenv("CRABBOX_XCP_NG_ISO_E2E_KEEP_WINDOWS_ANSWER") == "1"
+}
 
 func RunISOE2E(ctx context.Context, opts ISOE2EOptions) (summary ISOE2ESummary, err error) {
 	summary = ISOE2ESummary{
@@ -201,7 +221,7 @@ func resolveISOE2EReadOnly(ctx context.Context, client lifecycleClient, placemen
 func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcpNgPlacement, opts ISOE2EOptions, summary ISOE2ESummary) (result ISOE2ESummary, err error) {
 	result = summary
 	now := isoE2ECurrentTime()
-	leaseID := fmt.Sprintf("cbx_isoe2e_%d", now.Unix())
+	leaseID := isoE2ELeaseID(now)
 	labels := core.DirectLeaseLabels(opts.Config, leaseID, strings.TrimPrefix(opts.NamePrefix, "crabbox-"), "xcp-ng", "", true, now)
 	if err = ensureWindowsInstallerSupported(opts.ISO, "", &result); err != nil {
 		return result, err
@@ -319,7 +339,7 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 func runISOE2ELinux(ctx context.Context, client lifecycleClient, placement xcpNgPlacement, opts ISOE2EOptions, summary ISOE2ESummary) (result ISOE2ESummary, err error) {
 	result = summary
 	now := isoE2ECurrentTime()
-	leaseID := fmt.Sprintf("cbx_isoe2e_%d", now.Unix())
+	leaseID := isoE2ELeaseID(now)
 	labels := core.DirectLeaseLabels(opts.Config, leaseID, strings.TrimPrefix(opts.NamePrefix, "crabbox-"), "xcp-ng", "", true, now)
 	runtime := &isoE2ERuntime{
 		client:       client,
@@ -440,7 +460,8 @@ func (r *isoE2ERuntime) prepareInstallerMedia(ctx context.Context, opts ISOE2EOp
 		summary.Reason = "installer ISO is required"
 		return exit(2, "%s", summary.Reason)
 	}
-	if !fileExists(installerPath) {
+	importedInstallerRef := strings.HasPrefix(installerPath, "OpaqueRef:") || looksLikeUUID(installerPath)
+	if !fileExists(installerPath) && !(isoE2EAllowImportedInstaller() && importedInstallerRef) {
 		summary.Classification = "environment_blocked"
 		summary.Phase = "installer_iso"
 		summary.Reason = "linux mutating path requires a local Ubuntu Server ISO so the harness can remaster the autoinstall boot arg"
@@ -459,6 +480,9 @@ func (r *isoE2ERuntime) prepareInstallerMedia(ctx context.Context, opts ISOE2EOp
 		summary.Evidence["installer_iso_remastered"] = remasteredISO
 		opts.ISO = remasteredISO
 		summary.ISO = remasteredISO
+	} else if importedInstallerRef {
+		summary.Details["installer_source"] = "sr-vdi"
+		summary.ISO = installerPath
 	}
 	payload, err := newLinuxAutoinstallPayload(opts.Config, r.leaseID, strings.TrimPrefix(r.leaseID, "cbx_"), r.publicKey)
 	if err != nil {
@@ -467,6 +491,7 @@ func (r *isoE2ERuntime) prepareInstallerMedia(ctx context.Context, opts ISOE2EOp
 		summary.Reason = err.Error()
 		return err
 	}
+	r.linuxSeedPayload = xcpNgCloudInitPayload{UserData: payload.UserData, MetaData: payload.MetaData}
 	seedISO, err := isoE2EWriteLinuxSeedISO(ctx, opts.EvidenceDir, payload)
 	if err != nil {
 		summary.Classification = "test_failed"
@@ -487,7 +512,32 @@ func (r *isoE2ERuntime) prepareInstallerMedia(ctx context.Context, opts ISOE2EOp
 
 func (r *isoE2ERuntime) prepareWindowsAnswerMedia(ctx context.Context, opts ISOE2EOptions, summary *ISOE2ESummary) error {
 	if strings.TrimSpace(summary.AnswerISO) != "" {
-		r.windowsFallback = true
+		if !isoE2EForceProvidedWindowsAnswerSSH() {
+			r.windowsFallback = true
+			return nil
+		}
+		keyPath, publicKey, err := isoE2EEnsureTestboxKey(opts.Config, r.leaseID)
+		if err != nil {
+			summary.Classification = "test_failed"
+			summary.Phase = "windows_answer_generation"
+			summary.Reason = err.Error()
+			return err
+		}
+		rawUser := strings.TrimSpace(core.Blank(opts.Config.XCPNg.User, opts.Config.SSHUser))
+		user := windowsAccountName(rawUser)
+		if user == "" {
+			summary.Classification = "test_failed"
+			summary.Phase = "windows_answer_generation"
+			summary.Reason = "xcp-ng windows autounattend user is required"
+			return exit(2, "%s", summary.Reason)
+		}
+		r.keyPath = keyPath
+		r.publicKey = publicKey
+		r.windowsUser = user
+		summary.Details["answer_iso_source"] = "provided-media"
+		summary.Details["windows_bootstrap"] = "openssh-key"
+		summary.Details["ssh_key"] = filepath.Base(keyPath)
+		summary.Phase = "windows_answer_generation"
 		return nil
 	}
 	keyPath, publicKey, err := isoE2EEnsureTestboxKey(opts.Config, r.leaseID)
@@ -523,6 +573,9 @@ func (r *isoE2ERuntime) prepareWindowsAnswerMedia(ctx context.Context, opts ISOE
 	r.windowsUser = payload.Username
 	r.generatedAnswer = answerISO
 	r.cleanupLocal = append(r.cleanupLocal, answerISO)
+	if isoE2EKeepGeneratedWindowsAnswer() {
+		r.keepLocal[answerISO] = struct{}{}
+	}
 	summary.AnswerISO = answerISO
 	summary.Details["answer_iso_source"] = "generated-local-file"
 	summary.Details["windows_bootstrap"] = "openssh-key"
@@ -652,6 +705,25 @@ func (r *isoE2ERuntime) attachAnswerMedia(ctx context.Context, opts ISOE2EOption
 	if answerValue == "" {
 		return nil
 	}
+	if strings.EqualFold(summary.OS, "linux") && answerValue == r.generatedSeed && r.linuxSeedPayload.UserData != "" {
+		drive, err := r.client.AttachConfigDrive(ctx, xcpNgConfigDriveRequest{
+			VMRef:   xapiRef(r.vm.VM.Ref),
+			SRRef:   r.placement.srRef,
+			LeaseID: r.leaseID,
+			Slug:    "linux-autoinstall",
+			Payload: r.linuxSeedPayload,
+			Labels:  r.labels,
+		})
+		if err != nil {
+			summary.Classification = "environment_blocked"
+			summary.Phase = "answer_iso"
+			summary.Reason = err.Error()
+			return err
+		}
+		r.answerDrive = drive
+		summary.Details["answer_iso_source"] = "generated-config-drive"
+		return nil
+	}
 	answerISO, err := r.client.ResolveISOMedia(ctx, xcpNgProviderConfig(opts.Config), answerValue)
 	if err == nil && answerISO.Source != "local-file" {
 		summary.Details["answer_iso_source"] = answerISO.Source
@@ -722,13 +794,61 @@ func (r *isoE2ERuntime) waitForGuestIPv4(ctx context.Context, installLabel strin
 		deadline = dl
 	}
 	var lastErr error
+	restartCount := 0
+	const maxRestarts = 3
+	const restartCooldown = 20 * time.Second
+	nextPowerCheck := time.Time{}
+	nextDiscover := time.Time{}
 	for {
 		ip, err := r.client.GuestIPv4(ctx, xapiRef(r.vm.VM.Ref))
 		if err == nil && ip != "" {
 			return ip, nil
 		}
 		lastErr = err
+		if discoverer, ok := r.client.(guestIPv4Discoverer); ok && time.Now().After(nextDiscover) {
+			nextDiscover = time.Now().Add(guestIPDiscoverInterval)
+			discovered, discoverErr := discoverer.DiscoverGuestIPv4(ctx, xapiRef(r.vm.VM.Ref))
+			if discoverErr == nil && discovered != "" {
+				return discovered, nil
+			}
+			if lastErr == nil && discoverErr != nil {
+				lastErr = discoverErr
+			}
+		}
+
+		// Halt-restart: if the VM is halted (e.g. autoinstall rebooted and shut down),
+		// automatically start it again, but only up to a bounded number of attempts.
+		if time.Now().After(nextPowerCheck) && restartCount < maxRestarts {
+			srv, srvErr := r.client.GetServer(ctx, r.vm.VM.UUID)
+			if srvErr == nil {
+				status := strings.ToLower(strings.TrimSpace(srv.Status))
+				switch status {
+				case "running":
+					// VM is running but guest metrics haven't reported an IP yet.
+					// Nothing to do; keep waiting.
+				case "halted":
+					restartCount++
+					if startErr := r.client.StartVM(ctx, xapiRef(r.vm.VM.Ref)); startErr != nil {
+						lastErr = fmt.Errorf(
+							"guest IPv4 unavailable and VM halted (restart %d/%d failed: %w)",
+							restartCount, maxRestarts, startErr,
+						)
+					} else {
+						// Give Xenops/XAPI time to boot the guest before we poll again.
+						nextPowerCheck = time.Now().Add(restartCooldown)
+					}
+				default:
+					// Unexpected state (paused, suspended, etc.) — surface it.
+					lastErr = fmt.Errorf("guest IPv4 unavailable and VM in unexpected state %q", srv.Status)
+				}
+			}
+			// If we couldn't reach GetServer, lastErr stays the GuestIPv4 error.
+		}
+
 		if time.Now().After(deadline) {
+			if restartCount > 0 {
+				return "", exit(5, "timed out waiting for XCP-ng guest IPv4 after %s install (restarted %d times): %v", waitLabel, restartCount, lastErr)
+			}
 			if lastErr != nil {
 				return "", exit(5, "timed out waiting for XCP-ng guest IPv4 after %s install: %v", waitLabel, lastErr)
 			}
@@ -748,6 +868,10 @@ func (r *isoE2ERuntime) waitForGuestIPv4(ctx context.Context, installLabel strin
 func (r *isoE2ERuntime) cleanup(ctx context.Context, summary *ISOE2ESummary, runErr *error) {
 	if r.vm.VM.Ref == "" {
 		summary.Cleanup = "not_needed"
+		return
+	}
+	if os.Getenv("CRABBOX_XCP_NG_ISO_E2E_NO_CLEANUP") == "1" {
+		summary.Cleanup = "skipped"
 		return
 	}
 	cleanupErr := r.client.DeleteServer(ctx, r.vm.VM.Ref)
@@ -917,6 +1041,83 @@ func writeWindowsAnswerISO(ctx context.Context, evidenceDir string, payload xcpN
 	return path, nil
 }
 
+func injectUbuntuAutoinstallIntoGrubConfig(data []byte) ([]byte, bool, error) {
+	foundEntry := false
+	modified := false
+	updated := isoE2EUbuntuLinuxLinePattern.ReplaceAllStringFunc(string(data), func(line string) string {
+		parts := isoE2EUbuntuLinuxLinePattern.FindStringSubmatch(line)
+		if len(parts) != 4 {
+			return line
+		}
+		foundEntry = true
+		args := strings.Fields(parts[2])
+		for _, arg := range args {
+			if arg == "autoinstall" {
+				return line
+			}
+		}
+		modified = true
+		middle := strings.TrimSpace(parts[2])
+		if middle == "" {
+			middle = "autoinstall"
+		} else {
+			middle = middle + " autoinstall"
+		}
+		return parts[1] + middle + parts[3]
+	})
+	if !foundEntry {
+		return nil, false, errors.New("autoinstall boot entry not found in installer grub config")
+	}
+	return []byte(updated), modified, nil
+}
+
+func patchUbuntuAutoinstallGrubFile(path string) (bool, bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("read installer grub config %s: %w", path, err)
+	}
+	updated, modified, err := injectUbuntuAutoinstallIntoGrubConfig(data)
+	if err != nil {
+		return false, false, err
+	}
+	if !modified {
+		return true, false, nil
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return true, false, fmt.Errorf("chmod installer grub config %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, updated, 0o600); err != nil {
+		return true, false, fmt.Errorf("write installer grub config %s: %w", path, err)
+	}
+	return true, true, nil
+}
+
+func findXorrisoBinary() (string, error) {
+	for _, candidate := range []string{"xorriso", "/opt/homebrew/bin/xorriso", "/usr/local/bin/xorriso"} {
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path, nil
+		}
+	}
+	return "", errors.New("xorriso not found; install xorriso to remaster Ubuntu autoinstall ISO")
+}
+
+func ubuntuAutoinstallRemasterArgs(srcISO, outputISO string, mappings [][2]string) []string {
+	args := []string{
+		"-indev", srcISO,
+		"-outdev", outputISO,
+		"-boot_image", "any", "replay",
+		"-overwrite", "on",
+	}
+	for _, mapping := range mappings {
+		args = append(args, "-map", mapping[0], mapping[1])
+	}
+	args = append(args, "-commit", "-end")
+	return args
+}
+
 func remasterUbuntuAutoinstallISO(ctx context.Context, srcISO, evidenceDir string) (string, error) {
 	workDir, err := os.MkdirTemp(evidenceDir, "linux-installer-remaster-")
 	if err != nil {
@@ -930,50 +1131,30 @@ func remasterUbuntuAutoinstallISO(ctx context.Context, srcISO, evidenceDir strin
 	if out, err := exec.CommandContext(ctx, "bsdtar", "-C", extractDir, "-xf", srcISO).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("extract installer ISO: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	grubPath := filepath.Join(extractDir, "boot", "grub", "grub.cfg")
-	data, err := os.ReadFile(grubPath)
+	grubDir := filepath.Join(extractDir, "boot", "grub")
+	mappings := make([][2]string, 0, 2)
+	grubPath := filepath.Join(grubDir, "grub.cfg")
+	found, _, err := patchUbuntuAutoinstallGrubFile(grubPath)
 	if err != nil {
-		return "", fmt.Errorf("read installer grub config: %w", err)
+		return "", err
 	}
-	updated := isoE2EUbuntuLinuxLinePattern.ReplaceAllStringFunc(string(data), func(line string) string {
-		parts := isoE2EUbuntuLinuxLinePattern.FindStringSubmatch(line)
-		if len(parts) != 4 {
-			return line
-		}
-		args := strings.Fields(parts[2])
-		for _, arg := range args {
-			if arg == "autoinstall" {
-				return line
-			}
-		}
-		middle := strings.TrimSpace(parts[2])
-		if middle == "" {
-			middle = "autoinstall"
-		} else {
-			middle = middle + " autoinstall"
-		}
-		return parts[1] + middle + parts[3]
-	})
-	if updated == string(data) || !strings.Contains(updated, "autoinstall") {
+	if !found {
 		return "", errors.New("autoinstall boot entry not found in installer grub config")
 	}
-	if err := os.Chmod(grubPath, 0o600); err != nil {
-		return "", fmt.Errorf("chmod installer grub config: %w", err)
-	}
-	if err := os.WriteFile(grubPath, []byte(updated), 0o600); err != nil {
-		return "", fmt.Errorf("write installer grub config: %w", err)
+	mappings = append(mappings, [2]string{grubPath, "/boot/grub/grub.cfg"})
+	loopbackPath := filepath.Join(grubDir, "loopback.cfg")
+	if _, modified, err := patchUbuntuAutoinstallGrubFile(loopbackPath); err != nil {
+		return "", err
+	} else if modified {
+		mappings = append(mappings, [2]string{loopbackPath, "/boot/grub/loopback.cfg"})
 	}
 	outputISO := filepath.Join(evidenceDir, fmt.Sprintf("%s-linux-installer-autoinstall.iso", isoE2ECurrentTime().Format("20060102t150405z")))
-	args := []string{
-		"makehybrid", "-quiet", "-o", outputISO, extractDir,
-		"-iso", "-joliet",
-		"-default-volume-name", "Ubuntu-Server-Autoinstall",
-		"-eltorito-boot", "boot/grub/i386-pc/eltorito.img",
-		"-no-emul-boot",
-		"-eltorito-platform", "0",
-		"-eltorito-specification", `({"eltorito-boot"="boot/grub/i386-pc/eltorito.img";"no-emul-boot"=1;"eltorito-platform"=0;},{"eltorito-boot"="EFI/boot/bootx64.efi";"no-emul-boot"=1;"eltorito-platform"=239;})`,
+	xorriso, err := findXorrisoBinary()
+	if err != nil {
+		return "", err
 	}
-	if out, err := exec.CommandContext(ctx, "/usr/bin/hdiutil", args...).CombinedOutput(); err != nil {
+	args := ubuntuAutoinstallRemasterArgs(srcISO, outputISO, mappings)
+	if out, err := exec.CommandContext(ctx, xorriso, args...).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("remaster installer ISO with autoinstall boot arg: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return outputISO, nil

@@ -13,10 +13,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -33,8 +35,19 @@ type xapiClient struct {
 var (
 	xcpNgShutdownPollInterval = 2 * time.Second
 	xcpNgShutdownTimeout      = 5 * time.Minute
+	xcpNgStartPollInterval    = 500 * time.Millisecond
+	xcpNgStartTimeout         = 1 * time.Minute
 	xcpNgTaskPollInterval     = 1 * time.Second
 	xcpNgTaskTimeout          = 1 * time.Minute
+	xcpNgProbeTCPAddress      = func(ctx context.Context, address string, timeout time.Duration) error {
+		conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", address)
+		if err == nil {
+			_ = conn.Close()
+		}
+		return err
+	}
+	xcpNgLocalIPv4Networks = localIPv4Networks
+	xcpNgReadARPTable      = readARPTable
 )
 
 func newXAPIClient(ctx context.Context, cfg Config) (*xapiClient, error) {
@@ -54,7 +67,7 @@ func newXAPIClient(ctx context.Context, cfg Config) (*xapiClient, error) {
 		}).DialContext,
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: xcfg.InsecureTLS}, //nolint:gosec // explicit private-lab opt-in.
 	}
-	httpClient := &http.Client{Timeout: 60 * time.Second, Transport: transport}
+	httpClient := &http.Client{Timeout: 5 * time.Minute, Transport: transport}
 	c := &xapiClient{endpoint: endpoint, username: xcfg.Username, password: xcfg.Password, http: httpClient}
 	if err := c.login(ctx); err != nil {
 		return nil, err
@@ -201,9 +214,6 @@ func (c *xapiClient) isoByRef(ctx context.Context, ref, requested string) (xcpNg
 	if xmlStructString(record, "type") == "system" {
 		return xcpNgISOMediaRef{}, exit(4, "xcp-ng installer ISO VDI is not user media: %s", requested)
 	}
-	if xmlStructString(record, "read_only") != "true" {
-		return xcpNgISOMediaRef{}, exit(4, "xcp-ng installer ISO VDI must be read-only media: %s", requested)
-	}
 	return iso, nil
 }
 
@@ -308,6 +318,10 @@ func (c *xapiClient) CreateFreshVM(ctx context.Context, req xcpNgFreshVMRequest)
 	if err != nil {
 		return xcpNgFreshVMResult{}, err
 	}
+	if _, err := c.call(ctx, "VM.set_is_a_template", c.session, ref, false); err != nil {
+		_ = c.deleteServer(context.Background(), ref, true)
+		return xcpNgFreshVMResult{}, err
+	}
 	// If the template has no disks and we need an SR for provisioning, use VM.copy
 	// For now, VM.clone is sufficient since we attach disks separately.
 	result := xcpNgFreshVMResult{VM: xapiVM{Ref: ref, Name: req.Name, PowerState: "halted", Labels: req.Labels}}
@@ -342,10 +356,22 @@ func (c *xapiClient) CreateFreshVM(ctx context.Context, req xcpNgFreshVMRequest)
 		_ = c.deleteServer(context.Background(), ref, true)
 		return xcpNgFreshVMResult{}, err
 	}
-	for key := range existingBootParams {
-		c.callDiscard(ctx, "VM.remove_from_HVM_boot_params", c.session, ref, key)
+	mergedBootParams := map[string]string{}
+	for key, value := range existingBootParams {
+		mergedBootParams[key] = value
 	}
 	for key, value := range hvmBootParams {
+		mergedBootParams[key] = value
+	}
+	for key, existingValue := range existingBootParams {
+		if value, ok := mergedBootParams[key]; !ok || value != existingValue {
+			c.callDiscard(ctx, "VM.remove_from_HVM_boot_params", c.session, ref, key)
+		}
+	}
+	for key, value := range mergedBootParams {
+		if existingValue, ok := existingBootParams[key]; ok && existingValue == value {
+			continue
+		}
 		if _, err := c.call(ctx, "VM.add_to_HVM_boot_params", c.session, ref, key, value); err != nil {
 			_ = c.deleteServer(context.Background(), ref, true)
 			return xcpNgFreshVMResult{}, err
@@ -356,10 +382,22 @@ func (c *xapiClient) CreateFreshVM(ctx context.Context, req xcpNgFreshVMRequest)
 		_ = c.deleteServer(context.Background(), ref, true)
 		return xcpNgFreshVMResult{}, err
 	}
-	for key := range existingPlatform {
-		c.callDiscard(ctx, "VM.remove_from_platform", c.session, ref, key)
+	mergedPlatform := map[string]string{}
+	for key, value := range existingPlatform {
+		mergedPlatform[key] = value
 	}
 	for key, value := range platformKeys {
+		mergedPlatform[key] = value
+	}
+	for key, existingValue := range existingPlatform {
+		if value, ok := mergedPlatform[key]; !ok || value != existingValue {
+			c.callDiscard(ctx, "VM.remove_from_platform", c.session, ref, key)
+		}
+	}
+	for key, value := range mergedPlatform {
+		if existingValue, ok := existingPlatform[key]; ok && existingValue == value {
+			continue
+		}
 		if _, err := c.call(ctx, "VM.add_to_platform", c.session, ref, key, value); err != nil {
 			_ = c.deleteServer(context.Background(), ref, true)
 			return xcpNgFreshVMResult{}, err
@@ -438,7 +476,7 @@ func (c *xapiClient) ImportISO(ctx context.Context, req xcpNgImportISORequest) (
 		"sharable":         false,
 		"read_only":        false,
 		"xenstore_data":    map[string]string{},
-		"sm_config":        map[string]string{},
+		"sm_config":        map[string]string{"type": "raw"},
 		"tags":             []string{},
 		"other_config":     labels,
 	})
@@ -482,7 +520,7 @@ func (c *xapiClient) AttachDisk(ctx context.Context, req xcpNgDiskAttachRequest)
 		"sharable":         false,
 		"read_only":        false,
 		"xenstore_data":    map[string]string{},
-		"sm_config":        map[string]string{},
+		"sm_config":        map[string]string{"type": "raw"},
 		"tags":             []string{},
 		"other_config":     labels,
 	})
@@ -531,7 +569,7 @@ func (c *xapiClient) AttachConfigDrive(ctx context.Context, req xcpNgConfigDrive
 		"sharable":         false,
 		"read_only":        false,
 		"xenstore_data":    map[string]string{},
-		"sm_config":        map[string]string{},
+		"sm_config":        map[string]string{"type": "raw"},
 		"tags":             []string{},
 		"other_config":     labels,
 	})
@@ -593,8 +631,13 @@ func (c *xapiClient) AttachISO(ctx context.Context, req xcpNgISOAttachRequest) (
 }
 
 func (c *xapiClient) StartVM(ctx context.Context, ref xapiRef) error {
-	_, err := c.call(ctx, "VM.start", c.session, ref.value(), false, false)
-	return err
+	if _, err := c.call(ctx, "VM.start", c.session, ref.value(), false, false); err != nil {
+		return err
+	}
+	if err := c.waitForPowerState(ctx, ref.value(), "Running", xcpNgStartTimeout); err != nil {
+		return err
+	}
+	return c.waitForDomID(ctx, ref.value(), xcpNgStartTimeout)
 }
 
 func (c *xapiClient) SetVMBootOrder(ctx context.Context, ref xapiRef, order string) error {
@@ -632,6 +675,18 @@ func (c *xapiClient) GuestIPv4(ctx context.Context, ref xapiRef) (string, error)
 	return "", errors.New("no guest ipv4 address reported by XCP-ng guest metrics")
 }
 
+func (c *xapiClient) DiscoverGuestIPv4(ctx context.Context, ref xapiRef) (string, error) {
+	macs, err := c.vmVIFMACs(ctx, ref.value())
+	if err != nil {
+		return "", err
+	}
+	endpointHost := ""
+	if u, parseErr := url.Parse(c.endpoint); parseErr == nil {
+		endpointHost = u.Hostname()
+	}
+	return discoverIPv4ByMAC(ctx, macs, endpointHost)
+}
+
 func (c *xapiClient) GuestIPv4ForID(ctx context.Context, id string) (string, error) {
 	ref, err := c.vmRefForID(ctx, id)
 	if err != nil {
@@ -651,6 +706,278 @@ func (c *xapiClient) GetServer(ctx context.Context, id string) (Server, error) {
 	}
 	ip, _ := c.GuestIPv4(ctx, xapiRef(record.Ref))
 	return xcpNgVMToServer(record, record.Labels, ip), nil
+}
+
+func (c *xapiClient) vmVIFMACs(ctx context.Context, vmRef string) ([]string, error) {
+	value, err := c.call(ctx, "VM.get_VIFs", c.session, vmRef)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	macs := make([]string, 0, len(value.Array))
+	for _, vifRef := range xmlValueToStrings(value) {
+		mac, err := c.callString(ctx, "VIF.get_MAC", c.session, vifRef)
+		if err != nil {
+			return nil, err
+		}
+		mac = normalizeMAC(mac)
+		if mac == "" {
+			continue
+		}
+		if _, ok := seen[mac]; ok {
+			continue
+		}
+		seen[mac] = struct{}{}
+		macs = append(macs, mac)
+	}
+	return macs, nil
+}
+
+func discoverIPv4ByMAC(ctx context.Context, macs []string, endpointHost string) (string, error) {
+	macs = normalizeMACList(macs)
+	if len(macs) == 0 {
+		return "", errors.New("xcp-ng guest IP fallback requires at least one VIF MAC")
+	}
+	if ip, err := matchIPv4ByMAC(ctx, macs); ip != "" || err != nil {
+		return ip, err
+	}
+	networks, err := xcpNgLocalIPv4Networks()
+	if err != nil {
+		return "", err
+	}
+	networks = preferredLocalIPv4Networks(networks, endpointHost)
+	if len(networks) == 0 {
+		return "", errors.New("xcp-ng guest IP fallback found no local IPv4 networks to probe")
+	}
+	probeLocalNetworks(ctx, networks)
+	return matchIPv4ByMAC(ctx, macs)
+}
+
+func matchIPv4ByMAC(ctx context.Context, macs []string) (string, error) {
+	table, err := xcpNgReadARPTable(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, mac := range macs {
+		if ip, ok := table[mac]; ok && usableIPv4(ip) != "" {
+			return usableIPv4(ip), nil
+		}
+	}
+	return "", nil
+}
+
+func preferredLocalIPv4Networks(networks []net.IPNet, endpointHost string) []net.IPNet {
+	endpointIP := net.ParseIP(strings.TrimSpace(endpointHost)).To4()
+	if endpointIP == nil {
+		return networks
+	}
+	filtered := make([]net.IPNet, 0, len(networks))
+	for _, network := range networks {
+		if network.Contains(endpointIP) {
+			filtered = append(filtered, network)
+		}
+	}
+	if len(filtered) == 0 {
+		return networks
+	}
+	return filtered
+}
+
+func probeLocalNetworks(ctx context.Context, networks []net.IPNet) {
+	const (
+		concurrency = 32
+		timeout     = 200 * time.Millisecond
+	)
+	ports := []string{"22", "2222"}
+	if len(ports) == 0 {
+		return
+	}
+	port := ports[0]
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for _, network := range networks {
+		for _, host := range enumerateIPv4Hosts(network) {
+			if ctx.Err() != nil {
+				break
+			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(host, port string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				_ = xcpNgProbeTCPAddress(ctx, net.JoinHostPort(host, port), timeout)
+			}(host, port)
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	wg.Wait()
+}
+
+func localIPv4Networks() ([]net.IPNet, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	out := make([]net.IPNet, 0, len(ifaces))
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return nil, err
+		}
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			clamped, ok := clampIPv4Network(*ipNet)
+			if !ok {
+				continue
+			}
+			key := clamped.String()
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, clamped)
+		}
+	}
+	return out, nil
+}
+
+func clampIPv4Network(network net.IPNet) (net.IPNet, bool) {
+	ip := network.IP.To4()
+	if ip == nil {
+		return net.IPNet{}, false
+	}
+	ones, bits := network.Mask.Size()
+	if bits != net.IPv4len*8 || ones >= 31 {
+		return net.IPNet{}, false
+	}
+	if ones < 24 {
+		network.Mask = net.CIDRMask(24, net.IPv4len*8)
+	}
+	network.IP = ip.Mask(network.Mask)
+	return network, true
+}
+
+func enumerateIPv4Hosts(network net.IPNet) []string {
+	ip := network.IP.To4()
+	if ip == nil {
+		return nil
+	}
+	ones, bits := network.Mask.Size()
+	if bits != net.IPv4len*8 {
+		return nil
+	}
+	hostBits := bits - ones
+	if hostBits <= 0 {
+		return nil
+	}
+	total := 1 << hostBits
+	if total > 256 {
+		total = 256
+	}
+	base := binaryIPv4(ip)
+	hosts := make([]string, 0, max(total-2, 0))
+	for offset := 1; offset < total-1; offset++ {
+		hosts = append(hosts, ipv4FromUint32(base+uint32(offset)).String())
+	}
+	return hosts
+}
+
+func readARPTable(ctx context.Context) (map[string]string, error) {
+	table := map[string]string{}
+	var firstErr error
+	for _, spec := range [][]string{{"arp", "-an"}, {"ip", "neigh"}} {
+		out, err := exec.CommandContext(ctx, spec[0], spec[1:]...).CombinedOutput()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		mergeARPTable(table, string(out))
+	}
+	if len(table) > 0 {
+		return table, nil
+	}
+	return nil, firstErr
+}
+
+func mergeARPTable(table map[string]string, output string) {
+	arpPattern := regexp.MustCompile(`\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+([0-9a-fA-F:]{17})`)
+	for _, match := range arpPattern.FindAllStringSubmatch(output, -1) {
+		ip := usableIPv4(match[1])
+		mac := normalizeMAC(match[2])
+		if ip == "" || mac == "" {
+			continue
+		}
+		table[mac] = ip
+	}
+	ipNeighPattern := regexp.MustCompile(`(?m)^(\d+\.\d+\.\d+\.\d+)\s+\S+\s+\S+\s+lladdr\s+([0-9a-fA-F:]{17})\b`)
+	for _, match := range ipNeighPattern.FindAllStringSubmatch(output, -1) {
+		ip := usableIPv4(match[1])
+		mac := normalizeMAC(match[2])
+		if ip == "" || mac == "" {
+			continue
+		}
+		table[mac] = ip
+	}
+}
+
+func normalizeMACList(macs []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(macs))
+	for _, mac := range macs {
+		mac = normalizeMAC(mac)
+		if mac == "" {
+			continue
+		}
+		if _, ok := seen[mac]; ok {
+			continue
+		}
+		seen[mac] = struct{}{}
+		out = append(out, mac)
+	}
+	return out
+}
+
+func normalizeMAC(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "-", ":")
+	if len(value) != 17 {
+		return ""
+	}
+	for i, ch := range value {
+		if i%3 == 2 {
+			if ch != ':' {
+				return ""
+			}
+			continue
+		}
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return ""
+		}
+	}
+	return value
+}
+
+func binaryIPv4(ip net.IP) uint32 {
+	ip = ip.To4()
+	if ip == nil {
+		return 0
+	}
+	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
+}
+
+func ipv4FromUint32(value uint32) net.IP {
+	return net.IPv4(byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
 }
 
 func (c *xapiClient) SetLabels(ctx context.Context, id string, labels map[string]string) error {
@@ -765,7 +1092,7 @@ func (c *xapiClient) waitForPowerState(ctx context.Context, ref, want string, ti
 		if err != nil {
 			return err
 		}
-		if state == want {
+		if strings.EqualFold(state, want) {
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -775,6 +1102,28 @@ func (c *xapiClient) waitForPowerState(ctx context.Context, ref, want string, ti
 		case <-ctx.Done():
 			return context.Cause(ctx)
 		case <-time.After(xcpNgShutdownPollInterval):
+		}
+	}
+}
+
+func (c *xapiClient) waitForDomID(ctx context.Context, ref string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		domid, err := c.callString(ctx, "VM.get_domid", c.session, ref)
+		if err != nil {
+			return err
+		}
+		domid = strings.TrimSpace(domid)
+		if domid != "" && domid != "-1" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return exit(5, "timed out waiting for xcp-ng VM %s domid assignment", ref)
+		}
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-time.After(xcpNgStartPollInterval):
 		}
 	}
 }

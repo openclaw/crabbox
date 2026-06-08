@@ -32,6 +32,7 @@ type fakeLifecycleClient struct {
 	importedISO  xcpNgConfigDrive
 	attachedDisk xcpNgConfigDrive
 	guestIP      string
+	discoveredIP string
 	getServer    map[string]Server
 	errOn        map[string]error
 	mutated      bool
@@ -257,6 +258,14 @@ func (f *fakeLifecycleClient) GuestIPv4ForID(context.Context, string) (string, e
 		return "", err
 	}
 	return f.guestIP, nil
+}
+
+func (f *fakeLifecycleClient) DiscoverGuestIPv4(context.Context, xapiRef) (string, error) {
+	f.record("discover-guest-ip")
+	if err := f.fail("discover-guest-ip"); err != nil {
+		return "", err
+	}
+	return f.discoveredIP, nil
 }
 
 func (f *fakeLifecycleClient) GetServer(_ context.Context, id string) (Server, error) {
@@ -494,6 +503,24 @@ func TestWaitForGuestIPv4ClassifiesGuestMetricsNoIPAsBootstrapTimeout(t *testing
 	}
 	if !strings.Contains(err.Error(), "no guest ipv4 address reported by XCP-ng guest metrics") {
 		t.Fatalf("err=%v, want guest metrics context", err)
+	}
+}
+
+func TestWaitForGuestIPv4FallsBackToDiscoveredGuestIP(t *testing.T) {
+	fake := &fakeLifecycleClient{
+		errOn:        map[string]error{"guest-ip": errors.New("no guest ipv4 address reported by XCP-ng guest metrics")},
+		discoveredIP: "192.0.2.77",
+	}
+	backend := newTestBackend(t, fake)
+	ip, err := backend.waitForGuestIPv4(context.Background(), fake, "OpaqueRef:vm", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ip != "192.0.2.77" {
+		t.Fatalf("ip=%s", ip)
+	}
+	if got := strings.Join(fake.calls, ","); !strings.Contains(got, "discover-guest-ip") {
+		t.Fatalf("calls=%v", fake.calls)
 	}
 }
 
@@ -842,6 +869,7 @@ func TestRunISOE2ELinuxMutatePassesWithImportedMediaAndSSHProof(t *testing.T) {
 		hostRef:      "OpaqueRef:host",
 		iso:          xcpNgISOMediaRef{Source: "local-file", NameLabel: isoPath},
 		guestIP:      "192.0.2.50",
+		drive:        xcpNgConfigDrive{VDIRef: "OpaqueRef:seed-vdi", VBDRef: "OpaqueRef:seed-vbd", Name: "linux-seed", DestroyVDI: true},
 		importedISO:  xcpNgConfigDrive{VDIRef: "OpaqueRef:imported-vdi", Name: "installer.iso", DestroyVDI: true},
 		attachedDisk: xcpNgConfigDrive{VDIRef: "OpaqueRef:disk-vdi", VBDRef: "OpaqueRef:disk-vbd", Name: "install-disk", DestroyVDI: true},
 	}
@@ -883,12 +911,15 @@ func TestRunISOE2ELinuxMutatePassesWithImportedMediaAndSSHProof(t *testing.T) {
 	if summary.Classification != "linux_install_passed" || summary.Phase != "linux_ssh_ok" || summary.Cleanup != "cleaned" {
 		t.Fatalf("summary=%#v", summary)
 	}
-	for _, want := range []string{"create-fresh-vm", "attach-disk", "import-iso", "attach-iso", "start", "set-boot-order", "guest-ip", "delete", "delete-config-drive"} {
+	for _, want := range []string{"create-fresh-vm", "attach-disk", "import-iso", "attach-iso", "attach-config-drive", "start", "set-boot-order", "guest-ip", "delete", "delete-config-drive"} {
 		if !strings.Contains(strings.Join(fake.calls, ","), want) {
 			t.Fatalf("calls=%v missing %s", fake.calls, want)
 		}
 	}
 	if summary.Details["first_boot_ip"] != "192.0.2.50" {
+		t.Fatalf("summary=%#v", summary)
+	}
+	if summary.Details["answer_iso_source"] != "generated-config-drive" {
 		t.Fatalf("summary=%#v", summary)
 	}
 }
@@ -904,6 +935,7 @@ func TestRunISOE2ELinuxMutateClassifiesGuestMetricsBlocker(t *testing.T) {
 		networkRef:   "OpaqueRef:net",
 		hostRef:      "OpaqueRef:host",
 		iso:          xcpNgISOMediaRef{Source: "local-file", NameLabel: isoPath},
+		drive:        xcpNgConfigDrive{VDIRef: "OpaqueRef:seed-vdi", VBDRef: "OpaqueRef:seed-vbd", Name: "linux-seed", DestroyVDI: true},
 		importedISO:  xcpNgConfigDrive{VDIRef: "OpaqueRef:imported-vdi", Name: "installer.iso", DestroyVDI: true},
 		attachedDisk: xcpNgConfigDrive{VDIRef: "OpaqueRef:disk-vdi", VBDRef: "OpaqueRef:disk-vbd", Name: "install-disk", DestroyVDI: true},
 		errOn:        map[string]error{"guest-ip": errors.New("no guest ipv4 address reported by XCP-ng guest metrics")},
@@ -939,6 +971,63 @@ func TestRunISOE2ELinuxMutateClassifiesGuestMetricsBlocker(t *testing.T) {
 	}
 	if !strings.Contains(summary.Reason, "guest IPv4") && !strings.Contains(summary.Reason, "guest metrics") && !strings.Contains(summary.Reason, "timed out waiting") {
 		t.Fatalf("summary=%#v", summary)
+	}
+}
+
+func TestRunISOE2ELinuxMutateFallsBackToDiscoveredGuestIP(t *testing.T) {
+	dir := t.TempDir()
+	isoPath := filepath.Join(dir, "ubuntu.iso")
+	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeLifecycleClient{
+		srRef:        "OpaqueRef:sr",
+		networkRef:   "OpaqueRef:net",
+		hostRef:      "OpaqueRef:host",
+		iso:          xcpNgISOMediaRef{Source: "local-file", NameLabel: isoPath},
+		drive:        xcpNgConfigDrive{VDIRef: "OpaqueRef:seed-vdi", VBDRef: "OpaqueRef:seed-vbd", Name: "linux-seed", DestroyVDI: true},
+		importedISO:  xcpNgConfigDrive{VDIRef: "OpaqueRef:imported-vdi", Name: "installer.iso", DestroyVDI: true},
+		attachedDisk: xcpNgConfigDrive{VDIRef: "OpaqueRef:disk-vdi", VBDRef: "OpaqueRef:disk-vbd", Name: "install-disk", DestroyVDI: true},
+		discoveredIP: "192.0.2.88",
+		errOn:        map[string]error{"guest-ip": errors.New("no guest ipv4 address reported by XCP-ng guest metrics")},
+	}
+	oldClient := newLifecycleClient
+	oldWait := isoE2EWaitForSSHReady
+	oldRunSSH := isoE2ERunSSHQuiet
+	oldEnsure := isoE2EEnsureTestboxKey
+	oldRemaster := isoE2ERemasterUbuntuISO
+	oldSeed := isoE2EWriteLinuxSeedISO
+	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
+	isoE2EWaitForSSHReady = func(context.Context, *core.SSHTarget, string, time.Duration) error { return nil }
+	isoE2ERunSSHQuiet = func(context.Context, core.SSHTarget, string) error { return nil }
+	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) {
+		return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil
+	}
+	isoE2ERemasterUbuntuISO = func(context.Context, string, string) (string, error) { return isoPath, nil }
+	isoE2EWriteLinuxSeedISO = func(context.Context, string, xcpNgLinuxAutoinstallPayload) (string, error) {
+		seedPath := filepath.Join(dir, "seed.iso")
+		if err := os.WriteFile(seedPath, []byte("seed"), 0o600); err != nil {
+			return "", err
+		}
+		return seedPath, nil
+	}
+	t.Cleanup(func() {
+		newLifecycleClient = oldClient
+		isoE2EWaitForSSHReady = oldWait
+		isoE2ERunSSHQuiet = oldRunSSH
+		isoE2EEnsureTestboxKey = oldEnsure
+		isoE2ERemasterUbuntuISO = oldRemaster
+		isoE2EWriteLinuxSeedISO = oldSeed
+	})
+	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "mutate", OS: "linux", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence"), MutateGate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Details["first_boot_ip"] != "192.0.2.88" {
+		t.Fatalf("summary=%#v", summary)
+	}
+	if got := strings.Join(fake.calls, ","); !strings.Contains(got, "discover-guest-ip") {
+		t.Fatalf("calls=%v", fake.calls)
 	}
 }
 

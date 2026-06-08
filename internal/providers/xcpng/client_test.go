@@ -6,10 +6,15 @@ import (
 	"encoding/xml"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -643,9 +648,274 @@ func TestCloneVMProvisionRollbackDestroysUnlabeledCopiedDisk(t *testing.T) {
 	}
 }
 
+func TestCreateFreshVMPreservesTemplateDefaults(t *testing.T) {
+	var removedBootKeys []string
+	var addedBootValues []string
+	var removedPlatformKeys []string
+	var addedPlatformValues []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, body := readXMLRPCBodyAndMethod(t, r)
+		switch method {
+		case "VM.get_by_name_label":
+			writeXMLRPCStringArray(t, w, []string{"OpaqueRef:tpl"})
+		case "VM.get_is_a_template":
+			writeXMLRPCString(t, w, "true")
+		case "VM.clone":
+			writeXMLRPCString(t, w, "OpaqueRef:vm")
+		case "VM.set_is_a_template", "VM.set_memory_static_max", "VM.set_memory_dynamic_max", "VM.set_memory_dynamic_min", "VM.set_memory_static_min", "VM.set_VCPUs_max", "VM.set_VCPUs_at_startup":
+			writeXMLRPCString(t, w, "true")
+		case "VM.get_HVM_boot_params":
+			writeXMLRPCStringMap(t, w, map[string]string{"firmware": "bios", "order": "cd"})
+		case "VM.remove_from_HVM_boot_params":
+			switch {
+			case strings.Contains(body, "<string>order</string>"):
+				removedBootKeys = append(removedBootKeys, "order")
+			case strings.Contains(body, "<string>firmware</string>"):
+				removedBootKeys = append(removedBootKeys, "firmware")
+			default:
+				t.Fatalf("unexpected remove boot body=%s", body)
+			}
+			writeXMLRPCString(t, w, "true")
+		case "VM.add_to_HVM_boot_params":
+			switch {
+			case strings.Contains(body, "<string>order</string>") && strings.Contains(body, "<string>dc</string>"):
+				addedBootValues = append(addedBootValues, "order=dc")
+			case strings.Contains(body, "<string>firmware</string>") && strings.Contains(body, "<string>uefi</string>"):
+				addedBootValues = append(addedBootValues, "firmware=uefi")
+			default:
+				t.Fatalf("unexpected add boot body=%s", body)
+			}
+			writeXMLRPCString(t, w, "true")
+		case "VM.get_platform":
+			writeXMLRPCStringMap(t, w, map[string]string{
+				"acpi":       "1",
+				"apic":       "true",
+				"hpet":       "true",
+				"nx":         "true",
+				"pae":        "true",
+				"secureboot": "false",
+				"viridian":   "true",
+			})
+		case "VM.remove_from_platform":
+			switch {
+			case strings.Contains(body, "<string>secureboot</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "secureboot")
+			case strings.Contains(body, "<string>nx</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "nx")
+			case strings.Contains(body, "<string>acpi</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "acpi")
+			case strings.Contains(body, "<string>apic</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "apic")
+			case strings.Contains(body, "<string>pae</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "pae")
+			case strings.Contains(body, "<string>hpet</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "hpet")
+			case strings.Contains(body, "<string>viridian</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "viridian")
+			default:
+				t.Fatalf("unexpected remove platform body=%s", body)
+			}
+			writeXMLRPCString(t, w, "true")
+		case "VM.add_to_platform":
+			switch {
+			case strings.Contains(body, "<string>secureboot</string>") && strings.Contains(body, "<string>true</string>"):
+				addedPlatformValues = append(addedPlatformValues, "secureboot=true")
+			default:
+				t.Fatalf("unexpected add platform body=%s", body)
+			}
+			writeXMLRPCString(t, w, "true")
+		case "VM.remove_from_other_config":
+			writeXMLRPCFault(t, w, "MAP_KEY_NOT_FOUND")
+		case "VM.add_to_other_config":
+			writeXMLRPCString(t, w, "true")
+		case "VM.get_uuid":
+			writeXMLRPCString(t, w, xcpNgTestVMUUID)
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	vm, err := client.CreateFreshVM(context.Background(), xcpNgFreshVMRequest{
+		Name:   "crabbox-test",
+		Labels: map[string]string{"lease": "cbx_lease"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.VM.UUID != xcpNgTestVMUUID {
+		t.Fatalf("vm=%#v", vm)
+	}
+	if got := strings.Join(removedBootKeys, ","); got != "order" {
+		t.Fatalf("removedBootKeys=%v", removedBootKeys)
+	}
+	if got := strings.Join(addedBootValues, ","); got != "order=dc" {
+		t.Fatalf("addedBootValues=%v", addedBootValues)
+	}
+	if len(removedPlatformKeys) != 0 {
+		t.Fatalf("removedPlatformKeys=%v", removedPlatformKeys)
+	}
+	if len(addedPlatformValues) != 0 {
+		t.Fatalf("addedPlatformValues=%v", addedPlatformValues)
+	}
+}
+
+func TestCreateFreshVMSecureBootOverridesTemplateWithoutDroppingPlatformDefaults(t *testing.T) {
+	var removedBootKeys []string
+	var addedBootValues []string
+	var removedPlatformKeys []string
+	var addedPlatformValues []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, body := readXMLRPCBodyAndMethod(t, r)
+		switch method {
+		case "VM.get_by_name_label":
+			writeXMLRPCStringArray(t, w, []string{"OpaqueRef:tpl"})
+		case "VM.get_is_a_template":
+			writeXMLRPCString(t, w, "true")
+		case "VM.clone":
+			writeXMLRPCString(t, w, "OpaqueRef:vm")
+		case "VM.set_is_a_template", "VM.set_memory_static_max", "VM.set_memory_dynamic_max", "VM.set_memory_dynamic_min", "VM.set_memory_static_min", "VM.set_VCPUs_max", "VM.set_VCPUs_at_startup", "VM.set_HVM_boot_policy":
+			writeXMLRPCString(t, w, "true")
+		case "VM.get_HVM_boot_params":
+			writeXMLRPCStringMap(t, w, map[string]string{"firmware": "bios", "order": "cd"})
+		case "VM.remove_from_HVM_boot_params":
+			switch {
+			case strings.Contains(body, "<string>order</string>"):
+				removedBootKeys = append(removedBootKeys, "order")
+			case strings.Contains(body, "<string>firmware</string>"):
+				removedBootKeys = append(removedBootKeys, "firmware")
+			default:
+				t.Fatalf("unexpected remove boot body=%s", body)
+			}
+			writeXMLRPCString(t, w, "true")
+		case "VM.add_to_HVM_boot_params":
+			switch {
+			case strings.Contains(body, "<string>order</string>") && strings.Contains(body, "<string>dc</string>"):
+				addedBootValues = append(addedBootValues, "order=dc")
+			case strings.Contains(body, "<string>firmware</string>") && strings.Contains(body, "<string>uefi</string>"):
+				addedBootValues = append(addedBootValues, "firmware=uefi")
+			default:
+				t.Fatalf("unexpected add boot body=%s", body)
+			}
+			writeXMLRPCString(t, w, "true")
+		case "VM.get_platform":
+			writeXMLRPCStringMap(t, w, map[string]string{
+				"acpi":       "1",
+				"apic":       "true",
+				"hpet":       "true",
+				"nx":         "true",
+				"pae":        "true",
+				"secureboot": "false",
+				"viridian":   "true",
+			})
+		case "VM.remove_from_platform":
+			switch {
+			case strings.Contains(body, "<string>secureboot</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "secureboot")
+			case strings.Contains(body, "<string>nx</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "nx")
+			case strings.Contains(body, "<string>acpi</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "acpi")
+			case strings.Contains(body, "<string>apic</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "apic")
+			case strings.Contains(body, "<string>pae</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "pae")
+			case strings.Contains(body, "<string>hpet</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "hpet")
+			case strings.Contains(body, "<string>viridian</string>"):
+				removedPlatformKeys = append(removedPlatformKeys, "viridian")
+			default:
+				t.Fatalf("unexpected remove platform body=%s", body)
+			}
+			writeXMLRPCString(t, w, "true")
+		case "VM.add_to_platform":
+			switch {
+			case strings.Contains(body, "<string>secureboot</string>") && strings.Contains(body, "<string>true</string>"):
+				addedPlatformValues = append(addedPlatformValues, "secureboot=true")
+			default:
+				t.Fatalf("unexpected add platform body=%s", body)
+			}
+			writeXMLRPCString(t, w, "true")
+		case "VM.remove_from_other_config":
+			writeXMLRPCFault(t, w, "MAP_KEY_NOT_FOUND")
+		case "VM.add_to_other_config":
+			writeXMLRPCString(t, w, "true")
+		case "VM.get_uuid":
+			writeXMLRPCString(t, w, xcpNgTestVMUUID)
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	vm, err := client.CreateFreshVM(context.Background(), xcpNgFreshVMRequest{
+		Name:       "crabbox-test",
+		Labels:     map[string]string{"lease": "cbx_lease"},
+		SecureBoot: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.VM.UUID != xcpNgTestVMUUID {
+		t.Fatalf("vm=%#v", vm)
+	}
+	sort.Strings(removedBootKeys)
+	sort.Strings(addedBootValues)
+	if got := strings.Join(removedBootKeys, ","); got != "firmware,order" {
+		t.Fatalf("removedBootKeys=%v", removedBootKeys)
+	}
+	if got := strings.Join(addedBootValues, ","); got != "firmware=uefi,order=dc" {
+		t.Fatalf("addedBootValues=%v", addedBootValues)
+	}
+	if got := strings.Join(removedPlatformKeys, ","); got != "secureboot" {
+		t.Fatalf("removedPlatformKeys=%v", removedPlatformKeys)
+	}
+	if got := strings.Join(addedPlatformValues, ","); got != "secureboot=true" {
+		t.Fatalf("addedPlatformValues=%v", addedPlatformValues)
+	}
+}
+
+func TestAttachDiskCreatesRawVDI(t *testing.T) {
+	var sawRawVDICreate bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, body := readXMLRPCBodyAndMethod(t, r)
+		switch method {
+		case "VDI.create":
+			if strings.Contains(body, `<name>sm_config</name><value><struct><member><name>type</name><value><string>raw</string></value></member></struct></value>`) {
+				sawRawVDICreate = true
+			}
+			writeXMLRPCString(t, w, "OpaqueRef:vdi")
+		case "VBD.create":
+			writeXMLRPCString(t, w, "OpaqueRef:vbd")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	drive, err := client.AttachDisk(context.Background(), xcpNgDiskAttachRequest{
+		VMRef:      "OpaqueRef:vm",
+		SRRef:      "OpaqueRef:sr",
+		Name:       "install-disk",
+		SizeBytes:  24 * 1024 * 1024 * 1024,
+		DestroyVDI: true,
+		Labels:     map[string]string{"lease": "cbx_lease"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawRawVDICreate {
+		t.Fatal("VDI.create did not request sm_config:type=raw")
+	}
+	if drive.VDIRef != "OpaqueRef:vdi" || drive.VBDRef != "OpaqueRef:vbd" || !drive.DestroyVDI {
+		t.Fatalf("drive=%#v", drive)
+	}
+}
+
 func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 	var methods []string
 	var imported bool
+	var sawRawVDICreate bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut && r.URL.Path == "/import_raw_vdi/" {
 			imported = true
@@ -661,6 +931,9 @@ func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 		case "VDI.create":
 			if !strings.Contains(body, "<name>read_only</name><value><boolean>0</boolean>") {
 				t.Fatalf("VDI.create must stay writable for raw import, body=%s", body)
+			}
+			if strings.Contains(body, `<name>sm_config</name><value><struct><member><name>type</name><value><string>raw</string></value></member></struct></value>`) {
+				sawRawVDICreate = true
 			}
 			for _, want := range []string{"xenstore_data", "sm_config", "tags"} {
 				if !strings.Contains(body, "<name>"+want+"</name>") {
@@ -704,20 +977,170 @@ func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 	if drive.VDIRef != "OpaqueRef:vdi" || drive.VBDRef != "OpaqueRef:vbd" || !imported {
 		t.Fatalf("drive=%#v imported=%v", drive, imported)
 	}
+	if !sawRawVDICreate {
+		t.Fatal("VDI.create did not request sm_config:type=raw")
+	}
 	if got := strings.Join(methods, ","); got != "VDI.create,task.create,task.get_status,task.destroy,VBD.create" {
+		t.Fatalf("methods=%s", got)
+	}
+}
+
+func TestImportISOCreatesRawVDI(t *testing.T) {
+	dir := t.TempDir()
+	isoPath := filepath.Join(dir, "installer.iso")
+	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var methods []string
+	var imported bool
+	var sawRawVDICreate bool
+	var setReadOnly bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && r.URL.Path == "/import_raw_vdi/" {
+			imported = true
+			if r.URL.Query().Get("format") != "raw" || r.URL.Query().Get("vdi") != "OpaqueRef:vdi" || r.URL.Query().Get("task_id") != "OpaqueRef:task" {
+				t.Fatalf("import query=%s", r.URL.RawQuery)
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		method, body := readXMLRPCBodyAndMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VDI.create":
+			if strings.Contains(body, `<name>sm_config</name><value><struct><member><name>type</name><value><string>raw</string></value></member></struct></value>`) {
+				sawRawVDICreate = true
+			}
+			writeXMLRPCString(t, w, "OpaqueRef:vdi")
+		case "task.create":
+			writeXMLRPCString(t, w, "OpaqueRef:task")
+		case "task.get_status":
+			writeXMLRPCString(t, w, "success")
+		case "task.destroy":
+			writeXMLRPCString(t, w, "true")
+		case "VDI.set_read_only":
+			setReadOnly = true
+			writeXMLRPCString(t, w, "true")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	drive, err := client.ImportISO(context.Background(), xcpNgImportISORequest{
+		SRRef:        "OpaqueRef:sr",
+		Path:         isoPath,
+		Name:         "installer.iso",
+		Description:  "Crabbox imported installer media",
+		DestroyVDI:   true,
+		MarkReadOnly: true,
+		Labels:       map[string]string{"lease": "cbx_lease"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawRawVDICreate {
+		t.Fatal("VDI.create did not request sm_config:type=raw")
+	}
+	if !imported || !setReadOnly {
+		t.Fatalf("imported=%v setReadOnly=%v", imported, setReadOnly)
+	}
+	if drive.VDIRef != "OpaqueRef:vdi" || !drive.DestroyVDI {
+		t.Fatalf("drive=%#v", drive)
+	}
+	if got := strings.Join(methods, ","); got != "VDI.create,task.create,task.get_status,task.destroy,VDI.set_read_only" {
+		t.Fatalf("methods=%s", got)
+	}
+}
+
+func TestDiscoverIPv4ByMACFallsBackToLocalProbe(t *testing.T) {
+	oldReadARPTable := xcpNgReadARPTable
+	oldLocalIPv4Networks := xcpNgLocalIPv4Networks
+	oldProbeTCPAddress := xcpNgProbeTCPAddress
+	var arpReads int
+	var probeCount atomic.Int32
+	xcpNgReadARPTable = func(context.Context) (map[string]string, error) {
+		arpReads++
+		if arpReads == 1 {
+			return map[string]string{}, nil
+		}
+		return map[string]string{"aa:bb:cc:dd:ee:ff": "192.0.2.88"}, nil
+	}
+	xcpNgLocalIPv4Networks = func() ([]net.IPNet, error) {
+		return []net.IPNet{{IP: net.IPv4(192, 0, 2, 0), Mask: net.CIDRMask(24, 32)}}, nil
+	}
+	xcpNgProbeTCPAddress = func(_ context.Context, address string, _ time.Duration) error {
+		probeCount.Add(1)
+		return errors.New("connection refused")
+	}
+	t.Cleanup(func() {
+		xcpNgReadARPTable = oldReadARPTable
+		xcpNgLocalIPv4Networks = oldLocalIPv4Networks
+		xcpNgProbeTCPAddress = oldProbeTCPAddress
+	})
+	ip, err := discoverIPv4ByMAC(context.Background(), []string{"AA-BB-CC-DD-EE-FF"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ip != "192.0.2.88" {
+		t.Fatalf("ip=%s", ip)
+	}
+	if probeCount.Load() == 0 {
+		t.Fatal("expected TCP probe sweep")
+	}
+}
+
+func TestResolveISOMediaAcceptsWritableSRVDI(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VDI.get_by_uuid":
+			writeXMLRPCString(t, w, "OpaqueRef:vdi")
+		case "VDI.get_record":
+			writeXMLRPCVDIRecord(t, w, "installer.iso")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	iso, err := client.ResolveISOMedia(context.Background(), xcpNgProviderConfig(testConfig()), xcpNgTestVMUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if iso.VDIRef != "OpaqueRef:vdi" || iso.NameLabel != "installer.iso" || iso.Source != "sr-vdi" {
+		t.Fatalf("iso=%#v", iso)
+	}
+	if got := strings.Join(methods, ","); got != "VDI.get_by_uuid,VDI.get_record" {
 		t.Fatalf("methods=%s", got)
 	}
 }
 
 func TestStartVMCallsXAPIStartWithPausedAndForceFlagsFalse(t *testing.T) {
 	var body string
+	var methods []string
+	domidPolls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		method, requestBody := readXMLRPCBodyAndMethod(t, r)
-		body = requestBody
-		if method != "VM.start" {
+		methods = append(methods, method)
+		switch method {
+		case "VM.start":
+			body = requestBody
+			writeXMLRPCString(t, w, "true")
+		case "VM.get_power_state":
+			writeXMLRPCString(t, w, "Running")
+		case "VM.get_domid":
+			domidPolls++
+			if domidPolls == 1 {
+				writeXMLRPCString(t, w, "-1")
+				return
+			}
+			writeXMLRPCString(t, w, "56")
+		default:
 			t.Fatalf("method=%s", method)
 		}
-		writeXMLRPCString(t, w, "true")
 	}))
 	defer server.Close()
 	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
@@ -736,6 +1159,9 @@ func TestStartVMCallsXAPIStartWithPausedAndForceFlagsFalse(t *testing.T) {
 	}
 	if strings.Count(body, "<boolean>0</boolean>") != 2 {
 		t.Fatalf("VM.start should pass paused=false and force=false, body=%s", body)
+	}
+	if got := strings.Join(methods, ","); got != "VM.start,VM.get_power_state,VM.get_domid,VM.get_domid" {
+		t.Fatalf("methods=%s", got)
 	}
 }
 
@@ -1607,6 +2033,28 @@ func writeXMLRPCStringArray(t *testing.T, w http.ResponseWriter, values []string
 		b.WriteString(`</string></value>`)
 	}
 	b.WriteString(`</data></array></value></param></params></methodResponse>`)
+	if _, err := w.Write([]byte(b.String())); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeXMLRPCStringMap(t *testing.T, w http.ResponseWriter, values map[string]string) {
+	t.Helper()
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0"?><methodResponse><params><param><value><struct>`)
+	for _, key := range keys {
+		b.WriteString(`<member><name>`)
+		b.WriteString(key)
+		b.WriteString(`</name><value><string>`)
+		b.WriteString(values[key])
+		b.WriteString(`</string></value></member>`)
+	}
+	b.WriteString(`</struct></value></param></params></methodResponse>`)
 	if _, err := w.Write([]byte(b.String())); err != nil {
 		t.Fatal(err)
 	}

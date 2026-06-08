@@ -52,7 +52,8 @@ func TestCloudInitPayloadConfiguresSSHPortContract(t *testing.T) {
 		"Port 22",
 		"PasswordAuthentication no",
 		"systemctl enable ssh || true",
-		"timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true",
+		"systemctl disable --now ssh.socket || true",
+		"timeout 30s systemctl restart ssh.service || timeout 30s systemctl restart ssh || true",
 	} {
 		if !strings.Contains(payload.UserData, want) {
 			t.Fatalf("user-data missing %q:\n%s", want, payload.UserData)
@@ -171,7 +172,10 @@ func TestLinuxAutoinstallPayloadIncludesUbuntuServerContract(t *testing.T) {
 		"ssh_authorized_keys",
 		"xe-guest-utilities",
 		"/usr/local/bin/crabbox-ready",
-		"systemctl enable xe-linux-distribution || true",
+		"systemctl disable --now ssh.socket || true",
+		"systemctl enable xe-daemon || true",
+		"timeout 30s systemctl restart xe-daemon || true",
+		"curtin in-target -- systemctl enable xe-daemon || true",
 		"touch, /var/lib/crabbox/bootstrapped",
 		"shutdown: reboot",
 	} {
@@ -260,25 +264,55 @@ func TestUbuntuAutoinstallLinuxLinePatternAddsFlagAcrossSpacingVariants(t *testi
 		`linux /casper/vmlinuz quiet splash ---`,
 		`}`,
 	}, "\n")
-	updated := isoE2EUbuntuLinuxLinePattern.ReplaceAllStringFunc(input, func(line string) string {
-		parts := isoE2EUbuntuLinuxLinePattern.FindStringSubmatch(line)
-		if len(parts) != 4 {
-			return line
-		}
-		middle := strings.TrimSpace(parts[2])
-		if middle == "" {
-			middle = "autoinstall"
-		} else {
-			middle = middle + " autoinstall"
-		}
-		return parts[1] + middle + parts[3]
-	})
+	updatedBytes, modified, err := injectUbuntuAutoinstallIntoGrubConfig([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !modified {
+		t.Fatal("expected grub config to be modified")
+	}
+	updated := string(updatedBytes)
 	for _, want := range []string{
 		`linux  /casper/vmlinuz autoinstall ---`,
 		`linux /casper/vmlinuz quiet splash autoinstall ---`,
 	} {
 		if !strings.Contains(updated, want) {
 			t.Fatalf("updated grub missing %q:\n%s", want, updated)
+		}
+	}
+}
+
+func TestInjectUbuntuAutoinstallIntoGrubConfigIsIdempotent(t *testing.T) {
+	input := []byte("menuentry {\n linux /casper/vmlinuz quiet autoinstall ---\n}\n")
+	updated, modified, err := injectUbuntuAutoinstallIntoGrubConfig(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if modified {
+		t.Fatal("expected autoinstall injection to skip already-patched grub config")
+	}
+	if string(updated) != string(input) {
+		t.Fatalf("updated=%q input=%q", updated, input)
+	}
+}
+
+func TestUbuntuAutoinstallRemasterArgsUseReplayMappings(t *testing.T) {
+	args := ubuntuAutoinstallRemasterArgs("/tmp/source.iso", "/tmp/output.iso", [][2]string{
+		{"/tmp/grub.cfg", "/boot/grub/grub.cfg"},
+		{"/tmp/loopback.cfg", "/boot/grub/loopback.cfg"},
+	})
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"-indev /tmp/source.iso",
+		"-outdev /tmp/output.iso",
+		"-boot_image any replay",
+		"-overwrite on",
+		"-map /tmp/grub.cfg /boot/grub/grub.cfg",
+		"-map /tmp/loopback.cfg /boot/grub/loopback.cfg",
+		"-commit -end",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args missing %q: %s", want, joined)
 		}
 	}
 }
