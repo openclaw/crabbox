@@ -244,7 +244,8 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if err != nil {
 		return err
 	}
-	if cfg.Incus.DeleteOnRelease || req.Force {
+	deleteInstance := cfg.Incus.DeleteOnRelease
+	if deleteInstance {
 		if err := client.DeleteInstance(inst.Name); err != nil {
 			return err
 		}
@@ -253,7 +254,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 			return err
 		}
 	}
-	if leaseID != "" {
+	if leaseID != "" && deleteInstance {
 		core.RemoveLeaseClaim(leaseID)
 		core.RemoveStoredTestboxKey(leaseID)
 	}

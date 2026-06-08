@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -250,6 +251,30 @@ func TestSSHTargetHostUsesIncusHostWhenProxyPortConfigured(t *testing.T) {
 	}
 }
 
+func TestConnectionArgsForAddressLoadsTLSCertContents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	certPath := filepath.Join(t.TempDir(), "server.crt")
+	if err := os.WriteFile(certPath, []byte("PEM-CONTENT"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.Address = "https://incus-host.example.test:8443"
+	cfg.Incus.TLSServerCert = certPath
+
+	args, err := connectionArgsForAddress(cfg)
+	if err != nil {
+		t.Fatalf("connectionArgsForAddress: %v", err)
+	}
+	if args.TLSServerCert != "PEM-CONTENT" {
+		t.Fatalf("TLSServerCert=%q want PEM contents", args.TLSServerCert)
+	}
+}
+
 func TestConfigureRejectsUnsupportedTargetAndTailscale(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -445,6 +470,62 @@ func TestAcquireCleansUpPartialInstanceEvenWhenDeleteOnReleaseFalse(t *testing.T
 	}
 	if len(fake.deleted) != 1 {
 		t.Fatalf("deleted=%v want partial instance cleanup", fake.deleted)
+	}
+}
+
+func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-retained": {
+				Name:       "crabbox-retained",
+				Status:     "Running",
+				StatusCode: api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_retain123456",
+					labelKey("slug"):    "retained-slug",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-retained": {Status: "Running", StatusCode: api.Running},
+		},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.DeleteOnRelease = false
+	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, "cbx_retain123456"); err != nil {
+		t.Fatalf("EnsureTestboxKeyForConfig: %v", err)
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePond("cbx_retain123456", "retained-slug", providerName, "instance:crabbox-retained", "", t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatalf("ClaimLeaseForRepoProviderScopePond: %v", err)
+	}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease := core.LeaseTarget{LeaseID: "cbx_retain123456", Server: core.Server{Name: "crabbox-retained", CloudID: "crabbox-retained", Labels: map[string]string{"lease": "cbx_retain123456", "slug": "retained-slug"}}}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted=%v want retained instance to be stopped, not deleted", fake.deleted)
+	}
+	if len(fake.stateUpdates) == 0 || fake.stateUpdates[0] != "crabbox-retained:stop" {
+		t.Fatalf("stateUpdates=%v want stop", fake.stateUpdates)
+	}
+	if _, err := core.TestboxKeyPath("cbx_retain123456"); err != nil {
+		t.Fatalf("expected retained lease key to remain available: %v", err)
 	}
 }
 

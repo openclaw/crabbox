@@ -1,6 +1,7 @@
 package incus
 
 import (
+	"os"
 	"net/url"
 	"strings"
 
@@ -120,8 +121,14 @@ func connectInstanceServer(cfg Config) (incusclient.InstanceServer, error) {
 
 func connectionArgsForAddress(cfg Config) (*incusclient.ConnectionArgs, error) {
 	args := &incusclient.ConnectionArgs{
-		TLSServerCert:      strings.TrimSpace(cfg.Incus.TLSServerCert),
 		InsecureSkipVerify: cfg.Incus.InsecureTLS,
+	}
+	if certPath := strings.TrimSpace(cfg.Incus.TLSServerCert); certPath != "" {
+		content, err := os.ReadFile(certPath)
+		if err != nil {
+			return nil, core.Exit(2, "read incus TLS server cert %q: %v", certPath, err)
+		}
+		args.TLSServerCert = strings.TrimSpace(string(content))
 	}
 	clientConfig, err := cliconfig.LoadConfig("")
 	if err != nil {
