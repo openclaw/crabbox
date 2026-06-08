@@ -129,9 +129,9 @@ sent to Islo when greater than zero; otherwise the sandbox uses Islo's defaults.
   a Crabbox-managed SSH/rsync target.
 - `--full-resync`, `--force-sync-large`, `--script`, `--script-stdin`,
   `--fresh-pr`, `--env-helper`, local stdout/stderr captures,
-  `--capture-on-fail`, `--download`, `--artifact-glob`, `--emit-proof`, and
-  `--stop-after` are rejected because Islo owns sync and command transport in
-  delegated-run mode.
+  `--capture-on-fail`, `--download`, `--artifact-glob`, `--require-artifact`,
+  `--emit-proof`, and `--stop-after` are rejected because Islo owns sync and
+  command transport in delegated-run mode.
 - `--keep-on-failure` keeps a newly created failed sandbox until an explicit
   `stop` or provider-side expiry.
 - Large-sync guardrails still apply. Because `--force-sync-large` is rejected,

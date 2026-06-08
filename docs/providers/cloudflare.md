@@ -21,10 +21,10 @@ It is not suitable for SSH-oriented or interactive desktop workflows.
   CLI against its own Worker runner, independent of any `CRABBOX_COORDINATOR`
   broker.
 - **Not supported:** SSH, VNC, browser desktop, code-server, Actions hydration,
-  `--download`, `--fresh-pr`, and `--checksum` (sync is archive-based, so there
-  is no per-file checksum step). The provider also does not participate in the
-  [pond](../features/pond.md) bridge plane, so `pond peers` reports its targets
-  as `unsupported`.
+  `--download`, `--fresh-pr`, `--artifact-glob`, `--require-artifact`, and
+  `--checksum` (sync is archive-based, so there is no per-file checksum step).
+  The provider also does not participate in the [pond](../features/pond.md)
+  bridge plane, so `pond peers` reports its targets as `unsupported`.
 
 ## Requirements
 

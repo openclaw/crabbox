@@ -26,6 +26,25 @@ func TestAppleContainerRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestDockerSandboxRegistersWithoutAliasCollision(t *testing.T) {
+	provider, err := core.ProviderFor("docker-sandbox")
+	if err != nil {
+		t.Fatalf("ProviderFor(docker-sandbox): %v", err)
+	}
+	if provider.Name() != "docker-sandbox" {
+		t.Fatalf("ProviderFor(docker-sandbox).Name=%q", provider.Name())
+	}
+	for _, alias := range []string{"docker", "container", "local-docker"} {
+		got, err := core.ProviderFor(alias)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", alias, err)
+		}
+		if got.Name() != "local-container" {
+			t.Fatalf("%q alias now resolves to %q; docker-sandbox must not steal local-container aliases", alias, got.Name())
+		}
+	}
+}
+
 func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 	providers := []string{
 		"apple-container",
@@ -35,6 +54,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"blacksmith-testbox",
 		"cloudflare",
 		"daytona",
+		"docker-sandbox",
 		"e2b",
 		"exe-dev",
 		"external",

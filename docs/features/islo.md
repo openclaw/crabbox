@@ -105,8 +105,9 @@ target, these `run` options are rejected:
 - `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync` — no
   Crabbox rsync target to drive.
 - `--script`, `--script-stdin`, `--fresh-pr`, local stdout/stderr captures,
-  `--capture-on-fail`, `--download`, `--artifact-glob`, `--env-helper`,
-  `--stop-after` — these require Crabbox-owned transport or execution.
+  `--capture-on-fail`, `--download`, `--artifact-glob`, `--require-artifact`,
+  `--env-helper`, `--stop-after` — these require Crabbox-owned transport or
+  execution.
 
 Large-sync guardrails still apply: the gzipped archive upload runs the same
 size preflight as rsync providers, but because `--force-sync-large` is rejected

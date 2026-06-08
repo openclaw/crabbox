@@ -143,7 +143,8 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 - Delegated run/sync options that need an SSH target or proof surface are
   rejected: `--script` / `--script-stdin`, `--fresh-pr`, `--full-resync`,
   `--env-helper`, `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`,
-  `--download`, `--artifact-glob`, `--emit-proof`, and `--stop-after`.
+  `--download`, `--artifact-glob`, `--require-artifact`, `--emit-proof`, and
+  `--stop-after`.
 - Forwarded environment values are written to a temporary shell profile in the
   Box workspace, sourced (`set -a`) for the command, and removed best-effort
   afterward. They are never placed on the local process argv.

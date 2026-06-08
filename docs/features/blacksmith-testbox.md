@@ -196,7 +196,8 @@ Because Blacksmith owns sync and execution, Crabbox rejects the following `run` 
 
 - sync flags: `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync`, `--fresh-pr`;
 - execution flags: `--script`, `--script-stdin`, `--env-helper`, `--capture-stdout`,
-  `--capture-stderr`, `--capture-on-fail`, `--download`, `--artifact-glob`, `--stop-after`;
+  `--capture-stderr`, `--capture-on-fail`, `--download`, `--artifact-glob`,
+  `--require-artifact`, `--stop-after`;
 - environment forwarding: `--allow-env` and `CRABBOX_ENV_ALLOW` are unsupported — configure
   secrets in the Testbox workflow instead;
 - `--actions-runner` on `warmup` — Blacksmith owns runner hydration.

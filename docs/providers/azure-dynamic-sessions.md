@@ -190,7 +190,8 @@ Sessions identifiers are rejected unless they are already claimed.
 - Targets `linux` only.
 - Supported commands: `warmup`, `run`, `status`, `list`, `stop`, `doctor`.
 - No SSH, VNC, desktop, browser, code-server, Actions hydration, downloads, or
-  artifacts — the provider has no SSH target.
+  run artifacts — the provider has no SSH target. SSH-run artifact flags such as
+  `--artifact-glob` and `--require-artifact` are rejected.
 - `--class` and `--type` are rejected; choose CPU/memory and egress in the Azure
   session pool configuration.
 - `--actions-runner` is rejected.

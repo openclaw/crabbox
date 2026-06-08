@@ -99,8 +99,8 @@ Because E2B owns sync and command transport, these `run` options are rejected:
   delegates sync (archive upload only).
 - `--script`, `--script-stdin`, `--fresh-pr`, `--capture-stdout`,
   `--capture-stderr`, `--capture-on-fail`, `--download`, `--artifact-glob`,
-  `--env-helper`, `--emit-proof`, and `--stop-after` — E2B delegates run
-  execution.
+  `--require-artifact`, `--env-helper`, `--emit-proof`, and `--stop-after` —
+  E2B delegates run execution.
 
 Large-sync preflight guardrails do not apply: without `--force-sync-large`
 support, the archive is uploaded as built.

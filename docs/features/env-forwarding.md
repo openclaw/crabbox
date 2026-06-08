@@ -83,8 +83,13 @@ values. Variables that match the allowlist but are unset locally simply do not
 appear in the forwarded set.
 
 Inline-allowlisted variables (those resolved from the local environment) are
-passed as part of the SSH command itself. Quoting and escaping are handled
-automatically, so values containing shell metacharacters pass through safely.
+passed through the provider's remote-command transport. SSH-backed providers
+pass them as part of the SSH command itself, with quoting and escaping handled
+automatically so values containing shell metacharacters pass through safely.
+Delegated-run providers may use a provider-specific transport instead; for
+example, Docker Sandbox writes the selected values to a temporary local env file
+and passes only that file path to `sbx exec --env-file` so the values do not
+appear in local process arguments.
 
 ## Profiles: `--env-from-profile`
 

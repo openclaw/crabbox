@@ -32,10 +32,11 @@ SSH-lease providers further differ by how they reach the cloud:
 - **Local runtime** — `local-container` starts a labeled Linux container through
   a Docker-compatible local runtime (Docker Desktop, OrbStack, Colima),
   `apple-container` uses Apple's native `container` runtime on Apple silicon
-  macOS, and `multipass` launches local Ubuntu VMs through Canonical Multipass.
+  macOS, `multipass` launches local Ubuntu VMs through Canonical Multipass,
+  and `tart` runs macOS VMs on Apple Silicon via Cirrus Labs tart.
 - **Delegated sandbox** — managed sandbox/proof runners that execute remotely
   without an SSH lease (e.g. `e2b`, `modal`, `islo`, `cloudflare`,
-  `azure-dynamic-sessions`).
+  `azure-dynamic-sessions`, `docker-sandbox`).
 
 Select a provider per command with `--provider <name>` (env `CRABBOX_PROVIDER`),
 or set `provider: <name>` in config. Provider flags are registered before
@@ -61,6 +62,7 @@ Each page below maps to an adapter under `internal/providers/<dir>`. The
 | [Local Container](local-container.md) | `local-container` | `docker`, `container`, `local-docker` | Linux | no (local) |
 | [Apple Container](apple-container.md) | `apple-container` | `apple`, `applecontainer` | Linux | no (local) |
 | [Multipass](multipass.md) | `multipass` | `mp`, `canonical-multipass` | Linux | no (local) |
+| [Tart](tart.md) | `tart` | `local-tart`, `macos-vm` | macOS | no (local) |
 | [exe.dev](exe-dev.md) | `exe-dev` | `exe`, `exedev` | Linux | no (direct) |
 | [KubeVirt](kubevirt.md) | `kubevirt` | `kubernetes-vm` | Linux | no (direct) |
 | [External](external.md) | `external` | `exec-provider` | Linux | no (direct) |
@@ -79,6 +81,7 @@ Each page below maps to an adapter under `internal/providers/<dir>`. The
 | [Azure Dynamic Sessions](azure-dynamic-sessions.md) | `azure-dynamic-sessions` | — | Linux |
 | [Blacksmith Testbox](blacksmith-testbox.md) | `blacksmith-testbox` | `blacksmith` | Linux |
 | [Cloudflare](cloudflare.md) | `cloudflare` | `cf` | Linux |
+| [Docker Sandbox](docker-sandbox.md) | `docker-sandbox` | — | Linux |
 | [E2B](e2b.md) | `e2b` | — | Linux |
 | [Islo](islo.md) | `islo` | — | Linux |
 | [Modal](modal.md) | `modal` | — | Linux |
@@ -98,6 +101,9 @@ reports.
   distinct adapters.
 - Tensorlake is Crabbox's Firecracker-backed delegated provider; Crabbox does
   not provision raw Firecracker instances directly.
+- Docker Sandbox is a delegated-run provider driven by the standalone `sbx`
+  CLI. It has no aliases, so `docker`, `container`, and `local-docker` remain
+  Local Container aliases.
 - ASCII Box is an SSH-lease provider. Crabbox uses the documented `box --json`
   CLI for lifecycle/status/delete, then runs normal sync and commands over SSH.
 - Capability flags (`--desktop`, `--browser`, `--code`, VNC) are validated
@@ -113,6 +119,7 @@ reports.
 crabbox warmup --provider aws --class beast
 crabbox run --provider hetzner -- pnpm test
 crabbox run --provider docker -- pnpm test
+crabbox run --provider docker-sandbox -- go test ./...
 crabbox run --provider multipass -- go test ./...
 crabbox run --provider blacksmith-testbox --id tbx_123 -- pnpm test
 crabbox run --provider namespace-devbox --id blue-lobster -- pnpm test

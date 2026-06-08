@@ -124,7 +124,7 @@ The non-auth settings can also be set through environment variables:
   `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync`,
   `--fresh-pr`, `--script` / `--script-stdin`, `--env-helper`,
   `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`, `--download`,
-  `--artifact-glob`, `--emit-proof`, and `--stop-after`.
+  `--artifact-glob`, `--require-artifact`, `--emit-proof`, and `--stop-after`.
 - `--actions-runner` is rejected because it needs a normal SSH lease host.
 - `--keep-on-failure` keeps a newly created failed sandbox until Daytona
   auto-stop or an explicit `crabbox stop`.

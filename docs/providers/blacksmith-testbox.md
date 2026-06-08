@@ -211,9 +211,9 @@ visibility-only detail page.
 - `--sync-only`, `--checksum`, and `--force-sync-large` do not apply because
   Blacksmith owns sync.
 - `--script`, `--script-stdin`, `--fresh-pr`, local stdout/stderr captures,
-  `--download`, and `--artifact-glob` are rejected because Blacksmith owns
-  command transport and remote artifact handling. Use `--emit-proof` for
-  PR-ready transcript proof.
+  `--download`, `--artifact-glob`, and `--require-artifact` are rejected because
+  Blacksmith owns command transport and remote artifact handling. Use
+  `--emit-proof` for PR-ready transcript proof.
 - `--actions-runner` is rejected; Blacksmith owns runner hydration.
 - `--tailscale`, desktop helpers, screenshots, VNC, and `artifacts collect` are
   rejected because Blacksmith owns machine connectivity.

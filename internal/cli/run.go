@@ -189,11 +189,13 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	var envProfileFlags stringListFlag
 	var presetVars stringListFlag
 	var artifactGlobs stringListFlag
+	var requiredArtifactGlobs stringListFlag
 	fs.Var(&downloads, "download", "download a remote file after command success: remote=local; repeatable")
 	fs.Var(&allowEnvFlags, "allow-env", "allow an environment variable for this run; repeatable or comma-separated")
 	fs.Var(&envProfileFlags, "env-from-profile", "load allowed environment values from a local profile file; repeatable")
 	fs.Var(&presetVars, "preset-var", "preset template variable name=value; repeatable or comma-separated")
 	fs.Var(&artifactGlobs, "artifact-glob", "collect remote files matching a safe glob into a local run artifact tarball; repeatable")
+	fs.Var(&requiredArtifactGlobs, "require-artifact", "require a remote file matching a safe glob after command success; repeatable")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
 	if err := parseFlags(fs, args); err != nil {
@@ -273,9 +275,17 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	if err := validateRunArtifactGlobs(expansion.ArtifactGlobs); err != nil {
 		return err
 	}
+	requiredArtifactGlobs = appendUniqueStrings(nil, requiredArtifactGlobs...)
+	if err := validateRequiredRunArtifactGlobs(requiredArtifactGlobs); err != nil {
+		return err
+	}
+	runArtifactGlobs := appendUniqueStrings(append([]string{}, expansion.ArtifactGlobs...), requiredArtifactGlobs...)
 	if *syncOnly {
 		if len(expansion.ArtifactGlobs) > 0 {
 			return exit(2, "--artifact-glob cannot be combined with --sync-only")
+		}
+		if len(requiredArtifactGlobs) > 0 {
+			return exit(2, "--require-artifact cannot be combined with --sync-only")
 		}
 		if strings.TrimSpace(*emitProof) != "" {
 			return exit(2, "--emit-proof cannot be combined with --sync-only")
@@ -380,6 +390,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		if err := validateRunArtifactGlobTarget(SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}, expansion.ArtifactGlobs); err != nil {
 			return err
 		}
+		if err := validateRequiredRunArtifactGlobTarget(SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}, requiredArtifactGlobs); err != nil {
+			return err
+		}
 		if envHelperName != "" {
 			if err := validateRunEnvHelperTarget(SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}, runEnvHelperPath(envHelperName)); err != nil {
 				return err
@@ -435,39 +448,40 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	options := leaseOptionsFromConfig(cfg)
 	scriptRequested := *scriptPath != "" || *scriptStdin
 	runReq := RunRequest{
-		Repo:             repo,
-		ID:               *leaseIDFlag,
-		Options:          options,
-		Keep:             *keep,
-		KeepOnFailure:    *keepOnFailure,
-		Reclaim:          *reclaim,
-		NoSync:           *noSync,
-		SyncOnly:         *syncOnly,
-		DebugSync:        *debugSync,
-		ShellMode:        *shellMode,
-		ChecksumSync:     *checksumSync,
-		ForceSyncLarge:   *forceSyncLarge,
-		FullResync:       fullResyncRequested,
-		EnvHelper:        envHelperName,
-		CaptureStdout:    *captureStdout,
-		CaptureStderr:    *captureStderr,
-		CaptureOnFail:    *captureOnFail,
-		Preflight:        *preflight,
-		Downloads:        downloads,
-		Env:              envSelection.Effective,
-		EnvSummary:       envSelection.SummaryRequested,
-		ScriptRequested:  scriptRequested,
-		FreshPR:          freshPR,
-		ApplyLocalPatch:  *applyLocalPatch,
-		Command:          command,
-		Label:            runLabelValue,
-		RequestedSlug:    requestedSlug,
-		TimingJSON:       *timingJSON,
-		ArtifactGlobs:    expansion.ArtifactGlobs,
-		EmitProof:        strings.TrimSpace(*emitProof),
-		ProofTemplate:    strings.TrimSpace(*proofTemplate),
-		ProfileVariables: expansion.Variables,
-		StopAfter:        strings.TrimSpace(*stopAfter),
+		Repo:                  repo,
+		ID:                    *leaseIDFlag,
+		Options:               options,
+		Keep:                  *keep,
+		KeepOnFailure:         *keepOnFailure,
+		Reclaim:               *reclaim,
+		NoSync:                *noSync,
+		SyncOnly:              *syncOnly,
+		DebugSync:             *debugSync,
+		ShellMode:             *shellMode,
+		ChecksumSync:          *checksumSync,
+		ForceSyncLarge:        *forceSyncLarge,
+		FullResync:            fullResyncRequested,
+		EnvHelper:             envHelperName,
+		CaptureStdout:         *captureStdout,
+		CaptureStderr:         *captureStderr,
+		CaptureOnFail:         *captureOnFail,
+		Preflight:             *preflight,
+		Downloads:             downloads,
+		Env:                   envSelection.Effective,
+		EnvSummary:            envSelection.SummaryRequested,
+		ScriptRequested:       scriptRequested,
+		FreshPR:               freshPR,
+		ApplyLocalPatch:       *applyLocalPatch,
+		Command:               command,
+		Label:                 runLabelValue,
+		RequestedSlug:         requestedSlug,
+		TimingJSON:            *timingJSON,
+		ArtifactGlobs:         expansion.ArtifactGlobs,
+		RequiredArtifactGlobs: requiredArtifactGlobs,
+		EmitProof:             strings.TrimSpace(*emitProof),
+		ProofTemplate:         strings.TrimSpace(*proofTemplate),
+		ProfileVariables:      expansion.Variables,
+		StopAfter:             strings.TrimSpace(*stopAfter),
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		if strings.TrimSpace(*readyPool) != "" {
@@ -604,6 +618,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		return recordFailure(err)
 	}
 	if err := validateRunArtifactGlobTarget(target, expansion.ArtifactGlobs); err != nil {
+		return recordFailure(err)
+	}
+	if err := validateRequiredRunArtifactGlobTarget(target, requiredArtifactGlobs); err != nil {
 		return recordFailure(err)
 	}
 	if expansion.Profile.Doctor.Enabled && isWindowsNativeTarget(target) {
@@ -846,6 +863,9 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			return true, err
 		}
 		if err := validateRunArtifactGlobTarget(target, expansion.ArtifactGlobs); err != nil {
+			return true, err
+		}
+		if err := validateRequiredRunArtifactGlobTarget(target, requiredArtifactGlobs); err != nil {
 			return true, err
 		}
 		if expansion.Profile.Doctor.Enabled && isWindowsNativeTarget(target) {
@@ -1326,6 +1346,17 @@ afterSync:
 			fmt.Fprintln(a.Stderr, line)
 		}
 	}
+	var artifactFailure error
+	if code == 0 && len(requiredArtifactGlobs) > 0 {
+		requireOutput, err := requireRunArtifactGlobs(ctx, target, workdir, requiredArtifactGlobs)
+		if err != nil {
+			artifactFailure = err
+			code = 7
+		}
+		if strings.TrimSpace(requireOutput) != "" {
+			fmt.Fprintln(a.Stderr, strings.TrimSpace(requireOutput))
+		}
+	}
 	if code == 0 {
 		for _, spec := range downloads {
 			bytes, local, err := downloadRemoteFile(ctx, target, workdir, spec)
@@ -1336,8 +1367,8 @@ afterSync:
 		}
 	}
 	var runArtifacts []runArtifact
-	if code == 0 && len(expansion.ArtifactGlobs) > 0 {
-		collected, artifactOutput, err := collectRunArtifactGlobs(ctx, target, workdir, repo.Root, recorder.runID, leaseID, expansion.ArtifactGlobs)
+	if code == 0 && len(runArtifactGlobs) > 0 {
+		collected, artifactOutput, err := collectRunArtifactGlobs(ctx, target, workdir, repo.Root, recorder.runID, leaseID, runArtifactGlobs)
 		if err != nil {
 			return recordFailure(err)
 		}
@@ -1352,7 +1383,11 @@ afterSync:
 	total := time.Since(timings.started)
 	classification := FailureClassification{}
 	if code != 0 {
-		classification = ClassifyRunFailure(code, logBuffer.String(), timings.commandPhases)
+		classificationLog := logBuffer.String()
+		if artifactFailure != nil {
+			classificationLog = strings.TrimSpace(classificationLog + "\n" + artifactFailure.Error())
+		}
+		classification = ClassifyRunFailure(code, classificationLog, timings.commandPhases)
 		timings.blockedStage = classification.BlockedStage
 		timings.retryLikely = classification.RetryLikely
 		failureClassificationPrinted = true
@@ -1447,6 +1482,9 @@ afterSync:
 		printCommandNotFoundHint(a.Stderr, cfg, target, leaseID, command, *shellMode, code, hydratedByActions, hydrateSuggestion)
 		printFailureTail(a.Stderr, "stdout", stdoutTail, *captureStdout)
 		printFailureTail(a.Stderr, "stderr", stderrTail, *captureStderr)
+		if artifactFailure != nil {
+			return recordFailure(artifactFailure)
+		}
 		return recordFailure(ExitError{Code: code, Message: fmt.Sprintf("remote command exited %d", code)})
 	}
 	return nil

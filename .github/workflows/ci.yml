@@ -111,6 +111,12 @@ jobs:
         with:
           node-version: 24
 
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
       - name: Test
         run: node --test scripts/*.test.js
 

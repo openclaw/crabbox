@@ -40,6 +40,11 @@ Crabbox lease ID and local slug:
   slug and deletes the Islo sandbox.
 - `e2b` — accepts a Crabbox lease ID, a local slug, or a Crabbox-owned E2B
   sandbox ID in raw or `e2b_<sandboxID>` form and deletes the E2B sandbox.
+- `docker-sandbox` — accepts only a Crabbox lease ID or local slug backed by a
+  `provider=docker-sandbox` local claim, then removes the sandbox with
+  `sbx rm --force`. This is destructive cleanup, not Docker Sandbox pause, and
+  it remains the manual cleanup path for clone-mode Docker Sandbox runs that
+  Crabbox keeps after a successful one-shot command.
 - `ssh` (static hosts) — removes the local claim for the configured static
   target; it never deletes the host.
 
@@ -56,6 +61,11 @@ The action `stop` takes depends on how the lease was created:
   provider-specific release message instead).
 - **Delegated runners** — call the provider's own teardown for the resolved
   sandbox.
+
+For `provider=docker-sandbox`, `crabbox stop` intentionally keeps Crabbox's
+cross-provider cleanup meaning. Use [`ports`](ports.md) and [`cp`](cp.md) for
+non-destructive post-create workflows on a running sandbox. A separate
+pause/resume command is deferred.
 
 Where applicable, `stop` makes a best-effort attempt to stop GitHub
 [Actions hydration](../features/actions-hydration.md) on the host before
@@ -95,6 +105,8 @@ Run `crabbox stop --help` for the full, provider-aware flag list, and
 
 - [`cleanup`](cleanup.md) — sweep expired direct-provider machines and stale
   local state.
+- [`ports`](ports.md) / [`cp`](cp.md) — non-destructive Docker Sandbox follow-up
+  operations.
 - [`pond release`](pond.md) — stop every lease in a named pond at once.
 - [`admin`](admin.md) — coordinator-side `release` and `delete` for operators.
 - [Lifecycle & cleanup](../features/lifecycle-cleanup.md) — how leases expire

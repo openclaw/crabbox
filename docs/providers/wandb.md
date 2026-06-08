@@ -138,8 +138,9 @@ five minutes and the sandbox lifetime.
   `Exec` RPC has no env field), so an `--id` run with `--allow-env` is
   rejected.
 - `--reclaim`, `--shell`, `--sync-only`, `--checksum`, `--force-sync-large`,
-  and `--full-resync` are rejected: W&B owns the sandbox lifecycle and there is
-  no Crabbox SSH/rsync target.
+  `--full-resync`, `--download`, `--artifact-glob`, and `--require-artifact`
+  are rejected: W&B owns the sandbox lifecycle and there is no Crabbox
+  SSH/rsync target.
 - `--keep` retains a newly acquired sandbox after the run; `--keep-on-failure`
   retains it only when the command fails, so you can debug.
 - gRPC failures map to sysexits-aligned exit codes:

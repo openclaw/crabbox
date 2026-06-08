@@ -75,6 +75,7 @@ SSH-lease providers:
 - Static/BYO SSH host: `internal/providers/ssh`, with target mapping in `internal/cli/static.go`
 - Local Docker container: `internal/providers/localcontainer`
 - Canonical Multipass local Ubuntu VM: `internal/providers/multipass`
+- Cirrus Labs tart local macOS VM: `internal/providers/tart`
 - Daytona, exe.dev, KubeVirt, External, Tenki, Namespace devbox, RunPod, Semaphore, Sprites, Railway:
   `internal/providers/daytona`, `internal/providers/exedev`, `internal/providers/kubevirt`, `internal/providers/external`, `internal/providers/tenki`, `internal/providers/namespace`,
   `internal/providers/runpod`, `internal/providers/semaphore`, `internal/providers/sprites`,
@@ -83,7 +84,8 @@ SSH-lease providers:
 Delegated-run providers (no SSH lease):
 
 - Cloudflare Containers: `internal/providers/cloudflare`, with the Worker runtime in `worker/src/cloudflare-container-runner.ts`
-- E2B, Islo, Modal, Tensorlake, Upstash, Blacksmith, W&B:
+- Docker Sandbox, E2B, Islo, Modal, Tensorlake, Upstash, Blacksmith, W&B:
+  `internal/providers/dockersandbox`,
   `internal/providers/e2b`, `internal/providers/islo`, `internal/providers/modal`,
   `internal/providers/tensorlake`, `internal/providers/upstashbox`,
   `internal/providers/blacksmith`, `internal/providers/wandb`

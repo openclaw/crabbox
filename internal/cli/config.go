@@ -17,6 +17,7 @@ type Config struct {
 	Profile                       string
 	Provider                      string
 	TargetOS                      string
+	targetExplicit                bool
 	Architecture                  string
 	architectureExplicit          bool
 	OSImage                       string
@@ -114,6 +115,7 @@ type Config struct {
 	isloImageExplicit             bool
 	Tenki                         TenkiConfig
 	Tensorlake                    TensorlakeConfig
+	DockerSandbox                 DockerSandboxConfig
 	Modal                         ModalConfig
 	UpstashBox                    UpstashBoxConfig
 	AsciiBox                      AsciiBoxConfig
@@ -127,6 +129,11 @@ type Config struct {
 	appleContainerImageExplicit   bool
 	Multipass                     MultipassConfig
 	multipassImageExplicit        bool
+	Tart                          TartConfig
+	tartImageExplicit             bool
+	tartDiskExplicit              bool
+	tartCPUsExplicit              bool
+	tartMemoryExplicit            bool
 	Tailscale                     TailscaleConfig
 	Static                        StaticConfig
 	Results                       ResultsConfig
@@ -349,6 +356,19 @@ type TensorlakeConfig struct {
 	NoInternet     bool
 }
 
+type DockerSandboxConfig struct {
+	CLIPath         string
+	Agent           string
+	Template        string
+	CPUs            float64
+	Memory          string
+	Clone           bool
+	Workdir         string
+	ExtraWorkspaces []string
+	MCP             []string
+	Kit             []string
+}
+
 type ModalConfig struct {
 	App     string
 	Image   string
@@ -483,6 +503,15 @@ type MultipassConfig struct {
 	Memory        string
 	Disk          string
 	LaunchTimeout time.Duration
+}
+
+type TartConfig struct {
+	Image    string
+	User     string
+	WorkRoot string
+	CPUs     int
+	Memory   int
+	Disk     int
 }
 
 type StaticConfig struct {
@@ -743,6 +772,13 @@ func loadConfig() (Config, error) {
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
 		return Config{}, err
 	}
+	if provider, err := ProviderFor(cfg.Provider); err != nil {
+		return Config{}, err
+	} else if validator, ok := provider.(ProviderConfigValidator); ok {
+		if err := validator.ValidateConfig(cfg); err != nil {
+			return Config{}, err
+		}
+	}
 	normalizeTargetConfig(&cfg)
 	if err := validateTargetConfig(cfg); err != nil {
 		return Config{}, err
@@ -797,6 +833,25 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		}
 		if cfg.TargetOS == "" {
 			cfg.TargetOS = targetLinux
+		}
+		return nil
+	}
+	if cfg.Provider == "tart" || cfg.Provider == "local-tart" || cfg.Provider == "macos-vm" {
+		if cfg.Tart.User != "" {
+			cfg.SSHUser = cfg.Tart.User
+		}
+		if cfg.SSHPort == "" || cfg.SSHPort == baseConfig().SSHPort {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		if cfg.Tart.WorkRoot != "" {
+			cfg.WorkRoot = cfg.Tart.WorkRoot
+		}
+		if !IsTargetExplicit(cfg) && (cfg.TargetOS == "" || cfg.TargetOS == targetLinux) {
+			cfg.TargetOS = targetMacOS
+		}
+		if !cfg.ServerTypeExplicit && cfg.Tart.Image != "" {
+			cfg.ServerType = cfg.Tart.Image
 		}
 		return nil
 	}
@@ -886,6 +941,42 @@ func MarkAppleContainerImageExplicit(cfg *Config) {
 
 func MarkMultipassImageExplicit(cfg *Config) {
 	cfg.multipassImageExplicit = true
+}
+
+func MarkTartImageExplicit(cfg *Config) {
+	cfg.tartImageExplicit = true
+}
+
+func IsTartDiskExplicit(cfg *Config) bool {
+	return cfg.tartDiskExplicit
+}
+
+func MarkTartDiskExplicit(cfg *Config) {
+	cfg.tartDiskExplicit = true
+}
+
+func IsTartCPUsExplicit(cfg *Config) bool {
+	return cfg.tartCPUsExplicit
+}
+
+func MarkTartCPUsExplicit(cfg *Config) {
+	cfg.tartCPUsExplicit = true
+}
+
+func IsTartMemoryExplicit(cfg *Config) bool {
+	return cfg.tartMemoryExplicit
+}
+
+func MarkTartMemoryExplicit(cfg *Config) {
+	cfg.tartMemoryExplicit = true
+}
+
+func IsTargetExplicit(cfg *Config) bool {
+	return cfg.targetExplicit
+}
+
+func MarkTargetExplicit(cfg *Config) {
+	cfg.targetExplicit = true
 }
 
 func baseConfig() Config {
@@ -1030,6 +1121,10 @@ func baseConfig() Config {
 			MemoryMB: 1024,
 			DiskMB:   10240,
 		},
+		DockerSandbox: DockerSandboxConfig{
+			CLIPath: "sbx",
+			Agent:   "shell",
+		},
 		Modal: ModalConfig{
 			App:     "crabbox",
 			Image:   "python:3.13-slim",
@@ -1085,6 +1180,13 @@ func baseConfig() Config {
 			Memory:        "8G",
 			Disk:          "30G",
 			LaunchTimeout: 20 * time.Minute,
+		},
+		Tart: TartConfig{
+			Image:    "ghcr.io/cirruslabs/macos-sequoia-base:latest",
+			User:     "admin",
+			WorkRoot: "/Users/admin/crabbox",
+			CPUs:     4,
+			Memory:   8192,
 		},
 		Tailscale: TailscaleConfig{
 			Tags:             []string{"tag:crabbox"},
@@ -1146,6 +1248,7 @@ type fileConfig struct {
 	Islo                 *fileIsloConfig                    `yaml:"islo,omitempty"`
 	Tenki                *fileTenkiConfig                   `yaml:"tenki,omitempty"`
 	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
+	DockerSandbox        *fileDockerSandboxConfig           `yaml:"dockerSandbox,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
 	UpstashBox           *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
 	AsciiBox             *fileAsciiBoxConfig                `yaml:"asciiBox,omitempty"`
@@ -1155,6 +1258,7 @@ type fileConfig struct {
 	LocalContainer       *fileLocalContainerConfig          `yaml:"localContainer,omitempty"`
 	AppleContainer       *fileAppleContainerConfig          `yaml:"appleContainer,omitempty"`
 	Multipass            *fileMultipassConfig               `yaml:"multipass,omitempty"`
+	Tart                 *fileTartConfig                    `yaml:"tart,omitempty"`
 	Tailscale            *fileTailscaleConfig               `yaml:"tailscale,omitempty"`
 	Static               *fileStaticConfig                  `yaml:"static,omitempty"`
 	Results              *fileResultsConfig                 `yaml:"results,omitempty"`
@@ -1490,6 +1594,19 @@ type fileTensorlakeConfig struct {
 	NoInternet     *bool   `yaml:"noInternet,omitempty"`
 }
 
+type fileDockerSandboxConfig struct {
+	CLIPath         string    `yaml:"cliPath,omitempty"`
+	Agent           string    `yaml:"agent,omitempty"`
+	Template        *string   `yaml:"template,omitempty"`
+	CPUs            *float64  `yaml:"cpus,omitempty"`
+	Memory          *string   `yaml:"memory,omitempty"`
+	Clone           *bool     `yaml:"clone,omitempty"`
+	Workdir         *string   `yaml:"workdir,omitempty"`
+	ExtraWorkspaces *[]string `yaml:"extraWorkspaces,omitempty"`
+	MCP             *[]string `yaml:"mcp,omitempty"`
+	Kit             *[]string `yaml:"kit,omitempty"`
+}
+
 type fileModalConfig struct {
 	App     string `yaml:"app,omitempty"`
 	Image   string `yaml:"image,omitempty"`
@@ -1576,6 +1693,15 @@ type fileMultipassConfig struct {
 	Memory        string `yaml:"memory,omitempty"`
 	Disk          string `yaml:"disk,omitempty"`
 	LaunchTimeout string `yaml:"launchTimeout,omitempty"`
+}
+
+type fileTartConfig struct {
+	Image    string `yaml:"image,omitempty"`
+	User     string `yaml:"user,omitempty"`
+	WorkRoot string `yaml:"workRoot,omitempty"`
+	CPUs     *int   `yaml:"cpus,omitempty"`
+	Memory   *int   `yaml:"memory,omitempty"`
+	Disk     *int   `yaml:"disk,omitempty"`
 }
 
 type fileTailscaleConfig struct {
@@ -1878,9 +2004,11 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	}
 	if file.Target != "" {
 		cfg.TargetOS = file.Target
+		cfg.targetExplicit = true
 	}
 	if file.TargetOS != "" {
 		cfg.TargetOS = file.TargetOS
+		cfg.targetExplicit = true
 	}
 	if file.Architecture != "" {
 		cfg.Architecture = file.Architecture
@@ -2617,6 +2745,41 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.Tensorlake.NoInternet = *file.Tensorlake.NoInternet
 		}
 	}
+	if file.DockerSandbox != nil {
+		if file.DockerSandbox.CLIPath != "" {
+			cfg.DockerSandbox.CLIPath = file.DockerSandbox.CLIPath
+		}
+		if file.DockerSandbox.Agent != "" {
+			cfg.DockerSandbox.Agent = file.DockerSandbox.Agent
+		}
+		if file.DockerSandbox.Template != nil {
+			cfg.DockerSandbox.Template = *file.DockerSandbox.Template
+		}
+		if file.DockerSandbox.CPUs != nil {
+			if *file.DockerSandbox.CPUs < 0 {
+				return exit(2, "docker-sandbox cpus must be non-negative")
+			}
+			cfg.DockerSandbox.CPUs = *file.DockerSandbox.CPUs
+		}
+		if file.DockerSandbox.Memory != nil {
+			cfg.DockerSandbox.Memory = *file.DockerSandbox.Memory
+		}
+		if file.DockerSandbox.Clone != nil {
+			cfg.DockerSandbox.Clone = *file.DockerSandbox.Clone
+		}
+		if file.DockerSandbox.Workdir != nil {
+			cfg.DockerSandbox.Workdir = *file.DockerSandbox.Workdir
+		}
+		if file.DockerSandbox.ExtraWorkspaces != nil {
+			cfg.DockerSandbox.ExtraWorkspaces = append([]string(nil), (*file.DockerSandbox.ExtraWorkspaces)...)
+		}
+		if file.DockerSandbox.MCP != nil {
+			cfg.DockerSandbox.MCP = append([]string(nil), (*file.DockerSandbox.MCP)...)
+		}
+		if file.DockerSandbox.Kit != nil {
+			cfg.DockerSandbox.Kit = append([]string(nil), (*file.DockerSandbox.Kit)...)
+		}
+	}
 	if file.Modal != nil {
 		if file.Modal.App != "" {
 			cfg.Modal.App = file.Modal.App
@@ -2765,6 +2928,30 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.Multipass.LaunchTimeout != "" {
 			applyLeaseDuration(&cfg.Multipass.LaunchTimeout, file.Multipass.LaunchTimeout)
+		}
+	}
+	if file.Tart != nil {
+		if file.Tart.Image != "" {
+			cfg.Tart.Image = file.Tart.Image
+			cfg.tartImageExplicit = true
+		}
+		if file.Tart.User != "" {
+			cfg.Tart.User = file.Tart.User
+		}
+		if file.Tart.WorkRoot != "" {
+			cfg.Tart.WorkRoot = file.Tart.WorkRoot
+		}
+		if file.Tart.CPUs != nil {
+			cfg.Tart.CPUs = *file.Tart.CPUs
+			cfg.tartCPUsExplicit = true
+		}
+		if file.Tart.Memory != nil {
+			cfg.Tart.Memory = *file.Tart.Memory
+			cfg.tartMemoryExplicit = true
+		}
+		if file.Tart.Disk != nil {
+			cfg.Tart.Disk = *file.Tart.Disk
+			cfg.tartDiskExplicit = true
 		}
 	}
 	if file.Tailscale != nil {
@@ -3143,7 +3330,13 @@ func applyLeaseDuration(target *time.Duration, value string) {
 func applyEnv(cfg *Config) error {
 	cfg.Profile = getenv("CRABBOX_PROFILE", cfg.Profile)
 	cfg.Provider = getenv("CRABBOX_PROVIDER", cfg.Provider)
-	cfg.TargetOS = getenv("CRABBOX_TARGET", getenv("CRABBOX_TARGET_OS", cfg.TargetOS))
+	if t := os.Getenv("CRABBOX_TARGET"); t != "" {
+		cfg.TargetOS = t
+		cfg.targetExplicit = true
+	} else if t := os.Getenv("CRABBOX_TARGET_OS"); t != "" {
+		cfg.TargetOS = t
+		cfg.targetExplicit = true
+	}
 	if arch := os.Getenv("CRABBOX_ARCH"); arch != "" {
 		cfg.Architecture = arch
 		cfg.architectureExplicit = true
@@ -3442,6 +3635,30 @@ func applyEnv(cfg *Config) error {
 	if v, ok := getenvBool("CRABBOX_TENSORLAKE_NO_INTERNET"); ok {
 		cfg.Tensorlake.NoInternet = v
 	}
+	cfg.DockerSandbox.CLIPath = getenv("CRABBOX_DOCKER_SANDBOX_CLI", cfg.DockerSandbox.CLIPath)
+	cfg.DockerSandbox.Agent = getenv("CRABBOX_DOCKER_SANDBOX_AGENT", cfg.DockerSandbox.Agent)
+	cfg.DockerSandbox.Template = getenv("CRABBOX_DOCKER_SANDBOX_TEMPLATE", cfg.DockerSandbox.Template)
+	if cpus := os.Getenv("CRABBOX_DOCKER_SANDBOX_CPUS"); cpus != "" {
+		parsed, err := strconv.ParseFloat(cpus, 64)
+		if err != nil {
+			return fmt.Errorf("parse CRABBOX_DOCKER_SANDBOX_CPUS: %w", err)
+		}
+		cfg.DockerSandbox.CPUs = parsed
+	}
+	cfg.DockerSandbox.Memory = getenv("CRABBOX_DOCKER_SANDBOX_MEMORY", cfg.DockerSandbox.Memory)
+	if v, ok := getenvBool("CRABBOX_DOCKER_SANDBOX_CLONE"); ok {
+		cfg.DockerSandbox.Clone = v
+	}
+	cfg.DockerSandbox.Workdir = getenv("CRABBOX_DOCKER_SANDBOX_WORKDIR", cfg.DockerSandbox.Workdir)
+	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES"); ok {
+		cfg.DockerSandbox.ExtraWorkspaces = values
+	}
+	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_MCP"); ok {
+		cfg.DockerSandbox.MCP = values
+	}
+	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_KIT"); ok {
+		cfg.DockerSandbox.Kit = values
+	}
 	cfg.Modal.App = getenv("CRABBOX_MODAL_APP", cfg.Modal.App)
 	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)
 	cfg.Modal.Workdir = getenv("CRABBOX_MODAL_WORKDIR", cfg.Modal.Workdir)
@@ -3510,6 +3727,24 @@ func applyEnv(cfg *Config) error {
 	cfg.Multipass.Disk = getenv("CRABBOX_MULTIPASS_DISK", cfg.Multipass.Disk)
 	if timeout := os.Getenv("CRABBOX_MULTIPASS_LAUNCH_TIMEOUT"); timeout != "" {
 		applyLeaseDuration(&cfg.Multipass.LaunchTimeout, timeout)
+	}
+	if image := os.Getenv("CRABBOX_TART_IMAGE"); image != "" {
+		cfg.Tart.Image = image
+		cfg.tartImageExplicit = true
+	}
+	cfg.Tart.User = getenv("CRABBOX_TART_USER", cfg.Tart.User)
+	cfg.Tart.WorkRoot = getenv("CRABBOX_TART_WORK_ROOT", cfg.Tart.WorkRoot)
+	if v := os.Getenv("CRABBOX_TART_CPUS"); v != "" {
+		cfg.Tart.CPUs = getenvInt("CRABBOX_TART_CPUS", cfg.Tart.CPUs)
+		cfg.tartCPUsExplicit = true
+	}
+	if v := os.Getenv("CRABBOX_TART_MEMORY"); v != "" {
+		cfg.Tart.Memory = getenvInt("CRABBOX_TART_MEMORY", cfg.Tart.Memory)
+		cfg.tartMemoryExplicit = true
+	}
+	if v := os.Getenv("CRABBOX_TART_DISK"); v != "" {
+		cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
+		cfg.tartDiskExplicit = true
 	}
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value

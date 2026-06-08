@@ -31,6 +31,7 @@ func registerTargetFlags(fs *flag.FlagSet, defaults Config) targetFlagValues {
 func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagValues) error {
 	if flagWasSet(fs, "target") {
 		cfg.TargetOS = *values.Target
+		cfg.targetExplicit = true
 	}
 	if flagWasSet(fs, "windows-mode") {
 		cfg.WindowsMode = *values.WindowsMode
