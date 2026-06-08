@@ -101,6 +101,57 @@ func TestXAPIEndpointStripsUserinfoBeforeRequests(t *testing.T) {
 	}
 }
 
+func TestXAPIEndpointRedactsUserinfoFromMalformedURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"full URL with bad escape in host", "https://pool-user:pool-pass@%zz"},
+		{"full URL with bad escape in path", "https://pool-user:pool-pass@xcp-ng.example.test/%zz"},
+		{"full URL with bad port", "https://pool-user:pool-pass@xcp-ng.example.test:abc"},
+		{"scheme-less URL with bad escape in host", "pool-user:pool-pass@%zz"},
+		{"scheme-less URL with bad escape in path", "pool-user:pool-pass@%zz/path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := xapiEndpoint(tc.raw)
+			if err == nil {
+				t.Fatalf("expected error for malformed URL %q", tc.raw)
+			}
+			text := err.Error()
+			for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass"} {
+				if strings.Contains(text, secret) {
+					t.Fatalf("error leaked %q for %q: %s", secret, tc.raw, text)
+				}
+			}
+		})
+	}
+}
+
+func TestXAPIEndpointForMasterRedactsUserinfoFromMalformedCurrentURL(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		current string
+		master  string
+	}{
+		{"full current with bad escape in host", "https://pool-user:pool-pass@%zz", "xcp-ng.example.test"},
+		{"full current with bad escape in path", "https://pool-user:pool-pass@xcp-ng.example.test/%zz", "xcp-ng.example.test"},
+		{"scheme-less current with bad escape in host", "pool-user:pool-pass@%zz", "xcp-ng.example.test"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := xapiEndpointForMaster(tc.current, tc.master)
+			if err == nil {
+				t.Fatalf("expected error for malformed current %q", tc.current)
+			}
+			text := err.Error()
+			for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass"} {
+				if strings.Contains(text, secret) {
+					t.Fatalf("error leaked %q for %q: %s", secret, tc.current, text)
+				}
+			}
+		})
+	}
+}
+
 func TestCloseRetainsSessionWhenLogoutFailsSoItCanRetry(t *testing.T) {
 	var methods []string
 	client := &xapiClient{

@@ -313,14 +313,20 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 
 func redactedConfigURL(value string) string {
 	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return value
+	}
 	addedScheme := false
 	parseValue := raw
-	if parseValue != "" && !strings.Contains(parseValue, "://") {
+	if !strings.Contains(parseValue, "://") {
 		parseValue = "https://" + parseValue
 		addedScheme = true
 	}
 	u, err := url.Parse(parseValue)
-	if err != nil || u.User == nil {
+	if err != nil {
+		return sanitizedMalformedConfigURL(parseValue, addedScheme)
+	}
+	if u.User == nil {
 		return value
 	}
 	redacted := *u
@@ -330,6 +336,25 @@ func redactedConfigURL(value string) string {
 		out = strings.TrimPrefix(out, "https://")
 	}
 	return out
+}
+
+// sanitizedMalformedConfigURL strips any userinfo from a malformed URL so
+// url.Parse error messages and downstream diagnostics cannot echo the
+// original credentials.
+func sanitizedMalformedConfigURL(parseValue string, addedScheme bool) string {
+	sanitized := parseValue
+	if i := strings.Index(sanitized, "://"); i >= 0 {
+		rest := sanitized[i+3:]
+		if at := strings.Index(rest, "@"); at >= 0 {
+			sanitized = sanitized[:i+3] + rest[at+1:]
+		}
+	} else if at := strings.Index(sanitized, "@"); at >= 0 {
+		sanitized = sanitized[at+1:]
+	}
+	if addedScheme {
+		sanitized = strings.TrimPrefix(sanitized, "https://")
+	}
+	return sanitized
 }
 
 func jobConfigViews(jobs map[string]JobConfig) map[string]any {

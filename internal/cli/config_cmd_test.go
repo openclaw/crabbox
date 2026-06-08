@@ -366,6 +366,49 @@ func TestConfigShowRedactsSchemeLessXCPNgAPIURLUserinfo(t *testing.T) {
 	}
 }
 
+func TestRedactedConfigURLRedactsUserinfoOnMalformedURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"full URL with bad escape in host", "https://pool-user:pool-pass@%zz"},
+		{"full URL with bad escape in path", "https://pool-user:pool-pass@xcp-ng.example.test/%zz"},
+		{"full URL with bad port", "https://pool-user:pool-pass@xcp-ng.example.test:abc"},
+		{"scheme-less URL with bad escape in host", "pool-user:pool-pass@%zz"},
+		{"scheme-less URL with bad escape in path", "pool-user:pool-pass@%zz/path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactedConfigURL(tc.raw)
+			for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass"} {
+				if strings.Contains(got, secret) {
+					t.Fatalf("redacted URL leaked %q for %q: %s", secret, tc.raw, got)
+				}
+			}
+		})
+	}
+}
+
+func TestRoutingSafeURLRedactsUserinfoOnMalformedURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"full URL with bad escape in host", "https://pool-user:pool-pass@%zz"},
+		{"full URL with bad escape in path", "https://pool-user:pool-pass@xcp-ng.example.test/%zz"},
+		{"scheme-less URL with bad escape in host", "pool-user:pool-pass@%zz"},
+		{"scheme-less URL with bad escape in path", "pool-user:pool-pass@%zz/path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := routingSafeURL(tc.raw)
+			for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass"} {
+				if strings.Contains(got, secret) {
+					t.Fatalf("routing URL leaked %q for %q: %s", secret, tc.raw, got)
+				}
+			}
+		})
+	}
+}
+
 func TestConfigShowIncludesDockerSandboxConfig(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

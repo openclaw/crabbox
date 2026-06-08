@@ -841,6 +841,23 @@ func redactedURL(u *url.URL) string {
 	return strings.ReplaceAll(text, "%3Credacted%3E", "<redacted>")
 }
 
+// redactURLUserinfo removes any URL userinfo from the input so url.Parse
+// error messages and downstream diagnostics cannot echo the original
+// credentials when the URL is otherwise malformed.
+func redactURLUserinfo(raw string) string {
+	if i := strings.Index(raw, "://"); i >= 0 {
+		rest := raw[i+3:]
+		if at := strings.Index(rest, "@"); at >= 0 {
+			return raw[:i+3] + rest[at+1:]
+		}
+		return raw
+	}
+	if at := strings.Index(raw, "@"); at >= 0 {
+		return raw[at+1:]
+	}
+	return raw
+}
+
 var (
 	sessionIDTextPattern = regexp.MustCompile(`(?i)(session_id=)[^&\s]+`)
 	uuidTextPattern      = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -1397,6 +1414,7 @@ func xapiEndpoint(raw string) (string, error) {
 	if !strings.Contains(raw, "://") {
 		raw = "https://" + raw
 	}
+	raw = redactURLUserinfo(raw)
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", err
@@ -1415,7 +1433,7 @@ func xapiEndpoint(raw string) (string, error) {
 }
 
 func xapiEndpointForMaster(current, master string) (string, error) {
-	currentURL, err := url.Parse(current)
+	currentURL, err := url.Parse(redactURLUserinfo(current))
 	if err != nil {
 		return "", err
 	}

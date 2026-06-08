@@ -1758,14 +1758,20 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 
 func routingSafeURL(value string) string {
 	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return value
+	}
 	addedScheme := false
 	parseValue := raw
-	if parseValue != "" && !strings.Contains(parseValue, "://") {
+	if !strings.Contains(parseValue, "://") {
 		parseValue = "https://" + parseValue
 		addedScheme = true
 	}
 	u, err := url.Parse(parseValue)
-	if err != nil || u.User == nil {
+	if err != nil {
+		return sanitizedMalformedConfigURL(parseValue, addedScheme)
+	}
+	if u.User == nil {
 		return value
 	}
 	safe := *u
