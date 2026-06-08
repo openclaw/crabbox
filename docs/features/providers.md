@@ -71,7 +71,7 @@ sync/run/release path. None of them go through the Worker.
 ssh              Existing SSH host (no provisioning)      Linux, macOS, Windows
 parallels        Parallels Desktop linked clones          Linux, macOS, Windows
 proxmox          Proxmox VE QEMU VM clones                Linux
-xcp-ng           XCP-ng template copy + provision over XAPI Linux
+xcp-ng           Self-hosted XCP-ng pool over XAPI        Linux (normal leases)
 local-container  Local Docker-compatible containers       Linux
 multipass        Canonical Multipass local Ubuntu VMs     Linux
 daytona          Daytona sandboxes (short-lived SSH)      Linux
@@ -83,6 +83,12 @@ runpod           RunPod GPU pods (public SSH)             Linux
 semaphore        Semaphore CI jobs                        Linux
 sprites          Sprites microVMs through sprite proxy    Linux
 ```
+
+XCP-ng pools for Crabbox run on dedicated 64-bit x86 server-class hardware.
+XCP-ng itself can host Linux, Windows, and BSD guests, but Crabbox's current
+`xcp-ng` lease flow provisions Linux templates only. The separate XCP-ng ISO
+E2E harness also covers Windows x86_64/x64 installer media. Use the Tart
+provider on Apple hardware for macOS VM workflows.
 
 ## Delegated-run providers
 
@@ -115,7 +121,7 @@ wandb                   Weights & Biases run sandboxes
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [Parallels](../providers/parallels.md): local or remote Mac Parallels Desktop VM clones and small Mac fleets.
 - [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
-- [XCP-ng](../providers/xcp-ng.md): direct XCP-ng Linux template copy/provision through XAPI and FAT16 `CIDATA` config-drive cloud-init.
+- [XCP-ng](../providers/xcp-ng.md): direct XCP-ng provider on dedicated x86_64 pool hardware. Crabbox normal leases use Linux templates; the separate ISO E2E harness also covers Windows x86_64/x64 installers.
 - [Local Container](../providers/local-container.md): local Linux containers through Docker-compatible runtimes.
 - [Multipass](../providers/multipass.md): local Ubuntu VMs through Canonical Multipass.
 - [Daytona](../providers/daytona.md): Daytona SDK/toolbox sandbox leases.

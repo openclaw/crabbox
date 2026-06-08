@@ -8,24 +8,35 @@ Read this when you:
   cleanup;
 - change `internal/providers/xcpng`.
 
-XCP-ng is a direct SSH-lease provider for Linux VMs on a self-hosted XCP-ng
-pool. For each lease Crabbox talks directly to the XAPI endpoint, copies the
-configured template to the selected SR with `VM.copy`, calls `VM.provision`,
-attaches a temporary FAT16 `CIDATA` config-drive image with per-lease
-cloud-init SSH access, waits for XCP-ng guest metrics to report the VM IPv4
-address, runs the Crabbox Linux bootstrap over SSH, and then uses the normal
-SSH sync/run/release path.
+Crabbox's `xcp-ng` provider is a direct SSH-lease provider for Linux VMs on a
+self-hosted XCP-ng pool. For each lease Crabbox talks directly to the XAPI
+endpoint, copies the configured template to the selected SR with `VM.copy`,
+calls `VM.provision`, attaches a temporary FAT16 `CIDATA` config-drive image
+with per-lease cloud-init SSH access, waits for XCP-ng guest metrics to report
+the VM IPv4 address, runs the Crabbox Linux bootstrap over SSH, and then uses
+the normal SSH sync/run/release path.
 
 The provider is direct-only: it talks to XCP-ng straight from the CLI. Xen
 Orchestra is not required, and the Crabbox coordinator does not provision or
 broker XCP-ng capacity. XCP-ng supports the `ssh`, `crabbox-sync`, and
 `cleanup` features on `target=linux` only.
 
+Crabbox expects a self-hosted XCP-ng pool on dedicated 64-bit x86 server-class
+hardware for VM workloads. XCP-ng itself can host many guest OS families,
+including Linux, Windows, and BSD. Crabbox's current `xcp-ng` adapter is
+narrower: the normal `doctor` / `warmup` / `run` / `ssh` / `stop` / `cleanup`
+lease surface provisions Linux templates only. The separate ISO E2E harness
+documented below extends validation coverage to fresh Linux installers and
+Windows x86_64/x64 installer media. macOS guests are out of scope on this
+path; use the Tart provider on Apple hardware when you need macOS VM
+workflows.
+
 ## When to use
 
 Use XCP-ng when:
 
-- your test capacity lives on a private XCP-ng pool;
+- your test capacity lives on a private XCP-ng pool on dedicated 64-bit x86
+  server-class hardware;
 - you want reusable lab infrastructure instead of public-cloud VMs;
 - your template already supports cloud-init config drives and XCP-ng guest
   tools.
@@ -33,7 +44,8 @@ Use XCP-ng when:
 Use [AWS](aws.md), [Azure](azure.md), [Google Cloud](gcp.md), or
 [Hetzner](hetzner.md) when you need brokered, cost-capped shared-team leases.
 Use the [Static SSH](ssh.md) provider when you already have a running host and
-do not want Crabbox to clone or delete VMs.
+do not want Crabbox to clone or delete VMs. Use the Tart provider on Apple
+hardware when you need macOS guest virtualization.
 
 Provider name:
 
@@ -263,9 +275,11 @@ scripts/xcpng-iso-e2e-smoke.sh --read-only --os windows --iso ~/Desktop/xcp/ISOs
 ```
 
 This harness is intentionally separate from `scripts/xcpng-live-smoke.sh`.
-`xcpng-live-smoke.sh` preserves the normal PR 222 template-clone contract.
+`xcpng-live-smoke.sh` preserves the normal Linux template-clone contract.
 `xcpng-iso-e2e-smoke.sh` is a quarantined acceptance helper for fresh blank VM
-+ installer media lifecycle.
+plus installer media lifecycle. It extends validation coverage for fresh Linux and
+Windows x86_64/x64 installs on XCP-ng itself, but it does not change the normal
+`provider: xcp-ng` lease contract, which remains Linux-only.
 
 Read-only mode:
 

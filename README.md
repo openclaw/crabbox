@@ -125,6 +125,7 @@ Targets: **L**inux, **M**acOS, **W**indows.
 | [Hetzner Cloud](docs/providers/hetzner.md) | `hetzner` | L | brokered | Linux VMs with desktop/browser/code and Tailscale. |
 | [Parallels](docs/providers/parallels.md) | `parallels` | L / M / W | direct | Local or remote macOS host; checkpoint/fork/restore/snapshot. |
 | [Proxmox](docs/providers/proxmox.md) | `proxmox` | L | direct | Clone Linux QEMU templates on a private Proxmox VE cluster. |
+| [XCP-ng](docs/providers/xcp-ng.md) | `xcp-ng` | L | direct | Self-hosted XCP-ng pool on dedicated x86_64 server hardware; Crabbox normal leases use Linux templates, with separate Windows x86_64/x64 ISO E2E coverage. |
 | [Static SSH](docs/providers/ssh.md) | `ssh` (`static`, `static-ssh`) | L / M / W | direct | Existing machines; no provisioning. |
 | [Local Container](docs/providers/local-container.md) | `local-container` (`docker`, `container`, `local-docker`) | L | direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima, Podman). |
 | [Apple Container](docs/providers/apple-container.md) | `apple-container` (`apple`, `applecontainer`) | L | direct | Apple's native `container` runtime on Apple silicon macOS. |
@@ -137,6 +138,12 @@ Targets: **L**inux, **M**acOS, **W**indows.
 | [Daytona](docs/providers/daytona.md) | `daytona` | L | direct | Daytona-managed dev sandbox over SSH. |
 | [RunPod](docs/providers/runpod.md) | `runpod` (`run-pod`, `runpodio`) | L | direct | RunPod GPU pods with public SSH. |
 | [ASCII Box](docs/providers/ascii-box.md) | `ascii-box` (`ascii`, `asciibox`) | L | direct | ASCII Box Ubuntu sandboxes exposed as SSH leases. |
+
+XCP-ng itself can host Linux, Windows, and BSD guests, but Crabbox's current
+`xcp-ng` adapter provisions normal leases from Linux templates only. The
+separate XCP-ng ISO E2E harness also covers Windows x86_64/x64 installers.
+macOS guests are out of scope on this path; use the Tart provider on Apple
+hardware for macOS VM workflows.
 
 ### Delegated-run providers (sandbox/proof runners, no SSH lease)
 

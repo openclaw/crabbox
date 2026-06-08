@@ -359,6 +359,13 @@ config or `CRABBOX_XCP_NG_PASSWORD`; there is intentionally no
 XCP-ng password command-line flag. Prefer a pool-master `apiUrl`; if XAPI
 returns `HOST_IS_SLAVE`, Crabbox retries login once against the reported master.
 
+`target: linux` describes the current Crabbox lease surface, not an XCP-ng
+hypervisor limitation. XCP-ng itself can host Linux, Windows, and BSD guests on
+dedicated 64-bit x86 server-class hardware, but Crabbox's normal `xcp-ng` flow
+provisions Linux templates only. The separate XCP-ng ISO E2E harness also
+covers Windows x86_64/x64 installer media. Use the Tart provider on Apple
+hardware for macOS VM workflows.
+
 `network`, `networkUuid`, and `host` are optional placement hints. When
 `network` or `networkUuid` is set, Crabbox moves all VIFs on the copied VM to
 that network. Prefer a single-NIC template for Crabbox-managed VMs, or leave
