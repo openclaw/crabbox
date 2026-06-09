@@ -574,6 +574,17 @@ function Stop-SandboxSession {
   Get-Process -Name WindowsSandbox -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
+function Wait-SandboxSession([int]$TimeoutSeconds) {
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while (Get-Process -Name WindowsSandbox -ErrorAction SilentlyContinue) {
+    if ((Get-Date) -gt $deadline) {
+      Stop-SandboxSession
+      return
+    }
+    Start-Sleep -Milliseconds 500
+  }
+}
+
 function Flush-Log([string]$Path, [ref]$Offset, [bool]$IsError) {
   if (-not (Test-Path -LiteralPath $Path)) { return }
   $content = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
@@ -600,8 +611,8 @@ while ($true) {
     [int]$exitCode = 1
     [void][int]::TryParse($raw, [ref]$exitCode)
     $keepOpen = $Keep.IsPresent -or ($KeepOnFailure.IsPresent -and $exitCode -ne 0)
-    if (-not $keepOpen -and $process -and -not $process.HasExited) {
-      Wait-Process -Id $process.Id -Timeout 20 -ErrorAction SilentlyContinue
+    if (-not $keepOpen) {
+      Wait-SandboxSession 20
     }
     exit $exitCode
   }
@@ -705,12 +716,37 @@ func cleanWindowsSandboxPath(value string) (string, error) {
 	if len(value) < 3 || value[1] != ':' || value[2] != '\\' {
 		return "", exit(2, "windows-sandbox workdir %q must be an absolute Windows path like C:\\crabbox-work", value)
 	}
-	clean := filepath.Clean(value)
+	drive := value[0]
+	if !((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) {
+		return "", exit(2, "windows-sandbox workdir %q must start with a Windows drive letter like C:\\crabbox-work", value)
+	}
+	clean := cleanWindowsPath(value)
 	switch strings.ToUpper(clean) {
 	case `C:\`, `C:\WINDOWS`, `C:\USERS`, `C:\PROGRAM FILES`, `C:\PROGRAM FILES (X86)`:
 		return "", exit(2, "windows-sandbox workdir %q is too broad; choose a dedicated directory", clean)
 	}
 	return clean, nil
+}
+
+func cleanWindowsPath(value string) string {
+	drive := strings.ToUpper(value[:1])
+	parts := make([]string, 0)
+	for _, part := range strings.Split(value[3:], `\`) {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) > 0 {
+				parts = parts[:len(parts)-1]
+			}
+		default:
+			parts = append(parts, part)
+		}
+	}
+	if len(parts) == 0 {
+		return drive + `:\`
+	}
+	return drive + `:\` + strings.Join(parts, `\`)
 }
 
 func psSingleQuote(value string) string {

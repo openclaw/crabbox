@@ -127,12 +127,28 @@ func TestHostRunnerScriptStopsActualSandboxProcessOnTimeout(t *testing.T) {
 	script := hostRunnerScript()
 	for _, want := range []string{
 		"function Stop-SandboxSession",
+		"function Wait-SandboxSession",
+		"Wait-SandboxSession 20",
 		"Get-Process -Name WindowsSandbox -ErrorAction SilentlyContinue | Stop-Process -Force",
 		"if (Get-Process -Name WindowsSandbox -ErrorAction SilentlyContinue)",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("host runner missing %q:\n%s", want, script)
 		}
+	}
+}
+
+func TestCleanWindowsSandboxPathUsesWindowsSemantics(t *testing.T) {
+	got, err := cleanWindowsSandboxPath(`c:/repo/../work/./project`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `C:\work\project` {
+		t.Fatalf("clean path=%q, want C:\\work\\project", got)
+	}
+
+	if _, err := cleanWindowsSandboxPath(`C:/work/../Windows`); err == nil || !strings.Contains(err.Error(), "too broad") {
+		t.Fatalf("err=%v, want broad path rejection", err)
 	}
 }
 
