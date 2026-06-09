@@ -126,11 +126,16 @@ func TestSandboxRunScriptQuotesCommandEnvAndKeepOnFailure(t *testing.T) {
 func TestHostRunnerScriptStopsActualSandboxProcessOnTimeout(t *testing.T) {
 	script := hostRunnerScript()
 	for _, want := range []string{
+		"function Get-SandboxProcesses",
 		"function Stop-SandboxSession",
 		"function Wait-SandboxSession",
+		"Get-Process -Name WindowsSandbox,WindowsSandboxClient -ErrorAction SilentlyContinue",
+		"$sandboxExe = (Get-Command WindowsSandbox.exe -ErrorAction Stop).Source",
+		"Start-Process -FilePath $sandboxExe",
+		"$sandboxSeen = $false",
 		"Wait-SandboxSession 20",
-		"Get-Process -Name WindowsSandbox -ErrorAction SilentlyContinue | Stop-Process -Force",
-		"if (Get-Process -Name WindowsSandbox -ErrorAction SilentlyContinue)",
+		"Get-SandboxProcesses | Stop-Process -Force",
+		"if (-not $sandboxSeen)",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("host runner missing %q:\n%s", want, script)

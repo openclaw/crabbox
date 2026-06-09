@@ -555,28 +555,34 @@ $stderr = Join-Path $ControlDir 'stderr.log'
 $exitFile = Join-Path $ControlDir 'exit-code.txt'
 Remove-Item -LiteralPath $stdout,$stderr,$exitFile -Force -ErrorAction SilentlyContinue
 
-$running = Get-Process -Name WindowsSandbox -ErrorAction SilentlyContinue
+function Get-SandboxProcesses {
+  Get-Process -Name WindowsSandbox,WindowsSandboxClient -ErrorAction SilentlyContinue
+}
+
+$running = Get-SandboxProcesses
 if ($running) {
   Write-Error 'Windows Sandbox is already running. Microsoft Windows Sandbox allows one instance at a time; close it before running Crabbox with provider=windows-sandbox.'
   exit 2
 }
 
-$process = Start-Process -FilePath $WsbPath -PassThru
+$sandboxExe = (Get-Command WindowsSandbox.exe -ErrorAction Stop).Source
+$process = Start-Process -FilePath $sandboxExe -ArgumentList ('"{0}"' -f $WsbPath) -PassThru
 $started = Get-Date
 $deadline = $started.AddSeconds($TimeoutSeconds)
 $outOffset = 0
 $errOffset = 0
+$sandboxSeen = $false
 
 function Stop-SandboxSession {
   if ($process -and -not $process.HasExited) {
     Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
   }
-  Get-Process -Name WindowsSandbox -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Get-SandboxProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
 function Wait-SandboxSession([int]$TimeoutSeconds) {
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-  while (Get-Process -Name WindowsSandbox -ErrorAction SilentlyContinue) {
+  while (Get-SandboxProcesses) {
     if ((Get-Date) -gt $deadline) {
       Stop-SandboxSession
       return
@@ -603,6 +609,10 @@ function Flush-Log([string]$Path, [ref]$Offset, [bool]$IsError) {
 while ($true) {
   Flush-Log $stdout ([ref]$outOffset) $false
   Flush-Log $stderr ([ref]$errOffset) $true
+  $sandboxRunning = Get-SandboxProcesses
+  if ($sandboxRunning) {
+    $sandboxSeen = $true
+  }
   if (Test-Path -LiteralPath $exitFile) {
     Start-Sleep -Milliseconds 300
     Flush-Log $stdout ([ref]$outOffset) $false
@@ -622,13 +632,20 @@ while ($true) {
     exit 124
   }
   if ($process -and $process.HasExited) {
-    if (Get-Process -Name WindowsSandbox -ErrorAction SilentlyContinue) {
+    if ($sandboxRunning) {
+      Start-Sleep -Milliseconds 500
+      continue
+    }
+    if (-not $sandboxSeen) {
       Start-Sleep -Milliseconds 500
       continue
     }
     Start-Sleep -Seconds 2
     Flush-Log $stdout ([ref]$outOffset) $false
     Flush-Log $stderr ([ref]$errOffset) $true
+    if (Get-SandboxProcesses) {
+      continue
+    }
     if (-not (Test-Path -LiteralPath $exitFile)) {
       Write-Error 'Windows Sandbox closed before Crabbox received an exit code.'
       exit 1
