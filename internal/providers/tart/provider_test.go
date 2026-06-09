@@ -475,6 +475,11 @@ func TestEnableScreenSharingEnablesService(t *testing.T) {
 	if !strings.Contains(script, "com.apple.screensharing") {
 		t.Errorf("script should enable com.apple.screensharing\nscript: %s", script)
 	}
+	// Must verify the VNC listener actually came up and fail otherwise, so a lease
+	// is never reported ready with Screen Sharing down.
+	if !strings.Contains(script, "nc -z 127.0.0.1 5900") || !strings.Contains(script, "exit 1") {
+		t.Errorf("script should verify the VNC listener and fail if absent\nscript: %s", script)
+	}
 	// No crabbox-managed VNC credential: nothing secret reaches the guest, and the
 	// account password is never reset (that breaks secure-token accounts).
 	for _, banned := range []string{"vnc.password", "dscl", "-passwd"} {

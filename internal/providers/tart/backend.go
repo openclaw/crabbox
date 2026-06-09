@@ -543,7 +543,13 @@ func (b *backend) enableScreenSharing(ctx context.Context, name string) error {
 	script := `set -eu
 sudo launchctl enable system/com.apple.screensharing || true
 sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-sudo launchctl kickstart -k system/com.apple.screensharing || true`
+sudo launchctl kickstart -k system/com.apple.screensharing || true
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if nc -z 127.0.0.1 5900; then exit 0; fi
+  sleep 1
+done
+echo 'macOS Screen Sharing did not start (no VNC listener on 127.0.0.1:5900)' >&2
+exit 1`
 	result, err := b.tart(ctx, []string{"exec", name, "bash", "-c", script}, nil, b.rt.Stderr)
 	if err != nil {
 		return commandError("enable screen sharing", result, err)

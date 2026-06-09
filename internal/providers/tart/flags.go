@@ -12,7 +12,6 @@ import (
 type flagValues struct {
 	Image    *string
 	User     *string
-	Password *string
 	CPUs     *int
 	Memory   *int
 	Disk     *int
@@ -22,7 +21,6 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
 		Image:    fs.String("tart-image", defaults.Tart.Image, "tart base image to clone from"),
 		User:     fs.String("tart-user", defaults.Tart.User, "guest user account for SSH and desktop/VNC"),
-		Password: fs.String("tart-password", defaults.Tart.Password, "guest account password for the local WebVNC viewer (default: admin; viewer-only, never sent to the guest)"),
 		CPUs:     fs.Int("tart-cpu", defaults.Tart.CPUs, "CPU count for tart VMs"),
 		Memory:   fs.Int("tart-memory", defaults.Tart.Memory, "memory in MB for tart VMs"),
 		Disk:     fs.Int("tart-disk", defaults.Tart.Disk, "disk size in GB for tart VMs (0 = use clone default)"),
@@ -40,9 +38,6 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "tart-user") {
 		cfg.Tart.User = *v.User
-	}
-	if flagWasSet(fs, "tart-password") {
-		cfg.Tart.Password = *v.Password
 	}
 	if flagWasSet(fs, "tart-cpu") {
 		if *v.CPUs < 4 {
