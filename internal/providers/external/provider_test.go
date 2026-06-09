@@ -74,6 +74,25 @@ func TestCommandRoutingArgsUsesPrivateLeaseState(t *testing.T) {
 	}
 }
 
+func TestProtocolClaimScopeIgnoresZeroLifecycleConnection(t *testing.T) {
+	cfg := testConfig()
+	before := externalClaimScope(cfg)
+	cfg.External.Connection.SSH.User = "developer"
+	if after := externalClaimScope(cfg); after != before {
+		t.Fatalf("protocol scope changed after zero lifecycle connection: before=%s after=%s", before, after)
+	}
+	cfg.External.Command = ""
+	cfg.External.Lifecycle.Acquire.Argv = []string{"devboxctl", "new", "{{name}}"}
+	cfg.External.Lifecycle.List.Argv = []string{"devboxctl", "list"}
+	cfg.External.Lifecycle.List.Output = lifecycleOutputJSONNameArray
+	cfg.External.Lifecycle.Release.Argv = []string{"devboxctl", "rm", "{{name}}"}
+	lifecycleScope := externalClaimScope(cfg)
+	cfg.External.Connection.SSH.Host = "{{name}}.example"
+	if after := externalClaimScope(cfg); after == lifecycleScope {
+		t.Fatalf("lifecycle scope did not include connection: %s", after)
+	}
+}
+
 func TestConfigurePreservesExplicitTopLevelWorkRoot(t *testing.T) {
 	cfg := testConfig()
 	cfg.WorkRoot = "/workspace/top-level"
@@ -240,6 +259,83 @@ func TestInvokeDeclarativeLifecycleExpandsArgvAndBuildsLease(t *testing.T) {
 	}
 }
 
+func TestInvokeDeclarativeLifecycleValidatesConnectionBeforeAcquire(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{name}}"}},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list", "--format", "json"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{name}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			SSH: core.ExternalSSHConnectionConfig{
+				User: "{{env.MISSING_DEVBOX_USER}}",
+				Host: "{{name}}",
+			},
+		},
+		WorkRoot: "/home/developer/crabbox",
+	}
+	runner := &recordingRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	_, err := backend.invoke(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Desired: &desiredLease{
+			LeaseID: "cbx_abcdef123456",
+			Slug:    "fast-coral",
+			Name:    "crabbox-fast-coral-deadbeef",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "external connection ssh.user") || !strings.Contains(err.Error(), "MISSING_DEVBOX_USER") {
+		t.Fatalf("err=%v", err)
+	}
+	if runner.name != "" {
+		t.Fatalf("acquire command ran before connection validation: %s %#v", runner.name, runner.args)
+	}
+}
+
+func TestInvokeDeclarativeLifecycleConnectionTemplatesUseRequestContext(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{name}}", "--repo", "{{repo.name}}"}},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list", "--format", "json"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{name}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			SSH: core.ExternalSSHConnectionConfig{
+				User: "developer",
+				Host: "{{repo.name}}-{{name}}",
+			},
+		},
+	}
+	runner := &recordingRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	response, err := backend.invoke(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Desired: &desiredLease{
+			LeaseID: "cbx_abcdef123456",
+			Slug:    "fast-coral",
+			Name:    "crabbox-fast-coral-deadbeef",
+		},
+		Repo: &protocolRepo{Name: "my-app"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Lease == nil || response.Lease.SSH == nil || response.Lease.SSH.Host != "my-app-crabbox-fast-coral-deadbeef" {
+		t.Fatalf("response=%#v", response)
+	}
+	if strings.Join(runner.args, "|") != "new|crabbox-fast-coral-deadbeef|--repo|my-app" {
+		t.Fatalf("args=%#v", runner.args)
+	}
+}
+
 func TestInvokeDeclarativeLifecycleParsesNameInventory(t *testing.T) {
 	isolateCrabboxState(t)
 	cfg := core.BaseConfig()
@@ -279,6 +375,71 @@ func TestInvokeDeclarativeLifecycleParsesNameInventory(t *testing.T) {
 	}
 	if response.Leases[1].LeaseID != "unclaimed-box" || response.Leases[1].Name != "unclaimed-box" {
 		t.Fatalf("unclaimed lease=%#v", response.Leases[1])
+	}
+}
+
+func TestDeclarativeLifecycleCleanupDryRunDoesNotRunCommand(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{name}}"}},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list", "--format", "json"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{name}}"}},
+			Cleanup: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "gc"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}"},
+		},
+	}
+	runner := &recordingRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if runner.name != "" {
+		t.Fatalf("cleanup command ran during dry-run: %s %#v", runner.name, runner.args)
+	}
+}
+
+func TestDeclarativeLifecycleDefaultTouchUpdatesLocalLabels(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.IdleTimeout = time.Minute
+	cfg.TTL = time.Hour
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{name}}"}},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list", "--format", "json"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{name}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}"},
+		},
+	}
+	created := time.Now().UTC().Add(-10 * time.Minute)
+	labels := core.DirectLeaseLabels(cfg, "cbx_abcdef123456", "fast-coral", providerName, "", false, created)
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: &recordingRunner{}}}
+	server, err := backend.Touch(context.Background(), core.TouchRequest{
+		Lease: core.LeaseTarget{
+			LeaseID: "cbx_abcdef123456",
+			Server:  core.Server{Name: "devbox-fast-coral", Labels: labels},
+		},
+		State:       "ready",
+		IdleTimeout: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.Labels["last_touched_at"] == labels["last_touched_at"] {
+		t.Fatalf("last_touched_at was not refreshed: %#v", server.Labels)
+	}
+	if server.Labels["state"] != "ready" || server.Labels["expires_at"] == labels["expires_at"] {
+		t.Fatalf("touch labels not refreshed: %#v", server.Labels)
 	}
 }
 
@@ -597,6 +758,41 @@ func TestResolvePreservesClaimedLifecycleLabels(t *testing.T) {
 	}
 	if lease.Server.Labels["keep"] != "false" || lease.Server.Labels["created_at"] != "100" || lease.Server.Labels["expires_at"] != "200" {
 		t.Fatalf("labels=%#v", lease.Server.Labels)
+	}
+}
+
+func TestDeclarativeReleaseOnlyResolveSkipsSSHConnectionExpansion(t *testing.T) {
+	isolateCrabboxState(t)
+	repo := t.TempDir()
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{name}}"}},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list", "--format", "json"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{name}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			SSH: core.ExternalSSHConnectionConfig{
+				User: "{{env.MISSING_DEVBOX_USER}}",
+				Host: "{{name}}",
+			},
+		},
+	}
+	claimExternalLease(t, cfg, "cbx_000000000006", "ephemeral", repo, time.Minute, false)
+	server := core.Server{Name: "devbox-ephemeral", Labels: map[string]string{"name": "devbox-ephemeral", "slug": "ephemeral"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_000000000006", server, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: &recordingRunner{}}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "ephemeral", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != "cbx_000000000006" || lease.Server.Name != "devbox-ephemeral" {
+		t.Fatalf("lease=%#v", lease)
 	}
 }
 

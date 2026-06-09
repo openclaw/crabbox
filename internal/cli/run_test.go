@@ -847,7 +847,7 @@ exit 0
 		"--no-sync",
 		"--require-artifact", "reports/data/manifest.json",
 		"--artifact-glob", "reports/data/*.txt",
-		"--", "bash", "-lc", "mkdir -p reports/data && printf '{}\n' > reports/data/manifest.json && printf 'ok\n' > reports/data/quality.txt && printf 'data run complete\n'",
+		"--", "sh", "-c", "mkdir -p reports/data && printf '{}\n' > reports/data/manifest.json && printf 'ok\n' > reports/data/quality.txt && printf 'data run complete\n'",
 	})
 	if err != nil {
 		t.Fatalf("runCommand error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())

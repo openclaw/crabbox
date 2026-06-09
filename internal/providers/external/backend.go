@@ -300,21 +300,24 @@ func (b *leaseBackend) claimScope() string {
 }
 
 type externalClaimScopeData struct {
-	Command    string                        `json:"command,omitempty"`
-	Args       []string                      `json:"args,omitempty"`
-	Config     map[string]any                `json:"config,omitempty"`
-	Lifecycle  core.ExternalLifecycleConfig  `json:"lifecycle,omitempty"`
-	Connection core.ExternalConnectionConfig `json:"connection,omitempty"`
+	Command    string                         `json:"command,omitempty"`
+	Args       []string                       `json:"args,omitempty"`
+	Config     map[string]any                 `json:"config,omitempty"`
+	Lifecycle  *core.ExternalLifecycleConfig  `json:"lifecycle,omitempty"`
+	Connection *core.ExternalConnectionConfig `json:"connection,omitempty"`
 }
 
 func externalClaimScope(cfg core.Config) string {
-	data, err := json.Marshal(externalClaimScopeData{
-		Command:    strings.TrimSpace(cfg.External.Command),
-		Args:       append([]string(nil), cfg.External.Args...),
-		Config:     cfg.External.Config,
-		Lifecycle:  cfg.External.Lifecycle,
-		Connection: cfg.External.Connection,
-	})
+	scope := externalClaimScopeData{
+		Command: strings.TrimSpace(cfg.External.Command),
+		Args:    append([]string(nil), cfg.External.Args...),
+		Config:  cfg.External.Config,
+	}
+	if lifecycleConfigured(cfg.External) {
+		scope.Lifecycle = &cfg.External.Lifecycle
+		scope.Connection = &cfg.External.Connection
+	}
+	data, err := json.Marshal(scope)
 	if err != nil {
 		data = []byte(strings.TrimSpace(cfg.External.Command) + "\x00" + strings.Join(cfg.External.Args, "\x00"))
 	}

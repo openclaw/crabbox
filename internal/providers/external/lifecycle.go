@@ -28,6 +28,9 @@ type lifecycleTemplateContext struct {
 
 func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequest) (protocolResponse, error) {
 	operation := lifecycleOperation(b.cfg.External.Lifecycle, request.Operation)
+	if request.Operation == "cleanup" && request.DryRun {
+		return b.defaultLifecycleResponse(request)
+	}
 	if len(operation.Argv) == 0 {
 		return b.defaultLifecycleResponse(request)
 	}
@@ -38,6 +41,14 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 	argv, err := expandLifecycleArgv(operation.Argv, templateCtx)
 	if err != nil {
 		return protocolResponse{}, core.Exit(2, "external lifecycle %s: %v", request.Operation, err)
+	}
+	var defaultResponse *protocolResponse
+	if operation.Output == lifecycleOutputNone && lifecycleDefaultLeaseResponseOperation(request.Operation) {
+		response, err := b.defaultLifecycleResponse(request)
+		if err != nil {
+			return protocolResponse{}, err
+		}
+		defaultResponse = &response
 	}
 	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   argv[0],
@@ -59,6 +70,9 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 	}
 	switch operation.Output {
 	case lifecycleOutputNone:
+		if defaultResponse != nil {
+			return *defaultResponse, nil
+		}
 		return b.defaultLifecycleResponse(request)
 	case lifecycleOutputJSONNameArray:
 		var names []string
@@ -89,17 +103,32 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 	}
 }
 
+func lifecycleDefaultLeaseResponseOperation(operation string) bool {
+	switch operation {
+	case "acquire", "resolve", "touch":
+		return true
+	default:
+		return false
+	}
+}
+
 func (b *leaseBackend) defaultLifecycleResponse(request protocolRequest) (protocolResponse, error) {
 	response := protocolResponse{ProtocolVersion: protocolVersion}
 	switch request.Operation {
 	case "doctor":
 		response.Message = "declarative external provider ready"
-	case "acquire", "resolve", "touch":
+	case "acquire", "resolve":
+		if request.Operation == "resolve" && request.ReleaseOnly && len(b.cfg.External.Lifecycle.Resolve.Argv) == 0 {
+			lease := lifecycleMinimalLease(request)
+			response.Lease = &lease
+			break
+		}
 		lease, err := b.lifecycleLease(request)
 		if err != nil {
 			return protocolResponse{}, err
 		}
 		response.Lease = &lease
+	case "touch":
 	case "list":
 		response.Leases = []protocolLease{}
 	case "release", "cleanup":
@@ -107,6 +136,27 @@ func (b *leaseBackend) defaultLifecycleResponse(request protocolRequest) (protoc
 		return protocolResponse{}, core.Exit(2, "external lifecycle operation %q is unsupported", request.Operation)
 	}
 	return response, nil
+}
+
+func lifecycleMinimalLease(request protocolRequest) protocolLease {
+	desired := request.Desired
+	if desired == nil && request.Lease != nil {
+		desired = &desiredLease{
+			LeaseID: request.Lease.LeaseID,
+			Slug:    request.Lease.Slug,
+			Name:    request.Lease.Name,
+		}
+	}
+	if desired == nil {
+		name := strings.TrimSpace(request.ID)
+		desired = &desiredLease{LeaseID: name, Slug: core.NormalizeLeaseSlug(name), Name: name}
+	}
+	return protocolLease{
+		LeaseID: desired.LeaseID,
+		Slug:    desired.Slug,
+		Name:    desired.Name,
+		Status:  "ready",
+	}
 }
 
 func lifecycleOperation(cfg core.ExternalLifecycleConfig, operation string) core.ExternalLifecycleOperation {
@@ -143,7 +193,8 @@ func (b *leaseBackend) lifecycleLease(request protocolRequest) (protocolLease, e
 		name := strings.TrimSpace(request.ID)
 		desired = &desiredLease{LeaseID: name, Slug: core.NormalizeLeaseSlug(name), Name: name}
 	}
-	return b.lifecycleLeaseForDesired(*desired)
+	request.Desired = desired
+	return b.lifecycleLeaseForRequest(request)
 }
 
 func (b *leaseBackend) lifecycleLeaseForName(name string) (protocolLease, error) {
@@ -166,10 +217,17 @@ func (b *leaseBackend) lifecycleLeaseForName(name string) (protocolLease, error)
 }
 
 func (b *leaseBackend) lifecycleLeaseForDesired(desired desiredLease) (protocolLease, error) {
-	request := protocolRequest{Desired: &desired}
+	return b.lifecycleLeaseForRequest(protocolRequest{Desired: &desired})
+}
+
+func (b *leaseBackend) lifecycleLeaseForRequest(request protocolRequest) (protocolLease, error) {
 	templateCtx, err := lifecycleContext(request, b.cfg.External.Config)
 	if err != nil {
 		return protocolLease{}, err
+	}
+	desired := request.Desired
+	if desired == nil {
+		return protocolLease{}, core.Exit(2, "external lifecycle lease requires desired identity")
 	}
 	connection := b.cfg.External.Connection
 	cloudID, err := expandLifecycleValue(core.Blank(connection.CloudID, "{{name}}"), templateCtx)
