@@ -56,6 +56,8 @@ and `CRABBOX_HYPERV_GUEST_PASSWORD=<password>`. The provider handles OpenSSH.
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--hyperv-image` | (none) | Path to a Windows VHDX template (required) |
+| `--hyperv-user` | `crabbox` | Guest administrator account for SSH (password via `CRABBOX_HYPERV_GUEST_PASSWORD`) |
+| `--hyperv-work-root` | `C:\crabbox` | Crabbox work root inside the guest |
 | `--hyperv-cpu` | `4` | Number of virtual CPUs |
 | `--hyperv-memory` | `8192` | Memory in MB |
 | `--hyperv-disk` | `50` | Reserved; leases inherit the template's virtual size (differencing disk) |
