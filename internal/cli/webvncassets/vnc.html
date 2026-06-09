@@ -18,13 +18,20 @@
     <div id="screen"></div>
     <script type="module">
       import RFB from "./rfb.js";
-      const params = new URLSearchParams(location.search);
+      const status = document.getElementById("status");
       const proto = location.protocol === "https:" ? "wss" : "ws";
       const url = proto + "://" + location.host + "/websockify";
-      const status = document.getElementById("status");
-      const creds = {};
-      if (params.get("username")) creds.username = params.get("username");
-      if (params.get("password")) creds.password = params.get("password");
+      // The session token is in the URL fragment (never sent to the server).
+      // Credentials are fetched from the token-gated endpoint so the account
+      // password never appears in the URL / scrollback / history / opener args.
+      const token = new URLSearchParams(location.hash.slice(1)).get("token") || "";
+      let creds = {};
+      try {
+        const resp = await fetch("/credentials?token=" + encodeURIComponent(token));
+        if (resp.ok) creds = await resp.json();
+      } catch (e) {
+        status.textContent = "could not load VNC credentials";
+      }
       const rfb = new RFB(
         document.getElementById("screen"),
         url,

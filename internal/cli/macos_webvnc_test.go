@@ -7,15 +7,27 @@ import (
 )
 
 func TestMacOSWebVNCViewerURL(t *testing.T) {
-	got := macOSWebVNCViewerURL("6080", "admin", "s3cret")
-	for _, want := range []string{"http://127.0.0.1:6080/vnc.html?", "username=admin", "password=s3cret"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("viewer URL missing %q: %s", want, got)
+	got := macOSWebVNCViewerURL("6080", "deadbeefcafef00d")
+	if got != "http://127.0.0.1:6080/vnc.html#token=deadbeefcafef00d" {
+		t.Errorf("unexpected viewer URL: %s", got)
+	}
+	// The account password must never appear in the URL (it's fetched from the
+	// token-gated /credentials endpoint instead).
+	for _, banned := range []string{"password", "admin", "?"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("viewer URL must not contain %q: %s", banned, got)
 		}
 	}
-	// No credentials -> no query string.
-	if u := macOSWebVNCViewerURL("6080", "", ""); u != "http://127.0.0.1:6080/vnc.html" {
-		t.Errorf("expected bare viewer URL, got %s", u)
+}
+
+func TestRandomTokenUnique(t *testing.T) {
+	a, err := randomToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := randomToken()
+	if a == "" || a == b || len(a) != 32 {
+		t.Fatalf("tokens should be unique 16-byte hex: %q %q", a, b)
 	}
 }
 

@@ -2,10 +2,13 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -42,8 +45,26 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	}
 	defer stopProcess(tunnel)
 
+	// A per-session token gates the credentials endpoint. The viewer page reads it
+	// from the URL fragment (which is never sent to the server, and only the token
+	// -- not the account password -- ever appears in the URL/openers).
+	token, err := randomToken()
+	if err != nil {
+		return exit(5, "generate viewer session token: %v", err)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.FS(webVNCAssets())))
+	mux.HandleFunc("/credentials", func(w http.ResponseWriter, r *http.Request) {
+		if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(token)) != 1 {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"username": target.User,
+			"password": vncViewerPassword(cfg),
+		})
+	})
 	mux.HandleFunc("/websockify", func(w http.ResponseWriter, r *http.Request) {
 		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 			Subprotocols:   []string{"binary"},
@@ -75,7 +96,7 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	go func() { _ = srv.Serve(ln) }()
 	defer func() { _ = srv.Close() }()
 
-	viewerURL := macOSWebVNCViewerURL(webPort, target.User, vncViewerPassword(cfg))
+	viewerURL := macOSWebVNCViewerURL(webPort, token)
 	fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=macos\n", leaseID, blank(serverSlug(server), "-"), blank(server.Provider, cfg.Provider))
 	fmt.Fprintf(a.Stdout, "bridge: serving noVNC locally; SSH tunnel -> guest 127.0.0.1:%s; keep this running while viewing\n", managedVNCPort)
 	fmt.Fprintf(a.Stdout, "webvnc: %s\n", viewerURL)
@@ -110,19 +131,20 @@ func relayWebSocketVNC(ctx context.Context, ws *websocket.Conn, tcp net.Conn) {
 	<-errc
 }
 
-func macOSWebVNCViewerURL(webPort, username, password string) string {
-	v := url.Values{}
-	if u := strings.TrimSpace(username); u != "" {
-		v.Set("username", u)
+// macOSWebVNCViewerURL builds the local viewer URL. The session token is carried
+// in the fragment (never sent to the server); credentials are fetched from the
+// token-gated /credentials endpoint, so the account password never appears in
+// the URL, terminal scrollback, browser history, or the OS opener's arguments.
+func macOSWebVNCViewerURL(webPort, token string) string {
+	return "http://127.0.0.1:" + webPort + "/vnc.html#token=" + token
+}
+
+func randomToken() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
 	}
-	if p := strings.TrimSpace(password); p != "" {
-		v.Set("password", p)
-	}
-	q := ""
-	if len(v) > 0 {
-		q = "?" + v.Encode()
-	}
-	return "http://127.0.0.1:" + webPort + "/vnc.html" + q
+	return hex.EncodeToString(b), nil
 }
 
 // vncViewerPassword returns the account password the local noVNC viewer uses for
