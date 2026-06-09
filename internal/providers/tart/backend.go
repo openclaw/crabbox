@@ -529,17 +529,13 @@ func (b *backend) injectSSHKey(ctx context.Context, name string, user string, pu
 	return nil
 }
 
-// enableScreenSharing turns on the guest's built-in macOS Screen Sharing (VNC on
-// 127.0.0.1:5900) and provisions the VNC credential crabbox's webvnc bridge
-// expects: a 16-char password written to /var/db/crabbox/vnc.password with the
-// lease user's account password set to match. This mirrors the macOS bootstrap
-// used by the cloud providers, run via `tart exec` (unprivileged, so each
-// privileged step uses sudo). Only invoked for --desktop leases.
-// enableScreenSharing turns on the guest's built-in macOS Screen Sharing so a
-// --desktop lease exposes a native VNC server on 127.0.0.1:5900. Clients
-// authenticate with the guest account's own credentials over an SSH tunnel, so
-// crabbox provisions no VNC password and passes no secret through the guest
-// command line.
+// enableScreenSharing turns on the guest's built-in macOS Screen Sharing for a
+// --desktop lease (port 5900). Authentication uses the guest account's own
+// credentials; crabbox provisions no VNC password and passes no secret to the
+// guest. macOS Screen Sharing binds all guest interfaces, so the service is
+// reachable at the guest's address on the host-local tart network (gated by
+// account auth); an SSH tunnel can keep the viewer on 127.0.0.1. Only invoked
+// for --desktop leases.
 func (b *backend) enableScreenSharing(ctx context.Context, name string) error {
 	script := `set -eu
 sudo launchctl enable system/com.apple.screensharing || true
