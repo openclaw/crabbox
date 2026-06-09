@@ -96,6 +96,11 @@ func TestGuardMacOSDirectWebVNC(t *testing.T) {
 	if !strings.Contains(err.Error(), "native VNC client") || !strings.Contains(err.Error(), "ssh -L 5900") {
 		t.Fatalf("guard error should give native-client guidance, got: %v", err)
 	}
+	// Even with TargetOS unresolved (as the webvnc subcommands leave it), tart is
+	// guarded via its provider spec's macOS target.
+	if err := guardMacOSDirectWebVNC(Config{Provider: "tart"}); err == nil {
+		t.Fatal("tart should be guarded via provider spec even when TargetOS is unset")
+	}
 	// Linux desktop leases keep using the browser bridge.
 	if err := guardMacOSDirectWebVNC(Config{Provider: "local-container", TargetOS: targetLinux}); err != nil {
 		t.Fatalf("linux lease should not be guarded: %v", err)

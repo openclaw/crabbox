@@ -355,6 +355,9 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 	target := SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}
 	bridgeID := *id
 	if supportsDirectSSHWebVNC(cfg.Provider) {
+		if err := guardMacOSDirectWebVNC(cfg); err != nil {
+			return err
+		}
 		server, resolvedTarget, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
 		if err != nil {
 			return err
@@ -500,6 +503,9 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	if supportsDirectSSHWebVNC(cfg.Provider) {
+		if err := guardMacOSDirectWebVNC(cfg); err != nil {
+			return err
+		}
 		return a.directSSHWebVNCStatus(ctx, cfg, *id, *localPort)
 	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
@@ -619,6 +625,9 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	if supportsDirectSSHWebVNC(cfg.Provider) {
+		if err := guardMacOSDirectWebVNC(cfg); err != nil {
+			return err
+		}
 		return a.directSSHWebVNCReset(ctx, cfg, *id, *openPortal, *takeControl)
 	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
@@ -1225,10 +1234,27 @@ func isLocalContainerProvider(provider string) bool {
 // which is Linux-only; macOS leases expose native Screen Sharing instead, so we
 // point the user at a native VNC client over an SSH tunnel.
 func guardMacOSDirectWebVNC(cfg Config) error {
-	if cfg.TargetOS != targetMacOS {
+	if !isMacOSDesktopProvider(cfg) {
 		return nil
 	}
 	return exit(2, "webvnc's browser bridge requires Linux noVNC tooling and is not available for macOS leases; connect a native VNC client over an SSH tunnel instead:\n  ssh -L 5900:127.0.0.1:5900 %s@<lease-ip>\n  open vnc://127.0.0.1:5900", blank(cfg.SSHUser, "<user>"))
+}
+
+// isMacOSDesktopProvider reports whether the lease is macOS-targeted, keyed off
+// the provider's spec (not just the resolved cfg.TargetOS, which the webvnc
+// subcommands don't always populate) so every entrypoint is guarded uniformly.
+func isMacOSDesktopProvider(cfg Config) bool {
+	if cfg.TargetOS == targetMacOS {
+		return true
+	}
+	if p, err := ProviderFor(cfg.Provider); err == nil {
+		for _, t := range p.Spec().Targets {
+			if t.OS == targetMacOS {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func supportsDirectSSHWebVNC(provider string) bool {
