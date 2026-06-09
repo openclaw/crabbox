@@ -459,7 +459,7 @@ func TestEnableScreenSharingProvisionsVNC(t *testing.T) {
 	cfg.Provider = providerName
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 
-	if err := b.enableScreenSharing(context.Background(), "crabbox-blue-1234", "admin"); err != nil {
+	if err := b.enableScreenSharing(context.Background(), "crabbox-blue-1234", "admin", "s3cr3t-pw"); err != nil {
 		t.Fatalf("enableScreenSharing: %v", err)
 	}
 
@@ -475,12 +475,15 @@ func TestEnableScreenSharingProvisionsVNC(t *testing.T) {
 	for _, want := range []string{
 		"com.apple.screensharing",
 		"/var/db/crabbox/vnc.password",
-		"dscl . -passwd '/Users/admin'",
+		"'s3cr3t-pw'", // configured password recorded for webvnc
 		"sudo ",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("screen-sharing script missing %q\nscript: %s", want, script)
 		}
+	}
+	if strings.Contains(script, "dscl") {
+		t.Error("must not reset the account password (breaks secure-token accounts)")
 	}
 }
 
@@ -490,7 +493,7 @@ func TestEnableScreenSharingRejectsBadUser(t *testing.T) {
 	cfg.Provider = providerName
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 
-	if err := b.enableScreenSharing(context.Background(), "crabbox-x", "$(whoami)"); err == nil {
+	if err := b.enableScreenSharing(context.Background(), "crabbox-x", "$(whoami)", "pw"); err == nil {
 		t.Fatal("enableScreenSharing should reject an invalid POSIX user")
 	}
 	if len(runner.calls) != 0 {
