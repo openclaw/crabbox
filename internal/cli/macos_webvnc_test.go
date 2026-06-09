@@ -42,6 +42,20 @@ func TestVNCViewerPasswordDefaultsToAdmin(t *testing.T) {
 	}
 }
 
+func TestAvailableLocalVNCPortExcept(t *testing.T) {
+	// The tunnel port must never equal the (possibly user-supplied) web port.
+	webPort := availableLocalVNCPort()
+	for i := 0; i < 20; i++ {
+		if got := availableLocalVNCPortExcept(webPort); got == webPort {
+			t.Fatalf("availableLocalVNCPortExcept(%q) returned the excluded port", webPort)
+		}
+	}
+	// Excluding the fallback (5901) must still yield a different fallback.
+	if got := availableLocalVNCPortExcept("5901"); got == "5901" {
+		t.Errorf("availableLocalVNCPortExcept(5901) = 5901, want a different port")
+	}
+}
+
 func TestWebVNCAssetsEmbedded(t *testing.T) {
 	assets := webVNCAssets()
 	for _, name := range []string{"vnc.html", "rfb.js"} {

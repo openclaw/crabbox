@@ -37,8 +37,14 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 		return err
 	}
 
+	// Resolve the browser-facing port first (honoring an explicit --local-port),
+	// then pick the SSH-tunnel port so the two never collide on the same value.
+	if webPort == "" {
+		webPort = availableLocalVNCPort()
+	}
+
 	// SSH tunnel: 127.0.0.1:vncPort -> guest 127.0.0.1:5900 (Screen Sharing).
-	vncPort := availableLocalVNCPort()
+	vncPort := availableLocalVNCPortExcept(webPort)
 	tunnel, err := startVNCForegroundTunnel(ctx, target, vncPort, "127.0.0.1", managedVNCPort)
 	if err != nil {
 		return err
@@ -84,9 +90,6 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 		relayWebSocketVNC(r.Context(), ws, tcp)
 	})
 
-	if webPort == "" {
-		webPort = availableLocalVNCPort()
-	}
 	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", webPort))
 	if err != nil {
 		return exit(5, "start local WebVNC server on 127.0.0.1:%s: %v", webPort, err)
