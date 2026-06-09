@@ -29,10 +29,12 @@ reject configuration on non-Windows hosts.
     installed on first use
 - The Hyper-V PowerShell module (included with the Hyper-V feature)
 
-OpenSSH does **not** need to be pre-installed: on first acquire the provider
-installs and starts the Windows OpenSSH server in the guest over PowerShell
-Direct, then injects the lease SSH key. If OpenSSH is already present the step
-is a no-op. ISO images are not supported — provide a fully installed VHDX.
+OpenSSH and git do **not** need to be pre-installed: on first acquire the
+provider installs the Windows OpenSSH server (over PowerShell Direct) and, if
+absent, git (portable MinGit) — both are no-ops when already present, so a
+template that pre-bakes them just skips the per-lease download. This keeps the
+template requirement to a plain Windows VHDX with a known admin password. ISO
+images are not supported — provide a fully installed VHDX.
 
 ### Preparing a template
 
@@ -94,8 +96,9 @@ During `Acquire`, the provider:
    and space-thin; the template stays read-only and shared — no multi-GB copy)
 2. Creates and starts the VM
 3. Installs and starts the Windows OpenSSH server in the guest via PowerShell
-   Direct if it is not already present (`Add-WindowsCapability`, `Start-Service
-   sshd`, firewall rule)
+   Direct if not already present (`Add-WindowsCapability`, `Start-Service sshd`,
+   firewall rule), and installs git (MinGit) if absent — both required for SSH
+   readiness and crabbox sync
 4. Injects the per-lease SSH public key via PowerShell Direct
    (`Invoke-Command -VMName`) using the configured guest password
 5. Waits for SSH readiness on the injected key

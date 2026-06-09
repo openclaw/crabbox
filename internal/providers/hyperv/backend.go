@@ -147,6 +147,12 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		}
 		return LeaseTarget{}, fmt.Errorf("guest OpenSSH setup failed: %w", err)
 	}
+	if err := b.ensureGit(ctx, name, cfg.HyperV.User); err != nil {
+		if !req.Keep {
+			_ = b.removeVM(context.Background(), name)
+		}
+		return LeaseTarget{}, fmt.Errorf("guest git setup failed: %w", err)
+	}
 
 	if publicKey != "" {
 		if retryErr := b.injectSSHKey(ctx, name, cfg.HyperV.User, publicKey); retryErr != nil {
@@ -506,6 +512,31 @@ func (b *backend) ensureOpenSSH(ctx context.Context, vmName, user string) error 
 		`if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)) { ` +
 		`New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null }`
 	return b.invokeInGuest(ctx, vmName, user, scriptBlock, "OpenSSH install")
+}
+
+// ensureGit installs git in the guest when it is absent, so a plain Windows
+// template (only a known admin password) satisfies Crabbox's Windows readiness
+// check, which requires git for sync -- mirroring how the Linux cloud-init path
+// installs git. Idempotent: a no-op when git is already on PATH (so a template
+// that pre-bakes git skips the per-lease download). Uses portable MinGit from
+// the latest git-for-windows release; needs guest internet.
+func (b *backend) ensureGit(ctx context.Context, vmName, user string) error {
+	scriptBlock := `$ErrorActionPreference='Stop'; ` +
+		`if (Get-Command git -ErrorAction SilentlyContinue) { return }; ` +
+		`[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; ` +
+		`$h=@{'User-Agent'='crabbox'}; ` +
+		`$rel=Invoke-RestMethod -UseBasicParsing -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest' -Headers $h; ` +
+		`$asset=$rel.assets | Where-Object { $_.name -like 'MinGit-*-64-bit.zip' } | Select-Object -First 1; ` +
+		`if (-not $asset) { throw 'MinGit asset not found' }; ` +
+		`$zip=Join-Path $env:TEMP 'crabbox-mingit.zip'; ` +
+		`Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $zip; ` +
+		`$dst='C:\Program Files\Git'; ` +
+		`Expand-Archive -Path $zip -DestinationPath $dst -Force; ` +
+		`$cmd=Join-Path $dst 'cmd'; ` +
+		`$p=[Environment]::GetEnvironmentVariable('PATH','Machine'); ` +
+		`if ($p -notlike ('*'+$cmd+'*')) { [Environment]::SetEnvironmentVariable('PATH',($p+';'+$cmd),'Machine') }; ` +
+		`Restart-Service sshd`
+	return b.invokeInGuest(ctx, vmName, user, scriptBlock, "git install")
 }
 
 // injectSSHKey writes the SSH public key into the VM via PowerShell Direct,

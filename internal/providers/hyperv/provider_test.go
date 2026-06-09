@@ -580,6 +580,30 @@ func TestQueryVMParsesSingle(t *testing.T) {
 	}
 }
 
+func TestEnsureGitInstallsWhenMissing(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+
+	if err := b.ensureGit(context.Background(), "crabbox-blue-1234", "crabbox"); err != nil {
+		t.Fatalf("ensureGit: %v", err)
+	}
+	var script string
+	for _, call := range runner.calls {
+		s := call.Args[len(call.Args)-1]
+		if strings.Contains(s, "Invoke-Command") && strings.Contains(s, "MinGit") {
+			script = s
+		}
+	}
+	if script == "" {
+		t.Fatal("ensureGit should install git over PowerShell Direct when missing")
+	}
+	for _, want := range []string{"Get-Command git", "git-for-windows", "Expand-Archive", "SetEnvironmentVariable"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("ensureGit script missing %q", want)
+		}
+	}
+}
+
 func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(runner)
