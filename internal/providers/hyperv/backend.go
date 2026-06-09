@@ -367,6 +367,10 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 	if err := os.MkdirAll(vhdDir, 0o755); err != nil {
 		return exit(2, "create VHD directory %s: %v", vhdDir, err)
 	}
+	vmDir := hypervVMDir()
+	if err := os.MkdirAll(vmDir, 0o755); err != nil {
+		return exit(2, "create VM directory %s: %v", vmDir, err)
+	}
 	vhdPath := filepath.Join(vhdDir, name+".vhdx")
 
 	switchCheck := fmt.Sprintf(
@@ -386,13 +390,20 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 		return commandError("copy VHDX template", result, err)
 	}
 	if cfg.HyperV.Disk > 0 {
-		resizeScript := fmt.Sprintf(`Resize-VHD -Path '%s' -SizeBytes %d -ErrorAction SilentlyContinue`,
-			escapePSString(vhdPath), int64(cfg.HyperV.Disk)*1024*1024*1024)
-		b.powershell(ctx, resizeScript) //nolint:errcheck
+		targetSizeBytes := int64(cfg.HyperV.Disk) * 1024 * 1024 * 1024
+		resizeScript := fmt.Sprintf(
+			`$vhd = Get-VHD -Path '%s' -ErrorAction Stop; if ($vhd.Size -lt %d) { Resize-VHD -Path '%s' -SizeBytes %d -ErrorAction Stop }`,
+			escapePSString(vhdPath), targetSizeBytes, escapePSString(vhdPath), targetSizeBytes,
+		)
+		result, err = b.powershell(ctx, resizeScript)
+		if err != nil {
+			os.Remove(vhdPath) //nolint:errcheck
+			return commandError("Resize-VHD", result, err)
+		}
 	}
 	createScript := fmt.Sprintf(
-		`New-VM -Name '%s' -MemoryStartupBytes %d -Generation 2 -VHDPath '%s'`,
-		escapePSString(name), memBytes, escapePSString(vhdPath),
+		`New-VM -Name '%s' -MemoryStartupBytes %d -Generation 2 -VHDPath '%s' -Path '%s'`,
+		escapePSString(name), memBytes, escapePSString(vhdPath), escapePSString(vmDir),
 	)
 	result, err = b.powershell(ctx, createScript)
 	if err != nil {
@@ -828,6 +839,14 @@ func hypervVHDDir() string {
 		home = `C:\Users\Public`
 	}
 	return filepath.Join(home, "Hyper-V", "Virtual Hard Disks")
+}
+
+func hypervVMDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = `C:\Users\Public`
+	}
+	return filepath.Join(home, "Hyper-V", "Virtual Machines")
 }
 
 func parseVMList(raw string) ([]hypervVM, error) {

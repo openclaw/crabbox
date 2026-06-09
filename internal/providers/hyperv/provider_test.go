@@ -454,6 +454,58 @@ func TestCreateVMCopiesVHDXTemplate(t *testing.T) {
 	}
 }
 
+func TestCreateVMOnlyGrowsVHDXTemplate(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+		errors:    map[string]error{},
+	}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.HyperV.Image = `C:\Images\windows.vhdx`
+	cfg.HyperV.Disk = 25
+
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", ""); err != nil {
+		t.Fatalf("createVM: %v", err)
+	}
+
+	var foundGuardedResize bool
+	for _, call := range runner.calls {
+		script := call.Args[len(call.Args)-1]
+		if strings.Contains(script, "Get-VHD") && strings.Contains(script, "if ($vhd.Size -lt") && strings.Contains(script, "Resize-VHD") {
+			foundGuardedResize = true
+		}
+	}
+	if !foundGuardedResize {
+		t.Fatal("createVM should guard Resize-VHD so templates are only grown, never shrunk")
+	}
+}
+
+func TestCreateVMPlacesVMFilesUnderHypervVMDir(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+		errors:    map[string]error{},
+	}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.HyperV.Image = `C:\Images\windows.vhdx`
+
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", ""); err != nil {
+		t.Fatalf("createVM: %v", err)
+	}
+
+	wantVMDir := hypervVMDir()
+	var foundPathedNewVM bool
+	for _, call := range runner.calls {
+		script := call.Args[len(call.Args)-1]
+		if strings.Contains(script, "New-VM") && strings.Contains(script, "-Path '"+wantVMDir+"'") {
+			foundPathedNewVM = true
+		}
+	}
+	if !foundPathedNewVM {
+		t.Fatalf("createVM should pass New-VM -Path %q so VM config/runtime files don't default to the system drive", wantVMDir)
+	}
+}
+
 func TestAcquireRejectsISO(t *testing.T) {
 	b := testBackend(&recordingRunner{})
 	oldOS := hypervHostOS
