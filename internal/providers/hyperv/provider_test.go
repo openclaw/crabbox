@@ -965,3 +965,26 @@ func TestApplyFlagsAcceptsExplicitConfigWindows(t *testing.T) {
 		t.Fatalf("TargetOS=%s want windows", cfg.TargetOS)
 	}
 }
+
+func TestApplyFlagsHyperVUserAndWorkRoot(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
+	vals := registerFlags(fs, core.BaseConfig())
+	if err := fs.Set("hyperv-user", "Administrator"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Set("hyperv-work-root", `C:\work`); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, vals); err != nil {
+		t.Fatalf("applyFlags: %v", err)
+	}
+	if cfg.HyperV.User != "Administrator" {
+		t.Fatalf("--hyperv-user not applied: %q", cfg.HyperV.User)
+	}
+	if cfg.HyperV.WorkRoot != `C:\work` {
+		t.Fatalf("--hyperv-work-root not applied: %q", cfg.HyperV.WorkRoot)
+	}
+}

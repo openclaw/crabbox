@@ -8,20 +8,24 @@ import (
 )
 
 type flagValues struct {
-	Image  *string
-	CPUs   *int
-	Memory *int
-	Disk   *int
-	Switch *string
+	Image    *string
+	User     *string
+	WorkRoot *string
+	CPUs     *int
+	Memory   *int
+	Disk     *int
+	Switch   *string
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		Image:  fs.String("hyperv-image", defaults.HyperV.Image, "Windows VHDX template path for Hyper-V VM creation"),
-		CPUs:   fs.Int("hyperv-cpu", defaults.HyperV.CPUs, "CPU count for Hyper-V leases"),
-		Memory: fs.Int("hyperv-memory", defaults.HyperV.Memory, "memory in MB for Hyper-V leases"),
-		Disk:   fs.Int("hyperv-disk", defaults.HyperV.Disk, "disk size in GB for Hyper-V leases"),
-		Switch: fs.String("hyperv-switch", defaults.HyperV.Switch, "Hyper-V virtual switch name"),
+		Image:    fs.String("hyperv-image", defaults.HyperV.Image, "Windows VHDX template path for Hyper-V VM creation"),
+		User:     fs.String("hyperv-user", defaults.HyperV.User, "guest administrator account for SSH (password via CRABBOX_HYPERV_GUEST_PASSWORD)"),
+		WorkRoot: fs.String("hyperv-work-root", defaults.HyperV.WorkRoot, "Crabbox work root inside the guest"),
+		CPUs:     fs.Int("hyperv-cpu", defaults.HyperV.CPUs, "CPU count for Hyper-V leases"),
+		Memory:   fs.Int("hyperv-memory", defaults.HyperV.Memory, "memory in MB for Hyper-V leases"),
+		Disk:     fs.Int("hyperv-disk", defaults.HyperV.Disk, "disk size in GB for Hyper-V leases"),
+		Switch:   fs.String("hyperv-switch", defaults.HyperV.Switch, "Hyper-V virtual switch name"),
 	}
 }
 
@@ -32,6 +36,12 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "hyperv-image") {
 		cfg.HyperV.Image = *v.Image
+	}
+	if flagWasSet(fs, "hyperv-user") {
+		cfg.HyperV.User = *v.User
+	}
+	if flagWasSet(fs, "hyperv-work-root") {
+		cfg.HyperV.WorkRoot = *v.WorkRoot
 	}
 	if flagWasSet(fs, "hyperv-cpu") {
 		cfg.HyperV.CPUs = *v.CPUs
