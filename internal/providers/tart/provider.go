@@ -24,7 +24,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "local-vm",
 		Kind:        core.ProviderKindSSHLease,
 		Targets:     []core.TargetSpec{{OS: core.TargetMacOS}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
+		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop},
 		Coordinator: core.CoordinatorNever,
 	}
 }

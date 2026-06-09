@@ -447,6 +447,57 @@ func TestInjectSSHKeyRejectsShellInjection(t *testing.T) {
 	}
 }
 
+func TestSpecAdvertisesDesktop(t *testing.T) {
+	if !(Provider{}).Spec().Features.Has(core.FeatureDesktop) {
+		t.Fatal("tart Spec should advertise FeatureDesktop so --desktop is accepted")
+	}
+}
+
+func TestEnableScreenSharingProvisionsVNC(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	if err := b.enableScreenSharing(context.Background(), "crabbox-blue-1234", "admin"); err != nil {
+		t.Fatalf("enableScreenSharing: %v", err)
+	}
+
+	var script string
+	for _, call := range runner.calls {
+		if len(call.Args) >= 4 && call.Args[0] == "exec" && call.Args[2] == "bash" {
+			script = call.Args[len(call.Args)-1]
+		}
+	}
+	if script == "" {
+		t.Fatal("enableScreenSharing should issue a tart exec bash script")
+	}
+	for _, want := range []string{
+		"com.apple.screensharing",
+		"/var/db/crabbox/vnc.password",
+		"dscl . -passwd '/Users/admin'",
+		"sudo ",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("screen-sharing script missing %q\nscript: %s", want, script)
+		}
+	}
+}
+
+func TestEnableScreenSharingRejectsBadUser(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	if err := b.enableScreenSharing(context.Background(), "crabbox-x", "$(whoami)"); err == nil {
+		t.Fatal("enableScreenSharing should reject an invalid POSIX user")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("no tart commands should run for an invalid user, got %d", len(runner.calls))
+	}
+}
+
 func TestInstanceNameFromScopeRequiresPrefix(t *testing.T) {
 	cases := []struct {
 		scope string

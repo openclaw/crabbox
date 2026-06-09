@@ -53,10 +53,21 @@ Environment variables: `CRABBOX_TART_IMAGE`, `CRABBOX_TART_USER`,
 4. `tart ip crabbox-<slug>` polls for the guest IP (DHCP, typically ~10s).
 5. `tart exec crabbox-<slug> bash -c "..."` injects the SSH public key.
 6. Crabbox waits for SSH readiness, then syncs and runs commands normally.
-7. `tart stop` + `tart delete` on release.
+7. For `--desktop` leases, `tart exec` enables the guest's built-in macOS Screen Sharing (VNC on `127.0.0.1:5900`) and provisions the VNC credential.
+8. `tart stop` + `tart delete` on release.
+
+## Desktop / VNC
+
+Lease with `--desktop` to get a visible macOS session:
+
+```sh
+crabbox warmup --provider tart --desktop
+crabbox webvnc --id <lease-id>
+```
+
+The VM still starts with `--no-graphics` (the local display is not needed); instead the provider enables the guest's native **Screen Sharing** service over SSH. During acquire it generates a 16-character password at `/var/db/crabbox/vnc.password`, sets the lease user's account password to match, and starts `com.apple.screensharing`. `crabbox webvnc` then tunnels VNC on `127.0.0.1:5900` over SSH and bridges it to the portal — the same managed-VNC path the other desktop-capable providers use.
 
 ## Not yet supported
 
-- Desktop/VNC (tart VMs run headless; Screen Sharing setup is a follow-up).
 - Shared-directory mounts (`tart run --dir`; needs explicit host-mount config).
 - Checkpoint/fork (tracked as a separate follow-up PR).

@@ -147,6 +147,15 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		}
 		return LeaseTarget{}, err
 	}
+	if cfg.Desktop {
+		if err := b.enableScreenSharing(ctx, name, cfg.Tart.User); err != nil {
+			if !req.Keep {
+				_ = b.stopVM(context.Background(), name)
+				_ = b.deleteVM(context.Background(), name)
+			}
+			return LeaseTarget{}, err
+		}
+	}
 
 	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
 	labels["instance"] = name
@@ -516,6 +525,35 @@ func (b *backend) injectSSHKey(ctx context.Context, name string, user string, pu
 	injectResult, err := b.tart(ctx, []string{"exec", name, "bash", "-c", injectScript}, nil, b.rt.Stderr)
 	if err != nil {
 		return commandError("ssh key injection", injectResult, err)
+	}
+	return nil
+}
+
+// enableScreenSharing turns on the guest's built-in macOS Screen Sharing (VNC on
+// 127.0.0.1:5900) and provisions the VNC credential crabbox's webvnc bridge
+// expects: a 16-char password written to /var/db/crabbox/vnc.password with the
+// lease user's account password set to match. This mirrors the macOS bootstrap
+// used by the cloud providers, run via `tart exec` (unprivileged, so each
+// privileged step uses sudo). Only invoked for --desktop leases.
+func (b *backend) enableScreenSharing(ctx context.Context, name string, user string) error {
+	if !validPOSIXUser.MatchString(user) {
+		return exit(2, "tart.user %q is not a valid POSIX account name", user)
+	}
+	script := fmt.Sprintf(`set -eu
+sudo install -d -m 0755 /var/db/crabbox
+if ! sudo test -s /var/db/crabbox/vnc.password; then
+  pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16 || true)"
+  if [ "${#pw}" -ne 16 ]; then echo 'failed to generate vnc password' >&2; exit 1; fi
+  printf '%%s\n' "$pw" | sudo tee /var/db/crabbox/vnc.password >/dev/null
+  sudo dscl . -passwd '/Users/%s' "$pw"
+fi
+sudo chmod 0600 /var/db/crabbox/vnc.password
+sudo launchctl enable system/com.apple.screensharing || true
+sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
+sudo launchctl kickstart -k system/com.apple.screensharing || true`, user)
+	result, err := b.tart(ctx, []string{"exec", name, "bash", "-c", script}, nil, b.rt.Stderr)
+	if err != nil {
+		return commandError("enable screen sharing", result, err)
 	}
 	return nil
 }
