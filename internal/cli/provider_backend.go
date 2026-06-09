@@ -71,6 +71,11 @@ type DelegatedRunBackend interface {
 	Stop(ctx context.Context, req StopRequest) error
 }
 
+type DelegatedRunArtifactBackend interface {
+	Backend
+	CollectRunArtifacts(ctx context.Context, req DelegatedRunArtifactRequest) (DelegatedRunArtifactResult, error)
+}
+
 type PortsRequest struct {
 	Options   LeaseOptions
 	ID        string
@@ -184,22 +189,23 @@ type TargetSpec struct {
 type Feature string
 
 const (
-	FeatureSSH         Feature = "ssh"
-	FeatureCrabboxSync Feature = "crabbox-sync"
-	FeatureArchiveSync Feature = "archive-sync"
-	FeatureCleanup     Feature = "cleanup"
-	FeatureDesktop     Feature = "desktop"
-	FeatureBrowser     Feature = "browser"
-	FeatureCode        Feature = "code"
-	FeatureTailscale   Feature = "tailscale"
-	FeatureURLBridge   Feature = "url-bridge"
-	FeatureCheckpoint  Feature = "workspace-checkpoint"
-	FeatureFork        Feature = "workspace-fork"
-	FeatureRestore     Feature = "workspace-restore"
-	FeatureSnapshot    Feature = "provider-snapshot"
-	FeatureCacheVolume Feature = "cache-volume"
-	FeatureRunProof    Feature = "run-proof"
-	FeatureRunSession  Feature = "run-session"
+	FeatureSSH          Feature = "ssh"
+	FeatureCrabboxSync  Feature = "crabbox-sync"
+	FeatureArchiveSync  Feature = "archive-sync"
+	FeatureCleanup      Feature = "cleanup"
+	FeatureDesktop      Feature = "desktop"
+	FeatureBrowser      Feature = "browser"
+	FeatureCode         Feature = "code"
+	FeatureTailscale    Feature = "tailscale"
+	FeatureURLBridge    Feature = "url-bridge"
+	FeatureCheckpoint   Feature = "workspace-checkpoint"
+	FeatureFork         Feature = "workspace-fork"
+	FeatureRestore      Feature = "workspace-restore"
+	FeatureSnapshot     Feature = "provider-snapshot"
+	FeatureCacheVolume  Feature = "cache-volume"
+	FeatureRunProof     Feature = "run-proof"
+	FeatureRunSession   Feature = "run-session"
+	FeatureRunArtifacts Feature = "run-artifacts"
 )
 
 type FeatureSet []Feature
@@ -444,6 +450,18 @@ type RunResult struct {
 	LogExcerpt    string
 	ActionsURL    string
 	Artifacts     []RunArtifact
+}
+
+type DelegatedRunArtifactRequest struct {
+	RunReq   RunRequest
+	Result   RunResult
+	MaxFiles int
+	MaxBytes int64
+}
+
+type DelegatedRunArtifactResult struct {
+	Artifacts []RunArtifact
+	Output    string
 }
 
 type RunSessionHandle struct {
@@ -784,10 +802,11 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if len(req.Downloads) > 0 {
 		return exit(2, "%s delegates run execution; --download is not supported", provider)
 	}
-	if len(req.ArtifactGlobs) > 0 {
+	runArtifacts := featureSetHas(spec.Features, FeatureRunArtifacts)
+	if len(req.ArtifactGlobs) > 0 && !runArtifacts {
 		return exit(2, "%s delegates run execution; --artifact-glob is not supported", provider)
 	}
-	if len(req.RequiredArtifactGlobs) > 0 {
+	if len(req.RequiredArtifactGlobs) > 0 && !runArtifacts {
 		return exit(2, "%s delegates run execution; --require-artifact is not supported", provider)
 	}
 	if req.EmitProof != "" && !featureSetHas(spec.Features, FeatureRunProof) {
