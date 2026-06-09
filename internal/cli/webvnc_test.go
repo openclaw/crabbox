@@ -86,6 +86,22 @@ func TestWebVNCURLs(t *testing.T) {
 	}
 }
 
+func TestGuardMacOSDirectWebVNC(t *testing.T) {
+	// macOS desktop leases (e.g. tart) must be rejected from the Linux-only
+	// noVNC bridge with native-client guidance, not silently enter it.
+	err := guardMacOSDirectWebVNC(Config{Provider: "tart", TargetOS: targetMacOS, SSHUser: "admin"})
+	if err == nil {
+		t.Fatal("macOS lease should be guarded out of the direct WebVNC browser path")
+	}
+	if !strings.Contains(err.Error(), "native VNC client") || !strings.Contains(err.Error(), "ssh -L 5900") {
+		t.Fatalf("guard error should give native-client guidance, got: %v", err)
+	}
+	// Linux desktop leases keep using the browser bridge.
+	if err := guardMacOSDirectWebVNC(Config{Provider: "local-container", TargetOS: targetLinux}); err != nil {
+		t.Fatalf("linux lease should not be guarded: %v", err)
+	}
+}
+
 func TestWebVNCBridgeArgsPreserveProviderRouting(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	args := webVNCBridgeArgs(
