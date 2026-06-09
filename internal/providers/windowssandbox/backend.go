@@ -569,6 +569,8 @@ $sandboxExe = (Get-Command WindowsSandbox.exe -ErrorAction Stop).Source
 $process = Start-Process -FilePath $sandboxExe -ArgumentList ('"{0}"' -f $WsbPath) -PassThru
 $started = Get-Date
 $deadline = $started.AddSeconds($TimeoutSeconds)
+$startupGraceSeconds = [Math]::Min($TimeoutSeconds, 120)
+$startupDeadline = $started.AddSeconds($startupGraceSeconds)
 $outOffset = 0
 $errOffset = 0
 $sandboxSeen = $false
@@ -637,6 +639,12 @@ while ($true) {
       continue
     }
     if (-not $sandboxSeen) {
+      if ((Get-Date) -gt $startupDeadline) {
+        Flush-Log $stdout ([ref]$outOffset) $false
+        Flush-Log $stderr ([ref]$errOffset) $true
+        Write-Error "Windows Sandbox launcher exited before any sandbox process was observed after ${startupGraceSeconds}s."
+        exit 1
+      }
       Start-Sleep -Milliseconds 500
       continue
     }

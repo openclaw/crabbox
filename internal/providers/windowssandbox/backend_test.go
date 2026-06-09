@@ -132,10 +132,12 @@ func TestHostRunnerScriptStopsActualSandboxProcessOnTimeout(t *testing.T) {
 		"Get-Process -Name WindowsSandbox,WindowsSandboxClient -ErrorAction SilentlyContinue",
 		"$sandboxExe = (Get-Command WindowsSandbox.exe -ErrorAction Stop).Source",
 		"Start-Process -FilePath $sandboxExe",
+		"$startupGraceSeconds = [Math]::Min($TimeoutSeconds, 120)",
 		"$sandboxSeen = $false",
 		"Wait-SandboxSession 20",
 		"Get-SandboxProcesses | Stop-Process -Force",
 		"if (-not $sandboxSeen)",
+		"Windows Sandbox launcher exited before any sandbox process was observed",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("host runner missing %q:\n%s", want, script)
