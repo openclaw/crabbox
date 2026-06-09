@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lxc/incus/v7/shared/cliconfig"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 	"golang.org/x/oauth2"
@@ -247,6 +248,219 @@ func TestDoctorConnectionInfoRejectsLocalUnixRemoteOnNonLinux(t *testing.T) {
 	if _, err := doctorConnectionInfoForConfig(cfg); err == nil || !strings.Contains(err.Error(), "not configured for a reachable Linux Incus daemon") {
 		t.Fatalf("doctorConnectionInfoForConfig err=%v", err)
 	}
+}
+
+func TestConnectInstanceServerRejectsMalformedConfigWithExitCodeTwo(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".config", "incus")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.yml"), []byte("default-remote: [\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+
+	_, err := connectInstanceServer(cfg)
+	exitErr := requireExitCode(t, err, 2)
+	if !strings.Contains(exitErr.Message, "load incus client config") {
+		t.Fatalf("unexpected error: %v", exitErr)
+	}
+}
+
+func TestDoctorConnectionInfoRejectsMalformedConfigWithExitCodeTwo(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".config", "incus")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.yml"), []byte("default-remote: [\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+
+	_, err := doctorConnectionInfoForConfig(cfg)
+	exitErr := requireExitCode(t, err, 2)
+	if !strings.Contains(exitErr.Message, "load incus client config") {
+		t.Fatalf("unexpected error: %v", exitErr)
+	}
+}
+
+func TestDoctorConnectionInfoRejectsMissingRemoteWithExitCodeTwo(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeIncusConfig(t, home, "default-remote: missing\nremotes: {}\n")
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.Remote = ""
+
+	_, err := doctorConnectionInfoForConfig(cfg)
+	exitErr := requireExitCode(t, err, 2)
+	if !strings.Contains(exitErr.Message, "remote not found") {
+		t.Fatalf("unexpected error: %v", exitErr)
+	}
+}
+
+func TestConnectionArgsForAddressRejectsMalformedConfigWithExitCodeTwo(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".config", "incus")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.yml"), []byte("default-remote: [\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.Address = "https://incus.example.test:8443"
+
+	_, err := connectionArgsForAddress(cfg)
+	exitErr := requireExitCode(t, err, 2)
+	if !strings.Contains(exitErr.Message, "load incus client config for TLS credentials") {
+		t.Fatalf("unexpected error: %v", exitErr)
+	}
+}
+
+func TestConnectionArgsForAddressRejectsMissingServerCertWithExitCodeTwo(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.Address = "https://incus.example.test:8443"
+	cfg.Incus.TLSServerCert = filepath.Join(t.TempDir(), "missing.crt")
+
+	_, err := connectionArgsForAddress(cfg)
+	exitErr := requireExitCode(t, err, 2)
+	if !strings.Contains(exitErr.Message, "read incus TLS server cert") {
+		t.Fatalf("unexpected error: %v", exitErr)
+	}
+}
+
+func TestConnectionArgsForAddressRejectsMalformedOIDCTokensWithExitCodeTwo(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := writeIncusConfig(t, home, "default-remote: staging\nremotes:\n  staging:\n    addr: https://staging.incus.example.test:8443\n    auth_type: oidc\n    protocol: incus\n")
+	tokenDir := filepath.Join(configDir, "oidctokens")
+	if err := os.MkdirAll(tokenDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll oidctokens: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tokenDir, "staging.json"), []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("WriteFile token: %v", err)
+	}
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.Remote = "staging"
+	cfg.Incus.Address = "https://staging.incus.example.test:8443"
+	cfg.Incus.InsecureTLS = true
+
+	_, err := connectionArgsForAddress(cfg)
+	exitErr := requireExitCode(t, err, 2)
+	if !strings.Contains(exitErr.Message, "read incus OIDC tokens") {
+		t.Fatalf("unexpected error: %v", exitErr)
+	}
+}
+
+func TestConfiguredRemoteAddrFallsBackToFirstAddress(t *testing.T) {
+	remote := cliconfig.Remote{
+		Addrs: []string{"https://first.example.test:8443", "https://second.example.test:8443"},
+	}
+	if got := configuredRemoteAddr(remote); got != "https://first.example.test:8443" {
+		t.Fatalf("configuredRemoteAddr=%q want first address", got)
+	}
+
+	remote.LastWorkingAddr = "https://last.example.test:8443"
+	if got := configuredRemoteAddr(remote); got != "https://last.example.test:8443" {
+		t.Fatalf("configuredRemoteAddr=%q want last working address", got)
+	}
+}
+
+func TestSelectedProjectPrefersExplicitRemoteThenDefault(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.Project = "explicit"
+
+	if got := selectedProject(cfg, &cliconfig.Remote{Project: "remote"}); got != "explicit" {
+		t.Fatalf("selectedProject=%q want explicit", got)
+	}
+
+	cfg.Incus.Project = ""
+	if got := selectedProject(cfg, &cliconfig.Remote{Project: "remote"}); got != "remote" {
+		t.Fatalf("selectedProject=%q want remote", got)
+	}
+
+	if got := selectedProject(cfg, nil); got != "default" {
+		t.Fatalf("selectedProject=%q want default", got)
+	}
+}
+
+func TestSSHHostForConfigFallsBackAcrossSources(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeIncusConfig(t, home, "default-remote: lab\nremotes:\n  lab:\n    addr: https://remote.example.test:8443\n    protocol: incus\n")
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+
+	cfg.Incus.ProxyListenHost = "198.51.100.8"
+	if got := sshHostForConfig(cfg); got != "198.51.100.8" {
+		t.Fatalf("sshHostForConfig explicit host=%q want 198.51.100.8", got)
+	}
+
+	cfg.Incus.ProxyListenHost = "0.0.0.0"
+	cfg.Incus.Socket = "/var/lib/incus/unix.socket"
+	if got := sshHostForConfig(cfg); got != "127.0.0.1" {
+		t.Fatalf("sshHostForConfig socket host=%q want 127.0.0.1", got)
+	}
+
+	cfg.Incus.Socket = ""
+	cfg.Incus.Address = "https://address.example.test:8443"
+	if got := sshHostForConfig(cfg); got != "address.example.test" {
+		t.Fatalf("sshHostForConfig address host=%q want address.example.test", got)
+	}
+
+	cfg.Incus.Address = ""
+	cfg.Incus.Remote = "lab"
+	if got := sshHostForConfig(cfg); got != "remote.example.test" {
+		t.Fatalf("sshHostForConfig remote host=%q want remote.example.test", got)
+	}
+}
+
+func TestHostFromAddrHandlesEmptyBareAndInvalidValues(t *testing.T) {
+	if got := hostFromAddr(""); got != "" {
+		t.Fatalf("hostFromAddr(empty)=%q want empty", got)
+	}
+	if got := hostFromAddr("incus.example.test:8443"); got != "incus.example.test" {
+		t.Fatalf("hostFromAddr(bare)=%q want incus.example.test", got)
+	}
+	if got := hostFromAddr("://bad"); got != "" {
+		t.Fatalf("hostFromAddr(invalid)=%q want empty", got)
+	}
+}
+
+func requireExitCode(t *testing.T, err error, code int) core.ExitError {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected exit error")
+	}
+	var exitErr core.ExitError
+	if !core.AsExitError(err, &exitErr) {
+		t.Fatalf("expected ExitError, got %T: %v", err, err)
+	}
+	if exitErr.Code != code {
+		t.Fatalf("exit code=%d want %d (err=%v)", exitErr.Code, code, exitErr)
+	}
+	return exitErr
 }
 
 func writeIncusConfig(t *testing.T, home string, body string) string {

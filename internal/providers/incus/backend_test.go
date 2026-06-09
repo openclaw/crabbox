@@ -18,6 +18,7 @@ import (
 type fakeClient struct {
 	instances            map[string]*api.Instance
 	states               map[string]*api.InstanceState
+	listOrder            []string
 	deleted              []string
 	created              []api.InstancesPost
 	updated              []string
@@ -37,6 +38,24 @@ func (f *fakeClient) ListInstances() ([]api.Instance, error) {
 		return nil, f.listErr
 	}
 	out := make([]api.Instance, 0, len(f.instances))
+	if len(f.listOrder) > 0 {
+		seen := make(map[string]struct{}, len(f.listOrder))
+		for _, name := range f.listOrder {
+			inst, ok := f.instances[name]
+			if !ok {
+				continue
+			}
+			out = append(out, *inst)
+			seen[name] = struct{}{}
+		}
+		for name, inst := range f.instances {
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			out = append(out, *inst)
+		}
+		return out, nil
+	}
 	for _, inst := range f.instances {
 		out = append(out, *inst)
 	}
@@ -256,6 +275,25 @@ func TestApplyDefaultsAllowsIncusSpecificUserAndWorkRootOverride(t *testing.T) {
 	}
 	if cfg.WorkRoot != "/workspace/incus" {
 		t.Fatalf("WorkRoot=%q want /workspace/incus", cfg.WorkRoot)
+	}
+}
+
+func TestApplyDefaultsDoesNotClobberExplicitValuesWithDefaultIncusValues(t *testing.T) {
+	base := core.BaseConfig()
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.SSHUser = "alice"
+	cfg.WorkRoot = "/tmp/custom"
+	cfg.Incus.User = base.Incus.User
+	cfg.Incus.WorkRoot = base.Incus.WorkRoot
+
+	applyDefaults(&cfg)
+
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("SSHUser=%q want alice", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/tmp/custom" {
+		t.Fatalf("WorkRoot=%q want /tmp/custom", cfg.WorkRoot)
 	}
 }
 
@@ -958,6 +996,54 @@ func TestResolveStatusOnlyUsesLiveStoppedState(t *testing.T) {
 	}
 }
 
+func TestResolveStatusOnlyPromotesRunningStateWhenStoredLabelIsStale(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-status": {
+				Name:       "crabbox-status",
+				Status:     "Running",
+				StatusCode: api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_feedfacebead",
+					labelKey("slug"):    "status-slug",
+					labelKey("state"):   "stopped",
+					labelKey("host"):    "192.0.2.10",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-status": {Status: "Running", StatusCode: api.Running},
+		},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_feedfacebead", StatusOnly: true})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if lease.Server.Status != "running" {
+		t.Fatalf("server status=%q want running", lease.Server.Status)
+	}
+	if lease.Server.Labels["state"] != "running" {
+		t.Fatalf("label state=%q want running", lease.Server.Labels["state"])
+	}
+}
+
 func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1030,6 +1116,230 @@ func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T
 	}
 	if _, err := core.TestboxKeyPath("cbx_retain123456"); err != nil {
 		t.Fatalf("expected retained lease key to remain available: %v", err)
+	}
+}
+
+func TestReleaseLeaseDeleteOnReleaseRemovesClaimAndKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-delete": {
+				Name:       "crabbox-delete",
+				Status:     "Running",
+				StatusCode: api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_delete12345",
+					labelKey("slug"):    "delete-slug",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-delete": {Status: "Running", StatusCode: api.Running},
+		},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.DeleteOnRelease = true
+	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, "cbx_delete12345"); err != nil {
+		t.Fatalf("EnsureTestboxKeyForConfig: %v", err)
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePond("cbx_delete12345", "delete-slug", providerName, "instance:crabbox-delete", "", t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatalf("ClaimLeaseForRepoProviderScopePond: %v", err)
+	}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease := core.LeaseTarget{LeaseID: "cbx_delete12345", Server: core.Server{Name: "crabbox-delete", CloudID: "crabbox-delete", Labels: map[string]string{"lease": "cbx_delete12345", "slug": "delete-slug"}}}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-delete" {
+		t.Fatalf("deleted=%v want crabbox-delete removed", fake.deleted)
+	}
+	claim, err := core.ReadLeaseClaim("cbx_delete12345")
+	if err != nil {
+		t.Fatalf("ReadLeaseClaim: %v", err)
+	}
+	if claim.LeaseID != "" {
+		t.Fatalf("expected delete-on-release to remove lease claim, got %#v", claim)
+	}
+	keyPath, err := core.TestboxKeyPath("cbx_delete12345")
+	if err != nil {
+		t.Fatalf("TestboxKeyPath: %v", err)
+	}
+	if _, err := os.Stat(keyPath); err == nil {
+		t.Fatal("expected delete-on-release to remove stored key")
+	}
+}
+
+func TestListSkipsForeignInstancesBeforeManagedOnes(t *testing.T) {
+	oldNewClient := newClient
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"foreign": {
+				Name:        "foreign",
+				Status:      "Running",
+				StatusCode:  api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{}},
+			},
+			"crabbox-managed": {
+				Name:       "crabbox-managed",
+				Status:     "Running",
+				StatusCode: api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_abcd1234ef56",
+					labelKey("slug"):    "managed",
+				}},
+			},
+		},
+		listOrder: []string{"foreign", "crabbox-managed"},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	views, err := b.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(views) != 1 || views[0].Name != "crabbox-managed" {
+		t.Fatalf("views=%#v want only managed instance", views)
+	}
+}
+
+func TestResolveSkipsForeignInstancesBeforeManagedOnes(t *testing.T) {
+	oldNewClient := newClient
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"foreign": {
+				Name:        "foreign",
+				Status:      "Running",
+				StatusCode:  api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{}},
+			},
+			"crabbox-managed": {
+				Name:       "crabbox-managed",
+				Status:     "Running",
+				StatusCode: api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_abcd1234ef56",
+					labelKey("slug"):    "managed",
+					labelKey("state"):   "ready",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"foreign":         {Status: "Running", StatusCode: api.Running},
+			"crabbox-managed": {Status: "Running", StatusCode: api.Running},
+		},
+		listOrder: []string{"foreign", "crabbox-managed"},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_abcd1234ef56", StatusOnly: true})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if lease.Server.Name != "crabbox-managed" {
+		t.Fatalf("resolved=%#v want managed instance", lease)
+	}
+}
+
+func TestCleanupContinuesPastForeignAndFreshInstances(t *testing.T) {
+	oldNewClient := newClient
+	now := time.Now().UTC()
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"foreign": {
+				Name:        "foreign",
+				Status:      "Running",
+				StatusCode:  api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{}},
+			},
+			"crabbox-fresh": {
+				Name:       "crabbox-fresh",
+				Status:     "Running",
+				StatusCode: api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"):           "true",
+					labelKey("lease"):             "cbx_fresh123456",
+					labelKey("slug"):              "fresh",
+					labelKey("state"):             "ready",
+					labelKey("created_at"):        core.LeaseLabelTime(now.Add(-5 * time.Minute)),
+					labelKey("last_touched_at"):   core.LeaseLabelTime(now.Add(-5 * time.Minute)),
+					labelKey("idle_timeout"):      "3600",
+					labelKey("idle_timeout_secs"): "3600",
+					labelKey("ttl_secs"):          "7200",
+					labelKey("expires_at"):        core.LeaseLabelTime(now.Add(time.Hour)),
+				}},
+			},
+			"crabbox-stale": {
+				Name:       "crabbox-stale",
+				Status:     "Stopped",
+				StatusCode: api.Stopped,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"):           "true",
+					labelKey("lease"):             "cbx_stale123456",
+					labelKey("slug"):              "stale",
+					labelKey("state"):             "ready",
+					labelKey("created_at"):        core.LeaseLabelTime(now.Add(-2 * time.Hour)),
+					labelKey("last_touched_at"):   core.LeaseLabelTime(now.Add(-2 * time.Hour)),
+					labelKey("idle_timeout"):      "60",
+					labelKey("idle_timeout_secs"): "60",
+					labelKey("ttl_secs"):          "120",
+					labelKey("expires_at"):        core.LeaseLabelTime(now.Add(-time.Hour)),
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"foreign":       {Status: "Running", StatusCode: api.Running},
+			"crabbox-fresh": {Status: "Running", StatusCode: api.Running},
+			"crabbox-stale": {Status: "Stopped", StatusCode: api.Stopped},
+		},
+		listOrder: []string{"foreign", "crabbox-fresh", "crabbox-stale"},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-stale" {
+		t.Fatalf("deleted=%v want only stale instance removed", fake.deleted)
 	}
 }
 
