@@ -468,6 +468,19 @@ describe("lease config", () => {
     expect(config.azureImage).toBe("Canonical:ubuntu-26_04-lts:server-arm64:latest");
   });
 
+  it("does not apply the Azure Windows ARM64 broker image default to Linux leases", () => {
+    const config = leaseConfig(
+      {
+        provider: "azure",
+        architecture: "arm64",
+        os: "ubuntu:26.04",
+        sshPublicKey: "ssh-ed25519 test",
+      },
+      { azureWindowsARM64Image: "Contoso:windows-arm64:server:latest" },
+    );
+    expect(config.azureImage).toBe("Canonical:ubuntu-26_04-lts:server-arm64:latest");
+  });
+
   it("filters Azure defaults for ephemeral-preview full caching", () => {
     const arm = leaseConfig({
       provider: "azure",
@@ -570,9 +583,22 @@ describe("lease config", () => {
         serverType: "Standard_D32pds_v6",
         sshPublicKey: "ssh-ed25519 test",
       },
-      { azureImage: "Contoso:windows-arm64:server:latest" },
+      { azureWindowsARM64Image: "Contoso:windows-arm64:server:latest" },
     );
     expect(defaultImage.azureImage).toBe("Contoso:windows-arm64:server:latest");
+
+    const emptyRequestImage = leaseConfig(
+      {
+        provider: "azure",
+        target: "windows",
+        architecture: "arm64",
+        serverType: "Standard_D32pds_v6",
+        azureImage: "",
+        sshPublicKey: "ssh-ed25519 test",
+      },
+      { azureWindowsARM64Image: "Contoso:windows-arm64:server:latest" },
+    );
+    expect(emptyRequestImage.azureImage).toBe("Contoso:windows-arm64:server:latest");
   });
 
   it("rejects Azure Windows ARM64 leases without an explicit ARM64 image", () => {
@@ -585,6 +611,35 @@ describe("lease config", () => {
         sshPublicKey: "ssh-ed25519 test",
       }),
     ).toThrow("requires azureImage");
+
+    expect(() =>
+      leaseConfig(
+        {
+          provider: "azure",
+          target: "windows",
+          architecture: "arm64",
+          serverType: "Standard_D32pds_v6",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+        { azureImage: "Contoso:windows-arm64:server:latest" },
+      ),
+    ).toThrow("requires azureImage");
+
+    for (const azureImage of [
+      "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest",
+      "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest",
+    ]) {
+      expect(() =>
+        leaseConfig({
+          provider: "azure",
+          target: "windows",
+          architecture: "arm64",
+          serverType: "Standard_D32pds_v6",
+          azureImage,
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+      ).toThrow("requires azureImage");
+    }
   });
 
   it("rejects Azure Windows ARM64 WSL2 leases", () => {

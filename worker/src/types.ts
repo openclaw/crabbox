@@ -31,6 +31,7 @@ export interface Env {
   CRABBOX_AZURE_REGIONS?: string;
   CRABBOX_AZURE_RESOURCE_GROUP?: string;
   CRABBOX_AZURE_IMAGE?: string;
+  CRABBOX_AZURE_WINDOWS_ARM64_IMAGE?: string;
   CRABBOX_AZURE_OS_DISK?: string;
   CRABBOX_AZURE_VNET?: string;
   CRABBOX_AZURE_SUBNET?: string;

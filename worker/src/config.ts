@@ -90,6 +90,7 @@ export type Architecture = "amd64" | "arm64";
 export interface LeaseConfigDefaults {
   azureOSDisk?: string;
   azureImage?: string;
+  azureWindowsARM64Image?: string;
 }
 
 const maxRequestedPondNameLength = 41;
@@ -111,9 +112,14 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
   const architecture = architectureExplicit
     ? requestedArchitecture
     : inferArchitectureForServerType(provider, target, input.serverType, requestedArchitecture);
+  const defaultAzureImage =
+    provider === "azure" && target === "windows" && architecture === "arm64"
+      ? defaults.azureWindowsARM64Image
+      : undefined;
+  const inputAzureImage = input.azureImage?.trim() || undefined;
   const azureImage =
-    input.azureImage ??
-    defaults.azureImage ??
+    inputAzureImage ??
+    defaultAzureImage ??
     (target === "linux" && osExplicit
       ? architecture === "arm64"
         ? (linuxOSImage?.azureArm64Image ?? "")
@@ -432,6 +438,8 @@ function azureWindowsARM64HasExplicitImage(image: string | undefined): boolean {
   if (!normalized) return false;
   const defaultImages = new Set([
     "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest",
+    "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest",
+    "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest",
     osImageSpec("ubuntu:24.04").azureImage,
     osImageSpec("ubuntu:24.04").azureArm64Image,
     osImageSpec("ubuntu:26.04").azureImage,

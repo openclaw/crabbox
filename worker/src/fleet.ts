@@ -1029,6 +1029,8 @@ export class FleetDurableObject implements DurableObject {
     const defaults: LeaseConfigDefaults = {};
     const azureImage = this.env.CRABBOX_AZURE_IMAGE?.trim();
     if (azureImage) defaults.azureImage = azureImage;
+    const azureWindowsARM64Image = this.env.CRABBOX_AZURE_WINDOWS_ARM64_IMAGE?.trim();
+    if (azureWindowsARM64Image) defaults.azureWindowsARM64Image = azureWindowsARM64Image;
     if (this.env.CRABBOX_AZURE_OS_DISK) defaults.azureOSDisk = this.env.CRABBOX_AZURE_OS_DISK;
     let config = leaseConfig(input, defaults);
     if (!isAdminRequest(request) && hasNativeLeaseSource(config)) {
