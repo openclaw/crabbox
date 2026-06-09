@@ -46,10 +46,14 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		cfg.HyperV.Switch = *v.Switch
 	}
 	if isHyperVProviderName(cfg.Provider) {
-		if flagWasSet(fs, "target") && cfg.TargetOS != targetWindows {
-			return exit(2, "provider=%s supports target=%s only (got --%s %s)", providerName, targetWindows, "target", cfg.TargetOS)
-		}
-		if !flagWasSet(fs, "target") && cfg.TargetOS == "linux" {
+		// Reject an explicitly-set non-Windows target from any source (CLI flag,
+		// YAML, or env) rather than silently rewriting it to windows. Only adopt
+		// windows when the target was never set (baseConfig defaults to linux).
+		if flagWasSet(fs, "target") || core.IsTargetExplicit(cfg) {
+			if cfg.TargetOS != targetWindows {
+				return exit(2, "provider=%s supports target=%s only (got target=%s)", providerName, targetWindows, cfg.TargetOS)
+			}
+		} else {
 			cfg.TargetOS = targetWindows
 		}
 		applyDefaults(cfg)

@@ -838,3 +838,38 @@ func TestApplyFlagsAcceptsExplicitWindows(t *testing.T) {
 		t.Fatalf("TargetOS=%s want windows", cfg.TargetOS)
 	}
 }
+
+// A non-Windows target set via YAML or env (no CLI --target flag) must be
+// rejected, not silently rewritten to windows.
+func TestApplyFlagsRejectsExplicitConfigTarget(t *testing.T) {
+	for _, target := range []string{core.TargetLinux, core.TargetMacOS} {
+		cfg := core.BaseConfig()
+		cfg.Provider = providerName
+		cfg.TargetOS = target
+		core.MarkTargetExplicit(&cfg) // simulates target set from YAML/env
+
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.String("target", "linux", "") // present but NOT set (no CLI flag)
+
+		if err := applyFlags(&cfg, fs, flagValues{}); err == nil {
+			t.Fatalf("applyFlags should reject explicit config target=%s, got TargetOS=%s", target, cfg.TargetOS)
+		}
+	}
+}
+
+func TestApplyFlagsAcceptsExplicitConfigWindows(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetWindows
+	core.MarkTargetExplicit(&cfg)
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
+
+	if err := applyFlags(&cfg, fs, flagValues{}); err != nil {
+		t.Fatalf("applyFlags should accept explicit config target=windows: %v", err)
+	}
+	if cfg.TargetOS != core.TargetWindows {
+		t.Fatalf("TargetOS=%s want windows", cfg.TargetOS)
+	}
+}
