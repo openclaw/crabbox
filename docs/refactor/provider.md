@@ -318,6 +318,7 @@ const (
 	FeatureSnapshot    Feature = "provider-snapshot"
 	FeatureRunProof    Feature = "run-proof"
 	FeatureRunSession  Feature = "run-session"
+	FeatureRunArtifacts Feature = "run-artifacts"
 )
 ```
 

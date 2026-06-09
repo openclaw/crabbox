@@ -756,7 +756,7 @@ func TestSafeArtifactGlob(t *testing.T) {
 	if !safeArtifactGlob(".artifacts/qa-e2e/**") {
 		t.Fatal("expected QA artifact glob to be accepted")
 	}
-	for _, glob := range []string{"", "../secret", "/etc/passwd", ".artifacts/$(id)", "-C/tmp", "{/,}etc/passwd", ".{.,}/secret"} {
+	for _, glob := range []string{"", "../secret", "/etc/passwd", ".//etc/passwd", ".artifacts/$(id)", "-C/tmp", "{/,}etc/passwd", ".{.,}/secret"} {
 		if safeArtifactGlob(glob) {
 			t.Fatalf("expected unsafe glob %q to be rejected", glob)
 		}

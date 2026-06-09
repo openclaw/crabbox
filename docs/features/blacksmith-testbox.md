@@ -196,8 +196,7 @@ Because Blacksmith owns sync and execution, Crabbox rejects the following `run` 
 
 - sync flags: `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync`, `--fresh-pr`;
 - execution flags: `--script`, `--script-stdin`, `--env-helper`, `--capture-stdout`,
-  `--capture-stderr`, `--capture-on-fail`, `--download`, `--artifact-glob`,
-  `--require-artifact`, `--stop-after`;
+  `--capture-stderr`, `--capture-on-fail`, `--download`, `--stop-after`;
 - environment forwarding: `--allow-env` and `CRABBOX_ENV_ALLOW` are unsupported — configure
   secrets in the Testbox workflow instead;
 - `--actions-runner` on `warmup` — Blacksmith owns runner hydration.
@@ -207,6 +206,12 @@ persists a local proof bundle (stdout/stderr logs, `timing.json`, `metadata.json
 detected GitHub Actions run URL when one appears in the output. Failed runs always save a local
 failure bundle with stdout/stderr, timing, and redacted env/config metadata. `--keep-on-failure`
 keeps a failed one-shot Testbox inspectable until its idle timeout or an explicit `crabbox stop`.
+
+`--artifact-glob` and `--require-artifact` are supported through Blacksmith's delegated
+run-artifact adapter. After the command succeeds, Crabbox asks the same Testbox to validate
+required globs and stream one bounded tarball back to the local
+`.crabbox/runs/<lease>/blacksmith-artifacts.tgz` path. The adapter caps retrieval at 256 files and
+10 MiB by default and still excludes `.git` and `.crabbox` paths.
 
 ## Desktop and VNC
 
