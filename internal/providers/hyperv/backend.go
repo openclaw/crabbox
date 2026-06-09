@@ -416,7 +416,12 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 		return commandError("New-VM", result, err)
 	}
 
-	cpuScript := fmt.Sprintf(`Set-VM -Name '%s' -ProcessorCount %d`, escapePSString(name), cfg.HyperV.CPUs)
+	// Disable automatic checkpoints: client Hyper-V enables them by default, which
+	// makes Start-VM create a <name>_<guid>.avhdx differencing disk and attach it
+	// in place of the base VHDX. That defeats removeVM's disk cleanup (it matches
+	// the base <name>.vhdx) and leaks a disk-sized file on release. Lease VMs are
+	// ephemeral and have no use for checkpoints.
+	cpuScript := fmt.Sprintf(`Set-VM -Name '%s' -ProcessorCount %d -AutomaticCheckpointsEnabled $false`, escapePSString(name), cfg.HyperV.CPUs)
 	result, err = b.powershell(ctx, cpuScript)
 	if err != nil {
 		return commandError("Set-VM", result, err)
@@ -622,15 +627,29 @@ func (b *backend) removeVM(ctx context.Context, name string) error {
 		return commandError("Remove-VM", result, err)
 	}
 
-	expectedVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
-	if len(vhdPaths) > 0 {
-		for _, p := range vhdPaths {
-			if strings.EqualFold(filepath.Clean(p), filepath.Clean(expectedVHD)) {
-				b.removeVHDFile(p)
-			}
+	// Always remove the provider-created boot disk. We can't rely on the attached
+	// disk path matching it: client Hyper-V may have created and attached a
+	// <name>_<guid>.avhdx checkpoint disk instead, in which case the base VHDX
+	// would otherwise be leaked. Also sweep any name-prefixed differencing disks
+	// in our VHD directory, while leaving unrelated attached disks untouched.
+	vhdDir := hypervVHDDir()
+	expectedVHD := filepath.Join(vhdDir, name+".vhdx")
+	b.removeVHDFile(expectedVHD)
+	for _, p := range vhdPaths {
+		clean := filepath.Clean(p)
+		if strings.EqualFold(clean, filepath.Clean(expectedVHD)) {
+			continue
 		}
-	} else {
-		b.removeVHDFile(expectedVHD)
+		if strings.HasPrefix(filepath.Base(clean), name) &&
+			strings.EqualFold(filepath.Dir(clean), filepath.Clean(vhdDir)) {
+			b.removeVHDFile(p)
+		}
+	}
+
+	// Remove the per-VM configuration directory created by New-VM -Path; Remove-VM
+	// unregisters the VM but leaves its <vmDir>/<name> folder behind.
+	if err := os.RemoveAll(filepath.Join(hypervVMDir(), name)); err != nil {
+		fmt.Fprintf(b.rt.Stderr, "warning: failed to remove VM directory for %s: %v\n", name, err)
 	}
 
 	return nil

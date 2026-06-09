@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -653,6 +655,70 @@ func TestRemoveVMQueriesActualVHDPaths(t *testing.T) {
 	}
 	if !foundVHDQuery {
 		t.Error("removeVM did not query actual VHD paths before deletion")
+	}
+}
+
+func TestCreateVMDisablesAutomaticCheckpoints(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.HyperV.Image = `C:\Images\windows.vhdx`
+
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", ""); err != nil {
+		t.Fatalf("createVM: %v", err)
+	}
+
+	var found bool
+	for _, call := range runner.calls {
+		script := call.Args[len(call.Args)-1]
+		if strings.Contains(script, "Set-VM") && strings.Contains(script, "-AutomaticCheckpointsEnabled $false") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("createVM should disable automatic checkpoints on lease VMs")
+	}
+}
+
+// Regression: client Hyper-V auto-checkpoints attach a <name>_<guid>.avhdx in
+// place of the base disk. removeVM must still delete the base VHDX and the
+// per-VM config directory, or every lease leaks a disk-sized file on release.
+func TestRemoveVMCleansBaseDiskAndDirDespiteCheckpoint(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	name := "crabbox-blue-1234"
+	vhdDir := hypervVHDDir()
+	vmDir := filepath.Join(hypervVMDir(), name)
+	if err := os.MkdirAll(vhdDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(vmDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	baseVHD := filepath.Join(vhdDir, name+".vhdx")
+	checkpoint := filepath.Join(vhdDir, name+"_4F2A.avhdx")
+	for _, p := range []string{baseVHD, checkpoint} {
+		if err := os.WriteFile(p, []byte("disk"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	// The attached disk reported by Hyper-V is the checkpoint .avhdx, not the base.
+	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
+		`Get-VMHardDiskDrive -VMName 'crabbox-blue-1234' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path`})] =
+		core.LocalCommandResult{Stdout: checkpoint + "\n"}
+	b := testBackend(runner)
+
+	if err := b.removeVM(context.Background(), name); err != nil {
+		t.Fatalf("removeVM: %v", err)
+	}
+	for _, p := range []string{baseVHD, checkpoint, vmDir} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("removeVM left %s behind (err=%v)", p, err)
+		}
 	}
 }
 
