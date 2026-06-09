@@ -90,6 +90,9 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		return err
 	}
 	if supportsDirectSSHWebVNC(cfg.Provider) {
+		if err := guardMacOSDirectWebVNC(cfg); err != nil {
+			return err
+		}
 		return a.directSSHWebVNC(ctx, cfg, *id, *localPort, *openPortal, *takeControl, *reclaim)
 	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
@@ -1215,6 +1218,17 @@ func webVNCObserverSlotsExhausted(status CoordinatorWebVNCStatus) bool {
 func isLocalContainerProvider(provider string) bool {
 	p, err := ProviderFor(provider)
 	return err == nil && p.Name() == "local-container"
+}
+
+// guardMacOSDirectWebVNC rejects the direct WebVNC browser path for macOS
+// desktop leases (e.g. tart). That path shells noVNC/websockify on the guest,
+// which is Linux-only; macOS leases expose native Screen Sharing instead, so we
+// point the user at a native VNC client over an SSH tunnel.
+func guardMacOSDirectWebVNC(cfg Config) error {
+	if cfg.TargetOS != targetMacOS {
+		return nil
+	}
+	return exit(2, "webvnc's browser bridge requires Linux noVNC tooling and is not available for macOS leases; connect a native VNC client over an SSH tunnel instead:\n  ssh -L 5900:127.0.0.1:5900 %s@<lease-ip>\n  open vnc://127.0.0.1:5900", blank(cfg.SSHUser, "<user>"))
 }
 
 func supportsDirectSSHWebVNC(provider string) bool {

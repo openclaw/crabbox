@@ -53,7 +53,7 @@ Environment variables: `CRABBOX_TART_IMAGE`, `CRABBOX_TART_USER`,
 4. `tart ip crabbox-<slug>` polls for the guest IP (DHCP, typically ~10s).
 5. `tart exec crabbox-<slug> bash -c "..."` injects the SSH public key.
 6. Crabbox waits for SSH readiness, then syncs and runs commands normally.
-7. For `--desktop` leases, `tart exec` enables the guest's built-in macOS Screen Sharing (VNC on `127.0.0.1:5900`) and provisions the VNC credential.
+7. For `--desktop` leases, `tart exec` turns on the guest's built-in macOS Screen Sharing (native VNC on port 5900). No VNC password is provisioned — authentication uses the guest account's own credentials.
 8. `tart stop` + `tart delete` on release.
 
 ## Desktop / VNC
@@ -67,9 +67,19 @@ ssh -i <lease-key> -L 5900:127.0.0.1:5900 admin@<lease-ip>
 open vnc://127.0.0.1:5900    # macOS Screen Sharing, or any VNC client
 ```
 
-The VM still starts with `--no-graphics` (the local display is not needed); for `--desktop` leases the provider turns on the guest's built-in macOS **Screen Sharing** (`com.apple.screensharing`), exposing a native VNC server on `127.0.0.1:5900`. Authentication uses the guest account's own credentials, so crabbox provisions no separate VNC password.
+The VM still starts with `--no-graphics` (the local display is not needed); for `--desktop` leases the provider turns on the guest's built-in macOS **Screen Sharing** (`com.apple.screensharing`). Authentication uses the **guest account's own credentials** (macOS user auth, e.g. `admin`/`admin` on the cirruslabs base image) — crabbox provisions no separate VNC password and passes no credential to the guest.
 
-> The `crabbox webvnc` browser bridge is not yet wired for tart: its noVNC path expects a Linux guest (`websockify` + `/usr/share/novnc`). On macOS, connect with a native VNC client over the SSH tunnel as shown above. A macOS noVNC bridge is a possible follow-up.
+**Remote control plane (controller → Mac → guest).** When crabbox runs on the Mac over SSH from another machine, the guest's VNC port isn't directly reachable from the controller — forward it *through* the Mac to the guest's tart IP:
+
+```sh
+# on the controller (the guest IP is printed by `crabbox warmup`):
+ssh -L 5900:<guest-tart-ip>:5900 <user>@<mac-host>
+open vnc://127.0.0.1:5900    # native VNC client on the controller
+```
+
+**Exposure boundary:** macOS Screen Sharing binds all guest interfaces, so the VNC server is reachable at the guest's address on the tart host network (not localhost-only), gated by account authentication. tart's network is host-local (only the Mac can reach the guest), so the effective boundary is "account-authenticated VNC, reachable from the tart host." The SSH tunnels above keep the viewer side on `127.0.0.1`.
+
+> **`crabbox webvnc` is not supported for tart** and refuses with native-client guidance: its browser bridge shells noVNC/`websockify` on the guest, which is Linux-only. Connect with a native VNC client over the SSH tunnel as shown above. A macOS noVNC bridge is a possible follow-up.
 
 ## Not yet supported
 
