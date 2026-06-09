@@ -60,26 +60,28 @@ external:
     doctor:
       argv: [devboxctl, list, --format, json]
     acquire:
-      argv: [devboxctl, new, "{{name}}", --size, "{{config.size}}"]
+      argv: [devboxctl, new, "{{resourceName}}", --size, "{{config.size}}"]
     resolve:
-      argv: [devboxctl, inspect, "{{name}}"]
+      argv: [devboxctl, inspect, "{{resourceName}}"]
     list:
       argv: [devboxctl, list, --format, json]
       output: json-name-array
+      namePrefix: "cbx-"
     release:
-      argv: [devboxctl, rm, --yes, "{{name}}"]
+      argv: [devboxctl, rm, --yes, "{{resourceName}}"]
     touch:
-      argv: [devboxctl, touch, "{{name}}"]
+      argv: [devboxctl, touch, "{{resourceName}}"]
     cleanup:
       argv: [devboxctl, gc]
   connection:
-    cloudId: devboxes/{{name}}
+    resourceName: "{{leaseIdSlug}}"
+    cloudId: devboxes/{{resourceName}}
     serverType: "{{config.size}}"
     labels:
       backend: container
     ssh:
       user: "{{env.DEVBOX_USER}}"
-      host: "{{name}}"
+      host: "{{resourceName}}"
       port: "22"
       sshConfigProxy: true
       readyCheck: command -v git && command -v rsync && command -v tar
@@ -89,15 +91,19 @@ external:
 ```
 
 `acquire`, `list`, `release`, and `connection.ssh.user` are required.
-`connection.ssh.host` defaults to `{{name}}`. Optional operations are skipped
-when absent; Crabbox still maintains local touch metadata.
+`connection.resourceName` defaults to `{{name}}`; use it when the provider has
+stricter resource-name limits than Crabbox. Crabbox stores the resolved value
+with the lease so `json-name-array` inventory can recover the original lease
+ID and slug. `connection.ssh.host` defaults to `{{resourceName}}`. Optional
+operations are skipped when absent; Crabbox still maintains local touch
+metadata.
 
 Each `argv` item is passed directly to the configured executable. Shell
 operators, pipes, variable expansion, and command substitution are not
 evaluated. Supported placeholders:
 
 ```text
-{{leaseId}} {{slug}} {{name}} {{id}} {{state}}
+{{leaseId}} {{leaseIdSlug}} {{slug}} {{name}} {{resourceName}} {{id}} {{state}}
 {{keep}} {{reclaim}} {{releaseOnly}} {{force}}
 {{all}} {{refresh}} {{dryRun}}
 {{repo.root}} {{repo.name}} {{repo.remoteUrl}} {{repo.head}} {{repo.baseRef}}
@@ -110,11 +116,19 @@ secret environment values in lifecycle arguments: process arguments may be
 visible to other local processes. Provider CLIs should use their normal
 credential store or inherited environment for authentication.
 
+`leaseIdSlug` is the lease ID normalized as a lowercase slug, suitable for
+providers that require DNS-style names. `resourceName` is the expanded
+`connection.resourceName`.
+
 `list.output` accepts:
 
 - `json-name-array`: stdout is a JSON array of resource names;
 - `json-lease-array`: stdout is a JSON array using the protocol lease shape
   documented below.
+
+For `json-name-array`, optional `list.namePrefix` discards inventory names
+outside the expanded prefix before Crabbox constructs leases. Use it when a
+provider CLI lists resources that are not all owned by this configuration.
 
 Declarative configuration and resolved connection templates are included in
 the private per-lease routing file. This lets generated retry, daemon, SSH, and

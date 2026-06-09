@@ -90,6 +90,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	id := req.ID
 	var desired *desiredLease
+	var claimedLease *protocolLease
 	var claimLabels map[string]string
 	keep := true
 	if claim, ok, err := b.resolveClaim(req.ID); err != nil {
@@ -99,12 +100,21 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 		id = name
 		desired = &desiredLease{LeaseID: claim.LeaseID, Slug: claim.Slug, Name: name}
 		claimLabels = claim.Labels
+		if lifecycleConfigured(b.cfg.External) {
+			claimedLease = &protocolLease{
+				LeaseID: claim.LeaseID,
+				Slug:    claim.Slug,
+				Name:    name,
+				Labels:  claim.Labels,
+			}
+		}
 		keep = keepFromLabels(claim.Labels, true)
 	}
 	response, err := b.invoke(ctx, protocolRequest{
 		Operation:   "resolve",
 		ID:          id,
 		Desired:     desired,
+		Lease:       claimedLease,
 		Reclaim:     req.Reclaim,
 		ReleaseOnly: req.ReleaseOnly,
 		Repo:        repoForProtocol(req.Repo),
@@ -438,6 +448,7 @@ func validateAndFillDesired(lease *protocolLease, desired *desiredLease) error {
 }
 
 var lifecycleLabelKeys = []string{
+	externalResourceNameLabel,
 	"keep",
 	"created_at",
 	"last_touched_at",

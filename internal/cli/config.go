@@ -229,15 +229,17 @@ type ExternalLifecycleConfig struct {
 }
 
 type ExternalLifecycleOperation struct {
-	Argv   []string `yaml:"argv,omitempty" json:"argv,omitempty"`
-	Output string   `yaml:"output,omitempty" json:"output,omitempty"`
+	Argv       []string `yaml:"argv,omitempty" json:"argv,omitempty"`
+	Output     string   `yaml:"output,omitempty" json:"output,omitempty"`
+	NamePrefix string   `yaml:"namePrefix,omitempty" json:"namePrefix,omitempty"`
 }
 
 type ExternalConnectionConfig struct {
-	CloudID    string                      `yaml:"cloudId,omitempty" json:"cloudId,omitempty"`
-	ServerType string                      `yaml:"serverType,omitempty" json:"serverType,omitempty"`
-	Labels     map[string]string           `yaml:"labels,omitempty" json:"labels,omitempty"`
-	SSH        ExternalSSHConnectionConfig `yaml:"ssh,omitempty" json:"ssh,omitempty"`
+	ResourceName string                      `yaml:"resourceName,omitempty" json:"resourceName,omitempty"`
+	CloudID      string                      `yaml:"cloudId,omitempty" json:"cloudId,omitempty"`
+	ServerType   string                      `yaml:"serverType,omitempty" json:"serverType,omitempty"`
+	Labels       map[string]string           `yaml:"labels,omitempty" json:"labels,omitempty"`
+	SSH          ExternalSSHConnectionConfig `yaml:"ssh,omitempty" json:"ssh,omitempty"`
 }
 
 type ExternalSSHConnectionConfig struct {

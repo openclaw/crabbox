@@ -477,18 +477,20 @@ provider: external
 external:
   lifecycle:
     acquire:
-      argv: [devboxctl, new, "{{name}}", --size, "{{config.size}}"]
+      argv: [devboxctl, new, "{{resourceName}}", --size, "{{config.size}}"]
     list:
       argv: [devboxctl, list, --format, json]
       output: json-name-array
+      namePrefix: "cbx-"
     release:
-      argv: [devboxctl, rm, --yes, "{{name}}"]
+      argv: [devboxctl, rm, --yes, "{{resourceName}}"]
   connection:
-    cloudId: devboxes/{{name}}
+    resourceName: "{{leaseIdSlug}}"
+    cloudId: devboxes/{{resourceName}}
     serverType: "{{config.size}}"
     ssh:
       user: "{{env.DEVBOX_USER}}"
-      host: "{{name}}"
+      host: "{{resourceName}}"
       sshConfigProxy: true
   config:
     size: cpu16

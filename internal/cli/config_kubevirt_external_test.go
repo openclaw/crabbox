@@ -137,9 +137,11 @@ external:
     list:
       argv: [devboxctl, list, --format, json]
       output: json-name-array
+      namePrefix: "cbx-"
     release:
       argv: [devboxctl, rm, --yes, "{{name}}"]
   connection:
+    resourceName: "{{leaseIdSlug}}"
     cloudId: devboxes/{{name}}
     serverType: "{{config.size}}"
     labels:
@@ -170,7 +172,12 @@ external:
 	if cfg.External.Lifecycle.List.Output != "json-name-array" {
 		t.Fatalf("list=%#v", cfg.External.Lifecycle.List)
 	}
-	if cfg.External.Connection.SSH.User != "{{env.DEVBOX_USER}}" || !cfg.External.Connection.SSH.SSHConfigProxy {
+	if cfg.External.Lifecycle.List.NamePrefix != "cbx-" {
+		t.Fatalf("list=%#v", cfg.External.Lifecycle.List)
+	}
+	if cfg.External.Connection.ResourceName != "{{leaseIdSlug}}" ||
+		cfg.External.Connection.SSH.User != "{{env.DEVBOX_USER}}" ||
+		!cfg.External.Connection.SSH.SSHConfigProxy {
 		t.Fatalf("connection=%#v", cfg.External.Connection)
 	}
 	if cfg.External.Config["size"] != "cpu16" || cfg.External.WorkRoot != "/home/developer/crabbox" {

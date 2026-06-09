@@ -141,6 +141,12 @@ func validateLifecycleOperation(name string, operation core.ExternalLifecycleOpe
 	if name != "list" && operation.Output != lifecycleOutputNone {
 		return core.Exit(2, "external.lifecycle.%s.output is only supported for list", name)
 	}
+	if name != "list" && operation.NamePrefix != "" {
+		return core.Exit(2, "external.lifecycle.%s.namePrefix is only supported for list", name)
+	}
+	if operation.NamePrefix != "" && operation.Output != lifecycleOutputJSONNameArray {
+		return core.Exit(2, "external.lifecycle.list.namePrefix requires output %q", lifecycleOutputJSONNameArray)
+	}
 	switch operation.Output {
 	case lifecycleOutputNone, lifecycleOutputJSONNameArray, lifecycleOutputJSONLeaseArray:
 	default:
