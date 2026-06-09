@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -18,6 +19,7 @@ const (
 	lifecycleOutputJSONNameArray  = "json-name-array"
 	lifecycleOutputJSONLeaseArray = "json-lease-array"
 	externalResourceNameLabel     = "externalResourceName"
+	lifecycleRollbackTimeout      = 30 * time.Second
 )
 
 var lifecyclePlaceholderPattern = regexp.MustCompile(`\{\{([A-Za-z_][A-Za-z0-9_.-]*)\}\}`)
@@ -32,16 +34,21 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 	if request.Operation == "cleanup" && request.DryRun {
 		return b.defaultLifecycleResponse(request)
 	}
-	if len(operation.Argv) == 0 {
+	commands := lifecycleOperationCommands(operation)
+	if len(commands) == 0 {
 		return b.defaultLifecycleResponse(request)
 	}
 	templateCtx, err := b.lifecycleContext(request, "")
 	if err != nil {
 		return protocolResponse{}, err
 	}
-	argv, err := expandLifecycleArgv(operation.Argv, templateCtx)
-	if err != nil {
-		return protocolResponse{}, core.Exit(2, "external lifecycle %s: %v", request.Operation, err)
+	expandedCommands := make([][]string, len(commands))
+	for index, command := range commands {
+		argv, err := expandLifecycleArgv(command, templateCtx)
+		if err != nil {
+			return protocolResponse{}, core.Exit(2, "external lifecycle %s step %d: %v", request.Operation, index+1, err)
+		}
+		expandedCommands[index] = argv
 	}
 	var defaultResponse *protocolResponse
 	if operation.Output == lifecycleOutputNone && lifecycleDefaultLeaseResponseOperation(request.Operation) {
@@ -51,22 +58,40 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 		}
 		defaultResponse = &response
 	}
-	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
-		Name:   argv[0],
-		Args:   argv[1:],
-		Stderr: b.rt.Stderr,
-	})
-	if err != nil {
-		message := strings.TrimSpace(result.Stderr)
-		if message == "" {
-			message = strings.TrimSpace(result.Stdout)
+	var result core.LocalCommandResult
+	for index, argv := range expandedCommands {
+		result, err = b.rt.Exec.Run(ctx, core.LocalCommandRequest{
+			Name:   argv[0],
+			Args:   argv[1:],
+			Stderr: b.rt.Stderr,
+		})
+		if err != nil {
+			var rollbackErr error
+			if operation.RollbackOnFailure && index > 0 && !request.Keep {
+				rollbackErr = b.rollbackLifecycleAcquire(ctx, request)
+			}
+			message := strings.TrimSpace(result.Stderr)
+			if message == "" {
+				message = strings.TrimSpace(result.Stdout)
+			}
+			if rollbackErr != nil {
+				message = fmt.Sprintf("%s; rollback failed: %v", message, rollbackErr)
+			}
+			return protocolResponse{}, core.Exit(
+				result.ExitCode,
+				"external lifecycle %s step %d failed: %v: %s",
+				request.Operation,
+				index+1,
+				err,
+				message,
+			)
 		}
-		return protocolResponse{}, core.Exit(result.ExitCode, "external lifecycle %s failed: %v: %s", request.Operation, err, message)
-	}
-	if operation.Output == lifecycleOutputNone && strings.TrimSpace(result.Stdout) != "" && b.rt.Stderr != nil {
-		_, _ = io.WriteString(b.rt.Stderr, result.Stdout)
-		if !strings.HasSuffix(result.Stdout, "\n") {
-			_, _ = io.WriteString(b.rt.Stderr, "\n")
+		if (index < len(expandedCommands)-1 || operation.Output == lifecycleOutputNone) &&
+			strings.TrimSpace(result.Stdout) != "" && b.rt.Stderr != nil {
+			_, _ = io.WriteString(b.rt.Stderr, result.Stdout)
+			if !strings.HasSuffix(result.Stdout, "\n") {
+				_, _ = io.WriteString(b.rt.Stderr, "\n")
+			}
 		}
 	}
 	switch operation.Output {
@@ -114,6 +139,35 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 	}
 }
 
+func lifecycleOperationConfigured(operation core.ExternalLifecycleOperation) bool {
+	return len(operation.Argv) > 0 || len(operation.Steps) > 0
+}
+
+func lifecycleOperationCommands(operation core.ExternalLifecycleOperation) [][]string {
+	if len(operation.Steps) > 0 {
+		return operation.Steps
+	}
+	if len(operation.Argv) > 0 {
+		return [][]string{operation.Argv}
+	}
+	return nil
+}
+
+func (b *leaseBackend) rollbackLifecycleAcquire(ctx context.Context, request protocolRequest) error {
+	lease, err := b.lifecycleLease(request)
+	if err != nil {
+		return err
+	}
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lifecycleRollbackTimeout)
+	defer cancel()
+	_, err = b.invokeLifecycle(rollbackCtx, protocolRequest{
+		Operation: "release",
+		Lease:     &lease,
+		Force:     true,
+	})
+	return err
+}
+
 func lifecycleDefaultLeaseResponseOperation(operation string) bool {
 	switch operation {
 	case "acquire", "resolve", "touch":
@@ -129,7 +183,8 @@ func (b *leaseBackend) defaultLifecycleResponse(request protocolRequest) (protoc
 	case "doctor":
 		response.Message = "declarative external provider ready"
 	case "acquire", "resolve":
-		if request.Operation == "resolve" && request.ReleaseOnly && len(b.cfg.External.Lifecycle.Resolve.Argv) == 0 {
+		if request.Operation == "resolve" && request.ReleaseOnly &&
+			!lifecycleOperationConfigured(b.cfg.External.Lifecycle.Resolve) {
 			lease := lifecycleMinimalLease(request)
 			response.Lease = &lease
 			break

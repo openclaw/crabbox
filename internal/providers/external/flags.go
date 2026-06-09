@@ -3,6 +3,7 @@ package external
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"path"
 	"strings"
 
@@ -100,11 +101,11 @@ func validateConfig(cfg core.Config) error {
 		}
 	}
 	if hasLifecycle {
-		if len(cfg.External.Lifecycle.Release.Argv) == 0 {
-			return core.Exit(2, "external.lifecycle.release.argv is required")
+		if !lifecycleOperationConfigured(cfg.External.Lifecycle.Release) {
+			return core.Exit(2, "external.lifecycle.release.argv or steps is required")
 		}
-		if len(cfg.External.Lifecycle.List.Argv) == 0 {
-			return core.Exit(2, "external.lifecycle.list.argv is required")
+		if !lifecycleOperationConfigured(cfg.External.Lifecycle.List) {
+			return core.Exit(2, "external.lifecycle.list.argv or steps is required")
 		}
 		for name, operation := range map[string]core.ExternalLifecycleOperation{
 			"doctor":  cfg.External.Lifecycle.Doctor,
@@ -138,6 +139,9 @@ func validateConfig(cfg core.Config) error {
 }
 
 func validateLifecycleOperation(name string, operation core.ExternalLifecycleOperation) error {
+	if len(operation.Argv) > 0 && len(operation.Steps) > 0 {
+		return core.Exit(2, "external.lifecycle.%s configures both argv and steps", name)
+	}
 	if name != "list" && operation.Output != lifecycleOutputNone {
 		return core.Exit(2, "external.lifecycle.%s.output is only supported for list", name)
 	}
@@ -152,13 +156,29 @@ func validateLifecycleOperation(name string, operation core.ExternalLifecycleOpe
 	default:
 		return core.Exit(2, "external.lifecycle.%s.output %q is unsupported", name, operation.Output)
 	}
-	for index, arg := range operation.Argv {
-		if strings.ContainsRune(arg, '\x00') {
-			return core.Exit(2, "external.lifecycle.%s.argv[%d] contains a NUL byte", name, index)
-		}
+	if operation.RollbackOnFailure && name != "acquire" {
+		return core.Exit(2, "external.lifecycle.%s.rollbackOnFailure is only supported for acquire", name)
 	}
-	if len(operation.Argv) > 0 && strings.TrimSpace(operation.Argv[0]) == "" {
-		return core.Exit(2, "external.lifecycle.%s.argv executable is empty", name)
+	commands := lifecycleOperationCommands(operation)
+	if operation.RollbackOnFailure && len(commands) < 2 {
+		return core.Exit(2, "external.lifecycle.acquire.rollbackOnFailure requires at least two steps")
+	}
+	for commandIndex, command := range commands {
+		label := "argv"
+		if len(operation.Steps) > 0 {
+			label = fmt.Sprintf("steps[%d]", commandIndex)
+		}
+		if len(command) == 0 {
+			return core.Exit(2, "external.lifecycle.%s.%s is empty", name, label)
+		}
+		for index, arg := range command {
+			if strings.ContainsRune(arg, '\x00') {
+				return core.Exit(2, "external.lifecycle.%s.%s[%d] contains a NUL byte", name, label, index)
+			}
+		}
+		if strings.TrimSpace(command[0]) == "" {
+			return core.Exit(2, "external.lifecycle.%s.%s executable is empty", name, label)
+		}
 	}
 	return nil
 }

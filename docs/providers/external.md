@@ -60,7 +60,10 @@ external:
     doctor:
       argv: [devboxctl, list, --format, json]
     acquire:
-      argv: [devboxctl, new, "{{resourceName}}", --size, "{{config.size}}"]
+      steps:
+        - [devboxctl, new, "{{resourceName}}", --size, "{{config.size}}"]
+        - [devboxctl, setup, "{{resourceName}}"]
+      rollbackOnFailure: true
     resolve:
       argv: [devboxctl, inspect, "{{resourceName}}"]
     list:
@@ -91,6 +94,13 @@ external:
 ```
 
 `acquire`, `list`, `release`, and `connection.ssh.user` are required.
+Lifecycle operations configure exactly one of `argv` or `steps`. Steps run in
+order and stop at the first failure. For structured list output, only the final
+step's stdout is parsed; earlier stdout is forwarded as diagnostic output.
+`acquire.rollbackOnFailure: true` runs the configured release operation when a
+later acquire step fails after at least one successful step, unless the caller
+requested `--keep`.
+
 `connection.resourceName` defaults to `{{name}}`; use it when the provider has
 stricter resource-name limits than Crabbox. Crabbox stores the resolved value
 with the lease so `json-name-array` inventory can recover the original lease
@@ -98,8 +108,8 @@ ID and slug. `connection.ssh.host` defaults to `{{resourceName}}`. Optional
 operations are skipped when absent; Crabbox still maintains local touch
 metadata.
 
-Each `argv` item is passed directly to the configured executable. Shell
-operators, pipes, variable expansion, and command substitution are not
+Each `argv` or `steps` item is passed directly to the configured executable.
+Shell operators, pipes, variable expansion, and command substitution are not
 evaluated. Supported placeholders:
 
 ```text

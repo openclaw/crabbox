@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"os"
@@ -257,6 +258,220 @@ func TestInvokeDeclarativeLifecycleExpandsArgvAndBuildsLease(t *testing.T) {
 	}
 	if response.Lease.Labels["backend"] != "pod" || response.Lease.Labels[externalResourceNameLabel] != "cbx-abcdef123456" {
 		t.Fatalf("labels=%#v", response.Lease.Labels)
+	}
+}
+
+func TestInvokeDeclarativeLifecycleRunsOrderedSteps(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Config: map[string]any{"size": "cpu16"},
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{
+				Steps: [][]string{
+					{"devboxctl", "new", "{{resourceName}}", "--size", "{{config.size}}"},
+					{"devboxctl", "setup", "{{resourceName}}"},
+				},
+			},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{resourceName}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			ResourceName: "{{leaseIdSlug}}",
+			SSH:          core.ExternalSSHConnectionConfig{User: "developer", Host: "{{resourceName}}"},
+		},
+	}
+	runner := &recordingRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	response, err := backend.invokeLifecycle(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Desired: &desiredLease{
+			LeaseID: "cbx_abcdef123456",
+			Slug:    "fast-coral",
+			Name:    "crabbox-fast-coral-deadbeef",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.requests) != 2 {
+		t.Fatalf("requests=%#v", runner.requests)
+	}
+	if got := runner.requests[0]; got.Name != "devboxctl" || strings.Join(got.Args, "|") != "new|cbx-abcdef123456|--size|cpu16" {
+		t.Fatalf("first=%#v", got)
+	}
+	if got := runner.requests[1]; got.Name != "devboxctl" || strings.Join(got.Args, "|") != "setup|cbx-abcdef123456" {
+		t.Fatalf("second=%#v", got)
+	}
+	if response.Lease == nil || response.Lease.Labels[externalResourceNameLabel] != "cbx-abcdef123456" {
+		t.Fatalf("response=%#v", response)
+	}
+}
+
+func TestInvokeDeclarativeLifecycleRollsBackFailedAcquireStep(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{
+				Steps: [][]string{
+					{"devboxctl", "new", "{{resourceName}}"},
+					{"devboxctl", "setup", "{{resourceName}}"},
+				},
+				RollbackOnFailure: true,
+			},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "--yes", "{{resourceName}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			ResourceName: "{{leaseIdSlug}}",
+			SSH:          core.ExternalSSHConnectionConfig{User: "developer", Host: "{{resourceName}}"},
+		},
+	}
+	runner := &failingLifecycleStepRunner{failAt: 2}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	_, err := backend.invokeLifecycle(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Desired: &desiredLease{
+			LeaseID: "cbx_abcdef123456",
+			Slug:    "fast-coral",
+			Name:    "crabbox-fast-coral-deadbeef",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "acquire step 2 failed") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(runner.requests) != 3 {
+		t.Fatalf("requests=%#v", runner.requests)
+	}
+	if got := runner.requests[2]; got.Name != "devboxctl" || strings.Join(got.Args, "|") != "rm|--yes|cbx-abcdef123456" {
+		t.Fatalf("rollback=%#v", got)
+	}
+}
+
+func TestInvokeDeclarativeLifecycleKeepsFailedAcquireWhenRequested(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{
+				Steps: [][]string{
+					{"devboxctl", "new", "{{resourceName}}"},
+					{"devboxctl", "setup", "{{resourceName}}"},
+				},
+				RollbackOnFailure: true,
+			},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "--yes", "{{resourceName}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			ResourceName: "{{leaseIdSlug}}",
+			SSH:          core.ExternalSSHConnectionConfig{User: "developer", Host: "{{resourceName}}"},
+		},
+	}
+	runner := &failingLifecycleStepRunner{failAt: 2}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	_, err := backend.invokeLifecycle(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Keep:      true,
+		Desired: &desiredLease{
+			LeaseID: "cbx_abcdef123456",
+			Slug:    "fast-coral",
+			Name:    "crabbox-fast-coral-deadbeef",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "acquire step 2 failed") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(runner.requests) != 2 {
+		t.Fatalf("keep=true unexpectedly ran rollback: %#v", runner.requests)
+	}
+}
+
+func TestInvokeDeclarativeLifecycleReportsFailedRollback(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{
+				Steps: [][]string{
+					{"devboxctl", "new", "{{resourceName}}"},
+					{"devboxctl", "setup", "{{resourceName}}"},
+				},
+				RollbackOnFailure: true,
+			},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "--yes", "{{resourceName}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			ResourceName: "{{leaseIdSlug}}",
+			SSH:          core.ExternalSSHConnectionConfig{User: "developer", Host: "{{resourceName}}"},
+		},
+	}
+	runner := &failingLifecycleRollbackRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	_, err := backend.invokeLifecycle(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Desired: &desiredLease{
+			LeaseID: "cbx_abcdef123456",
+			Slug:    "fast-coral",
+			Name:    "crabbox-fast-coral-deadbeef",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "acquire step 2 failed") ||
+		!strings.Contains(err.Error(), "rollback failed") || !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("err=%v", err)
+	}
+	if !runner.rollbackHasDeadline {
+		t.Fatal("rollback command did not receive a bounded context")
+	}
+}
+
+func TestInvokeDeclarativeLifecycleExpandsAllStepsBeforeRunning(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{
+				Steps: [][]string{
+					{"devboxctl", "new", "{{resourceName}}"},
+					{"devboxctl", "setup", "{{env.MISSING_DEVBOX_SETUP}}"},
+				},
+				RollbackOnFailure: true,
+			},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "--yes", "{{resourceName}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			ResourceName: "{{leaseIdSlug}}",
+			SSH:          core.ExternalSSHConnectionConfig{User: "developer", Host: "{{resourceName}}"},
+		},
+	}
+	runner := &recordingRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	_, err := backend.invokeLifecycle(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Desired: &desiredLease{
+			LeaseID: "cbx_abcdef123456",
+			Slug:    "fast-coral",
+			Name:    "crabbox-fast-coral-deadbeef",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "acquire step 2") || !strings.Contains(err.Error(), "MISSING_DEVBOX_SETUP") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("commands ran before all steps expanded: %#v", runner.requests)
 	}
 }
 
@@ -1077,19 +1292,52 @@ func TestExternalProviderHelperProcess(t *testing.T) {
 }
 
 type recordingRunner struct {
-	name   string
-	args   []string
-	stdin  []byte
-	stdout string
+	name     string
+	args     []string
+	stdin    []byte
+	stdout   string
+	requests []core.LocalCommandRequest
 }
 
 func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.name = req.Name
 	r.args = append([]string(nil), req.Args...)
+	r.requests = append(r.requests, req)
 	if req.Stdin != nil {
 		r.stdin, _ = io.ReadAll(req.Stdin)
 	}
 	return core.LocalCommandResult{Stdout: r.stdout}, nil
+}
+
+type failingLifecycleStepRunner struct {
+	requests []core.LocalCommandRequest
+	failAt   int
+}
+
+func (r *failingLifecycleStepRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	r.requests = append(r.requests, req)
+	if len(r.requests) == r.failAt {
+		return core.LocalCommandResult{ExitCode: 17, Stderr: "setup failed"}, errors.New("exit status 17")
+	}
+	return core.LocalCommandResult{}, nil
+}
+
+type failingLifecycleRollbackRunner struct {
+	requests            []core.LocalCommandRequest
+	rollbackHasDeadline bool
+}
+
+func (r *failingLifecycleRollbackRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	r.requests = append(r.requests, req)
+	switch len(r.requests) {
+	case 2:
+		return core.LocalCommandResult{ExitCode: 17, Stderr: "setup failed"}, errors.New("exit status 17")
+	case 3:
+		_, r.rollbackHasDeadline = ctx.Deadline()
+		return core.LocalCommandResult{ExitCode: 18, Stderr: "delete failed"}, errors.New("exit status 18")
+	default:
+		return core.LocalCommandResult{}, nil
+	}
 }
 
 type processRunner struct{}

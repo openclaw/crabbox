@@ -336,7 +336,7 @@ func externalClaimScope(cfg core.Config) string {
 }
 
 func lifecycleConfigured(cfg core.ExternalConfig) bool {
-	return len(cfg.Lifecycle.Acquire.Argv) > 0
+	return lifecycleOperationConfigured(cfg.Lifecycle.Acquire)
 }
 
 func (b *leaseBackend) claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) error {

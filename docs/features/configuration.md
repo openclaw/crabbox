@@ -477,7 +477,10 @@ provider: external
 external:
   lifecycle:
     acquire:
-      argv: [devboxctl, new, "{{resourceName}}", --size, "{{config.size}}"]
+      steps:
+        - [devboxctl, new, "{{resourceName}}", --size, "{{config.size}}"]
+        - [devboxctl, setup, "{{resourceName}}"]
+      rollbackOnFailure: true
     list:
       argv: [devboxctl, list, --format, json]
       output: json-name-array
@@ -497,9 +500,11 @@ external:
   workRoot: /home/developer/crabbox
 ```
 
-Declarative lifecycle entries are argv arrays, not shell commands. See
-[External Provider](../providers/external.md) for placeholders, inventory
-formats, routing behavior, and security guidance.
+Declarative lifecycle entries use one `argv` array or an ordered `steps` list,
+not shell commands. Acquire steps can opt into release cleanup with
+`rollbackOnFailure: true`. See [External Provider](../providers/external.md)
+for placeholders, output semantics, inventory formats, routing behavior, and
+security guidance.
 
 ### Daytona
 

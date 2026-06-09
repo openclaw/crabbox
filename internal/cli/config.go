@@ -229,9 +229,11 @@ type ExternalLifecycleConfig struct {
 }
 
 type ExternalLifecycleOperation struct {
-	Argv       []string `yaml:"argv,omitempty" json:"argv,omitempty"`
-	Output     string   `yaml:"output,omitempty" json:"output,omitempty"`
-	NamePrefix string   `yaml:"namePrefix,omitempty" json:"namePrefix,omitempty"`
+	Argv              []string   `yaml:"argv,omitempty" json:"argv,omitempty"`
+	Steps             [][]string `yaml:"steps,omitempty" json:"steps,omitempty"`
+	Output            string     `yaml:"output,omitempty" json:"output,omitempty"`
+	NamePrefix        string     `yaml:"namePrefix,omitempty" json:"namePrefix,omitempty"`
+	RollbackOnFailure bool       `yaml:"rollbackOnFailure,omitempty" json:"rollbackOnFailure,omitempty"`
 }
 
 type ExternalConnectionConfig struct {

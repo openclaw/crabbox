@@ -133,7 +133,10 @@ func TestLoadDeclarativeExternalConfig(t *testing.T) {
 external:
   lifecycle:
     acquire:
-      argv: [devboxctl, new, "{{name}}", --size, "{{config.size}}"]
+      steps:
+        - [devboxctl, new, "{{name}}", --size, "{{config.size}}"]
+        - [devboxctl, setup, "{{name}}"]
+      rollbackOnFailure: true
     list:
       argv: [devboxctl, list, --format, json]
       output: json-name-array
@@ -166,8 +169,11 @@ external:
 	if err := applyFileConfig(&cfg, file); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(cfg.External.Lifecycle.Acquire.Argv, "|"); got != "devboxctl|new|{{name}}|--size|{{config.size}}" {
-		t.Fatalf("acquire argv=%q", got)
+	if len(cfg.External.Lifecycle.Acquire.Steps) != 2 ||
+		strings.Join(cfg.External.Lifecycle.Acquire.Steps[0], "|") != "devboxctl|new|{{name}}|--size|{{config.size}}" ||
+		strings.Join(cfg.External.Lifecycle.Acquire.Steps[1], "|") != "devboxctl|setup|{{name}}" ||
+		!cfg.External.Lifecycle.Acquire.RollbackOnFailure {
+		t.Fatalf("acquire=%#v", cfg.External.Lifecycle.Acquire)
 	}
 	if cfg.External.Lifecycle.List.Output != "json-name-array" {
 		t.Fatalf("list=%#v", cfg.External.Lifecycle.List)

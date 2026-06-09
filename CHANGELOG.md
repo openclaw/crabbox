@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added ordered declarative external lifecycle steps with optional acquire rollback, allowing multi-command private provider setup without shell wrappers.
+
 ## 0.26.1 - 2026-06-09
 
 ### Added

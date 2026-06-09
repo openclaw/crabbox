@@ -43,7 +43,13 @@ func TestDeclarativeExternalRoutingRoundTrip(t *testing.T) {
 	cfg := ExternalConfig{
 		Config: map[string]any{"size": "cpu16"},
 		Lifecycle: ExternalLifecycleConfig{
-			Acquire: ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{name}}"}},
+			Acquire: ExternalLifecycleOperation{
+				Steps: [][]string{
+					{"devboxctl", "new", "{{name}}"},
+					{"devboxctl", "setup", "{{name}}"},
+				},
+				RollbackOnFailure: true,
+			},
 			List: ExternalLifecycleOperation{
 				Argv:   []string{"devboxctl", "list", "--format", "json"},
 				Output: "json-name-array",
@@ -67,8 +73,11 @@ func TestDeclarativeExternalRoutingRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := loaded.Lifecycle.Acquire.Argv; len(got) != 3 || got[0] != "devboxctl" || got[2] != "{{name}}" {
-		t.Fatalf("acquire=%#v", got)
+	if got := loaded.Lifecycle.Acquire.Steps; len(got) != 2 ||
+		len(got[0]) != 3 || got[0][0] != "devboxctl" || got[0][2] != "{{name}}" ||
+		len(got[1]) != 3 || got[1][1] != "setup" ||
+		!loaded.Lifecycle.Acquire.RollbackOnFailure {
+		t.Fatalf("acquire=%#v", loaded.Lifecycle.Acquire)
 	}
 	if loaded.Connection.SSH.User != "{{env.DEVBOX_USER}}" || !loaded.Connection.SSH.SSHConfigProxy {
 		t.Fatalf("connection=%#v", loaded.Connection)
