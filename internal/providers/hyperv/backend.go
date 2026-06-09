@@ -91,10 +91,10 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	}
 	cfg := b.configForRun()
 	if cfg.HyperV.Image == "" {
-		return LeaseTarget{}, exit(2, "provider=%s requires --hyperv-image (path to a VHDX template with OpenSSH pre-configured)", providerName)
+		return LeaseTarget{}, exit(2, "provider=%s requires --hyperv-image (path to a Windows VHDX template with a known administrator password; the provider installs OpenSSH if missing)", providerName)
 	}
 	if strings.HasSuffix(strings.ToLower(cfg.HyperV.Image), ".iso") {
-		return LeaseTarget{}, exit(2, "provider=%s does not support ISO images; provide a pre-configured VHDX template with OpenSSH and a known user", providerName)
+		return LeaseTarget{}, exit(2, "provider=%s does not support ISO images; provide a Windows VHDX template with a reachable administrator account", providerName)
 	}
 	leaseID := newLeaseID()
 	instances, err := b.listInstances(ctx)
@@ -139,6 +139,13 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 			_ = b.removeVM(context.Background(), name)
 		}
 		return LeaseTarget{}, err
+	}
+
+	if err := b.ensureOpenSSH(ctx, name, cfg.HyperV.User); err != nil {
+		if !req.Keep {
+			_ = b.removeVM(context.Background(), name)
+		}
+		return LeaseTarget{}, fmt.Errorf("guest OpenSSH setup failed: %w", err)
 	}
 
 	if publicKey != "" {
@@ -451,32 +458,22 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 	return nil
 }
 
-// injectSSHKey writes the SSH public key into the VM via PowerShell Direct
-// (Invoke-Command -VMName). Retries up to 5 times with backoff to allow the
-// guest OS to boot. The VHDX template must have the configured user with the
-// password matching CRABBOX_HYPERV_GUEST_PASSWORD (default: from config or
-// image-level convention). This is best-effort: images with pre-configured
-// authorized_keys and OpenSSH will work without injection.
-func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey string) error {
+// invokeInGuest runs a PowerShell script block inside the guest over PowerShell
+// Direct, authenticating as user with the configured guest password. It retries
+// with backoff while the guest finishes booting. scriptBlock is the body of an
+// Invoke-Command -ScriptBlock { ... }; the guest password is passed via the
+// _CRABBOX_GP env var, never on the command line.
+func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, label string) error {
 	guestPassword := b.cfg.HyperV.GuestPassword
 	if guestPassword == "" {
 		guestPassword = "crabbox"
 	}
 	script := fmt.Sprintf(
 		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
-			`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { `+
-			`$sshDir = Join-Path $env:USERPROFILE '.ssh'; `+
-			`New-Item -ItemType Directory -Force -Path $sshDir | Out-Null; `+
-			`$akPath = Join-Path $sshDir 'authorized_keys'; `+
-			`Add-Content -Encoding ASCII -Path $akPath -Value '%s'; `+
-			`$adminAK = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'; `+
-			`if (Test-Path (Split-Path $adminAK)) { Add-Content -Encoding ASCII -Path $adminAK -Value '%s' } `+
-			`}`,
-		escapePSString(user), escapePSString(vmName),
-		escapePSString(publicKey), escapePSString(publicKey),
+			`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { %s }`,
+		escapePSString(user), escapePSString(vmName), scriptBlock,
 	)
-	env := os.Environ()
-	env = append(env, "_CRABBOX_GP="+guestPassword)
+	env := append(os.Environ(), "_CRABBOX_GP="+guestPassword)
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
 		if attempt > 0 {
@@ -485,15 +482,48 @@ func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey stri
 				return ctx.Err()
 			case <-time.After(time.Duration(attempt*5) * time.Second):
 			}
-			fmt.Fprintf(b.rt.Stderr, "retrying SSH key injection (%d/5)...\n", attempt+1)
+			fmt.Fprintf(b.rt.Stderr, "retrying %s (%d/5)...\n", label, attempt+1)
 		}
 		result, err := b.powershellWithEnv(ctx, script, env)
 		if err == nil {
 			return nil
 		}
-		lastErr = commandError("SSH key injection", result, err)
+		lastErr = commandError(label, result, err)
 	}
 	return lastErr
+}
+
+// ensureOpenSSH installs and starts the Windows OpenSSH server inside the guest
+// over PowerShell Direct when it is not already present, then opens the firewall
+// for it. This lets a plain Windows template be used as-is: it only needs a
+// reachable administrator account (CRABBOX_HYPERV_GUEST_PASSWORD), not a
+// pre-baked SSH setup. Idempotent; installing the capability needs guest
+// internet (or a configured Features-on-Demand source).
+func (b *backend) ensureOpenSSH(ctx context.Context, vmName, user string) error {
+	scriptBlock := `$ErrorActionPreference='Stop'; ` +
+		`$cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*'; ` +
+		`if ($cap.State -ne 'Installed') { Add-WindowsCapability -Online -Name $cap.Name | Out-Null }; ` +
+		`Set-Service -Name sshd -StartupType Automatic; ` +
+		`Start-Service sshd; ` +
+		`if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)) { ` +
+		`New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null }`
+	return b.invokeInGuest(ctx, vmName, user, scriptBlock, "OpenSSH install")
+}
+
+// injectSSHKey writes the SSH public key into the VM via PowerShell Direct,
+// appending to both the user's authorized_keys and, for admin accounts, the
+// administrators_authorized_keys file.
+func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey string) error {
+	scriptBlock := fmt.Sprintf(
+		`$sshDir = Join-Path $env:USERPROFILE '.ssh'; `+
+			`New-Item -ItemType Directory -Force -Path $sshDir | Out-Null; `+
+			`$akPath = Join-Path $sshDir 'authorized_keys'; `+
+			`Add-Content -Encoding ASCII -Path $akPath -Value '%s'; `+
+			`$adminAK = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'; `+
+			`if (Test-Path (Split-Path $adminAK)) { Add-Content -Encoding ASCII -Path $adminAK -Value '%s' }`,
+		escapePSString(publicKey), escapePSString(publicKey),
+	)
+	return b.invokeInGuest(ctx, vmName, user, scriptBlock, "SSH key injection")
 }
 
 // waitForIP polls Get-VMNetworkAdapter until an IPv4 address appears.

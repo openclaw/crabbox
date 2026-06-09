@@ -609,6 +609,47 @@ func TestInjectSSHKeyPasswordNotInArgs(t *testing.T) {
 	}
 }
 
+func TestEnsureOpenSSHInstallsAndStartsSshd(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+
+	if err := b.ensureOpenSSH(context.Background(), "crabbox-blue-1234", "crabbox"); err != nil {
+		t.Fatalf("ensureOpenSSH: %v", err)
+	}
+
+	var script string
+	for _, call := range runner.calls {
+		s := call.Args[len(call.Args)-1]
+		if strings.Contains(s, "Invoke-Command") && strings.Contains(s, "OpenSSH.Server") {
+			script = s
+		}
+	}
+	if script == "" {
+		t.Fatal("ensureOpenSSH should invoke an OpenSSH install over PowerShell Direct")
+	}
+	for _, want := range []string{"Add-WindowsCapability", "Start-Service sshd", "OpenSSH-Server-In-TCP"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("ensureOpenSSH script missing %q", want)
+		}
+	}
+}
+
+func TestEnsureOpenSSHPasswordNotInArgs(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	b.cfg.HyperV.GuestPassword = "s3cret-pa$$word"
+
+	_ = b.ensureOpenSSH(context.Background(), "crabbox-blue-1234", "crabbox")
+
+	for _, call := range runner.calls {
+		for _, arg := range call.Args {
+			if strings.Contains(arg, "s3cret-pa$$word") {
+				t.Fatal("guest password found in command args; should be passed via environment only")
+			}
+		}
+	}
+}
+
 func TestResolveInstancePropagatesQueryError(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
