@@ -579,6 +579,32 @@ func TestQueryVMParsesSingle(t *testing.T) {
 	}
 }
 
+func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+
+	if err := b.injectSSHKey(context.Background(), "crabbox-blue-1234", "Administrator", "ssh-ed25519 AAAA test"); err != nil {
+		t.Fatalf("injectSSHKey: %v", err)
+	}
+	var script string
+	for _, call := range runner.calls {
+		s := call.Args[len(call.Args)-1]
+		if strings.Contains(s, "administrators_authorized_keys") {
+			script = s
+		}
+	}
+	if script == "" {
+		t.Fatal("injectSSHKey should write administrators_authorized_keys")
+	}
+	// Windows OpenSSH ignores administrators_authorized_keys unless it is owned
+	// only by SYSTEM + Administrators with inheritance disabled.
+	for _, want := range []string{"icacls", "/inheritance:r", "SYSTEM:F", `BUILTIN\Administrators:F`} {
+		if !strings.Contains(script, want) {
+			t.Errorf("admin-key ACL lockdown missing %q\nscript: %s", want, script)
+		}
+	}
+}
+
 func TestInjectSSHKeyPasswordNotInArgs(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},

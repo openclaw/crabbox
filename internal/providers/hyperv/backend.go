@@ -520,7 +520,8 @@ func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey stri
 			`$akPath = Join-Path $sshDir 'authorized_keys'; `+
 			`Add-Content -Encoding ASCII -Path $akPath -Value '%s'; `+
 			`$adminAK = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'; `+
-			`if (Test-Path (Split-Path $adminAK)) { Add-Content -Encoding ASCII -Path $adminAK -Value '%s' }`,
+			`if (Test-Path (Split-Path $adminAK)) { Add-Content -Encoding ASCII -Path $adminAK -Value '%s'; `+
+			`icacls $adminAK /inheritance:r /grant 'SYSTEM:F' 'BUILTIN\Administrators:F' | Out-Null }`,
 		escapePSString(publicKey), escapePSString(publicKey),
 	)
 	return b.invokeInGuest(ctx, vmName, user, scriptBlock, "SSH key injection")
