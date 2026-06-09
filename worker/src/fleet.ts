@@ -83,7 +83,7 @@ import type {
   TailscaleMetadata,
   WindowsMode,
 } from "./types";
-import { providers as supportedProviders } from "./types";
+import { coordinatorProviders, coordinatorProviderSpec, isCoordinatorProvider } from "./types";
 import { costLimits, enforceCostLimits, leaseCost, requestOrg, usageSummary } from "./usage";
 
 const fleetID = "default";
@@ -1502,7 +1502,7 @@ export class FleetDurableObject implements DurableObject {
   }
 
   private async providerReadiness(request: Request, provider: string): Promise<Response> {
-    if (!isManagedProvider(provider)) {
+    if (!isCoordinatorProvider(provider)) {
       return json(
         { error: "invalid_provider", message: `unsupported provider: ${provider}` },
         { status: 400 },
@@ -1797,7 +1797,7 @@ export class FleetDurableObject implements DurableObject {
   private async portalAdminProviderStatuses(
     leases: PortalAdminLeaseSummary[],
   ): Promise<PortalAdminProviderStatus[]> {
-    const providerSet = new Set<Provider>(supportedProviders);
+    const providerSet = new Set<Provider>(coordinatorProviders);
     for (const lease of leases) {
       providerSet.add(lease.provider);
     }
@@ -5487,6 +5487,7 @@ interface ProviderReadinessCheck {
 }
 
 function providerReadiness(provider: Provider, env: Env, gcpProject?: string): ProviderReadiness {
+  const spec = coordinatorProviderSpec(provider);
   if (provider === "gcp") {
     const missing = providerRequiredSecrets(provider).filter((name) => !nonSecretString(env[name]));
     if (
@@ -5502,8 +5503,8 @@ function providerReadiness(provider: Provider, env: Env, gcpProject?: string): P
       missing,
       message:
         missing.length === 0
-          ? "gcp coordinator secrets are configured"
-          : `gcp coordinator secrets missing: ${missing.join(", ")}`,
+          ? `${spec.provider} coordinator secrets are configured`
+          : `${spec.provider} coordinator secrets missing: ${missing.join(", ")}`,
     };
   }
   const missing = providerRequiredSecrets(provider).filter((name) => !nonSecretString(env[name]));
@@ -5513,8 +5514,8 @@ function providerReadiness(provider: Provider, env: Env, gcpProject?: string): P
     missing,
     message:
       missing.length === 0
-        ? `${provider} coordinator secrets are configured`
-        : `${provider} coordinator secrets missing: ${missing.join(", ")}`,
+        ? `${spec.provider} coordinator secrets are configured`
+        : `${spec.provider} coordinator secrets missing: ${missing.join(", ")}`,
   };
 }
 
@@ -5537,20 +5538,7 @@ function normalizeReadinessMarket(value: string | null): "spot" | "on-demand" | 
 }
 
 function providerRequiredSecrets(provider: Provider): Array<keyof Env> {
-  switch (provider) {
-    case "aws":
-      return ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
-    case "azure":
-      return ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_SUBSCRIPTION_ID"];
-    case "gcp":
-      return ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"];
-    case "hetzner":
-      return ["HETZNER_TOKEN"];
-  }
-}
-
-function isManagedProvider(provider: string): provider is Provider {
-  return supportedProviders.includes(provider as Provider);
+  return [...coordinatorProviderSpec(provider).requiredSecrets];
 }
 
 function portalReturnLocation(request: Request): string {

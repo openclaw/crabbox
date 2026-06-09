@@ -169,8 +169,58 @@ export interface LeaseRequest {
   exposedPorts?: string[];
 }
 
-export const providers = ["hetzner", "aws", "azure", "gcp"] as const;
-export type Provider = (typeof providers)[number];
+export const coordinatorProviderRegistry = [
+  {
+    provider: "hetzner",
+    label: "Hetzner",
+    requiredSecrets: ["HETZNER_TOKEN"],
+    adminAudit: false,
+  },
+  {
+    provider: "aws",
+    label: "AWS",
+    requiredSecrets: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+    adminAudit: true,
+  },
+  {
+    provider: "azure",
+    label: "Azure",
+    requiredSecrets: [
+      "AZURE_TENANT_ID",
+      "AZURE_CLIENT_ID",
+      "AZURE_CLIENT_SECRET",
+      "AZURE_SUBSCRIPTION_ID",
+    ],
+    adminAudit: true,
+  },
+  {
+    provider: "gcp",
+    label: "GCP",
+    requiredSecrets: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
+    adminAudit: false,
+  },
+] as const satisfies readonly {
+  provider: string;
+  label: string;
+  requiredSecrets: readonly (keyof Env)[];
+  adminAudit: boolean;
+}[];
+
+export type CoordinatorProviderSpec = (typeof coordinatorProviderRegistry)[number];
+export type Provider = CoordinatorProviderSpec["provider"];
+export const coordinatorProviders = coordinatorProviderRegistry.map(
+  (spec) => spec.provider,
+) as Provider[];
+export const providers = coordinatorProviders;
+
+export function isCoordinatorProvider(provider: string): provider is Provider {
+  return coordinatorProviders.includes(provider as Provider);
+}
+
+export function coordinatorProviderSpec(provider: Provider): CoordinatorProviderSpec {
+  return coordinatorProviderRegistry.find((spec) => spec.provider === provider)!;
+}
+
 export type TargetOS = "linux" | "macos" | "windows";
 export type WindowsMode = "normal" | "wsl2";
 

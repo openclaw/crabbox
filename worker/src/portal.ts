@@ -5,6 +5,7 @@ import type {
   RunEventRecord,
   RunRecord,
 } from "./types";
+import { coordinatorProviderSpec } from "./types";
 
 const novncModuleURL = "/portal/assets/novnc/rfb.js";
 const copyIcon = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>`;
@@ -19,6 +20,14 @@ const themeMoonIcon = `<svg class="theme-icon-moon" viewBox="0 0 20 20" aria-hid
 const themeSunIcon = `<svg class="theme-icon-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.4" fill="currentColor"/><g stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="10" y1="2" x2="10" y2="4"/><line x1="10" y1="16" x2="10" y2="18"/><line x1="2" y1="10" x2="4" y2="10"/><line x1="16" y1="10" x2="18" y2="10"/><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"/><line x1="14.4" y1="14.4" x2="15.8" y2="15.8"/><line x1="4.2" y1="15.8" x2="5.6" y2="14.4"/><line x1="14.4" y1="5.6" x2="15.8" y2="4.2"/></g></svg>`;
 const themeSystemIcon = `<svg class="theme-icon-system" viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="10" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 17h6M10 14v3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`;
 const portalBrand = "🦀 crabbox";
+const genericProviderIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="m7 10 3 2-3 2M12 15h5"/></svg>`;
+const providerIcons: Record<string, string> = {
+  "blacksmith-testbox": `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v5H4z"/><path d="M4 13h16v5H4z"/><path d="M8 8.5h.01M8 15.5h.01M12 8.5h5M12 15.5h5"/></svg>`,
+  aws: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 15.5c3.8 2.2 9.1 2.5 14.8.9"/><path d="M17.5 13.2 20 16l-3.7.7"/><path d="M7 8.5h10l1.8 4H5.2z"/></svg>`,
+  azure: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 17.5h9.2a4 4 0 0 0 .5-8 5.5 5.5 0 0 0-10.5-1.6A4.8 4.8 0 0 0 7.5 17.5Z"/><path d="M9 13h6"/></svg>`,
+  gcp: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17 3.5 12.5 9.5 2h5L20.5 12.5 18 17z"/><path d="M8.5 17h9.5M9.5 2l3 5.5M14.5 2l-3 5.5"/></svg>`,
+  hetzner: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M8 8v8M16 8v8M8 12h8"/></svg>`,
+};
 
 function themeToggleButton(): string {
   return `<button class="icon-btn theme-toggle" type="button" aria-label="Theme: system" aria-pressed="false" title="Theme: system" data-theme-toggle>${themeMoonIcon}${themeSunIcon}${themeSystemIcon}</button>`;
@@ -293,10 +302,12 @@ function adminLeasesPanel(
     `<a class="admin-filter-chip" data-active="${providerFilter === undefined}" href="/portal/admin/leases">all providers</a>`,
     ...providers.map(
       (provider) =>
-        `<a class="admin-filter-chip" data-active="${providerFilter === provider.provider}" data-provider="${escapeHTML(provider.provider)}" href="/portal/admin/leases?provider=${encodeURIComponent(provider.provider)}">${providerIcon(provider.provider)}<span>${escapeHTML(providerLabel(provider.provider))}</span></a>`,
+        `<a class="admin-filter-chip" data-active="${providerFilter === provider.provider}" data-provider="${escapeHTML(provider.provider)}" href="/portal/admin/leases?provider=${encodeURIComponent(provider.provider)}">${providerIcon(provider.provider)}<span>${escapeHTML(coordinatorProviderSpec(provider.provider).label)}</span></a>`,
     ),
   ].join("");
-  const title = providerFilter ? `${providerLabel(providerFilter)} leases` : "all leases";
+  const title = providerFilter
+    ? `${coordinatorProviderSpec(providerFilter).label} leases`
+    : "all leases";
   return `<section class="panel table-panel admin-full-panel">
     <div class="section-head">
       <h2>${escapeHTML(title)}</h2>
@@ -321,10 +332,10 @@ function providerAdminRow(provider: PortalAdminProviderStatus): string {
   const machineCount = provider.machineCount === undefined ? "-" : String(provider.machineCount);
   const readinessPath = `/v1/providers/${encodeURIComponent(provider.provider)}/readiness`;
   const machinesPath = `/v1/pool?provider=${encodeURIComponent(provider.provider)}`;
-  const auditPath =
-    provider.provider === "aws" || provider.provider === "azure"
-      ? `/v1/admin/lease-audit?provider=${encodeURIComponent(provider.provider)}`
-      : "";
+  const providerSpec = coordinatorProviderSpec(provider.provider);
+  const auditPath = providerSpec.adminAudit
+    ? `/v1/admin/lease-audit?provider=${encodeURIComponent(provider.provider)}`
+    : "";
   const actions = provider.configured
     ? [
         `<a href="${readinessPath}">readiness</a>`,
@@ -354,7 +365,7 @@ function providerAdminRow(provider: PortalAdminProviderStatus): string {
     <div class="provider-status-head">
       <span class="provider-favicon" data-provider="${escapeHTML(provider.provider)}">${providerIcon(provider.provider)}</span>
       <div class="provider-status-title">
-        <strong>${escapeHTML(providerLabel(provider.provider))}</strong>
+        <strong>${escapeHTML(providerSpec.label)}</strong>
         <span><span class="traffic-light" data-tone="${provider.status}" aria-label="${provider.status}"></span>${escapeHTML(provider.configured ? "configured" : "missing config")}</span>
       </div>
       <span class="pill"${tone ? ` data-tone="${tone}"` : ""}>${escapeHTML(provider.status)}</span>
@@ -411,21 +422,6 @@ function normalizeAdminProviderFilter(
   return providers.some((provider) => provider.provider === normalized)
     ? (normalized as Provider)
     : undefined;
-}
-
-function providerLabel(provider: Provider): string {
-  switch (provider) {
-    case "aws":
-      return "AWS";
-    case "azure":
-      return "Azure";
-    case "gcp":
-      return "GCP";
-    case "hetzner":
-      return "Hetzner";
-    default:
-      return provider;
-  }
 }
 
 function portalAdminSummary(input: {
@@ -2777,22 +2773,7 @@ function telemetryStorage(
 }
 
 function providerIcon(provider: string): string {
-  if (provider === "blacksmith-testbox") {
-    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v5H4z"/><path d="M4 13h16v5H4z"/><path d="M8 8.5h.01M8 15.5h.01M12 8.5h5M12 15.5h5"/></svg>`;
-  }
-  if (provider === "aws") {
-    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 15.5c3.8 2.2 9.1 2.5 14.8.9"/><path d="M17.5 13.2 20 16l-3.7.7"/><path d="M7 8.5h10l1.8 4H5.2z"/></svg>`;
-  }
-  if (provider === "azure") {
-    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 17.5h9.2a4 4 0 0 0 .5-8 5.5 5.5 0 0 0-10.5-1.6A4.8 4.8 0 0 0 7.5 17.5Z"/><path d="M9 13h6"/></svg>`;
-  }
-  if (provider === "gcp") {
-    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17 3.5 12.5 9.5 2h5L20.5 12.5 18 17z"/><path d="M8.5 17h9.5M9.5 2l3 5.5M14.5 2l-3 5.5"/></svg>`;
-  }
-  if (provider === "hetzner") {
-    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M8 8v8M16 8v8M8 12h8"/></svg>`;
-  }
-  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="m7 10 3 2-3 2M12 15h5"/></svg>`;
+  return providerIcons[provider] ?? genericProviderIcon;
 }
 
 function runnerStatusTone(status: string): string {

@@ -22,8 +22,8 @@ describe("portal theme", () => {
       new Request("https://crabbox.example/portal", {
         headers: {
           "x-crabbox-admin": "true",
-          "x-crabbox-owner": "vincentkoc@ieee.org",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "admin@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -32,6 +32,6 @@ describe("portal theme", () => {
     expect(body).toContain("admin mode");
     expect(body).toContain("data-admin-panel");
     expect(body).toContain("leases JSON");
-    expect(body).toContain("vincentkoc@ieee.org / openclaw");
+    expect(body).toContain("admin@example.com / example-org");
   });
 });
