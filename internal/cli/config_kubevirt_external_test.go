@@ -126,3 +126,67 @@ func TestExternalArgEnvOverridesConfigArgs(t *testing.T) {
 		t.Fatalf("external args=%#v", cfg.External.Args)
 	}
 }
+
+func TestLoadDeclarativeExternalConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := `provider: external
+external:
+  lifecycle:
+    acquire:
+      steps:
+        - [devboxctl, new, "{{name}}", --size, "{{config.size}}"]
+        - [devboxctl, setup, "{{name}}"]
+      rollbackOnFailure: true
+    list:
+      argv: [devboxctl, list, --format, json]
+      output: json-name-array
+      namePrefix: "cbx-"
+    release:
+      argv: [devboxctl, rm, --yes, "{{name}}"]
+  connection:
+    resourceName: "{{leaseIdSlug}}"
+    cloudId: devboxes/{{name}}
+    serverType: "{{config.size}}"
+    labels:
+      backend: pod
+    ssh:
+      user: "{{env.DEVBOX_USER}}"
+      host: "{{name}}"
+      port: "22"
+      sshConfigProxy: true
+  config:
+    size: cpu16
+  workRoot: /home/developer/crabbox
+`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := readFileConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.External.Lifecycle.Acquire.Steps) != 2 ||
+		strings.Join(cfg.External.Lifecycle.Acquire.Steps[0], "|") != "devboxctl|new|{{name}}|--size|{{config.size}}" ||
+		strings.Join(cfg.External.Lifecycle.Acquire.Steps[1], "|") != "devboxctl|setup|{{name}}" ||
+		!cfg.External.Lifecycle.Acquire.RollbackOnFailure {
+		t.Fatalf("acquire=%#v", cfg.External.Lifecycle.Acquire)
+	}
+	if cfg.External.Lifecycle.List.Output != "json-name-array" {
+		t.Fatalf("list=%#v", cfg.External.Lifecycle.List)
+	}
+	if cfg.External.Lifecycle.List.NamePrefix != "cbx-" {
+		t.Fatalf("list=%#v", cfg.External.Lifecycle.List)
+	}
+	if cfg.External.Connection.ResourceName != "{{leaseIdSlug}}" ||
+		cfg.External.Connection.SSH.User != "{{env.DEVBOX_USER}}" ||
+		!cfg.External.Connection.SSH.SSHConfigProxy {
+		t.Fatalf("connection=%#v", cfg.External.Connection)
+	}
+	if cfg.External.Config["size"] != "cpu16" || cfg.External.WorkRoot != "/home/developer/crabbox" {
+		t.Fatalf("external=%#v", cfg.External)
+	}
+}

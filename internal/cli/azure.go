@@ -1574,18 +1574,3 @@ func isAzureRetryableDeleteError(err error) bool {
 		strings.Contains(s, "AnotherOperationInProgress") ||
 		(strings.Contains(s, "OperationNotAllowed") && strings.Contains(s, "retry after"))
 }
-
-func deleteAzureServer(ctx context.Context, cfg Config, server Server) error {
-	client, err := NewAzureClient(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	name := server.CloudID
-	if name == "" {
-		name = server.Name
-	}
-	if name == "" {
-		return errors.New("azure delete: server has no name")
-	}
-	return client.DeleteServer(ctx, name)
-}

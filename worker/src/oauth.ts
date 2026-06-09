@@ -1,4 +1,4 @@
-import { issueUserToken, sha256Hex } from "./auth";
+import { issueUserToken, sha256Hex, userTokenExpiresAt } from "./auth";
 import { errorMessage, json, readJson } from "./http";
 import type { Env, Provider } from "./types";
 import { requestOrg } from "./usage";
@@ -8,6 +8,9 @@ const githubTokenURL = "https://github.com/login/oauth/access_token";
 const githubAPIURL = "https://api.github.com";
 const maxPendingOAuthLogins = 100;
 const maxGitHubTeamPages = 10;
+const defaultUserTokenTTLSeconds = 180 * 24 * 60 * 60;
+const minUserTokenTTLSeconds = 60 * 60;
+const maxUserTokenTTLSeconds = 365 * 24 * 60 * 60;
 
 interface OAuthPending {
   id: string;
@@ -19,6 +22,7 @@ interface OAuthPending {
   createdAt: string;
   expiresAt: string;
   token?: string;
+  tokenExpiresAt?: string;
   owner?: string;
   org?: string;
   login?: string;
@@ -217,15 +221,21 @@ async function githubAuthCallback(
     );
     const org = await requireAllowedOrgMembership(accessToken, identity.login, requestedOrg, env);
     await requireAllowedTeamMembership(accessToken, identity.login, org, env);
+    const ttlSeconds = userTokenTTLSeconds(env);
     const tokenInput = {
       owner: identity.owner,
       org,
       login: identity.login,
-    } as { owner: string; org: string; login: string; name?: string };
+      ttlSeconds,
+    } as { owner: string; org: string; login: string; name?: string; ttlSeconds: number };
     if (identity.name) {
       tokenInput.name = identity.name;
     }
     pending.token = await issueUserToken(env, tokenInput);
+    const tokenExpiry = userTokenExpiresAt(pending.token);
+    if (tokenExpiry) {
+      pending.tokenExpiresAt = tokenExpiry;
+    }
     pending.owner = identity.owner;
     pending.org = org;
     pending.login = identity.login;
@@ -233,7 +243,7 @@ async function githubAuthCallback(
     if (pending.mode === "portal") {
       await deletePendingOAuth(storage, pending);
       return redirect(pending.returnTo || "/portal", 302, {
-        "set-cookie": portalSessionCookie(pending.token, 30 * 24 * 60 * 60),
+        "set-cookie": portalSessionCookie(pending.token, ttlSeconds),
       });
     }
     return html(
@@ -282,9 +292,22 @@ async function githubAuthPoll(request: Request, storage: DurableObjectStorage): 
     org: pending.org,
     login: pending.login,
     provider: pending.provider,
+    tokenExpiresAt: pending.tokenExpiresAt,
   };
   await deletePendingOAuth(storage, pending);
   return json(response);
+}
+
+function userTokenTTLSeconds(env: Pick<Env, "CRABBOX_USER_TOKEN_TTL_SECONDS">): number {
+  const configured = env.CRABBOX_USER_TOKEN_TTL_SECONDS?.trim();
+  if (!configured) {
+    return defaultUserTokenTTLSeconds;
+  }
+  const value = Number(configured);
+  if (!Number.isFinite(value) || value <= 0) {
+    return defaultUserTokenTTLSeconds;
+  }
+  return Math.min(maxUserTokenTTLSeconds, Math.max(minUserTokenTTLSeconds, Math.trunc(value)));
 }
 
 function githubRedirectURI(request: Request, env: Env): string {

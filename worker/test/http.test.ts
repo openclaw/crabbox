@@ -163,6 +163,48 @@ describe("coordinator auth", () => {
       org: "openclaw",
       login: "friend",
     });
+    expect(auth?.tokenExpiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("promotes configured GitHub user tokens to admin", async () => {
+    const env = {
+      CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_DEFAULT_ORG: "openclaw",
+      CRABBOX_GITHUB_ADMIN_OWNERS: "vincentkoc@ieee.org",
+      CRABBOX_GITHUB_ADMIN_LOGINS: "steipete",
+    };
+    const ownerToken = await issueUserToken(env, {
+      owner: "vincentkoc@ieee.org",
+      org: "openclaw",
+      login: "vincentkoc",
+    });
+    const loginToken = await issueUserToken(env, {
+      owner: "peter@example.com",
+      org: "openclaw",
+      login: "steipete",
+    });
+
+    const ownerAuth = await authenticateRequest(
+      new Request("https://example.test/v1/whoami", {
+        headers: { authorization: `Bearer ${ownerToken}` },
+      }),
+      env,
+    );
+    const loginAuth = await authenticateRequest(
+      new Request("https://example.test/v1/whoami", {
+        headers: { authorization: `Bearer ${loginToken}` },
+      }),
+      env,
+    );
+
+    expect(ownerAuth).toMatchObject({ admin: true, owner: "vincentkoc@ieee.org" });
+    expect(loginAuth).toMatchObject({ admin: true, login: "steipete" });
+    expect(
+      requestWithAuthContext(
+        new Request("https://example.test/v1/admin/leases"),
+        ownerAuth!,
+      ).headers.get("x-crabbox-admin"),
+    ).toBe("true");
   });
 
   it("rejects signed user tokens with admin claims", async () => {

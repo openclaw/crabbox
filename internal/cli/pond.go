@@ -187,16 +187,6 @@ func providerCapableOfTailscale(provider string) bool {
 	return providerCapabilities(provider).Tailscale
 }
 
-// pondHasTailscaleCapableProvider returns true when at least one claim in
-// the named pond belongs to a provider that advertises FeatureTailscale.
-// Used by doctor to decide whether to run ACL verification when the
-// operator's default provider (cfg.Provider) does not support Tailscale
-// but the pond includes mixed-provider members that do.
-func pondHasTailscaleCapableProvider(pond string) bool {
-	_, hasTailscale := pondClaimProviderSummary(pond)
-	return hasTailscale
-}
-
 func pondClaimProviderSummary(pond string) (bool, bool) {
 	pond = normalizePondName(pond)
 	if pond == "" {

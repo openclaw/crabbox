@@ -33,10 +33,10 @@ crabbox list --provider tenki --json
 
 ## Auth
 
-Authenticate with the Tenki CLI before using the provider:
+Authenticate with the Tenki CLI's browser flow:
 
 ```sh
-tenki auth login
+tenki login
 ```
 
 Crabbox shells out to `tenki`, so it reuses the Tenki CLI's normal config and
@@ -148,7 +148,7 @@ All SSH traffic goes through Tenki's supported cert-backed `ssh-proxy` path.
 ## Live Smoke
 
 ```sh
-tenki auth login
+tenki login
 go build -trimpath -o bin/crabbox ./cmd/crabbox
 
 bin/crabbox warmup --provider tenki --timing-json
@@ -158,6 +158,16 @@ bin/crabbox status --provider tenki --id "$lease" --wait
 bin/crabbox run --provider tenki --id "$lease" --no-sync -- echo crabbox-tenki-ok
 bin/crabbox stop --provider tenki "$lease"
 bin/crabbox list --provider tenki --json
+```
+
+The repository live-smoke harness also checks that a paused session stays
+paused while `status --wait` times out:
+
+```sh
+CRABBOX_LIVE=1 \
+CRABBOX_LIVE_COORDINATOR=0 \
+CRABBOX_LIVE_PROVIDERS=tenki \
+scripts/live-smoke.sh
 ```
 
 Expected results:

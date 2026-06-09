@@ -20,6 +20,9 @@ func (a App) configShow(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := validateProviderConfig(cfg); err != nil {
+		return err
+	}
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(configShowView(cfg))
 	}

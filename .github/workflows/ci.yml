@@ -45,6 +45,15 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Deadcode
+        run: |
+          output_file=$(mktemp)
+          go run golang.org/x/tools/cmd/deadcode@v0.45.0 -test ./... > "$output_file"
+          if [ -s "$output_file" ]; then
+            cat "$output_file"
+            exit 1
+          fi
+
       - name: Test
         run: go test -race ./...
 
@@ -116,6 +125,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+
+      - name: Install script dependencies
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
 
       - name: Test
         run: node --test scripts/*.test.js

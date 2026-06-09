@@ -13,6 +13,7 @@ export interface AuthContext {
   owner: string;
   org: string;
   login?: string;
+  tokenExpiresAt?: string;
 }
 
 interface UserTokenPayload {
@@ -36,6 +37,8 @@ export async function authenticateRequest(
     | "CRABBOX_DEFAULT_ORG"
     | "CRABBOX_ACCESS_TEAM_DOMAIN"
     | "CRABBOX_ACCESS_AUD"
+    | "CRABBOX_GITHUB_ADMIN_OWNERS"
+    | "CRABBOX_GITHUB_ADMIN_LOGINS"
   >,
 ): Promise<AuthContext | undefined> {
   const token = bearerToken(request);
@@ -67,12 +70,32 @@ export async function authenticateRequest(
   }
   return {
     authorized: true,
-    admin: false,
+    admin: githubUserIsAdmin(payload, env),
     auth: "github",
     owner: payload.owner,
     org: payload.org,
     login: payload.login,
+    tokenExpiresAt: new Date(payload.exp * 1000).toISOString(),
   };
+}
+
+function githubUserIsAdmin(
+  payload: Pick<UserTokenPayload, "owner" | "login">,
+  env: Pick<Env, "CRABBOX_GITHUB_ADMIN_OWNERS" | "CRABBOX_GITHUB_ADMIN_LOGINS">,
+): boolean {
+  const owner = payload.owner.trim().toLowerCase();
+  const login = payload.login.trim().toLowerCase();
+  return (
+    envList(env.CRABBOX_GITHUB_ADMIN_OWNERS).includes(owner) ||
+    envList(env.CRABBOX_GITHUB_ADMIN_LOGINS).includes(login)
+  );
+}
+
+function envList(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 export function requestWithAuthContext(request: Request, auth: AuthContext): Request {
@@ -87,6 +110,11 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
     headers.set("x-crabbox-github-login", auth.login);
   } else {
     headers.delete("x-crabbox-github-login");
+  }
+  if (auth.tokenExpiresAt) {
+    headers.set("x-crabbox-token-expires-at", auth.tokenExpiresAt);
+  } else {
+    headers.delete("x-crabbox-token-expires-at");
   }
   return new Request(request, { headers });
 }
@@ -122,6 +150,14 @@ export async function issueUserToken(
   return `${tokenPrefix}${encodedPayload}.${sig}`;
 }
 
+export function userTokenExpiresAt(token: string): string | undefined {
+  const payload = decodeUserTokenPayload(token);
+  if (typeof payload?.exp !== "number") {
+    return undefined;
+  }
+  return new Date(payload.exp * 1000).toISOString();
+}
+
 async function verifyUserToken(
   token: string,
   env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
@@ -138,9 +174,7 @@ async function verifyUserToken(
   if (!constantTimeEqual(signature, expected)) {
     return undefined;
   }
-  const payload = JSON.parse(
-    new TextDecoder().decode(base64URLDecode(encodedPayload)),
-  ) as Partial<UserTokenPayload>;
+  const payload = decodeUserTokenPayload(token);
   if (
     payload.typ !== "crabbox-user" ||
     typeof payload.owner !== "string" ||
@@ -153,6 +187,22 @@ async function verifyUserToken(
     return undefined;
   }
   return payload as UserTokenPayload;
+}
+
+function decodeUserTokenPayload(token: string): Partial<UserTokenPayload> {
+  if (!token.startsWith(tokenPrefix)) {
+    return {};
+  }
+  const raw = token.slice(tokenPrefix.length);
+  const [encodedPayload] = raw.split(".", 1);
+  if (!encodedPayload) {
+    return {};
+  }
+  try {
+    return JSON.parse(decoder.decode(base64URLDecode(encodedPayload))) as Partial<UserTokenPayload>;
+  } catch {
+    return {};
+  }
 }
 
 function sessionSecret(env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">): string {

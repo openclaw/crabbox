@@ -34,6 +34,10 @@ type ProviderRoutingFlagProvider interface {
 	RoutingFlagNames() []string
 }
 
+type ProviderCommandRoutingArgs interface {
+	CommandRoutingArgs(cfg Config, leaseID string) []string
+}
+
 type ProviderServerTypeProvider interface {
 	ServerTypeForConfig(cfg Config) string
 	ServerTypeForClass(class string) string
@@ -69,6 +73,11 @@ type DelegatedRunBackend interface {
 	List(ctx context.Context, req ListRequest) ([]LeaseView, error)
 	Status(ctx context.Context, req StatusRequest) (StatusView, error)
 	Stop(ctx context.Context, req StopRequest) error
+}
+
+type DelegatedRunArtifactBackend interface {
+	Backend
+	CollectRunArtifacts(ctx context.Context, req DelegatedRunArtifactRequest) (DelegatedRunArtifactResult, error)
 }
 
 type PortsRequest struct {
@@ -184,22 +193,23 @@ type TargetSpec struct {
 type Feature string
 
 const (
-	FeatureSSH         Feature = "ssh"
-	FeatureCrabboxSync Feature = "crabbox-sync"
-	FeatureArchiveSync Feature = "archive-sync"
-	FeatureCleanup     Feature = "cleanup"
-	FeatureDesktop     Feature = "desktop"
-	FeatureBrowser     Feature = "browser"
-	FeatureCode        Feature = "code"
-	FeatureTailscale   Feature = "tailscale"
-	FeatureURLBridge   Feature = "url-bridge"
-	FeatureCheckpoint  Feature = "workspace-checkpoint"
-	FeatureFork        Feature = "workspace-fork"
-	FeatureRestore     Feature = "workspace-restore"
-	FeatureSnapshot    Feature = "provider-snapshot"
-	FeatureCacheVolume Feature = "cache-volume"
-	FeatureRunProof    Feature = "run-proof"
-	FeatureRunSession  Feature = "run-session"
+	FeatureSSH          Feature = "ssh"
+	FeatureCrabboxSync  Feature = "crabbox-sync"
+	FeatureArchiveSync  Feature = "archive-sync"
+	FeatureCleanup      Feature = "cleanup"
+	FeatureDesktop      Feature = "desktop"
+	FeatureBrowser      Feature = "browser"
+	FeatureCode         Feature = "code"
+	FeatureTailscale    Feature = "tailscale"
+	FeatureURLBridge    Feature = "url-bridge"
+	FeatureCheckpoint   Feature = "workspace-checkpoint"
+	FeatureFork         Feature = "workspace-fork"
+	FeatureRestore      Feature = "workspace-restore"
+	FeatureSnapshot     Feature = "provider-snapshot"
+	FeatureCacheVolume  Feature = "cache-volume"
+	FeatureRunProof     Feature = "run-proof"
+	FeatureRunSession   Feature = "run-session"
+	FeatureRunArtifacts Feature = "run-artifacts"
 )
 
 type FeatureSet []Feature
@@ -346,6 +356,7 @@ type ResolveRequest struct {
 	Reclaim     bool
 	ReleaseOnly bool
 	StatusOnly  bool
+	ReadyProbe  bool
 }
 
 type ReleaseLeaseRequest struct {
@@ -443,6 +454,18 @@ type RunResult struct {
 	LogExcerpt    string
 	ActionsURL    string
 	Artifacts     []RunArtifact
+}
+
+type DelegatedRunArtifactRequest struct {
+	RunReq   RunRequest
+	Result   RunResult
+	MaxFiles int
+	MaxBytes int64
+}
+
+type DelegatedRunArtifactResult struct {
+	Artifacts []RunArtifact
+	Output    string
 }
 
 type RunSessionHandle struct {
@@ -585,6 +608,29 @@ func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues
 	}
 	cfg.Provider = after.Name()
 	return after.ApplyFlags(cfg, fs, values[after.Name()])
+}
+
+func validateProviderConfig(cfg Config) error {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return err
+	}
+	if validator, ok := provider.(ProviderConfigValidator); ok {
+		return validator.ValidateConfig(cfg)
+	}
+	return nil
+}
+
+func providerCommandRoutingArgs(cfg Config, leaseID string) []string {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return nil
+	}
+	router, ok := provider.(ProviderCommandRoutingArgs)
+	if !ok {
+		return nil
+	}
+	return router.CommandRoutingArgs(cfg, leaseID)
 }
 
 func routeProviderFlagOverride(cfg *Config, fs *flag.FlagSet, values providerFlagValues) (bool, error) {
@@ -772,10 +818,11 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if len(req.Downloads) > 0 {
 		return exit(2, "%s delegates run execution; --download is not supported", provider)
 	}
-	if len(req.ArtifactGlobs) > 0 {
+	runArtifacts := featureSetHas(spec.Features, FeatureRunArtifacts)
+	if len(req.ArtifactGlobs) > 0 && !runArtifacts {
 		return exit(2, "%s delegates run execution; --artifact-glob is not supported", provider)
 	}
-	if len(req.RequiredArtifactGlobs) > 0 {
+	if len(req.RequiredArtifactGlobs) > 0 && !runArtifacts {
 		return exit(2, "%s delegates run execution; --require-artifact is not supported", provider)
 	}
 	if req.EmitProof != "" && !featureSetHas(spec.Features, FeatureRunProof) {
@@ -791,14 +838,6 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 		return exit(2, "%s delegates sync; --fresh-pr is not supported", provider)
 	}
 	return nil
-}
-
-func rejectDelegatedSyncOptions(provider string, req RunRequest) error {
-	return rejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: provider}, req)
-}
-
-func RejectDelegatedSyncOptions(provider string, req RunRequest) error {
-	return rejectDelegatedSyncOptions(provider, req)
 }
 
 func RejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {

@@ -673,6 +673,13 @@ func TestRejectDelegatedSyncOptionsAllowsArchiveSyncControls(t *testing.T) {
 	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{RequiredArtifactGlobs: []string{"reports/data/manifest.json"}}); err == nil {
 		t.Fatal("archive sync provider should reject --require-artifact")
 	}
+	spec.Features = append(spec.Features, FeatureRunArtifacts)
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{RequiredArtifactGlobs: []string{"reports/data/manifest.json"}}); err != nil {
+		t.Fatalf("delegated artifact provider should allow --require-artifact: %v", err)
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{ArtifactGlobs: []string{"reports/data/**"}}); err != nil {
+		t.Fatalf("delegated artifact provider should allow --artifact-glob: %v", err)
+	}
 	if err := RejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: "islo"}, RunRequest{SyncOnly: true}); err == nil {
 		t.Fatal("plain delegated provider should reject --sync-only")
 	}

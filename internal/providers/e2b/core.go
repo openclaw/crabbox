@@ -61,10 +61,6 @@ func newLeaseSlug(leaseID string) string {
 	return core.NewLeaseSlug(leaseID)
 }
 
-func normalizeLeaseSlug(value string) string {
-	return core.NormalizeLeaseSlug(value)
-}
-
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }
@@ -93,10 +89,6 @@ func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
 }
 
-func PrintKeepOnFailureDelegatedHint(w io.Writer, provider, leaseID, slug string, idleTimeout, ttl time.Duration) {
-	core.PrintKeepOnFailureDelegatedHint(w, provider, leaseID, slug, idleTimeout, ttl)
-}
-
 func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
 	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
 }
@@ -119,10 +111,6 @@ func shouldUseShell(command []string) bool {
 
 func leadingEnvAssignment(command []string) bool {
 	return core.LeadingEnvAssignment(command)
-}
-
-func allowedEnv(allow []string) map[string]string {
-	return core.AllowedEnv(allow)
 }
 
 func syncExcludes(root string, cfg Config) ([]string, error) {

@@ -847,7 +847,7 @@ exit 0
 		"--no-sync",
 		"--require-artifact", "reports/data/manifest.json",
 		"--artifact-glob", "reports/data/*.txt",
-		"--", "bash", "-lc", "mkdir -p reports/data && printf '{}\n' > reports/data/manifest.json && printf 'ok\n' > reports/data/quality.txt && printf 'data run complete\n'",
+		"--", "sh", "-c", "mkdir -p reports/data && printf '{}\n' > reports/data/manifest.json && printf 'ok\n' > reports/data/quality.txt && printf 'data run complete\n'",
 	})
 	if err != nil {
 		t.Fatalf("runCommand error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
@@ -884,6 +884,52 @@ exit 0
 		if !strings.Contains(string(logData), want) {
 			t.Fatalf("ssh log missing %q:\n%s", want, logData)
 		}
+	}
+}
+
+func TestDelegatedRunArtifactScriptSkipsSlashNormalizedMatches(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "etc", "passwd"), []byte("repo fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tarLog := filepath.Join(dir, "tar.log")
+	tarPath := filepath.Join(binDir, "tar")
+	if err := os.WriteFile(tarPath, []byte(`#!/bin/sh
+printf '%s\n' "$@" > "$CRABBOX_FAKE_TAR_LOG"
+out=""
+prev=""
+for arg do
+  if [ "$prev" = "-czf" ]; then out="$arg"; break; fi
+  prev="$arg"
+done
+: > "$out"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_TAR_LOG", tarLog)
+	cmd := exec.Command("bash", "-c", DelegatedRunArtifactScript(nil, []string{".//etc/passwd"}, 16, 1024*1024))
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("delegated artifact script failed: %v\n%s", err, out)
+	}
+	logData, err := os.ReadFile(tarLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logData), "/etc/passwd") {
+		t.Fatalf("tar received slash-normalized path:\n%s", logData)
+	}
+	if !strings.Contains(string(logData), "--files-from\n/dev/null") {
+		t.Fatalf("tar should receive an empty archive after rejecting slash-normalized matches:\n%s", logData)
 	}
 }
 

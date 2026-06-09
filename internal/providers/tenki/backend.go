@@ -172,7 +172,16 @@ func (b *tenkiBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		return LeaseTarget{}, err
 	}
 	if req.ReleaseOnly || req.StatusOnly {
-		return LeaseTarget{Server: b.sessionToServer(cfg, session, leaseID, slug, session.Sticky), LeaseID: leaseID}, nil
+		lease := LeaseTarget{Server: b.sessionToServer(cfg, session, leaseID, slug, session.Sticky), LeaseID: leaseID}
+		if !req.ReadyProbe || !tenkiSessionReady(session) {
+			return lease, nil
+		}
+		target, err := b.resolveSSHTarget(ctx, cfg, session.ID)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		lease.SSH = target
+		return lease, nil
 	}
 	lease, err := b.prepareLease(ctx, cfg, session, leaseID, slug, true, true)
 	if err != nil {
@@ -199,6 +208,38 @@ func (b *tenkiBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 		}
 		leaseID, slug := tenkiLeaseMetadata(session)
 		out = append(out, b.sessionToServer(cfg, session, leaseID, slug, session.Sticky))
+	}
+	return out, nil
+}
+
+type tenkiLeaseListView struct {
+	ID         string            `json:"id"`
+	Slug       string            `json:"slug,omitempty"`
+	Provider   string            `json:"provider"`
+	State      string            `json:"state"`
+	ServerID   string            `json:"serverId"`
+	Name       string            `json:"name"`
+	ServerType string            `json:"serverType"`
+	Labels     map[string]string `json:"labels,omitempty"`
+}
+
+func (b *tenkiBackend) ListJSON(ctx context.Context, req ListRequest) (any, error) {
+	servers, err := b.List(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tenkiLeaseListView, 0, len(servers))
+	for _, server := range servers {
+		out = append(out, tenkiLeaseListView{
+			ID:         blank(server.Labels["lease"], server.DisplayID()),
+			Slug:       server.Labels["slug"],
+			Provider:   blank(server.Provider, server.Labels["provider"]),
+			State:      blank(server.Labels["state"], server.Status),
+			ServerID:   server.DisplayID(),
+			Name:       server.Name,
+			ServerType: server.ServerType.Name,
+			Labels:     server.Labels,
+		})
 	}
 	return out, nil
 }
@@ -317,12 +358,10 @@ func (b *tenkiBackend) prepareLease(ctx context.Context, cfg Config, session ten
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	sshCommand, err := b.waitForTenkiSSHCommand(ctx, session.ID, bootstrapWaitTimeout(cfg))
+	target, err := b.resolveSSHTarget(ctx, cfg, session.ID)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	target := b.sshTarget(sshCommand)
-	target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null"
 	server := b.sessionToServer(cfg, session, leaseID, slug, keep)
 	if waitSSH {
 		if err := waitForSSHReadyFunc(ctx, &target, b.rt.Stderr, "tenki sandbox ssh", bootstrapWaitTimeout(cfg)); err != nil {
@@ -330,6 +369,16 @@ func (b *tenkiBackend) prepareLease(ctx context.Context, cfg Config, session ten
 		}
 	}
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+}
+
+func (b *tenkiBackend) resolveSSHTarget(ctx context.Context, cfg Config, sessionID string) (SSHTarget, error) {
+	sshCommand, err := b.waitForTenkiSSHCommand(ctx, sessionID, bootstrapWaitTimeout(cfg))
+	if err != nil {
+		return SSHTarget{}, err
+	}
+	target := b.sshTarget(sshCommand)
+	target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null"
+	return target, nil
 }
 
 func (b *tenkiBackend) getSession(ctx context.Context, sessionID string) (tenkiSession, error) {

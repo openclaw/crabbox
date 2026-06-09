@@ -76,22 +76,6 @@ func touchDirectLeaseLabels(labels map[string]string, cfg Config, state string, 
 	return core.TouchDirectLeaseLabels(labels, cfg, state, now)
 }
 
-func leaseLabelTime(t time.Time) string {
-	return core.LeaseLabelTime(t)
-}
-
-func leaseLabelTimeDisplay(value string) string {
-	return core.LeaseLabelTimeDisplay(value)
-}
-
-func leaseLabelDurationDisplay(secondsValue, fallbackValue string) string {
-	return core.LeaseLabelDurationDisplay(secondsValue, fallbackValue)
-}
-
-func idleForString(value string, now time.Time) string {
-	return core.IdleForString(value, now)
-}
-
 func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
 }

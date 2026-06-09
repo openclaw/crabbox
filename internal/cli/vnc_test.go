@@ -15,6 +15,9 @@ func TestVNCTunnelCommandQuotesKeyPath(t *testing.T) {
 	if !strings.Contains(got, "'-i' '/tmp/Application Support/crabbox/id_ed25519'") {
 		t.Fatalf("tunnel key path should be shell-quoted: %q", got)
 	}
+	if !strings.Contains(got, "IdentitiesOnly=yes") {
+		t.Fatalf("key-backed tunnel should restrict SSH identities: %q", got)
+	}
 	if !strings.Contains(got, "'-L' '5907:127.0.0.1:5900'") {
 		t.Fatalf("tunnel should forward VNC loopback: %q", got)
 	}
@@ -29,6 +32,9 @@ func TestVNCTunnelCommandForwardsProxyCommand(t *testing.T) {
 	}, "5907")
 	if strings.Contains(got, "'-i' ''") {
 		t.Fatalf("empty key must not emit -i: %q", got)
+	}
+	if strings.Contains(got, "IdentitiesOnly=yes") {
+		t.Fatalf("SSH-config-backed tunnel must allow agent identities: %q", got)
 	}
 	if !strings.Contains(got, "ProxyCommand=ssh -W 10.211.55.3:%p mac-host") {
 		t.Fatalf("tunnel should preserve proxy command: %q", got)

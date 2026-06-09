@@ -83,11 +83,15 @@ has_provider() {
 }
 
 extract_lease() {
-  rg -o '(cbx_[a-f0-9]{12}|sem_[A-Za-z0-9][A-Za-z0-9._-]*)' | head -1
+  grep -Eo '(cbx_[a-f0-9]{12}|sem_[A-Za-z0-9][A-Za-z0-9._-]*)' | head -1
 }
 
 extract_slug() {
-  sed -n 's/.*slug=\([^ ]*\).*/\1/p' | rg -v '^-$' | tail -1
+  sed -n 's/.*slug=\([^ ]*\).*/\1/p' | grep -Ev '^-$' | tail -1
+}
+
+extract_tenki_session() {
+  sed -n 's/.*tenki_session=\([^ ]*\).*/\1/p' | tail -1
 }
 
 stop_lease() {
@@ -469,6 +473,102 @@ sprites_smoke() {
   lease=""
 }
 
+tenki_smoke() {
+  need_tool jq
+  need_tool rg
+
+  local tenki_cli="${CRABBOX_TENKI_CLI:-${TENKI_CLI:-tenki}}"
+  need_tool "$tenki_cli"
+  local tenki_endpoint="${CRABBOX_TENKI_ENDPOINT:-${TENKI_ENDPOINT:-$(config_value tenki.endpoint || true)}}"
+  local tenki_sandbox_args=()
+  if [[ -n "$tenki_endpoint" ]]; then
+    tenki_sandbox_args+=(--endpoint "$tenki_endpoint")
+  fi
+
+  local auth
+  capture_run auth "$tenki_cli" status --json
+  if ! printf '%s\n' "$auth" | jq -e '.status | startswith("Logged in")' >/dev/null; then
+    echo "tenki smoke requires an authenticated Tenki CLI; run tenki login" >&2
+    return 2
+  fi
+  "$tenki_cli" --version
+  printf '%s\n' "$auth" | jq '{status,api_endpoint,workspace_id,project_id}'
+
+  local lease=""
+  local slug=""
+  local session=""
+  cleanup() {
+    if [[ -n "$lease" ]]; then
+      stop_provider_lease tenki "$lease" "$slug"
+    fi
+  }
+  trap cleanup RETURN
+
+  run_in_repo "$cb" doctor --provider tenki
+
+  local out
+  capture_run out run_in_repo "$cb" warmup \
+    --provider tenki \
+    --slug "${CRABBOX_LIVE_TENKI_SLUG:-tenki-smoke-$(date +%Y%m%d%H%M%S)-$$}" \
+    --ttl "${CRABBOX_LIVE_TENKI_TTL:-15m}" \
+    --idle-timeout "${CRABBOX_LIVE_TENKI_IDLE_TIMEOUT:-5m}" \
+    --timing-json
+  printf '%s\n' "$out"
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  slug="$(printf '%s\n' "$out" | extract_slug)"
+  session="$(printf '%s\n' "$out" | extract_tenki_session)"
+  test -n "$lease"
+  test -n "$slug"
+  test -n "$session"
+
+  run_in_repo "$cb" status --provider tenki --id "$slug" --wait --wait-timeout "${CRABBOX_LIVE_TENKI_WAIT_TIMEOUT:-120s}"
+  run_in_repo "$cb" run --provider tenki --id "$slug" --no-sync -- echo crabbox-tenki-ok
+  local list_json
+  capture_run list_json run_in_repo "$cb" list --provider tenki --json
+  printf '%s\n' "$list_json" | jq 'map({id,serverId,slug,provider,state})'
+  if ! printf '%s\n' "$list_json" | jq -e --arg lease "$lease" --arg session "$session" \
+    'any(.[]; .id == $lease and .serverId == $session and .provider == "tenki")' >/dev/null; then
+    echo "tenki list JSON missing lease=$lease session=$session" >&2
+    return 1
+  fi
+
+  "$tenki_cli" sandbox pause "${tenki_sandbox_args[@]}" --session "$session"
+  local pause_timeout="${CRABBOX_LIVE_TENKI_PAUSE_TIMEOUT:-60}"
+  local pause_deadline=$((SECONDS + pause_timeout))
+  local state=""
+  while (( SECONDS < pause_deadline )); do
+    state="$("$tenki_cli" sandbox get "${tenki_sandbox_args[@]}" --output json "$session" | jq -r '.state // ""' | tr '[:upper:]' '[:lower:]')"
+    [[ "$state" == "paused" ]] && break
+    sleep 1
+  done
+  if [[ "$state" != "paused" ]]; then
+    echo "tenki session did not pause within ${pause_timeout}s; last state=${state:-unknown}" >&2
+    return 1
+  fi
+
+  local paused_out
+  local paused_status=0
+  if paused_out="$(run_in_repo "$cb" status --provider tenki --id "$slug" --wait --wait-timeout 2s 2>&1)"; then
+    paused_status=0
+  else
+    paused_status=$?
+  fi
+  printf '%s\n' "$paused_out"
+  if [[ "$paused_status" -ne 5 ]]; then
+    echo "paused Tenki status wait exited $paused_status, want 5" >&2
+    return 1
+  fi
+  state="$("$tenki_cli" sandbox get "${tenki_sandbox_args[@]}" --output json "$session" | jq -r '.state // ""' | tr '[:upper:]' '[:lower:]')"
+  if [[ "$state" != "paused" ]]; then
+    echo "paused Tenki status wait changed session state to ${state:-unknown}" >&2
+    return 1
+  fi
+  echo "tenki paused-session readiness check preserved state=paused"
+
+  stop_provider_lease tenki "$lease" "$slug"
+  lease=""
+}
+
 kubevirt_smoke() {
   need_tool jq
   need_tool rg
@@ -531,12 +631,17 @@ external_smoke() {
   need_tool rg
 
   local command="${CRABBOX_LIVE_EXTERNAL_COMMAND:-${CRABBOX_EXTERNAL_COMMAND:-$(config_value external.command || true)}}"
-  if [[ -z "$command" ]]; then
-    echo "external smoke requires CRABBOX_LIVE_EXTERNAL_COMMAND, CRABBOX_EXTERNAL_COMMAND, or external.command" >&2
+  local lifecycle_acquire
+  lifecycle_acquire="$(config_value external.lifecycle.acquire.argv || true)"
+  if [[ -z "$command" && -z "$lifecycle_acquire" ]]; then
+    echo "external smoke requires an external command or external.lifecycle.acquire configuration" >&2
     return 2
   fi
 
-  local external_env=(CRABBOX_EXTERNAL_COMMAND="$command")
+  local external_env=()
+  if [[ -n "$command" ]]; then
+    external_env+=(CRABBOX_EXTERNAL_COMMAND="$command")
+  fi
   local route_args=(--provider external)
   if [[ -n "${CRABBOX_LIVE_EXTERNAL_ARG:-}" ]]; then
     external_env+=(CRABBOX_EXTERNAL_ARG="$CRABBOX_LIVE_EXTERNAL_ARG")
@@ -546,7 +651,11 @@ external_smoke() {
   fi
   local lease_args=("${route_args[@]}" --ttl "${CRABBOX_LIVE_EXTERNAL_TTL:-15m}" --idle-timeout "${CRABBOX_LIVE_EXTERNAL_IDLE_TIMEOUT:-5m}")
   external_run() {
-    (cd "$repo" && env "${external_env[@]}" "$cb" "$@")
+    if (( ${#external_env[@]} )); then
+      (cd "$repo" && env "${external_env[@]}" "$cb" "$@")
+    else
+      (cd "$repo" && "$cb" "$@")
+    fi
   }
 
   local lease=""
@@ -633,6 +742,10 @@ fi
 
 if has_provider sprites; then
   sprites_smoke
+fi
+
+if has_provider tenki; then
+  tenki_smoke
 fi
 
 if has_provider wandb; then

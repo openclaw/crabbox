@@ -90,6 +90,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	id := req.ID
 	var desired *desiredLease
+	var claimedLease *protocolLease
 	var claimLabels map[string]string
 	keep := true
 	if claim, ok, err := b.resolveClaim(req.ID); err != nil {
@@ -99,12 +100,21 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 		id = name
 		desired = &desiredLease{LeaseID: claim.LeaseID, Slug: claim.Slug, Name: name}
 		claimLabels = claim.Labels
+		if lifecycleConfigured(b.cfg.External) {
+			claimedLease = &protocolLease{
+				LeaseID: claim.LeaseID,
+				Slug:    claim.Slug,
+				Name:    name,
+				Labels:  claim.Labels,
+			}
+		}
 		keep = keepFromLabels(claim.Labels, true)
 	}
 	response, err := b.invoke(ctx, protocolRequest{
 		Operation:   "resolve",
 		ID:          id,
 		Desired:     desired,
+		Lease:       claimedLease,
 		Reclaim:     req.Reclaim,
 		ReleaseOnly: req.ReleaseOnly,
 		Repo:        repoForProtocol(req.Repo),
@@ -256,6 +266,13 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 }
 
 func (b *leaseBackend) invoke(ctx context.Context, request protocolRequest) (protocolResponse, error) {
+	if lifecycleConfigured(b.cfg.External) {
+		return b.invokeLifecycle(ctx, request)
+	}
+	return b.invokeProtocol(ctx, request)
+}
+
+func (b *leaseBackend) invokeProtocol(ctx context.Context, request protocolRequest) (protocolResponse, error) {
 	request.ProtocolVersion = protocolVersion
 	request.Config = b.cfg.External.Config
 	var stdin bytes.Buffer
@@ -293,22 +310,33 @@ func (b *leaseBackend) claimScope() string {
 }
 
 type externalClaimScopeData struct {
-	Command string         `json:"command"`
-	Args    []string       `json:"args,omitempty"`
-	Config  map[string]any `json:"config,omitempty"`
+	Command    string                         `json:"command,omitempty"`
+	Args       []string                       `json:"args,omitempty"`
+	Config     map[string]any                 `json:"config,omitempty"`
+	Lifecycle  *core.ExternalLifecycleConfig  `json:"lifecycle,omitempty"`
+	Connection *core.ExternalConnectionConfig `json:"connection,omitempty"`
 }
 
 func externalClaimScope(cfg core.Config) string {
-	data, err := json.Marshal(externalClaimScopeData{
+	scope := externalClaimScopeData{
 		Command: strings.TrimSpace(cfg.External.Command),
 		Args:    append([]string(nil), cfg.External.Args...),
 		Config:  cfg.External.Config,
-	})
+	}
+	if lifecycleConfigured(cfg.External) {
+		scope.Lifecycle = &cfg.External.Lifecycle
+		scope.Connection = &cfg.External.Connection
+	}
+	data, err := json.Marshal(scope)
 	if err != nil {
 		data = []byte(strings.TrimSpace(cfg.External.Command) + "\x00" + strings.Join(cfg.External.Args, "\x00"))
 	}
 	sum := sha256.Sum256(data)
 	return "sha256:" + fmt.Sprintf("%x", sum[:12])
+}
+
+func lifecycleConfigured(cfg core.ExternalConfig) bool {
+	return lifecycleOperationConfigured(cfg.Lifecycle.Acquire)
 }
 
 func (b *leaseBackend) claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
@@ -420,6 +448,7 @@ func validateAndFillDesired(lease *protocolLease, desired *desiredLease) error {
 }
 
 var lifecycleLabelKeys = []string{
+	externalResourceNameLabel,
 	"keep",
 	"created_at",
 	"last_touched_at",

@@ -240,13 +240,24 @@ func (a App) doctor(ctx context.Context, args []string) error {
 				ok = false
 			} else {
 				record("ok", "coord", fmt.Sprintf("%s access=%s", cfg.Coordinator, accessAuthState(cfg.Access)), map[string]string{"url": cfg.Coordinator, "access": accessAuthState(cfg.Access)})
+				brokerOK := true
 				if whoami, err := coord.Whoami(ctx); err != nil {
-					record("failed", "broker", err.Error(), nil)
+					class := doctorErrorClass(err)
+					if isCoordinatorUnauthorized(err) {
+						class = "broker_auth"
+					}
+					hint := doctorErrorHint("broker", class)
+					record("failed", "broker", fmt.Sprintf("class=%s hint=%s %v", class, hint, err), map[string]string{"class": class, "hint": hint, "error": err.Error()})
 					ok = false
+					brokerOK = false
 				} else {
-					record("ok", "broker", fmt.Sprintf("auth=%s owner=%s org=%s default_type=%s", whoami.Auth, whoami.Owner, whoami.Org, cfg.ServerType), map[string]string{"auth": whoami.Auth, "owner": whoami.Owner, "org": whoami.Org, "default_type": cfg.ServerType})
+					details := map[string]string{"auth": whoami.Auth, "owner": whoami.Owner, "org": whoami.Org, "default_type": cfg.ServerType}
+					if whoami.TokenExpiresAt != "" {
+						details["token_expires"] = whoami.TokenExpiresAt
+					}
+					record("ok", "broker", doctorBrokerOKMessage(whoami, cfg.ServerType), details)
 				}
-				if coordinatorProviderReadinessSupported(cfg.Provider) {
+				if brokerOK && coordinatorProviderReadinessSupported(cfg.Provider) {
 					readiness, err := coord.ProviderReadiness(ctx, cfg)
 					if err == nil {
 						if readiness.Configured {
@@ -261,6 +272,9 @@ func (a App) doctor(ctx context.Context, args []string) error {
 						}
 					} else if !isCoordinatorNotFoundError(err) {
 						class := doctorErrorClass(err)
+						if isCoordinatorUnauthorized(err) {
+							class = "broker_auth"
+						}
 						hint := doctorErrorHint(cfg.Provider, class)
 						record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", cfg.Provider, class, hint, err), map[string]string{"provider": cfg.Provider, "class": class, "hint": hint, "error": err.Error()})
 						ok = false
@@ -509,6 +523,19 @@ func doctorStatusFails(status string) bool {
 	}
 }
 
+func doctorBrokerOKMessage(whoami CoordinatorWhoami, serverType string) string {
+	parts := []string{
+		"auth=" + whoami.Auth,
+		"owner=" + whoami.Owner,
+		"org=" + whoami.Org,
+		"default_type=" + serverType,
+	}
+	if whoami.TokenExpiresAt != "" {
+		parts = append(parts, "token_expires="+whoami.TokenExpiresAt)
+	}
+	return strings.Join(parts, " ")
+}
+
 func doctorErrorClass(err error) string {
 	if err == nil {
 		return ""
@@ -542,6 +569,9 @@ func doctorErrorHint(provider, class string) string {
 	}
 	if class == "network" {
 		return "check_network_and_provider_endpoint"
+	}
+	if class == "broker_auth" {
+		return "renew_crabbox_broker_login"
 	}
 	switch provider {
 	case "aws":

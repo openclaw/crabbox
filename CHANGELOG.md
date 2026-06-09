@@ -1,20 +1,40 @@
 # Changelog
 
-## 0.26.1 - Unreleased
+## Unreleased
 
 ### Added
 
+- Added `provider: incus` for direct Linux SSH leases through the official Incus Go client, including typed config/env/flag routing, provider-owned `user.crabbox.*` metadata, and deterministic fake-backed lifecycle coverage.
+
+## 0.27.0 - 2026-06-09
+
+### Added
+
+- Added ordered declarative external lifecycle steps with optional acquire rollback, allowing multi-command private provider setup without shell wrappers.
+
+## 0.26.1 - 2026-06-09
+
+### Added
+
+- Added declarative `external.lifecycle` command configuration, provider resource-name mapping, and coordinator-free WebVNC over SSH for deterministic private devbox CLIs.
 - Added Podman runtime compatibility for `provider: local-container`, including runtime selection, provider flags on SSH commands, and Podman-safe local lease claim scopes. Thanks @sallyom.
 - Added `sync.include` / `sync.includes` whitelists for root-relative sync plans, SSH sync, native Windows sync, local Actions hydration, and archive-sync providers. Thanks @anagnorisis2peripeteia.
 - Added generic `kubevirt` SSH leases and a versioned `external` executable provider so private or proprietary VM/devbox control planes can integrate through configuration without provider-specific Crabbox forks.
-- Added `provider: incus` for direct Linux SSH leases through the official Incus Go client, including typed config/env/flag routing, provider-owned `user.crabbox.*` metadata, and deterministic fake-backed lifecycle coverage.
+- Added Tenki to the live provider smoke harness, including authenticated create/run coverage and a paused-session check that proves `status --wait` does not resume the sandbox.
 
 ### Changed
 
+- Extended GitHub broker login user tokens to 180 days by default, exposed token expiry in login/doctor identity output, and made the lifetime configurable with `CRABBOX_USER_TOKEN_TTL_SECONDS`.
+- Added optional GitHub user-token admin allowlists via `CRABBOX_GITHUB_ADMIN_OWNERS` and `CRABBOX_GITHUB_ADMIN_LOGINS`, and removed committed capacity-admin identities from the reusable Worker config.
+
 ### Fixed
 
+- Fixed brokered provider doctor output so expired or rejected broker tokens tell maintainers to renew Crabbox login instead of misreporting AWS, Azure, GCP, or Hetzner credential failures.
+- Fixed delegated run artifact collection so Blacksmith Testbox can satisfy `--require-artifact` and `--artifact-glob` before one-shot lease cleanup.
 - Fixed malformed AWS, Azure, and GCP SSH CIDR configuration to fail closed instead of falling back to broad SSH access. Thanks @coygeek.
-- Fixed local-container warmup on Windows by mounting the generated bootstrap script instead of passing it inline to Docker. Thanks @anagnorisis2peripeteia.
+- Fixed local-container warmup on Windows by mounting the generated bootstrap directory instead of passing the script inline to Docker. Thanks @anagnorisis2peripeteia.
+- Fixed SSH-backed status waits to honor `--wait-timeout` while allowing Tenki readiness probes without resuming paused sessions. Thanks @aki-luxor.
+- Fixed Tenki JSON lease listings to expose the Crabbox lease ID instead of an unset numeric provider ID.
 - Fixed brokered Azure lease creation to persist in-flight leases before VM provisioning, keep failed creates visible, and sweep orphaned Azure VMs from coordinator maintenance. Fixes https://github.com/openclaw/crabbox/issues/215.
 - Fixed brokered lease release races so leases released while provisioning cannot be reactivated or lose cleanup retry state.
 - Fixed Islo provider status, streaming exec, archive upload, share, and delete handling for the current Islo API contract. Thanks @zozo123.

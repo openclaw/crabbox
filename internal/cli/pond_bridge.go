@@ -106,67 +106,6 @@ type pondPeersFlags struct {
 	ShareTTL  time.Duration
 }
 
-func (a App) pond(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		a.pondHelp()
-		return exit(2, "missing pond subcommand")
-	}
-	switch args[0] {
-	case "peers":
-		return a.pondPeers(ctx, args[1:])
-	case "connect":
-		return a.pondConnect(ctx, args[1:])
-	case "disconnect":
-		return a.pondDisconnect(ctx, args[1:])
-	case "release":
-		return a.pondRelease(ctx, args[1:])
-	case "-h", "--help", "help":
-		a.pondHelp()
-		return nil
-	default:
-		a.pondHelp()
-		return exit(2, "unknown pond subcommand %q", args[0])
-	}
-}
-
-func (a App) pondHelp() {
-	fmt.Fprintln(a.Stdout, `Pond — cross-provider peer discovery and lifecycle.
-
-Usage:
-  crabbox pond peers   --pond <name> [flags]
-  crabbox pond connect <name> [flags]
-  crabbox pond disconnect <name>
-  crabbox pond release <name>
-
-Subcommands:
-  peers   List every peer in the named pond, regardless of provider.
-  connect Open operator-side SSH forwards for exposed pond ports.
-  disconnect Stop daemonized SSH forwards started by connect --export.
-  release Stop every lease in the named pond and remove their claims.
-
-Flags for `+"`pond peers`"+`:
-  --pond <name>          Required. Pond label to resolve.
-  --provider <name>      Restrict to a single provider (default: all delegated
-                         providers in the pond).
-  --json                 Emit machine-readable JSON instead of text.
-  --share-port <port>    Publish a per-peer public URL for this port (idempotent).
-  --share-ttl <duration> TTL for shares created with --share-port (default 24h).
-
-Examples:
-  crabbox pond peers --pond alpha
-  crabbox pond peers --pond alpha --provider islo
-  crabbox pond peers --pond alpha --json
-  crabbox pond peers --pond alpha --share-port 8080 --json
-  crabbox pond release alpha
-
-The bridge plane is HTTP-only by design: peers are reachable via the per-
-provider native ingress (islo shares, e2b sandbox previews, railway deploy
-URLs, …). Non-HTTP protocols are out of scope — use the Tailscale plane for
-arbitrary TCP/UDP. Providers that do not expose a per-sandbox HTTPS ingress
-(modal, cloudflare, tensorlake) are honestly reported as unsupported instead
-of pretending to bridge.`)
-}
-
 func (a App) pondPeers(ctx context.Context, args []string) error {
 	fs := newFlagSet("pond peers", a.Stderr)
 	flags := pondPeersFlags{ShareTTL: 24 * time.Hour}

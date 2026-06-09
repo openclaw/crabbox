@@ -12,20 +12,23 @@ function writeExecutable(file, body) {
   fs.chmodSync(file, 0o755);
 }
 
+function prepareSmokeRepo(dir) {
+  const tempRoot = path.join(dir, "repo");
+  const tempScripts = path.join(tempRoot, "scripts");
+  const smokeScript = path.join(tempScripts, "live-docker-sandbox-smoke.sh");
+  fs.mkdirSync(tempScripts, { recursive: true });
+  fs.copyFileSync(path.join(repoRoot, "scripts", "live-docker-sandbox-smoke.sh"), smokeScript);
+  fs.chmodSync(smokeScript, 0o755);
+  return { tempRoot, smokeScript };
+}
+
 test("live docker sandbox smoke honors configured alternate sbx path", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-sbx-smoke-"));
   const bin = path.join(dir, "bin");
-  const tempRoot = path.join(dir, "repo");
-  const tempScripts = path.join(tempRoot, "scripts");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   const fakeSbx = path.join(dir, "fake-sbx");
   const calls = path.join(dir, "calls.log");
   fs.mkdirSync(bin);
-  fs.mkdirSync(tempScripts, { recursive: true });
-  fs.copyFileSync(
-    path.join(repoRoot, "scripts", "live-docker-sandbox-smoke.sh"),
-    path.join(tempScripts, "live-docker-sandbox-smoke.sh"),
-  );
-  fs.chmodSync(path.join(tempScripts, "live-docker-sandbox-smoke.sh"), 0o755);
 
   writeExecutable(
     fakeSbx,
@@ -57,7 +60,7 @@ chmod +x bin/crabbox
 `,
   );
 
-  const result = spawnSync("bash", [path.join(tempScripts, "live-docker-sandbox-smoke.sh")], {
+  const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
     env: {
       ...process.env,
@@ -85,6 +88,7 @@ chmod +x bin/crabbox
 test("live docker sandbox smoke classifies provider preflight failures", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-docker-sandbox-"));
   const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   fs.mkdirSync(binDir, { recursive: true });
 
   writeExecutable(
@@ -115,8 +119,8 @@ chmod +x "$out"
 `,
   );
 
-  const result = spawnSync("bash", ["scripts/live-docker-sandbox-smoke.sh"], {
-    cwd: repoRoot,
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
     env: {
       ...process.env,
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
@@ -135,6 +139,7 @@ chmod +x "$out"
 test("live docker sandbox smoke classifies quota-like provider blockers", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-docker-sandbox-quota-"));
   const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   fs.mkdirSync(binDir, { recursive: true });
 
   writeExecutable(
@@ -165,8 +170,8 @@ chmod +x "$out"
 `,
   );
 
-  const result = spawnSync("bash", ["scripts/live-docker-sandbox-smoke.sh"], {
-    cwd: repoRoot,
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
     env: {
       ...process.env,
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,

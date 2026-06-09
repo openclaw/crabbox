@@ -190,10 +190,6 @@ func providerSpecSupportsTarget(spec ProviderSpec, targetOS, windowsMode string)
 	return false
 }
 
-func unsupportedManagedTargetMessage(provider, target string) string {
-	return unsupportedManagedTargetMessageForConfig(provider, Config{TargetOS: target, WindowsMode: windowsModeNormal})
-}
-
 func unsupportedManagedTargetMessageForConfig(provider string, cfg Config) string {
 	target := cfg.TargetOS
 	if provider == "azure" {
@@ -292,10 +288,6 @@ func isWindowsNativeTarget(target SSHTarget) bool {
 
 func isWindowsWSL2Target(target SSHTarget) bool {
 	return target.TargetOS == targetWindows && target.WindowsMode == windowsModeWSL2
-}
-
-func isPOSIXTarget(target SSHTarget) bool {
-	return !isWindowsNativeTarget(target)
 }
 
 func remoteJoin(cfg Config, parts ...string) string {

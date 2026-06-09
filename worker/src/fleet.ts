@@ -24,6 +24,7 @@ import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth"
 import { defaultOSImage, normalizeOSImage } from "./os-image";
 import {
   portalCode,
+  portalAdmin,
   portalError,
   portalExternalRunnerDetail,
   portalHome,
@@ -32,7 +33,11 @@ import {
   portalRunDetail,
   portalShareLease,
   portalVNC,
+  type PortalAdminLeaseSummary,
   type PortalLeaseBridgeStatus,
+  type PortalAdminProviderStatus,
+  type PortalAdminUserSummary,
+  type PortalAdminView,
   type PortalMacHostRecord,
   webVNCBridgeCommand,
 } from "./portal";
@@ -78,6 +83,7 @@ import type {
   TailscaleMetadata,
   WindowsMode,
 } from "./types";
+import { coordinatorProviders, coordinatorProviderSpec, isCoordinatorProvider } from "./types";
 import { costLimits, enforceCostLimits, leaseCost, requestOrg, usageSummary } from "./usage";
 
 const fleetID = "default";
@@ -1476,15 +1482,27 @@ export class FleetDurableObject implements DurableObject {
   }
 
   private whoami(request: Request): Response {
-    return json({
+    const response: {
+      owner: string;
+      org: string;
+      auth: string;
+      admin: boolean;
+      tokenExpiresAt?: string;
+    } = {
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
       auth: request.headers.get("x-crabbox-auth") || "bearer",
-    });
+      admin: isAdminRequest(request),
+    };
+    const tokenExpiresAt = request.headers.get("x-crabbox-token-expires-at");
+    if (tokenExpiresAt) {
+      response.tokenExpiresAt = tokenExpiresAt;
+    }
+    return json(response);
   }
 
   private async providerReadiness(request: Request, provider: string): Promise<Response> {
-    if (!isManagedProvider(provider)) {
+    if (!isCoordinatorProvider(provider)) {
       return json(
         { error: "invalid_provider", message: `unsupported provider: ${provider}` },
         { status: 400 },
@@ -1561,6 +1579,21 @@ export class FleetDurableObject implements DurableObject {
         this.portalMacHosts(),
       ]);
       return portalHome(leases, runners, request, this.attachPortalMacHostLeases(macHosts, leases));
+    }
+    if (method === "GET" && parts[1] === "admin") {
+      if (!isAdminRequest(request)) {
+        return portalError("Admin required", "That page requires admin access.", 403);
+      }
+      const tab =
+        parts[2] === undefined || parts[2] === "health"
+          ? "health"
+          : parts[2] === "leases" || parts[2] === "users"
+            ? parts[2]
+            : undefined;
+      if (!tab || parts[3] !== undefined) {
+        return json({ error: "not_found" }, { status: 404 });
+      }
+      return portalAdmin(await this.portalAdminView(), request, tab);
     }
     if (method === "GET" && parts[1] === "runs" && parts[2]) {
       return await this.portalRunRoute(request, parts[2], parts[3]);
@@ -1750,6 +1783,144 @@ export class FleetDurableObject implements DurableObject {
     );
   }
 
+  private async portalAdminView(): Promise<PortalAdminView> {
+    const leases = this.portalAdminLeaseSummaries(await this.leaseRecords());
+    const providers = await this.portalAdminProviderStatuses(leases);
+    return {
+      generatedAt: new Date().toISOString(),
+      providers,
+      users: this.portalAdminUserSummaries(leases),
+      leases,
+    };
+  }
+
+  private async portalAdminProviderStatuses(
+    leases: PortalAdminLeaseSummary[],
+  ): Promise<PortalAdminProviderStatus[]> {
+    const providerSet = new Set<Provider>(coordinatorProviders);
+    for (const lease of leases) {
+      providerSet.add(lease.provider);
+    }
+    return await Promise.all(
+      [...providerSet]
+        .toSorted((a, b) => a.localeCompare(b))
+        .map((provider) => this.portalAdminProviderStatus(provider, leases)),
+    );
+  }
+
+  private async portalAdminProviderStatus(
+    provider: Provider,
+    leases: PortalAdminLeaseSummary[],
+  ): Promise<PortalAdminProviderStatus> {
+    const readiness = this.providerConfigurationReadiness(provider);
+    const providerLeases = leases.filter((lease) => lease.provider === provider);
+    const activeLeases = providerLeases.filter((lease) => lease.state === "active").length;
+    const users = new Set(providerLeases.map((lease) => lease.owner || "unknown")).size;
+    const recentLeases = providerLeases
+      .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, 4);
+    if (!readiness.configured) {
+      return {
+        provider,
+        status: "disabled",
+        configured: false,
+        message: readiness.message,
+        missing: readiness.missing,
+        activeLeases,
+        totalLeases: providerLeases.length,
+        users,
+        recentLeases,
+      };
+    }
+    try {
+      const machines = await this.provider(provider).listCrabboxServers();
+      return {
+        provider,
+        status: "ok",
+        configured: true,
+        message: readiness.message,
+        missing: [],
+        machineCount: machines.length,
+        activeLeases,
+        totalLeases: providerLeases.length,
+        users,
+        recentLeases,
+      };
+    } catch (error) {
+      return {
+        provider,
+        status: "bad",
+        configured: true,
+        message: readiness.message,
+        missing: [],
+        activeLeases,
+        totalLeases: providerLeases.length,
+        users,
+        recentLeases,
+        error: errorMessage(error),
+      };
+    }
+  }
+
+  private portalAdminLeaseSummaries(leases: LeaseRecord[]): PortalAdminLeaseSummary[] {
+    return leases
+      .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map((lease) => ({
+        id: lease.id,
+        ...(lease.slug ? { slug: lease.slug } : {}),
+        provider: lease.provider,
+        state: lease.state,
+        target: lease.target || "linux",
+        owner: lease.owner,
+        org: lease.org,
+        class: lease.class,
+        serverType: lease.serverType,
+        ...(lease.host ? { host: lease.host } : {}),
+        createdAt: lease.createdAt,
+        expiresAt: lease.expiresAt,
+        updatedAt: lease.updatedAt,
+      }));
+  }
+
+  private portalAdminUserSummaries(leases: PortalAdminLeaseSummary[]): PortalAdminUserSummary[] {
+    const users = new Map<string, PortalAdminUserSummary>();
+    for (const lease of leases) {
+      const owner = lease.owner || "unknown";
+      const current =
+        users.get(owner) ??
+        ({
+          owner,
+          orgs: [],
+          activeLeases: 0,
+          totalLeases: 0,
+          providers: [],
+          lastSeenAt: lease.updatedAt || lease.createdAt,
+        } satisfies PortalAdminUserSummary);
+      current.totalLeases += 1;
+      if (lease.state === "active") {
+        current.activeLeases += 1;
+      }
+      if (lease.org && !current.orgs.includes(lease.org)) {
+        current.orgs.push(lease.org);
+      }
+      if (!current.providers.includes(lease.provider)) {
+        current.providers.push(lease.provider);
+      }
+      const lastSeen = lease.updatedAt || lease.createdAt;
+      if (lastSeen.localeCompare(current.lastSeenAt) > 0) {
+        current.lastSeenAt = lastSeen;
+      }
+      users.set(owner, current);
+    }
+    return [...users.values()]
+      .map((user) => ({
+        ...user,
+        orgs: user.orgs.toSorted((a, b) => a.localeCompare(b)),
+        providers: user.providers.toSorted((a, b) => a.localeCompare(b)),
+      }))
+      .toSorted((a, b) => b.activeLeases - a.activeLeases || a.owner.localeCompare(b.owner));
+  }
+
   private async portalMacHostPage(
     request: Request,
     provider: string,
@@ -1909,7 +2080,10 @@ export class FleetDurableObject implements DurableObject {
       return portalError("Stop unavailable", "Lease manage access is required.", 403);
     }
     await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
-    return new Response(null, { status: 303, headers: { location: "/portal" } });
+    return new Response(null, {
+      status: 303,
+      headers: { location: portalReturnLocation(request) },
+    });
   }
 
   private async portalShareLeasePage(request: Request, identifier: string): Promise<Response> {
@@ -3937,11 +4111,13 @@ export class FleetDurableObject implements DurableObject {
   private filterLeases(leases: LeaseRecord[], request: Request): LeaseRecord[] {
     const url = new URL(request.url);
     const state = url.searchParams.get("state") ?? "";
+    const provider = url.searchParams.get("provider") ?? "";
     const owner = url.searchParams.get("owner") ?? "";
     const org = url.searchParams.get("org") ?? "";
     const limit = clampLimit(url.searchParams.get("limit"), 100);
     return leases
       .filter((lease) => !state || lease.state === state)
+      .filter((lease) => !provider || lease.provider === provider)
       .filter((lease) => !owner || lease.owner === owner)
       .filter((lease) => !org || lease.org === org)
       .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -5311,6 +5487,7 @@ interface ProviderReadinessCheck {
 }
 
 function providerReadiness(provider: Provider, env: Env, gcpProject?: string): ProviderReadiness {
+  const spec = coordinatorProviderSpec(provider);
   if (provider === "gcp") {
     const missing = providerRequiredSecrets(provider).filter((name) => !nonSecretString(env[name]));
     if (
@@ -5326,8 +5503,8 @@ function providerReadiness(provider: Provider, env: Env, gcpProject?: string): P
       missing,
       message:
         missing.length === 0
-          ? "gcp coordinator secrets are configured"
-          : `gcp coordinator secrets missing: ${missing.join(", ")}`,
+          ? `${spec.provider} coordinator secrets are configured`
+          : `${spec.provider} coordinator secrets missing: ${missing.join(", ")}`,
     };
   }
   const missing = providerRequiredSecrets(provider).filter((name) => !nonSecretString(env[name]));
@@ -5337,8 +5514,8 @@ function providerReadiness(provider: Provider, env: Env, gcpProject?: string): P
     missing,
     message:
       missing.length === 0
-        ? `${provider} coordinator secrets are configured`
-        : `${provider} coordinator secrets missing: ${missing.join(", ")}`,
+        ? `${spec.provider} coordinator secrets are configured`
+        : `${spec.provider} coordinator secrets missing: ${missing.join(", ")}`,
   };
 }
 
@@ -5361,20 +5538,12 @@ function normalizeReadinessMarket(value: string | null): "spot" | "on-demand" | 
 }
 
 function providerRequiredSecrets(provider: Provider): Array<keyof Env> {
-  switch (provider) {
-    case "aws":
-      return ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
-    case "azure":
-      return ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_SUBSCRIPTION_ID"];
-    case "gcp":
-      return ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"];
-    case "hetzner":
-      return ["HETZNER_TOKEN"];
-  }
+  return [...coordinatorProviderSpec(provider).requiredSecrets];
 }
 
-function isManagedProvider(provider: string): provider is Provider {
-  return provider === "aws" || provider === "azure" || provider === "gcp" || provider === "hetzner";
+function portalReturnLocation(request: Request): string {
+  const value = new URL(request.url).searchParams.get("return") ?? "";
+  return value.startsWith("/portal") && !value.startsWith("//") ? value : "/portal";
 }
 
 function leaseKey(leaseID: string): string {

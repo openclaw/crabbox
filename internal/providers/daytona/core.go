@@ -119,10 +119,6 @@ func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, 
 	return core.ClaimLeaseForRepoProvider(leaseID, slug, cfg.Provider, repoRoot, idleTimeout, reclaim)
 }
 
-func sshTargetFromConfig(cfg Config, host string) SSHTarget {
-	return core.SSHTargetFromConfig(cfg, host)
-}
-
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
 }
@@ -137,10 +133,6 @@ func durationMinutesCeil(duration time.Duration) int {
 
 func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
-}
-
-func printKeepOnFailureDelegatedHint(w io.Writer, provider, leaseID, slug string, idleTimeout, ttl time.Duration) {
-	core.PrintKeepOnFailureDelegatedHint(w, provider, leaseID, slug, idleTimeout, ttl)
 }
 
 func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
@@ -169,10 +161,6 @@ func leadingEnvAssignment(command []string) bool {
 
 func remoteJoin(cfg Config, parts ...string) string {
 	return core.RemoteJoin(cfg, parts...)
-}
-
-func allowedEnv(allow []string) map[string]string {
-	return core.AllowedEnv(allow)
 }
 
 func syncExcludes(root string, cfg Config) ([]string, error) {

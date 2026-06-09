@@ -449,6 +449,8 @@ placeholders, applies it with `kubectl`, and starts it with `virtctl`.
 
 ### External provider
 
+Protocol adapter:
+
 ```yaml
 provider: external
 external:
@@ -467,6 +469,42 @@ operation and returns one JSON response on stdout. This keeps internal control
 plane logic outside Crabbox while preserving normal SSH sync, rsync, WebVNC,
 and command execution. Crabbox writes private per-lease routing state for
 generated stop commands; `routingFile` is normally set only by those commands.
+
+Declarative CLI:
+
+```yaml
+provider: external
+external:
+  lifecycle:
+    acquire:
+      steps:
+        - [devboxctl, new, "{{resourceName}}", --size, "{{config.size}}"]
+        - [devboxctl, setup, "{{resourceName}}"]
+      rollbackOnFailure: true
+    list:
+      argv: [devboxctl, list, --format, json]
+      output: json-name-array
+      namePrefix: "cbx-"
+    release:
+      argv: [devboxctl, rm, --yes, "{{resourceName}}"]
+  connection:
+    resourceName: "{{leaseIdSlug}}"
+    cloudId: devboxes/{{resourceName}}
+    serverType: "{{config.size}}"
+    ssh:
+      user: "{{env.DEVBOX_USER}}"
+      host: "{{resourceName}}"
+      sshConfigProxy: true
+  config:
+    size: cpu16
+  workRoot: /home/developer/crabbox
+```
+
+Declarative lifecycle entries use one `argv` array or an ordered `steps` list,
+not shell commands. Acquire steps can opt into release cleanup with
+`rollbackOnFailure: true`. See [External Provider](../providers/external.md)
+for placeholders, output semantics, inventory formats, routing behavior, and
+security guidance.
 
 ### Daytona
 

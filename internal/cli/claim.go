@@ -92,10 +92,6 @@ type staticClaimDetails struct {
 	WindowsMode string
 }
 
-func claimLeaseForRepoProviderScopeDetails(leaseID, slug, provider, providerScope string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, "", staticDetails, repoRoot, idleTimeout, reclaim)
-}
-
 func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	if leaseID == "" || repoRoot == "" {
 		return nil

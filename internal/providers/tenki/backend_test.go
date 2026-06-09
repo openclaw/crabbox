@@ -137,6 +137,75 @@ func TestTenkiResolveStatusOnlyDoesNotPrepareSSH(t *testing.T) {
 	}
 }
 
+func TestTenkiResolveReadyProbePreparesSSH(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "id_ed25519")
+	certPath := filepath.Join(dir, "id_ed25519-cert.pub")
+	if err := os.WriteFile(keyPath, []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certPath, []byte("cert"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		runner.calls = append(runner.calls, req)
+		switch strings.Join(req.Args, " ") {
+		case "sandbox list --output json --tags crabbox,crabbox-provider-tenki":
+			return LocalCommandResult{Stdout: `[{"id":"session-1","name":"crabbox-blue","state":"RUNNING","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}]`}, nil
+		case "sandbox ssh-command --output json --session session-1 --user tenki --batch-mode --connect-timeout 10s":
+			return LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","proxy_command":"tenki sandbox ssh-proxy --session session-1"}`}, nil
+		default:
+			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_123", StatusOnly: true, ReadyProbe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.Host != "sandbox" || lease.SSH.Key != keyPath {
+		t.Fatalf("ready probe did not prepare SSH target: %#v", lease.SSH)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls=%d want 2", len(runner.calls))
+	}
+}
+
+func TestTenkiResolveReadyProbeDoesNotResumePausedSession(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		runner.calls = append(runner.calls, req)
+		switch strings.Join(req.Args, " ") {
+		case "sandbox list --output json --tags crabbox,crabbox-provider-tenki":
+			return LocalCommandResult{Stdout: `[{"id":"session-1","name":"crabbox-blue","state":"PAUSED","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}]`}, nil
+		default:
+			t.Fatalf("paused readiness probe mutated session: %s %s", req.Name, strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_123", StatusOnly: true, ReadyProbe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Status != "paused" || lease.SSH.Host != "" {
+		t.Fatalf("unexpected paused readiness probe lease: %#v", lease)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%d want 1", len(runner.calls))
+	}
+}
+
 func TestTenkiResolveClaimUsesStoredSessionID(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "tenki_session-1"
@@ -279,6 +348,34 @@ func TestTenkiSessionToServerDoesNotExposeSessionIDAsIP(t *testing.T) {
 	}
 	if server.CloudID != "session-1" || server.Labels["tenki_session_id"] != "session-1" {
 		t.Fatalf("session id not preserved in server metadata: %#v", server)
+	}
+}
+
+func TestTenkiListJSONUsesCrabboxLeaseID(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		runner.calls = append(runner.calls, req)
+		if got := strings.Join(req.Args, " "); got != "sandbox list --output json --tags crabbox,crabbox-provider-tenki" {
+			t.Fatalf("unexpected command: %s %s", req.Name, got)
+		}
+		return LocalCommandResult{Stdout: `[{"id":"session-1","name":"crabbox-blue","state":"RUNNING","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}]`}, nil
+	}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	raw, err := backend.ListJSON(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	views, ok := raw.([]tenkiLeaseListView)
+	if !ok || len(views) != 1 {
+		t.Fatalf("unexpected JSON list view: %#v", raw)
+	}
+	view := views[0]
+	if view.ID != "cbx_123" || view.ServerID != "session-1" || view.Slug != "blue" || view.Provider != tenkiProvider || view.State != "ready" {
+		t.Fatalf("unexpected JSON list entry: %#v", view)
 	}
 }
 
