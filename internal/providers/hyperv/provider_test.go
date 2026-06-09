@@ -168,6 +168,45 @@ func TestApplyDefaults(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultsHonorsExplicitSSHUser(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.HyperV = core.HyperVConfig{}
+	cfg.SSHUser = "devuser"
+	applyDefaults(&cfg)
+	if cfg.HyperV.User != "devuser" {
+		t.Fatalf("explicit --ssh-user not inherited: HyperV.User=%s want devuser", cfg.HyperV.User)
+	}
+	if cfg.SSHUser != "devuser" {
+		t.Fatalf("SSHUser=%s want devuser", cfg.SSHUser)
+	}
+
+	// An explicit --hyperv-user still wins over --ssh-user.
+	cfg = core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.HyperV = core.HyperVConfig{User: "winuser"}
+	cfg.SSHUser = "devuser"
+	applyDefaults(&cfg)
+	if cfg.HyperV.User != "winuser" || cfg.SSHUser != "winuser" {
+		t.Fatalf("explicit --hyperv-user not preserved: HyperV.User=%s SSHUser=%s want winuser", cfg.HyperV.User, cfg.SSHUser)
+	}
+}
+
+func TestDoctorReportsConfiguredImage(t *testing.T) {
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	b := testBackend(&recordingRunner{})
+	result, err := b.Doctor(context.Background(), DoctorRequest{})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	if !strings.Contains(result.Message, `image=C:\Images\windows.vhdx`) {
+		t.Fatalf("doctor message missing configured image: %q", result.Message)
+	}
+}
+
 func TestCleanupScopedToCrabboxPrefix(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(runner)

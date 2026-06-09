@@ -47,7 +47,11 @@ func applyDefaults(cfg *Config) {
 	}
 	cfg.SSHFallbackPorts = []string{}
 	if cfg.HyperV.User == "" {
-		cfg.HyperV.User = "crabbox"
+		if cfg.SSHUser != "" && cfg.SSHUser != "crabbox" {
+			cfg.HyperV.User = cfg.SSHUser
+		} else {
+			cfg.HyperV.User = "crabbox"
+		}
 	}
 	if cfg.HyperV.WorkRoot == "" {
 		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
@@ -241,12 +245,13 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	if err != nil {
 		return DoctorResult{}, err
 	}
+	cfg := b.configForRun()
 	probe := "unchecked"
 	if req.ProbeSSH {
 		probe = "requires_running_lease"
 	}
-	msg := fmt.Sprintf("hyperv=%s control_plane=local inventory=ready api=powershell mutation=false leases=%d ssh_probe=%s",
-		firstLine(state), len(instances), probe)
+	msg := fmt.Sprintf("hyperv=%s control_plane=local inventory=ready api=powershell mutation=false leases=%d image=%s ssh_probe=%s",
+		firstLine(state), len(instances), cfg.HyperV.Image, probe)
 	return DoctorResult{Provider: providerName, Message: msg}, nil
 }
 
@@ -621,14 +626,24 @@ func (b *backend) removeVM(ctx context.Context, name string) error {
 	if len(vhdPaths) > 0 {
 		for _, p := range vhdPaths {
 			if strings.EqualFold(filepath.Clean(p), filepath.Clean(expectedVHD)) {
-				os.Remove(p) //nolint:errcheck
+				b.removeVHDFile(p)
 			}
 		}
 	} else {
-		os.Remove(expectedVHD) //nolint:errcheck
+		b.removeVHDFile(expectedVHD)
 	}
 
 	return nil
+}
+
+// removeVHDFile deletes a lease VHDX best-effort. The VM is already gone by the
+// time this runs, so a failure must not abort ReleaseLease (that would strand
+// the lease claim); instead surface it as a warning so an orphaned disk is
+// visible rather than silently leaked.
+func (b *backend) removeVHDFile(path string) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(b.rt.Stderr, "warning: failed to remove lease VHDX %s: %v\n", path, err)
+	}
 }
 
 func (b *backend) queryVM(ctx context.Context, name string) (hypervVM, error) {
