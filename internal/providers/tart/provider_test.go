@@ -453,13 +453,13 @@ func TestSpecAdvertisesDesktop(t *testing.T) {
 	}
 }
 
-func TestEnableScreenSharingProvisionsVNC(t *testing.T) {
+func TestEnableScreenSharingEnablesService(t *testing.T) {
 	runner := &recordingRunner{}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 
-	if err := b.enableScreenSharing(context.Background(), "crabbox-blue-1234", "admin", "s3cr3t-pw"); err != nil {
+	if err := b.enableScreenSharing(context.Background(), "crabbox-blue-1234"); err != nil {
 		t.Fatalf("enableScreenSharing: %v", err)
 	}
 
@@ -472,32 +472,15 @@ func TestEnableScreenSharingProvisionsVNC(t *testing.T) {
 	if script == "" {
 		t.Fatal("enableScreenSharing should issue a tart exec bash script")
 	}
-	for _, want := range []string{
-		"com.apple.screensharing",
-		"/var/db/crabbox/vnc.password",
-		"'s3cr3t-pw'", // configured password recorded for webvnc
-		"sudo ",
-	} {
-		if !strings.Contains(script, want) {
-			t.Errorf("screen-sharing script missing %q\nscript: %s", want, script)
+	if !strings.Contains(script, "com.apple.screensharing") {
+		t.Errorf("script should enable com.apple.screensharing\nscript: %s", script)
+	}
+	// No crabbox-managed VNC credential: nothing secret reaches the guest, and the
+	// account password is never reset (that breaks secure-token accounts).
+	for _, banned := range []string{"vnc.password", "dscl", "-passwd"} {
+		if strings.Contains(script, banned) {
+			t.Errorf("script should not reference %q\nscript: %s", banned, script)
 		}
-	}
-	if strings.Contains(script, "dscl") {
-		t.Error("must not reset the account password (breaks secure-token accounts)")
-	}
-}
-
-func TestEnableScreenSharingRejectsBadUser(t *testing.T) {
-	runner := &recordingRunner{}
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-
-	if err := b.enableScreenSharing(context.Background(), "crabbox-x", "$(whoami)", "pw"); err == nil {
-		t.Fatal("enableScreenSharing should reject an invalid POSIX user")
-	}
-	if len(runner.calls) != 0 {
-		t.Fatalf("no tart commands should run for an invalid user, got %d", len(runner.calls))
 	}
 }
 

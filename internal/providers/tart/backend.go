@@ -53,9 +53,6 @@ func applyDefaults(cfg *Config) {
 			cfg.Tart.User = "admin"
 		}
 	}
-	if cfg.Tart.Password == "" {
-		cfg.Tart.Password = "admin" // cirruslabs base-image default
-	}
 	if cfg.Tart.WorkRoot == "" {
 		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
 			cfg.Tart.WorkRoot = cfg.WorkRoot
@@ -151,7 +148,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		return LeaseTarget{}, err
 	}
 	if cfg.Desktop {
-		if err := b.enableScreenSharing(ctx, name, cfg.Tart.User, cfg.Tart.Password); err != nil {
+		if err := b.enableScreenSharing(ctx, name); err != nil {
 			if !req.Keep {
 				_ = b.stopVM(context.Background(), name)
 				_ = b.deleteVM(context.Background(), name)
@@ -538,24 +535,16 @@ func (b *backend) injectSSHKey(ctx context.Context, name string, user string, pu
 // lease user's account password set to match. This mirrors the macOS bootstrap
 // used by the cloud providers, run via `tart exec` (unprivileged, so each
 // privileged step uses sudo). Only invoked for --desktop leases.
-func (b *backend) enableScreenSharing(ctx context.Context, name, user, password string) error {
-	if !validPOSIXUser.MatchString(user) {
-		return exit(2, "tart.user %q is not a valid POSIX account name", user)
-	}
-	// webvnc authenticates to macOS Screen Sharing with the account (user +
-	// password), so record the account password where webvnc reads it and turn
-	// the service on. We deliberately do NOT reset the password: resetting a
-	// secure-token account (the cirruslabs default) requires the old password.
-	// tart exec forwards neither stdin nor env to the guest, so (as with the SSH
-	// key in injectSSHKey) the value is escaped into the argv script.
-	safePw := strings.ReplaceAll(password, `'`, `'\''`)
-	script := fmt.Sprintf(`set -eu
-sudo install -d -m 0755 /var/db/crabbox
-printf '%%s\n' '%s' | sudo tee /var/db/crabbox/vnc.password >/dev/null
-sudo chmod 0600 /var/db/crabbox/vnc.password
+// enableScreenSharing turns on the guest's built-in macOS Screen Sharing so a
+// --desktop lease exposes a native VNC server on 127.0.0.1:5900. Clients
+// authenticate with the guest account's own credentials over an SSH tunnel, so
+// crabbox provisions no VNC password and passes no secret through the guest
+// command line.
+func (b *backend) enableScreenSharing(ctx context.Context, name string) error {
+	script := `set -eu
 sudo launchctl enable system/com.apple.screensharing || true
 sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-sudo launchctl kickstart -k system/com.apple.screensharing || true`, safePw)
+sudo launchctl kickstart -k system/com.apple.screensharing || true`
 	result, err := b.tart(ctx, []string{"exec", name, "bash", "-c", script}, nil, b.rt.Stderr)
 	if err != nil {
 		return commandError("enable screen sharing", result, err)

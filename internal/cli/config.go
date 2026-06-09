@@ -549,7 +549,6 @@ type MultipassConfig struct {
 type TartConfig struct {
 	Image    string
 	User     string
-	Password string
 	WorkRoot string
 	CPUs     int
 	Memory   int
@@ -1735,7 +1734,6 @@ type fileMultipassConfig struct {
 type fileTartConfig struct {
 	Image    string `yaml:"image,omitempty"`
 	User     string `yaml:"user,omitempty"`
-	Password string `yaml:"password,omitempty"`
 	WorkRoot string `yaml:"workRoot,omitempty"`
 	CPUs     *int   `yaml:"cpus,omitempty"`
 	Memory   *int   `yaml:"memory,omitempty"`
@@ -2982,9 +2980,6 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.Tart.User != "" {
 			cfg.Tart.User = file.Tart.User
 		}
-		if file.Tart.Password != "" {
-			cfg.Tart.Password = file.Tart.Password
-		}
 		if file.Tart.WorkRoot != "" {
 			cfg.Tart.WorkRoot = file.Tart.WorkRoot
 		}
@@ -3780,7 +3775,6 @@ func applyEnv(cfg *Config) error {
 		cfg.tartImageExplicit = true
 	}
 	cfg.Tart.User = getenv("CRABBOX_TART_USER", cfg.Tart.User)
-	cfg.Tart.Password = getenv("CRABBOX_TART_PASSWORD", cfg.Tart.Password)
 	cfg.Tart.WorkRoot = getenv("CRABBOX_TART_WORK_ROOT", cfg.Tart.WorkRoot)
 	if v := os.Getenv("CRABBOX_TART_CPUS"); v != "" {
 		cfg.Tart.CPUs = getenvInt("CRABBOX_TART_CPUS", cfg.Tart.CPUs)

@@ -62,10 +62,14 @@ Lease with `--desktop` to get a visible macOS session:
 
 ```sh
 crabbox warmup --provider tart --desktop
-crabbox webvnc --id <lease-id>
+# tunnel the guest's VNC port and connect with a native VNC client:
+ssh -i <lease-key> -L 5900:127.0.0.1:5900 admin@<lease-ip>
+open vnc://127.0.0.1:5900    # macOS Screen Sharing, or any VNC client
 ```
 
-The VM still starts with `--no-graphics` (the local display is not needed); instead the provider enables the guest's native **Screen Sharing** service over SSH. During acquire it generates a 16-character password at `/var/db/crabbox/vnc.password`, sets the lease user's account password to match, and starts `com.apple.screensharing`. `crabbox webvnc` then tunnels VNC on `127.0.0.1:5900` over SSH and bridges it to the portal — the same managed-VNC path the other desktop-capable providers use.
+The VM still starts with `--no-graphics` (the local display is not needed); for `--desktop` leases the provider turns on the guest's built-in macOS **Screen Sharing** (`com.apple.screensharing`), exposing a native VNC server on `127.0.0.1:5900`. Authentication uses the guest account's own credentials, so crabbox provisions no separate VNC password.
+
+> The `crabbox webvnc` browser bridge is not yet wired for tart: its noVNC path expects a Linux guest (`websockify` + `/usr/share/novnc`). On macOS, connect with a native VNC client over the SSH tunnel as shown above. A macOS noVNC bridge is a possible follow-up.
 
 ## Not yet supported
 
