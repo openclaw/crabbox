@@ -441,7 +441,7 @@ func windowsSandboxConfigXML(cfg Config, run preparedRun) ([]byte, error) {
 
 type wsbConfiguration struct {
 	XMLName            xml.Name         `xml:"Configuration"`
-	VGPU               string           `xml:"VGpu,omitempty"`
+	VGPU               string           `xml:"vGPU,omitempty"`
 	Networking         string           `xml:"Networking,omitempty"`
 	MappedFolders      wsbMappedFolders `xml:"MappedFolders"`
 	LogonCommand       wsbLogonCommand  `xml:"LogonCommand"`

@@ -80,7 +80,7 @@ func TestWindowsSandboxConfigXML(t *testing.T) {
 	for _, want := range []string{
 		"<Configuration>",
 		"<Networking>Disable</Networking>",
-		"<VGpu>Disable</VGpu>",
+		"<vGPU>Disable</vGPU>",
 		"<ClipboardRedirection>Disable</ClipboardRedirection>",
 		"<MemoryInMB>4096</MemoryInMB>",
 		"<HostFolder>C:\\host\\workspace</HostFolder>",
