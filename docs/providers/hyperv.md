@@ -21,14 +21,31 @@ reject configuration on non-Windows hosts.
 
 - Windows 10 Pro/Enterprise/Education or Windows Server with Hyper-V enabled
 - PowerShell 5.1 or later (ships with Windows)
-- A pre-configured Windows VHDX template with:
-  - OpenSSH Server installed and running
-  - A known user account (default: `crabbox`) with a known password
+- A Windows VHDX template (Generation 2 / UEFI) with:
+  - A local administrator account whose password is known to Crabbox
+    (`--hyperv-user` / `CRABBOX_HYPERV_GUEST_PASSWORD`)
   - Network configured for DHCP on the Hyper-V virtual switch
+  - Guest internet access (or a Features-on-Demand source) so OpenSSH can be
+    installed on first use
 - The Hyper-V PowerShell module (included with the Hyper-V feature)
 
-ISO images are not supported. The VHDX template must be a fully installed
-Windows image with SSH ready to accept connections.
+OpenSSH does **not** need to be pre-installed: on first acquire the provider
+installs and starts the Windows OpenSSH server in the guest over PowerShell
+Direct, then injects the lease SSH key. If OpenSSH is already present the step
+is a no-op. ISO images are not supported — provide a fully installed VHDX.
+
+### Preparing a template
+
+The only thing a base Windows VHDX needs is a reachable administrator account.
+For example, from an elevated prompt inside the guest before capturing it:
+
+```powershell
+net user Administrator '<password>'   # or your admin account
+net user Administrator /active:yes
+```
+
+Then point `--hyperv-image` at the VHDX and set `--hyperv-user Administrator`
+and `CRABBOX_HYPERV_GUEST_PASSWORD=<password>`. The provider handles OpenSSH.
 
 ## Configuration
 
@@ -75,24 +92,28 @@ During `Acquire`, the provider:
 
 1. Copies the VHDX template to a per-lease path
 2. Creates and starts the VM
-3. Injects the per-lease SSH public key via PowerShell Direct
+3. Installs and starts the Windows OpenSSH server in the guest via PowerShell
+   Direct if it is not already present (`Add-WindowsCapability`, `Start-Service
+   sshd`, firewall rule)
+4. Injects the per-lease SSH public key via PowerShell Direct
    (`Invoke-Command -VMName`) using the configured guest password
-4. Waits for SSH readiness on the injected key
+5. Waits for SSH readiness on the injected key
 
-The SSH key injection retries up to 5 times with backoff to allow the guest OS
-to boot. If injection fails (wrong password, guest not ready), the provider
-falls back to whatever SSH configuration the VHDX template already has.
+Both the OpenSSH-install and key-injection steps authenticate over PowerShell
+Direct using the guest administrator password and retry up to 5 times with
+backoff to allow the guest OS to boot.
 
 Set `CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword` in config to
-match the password baked into your VHDX template. Default: `crabbox`.
+match the administrator password in your VHDX template. Default: `crabbox`.
 
 ## Lifecycle
 
 1. **Acquire**: Copies the VHDX template, creates a Generation 2 VM (`New-VM`),
-   configures CPU count (`Set-VM`), connects the network adapter to the
-   configured switch (`Connect-VMNetworkAdapter`), starts the VM (`Start-VM`),
-   injects the SSH key via PowerShell Direct, polls for an IP address via
-   `Get-VMNetworkAdapter`, then waits for SSH readiness.
+   configures CPU count and disables automatic checkpoints (`Set-VM`), connects
+   the network adapter to the configured switch (`Connect-VMNetworkAdapter`),
+   starts the VM (`Start-VM`), polls for an IP address via
+   `Get-VMNetworkAdapter`, installs OpenSSH in the guest if needed and injects
+   the SSH key via PowerShell Direct, then waits for SSH readiness.
 2. **Resolve**: Finds a running crabbox VM by lease ID, slug, or instance name.
    Queries live VM state and IP from Hyper-V.
 3. **List**: Lists all VMs with the `crabbox-` name prefix.
