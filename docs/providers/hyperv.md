@@ -56,7 +56,7 @@ and `CRABBOX_HYPERV_GUEST_PASSWORD=<password>`. The provider handles OpenSSH.
 | `--hyperv-image` | (none) | Path to a Windows VHDX template (required) |
 | `--hyperv-cpu` | `4` | Number of virtual CPUs |
 | `--hyperv-memory` | `8192` | Memory in MB |
-| `--hyperv-disk` | `50` | Disk size in GB |
+| `--hyperv-disk` | `50` | Reserved; leases inherit the template's virtual size (differencing disk) |
 | `--hyperv-switch` | `Default Switch` | Hyper-V virtual switch name |
 
 ### Config file
@@ -90,7 +90,8 @@ hyperv:
 
 During `Acquire`, the provider:
 
-1. Copies the VHDX template to a per-lease path
+1. Creates a per-lease **differencing disk** backed by the template (near-instant
+   and space-thin; the template stays read-only and shared — no multi-GB copy)
 2. Creates and starts the VM
 3. Installs and starts the Windows OpenSSH server in the guest via PowerShell
    Direct if it is not already present (`Add-WindowsCapability`, `Start-Service
@@ -108,7 +109,8 @@ match the administrator password in your VHDX template. Default: `crabbox`.
 
 ## Lifecycle
 
-1. **Acquire**: Copies the VHDX template, creates a Generation 2 VM (`New-VM`),
+1. **Acquire**: Creates a per-lease differencing disk over the template
+   (`New-VHD -Differencing -ParentPath`), creates a Generation 2 VM (`New-VM`),
    configures CPU count and disables automatic checkpoints (`Set-VM`), connects
    the network adapter to the configured switch (`Connect-VMNetworkAdapter`),
    starts the VM (`Start-VM`), polls for an IP address via

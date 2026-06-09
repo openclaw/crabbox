@@ -451,7 +451,7 @@ func TestServerFromInstanceNoIPWithoutClaim(t *testing.T) {
 	}
 }
 
-func TestCreateVMCopiesVHDXTemplate(t *testing.T) {
+func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
 		errors:    map[string]error{},
@@ -465,11 +465,12 @@ func TestCreateVMCopiesVHDXTemplate(t *testing.T) {
 		t.Fatalf("createVM: %v", err)
 	}
 
-	var foundCopy, foundNewVM, foundStart, foundInject bool
+	var foundDiff, foundNewVM, foundStart, foundInject bool
 	for _, call := range runner.calls {
 		script := call.Args[len(call.Args)-1]
-		if strings.Contains(script, "Copy-Item") && strings.Contains(script, "windows.vhdx") {
-			foundCopy = true
+		if strings.Contains(script, "New-VHD") && strings.Contains(script, "-Differencing") &&
+			strings.Contains(script, `-ParentPath 'C:\Images\windows.vhdx'`) {
+			foundDiff = true
 		}
 		if strings.Contains(script, "New-VM") && strings.Contains(script, "-VHDPath") && !strings.Contains(script, "-NewVHDPath") {
 			foundNewVM = true
@@ -481,8 +482,8 @@ func TestCreateVMCopiesVHDXTemplate(t *testing.T) {
 			foundInject = true
 		}
 	}
-	if !foundCopy {
-		t.Error("createVM did not copy the VHDX template")
+	if !foundDiff {
+		t.Error("createVM should back the lease with a differencing disk over the template")
 	}
 	if !foundNewVM {
 		t.Error("createVM did not use -VHDPath (existing VHD)")
@@ -495,7 +496,9 @@ func TestCreateVMCopiesVHDXTemplate(t *testing.T) {
 	}
 }
 
-func TestCreateVMOnlyGrowsVHDXTemplate(t *testing.T) {
+// Leases must not copy or resize the template: the differencing disk avoids the
+// multi-GB per-lease copy and inherits the template's virtual size.
+func TestCreateVMDoesNotCopyOrResizeTemplate(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
 		errors:    map[string]error{},
@@ -508,16 +511,14 @@ func TestCreateVMOnlyGrowsVHDXTemplate(t *testing.T) {
 	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", ""); err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
-
-	var foundGuardedResize bool
 	for _, call := range runner.calls {
 		script := call.Args[len(call.Args)-1]
-		if strings.Contains(script, "Get-VHD") && strings.Contains(script, "if ($vhd.Size -lt") && strings.Contains(script, "Resize-VHD") {
-			foundGuardedResize = true
+		if strings.Contains(script, "Copy-Item") {
+			t.Error("createVM should not copy the template (use a differencing disk)")
 		}
-	}
-	if !foundGuardedResize {
-		t.Fatal("createVM should guard Resize-VHD so templates are only grown, never shrunk")
+		if strings.Contains(script, "Resize-VHD") {
+			t.Error("createVM should not resize the lease disk (it inherits the template size)")
+		}
 	}
 }
 

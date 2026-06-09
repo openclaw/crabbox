@@ -396,22 +396,20 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 
 	memBytes := int64(cfg.HyperV.Memory) * 1024 * 1024
 
-	copyScript := fmt.Sprintf(`Copy-Item -LiteralPath '%s' -Destination '%s'`, escapePSString(cfg.HyperV.Image), escapePSString(vhdPath))
-	result, err = b.powershell(ctx, copyScript)
+	// Back each lease with a differencing disk over the template instead of
+	// copying the whole VHDX. Creating the child is near-instant and space-thin
+	// (the lease only stores its own writes); the template stays read-only and is
+	// shared across leases. The lease inherits the template's virtual size, so
+	// --hyperv-disk is not applied here -- size the template instead. On release
+	// only this child disk is deleted; the template is left untouched.
+	diffScript := fmt.Sprintf(
+		`New-VHD -Path '%s' -ParentPath '%s' -Differencing -ErrorAction Stop | Out-Null`,
+		escapePSString(vhdPath), escapePSString(cfg.HyperV.Image),
+	)
+	result, err = b.powershell(ctx, diffScript)
 	if err != nil {
-		return commandError("copy VHDX template", result, err)
-	}
-	if cfg.HyperV.Disk > 0 {
-		targetSizeBytes := int64(cfg.HyperV.Disk) * 1024 * 1024 * 1024
-		resizeScript := fmt.Sprintf(
-			`$vhd = Get-VHD -Path '%s' -ErrorAction Stop; if ($vhd.Size -lt %d) { Resize-VHD -Path '%s' -SizeBytes %d -ErrorAction Stop }`,
-			escapePSString(vhdPath), targetSizeBytes, escapePSString(vhdPath), targetSizeBytes,
-		)
-		result, err = b.powershell(ctx, resizeScript)
-		if err != nil {
-			os.Remove(vhdPath) //nolint:errcheck
-			return commandError("Resize-VHD", result, err)
-		}
+		os.Remove(vhdPath) //nolint:errcheck
+		return commandError("create differencing disk", result, err)
 	}
 	createScript := fmt.Sprintf(
 		`New-VM -Name '%s' -MemoryStartupBytes %d -Generation 2 -VHDPath '%s' -Path '%s'`,
