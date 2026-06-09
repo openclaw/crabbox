@@ -912,14 +912,15 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		return nil
 	}
 	if cfg.Provider == "incus" {
-		if cfg.Incus.User != "" {
+		base := baseConfig()
+		if cfg.Incus.User != "" && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser || cfg.Incus.User != base.Incus.User) {
 			cfg.SSHUser = cfg.Incus.User
 		}
-		if cfg.SSHPort == "" || cfg.SSHPort == baseConfig().SSHPort {
+		if cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort {
 			cfg.SSHPort = blank(cfg.Incus.ProxyListenPort, "22")
 		}
 		cfg.SSHFallbackPorts = nil
-		if cfg.Incus.WorkRoot != "" {
+		if cfg.Incus.WorkRoot != "" && (isDefaultWorkRoot(cfg.WorkRoot) || cfg.Incus.WorkRoot != base.Incus.WorkRoot) {
 			cfg.WorkRoot = cfg.Incus.WorkRoot
 		}
 		if cfg.TargetOS == "" {
@@ -1094,11 +1095,11 @@ func baseConfig() Config {
 			Workdir:     "/workspace/crabbox",
 			TimeoutSecs: 1800,
 		},
-		GCPZone:          "europe-west2-a",
-		GCPImage:         gcpImage,
-		GCPNetwork:       "default",
-		GCPTags:          []string{"crabbox-ssh"},
-		GCPRootGB:        400,
+		GCPZone:    "europe-west2-a",
+		GCPImage:   gcpImage,
+		GCPNetwork: "default",
+		GCPTags:    []string{"crabbox-ssh"},
+		GCPRootGB:  400,
 		Incus: IncusConfig{
 			Remote:            "local",
 			Project:           "default",

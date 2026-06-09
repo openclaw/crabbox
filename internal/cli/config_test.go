@@ -618,6 +618,79 @@ func TestIncusConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestLoadConfigIncusPreservesExplicitTopLevelSSHUserAndWorkRoot(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	body := "provider: incus\nssh:\n  user: alice\nworkRoot: /tmp/custom\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("SSHUser=%q want alice", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/tmp/custom" {
+		t.Fatalf("WorkRoot=%q want /tmp/custom", cfg.WorkRoot)
+	}
+}
+
+func TestLoadConfigIncusPreservesExplicitTopLevelSSHUserAndWorkRootFromEnv(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	t.Setenv("CRABBOX_SSH_USER", "alice")
+	t.Setenv("CRABBOX_WORK_ROOT", "/tmp/custom")
+	if err := os.WriteFile(cfgPath, []byte("provider: incus\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("SSHUser=%q want alice", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/tmp/custom" {
+		t.Fatalf("WorkRoot=%q want /tmp/custom", cfg.WorkRoot)
+	}
+}
+
+func TestLoadConfigIncusSpecificUserAndWorkRootOverrideTopLevel(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	body := "provider: incus\nssh:\n  user: alice\nworkRoot: /tmp/custom\nincus:\n  user: ubuntu\n  workRoot: /workspace/incus\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.SSHUser != "ubuntu" {
+		t.Fatalf("SSHUser=%q want ubuntu", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/workspace/incus" {
+		t.Fatalf("WorkRoot=%q want /workspace/incus", cfg.WorkRoot)
+	}
+}
+
 func TestTartConfigYAMLExplicitZeroPreserved(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

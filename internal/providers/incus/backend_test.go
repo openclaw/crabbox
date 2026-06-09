@@ -159,6 +159,21 @@ func (f *fakeClient) DeleteInstance(name string) error {
 	return nil
 }
 
+type stateCountingClient struct {
+	*fakeClient
+	getStateCalls int
+	afterGetState func(int)
+}
+
+func (c *stateCountingClient) GetInstanceState(name string) (*api.InstanceState, string, error) {
+	c.getStateCalls++
+	state, etag, err := c.fakeClient.GetInstanceState(name)
+	if c.afterGetState != nil {
+		c.afterGetState(c.getStateCalls)
+	}
+	return state, etag, err
+}
+
 func TestProviderSpecAndFlags(t *testing.T) {
 	p := Provider{}
 	if p.Name() != providerName {
@@ -207,6 +222,40 @@ func TestProviderSpecAndFlags(t *testing.T) {
 	}
 	if cfg.ServerType != "virtual-machine:images:ubuntu/24.04/cloud" {
 		t.Fatalf("serverType=%q", cfg.ServerType)
+	}
+}
+
+func TestApplyDefaultsPreservesExplicitSSHUserAndWorkRoot(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.SSHUser = "alice"
+	cfg.WorkRoot = "/tmp/custom"
+
+	applyDefaults(&cfg)
+
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("SSHUser=%q want alice", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/tmp/custom" {
+		t.Fatalf("WorkRoot=%q want /tmp/custom", cfg.WorkRoot)
+	}
+}
+
+func TestApplyDefaultsAllowsIncusSpecificUserAndWorkRootOverride(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.SSHUser = "alice"
+	cfg.WorkRoot = "/tmp/custom"
+	cfg.Incus.User = "ubuntu"
+	cfg.Incus.WorkRoot = "/workspace/incus"
+
+	applyDefaults(&cfg)
+
+	if cfg.SSHUser != "ubuntu" {
+		t.Fatalf("SSHUser=%q want ubuntu", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/workspace/incus" {
+		t.Fatalf("WorkRoot=%q want /workspace/incus", cfg.WorkRoot)
 	}
 }
 
@@ -522,6 +571,70 @@ func TestAcquireCleansUpPartialInstanceEvenWhenDeleteOnReleaseFalse(t *testing.T
 	}
 }
 
+func TestAcquireKeepFailurePreservesStoredKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	oldWait := waitForSSHReady
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{},
+		states:    map[string]*api.InstanceState{},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+		_ = ctx
+		_ = target
+		_ = stderr
+		_ = phase
+		_ = timeout
+		return core.Exit(5, "simulated ssh failure")
+	}
+	t.Cleanup(func() {
+		newClient = oldNewClient
+		waitForSSHReady = oldWait
+	})
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.DeleteOnRelease = false
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "keep-on-fail", Keep: true})
+	if err == nil {
+		t.Fatal("Acquire unexpectedly succeeded")
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted=%v want retained instance on Keep=true failure", fake.deleted)
+	}
+	if len(fake.created) != 1 {
+		t.Fatalf("created=%d want 1", len(fake.created))
+	}
+
+	var leaseID string
+	for _, inst := range fake.instances {
+		leaseID = inst.Config[labelKey("lease")]
+		if leaseID != "" {
+			break
+		}
+	}
+	if leaseID == "" {
+		t.Fatal("expected created instance to include a lease label")
+	}
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatalf("TestboxKeyPath: %v", err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("expected retained acquire failure to preserve key %q: %v", keyPath, err)
+	}
+}
+
 func TestAcquireUsesProxyHostWhenGuestAddressUnavailable(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -640,6 +753,85 @@ func TestResolveStartsStoppedInstanceAndPersistsReadyLabels(t *testing.T) {
 	}
 	if got := fake.instances["crabbox-retained"].Config[labelKey("state")]; got != "ready" {
 		t.Fatalf("stored state=%q want ready", got)
+	}
+}
+
+func TestResolveIgnoresStaleHostLabelWhileWaitingForLiveAddress(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	oldWait := waitForSSHReady
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-stale-host": {
+				Name:       "crabbox-stale-host",
+				Status:     "Stopped",
+				StatusCode: api.Stopped,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_deadbeefcafe",
+					labelKey("slug"):    "stale-slug",
+					labelKey("state"):   "stopped",
+					labelKey("host"):    "192.0.2.10",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-stale-host": {Status: "Stopped", StatusCode: api.Stopped},
+		},
+		preserveEmptyNetwork: true,
+	}
+	counting := &stateCountingClient{fakeClient: fake}
+	counting.afterGetState = func(calls int) {
+		if calls == 1 {
+			fake.states["crabbox-stale-host"] = &api.InstanceState{
+				Status:     "Running",
+				StatusCode: api.Running,
+				Network: map[string]api.InstanceStateNetwork{
+					"eth0": {Addresses: []api.InstanceStateNetworkAddress{{Family: "inet", Scope: "global", Address: "198.51.100.24"}}},
+				},
+			}
+		}
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return counting, nil
+	}
+	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+		_ = ctx
+		_ = stderr
+		_ = phase
+		_ = timeout
+		if target.Host != "198.51.100.24" {
+			t.Fatalf("target.Host=%q want live address", target.Host)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		newClient = oldNewClient
+		waitForSSHReady = oldWait
+	})
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.StartTimeout = 5 * time.Second
+	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, "cbx_deadbeefcafe"); err != nil {
+		t.Fatalf("EnsureTestboxKeyForConfig: %v", err)
+	}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_deadbeefcafe"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if counting.getStateCalls < 2 {
+		t.Fatalf("Resolve should keep polling for a live address, got %d GetInstanceState calls", counting.getStateCalls)
+	}
+	if lease.SSH.Host != "198.51.100.24" {
+		t.Fatalf("lease.SSH.Host=%q want live address", lease.SSH.Host)
 	}
 }
 

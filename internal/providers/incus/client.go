@@ -1,6 +1,7 @@
 package incus
 
 import (
+	"encoding/json"
 	"net/url"
 	"os"
 	"runtime"
@@ -9,6 +10,7 @@ import (
 	incusclient "github.com/lxc/incus/v7/client"
 	"github.com/lxc/incus/v7/shared/api"
 	"github.com/lxc/incus/v7/shared/cliconfig"
+	"github.com/zitadel/oidc/v3/pkg/oidc"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -187,16 +189,34 @@ func connectionArgsForAddress(cfg Config) (*incusclient.ConnectionArgs, error) {
 	if err != nil {
 		return nil, core.Exit(2, "load incus client config for TLS credentials: %v", err)
 	}
-	remote := configuredRemoteName(cfg, clientConfig)
-	if remote != "" {
-		cert, key, ca, certErr := clientConfig.GetClientCertificate(remote)
-		if certErr == nil {
-			args.TLSClientCert = cert
-			args.TLSClientKey = key
-			args.TLSCA = ca
+	remoteName := configuredRemoteName(cfg, clientConfig)
+	if remoteName != "" {
+		if remoteConfig, ok := clientConfig.Remotes[remoteName]; ok && addressMatchesRemote(strings.TrimSpace(cfg.Incus.Address), remoteConfig) {
+			if args.TLSServerCert == "" {
+				serverCert, certErr := loadRemoteServerCert(clientConfig, remoteName)
+				if certErr != nil {
+					return nil, core.Exit(2, "read incus server cert for remote %q: %v", remoteName, certErr)
+				}
+				args.TLSServerCert = serverCert
+			}
+			if remoteConfig.AuthType == api.AuthenticationMethodOIDC {
+				args.AuthType = api.AuthenticationMethodOIDC
+				tokens, tokenErr := loadRemoteOIDCTokens(clientConfig, remoteName)
+				if tokenErr != nil {
+					return nil, core.Exit(2, "read incus OIDC tokens for remote %q: %v", remoteName, tokenErr)
+				}
+				args.OIDCTokens = tokens
+			} else {
+				cert, key, ca, certErr := clientConfig.GetClientCertificate(remoteName)
+				if certErr == nil {
+					args.TLSClientCert = cert
+					args.TLSClientKey = key
+					args.TLSCA = ca
+				}
+			}
 		}
 	}
-	if args.TLSServerCert == "" && args.TLSClientCert == "" && !args.InsecureSkipVerify {
+	if args.TLSServerCert == "" && args.TLSClientCert == "" && args.AuthType != api.AuthenticationMethodOIDC && !args.InsecureSkipVerify {
 		return nil, core.Exit(2, "provider=%s address mode requires Incus TLS trust material or --incus-insecure-tls", providerName)
 	}
 	return args, nil
@@ -208,6 +228,8 @@ func doctorAddressAuth(cfg Config) (string, error) {
 		return "", err
 	}
 	switch {
+	case args.AuthType == api.AuthenticationMethodOIDC:
+		return "oidc", nil
 	case args.InsecureSkipVerify:
 		return "insecure_tls", nil
 	case strings.TrimSpace(args.TLSClientCert) != "":
@@ -217,6 +239,72 @@ func doctorAddressAuth(cfg Config) (string, error) {
 	default:
 		return "configured", nil
 	}
+}
+
+func addressMatchesRemote(address string, remote cliconfig.Remote) bool {
+	target, ok := normalizeIncusAddress(address)
+	if !ok {
+		return false
+	}
+	candidates := []string{configuredRemoteAddr(remote)}
+	candidates = append(candidates, remote.Addrs...)
+	for _, candidate := range candidates {
+		normalized, ok := normalizeIncusAddress(candidate)
+		if ok && normalized == target {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeIncusAddress(value string) (string, bool) {
+	candidate := strings.TrimSpace(value)
+	if candidate == "" {
+		return "", false
+	}
+	parsed, err := url.Parse(candidate)
+	if err != nil || parsed.Host == "" {
+		parsed, err = url.Parse("https://" + candidate)
+		if err != nil || parsed.Host == "" {
+			return "", false
+		}
+	}
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if scheme == "" {
+		scheme = "https"
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Host))
+	path := strings.TrimRight(parsed.EscapedPath(), "/")
+	if path == "" {
+		return scheme + "://" + host, true
+	}
+	return scheme + "://" + host + path, true
+}
+
+func loadRemoteServerCert(clientConfig *cliconfig.Config, remoteName string) (string, error) {
+	content, err := os.ReadFile(clientConfig.ServerCertPath(remoteName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(content)), nil
+}
+
+func loadRemoteOIDCTokens(clientConfig *cliconfig.Config, remoteName string) (*oidc.Tokens[*oidc.IDTokenClaims], error) {
+	content, err := os.ReadFile(clientConfig.OIDCTokenPath(remoteName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &oidc.Tokens[*oidc.IDTokenClaims]{}, nil
+		}
+		return nil, err
+	}
+	tokens := oidc.Tokens[*oidc.IDTokenClaims]{}
+	if err := json.Unmarshal(content, &tokens); err != nil {
+		return nil, err
+	}
+	return &tokens, nil
 }
 
 func configuredRemoteName(cfg Config, clientConfig *cliconfig.Config) string {

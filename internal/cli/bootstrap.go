@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -32,6 +33,10 @@ func cloudInit(cfg Config, publicKey string) string {
 	readyChecks := cloudInitOptionalReadyChecks(cfg)
 	writeFiles := cloudInitOptionalWriteFiles(cfg)
 	bootstrap := cloudInitOptionalBootstrap(cfg)
+	yamlSSHUser := yamlInlineString(cfg.SSHUser)
+	yamlPublicKey := yamlInlineString(publicKey)
+	shellSSHUser := shellQuote(cfg.SSHUser)
+	shellWorkRoot := shellQuote(cfg.WorkRoot)
 	return fmt.Sprintf(`#cloud-config
 package_update: false
 package_upgrade: false
@@ -83,19 +88,23 @@ runcmd:
     retry apt-get update
     retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq
     mkdir -p %[3]s /var/cache/crabbox/pnpm /var/cache/crabbox/npm
-    chown -R %[1]s:%[1]s %[3]s /var/cache/crabbox
+    chown -R %[7]s:%[7]s %[3]s /var/cache/crabbox
     install -d /var/lib/crabbox
     systemctl enable ssh || true
     timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true
-%[7]s
+%[8]s
     touch /var/lib/crabbox/bootstrapped
     crabbox-ready
     BOOT
-`, cfg.SSHUser, publicKey, cfg.WorkRoot, portLines, readyChecks, writeFiles, bootstrap)
+`, yamlSSHUser, yamlPublicKey, shellWorkRoot, portLines, readyChecks, writeFiles, shellSSHUser, bootstrap)
 }
 
 func CloudInitUserData(cfg Config, publicKey string) string {
 	return cloudInit(cfg, publicKey)
+}
+
+func yamlInlineString(value string) string {
+	return strconv.Quote(value)
 }
 
 func windowsUserData(cfg Config, publicKey string) string {

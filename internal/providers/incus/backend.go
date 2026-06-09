@@ -39,16 +39,17 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 
 func applyDefaults(cfg *Config) {
 	cfg.Provider = providerName
+	base := core.BaseConfig()
 	if cfg.TargetOS == "" {
 		cfg.TargetOS = core.TargetLinux
 	}
 	if cfg.TargetOS == core.TargetLinux {
 		cfg.WindowsMode = ""
 	}
-	if cfg.Incus.User != "" {
+	if cfg.Incus.User != "" && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser || cfg.Incus.User != base.Incus.User) {
 		cfg.SSHUser = cfg.Incus.User
 	}
-	if cfg.Incus.WorkRoot != "" {
+	if cfg.Incus.WorkRoot != "" && (core.IsDefaultWorkRoot(cfg.WorkRoot) || cfg.Incus.WorkRoot != base.Incus.WorkRoot) {
 		cfg.WorkRoot = cfg.Incus.WorkRoot
 	}
 	cfg.SSHPort = core.Blank(strings.TrimSpace(cfg.Incus.ProxyListenPort), core.Blank(strings.TrimSpace(cfg.Incus.LaunchPort), "22"))
@@ -123,6 +124,9 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s type=%s image=%s keep=%v\n", providerName, leaseID, slug, cfg.Incus.InstanceType, cfg.Incus.Image, req.Keep)
 	if err := client.CreateInstance(createReq); err != nil {
 		return LeaseTarget{}, err
+	}
+	if req.Keep {
+		cleanupKey = false
 	}
 	cleanupInstance := func() {
 		_ = client.DeleteInstance(name)
@@ -417,10 +421,11 @@ func (b *backend) waitForAddress(ctx context.Context, client instanceClient, nam
 		if stateErr != nil {
 			return nil, "", stateErr
 		}
+		if inst.Config == nil {
+			inst.Config = map[string]string{}
+		}
+		delete(inst.Config, labelKey("host"))
 		if host := instanceHost(*inst, state, cfg); host != "" {
-			if inst.Config == nil {
-				inst.Config = map[string]string{}
-			}
 			inst.Config[labelKey("host")] = host
 			return inst, etag, nil
 		}
