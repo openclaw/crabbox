@@ -42,8 +42,15 @@ tart:
 ```
 
 Environment variables: `CRABBOX_TART_IMAGE`, `CRABBOX_TART_USER`,
-`CRABBOX_TART_WORK_ROOT`, `CRABBOX_TART_CPUS`, `CRABBOX_TART_MEMORY`,
-`CRABBOX_TART_DISK`.
+`CRABBOX_TART_PASSWORD`, `CRABBOX_TART_WORK_ROOT`, `CRABBOX_TART_CPUS`,
+`CRABBOX_TART_MEMORY`, `CRABBOX_TART_DISK`.
+
+`CRABBOX_TART_PASSWORD` (or `tart.password` in config) is the guest account
+password the local WebVNC viewer uses for macOS Apple/ARD authentication. It
+defaults to `admin` (the cirruslabs base-image account) and is **only** handed to
+the local browser viewer over a token-gated localhost endpoint — never written to
+the guest. There is intentionally no CLI flag for it (keeps the password out of
+shell history / process metadata); set it via env or config for custom images.
 
 ## How it works
 

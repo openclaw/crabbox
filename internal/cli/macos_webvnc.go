@@ -149,8 +149,9 @@ func randomToken() (string, error) {
 
 // vncViewerPassword returns the account password the local noVNC viewer uses for
 // macOS Apple (ARD) authentication. It defaults to the cirruslabs base-image
-// account password; override with --tart-password / CRABBOX_TART_PASSWORD. This
-// value is only handed to the local browser viewer.
+// account password; override with CRABBOX_TART_PASSWORD or tart.password in
+// config (there is no CLI flag, to keep it out of shell history). This value is
+// only handed to the local browser viewer over the token-gated endpoint.
 func vncViewerPassword(cfg Config) string {
 	if p := strings.TrimSpace(cfg.Tart.Password); p != "" {
 		return p
