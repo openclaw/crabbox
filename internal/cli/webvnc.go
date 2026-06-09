@@ -90,8 +90,11 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		return err
 	}
 	if supportsDirectSSHWebVNC(cfg.Provider) {
-		if err := guardMacOSDirectWebVNC(cfg); err != nil {
-			return err
+		// macOS leases (e.g. tart) have no guest-side noVNC/websockify; serve the
+		// browser viewer from a host-side bridge over the guest's native Screen
+		// Sharing instead of the Linux directSSHWebVNC path.
+		if isMacOSDesktopProvider(cfg) {
+			return a.macOSWebVNCBridge(ctx, cfg, *id, *localPort, *openPortal, *reclaim)
 		}
 		return a.directSSHWebVNC(ctx, cfg, *id, *localPort, *openPortal, *takeControl, *reclaim)
 	}
@@ -1237,7 +1240,7 @@ func guardMacOSDirectWebVNC(cfg Config) error {
 	if !isMacOSDesktopProvider(cfg) {
 		return nil
 	}
-	return exit(2, "webvnc's browser bridge requires Linux noVNC tooling and is not available for macOS leases; connect a native VNC client over an SSH tunnel instead:\n  ssh -L 5900:127.0.0.1:5900 %s@<lease-ip>\n  open vnc://127.0.0.1:5900", blank(cfg.SSHUser, "<user>"))
+	return exit(2, "this webvnc subcommand is not available for macOS leases; run `crabbox webvnc --id <id>` for the host-side browser viewer, or use a native VNC client over an SSH tunnel:\n  ssh -L 5900:127.0.0.1:5900 %s@<lease-ip>\n  open vnc://127.0.0.1:5900", blank(cfg.SSHUser, "<user>"))
 }
 
 // isMacOSDesktopProvider reports whether the lease is macOS-targeted, keyed off

@@ -62,7 +62,12 @@ Lease with `--desktop` to get a visible macOS session:
 
 ```sh
 crabbox warmup --provider tart --desktop
-# tunnel the guest's VNC port and connect with a native VNC client:
+crabbox webvnc --provider tart --id <lease-id>   # browser viewer (host-side bridge)
+```
+
+`crabbox webvnc` runs a host-side bridge: it SSH-tunnels to the guest's Screen Sharing port, serves the embedded noVNC viewer locally, and opens the browser — no noVNC/`websockify` tooling on the guest. noVNC authenticates via macOS Apple (ARD) auth with the lease account credentials (handed to the local viewer only). Prefer a native VNC client instead? Tunnel and connect directly:
+
+```sh
 ssh -i <lease-key> -L 5900:127.0.0.1:5900 admin@<lease-ip>
 open vnc://127.0.0.1:5900    # macOS Screen Sharing, or any VNC client
 ```
@@ -79,7 +84,7 @@ open vnc://127.0.0.1:5900    # native VNC client on the controller
 
 **Exposure boundary:** macOS Screen Sharing binds all guest interfaces, so the VNC server is reachable at the guest's address on the tart host network (not localhost-only), gated by account authentication. tart's network is host-local (only the Mac can reach the guest), so the effective boundary is "account-authenticated VNC, reachable from the tart host." The SSH tunnels above keep the viewer side on `127.0.0.1`.
 
-> **`crabbox webvnc` is not supported for tart** and refuses with native-client guidance: its browser bridge shells noVNC/`websockify` on the guest, which is Linux-only. Connect with a native VNC client over the SSH tunnel as shown above. A macOS noVNC bridge is a possible follow-up.
+> The browser viewer is a **host-side** bridge (the guest needs no noVNC/`websockify`). For the remote control-plane case, run `crabbox webvnc` on the Mac and tunnel the printed web port to your machine: `ssh -L <port>:127.0.0.1:<port> <user>@<mac>`, then open the URL locally. The `webvnc status`/`reset`/`daemon` subcommands (the Linux noVNC-daemon model) remain unsupported for macOS and point you to `crabbox webvnc`.
 
 ## Not yet supported
 

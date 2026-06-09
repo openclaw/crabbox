@@ -53,6 +53,9 @@ func applyDefaults(cfg *Config) {
 			cfg.Tart.User = "admin"
 		}
 	}
+	if cfg.Tart.Password == "" {
+		cfg.Tart.Password = "admin" // cirruslabs base-image default; WebVNC viewer credential only
+	}
 	if cfg.Tart.WorkRoot == "" {
 		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
 			cfg.Tart.WorkRoot = cfg.WorkRoot

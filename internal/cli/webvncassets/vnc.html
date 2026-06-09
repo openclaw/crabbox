@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>crabbox WebVNC</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #111; overflow: hidden; }
+      #screen { width: 100%; height: 100%; }
+      #status {
+        position: fixed; top: 0; left: 0; right: 0; color: #ddd;
+        font: 12px/1.6 ui-monospace, monospace; padding: 4px 8px;
+        background: rgba(0,0,0,0.7); z-index: 10;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status">connecting…</div>
+    <div id="screen"></div>
+    <script type="module">
+      import RFB from "./rfb.js";
+      const params = new URLSearchParams(location.search);
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const url = proto + "://" + location.host + "/websockify";
+      const status = document.getElementById("status");
+      const creds = {};
+      if (params.get("username")) creds.username = params.get("username");
+      if (params.get("password")) creds.password = params.get("password");
+      const rfb = new RFB(
+        document.getElementById("screen"),
+        url,
+        Object.keys(creds).length ? { credentials: creds } : {}
+      );
+      rfb.scaleViewport = true;
+      rfb.focusOnClick = true;
+      rfb.addEventListener("connect", () => {
+        status.textContent = "connected";
+        setTimeout(() => { status.style.display = "none"; }, 1500);
+      });
+      rfb.addEventListener("disconnect", (e) => {
+        status.style.display = "block";
+        status.textContent = "disconnected" + (e.detail && e.detail.clean ? "" : " (connection error)");
+      });
+      rfb.addEventListener("credentialsrequired", () => {
+        status.style.display = "block";
+        status.textContent = "VNC credentials required";
+      });
+    </script>
+  </body>
+</html>

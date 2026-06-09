@@ -1,0 +1,49 @@
+package cli
+
+import (
+	"io/fs"
+	"strings"
+	"testing"
+)
+
+func TestMacOSWebVNCViewerURL(t *testing.T) {
+	got := macOSWebVNCViewerURL("6080", "admin", "s3cret")
+	for _, want := range []string{"http://127.0.0.1:6080/vnc.html?", "username=admin", "password=s3cret"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("viewer URL missing %q: %s", want, got)
+		}
+	}
+	// No credentials -> no query string.
+	if u := macOSWebVNCViewerURL("6080", "", ""); u != "http://127.0.0.1:6080/vnc.html" {
+		t.Errorf("expected bare viewer URL, got %s", u)
+	}
+}
+
+func TestVNCViewerPasswordDefaultsToAdmin(t *testing.T) {
+	if p := vncViewerPassword(Config{}); p != "admin" {
+		t.Errorf("default viewer password = %q, want admin (cirruslabs default)", p)
+	}
+	cfg := Config{}
+	cfg.Tart.Password = "custom"
+	if p := vncViewerPassword(cfg); p != "custom" {
+		t.Errorf("override viewer password = %q, want custom", p)
+	}
+}
+
+func TestWebVNCAssetsEmbedded(t *testing.T) {
+	assets := webVNCAssets()
+	for _, name := range []string{"vnc.html", "rfb.js"} {
+		b, err := fs.ReadFile(assets, name)
+		if err != nil {
+			t.Fatalf("embedded asset %s missing: %v", name, err)
+		}
+		if len(b) == 0 {
+			t.Fatalf("embedded asset %s is empty", name)
+		}
+	}
+	// The viewer must import the vendored RFB module.
+	html, _ := fs.ReadFile(assets, "vnc.html")
+	if !strings.Contains(string(html), "rfb.js") || !strings.Contains(string(html), "/websockify") {
+		t.Error("vnc.html should import rfb.js and connect to /websockify")
+	}
+}
