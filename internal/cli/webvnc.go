@@ -1243,21 +1243,28 @@ func guardMacOSDirectWebVNC(cfg Config) error {
 	return exit(2, "this webvnc subcommand is not available for macOS leases; run `crabbox webvnc --id <id>` for the host-side browser viewer, or use a native VNC client over an SSH tunnel:\n  ssh -L 5900:127.0.0.1:5900 %s@<lease-ip>\n  open vnc://127.0.0.1:5900", blank(cfg.SSHUser, "<user>"))
 }
 
-// isMacOSDesktopProvider reports whether the lease is macOS-targeted, keyed off
-// the provider's spec (not just the resolved cfg.TargetOS, which the webvnc
-// subcommands don't always populate) so every entrypoint is guarded uniformly.
+// isMacOSDesktopProvider reports whether the lease belongs to a provider whose
+// ONLY target is macOS (e.g. tart) — those use the host-side Screen Sharing
+// bridge. It is keyed off the provider spec (not the resolved cfg.TargetOS,
+// which the webvnc subcommands don't always populate) so every entrypoint
+// classifies uniformly. Multi-target providers (e.g. parallels, which also
+// serves Linux/Windows) keep the existing WebVNC path even for their macOS
+// leases, so a single macOS target must not divert them into the tart bridge.
 func isMacOSDesktopProvider(cfg Config) bool {
-	if cfg.TargetOS == targetMacOS {
-		return true
+	p, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return false
 	}
-	if p, err := ProviderFor(cfg.Provider); err == nil {
-		for _, t := range p.Spec().Targets {
-			if t.OS == targetMacOS {
-				return true
-			}
+	targets := p.Spec().Targets
+	if len(targets) == 0 {
+		return false
+	}
+	for _, t := range targets {
+		if t.OS != targetMacOS {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func supportsDirectSSHWebVNC(provider string) bool {

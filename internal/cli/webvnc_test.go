@@ -107,6 +107,21 @@ func TestGuardMacOSDirectWebVNC(t *testing.T) {
 	}
 }
 
+func TestIsMacOSDesktopProviderOnlyDedicatedMacOS(t *testing.T) {
+	// tart's only target is macOS -> uses the host-side Screen Sharing bridge.
+	if !isMacOSDesktopProvider(Config{Provider: "tart"}) {
+		t.Error("tart (dedicated macOS provider) should route to the macOS bridge")
+	}
+	// parallels is multi-target (macOS + Linux + Windows); it must NOT be diverted
+	// into the tart bridge, even for a macOS lease — regression guard.
+	if isMacOSDesktopProvider(Config{Provider: "parallels"}) {
+		t.Error("parallels (multi-target) must not route to the macOS bridge")
+	}
+	if isMacOSDesktopProvider(Config{Provider: "parallels", TargetOS: targetMacOS}) {
+		t.Error("a macOS parallels lease must still use the existing WebVNC path")
+	}
+}
+
 func TestWebVNCBridgeArgsPreserveProviderRouting(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	args := webVNCBridgeArgs(
