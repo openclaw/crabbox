@@ -449,6 +449,8 @@ placeholders, applies it with `kubectl`, and starts it with `virtctl`.
 
 ### External provider
 
+Protocol adapter:
+
 ```yaml
 provider: external
 external:
@@ -467,6 +469,35 @@ operation and returns one JSON response on stdout. This keeps internal control
 plane logic outside Crabbox while preserving normal SSH sync, rsync, WebVNC,
 and command execution. Crabbox writes private per-lease routing state for
 generated stop commands; `routingFile` is normally set only by those commands.
+
+Declarative CLI:
+
+```yaml
+provider: external
+external:
+  lifecycle:
+    acquire:
+      argv: [devboxctl, new, "{{name}}", --size, "{{config.size}}"]
+    list:
+      argv: [devboxctl, list, --format, json]
+      output: json-name-array
+    release:
+      argv: [devboxctl, rm, --yes, "{{name}}"]
+  connection:
+    cloudId: devboxes/{{name}}
+    serverType: "{{config.size}}"
+    ssh:
+      user: "{{env.DEVBOX_USER}}"
+      host: "{{name}}"
+      sshConfigProxy: true
+  config:
+    size: cpu16
+  workRoot: /home/developer/crabbox
+```
+
+Declarative lifecycle entries are argv arrays, not shell commands. See
+[External Provider](../providers/external.md) for placeholders, inventory
+formats, routing behavior, and security guidance.
 
 ### Daytona
 

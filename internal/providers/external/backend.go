@@ -256,6 +256,13 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 }
 
 func (b *leaseBackend) invoke(ctx context.Context, request protocolRequest) (protocolResponse, error) {
+	if lifecycleConfigured(b.cfg.External) {
+		return b.invokeLifecycle(ctx, request)
+	}
+	return b.invokeProtocol(ctx, request)
+}
+
+func (b *leaseBackend) invokeProtocol(ctx context.Context, request protocolRequest) (protocolResponse, error) {
 	request.ProtocolVersion = protocolVersion
 	request.Config = b.cfg.External.Config
 	var stdin bytes.Buffer
@@ -293,22 +300,33 @@ func (b *leaseBackend) claimScope() string {
 }
 
 type externalClaimScopeData struct {
-	Command string         `json:"command"`
-	Args    []string       `json:"args,omitempty"`
-	Config  map[string]any `json:"config,omitempty"`
+	Command    string                         `json:"command,omitempty"`
+	Args       []string                       `json:"args,omitempty"`
+	Config     map[string]any                 `json:"config,omitempty"`
+	Lifecycle  *core.ExternalLifecycleConfig  `json:"lifecycle,omitempty"`
+	Connection *core.ExternalConnectionConfig `json:"connection,omitempty"`
 }
 
 func externalClaimScope(cfg core.Config) string {
-	data, err := json.Marshal(externalClaimScopeData{
+	scope := externalClaimScopeData{
 		Command: strings.TrimSpace(cfg.External.Command),
 		Args:    append([]string(nil), cfg.External.Args...),
 		Config:  cfg.External.Config,
-	})
+	}
+	if lifecycleConfigured(cfg.External) {
+		scope.Lifecycle = &cfg.External.Lifecycle
+		scope.Connection = &cfg.External.Connection
+	}
+	data, err := json.Marshal(scope)
 	if err != nil {
 		data = []byte(strings.TrimSpace(cfg.External.Command) + "\x00" + strings.Join(cfg.External.Args, "\x00"))
 	}
 	sum := sha256.Sum256(data)
 	return "sha256:" + fmt.Sprintf("%x", sum[:12])
+}
+
+func lifecycleConfigured(cfg core.ExternalConfig) bool {
+	return len(cfg.Lifecycle.Acquire.Argv) > 0
 }
 
 func (b *leaseBackend) claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) error {

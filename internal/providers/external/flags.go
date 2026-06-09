@@ -86,15 +86,44 @@ func (f *stringListFlag) Set(value string) error {
 }
 
 func validateConfig(cfg core.Config) error {
-	if strings.TrimSpace(cfg.External.Command) == "" {
-		return core.Exit(2, "external.command is required")
+	hasCommand := strings.TrimSpace(cfg.External.Command) != ""
+	hasLifecycle := lifecycleConfigured(cfg.External)
+	if hasCommand == hasLifecycle {
+		return core.Exit(2, "configure exactly one of external.command or external.lifecycle.acquire")
 	}
-	if strings.ContainsRune(cfg.External.Command, '\x00') {
+	if hasCommand && strings.ContainsRune(cfg.External.Command, '\x00') {
 		return core.Exit(2, "external.command contains a NUL byte")
 	}
 	for _, arg := range cfg.External.Args {
 		if strings.ContainsRune(arg, '\x00') {
 			return core.Exit(2, "external.args contains a NUL byte")
+		}
+	}
+	if hasLifecycle {
+		if len(cfg.External.Lifecycle.Release.Argv) == 0 {
+			return core.Exit(2, "external.lifecycle.release.argv is required")
+		}
+		if len(cfg.External.Lifecycle.List.Argv) == 0 {
+			return core.Exit(2, "external.lifecycle.list.argv is required")
+		}
+		for name, operation := range map[string]core.ExternalLifecycleOperation{
+			"doctor":  cfg.External.Lifecycle.Doctor,
+			"acquire": cfg.External.Lifecycle.Acquire,
+			"resolve": cfg.External.Lifecycle.Resolve,
+			"list":    cfg.External.Lifecycle.List,
+			"release": cfg.External.Lifecycle.Release,
+			"touch":   cfg.External.Lifecycle.Touch,
+			"cleanup": cfg.External.Lifecycle.Cleanup,
+		} {
+			if err := validateLifecycleOperation(name, operation); err != nil {
+				return err
+			}
+		}
+		if strings.TrimSpace(cfg.External.Connection.SSH.User) == "" {
+			return core.Exit(2, "external.connection.ssh.user is required")
+		}
+		if cfg.External.Lifecycle.List.Output != lifecycleOutputJSONNameArray && cfg.External.Lifecycle.List.Output != lifecycleOutputJSONLeaseArray {
+			return core.Exit(2, "external.lifecycle.list.output must be %q or %q", lifecycleOutputJSONNameArray, lifecycleOutputJSONLeaseArray)
 		}
 	}
 	clean := path.Clean(externalWorkRoot(cfg))
@@ -104,6 +133,26 @@ func validateConfig(cfg core.Config) error {
 	switch clean {
 	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var":
 		return core.Exit(2, "external.workRoot %q is too broad; choose a dedicated subdirectory", clean)
+	}
+	return nil
+}
+
+func validateLifecycleOperation(name string, operation core.ExternalLifecycleOperation) error {
+	if name != "list" && operation.Output != lifecycleOutputNone {
+		return core.Exit(2, "external.lifecycle.%s.output is only supported for list", name)
+	}
+	switch operation.Output {
+	case lifecycleOutputNone, lifecycleOutputJSONNameArray, lifecycleOutputJSONLeaseArray:
+	default:
+		return core.Exit(2, "external.lifecycle.%s.output %q is unsupported", name, operation.Output)
+	}
+	for index, arg := range operation.Argv {
+		if strings.ContainsRune(arg, '\x00') {
+			return core.Exit(2, "external.lifecycle.%s.argv[%d] contains a NUL byte", name, index)
+		}
+	}
+	if len(operation.Argv) > 0 && strings.TrimSpace(operation.Argv[0]) == "" {
+		return core.Exit(2, "external.lifecycle.%s.argv executable is empty", name)
 	}
 	return nil
 }

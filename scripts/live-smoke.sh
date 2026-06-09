@@ -83,11 +83,11 @@ has_provider() {
 }
 
 extract_lease() {
-  rg -o '(cbx_[a-f0-9]{12}|sem_[A-Za-z0-9][A-Za-z0-9._-]*)' | head -1
+  grep -Eo '(cbx_[a-f0-9]{12}|sem_[A-Za-z0-9][A-Za-z0-9._-]*)' | head -1
 }
 
 extract_slug() {
-  sed -n 's/.*slug=\([^ ]*\).*/\1/p' | rg -v '^-$' | tail -1
+  sed -n 's/.*slug=\([^ ]*\).*/\1/p' | grep -Ev '^-$' | tail -1
 }
 
 extract_tenki_session() {
@@ -557,12 +557,17 @@ external_smoke() {
   need_tool rg
 
   local command="${CRABBOX_LIVE_EXTERNAL_COMMAND:-${CRABBOX_EXTERNAL_COMMAND:-$(config_value external.command || true)}}"
-  if [[ -z "$command" ]]; then
-    echo "external smoke requires CRABBOX_LIVE_EXTERNAL_COMMAND, CRABBOX_EXTERNAL_COMMAND, or external.command" >&2
+  local lifecycle_acquire
+  lifecycle_acquire="$(config_value external.lifecycle.acquire.argv || true)"
+  if [[ -z "$command" && -z "$lifecycle_acquire" ]]; then
+    echo "external smoke requires an external command or external.lifecycle.acquire configuration" >&2
     return 2
   fi
 
-  local external_env=(CRABBOX_EXTERNAL_COMMAND="$command")
+  local external_env=()
+  if [[ -n "$command" ]]; then
+    external_env+=(CRABBOX_EXTERNAL_COMMAND="$command")
+  fi
   local route_args=(--provider external)
   if [[ -n "${CRABBOX_LIVE_EXTERNAL_ARG:-}" ]]; then
     external_env+=(CRABBOX_EXTERNAL_ARG="$CRABBOX_LIVE_EXTERNAL_ARG")
@@ -572,7 +577,11 @@ external_smoke() {
   fi
   local lease_args=("${route_args[@]}" --ttl "${CRABBOX_LIVE_EXTERNAL_TTL:-15m}" --idle-timeout "${CRABBOX_LIVE_EXTERNAL_IDLE_TIMEOUT:-5m}")
   external_run() {
-    (cd "$repo" && env "${external_env[@]}" "$cb" "$@")
+    if (( ${#external_env[@]} )); then
+      (cd "$repo" && env "${external_env[@]}" "$cb" "$@")
+    else
+      (cd "$repo" && "$cb" "$@")
+    fi
   }
 
   local lease=""

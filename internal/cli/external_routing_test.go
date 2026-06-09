@@ -38,6 +38,43 @@ func TestExternalRoutingRoundTripUsesPrivateHashedPath(t *testing.T) {
 	}
 }
 
+func TestDeclarativeExternalRoutingRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := ExternalConfig{
+		Config: map[string]any{"size": "cpu16"},
+		Lifecycle: ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{name}}"}},
+			List: ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list", "--format", "json"},
+				Output: "json-name-array",
+			},
+			Release: ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{name}}"}},
+		},
+		Connection: ExternalConnectionConfig{
+			SSH: ExternalSSHConnectionConfig{
+				User:           "{{env.DEVBOX_USER}}",
+				Host:           "{{name}}",
+				SSHConfigProxy: true,
+			},
+		},
+		WorkRoot: "/home/developer/crabbox",
+	}
+	path, err := PersistExternalRouting("cbx_abcdef123456", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Lifecycle.Acquire.Argv; len(got) != 3 || got[0] != "devboxctl" || got[2] != "{{name}}" {
+		t.Fatalf("acquire=%#v", got)
+	}
+	if loaded.Connection.SSH.User != "{{env.DEVBOX_USER}}" || !loaded.Connection.SSH.SSHConfigProxy {
+		t.Fatalf("connection=%#v", loaded.Connection)
+	}
+}
+
 func TestLoadExternalRoutingRejectsBroadPermissions(t *testing.T) {
 	path := t.TempDir() + "/routing.json"
 	if err := os.WriteFile(path, []byte(`{"command":"provider"}`), 0o644); err != nil {

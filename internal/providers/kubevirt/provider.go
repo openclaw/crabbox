@@ -2,6 +2,7 @@ package kubevirt
 
 import (
 	"flag"
+	"strconv"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -41,6 +42,34 @@ func (Provider) RouteConfig(cfg *core.Config, _ *flag.FlagSet, _ any) error {
 		cfg.WorkRoot = cfg.KubeVirt.WorkRoot
 	}
 	return nil
+}
+
+func (Provider) CommandRoutingArgs(cfg core.Config, _ string) []string {
+	values := cfg.KubeVirt
+	args := []string{
+		"--kubevirt-kubectl", values.Kubectl,
+		"--kubevirt-virtctl", values.Virtctl,
+		"--kubevirt-context", values.Context,
+		"--kubevirt-namespace", values.Namespace,
+		"--kubevirt-ssh-user", values.SSHUser,
+		"--kubevirt-ssh-port", values.SSHPort,
+		"--kubevirt-work-root", values.WorkRoot,
+		"--kubevirt-delete-on-release=" + strconv.FormatBool(values.DeleteOnRelease),
+	}
+	for _, optional := range []struct {
+		flagName string
+		value    string
+	}{
+		{flagName: "--kubevirt-kubeconfig", value: values.Kubeconfig},
+		{flagName: "--kubevirt-template", value: values.Template},
+		{flagName: "--kubevirt-ssh-key", value: values.SSHKey},
+		{flagName: "--kubevirt-ssh-public-key", value: values.SSHPublicKey},
+	} {
+		if strings.TrimSpace(optional.value) != "" {
+			args = append(args, optional.flagName, optional.value)
+		}
+	}
+	return args
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
