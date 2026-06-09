@@ -141,6 +141,10 @@ describe("machine class config", () => {
       expect(azureVMSizeCandidatesForTargetClass("windows", name, "wsl2")).toEqual(
         azureWindows[name],
       );
+      expect(azureVMSizeCandidatesForTargetClass("windows", name, "normal", "arm64")).toEqual(
+        azureLinuxARM64[name],
+      );
+      expect(azureVMSizeCandidatesForTargetClass("windows", name, "wsl2", "arm64")).toEqual([name]);
       expect(awsInstanceTypeCandidatesForTargetClass("windows", name)).toEqual(awsWindows[name]);
       expect(awsInstanceTypeCandidatesForTargetClass("windows", name, "wsl2")).toEqual(
         awsWSL2[name],
@@ -535,15 +539,79 @@ describe("lease config", () => {
     }
   });
 
-  it("rejects ARM leases outside supported Linux providers", () => {
+  it("allows Azure Windows ARM64 leases", () => {
+    const config = leaseConfig({
+      provider: "azure",
+      target: "windows",
+      architecture: "arm64",
+      serverType: "Standard_D32pds_v6",
+      azureImage: "Contoso:windows-arm64:server:latest",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(config.architecture).toBe("arm64");
+    expect(config.serverType).toBe("Standard_D32pds_v6");
+    expect(config.azureImage).toBe("Contoso:windows-arm64:server:latest");
+
+    const marketplace = leaseConfig({
+      provider: "azure",
+      target: "windows",
+      architecture: "arm64",
+      serverType: "Standard_D32pds_v6",
+      azureImage: "Canonical:windows-arm64:server:latest",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(marketplace.azureImage).toBe("Canonical:windows-arm64:server:latest");
+
+    const defaultImage = leaseConfig(
+      {
+        provider: "azure",
+        target: "windows",
+        architecture: "arm64",
+        serverType: "Standard_D32pds_v6",
+        sshPublicKey: "ssh-ed25519 test",
+      },
+      { azureImage: "Contoso:windows-arm64:server:latest" },
+    );
+    expect(defaultImage.azureImage).toBe("Contoso:windows-arm64:server:latest");
+  });
+
+  it("rejects Azure Windows ARM64 leases without an explicit ARM64 image", () => {
     expect(() =>
       leaseConfig({
         provider: "azure",
         target: "windows",
         architecture: "arm64",
+        serverType: "Standard_D32pds_v6",
         sshPublicKey: "ssh-ed25519 test",
       }),
-    ).toThrow("architecture=arm64 currently supports target=linux only");
+    ).toThrow("requires azureImage");
+  });
+
+  it("rejects Azure Windows ARM64 WSL2 leases", () => {
+    expect(() =>
+      leaseConfig({
+        provider: "azure",
+        target: "windows",
+        windowsMode: "wsl2",
+        architecture: "arm64",
+        serverType: "Standard_D32pds_v6",
+        azureImage: "Contoso:windows-arm64:server:latest",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("supports windowsMode=normal only");
+  });
+
+  it("rejects ARM leases outside supported providers and targets", () => {
+    expect(() =>
+      leaseConfig({
+        provider: "aws",
+        target: "windows",
+        architecture: "arm64",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow(
+      "architecture=arm64 currently supports target=linux or provider=azure target=windows only",
+    );
     expect(() =>
       leaseConfig({
         provider: "hetzner",

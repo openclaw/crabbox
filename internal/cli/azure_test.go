@@ -150,6 +150,14 @@ func TestAzureVMSizeCandidatesForTargetModeClass(t *testing.T) {
 	if want := azureWindowsVMSizeCandidatesForClass("standard"); !reflect.DeepEqual(wsl2, want) {
 		t.Fatalf("wsl2 target got %v want %v", wsl2, want)
 	}
+	windowsARM64 := azureVMSizeCandidatesForTargetModeArchitectureClass(targetWindows, windowsModeNormal, ArchitectureARM64, "standard")
+	if want := azureARM64VMSizeCandidatesForClass("standard"); !reflect.DeepEqual(windowsARM64, want) {
+		t.Fatalf("windows arm64 target got %v want %v", windowsARM64, want)
+	}
+	wsl2ARM64 := azureVMSizeCandidatesForTargetModeArchitectureClass(targetWindows, windowsModeWSL2, ArchitectureARM64, "standard")
+	if want := []string{"standard"}; !reflect.DeepEqual(wsl2ARM64, want) {
+		t.Fatalf("wsl2 arm64 target got %v want %v", wsl2ARM64, want)
+	}
 }
 
 func TestAzureVMSizeCandidatesForConfigHonorsARM64(t *testing.T) {
@@ -161,6 +169,18 @@ func TestAzureVMSizeCandidatesForConfigHonorsARM64(t *testing.T) {
 	cfg.architectureExplicit = true
 	if got := azureVMSizeCandidatesForConfig(cfg)[0]; got != "Standard_D96pds_v6" {
 		t.Fatalf("first arm64 size=%q", got)
+	}
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	if got := azureVMSizeCandidatesForConfig(cfg)[0]; got != "Standard_D96pds_v6" {
+		t.Fatalf("first windows arm64 size=%q", got)
+	}
+	cfg.architectureExplicit = false
+	cfg.Architecture = ArchitectureAMD64
+	cfg.ServerType = "Standard_D2pds_v6"
+	cfg.ServerTypeExplicit = true
+	if got := effectiveArchitectureForConfig(cfg); got != ArchitectureARM64 {
+		t.Fatalf("windows explicit ARM64 size inferred architecture=%q", got)
 	}
 }
 
@@ -184,6 +204,11 @@ func TestAzureVMSizeCandidatesForConfigFiltersEphemeralPreview(t *testing.T) {
 	windows.AzureOSDisk = AzureOSDiskEphemeralPreview
 	if got := azureVMSizeCandidatesForConfig(windows); !reflect.DeepEqual(got, []string{"Standard_D8ads_v6", "Standard_D8ds_v6", "Standard_D8ads_v5", "Standard_D8ds_v5", "Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_D16ads_v5", "Standard_D16ds_v5"}) {
 		t.Fatalf("windows preview candidates=%v", got)
+	}
+	windows.Architecture = ArchitectureARM64
+	windows.architectureExplicit = true
+	if got := azureVMSizeCandidatesForConfig(windows); !reflect.DeepEqual(got, []string{"Standard_D32pds_v6", "Standard_D16pds_v6"}) {
+		t.Fatalf("windows arm64 preview candidates=%v", got)
 	}
 }
 

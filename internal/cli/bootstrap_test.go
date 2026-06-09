@@ -555,7 +555,11 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 		"WriteAllText($wslSetup",
 		"wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh",
 		"apt-get install -y --no-install-recommends ca-certificates curl git rsync jq",
+		"mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc",
+		"test -w /proc/sys/fs/binfmt_misc/register",
+		":WSLInterop:M::MZ::/init:PF",
 		"cat >/usr/local/bin/crabbox-ready",
+		"test -e /proc/sys/fs/binfmt_misc/WSLInterop",
 		`test -w '/work/crabbox'`,
 	} {
 		if !strings.Contains(got, want) {

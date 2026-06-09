@@ -87,10 +87,12 @@ func effectiveArchitectureForConfig(cfg Config) string {
 	if cfg.architectureExplicit {
 		return cfg.Architecture
 	}
-	if cfg.TargetOS == targetLinux {
+	if cfg.TargetOS == targetLinux || cfg.TargetOS == targetWindows {
 		if cfg.Provider == "azure" && azureVMSizeIsARM64(cfg.ServerType) {
 			return ArchitectureARM64
 		}
+	}
+	if cfg.TargetOS == targetLinux {
 		if cfg.Provider == "aws" && awsInstanceTypeIsARM64(cfg.ServerType) {
 			return ArchitectureARM64
 		}

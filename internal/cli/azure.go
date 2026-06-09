@@ -178,6 +178,11 @@ func isAzureDefaultLinuxImage(image string) bool {
 	}
 }
 
+func azureWindowsARM64HasExplicitImage(cfg Config) bool {
+	image := strings.TrimSpace(cfg.AzureImage)
+	return image != "" && image != defaultAzureWindowsImage && !isAzureDefaultLinuxImage(image)
+}
+
 func azureVMSizeCandidatesForTargetModeClass(target, windowsMode, class string) []string {
 	switch target {
 	case targetLinux:
@@ -214,6 +219,12 @@ func azureVMSizeCandidatesForTargetModeArchitectureClass(target, windowsMode, ar
 		return azureVMSizeCandidatesForArchitectureClass(architecture, class)
 	case targetWindows:
 		if windowsMode == windowsModeNormal || windowsMode == windowsModeWSL2 {
+			if architecture == ArchitectureARM64 {
+				if windowsMode == windowsModeWSL2 {
+					return []string{class}
+				}
+				return azureARM64VMSizeCandidatesForClass(class)
+			}
 			return azureWindowsVMSizeCandidatesForClass(class)
 		}
 		return []string{class}
@@ -282,8 +293,8 @@ func azureEphemeralFullCachingCandidates(cfg Config, candidates []string) []stri
 	}
 	if cfg.TargetOS == targetWindows {
 		return filterAzureEphemeralFullCachingCandidates(appendUniqueStrings(
-			azureWindowsVMSizeCandidatesForClass("large"),
-			azureWindowsVMSizeCandidatesForClass("beast")...,
+			azureVMSizeCandidatesForTargetModeArchitectureClass(targetWindows, cfg.WindowsMode, effectiveArchitectureForConfig(cfg), "large"),
+			azureVMSizeCandidatesForTargetModeArchitectureClass(targetWindows, cfg.WindowsMode, effectiveArchitectureForConfig(cfg), "beast")...,
 		))
 	}
 	return candidates

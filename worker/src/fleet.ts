@@ -16,6 +16,7 @@ import {
   leaseConfig,
   validCIDRs,
   type LeaseConfig,
+  type LeaseConfigDefaults,
 } from "./config";
 import { GCPClient } from "./gcp";
 import { HetznerClient } from "./hetzner";
@@ -1025,10 +1026,11 @@ export class FleetDurableObject implements DurableObject {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<LeaseRequest>(request);
-    let config = leaseConfig(
-      input,
-      this.env.CRABBOX_AZURE_OS_DISK ? { azureOSDisk: this.env.CRABBOX_AZURE_OS_DISK } : undefined,
-    );
+    const defaults: LeaseConfigDefaults = {};
+    const azureImage = this.env.CRABBOX_AZURE_IMAGE?.trim();
+    if (azureImage) defaults.azureImage = azureImage;
+    if (this.env.CRABBOX_AZURE_OS_DISK) defaults.azureOSDisk = this.env.CRABBOX_AZURE_OS_DISK;
+    let config = leaseConfig(input, defaults);
     if (!isAdminRequest(request) && hasNativeLeaseSource(config)) {
       return json(
         {

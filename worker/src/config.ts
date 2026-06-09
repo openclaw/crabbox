@@ -89,6 +89,7 @@ export type Architecture = "amd64" | "arm64";
 
 export interface LeaseConfigDefaults {
   azureOSDisk?: string;
+  azureImage?: string;
 }
 
 const maxRequestedPondNameLength = 41;
@@ -110,6 +111,14 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
   const architecture = architectureExplicit
     ? requestedArchitecture
     : inferArchitectureForServerType(provider, target, input.serverType, requestedArchitecture);
+  const azureImage =
+    input.azureImage ??
+    defaults.azureImage ??
+    (target === "linux" && osExplicit
+      ? architecture === "arm64"
+        ? (linuxOSImage?.azureArm64Image ?? "")
+        : (linuxOSImage?.azureImage ?? "")
+      : "");
   if (
     target !== "linux" &&
     !(provider === "aws" && target === "windows") &&
@@ -122,11 +131,27 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     throw new Error(`unsupported target for brokered ${provider}: ${target}`);
   }
   if (architecture === "arm64") {
-    if (target !== "linux") {
-      throw new Error("architecture=arm64 currently supports target=linux only");
-    }
     if (provider !== "azure" && provider !== "aws") {
       throw new Error("architecture=arm64 currently supports provider=azure or provider=aws");
+    }
+    if (target !== "linux" && !(provider === "azure" && target === "windows")) {
+      throw new Error(
+        "architecture=arm64 currently supports target=linux or provider=azure target=windows only",
+      );
+    }
+    if (provider === "azure" && target === "windows" && windowsMode === "wsl2") {
+      throw new Error(
+        "brokered provider=azure target=windows architecture=arm64 supports windowsMode=normal only; windowsMode=wsl2 requires nested virtualization, which Azure Cobalt ARM64 VM sizes do not support",
+      );
+    }
+    if (
+      provider === "azure" &&
+      target === "windows" &&
+      !azureWindowsARM64HasExplicitImage(azureImage)
+    ) {
+      throw new Error(
+        "brokered provider=azure target=windows architecture=arm64 requires azureImage with an ARM64 Windows image; the built-in Windows default is x64",
+      );
     }
   }
   if (
@@ -232,13 +257,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     awsSSHCIDRs,
     awsMacHostID: input.awsMacHostID ?? "",
     azureLocation: input.azureLocation ?? "",
-    azureImage:
-      input.azureImage ??
-      (osExplicit
-        ? architecture === "arm64"
-          ? (linuxOSImage?.azureArm64Image ?? "")
-          : (linuxOSImage?.azureImage ?? "")
-        : ""),
+    azureImage,
     azureSnapshot,
     azureOSDisk,
     gcpProject: input.gcpProject ?? "",
@@ -357,13 +376,17 @@ function inferArchitectureForServerType(
   serverType: string | undefined,
   fallback: Architecture,
 ): Architecture {
-  if (target !== "linux" || !serverType) {
+  if (!serverType) {
     return fallback;
   }
-  if (provider === "azure" && azureVMSizeIsARM64(serverType)) {
+  if (
+    provider === "azure" &&
+    (target === "linux" || target === "windows") &&
+    azureVMSizeIsARM64(serverType)
+  ) {
     return "arm64";
   }
-  if (provider === "aws" && awsInstanceTypeIsARM64(serverType)) {
+  if (provider === "aws" && target === "linux" && awsInstanceTypeIsARM64(serverType)) {
     return "arm64";
   }
   return fallback;
@@ -376,7 +399,7 @@ function validateArchitectureServerType(
   architectureExplicit: boolean,
   serverType: string,
 ): void {
-  if (target !== "linux") {
+  if (target !== "linux" && !(provider === "azure" && target === "windows")) {
     return;
   }
   const serverTypeARM64 =
@@ -402,6 +425,19 @@ function providerServerTypeName(provider: Provider): string {
     return "AWS instance type";
   }
   return "server type";
+}
+
+function azureWindowsARM64HasExplicitImage(image: string | undefined): boolean {
+  const normalized = image?.trim() ?? "";
+  if (!normalized) return false;
+  const defaultImages = new Set([
+    "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest",
+    osImageSpec("ubuntu:24.04").azureImage,
+    osImageSpec("ubuntu:24.04").azureArm64Image,
+    osImageSpec("ubuntu:26.04").azureImage,
+    osImageSpec("ubuntu:26.04").azureArm64Image,
+  ]);
+  return !defaultImages.has(normalized);
 }
 
 export function awsPromotedAMIConfigKey(region: string, serverType: string): string {
@@ -723,12 +759,17 @@ export function azureVMSizeCandidatesForTargetClass(
   if (target === "linux") {
     candidates = azureVMSizeCandidatesForArchitectureClass(architecture, machineClass);
   } else if (target === "windows" && (windowsMode === "normal" || windowsMode === "wsl2")) {
-    candidates = azureWindowsVMSizeCandidatesForClass(machineClass);
+    candidates =
+      architecture === "arm64"
+        ? windowsMode === "wsl2"
+          ? [machineClass]
+          : azureARM64VMSizeCandidatesForClass(machineClass)
+        : azureWindowsVMSizeCandidatesForClass(machineClass);
   } else {
     candidates = [machineClass];
   }
   if (azureOSDisk === "ephemeral-preview") {
-    return azureEphemeralFullCachingCandidates(target, candidates);
+    return azureEphemeralFullCachingCandidates(target, candidates, architecture, windowsMode);
   }
   return candidates;
 }
@@ -871,13 +912,18 @@ function azureVMSizeVCPUCount(vmSize: string): number | undefined {
   return Number.parseInt(match[1], 10);
 }
 
-function azureEphemeralFullCachingCandidates(target: TargetOS, candidates: string[]): string[] {
+function azureEphemeralFullCachingCandidates(
+  target: TargetOS,
+  candidates: string[],
+  architecture: Architecture = "amd64",
+  windowsMode: WindowsMode = "normal",
+): string[] {
   const filtered = candidates.filter(azureSupportsEphemeralFullCaching);
   if (filtered.length > 0) return filtered;
   if (target === "windows") {
     return [
-      ...azureWindowsVMSizeCandidatesForClass("large"),
-      ...azureWindowsVMSizeCandidatesForClass("beast"),
+      ...azureVMSizeCandidatesForTargetClass(target, "large", windowsMode, architecture),
+      ...azureVMSizeCandidatesForTargetClass(target, "beast", windowsMode, architecture),
     ]
       .filter((value, index, values) => values.indexOf(value) === index)
       .filter(azureSupportsEphemeralFullCaching);
