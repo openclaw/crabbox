@@ -288,6 +288,9 @@ func TestCreateContainerNoSecretsAsCLIArgs(t *testing.T) {
 }
 
 func TestAcquirePostCreateFailureKeepsRetainedContainerKey(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("apple-container acquire only runs on macOS/Apple silicon")
+	}
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
