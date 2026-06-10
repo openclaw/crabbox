@@ -17,9 +17,10 @@ import (
 )
 
 type backend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec                  ProviderSpec
+	cfg                   Config
+	rt                    Runtime
+	startupObserveTimeout time.Duration
 }
 
 type tartInstance struct {
@@ -33,7 +34,12 @@ type tartInstance struct {
 
 func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	applyDefaults(&cfg)
-	return &backend{spec: spec, cfg: cfg, rt: rt}
+	return &backend{
+		spec:                  spec,
+		cfg:                   cfg,
+		rt:                    rt,
+		startupObserveTimeout: defaultStartupObserveTimeout,
+	}
 }
 
 func applyDefaults(cfg *Config) {
@@ -169,18 +175,8 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		cleanupUnclaimedVM()
 		return LeaseTarget{}, err
 	}
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
 		cleanupUnclaimedVM()
-		return LeaseTarget{}, err
-	}
-	if req.Keep {
-		cleanupKey = false
-	}
-	if err := updateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
-		if !req.Keep {
-			_ = b.stopVM(context.Background(), name)
-			_ = b.deleteVM(context.Background(), name)
-		}
 		return LeaseTarget{}, err
 	}
 	cleanupKey = false
@@ -489,7 +485,7 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep boo
 			return exit(2, "tart run %s failed during startup: %v", name, err)
 		}
 		return exit(2, "tart run %s exited unexpectedly during startup", name)
-	case <-time.After(startupObserveTimeout):
+	case <-time.After(b.startupObserveTimeout):
 		return nil
 	}
 }

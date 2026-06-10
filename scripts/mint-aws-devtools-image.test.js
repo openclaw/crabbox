@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,6 +41,12 @@ case "$1" in
     fi
     ;;
   run)
+    if [[ -n "\${CRABBOX_FAKE_CAPTURE_RUN_SCRIPT:-}" ]]; then
+      last_arg="\${@: -1}"
+      if [[ "$last_arg" == *"docker_probe="* ]]; then
+        printf '%s\\n' "$last_arg" >"\${CRABBOX_FAKE_CAPTURE_RUN_SCRIPT}"
+      fi
+    fi
     if [[ "$*" == *"Test-Path 'C:\\ProgramData\\crabbox\\image-prep-reboot-required'"* ]]; then
       if [[ "\${CRABBOX_FAKE_WINDOWS_REBOOT:-0}" == "1" && ! -f "\${CRABBOX_FAKE_LOG}.rebooted" ]]; then
         printf 'crabbox-reboot-required\\n'
@@ -183,6 +189,87 @@ test("AWS devtools mint wrapper isolates warmup logs from explicit image names",
   for (const file of files) {
     assert.match(file, /^image-mint-shared-devtools-(source|candidate)-/);
   }
+});
+
+test("AWS devtools mint wrapper uses sg for first docker group member", async () => {
+  const fake = await setupFakeCrabbox();
+  const smokeScript = path.join(fake.dir, "smoke.sh");
+  const result = await runScript(["--target", "linux", "--run", "--no-promote", "--prep-script", fake.linuxPrep], {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_FAKE_CAPTURE_RUN_SCRIPT: smokeScript,
+  });
+  assert.equal(result.code, 0, result.stderr);
+
+  const bin = path.join(fake.dir, "smoke-bin");
+  await mkdir(bin);
+  const sgMarker = path.join(fake.dir, "sg-used");
+  const sudoMarker = path.join(fake.dir, "sudo-used");
+  const writeTool = async (name, body) => {
+    const file = path.join(bin, name);
+    await writeFile(file, body);
+    await chmod(file, 0o755);
+  };
+  for (const name of ["git", "gh", "jq", "rg", "fd", "python3", "node", "npm", "corepack", "pnpm"]) {
+    await writeTool(name, "#!/usr/bin/env bash\nexit 0\n");
+  }
+  await writeTool("id", "#!/usr/bin/env bash\n[[ \"$*\" == \"-nG\" ]] && printf 'users\\n'\n");
+  await writeTool("whoami", "#!/usr/bin/env bash\nprintf 'alice\\n'\n");
+  await writeTool("getent", "#!/usr/bin/env bash\n[[ \"$*\" == \"group docker\" ]] && printf 'docker:x:999:alice,bob\\n'\n");
+  await writeTool(
+    "docker",
+    `#!/usr/bin/env bash
+if [[ "\${CRABBOX_FAKE_IN_SG:-0}" == "1" ]]; then
+  exit 0
+fi
+exit 1
+`,
+  );
+  await writeTool(
+    "sg",
+    `#!/usr/bin/env bash
+touch "${sgMarker}"
+shift
+[[ "\${1:-}" == "-c" ]] || exit 64
+shift
+CRABBOX_FAKE_IN_SG=1 bash -c "$1"
+`,
+  );
+  await writeTool(
+    "sudo",
+    `#!/usr/bin/env bash
+touch "${sudoMarker}"
+exit 80
+`,
+  );
+
+  const generated = (await readFile(smokeScript, "utf8")).replace("test -d /var/cache/crabbox/pnpm", "true");
+  const smoke = await new Promise((resolve, reject) => {
+    const child = spawn("bash", ["-c", generated], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+
+  assert.equal(smoke.code, 0, smoke.stderr || smoke.stdout);
+  assert.equal(await readFile(sgMarker, "utf8"), "");
+  await assert.rejects(readFile(sudoMarker, "utf8"));
 });
 
 test("AWS devtools mint wrapper maps windows flags", async () => {

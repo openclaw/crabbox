@@ -55,7 +55,7 @@ instead.
 | Plane     | Feature flag       | Providers that advertise it (today)                                                                                       | What you get                                                |
 | --------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
 | Tailscale | `FeatureTailscale` | Hetzner, Azure, GCP                                                                                                       | true peer-to-peer mesh, `<slug>.cbx` DNS                    |
-| Bridge    | `FeatureURLBridge` | Islo, E2B, Modal, Cloudflare, Tensorlake (adapters report `unsupported` until they ship a per-sandbox HTTPS ingress)      | provider-native HTTP(S) endpoints for discovery and sharing |
+| Bridge    | `FeatureURLBridge` | Islo, E2B, Railway                                                                                                      | provider-native HTTP(S) endpoints for discovery and sharing |
 | SSH-mesh  | `FeatureSSH`       | any provider advertising SSH: Hetzner, Azure, GCP, AWS, Proxmox, static `ssh`, RunPod, exe-dev, Daytona, Sprites, Namespace, Semaphore, local-container, Parallels | operator-side `ssh -L` tunnels via `pond connect`           |
 
 macOS and Windows peer reachability are not covered by any plane yet.
@@ -188,13 +188,13 @@ crabbox warmup --pond "pr-$PR" --slug web --provider hetzner --tailscale
 crabbox pond release "pr-$PR"
 ```
 
-**Mixed-vendor integration test.** CPU on Hetzner, GPU on a delegated provider,
+**Mixed-vendor integration test.** CPU on Hetzner, a delegated HTTP sandbox,
 DB on Hetzner. Use Tailscale names for tailnet members and the URL bridge for
-HTTP(S) peers:
+providers that advertise it:
 
 ```sh
 crabbox warmup --pond "it-$SHA" --slug api --provider hetzner --tailscale
-crabbox warmup --pond "it-$SHA" --slug ml  --provider modal   --class a10g
+crabbox warmup --pond "it-$SHA" --slug web --provider e2b --e2b-template base
 crabbox warmup --pond "it-$SHA" --slug db  --provider hetzner --tailscale
 crabbox run --id api -- "DB_HOST=db.cbx go test ./..."
 ```

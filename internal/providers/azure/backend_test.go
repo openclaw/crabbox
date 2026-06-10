@@ -11,6 +11,7 @@ type fakeAzureClient struct {
 	deleted   []string
 	tagged    []string
 	servers   []Server
+	listErr   error
 	created   Server
 	createCfg Config
 	createErr error
@@ -18,6 +19,9 @@ type fakeAzureClient struct {
 }
 
 func (c *fakeAzureClient) ListCrabboxServers(context.Context) ([]Server, error) {
+	if c.listErr != nil {
+		return nil, c.listErr
+	}
 	return c.servers, nil
 }
 
@@ -58,7 +62,7 @@ func TestAzureAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {
 	ipErr := errors.New("ip unavailable")
 	fake := &fakeAzureClient{
 		created:   Server{CloudID: "crabbox-created", Name: "crabbox-created", Labels: map[string]string{"lease": "cbx_created"}},
-		createCfg: Config{Provider: "azure", AzureLocation: "eastus", AzureResourceGroup: "rg"},
+		createCfg: azureAcquireTestConfig(),
 		waitErr:   ipErr,
 	}
 	oldClient := newAzureClient
@@ -67,13 +71,69 @@ func TestAzureAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { newAzureClient = oldClient })
 
-	backend := NewAzureLeaseBackend(ProviderSpec{}, Config{Provider: "azure", AzureLocation: "eastus", AzureResourceGroup: "rg"}, Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+	backend := NewAzureLeaseBackend(ProviderSpec{}, azureAcquireTestConfig(), Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
 	_, err := backend.acquireOnce(context.Background(), false, "")
 	if !errors.Is(err, ipErr) {
 		t.Fatalf("err=%v, want IP failure", err)
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-created" {
 		t.Fatalf("deleted=%v, want created server cleanup", fake.deleted)
+	}
+}
+
+func TestAzureAcquireValidatesSSHCIDRsBeforeClient(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	listErr := errors.New("stop before provision")
+	fake := &fakeAzureClient{listErr: listErr}
+	oldValidate := validateAzureSSHCIDRsForAcquire
+	validated := false
+	validateAzureSSHCIDRsForAcquire = func(_ context.Context, cfg Config) error {
+		validated = true
+		if len(cfg.AzureSSHCIDRs) != 0 {
+			t.Fatalf("AzureSSHCIDRs=%v before validation, want non-explicit empty config", cfg.AzureSSHCIDRs)
+		}
+		return nil
+	}
+	t.Cleanup(func() { validateAzureSSHCIDRsForAcquire = oldValidate })
+	var clientCfg Config
+	oldClient := newAzureClient
+	newAzureClient = func(_ context.Context, cfg Config) (azureClient, error) {
+		if !validated {
+			t.Fatal("newAzureClient ran before SSH CIDR validation")
+		}
+		clientCfg = cfg
+		return fake, nil
+	}
+	t.Cleanup(func() { newAzureClient = oldClient })
+
+	backend := NewAzureLeaseBackend(ProviderSpec{}, Config{Provider: "azure", AzureLocation: "eastus", AzureResourceGroup: "rg"}, Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+	_, err := backend.acquireOnce(context.Background(), false, "")
+	if !errors.Is(err, listErr) {
+		t.Fatalf("err=%v, want list failure", err)
+	}
+	if len(clientCfg.AzureSSHCIDRs) != 0 {
+		t.Fatalf("AzureSSHCIDRs=%v, want detected CIDR provenance preserved as non-explicit", clientCfg.AzureSSHCIDRs)
+	}
+}
+
+func TestAzureAcquireFailsClosedWhenSSHCIDRDetectionFails(t *testing.T) {
+	oldValidate := validateAzureSSHCIDRsForAcquire
+	validateAzureSSHCIDRsForAcquire = func(context.Context, Config) error {
+		return errors.New("offline")
+	}
+	t.Cleanup(func() { validateAzureSSHCIDRsForAcquire = oldValidate })
+	oldClient := newAzureClient
+	newAzureClient = func(context.Context, Config) (azureClient, error) {
+		t.Fatal("newAzureClient should not run when SSH CIDR detection fails")
+		return nil, nil
+	}
+	t.Cleanup(func() { newAzureClient = oldClient })
+
+	backend := NewAzureLeaseBackend(ProviderSpec{}, Config{Provider: "azure", AzureLocation: "eastus", AzureResourceGroup: "rg"}, Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+	_, err := backend.acquireOnce(context.Background(), false, "")
+	if err == nil || err.Error() != "offline" {
+		t.Fatalf("err=%v, want detection failure", err)
 	}
 }
 
@@ -88,7 +148,7 @@ func TestAzureAcquireDoesNotRollbackReadyServer(t *testing.T) {
 	created.PublicNet.IPv4.IP = "203.0.113.10"
 	fake := &fakeAzureClient{
 		created:   created,
-		createCfg: Config{Provider: "azure", AzureLocation: "eastus", AzureResourceGroup: "rg"},
+		createCfg: azureAcquireTestConfig(),
 	}
 	oldClient := newAzureClient
 	newAzureClient = func(context.Context, Config) (azureClient, error) {
@@ -101,7 +161,7 @@ func TestAzureAcquireDoesNotRollbackReadyServer(t *testing.T) {
 	}
 	t.Cleanup(func() { bootstrapManagedWindowsDesktop = oldBootstrap })
 
-	backend := NewAzureLeaseBackend(ProviderSpec{}, Config{Provider: "azure", AzureLocation: "eastus", AzureResourceGroup: "rg"}, Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+	backend := NewAzureLeaseBackend(ProviderSpec{}, azureAcquireTestConfig(), Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
 	lease, err := backend.acquireOnce(context.Background(), false, "")
 	if err != nil {
 		t.Fatal(err)
@@ -114,5 +174,14 @@ func TestAzureAcquireDoesNotRollbackReadyServer(t *testing.T) {
 	}
 	if len(fake.tagged) != 1 || fake.tagged[0] != "crabbox-ready" {
 		t.Fatalf("tagged=%v, want ready tag update", fake.tagged)
+	}
+}
+
+func azureAcquireTestConfig() Config {
+	return Config{
+		Provider:           "azure",
+		AzureLocation:      "eastus",
+		AzureResourceGroup: "rg",
+		AzureSSHCIDRs:      []string{"198.51.100.7/32"},
 	}
 }

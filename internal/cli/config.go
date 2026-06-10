@@ -129,6 +129,7 @@ type Config struct {
 	localContainerImageExplicit   bool
 	AppleContainer                AppleContainerConfig
 	appleContainerImageExplicit   bool
+	MXC                           MXCConfig
 	Multipass                     MultipassConfig
 	multipassImageExplicit        bool
 	Tart                          TartConfig
@@ -231,19 +232,22 @@ type ExternalLifecycleConfig struct {
 }
 
 type ExternalLifecycleOperation struct {
-	Argv              []string   `yaml:"argv,omitempty" json:"argv,omitempty"`
-	Steps             [][]string `yaml:"steps,omitempty" json:"steps,omitempty"`
-	Output            string     `yaml:"output,omitempty" json:"output,omitempty"`
-	NamePrefix        string     `yaml:"namePrefix,omitempty" json:"namePrefix,omitempty"`
-	RollbackOnFailure bool       `yaml:"rollbackOnFailure,omitempty" json:"rollbackOnFailure,omitempty"`
+	Argv              []string          `yaml:"argv,omitempty" json:"argv,omitempty"`
+	Steps             [][]string        `yaml:"steps,omitempty" json:"steps,omitempty"`
+	Env               map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	AllowEnvArgv      bool              `yaml:"allowEnvArgv,omitempty" json:"allowEnvArgv,omitempty"`
+	Output            string            `yaml:"output,omitempty" json:"output,omitempty"`
+	NamePrefix        string            `yaml:"namePrefix,omitempty" json:"namePrefix,omitempty"`
+	RollbackOnFailure bool              `yaml:"rollbackOnFailure,omitempty" json:"rollbackOnFailure,omitempty"`
 }
 
 type ExternalConnectionConfig struct {
-	ResourceName string                      `yaml:"resourceName,omitempty" json:"resourceName,omitempty"`
-	CloudID      string                      `yaml:"cloudId,omitempty" json:"cloudId,omitempty"`
-	ServerType   string                      `yaml:"serverType,omitempty" json:"serverType,omitempty"`
-	Labels       map[string]string           `yaml:"labels,omitempty" json:"labels,omitempty"`
-	SSH          ExternalSSHConnectionConfig `yaml:"ssh,omitempty" json:"ssh,omitempty"`
+	ResourceName         string                      `yaml:"resourceName,omitempty" json:"resourceName,omitempty"`
+	AllowEnvResourceName bool                        `yaml:"allowEnvResourceName,omitempty" json:"allowEnvResourceName,omitempty"`
+	CloudID              string                      `yaml:"cloudId,omitempty" json:"cloudId,omitempty"`
+	ServerType           string                      `yaml:"serverType,omitempty" json:"serverType,omitempty"`
+	Labels               map[string]string           `yaml:"labels,omitempty" json:"labels,omitempty"`
+	SSH                  ExternalSSHConnectionConfig `yaml:"ssh,omitempty" json:"ssh,omitempty"`
 }
 
 type ExternalSSHConnectionConfig struct {
@@ -548,14 +552,15 @@ type SpritesConfig struct {
 }
 
 type LocalContainerConfig struct {
-	Runtime      string
-	Image        string
-	User         string
-	WorkRoot     string
-	CPUs         int
-	Memory       string
-	Network      string
-	DockerSocket bool
+	Runtime            string
+	Image              string
+	User               string
+	WorkRoot           string
+	CPUs               int
+	Memory             string
+	Network            string
+	DockerSocket       bool
+	CheckpointMetadata map[string]string `yaml:"-" json:"-"`
 }
 
 type AppleContainerConfig struct {
@@ -566,6 +571,20 @@ type AppleContainerConfig struct {
 	CPUs         int
 	Memory       string
 	ExtraRunArgs []string
+}
+
+type MXCConfig struct {
+	CLIPath           string
+	Version           string
+	Containment       string
+	Network           string
+	ReadOnlyPaths     []string
+	ReadWritePaths    []string
+	AllowedHosts      []string
+	BlockedHosts      []string
+	AllowDACLMutation bool
+	AllowWindowsUI    bool
+	Experimental      bool
 }
 
 type MultipassConfig struct {
@@ -1027,6 +1046,10 @@ func MarkAppleContainerImageExplicit(cfg *Config) {
 	cfg.appleContainerImageExplicit = true
 }
 
+func AppleContainerImageExplicit(cfg Config) bool {
+	return cfg.appleContainerImageExplicit
+}
+
 func MarkMultipassImageExplicit(cfg *Config) {
 	cfg.multipassImageExplicit = true
 }
@@ -1278,6 +1301,12 @@ func baseConfig() Config {
 			User:     "crabbox",
 			WorkRoot: "/work/crabbox",
 		},
+		MXC: MXCConfig{
+			CLIPath:     "wxc-exec.exe",
+			Version:     "0.6.0-alpha",
+			Containment: "processcontainer",
+			Network:     "block",
+		},
 		Multipass: MultipassConfig{
 			CLIPath:       "multipass",
 			Image:         multipassImage,
@@ -1366,6 +1395,7 @@ type fileConfig struct {
 	Sprites              *fileSpritesConfig                 `yaml:"sprites,omitempty"`
 	LocalContainer       *fileLocalContainerConfig          `yaml:"localContainer,omitempty"`
 	AppleContainer       *fileAppleContainerConfig          `yaml:"appleContainer,omitempty"`
+	MXC                  *fileMXCConfig                     `yaml:"mxc,omitempty"`
 	Multipass            *fileMultipassConfig               `yaml:"multipass,omitempty"`
 	Tart                 *fileTartConfig                    `yaml:"tart,omitempty"`
 	Tailscale            *fileTailscaleConfig               `yaml:"tailscale,omitempty"`
@@ -1824,6 +1854,20 @@ type fileAppleContainerConfig struct {
 	CPUs         int      `yaml:"cpus,omitempty"`
 	Memory       string   `yaml:"memory,omitempty"`
 	ExtraRunArgs []string `yaml:"extraRunArgs,omitempty"`
+}
+
+type fileMXCConfig struct {
+	CLIPath           string   `yaml:"cliPath,omitempty"`
+	Version           string   `yaml:"version,omitempty"`
+	Containment       string   `yaml:"containment,omitempty"`
+	Network           string   `yaml:"network,omitempty"`
+	ReadOnlyPaths     []string `yaml:"readOnlyPaths,omitempty"`
+	ReadWritePaths    []string `yaml:"readWritePaths,omitempty"`
+	AllowedHosts      []string `yaml:"allowedHosts,omitempty"`
+	BlockedHosts      []string `yaml:"blockedHosts,omitempty"`
+	AllowDACLMutation *bool    `yaml:"allowDaclMutation,omitempty"`
+	AllowWindowsUI    *bool    `yaml:"allowWindowsUI,omitempty"`
+	Experimental      *bool    `yaml:"experimental,omitempty"`
 }
 
 type fileMultipassConfig struct {
@@ -3131,6 +3175,41 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.AppleContainer.ExtraRunArgs = append([]string(nil), file.AppleContainer.ExtraRunArgs...)
 		}
 	}
+	if file.MXC != nil {
+		if file.MXC.CLIPath != "" {
+			cfg.MXC.CLIPath = file.MXC.CLIPath
+		}
+		if file.MXC.Version != "" {
+			cfg.MXC.Version = file.MXC.Version
+		}
+		if file.MXC.Containment != "" {
+			cfg.MXC.Containment = file.MXC.Containment
+		}
+		if file.MXC.Network != "" {
+			cfg.MXC.Network = file.MXC.Network
+		}
+		if file.MXC.ReadOnlyPaths != nil {
+			cfg.MXC.ReadOnlyPaths = append([]string(nil), file.MXC.ReadOnlyPaths...)
+		}
+		if file.MXC.ReadWritePaths != nil {
+			cfg.MXC.ReadWritePaths = append([]string(nil), file.MXC.ReadWritePaths...)
+		}
+		if file.MXC.AllowedHosts != nil {
+			cfg.MXC.AllowedHosts = append([]string(nil), file.MXC.AllowedHosts...)
+		}
+		if file.MXC.BlockedHosts != nil {
+			cfg.MXC.BlockedHosts = append([]string(nil), file.MXC.BlockedHosts...)
+		}
+		if file.MXC.AllowDACLMutation != nil {
+			cfg.MXC.AllowDACLMutation = *file.MXC.AllowDACLMutation
+		}
+		if file.MXC.AllowWindowsUI != nil {
+			cfg.MXC.AllowWindowsUI = *file.MXC.AllowWindowsUI
+		}
+		if file.MXC.Experimental != nil {
+			cfg.MXC.Experimental = *file.MXC.Experimental
+		}
+	}
 	if file.Multipass != nil {
 		if file.Multipass.CLIPath != "" {
 			cfg.Multipass.CLIPath = file.Multipass.CLIPath
@@ -3981,6 +4060,31 @@ func applyEnv(cfg *Config) error {
 	if extra := strings.Fields(os.Getenv("CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS")); len(extra) > 0 {
 		cfg.AppleContainer.ExtraRunArgs = extra
 	}
+	cfg.MXC.CLIPath = getenv("CRABBOX_MXC_CLI", cfg.MXC.CLIPath)
+	cfg.MXC.Version = getenv("CRABBOX_MXC_VERSION", cfg.MXC.Version)
+	cfg.MXC.Containment = getenv("CRABBOX_MXC_CONTAINMENT", cfg.MXC.Containment)
+	cfg.MXC.Network = getenv("CRABBOX_MXC_NETWORK", cfg.MXC.Network)
+	if value := os.Getenv("CRABBOX_MXC_READONLY_PATHS"); value != "" {
+		cfg.MXC.ReadOnlyPaths = splitCommaList(value)
+	}
+	if value := os.Getenv("CRABBOX_MXC_READWRITE_PATHS"); value != "" {
+		cfg.MXC.ReadWritePaths = splitCommaList(value)
+	}
+	if value := os.Getenv("CRABBOX_MXC_ALLOWED_HOSTS"); value != "" {
+		cfg.MXC.AllowedHosts = splitCommaList(value)
+	}
+	if value := os.Getenv("CRABBOX_MXC_BLOCKED_HOSTS"); value != "" {
+		cfg.MXC.BlockedHosts = splitCommaList(value)
+	}
+	if value, ok := getenvBool("CRABBOX_MXC_ALLOW_DACL_MUTATION"); ok {
+		cfg.MXC.AllowDACLMutation = value
+	}
+	if value, ok := getenvBool("CRABBOX_MXC_ALLOW_WINDOWS_UI"); ok {
+		cfg.MXC.AllowWindowsUI = value
+	}
+	if value, ok := getenvBool("CRABBOX_MXC_EXPERIMENTAL"); ok {
+		cfg.MXC.Experimental = value
+	}
 	cfg.Multipass.CLIPath = getenv("CRABBOX_MULTIPASS_CLI", cfg.Multipass.CLIPath)
 	if image := os.Getenv("CRABBOX_MULTIPASS_IMAGE"); image != "" {
 		cfg.Multipass.Image = image
@@ -4011,7 +4115,7 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("CRABBOX_TART_DISK"); v != "" {
 		cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
-		cfg.tartDiskExplicit = true
+		cfg.tartDiskExplicit = cfg.Tart.Disk > 0
 	}
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value

@@ -3,6 +3,7 @@ package railway
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,20 @@ func TestRailwayPublishPeerSurfacesAPIError(t *testing.T) {
 	}
 }
 
+func TestRailwayPublishPeerRejectsNonReadyDeploymentURL(t *testing.T) {
+	api := &fakeRailwayAPI{
+		deployment: railwayDeployment{URL: "https://stale.railway.app", Status: railwayStatusFailed},
+	}
+	backend := newRailwayBackendForTest(api)
+	_, err := backend.PublishPeer(context.Background(), "svc-1", 8080, time.Hour)
+	if err == nil {
+		t.Fatal("expected not-ready deployment error")
+	}
+	if !strings.Contains(err.Error(), "not ready") || !strings.Contains(err.Error(), "FAILED") {
+		t.Fatalf("err=%v, want not-ready FAILED error", err)
+	}
+}
+
 func TestRailwayListPeerTargetsLive(t *testing.T) {
 	api := &fakeRailwayAPI{
 		deployment: railwayDeployment{URL: "https://live.railway.app", Status: railwayStatusSuccess},
@@ -68,6 +83,31 @@ func TestRailwayListPeerTargetsLive(t *testing.T) {
 	}
 	if len(targets) != 1 || targets[0].URL != "https://live.railway.app" {
 		t.Fatalf("expected one live target, got %#v", targets)
+	}
+}
+
+func TestRailwayListPeerTargetsIgnoresNonReadyDeploymentURLs(t *testing.T) {
+	for _, status := range []railwayDeploymentStatus{
+		railwayStatusFailed,
+		railwayStatusCrashed,
+		railwayStatusRemoved,
+		railwayStatusSkipped,
+		railwayStatusBuilding,
+		railwayStatusDeploying,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			api := &fakeRailwayAPI{
+				deployment: railwayDeployment{URL: "https://stale.railway.app", Status: status},
+			}
+			backend := newRailwayBackendForTest(api)
+			targets, err := backend.ListPeerTargets(context.Background(), "svc-1")
+			if err != nil {
+				t.Fatalf("ListPeerTargets: %v", err)
+			}
+			if len(targets) != 0 {
+				t.Fatalf("expected no targets for %s deployment, got %#v", status, targets)
+			}
+		})
 	}
 }
 

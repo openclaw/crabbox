@@ -561,6 +561,56 @@ func TestBlacksmithKeptRunWritesLeaseOutput(t *testing.T) {
 	}
 }
 
+func TestBlacksmithActionsURLExtractionNormalizesProse(t *testing.T) {
+	tests := []struct {
+		name    string
+		text    string
+		wantURL string
+		wantID  string
+	}{
+		{
+			name:    "parenthesized sentence",
+			text:    "run: (https://github.com/example-org/my-app/actions/runs/123456).",
+			wantURL: "https://github.com/example-org/my-app/actions/runs/123456",
+			wantID:  "123456",
+		},
+		{
+			name:    "markdown link",
+			text:    "[run](https://github.com/example-org/my-app/actions/runs/222333)",
+			wantURL: "https://github.com/example-org/my-app/actions/runs/222333",
+			wantID:  "222333",
+		},
+		{
+			name:    "query string",
+			text:    "https://github.com/example-org/my-app/actions/runs/987654321?check_suite_focus=true.",
+			wantURL: "https://github.com/example-org/my-app/actions/runs/987654321?check_suite_focus=true",
+			wantID:  "987654321",
+		},
+		{
+			name:    "attempt suffix",
+			text:    "https://github.com/example-org/my-app/actions/runs/123456/attempts/1",
+			wantURL: "https://github.com/example-org/my-app/actions/runs/123456/attempts/1",
+			wantID:  "123456",
+		},
+		{
+			name: "reject nonnumeric run id",
+			text: "https://github.com/example-org/my-app/actions/runs/123abc",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotURL := firstBlacksmithActionsURL(tt.text)
+			if gotURL != tt.wantURL {
+				t.Fatalf("url=%q, want %q", gotURL, tt.wantURL)
+			}
+			gotID := blacksmithActionsRunID(gotURL)
+			if gotID != tt.wantID {
+				t.Fatalf("runID=%q, want %q", gotID, tt.wantID)
+			}
+		})
+	}
+}
+
 func TestBlacksmithReusedRunWritesLeaseOutput(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -771,6 +821,40 @@ func TestBlacksmithCollectRunArtifactsWritesBoundedArchive(t *testing.T) {
 	}
 }
 
+func TestBlacksmithCollectRunArtifactsBoundsCommandOutput(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	const maxBytes int64 = 64
+	oversized := strings.Repeat("x", int(blacksmithArtifactOutputCaptureLimit(maxBytes)+1024))
+	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" && req.Stdout != nil {
+			if !req.DisableOutputCapture {
+				t.Fatalf("artifact collection should disable command-runner output capture")
+			}
+			_, _ = req.Stdout.Write([]byte(oversized))
+		}
+		return LocalCommandResult{}, nil
+	}}
+	cfg := baseConfig()
+	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	backend := newTestBlacksmithBackend(cfg, runner)
+	_, err := backend.CollectRunArtifacts(context.Background(), core.DelegatedRunArtifactRequest{
+		RunReq: core.RunRequest{
+			Repo:          core.Repo{Root: repo},
+			ArtifactGlobs: []string{"reports/**"},
+		},
+		Result:   core.RunResult{LeaseID: "tbx_artifacts"},
+		MaxFiles: 16,
+		MaxBytes: maxBytes,
+	})
+	if err == nil || !strings.Contains(err.Error(), "artifact output too large before archive validation") {
+		t.Fatalf("err=%v, want bounded output error", err)
+	}
+}
+
 func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	home := t.TempDir()
 	repo := t.TempDir()
@@ -884,7 +968,7 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 }
 
 func TestBlacksmithExtractArtifactArchiveRejectsMissingEnvelope(t *testing.T) {
-	_, _, err := blacksmithExtractArtifactArchive("no marker")
+	_, _, err := blacksmithExtractArtifactArchive("no marker", core.DelegatedRunArtifactDefaultMaxBytes)
 	if err == nil || !strings.Contains(err.Error(), "did not return a bounded artifact archive") {
 		t.Fatalf("err=%v, want missing envelope", err)
 	}
@@ -899,7 +983,7 @@ func TestBlacksmithExtractArtifactArchiveIgnoresPreambleMarkerText(t *testing.T)
 		base64.StdEncoding.EncodeToString(archive),
 		core.DelegatedRunArtifactEndMarker,
 	}, "\n")
-	got, clean, err := blacksmithExtractArtifactArchive(output)
+	got, clean, err := blacksmithExtractArtifactArchive(output, core.DelegatedRunArtifactDefaultMaxBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -913,6 +997,22 @@ func TestBlacksmithExtractArtifactArchiveIgnoresPreambleMarkerText(t *testing.T)
 		if !strings.Contains(clean, want) {
 			t.Fatalf("clean output missing %q:\n%s", want, clean)
 		}
+	}
+}
+
+func TestBlacksmithExtractArtifactArchiveAllowsExactMaxWithPadding(t *testing.T) {
+	archive := bytes.Repeat([]byte("x"), 64)
+	output := strings.Join([]string{
+		core.DelegatedRunArtifactBeginMarker,
+		base64.StdEncoding.EncodeToString(archive),
+		core.DelegatedRunArtifactEndMarker,
+	}, "\n")
+	got, _, err := blacksmithExtractArtifactArchive(output, int64(len(archive)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, archive) {
+		t.Fatalf("archive mismatch bytes=%d want=%d", len(got), len(archive))
 	}
 }
 
@@ -1171,6 +1271,32 @@ func TestBlacksmithStatusWaitTimeoutMentionsQueuedState(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error=%q, want %q", err.Error(), want)
 		}
+	}
+}
+
+func TestBlacksmithStatusWaitReturnsOnContextCancellation(t *testing.T) {
+	originalDelay := blacksmithStatusPollDelay
+	blacksmithStatusPollDelay = 500 * time.Millisecond
+	t.Cleanup(func() { blacksmithStatusPollDelay = originalDelay })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
+		cancel()
+		return LocalCommandResult{
+			Stdout: "tbx_123 queued openclaw .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
+		}, nil
+	}}
+	backend := newTestBlacksmithBackend(baseConfig(), runner)
+	started := time.Now()
+	_, err := backend.Status(ctx, StatusRequest{ID: "tbx_123", Wait: true, WaitTimeout: time.Minute})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Status err=%v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 200*time.Millisecond {
+		t.Fatalf("Status returned after %s, want prompt cancellation", elapsed)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("runner calls=%d, want one status poll before cancellation", len(runner.calls))
 	}
 }
 

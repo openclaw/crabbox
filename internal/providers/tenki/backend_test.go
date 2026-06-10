@@ -3,6 +3,7 @@ package tenki
 import (
 	"context"
 	"errors"
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
@@ -85,6 +86,76 @@ func TestTenkiCreateAddsMetadata(t *testing.T) {
 	}
 	if len(runner.calls) != 2 {
 		t.Fatalf("calls=%d want 2", len(runner.calls))
+	}
+}
+
+func TestTenkiCreateTrimsImageAndSnapshotOptions(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		args := strings.Join(req.Args, " ")
+		if strings.HasPrefix(args, "sandbox create ") {
+			if strings.Contains(args, "--image") {
+				t.Fatalf("whitespace image should be omitted:\n%s", args)
+			}
+			if !strings.Contains(args, "--snapshot snap-ready") {
+				t.Fatalf("snapshot was not trimmed/emitted:\n%s", args)
+			}
+			return LocalCommandResult{Stdout: `{"id":"session-1"}`}, nil
+		}
+		if args == "sandbox get --output json session-1" {
+			return LocalCommandResult{Stdout: `{"id":"session-1","name":"snap","state":"RUNNING"}`}, nil
+		}
+		t.Fatalf("unexpected command: %s %s", req.Name, args)
+		return LocalCommandResult{}, nil
+	}
+	backend, err := NewTenkiBackend(ProviderSpec{}, Config{Tenki: TenkiConfig{
+		CLIPath:  "tenki",
+		Image:    "   ",
+		Snapshot: "  snap-ready  ",
+	}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := backend.(*tenkiBackend).createSession(context.Background(), backend.(*tenkiBackend).configForRun(), "crabbox-snap", "cbx_123", "snap", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTenkiValidationRejectsNegativeResources(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+	}{
+		{name: "cpus", cfg: Config{Tenki: TenkiConfig{CPUs: -1}}},
+		{name: "memory", cfg: Config{Tenki: TenkiConfig{MemoryMB: -1}}},
+		{name: "disk", cfg: Config{Tenki: TenkiConfig{DiskGB: -1}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateTenkiOptions(tc.cfg); err == nil {
+				t.Fatal("expected negative resource value to fail")
+			}
+		})
+	}
+	if err := validateTenkiOptions(Config{Tenki: TenkiConfig{CPUs: 0, MemoryMB: 0, DiskGB: 0}}); err != nil {
+		t.Fatalf("zero resource sentinels should remain valid: %v", err)
+	}
+}
+
+func TestTenkiApplyFlagsNormalizesImageAndSnapshot(t *testing.T) {
+	provider := Provider{}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := provider.RegisterFlags(fs, Config{})
+	if err := fs.Parse([]string{"--tenki-image", "  ubuntu:tenki  "}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Provider: tenkiProvider}
+	if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tenki.Image != "ubuntu:tenki" {
+		t.Fatalf("image=%q, want trimmed value", cfg.Tenki.Image)
 	}
 }
 

@@ -320,6 +320,9 @@ func resolveDaytonaSandbox(ctx context.Context, client daytonaAPI, cfg Config, i
 	if err == nil && sandbox != nil && sandbox.GetId() != "" {
 		return sandbox, blank(sandbox.Labels["lease"], id), nil
 	}
+	if err != nil && !daytonaIsNotFoundError(err) {
+		return nil, "", daytonaError("get sandbox", err)
+	}
 	_ = cfg
 	return nil, "", exit(4, "daytona sandbox not found: %s", id)
 }

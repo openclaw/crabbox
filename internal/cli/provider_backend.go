@@ -131,19 +131,79 @@ type NativeCheckpointCapability struct {
 }
 
 type NativeCheckpointRequest struct {
-	Config   Config
-	Server   Server
-	Target   SSHTarget
-	Strategy string
+	Config           Config
+	Server           Server
+	Target           SSHTarget
+	Strategy         string
+	StrategyExplicit bool
 }
 
 type NativeCheckpointProvider interface {
 	NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool)
 }
 
+type NativeCheckpointImage struct {
+	ID         string
+	Name       string
+	State      string
+	Provider   string
+	Kind       string
+	Region     string
+	ResourceID string
+	Direct     bool
+}
+
+type NativeCheckpointCreateRequest struct {
+	Config      Config
+	Server      Server
+	Target      SSHTarget
+	LeaseID     string
+	Name        string
+	RepoName    string
+	Workdir     string
+	Strategy    string
+	NoReboot    bool
+	Wait        bool
+	WaitTimeout time.Duration
+	Stderr      io.Writer
+}
+
+type NativeCheckpointCreateResult struct {
+	Image    NativeCheckpointImage
+	Metadata map[string]string
+}
+
+type NativeCheckpointWorkdirRequest struct {
+	Config   Config
+	Server   Server
+	LeaseID  string
+	RepoName string
+	Override string
+}
+
+type NativeCheckpointResourceRequest struct {
+	Config   Config
+	Image    NativeCheckpointImage
+	Metadata map[string]string
+}
+
+type NativeCheckpointVerifyResult struct {
+	ProviderState string
+	NextAction    string
+	Error         string
+}
+
+type NativeCheckpointLifecycleProvider interface {
+	NativeCheckpointWorkdir(req NativeCheckpointWorkdirRequest) string
+	CreateNativeCheckpoint(ctx context.Context, req NativeCheckpointCreateRequest) (NativeCheckpointCreateResult, error)
+	VerifyNativeCheckpoint(ctx context.Context, req NativeCheckpointResourceRequest) (NativeCheckpointVerifyResult, error)
+	DeleteNativeCheckpoint(ctx context.Context, req NativeCheckpointResourceRequest) error
+}
+
 type NativeCheckpointForkRecord struct {
 	Kind        string
 	ImageID     string
+	Name        string
 	Resource    string
 	Region      string
 	Project     string
@@ -152,6 +212,7 @@ type NativeCheckpointForkRecord struct {
 	TargetOS    string
 	WindowsMode string
 	ServerType  string
+	Metadata    map[string]string
 }
 
 type NativeCheckpointForkRequest struct {
@@ -254,13 +315,14 @@ type CommandRunner interface {
 }
 
 type LocalCommandRequest struct {
-	Name   string
-	Args   []string
-	Env    []string
-	Dir    string
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
+	Name                 string
+	Args                 []string
+	Env                  []string
+	Dir                  string
+	Stdin                io.Reader
+	Stdout               io.Writer
+	Stderr               io.Writer
+	DisableOutputCapture bool
 }
 
 type LocalCommandResult struct {
@@ -311,14 +373,30 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if req.Stdout != nil {
-		cmd.Stdout = io.MultiWriter(req.Stdout, &stdout)
+		if req.DisableOutputCapture {
+			cmd.Stdout = req.Stdout
+		} else {
+			cmd.Stdout = io.MultiWriter(req.Stdout, &stdout)
+		}
 	} else {
-		cmd.Stdout = &stdout
+		if req.DisableOutputCapture {
+			cmd.Stdout = io.Discard
+		} else {
+			cmd.Stdout = &stdout
+		}
 	}
 	if req.Stderr != nil {
-		cmd.Stderr = io.MultiWriter(req.Stderr, &stderr)
+		if req.DisableOutputCapture {
+			cmd.Stderr = req.Stderr
+		} else {
+			cmd.Stderr = io.MultiWriter(req.Stderr, &stderr)
+		}
 	} else {
-		cmd.Stderr = &stderr
+		if req.DisableOutputCapture {
+			cmd.Stderr = io.Discard
+		} else {
+			cmd.Stderr = &stderr
+		}
 	}
 	err := cmd.Run()
 	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}

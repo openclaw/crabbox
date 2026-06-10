@@ -111,6 +111,9 @@ var newAzureDynamicSessionsClient = func(ctx context.Context, cfg Config, rt Run
 }
 
 func azureDynamicSessionsEndpoint(cfg Config) (string, error) {
+	if strings.TrimSpace(cfg.AzureDynamicSessions.Pool) != "" {
+		return "", exit(2, "azureDynamicSessions.pool is not supported; set azureDynamicSessions.endpoint to the custom container poolManagementEndpoint")
+	}
 	endpoint := strings.TrimSpace(cfg.AzureDynamicSessions.Endpoint)
 	if endpoint == "" {
 		return "", exit(2, "provider=%s requires azureDynamicSessions.endpoint set to the custom container poolManagementEndpoint", providerName)
@@ -273,11 +276,15 @@ func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier 
 		switch event.Type {
 		case "stdout":
 			if stdout != nil {
-				_, _ = io.WriteString(stdout, event.Data)
+				if _, err := io.WriteString(stdout, event.Data); err != nil {
+					return exitCode, fmt.Errorf("write %s stdout: %w", providerName, err)
+				}
 			}
 		case "stderr":
 			if stderr != nil {
-				_, _ = io.WriteString(stderr, event.Data)
+				if _, err := io.WriteString(stderr, event.Data); err != nil {
+					return exitCode, fmt.Errorf("write %s stderr: %w", providerName, err)
+				}
 			}
 		case "complete":
 			completed = true

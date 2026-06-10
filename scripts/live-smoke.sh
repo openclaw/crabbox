@@ -80,6 +80,27 @@ capture_run() {
   printf -v "$__name" '%s' "$__out"
 }
 
+capture_stdout() {
+  local __name="$1"
+  shift
+  local __stderr
+  __stderr="$(mktemp)"
+  local __out
+  local __status=0
+  if __out="$("$@" 2>"$__stderr")"; then
+    __status=0
+  else
+    __status=$?
+  fi
+  cat "$__stderr" >&2
+  rm -f "$__stderr"
+  if [[ "$__status" -ne 0 ]]; then
+    printf '%s\n' "$__out"
+    return "$__status"
+  fi
+  printf -v "$__name" '%s' "$__out"
+}
+
 capture_run_live() {
   local __name="$1"
   shift
@@ -217,12 +238,28 @@ blacksmith_smoke() {
   job="${job:-check}"
   local ref="${CRABBOX_BLACKSMITH_REF:-$(config_value blacksmith.ref || config_value actions.ref || true)}"
   ref="${ref:-main}"
+  local org="${CRABBOX_BLACKSMITH_ORG:-}"
+  if [[ -z "$org" ]]; then
+    need_tool ruby
+    org="$(config_value blacksmith.org || true)"
+  fi
+  if [[ -z "$org" ]]; then
+    local actions_repo
+    actions_repo="$(config_value actions.repo || true)"
+    if [[ "$actions_repo" == */* ]]; then
+      org="${actions_repo%%/*}"
+    fi
+  fi
+  if [[ -z "$org" ]]; then
+    echo "blacksmith-testbox smoke requires CRABBOX_BLACKSMITH_ORG, blacksmith.org, or actions.repo in config" >&2
+    return 2
+  fi
   validate_blacksmith_workflow "$workflow"
 
   run_in_repo "$cb" list --provider blacksmith-testbox --json | jq '.[0] // empty'
   run_in_repo "$cb" run \
     --provider blacksmith-testbox \
-    --blacksmith-org "${CRABBOX_BLACKSMITH_ORG:-openclaw}" \
+    --blacksmith-org "$org" \
     --blacksmith-workflow "$workflow" \
     --blacksmith-job "$job" \
     --blacksmith-ref "$ref" \
@@ -537,7 +574,7 @@ tenki_smoke() {
   fi
 
   local auth
-  capture_run auth "$tenki_cli" status --json
+  capture_stdout auth "$tenki_cli" status --json
   if ! printf '%s\n' "$auth" | jq -e '.status | startswith("Logged in")' >/dev/null; then
     echo "tenki smoke requires an authenticated Tenki CLI; run tenki login" >&2
     return 2
@@ -575,7 +612,7 @@ tenki_smoke() {
   run_in_repo "$cb" status --provider tenki --id "$slug" --wait --wait-timeout "${CRABBOX_LIVE_TENKI_WAIT_TIMEOUT:-120s}"
   run_in_repo "$cb" run --provider tenki --id "$slug" --no-sync -- echo crabbox-tenki-ok
   local list_json
-  capture_run list_json run_in_repo "$cb" list --provider tenki --json
+  capture_stdout list_json run_in_repo "$cb" list --provider tenki --json
   printf '%s\n' "$list_json" | jq 'map({id,serverId,slug,provider,state})'
   if ! printf '%s\n' "$list_json" | jq -e --arg lease "$lease" --arg session "$session" \
     'any(.[]; .id == $lease and .serverId == $session and .provider == "tenki")' >/dev/null; then
@@ -803,6 +840,14 @@ needs_coordinator_preamble() {
   has_provider aws || has_provider hetzner || has_provider blacksmith-testbox
 }
 
+needs_admin_audit() {
+  case "${CRABBOX_LIVE_ADMIN_AUDIT:-auto}" in
+    0|false|no|skip) return 1 ;;
+    1|true|yes|required) return 0 ;;
+  esac
+  needs_coordinator_preamble
+}
+
 if needs_coordinator_preamble; then
   run_coordinator_preamble
 fi
@@ -867,9 +912,16 @@ if has_provider morph; then
   morph_smoke
 fi
 
-admin_out="$(run_in_repo "$cb" admin leases --state active --json 2>&1)" || {
-  printf 'warning: admin active-lease check skipped: %s\n' "$admin_out" >&2
-  exit 0
-}
+if needs_admin_audit; then
+  admin_status=0
+  admin_out="$(run_in_repo "$cb" admin leases --state active --json 2>&1)" || admin_status=$?
+  if [[ "$admin_status" -ne 0 ]]; then
+    printf 'error: admin active-lease check failed: %s\n' "$admin_out" >&2
+    exit "$admin_status"
+  fi
+else
+  printf 'warning: admin active-lease check skipped; set CRABBOX_LIVE_ADMIN_AUDIT=1 to require it\n' >&2
+  admin_out='[]'
+fi
 need_tool jq
 printf '%s\n' "$admin_out" | jq 'length'

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ type fakeHetznerClient struct {
 	createServer Server
 	createErr    error
 	deleteErr    error
+	keyDeleteErr error
 	keyCreated   bool
 
 	deletedServers []int64
@@ -51,7 +53,7 @@ func (f *fakeHetznerClient) DeleteServer(_ context.Context, id int64) error {
 
 func (f *fakeHetznerClient) DeleteSSHKey(_ context.Context, name string) error {
 	f.deletedKeys = append(f.deletedKeys, name)
-	return nil
+	return f.keyDeleteErr
 }
 
 func (f *fakeHetznerClient) SetLabels(context.Context, int64, map[string]string) error {
@@ -155,6 +157,99 @@ func TestHetznerDeleteAllowsLegacyServerWithoutProviderLabel(t *testing.T) {
 	}
 }
 
+func TestHetznerReleaseRetainsClaimUntilKeyDeleteSucceeds(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	keyErr := errors.New("delete key failed")
+	client := &fakeHetznerClient{keyDeleteErr: keyErr}
+	installHetznerTestHooks(t, client)
+	installHetznerClaimState(t)
+
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "test", providerName, "/repo", 30*time.Minute, false); err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+
+	backend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
+	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: crabboxHetznerServer(42, leaseID)}})
+	if !errors.Is(err, keyErr) {
+		t.Fatalf("err=%v, want key delete failure", err)
+	}
+	if len(client.deletedServers) != 1 || client.deletedServers[0] != 42 {
+		t.Fatalf("deletedServers=%v, want [42]", client.deletedServers)
+	}
+	if want := core.ProviderKeyForLease(leaseID); len(client.deletedKeys) != 1 || client.deletedKeys[0] != want {
+		t.Fatalf("deletedKeys=%v, want [%s]", client.deletedKeys, want)
+	}
+	if claim, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || !ok || claim.LeaseID != leaseID {
+		t.Fatalf("claim=%+v ok=%v err=%v, want retained claim", claim, ok, err)
+	}
+
+	client.deleteErr = errors.New(`hetzner DELETE /servers/42: http 404: {"error":{"code":"not_found"}}`)
+	client.keyDeleteErr = nil
+	err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: crabboxHetznerServer(42, leaseID)}})
+	if err != nil {
+		t.Fatalf("retry ReleaseLease: %v", err)
+	}
+	if len(client.deletedServers) != 2 || client.deletedServers[1] != 42 {
+		t.Fatalf("deletedServers=%v, want second delete of 42", client.deletedServers)
+	}
+	if want := core.ProviderKeyForLease(leaseID); len(client.deletedKeys) != 2 || client.deletedKeys[1] != want {
+		t.Fatalf("deletedKeys=%v, want second delete of %s", client.deletedKeys, want)
+	}
+	if claim, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok || claim.LeaseID != "" {
+		t.Fatalf("claim=%+v ok=%v err=%v, want removed claim after retry", claim, ok, err)
+	}
+}
+
+func TestHetznerReleaseTreatsMissingServerAsGone(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	client := &fakeHetznerClient{deleteErr: errors.New(`hetzner DELETE /servers/42: http 404: {"error":{"code":"not_found"}}`)}
+	installHetznerTestHooks(t, client)
+	installHetznerClaimState(t)
+
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "test", providerName, "/repo", 30*time.Minute, false); err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+
+	backend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
+	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: crabboxHetznerServer(42, leaseID)}})
+	if err != nil {
+		t.Fatalf("ReleaseLease: %v", err)
+	}
+	if len(client.deletedServers) != 1 || client.deletedServers[0] != 42 {
+		t.Fatalf("deletedServers=%v, want [42]", client.deletedServers)
+	}
+	if want := core.ProviderKeyForLease(leaseID); len(client.deletedKeys) != 1 || client.deletedKeys[0] != want {
+		t.Fatalf("deletedKeys=%v, want [%s]", client.deletedKeys, want)
+	}
+	if claim, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok || claim.LeaseID != "" {
+		t.Fatalf("claim=%+v ok=%v err=%v, want removed claim", claim, ok, err)
+	}
+}
+
+func TestHetznerReleaseDoesNotTreatBodyMentioned404AsMissingServer(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	deleteErr := errors.New(`hetzner DELETE /servers/42: http 500: {"message":"upstream http 404"}`)
+	client := &fakeHetznerClient{deleteErr: deleteErr}
+	installHetznerTestHooks(t, client)
+	installHetznerClaimState(t)
+
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "test", providerName, "/repo", 30*time.Minute, false); err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+
+	backend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
+	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: crabboxHetznerServer(42, leaseID)}})
+	if !errors.Is(err, deleteErr) {
+		t.Fatalf("err=%v, want server delete failure", err)
+	}
+	if len(client.deletedKeys) != 0 {
+		t.Fatalf("deletedKeys=%v, want none", client.deletedKeys)
+	}
+	if claim, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || !ok || claim.LeaseID != leaseID {
+		t.Fatalf("claim=%+v ok=%v err=%v, want retained claim", claim, ok, err)
+	}
+}
+
 func TestHetznerAcquireRollsBackAfterIPWaitFailure(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
 	server := crabboxHetznerServer(42, leaseID)
@@ -243,4 +338,16 @@ func crabboxHetznerServer(id int64, leaseID string) Server {
 	}
 	server.PublicNet.IPv4.IP = "203.0.113.10"
 	return server
+}
+
+func installHetznerClaimState(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
 }

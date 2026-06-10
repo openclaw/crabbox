@@ -23,8 +23,8 @@ It is not suitable for SSH-oriented or interactive desktop workflows.
 - **Not supported:** SSH, VNC, browser desktop, code-server, Actions hydration,
   `--download`, `--fresh-pr`, `--artifact-glob`, `--require-artifact`, and
   `--checksum` (sync is archive-based, so there is no per-file checksum step).
-  The provider also does not participate in the [pond](../features/pond.md)
-  bridge plane, so `pond peers` reports its targets as `unsupported`.
+  The provider also does not advertise a [pond](../features/pond.md) transport,
+  so `pond peers` reports Cloudflare members as `transport=none`.
 
 ## Requirements
 
@@ -242,8 +242,8 @@ Crabbox does not wire those by default, but custom runner images can add them:
   `--fresh-pr` are not supported.
 - `--checksum` is not supported, because sync uses archive upload/extract rather
   than rsync.
-- The provider does not participate in the pond bridge plane; `pond peers`
-  reports its targets as `unsupported` rather than fabricating an endpoint.
+- The provider does not advertise a pond transport; `pond peers` reports
+  Cloudflare members as `transport=none` rather than fabricating an endpoint.
 - Cleanup cannot discover containers that have no local Crabbox claim.
 - Container capacity is bounded by the checked-in Wrangler bindings
   (`max_instances`) and the target account's Cloudflare Containers limits.

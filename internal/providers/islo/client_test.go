@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // TestIsloClientDeleteSandboxHandlesEmptyAndMissing verifies the raw DELETE
@@ -63,4 +64,20 @@ func TestIsloClientDeleteSandboxHandlesEmptyAndMissing(t *testing.T) {
 			t.Fatal("expected error for 500 delete, got nil")
 		}
 	})
+}
+
+func TestIsloShareFromAPIMarksInvalidExpiryAsSet(t *testing.T) {
+	expiresAt := "not-a-time"
+	share := isloShareFromAPI(isloShareResponse{
+		ShareID:   "shr_123",
+		URL:       "https://share.islo.dev",
+		Port:      8080,
+		ExpiresAt: &expiresAt,
+	})
+	if !share.ExpiresAtSet {
+		t.Fatalf("ExpiresAtSet=false, want true for non-empty API expiry")
+	}
+	if !share.ExpiresAt.IsZero() {
+		t.Fatalf("ExpiresAt=%s want zero for invalid expiry", share.ExpiresAt.Format(time.RFC3339))
+	}
 }

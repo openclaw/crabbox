@@ -434,11 +434,11 @@ func bridgePeerFromClaim(claim leaseClaim, class string) BridgePeer {
 		if isBlacksmithProvider(claim.Provider) {
 			peer.Note = "blacksmith owns connectivity"
 		} else {
-			peer.Note = fmt.Sprintf("no bridge adapter for provider %s", claim.Provider)
+			peer.Note = fmt.Sprintf("no advertised pond transport for provider %s", claim.Provider)
 		}
 	default:
 		peer.Transport = TransportNone
-		peer.Note = fmt.Sprintf("no bridge adapter for provider %s", claim.Provider)
+		peer.Note = fmt.Sprintf("no advertised pond transport for provider %s", claim.Provider)
 	}
 	return peer
 }

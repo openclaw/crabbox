@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNamespaceSSHTargetParsesPrepareResult(t *testing.T) {
@@ -51,6 +53,28 @@ func TestParseNamespaceListAcceptsEmptyCLIText(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Fatalf("items=%#v", items)
+	}
+}
+
+func TestListDevboxesIgnoresSuccessfulCommandStderr(t *testing.T) {
+	runner := &namespaceQueuedRunner{
+		results: []LocalCommandResult{{
+			Stdout: `[{"name":"crabbox-blue-lobster-deadbeef","status":"running","size":"L"}]`,
+			Stderr: "warning: update available\n",
+		}},
+	}
+	var stderr bytes.Buffer
+	backend := &namespaceLeaseBackend{rt: Runtime{Exec: runner, Stderr: &stderr}}
+
+	items, err := backend.listDevboxes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Name != "crabbox-blue-lobster-deadbeef" {
+		t.Fatalf("items=%#v", items)
+	}
+	if !strings.Contains(stderr.String(), "warning: update available") {
+		t.Fatalf("stderr=%q, want warning replayed", stderr.String())
 	}
 }
 
@@ -219,6 +243,40 @@ func TestNamespaceRejectsUnsafeWorkRoot(t *testing.T) {
 	}
 }
 
+func TestNamespaceAutoStopDurationFlagValidation(t *testing.T) {
+	for _, value := range []string{"bogus", "0s", "-1m", ""} {
+		t.Run(value, func(t *testing.T) {
+			cfg := Config{}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			values := RegisterNamespaceProviderFlags(fs, cfg)
+			if err := fs.Parse([]string{"--namespace-auto-stop-idle-timeout", value}); err != nil {
+				t.Fatal(err)
+			}
+			err := ApplyNamespaceProviderFlags(&cfg, fs, values)
+			if err == nil || !strings.Contains(err.Error(), "namespace auto-stop idle timeout must be a positive duration") {
+				t.Fatalf("ApplyNamespaceProviderFlags(%q) err=%v, want duration validation", value, err)
+			}
+		})
+	}
+}
+
+func TestNamespaceAutoStopDurationFlagAppliesValidValue(t *testing.T) {
+	cfg := Config{}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := RegisterNamespaceProviderFlags(fs, cfg)
+	if err := fs.Parse([]string{"--namespace-auto-stop-idle-timeout", "45m"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyNamespaceProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Namespace.AutoStopIdleTimeout != 45*time.Minute {
+		t.Fatalf("auto-stop idle timeout=%s, want 45m", cfg.Namespace.AutoStopIdleTimeout)
+	}
+}
+
 func TestNamespaceLifecycleCommandFallbacks(t *testing.T) {
 	runner := &namespaceRecordingRunner{failFirst: true}
 	backend := &namespaceLeaseBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
@@ -254,6 +312,30 @@ func TestNamespacePrepareReportsPrepareFailure(t *testing.T) {
 	}
 }
 
+func TestNamespacePrepareIgnoresSuccessfulCommandStderr(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	runner := &namespaceQueuedRunner{
+		results: []LocalCommandResult{
+			{ExitCode: 2, Stderr: "configure unsupported"},
+			{Stdout: `{"ssh_endpoint":"crabbox@ssh.namespace.example:2222","ssh_key_path":"/tmp/ns-key"}`, Stderr: "warning: update available\n"},
+		},
+		errs: []error{errors.New("unsupported"), nil},
+	}
+	var stderr bytes.Buffer
+	backend := &namespaceLeaseBackend{rt: Runtime{Stdout: io.Discard, Stderr: &stderr, Exec: runner}}
+
+	target, err := backend.prepareDevbox(context.Background(), "crabbox-blue-lobster-deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.User != "crabbox" || target.Host != "ssh.namespace.example" || target.Port != "2222" {
+		t.Fatalf("target=%#v", target)
+	}
+	if !strings.Contains(stderr.String(), "warning: update available") {
+		t.Fatalf("stderr=%q, want warning replayed", stderr.String())
+	}
+}
+
 type namespaceRecordingRunner struct {
 	calls     []string
 	failAll   bool
@@ -270,4 +352,25 @@ func (r *namespaceRecordingRunner) Run(_ context.Context, req LocalCommandReques
 		return LocalCommandResult{ExitCode: 2}, errors.New("unsupported")
 	}
 	return LocalCommandResult{}, nil
+}
+
+type namespaceQueuedRunner struct {
+	calls   []string
+	results []LocalCommandResult
+	errs    []error
+}
+
+func (r *namespaceQueuedRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	r.calls = append(r.calls, req.Name+" "+strings.Join(req.Args, " "))
+	if len(r.results) == 0 {
+		return LocalCommandResult{}, nil
+	}
+	result := r.results[0]
+	r.results = r.results[1:]
+	var err error
+	if len(r.errs) > 0 {
+		err = r.errs[0]
+		r.errs = r.errs[1:]
+	}
+	return result, err
 }

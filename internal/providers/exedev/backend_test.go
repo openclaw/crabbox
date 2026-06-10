@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 type exeDevRecordingRunner struct {
@@ -112,6 +113,75 @@ func TestExeDevCreateVMUsesSSHControlAPI(t *testing.T) {
 	if vm.Name() != "crabbox-blue-12345678" || vm.SSHHost() != "crabbox-blue-12345678.exe.xyz" {
 		t.Fatalf("vm=%#v", vm)
 	}
+}
+
+func TestExeDevAcquireReportsRollbackFailureAfterPrepareFailure(t *testing.T) {
+	primaryErr := errors.New("ssh not ready")
+	oldWait := waitForSSHReady
+	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return primaryErr
+	}
+	t.Cleanup(func() { waitForSSHReady = oldWait })
+	runner := newExeDevAcquireRollbackRunner()
+	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}})
+	assertExeDevRollbackFailure(t, err, primaryErr, runner)
+}
+
+func TestExeDevAcquireReportsRollbackFailureAfterClaimFailure(t *testing.T) {
+	primaryErr := errors.New("claim failed")
+	oldWait := waitForSSHReady
+	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return nil
+	}
+	t.Cleanup(func() { waitForSSHReady = oldWait })
+	oldClaim := claimLeaseForRepoProvider
+	claimLeaseForRepoProvider = func(string, string, string, string, time.Duration, bool) error {
+		return primaryErr
+	}
+	t.Cleanup(func() { claimLeaseForRepoProvider = oldClaim })
+	runner := newExeDevAcquireRollbackRunner()
+	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}})
+	assertExeDevRollbackFailure(t, err, primaryErr, runner)
+}
+
+func newExeDevAcquireRollbackRunner() *exeDevRecordingRunner {
+	return &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		cmd := strings.Join(req.Args, " ")
+		switch {
+		case strings.Contains(cmd, "ls --l --json --a"):
+			return LocalCommandResult{Stdout: `{"vms":[]}`}, nil
+		case strings.Contains(cmd, " new "):
+			return LocalCommandResult{Stdout: `{"vm_name":"created-vm","ssh_dest":"created-vm.exe.xyz","status":"running"}`}, nil
+		case strings.Contains(cmd, " rm "):
+			return LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
+		default:
+			return LocalCommandResult{}, nil
+		}
+	}}
+}
+
+func assertExeDevRollbackFailure(t *testing.T, err error, primary error, runner *exeDevRecordingRunner) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("Acquire succeeded, want rollback failure")
+	}
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+		t.Fatalf("err=%#v, want rendered ExitError code 1", err)
+	}
+	for _, want := range []string{"exe.dev cleanup failed for VM", "manual cleanup: crabbox stop --provider exe-dev --id", "exit status 1", primary.Error()} {
+		if !strings.Contains(exitErr.Message, want) {
+			t.Fatalf("exit message=%q missing %q", exitErr.Message, want)
+		}
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(strings.Join(call.Args, " "), " rm ") {
+			return
+		}
+	}
+	t.Fatalf("rollback did not call rm: %#v", runner.calls)
 }
 
 func TestExeDevDefaultsPreserveCustomTopLevelWorkRoot(t *testing.T) {

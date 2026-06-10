@@ -243,8 +243,16 @@ const staticLeaseIDPrefix = "static_"
 // and restores the original static host from the local claim when the caller
 // did not already pass --static-host.
 func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
-	suffix, ok := strings.CutPrefix(strings.TrimSpace(id), staticLeaseIDPrefix)
-	if !ok || suffix == "" {
+	id = strings.TrimSpace(id)
+	suffix, hasStaticPrefix := strings.CutPrefix(id, staticLeaseIDPrefix)
+	if flagWasSet(fs, "provider") && !isStaticProvider(cfg.Provider) {
+		return nil
+	}
+	claim, hasClaim, err := staticLeaseClaim(id)
+	if err != nil {
+		return err
+	}
+	if (!hasStaticPrefix || suffix == "") && !hasClaim {
 		return nil
 	}
 	if !flagWasSet(fs, "provider") {
@@ -253,11 +261,8 @@ func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
 	if !isStaticProvider(cfg.Provider) {
 		return nil
 	}
-	claim, ok, err := staticLeaseClaim(id)
-	if err != nil {
-		return err
-	}
-	if ok {
+	if hasClaim {
+		restoreStaticClaimIdentity(cfg, claim)
 		restoreStaticClaimTarget(cfg, fs, claim)
 	}
 	normalizeTargetConfig(cfg)
@@ -270,6 +275,15 @@ func staticLeaseClaim(id string) (leaseClaim, bool, error) {
 		return leaseClaim{}, false, err
 	}
 	return claim, true, nil
+}
+
+func restoreStaticClaimIdentity(cfg *Config, claim leaseClaim) {
+	if strings.TrimSpace(claim.LeaseID) != "" {
+		cfg.Static.ID = strings.TrimSpace(claim.LeaseID)
+	}
+	if strings.TrimSpace(claim.Slug) != "" {
+		cfg.Static.Name = strings.TrimSpace(claim.Slug)
+	}
 }
 
 func restoreStaticClaimTarget(cfg *Config, fs *flag.FlagSet, claim leaseClaim) {

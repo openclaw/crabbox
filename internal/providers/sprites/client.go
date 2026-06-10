@@ -179,6 +179,10 @@ func isCrabboxSprite(sprite spritesInfo) bool {
 			return true
 		}
 	}
+	return false
+}
+
+func isLegacyCrabboxSpriteName(sprite spritesInfo) bool {
 	return strings.HasPrefix(sprite.Name, "crabbox-")
 }
 

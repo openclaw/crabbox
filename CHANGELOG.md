@@ -1,17 +1,30 @@
 # Changelog
 
-## Unreleased
+## 0.28.0 - 2026-06-11
 
 ### Added
 
+- Added local-container checkpoint forks that launch a fresh Docker lease from a committed checkpoint image while replaying and validating its recorded daemon scope. Thanks @anagnorisis2peripeteia.
+- Added opt-in native Docker local-container checkpoints with immutable image identity, daemon-scope-aware verification and deletion, mounted-workspace guards, and live lifecycle coverage. Thanks @anagnorisis2peripeteia.
 - Added `provider: morph` for Morph Cloud Linux SSH leases, including snapshot boot, Morph API key/config plumbing, per-instance SSH key retrieval, pause-on-release reuse, and provider docs.
 - Added a built-in Incus provider for local or remote Linux containers and virtual machines, including socket, TLS, and OIDC control-plane authentication, optional SSH proxy devices, retained lease reuse, and live lifecycle verification. Thanks @coygeek.
 - Added Tart macOS desktop leases with native Screen Sharing, a token-gated host-side WebVNC bridge, and documented local-network exposure boundaries. Thanks @anagnorisis2peripeteia.
 - Added native Azure Windows ARM64 lease support with explicit Windows ARM64 images, Cobalt ARM64 SKU inference, and `CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` broker configuration for ARM64 validation.
+- Added persistent Apple Container 1.0 development machines through the local `apple-machine` provider.
+- Added local Windows sandbox execution through Microsoft Execution Containers with explicit filesystem, network, DACL-fallback, and Win32k capability controls plus an execution-backed doctor check.
+
+### Changed
+
+- Removed the stale root OpenClaw plugin package and its npm publishing surface; Crabbox releases now version only the Worker package and Go CLI artifacts.
+- Expanded release, smoke, installer, provider-contract, cleanup, and race coverage across the CLI, Worker, and provider adapters.
 
 ### Fixed
 
 - Fixed kept Tart VMs stopping when the Crabbox command that launched them exited.
+- Hardened provider lifecycle ownership, claims, retained-resource metadata, rollback, cleanup timeouts, and partial-failure reporting across Apple Container, ASCII Box, AWS, Azure, Azure Dynamic Sessions, Blacksmith Testbox, Cloudflare, Daytona, Docker Sandbox, E2B, exe.dev, external providers, GCP, Hetzner, Islo, Local Container, Modal, Multipass, Namespace, Parallels, Proxmox, Railway, RunPod, Semaphore, Sprites, SSH, Tart, Tenki, Tensorlake, Upstash Box, and Weights & Biases.
+- Fixed static SSH requested slugs, delegated synthetic lease IDs, provider bridge targets, service inventory pagination, Windows share validation, and provider-specific configuration validation.
+- Fixed Linux and macOS developer-tool installers, AWS account and orphan guards, image-minting and WSL2 smoke cleanup, coverage isolation, live-smoke JSON handling, and release workflow tag checkout ordering.
+- Fixed CI deadcode, script sandboxing, and Cloudflare cleanup race failures found during release validation.
 
 ## 0.27.0 - 2026-06-09
 

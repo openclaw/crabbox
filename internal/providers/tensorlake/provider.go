@@ -21,7 +21,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "firecracker",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureURLBridge},
+		Features:    core.FeatureSet{},
 		Coordinator: core.CoordinatorNever,
 	}
 }

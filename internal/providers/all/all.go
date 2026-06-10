@@ -2,6 +2,7 @@ package all
 
 import (
 	_ "github.com/openclaw/crabbox/internal/providers/applecontainer"
+	_ "github.com/openclaw/crabbox/internal/providers/applemachine"
 	_ "github.com/openclaw/crabbox/internal/providers/asciibox"
 	_ "github.com/openclaw/crabbox/internal/providers/aws"
 	_ "github.com/openclaw/crabbox/internal/providers/azure"
@@ -22,6 +23,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/modal"
 	_ "github.com/openclaw/crabbox/internal/providers/morph"
 	_ "github.com/openclaw/crabbox/internal/providers/multipass"
+	_ "github.com/openclaw/crabbox/internal/providers/mxc"
 	_ "github.com/openclaw/crabbox/internal/providers/namespace"
 	_ "github.com/openclaw/crabbox/internal/providers/parallels"
 	_ "github.com/openclaw/crabbox/internal/providers/proxmox"

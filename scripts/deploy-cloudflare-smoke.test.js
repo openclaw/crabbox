@@ -12,7 +12,7 @@ function writeExecutable(file, body) {
   fs.chmodSync(file, 0o755);
 }
 
-test("deploy-cloudflare-smoke stops a kept lease after failed kept run", () => {
+test("deploy-cloudflare-smoke ignores lease-like stderr from failed kept run", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-cf-smoke-"));
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin);
@@ -39,7 +39,74 @@ const calls = process.env.CRABBOX_FAKE_CALLS;
 const args = process.argv.slice(2);
 fs.appendFileSync(calls, JSON.stringify(args) + "\\n");
 if (args[0] === "run" && args.includes("--keep")) {
-  process.stderr.write("leased cbx_keep slug=blue-lobster provider=cloudflare sandbox=cbx_keep\\n");
+  process.stderr.write("leased cbx_keep from diagnostic stderr\\n");
+  process.exit(7);
+}
+process.exit(0);
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/deploy-cloudflare-smoke.sh"], {
+    cwd: root,
+    env: {
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      HOME: process.env.HOME ?? dir,
+      TMPDIR: process.env.TMPDIR ?? os.tmpdir(),
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_FAKE_CALLS: calls,
+      CRABBOX_CLOUDFLARE_SKIP_DEPLOY: "1",
+      CRABBOX_CLOUDFLARE_SKIP_SMOKE: "0",
+      CRABBOX_LIVE_REPO: root,
+      CRABBOX_CLOUDFLARE_RUNNER_URL: "https://runner.example.test",
+      CRABBOX_CLOUDFLARE_RUNNER_TOKEN: "token",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 7, result.stderr || result.stdout);
+  const seen = fs
+    .readFileSync(calls, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(
+    seen.some((args) =>
+      JSON.stringify(args) ===
+      JSON.stringify(["stop", "--provider", "cloudflare", "cbx_keep"]),
+    ),
+    false,
+    `diagnostic stderr should not be parsed as a cleanup lease in ${JSON.stringify(seen)}`,
+  );
+});
+
+test("deploy-cloudflare-smoke stops kept lease from failed timing JSON", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-cf-smoke-"));
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin);
+  const calls = path.join(dir, "calls.jsonl");
+
+  writeExecutable(
+    path.join(bin, "go"),
+    `#!/usr/bin/env node
+process.exit(0);
+`,
+  );
+  writeExecutable(
+    path.join(bin, "npm"),
+    `#!/usr/bin/env node
+process.exit(0);
+`,
+  );
+  const fakeCrabbox = path.join(dir, "crabbox");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const calls = process.env.CRABBOX_FAKE_CALLS;
+const args = process.argv.slice(2);
+fs.appendFileSync(calls, JSON.stringify(args) + "\\n");
+if (args[0] === "run" && args.includes("--keep")) {
+  process.stderr.write(JSON.stringify({ leaseId: "cbx_keep", provider: "cloudflare", exitCode: 7 }) + "\\n");
   process.exit(7);
 }
 process.exit(0);
@@ -74,7 +141,141 @@ process.exit(0);
       JSON.stringify(args) ===
       JSON.stringify(["stop", "--provider", "cloudflare", "cbx_keep"]),
     ),
-    `expected cleanup stop call in ${JSON.stringify(seen)}`,
+    `expected trap stop call in ${JSON.stringify(seen)}`,
+  );
+});
+
+test("deploy-cloudflare-smoke stops kept lease from failed lease record", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-cf-smoke-"));
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin);
+  const calls = path.join(dir, "calls.jsonl");
+
+  writeExecutable(
+    path.join(bin, "go"),
+    `#!/usr/bin/env node
+process.exit(0);
+`,
+  );
+  writeExecutable(
+    path.join(bin, "npm"),
+    `#!/usr/bin/env node
+process.exit(0);
+`,
+  );
+  const fakeCrabbox = path.join(dir, "crabbox");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const calls = process.env.CRABBOX_FAKE_CALLS;
+const args = process.argv.slice(2);
+fs.appendFileSync(calls, JSON.stringify(args) + "\\n");
+if (args[0] === "run" && args.includes("--keep")) {
+  process.stderr.write("leased cbx_keep slug=blue-box provider=cloudflare sandbox=cbx_keep\\n");
+  process.exit(7);
+}
+process.exit(0);
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/deploy-cloudflare-smoke.sh"], {
+    cwd: root,
+    env: {
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      HOME: process.env.HOME ?? dir,
+      TMPDIR: process.env.TMPDIR ?? os.tmpdir(),
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_FAKE_CALLS: calls,
+      CRABBOX_CLOUDFLARE_SKIP_DEPLOY: "1",
+      CRABBOX_CLOUDFLARE_SKIP_SMOKE: "0",
+      CRABBOX_LIVE_REPO: root,
+      CRABBOX_CLOUDFLARE_RUNNER_URL: "https://runner.example.test",
+      CRABBOX_CLOUDFLARE_RUNNER_TOKEN: "token",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 7, result.stderr || result.stdout);
+  const seen = fs
+    .readFileSync(calls, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.ok(
+    seen.some((args) =>
+      JSON.stringify(args) ===
+      JSON.stringify(["stop", "--provider", "cloudflare", "cbx_keep"]),
+    ),
+    `expected trap stop call in ${JSON.stringify(seen)}`,
+  );
+});
+
+test("deploy-cloudflare-smoke stops kept lease parsed from timing JSON", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-cf-smoke-"));
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin);
+  const calls = path.join(dir, "calls.jsonl");
+
+  writeExecutable(
+    path.join(bin, "go"),
+    `#!/usr/bin/env node
+process.exit(0);
+`,
+  );
+  writeExecutable(
+    path.join(bin, "npm"),
+    `#!/usr/bin/env node
+process.exit(0);
+`,
+  );
+  const fakeCrabbox = path.join(dir, "crabbox");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const calls = process.env.CRABBOX_FAKE_CALLS;
+const args = process.argv.slice(2);
+fs.appendFileSync(calls, JSON.stringify(args) + "\\n");
+if (args[0] === "run" && args.includes("--keep")) {
+  process.stderr.write("cloudflare warning on stderr\\n");
+  process.stdout.write("CRABBOX_CF_KEEP_OK\\n");
+  process.stderr.write(JSON.stringify({ leaseId: "cbx_keep", provider: "cloudflare", exitCode: 0 }) + "\\n");
+}
+process.exit(0);
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/deploy-cloudflare-smoke.sh"], {
+    cwd: root,
+    env: {
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      HOME: process.env.HOME ?? dir,
+      TMPDIR: process.env.TMPDIR ?? os.tmpdir(),
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_FAKE_CALLS: calls,
+      CRABBOX_CLOUDFLARE_SKIP_DEPLOY: "1",
+      CRABBOX_CLOUDFLARE_SKIP_SMOKE: "0",
+      CRABBOX_LIVE_REPO: root,
+      CRABBOX_CLOUDFLARE_RUNNER_URL: "https://runner.example.test",
+      CRABBOX_CLOUDFLARE_RUNNER_TOKEN: "token",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stderr, /cloudflare warning on stderr/);
+  const seen = fs
+    .readFileSync(calls, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.ok(
+    seen.some((args) =>
+      JSON.stringify(args) ===
+      JSON.stringify(["stop", "--provider", "cloudflare", "cbx_keep"]),
+    ),
+    `expected explicit stop call in ${JSON.stringify(seen)}`,
   );
 });
 

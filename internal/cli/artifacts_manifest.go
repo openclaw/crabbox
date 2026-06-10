@@ -15,7 +15,10 @@ import (
 	"time"
 )
 
-const artifactManifestFilename = "artifact-manifest.json"
+const (
+	artifactManifestFilename = "artifact-manifest.json"
+	maxPulledArtifactBytes   = int64(1024 * 1024 * 1024)
+)
 
 type artifactManifest struct {
 	SchemaVersion int                    `json:"schemaVersion"`
@@ -163,6 +166,9 @@ func pullArtifactManifest(ctx context.Context, ref, output string, overwrite boo
 	for _, file := range manifest.Files {
 		if strings.TrimSpace(file.Name) == "" {
 			return artifactPullResult{}, exit(2, "artifact manifest contains an unnamed file")
+		}
+		if file.Size < 0 {
+			return artifactPullResult{}, exit(2, "artifact size for %s is invalid: %d", file.Name, file.Size)
 		}
 		outPath, err := safeArtifactOutputPath(output, file.Name)
 		if err != nil {
@@ -333,17 +339,47 @@ func downloadArtifactURL(ctx context.Context, file artifactManifestFile, outPath
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", 0, "", exit(2, "download artifact %s: http %d: %s", file.Name, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	limit := artifactDownloadLimit(file)
+	if resp.ContentLength > limit {
+		return "", 0, "", exit(2, "artifact %s is too large: content-length %d exceeds limit %d", file.Name, resp.ContentLength, limit)
+	}
 	dest, err := os.Create(outPath)
 	if err != nil {
 		return "", 0, "", exit(2, "create artifact %s: %v", outPath, err)
 	}
 	defer dest.Close()
 	hash := sha256.New()
-	written, err := io.Copy(io.MultiWriter(dest, hash), resp.Body)
+	written, exceeded, err := copyArtifactResponse(io.MultiWriter(dest, hash), resp.Body, limit)
 	if err != nil {
 		return "", 0, "", exit(2, "write artifact %s: %v", file.Name, err)
 	}
+	if exceeded {
+		return "", 0, "", exit(2, "artifact %s is too large: response exceeds limit %d", file.Name, limit)
+	}
 	return resp.Header.Get("content-type"), written, hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func artifactDownloadLimit(file artifactManifestFile) int64 {
+	if file.Size > 0 && file.Size < maxPulledArtifactBytes {
+		return file.Size
+	}
+	return maxPulledArtifactBytes
+}
+
+func copyArtifactResponse(dest io.Writer, body io.Reader, limit int64) (int64, bool, error) {
+	written, err := io.Copy(dest, io.LimitReader(body, limit))
+	if err != nil {
+		return written, false, err
+	}
+	var extra [1]byte
+	n, err := body.Read(extra[:])
+	if n > 0 {
+		return written, true, nil
+	}
+	if err != nil && err != io.EOF {
+		return written, false, err
+	}
+	return written, false, nil
 }
 
 func safeArtifactOutputPath(root, name string) (string, error) {

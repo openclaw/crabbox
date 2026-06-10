@@ -18,8 +18,12 @@ type DirectSSHBackend struct {
 func (b *DirectSSHBackend) Spec() core.ProviderSpec { return b.SpecValue }
 
 func (b *DirectSSHBackend) CleanupServers(ctx context.Context, req core.CleanupRequest, servers []core.Server) error {
+	now := time.Now().UTC()
+	if b.RT.Clock != nil {
+		now = b.RT.Clock.Now().UTC()
+	}
 	for _, s := range servers {
-		shouldDelete, reason := core.ShouldCleanupServer(s, time.Now().UTC())
+		shouldDelete, reason := core.ShouldCleanupServer(s, now)
 		if !shouldDelete {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", s.DisplayID(), s.Name, reason)
 			continue

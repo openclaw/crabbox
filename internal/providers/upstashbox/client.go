@@ -59,6 +59,10 @@ type execResult struct {
 	Error    string `json:"error"`
 }
 
+const upstashBoxDefaultResponseHeaderTimeout = 30 * time.Second
+
+var upstashBoxCleanupTimeout = 15 * time.Second
+
 var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	apiKey := strings.TrimSpace(cfg.UpstashBox.APIKey)
 	if apiKey == "" {
@@ -66,10 +70,20 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = defaultUpstashBoxHTTPClient()
 	}
 	base := strings.TrimRight(blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), "https://us-east-1.box.upstash.com"), "/")
 	return &client{apiKey: apiKey, base: base, http: httpClient}, nil
+}
+
+func upstashBoxCleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), upstashBoxCleanupTimeout)
+}
+
+func defaultUpstashBoxHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = upstashBoxDefaultResponseHeaderTimeout
+	return &http.Client{Transport: transport}
 }
 
 func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, error) {
@@ -121,7 +135,7 @@ func (c *client) cleanupCreatedBox(boxID string, cause error) error {
 	if strings.TrimSpace(boxID) == "" {
 		return cause
 	}
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	cleanupCtx, cancel := upstashBoxCleanupContext()
 	defer cancel()
 	if err := c.DeleteBoxes(cleanupCtx, []string{boxID}); err != nil {
 		return fmt.Errorf("%w; cleanup failed for upstash-box %s: %v", cause, boxID, err)
@@ -203,6 +217,7 @@ func (c *client) UploadFile(ctx context.Context, boxID, localPath, remotePath st
 	}
 	reader, pipeWriter := io.Pipe()
 	writer := multipart.NewWriter(pipeWriter)
+	producerDone := make(chan error, 1)
 	go func() {
 		var writeErr error
 		defer func() {
@@ -213,6 +228,7 @@ func (c *client) UploadFile(ctx context.Context, boxID, localPath, remotePath st
 				writeErr = closeErr
 			}
 			_ = pipeWriter.CloseWithError(writeErr)
+			producerDone <- writeErr
 		}()
 		if writeErr = writer.WriteField("paths", remotePath); writeErr != nil {
 			return
@@ -224,22 +240,31 @@ func (c *client) UploadFile(ctx context.Context, boxID, localPath, remotePath st
 		}
 		_, writeErr = io.Copy(part, file)
 	}()
+	finishProducer := func(primary error) error {
+		if primary != nil {
+			_ = reader.CloseWithError(primary)
+		}
+		producerErr := <-producerDone
+		if primary != nil {
+			return primary
+		}
+		return producerErr
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v2/box/"+url.PathEscape(boxID)+"/files/upload", reader)
 	if err != nil {
-		_ = reader.Close()
-		return err
+		return finishProducer(err)
 	}
 	c.addHeaders(req)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return finishProducer(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return apiError(resp)
+		return finishProducer(apiError(resp))
 	}
-	return nil
+	return finishProducer(nil)
 }
 
 func (c *client) WriteFile(ctx context.Context, boxID, remotePath, content string) error {

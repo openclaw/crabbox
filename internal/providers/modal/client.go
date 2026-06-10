@@ -250,6 +250,8 @@ import threading
 import traceback
 
 TRANSPORT_EXIT = 125
+_stream_errors = []
+_stream_errors_lock = threading.Lock()
 
 def fail(exc):
     print("modal python client: %s" % exc, file=sys.stderr)
@@ -295,7 +297,13 @@ def write_stream(src, dst):
             dst.write(chunk)
             dst.flush()
     except Exception as exc:
+        with _stream_errors_lock:
+            _stream_errors.append(str(exc))
         print("modal stream copy failed: %s" % exc, file=sys.stderr)
+
+def stream_error():
+    with _stream_errors_lock:
+        return "; ".join(_stream_errors)
 `
 
 const modalCreateScript = modalPythonPrelude + `
@@ -350,6 +358,9 @@ try:
     rc = proc.wait()
     for thread in threads:
         thread.join()
+    copy_error = stream_error()
+    if copy_error:
+        fail("stream copy failed: %s" % copy_error)
     result_path = req.get("result_path")
     if result_path:
         with open(result_path, "w", encoding="utf-8") as f:

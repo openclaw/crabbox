@@ -85,7 +85,6 @@ provider, including:
 --exe-dev-control-host <host>
 --sprites-api-url <url>
 --azure-dynamic-sessions-endpoint <url>
---azure-dynamic-sessions-pool <name>
 --azure-dynamic-sessions-api-version <version>
 --e2b-api-url <url>
 --e2b-domain <domain>

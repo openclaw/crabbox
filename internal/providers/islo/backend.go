@@ -176,7 +176,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			if !shouldStop {
 				return
 			}
-			if err := client.DeleteSandbox(context.Background(), name); err != nil {
+			if err := deleteIsloSandboxForCleanup(client, name); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: islo stop failed for %s: %v\n", name, err)
 				return
 			}
@@ -369,14 +369,24 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 	leaseID := isloLeasePrefix + sandbox.GetName()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		_ = client.DeleteSandbox(context.Background(), sandbox.GetName())
+		if cleanupErr := deleteIsloSandboxForCleanup(client, sandbox.GetName()); cleanupErr != nil {
+			return "", "", "", fmt.Errorf("%w; cleanup failed for islo sandbox %s: %v", err, sandbox.GetName(), cleanupErr)
+		}
 		return "", "", "", err
 	}
 	if err := claimLeaseForRepoProviderWithPond(leaseID, slug, isloProvider, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		_ = client.DeleteSandbox(context.Background(), sandbox.GetName())
+		if cleanupErr := deleteIsloSandboxForCleanup(client, sandbox.GetName()); cleanupErr != nil {
+			return "", "", "", fmt.Errorf("%w; cleanup failed for islo sandbox %s: %v", err, sandbox.GetName(), cleanupErr)
+		}
 		return "", "", "", err
 	}
 	return leaseID, sandbox.GetName(), slug, nil
+}
+
+func deleteIsloSandboxForCleanup(client isloAPI, name string) error {
+	cleanupCtx, cancel := isloCleanupContext()
+	defer cancel()
+	return client.DeleteSandbox(cleanupCtx, name)
 }
 
 func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir string, command []string, shellMode bool, env map[string]string) (int, error) {

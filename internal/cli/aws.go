@@ -1,9 +1,17 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -156,11 +164,12 @@ func (c *AWSClient) ListCrabboxServers(ctx context.Context) ([]Server, error) {
 }
 
 func (c *AWSClient) EnsureSSHKey(ctx context.Context, name, publicKey string) error {
-	_, err := c.ec2.DescribeKeyPairs(ctx, &ec2.DescribeKeyPairsInput{
-		KeyNames: []string{name},
+	out, err := c.ec2.DescribeKeyPairs(ctx, &ec2.DescribeKeyPairsInput{
+		KeyNames:         []string{name},
+		IncludePublicKey: aws.Bool(true),
 	})
 	if err == nil {
-		return nil
+		return verifyAWSKeyPairMatches(name, publicKey, out.KeyPairs)
 	}
 	if !strings.Contains(err.Error(), "InvalidKeyPair.NotFound") {
 		return err
@@ -176,6 +185,168 @@ func (c *AWSClient) EnsureSSHKey(ctx context.Context, name, publicKey string) er
 		},
 	})
 	return err
+}
+
+func verifyAWSKeyPairMatches(name, publicKey string, keyPairs []types.KeyPairInfo) error {
+	if len(keyPairs) == 0 {
+		return exit(2, "aws key pair %q exists but DescribeKeyPairs returned no key material", name)
+	}
+	existing := keyPairs[0]
+	if sameOpenSSHPublicKey(aws.ToString(existing.PublicKey), publicKey) {
+		return nil
+	}
+	fingerprints, err := awsImportedPublicKeyFingerprints(publicKey)
+	if err != nil {
+		return err
+	}
+	if awsKeyFingerprintMatches(aws.ToString(existing.KeyFingerprint), fingerprints) {
+		return nil
+	}
+	if existing.PublicKey != nil && strings.TrimSpace(aws.ToString(existing.PublicKey)) != "" {
+		return exit(2, "aws key pair %q already exists with different public key; delete it or configure a unique provider key", name)
+	}
+	if existing.KeyFingerprint == nil || strings.TrimSpace(aws.ToString(existing.KeyFingerprint)) == "" {
+		return exit(2, "aws key pair %q already exists but Crabbox cannot verify its public key; delete it or configure a unique provider key", name)
+	}
+	return exit(2, "aws key pair %q already exists with fingerprint %s, expected %s; delete it or configure a unique provider key", name, aws.ToString(existing.KeyFingerprint), strings.Join(fingerprints, " or "))
+}
+
+func sameOpenSSHPublicKey(left, right string) bool {
+	leftType, leftBlob, err := parseOpenSSHPublicKey(left)
+	if err != nil {
+		return false
+	}
+	rightType, rightBlob, err := parseOpenSSHPublicKey(right)
+	if err != nil {
+		return false
+	}
+	return leftType == rightType && bytes.Equal(leftBlob, rightBlob)
+}
+
+func awsImportedPublicKeyFingerprints(publicKey string) ([]string, error) {
+	keyType, blob, err := parseOpenSSHPublicKey(publicKey)
+	if err != nil {
+		return nil, err
+	}
+	switch keyType {
+	case "ssh-ed25519":
+		sum := sha256.Sum256(blob)
+		raw := base64.RawStdEncoding.EncodeToString(sum[:])
+		return []string{"SHA256:" + raw, raw}, nil
+	case "ssh-rsa":
+		pub, err := parseOpenSSHRSAPublicKey(blob)
+		if err != nil {
+			return nil, err
+		}
+		blobSum := md5.Sum(blob)                           //nolint:gosec // EC2 reports MD5 fingerprints for imported RSA public keys.
+		derSum := md5.Sum(x509.MarshalPKCS1PublicKey(pub)) //nolint:gosec // AWS examples also derive imported RSA fingerprints from PKCS#1 DER.
+		return []string{colonHex(blobSum[:]), colonHex(derSum[:])}, nil
+	default:
+		return nil, exit(2, "unsupported AWS SSH public key type %q", keyType)
+	}
+}
+
+func awsKeyFingerprintMatches(existing string, expected []string) bool {
+	existing = strings.TrimSpace(existing)
+	if existing == "" {
+		return false
+	}
+	for _, want := range expected {
+		if normalizeAWSKeyFingerprint(existing) == normalizeAWSKeyFingerprint(want) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeAWSKeyFingerprint(value string) string {
+	value = strings.TrimSpace(value)
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "md5:") {
+		return strings.TrimPrefix(lower, "md5:")
+	}
+	if strings.HasPrefix(value, "SHA256:") {
+		return value
+	}
+	return lower
+}
+
+func parseOpenSSHPublicKey(publicKey string) (string, []byte, error) {
+	fields := strings.Fields(strings.TrimSpace(publicKey))
+	if len(fields) < 2 {
+		return "", nil, exit(2, "invalid SSH public key")
+	}
+	blob, err := base64.StdEncoding.DecodeString(fields[1])
+	if err != nil {
+		return "", nil, exit(2, "invalid SSH public key: %v", err)
+	}
+	innerType, rest, err := readSSHString(blob)
+	if err != nil {
+		return "", nil, exit(2, "invalid SSH public key: %v", err)
+	}
+	if innerType != fields[0] {
+		return "", nil, exit(2, "invalid SSH public key: type %q does not match blob type %q", fields[0], innerType)
+	}
+	_ = rest
+	return innerType, blob, nil
+}
+
+func parseOpenSSHRSAPublicKey(blob []byte) (*rsa.PublicKey, error) {
+	keyType, rest, err := readSSHString(blob)
+	if err != nil {
+		return nil, exit(2, "invalid RSA public key: %v", err)
+	}
+	if keyType != "ssh-rsa" {
+		return nil, exit(2, "invalid RSA public key: type %q", keyType)
+	}
+	eBytes, rest, err := readSSHBytes(rest)
+	if err != nil {
+		return nil, exit(2, "invalid RSA public key exponent: %v", err)
+	}
+	nBytes, rest, err := readSSHBytes(rest)
+	if err != nil {
+		return nil, exit(2, "invalid RSA public key modulus: %v", err)
+	}
+	if len(rest) != 0 {
+		return nil, exit(2, "invalid RSA public key: trailing data")
+	}
+	e := new(big.Int).SetBytes(eBytes)
+	if !e.IsInt64() || e.Sign() <= 0 || e.Int64() > int64(^uint(0)>>1) {
+		return nil, exit(2, "invalid RSA public key exponent")
+	}
+	n := new(big.Int).SetBytes(nBytes)
+	if n.Sign() <= 0 {
+		return nil, exit(2, "invalid RSA public key modulus")
+	}
+	return &rsa.PublicKey{N: n, E: int(e.Int64())}, nil
+}
+
+func readSSHString(data []byte) (string, []byte, error) {
+	value, rest, err := readSSHBytes(data)
+	if err != nil {
+		return "", nil, err
+	}
+	return string(value), rest, nil
+}
+
+func readSSHBytes(data []byte) ([]byte, []byte, error) {
+	if len(data) < 4 {
+		return nil, nil, fmt.Errorf("short field")
+	}
+	n := int(binary.BigEndian.Uint32(data[:4]))
+	if n < 0 || len(data[4:]) < n {
+		return nil, nil, fmt.Errorf("short field")
+	}
+	return data[4 : 4+n], data[4+n:], nil
+}
+
+func colonHex(data []byte) string {
+	encoded := hex.EncodeToString(data)
+	parts := make([]string, 0, len(encoded)/2)
+	for i := 0; i < len(encoded); i += 2 {
+		parts = append(parts, encoded[i:i+2])
+	}
+	return strings.Join(parts, ":")
 }
 
 func (c *AWSClient) DeleteSSHKey(ctx context.Context, name string) error {

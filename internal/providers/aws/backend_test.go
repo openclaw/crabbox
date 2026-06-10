@@ -22,6 +22,7 @@ type fakeAWSClient struct {
 	waitErr          error
 	deletedInstances []string
 	deletedKeys      []string
+	deleteKeyErr     error
 	tagged           []string
 }
 
@@ -67,7 +68,7 @@ func (c *fakeAWSClient) DeleteServer(_ context.Context, id string) error {
 
 func (c *fakeAWSClient) DeleteSSHKey(_ context.Context, name string) error {
 	c.deletedKeys = append(c.deletedKeys, name)
-	return nil
+	return c.deleteKeyErr
 }
 
 func (c *fakeAWSClient) SetTags(_ context.Context, id string, _ map[string]string) error {
@@ -184,6 +185,43 @@ func TestAWSResolveAndReleaseUseFallbackRegion(t *testing.T) {
 	}
 	if len(west.deletedKeys) != 1 || west.deletedKeys[0] != "crabbox-cbx-fedcba654321" {
 		t.Fatalf("west deleted keys=%v, want provider key", west.deletedKeys)
+	}
+}
+
+func TestAWSReleaseRemovesClaimWhenProviderKeyDeletionFails(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	keyName := "crabbox-cbx-abcdef123456"
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "partial-release", "aws", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+	keyErr := errors.New("iam denied key deletion")
+	fake := &fakeAWSClient{deleteKeyErr: keyErr}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	server := awsTestServer("i-partial", leaseID, "partial-release", "us-west-2")
+	server.Labels["provider_key"] = keyName
+	backend := NewAWSLeaseBackend(ProviderSpec{}, Config{Provider: "aws", AWSRegion: "us-west-2"}, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{Server: server, LeaseID: leaseID}})
+	if !errors.Is(err, keyErr) {
+		t.Fatalf("err=%v, want wrapped key deletion error", err)
+	}
+	if !strings.Contains(err.Error(), "provider key may be orphaned") || !strings.Contains(err.Error(), keyName) {
+		t.Fatalf("err=%q, want orphaned provider key diagnostic", err)
+	}
+	if len(fake.deletedInstances) != 1 || fake.deletedInstances[0] != "i-partial" {
+		t.Fatalf("deleted instances=%v, want terminated instance", fake.deletedInstances)
+	}
+	if len(fake.deletedKeys) != 1 || fake.deletedKeys[0] != keyName {
+		t.Fatalf("deleted keys=%v, want failed provider key cleanup attempt", fake.deletedKeys)
+	}
+	if claim, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok || claim.LeaseID != "" {
+		t.Fatalf("claim=%+v ok=%v err=%v, want removed claim after instance termination", claim, ok, err)
 	}
 }
 

@@ -2,8 +2,24 @@
 set -euo pipefail
 
 threshold="${1:-90.0}"
-profile="${TMPDIR:-/tmp}/crabbox-go-coverage.out"
-core_profile="${TMPDIR:-/tmp}/crabbox-go-core-coverage.out"
+if [[ ! "$threshold" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; then
+  echo "invalid coverage threshold: $threshold (must be a number from 0 to 100)" >&2
+  exit 2
+fi
+if ! awk -v threshold="$threshold" 'BEGIN { exit !(threshold >= 0 && threshold <= 100) }'; then
+  echo "invalid coverage threshold: $threshold (must be a number from 0 to 100)" >&2
+  exit 2
+fi
+if ! work_dir="$(mktemp -d "${TMPDIR:-/tmp}/crabbox-go-coverage.XXXXXX")"; then
+  echo "could not create temporary coverage directory" >&2
+  exit 1
+fi
+cleanup() {
+  rm -rf "$work_dir"
+}
+trap cleanup EXIT
+profile="$work_dir/coverage.out"
+core_profile="$work_dir/core-coverage.out"
 
 go test ./... -covermode=atomic -coverprofile="$profile"
 

@@ -38,6 +38,50 @@ func TestRunStopsNewSessionByDefault(t *testing.T) {
 	}
 }
 
+func TestRunCleanupUsesBoundedContext(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	oldTimeout := azureDynamicSessionsDeleteTimeout
+	azureDynamicSessionsDeleteTimeout = time.Millisecond
+	t.Cleanup(func() { azureDynamicSessionsDeleteTimeout = oldTimeout })
+	fake := &recordingAzureDynamicSessionsAPI{deleteWaitForCancel: true}
+	restoreAzureDynamicSessionsClient(t, fake)
+	backend := testAzureDynamicSessionsBackend()
+
+	started := time.Now()
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:  true,
+		Command: []string{"printf", "ok"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("bounded cleanup did not return promptly")
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != result.LeaseID {
+		t.Fatalf("deleted sessions = %#v, want %s", fake.deleted, result.LeaseID)
+	}
+	if !strings.Contains(backend.rt.Stderr.(*bytes.Buffer).String(), "stop failed") {
+		t.Fatalf("stderr missing stop warning: %q", backend.rt.Stderr)
+	}
+}
+
+func TestCreateSessionRollbackReportsDeleteFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &recordingAzureDynamicSessionsAPI{deleteErr: errors.New("delete failed")}
+	backend := testAzureDynamicSessionsBackend()
+	backend.cfg.AzureDynamicSessions.Endpoint = ""
+
+	_, _, err := backend.createSession(context.Background(), fake, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	if err == nil || !strings.Contains(err.Error(), "requires azureDynamicSessions.endpoint") || !strings.Contains(err.Error(), "cleanup azure-dynamic-sessions session") || !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("err = %v, want claim-scope and cleanup errors", err)
+	}
+	if len(fake.deleted) != 1 {
+		t.Fatalf("deleted sessions = %#v, want rollback delete attempt", fake.deleted)
+	}
+}
+
 func TestRunKeepOnFailureRetainsNewSession(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := t.TempDir()
@@ -209,12 +253,13 @@ func claimAzureDynamicSessionsLease(t *testing.T, leaseID, slug, repoRoot string
 }
 
 type recordingAzureDynamicSessionsAPI struct {
-	checkRunnerCalls int
-	getSessionCalls  int
-	deleted          []string
-	execs            []azureDynamicSessionsExecRequest
-	commandExit      int
-	deleteErr        error
+	checkRunnerCalls    int
+	getSessionCalls     int
+	deleted             []string
+	execs               []azureDynamicSessionsExecRequest
+	commandExit         int
+	deleteErr           error
+	deleteWaitForCancel bool
 }
 
 func (r *recordingAzureDynamicSessionsAPI) CheckRunner(context.Context, string) error {
@@ -243,8 +288,12 @@ func (r *recordingAzureDynamicSessionsAPI) ListSessions(context.Context) ([]azur
 	return nil, nil
 }
 
-func (r *recordingAzureDynamicSessionsAPI) DeleteSession(_ context.Context, identifier string) error {
+func (r *recordingAzureDynamicSessionsAPI) DeleteSession(ctx context.Context, identifier string) error {
 	r.deleted = append(r.deleted, identifier)
+	if r.deleteWaitForCancel {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if r.deleteErr != nil {
 		return r.deleteErr
 	}

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +29,22 @@ func TestAzureDynamicSessionsEndpointRequiresPoolManagementEndpoint(t *testing.T
 	want := "https://pool.env.eastus.azurecontainerapps.io"
 	if got != want {
 		t.Fatalf("endpoint = %q, want %q", got, want)
+	}
+}
+
+func TestAzureDynamicSessionsPoolSelectorIsUnsupported(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	RegisterAzureDynamicSessionsProviderFlags(fs, Config{})
+	if fs.Lookup("azure-dynamic-sessions-pool") != nil {
+		t.Fatal("azure-dynamic-sessions-pool should not be registered")
+	}
+
+	cfg := Config{}
+	cfg.AzureDynamicSessions.Endpoint = "https://pool.env.eastus.azurecontainerapps.io"
+	cfg.AzureDynamicSessions.Pool = "pool"
+	_, err := azureDynamicSessionsEndpoint(cfg)
+	if err == nil || !strings.Contains(err.Error(), "azureDynamicSessions.pool is not supported") {
+		t.Fatalf("err = %v, want unsupported pool config", err)
 	}
 }
 
@@ -287,6 +305,54 @@ func TestAzureDynamicSessionsExecStreamRejectsIncompleteStream(t *testing.T) {
 	if _, err := client.ExecStream(context.Background(), "azds-test", azureDynamicSessionsExecRequest{Command: "echo partial"}, nil, nil); err == nil || !strings.Contains(err.Error(), "ended before completion") {
 		t.Fatalf("err = %v, want incomplete stream", err)
 	}
+}
+
+func TestAzureDynamicSessionsExecStreamReturnsWriterErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		event   string
+		stdout  io.Writer
+		stderr  io.Writer
+		wantErr string
+	}{
+		{
+			name:    "stdout",
+			event:   `{"type":"stdout","data":"out"}`,
+			stdout:  errWriter("stdout closed"),
+			wantErr: "write azure-dynamic-sessions stdout: stdout closed",
+		},
+		{
+			name:    "stderr",
+			event:   `{"type":"stderr","data":"err"}`,
+			stderr:  errWriter("stderr closed"),
+			wantErr: "write azure-dynamic-sessions stderr: stderr closed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/x-ndjson")
+				_, _ = w.Write([]byte(tc.event + "\n"))
+				_, _ = w.Write([]byte(`{"type":"complete","exitCode":0}` + "\n"))
+			}))
+			defer server.Close()
+
+			client := &azureDynamicSessionsClient{
+				endpoint:   server.URL,
+				token:      "test-token",
+				httpClient: server.Client(),
+			}
+			exitCode, err := client.ExecStream(context.Background(), "azds-test", azureDynamicSessionsExecRequest{Command: "echo"}, tc.stdout, tc.stderr)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("exit=%d err=%v, want %q", exitCode, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+type errWriter string
+
+func (w errWriter) Write([]byte) (int, error) {
+	return 0, errors.New(string(w))
 }
 
 type recordingRunner struct {

@@ -24,12 +24,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
       - name: Stash GoReleaser config
         run: cp .goreleaser.yaml /tmp/.goreleaser.yaml
 
@@ -38,6 +32,12 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: git checkout "$RELEASE_TAG"
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
 
       - name: Resolve release tag
         id: release

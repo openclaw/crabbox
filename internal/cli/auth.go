@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -44,7 +43,7 @@ func (a App) login(ctx context.Context, args []string) error {
 }
 
 func (a App) loginWithToken(ctx context.Context, brokerURL, provider string, jsonOut bool) error {
-	data, err := io.ReadAll(os.Stdin)
+	data, err := io.ReadAll(a.input())
 	if err != nil {
 		return exit(2, "read broker token: %v", err)
 	}

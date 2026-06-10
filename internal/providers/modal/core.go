@@ -68,13 +68,9 @@ func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 	return core.DirectLeaseLabels(cfg, leaseID, slug, provider, market, keep, now)
 }
 
-func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
-}
+var claimLeaseForRepoProvider = core.ClaimLeaseForRepoProvider
 
-func claimLeaseForRepoProviderPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProviderPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
-}
+var claimLeaseForRepoProviderPond = core.ClaimLeaseForRepoProviderPond
 
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)

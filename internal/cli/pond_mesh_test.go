@@ -687,7 +687,8 @@ func TestProviderCapabilitiesPrimary(t *testing.T) {
 		{"exe-dev", TransportSSH},
 		{"daytona", TransportSSH},
 		{"islo", TransportURL},
-		{"modal", TransportURL},
+		{"modal", TransportNone},
+		{"cloudflare", TransportNone},
 		{"blacksmith-testbox", TransportNone},
 		{"unknown-provider", TransportNone},
 	}
@@ -714,7 +715,8 @@ func TestProviderCapabilitiesAvailable(t *testing.T) {
 		{"aws", []string{TransportSSH}},
 		{"exe-dev", []string{TransportSSH}},
 		{"islo", []string{TransportURL}},
-		{"modal", []string{TransportURL}},
+		{"modal", nil},
+		{"cloudflare", nil},
 		{"blacksmith-testbox", nil},
 	}
 	for _, tc := range cases {

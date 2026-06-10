@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -179,10 +180,13 @@ func (b *hetznerLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) 
 }
 
 func (b *hetznerLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
-	if err := deleteServer(ctx, b.Cfg, req.Lease.Server); err != nil {
+	serverGone, err := deleteServerForRelease(ctx, b.Cfg, req.Lease.Server)
+	if err != nil {
 		return err
 	}
-	removeLeaseClaim(req.Lease.LeaseID)
+	if serverGone {
+		removeLeaseClaim(req.Lease.LeaseID)
+	}
 	return nil
 }
 
@@ -215,26 +219,35 @@ func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
 }
 func deleteServer(ctx context.Context, cfg Config, server Server) error {
+	_, err := deleteServerForRelease(ctx, cfg, server)
+	return err
+}
+func deleteServerForRelease(ctx context.Context, cfg Config, server Server) (bool, error) {
 	if err := validateHetznerServerOwnership(server); err != nil {
-		return err
+		return false, err
 	}
 	client, err := newHetznerClient()
 	if err != nil {
-		return err
+		return false, err
 	}
 	return deleteServerWithClient(ctx, client, server, true)
 }
-func deleteServerWithClient(ctx context.Context, client hetznerClient, server Server, deleteKey bool) error {
+func deleteServerWithClient(ctx context.Context, client hetznerClient, server Server, deleteKey bool) (bool, error) {
 	if err := validateHetznerServerOwnership(server); err != nil {
-		return err
+		return false, err
 	}
 	if err := client.DeleteServer(ctx, server.ID); err != nil {
-		return err
+		if !hetznerServerAlreadyAbsent(err, server.ID) {
+			return false, err
+		}
 	}
 	if keyName := core.ServerProviderKey(server); deleteKey && core.ValidCrabboxProviderKey(keyName) {
-		return client.DeleteSSHKey(ctx, keyName)
+		return true, client.DeleteSSHKey(ctx, keyName)
 	}
-	return nil
+	return true, nil
+}
+func hetznerServerAlreadyAbsent(err error, serverID int64) bool {
+	return strings.HasPrefix(err.Error(), fmt.Sprintf("hetzner DELETE /servers/%d: http 404:", serverID))
 }
 func validateHetznerServerOwnership(server Server) error {
 	if server.Labels == nil ||
@@ -250,7 +263,8 @@ func rollbackHetznerAcquire(client hetznerClient, server Server, serverCreated b
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if serverCreated {
-		return deleteServerWithClient(cleanupCtx, client, server, keyCreated)
+		_, err := deleteServerWithClient(cleanupCtx, client, server, keyCreated)
+		return err
 	}
 	if keyCreated && core.ValidCrabboxProviderKey(keyName) {
 		return client.DeleteSSHKey(cleanupCtx, keyName)

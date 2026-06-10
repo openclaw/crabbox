@@ -481,6 +481,8 @@ external:
         - [devboxctl, new, "{{resourceName}}", --size, "{{config.size}}"]
         - [devboxctl, setup, "{{resourceName}}"]
       rollbackOnFailure: true
+      env:
+        DEVBOX_TOKEN: "{{env.DEVBOX_TOKEN}}"
     list:
       argv: [devboxctl, list, --format, json]
       output: json-name-array
@@ -502,9 +504,12 @@ external:
 
 Declarative lifecycle entries use one `argv` array or an ordered `steps` list,
 not shell commands. Acquire steps can opt into release cleanup with
-`rollbackOnFailure: true`. See [External Provider](../providers/external.md)
-for placeholders, output semantics, inventory formats, routing behavior, and
-security guidance.
+`rollbackOnFailure: true`. Put credentials in an operation `env:` map, not in
+`argv` or `steps`; environment-derived argv values require the explicit
+`allowEnvArgv: true` compatibility opt-in, and environment-derived resource
+names require `connection.allowEnvResourceName: true`. See
+[External Provider](../providers/external.md) for placeholders, output
+semantics, inventory formats, routing behavior, and security guidance.
 
 ### Daytona
 

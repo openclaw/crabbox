@@ -20,6 +20,13 @@ func Run(ctx context.Context, args []string) error {
 	return app.Run(ctx, args)
 }
 
+func (a App) input() io.Reader {
+	if a.Stdin != nil {
+		return a.Stdin
+	}
+	return os.Stdin
+}
+
 func (a App) Run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		a.printHelp()

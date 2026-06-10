@@ -37,6 +37,9 @@ func TestProviderSpec(t *testing.T) {
 	if !hasFeature(spec.Features, core.FeatureArchiveSync) {
 		t.Fatalf("features=%#v want archive sync", spec.Features)
 	}
+	if hasFeature(spec.Features, core.FeatureURLBridge) {
+		t.Fatalf("features=%#v should not advertise unsupported URL bridge", spec.Features)
+	}
 }
 
 func TestProviderForResolvesModal(t *testing.T) {
@@ -193,6 +196,99 @@ func TestRunNoSyncDoesNotDeleteExistingWorkspace(t *testing.T) {
 	}
 }
 
+func TestRunByRemoteIdentifierEnforcesRepoClaim(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		id   string
+	}{
+		{name: "sandbox id", id: "sb-123"},
+		{name: "lease id", id: "cbx_123"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			oldRepo := t.TempDir()
+			newRepo := t.TempDir()
+			if err := core.ClaimLeaseForRepoProvider("cbx_123", "blue-lobster", "other-provider", oldRepo, time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			fake := &fakeModalAPI{sandbox: modalSandbox{
+				ID:     "sb-123",
+				Status: "running",
+				Tags: map[string]string{
+					"provider": "modal",
+					"crabbox":  "true",
+					"lease":    "cbx_123",
+					"slug":     "blue-lobster",
+				},
+			}}
+			withFakeModalAPI(t, fake)
+			backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
+			_, err := backend.Run(context.Background(), RunRequest{
+				ID:      tt.id,
+				Repo:    Repo{Name: "new", Root: newRepo},
+				Command: []string{"true"},
+				NoSync:  true,
+			})
+			if err == nil || !strings.Contains(err.Error(), oldRepo) || !strings.Contains(err.Error(), "--reclaim") {
+				t.Fatalf("Run err=%v, want repo claim rejection", err)
+			}
+			if containsVerb(fake.verbs, "exec") {
+				t.Fatalf("run executed despite claim rejection: %v", fake.verbs)
+			}
+
+			if _, err := backend.Run(context.Background(), RunRequest{
+				ID:      tt.id,
+				Repo:    Repo{Name: "new", Root: newRepo},
+				Command: []string{"true"},
+				NoSync:  true,
+				Reclaim: true,
+			}); err != nil {
+				t.Fatalf("Run with reclaim err=%v", err)
+			}
+			claim, ok, err := core.ResolveLeaseClaim("cbx_123")
+			if err != nil || !ok {
+				t.Fatalf("claim ok=%v err=%v", ok, err)
+			}
+			if claim.Provider != providerName || claim.RepoRoot != newRepo {
+				t.Fatalf("claim after reclaim=%#v, want provider=%s repo=%s", claim, providerName, newRepo)
+			}
+		})
+	}
+}
+
+func TestCreateSandboxReportsCleanupFailureAfterClaimFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	claimErr := errors.New("claim write failed")
+	oldClaim := claimLeaseForRepoProviderPond
+	claimLeaseForRepoProviderPond = func(string, string, string, string, string, time.Duration, bool) error {
+		return claimErr
+	}
+	t.Cleanup(func() { claimLeaseForRepoProviderPond = oldClaim })
+
+	fake := &fakeModalAPI{terminateErr: errors.New("terminate failed")}
+	var stderr bytes.Buffer
+	rt := testRuntime()
+	rt.Stderr = &stderr
+	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), rt).(*modalBackend)
+
+	_, _, _, err := backend.createSandbox(context.Background(), fake, Repo{Name: "repo", Root: t.TempDir()}, false, false, "")
+	if err == nil {
+		t.Fatal("createSandbox err=nil, want claim and cleanup failure")
+	}
+	msg := err.Error()
+	for _, want := range []string{"claim write failed", "cleanup modal sandbox sb-123", "terminate failed", "crabbox stop --provider modal --id sb-123"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("err=%q missing %q", msg, want)
+		}
+	}
+	if !reflect.DeepEqual(fake.verbs, []string{"create", "terminate"}) {
+		t.Fatalf("verbs=%v want create then terminate", fake.verbs)
+	}
+	if !strings.Contains(stderr.String(), "warning: cleanup modal sandbox sb-123") {
+		t.Fatalf("stderr=%q missing cleanup warning", stderr.String())
+	}
+}
+
 func TestSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
 	fake := &fakeModalAPI{execCodes: []int{0, 7, 0}}
 	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
@@ -302,6 +398,7 @@ type fakeModalAPI struct {
 	sandbox      modalSandbox
 	execCommands [][]string
 	execCodes    []int
+	terminateErr error
 }
 
 func (f *fakeModalAPI) CreateSandbox(_ context.Context, req modalCreateSandboxRequest) (modalSandbox, error) {
@@ -347,7 +444,7 @@ func (f *fakeModalAPI) ListSandboxes(context.Context, map[string]string) ([]moda
 
 func (f *fakeModalAPI) Terminate(context.Context, string) error {
 	f.verbs = append(f.verbs, "terminate")
-	return nil
+	return f.terminateErr
 }
 
 func containsArg(args []string, want string) bool {

@@ -15,6 +15,12 @@ import (
 	sdktypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
 )
 
+var daytonaCleanupTimeout = 30 * time.Second
+
+func daytonaCleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), daytonaCleanupTimeout)
+}
+
 func (b *daytonaLeaseBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.ActionsRunner {
 		return exit(2, "--actions-runner is not supported for provider=daytona SDK warmup")
@@ -73,7 +79,9 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 	if shouldStop {
 		defer func() {
 			if shouldStop {
-				b.deleteDaytonaToolboxSandbox(context.Background(), sandbox.ID, leaseID)
+				cleanupCtx, cancel := daytonaCleanupContext()
+				defer cancel()
+				b.deleteDaytonaToolboxSandbox(cleanupCtx, sandbox.ID, leaseID)
 			}
 		}()
 	}

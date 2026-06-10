@@ -595,7 +595,10 @@ func TestCreateSandboxRemovesSandboxWhenClaimSetupFails(t *testing.T) {
 		name          string
 		requestedSlug string
 		setupState    func(t *testing.T)
+		rmReply       scriptedReply
 		want          string
+		wantAlso      []string
+		wantWarning   string
 	}{
 		{
 			name:          "slug allocation",
@@ -626,18 +629,51 @@ func TestCreateSandboxRemovesSandboxWhenClaimSetupFails(t *testing.T) {
 			},
 			want: "write claim",
 		},
+		{
+			name:          "claim persistence cleanup failure",
+			requestedSlug: "",
+			setupState: func(t *testing.T) {
+				stateDir := t.TempDir()
+				claimsDir := filepathJoin(stateDir, "crabbox", "claims")
+				if err := os.MkdirAll(claimsDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(claimsDir, 0o500); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(claimsDir, 0o700) })
+				t.Setenv("XDG_STATE_HOME", stateDir)
+			},
+			rmReply: scriptedReply{stderr: "rm failed", exitCode: 1},
+			want:    "write claim",
+			wantAlso: []string{
+				"cleanup docker-sandbox sandbox crabbox-my-app-010203 after claim setup failure",
+				"sbx rm --force crabbox-my-app-010203 exited 1: rm failed",
+				"run `sbx rm --force crabbox-my-app-010203` to retry cleanup",
+			},
+			wantWarning: "warning: cleanup docker-sandbox sandbox crabbox-my-app-010203",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.setupState(t)
 			runner := newRunner(map[string]scriptedReply{
 				"create": {stdout: ""},
-				"rm":     {stdout: ""},
+				"rm":     tt.rmReply,
 			}, nil)
-			backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+			var stderr bytes.Buffer
+			backend := newTestBackend(newTestConfig(), runner, io.Discard, &stderr)
 			cli := &sbxCLI{cfg: backend.cfg, rt: backend.rt}
 			_, _, _, err := backend.createSandbox(context.Background(), cli, Repo{Name: "my-app", Root: repoRoot}, false, tt.requestedSlug)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("createSandbox err=%v want %q", err, tt.want)
+			}
+			for _, want := range tt.wantAlso {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("createSandbox err=%v want %q", err, want)
+				}
+			}
+			if tt.wantWarning != "" && !strings.Contains(stderr.String(), tt.wantWarning) {
+				t.Fatalf("stderr=%q want %q", stderr.String(), tt.wantWarning)
 			}
 			if got, want := callVerbs(runner), []string{"create", "rm"}; !reflect.DeepEqual(got, want) {
 				t.Fatalf("verbs=%v want cleanup verbs %v", got, want)
@@ -1463,7 +1499,7 @@ func TestSBXErrorClassifiesTimeoutAndStreamedErrors(t *testing.T) {
 		t.Fatalf("streamed err code=%d err=%v", code, err)
 	}
 	runner = newRunner(map[string]scriptedReply{
-		"exec": {exitCode: 4, err: errors.New("process failed")},
+		"exec": {exitCode: 4, err: errors.New("exit status 4")},
 	}, nil)
 	cli, err = newSBXCLI(newTestConfig(), Runtime{Exec: runner})
 	if err != nil {
@@ -1471,7 +1507,21 @@ func TestSBXErrorClassifiesTimeoutAndStreamedErrors(t *testing.T) {
 	}
 	code, err = cli.execStream(context.Background(), "sandbox", "", "", []string{"false"}, io.Discard, io.Discard)
 	if code != 4 || err != nil {
-		t.Fatalf("nonzero streamed result code=%d err=%v", code, err)
+		t.Fatalf("normal nonzero streamed result code=%d err=%v, want command exit only", code, err)
+	}
+	runner = newRunner(map[string]scriptedReply{
+		"exec": {exitCode: 4, err: errors.New("process failed")},
+	}, nil)
+	cli, err = newSBXCLI(newTestConfig(), Runtime{Exec: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err = cli.execStream(context.Background(), "sandbox", "", "", []string{"deploy", "--token", "secret-token"}, io.Discard, io.Discard)
+	if code != 4 || err == nil || !strings.Contains(err.Error(), "process failed") {
+		t.Fatalf("nonzero streamed result code=%d err=%v, want runtime error", code, err)
+	}
+	if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "deploy --token") {
+		t.Fatalf("nonzero streamed runtime err=%v leaked command arguments", err)
 	}
 }
 
@@ -1479,13 +1529,39 @@ func TestRunPropagatesCommandExit(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	runner := newRunner(map[string]scriptedReply{
 		"create": {stdout: ""},
-		"exec":   {exitCode: 7, stderr: "failed\n"},
+		"exec":   {exitCode: 7, stderr: "failed\n", err: errors.New("exit status 7")},
 	}, nil)
 	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
-	_, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: []string{"false"}, Keep: true})
+	_, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: []string{"deploy", "--token", "secret-token"}, Keep: true})
 	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v want exit 7", err)
+	}
+	if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "deploy --token") {
+		t.Fatalf("err=%v leaked command arguments", err)
+	}
+}
+
+func TestRunPropagatesStreamRuntimeErrorWithCommandExit(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	runner := newRunner(map[string]scriptedReply{
+		"create": {stdout: ""},
+		"exec":   {exitCode: 7, stderr: "failed\n", err: errors.New("stream transport failed")},
+	}, nil)
+	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+	result, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: []string{"deploy", "--token", "secret-token"}, Keep: true})
+	var exitErr core.ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("err=%v want exit 7", err)
+	}
+	if !strings.Contains(err.Error(), "stream transport failed") {
+		t.Fatalf("err=%v missing runtime diagnostic", err)
+	}
+	if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "deploy --token") {
+		t.Fatalf("err=%v leaked command arguments", err)
+	}
+	if result.ExitCode != 7 {
+		t.Fatalf("result.ExitCode=%d want 7", result.ExitCode)
 	}
 }
 

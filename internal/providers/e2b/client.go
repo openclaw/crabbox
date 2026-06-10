@@ -186,8 +186,26 @@ func (c *e2bClient) DeleteSandbox(ctx context.Context, sandboxID string) error {
 }
 
 func (c *e2bClient) UploadFile(ctx context.Context, session e2bSession, targetPath string, r io.Reader) error {
+	endpoint, err := url.Parse(c.envdURL(session, "/files"))
+	if err != nil {
+		return err
+	}
+	query := endpoint.Query()
+	query.Set("path", targetPath)
+	if strings.TrimSpace(c.user) != "" {
+		query.Set("username", c.user)
+	}
+	endpoint.RawQuery = query.Encode()
 	pr, pw := io.Pipe()
 	writer := multipart.NewWriter(pw)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), pr)
+	if err != nil {
+		_ = pr.CloseWithError(err)
+		_ = pw.CloseWithError(err)
+		return err
+	}
+	c.setEnvdHeaders(req, session)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 	go func() {
 		part, err := writer.CreateFormFile("file", targetPath)
 		if err != nil {
@@ -204,24 +222,10 @@ func (c *e2bClient) UploadFile(ctx context.Context, session e2bSession, targetPa
 		}
 		_ = pw.Close()
 	}()
-	endpoint, err := url.Parse(c.envdURL(session, "/files"))
-	if err != nil {
-		return err
-	}
-	query := endpoint.Query()
-	query.Set("path", targetPath)
-	if strings.TrimSpace(c.user) != "" {
-		query.Set("username", c.user)
-	}
-	endpoint.RawQuery = query.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), pr)
-	if err != nil {
-		return err
-	}
-	c.setEnvdHeaders(req, session)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		_ = pr.CloseWithError(err)
+		_ = pw.CloseWithError(err)
 		return err
 	}
 	defer resp.Body.Close()

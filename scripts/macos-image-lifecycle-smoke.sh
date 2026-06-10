@@ -123,10 +123,19 @@ run_tee() {
 run_tee_combined() {
   local out="$1"
   shift
+  local errexit_set=0
+  local status
+  [[ "$-" == *e* ]] && errexit_set=1
   printf '+'
   printf ' %q' "$@"
   printf '\n'
-  "$@" > >(tee "$out") 2> >(tee -a "$out" >&2)
+  set +e
+  "$@" 2>&1 | tee "$out"
+  status="${PIPESTATUS[0]}"
+  if [[ "$errexit_set" -eq 1 ]]; then
+    set -e
+  fi
+  return "$status"
 }
 
 preflight_blocker_from_stderr() {
@@ -760,10 +769,11 @@ require_webvnc_connected() {
 warmup_macos() {
   local label="$1"
   shift
-  local log
+  local log status
   log="$(log_for_label warmup "$label")"
   : >"$log"
   printf 'warming macOS lease: %s\n' "$label" >&2
+  set +e
   (
     CRABBOX_AWS_REGION="$region" AWS_REGION="$region" "$CRABBOX_BIN" warmup \
       --provider aws \
@@ -775,7 +785,12 @@ warmup_macos() {
       --idle-timeout "$idle_timeout" \
       --timing-json \
       "$@"
-  ) > >(tee -a "$log" >&2) 2> >(tee -a "$log" >&2)
+  ) 2>&1 | tee -a "$log" >&2
+  status="${PIPESTATUS[0]}"
+  set -e
+  if [[ "$status" -ne 0 ]]; then
+    return "$status"
+  fi
   lease_from_log "$log"
 }
 

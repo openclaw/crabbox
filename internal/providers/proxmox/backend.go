@@ -96,6 +96,9 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		_ = client.DeleteServer(context.Background(), server.CloudID)
 		return LeaseTarget{}, err
 	}
+	if server.Labels == nil {
+		server.Labels = map[string]string{}
+	}
 	server.Labels["state"] = "ready"
 	if err := client.SetLabels(ctx, server.CloudID, server.Labels); err != nil {
 		fmt.Fprintf(b.RT.Stderr, "warning: set proxmox labels: %v\n", err)
@@ -196,10 +199,11 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	if id == "" {
 		id = req.Lease.LeaseID
 	}
+	leaseID := proxmoxClaimLeaseID(req.Lease.Server, req.Lease.LeaseID)
 	if err := client.DeleteServer(ctx, id); err != nil {
 		return err
 	}
-	removeLeaseClaim(req.Lease.LeaseID)
+	removeLeaseClaim(leaseID)
 	return nil
 }
 
@@ -238,8 +242,25 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if err := client.DeleteServer(ctx, server.CloudID); err != nil {
 			return err
 		}
+		removeLeaseClaim(proxmoxClaimLabelLeaseID(server))
 	}
 	return nil
+}
+
+func proxmoxClaimLeaseID(server Server, fallback string) string {
+	if leaseID := proxmoxClaimLabelLeaseID(server); leaseID != "" {
+		return leaseID
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func proxmoxClaimLabelLeaseID(server Server) string {
+	if server.Labels != nil {
+		if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
+			return leaseID
+		}
+	}
+	return ""
 }
 
 var newClient = func(cfg Config) (proxmoxClient, error) { return core.NewProxmoxClient(cfg) }

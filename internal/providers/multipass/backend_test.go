@@ -35,6 +35,15 @@ func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (
 	if result, ok := r.responses[key]; ok {
 		return result, nil
 	}
+	if len(req.Args) >= 4 && req.Args[0] == "info" {
+		if err, ok := r.errors["info"]; ok {
+			return r.responses["info"], err
+		}
+		if result, ok := r.responses["info"]; ok {
+			result.Stdout = strings.ReplaceAll(result.Stdout, "{{name}}", req.Args[3])
+			return result, nil
+		}
+	}
 	if len(req.Args) > 0 {
 		if err, ok := r.errors[req.Args[0]]; ok {
 			return r.responses[req.Args[0]], err
@@ -336,6 +345,137 @@ func TestAcquireCleansUpLaunchFailure(t *testing.T) {
 	deleteArgs := recordedArgsForCommand(t, runner, "delete")
 	if !strings.Contains(deleteArgs, "delete\n--purge\ncrabbox-") {
 		t.Fatalf("delete not recorded after launch failure:\n%s", deleteArgs)
+	}
+}
+
+func TestAcquireKeepRetainsKeyAfterPostLaunchInfoFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"list", "--format", "json"}): {Stdout: `{"list":[]}`},
+			"launch": {Stdout: "launched"},
+			"info":   {Stderr: "info failed"},
+		},
+		errors: map[string]error{"info": errors.New("info failed")},
+	}
+	b := testBackend(runner)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true})
+	if err == nil || !strings.Contains(err.Error(), "multipass info failed") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && call.Args[0] == "delete" {
+			t.Fatalf("kept post-launch failure should not delete instance: %#v", call.Args)
+		}
+	}
+	keys, err := findStoredTestboxKeys(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("kept instance key count=%d, want 1: %#v", len(keys), keys)
+	}
+}
+
+func findStoredTestboxKeys(root string) ([]string, error) {
+	keys := []string{}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && entry.Name() == "id_ed25519" {
+			keys = append(keys, path)
+		}
+		return nil
+	})
+	return keys, err
+}
+
+func TestAcquireRemovesClaimAfterEndpointUpdateFailure(t *testing.T) {
+	runner, b := setupAcquireMetadataFailureTest(t)
+	oldUpdate := updateLeaseClaimEndpoint
+	updateLeaseClaimEndpoint = func(string, Server, SSHTarget) error {
+		return errors.New("endpoint boom")
+	}
+	t.Cleanup(func() { updateLeaseClaimEndpoint = oldUpdate })
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "endpoint boom") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	assertAcquireRollbackRemovedInstanceAndClaim(t, runner)
+}
+
+func TestAcquireRemovesClaimAfterCacheVolumeUpdateFailure(t *testing.T) {
+	runner, b := setupAcquireMetadataFailureTest(t)
+	oldUpdate := updateLeaseClaimCacheVolumes
+	updateLeaseClaimCacheVolumes = func(string, []string) error {
+		return errors.New("cache volume boom")
+	}
+	t.Cleanup(func() { updateLeaseClaimCacheVolumes = oldUpdate })
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "cache volume boom") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	assertAcquireRollbackRemovedInstanceAndClaim(t, runner)
+}
+
+func TestAcquireKeepsClaimWhenMetadataRollbackDeleteFails(t *testing.T) {
+	runner, b := setupAcquireMetadataFailureTest(t)
+	oldUpdate := updateLeaseClaimEndpoint
+	updateLeaseClaimEndpoint = func(string, Server, SSHTarget) error {
+		return errors.New("endpoint boom")
+	}
+	t.Cleanup(func() { updateLeaseClaimEndpoint = oldUpdate })
+	runner.errors = map[string]error{"delete": errors.New("delete boom")}
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "endpoint boom") || !strings.Contains(err.Error(), "multipass cleanup failed") {
+		t.Fatalf("Acquire error=%v, want metadata and cleanup errors", err)
+	}
+	_ = recordedArgsForCommand(t, runner, "delete")
+	claims, claimErr := listLeaseClaims()
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("claim should remain when instance deletion fails: %#v", claims)
+	}
+}
+
+func setupAcquireMetadataFailureTest(t *testing.T) (*recordingRunner, *backend) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	oldWait := waitForSSHReady
+	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return nil
+	}
+	t.Cleanup(func() { waitForSSHReady = oldWait })
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"list", "--format", "json"}): {Stdout: `{"list":[]}`},
+		"launch": {},
+		"info":   {Stdout: sampleInfoJSON("{{name}}")},
+	}}
+	return runner, testBackend(runner)
+}
+
+func assertAcquireRollbackRemovedInstanceAndClaim(t *testing.T, runner *recordingRunner) {
+	t.Helper()
+	deleteArgs := recordedArgsForCommand(t, runner, "delete")
+	if !strings.Contains(deleteArgs, "delete\n--purge\ncrabbox-") {
+		t.Fatalf("delete not recorded after metadata failure:\n%s", deleteArgs)
+	}
+	claims, err := listLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("claim was not removed after rollback: %#v", claims)
 	}
 }
 

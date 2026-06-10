@@ -51,10 +51,14 @@ func (b *azureLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 }
 
 func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (LeaseTarget, error) {
-	if b.Cfg.Tailscale.Enabled && b.Cfg.Tailscale.AuthKey == "" {
-		return LeaseTarget{}, exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", b.Cfg.Tailscale.AuthKeyEnv)
+	cfg := b.Cfg
+	if cfg.Tailscale.Enabled && cfg.Tailscale.AuthKey == "" {
+		return LeaseTarget{}, exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", cfg.Tailscale.AuthKeyEnv)
 	}
-	client, err := newAzureClient(ctx, b.Cfg)
+	if err := validateAzureSSHCIDRsForAcquire(ctx, cfg); err != nil {
+		return LeaseTarget{}, err
+	}
+	client, err := newAzureClient(ctx, cfg)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -67,7 +71,6 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	cfg := b.Cfg
 	keyPath, publicKey, err := ensureTestboxKeyForConfig(cfg, leaseID)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -210,6 +213,8 @@ func exit(code int, format string, args ...any) core.ExitError {
 var newAzureClient = func(ctx context.Context, cfg Config) (azureClient, error) {
 	return core.NewAzureClient(ctx, cfg)
 }
+
+var validateAzureSSHCIDRsForAcquire = core.ValidateAzureSSHCIDRsForAcquire
 
 func newLeaseID() string { return core.NewLeaseID() }
 func allocateDirectLeaseSlug(id, requested string, servers []Server) (string, error) {

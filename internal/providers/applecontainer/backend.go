@@ -126,6 +126,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if req.Keep {
+		cleanupKey = false
+	}
 	c, err := b.inspectContainer(ctx, containerID)
 	if err != nil {
 		if !req.Keep {
@@ -147,13 +150,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		return core.LeaseTarget{}, err
 	}
-	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, "", cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		if !req.Keep {
-			_ = b.removeContainer(context.Background(), containerID)
-		}
-		return core.LeaseTarget{}, err
-	}
-	if err := core.UpdateLeaseClaimCacheVolumes(leaseID, core.CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, providerName, "", cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
 		if !req.Keep {
 			_ = b.removeContainer(context.Background(), containerID)
 		}

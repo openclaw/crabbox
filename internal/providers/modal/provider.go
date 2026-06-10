@@ -21,7 +21,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "modal",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureArchiveSync, core.FeatureURLBridge},
+		Features:    core.FeatureSet{core.FeatureArchiveSync},
 		Coordinator: core.CoordinatorNever,
 	}
 }

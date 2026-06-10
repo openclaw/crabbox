@@ -38,6 +38,9 @@ func TestProviderSpec(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v want [{linux}]", spec.Targets)
 	}
+	if spec.Features.Has(core.FeatureURLBridge) {
+		t.Fatalf("features=%#v should not advertise unsupported URL bridge", spec.Features)
+	}
 }
 
 func TestProviderForResolvesNameAndAliases(t *testing.T) {
@@ -246,6 +249,71 @@ func TestResolveLeaseIDRequiresIdentifier(t *testing.T) {
 	if _, _, _, err := resolveLeaseID("", "", false, 0); err == nil {
 		t.Fatalf("expected error for empty id")
 	}
+}
+
+func TestStatusReturnsDescribeErrorWithoutWait(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "tlsbx_statusmissing123"
+	if err := claimLeaseForRepoProvider(leaseID, "status-missing", providerName, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	defer removeLeaseClaim(leaseID)
+	runner := newRunner(map[string]scriptedReply{
+		"sbx describe": {stderr: "sandbox not found\n", exitCode: 1},
+	}, nil)
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "status-missing"})
+	if err == nil || !strings.Contains(err.Error(), "tensorlake sbx describe") || !strings.Contains(err.Error(), "sandbox not found") {
+		t.Fatalf("Status err=%v, want describe failure", err)
+	}
+}
+
+func TestStatusWaitTimeoutIncludesDescribeError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "tlsbx_statuswait123"
+	if err := claimLeaseForRepoProvider(leaseID, "status-wait", providerName, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	defer removeLeaseClaim(leaseID)
+	runner := newRunner(map[string]scriptedReply{
+		"sbx describe": {stderr: "auth denied\n", exitCode: 1},
+	}, nil)
+	rt := newTestRuntime(runner)
+	rt.Clock = &stepClock{now: time.Unix(0, 0), step: time.Second}
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "status-wait", Wait: true, WaitTimeout: time.Millisecond})
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting") || !strings.Contains(err.Error(), "auth denied") {
+		t.Fatalf("Status err=%v, want timeout with describe failure", err)
+	}
+}
+
+func TestStatusWaitContextExpiryIncludesDescribeError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "tlsbx_statusctx123"
+	if err := claimLeaseForRepoProvider(leaseID, "status-context", providerName, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	defer removeLeaseClaim(leaseID)
+	runner := newRunner(map[string]scriptedReply{
+		"sbx describe": {stderr: "auth denied\n", exitCode: 1},
+	}, nil)
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := backend.Status(ctx, StatusRequest{ID: "status-context", Wait: true, WaitTimeout: time.Minute})
+	if err == nil || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "auth denied") {
+		t.Fatalf("Status err=%v, want context cancellation with describe failure", err)
+	}
+}
+
+type stepClock struct {
+	now  time.Time
+	step time.Duration
+}
+
+func (c *stepClock) Now() time.Time {
+	c.now = c.now.Add(c.step)
+	return c.now
 }
 
 func TestNewSandboxNameUsesRepoName(t *testing.T) {

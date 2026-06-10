@@ -93,7 +93,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			if !shouldStop {
 				return
 			}
-			if err := client.DeleteBoxes(context.Background(), []string{boxID}); err != nil {
+			cleanupCtx, cancel := upstashBoxCleanupContext()
+			defer cancel()
+			if err := client.DeleteBoxes(cleanupCtx, []string{boxID}); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: upstash-box delete failed for %s: %v\n", boxID, err)
 				return
 			}
@@ -140,21 +142,29 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
+	envPath := ""
 	if len(req.Env) > 0 {
-		envPath := workspacePath(".crabbox-env-" + leaseID + ".sh")
+		envPath = workspacePath(".crabbox-env-" + leaseID + ".sh")
 		if err := client.WriteFile(ctx, boxID, envPath, shellEnvProfile(req.Env)); err != nil {
 			return RunResult{}, err
 		}
-		defer func() {
-			_, _ = client.Exec(context.Background(), boxID, "rm -f "+shellQuote(envPath), "")
-		}()
 		command = ". " + shellQuote(envPath) + " && " + command
 	}
 	commandStarted := b.now()
 	exitCode, commandErr := client.ExecStream(ctx, boxID, command, folder, b.rt.Stdout)
 	commandDuration := b.now().Sub(commandStarted)
+	envCleanupErr := error(nil)
+	if envPath != "" {
+		envCleanupErr = b.cleanupEnvFile(client, boxID, envPath)
+	}
+	finalExitCode := exitCode
+	if commandErr != nil {
+		finalExitCode = 1
+	} else if exitCode == 0 && envCleanupErr != nil {
+		finalExitCode = 5
+	}
 	result := RunResult{
-		ExitCode:      exitCode,
+		ExitCode:      finalExitCode,
 		Command:       commandDuration,
 		Total:         b.now().Sub(started),
 		SyncDelegated: true,
@@ -164,9 +174,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		CommandText:   strings.Join(req.Command, " "),
 	}
 	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "upstash-box run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
+		fmt.Fprintf(b.rt.Stderr, "upstash-box run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), finalExitCode)
 	} else {
-		fmt.Fprintf(b.rt.Stderr, "upstash-box run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
+		fmt.Fprintf(b.rt.Stderr, "upstash-box run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), finalExitCode)
 	}
 	if req.TimingJSON {
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{
@@ -179,7 +189,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			SyncSkipped:   req.NoSync,
 			CommandMs:     commandDuration.Milliseconds(),
 			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      exitCode,
+			ExitCode:      finalExitCode,
 			Label:         strings.TrimSpace(req.Label),
 		}); err != nil {
 			return result, err
@@ -187,13 +197,42 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	if commandErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		if envCleanupErr != nil {
+			return result, ExitError{Code: 1, Message: fmt.Sprintf("upstash-box run failed: %v; %v", commandErr, envCleanupErr)}
+		}
 		return result, ExitError{Code: 1, Message: fmt.Sprintf("upstash-box run failed: %v", commandErr)}
 	}
 	if exitCode != 0 {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		if envCleanupErr != nil {
+			return result, ExitError{Code: exitCode, Message: fmt.Sprintf("upstash-box run exited %d; %v", exitCode, envCleanupErr)}
+		}
 		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("upstash-box run exited %d", exitCode)}
 	}
+	if envCleanupErr != nil {
+		return result, ExitError{Code: 5, Message: envCleanupErr.Error()}
+	}
 	return result, nil
+}
+
+func (b *backend) cleanupEnvFile(client api, boxID, envPath string) error {
+	if err := cleanupRemoteFile(client, boxID, envPath); err != nil {
+		return fmt.Errorf("upstash-box env cleanup failed for %s: %w", boxID, err)
+	}
+	return nil
+}
+
+func cleanupRemoteFile(client api, boxID, remotePath string) error {
+	cleanupCtx, cancel := upstashBoxCleanupContext()
+	defer cancel()
+	result, err := client.Exec(cleanupCtx, boxID, "rm -f "+shellQuote(remotePath), "")
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		return commandExitError("upstash-box exec rm -f "+remotePath, result)
+	}
+	return nil
 }
 
 func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -303,7 +342,12 @@ func (b *backend) createBox(ctx context.Context, client api, repo Repo, keep, re
 		return "", boxData{}, "", err
 	}
 	if err := claimLeaseForRepoProvider(leaseID, slug, providerName, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		_ = client.DeleteBoxes(context.Background(), []string{box.ID})
+		cleanupCtx, cancel := upstashBoxCleanupContext()
+		cleanupErr := client.DeleteBoxes(cleanupCtx, []string{box.ID})
+		cancel()
+		if cleanupErr != nil {
+			return "", boxData{}, "", fmt.Errorf("%w; cleanup failed for upstash-box %s: %v", err, box.ID, cleanupErr)
+		}
 		return "", boxData{}, "", err
 	}
 	return leaseID, box, slug, nil
@@ -430,7 +474,7 @@ func boxSlug(leaseID string, box boxData) string {
 
 func statusReady(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "", "running", "ready", "idle", "paused":
+	case "running", "ready", "idle", "paused":
 		return true
 	default:
 		return false

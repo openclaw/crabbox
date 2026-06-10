@@ -98,16 +98,25 @@ if ! jq -e -n --arg value "$desired_value" '$value | test("^[0-9]+([.][0-9]+)?$"
   exit 2
 fi
 
-quota_json="$(
+quota_matches="$(
   jq -c '
-    map(select((.serviceCode // "") != "" and (.quotaCode // "") != ""))
-    | .[0] // empty
+    map(select(
+      (.serviceCode // "") == "ec2"
+      and (.quotaCode // "") != ""
+      and ((.quotaName // "") | test("^Running Dedicated mac[[:alnum:]-]* Hosts$"; "i"))
+    ))
   ' "$quota_file"
 )"
-if [[ -z "$quota_json" ]]; then
+quota_count="$(printf '%s\n' "$quota_matches" | jq 'length')"
+if [[ "$quota_count" -eq 0 ]]; then
   echo "quota file does not contain a visible EC2 Mac host quota" >&2
   exit 1
 fi
+if [[ "$quota_count" -ne 1 ]]; then
+  echo "quota file contains multiple EC2 Mac host quotas; provide the quota output for one Mac host family" >&2
+  exit 1
+fi
+quota_json="$(printf '%s\n' "$quota_matches" | jq -c '.[0]')"
 
 service_code="$(printf '%s\n' "$quota_json" | jq -r '.serviceCode')"
 quota_code="$(printf '%s\n' "$quota_json" | jq -r '.quotaCode')"

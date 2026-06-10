@@ -3,6 +3,7 @@ package wandb
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	sandboxv1 "github.com/openclaw/crabbox/internal/providers/wandb/gen/coreweave/sandbox/v1beta2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -128,17 +130,119 @@ func TestReadNetrcWandbKeyHosts(t *testing.T) {
 	}
 }
 
-func TestStripScheme(t *testing.T) {
+func TestResolveEndpoint(t *testing.T) {
 	for _, tc := range []struct {
-		in, want string
+		name         string
+		in           string
+		wantTarget   string
+		wantProtocol string
 	}{
-		{"api.cwsandbox.com:443", "api.cwsandbox.com:443"},
-		{"https://api.cwsandbox.com:443", "api.cwsandbox.com:443"},
-		{"http://api.cwsandbox.com:443/", "api.cwsandbox.com:443"},
+		{name: "raw target", in: "api.cwsandbox.com:443", wantTarget: "api.cwsandbox.com:443", wantProtocol: "tls"},
+		{name: "https", in: "https://api.cwsandbox.com:443", wantTarget: "api.cwsandbox.com:443", wantProtocol: "tls"},
+		{name: "http loopback", in: "http://127.0.0.1:50051/", wantTarget: "127.0.0.1:50051", wantProtocol: "insecure"},
 	} {
-		if got := stripScheme(tc.in); got != tc.want {
-			t.Fatalf("stripScheme(%q) = %q, want %q", tc.in, got, tc.want)
+		t.Run(tc.name, func(t *testing.T) {
+			target, creds, err := resolveEndpoint(tc.in)
+			if err != nil {
+				t.Fatalf("resolveEndpoint(%q) err: %v", tc.in, err)
+			}
+			if target != tc.wantTarget {
+				t.Fatalf("target = %q, want %q", target, tc.wantTarget)
+			}
+			if got := creds.Info().SecurityProtocol; got != tc.wantProtocol {
+				t.Fatalf("security protocol = %q, want %q", got, tc.wantProtocol)
+			}
+		})
+	}
+}
+
+func TestResolveEndpointRejectsURLPath(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://api.cwsandbox.com:443/v2",
+		"http://127.0.0.1:50051/service",
+		"https://api.cwsandbox.com:443?debug=true",
+		"https://api.cwsandbox.com:443#fragment",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			_, _, err := resolveEndpoint(endpoint)
+			if err == nil {
+				t.Fatalf("resolveEndpoint(%q) accepted URL path/query/fragment", endpoint)
+			}
+		})
+	}
+}
+
+func TestResolveEndpointRejectsRemotePlaintext(t *testing.T) {
+	for _, endpoint := range []string{
+		"http://api.cwsandbox.com:443",
+		"http://staging.example.com:50051",
+		"http://192.0.2.10:50051",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			_, _, err := resolveEndpoint(endpoint)
+			if err == nil || !strings.Contains(err.Error(), "non-loopback") {
+				t.Fatalf("resolveEndpoint(%q) err = %v, want non-loopback rejection", endpoint, err)
+			}
+		})
+	}
+}
+
+type versionGatewayServer struct {
+	sandboxv1.UnimplementedGatewayServiceServer
+}
+
+func (versionGatewayServer) List(_ context.Context, req *sandboxv1.ListSandboxesRequest) (*sandboxv1.ListSandboxesResponse, error) {
+	if req.GetPageSize() != 1 {
+		return nil, status.Errorf(codes.InvalidArgument, "page_size = %d", req.GetPageSize())
+	}
+	return &sandboxv1.ListSandboxesResponse{}, nil
+}
+
+func TestWandbClientUsesPlaintextForHTTPOverride(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	sandboxv1.RegisterGatewayServiceServer(server, versionGatewayServer{})
+	go func() {
+		_ = server.Serve(lis)
+	}()
+	t.Cleanup(server.Stop)
+
+	t.Setenv("CRABBOX_WANDB_API_KEY", "test-key")
+	t.Setenv("WANDB_ENTITY_NAME", "test-entity")
+	t.Setenv("CWSANDBOX_BASE_URL", "http://"+lis.Addr().String())
+	api, err := newWandbClient(Config{}, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, ok := api.(*wandbClient)
+	if !ok {
+		t.Fatalf("api = %T, want *wandbClient", api)
+	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = client.Close()
 		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	version, err := api.Version(ctx)
+	if err != nil {
+		t.Fatalf("Version with http override err: %v", err)
+	}
+	if version != "coreweave.sandbox.v1beta2" {
+		t.Fatalf("version = %q", version)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close err: %v", err)
+	}
+	closed = true
+	if got := client.conn.GetState(); got != connectivity.Shutdown {
+		t.Fatalf("conn state = %s, want %s", got, connectivity.Shutdown)
 	}
 }
 

@@ -73,7 +73,11 @@ func (a App) status(ctx context.Context, args []string) error {
 		}
 		if err != nil {
 			if *wait && errors.Is(statusCtx.Err(), context.DeadlineExceeded) {
-				return exit(5, "timed out waiting for %s to become ready", *id)
+				timeoutErr := exit(5, "timed out waiting for %s to become ready", *id)
+				if err != statusCtx.Err() {
+					return errors.Join(timeoutErr, err)
+				}
+				return timeoutErr
 			}
 			return err
 		}

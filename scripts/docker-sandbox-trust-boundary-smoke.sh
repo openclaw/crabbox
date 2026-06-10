@@ -71,34 +71,62 @@ case "${1:-}" in
   create)
     shift
     write_args "$log_dir/create.args" "$@"
-    ;;
-  exec)
-    shift
-    write_args "$log_dir/exec.args" "$@"
-    env_file=""
+    sandbox_name=""
     while [[ "$#" -gt 0 ]]; do
       case "$1" in
-        --env-file)
-          env_file="${2:-}"
+        --name)
+          [[ -n "${2:-}" ]] || exit 81
+          sandbox_name="${2:-}"
           shift 2
-          ;;
-        --workdir)
-          shift 2
-          ;;
-        --)
-          shift
           ;;
         *)
           shift
           ;;
       esac
     done
+    [[ -n "$sandbox_name" ]] || exit 82
+    printf '%s\n' "$sandbox_name" >"$log_dir/sandbox.name"
+    ;;
+  exec)
+    shift
+    write_args "$log_dir/exec.args" "$@"
+    env_file=""
+    workdir=""
+    sandbox=""
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        --env-file)
+          [[ -n "${2:-}" ]] || exit 91
+          env_file="${2:-}"
+          shift 2
+          ;;
+        --workdir)
+          [[ -n "${2:-}" ]] || exit 92
+          workdir="${2:-}"
+          shift 2
+          ;;
+        --*)
+          printf 'unexpected fake sbx exec option: %s\n' "$1" >&2
+          exit 93
+          ;;
+        *)
+          sandbox="$1"
+          shift
+          break
+          ;;
+      esac
+    done
+    expected_sandbox="$(cat "$log_dir/sandbox.name")"
+    [[ "$workdir" == "${CRABBOX_FAKE_SBX_WORKSPACE:-}" ]] || exit 94
+    [[ "$sandbox" == "$expected_sandbox" ]] || exit 95
+    [[ "$#" -eq 2 && "${1:-}" == "printenv" && "${2:-}" == "CRABBOX_TRUST_BOUNDARY_TOKEN" ]] || exit 96
+    [[ -n "$env_file" && -f "$env_file" ]] || exit 97
     if [[ -n "$env_file" ]]; then
       cp "$env_file" "$log_dir/env-file.snapshot"
     fi
     if [[ -f "$log_dir/env-file.snapshot" ]]; then
       value="$(awk -F= '$1 == "CRABBOX_TRUST_BOUNDARY_TOKEN" {print substr($0, index($0, "=") + 1)}' "$log_dir/env-file.snapshot")"
-      printf '%s\n' "$value"
+      CRABBOX_TRUST_BOUNDARY_TOKEN="$value" printenv CRABBOX_TRUST_BOUNDARY_TOKEN
     fi
     ;;
   rm)

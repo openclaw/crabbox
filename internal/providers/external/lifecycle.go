@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,14 +20,17 @@ const (
 	lifecycleOutputJSONNameArray  = "json-name-array"
 	lifecycleOutputJSONLeaseArray = "json-lease-array"
 	externalResourceNameLabel     = "externalResourceName"
-	lifecycleRollbackTimeout      = 30 * time.Second
+	externalResourceNameFromEnv   = "externalResourceNameFromEnv"
 )
+
+var lifecycleRollbackTimeout = 30 * time.Second
 
 var lifecyclePlaceholderPattern = regexp.MustCompile(`\{\{([A-Za-z_][A-Za-z0-9_.-]*)\}\}`)
 var lifecycleEnvNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type lifecycleTemplateContext struct {
-	values map[string]string
+	values    map[string]string
+	sensitive map[string]bool
 }
 
 func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequest) (protocolResponse, error) {
@@ -44,11 +48,15 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 	}
 	expandedCommands := make([][]string, len(commands))
 	for index, command := range commands {
-		argv, err := expandLifecycleArgv(command, templateCtx)
+		argv, err := expandLifecycleArgv(command, templateCtx, operation.AllowEnvArgv)
 		if err != nil {
 			return protocolResponse{}, core.Exit(2, "external lifecycle %s step %d: %v", request.Operation, index+1, err)
 		}
 		expandedCommands[index] = argv
+	}
+	commandEnv, err := expandLifecycleEnv(operation.Env, templateCtx)
+	if err != nil {
+		return protocolResponse{}, core.Exit(2, "external lifecycle %s env: %v", request.Operation, err)
 	}
 	var defaultResponse *protocolResponse
 	if operation.Output == lifecycleOutputNone && lifecycleDefaultLeaseResponseOperation(request.Operation) {
@@ -63,6 +71,7 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 		result, err = b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 			Name:   argv[0],
 			Args:   argv[1:],
+			Env:    commandEnv,
 			Stderr: b.rt.Stderr,
 		})
 		if err != nil {
@@ -273,6 +282,7 @@ func (b *leaseBackend) lifecycleLease(request protocolRequest) (protocolLease, e
 func (b *leaseBackend) lifecycleLeaseForName(name string) (protocolLease, error) {
 	desired := desiredLease{LeaseID: name, Slug: core.NormalizeLeaseSlug(name), Name: name}
 	resourceName := ""
+	labels := map[string]string(nil)
 	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return protocolLease{}, err
@@ -287,10 +297,11 @@ func (b *leaseBackend) lifecycleLeaseForName(name string) (protocolLease, error)
 			desired.Slug = claim.Slug
 			desired.Name = strings.TrimSpace(claim.Labels["name"])
 			resourceName = name
+			labels = claim.Labels
 			break
 		}
 	}
-	return b.lifecycleLeaseForRequest(protocolRequest{Desired: &desired}, resourceName)
+	return b.lifecycleLeaseForRequest(protocolRequest{Desired: &desired, Lease: &protocolLease{Labels: labels}}, resourceName)
 }
 
 func (b *leaseBackend) lifecycleLeaseForRequest(request protocolRequest, resourceName string) (protocolLease, error) {
@@ -320,6 +331,9 @@ func (b *leaseBackend) lifecycleLeaseForRequest(request protocolRequest, resourc
 		labels[key] = expanded
 	}
 	labels[externalResourceNameLabel] = templateCtx.values["resourceName"]
+	if templateCtx.sensitive["resourceName"] {
+		labels[externalResourceNameFromEnv] = "true"
+	}
 	ssh, err := lifecycleSSH(connection.SSH, templateCtx)
 	if err != nil {
 		return protocolLease{}, err
@@ -442,13 +456,19 @@ func lifecycleContext(request protocolRequest, config map[string]any) (lifecycle
 	for key, value := range config {
 		addLifecycleConfigValues(values, "config."+key, value)
 	}
-	return lifecycleTemplateContext{values: values}, nil
+	return lifecycleTemplateContext{values: values, sensitive: map[string]bool{}}, nil
 }
 
 func (b *leaseBackend) lifecycleContext(request protocolRequest, resourceName string) (lifecycleTemplateContext, error) {
 	templateCtx, err := lifecycleContext(request, b.cfg.External.Config)
 	if err != nil {
 		return lifecycleTemplateContext{}, err
+	}
+	if request.Lease != nil && strings.EqualFold(strings.TrimSpace(request.Lease.Labels[externalResourceNameFromEnv]), "true") {
+		templateCtx.sensitive["resourceName"] = true
+	}
+	if request.Lease != nil && lifecycleTemplateReferencesEnv(core.Blank(b.cfg.External.Connection.ResourceName, "{{name}}")) {
+		templateCtx.sensitive["resourceName"] = true
 	}
 	if resourceName == "" && request.Lease != nil {
 		resourceName = strings.TrimSpace(request.Lease.Labels[externalResourceNameLabel])
@@ -457,16 +477,33 @@ func (b *leaseBackend) lifecycleContext(request protocolRequest, resourceName st
 		}
 	}
 	if resourceName == "" {
-		resourceName, err = expandLifecycleValue(
+		expansion, err := expandLifecycleValueTracked(
 			core.Blank(b.cfg.External.Connection.ResourceName, "{{name}}"),
 			templateCtx,
 		)
 		if err != nil {
 			return lifecycleTemplateContext{}, core.Exit(2, "external connection resourceName: %v", err)
 		}
+		if expansion.sensitive && !b.cfg.External.Connection.AllowEnvResourceName {
+			return lifecycleTemplateContext{}, core.Exit(2, "external connection resourceName uses environment-derived value; set allowEnvResourceName only for non-secret durable identifiers")
+		}
+		resourceName = expansion.value
+		if expansion.sensitive {
+			templateCtx.sensitive["resourceName"] = true
+		}
 	}
 	templateCtx.values["resourceName"] = resourceName
 	return templateCtx, nil
+}
+
+func lifecycleTemplateReferencesEnv(value string) bool {
+	matches := lifecyclePlaceholderPattern.FindAllStringSubmatch(value, -1)
+	for _, match := range matches {
+		if len(match) > 1 && strings.HasPrefix(match[1], "env.") {
+			return true
+		}
+	}
+	return false
 }
 
 func addLifecycleConfigValues(values map[string]string, key string, value any) {
@@ -492,20 +529,23 @@ func addLifecycleConfigValues(values map[string]string, key string, value any) {
 	}
 }
 
-func expandLifecycleArgv(argv []string, templateCtx lifecycleTemplateContext) ([]string, error) {
+func expandLifecycleArgv(argv []string, templateCtx lifecycleTemplateContext, allowEnvArgv bool) ([]string, error) {
 	if len(argv) == 0 {
 		return nil, fmt.Errorf("argv is empty")
 	}
 	expanded := make([]string, len(argv))
 	for index, value := range argv {
-		item, err := expandLifecycleValue(value, templateCtx)
+		item, err := expandLifecycleValueTracked(value, templateCtx)
 		if err != nil {
 			return nil, fmt.Errorf("argv[%d]: %w", index, err)
 		}
-		if strings.ContainsRune(item, '\x00') {
+		if item.sensitive && !allowEnvArgv {
+			return nil, fmt.Errorf("argv[%d] uses environment-derived value; use lifecycle env for secrets or set allowEnvArgv only for non-secret arguments", index)
+		}
+		if strings.ContainsRune(item.value, '\x00') {
 			return nil, fmt.Errorf("argv[%d] contains a NUL byte", index)
 		}
-		expanded[index] = item
+		expanded[index] = item.value
 	}
 	if strings.TrimSpace(expanded[0]) == "" {
 		return nil, fmt.Errorf("argv executable is empty")
@@ -514,7 +554,21 @@ func expandLifecycleArgv(argv []string, templateCtx lifecycleTemplateContext) ([
 }
 
 func expandLifecycleValue(value string, templateCtx lifecycleTemplateContext) (string, error) {
+	expansion, err := expandLifecycleValueTracked(value, templateCtx)
+	if err != nil {
+		return "", err
+	}
+	return expansion.value, nil
+}
+
+type lifecycleExpansion struct {
+	value     string
+	sensitive bool
+}
+
+func expandLifecycleValueTracked(value string, templateCtx lifecycleTemplateContext) (lifecycleExpansion, error) {
 	var expansionErr error
+	sensitive := false
 	expanded := lifecyclePlaceholderPattern.ReplaceAllStringFunc(value, func(match string) string {
 		parts := lifecyclePlaceholderPattern.FindStringSubmatch(match)
 		key := parts[1]
@@ -529,6 +583,7 @@ func expandLifecycleValue(value string, templateCtx lifecycleTemplateContext) (s
 				expansionErr = fmt.Errorf("environment variable %s is not set", name)
 				return ""
 			}
+			sensitive = true
 			return envValue
 		}
 		replacement, ok := templateCtx.values[key]
@@ -536,13 +591,42 @@ func expandLifecycleValue(value string, templateCtx lifecycleTemplateContext) (s
 			expansionErr = fmt.Errorf("unknown placeholder %q", key)
 			return ""
 		}
+		if templateCtx.sensitive[key] {
+			sensitive = true
+		}
 		return replacement
 	})
 	if expansionErr != nil {
-		return "", expansionErr
+		return lifecycleExpansion{}, expansionErr
 	}
 	if strings.Contains(expanded, "{{") || strings.Contains(expanded, "}}") {
-		return "", fmt.Errorf("invalid placeholder syntax in %q", value)
+		return lifecycleExpansion{}, fmt.Errorf("invalid placeholder syntax in %q", value)
+	}
+	return lifecycleExpansion{value: expanded, sensitive: sensitive}, nil
+}
+
+func expandLifecycleEnv(env map[string]string, templateCtx lifecycleTemplateContext) ([]string, error) {
+	if len(env) == 0 {
+		return nil, nil
+	}
+	keys := make([]string, 0, len(env))
+	for name := range env {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	expanded := append([]string(nil), os.Environ()...)
+	for _, name := range keys {
+		if !lifecycleEnvNamePattern.MatchString(name) {
+			return nil, fmt.Errorf("invalid environment variable name %q", name)
+		}
+		value, err := expandLifecycleValue(env[name], templateCtx)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		if strings.ContainsRune(value, '\x00') {
+			return nil, fmt.Errorf("%s contains a NUL byte", name)
+		}
+		expanded = append(expanded, name+"="+value)
 	}
 	return expanded, nil
 }

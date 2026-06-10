@@ -249,6 +249,30 @@ func TestIsloRunRejectsUnsafeWorkdirBeforeProviderClient(t *testing.T) {
 	}
 }
 
+func TestIsloClientUsesBoundedDefaultTransport(t *testing.T) {
+	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "test", BaseURL: "http://127.0.0.1:8787"}}, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, ok := api.(*isloSDKClient)
+	if !ok {
+		t.Fatalf("api=%T, want *isloSDKClient", api)
+	}
+	if client.httpClient == nil || client.httpClient == http.DefaultClient {
+		t.Fatalf("default http client=%#v, want bounded private client", client.httpClient)
+	}
+	if client.httpClient.Timeout != 0 {
+		t.Fatalf("whole-response timeout=%s, want caller context to govern streams", client.httpClient.Timeout)
+	}
+	transport, ok := client.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport=%T, want *http.Transport", client.httpClient.Transport)
+	}
+	if transport.ResponseHeaderTimeout != isloDefaultResponseHeaderTimeout {
+		t.Fatalf("response header timeout=%s, want %s", transport.ResponseHeaderTimeout, isloDefaultResponseHeaderTimeout)
+	}
+}
+
 func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
@@ -285,6 +309,40 @@ func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	}
 	if got.CleanupCommand != "crabbox stop --provider islo 'isb_crabbox-repo-abcdef'" {
 		t.Fatalf("cleanup command=%q", got.CleanupCommand)
+	}
+}
+
+func TestIsloRunCleanupDeleteUsesBoundedContext(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	withIsloCleanupTimeout(t, 20*time.Millisecond)
+	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef", blockDelete: true}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	var stderr bytes.Buffer
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: &stderr},
+	}
+	start := time.Now()
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("result=%#v", result)
+	}
+	if client.deleteCalls != 1 {
+		t.Fatalf("delete calls=%d want 1", client.deleteCalls)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "warning: islo stop failed for crabbox-repo-abcdef: context deadline exceeded") {
+		t.Fatalf("stderr=%q, want cleanup timeout warning", stderr.String())
 	}
 }
 
@@ -446,6 +504,30 @@ func TestIsloSyncWorkspaceFallsBackToExecUpload(t *testing.T) {
 	}
 	if !client.commandContains("base64 -d") || !client.commandContains("tar -xzf") {
 		t.Fatalf("fallback commands=%#v", client.prepareCommands)
+	}
+}
+
+func TestIsloExecUploadCleansTempFilesOnChunkFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &fakeIsloSyncClient{
+		execErrOnCommandContains: "printf",
+		execErrOnCommandSkip:     1,
+		execErrOnCommand:         errors.New("chunk transfer failed"),
+		execErrOnCommandHook:     cancel,
+		rejectCanceledContext:    true,
+	}
+	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
+	archive := bytes.NewReader(bytes.Repeat([]byte("x"), 49*1024))
+
+	err := backend.uploadArchiveViaExec(ctx, client, "crabbox-test", "/workspace/repo", archive)
+	if err == nil || !strings.Contains(err.Error(), "chunk transfer failed") {
+		t.Fatalf("uploadArchiveViaExec err=%v, want chunk transfer failure", err)
+	}
+	lastCommand := client.prepareCommands[len(client.prepareCommands)-1]
+	for _, want := range []string{"rm -f", ".tgz.b64", ".tgz"} {
+		if !strings.Contains(lastCommand, want) {
+			t.Fatalf("last command %q missing %q; commands=%#v", lastCommand, want, client.prepareCommands)
+		}
 	}
 }
 
@@ -625,15 +707,22 @@ func TestIsloSDKClientUploadArchiveStreamsMultipartTarball(t *testing.T) {
 }
 
 type fakeIsloSyncClient struct {
-	prepareCommands   []string
-	execRequests      []*gosdk.ExecRequest
-	uploadPath        string
-	uploaded          bytes.Buffer
-	uploadErr         error
-	execErr           error
-	closeUploadReader bool
-	createRequest     *gosdk.SandboxCreate
-	createName        string
+	prepareCommands          []string
+	execRequests             []*gosdk.ExecRequest
+	uploadPath               string
+	uploaded                 bytes.Buffer
+	uploadErr                error
+	execErr                  error
+	execErrOnCommand         error
+	execErrOnCommandContains string
+	execErrOnCommandSkip     int
+	execErrOnCommandHook     func()
+	rejectCanceledContext    bool
+	closeUploadReader        bool
+	createRequest            *gosdk.SandboxCreate
+	createName               string
+	blockDelete              bool
+	deleteCalls              int
 }
 
 func (f *fakeIsloSyncClient) CreateSandbox(_ context.Context, req *gosdk.SandboxCreate) (*gosdk.SandboxResponse, error) {
@@ -653,7 +742,12 @@ func (f *fakeIsloSyncClient) ListSandboxes(context.Context) ([]*gosdk.SandboxRes
 	return nil, nil
 }
 
-func (f *fakeIsloSyncClient) DeleteSandbox(context.Context, string) error {
+func (f *fakeIsloSyncClient) DeleteSandbox(ctx context.Context, _ string) error {
+	f.deleteCalls++
+	if f.blockDelete {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return nil
 }
 
@@ -671,11 +765,25 @@ func (f *fakeIsloSyncClient) UploadArchive(_ context.Context, _ string, targetPa
 	return err
 }
 
-func (f *fakeIsloSyncClient) ExecStream(_ context.Context, _ string, req *gosdk.ExecRequest, _, _ io.Writer) (int, error) {
+func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosdk.ExecRequest, _, _ io.Writer) (int, error) {
+	if f.rejectCanceledContext && ctx.Err() != nil {
+		return 1, ctx.Err()
+	}
 	f.execRequests = append(f.execRequests, req)
-	f.prepareCommands = append(f.prepareCommands, strings.Join(req.GetCommand(), " "))
+	command := strings.Join(req.GetCommand(), " ")
+	f.prepareCommands = append(f.prepareCommands, command)
 	if f.execErr != nil {
 		return 1, f.execErr
+	}
+	if f.execErrOnCommand != nil && strings.Contains(command, f.execErrOnCommandContains) {
+		if f.execErrOnCommandSkip > 0 {
+			f.execErrOnCommandSkip--
+		} else {
+			if f.execErrOnCommandHook != nil {
+				f.execErrOnCommandHook()
+			}
+			return 1, f.execErrOnCommand
+		}
 	}
 	return 0, nil
 }
@@ -705,6 +813,13 @@ func swapNewIsloClient(client isloAPI) func() {
 	return func() {
 		newIsloClient = previous
 	}
+}
+
+func withIsloCleanupTimeout(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	original := isloCleanupTimeout
+	isloCleanupTimeout = timeout
+	t.Cleanup(func() { isloCleanupTimeout = original })
 }
 
 func tarGzipContains(t *testing.T, data []byte, name string) bool {

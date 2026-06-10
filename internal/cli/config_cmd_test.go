@@ -179,6 +179,43 @@ func TestConfigShowIncludesMorphWithoutSecret(t *testing.T) {
 	}
 }
 
+func TestConfigShowSurfacesUnsupportedAzureDynamicSessionsPool(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte("azureDynamicSessions:\n  endpoint: https://pool.env.eastus.azurecontainerapps.io\n  pool: legacy-pool\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "unsupported_pool=legacy-pool") {
+		t.Fatalf("config show hid unsupported Azure Dynamic Sessions pool: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		AzureDynamicSessions struct {
+			UnsupportedPool string `json:"unsupportedPool"`
+		} `json:"azureDynamicSessions"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.AzureDynamicSessions.UnsupportedPool != "legacy-pool" {
+		t.Fatalf("json azureDynamicSessions.unsupportedPool=%q", got.AzureDynamicSessions.UnsupportedPool)
+	}
+}
+
 func TestConfigShowIncludesSyncInclude(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

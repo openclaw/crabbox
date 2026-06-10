@@ -301,8 +301,11 @@ Azure does not provision macOS through this provider. Use [AWS](aws.md) or
 - `crabbox stop --provider azure <name>` only acts on VMs that carry `crabbox=true`
   (and either no `provider` tag or `provider=azure`). A manually named VM in the
   resource group will not be deleted by Crabbox.
-- The default SSH NSG rule allows `0.0.0.0/0` when `azure.sshCIDRs` is empty. Set
-  explicit CIDRs for any production-adjacent setup.
+- When `azure.sshCIDRs` is empty on the public network path, direct Azure
+  provisioning detects the operator's outbound IPv4 and creates a `/32` SSH
+  rule. If a shared NSG already has a different managed SSH CIDR, set
+  `CRABBOX_AZURE_SSH_CIDRS` explicitly to replace or extend it. Private-network
+  leases also require explicit VPN/VNet source CIDRs.
 - Azure costs are not hardcoded in Crabbox. Set `CRABBOX_COST_RATES_JSON` when you
   need exact Azure cost guardrails.
 - Azure native Windows uses a Custom Script Extension because Windows custom data

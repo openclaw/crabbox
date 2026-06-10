@@ -174,19 +174,22 @@ func TestResolvePondPeersUnknownProvider(t *testing.T) {
 
 func TestResolvePondPeersExplicitlyUnsupportedAdapter(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
-		{LeaseID: "cbx_modal", Slug: "fn", Provider: "modal", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "isb_islo", Slug: "fn", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
 	})
 	fake := &fakeBridgeProvider{listErr: ErrBridgeNotImplemented}
 	prev := loadBridgeProviderFunc
 	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
 	t.Cleanup(func() { loadBridgeProviderFunc = prev })
 
-	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "modal", pondPeersFlags{})
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{})
 	if err != nil {
 		t.Fatalf("resolvePondPeers: %v", err)
 	}
 	if len(peers) != 1 || peers[0].BridgeState != "unsupported" {
 		t.Fatalf("expected ErrBridgeNotImplemented to surface as BridgeState=unsupported, got %#v", peers)
+	}
+	if peers[0].Transport != TransportNone {
+		t.Fatalf("transport=%q want none", peers[0].Transport)
 	}
 	if len(peers[0].Targets) != 0 {
 		t.Fatalf("expected no targets when adapter reports unsupported, got %#v", peers[0].Targets)
@@ -195,14 +198,14 @@ func TestResolvePondPeersExplicitlyUnsupportedAdapter(t *testing.T) {
 
 func TestResolvePondPeersExplicitlyUnsupportedPublish(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
-		{LeaseID: "cbx_cf", Slug: "edge", Provider: "cloudflare", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "isb_islo", Slug: "edge", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
 	})
 	fake := &fakeBridgeProvider{pubErr: ErrBridgeNotImplemented}
 	prev := loadBridgeProviderFunc
 	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
 	t.Cleanup(func() { loadBridgeProviderFunc = prev })
 
-	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "cloudflare", pondPeersFlags{SharePort: 8080, ShareTTL: time.Hour})
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{SharePort: 8080, ShareTTL: time.Hour})
 	if err != nil {
 		t.Fatalf("resolvePondPeers: %v", err)
 	}
@@ -222,9 +225,8 @@ func TestResolvePondPeersMultiProviderFanOut(t *testing.T) {
 	// resolvePondPeers picks the right backend per provider rather than
 	// applying one backend uniformly.
 	adapters := map[string]*fakeBridgeProvider{
-		"islo":  {listed: map[string][]BridgePeerTarget{"isb_islo1": {{Port: 80, URL: "https://islo-a.share.islo.dev"}}}},
-		"e2b":   {listed: map[string][]BridgePeerTarget{"cbx_e2b1": {{Port: 8080, URL: "https://8080-sbx.e2b.app"}}}},
-		"modal": {listErr: ErrBridgeNotImplemented},
+		"islo": {listed: map[string][]BridgePeerTarget{"isb_islo1": {{Port: 80, URL: "https://islo-a.share.islo.dev"}}}},
+		"e2b":  {listed: map[string][]BridgePeerTarget{"cbx_e2b1": {{Port: 8080, URL: "https://8080-sbx.e2b.app"}}}},
 	}
 	prev := loadBridgeProviderFunc
 	loadBridgeProviderFunc = func(provider string, _ Runtime) (BridgeProvider, error) {
@@ -254,8 +256,15 @@ func TestResolvePondPeersMultiProviderFanOut(t *testing.T) {
 	if got := byProvider["e2b"].Targets; len(got) != 1 || got[0].URL == "" {
 		t.Fatalf("e2b peer should have its target, got %#v", got)
 	}
-	if state := byProvider["modal"].BridgeState; state != "unsupported" {
-		t.Fatalf("modal peer should report unsupported, got %q", state)
+	modal := byProvider["modal"]
+	if modal.Transport != TransportNone {
+		t.Fatalf("modal transport=%q want none", modal.Transport)
+	}
+	if modal.BridgeState != "" {
+		t.Fatalf("modal peer should not enter bridge path, got state %q", modal.BridgeState)
+	}
+	if modal.Note != "no advertised pond transport for provider modal" {
+		t.Fatalf("modal note=%q", modal.Note)
 	}
 }
 

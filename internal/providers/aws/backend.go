@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -198,6 +199,10 @@ func (b *awsLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (cor
 
 func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	if err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server); err != nil {
+		var keyErr *awsProviderKeyCleanupError
+		if errors.As(err, &keyErr) {
+			removeLeaseClaim(req.Lease.LeaseID)
+		}
 		return err
 	}
 	removeLeaseClaim(req.Lease.LeaseID)
@@ -348,10 +353,24 @@ func deleteServer(ctx context.Context, cfg Config, server Server) error {
 		return err
 	}
 	if keyName := core.ServerProviderKey(server); core.ValidCrabboxProviderKey(keyName) {
-		return client.DeleteSSHKey(ctx, keyName)
+		if err := client.DeleteSSHKey(ctx, keyName); err != nil {
+			return &awsProviderKeyCleanupError{keyName: keyName, err: err}
+		}
 	}
 	return nil
 }
+
+type awsProviderKeyCleanupError struct {
+	keyName string
+	err     error
+}
+
+func (e *awsProviderKeyCleanupError) Error() string {
+	return fmt.Sprintf("deleted aws instance but failed to delete provider key %s; provider key may be orphaned: %v", e.keyName, e.err)
+}
+
+func (e *awsProviderKeyCleanupError) Unwrap() error { return e.err }
+
 func removeLeaseClaim(leaseID string) { core.RemoveLeaseClaim(leaseID) }
 
 func cleanupAWSProviderKeyAcrossRegions(stderr io.Writer, cfg Config, keyName string) {

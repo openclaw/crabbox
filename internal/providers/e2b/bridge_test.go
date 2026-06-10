@@ -61,6 +61,29 @@ func TestE2BPublishPeerReturnsCanonicalURL(t *testing.T) {
 	}
 }
 
+func TestE2BPublishPeerAcceptsSyntheticLeaseID(t *testing.T) {
+	fake := &fakeBridgeAPI{
+		fakeE2BSyncClient: fakeE2BSyncClient{
+			sandbox: e2bSandbox{
+				SandboxID: "sbx_1",
+				Domain:    "e2b.app",
+				Metadata: map[string]string{
+					"crabbox":  "true",
+					"provider": e2bProvider,
+				},
+			},
+		},
+	}
+	backend := newBridgeBackend(t, fake)
+	target, err := backend.PublishPeer(context.Background(), "e2b_sbx_1", 3000, time.Hour)
+	if err != nil {
+		t.Fatalf("PublishPeer: %v", err)
+	}
+	if target.URL != "https://3000-sbx_1.e2b.app" {
+		t.Fatalf("URL=%q, want synthetic sandbox preview URL", target.URL)
+	}
+}
+
 func TestE2BPublishPeerFallsBackToConfigDomain(t *testing.T) {
 	fake := &fakeBridgeAPI{
 		listed: []e2bSandbox{{

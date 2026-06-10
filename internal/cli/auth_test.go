@@ -166,6 +166,54 @@ func TestGitHubLoginNoBrowserStoresReturnedToken(t *testing.T) {
 	}
 }
 
+func TestLoginWithTokenReadsAppStdin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/whoami":
+			if got := r.Header.Get("Authorization"); got != "Bearer stdin-session-token" {
+				t.Fatalf("authorization=%q", got)
+			}
+			_ = json.NewEncoder(w).Encode(CoordinatorWhoami{
+				Owner: "friend@example.com",
+				Org:   "openclaw",
+				Auth:  "token",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	app := App{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Stdin:  strings.NewReader("stdin-session-token\n"),
+	}
+	if err := app.login(context.Background(), []string{"--url", server.URL, "--provider", "aws", "--token-stdin"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "user=friend@example.com") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Coordinator != server.URL || cfg.CoordToken != "stdin-session-token" || cfg.Provider != "aws" {
+		t.Fatalf("unexpected config: %#v", cfg)
+	}
+}
+
 func TestGitHubLoginMigratesToCanonicalRedirectOrigin(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

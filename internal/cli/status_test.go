@@ -3,8 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -114,16 +116,36 @@ func TestStatusWaitBoundsResolveByTimeout(t *testing.T) {
 	}
 }
 
+func TestStatusWaitPreservesBackendTimeoutDetail(t *testing.T) {
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	backend := &statusResolveRecordingBackend{block: true, timeoutDetail: "auth denied"}
+	testAWSBackendOverride = backend
+	defer func() { testAWSBackendOverride = nil }()
+
+	app := App{Stdout: io.Discard, Stderr: &bytes.Buffer{}}
+	err := app.status(context.Background(), []string{"--provider", "aws", "--id", "cbx_status", "--wait", "--wait-timeout", "20ms"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 5 || !strings.Contains(err.Error(), "auth denied") {
+		t.Fatalf("status --wait error = %#v, want timeout exit 5 with backend detail", err)
+	}
+}
+
 type statusResolveRecordingBackend struct {
 	testSSHBackend
-	requests []ResolveRequest
-	block    bool
+	requests      []ResolveRequest
+	block         bool
+	timeoutDetail string
 }
 
 func (b *statusResolveRecordingBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
 	b.requests = append(b.requests, req)
 	if b.block {
 		<-ctx.Done()
+		if b.timeoutDetail != "" {
+			return LeaseTarget{}, errors.Join(ctx.Err(), errors.New(b.timeoutDetail))
+		}
 		return LeaseTarget{}, ctx.Err()
 	}
 	return LeaseTarget{

@@ -122,6 +122,12 @@ case "$1" in
       printf 'warmup failed at %s\\n' "$count" >&2
       exit 42
     fi
+    if [[ "\${CRABBOX_FAKE_WARMUP_SPLIT_LOG:-0}" == "1" ]]; then
+      for n in $(seq 1 25); do
+        printf 'warmup-stdout-record-%02d\\n' "$n"
+        printf 'warmup-stderr-record-%02d\\n' "$n" >&2
+      done
+    fi
     case "$count" in
       1) printf '{"leaseId":"cbx_source"}\\n' ;;
       2) printf '{"leaseId":"cbx_candidate"}\\n' ;;
@@ -129,6 +135,12 @@ case "$1" in
     esac
     ;;
   run)
+    if [[ "\${CRABBOX_FAKE_RUN_SPLIT_LOG:-0}" == "1" && " $* " == *" --script "* ]]; then
+      for n in $(seq 1 50); do
+        printf 'stdout-record-%02d\\n' "$n"
+        printf 'stderr-record-%02d\\n' "$n" >&2
+      done
+    fi
     printf 'macos-smoke-ok\\n'
     ;;
   webvnc)
@@ -547,6 +559,7 @@ test("macOS lifecycle smoke preserves full mock lifecycle evidence", async () =>
     CRABBOX_FAKE_NO_HOST: "1",
     CRABBOX_MACOS_ALLOCATE: "1",
     CRABBOX_MACOS_PROMOTE: "1",
+    CRABBOX_FAKE_WARMUP_SPLIT_LOG: "1",
     CRABBOX_MACOS_RELEASE_HOST: "1",
     CRABBOX_MACOS_ARTIFACT_DIR: run.artifacts,
     CRABBOX_MACOS_IMAGE_NAME: "full",
@@ -573,6 +586,8 @@ test("macOS lifecycle smoke preserves full mock lifecycle evidence", async () =>
     await readdir(summaryPath(run.artifacts, summary.artifacts[label]));
     await assertSummaryFileContains(run.artifacts, summary.evidence.hostWait[label], /host h-mock is available/);
     await assertSummaryFileContains(run.artifacts, summary.evidence.warmup[label], /"leaseId":"cbx_/);
+    await assertSummaryFileContains(run.artifacts, summary.evidence.warmup[label], /warmup-stdout-record-25/);
+    await assertSummaryFileContains(run.artifacts, summary.evidence.warmup[label], /warmup-stderr-record-25/);
     await assertSummaryFileContains(run.artifacts, summary.evidence.webvncDaemon[label], /webvnc daemon: ready/);
     await assertSummaryFileContains(run.artifacts, summary.evidence.webvncStatus[label], /portal bridge: connected=true/);
   }
@@ -677,6 +692,7 @@ echo prep-ok
     CRABBOX_FAKE_NO_HOST: "1",
     CRABBOX_MACOS_ALLOCATE: "1",
     CRABBOX_MACOS_CREATE_IMAGE: "0",
+    CRABBOX_FAKE_RUN_SPLIT_LOG: "1",
     CRABBOX_MACOS_SOURCE_PREP_SCRIPT: prep,
     CRABBOX_MACOS_ARTIFACT_DIR: run.artifacts,
     CRABBOX_MACOS_IMAGE_NAME: "source-prep",
@@ -689,6 +705,12 @@ echo prep-ok
   assert.equal(summary.phase, "source");
   assert.equal(summary.evidence.sourcePrep, "evidence/source-prep.log");
   await assertSummaryFileContains(run.artifacts, summary.evidence.sourcePrep, /macos-smoke-ok/);
+  const sourcePrepLog = await readFile(summaryPath(run.artifacts, summary.evidence.sourcePrep), "utf8");
+  for (let n = 1; n <= 50; n += 1) {
+    const label = String(n).padStart(2, "0");
+    assert.equal((sourcePrepLog.match(new RegExp(`^stdout-record-${label}$`, "gm")) ?? []).length, 1);
+    assert.equal((sourcePrepLog.match(new RegExp(`^stderr-record-${label}$`, "gm")) ?? []).length, 1);
+  }
 
   const fakeLog = await readFile(run.fakeLog, "utf8");
   const prepIndex = fakeLog.indexOf(`run --provider aws --target macos --id cbx_source --no-sync --script ${prep}`);

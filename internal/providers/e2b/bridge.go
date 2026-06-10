@@ -68,7 +68,19 @@ func (b *e2bBackend) bridgeSandboxCoords(ctx context.Context, leaseID string) (s
 	if err != nil {
 		return "", "", err
 	}
-	sandbox, err := resolveE2BSandboxByLease(ctx, client, leaseID)
+	var sandbox e2bSandbox
+	if isE2BSyntheticID(leaseID) {
+		sandboxID := strings.TrimPrefix(leaseID, "e2b_")
+		sandbox, err = client.GetSandbox(ctx, sandboxID)
+		if err != nil {
+			return "", "", e2bError("get sandbox", err)
+		}
+		if !isCrabboxE2BSandbox(sandbox) {
+			return "", "", exit(4, "e2b sandbox %q is not claimed by Crabbox", leaseID)
+		}
+	} else {
+		sandbox, err = resolveE2BSandboxByLease(ctx, client, leaseID)
+	}
 	if err != nil {
 		return "", "", err
 	}

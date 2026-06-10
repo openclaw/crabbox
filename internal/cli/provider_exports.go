@@ -94,6 +94,18 @@ func ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, 
 	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
 }
 
+func ClaimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, cacheVolumes []string) error {
+	return claimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, cacheVolumes)
+}
+
+func ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget) error {
+	return claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target)
+}
+
+func ClaimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
+}
+
 func ResolveLeaseClaim(identifier string) (LeaseClaim, bool, error) {
 	return resolveLeaseClaim(identifier)
 }
@@ -104,6 +116,11 @@ func ResolveLeaseClaimForProvider(identifier, provider string) (LeaseClaim, bool
 
 func RemoveLeaseClaim(leaseID string) {
 	removeLeaseClaim(leaseID)
+}
+
+func ValidateAzureSSHCIDRsForAcquire(ctx context.Context, cfg Config) error {
+	_, err := azureSSHCIDRsForRules(ctx, cfg, nil)
+	return err
 }
 
 func UpdateLeaseClaimCacheVolumes(leaseID string, specs []string) error {
@@ -120,6 +137,10 @@ func ListLeaseClaims() ([]LeaseClaim, error) {
 
 func ReadLeaseClaim(leaseID string) (LeaseClaim, error) {
 	return readLeaseClaim(leaseID)
+}
+
+func CrabboxStateDir() (string, error) {
+	return crabboxStateDir()
 }
 
 func DirectLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep bool, now time.Time) map[string]string {
@@ -207,6 +228,7 @@ const (
 	CheckpointKindGCP              = checkpointKindGCP
 	CheckpointKindGCPDisk          = checkpointKindGCPDisk
 	CheckpointKindParallels        = checkpointKindParallels
+	CheckpointKindDockerCommit     = checkpointKindDockerCommit
 	CheckpointStrategyImage        = checkpointStrategyImage
 	CheckpointStrategyDiskSnapshot = checkpointStrategyDiskSnapshot
 )

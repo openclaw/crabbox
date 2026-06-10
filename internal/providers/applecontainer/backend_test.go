@@ -2,7 +2,9 @@ package applecontainer
 
 import (
 	"context"
+	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -55,6 +57,27 @@ func recordedArgsForCommand(t *testing.T, runner *recordingRunner, command strin
 	}
 	t.Fatalf("%s command was not recorded: %#v", command, runner.calls)
 	return ""
+}
+
+func labelFromRunArgs(t *testing.T, args []string, key string) string {
+	t.Helper()
+	prefix := key + "="
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--label" && strings.HasPrefix(args[i+1], prefix) {
+			return strings.TrimPrefix(args[i+1], prefix)
+		}
+	}
+	t.Fatalf("%s label not found in run args: %v", key, args)
+	return ""
+}
+
+func commandWasCalled(calls []core.LocalCommandRequest, command string) bool {
+	for _, call := range calls {
+		if len(call.Args) > 0 && call.Args[0] == command {
+			return true
+		}
+	}
+	return false
 }
 
 func testBackend(runner *recordingRunner) *backend {
@@ -262,6 +285,46 @@ func TestCreateContainerNoSecretsAsCLIArgs(t *testing.T) {
 	if strings.Contains(strings.ToUpper(args), "PRIVATE") {
 		t.Fatalf("unexpected secret-like content in args:\n%s", args)
 	}
+}
+
+func TestAcquirePostCreateFailureKeepsRetainedContainerKey(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("apple-container acquire only runs on macOS/Apple silicon")
+	}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"ls", "--all", "--format", "json"}):       {Stdout: "[]"},
+			commandKey([]string{"run"}):                                   {Stdout: "crabbox-kept\n"},
+			commandKey([]string{"inspect", "crabbox-kept"}):               {Stderr: "inspect failed"},
+			commandKey([]string{"delete", "--force", "crabbox-kept"}):     {},
+			commandKey([]string{"system", "dns"}):                         {},
+			commandKey([]string{"system", "dns", "--format", "resolver"}): {},
+		},
+		errors: map[string]error{
+			commandKey([]string{"inspect", "crabbox-kept"}): errors.New("inspect failed"),
+		},
+	}
+	b := testBackend(runner)
+
+	if _, err := b.Acquire(context.Background(), core.AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}}); err == nil {
+		t.Fatal("Acquire succeeded")
+	}
+	runArgs := recordedArgsForCommand(t, runner, "run")
+	leaseID := labelFromRunArgs(t, strings.Split(runArgs, "\n"), "lease")
+	if commandWasCalled(runner.calls, "delete") {
+		t.Fatalf("kept failed container should not be deleted: %#v", runner.calls)
+	}
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("kept container SSH key missing: %v", err)
+	}
+	t.Cleanup(func() { core.RemoveStoredTestboxKey(leaseID) })
 }
 
 func TestCreateContainerMountsCacheVolumes(t *testing.T) {

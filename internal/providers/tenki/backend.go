@@ -93,6 +93,7 @@ func ApplyTenkiProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if flagWasSet(fs, "tenki-disk-gb") {
 		cfg.Tenki.DiskGB = *v.DiskGB
 	}
+	normalizeTenkiProviderConfig(cfg)
 	if cfg.Provider == tenkiProvider {
 		return validateTenkiOptions(*cfg)
 	}
@@ -100,6 +101,7 @@ func ApplyTenkiProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 }
 
 func NewTenkiBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error) {
+	normalizeTenkiProviderConfig(&cfg)
 	if err := validateTenkiOptions(cfg); err != nil {
 		return nil, err
 	}
@@ -114,16 +116,32 @@ func NewTenkiBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error)
 }
 
 func validateTenkiOptions(cfg Config) error {
+	cfg.Tenki.Image = strings.TrimSpace(cfg.Tenki.Image)
+	cfg.Tenki.Snapshot = strings.TrimSpace(cfg.Tenki.Snapshot)
 	if cfg.Tailscale.Enabled {
 		return exit(2, "--tailscale is not supported for provider=tenki; Tenki owns sandbox networking")
 	}
-	if strings.TrimSpace(cfg.Tenki.Image) != "" && strings.TrimSpace(cfg.Tenki.Snapshot) != "" {
+	if cfg.Tenki.Image != "" && cfg.Tenki.Snapshot != "" {
 		return exit(2, "provider=tenki accepts only one of tenki.image or tenki.snapshot")
+	}
+	if cfg.Tenki.CPUs < 0 {
+		return exit(2, "tenki.cpus must be zero or greater")
+	}
+	if cfg.Tenki.MemoryMB < 0 {
+		return exit(2, "tenki.memoryMB must be zero or greater")
+	}
+	if cfg.Tenki.DiskGB < 0 {
+		return exit(2, "tenki.diskGB must be zero or greater")
 	}
 	if err := cleanTenkiWorkRoot(tenkiWorkRoot(cfg)); err != nil {
 		return err
 	}
 	return nil
+}
+
+func normalizeTenkiProviderConfig(cfg *Config) {
+	cfg.Tenki.Image = strings.TrimSpace(cfg.Tenki.Image)
+	cfg.Tenki.Snapshot = strings.TrimSpace(cfg.Tenki.Snapshot)
 }
 
 type tenkiBackend struct {
@@ -289,6 +307,7 @@ func (b *tenkiBackend) Touch(_ context.Context, req TouchRequest) (Server, error
 
 func (b *tenkiBackend) configForRun() Config {
 	cfg := b.cfg
+	normalizeTenkiProviderConfig(&cfg)
 	cfg.Provider = tenkiProvider
 	cfg.TargetOS = targetLinux
 	cfg.SSHUser = "tenki"
@@ -336,11 +355,11 @@ func (b *tenkiBackend) createSession(ctx context.Context, cfg Config, name, leas
 	if cfg.Tenki.DiskGB > 0 {
 		args = append(args, "--disk-size-gb", strconv.Itoa(cfg.Tenki.DiskGB))
 	}
-	if cfg.Tenki.Image != "" {
-		args = append(args, "--image", cfg.Tenki.Image)
+	if image := strings.TrimSpace(cfg.Tenki.Image); image != "" {
+		args = append(args, "--image", image)
 	}
-	if cfg.Tenki.Snapshot != "" {
-		args = append(args, "--snapshot", cfg.Tenki.Snapshot)
+	if snapshot := strings.TrimSpace(cfg.Tenki.Snapshot); snapshot != "" {
+		args = append(args, "--snapshot", snapshot)
 	}
 	result, err := b.runTenki(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
@@ -961,20 +980,20 @@ func tenkiServerType(cfg Config, session tenkiSession) string {
 	if session.SourceSnapshotID != "" {
 		return "snapshot"
 	}
-	if cfg.Tenki.Image != "" {
-		return cfg.Tenki.Image
+	if image := strings.TrimSpace(cfg.Tenki.Image); image != "" {
+		return image
 	}
-	if cfg.Tenki.Snapshot != "" {
+	if strings.TrimSpace(cfg.Tenki.Snapshot) != "" {
 		return "snapshot"
 	}
 	return "sandbox"
 }
 
 func tenkiConfiguredServerType(cfg Config) string {
-	if cfg.Tenki.Image != "" {
-		return cfg.Tenki.Image
+	if image := strings.TrimSpace(cfg.Tenki.Image); image != "" {
+		return image
 	}
-	if cfg.Tenki.Snapshot != "" {
+	if strings.TrimSpace(cfg.Tenki.Snapshot) != "" {
 		return "snapshot"
 	}
 	return "sandbox"

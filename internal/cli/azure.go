@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +54,7 @@ type AzureClient struct {
 	Subnet         string
 	NSG            string
 	SSHCIDRs       []string
+	Network        string
 	Image          azureImageRef
 	SSHPort        string
 	FallbackPorts  []string
@@ -108,10 +110,6 @@ func NewAzureClient(ctx context.Context, cfg Config) (*AzureClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("armcompute factory: %w", err)
 	}
-	cidrs := cfg.AzureSSHCIDRs
-	if len(cidrs) == 0 {
-		cidrs = []string{"0.0.0.0/0"}
-	}
 	return &AzureClient{
 		SubscriptionID: cfg.AzureSubscription,
 		Location:       cfg.AzureLocation,
@@ -119,7 +117,8 @@ func NewAzureClient(ctx context.Context, cfg Config) (*AzureClient, error) {
 		VNet:           cfg.AzureVNet,
 		Subnet:         cfg.AzureSubnet,
 		NSG:            cfg.AzureNSG,
-		SSHCIDRs:       cidrs,
+		SSHCIDRs:       cfg.AzureSSHCIDRs,
+		Network:        cfg.AzureNetwork,
 		Image:          img,
 		SSHPort:        cfg.SSHPort,
 		FallbackPorts:  cfg.SSHFallbackPorts,
@@ -134,6 +133,58 @@ func NewAzureClient(ctx context.Context, cfg Config) (*AzureClient, error) {
 		diskc:          cmpFactory.NewDisksClient(),
 		skuc:           cmpFactory.NewResourceSKUsClient(),
 	}, nil
+}
+
+func azureSSHCIDRsForConfig(ctx context.Context, cfg Config) ([]string, error) {
+	if len(cfg.AzureSSHCIDRs) > 0 {
+		return cfg.AzureSSHCIDRs, nil
+	}
+	cidr, err := detectOutboundIPv4CIDRFunc(ctx)
+	if err == nil && cidr != "" {
+		return []string{cidr}, nil
+	}
+	if err != nil {
+		return nil, exit(3, "azure ssh CIDRs are not configured and outbound IPv4 detection failed: %v; set CRABBOX_AZURE_SSH_CIDRS explicitly (use 0.0.0.0/0 only if world-open SSH is intentional)", err)
+	}
+	return nil, exit(3, "azure ssh CIDRs are not configured and outbound IPv4 detection returned no IPv4 address; set CRABBOX_AZURE_SSH_CIDRS explicitly (use 0.0.0.0/0 only if world-open SSH is intentional)")
+}
+
+func azureSSHCIDRsForRules(ctx context.Context, cfg Config, existingRules []*armnetwork.SecurityRule) ([]string, error) {
+	if len(cfg.AzureSSHCIDRs) > 0 {
+		return cfg.AzureSSHCIDRs, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.AzureNetwork), "private") {
+		return nil, exit(3, "azure private network SSH CIDRs are not configured; set CRABBOX_AZURE_SSH_CIDRS to the VPN/VNet source CIDR explicitly")
+	}
+	detected, err := azureSSHCIDRsForConfig(ctx, Config{})
+	if err != nil {
+		return nil, err
+	}
+	existing := azureExistingCrabboxSSHCIDRs(existingRules)
+	if len(existing) == 0 {
+		return detected, nil
+	}
+	for _, cidr := range detected {
+		if slices.Contains(existing, cidr) {
+			return existing, nil
+		}
+	}
+	return nil, exit(3, "azure ssh CIDRs are not configured and this shared NSG already has managed SSH CIDRs %s; set CRABBOX_AZURE_SSH_CIDRS explicitly to replace or extend them", strings.Join(existing, ","))
+}
+
+func azureExistingCrabboxSSHCIDRs(rules []*armnetwork.SecurityRule) []string {
+	out := []string{}
+	for _, rule := range rules {
+		if rule == nil || rule.Name == nil || !strings.HasPrefix(*rule.Name, "crabbox-ssh-") || rule.Properties == nil || rule.Properties.SourceAddressPrefix == nil {
+			continue
+		}
+		cidr := strings.TrimSpace(*rule.Properties.SourceAddressPrefix)
+		if cidr == "" || cidr == "0.0.0.0/0" || cidr == "::/0" {
+			continue
+		}
+		out = appendUniqueStrings(out, cidr)
+	}
+	return out
 }
 
 func azureCredentialForConfig(cfg Config) (azcore.TokenCredential, error) {
@@ -633,8 +684,12 @@ func (c *AzureClient) ensureNSG(ctx context.Context) error {
 	}
 	rules := preserveNonCrabboxRules(existingRules)
 	usedPriorities := azureNSGUsedPriorities(rules)
+	cidrs, err := azureSSHCIDRsForRules(ctx, Config{AzureSSHCIDRs: c.SSHCIDRs, AzureNetwork: c.Network}, existingRules)
+	if err != nil {
+		return err
+	}
 	for _, port := range sshPortCandidates(c.SSHPort, c.FallbackPorts) {
-		for j, cidr := range c.SSHCIDRs {
+		for j, cidr := range cidrs {
 			priority, err := nextAzureNSGPriority(usedPriorities)
 			if err != nil {
 				return err
