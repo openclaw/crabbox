@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added Tart macOS desktop leases with native Screen Sharing, a token-gated host-side WebVNC bridge, and documented local-network exposure boundaries. Thanks @anagnorisis2peripeteia.
+
 ## 0.27.0 - 2026-06-09
 
 ### Added
