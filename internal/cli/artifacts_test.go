@@ -568,6 +568,86 @@ func TestArtifactsPullDownloadsAndVerifiesManifest(t *testing.T) {
 	}
 }
 
+func TestDownloadArtifactURLRejectsContentLengthAboveLimit(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/octet-stream")
+		w.Header().Set("content-length", fmt.Sprint(len(payload)))
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	outPath := filepath.Join(t.TempDir(), "artifact.bin")
+	_, _, _, err := downloadArtifactURL(context.Background(), artifactManifestFile{
+		Name: "artifact.bin",
+		URL:  server.URL,
+		Size: 4,
+	}, outPath)
+	if err == nil || !strings.Contains(err.Error(), "content-length 1024 exceeds limit 4") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+		t.Fatalf("artifact output was created: %v", err)
+	}
+}
+
+func TestDownloadArtifactURLStopsStreamingAboveDeclaredSize(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload[:4])
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write(payload[4:])
+	}))
+	defer server.Close()
+
+	outPath := filepath.Join(t.TempDir(), "artifact.bin")
+	_, _, _, err := downloadArtifactURL(context.Background(), artifactManifestFile{
+		Name: "artifact.bin",
+		URL:  server.URL,
+		Size: 4,
+	}, outPath)
+	if err == nil || !strings.Contains(err.Error(), "response exceeds limit 4") {
+		t.Fatalf("err=%v", err)
+	}
+	info, statErr := os.Stat(outPath)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if info.Size() > 4 {
+		t.Fatalf("artifact output grew past declared size: %d", info.Size())
+	}
+}
+
+func TestArtifactsPullRejectsNegativeManifestSize(t *testing.T) {
+	dir := t.TempDir()
+	manifest := artifactManifest{
+		SchemaVersion: 1,
+		GeneratedAt:   "2026-05-25T00:00:00Z",
+		Storage:       artifactManifestStore{Backend: "local"},
+		Files: []artifactManifestFile{{
+			Name: "screenshot.png",
+			Path: "screenshot.png",
+			Size: -1,
+		}},
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(dir, artifactManifestFilename)
+	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = pullArtifactManifest(context.Background(), manifestPath, filepath.Join(dir, "pull"), false)
+	if err == nil || !strings.Contains(err.Error(), "artifact size for screenshot.png is invalid: -1") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestArtifactsPullAllowsOutputAfterManifestRef(t *testing.T) {
 	dir := t.TempDir()
 	payload := []byte("png-data")
