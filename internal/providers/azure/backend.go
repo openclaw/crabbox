@@ -3,9 +3,9 @@ package azure
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"strings"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
@@ -27,6 +27,17 @@ type Server = core.Server
 type SSHTarget = core.SSHTarget
 
 type azureLeaseBackend struct{ shared.DirectSSHBackend }
+
+const azureAcquireRollbackTimeout = 20 * time.Minute
+
+type azureClient interface {
+	ListCrabboxServers(context.Context) ([]Server, error)
+	CreateServerWithFallback(context.Context, Config, string, string, string, bool, func(string, ...any)) (Server, Config, error)
+	WaitForServerIP(context.Context, string) (Server, error)
+	GetServer(context.Context, string) (Server, error)
+	DeleteServer(context.Context, string) error
+	SetTags(context.Context, string, map[string]string) error
+}
 
 func NewAzureLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = "azure"
@@ -71,6 +82,18 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	rollback := true
+	rollbackCloudID := server.CloudID
+	defer func() {
+		if !rollback || strings.TrimSpace(rollbackCloudID) == "" {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), azureAcquireRollbackTimeout)
+		defer cancel()
+		if err := client.DeleteServer(cleanupCtx, rollbackCloudID); err != nil {
+			fmt.Fprintf(b.RT.Stderr, "warning: cleanup azure server %s after acquire failure: %v\n", rollbackCloudID, err)
+		}
+	}()
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s type=%s\n", leaseID, server.DisplayID(), cfg.ServerType)
 	server, err = client.WaitForServerIP(ctx, server.CloudID)
 	if err != nil {
@@ -78,10 +101,10 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 	}
 	target := sshTargetFromConfig(cfg, azureServerHost(server, cfg.AzureNetwork))
 	if err := bootstrapManagedWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr); err != nil {
-		_ = client.DeleteServer(context.Background(), server.CloudID)
 		return LeaseTarget{}, err
 	}
 	server.Labels["state"] = "ready"
+	rollback = false
 	if err := client.SetTags(ctx, server.CloudID, server.Labels); err != nil {
 		fmt.Fprintf(b.RT.Stderr, "warning: set tags: %v\n", err)
 	}
@@ -184,7 +207,7 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func newAzureClient(ctx context.Context, cfg Config) (*core.AzureClient, error) {
+var newAzureClient = func(ctx context.Context, cfg Config) (azureClient, error) {
 	return core.NewAzureClient(ctx, cfg)
 }
 
@@ -199,9 +222,9 @@ func providerKeyForLease(leaseID string) string { return core.ProviderKeyForLeas
 func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
 }
-func bootstrapManagedWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarget, publicKey string, stderr io.Writer) error {
-	return core.BootstrapManagedWindowsDesktop(ctx, cfg, target, publicKey, stderr)
-}
+
+var bootstrapManagedWindowsDesktop = core.BootstrapManagedWindowsDesktop
+
 func deleteServer(ctx context.Context, cfg Config, server Server) error {
 	client, err := newAzureClient(ctx, cfg)
 	if err != nil {
