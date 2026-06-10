@@ -563,15 +563,17 @@ type AppleContainerConfig struct {
 }
 
 type MXCConfig struct {
-	CLIPath        string
-	Version        string
-	Containment    string
-	Network        string
-	ReadOnlyPaths  []string
-	ReadWritePaths []string
-	AllowedHosts   []string
-	BlockedHosts   []string
-	Experimental   bool
+	CLIPath           string
+	Version           string
+	Containment       string
+	Network           string
+	ReadOnlyPaths     []string
+	ReadWritePaths    []string
+	AllowedHosts      []string
+	BlockedHosts      []string
+	AllowDACLMutation bool
+	AllowWindowsUI    bool
+	Experimental      bool
 }
 
 type MultipassConfig struct {
@@ -1827,15 +1829,17 @@ type fileAppleContainerConfig struct {
 }
 
 type fileMXCConfig struct {
-	CLIPath        string   `yaml:"cliPath,omitempty"`
-	Version        string   `yaml:"version,omitempty"`
-	Containment    string   `yaml:"containment,omitempty"`
-	Network        string   `yaml:"network,omitempty"`
-	ReadOnlyPaths  []string `yaml:"readOnlyPaths,omitempty"`
-	ReadWritePaths []string `yaml:"readWritePaths,omitempty"`
-	AllowedHosts   []string `yaml:"allowedHosts,omitempty"`
-	BlockedHosts   []string `yaml:"blockedHosts,omitempty"`
-	Experimental   *bool    `yaml:"experimental,omitempty"`
+	CLIPath           string   `yaml:"cliPath,omitempty"`
+	Version           string   `yaml:"version,omitempty"`
+	Containment       string   `yaml:"containment,omitempty"`
+	Network           string   `yaml:"network,omitempty"`
+	ReadOnlyPaths     []string `yaml:"readOnlyPaths,omitempty"`
+	ReadWritePaths    []string `yaml:"readWritePaths,omitempty"`
+	AllowedHosts      []string `yaml:"allowedHosts,omitempty"`
+	BlockedHosts      []string `yaml:"blockedHosts,omitempty"`
+	AllowDACLMutation *bool    `yaml:"allowDaclMutation,omitempty"`
+	AllowWindowsUI    *bool    `yaml:"allowWindowsUI,omitempty"`
+	Experimental      *bool    `yaml:"experimental,omitempty"`
 }
 
 type fileMultipassConfig struct {
@@ -3144,6 +3148,12 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.MXC.BlockedHosts != nil {
 			cfg.MXC.BlockedHosts = append([]string(nil), file.MXC.BlockedHosts...)
+		}
+		if file.MXC.AllowDACLMutation != nil {
+			cfg.MXC.AllowDACLMutation = *file.MXC.AllowDACLMutation
+		}
+		if file.MXC.AllowWindowsUI != nil {
+			cfg.MXC.AllowWindowsUI = *file.MXC.AllowWindowsUI
 		}
 		if file.MXC.Experimental != nil {
 			cfg.MXC.Experimental = *file.MXC.Experimental

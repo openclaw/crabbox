@@ -57,13 +57,13 @@ func TestFlagsApplyPolicy(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	values := registerFlags(fs, cfg)
-	if err := fs.Parse([]string{"--mxc-network", "allow", "--mxc-readwrite-paths", `C:\src,C:\cache`, "--mxc-experimental"}); err != nil {
+	if err := fs.Parse([]string{"--mxc-network", "allow", "--mxc-readwrite-paths", `C:\src,C:\cache`, "--mxc-allow-dacl-mutation", "--mxc-allow-windows-ui", "--mxc-experimental"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := applyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.MXC.Network != "allow" || len(cfg.MXC.ReadWritePaths) != 2 || !cfg.MXC.Experimental {
+	if cfg.MXC.Network != "allow" || len(cfg.MXC.ReadWritePaths) != 2 || !cfg.MXC.AllowDACLMutation || !cfg.MXC.AllowWindowsUI || !cfg.MXC.Experimental {
 		t.Fatalf("mxc=%+v", cfg.MXC)
 	}
 }

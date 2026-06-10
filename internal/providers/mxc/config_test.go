@@ -13,8 +13,13 @@ import (
 
 func TestBuildConfigDefaultsToBlockedProcessContainer(t *testing.T) {
 	t.Setenv("SystemRoot", `C:\Windows`)
+	t.Setenv("SystemDrive", `C:`)
+	t.Setenv("WINDIR", `C:\Windows`)
+	t.Setenv("ComSpec", `C:\Windows\System32\cmd.exe`)
 	t.Setenv("ProgramFiles", `C:\Program Files`)
 	t.Setenv("PATH", `C:\Windows\System32;C:\Tools`)
+	t.Setenv("PATHEXT", `.COM;.EXE;.BAT;.CMD`)
+	t.Setenv("OS", `Windows_NT`)
 	cfg := core.BaseConfig()
 	cfg.MXC.ReadOnlyPaths = []string{`C:\Windows`}
 	config, err := buildConfig(cfg, RunRequest{
@@ -35,7 +40,10 @@ func TestBuildConfigDefaultsToBlockedProcessContainer(t *testing.T) {
 	if config.Fallback.AllowDACLMutation {
 		t.Fatal("host DACL mutation fallback must be disabled by default")
 	}
-	if config.Process.Timeout != 120000 || len(config.Process.Env) != 1 || config.Process.Env[0] != "CI=1" {
+	if !config.UI.Disable {
+		t.Fatal("Win32k/UI access must be disabled by default")
+	}
+	if config.Process.Timeout != 120000 || !containsString(config.Process.Env, "CI=1") || !containsString(config.Process.Env, `SystemRoot=C:\Windows`) {
 		t.Fatalf("process=%+v", config.Process)
 	}
 	if !containsFold(config.Filesystem.ReadWritePaths, `C:\src\example`) || !containsFold(config.Filesystem.ReadOnlyPaths, `C:\Windows`) {
@@ -46,6 +54,49 @@ func TestBuildConfigDefaultsToBlockedProcessContainer(t *testing.T) {
 	}
 	if !strings.Contains(config.Process.CommandLine, `\"hello world\"`) {
 		t.Fatalf("commandLine=%q", config.Process.CommandLine)
+	}
+}
+
+func TestWindowsProcessEnvironmentProtectsRequiredValues(t *testing.T) {
+	t.Setenv("SystemRoot", `C:\Windows`)
+	env := windowsProcessEnvironment(map[string]string{"systemroot": `C:\attacker`, "TOKEN": "secret"})
+	if !containsString(env, `SystemRoot=C:\Windows`) || containsString(env, `systemroot=C:\attacker`) {
+		t.Fatalf("env=%v", env)
+	}
+	if !containsString(env, "TOKEN=secret") {
+		t.Fatalf("forwarded environment missing: %v", env)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBuildConfigAllowsExplicitDACLMutationFallback(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.MXC.AllowDACLMutation = true
+	cfg.MXC.AllowWindowsUI = true
+	config, err := buildConfig(cfg, RunRequest{Command: []string{"cmd.exe", "/c", "exit", "0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.Fallback.AllowDACLMutation {
+		t.Fatal("explicit host DACL mutation fallback was not forwarded")
+	}
+	if config.UI.Disable {
+		t.Fatal("explicit Windows UI capability was not forwarded")
+	}
+}
+
+func TestBuildConfigRejectsVolumeRoot(t *testing.T) {
+	_, err := buildConfig(core.BaseConfig(), RunRequest{Repo: core.Repo{Root: `C:\`}, Command: []string{"cmd.exe", "/c", "exit", "0"}})
+	if err == nil || !strings.Contains(err.Error(), "volume root") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -116,6 +167,18 @@ func TestWindowsCommandLineRejectsCommandShim(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "rerun with --shell") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestWindowsCommandLineUsesResolvedExecutable(t *testing.T) {
+	commandLine, err := windowsCommandLineWithLookPath([]string{"powershell.exe", "-NoProfile"}, false, func(string) (string, error) {
+		return `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(commandLine, `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `) {
+		t.Fatalf("commandLine=%q", commandLine)
 	}
 }
 

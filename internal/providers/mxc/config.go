@@ -18,6 +18,7 @@ type mxcConfig struct {
 	Filesystem  mxcFilesystem `json:"filesystem"`
 	Network     mxcNetwork    `json:"network"`
 	Fallback    mxcFallback   `json:"fallback"`
+	UI          mxcUI         `json:"ui"`
 }
 type mxcProcess struct {
 	CommandLine string   `json:"commandLine"`
@@ -38,6 +39,9 @@ type mxcNetwork struct {
 type mxcFallback struct {
 	AllowDACLMutation bool `json:"allowDaclMutation"`
 }
+type mxcUI struct {
+	Disable bool `json:"disable"`
+}
 
 func buildConfig(cfg Config, req RunRequest) (mxcConfig, error) {
 	commandLine, err := windowsCommandLine(req.Command, req.ShellMode)
@@ -46,6 +50,9 @@ func buildConfig(cfg Config, req RunRequest) (mxcConfig, error) {
 	}
 	readwrite := append([]string(nil), cfg.MXC.ReadWritePaths...)
 	if root := strings.TrimSpace(req.Repo.Root); root != "" {
+		if isWindowsVolumeRoot(root) {
+			return mxcConfig{}, exit(2, "refusing to grant MXC read-write access to volume root %q", root)
+		}
 		readwrite = append(readwrite, root)
 	}
 	readonly := append(defaultReadOnlyPaths(), cfg.MXC.ReadOnlyPaths...)
@@ -54,11 +61,7 @@ func buildConfig(cfg Config, req RunRequest) (mxcConfig, error) {
 			readonly = append(readonly, resolved)
 		}
 	}
-	env := make([]string, 0, len(req.Env))
-	for key, value := range req.Env {
-		env = append(env, key+"="+value)
-	}
-	sort.Strings(env)
+	env := windowsProcessEnvironment(req.Env)
 	timeout := req.Options.TTL
 	if timeout <= 0 {
 		timeout = cfg.TTL
@@ -69,8 +72,42 @@ func buildConfig(cfg Config, req RunRequest) (mxcConfig, error) {
 		Process:     mxcProcess{CommandLine: commandLine, CWD: req.Repo.Root, Env: env, Timeout: timeout.Milliseconds()},
 		Filesystem:  mxcFilesystem{ReadWritePaths: uniquePaths(readwrite), ReadOnlyPaths: uniquePaths(readonly)},
 		Network:     mxcNetwork{DefaultPolicy: defaultString(cfg.MXC.Network, "block"), EnforcementMode: "both", AllowedHosts: cfg.MXC.AllowedHosts, BlockedHosts: cfg.MXC.BlockedHosts},
-		Fallback:    mxcFallback{AllowDACLMutation: false},
+		Fallback:    mxcFallback{AllowDACLMutation: cfg.MXC.AllowDACLMutation},
+		UI:          mxcUI{Disable: !cfg.MXC.AllowWindowsUI},
 	}, nil
+}
+
+func isWindowsVolumeRoot(path string) bool {
+	clean := strings.TrimRight(strings.TrimSpace(path), `\\/`)
+	return len(clean) == 2 && clean[1] == ':'
+}
+
+func windowsProcessEnvironment(forwarded map[string]string) []string {
+	type entry struct {
+		key   string
+		value string
+	}
+	entries := make(map[string]entry, len(forwarded)+30)
+	for key, value := range forwarded {
+		entries[strings.ToLower(key)] = entry{key: key, value: value}
+	}
+	for _, key := range []string{
+		"ALLUSERSPROFILE", "APPDATA", "CommonProgramFiles", "CommonProgramFiles(x86)", "CommonProgramW6432",
+		"COMPUTERNAME", "ComSpec", "DriverData", "LOCALAPPDATA", "NUMBER_OF_PROCESSORS", "OS", "Path", "PATHEXT",
+		"PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "PROCESSOR_LEVEL", "PROCESSOR_REVISION", "ProgramData",
+		"ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "PROMPT", "PSModulePath", "PUBLIC", "SystemDrive",
+		"SystemRoot", "USERPROFILE", "WINDIR",
+	} {
+		if value, ok := os.LookupEnv(key); ok && strings.TrimSpace(value) != "" {
+			entries[strings.ToLower(key)] = entry{key: key, value: value}
+		}
+	}
+	env := make([]string, 0, len(entries))
+	for _, item := range entries {
+		env = append(env, item.key+"="+item.value)
+	}
+	sort.Strings(env)
+	return env
 }
 
 func buildIsolatedConfig(cfg Config, req RunRequest) (mxcConfig, string, func(), error) {
@@ -178,18 +215,19 @@ func windowsCommandLineWithLookPath(command []string, shellMode bool, lookPath f
 	if shellMode {
 		return "powershell.exe -NoProfile -NonInteractive -Command " + quoteWindowsArg(strings.Join(command, " ")), nil
 	}
-	parts := make([]string, len(command))
-	for i, arg := range command {
-		parts[i] = quoteWindowsArg(arg)
-	}
-	commandLine := strings.Join(parts, " ")
+	resolvedCommand := append([]string(nil), command...)
 	if resolved, err := lookPath(command[0]); err == nil {
 		switch strings.ToLower(filepath.Ext(resolved)) {
 		case ".bat", ".cmd":
 			return "", exit(2, "command %q resolves to a Windows script shim; rerun with --shell or invoke an executable directly", command[0])
 		}
+		resolvedCommand[0] = resolved
 	}
-	return commandLine, nil
+	parts := make([]string, len(resolvedCommand))
+	for i, arg := range resolvedCommand {
+		parts[i] = quoteWindowsArg(arg)
+	}
+	return strings.Join(parts, " "), nil
 }
 func quoteWindowsArg(value string) string {
 	if value != "" && !strings.ContainsAny(value, " \t\n\v\"") {

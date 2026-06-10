@@ -128,7 +128,7 @@ func requireSupportedWindows() error {
 		return exit(3, "%v", err)
 	}
 	if build < 26100 {
-		return exit(2, "provider=mxc requires Windows 11 24H2 or newer (build 26100+); detected build %d", build)
+		return exit(2, "provider=mxc requires Windows build 26100 or newer; detected build %d", build)
 	}
 	return nil
 }
