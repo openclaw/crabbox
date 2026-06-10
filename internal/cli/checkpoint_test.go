@@ -172,10 +172,7 @@ func TestCheckpointRestoreDryRunDoesNotResolveLease(t *testing.T) {
 }
 
 // TestCheckpointRestoreDockerCommitDoesNotPointAtFork is the round-10 regression:
-// restoring a docker-commit checkpoint must not tell users to use `checkpoint
-// fork` (which lands separately) or call the image a "VM image"; it should point
-// at the create/verify/delete support this PR adds.
-func TestCheckpointRestoreDockerCommitDoesNotPointAtFork(t *testing.T) {
+func TestCheckpointRestoreDockerCommitPointsAtFork(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
 	store, err := defaultCheckpointStore()
@@ -193,8 +190,8 @@ func TestCheckpointRestoreDockerCommitDoesNotPointAtFork(t *testing.T) {
 		t.Fatal("expected restore of a docker-commit checkpoint to be unsupported")
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "fork") {
-		t.Fatalf("docker-commit restore guidance must not point at fork, got %q", msg)
+	if !strings.Contains(msg, "checkpoint fork") {
+		t.Fatalf("docker-commit restore guidance should point at fork, got %q", msg)
 	}
 	if strings.Contains(msg, "VM image") {
 		t.Fatalf("docker-commit image must not be called a VM image, got %q", msg)
@@ -657,6 +654,18 @@ func TestCheckpointCreateModeLocalContainerNativeUsesDockerCommit(t *testing.T) 
 func TestCheckpointDockerCommitUsesImageStrategy(t *testing.T) {
 	if got := checkpointStrategyForKind(checkpointKindDockerCommit); got != checkpointStrategyImage {
 		t.Fatalf("strategy=%q, want %q", got, checkpointStrategyImage)
+	}
+}
+
+func TestNativeCheckpointForkRecordCarriesNameAndMetadata(t *testing.T) {
+	metadata := map[string]string{"runtime": "docker"}
+	record := checkpointRecord{Kind: checkpointKindDockerCommit}
+	record.Native.ImageID = "sha256:123"
+	record.Native.Name = "crabbox-checkpoint-demo-123"
+	record.Native.Metadata = metadata
+	got := nativeCheckpointForkRecord(record)
+	if got.Name != "crabbox-checkpoint-demo-123" || got.Metadata["runtime"] != "docker" {
+		t.Fatalf("fork record=%#v", got)
 	}
 }
 

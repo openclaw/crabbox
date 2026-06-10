@@ -20,7 +20,20 @@ const (
 	checkpointMetadataConfig   = "docker_config"
 	checkpointMetadataEndpoint = "docker_endpoint"
 	checkpointMetadataDaemonID = "docker_daemon_id"
+	checkpointMetadataForkID   = "fork_image_id"
+	checkpointMetadataForkName = "fork_image_name"
+	checkpointMetadataUser     = "container_user"
+	checkpointMetadataWorkRoot = "container_work_root"
 )
+
+var checkpointScopeMetadataKeys = []string{
+	checkpointMetadataRuntime,
+	checkpointMetadataHost,
+	checkpointMetadataContext,
+	checkpointMetadataConfig,
+	checkpointMetadataEndpoint,
+	checkpointMetadataDaemonID,
+}
 
 type checkpointScope struct {
 	Runtime  string
@@ -47,6 +60,11 @@ var checkpointLeaseLabelKeys = []string{
 	"created_by",
 	"desktop",
 	"desktop_env",
+	checkpointMetadataConfig,
+	checkpointMetadataContext,
+	checkpointMetadataDaemonID,
+	checkpointMetadataEndpoint,
+	checkpointMetadataHost,
 	"docker_socket",
 	"expires_at",
 	"host_work_root",
@@ -103,6 +121,7 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	if !isDockerRuntime(scope.Runtime) {
 		return core.NativeCheckpointCreateResult{}, core.Exit(2, "docker-commit checkpoints require the Docker runtime; use --mode archive with %s", scope.Runtime)
 	}
+	metadata := checkpointMetadataForServer(scope, req.Config, req.Server)
 	canonicalWorkdir, err := checkpointCanonicalWorkdir(ctx, scope, containerID, req.Workdir)
 	if err != nil {
 		return core.NativeCheckpointCreateResult{}, err
@@ -149,7 +168,7 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 					Kind:     core.CheckpointKindDockerCommit,
 					Direct:   true,
 				},
-				Metadata: checkpointScopeMetadata(scope),
+				Metadata: metadata,
 			}, core.Exit(7, "docker tag %s: %v: %s", imageID, err, detail)
 		}
 		return core.NativeCheckpointCreateResult{}, core.Exit(7, "docker tag %s: %v: %s", imageID, err, detail)
@@ -163,7 +182,7 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 			Kind:     core.CheckpointKindDockerCommit,
 			Direct:   true,
 		},
-		Metadata: checkpointScopeMetadata(scope),
+		Metadata: metadata,
 	}, nil
 }
 
@@ -242,6 +261,13 @@ func inspectCheckpointTag(ctx context.Context, scope checkpointScope, image core
 
 func checkpointScopeForServer(ctx context.Context, cfg core.Config, server core.Server) (checkpointScope, error) {
 	runtimeName := leaseRuntime(server, cfg.LocalContainer.Runtime)
+	if metadata := checkpointScopeMetadataFromLabels(server.Labels); len(metadata) != 0 {
+		scope := checkpointScopeFromMetadata(metadata, runtimeName)
+		if err := validateCheckpointScope(ctx, scope); err != nil {
+			return checkpointScope{}, err
+		}
+		return scope, nil
+	}
 	scope := checkpointScope{Runtime: runtimeName}
 	if !isDockerRuntime(runtimeName) {
 		return scope, nil
@@ -295,10 +321,13 @@ func checkpointScopeForServer(ctx context.Context, cfg core.Config, server core.
 }
 
 func checkpointScopeFromRequest(req core.NativeCheckpointResourceRequest) checkpointScope {
-	metadata := req.Metadata
+	return checkpointScopeFromMetadata(req.Metadata, req.Config.LocalContainer.Runtime)
+}
+
+func checkpointScopeFromMetadata(metadata map[string]string, fallbackRuntime string) checkpointScope {
 	runtimeName := strings.TrimSpace(metadata[checkpointMetadataRuntime])
 	if runtimeName == "" {
-		runtimeName = firstCheckpointValue(req.Config.LocalContainer.Runtime, "docker")
+		runtimeName = firstCheckpointValue(fallbackRuntime, "docker")
 	}
 	return checkpointScope{
 		Runtime:  runtimeName,
@@ -310,6 +339,16 @@ func checkpointScopeFromRequest(req core.NativeCheckpointResourceRequest) checkp
 	}
 }
 
+func checkpointForkMetadata(metadata map[string]string, image core.NativeCheckpointForkRecord) map[string]string {
+	out := make(map[string]string, len(metadata)+2)
+	for key, value := range metadata {
+		out[key] = value
+	}
+	out[checkpointMetadataForkID] = strings.TrimSpace(image.ImageID)
+	out[checkpointMetadataForkName] = strings.TrimSpace(firstCheckpointValue(image.Name, image.Resource))
+	return out
+}
+
 func checkpointScopeMetadata(scope checkpointScope) map[string]string {
 	return map[string]string{
 		checkpointMetadataRuntime:  scope.Runtime,
@@ -319,6 +358,26 @@ func checkpointScopeMetadata(scope checkpointScope) map[string]string {
 		checkpointMetadataEndpoint: scope.Endpoint,
 		checkpointMetadataDaemonID: scope.DaemonID,
 	}
+}
+
+func checkpointMetadataForServer(scope checkpointScope, cfg core.Config, server core.Server) map[string]string {
+	metadata := checkpointScopeMetadata(scope)
+	metadata[checkpointMetadataUser] = firstCheckpointValue(server.Labels["ssh_user"], cfg.LocalContainer.User, cfg.SSHUser)
+	metadata[checkpointMetadataWorkRoot] = firstCheckpointValue(server.Labels["work_root"], cfg.LocalContainer.WorkRoot, cfg.WorkRoot)
+	return metadata
+}
+
+func checkpointScopeMetadataFromLabels(labels map[string]string) map[string]string {
+	if strings.TrimSpace(labels[checkpointMetadataDaemonID]) == "" {
+		return nil
+	}
+	metadata := make(map[string]string, len(checkpointScopeMetadataKeys))
+	for _, key := range checkpointScopeMetadataKeys {
+		if value := strings.TrimSpace(labels[key]); value != "" {
+			metadata[key] = value
+		}
+	}
+	return metadata
 }
 
 func validateCheckpointScope(ctx context.Context, scope checkpointScope) error {
@@ -340,6 +399,35 @@ func validateCheckpointScope(ctx context.Context, scope checkpointScope) error {
 	}
 	if currentDaemonID != scope.DaemonID {
 		return core.Exit(7, "Docker daemon changed from %s to %s; refusing checkpoint operation", scope.DaemonID, currentDaemonID)
+	}
+	return nil
+}
+
+func validateCheckpointFork(ctx context.Context, cfg core.Config) error {
+	metadata := cfg.LocalContainer.CheckpointMetadata
+	if len(metadata) == 0 {
+		return nil
+	}
+	scope := checkpointScopeFromMetadata(metadata, cfg.LocalContainer.Runtime)
+	if err := validateCheckpointScope(ctx, scope); err != nil {
+		return err
+	}
+	image := core.NativeCheckpointImage{
+		ID:   strings.TrimSpace(metadata[checkpointMetadataForkID]),
+		Name: strings.TrimSpace(metadata[checkpointMetadataForkName]),
+	}
+	if image.ID == "" || image.Name == "" {
+		return core.Exit(7, "local-container checkpoint fork is missing its recorded image identity")
+	}
+	currentID, missing, err := inspectCheckpointTag(ctx, scope, image)
+	if err != nil {
+		return err
+	}
+	if missing {
+		return core.Exit(7, "local-container checkpoint image %s is missing", image.Name)
+	}
+	if !strings.EqualFold(currentID, image.ID) {
+		return core.Exit(7, "refusing to fork checkpoint tag %s: recorded image %s but tag now points to %s", image.Name, image.ID, currentID)
 	}
 	return nil
 }

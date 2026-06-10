@@ -537,14 +537,15 @@ type SpritesConfig struct {
 }
 
 type LocalContainerConfig struct {
-	Runtime      string
-	Image        string
-	User         string
-	WorkRoot     string
-	CPUs         int
-	Memory       string
-	Network      string
-	DockerSocket bool
+	Runtime            string
+	Image              string
+	User               string
+	WorkRoot           string
+	CPUs               int
+	Memory             string
+	Network            string
+	DockerSocket       bool
+	CheckpointMetadata map[string]string `yaml:"-" json:"-"`
 }
 
 type AppleContainerConfig struct {

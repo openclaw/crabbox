@@ -203,6 +203,7 @@ type NativeCheckpointLifecycleProvider interface {
 type NativeCheckpointForkRecord struct {
 	Kind        string
 	ImageID     string
+	Name        string
 	Resource    string
 	Region      string
 	Project     string
@@ -211,6 +212,7 @@ type NativeCheckpointForkRecord struct {
 	TargetOS    string
 	WindowsMode string
 	ServerType  string
+	Metadata    map[string]string
 }
 
 type NativeCheckpointForkRequest struct {

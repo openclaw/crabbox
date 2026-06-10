@@ -608,7 +608,7 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 				return nil
 			}
 			if record.Kind == checkpointKindDockerCommit {
-				return exit(2, "checkpoint %s is a docker-commit image; restore is not supported for docker-commit checkpoints — verify it with crabbox checkpoint inspect %s --verify or remove it with crabbox checkpoint delete %s", record.ID, record.ID, record.ID)
+				return exit(2, "checkpoint %s is a docker-commit image; use crabbox checkpoint fork %s to create a lease, crabbox checkpoint inspect %s --verify to verify it, or crabbox checkpoint delete %s to remove it", record.ID, record.ID, record.ID, record.ID)
 			}
 			return exit(2, "checkpoint %s is a VM image; use crabbox checkpoint fork %s to create a lease from it", record.ID, record.ID)
 		}

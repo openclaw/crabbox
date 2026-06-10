@@ -99,6 +99,14 @@ and nerdctl leases keep using workspace archives. Crabbox rejects native
 checkpoint creation when the workspace is stored in a mounted volume because
 `docker commit` does not capture mounted data.
 
+`crabbox checkpoint fork <id>` starts a fresh local-container lease from the
+checkpoint image, then relocates the saved workspace into the new lease path.
+Fork validates the recorded image tag and Docker system ID before launch and
+replays the checkpoint's Docker runtime, context store, context, and host so a
+changed ambient Docker configuration cannot select another daemon. The forked
+lease persists that scope for later `run`, `ssh`, and `stop` commands and
+reuses the source container user and work root during workspace relocation.
+
 **Azure notes.** Disk-snapshot checkpoints require managed OS disks, the default
 for new Azure leases. Crabbox refuses native checkpoint creation from Azure
 ephemeral-OS-disk leases (Azure reports success but does not capture live disk

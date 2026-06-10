@@ -2,6 +2,9 @@ package localcontainer
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -192,5 +195,155 @@ func TestNativeCheckpointCapabilityUsesResolvedLeaseRuntime(t *testing.T) {
 				t.Fatalf("supported=%v, want %v", ok, tc.want)
 			}
 		})
+	}
+}
+
+func TestSpecAdvertisesForkFeature(t *testing.T) {
+	if !(Provider{}).Spec().Features.Has(core.FeatureFork) {
+		t.Fatal("expected local-container to advertise checkpoint fork support")
+	}
+}
+
+func TestCheckpointForkUsesTagForDisplay(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.LocalContainer.Image = "sha256:123"
+	cfg.LocalContainer.CheckpointMetadata = map[string]string{
+		checkpointMetadataForkName: "crabbox-checkpoint-demo-123",
+	}
+	applyDefaults(&cfg)
+	if cfg.ServerType != "crabbox-checkpoint-demo-123" {
+		t.Fatalf("server type=%q", cfg.ServerType)
+	}
+	if cfg.LocalContainer.Image != "sha256:123" {
+		t.Fatalf("launch image=%q", cfg.LocalContainer.Image)
+	}
+}
+
+func TestCheckpointScopeForServerUsesPersistedLabels(t *testing.T) {
+	binDir := writeCheckpointScopeDocker(t, "unix:///tmp/docker.sock", "daemon-123")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DOCKER_CONTEXT", "ambient-invalid")
+	t.Setenv("DOCKER_HOST", "tcp://ambient.invalid:2376")
+	labels := map[string]string{
+		checkpointMetadataRuntime:  "docker",
+		checkpointMetadataContext:  "remote-context",
+		checkpointMetadataConfig:   "/tmp/docker-config",
+		checkpointMetadataEndpoint: "unix:///tmp/docker.sock",
+		checkpointMetadataDaemonID: "daemon-123",
+	}
+	scope, err := checkpointScopeForServer(context.Background(), core.Config{}, core.Server{Labels: labels})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope.Context != "remote-context" || scope.Config != "/tmp/docker-config" || scope.DaemonID != "daemon-123" {
+		t.Fatalf("scope=%#v", scope)
+	}
+	labels[checkpointMetadataDaemonID] = "another-daemon"
+	if _, err := checkpointScopeForServer(context.Background(), core.Config{}, core.Server{Labels: labels}); err == nil {
+		t.Fatal("expected changed persisted daemon identity to fail")
+	}
+}
+
+func TestCheckpointMetadataForServerPreservesUserAndWorkRoot(t *testing.T) {
+	metadata := checkpointMetadataForServer(
+		checkpointScope{Runtime: "docker", DaemonID: "daemon-123"},
+		core.Config{LocalContainer: core.LocalContainerConfig{User: "configured", WorkRoot: "/configured"}},
+		core.Server{Labels: map[string]string{"ssh_user": "runner", "work_root": "/workspace"}},
+	)
+	if metadata[checkpointMetadataUser] != "runner" || metadata[checkpointMetadataWorkRoot] != "/workspace" {
+		t.Fatalf("metadata=%#v", metadata)
+	}
+}
+
+func writeCheckpointScopeDocker(t *testing.T, endpoint, daemonID string) string {
+	t.Helper()
+	binDir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "--context" ]; then
+  shift 2
+fi
+case "$1" in
+  context) printf '%%s\n' '%s' ;;
+  info) printf '%%s\n' '%s' ;;
+esac
+`, endpoint, daemonID)
+	if err := os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return binDir
+}
+
+func TestApplyNativeCheckpointForkConfig(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.LocalContainer.DockerSocket = true
+	metadata := map[string]string{
+		checkpointMetadataRuntime:  "docker",
+		checkpointMetadataContext:  "orbstack",
+		checkpointMetadataConfig:   "/tmp/docker-config",
+		checkpointMetadataEndpoint: "unix:///tmp/docker.sock",
+		checkpointMetadataDaemonID: "daemon-123",
+		checkpointMetadataUser:     "runner",
+		checkpointMetadataWorkRoot: "/workspace",
+	}
+	err := (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{
+		Config: &cfg,
+		Record: core.NativeCheckpointForkRecord{
+			Kind:     core.CheckpointKindDockerCommit,
+			ImageID:  "sha256:123",
+			Name:     "crabbox-checkpoint-demo-123",
+			Metadata: metadata,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LocalContainer.Image != "sha256:123" {
+		t.Fatalf("image=%q", cfg.LocalContainer.Image)
+	}
+	if cfg.LocalContainer.Runtime != "docker" {
+		t.Fatalf("runtime=%q", cfg.LocalContainer.Runtime)
+	}
+	if cfg.LocalContainer.User != "runner" || cfg.SSHUser != "runner" {
+		t.Fatalf("users local=%q ssh=%q", cfg.LocalContainer.User, cfg.SSHUser)
+	}
+	if cfg.LocalContainer.WorkRoot != "/workspace" || cfg.WorkRoot != "/workspace" {
+		t.Fatalf("work roots local=%q generic=%q", cfg.LocalContainer.WorkRoot, cfg.WorkRoot)
+	}
+	if cfg.LocalContainer.DockerSocket {
+		t.Fatal("fork must disable Docker socket passthrough")
+	}
+	if got := cfg.LocalContainer.CheckpointMetadata[checkpointMetadataForkID]; got != "sha256:123" {
+		t.Fatalf("fork image id=%q", got)
+	}
+	if _, ok := metadata[checkpointMetadataForkID]; ok {
+		t.Fatal("fork config mutated persisted checkpoint metadata")
+	}
+}
+
+func TestApplyNativeCheckpointForkConfigRejectsInvalidRecord(t *testing.T) {
+	for _, record := range []core.NativeCheckpointForkRecord{
+		{Kind: "workspace-archive", ImageID: "sha256:123"},
+		{Kind: core.CheckpointKindDockerCommit},
+		{Kind: core.CheckpointKindDockerCommit, ImageID: "sha256:123"},
+		{Kind: core.CheckpointKindDockerCommit, Name: "crabbox-checkpoint-demo-123"},
+		{
+			Kind:     core.CheckpointKindDockerCommit,
+			ImageID:  "sha256:123",
+			Name:     "crabbox-checkpoint-demo-123",
+			Metadata: map[string]string{checkpointMetadataRuntime: "podman"},
+		},
+		{
+			Kind:    core.CheckpointKindDockerCommit,
+			ImageID: "sha256:123",
+			Name:    "crabbox-checkpoint-demo-123",
+			Metadata: map[string]string{
+				checkpointMetadataRuntime: "docker",
+			},
+		},
+	} {
+		cfg := core.BaseConfig()
+		if err := (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{Config: &cfg, Record: record}); err == nil {
+			t.Fatalf("expected record to fail: %#v", record)
+		}
 	}
 }

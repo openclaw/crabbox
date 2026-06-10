@@ -69,6 +69,9 @@ func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	cfg := b.configForRun()
+	if err := validateCheckpointFork(ctx, cfg); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	leaseID := core.NewLeaseID()
 	containers, err := b.listContainers(ctx)
 	if err != nil {
@@ -130,17 +133,21 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		cleanupContainer()
 		return core.LeaseTarget{}, err
 	}
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
+		cleanupContainer()
+		return core.LeaseTarget{}, err
+	}
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s container=%s state=ready\n", leaseID, shortID(container.ID))
 	return lease, nil
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
-	cfg := b.configForRun()
 	container, leaseID, slug, err := b.resolveContainer(ctx, req.ID)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	cfg := b.configForRun()
 	if req.ReleaseOnly {
 		return core.LeaseTarget{Server: b.serverFromContainer(container, cfg), LeaseID: leaseID}, nil
 	}
@@ -186,6 +193,20 @@ func (b *backend) Doctor(ctx context.Context, req core.DoctorRequest) (core.Doct
 
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	lease := req.Lease
+	appliedScope, err := b.applyCheckpointScopeLabels(ctx, lease.Server.Labels)
+	if err != nil {
+		return err
+	}
+	if !appliedScope {
+		identifier := firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"])
+		if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName); err != nil {
+			return err
+		} else if ok {
+			if _, err := b.applyCheckpointScopeLabels(ctx, claim.Labels); err != nil {
+				return err
+			}
+		}
+	}
 	id := strings.TrimSpace(req.Lease.Server.CloudID)
 	if id == "" {
 		container, leaseID, _, err := b.resolveContainer(ctx, req.Lease.LeaseID)
@@ -316,7 +337,9 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 	}
 	original := server.Labels
 	server.Labels = core.TouchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	for _, key := range []string{"bootstrap_dir", "container_id", "docker_socket", "host_work_root", "image", "runtime", "runtime_context", "ssh_port", "ssh_user", "work_root"} {
+	preservedKeys := []string{"bootstrap_dir", "container_id", "docker_socket", "host_work_root", "image", "runtime", "runtime_context", "ssh_port", "ssh_user", "work_root"}
+	preservedKeys = append(preservedKeys, checkpointScopeMetadataKeys...)
+	for _, key := range preservedKeys {
 		if value := strings.TrimSpace(original[key]); value != "" {
 			server.Labels[key] = value
 		}
@@ -391,13 +414,28 @@ func applyDefaults(cfg *core.Config) {
 	cfg.SSHUser = cfg.LocalContainer.User
 	cfg.SSHPort = sshPort
 	cfg.WorkRoot = cfg.LocalContainer.WorkRoot
-	cfg.ServerType = cfg.LocalContainer.Image
+	cfg.ServerType = localContainerDisplayImage(*cfg)
+}
+
+func localContainerDisplayImage(cfg core.Config) string {
+	if name := strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[checkpointMetadataForkName]); name != "" {
+		return name
+	}
+	return cfg.LocalContainer.Image
 }
 
 func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string, keep bool) (string, string, error) {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
 	labels["runtime"] = cfg.LocalContainer.Runtime
-	labels["image"] = cfg.LocalContainer.Image
+	labels["image"] = localContainerDisplayImage(cfg)
+	for _, key := range checkpointScopeMetadataKeys {
+		if value := strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[key]); value != "" {
+			labels[key] = value
+		}
+	}
+	if contextName := strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[checkpointMetadataContext]); contextName != "" {
+		labels["runtime_context"] = contextName
+	}
 	labels["ssh_user"] = cfg.LocalContainer.User
 	labels["ssh_port"] = sshPort
 	labels["docker_socket"] = boolEnv(cfg.LocalContainer.DockerSocket)
@@ -747,26 +785,83 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 	if identifier == "" {
 		return inspectContainer{}, "", "", core.Exit(2, "provider=%s requires --id <lease-id-or-slug-or-container>", providerName)
 	}
-	if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName); err != nil {
+	exactClaim, err := core.ReadLeaseClaim(identifier)
+	if err != nil {
 		return inspectContainer{}, "", "", err
-	} else if ok {
-		return b.findContainerForClaim(ctx, claim)
 	}
-	containers, err := b.listContainers(ctx)
+	if exactClaim.LeaseID == identifier && exactClaim.Provider == providerName {
+		if _, err := b.applyCheckpointScopeLabels(ctx, exactClaim.Labels); err != nil {
+			return inspectContainer{}, "", "", err
+		}
+		return b.findContainerForClaim(ctx, exactClaim)
+	}
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return inspectContainer{}, "", "", err
 	}
 	normalized := core.NormalizeLeaseSlug(identifier)
+	slugClaims := make([]core.LeaseClaim, 0, 1)
+	for i := range claims {
+		claim := claims[i]
+		if claim.Provider != providerName {
+			continue
+		}
+		if normalized != "" && core.NormalizeLeaseSlug(claim.Slug) == normalized {
+			slugClaims = append(slugClaims, claim)
+		}
+	}
+	if len(slugClaims) > 1 {
+		return inspectContainer{}, "", "", core.Exit(2, "local-container slug %s is ambiguous across %d lease claims; use a lease id", identifier, len(slugClaims))
+	}
+	containers, listErr := b.listContainers(ctx)
 	for _, container := range containers {
 		labels := container.Config.Labels
 		leaseID := labels["lease"]
 		slug := labels["slug"]
 		name := strings.TrimPrefix(container.Name, "/")
 		if container.ID == identifier || shortID(container.ID) == identifier || name == identifier || leaseID == identifier || (normalized != "" && core.NormalizeLeaseSlug(slug) == normalized) {
+			if len(slugClaims) == 1 && slugClaims[0].LeaseID != leaseID {
+				return inspectContainer{}, "", "", core.Exit(2, "local-container slug %s matches ambient lease %s and scoped lease %s; use a lease id", identifier, leaseID, slugClaims[0].LeaseID)
+			}
+			if len(slugClaims) == 1 {
+				claim := slugClaims[0]
+				if applied, err := b.applyCheckpointScopeLabels(ctx, claim.Labels); err != nil {
+					return inspectContainer{}, "", "", err
+				} else if applied {
+					return b.findContainerForClaim(ctx, claim)
+				}
+			}
 			return container, leaseID, slug, nil
 		}
 	}
+	if len(slugClaims) == 1 {
+		claim := slugClaims[0]
+		if _, err := b.applyCheckpointScopeLabels(ctx, claim.Labels); err != nil {
+			return inspectContainer{}, "", "", err
+		}
+		return b.findContainerForClaim(ctx, claim)
+	}
+	if listErr != nil {
+		return inspectContainer{}, "", "", listErr
+	}
 	return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", identifier)
+}
+
+func (b *backend) applyCheckpointScopeLabels(ctx context.Context, labels map[string]string) (bool, error) {
+	metadata := checkpointScopeMetadataFromLabels(labels)
+	if len(metadata) == 0 {
+		return false, nil
+	}
+	scope := checkpointScopeFromMetadata(metadata, b.cfg.LocalContainer.Runtime)
+	if err := validateCheckpointScope(ctx, scope); err != nil {
+		return false, err
+	}
+	b.cfg.LocalContainer.CheckpointMetadata = metadata
+	if runtimeName := strings.TrimSpace(metadata[checkpointMetadataRuntime]); runtimeName != "" {
+		b.cfg.LocalContainer.Runtime = runtimeName
+		core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+	}
+	return true, nil
 }
 
 func (b *backend) findContainerForClaim(ctx context.Context, claim core.LeaseClaim) (inspectContainer, string, string, error) {
@@ -777,12 +872,6 @@ func (b *backend) findContainerForClaim(ctx context.Context, claim core.LeaseCla
 	for _, container := range containers {
 		labels := container.Config.Labels
 		if labels["lease"] == claim.LeaseID {
-			return container, labels["lease"], labels["slug"], nil
-		}
-	}
-	for _, container := range containers {
-		labels := container.Config.Labels
-		if claim.Slug != "" && core.NormalizeLeaseSlug(labels["slug"]) == core.NormalizeLeaseSlug(claim.Slug) {
 			return container, labels["lease"], labels["slug"], nil
 		}
 	}
@@ -842,6 +931,14 @@ func (b *backend) runtimeContext(ctx context.Context, runtimeName string) string
 
 func (b *backend) claimScope(ctx context.Context) string {
 	cfg := b.configForRun()
+	if metadata := cfg.LocalContainer.CheckpointMetadata; len(metadata) != 0 {
+		scope := checkpointScopeFromMetadata(metadata, cfg.LocalContainer.Runtime)
+		contextName := scope.Context
+		if contextName == "" && scope.Host != "" {
+			contextName = "default"
+		}
+		return localContainerClaimScope(scope.Runtime, contextName, scope.Host)
+	}
 	return localContainerClaimScope(
 		cfg.LocalContainer.Runtime,
 		b.runtimeContext(ctx, cfg.LocalContainer.Runtime),
@@ -911,9 +1008,18 @@ func localContainerClaimExpired(claim core.LeaseClaim, now time.Time) bool {
 
 func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
 	cfg := b.configForRun()
+	var env []string
+	if metadata := cfg.LocalContainer.CheckpointMetadata; len(metadata) != 0 {
+		scope := checkpointScopeFromMetadata(metadata, cfg.LocalContainer.Runtime)
+		if scope.Context != "" {
+			args = append([]string{"--context", scope.Context}, args...)
+		}
+		env = checkpointEnvForScope(scope)
+	}
 	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   cfg.LocalContainer.Runtime,
 		Args:   args,
+		Env:    env,
 		Stdout: stdout,
 		Stderr: stderr,
 	})
@@ -922,6 +1028,9 @@ func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.W
 func (b *backend) serverFromContainer(container inspectContainer, cfg core.Config) core.Server {
 	labels := map[string]string{}
 	for key, value := range container.Config.Labels {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
 		labels[key] = value
 	}
 	labels["container_id"] = shortID(container.ID)

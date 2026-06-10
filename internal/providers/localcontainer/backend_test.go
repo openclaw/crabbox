@@ -2,12 +2,14 @@ package localcontainer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -78,6 +80,197 @@ func testBackend(runner *recordingRunner) *backend {
 		Network:  "bridge",
 	}
 	return newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+}
+
+func TestDockerPinsCheckpointForkScope(t *testing.T) {
+	runner := &recordingRunner{}
+	b := testBackend(runner)
+	b.cfg.LocalContainer.CheckpointMetadata = map[string]string{
+		checkpointMetadataRuntime: "docker",
+		checkpointMetadataContext: "remote-context",
+		checkpointMetadataConfig:  "/tmp/docker-config",
+	}
+	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+	t.Setenv("DOCKER_HOST", "tcp://ambient.invalid:2376")
+	if _, err := b.docker(context.Background(), []string{"image", "inspect", "checkpoint"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	last := runner.calls[len(runner.calls)-1]
+	if len(last.Args) < 3 || last.Args[0] != "--context" || last.Args[1] != "remote-context" {
+		t.Fatalf("args=%v", last.Args)
+	}
+	foundConfig := false
+	for _, value := range last.Env {
+		if value == "DOCKER_CONFIG=/tmp/docker-config" {
+			foundConfig = true
+		}
+		if strings.HasPrefix(value, "DOCKER_HOST=") {
+			t.Fatalf("ambient Docker host leaked into pinned context: %q", value)
+		}
+	}
+	if !foundConfig {
+		t.Fatal("Docker config was not pinned")
+	}
+}
+
+func TestClaimScopePinsCheckpointForkDaemon(t *testing.T) {
+	runner := &recordingRunner{}
+	b := testBackend(runner)
+	b.cfg.LocalContainer.CheckpointMetadata = map[string]string{
+		checkpointMetadataRuntime: "docker",
+		checkpointMetadataContext: "remote-context",
+	}
+	t.Setenv("DOCKER_HOST", "tcp://ambient.invalid:2376")
+
+	got := b.claimScope(context.Background())
+	want := "runtime:docker/context:remote-context"
+	if got != want {
+		t.Fatalf("scope=%q, want %q", got, want)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("recorded fork scope should not probe ambient Docker state: calls=%d", len(runner.calls))
+	}
+}
+
+func TestResolveContainerUsesCheckpointScopeFromClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("DOCKER_HOST", "tcp://ambient.invalid:2376")
+	binDir := writeCheckpointScopeDocker(t, "unix:///tmp/docker.sock", "daemon-123")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	labels := map[string]string{
+		"crabbox":                  "true",
+		"provider":                 providerName,
+		"lease":                    "cbx_scope",
+		"slug":                     "scope-fork",
+		"state":                    "ready",
+		"runtime":                  "docker",
+		"image":                    "crabbox-checkpoint-demo-123",
+		checkpointMetadataContext:  "remote-context",
+		checkpointMetadataConfig:   "/tmp/docker-config",
+		checkpointMetadataEndpoint: "unix:///tmp/docker.sock",
+		checkpointMetadataDaemonID: "daemon-123",
+		checkpointMetadataForkName: "crabbox-checkpoint-demo-123",
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePond("cbx_scope", "scope-fork", providerName, "runtime:docker/context:remote-context", "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_scope", core.Server{Labels: labels}, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	containerJSON, err := json.Marshal([]inspectContainer{{
+		ID:     "container-123",
+		Name:   "/crabbox-scope-fork",
+		Config: inspectConfig{Image: "sha256:123", Labels: labels},
+		State:  inspectState{Status: "running", Running: true},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		switch {
+		case slices.Contains(req.Args, "ps"):
+			if len(req.Args) < 2 || req.Args[0] != "--context" {
+				return core.LocalCommandResult{}, errors.New("ambient Docker daemon unavailable")
+			}
+			return core.LocalCommandResult{Stdout: "container-123\n"}, nil
+		case slices.Contains(req.Args, "inspect"):
+			return core.LocalCommandResult{Stdout: string(containerJSON)}, nil
+		default:
+			return core.LocalCommandResult{}, nil
+		}
+	}}
+	b := testBackend(runner)
+	container, leaseID, slug, err := b.resolveContainer(context.Background(), "scope-fork")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if container.ID != "container-123" || leaseID != "cbx_scope" || slug != "scope-fork" {
+		t.Fatalf("resolved container=%q lease=%q slug=%q", container.ID, leaseID, slug)
+	}
+	var scopedCall *core.LocalCommandRequest
+	for i := range runner.calls {
+		if len(runner.calls[i].Args) >= 2 && runner.calls[i].Args[0] == "--context" {
+			scopedCall = &runner.calls[i]
+			break
+		}
+	}
+	if scopedCall == nil {
+		t.Fatal("claim-scoped lookup did not call Docker")
+	}
+	if scopedCall.Args[1] != "remote-context" {
+		t.Fatalf("claim scope was not applied to Docker lookup: args=%v", scopedCall.Args)
+	}
+	for _, value := range scopedCall.Env {
+		if value == "DOCKER_HOST=tcp://ambient.invalid:2376" {
+			t.Fatal("ambient Docker host leaked into claim-scoped lookup")
+		}
+	}
+}
+
+func TestResolveContainerRejectsAmbiguousClaimSlug(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	for _, leaseID := range []string{"cbx_scope_a", "cbx_scope_b"} {
+		if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "shared-slug", providerName, "runtime:docker/context:remote-context", "", "/repo", time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := &recordingRunner{}
+	b := testBackend(runner)
+	if _, _, _, err := b.resolveContainer(context.Background(), "shared-slug"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("ambiguous slug should fail before Docker lookup: calls=%d", len(runner.calls))
+	}
+}
+
+func TestResolveContainerExactLeaseIgnoresMalformedUnrelatedClaim(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	if err := writeLocalContainerClaim(t, "cbx_exact", "exact-slug", "", time.Now().UTC(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	claimDir := filepath.Join(stateHome, "crabbox", "claims")
+	if err := os.WriteFile(filepath.Join(claimDir, "cbx_unrelated.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inspectJSON := `[{
+		"Id":"container-exact",
+		"Name":"/crabbox-exact",
+		"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_exact","slug":"exact-slug","state":"ready"}},
+		"State":{"Status":"running","Running":true}
+	}]`
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "container-exact\n"},
+		commandKey([]string{"inspect", "container-exact"}): {Stdout: inspectJSON},
+	}}
+	b := testBackend(runner)
+	container, leaseID, _, err := b.resolveContainer(context.Background(), "cbx_exact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if container.ID != "container-exact" || leaseID != "cbx_exact" {
+		t.Fatalf("container=%q lease=%q", container.ID, leaseID)
+	}
+}
+
+func TestServerFromContainerDropsEmptyInheritedLabels(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	server := b.serverFromContainer(inspectContainer{
+		ID: "container-123",
+		Config: inspectConfig{
+			Image: "checkpoint-image",
+			Labels: map[string]string{
+				"crabbox":             "true",
+				"provider":            providerName,
+				"lease":               "cbx_123",
+				"tailscale_exit_node": "",
+			},
+		},
+	}, b.cfg)
+	if _, ok := server.Labels["tailscale_exit_node"]; ok {
+		t.Fatalf("empty inherited label survived: %#v", server.Labels)
+	}
 }
 
 func TestProviderAliases(t *testing.T) {
@@ -1198,7 +1391,7 @@ func TestTrustedBootstrapDir(t *testing.T) {
 	}
 }
 
-func TestFindContainerForClaimReturnsMatchedContainerIdentity(t *testing.T) {
+func TestFindContainerForClaimRejectsSlugOnlyMatch(t *testing.T) {
 	inspectJSON := `[{
 		"Id":"newcontainer123456",
 		"Name":"/crabbox-blue-new",
@@ -1214,12 +1407,8 @@ func TestFindContainerForClaimReturnsMatchedContainerIdentity(t *testing.T) {
 	}
 	b := testBackend(runner)
 
-	container, leaseID, slug, err := b.findContainerForClaim(context.Background(), core.LeaseClaim{LeaseID: "cbx_old", Slug: "blue-lobster"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if container.ID != "newcontainer123456" || leaseID != "cbx_new" || slug != "blue-lobster" {
-		t.Fatalf("identity = container=%s lease=%s slug=%s", container.ID, leaseID, slug)
+	if _, _, _, err := b.findContainerForClaim(context.Background(), core.LeaseClaim{LeaseID: "cbx_old", Slug: "blue-lobster"}); err == nil {
+		t.Fatal("expected stale claim lease id to reject a same-slug container")
 	}
 }
 

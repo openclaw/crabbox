@@ -563,6 +563,7 @@ func nativeCheckpointForkRecord(record checkpointRecord) NativeCheckpointForkRec
 	return NativeCheckpointForkRecord{
 		Kind:        record.Kind,
 		ImageID:     record.Native.ImageID,
+		Name:        record.Native.Name,
 		Resource:    record.Native.Resource,
 		Region:      record.Native.Region,
 		Project:     record.Native.Project,
@@ -571,6 +572,7 @@ func nativeCheckpointForkRecord(record checkpointRecord) NativeCheckpointForkRec
 		TargetOS:    record.TargetOS,
 		WindowsMode: record.WindowsMode,
 		ServerType:  record.ServerType,
+		Metadata:    record.Native.Metadata,
 	}
 }
 

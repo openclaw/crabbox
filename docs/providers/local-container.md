@@ -184,6 +184,13 @@ metadata updates.
   This native path is currently Docker-only; Podman and nerdctl keep using
   workspace archives. Crabbox rejects native checkpoints when the workspace is
   stored in a mounted volume because `docker commit` omits mounted data.
+- `crabbox checkpoint fork <id>` launches a fresh lease from the committed
+  image. Fork validates the checkpoint tag and Docker system ID, replays the
+  recorded Docker runtime and daemon scope, disables Docker socket passthrough,
+  relocates the saved workspace into the new lease path, and persists the scope
+  for later lease commands even when ambient Docker settings change. The source
+  container user and work root are also replayed so relocation keeps ownership
+  and path semantics intact.
 - `warmup --actions-runner` is not supported. Use plain `crabbox run` for local
   container smoke tests, or a remote SSH provider for GitHub runner registration.
 - Socket pass-through is opt-in and grants the lease access to the host

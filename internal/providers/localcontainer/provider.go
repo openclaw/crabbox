@@ -26,7 +26,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "container",
 		Kind:        core.ProviderKindSSHLease,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCacheVolume, core.FeatureCheckpoint},
+		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCacheVolume, core.FeatureCheckpoint, core.FeatureFork},
 		Coordinator: core.CoordinatorNever,
 	}
 }
@@ -97,6 +97,41 @@ func leaseRuntime(server core.Server, fallback string) string {
 func isDockerRuntime(runtime string) bool {
 	name := strings.TrimSuffix(strings.ToLower(filepath.Base(strings.TrimSpace(runtime))), ".exe")
 	return name == "docker"
+}
+
+func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {
+	if req.Record.Kind != core.CheckpointKindDockerCommit {
+		return core.Exit(2, "provider=%s does not support checkpoint kind=%s", providerName, req.Record.Kind)
+	}
+	imageID := strings.TrimSpace(req.Record.ImageID)
+	if imageID == "" {
+		return core.Exit(2, "local-container checkpoint fork requires a committed image id")
+	}
+	imageName := strings.TrimSpace(firstCheckpointValue(req.Record.Name, req.Record.Resource))
+	if imageName == "" {
+		return core.Exit(2, "local-container checkpoint fork requires a committed image tag")
+	}
+	metadata := checkpointForkMetadata(req.Record.Metadata, req.Record)
+	scope := checkpointScopeFromMetadata(metadata, req.Config.LocalContainer.Runtime)
+	if !isDockerRuntime(scope.Runtime) {
+		return core.Exit(2, "local-container checkpoint fork requires the Docker runtime")
+	}
+	user := strings.TrimSpace(metadata[checkpointMetadataUser])
+	workRoot := strings.TrimSpace(metadata[checkpointMetadataWorkRoot])
+	if user == "" || workRoot == "" {
+		return core.Exit(2, "local-container checkpoint %s predates fork relocation metadata; recreate it from the source lease before forking", imageName)
+	}
+	req.Config.LocalContainer.Image = imageID
+	req.Config.LocalContainer.Runtime = scope.Runtime
+	req.Config.LocalContainer.User = user
+	req.Config.SSHUser = user
+	req.Config.LocalContainer.WorkRoot = workRoot
+	req.Config.WorkRoot = workRoot
+	req.Config.LocalContainer.DockerSocket = false
+	req.Config.LocalContainer.CheckpointMetadata = metadata
+	core.MarkLocalContainerImageExplicit(req.Config)
+	core.MarkLocalContainerRuntimeExplicit(req.Config)
+	return nil
 }
 
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
