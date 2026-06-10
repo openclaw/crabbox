@@ -137,6 +137,62 @@ crabbox stop --provider morph blue-lobster
   so `status` shows the gateway target for SSH and the instance hostname only as
   provider metadata when Morph reports one.
 
+## Live testing
+
+Two opt-in entry points exercise the real Morph API. Neither runs in the
+default `go test -race ./...` or `node --test scripts/*.test.js` CI jobs;
+both are skipped or fail-fast when the API key is absent.
+
+The Morph API key is read from the same contract as runtime auth:
+
+1. `CRABBOX_MORPH_API_KEY`
+2. `MORPH_API_KEY`
+3. `morph.apiKey` in the user config
+
+### Go integration test
+
+```sh
+export CRABBOX_MORPH_API_KEY=...
+export CRABBOX_LIVE_MORPH_SNAPSHOT=snapshot_xxx
+go test -tags smoke -run TestLiveMorphAcquireResolveTouchReleaseLease \
+  -count=1 -v ./internal/providers/morph/
+```
+
+The test boots a real instance from the configured snapshot, exercises
+`Acquire` → `Resolve` → `Touch` → `List` → `ReleaseLease`, and unconditionally
+releases the lease on exit. It skips when `CRABBOX_MORPH_API_KEY` /
+`MORPH_API_KEY` is unset or when `go test -short` is set.
+
+### Live provider smoke
+
+```sh
+export CRABBOX_MORPH_API_KEY=...
+export CRABBOX_LIVE_MORPH_SNAPSHOT=snapshot_xxx
+go build -trimpath -o bin/crabbox ./cmd/crabbox
+CRABBOX_LIVE=1 CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_PROVIDERS=morph \
+  scripts/live-smoke.sh
+```
+
+Optional knobs: `CRABBOX_LIVE_MORPH_SLUG` (default `morph-smoke-<pid>`),
+`CRABBOX_LIVE_MORPH_TTL` (default `15m`), `CRABBOX_LIVE_MORPH_IDLE_TIMEOUT`
+(default `5m`).
+
+### Loading the key from a local file
+
+Keep the key in a file outside the repository (for example
+`~/Desktop/morph-crabbox/api.env.md`). The repository `.gitignore` blocks
+`*.env` and `api.env*` so accidental `git add .` cannot leak it:
+
+```sh
+export CRABBOX_MORPH_API_KEY=$(tr -d '[:space:]' < ~/path/to/api.env.md)
+```
+
+> The key file is intentionally outside the repo. Do not commit it, do not
+> copy it into `crabbox.yaml`, and do not echo it in CI logs. The PR diff
+> must never contain the key bytes — verify with
+> `git diff origin/main..HEAD | grep -E 'morph_[A-Za-z0-9]{20,}'` (should
+> return nothing).
+
 ## Related docs
 
 - [Provider backends](../provider-backends.md)

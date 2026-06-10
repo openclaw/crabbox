@@ -9,7 +9,7 @@ fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cb="${CRABBOX_BIN:-$root/bin/crabbox}"
 repo="${CRABBOX_LIVE_REPO:-$PWD}"
-providers=",${CRABBOX_LIVE_PROVIDERS-aws,hetzner},"
+providers=",${CRABBOX_LIVE_PROVIDERS-aws,hetzner,morph},"
 default_live_command='if [ -f go.mod ]; then test -f go.mod; elif [ -f package.json ]; then test -f package.json; else test -d .; fi; printf crabbox-live-ok; printf " pwd=%s\n" "$PWD"'
 live_command="${CRABBOX_LIVE_COMMAND:-$default_live_command}"
 config_paths=()
@@ -616,6 +616,54 @@ external_smoke() {
   lease=""
 }
 
+morph_smoke() {
+  need_tool jq
+  need_tool rg
+
+  local api_key="${CRABBOX_MORPH_API_KEY:-${MORPH_API_KEY:-}}"
+  if [[ -z "$api_key" ]]; then
+    echo "set CRABBOX_MORPH_API_KEY or MORPH_API_KEY to run morph live smoke" >&2
+    return 2
+  fi
+  local snapshot="${CRABBOX_LIVE_MORPH_SNAPSHOT:-}"
+  if [[ -z "$snapshot" ]]; then
+    echo "set CRABBOX_LIVE_MORPH_SNAPSHOT to run morph live smoke" >&2
+    return 2
+  fi
+  local slug="${CRABBOX_LIVE_MORPH_SLUG:-morph-smoke-$$}"
+  local ttl="${CRABBOX_LIVE_MORPH_TTL:-15m}"
+  local idle="${CRABBOX_LIVE_MORPH_IDLE_TIMEOUT:-5m}"
+
+  local morph_env=(CRABBOX_PROVIDER=morph "CRABBOX_MORPH_SNAPSHOT=$snapshot")
+  morph_run() {
+    run_in_repo env "${morph_env[@]}" "$cb" "$@"
+  }
+
+  local lease=""
+  cleanup() {
+    if [[ -n "$lease" ]]; then
+      morph_run stop "$slug" || morph_run stop "$lease" || true
+    fi
+  }
+  trap cleanup RETURN
+
+  morph_run doctor
+  local out
+  capture_run out morph_run warmup --slug "$slug" --ttl "$ttl" --idle-timeout "$idle"
+  printf '%s\n' "$out"
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  slug="$(printf '%s\n' "$out" | extract_slug)"
+  test -n "$lease"
+  test -n "$slug"
+
+  morph_run status --id "$slug" --wait --wait-timeout 120s
+  morph_run inspect --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
+  morph_run run --id "$slug" --shell -- "$live_command"
+  morph_run list --json | jq 'map({id:.id,slug:.slug,provider:.provider,state:.state})'
+  morph_run stop "$slug" || morph_run stop "$lease"
+  lease=""
+}
+
 run_coordinator_preamble() {
   run_in_repo "$cb" whoami --json
   run_in_repo "$cb" doctor
@@ -684,6 +732,10 @@ fi
 
 if has_provider external; then
   external_smoke
+fi
+
+if has_provider morph; then
+  morph_smoke
 fi
 
 admin_out="$(run_in_repo "$cb" admin leases --state active --json 2>&1)" || {
