@@ -61,10 +61,11 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.FS(webVNCAssets())))
 	mux.HandleFunc("/credentials", func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(token)) != 1 {
+		if !macOSWebVNCTokenAllowed(r, token) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"username": target.User,
@@ -72,6 +73,10 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 		})
 	})
 	mux.HandleFunc("/websockify", func(w http.ResponseWriter, r *http.Request) {
+		if !macOSWebVNCTokenAllowed(r, token) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 			Subprotocols:   []string{"binary"},
 			OriginPatterns: []string{"127.0.0.1:*", "localhost:*"},
@@ -140,6 +145,10 @@ func relayWebSocketVNC(ctx context.Context, ws *websocket.Conn, tcp net.Conn) {
 // the URL, terminal scrollback, browser history, or the OS opener's arguments.
 func macOSWebVNCViewerURL(webPort, token string) string {
 	return "http://127.0.0.1:" + webPort + "/vnc.html#token=" + token
+}
+
+func macOSWebVNCTokenAllowed(r *http.Request, token string) bool {
+	return subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(token)) == 1
 }
 
 func randomToken() (string, error) {

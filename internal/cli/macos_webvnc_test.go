@@ -2,6 +2,7 @@ package cli
 
 import (
 	"io/fs"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,19 @@ func TestRandomTokenUnique(t *testing.T) {
 	b, _ := randomToken()
 	if a == "" || a == b || len(a) != 32 {
 		t.Fatalf("tokens should be unique 16-byte hex: %q %q", a, b)
+	}
+}
+
+func TestMacOSWebVNCTokenAllowed(t *testing.T) {
+	req := httptest.NewRequest("GET", "/websockify?token=deadbeef", nil)
+	if !macOSWebVNCTokenAllowed(req, "deadbeef") {
+		t.Fatal("matching token should be accepted")
+	}
+	for _, path := range []string{"/websockify", "/websockify?token=wrong"} {
+		req := httptest.NewRequest("GET", path, nil)
+		if macOSWebVNCTokenAllowed(req, "deadbeef") {
+			t.Fatalf("path %q should be rejected", path)
+		}
 	}
 }
 
@@ -69,7 +83,7 @@ func TestWebVNCAssetsEmbedded(t *testing.T) {
 	}
 	// The viewer must import the vendored RFB module.
 	html, _ := fs.ReadFile(assets, "vnc.html")
-	if !strings.Contains(string(html), "rfb.js") || !strings.Contains(string(html), "/websockify") {
-		t.Error("vnc.html should import rfb.js and connect to /websockify")
+	if !strings.Contains(string(html), "rfb.js") || !strings.Contains(string(html), "/websockify?token=") {
+		t.Error("vnc.html should import rfb.js and connect to token-gated /websockify")
 	}
 }

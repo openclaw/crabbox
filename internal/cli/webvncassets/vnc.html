@@ -20,11 +20,11 @@
       import RFB from "./rfb.js";
       const status = document.getElementById("status");
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const url = proto + "://" + location.host + "/websockify";
       // The session token is in the URL fragment (never sent to the server).
       // Credentials are fetched from the token-gated endpoint so the account
       // password never appears in the URL / scrollback / history / opener args.
       const token = new URLSearchParams(location.hash.slice(1)).get("token") || "";
+      const url = proto + "://" + location.host + "/websockify?token=" + encodeURIComponent(token);
       let creds = {};
       try {
         const resp = await fetch("/credentials?token=" + encodeURIComponent(token));
