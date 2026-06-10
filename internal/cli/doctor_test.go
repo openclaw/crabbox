@@ -25,6 +25,7 @@ func TestCoordinatorProviderReadinessSupported(t *testing.T) {
 		{provider: "hetzner", want: true},
 		{provider: "proxmox", want: false},
 		{provider: "daytona", want: false},
+		{provider: "morph", want: false},
 		{provider: "islo", want: false},
 		{provider: "e2b", want: false},
 		{provider: "blacksmith-testbox", want: false},

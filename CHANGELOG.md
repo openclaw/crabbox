@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added `provider: morph` for Morph Cloud Linux SSH leases, including snapshot boot, Morph API key/config plumbing, per-instance SSH key retrieval, pause-on-release reuse, and provider docs.
+
 ## 0.27.0 - 2026-06-09
 
 ### Added

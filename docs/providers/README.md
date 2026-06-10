@@ -25,7 +25,7 @@ SSH-lease providers further differ by how they reach the cloud:
   (`CRABBOX_COORDINATOR`).
 - **Direct cloud** — the same four providers without a configured broker, plus
   cloud providers that never broker (e.g. `proxmox`, `runpod`, `namespace-devbox`,
-  `semaphore`, `sprites`, `exe-dev`, `daytona`). The CLI talks to the provider
+  `semaphore`, `sprites`, `exe-dev`, `daytona`, `morph`). The CLI talks to the provider
   API itself and cleans up best-effort via provider labels.
 - **Static SSH** — `ssh` connects to a preexisting machine you supply; no
   provisioning, no cleanup.
@@ -71,6 +71,7 @@ Each page below maps to an adapter under `internal/providers/<dir>`. The
 | [Sprites](sprites.md) | `sprites` | — | Linux | no (direct) |
 | [Tenki](tenki.md) | `tenki` | — | Linux | no (direct) |
 | [Daytona](daytona.md) | `daytona` | — | Linux | no (direct) |
+| [Morph](morph.md) | `morph` | — | Linux | no (direct) |
 | [RunPod](runpod.md) | `runpod` | `run-pod`, `runpodio` | Linux | no (direct) |
 | [ASCII Box](ascii-box.md) | `ascii-box` | `ascii`, `asciibox` | Linux | no (direct) |
 

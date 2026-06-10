@@ -105,6 +105,7 @@ type Config struct {
 	KubeVirt                      KubeVirtConfig
 	External                      ExternalConfig
 	Namespace                     NamespaceConfig
+	Morph                         MorphConfig
 	Daytona                       DaytonaConfig
 	E2B                           E2BConfig
 	ExeDev                        ExeDevConfig
@@ -266,6 +267,16 @@ type NamespaceConfig struct {
 	AutoStopIdleTimeout time.Duration
 	WorkRoot            string
 	DeleteOnRelease     bool
+}
+
+type MorphConfig struct {
+	APIKey          string
+	APIURL          string
+	Snapshot        string
+	SSHGatewayHost  string
+	WorkRoot        string
+	DeleteOnRelease bool
+	WakeOnSSH       bool
 }
 
 type DaytonaConfig struct {
@@ -1105,6 +1116,12 @@ func baseConfig() Config {
 			WorkRoot:            "/workspaces/crabbox",
 			AutoStopIdleTimeout: 30 * time.Minute,
 		},
+		Morph: MorphConfig{
+			APIURL:         "https://cloud.morph.so",
+			SSHGatewayHost: "ssh.cloud.morph.so",
+			WorkRoot:       "/tmp/crabbox",
+			WakeOnSSH:      true,
+		},
 		Daytona: DaytonaConfig{
 			APIURL:           "https://app.daytona.io/api",
 			User:             "daytona",
@@ -1273,6 +1290,7 @@ type fileConfig struct {
 	KubeVirt             *fileKubeVirtConfig                `yaml:"kubevirt,omitempty"`
 	External             *fileExternalConfig                `yaml:"external,omitempty"`
 	Namespace            *fileNamespaceConfig               `yaml:"namespace,omitempty"`
+	Morph                *fileMorphConfig                   `yaml:"morph,omitempty"`
 	Daytona              *fileDaytonaConfig                 `yaml:"daytona,omitempty"`
 	E2B                  *fileE2BConfig                     `yaml:"e2b,omitempty"`
 	ExeDev               *fileExeDevConfig                  `yaml:"exeDev,omitempty"`
@@ -1526,6 +1544,16 @@ type fileNamespaceConfig struct {
 	AutoStopIdleTimeout string `yaml:"autoStopIdleTimeout,omitempty"`
 	WorkRoot            string `yaml:"workRoot,omitempty"`
 	DeleteOnRelease     *bool  `yaml:"deleteOnRelease,omitempty"`
+}
+
+type fileMorphConfig struct {
+	APIKey          string `yaml:"apiKey,omitempty"`
+	APIURL          string `yaml:"apiUrl,omitempty"`
+	Snapshot        string `yaml:"snapshot,omitempty"`
+	SSHGatewayHost  string `yaml:"sshGatewayHost,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
+	WakeOnSSH       *bool  `yaml:"wakeOnSSH,omitempty"`
 }
 
 type fileDaytonaConfig struct {
@@ -2567,6 +2595,29 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.Namespace.DeleteOnRelease = *file.Namespace.DeleteOnRelease
 		}
 	}
+	if file.Morph != nil {
+		if file.Morph.APIKey != "" {
+			cfg.Morph.APIKey = file.Morph.APIKey
+		}
+		if file.Morph.APIURL != "" {
+			cfg.Morph.APIURL = file.Morph.APIURL
+		}
+		if file.Morph.Snapshot != "" {
+			cfg.Morph.Snapshot = file.Morph.Snapshot
+		}
+		if file.Morph.SSHGatewayHost != "" {
+			cfg.Morph.SSHGatewayHost = file.Morph.SSHGatewayHost
+		}
+		if file.Morph.WorkRoot != "" {
+			cfg.Morph.WorkRoot = file.Morph.WorkRoot
+		}
+		if file.Morph.DeleteOnRelease != nil {
+			cfg.Morph.DeleteOnRelease = *file.Morph.DeleteOnRelease
+		}
+		if file.Morph.WakeOnSSH != nil {
+			cfg.Morph.WakeOnSSH = *file.Morph.WakeOnSSH
+		}
+	}
 	if file.Daytona != nil {
 		if file.Daytona.APIURL != "" {
 			cfg.Daytona.APIURL = file.Daytona.APIURL
@@ -3592,6 +3643,17 @@ func applyEnv(cfg *Config) error {
 	cfg.Namespace.WorkRoot = getenv("CRABBOX_NAMESPACE_WORK_ROOT", cfg.Namespace.WorkRoot)
 	if value, ok := getenvBool("CRABBOX_NAMESPACE_DELETE_ON_RELEASE"); ok {
 		cfg.Namespace.DeleteOnRelease = value
+	}
+	cfg.Morph.APIKey = getenv("CRABBOX_MORPH_API_KEY", getenv("MORPH_API_KEY", cfg.Morph.APIKey))
+	cfg.Morph.APIURL = getenv("CRABBOX_MORPH_API_URL", cfg.Morph.APIURL)
+	cfg.Morph.Snapshot = getenv("CRABBOX_MORPH_SNAPSHOT", cfg.Morph.Snapshot)
+	cfg.Morph.SSHGatewayHost = getenv("CRABBOX_MORPH_SSH_GATEWAY_HOST", cfg.Morph.SSHGatewayHost)
+	cfg.Morph.WorkRoot = getenv("CRABBOX_MORPH_WORK_ROOT", cfg.Morph.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_MORPH_DELETE_ON_RELEASE"); ok {
+		cfg.Morph.DeleteOnRelease = value
+	}
+	if value, ok := getenvBool("CRABBOX_MORPH_WAKE_ON_SSH"); ok {
+		cfg.Morph.WakeOnSSH = value
 	}
 	cfg.Daytona.APIKey = getenv("CRABBOX_DAYTONA_API_KEY", getenv("DAYTONA_API_KEY", cfg.Daytona.APIKey))
 	cfg.Daytona.JWTToken = getenv("CRABBOX_DAYTONA_JWT_TOKEN", getenv("DAYTONA_JWT_TOKEN", cfg.Daytona.JWTToken))
