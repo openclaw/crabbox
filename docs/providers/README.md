@@ -97,6 +97,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Tensorlake](tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux |
 | [Upstash Box](upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux |
 | [W&B Sandboxes](wandb.md) — `wandb` (`weights-and-biases`) | Linux |
+| [WASI (experimental)](wasi.md) — `wasi` (`wasm`, `wazero`) | Wasm (WASI preview1/2) |
 
 Run `crabbox providers` (`--json`) to see the live capability set the binary
 reports.

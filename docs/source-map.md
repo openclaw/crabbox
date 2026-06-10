@@ -85,11 +85,12 @@ SSH-lease providers:
 Delegated-run providers (no SSH lease):
 
 - Cloudflare Containers: `internal/providers/cloudflare`, with the Worker runtime in `worker/src/cloudflare-container-runner.ts`
-- Docker Sandbox, E2B, Islo, Modal, OpenComputer, Tensorlake, Upstash, Blacksmith, W&B:
+- Docker Sandbox, E2B, Islo, Modal, OpenComputer, Tensorlake, Upstash, Blacksmith, W&B, WASI (experimental):
   `internal/providers/dockersandbox`,
   `internal/providers/e2b`, `internal/providers/islo`, `internal/providers/modal`,
   `internal/providers/opencomputer`, `internal/providers/tensorlake`, `internal/providers/upstashbox`,
-  `internal/providers/blacksmith`, `internal/providers/wandb`
+  `internal/providers/blacksmith`, `internal/providers/wandb`,
+  `internal/providers/wasi` (wazero/wasmtime delegated sandbox)
 - Azure Container Apps dynamic sessions (shares the `azure` family, but
   delegated-run): `internal/providers/azuredynamicsessions`, runner image `worker/azure-dynamic-sessions.Dockerfile`
 

@@ -365,6 +365,14 @@ func CLIDoctorResult(provider string, leases int, runtime string) DoctorResult {
 
 type execCommandRunner struct{}
 
+// NewExecCommandRunner returns the default real command runner used for
+// subprocess execution in the CLI and delegated providers. It is exported
+// primarily so provider tests (e.g. direct backend e2e tests) can construct
+// a Runtime with a non-nil Exec, matching the load path used by the CLI.
+func NewExecCommandRunner() CommandRunner {
+	return execCommandRunner{}
+}
+
 func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	cmd := exec.CommandContext(ctx, req.Name, req.Args...)
 	cmd.Env = req.Env
@@ -797,7 +805,7 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 		rt.Clock = realClock{}
 	}
 	if rt.Exec == nil {
-		rt.Exec = execCommandRunner{}
+		rt.Exec = NewExecCommandRunner()
 	}
 	provider, err := ProviderFor(cfg.Provider)
 	if err != nil {

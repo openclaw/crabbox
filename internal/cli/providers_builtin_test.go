@@ -35,6 +35,7 @@ func init() {
 	RegisterProvider(testParallelsProvider{})
 	RegisterProvider(testWandbProvider{})
 	RegisterProvider(testServiceControlProvider{})
+	RegisterProvider(testWasiProvider{})
 }
 
 type testAzureProvider struct{}
@@ -1460,4 +1461,33 @@ func (b testSSHBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error
 }
 func (b testSSHBackend) Touch(context.Context, TouchRequest) (Server, error) {
 	return Server{}, nil
+}
+
+type testWasiProvider struct{}
+
+func (testWasiProvider) Name() string      { return "wasi" }
+func (testWasiProvider) Aliases() []string { return []string{"wasm", "wazero"} }
+func (testWasiProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "wasi",
+		Family:      "wasi",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: TargetLinux}},
+		Features:    FeatureSet{FeatureArchiveSync, FeatureRunSession, FeatureRunProof},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testWasiProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return NoProviderFlags()
+}
+func (testWasiProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error { return nil }
+func (p testWasiProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testDelegatedBackend{spec: p.Spec()}, nil
+}
+func (p testWasiProvider) ConfigureDoctor(cfg Config, rt Runtime) (DoctorBackend, error) {
+	b, _ := p.Configure(cfg, rt)
+	if d, ok := b.(DoctorBackend); ok {
+		return d, nil
+	}
+	return testDoctorDelegatedBackend{testDelegatedBackend: testDelegatedBackend{spec: p.Spec()}}, nil
 }

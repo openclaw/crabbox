@@ -121,6 +121,7 @@ type Config struct {
 	DockerSandbox                 DockerSandboxConfig
 	Modal                         ModalConfig
 	UpstashBox                    UpstashBoxConfig
+	Wasi                          WasiConfig
 	AsciiBox                      AsciiBoxConfig
 	Cloudflare                    CloudflareConfig
 	Semaphore                     SemaphoreConfig
@@ -457,6 +458,12 @@ type UpstashBoxConfig struct {
 	Size      string
 	Workdir   string
 	KeepAlive bool
+}
+
+type WasiConfig struct {
+	Workdir      string
+	Runtime      string // "wazero" (embedded) or "wasmtime"
+	GuestBaseDir string // optional base for guest roots (defaults to os.TempDir)
 }
 
 type AsciiBoxConfig struct {
@@ -1292,6 +1299,10 @@ func baseConfig() Config {
 			Size:    "small",
 			Workdir: "/workspace/home/crabbox",
 		},
+		Wasi: WasiConfig{
+			Workdir: "crabbox",
+			Runtime: "wazero",
+		},
 		AsciiBox: AsciiBoxConfig{
 			BaseURL: "https://ascii.dev",
 			CLIPath: "box",
@@ -1415,6 +1426,7 @@ type fileConfig struct {
 	DockerSandbox        *fileDockerSandboxConfig           `yaml:"dockerSandbox,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
 	UpstashBox           *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
+	Wasi                 *fileWasiConfig                    `yaml:"wasi,omitempty"`
 	AsciiBox             *fileAsciiBoxConfig                `yaml:"asciiBox,omitempty"`
 	Cloudflare           *fileCloudflareConfig              `yaml:"cloudflare,omitempty"`
 	Semaphore            *fileSemaphoreConfig               `yaml:"semaphore,omitempty"`
@@ -1827,6 +1839,12 @@ type fileUpstashBoxConfig struct {
 	Size      string `yaml:"size,omitempty"`
 	Workdir   string `yaml:"workdir,omitempty"`
 	KeepAlive *bool  `yaml:"keepAlive,omitempty"`
+}
+
+type fileWasiConfig struct {
+	Workdir      string `yaml:"workdir,omitempty"`
+	Runtime      string `yaml:"runtime,omitempty"`
+	GuestBaseDir string `yaml:"guestBaseDir,omitempty"`
 }
 
 type fileAsciiBoxConfig struct {
@@ -3138,6 +3156,17 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.UpstashBox.KeepAlive = *file.UpstashBox.KeepAlive
 		}
 	}
+	if file.Wasi != nil {
+		if file.Wasi.Workdir != "" {
+			cfg.Wasi.Workdir = file.Wasi.Workdir
+		}
+		if file.Wasi.Runtime != "" {
+			cfg.Wasi.Runtime = file.Wasi.Runtime
+		}
+		if file.Wasi.GuestBaseDir != "" {
+			cfg.Wasi.GuestBaseDir = file.Wasi.GuestBaseDir
+		}
+	}
 	if file.AsciiBox != nil {
 		if file.AsciiBox.BaseURL != "" {
 			cfg.AsciiBox.BaseURL = file.AsciiBox.BaseURL
@@ -4080,6 +4109,9 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_UPSTASH_BOX_KEEP_ALIVE"); ok {
 		cfg.UpstashBox.KeepAlive = value
 	}
+	cfg.Wasi.Workdir = getenv("CRABBOX_WASI_WORKDIR", cfg.Wasi.Workdir)
+	cfg.Wasi.Runtime = getenv("CRABBOX_WASI_RUNTIME", cfg.Wasi.Runtime)
+	cfg.Wasi.GuestBaseDir = getenv("CRABBOX_WASI_GUEST_BASE_DIR", cfg.Wasi.GuestBaseDir)
 	cfg.AsciiBox.APIKey = getenv("CRABBOX_ASCII_BOX_API_KEY", getenv("ASCII_BOX_API_KEY", cfg.AsciiBox.APIKey))
 	cfg.AsciiBox.BaseURL = getenv("CRABBOX_ASCII_BOX_BASE_URL", getenv("ASCII_BOX_BASE_URL", cfg.AsciiBox.BaseURL))
 	cfg.AsciiBox.CLIPath = getenv("CRABBOX_ASCII_BOX_CLI", getenv("BOX_CLI", cfg.AsciiBox.CLIPath))

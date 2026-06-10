@@ -944,6 +944,20 @@ if has_provider morph; then
   morph_smoke
 fi
 
+# wasi is a local, zero-credential experimental provider
+wasi_smoke() {
+  run_in_repo "$cb" doctor --provider wasi --json >/dev/null
+  run_in_repo "$cb" run --provider wasi -- echo 'crabbox-wasi-live-smoke-ok'
+  run_in_repo "$cb" warmup --provider wasi --slug wasi-smoke
+  run_in_repo "$cb" run --provider wasi --id wasi-smoke --sync-only
+  run_in_repo "$cb" status --provider wasi --id wasi-smoke
+  run_in_repo "$cb" stop --provider wasi wasi-smoke
+  run_in_repo "$cb" run --provider wasi -- false || echo 'expected non-zero'
+}
+if has_provider wasi; then
+  wasi_smoke
+fi
+
 if needs_admin_audit; then
   admin_status=0
   admin_out="$(run_in_repo "$cb" admin leases --state active --json 2>&1)" || admin_status=$?

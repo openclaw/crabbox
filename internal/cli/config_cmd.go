@@ -150,6 +150,11 @@ func configShowView(cfg Config) map[string]any {
 			"workdir":   cfg.UpstashBox.Workdir,
 			"keepAlive": cfg.UpstashBox.KeepAlive,
 		},
+		"wasi": map[string]any{
+			"workdir":      cfg.Wasi.Workdir,
+			"runtime":      cfg.Wasi.Runtime,
+			"guestBaseDir": cfg.Wasi.GuestBaseDir,
+		},
 		"asciiBox": map[string]any{
 			"baseUrl": cfg.AsciiBox.BaseURL,
 			"auth":    tokenState(cfg.AsciiBox.APIKey),
@@ -304,6 +309,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "morph api_url=%s snapshot=%s ssh_gateway_host=%s work_root=%s delete_on_release=%t wake_on_ssh=%t auth=%s\n", blank(cfg.Morph.APIURL, "-"), blank(cfg.Morph.Snapshot, "-"), blank(cfg.Morph.SSHGatewayHost, "-"), blank(cfg.Morph.WorkRoot, "-"), cfg.Morph.DeleteOnRelease, cfg.Morph.WakeOnSSH, tokenState(cfg.Morph.APIKey))
 	fmt.Fprintf(w, "e2b api_url=%s domain=%s template=%s workdir=%s user=%s\n", cfg.E2B.APIURL, cfg.E2B.Domain, cfg.E2B.Template, cfg.E2B.Workdir, blank(cfg.E2B.User, "-"))
 	fmt.Fprintf(w, "upstash_box base_url=%s runtime=%s size=%s workdir=%s keep_alive=%t auth=%s\n", cfg.UpstashBox.BaseURL, cfg.UpstashBox.Runtime, cfg.UpstashBox.Size, cfg.UpstashBox.Workdir, cfg.UpstashBox.KeepAlive, tokenState(cfg.UpstashBox.APIKey))
+	fmt.Fprintf(w, "wasi workdir=%s runtime=%s guest_base_dir=%s\n", blank(cfg.Wasi.Workdir, "-"), blank(cfg.Wasi.Runtime, "-"), blank(cfg.Wasi.GuestBaseDir, "-"))
 	fmt.Fprintf(w, "ascii_box base_url=%s cli=%s workdir=%s auth=%s\n", cfg.AsciiBox.BaseURL, cfg.AsciiBox.CLIPath, cfg.AsciiBox.Workdir, tokenState(cfg.AsciiBox.APIKey))
 	fmt.Fprintf(w, "apple_container cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s\n", cfg.AppleContainer.CLIPath, cfg.AppleContainer.Image, cfg.AppleContainer.User, cfg.AppleContainer.WorkRoot, cfg.AppleContainer.CPUs, blank(cfg.AppleContainer.Memory, "-"))
 	fmt.Fprintf(w, "mxc cli=%s version=%s containment=%s network=%s readonly_paths=%d readwrite_paths=%d allowed_hosts=%d blocked_hosts=%d allow_dacl_mutation=%t allow_windows_ui=%t experimental=%t\n", cfg.MXC.CLIPath, cfg.MXC.Version, cfg.MXC.Containment, cfg.MXC.Network, len(cfg.MXC.ReadOnlyPaths), len(cfg.MXC.ReadWritePaths), len(cfg.MXC.AllowedHosts), len(cfg.MXC.BlockedHosts), cfg.MXC.AllowDACLMutation, cfg.MXC.AllowWindowsUI, cfg.MXC.Experimental)

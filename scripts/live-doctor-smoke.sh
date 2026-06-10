@@ -20,6 +20,7 @@ default_providers=(
   sprites
   ssh
   tensorlake
+  wasi
 )
 
 if [[ -n "${CRABBOX_LIVE_DOCTOR_PROVIDERS:-}" ]]; then

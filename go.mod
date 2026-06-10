@@ -23,6 +23,7 @@ require (
 	github.com/gofrs/flock v0.13.0
 	github.com/islo-labs/go-sdk v0.0.0-20260528125833-04a38f6f507c
 	github.com/lxc/incus/v7 v7.1.0
+	github.com/tetratelabs/wazero v1.12.0
 	github.com/zitadel/oidc/v3 v3.47.5
 	golang.org/x/crypto v0.52.0
 	golang.org/x/oauth2 v0.36.0

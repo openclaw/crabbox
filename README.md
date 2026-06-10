@@ -158,6 +158,7 @@ configured); every other provider always runs direct from the CLI.
 | [Azure Dynamic Sessions](docs/providers/azure-dynamic-sessions.md) — `azure-dynamic-sessions` | Linux | Azure Container Apps dynamic sessions. |
 | [Blacksmith Testbox](docs/providers/blacksmith-testbox.md) — `blacksmith-testbox` (`blacksmith`) | Linux | Delegated Blacksmith CI Testbox lifecycle and execution. |
 | [W&B Sandboxes](docs/providers/wandb.md) — `wandb` (`weights-and-biases`) | Linux | Weights & Biases Sandboxes; reuses `wandb login` credentials. |
+| [WASI (experimental)](docs/providers/wasi.md) — `wasi` (`wasm`, `wazero`) | Wasm (WASI preview1/2) | Specialized Wasm sandbox (wazero/wasmtime) for WASI modules and Wasm-first code. Experimental. |
 
 See [Providers](docs/providers/README.md) for the full reference, capabilities,
 and authoring guide.
