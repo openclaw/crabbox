@@ -36,6 +36,22 @@ func TestConfigureNormalizesContainment(t *testing.T) {
 	}
 }
 
+func TestConfigureAcceptsStableProcessIntent(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetWindows
+	cfg.WindowsMode = core.WindowsModeNormal
+	cfg.MXC.Containment = "Process"
+
+	configured, err := (Provider{}).Configure(cfg, core.Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := configured.(*backend).cfg.MXC.Containment; got != "process" {
+		t.Fatalf("containment=%q", got)
+	}
+}
+
 func TestFlagsApplyPolicy(t *testing.T) {
 	cfg := core.BaseConfig()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
