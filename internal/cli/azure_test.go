@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -788,6 +790,169 @@ func TestNewAzureClientAutoResolvesSubscription(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "az login") {
 		t.Fatalf("error should mention 'az login': %v", err)
+	}
+}
+
+func TestNewAzureClientDoesNotResolveDefaultSSHCIDRs(t *testing.T) {
+	prev := detectOutboundIPv4CIDRFunc
+	detectOutboundIPv4CIDRFunc = func(context.Context) (string, error) {
+		t.Fatal("NewAzureClient should not resolve SSH CIDRs before provisioning")
+		return "", nil
+	}
+	t.Cleanup(func() { detectOutboundIPv4CIDRFunc = prev })
+
+	cfg := defaultConfig()
+	cfg.Provider = "azure"
+	cfg.AzureSubscription = "sub"
+	cfg.AzureLocation = "eastus"
+
+	client, err := NewAzureClient(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.SSHCIDRs) != 0 {
+		t.Fatalf("SSHCIDRs=%v, want unresolved until ensureNSG", client.SSHCIDRs)
+	}
+}
+
+func TestAzureSSHCIDRsForConfigUsesExplicitCIDRs(t *testing.T) {
+	prev := detectOutboundIPv4CIDRFunc
+	detectOutboundIPv4CIDRFunc = func(context.Context) (string, error) {
+		t.Fatal("explicit Azure SSH CIDRs should not call outbound detection")
+		return "", nil
+	}
+	t.Cleanup(func() { detectOutboundIPv4CIDRFunc = prev })
+
+	got, err := azureSSHCIDRsForConfig(t.Context(), Config{AzureSSHCIDRs: []string{"0.0.0.0/0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"0.0.0.0/0"}) {
+		t.Fatalf("cidrs=%v, want explicit world-open CIDR", got)
+	}
+}
+
+func TestAzureSSHCIDRsForConfigDetectsOperatorIPv4(t *testing.T) {
+	prev := detectOutboundIPv4CIDRFunc
+	detectOutboundIPv4CIDRFunc = func(context.Context) (string, error) {
+		return "198.51.100.7/32", nil
+	}
+	t.Cleanup(func() { detectOutboundIPv4CIDRFunc = prev })
+
+	got, err := azureSSHCIDRsForConfig(t.Context(), Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"198.51.100.7/32"}) {
+		t.Fatalf("cidrs=%v, want detected /32", got)
+	}
+}
+
+func TestAzureSSHCIDRsForConfigRequiresExplicitCIDRsWhenDetectionFails(t *testing.T) {
+	prev := detectOutboundIPv4CIDRFunc
+	detectOutboundIPv4CIDRFunc = func(context.Context) (string, error) {
+		return "", errors.New("offline")
+	}
+	t.Cleanup(func() { detectOutboundIPv4CIDRFunc = prev })
+
+	_, err := azureSSHCIDRsForConfig(t.Context(), Config{})
+	if err == nil || !strings.Contains(err.Error(), "CRABBOX_AZURE_SSH_CIDRS") || !strings.Contains(err.Error(), "0.0.0.0/0 only if") {
+		t.Fatalf("err=%v, want explicit CIDR guidance", err)
+	}
+}
+
+func TestAzureSSHCIDRsForRulesKeepsMatchingExistingManagedCIDRs(t *testing.T) {
+	prev := detectOutboundIPv4CIDRFunc
+	detectOutboundIPv4CIDRFunc = func(context.Context) (string, error) {
+		return "203.0.113.9/32", nil
+	}
+	t.Cleanup(func() { detectOutboundIPv4CIDRFunc = prev })
+
+	rules := []*armnetwork.SecurityRule{
+		{
+			Name: to.Ptr("crabbox-ssh-2222-0"),
+			Properties: &armnetwork.SecurityRulePropertiesFormat{
+				SourceAddressPrefix: to.Ptr("203.0.113.9/32"),
+			},
+		},
+		{
+			Name: to.Ptr("crabbox-ssh-22-0"),
+			Properties: &armnetwork.SecurityRulePropertiesFormat{
+				SourceAddressPrefix: to.Ptr("0.0.0.0/0"),
+			},
+		},
+		{
+			Name: to.Ptr("user-owned"),
+			Properties: &armnetwork.SecurityRulePropertiesFormat{
+				SourceAddressPrefix: to.Ptr("203.0.113.10/32"),
+			},
+		},
+	}
+
+	got, err := azureSSHCIDRsForRules(t.Context(), Config{}, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"203.0.113.9/32"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cidrs=%v, want %v", got, want)
+	}
+}
+
+func TestAzureSSHCIDRsForRulesRejectsDifferentDetectedCIDRForSharedNSG(t *testing.T) {
+	prev := detectOutboundIPv4CIDRFunc
+	detectOutboundIPv4CIDRFunc = func(context.Context) (string, error) {
+		return "198.51.100.7/32", nil
+	}
+	t.Cleanup(func() { detectOutboundIPv4CIDRFunc = prev })
+
+	rules := []*armnetwork.SecurityRule{{
+		Name: to.Ptr("crabbox-ssh-2222-0"),
+		Properties: &armnetwork.SecurityRulePropertiesFormat{
+			SourceAddressPrefix: to.Ptr("203.0.113.9/32"),
+		},
+	}}
+
+	_, err := azureSSHCIDRsForRules(t.Context(), Config{}, rules)
+	if err == nil || !strings.Contains(err.Error(), "already has managed SSH CIDRs") || !strings.Contains(err.Error(), "CRABBOX_AZURE_SSH_CIDRS") {
+		t.Fatalf("err=%v, want explicit CIDR guidance for shared NSG", err)
+	}
+}
+
+func TestAzureSSHCIDRsForRulesRequiresExplicitPrivateNetworkCIDRs(t *testing.T) {
+	prev := detectOutboundIPv4CIDRFunc
+	detectOutboundIPv4CIDRFunc = func(context.Context) (string, error) {
+		t.Fatal("private Azure network should not use public outbound detection")
+		return "", nil
+	}
+	t.Cleanup(func() { detectOutboundIPv4CIDRFunc = prev })
+
+	_, err := azureSSHCIDRsForRules(t.Context(), Config{AzureNetwork: "private"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "VPN/VNet source CIDR") {
+		t.Fatalf("err=%v, want explicit private-network CIDR guidance", err)
+	}
+}
+
+func TestAzureSSHCIDRsForRulesUsesExplicitCIDRsWithoutMerging(t *testing.T) {
+	prev := detectOutboundIPv4CIDRFunc
+	detectOutboundIPv4CIDRFunc = func(context.Context) (string, error) {
+		t.Fatal("explicit Azure SSH CIDRs should not call outbound detection")
+		return "", nil
+	}
+	t.Cleanup(func() { detectOutboundIPv4CIDRFunc = prev })
+
+	rules := []*armnetwork.SecurityRule{{
+		Name: to.Ptr("crabbox-ssh-2222-0"),
+		Properties: &armnetwork.SecurityRulePropertiesFormat{
+			SourceAddressPrefix: to.Ptr("203.0.113.9/32"),
+		},
+	}}
+	got, err := azureSSHCIDRsForRules(t.Context(), Config{AzureSSHCIDRs: []string{"198.51.100.8/32"}}, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"198.51.100.8/32"}) {
+		t.Fatalf("cidrs=%v, want explicit only", got)
 	}
 }
 
