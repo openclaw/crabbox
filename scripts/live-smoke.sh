@@ -792,6 +792,14 @@ needs_coordinator_preamble() {
   has_provider aws || has_provider hetzner || has_provider blacksmith-testbox
 }
 
+needs_admin_audit() {
+  case "${CRABBOX_LIVE_ADMIN_AUDIT:-auto}" in
+    0|false|no|skip) return 1 ;;
+    1|true|yes|required) return 0 ;;
+  esac
+  needs_coordinator_preamble
+}
+
 if needs_coordinator_preamble; then
   run_coordinator_preamble
 fi
@@ -852,9 +860,16 @@ if has_provider external; then
   external_smoke
 fi
 
-admin_out="$(run_in_repo "$cb" admin leases --state active --json 2>&1)" || {
-  printf 'warning: admin active-lease check skipped: %s\n' "$admin_out" >&2
-  exit 0
-}
+if needs_admin_audit; then
+  admin_status=0
+  admin_out="$(run_in_repo "$cb" admin leases --state active --json 2>&1)" || admin_status=$?
+  if [[ "$admin_status" -ne 0 ]]; then
+    printf 'error: admin active-lease check failed: %s\n' "$admin_out" >&2
+    exit "$admin_status"
+  fi
+else
+  printf 'warning: admin active-lease check skipped; set CRABBOX_LIVE_ADMIN_AUDIT=1 to require it\n' >&2
+  admin_out='[]'
+fi
 need_tool jq
 printf '%s\n' "$admin_out" | jq 'length'

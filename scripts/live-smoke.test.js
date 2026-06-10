@@ -222,6 +222,9 @@ case "$1" in
   run)
     printf 'blacksmith-crabbox-ok\\n'
     ;;
+  admin)
+    printf '[]\\n'
+    ;;
   *)
     printf 'unexpected crabbox args: %s\\n' "$*" >&2
     exit 99
@@ -341,4 +344,82 @@ esac
   assert.match(crabboxCalls, /args=warmup --provider external/);
   assert.match(crabboxCalls, /args=stop --provider external external-smoke-test/);
   assert.doesNotMatch(crabboxCalls, /external_command=[^ \n]+/);
+});
+
+test("live smoke fails when final active lease audit fails", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-admin-audit-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  fs.mkdirSync(bin);
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  admin)
+    printf 'admin endpoint unavailable\\n' >&2
+    exit 42
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_ADMIN_AUDIT: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 42, result.stdout + result.stderr);
+  assert.match(result.stderr, /error: admin active-lease check failed: admin endpoint unavailable/);
+});
+
+test("live smoke skips final active lease audit when coordinator is disabled", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-admin-skip-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  fs.mkdirSync(bin);
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf 'unexpected crabbox args: %s\\n' "$*" >&2
+exit 99
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stderr, /admin active-lease check skipped/);
+  assert.match(result.stdout, /^0\n?$/);
 });
