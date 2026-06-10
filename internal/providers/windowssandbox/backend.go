@@ -629,7 +629,9 @@ while ($true) {
     exit $exitCode
   }
   if ((Get-Date) -gt $deadline) {
-    Stop-SandboxSession
+    if (-not ($Keep.IsPresent -or $KeepOnFailure.IsPresent)) {
+      Stop-SandboxSession
+    }
     Write-Error "Windows Sandbox timed out after ${TimeoutSeconds}s"
     exit 124
   }
@@ -799,9 +801,6 @@ func validEnvName(name string) bool {
 }
 
 func windowsSandboxCommandText(req RunRequest) string {
-	if req.ShellMode {
-		return strings.Join(req.Command, " ")
-	}
 	return strings.Join(req.Command, " ")
 }
 

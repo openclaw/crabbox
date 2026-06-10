@@ -145,6 +145,14 @@ func TestHostRunnerScriptStopsActualSandboxProcessOnTimeout(t *testing.T) {
 	}
 }
 
+func TestHostRunnerScriptHonorsKeepFlagsOnTimeout(t *testing.T) {
+	script := hostRunnerScript()
+	timeoutBranch := "if ((Get-Date) -gt $deadline) {\r\n    if (-not ($Keep.IsPresent -or $KeepOnFailure.IsPresent)) {\r\n      Stop-SandboxSession\r\n    }\r\n    Write-Error \"Windows Sandbox timed out after ${TimeoutSeconds}s\"\r\n    exit 124\r\n  }"
+	if !strings.Contains(script, timeoutBranch) {
+		t.Fatalf("host runner timeout branch must gate Stop-SandboxSession on keep flags:\n%s", script)
+	}
+}
+
 func TestCleanWindowsSandboxPathUsesWindowsSemantics(t *testing.T) {
 	got, err := cleanWindowsSandboxPath(`c:/repo/../work/./project`)
 	if err != nil {
