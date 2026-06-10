@@ -127,6 +127,9 @@ func validateProviderTarget(cfg Config) error {
 	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
 		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
+	if provider.Name() == "tart" && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
+		return exit(2, "provider=tart supports architecture=arm64 only")
+	}
 	if effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
 		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" {
 			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, or provider=tart")
