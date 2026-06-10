@@ -31,8 +31,9 @@ reject configuration on non-Windows hosts.
 
 OpenSSH and git do **not** need to be pre-installed: on first acquire the
 provider installs the Windows OpenSSH server (over PowerShell Direct) and, if
-absent, git (portable MinGit) — both are no-ops when already present, so a
-template that pre-bakes them just skips the per-lease download. This keeps the
+absent, git (portable MinGit, pinned to a specific release and SHA-256-verified
+before extraction) — both are no-ops when already present, so a template that
+pre-bakes them just skips the per-lease download. This keeps the
 template requirement to a plain Windows VHDX with a known admin password. ISO
 images are not supported — provide a fully installed VHDX.
 

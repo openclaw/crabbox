@@ -569,12 +569,23 @@ func (b *backend) ensureOpenSSH(ctx context.Context, vmName, user string) error 
 	return b.invokeInGuest(ctx, vmName, user, scriptBlock, "OpenSSH install")
 }
 
+// MinGit release pinned for the guest git bootstrap. The download runs inside
+// the guest and lands in Program Files + machine PATH, so it must not float
+// with "latest": a changed release response or substituted archive would be
+// privileged guest code execution. Update the URL and SHA-256 together; the
+// hash is the official checksum from the git-for-windows release notes for
+// this exact asset.
+const (
+	minGitURL    = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip"
+	minGitSHA256 = "04f937e1f0918b17b9be6f2294cb2bb66e96e1d9832d1c298e2de088a1d0e668"
+)
+
 // ensureGit installs git in the guest when it is absent, so a plain Windows
 // template (only a known admin password) satisfies Crabbox's Windows readiness
 // check, which requires git for sync -- mirroring how the Linux cloud-init path
 // installs git. Idempotent: a no-op when git is already on PATH (so a template
-// that pre-bakes git skips the per-lease download). Uses portable MinGit from
-// the latest git-for-windows release; needs guest internet.
+// that pre-bakes git skips the per-lease download). Uses the pinned MinGit
+// release above, SHA-256-verified before extraction; needs guest internet.
 //
 // MinGit must NOT be extracted to C:\Program Files\Git: MinGit's etc\gitconfig
 // deliberately includes C:/Program Files/Git/etc/gitconfig (to inherit a full
@@ -586,12 +597,10 @@ func (b *backend) ensureGit(ctx context.Context, vmName, user string) error {
 	scriptBlock := `$ErrorActionPreference='Stop'; ` +
 		`if (Get-Command git -ErrorAction SilentlyContinue) { return }; ` +
 		`[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; ` +
-		`$h=@{'User-Agent'='crabbox'}; ` +
-		`$rel=Invoke-RestMethod -UseBasicParsing -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest' -Headers $h; ` +
-		`$asset=$rel.assets | Where-Object { $_.name -like 'MinGit-*-64-bit.zip' } | Select-Object -First 1; ` +
-		`if (-not $asset) { throw 'MinGit asset not found' }; ` +
 		`$zip=Join-Path $env:TEMP 'crabbox-mingit.zip'; ` +
-		`Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $zip; ` +
+		`Invoke-WebRequest -UseBasicParsing -Uri '` + minGitURL + `' -OutFile $zip; ` +
+		`$hash=(Get-FileHash -Path $zip -Algorithm SHA256).Hash; ` +
+		`if ($hash -ne '` + minGitSHA256 + `') { Remove-Item $zip -Force; throw ('MinGit SHA-256 mismatch: got ' + $hash) }; ` +
 		`$dst='C:\Program Files\MinGit'; ` +
 		`Expand-Archive -Path $zip -DestinationPath $dst -Force; ` +
 		`$cmd=Join-Path $dst 'cmd'; ` +

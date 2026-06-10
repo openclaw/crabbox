@@ -713,6 +713,80 @@ func TestEnsureGitInstallsWhenMissing(t *testing.T) {
 	}
 }
 
+func ensureGitScript(t *testing.T) string {
+	t.Helper()
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	if err := b.ensureGit(context.Background(), "crabbox-blue-1234", "crabbox"); err != nil {
+		t.Fatalf("ensureGit: %v", err)
+	}
+	for _, call := range runner.calls {
+		s := call.Args[len(call.Args)-1]
+		if strings.Contains(s, "Invoke-Command") && strings.Contains(s, "MinGit") {
+			return s
+		}
+	}
+	t.Fatal("ensureGit install script not found")
+	return ""
+}
+
+// The MinGit archive is extracted into Program Files and added to the machine
+// PATH inside the guest, so the download must be pinned to an immutable
+// release asset -- never the floating "latest" API -- and verified against
+// the release's published SHA-256 before extraction.
+func TestEnsureGitPinsImmutableMinGitRelease(t *testing.T) {
+	script := ensureGitScript(t)
+	if !strings.Contains(script, minGitURL) {
+		t.Error("ensureGit must download the pinned MinGit release asset")
+	}
+	if !strings.Contains(script, minGitSHA256) {
+		t.Error("ensureGit must embed the expected MinGit SHA-256")
+	}
+	for _, banned := range []string{"releases/latest", "Invoke-RestMethod"} {
+		if strings.Contains(script, banned) {
+			t.Errorf("ensureGit must not resolve MinGit via %q (mutable release reference)", banned)
+		}
+	}
+	if !strings.Contains(minGitURL, "/releases/download/v") {
+		t.Errorf("minGitURL %q is not an immutable release asset URL", minGitURL)
+	}
+	if len(minGitSHA256) != 64 {
+		t.Errorf("minGitSHA256 length = %d, want 64 hex chars", len(minGitSHA256))
+	}
+}
+
+// Success path: the hash must be computed and compared BEFORE Expand-Archive
+// runs, so a tampered archive is never extracted.
+func TestEnsureGitVerifiesChecksumBeforeExtraction(t *testing.T) {
+	script := ensureGitScript(t)
+	idxHash := strings.Index(script, "Get-FileHash")
+	idxCompare := strings.Index(script, minGitSHA256)
+	idxExtract := strings.Index(script, "Expand-Archive")
+	if idxHash < 0 || idxCompare < 0 || idxExtract < 0 {
+		t.Fatalf("ensureGit script missing verification steps: hash=%d compare=%d extract=%d", idxHash, idxCompare, idxExtract)
+	}
+	if !(idxHash < idxExtract && idxCompare < idxExtract) {
+		t.Errorf("checksum verification (hash@%d, compare@%d) must precede extraction (@%d)", idxHash, idxCompare, idxExtract)
+	}
+}
+
+// Mismatch path: a wrong hash must fail closed -- delete the downloaded
+// archive and throw (PowerShell Direct surfaces the throw as a non-zero exit,
+// which ensureGit returns as an error after retries).
+func TestEnsureGitFailsClosedOnChecksumMismatch(t *testing.T) {
+	script := ensureGitScript(t)
+	mismatch := strings.Index(script, "MinGit SHA-256 mismatch")
+	if mismatch < 0 {
+		t.Fatal("ensureGit script has no checksum-mismatch branch")
+	}
+	branch := script[strings.Index(script, "$hash"):strings.Index(script, "Expand-Archive")]
+	for _, want := range []string{"Remove-Item $zip", "throw"} {
+		if !strings.Contains(branch, want) {
+			t.Errorf("checksum-mismatch branch missing %q", want)
+		}
+	}
+}
+
 func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(runner)
