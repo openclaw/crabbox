@@ -981,6 +981,62 @@ func TestCreateContainerMountsPodmanSocketWithSecurityOpt(t *testing.T) {
 	}
 }
 
+func TestCreateContainerCleansDockerSocketLeaseRootOnMountError(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.DockerSocket = true
+	cfg.LocalContainer.WorkRoot = t.TempDir()
+	cfg.WorkRoot = cfg.LocalContainer.WorkRoot
+
+	_, _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
+	if err == nil {
+		t.Fatal("createContainer succeeded")
+	}
+	if _, statErr := os.Stat(filepath.Join(cfg.LocalContainer.WorkRoot, "cbx_123")); !os.IsNotExist(statErr) {
+		t.Fatalf("host lease root still exists after docker socket mount error: %v", statErr)
+	}
+	if _, statErr := os.Stat(cfg.LocalContainer.WorkRoot); statErr != nil {
+		t.Fatalf("host work root parent removed after docker socket mount error: %v", statErr)
+	}
+	if !trustedLocalContainerWorkRoot(cfg.LocalContainer.WorkRoot) {
+		t.Fatalf("host work root marker missing after docker socket mount error")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("docker should not be invoked after mount path rejection: %#v", runner.calls)
+	}
+}
+
+func TestCreateContainerDoesNotDeletePreexistingDockerSocketLeasePath(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.DockerSocket = true
+	cfg.LocalContainer.WorkRoot = t.TempDir()
+	cfg.WorkRoot = cfg.LocalContainer.WorkRoot
+	leasePath := filepath.Join(cfg.LocalContainer.WorkRoot, "cbx_123")
+	if err := os.WriteFile(leasePath, []byte("preexisting"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
+	if err == nil {
+		t.Fatal("createContainer succeeded")
+	}
+	data, readErr := os.ReadFile(leasePath)
+	if readErr != nil {
+		t.Fatalf("preexisting lease path was removed: %v", readErr)
+	}
+	if string(data) != "preexisting" {
+		t.Fatalf("preexisting lease path content = %q", data)
+	}
+}
+
 func TestDockerSocketMountRejectsRemoteDockerHost(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
 	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
