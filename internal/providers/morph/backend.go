@@ -13,6 +13,7 @@ import (
 )
 
 const morphReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"
+const defaultMorphWorkRoot = "/tmp/crabbox"
 
 var waitForMorphSSHReady = waitForSSHReady
 
@@ -82,14 +83,14 @@ func ApplyMorphProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if isMorphProviderName(cfg.Provider) {
 		applyMorphDefaults(cfg)
-		return validateMorphOptions(*cfg)
+		return validateMorphConfig(*cfg)
 	}
 	return nil
 }
 
 func NewMorphBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error) {
 	applyMorphDefaults(&cfg)
-	if err := validateMorphOptions(cfg); err != nil {
+	if err := validateMorphConfig(cfg); err != nil {
 		return nil, err
 	}
 	return &morphLeaseBackend{
@@ -106,6 +107,9 @@ func (b *morphLeaseBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *morphLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
 	cfg := b.configForRun()
+	if err := validateMorphCreateConfig(cfg); err != nil {
+		return DoctorResult{}, err
+	}
 	client, err := b.api()
 	if err != nil {
 		return DoctorResult{}, err
@@ -143,6 +147,9 @@ func (b *morphLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (Doctor
 
 func (b *morphLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	cfg := b.configForRun()
+	if err := validateMorphCreateConfig(cfg); err != nil {
+		return LeaseTarget{}, err
+	}
 	client, err := b.api()
 	if err != nil {
 		return LeaseTarget{}, err
@@ -225,6 +232,10 @@ func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	server := morphServer(instance, cfg, leaseID, slug)
+	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
+		return LeaseTarget{LeaseID: leaseID, Server: server}, nil
+	}
 	needsReady := !req.StatusOnly || req.ReadyProbe
 	if needsReady {
 		switch {
@@ -243,10 +254,7 @@ func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 			}
 		}
 	}
-	server := morphServer(instance, cfg, leaseID, slug)
-	if req.ReleaseOnly {
-		return LeaseTarget{LeaseID: leaseID, Server: server}, nil
-	}
+	server = morphServer(instance, cfg, leaseID, slug)
 	target, err := b.resolveSSHTarget(ctx, cfg, client, leaseID, instance, needsReady)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -366,6 +374,9 @@ func (b *morphLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server
 		if err != nil {
 			return Server{}, err
 		}
+	}
+	if instance.Metadata == nil {
+		instance.Metadata = morphMetadata{}
 	}
 	if req.IdleTimeout > 0 {
 		instance.Metadata["idle_timeout"] = strconv.Itoa(int(req.IdleTimeout.Seconds()))
@@ -532,7 +543,7 @@ func applyMorphDefaults(cfg *Config) {
 	}
 	if strings.TrimSpace(cfg.Morph.WorkRoot) == "" {
 		if isDefaultWorkRoot(cfg.WorkRoot) || strings.TrimSpace(cfg.WorkRoot) == "" {
-			cfg.Morph.WorkRoot = "/tmp/crabbox"
+			cfg.Morph.WorkRoot = defaultMorphWorkRoot
 		} else {
 			cfg.Morph.WorkRoot = cfg.WorkRoot
 		}
@@ -546,12 +557,19 @@ func applyMorphDefaults(cfg *Config) {
 	}
 }
 
-func validateMorphOptions(cfg Config) error {
+func validateMorphConfig(cfg Config) error {
 	if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
 		return exit(2, "provider=morph supports target=linux only")
 	}
 	if cfg.Tailscale.Enabled {
 		return exit(2, "--tailscale is not supported for provider=morph; Morph exposes SSH through the public gateway")
+	}
+	return nil
+}
+
+func validateMorphCreateConfig(cfg Config) error {
+	if err := validateMorphConfig(cfg); err != nil {
+		return err
 	}
 	if strings.TrimSpace(cfg.Morph.Snapshot) == "" {
 		return exit(2, "provider=morph requires CRABBOX_MORPH_SNAPSHOT or morph.snapshot")
@@ -572,6 +590,7 @@ func morphIsManaged(instance morphInstance) bool {
 }
 
 func morphLeaseMetadata(cfg Config, instance morphInstance, leaseID, slug, state string, keep bool, now time.Time, touch bool) map[string]string {
+	existingWorkRoot := strings.TrimSpace(instance.Metadata["work_root"])
 	var labels map[string]string
 	if touch {
 		labels = touchDirectLeaseLabels(instance.Metadata.Clone(), cfg, state, now)
@@ -586,8 +605,13 @@ func morphLeaseMetadata(cfg Config, instance morphInstance, leaseID, slug, state
 	if slug != "" {
 		labels["slug"] = normalizeLeaseSlug(slug)
 	}
-	if cfg.WorkRoot != "" {
-		labels["work_root"] = cfg.WorkRoot
+	if root := strings.TrimSpace(cfg.WorkRoot); root != "" {
+		switch {
+		case !touch, existingWorkRoot == "", existingWorkRoot == root, !isDefaultMorphWorkRoot(root):
+			labels["work_root"] = root
+		default:
+			labels["work_root"] = existingWorkRoot
+		}
 	}
 	if instance.ID != "" {
 		labels["instance_id"] = instance.ID
@@ -767,4 +791,9 @@ func morphTTLSecondsFromLabels(labels map[string]string, now time.Time) int {
 
 func boolPtr(value bool) *bool {
 	return &value
+}
+
+func isDefaultMorphWorkRoot(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "" || value == defaultMorphWorkRoot || isDefaultWorkRoot(value)
 }

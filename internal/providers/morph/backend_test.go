@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -216,6 +217,38 @@ func TestMorphAcquireStoresMetadataAndKey(t *testing.T) {
 	}
 }
 
+func TestNewMorphBackendAllowsMissingSnapshotForExistingLeaseOps(t *testing.T) {
+	cfg := testMorphConfig()
+	cfg.Morph.Snapshot = ""
+	cfg.ServerType = ""
+
+	backend, err := NewMorphBackend(Provider{}.Spec(), cfg, Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend.Spec().Name != providerName {
+		t.Fatalf("unexpected backend spec: %#v", backend.Spec())
+	}
+}
+
+func TestMorphAcquireRequiresSnapshot(t *testing.T) {
+	cfg := testMorphConfig()
+	cfg.Morph.Snapshot = ""
+
+	backend := &morphLeaseBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    cfg,
+		rt:     Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}},
+		client: &fakeMorphAPI{},
+		now:    time.Now,
+	}
+
+	_, err := backend.Acquire(context.Background(), AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "CRABBOX_MORPH_SNAPSHOT") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+}
+
 func TestMorphResolveResumesPausedInstanceWithoutWakeOnSSH(t *testing.T) {
 	configureMorphTestHome(t)
 	cfg := testMorphConfig()
@@ -267,6 +300,62 @@ func TestMorphResolveResumesPausedInstanceWithoutWakeOnSSH(t *testing.T) {
 	}
 	if lease.Server.Status != "ready" || lease.SSH.User != "inst_2" {
 		t.Fatalf("unexpected resolved lease: %#v", lease)
+	}
+}
+
+func TestMorphResolveStatusOnlyAndReleaseOnlySkipSSHPreparation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  ResolveRequest
+	}{
+		{name: "status-only", req: ResolveRequest{ID: "inst_2", StatusOnly: true}},
+		{name: "release-only", req: ResolveRequest{ID: "inst_2", ReleaseOnly: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configureMorphTestHome(t)
+			cfg := testMorphConfig()
+			cfg.Morph.WakeOnSSH = false
+
+			resumeCalls := 0
+			sshKeyCalls := 0
+			fake := &fakeMorphAPI{
+				getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
+					return morphInstance{ID: instanceID, Status: "paused"}, nil
+				},
+				resumeInstance: func(_ context.Context, instanceID string) error {
+					resumeCalls++
+					return nil
+				},
+				getSSHKey: func(_ context.Context, instanceID string) (morphSSHKey, error) {
+					sshKeyCalls++
+					return morphSSHKey{PrivateKey: "PRIVATE KEY"}, nil
+				},
+			}
+
+			backend := &morphLeaseBackend{
+				spec:              Provider{}.Spec(),
+				cfg:               cfg,
+				rt:                Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}},
+				client:            fake,
+				now:               time.Now,
+				readyPollInterval: time.Millisecond,
+				readyTimeout:      time.Second,
+			}
+
+			lease, err := backend.Resolve(context.Background(), tc.req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resumeCalls != 0 || sshKeyCalls != 0 {
+				t.Fatalf("resumeCalls=%d sshKeyCalls=%d", resumeCalls, sshKeyCalls)
+			}
+			if lease.SSH.Host != "" || lease.SSH.User != "" {
+				t.Fatalf("expected empty ssh target, got %#v", lease.SSH)
+			}
+			if lease.Server.Status != "paused" {
+				t.Fatalf("unexpected server state: %#v", lease.Server)
+			}
+		})
 	}
 }
 
@@ -337,7 +426,59 @@ func TestMorphReleasePausesOrDeletesAndCleansKey(t *testing.T) {
 	}
 }
 
-func TestMorphTouchPreservesWorkRootAndRefreshesTTL(t *testing.T) {
+func TestMorphTouchInitializesMissingMetadata(t *testing.T) {
+	configureMorphTestHome(t)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	cfg := testMorphConfig()
+
+	var gotMetadata map[string]string
+	fake := &fakeMorphAPI{
+		getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
+			return morphInstance{
+				ID:     instanceID,
+				Status: "ready",
+				Refs:   morphInstanceRefs{SnapshotID: "snapshot_123"},
+			}, nil
+		},
+		setInstanceMetadata: func(_ context.Context, instanceID string, metadata map[string]string) error {
+			gotMetadata = metadata
+			return nil
+		},
+		updateInstanceTTL: func(_ context.Context, instanceID string, ttlSeconds int, ttlAction string) error {
+			return nil
+		},
+		updateInstanceWake: func(_ context.Context, instanceID string, wakeOnSSH, wakeOnHTTP *bool) error {
+			return nil
+		},
+	}
+
+	backend := &morphLeaseBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    cfg,
+		rt:     Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}},
+		client: fake,
+		now:    func() time.Time { return now },
+	}
+	_, err := backend.Touch(context.Background(), TouchRequest{
+		Lease: LeaseTarget{
+			LeaseID: "cbx_nil",
+			Server: Server{
+				CloudID: "inst_nil",
+				Labels:  map[string]string{"slug": "blue-lobster"},
+			},
+		},
+		State:       "running",
+		IdleTimeout: 30 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMetadata["lease"] != "cbx_nil" || gotMetadata["work_root"] != "/tmp/crabbox" || gotMetadata["idle_timeout_secs"] != "1800" {
+		t.Fatalf("unexpected metadata: %#v", gotMetadata)
+	}
+}
+
+func TestMorphTouchPreservesCustomWorkRootAndRefreshesTTL(t *testing.T) {
 	configureMorphTestHome(t)
 	now := time.Unix(1_700_000_000, 0).UTC()
 	cfg := testMorphConfig()
@@ -347,7 +488,13 @@ func TestMorphTouchPreservesWorkRootAndRefreshesTTL(t *testing.T) {
 		Status: "ready",
 		Refs:   morphInstanceRefs{SnapshotID: "snapshot_123"},
 	}
-	instance.Metadata = morphLeaseMetadata(cfg, instance, "cbx_touch", "blue-lobster", "", false, now, false)
+	instance.Metadata = morphMetadata{
+		"lease":      "cbx_touch",
+		"slug":       "blue-lobster",
+		"work_root":  "/workspace/custom",
+		"provider":   providerName,
+		"created_at": strconv.FormatInt(now.Unix(), 10),
+	}
 
 	var gotMetadata map[string]string
 	var gotTTL int
@@ -391,7 +538,7 @@ func TestMorphTouchPreservesWorkRootAndRefreshesTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotMetadata["work_root"] != "/tmp/crabbox" || gotMetadata["state"] != "running" || gotMetadata["instance_id"] != "inst_touch" {
+	if gotMetadata["work_root"] != "/workspace/custom" || gotMetadata["state"] != "running" || gotMetadata["instance_id"] != "inst_touch" {
 		t.Fatalf("unexpected touched metadata: %#v", gotMetadata)
 	}
 	if gotTTL != int((30 * time.Minute).Seconds()) {
@@ -400,7 +547,7 @@ func TestMorphTouchPreservesWorkRootAndRefreshesTTL(t *testing.T) {
 	if gotWakeOnSSH == nil || *gotWakeOnSSH {
 		t.Fatalf("unexpected wakeOnSSH value: %#v", gotWakeOnSSH)
 	}
-	if server.Labels["work_root"] != "/tmp/crabbox" {
+	if server.Labels["work_root"] != "/workspace/custom" {
 		t.Fatalf("server labels lost work_root: %#v", server.Labels)
 	}
 }
