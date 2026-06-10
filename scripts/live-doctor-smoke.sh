@@ -42,7 +42,10 @@ if [[ ! -x "$bin" ]]; then
   exit 2
 fi
 
-tmpdir="$(mktemp -d)"
+if ! tmpdir="$(mktemp -d)"; then
+  echo "live doctor smoke could not create temporary directory" >&2
+  exit 2
+fi
 trap 'rm -rf "$tmpdir"' EXIT
 
 pass=0
