@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -559,12 +560,270 @@ func TestResolveByJobIDRejectsNonCrabboxJob(t *testing.T) {
 		client: &apiClient{host: host, token: "tok", http: server.Client()},
 	}
 
-	_, err := backend.resolveByJobID(context.Background(), "job-123")
+	_, err := backend.resolveByJobID(context.Background(), "job-123", false, false)
 	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
 		t.Fatalf("resolve error = %v, want Crabbox-managed rejection", err)
 	}
 	if debugKeyHit {
 		t.Fatal("debug SSH key endpoint should not be called for non-Crabbox jobs")
+	}
+}
+
+func TestResolveByJobIDRejectsIncompleteSSHTarget(t *testing.T) {
+	tests := []struct {
+		name  string
+		ip    string
+		ports []map[string]any
+	}{
+		{
+			name:  "empty ip",
+			ip:    "",
+			ports: []map[string]any{{"name": "ssh", "number": 40010}},
+		},
+		{
+			name:  "missing ssh port",
+			ip:    "1.2.3.4",
+			ports: []map[string]any{{"name": "http", "number": 80}},
+		},
+		{
+			name:  "zero ssh port",
+			ip:    "1.2.3.4",
+			ports: []map[string]any{{"name": "ssh", "number": 0}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			debugKeyHit := false
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs/job-123" {
+					json.NewEncoder(w).Encode(map[string]any{
+						"metadata": map[string]string{
+							"name": "crabbox testbox blue-lobster",
+						},
+						"status": map[string]any{
+							"state": "RUNNING",
+							"agent": map[string]any{
+								"ip":    tt.ip,
+								"ports": tt.ports,
+							},
+						},
+					})
+					return
+				}
+				if strings.HasSuffix(r.URL.Path, "/debug_ssh_key") {
+					debugKeyHit = true
+				}
+				w.WriteHeader(404)
+			}))
+			defer server.Close()
+
+			host := strings.TrimPrefix(server.URL, "https://")
+			backend := &semaphoreBackend{
+				spec:   Provider{}.Spec(),
+				cfg:    testConfig(host),
+				rt:     testRuntime(server.Client()),
+				client: &apiClient{host: host, token: "tok", http: server.Client()},
+			}
+
+			_, err := backend.resolveByJobID(context.Background(), "job-123", false, false)
+			if err == nil || !strings.Contains(err.Error(), "SSH endpoint is not ready") {
+				t.Fatalf("resolve error = %v, want SSH endpoint readiness error", err)
+			}
+			if debugKeyHit {
+				t.Fatal("debug SSH key endpoint should not be called before SSH endpoint is ready")
+			}
+		})
+	}
+}
+
+func TestResolveByJobIDReleaseOnlyAllowsIncompleteSSHTarget(t *testing.T) {
+	debugKeyHit := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs/job-123" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]string{
+					"name": "crabbox testbox blue-lobster",
+				},
+				"status": map[string]any{
+					"state": "RUNNING",
+					"agent": map[string]any{
+						"ip":    "",
+						"ports": []map[string]any{},
+					},
+				},
+			})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/debug_ssh_key") {
+			debugKeyHit = true
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "https://")
+	backend := &semaphoreBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    testConfig(host),
+		rt:     testRuntime(server.Client()),
+		client: &apiClient{host: host, token: "tok", http: server.Client()},
+	}
+
+	target, err := backend.resolveByJobID(context.Background(), "job-123", true, false)
+	if err != nil {
+		t.Fatalf("resolve release-only: %v", err)
+	}
+	if target.LeaseID != "sem_job-123" || target.Server.CloudID != "job-123" || target.SSH.Host != "" {
+		t.Fatalf("target=%#v, want release-only identity without SSH target", target)
+	}
+	if debugKeyHit {
+		t.Fatal("debug SSH key endpoint should not be called for release-only resolution")
+	}
+}
+
+func TestResolveByJobIDReleaseOnlySkipsReadySSHTarget(t *testing.T) {
+	debugKeyHit := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs/job-123" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]string{
+					"name": "crabbox testbox blue-lobster",
+				},
+				"status": map[string]any{
+					"state": "RUNNING",
+					"agent": map[string]any{
+						"ip": "1.2.3.4",
+						"ports": []map[string]any{
+							{"name": "ssh", "number": 40010},
+						},
+					},
+				},
+			})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/debug_ssh_key") {
+			debugKeyHit = true
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "https://")
+	backend := &semaphoreBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    testConfig(host),
+		rt:     testRuntime(server.Client()),
+		client: &apiClient{host: host, token: "tok", http: server.Client()},
+	}
+
+	target, err := backend.resolveByJobID(context.Background(), "job-123", true, false)
+	if err != nil {
+		t.Fatalf("resolve release-only: %v", err)
+	}
+	if target.LeaseID != "sem_job-123" || target.Server.PublicNet.IPv4.IP != "1.2.3.4" || target.SSH.Host != "" {
+		t.Fatalf("target=%#v, want release-only server identity without SSH target", target)
+	}
+	if debugKeyHit {
+		t.Fatal("debug SSH key endpoint should not be called for release-only resolution")
+	}
+}
+
+func TestResolveStatusOnlyAllowsIncompleteSSHTarget(t *testing.T) {
+	debugKeyHit := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs/job-123" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]string{
+					"name": "crabbox testbox blue-lobster",
+				},
+				"status": map[string]any{
+					"state": "RUNNING",
+					"agent": map[string]any{
+						"ip":    "",
+						"ports": []map[string]any{},
+					},
+				},
+			})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/debug_ssh_key") {
+			debugKeyHit = true
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "https://")
+	backend := &semaphoreBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    testConfig(host),
+		rt:     testRuntime(server.Client()),
+		client: &apiClient{host: host, token: "tok", http: server.Client()},
+	}
+
+	target, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "sem_job-123", StatusOnly: true})
+	if err != nil {
+		t.Fatalf("resolve status-only: %v", err)
+	}
+	if target.LeaseID != "sem_job-123" || target.SSH.Host != "" {
+		t.Fatalf("target=%#v, want status-only identity without SSH target", target)
+	}
+	if debugKeyHit {
+		t.Fatal("debug SSH key endpoint should not be called for status-only resolution")
+	}
+}
+
+func TestResolveStatusKeepsReadySSHTarget(t *testing.T) {
+	for _, readyProbe := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ready_probe_%t", readyProbe), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			debugKeyHit := false
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs/job-123" {
+					json.NewEncoder(w).Encode(map[string]any{
+						"metadata": map[string]string{
+							"name": "crabbox testbox blue-lobster",
+						},
+						"status": map[string]any{
+							"state": "RUNNING",
+							"agent": map[string]any{
+								"ip": "1.2.3.4",
+								"ports": []map[string]any{
+									{"name": "ssh", "number": 40010},
+								},
+							},
+						},
+					})
+					return
+				}
+				if strings.HasSuffix(r.URL.Path, "/debug_ssh_key") {
+					debugKeyHit = true
+					json.NewEncoder(w).Encode(map[string]string{"key": "test-private-key"})
+					return
+				}
+				w.WriteHeader(404)
+			}))
+			defer server.Close()
+
+			host := strings.TrimPrefix(server.URL, "https://")
+			backend := &semaphoreBackend{
+				spec:   Provider{}.Spec(),
+				cfg:    testConfig(host),
+				rt:     testRuntime(server.Client()),
+				client: &apiClient{host: host, token: "tok", http: server.Client()},
+			}
+
+			target, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "sem_job-123", StatusOnly: true, ReadyProbe: readyProbe})
+			if err != nil {
+				t.Fatalf("resolve status: %v", err)
+			}
+			if target.SSH.Host != "1.2.3.4" || target.SSH.Port != "40010" {
+				t.Fatalf("ssh target=%#v, want ready SSH target", target.SSH)
+			}
+			if !debugKeyHit {
+				t.Fatal("debug SSH key endpoint should be called for ready status resolution")
+			}
+		})
 	}
 }
 
