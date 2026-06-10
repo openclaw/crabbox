@@ -186,9 +186,13 @@ func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 	}
 	if target.Host != "" {
 		claim.SSHHost = target.Host
+	} else if statusTerminalState(server.Labels["state"]) {
+		claim.SSHHost = ""
 	}
 	if port, err := strconv.Atoi(strings.TrimSpace(target.Port)); err == nil && port > 0 {
 		claim.SSHPort = port
+	} else if statusTerminalState(server.Labels["state"]) {
+		claim.SSHPort = 0
 	}
 	data, err := json.MarshalIndent(claim, "", "  ")
 	if err != nil {

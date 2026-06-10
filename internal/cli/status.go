@@ -191,7 +191,7 @@ func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
 	if lease.Coordinator != nil {
 		return state == "active"
 	}
-	return state != "provisioning"
+	return state != "provisioning" && !statusTerminalState(state)
 }
 
 type StatusView struct {

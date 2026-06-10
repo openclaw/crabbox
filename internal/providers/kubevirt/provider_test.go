@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -315,11 +316,15 @@ func TestProxyCommandUsesVirtctlControlPlaneForwarding(t *testing.T) {
 		"'--kubeconfig' '/tmp/kube config'",
 		"'--context' 'test-context'",
 		"'--namespace' 'test-ns'",
-		"'port-forward' '--stdio=true' 'vm/crabbox-test-deadbeef/test-ns' '%p'",
+		"'port-forward' '--stdio=true' 'vm/crabbox-test-deadbeef' '%p'",
 	} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("proxy command %q missing %q", command, want)
 		}
+	}
+	wantParts := []string{"virtctl-custom", "--kubeconfig", "/tmp/kube config", "--context", "test-context", "--namespace", "test-ns", "port-forward", "--stdio=true", "vm/crabbox-test-deadbeef", "%p"}
+	if got := backend.proxyCommandParts("crabbox-test-deadbeef"); !reflect.DeepEqual(got, wantParts) {
+		t.Fatalf("proxy command parts=%v want %v", got, wantParts)
 	}
 	target := backend.sshTarget("crabbox-test-deadbeef", "/tmp/id_test")
 	if !target.SSHConfigProxy || target.ProxyCommand == "" || target.Port != "2222" {

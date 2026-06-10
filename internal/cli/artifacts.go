@@ -205,7 +205,7 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 			})
 		}
 		path := filepath.Join(dir, "screenshot.png")
-		if err := captureDesktopScreenshot(ctx, target, path); err != nil {
+		if err := captureDesktopScreenshot(ctx, cfg, target, path); err != nil {
 			return fail(err, artifactWarning{
 				Problem: classifyDesktopFailure(err.Error()),
 				Detail:  err.Error(),

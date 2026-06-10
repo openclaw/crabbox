@@ -310,6 +310,7 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 	}
 	now := time.Now().UTC()
 	labels := directLeaseLabels(cfg, leaseID, slug, "aws", mapMarket(spot), keep, now)
+	labels["aws_region"] = cfg.AWSRegion
 	userData := base64.StdEncoding.EncodeToString([]byte(awsUserData(cfg, publicKey)))
 	rootGB := cfg.AWSRootGB
 	if rootGB <= 0 {

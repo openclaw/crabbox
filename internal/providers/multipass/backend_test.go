@@ -179,9 +179,9 @@ func TestCreateInstanceBuildsLaunchArgsAndCloudInit(t *testing.T) {
 	}
 	cloudInit := runner.cloudInit
 	for _, want := range []string{
-		"name: runner",
+		`name: "runner"`,
 		"ssh-ed25519 AAAA test",
-		"test -w /workspace/crabbox",
+		"test -w '/workspace/crabbox'",
 		"Port 22",
 	} {
 		if !strings.Contains(cloudInit, want) {

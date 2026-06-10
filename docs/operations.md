@@ -258,10 +258,9 @@ After AWS credential or account rotation, scan old provider accounts directly fo
 
 ```sh
 scripts/aws-crabbox-orphan-audit.sh --profile old-crabbox-account
-scripts/aws-crabbox-orphan-audit.sh --profile old-crabbox-account --terminate
 ```
 
-The audit is read-only by default. It skips `keep=true` instances, protects active coordinator leases by lease tag or EC2 instance ID, and applies the same grace window as the broker sweep before reporting stale labels. `--terminate` refuses to run if active coordinator leases cannot be loaded or may be truncated.
+The audit is read-only. It skips `keep=true` instances, protects active coordinator leases by lease tag or EC2 instance ID, and applies the same grace window as the broker sweep before reporting stale labels. The script intentionally refuses `--terminate`: a local AWS scan cannot atomically lock coordinator lease state before deleting an instance. For broker-owned accounts, use the coordinator AWS orphan sweep below. For rotated legacy accounts, treat the JSON output as investigation evidence and delete through an explicit operator or infrastructure workflow only after confirming no active coordinator can still claim the instance.
 
 Direct-provider cleanup is only for debug mode without a coordinator:
 

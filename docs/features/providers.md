@@ -18,8 +18,10 @@ aliases is each adapter's `provider.go` (`Name()`, `Aliases()`, `Spec()`).
 Each adapter declares a `Spec` that drives how Crabbox treats it:
 
 - **Kind** — `ssh-lease` (Crabbox provisions or connects to an SSH-reachable box
-  and owns the full lifecycle, sync, run, and release) or `delegated-run` (the
-  provider owns sync and execution; there is no SSH lease).
+  and owns the full lifecycle, sync, run, and release), `delegated-run` (the
+  provider owns sync and execution; there is no SSH lease), or
+  `service-control` (Crabbox can inspect or stop a provider-owned service, but
+  cannot execute arbitrary run commands there).
 - **Coordinator** — `supported` means the provider *may* be brokered through the
   Cloudflare Worker; `never` means it always runs direct from the CLI. Only
   `aws`, `azure`, `gcp`, and `hetzner` are `supported`, and even those run direct
@@ -36,6 +38,17 @@ provider-specific path in `scripts/live-smoke.sh`. The smoke should use explicit
 `--provider` routing for `warmup`, `status`, `run`, `list`, and `stop`, and its
 remote command should not assume a particular project language unless it is
 provider-specific.
+
+If the provider is still unimplemented or the only credible proof is an
+environment-specific local runbook, keep the smoke manual and document the real
+acceptance contract first. Do not add a placeholder `scripts/live-smoke.sh`
+branch that cannot run on a fresh operator machine with the documented
+prerequisites.
+
+Incus is the current example of an explicit opt-in local path: the default live
+matrix still skips it, while `CRABBOX_LIVE_PROVIDERS=incus` and
+`CRABBOX_LIVE_DOCTOR_PROVIDERS=incus` run the documented Apple Silicon / local
+testbed contract when those prerequisites are actually present.
 
 ## Brokered providers
 
@@ -71,6 +84,7 @@ sync/run/release path. None of them go through the Worker.
 ssh              Existing SSH host (no provisioning)      Linux, macOS, Windows
 parallels        Parallels Desktop linked clones          Linux, macOS, Windows
 proxmox          Proxmox VE QEMU VM clones                Linux
+incus            Incus containers or VMs over SSH         Linux
 local-container  Local Docker-compatible containers       Linux
 multipass        Canonical Multipass local Ubuntu VMs     Linux
 daytona          Daytona sandboxes (short-lived SSH)      Linux
@@ -96,11 +110,19 @@ docker-sandbox          Docker Sandboxes through the standalone sbx CLI
 e2b                     E2B Firecracker sandboxes
 islo                    Islo sandboxes
 modal                   Modal Sandboxes
-railway                 Railway service redeploys
 tensorlake              Tensorlake Firecracker sandboxes
 upstash-box             Upstash sandboxes
 blacksmith-testbox      Blacksmith CI test runner (proof/session)
 wandb                   Weights & Biases run sandboxes
+```
+
+## Service-control providers
+
+These expose provider-native service inspection/control without an arbitrary
+command execution contract.
+
+```text
+railway                 Railway service status and stop controls
 ```
 
 ## Provider pages
@@ -114,6 +136,7 @@ wandb                   Weights & Biases run sandboxes
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [Parallels](../providers/parallels.md): local or remote Mac Parallels Desktop VM clones and small Mac fleets.
 - [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
+- [Incus](../providers/incus.md): direct Incus Linux SSH leases plus an opt-in Apple Silicon / local live smoke contract.
 - [Local Container](../providers/local-container.md): local Linux containers through Docker-compatible runtimes.
 - [Multipass](../providers/multipass.md): local Ubuntu VMs through Canonical Multipass.
 - [Daytona](../providers/daytona.md): Daytona SDK/toolbox sandbox leases.
@@ -121,7 +144,7 @@ wandb                   Weights & Biases run sandboxes
 - [KubeVirt](../providers/kubevirt.md): generic KubeVirt VMs over Kubernetes control-plane forwarding.
 - [External](../providers/external.md): configured executable provider protocol for private integrations.
 - [Namespace Devbox](../providers/namespace-devbox.md): Namespace Devbox SSH leases.
-- [Railway](../providers/railway.md): delegated Railway service redeploys.
+- [Railway](../providers/railway.md): Railway service status and stop controls.
 - [RunPod](../providers/runpod.md): RunPod GPU pods over public SSH.
 - [Semaphore](../providers/semaphore.md): Semaphore CI job leases.
 - [Sprites](../providers/sprites.md): Sprites microVM SSH leases through `sprite proxy`.

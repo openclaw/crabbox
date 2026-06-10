@@ -536,6 +536,7 @@ main{min-width:0;padding:28px clamp(20px,4.5vw,60px) 72px;max-width:1180px;margi
 .doc table{width:100%;border-collapse:collapse;margin:1.2em 0;font-size:.94em}
 .doc th,.doc td{border-bottom:1px solid var(--line);padding:9px 10px;text-align:left}
 .doc th{font-weight:600;color:var(--reef)}
+.doc td code{overflow-wrap:anywhere;word-break:break-word}
 .doc hr{border:0;border-top:1px solid var(--line);margin:2em 0}
 
 /* toc */

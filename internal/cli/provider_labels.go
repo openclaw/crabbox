@@ -174,6 +174,10 @@ func leaseLabelDurationDisplay(secondsValue, fallbackValue string) string {
 func sanitizeProviderLabels(labels map[string]string) map[string]string {
 	out := make(map[string]string, len(labels))
 	for key, value := range labels {
+		if key == "work_root" {
+			out[key] = value
+			continue
+		}
 		out[key] = sanitizeProviderLabelValue(value)
 	}
 	return out

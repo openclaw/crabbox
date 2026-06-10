@@ -24,6 +24,7 @@ type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type LeaseTarget = core.LeaseTarget
 type LeaseClaim = core.LeaseClaim
+type Repo = core.Repo
 type Server = core.Server
 type SSHTarget = core.SSHTarget
 type ExitError = core.ExitError

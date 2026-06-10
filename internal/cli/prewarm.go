@@ -63,6 +63,9 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if backend.Spec().Kind == ProviderKindServiceControl {
+		return exit(2, "prewarm is not supported for provider=%s; it does not provide a lease or run surface", backend.Spec().Name)
+	}
 	readyPoolKey := strings.TrimSpace(*poolKey)
 	if readyPoolKey != "" && backendCoordinator(backend) == nil {
 		return exit(2, "--pool requires a coordinator-backed SSH lease provider")

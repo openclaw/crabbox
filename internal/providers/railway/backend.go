@@ -10,10 +10,11 @@ import (
 	"time"
 )
 
-// Polling configuration for Run(). Railway has no synchronous exec endpoint,
-// so we trigger a redeploy and then poll the new deployment's status until it
-// reaches a terminal state. The interval grows exponentially with jitter so a
-// long deployment doesn't hammer the API while a short one still feels snappy.
+// Polling configuration for Railway redeploy tracking. Railway has no
+// synchronous exec endpoint; redeploy tracking polls the new deployment's status
+// until it reaches a terminal state. The interval grows exponentially with
+// jitter so a long deployment doesn't hammer the API while a short one still
+// feels snappy.
 const (
 	railwayPollInitialInterval  = 5 * time.Second
 	railwayPollMaxInterval      = 30 * time.Second
@@ -80,28 +81,33 @@ func (b *railwayBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 }
 
 func (b *railwayBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	_ = ctx
 	if err := rejectRailwayRunOptions(req); err != nil {
 		return RunResult{}, err
 	}
 	if req.ID == "" {
 		return RunResult{}, exit(2, "provider=%s requires --id <railway-service-id>", providerName)
 	}
+	if len(req.Command) == 0 {
+		return RunResult{}, exit(2, "missing command")
+	}
+	return RunResult{}, exit(2, "provider=%s cannot execute arbitrary run commands; Railway only runs the service's configured start command", providerName)
+}
+
+func (b *railwayBackend) redeployService(ctx context.Context, serviceID string) (RunResult, error) {
 	projectID, environmentID, err := b.requireProjectEnv()
 	if err != nil {
 		return RunResult{}, err
-	}
-	if len(req.Command) == 0 {
-		return RunResult{}, exit(2, "missing command")
 	}
 	client, err := b.api()
 	if err != nil {
 		return RunResult{}, err
 	}
 	started := b.now()
-	fmt.Fprintf(b.rt.Stderr, "running on %s service=%s command=%s (start command is owned by the Railway service)\n", providerName, req.ID, strings.Join(req.Command, " "))
+	fmt.Fprintf(b.rt.Stderr, "redeploying %s service=%s (Railway runs the service's configured start command)\n", providerName, serviceID)
 
-	previousDeployment, previousErr := client.LatestDeployment(ctx, projectID, environmentID, req.ID)
-	deploymentID, err := client.TriggerDeploy(ctx, projectID, environmentID, req.ID)
+	previousDeployment, previousErr := client.LatestDeployment(ctx, projectID, environmentID, serviceID)
+	deploymentID, err := client.TriggerDeploy(ctx, projectID, environmentID, serviceID)
 	if err != nil {
 		return RunResult{}, ExitError{Code: 1, Message: fmt.Sprintf("%s trigger deploy failed: %v", providerName, err)}
 	}
@@ -110,7 +116,7 @@ func (b *railwayBackend) Run(ctx context.Context, req RunRequest) (RunResult, er
 		if previousErr != nil {
 			return RunResult{ExitCode: 1}, ExitError{Code: 1, Message: fmt.Sprintf("%s read latest deployment before trigger failed: %v", providerName, previousErr)}
 		}
-		deploymentID, err = b.resolveTriggeredDeployment(ctx, client, projectID, environmentID, req.ID, previousDeployment.ID)
+		deploymentID, err = b.resolveTriggeredDeployment(ctx, client, projectID, environmentID, serviceID, previousDeployment.ID)
 		if err != nil {
 			return RunResult{ExitCode: 1}, ExitError{Code: 1, Message: fmt.Sprintf("%s resolve triggered deployment failed: %v", providerName, err)}
 		}
@@ -129,17 +135,7 @@ func (b *railwayBackend) Run(ctx context.Context, req RunRequest) (RunResult, er
 		Command:  commandDuration,
 		Total:    commandDuration,
 	}
-	fmt.Fprintf(b.rt.Stderr, "%s run summary command=%s total=%s exit=%d status=%s\n", providerName, result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode, finalStatus)
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider:  providerName,
-			CommandMs: commandDuration.Milliseconds(),
-			TotalMs:   result.Total.Milliseconds(),
-			ExitCode:  result.ExitCode,
-		}); err != nil {
-			return result, err
-		}
-	}
+	fmt.Fprintf(b.rt.Stderr, "%s redeploy summary elapsed=%s exit=%d status=%s\n", providerName, result.Total.Round(time.Millisecond), result.ExitCode, finalStatus)
 	if result.ExitCode != 0 {
 		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s deployment status=%s", providerName, finalStatus)}
 	}

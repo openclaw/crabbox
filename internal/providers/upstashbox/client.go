@@ -100,14 +100,14 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 			return box, nil
 		}
 		if status == "error" || status == "failed" {
-			return boxData{}, exit(5, "upstash-box creation failed for %s", box.ID)
+			return boxData{}, c.cleanupCreatedBox(box.ID, exit(5, "upstash-box creation failed for %s", box.ID))
 		}
 		if time.Now().After(deadline) {
-			return boxData{}, exit(5, "upstash-box creation timed out for %s status=%s", box.ID, blank(box.Status, "unknown"))
+			return boxData{}, c.cleanupCreatedBox(box.ID, exit(5, "upstash-box creation timed out for %s status=%s", box.ID, blank(box.Status, "unknown")))
 		}
 		select {
 		case <-ctx.Done():
-			return boxData{}, ctx.Err()
+			return boxData{}, c.cleanupCreatedBox(box.ID, ctx.Err())
 		case <-time.After(2 * time.Second):
 		}
 		next, err := c.GetBox(ctx, box.ID)
@@ -115,6 +115,18 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 			box = next
 		}
 	}
+}
+
+func (c *client) cleanupCreatedBox(boxID string, cause error) error {
+	if strings.TrimSpace(boxID) == "" {
+		return cause
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := c.DeleteBoxes(cleanupCtx, []string{boxID}); err != nil {
+		return fmt.Errorf("%w; cleanup failed for upstash-box %s: %v", cause, boxID, err)
+	}
+	return cause
 }
 
 func createStatusReady(status string) bool {

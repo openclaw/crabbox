@@ -44,15 +44,17 @@ config_value() {
   local value=""
   local found=0
   local path
+  local candidate
   for path in "${config_paths[@]}"; do
     [[ -r "$path" ]] || continue
-    if value="$(ruby -ryaml -e '
+    if candidate="$(ruby -ryaml -e '
       value = ARGV[1].split(".").reduce(YAML.load_file(ARGV[0])) do |memo, key|
         memo.is_a?(Hash) ? memo[key] : nil
       end
       exit 3 if value.nil? || value.to_s.empty?
       print value
     ' "$path" "$key_path" 2>/dev/null)"; then
+      value="$candidate"
       found=1
     fi
   done

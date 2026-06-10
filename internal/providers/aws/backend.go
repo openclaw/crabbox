@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -27,6 +29,20 @@ type Server = core.Server
 type SSHTarget = core.SSHTarget
 
 type awsLeaseBackend struct{ shared.DirectSSHBackend }
+
+const awsAcquireRollbackTimeout = 2 * time.Minute
+
+type awsClient interface {
+	ListCrabboxServers(context.Context) ([]Server, error)
+	CreateServerWithFallback(context.Context, Config, string, string, string, bool, func(string, ...any)) (Server, Config, error)
+	WaitForServerIP(context.Context, string) (Server, error)
+	GetServer(context.Context, string) (Server, error)
+	DeleteServer(context.Context, string) error
+	DeleteSSHKey(context.Context, string) error
+	SetTags(context.Context, string, map[string]string) error
+	CapacityDoctorChecks(context.Context, Config) []core.DoctorCheck
+	SpotPlacementScores(context.Context, Config) ([]ec2types.SpotPlacementScore, error)
+}
 
 func NewAWSLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = "aws"
@@ -49,7 +65,7 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		return LeaseTarget{}, err
 	}
 	leaseID := newLeaseID()
-	servers, err := client.ListCrabboxServers(ctx)
+	servers, err := b.listAcrossRegions(ctx)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -65,9 +81,26 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	cfg.ProviderKey = providerKeyForLease(leaseID)
 	ensureAWSSSHCIDRs(ctx, &cfg)
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=aws lease=%s slug=%s class=%s preferred_type=%s region=%s keep=%v market=%s strategy=%s\n", leaseID, slug, cfg.Class, cfg.ServerType, cfg.AWSRegion, keep, cfg.Capacity.Market, cfg.Capacity.Strategy)
-	server, cfg, err := client.CreateServerWithFallback(ctx, cfg, publicKey, leaseID, slug, keep, func(format string, args ...any) {
+	server, resolvedCfg, err := client.CreateServerWithFallback(ctx, cfg, publicKey, leaseID, slug, keep, func(format string, args ...any) {
 		fmt.Fprintf(b.RT.Stderr, format, args...)
 	})
+	if err != nil {
+		cleanupAWSProviderKeyAcrossRegions(b.RT.Stderr, cfg, cfg.ProviderKey)
+		return LeaseTarget{}, err
+	}
+	cfg = resolvedCfg
+	rollback := true
+	rollbackCloudID := server.CloudID
+	rollbackKeyName := firstNonBlank(core.ServerProviderKey(server), cfg.ProviderKey)
+	defer func() {
+		if !rollback {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), awsAcquireRollbackTimeout)
+		defer cancel()
+		cleanupAWSCreatedResources(cleanupCtx, b.RT.Stderr, cfg, rollbackCloudID, rollbackKeyName)
+	}()
+	client, err = newAWSClient(ctx, cfg)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -76,12 +109,16 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	server = annotateAWSServerRegion(server, cfg.AWSRegion)
+	if keyName := core.ServerProviderKey(server); keyName != "" {
+		rollbackKeyName = keyName
+	}
 	target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 	if err := bootstrapAWSWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr); err != nil {
-		_ = client.DeleteServer(context.Background(), server.CloudID)
 		return LeaseTarget{}, err
 	}
 	server.Labels["state"] = "ready"
+	rollback = false
 	if err := client.SetTags(ctx, server.CloudID, server.Labels); err != nil {
 		fmt.Fprintf(b.RT.Stderr, "warning: set tags: %v\n", err)
 	}
@@ -89,28 +126,40 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 }
 
 func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
-	client, err := newAWSClient(ctx, b.Cfg)
-	if err != nil {
-		return LeaseTarget{}, err
-	}
 	if strings.HasPrefix(req.ID, "i-") {
-		server, err := client.GetServer(ctx, req.ID)
-		if err != nil {
-			return LeaseTarget{}, err
+		var lastErr error
+		for _, cfg := range awsRegionConfigs(b.Cfg) {
+			client, err := newAWSClient(ctx, cfg)
+			if err != nil {
+				return LeaseTarget{}, err
+			}
+			server, err := client.GetServer(ctx, req.ID)
+			if err != nil {
+				lastErr = err
+				if isAWSResolveNotFound(err) {
+					continue
+				}
+				return LeaseTarget{}, err
+			}
+			server = annotateAWSServerRegion(server, cfg.AWSRegion)
+			leaseID := blank(server.Labels["lease"], req.ID)
+			target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+			useStoredTestboxKey(&target, leaseID)
+			return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 		}
-		leaseID := blank(server.Labels["lease"], req.ID)
-		target := sshTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
-		useStoredTestboxKey(&target, leaseID)
-		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+		if lastErr != nil {
+			return LeaseTarget{}, lastErr
+		}
 	}
-	servers, err := client.ListCrabboxServers(ctx)
+	servers, err := b.listAcrossRegions(ctx)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
 	if server, leaseID, err := findServerByAlias(servers, req.ID); err != nil {
 		return LeaseTarget{}, err
 	} else if leaseID != "" {
-		target := sshTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
+		cfg := awsConfigForServer(b.Cfg, server)
+		target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 		useStoredTestboxKey(&target, leaseID)
 		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 	}
@@ -119,11 +168,7 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 
 func (b *awsLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
 	_ = req
-	client, err := newAWSClient(ctx, b.Cfg)
-	if err != nil {
-		return nil, err
-	}
-	return client.ListCrabboxServers(ctx)
+	return b.listAcrossRegions(ctx)
 }
 
 func (b *awsLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
@@ -152,7 +197,7 @@ func (b *awsLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (cor
 }
 
 func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
-	if err := deleteServer(ctx, b.Cfg, req.Lease.Server); err != nil {
+	if err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server); err != nil {
 		return err
 	}
 	removeLeaseClaim(req.Lease.LeaseID)
@@ -164,7 +209,23 @@ func (b *awsLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 }
 
 func (b *awsLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
-	return b.DirectSSHBackend.Touch(ctx, req.Lease.Server, req.State), nil
+	server := req.Lease.Server
+	if server.Labels == nil {
+		server.Labels = map[string]string{}
+	}
+	cfg := awsConfigForServer(b.Cfg, server)
+	if req.IdleTimeout > 0 {
+		cfg.IdleTimeout = req.IdleTimeout
+	}
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, time.Now().UTC())
+	client, err := newAWSClient(ctx, cfg)
+	if err != nil {
+		return server, err
+	}
+	if err := client.SetTags(ctx, server.CloudID, server.Labels); err != nil {
+		return server, err
+	}
+	return server, nil
 }
 
 func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
@@ -172,7 +233,40 @@ func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 	if err != nil {
 		return err
 	}
-	return b.CleanupServers(ctx, req, servers)
+	now := time.Now().UTC()
+	for _, server := range servers {
+		shouldDelete, reason := core.ShouldCleanupServer(server, now)
+		if !shouldDelete {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
+			continue
+		}
+		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
+		if req.DryRun {
+			continue
+		}
+		if err := deleteServer(ctx, awsConfigForServer(b.Cfg, server), server); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *awsLeaseBackend) listAcrossRegions(ctx context.Context) ([]LeaseView, error) {
+	var all []LeaseView
+	for _, cfg := range awsRegionConfigs(b.Cfg) {
+		client, err := newAWSClient(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
+		servers, err := client.ListCrabboxServers(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, server := range servers {
+			all = append(all, annotateAWSServerRegion(server, cfg.AWSRegion))
+		}
+	}
+	return all, nil
 }
 
 func acquireAttemptsRetry(rt Runtime, keep bool, acquire func() (LeaseTarget, error)) (LeaseTarget, error) {
@@ -215,7 +309,7 @@ func chooseAWSRegion(ctx context.Context, cfg Config, stderr io.Writer) Config {
 	return cfg
 }
 
-func newAWSClient(ctx context.Context, cfg Config) (*core.AWSClient, error) {
+var newAWSClient = func(ctx context.Context, cfg Config) (awsClient, error) {
 	return core.NewAWSClient(ctx, cfg)
 }
 
@@ -231,9 +325,9 @@ func ensureAWSSSHCIDRs(ctx context.Context, cfg *Config) { core.EnsureAWSSSHCIDR
 func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
 }
-func bootstrapAWSWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarget, publicKey string, stderr io.Writer) error {
-	return core.BootstrapAWSWindowsDesktop(ctx, cfg, target, publicKey, stderr)
-}
+
+var bootstrapAWSWindowsDesktop = core.BootstrapAWSWindowsDesktop
+
 func blank(value, fallback string) string { return core.Blank(value, fallback) }
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
 	if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
@@ -259,3 +353,108 @@ func deleteServer(ctx context.Context, cfg Config, server Server) error {
 	return nil
 }
 func removeLeaseClaim(leaseID string) { core.RemoveLeaseClaim(leaseID) }
+
+func cleanupAWSProviderKeyAcrossRegions(stderr io.Writer, cfg Config, keyName string) {
+	if !core.ValidCrabboxProviderKey(keyName) {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), awsAcquireRollbackTimeout)
+	defer cancel()
+	for _, regionCfg := range awsRegionConfigs(cfg) {
+		client, err := newAWSClient(cleanupCtx, regionCfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: create aws cleanup client for key %s region=%s: %v\n", keyName, regionCfg.AWSRegion, err)
+			continue
+		}
+		if err := client.DeleteSSHKey(cleanupCtx, keyName); err != nil {
+			fmt.Fprintf(stderr, "warning: cleanup aws key %s region=%s after acquire failure: %v\n", keyName, regionCfg.AWSRegion, err)
+		}
+	}
+}
+
+func cleanupAWSCreatedResources(ctx context.Context, stderr io.Writer, cfg Config, cloudID, keyName string) {
+	client, err := newAWSClient(ctx, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: create aws cleanup client for %s region=%s: %v\n", cloudID, cfg.AWSRegion, err)
+		return
+	}
+	if strings.TrimSpace(cloudID) != "" {
+		if err := client.DeleteServer(ctx, cloudID); err != nil {
+			fmt.Fprintf(stderr, "warning: cleanup aws instance %s after acquire failure: %v\n", cloudID, err)
+		}
+	}
+	if core.ValidCrabboxProviderKey(keyName) {
+		if err := client.DeleteSSHKey(ctx, keyName); err != nil {
+			fmt.Fprintf(stderr, "warning: cleanup aws key %s after acquire failure: %v\n", keyName, err)
+		}
+	}
+}
+
+func awsRegionConfigs(cfg Config) []Config {
+	regions := uniqueAWSRegions(append([]string{cfg.AWSRegion}, cfg.Capacity.Regions...))
+	if len(regions) == 0 {
+		regions = []string{cfg.AWSRegion}
+	}
+	configs := make([]Config, 0, len(regions))
+	for _, region := range regions {
+		next := cfg
+		next.AWSRegion = region
+		configs = append(configs, next)
+	}
+	return configs
+}
+
+func uniqueAWSRegions(regions []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, region := range regions {
+		region = strings.TrimSpace(region)
+		if region == "" {
+			continue
+		}
+		if _, ok := seen[region]; ok {
+			continue
+		}
+		seen[region] = struct{}{}
+		out = append(out, region)
+	}
+	return out
+}
+
+func awsServerRegion(server Server) string {
+	if server.Labels == nil {
+		return ""
+	}
+	return strings.TrimSpace(server.Labels["aws_region"])
+}
+
+func annotateAWSServerRegion(server Server, region string) Server {
+	region = strings.TrimSpace(region)
+	if region == "" {
+		return server
+	}
+	if server.Labels == nil {
+		server.Labels = map[string]string{}
+	}
+	if strings.TrimSpace(server.Labels["aws_region"]) == "" {
+		server.Labels["aws_region"] = region
+	}
+	return server
+}
+
+func awsConfigForServer(cfg Config, server Server) Config {
+	if region := awsServerRegion(server); region != "" {
+		cfg.AWSRegion = region
+	}
+	return cfg
+}
+
+func isAWSResolveNotFound(err error) bool {
+	var exitErr core.ExitError
+	if core.AsExitError(err, &exitErr) && exitErr.Code == 4 {
+		return true
+	}
+	message := err.Error()
+	return strings.Contains(message, "InvalidInstanceID.NotFound") ||
+		strings.Contains(message, "aws instance not found")
+}

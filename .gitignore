@@ -3,6 +3,7 @@ dist/
 dist-cloudflare/
 artifacts/
 .crabbox/
+.clawpatch/
 node_modules/
 .wrangler/
 *.test

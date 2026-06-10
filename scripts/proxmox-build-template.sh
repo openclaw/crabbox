@@ -70,7 +70,7 @@ fetch_image() {
   fi
 }
 
-if [[ "${EUID}" -ne 0 ]]; then
+if [[ "${EUID}" -ne 0 && "${CRABBOX_PROXMOX_ALLOW_NONROOT_FOR_TEST:-0}" != "1" ]]; then
   die "run this script on a Proxmox VE node as root"
 fi
 
@@ -85,18 +85,27 @@ need_cmd qemu-img
 need_cmd sha256sum
 need_cmd awk
 
+template_exists=0
 if qm status "$template_id" >/dev/null 2>&1; then
   if [[ "$replace_template" == "1" ]]; then
-    printf 'destroying existing VM/template %s before rebuild\n' "$template_id" >&2
-    qm destroy "$template_id" --purge 1
+    template_exists=1
+    printf 'existing VM/template %s will be replaced after the new image is validated\n' "$template_id" >&2
   else
     die "VMID $template_id already exists; set CRABBOX_PROXMOX_REPLACE_TEMPLATE=1 to rebuild it"
   fi
 fi
 
 workdir="$(mktemp -d /var/tmp/crabbox-proxmox-template.XXXXXX)"
+created_template=0
+template_ready=0
 cleanup() {
+  local status=$?
+  if [[ "$created_template" == "1" && "$template_ready" != "1" ]]; then
+    printf 'cleaning up incomplete Proxmox template VMID=%s\n' "$template_id" >&2
+    qm destroy "$template_id" --purge 1 >/dev/null 2>&1 || true
+  fi
   rm -rf "$workdir"
+  return "$status"
 }
 trap cleanup EXIT
 
@@ -117,6 +126,11 @@ virt-customize -a "$custom_image" \
   --run-command 'systemctl enable cloud-init qemu-guest-agent ssh || true' \
   --run-command 'cloud-init clean --logs'
 
+if [[ "$template_exists" == "1" ]]; then
+  printf 'destroying existing VM/template %s for non-atomic replacement\n' "$template_id" >&2
+  qm destroy "$template_id" --purge 1
+fi
+
 printf 'creating Proxmox template VMID=%s name=%s storage=%s bridge=%s\n' "$template_id" "$template_name" "$storage" "$bridge" >&2
 qm create "$template_id" \
   --name "$template_name" \
@@ -128,12 +142,12 @@ qm create "$template_id" \
   --agent enabled=1 \
   --ostype l26 \
   --scsihw virtio-scsi-pci
+created_template=1
 
 qm importdisk "$template_id" "$custom_image" "$storage"
 
 disk_volume="$(pvesm list "$storage" --vmid "$template_id" | awk -v id="$template_id" 'NR > 1 && $1 ~ ("vm-" id "-disk-") { print $1; exit }')"
 if [[ -z "$disk_volume" ]]; then
-  qm destroy "$template_id" --purge 1
   die "could not find imported disk volume for VMID $template_id on storage $storage"
 fi
 
@@ -143,6 +157,7 @@ qm set "$template_id" --boot c --bootdisk scsi0
 qm set "$template_id" --ipconfig0 ip=dhcp --ciuser "$vm_user"
 qm resize "$template_id" scsi0 "$disk_size"
 qm template "$template_id"
+template_ready=1
 
 cat <<EOF
 Created Crabbox Proxmox template:

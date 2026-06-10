@@ -240,6 +240,70 @@ func TestTenkiResolveClaimUsesStoredSessionID(t *testing.T) {
 	}
 }
 
+func TestTenkiResolveReclaimPersistsSessionEndpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "id_ed25519")
+	certPath := filepath.Join(dir, "id_ed25519-cert.pub")
+	if err := os.WriteFile(keyPath, []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certPath, []byte("cert"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldWait := waitForSSHReadyFunc
+	waitForSSHReadyFunc = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return nil
+	}
+	t.Cleanup(func() { waitForSSHReadyFunc = oldWait })
+
+	runner := &fakeRunner{}
+	var commands []string
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		command := strings.Join(req.Args, " ")
+		commands = append(commands, command)
+		switch command {
+		case "sandbox get --output json session-1":
+			return LocalCommandResult{Stdout: `{"id":"session-1","name":"unmanaged","state":"RUNNING"}`}, nil
+		case "sandbox ssh-command --output json --session session-1 --user tenki --batch-mode --connect-timeout 10s":
+			return LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","proxy_command":"tenki proxy session-1"}`}, nil
+		default:
+			t.Fatalf("unexpected command: %s %s", req.Name, command)
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "session-1", Reclaim: true, Repo: Repo{Root: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != "tenki_session-1" {
+		t.Fatalf("lease id=%q", lease.LeaseID)
+	}
+	claim, ok, err := resolveLeaseClaim("unmanaged")
+	if err != nil || !ok {
+		t.Fatalf("claim ok=%t err=%v", ok, err)
+	}
+	if claim.Labels["tenki_session_id"] != "session-1" {
+		t.Fatalf("claim labels=%v, want stored tenki session id", claim.Labels)
+	}
+	commands = nil
+	lease, err = backend.Resolve(context.Background(), ResolveRequest{ID: "unmanaged", StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != "session-1" {
+		t.Fatalf("resolved server=%s, want session-1", lease.Server.CloudID)
+	}
+	if len(commands) != 1 || commands[0] != "sandbox get --output json session-1" {
+		t.Fatalf("commands=%v, want stored session get only", commands)
+	}
+}
+
 func TestTenkiEnsureSessionReadyResumesPausedSession(t *testing.T) {
 	runner := &fakeRunner{}
 	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {

@@ -337,8 +337,9 @@ The wrapper defaults to `--class standard` even when an explicit instance type
 is given, so bakes do not consume the high-pressure beast class. It proves the
 source lease, candidate AMI, and promoted AMI before declaring success unless
 `--no-promote` is set, and writes warmup timing logs under
-`.crabbox/image-mint-<image-name>-*.log` — the evidence to compare before and
-after each bake.
+`.crabbox/image-mint-<image-name>-*.log.*` with a per-invocation suffix. Each
+warmup prints its exact `log=` path; use those files as the evidence to compare
+before and after each bake.
 
 ## macOS images
 

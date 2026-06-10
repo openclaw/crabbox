@@ -139,6 +139,77 @@ func TestExeDevControlSurfacesJSONError(t *testing.T) {
 	}
 }
 
+func TestExeDevControlRejectsSSHOptionLikeHost(t *testing.T) {
+	runner := &exeDevRecordingRunner{}
+	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "-oProxyCommand=sh"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err == nil || !strings.Contains(err.Error(), "invalid exe.dev control host") {
+		t.Fatalf("err=%v, want invalid control host", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("ssh should not run for invalid host, calls=%v", runner.calls)
+	}
+}
+
+func TestExeDevControlHostUsesSeparatePortArgument(t *testing.T) {
+	runner := &exeDevRecordingRunner{}
+	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "alice@control.example:2222"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%d, want 1", len(runner.calls))
+	}
+	want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "-p", "2222", "alice@control.example", "ls --json"}
+	if !reflect.DeepEqual(runner.calls[0].Args, want) {
+		t.Fatalf("args=%v want %v", runner.calls[0].Args, want)
+	}
+}
+
+func TestExeDevControlHostPreservesBareIPv6Destination(t *testing.T) {
+	runner := &exeDevRecordingRunner{}
+	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "alice@2001:db8::10"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%d, want 1", len(runner.calls))
+	}
+	want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "alice@2001:db8::10", "ls --json"}
+	if !reflect.DeepEqual(runner.calls[0].Args, want) {
+		t.Fatalf("args=%v want %v", runner.calls[0].Args, want)
+	}
+}
+
+func TestExeDevControlHostAcceptsBracketedIPv6Port(t *testing.T) {
+	runner := &exeDevRecordingRunner{}
+	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "alice@[2001:db8::10]:2222"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%d, want 1", len(runner.calls))
+	}
+	want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "-p", "2222", "alice@2001:db8::10", "ls --json"}
+	if !reflect.DeepEqual(runner.calls[0].Args, want) {
+		t.Fatalf("args=%v want %v", runner.calls[0].Args, want)
+	}
+}
+
+func TestExeDevControlHostPreservesScopedIPv6Destination(t *testing.T) {
+	runner := &exeDevRecordingRunner{}
+	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "alice@fe80::1%eth0"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%d, want 1", len(runner.calls))
+	}
+	want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "alice@fe80::1%eth0", "ls --json"}
+	if !reflect.DeepEqual(runner.calls[0].Args, want) {
+		t.Fatalf("args=%v want %v", runner.calls[0].Args, want)
+	}
+}
+
 func TestExeDevResolveVMUsesTaggedLeaseIdentity(t *testing.T) {
 	runner := &exeDevRecordingRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
 		return LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running","tags":["crabbox","crabbox-lease-cbx_abcdef123456","crabbox-slug-blue"]}]}`}, nil

@@ -191,6 +191,9 @@ func (b *tenkiBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		if err := claimLeaseForRepoProvider(leaseID, slug, tenkiProvider, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 			return LeaseTarget{}, err
 		}
+		if err := updateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
+			return LeaseTarget{}, err
+		}
 	}
 	return lease, nil
 }

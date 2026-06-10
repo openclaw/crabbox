@@ -124,7 +124,15 @@ func enforceManagedLeaseCapabilities(cfg Config, server Server, leaseID string) 
 }
 
 func macOSScreenSharingLease(cfg Config, server Server) bool {
-	return cfg.TargetOS == targetMacOS || strings.EqualFold(server.Labels["target"], targetMacOS)
+	if cfg.TargetOS != targetMacOS && !strings.EqualFold(server.Labels["target"], targetMacOS) {
+		return false
+	}
+	providerName := firstNonBlank(server.Provider, cfg.Provider)
+	if providerName == "" {
+		return true
+	}
+	provider, err := ProviderFor(providerName)
+	return err != nil || provider.Spec().Coordinator != CoordinatorNever
 }
 
 func labelBool(value string) bool {
@@ -309,15 +317,29 @@ func parseEnvLines(input string) map[string]string {
 }
 
 func availableLocalVNCPort() string {
+	return availableLocalVNCPortExcept("")
+}
+
+// availableLocalVNCPortExcept returns a free loopback port in the VNC range,
+// skipping `except` so two cooperating listeners (e.g. the WebVNC server and its
+// SSH tunnel) never land on the same port.
+func availableLocalVNCPortExcept(except string) string {
 	for port := 5901; port <= 5999; port++ {
+		p := fmt.Sprint(port)
+		if p == except {
+			continue
+		}
 		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			continue
 		}
 		_ = ln.Close()
-		return fmt.Sprint(port)
+		return p
 	}
-	return "5901"
+	if except != "5901" {
+		return "5901"
+	}
+	return "5902"
 }
 
 func resolveVNCEndpoint(ctx context.Context, cfg Config, target *SSHTarget) (vncEndpoint, error) {

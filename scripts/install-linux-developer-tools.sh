@@ -36,6 +36,16 @@ apt_install() {
   retry apt-get install -y --no-install-recommends "$@"
 }
 
+docker_packages_installed() {
+  local package
+  for package in docker-ce docker-ce-cli containerd.io; do
+    if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -qx 'install ok installed'; then
+      return 1
+    fi
+  done
+  return 0
+}
+
 add_nodesource() {
   if command -v node >/dev/null 2>&1 && node --version | grep -q "^v${node_major}\\."; then
     return 0
@@ -49,22 +59,35 @@ add_nodesource() {
 }
 
 add_docker_repo() {
-  if command -v docker >/dev/null 2>&1; then
+  if docker_packages_installed; then
     return 0
   fi
-  local codename arch
+  local distro_id codename arch
+  # shellcheck disable=SC1091
+  distro_id="$(. /etc/os-release && printf '%s' "${ID:-}")"
   # shellcheck disable=SC1091
   codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")"
   arch="$(dpkg --print-architecture)"
+  case "$distro_id" in
+    debian|ubuntu) ;;
+    "")
+      log "could not determine Debian/Ubuntu distribution ID"
+      exit 2
+      ;;
+    *)
+      log "unsupported Docker repository distribution: $distro_id"
+      exit 2
+      ;;
+  esac
   if [[ -z "$codename" ]]; then
     log "could not determine Debian/Ubuntu codename"
     exit 2
   fi
   install -d -m 0755 /etc/apt/keyrings
-  curl -fsSL "https://download.docker.com/linux/ubuntu/gpg" |
+  curl -fsSL "https://download.docker.com/linux/${distro_id}/gpg" |
     gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   chmod 0644 /etc/apt/keyrings/docker.gpg
-  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu %s stable\n' "$arch" "$codename" \
+  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/%s %s stable\n' "$arch" "$distro_id" "$codename" \
     >/etc/apt/sources.list.d/docker.list
 }
 

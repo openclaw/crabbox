@@ -96,6 +96,34 @@ cache:
 	}
 }
 
+func TestPrewarmRejectsServiceControlProviderBeforePlan(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	if err := os.WriteFile(filepath.Join(dir, ".crabbox.yaml"), []byte(`provider: service-control-test
+actions:
+  workflow: hydrate.yml
+  job: hydrate
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	err := app.Run(context.Background(), []string{"prewarm", "--dry-run", "--provider", "service-control-test"})
+	if err == nil {
+		t.Fatalf("service-control prewarm succeeded; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(err.Error(), "prewarm is not supported for provider=service-control-test") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(stdout.String(), "crabbox warmup") || strings.Contains(stdout.String(), "actions hydrate") {
+		t.Fatalf("service-control prewarm emitted a plan:\n%s", stdout.String())
+	}
+}
+
 func TestPrewarmPoolRequiresCoordinatorBeforeWarmup(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()

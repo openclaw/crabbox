@@ -69,7 +69,7 @@ repo="${CRABBOX_LIVE_REPO:-$ROOT}"
 lease_id=""
 cleanup() {
   if [[ -n "$lease_id" ]]; then
-    (cd "$repo" && "$CRABBOX_BIN" stop --provider cloudflare "$lease_id") || true
+    "$CRABBOX_BIN" stop --provider cloudflare "$lease_id" || true
   fi
 }
 trap cleanup EXIT
@@ -87,17 +87,23 @@ smoke_no_sync() {
 smoke_keep_stop() {
   local keep_out
   local keep_status=0
-  set +e
-  keep_out="$(
-    cd "$repo"
+  if keep_out="$(
+    {
+    cd "$repo" || exit 2
     "$CRABBOX_BIN" run --provider cloudflare --type lite --keep --no-sync --timing-json --shell -- \
-      'set -eu; echo CRABBOX_CF_KEEP_OK; sleep 1' 2>&1
-  )"
-  keep_status=$?
-  set -e
+      'set -eu; echo CRABBOX_CF_KEEP_OK; sleep 1'
+    } 2>&1
+  )"; then
+    keep_status=0
+  else
+    keep_status=$?
+  fi
   printf '%s\n' "$keep_out"
   lease_id="$(printf '%s\n' "$keep_out" | awk '/^leased / {print $2; exit}')"
   if [[ -z "$lease_id" ]]; then
+    if [[ "$keep_status" -ne 0 ]]; then
+      return "$keep_status"
+    fi
     printf 'could not parse kept Cloudflare lease id\n' >&2
     exit 3
   fi

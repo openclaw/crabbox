@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -151,6 +153,70 @@ func TestClientUsesUpstashBoxRESTShape(t *testing.T) {
 	}
 	if !reflect.DeepEqual(deleteBody["ids"], []any{"box_1"}) {
 		t.Fatalf("delete body=%v", deleteBody)
+	}
+}
+
+func TestUpstashBoxCreateBoxDeletesFailedProvision(t *testing.T) {
+	var deleted []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/box":
+			_ = json.NewEncoder(w).Encode(boxData{ID: "box_failed", Status: "failed"})
+		case r.Method == http.MethodDelete && r.URL.Path == "/v2/box":
+			var body struct {
+				IDs []string `json:"ids"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			deleted = append(deleted, body.IDs...)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := &client{apiKey: "box_key", base: srv.URL, http: srv.Client()}
+	_, err := client.CreateBox(context.Background(), createRequest{Name: "crabbox-failed"})
+	if err == nil || !strings.Contains(err.Error(), "creation failed") {
+		t.Fatalf("CreateBox err=%v, want creation failed", err)
+	}
+	if !reflect.DeepEqual(deleted, []string{"box_failed"}) {
+		t.Fatalf("deleted=%v, want failed box cleanup", deleted)
+	}
+}
+
+func TestUpstashBoxCreateBoxDeletesCancelledProvision(t *testing.T) {
+	var deleted []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/box":
+			_ = json.NewEncoder(w).Encode(boxData{ID: "box_cancelled", Status: "provisioning"})
+		case r.Method == http.MethodDelete && r.URL.Path == "/v2/box":
+			var body struct {
+				IDs []string `json:"ids"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			deleted = append(deleted, body.IDs...)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	client := &client{apiKey: "box_key", base: srv.URL, http: srv.Client()}
+	_, err := client.CreateBox(ctx, createRequest{Name: "crabbox-cancelled"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CreateBox err=%v, want deadline exceeded", err)
+	}
+	if !reflect.DeepEqual(deleted, []string{"box_cancelled"}) {
+		t.Fatalf("deleted=%v, want cancelled box cleanup", deleted)
 	}
 }
 

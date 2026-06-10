@@ -86,6 +86,42 @@ func TestWebVNCURLs(t *testing.T) {
 	}
 }
 
+func TestGuardMacOSDirectWebVNC(t *testing.T) {
+	// macOS desktop leases (e.g. tart) must be rejected from the Linux-only
+	// noVNC bridge with native-client guidance, not silently enter it.
+	err := guardMacOSDirectWebVNC(Config{Provider: "tart", TargetOS: targetMacOS, SSHUser: "admin"})
+	if err == nil {
+		t.Fatal("macOS lease should be guarded out of the direct WebVNC browser path")
+	}
+	if !strings.Contains(err.Error(), "native VNC client") || !strings.Contains(err.Error(), "ssh -L 5900") {
+		t.Fatalf("guard error should give native-client guidance, got: %v", err)
+	}
+	// Even with TargetOS unresolved (as the webvnc subcommands leave it), tart is
+	// guarded via its provider spec's macOS target.
+	if err := guardMacOSDirectWebVNC(Config{Provider: "tart"}); err == nil {
+		t.Fatal("tart should be guarded via provider spec even when TargetOS is unset")
+	}
+	// Linux desktop leases keep using the browser bridge.
+	if err := guardMacOSDirectWebVNC(Config{Provider: "local-container", TargetOS: targetLinux}); err != nil {
+		t.Fatalf("linux lease should not be guarded: %v", err)
+	}
+}
+
+func TestIsMacOSDesktopProviderOnlyDedicatedMacOS(t *testing.T) {
+	// tart's only target is macOS -> uses the host-side Screen Sharing bridge.
+	if !isMacOSDesktopProvider(Config{Provider: "tart"}) {
+		t.Error("tart (dedicated macOS provider) should route to the macOS bridge")
+	}
+	// parallels is multi-target (macOS + Linux + Windows); it must NOT be diverted
+	// into the tart bridge, even for a macOS lease — regression guard.
+	if isMacOSDesktopProvider(Config{Provider: "parallels"}) {
+		t.Error("parallels (multi-target) must not route to the macOS bridge")
+	}
+	if isMacOSDesktopProvider(Config{Provider: "parallels", TargetOS: targetMacOS}) {
+		t.Error("a macOS parallels lease must still use the existing WebVNC path")
+	}
+}
+
 func TestWebVNCBridgeArgsPreserveProviderRouting(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	args := webVNCBridgeArgs(

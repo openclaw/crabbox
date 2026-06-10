@@ -3,11 +3,15 @@ package sprites
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestSpritesSSHTargetUsesSpriteProxy(t *testing.T) {
@@ -133,6 +137,35 @@ func TestResolveReleaseOnlySkipsSpriteCLIAndBootstrap(t *testing.T) {
 	if _, ok, err := resolveLeaseClaim("unhealthy"); err != nil || ok {
 		t.Fatalf("claim still resolves ok=%t err=%v", ok, err)
 	}
+}
+
+func TestAcquireKeepFailurePreservesRetainedSpriteKey(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeSpritesAPI{}
+	runner := &recordingRunner{failContains: "exec -s", err: errors.New("bootstrap failed")}
+	backend := &spritesBackend{
+		cfg:    Config{Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}},
+		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		client: api,
+	}
+
+	_, err := backend.Acquire(context.Background(), AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "bootstrap failed") {
+		t.Fatalf("Acquire err=%v, want bootstrap failure", err)
+	}
+	if api.deleted != "" {
+		t.Fatalf("kept failed acquire should not delete sprite, deleted=%q", api.deleted)
+	}
+	leaseID := spritesLeaseID(spritesInfo{Labels: api.createdLabels})
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("kept Sprite SSH key missing: %v", err)
+	}
+	t.Cleanup(func() { core.RemoveStoredTestboxKey(leaseID) })
 }
 
 func TestSpritesRejectsTailscale(t *testing.T) {
@@ -273,21 +306,35 @@ func TestSpritesBootstrapInstallsFullSyncToolchain(t *testing.T) {
 }
 
 type recordingRunner struct {
-	calls []string
+	calls        []string
+	failContains string
+	err          error
 }
 
 func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
-	r.calls = append(r.calls, strings.Join(append([]string{req.Name}, req.Args...), " "))
+	call := strings.Join(append([]string{req.Name}, req.Args...), " ")
+	r.calls = append(r.calls, call)
+	if r.failContains != "" && strings.Contains(call, r.failContains) {
+		err := r.err
+		if err == nil {
+			err = errors.New("command failed")
+		}
+		return LocalCommandResult{ExitCode: 1, Stderr: err.Error()}, err
+	}
 	return LocalCommandResult{}, nil
 }
 
 type fakeSpritesAPI struct {
-	get     spritesInfo
-	deleted string
+	get           spritesInfo
+	createdName   string
+	createdLabels []string
+	deleted       string
 }
 
-func (f *fakeSpritesAPI) CreateSprite(context.Context, string, []string) (spritesInfo, error) {
-	return spritesInfo{}, nil
+func (f *fakeSpritesAPI) CreateSprite(_ context.Context, name string, labels []string) (spritesInfo, error) {
+	f.createdName = name
+	f.createdLabels = labels
+	return spritesInfo{Name: name, Labels: labels}, nil
 }
 
 func (f *fakeSpritesAPI) GetSprite(context.Context, string) (spritesInfo, error) {

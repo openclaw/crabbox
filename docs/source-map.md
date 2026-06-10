@@ -72,6 +72,7 @@ SSH-lease providers:
 - Hetzner Cloud: `internal/providers/hetzner`, with CLI helpers in `internal/cli/hcloud.go`
 - Parallels (macOS VM host): `internal/providers/parallels`, with CLI helpers in `internal/cli/parallels.go`
 - Proxmox VE: `internal/providers/proxmox`, with CLI helpers in `internal/cli/proxmox.go`
+- Incus: `internal/providers/incus`
 - Static/BYO SSH host: `internal/providers/ssh`, with target mapping in `internal/cli/static.go`
 - Local Docker container: `internal/providers/localcontainer`
 - Canonical Multipass local Ubuntu VM: `internal/providers/multipass`
@@ -122,7 +123,7 @@ Actions hydration or repo scripts.
 Provider docs:
 
 - Per-provider feature notes: `docs/features/aws.md`, `docs/features/azure.md`, `docs/features/hetzner.md`, `docs/features/blacksmith-testbox.md`, `docs/features/namespace-devbox.md`, `docs/features/namespace-devbox-setup.md`, `docs/features/semaphore.md`, `docs/features/sprites.md`, `docs/features/daytona.md`, `docs/features/islo.md`, `docs/features/e2b.md`
-- Per-provider reference: `docs/providers/README.md` plus one file per provider under `docs/providers/`
+- Per-provider reference: `docs/providers/README.md` plus one file per provider under `docs/providers/`, including `docs/providers/incus.md` for both the built-in provider reference and the separate local Apple Silicon validation contract
 - Provider/backend authoring guide: `docs/provider-backends.md`, `docs/features/provider-authoring.md`
 - Tailscale contract: `docs/features/tailscale.md`
 

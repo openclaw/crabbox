@@ -353,6 +353,40 @@ func TestAcquireRunFailureKeepsOwnedContainerKey(t *testing.T) {
 	})
 }
 
+func TestAcquirePostCreateFailureKeepsRetainedContainerKey(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var leaseID string
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		switch firstArg(req.Args) {
+		case "run":
+			leaseID = labelFromRunArgs(t, req.Args, "lease")
+			return core.LocalCommandResult{Stdout: "created123\n"}, nil
+		case "inspect":
+			return core.LocalCommandResult{Stderr: "inspect failed"}, errors.New("inspect failed")
+		default:
+			return core.LocalCommandResult{}, nil
+		}
+	}
+	b := testBackend(runner)
+
+	if _, err := b.Acquire(context.Background(), core.AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}}); err == nil {
+		t.Fatal("Acquire succeeded")
+	}
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("kept post-create container SSH key missing: %v", err)
+	}
+	t.Cleanup(func() {
+		core.RemoveStoredTestboxKey(leaseID)
+	})
+}
+
 func TestCreateContainerRecoversEmptyContainerID(t *testing.T) {
 	var bootstrapDir string
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}

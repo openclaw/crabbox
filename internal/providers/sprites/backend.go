@@ -112,19 +112,21 @@ func (b *spritesBackend) Acquire(ctx context.Context, req AcquireRequest) (Lease
 	if sprite.Name == "" {
 		sprite.Name = name
 	}
+	cleanupFailedAcquire := func() {
+		if req.Keep {
+			return
+		}
+		if err := b.client.DeleteSprite(context.Background(), name); err == nil {
+			removeStoredTestboxKey(leaseID)
+		}
+	}
 	lease, err := b.prepareLease(ctx, sprite, leaseID, slug, req.Keep, keyPath, publicKey)
 	if err != nil {
-		if !req.Keep {
-			_ = b.client.DeleteSprite(context.Background(), name)
-		}
-		removeStoredTestboxKey(leaseID)
+		cleanupFailedAcquire()
 		return LeaseTarget{}, err
 	}
 	if err := claimLeaseForRepoProvider(leaseID, slug, spritesProvider, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		if !req.Keep {
-			_ = b.client.DeleteSprite(context.Background(), name)
-		}
-		removeStoredTestboxKey(leaseID)
+		cleanupFailedAcquire()
 		return LeaseTarget{}, err
 	}
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s sprite=%s state=ready\n", leaseID, name)

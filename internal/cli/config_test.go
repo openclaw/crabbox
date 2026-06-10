@@ -553,6 +553,152 @@ func TestTartConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestIncusConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.Incus.Remote != "local" || cfg.Incus.Project != "" || cfg.Incus.InstanceType != "container" || cfg.Incus.Image != "images:ubuntu/24.04/cloud" {
+		t.Fatalf("incus defaults not applied: %#v", cfg.Incus)
+	}
+	deleteOnRelease := false
+	insecureTLS := true
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "incus",
+		Incus: &fileIncusConfig{
+			Remote:            "lab",
+			Project:           "crabbox",
+			Address:           "https://incus.example.test:8443",
+			Socket:            "~/incus.sock",
+			InstanceType:      "vm",
+			Image:             "images:ubuntu/26.04/cloud",
+			Profile:           "crabbox",
+			User:              "ubuntu",
+			WorkRoot:          "/workspace/incus",
+			DeleteOnRelease:   &deleteOnRelease,
+			StartTimeout:      "12m",
+			LaunchPort:        "22",
+			ProxyListenHost:   "127.0.0.1",
+			ProxyListenPort:   "2201",
+			ProxyDevice:       "ssh-proxy",
+			TLSServerCert:     "~/certs/incus.crt",
+			InsecureTLS:       &insecureTLS,
+			RemoteImageServer: "https://images.example.test",
+		},
+	})
+	if cfg.Incus.Remote != "lab" || cfg.Incus.Project != "crabbox" || cfg.Incus.Address != "https://incus.example.test:8443" || !strings.HasSuffix(cfg.Incus.Socket, "/incus.sock") {
+		t.Fatalf("file incus config not applied: %#v", cfg.Incus)
+	}
+	if cfg.Incus.InstanceType != "vm" || cfg.Incus.Image != "images:ubuntu/26.04/cloud" || cfg.Incus.Profile != "crabbox" || cfg.Incus.User != "ubuntu" || cfg.Incus.WorkRoot != "/workspace/incus" {
+		t.Fatalf("file incus identity config not applied: %#v", cfg.Incus)
+	}
+	if cfg.Incus.DeleteOnRelease || cfg.Incus.StartTimeout != 12*time.Minute || cfg.Incus.ProxyListenPort != "2201" || cfg.Incus.ProxyDevice != "ssh-proxy" || !strings.HasSuffix(cfg.Incus.TLSServerCert, "/certs/incus.crt") || !cfg.Incus.InsecureTLS || cfg.Incus.RemoteImageServer != "https://images.example.test" {
+		t.Fatalf("file incus runtime config not applied: %#v", cfg.Incus)
+	}
+
+	t.Setenv("CRABBOX_INCUS_REMOTE", "env-remote")
+	t.Setenv("CRABBOX_INCUS_PROJECT", "env-project")
+	t.Setenv("CRABBOX_INCUS_ADDRESS", "https://env-incus.example.test:8443")
+	t.Setenv("CRABBOX_INCUS_SOCKET", "~/env-incus.sock")
+	t.Setenv("CRABBOX_INCUS_INSTANCE_TYPE", "container")
+	t.Setenv("CRABBOX_INCUS_IMAGE", "images:debian/12/cloud")
+	t.Setenv("CRABBOX_INCUS_PROFILE", "env-profile")
+	t.Setenv("CRABBOX_INCUS_USER", "crabuser")
+	t.Setenv("CRABBOX_INCUS_WORK_ROOT", "/env/work")
+	t.Setenv("CRABBOX_INCUS_DELETE_ON_RELEASE", "true")
+	t.Setenv("CRABBOX_INCUS_START_TIMEOUT", "5m")
+	t.Setenv("CRABBOX_INCUS_LAUNCH_PORT", "2222")
+	t.Setenv("CRABBOX_INCUS_PROXY_LISTEN_HOST", "0.0.0.0")
+	t.Setenv("CRABBOX_INCUS_PROXY_LISTEN_PORT", "2223")
+	t.Setenv("CRABBOX_INCUS_PROXY_DEVICE", "env-proxy")
+	t.Setenv("CRABBOX_INCUS_TLS_SERVER_CERT", "~/env-incus.crt")
+	t.Setenv("CRABBOX_INCUS_INSECURE_TLS", "false")
+	t.Setenv("CRABBOX_INCUS_REMOTE_IMAGE_SERVER", "https://env-images.example.test")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.Incus.Remote != "env-remote" || cfg.Incus.Project != "env-project" || cfg.Incus.Address != "https://env-incus.example.test:8443" || !strings.HasSuffix(cfg.Incus.Socket, "/env-incus.sock") {
+		t.Fatalf("env incus config not applied: %#v", cfg.Incus)
+	}
+	if cfg.Incus.InstanceType != "container" || cfg.Incus.Image != "images:debian/12/cloud" || cfg.Incus.Profile != "env-profile" || cfg.Incus.User != "crabuser" || cfg.Incus.WorkRoot != "/env/work" {
+		t.Fatalf("env incus identity config not applied: %#v", cfg.Incus)
+	}
+	if !cfg.Incus.DeleteOnRelease || cfg.Incus.StartTimeout != 5*time.Minute || cfg.Incus.LaunchPort != "2222" || cfg.Incus.ProxyListenPort != "2223" || cfg.Incus.ProxyDevice != "env-proxy" || !strings.HasSuffix(cfg.Incus.TLSServerCert, "/env-incus.crt") || cfg.Incus.InsecureTLS || cfg.Incus.RemoteImageServer != "https://env-images.example.test" {
+		t.Fatalf("env incus runtime config not applied: %#v", cfg.Incus)
+	}
+}
+
+func TestLoadConfigIncusPreservesExplicitTopLevelSSHUserAndWorkRoot(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	body := "provider: incus\nssh:\n  user: alice\nworkRoot: /tmp/custom\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("SSHUser=%q want alice", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/tmp/custom" {
+		t.Fatalf("WorkRoot=%q want /tmp/custom", cfg.WorkRoot)
+	}
+}
+
+func TestLoadConfigIncusPreservesExplicitTopLevelSSHUserAndWorkRootFromEnv(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	t.Setenv("CRABBOX_SSH_USER", "alice")
+	t.Setenv("CRABBOX_WORK_ROOT", "/tmp/custom")
+	if err := os.WriteFile(cfgPath, []byte("provider: incus\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("SSHUser=%q want alice", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/tmp/custom" {
+		t.Fatalf("WorkRoot=%q want /tmp/custom", cfg.WorkRoot)
+	}
+}
+
+func TestLoadConfigIncusSpecificUserAndWorkRootOverrideTopLevel(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	body := "provider: incus\nssh:\n  user: alice\nworkRoot: /tmp/custom\nincus:\n  user: ubuntu\n  workRoot: /workspace/incus\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.SSHUser != "ubuntu" {
+		t.Fatalf("SSHUser=%q want ubuntu", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/workspace/incus" {
+		t.Fatalf("WorkRoot=%q want /workspace/incus", cfg.WorkRoot)
+	}
+}
+
 func TestTartConfigYAMLExplicitZeroPreserved(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
@@ -2364,6 +2510,12 @@ func TestNamespaceDevboxSizeForConfig(t *testing.T) {
 }
 
 func TestConfigServerTypeHelperBranches(t *testing.T) {
+	if got := incusServerTypeForConfig(Config{}); got != "container" {
+		t.Fatalf("incus default=%q", got)
+	}
+	if got := incusServerTypeForConfig(Config{Incus: IncusConfig{InstanceType: "vm", Image: "images:ubuntu/24.04/cloud"}}); got != "vm:images:ubuntu/24.04/cloud" {
+		t.Fatalf("incus vm=%q", got)
+	}
 	if got := proxmoxServerTypeForConfig(Config{}); got != "template" {
 		t.Fatalf("proxmox default=%q", got)
 	}

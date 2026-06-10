@@ -102,6 +102,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		return core.LeaseTarget{}, err
 	}
+	if req.Keep {
+		cleanupKey = false
+	}
 	cleanupContainer := func() {
 		if req.Keep {
 			return

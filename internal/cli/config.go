@@ -85,6 +85,7 @@ type Config struct {
 	GCPRootGB                     int64
 	gcpRootGBExplicit             bool
 	GCPServiceAccount             string
+	Incus                         IncusConfig
 	Proxmox                       ProxmoxConfig
 	Parallels                     ParallelsConfig
 	parallelsTemplateApplied      bool
@@ -465,6 +466,27 @@ type ProxmoxConfig struct {
 	InsecureTLS bool
 }
 
+type IncusConfig struct {
+	Remote            string
+	Project           string
+	Address           string
+	Socket            string
+	InstanceType      string
+	Image             string
+	Profile           string
+	User              string
+	WorkRoot          string
+	DeleteOnRelease   bool
+	StartTimeout      time.Duration
+	LaunchPort        string
+	ProxyListenHost   string
+	ProxyListenPort   string
+	ProxyDevice       string
+	TLSServerCert     string
+	InsecureTLS       bool
+	RemoteImageServer string
+}
+
 type ParallelsConfig struct {
 	Template         string
 	Source           string
@@ -560,6 +582,7 @@ type MultipassConfig struct {
 type TartConfig struct {
 	Image    string
 	User     string
+	Password string
 	WorkRoot string
 	CPUs     int
 	Memory   int
@@ -900,6 +923,26 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		}
 		return nil
 	}
+	if cfg.Provider == "incus" {
+		base := baseConfig()
+		if cfg.Incus.User != "" && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser || cfg.Incus.User != base.Incus.User) {
+			cfg.SSHUser = cfg.Incus.User
+		}
+		if cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort {
+			cfg.SSHPort = blank(cfg.Incus.ProxyListenPort, "22")
+		}
+		cfg.SSHFallbackPorts = nil
+		if cfg.Incus.WorkRoot != "" && (isDefaultWorkRoot(cfg.WorkRoot) || cfg.Incus.WorkRoot != base.Incus.WorkRoot) {
+			cfg.WorkRoot = cfg.Incus.WorkRoot
+		}
+		if cfg.TargetOS == "" {
+			cfg.TargetOS = targetLinux
+		}
+		if !cfg.ServerTypeExplicit {
+			cfg.ServerType = incusServerTypeForConfig(*cfg)
+		}
+		return nil
+	}
 	if cfg.Provider != "proxmox" {
 		if cfg.Provider != "parallels" {
 			return nil
@@ -1064,11 +1107,24 @@ func baseConfig() Config {
 			Workdir:     "/workspace/crabbox",
 			TimeoutSecs: 1800,
 		},
-		GCPZone:          "europe-west2-a",
-		GCPImage:         gcpImage,
-		GCPNetwork:       "default",
-		GCPTags:          []string{"crabbox-ssh"},
-		GCPRootGB:        400,
+		GCPZone:    "europe-west2-a",
+		GCPImage:   gcpImage,
+		GCPNetwork: "default",
+		GCPTags:    []string{"crabbox-ssh"},
+		GCPRootGB:  400,
+		Incus: IncusConfig{
+			Remote:          "local",
+			Project:         "",
+			InstanceType:    "container",
+			Image:           "images:ubuntu/24.04/cloud",
+			User:            "crabbox",
+			WorkRoot:        defaultPOSIXWorkRoot,
+			DeleteOnRelease: true,
+			StartTimeout:    10 * time.Minute,
+			LaunchPort:      "22",
+			ProxyListenHost: "127.0.0.1",
+			ProxyDevice:     "crabbox-ssh",
+		},
 		SSHUser:          "crabbox",
 		SSHKey:           sshKey,
 		SSHPort:          "2222",
@@ -1278,6 +1334,7 @@ type fileConfig struct {
 	Azure                *fileAzureConfig                   `yaml:"azure,omitempty"`
 	AzureDynamicSessions *fileAzureDynamicSessionsConfig    `yaml:"azureDynamicSessions,omitempty"`
 	GCP                  *fileGCPConfig                     `yaml:"gcp,omitempty"`
+	Incus                *fileIncusConfig                   `yaml:"incus,omitempty"`
 	Proxmox              *fileProxmoxConfig                 `yaml:"proxmox,omitempty"`
 	Parallels            *fileParallelsConfig               `yaml:"parallels,omitempty"`
 	SSH                  *fileSSHConfig                     `yaml:"ssh,omitempty"`
@@ -1386,6 +1443,27 @@ type fileGCPConfig struct {
 	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
 	RootGB         int64    `yaml:"rootGB,omitempty"`
 	ServiceAccount string   `yaml:"serviceAccount,omitempty"`
+}
+
+type fileIncusConfig struct {
+	Remote            string `yaml:"remote,omitempty"`
+	Project           string `yaml:"project,omitempty"`
+	Address           string `yaml:"address,omitempty"`
+	Socket            string `yaml:"socket,omitempty"`
+	InstanceType      string `yaml:"instanceType,omitempty"`
+	Image             string `yaml:"image,omitempty"`
+	Profile           string `yaml:"profile,omitempty"`
+	User              string `yaml:"user,omitempty"`
+	WorkRoot          string `yaml:"workRoot,omitempty"`
+	DeleteOnRelease   *bool  `yaml:"deleteOnRelease,omitempty"`
+	StartTimeout      string `yaml:"startTimeout,omitempty"`
+	LaunchPort        string `yaml:"launchPort,omitempty"`
+	ProxyListenHost   string `yaml:"proxyListenHost,omitempty"`
+	ProxyListenPort   string `yaml:"proxyListenPort,omitempty"`
+	ProxyDevice       string `yaml:"proxyDevice,omitempty"`
+	TLSServerCert     string `yaml:"tlsServerCert,omitempty"`
+	InsecureTLS       *bool  `yaml:"insecureTLS,omitempty"`
+	RemoteImageServer string `yaml:"remoteImageServer,omitempty"`
 }
 
 type fileProxmoxConfig struct {
@@ -1762,6 +1840,7 @@ type fileMultipassConfig struct {
 type fileTartConfig struct {
 	Image    string `yaml:"image,omitempty"`
 	User     string `yaml:"user,omitempty"`
+	Password string `yaml:"password,omitempty"`
 	WorkRoot string `yaml:"workRoot,omitempty"`
 	CPUs     *int   `yaml:"cpus,omitempty"`
 	Memory   *int   `yaml:"memory,omitempty"`
@@ -2279,6 +2358,62 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.GCP.ServiceAccount != "" {
 			cfg.GCPServiceAccount = file.GCP.ServiceAccount
+		}
+	}
+	if file.Incus != nil {
+		if file.Incus.Remote != "" {
+			cfg.Incus.Remote = file.Incus.Remote
+		}
+		if file.Incus.Project != "" {
+			cfg.Incus.Project = file.Incus.Project
+		}
+		if file.Incus.Address != "" {
+			cfg.Incus.Address = file.Incus.Address
+		}
+		if file.Incus.Socket != "" {
+			cfg.Incus.Socket = expandUserPath(file.Incus.Socket)
+		}
+		if file.Incus.InstanceType != "" {
+			cfg.Incus.InstanceType = file.Incus.InstanceType
+		}
+		if file.Incus.Image != "" {
+			cfg.Incus.Image = file.Incus.Image
+		}
+		if file.Incus.Profile != "" {
+			cfg.Incus.Profile = file.Incus.Profile
+		}
+		if file.Incus.User != "" {
+			cfg.Incus.User = file.Incus.User
+		}
+		if file.Incus.WorkRoot != "" {
+			cfg.Incus.WorkRoot = file.Incus.WorkRoot
+		}
+		if file.Incus.DeleteOnRelease != nil {
+			cfg.Incus.DeleteOnRelease = *file.Incus.DeleteOnRelease
+		}
+		if file.Incus.StartTimeout != "" {
+			applyLeaseDuration(&cfg.Incus.StartTimeout, file.Incus.StartTimeout)
+		}
+		if file.Incus.LaunchPort != "" {
+			cfg.Incus.LaunchPort = file.Incus.LaunchPort
+		}
+		if file.Incus.ProxyListenHost != "" {
+			cfg.Incus.ProxyListenHost = file.Incus.ProxyListenHost
+		}
+		if file.Incus.ProxyListenPort != "" {
+			cfg.Incus.ProxyListenPort = file.Incus.ProxyListenPort
+		}
+		if file.Incus.ProxyDevice != "" {
+			cfg.Incus.ProxyDevice = file.Incus.ProxyDevice
+		}
+		if file.Incus.TLSServerCert != "" {
+			cfg.Incus.TLSServerCert = expandUserPath(file.Incus.TLSServerCert)
+		}
+		if file.Incus.InsecureTLS != nil {
+			cfg.Incus.InsecureTLS = *file.Incus.InsecureTLS
+		}
+		if file.Incus.RemoteImageServer != "" {
+			cfg.Incus.RemoteImageServer = file.Incus.RemoteImageServer
 		}
 	}
 	if file.Proxmox != nil {
@@ -3031,6 +3166,9 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.Tart.User != "" {
 			cfg.Tart.User = file.Tart.User
 		}
+		if file.Tart.Password != "" {
+			cfg.Tart.Password = file.Tart.Password
+		}
 		if file.Tart.WorkRoot != "" {
 			cfg.Tart.WorkRoot = file.Tart.WorkRoot
 		}
@@ -3545,6 +3683,30 @@ func applyEnv(cfg *Config) error {
 		cfg.gcpRootGBExplicit = true
 	}
 	cfg.GCPServiceAccount = getenv("CRABBOX_GCP_SERVICE_ACCOUNT", cfg.GCPServiceAccount)
+	cfg.Incus.Remote = getenv("CRABBOX_INCUS_REMOTE", cfg.Incus.Remote)
+	cfg.Incus.Project = getenv("CRABBOX_INCUS_PROJECT", cfg.Incus.Project)
+	cfg.Incus.Address = getenv("CRABBOX_INCUS_ADDRESS", cfg.Incus.Address)
+	cfg.Incus.Socket = expandUserPath(getenv("CRABBOX_INCUS_SOCKET", cfg.Incus.Socket))
+	cfg.Incus.InstanceType = getenv("CRABBOX_INCUS_INSTANCE_TYPE", cfg.Incus.InstanceType)
+	cfg.Incus.Image = getenv("CRABBOX_INCUS_IMAGE", cfg.Incus.Image)
+	cfg.Incus.Profile = getenv("CRABBOX_INCUS_PROFILE", cfg.Incus.Profile)
+	cfg.Incus.User = getenv("CRABBOX_INCUS_USER", cfg.Incus.User)
+	cfg.Incus.WorkRoot = getenv("CRABBOX_INCUS_WORK_ROOT", cfg.Incus.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_INCUS_DELETE_ON_RELEASE"); ok {
+		cfg.Incus.DeleteOnRelease = value
+	}
+	if timeout := os.Getenv("CRABBOX_INCUS_START_TIMEOUT"); timeout != "" {
+		applyLeaseDuration(&cfg.Incus.StartTimeout, timeout)
+	}
+	cfg.Incus.LaunchPort = getenv("CRABBOX_INCUS_LAUNCH_PORT", cfg.Incus.LaunchPort)
+	cfg.Incus.ProxyListenHost = getenv("CRABBOX_INCUS_PROXY_LISTEN_HOST", cfg.Incus.ProxyListenHost)
+	cfg.Incus.ProxyListenPort = getenv("CRABBOX_INCUS_PROXY_LISTEN_PORT", cfg.Incus.ProxyListenPort)
+	cfg.Incus.ProxyDevice = getenv("CRABBOX_INCUS_PROXY_DEVICE", cfg.Incus.ProxyDevice)
+	cfg.Incus.TLSServerCert = expandUserPath(getenv("CRABBOX_INCUS_TLS_SERVER_CERT", cfg.Incus.TLSServerCert))
+	if value, ok := getenvBool("CRABBOX_INCUS_INSECURE_TLS"); ok {
+		cfg.Incus.InsecureTLS = value
+	}
+	cfg.Incus.RemoteImageServer = getenv("CRABBOX_INCUS_REMOTE_IMAGE_SERVER", cfg.Incus.RemoteImageServer)
 	if tags := os.Getenv("CRABBOX_GCP_TAGS"); tags != "" {
 		cfg.GCPTags = splitCommaList(tags)
 		cfg.gcpTagsExplicit = true
@@ -3837,6 +3999,7 @@ func applyEnv(cfg *Config) error {
 		cfg.tartImageExplicit = true
 	}
 	cfg.Tart.User = getenv("CRABBOX_TART_USER", cfg.Tart.User)
+	cfg.Tart.Password = getenv("CRABBOX_TART_PASSWORD", cfg.Tart.Password)
 	cfg.Tart.WorkRoot = getenv("CRABBOX_TART_WORK_ROOT", cfg.Tart.WorkRoot)
 	if v := os.Getenv("CRABBOX_TART_CPUS"); v != "" {
 		cfg.Tart.CPUs = getenvInt("CRABBOX_TART_CPUS", cfg.Tart.CPUs)
@@ -4015,6 +4178,9 @@ func serverTypeForConfig(cfg Config) string {
 	if cfg.Provider == "proxmox" {
 		return proxmoxServerTypeForConfig(cfg)
 	}
+	if cfg.Provider == "incus" {
+		return incusServerTypeForConfig(cfg)
+	}
 	if cfg.Provider == "parallels" {
 		return parallelsServerTypeForConfig(cfg)
 	}
@@ -4061,10 +4227,24 @@ func serverTypeForProviderClass(provider, class string) string {
 	if provider == "proxmox" {
 		return "template"
 	}
+	if provider == "incus" {
+		return "container"
+	}
 	if provider == "parallels" {
 		return "template"
 	}
 	return serverTypeForClass(class)
+}
+
+func incusServerTypeForConfig(cfg Config) string {
+	instanceType := strings.ToLower(strings.TrimSpace(cfg.Incus.InstanceType))
+	if instanceType == "" {
+		instanceType = "container"
+	}
+	if image := strings.TrimSpace(cfg.Incus.Image); image != "" {
+		return instanceType + ":" + image
+	}
+	return instanceType
 }
 
 func proxmoxServerTypeForConfig(cfg Config) string {
