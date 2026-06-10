@@ -3,6 +3,7 @@ package islo
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -124,6 +125,18 @@ func TestPublishPeerCreatesWhenAbsent(t *testing.T) {
 	}
 	if len(fake.created) != 1 {
 		t.Fatalf("expected 1 new share, got %d", len(fake.created))
+	}
+}
+
+func TestPublishPeerDoesNotCreateWhenListFails(t *testing.T) {
+	fake := &fakeBridgeClient{listErr: errors.New("islo down")}
+	backend := newBridgeBackend(t, fake)
+	_, err := backend.PublishPeer(context.Background(), "isb_crabbox-x-abc123", 9090, time.Hour)
+	if err == nil || !strings.Contains(err.Error(), "islo down") {
+		t.Fatalf("PublishPeer err=%v, want list error", err)
+	}
+	if len(fake.created) != 0 {
+		t.Fatalf("created=%d want 0", len(fake.created))
 	}
 }
 
