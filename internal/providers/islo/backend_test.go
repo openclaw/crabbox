@@ -449,6 +449,30 @@ func TestIsloSyncWorkspaceFallsBackToExecUpload(t *testing.T) {
 	}
 }
 
+func TestIsloExecUploadCleansTempFilesOnChunkFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &fakeIsloSyncClient{
+		execErrOnCommandContains: "printf",
+		execErrOnCommandSkip:     1,
+		execErrOnCommand:         errors.New("chunk transfer failed"),
+		execErrOnCommandHook:     cancel,
+		rejectCanceledContext:    true,
+	}
+	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
+	archive := bytes.NewReader(bytes.Repeat([]byte("x"), 49*1024))
+
+	err := backend.uploadArchiveViaExec(ctx, client, "crabbox-test", "/workspace/repo", archive)
+	if err == nil || !strings.Contains(err.Error(), "chunk transfer failed") {
+		t.Fatalf("uploadArchiveViaExec err=%v, want chunk transfer failure", err)
+	}
+	lastCommand := client.prepareCommands[len(client.prepareCommands)-1]
+	for _, want := range []string{"rm -f", ".tgz.b64", ".tgz"} {
+		if !strings.Contains(lastCommand, want) {
+			t.Fatalf("last command %q missing %q; commands=%#v", lastCommand, want, client.prepareCommands)
+		}
+	}
+}
+
 func TestIsloFallbackExtractCommandCleansUploadsOnFailure(t *testing.T) {
 	cmd := isloFallbackExtractCommand("/tmp/crabbox-test.tgz.b64", "/tmp/crabbox-test.tgz", "/workspace/repo")
 	for _, want := range []string{
@@ -625,15 +649,20 @@ func TestIsloSDKClientUploadArchiveStreamsMultipartTarball(t *testing.T) {
 }
 
 type fakeIsloSyncClient struct {
-	prepareCommands   []string
-	execRequests      []*gosdk.ExecRequest
-	uploadPath        string
-	uploaded          bytes.Buffer
-	uploadErr         error
-	execErr           error
-	closeUploadReader bool
-	createRequest     *gosdk.SandboxCreate
-	createName        string
+	prepareCommands          []string
+	execRequests             []*gosdk.ExecRequest
+	uploadPath               string
+	uploaded                 bytes.Buffer
+	uploadErr                error
+	execErr                  error
+	execErrOnCommand         error
+	execErrOnCommandContains string
+	execErrOnCommandSkip     int
+	execErrOnCommandHook     func()
+	rejectCanceledContext    bool
+	closeUploadReader        bool
+	createRequest            *gosdk.SandboxCreate
+	createName               string
 }
 
 func (f *fakeIsloSyncClient) CreateSandbox(_ context.Context, req *gosdk.SandboxCreate) (*gosdk.SandboxResponse, error) {
@@ -671,11 +700,25 @@ func (f *fakeIsloSyncClient) UploadArchive(_ context.Context, _ string, targetPa
 	return err
 }
 
-func (f *fakeIsloSyncClient) ExecStream(_ context.Context, _ string, req *gosdk.ExecRequest, _, _ io.Writer) (int, error) {
+func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosdk.ExecRequest, _, _ io.Writer) (int, error) {
+	if f.rejectCanceledContext && ctx.Err() != nil {
+		return 1, ctx.Err()
+	}
 	f.execRequests = append(f.execRequests, req)
-	f.prepareCommands = append(f.prepareCommands, strings.Join(req.GetCommand(), " "))
+	command := strings.Join(req.GetCommand(), " ")
+	f.prepareCommands = append(f.prepareCommands, command)
 	if f.execErr != nil {
 		return 1, f.execErr
+	}
+	if f.execErrOnCommand != nil && strings.Contains(command, f.execErrOnCommandContains) {
+		if f.execErrOnCommandSkip > 0 {
+			f.execErrOnCommandSkip--
+		} else {
+			if f.execErrOnCommandHook != nil {
+				f.execErrOnCommandHook()
+			}
+			return 1, f.execErrOnCommand
+		}
 	}
 	return 0, nil
 }

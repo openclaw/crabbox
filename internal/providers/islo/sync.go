@@ -97,9 +97,18 @@ func (b *isloBackend) uploadArchiveViaExec(ctx context.Context, client isloAPI, 
 	suffix := isloRandomSuffix()
 	remoteB64 := path.Join("/tmp", "crabbox-"+suffix+".tgz.b64")
 	remoteArchive := path.Join("/tmp", "crabbox-"+suffix+".tgz")
-	if err := b.execShell(ctx, client, name, "rm -f "+shellQuote(remoteB64)+" "+shellQuote(remoteArchive), io.Discard); err != nil {
+	cleanup := "rm -f " + shellQuote(remoteB64) + " " + shellQuote(remoteArchive)
+	if err := b.execShell(ctx, client, name, cleanup, io.Discard); err != nil {
 		return err
 	}
+	cleanupRemote := true
+	defer func() {
+		if cleanupRemote {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			defer cancel()
+			_ = b.execShell(cleanupCtx, client, name, cleanup, io.Discard)
+		}
+	}()
 	buf := make([]byte, 48*1024)
 	for {
 		n, readErr := archive.Read(buf)
@@ -117,7 +126,11 @@ func (b *isloBackend) uploadArchiveViaExec(ctx context.Context, client isloAPI, 
 			return fmt.Errorf("islo read archive for fallback upload: %w", readErr)
 		}
 	}
-	return b.execShell(ctx, client, name, isloFallbackExtractCommand(remoteB64, remoteArchive, workspace), io.Discard)
+	if err := b.execShell(ctx, client, name, isloFallbackExtractCommand(remoteB64, remoteArchive, workspace), io.Discard); err != nil {
+		return err
+	}
+	cleanupRemote = false
+	return nil
 }
 
 func isloFallbackExtractCommand(remoteB64, remoteArchive, workspace string) string {
