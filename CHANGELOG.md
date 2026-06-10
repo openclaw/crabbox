@@ -19,6 +19,7 @@
 - Added native Azure Windows ARM64 lease support with explicit Windows ARM64 images, Cobalt ARM64 SKU inference, and `CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` broker configuration for ARM64 validation.
 - Added persistent Apple Container 1.0 development machines through the local `apple-machine` provider.
 - Added local Windows sandbox execution through Microsoft Execution Containers with explicit filesystem, network, DACL-fallback, and Win32k capability controls plus an execution-backed doctor check.
+- Added a delegated Freestyle provider that runs commands in Freestyle VMs through the Freestyle REST API, with env-only authentication, archive sync, and automatic VM cleanup. Thanks @zozo123.
 
 ### Changed
 

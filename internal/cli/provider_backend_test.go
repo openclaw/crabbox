@@ -75,10 +75,12 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 	}
 }
 
-func TestProviderHelpAllIncludesWandbAndMorph(t *testing.T) {
-	all := providerHelpAll()
-	if !strings.Contains(all, "wandb") || !strings.Contains(all, "morph") {
-		t.Fatalf("providerHelpAll() = %q, want wandb and morph", all)
+func TestProviderHelpAllIncludesDelegatedProviders(t *testing.T) {
+	help := providerHelpAll()
+	for _, provider := range []string{"freestyle", "morph", "wandb"} {
+		if !strings.Contains(help, provider) {
+			t.Fatalf("providerHelpAll() = %q, want %s", help, provider)
+		}
 	}
 	if strings.Contains(providerHelpSSH(), "azure-dynamic-sessions") {
 		t.Fatalf("providerHelpSSH() = %q, want only ssh-capable providers", providerHelpSSH())

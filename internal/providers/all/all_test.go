@@ -70,6 +70,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"e2b",
 		"exe-dev",
 		"external",
+		"freestyle",
 		"gcp",
 		"hetzner",
 		"incus",

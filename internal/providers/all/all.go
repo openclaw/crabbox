@@ -14,6 +14,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/e2b"
 	_ "github.com/openclaw/crabbox/internal/providers/exedev"
 	_ "github.com/openclaw/crabbox/internal/providers/external"
+	_ "github.com/openclaw/crabbox/internal/providers/freestyle"
 	_ "github.com/openclaw/crabbox/internal/providers/gcp"
 	_ "github.com/openclaw/crabbox/internal/providers/hetzner"
 	_ "github.com/openclaw/crabbox/internal/providers/incus"

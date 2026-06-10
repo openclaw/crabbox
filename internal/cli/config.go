@@ -115,6 +115,7 @@ type Config struct {
 	Wandb                         WandbConfig
 	Islo                          IsloConfig
 	isloImageExplicit             bool
+	Freestyle                     FreestyleConfig
 	Tenki                         TenkiConfig
 	Tensorlake                    TensorlakeConfig
 	OpenComputer                  OpenComputerConfig
@@ -381,6 +382,14 @@ type IsloConfig struct {
 	VCPUs          int
 	MemoryMB       int
 	DiskGB         int
+}
+
+type FreestyleConfig struct {
+	APIKey   string
+	APIURL   string
+	Workdir  string
+	VCPUs    int
+	MemoryGB int
 }
 
 type TenkiConfig struct {
@@ -1256,6 +1265,10 @@ func baseConfig() Config {
 			MemoryMB: 4096,
 			DiskGB:   20,
 		},
+		Freestyle: FreestyleConfig{
+			APIURL:  "https://api.freestyle.sh",
+			Workdir: "crabbox",
+		},
 		Tenki: TenkiConfig{
 			CLIPath:  "tenki",
 			WorkRoot: "/home/tenki/crabbox",
@@ -1409,6 +1422,7 @@ type fileConfig struct {
 	Runpod               *fileRunpodConfig                  `yaml:"runpod,omitempty"`
 	Wandb                *fileWandbConfig                   `yaml:"wandb,omitempty"`
 	Islo                 *fileIsloConfig                    `yaml:"islo,omitempty"`
+	Freestyle            *fileFreestyleConfig               `yaml:"freestyle,omitempty"`
 	Tenki                *fileTenkiConfig                   `yaml:"tenki,omitempty"`
 	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	OpenComputer         *fileOpenComputerConfig            `yaml:"openComputer,omitempty"`
@@ -1714,6 +1728,13 @@ type fileAzureDynamicSessionsConfig struct {
 	APIVersion  string `yaml:"apiVersion,omitempty"`
 	Workdir     string `yaml:"workdir,omitempty"`
 	TimeoutSecs int    `yaml:"timeoutSecs,omitempty"`
+}
+
+type fileFreestyleConfig struct {
+	APIURL   string `yaml:"apiUrl,omitempty"`
+	Workdir  string `yaml:"workdir,omitempty"`
+	VCPUs    int    `yaml:"vcpus,omitempty"`
+	MemoryGB int    `yaml:"memoryGB,omitempty"`
 }
 
 type fileExeDevConfig struct {
@@ -2976,6 +2997,20 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.Islo.DiskGB = file.Islo.DiskGB
 		}
 	}
+	if file.Freestyle != nil {
+		if file.Freestyle.APIURL != "" {
+			cfg.Freestyle.APIURL = file.Freestyle.APIURL
+		}
+		if file.Freestyle.Workdir != "" {
+			cfg.Freestyle.Workdir = file.Freestyle.Workdir
+		}
+		if file.Freestyle.VCPUs > 0 {
+			cfg.Freestyle.VCPUs = file.Freestyle.VCPUs
+		}
+		if file.Freestyle.MemoryGB > 0 {
+			cfg.Freestyle.MemoryGB = file.Freestyle.MemoryGB
+		}
+	}
 	if file.Tenki != nil {
 		if file.Tenki.CLIPath != "" {
 			cfg.Tenki.CLIPath = file.Tenki.CLIPath
@@ -4008,6 +4043,11 @@ func applyEnv(cfg *Config) error {
 	cfg.Islo.VCPUs = getenvInt("CRABBOX_ISLO_VCPUS", cfg.Islo.VCPUs)
 	cfg.Islo.MemoryMB = getenvInt("CRABBOX_ISLO_MEMORY_MB", cfg.Islo.MemoryMB)
 	cfg.Islo.DiskGB = getenvInt("CRABBOX_ISLO_DISK_GB", cfg.Islo.DiskGB)
+	cfg.Freestyle.APIKey = getenv("CRABBOX_FREESTYLE_API_KEY", getenv("FREESTYLE_API_KEY", cfg.Freestyle.APIKey))
+	cfg.Freestyle.APIURL = getenv("CRABBOX_FREESTYLE_API_URL", getenv("FREESTYLE_API_URL", cfg.Freestyle.APIURL))
+	cfg.Freestyle.Workdir = getenv("CRABBOX_FREESTYLE_WORKDIR", cfg.Freestyle.Workdir)
+	cfg.Freestyle.VCPUs = getenvInt("CRABBOX_FREESTYLE_VCPUS", cfg.Freestyle.VCPUs)
+	cfg.Freestyle.MemoryGB = getenvInt("CRABBOX_FREESTYLE_MEMORY_GB", cfg.Freestyle.MemoryGB)
 	cfg.Tenki.CLIPath = getenv("CRABBOX_TENKI_CLI", getenv("TENKI_CLI", cfg.Tenki.CLIPath))
 	cfg.Tenki.Endpoint = getenv("CRABBOX_TENKI_ENDPOINT", getenv("TENKI_ENDPOINT", cfg.Tenki.Endpoint))
 	cfg.Tenki.Gateway = getenv("CRABBOX_TENKI_GATEWAY", getenv("TENKI_GATEWAY", cfg.Tenki.Gateway))
