@@ -559,8 +559,13 @@ func (b *backend) resolveInstance(ctx context.Context, client instanceClient, id
 }
 
 func instanceConfigForCreate(cfg Config, labels map[string]string, publicKey string) map[string]string {
+	bootstrapCfg := cfg
+	if strings.TrimSpace(cfg.Incus.ProxyListenPort) != "" {
+		bootstrapCfg.SSHPort = core.Blank(strings.TrimSpace(cfg.Incus.LaunchPort), "22")
+		bootstrapCfg.SSHFallbackPorts = nil
+	}
 	config := map[string]string{
-		"cloud-init.user-data": core.CloudInitUserData(cfg, publicKey),
+		"cloud-init.user-data": core.CloudInitUserData(bootstrapCfg, publicKey),
 	}
 	for key, value := range labels {
 		config[labelKey(key)] = value
@@ -595,9 +600,6 @@ func devicesForCreate(cfg Config) api.DevicesMap {
 		"listen":  fmt.Sprintf("tcp:%s:%s", host, port),
 		"connect": fmt.Sprintf("tcp:0.0.0.0:%s", guestPort),
 		"bind":    "host",
-	}
-	if normalizeInstanceType(cfg.Incus.InstanceType) == "virtual-machine" {
-		device["nat"] = "true"
 	}
 	return api.DevicesMap{
 		deviceName: device,

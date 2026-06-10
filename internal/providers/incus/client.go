@@ -2,11 +2,15 @@ package incus
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
+	"github.com/gofrs/flock"
 	incusclient "github.com/lxc/incus/v7/client"
 	"github.com/lxc/incus/v7/shared/api"
 	"github.com/lxc/incus/v7/shared/cliconfig"
@@ -30,59 +34,180 @@ type instanceClient interface {
 }
 
 type sdkClient struct {
-	server incusclient.InstanceServer
+	server           incusclient.InstanceServer
+	reloadOIDCTokens func() error
+	saveOIDCTokens   func() error
+	oidcLock         *flock.Flock
+	operationMu      sync.Mutex
 }
 
 func (c *sdkClient) ListInstances() ([]api.Instance, error) {
-	return c.server.GetInstances(api.InstanceTypeAny)
+	if err := c.beginOperation(); err != nil {
+		return nil, err
+	}
+	defer c.endOperation()
+	instances, err := c.server.GetInstances(api.InstanceTypeAny)
+	return instances, c.persistResult(err)
 }
 
 func (c *sdkClient) GetInstance(name string) (*api.Instance, string, error) {
-	return c.server.GetInstance(name)
+	if err := c.beginOperation(); err != nil {
+		return nil, "", err
+	}
+	defer c.endOperation()
+	inst, etag, err := c.server.GetInstance(name)
+	return inst, etag, c.persistResult(err)
 }
 
 func (c *sdkClient) CreateInstance(req api.InstancesPost) error {
-	op, err := c.server.CreateInstance(req)
-	if err != nil {
+	if err := c.beginOperation(); err != nil {
 		return err
 	}
-	return op.Wait()
+	defer c.endOperation()
+	if err := c.persistResult(nil); err != nil {
+		return err
+	}
+	op, err := c.server.CreateInstance(req)
+	if err != nil {
+		return c.persistResult(err)
+	}
+	if err := op.Wait(); err != nil {
+		return c.persistResult(err)
+	}
+	c.persistCommittedMutation()
+	return nil
 }
 
 func (c *sdkClient) UpdateInstance(name string, put api.InstancePut, etag string) error {
-	op, err := c.server.UpdateInstance(name, put, etag)
-	if err != nil {
+	if err := c.beginOperation(); err != nil {
 		return err
 	}
-	return op.Wait()
+	defer c.endOperation()
+	if err := c.persistResult(nil); err != nil {
+		return err
+	}
+	op, err := c.server.UpdateInstance(name, put, etag)
+	if err != nil {
+		return c.persistResult(err)
+	}
+	if err := op.Wait(); err != nil {
+		return c.persistResult(err)
+	}
+	c.persistCommittedMutation()
+	return nil
 }
 
 func (c *sdkClient) SetInstanceState(name string, put api.InstanceStatePut, etag string) error {
-	op, err := c.server.UpdateInstanceState(name, put, etag)
-	if err != nil {
+	if err := c.beginOperation(); err != nil {
 		return err
 	}
-	return op.Wait()
+	defer c.endOperation()
+	if err := c.persistResult(nil); err != nil {
+		return err
+	}
+	op, err := c.server.UpdateInstanceState(name, put, etag)
+	if err != nil {
+		return c.persistResult(err)
+	}
+	if err := op.Wait(); err != nil {
+		return c.persistResult(err)
+	}
+	c.persistCommittedMutation()
+	return nil
 }
 
 func (c *sdkClient) GetInstanceState(name string) (*api.InstanceState, string, error) {
-	return c.server.GetInstanceState(name)
+	if err := c.beginOperation(); err != nil {
+		return nil, "", err
+	}
+	defer c.endOperation()
+	state, etag, err := c.server.GetInstanceState(name)
+	return state, etag, c.persistResult(err)
 }
 
 func (c *sdkClient) DeleteInstance(name string) error {
-	op, err := c.server.DeleteInstance(name)
-	if err != nil {
+	if err := c.beginOperation(); err != nil {
 		return err
 	}
-	return op.Wait()
+	defer c.endOperation()
+	if err := c.persistResult(nil); err != nil {
+		return err
+	}
+	op, err := c.server.DeleteInstance(name)
+	if err != nil {
+		return c.persistResult(err)
+	}
+	if err := op.Wait(); err != nil {
+		return c.persistResult(err)
+	}
+	c.persistCommittedMutation()
+	return nil
+}
+
+func (c *sdkClient) beginOperation() error {
+	c.operationMu.Lock()
+	if c.oidcLock == nil {
+		return nil
+	}
+	if err := c.oidcLock.Lock(); err != nil {
+		c.operationMu.Unlock()
+		return fmt.Errorf("lock Incus OIDC tokens: %w", err)
+	}
+	if c.reloadOIDCTokens != nil {
+		if err := c.reloadOIDCTokens(); err != nil {
+			_ = c.oidcLock.Unlock()
+			c.operationMu.Unlock()
+			return fmt.Errorf("reload Incus OIDC tokens: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c *sdkClient) endOperation() {
+	if c.oidcLock != nil {
+		_ = c.oidcLock.Unlock()
+	}
+	c.operationMu.Unlock()
+}
+
+func (c *sdkClient) persistResult(operationErr error) error {
+	if c.saveOIDCTokens == nil {
+		return operationErr
+	}
+	saveErr := c.saveOIDCTokens()
+	if saveErr == nil {
+		return operationErr
+	}
+	if operationErr != nil {
+		return fmt.Errorf("%w; persist Incus OIDC tokens: %v", operationErr, saveErr)
+	}
+	return fmt.Errorf("persist Incus OIDC tokens: %w", saveErr)
+}
+
+func (c *sdkClient) persistCommittedMutation() {
+	if c.saveOIDCTokens != nil {
+		_ = c.saveOIDCTokens()
+	}
+}
+
+type instanceConnection struct {
+	server           incusclient.InstanceServer
+	reloadOIDCTokens func() error
+	saveOIDCTokens   func() error
+	oidcLock         *flock.Flock
 }
 
 var newClient = func(cfg Config) (instanceClient, error) {
-	server, err := connectInstanceServer(cfg)
+	connection, err := connectInstanceConnection(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &sdkClient{server: server}, nil
+	return &sdkClient{
+		server:           connection.server,
+		reloadOIDCTokens: connection.reloadOIDCTokens,
+		saveOIDCTokens:   connection.saveOIDCTokens,
+		oidcLock:         connection.oidcLock,
+	}, nil
 }
 
 type doctorConnectionInfo struct {
@@ -95,40 +220,117 @@ type doctorConnectionInfo struct {
 }
 
 func connectInstanceServer(cfg Config) (incusclient.InstanceServer, error) {
+	connection, err := connectInstanceConnection(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return connection.server, nil
+}
+
+func connectInstanceConnection(cfg Config) (instanceConnection, error) {
 	if socket := strings.TrimSpace(cfg.Incus.Socket); socket != "" {
 		server, err := incusclient.ConnectIncusUnix(socket, nil)
 		if err != nil {
-			return nil, core.Exit(2, "connect incus socket %q: %v", socket, err)
+			return instanceConnection{}, core.Exit(2, "connect incus socket %q: %v", socket, err)
 		}
-		return useProject(server, cfg.Incus.Project), nil
+		return instanceConnection{server: useProject(server, cfg.Incus.Project)}, nil
 	}
 	if address := strings.TrimSpace(cfg.Incus.Address); address != "" {
-		args, err := connectionArgsForAddress(cfg)
+		args, oidcTokenPath, err := connectionArgsForAddressWithTokenPath(cfg)
 		if err != nil {
-			return nil, err
+			return instanceConnection{}, err
+		}
+		tokenLock, err := lockOIDCTokens(oidcTokenPath)
+		if err != nil {
+			return instanceConnection{}, err
+		}
+		lockHeld := tokenLock != nil
+		defer func() {
+			if lockHeld {
+				_ = tokenLock.Unlock()
+			}
+		}()
+		if tokenLock != nil {
+			tokens, err := loadOIDCTokens(oidcTokenPath)
+			if err != nil {
+				return instanceConnection{}, core.Exit(2, "read Incus OIDC tokens: %v", err)
+			}
+			args.OIDCTokens = tokens
 		}
 		server, err := incusclient.ConnectIncus(address, args)
 		if err != nil {
-			return nil, core.Exit(2, "connect incus address %q: %v", address, err)
+			return instanceConnection{}, core.Exit(2, "connect incus address %q: %v", address, err)
 		}
-		return useProject(server, cfg.Incus.Project), nil
+		server = useProject(server, cfg.Incus.Project)
+		reloadOIDCTokens, saveOIDCTokens, err := oidcTokenCallbacks(server, oidcTokenPath)
+		if err != nil {
+			return instanceConnection{}, err
+		}
+		if saveOIDCTokens != nil {
+			if err := saveOIDCTokens(); err != nil {
+				return instanceConnection{}, fmt.Errorf("persist Incus OIDC tokens: %w", err)
+			}
+		}
+		if tokenLock != nil {
+			if err := tokenLock.Unlock(); err != nil {
+				return instanceConnection{}, fmt.Errorf("unlock Incus OIDC tokens: %w", err)
+			}
+			lockHeld = false
+		}
+		return instanceConnection{
+			server:           server,
+			reloadOIDCTokens: reloadOIDCTokens,
+			saveOIDCTokens:   saveOIDCTokens,
+			oidcLock:         tokenLock,
+		}, nil
 	}
 	clientConfig, err := cliconfig.LoadConfig("")
 	if err != nil {
-		return nil, core.Exit(2, "load incus client config: %v", err)
+		return instanceConnection{}, core.Exit(2, "load incus client config: %v", err)
 	}
 	if project := strings.TrimSpace(cfg.Incus.Project); project != "" {
 		clientConfig.ProjectOverride = project
 	}
 	remote := configuredRemoteName(cfg, clientConfig)
 	if remoteConfig, ok := clientConfig.Remotes[remote]; ok && strings.HasPrefix(configuredRemoteAddr(remoteConfig), "unix:") && runtime.GOOS != "linux" {
-		return nil, core.Exit(2, "provider=%s: incus.remote, incus.address, or incus.socket not configured for a reachable Linux Incus daemon (remote %q resolves to local unix socket on %s)", providerName, remote, runtime.GOOS)
+		return instanceConnection{}, core.Exit(2, "provider=%s: incus.remote, incus.address, or incus.socket not configured for a reachable Linux Incus daemon (remote %q resolves to local unix socket on %s)", providerName, remote, runtime.GOOS)
 	}
+	disableOIDCKeepAlive(clientConfig, remote)
+	oidcTokenPath := ""
+	if remoteConfig, ok := clientConfig.Remotes[remote]; ok && remoteConfig.AuthType == api.AuthenticationMethodOIDC {
+		oidcTokenPath = clientConfig.OIDCTokenPath(remote)
+	}
+	tokenLock, err := lockOIDCTokens(oidcTokenPath)
+	if err != nil {
+		return instanceConnection{}, err
+	}
+	lockHeld := tokenLock != nil
+	defer func() {
+		if lockHeld {
+			_ = tokenLock.Unlock()
+		}
+	}()
 	server, err := clientConfig.GetInstanceServer(remote)
 	if err != nil {
-		return nil, core.Exit(2, "connect incus remote %q: %v", remote, err)
+		return instanceConnection{}, core.Exit(2, "connect incus remote %q: %v", remote, err)
 	}
-	return server, nil
+	connection := instanceConnection{server: server, oidcLock: tokenLock}
+	connection.reloadOIDCTokens, connection.saveOIDCTokens, err = oidcTokenCallbacks(server, oidcTokenPath)
+	if err != nil {
+		return instanceConnection{}, err
+	}
+	if connection.saveOIDCTokens != nil {
+		if err := connection.saveOIDCTokens(); err != nil {
+			return instanceConnection{}, fmt.Errorf("persist Incus OIDC tokens: %w", err)
+		}
+	}
+	if tokenLock != nil {
+		if err := tokenLock.Unlock(); err != nil {
+			return instanceConnection{}, fmt.Errorf("unlock Incus OIDC tokens: %w", err)
+		}
+		lockHeld = false
+	}
+	return connection, nil
 }
 
 func doctorConnectionInfoForConfig(cfg Config) (doctorConnectionInfo, error) {
@@ -182,13 +384,18 @@ func doctorConnectionInfoForConfig(cfg Config) (doctorConnectionInfo, error) {
 }
 
 func connectionArgsForAddress(cfg Config) (*incusclient.ConnectionArgs, error) {
+	args, _, err := connectionArgsForAddressWithTokenPath(cfg)
+	return args, err
+}
+
+func connectionArgsForAddressWithTokenPath(cfg Config) (*incusclient.ConnectionArgs, string, error) {
 	args := &incusclient.ConnectionArgs{
 		InsecureSkipVerify: cfg.Incus.InsecureTLS,
 	}
 	if certPath := strings.TrimSpace(cfg.Incus.TLSServerCert); certPath != "" {
 		content, err := os.ReadFile(certPath)
 		if err != nil {
-			return nil, core.Exit(2, "read incus TLS server cert %q: %v", certPath, err)
+			return nil, "", core.Exit(2, "read incus TLS server cert %q: %v", certPath, err)
 		}
 		args.TLSServerCert = strings.TrimSpace(string(content))
 	}
@@ -197,9 +404,10 @@ func connectionArgsForAddress(cfg Config) (*incusclient.ConnectionArgs, error) {
 		if args.TLSServerCert != "" || args.InsecureSkipVerify {
 			clientConfig = nil
 		} else {
-			return nil, core.Exit(2, "load incus client config for TLS credentials: %v", configErr)
+			return nil, "", core.Exit(2, "load incus client config for TLS credentials: %v", configErr)
 		}
 	}
+	oidcTokenPath := ""
 	if clientConfig != nil {
 		address := strings.TrimSpace(cfg.Incus.Address)
 		matchedRemote := ""
@@ -225,7 +433,7 @@ func connectionArgsForAddress(cfg Config) (*incusclient.ConnectionArgs, error) {
 				if args.TLSServerCert == "" {
 					serverCert, certErr := loadRemoteServerCert(clientConfig, matchedRemote)
 					if certErr != nil {
-						return nil, core.Exit(2, "read incus server cert for remote %q: %v", matchedRemote, certErr)
+						return nil, "", core.Exit(2, "read incus server cert for remote %q: %v", matchedRemote, certErr)
 					}
 					args.TLSServerCert = serverCert
 				}
@@ -233,9 +441,10 @@ func connectionArgsForAddress(cfg Config) (*incusclient.ConnectionArgs, error) {
 					args.AuthType = api.AuthenticationMethodOIDC
 					tokens, tokenErr := loadRemoteOIDCTokens(clientConfig, matchedRemote)
 					if tokenErr != nil {
-						return nil, core.Exit(2, "read incus OIDC tokens for remote %q: %v", matchedRemote, tokenErr)
+						return nil, "", core.Exit(2, "read incus OIDC tokens for remote %q: %v", matchedRemote, tokenErr)
 					}
 					args.OIDCTokens = tokens
+					oidcTokenPath = clientConfig.OIDCTokenPath(matchedRemote)
 				} else {
 					cert, key, ca, certErr := clientConfig.GetClientCertificate(matchedRemote)
 					if certErr == nil {
@@ -249,9 +458,98 @@ func connectionArgsForAddress(cfg Config) (*incusclient.ConnectionArgs, error) {
 	}
 	hasTLSClientAuth := strings.TrimSpace(args.TLSClientCert) != "" && strings.TrimSpace(args.TLSClientKey) != ""
 	if !hasTLSClientAuth && args.AuthType != api.AuthenticationMethodOIDC {
-		return nil, core.Exit(2, "provider=%s address mode requires a matching authenticated Incus remote with TLS client credentials or OIDC; --incus-insecure-tls only disables server certificate verification", providerName)
+		return nil, "", core.Exit(2, "provider=%s address mode requires a matching authenticated Incus remote with TLS client credentials or OIDC; --incus-insecure-tls only disables server certificate verification", providerName)
 	}
-	return args, nil
+	return args, oidcTokenPath, nil
+}
+
+type oidcTokenSource interface {
+	GetOIDCTokens() *oidc.Tokens[*oidc.IDTokenClaims]
+}
+
+func oidcTokenCallbacks(server any, path string) (func() error, func() error, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, nil, nil
+	}
+	source, ok := server.(oidcTokenSource)
+	if !ok || source.GetOIDCTokens() == nil {
+		return nil, nil, fmt.Errorf("Incus OIDC client does not expose refreshed tokens")
+	}
+	reload := func() error {
+		tokens, err := loadOIDCTokens(path)
+		if err != nil {
+			return err
+		}
+		*source.GetOIDCTokens() = *tokens
+		return nil
+	}
+	save := func() error {
+		return writeOIDCTokens(path, source.GetOIDCTokens())
+	}
+	return reload, save, nil
+}
+
+func writeOIDCTokens(path string, tokens *oidc.Tokens[*oidc.IDTokenClaims]) error {
+	if tokens == nil {
+		return nil
+	}
+	data, err := json.Marshal(tokens)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+func lockOIDCTokens(path string) (*flock.Flock, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, nil
+	}
+	if runtime.GOOS == "windows" {
+		return nil, core.Exit(2, "provider=%s OIDC remotes are not supported on Windows because refreshed token files cannot be replaced atomically; use TLS client certificate authentication", providerName)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	lock := flock.New(path+".lock", flock.SetPermissions(0o600))
+	if err := lock.Lock(); err != nil {
+		return nil, fmt.Errorf("lock Incus OIDC tokens: %w", err)
+	}
+	return lock, nil
+}
+
+func disableOIDCKeepAlive(clientConfig *cliconfig.Config, remoteName string) {
+	remote, ok := clientConfig.Remotes[remoteName]
+	if !ok || remote.AuthType != api.AuthenticationMethodOIDC || remote.KeepAlive == 0 {
+		return
+	}
+	remote.KeepAlive = 0
+	clientConfig.Remotes[remoteName] = remote
 }
 
 func doctorAddressAuth(cfg Config) (string, error) {
@@ -327,7 +625,11 @@ func loadRemoteServerCert(clientConfig *cliconfig.Config, remoteName string) (st
 }
 
 func loadRemoteOIDCTokens(clientConfig *cliconfig.Config, remoteName string) (*oidc.Tokens[*oidc.IDTokenClaims], error) {
-	content, err := os.ReadFile(clientConfig.OIDCTokenPath(remoteName))
+	return loadOIDCTokens(clientConfig.OIDCTokenPath(remoteName))
+}
+
+func loadOIDCTokens(path string) (*oidc.Tokens[*oidc.IDTokenClaims], error) {
+	content, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &oidc.Tokens[*oidc.IDTokenClaims]{}, nil

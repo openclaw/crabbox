@@ -79,5 +79,8 @@ func validateConfig(cfg core.Config) error {
 	if strings.TrimSpace(cfg.Incus.Image) == "" {
 		return core.Exit(2, "provider=%s requires incus.image", providerName)
 	}
+	if instanceType == "virtual-machine" && strings.TrimSpace(cfg.Incus.ProxyListenPort) != "" {
+		return core.Exit(2, "provider=%s does not support incus.proxyListenPort with virtual-machine instances; Incus VM proxy devices require a preconfigured static NIC, so omit the proxy or use a container", providerName)
+	}
 	return nil
 }

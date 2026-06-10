@@ -105,7 +105,8 @@ Key fields:
 - `incus.proxyListenHost`: host-side bind address for the optional Incus proxy
   device. Default: `127.0.0.1`
 - `incus.proxyListenPort`: host-side published SSH port. When set, Crabbox uses
-  this as the returned SSH port
+  this as the returned SSH port. Proxy devices are supported for containers;
+  VMs must be directly reachable because Incus VM proxies require a static NIC
 - `incus.proxyDevice`: Incus device name for the SSH proxy. Default:
   `crabbox-ssh`
 - `incus.tlsServerCert`: trusted Incus server certificate path for explicit
@@ -185,7 +186,8 @@ On acquire, Crabbox:
 3. creates an Incus instance from the configured image;
 4. injects Crabbox cloud-init plus provider metadata in `user.crabbox.*`
    instance config keys;
-5. optionally adds an Incus TCP proxy device when `incus.proxyListenPort` is set;
+5. optionally adds an Incus TCP proxy device for containers when
+   `incus.proxyListenPort` is set;
 6. starts the instance and waits for a reachable SSH path;
 7. returns a normal Crabbox SSH lease target.
 
@@ -283,6 +285,10 @@ strand test instances.
 - Linux only
 - coordinator unsupported
 - no Windows or macOS guests
+- SSH proxy devices are container-only; VM leases require direct guest
+  reachability
+- OIDC remotes require a macOS or Linux Crabbox client so refreshed credentials
+  can be persisted atomically; Windows clients can use TLS certificate auth
 - no provider-native snapshot/checkpoint/fork support in v1
 
 ## Troubleshooting

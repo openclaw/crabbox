@@ -20,8 +20,11 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.42.3
 	github.com/daytonaio/daytona/libs/api-client-go v0.183.0
 	github.com/daytonaio/daytona/libs/sdk-go v0.183.0
+	github.com/gofrs/flock v0.13.0
 	github.com/islo-labs/go-sdk v0.0.0-20260528125833-04a38f6f507c
 	github.com/lxc/incus/v7 v7.1.0
+	github.com/zitadel/oidc/v3 v3.47.5
+	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.282.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa
 	google.golang.org/grpc v1.81.1
@@ -97,7 +100,6 @@ require (
 	github.com/urfave/cli v1.22.17 // indirect
 	github.com/vbatts/go-mtree v0.7.0 // indirect
 	github.com/zitadel/logging v0.7.0 // indirect
-	github.com/zitadel/oidc/v3 v3.47.5 // indirect
 	github.com/zitadel/schema v1.3.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0 // indirect
@@ -113,7 +115,6 @@ require (
 	go.yaml.in/yaml/v4 v4.0.0-rc.4 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/term v0.43.0 // indirect
 	golang.org/x/text v0.37.0 // indirect

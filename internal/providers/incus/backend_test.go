@@ -235,7 +235,7 @@ func TestProviderSpecAndFlags(t *testing.T) {
 		"--incus-image", "images:ubuntu/24.04/cloud",
 		"--incus-user", "ubuntu",
 		"--incus-work-root", "/workspace/incus",
-		"--incus-proxy-listen-port", "2201",
+		"--incus-launch-port", "2201",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -243,6 +243,7 @@ func TestProviderSpecAndFlags(t *testing.T) {
 	if err := applyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
+	applyDefaults(&cfg)
 	if cfg.Incus.InstanceType != "virtual-machine" || cfg.Incus.User != "ubuntu" || cfg.WorkRoot != "/workspace/incus" || cfg.SSHPort != "2201" {
 		t.Fatalf("flags not applied: %#v", cfg.Incus)
 	}
@@ -332,19 +333,15 @@ func TestApplyDefaultsUsesIncusLaunchPortWhenTopLevelSSHPortIsDefault(t *testing
 	}
 }
 
-func TestDevicesForCreateUsesNATForVMInstances(t *testing.T) {
+func TestValidateConfigRejectsProxyForVMInstances(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.Incus.InstanceType = "virtual-machine"
 	cfg.Incus.ProxyListenPort = "2222"
 
-	devices := devicesForCreate(cfg)
-	device, ok := devices["crabbox-ssh"]
-	if !ok {
-		t.Fatal("expected crabbox-ssh proxy device")
-	}
-	if device["nat"] != "true" {
-		t.Fatalf("VM proxy device nat=%q want true", device["nat"])
+	err := validateConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "static NIC") {
+		t.Fatalf("validateConfig err=%v want VM proxy rejection", err)
 	}
 }
 
@@ -496,6 +493,22 @@ func TestConnectionArgsForAddressLoadsTLSCertContents(t *testing.T) {
 	}
 	if args.TLSServerCert != "PEM-CONTENT" {
 		t.Fatalf("TLSServerCert=%q want PEM contents", args.TLSServerCert)
+	}
+}
+
+func TestInstanceConfigForCreateUsesGuestLaunchPortBehindProxy(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.SSHPort = "2222"
+	cfg.Incus.LaunchPort = "2201"
+	cfg.Incus.ProxyListenPort = "2222"
+
+	userData := instanceConfigForCreate(cfg, nil, "ssh-ed25519 test-key")["cloud-init.user-data"]
+	if !strings.Contains(userData, "      Port 2201\n") {
+		t.Fatalf("cloud-init missing guest launch port:\n%s", userData)
+	}
+	if strings.Contains(userData, "      Port 2222\n") {
+		t.Fatalf("cloud-init incorrectly uses host proxy port:\n%s", userData)
 	}
 }
 

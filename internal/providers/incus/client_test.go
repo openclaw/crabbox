@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -20,6 +21,14 @@ import (
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 	"golang.org/x/oauth2"
 )
+
+type fakeOIDCTokenSource struct {
+	tokens *oidc.Tokens[*oidc.IDTokenClaims]
+}
+
+func (s fakeOIDCTokenSource) GetOIDCTokens() *oidc.Tokens[*oidc.IDTokenClaims] {
+	return s.tokens
+}
 
 func TestDoctorConnectionInfoForConfigUsesNamedRemoteMetadata(t *testing.T) {
 	home := t.TempDir()
@@ -175,6 +184,126 @@ func TestConnectionArgsForAddressUsesMatchingRemoteOIDCTokens(t *testing.T) {
 	}
 	if args.OIDCTokens == nil || args.OIDCTokens.AccessToken != "forged-access-token" || args.OIDCTokens.IDToken != "forged-id-token" {
 		t.Fatalf("unexpected OIDC tokens: %#v", args.OIDCTokens)
+	}
+}
+
+func TestConnectionArgsForAddressPersistsRefreshedOIDCTokens(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := writeIncusConfig(t, home, "default-remote: staging\nremotes:\n  staging:\n    addr: https://staging.incus.example.test:8443\n    auth_type: oidc\n    protocol: incus\n")
+	writeOIDCTokenFile(t, configDir, "staging", oidc.Tokens[*oidc.IDTokenClaims]{
+		Token: &oauth2.Token{AccessToken: "old-access-token"},
+	})
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.Remote = "staging"
+	cfg.Incus.Address = "https://staging.incus.example.test:8443"
+
+	args, tokenPath, err := connectionArgsForAddressWithTokenPath(cfg)
+	if err != nil {
+		t.Fatalf("connectionArgsForAddressWithTokenPath: %v", err)
+	}
+	args.OIDCTokens.AccessToken = "refreshed-access-token"
+	_, save, err := oidcTokenCallbacks(fakeOIDCTokenSource{tokens: args.OIDCTokens}, tokenPath)
+	if err != nil {
+		t.Fatalf("oidcTokenCallbacks: %v", err)
+	}
+	if save == nil {
+		t.Fatal("OIDC save callback is nil")
+	}
+	if err := save(); err != nil {
+		t.Fatalf("save OIDC tokens: %v", err)
+	}
+
+	content, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var saved oidc.Tokens[*oidc.IDTokenClaims]
+	if err := json.Unmarshal(content, &saved); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if saved.AccessToken != "refreshed-access-token" {
+		t.Fatalf("AccessToken=%q want refreshed-access-token", saved.AccessToken)
+	}
+	info, err := os.Stat(tokenPath)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("token mode=%#o want 0600", info.Mode().Perm())
+	}
+}
+
+func TestOIDCTokenCallbacksReloadLatestTokens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	if err := writeOIDCTokens(path, &oidc.Tokens[*oidc.IDTokenClaims]{
+		Token: &oauth2.Token{AccessToken: "latest-access-token"},
+	}); err != nil {
+		t.Fatalf("writeOIDCTokens: %v", err)
+	}
+	current := &oidc.Tokens[*oidc.IDTokenClaims]{
+		Token: &oauth2.Token{AccessToken: "stale-access-token"},
+	}
+	reload, _, err := oidcTokenCallbacks(fakeOIDCTokenSource{tokens: current}, path)
+	if err != nil {
+		t.Fatalf("oidcTokenCallbacks: %v", err)
+	}
+	if err := reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if current.AccessToken != "latest-access-token" {
+		t.Fatalf("AccessToken=%q want latest-access-token", current.AccessToken)
+	}
+}
+
+func TestSDKClientPersistsTokensAfterOperation(t *testing.T) {
+	calls := 0
+	client := &sdkClient{
+		saveOIDCTokens: func() error {
+			calls++
+			return nil
+		},
+	}
+	if err := client.persistResult(nil); err != nil {
+		t.Fatalf("persistResult: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("save calls=%d want 1", calls)
+	}
+}
+
+func TestSDKClientPreservesCommittedMutationWhenTokenSaveFails(t *testing.T) {
+	calls := 0
+	client := &sdkClient{
+		saveOIDCTokens: func() error {
+			calls++
+			return errors.New("disk full")
+		},
+	}
+	client.persistCommittedMutation()
+	if calls != 1 {
+		t.Fatalf("save calls=%d want 1", calls)
+	}
+}
+
+func TestDisableOIDCKeepAlive(t *testing.T) {
+	clientConfig := &cliconfig.Config{
+		Remotes: map[string]cliconfig.Remote{
+			"oidc": {AuthType: "oidc", KeepAlive: 30},
+			"tls":  {AuthType: "tls", KeepAlive: 30},
+		},
+	}
+
+	disableOIDCKeepAlive(clientConfig, "oidc")
+	disableOIDCKeepAlive(clientConfig, "tls")
+
+	if got := clientConfig.Remotes["oidc"].KeepAlive; got != 0 {
+		t.Fatalf("OIDC KeepAlive=%d want 0", got)
+	}
+	if got := clientConfig.Remotes["tls"].KeepAlive; got != 30 {
+		t.Fatalf("TLS KeepAlive=%d want 30", got)
 	}
 }
 
