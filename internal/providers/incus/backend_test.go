@@ -749,8 +749,9 @@ func TestAcquireCleansUpPartialInstanceEvenWhenDeleteOnReleaseFalse(t *testing.T
 	oldNewClient := newClient
 	oldWait := waitForSSHReady
 	fake := &fakeClient{
-		instances: map[string]*api.Instance{},
-		states:    map[string]*api.InstanceState{},
+		deleteRequiresStop: true,
+		instances:          map[string]*api.Instance{},
+		states:             map[string]*api.InstanceState{},
 	}
 	newClient = func(cfg Config) (instanceClient, error) {
 		_ = cfg
@@ -780,6 +781,9 @@ func TestAcquireCleansUpPartialInstanceEvenWhenDeleteOnReleaseFalse(t *testing.T
 	}
 	if len(fake.deleted) != 1 {
 		t.Fatalf("deleted=%v want partial instance cleanup", fake.deleted)
+	}
+	if len(fake.stateUpdates) != 2 || fake.stateUpdates[0] != fake.created[0].Name+":start" || fake.stateUpdates[1] != fake.created[0].Name+":stop" {
+		t.Fatalf("stateUpdates=%v want start then stop before delete", fake.stateUpdates)
 	}
 }
 
@@ -1724,6 +1728,55 @@ func TestCleanupContinuesPastForeignAndFreshInstances(t *testing.T) {
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-stale" {
 		t.Fatalf("deleted=%v want only stale instance removed", fake.deleted)
+	}
+}
+
+func TestCleanupStopsRunningStaleInstancesBeforeDelete(t *testing.T) {
+	oldNewClient := newClient
+	now := time.Now().UTC()
+	fake := &fakeClient{
+		deleteRequiresStop: true,
+		instances: map[string]*api.Instance{
+			"crabbox-stale": {
+				Name:       "crabbox-stale",
+				Status:     "Running",
+				StatusCode: api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"):           "true",
+					labelKey("lease"):             "cbx_stale654321",
+					labelKey("slug"):              "stale-running",
+					labelKey("state"):             "ready",
+					labelKey("created_at"):        core.LeaseLabelTime(now.Add(-2 * time.Hour)),
+					labelKey("last_touched_at"):   core.LeaseLabelTime(now.Add(-2 * time.Hour)),
+					labelKey("idle_timeout"):      "60",
+					labelKey("idle_timeout_secs"): "60",
+					labelKey("ttl_secs"):          "120",
+					labelKey("expires_at"):        core.LeaseLabelTime(now.Add(-time.Hour)),
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-stale": {Status: "Running", StatusCode: api.Running},
+		},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-stale" {
+		t.Fatalf("deleted=%v want stale instance removed", fake.deleted)
+	}
+	if len(fake.stateUpdates) != 1 || fake.stateUpdates[0] != "crabbox-stale:stop" {
+		t.Fatalf("stateUpdates=%v want stop before delete", fake.stateUpdates)
 	}
 }
 

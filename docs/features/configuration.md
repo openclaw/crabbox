@@ -77,7 +77,7 @@ broker:
 
 provider: aws            # default provider when --provider is unset
 target: linux            # default target OS: linux | macos | windows
-architecture: amd64      # amd64 | arm64; arm64 is Linux-only on AWS/Azure
+architecture: amd64      # amd64 | arm64; arm64 supports Linux on AWS/Azure and native Windows on Azure
 os: ubuntu:26.04         # OS image; resolved to per-provider images for linux
 windows:
   mode: normal           # normal | wsl2 when target=windows

@@ -161,6 +161,9 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 		cleanupKey = false
 	}
 	cleanupInstance := func() {
+		if inst, _, err := client.GetInstance(name); err == nil && inst.IsActive() {
+			_ = client.SetInstanceState(name, api.InstanceStatePut{Action: "stop", Force: true, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, "")
+		}
 		_ = client.DeleteInstance(name)
 	}
 	retainedCleanup := func() {
@@ -454,6 +457,11 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		fmt.Fprintf(b.rt.Stdout, "remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(server.Labels["lease"], "-"), reason)
 		if req.DryRun {
 			continue
+		}
+		if inst.IsActive() {
+			if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: true, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
+				return err
+			}
 		}
 		if err := client.DeleteInstance(inst.Name); err != nil {
 			return err
