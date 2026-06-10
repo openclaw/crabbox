@@ -40,6 +40,25 @@ func claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration
 }
 
 func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	provider, staticDetails := claimProviderDetailsForConfig(cfg)
+	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+		setCacheVolumes: true,
+		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
+	})
+}
+
+func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	provider, staticDetails := claimProviderDetailsForConfig(cfg)
+	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+		setCacheVolumes: true,
+		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
+		setEndpoint:     true,
+		server:          server,
+		target:          target,
+	})
+}
+
+func claimProviderDetailsForConfig(cfg Config) (string, staticClaimDetails) {
 	provider := canonicalClaimProvider(cfg.Provider)
 	staticDetails := staticClaimDetails{}
 	if isStaticProvider(provider) {
@@ -53,14 +72,7 @@ func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, 
 			WindowsMode: strings.TrimSpace(cfg.WindowsMode),
 		}
 	}
-	return claimLeaseForRepoProviderScopePondDetailsCacheVolumes(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, true, CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes))
-}
-
-func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	if err := claimLeaseForRepoConfig(leaseID, slug, cfg, repoRoot, idleTimeout, reclaim); err != nil {
-		return err
-	}
-	return updateLeaseClaimEndpoint(leaseID, server, target)
+	return provider, staticDetails
 }
 
 func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
@@ -80,7 +92,18 @@ func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, 
 }
 
 func claimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, cacheVolumes []string) error {
-	return claimLeaseForRepoProviderScopePondDetailsCacheVolumes(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, true, cacheVolumes)
+	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, claimMetadata{
+		setCacheVolumes: true,
+		cacheVolumes:    cacheVolumes,
+	})
+}
+
+func claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget) error {
+	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, claimMetadata{
+		setEndpoint: true,
+		server:      server,
+		target:      target,
+	})
 }
 
 type staticClaimDetails struct {
@@ -93,11 +116,19 @@ type staticClaimDetails struct {
 	WindowsMode string
 }
 
-func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return claimLeaseForRepoProviderScopePondDetailsCacheVolumes(leaseID, slug, provider, providerScope, pond, staticDetails, repoRoot, idleTimeout, reclaim, false, nil)
+type claimMetadata struct {
+	setCacheVolumes bool
+	cacheVolumes    []string
+	setEndpoint     bool
+	server          Server
+	target          SSHTarget
 }
 
-func claimLeaseForRepoProviderScopePondDetailsCacheVolumes(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool, setCacheVolumes bool, cacheVolumes []string) error {
+func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{})
+}
+
+func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool, metadata claimMetadata) error {
 	if leaseID == "" || repoRoot == "" {
 		return nil
 	}
@@ -147,8 +178,11 @@ func claimLeaseForRepoProviderScopePondDetailsCacheVolumes(leaseID, slug, provid
 	if idleTimeout > 0 {
 		existing.IdleTimeoutSeconds = int(idleTimeout.Seconds())
 	}
-	if setCacheVolumes {
-		existing.CacheVolumes = append([]string(nil), cacheVolumes...)
+	if metadata.setCacheVolumes {
+		existing.CacheVolumes = append([]string(nil), metadata.cacheVolumes...)
+	}
+	if metadata.setEndpoint {
+		applyLeaseClaimEndpoint(&existing, metadata.server, metadata.target)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return exit(2, "create claim directory: %v", err)
@@ -179,6 +213,19 @@ func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 	if claim.LeaseID == "" {
 		return nil
 	}
+	applyLeaseClaimEndpoint(&claim, server, target)
+	data, err := json.MarshalIndent(claim, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return exit(2, "write claim %s: %v", path, err)
+	}
+	return nil
+}
+
+func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget) {
 	if len(server.Labels) > 0 {
 		claim.Labels = cloneStringMap(server.Labels)
 	}
@@ -202,15 +249,6 @@ func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 	} else if statusTerminalState(server.Labels["state"]) {
 		claim.SSHPort = 0
 	}
-	data, err := json.MarshalIndent(claim, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return exit(2, "write claim %s: %v", path, err)
-	}
-	return nil
 }
 
 func updateLeaseClaimCacheVolumes(leaseID string, specs []string) error {

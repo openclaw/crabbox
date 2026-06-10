@@ -119,6 +119,33 @@ func TestClaimLeaseForRepoProviderScopePondCacheVolumesStoresInitialClaim(t *tes
 	}
 }
 
+func TestClaimLeaseForRepoProviderScopePondEndpointStoresInitialClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo := filepath.Join(t.TempDir(), "repo")
+	server := Server{
+		Labels: map[string]string{
+			"lease":    "cbx_tart",
+			"instance": "crabbox-cache-1234",
+			"state":    "ready",
+		},
+	}
+	target := SSHTarget{Host: "192.0.2.44", Port: "2222"}
+
+	if err := claimLeaseForRepoProviderScopePondEndpoint("cbx_tart", "mac", "tart", "instance:crabbox-cache-1234", "Mac Pond", repo, 30*time.Minute, false, server, target); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := readLeaseClaim("cbx_tart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Provider != "tart" || claim.ProviderScope != "instance:crabbox-cache-1234" || claim.Pond != "mac-pond" {
+		t.Fatalf("unexpected claim identity: %#v", claim)
+	}
+	if claim.SSHHost != "192.0.2.44" || claim.SSHPort != 2222 || claim.Labels["instance"] != "crabbox-cache-1234" {
+		t.Fatalf("endpoint metadata not stored in initial claim: %#v", claim)
+	}
+}
+
 func TestClaimLeaseForRepoConfigScopesProviderClaims(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")

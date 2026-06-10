@@ -169,18 +169,8 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		cleanupUnclaimedVM()
 		return LeaseTarget{}, err
 	}
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
 		cleanupUnclaimedVM()
-		return LeaseTarget{}, err
-	}
-	if req.Keep {
-		cleanupKey = false
-	}
-	if err := updateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
-		if !req.Keep {
-			_ = b.stopVM(context.Background(), name)
-			_ = b.deleteVM(context.Background(), name)
-		}
 		return LeaseTarget{}, err
 	}
 	cleanupKey = false
