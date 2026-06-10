@@ -1338,6 +1338,23 @@ func TestAllocateLeaseSlugChecksGeneratedSlugClaims(t *testing.T) {
 	}
 }
 
+func TestReserveLeaseSlugRechecksClaimsUnderLock(t *testing.T) {
+	isolateCrabboxState(t)
+	cfg := testConfig()
+	backend := &leaseBackend{cfg: cfg}
+	claimExternalLease(t, cfg, "cbx_existing", "shared", t.TempDir(), time.Minute, false)
+	reservation, reserved, err := backend.reserveLeaseSlug("shared", "cbx_next")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reservation != nil {
+		defer reservation.Release()
+	}
+	if reserved {
+		t.Fatal("reserved slug that was already claimed")
+	}
+}
+
 func TestAllocateLeaseSlugReclaimsStaleReservation(t *testing.T) {
 	isolateCrabboxState(t)
 	backend := &leaseBackend{cfg: testConfig()}

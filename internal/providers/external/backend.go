@@ -507,6 +507,13 @@ func (b *leaseBackend) reserveLeaseSlug(slug, leaseID string) (*slugReservation,
 		return nil, false, err
 	}
 	defer unlock()
+	inUse, err := b.claimSlugInUse(slug, leaseID)
+	if err != nil {
+		return nil, false, err
+	}
+	if inUse {
+		return nil, false, nil
+	}
 	token, err := newSlugReservationToken()
 	if err != nil {
 		return nil, false, err
