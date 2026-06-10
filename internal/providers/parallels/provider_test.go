@@ -2,10 +2,15 @@ package parallels
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
@@ -135,8 +140,52 @@ func TestCleanupStopsOnPartialFleetInventory(t *testing.T) {
 	}
 }
 
+func TestCleanupRemovesClaimAndStoredKeyAfterDelete(t *testing.T) {
+	leaseID, keyPath := seedParallelsCleanupState(t)
+	runner := &parallelsCleanupRunner{}
+	backend := &leaseBackend{
+		DirectSSHBackend: sharedBackend(testParallelsCleanupConfig(), runner),
+	}
+
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if runner.deleteCalls != 1 {
+		t.Fatalf("deleteCalls=%d want 1", runner.deleteCalls)
+	}
+	if _, ok, err := core.ResolveLeaseClaim("blue"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatalf("claim for %s still resolves after cleanup", leaseID)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("key path still exists or unexpected stat error: %v", err)
+	}
+}
+
+func TestCleanupKeepsClaimAndStoredKeyWhenDeleteFails(t *testing.T) {
+	leaseID, keyPath := seedParallelsCleanupState(t)
+	runner := &parallelsCleanupRunner{deleteErr: errors.New("delete failed")}
+	backend := &leaseBackend{
+		DirectSSHBackend: sharedBackend(testParallelsCleanupConfig(), runner),
+	}
+
+	err := backend.Cleanup(context.Background(), CleanupRequest{})
+	if err == nil || !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("Cleanup err=%v, want delete failure", err)
+	}
+	if _, ok, err := core.ResolveLeaseClaim("blue"); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Fatalf("claim for %s was removed after failed delete", leaseID)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key path missing after failed delete: %v", err)
+	}
+}
+
 func sharedBackend(cfg core.Config, runner core.CommandRunner) shared.DirectSSHBackend {
-	return shared.DirectSSHBackend{Cfg: cfg, RT: Runtime{Exec: runner}}
+	return shared.DirectSSHBackend{Cfg: cfg, RT: Runtime{Exec: runner, Stderr: io.Discard}}
 }
 
 func testParallelsFleetConfig() core.Config {
@@ -148,6 +197,54 @@ func testParallelsFleetConfig() core.Config {
 		{Name: "bad-host", Host: "bad.example"},
 	}
 	return cfg
+}
+
+func testParallelsCleanupConfig() core.Config {
+	cfg := core.BaseConfig()
+	cfg.Provider = "parallels"
+	cfg.TargetOS = core.TargetLinux
+	return cfg
+}
+
+func seedParallelsCleanupState(t *testing.T) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	leaseID := "cbx_good"
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "blue", "parallels", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte("private key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	labels := map[string]string{
+		"provider":   "parallels",
+		"lease":      leaseID,
+		"slug":       "blue",
+		"state":      "ready",
+		"expires_at": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	}
+	data, err := json.Marshal(labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labelsPath := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "parallels", "leases", leaseID+".json")
+	if err := os.MkdirAll(filepath.Dir(labelsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(labelsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return leaseID, keyPath
 }
 
 type parallelsFleetRunner struct {
@@ -167,4 +264,27 @@ func (r *parallelsFleetRunner) Run(_ context.Context, req core.LocalCommandReque
 		return core.LocalCommandResult{Stderr: "permission denied"}, errors.New("ssh failed")
 	}
 	return core.LocalCommandResult{Stdout: `[{"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"running","ip_configured":"10.0.0.5"}]`}, nil
+}
+
+type parallelsCleanupRunner struct {
+	deleteCalls int
+	deleteErr   error
+}
+
+func (r *parallelsCleanupRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	if req.Name != "prlctl" || len(req.Args) == 0 {
+		return core.LocalCommandResult{}, errors.New("unexpected command")
+	}
+	switch req.Args[0] {
+	case "list":
+		return core.LocalCommandResult{Stdout: `[{"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"stopped","ip_configured":"10.0.0.5"}]`}, nil
+	case "delete":
+		r.deleteCalls++
+		if r.deleteErr != nil {
+			return core.LocalCommandResult{Stderr: r.deleteErr.Error()}, r.deleteErr
+		}
+		return core.LocalCommandResult{}, nil
+	default:
+		return core.LocalCommandResult{}, errors.New("unexpected prlctl command")
+	}
 }

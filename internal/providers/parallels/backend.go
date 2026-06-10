@@ -303,6 +303,9 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if err := client.Delete(ctx, server.CloudID); err != nil {
 			return err
 		}
+		leaseID := server.Labels["lease"]
+		core.RemoveLeaseClaim(leaseID)
+		core.RemoveStoredTestboxKey(leaseID)
 	}
 	return nil
 }
