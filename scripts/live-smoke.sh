@@ -745,9 +745,9 @@ morph_smoke() {
   need_tool jq
   need_tool rg
 
-  local api_key="${CRABBOX_MORPH_API_KEY:-${MORPH_API_KEY:-}}"
+  local api_key="${CRABBOX_MORPH_API_KEY:-${MORPH_API_KEY:-$(config_value morph.apiKey || true)}}"
   if [[ -z "$api_key" ]]; then
-    echo "set CRABBOX_MORPH_API_KEY or MORPH_API_KEY to run morph live smoke" >&2
+    echo "set CRABBOX_MORPH_API_KEY, MORPH_API_KEY, or morph.apiKey to run morph live smoke" >&2
     return 2
   fi
   local snapshot="${CRABBOX_LIVE_MORPH_SNAPSHOT:-}"
