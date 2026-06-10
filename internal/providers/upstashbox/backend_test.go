@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime/pprof"
 	"strings"
 	"testing"
 	"time"
@@ -154,6 +155,47 @@ func TestClientUsesUpstashBoxRESTShape(t *testing.T) {
 	if !reflect.DeepEqual(deleteBody["ids"], []any{"box_1"}) {
 		t.Fatalf("delete body=%v", deleteBody)
 	}
+}
+
+func TestUploadFileStopsProducerOnTransportFailure(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "archive.tgz")
+	if err := os.WriteFile(archive, []byte("archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transportErr := errors.New("transport failed")
+	client := &client{
+		apiKey: "box_key",
+		base:   "https://box.example.test",
+		http: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, transportErr
+		})},
+	}
+	err := client.UploadFile(context.Background(), "box_1", archive, "/tmp/archive.tgz")
+	if !errors.Is(err, transportErr) {
+		t.Fatalf("UploadFile err=%v, want transport failure", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if !uploadFileProducerRunning() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("upload producer goroutine still running after transport failure")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func uploadFileProducerRunning() bool {
+	var stack bytes.Buffer
+	if err := pprof.Lookup("goroutine").WriteTo(&stack, 2); err != nil {
+		return false
+	}
+	return strings.Contains(stack.String(), "upstashbox.(*client).UploadFile.func1")
 }
 
 func TestUpstashBoxCreateBoxDeletesFailedProvision(t *testing.T) {

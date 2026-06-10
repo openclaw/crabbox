@@ -203,6 +203,7 @@ func (c *client) UploadFile(ctx context.Context, boxID, localPath, remotePath st
 	}
 	reader, pipeWriter := io.Pipe()
 	writer := multipart.NewWriter(pipeWriter)
+	producerDone := make(chan error, 1)
 	go func() {
 		var writeErr error
 		defer func() {
@@ -213,6 +214,7 @@ func (c *client) UploadFile(ctx context.Context, boxID, localPath, remotePath st
 				writeErr = closeErr
 			}
 			_ = pipeWriter.CloseWithError(writeErr)
+			producerDone <- writeErr
 		}()
 		if writeErr = writer.WriteField("paths", remotePath); writeErr != nil {
 			return
@@ -224,22 +226,31 @@ func (c *client) UploadFile(ctx context.Context, boxID, localPath, remotePath st
 		}
 		_, writeErr = io.Copy(part, file)
 	}()
+	finishProducer := func(primary error) error {
+		if primary != nil {
+			_ = reader.CloseWithError(primary)
+		}
+		producerErr := <-producerDone
+		if primary != nil {
+			return primary
+		}
+		return producerErr
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v2/box/"+url.PathEscape(boxID)+"/files/upload", reader)
 	if err != nil {
-		_ = reader.Close()
-		return err
+		return finishProducer(err)
 	}
 	c.addHeaders(req)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return finishProducer(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return apiError(resp)
+		return finishProducer(apiError(resp))
 	}
-	return nil
+	return finishProducer(nil)
 }
 
 func (c *client) WriteFile(ctx context.Context, boxID, remotePath, content string) error {
