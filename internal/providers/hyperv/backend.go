@@ -97,8 +97,16 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		if cfg.HyperV.GuestPassword == "" {
 			return LeaseTarget{}, exit(2, "provider=%s --hyperv-init-password requires an explicit CRABBOX_HYPERV_GUEST_PASSWORD (refusing to set the default password on the guest)", providerName)
 		}
+		// Both values land inside a double-quoted cmd.exe RunOnce command at
+		// first boot: a double quote would break out of the quoting and a
+		// percent sign would expand as a cmd variable, so reject either in
+		// either value rather than emitting a command that does something
+		// other than what was configured.
 		if strings.ContainsAny(cfg.HyperV.GuestPassword, `"%`) {
 			return LeaseTarget{}, exit(2, "provider=%s --hyperv-init-password sets the password through cmd.exe, which cannot carry double quotes or percent signs; choose a different CRABBOX_HYPERV_GUEST_PASSWORD", providerName)
+		}
+		if strings.ContainsAny(cfg.HyperV.User, `"%`) {
+			return LeaseTarget{}, exit(2, "provider=%s --hyperv-init-password sets the password through cmd.exe, which cannot carry double quotes or percent signs in the user name; choose a different --hyperv-user", providerName)
 		}
 	}
 	leaseID := newLeaseID()

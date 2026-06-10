@@ -72,8 +72,8 @@ Notes:
 
 - Requires an explicit `CRABBOX_HYPERV_GUEST_PASSWORD` (the provider refuses
   to stamp its default password onto a guest).
-- The password cannot contain `"` or `%` (it passes through `cmd.exe` at
-  logon).
+- Neither the password nor the user name can contain `"` or `%` (both pass
+  through `cmd.exe` at logon).
 - This only works for templates that auto-log-on an administrator account
   (`RunOnce` fires at logon). Templates without auto-logon need a known
   password baked in, as above.

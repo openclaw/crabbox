@@ -639,11 +639,31 @@ func TestAcquireInitPasswordRejectsCmdUnsafePassword(t *testing.T) {
 	t.Cleanup(func() { hypervHostOS = oldOS })
 
 	b.cfg.HyperV.InitPassword = true
-	for _, password := range []string{`pa"ss`, `pa%ss`} {
+	for _, password := range []string{`pa"ss`, `pa%ss`, `%TEMP%`, `a"&calc&"b`} {
 		b.cfg.HyperV.GuestPassword = password
 		_, err := b.Acquire(context.Background(), core.AcquireRequest{})
 		if err == nil || !strings.Contains(err.Error(), "cannot carry") {
 			t.Fatalf("Acquire should reject cmd-unsafe init password %q, got: %v", password, err)
+		}
+	}
+}
+
+// The user name lands inside the same double-quoted cmd.exe RunOnce command
+// as the password, so it gets the same metacharacter validation -- an
+// embedded quote must not be able to alter the elevated first-boot command.
+func TestAcquireInitPasswordRejectsCmdUnsafeUser(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	b.cfg.HyperV.InitPassword = true
+	b.cfg.HyperV.GuestPassword = "SafePass1!"
+	for _, user := range []string{`us"er`, `us%er`, `u" & calc & "`, `%PATH%`} {
+		b.cfg.HyperV.User = user
+		_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+		if err == nil || !strings.Contains(err.Error(), "user name") {
+			t.Fatalf("Acquire should reject cmd-unsafe init user %q, got: %v", user, err)
 		}
 	}
 }
