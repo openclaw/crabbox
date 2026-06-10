@@ -3,6 +3,7 @@ package runpod
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestRunpodProviderSpec(t *testing.T) {
@@ -298,14 +301,15 @@ func TestRunpodDoctorReportsMissingAPIKey(t *testing.T) {
 }
 
 type fakeRunpodAPI struct {
-	mu          sync.Mutex
-	whoamiCalls int
-	listCalls   int
-	deployCalls []runpodDeployInput
-	terminated  []string
-	listPods    []runpodPod
-	getPod      func(string) (runpodPod, error)
-	deployPod   runpodPod
+	mu           sync.Mutex
+	whoamiCalls  int
+	listCalls    int
+	deployCalls  []runpodDeployInput
+	terminated   []string
+	listPods     []runpodPod
+	getPod       func(string) (runpodPod, error)
+	terminatePod func(context.Context, string) error
+	deployPod    runpodPod
 }
 
 func (f *fakeRunpodAPI) Whoami(_ context.Context) (runpodMyself, error) {
@@ -332,10 +336,14 @@ func (f *fakeRunpodAPI) ListPods(_ context.Context) ([]runpodPod, error) {
 	f.listCalls++
 	return f.listPods, nil
 }
-func (f *fakeRunpodAPI) TerminatePod(_ context.Context, podID string) error {
+func (f *fakeRunpodAPI) TerminatePod(ctx context.Context, podID string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.terminated = append(f.terminated, podID)
+	terminatePod := f.terminatePod
+	f.mu.Unlock()
+	if terminatePod != nil {
+		return terminatePod(ctx, podID)
+	}
 	return nil
 }
 
@@ -403,6 +411,74 @@ func TestRunpodWaitForSSHRejectsProxyOnlyPods(t *testing.T) {
 	_, err := backend.waitForPodSSH(context.Background(), fake, "pod_a")
 	if err == nil || !strings.Contains(err.Error(), "ssh endpoint not exposed") {
 		t.Fatalf("err=%v, want timeout without public TCP endpoint", err)
+	}
+}
+
+func TestRunpodAcquireRollbackUsesBoundedCleanup(t *testing.T) {
+	terminateErr := errors.New("terminate failed")
+	fake := &fakeRunpodAPI{
+		deployPod: runpodPod{ID: "pod_failed", Name: "crabbox-blue-12345678", DesiredStatus: "PROVISIONING"},
+		getPod: func(id string) (runpodPod, error) {
+			return runpodPod{ID: id, Name: "crabbox-blue-12345678", DesiredStatus: "PROVISIONING"}, nil
+		},
+		terminatePod: func(ctx context.Context, podID string) error {
+			if podID != "pod_failed" {
+				t.Fatalf("podID=%q, want pod_failed", podID)
+			}
+			if _, ok := ctx.Deadline(); !ok {
+				t.Fatal("cleanup context should have a deadline")
+			}
+			return terminateErr
+		},
+	}
+	backend := &runpodLeaseBackend{
+		cfg:                    Config{Runpod: RunpodConfig{APIKey: "k"}},
+		rt:                     Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		client:                 fake,
+		pollInitialOverride:    time.Millisecond,
+		pollTimeoutOverride:    5 * time.Millisecond,
+		cleanupTimeoutOverride: 20 * time.Millisecond,
+	}
+
+	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "ssh endpoint not exposed") || !strings.Contains(err.Error(), "cleanup failed") || !errors.Is(err, terminateErr) {
+		t.Fatalf("err=%v, want original wait failure plus cleanup failure", err)
+	}
+	if len(fake.terminated) != 1 || fake.terminated[0] != "pod_failed" {
+		t.Fatalf("terminated=%v", fake.terminated)
+	}
+}
+
+func TestRunpodAcquireRollbackCannotBlockForever(t *testing.T) {
+	fake := &fakeRunpodAPI{
+		deployPod: runpodPod{ID: "pod_blocked", Name: "crabbox-blue-12345678", DesiredStatus: "PROVISIONING"},
+		getPod: func(id string) (runpodPod, error) {
+			return runpodPod{ID: id, Name: "crabbox-blue-12345678", DesiredStatus: "PROVISIONING"}, nil
+		},
+		terminatePod: func(ctx context.Context, _ string) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+	backend := &runpodLeaseBackend{
+		cfg:                    Config{Runpod: RunpodConfig{APIKey: "k"}},
+		rt:                     Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		client:                 fake,
+		pollInitialOverride:    time.Millisecond,
+		pollTimeoutOverride:    5 * time.Millisecond,
+		cleanupTimeoutOverride: 20 * time.Millisecond,
+	}
+	start := time.Now()
+
+	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "cleanup failed") || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want bounded cleanup deadline error", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Acquire took %s, cleanup should be bounded", elapsed)
+	}
+	if len(fake.terminated) != 1 || fake.terminated[0] != "pod_blocked" {
+		t.Fatalf("terminated=%v", fake.terminated)
 	}
 }
 
