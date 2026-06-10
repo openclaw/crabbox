@@ -80,6 +80,27 @@ capture_run() {
   printf -v "$__name" '%s' "$__out"
 }
 
+capture_stdout() {
+  local __name="$1"
+  shift
+  local __stderr
+  __stderr="$(mktemp)"
+  local __out
+  local __status=0
+  if __out="$("$@" 2>"$__stderr")"; then
+    __status=0
+  else
+    __status=$?
+  fi
+  cat "$__stderr" >&2
+  rm -f "$__stderr"
+  if [[ "$__status" -ne 0 ]]; then
+    printf '%s\n' "$__out"
+    return "$__status"
+  fi
+  printf -v "$__name" '%s' "$__out"
+}
+
 capture_run_live() {
   local __name="$1"
   shift
@@ -537,7 +558,7 @@ tenki_smoke() {
   fi
 
   local auth
-  capture_run auth "$tenki_cli" status --json
+  capture_stdout auth "$tenki_cli" status --json
   if ! printf '%s\n' "$auth" | jq -e '.status | startswith("Logged in")' >/dev/null; then
     echo "tenki smoke requires an authenticated Tenki CLI; run tenki login" >&2
     return 2
@@ -575,7 +596,7 @@ tenki_smoke() {
   run_in_repo "$cb" status --provider tenki --id "$slug" --wait --wait-timeout "${CRABBOX_LIVE_TENKI_WAIT_TIMEOUT:-120s}"
   run_in_repo "$cb" run --provider tenki --id "$slug" --no-sync -- echo crabbox-tenki-ok
   local list_json
-  capture_run list_json run_in_repo "$cb" list --provider tenki --json
+  capture_stdout list_json run_in_repo "$cb" list --provider tenki --json
   printf '%s\n' "$list_json" | jq 'map({id,serverId,slug,provider,state})'
   if ! printf '%s\n' "$list_json" | jq -e --arg lease "$lease" --arg session "$session" \
     'any(.[]; .id == $lease and .serverId == $session and .provider == "tenki")' >/dev/null; then

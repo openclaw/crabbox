@@ -50,6 +50,7 @@ case "$1" in
     printf 'crabbox-tenki-ok\\n'
     ;;
   list)
+    printf 'crabbox list warning\\n' >&2
     printf '[{"id":"cbx_123456789abc","serverId":"00000000-0000-0000-0000-000000000001","slug":"tenki-smoke-test","provider":"tenki","state":"ready"}]\\n'
     ;;
   stop)
@@ -76,6 +77,7 @@ case "$1" in
     printf 'tenki version v0.test\\n'
     ;;
   status)
+    printf 'tenki status warning\\n' >&2
     printf '{"status":"Logged in (API key)","api_endpoint":"https://api.tenki.test","workspace_id":"ws_test","project_id":"proj_test"}\\n'
     ;;
   sandbox)
@@ -123,6 +125,8 @@ esac
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /crabbox-tenki-ok/);
   assert.match(result.stdout, /paused-session readiness check preserved state=paused/);
+  assert.match(result.stderr, /tenki status warning/);
+  assert.match(result.stderr, /crabbox list warning/);
 
   const crabboxCalls = fs.readFileSync(crabboxLog, "utf8");
   assert.match(crabboxCalls, /doctor --provider tenki/);
