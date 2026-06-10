@@ -3,10 +3,14 @@ package external
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,13 +23,18 @@ type leaseBackend struct {
 	rt   core.Runtime
 }
 
+const externalSlugReservationTTL = 6 * time.Hour
+
 func (b *leaseBackend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	leaseID := core.NewLeaseID()
-	slug, err := b.allocateLeaseSlug(leaseID, req.RequestedSlug)
+	slug, reservation, err := b.allocateLeaseSlug(leaseID, req.RequestedSlug)
 	if err != nil {
 		return core.LeaseTarget{}, err
+	}
+	if reservation != nil {
+		defer reservation.Release()
 	}
 	desired := &desiredLease{LeaseID: leaseID, Slug: slug, Name: core.LeaseProviderName(leaseID, slug)}
 	response, err := b.invoke(ctx, protocolRequest{
@@ -72,7 +81,45 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 	}
 	lease.Server.Status = "ready"
 	lease.Server.Labels["state"] = "ready"
-	if err := b.claimLeaseForRepo(lease.LeaseID, leaseSlugForClaim(lease, slug), req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+	claimSlug := leaseSlugForClaim(lease, slug)
+	var claimSlugReservation *slugReservation
+	if core.NormalizeLeaseSlug(claimSlug) != core.NormalizeLeaseSlug(slug) {
+		inUse, err := b.claimSlugInUse(claimSlug, leaseID)
+		if err != nil {
+			if !req.Keep {
+				err = appendAcquireCleanupError(err, b.rollbackAcquireRelease(ctx, leaseForProtocol(lease)))
+				core.RemoveExternalRouting(lease.LeaseID)
+			}
+			return core.LeaseTarget{}, err
+		}
+		if inUse {
+			var err error = core.Exit(4, "external provider returned slug %q which is already claimed in this lifecycle scope", claimSlug)
+			if !req.Keep {
+				err = appendAcquireCleanupError(err, b.rollbackAcquireRelease(ctx, leaseForProtocol(lease)))
+				core.RemoveExternalRouting(lease.LeaseID)
+			}
+			return core.LeaseTarget{}, err
+		}
+		var reserved bool
+		claimSlugReservation, reserved, err = b.reserveLeaseSlug(claimSlug, leaseID)
+		if err != nil {
+			if !req.Keep {
+				err = appendAcquireCleanupError(err, b.rollbackAcquireRelease(ctx, leaseForProtocol(lease)))
+				core.RemoveExternalRouting(lease.LeaseID)
+			}
+			return core.LeaseTarget{}, err
+		}
+		if !reserved {
+			var err error = core.Exit(4, "external provider returned slug %q which is already reserved in this lifecycle scope", claimSlug)
+			if !req.Keep {
+				err = appendAcquireCleanupError(err, b.rollbackAcquireRelease(ctx, leaseForProtocol(lease)))
+				core.RemoveExternalRouting(lease.LeaseID)
+			}
+			return core.LeaseTarget{}, err
+		}
+		defer claimSlugReservation.Release()
+	}
+	if err := b.claimLeaseForRepo(lease.LeaseID, claimSlug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
 			err = appendAcquireCleanupError(err, b.rollbackAcquireRelease(ctx, leaseForProtocol(lease)))
 			core.RemoveExternalRouting(lease.LeaseID)
@@ -384,28 +431,208 @@ func (b *leaseBackend) claimLeaseForRepo(leaseID, slug, repoRoot string, idleTim
 	return core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, b.claimScope(), repoRoot, idleTimeout, reclaim)
 }
 
-func (b *leaseBackend) allocateLeaseSlug(leaseID, requested string) (string, error) {
+func (b *leaseBackend) allocateLeaseSlug(leaseID, requested string) (string, *slugReservation, error) {
 	base := core.NormalizeLeaseSlug(requested)
-	checkClaims := base != ""
 	if base == "" {
 		base = core.NewLeaseSlug(leaseID)
 	}
-	slug := base
-	for attempt := 0; attempt < 20; attempt++ {
+	for attempt := 0; attempt < 40; attempt++ {
+		slug := base
+		if attempt > 0 {
+			slug = core.SlugWithCollisionSuffix(base, fmt.Sprintf("%s-%d", leaseID, attempt-1))
+		}
 		inUse := false
 		var err error
-		if checkClaims {
-			inUse, err = b.claimSlugInUse(slug, leaseID)
-		}
+		inUse, err = b.claimSlugInUse(slug, leaseID)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if !inUse {
-			return slug, nil
+			reservation, reserved, err := b.reserveLeaseSlug(slug, leaseID)
+			if err != nil {
+				return "", nil, err
+			}
+			if reserved {
+				return slug, reservation, nil
+			}
 		}
-		slug = core.SlugWithCollisionSuffix(base, fmt.Sprintf("%s-%d", leaseID, attempt))
 	}
-	return core.SlugWithCollisionSuffix(base, leaseID), nil
+	return "", nil, core.Exit(4, "could not reserve external lease slug %q in this lifecycle scope", base)
+}
+
+type slugReservation struct {
+	path  string
+	token string
+}
+
+type slugReservationRecord struct {
+	LeaseID   string `json:"leaseID"`
+	Slug      string `json:"slug"`
+	CreatedAt string `json:"createdAt"`
+	Token     string `json:"token"`
+	PID       int    `json:"pid,omitempty"`
+}
+
+func (r *slugReservation) Release() {
+	if r == nil || r.path == "" || r.token == "" {
+		return
+	}
+	unlock, err := waitForSlugReservationLock(r.path, 2*time.Second)
+	if err != nil {
+		return
+	}
+	defer unlock()
+	data, err := os.ReadFile(r.path)
+	if err != nil {
+		return
+	}
+	var record slugReservationRecord
+	if err := json.Unmarshal(data, &record); err != nil || record.Token != r.token {
+		return
+	}
+	_ = os.Remove(r.path)
+}
+
+func (b *leaseBackend) reserveLeaseSlug(slug, leaseID string) (*slugReservation, bool, error) {
+	dir, err := b.slugReservationDir()
+	if err != nil {
+		return nil, false, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, false, fmt.Errorf("create external slug reservation dir: %w", err)
+	}
+	path := slugReservationPath(dir, slug)
+	unlock, err := waitForSlugReservationLock(path, 30*time.Second)
+	if err != nil {
+		return nil, false, err
+	}
+	defer unlock()
+	token, err := newSlugReservationToken()
+	if err != nil {
+		return nil, false, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		reclaimed, err := reclaimStaleSlugReservation(path)
+		if err != nil {
+			return nil, false, err
+		}
+		if reclaimed {
+			file, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if err == nil {
+				if err := writeSlugReservation(file, leaseID, slug, token); err != nil {
+					_ = os.Remove(path)
+					return nil, false, err
+				}
+				return &slugReservation{path: path, token: token}, true, nil
+			}
+			if !errors.Is(err, os.ErrExist) {
+				return nil, false, fmt.Errorf("reserve external slug %s: %w", slug, err)
+			}
+		}
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("reserve external slug %s: %w", slug, err)
+	}
+	if err := writeSlugReservation(file, leaseID, slug, token); err != nil {
+		_ = os.Remove(path)
+		return nil, false, err
+	}
+	return &slugReservation{path: path, token: token}, true, nil
+}
+
+func slugReservationPath(dir, slug string) string {
+	sum := sha256.Sum256([]byte(slug))
+	return filepath.Join(dir, hex.EncodeToString(sum[:])+".json")
+}
+
+func waitForSlugReservationLock(path string, timeout time.Duration) (func(), error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		unlock, locked, err := lockSlugReservation(path)
+		if err != nil {
+			return nil, err
+		}
+		if locked {
+			return unlock, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out locking external slug reservation")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func reclaimStaleSlugReservation(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("stat external slug reservation: %w", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read external slug reservation: %w", err)
+	}
+	var record slugReservationRecord
+	if err := json.Unmarshal(data, &record); err != nil || strings.TrimSpace(record.CreatedAt) == "" {
+		if time.Since(info.ModTime()) <= externalSlugReservationTTL {
+			return false, nil
+		}
+		return removeStaleSlugReservation(path)
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, record.CreatedAt)
+	if err != nil {
+		if time.Since(info.ModTime()) <= externalSlugReservationTTL {
+			return false, nil
+		}
+		return removeStaleSlugReservation(path)
+	}
+	if time.Since(createdAt) <= externalSlugReservationTTL {
+		return false, nil
+	}
+	if slugReservationOwnerActive(record.PID) {
+		return false, nil
+	}
+	return removeStaleSlugReservation(path)
+}
+
+func writeSlugReservation(file *os.File, leaseID, slug, token string) error {
+	record := slugReservationRecord{LeaseID: leaseID, Slug: slug, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Token: token, PID: os.Getpid()}
+	if err := json.NewEncoder(file).Encode(record); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write external slug reservation: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close external slug reservation: %w", err)
+	}
+	return nil
+}
+
+func newSlugReservationToken() (string, error) {
+	var data [16]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return "", fmt.Errorf("generate external slug reservation token: %w", err)
+	}
+	return hex.EncodeToString(data[:]), nil
+}
+
+func removeStaleSlugReservation(path string) (bool, error) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("remove stale external slug reservation: %w", err)
+	}
+	return true, nil
+}
+
+func (b *leaseBackend) slugReservationDir() (string, error) {
+	dir, err := core.CrabboxStateDir()
+	if err != nil {
+		return "", err
+	}
+	scope := strings.TrimPrefix(b.claimScope(), "sha256:")
+	return filepath.Join(dir, "external-slug-reservations", scope), nil
 }
 
 func (b *leaseBackend) claimSlugInUse(slug, leaseID string) (bool, error) {
@@ -447,13 +674,20 @@ func (b *leaseBackend) resolveClaim(identifier string) (core.LeaseClaim, bool, e
 		return core.LeaseClaim{}, false, err
 	}
 	slug := core.NormalizeLeaseSlug(identifier)
+	var match core.LeaseClaim
 	for _, claim := range claims {
 		if !externalClaimMatchesScope(claim, scope) {
 			continue
 		}
 		if claim.LeaseID == identifier || (slug != "" && core.NormalizeLeaseSlug(claim.Slug) == slug) {
-			return claim, true, nil
+			if match.LeaseID != "" && match.LeaseID != claim.LeaseID {
+				return core.LeaseClaim{}, false, core.Exit(4, "external provider claim %q is ambiguous in this lifecycle scope", identifier)
+			}
+			match = claim
 		}
+	}
+	if match.LeaseID != "" {
+		return match, true, nil
 	}
 	return core.LeaseClaim{}, false, nil
 }

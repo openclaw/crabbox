@@ -130,6 +130,10 @@ func ReadLeaseClaim(leaseID string) (LeaseClaim, error) {
 	return readLeaseClaim(leaseID)
 }
 
+func CrabboxStateDir() (string, error) {
+	return crabboxStateDir()
+}
+
 func DirectLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep bool, now time.Time) map[string]string {
 	return directLeaseLabels(cfg, leaseID, slug, provider, market, keep, now)
 }

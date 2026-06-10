@@ -1273,20 +1273,216 @@ func TestAllocateLeaseSlugIgnoresOtherExternalScopes(t *testing.T) {
 	otherCfg.External.Config = map[string]any{"namespace": "prod", "cpu": 32}
 	claimExternalLease(t, otherCfg, "cbx_other", "shared", t.TempDir(), time.Minute, false)
 	backend := &leaseBackend{cfg: cfg}
-	slug, err := backend.allocateLeaseSlug("cbx_new", "shared")
+	slug, reservation, err := backend.allocateLeaseSlug("cbx_new", "shared")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if reservation != nil {
+		reservation.Release()
 	}
 	if slug != "shared" {
 		t.Fatalf("slug=%q, want shared when collision is outside scope", slug)
 	}
 	claimExternalLease(t, cfg, "cbx_current", "shared", t.TempDir(), time.Minute, false)
-	slug, err = backend.allocateLeaseSlug("cbx_next", "shared")
+	slug, reservation, err = backend.allocateLeaseSlug("cbx_next", "shared")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if reservation != nil {
+		defer reservation.Release()
+	}
 	if slug == "shared" || !strings.HasPrefix(slug, "shared-") {
 		t.Fatalf("slug=%q, want current-scope collision suffix", slug)
+	}
+}
+
+func TestAllocateLeaseSlugReservesRequestedSlug(t *testing.T) {
+	isolateCrabboxState(t)
+	backend := &leaseBackend{cfg: testConfig()}
+	first, firstReservation, err := backend.allocateLeaseSlug("cbx_first", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstReservation.Release()
+	if first != "shared" {
+		t.Fatalf("first slug=%q, want shared", first)
+	}
+	second, secondReservation, err := backend.allocateLeaseSlug("cbx_second", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondReservation != nil {
+		defer secondReservation.Release()
+	}
+	if second == "shared" || !strings.HasPrefix(second, "shared-") {
+		t.Fatalf("second slug=%q, want reserved collision suffix", second)
+	}
+}
+
+func TestAllocateLeaseSlugChecksGeneratedSlugClaims(t *testing.T) {
+	isolateCrabboxState(t)
+	cfg := testConfig()
+	leaseID := "cbx_new"
+	generated := core.NewLeaseSlug(leaseID)
+	claimExternalLease(t, cfg, "cbx_existing", generated, t.TempDir(), time.Minute, false)
+	backend := &leaseBackend{cfg: cfg}
+	slug, reservation, err := backend.allocateLeaseSlug(leaseID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reservation != nil {
+		defer reservation.Release()
+	}
+	if slug == generated || !strings.HasPrefix(slug, generated+"-") {
+		t.Fatalf("slug=%q, want generated collision suffix for %q", slug, generated)
+	}
+}
+
+func TestAllocateLeaseSlugReclaimsStaleReservation(t *testing.T) {
+	isolateCrabboxState(t)
+	backend := &leaseBackend{cfg: testConfig()}
+	dir, err := backend.slugReservationDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := slugReservationRecord{
+		LeaseID:   "cbx_stale",
+		Slug:      "shared",
+		CreatedAt: time.Now().Add(-externalSlugReservationTTL - time.Minute).UTC().Format(time.RFC3339Nano),
+	}
+	data, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(slugReservationPath(dir, "shared"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	slug, reservation, err := backend.allocateLeaseSlug("cbx_next", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reservation != nil {
+		defer reservation.Release()
+	}
+	if slug != "shared" {
+		t.Fatalf("slug=%q, want reclaimed shared", slug)
+	}
+}
+
+func TestAllocateLeaseSlugPreservesActiveStaleReservation(t *testing.T) {
+	isolateCrabboxState(t)
+	backend := &leaseBackend{cfg: testConfig()}
+	dir, err := backend.slugReservationDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	active := slugReservationRecord{
+		LeaseID:   "cbx_active",
+		Slug:      "shared",
+		CreatedAt: time.Now().Add(-externalSlugReservationTTL - time.Minute).UTC().Format(time.RFC3339Nano),
+		Token:     "active-token",
+		PID:       os.Getpid(),
+	}
+	data, err := json.Marshal(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := slugReservationPath(dir, "shared")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	slug, reservation, err := backend.allocateLeaseSlug("cbx_next", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reservation != nil {
+		defer reservation.Release()
+	}
+	if slug == "shared" || !strings.HasPrefix(slug, "shared-") {
+		t.Fatalf("slug=%q, want suffix while active reservation remains", slug)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("active reservation was removed: %v", err)
+	}
+}
+
+func TestAllocateLeaseSlugReclaimsMalformedStaleReservation(t *testing.T) {
+	isolateCrabboxState(t)
+	backend := &leaseBackend{cfg: testConfig()}
+	dir, err := backend.slugReservationDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := slugReservationPath(dir, "shared")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-externalSlugReservationTTL - time.Minute)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	slug, reservation, err := backend.allocateLeaseSlug("cbx_next", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reservation != nil {
+		defer reservation.Release()
+	}
+	if slug != "shared" {
+		t.Fatalf("slug=%q, want reclaimed shared", slug)
+	}
+}
+
+func TestSlugReservationReleasePreservesNewOwner(t *testing.T) {
+	isolateCrabboxState(t)
+	backend := &leaseBackend{cfg: testConfig()}
+	slug, reservation, err := backend.allocateLeaseSlug("cbx_first", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slug != "shared" || reservation == nil {
+		t.Fatalf("slug=%q reservation=%#v", slug, reservation)
+	}
+	replacement := slugReservationRecord{
+		LeaseID:   "cbx_second",
+		Slug:      "shared",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Token:     "replacement-token",
+	}
+	data, err := json.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reservation.path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reservation.Release()
+	if _, err := os.Stat(reservation.path); err != nil {
+		t.Fatalf("replacement reservation was removed: %v", err)
+	}
+	_ = os.Remove(reservation.path)
+}
+
+func TestResolveClaimRejectsDuplicateScopedSlug(t *testing.T) {
+	isolateCrabboxState(t)
+	cfg := testConfig()
+	claimExternalLease(t, cfg, "cbx_first", "shared", t.TempDir(), time.Minute, false)
+	claimExternalLease(t, cfg, "cbx_second", "shared", t.TempDir(), time.Minute, false)
+	backend := &leaseBackend{cfg: cfg}
+	if _, ok, err := backend.resolveClaim("shared"); err == nil || ok || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ok=%v err=%v, want ambiguous slug", ok, err)
+	}
+	if claim, ok, err := backend.resolveClaim("cbx_first"); err != nil || !ok || claim.LeaseID != "cbx_first" {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
 }
 
