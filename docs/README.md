@@ -128,7 +128,8 @@ Pick whichever matches your intent:
   [Browser portal](features/portal.md),
   [Capabilities](features/capabilities.md),
   [Interactive desktop and VNC](features/interactive-desktop-vnc.md),
-  [Telemetry](features/telemetry.md), [Sync](features/sync.md).
+  [Telemetry](features/telemetry.md), [Sync](features/sync.md),
+  [Data Runs](features/data-runs.md).
 - **Pick or add a target:** [Provider reference](providers/README.md),
   [Providers feature overview](features/providers.md),
   [Provider authoring](features/provider-authoring.md),

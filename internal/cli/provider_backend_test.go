@@ -1143,6 +1143,27 @@ func TestRejectDelegatedSyncOptionsAllowsModuleRunScriptOnly(t *testing.T) {
 	}
 }
 
+func TestRejectDelegatedSyncOptionsAllowsBoundedArtifactFeature(t *testing.T) {
+	spec := ProviderSpec{Name: "islo", Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeatureRunDownloads}}
+	req := RunRequest{
+		NoSync:                true,
+		RequiredArtifactGlobs: []string{"reports/data/manifest.json"},
+		Downloads:             []string{"reports/data/manifest.json=manifest.json"},
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, req); err != nil {
+		t.Fatalf("delegated artifact provider should allow required file/download: %v", err)
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{ArtifactGlobs: []string{"reports/data/**"}}); err == nil {
+		t.Fatal("delegated download provider should reject artifact globs")
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{RequiredArtifactGlobs: []string{"reports/data/*.json"}}); err == nil {
+		t.Fatal("delegated artifact provider should reject glob required artifacts")
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{Downloads: []string{"../secret=secret.txt"}}); err == nil {
+		t.Fatal("delegated artifact provider should reject unsafe download paths")
+	}
+}
+
 func TestProviderFlagsApplyDaytonaAndIsloWithoutCoreEdits(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)

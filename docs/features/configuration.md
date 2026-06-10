@@ -225,6 +225,36 @@ Actions features. When `hydrate.actions` is false or omitted, `job run` passes
 `--no-hydrate` to the nested `run` even if the global profile configures
 `actions.workflow`.
 
+### Data Runs
+
+Named data runs live under `dataRuns:` and expand into normal `crabbox run`
+commands plus bounded manifest validation. They are for caller-owned data
+commands, not connector catalogs or schedulers. See [Data Runs](data-runs.md)
+and [`crabbox data`](../commands/data.md).
+
+```yaml
+dataRuns:
+  nightly-import:
+    provider: aws
+    target: linux
+    shell: true
+    command: ./scripts/nightly-import.sh
+    # Use commandArgs instead of shell/command when a delegated provider needs
+    # exact argv and rejects --shell.
+    # commandArgs: ["sh", "-lc", "mkdir -p reports/data && python run.py"]
+    manifest: reports/data/manifest.json
+    requiredArtifacts:
+      - reports/data/quality.json
+    artifactGlobs:
+      - reports/data/**
+    policy:
+      sourceIdentity: service-account:data-reader
+      sinkIdentity: service-account:data-writer
+      egress: restricted
+      promotion: manual
+      enforcement: declared-only
+```
+
 ### Capacity
 
 ```yaml

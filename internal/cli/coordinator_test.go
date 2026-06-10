@@ -654,6 +654,38 @@ func TestCoordinatorAppendRunTelemetry(t *testing.T) {
 	}
 }
 
+func TestCoordinatorUpdateRunDataSummary(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/runs/run_123/data-summary" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"cbx_123","owner":"alice@example.com","org":"example-org","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"succeeded","phase":"succeeded","exitCode":0,"logBytes":0,"logTruncated":false,"dataSummary":{"schemaVersion":"crabbox.data-run-summary.v1","status":"success","manifestPath":"reports/data/manifest.json","inputs":0,"outputs":1,"generatedAt":"2026-06-08T00:00:00Z"},"startedAt":"2026-05-02T00:00:00Z"}}`))
+	}))
+	defer server.Close()
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	run, err := client.UpdateRunDataSummary(context.Background(), "run_123", DataRunSummary{
+		SchemaVersion: dataRunSummarySchema,
+		Status:        "success",
+		ManifestPath:  "reports/data/manifest.json",
+		Outputs:       1,
+		GeneratedAt:   "2026-06-08T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, ok := body["dataSummary"].(map[string]any)
+	if !ok || summary["schemaVersion"] != dataRunSummarySchema || summary["outputs"] != float64(1) {
+		t.Fatalf("data summary body=%#v", body)
+	}
+	if run.DataSummary == nil || run.DataSummary.Outputs != 1 {
+		t.Fatalf("run summary=%#v", run.DataSummary)
+	}
+}
+
 func TestCoordinatorHeartbeatTouchesImmediately(t *testing.T) {
 	touches := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

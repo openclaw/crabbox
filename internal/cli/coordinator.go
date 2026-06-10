@@ -409,6 +409,7 @@ type CoordinatorRun struct {
 	RetryLikely  string               `json:"retryLikely,omitempty"`
 	Results      *TestResultSummary   `json:"results,omitempty"`
 	Telemetry    *RunTelemetrySummary `json:"telemetry,omitempty"`
+	DataSummary  *DataRunSummary      `json:"dataSummary,omitempty"`
 	StartedAt    string               `json:"startedAt"`
 	LastEventAt  string               `json:"lastEventAt,omitempty"`
 	EventCount   int                  `json:"eventCount,omitempty"`
@@ -1483,6 +1484,14 @@ func (c *CoordinatorClient) AppendRunTelemetry(ctx context.Context, runID string
 	var res CoordinatorRunResponse
 	err := c.do(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/telemetry", map[string]any{
 		"telemetry": telemetry,
+	}, &res)
+	return res.Run, err
+}
+
+func (c *CoordinatorClient) UpdateRunDataSummary(ctx context.Context, runID string, summary DataRunSummary) (CoordinatorRun, error) {
+	var res CoordinatorRunResponse
+	err := c.do(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/data-summary", map[string]any{
+		"dataSummary": summary,
 	}, &res)
 	return res.Run, err
 }

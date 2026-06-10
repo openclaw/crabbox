@@ -319,6 +319,7 @@ const (
 	FeatureRunProof    Feature = "run-proof"
 	FeatureRunSession  Feature = "run-session"
 	FeatureRunArtifacts Feature = "run-artifacts"
+	FeatureRunDownloads Feature = "run-downloads"
 )
 ```
 

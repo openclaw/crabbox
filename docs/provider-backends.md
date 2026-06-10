@@ -116,12 +116,25 @@ can declare that feature in `spec` so `--sync-only` and `--force-sync-large`
 are allowed while the rest stay rejected. The helper rejects checksum sync,
 full resync, local stdout/stderr captures, capture-on-fail, downloads, artifact
 globs, uploaded scripts, env helpers, `--stop-after`, fresh PR checkouts, and
-`--emit-proof` (unless the provider declares `FeatureRunProof`). Providers that
-execute source modules instead of shell commands may declare `FeatureModuleRun`;
-then `--script` and `--script-stdin` are accepted as module source input, while
-trailing shell command argv remains rejected. Do not pretend a delegated
-provider is SSH-like unless it has a stable SSH contract. If Crabbox cannot run
-rsync and remote commands itself, use `DelegatedRunBackend`.
+`--emit-proof` (unless the provider declares `FeatureRunProof`) unless another
+explicit feature/capability covers the request. Providers that execute source
+modules instead of shell commands may declare `FeatureModuleRun`; then `--script`
+and `--script-stdin` are accepted as module source input, while trailing shell
+command argv remains rejected. Delegated artifact globs require
+`FeatureRunArtifacts`, and providers that collect artifact archives should
+implement `DelegatedRunArtifactBackend`. Delegated downloads require
+`FeatureRunDownloads`, with single-file materialization behind the provider
+adapter. Required artifacts require one of those artifact capabilities: archive
+providers may support globs, while download-capable single-file providers accept
+safe relative file paths. Do not pretend a delegated provider is SSH-like unless
+it has a stable SSH contract. If Crabbox cannot run rsync and remote commands
+itself, use `DelegatedRunBackend`.
+
+Providers that can evaluate data-run policy declarations may implement
+`DataRunPolicyBackend`. The hook receives provider-neutral source identity, sink
+identity, egress, and promotion declarations and returns an enforcement tier.
+Until an adapter can prove enforcement, return `declared-only` or `unsupported`;
+core rejects unproven `enforced` claims.
 
 ### Optional interfaces
 
@@ -396,6 +409,8 @@ cli.FeatureCacheVolume  // "cache-volume"
 cli.FeatureRunProof     // "run-proof"
 cli.FeatureRunSession   // "run-session"
 cli.FeatureModuleRun    // "module-run"
+cli.FeatureRunArtifacts // "run-artifacts"
+cli.FeatureRunDownloads // "run-downloads"
 ```
 
 Actions runner hydration is intentionally not a provider feature. It is a core
@@ -423,6 +438,11 @@ Checkpoint-related features are reserved for versioned workspaces:
   handle.
 - `FeatureModuleRun`: delegated provider accepts `--script` or `--script-stdin`
   as source module input and does not interpret trailing argv as a shell command.
+- `FeatureRunArtifacts`: delegated provider can validate and collect bounded run
+  artifact globs after a successful command, including required artifacts.
+- `FeatureRunDownloads`: delegated provider can materialize bounded single-file
+  `--download` outputs and validate safe relative single-file required artifacts
+  after a successful command.
 - `FeatureArchiveSync`: provider syncs the checkout as an uploaded archive rather
   than over rsync.
 - `FeatureURLBridge`: delegated provider can expose a lease's port through the

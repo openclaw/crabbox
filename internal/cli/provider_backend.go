@@ -119,6 +119,23 @@ type DelegatedRunBackend interface {
 	Stop(ctx context.Context, req StopRequest) error
 }
 
+type DataRunPolicyRequest struct {
+	SourceIdentity string
+	SinkIdentity   string
+	Egress         string
+	Promotion      string
+}
+
+type DataRunPolicyResult struct {
+	Enforcement string
+	Message     string
+}
+
+type DataRunPolicyBackend interface {
+	Backend
+	DataRunPolicy(ctx context.Context, req DataRunPolicyRequest) (DataRunPolicyResult, error)
+}
+
 type DelegatedRunArtifactBackend interface {
 	Backend
 	CollectRunArtifacts(ctx context.Context, req DelegatedRunArtifactRequest) (DelegatedRunArtifactResult, error)
@@ -349,6 +366,7 @@ const (
 	FeatureRunArtifacts Feature = "run-artifacts"
 	FeatureModuleRun    Feature = "module-run"
 	FeaturePauseResume  Feature = "pause-resume"
+	FeatureRunDownloads Feature = "run-downloads"
 )
 
 type FeatureSet []Feature
@@ -1271,15 +1289,26 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if req.CaptureOnFail {
 		return exit(2, "%s delegates run execution; --capture-on-fail is not supported", provider)
 	}
-	if len(req.Downloads) > 0 {
+	runArtifacts := featureSetHas(spec.Features, FeatureRunArtifacts)
+	runDownloads := featureSetHas(spec.Features, FeatureRunDownloads)
+	if len(req.Downloads) > 0 && !runDownloads {
 		return exit(2, "%s delegates run execution; --download is not supported", provider)
 	}
-	runArtifacts := featureSetHas(spec.Features, FeatureRunArtifacts)
 	if len(req.ArtifactGlobs) > 0 && !runArtifacts {
 		return exit(2, "%s delegates run execution; --artifact-glob is not supported", provider)
 	}
-	if len(req.RequiredArtifactGlobs) > 0 && !runArtifacts {
+	if len(req.RequiredArtifactGlobs) > 0 && !runArtifacts && !runDownloads {
 		return exit(2, "%s delegates run execution; --require-artifact is not supported", provider)
+	}
+	if runDownloads {
+		if err := validateDelegatedDownloadRequests(req.Downloads); err != nil {
+			return err
+		}
+	}
+	if runDownloads && !runArtifacts {
+		if err := validateDelegatedArtifactFileRequests(req.RequiredArtifactGlobs); err != nil {
+			return err
+		}
 	}
 	if req.EmitProof != "" && !featureSetHas(spec.Features, FeatureRunProof) {
 		return exit(2, "%s delegates run execution; --emit-proof is not supported", provider)

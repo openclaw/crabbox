@@ -74,6 +74,7 @@ Provider deep-dives that live here in `features/`:
 
 - [Sync](sync.md): Git file-list manifests, rsync, fingerprints, excludes, guardrails, and sanity checks.
 - [Jobs](jobs.md): named repo-local warmup, hydrate, run, and cleanup workflows.
+- [Data Runs](data-runs.md): caller-owned data commands with bounded evidence manifests.
 - [Actions hydration](actions-hydration.md): let GitHub Actions prepare a runner, then sync local work into that workspace.
 - [Capsules](capsules.md): local-first replay manifests for GitHub Actions failures.
 - [Checkpoints](checkpoints.md): save, restore, and fork reusable remote workspaces.
@@ -103,6 +104,7 @@ Provider deep-dives that live here in `features/`:
 - [warmup](../commands/warmup.md) — provision a warm box
 - [run](../commands/run.md) — sync and run a command
 - [job](../commands/job.md) — run a named repo job
+- [data](../commands/data.md) — run a data workflow with bounded evidence
 - [status](../commands/status.md) — show lease status
 - [list](../commands/list.md) — list active leases
 - [stop](../commands/stop.md) — release a lease

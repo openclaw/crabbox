@@ -193,6 +193,7 @@ type Config struct {
 	Presets                       map[string]PresetConfig
 	ProofTemplates                map[string]ProofTemplateConfig
 	Jobs                          map[string]JobConfig
+	DataRuns                      map[string]DataRunConfig
 }
 
 type SyncConfig struct {
@@ -2275,6 +2276,7 @@ type fileConfig struct {
 	Presets                  map[string]filePresetConfig         `yaml:"presets,omitempty"`
 	ProofTemplates           map[string]fileProofTemplateConfig  `yaml:"proofTemplates,omitempty"`
 	Jobs                     map[string]fileJobConfig            `yaml:"jobs,omitempty"`
+	DataRuns                 map[string]fileDataRunConfig        `yaml:"dataRuns,omitempty"`
 	TTL                      string                              `yaml:"ttl,omitempty"`
 	IdleTimeout              string                              `yaml:"idleTimeout,omitempty"`
 	WorkRoot                 string                              `yaml:"workRoot,omitempty"`
@@ -3248,6 +3250,42 @@ type fileJobConfig struct {
 	JUnit          []string              `yaml:"junit,omitempty"`
 	Downloads      []string              `yaml:"downloads,omitempty"`
 	Stop           string                `yaml:"stop,omitempty"`
+}
+
+type fileDataRunConfig struct {
+	Provider          string                   `yaml:"provider,omitempty"`
+	Target            string                   `yaml:"target,omitempty"`
+	TargetOS          string                   `yaml:"targetOS,omitempty"`
+	Windows           *fileWindowsConfig       `yaml:"windows,omitempty"`
+	Profile           string                   `yaml:"profile,omitempty"`
+	Class             string                   `yaml:"class,omitempty"`
+	Architecture      string                   `yaml:"architecture,omitempty"`
+	ServerType        string                   `yaml:"serverType,omitempty"`
+	Type              string                   `yaml:"type,omitempty"`
+	Capacity          *fileCapacityConfig      `yaml:"capacity,omitempty"`
+	Market            string                   `yaml:"market,omitempty"`
+	TTL               string                   `yaml:"ttl,omitempty"`
+	IdleTimeout       string                   `yaml:"idleTimeout,omitempty"`
+	Network           string                   `yaml:"network,omitempty"`
+	Shell             *bool                    `yaml:"shell,omitempty"`
+	Command           string                   `yaml:"command,omitempty"`
+	CommandArgs       []string                 `yaml:"commandArgs,omitempty"`
+	NoSync            *bool                    `yaml:"noSync,omitempty"`
+	ForceSyncLarge    *bool                    `yaml:"forceSyncLarge,omitempty"`
+	Manifest          string                   `yaml:"manifest,omitempty"`
+	RequiredArtifacts []string                 `yaml:"requiredArtifacts,omitempty"`
+	ArtifactGlobs     []string                 `yaml:"artifactGlobs,omitempty"`
+	JUnit             []string                 `yaml:"junit,omitempty"`
+	Downloads         []string                 `yaml:"downloads,omitempty"`
+	Policy            *fileDataRunPolicyConfig `yaml:"policy,omitempty"`
+}
+
+type fileDataRunPolicyConfig struct {
+	SourceIdentity string `yaml:"sourceIdentity,omitempty"`
+	SinkIdentity   string `yaml:"sinkIdentity,omitempty"`
+	Egress         string `yaml:"egress,omitempty"`
+	Promotion      string `yaml:"promotion,omitempty"`
+	Enforcement    string `yaml:"enforcement,omitempty"`
 }
 
 type fileJobHydrateConfig struct {
@@ -5104,6 +5142,22 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.Jobs[name] = applyFileJobConfig(cfg.Jobs[name], job)
 		}
 	}
+	if len(file.DataRuns) > 0 {
+		if cfg.DataRuns == nil {
+			cfg.DataRuns = map[string]DataRunConfig{}
+		}
+		for name, run := range file.DataRuns {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			applied, err := applyFileDataRunConfig(cfg.DataRuns[name], run)
+			if err != nil {
+				return err
+			}
+			cfg.DataRuns[name] = applied
+		}
+	}
 	return nil
 }
 
@@ -5343,6 +5397,97 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 		job.Stop = file.Stop
 	}
 	return job
+}
+
+func applyFileDataRunConfig(run DataRunConfig, file fileDataRunConfig) (DataRunConfig, error) {
+	if file.Provider != "" {
+		run.Provider = file.Provider
+	}
+	if file.Target != "" {
+		run.Target = file.Target
+	}
+	if file.TargetOS != "" {
+		run.Target = file.TargetOS
+	}
+	if file.Windows != nil && file.Windows.Mode != "" {
+		run.WindowsMode = file.Windows.Mode
+	}
+	if file.Profile != "" {
+		run.Profile = file.Profile
+	}
+	if file.Class != "" {
+		run.Class = file.Class
+	}
+	if file.Architecture != "" {
+		run.Architecture = file.Architecture
+	}
+	if file.ServerType != "" {
+		run.ServerType = file.ServerType
+	}
+	if file.Type != "" {
+		run.ServerType = file.Type
+	}
+	if file.Capacity != nil && file.Capacity.Market != "" {
+		run.Market = file.Capacity.Market
+	}
+	if file.Market != "" {
+		run.Market = file.Market
+	}
+	if file.TTL != "" {
+		ttl, err := time.ParseDuration(file.TTL)
+		if err != nil {
+			return run, fmt.Errorf("invalid data run ttl %q: %w", file.TTL, err)
+		}
+		run.TTL = ttl
+	}
+	if file.IdleTimeout != "" {
+		idle, err := time.ParseDuration(file.IdleTimeout)
+		if err != nil {
+			return run, fmt.Errorf("invalid data run idleTimeout %q: %w", file.IdleTimeout, err)
+		}
+		run.IdleTimeout = idle
+	}
+	if file.Network != "" {
+		run.Network = file.Network
+	}
+	if file.Shell != nil {
+		run.Shell = *file.Shell
+	}
+	if file.Command != "" {
+		run.Command = file.Command
+	}
+	if len(file.CommandArgs) > 0 {
+		run.CommandArgs = append([]string(nil), file.CommandArgs...)
+	}
+	if file.NoSync != nil {
+		run.NoSync = *file.NoSync
+	}
+	if file.ForceSyncLarge != nil {
+		run.ForceSyncLarge = *file.ForceSyncLarge
+	}
+	if file.Manifest != "" {
+		run.Manifest = file.Manifest
+	}
+	if len(file.RequiredArtifacts) > 0 {
+		run.RequiredArtifacts = appendUniqueStrings(nil, file.RequiredArtifacts...)
+	}
+	if len(file.ArtifactGlobs) > 0 {
+		run.ArtifactGlobs = appendUniqueStrings(nil, file.ArtifactGlobs...)
+	}
+	if len(file.JUnit) > 0 {
+		run.JUnit = appendUniqueStrings(nil, file.JUnit...)
+	}
+	if len(file.Downloads) > 0 {
+		run.Downloads = appendUniqueStrings(nil, file.Downloads...)
+	}
+	if file.Policy != nil {
+		run.Policy.SourceIdentity = file.Policy.SourceIdentity
+		run.Policy.SinkIdentity = file.Policy.SinkIdentity
+		run.Policy.Egress = file.Policy.Egress
+		run.Policy.Promotion = file.Policy.Promotion
+		run.Policy.Enforcement = file.Policy.Enforcement
+	}
+	return run, nil
 }
 
 func applyLeaseDuration(target *time.Duration, value string) {

@@ -171,6 +171,7 @@ Commands:
   prewarm     Lease and hydrate a reusable test-ready box
   run         Sync the repo, run a remote command, stream output
   job         Run named repo-local Crabbox jobs
+  data        Run caller-owned data workflows with bounded evidence manifests
   desktop     Launch apps into a visible desktop session
   media       Create preview artifacts from recorded desktop videos
   artifacts   Collect, transform, and publish QA artifacts
@@ -217,6 +218,7 @@ Common Flows:
   crabbox warmup
   crabbox status --id blue-lobster --wait
   crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
+  crabbox data run nightly-import
   crabbox ssh --id blue-lobster
   crabbox ports --id blue-lobster --publish 8080
   crabbox cp --id blue-lobster ./coverage.xml SANDBOX:/tmp/coverage.xml
