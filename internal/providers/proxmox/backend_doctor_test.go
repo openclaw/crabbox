@@ -14,6 +14,7 @@ type fakeProxmoxDoctorClient struct {
 	listCalls   int
 	getCalls    int
 	deleteCalls int
+	deletedIDs  []string
 	mutated     bool
 	servers     []Server
 }
@@ -38,8 +39,9 @@ func (c *fakeProxmoxDoctorClient) GetServer(context.Context, string) (Server, er
 	return server, nil
 }
 
-func (c *fakeProxmoxDoctorClient) DeleteServer(context.Context, string) error {
+func (c *fakeProxmoxDoctorClient) DeleteServer(_ context.Context, id string) error {
 	c.deleteCalls++
+	c.deletedIDs = append(c.deletedIDs, id)
 	c.mutated = true
 	return nil
 }
@@ -109,5 +111,116 @@ func TestProxmoxAcquirePollsUntilServerIPIsAvailable(t *testing.T) {
 	}
 	if fake.deleteCalls != 0 {
 		t.Fatal("delayed IP discovery should not delete the VM")
+	}
+}
+
+func TestProxmoxCleanupRemovesClaimAfterDelete(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_proxmox_cleanup"
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "old", "proxmox", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeProxmoxDoctorClient{servers: []Server{expiredProxmoxServer("101", leaseID)}}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldClient })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.deleteCalls != 1 {
+		t.Fatalf("deleteCalls=%d, want 1", fake.deleteCalls)
+	}
+	if len(fake.deletedIDs) != 1 || fake.deletedIDs[0] != "101" {
+		t.Fatalf("deletedIDs=%v, want [101]", fake.deletedIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok {
+		t.Fatalf("claim ok=%t err=%v, want removed", ok, err)
+	}
+}
+
+func TestProxmoxCleanupDryRunPreservesClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_proxmox_dryrun"
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "old", "proxmox", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeProxmoxDoctorClient{servers: []Server{expiredProxmoxServer("101", leaseID)}}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldClient })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.deleteCalls != 0 {
+		t.Fatalf("deleteCalls=%d, want 0", fake.deleteCalls)
+	}
+	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || !ok {
+		t.Fatalf("claim ok=%t err=%v, want preserved", ok, err)
+	}
+}
+
+func TestProxmoxCleanupIgnoresInvalidClaimLabel(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeProxmoxDoctorClient{servers: []Server{expiredProxmoxServer("101", "../target")}}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldClient })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedIDs) != 1 || fake.deletedIDs[0] != "101" {
+		t.Fatalf("deletedIDs=%v, want [101]", fake.deletedIDs)
+	}
+}
+
+func TestProxmoxCleanupWithoutLeaseLabelPreservesNumericClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := core.ClaimLeaseForRepoProvider("101", "numeric", "proxmox", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	server := expiredProxmoxServer("101", "")
+	delete(server.Labels, "lease")
+	fake := &fakeProxmoxDoctorClient{servers: []Server{server}}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldClient })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedIDs) != 1 || fake.deletedIDs[0] != "101" {
+		t.Fatalf("deletedIDs=%v, want [101]", fake.deletedIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaim("101"); err != nil || !ok {
+		t.Fatalf("numeric claim ok=%t err=%v, want preserved", ok, err)
+	}
+}
+
+func expiredProxmoxServer(id, leaseID string) Server {
+	return Server{
+		CloudID: id,
+		Name:    "crabbox-old",
+		Labels: map[string]string{
+			"lease":      leaseID,
+			"slug":       "old",
+			"keep":       "false",
+			"state":      "ready",
+			"expires_at": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+		},
 	}
 }

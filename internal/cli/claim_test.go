@@ -26,6 +26,39 @@ func TestClaimLeaseForRepoWritesAndUpdatesClaim(t *testing.T) {
 	}
 }
 
+func TestLeaseClaimPathRejectsTraversalIDs(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := claimLeaseForRepoProvider("../target", "bad", "proxmox", repo, 30*time.Minute, false); err == nil {
+		t.Fatal("claim with traversal lease id succeeded")
+	}
+	if err := claimLeaseForRepoProvider(" cbx_123 ", "bad", "proxmox", repo, 30*time.Minute, false); err == nil {
+		t.Fatal("claim with whitespace-padded lease id succeeded")
+	}
+	if err := claimLeaseForRepoProvider("site:runner", "bad", "proxmox", repo, 30*time.Minute, false); err == nil {
+		t.Fatal("claim with Windows-reserved lease id character succeeded")
+	}
+	if err := claimLeaseForRepoProvider("CON", "bad", "proxmox", repo, 30*time.Minute, false); err == nil {
+		t.Fatal("claim with Windows-reserved device name succeeded")
+	}
+	if _, ok, err := resolveLeaseClaim("../target"); err != nil || ok {
+		t.Fatalf("resolve traversal id ok=%t err=%v, want no direct claim match", ok, err)
+	}
+}
+
+func TestLeaseClaimPathAllowsCustomFilenameIDs(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo := filepath.Join(t.TempDir(), "repo")
+	for _, leaseID := range []string{"host@example.com", "site-runner", "東京"} {
+		if err := claimLeaseForRepoProvider(leaseID, "custom", "static", repo, 30*time.Minute, false); err != nil {
+			t.Fatalf("claimLeaseForRepoProvider(%q): %v", leaseID, err)
+		}
+		if claim, ok, err := resolveLeaseClaim(leaseID); err != nil || !ok || claim.LeaseID != leaseID {
+			t.Fatalf("resolve %q claim=%#v ok=%t err=%v", leaseID, claim, ok, err)
+		}
+	}
+}
+
 func TestClaimLeaseTargetForRepoConfigStoresEndpointMetadata(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := baseConfig()

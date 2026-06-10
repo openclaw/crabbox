@@ -35,6 +35,12 @@ type leaseClaim struct {
 	Labels             map[string]string `json:"labels,omitempty"`
 }
 
+type invalidLeaseClaimIDError struct{ id string }
+
+func (e invalidLeaseClaimIDError) Error() string {
+	return "invalid lease claim id " + strconv.Quote(e.id)
+}
+
 func claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return claimLeaseForRepoProvider(leaseID, slug, "", repoRoot, idleTimeout, reclaim)
 }
@@ -423,6 +429,10 @@ func listLeaseClaims() ([]leaseClaim, error) {
 func readLeaseClaim(leaseID string) (leaseClaim, error) {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
+		var invalid invalidLeaseClaimIDError
+		if errors.As(err, &invalid) {
+			return leaseClaim{}, nil
+		}
 		return leaseClaim{}, err
 	}
 	data, err := os.ReadFile(path)
@@ -440,11 +450,43 @@ func readLeaseClaim(leaseID string) (leaseClaim, error) {
 }
 
 func leaseClaimPath(leaseID string) (string, error) {
+	if leaseID != strings.TrimSpace(leaseID) {
+		return "", invalidLeaseClaimIDError{id: leaseID}
+	}
+	if !validLeaseClaimID(leaseID) {
+		return "", invalidLeaseClaimIDError{id: leaseID}
+	}
 	dir, err := crabboxStateDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(dir, "claims", leaseID+".json"), nil
+}
+
+func validLeaseClaimID(leaseID string) bool {
+	if leaseID == "" || leaseID == "." || leaseID == ".." {
+		return false
+	}
+	if strings.ContainsAny(leaseID, `<>:"/\|?*`) || strings.ContainsRune(leaseID, 0) || strings.HasSuffix(leaseID, ".") {
+		return false
+	}
+	for _, r := range leaseID {
+		if r < 32 {
+			return false
+		}
+	}
+	name := strings.ToUpper(leaseID)
+	if i := strings.IndexByte(name, '.'); i >= 0 {
+		name = name[:i]
+	}
+	switch name {
+	case "CON", "PRN", "AUX", "NUL":
+		return false
+	}
+	if len(name) == 4 && (strings.HasPrefix(name, "COM") || strings.HasPrefix(name, "LPT")) && name[3] >= '1' && name[3] <= '9' {
+		return false
+	}
+	return true
 }
 
 func crabboxStateDir() (string, error) {
