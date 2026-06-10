@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -131,12 +132,22 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		_ = b.removeInstance(context.Background(), name)
 		return LeaseTarget{}, err
 	}
+	claimCreated := false
+	rollbackProvisioned := func(cause error) error {
+		if req.Keep {
+			return cause
+		}
+		if err := b.removeInstance(context.Background(), name); err != nil {
+			return errors.Join(cause, fmt.Errorf("multipass cleanup failed for instance %s: %w", name, err))
+		}
+		if claimCreated {
+			removeLeaseClaim(leaseID)
+		}
+		return cause
+	}
 	info, err := b.inspectInstance(ctx, name)
 	if err != nil {
-		if !req.Keep {
-			_ = b.removeInstance(context.Background(), name)
-		}
-		return LeaseTarget{}, err
+		return LeaseTarget{}, rollbackProvisioned(err)
 	}
 	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
 	labels["instance"] = name
@@ -147,28 +158,17 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
 	lease, err := b.prepareLease(ctx, cfg, info.toInstance(name), claim, true)
 	if err != nil {
-		if !req.Keep {
-			_ = b.removeInstance(context.Background(), name)
-		}
-		return LeaseTarget{}, err
+		return LeaseTarget{}, rollbackProvisioned(err)
 	}
 	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		if !req.Keep {
-			_ = b.removeInstance(context.Background(), name)
-		}
-		return LeaseTarget{}, err
+		return LeaseTarget{}, rollbackProvisioned(err)
 	}
+	claimCreated = true
 	if err := updateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
-		if !req.Keep {
-			_ = b.removeInstance(context.Background(), name)
-		}
-		return LeaseTarget{}, err
+		return LeaseTarget{}, rollbackProvisioned(err)
 	}
 	if err := updateLeaseClaimCacheVolumes(leaseID, cacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
-		if !req.Keep {
-			_ = b.removeInstance(context.Background(), name)
-		}
-		return LeaseTarget{}, err
+		return LeaseTarget{}, rollbackProvisioned(err)
 	}
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
