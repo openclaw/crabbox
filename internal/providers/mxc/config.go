@@ -44,6 +44,9 @@ type mxcUI struct {
 }
 
 func buildConfig(cfg Config, req RunRequest) (mxcConfig, error) {
+	if req.ShellMode && !cfg.MXC.AllowWindowsUI {
+		return mxcConfig{}, exit(2, "provider=mxc --shell uses Windows PowerShell; rerun with --mxc-allow-windows-ui")
+	}
 	commandLine, err := windowsCommandLine(req.Command, req.ShellMode)
 	if err != nil {
 		return mxcConfig{}, err

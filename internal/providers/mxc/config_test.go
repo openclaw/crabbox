@@ -93,6 +93,13 @@ func TestBuildConfigAllowsExplicitDACLMutationFallback(t *testing.T) {
 	}
 }
 
+func TestBuildConfigShellRequiresWindowsUI(t *testing.T) {
+	_, err := buildConfig(core.BaseConfig(), RunRequest{Command: []string{"npm", "test"}, ShellMode: true})
+	if err == nil || !strings.Contains(err.Error(), "--mxc-allow-windows-ui") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestBuildConfigRejectsVolumeRoot(t *testing.T) {
 	_, err := buildConfig(core.BaseConfig(), RunRequest{Repo: core.Repo{Root: `C:\`}, Command: []string{"cmd.exe", "/c", "exit", "0"}})
 	if err == nil || !strings.Contains(err.Error(), "volume root") {

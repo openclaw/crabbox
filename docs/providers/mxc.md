@@ -46,12 +46,13 @@ crabbox run --provider mxc --target windows -- cmd.exe /d /c cd
 Outbound network access is blocked by default:
 
 ```powershell
-crabbox run --provider mxc --mxc-network allow --shell -- npm test
+crabbox run --provider mxc --mxc-network allow --mxc-allow-windows-ui --shell -- npm test
 ```
 
 Use `--shell` for Windows `.cmd` and `.bat` shims such as `npm`, `pnpm`, and
 `yarn`; direct mode fails closed instead of passing unescaped arguments through
-`cmd.exe`.
+`cmd.exe`. Shell mode uses Windows PowerShell and therefore requires the explicit
+`--mxc-allow-windows-ui` capability opt-in.
 
 ## Configuration
 
