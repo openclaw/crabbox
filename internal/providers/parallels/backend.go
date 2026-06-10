@@ -80,6 +80,17 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	keepKey := false
+	defer func() {
+		if !keepKey {
+			core.RemoveStoredTestboxKey(leaseID)
+		}
+	}()
+	cleanupVM := func(id string) {
+		if err := client.Delete(context.Background(), id); err != nil {
+			keepKey = true
+		}
+	}
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
 	snapshotID := strings.TrimSpace(firstNonEmpty(cfg.Parallels.SourceSnapshotID, cfg.Parallels.SourceSnapshot))
@@ -97,24 +108,24 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		return LeaseTarget{}, err
 	}
 	if err := client.Start(ctx, server.CloudID); err != nil {
-		_ = client.Delete(context.Background(), server.CloudID)
+		cleanupVM(server.CloudID)
 		return LeaseTarget{}, err
 	}
 	vm, err := client.WaitForIP(ctx, server.CloudID, cfg.Parallels.StartupTimeout)
 	if err != nil {
-		_ = client.Delete(context.Background(), server.CloudID)
+		cleanupVM(server.CloudID)
 		return LeaseTarget{}, err
 	}
 	if err := client.WaitForGuestExec(ctx, server.CloudID, cfg, cfg.Parallels.StartupTimeout); err != nil {
-		_ = client.Delete(context.Background(), server.CloudID)
+		cleanupVM(server.CloudID)
 		return LeaseTarget{}, err
 	}
 	if err := client.InstallSSHKey(ctx, server.CloudID, cfg, publicKey); err != nil {
-		_ = client.Delete(context.Background(), server.CloudID)
+		cleanupVM(server.CloudID)
 		return LeaseTarget{}, err
 	}
 	if err := client.EnsureGuestReady(ctx, server.CloudID, cfg); err != nil {
-		_ = client.Delete(context.Background(), server.CloudID)
+		cleanupVM(server.CloudID)
 		return LeaseTarget{}, err
 	}
 	server.PublicNet.IPv4.IP = vm.IP
@@ -127,12 +138,13 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		target.SSHConfigProxy = true
 	}
 	if err := core.WaitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
-		_ = client.Delete(context.Background(), server.CloudID)
+		cleanupVM(server.CloudID)
 		return LeaseTarget{}, err
 	}
 	server.Status = "ready"
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", time.Now().UTC())
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s vm=%s ip=%s\n", leaseID, server.DisplayID(), vm.IP)
+	keepKey = true
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 

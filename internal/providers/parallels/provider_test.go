@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -184,6 +186,88 @@ func TestCleanupKeepsClaimAndStoredKeyWhenDeleteFails(t *testing.T) {
 	}
 }
 
+func TestAcquireRemovesStoredKeyAfterPostKeyFailure(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skip("ssh-keygen not available")
+	}
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	cfg := core.BaseConfig()
+	cfg.Provider = "parallels"
+	cfg.TargetOS = core.TargetLinux
+	cfg.Parallels.Source = "source-vm"
+	cfg.Parallels.SourceSnapshot = "missing-snapshot"
+	runner := &parallelsAcquireRunner{snapshotErr: errors.New("snapshot lookup failed")}
+	backend := &leaseBackend{
+		DirectSSHBackend: sharedBackend(cfg, runner),
+	}
+
+	_, err := backend.acquireOnce(context.Background(), false, "")
+	if err == nil || !strings.Contains(err.Error(), "snapshot lookup failed") {
+		t.Fatalf("acquireOnce err=%v, want snapshot lookup failure", err)
+	}
+	keyMatches := storedTestboxKeyMatches(t)
+	if len(keyMatches) != 0 {
+		t.Fatalf("stored keys remain after failed acquire: %v", keyMatches)
+	}
+}
+
+func TestAcquireKeepsStoredKeyWhenRollbackDeleteFails(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skip("ssh-keygen not available")
+	}
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	cfg := core.BaseConfig()
+	cfg.Provider = "parallels"
+	cfg.TargetOS = core.TargetLinux
+	cfg.Parallels.Source = "source-vm"
+	cfg.Parallels.CloneMode = "full"
+	runner := &parallelsAcquireRunner{
+		startErr:  errors.New("start failed"),
+		deleteErr: errors.New("delete failed"),
+	}
+	backend := &leaseBackend{
+		DirectSSHBackend: sharedBackend(cfg, runner),
+	}
+
+	_, err := backend.acquireOnce(context.Background(), false, "")
+	if err == nil || !strings.Contains(err.Error(), "start failed") {
+		t.Fatalf("acquireOnce err=%v, want start failure", err)
+	}
+	keyMatches := storedTestboxKeyMatches(t)
+	if len(keyMatches) != 1 {
+		t.Fatalf("stored keys=%v, want one preserved key after rollback delete failure", keyMatches)
+	}
+}
+
+func storedTestboxKeyMatches(t *testing.T) []string {
+	t.Helper()
+	var patterns []string
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		patterns = append(patterns, filepath.Join(xdg, "crabbox", "testboxes", "*", "id_ed25519"))
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		patterns = append(patterns,
+			filepath.Join(home, ".config", "crabbox", "testboxes", "*", "id_ed25519"),
+			filepath.Join(home, "Library", "Application Support", "crabbox", "testboxes", "*", "id_ed25519"),
+		)
+	}
+	var matches []string
+	for _, pattern := range patterns {
+		found, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		matches = append(matches, found...)
+	}
+	return matches
+}
+
 func sharedBackend(cfg core.Config, runner core.CommandRunner) shared.DirectSSHBackend {
 	return shared.DirectSSHBackend{Cfg: cfg, RT: Runtime{Exec: runner, Stderr: io.Discard}}
 }
@@ -280,6 +364,62 @@ func (r *parallelsCleanupRunner) Run(_ context.Context, req core.LocalCommandReq
 		return core.LocalCommandResult{Stdout: `[{"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"stopped","ip_configured":"10.0.0.5"}]`}, nil
 	case "delete":
 		r.deleteCalls++
+		if r.deleteErr != nil {
+			return core.LocalCommandResult{Stderr: r.deleteErr.Error()}, r.deleteErr
+		}
+		return core.LocalCommandResult{}, nil
+	default:
+		return core.LocalCommandResult{}, errors.New("unexpected prlctl command")
+	}
+}
+
+type parallelsAcquireRunner struct {
+	snapshotErr error
+	startErr    error
+	deleteErr   error
+	cloneID     string
+	cloneName   string
+}
+
+func (r *parallelsAcquireRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	if req.Name != "prlctl" || len(req.Args) == 0 {
+		return core.LocalCommandResult{}, errors.New("unexpected command")
+	}
+	switch req.Args[0] {
+	case "list":
+		if len(req.Args) > 1 && req.Args[1] == "-i" {
+			id := r.cloneID
+			if id == "" {
+				id = "clone-id"
+			}
+			name := r.cloneName
+			if name == "" {
+				name = "crabbox-cbx-test-blue"
+			}
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"ID":%q,"Name":%q,"State":"running","ip_configured":"10.0.0.5"}]`, id, name)}, nil
+		}
+		return core.LocalCommandResult{Stdout: `[{"ID":"source-id","Name":"source-vm","State":"stopped","ip_configured":"10.0.0.5"}]`}, nil
+	case "snapshot-list":
+		if r.snapshotErr != nil {
+			return core.LocalCommandResult{Stderr: r.snapshotErr.Error()}, r.snapshotErr
+		}
+		return core.LocalCommandResult{Stdout: `[]`}, nil
+	case "clone":
+		r.cloneID = "clone-id"
+		for i := 0; i+1 < len(req.Args); i++ {
+			if req.Args[i] == "--name" {
+				r.cloneName = req.Args[i+1]
+			}
+		}
+		return core.LocalCommandResult{}, nil
+	case "start":
+		if r.startErr != nil {
+			return core.LocalCommandResult{Stderr: r.startErr.Error()}, r.startErr
+		}
+		return core.LocalCommandResult{}, nil
+	case "stop":
+		return core.LocalCommandResult{}, nil
+	case "delete":
 		if r.deleteErr != nil {
 			return core.LocalCommandResult{Stderr: r.deleteErr.Error()}, r.deleteErr
 		}
