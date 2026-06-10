@@ -40,12 +40,12 @@ func (p Provider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return NewMorphBackend(p.Spec(), cfg, rt)
 }
 
-func (p Provider) ConfigureDoctor(cfg Config, rt Runtime) (core.DoctorProvider, error) {
+func (p Provider) ConfigureDoctor(cfg Config, rt Runtime) (core.DoctorBackend, error) {
 	backend, err := p.Configure(cfg, rt)
 	if err != nil {
 		return nil, err
 	}
-	doctor, ok := backend.(core.DoctorProvider)
+	doctor, ok := backend.(core.DoctorBackend)
 	if !ok {
 		return nil, exit(2, "provider=%s does not implement doctor", providerName)
 	}

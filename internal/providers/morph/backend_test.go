@@ -231,6 +231,19 @@ func TestNewMorphBackendAllowsMissingSnapshotForExistingLeaseOps(t *testing.T) {
 	}
 }
 
+func TestConfigureDoctorReturnsMorphDoctorBackend(t *testing.T) {
+	doctor, err := Provider{}.ConfigureDoctor(testMorphConfig(), Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatalf("ConfigureDoctor: %v", err)
+	}
+	if doctor.Spec().Name != providerName {
+		t.Fatalf("doctor.Spec().Name=%q want %q", doctor.Spec().Name, providerName)
+	}
+	if _, ok := doctor.(*morphLeaseBackend); !ok {
+		t.Fatalf("doctor backend type=%T", doctor)
+	}
+}
+
 func TestMorphAcquireRequiresSnapshot(t *testing.T) {
 	cfg := testMorphConfig()
 	cfg.Morph.Snapshot = ""
