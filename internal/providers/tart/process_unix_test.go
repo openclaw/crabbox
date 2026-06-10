@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -35,6 +36,7 @@ func TestStartVMKeepPreservesStartupStderr(t *testing.T) {
 		core.BaseConfig(),
 		core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	).(*backend)
+	backend.startupObserveTimeout = 10 * time.Second
 	err := backend.startVM(context.Background(), core.BaseConfig(), "test-vm", true)
 	if err == nil || !strings.Contains(err.Error(), "vm is locked") {
 		t.Fatalf("err=%v", err)

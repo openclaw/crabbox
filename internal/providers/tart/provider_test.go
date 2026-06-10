@@ -273,10 +273,6 @@ func TestAcquireKeepIPFailureDeletesUnclaimedVMAndKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	originalStartupObserve := startupObserveTimeout
-	startupObserveTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { startupObserveTimeout = originalStartupObserve })
-
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: "[]"},
@@ -285,7 +281,10 @@ func TestAcquireKeepIPFailureDeletesUnclaimedVMAndKey(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	b.startupObserveTimeout = 20 * time.Millisecond
+	// Keep setup outside the deadline race under coverage while still forcing
+	// waitForIP to fail promptly after the VM starts.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	if _, err := b.Acquire(ctx, core.AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}}); err == nil {
