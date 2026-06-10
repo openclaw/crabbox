@@ -238,12 +238,28 @@ blacksmith_smoke() {
   job="${job:-check}"
   local ref="${CRABBOX_BLACKSMITH_REF:-$(config_value blacksmith.ref || config_value actions.ref || true)}"
   ref="${ref:-main}"
+  local org="${CRABBOX_BLACKSMITH_ORG:-}"
+  if [[ -z "$org" ]]; then
+    need_tool ruby
+    org="$(config_value blacksmith.org || true)"
+  fi
+  if [[ -z "$org" ]]; then
+    local actions_repo
+    actions_repo="$(config_value actions.repo || true)"
+    if [[ "$actions_repo" == */* ]]; then
+      org="${actions_repo%%/*}"
+    fi
+  fi
+  if [[ -z "$org" ]]; then
+    echo "blacksmith-testbox smoke requires CRABBOX_BLACKSMITH_ORG, blacksmith.org, or actions.repo in config" >&2
+    return 2
+  fi
   validate_blacksmith_workflow "$workflow"
 
   run_in_repo "$cb" list --provider blacksmith-testbox --json | jq '.[0] // empty'
   run_in_repo "$cb" run \
     --provider blacksmith-testbox \
-    --blacksmith-org "${CRABBOX_BLACKSMITH_ORG:-openclaw}" \
+    --blacksmith-org "$org" \
     --blacksmith-workflow "$workflow" \
     --blacksmith-job "$job" \
     --blacksmith-ref "$ref" \

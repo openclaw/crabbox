@@ -150,6 +150,109 @@ esac
   assert.equal(fs.readFileSync(stateFile, "utf8").trim(), "PAUSED");
 });
 
+test("blacksmith live smoke requires an explicit organization", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-blacksmith-missing-org-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  const config = path.join(dir, "crabbox.yaml");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(
+    config,
+    `blacksmith:
+  workflow: .github/workflows/blacksmith-testbox.yml
+  job: go
+`,
+    "utf8",
+  );
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf 'unexpected crabbox args: %s\\n' "$*" >&2
+exit 99
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_BLACKSMITH_ORG: "",
+      CRABBOX_CONFIG: config,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "blacksmith-testbox",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /requires CRABBOX_BLACKSMITH_ORG, blacksmith\.org, or actions\.repo/);
+});
+
+test("blacksmith live smoke derives organization from actions repo", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-blacksmith-actions-org-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  const crabboxLog = path.join(dir, "crabbox.log");
+  const config = path.join(dir, "crabbox.yaml");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(
+    config,
+    `blacksmith:
+  workflow: .github/workflows/blacksmith-testbox.yml
+  job: go
+actions:
+  repo: example-org/my-app
+`,
+    "utf8",
+  );
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
+case "$1" in
+  list)
+    printf '[]\\n'
+    ;;
+  run)
+    printf 'blacksmith-crabbox-ok\\n'
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_BLACKSMITH_ORG: "",
+      CRABBOX_CONFIG: config,
+      CRABBOX_FAKE_LOG: crabboxLog,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "blacksmith-testbox",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /blacksmith-crabbox-ok/);
+  const crabboxCalls = fs.readFileSync(crabboxLog, "utf8");
+  assert.match(crabboxCalls, /run --provider blacksmith-testbox --blacksmith-org example-org/);
+});
+
 test("external live smoke accepts declarative lifecycle configuration", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-external-"));
   const bin = path.join(dir, "bin");
