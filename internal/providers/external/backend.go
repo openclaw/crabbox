@@ -490,6 +490,7 @@ func validateAndFillDesired(lease *protocolLease, desired *desiredLease) error {
 
 var lifecycleLabelKeys = []string{
 	externalResourceNameLabel,
+	externalResourceNameFromEnv,
 	"keep",
 	"created_at",
 	"last_touched_at",

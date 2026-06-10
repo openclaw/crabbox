@@ -64,6 +64,8 @@ external:
         - [devboxctl, new, "{{resourceName}}", --size, "{{config.size}}"]
         - [devboxctl, setup, "{{resourceName}}"]
       rollbackOnFailure: true
+      env:
+        DEVBOX_TOKEN: "{{env.DEVBOX_TOKEN}}"
     resolve:
       argv: [devboxctl, inspect, "{{resourceName}}"]
     list:
@@ -121,10 +123,27 @@ evaluated. Supported placeholders:
 {{env.<NAME>}}
 ```
 
-Environment placeholders require the named variable to be set. Do not place
-secret environment values in lifecycle arguments: process arguments may be
-visible to other local processes. Provider CLIs should use their normal
-credential store or inherited environment for authentication.
+Environment placeholders require the named variable to be set. Values expanded
+from `{{env.<NAME>}}` are rejected in lifecycle `argv` and `steps` by default
+because process arguments may be visible to other local processes. Pass secrets
+through an operation `env:` map instead; those entries are added to the child
+process environment without being copied into argv:
+
+```yaml
+external:
+  lifecycle:
+    acquire:
+      argv: [devboxctl, new, "{{resourceName}}"]
+      env:
+        DEVBOX_TOKEN: "{{env.DEVBOX_TOKEN}}"
+```
+
+For non-secret environment-backed arguments, set `allowEnvArgv: true` on that
+operation. For non-secret environment-backed resource names, also set
+`connection.allowEnvResourceName: true`; Crabbox records that provenance so a
+later release still requires `allowEnvArgv` before placing `{{resourceName}}`
+back in argv. Do not use either opt-in for tokens, passwords, API keys, or
+other credential contents.
 
 `leaseIdSlug` is the lease ID normalized as a lowercase slug, suitable for
 providers that require DNS-style names. `resourceName` is the expanded

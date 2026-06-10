@@ -230,19 +230,22 @@ type ExternalLifecycleConfig struct {
 }
 
 type ExternalLifecycleOperation struct {
-	Argv              []string   `yaml:"argv,omitempty" json:"argv,omitempty"`
-	Steps             [][]string `yaml:"steps,omitempty" json:"steps,omitempty"`
-	Output            string     `yaml:"output,omitempty" json:"output,omitempty"`
-	NamePrefix        string     `yaml:"namePrefix,omitempty" json:"namePrefix,omitempty"`
-	RollbackOnFailure bool       `yaml:"rollbackOnFailure,omitempty" json:"rollbackOnFailure,omitempty"`
+	Argv              []string          `yaml:"argv,omitempty" json:"argv,omitempty"`
+	Steps             [][]string        `yaml:"steps,omitempty" json:"steps,omitempty"`
+	Env               map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	AllowEnvArgv      bool              `yaml:"allowEnvArgv,omitempty" json:"allowEnvArgv,omitempty"`
+	Output            string            `yaml:"output,omitempty" json:"output,omitempty"`
+	NamePrefix        string            `yaml:"namePrefix,omitempty" json:"namePrefix,omitempty"`
+	RollbackOnFailure bool              `yaml:"rollbackOnFailure,omitempty" json:"rollbackOnFailure,omitempty"`
 }
 
 type ExternalConnectionConfig struct {
-	ResourceName string                      `yaml:"resourceName,omitempty" json:"resourceName,omitempty"`
-	CloudID      string                      `yaml:"cloudId,omitempty" json:"cloudId,omitempty"`
-	ServerType   string                      `yaml:"serverType,omitempty" json:"serverType,omitempty"`
-	Labels       map[string]string           `yaml:"labels,omitempty" json:"labels,omitempty"`
-	SSH          ExternalSSHConnectionConfig `yaml:"ssh,omitempty" json:"ssh,omitempty"`
+	ResourceName         string                      `yaml:"resourceName,omitempty" json:"resourceName,omitempty"`
+	AllowEnvResourceName bool                        `yaml:"allowEnvResourceName,omitempty" json:"allowEnvResourceName,omitempty"`
+	CloudID              string                      `yaml:"cloudId,omitempty" json:"cloudId,omitempty"`
+	ServerType           string                      `yaml:"serverType,omitempty" json:"serverType,omitempty"`
+	Labels               map[string]string           `yaml:"labels,omitempty" json:"labels,omitempty"`
+	SSH                  ExternalSSHConnectionConfig `yaml:"ssh,omitempty" json:"ssh,omitempty"`
 }
 
 type ExternalSSHConnectionConfig struct {

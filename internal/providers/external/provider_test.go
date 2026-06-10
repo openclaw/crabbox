@@ -44,6 +44,15 @@ func claimExternalLease(t *testing.T, cfg core.Config, leaseID, slug, repoRoot s
 	}
 }
 
+func envContains(env []string, entry string) bool {
+	for _, candidate := range env {
+		if candidate == entry {
+			return true
+		}
+	}
+	return false
+}
+
 func TestProviderSpec(t *testing.T) {
 	spec := (Provider{}).Spec()
 	if spec.Name != providerName || spec.Family != "external" {
@@ -276,7 +285,7 @@ func TestInvokeDeclarativeLifecycleRunsOrderedSteps(t *testing.T) {
 				Argv:   []string{"devboxctl", "list"},
 				Output: lifecycleOutputJSONNameArray,
 			},
-			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{resourceName}}"}},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{resourceName}}"}, AllowEnvArgv: true},
 		},
 		Connection: core.ExternalConnectionConfig{
 			ResourceName: "{{leaseIdSlug}}",
@@ -710,6 +719,181 @@ func TestDeclarativeLifecycleExpandsExplicitEnvironmentPlaceholder(t *testing.T)
 	}
 }
 
+func TestInvokeDeclarativeLifecyclePassesSecretEnvWithoutArgvExposure(t *testing.T) {
+	t.Setenv("DEVBOX_TOKEN", "super-secret-token")
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{
+				Argv: []string{"devboxctl", "new", "{{name}}"},
+				Env: map[string]string{
+					"DEVBOX_TOKEN": "{{env.DEVBOX_TOKEN}}",
+					"DEVBOX_NAME":  "{{name}}",
+				},
+			},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{name}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}"},
+		},
+	}
+	runner := &recordingRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	_, err := backend.invokeLifecycle(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Desired:   &desiredLease{LeaseID: "cbx_abcdef123456", Slug: "fast-coral", Name: "devbox-fast-coral"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.requests) != 1 {
+		t.Fatalf("requests=%#v", runner.requests)
+	}
+	gotArgv := runner.requests[0].Name + " " + strings.Join(runner.requests[0].Args, " ")
+	if strings.Contains(gotArgv, "super-secret-token") {
+		t.Fatalf("secret leaked through argv: %q", gotArgv)
+	}
+	if !envContains(runner.requests[0].Env, "DEVBOX_TOKEN=super-secret-token") {
+		t.Fatal("env missing DEVBOX_TOKEN entry")
+	}
+	if !envContains(runner.requests[0].Env, "DEVBOX_NAME=devbox-fast-coral") {
+		t.Fatal("env missing DEVBOX_NAME entry")
+	}
+}
+
+func TestInvokeDeclarativeLifecyclePreservesEnvResourceNameProvenance(t *testing.T) {
+	t.Setenv("DEVBOX_RESOURCE", "durable-resource-name")
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{
+				Argv: []string{"devboxctl", "new"},
+				Env:  map[string]string{"DEVBOX_RESOURCE": "{{env.DEVBOX_RESOURCE}}"},
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{resourceName}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			ResourceName:         "{{env.DEVBOX_RESOURCE}}",
+			AllowEnvResourceName: true,
+			SSH:                  core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}"},
+		},
+	}
+	runner := &recordingRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	response, err := backend.invokeLifecycle(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Desired:   &desiredLease{LeaseID: "cbx_abcdef123456", Slug: "fast-coral", Name: "devbox-fast-coral"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Lease == nil || response.Lease.Labels[externalResourceNameFromEnv] != "true" {
+		t.Fatalf("lease labels=%#v, want env resourceName provenance", response.Lease.Labels)
+	}
+	_, err = backend.invokeLifecycle(context.Background(), protocolRequest{Operation: "release", Lease: response.Lease})
+	if err == nil || !strings.Contains(err.Error(), "environment-derived value") {
+		t.Fatalf("err=%v, want env resourceName argv rejection", err)
+	}
+	if strings.Contains(err.Error(), "durable-resource-name") {
+		t.Fatalf("resource value leaked through error: %v", err)
+	}
+	if len(runner.requests) != 1 {
+		t.Fatalf("release command ran despite secret resourceName: %#v", runner.requests)
+	}
+}
+
+func TestInvokeDeclarativeLifecycleRejectsEnvironmentDerivedArgv(t *testing.T) {
+	t.Setenv("DEVBOX_TOKEN", "super-secret-token")
+	t.Setenv("DEVBOX_REGION", "us-test-1")
+	t.Setenv("E2B_API_KEY", "e2b-secret-key")
+	for name, cfg := range map[string]core.ExternalConfig{
+		"apiKey": {
+			Lifecycle: core.ExternalLifecycleConfig{
+				Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "--api-key", "{{env.E2B_API_KEY}}"}},
+			},
+		},
+		"direct": {
+			Lifecycle: core.ExternalLifecycleConfig{
+				Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "--token", "{{env.DEVBOX_TOKEN}}"}},
+			},
+		},
+		"mixed": {
+			Lifecycle: core.ExternalLifecycleConfig{
+				Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{env.DEVBOX_TOKEN}}-{{env.DEVBOX_REGION}}"}},
+			},
+		},
+		"resourceName": {
+			Lifecycle: core.ExternalLifecycleConfig{
+				Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{resourceName}}"}},
+			},
+			Connection: core.ExternalConnectionConfig{ResourceName: "{{env.DEVBOX_TOKEN}}"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fullCfg := core.BaseConfig()
+			fullCfg.External = cfg
+			runner := &recordingRunner{}
+			backend := &leaseBackend{cfg: fullCfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+			_, err := backend.invokeLifecycle(context.Background(), protocolRequest{
+				Operation: "acquire",
+				Desired:   &desiredLease{LeaseID: "cbx_abcdef123456", Slug: "fast-coral", Name: "devbox-fast-coral"},
+			})
+			if err == nil || !strings.Contains(err.Error(), "environment-derived value") {
+				t.Fatalf("err=%v, want argv secret rejection", err)
+			}
+			if strings.Contains(err.Error(), "super-secret-token") {
+				t.Fatalf("secret leaked through error: %v", err)
+			}
+			if len(runner.requests) != 0 {
+				t.Fatalf("command ran despite secret argv: %#v", runner.requests)
+			}
+		})
+	}
+}
+
+func TestInvokeDeclarativeLifecycleAllowsBenignEnvironmentArgv(t *testing.T) {
+	t.Setenv("AUTH_MODE", "oauth")
+	t.Setenv("GIT_AUTHOR_NAME", "Alice")
+	t.Setenv("E2B_API_KEY_FILE", "/tmp/e2b-key")
+	t.Setenv("SSH_PRIVATE_KEY_PATH", "/tmp/id_ed25519")
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{
+				Argv:         []string{"devboxctl", "new", "--auth-mode", "{{env.AUTH_MODE}}", "--author", "{{env.GIT_AUTHOR_NAME}}", "--api-key-file", "{{env.E2B_API_KEY_FILE}}", "-i", "{{env.SSH_PRIVATE_KEY_PATH}}"},
+				AllowEnvArgv: true,
+			},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{name}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}"},
+		},
+	}
+	runner := &recordingRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	_, err := backend.invokeLifecycle(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Desired:   &desiredLease{LeaseID: "cbx_abcdef123456", Slug: "fast-coral", Name: "devbox-fast-coral"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.requests) != 1 {
+		t.Fatalf("requests=%#v", runner.requests)
+	}
+	if got := strings.Join(runner.requests[0].Args, "|"); got != "new|--auth-mode|oauth|--author|Alice|--api-key-file|/tmp/e2b-key|-i|/tmp/id_ed25519" {
+		t.Fatalf("args=%q", got)
+	}
+}
+
 func TestDeclarativeLifecycleIDFallsBackToLeaseID(t *testing.T) {
 	templateCtx, err := lifecycleContext(protocolRequest{
 		Lease: &protocolLease{
@@ -735,16 +919,17 @@ func TestDeclarativeLifecycleReusesPersistedResourceName(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.External = core.ExternalConfig{
 		Lifecycle: core.ExternalLifecycleConfig{
-			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{resourceName}}"}},
+			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{resourceName}}"}, AllowEnvArgv: true},
 			List: core.ExternalLifecycleOperation{
 				Argv:   []string{"devboxctl", "list"},
 				Output: lifecycleOutputJSONNameArray,
 			},
-			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{resourceName}}"}},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{resourceName}}"}, AllowEnvArgv: true},
 		},
 		Connection: core.ExternalConnectionConfig{
-			ResourceName: "{{env.DEVBOX_RESOURCE}}",
-			SSH:          core.ExternalSSHConnectionConfig{User: "developer"},
+			ResourceName:         "{{env.DEVBOX_RESOURCE}}",
+			AllowEnvResourceName: true,
+			SSH:                  core.ExternalSSHConnectionConfig{User: "developer"},
 		},
 	}
 	runner := &recordingRunner{}
@@ -770,16 +955,17 @@ func TestDeclarativeLifecycleUsesLegacyLeaseNameWhenResourceLabelMissing(t *test
 	cfg := core.BaseConfig()
 	cfg.External = core.ExternalConfig{
 		Lifecycle: core.ExternalLifecycleConfig{
-			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{resourceName}}"}},
+			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{resourceName}}"}, AllowEnvArgv: true},
 			List: core.ExternalLifecycleOperation{
 				Argv:   []string{"devboxctl", "list"},
 				Output: lifecycleOutputJSONNameArray,
 			},
-			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{resourceName}}"}},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{resourceName}}"}, AllowEnvArgv: true},
 		},
 		Connection: core.ExternalConnectionConfig{
-			ResourceName: "{{env.DEVBOX_RESOURCE}}",
-			SSH:          core.ExternalSSHConnectionConfig{User: "developer"},
+			ResourceName:         "{{env.DEVBOX_RESOURCE}}",
+			AllowEnvResourceName: true,
+			SSH:                  core.ExternalSSHConnectionConfig{User: "developer"},
 		},
 	}
 	runner := &recordingRunner{}
@@ -805,7 +991,7 @@ func TestDeclarativeInventoryUsesListedNameForLegacyClaim(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.External = core.ExternalConfig{
 		Lifecycle: core.ExternalLifecycleConfig{
-			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{resourceName}}"}},
+			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{resourceName}}"}, AllowEnvArgv: true},
 			List: core.ExternalLifecycleOperation{
 				Argv:   []string{"devboxctl", "list"},
 				Output: lifecycleOutputJSONNameArray,
@@ -813,8 +999,9 @@ func TestDeclarativeInventoryUsesListedNameForLegacyClaim(t *testing.T) {
 			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{resourceName}}"}},
 		},
 		Connection: core.ExternalConnectionConfig{
-			ResourceName: "{{env.DEVBOX_RESOURCE}}",
-			SSH:          core.ExternalSSHConnectionConfig{User: "developer"},
+			ResourceName:         "{{env.DEVBOX_RESOURCE}}",
+			AllowEnvResourceName: true,
+			SSH:                  core.ExternalSSHConnectionConfig{User: "developer"},
 		},
 		WorkRoot: "/home/developer/crabbox",
 	}
@@ -844,13 +1031,12 @@ func TestDeclarativeInventoryUsesListedNameForLegacyClaim(t *testing.T) {
 	}
 }
 
-func TestDeclarativeResolveThenReleaseReusesPersistedResourceName(t *testing.T) {
+func TestDeclarativeInventoryPreservesEnvResourceNameProvenance(t *testing.T) {
 	isolateCrabboxState(t)
-	t.Setenv("DEVBOX_RESOURCE", "new-resource")
 	cfg := core.BaseConfig()
 	cfg.External = core.ExternalConfig{
 		Lifecycle: core.ExternalLifecycleConfig{
-			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{resourceName}}"}},
+			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{name}}"}},
 			List: core.ExternalLifecycleOperation{
 				Argv:   []string{"devboxctl", "list"},
 				Output: lifecycleOutputJSONNameArray,
@@ -858,8 +1044,58 @@ func TestDeclarativeResolveThenReleaseReusesPersistedResourceName(t *testing.T) 
 			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{resourceName}}"}},
 		},
 		Connection: core.ExternalConnectionConfig{
-			ResourceName: "{{env.DEVBOX_RESOURCE}}",
-			SSH:          core.ExternalSSHConnectionConfig{User: "developer"},
+			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{resourceName}}"},
+		},
+		WorkRoot: "/home/developer/crabbox",
+	}
+	claimExternalLease(t, cfg, "cbx_abcdef123456", "fast-coral", t.TempDir(), time.Minute, false)
+	if err := core.UpdateLeaseClaimEndpoint(
+		"cbx_abcdef123456",
+		core.Server{Name: "env-resource", Labels: map[string]string{
+			"name":                      "env-resource",
+			"slug":                      "fast-coral",
+			externalResourceNameLabel:   "env-resource",
+			externalResourceNameFromEnv: "true",
+		}},
+		core.SSHTarget{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{stdout: `["env-resource"]`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	response, err := backend.invoke(context.Background(), protocolRequest{Operation: "list"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Leases) != 1 || response.Leases[0].Labels[externalResourceNameFromEnv] != "true" {
+		t.Fatalf("leases=%#v, want env resourceName provenance", response.Leases)
+	}
+	_, err = backend.invoke(context.Background(), protocolRequest{Operation: "release", Lease: &response.Leases[0]})
+	if err == nil || !strings.Contains(err.Error(), "environment-derived value") {
+		t.Fatalf("err=%v, want env resourceName argv rejection", err)
+	}
+	if len(runner.requests) != 1 {
+		t.Fatalf("release command ran despite env-derived resourceName: %#v", runner.requests)
+	}
+}
+
+func TestDeclarativeResolveThenReleaseReusesPersistedResourceName(t *testing.T) {
+	isolateCrabboxState(t)
+	t.Setenv("DEVBOX_RESOURCE", "new-resource")
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{resourceName}}"}, AllowEnvArgv: true},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{resourceName}}"}, AllowEnvArgv: true},
+		},
+		Connection: core.ExternalConnectionConfig{
+			ResourceName:         "{{env.DEVBOX_RESOURCE}}",
+			AllowEnvResourceName: true,
+			SSH:                  core.ExternalSSHConnectionConfig{User: "developer"},
 		},
 		WorkRoot: "/home/developer/crabbox",
 	}
@@ -889,6 +1125,54 @@ func TestDeclarativeResolveThenReleaseReusesPersistedResourceName(t *testing.T) 
 	}
 	if runner.name != "devboxctl" || strings.Join(runner.args, "|") != "rm|original-resource" {
 		t.Fatalf("command=%q args=%#v", runner.name, runner.args)
+	}
+}
+
+func TestDeclarativeResolveThenReleasePreservesEnvResourceNameProvenance(t *testing.T) {
+	isolateCrabboxState(t)
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "new", "{{name}}"}},
+			List: core.ExternalLifecycleOperation{
+				Argv:   []string{"devboxctl", "list"},
+				Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{resourceName}}"}},
+		},
+		Connection: core.ExternalConnectionConfig{
+			SSH: core.ExternalSSHConnectionConfig{User: "developer"},
+		},
+		WorkRoot: "/home/developer/crabbox",
+	}
+	claimExternalLease(t, cfg, "cbx_abcdef123456", "fast-coral", t.TempDir(), time.Minute, false)
+	if err := core.UpdateLeaseClaimEndpoint(
+		"cbx_abcdef123456",
+		core.Server{Name: "crabbox-fast-coral-deadbeef", Labels: map[string]string{
+			"name":                      "crabbox-fast-coral-deadbeef",
+			"slug":                      "fast-coral",
+			externalResourceNameLabel:   "env-resource",
+			externalResourceNameFromEnv: "true",
+		}},
+		core.SSHTarget{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "fast-coral", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Labels[externalResourceNameFromEnv] != "true" {
+		t.Fatalf("lease=%#v, want env resourceName provenance", lease)
+	}
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+	if err == nil || !strings.Contains(err.Error(), "environment-derived value") {
+		t.Fatalf("err=%v, want env resourceName argv rejection", err)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("release command ran despite env-derived resourceName: %#v", runner.requests)
 	}
 }
 
