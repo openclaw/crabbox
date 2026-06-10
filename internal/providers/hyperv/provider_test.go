@@ -548,6 +548,108 @@ func TestCreateVMPlacesVMFilesUnderHypervVMDir(t *testing.T) {
 	}
 }
 
+// --hyperv-init-password must write the first-boot RunOnce into the lease disk
+// BEFORE the VM is created/booted, keep the password out of host command lines,
+// and leave the template (ParentPath) untouched.
+func TestCreateVMInitPasswordInjectsRunOnceBeforeBoot(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	b.cfg.HyperV.InitPassword = true
+	b.cfg.HyperV.GuestPassword = "s3cret-pa$$word"
+	cfg := b.configForRun()
+	cfg.HyperV.Image = `C:\Images\windows.vhdx`
+
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", ""); err != nil {
+		t.Fatalf("createVM: %v", err)
+	}
+
+	injectIdx, newVMIdx := -1, -1
+	for i, call := range runner.calls {
+		script := call.Args[len(call.Args)-1]
+		if strings.Contains(script, "Mount-VHD") && strings.Contains(script, "RunOnce") {
+			injectIdx = i
+			for _, want := range []string{`net user "crabbox"`, "reg.exe load", "reg.exe unload", "Dismount-VHD", "$env:_CRABBOX_GP"} {
+				if !strings.Contains(script, want) {
+					t.Errorf("init-password script missing %q", want)
+				}
+			}
+			if strings.Contains(script, `C:\Images\windows.vhdx`) {
+				t.Error("init-password script must mount the lease disk, not the template")
+			}
+			var foundEnv bool
+			for _, e := range call.Env {
+				if strings.Contains(e, "_CRABBOX_GP=s3cret-pa$$word") {
+					foundEnv = true
+				}
+			}
+			if !foundEnv {
+				t.Error("_CRABBOX_GP env var not found on the injection call")
+			}
+		}
+		for _, arg := range call.Args {
+			if strings.Contains(arg, "s3cret-pa$$word") {
+				t.Fatal("guest password found in command args; should be passed via environment only")
+			}
+		}
+		if strings.Contains(script, "New-VM ") {
+			newVMIdx = i
+		}
+	}
+	if injectIdx < 0 {
+		t.Fatal("createVM should inject the first-boot password RunOnce when init-password is enabled")
+	}
+	if newVMIdx < 0 || newVMIdx < injectIdx {
+		t.Fatalf("password injection (call %d) must happen before New-VM (call %d)", injectIdx, newVMIdx)
+	}
+}
+
+func TestCreateVMNoInitPasswordByDefault(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.HyperV.Image = `C:\Images\windows.vhdx`
+
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", ""); err != nil {
+		t.Fatalf("createVM: %v", err)
+	}
+	for _, call := range runner.calls {
+		script := call.Args[len(call.Args)-1]
+		if strings.Contains(script, "Mount-VHD") || strings.Contains(script, "RunOnce") {
+			t.Fatal("createVM must not touch the lease disk offline unless --hyperv-init-password is set")
+		}
+	}
+}
+
+func TestAcquireInitPasswordRequiresExplicitPassword(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	b.cfg.HyperV.InitPassword = true
+	b.cfg.HyperV.GuestPassword = ""
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "CRABBOX_HYPERV_GUEST_PASSWORD") {
+		t.Fatalf("Acquire should require an explicit guest password with init-password, got: %v", err)
+	}
+}
+
+func TestAcquireInitPasswordRejectsCmdUnsafePassword(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	b.cfg.HyperV.InitPassword = true
+	for _, password := range []string{`pa"ss`, `pa%ss`} {
+		b.cfg.HyperV.GuestPassword = password
+		_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+		if err == nil || !strings.Contains(err.Error(), "cannot carry") {
+			t.Fatalf("Acquire should reject cmd-unsafe init password %q, got: %v", password, err)
+		}
+	}
+}
+
 func TestAcquireRejectsISO(t *testing.T) {
 	b := testBackend(&recordingRunner{})
 	oldOS := hypervHostOS
@@ -986,5 +1088,22 @@ func TestApplyFlagsHyperVUserAndWorkRoot(t *testing.T) {
 	}
 	if cfg.HyperV.WorkRoot != `C:\work` {
 		t.Fatalf("--hyperv-work-root not applied: %q", cfg.HyperV.WorkRoot)
+	}
+}
+
+func TestApplyFlagsHyperVInitPassword(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
+	vals := registerFlags(fs, core.BaseConfig())
+	if err := fs.Set("hyperv-init-password", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, vals); err != nil {
+		t.Fatalf("applyFlags: %v", err)
+	}
+	if !cfg.HyperV.InitPassword {
+		t.Fatal("--hyperv-init-password not applied")
 	}
 }

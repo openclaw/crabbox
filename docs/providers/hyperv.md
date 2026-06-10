@@ -49,6 +49,37 @@ net user Administrator /active:yes
 Then point `--hyperv-image` at the VHDX and set `--hyperv-user Administrator`
 and `CRABBOX_HYPERV_GUEST_PASSWORD=<password>`. The provider handles OpenSSH.
 
+### Password-less templates (Windows dev-environment images)
+
+Microsoft's downloadable Windows dev-environment VHDXs auto-log-on as `User`
+with **no password**, and PowerShell Direct refuses empty credentials — so a
+stock image fails the bootstrap as-is. Pass `--hyperv-init-password` to use one
+unmodified:
+
+```sh
+set CRABBOX_HYPERV_GUEST_PASSWORD=<password>
+crabbox warmup --provider hyperv --hyperv-image C:\Images\WinDev2407Eval.vhdx ^
+  --hyperv-user User --hyperv-init-password
+```
+
+Before first boot the provider mounts the per-lease differencing disk, loads
+its offline registry hive, and writes a `RunOnce` command that sets the guest
+account's password to `CRABBOX_HYPERV_GUEST_PASSWORD` at the template's
+auto-logon. Only the lease disk is modified; the template VHDX stays untouched.
+
+Notes:
+
+- Requires an explicit `CRABBOX_HYPERV_GUEST_PASSWORD` (the provider refuses
+  to stamp its default password onto a guest).
+- The password cannot contain `"` or `%` (it passes through `cmd.exe` at
+  logon).
+- This only works for templates that auto-log-on an administrator account
+  (`RunOnce` fires at logon). Templates without auto-logon need a known
+  password baked in, as above.
+- The password is briefly visible inside the guest (the `RunOnce` registry
+  value, then the `net.exe` command line at first logon). The guest belongs to
+  the lease, and the differencing disk holding it is deleted on release.
+
 ## Configuration
 
 ### Flags
@@ -62,6 +93,7 @@ and `CRABBOX_HYPERV_GUEST_PASSWORD=<password>`. The provider handles OpenSSH.
 | `--hyperv-memory` | `8192` | Memory in MB |
 | `--hyperv-disk` | `50` | Reserved; leases inherit the template's virtual size (differencing disk) |
 | `--hyperv-switch` | `Default Switch` | Hyper-V virtual switch name |
+| `--hyperv-init-password` | `false` | Set the guest password at first boot via the lease disk (password-less auto-logon templates) |
 
 ### Config file
 
@@ -75,6 +107,7 @@ hyperv:
   disk: 50
   switch: Default Switch
   guestPassword: crabbox
+  initPassword: false
 ```
 
 ### Environment variables
@@ -89,6 +122,7 @@ hyperv:
 | `CRABBOX_HYPERV_DISK` | Disk in GB |
 | `CRABBOX_HYPERV_SWITCH` | Virtual switch name |
 | `CRABBOX_HYPERV_GUEST_PASSWORD` | Guest user password for SSH key injection |
+| `CRABBOX_HYPERV_INIT_PASSWORD` | Set the guest password at first boot (`true`/`false`) |
 
 ## Bootstrap contract
 
@@ -96,14 +130,16 @@ During `Acquire`, the provider:
 
 1. Creates a per-lease **differencing disk** backed by the template (near-instant
    and space-thin; the template stays read-only and shared — no multi-GB copy)
-2. Creates and starts the VM
-3. Installs and starts the Windows OpenSSH server in the guest via PowerShell
+2. With `--hyperv-init-password`, mounts the lease disk offline and writes a
+   first-boot `RunOnce` that sets the guest password (password-less templates)
+3. Creates and starts the VM
+4. Installs and starts the Windows OpenSSH server in the guest via PowerShell
    Direct if not already present (`Add-WindowsCapability`, `Start-Service sshd`,
    firewall rule), and installs git (MinGit) if absent — both required for SSH
    readiness and crabbox sync
-4. Injects the per-lease SSH public key via PowerShell Direct
+5. Injects the per-lease SSH public key via PowerShell Direct
    (`Invoke-Command -VMName`) using the configured guest password
-5. Waits for SSH readiness on the injected key
+6. Waits for SSH readiness on the injected key
 
 Both the OpenSSH-install and key-injection steps authenticate over PowerShell
 Direct using the guest administrator password and retry up to 5 times with

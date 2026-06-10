@@ -592,6 +592,7 @@ type HyperVConfig struct {
 	Disk          int
 	Switch        string
 	GuestPassword string
+	InitPassword  bool
 }
 
 type StaticConfig struct {
@@ -1853,6 +1854,7 @@ type fileHyperVConfig struct {
 	Disk          int    `yaml:"disk,omitempty"`
 	Switch        string `yaml:"switch,omitempty"`
 	GuestPassword string `yaml:"guestPassword,omitempty"`
+	InitPassword  *bool  `yaml:"initPassword,omitempty"`
 }
 
 type fileTailscaleConfig struct {
@@ -3195,6 +3197,9 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.HyperV.GuestPassword != "" {
 			cfg.HyperV.GuestPassword = file.HyperV.GuestPassword
 		}
+		if file.HyperV.InitPassword != nil {
+			cfg.HyperV.InitPassword = *file.HyperV.InitPassword
+		}
 	}
 	if file.Tailscale != nil {
 		if file.Tailscale.Enabled != nil {
@@ -4021,6 +4026,9 @@ func applyEnv(cfg *Config) error {
 	cfg.HyperV.Disk = getenvInt("CRABBOX_HYPERV_DISK", cfg.HyperV.Disk)
 	cfg.HyperV.Switch = getenv("CRABBOX_HYPERV_SWITCH", cfg.HyperV.Switch)
 	cfg.HyperV.GuestPassword = getenv("CRABBOX_HYPERV_GUEST_PASSWORD", cfg.HyperV.GuestPassword)
+	if value, ok := getenvBool("CRABBOX_HYPERV_INIT_PASSWORD"); ok {
+		cfg.HyperV.InitPassword = value
+	}
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value
 	}

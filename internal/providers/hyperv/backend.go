@@ -96,6 +96,14 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if strings.HasSuffix(strings.ToLower(cfg.HyperV.Image), ".iso") {
 		return LeaseTarget{}, exit(2, "provider=%s does not support ISO images; provide a Windows VHDX template with a reachable administrator account", providerName)
 	}
+	if cfg.HyperV.InitPassword {
+		if cfg.HyperV.GuestPassword == "" {
+			return LeaseTarget{}, exit(2, "provider=%s --hyperv-init-password requires an explicit CRABBOX_HYPERV_GUEST_PASSWORD (refusing to set the default password on the guest)", providerName)
+		}
+		if strings.ContainsAny(cfg.HyperV.GuestPassword, `"%`) {
+			return LeaseTarget{}, exit(2, "provider=%s --hyperv-init-password sets the password through cmd.exe, which cannot carry double quotes or percent signs; choose a different CRABBOX_HYPERV_GUEST_PASSWORD", providerName)
+		}
+	}
 	leaseID := newLeaseID()
 	instances, err := b.listInstances(ctx)
 	if err != nil {
@@ -417,6 +425,14 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 		os.Remove(vhdPath) //nolint:errcheck
 		return commandError("create differencing disk", result, err)
 	}
+
+	if cfg.HyperV.InitPassword {
+		if err := b.injectInitPassword(ctx, vhdPath, cfg.HyperV.User); err != nil {
+			os.Remove(vhdPath) //nolint:errcheck
+			return err
+		}
+	}
+
 	createScript := fmt.Sprintf(
 		`New-VM -Name '%s' -MemoryStartupBytes %d -Generation 2 -VHDPath '%s' -Path '%s'`,
 		escapePSString(name), memBytes, escapePSString(vhdPath), escapePSString(vmDir),
@@ -462,22 +478,64 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 	return nil
 }
 
+func (b *backend) guestPassword() string {
+	if password := b.cfg.HyperV.GuestPassword; password != "" {
+		return password
+	}
+	return "crabbox"
+}
+
+// injectInitPassword makes a password-less template (e.g. a stock Windows
+// dev-environment VHDX, which auto-logs-on with no password set) usable:
+// PowerShell Direct refuses empty credentials, so before first boot we mount
+// the per-lease differencing disk, load its offline SOFTWARE hive, and write a
+// RunOnce command that sets the guest account password at the template's
+// auto-logon. Only the lease disk is modified -- the template stays untouched.
+// The password reaches this host script via the _CRABBOX_GP env var, never on
+// a command line; inside the guest it is visible to the guest itself (RunOnce
+// value, then the net.exe command line at first logon), which the lease owns.
+func (b *backend) injectInitPassword(ctx context.Context, vhdPath, user string) error {
+	script := fmt.Sprintf(
+		`$ErrorActionPreference = 'Stop'; `+
+			`$disk = Mount-VHD -Path '%s' -Passthru | Get-Disk; `+
+			`try { `+
+			`if ($disk.IsOffline) { Set-Disk -Number $disk.Number -IsOffline $false }; `+
+			`$letters = ($disk | Get-Partition | Where-Object DriveLetter).DriveLetter; `+
+			`$sys = $letters | Where-Object { Test-Path ("$_" + ':\Windows\System32\config\SOFTWARE') } | Select-Object -First 1; `+
+			`if (-not $sys) { throw 'no Windows system volume found in template' }; `+
+			`reg.exe load HKLM\crabbox-init ("$sys" + ':\Windows\System32\config\SOFTWARE') | Out-Null; `+
+			`if ($LASTEXITCODE -ne 0) { throw 'loading the offline SOFTWARE hive failed' }; `+
+			`try { `+
+			`$runOnce = 'HKLM:\crabbox-init\Microsoft\Windows\CurrentVersion\RunOnce'; `+
+			`if (-not (Test-Path $runOnce)) { New-Item -Path $runOnce -Force | Out-Null }; `+
+			`New-ItemProperty -Path $runOnce -Name 'CrabboxInitPassword' -PropertyType String -Force -Value ('cmd /c net user "%s" "' + $env:_CRABBOX_GP + '" /y') | Out-Null `+
+			`} finally { `+
+			`[gc]::Collect(); [gc]::WaitForPendingFinalizers(); `+
+			`reg.exe unload HKLM\crabbox-init | Out-Null `+
+			`} `+
+			`} finally { Dismount-VHD -Path '%s' }`,
+		escapePSString(vhdPath), escapePSString(user), escapePSString(vhdPath),
+	)
+	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
+	result, err := b.powershellWithEnv(ctx, script, env)
+	if err != nil {
+		return commandError("init-password injection", result, err)
+	}
+	return nil
+}
+
 // invokeInGuest runs a PowerShell script block inside the guest over PowerShell
 // Direct, authenticating as user with the configured guest password. It retries
 // with backoff while the guest finishes booting. scriptBlock is the body of an
 // Invoke-Command -ScriptBlock { ... }; the guest password is passed via the
 // _CRABBOX_GP env var, never on the command line.
 func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, label string) error {
-	guestPassword := b.cfg.HyperV.GuestPassword
-	if guestPassword == "" {
-		guestPassword = "crabbox"
-	}
 	script := fmt.Sprintf(
 		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
 			`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { %s }`,
 		escapePSString(user), escapePSString(vmName), scriptBlock,
 	)
-	env := append(os.Environ(), "_CRABBOX_GP="+guestPassword)
+	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
 		if attempt > 0 {

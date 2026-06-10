@@ -8,24 +8,26 @@ import (
 )
 
 type flagValues struct {
-	Image    *string
-	User     *string
-	WorkRoot *string
-	CPUs     *int
-	Memory   *int
-	Disk     *int
-	Switch   *string
+	Image        *string
+	User         *string
+	WorkRoot     *string
+	CPUs         *int
+	Memory       *int
+	Disk         *int
+	Switch       *string
+	InitPassword *bool
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		Image:    fs.String("hyperv-image", defaults.HyperV.Image, "Windows VHDX template path for Hyper-V VM creation"),
-		User:     fs.String("hyperv-user", defaults.HyperV.User, "guest administrator account for SSH (password via CRABBOX_HYPERV_GUEST_PASSWORD)"),
-		WorkRoot: fs.String("hyperv-work-root", defaults.HyperV.WorkRoot, "Crabbox work root inside the guest"),
-		CPUs:     fs.Int("hyperv-cpu", defaults.HyperV.CPUs, "CPU count for Hyper-V leases"),
-		Memory:   fs.Int("hyperv-memory", defaults.HyperV.Memory, "memory in MB for Hyper-V leases"),
-		Disk:     fs.Int("hyperv-disk", defaults.HyperV.Disk, "disk size in GB for Hyper-V leases"),
-		Switch:   fs.String("hyperv-switch", defaults.HyperV.Switch, "Hyper-V virtual switch name"),
+		Image:        fs.String("hyperv-image", defaults.HyperV.Image, "Windows VHDX template path for Hyper-V VM creation"),
+		User:         fs.String("hyperv-user", defaults.HyperV.User, "guest administrator account for SSH (password via CRABBOX_HYPERV_GUEST_PASSWORD)"),
+		WorkRoot:     fs.String("hyperv-work-root", defaults.HyperV.WorkRoot, "Crabbox work root inside the guest"),
+		CPUs:         fs.Int("hyperv-cpu", defaults.HyperV.CPUs, "CPU count for Hyper-V leases"),
+		Memory:       fs.Int("hyperv-memory", defaults.HyperV.Memory, "memory in MB for Hyper-V leases"),
+		Disk:         fs.Int("hyperv-disk", defaults.HyperV.Disk, "disk size in GB for Hyper-V leases"),
+		Switch:       fs.String("hyperv-switch", defaults.HyperV.Switch, "Hyper-V virtual switch name"),
+		InitPassword: fs.Bool("hyperv-init-password", defaults.HyperV.InitPassword, "set the guest password at first boot via the lease disk (for password-less auto-logon templates, e.g. Windows dev-environment VHDXs)"),
 	}
 }
 
@@ -54,6 +56,9 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "hyperv-switch") {
 		cfg.HyperV.Switch = *v.Switch
+	}
+	if flagWasSet(fs, "hyperv-init-password") {
+		cfg.HyperV.InitPassword = *v.InitPassword
 	}
 	if isHyperVProviderName(cfg.Provider) {
 		// Reject an explicitly-set non-Windows target from any source (CLI flag,
