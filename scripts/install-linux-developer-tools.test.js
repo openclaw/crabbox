@@ -18,6 +18,10 @@ test("linux developer tool repository setup rewrites keyrings idempotently", () 
 	const keyrings = path.join(dir, "keyrings");
 	const sources = path.join(dir, "sources");
 	const aptConf = path.join(dir, "apt-conf");
+	const chromePolicy = path.join(dir, "chrome-policy");
+	const chromiumPolicy = path.join(dir, "chromium-policy");
+	const browserBin = path.join(dir, "browser-bin");
+	const browserState = path.join(dir, "browser-state");
 	const osRelease = path.join(dir, "os-release");
 	const log = path.join(dir, "gpg.log");
 	fs.mkdirSync(bin);
@@ -69,6 +73,12 @@ printf '%s\\n' "$output" >>"$CRABBOX_FAKE_GPG_LOG"
 		path.join(bin, "node"),
 		`#!/usr/bin/env bash
 printf 'v23.0.0\\n'
+`,
+	);
+	writeExecutable(
+		path.join(bin, "google-chrome"),
+		`#!/usr/bin/env bash
+exit 0
 `,
 	);
 	writeExecutable(
@@ -126,6 +136,10 @@ exit 1
 				CRABBOX_LINUX_APT_SOURCES_DIR: sources,
 				CRABBOX_LINUX_APT_CONF_DIR: aptConf,
 				CRABBOX_LINUX_OS_RELEASE_FILE: osRelease,
+				CRABBOX_LINUX_CHROME_POLICY_DIR: chromePolicy,
+				CRABBOX_LINUX_CHROMIUM_POLICY_DIR: chromiumPolicy,
+				CRABBOX_LINUX_BROWSER_BIN_DIR: browserBin,
+				CRABBOX_LINUX_BROWSER_STATE_DIR: browserState,
 			},
 			encoding: "utf8",
 		},
@@ -144,4 +158,8 @@ exit 1
 	assert.match(fs.readFileSync(path.join(sources, "nodesource.list"), "utf8"), new RegExp(`signed-by=${keyrings}/nodesource.gpg`));
 	assert.match(fs.readFileSync(path.join(sources, "docker.list"), "utf8"), new RegExp(`signed-by=${keyrings}/docker.gpg`));
 	assert.match(fs.readFileSync(path.join(sources, "google-chrome.list"), "utf8"), new RegExp(`signed-by=${keyrings}/google-linux.gpg`));
+	assert.equal(fs.existsSync(path.join(chromePolicy, "crabbox.json")), true);
+	assert.equal(fs.existsSync(path.join(chromiumPolicy, "crabbox.json")), true);
+	assert.equal(fs.existsSync(path.join(browserBin, "crabbox-browser")), true);
+	assert.match(fs.readFileSync(path.join(browserState, "browser.env"), "utf8"), new RegExp(`CHROME_BIN=${browserBin}/crabbox-browser`));
 });
