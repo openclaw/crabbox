@@ -116,6 +116,7 @@ type Config struct {
 	isloImageExplicit             bool
 	Tenki                         TenkiConfig
 	Tensorlake                    TensorlakeConfig
+	OpenComputer                  OpenComputerConfig
 	DockerSandbox                 DockerSandboxConfig
 	Modal                         ModalConfig
 	UpstashBox                    UpstashBoxConfig
@@ -400,6 +401,19 @@ type TensorlakeConfig struct {
 	DiskMB         int
 	TimeoutSecs    int
 	NoInternet     bool
+}
+
+// OpenComputerConfig configures the delegated OpenComputer provider, which
+// talks to the OpenComputer REST API. The API key is intentionally absent: it
+// is read at runtime from CRABBOX_OPENCOMPUTER_API_KEY / OPENCOMPUTER_API_KEY
+// or the `oc` CLI config (`oc config set api-key`), and sent only in the
+// X-API-Key header — never persisted in Crabbox config or placed on argv.
+type OpenComputerConfig struct {
+	APIURL      string
+	Workdir     string
+	CPU         int
+	MemoryMB    int
+	TimeoutSecs int
 }
 
 type DockerSandboxConfig struct {
@@ -1234,6 +1248,13 @@ func baseConfig() Config {
 			MemoryMB: 1024,
 			DiskMB:   10240,
 		},
+		OpenComputer: OpenComputerConfig{
+			// APIURL is intentionally unset here so the `oc` config file's
+			// api_url is honored before the built-in default; the provider
+			// applies the default (https://app.opencomputer.dev) as the final
+			// fallback in newOCAPIClient.
+			Workdir: "/workspace/crabbox",
+		},
 		DockerSandbox: DockerSandboxConfig{
 			CLIPath: "sbx",
 			Agent:   "shell",
@@ -1368,6 +1389,7 @@ type fileConfig struct {
 	Islo                 *fileIsloConfig                    `yaml:"islo,omitempty"`
 	Tenki                *fileTenkiConfig                   `yaml:"tenki,omitempty"`
 	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
+	OpenComputer         *fileOpenComputerConfig            `yaml:"openComputer,omitempty"`
 	DockerSandbox        *fileDockerSandboxConfig           `yaml:"dockerSandbox,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
 	UpstashBox           *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
@@ -1736,6 +1758,14 @@ type fileTensorlakeConfig struct {
 	DiskMB         int     `yaml:"diskMB,omitempty"`
 	TimeoutSecs    int     `yaml:"timeoutSecs,omitempty"`
 	NoInternet     *bool   `yaml:"noInternet,omitempty"`
+}
+
+type fileOpenComputerConfig struct {
+	APIURL      string `yaml:"apiUrl,omitempty"`
+	Workdir     string `yaml:"workdir,omitempty"`
+	CPU         int    `yaml:"cpu,omitempty"`
+	MemoryMB    int    `yaml:"memoryMB,omitempty"`
+	TimeoutSecs int    `yaml:"timeoutSecs,omitempty"`
 }
 
 type fileDockerSandboxConfig struct {
@@ -2966,6 +2996,23 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.Tensorlake.NoInternet = *file.Tensorlake.NoInternet
 		}
 	}
+	if file.OpenComputer != nil {
+		if file.OpenComputer.APIURL != "" {
+			cfg.OpenComputer.APIURL = file.OpenComputer.APIURL
+		}
+		if file.OpenComputer.Workdir != "" {
+			cfg.OpenComputer.Workdir = file.OpenComputer.Workdir
+		}
+		if file.OpenComputer.CPU > 0 {
+			cfg.OpenComputer.CPU = file.OpenComputer.CPU
+		}
+		if file.OpenComputer.MemoryMB > 0 {
+			cfg.OpenComputer.MemoryMB = file.OpenComputer.MemoryMB
+		}
+		if file.OpenComputer.TimeoutSecs > 0 {
+			cfg.OpenComputer.TimeoutSecs = file.OpenComputer.TimeoutSecs
+		}
+	}
 	if file.DockerSandbox != nil {
 		if file.DockerSandbox.CLIPath != "" {
 			cfg.DockerSandbox.CLIPath = file.DockerSandbox.CLIPath
@@ -3918,6 +3965,11 @@ func applyEnv(cfg *Config) error {
 	if v, ok := getenvBool("CRABBOX_TENSORLAKE_NO_INTERNET"); ok {
 		cfg.Tensorlake.NoInternet = v
 	}
+	cfg.OpenComputer.APIURL = getenv("CRABBOX_OPENCOMPUTER_API_URL", getenv("OPENCOMPUTER_API_URL", cfg.OpenComputer.APIURL))
+	cfg.OpenComputer.Workdir = getenv("CRABBOX_OPENCOMPUTER_WORKDIR", cfg.OpenComputer.Workdir)
+	cfg.OpenComputer.CPU = getenvInt("CRABBOX_OPENCOMPUTER_CPU", cfg.OpenComputer.CPU)
+	cfg.OpenComputer.MemoryMB = getenvInt("CRABBOX_OPENCOMPUTER_MEMORY_MB", cfg.OpenComputer.MemoryMB)
+	cfg.OpenComputer.TimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", cfg.OpenComputer.TimeoutSecs)
 	cfg.DockerSandbox.CLIPath = getenv("CRABBOX_DOCKER_SANDBOX_CLI", cfg.DockerSandbox.CLIPath)
 	cfg.DockerSandbox.Agent = getenv("CRABBOX_DOCKER_SANDBOX_AGENT", cfg.DockerSandbox.Agent)
 	cfg.DockerSandbox.Template = getenv("CRABBOX_DOCKER_SANDBOX_TEMPLATE", cfg.DockerSandbox.Template)

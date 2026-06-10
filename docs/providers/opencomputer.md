@@ -1,0 +1,161 @@
+# OpenComputer Provider
+
+Read when:
+
+- choosing `provider: opencomputer` (aliases: `oc`, `open-computer`);
+- configuring the OpenComputer sandbox sizing, workdir, or API URL;
+- changing `internal/providers/opencomputer`.
+
+OpenComputer is a delegated run provider. Crabbox talks to the
+[OpenComputer](https://app.opencomputer.dev) REST API directly (no `oc` CLI
+process at runtime) for sandbox lifecycle, command execution, and file sync.
+OpenComputer owns the Linux VM and the command transport; Crabbox owns local
+config, repo claims, sync manifests and guardrails, slugs, timing summaries, and
+normalized list/status rendering.
+
+The API key travels only in the `X-API-Key` header and every payload (command
+env, file content) travels in request bodies, so nothing sensitive is ever
+placed on a process command line.
+
+## When To Use
+
+Use OpenComputer when the remote box should be an OpenComputer full Linux VM.
+Use AWS, Hetzner, Static SSH, or Daytona when you need Crabbox-native SSH
+access, since OpenComputer does not expose SSH through Crabbox.
+
+## Prerequisites
+
+An OpenComputer API key (`osb_...`). The easiest way to provide it is the `oc`
+CLI's config file, which Crabbox reads automatically:
+
+```sh
+oc config set api-key osb_...
+```
+
+The `oc` binary is **not** required at runtime — Crabbox only reads the key it
+stores. Alternatively set `CRABBOX_OPENCOMPUTER_API_KEY` (or
+`OPENCOMPUTER_API_KEY`) in the environment.
+
+## Commands
+
+```sh
+crabbox warmup --provider opencomputer
+crabbox run --provider opencomputer -- pnpm test
+crabbox run --provider opencomputer --id blue-lobster --shell 'pnpm install && pnpm test'
+crabbox status --provider opencomputer --id blue-lobster
+crabbox stop --provider opencomputer blue-lobster
+```
+
+## Auth
+
+Crabbox resolves the API key from, in order, `CRABBOX_OPENCOMPUTER_API_KEY`,
+`OPENCOMPUTER_API_KEY`, then the `oc` CLI config file (`~/.oc/config.json`,
+written by `oc config set api-key`). It is sent only in the `X-API-Key` header,
+never persisted in Crabbox config and never placed on argv. If no key is
+resolvable, operations fail with a clear error.
+
+The API base URL defaults to `https://app.opencomputer.dev` and can be
+overridden with `openComputer.apiUrl` / `--opencomputer-api-url` /
+`OPENCOMPUTER_API_URL` (it also falls back to the `api_url` in the `oc` config).
+
+## Config
+
+```yaml
+provider: opencomputer
+target: linux
+openComputer:
+  apiUrl: https://app.opencomputer.dev
+  workdir: /workspace/crabbox  # absolute path; sync target and exec cwd
+  cpu: 0                       # vCPUs; 0 leaves it to the OpenComputer default
+  memoryMB: 0                  # memory in MB; 0 leaves it to the default
+  timeoutSecs: 0               # sandbox idle timeout; 0 leaves it to the default
+```
+
+Provider flags:
+
+```text
+--opencomputer-api-url
+--opencomputer-workdir
+--opencomputer-cpu
+--opencomputer-memory-mb
+--opencomputer-timeout-secs
+```
+
+Each flag has a matching `CRABBOX_OPENCOMPUTER_*` environment override (for
+example `CRABBOX_OPENCOMPUTER_WORKDIR`, `CRABBOX_OPENCOMPUTER_CPU`). The API URL
+also reads `OPENCOMPUTER_API_URL`.
+
+> **Sizing tiers.** `cpu` and `memoryMB` must form an allowed tier (for example
+> `1/1024`, `1/4096`, `2/8192`, `4/16384`). They are sent only when both are
+> set; leaving either at `0` uses the OpenComputer default tier, so an invalid
+> partial sizing is never sent.
+
+### Environment forwarding
+
+`--allow-env` / `--env-from-profile` are supported and never place values on the
+command line: forwarded env is sent in the body of the exec request (`POST
+/api/sandboxes/<id>/exec/run`, the `envs` field), so values never appear in any
+process argv.
+
+```sh
+crabbox run --provider opencomputer --allow-env API_TOKEN -- printenv API_TOKEN
+```
+
+## Lifecycle
+
+1. `warmup` or `run` without `--id` calls `POST /api/sandboxes` with the
+   configured timeout and sizing tier and `metadata` tagging the box as
+   Crabbox-owned (`crabbox=true`, `crabbox-name=crabbox-<repo-slug>-<random6>`).
+   The returned sandbox ID (`sb-...`) is the canonical identifier.
+2. The local lease is stored as `ocbx_<sandbox-id>` with a friendly slug and a
+   repo claim.
+3. By default `run` archive-syncs the working tree: a `git ls-files`-driven
+   manifest is packed into a gzipped tar locally, uploaded via the file API
+   (`PUT /api/sandboxes/<id>/files?path=...`, content in the request body), and
+   extracted into the configured workdir. `--no-sync` skips the archive step
+   (the workdir is still created); `--sync-only` syncs and stops without running
+   a command.
+4. The command runs via `POST /api/sandboxes/<id>/exec/run` with `cwd` set to
+   the workdir and `envs` carrying any forwarded env; the buffered stdout/stderr
+   are streamed back and the remote exit code is mirrored.
+5. On release the sandbox is deleted (`DELETE /api/sandboxes/<id>`) unless
+   `--keep` was set. `--keep-on-failure` retains a newly created sandbox after a
+   failed run and prints a rerun/stop hint.
+
+## Capabilities
+
+- SSH: not driven by Crabbox.
+- Crabbox sync: yes — gzipped tar uploaded via the file API (off-argv) and
+  extracted in-sandbox. The archive-sync feature is advertised, so
+  `--force-sync-large` and `--sync-only` are honored.
+- Env forwarding: yes — off-argv, in the exec request body.
+- Provider sync: no separate provider-side copy command is required.
+- URL bridge: no — OpenComputer preview URLs are managed by the OpenComputer
+  control plane rather than the Crabbox bridge plane (same honest-unsupported
+  pattern as Modal and Tensorlake).
+- Desktop / browser / code: no Crabbox VNC or code-server surface.
+- Actions hydration: no.
+- Coordinator: no — OpenComputer always runs direct against the API and never
+  goes through the broker.
+
+## Gotchas
+
+- `--checksum` is rejected because OpenComputer does not expose Crabbox's rsync
+  checksum semantics. `--sync-only` and `--force-sync-large` are supported.
+- Large-sync guardrails still apply; pass `--force-sync-large` when a large
+  archive sync is intentional.
+- `--shell` wraps the command as `bash -lc '<joined args>'`. Plain commands that
+  contain shell metacharacters (`&&`, `|`, `>`, etc.) or a leading `KEY=VALUE`
+  assignment are auto-wrapped the same way.
+- `exec/run` is buffered: stdout/stderr are returned when the command finishes
+  rather than streamed line-by-line.
+- `openComputer.workdir` must be an absolute path (default `/workspace/crabbox`)
+  and cannot be a broad system directory such as `/`, `/tmp`, or `/workspace`.
+  It is both the sync target and the exec working directory.
+- IDs accepted by `--id` and `stop` are Crabbox slugs and `ocbx_<sandbox-id>`
+  lease IDs that have a local Crabbox claim. Sandboxes without a local claim are
+  rejected (the same Crabbox-owned-only safety pattern as Islo).
+
+Related docs:
+
+- [Provider backends](../provider-backends.md)
