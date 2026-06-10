@@ -1,8 +1,10 @@
 package islo
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -120,6 +122,19 @@ type isloBackend struct {
 var _ core.PausableBackend = (*isloBackend)(nil)
 
 func (b *isloBackend) Spec() ProviderSpec { return b.spec }
+
+func (b *isloBackend) DataRunPolicy(_ context.Context, req core.DataRunPolicyRequest) (core.DataRunPolicyResult, error) {
+	if strings.TrimSpace(req.SourceIdentity) == "" &&
+		strings.TrimSpace(req.SinkIdentity) == "" &&
+		strings.TrimSpace(req.Egress) == "" &&
+		strings.TrimSpace(req.Promotion) == "" {
+		return core.DataRunPolicyResult{}, nil
+	}
+	return core.DataRunPolicyResult{
+		Enforcement: "declared-only",
+		Message:     "islo records data-run policy declarations but does not enforce identity, egress, or promotion",
+	}, nil
+}
 
 func (b *isloBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	started := b.now()
@@ -268,10 +283,17 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	result.ExitCode = exitCode
 	result.Command = commandDuration
 	result.Total = b.now().Sub(started)
+	var artifactErr error
+	if runErr == nil && result.ExitCode == 0 && core.HasDelegatedArtifactRequests(req) {
+		result.Artifacts, artifactErr = core.CollectDelegatedRunArtifacts(ctx, b, req, req.Repo.Root, "", leaseID, b.rt.Stderr)
+		if artifactErr != nil {
+			result.ExitCode = 7
+		}
+	}
 	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "islo run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
+		fmt.Fprintf(b.rt.Stderr, "islo run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	} else {
-		fmt.Fprintf(b.rt.Stderr, "islo run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
+		fmt.Fprintf(b.rt.Stderr, "islo run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	}
 	if req.TimingJSON {
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{
@@ -283,11 +305,17 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			SyncSkipped:   req.NoSync,
 			CommandMs:     result.Command.Milliseconds(),
 			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      exitCode,
+			ExitCode:      result.ExitCode,
 			Label:         strings.TrimSpace(req.Label),
+			Artifacts:     result.Artifacts,
 		}); err != nil {
 			return result, err
 		}
+	}
+	if artifactErr != nil {
+		handleDelegatedRunFailure(b.rt.Stderr, req, isloProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		result.Session.Kept = !shouldStop
+		return result, artifactErr
 	}
 	if runErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, isloProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
@@ -331,6 +359,76 @@ func applyIsloProxyPair(env map[string]string, upper, lower, defaultValue string
 		env[upper] = defaultValue
 		env[lower] = defaultValue
 	}
+}
+
+func (b *isloBackend) FetchDelegatedArtifact(ctx context.Context, req core.DelegatedArtifactRequest) ([]byte, error) {
+	client, err := newIsloClient(b.cfg, b.rt)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimPrefix(strings.TrimSpace(req.LeaseID), isloLeasePrefix)
+	if name == "" || name == req.LeaseID {
+		return nil, fmt.Errorf("islo sandbox name is required")
+	}
+	workspace, err := isloWorkspacePath(b.cfg)
+	if err != nil {
+		return nil, err
+	}
+	maxBytes := req.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = core.DelegatedArtifactMaxBytes
+	}
+	script := strings.Join([]string{
+		"set -euo pipefail",
+		"cd " + shellQuote(workspace),
+		"test -f " + shellQuote(req.RemotePath),
+		"test ! -L " + shellQuote(req.RemotePath),
+		"size=$(wc -c < " + shellQuote(req.RemotePath) + ")",
+		"if [ \"$size\" -gt " + fmt.Sprint(maxBytes) + " ]; then echo " + shellQuote(req.RemotePath+" exceeds "+fmt.Sprint(maxBytes)+" bytes") + " >&2; exit 7; fi",
+		"base64 < " + shellQuote(req.RemotePath),
+	}, "\n")
+	stdout := &boundedArtifactBuffer{max: base64.StdEncoding.EncodedLen(maxBytes) + 4096}
+	code, err := client.ExecStream(ctx, name, &gosdk.ExecRequest{Command: []string{"bash", "-lc", script}}, stdout, b.rt.Stderr)
+	if err != nil {
+		return nil, fmt.Errorf("islo retrieve artifact %s: %w", req.RemotePath, err)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("islo retrieve artifact %s exited %d", req.RemotePath, code)
+	}
+	if stdout.exceeded {
+		return nil, fmt.Errorf("islo retrieve artifact %s exceeds encoded output bound", req.RemotePath)
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(stdout.String()), ""))
+	if err != nil {
+		return nil, fmt.Errorf("islo retrieve artifact %s: decode base64: %w", req.RemotePath, err)
+	}
+	if len(data) > maxBytes {
+		return nil, fmt.Errorf("islo retrieve artifact %s exceeds %d bytes", req.RemotePath, maxBytes)
+	}
+	return data, nil
+}
+
+type boundedArtifactBuffer struct {
+	buf      bytes.Buffer
+	max      int
+	exceeded bool
+}
+
+func (b *boundedArtifactBuffer) Write(p []byte) (int, error) {
+	if b.max <= 0 || b.buf.Len()+len(p) <= b.max {
+		_, _ = b.buf.Write(p)
+		return len(p), nil
+	}
+	remaining := b.max - b.buf.Len()
+	if remaining > 0 {
+		_, _ = b.buf.Write(p[:remaining])
+	}
+	b.exceeded = true
+	return len(p), nil
+}
+
+func (b *boundedArtifactBuffer) String() string {
+	return b.buf.String()
 }
 
 func (b *isloBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {

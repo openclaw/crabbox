@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -583,6 +585,95 @@ func TestIsloRunCleanupDeleteUsesBoundedContext(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "warning: islo stop failed for crabbox-repo-abcdef: context deadline exceeded") {
 		t.Fatalf("stderr=%q, want cleanup timeout warning", stderr.String())
+	}
+}
+
+func TestIsloRunRetrievesRequiredArtifactAndDownloadBeforeStop(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "manifest.json")
+	client := &fakeIsloSyncClient{
+		createName: "crabbox-repo-abcdef",
+		retrieveFiles: map[string][]byte{
+			"reports/data/manifest.json": []byte(`{"schemaVersion":"crabbox.data-run.v1","status":"success","outputs":[{"name":"warehouse.users"}]}`),
+		},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	var stderr bytes.Buffer
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: &stderr},
+	}
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:                  Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:                true,
+		Command:               []string{"bash", "-lc", "true"},
+		RequiredArtifactGlobs: []string{"reports/data/manifest.json"},
+		Downloads:             []string{"reports/data/manifest.json=" + manifestPath},
+	})
+	if err != nil {
+		t.Fatalf("Run err: %v\nstderr=%s", err, stderr.String())
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit=%d, want 0", result.ExitCode)
+	}
+	if len(result.Artifacts) != 1 || result.Artifacts[0].Kind != "delegated-download" {
+		t.Fatalf("artifacts=%#v", result.Artifacts)
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"schemaVersion"`) {
+		t.Fatalf("downloaded manifest=%s", data)
+	}
+	if !strings.Contains(stderr.String(), "required artifact reports/data/manifest.json matched=1") {
+		t.Fatalf("missing required artifact match output: %s", stderr.String())
+	}
+	if !client.commandContains("test ! -L 'reports/data/manifest.json'") {
+		t.Fatalf("retrieve command should reject symlinks: %#v", client.prepareCommands)
+	}
+}
+
+func TestIsloRunRejectsOversizedArtifactBeforeDownload(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{
+		createName: "crabbox-repo-abcdef",
+		retrieveFiles: map[string][]byte{
+			"reports/data/manifest.json": bytes.Repeat([]byte("x"), core.DelegatedArtifactMaxBytes+1),
+		},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:                  Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:                true,
+		Command:               []string{"bash", "-lc", "true"},
+		RequiredArtifactGlobs: []string{"reports/data/manifest.json"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "delegated artifact reports/data/manifest.json") {
+		t.Fatalf("err=%v, want delegated artifact failure", err)
+	}
+	if result.ExitCode != 7 {
+		t.Fatalf("exit=%d, want 7", result.ExitCode)
+	}
+}
+
+func TestBoundedArtifactBufferRecordsExceededOutput(t *testing.T) {
+	buf := &boundedArtifactBuffer{max: 4}
+	if n, err := buf.Write([]byte("abcdef")); err != nil || n != 6 {
+		t.Fatalf("write n=%d err=%v", n, err)
+	}
+	if !buf.exceeded {
+		t.Fatal("expected exceeded flag")
+	}
+	if got := buf.String(); got != "abcd" {
+		t.Fatalf("buffer=%q, want truncated prefix", got)
 	}
 }
 
@@ -1397,6 +1488,7 @@ type fakeIsloSyncClient struct {
 	execCodes                []int
 	execOut                  string
 	execOuts                 []string
+	retrieveFiles            map[string][]byte
 	execErrOnCommand         error
 	execErrOnCommandContains string
 	execErrOnCommandSkip     int
@@ -1512,6 +1604,21 @@ func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosd
 	}
 	if f.execErr != nil {
 		return 1, f.execErr
+	}
+	if strings.Contains(command, "wc -c") && strings.Contains(command, "base64 <") {
+		for path, data := range f.retrieveFiles {
+			if !strings.Contains(command, path) {
+				continue
+			}
+			if len(data) > core.DelegatedArtifactMaxBytes {
+				return 7, nil
+			}
+			if stdout != nil {
+				_, _ = io.WriteString(stdout, base64.StdEncoding.EncodeToString(data))
+			}
+			return 0, nil
+		}
+		return 1, nil
 	}
 	if f.execErrOnCommand != nil && strings.Contains(command, f.execErrOnCommandContains) {
 		if f.execErrOnCommandSkip > 0 {

@@ -23,6 +23,9 @@ func rejectIsloSyncOptions(req RunRequest) error {
 	if req.ChecksumSync {
 		return exit(2, "%s uses Islo archive sync; --checksum is not supported", isloProvider)
 	}
+	if len(req.ArtifactGlobs) > 0 {
+		return exit(2, "%s supports bounded single-file artifacts; --artifact-glob is not supported", isloProvider)
+	}
 	return nil
 }
 
@@ -175,12 +178,19 @@ func (b *isloBackend) execShellAs(ctx context.Context, client isloAPI, name, com
 	}
 	code, err := client.ExecStream(ctx, name, req, stdout, b.rt.Stderr)
 	if err != nil {
-		return fmt.Errorf("islo exec %q: %w", command, err)
+		return fmt.Errorf("islo exec %q: %w", isloCommandForError(command), err)
 	}
 	if code != 0 {
-		return exit(code, "islo exec %q exited %d", command, code)
+		return exit(code, "islo exec %q exited %d", isloCommandForError(command), code)
 	}
 	return nil
+}
+
+func isloCommandForError(command string) string {
+	if strings.HasPrefix(command, "printf %s ") && strings.Contains(command, " >> ") {
+		return "append archive chunk"
+	}
+	return command
 }
 
 func createIsloSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, _ io.Writer) (*os.File, error) {

@@ -125,6 +125,10 @@ sent to Islo when greater than zero; otherwise the sandbox uses Islo's defaults.
 - Pause / resume: yes. `crabbox pause` snapshots the sandbox to disk and frees
   its CPU/memory via Islo's pause API; `crabbox resume` restores it. The lease
   claim is preserved across a pause.
+- Bounded run artifacts: yes — safe relative single-file `--require-artifact`
+  and `--download`, capped at 64 KiB per file through Islo exec.
+- Data-run policy: declared-only — Islo records Crabbox data-run policy
+  declarations but does not enforce identity, egress, or promotion.
 - Desktop / browser / code: no.
 - Actions hydration: no.
 - Coordinator (broker): no — always direct from the CLI.
@@ -138,9 +142,10 @@ sent to Islo when greater than zero; otherwise the sandbox uses Islo's defaults.
   delegated archive/exec transport, not Crabbox-managed rsync.
 - `--full-resync`, `--force-sync-large`, `--script`, `--script-stdin`,
   `--fresh-pr`, `--env-helper`, local stdout/stderr captures,
-  `--capture-on-fail`, `--download`, `--artifact-glob`, `--require-artifact`,
-  `--emit-proof`, and `--stop-after` are rejected because Islo owns sync and
-  command transport in delegated-run mode.
+  `--capture-on-fail`, `--artifact-glob`, `--emit-proof`, and `--stop-after`
+  are rejected because Islo owns sync and command transport in delegated-run
+  mode. `--require-artifact` and `--download` are supported only for bounded
+  single files retrieved after a successful command and before one-shot cleanup.
 - `--keep-on-failure` keeps a newly created failed sandbox until an explicit
   `stop` or provider-side expiry.
 - Large-sync guardrails still apply. Because `--force-sync-large` is rejected,
