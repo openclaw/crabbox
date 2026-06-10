@@ -706,6 +706,33 @@ func TestIsloSDKClientUploadArchiveStreamsMultipartTarball(t *testing.T) {
 	}
 }
 
+func TestIsloPauseResumeCallProvider(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	if err := backend.Pause(context.Background(), PauseRequest{ID: "crabbox-repo-abcdef"}); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if client.pausedName != "crabbox-repo-abcdef" {
+		t.Fatalf("pausedName=%q, want crabbox-repo-abcdef", client.pausedName)
+	}
+	if err := backend.Resume(context.Background(), ResumeRequest{ID: "crabbox-repo-abcdef"}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if client.resumedName != "crabbox-repo-abcdef" {
+		t.Fatalf("resumedName=%q, want crabbox-repo-abcdef", client.resumedName)
+	}
+	// A non-Crabbox sandbox id must be rejected before any provider call.
+	if err := backend.Pause(context.Background(), PauseRequest{ID: "production"}); err == nil {
+		t.Fatal("expected non-Crabbox sandbox to be rejected")
+	}
+}
+
 type fakeIsloSyncClient struct {
 	prepareCommands          []string
 	execRequests             []*gosdk.ExecRequest
@@ -723,6 +750,8 @@ type fakeIsloSyncClient struct {
 	createName               string
 	blockDelete              bool
 	deleteCalls              int
+	pausedName               string
+	resumedName              string
 }
 
 func (f *fakeIsloSyncClient) CreateSandbox(_ context.Context, req *gosdk.SandboxCreate) (*gosdk.SandboxResponse, error) {
@@ -748,6 +777,16 @@ func (f *fakeIsloSyncClient) DeleteSandbox(ctx context.Context, _ string) error 
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	return nil
+}
+
+func (f *fakeIsloSyncClient) PauseSandbox(_ context.Context, name string) error {
+	f.pausedName = name
+	return nil
+}
+
+func (f *fakeIsloSyncClient) ResumeSandbox(_ context.Context, name string) error {
+	f.resumedName = name
 	return nil
 }
 

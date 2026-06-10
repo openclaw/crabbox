@@ -120,6 +120,16 @@ type CleanupBackend interface {
 	Cleanup(ctx context.Context, req CleanupRequest) error
 }
 
+// PausableBackend is implemented by providers that can pause a lease — freeing
+// remote compute while preserving its state — and resume it later. It is
+// optional: the `pause`/`resume` commands report a clear error for providers
+// that do not implement it.
+type PausableBackend interface {
+	Backend
+	Pause(ctx context.Context, req PauseRequest) error
+	Resume(ctx context.Context, req ResumeRequest) error
+}
+
 type ReleaseLeaseReporter interface {
 	ReleaseLeaseMessage(lease LeaseTarget) string
 }
@@ -520,6 +530,16 @@ type StatusRequest struct {
 }
 
 type StopRequest struct {
+	Options LeaseOptions
+	ID      string
+}
+
+type PauseRequest struct {
+	Options LeaseOptions
+	ID      string
+}
+
+type ResumeRequest struct {
 	Options LeaseOptions
 	ID      string
 }

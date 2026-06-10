@@ -121,6 +121,10 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.inspect(ctx, helpArgs), true
 	case "stop", "release":
 		return a.stop(ctx, helpArgs), true
+	case "pause":
+		return a.pause(ctx, helpArgs), true
+	case "resume":
+		return a.resume(ctx, helpArgs), true
 	case "cleanup":
 		return a.cleanup(ctx, helpArgs), true
 	default:
@@ -196,6 +200,8 @@ Commands:
   screenshot  Capture a PNG from a desktop lease
   inspect     Print lease/provider details; add --json for scripts
   stop        Release a lease or delete a direct-provider machine
+  pause       Pause a lease, freeing remote compute while preserving state
+  resume      Resume a previously paused lease
   cleanup     Sweep expired direct-provider machines or local provider state
   pool        Manage ready-pool leases and list machine inventory aliases
   pond        Bridge plane peer discovery for delegated providers

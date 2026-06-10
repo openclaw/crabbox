@@ -31,6 +31,8 @@ crabbox warmup --provider islo --islo-image docker.io/library/ubuntu:26.04
 crabbox run --provider islo -- pnpm test
 crabbox run --provider islo --id swift-crab --shell 'pnpm install && pnpm test'
 crabbox status --provider islo --id swift-crab --wait
+crabbox pause --provider islo swift-crab
+crabbox resume --provider islo swift-crab
 crabbox stop --provider islo swift-crab
 crabbox list --provider islo --json
 ```
@@ -119,6 +121,9 @@ sent to Islo when greater than zero; otherwise the sandbox uses Islo's defaults.
 - URL bridge: yes. Exposed ports become public HTTPS shares through Islo's
   `/sandboxes/{name}/shares` API, surfaced by `--expose` and the pond bridge
   plane. Share creation is idempotent per port.
+- Pause / resume: yes. `crabbox pause` snapshots the sandbox to disk and frees
+  its CPU/memory via Islo's pause API; `crabbox resume` restores it. The lease
+  claim is preserved across a pause.
 - Desktop / browser / code: no.
 - Actions hydration: no.
 - Coordinator (broker): no — always direct from the CLI.
