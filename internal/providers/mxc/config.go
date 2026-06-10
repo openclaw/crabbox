@@ -81,8 +81,36 @@ func buildConfig(cfg Config, req RunRequest) (mxcConfig, error) {
 }
 
 func isWindowsVolumeRoot(path string) bool {
-	clean := strings.TrimRight(strings.TrimSpace(path), `\\/`)
-	return len(clean) == 2 && clean[1] == ':'
+	clean := strings.TrimRight(strings.ReplaceAll(strings.TrimSpace(path), "/", `\`), `\`)
+	if isWindowsDriveRoot(clean) {
+		return true
+	}
+	lower := strings.ToLower(clean)
+	if strings.HasPrefix(lower, `\\?\unc\`) {
+		return len(windowsPathParts(clean[len(`\\?\unc\`):])) == 2
+	}
+	if strings.HasPrefix(lower, `\\?\`) {
+		return isWindowsDriveRoot(clean[len(`\\?\`):])
+	}
+	if strings.HasPrefix(clean, `\\`) {
+		return len(windowsPathParts(clean[2:])) == 2
+	}
+	return false
+}
+
+func isWindowsDriveRoot(path string) bool {
+	return len(path) == 2 && path[1] == ':' && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z'))
+}
+
+func windowsPathParts(path string) []string {
+	parts := strings.Split(path, `\`)
+	out := parts[:0]
+	for _, part := range parts {
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func windowsProcessEnvironment(forwarded map[string]string) []string {

@@ -101,9 +101,18 @@ func TestBuildConfigShellRequiresWindowsUI(t *testing.T) {
 }
 
 func TestBuildConfigRejectsVolumeRoot(t *testing.T) {
-	_, err := buildConfig(core.BaseConfig(), RunRequest{Repo: core.Repo{Root: `C:\`}, Command: []string{"cmd.exe", "/c", "exit", "0"}})
-	if err == nil || !strings.Contains(err.Error(), "volume root") {
-		t.Fatalf("err=%v", err)
+	for _, root := range []string{`C:\`, `\\server\share\`, `\\?\C:\`, `\\?\UNC\server\share\`} {
+		t.Run(root, func(t *testing.T) {
+			_, err := buildConfig(core.BaseConfig(), RunRequest{Repo: core.Repo{Root: root}, Command: []string{"cmd.exe", "/c", "exit", "0"}})
+			if err == nil || !strings.Contains(err.Error(), "volume root") {
+				t.Fatalf("root=%q err=%v", root, err)
+			}
+		})
+	}
+	for _, root := range []string{`C:\src`, `\\server\share\src`, `\\?\C:\src`, `\\?\UNC\server\share\src`} {
+		if isWindowsVolumeRoot(root) {
+			t.Fatalf("nested path treated as volume root: %q", root)
+		}
 	}
 }
 
