@@ -41,6 +41,13 @@ func testRuntime(httpClient *http.Client) core.Runtime {
 	}
 }
 
+func withWaitForRunningPollInterval(t *testing.T, interval time.Duration) {
+	t.Helper()
+	old := waitForRunningPollInterval
+	waitForRunningPollInterval = interval
+	t.Cleanup(func() { waitForRunningPollInterval = old })
+}
+
 // --- Provider registration ---
 
 func TestProviderName(t *testing.T) {
@@ -302,6 +309,96 @@ func TestGetJobStatus(t *testing.T) {
 	}
 	if status.SSHPort != 40010 {
 		t.Errorf("port = %d", status.SSHPort)
+	}
+}
+
+func TestWaitForRunningReturnsPermanentStatusErrors(t *testing.T) {
+	withWaitForRunningPollInterval(t, 0)
+	for _, tt := range []struct {
+		name      string
+		status    int
+		body      string
+		wantError string
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized, body: "bad token", wantError: "returned 401"},
+		{name: "not found", status: http.StatusNotFound, body: "missing", wantError: "returned 404"},
+		{name: "malformed json", status: http.StatusOK, body: "{", wantError: "unexpected end of JSON input"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+			host := strings.TrimPrefix(server.URL, "https://")
+			client := &apiClient{host: host, token: "tok", http: server.Client()}
+
+			_, _, err := client.WaitForRunning(context.Background(), "job-123", func() {})
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("err=%v, want %q", err, tt.wantError)
+			}
+			if calls != 1 {
+				t.Fatalf("calls=%d want 1 permanent failure", calls)
+			}
+		})
+	}
+}
+
+func TestWaitForRunningRetriesTransientStatusError(t *testing.T) {
+	withWaitForRunningPollInterval(t, 0)
+	calls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, "temporary")
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"metadata": map[string]string{"name": "crabbox testbox"},
+			"status": map[string]any{
+				"state": "RUNNING",
+				"agent": map[string]any{
+					"ip": "1.2.3.4",
+					"ports": []map[string]any{
+						{"name": "ssh", "number": 40010},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "https://")
+	client := &apiClient{host: host, token: "tok", http: server.Client()}
+
+	ip, port, err := client.WaitForRunning(context.Background(), "job-123", func() {})
+	if err != nil {
+		t.Fatalf("WaitForRunning err=%v", err)
+	}
+	if ip != "1.2.3.4" || port != 40010 {
+		t.Fatalf("target=%s:%d want 1.2.3.4:40010", ip, port)
+	}
+	if calls != 2 {
+		t.Fatalf("calls=%d want 2", calls)
+	}
+}
+
+func TestRetryableJobStatusErrorUsesPollingContext(t *testing.T) {
+	if !retryableJobStatusError(context.Background(), context.DeadlineExceeded) {
+		t.Fatal("per-request deadline should be retryable while polling context is active")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if retryableJobStatusError(ctx, context.DeadlineExceeded) {
+		t.Fatal("deadline should not be retryable after polling context is canceled")
+	}
+	if retryableJobStatusError(context.Background(), &semaphoreAPIError{StatusCode: http.StatusUnauthorized}) {
+		t.Fatal("401 should not be retryable")
+	}
+	if !retryableJobStatusError(context.Background(), &semaphoreAPIError{StatusCode: http.StatusTooManyRequests}) {
+		t.Fatal("429 should be retryable")
 	}
 }
 
