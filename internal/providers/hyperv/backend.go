@@ -191,13 +191,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		}
 		return LeaseTarget{}, err
 	}
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		if !req.Keep {
-			_ = b.removeVM(context.Background(), name)
-		}
-		return LeaseTarget{}, err
-	}
-	if err := updateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
+	if err := persistLease(leaseID, slug, name, cfg, req, lease); err != nil {
 		if !req.Keep {
 			_ = b.removeVM(context.Background(), name)
 		}
@@ -206,6 +200,14 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
 	return lease, nil
+}
+
+// persistLease records the lease claim and its SSH endpoint in one atomic
+// write. Acquire removes the VM when this fails, so the claim and endpoint
+// must never be written separately: a failure between two writes would leave
+// a claim pointing at a VM that no longer exists.
+func persistLease(leaseID, slug, name string, cfg Config, req AcquireRequest, lease LeaseTarget) error {
+	return claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH)
 }
 
 func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {

@@ -74,6 +74,10 @@ func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, 
 	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
 }
 
+func claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget) error {
+	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target)
+}
+
 func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaimForProvider(identifier, provider)
 }
@@ -84,10 +88,6 @@ func listLeaseClaims() ([]core.LeaseClaim, error) {
 
 func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
-}
-
-func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
-	return core.UpdateLeaseClaimEndpoint(leaseID, server, target)
 }
 
 func ensureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {

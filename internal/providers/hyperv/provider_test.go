@@ -668,6 +668,75 @@ func TestAcquireInitPasswordRejectsCmdUnsafeUser(t *testing.T) {
 	}
 }
 
+// Acquire persists the lease claim and its SSH endpoint in ONE atomic write.
+// Success must leave a claim that already carries the endpoint -- there is no
+// separate endpoint update whose failure could strand a half-written claim.
+func TestPersistLeaseWritesClaimAndEndpointAtomically(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	b := testBackend(&recordingRunner{})
+	cfg := b.configForRun()
+	lease := LeaseTarget{LeaseID: "cbx_atomic123456"}
+	lease.Server = b.serverFromInstance(hypervVM{Name: "crabbox-atom-1234", State: 2}, core.LeaseClaim{}, cfg)
+	lease.Server.PublicNet.IPv4.IP = "172.20.0.9"
+	lease.SSH = sshTargetFromConfig(cfg, "172.20.0.9")
+
+	req := AcquireRequest{}
+	req.Repo.Root = t.TempDir()
+	if err := persistLease("cbx_atomic123456", "atomslug", "crabbox-atom-1234", cfg, req, lease); err != nil {
+		t.Fatalf("persistLease: %v", err)
+	}
+	t.Cleanup(func() { removeLeaseClaim("cbx_atomic123456") })
+
+	claims, err := listLeaseClaims()
+	if err != nil {
+		t.Fatalf("listLeaseClaims: %v", err)
+	}
+	var found *core.LeaseClaim
+	for i := range claims {
+		if claims[i].LeaseID == "cbx_atomic123456" {
+			found = &claims[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("persistLease did not write the claim")
+	}
+	if found.SSHHost != "172.20.0.9" {
+		t.Fatalf("claim SSHHost=%q want 172.20.0.9 (endpoint must be in the same write as the claim)", found.SSHHost)
+	}
+	if instanceNameFromClaim(*found) != "crabbox-atom-1234" {
+		t.Fatalf("claim instance=%q want crabbox-atom-1234", instanceNameFromClaim(*found))
+	}
+}
+
+// When the atomic persist fails, NO claim may remain: Acquire's error path
+// removes the VM, so any surviving lease state would point at a resource that
+// no longer exists.
+func TestPersistLeaseFailureLeavesNoStaleClaim(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "state-not-a-dir")
+	if err := os.WriteFile(blocker, []byte("plain file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// crabboxStateDir joins XDG_STATE_HOME with "crabbox"; pointing it at a
+	// plain file makes every claim write fail.
+	t.Setenv("XDG_STATE_HOME", blocker)
+
+	b := testBackend(&recordingRunner{})
+	cfg := b.configForRun()
+	lease := LeaseTarget{LeaseID: "cbx_atomfail12345"}
+	lease.Server = b.serverFromInstance(hypervVM{Name: "crabbox-atom-fail", State: 2}, core.LeaseClaim{}, cfg)
+	lease.SSH = sshTargetFromConfig(cfg, "172.20.0.10")
+
+	req := AcquireRequest{}
+	req.Repo.Root = t.TempDir()
+	if err := persistLease("cbx_atomfail12345", "atomfail", "crabbox-atom-fail", cfg, req, lease); err == nil {
+		t.Fatal("persistLease should fail when the state directory is unwritable")
+	}
+	info, err := os.Stat(blocker)
+	if err != nil || info.IsDir() {
+		t.Fatalf("state path mutated: err=%v isDir=%v -- nothing may be persisted on failure", err, info.IsDir())
+	}
+}
+
 func TestAcquireRejectsISO(t *testing.T) {
 	b := testBackend(&recordingRunner{})
 	oldOS := hypervHostOS
