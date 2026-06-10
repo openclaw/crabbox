@@ -9,7 +9,7 @@ fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cb="${CRABBOX_BIN:-$root/bin/crabbox}"
 repo="${CRABBOX_LIVE_REPO:-$PWD}"
-providers=",${CRABBOX_LIVE_PROVIDERS-aws,hetzner,morph},"
+providers=",${CRABBOX_LIVE_PROVIDERS-aws,hetzner},"
 default_live_command='if [ -f go.mod ]; then test -f go.mod; elif [ -f package.json ]; then test -f package.json; else test -d .; fi; printf crabbox-live-ok; printf " pwd=%s\n" "$PWD"'
 live_command="${CRABBOX_LIVE_COMMAND:-$default_live_command}"
 config_paths=()

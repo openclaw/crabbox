@@ -346,6 +346,80 @@ esac
   assert.doesNotMatch(crabboxCalls, /external_command=[^ \n]+/);
 });
 
+test("default live smoke keeps Morph opt-in", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-default-providers-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  const crabboxLog = path.join(dir, "crabbox.log");
+  fs.mkdirSync(bin);
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
+case "$1" in
+  warmup)
+    printf 'provisioning provider=test lease=cbx_123456789abc slug=default-smoke-test\\n'
+    printf 'provisioned lease=cbx_123456789abc slug=default-smoke-test state=ready\\n'
+    ;;
+  status)
+    printf 'lease=cbx_123456789abc slug=default-smoke-test provider=test state=ready ready=true\\n'
+    ;;
+  inspect)
+    printf '{"id":"cbx_123456789abc","slug":"default-smoke-test","provider":"test","state":"ready","serverType":"type","host":"example.test","ready":true,"lastTouchedAt":"2026-06-10T00:00:00Z","expiresAt":"2026-06-10T00:15:00Z"}\\n'
+    ;;
+  ssh)
+    exit 0
+    ;;
+  cache)
+    printf '[]\\n'
+    ;;
+  run)
+    printf 'crabbox-live-ok\\n'
+    ;;
+  history)
+    printf 'history ok\\n'
+    ;;
+  stop)
+    printf 'stopped %s\\n' "\${*: -1}"
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const env = { ...process.env };
+  delete env.CRABBOX_LIVE_PROVIDERS;
+  delete env.CRABBOX_MORPH_API_KEY;
+  delete env.MORPH_API_KEY;
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...env,
+      PATH: `${bin}${path.delimiter}${env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_FAKE_LOG: crabboxLog,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /crabbox-live-ok/);
+  const crabboxCalls = fs.readFileSync(crabboxLog, "utf8");
+  assert.match(crabboxCalls, /warmup --provider aws/);
+  assert.match(crabboxCalls, /warmup --provider hetzner/);
+  assert.doesNotMatch(crabboxCalls, /--provider morph/);
+  assert.doesNotMatch(result.stderr, /CRABBOX_MORPH_API_KEY|MORPH_API_KEY|morph\.apiKey/);
+});
+
 test("live smoke fails when final active lease audit fails", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-admin-audit-"));
   const bin = path.join(dir, "bin");
