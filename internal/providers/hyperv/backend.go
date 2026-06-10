@@ -66,9 +66,6 @@ func applyDefaults(cfg *Config) {
 	if cfg.HyperV.Memory <= 0 {
 		cfg.HyperV.Memory = 8192
 	}
-	if cfg.HyperV.Disk <= 0 {
-		cfg.HyperV.Disk = 50
-	}
 	if cfg.HyperV.Switch == "" {
 		cfg.HyperV.Switch = "Default Switch"
 	}
@@ -133,8 +130,8 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	}()
 	cfg.SSHKey = keyPath
 	name := leaseProviderName(leaseID, slug)
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB disk=%dGB switch=%s keep=%v\n",
-		providerName, leaseID, slug, cfg.HyperV.Image, cfg.HyperV.CPUs, cfg.HyperV.Memory, cfg.HyperV.Disk, cfg.HyperV.Switch, req.Keep)
+	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB switch=%s keep=%v\n",
+		providerName, leaseID, slug, cfg.HyperV.Image, cfg.HyperV.CPUs, cfg.HyperV.Memory, cfg.HyperV.Switch, req.Keep)
 
 	if err := b.createVM(ctx, cfg, name, publicKey); err != nil {
 		_ = b.removeVM(context.Background(), name)
@@ -413,9 +410,9 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 	// Back each lease with a differencing disk over the template instead of
 	// copying the whole VHDX. Creating the child is near-instant and space-thin
 	// (the lease only stores its own writes); the template stays read-only and is
-	// shared across leases. The lease inherits the template's virtual size, so
-	// --hyperv-disk is not applied here -- size the template instead. On release
-	// only this child disk is deleted; the template is left untouched.
+	// shared across leases. The lease inherits the template's virtual size --
+	// size the template to size the lease. On release only this child disk is
+	// deleted; the template is left untouched.
 	diffScript := fmt.Sprintf(
 		`New-VHD -Path '%s' -ParentPath '%s' -Differencing -ErrorAction Stop | Out-Null`,
 		escapePSString(vhdPath), escapePSString(cfg.HyperV.Image),

@@ -13,7 +13,6 @@ type flagValues struct {
 	WorkRoot     *string
 	CPUs         *int
 	Memory       *int
-	Disk         *int
 	Switch       *string
 	InitPassword *bool
 }
@@ -25,7 +24,6 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 		WorkRoot:     fs.String("hyperv-work-root", defaults.HyperV.WorkRoot, "Crabbox work root inside the guest"),
 		CPUs:         fs.Int("hyperv-cpu", defaults.HyperV.CPUs, "CPU count for Hyper-V leases"),
 		Memory:       fs.Int("hyperv-memory", defaults.HyperV.Memory, "memory in MB for Hyper-V leases"),
-		Disk:         fs.Int("hyperv-disk", defaults.HyperV.Disk, "disk size in GB for Hyper-V leases"),
 		Switch:       fs.String("hyperv-switch", defaults.HyperV.Switch, "Hyper-V virtual switch name"),
 		InitPassword: fs.Bool("hyperv-init-password", defaults.HyperV.InitPassword, "set the guest password at first boot via the lease disk (for password-less auto-logon templates, e.g. Windows dev-environment VHDXs)"),
 	}
@@ -50,9 +48,6 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "hyperv-memory") {
 		cfg.HyperV.Memory = *v.Memory
-	}
-	if flagWasSet(fs, "hyperv-disk") {
-		cfg.HyperV.Disk = *v.Disk
 	}
 	if flagWasSet(fs, "hyperv-switch") {
 		cfg.HyperV.Switch = *v.Switch

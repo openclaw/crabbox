@@ -55,7 +55,6 @@ func testBackend(runner *recordingRunner) *backend {
 		WorkRoot: `C:\crabbox`,
 		CPUs:     4,
 		Memory:   8192,
-		Disk:     50,
 		Switch:   "Default Switch",
 	}
 	return newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
@@ -153,8 +152,8 @@ func TestApplyDefaults(t *testing.T) {
 	if cfg.WindowsMode != core.WindowsModeNormal {
 		t.Fatalf("windowsMode=%s want normal", cfg.WindowsMode)
 	}
-	if cfg.HyperV.CPUs != 4 || cfg.HyperV.Memory != 8192 || cfg.HyperV.Disk != 50 {
-		t.Fatalf("defaults not applied: cpus=%d memory=%d disk=%d", cfg.HyperV.CPUs, cfg.HyperV.Memory, cfg.HyperV.Disk)
+	if cfg.HyperV.CPUs != 4 || cfg.HyperV.Memory != 8192 {
+		t.Fatalf("defaults not applied: cpus=%d memory=%d", cfg.HyperV.CPUs, cfg.HyperV.Memory)
 	}
 	if cfg.HyperV.Switch != "Default Switch" {
 		t.Fatalf("switch=%s want Default Switch", cfg.HyperV.Switch)
@@ -506,7 +505,6 @@ func TestCreateVMDoesNotCopyOrResizeTemplate(t *testing.T) {
 	b := testBackend(runner)
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
-	cfg.HyperV.Disk = 25
 
 	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", ""); err != nil {
 		t.Fatalf("createVM: %v", err)

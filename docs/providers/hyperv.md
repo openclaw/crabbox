@@ -91,7 +91,6 @@ Notes:
 | `--hyperv-work-root` | `C:\crabbox` | Crabbox work root inside the guest |
 | `--hyperv-cpu` | `4` | Number of virtual CPUs |
 | `--hyperv-memory` | `8192` | Memory in MB |
-| `--hyperv-disk` | `50` | Reserved; leases inherit the template's virtual size (differencing disk) |
 | `--hyperv-switch` | `Default Switch` | Hyper-V virtual switch name |
 | `--hyperv-init-password` | `false` | Set the guest password at first boot via the lease disk (password-less auto-logon templates) |
 
@@ -104,7 +103,6 @@ hyperv:
   workRoot: C:\crabbox
   cpus: 4
   memory: 8192
-  disk: 50
   switch: Default Switch
   guestPassword: crabbox
   initPassword: false
@@ -119,7 +117,6 @@ hyperv:
 | `CRABBOX_HYPERV_WORK_ROOT` | Work root inside the VM |
 | `CRABBOX_HYPERV_CPUS` | CPU count |
 | `CRABBOX_HYPERV_MEMORY` | Memory in MB |
-| `CRABBOX_HYPERV_DISK` | Disk in GB |
 | `CRABBOX_HYPERV_SWITCH` | Virtual switch name |
 | `CRABBOX_HYPERV_GUEST_PASSWORD` | Guest user password for SSH key injection |
 | `CRABBOX_HYPERV_INIT_PASSWORD` | Set the guest password at first boot (`true`/`false`) |

@@ -589,7 +589,6 @@ type HyperVConfig struct {
 	WorkRoot      string
 	CPUs          int
 	Memory        int
-	Disk          int
 	Switch        string
 	GuestPassword string
 	InitPassword  bool
@@ -1300,7 +1299,6 @@ func baseConfig() Config {
 			WorkRoot: defaultWindowsWorkRoot,
 			CPUs:     4,
 			Memory:   8192,
-			Disk:     50,
 			Switch:   "Default Switch",
 		},
 		Tailscale: TailscaleConfig{
@@ -1851,7 +1849,6 @@ type fileHyperVConfig struct {
 	WorkRoot      string `yaml:"workRoot,omitempty"`
 	CPUs          int    `yaml:"cpus,omitempty"`
 	Memory        int    `yaml:"memory,omitempty"`
-	Disk          int    `yaml:"disk,omitempty"`
 	Switch        string `yaml:"switch,omitempty"`
 	GuestPassword string `yaml:"guestPassword,omitempty"`
 	InitPassword  *bool  `yaml:"initPassword,omitempty"`
@@ -3188,9 +3185,6 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.HyperV.Memory > 0 {
 			cfg.HyperV.Memory = file.HyperV.Memory
 		}
-		if file.HyperV.Disk > 0 {
-			cfg.HyperV.Disk = file.HyperV.Disk
-		}
 		if file.HyperV.Switch != "" {
 			cfg.HyperV.Switch = file.HyperV.Switch
 		}
@@ -4023,7 +4017,6 @@ func applyEnv(cfg *Config) error {
 	cfg.HyperV.WorkRoot = getenv("CRABBOX_HYPERV_WORK_ROOT", cfg.HyperV.WorkRoot)
 	cfg.HyperV.CPUs = getenvInt("CRABBOX_HYPERV_CPUS", cfg.HyperV.CPUs)
 	cfg.HyperV.Memory = getenvInt("CRABBOX_HYPERV_MEMORY", cfg.HyperV.Memory)
-	cfg.HyperV.Disk = getenvInt("CRABBOX_HYPERV_DISK", cfg.HyperV.Disk)
 	cfg.HyperV.Switch = getenv("CRABBOX_HYPERV_SWITCH", cfg.HyperV.Switch)
 	cfg.HyperV.GuestPassword = getenv("CRABBOX_HYPERV_GUEST_PASSWORD", cfg.HyperV.GuestPassword)
 	if value, ok := getenvBool("CRABBOX_HYPERV_INIT_PASSWORD"); ok {
