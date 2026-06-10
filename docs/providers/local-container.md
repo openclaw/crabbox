@@ -168,7 +168,22 @@ metadata updates.
 - Desktop, browser, VNC, WebVNC, screenshot, video, and desktop input helpers
   are local-only. `webvnc` starts noVNC/websockify on the target and tunnels it
   over SSH; it does not use the authenticated Crabbox portal.
-- No code-server, no Tailscale bootstrap, and no native checkpoint support.
+- No code-server and no Tailscale bootstrap.
+- Native checkpoints use `docker commit` (opt in with `--mode native`):
+  `crabbox checkpoint create` captures the container filesystem as a Docker image
+  tagged `crabbox-checkpoint-<name>-<digest>`, `crabbox checkpoint inspect <id>
+  --verify` (or `checkpoint list --verify`) confirms it, and `crabbox checkpoint
+  delete <id>` removes its verified Crabbox-owned tag while preserving
+  user-created tags and dependent containers. Committed images have Crabbox
+  lease ownership labels cleared so derived containers are not inventoried as
+  the source lease, and their mount-dependent bootstrap command is replaced with
+  a persistent default command. `auto` mode keeps the workspace-archive default.
+  Each checkpoint records its Docker context, context-store path, resolved
+  daemon endpoint, and Docker system ID; verify and delete fail closed if that
+  context or daemon is later replaced.
+  This native path is currently Docker-only; Podman and nerdctl keep using
+  workspace archives. Crabbox rejects native checkpoints when the workspace is
+  stored in a mounted volume because `docker commit` omits mounted data.
 - `warmup --actions-runner` is not supported. Use plain `crabbox run` for local
   container smoke tests, or a remote SSH provider for GitHub runner registration.
 - Socket pass-through is opt-in and grants the lease access to the host

@@ -81,6 +81,24 @@ Images are slower to create but preserve complete launch configuration. Direct
 AWS Linux/macOS leases use the AMI path for native checkpoints because AMIs fork
 directly without a coordinator.
 
+**`docker-commit`** — the `local-container` provider's native primitive (opt in
+with `--mode native`; `auto` keeps the workspace-archive default). `crabbox
+checkpoint create` captures the container filesystem as a Docker image tagged
+`crabbox-checkpoint-<name>-<digest>` (using the immutable image digest as
+identity); `crabbox checkpoint inspect <id> --verify` (or `checkpoint list
+--verify`) confirms the image is still present on its daemon; and `crabbox
+checkpoint delete <id>` removes its verified Crabbox-owned image tag while
+preserving any user-created tags or dependent containers. Crabbox strips lease
+ownership labels from the committed image so derived containers are not
+inventoried as the source lease and replaces the mount-dependent bootstrap
+command with a persistent default command. The Docker context, context-store
+path, resolved daemon endpoint, and Docker system ID used at create time are
+recorded and validated so verify and delete fail closed if that context or
+daemon is later replaced. Native checkpoints are currently Docker-only; Podman
+and nerdctl leases keep using workspace archives. Crabbox rejects native
+checkpoint creation when the workspace is stored in a mounted volume because
+`docker commit` does not capture mounted data.
+
 **Azure notes.** Disk-snapshot checkpoints require managed OS disks, the default
 for new Azure leases. Crabbox refuses native checkpoint creation from Azure
 ephemeral-OS-disk leases (Azure reports success but does not capture live disk

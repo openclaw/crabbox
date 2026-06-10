@@ -171,6 +171,44 @@ func TestCheckpointRestoreDryRunDoesNotResolveLease(t *testing.T) {
 	}
 }
 
+// TestCheckpointRestoreDockerCommitDoesNotPointAtFork is the round-10 regression:
+// restoring a docker-commit checkpoint must not tell users to use `checkpoint
+// fork` (which lands separately) or call the image a "VM image"; it should point
+// at the create/verify/delete support this PR adds.
+func TestCheckpointRestoreDockerCommitDoesNotPointAtFork(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := checkpointRecord{ID: "chk_dc_restore", Kind: checkpointKindDockerCommit, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	record.Native.ImageID = "sha256:deadbeef"
+	if _, err := store.Create(record); err != nil {
+		t.Fatal(err)
+	}
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	err = app.checkpointRestore(context.Background(), []string{record.ID, "--id", "cbx_x"})
+	if err == nil {
+		t.Fatal("expected restore of a docker-commit checkpoint to be unsupported")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "fork") {
+		t.Fatalf("docker-commit restore guidance must not point at fork, got %q", msg)
+	}
+	if strings.Contains(msg, "VM image") {
+		t.Fatalf("docker-commit image must not be called a VM image, got %q", msg)
+	}
+	// Must point at commands that actually exist: `inspect <id> --verify` and
+	// `delete <id>` (there is no `checkpoint verify` subcommand).
+	if !strings.Contains(msg, "checkpoint inspect") || !strings.Contains(msg, "--verify") {
+		t.Fatalf("guidance should point at `checkpoint inspect <id> --verify`, got %q", msg)
+	}
+	if !strings.Contains(msg, "checkpoint delete") {
+		t.Fatalf("guidance should point at `checkpoint delete <id>`, got %q", msg)
+	}
+}
+
 func TestCheckpointForkDryRunDoesNotAcquireLease(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
@@ -597,6 +635,41 @@ func TestCheckpointCreateModeParallelsRejectsImageStrategy(t *testing.T) {
 	}
 }
 
+func TestCheckpointCreateModeLocalContainerNativeUsesDockerCommit(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "local-container"
+	server := Server{Provider: "local-container", CloudID: "abc123"}
+	target := SSHTarget{TargetOS: targetLinux}
+	// auto keeps the existing workspace-archive default; docker-commit is opt-in via --mode native.
+	if got := checkpointCreateMode("auto", "", cfg, server, target, false); got != checkpointKindArchive {
+		t.Fatalf("auto mode=%q, want %q", got, checkpointKindArchive)
+	}
+	if got := checkpointCreateMode("native", "", cfg, server, target, false); got != checkpointKindDockerCommit {
+		t.Fatalf("native mode=%q, want %q", got, checkpointKindDockerCommit)
+	}
+	for _, strategy := range []string{checkpointStrategyImage, checkpointStrategyDiskSnapshot, "disk", "snapshot"} {
+		if got := checkpointCreateMode("native", strategy, cfg, server, target, false); got != "unsupported" {
+			t.Fatalf("native strategy=%q mode=%q, want unsupported", strategy, got)
+		}
+	}
+}
+
+func TestCheckpointDockerCommitUsesImageStrategy(t *testing.T) {
+	if got := checkpointStrategyForKind(checkpointKindDockerCommit); got != checkpointStrategyImage {
+		t.Fatalf("strategy=%q, want %q", got, checkpointStrategyImage)
+	}
+}
+
+func TestCheckpointCreateModeLocalContainerRequiresCloudID(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "local-container"
+	server := Server{Provider: "local-container"}
+	target := SSHTarget{TargetOS: targetLinux}
+	if got := checkpointCreateMode("auto", "", cfg, server, target, false); got != checkpointKindArchive {
+		t.Fatalf("no cloud ID auto mode=%q, want %q", got, checkpointKindArchive)
+	}
+}
+
 func TestDirectAWSCheckpointConfigUsesDirectMarker(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "crabbox.yaml")
 	if err := os.WriteFile(cfgPath, []byte("provider: aws\naws:\n  region: us-east-1\n"), 0o600); err != nil {
@@ -802,7 +875,7 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 	cfg.Coordinator = "https://coordinator.example"
 	cfg.TargetOS = targetLinux
 
-	_, err := (App{Stdout: io.Discard, Stderr: io.Discard}).createNativeCheckpoint(
+	_, _, err := (App{Stdout: io.Discard, Stderr: io.Discard}).createNativeCheckpoint(
 		context.Background(),
 		cfg,
 		Server{Provider: "azure", CloudID: "crabbox-source"},
@@ -810,6 +883,7 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 		"cbx_123",
 		"",
 		"repo",
+		"",
 		checkpointStrategyImage,
 		true,
 		false,

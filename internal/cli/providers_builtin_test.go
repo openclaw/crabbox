@@ -1012,7 +1012,7 @@ func (testLocalContainerProvider) Spec() ProviderSpec {
 		Name:        "local-container",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCacheVolume},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCacheVolume, FeatureCheckpoint},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -1079,6 +1079,12 @@ func (testLocalContainerProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, valu
 }
 func (p testLocalContainerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
+}
+func (testLocalContainerProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
+	if req.Server.CloudID == "" || req.StrategyExplicit {
+		return NativeCheckpointCapability{}, false
+	}
+	return NativeCheckpointCapability{Kind: checkpointKindDockerCommit, Direct: true}, true
 }
 
 type testMultipassProvider struct{}

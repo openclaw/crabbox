@@ -17,6 +17,7 @@ type checkpointNativeCreateRequest struct {
 	LeaseID     string
 	Name        string
 	RepoName    string
+	Workdir     string
 	Strategy    string
 	NoReboot    bool
 	Wait        bool
@@ -68,7 +69,7 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req checkpointNat
 		return CoordinatorImage{}, exit(2, "native checkpoints require a configured coordinator")
 	}
 	strategy := normalizeCheckpointStrategy(req.Strategy)
-	capability, ok := providerNativeCheckpointCapability(req.Cfg, req.Server, req.Target, strategy)
+	capability, ok := providerNativeCheckpointCapability(req.Cfg, req.Server, req.Target, req.Strategy)
 	if !ok || capability.Direct || capability.Kind == "" {
 		return CoordinatorImage{}, exit(2, "native checkpoints support brokered AWS Linux/macOS leases and brokered Azure/GCP Linux leases only")
 	}
@@ -169,8 +170,11 @@ func nativeCheckpointCreateDriver(cfg Config, server Server, target SSHTarget, s
 	if _, ok := directParallelsNativeCheckpointKind(cfg, server, target, strategy); ok {
 		return directParallelsCheckpointDriver{}, true
 	}
-	if kind, ok := directNativeCheckpointKind(cfg, server, target, strategy); ok && kind == checkpointKindAWSAMI {
-		return directAWSAMICheckpointDriver{}, true
+	if kind, ok := directNativeCheckpointKind(cfg, server, target, strategy); ok {
+		switch kind {
+		case checkpointKindAWSAMI:
+			return directAWSAMICheckpointDriver{}, true
+		}
 	}
 	if _, ok := nativeCheckpointKind(cfg, server, target, strategy); ok {
 		return coordinatorCheckpointDriver{}, true
@@ -178,31 +182,74 @@ func nativeCheckpointCreateDriver(cfg Config, server Server, target SSHTarget, s
 	return nil, false
 }
 
-func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID, name, repoName, strategy string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
+func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID, name, repoName, workdir, strategy string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, map[string]string, error) {
+	if provider, ok := nativeCheckpointLifecycleProvider(cfg, server); ok {
+		result, err := provider.CreateNativeCheckpoint(ctx, NativeCheckpointCreateRequest{
+			Config:      cfg,
+			Server:      server,
+			Target:      target,
+			LeaseID:     leaseID,
+			Name:        name,
+			RepoName:    repoName,
+			Workdir:     workdir,
+			Strategy:    strategy,
+			NoReboot:    noReboot,
+			Wait:        wait,
+			WaitTimeout: waitTimeout,
+			Stderr:      a.Stderr,
+		})
+		return coordinatorImageFromNativeCheckpoint(result.Image), result.Metadata, err
+	}
 	driver, ok := nativeCheckpointCreateDriver(cfg, server, target, strategy)
 	if !ok {
 		if cfg.Coordinator == "" {
-			return CoordinatorImage{}, exit(2, "native checkpoints require a configured coordinator")
+			return CoordinatorImage{}, nil, exit(2, "native checkpoints require a configured coordinator")
 		}
-		return CoordinatorImage{}, exit(2, "native checkpoints support brokered AWS Linux/macOS leases and brokered Azure/GCP Linux leases only")
+		return CoordinatorImage{}, nil, exit(2, "native checkpoints support brokered AWS Linux/macOS leases and brokered Azure/GCP Linux leases only")
 	}
-	return driver.Create(ctx, checkpointNativeCreateRequest{
+	image, err := driver.Create(ctx, checkpointNativeCreateRequest{
 		Cfg:         cfg,
 		Server:      server,
 		Target:      target,
 		LeaseID:     leaseID,
 		Name:        name,
 		RepoName:    repoName,
+		Workdir:     workdir,
 		Strategy:    strategy,
 		NoReboot:    noReboot,
 		Wait:        wait,
 		WaitTimeout: waitTimeout,
 		Stderr:      a.Stderr,
 	})
+	return image, nil, err
 }
 
 func (a App) createAWSAMICheckpoint(ctx context.Context, cfg Config, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
-	return a.createNativeCheckpoint(ctx, cfg, Server{Provider: "aws", CloudID: leaseID}, target, leaseID, name, repoName, checkpointStrategyImage, noReboot, wait, waitTimeout)
+	image, _, err := a.createNativeCheckpoint(ctx, cfg, Server{Provider: "aws", CloudID: leaseID}, target, leaseID, name, repoName, "", checkpointStrategyImage, noReboot, wait, waitTimeout)
+	return image, err
+}
+
+func coordinatorImageFromNativeCheckpoint(image NativeCheckpointImage) CoordinatorImage {
+	return CoordinatorImage{
+		ID:         image.ID,
+		Name:       image.Name,
+		State:      image.State,
+		Provider:   image.Provider,
+		Kind:       image.Kind,
+		Region:     image.Region,
+		ResourceID: image.ResourceID,
+		Direct:     image.Direct,
+	}
+}
+
+func nativeCheckpointLifecycleProvider(cfg Config, server Server) (NativeCheckpointLifecycleProvider, bool) {
+	providerName := firstNonBlank(server.Provider, cfg.Provider)
+	provider, err := ProviderFor(providerName)
+	if err != nil {
+		return nil, false
+	}
+	lifecycle, ok := provider.(NativeCheckpointLifecycleProvider)
+	return lifecycle, ok
 }
 
 func (a App) createDirectAWSAMICheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
@@ -320,10 +367,11 @@ func providerNativeCheckpointCapability(cfg Config, server Server, target SSHTar
 		return NativeCheckpointCapability{}, false
 	}
 	return capabilityProvider.NativeCheckpointCapability(NativeCheckpointRequest{
-		Config:   cfg,
-		Server:   server,
-		Target:   target,
-		Strategy: normalizeCheckpointStrategy(strategy),
+		Config:           cfg,
+		Server:           server,
+		Target:           target,
+		Strategy:         normalizeCheckpointStrategy(strategy),
+		StrategyExplicit: !isAutoCheckpointStrategy(strategy),
 	})
 }
 
@@ -389,6 +437,22 @@ func nativeCheckpointDeleteID(record checkpointRecord) string {
 	return record.nativeDeleteID()
 }
 
+func nativeCheckpointResourceRequest(record checkpointRecord) NativeCheckpointResourceRequest {
+	return NativeCheckpointResourceRequest{
+		Image: NativeCheckpointImage{
+			ID:         record.Native.ImageID,
+			Name:       record.Native.Name,
+			State:      record.Native.State,
+			Provider:   record.nativeProvider(),
+			Kind:       record.Kind,
+			Region:     record.Native.Region,
+			ResourceID: record.Native.Resource,
+			Direct:     record.Native.Direct,
+		},
+		Metadata: record.Native.Metadata,
+	}
+}
+
 func checkpointKindForProviderImage(image CoordinatorImage) string {
 	switch image.Kind {
 	case checkpointKindAWSEBS:
@@ -397,6 +461,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindAzureOS
 	case checkpointKindGCPDisk:
 		return checkpointKindGCPDisk
+	case checkpointKindDockerCommit:
+		return checkpointKindDockerCommit
 	}
 	switch image.Provider {
 	case "azure":
@@ -405,6 +471,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindGCP
 	case "parallels":
 		return checkpointKindParallels
+	case "local-container":
+		return checkpointKindDockerCommit
 	default:
 		return checkpointKindAWSAMI
 	}
@@ -412,7 +480,7 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 
 func checkpointStrategyForKind(kind string) string {
 	switch kind {
-	case checkpointKindAWSAMI, checkpointKindAzure, checkpointKindGCP:
+	case checkpointKindAWSAMI, checkpointKindAzure, checkpointKindGCP, checkpointKindDockerCommit:
 		return checkpointStrategyImage
 	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindParallels:
 		return checkpointStrategyDiskSnapshot
