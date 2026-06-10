@@ -1047,6 +1047,71 @@ func TestAcquireReleasesInvalidLeaseResponse(t *testing.T) {
 	}
 }
 
+func TestAcquireRollbackReleaseUsesBoundedDetachedContext(t *testing.T) {
+	isolateCrabboxState(t)
+	oldTimeout := lifecycleRollbackTimeout
+	lifecycleRollbackTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { lifecycleRollbackTimeout = oldTimeout })
+
+	runner := &blockingAcquireRollbackRunner{}
+	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	_, err := backend.Acquire(ctx, core.AcquireRequest{RequestedSlug: "invalid", Keep: false})
+	elapsed := time.Since(start)
+	if err == nil ||
+		!strings.Contains(err.Error(), "SSH host and user are required") ||
+		!strings.Contains(err.Error(), "external provider cleanup failed") ||
+		!strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("err=%v, want validation error with bounded cleanup failure", err)
+	}
+	var exit core.ExitError
+	if !core.AsExitError(err, &exit) || exit.Code != 5 || !strings.Contains(exit.Message, "external provider cleanup failed") {
+		t.Fatalf("exit=%#v ok=%v, want primary validation exit with cleanup message", exit, core.AsExitError(err, &exit))
+	}
+	if elapsed > time.Second {
+		t.Fatalf("Acquire took %s, want bounded cleanup to return promptly", elapsed)
+	}
+	if len(runner.operations) != 2 || runner.operations[0] != "acquire" || runner.operations[1] != "release" {
+		t.Fatalf("operations=%#v", runner.operations)
+	}
+	if !runner.releaseHasDeadline {
+		t.Fatal("release rollback did not receive a deadline")
+	}
+}
+
+func TestAcquireRollbackReleasePreservesCanceledPrimaryError(t *testing.T) {
+	isolateCrabboxState(t)
+	oldTimeout := lifecycleRollbackTimeout
+	lifecycleRollbackTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { lifecycleRollbackTimeout = oldTimeout })
+
+	runner := &blockingAcquireRollbackRunner{acquireResponse: `{"protocolVersion":1,"lease":{"slug":"invalid","name":"created-with-ssh","ssh":{"host":"127.0.0.1","user":"tester","port":"1"}}}`}
+	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := backend.Acquire(ctx, core.AcquireRequest{RequestedSlug: "invalid", Keep: false})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want context.Canceled in error chain", err)
+	}
+	if !strings.Contains(err.Error(), "external provider cleanup failed") || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("err=%v, want bounded cleanup failure message", err)
+	}
+	var exit core.ExitError
+	if core.AsExitError(err, &exit) {
+		t.Fatalf("exit=%#v, want non-ExitError primary to keep fallback classification", exit)
+	}
+	if len(runner.operations) != 2 || runner.operations[0] != "acquire" || runner.operations[1] != "release" {
+		t.Fatalf("operations=%#v", runner.operations)
+	}
+	if !runner.releaseHasDeadline {
+		t.Fatal("release rollback did not receive a deadline")
+	}
+}
+
 func TestResolveRejectsReplacementLeaseIdentity(t *testing.T) {
 	isolateCrabboxState(t)
 	repo := t.TempDir()
@@ -1335,6 +1400,34 @@ func (r *failingLifecycleRollbackRunner) Run(ctx context.Context, req core.Local
 	case 3:
 		_, r.rollbackHasDeadline = ctx.Deadline()
 		return core.LocalCommandResult{ExitCode: 18, Stderr: "delete failed"}, errors.New("exit status 18")
+	default:
+		return core.LocalCommandResult{}, nil
+	}
+}
+
+type blockingAcquireRollbackRunner struct {
+	acquireResponse    string
+	operations         []string
+	releaseHasDeadline bool
+}
+
+func (r *blockingAcquireRollbackRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	var request protocolRequest
+	if err := json.NewDecoder(req.Stdin).Decode(&request); err != nil {
+		return core.LocalCommandResult{}, err
+	}
+	r.operations = append(r.operations, request.Operation)
+	switch request.Operation {
+	case "acquire":
+		response := r.acquireResponse
+		if response == "" {
+			response = `{"protocolVersion":1,"lease":{"name":"created-without-ssh"}}`
+		}
+		return core.LocalCommandResult{Stdout: response}, nil
+	case "release":
+		_, r.releaseHasDeadline = ctx.Deadline()
+		<-ctx.Done()
+		return core.LocalCommandResult{ExitCode: 124, Stderr: "release timed out"}, ctx.Err()
 	default:
 		return core.LocalCommandResult{}, nil
 	}

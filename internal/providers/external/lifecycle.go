@@ -19,8 +19,9 @@ const (
 	lifecycleOutputJSONNameArray  = "json-name-array"
 	lifecycleOutputJSONLeaseArray = "json-lease-array"
 	externalResourceNameLabel     = "externalResourceName"
-	lifecycleRollbackTimeout      = 30 * time.Second
 )
+
+var lifecycleRollbackTimeout = 30 * time.Second
 
 var lifecyclePlaceholderPattern = regexp.MustCompile(`\{\{([A-Za-z_][A-Za-z0-9_.-]*)\}\}`)
 var lifecycleEnvNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)

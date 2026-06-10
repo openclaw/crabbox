@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -41,28 +42,30 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 		return core.LeaseTarget{}, core.Exit(5, "external provider acquire returned no lease")
 	}
 	if response.Lease.LeaseID != "" && response.Lease.LeaseID != desired.LeaseID {
+		var err error = core.Exit(4, "external provider lease identity changed: expected %s, found %s", desired.LeaseID, response.Lease.LeaseID)
 		if !req.Keep {
-			_, _ = b.invoke(context.Background(), protocolRequest{Operation: "release", Lease: response.Lease})
+			err = appendAcquireCleanupError(err, b.rollbackAcquireRelease(ctx, response.Lease))
 		}
-		return core.LeaseTarget{}, core.Exit(4, "external provider lease identity changed: expected %s, found %s", desired.LeaseID, response.Lease.LeaseID)
+		return core.LeaseTarget{}, err
 	}
 	fillDesired(response.Lease, desired)
 	lease := response.Lease.target(b.cfg, req.Keep)
 	if err := validateLease(lease, true, true); err != nil {
 		if !req.Keep {
-			_, _ = b.invoke(context.Background(), protocolRequest{Operation: "release", Lease: leaseForProtocol(lease)})
+			err = appendAcquireCleanupError(err, b.rollbackAcquireRelease(ctx, leaseForProtocol(lease)))
 		}
 		return core.LeaseTarget{}, err
 	}
 	if _, err := core.PersistExternalRouting(lease.LeaseID, b.cfg.External); err != nil {
+		var acquireErr error = core.Exit(2, "%v", err)
 		if !req.Keep {
-			_, _ = b.invoke(context.Background(), protocolRequest{Operation: "release", Lease: leaseForProtocol(lease)})
+			acquireErr = appendAcquireCleanupError(acquireErr, b.rollbackAcquireRelease(ctx, leaseForProtocol(lease)))
 		}
-		return core.LeaseTarget{}, core.Exit(2, "%v", err)
+		return core.LeaseTarget{}, acquireErr
 	}
 	if err := core.WaitForSSHReady(ctx, &lease.SSH, b.rt.Stderr, "external provider SSH", core.BootstrapWaitTimeout(b.cfg)); err != nil {
 		if !req.Keep {
-			_, _ = b.invoke(context.Background(), protocolRequest{Operation: "release", Lease: leaseForProtocol(lease)})
+			err = appendAcquireCleanupError(err, b.rollbackAcquireRelease(ctx, leaseForProtocol(lease)))
 			core.RemoveExternalRouting(lease.LeaseID)
 		}
 		return core.LeaseTarget{}, err
@@ -71,20 +74,58 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 	lease.Server.Labels["state"] = "ready"
 	if err := b.claimLeaseForRepo(lease.LeaseID, leaseSlugForClaim(lease, slug), req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
-			_, _ = b.invoke(context.Background(), protocolRequest{Operation: "release", Lease: leaseForProtocol(lease)})
+			err = appendAcquireCleanupError(err, b.rollbackAcquireRelease(ctx, leaseForProtocol(lease)))
 			core.RemoveExternalRouting(lease.LeaseID)
 		}
 		return core.LeaseTarget{}, err
 	}
 	if err := core.UpdateLeaseClaimEndpoint(lease.LeaseID, lease.Server, lease.SSH); err != nil {
 		if !req.Keep {
-			_, _ = b.invoke(context.Background(), protocolRequest{Operation: "release", Lease: leaseForProtocol(lease)})
+			err = appendAcquireCleanupError(err, b.rollbackAcquireRelease(ctx, leaseForProtocol(lease)))
 			core.RemoveLeaseClaim(lease.LeaseID)
 			core.RemoveExternalRouting(lease.LeaseID)
 		}
 		return core.LeaseTarget{}, err
 	}
 	return lease, nil
+}
+
+func (b *leaseBackend) rollbackAcquireRelease(ctx context.Context, lease *protocolLease) error {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lifecycleRollbackTimeout)
+	defer cancel()
+	_, err := b.invoke(rollbackCtx, protocolRequest{Operation: "release", Lease: lease})
+	return err
+}
+
+func appendAcquireCleanupError(primary, cleanup error) error {
+	if cleanup == nil {
+		return primary
+	}
+	return acquireCleanupError{primary: primary, cleanup: cleanup}
+}
+
+type acquireCleanupError struct {
+	primary error
+	cleanup error
+}
+
+func (e acquireCleanupError) Error() string {
+	return fmt.Sprintf("%v; external provider cleanup failed: %v", e.primary, e.cleanup)
+}
+
+func (e acquireCleanupError) Unwrap() error {
+	return e.primary
+}
+
+func (e acquireCleanupError) As(target any) bool {
+	var exit core.ExitError
+	if core.AsExitError(e.primary, &exit) {
+		if targetExit, ok := target.(*core.ExitError); ok {
+			*targetExit = core.Exit(exit.Code, "%s", e.Error())
+			return true
+		}
+	}
+	return errors.As(e.primary, target)
 }
 
 func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
