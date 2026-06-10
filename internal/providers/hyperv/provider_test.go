@@ -704,6 +704,15 @@ func TestEnsureGitInstallsWhenMissing(t *testing.T) {
 			t.Errorf("ensureGit script missing %q", want)
 		}
 	}
+	// MinGit's etc\gitconfig includes C:/Program Files/Git/etc/gitconfig, so
+	// extracting it to that path makes the include self-referential and every
+	// guest git command fails with "exceeded maximum include depth".
+	if !strings.Contains(script, `C:\Program Files\MinGit`) {
+		t.Error("ensureGit must extract MinGit to its own directory")
+	}
+	if strings.Contains(script, `$dst='C:\Program Files\Git'`) {
+		t.Error("ensureGit must not extract MinGit to C:\\Program Files\\Git (self-referential gitconfig include)")
+	}
 }
 
 func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {

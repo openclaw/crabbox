@@ -578,6 +578,13 @@ func (b *backend) ensureOpenSSH(ctx context.Context, vmName, user string) error 
 // installs git. Idempotent: a no-op when git is already on PATH (so a template
 // that pre-bakes git skips the per-lease download). Uses portable MinGit from
 // the latest git-for-windows release; needs guest internet.
+//
+// MinGit must NOT be extracted to C:\Program Files\Git: MinGit's etc\gitconfig
+// deliberately includes C:/Program Files/Git/etc/gitconfig (to inherit a full
+// Git-for-Windows install's system config), so extracting it there makes the
+// include self-referential and every git command fails with "exceeded maximum
+// include depth". At C:\Program Files\MinGit the include points at a missing
+// file, which git ignores.
 func (b *backend) ensureGit(ctx context.Context, vmName, user string) error {
 	scriptBlock := `$ErrorActionPreference='Stop'; ` +
 		`if (Get-Command git -ErrorAction SilentlyContinue) { return }; ` +
@@ -588,7 +595,7 @@ func (b *backend) ensureGit(ctx context.Context, vmName, user string) error {
 		`if (-not $asset) { throw 'MinGit asset not found' }; ` +
 		`$zip=Join-Path $env:TEMP 'crabbox-mingit.zip'; ` +
 		`Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $zip; ` +
-		`$dst='C:\Program Files\Git'; ` +
+		`$dst='C:\Program Files\MinGit'; ` +
 		`Expand-Archive -Path $zip -DestinationPath $dst -Force; ` +
 		`$cmd=Join-Path $dst 'cmd'; ` +
 		`$p=[Environment]::GetEnvironmentVariable('PATH','Machine'); ` +
