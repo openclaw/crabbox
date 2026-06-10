@@ -227,6 +227,24 @@ emit_orphan_matches() {
     '
 }
 
+discover_regions() {
+  local profile="$1"
+  local discovered
+  if ! discovered="$(
+    aws ec2 describe-regions --profile "$profile" --region us-east-1 --all-regions --output json |
+      jq -r '.Regions[] | select(.OptInStatus == null or .OptInStatus == "opt-in-not-required" or .OptInStatus == "opted-in") | .RegionName' |
+      sort
+  )"; then
+    echo "error: failed to discover enabled AWS regions for profile $profile" >&2
+    return 1
+  fi
+  if [[ -z "$discovered" ]]; then
+    echo "error: no enabled AWS regions discovered for profile $profile" >&2
+    return 1
+  fi
+  printf '%s\n' "$discovered"
+}
+
 active_prefix="$tmpdir/active"
 active_loaded=false
 active_truncated=false
@@ -261,13 +279,12 @@ for profile in "${profiles[@]}"; do
 
   if [[ ${#regions[@]} -eq 0 ]]; then
     scan_regions=()
+    if ! discovered_regions="$(discover_regions "$profile")"; then
+      exit 1
+    fi
     while IFS= read -r region_name; do
       [[ -n "$region_name" ]] && scan_regions+=("$region_name")
-    done < <(
-      aws ec2 describe-regions --profile "$profile" --region us-east-1 --all-regions --output json |
-        jq -r '.Regions[] | select(.OptInStatus == null or .OptInStatus == "opt-in-not-required" or .OptInStatus == "opted-in") | .RegionName' |
-        sort
-    )
+    done <<<"$discovered_regions"
   else
     scan_regions=("${regions[@]}")
   fi

@@ -12,7 +12,7 @@ function writeExecutable(file, body) {
   fs.chmodSync(file, 0o755);
 }
 
-function setupFakes({ active = false, invalidLeases = false } = {}) {
+function setupFakes({ active = false, invalidLeases = false, regionDiscoveryFails = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-aws-orphan-audit-"));
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin);
@@ -47,6 +47,17 @@ if (args[0] === "ec2" && args[1] === "describe-instances") {
         ]
       }]
     }]
+  }) + "\\n");
+  process.exit(0);
+}
+
+if (args[0] === "ec2" && args[1] === "describe-regions") {
+  if (process.env.CRABBOX_FAKE_REGION_DISCOVERY_FAILS === "1") {
+    process.stderr.write("region discovery failed\\n");
+    process.exit(42);
+  }
+  process.stdout.write(JSON.stringify({
+    Regions: [{ RegionName: "us-east-1", OptInStatus: "opt-in-not-required" }]
   }) + "\\n");
   process.exit(0);
 }
@@ -92,16 +103,22 @@ if (process.env.CRABBOX_FAKE_INVALID_LEASES === "1") {
       CRABBOX_BIN: fakeCrabbox,
       CRABBOX_FAKE_ACTIVE: active ? "1" : "0",
       CRABBOX_FAKE_INVALID_LEASES: invalidLeases ? "1" : "0",
+      CRABBOX_FAKE_REGION_DISCOVERY_FAILS: regionDiscoveryFails ? "1" : "0",
       CRABBOX_FAKE_CALLS: calls,
       CRABBOX_AWS_ORPHAN_AUDIT_GRACE_SECONDS: "0",
     },
   };
 }
 
-function runAudit(fake, extraArgs = []) {
+function runAudit(fake, extraArgs = [], { explicitRegion = true } = {}) {
+  const args = ["scripts/aws-crabbox-orphan-audit.sh", "--profile", "test"];
+  if (explicitRegion) {
+    args.push("--region", "us-east-1");
+  }
+  args.push(...extraArgs);
   return spawnSync(
     "bash",
-    ["scripts/aws-crabbox-orphan-audit.sh", "--profile", "test", "--region", "us-east-1", ...extraArgs],
+    args,
     {
       cwd: root,
       env: { ...process.env, ...fake.env },
@@ -154,6 +171,20 @@ test("AWS orphan audit fails closed on malformed active lease data", () => {
     readCalls(fake).some((args) => args[0] === "aws"),
     false,
     "AWS should not be queried when coordinator lease data is malformed",
+  );
+});
+
+test("AWS orphan audit fails closed when automatic region discovery fails", () => {
+  const fake = setupFakes({ regionDiscoveryFails: true });
+  const result = runAudit(fake, [], { explicitRegion: false });
+
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /failed to discover enabled AWS regions for profile test/);
+  assert.equal(result.stdout.trim(), "");
+  assert.equal(
+    readCalls(fake).some((args) => args[0] === "aws" && args[1] === "ec2" && args[2] === "describe-instances"),
+    false,
+    "AWS instances should not be queried when region discovery fails",
   );
 });
 
