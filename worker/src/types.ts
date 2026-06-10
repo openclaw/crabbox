@@ -521,6 +521,7 @@ export interface RunRecord {
   retryLikely?: string;
   results?: TestResultSummary;
   telemetry?: RunTelemetrySummary;
+  dataSummary?: DataRunSummary;
   startedAt: string;
   lastEventAt?: string;
   eventCount?: number;
@@ -549,6 +550,39 @@ export interface RunFinishRequest {
   retryLikely?: string;
   results?: TestResultSummary;
   telemetry?: RunTelemetrySummary;
+}
+
+export interface DataRunSummary {
+  schemaVersion: "crabbox.data-run-summary.v1";
+  name?: string;
+  status: "success";
+  manifestPath: string;
+  inputs: number;
+  outputs: number;
+  outputRows?: number;
+  outputBytes?: number;
+  artifacts?: number;
+  policy?: DataRunPolicySummary;
+  promotion?: DataRunPromotionSummary;
+  summary?: Record<string, string | number | boolean | null>;
+  generatedAt: string;
+}
+
+export interface DataRunPolicySummary {
+  sourceIdentity?: string;
+  sinkIdentity?: string;
+  egress?: string;
+  enforcement?: "declared-only" | "unsupported";
+}
+
+export interface DataRunPromotionSummary {
+  mode?: string;
+  target?: string;
+  enforcement?: "declared-only" | "unsupported";
+}
+
+export interface RunDataSummaryRequest {
+  dataSummary?: DataRunSummary;
 }
 
 export interface RunTelemetryRequest {

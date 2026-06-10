@@ -11403,6 +11403,51 @@ describe("fleet run history", () => {
     );
     expect(finish.status).toBe(200);
 
+    const dataSummary = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/data-summary`, {
+        headers: ownerHeaders,
+        body: {
+          dataSummary: {
+            schemaVersion: "crabbox.data-run-summary.v1",
+            name: "import-users",
+            status: "success",
+            manifestPath: "reports/data/manifest.json",
+            inputs: 0,
+            outputs: 1,
+            outputRows: 3,
+            outputBytes: 12,
+            artifacts: 1,
+            policy: {
+              sourceIdentity: "declared-reader",
+              sinkIdentity: "declared-writer",
+              egress: "provider-default",
+              enforcement: "declared-only",
+            },
+            promotion: {
+              mode: "manual",
+              target: "staging",
+              enforcement: "unsupported",
+            },
+            summary: {
+              provider: "islo",
+              changed: true,
+              rows: 3,
+            },
+            generatedAt: "2026-06-08T00:00:00Z",
+          },
+        },
+      }),
+    );
+    expect(dataSummary.status).toBe(200);
+    const dataSummaryBody = (await dataSummary.json()) as {
+      run: { dataSummary: { name: string; outputs: number; outputRows: number } };
+    };
+    expect(dataSummaryBody.run.dataSummary).toMatchObject({
+      name: "import-users",
+      outputs: 1,
+      outputRows: 3,
+    });
+
     const events = await fleet.fetch(
       request("GET", `/v1/runs/${run.id}/events`, { headers: ownerHeaders }),
     );
@@ -11414,8 +11459,9 @@ describe("fleet run history", () => {
       "lease.created",
       "stdout",
       "command.finished",
+      "data.summary",
     ]);
-    expect(eventsBody.events.map((event) => event.seq)).toEqual([1, 2, 3, 4]);
+    expect(eventsBody.events.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5]);
 
     const pagedEvents = await fleet.fetch(
       request("GET", `/v1/runs/${run.id}/events?after=1&limit=2`, {
@@ -11430,6 +11476,83 @@ describe("fleet run history", () => {
       [2, "lease.created"],
       [3, "stdout"],
     ]);
+  });
+
+  it("rejects invalid data summaries on run records", async () => {
+    const fleet = testFleet();
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        headers,
+        body: {
+          provider: "aws",
+          class: "standard",
+          serverType: "t3.small",
+          command: ["pnpm", "test"],
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    const { run } = (await create.json()) as { run: { id: string } };
+    const invalid = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/data-summary`, {
+        headers,
+        body: {
+          dataSummary: {
+            schemaVersion: "crabbox.data-run-summary.v1",
+            status: "success",
+            manifestPath: "../secret.json",
+            inputs: 0,
+            outputs: 1,
+            generatedAt: "2026-06-08T00:00:00Z",
+          },
+        },
+      }),
+    );
+    expect(invalid.status).toBe(400);
+  });
+
+  it("rejects unsafe data summary proof keys on run records", async () => {
+    const fleet = testFleet();
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        headers,
+        body: {
+          provider: "aws",
+          class: "standard",
+          serverType: "t3.small",
+          command: ["pnpm", "test"],
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    const { run } = (await create.json()) as { run: { id: string } };
+    const unsafe = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/data-summary`, {
+        headers,
+        body: {
+          dataSummary: {
+            schemaVersion: "crabbox.data-run-summary.v1",
+            status: "success",
+            manifestPath: "reports/data/manifest.json",
+            inputs: 0,
+            outputs: 1,
+            generatedAt: "2026-06-08T00:00:00Z",
+            summary: {
+              rawRows: "alice@example.com",
+            },
+          },
+        },
+      }),
+    );
+    expect(unsafe.status).toBe(400);
   });
 
   it("streams run events and lease heartbeats over a control websocket", async () => {

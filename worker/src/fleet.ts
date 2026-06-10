@@ -72,6 +72,9 @@ import {
 } from "./tailscale";
 import type {
   CapacityHint,
+  DataRunPolicySummary,
+  DataRunPromotionSummary,
+  DataRunSummary,
   Env,
   ExternalRunnerInput,
   ExternalRunnerRecord,
@@ -93,6 +96,7 @@ import type {
   ReadyPoolReturnRequest,
   PromotedImageRecord,
   RunCreateRequest,
+  RunDataSummaryRequest,
   RunEventRecord,
   RunEventRequest,
   RunFinishRequest,
@@ -6117,6 +6121,9 @@ export class FleetCoordinator {
     if (method === "POST" && action === "telemetry") {
       return this.appendRunTelemetry(request, runID);
     }
+    if (method === "POST" && action === "data-summary") {
+      return this.updateRunDataSummary(request, runID);
+    }
     if (method === "POST" && action === "finish") {
       return this.finishRun(request, runID);
     }
@@ -6135,6 +6142,26 @@ export class FleetCoordinator {
     }
     run.telemetry = appendRunTelemetrySample(run.telemetry, telemetry);
     await this.putRun(run);
+    return json({ run });
+  }
+
+  private async updateRunDataSummary(request: Request, runID: string): Promise<Response> {
+    const run = await this.getRun(runID);
+    if (!run || !this.runVisibleToRequest(run, request)) {
+      return notFound();
+    }
+    const input = await readJson<RunDataSummaryRequest>(request);
+    const dataSummary = sanitizeDataRunSummary(input.dataSummary);
+    if (!dataSummary) {
+      return json({ error: "invalid_data_summary" }, { status: 400 });
+    }
+    run.dataSummary = dataSummary;
+    await this.putRun(run);
+    await this.appendRunEventRecord(run, {
+      type: "data.summary",
+      phase: run.phase || run.state,
+      message: `${dataSummary.name || "data run"} outputs=${dataSummary.outputs}`,
+    });
     return json({ run });
   }
 
@@ -10215,6 +10242,190 @@ function sanitizeRunClassification(value: unknown): string | undefined {
   }
   const text = value.trim();
   return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(text) ? text : undefined;
+}
+
+function sanitizeDataRunSummary(input: DataRunSummary | undefined): DataRunSummary | undefined {
+  if (
+    !input ||
+    input.schemaVersion !== "crabbox.data-run-summary.v1" ||
+    input.status !== "success"
+  ) {
+    return undefined;
+  }
+  const manifestPath = safeDataSummaryPath(input.manifestPath);
+  const generatedAt = safeISOTime(input.generatedAt);
+  const inputs = boundedCount(input.inputs, 128);
+  const outputs = boundedCount(input.outputs, 128);
+  if (
+    !manifestPath ||
+    !generatedAt ||
+    inputs === undefined ||
+    outputs === undefined ||
+    outputs < 1
+  ) {
+    return undefined;
+  }
+  const summary: DataRunSummary = {
+    schemaVersion: "crabbox.data-run-summary.v1",
+    status: "success",
+    manifestPath,
+    inputs,
+    outputs,
+    generatedAt,
+  };
+  const name = nonSecretString(input.name);
+  if (name) {
+    summary.name = name;
+  }
+  const outputRows = boundedCount(input.outputRows, 1_000_000_000_000);
+  if (outputRows !== undefined) {
+    summary.outputRows = outputRows;
+  }
+  const outputBytes = boundedCount(input.outputBytes, 1_000_000_000_000_000);
+  if (outputBytes !== undefined) {
+    summary.outputBytes = outputBytes;
+  }
+  const artifacts = boundedCount(input.artifacts, 128);
+  if (artifacts !== undefined) {
+    summary.artifacts = artifacts;
+  }
+  const policy = sanitizeDataPolicySummary(input.policy);
+  if (policy) {
+    summary.policy = policy;
+  }
+  const promotion = sanitizeDataPromotionSummary(input.promotion);
+  if (promotion) {
+    summary.promotion = promotion;
+  }
+  if (hasUnsafeDataSummaryKey(input.summary)) {
+    return undefined;
+  }
+  const scalarSummary = sanitizeDataScalarSummary(input.summary);
+  if (scalarSummary) {
+    summary.summary = scalarSummary;
+  }
+  return summary;
+}
+
+function hasUnsafeDataSummaryKey(
+  input: Record<string, string | number | boolean | null> | undefined,
+): boolean {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return false;
+  }
+  return Object.keys(input).some((key) => unsafeDataSummaryKey(key));
+}
+
+function sanitizeDataPolicySummary(
+  input: DataRunPolicySummary | undefined,
+): DataRunPolicySummary | undefined {
+  if (!input) {
+    return undefined;
+  }
+  const out: DataRunPolicySummary = {};
+  for (const key of ["sourceIdentity", "sinkIdentity", "egress"] as const) {
+    const value = nonSecretString(input[key]);
+    if (value) {
+      out[key] = value;
+    }
+  }
+  const enforcement = sanitizeDataEnforcement(input.enforcement);
+  if (enforcement) {
+    out.enforcement = enforcement;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function sanitizeDataPromotionSummary(
+  input: DataRunPromotionSummary | undefined,
+): DataRunPromotionSummary | undefined {
+  if (!input) {
+    return undefined;
+  }
+  const out: DataRunPromotionSummary = {};
+  for (const key of ["mode", "target"] as const) {
+    const value = nonSecretString(input[key]);
+    if (value) {
+      out[key] = value;
+    }
+  }
+  const enforcement = sanitizeDataEnforcement(input.enforcement);
+  if (enforcement) {
+    out.enforcement = enforcement;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function sanitizeDataEnforcement(value: unknown): "declared-only" | "unsupported" | undefined {
+  return value === "declared-only" || value === "unsupported" ? value : undefined;
+}
+
+function sanitizeDataScalarSummary(
+  input: Record<string, string | number | boolean | null> | undefined,
+): Record<string, string | number | boolean | null> | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return undefined;
+  }
+  const entries = Object.entries(input).slice(0, 32);
+  const out: Record<string, string | number | boolean | null> = {};
+  for (const [rawKey, rawValue] of entries) {
+    const key = nonSecretString(rawKey);
+    if (!key) {
+      continue;
+    }
+    if (rawValue === null || typeof rawValue === "boolean") {
+      out[key] = rawValue;
+    } else if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+      out[key] = rawValue;
+    } else if (typeof rawValue === "string") {
+      out[key] = rawValue.slice(0, 512);
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function unsafeDataSummaryKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[_\-.]/g, "");
+  return [
+    "password",
+    "passwd",
+    "secret",
+    "credential",
+    "token",
+    "apikey",
+    "accesskey",
+    "privatekey",
+    "signedurl",
+    "presignedurl",
+    "rawrow",
+    "rawrows",
+    "rawdata",
+    "rowsample",
+    "samplerows",
+    "sampledata",
+  ].some((token) => normalized.includes(token));
+}
+
+function safeDataSummaryPath(value: unknown): string | undefined {
+  const path = nonSecretString(value);
+  if (!path || path.startsWith("/") || path.includes("..") || path.includes("\\")) {
+    return undefined;
+  }
+  return /^[A-Za-z0-9_./@+=:,-]+$/.test(path) ? path : undefined;
+}
+
+function safeISOTime(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const time = new Date(value);
+  return Number.isFinite(time.getTime()) ? time.toISOString() : undefined;
+}
+
+function boundedCount(value: unknown, max: number): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= max
+    ? value
+    : undefined;
 }
 
 function phaseForRunEvent(event: RunEventRecord): string {
