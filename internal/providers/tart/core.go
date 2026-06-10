@@ -88,10 +88,6 @@ func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
 }
 
-func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
-	return core.UpdateLeaseClaimEndpoint(leaseID, server, target)
-}
-
 func ensureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {
 	return core.EnsureTestboxKeyForConfig(cfg, leaseID)
 }
