@@ -42,12 +42,8 @@ run_crabbox_wsl2() {
   )
 }
 
-extract_lease_or_slug() {
-  local data
-  data="$(cat)"
-  printf '%s\n' "$data" |
-    node -e 'let data = ""; process.stdin.on("data", c => data += c); process.stdin.on("end", () => { for (const line of data.trim().split(/\n/).reverse()) { try { const json = JSON.parse(line); if (json.leaseId) { console.log(json.leaseId); process.exit(0); } } catch {} } process.exit(1); });' 2>/dev/null ||
-    printf '%s\n' "$data" | sed -n 's/.*slug=\([^ ]*\).*/\1/p' | head -1
+extract_lease_id_from_timing() {
+  node -e 'let data = ""; process.stdin.on("data", c => data += c); process.stdin.on("end", () => { for (const line of data.trim().split(/\n/).reverse()) { try { const json = JSON.parse(line); if (json.leaseId) { console.log(json.leaseId); process.exit(0); } } catch {} } process.exit(1); });' 2>/dev/null
 }
 
 tmpdir="$(mktemp -d)"
@@ -87,23 +83,24 @@ if [[ -z "$lease" ]]; then
     echo "could not capture pre-warmup lease list; refusing to create WSL2 lease without cleanup baseline" >&2
     exit 1
   fi
-  if out="$(run_in_repo "$cb" warmup \
+  warmup_out="$tmpdir/warmup.out"
+  warmup_err="$tmpdir/warmup.err"
+  if run_in_repo "$cb" warmup \
     "${crabbox_target_args[@]}" \
     --slug "$requested_slug" \
     --class "$class" \
     --market "$market" \
     --idle-timeout "$idle_timeout" \
-    --timing-json 2>&1)"; then
-    printf '%s\n' "$out"
+    --timing-json >"$warmup_out" 2>"$warmup_err"; then
+    cat "$warmup_out"
+    cat "$warmup_err" >&2
   else
     rc=$?
-    printf '%s\n' "$out"
+    cat "$warmup_out"
+    cat "$warmup_err" >&2
     exit "$rc"
   fi
-  lease="$(printf '%s\n' "$out" | extract_lease_or_slug)"
-  if [[ -z "$lease" ]]; then
-    lease="$(printf '%s\n' "$out" | sed -n 's/.*\(cbx_[a-f0-9]\{12\}\).*/\1/p' | head -1)"
-  fi
+  lease="$(extract_lease_id_from_timing <"$warmup_err" || true)"
   if [[ -z "$lease" ]]; then
     if resolved_lease="$(resolve_new_lease_from_list "$before_leases")" && [[ -n "$resolved_lease" ]]; then
       cleanup_ref="$resolved_lease"

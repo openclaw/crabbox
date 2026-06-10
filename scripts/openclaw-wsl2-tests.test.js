@@ -204,3 +204,65 @@ esac
 	assert.doesNotMatch(log, /stop cbx_existing/);
 	assert.doesNotMatch(log, /stop wsl2-tests-000000-1-1/);
 });
+
+test("OpenClaw WSL2 test selects lease id from timing JSON without stderr token pollution", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-openclaw-wsl2-"));
+	const repo = path.join(dir, "repo");
+	const bin = path.join(dir, "bin");
+	const calls = path.join(dir, "calls.log");
+	fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+	fs.mkdirSync(bin);
+	const fakeCrabbox = path.join(bin, "crabbox");
+	writeExecutable(
+		fakeCrabbox,
+		`#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${calls}"
+case "\${1:-}" in
+  list)
+    printf '[]\\n'
+    exit 0
+    ;;
+  warmup)
+    printf 'prewarm complete id=cbx_correct\\n'
+    printf 'warning: stale slug=old-lease cbx_badbadbadbad from diagnostics\\n' >&2
+    printf '{"leaseId":"cbx_correct","provider":"aws","exitCode":0}\\n' >&2
+    exit 0
+    ;;
+  actions)
+    exit 0
+    ;;
+  run)
+    exit 0
+    ;;
+  stop)
+    exit 0
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 64
+    ;;
+esac
+`,
+	);
+
+	const result = spawnSync("bash", ["scripts/openclaw-wsl2-tests.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+			HOME: dir,
+			CRABBOX_LIVE: "1",
+			CRABBOX_BIN: fakeCrabbox,
+			CRABBOX_OPENCLAW_REPO: repo,
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	const log = fs.readFileSync(calls, "utf8");
+	assert.match(log, /actions hydrate --id cbx_correct/);
+	assert.match(log, /run --id cbx_correct/);
+	assert.doesNotMatch(log, /--id old-lease/);
+	assert.doesNotMatch(log, /--id cbx_badbadbadbad/);
+});
