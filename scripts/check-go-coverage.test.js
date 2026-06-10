@@ -7,9 +7,9 @@ import test from "node:test";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
-function runCoverage(env) {
+function runCoverage(env, threshold = "90.0") {
 	return new Promise((resolve, reject) => {
-		const child = spawn("bash", ["scripts/check-go-coverage.sh", "90.0"], {
+		const child = spawn("bash", ["scripts/check-go-coverage.sh", threshold], {
 			cwd: repoRoot,
 			env: { ...process.env, ...env },
 			stdio: ["ignore", "pipe", "pipe"],
@@ -81,4 +81,12 @@ exit 64
 	const leftovers = await readdir(dir);
 	assert.equal(leftovers.includes("crabbox-go-coverage.out"), false);
 	assert.equal(leftovers.includes("crabbox-go-core-coverage.out"), false);
+});
+
+test("Go coverage check rejects invalid thresholds", async () => {
+	for (const threshold of ["abc", "-1", "101"]) {
+		const result = await runCoverage({}, threshold);
+		assert.equal(result.code, 2, `threshold=${threshold} stdout=${result.stdout} stderr=${result.stderr}`);
+		assert.match(result.stderr, new RegExp(`invalid coverage threshold: ${threshold.replace("-", "\\-")}`));
+	}
 });
