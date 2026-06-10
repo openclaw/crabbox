@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -160,6 +160,29 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
   assert.match(log, /image create --id cbx_source --name crabbox-linux-devtools-/);
   assert.match(log, /image promote --target linux --json --region us-west-2 --fast-snapshot-restore --fsr-az us-west-2a ami-devtools/);
+});
+
+test("AWS devtools mint wrapper isolates warmup logs from explicit image names", async () => {
+  const logDir = await mkdtemp(path.join(os.tmpdir(), "crabbox-aws-image-mint-logs-"));
+  for (let i = 0; i < 2; i += 1) {
+    const fake = await setupFakeCrabbox();
+    const result = await runScript(["--target", "linux", "--run", "--no-promote", "--name", "shared-devtools", "--prep-script", fake.linuxPrep], {
+      CRABBOX_BIN: fake.fake,
+      CRABBOX_FAKE_LOG: fake.log,
+      CRABBOX_IMAGE_LOG_DIR: logDir,
+      CRABBOX_IMAGE_WINDOWS_WARMUP_SETTLE_SECONDS: "0",
+      CRABBOX_IMAGE_REBOOT_READY_SETTLE_SECONDS: "0",
+      CRABBOX_IMAGE_PREP_WAIT_TIMEOUT: "5s",
+    });
+    assert.equal(result.code, 0, result.stderr);
+  }
+
+  const files = (await readdir(logDir)).filter((name) => name.startsWith("image-mint-"));
+  assert.equal(files.length, 4);
+  assert.equal(new Set(files).size, 4);
+  for (const file of files) {
+    assert.match(file, /^image-mint-shared-devtools-(source|candidate)-/);
+  }
 });
 
 test("AWS devtools mint wrapper maps windows flags", async () => {
