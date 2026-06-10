@@ -70,9 +70,10 @@ Lease with `--desktop` to get a visible macOS session:
 ```sh
 crabbox warmup --provider tart --desktop
 crabbox webvnc --provider tart --id <lease-id>   # browser viewer (host-side bridge)
+crabbox screenshot --provider tart --id <lease-id> --output desktop.png
 ```
 
-`crabbox webvnc` runs a host-side bridge: it SSH-tunnels to the guest's Screen Sharing port, serves the embedded noVNC viewer locally, and opens the browser — no noVNC/`websockify` tooling on the guest. The local WebVNC URL carries a per-session token in the fragment; the viewer uses it to open the local WebSocket bridge and fetch credentials. noVNC authenticates via macOS Apple (ARD) auth with the lease account credentials (handed to the local viewer only). Prefer a native VNC client instead? Tunnel and connect directly:
+`crabbox webvnc` runs a host-side bridge: it SSH-tunnels to the guest's Screen Sharing port, serves the embedded noVNC viewer locally, and opens the browser — no noVNC/`websockify` tooling on the guest. The local WebVNC URL carries a per-session token in the fragment; the viewer uses it to open the local WebSocket bridge and fetch credentials. `crabbox screenshot` uses the same locally configured account credentials for noninteractive capture. noVNC authenticates via macOS Apple (ARD) auth with the lease account credentials (handed to the local viewer only). Prefer a native VNC client instead? Tunnel and connect directly:
 
 ```sh
 ssh -i <lease-key> -L 5900:127.0.0.1:5900 admin@<lease-ip>

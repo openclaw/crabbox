@@ -283,7 +283,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		}
 	}
 	if path := strings.TrimSpace(*screenshot); path != "" {
-		if err := captureDesktopScreenshot(ctx, target, path); err != nil {
+		if err := captureDesktopScreenshot(ctx, cfg, target, path); err != nil {
 			return err
 		}
 		fmt.Fprintf(a.Stdout, "screenshot: %s\n", path)
@@ -491,7 +491,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "metadata: %s\n", metadataPath)
 	screenshotPath := filepath.Join(dir, "screenshot.png")
-	if err := captureDesktopScreenshot(ctx, target, screenshotPath); err != nil {
+	if err := captureDesktopScreenshot(ctx, cfg, target, screenshotPath); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "screenshot: %s\n", screenshotPath)

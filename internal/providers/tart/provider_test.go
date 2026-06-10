@@ -453,6 +453,27 @@ func TestSpecAdvertisesDesktop(t *testing.T) {
 	}
 }
 
+func TestDesktopCredentials(t *testing.T) {
+	credentials, ok := (Provider{}).DesktopCredentials(core.Config{}, core.SSHTarget{})
+	if !ok {
+		t.Fatal("tart should provide desktop credentials")
+	}
+	if credentials.Username != "admin" || credentials.Password != "admin" {
+		t.Fatalf("default credentials = %#v", credentials)
+	}
+
+	cfg := core.Config{}
+	cfg.Tart.User = "configured-user"
+	cfg.Tart.Password = "configured-password"
+	credentials, ok = (Provider{}).DesktopCredentials(cfg, core.SSHTarget{User: "lease-user"})
+	if !ok {
+		t.Fatal("tart should provide configured desktop credentials")
+	}
+	if credentials.Username != "lease-user" || credentials.Password != "configured-password" {
+		t.Fatalf("configured credentials = %#v", credentials)
+	}
+}
+
 func TestEnableScreenSharingEnablesService(t *testing.T) {
 	runner := &recordingRunner{}
 	cfg := core.BaseConfig()

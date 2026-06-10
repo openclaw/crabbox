@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -35,6 +34,10 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	}
 	if _, err := resolveVNCEndpoint(ctx, cfg, &target); err != nil {
 		return err
+	}
+	credentials, ok := providerDesktopCredentials(cfg, target)
+	if !ok {
+		return exit(2, "provider=%s does not supply macOS desktop credentials", cfg.Provider)
 	}
 
 	// Resolve the browser-facing port first (honoring an explicit --local-port),
@@ -68,8 +71,8 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"username": target.User,
-			"password": vncViewerPassword(cfg),
+			"username": credentials.Username,
+			"password": credentials.Password,
 		})
 	})
 	mux.HandleFunc("/websockify", func(w http.ResponseWriter, r *http.Request) {
@@ -157,16 +160,4 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
-}
-
-// vncViewerPassword returns the account password the local noVNC viewer uses for
-// macOS Apple (ARD) authentication. It defaults to the cirruslabs base-image
-// account password; override with CRABBOX_TART_PASSWORD or tart.password in
-// config (there is no CLI flag, to keep it out of shell history). This value is
-// only handed to the local browser viewer over the token-gated endpoint.
-func vncViewerPassword(cfg Config) string {
-	if p := strings.TrimSpace(cfg.Tart.Password); p != "" {
-		return p
-	}
-	return "admin"
 }

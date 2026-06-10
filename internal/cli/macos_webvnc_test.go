@@ -45,17 +45,6 @@ func TestMacOSWebVNCTokenAllowed(t *testing.T) {
 	}
 }
 
-func TestVNCViewerPasswordDefaultsToAdmin(t *testing.T) {
-	if p := vncViewerPassword(Config{}); p != "admin" {
-		t.Errorf("default viewer password = %q, want admin (cirruslabs default)", p)
-	}
-	cfg := Config{}
-	cfg.Tart.Password = "custom"
-	if p := vncViewerPassword(cfg); p != "custom" {
-		t.Errorf("override viewer password = %q, want custom", p)
-	}
-}
-
 func TestAvailableLocalVNCPortExcept(t *testing.T) {
 	// The tunnel port must never equal the (possibly user-supplied) web port.
 	webPort := availableLocalVNCPort()
