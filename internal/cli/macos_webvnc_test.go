@@ -2,21 +2,46 @@ package cli
 
 import (
 	"io/fs"
+	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
 
-func TestMacOSWebVNCViewerURL(t *testing.T) {
-	got := macOSWebVNCViewerURL("6080", "deadbeefcafef00d")
-	if got != "http://127.0.0.1:6080/vnc.html#token=deadbeefcafef00d" {
-		t.Errorf("unexpected viewer URL: %s", got)
+func TestCreateMacOSWebVNCHandoffKeepsTokenOutOfOpenURL(t *testing.T) {
+	session := macOSWebVNCSession{
+		Token:    "deadbeefcafef00d",
+		Protocol: "crabbox.deadbeefcafef00d",
 	}
-	// The account password must never appear in the URL (it's fetched from the
-	// token-gated /credentials endpoint instead).
-	for _, banned := range []string{"password", "admin", "?"} {
-		if strings.Contains(got, banned) {
-			t.Errorf("viewer URL must not contain %q: %s", banned, got)
+	handoff, err := createMacOSWebVNCHandoff("6080", session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(handoff.Path)
+	if strings.Contains(handoff.URL, "deadbeefcafef00d") {
+		t.Fatalf("handoff URL exposes token: %s", handoff.URL)
+	}
+	info, err := os.Stat(handoff.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("handoff permissions = %o, want 600", got)
+	}
+	content, err := os.ReadFile(handoff.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"http://127.0.0.1:6080/credentials",
+		"ws://127.0.0.1:6080/websockify",
+		"deadbeefcafef00d",
+		"crabbox.deadbeefcafef00d",
+		"wsProtocols",
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("handoff missing %q: %s", want, content)
 		}
 	}
 }
@@ -32,16 +57,64 @@ func TestRandomTokenUnique(t *testing.T) {
 	}
 }
 
-func TestMacOSWebVNCTokenAllowed(t *testing.T) {
-	req := httptest.NewRequest("GET", "/websockify?token=deadbeef", nil)
-	if !macOSWebVNCTokenAllowed(req, "deadbeef") {
-		t.Fatal("matching token should be accepted")
+func TestMacOSWebVNCCredentialsHandler(t *testing.T) {
+	session := macOSWebVNCSession{
+		Token:    "deadbeef",
+		Protocol: "crabbox.deadbeef",
 	}
-	for _, path := range []string{"/websockify", "/websockify?token=wrong"} {
-		req := httptest.NewRequest("GET", path, nil)
-		if macOSWebVNCTokenAllowed(req, "deadbeef") {
-			t.Fatalf("path %q should be rejected", path)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:6080/credentials", strings.NewReader("token=deadbeef"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "null")
+	recorder := httptest.NewRecorder()
+	macOSWebVNCCredentialsHandler(session, rfbCredentials{Username: "admin", Password: "secret"}).ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if origin := recorder.Header().Get("Access-Control-Allow-Origin"); origin != "null" {
+		t.Fatalf("allow origin = %q", origin)
+	}
+	for _, want := range []string{`"username":"admin"`, `"password":"secret"`} {
+		if !strings.Contains(recorder.Body.String(), want) {
+			t.Fatalf("credentials response missing %q: %s", want, recorder.Body.String())
 		}
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "http://127.0.0.1:6080/credentials", strings.NewReader("token=deadbeef"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recorder = httptest.NewRecorder()
+	macOSWebVNCCredentialsHandler(session, rfbCredentials{}).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("missing file origin status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+}
+
+func TestMacOSWebVNCProtocolAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:6080/websockify", nil)
+	req.Header.Set("Sec-WebSocket-Protocol", "binary, crabbox.deadbeef")
+	if !macOSWebVNCProtocolAllowed(req, "crabbox.deadbeef") {
+		t.Fatal("matching WebSocket subprotocol should be accepted")
+	}
+	req.Header.Set("Sec-WebSocket-Protocol", "binary, crabbox.wrong")
+	if macOSWebVNCProtocolAllowed(req, "crabbox.deadbeef") {
+		t.Fatal("wrong WebSocket subprotocol should be rejected")
+	}
+}
+
+func TestMacOSWebVNCSessionsUseDistinctProtocols(t *testing.T) {
+	first, err := newMacOSWebVNCSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := newMacOSWebVNCSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Token == second.Token || first.Protocol == second.Protocol {
+		t.Fatalf("sessions should be isolated: first=%#v second=%#v", first, second)
+	}
+	if first.Protocol != "crabbox."+first.Token {
+		t.Fatalf("protocol = %q, token = %q", first.Protocol, first.Token)
 	}
 }
 
@@ -61,7 +134,7 @@ func TestAvailableLocalVNCPortExcept(t *testing.T) {
 
 func TestWebVNCAssetsEmbedded(t *testing.T) {
 	assets := webVNCAssets()
-	for _, name := range []string{"vnc.html", "rfb.js"} {
+	for _, name := range []string{"rfb.js", "LICENSE.txt"} {
 		b, err := fs.ReadFile(assets, name)
 		if err != nil {
 			t.Fatalf("embedded asset %s missing: %v", name, err)
@@ -69,10 +142,5 @@ func TestWebVNCAssetsEmbedded(t *testing.T) {
 		if len(b) == 0 {
 			t.Fatalf("embedded asset %s is empty", name)
 		}
-	}
-	// The viewer must import the vendored RFB module.
-	html, _ := fs.ReadFile(assets, "vnc.html")
-	if !strings.Contains(string(html), "rfb.js") || !strings.Contains(string(html), "/websockify?token=") {
-		t.Error("vnc.html should import rfb.js and connect to token-gated /websockify")
 	}
 }

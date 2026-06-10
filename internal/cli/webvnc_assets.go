@@ -5,15 +5,13 @@ import (
 	"io/fs"
 )
 
-// webVNCAssetsFS holds the vendored noVNC viewer (rfb.js) plus a minimal
-// vnc.html, served by the host-side macOS WebVNC bridge so a browser can view a
-// tart lease's Screen Sharing without any noVNC/websockify tooling on the guest.
+// webVNCAssetsFS holds the vendored noVNC RFB module used to build the
+// mode-0600 temporary macOS viewer handoff.
 //
-//go:embed webvncassets/rfb.js webvncassets/vnc.html webvncassets/LICENSE.txt
+//go:embed webvncassets/rfb.js webvncassets/LICENSE.txt
 var webVNCAssetsFS embed.FS
 
-// webVNCAssets returns the embedded viewer assets rooted so that "vnc.html" and
-// "rfb.js" are served at the HTTP root.
+// webVNCAssets returns the embedded viewer assets rooted at webvncassets.
 func webVNCAssets() fs.FS {
 	sub, err := fs.Sub(webVNCAssetsFS, "webvncassets")
 	if err != nil {

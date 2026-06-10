@@ -11,9 +11,9 @@ and served by the host-side macOS WebVNC bridge (`crabbox webvnc --provider tart
   `worker/public/portal/assets/novnc/rfb.js` (produced and version-pinned by
   `worker/scripts/vendor-novnc.mjs`). It is upstream-minified, not authored here.
 - **`LICENSE.txt`** — noVNC's MPL-2.0 license, copied alongside the bundle.
-- **`vnc.html`** — a small first-party viewer page (authored here) that imports
-  `rfb.js`, connects to the bridge's `/websockify` endpoint, and passes the
-  account credentials for macOS Apple (ARD) authentication.
+The host-side bridge builds a mode-0600 temporary HTML viewer around `rfb.js`
+for each session. The file contains only the ephemeral bridge token; the guest
+account password is fetched from the loopback bridge and kept in browser memory.
 
 ## Updating
 
