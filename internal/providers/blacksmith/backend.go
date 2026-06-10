@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -311,11 +312,19 @@ func (b *blacksmithBackend) CollectRunArtifacts(ctx context.Context, req core.De
 	if err != nil {
 		return core.DelegatedRunArtifactResult{}, err
 	}
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	maxBytes := req.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = core.DelegatedRunArtifactDefaultMaxBytes
+	}
+	captureLimit := blacksmithArtifactOutputCaptureLimit(maxBytes)
+	stdout := newBlacksmithLimitedBuffer(captureLimit)
+	stderr := newBlacksmithLimitedBuffer(captureLimit)
 	args := blacksmithRunArgs(b.cfg, leaseID, keyPath, []string{script}, b.cfg.Blacksmith.Debug, true)
-	_, timedOut, err := b.runCommandWithSyncGuard(ctx, args, &stdout, &stderr)
+	_, timedOut, err := b.runCommandWithSyncGuardCapture(ctx, args, stdout, stderr, true)
 	output := strings.TrimSpace(stdout.String() + "\n" + stderr.String())
+	if stdout.exceeded || stderr.exceeded {
+		return core.DelegatedRunArtifactResult{}, exit(7, "blacksmith artifact output too large before archive validation: captured more than %d bytes", captureLimit)
+	}
 	if timedOut {
 		fmt.Fprintf(
 			b.rt.Stderr,
@@ -331,16 +340,9 @@ func (b *blacksmithBackend) CollectRunArtifacts(ctx context.Context, req core.De
 	if len(collectGlobs) == 0 {
 		return core.DelegatedRunArtifactResult{Output: output}, nil
 	}
-	archive, cleanOutput, err := blacksmithExtractArtifactArchive(output)
+	archive, cleanOutput, err := blacksmithExtractArtifactArchive(output, maxBytes)
 	if err != nil {
 		return core.DelegatedRunArtifactResult{}, err
-	}
-	maxBytes := req.MaxBytes
-	if maxBytes <= 0 {
-		maxBytes = core.DelegatedRunArtifactDefaultMaxBytes
-	}
-	if int64(len(archive)) > maxBytes {
-		return core.DelegatedRunArtifactResult{}, exit(7, "blacksmith artifact archive too large: %d > %d bytes", len(archive), maxBytes)
 	}
 	path := core.LocalRunArtifactPath(req.RunReq.Repo.Root, "", leaseID, "blacksmith-artifacts.tgz")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -359,7 +361,7 @@ func (b *blacksmithBackend) CollectRunArtifacts(ctx context.Context, req core.De
 	}, nil
 }
 
-func blacksmithExtractArtifactArchive(output string) ([]byte, string, error) {
+func blacksmithExtractArtifactArchive(output string, maxBytes int64) ([]byte, string, error) {
 	begin := blacksmithArtifactMarkerLineIndex(output, core.DelegatedRunArtifactBeginMarker, 0)
 	end := -1
 	if begin >= 0 {
@@ -373,9 +375,24 @@ func blacksmithExtractArtifactArchive(output string) ([]byte, string, error) {
 	encoded := output[encodedStart:end]
 	after := strings.TrimSpace(output[end+len(core.DelegatedRunArtifactEndMarker):])
 	compact := strings.NewReplacer("\n", "", "\r", "", "\t", "", " ", "").Replace(encoded)
+	if maxBytes <= 0 {
+		maxBytes = core.DelegatedRunArtifactDefaultMaxBytes
+	}
+	decodedLen := int64(base64.StdEncoding.DecodedLen(len(compact)))
+	if strings.HasSuffix(compact, "==") {
+		decodedLen -= 2
+	} else if strings.HasSuffix(compact, "=") {
+		decodedLen--
+	}
+	if decodedLen > maxBytes {
+		return nil, "", exit(7, "blacksmith artifact archive too large: decoded output exceeds %d bytes", maxBytes)
+	}
 	archive, err := base64.StdEncoding.DecodeString(compact)
 	if err != nil {
 		return nil, "", exit(7, "blacksmith artifact archive decode failed: %v", err)
+	}
+	if int64(len(archive)) > maxBytes {
+		return nil, "", exit(7, "blacksmith artifact archive too large: %d > %d bytes", len(archive), maxBytes)
 	}
 	return archive, strings.TrimSpace(strings.TrimSpace(before) + "\n" + strings.TrimSpace(after)), nil
 }
@@ -408,6 +425,45 @@ func blacksmithEnvForwardingRequested(req RunRequest) bool {
 }
 
 const blacksmithProofStreamCaptureBytes = 1024 * 1024
+const blacksmithArtifactDiagnosticCaptureBytes int64 = 64 * 1024
+
+type blacksmithLimitedBuffer struct {
+	bytes.Buffer
+	limit    int64
+	exceeded bool
+}
+
+func newBlacksmithLimitedBuffer(limit int64) *blacksmithLimitedBuffer {
+	return &blacksmithLimitedBuffer{limit: limit}
+}
+
+func (b *blacksmithLimitedBuffer) Write(p []byte) (int, error) {
+	if b.limit <= 0 || b.exceeded {
+		b.exceeded = b.exceeded || b.limit > 0
+		return len(p), nil
+	}
+	remaining := b.limit - int64(b.Buffer.Len())
+	if remaining <= 0 {
+		b.exceeded = true
+		return len(p), nil
+	}
+	if int64(len(p)) > remaining {
+		_, _ = b.Buffer.Write(p[:int(remaining)])
+		b.exceeded = true
+		return len(p), nil
+	}
+	return b.Buffer.Write(p)
+}
+
+func blacksmithArtifactOutputCaptureLimit(maxBytes int64) int64 {
+	if maxBytes <= 0 {
+		maxBytes = core.DelegatedRunArtifactDefaultMaxBytes
+	}
+	if maxBytes > (math.MaxInt64-blacksmithArtifactDiagnosticCaptureBytes-4096)/2 {
+		return math.MaxInt64
+	}
+	return maxBytes*2 + blacksmithArtifactDiagnosticCaptureBytes + 4096
+}
 
 type blacksmithProofTailBuffer struct {
 	mu         sync.Mutex
@@ -818,7 +874,11 @@ func (b *blacksmithBackend) commandOutput(ctx context.Context, args []string) (s
 }
 
 func (b *blacksmithBackend) runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, error) {
-	result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{Name: "blacksmith", Args: args, Stdout: stdout, Stderr: stderr})
+	return b.runCommandCapture(ctx, args, stdout, stderr, false)
+}
+
+func (b *blacksmithBackend) runCommandCapture(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool) (LocalCommandResult, error) {
+	result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{Name: "blacksmith", Args: args, Stdout: stdout, Stderr: stderr, DisableOutputCapture: disableOutputCapture})
 	if err != nil {
 		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("blacksmith failed: %v", err)}
 	}
@@ -826,9 +886,13 @@ func (b *blacksmithBackend) runCommand(ctx context.Context, args []string, stdou
 }
 
 func (b *blacksmithBackend) runCommandWithSyncGuard(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, bool, error) {
+	return b.runCommandWithSyncGuardCapture(ctx, args, stdout, stderr, false)
+}
+
+func (b *blacksmithBackend) runCommandWithSyncGuardCapture(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool) (LocalCommandResult, bool, error) {
 	timeout := blacksmithSyncTimeout(os.Getenv)
 	if timeout <= 0 {
-		result, err := b.runCommand(ctx, args, stdout, stderr)
+		result, err := b.runCommandCapture(ctx, args, stdout, stderr, disableOutputCapture)
 		return result, false, err
 	}
 	guardCtx, cancel := context.WithCancel(ctx)
@@ -839,11 +903,12 @@ func (b *blacksmithBackend) runCommandWithSyncGuard(ctx context.Context, args []
 		err    error
 	}, 1)
 	go func() {
-		result, err := b.runCommand(
+		result, err := b.runCommandCapture(
 			guardCtx,
 			args,
 			blacksmithSyncGuardWriter{w: stdout, tracker: tracker},
 			blacksmithSyncGuardWriter{w: stderr, tracker: tracker},
+			disableOutputCapture,
 		)
 		resultCh <- struct {
 			result LocalCommandResult

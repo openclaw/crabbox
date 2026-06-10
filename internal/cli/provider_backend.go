@@ -315,13 +315,14 @@ type CommandRunner interface {
 }
 
 type LocalCommandRequest struct {
-	Name   string
-	Args   []string
-	Env    []string
-	Dir    string
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
+	Name                 string
+	Args                 []string
+	Env                  []string
+	Dir                  string
+	Stdin                io.Reader
+	Stdout               io.Writer
+	Stderr               io.Writer
+	DisableOutputCapture bool
 }
 
 type LocalCommandResult struct {
@@ -372,14 +373,30 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if req.Stdout != nil {
-		cmd.Stdout = io.MultiWriter(req.Stdout, &stdout)
+		if req.DisableOutputCapture {
+			cmd.Stdout = req.Stdout
+		} else {
+			cmd.Stdout = io.MultiWriter(req.Stdout, &stdout)
+		}
 	} else {
-		cmd.Stdout = &stdout
+		if req.DisableOutputCapture {
+			cmd.Stdout = io.Discard
+		} else {
+			cmd.Stdout = &stdout
+		}
 	}
 	if req.Stderr != nil {
-		cmd.Stderr = io.MultiWriter(req.Stderr, &stderr)
+		if req.DisableOutputCapture {
+			cmd.Stderr = req.Stderr
+		} else {
+			cmd.Stderr = io.MultiWriter(req.Stderr, &stderr)
+		}
 	} else {
-		cmd.Stderr = &stderr
+		if req.DisableOutputCapture {
+			cmd.Stderr = io.Discard
+		} else {
+			cmd.Stderr = &stderr
+		}
 	}
 	err := cmd.Run()
 	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
