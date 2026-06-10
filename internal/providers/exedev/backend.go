@@ -3,6 +3,7 @@ package exedev
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -46,13 +47,13 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	lease, err := b.prepareLease(ctx, cfg, vm, leaseID, slug, req.Keep, true)
 	if err != nil {
 		if !req.Keep {
-			_ = b.deleteVM(context.Background(), name)
+			err = b.rollbackCreatedVM(name, err)
 		}
 		return LeaseTarget{}, err
 	}
 	if err := claimLeaseForRepoProvider(leaseID, slug, providerName, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
-			_ = b.deleteVM(context.Background(), name)
+			err = b.rollbackCreatedVM(name, err)
 		}
 		return LeaseTarget{}, err
 	}
@@ -346,6 +347,23 @@ func (b *exeDevLeaseBackend) control(ctx context.Context, args []string, stdout,
 	sshArgs = append(sshArgs, dest)
 	sshArgs = append(sshArgs, shellQuoteArgs(args))
 	return b.rt.Exec.Run(ctx, LocalCommandRequest{Name: "ssh", Args: sshArgs, Stdout: stdout, Stderr: stderr})
+}
+
+func (b *exeDevLeaseBackend) rollbackCreatedVM(name string, cause error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := b.deleteVM(cleanupCtx, name); err != nil {
+		return exit(exitCodeForError(cause), "%v; exe.dev cleanup failed for VM %s; manual cleanup: crabbox stop --provider exe-dev --id %s: %v", cause, name, name, err)
+	}
+	return cause
+}
+
+func exitCodeForError(err error) int {
+	var exitErr ExitError
+	if errors.As(err, &exitErr) && exitErr.Code != 0 {
+		return exitErr.Code
+	}
+	return 1
 }
 
 func exeDevControlDestination(value string) (string, string, error) {
