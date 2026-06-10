@@ -443,14 +443,30 @@ func startVMArgs(name string) []string {
 func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep bool) error {
 	args := startVMArgs(name)
 	var stderrBuf bytes.Buffer
+	var detachedStderr *os.File
 	var cmd *exec.Cmd
 	if keep {
 		if err := ctx.Err(); err != nil {
 			return exit(2, "tart run %s: context already cancelled", name)
 		}
 		cmd = exec.Command("tart", args...)
-		cmd.Stdout = io.Discard
-		cmd.Stderr = &stderrBuf
+		detachCommand(cmd)
+		devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+		if err != nil {
+			return exit(2, "tart run %s: open null device: %v", name, err)
+		}
+		defer devNull.Close()
+		detachedStderr, err = os.CreateTemp("", "crabbox-tart-run-*.log")
+		if err != nil {
+			return exit(2, "tart run %s: create startup log: %v", name, err)
+		}
+		defer func() {
+			_ = detachedStderr.Close()
+			_ = os.Remove(detachedStderr.Name())
+		}()
+		cmd.Stdin = devNull
+		cmd.Stdout = devNull
+		cmd.Stderr = detachedStderr
 	} else {
 		cmd = exec.CommandContext(ctx, "tart", args...)
 		cmd.Stdout = io.Discard
@@ -468,6 +484,11 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep boo
 		}
 		return exit(2, "tart run %s: context cancelled during startup", name)
 	case err := <-exitCh:
+		if detachedStderr != nil {
+			if _, seekErr := detachedStderr.Seek(0, io.SeekStart); seekErr == nil {
+				_, _ = io.Copy(&stderrBuf, io.LimitReader(detachedStderr, 64<<10))
+			}
+		}
 		detail := strings.TrimSpace(stderrBuf.String())
 		if detail != "" {
 			return exit(2, "tart run %s failed during startup: %s", name, detail)
@@ -477,9 +498,6 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep boo
 		}
 		return exit(2, "tart run %s exited unexpectedly during startup", name)
 	case <-time.After(startupObserveTimeout):
-		if keep {
-			_ = cmd.Process.Release()
-		}
 		return nil
 	}
 }
