@@ -2,10 +2,6 @@
 
 ## Unreleased
 
-### Added
-
-- Added `provider: incus` for direct Linux SSH leases through the official Incus Go client, including typed config/env/flag routing, provider-owned `user.crabbox.*` metadata, and deterministic fake-backed lifecycle coverage.
-
 ## 0.27.0 - 2026-06-09
 
 ### Added

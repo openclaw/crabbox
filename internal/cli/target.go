@@ -127,15 +127,21 @@ func validateProviderTarget(cfg Config) error {
 	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
 		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
-	if cfg.Architecture == ArchitectureARM64 {
-		if cfg.TargetOS != targetLinux {
-			return exit(2, "architecture=arm64 currently supports target=linux only")
-		}
+	if effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
 		if provider.Name() != "azure" && provider.Name() != "aws" {
 			return exit(2, "architecture=arm64 currently supports provider=azure or provider=aws")
 		}
+		if cfg.TargetOS != targetLinux && !(provider.Name() == "azure" && cfg.TargetOS == targetWindows) {
+			return exit(2, "architecture=arm64 currently supports target=linux or provider=azure target=windows only")
+		}
+		if provider.Name() == "azure" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 {
+			return exit(2, "provider=azure target=windows architecture=arm64 supports windows.mode=normal only; windows.mode=wsl2 requires nested virtualization, which Azure Cobalt ARM64 VM sizes do not support")
+		}
+		if provider.Name() == "azure" && cfg.TargetOS == targetWindows && !azureWindowsARM64HasExplicitImage(cfg) {
+			return exit(2, "provider=azure target=windows architecture=arm64 requires azure.image or CRABBOX_AZURE_IMAGE with an ARM64 Windows image; the built-in Windows default is x64")
+		}
 	}
-	if cfg.TargetOS == targetLinux && strings.TrimSpace(cfg.ServerType) != "" {
+	if (cfg.TargetOS == targetLinux || (provider.Name() == "azure" && cfg.TargetOS == targetWindows)) && strings.TrimSpace(cfg.ServerType) != "" {
 		switch provider.Name() {
 		case "aws":
 			if err := validateArchitectureServerType("AWS instance type", cfg, awsInstanceTypeIsARM64(cfg.ServerType)); err != nil {

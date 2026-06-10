@@ -480,6 +480,10 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("downloaded WSL rootfs is incomplete");
     expect(got).toContain("wsl.exe --import $wslDistro $wslRoot $wslRootfs --version 2");
     expect(got).toContain("wsl.exe --set-default $wslDistro");
+    expect(got).toContain("mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc");
+    expect(got).toContain("test -w /proc/sys/fs/binfmt_misc/register");
+    expect(got).toContain(":WSLInterop:M::MZ::/init:PF");
+    expect(got).toContain("test -e /proc/sys/fs/binfmt_misc/WSLInterop");
     expect(got).toContain("test -w '/work/crabbox'");
     const setupIndex = got.indexOf(
       "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
