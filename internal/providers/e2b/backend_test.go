@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -262,6 +263,21 @@ func TestE2BClientCreateConnectListAndDeleteUseOfficialRESTShape(t *testing.T) {
 	}
 	if !deleteHit {
 		t.Fatal("delete endpoint was not called")
+	}
+}
+
+func TestE2BUploadFileRejectsMalformedDomainBeforeProducer(t *testing.T) {
+	client := &e2bClient{apiKey: "e2b_test", domain: "%zz", httpClient: http.DefaultClient}
+	err := client.UploadFile(context.Background(), e2bSession{SandboxID: "sbx_1"}, "/tmp/archive.tgz", strings.NewReader("archive"))
+	if err == nil {
+		t.Fatal("UploadFile err=nil, want malformed URL error")
+	}
+	runtime.Gosched()
+	time.Sleep(10 * time.Millisecond)
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	if bytes.Contains(buf[:n], []byte("github.com/openclaw/crabbox/internal/providers/e2b.(*e2bClient).UploadFile.func1")) {
+		t.Fatalf("multipart producer goroutine still running after malformed URL:\n%s", buf[:n])
 	}
 }
 
