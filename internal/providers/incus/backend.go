@@ -143,6 +143,12 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 	labels["ssh_user"] = cfg.SSHUser
 	labels["ssh_port"] = cfg.SSHPort
 	labels["work_root"] = cfg.WorkRoot
+	if port := strings.TrimSpace(cfg.Incus.ProxyListenPort); port != "" {
+		labels["proxy_port"] = port
+		if host := sshHostForConfig(cfg); host != "" {
+			labels["proxy_host"] = host
+		}
+	}
 	createReq := api.InstancesPost{
 		Name: name,
 		Type: api.InstanceType(normalizeInstanceType(cfg.Incus.InstanceType)),
@@ -386,8 +392,10 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 			return err
 		}
 	} else {
-		if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: true, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
-			return err
+		if inst.IsActive() {
+			if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: true, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
+				return err
+			}
 		}
 		labels := labelsFromInstance(inst)
 		labels["state"] = "stopped"
@@ -635,6 +643,9 @@ func instanceHost(inst api.Instance, state *api.InstanceState, cfg Config) strin
 			return host
 		}
 	}
+	if host := persistedProxyHost(labelsFromInstance(inst)); host != "" {
+		return host
+	}
 	return bestAddress(inst, state)
 }
 
@@ -644,7 +655,17 @@ func sshTargetHost(server core.Server, cfg Config) string {
 			return host
 		}
 	}
+	if host := persistedProxyHost(server.Labels); host != "" {
+		return host
+	}
 	return server.PublicNet.IPv4.IP
+}
+
+func persistedProxyHost(labels map[string]string) string {
+	if strings.TrimSpace(labels["proxy_port"]) == "" {
+		return ""
+	}
+	return strings.TrimSpace(labels["proxy_host"])
 }
 
 func bestAddress(inst api.Instance, state *api.InstanceState) string {

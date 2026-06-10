@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added a built-in Incus provider for local or remote Linux containers and virtual machines, including socket, TLS, and OIDC control-plane authentication, optional SSH proxy devices, retained lease reuse, and live lifecycle verification. Thanks @coygeek.
+
 ## 0.27.0 - 2026-06-09
 
 ### Added

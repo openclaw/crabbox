@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lxc/incus/v7/shared/api"
 	"github.com/lxc/incus/v7/shared/cliconfig"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/zitadel/oidc/v3/pkg/oidc"
@@ -63,9 +62,11 @@ func TestDoctorConnectionInfoForConfigUsesNamedRemoteMetadata(t *testing.T) {
 	}
 }
 
-func TestDoctorConnectionInfoForConfigUsesAddressTrustMode(t *testing.T) {
+func TestDoctorConnectionInfoForConfigUsesAuthenticatedAddressMode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	configDir := writeIncusConfig(t, home, "default-remote: trusted\nremotes:\n  trusted:\n    addr: https://incus.example.test:8443\n    protocol: incus\n")
+	writeClientCertificateFiles(t, configDir)
 
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -82,8 +83,8 @@ func TestDoctorConnectionInfoForConfigUsesAddressTrustMode(t *testing.T) {
 	if info.Endpoint != "https://incus.example.test:8443" {
 		t.Fatalf("Endpoint=%q want https://incus.example.test:8443", info.Endpoint)
 	}
-	if info.Auth != "insecure_tls" {
-		t.Fatalf("Auth=%q want insecure_tls", info.Auth)
+	if info.Auth != "tls_client_cert_insecure_tls" {
+		t.Fatalf("Auth=%q want tls_client_cert_insecure_tls", info.Auth)
 	}
 	if info.Project != "default" {
 		t.Fatalf("Project=%q want default", info.Project)
@@ -93,16 +94,17 @@ func TestDoctorConnectionInfoForConfigUsesAddressTrustMode(t *testing.T) {
 	}
 }
 
-func TestDoctorConnectionInfoForConfigRejectsAddressWithoutTrustMaterial(t *testing.T) {
+func TestDoctorConnectionInfoForConfigRejectsAddressWithoutClientAuthentication(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.Incus.Address = "https://incus.example.test:8443"
+	cfg.Incus.InsecureTLS = true
 
 	if _, err := doctorConnectionInfoForConfig(cfg); err == nil {
-		t.Fatal("doctorConnectionInfoForConfig accepted address mode without trust material")
+		t.Fatal("doctorConnectionInfoForConfig accepted address mode without client authentication")
 	}
 }
 
@@ -118,12 +120,10 @@ func TestConnectionArgsForAddressDoesNotReuseRemoteTLSClientCertForDifferentAddr
 	cfg.Incus.Address = "https://attacker.example.test:8443"
 	cfg.Incus.InsecureTLS = true
 
-	args, err := connectionArgsForAddress(cfg)
-	if err != nil {
-		t.Fatalf("connectionArgsForAddress: %v", err)
-	}
-	if args.TLSClientCert != "" || args.TLSClientKey != "" {
-		t.Fatalf("unexpected remote TLS client credentials for unrelated address: %#v", args)
+	_, err := connectionArgsForAddress(cfg)
+	exitErr := requireExitCode(t, err, 2)
+	if !strings.Contains(exitErr.Message, "matching authenticated Incus remote") {
+		t.Fatalf("unexpected error: %v", exitErr)
 	}
 }
 
@@ -363,15 +363,10 @@ func TestConnectionArgsForAddressSkipsOIDCWhenInsecureTLSEnabled(t *testing.T) {
 	cfg.Incus.Address = "https://staging.incus.example.test:8443"
 	cfg.Incus.InsecureTLS = true
 
-	args, err := connectionArgsForAddress(cfg)
-	if err != nil {
-		t.Fatalf("expected insecure TLS to skip OIDC and succeed, got: %v", err)
-	}
-	if args.AuthType == api.AuthenticationMethodOIDC {
-		t.Fatal("OIDC auth should not be loaded when insecure TLS is enabled")
-	}
-	if !args.InsecureSkipVerify {
-		t.Fatal("InsecureSkipVerify should be true")
+	_, err := connectionArgsForAddress(cfg)
+	exitErr := requireExitCode(t, err, 2)
+	if !strings.Contains(exitErr.Message, "matching authenticated Incus remote") {
+		t.Fatalf("unexpected error: %v", exitErr)
 	}
 }
 

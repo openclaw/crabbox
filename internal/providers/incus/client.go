@@ -247,8 +247,9 @@ func connectionArgsForAddress(cfg Config) (*incusclient.ConnectionArgs, error) {
 			}
 		}
 	}
-	if args.TLSServerCert == "" && args.TLSClientCert == "" && args.AuthType != api.AuthenticationMethodOIDC && !args.InsecureSkipVerify {
-		return nil, core.Exit(2, "provider=%s address mode requires Incus TLS trust material or --incus-insecure-tls", providerName)
+	hasTLSClientAuth := strings.TrimSpace(args.TLSClientCert) != "" && strings.TrimSpace(args.TLSClientKey) != ""
+	if !hasTLSClientAuth && args.AuthType != api.AuthenticationMethodOIDC {
+		return nil, core.Exit(2, "provider=%s address mode requires a matching authenticated Incus remote with TLS client credentials or OIDC; --incus-insecure-tls only disables server certificate verification", providerName)
 	}
 	return args, nil
 }
@@ -261,6 +262,8 @@ func doctorAddressAuth(cfg Config) (string, error) {
 	switch {
 	case args.AuthType == api.AuthenticationMethodOIDC:
 		return "oidc", nil
+	case strings.TrimSpace(args.TLSClientCert) != "" && args.InsecureSkipVerify:
+		return "tls_client_cert_insecure_tls", nil
 	case args.InsecureSkipVerify:
 		return "insecure_tls", nil
 	case strings.TrimSpace(args.TLSClientCert) != "":

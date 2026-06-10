@@ -477,6 +477,8 @@ func TestConnectionArgsForAddressLoadsTLSCertContents(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	configDir := writeIncusConfig(t, home, "default-remote: trusted\nremotes:\n  trusted:\n    addr: https://incus-host.example.test:8443\n    protocol: incus\n")
+	writeClientCertificateFiles(t, configDir)
 
 	certPath := filepath.Join(t.TempDir(), "server.crt")
 	if err := os.WriteFile(certPath, []byte("PEM-CONTENT"), 0o600); err != nil {
@@ -979,6 +981,80 @@ func TestAcquireUsesProxyHostWhenGuestAddressUnavailable(t *testing.T) {
 	}
 	if lease.Server.PublicNet.IPv4.IP != "incus-host.example.test" {
 		t.Fatalf("lease.Server.PublicNet.IPv4.IP=%q want incus-host.example.test", lease.Server.PublicNet.IPv4.IP)
+	}
+	created := fake.instances[lease.Server.CloudID]
+	if got := created.Config[labelKey("proxy_host")]; got != "incus-host.example.test" {
+		t.Fatalf("stored proxy_host=%q want incus-host.example.test", got)
+	}
+	if got := created.Config[labelKey("proxy_port")]; got != "2222" {
+		t.Fatalf("stored proxy_port=%q want 2222", got)
+	}
+}
+
+func TestResolveUsesPersistedProxyEndpointWhenFlagsAreOmitted(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	oldWait := waitForSSHReady
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-retained": {
+				Name:       "crabbox-retained",
+				Status:     "Stopped",
+				StatusCode: api.Stopped,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"):    "true",
+					labelKey("lease"):      "cbx_abcd12345678",
+					labelKey("slug"):       "proxy-retained",
+					labelKey("state"):      "stopped",
+					labelKey("ssh_port"):   "2222",
+					labelKey("proxy_host"): "incus-host.example.test",
+					labelKey("proxy_port"): "2222",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-retained": {Status: "Stopped", StatusCode: api.Stopped},
+		},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+		_ = ctx
+		_ = stderr
+		_ = phase
+		_ = timeout
+		if target.Host != "incus-host.example.test" || target.Port != "2222" {
+			t.Fatalf("target=%#v want persisted proxy endpoint", target)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		newClient = oldNewClient
+		waitForSSHReady = oldWait
+	})
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, "cbx_abcd12345678"); err != nil {
+		t.Fatalf("EnsureTestboxKeyForConfig: %v", err)
+	}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_abcd12345678"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if lease.SSH.Host != "incus-host.example.test" || lease.SSH.Port != "2222" {
+		t.Fatalf("lease.SSH=%#v want persisted proxy endpoint", lease.SSH)
+	}
+	if lease.Server.PublicNet.IPv4.IP != "incus-host.example.test" {
+		t.Fatalf("lease.Server.PublicNet.IPv4.IP=%q want persisted proxy host", lease.Server.PublicNet.IPv4.IP)
 	}
 }
 
@@ -1500,6 +1576,54 @@ func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T
 	}
 	if _, err := core.TestboxKeyPath("cbx_retain123456"); err != nil {
 		t.Fatalf("expected retained lease key to remain available: %v", err)
+	}
+}
+
+func TestReleaseLeaseRetainIsIdempotentWhenInstanceAlreadyStopped(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-retained": {
+				Name:       "crabbox-retained",
+				Status:     "Stopped",
+				StatusCode: api.Stopped,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_abcdef123456",
+					labelKey("slug"):    "stopped-retained",
+					labelKey("state"):   "stopped",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-retained": {Status: "Stopped", StatusCode: api.Stopped},
+		},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.DeleteOnRelease = false
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease := core.LeaseTarget{LeaseID: "cbx_abcdef123456", Server: core.Server{Name: "crabbox-retained", CloudID: "crabbox-retained"}}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
+		t.Fatalf("ReleaseLease: %v", err)
+	}
+	if len(fake.stateUpdates) != 0 {
+		t.Fatalf("stateUpdates=%v want no stop for already stopped instance", fake.stateUpdates)
+	}
+	if got := fake.instances["crabbox-retained"].Config[labelKey("state")]; got != "stopped" {
+		t.Fatalf("stored state=%q want stopped", got)
 	}
 }
 

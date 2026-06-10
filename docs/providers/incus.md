@@ -52,7 +52,7 @@ list, and reports the selected connection context in the provider line:
 - `control_plane=local|remote`
 - `endpoint=<socket-or-address>`
 - `project=<incus-project>`
-- `auth=unix_socket|tls_client_cert|tls_server_cert|insecure_tls|tls|oidc|public`
+- `auth=unix_socket|tls_client_cert|tls_client_cert_insecure_tls|tls|oidc|public`
 - `remote=<name>` when named-remote mode is active
 
 The check stays non-mutating (`api=list mutation=false`). On a configured
@@ -216,15 +216,21 @@ incus remote add local-incus-testbed <host-or-token>
 crabbox warmup --provider incus --incus-remote local-incus-testbed
 ```
 
-Use an explicit address and project:
+Use an explicit address that matches an authenticated remote in the local
+Incus client config:
 
 ```sh
+incus remote add local-incus-testbed https://incus-host.example:8443
 crabbox warmup \
   --provider incus \
+  --incus-remote local-incus-testbed \
   --incus-address https://incus-host.example:8443 \
-  --incus-project crabbox \
-  --incus-insecure-tls
+  --incus-project crabbox
 ```
+
+Crabbox reuses that matching remote's TLS client certificate or OIDC tokens.
+`--incus-insecure-tls` only disables server certificate verification; it does
+not authenticate the client to a private Incus API.
 
 ## Deterministic verification
 
@@ -287,9 +293,10 @@ strand test instances.
 - `provider=incus: incus.remote, incus.address, or incus.socket not configured ...`:
   the default `local` Unix-socket remote is Linux-only; on macOS point Crabbox
   at a reachable Linux Incus daemon instead of the local remote stub
-- `provider=incus address mode requires Incus TLS trust material or --incus-insecure-tls`:
-  explicit HTTPS address mode needs trusted TLS material unless you intentionally
-  opt into insecure TLS
+- `provider=incus address mode requires a matching authenticated Incus remote ...`:
+  add the address as an Incus remote first so Crabbox can reuse its TLS client
+  certificate or OIDC tokens; server trust and `--incus-insecure-tls` do not
+  provide client authentication
 - `crabbox doctor --provider incus` now prints `mode`, `endpoint`, `project`,
   and `auth`; use those fields to confirm Crabbox picked the intended socket,
   explicit address, or named remote before blaming the live smoke path
