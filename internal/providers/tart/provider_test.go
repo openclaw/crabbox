@@ -472,6 +472,12 @@ func TestDesktopCredentials(t *testing.T) {
 	if credentials.Username != "lease-user" || credentials.Password != "configured-password" {
 		t.Fatalf("configured credentials = %#v", credentials)
 	}
+
+	cfg.Tart.Password = " password with spaces "
+	credentials, _ = (Provider{}).DesktopCredentials(cfg, core.SSHTarget{User: "lease-user"})
+	if credentials.Password != cfg.Tart.Password {
+		t.Fatalf("password = %q, want exact configured value %q", credentials.Password, cfg.Tart.Password)
+	}
 }
 
 func TestEnableScreenSharingEnablesService(t *testing.T) {

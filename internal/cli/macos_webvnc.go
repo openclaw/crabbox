@@ -113,9 +113,10 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	fmt.Fprintf(a.Stdout, "webvnc: %s\n", viewerURL)
 	fmt.Fprintf(a.Stdout, "remote: from another host first run  ssh -L %s:127.0.0.1:%s <user>@<this-host>  then open the URL there\n", webPort, webPort)
 	if openViewer {
-		if err := openLocalURL(viewerURL); err == nil {
-			fmt.Fprintf(a.Stdout, "opened: %s\n", viewerURL)
+		if err := openLocalURL(viewerURL); err != nil {
+			return err
 		}
+		fmt.Fprintf(a.Stdout, "opened: %s\n", viewerURL)
 	}
 	<-ctx.Done()
 	return context.Cause(ctx)

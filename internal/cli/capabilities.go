@@ -124,7 +124,15 @@ func enforceManagedLeaseCapabilities(cfg Config, server Server, leaseID string) 
 }
 
 func macOSScreenSharingLease(cfg Config, server Server) bool {
-	return cfg.TargetOS == targetMacOS || strings.EqualFold(server.Labels["target"], targetMacOS)
+	if cfg.TargetOS != targetMacOS && !strings.EqualFold(server.Labels["target"], targetMacOS) {
+		return false
+	}
+	providerName := firstNonBlank(server.Provider, cfg.Provider)
+	if providerName == "" {
+		return true
+	}
+	provider, err := ProviderFor(providerName)
+	return err != nil || provider.Spec().Coordinator != CoordinatorNever
 }
 
 func labelBool(value string) bool {

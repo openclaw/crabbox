@@ -46,7 +46,7 @@ func (Provider) DesktopCredentials(cfg core.Config, target core.SSHTarget) (core
 	if username == "" {
 		username = "admin"
 	}
-	password := strings.TrimSpace(cfg.Tart.Password)
+	password := cfg.Tart.Password
 	if password == "" {
 		password = "admin"
 	}
