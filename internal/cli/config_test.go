@@ -1413,6 +1413,23 @@ func TestLoadConfigRoutesAzureBackendFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadConfigMXCCapabilityEnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(home, "missing.yaml"))
+	t.Setenv("CRABBOX_MXC_ALLOW_DACL_MUTATION", "true")
+	t.Setenv("CRABBOX_MXC_ALLOW_WINDOWS_UI", "true")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MXC.AllowDACLMutation || !cfg.MXC.AllowWindowsUI {
+		t.Fatalf("mxc=%+v", cfg.MXC)
+	}
+}
+
 func TestLoadConfigTailscaleBlock(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

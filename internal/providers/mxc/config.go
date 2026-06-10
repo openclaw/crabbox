@@ -122,6 +122,11 @@ func buildIsolatedConfig(cfg Config, req RunRequest) (mxcConfig, string, func(),
 	}
 	cfg.MXC.ReadWritePaths = append(append([]string(nil), cfg.MXC.ReadWritePaths...), tempDir)
 	req.Env = cloneEnv(req.Env)
+	for key := range req.Env {
+		if strings.EqualFold(key, "TEMP") || strings.EqualFold(key, "TMP") {
+			delete(req.Env, key)
+		}
+	}
 	req.Env["TEMP"] = tempDir
 	req.Env["TMP"] = tempDir
 	config, err := buildConfig(cfg, req)

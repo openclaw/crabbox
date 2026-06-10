@@ -4014,6 +4014,12 @@ func applyEnv(cfg *Config) error {
 	if value := os.Getenv("CRABBOX_MXC_BLOCKED_HOSTS"); value != "" {
 		cfg.MXC.BlockedHosts = splitCommaList(value)
 	}
+	if value, ok := getenvBool("CRABBOX_MXC_ALLOW_DACL_MUTATION"); ok {
+		cfg.MXC.AllowDACLMutation = value
+	}
+	if value, ok := getenvBool("CRABBOX_MXC_ALLOW_WINDOWS_UI"); ok {
+		cfg.MXC.AllowWindowsUI = value
+	}
 	if value, ok := getenvBool("CRABBOX_MXC_EXPERIMENTAL"); ok {
 		cfg.MXC.Experimental = value
 	}
