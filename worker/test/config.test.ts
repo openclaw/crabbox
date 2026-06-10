@@ -144,9 +144,7 @@ describe("machine class config", () => {
       expect(azureVMSizeCandidatesForTargetClass("windows", name, "normal", "arm64")).toEqual(
         azureLinuxARM64[name],
       );
-      expect(azureVMSizeCandidatesForTargetClass("windows", name, "wsl2", "arm64")).toEqual([
-        name,
-      ]);
+      expect(azureVMSizeCandidatesForTargetClass("windows", name, "wsl2", "arm64")).toEqual([name]);
       expect(awsInstanceTypeCandidatesForTargetClass("windows", name)).toEqual(awsWindows[name]);
       expect(awsInstanceTypeCandidatesForTargetClass("windows", name, "wsl2")).toEqual(
         awsWSL2[name],

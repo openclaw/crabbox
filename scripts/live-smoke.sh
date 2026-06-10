@@ -78,6 +78,30 @@ capture_run() {
   printf -v "$__name" '%s' "$__out"
 }
 
+capture_run_live() {
+  local __name="$1"
+  shift
+  local __log
+  __log="$(mktemp)"
+  local __status=0
+  if "$@" 2>&1 | tee "$__log"; then
+    __status=0
+  else
+    __status=$?
+  fi
+  local __out
+  __out="$(cat "$__log")"
+  rm -f "$__log"
+  printf -v "$__name" '%s' "$__out"
+  if [[ "$__status" -ne 0 ]]; then
+    return "$__status"
+  fi
+}
+
+log_step() {
+  printf '[live-smoke %s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2
+}
+
 has_provider() {
   [[ "$providers" == *",$1,"* ]]
 }
@@ -368,6 +392,13 @@ incus_smoke() {
   local delete_lease_args=("${delete_args[@]}" --ttl "${CRABBOX_LIVE_INCUS_TTL:-15m}" --idle-timeout "${CRABBOX_LIVE_INCUS_IDLE_TIMEOUT:-5m}")
   local retain_args=(--provider incus --incus-delete-on-release=false)
   local retain_lease_args=("${retain_args[@]}" --ttl "${CRABBOX_LIVE_INCUS_RETAIN_TTL:-15m}" --idle-timeout "${CRABBOX_LIVE_INCUS_RETAIN_IDLE_TIMEOUT:-5m}")
+  local delete_wait_timeout="${CRABBOX_LIVE_INCUS_WAIT_TIMEOUT:-5m}"
+  local retain_wait_timeout="${CRABBOX_LIVE_INCUS_RETAIN_WAIT_TIMEOUT:-5m}"
+  local incus_run_debug="${CRABBOX_LIVE_INCUS_RUN_DEBUG:-${CRABBOX_LIVE_DEBUG:-0}}"
+  local run_args=(--timing-json)
+  if [[ "$incus_run_debug" == "1" ]]; then
+    run_args+=(--debug)
+  fi
   local retained_command="${CRABBOX_LIVE_INCUS_RETAIN_COMMAND:-$live_command}"
 
   local lease=""
@@ -393,42 +424,60 @@ incus_smoke() {
   trap cleanup RETURN
 
   local doctor_out
+  log_step "incus doctor"
   capture_run doctor_out run_in_repo "$cb" doctor --provider incus --json
   printf '%s\n' "$doctor_out"
   printf '%s\n' "$doctor_out" | jq '{ok,checks:[.checks[] | select(.check=="provider") | {status,details,message}]}'
 
   local out
-  capture_run out run_in_repo "$cb" warmup "${delete_lease_args[@]}" --slug "${CRABBOX_LIVE_INCUS_SLUG:-incus-smoke-$$}" --timing-json
-  printf '%s\n' "$out"
+  local delete_slug="${CRABBOX_LIVE_INCUS_SLUG:-incus-smoke-$$}"
+  log_step "incus warmup delete_on_release=true slug=$delete_slug"
+  capture_run_live out run_in_repo "$cb" warmup "${delete_lease_args[@]}" --slug "$delete_slug" --timing-json
   lease="$(printf '%s\n' "$out" | extract_lease)"
   slug="$(printf '%s\n' "$out" | extract_slug)"
   test -n "$lease"
   test -n "$slug"
 
-  run_in_repo "$cb" status "${delete_args[@]}" --id "$slug" --wait --wait-timeout "${CRABBOX_LIVE_INCUS_WAIT_TIMEOUT:-5m}"
-  run_in_repo "$cb" inspect "${delete_args[@]}" --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
+  log_step "incus status wait delete_on_release=true slug=$slug timeout=$delete_wait_timeout"
+  if ! run_in_repo "$cb" status "${delete_args[@]}" --id "$slug" --wait --wait-timeout "$delete_wait_timeout"; then
+    log_step "incus status wait failed, collecting postmortem slug=$slug"
+    run_in_repo "$cb" inspect --provider incus --id "$slug" --json || true
+    run_in_repo "$cb" list --provider incus --json | jq 'map({id:(.id // .CloudID),slug:(.slug // .labels.slug),provider:(.provider // .Provider // .labels.provider),state:(.state // .labels.state // .status),host:(.host // .Host)})' || true
+    return 1
+  fi
+  run_in_repo "$cb" inspect --provider incus --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
   local runout
-  capture_run runout run_in_repo "$cb" run "${delete_args[@]}" --id "$slug" --shell -- "$live_command"
-  printf '%s\n' "$runout"
+  log_step "incus run delete_on_release=true slug=$slug"
+  capture_run_live runout run_in_repo "$cb" run "${delete_args[@]}" --id "$slug" "${run_args[@]}" --shell -- "$live_command"
   run_in_repo "$cb" list --provider incus --json | jq 'map({id:(.id // .CloudID),slug:(.slug // .labels.slug),provider:(.provider // .Provider // .labels.provider),state:(.state // .labels.state // .status),host:(.host // .Host)})'
+  log_step "incus stop delete_on_release=true slug=$slug"
   run_in_repo "$cb" stop "${delete_args[@]}" "$slug" || run_in_repo "$cb" stop "${delete_args[@]}" "$lease"
   lease=""
   slug=""
 
-  capture_run out run_in_repo "$cb" warmup "${retain_lease_args[@]}" --slug "${CRABBOX_LIVE_INCUS_RETAINED_SLUG:-incus-retain-smoke-$$}" --timing-json
-  printf '%s\n' "$out"
+  local retain_slug="${CRABBOX_LIVE_INCUS_RETAINED_SLUG:-incus-retain-smoke-$$}"
+  log_step "incus warmup delete_on_release=false slug=$retain_slug"
+  capture_run_live out run_in_repo "$cb" warmup "${retain_lease_args[@]}" --slug "$retain_slug" --timing-json
   retained_lease="$(printf '%s\n' "$out" | extract_lease)"
   retained_slug="$(printf '%s\n' "$out" | extract_slug)"
   test -n "$retained_lease"
   test -n "$retained_slug"
 
-  run_in_repo "$cb" status "${retain_args[@]}" --id "$retained_slug" --wait --wait-timeout "${CRABBOX_LIVE_INCUS_RETAIN_WAIT_TIMEOUT:-5m}"
-  capture_run runout run_in_repo "$cb" run "${retain_args[@]}" --id "$retained_slug" --shell -- "$live_command"
-  printf '%s\n' "$runout"
+  log_step "incus status wait delete_on_release=false slug=$retained_slug timeout=$retain_wait_timeout"
+  if ! run_in_repo "$cb" status "${retain_args[@]}" --id "$retained_slug" --wait --wait-timeout "$retain_wait_timeout"; then
+    log_step "incus status wait failed, collecting postmortem slug=$retained_slug"
+    run_in_repo "$cb" inspect --provider incus --id "$retained_slug" --json || true
+    run_in_repo "$cb" list --provider incus --json | jq 'map({id:(.id // .CloudID),slug:(.slug // .labels.slug),provider:(.provider // .Provider // .labels.provider),state:(.state // .labels.state // .status),host:(.host // .Host)})' || true
+    return 1
+  fi
+  log_step "incus run delete_on_release=false slug=$retained_slug"
+  capture_run_live runout run_in_repo "$cb" run "${retain_args[@]}" --id "$retained_slug" "${run_args[@]}" --shell -- "$live_command"
+  log_step "incus stop delete_on_release=false slug=$retained_slug"
   run_in_repo "$cb" stop "${retain_args[@]}" "$retained_slug" || run_in_repo "$cb" stop "${retain_args[@]}" "$retained_lease"
   run_in_repo "$cb" status "${retain_args[@]}" --id "$retained_slug" --json | jq '{id,slug,state,ready,host}'
-  capture_run runout run_in_repo "$cb" run "${retain_args[@]}" --id "$retained_slug" --shell -- "$retained_command"
-  printf '%s\n' "$runout"
+  log_step "incus run retained reuse slug=$retained_slug"
+  capture_run_live runout run_in_repo "$cb" run "${retain_args[@]}" --id "$retained_slug" "${run_args[@]}" --shell -- "$retained_command"
+  log_step "incus stop delete_on_release=true slug=$retained_slug"
   run_in_repo "$cb" stop --provider incus --incus-delete-on-release=true "$retained_slug" || run_in_repo "$cb" stop --provider incus --incus-delete-on-release=true "$retained_lease"
   retained_lease=""
   retained_slug=""

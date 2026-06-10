@@ -25,6 +25,7 @@ type fakeClient struct {
 	updated              []string
 	stateUpdates         []string
 	preserveEmptyNetwork bool
+	deleteRequiresStop   bool
 	getCalls             map[string]int
 	getErr               error
 	listErr              error
@@ -172,6 +173,11 @@ func (f *fakeClient) GetInstanceState(name string) (*api.InstanceState, string, 
 func (f *fakeClient) DeleteInstance(name string) error {
 	if f.deleteErr != nil {
 		return f.deleteErr
+	}
+	if f.deleteRequiresStop {
+		if inst, ok := f.instances[name]; ok && strings.EqualFold(inst.Status, "running") {
+			return core.Exit(5, "instance is running")
+		}
 	}
 	delete(f.instances, name)
 	delete(f.states, name)
@@ -1501,6 +1507,7 @@ func TestReleaseLeaseDeleteOnReleaseRemovesClaimAndKey(t *testing.T) {
 
 	oldNewClient := newClient
 	fake := &fakeClient{
+		deleteRequiresStop: true,
 		instances: map[string]*api.Instance{
 			"crabbox-delete": {
 				Name:       "crabbox-delete",
@@ -1540,6 +1547,9 @@ func TestReleaseLeaseDeleteOnReleaseRemovesClaimAndKey(t *testing.T) {
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-delete" {
 		t.Fatalf("deleted=%v want crabbox-delete removed", fake.deleted)
+	}
+	if len(fake.stateUpdates) != 1 || fake.stateUpdates[0] != "crabbox-delete:stop" {
+		t.Fatalf("stateUpdates=%v want stop before delete", fake.stateUpdates)
 	}
 	claim, err := core.ReadLeaseClaim("cbx_delete12345")
 	if err != nil {

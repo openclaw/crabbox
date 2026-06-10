@@ -374,6 +374,11 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	}
 	deleteInstance := cfg.Incus.DeleteOnRelease
 	if deleteInstance {
+		if inst.IsActive() {
+			if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: req.Force, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
+				return err
+			}
+		}
 		if err := client.DeleteInstance(inst.Name); err != nil {
 			return err
 		}
