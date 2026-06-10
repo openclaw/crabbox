@@ -182,5 +182,3 @@ Related docs:
 - [Provider backends](../provider-backends.md)
 - [W&B Sandboxes docs](https://docs.wandb.ai/sandboxes)
 - [CoreWeave Sandboxes docs](https://docs.coreweave.com/products/sandboxes)
-</content>
-</invoke>
