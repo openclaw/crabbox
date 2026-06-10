@@ -10,6 +10,7 @@
 - Added Tart macOS desktop leases with native Screen Sharing, a token-gated host-side WebVNC bridge, and documented local-network exposure boundaries. Thanks @anagnorisis2peripeteia.
 - Added native Azure Windows ARM64 lease support with explicit Windows ARM64 images, Cobalt ARM64 SKU inference, and `CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` broker configuration for ARM64 validation.
 - Added persistent Apple Container 1.0 development machines through the local `apple-machine` provider.
+- Added local Windows sandbox execution through Microsoft Execution Containers with explicit filesystem and network policy controls and an execution-backed doctor check.
 
 ### Fixed
 

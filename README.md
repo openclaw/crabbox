@@ -149,6 +149,7 @@ configured); every other provider always runs direct from the CLI.
 | [E2B](docs/providers/e2b.md) — `e2b` | Linux | E2B Firecracker sandbox. |
 | [Islo](docs/providers/islo.md) — `islo` | Linux | Islo sandbox. |
 | [Modal](docs/providers/modal.md) — `modal` | Linux | Modal Sandbox through the local Python client. |
+| [Microsoft Execution Containers](docs/providers/mxc.md) — `mxc` (`execution-container`) | Windows | Policy-driven local Windows process containment. |
 | [Railway](docs/providers/railway.md) — `railway` (`rail`, `railwayapp`) | Linux | Redeploy and stream an existing Railway service. |
 | [Tensorlake](docs/providers/tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux | Tensorlake Firecracker sandbox via the Tensorlake CLI. |
 | [Upstash Box](docs/providers/upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux | Upstash Box through the Box REST API. |

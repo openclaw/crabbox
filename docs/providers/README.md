@@ -90,6 +90,7 @@ the built-in adapter needs a separate local smoke contract.
 | [E2B](e2b.md) — `e2b` | Linux |
 | [Islo](islo.md) — `islo` | Linux |
 | [Modal](modal.md) — `modal` | Linux |
+| [Microsoft Execution Containers](mxc.md) — `mxc` (`execution-container`) | Windows |
 | [Railway](railway.md) — `railway` (`rail`, `railwayapp`) | Linux |
 | [Tensorlake](tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux |
 | [Upstash Box](upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux |

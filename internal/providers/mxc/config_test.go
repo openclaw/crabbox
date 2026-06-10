@@ -1,0 +1,129 @@
+package mxc
+
+import (
+	"encoding/json"
+	"os"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+)
+
+func TestBuildConfigDefaultsToBlockedProcessContainer(t *testing.T) {
+	t.Setenv("SystemRoot", `C:\Windows`)
+	t.Setenv("ProgramFiles", `C:\Program Files`)
+	t.Setenv("PATH", `C:\Windows\System32;C:\Tools`)
+	cfg := core.BaseConfig()
+	cfg.MXC.ReadOnlyPaths = []string{`C:\Windows`}
+	config, err := buildConfig(cfg, RunRequest{
+		Repo:    core.Repo{Root: `C:\src\example`},
+		Command: []string{"powershell.exe", "-Command", `Write-Output "hello world"`},
+		Env:     map[string]string{"CI": "1"},
+		Options: core.LeaseOptions{TTL: 2 * time.Minute},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Version != "0.6.0-alpha" || config.Containment != "processcontainer" {
+		t.Fatalf("config=%+v", config)
+	}
+	if config.Network.DefaultPolicy != "block" || config.Network.EnforcementMode != "both" {
+		t.Fatalf("network=%+v", config.Network)
+	}
+	if config.Fallback.AllowDACLMutation {
+		t.Fatal("host DACL mutation fallback must be disabled by default")
+	}
+	if config.Process.Timeout != 120000 || len(config.Process.Env) != 1 || config.Process.Env[0] != "CI=1" {
+		t.Fatalf("process=%+v", config.Process)
+	}
+	if !containsFold(config.Filesystem.ReadWritePaths, `C:\src\example`) || !containsFold(config.Filesystem.ReadOnlyPaths, `C:\Windows`) {
+		t.Fatalf("filesystem=%+v", config.Filesystem)
+	}
+	if containsFold(config.Filesystem.ReadOnlyPaths, `C:\Tools`) {
+		t.Fatalf("PATH directory must not be broadly allowlisted: %+v", config.Filesystem.ReadOnlyPaths)
+	}
+	if !strings.Contains(config.Process.CommandLine, `\"hello world\"`) {
+		t.Fatalf("commandLine=%q", config.Process.CommandLine)
+	}
+}
+
+func TestBuildIsolatedConfigUsesPrivateTemporaryDirectory(t *testing.T) {
+	cfg := core.BaseConfig()
+	config, _, cleanup, err := buildIsolatedConfig(cfg, RunRequest{Command: []string{"cmd.exe", "/c", "exit", "0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+	temp := ""
+	for _, entry := range config.Process.Env {
+		if strings.HasPrefix(entry, "TEMP=") {
+			temp = strings.TrimPrefix(entry, "TEMP=")
+		}
+	}
+	if temp == "" || !containsFold(config.Filesystem.ReadWritePaths, temp) {
+		t.Fatalf("private temp missing: env=%v paths=%v", config.Process.Env, config.Filesystem.ReadWritePaths)
+	}
+	if _, err := os.Stat(temp); err != nil {
+		t.Fatalf("private temp not created: %v", err)
+	}
+}
+
+func TestWriteConfigFileUsesPrivatePermissions(t *testing.T) {
+	dir := t.TempDir()
+	path, cleanup, err := writeConfigFile(dir, mxcConfig{Version: "0.6.0-alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode=%o", info.Mode().Perm())
+	}
+	var decoded mxcConfig
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Version != "0.6.0-alpha" {
+		t.Fatalf("decoded=%+v", decoded)
+	}
+}
+
+func TestQuoteWindowsArg(t *testing.T) {
+	for input, want := range map[string]string{
+		"plain":       "plain",
+		"hello world": `"hello world"`,
+		`a"b`:         `"a\"b"`,
+		`C:\path\`:    `C:\path\`,
+	} {
+		if got := quoteWindowsArg(input); got != want {
+			t.Fatalf("quoteWindowsArg(%q)=%q want %q", input, got, want)
+		}
+	}
+}
+
+func TestWindowsCommandLineRejectsCommandShim(t *testing.T) {
+	_, err := windowsCommandLineWithLookPath([]string{"npm", "test"}, false, func(string) (string, error) {
+		return `C:\Program Files\nodejs\npm.cmd`, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "rerun with --shell") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func containsFold(values []string, want string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, want) {
+			return true
+		}
+	}
+	return false
+}

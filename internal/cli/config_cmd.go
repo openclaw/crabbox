@@ -155,6 +155,17 @@ func configShowView(cfg Config) map[string]any {
 			"cpus":     cfg.AppleContainer.CPUs,
 			"memory":   cfg.AppleContainer.Memory,
 		},
+		"mxc": map[string]any{
+			"cliPath":        cfg.MXC.CLIPath,
+			"version":        cfg.MXC.Version,
+			"containment":    cfg.MXC.Containment,
+			"network":        cfg.MXC.Network,
+			"readOnlyPaths":  cfg.MXC.ReadOnlyPaths,
+			"readWritePaths": cfg.MXC.ReadWritePaths,
+			"allowedHosts":   cfg.MXC.AllowedHosts,
+			"blockedHosts":   cfg.MXC.BlockedHosts,
+			"experimental":   cfg.MXC.Experimental,
+		},
 		"dockerSandbox": map[string]any{
 			"cliPath":         cfg.DockerSandbox.CLIPath,
 			"agent":           cfg.DockerSandbox.Agent,
@@ -283,6 +294,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "upstash_box base_url=%s runtime=%s size=%s workdir=%s keep_alive=%t auth=%s\n", cfg.UpstashBox.BaseURL, cfg.UpstashBox.Runtime, cfg.UpstashBox.Size, cfg.UpstashBox.Workdir, cfg.UpstashBox.KeepAlive, tokenState(cfg.UpstashBox.APIKey))
 	fmt.Fprintf(w, "ascii_box base_url=%s cli=%s workdir=%s auth=%s\n", cfg.AsciiBox.BaseURL, cfg.AsciiBox.CLIPath, cfg.AsciiBox.Workdir, tokenState(cfg.AsciiBox.APIKey))
 	fmt.Fprintf(w, "apple_container cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s\n", cfg.AppleContainer.CLIPath, cfg.AppleContainer.Image, cfg.AppleContainer.User, cfg.AppleContainer.WorkRoot, cfg.AppleContainer.CPUs, blank(cfg.AppleContainer.Memory, "-"))
+	fmt.Fprintf(w, "mxc cli=%s version=%s containment=%s network=%s readonly_paths=%d readwrite_paths=%d allowed_hosts=%d blocked_hosts=%d experimental=%t\n", cfg.MXC.CLIPath, cfg.MXC.Version, cfg.MXC.Containment, cfg.MXC.Network, len(cfg.MXC.ReadOnlyPaths), len(cfg.MXC.ReadWritePaths), len(cfg.MXC.AllowedHosts), len(cfg.MXC.BlockedHosts), cfg.MXC.Experimental)
 	fmt.Fprintf(w, "docker_sandbox cli=%s agent=%s template=%s cpus=%g memory=%s clone=%t workdir=%s extra_workspaces=%s mcp=%s kit=%s\n", cfg.DockerSandbox.CLIPath, cfg.DockerSandbox.Agent, blank(cfg.DockerSandbox.Template, "-"), cfg.DockerSandbox.CPUs, blank(cfg.DockerSandbox.Memory, "-"), cfg.DockerSandbox.Clone, blank(cfg.DockerSandbox.Workdir, "-"), blank(strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ","), "-"), blank(strings.Join(cfg.DockerSandbox.MCP, ","), "-"), blank(strings.Join(cfg.DockerSandbox.Kit, ","), "-"))
 	fmt.Fprintf(w, "multipass cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s disk=%s launch_timeout=%s\n", cfg.Multipass.CLIPath, cfg.Multipass.Image, cfg.Multipass.User, cfg.Multipass.WorkRoot, cfg.Multipass.CPUs, blank(cfg.Multipass.Memory, "-"), blank(cfg.Multipass.Disk, "-"), cfg.Multipass.LaunchTimeout)
 	fmt.Fprintf(w, "tart image=%s user=%s work_root=%s cpus=%d memory=%d disk=%d\n", cfg.Tart.Image, cfg.Tart.User, cfg.Tart.WorkRoot, cfg.Tart.CPUs, cfg.Tart.Memory, cfg.Tart.Disk)
