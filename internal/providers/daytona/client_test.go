@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
@@ -67,6 +68,46 @@ func TestDaytonaListCrabboxSandboxesUsesCursorPagination(t *testing.T) {
 	}
 	if len(cursors) != 4 || cursors[0] != "" || cursors[1] != "cursor-2" || cursors[2] != "" || cursors[3] != "cursor-2" {
 		t.Fatalf("cursors=%#v, want two cursor-paginated inventory scans", cursors)
+	}
+}
+
+func TestParseDaytonaCLIAuthConfigRejectsUnknownActiveProfile(t *testing.T) {
+	_, err := parseDaytonaCLIAuthConfig([]byte(`{
+  "activeProfile": "missing",
+  "profiles": [
+    {"id": "dev", "name": "dev", "api": {"url": "https://dev.example/api", "key": "dev-key"}},
+    {"id": "prod", "name": "prod", "api": {"url": "https://prod.example/api", "key": "prod-key"}}
+  ]
+}`))
+	if err == nil {
+		t.Fatal("expected unknown active profile error")
+	}
+	if !strings.Contains(err.Error(), `active profile "missing" was not found`) {
+		t.Fatalf("err=%v, want missing active profile", err)
+	}
+}
+
+func TestParseDaytonaCLIAuthConfigFallsBackWhenNoActiveProfile(t *testing.T) {
+	auth, err := parseDaytonaCLIAuthConfig([]byte(`{
+  "profiles": [
+    {
+      "id": "dev",
+      "name": "dev",
+      "activeOrganizationId": "org-dev",
+      "api": {"url": "https://dev.example/api", "key": "dev-key"}
+    },
+    {
+      "id": "prod",
+      "name": "prod",
+      "api": {"url": "https://prod.example/api", "key": "prod-key"}
+    }
+  ]
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth.APIKey != "dev-key" || auth.OrganizationID != "org-dev" || auth.APIURL != "https://dev.example/api" {
+		t.Fatalf("auth=%#v", auth)
 	}
 }
 

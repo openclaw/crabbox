@@ -182,16 +182,22 @@ func parseDaytonaCLIAuthConfig(data []byte) (daytonaAuth, error) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return daytonaAuth{}, err
 	}
+	activeProfile := strings.TrimSpace(config.ActiveProfile)
 	var selected *daytonaCLIProfile
 	for i := range config.Profiles {
 		profile := &config.Profiles[i]
-		if config.ActiveProfile == "" || profile.ID == config.ActiveProfile || profile.Name == config.ActiveProfile {
+		if activeProfile == "" || strings.TrimSpace(profile.ID) == activeProfile || strings.TrimSpace(profile.Name) == activeProfile {
 			selected = profile
 			break
 		}
 	}
-	if selected == nil && len(config.Profiles) > 0 {
-		selected = &config.Profiles[0]
+	if selected == nil {
+		if activeProfile != "" {
+			return daytonaAuth{}, fmt.Errorf("daytona CLI active profile %q was not found", activeProfile)
+		}
+		if len(config.Profiles) > 0 {
+			selected = &config.Profiles[0]
+		}
 	}
 	if selected == nil {
 		return daytonaAuth{}, nil
