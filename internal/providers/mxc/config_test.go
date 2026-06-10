@@ -102,7 +102,7 @@ func TestBuildConfigRejectsVolumeRoot(t *testing.T) {
 
 func TestBuildIsolatedConfigUsesPrivateTemporaryDirectory(t *testing.T) {
 	cfg := core.BaseConfig()
-	config, _, cleanup, err := buildIsolatedConfig(cfg, RunRequest{Command: []string{"cmd.exe", "/c", "exit", "0"}})
+	config, _, cleanup, err := buildIsolatedConfig(cfg, RunRequest{Command: []string{"cmd.exe", "/c", "exit", "0"}, Env: map[string]string{"Temp": `C:\attacker`, "tmp": `C:\other`}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,6 +115,11 @@ func TestBuildIsolatedConfigUsesPrivateTemporaryDirectory(t *testing.T) {
 	}
 	if temp == "" || !containsFold(config.Filesystem.ReadWritePaths, temp) {
 		t.Fatalf("private temp missing: env=%v paths=%v", config.Process.Env, config.Filesystem.ReadWritePaths)
+	}
+	for _, entry := range config.Process.Env {
+		if strings.Contains(entry, `C:\attacker`) || strings.Contains(entry, `C:\other`) {
+			t.Fatalf("untrusted temp override survived: %v", config.Process.Env)
+		}
 	}
 	if _, err := os.Stat(temp); err != nil {
 		t.Fatalf("private temp not created: %v", err)
