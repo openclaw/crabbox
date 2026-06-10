@@ -119,7 +119,9 @@ func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 			if !shouldStop {
 				return
 			}
-			if err := client.destroySandbox(context.Background(), sandboxID); err != nil {
+			cleanupCtx, cancel := cloudflareCleanupContext()
+			defer cancel()
+			if err := client.destroySandbox(cleanupCtx, sandboxID); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: %s destroy failed for %s: %v\n", providerName, sandboxID, err)
 				return
 			}
@@ -399,7 +401,12 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 		return "", cloudflareContainer{}, "", err
 	}
 	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		_ = client.destroySandbox(context.Background(), sandbox.ID)
+		cleanupCtx, cancel := cloudflareCleanupContext()
+		cleanupErr := client.destroySandbox(cleanupCtx, sandbox.ID)
+		cancel()
+		if cleanupErr != nil {
+			return "", cloudflareContainer{}, "", fmt.Errorf("%w; cleanup failed for %s sandbox %s: %v", err, providerName, sandbox.ID, cleanupErr)
+		}
 		return "", cloudflareContainer{}, "", err
 	}
 	return leaseID, sandbox, slug, nil

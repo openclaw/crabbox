@@ -59,6 +59,10 @@ type execStreamEvent struct {
 	ExitCode *int   `json:"exitCode,omitempty"`
 }
 
+const cloudflareDefaultResponseHeaderTimeout = 30 * time.Second
+
+var cloudflareCleanupTimeout = 15 * time.Second
+
 func newCloudflareClient(cfg Config, rt Runtime) (*cloudflareClient, error) {
 	apiURL := strings.TrimSpace(cfg.Cloudflare.APIURL)
 	if apiURL == "" {
@@ -94,7 +98,7 @@ func newCloudflareClient(cfg Config, rt Runtime) (*cloudflareClient, error) {
 	baseURL := strings.TrimRight(parsed.String(), "/")
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = defaultCloudflareHTTPClient()
 	}
 	return &cloudflareClient{
 		baseURL:      baseURL,
@@ -102,6 +106,16 @@ func newCloudflareClient(cfg Config, rt Runtime) (*cloudflareClient, error) {
 		instanceType: instanceType,
 		http:         httpClient,
 	}, nil
+}
+
+func cloudflareCleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), cloudflareCleanupTimeout)
+}
+
+func defaultCloudflareHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = cloudflareDefaultResponseHeaderTimeout
+	return &http.Client{Transport: transport}
 }
 
 func isLoopbackHTTPURL(parsed *url.URL) bool {

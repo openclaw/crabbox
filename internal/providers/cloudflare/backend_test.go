@@ -132,6 +132,29 @@ func TestCloudflareClientNormalizesBaseURL(t *testing.T) {
 	}
 }
 
+func TestCloudflareClientUsesBoundedDefaultTransport(t *testing.T) {
+	cfg := Config{}
+	cfg.Cloudflare.APIURL = "http://127.0.0.1:8787"
+	cfg.Cloudflare.Token = "token"
+	client, err := newCloudflareClient(cfg, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.http == nil || client.http == http.DefaultClient {
+		t.Fatalf("default http client=%#v, want bounded private client", client.http)
+	}
+	if client.http.Timeout != 0 {
+		t.Fatalf("whole-response timeout=%s, want caller context to govern streams", client.http.Timeout)
+	}
+	transport, ok := client.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport=%T, want *http.Transport", client.http.Transport)
+	}
+	if transport.ResponseHeaderTimeout != cloudflareDefaultResponseHeaderTimeout {
+		t.Fatalf("response header timeout=%s, want %s", transport.ResponseHeaderTimeout, cloudflareDefaultResponseHeaderTimeout)
+	}
+}
+
 func TestCloudflareClientRejectsURLQueryAndFragment(t *testing.T) {
 	for _, rawURL := range []string{
 		"https://runner.example.com?",
@@ -571,6 +594,65 @@ func TestCloudflareRunReportsCommandErrorAsFailure(t *testing.T) {
 	}
 }
 
+func TestCloudflareRunCleanupDestroyUsesBoundedContext(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	withCloudflareCleanupTimeout(t, 20*time.Millisecond)
+	var createdID string
+	execCalls := 0
+	deleteSeen := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			var req createSandboxRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode create request: %v", err)
+			}
+			createdID = req.ID
+			_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running","workdir":%q}`, req.ID, req.Workdir)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/"+createdID+"/exec-stream":
+			execCalls++
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			_, _ = io.WriteString(w, `{"type":"complete","exitCode":0}`+"\n")
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/"+createdID:
+			deleteSeen = true
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: providerName}
+	cfg.Cloudflare.APIURL = server.URL
+	cfg.Cloudflare.Token = "token"
+	var stderr bytes.Buffer
+	backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: &stderr, Stdout: io.Discard}}
+	start := time.Now()
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+		Command: []string{"true"},
+		NoSync:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("result=%#v", result)
+	}
+	if execCalls != 2 {
+		t.Fatalf("exec calls=%d, want prepare and command", execCalls)
+	}
+	if !deleteSeen {
+		t.Fatal("destroy was not attempted")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "warning: cloudflare destroy failed for "+createdID+":") || !strings.Contains(stderr.String(), "context deadline exceeded") {
+		t.Fatalf("stderr=%q, want destroy timeout warning", stderr.String())
+	}
+}
+
 func TestCloudflareClientUploadSendsContentLength(t *testing.T) {
 	var gotLength int64
 	var gotPath string
@@ -644,6 +726,13 @@ func TestDurationCeil(t *testing.T) {
 	if got := durationMillisecondsCeil(1500 * time.Microsecond); got != 2 {
 		t.Fatalf("durationMillisecondsCeil = %d, want 2", got)
 	}
+}
+
+func withCloudflareCleanupTimeout(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	original := cloudflareCleanupTimeout
+	cloudflareCleanupTimeout = timeout
+	t.Cleanup(func() { cloudflareCleanupTimeout = original })
 }
 
 func TestCloudflareResolveClaimRequiresReclaimForOtherRepo(t *testing.T) {
