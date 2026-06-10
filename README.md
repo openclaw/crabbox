@@ -111,50 +111,49 @@ human-readable name.
 
 ## Providers
 
-`Coordinator: brokered` providers can run through the Worker (or direct when no
-broker is configured); every other provider always runs direct from the CLI.
-Targets: **L**inux, **M**acOS, **W**indows.
+`Brokered` providers can run through the Worker (or direct when no broker is
+configured); every other provider always runs direct from the CLI.
 
 ### SSH-lease providers (provision or connect a box, full lifecycle)
 
-| Provider | `provider:` (aliases) | Targets | Coordinator | Notes |
-| --- | --- | --- | --- | --- |
-| [AWS EC2](docs/providers/aws.md) | `aws` | L / M / W | brokered | EC2 instances and EC2 Mac; native AMI/EBS checkpoints. |
-| [Azure](docs/providers/azure.md) | `azure` | L / W | brokered | VMs with Tailscale support; native Windows and WSL2. |
-| [Google Cloud](docs/providers/gcp.md) | `gcp` (`google`, `google-cloud`) | L | brokered | Linux Compute Engine VMs with Tailscale support. |
-| [Hetzner Cloud](docs/providers/hetzner.md) | `hetzner` | L | brokered | Linux VMs with desktop/browser/code and Tailscale. |
-| [Parallels](docs/providers/parallels.md) | `parallels` | L / M / W | direct | Local or remote macOS host; checkpoint/fork/restore/snapshot. |
-| [Proxmox](docs/providers/proxmox.md) | `proxmox` | L | direct | Clone Linux QEMU templates on a private Proxmox VE cluster. |
-| [Incus](docs/providers/incus.md) | `incus` | L | direct | Direct Incus Linux SSH leases through the official Incus Go client. |
-| [Static SSH](docs/providers/ssh.md) | `ssh` (`static`, `static-ssh`) | L / M / W | direct | Existing machines; no provisioning. |
-| [Local Container](docs/providers/local-container.md) | `local-container` (`docker`, `container`, `local-docker`) | L | direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima, Podman). |
-| [Apple Container](docs/providers/apple-container.md) | `apple-container` (`apple`, `applecontainer`) | L | direct | Apple's native `container` runtime on Apple silicon macOS. |
-| [exe.dev](docs/providers/exe-dev.md) | `exe-dev` (`exe`, `exedev`) | L | direct | exe.dev VMs exposed as public SSH leases. |
-| [KubeVirt](docs/providers/kubevirt.md) | `kubevirt` (`kubernetes-vm`) | L | direct | Generic KubeVirt VMs through `kubectl`, `virtctl`, and control-plane SSH forwarding. |
-| [External](docs/providers/external.md) | `external` (`exec-provider`) | L | direct | Configured executable implementing the Crabbox provider protocol. |
-| [Namespace Devbox](docs/providers/namespace-devbox.md) | `namespace-devbox` (`namespace`, `namespace-devboxes`) | L | direct | Namespace.so Devboxes over SSH. |
-| [Semaphore](docs/providers/semaphore.md) | `semaphore` (`sem`) | L | direct | A Semaphore CI job leased as a testbox. |
-| [Sprites](docs/providers/sprites.md) | `sprites` | L | direct | Sprites microVMs through `sprite proxy`. |
-| [Tenki](docs/providers/tenki.md) | `tenki` | L | direct | Tenki sandbox VMs through `tenki sandbox ssh-proxy`. |
-| [Daytona](docs/providers/daytona.md) | `daytona` | L | direct | Daytona-managed dev sandbox over SSH. |
-| [RunPod](docs/providers/runpod.md) | `runpod` (`run-pod`, `runpodio`) | L | direct | RunPod GPU pods with public SSH. |
-| [ASCII Box](docs/providers/ascii-box.md) | `ascii-box` (`ascii`, `asciibox`) | L | direct | ASCII Box Ubuntu sandboxes exposed as SSH leases. |
+| Provider and aliases | Runs on / mode | Notes |
+| --- | --- | --- |
+| [AWS EC2](docs/providers/aws.md) — `aws` | Linux, macOS, Windows · brokered | EC2 instances and EC2 Mac; native AMI/EBS checkpoints. |
+| [Azure](docs/providers/azure.md) — `azure` | Linux, Windows · brokered | VMs with Tailscale support; native Windows and WSL2. |
+| [Google Cloud](docs/providers/gcp.md) — `gcp` (`google`, `google-cloud`) | Linux · brokered | Compute Engine VMs with Tailscale support. |
+| [Hetzner Cloud](docs/providers/hetzner.md) — `hetzner` | Linux · brokered | VMs with desktop/browser/code and Tailscale. |
+| [Parallels](docs/providers/parallels.md) — `parallels` | Linux, macOS, Windows · direct | Local or remote macOS host; checkpoint/fork/restore/snapshot. |
+| [Proxmox](docs/providers/proxmox.md) — `proxmox` | Linux · direct | Clone QEMU templates on a private Proxmox VE cluster. |
+| [Incus](docs/providers/incus.md) — `incus` | Linux · direct | SSH leases through the official Incus Go client. |
+| [Static SSH](docs/providers/ssh.md) — `ssh` (`static`, `static-ssh`) | Linux, macOS, Windows · direct | Existing machines; no provisioning. |
+| [Local Container](docs/providers/local-container.md) — `local-container` (`docker`, `container`, `local-docker`) | Linux · direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima, Podman). |
+| [Apple Container](docs/providers/apple-container.md) — `apple-container` (`apple`, `applecontainer`) | Linux · direct | Apple's native `container` runtime on Apple silicon macOS. |
+| [exe.dev](docs/providers/exe-dev.md) — `exe-dev` (`exe`, `exedev`) | Linux · direct | exe.dev VMs exposed as public SSH leases. |
+| [KubeVirt](docs/providers/kubevirt.md) — `kubevirt` (`kubernetes-vm`) | Linux · direct | Generic KubeVirt VMs through `kubectl`, `virtctl`, and control-plane SSH forwarding. |
+| [External](docs/providers/external.md) — `external` (`exec-provider`) | Linux · direct | Configured executable implementing the Crabbox provider protocol. |
+| [Namespace Devbox](docs/providers/namespace-devbox.md) — `namespace-devbox` (`namespace`, `namespace-devboxes`) | Linux · direct | Namespace.so Devboxes over SSH. |
+| [Semaphore](docs/providers/semaphore.md) — `semaphore` (`sem`) | Linux · direct | A Semaphore CI job leased as a testbox. |
+| [Sprites](docs/providers/sprites.md) — `sprites` | Linux · direct | Sprites microVMs through `sprite proxy`. |
+| [Tenki](docs/providers/tenki.md) — `tenki` | Linux · direct | Tenki sandbox VMs through `tenki sandbox ssh-proxy`. |
+| [Daytona](docs/providers/daytona.md) — `daytona` | Linux · direct | Daytona-managed dev sandbox over SSH. |
+| [RunPod](docs/providers/runpod.md) — `runpod` (`run-pod`, `runpodio`) | Linux · direct | RunPod GPU pods with public SSH. |
+| [ASCII Box](docs/providers/ascii-box.md) — `ascii-box` (`ascii`, `asciibox`) | Linux · direct | ASCII Box Ubuntu sandboxes exposed as SSH leases. |
 
 ### Delegated-run providers (sandbox/proof runners, no SSH lease)
 
-| Provider | `provider:` (aliases) | Targets | Notes |
-| --- | --- | --- | --- |
-| [Cloudflare](docs/providers/cloudflare.md) | `cloudflare` (`cf`) | L | Cloudflare Containers via the Worker runtime. |
-| [Docker Sandbox](docs/providers/docker-sandbox.md) | `docker-sandbox` | L | Docker Sandboxes through the standalone `sbx` CLI. |
-| [E2B](docs/providers/e2b.md) | `e2b` | L | E2B Firecracker sandbox. |
-| [Islo](docs/providers/islo.md) | `islo` | L | Islo sandbox. |
-| [Modal](docs/providers/modal.md) | `modal` | L | Modal Sandbox through the local Python client. |
-| [Railway](docs/providers/railway.md) | `railway` (`rail`, `railwayapp`) | L | Redeploy and stream an existing Railway service. |
-| [Tensorlake](docs/providers/tensorlake.md) | `tensorlake` (`tl`, `tensorlake-sbx`) | L | Tensorlake Firecracker sandbox via the Tensorlake CLI. |
-| [Upstash Box](docs/providers/upstash-box.md) | `upstash-box` (`upstash`, `box`, `upstashbox`) | L | Upstash Box through the Box REST API. |
-| [Azure Dynamic Sessions](docs/providers/azure-dynamic-sessions.md) | `azure-dynamic-sessions` | L | Azure Container Apps dynamic sessions. |
-| [Blacksmith Testbox](docs/providers/blacksmith-testbox.md) | `blacksmith-testbox` (`blacksmith`) | L | Delegated Blacksmith CI Testbox lifecycle and execution. |
-| [W&B Sandboxes](docs/providers/wandb.md) | `wandb` (`weights-and-biases`) | L | Weights & Biases Sandboxes; reuses `wandb login` credentials. |
+| Provider and aliases | Runs on | Notes |
+| --- | --- | --- |
+| [Cloudflare](docs/providers/cloudflare.md) — `cloudflare` (`cf`) | Linux | Cloudflare Containers via the Worker runtime. |
+| [Docker Sandbox](docs/providers/docker-sandbox.md) — `docker-sandbox` | Linux | Docker Sandboxes through the standalone `sbx` CLI. |
+| [E2B](docs/providers/e2b.md) — `e2b` | Linux | E2B Firecracker sandbox. |
+| [Islo](docs/providers/islo.md) — `islo` | Linux | Islo sandbox. |
+| [Modal](docs/providers/modal.md) — `modal` | Linux | Modal Sandbox through the local Python client. |
+| [Railway](docs/providers/railway.md) — `railway` (`rail`, `railwayapp`) | Linux | Redeploy and stream an existing Railway service. |
+| [Tensorlake](docs/providers/tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux | Tensorlake Firecracker sandbox via the Tensorlake CLI. |
+| [Upstash Box](docs/providers/upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux | Upstash Box through the Box REST API. |
+| [Azure Dynamic Sessions](docs/providers/azure-dynamic-sessions.md) — `azure-dynamic-sessions` | Linux | Azure Container Apps dynamic sessions. |
+| [Blacksmith Testbox](docs/providers/blacksmith-testbox.md) — `blacksmith-testbox` (`blacksmith`) | Linux | Delegated Blacksmith CI Testbox lifecycle and execution. |
+| [W&B Sandboxes](docs/providers/wandb.md) — `wandb` (`weights-and-biases`) | Linux | Weights & Biases Sandboxes; reuses `wandb login` credentials. |
 
 See [Providers](docs/providers/README.md) for the full reference, capabilities,
 and authoring guide.

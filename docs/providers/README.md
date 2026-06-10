@@ -45,54 +45,54 @@ the default. Most names accept aliases (listed below).
 
 ## Provider pages
 
-Each page below maps to an adapter under `internal/providers/<dir>`. The
-**Provider id** is the canonical `--provider` value; **Aliases** also resolve.
+Each page below maps to an adapter under `internal/providers/<dir>`. The first
+code value is the canonical `--provider` value; parenthesized values are aliases.
 
 Some provider pages also preserve environment-specific validation runbooks when
 the built-in adapter needs a separate local smoke contract.
 
 ### SSH lease
 
-| Page | Provider id | Aliases | Targets | Brokered? |
-| --- | --- | --- | --- | --- |
-| [AWS](aws.md) | `aws` | — | Linux, macOS, Windows | yes |
-| [Azure](azure.md) | `azure` | — | Linux, Windows | yes |
-| [Google Cloud](gcp.md) | `gcp` | `google`, `google-cloud` | Linux | yes |
-| [Hetzner](hetzner.md) | `hetzner` | — | Linux | yes |
-| [Proxmox](proxmox.md) | `proxmox` | — | Linux | no (direct) |
-| [Incus](incus.md) | `incus` | — | Linux | no (direct) |
-| [Parallels](parallels.md) | `parallels` | — | Linux, macOS, Windows | no (direct) |
-| [Static SSH](ssh.md) | `ssh` | `static`, `static-ssh` | Linux, macOS, Windows | no (static) |
-| [Local Container](local-container.md) | `local-container` | `docker`, `container`, `local-docker` | Linux | no (local) |
-| [Apple Container](apple-container.md) | `apple-container` | `apple`, `applecontainer` | Linux | no (local) |
-| [Multipass](multipass.md) | `multipass` | `mp`, `canonical-multipass` | Linux | no (local) |
-| [Tart](tart.md) | `tart` | `local-tart`, `macos-vm` | macOS | no (local) |
-| [exe.dev](exe-dev.md) | `exe-dev` | `exe`, `exedev` | Linux | no (direct) |
-| [KubeVirt](kubevirt.md) | `kubevirt` | `kubernetes-vm` | Linux | no (direct) |
-| [External](external.md) | `external` | `exec-provider` | Linux | no (direct) |
-| [Namespace Devbox](namespace-devbox.md) | `namespace-devbox` | `namespace`, `namespace-devboxes` | Linux | no (direct) |
-| [Semaphore](semaphore.md) | `semaphore` | `sem` | Linux | no (direct) |
-| [Sprites](sprites.md) | `sprites` | — | Linux | no (direct) |
-| [Tenki](tenki.md) | `tenki` | — | Linux | no (direct) |
-| [Daytona](daytona.md) | `daytona` | — | Linux | no (direct) |
-| [RunPod](runpod.md) | `runpod` | `run-pod`, `runpodio` | Linux | no (direct) |
-| [ASCII Box](ascii-box.md) | `ascii-box` | `ascii`, `asciibox` | Linux | no (direct) |
+| Provider and aliases | Runs on / mode |
+| --- | --- |
+| [AWS](aws.md) — `aws` | Linux, macOS, Windows · brokered |
+| [Azure](azure.md) — `azure` | Linux, Windows · brokered |
+| [Google Cloud](gcp.md) — `gcp` (`google`, `google-cloud`) | Linux · brokered |
+| [Hetzner](hetzner.md) — `hetzner` | Linux · brokered |
+| [Proxmox](proxmox.md) — `proxmox` | Linux · direct |
+| [Incus](incus.md) — `incus` | Linux · direct |
+| [Parallels](parallels.md) — `parallels` | Linux, macOS, Windows · direct |
+| [Static SSH](ssh.md) — `ssh` (`static`, `static-ssh`) | Linux, macOS, Windows · static |
+| [Local Container](local-container.md) — `local-container` (`docker`, `container`, `local-docker`) | Linux · local |
+| [Apple Container](apple-container.md) — `apple-container` (`apple`, `applecontainer`) | Linux · local |
+| [Multipass](multipass.md) — `multipass` (`mp`, `canonical-multipass`) | Linux · local |
+| [Tart](tart.md) — `tart` (`local-tart`, `macos-vm`) | macOS · local |
+| [exe.dev](exe-dev.md) — `exe-dev` (`exe`, `exedev`) | Linux · direct |
+| [KubeVirt](kubevirt.md) — `kubevirt` (`kubernetes-vm`) | Linux · direct |
+| [External](external.md) — `external` (`exec-provider`) | Linux · direct |
+| [Namespace Devbox](namespace-devbox.md) — `namespace-devbox` (`namespace`, `namespace-devboxes`) | Linux · direct |
+| [Semaphore](semaphore.md) — `semaphore` (`sem`) | Linux · direct |
+| [Sprites](sprites.md) — `sprites` | Linux · direct |
+| [Tenki](tenki.md) — `tenki` | Linux · direct |
+| [Daytona](daytona.md) — `daytona` | Linux · direct |
+| [RunPod](runpod.md) — `runpod` (`run-pod`, `runpodio`) | Linux · direct |
+| [ASCII Box](ascii-box.md) — `ascii-box` (`ascii`, `asciibox`) | Linux · direct |
 
 ### Delegated run
 
-| Page | Provider id | Aliases | Targets |
-| --- | --- | --- | --- |
-| [Azure Dynamic Sessions](azure-dynamic-sessions.md) | `azure-dynamic-sessions` | — | Linux |
-| [Blacksmith Testbox](blacksmith-testbox.md) | `blacksmith-testbox` | `blacksmith` | Linux |
-| [Cloudflare](cloudflare.md) | `cloudflare` | `cf` | Linux |
-| [Docker Sandbox](docker-sandbox.md) | `docker-sandbox` | — | Linux |
-| [E2B](e2b.md) | `e2b` | — | Linux |
-| [Islo](islo.md) | `islo` | — | Linux |
-| [Modal](modal.md) | `modal` | — | Linux |
-| [Railway](railway.md) | `railway` | `rail`, `railwayapp` | Linux |
-| [Tensorlake](tensorlake.md) | `tensorlake` | `tl`, `tensorlake-sbx` | Linux |
-| [Upstash Box](upstash-box.md) | `upstash-box` | `upstash`, `box`, `upstashbox` | Linux |
-| [W&B Sandboxes](wandb.md) | `wandb` | `weights-and-biases` | Linux |
+| Provider and aliases | Runs on |
+| --- | --- |
+| [Azure Dynamic Sessions](azure-dynamic-sessions.md) — `azure-dynamic-sessions` | Linux |
+| [Blacksmith Testbox](blacksmith-testbox.md) — `blacksmith-testbox` (`blacksmith`) | Linux |
+| [Cloudflare](cloudflare.md) — `cloudflare` (`cf`) | Linux |
+| [Docker Sandbox](docker-sandbox.md) — `docker-sandbox` | Linux |
+| [E2B](e2b.md) — `e2b` | Linux |
+| [Islo](islo.md) — `islo` | Linux |
+| [Modal](modal.md) — `modal` | Linux |
+| [Railway](railway.md) — `railway` (`rail`, `railwayapp`) | Linux |
+| [Tensorlake](tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux |
+| [Upstash Box](upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux |
+| [W&B Sandboxes](wandb.md) — `wandb` (`weights-and-biases`) | Linux |
 
 Run `crabbox providers` (`--json`) to see the live capability set the binary
 reports.
