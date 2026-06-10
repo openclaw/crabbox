@@ -90,6 +90,12 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		return err
 	}
 	if supportsDirectSSHWebVNC(cfg.Provider) {
+		// macOS leases (e.g. tart) have no guest-side noVNC/websockify; serve the
+		// browser viewer from a host-side bridge over the guest's native Screen
+		// Sharing instead of the Linux directSSHWebVNC path.
+		if isMacOSDesktopProvider(cfg) {
+			return a.macOSWebVNCBridge(ctx, cfg, *id, *localPort, *openPortal, *reclaim)
+		}
 		return a.directSSHWebVNC(ctx, cfg, *id, *localPort, *openPortal, *takeControl, *reclaim)
 	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
@@ -352,6 +358,9 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 	target := SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}
 	bridgeID := *id
 	if supportsDirectSSHWebVNC(cfg.Provider) {
+		if err := guardMacOSDirectWebVNC(cfg); err != nil {
+			return err
+		}
 		server, resolvedTarget, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
 		if err != nil {
 			return err
@@ -497,6 +506,9 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	if supportsDirectSSHWebVNC(cfg.Provider) {
+		if err := guardMacOSDirectWebVNC(cfg); err != nil {
+			return err
+		}
 		return a.directSSHWebVNCStatus(ctx, cfg, *id, *localPort)
 	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
@@ -616,6 +628,9 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	if supportsDirectSSHWebVNC(cfg.Provider) {
+		if err := guardMacOSDirectWebVNC(cfg); err != nil {
+			return err
+		}
 		return a.directSSHWebVNCReset(ctx, cfg, *id, *openPortal, *takeControl)
 	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
@@ -1215,6 +1230,41 @@ func webVNCObserverSlotsExhausted(status CoordinatorWebVNCStatus) bool {
 func isLocalContainerProvider(provider string) bool {
 	p, err := ProviderFor(provider)
 	return err == nil && p.Name() == "local-container"
+}
+
+// guardMacOSDirectWebVNC rejects the direct WebVNC browser path for macOS
+// desktop leases (e.g. tart). That path shells noVNC/websockify on the guest,
+// which is Linux-only; macOS leases expose native Screen Sharing instead, so we
+// point the user at a native VNC client over an SSH tunnel.
+func guardMacOSDirectWebVNC(cfg Config) error {
+	if !isMacOSDesktopProvider(cfg) {
+		return nil
+	}
+	return exit(2, "this webvnc subcommand is not available for macOS leases; run `crabbox webvnc --id <id>` for the host-side browser viewer, or use a native VNC client over an SSH tunnel:\n  ssh -L 5900:127.0.0.1:5900 %s@<lease-ip>\n  open vnc://127.0.0.1:5900", blank(cfg.SSHUser, "<user>"))
+}
+
+// isMacOSDesktopProvider reports whether the lease belongs to a provider whose
+// ONLY target is macOS (e.g. tart) — those use the host-side Screen Sharing
+// bridge. It is keyed off the provider spec (not the resolved cfg.TargetOS,
+// which the webvnc subcommands don't always populate) so every entrypoint
+// classifies uniformly. Multi-target providers (e.g. parallels, which also
+// serves Linux/Windows) keep the existing WebVNC path even for their macOS
+// leases, so a single macOS target must not divert them into the tart bridge.
+func isMacOSDesktopProvider(cfg Config) bool {
+	p, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return false
+	}
+	targets := p.Spec().Targets
+	if len(targets) == 0 {
+		return false
+	}
+	for _, t := range targets {
+		if t.OS != targetMacOS {
+			return false
+		}
+	}
+	return true
 }
 
 func supportsDirectSSHWebVNC(provider string) bool {

@@ -2,6 +2,7 @@ package tart
 
 import (
 	"flag"
+	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -24,7 +25,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "local-vm",
 		Kind:        core.ProviderKindSSHLease,
 		Targets:     []core.TargetSpec{{OS: core.TargetMacOS}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
+		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop},
 		Coordinator: core.CoordinatorNever,
 	}
 }
@@ -35,6 +36,21 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 
 func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	return applyFlags(cfg, fs, values)
+}
+
+func (Provider) DesktopCredentials(cfg core.Config, target core.SSHTarget) (core.DesktopCredentials, bool) {
+	username := strings.TrimSpace(target.User)
+	if username == "" {
+		username = strings.TrimSpace(cfg.Tart.User)
+	}
+	if username == "" {
+		username = "admin"
+	}
+	password := cfg.Tart.Password
+	if password == "" {
+		password = "admin"
+	}
+	return core.DesktopCredentials{Username: username, Password: password}, true
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

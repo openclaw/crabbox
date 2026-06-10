@@ -31,7 +31,7 @@ type rfbCredentials struct {
 	Password string
 }
 
-func captureRemoteMacVNCScreenshot(ctx context.Context, target SSHTarget, outputPath string) error {
+func captureRemoteMacVNCScreenshot(ctx context.Context, cfg Config, target SSHTarget, outputPath string) error {
 	localPort := availableLocalVNCPort()
 	tunnel, err := startVNCForegroundTunnel(ctx, target, localPort, "127.0.0.1", managedVNCPort)
 	if err != nil {
@@ -39,13 +39,16 @@ func captureRemoteMacVNCScreenshot(ctx context.Context, target SSHTarget, output
 	}
 	defer stopProcess(tunnel)
 
-	password := ""
-	if out, err := runSSHOutput(ctx, target, vncPasswordCommand(target)); err == nil {
-		password = strings.TrimSpace(out)
-	}
-	creds := rfbCredentials{
-		Username: strings.TrimSpace(target.User),
-		Password: password,
+	creds, credentialsAvailable := providerDesktopCredentials(cfg, target)
+	if !credentialsAvailable {
+		password := ""
+		if out, err := runSSHOutput(ctx, target, vncPasswordCommand(target)); err == nil {
+			password = strings.TrimSpace(out)
+		}
+		creds = rfbCredentials{
+			Username: strings.TrimSpace(target.User),
+			Password: password,
+		}
 	}
 	img, err := captureRFBFrame(ctx, "127.0.0.1:"+localPort, creds)
 	if err != nil {
@@ -70,6 +73,33 @@ func captureRemoteMacVNCScreenshot(ctx context.Context, target SSHTarget, output
 	}
 	ok = true
 	return nil
+}
+
+func providerDesktopCredentials(cfg Config, target SSHTarget) (rfbCredentials, bool) {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return rfbCredentials{}, false
+	}
+	return desktopCredentialsFromProvider(provider, cfg, target)
+}
+
+func desktopCredentialsFromProvider(provider Provider, cfg Config, target SSHTarget) (rfbCredentials, bool) {
+	credentialProvider, ok := provider.(DesktopCredentialProvider)
+	if !ok {
+		return rfbCredentials{}, false
+	}
+	credentials, ok := credentialProvider.DesktopCredentials(cfg, target)
+	if !ok {
+		return rfbCredentials{}, false
+	}
+	username := strings.TrimSpace(credentials.Username)
+	if username == "" {
+		username = strings.TrimSpace(target.User)
+	}
+	return rfbCredentials{
+		Username: username,
+		Password: credentials.Password,
+	}, true
 }
 
 func captureRFBFrame(ctx context.Context, address string, creds rfbCredentials) (image.Image, error) {

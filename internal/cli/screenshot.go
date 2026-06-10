@@ -54,7 +54,7 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 	if outPath == "" {
 		outPath = defaultScreenshotPath(leaseID, serverSlug(server))
 	}
-	if err := captureDesktopScreenshot(ctx, target, outPath); err != nil {
+	if err := captureDesktopScreenshot(ctx, cfg, target, outPath); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "screenshot: %s\n", outPath)
@@ -72,7 +72,7 @@ func defaultScreenshotPath(leaseID, slug string) string {
 	return "crabbox-" + normalizeLeaseSlug(name) + "-screenshot.png"
 }
 
-func captureDesktopScreenshot(ctx context.Context, target SSHTarget, outputPath string) error {
+func captureDesktopScreenshot(ctx context.Context, cfg Config, target SSHTarget, outputPath string) error {
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		return exit(2, "create screenshot directory: %v", err)
 	}
@@ -80,7 +80,7 @@ func captureDesktopScreenshot(ctx context.Context, target SSHTarget, outputPath 
 		return captureLocalMacScreenshot(ctx, outputPath)
 	}
 	if target.TargetOS == targetMacOS {
-		return captureRemoteMacVNCScreenshot(ctx, target, outputPath)
+		return captureRemoteMacVNCScreenshot(ctx, cfg, target, outputPath)
 	}
 	file, err := os.Create(outputPath)
 	if err != nil {

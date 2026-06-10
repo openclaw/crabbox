@@ -137,6 +137,29 @@ func TestValidateProviderTargetAllowsAzureWindowsARM64(t *testing.T) {
 	}
 }
 
+func TestValidateProviderTargetAllowsTartMacOSARM64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	cfg.TargetOS = targetMacOS
+	cfg.Architecture = ArchitectureARM64
+	cfg.architectureExplicit = true
+	if err := validateProviderTarget(cfg); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateProviderTargetRejectsTartExplicitAMD64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	cfg.TargetOS = targetMacOS
+	cfg.Architecture = ArchitectureAMD64
+	cfg.architectureExplicit = true
+	err := validateProviderTarget(cfg)
+	if err == nil || !strings.Contains(err.Error(), "supports architecture=arm64 only") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestValidateProviderTargetRejectsAzureWindowsARM64WSL2(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "azure"

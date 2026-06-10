@@ -38,6 +38,15 @@ type ProviderCommandRoutingArgs interface {
 	CommandRoutingArgs(cfg Config, leaseID string) []string
 }
 
+type DesktopCredentials struct {
+	Username string
+	Password string
+}
+
+type DesktopCredentialProvider interface {
+	DesktopCredentials(cfg Config, target SSHTarget) (DesktopCredentials, bool)
+}
+
 type ProviderServerTypeProvider interface {
 	ServerTypeForConfig(cfg Config) string
 	ServerTypeForClass(class string) string

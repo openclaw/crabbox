@@ -447,6 +447,75 @@ func TestInjectSSHKeyRejectsShellInjection(t *testing.T) {
 	}
 }
 
+func TestSpecAdvertisesDesktop(t *testing.T) {
+	if !(Provider{}).Spec().Features.Has(core.FeatureDesktop) {
+		t.Fatal("tart Spec should advertise FeatureDesktop so --desktop is accepted")
+	}
+}
+
+func TestDesktopCredentials(t *testing.T) {
+	credentials, ok := (Provider{}).DesktopCredentials(core.Config{}, core.SSHTarget{})
+	if !ok {
+		t.Fatal("tart should provide desktop credentials")
+	}
+	if credentials.Username != "admin" || credentials.Password != "admin" {
+		t.Fatalf("default credentials = %#v", credentials)
+	}
+
+	cfg := core.Config{}
+	cfg.Tart.User = "configured-user"
+	cfg.Tart.Password = "configured-password"
+	credentials, ok = (Provider{}).DesktopCredentials(cfg, core.SSHTarget{User: "lease-user"})
+	if !ok {
+		t.Fatal("tart should provide configured desktop credentials")
+	}
+	if credentials.Username != "lease-user" || credentials.Password != "configured-password" {
+		t.Fatalf("configured credentials = %#v", credentials)
+	}
+
+	cfg.Tart.Password = " password with spaces "
+	credentials, _ = (Provider{}).DesktopCredentials(cfg, core.SSHTarget{User: "lease-user"})
+	if credentials.Password != cfg.Tart.Password {
+		t.Fatalf("password = %q, want exact configured value %q", credentials.Password, cfg.Tart.Password)
+	}
+}
+
+func TestEnableScreenSharingEnablesService(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	if err := b.enableScreenSharing(context.Background(), "crabbox-blue-1234"); err != nil {
+		t.Fatalf("enableScreenSharing: %v", err)
+	}
+
+	var script string
+	for _, call := range runner.calls {
+		if len(call.Args) >= 4 && call.Args[0] == "exec" && call.Args[2] == "bash" {
+			script = call.Args[len(call.Args)-1]
+		}
+	}
+	if script == "" {
+		t.Fatal("enableScreenSharing should issue a tart exec bash script")
+	}
+	if !strings.Contains(script, "com.apple.screensharing") {
+		t.Errorf("script should enable com.apple.screensharing\nscript: %s", script)
+	}
+	// Must verify the VNC listener actually came up and fail otherwise, so a lease
+	// is never reported ready with Screen Sharing down.
+	if !strings.Contains(script, "nc -z 127.0.0.1 5900") || !strings.Contains(script, "exit 1") {
+		t.Errorf("script should verify the VNC listener and fail if absent\nscript: %s", script)
+	}
+	// No crabbox-managed VNC credential: nothing secret reaches the guest, and the
+	// account password is never reset (that breaks secure-token accounts).
+	for _, banned := range []string{"vnc.password", "dscl", "-passwd"} {
+		if strings.Contains(script, banned) {
+			t.Errorf("script should not reference %q\nscript: %s", banned, script)
+		}
+	}
+}
+
 func TestInstanceNameFromScopeRequiresPrefix(t *testing.T) {
 	cases := []struct {
 		scope string

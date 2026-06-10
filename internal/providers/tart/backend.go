@@ -53,6 +53,9 @@ func applyDefaults(cfg *Config) {
 			cfg.Tart.User = "admin"
 		}
 	}
+	if cfg.Tart.Password == "" {
+		cfg.Tart.Password = "admin" // cirruslabs base-image default; WebVNC viewer credential only
+	}
 	if cfg.Tart.WorkRoot == "" {
 		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
 			cfg.Tart.WorkRoot = cfg.WorkRoot
@@ -146,6 +149,15 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 			_ = b.deleteVM(context.Background(), name)
 		}
 		return LeaseTarget{}, err
+	}
+	if cfg.Desktop {
+		if err := b.enableScreenSharing(ctx, name); err != nil {
+			if !req.Keep {
+				_ = b.stopVM(context.Background(), name)
+				_ = b.deleteVM(context.Background(), name)
+			}
+			return LeaseTarget{}, err
+		}
 	}
 
 	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
@@ -431,14 +443,30 @@ func startVMArgs(name string) []string {
 func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep bool) error {
 	args := startVMArgs(name)
 	var stderrBuf bytes.Buffer
+	var detachedStderr *os.File
 	var cmd *exec.Cmd
 	if keep {
 		if err := ctx.Err(); err != nil {
 			return exit(2, "tart run %s: context already cancelled", name)
 		}
 		cmd = exec.Command("tart", args...)
-		cmd.Stdout = io.Discard
-		cmd.Stderr = &stderrBuf
+		detachCommand(cmd)
+		devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+		if err != nil {
+			return exit(2, "tart run %s: open null device: %v", name, err)
+		}
+		defer devNull.Close()
+		detachedStderr, err = os.CreateTemp("", "crabbox-tart-run-*.log")
+		if err != nil {
+			return exit(2, "tart run %s: create startup log: %v", name, err)
+		}
+		defer func() {
+			_ = detachedStderr.Close()
+			_ = os.Remove(detachedStderr.Name())
+		}()
+		cmd.Stdin = devNull
+		cmd.Stdout = devNull
+		cmd.Stderr = detachedStderr
 	} else {
 		cmd = exec.CommandContext(ctx, "tart", args...)
 		cmd.Stdout = io.Discard
@@ -456,6 +484,11 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep boo
 		}
 		return exit(2, "tart run %s: context cancelled during startup", name)
 	case err := <-exitCh:
+		if detachedStderr != nil {
+			if _, seekErr := detachedStderr.Seek(0, io.SeekStart); seekErr == nil {
+				_, _ = io.Copy(&stderrBuf, io.LimitReader(detachedStderr, 64<<10))
+			}
+		}
 		detail := strings.TrimSpace(stderrBuf.String())
 		if detail != "" {
 			return exit(2, "tart run %s failed during startup: %s", name, detail)
@@ -465,9 +498,6 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep boo
 		}
 		return exit(2, "tart run %s exited unexpectedly during startup", name)
 	case <-time.After(startupObserveTimeout):
-		if keep {
-			_ = cmd.Process.Release()
-		}
 		return nil
 	}
 }
@@ -516,6 +546,31 @@ func (b *backend) injectSSHKey(ctx context.Context, name string, user string, pu
 	injectResult, err := b.tart(ctx, []string{"exec", name, "bash", "-c", injectScript}, nil, b.rt.Stderr)
 	if err != nil {
 		return commandError("ssh key injection", injectResult, err)
+	}
+	return nil
+}
+
+// enableScreenSharing turns on the guest's built-in macOS Screen Sharing for a
+// --desktop lease (port 5900). Authentication uses the guest account's own
+// credentials; crabbox provisions no VNC password and passes no secret to the
+// guest. macOS Screen Sharing binds all guest interfaces, so the service is
+// reachable at the guest's address on the host-local tart network (gated by
+// account auth); an SSH tunnel can keep the viewer on 127.0.0.1. Only invoked
+// for --desktop leases.
+func (b *backend) enableScreenSharing(ctx context.Context, name string) error {
+	script := `set -eu
+sudo launchctl enable system/com.apple.screensharing || true
+sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+sudo launchctl kickstart -k system/com.apple.screensharing || true
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if nc -z 127.0.0.1 5900; then exit 0; fi
+  sleep 1
+done
+echo 'macOS Screen Sharing did not start (no VNC listener on 127.0.0.1:5900)' >&2
+exit 1`
+	result, err := b.tart(ctx, []string{"exec", name, "bash", "-c", script}, nil, b.rt.Stderr)
+	if err != nil {
+		return commandError("enable screen sharing", result, err)
 	}
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/md5"
 	"encoding/binary"
+	"flag"
 	"image/color"
 	"io"
 	"math/big"
@@ -13,6 +14,36 @@ import (
 	"testing"
 	"time"
 )
+
+type desktopCredentialTestProvider struct{}
+
+func (desktopCredentialTestProvider) Name() string      { return "desktop-credential-test" }
+func (desktopCredentialTestProvider) Aliases() []string { return nil }
+func (desktopCredentialTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{Name: "desktop-credential-test"}
+}
+func (desktopCredentialTestProvider) RegisterFlags(*flag.FlagSet, Config) any { return nil }
+func (desktopCredentialTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (desktopCredentialTestProvider) Configure(Config, Runtime) (Backend, error) { return nil, nil }
+func (desktopCredentialTestProvider) DesktopCredentials(Config, SSHTarget) (DesktopCredentials, bool) {
+	return DesktopCredentials{Password: "provider-secret"}, true
+}
+
+func TestDesktopCredentialsFromProvider(t *testing.T) {
+	got, ok := desktopCredentialsFromProvider(
+		desktopCredentialTestProvider{},
+		Config{},
+		SSHTarget{User: "lease-user"},
+	)
+	if !ok {
+		t.Fatal("provider desktop credentials should be available")
+	}
+	if got.Username != "lease-user" || got.Password != "provider-secret" {
+		t.Fatalf("credentials = %#v", got)
+	}
+}
 
 func TestCaptureRFBFrameSupportsAppleRemoteDesktopAuth(t *testing.T) {
 	client, server := net.Pipe()

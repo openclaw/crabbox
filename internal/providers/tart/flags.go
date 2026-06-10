@@ -11,6 +11,7 @@ import (
 
 type flagValues struct {
 	Image  *string
+	User   *string
 	CPUs   *int
 	Memory *int
 	Disk   *int
@@ -19,6 +20,7 @@ type flagValues struct {
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
 		Image:  fs.String("tart-image", defaults.Tart.Image, "tart base image to clone from"),
+		User:   fs.String("tart-user", defaults.Tart.User, "guest user account for SSH and desktop/VNC"),
 		CPUs:   fs.Int("tart-cpu", defaults.Tart.CPUs, "CPU count for tart VMs"),
 		Memory: fs.Int("tart-memory", defaults.Tart.Memory, "memory in MB for tart VMs"),
 		Disk:   fs.Int("tart-disk", defaults.Tart.Disk, "disk size in GB for tart VMs (0 = use clone default)"),
@@ -33,6 +35,9 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if flagWasSet(fs, "tart-image") {
 		cfg.Tart.Image = *v.Image
 		core.MarkTartImageExplicit(cfg)
+	}
+	if flagWasSet(fs, "tart-user") {
+		cfg.Tart.User = *v.User
 	}
 	if flagWasSet(fs, "tart-cpu") {
 		if *v.CPUs < 4 {

@@ -149,3 +149,14 @@ func TestEnforceManagedLeaseCapabilitiesAllowsMacOSScreenSharing(t *testing.T) {
 		t.Fatalf("enforceManagedLeaseCapabilities error: %v", err)
 	}
 }
+
+func TestEnforceManagedLeaseCapabilitiesRequiresDesktopLabelForDirectMacOSProvider(t *testing.T) {
+	err := enforceManagedLeaseCapabilities(
+		Config{Desktop: true, Provider: "tart"},
+		Server{Provider: "tart", Labels: map[string]string{"target": targetMacOS}},
+		"cbx_test",
+	)
+	if err == nil {
+		t.Fatal("direct macOS lease without desktop label should be rejected")
+	}
+}

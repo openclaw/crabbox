@@ -127,12 +127,17 @@ func validateProviderTarget(cfg Config) error {
 	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
 		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
+	if provider.Name() == "tart" && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
+		return exit(2, "provider=tart supports architecture=arm64 only")
+	}
 	if effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
-		if provider.Name() != "azure" && provider.Name() != "aws" {
-			return exit(2, "architecture=arm64 currently supports provider=azure or provider=aws")
+		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" {
+			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, or provider=tart")
 		}
-		if cfg.TargetOS != targetLinux && !(provider.Name() == "azure" && cfg.TargetOS == targetWindows) {
-			return exit(2, "architecture=arm64 currently supports target=linux or provider=azure target=windows only")
+		if cfg.TargetOS != targetLinux &&
+			!(provider.Name() == "azure" && cfg.TargetOS == targetWindows) &&
+			!(provider.Name() == "tart" && cfg.TargetOS == targetMacOS) {
+			return exit(2, "architecture=arm64 currently supports target=linux, provider=azure target=windows, or provider=tart target=macos only")
 		}
 		if provider.Name() == "azure" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 {
 			return exit(2, "provider=azure target=windows architecture=arm64 supports windows.mode=normal only; windows.mode=wsl2 requires nested virtualization, which Azure Cobalt ARM64 VM sizes do not support")
