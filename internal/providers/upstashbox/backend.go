@@ -474,7 +474,7 @@ func boxSlug(leaseID string, box boxData) string {
 
 func statusReady(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "", "running", "ready", "idle", "paused":
+	case "running", "ready", "idle", "paused":
 		return true
 	default:
 		return false

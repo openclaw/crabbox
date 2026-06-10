@@ -517,6 +517,40 @@ func TestStatusMapsBoxName(t *testing.T) {
 	}
 }
 
+func TestStatusReadyStates(t *testing.T) {
+	tests := map[string]bool{
+		"running":   true,
+		"ready":     true,
+		"idle":      true,
+		"paused":    true,
+		" RUNNING ": true,
+		"":          false,
+		"pending":   false,
+		"creating":  false,
+		"failed":    false,
+		"unknown":   false,
+	}
+	for status, want := range tests {
+		if got := statusReady(status); got != want {
+			t.Fatalf("statusReady(%q)=%t want %t", status, got, want)
+		}
+	}
+}
+
+func TestStatusWaitTreatsMissingStatusAsNotReady(t *testing.T) {
+	fake := &fakeAPI{box: boxData{ID: "box_1", Name: "crabbox-blue-123456789abc"}}
+	withFakeAPI(t, fake)
+	backend := NewBackend(Provider{}.Spec(), testConfig(), Runtime{
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+		Clock:  &advancingClock{current: time.Unix(100, 0), step: time.Second},
+	}).(*backend)
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "box_1", Wait: true, WaitTimeout: time.Nanosecond})
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for upstash-box box_1 to become ready") {
+		t.Fatalf("err=%v, want timeout for missing status", err)
+	}
+}
+
 func hasFeature(features core.FeatureSet, want core.Feature) bool {
 	for _, feature := range features {
 		if feature == want {
@@ -541,6 +575,16 @@ func testConfig() Config {
 
 func testRuntime() Runtime {
 	return Runtime{Stdout: io.Discard, Stderr: io.Discard}
+}
+
+type advancingClock struct {
+	current time.Time
+	step    time.Duration
+}
+
+func (c *advancingClock) Now() time.Time {
+	c.current = c.current.Add(c.step)
+	return c.current
 }
 
 func withFakeAPI(t *testing.T, fake *fakeAPI) {
