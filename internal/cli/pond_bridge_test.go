@@ -476,6 +476,114 @@ func TestPondPeersIncludesManagedLinuxWithTailnetTransport(t *testing.T) {
 	}
 }
 
+// TestPondPeersMixesIsloBridgeAndTailnetMembers proves the headline pond
+// promise: a single pond can hold an Islo URL-bridge member and a Tailscale
+// mesh member at the same time, and one `pond peers` fan-out renders both with
+// the correct plane each — the Islo member as a URL-bridge peer (its share URL
+// resolved through the bridge adapter) and the Hetzner member as a tailnet peer
+// (its 100.x IPv4, with the bridge adapter never consulted for it). This is the
+// "does islo as a pond work with tailscale" question stated as a regression.
+func TestPondPeersMixesIsloBridgeAndTailnetMembers(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_islo1", Slug: "sandbox", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "cbx_web", Slug: "web", Provider: "hetzner", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "cbx_web", func(c *leaseClaim) { c.TailscaleIPv4 = "100.64.1.3" })
+
+	fake := &fakeBridgeProvider{
+		listed: map[string][]BridgePeerTarget{
+			"isb_islo1": {{Port: 8080, URL: "https://sandbox.share.islo.dev", ShareID: "shr_islo"}},
+		},
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(provider string, _ Runtime) (BridgeProvider, error) {
+		if provider != "islo" {
+			// The tailnet member must never reach the bridge adapter.
+			t.Fatalf("bridge adapter consulted for non-islo provider %q", provider)
+		}
+		return fake, nil
+	}
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "", pondPeersFlags{})
+	if err != nil {
+		t.Fatalf("resolvePondPeers: %v", err)
+	}
+	if len(peers) != 2 {
+		t.Fatalf("expected 2 peers (islo + hetzner), got %d: %#v", len(peers), peers)
+	}
+	byProvider := map[string]BridgePeer{}
+	for _, p := range peers {
+		byProvider[p.Provider] = p
+	}
+
+	islo, ok := byProvider["islo"]
+	if !ok {
+		t.Fatalf("islo member missing: %#v", peers)
+	}
+	if islo.Transport != TransportURL {
+		t.Fatalf("islo transport=%q want %q", islo.Transport, TransportURL)
+	}
+	if len(islo.Targets) != 1 || islo.Targets[0].URL != "https://sandbox.share.islo.dev" {
+		t.Fatalf("islo member should carry its share URL, got %#v", islo.Targets)
+	}
+
+	hetzner, ok := byProvider["hetzner"]
+	if !ok {
+		t.Fatalf("hetzner member missing: %#v", peers)
+	}
+	if hetzner.Transport != TransportTailnet {
+		t.Fatalf("hetzner transport=%q want %q", hetzner.Transport, TransportTailnet)
+	}
+	if hetzner.Endpoint != "100.64.1.3" {
+		t.Fatalf("hetzner endpoint=%q want 100.64.1.3", hetzner.Endpoint)
+	}
+}
+
+// TestPondPeersIsloDualPlane proves the islo Tailscale feature's discovery
+// half: in one all-islo pond, a member that joined the tailnet (claim carries a
+// TailscaleIPv4) surfaces on the tailnet plane with its 100.x endpoint, while a
+// plain member (no tailnet IP) falls back to the URL bridge rather than being
+// stranded as "pending". This is the per-claim fallback in bridgePeerFromClaim.
+func TestPondPeersIsloDualPlane(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_meshed", Slug: "node-a", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "isb_plain", Slug: "node-b", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_meshed", func(c *leaseClaim) { c.TailscaleIPv4 = "100.64.7.7" })
+
+	fake := &fakeBridgeProvider{listed: map[string][]BridgePeerTarget{
+		"isb_plain": {{Port: 8080, URL: "https://node-b.share.islo.dev"}},
+	}}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(provider string, _ Runtime) (BridgeProvider, error) {
+		if provider != "islo" {
+			t.Fatalf("unexpected provider %q", provider)
+		}
+		return fake, nil
+	}
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "", pondPeersFlags{})
+	if err != nil {
+		t.Fatalf("resolvePondPeers: %v", err)
+	}
+	by := map[string]BridgePeer{}
+	for _, p := range peers {
+		by[p.Slug] = p
+	}
+	if got := by["node-a"]; got.Transport != TransportTailnet || got.Endpoint != "100.64.7.7" {
+		t.Fatalf("joined islo member should be tailnet/100.64.7.7, got transport=%q endpoint=%q", got.Transport, got.Endpoint)
+	}
+	if got := by["node-b"]; got.Transport != TransportURL || got.Endpoint != "https://node-b.share.islo.dev" {
+		t.Fatalf("plain islo member should fall back to url, got transport=%q endpoint=%q", got.Transport, got.Endpoint)
+	}
+	// islo now advertises both planes in its capability set.
+	if got := by["node-a"].Transports; !containsString(got, TransportTailnet) || !containsString(got, TransportURL) {
+		t.Fatalf("islo should advertise both tailnet and url, got %v", got)
+	}
+}
+
 // TestPondPeersIncludesSSHLeaseWithSSHTransport asserts that SSH-lease
 // providers (RunPod here) surface their endpoint as `ssh://host:port` so
 // downstream tooling can dial it without provider-specific knowledge.

@@ -97,6 +97,48 @@ HTTPS share for an exposed sandbox port via Islo's
 port when one is present. This is how delegated providers surface a reachable
 URL in place of an SSH-tunneled bridge.
 
+## Tailscale (userspace tailnet)
+
+Islo advertises `FeatureTailscale` in addition to `url-bridge`. Because Islo is a
+delegated-run provider with no Crabbox-managed SSH lease, Crabbox cannot reuse
+the SSH runner-bootstrap that VM providers (Hetzner/Azure/GCP) use to join the
+tailnet. Instead, when a lease is created with `--tailscale`, Crabbox brings the
+sandbox onto the tailnet **through the Islo exec stream** — no Islo-side changes
+are required:
+
+1. it downloads the pinned static Tailscale build into the sandbox (the image
+   ships `wget`, not `curl`, and has no systemd to run the packaged unit);
+2. it starts `tailscaled` in **userspace-networking** mode. This is deliberate:
+   kernel mode rewrites the sandbox routing table, which severs the Islo exec
+   transport mid-run. Userspace mode never touches host routing, so the node
+   joins the tailnet and the exec channel survives;
+3. it runs `tailscale up` with the pond-scoped advertise tags, `TS_CONTROL_URL`
+   as `--login-server` when set, and any configured exit-node flags;
+4. it records the assigned tailnet IPv4 on the lease claim, so `pond peers`
+   reports the member on the tailnet plane (`transport: tailnet`) instead of the
+   URL bridge.
+
+```sh
+export CRABBOX_TAILSCALE_AUTH_KEY=tskey-auth-...     # node auth key (tagged or tag-authorized)
+crabbox warmup --pond mesh --slug node-a --provider islo --tailscale
+crabbox warmup --pond mesh --slug node-b --provider islo --tailscale
+crabbox pond peers --pond mesh --json                # both members on transport=tailnet
+```
+
+The static build is pinned; override it with `CRABBOX_ISLO_TAILSCALE_VERSION`.
+The Islo path runs Tailscale in userspace mode, so it does not install a kernel
+TUN route. Traffic from sandbox processes must use the local proxies that
+Crabbox starts with the daemon (`ALL_PROXY=socks5://localhost:1055` and
+`HTTP_PROXY=http://localhost:1055`) or another userspace Tailscale surface.
+Unproxied process traffic still uses the sandbox's normal network namespace.
+Exit-node settings are passed through to `tailscale up`, but only traffic sent
+through the userspace Tailscale path uses them.
+
+A lease warmed **without** `--tailscale` is unchanged: no tailnet IP is recorded
+and `pond peers` reports it on the URL bridge as before. The pond ACL tag and its
+auto-bootstrap (`CRABBOX_POND_ACL_BOOTSTRAP=1` + `TS_API_KEY`) apply to Islo
+exactly as they do for other direct Tailscale-capable providers.
+
 ## Rejected options
 
 Because Islo owns command transport and there is no Crabbox-managed SSH/rsync

@@ -13,8 +13,10 @@ import (
 // BridgePeer is the cross-provider shape returned by `crabbox pond peers`.
 // One row per pond member, regardless of which plane carries that member:
 //
-//   - Tailscale-capable managed Linux providers (Hetzner / Azure / GCP)
-//     surface with Transport="tailnet" and Endpoint=tailnet IPv4/FQDN.
+//   - Tailscale-capable providers surface with Transport="tailnet" and
+//     Endpoint=tailnet IPv4/FQDN. Managed Linux providers install an OS route;
+//     delegated userspace providers such as Islo expose the tailnet through
+//     their provider-specific userspace path.
 //   - SSH-lease providers (exe.dev / RunPod / Daytona / Sprites / Namespace /
 //     Semaphore) surface with Transport="ssh" and Endpoint=ssh://host:port.
 //   - Delegated-with-URL providers (Islo, E2B, Modal, Cloudflare, Railway,
@@ -306,11 +308,12 @@ func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, fl
 //
 // The transport class is determined per-provider:
 //
-//   - tailnet — managed Linux providers (AWS / Azure / GCP / Hetzner /
-//     Proxmox / Static SSH). The resolver does not invoke a bridge backend
-//     at all for these; the endpoint is read straight off the claim sidecar
-//     (TailscaleIPv4 / TailscaleFQDN), and missing endpoints surface as
-//     transport=pending with an honest note.
+//   - tailnet — providers that recorded a tailnet endpoint on their claim
+//     (managed Linux providers via cloud-init, delegated providers such as
+//     Islo via their own join path). The resolver does not invoke a bridge
+//     backend for tailnet endpoints; the endpoint is read straight off the
+//     claim sidecar (TailscaleIPv4 / TailscaleFQDN), and missing endpoints
+//     surface as transport=pending with an honest note.
 //   - ssh — SSH-lease providers (exe.dev / RunPod / Daytona / Sprites /
 //     Namespace / Semaphore). Endpoint is built from SSHHost+SSHPort; an
 //     unset host surfaces as transport=pending.
@@ -407,6 +410,16 @@ func bridgePeerFromClaim(claim leaseClaim, class string) BridgePeer {
 	case TransportTailnet:
 		endpoint := firstNonEmpty(claim.TailscaleIPv4, claim.TailscaleFQDN)
 		if endpoint == "" {
+			// The provider is tailnet-primary but this lease has no tailnet
+			// endpoint recorded. For providers that ALSO advertise the URL
+			// bridge (e.g. islo, which only records a tailnet IP when the lease
+			// was warmed with --tailscale), fall back to the bridge plane
+			// instead of stranding the member as "pending".
+			if providerCapabilities(claim.Provider).URLBridge {
+				peer.Transport = TransportURL
+				peer.Endpoint = claim.BridgeURL
+				return peer
+			}
 			peer.Transport = TransportPending
 			peer.Note = "tailnet endpoint not yet recorded for this lease"
 			return peer

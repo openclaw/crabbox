@@ -850,7 +850,7 @@ func (testIsloProvider) Spec() ProviderSpec {
 		Name:        "islo",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureURLBridge},
+		Features:    FeatureSet{FeatureURLBridge, FeatureRunSession, FeatureTailscale},
 		Coordinator: CoordinatorNever,
 	}
 }

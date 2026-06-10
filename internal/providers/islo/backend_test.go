@@ -19,6 +19,7 @@ import (
 	"time"
 
 	gosdk "github.com/islo-labs/go-sdk"
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestParseIsloSSE(t *testing.T) {
@@ -437,6 +438,68 @@ func TestIsloCreateSandboxStoresPondClaimForList(t *testing.T) {
 	}
 }
 
+func TestIsloCreateSandboxTailscaleClaimAndOptions(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("TS_CONTROL_URL", "https://headscale.example.com")
+	client := &fakeIsloSyncClient{
+		createName: "crabbox-repo-abcdef",
+		execOut:    "tailscale up ok\nCRABBOX_TS_IP=100.64.7.7\n",
+	}
+	backend := &isloBackend{
+		cfg: Config{
+			Pond: "Mesh Demo",
+			Islo: IsloConfig{Workdir: "repo"},
+			Tailscale: core.TailscaleConfig{
+				Enabled:                true,
+				AuthKey:                "tskey-secret",
+				AuthKeyEnv:             "TEST_TS_AUTH_KEY",
+				HostnameTemplate:       "cbx-{provider}-{slug}",
+				Tags:                   []string{"tag:cbx-pond-demo"},
+				ExitNode:               "exit.tailnet.ts.net",
+				ExitNodeAllowLANAccess: true,
+			},
+		},
+		rt: Runtime{Stderr: io.Discard},
+	}
+	leaseID, _, slug, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.execRequests) != 1 {
+		t.Fatalf("expected one tailscale exec request, got %d", len(client.execRequests))
+	}
+	req := client.execRequests[0]
+	for key, want := range map[string]string{
+		"TS_HOST":                "cbx-islo-node-a",
+		"TS_TAGS":                "tag:cbx-pond-demo",
+		"TS_LOGIN_SERVER":        "https://headscale.example.com",
+		"TS_EXIT_NODE":           "exit.tailnet.ts.net",
+		"TS_EXIT_NODE_ALLOW_LAN": "true",
+	} {
+		got := ""
+		if req.Env != nil && req.Env[key] != nil {
+			got = *req.Env[key]
+		}
+		if got != want {
+			t.Fatalf("exec env %s=%q want %q", key, got, want)
+		}
+	}
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("resolve claim ok=%t err=%v", ok, err)
+	}
+	if claim.Slug != slug || claim.Pond != "mesh-demo" || claim.TailscaleIPv4 != "100.64.7.7" {
+		t.Fatalf("claim=%#v slug=%q", claim, slug)
+	}
+	if claim.Labels["tailscale"] != "true" || claim.Labels["tailscale_ipv4"] != "100.64.7.7" || claim.Labels["tailscale_state"] != "ready" {
+		t.Fatalf("tailscale labels=%#v", claim.Labels)
+	}
+	server := isloSandboxToServer(&gosdk.SandboxResponse{Name: client.createName, Status: "running"})
+	if server.Labels["tailscale_ipv4"] != "100.64.7.7" || server.Labels["tailscale_state"] != "ready" {
+		t.Fatalf("server tailscale labels=%#v", server.Labels)
+	}
+}
+
 func TestIsloSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
@@ -713,6 +776,8 @@ type fakeIsloSyncClient struct {
 	uploaded                 bytes.Buffer
 	uploadErr                error
 	execErr                  error
+	execCode                 int
+	execOut                  string
 	execErrOnCommand         error
 	execErrOnCommandContains string
 	execErrOnCommandSkip     int
@@ -765,13 +830,16 @@ func (f *fakeIsloSyncClient) UploadArchive(_ context.Context, _ string, targetPa
 	return err
 }
 
-func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosdk.ExecRequest, _, _ io.Writer) (int, error) {
+func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosdk.ExecRequest, stdout, _ io.Writer) (int, error) {
 	if f.rejectCanceledContext && ctx.Err() != nil {
 		return 1, ctx.Err()
 	}
 	f.execRequests = append(f.execRequests, req)
 	command := strings.Join(req.GetCommand(), " ")
 	f.prepareCommands = append(f.prepareCommands, command)
+	if f.execOut != "" {
+		_, _ = io.WriteString(stdout, f.execOut)
+	}
 	if f.execErr != nil {
 		return 1, f.execErr
 	}
@@ -785,7 +853,7 @@ func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosd
 			return 1, f.execErrOnCommand
 		}
 	}
-	return 0, nil
+	return f.execCode, nil
 }
 
 func (f *fakeIsloSyncClient) CreateShare(context.Context, string, int, time.Duration) (IsloShare, error) {

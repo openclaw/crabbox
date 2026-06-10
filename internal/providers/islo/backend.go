@@ -380,6 +380,17 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 		}
 		return "", "", "", err
 	}
+	// When --tailscale is set, bring the sandbox onto the tailnet through the
+	// islo exec stream and record its tailnet address on the claim. A failure
+	// here means the lease cannot serve the plane the caller asked for, so we
+	// tear the sandbox down rather than leave a half-joined member behind.
+	if err := b.maybeJoinTailscale(ctx, client, sandbox.GetName(), slug, leaseID); err != nil {
+		removeLeaseClaim(leaseID)
+		if cleanupErr := deleteIsloSandboxForCleanup(client, sandbox.GetName()); cleanupErr != nil {
+			return "", "", "", fmt.Errorf("%w; cleanup failed for islo sandbox %s: %v", err, sandbox.GetName(), cleanupErr)
+		}
+		return "", "", "", err
+	}
 	return leaseID, sandbox.GetName(), slug, nil
 }
 
@@ -549,6 +560,16 @@ func applyIsloClaimLabels(labels map[string]string, leaseID string) {
 	}
 	if claim.Pond != "" {
 		labels["pond"] = claim.Pond
+	}
+	if claim.TailscaleIPv4 != "" || claim.TailscaleFQDN != "" {
+		labels["tailscale"] = "true"
+		labels["tailscale_state"] = "ready"
+		if claim.TailscaleIPv4 != "" {
+			labels["tailscale_ipv4"] = claim.TailscaleIPv4
+		}
+		if claim.TailscaleFQDN != "" {
+			labels["tailscale_fqdn"] = claim.TailscaleFQDN
+		}
 	}
 }
 

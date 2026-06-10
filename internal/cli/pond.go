@@ -213,17 +213,18 @@ func pondClaimProviderSummary(pond string) (bool, bool) {
 // ProviderCapabilities is the per-provider truth about which pond transport
 // planes are *physically* possible on its leases. Each plane is independent —
 // some providers advertise more than one (Hetzner / Azure / GCP support both
-// the Tailscale peer mesh AND the operator-side SSH-mesh; Islo is URL-only
-// today). Older code that asked "which one transport does this provider use"
-// (providerTransportClass) is now a thin Primary() picker; the capability set
-// is the source of truth and the `pond peers` + `pond connect` paths fan out
-// across whichever planes the operator (or default preference) actually wants.
+// the Tailscale peer mesh and the operator-side SSH-mesh; Islo supports the URL
+// bridge and a userspace Tailscale join). Older code that asked "which one
+// transport does this provider use" (providerTransportClass) is now a thin
+// Primary() picker; the capability set is the source of truth and the
+// `pond peers` + `pond connect` paths fan out across whichever planes the
+// operator (or default preference) actually wants.
 //
 // Capabilities are derived from the provider's own FeatureSet, so a provider
 // opts in to a transport plane by declaring the feature, not by being added
 // to a static table.
 type ProviderCapabilities struct {
-	Tailscale bool // peer mesh via tailnet (cloud-init Tailscale daemon + ACL tag)
+	Tailscale bool // tailnet plane (managed TUN or provider-specific userspace join)
 	SSHMesh   bool // operator-side `ssh -L` against the lease's SSH endpoint
 	URLBridge bool // native HTTPS endpoint surface (shares, preview URLs, deployments)
 }

@@ -686,7 +686,7 @@ func TestProviderCapabilitiesPrimary(t *testing.T) {
 		{"proxmox", TransportSSH}, // legacy mapping was TransportTailnet — capability model corrects to SSH
 		{"exe-dev", TransportSSH},
 		{"daytona", TransportSSH},
-		{"islo", TransportURL},
+		{"islo", TransportTailnet}, // dual-plane: tailnet (via crabbox-driven join) preferred, URL-bridge fallback
 		{"modal", TransportNone},
 		{"cloudflare", TransportNone},
 		{"blacksmith-testbox", TransportNone},
@@ -714,7 +714,7 @@ func TestProviderCapabilitiesAvailable(t *testing.T) {
 		{"gcp", []string{TransportTailnet, TransportSSH}},
 		{"aws", []string{TransportSSH}},
 		{"exe-dev", []string{TransportSSH}},
-		{"islo", []string{TransportURL}},
+		{"islo", []string{TransportTailnet, TransportURL}},
 		{"modal", nil},
 		{"cloudflare", nil},
 		{"blacksmith-testbox", nil},

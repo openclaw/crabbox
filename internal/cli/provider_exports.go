@@ -131,6 +131,13 @@ func UpdateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 	return updateLeaseClaimEndpoint(leaseID, server, target)
 }
 
+// UpdateLeaseClaimTailscale records a tailnet endpoint (IPv4 and/or FQDN) on an
+// existing claim. Used by delegated-run providers that join the tailnet
+// out-of-band rather than through a Crabbox-managed SSH lease.
+func UpdateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
+	return updateLeaseClaimTailscale(leaseID, ipv4, fqdn)
+}
+
 func ListLeaseClaims() ([]LeaseClaim, error) {
 	return listLeaseClaims()
 }
