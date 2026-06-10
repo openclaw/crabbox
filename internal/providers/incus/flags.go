@@ -69,7 +69,11 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		cfg.Incus.Socket = core.ExpandUserPath(*v.Socket)
 	}
 	if core.FlagWasSet(fs, "incus-instance-type") {
-		cfg.Incus.InstanceType = normalizeInstanceType(*v.InstanceType)
+		normalized := normalizeInstanceType(*v.InstanceType)
+		if normalized == "" {
+			return core.Exit(2, "provider=%s: unsupported incus-instance-type %q (use container or vm)", providerName, *v.InstanceType)
+		}
+		cfg.Incus.InstanceType = normalized
 		cfg.ServerType = core.IncusServerTypeForConfig(*cfg)
 	}
 	if core.FlagWasSet(fs, "incus-image") {

@@ -166,11 +166,18 @@ func doctorConnectionInfoForConfig(cfg Config) (doctorConnectionInfo, error) {
 		return doctorConnectionInfo{}, core.Exit(2, "provider=%s: incus.remote, incus.address, or incus.socket not configured for a reachable Linux Incus daemon (remote %q resolves to local unix socket on %s)", providerName, remoteName, runtime.GOOS)
 	}
 	info.Mode = "remote"
-	info.Protocol = core.Blank(strings.TrimSpace(remote.Protocol), "incus")
-	info.Endpoint = configuredRemoteAddr(remote)
+	addr := configuredRemoteAddr(remote)
+	if strings.HasPrefix(addr, "unix:") {
+		info.Mode = "socket"
+		info.Protocol = "unix"
+		info.Auth = "unix_socket"
+	} else {
+		info.Protocol = core.Blank(strings.TrimSpace(remote.Protocol), "incus")
+		info.Auth = remoteAuthType(remote)
+	}
+	info.Endpoint = addr
 	info.Project = selectedProject(cfg, &remote)
 	info.Remote = remoteName
-	info.Auth = remoteAuthType(remote)
 	return info, nil
 }
 
@@ -185,33 +192,57 @@ func connectionArgsForAddress(cfg Config) (*incusclient.ConnectionArgs, error) {
 		}
 		args.TLSServerCert = strings.TrimSpace(string(content))
 	}
-	clientConfig, err := cliconfig.LoadConfig("")
-	if err != nil {
-		return nil, core.Exit(2, "load incus client config for TLS credentials: %v", err)
+	clientConfig, configErr := cliconfig.LoadConfig("")
+	if configErr != nil {
+		if args.TLSServerCert != "" || args.InsecureSkipVerify {
+			clientConfig = nil
+		} else {
+			return nil, core.Exit(2, "load incus client config for TLS credentials: %v", configErr)
+		}
 	}
-	remoteName := configuredRemoteName(cfg, clientConfig)
-	if remoteName != "" {
-		if remoteConfig, ok := clientConfig.Remotes[remoteName]; ok && addressMatchesRemote(strings.TrimSpace(cfg.Incus.Address), remoteConfig) {
-			if args.TLSServerCert == "" {
-				serverCert, certErr := loadRemoteServerCert(clientConfig, remoteName)
-				if certErr != nil {
-					return nil, core.Exit(2, "read incus server cert for remote %q: %v", remoteName, certErr)
-				}
-				args.TLSServerCert = serverCert
+	if clientConfig != nil {
+		address := strings.TrimSpace(cfg.Incus.Address)
+		matchedRemote := ""
+		remoteName := configuredRemoteName(cfg, clientConfig)
+		if remoteName != "" {
+			if remoteConfig, ok := clientConfig.Remotes[remoteName]; ok && addressMatchesRemote(address, remoteConfig) {
+				matchedRemote = remoteName
 			}
-			if remoteConfig.AuthType == api.AuthenticationMethodOIDC {
-				args.AuthType = api.AuthenticationMethodOIDC
-				tokens, tokenErr := loadRemoteOIDCTokens(clientConfig, remoteName)
-				if tokenErr != nil {
-					return nil, core.Exit(2, "read incus OIDC tokens for remote %q: %v", remoteName, tokenErr)
+		}
+		if matchedRemote == "" {
+			for name, remoteConfig := range clientConfig.Remotes {
+				if name == remoteName {
+					continue
 				}
-				args.OIDCTokens = tokens
-			} else {
-				cert, key, ca, certErr := clientConfig.GetClientCertificate(remoteName)
-				if certErr == nil {
-					args.TLSClientCert = cert
-					args.TLSClientKey = key
-					args.TLSCA = ca
+				if addressMatchesRemote(address, remoteConfig) {
+					matchedRemote = name
+					break
+				}
+			}
+		}
+		if matchedRemote != "" {
+			if remoteConfig, ok := clientConfig.Remotes[matchedRemote]; ok {
+				if args.TLSServerCert == "" {
+					serverCert, certErr := loadRemoteServerCert(clientConfig, matchedRemote)
+					if certErr != nil {
+						return nil, core.Exit(2, "read incus server cert for remote %q: %v", matchedRemote, certErr)
+					}
+					args.TLSServerCert = serverCert
+				}
+				if remoteConfig.AuthType == api.AuthenticationMethodOIDC && !args.InsecureSkipVerify {
+					args.AuthType = api.AuthenticationMethodOIDC
+					tokens, tokenErr := loadRemoteOIDCTokens(clientConfig, matchedRemote)
+					if tokenErr != nil {
+						return nil, core.Exit(2, "read incus OIDC tokens for remote %q: %v", matchedRemote, tokenErr)
+					}
+					args.OIDCTokens = tokens
+				} else {
+					cert, key, ca, certErr := clientConfig.GetClientCertificate(matchedRemote)
+					if certErr == nil {
+						args.TLSClientCert = cert
+						args.TLSClientKey = key
+						args.TLSCA = ca
+					}
 				}
 			}
 		}
@@ -365,6 +396,10 @@ func imageSourceForConfig(cfg Config) api.InstanceSource {
 			source.Alias = aliasName
 			return source
 		}
+		if isLocalDaemonRemote(remoteName) {
+			source.Alias = aliasName
+			return source
+		}
 		if server != "" {
 			source.Server = server
 			source.Protocol = "simplestreams"
@@ -388,6 +423,19 @@ func splitImageAliasRemote(image string) (string, string, bool) {
 		return "", "", false
 	}
 	return remoteName, alias, true
+}
+
+func isLocalDaemonRemote(name string) bool {
+	clientConfig, err := cliconfig.LoadConfig("")
+	if err != nil {
+		clientConfig = cliconfig.DefaultConfig()
+	}
+	remote, ok := clientConfig.Remotes[name]
+	if !ok {
+		return false
+	}
+	addr := configuredRemoteAddr(remote)
+	return strings.HasPrefix(addr, "unix:")
 }
 
 func resolveImageRemote(name string) (string, string, bool) {

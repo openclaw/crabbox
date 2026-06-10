@@ -548,7 +548,7 @@ func TestTartConfigDefaultsFileAndEnv(t *testing.T) {
 func TestIncusConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
-	if cfg.Incus.Remote != "local" || cfg.Incus.Project != "default" || cfg.Incus.InstanceType != "container" || cfg.Incus.Image != "images:ubuntu/24.04/cloud" {
+	if cfg.Incus.Remote != "local" || cfg.Incus.Project != "" || cfg.Incus.InstanceType != "container" || cfg.Incus.Image != "images:ubuntu/24.04/cloud" {
 		t.Fatalf("incus defaults not applied: %#v", cfg.Incus)
 	}
 	deleteOnRelease := false

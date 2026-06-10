@@ -77,7 +77,7 @@ incus:
   deleteOnRelease: true
   startTimeout: 10m
   launchPort: "22"
-  proxyListenHost: 0.0.0.0
+  proxyListenHost: 127.0.0.1
   proxyListenPort: "2222"
   proxyDevice: crabbox-ssh
 ```
@@ -92,7 +92,8 @@ Key fields:
 - `incus.socket`: explicit Unix socket path override
 - `incus.instanceType`: `container` or `vm`. Default: `container`
 - `incus.image`: image alias/fingerprint. Default:
-  `images:ubuntu/24.04/cloud`
+  `images:ubuntu/24.04/cloud`. Unqualified aliases and fingerprints use the
+  active Incus daemon unless `incus.remoteImageServer` is set
 - `incus.profile`: optional Incus profile applied to created instances
 - `incus.user`: SSH user inside the guest. Default: `crabbox`
 - `incus.workRoot`: Crabbox work root inside the guest. Default:
@@ -102,7 +103,7 @@ Key fields:
 - `incus.startTimeout`: create/start/address wait timeout. Default: `10m`
 - `incus.launchPort`: guest SSH port. Default: `22`
 - `incus.proxyListenHost`: host-side bind address for the optional Incus proxy
-  device. Default: `0.0.0.0`
+  device. Default: `127.0.0.1`
 - `incus.proxyListenPort`: host-side published SSH port. When set, Crabbox uses
   this as the returned SSH port
 - `incus.proxyDevice`: Incus device name for the SSH proxy. Default:
@@ -111,8 +112,9 @@ Key fields:
   `incus.address` mode
 - `incus.insecureTLS`: allow untrusted TLS certs in explicit `incus.address`
   mode
-- `incus.remoteImageServer`: simplestreams image server URL used for alias-based
-  image source resolution when needed
+- `incus.remoteImageServer`: optional simplestreams image server URL used when
+  an unqualified alias should resolve remotely, or as a fallback when a named
+  image remote cannot be loaded from the local Incus config
 
 ## Environment
 
@@ -132,12 +134,11 @@ CRABBOX_INCUS_WORK_ROOT=/work/crabbox
 CRABBOX_INCUS_DELETE_ON_RELEASE=true
 CRABBOX_INCUS_START_TIMEOUT=10m
 CRABBOX_INCUS_LAUNCH_PORT=22
-CRABBOX_INCUS_PROXY_LISTEN_HOST=0.0.0.0
+CRABBOX_INCUS_PROXY_LISTEN_HOST=127.0.0.1
 CRABBOX_INCUS_PROXY_LISTEN_PORT=2222
 CRABBOX_INCUS_PROXY_DEVICE=crabbox-ssh
 CRABBOX_INCUS_TLS_SERVER_CERT=$HOME/.config/incus/server.crt
 CRABBOX_INCUS_INSECURE_TLS=false
-CRABBOX_INCUS_REMOTE_IMAGE_SERVER=https://images.linuxcontainers.org
 ```
 
 ## Flags

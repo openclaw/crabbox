@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -244,6 +245,25 @@ func TestProviderSpecAndFlags(t *testing.T) {
 	}
 }
 
+func TestApplyFlagsRejectsInvalidInstanceType(t *testing.T) {
+	defaults := core.BaseConfig()
+	defaults.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := registerFlags(fs, defaults)
+	if err := fs.Parse([]string{"--incus-instance-type", "vmm"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	err := applyFlags(&cfg, fs, values)
+	if err == nil {
+		t.Fatal("expected error for invalid instance-type")
+	}
+	if !strings.Contains(err.Error(), "unsupported") || !strings.Contains(err.Error(), "vmm") {
+		t.Fatalf("error=%q want unsupported instance-type message", err)
+	}
+}
+
 func TestApplyDefaultsPreservesExplicitSSHUserAndWorkRoot(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -275,6 +295,66 @@ func TestApplyDefaultsAllowsIncusSpecificUserAndWorkRootOverride(t *testing.T) {
 	}
 	if cfg.WorkRoot != "/workspace/incus" {
 		t.Fatalf("WorkRoot=%q want /workspace/incus", cfg.WorkRoot)
+	}
+}
+
+func TestApplyDefaultsPreservesExplicitSSHPort(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.SSHPort = "2205"
+	cfg.Incus.ProxyListenPort = "2222"
+	cfg.Incus.LaunchPort = "2201"
+
+	applyDefaults(&cfg)
+
+	if cfg.SSHPort != "2205" {
+		t.Fatalf("SSHPort=%q want 2205", cfg.SSHPort)
+	}
+}
+
+func TestApplyDefaultsUsesIncusLaunchPortWhenTopLevelSSHPortIsDefault(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.SSHPort = "22"
+	cfg.Incus.ProxyListenPort = ""
+	cfg.Incus.LaunchPort = "2205"
+
+	applyDefaults(&cfg)
+
+	if cfg.SSHPort != "2205" {
+		t.Fatalf("SSHPort=%q want 2205", cfg.SSHPort)
+	}
+}
+
+func TestDevicesForCreateUsesNATForVMInstances(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.InstanceType = "virtual-machine"
+	cfg.Incus.ProxyListenPort = "2222"
+
+	devices := devicesForCreate(cfg)
+	device, ok := devices["crabbox-ssh"]
+	if !ok {
+		t.Fatal("expected crabbox-ssh proxy device")
+	}
+	if device["nat"] != "true" {
+		t.Fatalf("VM proxy device nat=%q want true", device["nat"])
+	}
+}
+
+func TestDevicesForCreateUsesNonNATForContainerInstances(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.InstanceType = "container"
+	cfg.Incus.ProxyListenPort = "2222"
+
+	devices := devicesForCreate(cfg)
+	device, ok := devices["crabbox-ssh"]
+	if !ok {
+		t.Fatal("expected crabbox-ssh proxy device")
+	}
+	if _, hasNat := device["nat"]; hasNat {
+		t.Fatalf("container proxy device should not have nat key, got nat=%q", device["nat"])
 	}
 }
 
@@ -317,6 +397,58 @@ func TestImageSourceForConfigResolvesDefaultImagesRemote(t *testing.T) {
 	}
 }
 
+func TestImageSourceForConfigLeavesUnqualifiedAliasesLocalByDefault(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.Image = "local-alias"
+
+	source := imageSourceForConfig(cfg)
+	if source.Server != "" {
+		t.Fatalf("source.Server=%q want empty", source.Server)
+	}
+	if source.Protocol != "" {
+		t.Fatalf("source.Protocol=%q want empty", source.Protocol)
+	}
+	if source.Alias != "local-alias" {
+		t.Fatalf("source.Alias=%q want local-alias", source.Alias)
+	}
+}
+
+func TestImageSourceForConfigUsesExplicitRemoteImageServerForUnqualifiedAliases(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.Image = "ubuntu/24.04/cloud"
+	cfg.Incus.RemoteImageServer = "https://images.example.test"
+
+	source := imageSourceForConfig(cfg)
+	if source.Server != "https://images.example.test" {
+		t.Fatalf("source.Server=%q want https://images.example.test", source.Server)
+	}
+	if source.Protocol != "simplestreams" {
+		t.Fatalf("source.Protocol=%q want simplestreams", source.Protocol)
+	}
+	if source.Alias != "ubuntu/24.04/cloud" {
+		t.Fatalf("source.Alias=%q want ubuntu/24.04/cloud", source.Alias)
+	}
+}
+
+func TestImageSourceForConfigStripsLocalDaemonRemotePrefix(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.Image = "local:my-custom-image"
+
+	source := imageSourceForConfig(cfg)
+	if source.Server != "" {
+		t.Fatalf("source.Server=%q want empty for local daemon remote", source.Server)
+	}
+	if source.Protocol != "" {
+		t.Fatalf("source.Protocol=%q want empty for local daemon remote", source.Protocol)
+	}
+	if source.Alias != "my-custom-image" {
+		t.Fatalf("source.Alias=%q want my-custom-image", source.Alias)
+	}
+}
+
 func TestSSHTargetHostUsesIncusHostWhenProxyPortConfigured(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -325,6 +457,7 @@ func TestSSHTargetHostUsesIncusHostWhenProxyPortConfigured(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.Incus.Address = "https://incus-host.example.test:8443"
+	cfg.Incus.ProxyListenHost = "0.0.0.0"
 	cfg.Incus.ProxyListenPort = "2222"
 
 	server := core.Server{}
@@ -424,6 +557,41 @@ func TestConfigureRejectsUnsupportedTargetAndTailscale(t *testing.T) {
 	cfg.Tailscale.Enabled = true
 	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
 		t.Fatal("Configure accepted tailscale")
+	}
+}
+
+func TestDoctorReportsSocketModeForDefaultLocalRemote(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("default local remote uses unix socket, only valid on Linux")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	oldNewClient := newClient
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{},
+		states:    map[string]*api.InstanceState{},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	if !strings.Contains(result.Message, "mode=socket") {
+		t.Fatalf("doctor message should report mode=socket for default local unix remote: %s", result.Message)
+	}
+	if strings.Contains(result.Message, "control_plane=remote") {
+		t.Fatalf("doctor message should not report control_plane=remote for default local unix remote: %s", result.Message)
 	}
 }
 
@@ -673,6 +841,86 @@ func TestAcquireKeepFailurePreservesStoredKey(t *testing.T) {
 	}
 }
 
+func TestAcquireKeepBootstrapRetryCleansRetainedAttempt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	oldWait := waitForSSHReady
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{},
+		states:    map[string]*api.InstanceState{},
+	}
+	waitCalls := 0
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+		_ = ctx
+		_ = target
+		_ = stderr
+		_ = phase
+		_ = timeout
+		waitCalls++
+		if waitCalls == 1 {
+			return core.Exit(5, "timed out waiting for SSH on 203.0.113.10 during bootstrap")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		newClient = oldNewClient
+		waitForSSHReady = oldWait
+	})
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Incus.DeleteOnRelease = false
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "keep-retry", Keep: true})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if waitCalls != 2 {
+		t.Fatalf("waitCalls=%d want 2", waitCalls)
+	}
+	if len(fake.created) != 2 {
+		t.Fatalf("created=%d want 2", len(fake.created))
+	}
+	if len(fake.deleted) != 1 {
+		t.Fatalf("deleted=%v want one cleaned retry", fake.deleted)
+	}
+	if fake.deleted[0] != fake.created[0].Name {
+		t.Fatalf("deleted instance=%q want %q", fake.deleted[0], fake.created[0].Name)
+	}
+	if len(fake.instances) != 1 {
+		t.Fatalf("instances=%d want 1", len(fake.instances))
+	}
+
+	firstLeaseID := fake.created[0].Config[labelKey("lease")]
+	firstKeyPath, err := core.TestboxKeyPath(firstLeaseID)
+	if err != nil {
+		t.Fatalf("TestboxKeyPath(first): %v", err)
+	}
+	if _, err := os.Stat(firstKeyPath); !os.IsNotExist(err) {
+		t.Fatalf("expected first retry key to be removed, stat err=%v", err)
+	}
+
+	if lease.LeaseID != fake.created[1].Config[labelKey("lease")] {
+		t.Fatalf("lease.LeaseID=%q want %q", lease.LeaseID, fake.created[1].Config[labelKey("lease")])
+	}
+	secondKeyPath, err := core.TestboxKeyPath(lease.LeaseID)
+	if err != nil {
+		t.Fatalf("TestboxKeyPath(second): %v", err)
+	}
+	if _, err := os.Stat(secondKeyPath); err != nil {
+		t.Fatalf("expected final keep lease key %q: %v", secondKeyPath, err)
+	}
+}
+
 func TestAcquireUsesProxyHostWhenGuestAddressUnavailable(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -708,6 +956,7 @@ func TestAcquireUsesProxyHostWhenGuestAddressUnavailable(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.Incus.Address = "https://incus-host.example.test:8443"
+	cfg.Incus.ProxyListenHost = "0.0.0.0"
 	cfg.Incus.ProxyListenPort = "2222"
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
@@ -791,6 +1040,131 @@ func TestResolveStartsStoppedInstanceAndPersistsReadyLabels(t *testing.T) {
 	}
 	if got := fake.instances["crabbox-retained"].Config[labelKey("state")]; got != "ready" {
 		t.Fatalf("stored state=%q want ready", got)
+	}
+}
+
+func TestResolveFallsBackToConfiguredKeyWhenStoredKeyIsMissing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	oldWait := waitForSSHReady
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-nokey": {
+				Name:       "crabbox-nokey",
+				Status:     "Running",
+				StatusCode: api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_a1b2c3d4e5f6",
+					labelKey("slug"):    "nokey-slug",
+					labelKey("state"):   "ready",
+					labelKey("host"):    "198.51.100.24",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-nokey": {Status: "Running", StatusCode: api.Running, Network: map[string]api.InstanceStateNetwork{
+				"eth0": {Addresses: []api.InstanceStateNetworkAddress{{Family: "inet", Scope: "global", Address: "198.51.100.24"}}},
+			}},
+		},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+		_ = ctx
+		_ = stderr
+		_ = phase
+		_ = timeout
+		return nil
+	}
+	t.Cleanup(func() {
+		newClient = oldNewClient
+		waitForSSHReady = oldWait
+	})
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.SSHKey = filepath.Join(t.TempDir(), "configured-key")
+	if err := os.WriteFile(cfg.SSHKey, []byte("fake"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_a1b2c3d4e5f6"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if lease.SSH.Key != cfg.SSHKey {
+		t.Fatalf("SSH.Key=%q want configured key %q when stored key is missing", lease.SSH.Key, cfg.SSHKey)
+	}
+}
+
+func TestResolveUsesLeaseLabelsForSSHUserAndPort(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	oldWait := waitForSSHReady
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-label": {
+				Name:       "crabbox-label",
+				Status:     "Running",
+				StatusCode: api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"):  "true",
+					labelKey("lease"):    "cbx_1abe1e55f00d",
+					labelKey("slug"):     "label-slug",
+					labelKey("state"):    "ready",
+					labelKey("host"):     "198.51.100.24",
+					labelKey("ssh_user"): "ubuntu",
+					labelKey("ssh_port"): "2201",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-label": {Status: "Running", StatusCode: api.Running, Network: map[string]api.InstanceStateNetwork{
+				"eth0": {Addresses: []api.InstanceStateNetworkAddress{{Family: "inet", Scope: "global", Address: "198.51.100.24"}}},
+			}},
+		},
+	}
+	newClient = func(cfg Config) (instanceClient, error) {
+		_ = cfg
+		return fake, nil
+	}
+	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+		_ = ctx
+		_ = stderr
+		_ = phase
+		_ = timeout
+		return nil
+	}
+	t.Cleanup(func() {
+		newClient = oldNewClient
+		waitForSSHReady = oldWait
+	})
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_1abe1e55f00d"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if lease.SSH.User != "ubuntu" {
+		t.Fatalf("SSH.User=%q want ubuntu from lease label", lease.SSH.User)
+	}
+	if lease.SSH.Port != "2201" {
+		t.Fatalf("SSH.Port=%q want 2201 from lease label", lease.SSH.Port)
 	}
 }
 

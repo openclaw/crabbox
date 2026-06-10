@@ -2,14 +2,15 @@ package incus
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/lxc/incus/v7/shared/api"
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type ProviderSpec = core.ProviderSpec
@@ -32,6 +33,15 @@ type backend struct {
 
 var waitForSSHReady = core.WaitForSSHReady
 
+type retainedAcquireError struct {
+	err     error
+	cleanup func()
+}
+
+func (e *retainedAcquireError) Error() string { return e.err.Error() }
+
+func (e *retainedAcquireError) Unwrap() error { return e.err }
+
 func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	applyDefaults(&cfg)
 	return &backend{spec: spec, cfg: cfg, rt: rt}
@@ -52,7 +62,14 @@ func applyDefaults(cfg *Config) {
 	if cfg.Incus.WorkRoot != "" && (core.IsDefaultWorkRoot(cfg.WorkRoot) || cfg.Incus.WorkRoot != base.Incus.WorkRoot) {
 		cfg.WorkRoot = cfg.Incus.WorkRoot
 	}
-	cfg.SSHPort = core.Blank(strings.TrimSpace(cfg.Incus.ProxyListenPort), core.Blank(strings.TrimSpace(cfg.Incus.LaunchPort), "22"))
+	currentSSHPort := strings.TrimSpace(cfg.SSHPort)
+	defaultSSHPort := core.Blank(strings.TrimSpace(cfg.Incus.ProxyListenPort), core.Blank(strings.TrimSpace(cfg.Incus.LaunchPort), "22"))
+	baseSSHPort := core.Blank(strings.TrimSpace(base.Incus.ProxyListenPort), core.Blank(strings.TrimSpace(base.Incus.LaunchPort), "22"))
+	if currentSSHPort == "" || currentSSHPort == strings.TrimSpace(base.SSHPort) || currentSSHPort == baseSSHPort {
+		cfg.SSHPort = defaultSSHPort
+	} else {
+		cfg.SSHPort = currentSSHPort
+	}
 	cfg.SSHFallbackPorts = nil
 	if cfg.ServerType == "" {
 		cfg.ServerType = core.IncusServerTypeForConfig(*cfg)
@@ -68,9 +85,24 @@ func (b *backend) configForRun() Config {
 }
 
 func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
-	return shared.AcquireAttemptsRetry(b.rt, req.Keep, func() (LeaseTarget, error) {
-		return b.acquireOnce(ctx, req)
-	})
+	var lastErr error
+	attempts := core.AcquireAttempts(req.Keep)
+	for attempt := 1; attempt <= attempts; attempt++ {
+		lease, err := b.acquireOnce(ctx, req)
+		if err == nil {
+			return lease, nil
+		}
+		lastErr = err
+		if attempt == attempts || !core.IsBootstrapWaitError(err) {
+			return LeaseTarget{}, err
+		}
+		var retained *retainedAcquireError
+		if errors.As(err, &retained) && retained.cleanup != nil {
+			retained.cleanup()
+		}
+		fmt.Fprintf(b.rt.Stderr, "warning: bootstrap failed; retrying with fresh lease: %v\n", err)
+	}
+	return LeaseTarget{}, lastErr
 }
 
 func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
@@ -131,10 +163,16 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 	cleanupInstance := func() {
 		_ = client.DeleteInstance(name)
 	}
+	retainedCleanup := func() {
+		cleanupInstance()
+		core.RemoveStoredTestboxKey(leaseID)
+	}
 	inst, etag, err := client.GetInstance(name)
 	if err != nil {
 		if !req.Keep {
 			cleanupInstance()
+		} else {
+			err = &retainedAcquireError{err: err, cleanup: retainedCleanup}
 		}
 		return LeaseTarget{}, err
 	}
@@ -142,6 +180,8 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 		if err := client.SetInstanceState(name, api.InstanceStatePut{Action: "start", Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, etag); err != nil {
 			if !req.Keep {
 				cleanupInstance()
+			} else {
+				err = &retainedAcquireError{err: err, cleanup: retainedCleanup}
 			}
 			return LeaseTarget{}, err
 		}
@@ -150,6 +190,8 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 	if err != nil {
 		if !req.Keep {
 			cleanupInstance()
+		} else {
+			err = &retainedAcquireError{err: err, cleanup: retainedCleanup}
 		}
 		return LeaseTarget{}, err
 	}
@@ -158,6 +200,8 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 	if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 		if !req.Keep {
 			cleanupInstance()
+		} else {
+			err = &retainedAcquireError{err: err, cleanup: retainedCleanup}
 		}
 		return LeaseTarget{}, err
 	}
@@ -168,12 +212,16 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
 			cleanupInstance()
+		} else {
+			err = &retainedAcquireError{err: err, cleanup: retainedCleanup}
 		}
 		return LeaseTarget{}, err
 	}
 	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, target); err != nil {
 		if !req.Keep {
 			cleanupInstance()
+		} else {
+			err = &retainedAcquireError{err: err, cleanup: retainedCleanup}
 		}
 		return LeaseTarget{}, err
 	}
@@ -221,9 +269,17 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		server = serverFromInstance(inst, nil, cfg)
 	}
 	target := core.SSHTargetFromConfig(cfg, sshTargetHost(server, cfg))
+	if labelUser := strings.TrimSpace(server.Labels["ssh_user"]); labelUser != "" {
+		target.User = labelUser
+	}
+	if labelPort := strings.TrimSpace(server.Labels["ssh_port"]); labelPort != "" {
+		target.Port = labelPort
+	}
 	if leaseID != "" {
 		if keyPath, keyErr := core.TestboxKeyPath(leaseID); keyErr == nil {
-			target.Key = keyPath
+			if _, statErr := os.Stat(keyPath); statErr == nil {
+				target.Key = keyPath
+			}
 		}
 	}
 	if !req.StatusOnly {
@@ -510,16 +566,20 @@ func devicesForCreate(cfg Config) api.DevicesMap {
 	}
 	host := strings.TrimSpace(cfg.Incus.ProxyListenHost)
 	if host == "" {
-		host = "0.0.0.0"
+		host = "127.0.0.1"
 	}
 	guestPort := core.Blank(strings.TrimSpace(cfg.Incus.LaunchPort), "22")
+	device := map[string]string{
+		"type":    "proxy",
+		"listen":  fmt.Sprintf("tcp:%s:%s", host, port),
+		"connect": fmt.Sprintf("tcp:0.0.0.0:%s", guestPort),
+		"bind":    "host",
+	}
+	if normalizeInstanceType(cfg.Incus.InstanceType) == "virtual-machine" {
+		device["nat"] = "true"
+	}
 	return api.DevicesMap{
-		deviceName: {
-			"type":    "proxy",
-			"listen":  fmt.Sprintf("tcp:%s:%s", host, port),
-			"connect": fmt.Sprintf("tcp:0.0.0.0:%s", guestPort),
-			"bind":    "host",
-		},
+		deviceName: device,
 	}
 }
 

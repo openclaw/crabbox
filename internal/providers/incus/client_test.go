@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lxc/incus/v7/shared/api"
 	"github.com/lxc/incus/v7/shared/cliconfig"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/zitadel/oidc/v3/pkg/oidc"
@@ -164,7 +165,6 @@ func TestConnectionArgsForAddressUsesMatchingRemoteOIDCTokens(t *testing.T) {
 	cfg.Provider = providerName
 	cfg.Incus.Remote = "staging"
 	cfg.Incus.Address = "https://staging.incus.example.test:8443"
-	cfg.Incus.InsecureTLS = true
 
 	args, err := connectionArgsForAddress(cfg)
 	if err != nil {
@@ -187,7 +187,6 @@ func TestDoctorConnectionInfoForConfigUsesAddressOIDCMode(t *testing.T) {
 	cfg.Provider = providerName
 	cfg.Incus.Remote = "staging"
 	cfg.Incus.Address = "https://staging.incus.example.test:8443"
-	cfg.Incus.InsecureTLS = true
 
 	info, err := doctorConnectionInfoForConfig(cfg)
 	if err != nil {
@@ -346,7 +345,7 @@ func TestConnectionArgsForAddressRejectsMissingServerCertWithExitCodeTwo(t *test
 	}
 }
 
-func TestConnectionArgsForAddressRejectsMalformedOIDCTokensWithExitCodeTwo(t *testing.T) {
+func TestConnectionArgsForAddressSkipsOIDCWhenInsecureTLSEnabled(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	configDir := writeIncusConfig(t, home, "default-remote: staging\nremotes:\n  staging:\n    addr: https://staging.incus.example.test:8443\n    auth_type: oidc\n    protocol: incus\n")
@@ -364,10 +363,15 @@ func TestConnectionArgsForAddressRejectsMalformedOIDCTokensWithExitCodeTwo(t *te
 	cfg.Incus.Address = "https://staging.incus.example.test:8443"
 	cfg.Incus.InsecureTLS = true
 
-	_, err := connectionArgsForAddress(cfg)
-	exitErr := requireExitCode(t, err, 2)
-	if !strings.Contains(exitErr.Message, "read incus OIDC tokens") {
-		t.Fatalf("unexpected error: %v", exitErr)
+	args, err := connectionArgsForAddress(cfg)
+	if err != nil {
+		t.Fatalf("expected insecure TLS to skip OIDC and succeed, got: %v", err)
+	}
+	if args.AuthType == api.AuthenticationMethodOIDC {
+		t.Fatal("OIDC auth should not be loaded when insecure TLS is enabled")
+	}
+	if !args.InsecureSkipVerify {
+		t.Fatal("InsecureSkipVerify should be true")
 	}
 }
 
