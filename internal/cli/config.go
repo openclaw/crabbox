@@ -1016,6 +1016,10 @@ func MarkAppleContainerImageExplicit(cfg *Config) {
 	cfg.appleContainerImageExplicit = true
 }
 
+func AppleContainerImageExplicit(cfg Config) bool {
+	return cfg.appleContainerImageExplicit
+}
+
 func MarkMultipassImageExplicit(cfg *Config) {
 	cfg.multipassImageExplicit = true
 }

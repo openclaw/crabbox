@@ -65,6 +65,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Static SSH](ssh.md) — `ssh` (`static`, `static-ssh`) | Linux, macOS, Windows · static |
 | [Local Container](local-container.md) — `local-container` (`docker`, `container`, `local-docker`) | Linux · local |
 | [Apple Container](apple-container.md) — `apple-container` (`apple`, `applecontainer`) | Linux · local |
+| [Apple Container Machine](apple-machine.md) — `apple-machine` (`applemachine`) | Linux · local |
 | [Multipass](multipass.md) — `multipass` (`mp`, `canonical-multipass`) | Linux · local |
 | [Tart](tart.md) — `tart` (`local-tart`, `macos-vm`) | macOS · local |
 | [exe.dev](exe-dev.md) — `exe-dev` (`exe`, `exedev`) | Linux · direct |
