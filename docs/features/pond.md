@@ -223,13 +223,17 @@ wait
 
 ## Tailscale names and the `.cbx` hosts file
 
-On every Tailscale-capable Linux peer, bootstrap installs a systemd timer that
-rewrites `/etc/hosts.cbx` and a managed `/etc/hosts` block every 30 seconds from
-the box-local `tailscale status --json` output. Each peer renders as
+On managed Linux VM peers, bootstrap installs a systemd timer that rewrites
+`/etc/hosts.cbx` and a managed `/etc/hosts` block every 30 seconds from the
+box-local `tailscale status --json` output. Each peer renders as
 `<tailnet-ipv4> <slug>.cbx`, so members resolve each other as `<slug>.cbx`
 within roughly one refresh interval — and the broker never sees a Tailscale
 credential. Discovery is gated by the per-pond ACL tag (below): only peers
 carrying that tag are written.
+
+Islo uses userspace Tailscale without systemd, OS routes, or the managed hosts
+file. Discover its recorded tailnet IPv4 with `crabbox pond peers`, then reach
+that address through the workload proxy environment.
 
 ## Tailscale ACL bootstrap
 
