@@ -248,6 +248,160 @@ func TestCoderCleanupSkipsActiveClaimedAndRunningUnclaimedWorkspaces(t *testing.
 	}
 }
 
+func TestCoderListAndResolveUseStandardCrabboxLabels(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch strings.Join(req.Args, " ") {
+		case "list -o json":
+			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"crabbox":"true","created_by":"crabbox","provider":"coder","lease":"cbx_label","slug":"blue-lobster"},"latest_build":{"status":"stopped"}}]`}, nil
+		default:
+			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	servers, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 || servers[0].Name != "team-workspace" || serverSlug(servers[0]) != "blue-lobster" {
+		t.Fatalf("unexpected servers: %#v", servers)
+	}
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_label", StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != "cbx_label" || lease.Server.Name != "team-workspace" || serverSlug(lease.Server) != "blue-lobster" {
+		t.Fatalf("unexpected lease: %#v", lease)
+	}
+}
+
+func TestCoderListAndResolveUseLegacyCrabboxLabels(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch strings.Join(req.Args, " ") {
+		case "list -o json":
+			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"crabbox_lease_id":"cbx_legacy","crabbox_slug":"legacy-lobster"},"latest_build":{"status":"stopped"}}]`}, nil
+		default:
+			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	servers, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 || servers[0].Name != "team-workspace" || serverSlug(servers[0]) != "legacy-lobster" {
+		t.Fatalf("unexpected servers: %#v", servers)
+	}
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_legacy", StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != "cbx_legacy" || lease.Server.Name != "team-workspace" || serverSlug(lease.Server) != "legacy-lobster" {
+		t.Fatalf("unexpected lease: %#v", lease)
+	}
+}
+
+func TestCoderCleanupSkipsProviderLabelWithoutCrabboxOwnership(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch strings.Join(req.Args, " ") {
+		case "list -o json":
+			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"provider":"coder"},"latest_build":{"status":"stopped"}}]`}, nil
+		default:
+			t.Fatalf("cleanup must not act on provider-only labels, got: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("cleanup made mutating calls: %#v", runner.calls)
+	}
+}
+
+func TestCoderCleanupSkipsProviderAndSlugWithoutCrabboxMarker(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch strings.Join(req.Args, " ") {
+		case "list -o json":
+			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"provider":"coder","slug":"blue-lobster"},"latest_build":{"status":"stopped"}}]`}, nil
+		default:
+			t.Fatalf("cleanup must not act on provider+slug labels without Crabbox markers, got: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("cleanup made mutating calls: %#v", runner.calls)
+	}
+}
+
+func TestCoderCleanupSkipsGenericSlugWithoutCrabboxMarker(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch strings.Join(req.Args, " ") {
+		case "list -o json":
+			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"slug":"blue-lobster"},"latest_build":{"status":"stopped"}}]`}, nil
+		default:
+			t.Fatalf("cleanup must not act on generic slug labels, got: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("cleanup made mutating calls: %#v", runner.calls)
+	}
+}
+
+func TestCoderListUsesPrefixOwnershipDespiteUnrelatedProviderLabel(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch strings.Join(req.Args, " ") {
+		case "list -o json":
+			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","labels":{"provider":"terraform"},"latest_build":{"status":"stopped"}}]`}, nil
+		default:
+			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	servers, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 || servers[0].Name != "crabbox-blue" || serverSlug(servers[0]) != "blue" {
+		t.Fatalf("unexpected servers: %#v", servers)
+	}
+}
+
+func TestCoderResolveRejectsEmptyNormalizedSlugMatch(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch strings.Join(req.Args, " ") {
+		case "list -o json":
+			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"crabbox":"true","created_by":"crabbox"},"latest_build":{"status":"stopped"}}]`}, nil
+		default:
+			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.Resolve(context.Background(), ResolveRequest{ID: "!!!", StatusOnly: true}); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected not found, got %v", err)
+	}
+}
+
 func TestCoderResolveStatusOnlyDoesNotStartOrSSH(t *testing.T) {
 	runner := &fakeRunner{}
 	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {

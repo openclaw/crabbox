@@ -350,17 +350,10 @@ func shouldCleanupCoder(server Server, claim LeaseClaim, hasClaim bool, now time
 }
 
 func coderWorkspaceHasCrabboxLabel(workspace coderWorkspace) bool {
-	for _, key := range []string{"crabbox", "provider", "lease", "slug", "crabbox_lease_id", "crabbox_slug"} {
-		value := strings.TrimSpace(workspace.Labels[key])
-		if value == "" {
-			continue
-		}
-		if key == "provider" && value != coderProvider {
-			continue
-		}
+	if strings.EqualFold(strings.TrimSpace(workspace.Labels["crabbox"]), "true") {
 		return true
 	}
-	return false
+	return strings.EqualFold(strings.TrimSpace(workspace.Labels["created_by"]), "crabbox")
 }
 
 func coderServerRunning(status string) bool {
@@ -392,13 +385,19 @@ func (b *coderLeaseBackend) resolveWorkspace(identifier string, workspaces []cod
 		}
 	}
 	normalized := normalizeCoderWorkspaceIdentifier(identifier)
+	normalizedSlug := normalizeLeaseSlug(identifier)
 	matches := []coderWorkspace{}
 	for _, workspace := range workspaces {
+		leaseID, slug, owned := coderWorkspaceLeaseMetadata(workspace, b.cfg)
 		if normalizeCoderWorkspaceIdentifier(workspace.Name) == normalized || normalizeCoderWorkspaceIdentifier(coderOwnerWorkspace(workspace)) == normalized {
 			matches = append(matches, workspace)
 			continue
 		}
-		if _, slug, owned := coderWorkspaceLeaseMetadata(workspace, b.cfg); owned && normalizeLeaseSlug(slug) == normalizeLeaseSlug(identifier) {
+		if owned && leaseID != "" && leaseID == identifier {
+			matches = append(matches, workspace)
+			continue
+		}
+		if owned && normalizedSlug != "" && normalizeLeaseSlug(slug) == normalizedSlug {
 			matches = append(matches, workspace)
 		}
 	}
@@ -441,10 +440,27 @@ func coderWorkspaceToServer(workspace coderWorkspace, cfg Config, leaseID, slug 
 }
 
 func coderWorkspaceLeaseMetadata(workspace coderWorkspace, cfg Config) (string, string, bool) {
+	hasCrabboxLabel := coderWorkspaceHasCrabboxLabel(workspace)
 	leaseID := strings.TrimSpace(workspace.Labels["crabbox_lease_id"])
 	slug := normalizeLeaseSlug(workspace.Labels["crabbox_slug"])
 	if leaseID != "" || slug != "" {
+		if leaseID == "" {
+			leaseID = strings.TrimSpace(workspace.Labels["lease"])
+		}
+		if slug == "" {
+			slug = normalizeLeaseSlug(workspace.Labels["slug"])
+		}
 		return leaseID, slug, true
+	}
+	leaseID = strings.TrimSpace(workspace.Labels["lease"])
+	slug = normalizeLeaseSlug(workspace.Labels["slug"])
+	if leaseID != "" || slug != "" {
+		if hasCrabboxLabel {
+			return leaseID, slug, true
+		}
+	}
+	if hasCrabboxLabel {
+		return "", "", true
 	}
 	slug = coderSlugFromWorkspace(workspace.Name, cfg.Coder.WorkspacePrefix)
 	if slug == "" {
