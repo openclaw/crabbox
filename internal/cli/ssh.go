@@ -1116,9 +1116,13 @@ defined $len or die "missing manifest length\n";
 chomp $len;
 $len =~ /\A\d+\z/ or die "invalid manifest length\n";
 my $manifest = "";
-my $read = read(STDIN, $manifest, $len);
-defined $read or die "read manifest failed: $!\n";
-$read == $len or die "short manifest read\n";
+while (length($manifest) < $len) {
+    my $chunk = "";
+    my $read = read(STDIN, $chunk, $len - length($manifest));
+    defined $read or die "read manifest failed: $!\n";
+    $read > 0 or die "short manifest read\n";
+    $manifest .= $chunk;
+}
 local $/;
 my $deleted = <STDIN>;
 $deleted = "" unless defined $deleted;
@@ -1151,11 +1155,8 @@ func remotePruneSyncManifest(workdir string) string {
 	python := `import sys
 
 def read_manifest(path):
-    try:
-        with open(path, "rb") as handle:
-            data = handle.read()
-    except IOError:
-        return []
+    with open(path, "rb") as handle:
+        data = handle.read()
     return [entry for entry in data.split(b"\0") if entry]
 
 old = read_manifest(sys.argv[1])
@@ -1168,7 +1169,6 @@ use warnings;
 
 sub read_manifest {
     my ($path) = @_;
-    return () unless -f $path;
     open my $fh, "<", $path or die "open $path: $!\n";
     binmode $fh;
     local $/;
@@ -1183,7 +1183,7 @@ my %new = map { $_ => 1 } read_manifest($ARGV[1]);
 binmode STDOUT;
 print STDOUT map { $_ . "\0" } grep { !$new{$_} } @old;
 `
-	script := "set -e\ncd " + shellQuote(workdir) + `
+	script := "set -e -o pipefail\ncd " + shellQuote(workdir) + `
 ` + remoteSyncMetaDirScript() + `
 old="$meta_dir/sync-manifest"
 new="$meta_dir/sync-manifest.new"
