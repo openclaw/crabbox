@@ -57,6 +57,12 @@ if already configured). It is sent only in the `X-API-Key` header, never
 persisted in Crabbox config and never placed on argv. If no key is resolvable,
 operations fail with a clear error.
 
+Local lease claims are scoped to the normalized API URL and a SHA-256 fingerprint
+of the API key. The key itself is never stored. This prevents `status`, `run`,
+or `stop` from applying a claim created for another endpoint or account. Restore
+the original endpoint and credential when managing a retained lease after
+switching accounts or rotating keys.
+
 The API base URL defaults to `https://app.opencomputer.dev`. A trusted local
 override can come from `--opencomputer-api-url`,
 `CRABBOX_OPENCOMPUTER_API_URL`, `OPENCOMPUTER_API_URL`, or the `api_url` in the
@@ -132,13 +138,13 @@ crabbox run --provider opencomputer --allow-env API_TOKEN -- printenv API_TOKEN
    are streamed back and the remote exit code is mirrored.
 5. On release the sandbox is deleted (`DELETE /api/sandboxes/<id>`) unless
    `--keep` was set. `--keep-on-failure` retains a newly created sandbox after a
-   failed run and prints a rerun/stop hint. Best-effort cleanup calls are
-   bounded to 15 seconds; a failed rollback reports the remote sandbox ID for
-   manual cleanup in the OpenComputer console. A newly acquired sandbox already
-   removed during automatic cleanup still clears its local claim. For an
-   existing lease, a 404 is account-ambiguous and keeps the claim by default;
-   pass `--opencomputer-forget-missing` to `stop` only after confirming the
-   sandbox is gone in the intended account.
+   sync, workspace setup, or command failure and prints a rerun/stop hint.
+   Best-effort cleanup calls are bounded to 15 seconds; a failed rollback
+   reports the remote sandbox ID for manual cleanup in the OpenComputer console.
+   A newly acquired sandbox already removed during automatic cleanup still
+   clears its local claim. For an existing lease, a 404 is account-ambiguous and
+   keeps the claim by default; pass `--opencomputer-forget-missing` to `stop`
+   only after confirming the sandbox is gone in the intended account.
 
 ## Capabilities
 
@@ -166,7 +172,11 @@ crabbox run --provider opencomputer --allow-env API_TOKEN -- printenv API_TOKEN
   directory, then replaces the workdir only after extraction succeeds.
 - `crabbox list` starts from local OpenComputer claims and fetches each remote
   status, so kept sandboxes remain visible after hibernation. A 404 remains
-  visible as `missing-or-inaccessible` until explicitly forgotten.
+  visible as `missing-or-inaccessible` until explicitly forgotten. A malformed
+  matching claim fails the command instead of silently hiding a retained
+  sandbox.
+- `status --wait` applies its wait timeout to in-flight API requests as well as
+  polling sleeps.
 - `warmup --actions-runner` is rejected because OpenComputer is a delegated
   execution provider, not an SSH runner host.
 - Command and sync-helper requests use a 3600-second timeout by default instead

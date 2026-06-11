@@ -164,19 +164,19 @@ func TestIsTerminalState(t *testing.T) {
 }
 
 func TestResolveLeaseIDRejectsUnclaimed(t *testing.T) {
-	if _, _, _, err := resolveLeaseID("not-a-known-slug", "", false, 0); err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
+	if _, _, _, err := resolveLeaseID("not-a-known-slug", "", false, 0, testOCClaimScope("https://api.example.test")); err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
 		t.Fatalf("err=%v, want rejection", err)
 	}
 }
 
 func TestResolveLeaseIDRejectsLeasePrefixWithoutClaim(t *testing.T) {
-	if _, _, _, err := resolveLeaseID("ocbx_sb-unknown", "", false, 0); err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
+	if _, _, _, err := resolveLeaseID("ocbx_sb-unknown", "", false, 0, testOCClaimScope("https://api.example.test")); err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
 		t.Fatalf("err=%v, want rejection", err)
 	}
 }
 
 func TestResolveLeaseIDRequiresIdentifier(t *testing.T) {
-	if _, _, _, err := resolveLeaseID("", "", false, 0); err == nil {
+	if _, _, _, err := resolveLeaseID("", "", false, 0, testOCClaimScope("https://api.example.test")); err == nil {
 		t.Fatalf("expected error for empty id")
 	}
 }
@@ -184,10 +184,10 @@ func TestResolveLeaseIDRequiresIdentifier(t *testing.T) {
 func TestResolveLeaseIDFallsBackForSluglessClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "ocbx_sb-known123"
-	if err := claimLeaseForRepoProvider(leaseID, "", providerName, "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "", providerName, testOCClaimScope("https://api.example.test"), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	gotLease, sandboxID, slug, err := resolveLeaseID(leaseID, "", false, 0)
+	gotLease, sandboxID, slug, err := resolveLeaseID(leaseID, "", false, 0, testOCClaimScope("https://api.example.test"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,13 +199,13 @@ func TestResolveLeaseIDFallsBackForSluglessClaim(t *testing.T) {
 func TestResolveLeaseIDPrefersExactLeaseOverCollidingSlug(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	exactLeaseID := "ocbx_sb-z-exact"
-	if err := claimLeaseForRepoProvider(exactLeaseID, "exact", providerName, "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(exactLeaseID, "exact", providerName, testOCClaimScope("https://api.example.test"), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProvider("ocbx_sb-a-other", exactLeaseID, providerName, "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond("ocbx_sb-a-other", exactLeaseID, providerName, testOCClaimScope("https://api.example.test"), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	leaseID, sandboxID, _, err := resolveLeaseID(exactLeaseID, "", false, 0)
+	leaseID, sandboxID, _, err := resolveLeaseID(exactLeaseID, "", false, 0, testOCClaimScope("https://api.example.test"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,10 +218,10 @@ func TestStopSurfacesMalformedExactClaimBeforeSlugFallback(t *testing.T) {
 	f := newFakeAPI(t)
 	backend := newAPIBackend(t, f)
 	exactLeaseID := leasePrefix + "sb-z-exact"
-	if err := claimLeaseForRepoProvider(exactLeaseID, "exact", providerName, "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(exactLeaseID, "exact", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProvider(leasePrefix+"sb-a-other", exactLeaseID, providerName, "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leasePrefix+"sb-a-other", exactLeaseID, providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	claimPath := path.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", exactLeaseID+".json")
@@ -235,6 +235,23 @@ func TestStopSurfacesMalformedExactClaimBeforeSlugFallback(t *testing.T) {
 	}
 	if f.calls(http.MethodDelete, "/api/sandboxes/") != 0 {
 		t.Fatal("stop deleted a slug-colliding sandbox after exact claim parse failure")
+	}
+}
+
+func TestStopRejectsClaimFromDifferentAPIAccount(t *testing.T) {
+	f := newFakeAPI(t)
+	backend := newAPIBackend(t, f)
+	leaseID := leasePrefix + f.sandboxID
+	otherScope := (&ocAPIClient{baseURL: f.server.URL, apiKey: "osb_other_account"}).claimScope()
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "other-account", providerName, otherScope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "different API endpoint or account") {
+		t.Fatalf("Stop err=%v, want endpoint mismatch", err)
+	}
+	if f.calls(http.MethodDelete, "/api/sandboxes/") != 0 {
+		t.Fatal("stop contacted the configured endpoint for a claim from another endpoint")
 	}
 }
 
@@ -289,6 +306,7 @@ type fakeAPI struct {
 	listState     string
 	listStatus    int
 	getStatusCode int // when non-zero, GET /api/sandboxes/:id returns this code
+	blockGet      bool
 	blockDelete   bool
 	deleteStatus  int
 	uploadStatus  int
@@ -320,6 +338,10 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, []map[string]any{})
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/sandboxes/"):
+		if f.blockGet {
+			<-r.Context().Done()
+			return
+		}
 		if f.getStatusCode != 0 {
 			w.WriteHeader(f.getStatusCode)
 			_, _ = w.Write([]byte(`{"error":"boom"}`))
@@ -416,6 +438,10 @@ func newTestConfig(apiURL string) Config {
 	cfg.OpenComputer.APIURL = apiURL
 	cfg.OpenComputer.Workdir = "/workspace/crabbox"
 	return cfg
+}
+
+func testOCClaimScope(apiURL string) string {
+	return (&ocAPIClient{baseURL: apiURL, apiKey: "osb_testkey"}).claimScope()
 }
 
 // newAPIBackend wires a backend to the fake API and isolates it from the real
@@ -665,6 +691,32 @@ func TestSyncDeleteDoesNotTouchLiveWorkspaceBeforeUploadSucceeds(t *testing.T) {
 	}
 }
 
+func TestSyncFailureHonorsKeepOnFailure(t *testing.T) {
+	f := newFakeAPI(t)
+	f.uploadStatus = http.StatusServiceUnavailable
+	backend := newAPIBackend(t, f)
+	var stderr bytes.Buffer
+	backend.rt.Stderr = &stderr
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"}, KeepOnFailure: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "upload denied") {
+		t.Fatalf("Run err=%v, want upload failure", err)
+	}
+	if f.calls(http.MethodDelete, "/api/sandboxes/") != 0 {
+		t.Fatal("sync failure deleted sandbox despite --keep-on-failure")
+	}
+	leaseID := leasePrefix + f.sandboxID
+	t.Cleanup(func() { removeLeaseClaim(leaseID) })
+	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
+		t.Fatalf("retained claim=%#v err=%v", claim, err)
+	}
+	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease="+leaseID) {
+		t.Fatalf("stderr=%q, want keep-on-failure hint", stderr.String())
+	}
+}
+
 func TestSyncDeleteStagesBeforeReplacingWorkspace(t *testing.T) {
 	f := newFakeAPI(t)
 	backend := newAPIBackend(t, f)
@@ -727,7 +779,7 @@ func TestNoSyncDoesNotDeleteRetainedWorkspace(t *testing.T) {
 	backend := newAPIBackend(t, f)
 	backend.cfg.Sync.Delete = true
 	leaseID := leasePrefix + f.sandboxID
-	if err := claimLeaseForRepoProvider(leaseID, "retained", providerName, "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "retained", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := backend.Run(context.Background(), RunRequest{
@@ -878,7 +930,7 @@ func TestStopClearsClaimWhenSandboxAlreadyDeleted(t *testing.T) {
 	f.deleteStatus = http.StatusNotFound
 	backend := newAPIBackend(t, f)
 	leaseID := leasePrefix + f.sandboxID
-	if err := claimLeaseForRepoProvider(leaseID, "gone", providerName, "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "gone", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	backend.cfg.OpenComputer.ForgetMissing = true
@@ -895,7 +947,7 @@ func TestStopPreservesClaimForAmbiguousMissingSandbox(t *testing.T) {
 	f.deleteStatus = http.StatusNotFound
 	backend := newAPIBackend(t, f)
 	leaseID := leasePrefix + f.sandboxID
-	if err := claimLeaseForRepoProvider(leaseID, "possibly-other-account", providerName, "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "possibly-other-account", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
@@ -1119,7 +1171,7 @@ func TestListFetchesClaimedHibernatedSandbox(t *testing.T) {
 	}
 	// The collection endpoint omits hibernated sandboxes, so List must fetch
 	// each locally claimed sandbox by ID.
-	if err := claimLeaseForRepoProviderPond("ocbx_"+f.sandboxID, "slug", providerName, "alpha", "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond("ocbx_"+f.sandboxID, "slug", providerName, testOCClaimScope(f.server.URL), "alpha", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	views, err = backend.List(context.Background(), ListRequest{})
@@ -1145,7 +1197,7 @@ func TestListKeepsAmbiguousMissingClaimVisible(t *testing.T) {
 	f := newFakeAPI(t)
 	f.getStatusCode = http.StatusNotFound
 	backend := newAPIBackend(t, f)
-	if err := claimLeaseForRepoProvider(leasePrefix+f.sandboxID, "ambiguous", providerName, "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leasePrefix+f.sandboxID, "ambiguous", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	views, err := backend.List(context.Background(), ListRequest{})
@@ -1157,22 +1209,19 @@ func TestListKeepsAmbiguousMissingClaimVisible(t *testing.T) {
 	}
 }
 
-func TestListSkipsMalformedClaimAndKeepsValidInventory(t *testing.T) {
+func TestListSurfacesMalformedMatchingClaim(t *testing.T) {
 	f := newFakeAPI(t)
 	backend := newAPIBackend(t, f)
-	if err := claimLeaseForRepoProvider(leasePrefix+f.sandboxID, "valid", providerName, "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leasePrefix+f.sandboxID, "valid", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	claimsDir := path.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims")
 	if err := os.WriteFile(path.Join(claimsDir, leasePrefix+"broken.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	views, err := backend.List(context.Background(), ListRequest{})
-	if err != nil {
-		t.Fatalf("List err=%v", err)
-	}
-	if len(views) != 1 || views[0].Labels["slug"] != "valid" {
-		t.Fatalf("views=%#v", views)
+	_, err := backend.List(context.Background(), ListRequest{})
+	if err == nil || !strings.Contains(err.Error(), "parse claim") {
+		t.Fatalf("List err=%v, want malformed matching claim error", err)
 	}
 }
 
@@ -1195,12 +1244,31 @@ func TestStatusSurfacesAPIError(t *testing.T) {
 	f := newFakeAPI(t)
 	f.getStatusCode = http.StatusInternalServerError
 	backend := newAPIBackend(t, f)
-	if err := claimLeaseForRepoProvider("ocbx_"+f.sandboxID, "slug", providerName, "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond("ocbx_"+f.sandboxID, "slug", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	_, err := backend.Status(context.Background(), StatusRequest{ID: "ocbx_" + f.sandboxID})
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("err=%v, want surfaced API error", err)
+	}
+}
+
+func TestStatusWaitTimeoutCancelsBlockedAPIRequest(t *testing.T) {
+	f := newFakeAPI(t)
+	f.blockGet = true
+	backend := newAPIBackend(t, f)
+	if err := claimLeaseForRepoProviderScopePond(leasePrefix+f.sandboxID, "slug", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err := backend.Status(context.Background(), StatusRequest{
+		ID: leasePrefix + f.sandboxID, Wait: true, WaitTimeout: 50 * time.Millisecond,
+	})
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
+		t.Fatalf("Status err=%v, want wait timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Status took %s, wait timeout did not bound API request", elapsed)
 	}
 }
 

@@ -3,6 +3,7 @@ package opencomputer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,11 @@ type ocAPIClient struct {
 	http    *http.Client
 	baseURL string
 	apiKey  string
+}
+
+func (c *ocAPIClient) claimScope() string {
+	keyHash := sha256.Sum256([]byte(c.apiKey))
+	return fmt.Sprintf("endpoint:%s/key-sha256:%x", c.baseURL, keyHash[:])
 }
 
 // ocFileConfig mirrors the subset of ~/.oc/config.json that `oc config set`

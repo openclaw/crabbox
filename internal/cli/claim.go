@@ -494,9 +494,6 @@ func listLeaseClaimsWithPrefix(prefix string) ([]leaseClaim, error) {
 		}
 		claim, err := readLeaseClaim(leaseID)
 		if err != nil {
-			if prefix != "" {
-				continue
-			}
 			return nil, err
 		}
 		if claim.LeaseID != "" {
