@@ -114,6 +114,10 @@ func ResolveLeaseClaimForProvider(identifier, provider string) (LeaseClaim, bool
 	return resolveLeaseClaimForProvider(identifier, provider)
 }
 
+func ResolveLeaseClaimForProviderCloudID(cloudID, provider string) (LeaseClaim, bool, error) {
+	return resolveLeaseClaimForProviderCloudID(cloudID, provider)
+}
+
 func RemoveLeaseClaim(leaseID string) {
 	removeLeaseClaim(leaseID)
 }

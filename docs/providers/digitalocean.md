@@ -81,6 +81,7 @@ droplet:read
 droplet:create
 droplet:delete
 droplet:update
+image:read
 ssh_key:read
 ssh_key:create
 ssh_key:delete
@@ -103,7 +104,8 @@ explicit VPC. Do not broaden scopes inside scripts.
 5. Add ready-state Crabbox tags and claim the lease locally.
 6. Run normal Crabbox sync/run/ssh workflows over SSH.
 7. Delete the Droplet and managed SSH key on `stop`; `cleanup` deletes only
-   resources with a complete Crabbox DigitalOcean ownership tag set.
+   resources with a complete Crabbox DigitalOcean ownership tag set. Failed
+   post-delete cleanup retains the local claim so `stop` can retry it.
 
 ## Ownership And Cleanup
 
@@ -122,6 +124,12 @@ crabbox:expires_at:<unix-seconds>
 Release and cleanup require a complete ownership predicate: Crabbox marker,
 provider marker, lease id, slug, and Linux target. Droplets with partial,
 foreign, or malformed Crabbox-like tags are skipped/refused.
+
+Tag updates apply only the set difference. Crabbox detaches obsolete tags from
+the Droplet but does not delete account-level tag objects: DigitalOcean tag
+deletion can also untag images, volumes, snapshots, and databases that the token
+cannot necessarily inspect. Unused Crabbox tag objects may therefore remain in
+the account.
 
 Direct mode has no coordinator alarm. Use:
 
@@ -171,8 +179,8 @@ in `crabbox list --provider digitalocean --json` or the DigitalOcean console.
 - `digitalocean` is direct-only. Worker broker secrets and cost accounting do
   not cover these Droplets.
 - `--type` must be a valid Droplet size slug such as `s-1vcpu-1gb`.
-- DigitalOcean tag updates are additive. Crabbox decodes the ready state when
-  present, but cleanup relies on `expires_at` and ownership tags, not tag order.
+- Crabbox decodes the highest-priority state when stale tags coexist, but
+  cleanup relies on `expires_at` and ownership tags, not tag order.
 - Phase 1 does not create firewalls. Restrict SSH exposure through account/VPC
   policy where needed, and prefer short TTLs for live validation.
 

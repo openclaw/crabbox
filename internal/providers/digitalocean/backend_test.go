@@ -18,6 +18,7 @@ type fakeDigitalOceanAPI struct {
 	createErr      error
 	deleteErr      error
 	deleteSawDone  bool
+	keyDeleteErr   error
 	replaceErr     error
 	created        []droplet
 	deleted        []int64
@@ -84,7 +85,12 @@ func (f *fakeDigitalOceanAPI) DeleteDroplet(ctx context.Context, id int64) error
 	default:
 	}
 	f.deleted = append(f.deleted, id)
-	return f.deleteErr
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.droplets = removeDropletByID(f.droplets, id)
+	f.created = removeDropletByID(f.created, id)
+	return nil
 }
 
 func (f *fakeDigitalOceanAPI) DeleteSSHKeyByName(ctx context.Context, name string) error {
@@ -94,7 +100,7 @@ func (f *fakeDigitalOceanAPI) DeleteSSHKeyByName(ctx context.Context, name strin
 	default:
 	}
 	f.deletedKeys = append(f.deletedKeys, name)
-	return nil
+	return f.keyDeleteErr
 }
 
 func (f *fakeDigitalOceanAPI) ReplaceDropletTags(_ context.Context, id int64, currentTags, desiredTags []string) error {
@@ -115,6 +121,16 @@ func (f *fakeDigitalOceanAPI) ReplaceDropletTags(_ context.Context, id int64, cu
 		}
 	}
 	return nil
+}
+
+func removeDropletByID(items []droplet, id int64) []droplet {
+	out := items[:0]
+	for _, item := range items {
+		if item.ID != id {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func newTestBackend(t *testing.T, api *fakeDigitalOceanAPI) *digitalOceanLeaseBackend {
@@ -271,6 +287,98 @@ func TestResolveBySlugAndReleaseDeletesOwnedDroplet(t *testing.T) {
 	}
 	if len(api.deleted) != 1 || api.deleted[0] != 77 {
 		t.Fatalf("deleted=%v", api.deleted)
+	}
+}
+
+func TestReleaseRetriesKeyCleanupFromRetainedClaimAfterDropletDeletion(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = "s-1vcpu-1gb"
+	leaseID := "cbx_abcdef123456"
+	slug := "retry-cleanup"
+	cfg.ProviderKey = providerKeyForLease(leaseID)
+	item := droplet{ID: 77, Name: "crabbox-retry-cleanup", Status: "active", Tags: leaseTags(cfg, leaseID, slug, "ready", false, time.Now())}
+	item.Networks.V4 = append(item.Networks.V4, struct {
+		IPAddress string `json:"ip_address"`
+		Type      string `json:"type"`
+	}{IPAddress: "203.0.113.77", Type: "public"})
+	api := &fakeDigitalOceanAPI{
+		droplets:     []droplet{item},
+		keyDeleteErr: errors.New("key cleanup failed"),
+	}
+	backend := newTestBackend(t, api)
+	server := serverFromDroplet(item, backend.Cfg)
+	ssh := core.SSHTargetFromConfig(backend.Cfg, server.PublicNet.IPv4.IP)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, backend.Cfg, server, ssh, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyName := core.ServerProviderKey(lease.Server); !core.ValidCrabboxProviderKey(keyName) {
+		t.Fatalf("provider key=%q labels=%v", keyName, lease.Server.Labels)
+	}
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+	if err == nil || !strings.Contains(err.Error(), "key cleanup failed") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if len(api.droplets) != 0 || len(api.deleted) != 1 {
+		t.Fatalf("droplets=%v deleted=%v", api.droplets, api.deleted)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName); err != nil || !ok {
+		t.Fatalf("claim after failed cleanup ok=%v err=%v", ok, err)
+	}
+
+	api.keyDeleteErr = nil
+	lease, err = backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.ID != 77 || lease.Server.CloudID != "77" || lease.LeaseID != leaseID {
+		t.Fatalf("fallback lease=%#v", lease)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 2 || api.deleted[1] != 77 || len(api.deletedKeys) != 2 {
+		t.Fatalf("deleted=%v deletedKeys=%v", api.deleted, api.deletedKeys)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName); err != nil || ok {
+		t.Fatalf("claim after successful retry ok=%v err=%v", ok, err)
+	}
+}
+
+func TestReleaseFromClaimRefusesDropletMissingOwnershipTags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = "s-1vcpu-1gb"
+	leaseID := "cbx_abcdef123456"
+	slug := "lost-tags"
+	cfg.ProviderKey = providerKeyForLease(leaseID)
+	item := droplet{ID: 78, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: leaseTags(cfg, leaseID, slug, "ready", false, time.Now())}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	server := serverFromDroplet(item, backend.Cfg)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, backend.Cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	for i, tag := range api.droplets[0].Tags {
+		if tag == "crabbox:target:linux" {
+			api.droplets[0].Tags = append(api.droplets[0].Tags[:i], api.droplets[0].Tags[i+1:]...)
+			break
+		}
+	}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "refusing to operate") {
+		t.Fatalf("Resolve lease=%#v err=%v", lease, err)
+	}
+	if len(api.deleted) != 0 || len(api.droplets) != 1 {
+		t.Fatalf("deleted=%v droplets=%v", api.deleted, api.droplets)
 	}
 }
 

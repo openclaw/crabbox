@@ -150,11 +150,72 @@ func (b *digitalOceanLeaseBackend) Resolve(ctx context.Context, req core.Resolve
 	if id, ok := parseDropletID(req.ID); ok {
 		item, err := client.GetDroplet(ctx, id)
 		if err != nil {
+			if req.ReleaseOnly && isDigitalOceanNotFound(err) {
+				return releaseTargetFromClaim(ctx, client, req.ID)
+			}
 			return core.LeaseTarget{}, err
 		}
 		return b.targetFromDroplet(item, req)
 	}
+	if req.ReleaseOnly {
+		return releaseTargetFromClaim(ctx, client, req.ID)
+	}
 	return core.LeaseTarget{}, core.Exit(4, "lease/droplet not found: %s", req.ID)
+}
+
+func releaseTargetFromClaim(ctx context.Context, client digitalOceanAPI, id string) (core.LeaseTarget, error) {
+	claim, ok, err := core.ResolveLeaseClaimForProvider(id, providerName)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if !ok {
+		if _, numeric := parseDropletID(id); numeric {
+			claim, ok, err = core.ResolveLeaseClaimForProviderCloudID(id, providerName)
+			if err != nil {
+				return core.LeaseTarget{}, err
+			}
+		}
+	}
+	if !ok || claim.LeaseID == "" {
+		return core.LeaseTarget{}, core.Exit(4, "lease/droplet not found: %s", id)
+	}
+	if err := validateDropletLabels(claim.Labels); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	dropletID, ok := parseDropletID(claim.CloudID)
+	if !ok {
+		return core.LeaseTarget{}, core.Exit(4, "lease/droplet not found: %s", id)
+	}
+	if item, err := client.GetDroplet(ctx, dropletID); err == nil {
+		labels := labelsFromTags(item.Tags)
+		if err := validateDropletLabels(labels); err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if item.Name != core.LeaseProviderName(claim.LeaseID, claim.Slug) ||
+			labels["crabbox"] != "true" ||
+			labels["created_by"] != "crabbox" ||
+			labels["provider"] != providerName ||
+			labels["lease"] != claim.LeaseID ||
+			labels["slug"] != claim.Slug {
+			return core.LeaseTarget{}, core.Exit(2, "refusing to release DigitalOcean Droplet %d from stale local claim", dropletID)
+		}
+		return core.LeaseTarget{
+			LeaseID: claim.LeaseID,
+			Server:  serverFromDroplet(item, core.Config{}),
+		}, nil
+	} else if !isDigitalOceanNotFound(err) {
+		return core.LeaseTarget{}, err
+	}
+	return core.LeaseTarget{
+		LeaseID: claim.LeaseID,
+		Server: core.Server{
+			Provider: providerName,
+			CloudID:  claim.CloudID,
+			ID:       dropletID,
+			Name:     claim.Slug,
+			Labels:   claim.Labels,
+		},
+	}, nil
 }
 
 func (b *digitalOceanLeaseBackend) targetFromDroplet(item droplet, req core.ResolveRequest) (core.LeaseTarget, error) {
@@ -270,10 +331,13 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, cfg core.Co
 	if err := client.DeleteDroplet(ctx, server.ID); err != nil {
 		return err
 	}
+	var keyErr error
 	if keyName := core.ServerProviderKey(server); core.ValidCrabboxProviderKey(keyName) {
-		return client.DeleteSSHKeyByName(ctx, keyName)
+		if err := client.DeleteSSHKeyByName(ctx, keyName); err != nil {
+			keyErr = err
+		}
 	}
-	return nil
+	return keyErr
 }
 
 func (b *digitalOceanLeaseBackend) waitForDropletIP(ctx context.Context, client digitalOceanAPI, id int64) (droplet, error) {

@@ -72,6 +72,7 @@ func TestClaimLeaseTargetForRepoConfigStoresEndpointMetadata(t *testing.T) {
 	}}
 	server := Server{
 		Provider: "aws",
+		CloudID:  "i-123",
 		Labels: map[string]string{
 			"tailscale":      "true",
 			"tailscale_ipv4": "100.64.1.10",
@@ -88,7 +89,7 @@ func TestClaimLeaseTargetForRepoConfigStoresEndpointMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claim.Pond != "alpha-pond" || claim.TailscaleIPv4 != "100.64.1.10" || claim.SSHHost != "203.0.113.10" || claim.SSHPort != 2222 {
+	if claim.Pond != "alpha-pond" || claim.CloudID != "i-123" || claim.TailscaleIPv4 != "100.64.1.10" || claim.SSHHost != "203.0.113.10" || claim.SSHPort != 2222 {
 		t.Fatalf("unexpected claim endpoint metadata: %#v", claim)
 	}
 	if len(claim.CacheVolumes) != 1 || claim.CacheVolumes[0] != "repo-linux-node24-lock:/var/cache/crabbox/pnpm" {
@@ -96,6 +97,24 @@ func TestClaimLeaseTargetForRepoConfigStoresEndpointMetadata(t *testing.T) {
 	}
 	if claim.Labels[pondLabelKey] != "alpha-pond" {
 		t.Fatalf("claim labels=%#v", claim.Labels)
+	}
+	if resolved, ok, err := resolveLeaseClaimForProviderCloudID("i-123", "aws"); err != nil || !ok || resolved.LeaseID != "cbx_123" {
+		t.Fatalf("cloud id resolution claim=%#v ok=%t err=%v", resolved, ok, err)
+	}
+}
+
+func TestResolveLeaseClaimForProviderCloudIDRejectsDuplicates(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	for _, leaseID := range []string{"cbx_111111111111", "cbx_222222222222"} {
+		server := Server{Provider: "aws", CloudID: "i-duplicate"}
+		if err := claimLeaseTargetForRepoConfig(leaseID, leaseID, cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok, err := resolveLeaseClaimForProviderCloudID("i-duplicate", "aws"); err == nil || ok {
+		t.Fatalf("duplicate cloud id lookup ok=%t err=%v", ok, err)
 	}
 }
 

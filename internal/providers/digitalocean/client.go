@@ -19,6 +19,11 @@ import (
 
 const apiBaseURL = "https://api.digitalocean.com/v2"
 
+const (
+	createReconcileTimeout  = 30 * time.Second
+	createReconcileInterval = 2 * time.Second
+)
+
 type digitalOceanClient struct {
 	token   string
 	client  *http.Client
@@ -111,10 +116,24 @@ func (c *digitalOceanClient) do(ctx context.Context, method, path string, body a
 }
 
 func (c *digitalOceanClient) ListCrabboxDroplets(ctx context.Context) ([]droplet, error) {
+	droplets, err := c.listDropletsByTag(ctx, tagCrabbox)
+	if err != nil {
+		return nil, err
+	}
+	var out []droplet
+	for _, item := range droplets {
+		if isOwnedDroplet(item) {
+			out = append(out, item)
+		}
+	}
+	return out, nil
+}
+
+func (c *digitalOceanClient) listDropletsByTag(ctx context.Context, tag string) ([]droplet, error) {
 	var out []droplet
 	for page := 1; ; page++ {
 		q := url.Values{}
-		q.Set("tag_name", tagCrabbox)
+		q.Set("tag_name", tag)
 		q.Set("page", strconv.Itoa(page))
 		q.Set("per_page", "200")
 		var res struct {
@@ -128,11 +147,7 @@ func (c *digitalOceanClient) ListCrabboxDroplets(ctx context.Context) ([]droplet
 		if err := c.do(ctx, http.MethodGet, "/droplets?"+q.Encode(), nil, &res); err != nil {
 			return nil, err
 		}
-		for _, item := range res.Droplets {
-			if isOwnedDroplet(item) {
-				out = append(out, item)
-			}
-		}
+		out = append(out, res.Droplets...)
 		if res.Links.Pages.Next == "" {
 			return out, nil
 		}
@@ -165,13 +180,9 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 		return c.rollbackCreatedSSHKey(keyName, cause)
 	}
 	tags := leaseTags(cfg, leaseID, slug, "provisioning", keep, now)
-	for _, tag := range tags {
-		if err := c.EnsureTag(ctx, tag); err != nil {
-			return droplet{}, rollbackKey(err)
-		}
-	}
+	name := core.LeaseProviderName(leaseID, slug)
 	body := map[string]any{
-		"name":       core.LeaseProviderName(leaseID, slug),
+		"name":       name,
 		"region":     digitalOceanRegion(cfg),
 		"size":       cfg.ServerType,
 		"image":      digitalOceanImage(cfg),
@@ -188,9 +199,58 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 		Droplet droplet `json:"droplet"`
 	}
 	if err := c.do(ctx, http.MethodPost, "/droplets", body, &res); err != nil {
+		if shouldReconcileDropletCreate(err) {
+			if item, reconcileErr := c.reconcileDropletCreate(leaseID, name); reconcileErr == nil {
+				return item, nil
+			} else {
+				err = errors.Join(err, reconcileErr)
+			}
+		}
 		return droplet{}, rollbackKey(err)
 	}
 	return res.Droplet, nil
+}
+
+func shouldReconcileDropletCreate(err error) bool {
+	var apiErr *digitalOceanAPIError
+	return !errors.As(err, &apiErr) || apiErr.Status >= http.StatusInternalServerError
+}
+
+func (c *digitalOceanClient) reconcileDropletCreate(leaseID, name string) (droplet, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), createReconcileTimeout)
+	defer cancel()
+
+	leaseTag := encodeTagKV("lease", leaseID)
+	var lastErr error
+	for {
+		droplets, err := c.listDropletsByTag(ctx, leaseTag)
+		if err == nil {
+			var matches []droplet
+			for _, item := range droplets {
+				if item.Name == name && isOwnedDroplet(item) && labelsFromTags(item.Tags)["lease"] == leaseID {
+					matches = append(matches, item)
+				}
+			}
+			switch len(matches) {
+			case 1:
+				return matches[0], nil
+			case 0:
+				lastErr = core.Exit(4, "digitalocean create reconciliation did not find lease=%s", leaseID)
+			default:
+				return droplet{}, core.Exit(2, "digitalocean create reconciliation found multiple droplets for lease=%s", leaseID)
+			}
+		} else {
+			lastErr = err
+		}
+
+		timer := time.NewTimer(createReconcileInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return droplet{}, errors.Join(lastErr, ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 func (c *digitalOceanClient) rollbackCreatedSSHKey(keyName string, cause error) error {
@@ -283,7 +343,12 @@ func (c *digitalOceanClient) EnsureTag(ctx context.Context, tag string) error {
 }
 
 func (c *digitalOceanClient) ReplaceDropletTags(ctx context.Context, id int64, currentTags, desiredTags []string) error {
+	currentTags = normalizeTags(currentTags)
 	desiredTags = normalizeTags(desiredTags)
+	current := make(map[string]bool, len(currentTags))
+	for _, tag := range currentTags {
+		current[tag] = true
+	}
 	desired := make(map[string]bool, len(desiredTags))
 	for _, tag := range desiredTags {
 		desired[tag] = true
@@ -291,6 +356,9 @@ func (c *digitalOceanClient) ReplaceDropletTags(ctx context.Context, id int64, c
 	resources := make([]map[string]any, 0, 1)
 	resources = append(resources, map[string]any{"resource_id": strconv.FormatInt(id, 10), "resource_type": "droplet"})
 	for _, tag := range desiredTags {
+		if current[tag] {
+			continue
+		}
 		if err := c.EnsureTag(ctx, tag); err != nil {
 			return err
 		}
@@ -299,7 +367,7 @@ func (c *digitalOceanClient) ReplaceDropletTags(ctx context.Context, id int64, c
 			return err
 		}
 	}
-	for _, tag := range normalizeTags(currentTags) {
+	for _, tag := range currentTags {
 		if tag == tagCrabbox || !strings.HasPrefix(tag, tagPrefix) || desired[tag] {
 			continue
 		}

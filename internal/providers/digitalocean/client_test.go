@@ -40,9 +40,6 @@ func TestDigitalOceanClientCreateDropletRequestShape(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/account/keys":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"ssh_key":{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/tags":
-			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"tag":{"name":"ok"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/droplets":
 			if got := body["region"]; got != "sfo3" {
 				t.Fatalf("region=%v", got)
@@ -96,6 +93,9 @@ func TestDigitalOceanClientCreateDropletRequestShape(t *testing.T) {
 		if req.Auth != "Bearer secret-token" {
 			t.Fatalf("%s %s auth=%q", req.Method, req.Path, req.Auth)
 		}
+		if req.Method == http.MethodPost && req.Path == "/tags" {
+			t.Fatalf("create performed redundant tag request: requests=%v", requests)
+		}
 	}
 }
 
@@ -132,24 +132,71 @@ func TestDigitalOceanClientReplaceDropletTagsDetachesObsoleteCrabboxTags(t *test
 	err = client.ReplaceDropletTags(
 		context.Background(),
 		42,
-		[]string{tagCrabbox, "crabbox:lease:cbx_1", "crabbox:state:running", "other"},
-		[]string{tagCrabbox, "crabbox:lease:cbx_1", "crabbox:state:ready"},
+		[]string{tagCrabbox, "crabbox:lease:cbx_abcdef123456", "crabbox:state:running", "crabbox:last_touched_at:100", "other"},
+		[]string{tagCrabbox, "crabbox:lease:cbx_abcdef123456", "crabbox:state:ready", "crabbox:last_touched_at:200"},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var deleted []string
+	var created, attached, detached []string
 	for _, req := range requests {
-		if req.Method == http.MethodDelete {
-			deleted = append(deleted, req.Path)
+		switch {
+		case req.Method == http.MethodPost && req.Path == "/tags":
+			created = append(created, req.Path)
+		case req.Method == http.MethodPost && strings.HasSuffix(req.Path, "/resources"):
+			attached = append(attached, req.Path)
+		case req.Method == http.MethodDelete && strings.HasSuffix(req.Path, "/resources"):
+			detached = append(detached, req.Path)
 		}
 	}
-	if len(deleted) != 1 || !strings.Contains(deleted[0], "crabbox:state:running") {
-		t.Fatalf("deleted=%v requests=%v", deleted, requests)
+	if len(created) != 2 || len(attached) != 2 {
+		t.Fatalf("created=%v attached=%v requests=%v", created, attached, requests)
+	}
+	for _, path := range append(created, attached...) {
+		if strings.Contains(path, "crabbox:lease:cbx_abcdef123456") {
+			t.Fatalf("unchanged lease tag was recreated or reattached: requests=%v", requests)
+		}
+	}
+	if len(detached) != 2 ||
+		!slicesContainSubstring(detached, "crabbox:state:running") ||
+		!slicesContainSubstring(detached, "crabbox:last_touched_at:100") {
+		t.Fatalf("detached=%v requests=%v", detached, requests)
 	}
 }
 
-func TestDigitalOceanClientCreateDropletRollsBackNewSSHKeyOnTagFailure(t *testing.T) {
+func slicesContainSubstring(values []string, substring string) bool {
+	for _, value := range values {
+		if strings.Contains(value, substring) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDigitalOceanClientReplaceDropletTagsSkipsUnchangedSet(t *testing.T) {
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	tags := []string{tagCrabbox, "crabbox:lease:cbx_1", "crabbox:state:ready"}
+	if err := client.ReplaceDropletTags(context.Background(), 42, tags, append([]string(nil), tags...)); err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 0 {
+		t.Fatalf("requestCount=%d", requestCount)
+	}
+}
+
+func TestDigitalOceanClientCreateDropletRollsBackNewSSHKeyOnCreateFailure(t *testing.T) {
 	var deleteKey bool
 	var keyListCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -165,8 +212,8 @@ func TestDigitalOceanClientCreateDropletRollsBackNewSSHKeyOnTagFailure(t *testin
 		case r.Method == http.MethodPost && r.URL.Path == "/account/keys":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"ssh_key":{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/tags":
-			http.Error(w, "tag denied", http.StatusForbidden)
+		case r.Method == http.MethodPost && r.URL.Path == "/droplets":
+			http.Error(w, "create denied", http.StatusForbidden)
 		case r.Method == http.MethodDelete && r.URL.Path == "/account/keys/123":
 			deleteKey = true
 			w.WriteHeader(http.StatusNoContent)
@@ -226,6 +273,70 @@ func TestDigitalOceanClientRollbackCreatedSSHKeyUsesFreshContext(t *testing.T) {
 	}
 	if !deleteKey {
 		t.Fatal("new ssh key was not rolled back")
+	}
+}
+
+func TestDigitalOceanClientCreateDropletReconcilesLostResponse(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	slug := "lost-response"
+	name := core.LeaseProviderName(leaseID, slug)
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = "s-1vcpu-1gb"
+	tags := leaseTags(cfg, leaseID, slug, "provisioning", false, time.Now())
+	var deleteKey bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.RequestURI(), "/account/keys"):
+			_, _ = w.Write([]byte(`{"ssh_keys":[],"links":{"pages":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/account/keys":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"ssh_key":{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/droplets":
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = conn.Close()
+		case r.Method == http.MethodGet && r.URL.Path == "/droplets":
+			if got := r.URL.Query().Get("tag_name"); got != encodeTagKV("lease", leaseID) {
+				t.Fatalf("tag_name=%q", got)
+			}
+			payload, err := json.Marshal(map[string]any{
+				"droplets": []droplet{{ID: 456, Name: name, Status: "new", Tags: tags}},
+				"links":    map[string]any{"pages": map[string]any{}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write(payload)
+		case r.Method == http.MethodDelete && r.URL.Path == "/account/keys/123":
+			deleteKey = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+
+	item, err := client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", leaseID, slug, false, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.ID != 456 || item.Name != name {
+		t.Fatalf("droplet=%#v", item)
+	}
+	if deleteKey {
+		t.Fatal("reconciled create deleted its SSH key")
 	}
 }
 

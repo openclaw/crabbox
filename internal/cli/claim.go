@@ -17,6 +17,7 @@ type leaseClaim struct {
 	LeaseID            string            `json:"leaseID"`
 	Slug               string            `json:"slug,omitempty"`
 	Provider           string            `json:"provider,omitempty"`
+	CloudID            string            `json:"cloudID,omitempty"`
 	ProviderScope      string            `json:"providerScope,omitempty"`
 	StaticHost         string            `json:"staticHost,omitempty"`
 	StaticUser         string            `json:"staticUser,omitempty"`
@@ -206,6 +207,9 @@ func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 }
 
 func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget) {
+	if server.CloudID != "" {
+		claim.CloudID = server.CloudID
+	}
 	if len(server.Labels) > 0 {
 		claim.Labels = cloneStringMap(server.Labels)
 	}
@@ -420,6 +424,41 @@ func resolveLeaseClaimForProvider(identifier, provider string) (leaseClaim, bool
 		return leaseClaim{}, false, err
 	}
 	return claim, true, nil
+}
+
+func resolveLeaseClaimForProviderCloudID(cloudID, provider string) (leaseClaim, bool, error) {
+	if cloudID == "" || provider == "" {
+		return leaseClaim{}, false, nil
+	}
+	dir, err := crabboxStateDir()
+	if err != nil {
+		return leaseClaim{}, false, err
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "claims"))
+	if errors.Is(err, os.ErrNotExist) {
+		return leaseClaim{}, false, nil
+	}
+	if err != nil {
+		return leaseClaim{}, false, exit(2, "read claims directory: %v", err)
+	}
+	var match leaseClaim
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		claim, err := readLeaseClaim(strings.TrimSuffix(entry.Name(), ".json"))
+		if err != nil {
+			return leaseClaim{}, false, err
+		}
+		if claim.Provider != provider || claim.CloudID != cloudID {
+			continue
+		}
+		if match.LeaseID != "" {
+			return leaseClaim{}, false, exit(2, "multiple provider=%s claims match cloud id %s", provider, cloudID)
+		}
+		match = claim
+	}
+	return match, match.LeaseID != "", nil
 }
 
 func findLeaseClaim(identifier string, match func(leaseClaim) bool) (leaseClaim, bool, error) {
