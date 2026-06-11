@@ -3,6 +3,7 @@ package islo
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"regexp"
@@ -118,7 +119,7 @@ func (b *isloBackend) maybeJoinTailscale(ctx context.Context, client isloAPI, sa
 	loginServer := strings.TrimSpace(os.Getenv("TS_CONTROL_URL"))
 	exitNode := strings.TrimSpace(b.cfg.Tailscale.ExitNode)
 	allowLAN := fmt.Sprint(b.cfg.Tailscale.ExitNodeAllowLANAccess)
-	stateDir := "/tmp/crabbox-tailscale-" + normalizeLeaseSlug(leaseID)
+	stateDir := isloTailscaleStateDir(leaseID)
 
 	req := &gosdk.ExecRequest{Command: []string{"bash", "-lc", isloTailscaleBringUp}}
 	req.Env = map[string]*string{}
@@ -150,6 +151,11 @@ func (b *isloBackend) maybeJoinTailscale(ctx context.Context, client isloAPI, sa
 	}
 	fmt.Fprintf(b.rt.Stderr, "islo: joined tailnet ip=%s\n", m[1])
 	return updateLeaseClaimTailscale(leaseID, m[1], "")
+}
+
+func isloTailscaleStateDir(leaseID string) string {
+	sum := sha256.Sum256([]byte(leaseID))
+	return fmt.Sprintf("/tmp/crabbox-ts-%x", sum[:8])
 }
 
 func (b *isloBackend) validateTailscaleConfig() error {

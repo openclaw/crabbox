@@ -65,6 +65,21 @@ func TestIsloTailscaleIPRegex(t *testing.T) {
 	}
 }
 
+func TestIsloTailscaleStateDirIsBounded(t *testing.T) {
+	leaseID := "isb_crabbox-" + strings.Repeat("long-repository-name-", 20)
+	stateDir := isloTailscaleStateDir(leaseID)
+	socketPath := filepath.Join(stateDir, "tailscaled.sock")
+	if len(socketPath) > 107 {
+		t.Fatalf("socket path is %d bytes, want <=107: %q", len(socketPath), socketPath)
+	}
+	if stateDir != isloTailscaleStateDir(leaseID) {
+		t.Fatal("state directory is not deterministic")
+	}
+	if stateDir == isloTailscaleStateDir(leaseID+"-other") {
+		t.Fatal("different lease IDs share a state directory")
+	}
+}
+
 func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *testing.T) {
 	for _, want := range []string{
 		"--tun=userspace-networking",

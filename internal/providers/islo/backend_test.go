@@ -516,7 +516,7 @@ func TestIsloCreateSandboxTailscaleClaimAndOptions(t *testing.T) {
 		"TS_LOGIN_SERVER":        "https://headscale.example.com",
 		"TS_EXIT_NODE":           "exit.tailnet.ts.net",
 		"TS_EXIT_NODE_ALLOW_LAN": "true",
-		"TS_STATE_DIR":           "/tmp/crabbox-tailscale-" + normalizeLeaseSlug(leaseID),
+		"TS_STATE_DIR":           isloTailscaleStateDir(leaseID),
 	} {
 		got := ""
 		if req.Env != nil && req.Env[key] != nil {
