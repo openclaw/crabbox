@@ -292,6 +292,7 @@ func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, fl
 			if !allProviders {
 				return nil, err
 			}
+			peers = append(peers, providerPeers...)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -457,7 +458,7 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 		peers = append(peers, peer)
 	}
 	if deferredBridgeErr != nil && !hasResolvedIndependentPrimary(peers) {
-		return nil, deferredBridgeErr
+		return peers, deferredBridgeErr
 	}
 	return peers, nil
 }

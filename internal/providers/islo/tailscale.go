@@ -253,7 +253,11 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 	if err != nil {
 		return core.TailscaleMetadata{}, err
 	}
-	if !ok || (claim.TailscaleIPv4 == "" && claim.TailscaleFQDN == "") {
+	if !ok {
+		return core.TailscaleMetadata{}, nil
+	}
+	enrolled := claim.TailscaleIPv4 != "" || claim.TailscaleFQDN != "" || claim.TailscaleHostname != "" || b.cfg.Tailscale.Enabled
+	if !enrolled {
 		return core.TailscaleMetadata{}, nil
 	}
 	sandbox, sandboxErr := client.GetSandbox(ctx, sandboxName)

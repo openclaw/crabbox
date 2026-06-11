@@ -319,6 +319,36 @@ func TestEnsureLeaseTailscaleRestartsFromStateWithPondTag(t *testing.T) {
 	}
 }
 
+func TestEnsureLeaseTailscaleRejoinsFromSavedEnrollmentSettings(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscaleSettings(leaseID, "saved-node", []string{"tag:saved"}, "", "", false); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{
+		execCodes: []int{1, 0},
+		execOuts:  []string{"", "CRABBOX_TS_IP=100.64.7.9"},
+	}
+	backend := &isloBackend{
+		cfg: Config{Tailscale: core.TailscaleConfig{AuthKey: "tskey-new"}},
+		rt:  Runtime{Stderr: io.Discard},
+	}
+
+	meta, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.IPv4 != "100.64.7.9" || len(client.execRequests) != 2 {
+		t.Fatalf("rejoin metadata=%#v requests=%d", meta, len(client.execRequests))
+	}
+	if got := *client.execRequests[1].Env["TS_HOST"]; got != "saved-node" {
+		t.Fatalf("rejoin hostname=%q want saved-node", got)
+	}
+}
+
 func TestIsloTailscaleArchiveVerification(t *testing.T) {
 	archive := filepath.Join(t.TempDir(), "tailscale.tgz")
 	content := []byte("archive")

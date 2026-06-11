@@ -461,7 +461,7 @@ func TestResolvePondPeersMultiProviderFanOut(t *testing.T) {
 	}
 }
 
-func TestResolvePondPeersMultiProviderFanOutSkipsFailedProvider(t *testing.T) {
+func TestResolvePondPeersMultiProviderFanOutKeepsFailedProviderRow(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "cbx_e2b1", Slug: "e2b-a", Provider: "e2b", Pond: "demo", RepoRoot: "/r"},
 		{LeaseID: "isb_islo1", Slug: "islo-a", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
@@ -484,11 +484,18 @@ func TestResolvePondPeersMultiProviderFanOutSkipsFailedProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePondPeers should keep healthy providers when one fails: %v", err)
 	}
-	if len(peers) != 1 {
-		t.Fatalf("expected only the healthy e2b peer, got %d: %#v", len(peers), peers)
+	if len(peers) != 2 {
+		t.Fatalf("expected healthy and degraded peers, got %d: %#v", len(peers), peers)
 	}
-	if peers[0].Provider != "e2b" || len(peers[0].Targets) != 1 || peers[0].Targets[0].URL == "" {
-		t.Fatalf("expected healthy e2b peer with target, got %#v", peers[0])
+	byProvider := map[string]BridgePeer{}
+	for _, peer := range peers {
+		byProvider[peer.Provider] = peer
+	}
+	if got := byProvider["e2b"]; len(got.Targets) != 1 || got.Targets[0].URL == "" {
+		t.Fatalf("expected healthy e2b peer with target, got %#v", got)
+	}
+	if got := byProvider["islo"]; got.Transport != TransportNone || got.BridgeState != "error" {
+		t.Fatalf("expected degraded islo peer, got %#v", got)
 	}
 }
 
