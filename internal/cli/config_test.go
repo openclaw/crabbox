@@ -329,6 +329,103 @@ func TestDigitalOceanConfigFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestDigitalOceanPortableOSSelection(t *testing.T) {
+	t.Run("supported selector maps to provider image", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		cfg.OSImage = "ubuntu:24.04"
+		cfg.osImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+			t.Fatalf("DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+	})
+
+	t.Run("unsupported selector is deferred to acquisition", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+			t.Fatalf("default DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+		cfg.OSImage = "ubuntu:26.04"
+		cfg.osImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "" {
+			t.Fatalf("DigitalOcean.Image=%q, want unresolved provider image", cfg.DigitalOcean.Image)
+		}
+	})
+
+	t.Run("provider image overrides portable selector", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		cfg.OSImage = "ubuntu:26.04"
+		cfg.osImageExplicit = true
+		cfg.DigitalOcean.Image = "custom-image"
+		cfg.digitalOceanImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "custom-image" {
+			t.Fatalf("DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+	})
+}
+
+func TestDigitalOceanUnsupportedPortableOSDoesNotBlockCLIOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte("provider: digitalocean\nos: ubuntu:26.04\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("portable os override", func(t *testing.T) {
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs := newFlagSet("test", io.Discard)
+		values := registerLeaseCreateFlags(fs, cfg)
+		if err := parseFlags(fs, []string{"--os", "ubuntu:24.04"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+			t.Fatalf("DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+	})
+
+	t.Run("provider override", func(t *testing.T) {
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs := newFlagSet("test", io.Discard)
+		values := registerLeaseCreateFlags(fs, cfg)
+		if err := parseFlags(fs, []string{"--provider", "aws"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "aws" {
+			t.Fatalf("Provider=%q", cfg.Provider)
+		}
+	})
+}
+
 func TestDigitalOceanEnvDoesNotMutateGenericFieldsForOtherProviders(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

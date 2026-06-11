@@ -87,6 +87,7 @@ type Config struct {
 	gcpRootGBExplicit             bool
 	GCPServiceAccount             string
 	DigitalOcean                  DigitalOceanConfig
+	digitalOceanImageExplicit     bool
 	Incus                         IncusConfig
 	Proxmox                       ProxmoxConfig
 	Parallels                     ParallelsConfig
@@ -928,7 +929,13 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.DigitalOcean.Region == "" {
 			cfg.DigitalOcean.Region = "nyc3"
 		}
-		if cfg.DigitalOcean.Image == "" {
+		if cfg.osImageExplicit && !cfg.digitalOceanImageExplicit {
+			if cfg.OSImage == "ubuntu:24.04" {
+				cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+			} else {
+				cfg.DigitalOcean.Image = ""
+			}
+		} else if cfg.DigitalOcean.Image == "" {
 			cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
 		}
 		if cfg.TargetOS == "" {
@@ -2351,6 +2358,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.DigitalOcean.Image != "" {
 			cfg.DigitalOcean.Image = file.DigitalOcean.Image
+			cfg.digitalOceanImageExplicit = true
 		}
 		if file.DigitalOcean.VPCUUID != "" {
 			cfg.DigitalOcean.VPCUUID = file.DigitalOcean.VPCUUID
@@ -3898,6 +3906,7 @@ func applyEnv(cfg *Config) error {
 	cfg.DigitalOcean.Region = getenv("CRABBOX_DIGITALOCEAN_REGION", cfg.DigitalOcean.Region)
 	if image := os.Getenv("CRABBOX_DIGITALOCEAN_IMAGE"); image != "" {
 		cfg.DigitalOcean.Image = image
+		cfg.digitalOceanImageExplicit = true
 	}
 	cfg.DigitalOcean.VPCUUID = getenv("CRABBOX_DIGITALOCEAN_VPC", cfg.DigitalOcean.VPCUUID)
 	if cidrs := os.Getenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS"); cidrs != "" {

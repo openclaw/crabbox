@@ -58,6 +58,14 @@ Config keys under `digitalocean:`:
 | `vpc` | `cfg.DigitalOcean.VPCUUID` | empty | Optional VPC UUID for Droplet placement. |
 | `sshCIDRs` | `cfg.DigitalOcean.SSHCIDRs` | empty | Reserved for firewall-aware follow-up work; Phase 1 does not create firewalls. |
 
+The portable `--os ubuntu:24.04` selector maps to `ubuntu-24-04-x64`.
+DigitalOcean does not currently offer the portable default Ubuntu 26.04 image,
+so provisioning with an explicit `--os ubuntu:26.04` is rejected unless
+`digitalocean.image` or `CRABBOX_DIGITALOCEAN_IMAGE` provides an explicit image
+slug. Validation occurs when Crabbox acquires a new Droplet, after CLI
+overrides; `config show`, provider overrides, and cleanup commands remain
+available when the configured portable selector is unsupported.
+
 DigitalOcean leases use `root` on SSH port `22` with no fallback port. These
 effective values appear in `crabbox config show` without changing shared
 Hetzner configuration when a command overrides the provider.
@@ -115,6 +123,14 @@ explicit VPC. Do not broaden scopes inside scripts.
 7. Delete the Droplet and managed SSH key on `stop`; `cleanup` deletes only
    resources with a complete Crabbox DigitalOcean ownership tag set. Failed
    post-delete cleanup retains the local claim so `stop` can retry it.
+
+If Droplet creation returns an indeterminate transport or server failure,
+Crabbox retains the SSH credentials and records a pending local recovery claim.
+`crabbox stop --provider digitalocean <lease-or-slug>` reconciles that claim and
+deletes a late-created Droplet when DigitalOcean exposes it. Empty inventory is
+not treated as proof that creation failed: while the outcome remains
+indeterminate, Crabbox retains the claim and credentials and asks the operator
+to retry rather than risk orphaning a billed Droplet without its SSH key.
 
 ## Ownership And Cleanup
 

@@ -147,6 +147,10 @@ func ReadLeaseClaim(leaseID string) (LeaseClaim, error) {
 	return readLeaseClaim(leaseID)
 }
 
+func OSImageWasExplicit(cfg Config) bool {
+	return cfg.osImageExplicit
+}
+
 func CrabboxStateDir() (string, error) {
 	return crabboxStateDir()
 }

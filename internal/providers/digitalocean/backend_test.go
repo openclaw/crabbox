@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 
 type fakeDigitalOceanAPI struct {
 	droplets       []droplet
+	listFn         func() ([]droplet, error)
 	nextID         int64
 	createErr      error
 	deleteErr      error
@@ -37,6 +39,9 @@ type fakeDigitalOceanAPI struct {
 }
 
 func (f *fakeDigitalOceanAPI) ListCrabboxDroplets(context.Context) ([]droplet, error) {
+	if f.listFn != nil {
+		return f.listFn()
+	}
 	var out []droplet
 	for _, item := range f.droplets {
 		if isOwnedDroplet(item) {
@@ -245,6 +250,256 @@ func TestAcquireRetainsCredentialsWhenDropletCreationIsAmbiguous(t *testing.T) {
 	}
 	if _, statErr := os.Stat(keyPath); statErr != nil {
 		t.Fatalf("retained key stat: %v", statErr)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("ambiguous", providerName)
+	if claimErr != nil || !ok || claim.LeaseID != api.createRequests[0].leaseID || claim.CloudID != "" {
+		t.Fatalf("recovery claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	if _, resolveErr := backend.Resolve(context.Background(), core.ResolveRequest{ID: "ambiguous", ReleaseOnly: true}); resolveErr == nil || !strings.Contains(resolveErr.Error(), "still pending") {
+		t.Fatalf("immediate recovery resolve err=%v", resolveErr)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("ambiguous", providerName); err != nil || !ok {
+		t.Fatalf("pending recovery claim ok=%v err=%v", ok, err)
+	}
+	createdAt, parseErr := strconv.ParseInt(claim.Labels["created_at"], 10, 64)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	backend.RT.Clock = fixedClock{t: time.Unix(createdAt, 0).Add(ambiguousCreateRecoveryGrace + time.Second)}
+	backend.recoveryReconcilePolls = 2
+	backend.recoveryReconcileInterval = time.Nanosecond
+	if _, resolveErr := backend.Resolve(context.Background(), core.ResolveRequest{ID: "ambiguous", ReleaseOnly: true}); resolveErr == nil || !strings.Contains(resolveErr.Error(), "remains indeterminate") {
+		t.Fatalf("aged recovery resolve err=%v", resolveErr)
+	}
+	if len(api.deletedKeys) != 0 {
+		t.Fatalf("deletedKeys=%v", api.deletedKeys)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("ambiguous", providerName); err != nil || !ok {
+		t.Fatalf("retained recovery claim ok=%v err=%v", ok, err)
+	}
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatalf("retained key after recovery retry: %v", statErr)
+	}
+}
+
+func TestResolvePendingRecoveryFindsLateDroplet(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123456"
+	slug := "late"
+	createdAt := time.Now().Add(-ambiguousCreateRecoveryGrace - time.Minute)
+	cfg.ProviderKey = providerKeyForLease(leaseID)
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, createdAt)
+	labels["state"] = "provisioning"
+	item := droplet{ID: 106, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
+	listCalls := 0
+	api := &fakeDigitalOceanAPI{}
+	api.listFn = func() ([]droplet, error) {
+		if len(api.deleted) > 0 {
+			return nil, nil
+		}
+		listCalls++
+		if listCalls < 3 {
+			return nil, nil
+		}
+		return api.droplets, nil
+	}
+	api.droplets = []droplet{item}
+	backend := newTestBackend(t, api)
+	backend.RT.Clock = fixedClock{t: time.Now()}
+	backend.recoveryReconcilePolls = 3
+	backend.recoveryReconcileInterval = time.Nanosecond
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, core.Server{
+		Provider: providerName,
+		Name:     item.Name,
+		Labels:   labels,
+	}, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.ID != item.ID || lease.LeaseID != leaseID || listCalls != 3 {
+		t.Fatalf("lease=%#v listCalls=%d", lease, listCalls)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName)
+	if err != nil || !ok || claim.CloudID != strconv.FormatInt(item.ID, 10) {
+		t.Fatalf("recovered claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+
+	api.keyDeleteErr = errors.New("key cleanup failed")
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "key cleanup failed") {
+		t.Fatalf("first ReleaseLease err=%v", err)
+	}
+	claim, ok, err = core.ResolveLeaseClaimForProvider(slug, providerName)
+	if err != nil || !ok || claim.CloudID != strconv.FormatInt(item.ID, 10) {
+		t.Fatalf("retained claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+
+	api.keyDeleteErr = nil
+	retry, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.Server.ID != item.ID || retry.Server.CloudID != strconv.FormatInt(item.ID, 10) {
+		t.Fatalf("retry lease=%#v", retry)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: retry}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName); err != nil || ok {
+		t.Fatalf("claim after retry ok=%v err=%v", ok, err)
+	}
+}
+
+func TestResolvePendingRecoveryPersistsDropletFoundInInitialInventory(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123457"
+	slug := "already-visible"
+	createdAt := time.Now().Add(-ambiguousCreateRecoveryGrace - time.Minute)
+	cfg.ProviderKey = providerKeyForLease(leaseID)
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, createdAt)
+	labels["state"] = "provisioning"
+	item := droplet{ID: 107, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, core.Server{
+		Provider: providerName,
+		Name:     item.Name,
+		Labels:   labels,
+	}, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.ID != item.ID || lease.LeaseID != leaseID {
+		t.Fatalf("lease=%#v", lease)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName)
+	if err != nil || !ok || claim.CloudID != strconv.FormatInt(item.ID, 10) {
+		t.Fatalf("recovered claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+}
+
+func TestResolveVisibleDropletIgnoresUnrelatedCorruptClaim(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123458"
+	slug := "visible"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	item := droplet{ID: 108, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	stateDir, err := core.CrabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimsDir := filepath.Join(stateDir, "claims")
+	if err := os.MkdirAll(claimsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claimsDir, "cbx_unrelated.json"), []byte("{not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.ID != item.ID || lease.LeaseID != leaseID {
+		t.Fatalf("lease=%#v", lease)
+	}
+}
+
+func TestResolvePendingRecoveryRejectsDuplicateVisibleDroplets(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123459"
+	slug := "duplicate"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	items := []droplet{
+		{ID: 109, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)},
+		{ID: 110, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)},
+	}
+	api := &fakeDigitalOceanAPI{droplets: items}
+	backend := newTestBackend(t, api)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, core.Server{
+		Provider: providerName,
+		Name:     items[0].Name,
+		Labels:   labels,
+	}, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "found multiple droplets") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil || !ok || claim.CloudID != "" {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("deleted droplets=%v keys=%v", api.deleted, api.deletedKeys)
+	}
+}
+
+func TestReleasePersistsPendingRecoveryBeforeKeyCleanupFailure(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123460"
+	slug := "cleanup-retry"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	item := droplet{ID: 111, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
+	api := &fakeDigitalOceanAPI{
+		droplets:     []droplet{item},
+		keyDeleteErr: errors.New("key cleanup failed"),
+	}
+	backend := newTestBackend(t, api)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, core.Server{
+		Provider: providerName,
+		Name:     item.Name,
+		Labels:   labels,
+	}, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+
+	lease := core.LeaseTarget{LeaseID: leaseID, Server: serverFromDroplet(item, cfg)}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "key cleanup failed") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil || !ok || claim.CloudID != strconv.FormatInt(item.ID, 10) {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	if len(api.deleted) != 1 || api.deleted[0] != item.ID {
+		t.Fatalf("deleted=%v", api.deleted)
+	}
+}
+
+func TestDigitalOceanAcquireRejectsUnsupportedExplicitPortableOS(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.OSImage = "ubuntu:26.04"
+	if err := validateDigitalOceanAcquireConfig(cfg, false); err != nil {
+		t.Fatalf("implicit OS err=%v", err)
+	}
+	if err := validateDigitalOceanAcquireConfig(cfg, true); err == nil || !strings.Contains(err.Error(), "does not support --os ubuntu:26.04") {
+		t.Fatalf("explicit OS err=%v", err)
+	}
+	cfg.DigitalOcean.Image = "custom-image"
+	if err := validateDigitalOceanAcquireConfig(cfg, true); err != nil {
+		t.Fatalf("explicit provider image err=%v", err)
 	}
 }
 
