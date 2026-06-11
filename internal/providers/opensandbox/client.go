@@ -406,6 +406,16 @@ func (c *sdkOpenSandboxClient) handleCommandEvent(event sdk.StreamEvent) (comman
 		_, writeErr := io.WriteString(c.rt.Stdout, event.Data)
 		return commandEventResult{}, writeErr
 	}
+	if payload.Type == "" {
+		switch strings.ToLower(event.Event) {
+		case "stdout":
+			_, err := io.WriteString(c.rt.Stdout, event.Data)
+			return commandEventResult{}, err
+		case "stderr":
+			_, err := io.WriteString(c.rt.Stderr, event.Data)
+			return commandEventResult{}, err
+		}
+	}
 	eventType := payload.Type
 	if eventType == "" {
 		eventType = event.Event
@@ -465,6 +475,9 @@ func (c *sdkOpenSandboxClient) execd(ctx context.Context, sandboxID string) (*sd
 	}
 	conn := c.config()
 	endpointURL := conn.RewriteEndpointURL(endpoint.Endpoint)
+	if !strings.HasPrefix(endpointURL, "http") {
+		endpointURL = conn.GetProtocol() + "://" + endpointURL
+	}
 	headers := cloneStringMap(endpoint.Headers)
 	if c.cfg.OpenSandbox.UseServerProxy && headers["X-EXECD-ACCESS-TOKEN"] == "" && c.key != "" {
 		headers["X-EXECD-ACCESS-TOKEN"] = c.key

@@ -459,6 +459,40 @@ func TestSDKClientRunCommandSendsTimeoutMillis(t *testing.T) {
 	}
 }
 
+func TestSDKClientRunCommandAddsSchemeToBareEndpoint(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	commandHit := false
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-bare/endpoints/44772":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"endpoint":"`+strings.TrimPrefix(server.URL, "http://")+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/command":
+			commandHit = true
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"type\":\"execution_complete\",\"exit_code\":0}\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitCode, err := client.RunCommand(context.Background(), "sb-bare", runCommandRequest{Command: "true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exitCode != 0 || !commandHit {
+		t.Fatalf("exit=%d commandHit=%v", exitCode, commandHit)
+	}
+}
+
 func TestCommandEventErrorDefaultsToFailureExit(t *testing.T) {
 	var stderr bytes.Buffer
 	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: io.Discard, Stderr: &stderr}}
@@ -493,6 +527,31 @@ func TestCommandEventRoutesRawStderrEvent(t *testing.T) {
 	}
 	if stdout.String() != "" || stderr.String() != "warn" {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestCommandEventPreservesJSONLookingRawStdoutStderr(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: &stderr}}
+	if _, err := client.handleCommandEvent(sdk.StreamEvent{Event: "stdout", Data: `{"ok":true}`}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.handleCommandEvent(sdk.StreamEvent{Event: "stderr", Data: `{"warn":true}`}); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != `{"ok":true}` || stderr.String() != `{"warn":true}` {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestCommandEventUsesStructuredJSONWhenTypePresent(t *testing.T) {
+	var stdout bytes.Buffer
+	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: io.Discard}}
+	if _, err := client.handleCommandEvent(sdk.StreamEvent{Event: "stdout", Data: `{"type":"stdout","text":"hello"}`}); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "hello" {
+		t.Fatalf("stdout=%q", stdout.String())
 	}
 }
 
