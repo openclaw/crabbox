@@ -47,6 +47,16 @@ type fakeBridgeProvider struct {
 	calls     int
 }
 
+type fakeTailnetBridgeProvider struct {
+	*fakeBridgeProvider
+	meta        TailscaleMetadata
+	validateErr error
+}
+
+func (f *fakeTailnetBridgeProvider) ValidateTailnetPeer(context.Context, string) (TailscaleMetadata, error) {
+	return f.meta, f.validateErr
+}
+
 func (f *fakeBridgeProvider) PublishPeer(_ context.Context, leaseID string, port int, _ time.Duration) (BridgePeerTarget, error) {
 	f.calls++
 	if f.pubErr != nil {
@@ -262,6 +272,30 @@ func TestResolvePondPeersKeepsTailnetPeerWhenURLMemberFails(t *testing.T) {
 	}
 	if got := bySlug["url"]; got.Transport != TransportNone || got.BridgeState != "error" {
 		t.Fatalf("failed URL peer should degrade in place: %#v", got)
+	}
+}
+
+func TestResolvePondPeersFallsBackWhenTailnetValidationFails(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { c.TailscaleIPv4 = "100.64.7.7" })
+	fake := &fakeTailnetBridgeProvider{
+		fakeBridgeProvider: &fakeBridgeProvider{listed: map[string][]BridgePeerTarget{
+			"isb_w": {{Port: 8080, URL: "https://abc.share.islo.dev"}},
+		}},
+		validateErr: errors.New("daemon unavailable"),
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].Transport != TransportURL || peers[0].Endpoint != "https://abc.share.islo.dev" {
+		t.Fatalf("expected URL fallback after failed tailnet validation, got %#v", peers)
 	}
 }
 

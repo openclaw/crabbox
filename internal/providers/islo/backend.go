@@ -39,9 +39,11 @@ const (
 )
 
 const (
-	isloProvider    = "islo"
-	isloLeasePrefix = "isb_"
-	isloNamePrefix  = "crabbox-"
+	isloProvider     = "islo"
+	isloLeasePrefix  = "isb_"
+	isloNamePrefix   = "crabbox-"
+	isloAdminUser    = "root"
+	isloWorkloadUser = "islo"
 )
 
 type isloFlagValues struct {
@@ -167,6 +169,9 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	} else {
 		leaseID, name, slug, err = resolveIsloLeaseID(req.ID, req.Repo.Root, req.Reclaim)
 		if err != nil {
+			return RunResult{}, err
+		}
+		if _, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID); err != nil {
 			return RunResult{}, err
 		}
 	}
@@ -298,6 +303,11 @@ func (b *isloBackend) Status(ctx context.Context, req StatusRequest) (statusView
 		if err != nil {
 			return statusView{}, isloError("get sandbox", err)
 		}
+		if sandbox != nil && isloStatusReady(sandbox.GetStatus()) {
+			if _, err := b.ensureLeaseTailscale(ctx, client, name, newLeaseSlug(leaseID), leaseID); err != nil {
+				return statusView{}, err
+			}
+		}
 		view := isloStatusView(leaseID, sandbox)
 		if !req.Wait || view.Ready {
 			return view, nil
@@ -409,6 +419,7 @@ func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir st
 		return 2, err
 	}
 	req := &gosdk.ExecRequest{Command: execCommand}
+	req.User = stringValue(isloWorkloadUser)
 	if workdir != "" {
 		req.Workdir = stringValue(workdir)
 	}

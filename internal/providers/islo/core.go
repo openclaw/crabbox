@@ -74,6 +74,10 @@ func updateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
 	return core.UpdateLeaseClaimTailscale(leaseID, ipv4, fqdn)
 }
 
+func clearLeaseClaimTailscale(leaseID string) error {
+	return core.ClearLeaseClaimTailscale(leaseID)
+}
+
 func syncExcludes(root string, cfg Config) ([]string, error) {
 	return core.SyncExcludes(root, cfg)
 }

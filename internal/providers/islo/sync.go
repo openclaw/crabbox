@@ -143,7 +143,10 @@ func isloFallbackExtractCommand(remoteB64, remoteArchive, workspace string) stri
 }
 
 func (b *isloBackend) execShell(ctx context.Context, client isloAPI, name, command string, stdout io.Writer) error {
-	code, err := client.ExecStream(ctx, name, &gosdk.ExecRequest{Command: []string{"bash", "-lc", command}}, stdout, b.rt.Stderr)
+	code, err := client.ExecStream(ctx, name, &gosdk.ExecRequest{
+		Command: []string{"bash", "-lc", command},
+		User:    stringValue(isloWorkloadUser),
+	}, stdout, b.rt.Stderr)
 	if err != nil {
 		return fmt.Errorf("islo exec %q: %w", command, err)
 	}

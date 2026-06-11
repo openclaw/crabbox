@@ -266,6 +266,23 @@ func updateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
 	})
 }
 
+func clearLeaseClaimTailscale(leaseID string) error {
+	if leaseID == "" {
+		return nil
+	}
+	return mutateLeaseClaim(leaseID, func(claim *leaseClaim) error {
+		if claim.LeaseID == "" {
+			return nil
+		}
+		claim.TailscaleIPv4 = ""
+		claim.TailscaleFQDN = ""
+		for _, key := range []string{"tailscale", "tailscale_state", "tailscale_ipv4", "tailscale_fqdn"} {
+			delete(claim.Labels, key)
+		}
+		return nil
+	})
+}
+
 func updateLeaseClaimCacheVolumes(leaseID string, specs []string) error {
 	if leaseID == "" {
 		return nil

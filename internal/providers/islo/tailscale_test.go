@@ -1,13 +1,16 @@
 package islo
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIsloTailscaleHostname(t *testing.T) {
@@ -85,7 +88,7 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		"--tun=userspace-networking",
 		"--socks5-server=127.0.0.2:1055",
 		"--outbound-http-proxy-listen=127.0.0.2:1055",
-		`--statedir="${TS_STATE_DIR}"`,
+		"--state=mem:",
 		`TS_AUTH_FILE="$(mktemp /tmp/crabbox-ts-auth.XXXXXX)"`,
 		`--auth-key="file:${TS_AUTH_FILE}"`,
 		"unset TS_AUTHKEY",
@@ -119,6 +122,54 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 	extractAt := strings.Index(isloTailscaleBringUp, `tar -xzf "${TS_ARCHIVE}"`)
 	if verifyAt < 0 || extractAt < 0 || verifyAt > extractAt {
 		t.Fatal("bring-up script must verify the archive before extraction")
+	}
+}
+
+func TestEnsureLeaseTailscaleRevalidatesAsRoot(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{execOut: "CRABBOX_TS_IP=100.64.7.8"}
+	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
+
+	meta, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.IPv4 != "100.64.7.8" || meta.State != "ready" {
+		t.Fatalf("metadata=%#v", meta)
+	}
+	if len(client.execRequests) != 1 || client.execRequests[0].GetUser() == nil || *client.execRequests[0].GetUser() != isloAdminUser {
+		t.Fatalf("health request must run as root: %#v", client.execRequests)
+	}
+}
+
+func TestEnsureLeaseTailscaleClearsDeadClaimWithoutAuthKey(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{execCode: 1}
+	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
+
+	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID); err == nil {
+		t.Fatal("expected dead daemon error")
+	}
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("resolve claim ok=%t err=%v", ok, err)
+	}
+	if claim.TailscaleIPv4 != "" || claim.Labels["tailscale"] != "" {
+		t.Fatalf("stale tailnet metadata not cleared: %#v", claim)
 	}
 }
 

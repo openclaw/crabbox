@@ -323,6 +323,13 @@ func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	if result.Session == nil {
 		t.Fatal("missing session handle")
 	}
+	if len(client.execRequests) == 0 {
+		t.Fatal("missing workload exec request")
+	}
+	workloadReq := client.execRequests[len(client.execRequests)-1]
+	if workloadReq.GetUser() == nil || *workloadReq.GetUser() != isloWorkloadUser {
+		t.Fatalf("workload exec user=%v want %q", workloadReq.GetUser(), isloWorkloadUser)
+	}
 	got := result.Session
 	if got.Provider != isloProvider || got.LeaseID != "isb_crabbox-repo-abcdef" || got.Slug == "" || got.Reused || !got.Kept {
 		t.Fatalf("session=%#v", got)
@@ -510,6 +517,9 @@ func TestIsloCreateSandboxTailscaleClaimAndOptions(t *testing.T) {
 		t.Fatalf("expected one tailscale exec request, got %d", len(client.execRequests))
 	}
 	req := client.execRequests[0]
+	if req.GetUser() == nil || *req.GetUser() != isloAdminUser {
+		t.Fatalf("tailscale exec user=%v want %q", req.GetUser(), isloAdminUser)
+	}
 	for key, want := range map[string]string{
 		"TS_HOST":                "cbx-islo-node-a",
 		"TS_TAGS":                "tag:cbx-pond-demo",

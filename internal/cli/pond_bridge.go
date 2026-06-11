@@ -97,6 +97,12 @@ type BridgeProvider interface {
 	ListPeerTargets(ctx context.Context, leaseID string) ([]BridgePeerTarget, error)
 }
 
+// TailnetPeerValidator lets dual-plane delegated providers revalidate a local
+// tailnet claim before it is advertised as reachable.
+type TailnetPeerValidator interface {
+	ValidateTailnetPeer(ctx context.Context, leaseID string) (TailscaleMetadata, error)
+}
+
 // pondPeersFlags holds the parsed flags for `crabbox pond peers`. It is
 // extracted so the command can be unit tested without touching the global
 // flag set.
@@ -339,15 +345,28 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 	var bridgeLoadErr error
 	for _, claim := range claims {
 		peer := bridgePeerFromClaim(claim, class)
-		urlPrimary := peer.Transport == TransportURL
 		urlCapable := providerCapabilities(claim.Provider).URLBridge
-		secondaryRead := !urlPrimary && flags.SharePort == 0
-		useBridge := urlPrimary || urlCapable
+		useBridge := peer.Transport == TransportURL || urlCapable
 		if useBridge {
 			if !bridgeLoaded {
 				bridgeLoaded = true
 				bridge, bridgeLoadErr = loadBridgeProvider(provider, rt)
 			}
+			if peer.Transport == TransportTailnet && bridgeLoadErr == nil {
+				if validator, ok := bridge.(TailnetPeerValidator); ok {
+					meta, validateErr := validator.ValidateTailnetPeer(ctx, claim.LeaseID)
+					if validateErr != nil {
+						claim.TailscaleIPv4 = ""
+						claim.TailscaleFQDN = ""
+						peer = bridgePeerFromClaim(claim, class)
+						peer.Note = fmt.Sprintf("tailnet validation failed: %v", validateErr)
+					} else {
+						peer.Endpoint = firstNonEmpty(meta.IPv4, meta.FQDN, meta.Hostname)
+					}
+				}
+			}
+			urlPrimary := peer.Transport == TransportURL
+			secondaryRead := !urlPrimary && flags.SharePort == 0
 			if bridgeLoadErr != nil {
 				if secondaryRead {
 					peers = append(peers, peer)

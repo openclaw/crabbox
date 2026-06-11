@@ -134,6 +134,12 @@ Crabbox starts with the daemon (`ALL_PROXY=socks5://127.0.0.2:1055` and
 The proxy uses `127.0.0.2` because userspace Tailscale forwards inbound tailnet
 TCP to `127.0.0.1`; keeping the proxy on a separate loopback address prevents
 tailnet peers from using the unauthenticated outbound proxy.
+Crabbox runs `tailscaled` as `root` with ephemeral in-memory node state, while
+repository sync and workload commands run as Islo's non-root `islo` user. The
+root-only control socket is revalidated before lease reuse, status reporting,
+and `pond peers`; a stopped daemon is restarted when the auth key is available,
+otherwise stale tailnet claim metadata is removed and the lease falls back to
+its URL bridge.
 Unproxied process traffic still uses the sandbox's normal network namespace.
 Exit-node settings are passed through to `tailscale up`, but only traffic sent
 through the userspace Tailscale path uses them.

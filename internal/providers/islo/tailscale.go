@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	gosdk "github.com/islo-labs/go-sdk"
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 // The version and architecture-specific digests move together in code review
@@ -78,7 +79,7 @@ TS_SOCKET="${TS_STATE_DIR}/tailscaled.sock"
 if ! /tmp/ts/tailscale --socket="${TS_SOCKET}" status >/dev/null 2>&1; then
   # Userspace ingress forwards tailnet TCP to 127.0.0.1:<port>. Keep the
   # unauthenticated outbound proxy on another loopback address.
-  setsid /tmp/ts/tailscaled --tun=userspace-networking --statedir="${TS_STATE_DIR}" \
+  setsid /tmp/ts/tailscaled --tun=userspace-networking --state=mem: \
     --socket="${TS_SOCKET}" --socks5-server=127.0.0.2:1055 \
     --outbound-http-proxy-listen=127.0.0.2:1055 \
     >"${TS_STATE_DIR}/tailscaled.log" 2>&1 </dev/null &
@@ -102,6 +103,16 @@ test -n "${ts_ip}"
 echo "CRABBOX_TS_IP=${ts_ip}"
 `
 
+const isloTailscaleHealthCheck = `
+set -e
+: "${TS_STATE_DIR:?}"
+TS_SOCKET="${TS_STATE_DIR}/tailscaled.sock"
+test -S "${TS_SOCKET}"
+ts_ip="$(/tmp/ts/tailscale --socket="${TS_SOCKET}" ip -4 2>/dev/null | head -n1)"
+test -n "${ts_ip}"
+echo "CRABBOX_TS_IP=${ts_ip}"
+`
+
 // maybeJoinTailscale brings an islo sandbox onto the configured tailnet when
 // the lease was created with --tailscale. It is a no-op otherwise, so plain
 // url-bridge islo ponds are unchanged. On success it records the tailnet IPv4
@@ -121,7 +132,10 @@ func (b *isloBackend) maybeJoinTailscale(ctx context.Context, client isloAPI, sa
 	allowLAN := fmt.Sprint(b.cfg.Tailscale.ExitNodeAllowLANAccess)
 	stateDir := isloTailscaleStateDir(leaseID)
 
-	req := &gosdk.ExecRequest{Command: []string{"bash", "-lc", isloTailscaleBringUp}}
+	req := &gosdk.ExecRequest{
+		Command: []string{"bash", "-lc", isloTailscaleBringUp},
+		User:    stringValue(isloAdminUser),
+	}
 	req.Env = map[string]*string{}
 	for k, v := range map[string]string{
 		"TS_AUTHKEY":             authKey,
@@ -151,6 +165,72 @@ func (b *isloBackend) maybeJoinTailscale(ctx context.Context, client isloAPI, sa
 	}
 	fmt.Fprintf(b.rt.Stderr, "islo: joined tailnet ip=%s\n", m[1])
 	return updateLeaseClaimTailscale(leaseID, m[1], "")
+}
+
+func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, sandboxName, slug, leaseID string) (core.TailscaleMetadata, error) {
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil {
+		return core.TailscaleMetadata{}, err
+	}
+	if !ok || (claim.TailscaleIPv4 == "" && claim.TailscaleFQDN == "") {
+		return core.TailscaleMetadata{}, nil
+	}
+	stateDir := isloTailscaleStateDir(leaseID)
+	req := &gosdk.ExecRequest{
+		Command: []string{"bash", "-lc", isloTailscaleHealthCheck},
+		Env:     map[string]*string{"TS_STATE_DIR": stringValue(stateDir)},
+		User:    stringValue(isloAdminUser),
+	}
+	var out bytes.Buffer
+	code, checkErr := client.ExecStream(ctx, sandboxName, req, &out, b.rt.Stderr)
+	if checkErr == nil && code == 0 {
+		if match := isloTailscaleIPRe.FindStringSubmatch(out.String()); match != nil && match[1] != "" {
+			if err := updateLeaseClaimTailscale(leaseID, match[1], claim.TailscaleFQDN); err != nil {
+				return core.TailscaleMetadata{}, err
+			}
+			return core.TailscaleMetadata{Enabled: true, IPv4: match[1], FQDN: claim.TailscaleFQDN, State: "ready"}, nil
+		}
+	}
+	if strings.TrimSpace(b.cfg.Tailscale.AuthKey) != "" {
+		restart := *b
+		restart.cfg.Tailscale.Enabled = true
+		restartErr := restart.maybeJoinTailscale(ctx, client, sandboxName, blank(claim.Slug, slug), leaseID)
+		if restartErr == nil {
+			updated, _, readErr := resolveLeaseClaim(leaseID)
+			if readErr != nil {
+				return core.TailscaleMetadata{}, readErr
+			}
+			return core.TailscaleMetadata{Enabled: true, IPv4: updated.TailscaleIPv4, FQDN: updated.TailscaleFQDN, State: "ready"}, nil
+		}
+		if err := clearLeaseClaimTailscale(leaseID); err != nil {
+			return core.TailscaleMetadata{}, err
+		}
+		return core.TailscaleMetadata{}, exit(1, "islo tailnet restart failed: %v", restartErr)
+	}
+	if err := clearLeaseClaimTailscale(leaseID); err != nil {
+		return core.TailscaleMetadata{}, err
+	}
+	if checkErr != nil {
+		return core.TailscaleMetadata{}, exit(1, "islo tailnet health check: %v", checkErr)
+	}
+	return core.TailscaleMetadata{}, exit(1, "islo tailnet daemon unavailable for lease %s", leaseID)
+}
+
+func (b *isloBackend) ValidateTailnetPeer(ctx context.Context, leaseID string) (core.TailscaleMetadata, error) {
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil {
+		return core.TailscaleMetadata{}, err
+	}
+	if !ok {
+		return core.TailscaleMetadata{}, exit(4, "islo lease claim %s not found", leaseID)
+	}
+	client, err := newIsloClient(b.cfg, b.rt)
+	if err != nil {
+		_ = clearLeaseClaimTailscale(leaseID)
+		return core.TailscaleMetadata{}, err
+	}
+	name := strings.TrimPrefix(leaseID, isloLeasePrefix)
+	return b.ensureLeaseTailscale(ctx, client, name, claim.Slug, leaseID)
 }
 
 func isloTailscaleStateDir(leaseID string) string {
