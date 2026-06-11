@@ -27,7 +27,7 @@ func TestRunStartCleansUpDaemonAndInstanceDirectoryOnReadinessTimeout(t *testing
 	helperPath := filepath.Join(t.TempDir(), "fake-helper")
 	helperScript := `#!/bin/sh
 dd bs=1 count=1 <&3 >/dev/null 2>&1 || exit 24
-printf '%s\n' "$$" > "$CRABBOX_TEST_HELPER_PID_FILE"
+printf '%s\n' "$$" > ` + strconv.Quote(pidFile) + `
 printf 'fake helper waiting for readiness\n'
 trap 'exit 0' TERM INT
 while :; do sleep 1; done
@@ -35,8 +35,6 @@ while :; do sleep 1; done
 	if err := os.WriteFile(helperPath, []byte(helperScript), 0o755); err != nil {
 		t.Fatalf("write fake helper: %v", err)
 	}
-	t.Setenv("CRABBOX_TEST_HELPER_PID_FILE", pidFile)
-
 	originalPrepare := prepareInstanceAssetsFunc
 	originalExecutable := helperExecutable
 	originalProcessStartTime := processStartTime
@@ -565,6 +563,45 @@ func TestNormalizeInstanceKeepsRunningOnIdentityProbeFailure(t *testing.T) {
 	})
 	if inst.Status != StatusRunning || inst.PID != os.Getpid() || inst.PIDStartedAt != "known-start" {
 		t.Fatalf("normalized instance=%+v", inst)
+	}
+}
+
+func TestNormalizeInstanceStopsStalePIDlessStartup(t *testing.T) {
+	now := time.Now().UTC()
+	inst := normalizeInstance(Instance{
+		Status:    StatusStarting,
+		CreatedAt: now.Add(-pidlessStartupStaleAfter - time.Minute),
+		UpdatedAt: now.Add(-pidlessStartupStaleAfter - time.Minute),
+	})
+	if inst.Status != StatusStopped || inst.PID != 0 {
+		t.Fatalf("normalized instance=%+v", inst)
+	}
+}
+
+func TestNormalizeInstanceKeepsFreshPIDlessStartup(t *testing.T) {
+	now := time.Now().UTC()
+	inst := normalizeInstance(Instance{
+		Status:    StatusStarting,
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+	if inst.Status != StatusStarting || inst.PID != 0 {
+		t.Fatalf("normalized instance=%+v", inst)
+	}
+}
+
+func TestHelperDaemonEnvExcludesCallerCredentials(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "secret")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	env := helperDaemonEnv()
+	joined := strings.Join(env, "\n")
+	for _, name := range []string{"GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY"} {
+		if strings.Contains(joined, name+"=") {
+			t.Fatalf("daemon environment includes %s", name)
+		}
+	}
+	if !strings.Contains(joined, "PATH=/usr/bin:/bin:/usr/sbin:/sbin") {
+		t.Fatalf("daemon environment missing deterministic PATH: %q", joined)
 	}
 }
 

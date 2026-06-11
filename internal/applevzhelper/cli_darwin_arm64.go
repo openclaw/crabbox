@@ -31,6 +31,7 @@ var (
 	runStartPollInterval       = 250 * time.Millisecond
 	terminateInstanceGraceTime = 20 * time.Second
 	terminateInstancePollTime  = 250 * time.Millisecond
+	pidlessStartupStaleAfter   = 2 * time.Minute
 )
 
 const (
@@ -221,6 +222,7 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	cmd := exec.Command(exe, "serve", "--state-root", root, "--name", *name, "--startup-fd", strconv.Itoa(inheritedStartupFD))
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	cmd.Env = helperDaemonEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.ExtraFiles = []*os.File{startupReader}
 	if err := cmd.Start(); err != nil {
@@ -695,6 +697,10 @@ func normalizeInstance(inst Instance) Instance {
 	if inst.SSHHost == "" && inst.SSHPort > 0 {
 		inst.SSHHost = "127.0.0.1"
 	}
+	if inst.Status == StatusStarting && inst.PID == 0 && pidlessStartupStale(inst, time.Now().UTC()) {
+		inst.Status = StatusStopped
+		inst.PIDStartedAt = ""
+	}
 	if inst.PID > 0 && (!pidAlive(inst.PID) || processIdentityChanged(inst)) {
 		if IsRunningStatus(inst.Status) || inst.Status == StatusStopping {
 			inst.Status = StatusStopped
@@ -703,6 +709,29 @@ func normalizeInstance(inst Instance) Instance {
 		}
 	}
 	return inst
+}
+
+func helperDaemonEnv() []string {
+	env := []string{
+		"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+		"LC_ALL=C",
+		"LANG=C",
+		"TZ=UTC",
+	}
+	for _, name := range []string{"HOME", "TMPDIR"} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			env = append(env, name+"="+value)
+		}
+	}
+	return env
+}
+
+func pidlessStartupStale(inst Instance, now time.Time) bool {
+	updatedAt := inst.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = inst.CreatedAt
+	}
+	return updatedAt.IsZero() || !updatedAt.Add(pidlessStartupStaleAfter).After(now)
 }
 
 func processIdentityChanged(inst Instance) bool {
