@@ -318,15 +318,14 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 	}
 	name := core.LeaseProviderName(leaseID, slug)
 	body := map[string]any{
-		"name":       name,
-		"region":     digitalOceanRegion(cfg),
-		"size":       cfg.ServerType,
-		"image":      digitalOceanImage(cfg),
-		"ssh_keys":   []any{key.ID},
-		"tags":       tags,
-		"user_data":  core.CloudInitUserData(cfg, publicKey),
-		"monitoring": true,
-		"ipv6":       false,
+		"name":      name,
+		"region":    digitalOceanRegion(cfg),
+		"size":      cfg.ServerType,
+		"image":     digitalOceanImage(cfg),
+		"ssh_keys":  []any{key.ID},
+		"tags":      tags,
+		"user_data": core.CloudInitUserData(cfg, publicKey),
+		"ipv6":      false,
 	}
 	if cfg.DigitalOcean.VPCUUID != "" {
 		body["vpc_uuid"] = cfg.DigitalOcean.VPCUUID

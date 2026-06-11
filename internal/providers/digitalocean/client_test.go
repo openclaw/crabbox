@@ -54,6 +54,9 @@ func TestDigitalOceanClientCreateDropletRequestShape(t *testing.T) {
 			if got := body["vpc_uuid"]; got != "vpc-123" {
 				t.Fatalf("vpc_uuid=%v", got)
 			}
+			if _, ok := body["monitoring"]; ok {
+				t.Fatalf("monitoring agent must not be enabled: %v", body)
+			}
 			keys, _ := body["ssh_keys"].([]any)
 			if len(keys) != 1 || keys[0].(float64) != 123 {
 				t.Fatalf("ssh_keys=%v", body["ssh_keys"])
