@@ -55,7 +55,7 @@ func TestIsloTailscaleHostname(t *testing.T) {
 }
 
 func TestIsloTailscaleIPRegex(t *testing.T) {
-	out := "some preamble\nCRABBOX_TS_IP=100.105.127.13\ntrailing\n"
+	out := "/tmp/ts.tgz: OKCRABBOX_TS_IP=100.105.127.13trailing"
 	m := isloTailscaleIPRe.FindStringSubmatch(out)
 	if m == nil || m[1] != "100.105.127.13" {
 		t.Fatalf("expected to parse 100.105.127.13, got %v", m)

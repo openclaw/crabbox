@@ -21,13 +21,13 @@ const (
 	defaultIsloTailscaleARM64SHA256 = "3cb068eb1368b6bb218d0ef0aa0a7a679a7156b7c979e2279cc2c2321b5f05c7"
 )
 
-// isloTailscaleIPRe extracts the tailnet IPv4 the bring-up script reports back
-// on its own line so we never have to parse the full `tailscale status`.
-var isloTailscaleIPRe = regexp.MustCompile(`(?m)^CRABBOX_TS_IP=([0-9.]+)`)
+// isloTailscaleIPRe extracts the explicit tailnet marker even when the Islo SSE
+// stream concatenates adjacent stdout event payloads without line separators.
+var isloTailscaleIPRe = regexp.MustCompile(`CRABBOX_TS_IP=([0-9.]+)`)
 
 const isloTailscaleVerifyArchive = `
 command -v sha256sum >/dev/null 2>&1 || { echo "sha256sum is required" >&2; exit 3; }
-printf '%s  %s\n' "${TS_SHA256}" "${TS_ARCHIVE}" | sha256sum -c -
+printf '%s  %s\n' "${TS_SHA256}" "${TS_ARCHIVE}" | sha256sum -c - >/dev/null
 `
 
 // isloTailscaleBringUp is the in-sandbox script crabbox runs over the islo exec
