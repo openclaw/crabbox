@@ -387,6 +387,16 @@ func TestSSHArgsIncludeReliabilityOptions(t *testing.T) {
 	}
 }
 
+func TestSSHArgsNoInputAddsNativeStdinRedirect(t *testing.T) {
+	target := SSHTarget{User: "crabbox", Host: "203.0.113.10", Port: "22"}
+	if got := strings.Join(sshArgsNoInput(target, "true"), " "); !strings.Contains(" "+got+" ", " -n ") {
+		t.Fatalf("sshArgsNoInput() missing -n: %q", got)
+	}
+	if got := strings.Join(sshArgs(target, "true"), " "); strings.Contains(" "+got+" ", " -n ") {
+		t.Fatalf("sshArgs() unexpectedly contains -n: %q", got)
+	}
+}
+
 func TestSSHArgsIncludeCertificateFile(t *testing.T) {
 	t.Setenv("HOME", "/tmp/crabbox-home")
 	got := strings.Join(sshArgs(SSHTarget{

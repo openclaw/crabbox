@@ -36,17 +36,21 @@ func normalizeTargetConfig(cfg *Config) {
 	if cfg.Provider == "aws" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 && cfg.SSHUser == baseConfig().SSHUser {
 		cfg.SSHUser = "Administrator"
 	}
-	if cfg.Static.User != "" && cfg.SSHUser == baseConfig().SSHUser {
-		cfg.SSHUser = cfg.Static.User
+	if isStaticProvider(cfg.Provider) {
+		if cfg.Static.User != "" && cfg.SSHUser == baseConfig().SSHUser {
+			cfg.SSHUser = cfg.Static.User
+		}
 	}
 	if isDefaultWorkRoot(cfg.WorkRoot) {
 		cfg.WorkRoot = defaultWorkRootForTarget(cfg.TargetOS, cfg.WindowsMode)
 	}
-	if cfg.Static.Port != "" && cfg.SSHPort == baseConfig().SSHPort {
-		cfg.SSHPort = cfg.Static.Port
-	}
-	if cfg.Static.WorkRoot != "" {
-		cfg.WorkRoot = cfg.Static.WorkRoot
+	if isStaticProvider(cfg.Provider) {
+		if cfg.Static.Port != "" && cfg.SSHPort == baseConfig().SSHPort {
+			cfg.SSHPort = cfg.Static.Port
+		}
+		if cfg.Static.WorkRoot != "" {
+			cfg.WorkRoot = cfg.Static.WorkRoot
+		}
 	}
 	if (cfg.Provider == "namespace-devbox" || cfg.Provider == "namespace") && isDefaultWorkRoot(cfg.WorkRoot) && cfg.Namespace.WorkRoot != "" {
 		cfg.WorkRoot = cfg.Namespace.WorkRoot
@@ -127,12 +131,12 @@ func validateProviderTarget(cfg Config) error {
 	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
 		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
-	if provider.Name() == "tart" && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
-		return exit(2, "provider=tart supports architecture=arm64 only")
+	if (provider.Name() == "tart" || provider.Name() == "apple-vz") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
+		return exit(2, "provider=%s supports architecture=arm64 only", provider.Name())
 	}
 	if effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
-		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" {
-			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, or provider=tart")
+		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" && provider.Name() != "apple-vz" {
+			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, or provider=apple-vz")
 		}
 		if cfg.TargetOS != targetLinux &&
 			!(provider.Name() == "azure" && cfg.TargetOS == targetWindows) &&

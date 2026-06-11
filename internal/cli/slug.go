@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"hash/fnv"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -99,16 +102,20 @@ func leaseProviderName(leaseID, slug string) string {
 
 func allocateDirectLeaseSlug(leaseID, requested string, servers []Server) (string, error) {
 	base := normalizeLeaseSlug(requested)
-	checkClaims := base != ""
+	generated := base == ""
 	if base == "" {
 		base = newLeaseSlug(leaseID)
 	}
 	slug := base
 	for attempt := 0; attempt < 20; attempt++ {
 		inUse := serverSlugInUse(slug, servers)
-		if !inUse && checkClaims {
+		if !inUse {
 			var err error
-			inUse, err = claimSlugInUse(slug, leaseID)
+			if generated {
+				inUse, err = claimSlugInUseBestEffort(slug, leaseID)
+			} else {
+				inUse, err = claimSlugInUse(slug, leaseID)
+			}
 			if err != nil {
 				return "", err
 			}
@@ -151,6 +158,40 @@ func claimSlugInUse(slug, leaseID string) (bool, error) {
 			normalizeLeaseSlug(candidate.Slug) == slug
 	})
 	return ok, err
+}
+
+func claimSlugInUseBestEffort(slug, leaseID string) (bool, error) {
+	slug = normalizeLeaseSlug(slug)
+	if slug == "" {
+		return false, nil
+	}
+	dir, err := crabboxStateDir()
+	if err != nil {
+		return false, err
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "claims"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, exit(2, "read claims directory: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		candidateID := strings.TrimSuffix(entry.Name(), ".json")
+		candidate, err := readLeaseClaim(candidateID)
+		if err != nil {
+			continue
+		}
+		if candidate.LeaseID != "" &&
+			candidate.LeaseID != leaseID &&
+			normalizeLeaseSlug(candidate.Slug) == slug {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func serverSlugInUse(slug string, servers []Server) bool {

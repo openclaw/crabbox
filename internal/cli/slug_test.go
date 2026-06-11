@@ -120,6 +120,47 @@ func TestAllocateDirectLeaseSlugAvoidsLocalClaimCollisionForRequestedSlug(t *tes
 	}
 }
 
+func TestAllocateDirectLeaseSlugAvoidsLocalClaimCollisionForGeneratedSlug(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_000000000001"
+	base := newLeaseSlug(leaseID)
+	if err := claimLeaseForRepoProvider("cbx_000000000000", base, "digitalocean", "/repo-a", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := allocateDirectLeaseSlug(leaseID, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == base {
+		t.Fatalf("claim collision was not repaired: %q", got)
+	}
+	if !strings.HasPrefix(got, base+"-") || len(got) != len(base+"-0000") {
+		t.Fatalf("collision slug=%q want four-hex suffix", got)
+	}
+}
+
+func TestAllocateDirectLeaseSlugGeneratedIgnoresCorruptUnrelatedClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path, err := leaseClaimPath("cbx_badbadbadbad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	leaseID := "cbx_000000000001"
+	got, err := allocateDirectLeaseSlug(leaseID, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != newLeaseSlug(leaseID) {
+		t.Fatalf("slug=%q", got)
+	}
+}
+
 func TestAllocateClaimLeaseSlugAvoidsLocalClaimCollision(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	if err := claimLeaseForRepoProvider("cbx_000000000000", "update-flow-smoke", "cloudflare", "/repo-a", time.Minute, false); err != nil {

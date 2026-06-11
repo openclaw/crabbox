@@ -16,15 +16,18 @@ permissions:
 
 jobs:
   goreleaser:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Stash GoReleaser config
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+
+      - name: Stash current GoReleaser config
         run: cp .goreleaser.yaml /tmp/.goreleaser.yaml
 
       - name: Checkout release tag
@@ -32,6 +35,13 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: git checkout "$RELEASE_TAG"
+
+      - name: Preserve pre-helper release configuration
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          if [ ! -d cmd/crabbox-apple-vz-helper ]; then
+            cp .goreleaser.yaml /tmp/.goreleaser.yaml
+          fi
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -75,7 +85,7 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean --config /tmp/.goreleaser.yaml
+          args: release --clean --config /tmp/.goreleaser.yaml --parallelism 1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
