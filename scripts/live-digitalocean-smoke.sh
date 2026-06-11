@@ -155,14 +155,6 @@ if ! provider_enabled; then
 fi
 
 if [[ -z "${DIGITALOCEAN_TOKEN:-}" ]]; then
-  pat_file="${HOME}/Desktop/digitalocean-crabbox/PAT.md"
-  if [[ -f "$pat_file" ]]; then
-    DIGITALOCEAN_TOKEN="$(tr -d '\r\n' < "$pat_file")"
-    export DIGITALOCEAN_TOKEN
-  fi
-fi
-
-if [[ -z "${DIGITALOCEAN_TOKEN:-}" ]]; then
   printf 'classification=environment_blocked reason=DIGITALOCEAN_TOKEN_missing\n'
   exit 0
 fi

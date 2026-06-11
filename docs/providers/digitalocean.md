@@ -137,10 +137,10 @@ The repeatable live check is opt-in:
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=digitalocean scripts/live-digitalocean-smoke.sh
 ```
 
-The script builds `bin/crabbox`, uses `DIGITALOCEAN_TOKEN` from the environment
-or a local `$HOME/Desktop/digitalocean-crabbox/PAT.md` file if present, creates a
-small `s-1vcpu-1gb` Droplet, runs `echo ok`, verifies `list --json`, stops the
-lease, runs dry-run cleanup, and verifies the smoke slug is absent afterward.
+The script builds `bin/crabbox`, uses `DIGITALOCEAN_TOKEN` from the environment,
+creates a small `s-1vcpu-1gb` Droplet, runs `echo ok`, verifies `list --json`,
+stops the lease, runs dry-run cleanup, and verifies the smoke slug is absent
+afterward.
 
 Final classifications include:
 
