@@ -99,7 +99,6 @@ Each provider also registers its own flags; the ones relevant to `stop` include:
 --e2b-api-url <url>                      E2B API URL
 --e2b-domain <domain>                    E2B sandbox domain
 --azure-dynamic-sessions-endpoint <url>  Azure Container Apps Dynamic Sessions endpoint
---azure-dynamic-sessions-pool <name>     Azure Dynamic Sessions pool
 ```
 
 Run `crabbox stop --help` for the full, provider-aware flag list, and

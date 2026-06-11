@@ -184,6 +184,30 @@ func TestUploadFileStopsProducerOnTransportFailure(t *testing.T) {
 	t.Fatal("upload producer goroutine still running after transport failure")
 }
 
+func TestNewAPIUsesBoundedDefaultHTTPClient(t *testing.T) {
+	api, err := newAPI(testConfig(), Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, ok := api.(*client)
+	if !ok {
+		t.Fatalf("api=%T, want *client", api)
+	}
+	if client.http == nil || client.http == http.DefaultClient {
+		t.Fatalf("default http client=%#v, want bounded private client", client.http)
+	}
+	if client.http.Timeout != 0 {
+		t.Fatalf("whole-response timeout=%s, want caller context to govern streams", client.http.Timeout)
+	}
+	transport, ok := client.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport=%T, want *http.Transport", client.http.Transport)
+	}
+	if transport.ResponseHeaderTimeout != upstashBoxDefaultResponseHeaderTimeout {
+		t.Fatalf("response header timeout=%s, want %s", transport.ResponseHeaderTimeout, upstashBoxDefaultResponseHeaderTimeout)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -354,6 +378,91 @@ func TestRunCreatesExecsAndDeletesOneShotBox(t *testing.T) {
 	}
 }
 
+func TestRunCleanupDeleteUsesBoundedContext(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	withUpstashBoxCleanupTimeout(t, 20*time.Millisecond)
+	fake := &fakeAPI{blockDelete: true}
+	withFakeAPI(t, fake)
+	var stderr bytes.Buffer
+	backend := NewBackend(Provider{}.Spec(), testConfig(), Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
+	start := time.Now()
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+		Command: []string{"echo", "hello"},
+		NoSync:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("result=%#v", result)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "warning: upstash-box delete failed for box_1: context deadline exceeded") {
+		t.Fatalf("stderr=%q, want bounded cleanup warning", stderr.String())
+	}
+}
+
+func TestRunEnvCleanupUsesBoundedContext(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	withUpstashBoxCleanupTimeout(t, 20*time.Millisecond)
+	fake := &fakeAPI{blockEnvCleanup: true}
+	withFakeAPI(t, fake)
+	var stderr bytes.Buffer
+	backend := NewBackend(Provider{}.Spec(), testConfig(), Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
+	start := time.Now()
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+		Command: []string{"echo", "hello"},
+		Env:     map[string]string{"TOKEN": "secret"},
+		NoSync:  true,
+		Keep:    true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "upstash-box env cleanup failed for box_1: context deadline exceeded") {
+		t.Fatalf("err=%v, want bounded env cleanup failure", err)
+	}
+	if result.ExitCode != 5 {
+		t.Fatalf("result=%#v", result)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
+	}
+}
+
+func TestRunEnvCleanupFailsOnNonzeroExit(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeAPI{execResults: []execResult{{ExitCode: 0}, {ExitCode: 7, Error: "permission denied"}}}
+	withFakeAPI(t, fake)
+	var stderr bytes.Buffer
+	backend := NewBackend(Provider{}.Spec(), testConfig(), Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:       Repo{Name: "repo", Root: t.TempDir()},
+		Command:    []string{"echo", "hello"},
+		Env:        map[string]string{"TOKEN": "secret"},
+		NoSync:     true,
+		Keep:       true,
+		TimingJSON: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "upstash-box env cleanup failed for box_1") || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("err=%v, want env cleanup exit failure", err)
+	}
+	if result.ExitCode != 5 {
+		t.Fatalf("result=%#v", result)
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	var report struct {
+		ExitCode int `json:"exitCode"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+		t.Fatalf("timing json: %v\nstderr=%s", err, stderr.String())
+	}
+	if report.ExitCode != 5 {
+		t.Fatalf("timing exitCode=%d, want 5\nstderr=%s", report.ExitCode, stderr.String())
+	}
+}
+
 func TestSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
 	fake := &fakeAPI{execResults: []execResult{{ExitCode: 0}, {ExitCode: 9, Error: "extract failed"}, {ExitCode: 0}}}
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
@@ -368,6 +477,21 @@ func TestSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
 	}
 	if !strings.Contains(fake.execCommands[2], "rm -f '.crabbox-upstash-box-sync-") {
 		t.Fatalf("cleanup command=%q", fake.execCommands[2])
+	}
+}
+
+func TestSyncWorkspaceWarnsWhenRemoteArchiveCleanupExitsNonzero(t *testing.T) {
+	fake := &fakeAPI{execResults: []execResult{{ExitCode: 0}, {ExitCode: 9, Error: "extract failed"}, {ExitCode: 7, Error: "cleanup denied"}}}
+	var stderr bytes.Buffer
+	backend := NewBackend(Provider{}.Spec(), testConfig(), Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
+	_, _, err := backend.syncWorkspace(context.Background(), fake, "box_1", RunRequest{
+		Repo: Repo{Name: "repo", Root: newGitRepo(t)},
+	}, "/workspace/home/crabbox", "crabbox")
+	if err == nil {
+		t.Fatal("expected extract failure")
+	}
+	if !strings.Contains(stderr.String(), "warning: upstash-box sync cleanup failed for box_1") || !strings.Contains(stderr.String(), "cleanup denied") {
+		t.Fatalf("stderr=%q, want cleanup warning", stderr.String())
 	}
 }
 
@@ -390,6 +514,40 @@ func TestStatusMapsBoxName(t *testing.T) {
 	server := boxToServer(cfg, fake.box)
 	if server.PublicNet.IPv4.IP != "eu-west-1.box.upstash.com" {
 		t.Fatalf("host=%q", server.PublicNet.IPv4.IP)
+	}
+}
+
+func TestStatusReadyStates(t *testing.T) {
+	tests := map[string]bool{
+		"running":   true,
+		"ready":     true,
+		"idle":      true,
+		"paused":    true,
+		" RUNNING ": true,
+		"":          false,
+		"pending":   false,
+		"creating":  false,
+		"failed":    false,
+		"unknown":   false,
+	}
+	for status, want := range tests {
+		if got := statusReady(status); got != want {
+			t.Fatalf("statusReady(%q)=%t want %t", status, got, want)
+		}
+	}
+}
+
+func TestStatusWaitTreatsMissingStatusAsNotReady(t *testing.T) {
+	fake := &fakeAPI{box: boxData{ID: "box_1", Name: "crabbox-blue-123456789abc"}}
+	withFakeAPI(t, fake)
+	backend := NewBackend(Provider{}.Spec(), testConfig(), Runtime{
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+		Clock:  &advancingClock{current: time.Unix(100, 0), step: time.Second},
+	}).(*backend)
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "box_1", Wait: true, WaitTimeout: time.Nanosecond})
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for upstash-box box_1 to become ready") {
+		t.Fatalf("err=%v, want timeout for missing status", err)
 	}
 }
 
@@ -419,6 +577,16 @@ func testRuntime() Runtime {
 	return Runtime{Stdout: io.Discard, Stderr: io.Discard}
 }
 
+type advancingClock struct {
+	current time.Time
+	step    time.Duration
+}
+
+func (c *advancingClock) Now() time.Time {
+	c.current = c.current.Add(c.step)
+	return c.current
+}
+
 func withFakeAPI(t *testing.T, fake *fakeAPI) {
 	t.Helper()
 	original := newAPI
@@ -426,16 +594,25 @@ func withFakeAPI(t *testing.T, fake *fakeAPI) {
 	t.Cleanup(func() { newAPI = original })
 }
 
+func withUpstashBoxCleanupTimeout(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	original := upstashBoxCleanupTimeout
+	upstashBoxCleanupTimeout = timeout
+	t.Cleanup(func() { upstashBoxCleanupTimeout = original })
+}
+
 type fakeAPI struct {
-	verbs          []string
-	createReq      createRequest
-	box            boxData
-	execCommands   []string
-	execFolders    []string
-	streamCommands []string
-	streamFolders  []string
-	execResults    []execResult
-	deletedIDs     []string
+	verbs           []string
+	createReq       createRequest
+	box             boxData
+	execCommands    []string
+	execFolders     []string
+	streamCommands  []string
+	streamFolders   []string
+	execResults     []execResult
+	deletedIDs      []string
+	blockDelete     bool
+	blockEnvCleanup bool
 }
 
 func (f *fakeAPI) CreateBox(_ context.Context, createRequest createRequest) (boxData, error) {
@@ -459,16 +636,24 @@ func (f *fakeAPI) ListBoxes(context.Context) ([]boxData, error) {
 	return []boxData{f.box}, nil
 }
 
-func (f *fakeAPI) DeleteBoxes(_ context.Context, ids []string) error {
+func (f *fakeAPI) DeleteBoxes(ctx context.Context, ids []string) error {
 	f.verbs = append(f.verbs, "delete")
 	f.deletedIDs = append(f.deletedIDs, ids...)
+	if f.blockDelete {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return nil
 }
 
-func (f *fakeAPI) Exec(_ context.Context, _ string, command, folder string) (execResult, error) {
+func (f *fakeAPI) Exec(ctx context.Context, _ string, command, folder string) (execResult, error) {
 	f.verbs = append(f.verbs, "exec")
 	f.execCommands = append(f.execCommands, command)
 	f.execFolders = append(f.execFolders, folder)
+	if f.blockEnvCleanup && strings.Contains(command, ".crabbox-env-") {
+		<-ctx.Done()
+		return execResult{}, ctx.Err()
+	}
 	if len(f.execResults) == 0 {
 		return execResult{ExitCode: 0}, nil
 	}

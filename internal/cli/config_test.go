@@ -193,6 +193,14 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_NAMESPACE_AUTO_STOP_IDLE_TIMEOUT",
 		"CRABBOX_NAMESPACE_WORK_ROOT",
 		"CRABBOX_NAMESPACE_DELETE_ON_RELEASE",
+		"CRABBOX_MORPH_API_KEY",
+		"MORPH_API_KEY",
+		"CRABBOX_MORPH_API_URL",
+		"CRABBOX_MORPH_SNAPSHOT",
+		"CRABBOX_MORPH_SSH_GATEWAY_HOST",
+		"CRABBOX_MORPH_WORK_ROOT",
+		"CRABBOX_MORPH_DELETE_ON_RELEASE",
+		"CRABBOX_MORPH_WAKE_ON_SSH",
 		"CRABBOX_EXE_DEV_CONTROL_HOST",
 		"EXE_DEV_CONTROL_HOST",
 		"CRABBOX_EXE_DEV_IMAGE",
@@ -543,6 +551,17 @@ func TestTartConfigDefaultsFileAndEnv(t *testing.T) {
 	if cfg.Tart.Image != "ghcr.io/env:latest" || cfg.Tart.User != "env-user" || cfg.Tart.WorkRoot != "/work/env" || cfg.Tart.CPUs != 8 || cfg.Tart.Memory != 16384 || cfg.Tart.Disk != 100 {
 		t.Fatalf("env tart config not applied: %+v", cfg.Tart)
 	}
+	if !cfg.tartDiskExplicit {
+		t.Fatal("positive CRABBOX_TART_DISK should mark tart disk explicit")
+	}
+	t.Setenv("CRABBOX_TART_DISK", "0")
+	applyEnv(&cfg)
+	if cfg.Tart.Disk != 0 {
+		t.Fatalf("zero CRABBOX_TART_DISK disk=%d, want clone default 0", cfg.Tart.Disk)
+	}
+	if cfg.tartDiskExplicit {
+		t.Fatal("zero CRABBOX_TART_DISK should not mark tart disk explicit")
+	}
 }
 
 func TestIncusConfigDefaultsFileAndEnv(t *testing.T) {
@@ -739,6 +758,65 @@ func TestTartConfigYAMLMissingFieldsNotOverwritten(t *testing.T) {
 	}
 	if cfg.Tart.Memory != 16384 {
 		t.Fatalf("Tart.Memory=%d, want 16384 (missing YAML field must not overwrite)", cfg.Tart.Memory)
+	}
+}
+
+func TestOpenComputerConfigYAMLExplicitZeroPreserved(t *testing.T) {
+	cfg := baseConfig()
+	cfg.OpenComputer.CPU = 8
+	cfg.OpenComputer.MemoryMB = 16384
+	cfg.OpenComputer.TimeoutSecs = 600
+	cfg.OpenComputer.ExecTimeoutSecs = 7200
+	zero := 0
+	file := fileConfig{OpenComputer: &fileOpenComputerConfig{
+		CPU:             &zero,
+		MemoryMB:        &zero,
+		TimeoutSecs:     &zero,
+		ExecTimeoutSecs: &zero,
+	}}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenComputer.CPU != 0 || cfg.OpenComputer.MemoryMB != 0 || cfg.OpenComputer.TimeoutSecs != 0 || cfg.OpenComputer.ExecTimeoutSecs != 0 {
+		t.Fatalf("explicit zero values not preserved: %#v", cfg.OpenComputer)
+	}
+}
+
+func TestOpenComputerConfigYAMLCannotSetAPIURL(t *testing.T) {
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("openComputer:\n  apiUrl: https://attacker.example\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenComputer.APIURL != "" {
+		t.Fatalf("repository config set OpenComputer API URL to %q", cfg.OpenComputer.APIURL)
+	}
+}
+
+func TestOpenComputerBurstConfigYAMLAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("openComputer:\n  burst: true\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OpenComputer.Burst {
+		t.Fatal("openComputer.burst YAML was not applied")
+	}
+
+	cfg.OpenComputer.Burst = false
+	t.Setenv("CRABBOX_OPENCOMPUTER_BURST", "true")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OpenComputer.Burst {
+		t.Fatal("CRABBOX_OPENCOMPUTER_BURST was not applied")
 	}
 }
 
@@ -1074,6 +1152,14 @@ namespace:
   autoStopIdleTimeout: 1h
   workRoot: /workspaces/test
   deleteOnRelease: true
+morph:
+  apiKey: morph-file-key
+  apiUrl: https://morph.example.test
+  snapshot: snapshot-file
+  sshGatewayHost: ssh.morph.example.test
+  workRoot: /tmp/morph-test
+  deleteOnRelease: true
+  wakeOnSSH: false
 daytona:
   apiUrl: https://daytona.example.test/api
   snapshot: crabbox-ready
@@ -1141,6 +1227,13 @@ tensorlake:
   diskMB: 30000
   timeoutSecs: 1800
   noInternet: true
+openComputer:
+  apiUrl: https://opencomputer.example.test
+  workdir: /workspace/oc-test
+  cpu: 8
+  memoryMB: 16384
+  timeoutSecs: 600
+  execTimeoutSecs: 7200
 cloudflare:
   apiUrl: https://cloudflare.example.test
   token: cloudflare-token
@@ -1275,6 +1368,9 @@ ssh:
 	if cfg.Namespace.Image != "crabbox-ready" || cfg.Namespace.Size != "L" || cfg.Namespace.Repository != "github.com/openclaw/crabbox" || cfg.Namespace.Site != "fra1" || cfg.Namespace.VolumeSizeGB != 120 || cfg.Namespace.AutoStopIdleTimeout != time.Hour || cfg.Namespace.WorkRoot != "/workspaces/test" || !cfg.Namespace.DeleteOnRelease {
 		t.Fatalf("namespace config not loaded: %#v", cfg.Namespace)
 	}
+	if cfg.Morph.APIKey != "morph-file-key" || cfg.Morph.APIURL != "https://morph.example.test" || cfg.Morph.Snapshot != "snapshot-file" || cfg.Morph.SSHGatewayHost != "ssh.morph.example.test" || cfg.Morph.WorkRoot != "/tmp/morph-test" || !cfg.Morph.DeleteOnRelease || cfg.Morph.WakeOnSSH {
+		t.Fatalf("morph config not loaded: %#v", cfg.Morph)
+	}
 	if cfg.Daytona.APIURL != "https://daytona.example.test/api" || cfg.Daytona.Snapshot != "crabbox-ready" || cfg.Daytona.Target != "us" || cfg.Daytona.User != "daytona" || cfg.Daytona.WorkRoot != "/home/daytona/crabbox" || cfg.Daytona.SSHGatewayHost != "ssh.daytona.example.test" || cfg.Daytona.SSHAccessMinutes != 12 {
 		t.Fatalf("daytona config not loaded: %#v", cfg.Daytona)
 	}
@@ -1298,6 +1394,9 @@ ssh:
 	}
 	if cfg.Tensorlake.APIURL != "https://api.tensorlake.example.test" || cfg.Tensorlake.CLIPath != "/usr/local/bin/tl" || cfg.Tensorlake.Image != "ubuntu-22.04" || cfg.Tensorlake.Snapshot != "snap-tl" || cfg.Tensorlake.OrganizationID != "org-tl" || cfg.Tensorlake.ProjectID != "proj-tl" || cfg.Tensorlake.Namespace != "ns-tl" || cfg.Tensorlake.Workdir != "/workspace/crabbox-test" || cfg.Tensorlake.CPUs != 4 || cfg.Tensorlake.MemoryMB != 8192 || cfg.Tensorlake.DiskMB != 30000 || cfg.Tensorlake.TimeoutSecs != 1800 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("tensorlake config not loaded: %#v", cfg.Tensorlake)
+	}
+	if cfg.OpenComputer.APIURL != "" || cfg.OpenComputer.Workdir != "/workspace/oc-test" || cfg.OpenComputer.CPU != 8 || cfg.OpenComputer.MemoryMB != 16384 || cfg.OpenComputer.TimeoutSecs != 600 || cfg.OpenComputer.ExecTimeoutSecs != 7200 {
+		t.Fatalf("opencomputer config not loaded: %#v", cfg.OpenComputer)
 	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare.example.test" || cfg.Cloudflare.Token != "cloudflare-token" || cfg.Cloudflare.Workdir != "/workspace/cf-test" {
 		t.Fatalf("cloudflare config not loaded: %#v", cfg.Cloudflare)
@@ -1413,6 +1512,23 @@ func TestLoadConfigRoutesAzureBackendFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadConfigMXCCapabilityEnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(home, "missing.yaml"))
+	t.Setenv("CRABBOX_MXC_ALLOW_DACL_MUTATION", "true")
+	t.Setenv("CRABBOX_MXC_ALLOW_WINDOWS_UI", "true")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MXC.AllowDACLMutation || !cfg.MXC.AllowWindowsUI {
+		t.Fatalf("mxc=%+v", cfg.MXC)
+	}
+}
+
 func TestLoadConfigTailscaleBlock(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
@@ -1499,6 +1615,14 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_TAILSCALE_EXIT_NODE_ALLOW_LAN_ACCESS", "1")
 	t.Setenv("CRABBOX_TARGET", "macos")
 	t.Setenv("CRABBOX_STATIC_HOST", "mac.local")
+	t.Setenv("MORPH_API_KEY", "morph-api-file")
+	t.Setenv("CRABBOX_MORPH_API_KEY", "morph-api-env")
+	t.Setenv("CRABBOX_MORPH_API_URL", "https://morph-env.example")
+	t.Setenv("CRABBOX_MORPH_SNAPSHOT", "snapshot-env")
+	t.Setenv("CRABBOX_MORPH_SSH_GATEWAY_HOST", "ssh.morph-env.example")
+	t.Setenv("CRABBOX_MORPH_WORK_ROOT", "/tmp/morph-env")
+	t.Setenv("CRABBOX_MORPH_DELETE_ON_RELEASE", "true")
+	t.Setenv("CRABBOX_MORPH_WAKE_ON_SSH", "false")
 	t.Setenv("DAYTONA_API_KEY", "daytona-api-file")
 	t.Setenv("CRABBOX_DAYTONA_API_KEY", "daytona-api-env")
 	t.Setenv("DAYTONA_API_URL", "https://daytona-file.example/api")
@@ -1587,6 +1711,13 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_TENSORLAKE_DISK_MB", "20480")
 	t.Setenv("CRABBOX_TENSORLAKE_TIMEOUT_SECS", "900")
 	t.Setenv("CRABBOX_TENSORLAKE_NO_INTERNET", "true")
+	t.Setenv("OPENCOMPUTER_API_URL", "https://oc-file.example")
+	t.Setenv("CRABBOX_OPENCOMPUTER_API_URL", "https://oc-env.example")
+	t.Setenv("CRABBOX_OPENCOMPUTER_WORKDIR", "/workspace/oc-env")
+	t.Setenv("CRABBOX_OPENCOMPUTER_CPU", "6")
+	t.Setenv("CRABBOX_OPENCOMPUTER_MEMORY_MB", "12288")
+	t.Setenv("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", "1200")
+	t.Setenv("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", "2400")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_URL", "https://cloudflare-env.example")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", "cloudflare-env-token")
 	t.Setenv("CRABBOX_CLOUDFLARE_WORKDIR", "/workspace/cloudflare-env")
@@ -1717,6 +1848,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if len(cfg.Tailscale.Tags) != 2 || cfg.Tailscale.Tags[1] != "tag:ci" {
 		t.Fatalf("unexpected tailscale tags: %#v", cfg.Tailscale.Tags)
 	}
+	if cfg.Morph.APIKey != "morph-api-env" || cfg.Morph.APIURL != "https://morph-env.example" || cfg.Morph.Snapshot != "snapshot-env" || cfg.Morph.SSHGatewayHost != "ssh.morph-env.example" || cfg.Morph.WorkRoot != "/tmp/morph-env" || !cfg.Morph.DeleteOnRelease || cfg.Morph.WakeOnSSH {
+		t.Fatalf("unexpected morph env: %#v", cfg.Morph)
+	}
 	if cfg.Daytona.APIKey != "daytona-api-env" || cfg.Daytona.APIURL != "https://daytona-env.example/api" || cfg.Daytona.Snapshot != "snapshot-env" || cfg.Daytona.Target != "target-env" || cfg.Daytona.User != "daytona-env-user" || cfg.Daytona.WorkRoot != "/home/daytona/env" || cfg.Daytona.SSHGatewayHost != "ssh.env.example" || cfg.Daytona.SSHAccessMinutes != 44 {
 		t.Fatalf("unexpected daytona env: %#v", cfg.Daytona)
 	}
@@ -1737,6 +1871,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Tensorlake.APIKey != "tl-api-env" || cfg.Tensorlake.APIURL != "https://api.tl-env.example" || cfg.Tensorlake.CLIPath != "/opt/tl/bin/tensorlake" || cfg.Tensorlake.Image != "ubuntu:tl-env" || cfg.Tensorlake.Snapshot != "snap-tl-env" || cfg.Tensorlake.OrganizationID != "org-tl-env" || cfg.Tensorlake.ProjectID != "proj-tl-env" || cfg.Tensorlake.Namespace != "ns-tl-env" || cfg.Tensorlake.Workdir != "/workspace/tl-env" || cfg.Tensorlake.CPUs != 2.5 || cfg.Tensorlake.MemoryMB != 4096 || cfg.Tensorlake.DiskMB != 20480 || cfg.Tensorlake.TimeoutSecs != 900 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("unexpected tensorlake env: %#v", cfg.Tensorlake)
+	}
+	if cfg.OpenComputer.APIURL != "https://oc-env.example" || cfg.OpenComputer.Workdir != "/workspace/oc-env" || cfg.OpenComputer.CPU != 6 || cfg.OpenComputer.MemoryMB != 12288 || cfg.OpenComputer.TimeoutSecs != 1200 || cfg.OpenComputer.ExecTimeoutSecs != 2400 {
+		t.Fatalf("unexpected opencomputer env: %#v", cfg.OpenComputer)
 	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare-env.example" || cfg.Cloudflare.Token != "cloudflare-env-token" || cfg.Cloudflare.Workdir != "/workspace/cloudflare-env" {
 		t.Fatalf("unexpected cloudflare env: %#v", cfg.Cloudflare)

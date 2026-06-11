@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,22 @@ func TestAzureDynamicSessionsEndpointRequiresPoolManagementEndpoint(t *testing.T
 	want := "https://pool.env.eastus.azurecontainerapps.io"
 	if got != want {
 		t.Fatalf("endpoint = %q, want %q", got, want)
+	}
+}
+
+func TestAzureDynamicSessionsPoolSelectorIsUnsupported(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	RegisterAzureDynamicSessionsProviderFlags(fs, Config{})
+	if fs.Lookup("azure-dynamic-sessions-pool") != nil {
+		t.Fatal("azure-dynamic-sessions-pool should not be registered")
+	}
+
+	cfg := Config{}
+	cfg.AzureDynamicSessions.Endpoint = "https://pool.env.eastus.azurecontainerapps.io"
+	cfg.AzureDynamicSessions.Pool = "pool"
+	_, err := azureDynamicSessionsEndpoint(cfg)
+	if err == nil || !strings.Contains(err.Error(), "azureDynamicSessions.pool is not supported") {
+		t.Fatalf("err = %v, want unsupported pool config", err)
 	}
 }
 

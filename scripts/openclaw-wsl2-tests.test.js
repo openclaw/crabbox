@@ -12,6 +12,42 @@ function writeExecutable(file, body) {
 	fs.chmodSync(file, 0o755);
 }
 
+test("OpenClaw WSL2 test requires an explicit repository path", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-openclaw-wsl2-missing-repo-"));
+	const bin = path.join(dir, "bin");
+	const fakeCrabbox = path.join(bin, "crabbox");
+	fs.mkdirSync(bin);
+	writeExecutable(
+		fakeCrabbox,
+		`#!/usr/bin/env bash
+set -euo pipefail
+printf 'unexpected crabbox args: %s\\n' "$*" >&2
+exit 99
+`,
+	);
+
+	const env = {
+		...process.env,
+		PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+		HOME: dir,
+		CRABBOX_LIVE: "1",
+		CRABBOX_BIN: fakeCrabbox,
+	};
+	delete env.CRABBOX_OPENCLAW_REPO;
+	delete env.CRABBOX_LIVE_REPO;
+
+	const result = spawnSync("bash", ["scripts/openclaw-wsl2-tests.sh"], {
+		cwd: repoRoot,
+		env,
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 2, result.stdout + result.stderr);
+	assert.match(result.stderr, /OpenClaw repo path is required/);
+	assert.match(result.stderr, /CRABBOX_OPENCLAW_REPO=\/path\/to\/openclaw/);
+	assert.doesNotMatch(result.stderr, /\/Users\/[^/\s]+/);
+});
+
 test("OpenClaw WSL2 test resolves generated-slug cleanup from list diff", () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-openclaw-wsl2-"));
 	const repo = path.join(dir, "repo");

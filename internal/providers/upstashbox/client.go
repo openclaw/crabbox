@@ -59,6 +59,10 @@ type execResult struct {
 	Error    string `json:"error"`
 }
 
+const upstashBoxDefaultResponseHeaderTimeout = 30 * time.Second
+
+var upstashBoxCleanupTimeout = 15 * time.Second
+
 var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	apiKey := strings.TrimSpace(cfg.UpstashBox.APIKey)
 	if apiKey == "" {
@@ -66,10 +70,20 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = defaultUpstashBoxHTTPClient()
 	}
 	base := strings.TrimRight(blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), "https://us-east-1.box.upstash.com"), "/")
 	return &client{apiKey: apiKey, base: base, http: httpClient}, nil
+}
+
+func upstashBoxCleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), upstashBoxCleanupTimeout)
+}
+
+func defaultUpstashBoxHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = upstashBoxDefaultResponseHeaderTimeout
+	return &http.Client{Transport: transport}
 }
 
 func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, error) {
@@ -121,7 +135,7 @@ func (c *client) cleanupCreatedBox(boxID string, cause error) error {
 	if strings.TrimSpace(boxID) == "" {
 		return cause
 	}
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	cleanupCtx, cancel := upstashBoxCleanupContext()
 	defer cancel()
 	if err := c.DeleteBoxes(cleanupCtx, []string{boxID}); err != nil {
 		return fmt.Errorf("%w; cleanup failed for upstash-box %s: %v", cause, boxID, err)

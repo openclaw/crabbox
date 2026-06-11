@@ -230,6 +230,132 @@ func TestRailwayClientSurfacesGraphQLErrorsAsAPIError(t *testing.T) {
 	}
 }
 
+func TestRailwayClientListServicesPaginatesProjectsAndServices(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		first, _ := payload.Variables["first"].(float64)
+		if int(first) != railwayListServicesPageSize {
+			http.Error(w, fmt.Sprintf("first = %v", payload.Variables["first"]), http.StatusBadRequest)
+			return
+		}
+		switch {
+		case strings.Contains(payload.Query, "project(id:"):
+			calls = append(calls, "project-services")
+			if payload.Variables["projectId"] != "proj-1" || payload.Variables["after"] != "svc-cursor-1" {
+				http.Error(w, fmt.Sprintf("service vars = %#v", payload.Variables), http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"project": map[string]any{
+						"services": serviceConnection(false, "", serviceNode("svc-2", "worker")),
+					},
+				},
+			})
+		case strings.Contains(payload.Query, "projects("):
+			after, _ := payload.Variables["after"].(string)
+			calls = append(calls, "projects:"+after)
+			switch after {
+			case "":
+				if serviceFirst, _ := payload.Variables["serviceFirst"].(float64); int(serviceFirst) != railwayListServicesPageSize {
+					http.Error(w, fmt.Sprintf("serviceFirst = %v", payload.Variables["serviceFirst"]), http.StatusBadRequest)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"data": map[string]any{
+						"projects": map[string]any{
+							"pageInfo": pageInfo(true, "proj-cursor-1"),
+							"edges": []map[string]any{{
+								"node": map[string]any{
+									"id":       "proj-1",
+									"name":     "api-project",
+									"services": serviceConnection(true, "svc-cursor-1", serviceNode("svc-1", "api")),
+								},
+							}},
+						},
+					},
+				})
+			case "proj-cursor-1":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"data": map[string]any{
+						"projects": map[string]any{
+							"pageInfo": pageInfo(false, ""),
+							"edges": []map[string]any{{
+								"node": map[string]any{
+									"id":       "proj-2",
+									"name":     "jobs-project",
+									"services": serviceConnection(false, "", serviceNode("svc-3", "jobs")),
+								},
+							}},
+						},
+					},
+				})
+			default:
+				http.Error(w, "unexpected project cursor "+after, http.StatusBadRequest)
+			}
+		default:
+			http.Error(w, "unexpected query", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{}
+	cfg.Railway.APIToken = "test-token"
+	cfg.Railway.APIURL = server.URL
+	client, err := newRailwayClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	services, err := client.ListServices(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := calls, []string{"projects:", "project-services", "projects:proj-cursor-1"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %#v, want %#v", got, want)
+	}
+	want := map[string]railwayService{
+		"svc-1": {ID: "svc-1", Name: "api", ProjectID: "proj-1"},
+		"svc-2": {ID: "svc-2", Name: "worker", ProjectID: "proj-1"},
+		"svc-3": {ID: "svc-3", Name: "jobs", ProjectID: "proj-2"},
+	}
+	if len(services) != len(want) {
+		t.Fatalf("services = %#v, want %d services", services, len(want))
+	}
+	for _, service := range services {
+		if want[service.ID] != service {
+			t.Fatalf("service %q = %#v, want %#v", service.ID, service, want[service.ID])
+		}
+		delete(want, service.ID)
+	}
+}
+
+func pageInfo(hasNext bool, endCursor string) map[string]any {
+	return map[string]any{"hasNextPage": hasNext, "endCursor": endCursor}
+}
+
+func serviceConnection(hasNext bool, endCursor string, services ...map[string]any) map[string]any {
+	edges := make([]map[string]any, 0, len(services))
+	for _, service := range services {
+		edges = append(edges, map[string]any{"node": service})
+	}
+	return map[string]any{
+		"pageInfo": pageInfo(hasNext, endCursor),
+		"edges":    edges,
+	}
+}
+
+func serviceNode(id, name string) map[string]any {
+	return map[string]any{"id": id, "name": name}
+}
+
 func TestRailwayClientDecodesLargeLogResponse(t *testing.T) {
 	message := strings.Repeat("x", 2<<20)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

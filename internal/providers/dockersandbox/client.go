@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -60,10 +61,14 @@ func (c *sbxCLI) runStreamed(ctx context.Context, args []string, stdout, stderr 
 	})
 	if isMissingExecutableError(err) {
 		var stdoutBuf, stderrBuf bytes.Buffer
-		return res.ExitCode, sbxError(args, res.ExitCode, &stdoutBuf, &stderrBuf, err)
+		return res.ExitCode, sbxError(streamedErrorArgs(args), res.ExitCode, &stdoutBuf, &stderrBuf, err)
 	}
-	if err != nil && res.ExitCode == 0 {
-		return res.ExitCode, fmt.Errorf("sbx %s: %w", strings.Join(args, " "), err)
+	if err != nil {
+		if isCommandExitError(err, res.ExitCode) {
+			return res.ExitCode, nil
+		}
+		var stdoutBuf, stderrBuf bytes.Buffer
+		return res.ExitCode, sbxError(streamedErrorArgs(args), res.ExitCode, &stdoutBuf, &stderrBuf, err)
 	}
 	return res.ExitCode, nil
 }
@@ -255,15 +260,26 @@ func sbxError(args []string, exitCode int, stdout, stderr *bytes.Buffer, runErr 
 	action := strings.Join(args, " ")
 	guidance := classifySBXError(action, tail, runErr)
 	if runErr != nil {
-		if guidance != "" {
-			return fmt.Errorf("sbx %s (exit=%d): %v: %s: %s", action, exitCode, runErr, tail, guidance)
+		msg := fmt.Sprintf("sbx %s (exit=%d): %v", action, exitCode, runErr)
+		if tail != "" {
+			msg += ": " + tail
 		}
-		return fmt.Errorf("sbx %s (exit=%d): %v: %s", action, exitCode, runErr, tail)
+		if guidance != "" {
+			msg += ": " + guidance
+		}
+		return errors.New(msg)
 	}
 	if guidance != "" {
 		return fmt.Errorf("sbx %s exited %d: %s: %s", action, exitCode, tail, guidance)
 	}
 	return fmt.Errorf("sbx %s exited %d: %s", action, exitCode, tail)
+}
+
+func streamedErrorArgs(args []string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	return []string{args[0]}
 }
 
 func classifySBXError(action, text string, runErr error) string {
@@ -285,6 +301,17 @@ func classifySBXError(action, text string, runErr error) string {
 
 func isMissingExecutableError(err error) bool {
 	return err != nil && (errors.Is(err, os.ErrNotExist) || strings.Contains(strings.ToLower(err.Error()), "no such file"))
+}
+
+func isCommandExitError(err error, exitCode int) bool {
+	if err == nil || exitCode == 0 {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return true
+	}
+	return err.Error() == fmt.Sprintf("exit status %d", exitCode)
 }
 
 func firstNonEmptyLine(value string) string {

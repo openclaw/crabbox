@@ -111,6 +111,9 @@ var newAzureDynamicSessionsClient = func(ctx context.Context, cfg Config, rt Run
 }
 
 func azureDynamicSessionsEndpoint(cfg Config) (string, error) {
+	if strings.TrimSpace(cfg.AzureDynamicSessions.Pool) != "" {
+		return "", exit(2, "azureDynamicSessions.pool is not supported; set azureDynamicSessions.endpoint to the custom container poolManagementEndpoint")
+	}
 	endpoint := strings.TrimSpace(cfg.AzureDynamicSessions.Endpoint)
 	if endpoint == "" {
 		return "", exit(2, "provider=%s requires azureDynamicSessions.endpoint set to the custom container poolManagementEndpoint", providerName)

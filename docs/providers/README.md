@@ -25,7 +25,7 @@ SSH-lease providers further differ by how they reach the cloud:
   (`CRABBOX_COORDINATOR`).
 - **Direct cloud** — the same four providers without a configured broker, plus
   cloud providers that never broker (e.g. `proxmox`, `runpod`, `namespace-devbox`,
-  `semaphore`, `sprites`, `exe-dev`, `daytona`). The CLI talks to the provider
+  `semaphore`, `sprites`, `exe-dev`, `daytona`, `morph`). The CLI talks to the provider
   API itself and cleans up best-effort via provider labels.
 - **Static SSH** — `ssh` connects to a preexisting machine you supply; no
   provisioning, no cleanup.
@@ -66,6 +66,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Static SSH](ssh.md) — `ssh` (`static`, `static-ssh`) | Linux, macOS, Windows · static |
 | [Local Container](local-container.md) — `local-container` (`docker`, `container`, `local-docker`) | Linux · local |
 | [Apple Container](apple-container.md) — `apple-container` (`apple`, `applecontainer`) | Linux · local |
+| [Apple Container Machine](apple-machine.md) — `apple-machine` (`applemachine`) | Linux · local |
 | [Multipass](multipass.md) — `multipass` (`mp`, `canonical-multipass`) | Linux · local |
 | [Tart](tart.md) — `tart` (`local-tart`, `macos-vm`) | macOS · local |
 | [Hyper-V](hyperv.md) — `hyperv` | Windows · local |
@@ -77,6 +78,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Sprites](sprites.md) — `sprites` | Linux · direct |
 | [Tenki](tenki.md) — `tenki` | Linux · direct |
 | [Daytona](daytona.md) — `daytona` | Linux · direct |
+| [Morph](morph.md) — `morph` | Linux · direct |
 | [RunPod](runpod.md) — `runpod` (`run-pod`, `runpodio`) | Linux · direct |
 | [ASCII Box](ascii-box.md) — `ascii-box` (`ascii`, `asciibox`) | Linux · direct |
 
@@ -91,6 +93,8 @@ the built-in adapter needs a separate local smoke contract.
 | [E2B](e2b.md) — `e2b` | Linux |
 | [Islo](islo.md) — `islo` | Linux |
 | [Modal](modal.md) — `modal` | Linux |
+| [Microsoft Execution Containers](mxc.md) — `mxc` (`execution-container`) | Windows |
+| [OpenComputer](opencomputer.md) — `opencomputer` (`oc`, `open-computer`) | Linux |
 | [Railway](railway.md) — `railway` (`rail`, `railwayapp`) | Linux |
 | [Tensorlake](tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux |
 | [Upstash Box](upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux |

@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -114,10 +117,9 @@ type Auth struct {
 
 // wandbClient is the gRPC-backed implementation of wandbAPI.
 //
-// One long-lived ClientConn is held per backend instance; HTTP/2 multiplexes
-// concurrent calls over it. If we later expose --parallel runs we will
-// upgrade to a small pool of conns (4–8) to avoid head-of-line blocking on a
-// single TCP socket's congestion window.
+// One ClientConn is held per backend operation; HTTP/2 multiplexes the calls
+// inside that operation, and the backend closes the connection before returning
+// to avoid leaking sockets in long-lived Crabbox processes.
 type wandbClient struct {
 	conn *grpc.ClientConn
 	gw   sandboxv1.GatewayServiceClient
@@ -132,10 +134,13 @@ func newWandbClient(cfg Config, _ Runtime) (wandbAPI, error) {
 	if endpoint == "" {
 		endpoint = defaultEndpoint
 	}
-	endpoint = stripScheme(endpoint)
+	endpoint, creds, err := resolveEndpoint(endpoint)
+	if err != nil {
+		return nil, err
+	}
 
 	conn, err := grpc.NewClient(endpoint,
-		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})),
+		grpc.WithTransportCredentials(creds),
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(128<<20),
 			grpc.MaxCallSendMsgSize(128<<20),
@@ -152,6 +157,13 @@ func newWandbClient(cfg Config, _ Runtime) (wandbAPI, error) {
 		return nil, fmt.Errorf("dial cwsandbox gateway %s: %w", endpoint, err)
 	}
 	return &wandbClient{conn: conn, gw: sandboxv1.NewGatewayServiceClient(conn)}, nil
+}
+
+func (c *wandbClient) Close() error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
 }
 
 // resolveAuth walks the documented credential precedence:
@@ -235,10 +247,48 @@ func authUnary(a Auth) grpc.UnaryClientInterceptor {
 	}
 }
 
-func stripScheme(s string) string {
-	s = strings.TrimPrefix(s, "https://")
-	s = strings.TrimPrefix(s, "http://")
-	return strings.TrimSuffix(s, "/")
+func resolveEndpoint(raw string) (string, credentials.TransportCredentials, error) {
+	endpoint := strings.TrimSpace(raw)
+	if endpoint == "" {
+		return "", nil, fmt.Errorf("cwsandbox endpoint is empty")
+	}
+	lower := strings.ToLower(endpoint)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		return strings.TrimSuffix(endpoint, "/"), credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}), nil
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse cwsandbox endpoint %q: %w", raw, err)
+	}
+	if parsed.Host == "" {
+		return "", nil, fmt.Errorf("cwsandbox endpoint %q is missing host", raw)
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return "", nil, fmt.Errorf("cwsandbox endpoint %q must not include a path", raw)
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", nil, fmt.Errorf("cwsandbox endpoint %q must not include query or fragment", raw)
+	}
+	switch parsed.Scheme {
+	case "https":
+		return parsed.Host, credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}), nil
+	case "http":
+		if !isLoopbackHost(parsed.Hostname()) {
+			return "", nil, fmt.Errorf("cwsandbox endpoint %q uses plaintext http for non-loopback host %q", raw, parsed.Hostname())
+		}
+		return parsed.Host, insecure.NewCredentials(), nil
+	default:
+		return "", nil, fmt.Errorf("cwsandbox endpoint %q has unsupported scheme %q", raw, parsed.Scheme)
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(host))
+	if normalized == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(normalized, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 // Version round-trips the cheapest authenticated call (List with page_size=1)

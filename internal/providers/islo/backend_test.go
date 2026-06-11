@@ -249,6 +249,30 @@ func TestIsloRunRejectsUnsafeWorkdirBeforeProviderClient(t *testing.T) {
 	}
 }
 
+func TestIsloClientUsesBoundedDefaultTransport(t *testing.T) {
+	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "test", BaseURL: "http://127.0.0.1:8787"}}, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, ok := api.(*isloSDKClient)
+	if !ok {
+		t.Fatalf("api=%T, want *isloSDKClient", api)
+	}
+	if client.httpClient == nil || client.httpClient == http.DefaultClient {
+		t.Fatalf("default http client=%#v, want bounded private client", client.httpClient)
+	}
+	if client.httpClient.Timeout != 0 {
+		t.Fatalf("whole-response timeout=%s, want caller context to govern streams", client.httpClient.Timeout)
+	}
+	transport, ok := client.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport=%T, want *http.Transport", client.httpClient.Transport)
+	}
+	if transport.ResponseHeaderTimeout != isloDefaultResponseHeaderTimeout {
+		t.Fatalf("response header timeout=%s, want %s", transport.ResponseHeaderTimeout, isloDefaultResponseHeaderTimeout)
+	}
+}
+
 func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
@@ -285,6 +309,40 @@ func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	}
 	if got.CleanupCommand != "crabbox stop --provider islo 'isb_crabbox-repo-abcdef'" {
 		t.Fatalf("cleanup command=%q", got.CleanupCommand)
+	}
+}
+
+func TestIsloRunCleanupDeleteUsesBoundedContext(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	withIsloCleanupTimeout(t, 20*time.Millisecond)
+	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef", blockDelete: true}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	var stderr bytes.Buffer
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: &stderr},
+	}
+	start := time.Now()
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("result=%#v", result)
+	}
+	if client.deleteCalls != 1 {
+		t.Fatalf("delete calls=%d want 1", client.deleteCalls)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "warning: islo stop failed for crabbox-repo-abcdef: context deadline exceeded") {
+		t.Fatalf("stderr=%q, want cleanup timeout warning", stderr.String())
 	}
 }
 
@@ -663,6 +721,8 @@ type fakeIsloSyncClient struct {
 	closeUploadReader        bool
 	createRequest            *gosdk.SandboxCreate
 	createName               string
+	blockDelete              bool
+	deleteCalls              int
 }
 
 func (f *fakeIsloSyncClient) CreateSandbox(_ context.Context, req *gosdk.SandboxCreate) (*gosdk.SandboxResponse, error) {
@@ -682,7 +742,12 @@ func (f *fakeIsloSyncClient) ListSandboxes(context.Context) ([]*gosdk.SandboxRes
 	return nil, nil
 }
 
-func (f *fakeIsloSyncClient) DeleteSandbox(context.Context, string) error {
+func (f *fakeIsloSyncClient) DeleteSandbox(ctx context.Context, _ string) error {
+	f.deleteCalls++
+	if f.blockDelete {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return nil
 }
 
@@ -748,6 +813,13 @@ func swapNewIsloClient(client isloAPI) func() {
 	return func() {
 		newIsloClient = previous
 	}
+}
+
+func withIsloCleanupTimeout(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	original := isloCleanupTimeout
+	isloCleanupTimeout = timeout
+	t.Cleanup(func() { isloCleanupTimeout = original })
 }
 
 func tarGzipContains(t *testing.T, data []byte, name string) bool {

@@ -116,7 +116,7 @@ func (b *spritesBackend) Acquire(ctx context.Context, req AcquireRequest) (Lease
 		if req.Keep {
 			return
 		}
-		if err := b.client.DeleteSprite(context.Background(), name); err == nil {
+		if err := b.client.DeleteSprite(context.Background(), sprite.Name); err == nil {
 			removeStoredTestboxKey(leaseID)
 		}
 	}
@@ -129,7 +129,7 @@ func (b *spritesBackend) Acquire(ctx context.Context, req AcquireRequest) (Lease
 		cleanupFailedAcquire()
 		return LeaseTarget{}, err
 	}
-	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s sprite=%s state=ready\n", leaseID, name)
+	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s sprite=%s state=ready\n", leaseID, sprite.Name)
 	return lease, nil
 }
 

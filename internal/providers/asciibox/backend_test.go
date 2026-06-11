@@ -171,7 +171,7 @@ func TestClientPollsPartialCreateOutput(t *testing.T) {
 			`{"event":"state","id":"bx_2","state":"provisioning"}`,
 		}, "\n"),
 		newErr:        fmt.Errorf("exit status 1"),
-		infoResponses: []string{`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20"}}`},
+		infoResponses: []string{`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","expiresAt":"2026-06-10T12:00:00Z"}}`},
 	}
 	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: home, runner: runner}
 	box, err := client.CreateBox(context.Background(), createRequest{TTL: 30 * time.Minute})
@@ -180,6 +180,9 @@ func TestClientPollsPartialCreateOutput(t *testing.T) {
 	}
 	if box.ID != "bx_2" || boxHost(box) != "203.0.113.20" {
 		t.Fatalf("box=%#v", box)
+	}
+	if got := boxExpiresAt(box); got != "2026-06-10T12:00:00Z" {
+		t.Fatalf("boxExpiresAt=%q, want info response expiration", got)
 	}
 	if !containsCommand(runner.commands, "box --no-update --json --api-url https://ascii.dev info bx_2") {
 		t.Fatalf("commands missing info poll: %v", runner.commands)

@@ -360,8 +360,9 @@ Cost is an estimate for compute leases, not an invoice. See [Cost and Usage](fea
 
 Before tagging a release:
 
+- Rebase release preparation on the current `main`, restore the full changelog from the latest tag if concurrent work regressed it, and verify every published version remains represented.
 - Reorder `CHANGELOG.md` with the user-facing changes first, date the release section, and keep contributor thanks / co-author notes intact.
-- Update package metadata that carries the project version, including `worker/package.json` and `worker/package-lock.json`.
+- Update every package metadata file that carries the project version. The current release surface is `worker/package.json` plus both root package entries in `worker/package-lock.json`; the removed root plugin package must not be recreated.
 - `go vet ./...`
 - `go test -race ./...`
 - `scripts/test-go-modules.sh`

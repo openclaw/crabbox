@@ -220,6 +220,29 @@ func TestAcquireKeepFailurePreservesRetainedSpriteKey(t *testing.T) {
 	t.Cleanup(func() { core.RemoveStoredTestboxKey(leaseID) })
 }
 
+func TestAcquireFailureDeletesReturnedSpriteName(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeSpritesAPI{create: spritesInfo{Name: "canonical-sprite"}}
+	runner := &recordingRunner{failContains: "exec -s", err: errors.New("bootstrap failed")}
+	backend := &spritesBackend{
+		cfg:    Config{Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}},
+		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		client: api,
+	}
+
+	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "bootstrap failed") {
+		t.Fatalf("Acquire err=%v, want bootstrap failure", err)
+	}
+	if api.createdName == api.deleted {
+		t.Fatalf("test did not exercise renamed sprite; created=%q deleted=%q", api.createdName, api.deleted)
+	}
+	if api.deleted != "canonical-sprite" {
+		t.Fatalf("deleted=%q, want returned sprite name", api.deleted)
+	}
+}
+
 func TestSpritesRejectsTailscale(t *testing.T) {
 	cfg := Config{Sprites: SpritesConfig{Token: "test-token"}}
 	cfg.Tailscale.Enabled = true
@@ -377,6 +400,7 @@ func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (Local
 }
 
 type fakeSpritesAPI struct {
+	create        spritesInfo
 	get           spritesInfo
 	createdName   string
 	createdLabels []string
@@ -386,6 +410,13 @@ type fakeSpritesAPI struct {
 func (f *fakeSpritesAPI) CreateSprite(_ context.Context, name string, labels []string) (spritesInfo, error) {
 	f.createdName = name
 	f.createdLabels = labels
+	if f.create.Name != "" || len(f.create.Labels) > 0 || f.create.ID != "" {
+		sprite := f.create
+		if len(sprite.Labels) == 0 {
+			sprite.Labels = labels
+		}
+		return sprite, nil
+	}
 	return spritesInfo{Name: name, Labels: labels}, nil
 }
 

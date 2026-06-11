@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNamespaceSSHTargetParsesPrepareResult(t *testing.T) {
@@ -238,6 +240,40 @@ func TestNamespaceRejectsUnsafeWorkRoot(t *testing.T) {
 	}
 	if err := validateNamespaceConfig(Config{Namespace: NamespaceConfig{WorkRoot: "/workspaces/crabbox"}}); err != nil {
 		t.Fatalf("valid work root rejected: %v", err)
+	}
+}
+
+func TestNamespaceAutoStopDurationFlagValidation(t *testing.T) {
+	for _, value := range []string{"bogus", "0s", "-1m", ""} {
+		t.Run(value, func(t *testing.T) {
+			cfg := Config{}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			values := RegisterNamespaceProviderFlags(fs, cfg)
+			if err := fs.Parse([]string{"--namespace-auto-stop-idle-timeout", value}); err != nil {
+				t.Fatal(err)
+			}
+			err := ApplyNamespaceProviderFlags(&cfg, fs, values)
+			if err == nil || !strings.Contains(err.Error(), "namespace auto-stop idle timeout must be a positive duration") {
+				t.Fatalf("ApplyNamespaceProviderFlags(%q) err=%v, want duration validation", value, err)
+			}
+		})
+	}
+}
+
+func TestNamespaceAutoStopDurationFlagAppliesValidValue(t *testing.T) {
+	cfg := Config{}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := RegisterNamespaceProviderFlags(fs, cfg)
+	if err := fs.Parse([]string{"--namespace-auto-stop-idle-timeout", "45m"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyNamespaceProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Namespace.AutoStopIdleTimeout != 45*time.Minute {
+		t.Fatalf("auto-stop idle timeout=%s, want 45m", cfg.Namespace.AutoStopIdleTimeout)
 	}
 }
 

@@ -821,6 +821,40 @@ func TestBlacksmithCollectRunArtifactsWritesBoundedArchive(t *testing.T) {
 	}
 }
 
+func TestBlacksmithCollectRunArtifactsBoundsCommandOutput(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	const maxBytes int64 = 64
+	oversized := strings.Repeat("x", int(blacksmithArtifactOutputCaptureLimit(maxBytes)+1024))
+	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" && req.Stdout != nil {
+			if !req.DisableOutputCapture {
+				t.Fatalf("artifact collection should disable command-runner output capture")
+			}
+			_, _ = req.Stdout.Write([]byte(oversized))
+		}
+		return LocalCommandResult{}, nil
+	}}
+	cfg := baseConfig()
+	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	backend := newTestBlacksmithBackend(cfg, runner)
+	_, err := backend.CollectRunArtifacts(context.Background(), core.DelegatedRunArtifactRequest{
+		RunReq: core.RunRequest{
+			Repo:          core.Repo{Root: repo},
+			ArtifactGlobs: []string{"reports/**"},
+		},
+		Result:   core.RunResult{LeaseID: "tbx_artifacts"},
+		MaxFiles: 16,
+		MaxBytes: maxBytes,
+	})
+	if err == nil || !strings.Contains(err.Error(), "artifact output too large before archive validation") {
+		t.Fatalf("err=%v, want bounded output error", err)
+	}
+}
+
 func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	home := t.TempDir()
 	repo := t.TempDir()
@@ -934,7 +968,7 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 }
 
 func TestBlacksmithExtractArtifactArchiveRejectsMissingEnvelope(t *testing.T) {
-	_, _, err := blacksmithExtractArtifactArchive("no marker")
+	_, _, err := blacksmithExtractArtifactArchive("no marker", core.DelegatedRunArtifactDefaultMaxBytes)
 	if err == nil || !strings.Contains(err.Error(), "did not return a bounded artifact archive") {
 		t.Fatalf("err=%v, want missing envelope", err)
 	}
@@ -949,7 +983,7 @@ func TestBlacksmithExtractArtifactArchiveIgnoresPreambleMarkerText(t *testing.T)
 		base64.StdEncoding.EncodeToString(archive),
 		core.DelegatedRunArtifactEndMarker,
 	}, "\n")
-	got, clean, err := blacksmithExtractArtifactArchive(output)
+	got, clean, err := blacksmithExtractArtifactArchive(output, core.DelegatedRunArtifactDefaultMaxBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -963,6 +997,22 @@ func TestBlacksmithExtractArtifactArchiveIgnoresPreambleMarkerText(t *testing.T)
 		if !strings.Contains(clean, want) {
 			t.Fatalf("clean output missing %q:\n%s", want, clean)
 		}
+	}
+}
+
+func TestBlacksmithExtractArtifactArchiveAllowsExactMaxWithPadding(t *testing.T) {
+	archive := bytes.Repeat([]byte("x"), 64)
+	output := strings.Join([]string{
+		core.DelegatedRunArtifactBeginMarker,
+		base64.StdEncoding.EncodeToString(archive),
+		core.DelegatedRunArtifactEndMarker,
+	}, "\n")
+	got, _, err := blacksmithExtractArtifactArchive(output, int64(len(archive)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, archive) {
+		t.Fatalf("archive mismatch bytes=%d want=%d", len(got), len(archive))
 	}
 }
 

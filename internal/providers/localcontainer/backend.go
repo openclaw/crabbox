@@ -445,6 +445,13 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		hostWorkRoot, containerWorkRoot = dockerSocketWorkRoots(cfg)
 		labels["host_work_root"] = hostWorkRoot
 	}
+	hostLeaseWorkRoot := ""
+	cleanupHostLeaseWorkRoot := false
+	defer func() {
+		if cleanupHostLeaseWorkRoot && hostLeaseWorkRoot != "" {
+			_ = os.RemoveAll(hostLeaseWorkRoot)
+		}
+	}()
 	labels["work_root"] = containerWorkRoot
 	cacheVolumeMounts, err := localContainerCacheVolumeMounts(cfg.Cache.Volumes)
 	if err != nil {
@@ -486,9 +493,17 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 			return "", "", core.Exit(2, "mark local-container host work root %s: %v", hostWorkRoot, err)
 		}
 		leaseWorkRoot := filepath.Join(hostWorkRoot, leaseID)
+		hostLeaseWorkRoot = leaseWorkRoot
+		leaseWorkRootPreexisting := true
+		if _, err := os.Lstat(leaseWorkRoot); os.IsNotExist(err) {
+			leaseWorkRootPreexisting = false
+		} else if err != nil {
+			return "", "", core.Exit(2, "stat local-container host lease work root %s: %v", leaseWorkRoot, err)
+		}
 		if err := os.MkdirAll(leaseWorkRoot, 0o777); err != nil {
 			return "", "", core.Exit(2, "create local-container host lease work root %s: %v", leaseWorkRoot, err)
 		}
+		cleanupHostLeaseWorkRoot = !leaseWorkRootPreexisting
 		if err := os.Chmod(leaseWorkRoot, 0o777); err != nil {
 			return "", "", core.Exit(2, "make local-container host lease work root writable %s: %v", leaseWorkRoot, err)
 		}
@@ -523,14 +538,19 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		defer cancel()
 		containerID, owned, inspectErr := b.ownedContainerID(cleanupCtx, leaseID, bootstrapDir)
 		if owned && keep {
+			cleanupHostLeaseWorkRoot = false
 			return containerID, bootstrapDir, commandError("container run", result, err)
 		}
 		if owned {
 			if removeErr := b.removeContainer(cleanupCtx, containerID); removeErr == nil {
 				os.RemoveAll(bootstrapDir)
+			} else {
+				cleanupHostLeaseWorkRoot = false
 			}
 		} else if inspectErr == nil {
 			os.RemoveAll(bootstrapDir)
+		} else {
+			cleanupHostLeaseWorkRoot = false
 		}
 		return "", "", commandError("container run", result, err)
 	}
@@ -540,6 +560,7 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		defer cancel()
 		containerID, owned, inspectErr := b.ownedContainerID(cleanupCtx, leaseID, bootstrapDir)
 		if owned {
+			cleanupHostLeaseWorkRoot = false
 			return containerID, bootstrapDir, nil
 		}
 		if inspectErr == nil {
@@ -547,10 +568,15 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		} else if !keep {
 			if removeErr := b.removeContainer(cleanupCtx, name); removeErr == nil {
 				os.RemoveAll(bootstrapDir)
+			} else {
+				cleanupHostLeaseWorkRoot = false
 			}
+		} else {
+			cleanupHostLeaseWorkRoot = false
 		}
 		return "", "", core.Exit(2, "%s run did not return a container id", cfg.LocalContainer.Runtime)
 	}
+	cleanupHostLeaseWorkRoot = false
 	return id, bootstrapDir, nil
 }
 

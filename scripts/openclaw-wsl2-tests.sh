@@ -8,7 +8,7 @@ fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cb="${CRABBOX_BIN:-$root/bin/crabbox}"
-repo="${CRABBOX_OPENCLAW_REPO:-${CRABBOX_LIVE_REPO:-/Users/steipete/Projects/openclaw}}"
+repo="${CRABBOX_OPENCLAW_REPO:-${CRABBOX_LIVE_REPO:-}}"
 lease="${CRABBOX_OPENCLAW_WSL2_ID:-}"
 user_requested_slug="${CRABBOX_OPENCLAW_WSL2_SLUG:-}"
 requested_slug="${user_requested_slug:-wsl2-tests-$(date +%H%M%S)-$RANDOM-$$}"
@@ -25,9 +25,15 @@ crabbox_target_args=(
   --windows-mode wsl2
 )
 
+if [[ -z "$repo" ]]; then
+  echo "OpenClaw repo path is required" >&2
+  echo "set CRABBOX_OPENCLAW_REPO=/path/to/openclaw or CRABBOX_LIVE_REPO=/path/to/openclaw" >&2
+  exit 2
+fi
+
 if [[ ! -d "$repo/.git" ]]; then
   echo "OpenClaw repo not found: $repo" >&2
-  echo "set CRABBOX_OPENCLAW_REPO=/path/to/openclaw" >&2
+  echo "set CRABBOX_OPENCLAW_REPO=/path/to/openclaw or CRABBOX_LIVE_REPO=/path/to/openclaw" >&2
   exit 2
 fi
 

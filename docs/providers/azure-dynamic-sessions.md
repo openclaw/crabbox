@@ -154,13 +154,16 @@ azureDynamicSessions:
 | Config key (`azureDynamicSessions.*`) | Flag | Env override | Default |
 | --- | --- | --- | --- |
 | `endpoint` | `--azure-dynamic-sessions-endpoint` | `CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT` | (required) |
-| `pool` | `--azure-dynamic-sessions-pool` | `CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL` | (none) |
 | `apiVersion` | `--azure-dynamic-sessions-api-version` | `CRABBOX_AZURE_DYNAMIC_SESSIONS_API_VERSION` | `2025-02-02-preview` |
 | `workdir` | `--azure-dynamic-sessions-workdir` | `CRABBOX_AZURE_DYNAMIC_SESSIONS_WORKDIR` | `/workspace/crabbox` |
 | `timeoutSecs` | `--azure-dynamic-sessions-timeout-secs` | `CRABBOX_AZURE_DYNAMIC_SESSIONS_TIMEOUT_SECS` | `1800` (falls back to `--ttl` when unset) |
 
 The token uses `CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN` (see
 [Authentication](#authentication)).
+
+Legacy `azureDynamicSessions.pool` and
+`CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL` values are rejected. The
+`endpoint` setting is already the pool-specific management endpoint.
 
 `workdir` must be an absolute path and may not be a broad system directory such
 as `/`, `/tmp`, `/usr`, or bare `/workspace`; pick a dedicated subdirectory.

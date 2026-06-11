@@ -446,6 +446,9 @@ func mergeBox(base, update boxData) boxData {
 	if update.ArchiveAfter != nil {
 		base.ArchiveAfter = update.ArchiveAfter
 	}
+	if update.ExpiresAt != nil {
+		base.ExpiresAt = update.ExpiresAt
+	}
 	if update.CreatedAt != nil {
 		base.CreatedAt = update.CreatedAt
 	}

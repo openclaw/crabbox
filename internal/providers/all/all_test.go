@@ -58,6 +58,8 @@ func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 	providers := []string{
 		"apple-container",
+		"apple-machine",
+		"ascii-box",
 		"aws",
 		"azure",
 		"azure-dynamic-sessions",
@@ -76,17 +78,20 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"local-container",
 		"modal",
 		"multipass",
+		"mxc",
 		"namespace-devbox",
+		"opencomputer",
+		"parallels",
 		"proxmox",
 		"railway",
 		"runpod",
 		"semaphore",
 		"sprites",
 		"ssh",
+		"tart",
 		"tenki",
 		"tensorlake",
 		"upstash-box",
-		"ascii-box",
 		"wandb",
 	}
 	for _, name := range providers {

@@ -106,6 +106,7 @@ type Config struct {
 	KubeVirt                      KubeVirtConfig
 	External                      ExternalConfig
 	Namespace                     NamespaceConfig
+	Morph                         MorphConfig
 	Daytona                       DaytonaConfig
 	E2B                           E2BConfig
 	ExeDev                        ExeDevConfig
@@ -116,6 +117,7 @@ type Config struct {
 	isloImageExplicit             bool
 	Tenki                         TenkiConfig
 	Tensorlake                    TensorlakeConfig
+	OpenComputer                  OpenComputerConfig
 	DockerSandbox                 DockerSandboxConfig
 	Modal                         ModalConfig
 	UpstashBox                    UpstashBoxConfig
@@ -128,6 +130,7 @@ type Config struct {
 	localContainerImageExplicit   bool
 	AppleContainer                AppleContainerConfig
 	appleContainerImageExplicit   bool
+	MXC                           MXCConfig
 	Multipass                     MultipassConfig
 	multipassImageExplicit        bool
 	Tart                          TartConfig
@@ -273,6 +276,16 @@ type NamespaceConfig struct {
 	DeleteOnRelease     bool
 }
 
+type MorphConfig struct {
+	APIKey          string
+	APIURL          string
+	Snapshot        string
+	SSHGatewayHost  string
+	WorkRoot        string
+	DeleteOnRelease bool
+	WakeOnSSH       bool
+}
+
 type DaytonaConfig struct {
 	APIKey           string
 	JWTToken         string
@@ -400,6 +413,22 @@ type TensorlakeConfig struct {
 	DiskMB         int
 	TimeoutSecs    int
 	NoInternet     bool
+}
+
+// OpenComputerConfig configures the delegated OpenComputer provider, which
+// talks to the OpenComputer REST API. The API key is intentionally absent: it
+// is read at runtime from CRABBOX_OPENCOMPUTER_API_KEY / OPENCOMPUTER_API_KEY
+// or the `oc` CLI config (`oc config set api-key`), and sent only in the
+// X-API-Key header — never persisted in Crabbox config or placed on argv.
+type OpenComputerConfig struct {
+	APIURL          string
+	Workdir         string
+	CPU             int
+	MemoryMB        int
+	TimeoutSecs     int
+	ExecTimeoutSecs int
+	Burst           bool
+	ForgetMissing   bool
 }
 
 type DockerSandboxConfig struct {
@@ -560,6 +589,20 @@ type AppleContainerConfig struct {
 	CPUs         int
 	Memory       string
 	ExtraRunArgs []string
+}
+
+type MXCConfig struct {
+	CLIPath           string
+	Version           string
+	Containment       string
+	Network           string
+	ReadOnlyPaths     []string
+	ReadWritePaths    []string
+	AllowedHosts      []string
+	BlockedHosts      []string
+	AllowDACLMutation bool
+	AllowWindowsUI    bool
+	Experimental      bool
 }
 
 type MultipassConfig struct {
@@ -1032,6 +1075,10 @@ func MarkAppleContainerImageExplicit(cfg *Config) {
 	cfg.appleContainerImageExplicit = true
 }
 
+func AppleContainerImageExplicit(cfg Config) bool {
+	return cfg.appleContainerImageExplicit
+}
+
 func MarkMultipassImageExplicit(cfg *Config) {
 	cfg.multipassImageExplicit = true
 }
@@ -1177,6 +1224,12 @@ func baseConfig() Config {
 			WorkRoot:            "/workspaces/crabbox",
 			AutoStopIdleTimeout: 30 * time.Minute,
 		},
+		Morph: MorphConfig{
+			APIURL:         "https://cloud.morph.so",
+			SSHGatewayHost: "ssh.cloud.morph.so",
+			WorkRoot:       "/tmp/crabbox",
+			WakeOnSSH:      true,
+		},
 		Daytona: DaytonaConfig{
 			APIURL:           "https://app.daytona.io/api",
 			User:             "daytona",
@@ -1227,6 +1280,14 @@ func baseConfig() Config {
 			MemoryMB: 1024,
 			DiskMB:   10240,
 		},
+		OpenComputer: OpenComputerConfig{
+			// APIURL is intentionally unset here so the `oc` config file's
+			// api_url is honored before the built-in default; the provider
+			// applies the default (https://app.opencomputer.dev) as the final
+			// fallback in newOCAPIClient.
+			Workdir:         "/workspace/crabbox",
+			ExecTimeoutSecs: 3600,
+		},
 		DockerSandbox: DockerSandboxConfig{
 			CLIPath: "sbx",
 			Agent:   "shell",
@@ -1276,6 +1337,12 @@ func baseConfig() Config {
 			Image:    containerImage,
 			User:     "crabbox",
 			WorkRoot: "/work/crabbox",
+		},
+		MXC: MXCConfig{
+			CLIPath:     "wxc-exec.exe",
+			Version:     "0.6.0-alpha",
+			Containment: "processcontainer",
+			Network:     "block",
 		},
 		Multipass: MultipassConfig{
 			CLIPath:       "multipass",
@@ -1353,6 +1420,7 @@ type fileConfig struct {
 	KubeVirt             *fileKubeVirtConfig                `yaml:"kubevirt,omitempty"`
 	External             *fileExternalConfig                `yaml:"external,omitempty"`
 	Namespace            *fileNamespaceConfig               `yaml:"namespace,omitempty"`
+	Morph                *fileMorphConfig                   `yaml:"morph,omitempty"`
 	Daytona              *fileDaytonaConfig                 `yaml:"daytona,omitempty"`
 	E2B                  *fileE2BConfig                     `yaml:"e2b,omitempty"`
 	ExeDev               *fileExeDevConfig                  `yaml:"exeDev,omitempty"`
@@ -1362,6 +1430,7 @@ type fileConfig struct {
 	Islo                 *fileIsloConfig                    `yaml:"islo,omitempty"`
 	Tenki                *fileTenkiConfig                   `yaml:"tenki,omitempty"`
 	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
+	OpenComputer         *fileOpenComputerConfig            `yaml:"openComputer,omitempty"`
 	DockerSandbox        *fileDockerSandboxConfig           `yaml:"dockerSandbox,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
 	UpstashBox           *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
@@ -1371,6 +1440,7 @@ type fileConfig struct {
 	Sprites              *fileSpritesConfig                 `yaml:"sprites,omitempty"`
 	LocalContainer       *fileLocalContainerConfig          `yaml:"localContainer,omitempty"`
 	AppleContainer       *fileAppleContainerConfig          `yaml:"appleContainer,omitempty"`
+	MXC                  *fileMXCConfig                     `yaml:"mxc,omitempty"`
 	Multipass            *fileMultipassConfig               `yaml:"multipass,omitempty"`
 	Tart                 *fileTartConfig                    `yaml:"tart,omitempty"`
 	HyperV               *fileHyperVConfig                  `yaml:"hyperv,omitempty"`
@@ -1630,6 +1700,16 @@ type fileNamespaceConfig struct {
 	DeleteOnRelease     *bool  `yaml:"deleteOnRelease,omitempty"`
 }
 
+type fileMorphConfig struct {
+	APIKey          string `yaml:"apiKey,omitempty"`
+	APIURL          string `yaml:"apiUrl,omitempty"`
+	Snapshot        string `yaml:"snapshot,omitempty"`
+	SSHGatewayHost  string `yaml:"sshGatewayHost,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
+	WakeOnSSH       *bool  `yaml:"wakeOnSSH,omitempty"`
+}
+
 type fileDaytonaConfig struct {
 	APIURL           string `yaml:"apiUrl,omitempty"`
 	Snapshot         string `yaml:"snapshot,omitempty"`
@@ -1732,6 +1812,15 @@ type fileTensorlakeConfig struct {
 	NoInternet     *bool   `yaml:"noInternet,omitempty"`
 }
 
+type fileOpenComputerConfig struct {
+	Workdir         string `yaml:"workdir,omitempty"`
+	CPU             *int   `yaml:"cpu,omitempty"`
+	MemoryMB        *int   `yaml:"memoryMB,omitempty"`
+	TimeoutSecs     *int   `yaml:"timeoutSecs,omitempty"`
+	ExecTimeoutSecs *int   `yaml:"execTimeoutSecs,omitempty"`
+	Burst           *bool  `yaml:"burst,omitempty"`
+}
+
 type fileDockerSandboxConfig struct {
 	CLIPath         string    `yaml:"cliPath,omitempty"`
 	Agent           string    `yaml:"agent,omitempty"`
@@ -1820,6 +1909,20 @@ type fileAppleContainerConfig struct {
 	CPUs         int      `yaml:"cpus,omitempty"`
 	Memory       string   `yaml:"memory,omitempty"`
 	ExtraRunArgs []string `yaml:"extraRunArgs,omitempty"`
+}
+
+type fileMXCConfig struct {
+	CLIPath           string   `yaml:"cliPath,omitempty"`
+	Version           string   `yaml:"version,omitempty"`
+	Containment       string   `yaml:"containment,omitempty"`
+	Network           string   `yaml:"network,omitempty"`
+	ReadOnlyPaths     []string `yaml:"readOnlyPaths,omitempty"`
+	ReadWritePaths    []string `yaml:"readWritePaths,omitempty"`
+	AllowedHosts      []string `yaml:"allowedHosts,omitempty"`
+	BlockedHosts      []string `yaml:"blockedHosts,omitempty"`
+	AllowDACLMutation *bool    `yaml:"allowDaclMutation,omitempty"`
+	AllowWindowsUI    *bool    `yaml:"allowWindowsUI,omitempty"`
+	Experimental      *bool    `yaml:"experimental,omitempty"`
 }
 
 type fileMultipassConfig struct {
@@ -2737,6 +2840,29 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.Namespace.DeleteOnRelease = *file.Namespace.DeleteOnRelease
 		}
 	}
+	if file.Morph != nil {
+		if file.Morph.APIKey != "" {
+			cfg.Morph.APIKey = file.Morph.APIKey
+		}
+		if file.Morph.APIURL != "" {
+			cfg.Morph.APIURL = file.Morph.APIURL
+		}
+		if file.Morph.Snapshot != "" {
+			cfg.Morph.Snapshot = file.Morph.Snapshot
+		}
+		if file.Morph.SSHGatewayHost != "" {
+			cfg.Morph.SSHGatewayHost = file.Morph.SSHGatewayHost
+		}
+		if file.Morph.WorkRoot != "" {
+			cfg.Morph.WorkRoot = file.Morph.WorkRoot
+		}
+		if file.Morph.DeleteOnRelease != nil {
+			cfg.Morph.DeleteOnRelease = *file.Morph.DeleteOnRelease
+		}
+		if file.Morph.WakeOnSSH != nil {
+			cfg.Morph.WakeOnSSH = *file.Morph.WakeOnSSH
+		}
+	}
 	if file.Daytona != nil {
 		if file.Daytona.APIURL != "" {
 			cfg.Daytona.APIURL = file.Daytona.APIURL
@@ -2957,6 +3083,26 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.Tensorlake.NoInternet = *file.Tensorlake.NoInternet
 		}
 	}
+	if file.OpenComputer != nil {
+		if file.OpenComputer.Workdir != "" {
+			cfg.OpenComputer.Workdir = file.OpenComputer.Workdir
+		}
+		if file.OpenComputer.CPU != nil {
+			cfg.OpenComputer.CPU = *file.OpenComputer.CPU
+		}
+		if file.OpenComputer.MemoryMB != nil {
+			cfg.OpenComputer.MemoryMB = *file.OpenComputer.MemoryMB
+		}
+		if file.OpenComputer.TimeoutSecs != nil {
+			cfg.OpenComputer.TimeoutSecs = *file.OpenComputer.TimeoutSecs
+		}
+		if file.OpenComputer.ExecTimeoutSecs != nil {
+			cfg.OpenComputer.ExecTimeoutSecs = *file.OpenComputer.ExecTimeoutSecs
+		}
+		if file.OpenComputer.Burst != nil {
+			cfg.OpenComputer.Burst = *file.OpenComputer.Burst
+		}
+	}
 	if file.DockerSandbox != nil {
 		if file.DockerSandbox.CLIPath != "" {
 			cfg.DockerSandbox.CLIPath = file.DockerSandbox.CLIPath
@@ -3113,6 +3259,41 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if len(file.AppleContainer.ExtraRunArgs) > 0 {
 			cfg.AppleContainer.ExtraRunArgs = append([]string(nil), file.AppleContainer.ExtraRunArgs...)
+		}
+	}
+	if file.MXC != nil {
+		if file.MXC.CLIPath != "" {
+			cfg.MXC.CLIPath = file.MXC.CLIPath
+		}
+		if file.MXC.Version != "" {
+			cfg.MXC.Version = file.MXC.Version
+		}
+		if file.MXC.Containment != "" {
+			cfg.MXC.Containment = file.MXC.Containment
+		}
+		if file.MXC.Network != "" {
+			cfg.MXC.Network = file.MXC.Network
+		}
+		if file.MXC.ReadOnlyPaths != nil {
+			cfg.MXC.ReadOnlyPaths = append([]string(nil), file.MXC.ReadOnlyPaths...)
+		}
+		if file.MXC.ReadWritePaths != nil {
+			cfg.MXC.ReadWritePaths = append([]string(nil), file.MXC.ReadWritePaths...)
+		}
+		if file.MXC.AllowedHosts != nil {
+			cfg.MXC.AllowedHosts = append([]string(nil), file.MXC.AllowedHosts...)
+		}
+		if file.MXC.BlockedHosts != nil {
+			cfg.MXC.BlockedHosts = append([]string(nil), file.MXC.BlockedHosts...)
+		}
+		if file.MXC.AllowDACLMutation != nil {
+			cfg.MXC.AllowDACLMutation = *file.MXC.AllowDACLMutation
+		}
+		if file.MXC.AllowWindowsUI != nil {
+			cfg.MXC.AllowWindowsUI = *file.MXC.AllowWindowsUI
+		}
+		if file.MXC.Experimental != nil {
+			cfg.MXC.Experimental = *file.MXC.Experimental
 		}
 	}
 	if file.Multipass != nil {
@@ -3816,6 +3997,17 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_NAMESPACE_DELETE_ON_RELEASE"); ok {
 		cfg.Namespace.DeleteOnRelease = value
 	}
+	cfg.Morph.APIKey = getenv("CRABBOX_MORPH_API_KEY", getenv("MORPH_API_KEY", cfg.Morph.APIKey))
+	cfg.Morph.APIURL = getenv("CRABBOX_MORPH_API_URL", cfg.Morph.APIURL)
+	cfg.Morph.Snapshot = getenv("CRABBOX_MORPH_SNAPSHOT", cfg.Morph.Snapshot)
+	cfg.Morph.SSHGatewayHost = getenv("CRABBOX_MORPH_SSH_GATEWAY_HOST", cfg.Morph.SSHGatewayHost)
+	cfg.Morph.WorkRoot = getenv("CRABBOX_MORPH_WORK_ROOT", cfg.Morph.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_MORPH_DELETE_ON_RELEASE"); ok {
+		cfg.Morph.DeleteOnRelease = value
+	}
+	if value, ok := getenvBool("CRABBOX_MORPH_WAKE_ON_SSH"); ok {
+		cfg.Morph.WakeOnSSH = value
+	}
 	cfg.Daytona.APIKey = getenv("CRABBOX_DAYTONA_API_KEY", getenv("DAYTONA_API_KEY", cfg.Daytona.APIKey))
 	cfg.Daytona.JWTToken = getenv("CRABBOX_DAYTONA_JWT_TOKEN", getenv("DAYTONA_JWT_TOKEN", cfg.Daytona.JWTToken))
 	cfg.Daytona.OrganizationID = getenv("CRABBOX_DAYTONA_ORGANIZATION_ID", getenv("DAYTONA_ORGANIZATION_ID", cfg.Daytona.OrganizationID))
@@ -3900,6 +4092,15 @@ func applyEnv(cfg *Config) error {
 	if v, ok := getenvBool("CRABBOX_TENSORLAKE_NO_INTERNET"); ok {
 		cfg.Tensorlake.NoInternet = v
 	}
+	cfg.OpenComputer.APIURL = getenv("CRABBOX_OPENCOMPUTER_API_URL", getenv("OPENCOMPUTER_API_URL", cfg.OpenComputer.APIURL))
+	cfg.OpenComputer.Workdir = getenv("CRABBOX_OPENCOMPUTER_WORKDIR", cfg.OpenComputer.Workdir)
+	cfg.OpenComputer.CPU = getenvInt("CRABBOX_OPENCOMPUTER_CPU", cfg.OpenComputer.CPU)
+	cfg.OpenComputer.MemoryMB = getenvInt("CRABBOX_OPENCOMPUTER_MEMORY_MB", cfg.OpenComputer.MemoryMB)
+	cfg.OpenComputer.TimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", cfg.OpenComputer.TimeoutSecs)
+	cfg.OpenComputer.ExecTimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", cfg.OpenComputer.ExecTimeoutSecs)
+	if v, ok := getenvBool("CRABBOX_OPENCOMPUTER_BURST"); ok {
+		cfg.OpenComputer.Burst = v
+	}
 	cfg.DockerSandbox.CLIPath = getenv("CRABBOX_DOCKER_SANDBOX_CLI", cfg.DockerSandbox.CLIPath)
 	cfg.DockerSandbox.Agent = getenv("CRABBOX_DOCKER_SANDBOX_AGENT", cfg.DockerSandbox.Agent)
 	cfg.DockerSandbox.Template = getenv("CRABBOX_DOCKER_SANDBOX_TEMPLATE", cfg.DockerSandbox.Template)
@@ -3980,6 +4181,31 @@ func applyEnv(cfg *Config) error {
 	if extra := strings.Fields(os.Getenv("CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS")); len(extra) > 0 {
 		cfg.AppleContainer.ExtraRunArgs = extra
 	}
+	cfg.MXC.CLIPath = getenv("CRABBOX_MXC_CLI", cfg.MXC.CLIPath)
+	cfg.MXC.Version = getenv("CRABBOX_MXC_VERSION", cfg.MXC.Version)
+	cfg.MXC.Containment = getenv("CRABBOX_MXC_CONTAINMENT", cfg.MXC.Containment)
+	cfg.MXC.Network = getenv("CRABBOX_MXC_NETWORK", cfg.MXC.Network)
+	if value := os.Getenv("CRABBOX_MXC_READONLY_PATHS"); value != "" {
+		cfg.MXC.ReadOnlyPaths = splitCommaList(value)
+	}
+	if value := os.Getenv("CRABBOX_MXC_READWRITE_PATHS"); value != "" {
+		cfg.MXC.ReadWritePaths = splitCommaList(value)
+	}
+	if value := os.Getenv("CRABBOX_MXC_ALLOWED_HOSTS"); value != "" {
+		cfg.MXC.AllowedHosts = splitCommaList(value)
+	}
+	if value := os.Getenv("CRABBOX_MXC_BLOCKED_HOSTS"); value != "" {
+		cfg.MXC.BlockedHosts = splitCommaList(value)
+	}
+	if value, ok := getenvBool("CRABBOX_MXC_ALLOW_DACL_MUTATION"); ok {
+		cfg.MXC.AllowDACLMutation = value
+	}
+	if value, ok := getenvBool("CRABBOX_MXC_ALLOW_WINDOWS_UI"); ok {
+		cfg.MXC.AllowWindowsUI = value
+	}
+	if value, ok := getenvBool("CRABBOX_MXC_EXPERIMENTAL"); ok {
+		cfg.MXC.Experimental = value
+	}
 	cfg.Multipass.CLIPath = getenv("CRABBOX_MULTIPASS_CLI", cfg.Multipass.CLIPath)
 	if image := os.Getenv("CRABBOX_MULTIPASS_IMAGE"); image != "" {
 		cfg.Multipass.Image = image
@@ -4010,7 +4236,7 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("CRABBOX_TART_DISK"); v != "" {
 		cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
-		cfg.tartDiskExplicit = true
+		cfg.tartDiskExplicit = cfg.Tart.Disk > 0
 	}
 	cfg.HyperV.Image = getenv("CRABBOX_HYPERV_IMAGE", cfg.HyperV.Image)
 	cfg.HyperV.User = getenv("CRABBOX_HYPERV_USER", cfg.HyperV.User)

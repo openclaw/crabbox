@@ -27,12 +27,13 @@ func (b *isloBackend) PublishPeer(ctx context.Context, leaseID string, port int,
 		return core.BridgePeerTarget{}, err
 	}
 	existing, err := client.ListShares(ctx, name)
-	if err == nil {
-		now := b.now()
-		for _, share := range existing {
-			if isloShareReusable(share, port, now) {
-				return bridgeTargetFromShare(share), nil
-			}
+	if err != nil {
+		return core.BridgePeerTarget{}, err
+	}
+	now := b.now()
+	for _, share := range existing {
+		if isloShareReusable(share, port, now) {
+			return bridgeTargetFromShare(share), nil
 		}
 	}
 	share, err := client.CreateShare(ctx, name, port, ttl)

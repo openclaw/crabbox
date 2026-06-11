@@ -50,6 +50,10 @@ type isloSDKClient struct {
 	httpClient *http.Client
 }
 
+const isloDefaultResponseHeaderTimeout = 30 * time.Second
+
+var isloCleanupTimeout = 15 * time.Second
+
 var newIsloClient = func(cfg Config, rt Runtime) (isloAPI, error) {
 	apiKey := strings.TrimSpace(cfg.Islo.APIKey)
 	if apiKey == "" {
@@ -58,7 +62,7 @@ var newIsloClient = func(cfg Config, rt Runtime) (isloAPI, error) {
 	baseURL := strings.TrimRight(blank(cfg.Islo.BaseURL, "https://api.islo.dev"), "/")
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = defaultIsloHTTPClient()
 	}
 	auth := customauth.NewProvider(baseURL, apiKey, 0, httpClient)
 	var baseTransport http.RoundTripper
@@ -73,6 +77,16 @@ var newIsloClient = func(cfg Config, rt Runtime) (isloAPI, error) {
 	}
 	sdk := client.NewClient(option.WithBaseURL(baseURL), option.WithHTTPClient(sdkHTTPClient))
 	return &isloSDKClient{sdk: sdk, auth: auth, baseURL: baseURL, httpClient: httpClient}, nil
+}
+
+func isloCleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), isloCleanupTimeout)
+}
+
+func defaultIsloHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = isloDefaultResponseHeaderTimeout
+	return &http.Client{Transport: transport}
 }
 
 func (c *isloSDKClient) CreateSandbox(ctx context.Context, req *gosdk.SandboxCreate) (*gosdk.SandboxResponse, error) {

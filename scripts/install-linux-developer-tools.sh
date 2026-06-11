@@ -10,6 +10,10 @@ apt_keyrings_dir="${CRABBOX_LINUX_APT_KEYRINGS_DIR:-/etc/apt/keyrings}"
 apt_sources_dir="${CRABBOX_LINUX_APT_SOURCES_DIR:-/etc/apt/sources.list.d}"
 apt_conf_dir="${CRABBOX_LINUX_APT_CONF_DIR:-/etc/apt/apt.conf.d}"
 os_release_file="${CRABBOX_LINUX_OS_RELEASE_FILE:-/etc/os-release}"
+chrome_policy_dir="${CRABBOX_LINUX_CHROME_POLICY_DIR:-/etc/opt/chrome/policies/managed}"
+chromium_policy_dir="${CRABBOX_LINUX_CHROMIUM_POLICY_DIR:-/etc/chromium/policies/managed}"
+browser_bin_dir="${CRABBOX_LINUX_BROWSER_BIN_DIR:-/usr/local/bin}"
+browser_state_dir="${CRABBOX_LINUX_BROWSER_STATE_DIR:-/var/lib/crabbox}"
 
 log() {
   printf 'linux-tools: %s\n' "$*" >&2
@@ -146,19 +150,18 @@ install_chrome_or_chromium() {
     fi
   fi
   if [[ -n "$browser_path" ]]; then
-    install -d -m 0755 /etc/opt/chrome/policies/managed /etc/chromium/policies/managed
+    install -d -m 0755 "$chrome_policy_dir" "$chromium_policy_dir" "$browser_bin_dir" "$browser_state_dir"
     printf '%s\n' '{"DefaultBrowserSettingEnabled":false,"MetricsReportingEnabled":false,"PromotionalTabsEnabled":false}' \
-      >/etc/opt/chrome/policies/managed/crabbox.json
-    cp /etc/opt/chrome/policies/managed/crabbox.json /etc/chromium/policies/managed/crabbox.json
-    cat >/usr/local/bin/crabbox-browser <<EOF
+      >"$chrome_policy_dir/crabbox.json"
+    cp "$chrome_policy_dir/crabbox.json" "$chromium_policy_dir/crabbox.json"
+    cat >"$browser_bin_dir/crabbox-browser" <<EOF
 #!/bin/sh
 exec "$browser_path" --no-first-run --no-default-browser-check --disable-default-apps --window-size=1500,900 --window-position=80,80 "\$@"
 EOF
-    chmod 0755 /usr/local/bin/crabbox-browser
-    install -d -m 0755 /var/lib/crabbox
-    printf 'CHROME_BIN=/usr/local/bin/crabbox-browser\nBROWSER=/usr/local/bin/crabbox-browser\n' \
-      >/var/lib/crabbox/browser.env
-    chmod 0644 /var/lib/crabbox/browser.env
+    chmod 0755 "$browser_bin_dir/crabbox-browser"
+    printf 'CHROME_BIN=%s/crabbox-browser\nBROWSER=%s/crabbox-browser\n' "$browser_bin_dir" "$browser_bin_dir" \
+      >"$browser_state_dir/browser.env"
+    chmod 0644 "$browser_state_dir/browser.env"
   fi
 }
 

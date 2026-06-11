@@ -110,6 +110,7 @@ docker-sandbox          Docker Sandboxes through the standalone sbx CLI
 e2b                     E2B Firecracker sandboxes
 islo                    Islo sandboxes
 modal                   Modal Sandboxes
+opencomputer            OpenComputer Linux VMs
 tensorlake              Tensorlake Firecracker sandboxes
 upstash-box             Upstash sandboxes
 blacksmith-testbox      Blacksmith CI test runner (proof/session)
@@ -154,6 +155,7 @@ railway                 Railway service status and stop controls
 - [Islo](../providers/islo.md): delegated Islo sandbox execution.
 - [E2B](../providers/e2b.md): delegated E2B sandbox execution.
 - [Modal](../providers/modal.md): delegated Modal Sandbox execution.
+- [OpenComputer](../providers/opencomputer.md): delegated OpenComputer Linux VM execution through the OpenComputer REST API.
 - [Tensorlake](../providers/tensorlake.md): delegated Tensorlake Firecracker sandbox execution.
 - [Upstash Box](../providers/upstash-box.md): delegated Upstash sandbox execution.
 - [Blacksmith Testbox](../providers/blacksmith-testbox.md): delegated Blacksmith CI runner.

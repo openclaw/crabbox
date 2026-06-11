@@ -53,7 +53,9 @@ func (b *backend) syncWorkspace(ctx context.Context, client api, boxID string, r
 		"rm -f " + shellQuote(remoteArchiveName),
 	}, " && ")
 	if err := b.execShell(ctx, client, boxID, extract, io.Discard); err != nil {
-		_, _ = client.Exec(context.Background(), boxID, "rm -f "+shellQuote(remoteArchiveName), "")
+		if cleanupErr := cleanupRemoteFile(client, boxID, remoteArchiveName); cleanupErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: upstash-box sync cleanup failed for %s: %v\n", boxID, cleanupErr)
+		}
 		return nil, 0, err
 	}
 	uploadDuration := b.now().Sub(uploadStarted)

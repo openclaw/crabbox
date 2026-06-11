@@ -67,6 +67,7 @@ esac
 			PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
 			HOME: dir,
 			CRABBOX_BIN: fakeCrabbox,
+			CRABBOX_COORDINATOR: "https://broker.crabbox.test",
 			CRABBOX_DEPLOY_SMOKE_URLS: "https://broker.crabbox.test/v1/health",
 			CRABBOX_DEPLOY_SMOKE_AWS: "1",
 			CRABBOX_LIVE_REPO: liveRepo,

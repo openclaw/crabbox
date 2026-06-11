@@ -37,6 +37,9 @@ func publicKeyFor(privatePath string) (string, error) {
 }
 
 func testboxKeyPath(leaseID string) (string, error) {
+	if leaseID != strings.TrimSpace(leaseID) || !validLeaseClaimID(leaseID) {
+		return "", invalidLeaseClaimIDError{id: leaseID}
+	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", exit(2, "user config directory is unavailable")

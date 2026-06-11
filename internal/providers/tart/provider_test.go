@@ -1256,13 +1256,12 @@ func TestApplyFlagsRejectsInvalidEnvValues(t *testing.T) {
 	}{
 		{"zero cpu from env", "CRABBOX_TART_CPUS", "0", "tart cpu count must be at least 4"},
 		{"zero memory from env", "CRABBOX_TART_MEMORY", "0", "tart memory must be at least 4096"},
-		{"zero disk from env", "CRABBOX_TART_DISK", "0", "tart disk size must be a positive integer"},
 		{"non-integer cpu from env", "CRABBOX_TART_CPUS", "abc", "CRABBOX_TART_CPUS must be a valid integer"},
 		{"non-integer memory from env", "CRABBOX_TART_MEMORY", "4.5g", "CRABBOX_TART_MEMORY must be a valid integer"},
 		{"non-integer disk from env", "CRABBOX_TART_DISK", "fifty", "CRABBOX_TART_DISK must be a valid integer"},
 		{"below-floor cpu from env", "CRABBOX_TART_CPUS", "2", "tart cpu count must be at least 4"},
 		{"below-floor memory from env", "CRABBOX_TART_MEMORY", "1024", "tart memory must be at least 4096"},
-		{"negative disk from env", "CRABBOX_TART_DISK", "-1", "tart disk size must be a positive integer"},
+		{"negative disk from env", "CRABBOX_TART_DISK", "-1", "tart disk size must be non-negative"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1280,6 +1279,30 @@ func TestApplyFlagsRejectsInvalidEnvValues(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestApplyFlagsAcceptsDiskEnvValues(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "zero uses clone default", value: "0"},
+		{name: "positive is explicit", value: "50"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CRABBOX_TART_DISK", tc.value)
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			vals := registerFlags(fs, cfg)
+			if err := fs.Parse(nil); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if err := applyFlags(&cfg, fs, vals); err != nil {
+				t.Fatalf("applyFlags: %v", err)
 			}
 		})
 	}
@@ -2974,21 +2997,27 @@ func TestConfigureVMSkipsDiskWhenNotExplicit(t *testing.T) {
 	}
 }
 
-func TestValidateTartEnvIntPositive(t *testing.T) {
+func TestValidateTartEnvIntNonNegative(t *testing.T) {
 	t.Setenv("CRABBOX_TART_DISK", "0")
-	err := validateTartEnvIntPositive("CRABBOX_TART_DISK", "disk must be positive")
-	if err == nil {
-		t.Fatal("validateTartEnvIntPositive should reject 0")
+	err := validateTartEnvIntNonNegative("CRABBOX_TART_DISK", "disk must be non-negative")
+	if err != nil {
+		t.Fatalf("should accept 0: %v", err)
 	}
 
 	t.Setenv("CRABBOX_TART_DISK", "50")
-	err = validateTartEnvIntPositive("CRABBOX_TART_DISK", "disk must be positive")
+	err = validateTartEnvIntNonNegative("CRABBOX_TART_DISK", "disk must be non-negative")
 	if err != nil {
 		t.Fatalf("should accept 50: %v", err)
 	}
 
+	t.Setenv("CRABBOX_TART_DISK", "-1")
+	err = validateTartEnvIntNonNegative("CRABBOX_TART_DISK", "disk must be non-negative")
+	if err == nil {
+		t.Fatal("should reject negative disk")
+	}
+
 	t.Setenv("CRABBOX_TART_DISK", "abc")
-	err = validateTartEnvIntPositive("CRABBOX_TART_DISK", "disk must be positive")
+	err = validateTartEnvIntNonNegative("CRABBOX_TART_DISK", "disk must be non-negative")
 	if err == nil {
 		t.Fatal("should reject non-integer")
 	}

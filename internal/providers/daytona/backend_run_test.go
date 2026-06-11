@@ -2,7 +2,9 @@ package daytona
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
+	"context"
 	"flag"
 	"io"
 	"net/http"
@@ -287,6 +289,47 @@ func TestApplyDaytonaProviderFlagsRejectsResourceNoops(t *testing.T) {
 				t.Fatalf("err=%v, want daytona resource flag rejection", err)
 			}
 		})
+	}
+}
+
+type blockingDeleteDaytonaAPI struct {
+	fakeDaytonaDoctorAPI
+	canceled chan struct{}
+}
+
+func (a *blockingDeleteDaytonaAPI) DeleteSandbox(ctx context.Context, _ string) error {
+	<-ctx.Done()
+	close(a.canceled)
+	return ctx.Err()
+}
+
+func TestDeleteDaytonaToolboxSandboxUsesBoundedContext(t *testing.T) {
+	oldTimeout := daytonaCleanupTimeout
+	daytonaCleanupTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { daytonaCleanupTimeout = oldTimeout })
+	fake := &blockingDeleteDaytonaAPI{canceled: make(chan struct{})}
+	oldClient := newDaytonaClient
+	newDaytonaClient = func(Config, Runtime) (daytonaAPI, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newDaytonaClient = oldClient })
+
+	var stderr bytes.Buffer
+	backend := &daytonaLeaseBackend{cfg: baseConfig(), rt: Runtime{Stderr: &stderr}}
+	started := time.Now()
+	ctx, cancel := daytonaCleanupContext()
+	defer cancel()
+	backend.deleteDaytonaToolboxSandbox(ctx, "sandbox-one", "lease-one")
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("delete cleanup took %s, want bounded timeout", elapsed)
+	}
+	select {
+	case <-fake.canceled:
+	default:
+		t.Fatal("delete did not observe cleanup context cancellation")
+	}
+	if !strings.Contains(stderr.String(), "context deadline exceeded") {
+		t.Fatalf("stderr=%q, want timeout warning", stderr.String())
 	}
 }
 
