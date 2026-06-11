@@ -19,6 +19,7 @@ type fakeDigitalOceanAPI struct {
 	listFn         func() ([]droplet, error)
 	nextID         int64
 	createErr      error
+	getErr         error
 	deleteErr      error
 	deleteSawDone  bool
 	keyDeleteErr   error
@@ -52,6 +53,9 @@ func (f *fakeDigitalOceanAPI) ListCrabboxDroplets(context.Context) ([]droplet, e
 }
 
 func (f *fakeDigitalOceanAPI) GetDroplet(_ context.Context, id int64) (droplet, error) {
+	if f.getErr != nil {
+		return droplet{}, f.getErr
+	}
 	for _, item := range append(f.droplets, f.created...) {
 		if item.ID == id {
 			return item, nil
@@ -227,6 +231,47 @@ func TestAcquireRetainsLocalKeyWhenRollbackFails(t *testing.T) {
 	}
 	if _, statErr := os.Stat(keyPath); statErr != nil {
 		t.Fatalf("local key removed after failed rollback: %v", statErr)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("rollback-fail", providerName)
+	if claimErr != nil || !ok || claim.LeaseID != api.createRequests[0].leaseID || claim.CloudID != "100" {
+		t.Fatalf("cleanup claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+
+	api.keyDeleteErr = nil
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "rollback-fail", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 2 || api.deleted[1] != 100 || len(api.deletedKeys) != 2 {
+		t.Fatalf("deleted=%v deletedKeys=%v", api.deleted, api.deletedKeys)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("rollback-fail", providerName); err != nil || ok {
+		t.Fatalf("claim after retry ok=%v err=%v", ok, err)
+	}
+	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("local key retained after cleanup retry: %v", statErr)
+	}
+}
+
+func TestAcquireRollsBackOriginalDropletWhenWaitLookupFails(t *testing.T) {
+	api := &fakeDigitalOceanAPI{getErr: errors.New("droplet lookup failed")}
+	backend := newTestBackend(t, api)
+
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "lookup-fail"})
+	if err == nil || !strings.Contains(err.Error(), "droplet lookup failed") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if len(api.deleted) != 1 || api.deleted[0] != 100 {
+		t.Fatalf("deleted=%v", api.deleted)
+	}
+	if len(api.deletedKeys) != 1 {
+		t.Fatalf("deletedKeys=%v", api.deletedKeys)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("lookup-fail", providerName); err != nil || ok {
+		t.Fatalf("claim after successful rollback ok=%v err=%v", ok, err)
 	}
 }
 

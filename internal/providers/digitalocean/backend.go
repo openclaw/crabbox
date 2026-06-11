@@ -94,6 +94,7 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	now := b.now()
 	created := droplet{}
 	committed := false
 	defer func() {
@@ -104,9 +105,18 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 		if errors.As(err, &ambiguous) {
 			return
 		}
+		claimPersisted := false
+		var claimErr error
+		if created.ID != 0 {
+			claimErr = b.persistAcquireCleanupClaim(leaseID, slug, cfg, created, req.Repo.Root, req.Keep, now)
+			claimPersisted = claimErr == nil
+		}
 		if cleanupErr := rollbackDigitalOceanAcquire(client, created.ID, providerKeyForLease(leaseID)); cleanupErr != nil {
-			err = fmt.Errorf("%v; digitalocean cleanup failed: %w", err, cleanupErr)
+			err = fmt.Errorf("%v; digitalocean cleanup failed: %w", err, errors.Join(claimErr, cleanupErr))
 			return
+		}
+		if claimPersisted {
+			core.RemoveLeaseClaim(leaseID)
 		}
 		core.RemoveStoredTestboxKey(leaseID)
 	}()
@@ -118,7 +128,6 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
-	now := b.now()
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=digitalocean lease=%s slug=%s type=%s region=%s image=%s keep=%v\n", leaseID, slug, cfg.ServerType, digitalOceanRegion(cfg), digitalOceanImage(cfg), req.Keep)
 	created, err = client.CreateDroplet(ctx, cfg, publicKey, leaseID, slug, req.Keep, now)
 	if err != nil {
@@ -142,10 +151,11 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 		}
 		return core.LeaseTarget{}, err
 	}
-	created, err = b.waitForDropletIP(ctx, client, created.ID)
-	if err != nil {
-		return core.LeaseTarget{}, err
+	waited, waitErr := b.waitForDropletIP(ctx, client, created.ID)
+	if waitErr != nil {
+		return core.LeaseTarget{}, waitErr
 	}
+	created = waited
 	server := serverFromDroplet(created, cfg)
 	ssh := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 	if err := b.waitSSH(ctx, &ssh, "digitalocean bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
@@ -164,6 +174,35 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	committed = true
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s droplet=%s type=%s\n", leaseID, server.DisplayID(), cfg.ServerType)
 	return core.LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}, nil
+}
+
+func (b *digitalOceanLeaseBackend) persistAcquireCleanupClaim(leaseID, slug string, cfg core.Config, created droplet, repoRoot string, keep bool, now time.Time) error {
+	server := serverFromDroplet(created, cfg)
+	if err := validateDropletLabels(server.Labels); err != nil {
+		server.Labels = core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
+		server.Labels["state"] = "provisioning"
+	}
+	server.Labels["recovery"] = "rollback-cleanup"
+	if repoRoot == "" {
+		var err error
+		repoRoot, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("resolve rollback cleanup working directory: %w", err)
+		}
+	}
+	if err := claimLeaseTargetForRepoConfig(
+		leaseID,
+		slug,
+		cfg,
+		server,
+		core.SSHTarget{},
+		repoRoot,
+		cfg.IdleTimeout,
+		false,
+	); err != nil {
+		return fmt.Errorf("persist digitalocean rollback cleanup claim: %w", err)
+	}
+	return nil
 }
 
 func (b *digitalOceanLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
