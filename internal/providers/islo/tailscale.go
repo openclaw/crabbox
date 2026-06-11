@@ -58,14 +58,34 @@ umask 077
 : "${TS_STATE_DIR:?}"
 mkdir -p "${TS_STATE_DIR}"
 chmod 700 "${TS_STATE_DIR}"
+TS_LOCK_DIR="${TS_STATE_DIR}/operation.lock"
+TS_LOCKED=""
+for _ in $(seq 1 720); do
+  if mkdir "${TS_LOCK_DIR}" 2>/dev/null; then
+    printf '%s\n' "$$" >"${TS_LOCK_DIR}/pid"
+    TS_LOCKED=1
+    break
+  fi
+  lock_pid="$(cat "${TS_LOCK_DIR}/pid" 2>/dev/null || true)"
+  if [ -n "${lock_pid}" ] && ! kill -0 "${lock_pid}" 2>/dev/null; then
+    rm -rf "${TS_LOCK_DIR}"
+    continue
+  fi
+  sleep 0.5
+done
+test "${TS_LOCKED}" = 1 || { echo "timed out waiting for tailscale operation lock" >&2; exit 75; }
+TS_RUNTIME_DIR="/run/crabbox/tailscale/$(basename "${TS_STATE_DIR}")"
+mkdir -p "${TS_RUNTIME_DIR}"
+chmod 700 "${TS_RUNTIME_DIR}"
+rm -f "${TS_RUNTIME_DIR}"/auth.*
 TS_AUTH_FILE=""
 if [ -n "${TS_AUTHKEY}" ]; then
-  TS_AUTH_FILE="$(mktemp "${TS_STATE_DIR}/auth.XXXXXX")"
+  TS_AUTH_FILE="$(mktemp "${TS_RUNTIME_DIR}/auth.XXXXXX")"
   printf '%s' "${TS_AUTHKEY}" >"${TS_AUTH_FILE}"
 fi
 unset TS_AUTHKEY
 TS_INSTALL_DIR="$(mktemp -d "${TS_STATE_DIR}/install.XXXXXX")"
-trap 'if [ -n "${TS_AUTH_FILE}" ]; then rm -f "${TS_AUTH_FILE}"; fi; rm -rf "${TS_INSTALL_DIR}"' EXIT
+trap 'if [ -n "${TS_AUTH_FILE}" ]; then rm -f "${TS_AUTH_FILE}"; fi; rm -rf "${TS_INSTALL_DIR}"; if [ "${TS_LOCKED}" = 1 ]; then rm -rf "${TS_LOCK_DIR}"; fi' EXIT
 case "$(uname -m)" in
   x86_64) A=amd64; TS_SHA256=` + defaultIsloTailscaleAMD64SHA256 + ` ;;
   aarch64|arm64) A=arm64; TS_SHA256=` + defaultIsloTailscaleARM64SHA256 + ` ;;

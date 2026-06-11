@@ -457,15 +457,18 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 		}
 		peers = append(peers, peer)
 	}
-	if deferredBridgeErr != nil && !hasResolvedIndependentPrimary(peers) {
+	if deferredBridgeErr != nil && !hasResolvedPrimary(peers) {
 		return peers, deferredBridgeErr
 	}
 	return peers, nil
 }
 
-func hasResolvedIndependentPrimary(peers []BridgePeer) bool {
+func hasResolvedPrimary(peers []BridgePeer) bool {
 	for _, peer := range peers {
 		if peer.Transport == TransportTailnet || peer.Transport == TransportSSH {
+			return true
+		}
+		if peer.Transport == TransportURL && (peer.Endpoint != "" || len(peer.Targets) > 0) {
 			return true
 		}
 	}

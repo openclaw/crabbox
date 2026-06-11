@@ -43,6 +43,7 @@ type fakeBridgeProvider struct {
 	listed    map[string][]BridgePeerTarget
 	published map[string]BridgePeerTarget
 	listErr   error
+	listErrs  map[string]error
 	pubErr    error
 	calls     int
 }
@@ -69,6 +70,9 @@ func (f *fakeBridgeProvider) PublishPeer(_ context.Context, leaseID string, port
 
 func (f *fakeBridgeProvider) ListPeerTargets(_ context.Context, leaseID string) ([]BridgePeerTarget, error) {
 	f.calls++
+	if err := f.listErrs[leaseID]; err != nil {
+		return nil, err
+	}
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -271,6 +275,42 @@ func TestResolvePondPeersKeepsTailnetPeerWhenURLMemberFails(t *testing.T) {
 		t.Fatalf("healthy tailnet peer missing: %#v", got)
 	}
 	if got := bySlug["url"]; got.Transport != TransportNone || got.BridgeState != "error" {
+		t.Fatalf("failed URL peer should degrade in place: %#v", got)
+	}
+}
+
+func TestResolvePondPeersKeepsHealthyURLPeerWhenURLMemberFails(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_healthy", Slug: "healthy", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "isb_failed", Slug: "failed", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	fake := &fakeBridgeProvider{
+		listed: map[string][]BridgePeerTarget{
+			"isb_healthy": {{Port: 8080, URL: "https://healthy.share.islo.dev"}},
+		},
+		listErrs: map[string]error{
+			"isb_failed": errors.New("Islo API unavailable"),
+		},
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{})
+	if err != nil {
+		t.Fatalf("failed URL member must not discard healthy URL peer: %v", err)
+	}
+	if len(peers) != 2 {
+		t.Fatalf("expected healthy and degraded members, got %#v", peers)
+	}
+	bySlug := map[string]BridgePeer{}
+	for _, peer := range peers {
+		bySlug[peer.Slug] = peer
+	}
+	if got := bySlug["healthy"]; got.Transport != TransportURL || got.Endpoint != "https://healthy.share.islo.dev" {
+		t.Fatalf("healthy URL peer missing: %#v", got)
+	}
+	if got := bySlug["failed"]; got.Transport != TransportNone || got.BridgeState != "error" {
 		t.Fatalf("failed URL peer should degrade in place: %#v", got)
 	}
 }
