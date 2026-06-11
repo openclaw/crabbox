@@ -85,6 +85,9 @@ droplet:read
 droplet:create
 droplet:delete
 droplet:update
+regions:read
+sizes:read
+actions:read
 image:read
 ssh_key:read
 ssh_key:create
@@ -94,6 +97,8 @@ tag:create
 tag:delete
 ```
 
+DigitalOcean lists `regions:read`, `sizes:read`, `actions:read`, and
+`image:read` as required dependencies of the Droplet read/create scopes.
 If a live smoke fails with a permission error, keep the error output secret-safe
 and adjust token scopes before retrying. Add `vpc:read` when selecting an
 explicit VPC. Do not broaden scopes inside scripts.

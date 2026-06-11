@@ -25,7 +25,10 @@ func TestProviderServerTypeDefaults(t *testing.T) {
 	if got := (Provider{}).ServerTypeForClass("standard"); got != "s-1vcpu-1gb" {
 		t.Fatalf("ServerTypeForClass standard=%q", got)
 	}
-	if got := (Provider{}).ServerTypeForConfig(core.Config{ServerType: "s-2vcpu-2gb"}); got != "s-2vcpu-2gb" {
+	if got := (Provider{}).ServerTypeForConfig(core.Config{ServerType: "s-2vcpu-2gb", ServerTypeExplicit: true}); got != "s-2vcpu-2gb" {
 		t.Fatalf("explicit ServerTypeForConfig=%q", got)
+	}
+	if got := (Provider{}).ServerTypeForConfig(core.Config{ServerType: "cpx51"}); got != "s-1vcpu-1gb" {
+		t.Fatalf("implicit cross-provider ServerTypeForConfig=%q", got)
 	}
 }

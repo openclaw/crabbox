@@ -77,20 +77,7 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	cfg.SSHKey = keyPath
-	cfg.ProviderKey = providerKeyForLease(leaseID)
-	if cfg.ServerType == "" {
-		cfg.ServerType = digitalOceanServerTypeForClass(cfg.Class)
-	}
-	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
-		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
-	}
-	now := b.now()
-	fmt.Fprintf(b.RT.Stderr, "provisioning provider=digitalocean lease=%s slug=%s type=%s region=%s image=%s keep=%v\n", leaseID, slug, cfg.ServerType, digitalOceanRegion(cfg), digitalOceanImage(cfg), req.Keep)
-	created, err := client.CreateDroplet(ctx, cfg, publicKey, leaseID, slug, req.Keep, now)
-	if err != nil {
-		return core.LeaseTarget{}, err
-	}
+	created := droplet{}
 	committed := false
 	defer func() {
 		if err == nil || committed {
@@ -98,8 +85,24 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 		}
 		if cleanupErr := rollbackDigitalOceanAcquire(client, created.ID, providerKeyForLease(leaseID)); cleanupErr != nil {
 			err = errors.Join(err, fmt.Errorf("digitalocean cleanup failed: %w", cleanupErr))
+			return
 		}
+		core.RemoveStoredTestboxKey(leaseID)
 	}()
+	cfg.SSHKey = keyPath
+	cfg.ProviderKey = providerKeyForLease(leaseID)
+	if !cfg.ServerTypeExplicit || cfg.ServerType == "" {
+		cfg.ServerType = digitalOceanServerTypeForClass(cfg.Class)
+	}
+	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
+		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
+	}
+	now := b.now()
+	fmt.Fprintf(b.RT.Stderr, "provisioning provider=digitalocean lease=%s slug=%s type=%s region=%s image=%s keep=%v\n", leaseID, slug, cfg.ServerType, digitalOceanRegion(cfg), digitalOceanImage(cfg), req.Keep)
+	created, err = client.CreateDroplet(ctx, cfg, publicKey, leaseID, slug, req.Keep, now)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
 	created, err = b.waitForDropletIP(ctx, client, created.ID)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -453,7 +456,7 @@ func applyDigitalOceanDefaults(cfg *core.Config) {
 	if cfg.DigitalOcean.Image == "" {
 		cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
 	}
-	if cfg.ServerType == "" {
+	if !cfg.ServerTypeExplicit || cfg.ServerType == "" {
 		cfg.ServerType = digitalOceanServerTypeForClass(cfg.Class)
 	}
 	if cfg.SSHUser == "" || cfg.SSHUser == "crabbox" {

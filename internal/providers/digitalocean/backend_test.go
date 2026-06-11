@@ -186,6 +186,33 @@ func TestAcquireRollsBackDropletAndKeyOnSSHFailure(t *testing.T) {
 	if len(api.deletedKeys) != 1 || !strings.HasPrefix(api.deletedKeys[0], "crabbox-cbx-") {
 		t.Fatalf("deletedKeys=%v", api.deletedKeys)
 	}
+	keyPath, err := core.TestboxKeyPath(api.createRequests[0].leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("local key still exists after successful rollback: %v", err)
+	}
+}
+
+func TestAcquireRetainsLocalKeyWhenRollbackFails(t *testing.T) {
+	api := &fakeDigitalOceanAPI{
+		createErr:    errors.New("create failed"),
+		keyDeleteErr: errors.New("key cleanup failed"),
+	}
+	backend := newTestBackend(t, api)
+
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback-fail"})
+	if err == nil || !strings.Contains(err.Error(), "create failed") || !strings.Contains(err.Error(), "key cleanup failed") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	keyPath, pathErr := core.TestboxKeyPath(api.createRequests[0].leaseID)
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatalf("local key removed after failed rollback: %v", statErr)
+	}
 }
 
 func TestAcquireRollsBackKeepDropletAndKeyOnSSHFailure(t *testing.T) {
@@ -656,6 +683,7 @@ func TestApplyDigitalOceanDefaultsDoesNotMutateGenericImage(t *testing.T) {
 func TestApplyDigitalOceanDefaultsUseProviderDefaults(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
+	cfg.ServerType = "cpx51"
 
 	applyDigitalOceanDefaults(&cfg)
 
@@ -667,6 +695,22 @@ func TestApplyDigitalOceanDefaultsUseProviderDefaults(t *testing.T) {
 	}
 	if cfg.SSHUser != "root" || cfg.SSHPort != "22" || len(cfg.SSHFallbackPorts) != 0 {
 		t.Fatalf("effective ssh defaults=%s@:%s fallback=%v", cfg.SSHUser, cfg.SSHPort, cfg.SSHFallbackPorts)
+	}
+	if cfg.ServerType != "s-1vcpu-1gb" {
+		t.Fatalf("ServerType=%q want digitalocean default", cfg.ServerType)
+	}
+}
+
+func TestApplyDigitalOceanDefaultsPreservesExplicitServerType(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.ServerType = "s-2vcpu-2gb"
+	cfg.ServerTypeExplicit = true
+
+	applyDigitalOceanDefaults(&cfg)
+
+	if cfg.ServerType != "s-2vcpu-2gb" {
+		t.Fatalf("ServerType=%q want explicit type", cfg.ServerType)
 	}
 }
 

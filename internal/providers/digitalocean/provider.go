@@ -31,7 +31,7 @@ func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 }
 
 func (p Provider) ServerTypeForConfig(cfg core.Config) string {
-	if cfg.ServerType != "" {
+	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		return cfg.ServerType
 	}
 	return digitalOceanServerTypeForClass(cfg.Class)
