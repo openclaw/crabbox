@@ -119,6 +119,30 @@ func TestDigitalOceanClientCreateDropletRequestShape(t *testing.T) {
 	}
 }
 
+func TestDigitalOceanClientAccountIDPrefersTeamContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/account" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+		_, _ = w.Write([]byte(`{"account":{"uuid":"user-123","team":{"uuid":"team-456"}}}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	accountID, err := client.AccountID(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accountID != "team:team-456" {
+		t.Fatalf("accountID=%q", accountID)
+	}
+}
+
 func containsAnyTag(tags []any, want string) bool {
 	for _, tag := range tags {
 		if tag == want {

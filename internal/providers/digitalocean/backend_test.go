@@ -17,6 +17,8 @@ import (
 type fakeDigitalOceanAPI struct {
 	droplets       []droplet
 	listFn         func() ([]droplet, error)
+	accountID      string
+	accountErr     error
 	nextID         int64
 	createErr      error
 	getErr         error
@@ -37,6 +39,16 @@ type fakeDigitalOceanAPI struct {
 		slug    string
 		keep    bool
 	}
+}
+
+func (f *fakeDigitalOceanAPI) AccountID(context.Context) (string, error) {
+	if f.accountErr != nil {
+		return "", f.accountErr
+	}
+	if f.accountID != "" {
+		return f.accountID, nil
+	}
+	return "team:test-account", nil
 }
 
 func (f *fakeDigitalOceanAPI) ListCrabboxDroplets(context.Context) ([]droplet, error) {
@@ -272,6 +284,56 @@ func TestAcquireRollsBackOriginalDropletWhenWaitLookupFails(t *testing.T) {
 	}
 	if _, ok, err := core.ResolveLeaseClaimForProvider("lookup-fail", providerName); err != nil || ok {
 		t.Fatalf("claim after successful rollback ok=%v err=%v", ok, err)
+	}
+}
+
+func TestAcquirePersistsKeyOnlyCleanupClaim(t *testing.T) {
+	api := &fakeDigitalOceanAPI{
+		createErr:    errors.New("droplet create failed"),
+		keyDeleteErr: errors.New("key cleanup failed"),
+	}
+	backend := newTestBackend(t, api)
+
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "key-only"})
+	if err == nil || !strings.Contains(err.Error(), "droplet create failed") || !strings.Contains(err.Error(), "key cleanup failed") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if len(api.createRequests) != 1 || len(api.deleted) != 0 || len(api.deletedKeys) != 1 {
+		t.Fatalf("createRequests=%d deleted=%v deletedKeys=%v", len(api.createRequests), api.deleted, api.deletedKeys)
+	}
+	leaseID := api.createRequests[0].leaseID
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("key-only", providerName)
+	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels["recovery"] != "rollback-cleanup" ||
+		claim.Labels[digitalOceanAccountLabel] != "team:test-account" {
+		t.Fatalf("cleanup claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	keyPath, pathErr := core.TestboxKeyPath(leaseID)
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatalf("local key removed after failed key cleanup: %v", statErr)
+	}
+
+	api.keyDeleteErr = nil
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "key-only", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.ID != 0 || lease.LeaseID != leaseID {
+		t.Fatalf("key-only lease=%#v", lease)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 2 {
+		t.Fatalf("deleted=%v deletedKeys=%v", api.deleted, api.deletedKeys)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("key-only", providerName); err != nil || ok {
+		t.Fatalf("claim after key cleanup ok=%v err=%v", ok, err)
+	}
+	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("local key retained after key cleanup: %v", statErr)
 	}
 }
 
@@ -729,6 +791,95 @@ func TestReleaseRetriesKeyCleanupFromRetainedClaimAfterDropletDeletion(t *testin
 	}
 }
 
+func TestReleaseFromClaimRefusesDigitalOceanAccountMismatch(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123456"
+	slug := "account-guard"
+	cfg.ProviderKey = providerKeyForLease(leaseID)
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	labels[digitalOceanAccountLabel] = "team:account-a"
+	server := core.Server{
+		Provider: providerName,
+		CloudID:  "77",
+		ID:       77,
+		Name:     core.LeaseProviderName(leaseID, slug),
+		Labels:   labels,
+	}
+	api := &fakeDigitalOceanAPI{accountID: "team:account-b"}
+	backend := newTestBackend(t, api)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, backend.Cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := writeStoredTestboxKey(t, leaseID)
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "account mismatch") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("deleted=%v deletedKeys=%v", api.deleted, api.deletedKeys)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName); err != nil || !ok {
+		t.Fatalf("claim after mismatch ok=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key after mismatch: %v", err)
+	}
+
+	api.accountID = "team:account-a"
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 1 || api.deleted[0] != 77 || len(api.deletedKeys) != 1 {
+		t.Fatalf("deleted=%v deletedKeys=%v", api.deleted, api.deletedKeys)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName); err != nil || ok {
+		t.Fatalf("claim after matching cleanup ok=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("key after matching cleanup: %v", err)
+	}
+}
+
+func TestReleaseDoesNotBackfillStaleLegacyClaim(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123456"
+	slug := "stale-legacy"
+	item := droplet{ID: 77, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: leaseTags(cfg, leaseID, slug, "ready", false, time.Now())}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	liveServer := serverFromDroplet(item, backend.Cfg)
+	staleServer := liveServer
+	staleServer.ID = 999
+	staleServer.CloudID = "999"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, backend.Cfg, staleServer, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		Server:  liveServer,
+		LeaseID: leaseID,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "stale local claim") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("deleted=%v deletedKeys=%v", api.deleted, api.deletedKeys)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName)
+	if err != nil || !ok || claim.CloudID != "999" || claim.Labels[digitalOceanAccountLabel] != "" {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+}
+
 func TestReleaseFromClaimRefusesDropletMissingOwnershipTags(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -998,6 +1149,7 @@ func TestTouchPreservesLiveTailscaleTags(t *testing.T) {
 	server.Labels["tailscale_state"] = "requested"
 	server.Labels["tailscale_tags"] = "tag:stale"
 	server.Labels["tailscale_exit_node"] = "stale.example.ts.net"
+	server.Labels[digitalOceanAccountLabel] = "team:test-account"
 	liveLabels := normalizedDropletLabels(item.Tags)
 	liveLabels["tailscale_ipv4"] = "100.64.1.2"
 	liveLabels["tailscale_fqdn"] = "touch-me.example.ts.net"
@@ -1020,6 +1172,9 @@ func TestTouchPreservesLiveTailscaleTags(t *testing.T) {
 	}
 	if touched.Labels["state"] != "running" || touched.Labels["idle_timeout_secs"] != "1200" {
 		t.Fatalf("touched labels=%v", touched.Labels)
+	}
+	if touched.Labels[digitalOceanAccountLabel] != "team:test-account" {
+		t.Fatalf("account label=%q", touched.Labels[digitalOceanAccountLabel])
 	}
 	if len(api.replaced) != 1 || api.replaced[0] != 99 {
 		t.Fatalf("replaced=%v", api.replaced)
@@ -1046,6 +1201,7 @@ func TestUpdateTailscaleMetadataPersistsDigitalOceanTags(t *testing.T) {
 	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
 	backend := newTestBackend(t, api)
 	server := serverFromDroplet(item, backend.Cfg)
+	server.Labels[digitalOceanAccountLabel] = "team:test-account"
 	meta := core.TailscaleMetadata{
 		Enabled:  true,
 		Hostname: "metadata",
@@ -1066,6 +1222,9 @@ func TestUpdateTailscaleMetadataPersistsDigitalOceanTags(t *testing.T) {
 	}
 	if len(api.replacedTo) != 1 {
 		t.Fatalf("replacedTo=%v", api.replacedTo)
+	}
+	if updated.Labels[digitalOceanAccountLabel] != "team:test-account" {
+		t.Fatalf("account label=%q", updated.Labels[digitalOceanAccountLabel])
 	}
 	for _, labels := range []map[string]string{labelsFromTags(api.replacedTo[0]), updated.Labels} {
 		if labels["tailscale_ipv4"] != meta.IPv4 ||

@@ -76,7 +76,7 @@ Per-provider smoke prerequisites:
 - **KubeVirt** — `kubectl`, `virtctl`, a namespace with KubeVirt access, and an SSH-ready VM template.
 - **External** — a configured provider executable through `external.command` or `CRABBOX_LIVE_EXTERNAL_COMMAND`.
 - **W&B** — `WANDB_ENTITY_NAME` plus `CRABBOX_WANDB_API_KEY` or `WANDB_API_KEY` (from `wandb login`). `scripts/wandb-smoke.sh` is a coordinator-free, wandb-only gate.
-- **DigitalOcean** — `DIGITALOCEAN_TOKEN` with Droplet, image-read, SSH key, and tag scopes. `scripts/live-digitalocean-smoke.sh` is coordinator-free, requires an empty Crabbox-owned inventory, creates a small short-lived Droplet, verifies status and execution, and prints a final cleanup classification.
+- **DigitalOcean** — `DIGITALOCEAN_TOKEN` with account-read, Droplet, image-read, SSH key, and tag scopes. `scripts/live-digitalocean-smoke.sh` is coordinator-free, requires an empty Crabbox-owned inventory, creates a small short-lived Droplet, verifies status and execution, and prints a final cleanup classification.
 
 For a direct-provider smoke (no coordinator), disable the broker with a scratch config and run the same lease lifecycle manually:
 

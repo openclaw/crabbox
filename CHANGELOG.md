@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed DigitalOcean capability-tag persistence, provider config visibility and precedence, ambiguous-create recovery, and retryable Droplet/SSH-key cleanup.
+- Fixed DigitalOcean capability-tag persistence, provider config visibility and precedence, account-scoped ambiguous-create recovery, and retryable Droplet/SSH-key cleanup.
 - Fixed Namespace Devbox setup instructions to use the current browser workspace approval flow instead of obsolete token environment variables.
 
 ## 0.28.0 - 2026-06-11

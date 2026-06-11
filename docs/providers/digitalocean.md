@@ -89,6 +89,7 @@ The Phase 1 provider uses Droplets, SSH keys, and tags. A custom DigitalOcean
 token needs at least:
 
 ```text
+account:read
 droplet:read
 droplet:create
 droplet:delete
@@ -107,6 +108,9 @@ tag:delete
 
 DigitalOcean lists `regions:read`, `sizes:read`, `actions:read`, and
 `image:read` as required dependencies of the Droplet read/create scopes.
+Crabbox uses `account:read` to bind local cleanup claims to the creating
+DigitalOcean user or team and refuses claim-only deletion after an account
+switch.
 If a live smoke fails with a permission error, keep the error output secret-safe
 and adjust token scopes before retrying. Add `vpc:read` when selecting an
 explicit VPC. Do not broaden scopes inside scripts.
@@ -122,7 +126,8 @@ explicit VPC. Do not broaden scopes inside scripts.
 6. Run normal Crabbox sync/run/ssh workflows over SSH.
 7. Delete the Droplet and managed SSH key on `stop`; `cleanup` deletes only
    resources with a complete Crabbox DigitalOcean ownership tag set. Failed
-   post-delete cleanup retains the local claim so `stop` can retry it.
+   post-delete or key-only rollback cleanup retains an account-scoped local
+   claim so `stop` can retry it.
 
 If Droplet creation returns an indeterminate transport or server failure,
 Crabbox retains the SSH credentials and records a pending local recovery claim.

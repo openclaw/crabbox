@@ -85,6 +85,13 @@ type digitalOceanTag struct {
 	Name string `json:"name"`
 }
 
+type digitalOceanAccount struct {
+	UUID string `json:"uuid"`
+	Team struct {
+		UUID string `json:"uuid"`
+	} `json:"team"`
+}
+
 func newDigitalOceanClient(rt core.Runtime) (*digitalOceanClient, error) {
 	token := strings.TrimSpace(os.Getenv("DIGITALOCEAN_TOKEN"))
 	if token == "" {
@@ -225,6 +232,22 @@ func (c *digitalOceanClient) GetDroplet(ctx context.Context, id int64) (droplet,
 		return droplet{}, err
 	}
 	return res.Droplet, nil
+}
+
+func (c *digitalOceanClient) AccountID(ctx context.Context) (string, error) {
+	var res struct {
+		Account digitalOceanAccount `json:"account"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/account", nil, &res); err != nil {
+		return "", err
+	}
+	if id := strings.TrimSpace(res.Account.Team.UUID); id != "" {
+		return "team:" + id, nil
+	}
+	if id := strings.TrimSpace(res.Account.UUID); id != "" {
+		return "user:" + id, nil
+	}
+	return "", core.Exit(3, "digitalocean account API returned no account identity")
 }
 
 func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config, publicKey, leaseID, slug string, keep bool, now time.Time) (droplet, error) {
