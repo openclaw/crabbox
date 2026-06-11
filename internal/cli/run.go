@@ -1681,6 +1681,11 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if strings.TrimSpace(cfg.ExeDev.ControlHost) != "" {
 			args = append(args, "--exe-dev-control-host", cfg.ExeDev.ControlHost)
 		}
+	case "morph":
+		if strings.TrimSpace(cfg.Morph.APIURL) != "" {
+			args = append(args, "--morph-api-url", cfg.Morph.APIURL)
+		}
+		args = append(args, fmt.Sprintf("--morph-delete-on-release=%t", cfg.Morph.DeleteOnRelease))
 	case "kubevirt":
 		if strings.TrimSpace(cfg.KubeVirt.Kubectl) != "" {
 			args = append(args, "--kubevirt-kubectl", cfg.KubeVirt.Kubectl)

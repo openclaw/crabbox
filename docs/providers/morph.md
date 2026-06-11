@@ -131,6 +131,9 @@ crabbox stop --provider morph blue-lobster
   password, stores the usable key under the normal per-lease path with mode
   `0600`, and removes it when the lease is released. The password is not passed
   in command-line arguments or retained on disk.
+- SSH host keys for the shared Morph gateway persist in
+  `~/.config/crabbox/morph/known_hosts` (or the platform user config
+  equivalent), so trust-on-first-use survives lease cleanup.
 - `stop` pauses by default. Paused instances can be reused later by `run`,
   `ssh`, or `status --wait`; with `wakeOnSSH=true`, SSH can wake them through
   the gateway.

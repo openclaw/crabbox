@@ -561,7 +561,11 @@ func (b *morphLeaseBackend) resolveSSHTarget(ctx context.Context, cfg Config, cl
 	if err != nil {
 		return SSHTarget{}, err
 	}
-	target := morphSSHTarget(cfg, instance, keyPath)
+	knownHostsPath, err := ensureMorphKnownHostsPath()
+	if err != nil {
+		return SSHTarget{}, err
+	}
+	target := morphSSHTarget(cfg, instance, keyPath, knownHostsPath)
 	if waitReady {
 		if err := waitForMorphSSHReady(ctx, &target, b.rt.Stderr, "morph ssh", bootstrapWaitTimeout(cfg)); err != nil {
 			return SSHTarget{}, err
@@ -715,13 +719,13 @@ func morphServer(instance morphInstance, cfg Config, leaseID, slug string) Serve
 	return server
 }
 
-func morphSSHTarget(cfg Config, instance morphInstance, keyPath string) SSHTarget {
+func morphSSHTarget(cfg Config, instance morphInstance, keyPath, knownHostsPath string) SSHTarget {
 	target := sshTargetFromConfig(cfg, blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), "ssh.cloud.morph.so"))
 	target.Host = blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), "ssh.cloud.morph.so")
 	target.Port = "22"
 	target.User = instance.ID
 	target.Key = keyPath
-	target.KnownHostsFile = filepath.Join(filepath.Dir(keyPath), "known_hosts")
+	target.KnownHostsFile = knownHostsPath
 	target.TargetOS = targetLinux
 	target.NetworkKind = networkPublic
 	target.ReadyCheck = morphReadyCheck
@@ -758,6 +762,18 @@ func storeMorphSSHKey(leaseID string, sshKey morphSSHKey) (string, error) {
 		return "", err
 	}
 	if err := os.WriteFile(path, keyData, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func ensureMorphKnownHostsPath() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", exit(2, "user config directory is unavailable")
+	}
+	path := filepath.Join(configDir, "crabbox", providerName, "known_hosts")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", err
 	}
 	return path, nil

@@ -127,6 +127,14 @@ func TestMorphAcquireStoresMetadataAndKey(t *testing.T) {
 		if target.Host != "ssh.cloud.morph.so" || target.User != "inst_1" {
 			t.Fatalf("unexpected target: %#v", target)
 		}
+		configDir, err := os.UserConfigDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantKnownHosts := filepath.Join(configDir, "crabbox", providerName, "known_hosts")
+		if target.KnownHostsFile != wantKnownHosts {
+			t.Fatalf("knownHostsFile=%q want %q", target.KnownHostsFile, wantKnownHosts)
+		}
 		return nil
 	}
 	defer func() { waitForMorphSSHReady = originalWait }()
@@ -235,6 +243,14 @@ func TestMorphAcquireStoresMetadataAndKey(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("key perms=%o want 600", info.Mode().Perm())
+	}
+	knownHostsDir := filepath.Dir(lease.SSH.KnownHostsFile)
+	info, err = os.Stat(knownHostsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("known_hosts dir perms=%o want 700", info.Mode().Perm())
 	}
 }
 

@@ -638,6 +638,31 @@ func TestRunStopCommandIncludesExeDevRoutingFlags(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandIncludesMorphRoutingFlags(t *testing.T) {
+	got := runStopCommand(Config{
+		Provider: "morph",
+		TargetOS: targetLinux,
+		Morph: MorphConfig{
+			APIKey:          "secret-morph-key",
+			APIURL:          "https://morph.example.test",
+			DeleteOnRelease: true,
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"--provider morph",
+		"--morph-api-url https://morph.example.test",
+		"--morph-delete-on-release=true",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "secret-morph-key") {
+		t.Fatalf("stop command leaked Morph API key:\n%s", got)
+	}
+}
+
 func TestRunStopCommandIncludesKubeVirtRoutingFlags(t *testing.T) {
 	got := runStopCommand(Config{
 		Provider: "kubevirt",
