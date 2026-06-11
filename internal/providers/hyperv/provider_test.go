@@ -21,12 +21,18 @@ type recordingRunner struct {
 	responses map[string]core.LocalCommandResult
 	errors    map[string]error
 	onRun     func(core.LocalCommandRequest)
+	respond   func(core.LocalCommandRequest) (core.LocalCommandResult, error, bool)
 }
 
 func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	if r.onRun != nil {
 		r.onRun(req)
+	}
+	if r.respond != nil {
+		if result, err, ok := r.respond(req); ok {
+			return result, err
+		}
 	}
 	key := commandKey(req.Args)
 	if err, ok := r.errors[key]; ok {
@@ -348,26 +354,14 @@ func TestInstanceScopeRoundTrip(t *testing.T) {
 	}
 }
 
-func TestShouldCleanupKeepsUnexpiredRetainedLease(t *testing.T) {
+func TestShouldCleanupProtectsRetainedLease(t *testing.T) {
 	now := time.Now().UTC()
-	server := Server{Status: "running", Labels: map[string]string{
+	server := Server{Status: "stopped", Labels: map[string]string{
 		"keep":       "true",
-		"expires_at": core.LeaseLabelTime(now.Add(time.Hour)),
+		"expires_at": core.LeaseLabelTime(now.Add(-time.Hour)),
 	}}
 	claim := core.LeaseClaim{LeaseID: "cbx_123", Labels: server.Labels}
-	if ok, reason := shouldCleanup(server, claim, true, now); ok || reason != "claim active" {
-		t.Fatalf("cleanup=%v reason=%s", ok, reason)
-	}
-}
-
-func TestShouldCleanupExpiresRetainedLease(t *testing.T) {
-	now := time.Now().UTC()
-	server := Server{Status: "running", Labels: map[string]string{
-		"keep":       "true",
-		"expires_at": core.LeaseLabelTime(now.Add(-time.Minute)),
-	}}
-	claim := core.LeaseClaim{LeaseID: "cbx_123", Labels: server.Labels}
-	if ok, reason := shouldCleanup(server, claim, true, now); !ok || reason != "claim expired" {
+	if ok, reason := shouldCleanup(server, claim, true, now); ok || reason != "keep=true" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
 }
@@ -495,12 +489,12 @@ func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
 
-	err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", "ssh-ed25519 AAAA test")
+	err := b.createVM(context.Background(), cfg, "crabbox-blue-1234")
 	if err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
 
-	var foundDiff, foundNewVM, foundStart, foundInject bool
+	var foundDiff, foundNewVM, foundStart, foundConnect, foundInject bool
 	for _, call := range runner.calls {
 		script := call.Args[len(call.Args)-1]
 		if strings.Contains(script, "New-VHD") && strings.Contains(script, "-Differencing") &&
@@ -512,6 +506,9 @@ func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 		}
 		if strings.Contains(script, "Start-VM") {
 			foundStart = true
+		}
+		if strings.Contains(script, "Connect-VMNetworkAdapter") {
+			foundConnect = true
 		}
 		if strings.Contains(script, "Invoke-Command") && strings.Contains(script, "authorized_keys") {
 			foundInject = true
@@ -526,8 +523,8 @@ func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 	if !foundStart {
 		t.Error("createVM did not start the VM")
 	}
-	if !foundInject {
-		t.Error("createVM did not inject SSH key via PowerShell Direct")
+	if foundConnect || foundInject {
+		t.Error("createVM must leave the VM disconnected and defer guest SSH configuration to Acquire")
 	}
 }
 
@@ -542,7 +539,7 @@ func TestCreateVMDoesNotCopyOrResizeTemplate(t *testing.T) {
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
 
-	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", ""); err != nil {
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234"); err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
 	for _, call := range runner.calls {
@@ -565,7 +562,7 @@ func TestCreateVMPlacesVMFilesUnderHypervVMDir(t *testing.T) {
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
 
-	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", ""); err != nil {
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234"); err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
 
@@ -593,7 +590,7 @@ func TestCreateVMInitPasswordInjectsRunOnceBeforeBoot(t *testing.T) {
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
 
-	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", ""); err != nil {
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234"); err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
 
@@ -659,7 +656,7 @@ func TestCreateVMNoInitPasswordByDefault(t *testing.T) {
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
 
-	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", ""); err != nil {
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234"); err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
 	for _, call := range runner.calls {
@@ -694,6 +691,78 @@ func TestAcquireRequiresExplicitGuestPassword(t *testing.T) {
 	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
 	if err == nil || !strings.Contains(err.Error(), "requires an explicit CRABBOX_HYPERV_GUEST_PASSWORD") {
 		t.Fatalf("Acquire should require an explicit guest password, got: %v", err)
+	}
+}
+
+func TestAcquireRejectsUnsafeSSHUser(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	for _, user := range []string{"user name", `DOMAIN\user`, "user@domain", "user*", "user?"} {
+		b.cfg.HyperV.User = user
+		_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+		if err == nil || !strings.Contains(err.Error(), "--hyperv-user must be a local account name") {
+			t.Fatalf("Acquire should reject SSH user %q, got: %v", user, err)
+		}
+	}
+}
+
+func TestAcquireQuarantinesSSHBeforeConnectingNetwork(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.onRun = func(req core.LocalCommandRequest) {
+		if len(req.Args) > 0 && strings.Contains(req.Args[len(req.Args)-1], "Connect-VMNetworkAdapter") {
+			cancel()
+		}
+	}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if len(req.Args) > 0 {
+			script := req.Args[len(req.Args)-1]
+			if strings.Contains(script, "Get-VMNetworkAdapter") && strings.Contains(script, "ConvertTo-Json") {
+				return core.LocalCommandResult{Stdout: `["192.0.2.10"]`}, nil, true
+			}
+		}
+		return core.LocalCommandResult{}, nil, false
+	}
+	b := testBackend(runner)
+	_, err := b.Acquire(ctx, core.AcquireRequest{
+		Repo:          core.Repo{Root: t.TempDir()},
+		RequestedSlug: "network-order",
+	})
+	if err == nil {
+		t.Fatal("Acquire unexpectedly succeeded after test cancellation")
+	}
+
+	startIdx, stageIdx, connectIdx, activateIdx := -1, -1, -1, -1
+	for i, call := range runner.calls {
+		if len(call.Args) == 0 {
+			continue
+		}
+		script := call.Args[len(call.Args)-1]
+		switch {
+		case strings.Contains(script, "Start-VM"):
+			startIdx = i
+		case strings.Contains(script, "Crabbox-SSH-Quarantine") && !strings.Contains(script, "Remove-NetFirewallRule"):
+			stageIdx = i
+		case strings.Contains(script, "Connect-VMNetworkAdapter"):
+			connectIdx = i
+		case strings.Contains(script, "Remove-NetFirewallRule") && strings.Contains(script, "Start-Service sshd"):
+			activateIdx = i
+		}
+	}
+	if startIdx < 0 || stageIdx < 0 || connectIdx < 0 || activateIdx < 0 {
+		t.Fatalf("missing lifecycle calls start=%d stage=%d connect=%d activate=%d", startIdx, stageIdx, connectIdx, activateIdx)
+	}
+	if !(startIdx < stageIdx && stageIdx < connectIdx && connectIdx < activateIdx) {
+		t.Fatalf("unsafe lifecycle order start=%d stage=%d connect=%d activate=%d", startIdx, stageIdx, connectIdx, activateIdx)
 	}
 }
 
@@ -894,7 +963,7 @@ func TestPersistLeaseFailureLeavesNoStaleClaim(t *testing.T) {
 func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	name := "crabbox-retained-no-ip"
-	queryScript := fmt.Sprintf(`Get-VM -Name '%s' | Select-Object Name, State | ConvertTo-Json -Compress`, name)
+	queryScript := fmt.Sprintf(`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq '%s' } | Select-Object Name, State | ConvertTo-Json -Compress`, name)
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
 		queryScript: {Stdout: `{"Name":"crabbox-retained-no-ip","State":2}`},
 	}}
@@ -943,7 +1012,7 @@ func TestQueryVMParsesSingle(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
-				`Get-VM -Name 'crabbox-blue-1234' | Select-Object Name, State | ConvertTo-Json -Compress`}): {
+				`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State | ConvertTo-Json -Compress`}): {
 				Stdout: `{"Name":"crabbox-blue-1234","State":3}`,
 			},
 		},
@@ -955,6 +1024,64 @@ func TestQueryVMParsesSingle(t *testing.T) {
 	}
 	if vm.State != 3 {
 		t.Fatalf("state=%d want 3 (off)", vm.State)
+	}
+}
+
+func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	const leaseID = "cbx_missing123456"
+	const name = "crabbox-missing-1234"
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	if _, _, err := ensureTestboxKeyForConfig(cfg, leaseID); err != nil {
+		t.Fatalf("ensureTestboxKeyForConfig: %v", err)
+	}
+	claim := core.LeaseClaim{
+		LeaseID:       leaseID,
+		Slug:          "missing-vm",
+		Provider:      providerName,
+		ProviderScope: instanceScope(name),
+		Labels:        map[string]string{"instance": name, "lease": leaseID},
+	}
+	lease := LeaseTarget{
+		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
+		LeaseID: leaseID,
+	}
+	req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}
+	if err := persistLease(leaseID, claim.Slug, name, cfg, req, lease); err != nil {
+		t.Fatalf("persistLease: %v", err)
+	}
+
+	resolved, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatalf("Resolve release-only: %v", err)
+	}
+	if resolved.Server.Status != "missing" {
+		t.Fatalf("resolved status=%q want missing", resolved.Server.Status)
+	}
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: resolved}); err != nil {
+		t.Fatalf("ReleaseLease: %v", err)
+	}
+	if claims, err := listLeaseClaims(); err != nil || len(claims) != 0 {
+		t.Fatalf("claims after release=%#v err=%v", claims, err)
+	}
+	keyPath, err := testboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatalf("testboxKeyPath: %v", err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("missing VM release left key %s: %v", keyPath, err)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && strings.Contains(call.Args[len(call.Args)-1], "Remove-VM") {
+			t.Fatal("missing VM release should prune local state without calling Remove-VM")
+		}
 	}
 }
 
@@ -1084,7 +1211,7 @@ func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
 	}
 	// Windows OpenSSH ignores administrators_authorized_keys unless it is owned
 	// only by SYSTEM + Administrators with inheritance disabled.
-	for _, want := range []string{"icacls.exe", "/inheritance:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "$LASTEXITCODE", "PasswordAuthentication no", "PubkeyAuthentication yes", "sshd_config validation failed", "ssh_host_*", "ssh-keygen.exe", "-A", "SSH host key generation failed", "Start-Service sshd", "OpenSSH-Server-In-TCP"} {
+	for _, want := range []string{"icacls.exe", "/inheritance:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "$LASTEXITCODE", "PasswordAuthentication no", "PubkeyAuthentication yes", "AuthenticationMethods publickey", "AllowUsers Administrator", "sshd_config validation failed", "ssh_host_*", "ssh-keygen.exe", "-A", "SSH host key generation failed", "Start-Service sshd", "OpenSSH-Server-In-TCP", "Crabbox-SSH-Quarantine", "Remove-NetFirewallRule"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("admin-key SSH lockdown missing %q\nscript: %s", want, script)
 		}
@@ -1097,6 +1224,29 @@ func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
 	}
 	if strings.Count(script, "Set-Content -Encoding ASCII") < 3 {
 		t.Fatalf("SSH key injection should replace user, administrator, and config files: %s", script)
+	}
+	if strings.Index(script, "Remove-NetFirewallRule") < strings.Index(script, "Start-Service sshd") {
+		t.Fatal("SSH quarantine must be removed only after sshd starts with the final config")
+	}
+}
+
+func TestStageSSHKeyKeepsPortQuarantined(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+
+	if err := b.stageSSHKey(context.Background(), "crabbox-blue-1234", "crabbox", "ssh-ed25519 AAAA test"); err != nil {
+		t.Fatalf("stageSSHKey: %v", err)
+	}
+	script := runner.calls[len(runner.calls)-1].Args[len(runner.calls[len(runner.calls)-1].Args)-1]
+	for _, want := range []string{"Crabbox-SSH-Quarantine", "Action Block", "Stop-Service", "StartupType Disabled", "AllowUsers crabbox"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("pre-network SSH lockdown missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{"Start-Service sshd", "Remove-NetFirewallRule", "ssh-keygen.exe"} {
+		if strings.Contains(script, unwanted) {
+			t.Errorf("pre-network SSH lockdown must not activate SSH: %s", script)
+		}
 	}
 }
 
@@ -1182,10 +1332,10 @@ func TestResolveInstancePropagatesQueryError(t *testing.T) {
 		errors:    map[string]error{},
 	}
 	runner.errors[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
-		`Get-VM -Name 'crabbox-blue-1234' | Select-Object Name, State | ConvertTo-Json -Compress`})] =
+		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State | ConvertTo-Json -Compress`})] =
 		fmt.Errorf("powershell exec failed")
 	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
-		`Get-VM -Name 'crabbox-blue-1234' | Select-Object Name, State | ConvertTo-Json -Compress`})] =
+		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State | ConvertTo-Json -Compress`})] =
 		core.LocalCommandResult{Stderr: "VM not found"}
 
 	b := testBackend(runner)
@@ -1231,7 +1381,7 @@ func TestCreateVMDisablesAutomaticCheckpoints(t *testing.T) {
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
 
-	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", ""); err != nil {
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234"); err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
 

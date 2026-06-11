@@ -25,6 +25,8 @@ type backend struct {
 
 var hypervHostOS = runtime.GOOS
 
+const hypervMissingState = -1
+
 type hypervVM struct {
 	Name  string `json:"Name"`
 	State int    `json:"State"`
@@ -111,6 +113,9 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 			return LeaseTarget{}, exit(2, "provider=%s --hyperv-init-password sets the password through cmd.exe, which cannot carry double quotes or percent signs in the user name; choose a different --hyperv-user", providerName)
 		}
 	}
+	if !validHyperVSSHUser(cfg.HyperV.User) {
+		return LeaseTarget{}, exit(2, "provider=%s --hyperv-user must be a local account name containing only letters, digits, dot, underscore, or hyphen", providerName)
+	}
 	if strings.TrimSpace(req.Repo.Root) == "" {
 		return LeaseTarget{}, exit(2, "provider=%s requires a repository root so the VM claim can be persisted before bootstrap", providerName)
 	}
@@ -153,7 +158,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB switch=%s keep=%v\n",
 		providerName, leaseID, slug, cfg.HyperV.Image, cfg.HyperV.CPUs, cfg.HyperV.Memory, cfg.HyperV.Switch, req.Keep)
 
-	if err := b.createVM(ctx, cfg, name, publicKey); err != nil {
+	if err := b.createVM(ctx, cfg, name); err != nil {
 		_ = b.removeVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
@@ -176,6 +181,13 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		removeLeaseClaim(leaseID)
 		removeStoredTestboxKey(leaseID)
 		return nil
+	}
+
+	if err := b.stageSSHKey(ctx, name, cfg.HyperV.User, publicKey); err != nil {
+		return LeaseTarget{}, errors.Join(fmt.Errorf("pre-network SSH lockdown failed: %w", err), cleanupFailedLease())
+	}
+	if err := b.connectVMNetwork(ctx, name, cfg.HyperV.Switch); err != nil {
+		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
 
 	ip, err := b.waitForIP(ctx, name, 5*time.Minute)
@@ -223,6 +235,9 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	}
 	if req.ReleaseOnly {
 		return LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil
+	}
+	if inst.State == hypervMissingState {
+		return LeaseTarget{}, exit(4, "hyperv VM %s from claim %s no longer exists; run `crabbox stop --provider hyperv %s` to prune local lease state", inst.Name, claim.LeaseID, claim.LeaseID)
 	}
 	if claim.LeaseID == "" {
 		return LeaseTarget{}, exit(4, "hyperv instance %q has no Crabbox lease claim; use `crabbox stop --provider hyperv %s` to delete it or warm a new lease", inst.Name, inst.Name)
@@ -296,6 +311,10 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if lease.LeaseID == "" {
 		lease.LeaseID = strings.TrimSpace(lease.Server.Labels["lease"])
 	}
+	if lease.LeaseID != "" && lease.Server.Status == "missing" {
+		pruneLeaseState(lease.LeaseID)
+		return nil
+	}
 	name := strings.TrimSpace(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]))
 	if name == "" && lease.LeaseID != "" {
 		inst, _, err := b.resolveInstance(ctx, lease.LeaseID)
@@ -311,10 +330,14 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		return err
 	}
 	if lease.LeaseID != "" {
-		removeLeaseClaim(lease.LeaseID)
-		removeStoredTestboxKey(lease.LeaseID)
+		pruneLeaseState(lease.LeaseID)
 	}
 	return nil
+}
+
+func pruneLeaseState(leaseID string) {
+	removeLeaseClaim(leaseID)
+	removeStoredTestboxKey(leaseID)
 }
 
 func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
@@ -401,9 +424,9 @@ func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 	return server, nil
 }
 
-// createVM creates and starts a Hyper-V VM from the configured image and
-// injects the SSH public key via PowerShell Direct.
-func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey string) error {
+// createVM creates and starts a disconnected Hyper-V VM. Acquire configures
+// guest SSH over PowerShell Direct before connecting the network adapter.
+func (b *backend) createVM(ctx context.Context, cfg Config, name string) error {
 	vhdDir := hypervVHDDir()
 	if err := os.MkdirAll(vhdDir, 0o755); err != nil {
 		return exit(2, "create VHD directory %s: %v", vhdDir, err)
@@ -469,27 +492,24 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 		return commandError("Set-VM", result, err)
 	}
 
-	switchScript := fmt.Sprintf(
-		`Connect-VMNetworkAdapter -VMName '%s' -SwitchName '%s'`,
-		escapePSString(name), escapePSString(cfg.HyperV.Switch),
-	)
-	result, err = b.powershell(ctx, switchScript)
-	if err != nil {
-		return commandError("Connect-VMNetworkAdapter", result, err)
-	}
-
 	startScript := fmt.Sprintf(`Start-VM -Name '%s'`, escapePSString(name))
 	result, err = b.powershell(ctx, startScript)
 	if err != nil {
 		return commandError("Start-VM", result, err)
 	}
 
-	if publicKey != "" {
-		if err := b.injectSSHKey(ctx, name, cfg.HyperV.User, publicKey); err != nil {
-			fmt.Fprintf(b.rt.Stderr, "warning: SSH key injection via PowerShell Direct failed (will retry during SSH wait): %v\n", err)
-		}
-	}
+	return nil
+}
 
+func (b *backend) connectVMNetwork(ctx context.Context, name, switchName string) error {
+	script := fmt.Sprintf(
+		`Connect-VMNetworkAdapter -VMName '%s' -SwitchName '%s'`,
+		escapePSString(name), escapePSString(switchName),
+	)
+	result, err := b.powershell(ctx, script)
+	if err != nil {
+		return commandError("Connect-VMNetworkAdapter", result, err)
+	}
 	return nil
 }
 
@@ -632,51 +652,98 @@ func (b *backend) ensureGit(ctx context.Context, vmName, user string) error {
 	return b.invokeInGuest(ctx, vmName, user, scriptBlock, "git install")
 }
 
-// injectSSHKey writes the SSH public key into the VM via PowerShell Direct,
-// replacing both the user's authorized_keys and, for admin accounts, the
-// administrators_authorized_keys file so template-baked keys cannot retain
-// access to a new lease.
-func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey string) error {
-	scriptBlock := fmt.Sprintf(
+func sshAccessScript(user, publicKey string, activate bool) string {
+	script := fmt.Sprintf(
 		`$ErrorActionPreference='Stop'; `+
+			`if (Get-Service -Name sshd -ErrorAction SilentlyContinue) { `+
+			`Stop-Service -Name sshd -Force -ErrorAction SilentlyContinue; `+
+			`Set-Service -Name sshd -StartupType Disabled }; `+
+			`if (Get-NetFirewallRule -Name 'Crabbox-SSH-Quarantine' -ErrorAction SilentlyContinue) { `+
+			`Enable-NetFirewallRule -Name 'Crabbox-SSH-Quarantine' | Out-Null `+
+			`} else { `+
+			`New-NetFirewallRule -Name 'Crabbox-SSH-Quarantine' -DisplayName 'Crabbox SSH quarantine' -Enabled True -Direction Inbound -Protocol TCP -Action Block -LocalPort 22 | Out-Null }; `+
+			`if (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue) { `+
+			`Disable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' | Out-Null }; `+
 			`$sshDir = Join-Path $env:USERPROFILE '.ssh'; `+
 			`New-Item -ItemType Directory -Force -Path $sshDir | Out-Null; `+
 			`$akPath = Join-Path $sshDir 'authorized_keys'; `+
 			`Set-Content -Encoding ASCII -Path $akPath -Value '%s'; `+
+			`$hostKeyDir = Join-Path $env:ProgramData 'ssh'; `+
+			`New-Item -ItemType Directory -Force -Path $hostKeyDir | Out-Null; `+
 			`$adminAK = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'; `+
-			`if (Test-Path (Split-Path $adminAK)) { Set-Content -Encoding ASCII -Path $adminAK -Value '%s'; `+
+			`Set-Content -Encoding ASCII -Path $adminAK -Value '%s'; `+
 			`icacls.exe $adminAK /inheritance:r /grant '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null; `+
-			`if ($LASTEXITCODE -ne 0) { throw 'administrators_authorized_keys ACL update failed' } }; `+
+			`if ($LASTEXITCODE -ne 0) { throw 'administrators_authorized_keys ACL update failed' }; `+
 			`$sshdConfig = Join-Path $env:ProgramData 'ssh\sshd_config'; `+
 			`$sshdLines = if (Test-Path $sshdConfig) { Get-Content $sshdConfig } else { @() }; `+
-			`$globalLines = @(); $matchLines = @(); $inMatch = $false; `+
+			`$globalLines = @(); `+
 			`foreach ($line in $sshdLines) { `+
-			`if ($line -match '^\s*Match\s+') { $inMatch = $true }; `+
-			`if (-not $inMatch -and $line -match '^\s*(PasswordAuthentication|PubkeyAuthentication)\s+') { continue }; `+
-			`if ($inMatch) { $matchLines += $line } else { $globalLines += $line } }; `+
+			`if ($line -match '^\s*Match\s+') { break }; `+
+			`if ($line -match '^\s*(AuthenticationMethods|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|AllowUsers|AllowGroups|DenyUsers|DenyGroups|AuthorizedKeysFile|AuthorizedKeysCommand|AuthorizedKeysCommandUser|TrustedUserCAKeys|AuthorizedPrincipalsFile)\s+') { continue }; `+
+			`$globalLines += $line }; `+
 			`$globalLines += 'PubkeyAuthentication yes'; `+
 			`$globalLines += 'PasswordAuthentication no'; `+
-			`if (($matchLines -join [Environment]::NewLine) -notmatch '(?im)^\s*Match\s+Group\s+administrators\b') { `+
-			`$matchLines += 'Match Group administrators'; `+
-			`$matchLines += '       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys' }; `+
-			`Set-Content -Encoding ASCII -Path $sshdConfig -Value (($globalLines + $matchLines) -join [Environment]::NewLine); `+
-			`$sshdExe = Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'; `+
-			`& $sshdExe -t -f $sshdConfig; `+
-			`if ($LASTEXITCODE -ne 0) { throw 'sshd_config validation failed' }; `+
-			`$hostKeyDir = Join-Path $env:ProgramData 'ssh'; `+
-			`Get-ChildItem -Path $hostKeyDir -Filter 'ssh_host_*' -ErrorAction SilentlyContinue | Remove-Item -Force; `+
-			`$sshKeygen = Join-Path $env:WINDIR 'System32\OpenSSH\ssh-keygen.exe'; `+
-			`& $sshKeygen -A; `+
-			`if ($LASTEXITCODE -ne 0) { throw 'SSH host key generation failed' }; `+
-			`Set-Service -Name sshd -StartupType Automatic; `+
-			`Start-Service sshd; `+
-			`if (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue) { `+
-			`Enable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' | Out-Null `+
-			`} else { `+
-			`New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null }`,
-		escapePSString(publicKey), escapePSString(publicKey),
+			`$globalLines += 'KbdInteractiveAuthentication no'; `+
+			`$globalLines += 'AuthenticationMethods publickey'; `+
+			`$globalLines += 'AuthorizedKeysFile .ssh/authorized_keys'; `+
+			`$globalLines += 'AllowUsers %s'; `+
+			`$globalLines += 'Match Group administrators'; `+
+			`$globalLines += '       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys'; `+
+			`Set-Content -Encoding ASCII -Path $sshdConfig -Value ($globalLines -join [Environment]::NewLine); `,
+		escapePSString(publicKey), escapePSString(publicKey), escapePSString(user),
 	)
+	if !activate {
+		return script
+	}
+	return script +
+		`$sshdExe = Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'; ` +
+		`& $sshdExe -t -f $sshdConfig; ` +
+		`if ($LASTEXITCODE -ne 0) { throw 'sshd_config validation failed' }; ` +
+		`Get-ChildItem -Path $hostKeyDir -Filter 'ssh_host_*' -ErrorAction SilentlyContinue | Remove-Item -Force; ` +
+		`$sshKeygen = Join-Path $env:WINDIR 'System32\OpenSSH\ssh-keygen.exe'; ` +
+		`& $sshKeygen -A; ` +
+		`if ($LASTEXITCODE -ne 0) { throw 'SSH host key generation failed' }; ` +
+		`Set-Service -Name sshd -StartupType Automatic; ` +
+		`Start-Service sshd; ` +
+		`if (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue) { ` +
+		`Enable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' | Out-Null ` +
+		`} else { ` +
+		`New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null }; ` +
+		`Remove-NetFirewallRule -Name 'Crabbox-SSH-Quarantine' -ErrorAction Stop`
+}
+
+// stageSSHKey replaces template credentials while the VM is disconnected. The
+// quarantine rule remains active across capability installation and any guest
+// service restart until injectSSHKey completes.
+func (b *backend) stageSSHKey(ctx context.Context, vmName, user, publicKey string) error {
+	return b.invokeInGuest(ctx, vmName, user, sshAccessScript(user, publicKey, false), "pre-network SSH lockdown")
+}
+
+// injectSSHKey repeats the credential lockdown after OpenSSH installation,
+// validates the final config, rotates host keys, starts sshd, and removes the
+// firewall quarantine last.
+func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey string) error {
+	scriptBlock := sshAccessScript(user, publicKey, true)
 	return b.invokeInGuest(ctx, vmName, user, scriptBlock, "SSH key injection")
+}
+
+func validHyperVSSHUser(user string) bool {
+	user = strings.TrimSpace(user)
+	if user == "" {
+		return false
+	}
+	for _, r := range user {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		switch r {
+		case '.', '_', '-':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // waitForIP polls Get-VMNetworkAdapter until an IPv4 address appears.
@@ -877,14 +944,14 @@ func (b *backend) removeVHDFile(path string) {
 }
 
 func (b *backend) queryVM(ctx context.Context, name string) (hypervVM, error) {
-	script := fmt.Sprintf(`Get-VM -Name '%s' | Select-Object Name, State | ConvertTo-Json -Compress`, escapePSString(name))
+	script := fmt.Sprintf(`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq '%s' } | Select-Object Name, State | ConvertTo-Json -Compress`, escapePSString(name))
 	result, err := b.powershell(ctx, script)
 	if err != nil {
 		return hypervVM{}, commandError("Get-VM query", result, err)
 	}
 	stdout := strings.TrimSpace(result.Stdout)
 	if stdout == "" || stdout == "null" {
-		return hypervVM{}, exit(4, "hyperv VM %s not found", name)
+		return hypervVM{Name: name, State: hypervMissingState}, nil
 	}
 	var vm hypervVM
 	if err := json.Unmarshal([]byte(stdout), &vm); err != nil {
@@ -1039,6 +1106,9 @@ func instanceNameFromScope(scope string) string {
 }
 
 func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
+	if strings.EqualFold(server.Labels["keep"], "true") {
+		return false, "keep=true"
+	}
 	if server.Status != "running" && server.Status != "ready" {
 		return true, "instance state=" + blank(server.Status, "unknown")
 	}
@@ -1072,6 +1142,8 @@ func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time
 // See: https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/msvm-computersystem
 func hypervState(state int) string {
 	switch state {
+	case hypervMissingState:
+		return "missing"
 	case 2:
 		return "running"
 	case 3:

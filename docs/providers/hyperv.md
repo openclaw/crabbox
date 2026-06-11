@@ -88,7 +88,7 @@ Notes:
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--hyperv-image` | (none) | Path to a Windows VHDX template (required) |
-| `--hyperv-user` | `crabbox` | Guest administrator account for SSH (password via `CRABBOX_HYPERV_GUEST_PASSWORD`) |
+| `--hyperv-user` | `crabbox` | Local guest administrator account for SSH; letters, digits, `.`, `_`, and `-` only (password via `CRABBOX_HYPERV_GUEST_PASSWORD`) |
 | `--hyperv-work-root` | `C:\crabbox` | Crabbox work root inside the guest |
 | `--hyperv-cpu` | `4` | Number of virtual CPUs |
 | `--hyperv-memory` | `8192` | Memory in MB |
@@ -132,15 +132,16 @@ During `Acquire`, the provider:
    and space-thin; the template stays read-only and shared — no multi-GB copy)
 2. With `--hyperv-init-password`, mounts the lease disk offline and writes a
    first-boot `RunOnce` that sets the guest password (password-less templates)
-3. Creates and starts the VM
-4. Installs the Windows OpenSSH server in the guest via PowerShell Direct if
-   not already present, while keeping sshd stopped and its firewall rule
-   disabled
-5. Injects the per-lease SSH public key, applies SID-based ACLs, disables
-   password authentication, validates `sshd_config`, then starts sshd and opens
-   TCP/22
-6. Installs git (MinGit) if absent — required for Crabbox sync
-7. Waits for SSH readiness on the injected key
+3. Creates and starts the VM with its network adapter disconnected
+4. Uses PowerShell Direct to stop/disable sshd, add an inbound TCP/22 block
+   rule, replace authorized keys, discard template `Match` authentication
+   blocks, and restrict SSH to the selected user
+5. Connects the network adapter, installs Windows OpenSSH if absent, and keeps
+   sshd stopped behind the quarantine rule
+6. Reapplies the final key-only config, validates `sshd_config`, regenerates
+   per-lease SSH host keys, starts sshd, and removes the quarantine rule last
+7. Installs git (MinGit) if absent — required for Crabbox sync
+8. Waits for SSH readiness on the injected key
 
 Both the OpenSSH-install and key-injection steps authenticate over PowerShell
 Direct using the guest administrator password and retry up to 5 times with
@@ -155,11 +156,11 @@ installation.
 
 1. **Acquire**: Creates a per-lease differencing disk over the template
    (`New-VHD -Differencing -ParentPath`), creates a Generation 2 VM (`New-VM`),
-   configures CPU count and disables automatic checkpoints (`Set-VM`), connects
-   the network adapter to the configured switch (`Connect-VMNetworkAdapter`),
-   starts the VM (`Start-VM`), polls for an IP address via
-   `Get-VMNetworkAdapter`, installs OpenSSH in the guest if needed and injects
-   the SSH key via PowerShell Direct, then waits for SSH readiness.
+   configures CPU count and disables automatic checkpoints (`Set-VM`), starts
+   the VM disconnected (`Start-VM`), quarantines and replaces SSH credentials
+   through PowerShell Direct, connects the adapter
+   (`Connect-VMNetworkAdapter`), installs OpenSSH if needed, activates the
+   validated key-only configuration, then waits for SSH readiness.
 2. **Resolve**: Finds a running crabbox VM by lease ID, slug, or instance name.
    Queries live VM state and IP from Hyper-V.
 3. **List**: Lists all VMs with the `crabbox-` name prefix.
@@ -172,6 +173,9 @@ installation.
 
 - All VMs are named with a `crabbox-` prefix. Cleanup and release operations
   refuse to touch VMs without this prefix.
+- The selected SSH account must be a local account name containing only letters,
+  digits, `.`, `_`, or `-`. Domain/UPN names and SSH pattern characters are
+  rejected so `AllowUsers` cannot broaden access.
 - VHD files are stored in `%USERPROFILE%\Hyper-V\Virtual Hard Disks\` by
   default. Only the provider-created boot disk is cleaned up on release; other
   attached disks are preserved.
