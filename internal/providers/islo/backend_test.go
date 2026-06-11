@@ -511,6 +511,38 @@ func TestIsloRunMigratesFreshTailnetWorkspaceOwnership(t *testing.T) {
 	}
 }
 
+func TestIsloRunReturnsSessionHandleWhenFreshTailnetMigrationFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{
+		createName:               "crabbox-repo-abcdef",
+		execOut:                  "CRABBOX_TS_IP=100.64.7.7",
+		execErrOnCommand:         errors.New("migration failed"),
+		execErrOnCommandContains: "workspace-owner-",
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{
+			Islo:      IsloConfig{APIKey: "test", Workdir: "repo"},
+			Tailscale: core.TailscaleConfig{Enabled: true, AuthKey: "tskey-secret"},
+		},
+		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+		Keep:    true,
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "migration failed") {
+		t.Fatalf("expected migration failure, got %v", err)
+	}
+	if result.Session == nil || result.Session.LeaseID != "isb_crabbox-repo-abcdef" || !result.Session.Kept {
+		t.Fatalf("missing kept session after migration failure: %#v", result.Session)
+	}
+}
+
 func TestIsloWorkspaceOwnershipMigrationCommandIsValidBash(t *testing.T) {
 	cmd := exec.Command("bash", "-n")
 	cmd.Stdin = strings.NewReader(isloWorkspaceOwnershipMigrationCommand("/workspace/repo"))
@@ -1190,6 +1222,8 @@ type fakeIsloSyncClient struct {
 	execErrOnCommandContains string
 	execErrOnCommandSkip     int
 	execErrOnCommandHook     func()
+	execDeadlineCommand      string
+	execDeadline             time.Time
 	rejectCanceledContext    bool
 	closeUploadReader        bool
 	createRequest            *gosdk.SandboxCreate
@@ -1272,6 +1306,9 @@ func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosd
 	f.execRequests = append(f.execRequests, req)
 	callIndex := len(f.execRequests) - 1
 	command := strings.Join(req.GetCommand(), " ")
+	if f.execDeadlineCommand != "" && strings.Contains(command, f.execDeadlineCommand) {
+		f.execDeadline, _ = ctx.Deadline()
+	}
 	f.prepareCommands = append(f.prepareCommands, command)
 	output := f.execOut
 	if callIndex < len(f.execOuts) {

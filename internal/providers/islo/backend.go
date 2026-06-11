@@ -219,11 +219,6 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			removeLeaseClaim(leaseID)
 		}()
 	}
-	if tailnetEnrolled {
-		if err := b.migrateWorkspaceOwnership(ctx, client, name, workspace); err != nil {
-			return RunResult{}, err
-		}
-	}
 	result := RunResult{
 		SyncDelegated: true,
 		Session: &core.RunSessionHandle{
@@ -239,6 +234,11 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		result.Total = b.now().Sub(started)
 		result.Session.Kept = !shouldStop
 		return result
+	}
+	if tailnetEnrolled {
+		if err := b.migrateWorkspaceOwnership(ctx, client, name, workspace); err != nil {
+			return finishResult(), err
+		}
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=islo lease=%s sandbox=%s\n", leaseID, name)
 	syncDuration := time.Duration(0)

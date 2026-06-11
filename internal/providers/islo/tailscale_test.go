@@ -305,6 +305,34 @@ func TestEnsureLeaseTailscaleReadOnlyValidationDoesNotRepair(t *testing.T) {
 	}
 }
 
+func TestEnsureLeaseTailscaleBoundsHealthExec(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{
+		execOut:             "CRABBOX_TS_IP=100.64.7.7",
+		execDeadlineCommand: `"BackendState"`,
+	}
+	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
+	started := time.Now()
+
+	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID, false); err != nil {
+		t.Fatal(err)
+	}
+	if client.execDeadline.IsZero() {
+		t.Fatal("health exec has no deadline")
+	}
+	remaining := client.execDeadline.Sub(started)
+	if remaining <= 0 || remaining > isloTailscaleHealthTimeout+time.Second {
+		t.Fatalf("health deadline remaining=%s want <=%s", remaining, isloTailscaleHealthTimeout)
+	}
+}
+
 func TestEnsureLeaseTailscaleReadOnlyValidationPreservesClaimDuringRecovery(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-node-a"

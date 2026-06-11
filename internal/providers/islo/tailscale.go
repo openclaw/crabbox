@@ -20,6 +20,7 @@ import (
 // because every opted-in sandbox executes these downloaded binaries.
 const defaultIsloTailscaleVersion = "1.98.4"
 const isloTailscaleRecoveryPendingExitCode = 75
+const isloTailscaleHealthTimeout = 15 * time.Second
 
 const (
 	defaultIsloTailscaleAMD64SHA256 = "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b"
@@ -229,7 +230,7 @@ func isloClaimTailscaleEnrolled(claim core.LeaseClaim) bool {
 // maybeJoinTailscale brings an islo sandbox onto the configured tailnet when
 // the lease was created with --tailscale. It is a no-op otherwise, so plain
 // url-bridge islo ponds are unchanged. On success it records the tailnet IPv4
-// on the lease claim so `pond peers` reports the member on the tailnet plane.
+// for health and ACL checks; URL remains the dialable pond transport.
 func (b *isloBackend) maybeJoinTailscale(ctx context.Context, client isloAPI, sandboxName, slug, leaseID string) error {
 	if !b.cfg.Tailscale.Enabled {
 		return nil
@@ -330,7 +331,9 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 		User:    stringValue(isloAdminUser),
 	}
 	var out bytes.Buffer
-	code, checkErr := client.ExecStream(ctx, sandboxName, req, &out, b.rt.Stderr)
+	healthCtx, cancel := context.WithTimeout(ctx, isloTailscaleHealthTimeout)
+	defer cancel()
+	code, checkErr := client.ExecStream(healthCtx, sandboxName, req, &out, b.rt.Stderr)
 	if checkErr != nil {
 		return core.TailscaleMetadata{}, fmt.Errorf("%w: %v", core.ErrTailnetPeerValidationUnavailable, checkErr)
 	}
