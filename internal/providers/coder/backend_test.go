@@ -296,6 +296,33 @@ func TestCoderListAndCleanupFilterCrabboxOwnedStoppedWorkspaces(t *testing.T) {
 	}
 }
 
+func TestCoderCleanupSkipsKeptClaims(t *testing.T) {
+	installCoderClaimState(t)
+	if err := claimLeaseForRepoProvider("cbx_keep", "blue", coderProvider, t.TempDir(), time.Hour, true); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch strings.Join(req.Args, " ") {
+		case "list -o json":
+			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+		default:
+			t.Fatalf("kept cleanup should not mutate, got: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected cleanup to stop after inventory for keep=true claim, calls=%#v", runner.calls)
+	}
+}
+
 func TestCoderCleanupSkipsActiveClaimedAndRunningUnclaimedWorkspaces(t *testing.T) {
 	installCoderClaimState(t)
 	if err := claimLeaseForRepoProvider("cbx_active", "active", coderProvider, t.TempDir(), time.Hour, false); err != nil {
@@ -578,6 +605,27 @@ func TestCoderResolveClaimUsesStoredWorkspaceAcrossPrefixChanges(t *testing.T) {
 	}
 	if lease.Server.Name != "crabbox-blue" || lease.LeaseID != "cbx_prefix" {
 		t.Fatalf("unexpected lease: %#v", lease)
+	}
+}
+
+func TestCoderResolveKeepLabelUsesClaimKeepMetadata(t *testing.T) {
+	installCoderClaimState(t)
+	if err := claimLeaseForRepoProvider("cbx_keepflag", "blue", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := claimLeaseForRepoProvider("cbx_keeptrue", "green", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	server := Server{Name: "crabbox-green", Labels: map[string]string{"keep": "true"}}
+	if err := updateLeaseClaimEndpoint("cbx_keeptrue", server, SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}}
+	if keep, err := backend.resolveKeepLabel("cbx_keepflag"); err != nil || keep {
+		t.Fatalf("ordinary resolveKeepLabel keep=%v err=%v", keep, err)
+	}
+	if keep, err := backend.resolveKeepLabel("cbx_keeptrue"); err != nil || !keep {
+		t.Fatalf("kept resolveKeepLabel keep=%v err=%v", keep, err)
 	}
 }
 
