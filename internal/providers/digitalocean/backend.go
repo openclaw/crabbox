@@ -83,6 +83,10 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 		if err == nil || committed {
 			return
 		}
+		var ambiguous *ambiguousDropletCreateError
+		if errors.As(err, &ambiguous) {
+			return
+		}
 		if cleanupErr := rollbackDigitalOceanAcquire(client, created.ID, providerKeyForLease(leaseID)); cleanupErr != nil {
 			err = fmt.Errorf("%v; digitalocean cleanup failed: %w", err, cleanupErr)
 			return
@@ -420,7 +424,18 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Conf
 		return err
 	}
 	cloudID := firstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
-	if !ok || claim.CloudID != cloudID {
+	if !ok {
+		existing, err := core.ReadLeaseClaim(leaseID)
+		if err != nil {
+			return err
+		}
+		if existing.LeaseID != "" {
+			return nil
+		}
+		core.RemoveStoredTestboxKey(leaseID)
+		return nil
+	}
+	if claim.CloudID != cloudID {
 		return nil
 	}
 	core.RemoveLeaseClaim(leaseID)

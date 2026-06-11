@@ -225,6 +225,29 @@ func TestAcquireRetainsLocalKeyWhenRollbackFails(t *testing.T) {
 	}
 }
 
+func TestAcquireRetainsCredentialsWhenDropletCreationIsAmbiguous(t *testing.T) {
+	api := &fakeDigitalOceanAPI{
+		createErr: &ambiguousDropletCreateError{err: errors.New("create reconciliation timed out")},
+	}
+	backend := newTestBackend(t, api)
+
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "ambiguous"})
+	var ambiguous *ambiguousDropletCreateError
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("Acquire err=%v, want ambiguousDropletCreateError", err)
+	}
+	if len(api.createRequests) != 1 || len(api.deletedKeys) != 0 {
+		t.Fatalf("createRequests=%d deletedKeys=%v", len(api.createRequests), api.deletedKeys)
+	}
+	keyPath, pathErr := core.TestboxKeyPath(api.createRequests[0].leaseID)
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatalf("retained key stat: %v", statErr)
+	}
+}
+
 func TestAcquireRollsBackKeepDropletAndKeyOnSSHFailure(t *testing.T) {
 	api := &fakeDigitalOceanAPI{}
 	backend := newTestBackend(t, api)
@@ -489,6 +512,27 @@ func TestReleaseRefusesUnownedDroplet(t *testing.T) {
 	}
 	if len(api.deleted) != 0 {
 		t.Fatalf("deleted=%v", api.deleted)
+	}
+}
+
+func TestReleaseRemovesStoredKeyWithoutClaim(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123456"
+	item := droplet{ID: 91, Name: "recovered", Status: "active", Tags: leaseTags(cfg, leaseID, "recovered", "ready", false, time.Now())}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	keyPath := writeStoredTestboxKey(t, leaseID)
+
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		Server:  serverFromDroplet(item, backend.Cfg),
+		LeaseID: leaseID,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored key still exists after unclaimed release: %v", err)
 	}
 }
 

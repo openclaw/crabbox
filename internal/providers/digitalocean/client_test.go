@@ -321,6 +321,51 @@ func TestDigitalOceanClientCreateDropletRollsBackNewSSHKeyOnCreateFailure(t *tes
 	}
 }
 
+func TestDigitalOceanClientCreateDropletPreservesKeyOnAmbiguousFailure(t *testing.T) {
+	var deleteKey bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/account/keys":
+			_, _ = w.Write([]byte(`{"ssh_keys":[],"links":{"pages":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/account/keys":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"ssh_key":{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/droplets":
+			http.Error(w, "temporary failure", http.StatusInternalServerError)
+		case r.Method == http.MethodGet && r.URL.Path == "/droplets":
+			_, _ = w.Write([]byte(`{"droplets":[],"links":{"pages":{}}}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/account/keys/123":
+			deleteKey = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	client.reconcileTimeout = 20 * time.Millisecond
+	client.reconcileInterval = time.Millisecond
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = "s-1vcpu-1gb"
+
+	_, err = client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "blue", false, time.Now())
+	var ambiguous *ambiguousDropletCreateError
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("CreateDroplet err=%v, want ambiguousDropletCreateError", err)
+	}
+	if deleteKey {
+		t.Fatal("ambiguous create deleted its SSH key")
+	}
+}
+
 func TestDigitalOceanClientRollbackCreatedSSHKeyUsesFreshContext(t *testing.T) {
 	var deleteKey bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -380,6 +425,13 @@ func TestDigitalOceanClientCreateDropletReconcilesLostResponse(t *testing.T) {
 			}
 			_ = conn.Close()
 		case r.Method == http.MethodGet && r.URL.Path == "/droplets":
+			if r.URL.Query().Get("type") == "gpus" {
+				if got := r.URL.Query().Get("tag_name"); got != "" {
+					t.Fatalf("gpu tag_name=%q", got)
+				}
+				_, _ = w.Write([]byte(`{"droplets":[],"links":{"pages":{}}}`))
+				return
+			}
 			if got := r.URL.Query().Get("tag_name"); got != encodeTagKV("lease", leaseID) {
 				t.Fatalf("tag_name=%q", got)
 			}
@@ -453,6 +505,12 @@ func TestDigitalOceanClientCreateDropletReconcilesTruncatedSuccessBody(t *testin
 					err:  io.ErrUnexpectedEOF,
 				})), nil
 			case req.Method == http.MethodGet && req.URL.Path == "/droplets":
+				if req.URL.Query().Get("type") == "gpus" {
+					if got := req.URL.Query().Get("tag_name"); got != "" {
+						t.Fatalf("gpu tag_name=%q", got)
+					}
+					return response(http.StatusOK, io.NopCloser(strings.NewReader(`{"droplets":[],"links":{"pages":{}}}`))), nil
+				}
 				if got := req.URL.Query().Get("tag_name"); got != encodeTagKV("lease", leaseID) {
 					t.Fatalf("tag_name=%q", got)
 				}
@@ -604,7 +662,7 @@ func TestNewDigitalOceanClientRequiresToken(t *testing.T) {
 }
 
 func TestListCrabboxDropletsFiltersAndPaginates(t *testing.T) {
-	page := 0
+	standardPage := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer token" {
 			t.Fatalf("auth=%q", r.Header.Get("Authorization"))
@@ -612,8 +670,12 @@ func TestListCrabboxDropletsFiltersAndPaginates(t *testing.T) {
 		if r.URL.Query().Get("tag_name") != "" {
 			t.Fatalf("tag_name=%q", r.URL.Query().Get("tag_name"))
 		}
-		page++
-		if page == 1 {
+		if r.URL.Query().Get("type") == "gpus" {
+			_, _ = w.Write([]byte(`{"droplets":[{"id":4,"name":"gpu-owned","tags":["crabbox","crabbox:provider:digitalocean","crabbox:lease:cbx_4","crabbox:slug:gpu","crabbox:target:linux"]}],"links":{"pages":{}}}`))
+			return
+		}
+		standardPage++
+		if standardPage == 1 {
 			_, _ = w.Write([]byte(`{"droplets":[{"id":1,"name":"owned","tags":["Crabbox","Crabbox:Provider:DigitalOcean","Crabbox:Lease:cbx_1","Crabbox:Slug:one","Crabbox:Target:Linux"]},{"id":2,"name":"foreign","tags":["Crabbox"]}],"links":{"pages":{"next":"yes"}}}`))
 			return
 		}
@@ -630,7 +692,7 @@ func TestListCrabboxDropletsFiltersAndPaginates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(droplets) != 2 || droplets[0].ID != 1 || droplets[1].ID != 3 {
+	if len(droplets) != 3 || droplets[0].ID != 1 || droplets[1].ID != 3 || droplets[2].ID != 4 {
 		t.Fatalf("droplets=%v", droplets)
 	}
 }

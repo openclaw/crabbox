@@ -25,9 +25,23 @@ const (
 )
 
 type digitalOceanClient struct {
-	token   string
-	client  *http.Client
-	baseURL string
+	token             string
+	client            *http.Client
+	baseURL           string
+	reconcileTimeout  time.Duration
+	reconcileInterval time.Duration
+}
+
+type ambiguousDropletCreateError struct {
+	err error
+}
+
+func (e *ambiguousDropletCreateError) Error() string {
+	return fmt.Sprintf("digitalocean droplet creation remains indeterminate; preserving SSH credentials for recovery: %v", e.err)
+}
+
+func (e *ambiguousDropletCreateError) Unwrap() error {
+	return e.err
 }
 
 type digitalOceanAPIError struct {
@@ -144,52 +158,62 @@ func (c *digitalOceanClient) ListCrabboxDroplets(ctx context.Context) ([]droplet
 }
 
 func (c *digitalOceanClient) listDroplets(ctx context.Context) ([]droplet, error) {
-	var out []droplet
-	for page := 1; ; page++ {
-		q := url.Values{}
-		q.Set("page", strconv.Itoa(page))
-		q.Set("per_page", "200")
-		var res struct {
-			Droplets []droplet `json:"droplets"`
-			Links    struct {
-				Pages struct {
-					Next string `json:"next"`
-				} `json:"pages"`
-			} `json:"links"`
-		}
-		if err := c.do(ctx, http.MethodGet, "/droplets?"+q.Encode(), nil, &res); err != nil {
-			return nil, err
-		}
-		out = append(out, res.Droplets...)
-		if res.Links.Pages.Next == "" {
-			return out, nil
-		}
-	}
+	return c.listDropletsWithTag(ctx, "")
 }
 
 func (c *digitalOceanClient) listDropletsByTag(ctx context.Context, tag string) ([]droplet, error) {
+	return c.listDropletsWithTag(ctx, tag)
+}
+
+func (c *digitalOceanClient) listDropletsWithTag(ctx context.Context, tag string) ([]droplet, error) {
 	var out []droplet
-	for page := 1; ; page++ {
-		q := url.Values{}
-		q.Set("tag_name", tag)
-		q.Set("page", strconv.Itoa(page))
-		q.Set("per_page", "200")
-		var res struct {
-			Droplets []droplet `json:"droplets"`
-			Links    struct {
-				Pages struct {
-					Next string `json:"next"`
-				} `json:"pages"`
-			} `json:"links"`
-		}
-		if err := c.do(ctx, http.MethodGet, "/droplets?"+q.Encode(), nil, &res); err != nil {
-			return nil, err
-		}
-		out = append(out, res.Droplets...)
-		if res.Links.Pages.Next == "" {
-			return out, nil
+	seen := map[int64]bool{}
+	for _, dropletType := range []string{"", "gpus"} {
+		for page := 1; ; page++ {
+			q := url.Values{}
+			q.Set("page", strconv.Itoa(page))
+			q.Set("per_page", "200")
+			if tag != "" && dropletType == "" {
+				q.Set("tag_name", tag)
+			}
+			if dropletType != "" {
+				q.Set("type", dropletType)
+			}
+			var res struct {
+				Droplets []droplet `json:"droplets"`
+				Links    struct {
+					Pages struct {
+						Next string `json:"next"`
+					} `json:"pages"`
+				} `json:"links"`
+			}
+			if err := c.do(ctx, http.MethodGet, "/droplets?"+q.Encode(), nil, &res); err != nil {
+				return nil, err
+			}
+			for _, item := range res.Droplets {
+				if tag != "" && dropletType == "gpus" && !containsTagFold(item.Tags, tag) {
+					continue
+				}
+				if !seen[item.ID] {
+					seen[item.ID] = true
+					out = append(out, item)
+				}
+			}
+			if res.Links.Pages.Next == "" {
+				break
+			}
 		}
 	}
+	return out, nil
+}
+
+func containsTagFold(tags []string, want string) bool {
+	for _, tag := range tags {
+		if strings.EqualFold(tag, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *digitalOceanClient) GetDroplet(ctx context.Context, id int64) (droplet, error) {
@@ -241,7 +265,7 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 			if item, reconcileErr := c.reconcileDropletCreate(leaseID, name); reconcileErr == nil {
 				return item, nil
 			} else {
-				err = errors.Join(err, reconcileErr)
+				return droplet{}, &ambiguousDropletCreateError{err: errors.Join(err, reconcileErr)}
 			}
 		}
 		return droplet{}, rollbackKey(err)
@@ -255,7 +279,15 @@ func shouldReconcileMutation(err error) bool {
 }
 
 func (c *digitalOceanClient) reconcileDropletCreate(leaseID, name string) (droplet, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), createReconcileTimeout)
+	timeout := c.reconcileTimeout
+	if timeout <= 0 {
+		timeout = createReconcileTimeout
+	}
+	interval := c.reconcileInterval
+	if interval <= 0 {
+		interval = createReconcileInterval
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	leaseTag := encodeTagKV("lease", leaseID)
@@ -281,7 +313,7 @@ func (c *digitalOceanClient) reconcileDropletCreate(leaseID, name string) (dropl
 			lastErr = err
 		}
 
-		timer := time.NewTimer(createReconcileInterval)
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
