@@ -168,10 +168,6 @@ func isloFallbackExtractCommand(remoteB64, remoteArchive, workspace string) stri
 	return extract + "; status=$?; " + cleanup + "; exit $status"
 }
 
-func (b *isloBackend) execShell(ctx context.Context, client isloAPI, name, command string, stdout io.Writer) error {
-	return b.execShellAs(ctx, client, name, command, "", stdout)
-}
-
 func (b *isloBackend) execShellAs(ctx context.Context, client isloAPI, name, command, user string, stdout io.Writer) error {
 	req := &gosdk.ExecRequest{Command: []string{"bash", "-lc", command}}
 	if user != "" {
