@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added `provider: hyperv` for local Windows VM SSH leases through Microsoft Hyper-V, including differencing-disk provisioning, OpenSSH and MinGit bootstrap, password-less dev-image initialization, retained lease reuse, and cleanup. Thanks @anagnorisis2peripeteia.
+
 ### Fixed
 
 - Fixed Namespace Devbox setup instructions to use the current browser workspace approval flow instead of obsolete token environment variables.
