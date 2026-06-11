@@ -209,6 +209,9 @@ func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (RunResult, 
 	if len(req.Command) == 0 || (len(req.Command) == 1 && strings.TrimSpace(req.Command[0]) == "") {
 		return RunResult{}, exit(2, "missing command")
 	}
+	if req.EnvSummary {
+		printEnvForwardingSummary(b.rt.Stderr, freestyleProvider, "forwarded", req.Options.EnvAllow, req.Env)
+	}
 	commandStart := b.now()
 	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, req.Env)
 	commandDuration := b.now().Sub(commandStart)

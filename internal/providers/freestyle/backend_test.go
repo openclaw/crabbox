@@ -336,6 +336,43 @@ func TestFreestyleRunNoSyncDoesNotDeleteExistingWorkspace(t *testing.T) {
 	}
 }
 
+func TestFreestyleRunPrintsRedactedEnvSummary(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeFreestyleClient{getVM: freestyleVM{
+		ID:    "vm123",
+		Name:  "crabbox-repo-abc123",
+		State: "running",
+	}}
+	oldClient := newFreestyleClient
+	newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
+		return client, nil
+	}
+	defer func() { newFreestyleClient = oldClient }()
+	var stderr bytes.Buffer
+	backend := &freestyleBackend{
+		spec: Provider{}.Spec(),
+		cfg:  Config{Freestyle: FreestyleConfig{}},
+		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr},
+	}
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID:         "fsb_vm123",
+		Repo:       Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:     true,
+		Command:    []string{"printenv", "SECRET_TOKEN"},
+		Env:        map[string]string{"SECRET_TOKEN": "super-secret"},
+		EnvSummary: true,
+	})
+	if err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	if strings.Contains(stderr.String(), "super-secret") {
+		t.Fatalf("secret leaked in stderr: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "SECRET_TOKEN=set len=12 secret=true") {
+		t.Fatalf("missing redacted env summary: %s", stderr.String())
+	}
+}
+
 func TestFreestyleCreateSandboxWorksWithoutWorkdir(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeFreestyleClient{createID: "vm123"}

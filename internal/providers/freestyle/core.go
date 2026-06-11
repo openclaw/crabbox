@@ -26,6 +26,10 @@ func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, s
 	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
 }
 
+func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
+	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
+}
+
 func shouldUseShell(command []string) bool {
 	return core.ShouldUseShell(command)
 }
