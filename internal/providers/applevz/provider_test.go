@@ -122,6 +122,25 @@ func TestApplyDefaults(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultsHonorsGlobalWorkRoot(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.WorkRoot = "/custom/crabbox"
+	applyDefaults(&cfg)
+	if cfg.WorkRoot != "/custom/crabbox" || cfg.AppleVZ.WorkRoot != "/custom/crabbox" {
+		t.Fatalf("work root=%q apple-vz=%q want /custom/crabbox", cfg.WorkRoot, cfg.AppleVZ.WorkRoot)
+	}
+
+	cfg = core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.WorkRoot = "/custom/crabbox"
+	cfg.AppleVZ.WorkRoot = "/work/apple-vz"
+	applyDefaults(&cfg)
+	if cfg.WorkRoot != "/work/apple-vz" || cfg.AppleVZ.WorkRoot != "/work/apple-vz" {
+		t.Fatalf("specific work root=%q apple-vz=%q want /work/apple-vz", cfg.WorkRoot, cfg.AppleVZ.WorkRoot)
+	}
+}
+
 func TestApplyFlags(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

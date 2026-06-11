@@ -20,8 +20,14 @@ import (
 )
 
 var (
-	signalNotify = signal.Notify
-	signalStop   = signal.Stop
+	signalNotify               = signal.Notify
+	signalStop                 = signal.Stop
+	prepareInstanceAssetsFunc  = prepareInstanceAssets
+	helperExecutable           = os.Executable
+	runStartReadyTimeout       = 45 * time.Second
+	runStartPollInterval       = 250 * time.Millisecond
+	terminateInstanceGraceTime = 20 * time.Second
+	terminateInstancePollTime  = 250 * time.Millisecond
 )
 
 func RunCLI(args []string, stdout, stderr io.Writer) int {
@@ -104,6 +110,7 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 	cpus := fs.Int("cpus", 0, "cpu count")
 	memoryMiB := fs.Int("memory-mib", 0, "memory in MiB")
 	diskGiB := fs.Int("disk-gib", 0, "disk size in GiB")
+	readyTimeout := fs.Duration("ready-timeout", runStartReadyTimeout, "maximum time to wait for helper daemon readiness")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -128,6 +135,9 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 	}
 	if *cpus <= 0 || *memoryMiB <= 0 || *diskGiB <= 0 {
 		return fmt.Errorf("cpus, memory-mib, and disk-gib must be positive")
+	}
+	if *readyTimeout <= 0 {
+		return fmt.Errorf("ready-timeout must be positive")
 	}
 	instanceRoot := InstanceDir(root, *name)
 	if existing, err := readMetadata(MetadataPath(root, *name)); err == nil {
@@ -157,7 +167,7 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	inst, err = prepareInstanceAssets(context.Background(), startConfig{
+	inst, err = prepareInstanceAssetsFunc(context.Background(), startConfig{
 		StateRoot:    root,
 		Instance:     inst,
 		SSHPublicKey: strings.TrimSpace(*sshPublicKey),
@@ -177,7 +187,7 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("open helper log: %w", err)
 	}
 	defer logFile.Close()
-	exe, err := os.Executable()
+	exe, err := helperExecutable()
 	if err != nil {
 		_ = os.RemoveAll(instanceRoot)
 		return fmt.Errorf("resolve helper executable: %w", err)
@@ -195,27 +205,78 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 	if err := writeMetadata(MetadataPath(root, *name), inst); err != nil {
 		return err
 	}
-	_ = cmd.Process.Release()
-	deadline := time.Now().Add(45 * time.Second)
+	deadline := time.Now().Add(*readyTimeout)
 	for time.Now().Before(deadline) {
 		current, err := readMetadata(MetadataPath(root, *name))
 		if err == nil {
-			current = normalizeInstance(current)
-			if current.PID == inst.PID {
-				switch current.Status {
-				case StatusRunning:
-					return json.NewEncoder(stdout).Encode(StartResponse{Instance: current})
-				case StatusError:
-					return errors.New(current.Error)
+			handled, err := handleStartReadinessMetadata(root, *name, current, inst.PID, cmd.Process, stdout)
+			if handled {
+				if shouldReleaseStartedHelper(err) {
+					_ = cmd.Process.Release()
+				} else {
+					_ = cmd.Wait()
 				}
+				return err
 			}
 		}
 		if !pidAlive(inst.PID) {
+			_ = cmd.Process.Release()
 			return fmt.Errorf("helper daemon exited before the VM reached running state")
 		}
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(runStartPollInterval)
 	}
+	_ = terminateInstance(root, *name, inst.PID)
+	_ = cmd.Wait()
 	return fmt.Errorf("timed out waiting for helper daemon to report readiness")
+}
+
+func handleStartReadinessMetadata(stateRoot, name string, inst Instance, expectedPID int, process *os.Process, stdout io.Writer) (bool, error) {
+	rawPID := inst.PID
+	inst = normalizeInstance(inst)
+	if rawPID != expectedPID {
+		return false, nil
+	}
+	switch inst.Status {
+	case StatusRunning:
+		return true, json.NewEncoder(stdout).Encode(StartResponse{Instance: inst})
+	case StatusError:
+		return true, errors.New(inst.Error)
+	case StatusStopping, StatusStopped:
+		terminateStartedHelper(process, expectedPID)
+		if err := os.RemoveAll(InstanceDir(stateRoot, name)); err != nil {
+			return true, fmt.Errorf("%w; remove instance directory: %v", helperStoppedBeforeReadinessError(inst.Status), err)
+		}
+		return true, helperStoppedBeforeReadinessError(inst.Status)
+	default:
+		return false, nil
+	}
+}
+
+func shouldReleaseStartedHelper(err error) bool {
+	if err == nil {
+		return true
+	}
+	return !errors.Is(err, errHelperStoppedBeforeReadiness)
+}
+
+var errHelperStoppedBeforeReadiness = errors.New("apple-vz helper stopped before reporting readiness")
+
+func helperStoppedBeforeReadinessError(status string) error {
+	return fmt.Errorf("%w (status=%s)", errHelperStoppedBeforeReadiness, status)
+}
+
+func terminateStartedHelper(process *os.Process, pid int) {
+	if process == nil || pid <= 0 || !pidAlive(pid) {
+		return
+	}
+	_ = process.Signal(syscall.SIGTERM)
+	deadline := time.Now().Add(terminateInstanceGraceTime)
+	for pidAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(terminateInstancePollTime)
+	}
+	if pidAlive(pid) {
+		_ = process.Signal(syscall.SIGKILL)
+	}
 }
 
 func runServeCommand(args []string, stdout, stderr io.Writer) error {
@@ -299,25 +360,32 @@ func runDelete(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	inst = normalizeInstance(inst)
-	if inst.PID > 0 && pidAlive(inst.PID) {
-		if process, err := os.FindProcess(inst.PID); err == nil {
-			_ = process.Signal(syscall.SIGTERM)
-			deadline := time.Now().Add(20 * time.Second)
-			for pidAlive(inst.PID) && time.Now().Before(deadline) {
-				time.Sleep(250 * time.Millisecond)
-			}
-			if pidAlive(inst.PID) {
-				_ = process.Signal(syscall.SIGKILL)
-			}
-		}
-	}
-	if err := os.RemoveAll(InstanceDir(root, *name)); err != nil {
-		return fmt.Errorf("remove instance directory: %w", err)
+	if err := terminateInstance(root, *name, inst.PID); err != nil {
+		return err
 	}
 	inst.Status = StatusStopped
 	inst.UpdatedAt = time.Now().UTC()
 	inst.PID = 0
 	return json.NewEncoder(stdout).Encode(DeleteResponse{Deleted: true, Instance: inst})
+}
+
+func terminateInstance(stateRoot, name string, pid int) error {
+	if pid > 0 && pidAlive(pid) {
+		if process, err := os.FindProcess(pid); err == nil {
+			_ = process.Signal(syscall.SIGTERM)
+			deadline := time.Now().Add(terminateInstanceGraceTime)
+			for pidAlive(pid) && time.Now().Before(deadline) {
+				time.Sleep(terminateInstancePollTime)
+			}
+			if pidAlive(pid) {
+				_ = process.Signal(syscall.SIGKILL)
+			}
+		}
+	}
+	if err := os.RemoveAll(InstanceDir(stateRoot, name)); err != nil {
+		return fmt.Errorf("remove instance directory: %w", err)
+	}
+	return nil
 }
 
 func normalizeStateRoot(root string) (string, error) {

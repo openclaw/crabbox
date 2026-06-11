@@ -2020,6 +2020,44 @@ func TestAppleVZExplicitImageSurvivesOSDefault(t *testing.T) {
 	}
 }
 
+func TestAppleVZPreservesExplicitTopLevelWorkRoot(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\nworkRoot: /custom/crabbox\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/custom/crabbox" {
+		t.Fatalf("WorkRoot=%q want /custom/crabbox", cfg.WorkRoot)
+	}
+}
+
+func TestAppleVZSpecificWorkRootOverridesTopLevel(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\nworkRoot: /custom/crabbox\nappleVZ:\n  workRoot: /work/apple-vz\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/work/apple-vz" {
+		t.Fatalf("WorkRoot=%q want /work/apple-vz", cfg.WorkRoot)
+	}
+}
+
 func TestMultipassImageFollowsOSImageDefault(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

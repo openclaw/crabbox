@@ -67,6 +67,8 @@ func applyDefaults(cfg *core.Config) {
 		} else {
 			cfg.AppleVZ.WorkRoot = defaultWorkRoot
 		}
+	} else if workRoot := strings.TrimSpace(cfg.WorkRoot); workRoot != "" && workRoot != defaultWorkRoot && cfg.AppleVZ.WorkRoot == defaultWorkRoot {
+		cfg.AppleVZ.WorkRoot = workRoot
 	}
 	if cfg.AppleVZ.CPUs <= 0 {
 		cfg.AppleVZ.CPUs = defaultCPUs
@@ -437,6 +439,7 @@ func (b *backend) startInstance(ctx context.Context, cfg core.Config, name, leas
 		"--cpus", strconv.Itoa(cfg.AppleVZ.CPUs),
 		"--memory-mib", strconv.Itoa(cfg.AppleVZ.MemoryMiB),
 		"--disk-gib", strconv.Itoa(cfg.AppleVZ.DiskGiB),
+		"--ready-timeout", core.BootstrapWaitTimeout(cfg).String(),
 	}, &resp); err != nil {
 		return applevzhelper.Instance{}, err
 	}

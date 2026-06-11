@@ -962,7 +962,8 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			cfg.SSHPort = "22"
 		}
 		cfg.SSHFallbackPorts = nil
-		if cfg.AppleVZ.WorkRoot != "" {
+		base := baseConfig()
+		if cfg.AppleVZ.WorkRoot != "" && (IsDefaultWorkRoot(cfg.WorkRoot) || cfg.AppleVZ.WorkRoot != base.AppleVZ.WorkRoot) {
 			cfg.WorkRoot = cfg.AppleVZ.WorkRoot
 		}
 		if cfg.TargetOS == "" {

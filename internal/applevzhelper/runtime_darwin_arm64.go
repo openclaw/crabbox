@@ -589,6 +589,9 @@ func runServe(stateRoot, name string, stdout, stderr io.Writer) error {
 			inst.Error = err.Error()
 			inst.UpdatedAt = time.Now().UTC()
 			_ = writeMetadata(MetadataPath(stateRoot, name), inst)
+			if stopErr := requestStop(vm); stopErr != nil {
+				fmt.Fprintf(stderr, "apple-vz helper stop request failed for %s after proxy error: %v\n", name, stopErr)
+			}
 			return err
 		case sig := <-sigCh:
 			fmt.Fprintf(stderr, "apple-vz helper received %s for %s\n", sig.String(), name)
@@ -599,27 +602,56 @@ func runServe(stateRoot, name string, stdout, stderr io.Writer) error {
 				fmt.Fprintf(stderr, "apple-vz helper stop request failed for %s: %v\n", name, err)
 			}
 		case state := <-stateCh:
-			switch state {
-			case vz.VirtualMachineStateRunning:
-				inst.Status = StatusRunning
-				inst.Error = ""
-				inst.UpdatedAt = time.Now().UTC()
-				_ = writeMetadata(MetadataPath(stateRoot, name), inst)
-			case vz.VirtualMachineStateStopping:
-				inst.Status = StatusStopping
-				inst.UpdatedAt = time.Now().UTC()
-				_ = writeMetadata(MetadataPath(stateRoot, name), inst)
-			case vz.VirtualMachineStateStopped:
-				inst.Status = StatusStopped
-				inst.Error = ""
-				inst.UpdatedAt = time.Now().UTC()
-				_ = writeMetadata(MetadataPath(stateRoot, name), inst)
-				return nil
-			default:
-				fmt.Fprintf(stdout, "apple-vz helper state=%s name=%s\n", state.String(), name)
+			result := handleVMState(state, &inst, stateRoot, name, stdout)
+			if result.requestStop {
+				if err := requestStop(vm); err != nil {
+					fmt.Fprintf(stderr, "apple-vz helper stop request failed for %s: %v\n", name, err)
+				}
+			}
+			if result.done {
+				return result.err
 			}
 		}
 	}
+}
+
+type vmStateResult struct {
+	done        bool
+	requestStop bool
+	err         error
+}
+
+func handleVMState(state vz.VirtualMachineState, inst *Instance, stateRoot, name string, stdout io.Writer) vmStateResult {
+	switch state {
+	case vz.VirtualMachineStateRunning:
+		inst.Status = StatusRunning
+		inst.Error = ""
+		inst.UpdatedAt = time.Now().UTC()
+		_ = writeMetadata(MetadataPath(stateRoot, name), *inst)
+	case vz.VirtualMachineStateStopping:
+		inst.Status = StatusStopping
+		inst.UpdatedAt = time.Now().UTC()
+		_ = writeMetadata(MetadataPath(stateRoot, name), *inst)
+	case vz.VirtualMachineStateStopped:
+		inst.Status = StatusStopped
+		inst.Error = ""
+		inst.UpdatedAt = time.Now().UTC()
+		_ = writeMetadata(MetadataPath(stateRoot, name), *inst)
+		return vmStateResult{done: true}
+	case vz.VirtualMachineStateError:
+		inst.Status = StatusError
+		inst.Error = "vm entered VirtualMachineStateError"
+		inst.UpdatedAt = time.Now().UTC()
+		_ = writeMetadata(MetadataPath(stateRoot, name), *inst)
+		return vmStateResult{
+			done:        true,
+			requestStop: true,
+			err:         fmt.Errorf("vm entered error state"),
+		}
+	default:
+		fmt.Fprintf(stdout, "apple-vz helper state=%s name=%s\n", state.String(), name)
+	}
+	return vmStateResult{}
 }
 
 func buildVMConfig(inst Instance) (*vz.VirtualMachineConfiguration, []*os.File, error) {
