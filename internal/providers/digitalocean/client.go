@@ -99,12 +99,22 @@ func (c *digitalOceanClient) do(ctx context.Context, method, path string, body a
 		return err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
+	data, readErr := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if len(data) > 400 {
 			data = data[:400]
 		}
-		return &digitalOceanAPIError{Operation: method + " " + path, Status: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+		body := strings.TrimSpace(string(data))
+		if readErr != nil {
+			if body != "" {
+				body += "; "
+			}
+			body += "response body read failed: " + readErr.Error()
+		}
+		return &digitalOceanAPIError{Operation: method + " " + path, Status: resp.StatusCode, Body: body}
+	}
+	if readErr != nil {
+		return fmt.Errorf("digitalocean %s %s response body: %w", method, path, readErr)
 	}
 	if out == nil || len(data) == 0 {
 		return nil
@@ -199,7 +209,7 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 		Droplet droplet `json:"droplet"`
 	}
 	if err := c.do(ctx, http.MethodPost, "/droplets", body, &res); err != nil {
-		if shouldReconcileDropletCreate(err) {
+		if shouldReconcileMutation(err) {
 			if item, reconcileErr := c.reconcileDropletCreate(leaseID, name); reconcileErr == nil {
 				return item, nil
 			} else {
@@ -211,7 +221,7 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 	return res.Droplet, nil
 }
 
-func shouldReconcileDropletCreate(err error) bool {
+func shouldReconcileMutation(err error) bool {
 	var apiErr *digitalOceanAPIError
 	return !errors.As(err, &apiErr) || apiErr.Status >= http.StatusInternalServerError
 }
@@ -312,9 +322,48 @@ func (c *digitalOceanClient) EnsureSSHKey(ctx context.Context, name, publicKey s
 		SSHKey sshKey `json:"ssh_key"`
 	}
 	if err := c.do(ctx, http.MethodPost, "/account/keys", body, &res); err != nil {
+		if shouldReconcileMutation(err) {
+			if key, reconcileErr := c.reconcileSSHKey(name, publicKey); reconcileErr == nil {
+				return key, true, nil
+			} else {
+				err = errors.Join(err, reconcileErr)
+			}
+		}
 		return sshKey{}, false, err
 	}
 	return res.SSHKey, true, nil
+}
+
+func (c *digitalOceanClient) reconcileSSHKey(name, publicKey string) (sshKey, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), createReconcileTimeout)
+	defer cancel()
+
+	var lastErr error
+	for {
+		keys, err := c.ListSSHKeys(ctx)
+		if err == nil {
+			for _, key := range keys {
+				if key.Name != name {
+					continue
+				}
+				if strings.TrimSpace(key.PublicKey) != strings.TrimSpace(publicKey) {
+					return sshKey{}, core.Exit(3, "digitalocean ssh key %q exists with different public key", name)
+				}
+				return key, nil
+			}
+			lastErr = core.Exit(4, "digitalocean ssh key reconciliation did not find %q", name)
+		} else {
+			lastErr = err
+		}
+
+		timer := time.NewTimer(createReconcileInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return sshKey{}, errors.Join(lastErr, ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 func (c *digitalOceanClient) DeleteSSHKeyByName(ctx context.Context, name string) error {

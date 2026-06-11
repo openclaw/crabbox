@@ -928,22 +928,9 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.DigitalOcean.Region == "" {
 			cfg.DigitalOcean.Region = "nyc3"
 		}
-		if cfg.Location == "" || (!cfg.locationExplicit && cfg.Location == baseConfig().Location) {
-			cfg.Location = cfg.DigitalOcean.Region
-		}
 		if cfg.DigitalOcean.Image == "" {
 			cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
 		}
-		if cfg.Image == "" || (!cfg.imageExplicit && cfg.Image == baseConfig().Image) {
-			cfg.Image = cfg.DigitalOcean.Image
-		}
-		if cfg.SSHUser == "" || cfg.SSHUser == baseConfig().SSHUser {
-			cfg.SSHUser = "root"
-		}
-		if cfg.SSHPort == "" || cfg.SSHPort == baseConfig().SSHPort {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
 		if cfg.TargetOS == "" {
 			cfg.TargetOS = targetLinux
 		}

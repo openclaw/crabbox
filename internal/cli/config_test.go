@@ -323,8 +323,9 @@ func TestDigitalOceanConfigFileAndEnv(t *testing.T) {
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
 		t.Fatalf("applyProviderConfigDefaults err=%v", err)
 	}
-	if cfg.Location != "nyc3" || cfg.Image != "ubuntu-22-04-x64" {
-		t.Fatalf("provider defaults did not apply digitalocean region/image: cfg=%#v", cfg)
+	base := baseConfig()
+	if cfg.Location != base.Location || cfg.Image != base.Image {
+		t.Fatalf("digitalocean defaults leaked into generic fields: cfg=%#v", cfg)
 	}
 }
 
@@ -375,6 +376,31 @@ func TestDigitalOceanDefaultsPreserveExplicitGenericBaseValues(t *testing.T) {
 	}
 	if cfg.DigitalOcean.Region != "sfo3" || cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
 		t.Fatalf("DigitalOcean=%#v", cfg.DigitalOcean)
+	}
+}
+
+func TestDigitalOceanDefaultsDoNotLeakAcrossProviderOverride(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "digitalocean"
+	wantLocation := cfg.Location
+	wantImage := cfg.Image
+	wantSSHUser := cfg.SSHUser
+	wantSSHPort := cfg.SSHPort
+	wantFallbackPorts := append([]string(nil), cfg.SSHFallbackPorts...)
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("digitalocean defaults: %v", err)
+	}
+	cfg.Provider = "hetzner"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("hetzner defaults: %v", err)
+	}
+
+	if cfg.Location != wantLocation || cfg.Image != wantImage ||
+		cfg.SSHUser != wantSSHUser || cfg.SSHPort != wantSSHPort ||
+		strings.Join(cfg.SSHFallbackPorts, ",") != strings.Join(wantFallbackPorts, ",") {
+		t.Fatalf("digitalocean defaults leaked after provider override: %#v", cfg)
 	}
 }
 

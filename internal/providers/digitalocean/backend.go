@@ -269,11 +269,7 @@ func (b *digitalOceanLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequ
 }
 
 func (b *digitalOceanLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
-	if err := b.deleteServer(ctx, b.Cfg, req.Lease.Server); err != nil {
-		return err
-	}
-	core.RemoveLeaseClaim(req.Lease.LeaseID)
-	return nil
+	return b.deleteServer(ctx, b.Cfg, req.Lease.Server)
 }
 
 func (b *digitalOceanLeaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
@@ -320,7 +316,7 @@ func (b *digitalOceanLeaseBackend) Cleanup(ctx context.Context, req core.Cleanup
 	return b.CleanupServers(ctx, req, servers)
 }
 
-func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, cfg core.Config, server core.Server) error {
+func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {
 	if err := validateDropletLabels(server.Labels); err != nil {
 		return err
 	}
@@ -331,13 +327,23 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, cfg core.Co
 	if err := client.DeleteDroplet(ctx, server.ID); err != nil {
 		return err
 	}
-	var keyErr error
 	if keyName := core.ServerProviderKey(server); core.ValidCrabboxProviderKey(keyName) {
 		if err := client.DeleteSSHKeyByName(ctx, keyName); err != nil {
-			keyErr = err
+			return err
 		}
 	}
-	return keyErr
+	leaseID := server.Labels["lease"]
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil {
+		return err
+	}
+	cloudID := firstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
+	if !ok || claim.CloudID != cloudID {
+		return nil
+	}
+	core.RemoveLeaseClaim(leaseID)
+	core.RemoveStoredTestboxKey(leaseID)
+	return nil
 }
 
 func (b *digitalOceanLeaseBackend) waitForDropletIP(ctx context.Context, client digitalOceanAPI, id int64) (droplet, error) {
@@ -453,7 +459,7 @@ func applyDigitalOceanDefaults(cfg *core.Config) {
 	if cfg.SSHUser == "" || cfg.SSHUser == "crabbox" {
 		cfg.SSHUser = "root"
 	}
-	if cfg.SSHPort == "" {
+	if cfg.SSHPort == "" || cfg.SSHPort == core.BaseConfig().SSHPort {
 		cfg.SSHPort = "22"
 	}
 	cfg.SSHFallbackPorts = nil

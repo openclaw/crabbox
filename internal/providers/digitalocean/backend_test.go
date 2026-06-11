@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -282,11 +283,21 @@ func TestResolveBySlugAndReleaseDeletesOwnedDroplet(t *testing.T) {
 	if lease.LeaseID != "cbx_abcdef123456" || lease.SSH.Host != "203.0.113.77" {
 		t.Fatalf("lease=%#v", lease)
 	}
+	if err := core.ClaimLeaseTargetForRepoConfig(lease.LeaseID, "resolve-me", backend.Cfg, lease.Server, lease.SSH, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := writeStoredTestboxKey(t, lease.LeaseID)
 	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.deleted) != 1 || api.deleted[0] != 77 {
 		t.Fatalf("deleted=%v", api.deleted)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("resolve-me", providerName); err != nil || ok {
+		t.Fatalf("claim after release ok=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored key still exists: %v", err)
 	}
 }
 
@@ -313,6 +324,7 @@ func TestReleaseRetriesKeyCleanupFromRetainedClaimAfterDropletDeletion(t *testin
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, backend.Cfg, server, ssh, t.TempDir(), 0, false); err != nil {
 		t.Fatal(err)
 	}
+	keyPath := writeStoredTestboxKey(t, leaseID)
 
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
 	if err != nil {
@@ -331,6 +343,9 @@ func TestReleaseRetriesKeyCleanupFromRetainedClaimAfterDropletDeletion(t *testin
 	if _, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName); err != nil || !ok {
 		t.Fatalf("claim after failed cleanup ok=%v err=%v", ok, err)
 	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key removed after failed cleanup: %v", err)
+	}
 
 	api.keyDeleteErr = nil
 	lease, err = backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
@@ -348,6 +363,9 @@ func TestReleaseRetriesKeyCleanupFromRetainedClaimAfterDropletDeletion(t *testin
 	}
 	if _, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName); err != nil || ok {
 		t.Fatalf("claim after successful retry ok=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored key still exists after retry: %v", err)
 	}
 }
 
@@ -445,11 +463,22 @@ func TestCleanupDryRunDoesNotDelete(t *testing.T) {
 	item := droplet{ID: 88, Name: "old", Status: "active", Tags: leaseTags(cfg, "cbx_deadbeef1234", "old", "ready", false, time.Now().Add(-time.Hour))}
 	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
 	backend := newTestBackend(t, api)
+	server := serverFromDroplet(item, backend.Cfg)
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_deadbeef1234", "old", backend.Cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := writeStoredTestboxKey(t, "cbx_deadbeef1234")
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.deleted) != 0 {
 		t.Fatalf("dry-run deleted=%v", api.deleted)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("old", providerName); err != nil || !ok {
+		t.Fatalf("claim after dry-run ok=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key removed by dry-run: %v", err)
 	}
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
@@ -457,6 +486,58 @@ func TestCleanupDryRunDoesNotDelete(t *testing.T) {
 	if len(api.deleted) != 1 || api.deleted[0] != 88 {
 		t.Fatalf("deleted=%v", api.deleted)
 	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("old", providerName); err != nil || ok {
+		t.Fatalf("claim after cleanup ok=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored key still exists after cleanup: %v", err)
+	}
+}
+
+func TestCleanupPreservesLocalStateForMismatchedProviderClaim(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.TTL = time.Nanosecond
+	leaseID := "cbx_shared123456"
+	item := droplet{ID: 89, Name: "old", Status: "active", Tags: leaseTags(cfg, leaseID, "old", "ready", false, time.Now().Add(-time.Hour))}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	otherCfg := core.BaseConfig()
+	otherCfg.Provider = "aws"
+	otherServer := core.Server{CloudID: "i-123", Provider: "aws"}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "other-provider", otherCfg, otherServer, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := writeStoredTestboxKey(t, leaseID)
+
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 1 || api.deleted[0] != 89 {
+		t.Fatalf("deleted=%v", api.deleted)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, "aws"); err != nil || !ok {
+		t.Fatalf("other provider claim after cleanup ok=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("other provider key removed by cleanup: %v", err)
+	}
+}
+
+func writeStoredTestboxKey(t *testing.T, leaseID string) string {
+	t.Helper()
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte("test-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return keyPath
 }
 
 func TestTouchPersistsDigitalOceanTags(t *testing.T) {
@@ -583,6 +664,9 @@ func TestApplyDigitalOceanDefaultsUseProviderDefaults(t *testing.T) {
 	}
 	if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
 		t.Fatalf("DigitalOcean.Image=%q want %q", cfg.DigitalOcean.Image, "ubuntu-24-04-x64")
+	}
+	if cfg.SSHUser != "root" || cfg.SSHPort != "22" || len(cfg.SSHFallbackPorts) != 0 {
+		t.Fatalf("effective ssh defaults=%s@:%s fallback=%v", cfg.SSHUser, cfg.SSHPort, cfg.SSHFallbackPorts)
 	}
 }
 

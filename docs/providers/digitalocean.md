@@ -53,10 +53,14 @@ Config keys under `digitalocean:`:
 
 | Key | Maps to | Default | Notes |
 | --- | --- | --- | --- |
-| `region` | `cfg.DigitalOcean.Region` / `cfg.Location` | `nyc3` | DigitalOcean region slug. |
-| `image` | `cfg.DigitalOcean.Image` / `cfg.Image` | `ubuntu-24-04-x64` | Droplet image slug. |
+| `region` | `cfg.DigitalOcean.Region` | `nyc3` | DigitalOcean region slug. |
+| `image` | `cfg.DigitalOcean.Image` | `ubuntu-24-04-x64` | Droplet image slug. |
 | `vpc` | `cfg.DigitalOcean.VPCUUID` | empty | Optional VPC UUID for Droplet placement. |
 | `sshCIDRs` | `cfg.DigitalOcean.SSHCIDRs` | empty | Reserved for firewall-aware follow-up work; Phase 1 does not create firewalls. |
+
+DigitalOcean leases use `root` on SSH port `22` with no fallback port. These
+effective values appear in `crabbox config show` without changing shared
+Hetzner configuration when a command overrides the provider.
 
 Environment overrides:
 

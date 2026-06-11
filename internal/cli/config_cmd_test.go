@@ -148,13 +148,19 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 	if !strings.Contains(text, "digitalocean region=sfo3 image=ubuntu-24-04-x64 vpc=vpc-123 ssh_cidrs=203.0.113.0/24,2001:db8::/64") {
 		t.Fatalf("config show missing digitalocean summary: %q", text)
 	}
+	if !strings.Contains(text, "ssh=root@<host>:22 fallback_ports=-") {
+		t.Fatalf("config show missing effective digitalocean ssh defaults: %q", text)
+	}
 
 	stdout.Reset()
 	if err := app.configShow([]string{"--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
-		DigitalOcean struct {
+		SSHUser          string   `json:"sshUser"`
+		SSHPort          string   `json:"sshPort"`
+		SSHFallbackPorts []string `json:"sshFallbackPorts"`
+		DigitalOcean     struct {
 			Region   string   `json:"region"`
 			Image    string   `json:"image"`
 			VPC      string   `json:"vpc"`
@@ -169,6 +175,9 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 		got.DigitalOcean.VPC != "vpc-123" ||
 		strings.Join(got.DigitalOcean.SSHCIDRs, ",") != "203.0.113.0/24,2001:db8::/64" {
 		t.Fatalf("unexpected digitalocean json: %#v", got.DigitalOcean)
+	}
+	if got.SSHUser != "root" || got.SSHPort != "22" || len(got.SSHFallbackPorts) != 0 {
+		t.Fatalf("unexpected digitalocean ssh json: %#v", got)
 	}
 }
 

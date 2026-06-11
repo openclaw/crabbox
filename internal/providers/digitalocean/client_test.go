@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -337,6 +338,157 @@ func TestDigitalOceanClientCreateDropletReconcilesLostResponse(t *testing.T) {
 	}
 	if deleteKey {
 		t.Fatal("reconciled create deleted its SSH key")
+	}
+}
+
+func TestDigitalOceanClientCreateDropletReconcilesTruncatedSuccessBody(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	slug := "truncated-response"
+	name := core.LeaseProviderName(leaseID, slug)
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = "s-1vcpu-1gb"
+	tags := leaseTags(cfg, leaseID, slug, "provisioning", false, time.Now())
+	var deleteKey bool
+
+	client := &digitalOceanClient{
+		token:   "token",
+		baseURL: "https://api.digitalocean.test",
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			response := func(status int, body io.ReadCloser) *http.Response {
+				return &http.Response{
+					StatusCode: status,
+					Header:     make(http.Header),
+					Body:       body,
+					Request:    req,
+				}
+			}
+			switch {
+			case req.Method == http.MethodGet && req.URL.Path == "/account/keys":
+				return response(http.StatusOK, io.NopCloser(strings.NewReader(`{"ssh_keys":[],"links":{"pages":{}}}`))), nil
+			case req.Method == http.MethodPost && req.URL.Path == "/account/keys":
+				return response(http.StatusCreated, io.NopCloser(strings.NewReader(`{"ssh_key":{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}}`))), nil
+			case req.Method == http.MethodPost && req.URL.Path == "/droplets":
+				return response(http.StatusAccepted, io.NopCloser(&errorAfterReader{
+					data: []byte(`{"droplet":{"id":456`),
+					err:  io.ErrUnexpectedEOF,
+				})), nil
+			case req.Method == http.MethodGet && req.URL.Path == "/droplets":
+				if got := req.URL.Query().Get("tag_name"); got != encodeTagKV("lease", leaseID) {
+					t.Fatalf("tag_name=%q", got)
+				}
+				payload, err := json.Marshal(map[string]any{
+					"droplets": []droplet{{ID: 456, Name: name, Status: "new", Tags: tags}},
+					"links":    map[string]any{"pages": map[string]any{}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return response(http.StatusOK, io.NopCloser(strings.NewReader(string(payload)))), nil
+			case req.Method == http.MethodDelete && req.URL.Path == "/account/keys/123":
+				deleteKey = true
+				return response(http.StatusNoContent, http.NoBody), nil
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL.RequestURI())
+				return nil, nil
+			}
+		})},
+	}
+
+	item, err := client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", leaseID, slug, false, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.ID != 456 || item.Name != name {
+		t.Fatalf("droplet=%#v", item)
+	}
+	if deleteKey {
+		t.Fatal("reconciled create deleted its SSH key")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+type errorAfterReader struct {
+	data []byte
+	err  error
+}
+
+func (r *errorAfterReader) Read(p []byte) (int, error) {
+	if len(r.data) > 0 {
+		n := copy(p, r.data)
+		r.data = r.data[n:]
+		return n, nil
+	}
+	return 0, r.err
+}
+
+func TestDigitalOceanClientDeleteDropletPreservesTruncatedNotFoundStatus(t *testing.T) {
+	client := &digitalOceanClient{
+		token:   "token",
+		baseURL: "https://api.digitalocean.test",
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Header:     make(http.Header),
+				Body: io.NopCloser(&errorAfterReader{
+					data: []byte(`{"id":"not_found"`),
+					err:  io.ErrUnexpectedEOF,
+				}),
+				Request: req,
+			}, nil
+		})},
+	}
+
+	if err := client.DeleteDroplet(context.Background(), 456); err != nil {
+		t.Fatalf("DeleteDroplet err=%v", err)
+	}
+}
+
+func TestDigitalOceanClientEnsureSSHKeyReconcilesTruncatedSuccessBody(t *testing.T) {
+	var listCalls int
+	client := &digitalOceanClient{
+		token:   "token",
+		baseURL: "https://api.digitalocean.test",
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			response := func(status int, body io.ReadCloser) *http.Response {
+				return &http.Response{
+					StatusCode: status,
+					Header:     make(http.Header),
+					Body:       body,
+					Request:    req,
+				}
+			}
+			switch {
+			case req.Method == http.MethodGet && req.URL.Path == "/account/keys":
+				listCalls++
+				if listCalls == 1 {
+					return response(http.StatusOK, io.NopCloser(strings.NewReader(`{"ssh_keys":[],"links":{"pages":{}}}`))), nil
+				}
+				return response(http.StatusOK, io.NopCloser(strings.NewReader(`{"ssh_keys":[{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}],"links":{"pages":{}}}`))), nil
+			case req.Method == http.MethodPost && req.URL.Path == "/account/keys":
+				return response(http.StatusCreated, io.NopCloser(&errorAfterReader{
+					data: []byte(`{"ssh_key":{"id":123`),
+					err:  io.ErrUnexpectedEOF,
+				})), nil
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL.RequestURI())
+				return nil, nil
+			}
+		})},
+	}
+
+	key, created, err := client.EnsureSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || key.ID != 123 || listCalls != 2 {
+		t.Fatalf("key=%#v created=%v listCalls=%d", key, created, listCalls)
 	}
 }
 

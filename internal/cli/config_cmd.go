@@ -23,11 +23,26 @@ func (a App) configShow(args []string) error {
 	if err := validateProviderConfig(cfg); err != nil {
 		return err
 	}
+	cfg = effectiveConfigForShow(cfg)
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(configShowView(cfg))
 	}
 	writeConfigShowText(a.Stdout, cfg)
 	return nil
+}
+
+func effectiveConfigForShow(cfg Config) Config {
+	if cfg.Provider == "digitalocean" {
+		base := baseConfig()
+		if cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser {
+			cfg.SSHUser = "root"
+		}
+		if cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+	}
+	return cfg
 }
 
 func configShowView(cfg Config) map[string]any {
