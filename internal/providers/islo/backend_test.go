@@ -460,6 +460,36 @@ func TestIsloRunMigratesReusedWorkspaceOwnership(t *testing.T) {
 	}
 }
 
+func TestIsloRunMigratesFreshTailnetWorkspaceOwnership(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{
+		createName: "crabbox-repo-abcdef",
+		execOut:    "CRABBOX_TS_IP=100.64.7.7",
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{
+			Islo:      IsloConfig{APIKey: "test", Workdir: "repo"},
+			Tailscale: core.TailscaleConfig{Enabled: true, AuthKey: "tskey-secret"},
+		},
+		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+		Keep:    true,
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !client.commandContains("workspace-owner-") {
+		t.Fatalf("fresh tailnet lease skipped workspace migration: %#v", client.prepareCommands)
+	}
+}
+
 func TestIsloWorkspaceOwnershipMigrationCommandIsValidBash(t *testing.T) {
 	cmd := exec.Command("bash", "-n")
 	cmd.Stdin = strings.NewReader(isloWorkspaceOwnershipMigrationCommand("/workspace/repo"))
