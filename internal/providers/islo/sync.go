@@ -99,9 +99,13 @@ func (b *isloBackend) prepareWorkspace(ctx context.Context, client isloAPI, name
 }
 
 func (b *isloBackend) migrateWorkspaceOwnership(ctx context.Context, client isloAPI, name, workspace string) error {
+	return b.execShellAs(ctx, client, name, isloWorkspaceOwnershipMigrationCommand(workspace), isloAdminUser, io.Discard)
+}
+
+func isloWorkspaceOwnershipMigrationCommand(workspace string) string {
 	sum := sha256.Sum256([]byte(workspace))
 	marker := fmt.Sprintf("/var/lib/crabbox/workspace-owner-%x", sum[:8])
-	command := strings.Join([]string{
+	return strings.Join([]string{
 		"set -e",
 		"mkdir -p /var/lib/crabbox",
 		"if [ ! -e " + shellQuote(marker) + " ]; then",
@@ -110,8 +114,7 @@ func (b *isloBackend) migrateWorkspaceOwnership(ctx context.Context, client islo
 		": > " + shellQuote(marker),
 		"chmod 600 " + shellQuote(marker),
 		"fi",
-	}, "; ")
-	return b.execShellAs(ctx, client, name, command, isloAdminUser, io.Discard)
+	}, "\n")
 }
 
 func (b *isloBackend) restoreWorkspaceOwnership(ctx context.Context, client isloAPI, name, workspace, user string) error {

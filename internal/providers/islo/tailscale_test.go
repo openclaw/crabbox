@@ -153,8 +153,10 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 			t.Fatalf("%s script must require a running Tailscale backend", name)
 		}
 	}
-	if !strings.Contains(isloTailscaleHealthCheck, `"${TS_STATE_DIR}/operation.lock"`) || !strings.Contains(isloTailscaleHealthCheck, "exit 75") {
-		t.Fatal("health check must preserve claims while recovery holds the operation lock")
+	if !strings.Contains(isloTailscaleHealthCheck, `TS_LOCK_FILE="${TS_STATE_DIR}/operation.lock"`) ||
+		!strings.Contains(isloTailscaleHealthCheck, `kill -0 "${lock_pid}"`) ||
+		!strings.Contains(isloTailscaleHealthCheck, "exit 75") {
+		t.Fatal("health check must validate the recovery lock owner")
 	}
 }
 

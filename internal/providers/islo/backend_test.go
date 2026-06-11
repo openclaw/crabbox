@@ -460,6 +460,14 @@ func TestIsloRunMigratesReusedWorkspaceOwnership(t *testing.T) {
 	}
 }
 
+func TestIsloWorkspaceOwnershipMigrationCommandIsValidBash(t *testing.T) {
+	cmd := exec.Command("bash", "-n")
+	cmd.Stdin = strings.NewReader(isloWorkspaceOwnershipMigrationCommand("/workspace/repo"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("migration script syntax: %v\n%s", err, out)
+	}
+}
+
 func TestIsloRunRejectsReusedPlainLeaseTailscaleEnrollment(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-old-abcdef"

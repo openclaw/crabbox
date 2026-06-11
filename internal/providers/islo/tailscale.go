@@ -162,9 +162,18 @@ echo "CRABBOX_TS_IP=${ts_ip}"
 const isloTailscaleHealthCheck = `
 set -e
 : "${TS_STATE_DIR:?}"
-if [ -e "${TS_STATE_DIR}/operation.lock" ]; then
-  echo "tailscale recovery is in progress" >&2
-  exit 75
+TS_LOCK_FILE="${TS_STATE_DIR}/operation.lock"
+if [ -e "${TS_LOCK_FILE}" ]; then
+  lock_pid="$(cat "${TS_LOCK_FILE}" 2>/dev/null || true)"
+  case "${lock_pid}" in
+    ""|*[!0-9]*) rm -f "${TS_LOCK_FILE}" ;;
+    *) if kill -0 "${lock_pid}" 2>/dev/null; then
+         echo "tailscale recovery is in progress" >&2
+         exit 75
+       else
+         rm -f "${TS_LOCK_FILE}"
+       fi ;;
+  esac
 fi
 TS_SOCKET="${TS_STATE_DIR}/tailscaled.sock"
 test -S "${TS_SOCKET}"
