@@ -264,6 +264,12 @@ func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		for !morphInstanceReady(instance) {
 			if morphInstancePaused(instance) {
 				if cfg.Morph.WakeOnSSH {
+					if !instance.WakeOn.WakeOnSSH {
+						if err := client.UpdateInstanceWakeOn(ctx, instance.ID, boolPtr(true), nil); err != nil {
+							return LeaseTarget{}, exit(1, "morph enable wake-on-ssh for %s failed: %v", instance.ID, err)
+						}
+						instance.WakeOn.WakeOnSSH = true
+					}
 					break
 				}
 				if err := client.ResumeInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
@@ -674,11 +680,22 @@ func morphLeaseMetadata(cfg Config, instance morphInstance, leaseID, slug, state
 		labels["ssh_user"] = instance.ID
 	}
 	labels["ssh_port"] = "22"
-	if snapshotID := blank(strings.TrimSpace(instance.Refs.SnapshotID), strings.TrimSpace(cfg.Morph.Snapshot)); snapshotID != "" {
+	snapshotID := strings.TrimSpace(instance.Refs.SnapshotID)
+	if snapshotID == "" {
+		snapshotID = strings.TrimSpace(labels["snapshot_id"])
+	}
+	if snapshotID == "" && !touch {
+		snapshotID = strings.TrimSpace(cfg.Morph.Snapshot)
+	}
+	if snapshotID != "" {
 		labels["snapshot_id"] = snapshotID
 	}
-	if cfg.ServerType != "" {
+	if touch && snapshotID != "" {
+		labels["server_type"] = snapshotID
+	} else if !touch && cfg.ServerType != "" {
 		labels["server_type"] = cfg.ServerType
+	} else if strings.TrimSpace(labels["server_type"]) == "" && snapshotID != "" {
+		labels["server_type"] = snapshotID
 	}
 	if name := leaseProviderName(blank(leaseID, instance.ID), slug); name != "" {
 		labels["lease_name"] = name

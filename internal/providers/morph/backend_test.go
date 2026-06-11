@@ -490,6 +490,68 @@ func TestMorphResolveResumesPausedInstanceWithoutWakeOnSSH(t *testing.T) {
 	}
 }
 
+func TestMorphResolveEnablesProviderWakeOnSSHBeforeRelyingOnIt(t *testing.T) {
+	configureMorphTestHome(t)
+	cfg := testMorphConfig()
+	cfg.Morph.WakeOnSSH = true
+
+	getInstanceCalls := 0
+	wakeOnCalls := 0
+	wakeEnabled := false
+	originalWait := waitForMorphSSHReady
+	waitForMorphSSHReady = func(_ context.Context, _ *SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
+		if !wakeEnabled {
+			t.Fatal("SSH readiness checked before wake-on-SSH was enabled")
+		}
+		return nil
+	}
+	defer func() { waitForMorphSSHReady = originalWait }()
+
+	fake := &fakeMorphAPI{
+		getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
+			getInstanceCalls++
+			status := "paused"
+			if getInstanceCalls > 1 {
+				status = "ready"
+			}
+			return morphInstance{
+				ID:       instanceID,
+				Status:   status,
+				Metadata: morphMetadata{"crabbox": "true", "provider": providerName},
+				WakeOn:   morphWakeOnSettings{WakeOnSSH: wakeEnabled},
+			}, nil
+		},
+		updateInstanceWake: func(_ context.Context, _ string, wakeOnSSH, wakeOnHTTP *bool) error {
+			wakeOnCalls++
+			if wakeOnSSH == nil || !*wakeOnSSH || wakeOnHTTP != nil {
+				t.Fatalf("unexpected wake-on update: ssh=%v http=%v", wakeOnSSH, wakeOnHTTP)
+			}
+			wakeEnabled = true
+			return nil
+		},
+		getSSHKey: func(_ context.Context, _ string) (morphSSHKey, error) {
+			return morphSSHKey{PrivateKey: "PRIVATE KEY"}, nil
+		},
+	}
+	backend := &morphLeaseBackend{
+		spec:              Provider{}.Spec(),
+		cfg:               cfg,
+		rt:                Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		client:            fake,
+		now:               time.Now,
+		readyPollInterval: time.Millisecond,
+		readyTimeout:      time.Second,
+	}
+
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "inst_wake"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wakeOnCalls != 1 || lease.Server.Status != "ready" {
+		t.Fatalf("wakeOnCalls=%d lease=%#v", wakeOnCalls, lease)
+	}
+}
+
 func TestMorphResolveResumesAfterSavingTransitionsToPaused(t *testing.T) {
 	configureMorphTestHome(t)
 	cfg := testMorphConfig()
@@ -964,6 +1026,64 @@ func TestMorphTouchPreservesCustomWorkRootAndProtectsActiveRun(t *testing.T) {
 	}
 	if server.Status != "running" || server.Labels["state"] != "running" || server.Labels["work_root"] != "/workspace/custom" {
 		t.Fatalf("unexpected touched server: %#v", server)
+	}
+}
+
+func TestMorphTouchPreservesInstanceSnapshotIdentity(t *testing.T) {
+	configureMorphTestHome(t)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	cfg := testMorphConfig()
+	cfg.Morph.Snapshot = "snapshot_new"
+	cfg.ServerType = "snapshot_new"
+	instance := morphInstance{
+		ID:     "inst_snapshot",
+		Status: "ready",
+		Refs:   morphInstanceRefs{SnapshotID: "snapshot_old"},
+		Metadata: morphMetadata{
+			"crabbox":     "true",
+			"provider":    providerName,
+			"snapshot_id": "snapshot_old",
+			"server_type": "snapshot_new",
+		},
+	}
+
+	var gotMetadata map[string]string
+	fake := &fakeMorphAPI{
+		getInstance: func(_ context.Context, _ string) (morphInstance, error) {
+			return instance, nil
+		},
+		setInstanceMetadata: func(_ context.Context, _ string, metadata map[string]string) error {
+			gotMetadata = metadata
+			return nil
+		},
+		updateInstanceTTL: func(_ context.Context, _ string, _ int, _ string) error {
+			return nil
+		},
+		updateInstanceWake: func(_ context.Context, _ string, _, _ *bool) error {
+			return nil
+		},
+	}
+	backend := &morphLeaseBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    cfg,
+		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		client: fake,
+		now:    func() time.Time { return now },
+	}
+
+	server, err := backend.Touch(context.Background(), TouchRequest{
+		Lease:       LeaseTarget{LeaseID: "cbx_snapshot", Server: Server{CloudID: instance.ID}},
+		State:       "ready",
+		IdleTimeout: 30 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMetadata["snapshot_id"] != "snapshot_old" || gotMetadata["server_type"] != "snapshot_old" {
+		t.Fatalf("snapshot identity changed: %#v", gotMetadata)
+	}
+	if server.ServerType.Name != "snapshot_old" {
+		t.Fatalf("server type=%q", server.ServerType.Name)
 	}
 }
 
