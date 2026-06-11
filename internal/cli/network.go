@@ -331,7 +331,7 @@ func applyTailscaleMetadataToServer(server *Server, meta TailscaleMetadata) {
 	}
 }
 
-func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, coord *CoordinatorClient, useCoordinator bool, server *Server, target SSHTarget, leaseID string) {
+func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, backend Backend, coord *CoordinatorClient, useCoordinator bool, server *Server, target SSHTarget, leaseID string) {
 	if server == nil || !serverTailscaleMetadata(*server).Enabled {
 		return
 	}
@@ -353,6 +353,13 @@ func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, coord *Co
 	if useCoordinator && coord != nil && leaseID != "" {
 		if lease, err := coord.UpdateLeaseTailscale(ctx, leaseID, meta); err == nil {
 			updated, _, _ := leaseToServerTarget(lease, cfg)
+			*server = updated
+		} else {
+			fmt.Fprintf(a.Stderr, "warning: tailscale metadata update failed for %s: %v\n", leaseID, err)
+		}
+	} else if direct, ok := backend.(TailscaleMetadataBackend); ok && leaseID != "" {
+		updated, err := direct.UpdateTailscaleMetadata(ctx, LeaseTarget{Server: *server, SSH: target, LeaseID: leaseID}, meta)
+		if err == nil {
 			*server = updated
 		} else {
 			fmt.Fprintf(a.Stderr, "warning: tailscale metadata update failed for %s: %v\n", leaseID, err)

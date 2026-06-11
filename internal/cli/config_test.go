@@ -51,6 +51,10 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_GCP_SSH_CIDRS",
 		"CRABBOX_GCP_ROOT_GB",
 		"CRABBOX_GCP_SERVICE_ACCOUNT",
+		"CRABBOX_DIGITALOCEAN_REGION",
+		"CRABBOX_DIGITALOCEAN_IMAGE",
+		"CRABBOX_DIGITALOCEAN_VPC",
+		"CRABBOX_DIGITALOCEAN_SSH_CIDRS",
 		"CRABBOX_DAYTONA_API_KEY",
 		"DAYTONA_API_KEY",
 		"CRABBOX_DAYTONA_JWT_TOKEN",
@@ -289,6 +293,286 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/a,/tmp/b" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7,all" || strings.Join(cfg.DockerSandbox.Kit, ",") != "kit-a,kit-b" {
 		t.Fatalf("env dockerSandbox list config not applied: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDigitalOceanConfigFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "digitalocean",
+		DigitalOcean: &fileDigitalOceanConfig{
+			Region:   "sfo3",
+			Image:    "ubuntu-24-04-x64",
+			VPCUUID:  "vpc-file",
+			SSHCIDRs: []string{"203.0.113.0/24"},
+		},
+	})
+	if cfg.Provider != "digitalocean" || cfg.DigitalOcean.Region != "sfo3" || cfg.Location == "sfo3" || cfg.DigitalOcean.Image != "ubuntu-24-04-x64" || cfg.Image == "ubuntu-24-04-x64" || cfg.DigitalOcean.VPCUUID != "vpc-file" {
+		t.Fatalf("file digitalocean config not applied: cfg=%#v do=%#v", cfg, cfg.DigitalOcean)
+	}
+	if strings.Join(cfg.DigitalOcean.SSHCIDRs, ",") != "203.0.113.0/24" {
+		t.Fatalf("file digitalocean ssh cidrs=%v", cfg.DigitalOcean.SSHCIDRs)
+	}
+
+	t.Setenv("CRABBOX_DIGITALOCEAN_REGION", "nyc3")
+	t.Setenv("CRABBOX_DIGITALOCEAN_IMAGE", "ubuntu-22-04-x64")
+	t.Setenv("CRABBOX_DIGITALOCEAN_VPC", "vpc-env")
+	t.Setenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS", "198.51.100.0/24,2001:db8::/64")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.DigitalOcean.Region != "nyc3" || cfg.Location == "nyc3" || cfg.DigitalOcean.Image != "ubuntu-22-04-x64" || cfg.Image == "ubuntu-22-04-x64" || cfg.DigitalOcean.VPCUUID != "vpc-env" {
+		t.Fatalf("env digitalocean config not applied: cfg=%#v do=%#v", cfg, cfg.DigitalOcean)
+	}
+	if strings.Join(cfg.DigitalOcean.SSHCIDRs, ",") != "198.51.100.0/24,2001:db8::/64" {
+		t.Fatalf("env digitalocean ssh cidrs=%v", cfg.DigitalOcean.SSHCIDRs)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	base := baseConfig()
+	if cfg.Location != base.Location || cfg.Image != base.Image {
+		t.Fatalf("digitalocean defaults leaked into generic fields: cfg=%#v", cfg)
+	}
+}
+
+func TestDigitalOceanPortableOSSelection(t *testing.T) {
+	t.Run("supported selector maps to provider image", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		cfg.OSImage = "ubuntu:24.04"
+		cfg.osImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+			t.Fatalf("DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+	})
+
+	t.Run("unsupported selector is deferred to acquisition", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+			t.Fatalf("default DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+		cfg.OSImage = "ubuntu:26.04"
+		cfg.osImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "" {
+			t.Fatalf("DigitalOcean.Image=%q, want unresolved provider image", cfg.DigitalOcean.Image)
+		}
+	})
+
+	t.Run("provider image overrides portable selector", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		cfg.OSImage = "ubuntu:26.04"
+		cfg.osImageExplicit = true
+		cfg.DigitalOcean.Image = "custom-image"
+		cfg.digitalOceanImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "custom-image" {
+			t.Fatalf("DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+	})
+}
+
+func TestDigitalOceanUnsupportedPortableOSDoesNotBlockCLIOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte("provider: digitalocean\nos: ubuntu:26.04\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("portable os override", func(t *testing.T) {
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs := newFlagSet("test", io.Discard)
+		values := registerLeaseCreateFlags(fs, cfg)
+		if err := parseFlags(fs, []string{"--os", "ubuntu:24.04"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+			t.Fatalf("DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+	})
+
+	t.Run("provider override", func(t *testing.T) {
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs := newFlagSet("test", io.Discard)
+		values := registerLeaseCreateFlags(fs, cfg)
+		if err := parseFlags(fs, []string{"--provider", "aws"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "aws" {
+			t.Fatalf("Provider=%q", cfg.Provider)
+		}
+	})
+}
+
+func TestDigitalOceanEnvDoesNotMutateGenericFieldsForOtherProviders(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "hetzner"
+	originalLocation := cfg.Location
+	originalImage := cfg.Image
+	t.Setenv("CRABBOX_DIGITALOCEAN_REGION", "nyc3")
+	t.Setenv("CRABBOX_DIGITALOCEAN_IMAGE", "ubuntu-22-04-x64")
+
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.DigitalOcean.Region != "nyc3" || cfg.DigitalOcean.Image != "ubuntu-22-04-x64" {
+		t.Fatalf("digitalocean env not stored: do=%#v", cfg.DigitalOcean)
+	}
+	if cfg.Location != originalLocation || cfg.Image != originalImage {
+		t.Fatalf("digitalocean env leaked into generic fields: location=%q image=%q", cfg.Location, cfg.Image)
+	}
+}
+
+func TestDigitalOceanDefaultsPreserveExplicitGenericBaseValues(t *testing.T) {
+	clearConfigEnv(t)
+	base := baseConfig()
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "digitalocean",
+		SSH: &fileSSHConfig{
+			User: base.SSHUser,
+			Port: base.SSHPort,
+		},
+		Hetzner: &fileHetznerConfig{
+			Location: base.Location,
+			Image:    base.Image,
+		},
+		DigitalOcean: &fileDigitalOceanConfig{
+			Region: "sfo3",
+			Image:  "ubuntu-24-04-x64",
+		},
+	})
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	if cfg.Location != base.Location {
+		t.Fatalf("Location=%q want explicit %q", cfg.Location, base.Location)
+	}
+	if cfg.Image != base.Image {
+		t.Fatalf("Image=%q want explicit %q", cfg.Image, base.Image)
+	}
+	if cfg.SSHUser != base.SSHUser || cfg.SSHPort != base.SSHPort {
+		t.Fatalf("SSH=%s@:%s want explicit %s@:%s", cfg.SSHUser, cfg.SSHPort, base.SSHUser, base.SSHPort)
+	}
+	if cfg.DigitalOcean.Region != "sfo3" || cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+		t.Fatalf("DigitalOcean=%#v", cfg.DigitalOcean)
+	}
+}
+
+func TestDigitalOceanDefaultsPreserveExplicitGenericWorkRoot(t *testing.T) {
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "tart",
+		WorkRoot: "/srv/crabbox",
+		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
+		Windows:  &fileWindowsConfig{Mode: windowsModeNormal},
+	})
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != cfg.Tart.WorkRoot {
+		t.Fatalf("Tart WorkRoot=%q want provider root %q before override", cfg.WorkRoot, cfg.Tart.WorkRoot)
+	}
+	cfg.WindowsMode = windowsModeWSL2
+	cfg.Provider = "digitalocean"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("DigitalOcean WorkRoot=%q want explicit generic root", cfg.WorkRoot)
+	}
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("DigitalOcean SSHUser=%q want explicit generic user", cfg.SSHUser)
+	}
+	if cfg.SSHPort != "2200" {
+		t.Fatalf("DigitalOcean SSHPort=%q want explicit generic port", cfg.SSHPort)
+	}
+	if cfg.WindowsMode != windowsModeNormal {
+		t.Fatalf("DigitalOcean WindowsMode=%q want explicit generic mode", cfg.WindowsMode)
+	}
+}
+
+func TestDigitalOceanDefaultsIgnoreStaticProviderOverlays(t *testing.T) {
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "ssh",
+		WorkRoot: "/srv/crabbox",
+		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
+		Static: &fileStaticConfig{
+			User:     "builder",
+			Port:     "2202",
+			WorkRoot: "/srv/static",
+		},
+	})
+	normalizeTargetConfig(&cfg)
+	if cfg.SSHUser != "alice" || cfg.SSHPort != "2200" || cfg.WorkRoot != "/srv/static" {
+		t.Fatalf("static source settings user=%q port=%q root=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
+	}
+
+	cfg.Provider = "digitalocean"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHUser != "alice" || cfg.SSHPort != "2200" || cfg.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("DigitalOcean settings user=%q port=%q root=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
+	}
+}
+
+func TestDigitalOceanDefaultsDoNotLeakAcrossProviderOverride(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "digitalocean"
+	wantLocation := cfg.Location
+	wantImage := cfg.Image
+	wantSSHUser := cfg.SSHUser
+	wantSSHPort := cfg.SSHPort
+	wantFallbackPorts := append([]string(nil), cfg.SSHFallbackPorts...)
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("digitalocean defaults: %v", err)
+	}
+	cfg.Provider = "hetzner"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("hetzner defaults: %v", err)
+	}
+
+	if cfg.Location != wantLocation || cfg.Image != wantImage ||
+		cfg.SSHUser != wantSSHUser || cfg.SSHPort != wantSSHPort ||
+		strings.Join(cfg.SSHFallbackPorts, ",") != strings.Join(wantFallbackPorts, ",") {
+		t.Fatalf("digitalocean defaults leaked after provider override: %#v", cfg)
 	}
 }
 
@@ -1538,8 +1822,11 @@ ssh:
 	if cfg.Sprites.APIURL != "https://api.sprites.example.test" || cfg.Sprites.WorkRoot != "/home/sprite/test" {
 		t.Fatalf("sprites config not loaded: %#v", cfg.Sprites)
 	}
-	if cfg.Static.Host != "win-dev.local" || cfg.Static.User != "peter" || cfg.Static.Port != "22" || cfg.WorkRoot != "/home/peter/crabbox" {
-		t.Fatalf("static config not loaded: static=%#v workRoot=%s", cfg.Static, cfg.WorkRoot)
+	if cfg.Static.Host != "win-dev.local" || cfg.Static.User != "peter" || cfg.Static.Port != "22" || cfg.Static.WorkRoot != "/home/peter/crabbox" {
+		t.Fatalf("static config not loaded: static=%#v", cfg.Static)
+	}
+	if cfg.WorkRoot != defaultPOSIXWorkRoot {
+		t.Fatalf("static work root leaked into active provider: workRoot=%s", cfg.WorkRoot)
 	}
 	if len(cfg.Results.JUnit) != 1 || cfg.Results.JUnit[0] != "junit.xml" || !cfg.Results.Auto {
 		t.Fatalf("results config not loaded: %#v", cfg.Results)

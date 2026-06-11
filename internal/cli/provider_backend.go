@@ -36,6 +36,10 @@ type ProviderRoutingFlagProvider interface {
 	RoutingFlagNames() []string
 }
 
+type LeaseClaimEndpointPreparer interface {
+	PrepareLeaseClaimEndpoint(existing LeaseClaim, provider, slug string, server Server, allowProviderMetadata bool) (Server, error)
+}
+
 type ProviderCommandRoutingArgs interface {
 	CommandRoutingArgs(cfg Config, leaseID string) []string
 }
@@ -75,6 +79,11 @@ type SSHLeaseBackend interface {
 	List(ctx context.Context, req ListRequest) ([]LeaseView, error)
 	ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error
 	Touch(ctx context.Context, req TouchRequest) (Server, error)
+}
+
+type TailscaleMetadataBackend interface {
+	Backend
+	UpdateTailscaleMetadata(ctx context.Context, lease LeaseTarget, meta TailscaleMetadata) (Server, error)
 }
 
 type DelegatedRunBackend interface {

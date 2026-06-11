@@ -10,6 +10,7 @@ import (
 
 func init() {
 	RegisterProvider(testHetznerProvider{})
+	RegisterProvider(testDigitalOceanProvider{})
 	RegisterProvider(testAWSProvider{})
 	RegisterProvider(testAzureProvider{})
 	RegisterProvider(testAzureDynamicSessionsProvider{})
@@ -202,6 +203,30 @@ func (testHetznerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testHetznerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testDigitalOceanProvider struct{}
+
+func (testDigitalOceanProvider) Name() string      { return "digitalocean" }
+func (testDigitalOceanProvider) Aliases() []string { return nil }
+func (testDigitalOceanProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "digitalocean",
+		Family:      "digitalocean",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testDigitalOceanProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testDigitalOceanProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (testDigitalOceanProvider) ServerTypeForConfig(Config) string { return "s-1vcpu-1gb" }
+func (testDigitalOceanProvider) ServerTypeForClass(string) string  { return "s-1vcpu-1gb" }
+func (p testDigitalOceanProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

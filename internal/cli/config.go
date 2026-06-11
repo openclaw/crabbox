@@ -25,6 +25,7 @@ type Config struct {
 	osImageExplicit               bool
 	osImageProviderDefaults       string
 	WindowsMode                   string
+	explicitWindowsMode           string
 	Desktop                       bool
 	DesktopEnv                    string
 	Browser                       bool
@@ -41,6 +42,7 @@ type Config struct {
 	HostID                        string
 	Access                        AccessConfig
 	Location                      string
+	locationExplicit              bool
 	Image                         string
 	imageExplicit                 bool
 	AWSRegion                     string
@@ -86,16 +88,21 @@ type Config struct {
 	GCPRootGB                     int64
 	gcpRootGBExplicit             bool
 	GCPServiceAccount             string
+	DigitalOcean                  DigitalOceanConfig
+	digitalOceanImageExplicit     bool
 	Incus                         IncusConfig
 	Proxmox                       ProxmoxConfig
 	Parallels                     ParallelsConfig
 	parallelsTemplateApplied      bool
 	SSHUser                       string
+	explicitSSHUser               string
 	SSHKey                        string
 	SSHPort                       string
+	explicitSSHPort               string
 	SSHFallbackPorts              []string
 	ProviderKey                   string
 	WorkRoot                      string
+	explicitWorkRoot              string
 	TTL                           time.Duration
 	IdleTimeout                   time.Duration
 	Sync                          SyncConfig
@@ -183,6 +190,13 @@ type CapacityConfig struct {
 	Regions           []string
 	AvailabilityZones []string
 	Hints             bool
+}
+
+type DigitalOceanConfig struct {
+	Region   string
+	Image    string
+	VPCUUID  string
+	SSHCIDRs []string
 }
 
 type ActionsConfig struct {
@@ -945,6 +959,45 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		cfg.OSImage = normalized
 	}
 	applyOSImageProviderDefaults(cfg, false)
+	if cfg.Provider == "digitalocean" {
+		if cfg.DigitalOcean.Region == "" {
+			cfg.DigitalOcean.Region = "nyc3"
+		}
+		if cfg.osImageExplicit && !cfg.digitalOceanImageExplicit {
+			if cfg.OSImage == "ubuntu:24.04" {
+				cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+			} else {
+				cfg.DigitalOcean.Image = ""
+			}
+		} else if cfg.DigitalOcean.Image == "" {
+			cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+		}
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetLinux
+		}
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+		if cfg.explicitWorkRoot != "" {
+			cfg.WorkRoot = cfg.explicitWorkRoot
+		} else {
+			cfg.WorkRoot = defaultPOSIXWorkRoot
+		}
+		if cfg.explicitSSHUser != "" {
+			cfg.SSHUser = cfg.explicitSSHUser
+		} else {
+			cfg.SSHUser = baseConfig().SSHUser
+		}
+		if cfg.explicitSSHPort != "" {
+			cfg.SSHPort = cfg.explicitSSHPort
+		} else {
+			cfg.SSHPort = baseConfig().SSHPort
+		}
+		normalizeTargetConfig(cfg)
+		return validateTargetConfig(*cfg)
+	}
 	if cfg.Provider == "hyperv" {
 		if !IsTargetExplicit(cfg) {
 			cfg.TargetOS = targetWindows
@@ -1220,6 +1273,22 @@ func IsTargetExplicit(cfg *Config) bool {
 
 func MarkTargetExplicit(cfg *Config) {
 	cfg.targetExplicit = true
+}
+
+func IsSSHUserExplicit(cfg *Config) bool {
+	return cfg.explicitSSHUser != ""
+}
+
+func MarkSSHUserExplicit(cfg *Config) {
+	cfg.explicitSSHUser = cfg.SSHUser
+}
+
+func IsSSHPortExplicit(cfg *Config) bool {
+	return cfg.explicitSSHPort != ""
+}
+
+func MarkSSHPortExplicit(cfg *Config) {
+	cfg.explicitSSHPort = cfg.SSHPort
 }
 
 func baseConfig() Config {
@@ -1515,6 +1584,7 @@ type fileConfig struct {
 	HostID               string                             `yaml:"hostId,omitempty"`
 	Broker               *fileBrokerConfig                  `yaml:"broker,omitempty"`
 	Hetzner              *fileHetznerConfig                 `yaml:"hetzner,omitempty"`
+	DigitalOcean         *fileDigitalOceanConfig            `yaml:"digitalocean,omitempty"`
 	AWS                  *fileAWSConfig                     `yaml:"aws,omitempty"`
 	Azure                *fileAzureConfig                   `yaml:"azure,omitempty"`
 	AzureDynamicSessions *fileAzureDynamicSessionsConfig    `yaml:"azureDynamicSessions,omitempty"`
@@ -1593,6 +1663,13 @@ type fileHetznerConfig struct {
 	Location string `yaml:"location,omitempty"`
 	Image    string `yaml:"image,omitempty"`
 	SSHKey   string `yaml:"sshKey,omitempty"`
+}
+
+type fileDigitalOceanConfig struct {
+	Region   string   `yaml:"region,omitempty"`
+	Image    string   `yaml:"image,omitempty"`
+	VPCUUID  string   `yaml:"vpc,omitempty"`
+	SSHCIDRs []string `yaml:"sshCIDRs,omitempty"`
 }
 
 type fileAWSConfig struct {
@@ -2401,6 +2478,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	}
 	if file.Windows != nil && file.Windows.Mode != "" {
 		cfg.WindowsMode = file.Windows.Mode
+		cfg.explicitWindowsMode = file.Windows.Mode
 	}
 	if file.Desktop != nil {
 		cfg.Desktop = *file.Desktop
@@ -2461,6 +2539,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if file.Hetzner != nil {
 		if file.Hetzner.Location != "" {
 			cfg.Location = file.Hetzner.Location
+			cfg.locationExplicit = true
 		}
 		if file.Hetzner.Image != "" {
 			cfg.Image = file.Hetzner.Image
@@ -2468,6 +2547,21 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.Hetzner.SSHKey != "" {
 			cfg.ProviderKey = file.Hetzner.SSHKey
+		}
+	}
+	if file.DigitalOcean != nil {
+		if file.DigitalOcean.Region != "" {
+			cfg.DigitalOcean.Region = file.DigitalOcean.Region
+		}
+		if file.DigitalOcean.Image != "" {
+			cfg.DigitalOcean.Image = file.DigitalOcean.Image
+			cfg.digitalOceanImageExplicit = true
+		}
+		if file.DigitalOcean.VPCUUID != "" {
+			cfg.DigitalOcean.VPCUUID = file.DigitalOcean.VPCUUID
+		}
+		if len(file.DigitalOcean.SSHCIDRs) > 0 {
+			cfg.DigitalOcean.SSHCIDRs = file.DigitalOcean.SSHCIDRs
 		}
 	}
 	if file.AWS != nil {
@@ -2748,12 +2842,14 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if file.SSH != nil {
 		if file.SSH.User != "" {
 			cfg.SSHUser = file.SSH.User
+			MarkSSHUserExplicit(cfg)
 		}
 		if file.SSH.Key != "" {
 			cfg.SSHKey = expandUserPath(file.SSH.Key)
 		}
 		if file.SSH.Port != "" {
 			cfg.SSHPort = file.SSH.Port
+			MarkSSHPortExplicit(cfg)
 		}
 		if file.SSH.FallbackPorts != nil {
 			cfg.SSHFallbackPorts = normalizeList(*file.SSH.FallbackPorts)
@@ -2761,6 +2857,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		cfg.explicitWorkRoot = file.WorkRoot
 	}
 	applyLeaseDuration(&cfg.TTL, file.TTL)
 	applyLeaseDuration(&cfg.IdleTimeout, file.IdleTimeout)
@@ -3928,7 +4025,10 @@ func applyEnv(cfg *Config) error {
 			applyOSImageProviderDefaults(cfg, false)
 		}
 	}
-	cfg.WindowsMode = getenv("CRABBOX_WINDOWS_MODE", cfg.WindowsMode)
+	if windowsMode := os.Getenv("CRABBOX_WINDOWS_MODE"); windowsMode != "" {
+		cfg.WindowsMode = windowsMode
+		cfg.explicitWindowsMode = windowsMode
+	}
 	if value, ok := getenvBool("CRABBOX_DESKTOP"); ok {
 		cfg.Desktop = value
 	}
@@ -3954,7 +4054,10 @@ func applyEnv(cfg *Config) error {
 	cfg.Access.ClientID = getenv("CRABBOX_ACCESS_CLIENT_ID", getenv("CF_ACCESS_CLIENT_ID", cfg.Access.ClientID))
 	cfg.Access.ClientSecret = getenv("CRABBOX_ACCESS_CLIENT_SECRET", getenv("CF_ACCESS_CLIENT_SECRET", cfg.Access.ClientSecret))
 	cfg.Access.Token = getenv("CRABBOX_ACCESS_TOKEN", getenv("CF_ACCESS_TOKEN", cfg.Access.Token))
-	cfg.Location = getenv("CRABBOX_HETZNER_LOCATION", cfg.Location)
+	if location := os.Getenv("CRABBOX_HETZNER_LOCATION"); location != "" {
+		cfg.Location = location
+		cfg.locationExplicit = true
+	}
 	if image := os.Getenv("CRABBOX_HETZNER_IMAGE"); image != "" {
 		cfg.Image = image
 		cfg.imageExplicit = true
@@ -4062,6 +4165,15 @@ func applyEnv(cfg *Config) error {
 	if cidrs := os.Getenv("CRABBOX_GCP_SSH_CIDRS"); cidrs != "" {
 		cfg.GCPSSHCIDRs = splitCommaList(cidrs)
 	}
+	cfg.DigitalOcean.Region = getenv("CRABBOX_DIGITALOCEAN_REGION", cfg.DigitalOcean.Region)
+	if image := os.Getenv("CRABBOX_DIGITALOCEAN_IMAGE"); image != "" {
+		cfg.DigitalOcean.Image = image
+		cfg.digitalOceanImageExplicit = true
+	}
+	cfg.DigitalOcean.VPCUUID = getenv("CRABBOX_DIGITALOCEAN_VPC", cfg.DigitalOcean.VPCUUID)
+	if cidrs := os.Getenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS"); cidrs != "" {
+		cfg.DigitalOcean.SSHCIDRs = splitCommaList(cidrs)
+	}
 	cfg.Proxmox.APIURL = getenv("CRABBOX_PROXMOX_API_URL", cfg.Proxmox.APIURL)
 	cfg.Proxmox.TokenID = getenv("CRABBOX_PROXMOX_TOKEN_ID", cfg.Proxmox.TokenID)
 	cfg.Proxmox.TokenSecret = getenv("CRABBOX_PROXMOX_TOKEN_SECRET", cfg.Proxmox.TokenSecret)
@@ -4093,14 +4205,23 @@ func applyEnv(cfg *Config) error {
 	if startupTimeout := os.Getenv("CRABBOX_PARALLELS_STARTUP_TIMEOUT"); startupTimeout != "" {
 		applyLeaseDuration(&cfg.Parallels.StartupTimeout, startupTimeout)
 	}
-	cfg.SSHUser = getenv("CRABBOX_SSH_USER", cfg.SSHUser)
+	if sshUser := os.Getenv("CRABBOX_SSH_USER"); sshUser != "" {
+		cfg.SSHUser = sshUser
+		MarkSSHUserExplicit(cfg)
+	}
 	cfg.SSHKey = getenv("CRABBOX_SSH_KEY", cfg.SSHKey)
-	cfg.SSHPort = getenv("CRABBOX_SSH_PORT", cfg.SSHPort)
+	if sshPort := os.Getenv("CRABBOX_SSH_PORT"); sshPort != "" {
+		cfg.SSHPort = sshPort
+		MarkSSHPortExplicit(cfg)
+	}
 	if ports, ok := getenvList("CRABBOX_SSH_FALLBACK_PORTS"); ok {
 		cfg.SSHFallbackPorts = ports
 	}
 	cfg.ProviderKey = getenv("CRABBOX_HETZNER_SSH_KEY", cfg.ProviderKey)
-	cfg.WorkRoot = getenv("CRABBOX_WORK_ROOT", cfg.WorkRoot)
+	if workRoot := os.Getenv("CRABBOX_WORK_ROOT"); workRoot != "" {
+		cfg.WorkRoot = workRoot
+		cfg.explicitWorkRoot = workRoot
+	}
 	if ttl := os.Getenv("CRABBOX_TTL"); ttl != "" {
 		applyLeaseDuration(&cfg.TTL, ttl)
 	}

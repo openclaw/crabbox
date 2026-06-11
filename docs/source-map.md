@@ -70,6 +70,7 @@ SSH-lease providers:
 - Azure VM: `internal/providers/azure`, with CLI helpers in `internal/cli/azure.go`
 - Google Cloud (Compute Engine): `internal/providers/gcp`, with CLI helpers in `internal/cli/gcp.go`
 - Hetzner Cloud: `internal/providers/hetzner`, with CLI helpers in `internal/cli/hcloud.go`
+- DigitalOcean Droplets: `internal/providers/digitalocean`, with config glue in `internal/cli/config.go`
 - Parallels (macOS VM host): `internal/providers/parallels`, with CLI helpers in `internal/cli/parallels.go`
 - Proxmox VE: `internal/providers/proxmox`, with CLI helpers in `internal/cli/proxmox.go`
 - Incus: `internal/providers/incus`
@@ -127,7 +128,7 @@ Actions hydration or repo scripts.
 Provider docs:
 
 - Per-provider feature notes: `docs/features/aws.md`, `docs/features/azure.md`, `docs/features/hetzner.md`, `docs/features/blacksmith-testbox.md`, `docs/features/namespace-devbox.md`, `docs/features/namespace-devbox-setup.md`, `docs/features/semaphore.md`, `docs/features/sprites.md`, `docs/features/daytona.md`, `docs/features/islo.md`, `docs/features/e2b.md`
-- Per-provider reference: `docs/providers/README.md` plus one file per provider under `docs/providers/`, including `docs/providers/apple-vz.md` for the local Apple Silicon `Virtualization.framework` path and `docs/providers/incus.md` for the separate local live validation contract
+- Per-provider reference: `docs/providers/README.md` plus one file per provider under `docs/providers/`, including `docs/providers/apple-vz.md` for the local Apple Silicon `Virtualization.framework` path, `docs/providers/digitalocean.md` for the direct Droplet provider, and `docs/providers/incus.md` for the separate local live validation contract
 - Provider/backend authoring guide: `docs/provider-backends.md`, `docs/features/provider-authoring.md`
 - Tailscale contract: `docs/features/tailscale.md`
 
@@ -208,5 +209,5 @@ Provider docs:
 - Release workflow and Homebrew tap fallback: `.github/workflows/release.yml`
 - GoReleaser archives and Homebrew formula config: `.goreleaser.yaml`
 - Docs command-surface check, link check, site builder, and Pages deploy: `scripts/check-command-docs.mjs`, `scripts/check-docs-links.mjs`, `scripts/build-docs-site.mjs`, `.github/workflows/pages.yml`
-- Live provider smoke coverage: `scripts/live-smoke.sh`
+- Live provider smoke coverage: `scripts/live-smoke.sh`, plus provider-specific guarded smokes such as `scripts/live-digitalocean-smoke.sh`
 - Live coordinator auth smoke coverage: `scripts/live-auth-smoke.sh`
