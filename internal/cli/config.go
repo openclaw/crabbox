@@ -2359,12 +2359,9 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if file.DigitalOcean != nil {
 		if file.DigitalOcean.Region != "" {
 			cfg.DigitalOcean.Region = file.DigitalOcean.Region
-			cfg.Location = file.DigitalOcean.Region
 		}
 		if file.DigitalOcean.Image != "" {
 			cfg.DigitalOcean.Image = file.DigitalOcean.Image
-			cfg.Image = file.DigitalOcean.Image
-			cfg.imageExplicit = true
 		}
 		if file.DigitalOcean.VPCUUID != "" {
 			cfg.DigitalOcean.VPCUUID = file.DigitalOcean.VPCUUID
@@ -3907,13 +3904,8 @@ func applyEnv(cfg *Config) error {
 		cfg.GCPSSHCIDRs = splitCommaList(cidrs)
 	}
 	cfg.DigitalOcean.Region = getenv("CRABBOX_DIGITALOCEAN_REGION", cfg.DigitalOcean.Region)
-	if cfg.DigitalOcean.Region != "" {
-		cfg.Location = cfg.DigitalOcean.Region
-	}
 	if image := os.Getenv("CRABBOX_DIGITALOCEAN_IMAGE"); image != "" {
 		cfg.DigitalOcean.Image = image
-		cfg.Image = image
-		cfg.imageExplicit = true
 	}
 	cfg.DigitalOcean.VPCUUID = getenv("CRABBOX_DIGITALOCEAN_VPC", cfg.DigitalOcean.VPCUUID)
 	if cidrs := os.Getenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS"); cidrs != "" {

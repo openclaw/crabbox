@@ -28,6 +28,8 @@ type digitalOceanLeaseBackend struct {
 	waitSSH       func(context.Context, *core.SSHTarget, string, time.Duration) error
 }
 
+var claimLeaseTargetForRepoConfig = core.ClaimLeaseTargetForRepoConfig
+
 func NewDigitalOceanLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	applyDigitalOceanDefaults(&cfg)
@@ -91,10 +93,10 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	}
 	committed := false
 	defer func() {
-		if err == nil || committed || req.Keep {
+		if err == nil || committed {
 			return
 		}
-		if cleanupErr := rollbackDigitalOceanAcquire(ctx, client, created.ID, providerKeyForLease(leaseID)); cleanupErr != nil {
+		if cleanupErr := rollbackDigitalOceanAcquire(client, created.ID, providerKeyForLease(leaseID)); cleanupErr != nil {
 			err = errors.Join(err, fmt.Errorf("digitalocean cleanup failed: %w", cleanupErr))
 		}
 	}()
@@ -109,12 +111,12 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	}
 	readyTags := leaseTags(cfg, leaseID, slug, "ready", req.Keep, b.now())
 	if err := client.ReplaceDropletTags(ctx, created.ID, created.Tags, readyTags); err != nil {
-		fmt.Fprintf(b.RT.Stderr, "warning: digitalocean set ready tags: %v\n", err)
+		return core.LeaseTarget{}, err
 	} else {
 		server.Labels = labelsFromTags(readyTags)
 	}
 	server.Status = "ready"
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	committed = true
@@ -171,7 +173,7 @@ func (b *digitalOceanLeaseBackend) targetFromDroplet(item droplet, req core.Reso
 		}
 	}
 	if req.Repo.Root != "" {
-		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim); err != nil {
+		if err := claimLeaseTargetForRepoConfig(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -298,7 +300,10 @@ func (b *digitalOceanLeaseBackend) now() time.Time {
 	return time.Now().UTC()
 }
 
-func rollbackDigitalOceanAcquire(ctx context.Context, client digitalOceanAPI, dropletID int64, keyName string) error {
+func rollbackDigitalOceanAcquire(client digitalOceanAPI, dropletID int64, keyName string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	var errs []error
 	if dropletID != 0 {
 		if err := client.DeleteDroplet(ctx, dropletID); err != nil {

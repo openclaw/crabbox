@@ -194,6 +194,30 @@ func TestDigitalOceanClientCreateDropletRollsBackNewSSHKeyOnTagFailure(t *testin
 	}
 }
 
+func TestDigitalOceanClientEnsureSSHKeyRejectsMismatchedPublicKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.RequestURI(), "/account/keys"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ssh_keys":[{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 different"}],"links":{"pages":{}}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	_, _, err = client.EnsureSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 expected")
+	if err == nil || !strings.Contains(err.Error(), "exists with different public key") {
+		t.Fatalf("EnsureSSHKey err=%v", err)
+	}
+}
+
 func TestNewDigitalOceanClientRequiresToken(t *testing.T) {
 	old := os.Getenv("DIGITALOCEAN_TOKEN")
 	t.Cleanup(func() { _ = os.Setenv("DIGITALOCEAN_TOKEN", old) })

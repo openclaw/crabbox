@@ -235,6 +235,9 @@ func (c *digitalOceanClient) EnsureSSHKey(ctx context.Context, name, publicKey s
 	}
 	for _, key := range keys {
 		if key.Name == name {
+			if strings.TrimSpace(key.PublicKey) != strings.TrimSpace(publicKey) {
+				return sshKey{}, false, core.Exit(3, "digitalocean ssh key %q exists with different public key", name)
+			}
 			return key, false, nil
 		}
 	}

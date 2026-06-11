@@ -17,8 +17,11 @@ type fakeDigitalOceanAPI struct {
 	nextID         int64
 	createErr      error
 	deleteErr      error
+	deleteSawDone  bool
+	replaceErr     error
 	created        []droplet
 	deleted        []int64
+	keyDeleteDone  bool
 	deletedKeys    []string
 	replaced       []int64
 	replacedFrom   [][]string
@@ -74,12 +77,22 @@ func (f *fakeDigitalOceanAPI) CreateDroplet(_ context.Context, cfg core.Config, 
 	return item, nil
 }
 
-func (f *fakeDigitalOceanAPI) DeleteDroplet(_ context.Context, id int64) error {
+func (f *fakeDigitalOceanAPI) DeleteDroplet(ctx context.Context, id int64) error {
+	select {
+	case <-ctx.Done():
+		f.deleteSawDone = true
+	default:
+	}
 	f.deleted = append(f.deleted, id)
 	return f.deleteErr
 }
 
-func (f *fakeDigitalOceanAPI) DeleteSSHKeyByName(_ context.Context, name string) error {
+func (f *fakeDigitalOceanAPI) DeleteSSHKeyByName(ctx context.Context, name string) error {
+	select {
+	case <-ctx.Done():
+		f.keyDeleteDone = true
+	default:
+	}
 	f.deletedKeys = append(f.deletedKeys, name)
 	return nil
 }
@@ -88,6 +101,9 @@ func (f *fakeDigitalOceanAPI) ReplaceDropletTags(_ context.Context, id int64, cu
 	f.replaced = append(f.replaced, id)
 	f.replacedFrom = append(f.replacedFrom, append([]string(nil), currentTags...))
 	f.replacedTo = append(f.replacedTo, append([]string(nil), desiredTags...))
+	if f.replaceErr != nil {
+		return f.replaceErr
+	}
 	for i := range f.created {
 		if f.created[i].ID == id {
 			f.created[i].Tags = desiredTags
@@ -145,6 +161,82 @@ func TestAcquireRollsBackDropletAndKeyOnSSHFailure(t *testing.T) {
 	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error { return errors.New("ssh no") }
 	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback"})
 	if err == nil || !strings.Contains(err.Error(), "ssh no") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if len(api.deleted) != 1 || api.deleted[0] != 100 {
+		t.Fatalf("deleted=%v", api.deleted)
+	}
+	if len(api.deletedKeys) != 1 || !strings.HasPrefix(api.deletedKeys[0], "crabbox-cbx-") {
+		t.Fatalf("deletedKeys=%v", api.deletedKeys)
+	}
+}
+
+func TestAcquireRollsBackKeepDropletAndKeyOnSSHFailure(t *testing.T) {
+	api := &fakeDigitalOceanAPI{}
+	backend := newTestBackend(t, api)
+	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error { return errors.New("ssh no") }
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback-keep", Keep: true})
+	if err == nil || !strings.Contains(err.Error(), "ssh no") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if len(api.deleted) != 1 || api.deleted[0] != 100 {
+		t.Fatalf("deleted=%v", api.deleted)
+	}
+	if len(api.deletedKeys) != 1 || !strings.HasPrefix(api.deletedKeys[0], "crabbox-cbx-") {
+		t.Fatalf("deletedKeys=%v", api.deletedKeys)
+	}
+}
+
+func TestAcquireRollbackUsesFreshCleanupContextAfterCancellation(t *testing.T) {
+	api := &fakeDigitalOceanAPI{}
+	backend := newTestBackend(t, api)
+	backend.waitSSH = func(ctx context.Context, _ *core.SSHTarget, _ string, _ time.Duration) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := backend.Acquire(ctx, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "cancelled", Keep: true})
+	if err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if len(api.deleted) != 1 || api.deleteSawDone {
+		t.Fatalf("deleted=%v deleteSawDone=%v", api.deleted, api.deleteSawDone)
+	}
+	if len(api.deletedKeys) != 1 || api.keyDeleteDone {
+		t.Fatalf("deletedKeys=%v keyDeleteDone=%v", api.deletedKeys, api.keyDeleteDone)
+	}
+}
+
+func TestAcquireRollsBackDropletAndKeyOnReadyTagFailure(t *testing.T) {
+	api := &fakeDigitalOceanAPI{replaceErr: errors.New("tag update failed")}
+	backend := newTestBackend(t, api)
+
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "tag-fail", Keep: true})
+	if err == nil || !strings.Contains(err.Error(), "tag update failed") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if len(api.deleted) != 1 || api.deleted[0] != 100 {
+		t.Fatalf("deleted=%v", api.deleted)
+	}
+	if len(api.deletedKeys) != 1 || !strings.HasPrefix(api.deletedKeys[0], "crabbox-cbx-") {
+		t.Fatalf("deletedKeys=%v", api.deletedKeys)
+	}
+}
+
+func TestAcquireRollsBackKeepDropletAndKeyOnClaimFailure(t *testing.T) {
+	api := &fakeDigitalOceanAPI{}
+	backend := newTestBackend(t, api)
+	claimErr := errors.New("claim failed")
+	oldClaim := claimLeaseTargetForRepoConfig
+	claimLeaseTargetForRepoConfig = func(string, string, core.Config, core.Server, core.SSHTarget, string, time.Duration, bool) error {
+		return claimErr
+	}
+	t.Cleanup(func() { claimLeaseTargetForRepoConfig = oldClaim })
+
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback-claim", Keep: true})
+	if err == nil || !strings.Contains(err.Error(), "claim failed") {
 		t.Fatalf("Acquire err=%v", err)
 	}
 	if len(api.deleted) != 1 || api.deleted[0] != 100 {

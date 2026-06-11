@@ -300,7 +300,7 @@ func TestDigitalOceanConfigFileAndEnv(t *testing.T) {
 			SSHCIDRs: []string{"203.0.113.0/24"},
 		},
 	})
-	if cfg.Provider != "digitalocean" || cfg.DigitalOcean.Region != "sfo3" || cfg.Location != "sfo3" || cfg.DigitalOcean.Image != "ubuntu-24-04-x64" || cfg.Image != "ubuntu-24-04-x64" || cfg.DigitalOcean.VPCUUID != "vpc-file" {
+	if cfg.Provider != "digitalocean" || cfg.DigitalOcean.Region != "sfo3" || cfg.Location == "sfo3" || cfg.DigitalOcean.Image != "ubuntu-24-04-x64" || cfg.Image == "ubuntu-24-04-x64" || cfg.DigitalOcean.VPCUUID != "vpc-file" {
 		t.Fatalf("file digitalocean config not applied: cfg=%#v do=%#v", cfg, cfg.DigitalOcean)
 	}
 	if strings.Join(cfg.DigitalOcean.SSHCIDRs, ",") != "203.0.113.0/24" {
@@ -314,11 +314,37 @@ func TestDigitalOceanConfigFileAndEnv(t *testing.T) {
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatalf("applyEnv err=%v", err)
 	}
-	if cfg.DigitalOcean.Region != "nyc3" || cfg.Location != "nyc3" || cfg.DigitalOcean.Image != "ubuntu-22-04-x64" || cfg.Image != "ubuntu-22-04-x64" || cfg.DigitalOcean.VPCUUID != "vpc-env" {
+	if cfg.DigitalOcean.Region != "nyc3" || cfg.Location == "nyc3" || cfg.DigitalOcean.Image != "ubuntu-22-04-x64" || cfg.Image == "ubuntu-22-04-x64" || cfg.DigitalOcean.VPCUUID != "vpc-env" {
 		t.Fatalf("env digitalocean config not applied: cfg=%#v do=%#v", cfg, cfg.DigitalOcean)
 	}
 	if strings.Join(cfg.DigitalOcean.SSHCIDRs, ",") != "198.51.100.0/24,2001:db8::/64" {
 		t.Fatalf("env digitalocean ssh cidrs=%v", cfg.DigitalOcean.SSHCIDRs)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	if cfg.Location != "nyc3" || cfg.Image != "ubuntu-22-04-x64" {
+		t.Fatalf("provider defaults did not apply digitalocean region/image: cfg=%#v", cfg)
+	}
+}
+
+func TestDigitalOceanEnvDoesNotMutateGenericFieldsForOtherProviders(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "hetzner"
+	originalLocation := cfg.Location
+	originalImage := cfg.Image
+	t.Setenv("CRABBOX_DIGITALOCEAN_REGION", "nyc3")
+	t.Setenv("CRABBOX_DIGITALOCEAN_IMAGE", "ubuntu-22-04-x64")
+
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.DigitalOcean.Region != "nyc3" || cfg.DigitalOcean.Image != "ubuntu-22-04-x64" {
+		t.Fatalf("digitalocean env not stored: do=%#v", cfg.DigitalOcean)
+	}
+	if cfg.Location != originalLocation || cfg.Image != originalImage {
+		t.Fatalf("digitalocean env leaked into generic fields: location=%q image=%q", cfg.Location, cfg.Image)
 	}
 }
 

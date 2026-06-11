@@ -1,11 +1,14 @@
 package digitalocean
 
 import (
+	"regexp"
 	"testing"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+var digitalOceanTagNameRE = regexp.MustCompile(`^[A-Za-z0-9_:\-]+$`)
 
 func TestLeaseTagsRoundTripOwnedLabels(t *testing.T) {
 	cfg := core.BaseConfig()
@@ -76,18 +79,25 @@ func TestLeaseTagsPreserveTailscaleMetadata(t *testing.T) {
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
 	cfg.Tailscale.Enabled = true
-	cfg.Tailscale.Hostname = "cbx-blue"
+	cfg.Tailscale.Hostname = "cbx-blue.example.com"
 	cfg.Tailscale.Tags = []string{"tag:ci", "tag:crabbox"}
 	cfg.Tailscale.ExitNode = "exit.example"
 	cfg.Tailscale.ExitNodeAllowLANAccess = true
 
-	labels := labelsFromTags(leaseTags(cfg, "cbx_abcdef123456", "blue", "ready", false, time.Now()))
+	tags := leaseTags(cfg, "cbx_abcdef123456", "blue", "ready", false, time.Now())
+	for _, tag := range tags {
+		if !digitalOceanTagNameRE.MatchString(tag) {
+			t.Fatalf("invalid digitalocean tag %q in %v", tag, tags)
+		}
+	}
+
+	labels := labelsFromTags(tags)
 	for key, want := range map[string]string{
 		"tailscale":                            "true",
 		"tailscale_state":                      "requested",
-		"tailscale_hostname":                   "cbx-blue",
-		"tailscale_tags":                       "tag:ci,tag:crabbox",
-		"tailscale_exit_node":                  "exit.example",
+		"tailscale_hostname":                   "cbx-blue-example-com",
+		"tailscale_tags":                       "tag:ci-tag:crabbox",
+		"tailscale_exit_node":                  "exit-example",
 		"tailscale_exit_node_allow_lan_access": "true",
 	} {
 		if got := labels[key]; got != want {

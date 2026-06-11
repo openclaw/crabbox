@@ -16,7 +16,7 @@ const (
 	tagPrefix  = "crabbox:"
 )
 
-var tagSafeRe = regexp.MustCompile(`[^A-Za-z0-9_:\-.,]`)
+var tagSafeRe = regexp.MustCompile(`[^A-Za-z0-9_:\-]`)
 
 func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time.Time) []string {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
