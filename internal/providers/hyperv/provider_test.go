@@ -260,6 +260,27 @@ func TestRemoveVMRefuseNonCrabbox(t *testing.T) {
 	}
 }
 
+func TestRemoveVMStorageRefusesMalformedCrabboxNames(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	b := testBackend(&recordingRunner{})
+
+	for _, name := range []string{
+		"crabbox-",
+		"crabbox-../../target",
+		`crabbox-..\..\target`,
+		"crabbox-Blue-1234",
+		"crabbox-blue-1234 ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := b.removeVMStorage(name, nil); err == nil || !strings.Contains(err.Error(), "refusing") {
+				t.Fatalf("removeVMStorage(%q) err=%v, want refusal", name, err)
+			}
+		})
+	}
+}
+
 func TestParseVMListSingle(t *testing.T) {
 	raw := `{"Name":"crabbox-blue-1234","State":2}`
 	vms, err := parseVMList(raw)
@@ -1170,6 +1191,58 @@ func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
 	}
 }
 
+func TestCleanupMissingKeepClaimPreservesStorage(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	const leaseID = "cbx_cleanupkeep"
+	const name = "crabbox-cleanup-keep"
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	cfg := b.configForRun()
+	claim := core.LeaseClaim{
+		LeaseID:       leaseID,
+		Slug:          "cleanup-keep",
+		Provider:      providerName,
+		ProviderScope: instanceScope(name),
+		Labels: map[string]string{
+			"instance":   name,
+			"lease":      leaseID,
+			"state":      "ready",
+			"keep":       "true",
+			"created_at": core.LeaseLabelTime(time.Now().Add(-2 * hypervProvisioningClaimGrace)),
+		},
+	}
+	lease := LeaseTarget{
+		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
+		LeaseID: leaseID,
+	}
+	if err := persistLease(leaseID, claim.Slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}, lease); err != nil {
+		t.Fatalf("persistLease: %v", err)
+	}
+	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
+	if err := os.MkdirAll(filepath.Dir(baseVHD), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(baseVHD, []byte("disk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if _, err := os.Stat(baseVHD); err != nil {
+		t.Fatalf("cleanup removed retained disk %s: %v", baseVHD, err)
+	}
+	if claims, err := listLeaseClaims(); err != nil || len(claims) != 1 || claims[0].LeaseID != leaseID {
+		t.Fatalf("claims after cleanup=%#v err=%v", claims, err)
+	}
+}
+
 func TestMissingClaimCleanupWaitsForProvisioningGrace(t *testing.T) {
 	now := time.Now().UTC()
 	claim := core.LeaseClaim{
@@ -1185,6 +1258,10 @@ func TestMissingClaimCleanupWaitsForProvisioningGrace(t *testing.T) {
 	claim.Labels["created_at"] = core.LeaseLabelTime(now.Add(-2 * hypervProvisioningClaimGrace))
 	if ready, reason := missingClaimCleanupReady(claim, now); !ready || reason != "" {
 		t.Fatalf("stale claim ready=%v reason=%q", ready, reason)
+	}
+	claim.Labels["keep"] = "true"
+	if ready, reason := missingClaimCleanupReady(claim, now); ready || reason != "keep=true" {
+		t.Fatalf("retained claim ready=%v reason=%q", ready, reason)
 	}
 }
 
@@ -1314,7 +1391,7 @@ func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
 	}
 	// Windows OpenSSH ignores administrators_authorized_keys unless it is owned
 	// only by SYSTEM + Administrators with inheritance disabled.
-	for _, want := range []string{"icacls.exe", "/inheritance:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "$LASTEXITCODE", "PasswordAuthentication no", "PubkeyAuthentication yes", "AuthenticationMethods publickey", "AllowUsers administrator", "|Include)", "sshd_config validation failed", "ssh_host_*", "ssh-keygen.exe", "-A", "SSH host key generation failed", "Start-Service sshd", "OpenSSH-Server-In-TCP", "Crabbox-SSH-Quarantine", "Remove-NetFirewallRule"} {
+	for _, want := range []string{"icacls.exe", "/inheritance:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "$LASTEXITCODE", "Port|ListenAddress|AddressFamily|HostKey|", "Port 22", "AddressFamily any", "PasswordAuthentication no", "PubkeyAuthentication yes", "AuthenticationMethods publickey", "AllowUsers administrator", "|Include)", "sshd_config validation failed", "ssh_host_*", "ssh-keygen.exe", "-A", "SSH host key generation failed", "Start-Service sshd", "OpenSSH-Server-In-TCP", "Crabbox-SSH-Quarantine", "Remove-NetFirewallRule"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("admin-key SSH lockdown missing %q\nscript: %s", want, script)
 		}
@@ -1324,6 +1401,9 @@ func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
 	}
 	if strings.Index(script, "ssh-keygen.exe") > strings.Index(script, "Start-Service sshd") {
 		t.Fatal("SSH host keys must be regenerated before sshd starts")
+	}
+	if strings.Index(script, "ssh-keygen.exe") > strings.Index(script, "& $sshdExe -t") {
+		t.Fatal("SSH host keys must be regenerated before sshd_config validation")
 	}
 	if strings.Contains(script, "Add-Content") {
 		t.Fatalf("SSH key injection retained template keys: %s", script)
@@ -1404,9 +1484,14 @@ func TestEnsureOpenSSHInstallsWithSshdClosed(t *testing.T) {
 	if script == "" {
 		t.Fatal("ensureOpenSSH should invoke an OpenSSH install over PowerShell Direct")
 	}
-	for _, want := range []string{"Add-WindowsCapability", "Stop-Service", "StartupType Manual", "Disable-NetFirewallRule"} {
+	for _, want := range []string{"OpenSSH.Server~~~~0.0.1.0", "Add-WindowsCapability", "Stop-Service", "StartupType Manual", "Disable-NetFirewallRule"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("ensureOpenSSH script missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{"OpenSSH.Server*", "Add-WindowsCapability -Online -Name $cap.Name"} {
+		if strings.Contains(script, unwanted) {
+			t.Errorf("ensureOpenSSH uses ambiguous capability selection: %s", script)
 		}
 	}
 	for _, unwanted := range []string{"Start-Service sshd", "New-NetFirewallRule"} {

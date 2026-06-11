@@ -610,8 +610,9 @@ func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, 
 // Features-on-Demand source).
 func (b *backend) ensureOpenSSH(ctx context.Context, vmName, user string) error {
 	scriptBlock := `$ErrorActionPreference='Stop'; ` +
-		`$cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*'; ` +
-		`if ($cap.State -ne 'Installed') { Add-WindowsCapability -Online -Name $cap.Name | Out-Null }; ` +
+		`$capName = 'OpenSSH.Server~~~~0.0.1.0'; ` +
+		`$cap = Get-WindowsCapability -Online -Name $capName; ` +
+		`if ($cap.State -ne 'Installed') { Add-WindowsCapability -Online -Name $capName | Out-Null }; ` +
 		`Stop-Service -Name sshd -Force -ErrorAction SilentlyContinue; ` +
 		`Set-Service -Name sshd -StartupType Manual; ` +
 		`if (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue) { ` +
@@ -687,8 +688,10 @@ func sshAccessScript(user, publicKey string, activate bool) string {
 			`$globalLines = @(); `+
 			`foreach ($line in $sshdLines) { `+
 			`if ($line -match '^\s*Match\s+') { break }; `+
-			`if ($line -match '^\s*(AuthenticationMethods|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|AllowUsers|AllowGroups|DenyUsers|DenyGroups|AuthorizedKeysFile|AuthorizedKeysCommand|AuthorizedKeysCommandUser|TrustedUserCAKeys|AuthorizedPrincipalsFile|Include)\s+') { continue }; `+
+			`if ($line -match '^\s*(Port|ListenAddress|AddressFamily|HostKey|AuthenticationMethods|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|AllowUsers|AllowGroups|DenyUsers|DenyGroups|AuthorizedKeysFile|AuthorizedKeysCommand|AuthorizedKeysCommandUser|TrustedUserCAKeys|AuthorizedPrincipalsFile|Include)\s+') { continue }; `+
 			`$globalLines += $line }; `+
+			`$globalLines += 'Port 22'; `+
+			`$globalLines += 'AddressFamily any'; `+
 			`$globalLines += 'PubkeyAuthentication yes'; `+
 			`$globalLines += 'PasswordAuthentication no'; `+
 			`$globalLines += 'AuthenticationMethods publickey'; `+
@@ -703,13 +706,13 @@ func sshAccessScript(user, publicKey string, activate bool) string {
 		return script
 	}
 	return script +
-		`$sshdExe = Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'; ` +
-		`& $sshdExe -t -f $sshdConfig; ` +
-		`if ($LASTEXITCODE -ne 0) { throw 'sshd_config validation failed' }; ` +
 		`Get-ChildItem -Path $hostKeyDir -Filter 'ssh_host_*' -ErrorAction SilentlyContinue | Remove-Item -Force; ` +
 		`$sshKeygen = Join-Path $env:WINDIR 'System32\OpenSSH\ssh-keygen.exe'; ` +
 		`& $sshKeygen -A; ` +
 		`if ($LASTEXITCODE -ne 0) { throw 'SSH host key generation failed' }; ` +
+		`$sshdExe = Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'; ` +
+		`& $sshdExe -t -f $sshdConfig; ` +
+		`if ($LASTEXITCODE -ne 0) { throw 'sshd_config validation failed' }; ` +
 		`Set-Service -Name sshd -StartupType Automatic; ` +
 		`Start-Service sshd; ` +
 		`if (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue) { ` +
@@ -869,7 +872,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst hypervVM, i
 }
 
 func (b *backend) removeVM(ctx context.Context, name string) error {
-	if !strings.HasPrefix(name, "crabbox-") {
+	if !validHyperVVMName(name) {
 		return exit(2, "refusing to remove non-Crabbox Hyper-V VM %q", name)
 	}
 
@@ -893,6 +896,9 @@ func (b *backend) removeVM(ctx context.Context, name string) error {
 }
 
 func (b *backend) removeVMStorage(name string, attachedPaths []string) error {
+	if !validHyperVVMName(name) {
+		return exit(2, "refusing to remove storage for invalid Crabbox Hyper-V VM %q", name)
+	}
 	var errs []error
 	vhdDir := hypervVHDDir()
 	expectedVHD := filepath.Join(vhdDir, name+".vhdx")
@@ -926,6 +932,18 @@ func (b *backend) removeVMStorage(name string, attachedPaths []string) error {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+func validHyperVVMName(name string) bool {
+	if name != strings.TrimSpace(name) || len(name) <= len("crabbox-") || len(name) > 64 || !strings.HasPrefix(name, "crabbox-") {
+		return false
+	}
+	for _, r := range name {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+			return false
+		}
+	}
+	return name[len(name)-1] != '-'
 }
 
 func ownedHyperVCheckpoint(path, vhdDir, name string) bool {
@@ -1179,6 +1197,9 @@ func instanceNameFromScope(scope string) string {
 }
 
 func missingClaimCleanupReady(claim core.LeaseClaim, now time.Time) (bool, string) {
+	if strings.EqualFold(claim.Labels["keep"], "true") {
+		return false, "keep=true"
+	}
 	if !strings.EqualFold(claim.Labels["state"], "provisioning") {
 		return true, ""
 	}
