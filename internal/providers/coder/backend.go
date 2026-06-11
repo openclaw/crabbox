@@ -2,6 +2,8 @@ package coder
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -60,7 +62,7 @@ func (b *coderLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	workspaceName, err := coderWorkspaceName(b.cfg.Coder.WorkspacePrefix, slug, leaseID)
+	slug, workspaceName, err := coderUniqueWorkspaceName(existing, b.cfg.Coder.WorkspacePrefix, slug, leaseID)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -608,6 +610,37 @@ func normalizeCoderWorkspaceIdentifier(value string) string {
 
 var coderWorkspaceInvalidChars = regexp.MustCompile(`[^a-z0-9-]+`)
 
+const coderMaxRequestedSlugLength = 41
+const coderWorkspaceHashLength = 6
+
+func coderUniqueWorkspaceName(workspaces []coderWorkspace, prefix, slug, leaseID string) (string, string, error) {
+	name, err := coderWorkspaceName(prefix, slug, leaseID)
+	if err != nil {
+		return "", "", err
+	}
+	if !coderWorkspaceNameExists(workspaces, name) {
+		return slug, name, nil
+	}
+	candidateSlug := coderCollisionSlug(slug, leaseID)
+	name, err = coderWorkspaceName(prefix, candidateSlug, leaseID)
+	if err != nil {
+		return "", "", err
+	}
+	if coderWorkspaceNameExists(workspaces, name) {
+		return "", "", exit(5, "coder workspace name %q collides with existing inventory", name)
+	}
+	return candidateSlug, name, nil
+}
+
+func coderWorkspaceNameExists(workspaces []coderWorkspace, name string) bool {
+	for _, workspace := range workspaces {
+		if normalizeCoderWorkspaceIdentifier(workspace.Name) == normalizeCoderWorkspaceIdentifier(name) {
+			return true
+		}
+	}
+	return false
+}
+
 func coderWorkspaceName(prefix, slug, leaseID string) (string, error) {
 	cleanPrefix, err := cleanCoderWorkspacePrefix(prefix)
 	if err != nil {
@@ -627,7 +660,17 @@ func coderWorkspaceName(prefix, slug, leaseID string) (string, error) {
 		return "", exit(2, "coder.workspacePrefix %q leaves no room for a workspace name", cleanPrefix)
 	}
 	if len(base) > maxBase {
-		base = strings.Trim(base[:maxBase], "-")
+		hash := coderWorkspaceHash(base)
+		if maxBase <= len(hash)+1 {
+			base = hash[:maxBase]
+		} else {
+			prefixPart := strings.Trim(base[:maxBase-len(hash)-1], "-")
+			if prefixPart == "" {
+				base = hash[:maxBase]
+			} else {
+				base = prefixPart + "-" + hash
+			}
+		}
 	}
 	name := strings.Trim(cleanPrefix+base, "-")
 	if len(name) < 1 || len(name) > 32 {
@@ -640,4 +683,25 @@ func coderWorkspaceName(prefix, slug, leaseID string) (string, error) {
 		return "", exit(2, "coder workspace name %q must start and end with a letter or number", name)
 	}
 	return name, nil
+}
+
+func coderCollisionSlug(slug, leaseID string) string {
+	slug = normalizeLeaseSlug(slug)
+	suffix := coderWorkspaceHash(leaseID)
+	maxBase := coderMaxRequestedSlugLength - len(suffix) - 1
+	if maxBase < 1 {
+		return suffix[:coderMaxRequestedSlugLength]
+	}
+	if len(slug) > maxBase {
+		slug = strings.Trim(slug[:maxBase], "-")
+	}
+	if slug == "" {
+		return suffix
+	}
+	return slug + "-" + suffix
+}
+
+func coderWorkspaceHash(value string) string {
+	sum := sha1.Sum([]byte(value))
+	return hex.EncodeToString(sum[:])[:coderWorkspaceHashLength]
 }

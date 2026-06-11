@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -551,7 +552,6 @@ func TestCoderWorkspaceNameRules(t *testing.T) {
 	}{
 		{prefix: "crabbox-", slug: "Blue Workspace", leaseID: "cbx_123456abcdef", want: "crabbox-blue-workspace"},
 		{prefix: "cbx", slug: "new", leaseID: "cbx_123456abcdef", want: "cbx-cbx-new"},
-		{prefix: "crabbox-", slug: "this-name-is-much-longer-than-coder-allows", leaseID: "cbx_123456abcdef", want: "crabbox-this-name-is-much-longer"},
 	} {
 		got, err := coderWorkspaceName(tc.prefix, tc.slug, tc.leaseID)
 		if err != nil {
@@ -560,6 +560,47 @@ func TestCoderWorkspaceNameRules(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("coderWorkspaceName(%q,%q)=%q want %q", tc.prefix, tc.slug, got, tc.want)
 		}
+	}
+	got, err := coderWorkspaceName("crabbox-", "this-name-is-much-longer-than-coder-allows", "cbx_123456abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched := regexp.MustCompile(`^crabbox-this-name-is-much-[0-9a-f]{6}$`).MatchString(got); !matched {
+		t.Fatalf("unexpected long workspace name %q", got)
+	}
+}
+
+func TestCoderWorkspaceNameDisambiguatesLongSlugs(t *testing.T) {
+	first, err := coderWorkspaceName("crabbox-", "this-name-is-much-longer-than-coder-allows-alpha", "cbx_first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := coderWorkspaceName("crabbox-", "this-name-is-much-longer-than-coder-allows-bravo", "cbx_second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("long slugs collided: %q", first)
+	}
+}
+
+func TestCoderUniqueWorkspaceNameFallsBackOnExistingNameCollision(t *testing.T) {
+	existingName, err := coderWorkspaceName("crabbox-", "this-name-is-much-longer-than-coder-allows", "cbx_existing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug, name, err := coderUniqueWorkspaceName([]coderWorkspace{{Name: existingName}}, "crabbox-", "this-name-is-much-longer-than-coder-allows", "cbx_123456abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slug == "this-name-is-much-longer-than-coder-allows" {
+		t.Fatalf("expected collision slug, got %q", slug)
+	}
+	if name == existingName {
+		t.Fatalf("expected unique workspace name, got %q", name)
+	}
+	if !strings.HasSuffix(slug, "-"+coderWorkspaceHash("cbx_123456abcdef")) {
+		t.Fatalf("collision slug %q missing lease hash suffix", slug)
 	}
 }
 
