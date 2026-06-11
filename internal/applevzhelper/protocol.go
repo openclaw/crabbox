@@ -1,6 +1,9 @@
 package applevzhelper
 
 import (
+	"encoding/hex"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -87,6 +90,61 @@ type DoctorResponse struct {
 	Message   string            `json:"message"`
 	Details   map[string]string `json:"details,omitempty"`
 	Instances int               `json:"instances"`
+}
+
+type ImageRequest struct {
+	Image  string `json:"image"`
+	SHA256 string `json:"sha256,omitempty"`
+}
+
+func RedactImageRef(value string) string {
+	value = strings.TrimSpace(value)
+	_, remote := remoteImageURL(value)
+	if !remote {
+		return value
+	}
+	return "<remote-image>"
+}
+
+func ImageIdentity(value, expectedSHA256 string) string {
+	value = strings.TrimSpace(value)
+	if _, remote := remoteImageURL(value); !remote {
+		return value
+	}
+	checksum := strings.ToLower(strings.TrimSpace(expectedSHA256))
+	checksum = strings.TrimPrefix(checksum, "sha256:")
+	if len(checksum) == 64 {
+		if _, err := hex.DecodeString(checksum); err == nil {
+			return "remote:sha256:" + checksum[:12]
+		}
+	}
+	return "<remote-image>"
+}
+
+func IsRemoteImageRef(value string) bool {
+	_, remote := remoteImageURL(value)
+	return remote
+}
+
+func remoteImageURL(value string) (*url.URL, bool) {
+	value = strings.TrimSpace(value)
+	parsed, err := url.Parse(value)
+	if err == nil && (strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https")) {
+		parsed.Scheme = strings.ToLower(parsed.Scheme)
+		return parsed, true
+	}
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		return nil, true
+	}
+	return nil, false
+}
+
+func ensurePrivateDir(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o700)
 }
 
 func InstancesDir(stateRoot string) string {

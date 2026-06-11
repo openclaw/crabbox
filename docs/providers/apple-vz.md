@@ -144,7 +144,7 @@ Provider flags:
 
 ```text
 --apple-vz-helper <path>
---apple-vz-image <path-or-url>
+--apple-vz-image <local-path>
 --apple-vz-image-sha256 <sha256>
 --apple-vz-user <user>
 --apple-vz-work-root <path>
@@ -178,9 +178,21 @@ must also set `appleVZ.imageSHA256`; Crabbox refuses an unverified remote image.
 A local image path may omit the checksum, or set one to verify the file before
 boot.
 
+Remote images must use HTTPS. Plain HTTP is accepted only for loopback
+development servers. Apple VZ state directories are owner-only (`0700`);
+downloaded images, converted bases, VM disks, metadata, and logs are `0600`.
+
+Remote and signed URLs are accepted through `appleVZ.image` in a protected
+configuration file or `CRABBOX_APPLE_VZ_IMAGE`. Never put one on the command
+line: the shell and Crabbox process arguments see flag values before Crabbox
+can validate them. `--apple-vz-image` accepts local paths only. Crabbox removes
+the image variable from helper environments, forwards the complete request
+over stdin, and represents remote images in logs and persisted lease metadata
+only by a checksum-derived identity such as `remote:sha256:6a61b967ba4a`.
+
 QCOW2 cloud images are converted once into a sparse raw base image. Each lease
 gets a clone or sparse copy of that base, resized to `diskGiB`. Changing the
-image reference or source file creates a new converted cache entry.
+image reference, expected checksum, or source file creates a new cache entry.
 
 ## Lifecycle and networking
 

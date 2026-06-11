@@ -4,6 +4,7 @@ import (
 	"flag"
 	"strings"
 
+	"github.com/openclaw/crabbox/internal/applevzhelper"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
@@ -39,7 +40,7 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 }
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
-	return strings.TrimSpace(cfg.AppleVZ.Image)
+	return applevzhelper.ImageIdentity(strings.TrimSpace(cfg.AppleVZ.Image), cfg.AppleVZ.ImageSHA256)
 }
 
 func (Provider) ServerTypeForClass(string) string { return "" }

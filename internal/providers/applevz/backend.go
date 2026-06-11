@@ -95,7 +95,7 @@ func applyDefaults(cfg *core.Config) {
 	cfg.SSHUser = cfg.AppleVZ.User
 	cfg.SSHPort = strconv.Itoa(int(applevzhelper.GuestSSHPort))
 	cfg.WorkRoot = cfg.AppleVZ.WorkRoot
-	cfg.ServerType = cfg.AppleVZ.Image
+	cfg.ServerType = applevzhelper.ImageIdentity(cfg.AppleVZ.Image, cfg.AppleVZ.ImageSHA256)
 }
 
 func defaultAppleVZImage(osImage string) string {
@@ -161,14 +161,16 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		return rollbackErr
 	}
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMiB disk=%dGiB keep=%v\n", providerName, leaseID, slug, cfg.AppleVZ.Image, cfg.AppleVZ.CPUs, cfg.AppleVZ.MemoryMiB, cfg.AppleVZ.DiskGiB, req.Keep)
+	displayImage := applevzhelper.ImageIdentity(cfg.AppleVZ.Image, cfg.AppleVZ.ImageSHA256)
+	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMiB disk=%dGiB keep=%v\n", providerName, leaseID, slug, displayImage, cfg.AppleVZ.CPUs, cfg.AppleVZ.MemoryMiB, cfg.AppleVZ.DiskGiB, req.Keep)
 	inst, err := b.startInstance(ctx, cfg, name, leaseID, slug, publicKey)
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
 	labels["instance"] = name
-	labels["image"] = cfg.AppleVZ.Image
+	labels["image"] = displayImage
+	labels["server_type"] = displayImage
 	labels["ssh_user"] = cfg.AppleVZ.User
 	if inst.SSHPort > 0 {
 		labels["ssh_port"] = strconv.Itoa(inst.SSHPort)
@@ -255,14 +257,20 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 		return core.DoctorResult{}, err
 	}
 	var resp applevzhelper.DoctorResponse
-	if err := b.runHelperJSON(ctx, helperPath, []string{"doctor", "--state-root", root, "--image", cfg.AppleVZ.Image, "--image-sha256", cfg.AppleVZ.ImageSHA256}, &resp); err != nil {
+	if err := b.runHelperJSONInput(ctx, helperPath, []string{"doctor", "--state-root", root, "--image-request-stdin"}, applevzhelper.ImageRequest{
+		Image:  cfg.AppleVZ.Image,
+		SHA256: cfg.AppleVZ.ImageSHA256,
+	}, &resp); err != nil {
 		return core.DoctorResult{}, err
 	}
 	if strings.TrimSpace(resp.Status) != "ok" {
 		return core.DoctorResult{}, exit(2, "apple-vz doctor failed: %s", core.Blank(resp.Message, "unknown error"))
 	}
+	if image := strings.TrimSpace(resp.Details["image"]); image != "" {
+		resp.Details["image"] = applevzhelper.RedactImageRef(image)
+	}
 	runtimeLabel := core.Blank(resp.Details["runtime"], "ready")
-	msg := fmt.Sprintf("helper=ready control_plane=local inventory=ready api=list mutation=false leases=%d runtime=%s image=%s path=%s", resp.Instances, runtimeLabel, cfg.AppleVZ.Image, helperPath)
+	msg := fmt.Sprintf("helper=ready control_plane=local inventory=ready api=list mutation=false leases=%d runtime=%s image=%s path=%s", resp.Instances, runtimeLabel, applevzhelper.ImageIdentity(cfg.AppleVZ.Image, cfg.AppleVZ.ImageSHA256), helperPath)
 	return core.DoctorResult{
 		Provider: providerName,
 		Message:  msg,
@@ -380,7 +388,7 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 	}
 	original := server.Labels
 	server.Labels = core.TouchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	for _, key := range []string{"image", "instance", "ssh_user", "ssh_port", "work_root"} {
+	for _, key := range []string{"image", "instance", "server_type", "ssh_user", "ssh_port", "work_root"} {
 		if value := strings.TrimSpace(original[key]); value != "" {
 			server.Labels[key] = value
 		}
@@ -440,14 +448,13 @@ func (b *backend) startInstance(ctx context.Context, cfg core.Config, name, leas
 		return applevzhelper.Instance{}, err
 	}
 	var resp applevzhelper.StartResponse
-	if err := b.runHelperJSON(ctx, helperPath, []string{
+	if err := b.runHelperJSONInput(ctx, helperPath, []string{
 		"start",
 		"--state-root", root,
 		"--name", name,
 		"--lease-id", leaseID,
 		"--slug", slug,
-		"--image", cfg.AppleVZ.Image,
-		"--image-sha256", cfg.AppleVZ.ImageSHA256,
+		"--image-request-stdin",
 		"--ssh-user", cfg.AppleVZ.User,
 		"--ssh-public-key", publicKey,
 		"--work-root", cfg.AppleVZ.WorkRoot,
@@ -455,6 +462,9 @@ func (b *backend) startInstance(ctx context.Context, cfg core.Config, name, leas
 		"--memory-mib", strconv.Itoa(cfg.AppleVZ.MemoryMiB),
 		"--disk-gib", strconv.Itoa(cfg.AppleVZ.DiskGiB),
 		"--ready-timeout", core.BootstrapWaitTimeout(cfg).String(),
+	}, applevzhelper.ImageRequest{
+		Image:  cfg.AppleVZ.Image,
+		SHA256: cfg.AppleVZ.ImageSHA256,
 	}, &resp); err != nil {
 		return applevzhelper.Instance{}, err
 	}
@@ -629,12 +639,15 @@ func (b *backend) serverFromInstance(inst applevzhelper.Instance, claim core.Lea
 	if labels["state"] == "" {
 		labels["state"] = appleVZState(inst.Status)
 	}
+	imageIdentity := applevzhelper.ImageIdentity(cfg.AppleVZ.Image, cfg.AppleVZ.ImageSHA256)
 	if labels["server_type"] == "" {
-		labels["server_type"] = firstNonBlank(inst.Image, cfg.AppleVZ.Image)
+		labels["server_type"] = firstNonBlank(inst.Image, imageIdentity)
 	}
+	labels["server_type"] = applevzhelper.RedactImageRef(labels["server_type"])
 	if labels["image"] == "" {
-		labels["image"] = firstNonBlank(inst.Image, cfg.AppleVZ.Image)
+		labels["image"] = firstNonBlank(inst.Image, imageIdentity)
 	}
+	labels["image"] = applevzhelper.RedactImageRef(labels["image"])
 	if labels["ssh_user"] == "" {
 		labels["ssh_user"] = firstNonBlank(inst.SSHUser, cfg.AppleVZ.User)
 	}
@@ -658,12 +671,29 @@ func (b *backend) serverFromInstance(inst applevzhelper.Instance, claim core.Lea
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = firstNonBlank(inst.SSHHost, "127.0.0.1")
-	server.ServerType.Name = firstNonBlank(labels["server_type"], cfg.AppleVZ.Image)
+	server.ServerType.Name = applevzhelper.RedactImageRef(firstNonBlank(labels["server_type"], imageIdentity))
 	return server
 }
 
 func (b *backend) runHelperJSON(ctx context.Context, helperPath string, args []string, out any) error {
-	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{Name: helperPath, Args: args})
+	return b.runHelperJSONInput(ctx, helperPath, args, nil, out)
+}
+
+func (b *backend) runHelperJSONInput(ctx context.Context, helperPath string, args []string, input, out any) error {
+	var stdin io.Reader
+	if input != nil {
+		data, err := json.Marshal(input)
+		if err != nil {
+			return exit(2, "encode apple-vz helper input: %v", err)
+		}
+		stdin = strings.NewReader(string(data))
+	}
+	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
+		Name:  helperPath,
+		Args:  args,
+		Env:   appleVZHelperEnv(),
+		Stdin: stdin,
+	})
 	if err != nil {
 		return exit(2, "apple-vz helper %s failed: %s", strings.Join(args, " "), localCommandDetail(result, err))
 	}
@@ -676,13 +706,32 @@ func (b *backend) runHelperJSON(ctx context.Context, helperPath string, args []s
 	return nil
 }
 
+func appleVZHelperEnv() []string {
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "CRABBOX_APPLE_VZ_IMAGE=") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func ensurePrivateDir(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o700)
+}
+
 func (b *backend) appleVZStateRoot() (string, error) {
 	stateDir, err := core.CrabboxStateDir()
 	if err != nil {
 		return "", err
 	}
 	root := filepath.Join(stateDir, "apple-vz")
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	if err := ensurePrivateDir(root); err != nil {
 		return "", exit(2, "create apple-vz state directory: %v", err)
 	}
 	return root, nil
@@ -694,7 +743,7 @@ func (b *backend) ensureHelperBinary(ctx context.Context, cfg core.Config) (stri
 		return "", err
 	}
 	helperDir := applevzhelper.HelperDir(root)
-	if err := os.MkdirAll(helperDir, 0o755); err != nil {
+	if err := ensurePrivateDir(helperDir); err != nil {
 		return "", exit(2, "create apple-vz helper directory: %v", err)
 	}
 	sourcePath, err := resolveHelperSourcePath(cfg)

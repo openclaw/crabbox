@@ -82,15 +82,14 @@ while :; do sleep 1; done
 		"--name", name,
 		"--lease-id", "lease-test",
 		"--slug", "my-app",
-		"--image", "test.img",
-		"--image-sha256", "",
+		"--image-request-stdin",
 		"--ssh-user", "alice",
 		"--ssh-public-key", "ssh-ed25519 AAAATEST alice@example.com",
 		"--work-root", "/workspace",
 		"--cpus", "2",
 		"--memory-mib", "2048",
 		"--disk-gib", "16",
-	}, &bytes.Buffer{}, &bytes.Buffer{})
+	}, strings.NewReader(`{"image":"test.img"}`), &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "timed out waiting for helper daemon to report readiness") {
 		t.Fatalf("runStart error = %v, want readiness timeout", err)
 	}
@@ -154,7 +153,7 @@ exit 23
 		"--name", name,
 		"--lease-id", "lease-test",
 		"--slug", "my-app",
-		"--image", "test.img",
+		"--image-request-stdin",
 		"--ssh-user", "alice",
 		"--ssh-public-key", "ssh-ed25519 AAAATEST alice@example.com",
 		"--work-root", "/workspace",
@@ -162,7 +161,7 @@ exit 23
 		"--memory-mib", "2048",
 		"--disk-gib", "16",
 		"--ready-timeout", "5s",
-	}, &bytes.Buffer{}, &bytes.Buffer{})
+	}, strings.NewReader(`{"image":"test.img"}`), &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil ||
 		(!strings.Contains(err.Error(), "helper daemon exited before the VM reached running state") &&
 			!strings.Contains(err.Error(), "apple-vz helper stopped before reporting readiness")) {
@@ -226,14 +225,14 @@ while :; do sleep 1; done
 		"--name", name,
 		"--lease-id", "lease-test",
 		"--slug", "my-app",
-		"--image", "test.img",
+		"--image-request-stdin",
 		"--ssh-user", "alice",
 		"--ssh-public-key", "ssh-ed25519 AAAATEST alice@example.com",
 		"--work-root", "/workspace",
 		"--cpus", "2",
 		"--memory-mib", "2048",
 		"--disk-gib", "16",
-	}, &bytes.Buffer{}, &bytes.Buffer{})
+	}, strings.NewReader(`{"image":"test.img"}`), &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "injected identity metadata failure") {
 		t.Fatalf("runStart error=%v, want identity metadata failure", err)
 	}

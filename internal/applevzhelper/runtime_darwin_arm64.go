@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,20 +29,21 @@ import (
 type startConfig struct {
 	StateRoot    string
 	Instance     Instance
+	Image        string
 	ImageSHA256  string
 	SSHPublicKey string
 }
 
 func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, error) {
 	inst := cfg.Instance
-	if err := os.MkdirAll(InstanceDir(cfg.StateRoot, inst.Name), 0o755); err != nil {
+	if err := ensurePrivateDir(InstanceDir(cfg.StateRoot, inst.Name)); err != nil {
 		return Instance{}, fmt.Errorf("create instance directory: %w", err)
 	}
-	sourcePath, err := resolveSourceImage(ctx, cfg.StateRoot, inst.Image, cfg.ImageSHA256)
+	sourcePath, err := resolveSourceImage(ctx, cfg.StateRoot, cfg.Image, cfg.ImageSHA256)
 	if err != nil {
 		return Instance{}, err
 	}
-	rawPath, err := ensureRawImage(cfg.StateRoot, inst.Image, sourcePath)
+	rawPath, err := ensureRawImage(cfg.StateRoot, cfg.Image, sourcePath)
 	if err != nil {
 		return Instance{}, err
 	}
@@ -54,6 +54,9 @@ func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, erro
 	inst.ConsoleLogPath = ConsoleLogPath(cfg.StateRoot, inst.Name)
 	if err := cloneOrCopyFile(rawPath, inst.DiskPath); err != nil {
 		return Instance{}, fmt.Errorf("clone base disk: %w", err)
+	}
+	if err := os.Chmod(inst.DiskPath, 0o600); err != nil {
+		return Instance{}, fmt.Errorf("secure root disk: %w", err)
 	}
 	if inst.DiskGiB > 0 {
 		targetSize := int64(inst.DiskGiB) * 1024 * 1024 * 1024
@@ -70,10 +73,11 @@ func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, erro
 	if err := createSeedImage(ctx, inst.SeedPath, inst.Name, inst.SSHUser, cfg.SSHPublicKey, inst.WorkRoot); err != nil {
 		return Instance{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(inst.ConsoleLogPath), 0o755); err != nil {
+	if err := ensurePrivateDir(filepath.Dir(inst.ConsoleLogPath)); err != nil {
 		return Instance{}, fmt.Errorf("create console log directory: %w", err)
 	}
-	if file, err := os.OpenFile(inst.ConsoleLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+	if file, err := os.OpenFile(inst.ConsoleLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		_ = file.Chmod(0o600)
 		_ = file.Close()
 	}
 	return inst, nil
@@ -88,41 +92,58 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 	if err != nil {
 		return "", err
 	}
-	if strings.HasPrefix(image, "http://") || strings.HasPrefix(image, "https://") {
+	parsedURL, remote, err := validateRemoteImageURL(image)
+	if err != nil {
+		return "", err
+	}
+	if remote {
+		displayImage := RedactImageRef(image)
 		if checksum == "" {
-			return "", fmt.Errorf("apple-vz remote image %q requires --image-sha256", image)
+			return "", fmt.Errorf("apple-vz remote image %q requires a SHA-256 checksum", displayImage)
 		}
-		if err := os.MkdirAll(DownloadsDir(stateRoot), 0o755); err != nil {
+		if err := ensurePrivateDir(DownloadsDir(stateRoot)); err != nil {
 			return "", fmt.Errorf("create downloads cache: %w", err)
 		}
-		sum := sha256.Sum256([]byte(image))
-		parsedURL, err := url.Parse(image)
-		if err != nil {
-			return "", fmt.Errorf("parse image URL: %w", err)
-		}
-		name := path.Base(parsedURL.EscapedPath())
-		if name == "." || name == "/" || name == "" {
-			name = "image.img"
-		}
-		target := filepath.Join(DownloadsDir(stateRoot), hex.EncodeToString(sum[:8])+"-"+name)
+		sum := sha256.Sum256([]byte(image + "\x00" + checksum))
+		target := filepath.Join(DownloadsDir(stateRoot), hex.EncodeToString(sum[:8])+"-image.img")
 		if _, err := os.Stat(target); err == nil {
+			if err := os.Chmod(target, 0o600); err != nil {
+				return "", fmt.Errorf("secure cached image: %w", err)
+			}
 			if err := verifyFileSHA256(target, checksum); err != nil {
 				return "", err
 			}
 			return target, nil
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, image, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsedURL.String(), nil)
 		if err != nil {
-			return "", fmt.Errorf("build image request: %w", err)
+			return "", fmt.Errorf("build image request for %q: invalid URL", displayImage)
 		}
 		req.Header.Set("User-Agent", "crabbox-apple-vz-helper")
-		resp, err := (&http.Client{Timeout: 2 * time.Hour}).Do(req)
+		client := &http.Client{
+			Timeout: 2 * time.Hour,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				req.Header.Del("Referer")
+				if len(via) >= 10 {
+					return fmt.Errorf("stopped after 10 redirects")
+				}
+				req.URL.Scheme = strings.ToLower(req.URL.Scheme)
+				if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+					return fmt.Errorf("unsupported redirect scheme")
+				}
+				if req.URL.Scheme == "http" && !isLoopbackImageHost(req.URL.Hostname()) {
+					return fmt.Errorf("redirect to non-loopback HTTP is not allowed")
+				}
+				return nil
+			},
+		}
+		resp, err := client.Do(req)
 		if err != nil {
-			return "", fmt.Errorf("download image: %w", err)
+			return "", fmt.Errorf("download image %q: %s", displayImage, safeDownloadError(err))
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return "", fmt.Errorf("download image: http %d", resp.StatusCode)
+			return "", fmt.Errorf("download image %q: http %d", displayImage, resp.StatusCode)
 		}
 		file, err := createCacheTemp(target)
 		if err != nil {
@@ -130,7 +151,7 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 		}
 		tmp := file.Name()
 		defer os.Remove(tmp)
-		if err := file.Chmod(0o644); err != nil {
+		if err := file.Chmod(0o600); err != nil {
 			file.Close()
 			return "", fmt.Errorf("set image cache permissions: %w", err)
 		}
@@ -143,7 +164,7 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 			return "", fmt.Errorf("close image cache file: %w", err)
 		}
 		if actual := hex.EncodeToString(hash.Sum(nil)); actual != checksum {
-			return "", fmt.Errorf("verify image %q: sha256 %s does not match expected %s", image, actual, checksum)
+			return "", fmt.Errorf("verify image %q: sha256 %s does not match expected %s", displayImage, actual, checksum)
 		}
 		if err := os.Rename(tmp, target); err != nil {
 			return "", fmt.Errorf("commit image cache file: %w", err)
@@ -174,6 +195,42 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 		}
 	}
 	return path, nil
+}
+
+func safeDownloadError(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "request canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "request timed out"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "request timed out"
+	}
+	return "request failed"
+}
+
+func isLoopbackImageHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func validateRemoteImageURL(image string) (*url.URL, bool, error) {
+	parsed, remote := remoteImageURL(image)
+	if !remote {
+		return nil, false, nil
+	}
+	if parsed == nil || parsed.Host == "" {
+		return nil, true, fmt.Errorf("parse image URL %q: invalid URL", RedactImageRef(image))
+	}
+	if parsed.Scheme == "http" && !isLoopbackImageHost(parsed.Hostname()) {
+		return nil, true, fmt.Errorf("apple-vz remote images must use HTTPS; HTTP is allowed only for loopback development")
+	}
+	return parsed, true, nil
 }
 
 func normalizeExpectedSHA256(value string) (string, error) {
@@ -222,12 +279,15 @@ func ensureRawImage(stateRoot, sourceRef, sourcePath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("stat source image: %w", err)
 	}
-	if err := os.MkdirAll(ImagesDir(stateRoot), 0o755); err != nil {
+	if err := ensurePrivateDir(ImagesDir(stateRoot)); err != nil {
 		return "", fmt.Errorf("create image cache: %w", err)
 	}
 	key := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%d", sourceRef, sourcePath, info.Size(), info.ModTime().UnixNano())))
 	target := filepath.Join(ImagesDir(stateRoot), hex.EncodeToString(key[:])+".raw")
 	if _, err := os.Stat(target); err == nil {
+		if err := os.Chmod(target, 0o600); err != nil {
+			return "", fmt.Errorf("secure cached raw image: %w", err)
+		}
 		return target, nil
 	}
 	tmpFile, err := createCacheTemp(target)
@@ -284,7 +344,7 @@ func convertQCOW2ToRaw(sourcePath, targetPath string) error {
 	if size <= 0 {
 		return fmt.Errorf("qcow2 image size is unavailable")
 	}
-	target, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	target, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create raw image: %w", err)
 	}
@@ -393,7 +453,7 @@ func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workR
 		return fmt.Errorf("write seed user-data: %w", err)
 	}
 	_ = os.Remove(path)
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create seed image: %w", err)
 	}
@@ -742,6 +802,9 @@ func buildVMConfig(inst Instance) (*vz.VirtualMachineConfiguration, []*os.File, 
 	if err != nil {
 		return nil, closers, fmt.Errorf("create EFI variable store: %w", err)
 	}
+	if err := os.Chmod(inst.EFIVariableStorePath, 0o600); err != nil {
+		return nil, closers, fmt.Errorf("secure EFI variable store: %w", err)
+	}
 	bootLoader, err := vz.NewEFIBootLoader(vz.WithEFIVariableStore(efiStore))
 	if err != nil {
 		return nil, closers, fmt.Errorf("create EFI boot loader: %w", err)
@@ -791,10 +854,15 @@ func buildVMConfig(inst Instance) (*vz.VirtualMachineConfiguration, []*os.File, 
 		if err != nil {
 			return nil, closers, fmt.Errorf("open /dev/null: %w", err)
 		}
-		writeFile, err := os.OpenFile(inst.ConsoleLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		writeFile, err := os.OpenFile(inst.ConsoleLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			readFile.Close()
 			return nil, closers, fmt.Errorf("open console log: %w", err)
+		}
+		if err := writeFile.Chmod(0o600); err != nil {
+			readFile.Close()
+			writeFile.Close()
+			return nil, closers, fmt.Errorf("secure console log: %w", err)
 		}
 		closers = append(closers, readFile, writeFile)
 		consoleAttachment, err := vz.NewFileHandleSerialPortAttachment(readFile, writeFile)
@@ -878,8 +946,12 @@ func validateRuntimeConfig(stateRoot, image, expectedSHA256 string) (map[string]
 	if _, err := normalizeExpectedSHA256(expectedSHA256); err != nil {
 		return nil, err
 	}
-	if (strings.HasPrefix(image, "http://") || strings.HasPrefix(image, "https://")) && strings.TrimSpace(expectedSHA256) == "" {
-		return nil, fmt.Errorf("apple-vz remote image %q requires --image-sha256", image)
+	_, remote, err := validateRemoteImageURL(image)
+	if err != nil {
+		return nil, err
+	}
+	if remote && strings.TrimSpace(expectedSHA256) == "" {
+		return nil, fmt.Errorf("apple-vz remote image %q requires a SHA-256 checksum", RedactImageRef(image))
 	}
 	if _, err := exec.LookPath("hdiutil"); err != nil {
 		return nil, fmt.Errorf("hdiutil is required")
@@ -903,7 +975,7 @@ func validateRuntimeConfig(stateRoot, image, expectedSHA256 string) (map[string]
 	}
 	inst := Instance{
 		Name:                 "doctor",
-		Image:                image,
+		Image:                ImageIdentity(image, expectedSHA256),
 		SSHUser:              "crabbox",
 		WorkRoot:             "/work/crabbox",
 		CPUs:                 2,
@@ -928,7 +1000,7 @@ func validateRuntimeConfig(stateRoot, image, expectedSHA256 string) (map[string]
 	}
 	return map[string]string{
 		"state_root": stateRoot,
-		"image":      image,
+		"image":      ImageIdentity(image, expectedSHA256),
 		"runtime":    "virtualization.framework",
 		"host":       "darwin/arm64",
 	}, nil

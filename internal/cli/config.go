@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -988,7 +989,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			cfg.TargetOS = targetLinux
 		}
 		if !cfg.ServerTypeExplicit && cfg.AppleVZ.Image != "" {
-			cfg.ServerType = cfg.AppleVZ.Image
+			cfg.ServerType = redactRemoteURL(cfg.AppleVZ.Image)
 		}
 		return nil
 	}
@@ -4413,6 +4414,22 @@ func expandUserPath(path string) string {
 		}
 	}
 	return path
+}
+
+func redactRemoteURL(value string) string {
+	value = strings.TrimSpace(value)
+	parsed, err := url.Parse(value)
+	if err != nil {
+		lower := strings.ToLower(value)
+		if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+			return "<remote-image>"
+		}
+		return value
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return value
+	}
+	return "<remote-image>"
 }
 
 func serverTypeForClass(class string) string {

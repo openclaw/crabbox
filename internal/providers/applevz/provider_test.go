@@ -1,6 +1,7 @@
 package applevz
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -157,7 +158,7 @@ func TestApplyFlags(t *testing.T) {
 	values := registerFlags(fs, cfg)
 	if err := fs.Parse([]string{
 		"--apple-vz-helper", "/opt/bin/helper",
-		"--apple-vz-image", "https://example.test/custom.img",
+		"--apple-vz-image", "/tmp/custom.img",
 		"--apple-vz-image-sha256", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"--apple-vz-user", "ci",
 		"--apple-vz-work-root", "/work/ci",
@@ -170,7 +171,7 @@ func TestApplyFlags(t *testing.T) {
 	if err := applyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AppleVZ.HelperPath != "/opt/bin/helper" || cfg.AppleVZ.Image != "https://example.test/custom.img" || cfg.AppleVZ.ImageSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || cfg.AppleVZ.User != "ci" || cfg.AppleVZ.WorkRoot != "/work/ci" || cfg.AppleVZ.CPUs != 6 || cfg.AppleVZ.MemoryMiB != 12288 || cfg.AppleVZ.DiskGiB != 64 {
+	if cfg.AppleVZ.HelperPath != "/opt/bin/helper" || cfg.AppleVZ.Image != "/tmp/custom.img" || cfg.AppleVZ.ImageSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || cfg.AppleVZ.User != "ci" || cfg.AppleVZ.WorkRoot != "/work/ci" || cfg.AppleVZ.CPUs != 6 || cfg.AppleVZ.MemoryMiB != 12288 || cfg.AppleVZ.DiskGiB != 64 {
 		t.Fatalf("flags not applied: %#v", cfg.AppleVZ)
 	}
 	if !core.AppleVZImageExplicit(cfg) {
@@ -178,9 +179,58 @@ func TestApplyFlags(t *testing.T) {
 	}
 }
 
+func TestApplyFlagsRejectsRemoteImages(t *testing.T) {
+	for _, image := range []string{
+		"https://example.test/custom.img",
+		"https://alice:secret@example.test/custom.img",
+		"https://example.test/custom.img?token=private",
+		"https://example.test/custom.img#fragment",
+		"https://example.test/bearer-secret/custom.img",
+	} {
+		cfg := core.BaseConfig()
+		cfg.Provider = providerName
+		fs := flag.NewFlagSet("apple-vz", flag.ContinueOnError)
+		values := registerFlags(fs, cfg)
+		if err := fs.Parse([]string{"--apple-vz-image", image}); err != nil {
+			t.Fatal(err)
+		}
+		err := applyFlags(&cfg, fs, values)
+		if err == nil {
+			t.Fatalf("applyFlags accepted remote URL %q", image)
+		}
+		if strings.Contains(err.Error(), "alice") || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private") {
+			t.Fatalf("error exposes remote URL %q: %v", image, err)
+		}
+		if !strings.Contains(err.Error(), "CRABBOX_APPLE_VZ_IMAGE") {
+			t.Fatalf("error=%v, want secret-safe input guidance", err)
+		}
+	}
+}
+
+func TestRegisterFlagsRedactsSignedImageDefault(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.AppleVZ.Image = "https://downloads.example.test/bearer-secret/ubuntu.img?token=private"
+	cfg.AppleVZ.ImageSHA256 = strings.Repeat("a", 64)
+	fs := flag.NewFlagSet("apple-vz", flag.ContinueOnError)
+	var output bytes.Buffer
+	fs.SetOutput(&output)
+	registerFlags(fs, cfg)
+	fs.PrintDefaults()
+
+	got := output.String()
+	for _, secret := range []string{"downloads.example.test", "bearer-secret", "token=private"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("help output exposes signed image component %q: %s", secret, got)
+		}
+	}
+	if !strings.Contains(got, "remote:sha256:aaaaaaaaaaaa") {
+		t.Fatalf("help output missing safe image identity: %s", got)
+	}
+}
+
 func TestDoctorReady(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
-		commandKey("helper", []string{"doctor", "--state-root", "", "--image", "https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-arm64.img", "--image-sha256", "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec"}): {Stdout: mustJSON(t, applevzhelper.DoctorResponse{
+		commandKey("helper", []string{"doctor", "--state-root", "", "--image-request-stdin"}): {Stdout: mustJSON(t, applevzhelper.DoctorResponse{
 			Status:    "ok",
 			Message:   "runtime ready",
 			Instances: 2,
@@ -189,14 +239,180 @@ func TestDoctorReady(t *testing.T) {
 	}}
 	b := testBackend(t, runner)
 	root, _ := b.stateRoot()
-	runner.responses[commandKey("helper", []string{"doctor", "--state-root", root, "--image", b.configForRun().AppleVZ.Image, "--image-sha256", b.configForRun().AppleVZ.ImageSHA256})] = runner.responses[commandKey("helper", []string{"doctor", "--state-root", "", "--image", b.configForRun().AppleVZ.Image, "--image-sha256", b.configForRun().AppleVZ.ImageSHA256})]
-	delete(runner.responses, commandKey("helper", []string{"doctor", "--state-root", "", "--image", b.configForRun().AppleVZ.Image, "--image-sha256", b.configForRun().AppleVZ.ImageSHA256}))
+	runner.responses[commandKey("helper", []string{"doctor", "--state-root", root, "--image-request-stdin"})] = runner.responses[commandKey("helper", []string{"doctor", "--state-root", "", "--image-request-stdin"})]
+	delete(runner.responses, commandKey("helper", []string{"doctor", "--state-root", "", "--image-request-stdin"}))
 	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(result.Message, "leases=2") || !strings.Contains(result.Message, "virtualization.framework") {
 		t.Fatalf("unexpected doctor message: %s", result.Message)
+	}
+}
+
+func TestDoctorPassesSignedImageViaStdinAndRedactsDisplay(t *testing.T) {
+	runner := &recordingRunner{}
+	b := testBackend(t, runner)
+	signedImage := "https://downloads.example.test/bearer-secret/ubuntu.img"
+	t.Setenv("CRABBOX_APPLE_VZ_IMAGE", signedImage)
+	b.cfg.AppleVZ.Image = signedImage
+	b.cfg.AppleVZ.ImageSHA256 = strings.Repeat("a", 64)
+	applyDefaults(&b.cfg)
+
+	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if req.Name != "helper" || len(req.Args) == 0 || req.Args[0] != "doctor" {
+			return core.LocalCommandResult{}, nil, false
+		}
+		if args := strings.Join(req.Args, " "); strings.Contains(args, "secret") || strings.Contains(args, "private") {
+			t.Fatalf("helper argv exposes signed image: %s", args)
+		}
+		for _, entry := range req.Env {
+			if strings.HasPrefix(entry, "CRABBOX_APPLE_VZ_IMAGE=") {
+				t.Fatalf("helper environment exposes signed image")
+			}
+		}
+		data, err := io.ReadAll(req.Stdin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var imageRequest applevzhelper.ImageRequest
+		if err := json.Unmarshal(data, &imageRequest); err != nil {
+			t.Fatal(err)
+		}
+		if imageRequest.Image != signedImage || imageRequest.SHA256 != strings.Repeat("a", 64) {
+			t.Fatalf("image request=%+v", imageRequest)
+		}
+		return core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.DoctorResponse{
+			Status:  "ok",
+			Message: "runtime ready",
+			Details: map[string]string{"image": signedImage},
+		})}, nil, true
+	}
+
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.Message, "secret") || strings.Contains(result.Message, "private") || strings.Contains(result.Message, "alice") {
+		t.Fatalf("doctor message exposes signed image: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "remote:sha256:aaaaaaaaaaaa") {
+		t.Fatalf("doctor message missing safe image identity: %s", result.Message)
+	}
+	for _, check := range result.Checks {
+		for key, value := range check.Details {
+			if strings.Contains(value, "secret") || strings.Contains(value, "private") || strings.Contains(value, "alice") {
+				t.Fatalf("doctor detail %s exposes signed image: %s", key, value)
+			}
+		}
+	}
+	if got := (Provider{}).ServerTypeForConfig(b.cfg); got != "remote:sha256:aaaaaaaaaaaa" {
+		t.Fatalf("ServerTypeForConfig=%q", got)
+	}
+}
+
+func TestAcquireRedactsSignedImageFromLogsAndLeaseMetadata(t *testing.T) {
+	runner := &recordingRunner{}
+	b := testBackend(t, runner)
+	signedImage := "https://downloads.example.test/bearer-secret/ubuntu.img"
+	b.cfg.AppleVZ.Image = signedImage
+	b.cfg.AppleVZ.ImageSHA256 = strings.Repeat("a", 64)
+	applyDefaults(&b.cfg)
+	var stderr bytes.Buffer
+	b.rt.Stderr = &stderr
+
+	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if req.Name != "helper" || len(req.Args) == 0 {
+			return core.LocalCommandResult{}, nil, false
+		}
+		switch req.Args[0] {
+		case "list":
+			return core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.ListResponse{})}, nil, true
+		case "start":
+			if args := strings.Join(req.Args, " "); strings.Contains(args, "secret") || strings.Contains(args, "private") {
+				t.Fatalf("helper argv exposes signed image: %s", args)
+			}
+			data, err := io.ReadAll(req.Stdin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var imageRequest applevzhelper.ImageRequest
+			if err := json.Unmarshal(data, &imageRequest); err != nil {
+				t.Fatal(err)
+			}
+			if imageRequest.Image != signedImage {
+				t.Fatalf("image request=%+v", imageRequest)
+			}
+			inst := applevzhelper.Instance{
+				Name:      argumentValue(req.Args, "--name"),
+				LeaseID:   argumentValue(req.Args, "--lease-id"),
+				Slug:      argumentValue(req.Args, "--slug"),
+				Status:    applevzhelper.StatusRunning,
+				Image:     applevzhelper.ImageIdentity(signedImage, b.cfg.AppleVZ.ImageSHA256),
+				SSHUser:   argumentValue(req.Args, "--ssh-user"),
+				WorkRoot:  argumentValue(req.Args, "--work-root"),
+				SSHHost:   "127.0.0.1",
+				SSHPort:   43022,
+				CreatedAt: time.Now().UTC(),
+				UpdatedAt: time.Now().UTC(),
+			}
+			return core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.StartResponse{Instance: inst})}, nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:          core.Repo{Root: t.TempDir()},
+		RequestedSlug: "signed-image",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		core.RemoveLeaseClaim(lease.LeaseID)
+		core.RemoveStoredTestboxKey(lease.LeaseID)
+	})
+	for label, value := range map[string]string{
+		"stderr":      stderr.String(),
+		"image":       lease.Server.Labels["image"],
+		"server_type": lease.Server.ServerType.Name,
+	} {
+		if strings.Contains(value, "secret") || strings.Contains(value, "private") || strings.Contains(value, "alice") {
+			t.Fatalf("%s exposes signed image: %s", label, value)
+		}
+	}
+	if got := lease.Server.ServerType.Name; got != "remote:sha256:aaaaaaaaaaaa" {
+		t.Fatalf("server type=%q, want safe image identity", got)
+	}
+	if got := lease.Server.Labels["server_type"]; got != lease.Server.ServerType.Name {
+		t.Fatalf("server_type label=%q, server type=%q", got, lease.Server.ServerType.Name)
+	}
+}
+
+func TestTouchPreservesSafeServerTypeIdentity(t *testing.T) {
+	b := testBackend(t, &recordingRunner{})
+	identity := "remote:sha256:aaaaaaaaaaaa"
+	server := core.Server{
+		Labels: map[string]string{
+			"image":       identity,
+			"server_type": identity,
+		},
+	}
+	server.ServerType.Name = identity
+	lease := core.LeaseTarget{
+		Server: server,
+	}
+
+	server, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := server.Labels["server_type"]; got != identity {
+		t.Fatalf("server_type label=%q, want %q", got, identity)
+	}
+	if got := server.ServerType.Name; got != identity {
+		t.Fatalf("server type=%q, want %q", got, identity)
 	}
 }
 

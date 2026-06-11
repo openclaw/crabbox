@@ -4,6 +4,7 @@ import (
 	"flag"
 	"strings"
 
+	"github.com/openclaw/crabbox/internal/applevzhelper"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
@@ -21,7 +22,7 @@ type flagValues struct {
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
 		HelperPath:  fs.String("apple-vz-helper", defaults.AppleVZ.HelperPath, "apple-vz helper binary path"),
-		Image:       fs.String("apple-vz-image", defaults.AppleVZ.Image, "apple-vz source image path or URL"),
+		Image:       fs.String("apple-vz-image", applevzhelper.ImageIdentity(defaults.AppleVZ.Image, defaults.AppleVZ.ImageSHA256), "apple-vz local source image path"),
 		ImageSHA256: fs.String("apple-vz-image-sha256", defaults.AppleVZ.ImageSHA256, "expected SHA-256 for apple-vz source image downloads"),
 		User:        fs.String("apple-vz-user", defaults.AppleVZ.User, "SSH user created inside apple-vz leases"),
 		WorkRoot:    fs.String("apple-vz-work-root", defaults.AppleVZ.WorkRoot, "remote Crabbox work root inside apple-vz leases"),
@@ -40,7 +41,11 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		cfg.AppleVZ.HelperPath = strings.TrimSpace(*v.HelperPath)
 	}
 	if core.FlagWasSet(fs, "apple-vz-image") {
-		cfg.AppleVZ.Image = strings.TrimSpace(*v.Image)
+		image := strings.TrimSpace(*v.Image)
+		if applevzhelper.IsRemoteImageRef(image) {
+			return exit(2, "--apple-vz-image accepts local paths only; use CRABBOX_APPLE_VZ_IMAGE or configuration for remote URLs")
+		}
+		cfg.AppleVZ.Image = image
 		cfg.AppleVZ.ImageSHA256 = ""
 		core.MarkAppleVZImageExplicit(cfg)
 	}

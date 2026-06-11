@@ -1,7 +1,9 @@
 package applevzhelper
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -43,5 +45,65 @@ func TestProtocolPathsAndStatusHelpers(t *testing.T) {
 	}
 	if IsRunningStatus(StatusStopped) || IsRunningStatus("") {
 		t.Fatal("stopped and empty should not be active states")
+	}
+}
+
+func TestRedactImageRefRemovesRemoteCredentials(t *testing.T) {
+	for _, input := range []string{
+		"https://alice:secret@example.test/images/ubuntu.img?token=private#fragment",
+		"HTTPS://alice:secret@example.test/images/ubuntu.img?token=private#fragment",
+		"https://downloads.example.test/bearer-token/ubuntu.img",
+	} {
+		got := RedactImageRef(input)
+		if got != "<remote-image>" {
+			t.Fatalf("RedactImageRef(%q)=%q", input, got)
+		}
+	}
+	if got := RedactImageRef("/tmp/ubuntu.img"); got != "/tmp/ubuntu.img" {
+		t.Fatalf("local RedactImageRef=%q", got)
+	}
+	if got := RedactImageRef("HTTPS://example.test/%zz?token=private"); got != "<remote-image>" {
+		t.Fatalf("invalid remote RedactImageRef=%q", got)
+	}
+}
+
+func TestImageIdentityUsesRemoteChecksum(t *testing.T) {
+	checksum := strings.Repeat("a", 64)
+	if got := ImageIdentity("https://downloads.example.test/bearer-token/ubuntu.img", checksum); got != "remote:sha256:aaaaaaaaaaaa" {
+		t.Fatalf("ImageIdentity=%q", got)
+	}
+	if got := ImageIdentity("https://example.test/image.img", "invalid"); got != "<remote-image>" {
+		t.Fatalf("invalid checksum ImageIdentity=%q", got)
+	}
+	if got := ImageIdentity("/tmp/ubuntu.img", checksum); got != "/tmp/ubuntu.img" {
+		t.Fatalf("local ImageIdentity=%q", got)
+	}
+}
+
+func TestIsRemoteImageRef(t *testing.T) {
+	for _, input := range []string{"https://example.test/image.img", "HTTP://example.test/image.img"} {
+		if !IsRemoteImageRef(input) {
+			t.Fatalf("IsRemoteImageRef(%q)=false", input)
+		}
+	}
+	if IsRemoteImageRef("/tmp/image.img") {
+		t.Fatal("local path classified as remote")
+	}
+}
+
+func TestEnsurePrivateDirTightensExistingPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePrivateDir(path); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("private dir mode=%#o, want 0700", got)
 	}
 }

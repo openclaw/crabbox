@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `provider: apple-vz` for full ARM64 Ubuntu VMs through Apple's `Virtualization.framework`, including verified cloud images, loopback VSOCK SSH, retained leases, native helper packaging, failure rollback, and live lifecycle coverage. Thanks @coygeek.
+- Added `provider: apple-vz` for full ARM64 Ubuntu VMs through Apple's `Virtualization.framework`, including verified cloud images, secret-safe signed URL handling, loopback VSOCK SSH, retained leases, native helper packaging, failure rollback, and live lifecycle coverage. Thanks @coygeek.
 
 ### Fixed
 

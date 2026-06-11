@@ -38,7 +38,7 @@ const (
 	startupAuthorizationByte = 0xa5
 )
 
-func RunCLI(args []string, stdout, stderr io.Writer) int {
+func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: crabbox-apple-vz-helper <doctor|start|serve|list|inspect|delete>")
 		return 2
@@ -46,9 +46,9 @@ func RunCLI(args []string, stdout, stderr io.Writer) int {
 	var err error
 	switch args[0] {
 	case "doctor":
-		err = runDoctor(args[1:], stdout, stderr)
+		err = runDoctor(args[1:], stdin, stdout, stderr)
 	case "start":
-		err = runStart(args[1:], stdout, stderr)
+		err = runStart(args[1:], stdin, stdout, stderr)
 	case "serve":
 		err = runServeCommand(args[1:], stdout, stderr)
 	case "list":
@@ -68,13 +68,16 @@ func RunCLI(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runDoctor(args []string, stdout, stderr io.Writer) error {
+func runDoctor(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	stateRoot := fs.String("state-root", "", "apple-vz state root")
-	image := fs.String("image", "", "source image")
-	imageSHA256 := fs.String("image-sha256", "", "expected source image SHA-256")
+	imageRequestStdin := fs.Bool("image-request-stdin", false, "read source image request as JSON from stdin")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	imageRequest, err := readImageRequest(stdin, *imageRequestStdin)
+	if err != nil {
 		return err
 	}
 	root, err := normalizeStateRoot(*stateRoot)
@@ -85,7 +88,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	details, runtimeErr := validateRuntimeConfig(root, strings.TrimSpace(*image), strings.TrimSpace(*imageSHA256))
+	details, runtimeErr := validateRuntimeConfig(root, imageRequest.Image, imageRequest.SHA256)
 	if runtimeErr != nil {
 		if err := json.NewEncoder(stdout).Encode(DoctorResponse{
 			Status:    "error",
@@ -105,15 +108,14 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 	})
 }
 
-func runStart(args []string, stdout, stderr io.Writer) error {
+func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	stateRoot := fs.String("state-root", "", "apple-vz state root")
 	name := fs.String("name", "", "instance name")
 	leaseID := fs.String("lease-id", "", "lease id")
 	slug := fs.String("slug", "", "lease slug")
-	image := fs.String("image", "", "source image")
-	imageSHA256 := fs.String("image-sha256", "", "expected source image SHA-256")
+	imageRequestStdin := fs.Bool("image-request-stdin", false, "read source image request as JSON from stdin")
 	sshUser := fs.String("ssh-user", "", "ssh user")
 	sshPublicKey := fs.String("ssh-public-key", "", "ssh public key")
 	workRoot := fs.String("work-root", "", "work root")
@@ -124,15 +126,16 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	imageRequest, err := readImageRequest(stdin, *imageRequestStdin)
+	if err != nil {
+		return err
+	}
 	root, err := normalizeStateRoot(*stateRoot)
 	if err != nil {
 		return err
 	}
 	if err := validateInstanceName(*name); err != nil {
 		return err
-	}
-	if strings.TrimSpace(*image) == "" {
-		return fmt.Errorf("image is required")
 	}
 	if strings.TrimSpace(*sshUser) == "" {
 		return fmt.Errorf("ssh user is required")
@@ -159,7 +162,7 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("remove stale instance directory: %w", err)
 		}
 	}
-	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
+	if err := ensurePrivateDir(instanceRoot); err != nil {
 		return fmt.Errorf("create instance root: %w", err)
 	}
 	now := time.Now().UTC()
@@ -168,7 +171,7 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 		LeaseID:   strings.TrimSpace(*leaseID),
 		Slug:      strings.TrimSpace(*slug),
 		Status:    StatusStarting,
-		Image:     strings.TrimSpace(*image),
+		Image:     ImageIdentity(imageRequest.Image, imageRequest.SHA256),
 		SSHUser:   strings.TrimSpace(*sshUser),
 		WorkRoot:  strings.TrimSpace(*workRoot),
 		CPUs:      *cpus,
@@ -180,7 +183,8 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 	inst, err = prepareInstanceAssetsFunc(context.Background(), startConfig{
 		StateRoot:    root,
 		Instance:     inst,
-		ImageSHA256:  strings.TrimSpace(*imageSHA256),
+		Image:        imageRequest.Image,
+		ImageSHA256:  imageRequest.SHA256,
 		SSHPublicKey: strings.TrimSpace(*sshPublicKey),
 	})
 	if err != nil {
@@ -192,10 +196,15 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	logPath := HelperLogPath(root, *name)
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		_ = os.RemoveAll(instanceRoot)
 		return fmt.Errorf("open helper log: %w", err)
+	}
+	if err := logFile.Chmod(0o600); err != nil {
+		logFile.Close()
+		_ = os.RemoveAll(instanceRoot)
+		return fmt.Errorf("secure helper log: %w", err)
 	}
 	defer logFile.Close()
 	exe, err := helperExecutable()
@@ -273,6 +282,25 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 		case <-pollTicker.C:
 		}
 	}
+}
+
+func readImageRequest(stdin io.Reader, enabled bool) (ImageRequest, error) {
+	if !enabled {
+		return ImageRequest{}, fmt.Errorf("--image-request-stdin is required")
+	}
+	if stdin == nil {
+		return ImageRequest{}, fmt.Errorf("image request stdin is unavailable")
+	}
+	var request ImageRequest
+	if err := json.NewDecoder(io.LimitReader(stdin, 64*1024)).Decode(&request); err != nil {
+		return ImageRequest{}, fmt.Errorf("decode image request from stdin: %w", err)
+	}
+	request.Image = strings.TrimSpace(request.Image)
+	request.SHA256 = strings.TrimSpace(request.SHA256)
+	if request.Image == "" {
+		return ImageRequest{}, fmt.Errorf("image is required")
+	}
+	return request, nil
 }
 
 func authorizeStartedHelper(stateRoot, name string, inst Instance, writer io.Writer) (Instance, error) {
@@ -586,7 +614,7 @@ func normalizeStateRoot(root string) (string, error) {
 		}
 		root = abs
 	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	if err := ensurePrivateDir(root); err != nil {
 		return "", fmt.Errorf("create state root: %w", err)
 	}
 	return root, nil
@@ -604,7 +632,7 @@ func validateInstanceName(name string) error {
 }
 
 func writeMetadata(path string, inst Instance) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("create metadata directory: %w", err)
 	}
 	inst.UpdatedAt = inst.UpdatedAt.UTC()
@@ -616,8 +644,11 @@ func writeMetadata(path string, inst Instance) error {
 		return fmt.Errorf("encode metadata: %w", err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write metadata: %w", err)
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		return fmt.Errorf("secure metadata: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("commit metadata: %w", err)

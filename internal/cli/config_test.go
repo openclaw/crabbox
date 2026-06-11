@@ -526,6 +526,28 @@ func TestAppleVZConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestAppleVZConfigDefaultsRedactSignedImageServerType(t *testing.T) {
+	for _, image := range []string{
+		"https://alice:secret@example.test/images/ubuntu.img?token=private#fragment",
+		"HTTPS://alice:secret@example.test/images/ubuntu.img?token=private#fragment",
+	} {
+		cfg := baseConfig()
+		cfg.Provider = "apple-vz"
+		cfg.AppleVZ.Image = image
+		cfg.AppleVZ.ImageSHA256 = strings.Repeat("a", 64)
+
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.ServerType != "<remote-image>" {
+			t.Fatalf("ServerType=%q", cfg.ServerType)
+		}
+		if !strings.Contains(cfg.AppleVZ.Image, "token=private") {
+			t.Fatalf("AppleVZ.Image should retain the request URL in memory: %q", cfg.AppleVZ.Image)
+		}
+	}
+}
+
 func TestMultipassConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
