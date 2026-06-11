@@ -67,6 +67,11 @@ func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name st
 	}
 	if err := client.UploadArchive(ctx, name, workspace, struct{ io.Reader }{archive}); err != nil {
 		fmt.Fprintf(b.rt.Stderr, "warning: islo archive API upload failed; falling back to exec upload: %v\n", err)
+		if user != "" {
+			if ownershipErr := b.restoreWorkspaceOwnership(ctx, client, name, workspace, user); ownershipErr != nil {
+				return nil, 0, ownershipErr
+			}
+		}
 		if _, seekErr := archive.Seek(0, 0); seekErr != nil {
 			return nil, 0, fmt.Errorf("islo rewind archive for fallback: %w", seekErr)
 		}

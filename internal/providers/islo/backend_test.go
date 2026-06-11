@@ -954,12 +954,27 @@ func TestIsloSyncWorkspaceFallsBackToExecUpload(t *testing.T) {
 	}
 	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", RunRequest{
 		Repo: Repo{Root: root, Name: "repo"},
-	}, "")
+	}, isloWorkloadUser)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !client.commandContains("base64 -d") || !client.commandContains("tar -xzf") {
 		t.Fatalf("fallback commands=%#v", client.prepareCommands)
+	}
+	chownIndex, fallbackIndex := -1, -1
+	for i, command := range client.prepareCommands {
+		if strings.Contains(command, "chown -R") {
+			chownIndex = i
+		}
+		if fallbackIndex < 0 && strings.Contains(command, "base64 -d") {
+			fallbackIndex = i
+		}
+	}
+	if chownIndex < 0 || fallbackIndex < 0 || chownIndex > fallbackIndex {
+		t.Fatalf("ownership repair must precede fallback extraction: %#v", client.prepareCommands)
+	}
+	if client.execRequests[chownIndex].GetUser() == nil || *client.execRequests[chownIndex].GetUser() != isloAdminUser {
+		t.Fatalf("ownership repair user=%v want %q", client.execRequests[chownIndex].GetUser(), isloAdminUser)
 	}
 }
 
