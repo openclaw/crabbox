@@ -28,6 +28,7 @@ const (
 	managedHelperDigestFileName = applevzhelper.ManagedHelperName + ".digests.json"
 	diagnosticTailBytes         = 8 * 1024
 	rollbackTimeout             = 30 * time.Second
+	helperCancelGracePeriod     = 30 * time.Second
 )
 
 var hostGOOS, hostGOARCH = runtime.GOOS, runtime.GOARCH
@@ -689,10 +690,11 @@ func (b *backend) runHelperJSONInput(ctx context.Context, helperPath string, arg
 		stdin = strings.NewReader(string(data))
 	}
 	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
-		Name:  helperPath,
-		Args:  args,
-		Env:   appleVZHelperEnv(),
-		Stdin: stdin,
+		Name:              helperPath,
+		Args:              args,
+		Env:               appleVZHelperEnv(),
+		Stdin:             stdin,
+		CancelGracePeriod: helperCancelGracePeriod,
 	})
 	if err != nil {
 		return exit(2, "apple-vz helper %s failed: %s", strings.Join(args, " "), localCommandDetail(result, err))

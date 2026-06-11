@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -323,6 +325,7 @@ type LocalCommandRequest struct {
 	Stdout               io.Writer
 	Stderr               io.Writer
 	DisableOutputCapture bool
+	CancelGracePeriod    time.Duration
 }
 
 type LocalCommandResult struct {
@@ -367,6 +370,16 @@ type execCommandRunner struct{}
 
 func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	cmd := exec.CommandContext(ctx, req.Name, req.Args...)
+	if req.CancelGracePeriod > 0 {
+		cmd.Cancel = func() error {
+			err := cmd.Process.Signal(os.Interrupt)
+			if errors.Is(err, os.ErrProcessDone) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		cmd.WaitDelay = req.CancelGracePeriod
+	}
 	cmd.Env = req.Env
 	cmd.Dir = req.Dir
 	cmd.Stdin = req.Stdin

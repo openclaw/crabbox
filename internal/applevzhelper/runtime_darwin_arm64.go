@@ -39,11 +39,14 @@ func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, erro
 	if err := ensurePrivateDir(InstanceDir(cfg.StateRoot, inst.Name)); err != nil {
 		return Instance{}, fmt.Errorf("create instance directory: %w", err)
 	}
+	if err := cleanupImageCacheTemps(cfg.StateRoot); err != nil {
+		return Instance{}, err
+	}
 	sourcePath, err := resolveSourceImage(ctx, cfg.StateRoot, cfg.Image, cfg.ImageSHA256)
 	if err != nil {
 		return Instance{}, err
 	}
-	rawPath, err := ensureRawImage(cfg.StateRoot, cfg.Image, sourcePath)
+	rawPath, err := ensureRawImage(ctx, cfg.StateRoot, cfg.Image, sourcePath, cfg.ImageSHA256)
 	if err != nil {
 		return Instance{}, err
 	}
@@ -52,7 +55,7 @@ func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, erro
 	inst.SeedPath = SeedPath(cfg.StateRoot, inst.Name)
 	inst.EFIVariableStorePath = EFIPath(cfg.StateRoot, inst.Name)
 	inst.ConsoleLogPath = ConsoleLogPath(cfg.StateRoot, inst.Name)
-	if err := cloneOrCopyFile(rawPath, inst.DiskPath); err != nil {
+	if err := cloneOrCopyFile(ctx, rawPath, inst.DiskPath); err != nil {
 		return Instance{}, fmt.Errorf("clone base disk: %w", err)
 	}
 	if err := os.Chmod(inst.DiskPath, 0o600); err != nil {
@@ -150,6 +153,7 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 			return "", fmt.Errorf("create image cache file: %w", err)
 		}
 		tmp := file.Name()
+		defer file.Close()
 		defer os.Remove(tmp)
 		if err := file.Chmod(0o600); err != nil {
 			file.Close()
@@ -160,14 +164,17 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 			file.Close()
 			return "", fmt.Errorf("write image cache file: %w", err)
 		}
-		if err := file.Close(); err != nil {
-			return "", fmt.Errorf("close image cache file: %w", err)
+		if err := file.Sync(); err != nil {
+			return "", fmt.Errorf("sync image cache file: %w", err)
 		}
 		if actual := hex.EncodeToString(hash.Sum(nil)); actual != checksum {
 			return "", fmt.Errorf("verify image %q: sha256 %s does not match expected %s", displayImage, actual, checksum)
 		}
 		if err := os.Rename(tmp, target); err != nil {
 			return "", fmt.Errorf("commit image cache file: %w", err)
+		}
+		if err := file.Close(); err != nil {
+			return "", fmt.Errorf("close image cache file: %w", err)
 		}
 		return target, nil
 	}
@@ -267,7 +274,7 @@ func verifyFileSHA256(path, expected string) error {
 	return nil
 }
 
-func ensureRawImage(stateRoot, sourceRef, sourcePath string) (string, error) {
+func ensureRawImage(ctx context.Context, stateRoot, sourceRef, sourcePath, expectedSHA256 string) (string, error) {
 	qcow2, err := isQCOW2(sourcePath)
 	if err != nil {
 		return "", err
@@ -282,7 +289,11 @@ func ensureRawImage(stateRoot, sourceRef, sourcePath string) (string, error) {
 	if err := ensurePrivateDir(ImagesDir(stateRoot)); err != nil {
 		return "", fmt.Errorf("create image cache: %w", err)
 	}
-	key := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%d", sourceRef, sourcePath, info.Size(), info.ModTime().UnixNano())))
+	checksum, err := normalizeExpectedSHA256(expectedSHA256)
+	if err != nil {
+		return "", err
+	}
+	key := rawImageCacheKey(sourceRef, sourcePath, checksum, info)
 	target := filepath.Join(ImagesDir(stateRoot), hex.EncodeToString(key[:])+".raw")
 	if _, err := os.Stat(target); err == nil {
 		if err := os.Chmod(target, 0o600); err != nil {
@@ -295,22 +306,162 @@ func ensureRawImage(stateRoot, sourceRef, sourcePath string) (string, error) {
 		return "", fmt.Errorf("create raw image staging file: %w", err)
 	}
 	tmp := tmpFile.Name()
-	if err := tmpFile.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return "", fmt.Errorf("close raw image staging file: %w", err)
-	}
+	defer tmpFile.Close()
 	defer os.Remove(tmp)
-	if err := convertQCOW2ToRaw(sourcePath, tmp); err != nil {
+	if err := convertQCOW2ToRaw(ctx, sourcePath, tmpFile); err != nil {
 		return "", err
 	}
 	if err := os.Rename(tmp, target); err != nil {
 		return "", fmt.Errorf("commit raw image: %w", err)
 	}
+	if err := tmpFile.Close(); err != nil {
+		return "", fmt.Errorf("close raw image: %w", err)
+	}
 	return target, nil
 }
 
+func rawImageCacheKey(sourceRef, sourcePath, checksum string, info os.FileInfo) [sha256.Size]byte {
+	return sha256.Sum256([]byte(fmt.Sprintf(
+		"%s|%s|%s|%d|%d",
+		sourceRef,
+		sourcePath,
+		checksum,
+		info.Size(),
+		info.ModTime().UnixNano(),
+	)))
+}
+
 func createCacheTemp(target string) (*os.File, error) {
-	return os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".tmp-*")
+	dir := filepath.Dir(target)
+	dirLock, err := lockCacheDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.CreateTemp(dir, "."+filepath.Base(target)+".tmp-*")
+	if err != nil {
+		return nil, errors.Join(err, unlockCacheDir(dirLock))
+	}
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		_ = os.Remove(file.Name())
+		return nil, errors.Join(err, unlockCacheDir(dirLock))
+	}
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		file.Close()
+		_ = os.Remove(file.Name())
+		return nil, errors.Join(err, unlockCacheDir(dirLock))
+	}
+	if err := unlockCacheDir(dirLock); err != nil {
+		file.Close()
+		_ = os.Remove(file.Name())
+		return nil, err
+	}
+	return file, nil
+}
+
+func cleanupImageCacheTemps(stateRoot string) error {
+	for _, cacheDir := range []struct {
+		label string
+		path  string
+	}{
+		{label: "downloads", path: DownloadsDir(stateRoot)},
+		{label: "image", path: ImagesDir(stateRoot)},
+	} {
+		if err := ensurePrivateDir(cacheDir.path); err != nil {
+			return fmt.Errorf("create %s cache: %w", cacheDir.label, err)
+		}
+		if err := cleanupAbandonedCacheTemps(cacheDir.path); err != nil {
+			return fmt.Errorf("clean %s cache: %w", cacheDir.label, err)
+		}
+	}
+	return nil
+}
+
+func lockCacheDir(dir string) (*os.File, error) {
+	path := filepath.Join(dir, ".staging.lock")
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Fchmod(fd, 0o600); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}
+
+func unlockCacheDir(file *os.File) error {
+	if file == nil {
+		return nil
+	}
+	unlockErr := unix.Flock(int(file.Fd()), unix.LOCK_UN)
+	closeErr := file.Close()
+	return errors.Join(unlockErr, closeErr)
+}
+
+func cleanupAbandonedCacheTemps(dir string) (returnErr error) {
+	dirLock, err := lockCacheDir(dir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, unlockCacheDir(dirLock))
+	}()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, ".") || !strings.Contains(name, ".tmp-") {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ELOOP) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			_ = unix.Close(fd)
+			continue
+		} else if err != nil {
+			_ = unix.Close(fd)
+			return err
+		}
+		removeErr := os.Remove(path)
+		unlockErr := unix.Flock(fd, unix.LOCK_UN)
+		closeErr := unix.Close(fd)
+		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return removeErr
+		}
+		if unlockErr != nil {
+			return unlockErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return nil
 }
 
 func isQCOW2(path string) (bool, error) {
@@ -326,7 +477,7 @@ func isQCOW2(path string) (bool, error) {
 	return bytes.Equal(header, []byte{'Q', 'F', 'I', 0xfb}), nil
 }
 
-func convertQCOW2ToRaw(sourcePath, targetPath string) error {
+func convertQCOW2ToRaw(ctx context.Context, sourcePath string, target *os.File) error {
 	source, err := os.Open(sourcePath)
 	if err != nil {
 		return fmt.Errorf("open qcow2 image: %w", err)
@@ -344,16 +495,14 @@ func convertQCOW2ToRaw(sourcePath, targetPath string) error {
 	if size <= 0 {
 		return fmt.Errorf("qcow2 image size is unavailable")
 	}
-	target, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("create raw image: %w", err)
-	}
-	defer target.Close()
 	if err := target.Truncate(size); err != nil {
 		return fmt.Errorf("size raw image: %w", err)
 	}
 	buf := make([]byte, 4*1024*1024)
 	for offset := int64(0); offset < size; {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		extent, err := image.Extent(offset, size-offset)
 		if err != nil {
 			return fmt.Errorf("read qcow2 extent at %d: %w", offset, err)
@@ -367,16 +516,16 @@ func convertQCOW2ToRaw(sourcePath, targetPath string) error {
 			start = extent.Start
 		}
 		if extent.Allocated && !extent.Zero {
-			if err := copyReaderAtRange(target, image, start, end-start, buf); err != nil {
+			if err := copyReaderAtRange(ctx, target, image, start, end-start, buf); err != nil {
 				return fmt.Errorf("copy qcow2 extent at %d: %w", start, err)
 			}
 		}
 		offset = end
 	}
-	return nil
+	return target.Sync()
 }
 
-func cloneOrCopyFile(sourcePath, targetPath string) error {
+func cloneOrCopyFile(ctx context.Context, sourcePath, targetPath string) error {
 	_ = os.Remove(targetPath)
 	if err := unix.Clonefile(sourcePath, targetPath, 0); err == nil {
 		return nil
@@ -401,11 +550,14 @@ func cloneOrCopyFile(sourcePath, targetPath string) error {
 		return fmt.Errorf("size target file: %w", err)
 	}
 	buf := make([]byte, 4*1024*1024)
-	return copyReaderAtRange(target, source, 0, info.Size(), buf)
+	return copyReaderAtRange(ctx, target, source, 0, info.Size(), buf)
 }
 
-func copyReaderAtRange(target *os.File, source io.ReaderAt, offset, length int64, buf []byte) error {
+func copyReaderAtRange(ctx context.Context, target *os.File, source io.ReaderAt, offset, length int64, buf []byte) error {
 	for copied := int64(0); copied < length; {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		chunk := int64(len(buf))
 		if remaining := length - copied; remaining < chunk {
 			chunk = remaining
@@ -415,9 +567,6 @@ func copyReaderAtRange(target *os.File, source io.ReaderAt, offset, length int64
 			return err
 		}
 		if n == 0 {
-			if errors.Is(err, io.EOF) {
-				break
-			}
 			return io.ErrUnexpectedEOF
 		}
 		part := buf[:n]
@@ -427,6 +576,9 @@ func copyReaderAtRange(target *os.File, source io.ReaderAt, offset, length int64
 			}
 		}
 		copied += int64(n)
+		if errors.Is(err, io.EOF) && copied < length {
+			return io.ErrUnexpectedEOF
+		}
 	}
 	return nil
 }
@@ -464,7 +616,9 @@ func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workR
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("create seed image: %w", err)
 	}
-	attachOut, err := exec.CommandContext(ctx, "hdiutil", "attach", "-imagekey", "diskimage-class=CRawDiskImage", "-nomount", path).CombinedOutput()
+	// Register the attached device before honoring cancellation so cleanup can
+	// always detach it.
+	attachOut, err := exec.Command("hdiutil", "attach", "-imagekey", "diskimage-class=CRawDiskImage", "-nomount", path).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("attach seed image: %w: %s", err, strings.TrimSpace(string(attachOut)))
 	}
@@ -478,6 +632,9 @@ func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workR
 			_, _ = exec.Command("hdiutil", "detach", device).CombinedOutput()
 		}
 	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if out, err := exec.CommandContext(ctx, "newfs_msdos", "-F", "16", "-v", "cidata", device).CombinedOutput(); err != nil {
 		return fmt.Errorf("format seed image: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -485,7 +642,9 @@ func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workR
 	if err := os.MkdirAll(mountDir, 0o755); err != nil {
 		return fmt.Errorf("create seed mount dir: %w", err)
 	}
-	if out, err := exec.CommandContext(ctx, "mount", "-t", "msdos", device, mountDir).CombinedOutput(); err != nil {
+	// As with attachment, establish the mounted state before honoring
+	// cancellation so the deferred unmount cannot be skipped.
+	if out, err := exec.Command("mount", "-t", "msdos", device, mountDir).CombinedOutput(); err != nil {
 		return fmt.Errorf("mount seed image: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	mounted := true
@@ -494,6 +653,9 @@ func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workR
 			_, _ = exec.Command("umount", mountDir).CombinedOutput()
 		}
 	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	for _, name := range []string{"meta-data", "user-data"} {
 		if err := copyPlainFile(filepath.Join(tmpDir, name), filepath.Join(mountDir, name), 0o644); err != nil {
 			return fmt.Errorf("populate seed image: %w", err)

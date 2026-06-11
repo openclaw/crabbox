@@ -155,6 +155,8 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if *readyTimeout <= 0 {
 		return fmt.Errorf("ready-timeout must be positive")
 	}
+	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
 	instanceRoot := InstanceDir(root, *name)
 	if existing, err := readMetadata(MetadataPath(root, *name)); err == nil {
 		existing = normalizeInstance(existing)
@@ -183,7 +185,7 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	inst, err = prepareInstanceAssetsFunc(context.Background(), startConfig{
+	inst, err = prepareInstanceAssetsFunc(ctx, startConfig{
 		StateRoot:    root,
 		Instance:     inst,
 		Image:        imageRequest.Image,
@@ -191,6 +193,10 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		SSHPublicKey: strings.TrimSpace(*sshPublicKey),
 	})
 	if err != nil {
+		_ = os.RemoveAll(instanceRoot)
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		_ = os.RemoveAll(instanceRoot)
 		return err
 	}
@@ -283,6 +289,10 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			)
 			_ = os.RemoveAll(instanceRoot)
 			return failure
+		case <-ctx.Done():
+			terminateStartedHelper(cmd.Process, inst.PID)
+			_ = os.RemoveAll(instanceRoot)
+			return ctx.Err()
 		case <-pollTicker.C:
 		}
 	}

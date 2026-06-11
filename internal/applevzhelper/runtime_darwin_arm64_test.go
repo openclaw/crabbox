@@ -7,6 +7,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -399,5 +401,130 @@ func TestCreateCacheTempUsesUniqueSiblingFiles(t *testing.T) {
 		if !strings.HasPrefix(filepath.Base(path), ".ubuntu.raw.tmp-") {
 			t.Fatalf("staging path %q does not use target-specific prefix", path)
 		}
+	}
+}
+
+func TestCleanupAbandonedCacheTempsPreservesLockedWriters(t *testing.T) {
+	dir := t.TempDir()
+	active, err := createCacheTemp(filepath.Join(dir, "active.raw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Close()
+	defer os.Remove(active.Name())
+
+	abandoned := filepath.Join(dir, ".abandoned.raw.tmp-dead")
+	if err := os.WriteFile(abandoned, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupAbandonedCacheTemps(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(active.Name()); err != nil {
+		t.Fatalf("active cache staging file removed: %v", err)
+	}
+	if _, err := os.Stat(abandoned); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned cache staging file still exists: %v", err)
+	}
+}
+
+func TestCacheDirectoryLockSerializesCleanup(t *testing.T) {
+	dir := t.TempDir()
+	abandoned := filepath.Join(dir, ".abandoned.raw.tmp-dead")
+	if err := os.WriteFile(abandoned, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirLock, err := lockCacheDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cleanupAbandonedCacheTemps(dir)
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("cleanup bypassed directory lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := unlockCacheDir(dirLock); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("cleanup did not resume after directory unlock")
+	}
+	if _, err := os.Stat(abandoned); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned cache staging file still exists: %v", err)
+	}
+}
+
+func TestCleanupImageCacheTempsSweepsBothCaches(t *testing.T) {
+	stateRoot := t.TempDir()
+	for _, dir := range []string{DownloadsDir(stateRoot), ImagesDir(stateRoot)} {
+		if err := ensurePrivateDir(dir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".partial.tmp-dead"), []byte("partial"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cleanupImageCacheTemps(stateRoot); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{DownloadsDir(stateRoot), ImagesDir(stateRoot)} {
+		if matches, err := filepath.Glob(filepath.Join(dir, "*.tmp-*")); err != nil {
+			t.Fatal(err)
+		} else if len(matches) != 0 {
+			t.Fatalf("cache %q still contains staging files: %v", dir, matches)
+		}
+	}
+}
+
+func TestRawImageCacheKeyIncludesExpectedChecksum(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image.qcow2")
+	if err := os.WriteFile(path, []byte("same-size-image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := rawImageCacheKey(path, path, strings.Repeat("a", 64), info)
+	second := rawImageCacheKey(path, path, strings.Repeat("b", 64), info)
+	if first == second {
+		t.Fatal("raw cache key did not change with expected checksum")
+	}
+}
+
+func TestCopyReaderAtRangeRejectsPrematureEOF(t *testing.T) {
+	target, err := os.CreateTemp(t.TempDir(), "target-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+
+	err = copyReaderAtRange(context.Background(), target, strings.NewReader("short"), 0, 10, make([]byte, 4))
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("copyReaderAtRange error=%v, want unexpected EOF", err)
+	}
+}
+
+func TestCopyReaderAtRangeHonorsCancellation(t *testing.T) {
+	target, err := os.CreateTemp(t.TempDir(), "target-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = copyReaderAtRange(ctx, target, strings.NewReader("payload"), 0, 7, make([]byte, 4))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("copyReaderAtRange error=%v, want context canceled", err)
 	}
 }

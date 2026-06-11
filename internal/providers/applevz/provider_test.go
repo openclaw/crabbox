@@ -281,6 +281,9 @@ func TestDoctorPassesSignedImageViaStdinAndRedactsDisplay(t *testing.T) {
 		if !slices.Contains(req.Env, "HTTPS_PROXY=http://proxy.example.test:8080") {
 			t.Fatalf("helper environment missing configured HTTPS proxy: %q", req.Env)
 		}
+		if req.CancelGracePeriod != helperCancelGracePeriod {
+			t.Fatalf("helper cancel grace period=%s want %s", req.CancelGracePeriod, helperCancelGracePeriod)
+		}
 		data, err := io.ReadAll(req.Stdin)
 		if err != nil {
 			t.Fatal(err)

@@ -193,6 +193,9 @@ only by a checksum-derived identity such as `remote:sha256:6a61b967ba4a`.
 QCOW2 cloud images are converted once into a sparse raw base image. Each lease
 gets a clone or sparse copy of that base, resized to `diskGiB`. Changing the
 image reference, expected checksum, or source file creates a new cache entry.
+Interrupted downloads and conversions exit gracefully, remove their staging
+files, and detach seed-image mounts. A later run also removes unlocked staging
+files left by a forced process termination or host restart.
 
 ## Lifecycle and networking
 
