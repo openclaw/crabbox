@@ -342,6 +342,15 @@ func TestAcquireRedactsSignedImageFromLogsAndLeaseMetadata(t *testing.T) {
 		case "list":
 			return core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.ListResponse{})}, nil, true
 		case "start":
+			leaseID := argumentValue(req.Args, "--lease-id")
+			name := argumentValue(req.Args, "--name")
+			claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !ok || claim.ProviderScope != name {
+				t.Fatalf("claim before helper start: ok=%v claim=%+v", ok, claim)
+			}
 			if args := strings.Join(req.Args, " "); strings.Contains(args, "secret") || strings.Contains(args, "private") {
 				t.Fatalf("helper argv exposes signed image: %s", args)
 			}
@@ -819,6 +828,108 @@ func TestCleanupRemovesStoppedInstance(t *testing.T) {
 		t.Fatal(err)
 	} else if ok {
 		t.Fatalf("cleanup should remove claim for %s", leaseID)
+	}
+}
+
+func TestCleanupRemovesOldRunningInstanceWithoutPersistedClaim(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(t, runner)
+	root, _ := b.stateRoot()
+	leaseID := "cbx_orphan123456"
+	name := core.LeaseProviderName(leaseID, "orphan-demo")
+	instance := applevzhelper.Instance{
+		Name:      name,
+		LeaseID:   leaseID,
+		Slug:      "orphan-demo",
+		Status:    applevzhelper.StatusRunning,
+		CreatedAt: time.Now().UTC().Add(-unclaimedInstanceGrace - time.Minute),
+		UpdatedAt: time.Now().UTC().Add(-unclaimedInstanceGrace - time.Minute),
+	}
+	runner.responses[commandKey("helper", []string{"list", "--state-root", root})] = core.LocalCommandResult{
+		Stdout: mustJSON(t, applevzhelper.ListResponse{Instances: []applevzhelper.Instance{instance}}),
+	}
+	runner.responses["helper\x00delete"] = core.LocalCommandResult{
+		Stdout: mustJSON(t, applevzhelper.DeleteResponse{Deleted: true, Instance: instance}),
+	}
+
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	deleteCalls := 0
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && call.Args[0] == "delete" {
+			deleteCalls++
+		}
+	}
+	if deleteCalls != 1 {
+		t.Fatalf("delete calls=%d want 1", deleteCalls)
+	}
+}
+
+func TestCleanupPreservesFreshStartupClaimWithoutVisibleInstance(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(t, runner)
+	root, _ := b.stateRoot()
+	runner.responses[commandKey("helper", []string{"list", "--state-root", root})] = core.LocalCommandResult{
+		Stdout: mustJSON(t, applevzhelper.ListResponse{}),
+	}
+	leaseID := "cbx_startup123456"
+	if err := core.ClaimLeaseForRepoProviderScopePond(
+		leaseID,
+		"startup-demo",
+		providerName,
+		"crabbox-startup-demo",
+		"",
+		t.TempDir(),
+		5*time.Minute,
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
+
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Fatalf("fresh startup claim %s was removed", leaseID)
+	}
+}
+
+func TestShouldCleanupUsesLatestLifecycleTimestampForUnclaimedInstance(t *testing.T) {
+	now := time.Now().UTC()
+	inst := applevzhelper.Instance{
+		Status:    applevzhelper.StatusRunning,
+		CreatedAt: now.Add(-unclaimedInstanceGrace - time.Hour),
+		UpdatedAt: now.Add(-unclaimedInstanceGrace + time.Minute),
+	}
+	server := core.Server{Status: "running", Labels: map[string]string{"keep": "false"}}
+	if cleanup, reason := shouldCleanup(inst, server, core.LeaseClaim{}, false, now); cleanup || reason != "missing claim within grace period" {
+		t.Fatalf("cleanup=%v reason=%q", cleanup, reason)
+	}
+}
+
+func TestClaimWithinStartupGrace(t *testing.T) {
+	now := time.Now().UTC()
+	if !claimWithinStartupGrace(core.LeaseClaim{ClaimedAt: now.Add(-time.Minute).Format(time.RFC3339)}, now) {
+		t.Fatal("fresh claim should remain in startup grace")
+	}
+	if claimWithinStartupGrace(core.LeaseClaim{ClaimedAt: now.Add(-unclaimedInstanceGrace - time.Minute).Format(time.RFC3339)}, now) {
+		t.Fatal("old claim should be outside startup grace")
+	}
+}
+
+func TestShouldCleanupPreservesFreshRunningInstanceWithoutClaim(t *testing.T) {
+	now := time.Now().UTC()
+	inst := applevzhelper.Instance{
+		Status:    applevzhelper.StatusRunning,
+		CreatedAt: now.Add(-unclaimedInstanceGrace + time.Minute),
+	}
+	server := core.Server{Status: "running", Labels: map[string]string{"keep": "false"}}
+	if cleanup, reason := shouldCleanup(inst, server, core.LeaseClaim{}, false, now); cleanup || reason != "missing claim within grace period" {
+		t.Fatalf("cleanup=%v reason=%q", cleanup, reason)
 	}
 }
 

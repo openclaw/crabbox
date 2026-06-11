@@ -34,6 +34,8 @@ type startConfig struct {
 	SSHPublicKey string
 }
 
+const maxRemoteImageBytes int64 = 32 << 30
+
 func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, error) {
 	inst := cfg.Instance
 	if err := ensurePrivateDir(InstanceDir(cfg.StateRoot, inst.Name)); err != nil {
@@ -148,6 +150,9 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return "", fmt.Errorf("download image %q: http %d", displayImage, resp.StatusCode)
 		}
+		if resp.ContentLength > maxRemoteImageBytes {
+			return "", fmt.Errorf("download image %q: content length exceeds 32 GiB limit", displayImage)
+		}
 		file, err := createCacheTemp(target)
 		if err != nil {
 			return "", fmt.Errorf("create image cache file: %w", err)
@@ -159,15 +164,15 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 			file.Close()
 			return "", fmt.Errorf("set image cache permissions: %w", err)
 		}
-		hash := sha256.New()
-		if _, err := io.Copy(file, io.TeeReader(resp.Body, hash)); err != nil {
+		actual, err := copyRemoteImage(file, resp.Body, maxRemoteImageBytes)
+		if err != nil {
 			file.Close()
 			return "", fmt.Errorf("write image cache file: %w", err)
 		}
 		if err := file.Sync(); err != nil {
 			return "", fmt.Errorf("sync image cache file: %w", err)
 		}
-		if actual := hex.EncodeToString(hash.Sum(nil)); actual != checksum {
+		if actual != checksum {
 			return "", fmt.Errorf("verify image %q: sha256 %s does not match expected %s", displayImage, actual, checksum)
 		}
 		if err := os.Rename(tmp, target); err != nil {
@@ -202,6 +207,18 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 		}
 	}
 	return path, nil
+}
+
+func copyRemoteImage(target io.Writer, source io.Reader, maxBytes int64) (string, error) {
+	hash := sha256.New()
+	written, err := io.Copy(io.MultiWriter(target, hash), io.LimitReader(source, maxBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if written > maxBytes {
+		return "", fmt.Errorf("download exceeds 32 GiB limit")
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func safeDownloadError(err error) string {

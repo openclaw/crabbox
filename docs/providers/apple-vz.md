@@ -179,8 +179,9 @@ A local image path may omit the checksum, or set one to verify the file before
 boot.
 
 Remote images must use HTTPS. Plain HTTP is accepted only for loopback
-development servers. Apple VZ state directories are owner-only (`0700`);
-downloaded images, converted bases, VM disks, metadata, and logs are `0600`.
+development servers. Downloads are capped at 32 GiB before checksum
+verification. Apple VZ state directories are owner-only (`0700`); downloaded
+images, converted bases, VM disks, metadata, and logs are `0600`.
 
 Remote and signed URLs are accepted through `appleVZ.image` in a protected
 configuration file or `CRABBOX_APPLE_VZ_IMAGE`. Never put one on the command

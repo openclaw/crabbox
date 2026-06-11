@@ -29,6 +29,7 @@ const (
 	diagnosticTailBytes         = 8 * 1024
 	rollbackTimeout             = 30 * time.Second
 	helperCancelGracePeriod     = 30 * time.Second
+	unclaimedInstanceGrace      = 3 * time.Hour
 )
 
 var hostGOOS, hostGOARCH = runtime.GOOS, runtime.GOARCH
@@ -164,6 +165,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	}
 	displayImage := applevzhelper.ImageIdentity(cfg.AppleVZ.Image, cfg.AppleVZ.ImageSHA256)
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMiB disk=%dGiB keep=%v\n", providerName, leaseID, slug, displayImage, cfg.AppleVZ.CPUs, cfg.AppleVZ.MemoryMiB, cfg.AppleVZ.DiskGiB, req.Keep)
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		return core.LeaseTarget{}, rollback(err)
+	}
 	inst, err := b.startInstance(ctx, cfg, name, leaseID, slug, publicKey)
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
@@ -333,17 +337,30 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	now := time.Now().UTC()
 	removed := 0
 	for _, inst := range instances {
-		claim := claims[inst.Name]
+		claim, hasClaim := claims[inst.Name]
 		leaseID := firstNonBlank(claim.LeaseID, inst.LeaseID)
-		if leaseID != "" {
-			live[leaseID] = struct{}{}
+		if hasClaim && claim.LeaseID != "" {
+			live[claim.LeaseID] = struct{}{}
 			claim.LeaseID = leaseID
 		}
 		server := b.serverFromInstance(inst, claim, cfg)
-		shouldDelete, reason := shouldCleanup(server, claim, leaseID != "", now)
+		shouldDelete, reason := shouldCleanup(inst, server, claim, hasClaim, now)
 		if !shouldDelete {
 			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s reason=%s\n", inst.Name, reason)
 			continue
+		}
+		if !hasClaim && leaseID != "" {
+			refreshed, claimExists, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+			if err != nil {
+				return fmt.Errorf("recheck apple-vz claim %s before cleanup: %w", leaseID, err)
+			}
+			if claimExists {
+				if refreshed.LeaseID != "" {
+					live[refreshed.LeaseID] = struct{}{}
+				}
+				fmt.Fprintf(b.rt.Stderr, "skip instance name=%s reason=claim appeared during cleanup\n", inst.Name)
+				continue
+			}
 		}
 		if req.DryRun {
 			fmt.Fprintf(b.rt.Stdout, "would remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(leaseID, "-"), reason)
@@ -365,6 +382,10 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		if _, ok := live[claim.LeaseID]; ok {
+			continue
+		}
+		if claimWithinStartupGrace(claim, now) {
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=startup grace period\n", claim.LeaseID)
 			continue
 		}
 		if req.DryRun {
@@ -981,7 +1002,7 @@ func requireHost() error {
 	return nil
 }
 
-func shouldCleanup(server core.Server, claim core.LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
+func shouldCleanup(inst applevzhelper.Instance, server core.Server, claim core.LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
 	labels := server.Labels
 	if labels == nil {
 		return false, "missing labels"
@@ -1006,7 +1027,25 @@ func shouldCleanup(server core.Server, claim core.LeaseClaim, hasClaim bool, now
 		}
 		return false, "claim active"
 	}
-	return false, "missing claim"
+	lifecycleAt := inst.CreatedAt
+	if inst.UpdatedAt.After(lifecycleAt) {
+		lifecycleAt = inst.UpdatedAt
+	}
+	if !lifecycleAt.IsZero() && now.After(lifecycleAt.Add(unclaimedInstanceGrace)) {
+		return true, "missing claim beyond grace period"
+	}
+	return false, "missing claim within grace period"
+}
+
+func claimWithinStartupGrace(claim core.LeaseClaim, now time.Time) bool {
+	var latest time.Time
+	for _, value := range []string{claim.ClaimedAt, claim.LastUsedAt} {
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(value))
+		if err == nil && parsed.After(latest) {
+			latest = parsed
+		}
+	}
+	return !latest.IsZero() && !now.After(latest.Add(unclaimedInstanceGrace))
 }
 
 func appleVZRunning(state string) bool {

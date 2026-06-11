@@ -116,6 +116,30 @@ func TestResolveSourceImageVerifiesRemoteImageChecksum(t *testing.T) {
 	}
 }
 
+func TestResolveSourceImageRejectsOversizedContentLength(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "34359738369")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := resolveSourceImage(context.Background(), t.TempDir(), server.URL+"/image.img", strings.Repeat("a", 64))
+	if err == nil || !strings.Contains(err.Error(), "exceeds 32 GiB limit") {
+		t.Fatalf("resolveSourceImage error=%v, want size limit", err)
+	}
+}
+
+func TestCopyRemoteImageRejectsUnknownLengthBeyondLimit(t *testing.T) {
+	var target bytes.Buffer
+	_, err := copyRemoteImage(&target, strings.NewReader("123456789"), 8)
+	if err == nil || !strings.Contains(err.Error(), "exceeds 32 GiB limit") {
+		t.Fatalf("copyRemoteImage error=%v, want size limit", err)
+	}
+	if target.Len() != 9 {
+		t.Fatalf("bounded copy wrote %d bytes, want limit plus one", target.Len())
+	}
+}
+
 func TestResolveSourceImageRejectsNonLoopbackHTTP(t *testing.T) {
 	_, err := resolveSourceImage(
 		context.Background(),
