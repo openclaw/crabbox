@@ -539,9 +539,6 @@ func leadingEnvAssignment(command []string) bool {
 }
 
 func commandScript(command []string) string {
-	if len(command) == 3 && command[0] == "bash" && command[1] == "-lc" {
-		return command[2]
-	}
 	return shellScriptFromArgv(command)
 }
 

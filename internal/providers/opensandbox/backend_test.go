@@ -99,6 +99,45 @@ func TestRunCreatesSandboxForwardsEnvAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestRunPreservesBashLoginShellForExplicitInvocation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: tempGitRepo(t)},
+		NoSync:  true,
+		Command: []string{"bash", "-lc", "echo hello"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := fake.runs[len(fake.runs)-1].Command
+	want := shellScriptFromArgv([]string{"bash", "-lc", "echo hello"})
+	if got != want {
+		t.Fatalf("command=%q want %q", got, want)
+	}
+}
+
+func TestRunPreservesBashLoginShellForAutoWrappedMetachars(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: tempGitRepo(t)},
+		NoSync:  true,
+		Command: []string{"pnpm", "install", "&&", "pnpm", "test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := fake.runs[len(fake.runs)-1].Command
+	inner := shellScriptFromArgv([]string{"pnpm", "install", "&&", "pnpm", "test"})
+	want := shellScriptFromArgv([]string{"bash", "-lc", inner})
+	if got != want {
+		t.Fatalf("command=%q want %q", got, want)
+	}
+}
+
 func TestRunKeepsSandboxOnFailureWhenRequested(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeClient()
