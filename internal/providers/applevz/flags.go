@@ -51,6 +51,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "apple-vz-image-sha256") {
 		cfg.AppleVZ.ImageSHA256 = strings.TrimSpace(*v.ImageSHA256)
+		core.MarkAppleVZImageSHA256Explicit(cfg)
 	}
 	if core.FlagWasSet(fs, "apple-vz-user") {
 		cfg.AppleVZ.User = strings.TrimSpace(*v.User)

@@ -133,6 +133,7 @@ type Config struct {
 	appleContainerImageExplicit   bool
 	AppleVZ                       AppleVZConfig
 	appleVZImageExplicit          bool
+	appleVZImageSHA256Explicit    bool
 	MXC                           MXCConfig
 	Multipass                     MultipassConfig
 	multipassImageExplicit        bool
@@ -1082,7 +1083,7 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	if force || cfg.AppleVZ.Image == "" || (!cfg.appleVZImageExplicit && (cfg.AppleVZ.Image == base.AppleVZ.Image || wasOSDefault)) {
 		cfg.AppleVZ.Image = appleVZImage
 	}
-	if force || (cfg.AppleVZ.ImageSHA256 == "" && cfg.AppleVZ.Image == appleVZImage) || (!cfg.appleVZImageExplicit && (cfg.AppleVZ.ImageSHA256 == "" || wasOSDefault)) {
+	if !cfg.appleVZImageSHA256Explicit && (force || (cfg.AppleVZ.ImageSHA256 == "" && cfg.AppleVZ.Image == appleVZImage) || (!cfg.appleVZImageExplicit && (cfg.AppleVZ.ImageSHA256 == "" || wasOSDefault))) {
 		cfg.AppleVZ.ImageSHA256 = appleVZSHA256
 	}
 	if force || cfg.Multipass.Image == "" || (!cfg.multipassImageExplicit && (cfg.Multipass.Image == base.Multipass.Image || wasOSDefault)) {
@@ -1117,10 +1118,15 @@ func AppleContainerImageExplicit(cfg Config) bool {
 
 func MarkAppleVZImageExplicit(cfg *Config) {
 	cfg.appleVZImageExplicit = true
+	cfg.appleVZImageSHA256Explicit = false
 }
 
 func AppleVZImageExplicit(cfg Config) bool {
 	return cfg.appleVZImageExplicit
+}
+
+func MarkAppleVZImageSHA256Explicit(cfg *Config) {
+	cfg.appleVZImageSHA256Explicit = true
 }
 
 func MarkMultipassImageExplicit(cfg *Config) {
@@ -3315,9 +3321,11 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.AppleVZ.Image = file.AppleVZ.Image
 			cfg.AppleVZ.ImageSHA256 = ""
 			cfg.appleVZImageExplicit = true
+			cfg.appleVZImageSHA256Explicit = false
 		}
 		if file.AppleVZ.ImageSHA256 != "" {
 			cfg.AppleVZ.ImageSHA256 = file.AppleVZ.ImageSHA256
+			cfg.appleVZImageSHA256Explicit = true
 		}
 		if file.AppleVZ.User != "" {
 			cfg.AppleVZ.User = file.AppleVZ.User
@@ -4234,8 +4242,12 @@ func applyEnv(cfg *Config) error {
 		cfg.AppleVZ.Image = image
 		cfg.AppleVZ.ImageSHA256 = ""
 		cfg.appleVZImageExplicit = true
+		cfg.appleVZImageSHA256Explicit = false
 	}
-	cfg.AppleVZ.ImageSHA256 = getenv("CRABBOX_APPLE_VZ_IMAGE_SHA256", cfg.AppleVZ.ImageSHA256)
+	if checksum := os.Getenv("CRABBOX_APPLE_VZ_IMAGE_SHA256"); checksum != "" {
+		cfg.AppleVZ.ImageSHA256 = checksum
+		cfg.appleVZImageSHA256Explicit = true
+	}
 	cfg.AppleVZ.User = getenv("CRABBOX_APPLE_VZ_USER", cfg.AppleVZ.User)
 	cfg.AppleVZ.WorkRoot = getenv("CRABBOX_APPLE_VZ_WORK_ROOT", cfg.AppleVZ.WorkRoot)
 	cfg.AppleVZ.CPUs = getenvInt("CRABBOX_APPLE_VZ_CPUS", cfg.AppleVZ.CPUs)

@@ -51,7 +51,7 @@ func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, erro
 	if err != nil {
 		return Instance{}, err
 	}
-	sourcePath, err := resolveSourceImage(ctx, cfg.StateRoot, cfg.Image, cfg.ImageSHA256)
+	sourcePath, err := resolveSourceImageWithLimit(ctx, cfg.StateRoot, cfg.Image, cfg.ImageSHA256, targetSize)
 	if err != nil {
 		return Instance{}, err
 	}
@@ -93,6 +93,10 @@ func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, erro
 }
 
 func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 string) (string, error) {
+	return resolveSourceImageWithLimit(ctx, stateRoot, image, expectedSHA256, math.MaxInt64)
+}
+
+func resolveSourceImageWithLimit(ctx context.Context, stateRoot, image, expectedSHA256 string, maxDiskBytes int64) (string, error) {
 	image = strings.TrimSpace(image)
 	if image == "" {
 		return "", fmt.Errorf("image is required")
@@ -129,6 +133,7 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 			return "", fmt.Errorf("build image request for %q: invalid URL", displayImage)
 		}
 		req.Header.Set("User-Agent", "crabbox-apple-vz-helper")
+		originLoopback := isLoopbackImageHost(parsedURL.Hostname())
 		client := &http.Client{
 			Timeout: 2 * time.Hour,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -136,14 +141,7 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 				if len(via) >= 10 {
 					return fmt.Errorf("stopped after 10 redirects")
 				}
-				req.URL.Scheme = strings.ToLower(req.URL.Scheme)
-				if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-					return fmt.Errorf("unsupported redirect scheme")
-				}
-				if req.URL.Scheme == "http" && !isLoopbackImageHost(req.URL.Hostname()) {
-					return fmt.Errorf("redirect to non-loopback HTTP is not allowed")
-				}
-				return nil
+				return validateImageRedirect(req.URL, originLoopback)
 			},
 		}
 		resp, err := client.Do(req)
@@ -206,11 +204,206 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 		return "", fmt.Errorf("image %q: %w", path, err)
 	}
 	if checksum != "" {
-		if err := verifyFileSHA256(path, checksum); err != nil {
-			return "", err
-		}
+		return cacheVerifiedLocalImage(ctx, stateRoot, path, checksum, maxDiskBytes)
 	}
 	return path, nil
+}
+
+func validateImageRedirect(target *url.URL, originLoopback bool) error {
+	target.Scheme = strings.ToLower(target.Scheme)
+	if target.Scheme != "http" && target.Scheme != "https" {
+		return fmt.Errorf("unsupported redirect scheme")
+	}
+	targetLoopback := isLoopbackImageHost(target.Hostname())
+	if targetLoopback != originLoopback {
+		return fmt.Errorf("redirect crosses the loopback trust boundary")
+	}
+	if target.Scheme == "http" && !targetLoopback {
+		return fmt.Errorf("redirect to non-loopback HTTP is not allowed")
+	}
+	return nil
+}
+
+func cacheVerifiedLocalImage(ctx context.Context, stateRoot, sourcePath, checksum string, maxDiskBytes int64) (string, error) {
+	if err := ensurePrivateDir(DownloadsDir(stateRoot)); err != nil {
+		return "", fmt.Errorf("create downloads cache: %w", err)
+	}
+	target := filepath.Join(DownloadsDir(stateRoot), "local-"+checksum[:16]+"-image.img")
+	if _, err := os.Stat(target); err == nil {
+		if err := os.Chmod(target, 0o600); err != nil {
+			return "", fmt.Errorf("secure cached image: %w", err)
+		}
+		if err := verifyFileSHA256(target, checksum); err != nil {
+			return "", err
+		}
+		if err := validateImageDiskSize(target, maxDiskBytes); err != nil {
+			return "", err
+		}
+		return target, nil
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return "", fmt.Errorf("open image %q: %w", sourcePath, err)
+	}
+	defer source.Close()
+	info, err := source.Stat()
+	if err != nil {
+		return "", fmt.Errorf("stat image %q: %w", sourcePath, err)
+	}
+	qcow2, err := readerIsQCOW2(source)
+	if err != nil {
+		return "", err
+	}
+	if !qcow2 {
+		err = validateSourceDiskSize(info.Size(), maxDiskBytes)
+	}
+	if err != nil {
+		return "", err
+	}
+	file, err := createCacheTemp(target)
+	if err != nil {
+		return "", fmt.Errorf("create image cache file: %w", err)
+	}
+	tmp := file.Name()
+	defer os.Remove(tmp)
+	file, cloned, err := replaceCacheTempWithClone(source, file)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	var actual string
+	if cloned {
+		actual, err = fileSHA256(tmp)
+	} else {
+		actual, err = copySparseImageWithSHA256(ctx, file, source, info.Size())
+	}
+	if err != nil {
+		return "", fmt.Errorf("copy local image: %w", err)
+	}
+	if actual != checksum {
+		return "", fmt.Errorf("verify image %q: sha256 %s does not match expected %s", sourcePath, actual, checksum)
+	}
+	if err := syncFile(tmp); err != nil {
+		return "", fmt.Errorf("sync image cache file: %w", err)
+	}
+	if err := validateImageDiskSize(tmp, maxDiskBytes); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		return "", fmt.Errorf("commit image cache file: %w", err)
+	}
+	return target, nil
+}
+
+func replaceCacheTempWithClone(source, temp *os.File) (*os.File, bool, error) {
+	path := temp.Name()
+	dirLock, err := lockCacheDir(filepath.Dir(path))
+	if err != nil {
+		return nil, false, err
+	}
+	fail := func(err error) (*os.File, bool, error) {
+		return nil, false, errors.Join(err, unlockCacheDir(dirLock))
+	}
+	if err := temp.Close(); err != nil {
+		return fail(fmt.Errorf("close image cache placeholder: %w", err))
+	}
+	if err := os.Remove(path); err != nil {
+		return fail(fmt.Errorf("remove image cache placeholder: %w", err))
+	}
+	cloned, err := cloneLocalImage(source, path)
+	if err != nil {
+		return fail(err)
+	}
+	if cloned {
+		if err := os.Chmod(path, 0o600); err != nil {
+			return fail(fmt.Errorf("secure cloned image: %w", err))
+		}
+	}
+	flags := os.O_RDWR
+	if !cloned {
+		flags |= os.O_CREATE | os.O_EXCL
+	}
+	replacement, err := os.OpenFile(path, flags, 0o600)
+	if err != nil {
+		return fail(fmt.Errorf("open image cache staging file: %w", err))
+	}
+	if err := replacement.Chmod(0o600); err != nil {
+		replacement.Close()
+		return fail(fmt.Errorf("secure image cache staging file: %w", err))
+	}
+	if err := unix.Flock(int(replacement.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		replacement.Close()
+		return fail(fmt.Errorf("lock image cache staging file: %w", err))
+	}
+	if err := unlockCacheDir(dirLock); err != nil {
+		replacement.Close()
+		return nil, false, err
+	}
+	return replacement, cloned, nil
+}
+
+func cloneLocalImage(source *os.File, targetPath string) (bool, error) {
+	err := unix.Fclonefileat(int(source.Fd()), unix.AT_FDCWD, targetPath, unix.CLONE_NOOWNERCOPY)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, unix.EXDEV) || errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EINVAL) {
+		return false, nil
+	}
+	return false, fmt.Errorf("clone local image: %w", err)
+}
+
+func syncFile(path string) error {
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+type sparseFileWriter interface {
+	io.WriterAt
+	Truncate(size int64) error
+}
+
+func copySparseImageWithSHA256(ctx context.Context, target sparseFileWriter, source io.ReaderAt, size int64) (string, error) {
+	if err := target.Truncate(size); err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	buf := make([]byte, 4*1024*1024)
+	for offset := int64(0); offset < size; {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		chunk := int64(len(buf))
+		if remaining := size - offset; remaining < chunk {
+			chunk = remaining
+		}
+		n, err := source.ReadAt(buf[:chunk], offset)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		if n == 0 {
+			return "", io.ErrUnexpectedEOF
+		}
+		part := buf[:n]
+		if _, err := hash.Write(part); err != nil {
+			return "", err
+		}
+		if err := writeSparseBlocks(target, part, offset); err != nil {
+			return "", err
+		}
+		offset += int64(n)
+		if errors.Is(err, io.EOF) && offset < size {
+			return "", io.ErrUnexpectedEOF
+		}
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func copyRemoteImage(target io.Writer, source io.Reader, maxBytes int64) (string, error) {
@@ -279,20 +472,27 @@ func normalizeExpectedSHA256(value string) (string, error) {
 }
 
 func verifyFileSHA256(path, expected string) error {
-	file, err := os.Open(path)
+	actual, err := fileSHA256(path)
 	if err != nil {
-		return fmt.Errorf("open image for sha256: %w", err)
+		return err
 	}
-	defer file.Close()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return fmt.Errorf("hash image: %w", err)
-	}
-	actual := hex.EncodeToString(hash.Sum(nil))
 	if actual != expected {
 		return fmt.Errorf("verify image %q: sha256 %s does not match expected %s", path, actual, expected)
 	}
 	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open image for sha256: %w", err)
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", fmt.Errorf("hash image: %w", err)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func ensureRawImage(ctx context.Context, stateRoot, sourceRef, sourcePath, expectedSHA256 string, maxDiskBytes int64) (string, error) {
@@ -516,11 +716,15 @@ func isQCOW2(path string) (bool, error) {
 		return false, fmt.Errorf("open image: %w", err)
 	}
 	defer file.Close()
-	header := make([]byte, 4)
-	if _, err := io.ReadFull(file, header); err != nil {
+	return readerIsQCOW2(file)
+}
+
+func readerIsQCOW2(source io.ReaderAt) (bool, error) {
+	var header [4]byte
+	if _, err := io.ReadFull(io.NewSectionReader(source, 0, int64(len(header))), header[:]); err != nil {
 		return false, fmt.Errorf("read image header: %w", err)
 	}
-	return bytes.Equal(header, []byte{'Q', 'F', 'I', 0xfb}), nil
+	return bytes.Equal(header[:], []byte{'Q', 'F', 'I', 0xfb}), nil
 }
 
 func convertQCOW2ToRaw(ctx context.Context, sourcePath string, target *os.File, maxDiskBytes int64) error {
@@ -624,6 +828,38 @@ func validateSourceDiskSize(sourceBytes, maxDiskBytes int64) error {
 	return nil
 }
 
+func validateImageDiskSize(sourcePath string, maxDiskBytes int64) error {
+	qcow2, err := isQCOW2(sourcePath)
+	if err != nil {
+		return err
+	}
+	if !qcow2 {
+		info, err := os.Stat(sourcePath)
+		if err != nil {
+			return fmt.Errorf("stat source image: %w", err)
+		}
+		return validateSourceDiskSize(info.Size(), maxDiskBytes)
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return fmt.Errorf("open qcow2 image: %w", err)
+	}
+	defer source.Close()
+	reader, err := newStandaloneQCOW2Reader(source)
+	if err != nil {
+		return err
+	}
+	image, err := qcow2reader.Open(reader)
+	if err != nil {
+		return fmt.Errorf("open qcow2 image: %w", err)
+	}
+	defer image.Close()
+	if err := image.Readable(); err != nil {
+		return fmt.Errorf("qcow2 image not readable: %w", err)
+	}
+	return validateSourceDiskSize(image.Size(), maxDiskBytes)
+}
+
 func cloneOrCopyFile(ctx context.Context, sourcePath, targetPath string) error {
 	_ = os.Remove(targetPath)
 	if err := unix.Clonefile(sourcePath, targetPath, 0); err == nil {
@@ -669,15 +905,46 @@ func copyReaderAtRange(ctx context.Context, target *os.File, source io.ReaderAt,
 			return io.ErrUnexpectedEOF
 		}
 		part := buf[:n]
-		if !allZero(part) {
-			if _, err := target.WriteAt(part, offset+copied); err != nil {
-				return err
-			}
+		if err := writeSparseBlocks(target, part, offset+copied); err != nil {
+			return err
 		}
 		copied += int64(n)
 		if errors.Is(err, io.EOF) && copied < length {
 			return io.ErrUnexpectedEOF
 		}
+	}
+	return nil
+}
+
+func writeSparseBlocks(target io.WriterAt, data []byte, offset int64) error {
+	const blockSize = 4 * 1024
+	for start := 0; start < len(data); {
+		for start < len(data) {
+			end := min(start+blockSize, len(data))
+			if !allZero(data[start:end]) {
+				break
+			}
+			start = end
+		}
+		if start == len(data) {
+			break
+		}
+		end := start
+		for end < len(data) {
+			next := min(end+blockSize, len(data))
+			if allZero(data[end:next]) {
+				break
+			}
+			end = next
+		}
+		written, err := target.WriteAt(data[start:end], offset+int64(start))
+		if err != nil {
+			return err
+		}
+		if written != end-start {
+			return io.ErrShortWrite
+		}
+		start = end
 	}
 	return nil
 }

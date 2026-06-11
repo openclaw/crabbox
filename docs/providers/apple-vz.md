@@ -175,8 +175,9 @@ The portable `osImage` selector maps to dated Ubuntu ARM64 cloud images:
 
 Built-in remote URLs have pinned SHA-256 digests. A custom HTTP or HTTPS image
 must also set `appleVZ.imageSHA256`; Crabbox refuses an unverified remote image.
-A local image path may omit the checksum, or set one to verify the file before
-boot. The image's raw or virtual size must not exceed `appleVZ.diskGiB`.
+A local image path may omit the checksum. When one is set, Crabbox hashes while
+copying the image into its owner-only cache and boots only that verified copy.
+The image's raw or virtual size must not exceed `appleVZ.diskGiB`.
 
 Remote images must use HTTPS. Plain HTTP is accepted only for loopback
 development servers. Downloads are capped at 32 GiB before checksum

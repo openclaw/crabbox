@@ -715,6 +715,131 @@ func TestTerminateInstanceRechecksIdentityBeforeKill(t *testing.T) {
 	}
 }
 
+func TestTerminateStartedHelperRechecksIdentityBeforeKill(t *testing.T) {
+	originalProcessStartTime := processStartTime
+	originalProcessAlive := processAlive
+	originalSignalProcess := signalProcess
+	originalTerminateGrace := terminateInstanceGraceTime
+	originalTerminatePoll := terminateInstancePollTime
+	t.Cleanup(func() {
+		processStartTime = originalProcessStartTime
+		processAlive = originalProcessAlive
+		signalProcess = originalSignalProcess
+		terminateInstanceGraceTime = originalTerminateGrace
+		terminateInstancePollTime = originalTerminatePoll
+	})
+
+	identityChecks := 0
+	processAlive = func(int) bool { return true }
+	processStartTime = func(pid int) (string, error) {
+		if pid != 4242 {
+			t.Fatalf("processStartTime pid=%d want 4242", pid)
+		}
+		identityChecks++
+		if identityChecks == 1 {
+			return "original-start", nil
+		}
+		return "replacement-start", nil
+	}
+	var signals []os.Signal
+	signalProcess = func(pid int, signal os.Signal) error {
+		if pid != 4242 {
+			t.Fatalf("signal pid=%d want 4242", pid)
+		}
+		signals = append(signals, signal)
+		return nil
+	}
+	terminateInstanceGraceTime = time.Second
+	terminateInstancePollTime = time.Millisecond
+
+	if err := terminateStartedHelper(Instance{PID: 4242, PIDStartedAt: "original-start"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(signals) != 1 || signals[0] != syscall.SIGTERM {
+		t.Fatalf("signals=%v, want SIGTERM only", signals)
+	}
+	if identityChecks < 2 {
+		t.Fatalf("identity checks=%d, want revalidation after SIGTERM", identityChecks)
+	}
+}
+
+func TestCleanupStartedHelperPreservesStateOnIdentityProbeFailure(t *testing.T) {
+	root := t.TempDir()
+	name := "identity-probe-failure"
+	instanceRoot := InstanceDir(root, name)
+	mustCreateInstanceDir(t, root, name)
+
+	originalProcessStartTime := processStartTime
+	originalProcessAlive := processAlive
+	originalSignalProcess := signalProcess
+	t.Cleanup(func() {
+		processStartTime = originalProcessStartTime
+		processAlive = originalProcessAlive
+		signalProcess = originalSignalProcess
+	})
+
+	processAlive = func(pid int) bool {
+		if pid != 4242 {
+			t.Fatalf("processAlive pid=%d want 4242", pid)
+		}
+		return true
+	}
+	processStartTime = func(pid int) (string, error) {
+		if pid != 4242 {
+			t.Fatalf("processStartTime pid=%d want 4242", pid)
+		}
+		return "", errors.New("transient ps failure")
+	}
+	signalProcess = func(int, os.Signal) error {
+		t.Fatal("must not signal a process with unverified identity")
+		return nil
+	}
+
+	err := cleanupStartedHelper(Instance{PID: 4242, PIDStartedAt: "original-start"}, instanceRoot)
+	if err == nil || !strings.Contains(err.Error(), "transient ps failure") {
+		t.Fatalf("cleanup error=%v, want identity probe failure", err)
+	}
+	if _, err := os.Stat(instanceRoot); err != nil {
+		t.Fatalf("instance state was removed after uncertain termination: %v", err)
+	}
+}
+
+func TestCleanupUnauthorizedStartedHelperRemovesStateAfterConfirmedExit(t *testing.T) {
+	root := t.TempDir()
+	name := "unauthorized-exit"
+	instanceRoot := InstanceDir(root, name)
+	mustCreateInstanceDir(t, root, name)
+	waitCh := make(chan error, 1)
+	waitCh <- errors.New("exit status 24")
+
+	if err := cleanupUnauthorizedStartedHelper(Instance{PID: 4242}, instanceRoot, waitCh); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(instanceRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("instance state remains after confirmed child exit: %v", err)
+	}
+}
+
+func TestCleanupUnauthorizedStartedHelperPreservesStateWithoutIdentityOrExit(t *testing.T) {
+	root := t.TempDir()
+	name := "unauthorized-timeout"
+	instanceRoot := InstanceDir(root, name)
+	mustCreateInstanceDir(t, root, name)
+
+	originalTerminateGrace := terminateInstanceGraceTime
+	t.Cleanup(func() { terminateInstanceGraceTime = originalTerminateGrace })
+	terminateInstanceGraceTime = time.Millisecond
+
+	err := cleanupUnauthorizedStartedHelper(Instance{PID: 4242}, instanceRoot, make(chan error))
+	if err == nil || !strings.Contains(err.Error(), "did not exit") {
+		t.Fatalf("cleanup error=%v, want child exit timeout", err)
+	}
+	if _, err := os.Stat(instanceRoot); err != nil {
+		t.Fatalf("instance state was removed without confirmed child exit: %v", err)
+	}
+}
+
 func TestNormalizeInstanceMarksReusedPIDStopped(t *testing.T) {
 	originalProcessStartTime := processStartTime
 	t.Cleanup(func() { processStartTime = originalProcessStartTime })
@@ -794,7 +919,7 @@ func TestHelperDaemonEnvExcludesCallerCredentials(t *testing.T) {
 func TestHandleStartReadinessMetadataStoppedBeforeReadiness(t *testing.T) {
 	root := t.TempDir()
 	name := "stopped-before-ready"
-	pid := os.Getpid()
+	pid := unusedPID(t)
 	mustCreateInstanceDir(t, root, name)
 
 	handled, err := handleStartReadinessMetadata(root, name, Instance{
@@ -803,7 +928,7 @@ func TestHandleStartReadinessMetadataStoppedBeforeReadiness(t *testing.T) {
 		PID:       pid,
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
-	}, pid, nil, &bytes.Buffer{})
+	}, Instance{PID: pid}, &bytes.Buffer{})
 
 	if !handled {
 		t.Fatal("expected stopped status to be handled")
@@ -834,7 +959,7 @@ func TestHandleStartReadinessMetadataStoppingDeadPIDCleansInstanceDir(t *testing
 		PID:       pid,
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
-	}, pid, nil, &bytes.Buffer{})
+	}, Instance{PID: pid}, &bytes.Buffer{})
 
 	if !handled {
 		t.Fatal("expected stopping status with a dead PID to be handled")

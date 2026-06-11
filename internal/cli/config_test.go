@@ -2133,6 +2133,35 @@ func TestAppleVZExplicitImageSurvivesOSDefault(t *testing.T) {
 	}
 }
 
+func TestAppleVZExplicitChecksumSurvivesOSDefault(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	checksum := strings.Repeat("b", 64)
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\ntarget: linux\nos: ubuntu:24.04\nappleVZ:\n  imageSHA256: "+checksum+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVZ.ImageSHA256 != checksum {
+		t.Fatalf("explicit apple-vz checksum was overwritten by OS defaults: %q", cfg.AppleVZ.ImageSHA256)
+	}
+
+	t.Setenv("CRABBOX_APPLE_VZ_IMAGE_SHA256", strings.Repeat("c", 64))
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVZ.ImageSHA256 != strings.Repeat("c", 64) {
+		t.Fatalf("environment apple-vz checksum was overwritten by OS defaults: %q", cfg.AppleVZ.ImageSHA256)
+	}
+}
+
 func TestAppleVZPreservesExplicitTopLevelWorkRoot(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

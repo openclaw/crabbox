@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Code-Hex/vz/v3"
+	"golang.org/x/sys/unix"
 )
 
 func TestHandleVMStateErrorPersistsTerminalErrorAndRequestsStop(t *testing.T) {
@@ -336,6 +338,35 @@ func TestResolveSourceImageRejectsRedirectToNonLoopbackHTTP(t *testing.T) {
 	}
 }
 
+func TestValidateImageRedirectCannotCrossLoopbackBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		target         string
+		originLoopback bool
+		wantErr        bool
+	}{
+		{name: "remote https", target: "https://cdn.example.test/image.img", wantErr: false},
+		{name: "remote to loopback https", target: "https://127.0.0.1/image.img", wantErr: true},
+		{name: "remote to loopback http", target: "http://localhost/image.img", wantErr: true},
+		{name: "loopback http", target: "http://127.0.0.1/image.img", originLoopback: true, wantErr: false},
+		{name: "loopback to remote", target: "https://cdn.example.test/image.img", originLoopback: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target, err := url.Parse(tc.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = validateImageRedirect(target, tc.originLoopback)
+			if tc.wantErr && err == nil {
+				t.Fatal("redirect accepted")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("redirect rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestResolveSourceImageLimitsRedirects(t *testing.T) {
 	var requests atomic.Int32
 	var server *httptest.Server
@@ -372,24 +403,147 @@ func TestValidateRuntimeConfigRejectsNonLoopbackHTTPImage(t *testing.T) {
 }
 
 func TestResolveSourceImageVerifiesLocalImageWhenChecksumProvided(t *testing.T) {
+	stateRoot := t.TempDir()
 	path := t.TempDir() + "/image.img"
 	payload := []byte("local image")
 	sum := sha256.Sum256(payload)
 	if err := os.WriteFile(path, payload, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatal(err)
+	}
 
-	resolved, err := resolveSourceImage(context.Background(), t.TempDir(), path, "sha256:"+hex.EncodeToString(sum[:]))
+	resolved, err := resolveSourceImage(context.Background(), stateRoot, path, "sha256:"+hex.EncodeToString(sum[:]))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved != path {
-		t.Fatalf("resolved=%q want %q", resolved, path)
+	if resolved == path || filepath.Dir(resolved) != DownloadsDir(stateRoot) {
+		t.Fatalf("resolved=%q want private cached copy", resolved)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replacement image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cached, err := os.ReadFile(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(cached, payload) {
+		t.Fatalf("cached image=%q want %q", cached, payload)
 	}
 
 	_, err = resolveSourceImage(context.Background(), t.TempDir(), path, strings.Repeat("f", 64))
 	if err == nil {
 		t.Fatal("expected local checksum mismatch to fail")
+	}
+}
+
+func TestCacheVerifiedLocalImagePreservesSparseFileAndRejectsOversize(t *testing.T) {
+	stateRoot := t.TempDir()
+	sourcePath := filepath.Join(t.TempDir(), "sparse.raw")
+	source, err := os.OpenFile(sourcePath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const size = int64(32 << 20)
+	if err := source.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.WriteAt([]byte("sparse-tail"), size-11); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	source, err = os.Open(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := cacheVerifiedLocalImage(context.Background(), stateRoot, sourcePath, hex.EncodeToString(hash.Sum(nil)), size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stat unix.Stat_t
+	if err := unix.Stat(resolved, &stat); err != nil {
+		t.Fatal(err)
+	}
+	if stat.Size != size {
+		t.Fatalf("cached size=%d want %d", stat.Size, size)
+	}
+	if allocated := stat.Blocks * 512; allocated >= size/2 {
+		t.Fatalf("cached sparse image allocated=%d logical=%d", allocated, size)
+	}
+
+	oversizedPath := filepath.Join(t.TempDir(), "oversized.raw")
+	if err := os.WriteFile(oversizedPath, []byte("header"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(oversizedPath, size+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cacheVerifiedLocalImage(context.Background(), t.TempDir(), oversizedPath, strings.Repeat("a", 64), size); err == nil || !strings.Contains(err.Error(), "exceeds configured disk size") {
+		t.Fatalf("oversized cache error=%v", err)
+	}
+}
+
+type recordingSparseTarget struct {
+	size   int64
+	writes int
+	bytes  int
+}
+
+func (t *recordingSparseTarget) Truncate(size int64) error {
+	t.size = size
+	return nil
+}
+
+func (t *recordingSparseTarget) WriteAt(data []byte, _ int64) (int, error) {
+	t.writes++
+	t.bytes += len(data)
+	return len(data), nil
+}
+
+func TestCopySparseImageWritesScatteredDataAtBlockGranularity(t *testing.T) {
+	const size = 8 << 20
+	source := make([]byte, size)
+	source[0] = 1
+	source[4<<20] = 2
+	target := &recordingSparseTarget{}
+
+	if _, err := copySparseImageWithSHA256(context.Background(), target, bytes.NewReader(source), size); err != nil {
+		t.Fatal(err)
+	}
+	if target.size != size {
+		t.Fatalf("target size=%d want %d", target.size, size)
+	}
+	if target.bytes > 2*4*1024 {
+		t.Fatalf("sparse copy wrote %d bytes across %d writes", target.bytes, target.writes)
+	}
+}
+
+func TestCacheVerifiedLocalImageChecksHashBeforeParsingQCOW2(t *testing.T) {
+	sourcePath := filepath.Join(t.TempDir(), "untrusted.qcow2")
+	if err := os.WriteFile(sourcePath, []byte{'Q', 'F', 'I', 0xfb}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(sourcePath, (1<<20)+1); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := cacheVerifiedLocalImage(context.Background(), t.TempDir(), sourcePath, strings.Repeat("a", 64), 1<<20)
+	if err == nil || !strings.Contains(err.Error(), "does not match expected") {
+		t.Fatalf("cache error=%v, want checksum mismatch before QCOW2 parsing", err)
 	}
 }
 
@@ -450,6 +604,36 @@ func TestCleanupAbandonedCacheTempsPreservesLockedWriters(t *testing.T) {
 	}
 	if _, err := os.Stat(abandoned); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("abandoned cache staging file still exists: %v", err)
+	}
+}
+
+func TestCleanupAbandonedCacheTempsPreservesClonedWriters(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "source.raw")
+	if err := os.WriteFile(sourcePath, []byte("source image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	active, err := createCacheTemp(filepath.Join(dir, "active.raw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, _, err = replaceCacheTempWithClone(source, active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Close()
+	defer os.Remove(active.Name())
+
+	if err := cleanupAbandonedCacheTemps(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(active.Name()); err != nil {
+		t.Fatalf("active cloned cache staging file removed: %v", err)
 	}
 }
 

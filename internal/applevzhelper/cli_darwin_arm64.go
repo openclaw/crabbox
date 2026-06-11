@@ -264,22 +264,20 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	inst, err = authorizeStartedHelper(root, *name, inst, startupWriter)
 	if err != nil {
 		_ = startupWriter.Close()
-		terminateStartedHelper(cmd.Process, inst.PID)
 		failure := errors.Join(
 			fmt.Errorf("authorize helper daemon startup: %w", err),
 			startupDiagnostics(root, *name),
+			cleanupUnauthorizedStartedHelper(inst, instanceRoot, waitCh),
 		)
-		_ = os.RemoveAll(instanceRoot)
 		return failure
 	}
 	_ = startupWriter.Close()
 	if err := os.Remove(PreparationPath(root, *name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		terminateStartedHelper(cmd.Process, inst.PID)
 		failure := errors.Join(
 			fmt.Errorf("remove preparation marker: %w", err),
 			startupDiagnostics(root, *name),
+			cleanupStartedHelper(inst, instanceRoot),
 		)
-		_ = os.RemoveAll(instanceRoot)
 		return failure
 	}
 	readyTimer := time.NewTimer(*readyTimeout)
@@ -289,7 +287,7 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	for {
 		current, err := readMetadata(MetadataPath(root, *name))
 		if err == nil {
-			handled, err := handleStartReadinessMetadata(root, *name, current, inst.PID, cmd.Process, stdout)
+			handled, err := handleStartReadinessMetadata(root, *name, current, inst, stdout)
 			if handled {
 				return err
 			}
@@ -308,17 +306,14 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			_ = os.RemoveAll(instanceRoot)
 			return failure
 		case <-readyTimer.C:
-			terminateStartedHelper(cmd.Process, inst.PID)
 			failure := errors.Join(
 				fmt.Errorf("timed out waiting for helper daemon to report readiness"),
 				startupDiagnostics(root, *name),
+				cleanupStartedHelper(inst, instanceRoot),
 			)
-			_ = os.RemoveAll(instanceRoot)
 			return failure
 		case <-ctx.Done():
-			terminateStartedHelper(cmd.Process, inst.PID)
-			_ = os.RemoveAll(instanceRoot)
-			return ctx.Err()
+			return errors.Join(ctx.Err(), cleanupStartedHelper(inst, instanceRoot))
 		case <-pollTicker.C:
 		}
 	}
@@ -362,10 +357,10 @@ func authorizeStartedHelper(stateRoot, name string, inst Instance, writer io.Wri
 	return inst, nil
 }
 
-func handleStartReadinessMetadata(stateRoot, name string, inst Instance, expectedPID int, process *os.Process, stdout io.Writer) (bool, error) {
+func handleStartReadinessMetadata(stateRoot, name string, inst, expected Instance, stdout io.Writer) (bool, error) {
 	rawPID := inst.PID
 	inst = normalizeInstance(inst)
-	if rawPID != expectedPID {
+	if rawPID != expected.PID {
 		return false, nil
 	}
 	switch inst.Status {
@@ -374,12 +369,8 @@ func handleStartReadinessMetadata(stateRoot, name string, inst Instance, expecte
 	case StatusError:
 		return true, errors.New(inst.Error)
 	case StatusStopping, StatusStopped:
-		terminateStartedHelper(process, expectedPID)
 		failure := errors.Join(helperStoppedBeforeReadinessError(inst.Status), startupDiagnostics(stateRoot, name))
-		if err := os.RemoveAll(InstanceDir(stateRoot, name)); err != nil {
-			return true, errors.Join(failure, fmt.Errorf("remove instance directory: %w", err))
-		}
-		return true, failure
+		return true, errors.Join(failure, cleanupStartedHelper(expected, InstanceDir(stateRoot, name)))
 	default:
 		return false, nil
 	}
@@ -441,18 +432,79 @@ func readTail(path string, limit int64) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-func terminateStartedHelper(process *os.Process, pid int) {
-	if process == nil || pid <= 0 || !pidAlive(pid) {
-		return
+func cleanupStartedHelper(inst Instance, instanceRoot string) error {
+	if err := terminateStartedHelper(inst); err != nil {
+		return fmt.Errorf("terminate helper daemon: %w", err)
 	}
-	_ = process.Signal(syscall.SIGTERM)
+	if err := os.RemoveAll(instanceRoot); err != nil {
+		return fmt.Errorf("remove instance directory: %w", err)
+	}
+	return nil
+}
+
+func cleanupUnauthorizedStartedHelper(inst Instance, instanceRoot string, waitCh <-chan error) error {
+	timer := time.NewTimer(terminateInstanceGraceTime)
+	defer timer.Stop()
+	select {
+	case <-waitCh:
+		if err := os.RemoveAll(instanceRoot); err != nil {
+			return fmt.Errorf("remove instance directory: %w", err)
+		}
+		return nil
+	case <-timer.C:
+		if strings.TrimSpace(inst.PIDStartedAt) == "" {
+			return fmt.Errorf("helper process %d did not exit after startup authorization closed", inst.PID)
+		}
+		return cleanupStartedHelper(inst, instanceRoot)
+	}
+}
+
+func terminateStartedHelper(inst Instance) error {
+	matches, err := startedHelperIdentityMatches(inst)
+	if err != nil || !matches {
+		return err
+	}
+	if err := signalProcess(inst.PID, syscall.SIGTERM); err != nil && processAlive(inst.PID) {
+		return fmt.Errorf("signal helper process %d: %w", inst.PID, err)
+	}
 	deadline := time.Now().Add(terminateInstanceGraceTime)
-	for pidAlive(pid) && time.Now().Before(deadline) {
+	for time.Now().Before(deadline) {
+		matches, err := startedHelperIdentityMatches(inst)
+		if err != nil || !matches {
+			return err
+		}
 		time.Sleep(terminateInstancePollTime)
 	}
-	if pidAlive(pid) {
-		_ = process.Signal(syscall.SIGKILL)
+	matches, err = startedHelperIdentityMatches(inst)
+	if err != nil || !matches {
+		return err
 	}
+	if err := signalProcess(inst.PID, syscall.SIGKILL); err != nil && processAlive(inst.PID) {
+		return fmt.Errorf("kill helper process %d: %w", inst.PID, err)
+	}
+	deadline = time.Now().Add(terminateInstanceGraceTime)
+	for time.Now().Before(deadline) {
+		matches, err := startedHelperIdentityMatches(inst)
+		if err != nil || !matches {
+			return err
+		}
+		time.Sleep(terminateInstancePollTime)
+	}
+	return fmt.Errorf("helper process %d remained alive after SIGKILL", inst.PID)
+}
+
+func startedHelperIdentityMatches(inst Instance) (bool, error) {
+	if inst.PID <= 0 || !processAlive(inst.PID) {
+		return false, nil
+	}
+	matches, err := processIdentityMatches(inst)
+	if err != nil {
+		if processAlive(inst.PID) {
+			return false, fmt.Errorf("verify helper process %d identity: %w", inst.PID, err)
+		}
+		return false, nil
+	}
+	return matches, nil
 }
 
 func runServeCommand(args []string, stdout, stderr io.Writer) error {
