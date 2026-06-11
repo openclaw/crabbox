@@ -14,6 +14,7 @@ import (
 
 const morphReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"
 const defaultMorphWorkRoot = "/tmp/crabbox"
+const morphAcquireRollbackTimeout = 30 * time.Second
 
 var waitForMorphSSHReady = waitForSSHReady
 
@@ -34,6 +35,7 @@ type morphLeaseBackend struct {
 	now               func() time.Time
 	readyPollInterval time.Duration
 	readyTimeout      time.Duration
+	rollbackTimeout   time.Duration
 }
 
 func RegisterMorphProviderFlags(fs *flag.FlagSet, defaults Config) any {
@@ -100,6 +102,7 @@ func NewMorphBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error)
 		now:               time.Now,
 		readyPollInterval: 2 * time.Second,
 		readyTimeout:      10 * time.Minute,
+		rollbackTimeout:   morphAcquireRollbackTimeout,
 	}, nil
 }
 
@@ -169,18 +172,35 @@ func (b *morphLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	instance, err := client.BootSnapshot(ctx, cfg.Morph.Snapshot, morphBootSnapshotRequest{})
+	now := b.now().UTC()
+	labels := morphLeaseMetadata(cfg, morphInstance{
+		Refs: morphInstanceRefs{SnapshotID: cfg.Morph.Snapshot},
+	}, leaseID, slug, "", req.Keep, now, false)
+	bootReq := morphBootSnapshotRequest{
+		Metadata:  labels,
+		TTLAction: morphTTLAction(cfg),
+	}
+	if ttlSeconds := morphTTLSecondsFromLabels(labels, now); ttlSeconds > 0 {
+		bootReq.TTLSeconds = &ttlSeconds
+	}
+	instance, err := client.BootSnapshot(ctx, cfg.Morph.Snapshot, bootReq)
 	if err != nil {
 		return LeaseTarget{}, exit(1, "morph boot snapshot %q failed: %v", cfg.Morph.Snapshot, err)
 	}
 	createdLease := LeaseTarget{LeaseID: leaseID, Server: Server{CloudID: instance.ID}}
 	cleanupCreated := func() {
 		removeStoredTestboxKey(leaseID)
-		if cleanupErr := client.DeleteInstance(context.Background(), instance.ID); cleanupErr != nil && !isMorphNotFound(cleanupErr) && b.rt.Stderr != nil {
+		timeout := b.rollbackTimeout
+		if timeout <= 0 {
+			timeout = morphAcquireRollbackTimeout
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		defer cancel()
+		if cleanupErr := client.DeleteInstance(cleanupCtx, instance.ID); cleanupErr != nil && !isMorphNotFound(cleanupErr) && b.rt.Stderr != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: failed to delete morph instance %s after acquire error: %v\n", instance.ID, cleanupErr)
 		}
 	}
-	labels := morphLeaseMetadata(cfg, instance, leaseID, slug, "", req.Keep, b.now().UTC(), false)
+	labels = morphLeaseMetadata(cfg, instance, leaseID, slug, "", req.Keep, now, false)
 	if err := client.SetInstanceMetadata(ctx, instance.ID, labels); err != nil {
 		if !req.Keep {
 			cleanupCreated()

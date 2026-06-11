@@ -110,6 +110,7 @@ func TestMorphAcquireStoresMetadataAndKey(t *testing.T) {
 	cfg := testMorphConfig()
 
 	var gotMetadata map[string]string
+	var gotBootRequest morphBootSnapshotRequest
 	var gotTTL int
 	var gotTTLAction string
 	var gotWakeOnSSH *bool
@@ -137,7 +138,8 @@ func TestMorphAcquireStoresMetadataAndKey(t *testing.T) {
 			}
 			return nil, nil
 		},
-		bootSnapshot: func(_ context.Context, snapshotID string, _ morphBootSnapshotRequest) (morphInstance, error) {
+		bootSnapshot: func(_ context.Context, snapshotID string, req morphBootSnapshotRequest) (morphInstance, error) {
+			gotBootRequest = req
 			return morphInstance{ID: "inst_1", Status: "starting", Refs: morphInstanceRefs{SnapshotID: snapshotID}}, nil
 		},
 		setInstanceMetadata: func(_ context.Context, instanceID string, metadata map[string]string) error {
@@ -172,12 +174,19 @@ func TestMorphAcquireStoresMetadataAndKey(t *testing.T) {
 		},
 	}
 
+	nowCalls := 0
 	backend := &morphLeaseBackend{
-		spec:              Provider{}.Spec(),
-		cfg:               cfg,
-		rt:                Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}},
-		client:            fake,
-		now:               func() time.Time { return now },
+		spec:   Provider{}.Spec(),
+		cfg:    cfg,
+		rt:     Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}},
+		client: fake,
+		now: func() time.Time {
+			nowCalls++
+			if nowCalls == 1 {
+				return now
+			}
+			return now.Add(time.Minute)
+		},
 		readyPollInterval: time.Millisecond,
 		readyTimeout:      time.Second,
 	}
@@ -192,7 +201,13 @@ func TestMorphAcquireStoresMetadataAndKey(t *testing.T) {
 	if gotMetadata["lease"] != lease.LeaseID || gotMetadata["provider"] != providerName || gotMetadata["instance_id"] != "inst_1" || gotMetadata["work_root"] != "/tmp/crabbox" || gotMetadata["snapshot_id"] != "snapshot_123" {
 		t.Fatalf("unexpected metadata: %#v", gotMetadata)
 	}
-	if gotTTL != int((15*time.Minute).Seconds()) || gotTTLAction != "pause" {
+	if gotBootRequest.Metadata["lease"] != lease.LeaseID || gotBootRequest.Metadata["provider"] != providerName || gotBootRequest.Metadata["snapshot_id"] != "snapshot_123" {
+		t.Fatalf("unexpected boot metadata: %#v", gotBootRequest.Metadata)
+	}
+	if gotBootRequest.TTLSeconds == nil || *gotBootRequest.TTLSeconds != int((15*time.Minute).Seconds()) || gotBootRequest.TTLAction != "pause" {
+		t.Fatalf("unexpected boot ttl: %#v", gotBootRequest)
+	}
+	if gotTTL != int((14*time.Minute).Seconds()) || gotTTLAction != "pause" {
 		t.Fatalf("unexpected ttl update: ttl=%d action=%s", gotTTL, gotTTLAction)
 	}
 	if gotWakeOnSSH == nil || !*gotWakeOnSSH {
@@ -262,6 +277,57 @@ func TestMorphAcquireRequiresSnapshot(t *testing.T) {
 	}
 }
 
+func TestMorphAcquireRollbackIsBounded(t *testing.T) {
+	configureMorphTestHome(t)
+	cfg := testMorphConfig()
+	var stderr bytes.Buffer
+	deleteFinished := make(chan struct{})
+	fake := &fakeMorphAPI{
+		getSnapshot: func(_ context.Context, snapshotID string) (morphSnapshot, error) {
+			return morphSnapshot{ID: snapshotID}, nil
+		},
+		listInstances: func(_ context.Context, _ map[string]string) ([]morphInstance, error) {
+			return nil, nil
+		},
+		bootSnapshot: func(_ context.Context, _ string, _ morphBootSnapshotRequest) (morphInstance, error) {
+			return morphInstance{ID: "inst_rollback", Status: "starting"}, nil
+		},
+		setInstanceMetadata: func(_ context.Context, _ string, _ map[string]string) error {
+			return errors.New("metadata failed")
+		},
+		deleteInstance: func(ctx context.Context, _ string) error {
+			defer close(deleteFinished)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+	backend := &morphLeaseBackend{
+		spec:            Provider{}.Spec(),
+		cfg:             cfg,
+		rt:              Runtime{Stdout: io.Discard, Stderr: &stderr},
+		client:          fake,
+		now:             time.Now,
+		rollbackTimeout: 20 * time.Millisecond,
+	}
+
+	started := time.Now()
+	_, err := backend.Acquire(context.Background(), AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "metadata failed") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Acquire rollback took %s, want bounded timeout", elapsed)
+	}
+	select {
+	case <-deleteFinished:
+	default:
+		t.Fatal("rollback delete did not finish")
+	}
+	if !strings.Contains(stderr.String(), "context deadline exceeded") {
+		t.Fatalf("stderr=%q, want rollback timeout warning", stderr.String())
+	}
+}
+
 func TestMorphResolveResumesPausedInstanceWithoutWakeOnSSH(t *testing.T) {
 	configureMorphTestHome(t)
 	cfg := testMorphConfig()
@@ -313,6 +379,41 @@ func TestMorphResolveResumesPausedInstanceWithoutWakeOnSSH(t *testing.T) {
 	}
 	if lease.Server.Status != "ready" || lease.SSH.User != "inst_2" {
 		t.Fatalf("unexpected resolved lease: %#v", lease)
+	}
+}
+
+func TestMorphResolveRejectsUnsafeMetadataLeaseID(t *testing.T) {
+	home := t.TempDir()
+	configDir := filepath.Join(home, ".config")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	fake := &fakeMorphAPI{
+		getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
+			return morphInstance{
+				ID:       instanceID,
+				Status:   "ready",
+				Metadata: morphMetadata{"lease": "../escape", "provider": providerName, "crabbox": "true"},
+			}, nil
+		},
+		getSSHKey: func(_ context.Context, _ string) (morphSSHKey, error) {
+			return morphSSHKey{PrivateKey: "PRIVATE KEY"}, nil
+		},
+	}
+	backend := &morphLeaseBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    testMorphConfig(),
+		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		client: fake,
+		now:    time.Now,
+	}
+
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: "inst_unsafe"})
+	if err == nil || !strings.Contains(err.Error(), "invalid lease claim id") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	escapedPath := filepath.Join(configDir, "crabbox", "escape", "id_ed25519")
+	if _, err := os.Stat(escapedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsafe key path exists: %s", escapedPath)
 	}
 }
 
