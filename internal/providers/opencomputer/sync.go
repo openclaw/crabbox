@@ -86,17 +86,26 @@ func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClien
 }
 
 func (b *openComputerBackend) prepareWorkspace(ctx context.Context, api *ocAPIClient, sandboxID, workdir string) error {
-	command := "mkdir -p " + shellQuote(workdir)
-	if b.cfg.Sync.Delete {
-		command = "rm -rf " + shellQuote(workdir) + " && " + command
+	if !b.cfg.Sync.Delete {
+		return b.ensureWorkspace(ctx, api, sandboxID, workdir)
 	}
+	command := "rm -rf " + shellQuote(workdir) + " && mkdir -p " + shellQuote(workdir)
 	return b.execShell(ctx, api, sandboxID, command)
+}
+
+func (b *openComputerBackend) ensureWorkspace(ctx context.Context, api *ocAPIClient, sandboxID, workdir string) error {
+	// --no-sync must never apply sync.delete to a retained workspace.
+	return b.execShell(ctx, api, sandboxID, "mkdir -p "+shellQuote(workdir))
 }
 
 // execShell runs `bash -lc <command>` via exec/run and returns an error for
 // non-zero exits. Used for sync helpers (mkdir, extract, cleanup).
 func (b *openComputerBackend) execShell(ctx context.Context, api *ocAPIClient, sandboxID, command string) error {
-	res, err := api.execRun(ctx, sandboxID, execRunRequest{Cmd: "bash", Args: []string{"-lc", command}})
+	res, err := api.execRun(ctx, sandboxID, execRunRequest{
+		Cmd:     "bash",
+		Args:    []string{"-lc", command},
+		Timeout: b.execTimeoutSecs(),
+	})
 	if err != nil {
 		return err
 	}

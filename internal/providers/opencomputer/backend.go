@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const openComputerCleanupTimeout = 15 * time.Second
+const (
+	openComputerCleanupTimeout  = 15 * time.Second
+	openComputerExecTimeoutSecs = 3600
+)
 
 func NewOpenComputerBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = providerName
@@ -106,7 +109,7 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, api, sandboxID, workdir); err != nil {
+	} else if err := b.ensureWorkspace(ctx, api, sandboxID, workdir); err != nil {
 		return RunResult{}, err
 	}
 
@@ -303,10 +306,11 @@ func (b *openComputerBackend) execCommand(ctx context.Context, api *ocAPIClient,
 		return 2, errors.New("missing command")
 	}
 	res, err := api.execRun(ctx, sandboxID, execRunRequest{
-		Cmd:  command[0],
-		Args: command[1:],
-		Envs: env,
-		Cwd:  workdir,
+		Cmd:     command[0],
+		Args:    command[1:],
+		Envs:    env,
+		Cwd:     workdir,
+		Timeout: b.execTimeoutSecs(),
 	})
 	if err != nil {
 		return 1, err
@@ -327,11 +331,10 @@ func (b *openComputerBackend) createSandbox(ctx context.Context, api *ocAPIClien
 		Timeout:  b.cfg.OpenComputer.TimeoutSecs,
 		Metadata: map[string]string{"crabbox": "true", "crabbox-name": newSandboxName(repo)},
 	}
-	// Only send sizing when both are set; CPU/memory must form an allowed tier,
-	// so an unset sizing falls back to the service default rather than risking
-	// an invalid 0/0 combination.
-	if b.cfg.OpenComputer.CPU > 0 && b.cfg.OpenComputer.MemoryMB > 0 {
+	if b.cfg.OpenComputer.CPU > 0 {
 		req.CPUCount = b.cfg.OpenComputer.CPU
+	}
+	if b.cfg.OpenComputer.MemoryMB > 0 {
 		req.MemoryMB = b.cfg.OpenComputer.MemoryMB
 	}
 	sb, err := api.createSandbox(ctx, req)
@@ -341,16 +344,10 @@ func (b *openComputerBackend) createSandbox(ctx context.Context, api *ocAPIClien
 	leaseID := leasePrefix + sb.ID
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		cleanupCtx, cancel := b.cleanupContext(ctx)
-		defer cancel()
-		_ = api.killSandbox(cleanupCtx, sb.ID)
-		return "", "", "", err
+		return leaseID, sb.ID, "", b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
 	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		cleanupCtx, cancel := b.cleanupContext(ctx)
-		defer cancel()
-		_ = api.killSandbox(cleanupCtx, sb.ID)
-		return "", "", "", err
+		return leaseID, sb.ID, slug, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
 	return leaseID, sb.ID, slug, nil
 }
@@ -431,7 +428,7 @@ func isReadyState(state string) bool {
 // ready, so Status can fail fast instead of polling until a deadline.
 func isTerminalState(state string) bool {
 	switch strings.TrimSpace(strings.ToLower(state)) {
-	case "terminated", "stopped", "failed", "killed", "deleted":
+	case "terminated", "stopped", "failed", "error", "killed", "deleted":
 		return true
 	default:
 		return false
@@ -494,4 +491,20 @@ func (b *openComputerBackend) cleanupContext(ctx context.Context) (context.Conte
 		timeout = b.cleanupTimeoutOverride
 	}
 	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
+}
+
+func (b *openComputerBackend) cleanupCreateFailure(ctx context.Context, api *ocAPIClient, sandboxID string, cause error) error {
+	cleanupCtx, cancel := b.cleanupContext(ctx)
+	defer cancel()
+	if err := api.killSandbox(cleanupCtx, sandboxID); err != nil {
+		return errors.Join(cause, fmt.Errorf("opencomputer cleanup failed for sandbox %s; delete it in the OpenComputer console: %w", sandboxID, err))
+	}
+	return cause
+}
+
+func (b *openComputerBackend) execTimeoutSecs() int {
+	if b.cfg.OpenComputer.ExecTimeoutSecs > 0 {
+		return b.cfg.OpenComputer.ExecTimeoutSecs
+	}
+	return openComputerExecTimeoutSecs
 }

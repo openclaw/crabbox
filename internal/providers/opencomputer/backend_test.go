@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	osexec "os/exec"
+	"path"
 	"reflect"
 	"strings"
 	"sync"
@@ -143,7 +144,7 @@ func TestIsReadyState(t *testing.T) {
 
 func TestIsTerminalState(t *testing.T) {
 	for state, want := range map[string]bool{
-		"terminated": true, "stopped": true, "failed": true, "killed": true,
+		"terminated": true, "stopped": true, "failed": true, "error": true, "killed": true,
 		"running": false, "starting": false,
 	} {
 		if got := isTerminalState(state); got != want {
@@ -236,6 +237,7 @@ type fakeAPI struct {
 	listState     string
 	getStatusCode int // when non-zero, GET /api/sandboxes/:id returns this code
 	blockDelete   bool
+	deleteStatus  int
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
@@ -268,6 +270,11 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/sandboxes/"):
 		if f.blockDelete {
 			<-r.Context().Done()
+			return
+		}
+		if f.deleteStatus != 0 {
+			w.WriteHeader(f.deleteStatus)
+			_, _ = w.Write([]byte(`{"error":"cleanup denied"}`))
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -325,6 +332,17 @@ func (f *fakeAPI) allExecs() []execRecord {
 	return append([]execRecord(nil), f.execs...)
 }
 
+func (f *fakeAPI) firstRequest(method, path string) (recordedRequest, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, req := range f.requests {
+		if req.method == method && req.path == path {
+			return req, true
+		}
+	}
+	return recordedRequest{}, false
+}
+
 func newTestConfig(apiURL string) Config {
 	cfg := Config{}
 	cfg.OpenComputer.APIURL = apiURL
@@ -372,6 +390,9 @@ func TestRunCreatesExecsAndKillsEphemeral(t *testing.T) {
 	}
 	if last.Cwd != "/workspace/crabbox" {
 		t.Fatalf("user exec cwd=%q", last.Cwd)
+	}
+	if last.Timeout != openComputerExecTimeoutSecs {
+		t.Fatalf("user exec timeout=%d want %d", last.Timeout, openComputerExecTimeoutSecs)
 	}
 }
 
@@ -431,6 +452,23 @@ func TestRunForwardsEnvInExecBodyOffArgv(t *testing.T) {
 	}
 }
 
+func TestRunUsesConfiguredExecTimeout(t *testing.T) {
+	f := newFakeAPI(t)
+	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}}
+	backend := newAPIBackend(t, f)
+	backend.cfg.OpenComputer.ExecTimeoutSecs = 123
+	if _, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
+	}); err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	for _, exec := range f.allExecs() {
+		if exec.req.Timeout != 123 {
+			t.Fatalf("exec timeout=%d want 123: %#v", exec.req.Timeout, exec.req)
+		}
+	}
+}
+
 func TestRunRequiresAPIKey(t *testing.T) {
 	f := newFakeAPI(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -467,6 +505,94 @@ func TestRunPerformsArchiveSyncViaFileAPI(t *testing.T) {
 	}
 	if !sawExtract {
 		t.Fatalf("expected a tar extract exec after upload")
+	}
+}
+
+func TestNoSyncDoesNotDeleteRetainedWorkspace(t *testing.T) {
+	f := newFakeAPI(t)
+	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}}
+	backend := newAPIBackend(t, f)
+	backend.cfg.Sync.Delete = true
+	leaseID := leasePrefix + f.sandboxID
+	if err := claimLeaseForRepoProvider(leaseID, "retained", providerName, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Run(context.Background(), RunRequest{
+		ID: leaseID, Repo: Repo{Name: "carbbox", Root: "/repo"}, Command: []string{"true"}, NoSync: true,
+	}); err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	for _, exec := range f.allExecs() {
+		if strings.Contains(strings.Join(exec.req.Args, " "), "rm -rf") {
+			t.Fatalf("--no-sync deleted retained workspace: %#v", exec.req)
+		}
+	}
+}
+
+func TestCreateSandboxForwardsPartialSizing(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cpu      int
+		memoryMB int
+	}{
+		{name: "cpu only", cpu: 2},
+		{name: "memory only", memoryMB: 4096},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeAPI(t)
+			backend := newAPIBackend(t, f)
+			backend.cfg.OpenComputer.CPU = tc.cpu
+			backend.cfg.OpenComputer.MemoryMB = tc.memoryMB
+			api, err := newOCAPIClient(backend.cfg, backend.rt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			leaseID, _, _, err := backend.createSandbox(context.Background(), api, Repo{Name: "carbbox", Root: t.TempDir()}, false, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { removeLeaseClaim(leaseID) })
+			recorded, ok := f.firstRequest(http.MethodPost, "/api/sandboxes")
+			if !ok {
+				t.Fatal("missing create request")
+			}
+			var req createSandboxRequest
+			if err := json.Unmarshal([]byte(recorded.body), &req); err != nil {
+				t.Fatal(err)
+			}
+			if req.CPUCount != tc.cpu || req.MemoryMB != tc.memoryMB {
+				t.Fatalf("create sizing=%d/%d want %d/%d", req.CPUCount, req.MemoryMB, tc.cpu, tc.memoryMB)
+			}
+		})
+	}
+}
+
+func TestCreateSandboxReportsCleanupFailureAndSandboxID(t *testing.T) {
+	f := newFakeAPI(t)
+	f.deleteStatus = http.StatusInternalServerError
+	backend := newAPIBackend(t, f)
+	claimsPath := path.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims")
+	if err := os.MkdirAll(path.Dir(claimsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(claimsPath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	api, err := newOCAPIClient(backend.cfg, backend.rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseID, sandboxID, _, err := backend.createSandbox(context.Background(), api, Repo{Name: "carbbox", Root: t.TempDir()}, false, "taken")
+	if err == nil {
+		t.Fatal("expected claim setup and cleanup failure")
+	}
+	if leaseID != leasePrefix+f.sandboxID || sandboxID != f.sandboxID {
+		t.Fatalf("lease=%q sandbox=%q", leaseID, sandboxID)
+	}
+	for _, want := range []string{"read claims directory", "cleanup failed", f.sandboxID, "cleanup denied"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%v, want %q", err, want)
+		}
 	}
 }
 

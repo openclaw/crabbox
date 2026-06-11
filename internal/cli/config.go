@@ -420,11 +420,12 @@ type TensorlakeConfig struct {
 // or the `oc` CLI config (`oc config set api-key`), and sent only in the
 // X-API-Key header — never persisted in Crabbox config or placed on argv.
 type OpenComputerConfig struct {
-	APIURL      string
-	Workdir     string
-	CPU         int
-	MemoryMB    int
-	TimeoutSecs int
+	APIURL          string
+	Workdir         string
+	CPU             int
+	MemoryMB        int
+	TimeoutSecs     int
+	ExecTimeoutSecs int
 }
 
 type DockerSandboxConfig struct {
@@ -1270,7 +1271,8 @@ func baseConfig() Config {
 			// api_url is honored before the built-in default; the provider
 			// applies the default (https://app.opencomputer.dev) as the final
 			// fallback in newOCAPIClient.
-			Workdir: "/workspace/crabbox",
+			Workdir:         "/workspace/crabbox",
+			ExecTimeoutSecs: 3600,
 		},
 		DockerSandbox: DockerSandboxConfig{
 			CLIPath: "sbx",
@@ -1789,11 +1791,11 @@ type fileTensorlakeConfig struct {
 }
 
 type fileOpenComputerConfig struct {
-	APIURL      string `yaml:"apiUrl,omitempty"`
-	Workdir     string `yaml:"workdir,omitempty"`
-	CPU         int    `yaml:"cpu,omitempty"`
-	MemoryMB    int    `yaml:"memoryMB,omitempty"`
-	TimeoutSecs int    `yaml:"timeoutSecs,omitempty"`
+	Workdir         string `yaml:"workdir,omitempty"`
+	CPU             *int   `yaml:"cpu,omitempty"`
+	MemoryMB        *int   `yaml:"memoryMB,omitempty"`
+	TimeoutSecs     *int   `yaml:"timeoutSecs,omitempty"`
+	ExecTimeoutSecs *int   `yaml:"execTimeoutSecs,omitempty"`
 }
 
 type fileDockerSandboxConfig struct {
@@ -3048,20 +3050,20 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 	}
 	if file.OpenComputer != nil {
-		if file.OpenComputer.APIURL != "" {
-			cfg.OpenComputer.APIURL = file.OpenComputer.APIURL
-		}
 		if file.OpenComputer.Workdir != "" {
 			cfg.OpenComputer.Workdir = file.OpenComputer.Workdir
 		}
-		if file.OpenComputer.CPU > 0 {
-			cfg.OpenComputer.CPU = file.OpenComputer.CPU
+		if file.OpenComputer.CPU != nil {
+			cfg.OpenComputer.CPU = *file.OpenComputer.CPU
 		}
-		if file.OpenComputer.MemoryMB > 0 {
-			cfg.OpenComputer.MemoryMB = file.OpenComputer.MemoryMB
+		if file.OpenComputer.MemoryMB != nil {
+			cfg.OpenComputer.MemoryMB = *file.OpenComputer.MemoryMB
 		}
-		if file.OpenComputer.TimeoutSecs > 0 {
-			cfg.OpenComputer.TimeoutSecs = file.OpenComputer.TimeoutSecs
+		if file.OpenComputer.TimeoutSecs != nil {
+			cfg.OpenComputer.TimeoutSecs = *file.OpenComputer.TimeoutSecs
+		}
+		if file.OpenComputer.ExecTimeoutSecs != nil {
+			cfg.OpenComputer.ExecTimeoutSecs = *file.OpenComputer.ExecTimeoutSecs
 		}
 	}
 	if file.DockerSandbox != nil {
@@ -4032,6 +4034,7 @@ func applyEnv(cfg *Config) error {
 	cfg.OpenComputer.CPU = getenvInt("CRABBOX_OPENCOMPUTER_CPU", cfg.OpenComputer.CPU)
 	cfg.OpenComputer.MemoryMB = getenvInt("CRABBOX_OPENCOMPUTER_MEMORY_MB", cfg.OpenComputer.MemoryMB)
 	cfg.OpenComputer.TimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", cfg.OpenComputer.TimeoutSecs)
+	cfg.OpenComputer.ExecTimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", cfg.OpenComputer.ExecTimeoutSecs)
 	cfg.DockerSandbox.CLIPath = getenv("CRABBOX_DOCKER_SANDBOX_CLI", cfg.DockerSandbox.CLIPath)
 	cfg.DockerSandbox.Agent = getenv("CRABBOX_DOCKER_SANDBOX_AGENT", cfg.DockerSandbox.Agent)
 	cfg.DockerSandbox.Template = getenv("CRABBOX_DOCKER_SANDBOX_TEMPLATE", cfg.DockerSandbox.Template)

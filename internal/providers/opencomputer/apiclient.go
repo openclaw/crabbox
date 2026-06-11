@@ -44,9 +44,8 @@ type sandboxListResponse struct {
 	Sandboxes []sandbox `json:"sandboxes"`
 }
 
-// createSandboxRequest is the POST /api/sandboxes body. CPU/memory must form an
-// allowed tier (e.g. 1/1024, 2/8192); they are sent only when both are set, so
-// an unset sizing falls back to the service default tier.
+// createSandboxRequest is the POST /api/sandboxes body. When only CPU or memory
+// is set, OpenComputer infers the matching sizing value.
 type createSandboxRequest struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 	Timeout  int               `json:"timeout,omitempty"`
@@ -76,9 +75,9 @@ type execRunResult struct {
 // (~/.oc/config.json). Returns an error when no key can be found.
 func newOCAPIClient(cfg Config, rt Runtime) (*ocAPIClient, error) {
 	fileCfg := readOCFileConfig()
-	// API URL precedence: an explicit Crabbox setting (config/flag/env), then the
-	// `oc` CLI config file's api_url, then the built-in default. This honors
-	// `oc config set api-url <custom>` for users who never set it in Crabbox.
+	// API URL precedence: an explicit trusted Crabbox setting, then the `oc` CLI
+	// config file's api_url, then the built-in default. Repository YAML cannot
+	// populate cfg.OpenComputer.APIURL.
 	baseURL := strings.TrimRight(blank(strings.TrimSpace(cfg.OpenComputer.APIURL), blank(strings.TrimSpace(fileCfg.APIURL), defaultAPIURL)), "/")
 	apiKey := firstNonEmpty(
 		os.Getenv("CRABBOX_OPENCOMPUTER_API_KEY"),

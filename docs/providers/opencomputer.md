@@ -54,9 +54,11 @@ written by `oc config set api-key`). It is sent only in the `X-API-Key` header,
 never persisted in Crabbox config and never placed on argv. If no key is
 resolvable, operations fail with a clear error.
 
-The API base URL defaults to `https://app.opencomputer.dev` and can be
-overridden with `openComputer.apiUrl` / `--opencomputer-api-url` /
-`OPENCOMPUTER_API_URL` (it also falls back to the `api_url` in the `oc` config).
+The API base URL defaults to `https://app.opencomputer.dev`. A trusted local
+override can come from `--opencomputer-api-url`,
+`CRABBOX_OPENCOMPUTER_API_URL`, `OPENCOMPUTER_API_URL`, or the `api_url` in the
+local `oc` config. Repository YAML cannot set the API URL: that prevents a
+checked-in config from redirecting an automatically loaded API key.
 
 ## Config
 
@@ -64,11 +66,11 @@ overridden with `openComputer.apiUrl` / `--opencomputer-api-url` /
 provider: opencomputer
 target: linux
 openComputer:
-  apiUrl: https://app.opencomputer.dev
   workdir: /workspace/crabbox  # absolute path; sync target and exec cwd
-  cpu: 0                       # vCPUs; 0 leaves it to the OpenComputer default
-  memoryMB: 0                  # memory in MB; 0 leaves it to the default
+  cpu: 0                       # vCPUs; service infers memory when set alone
+  memoryMB: 0                  # memory; service infers CPU when set alone
   timeoutSecs: 0               # sandbox idle timeout; 0 leaves it to the default
+  execTimeoutSecs: 3600        # command/sync-helper timeout
 ```
 
 Provider flags:
@@ -79,16 +81,18 @@ Provider flags:
 --opencomputer-cpu
 --opencomputer-memory-mb
 --opencomputer-timeout-secs
+--opencomputer-exec-timeout-secs
 ```
 
 Each flag has a matching `CRABBOX_OPENCOMPUTER_*` environment override (for
-example `CRABBOX_OPENCOMPUTER_WORKDIR`, `CRABBOX_OPENCOMPUTER_CPU`). The API URL
-also reads `OPENCOMPUTER_API_URL`.
+example `CRABBOX_OPENCOMPUTER_WORKDIR`, `CRABBOX_OPENCOMPUTER_CPU`,
+`CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS`). The API URL also reads
+`OPENCOMPUTER_API_URL`.
 
-> **Sizing tiers.** `cpu` and `memoryMB` must form an allowed tier (for example
-> `1/1024`, `1/4096`, `2/8192`, `4/16384`). They are sent only when both are
-> set; leaving either at `0` uses the OpenComputer default tier, so an invalid
-> partial sizing is never sent.
+> **Sizing tiers.** When both `cpu` and `memoryMB` are set, they must form an
+> allowed tier (for example `1/1024`, `1/4096`, `2/8192`, `4/16384`). When only
+> one is set, OpenComputer infers the matching value. Leaving both at `0` uses
+> the service default tier.
 
 ### Environment forwarding
 
@@ -120,7 +124,9 @@ crabbox run --provider opencomputer --allow-env API_TOKEN -- printenv API_TOKEN
    are streamed back and the remote exit code is mirrored.
 5. On release the sandbox is deleted (`DELETE /api/sandboxes/<id>`) unless
    `--keep` was set. `--keep-on-failure` retains a newly created sandbox after a
-   failed run and prints a rerun/stop hint.
+   failed run and prints a rerun/stop hint. Best-effort cleanup calls are
+   bounded to 15 seconds; a failed rollback reports the remote sandbox ID for
+   manual cleanup in the OpenComputer console.
 
 ## Capabilities
 
@@ -142,6 +148,12 @@ crabbox run --provider opencomputer --allow-env API_TOKEN -- printenv API_TOKEN
 
 - `--checksum` is rejected because OpenComputer does not expose Crabbox's rsync
   checksum semantics. `--sync-only` and `--force-sync-large` are supported.
+- `--no-sync` only ensures the workdir exists. It never applies `sync.delete`,
+  so reusing a retained sandbox does not erase its workspace.
+- Command and sync-helper requests use a 3600-second timeout by default instead
+  of OpenComputer's 60-second API default. Override it with
+  `openComputer.execTimeoutSecs` or
+  `CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS`.
 - Large-sync guardrails still apply; pass `--force-sync-large` when a large
   archive sync is intentional.
 - `--shell` wraps the command as `bash -lc '<joined args>'`. Plain commands that
