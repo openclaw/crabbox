@@ -298,8 +298,8 @@ func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequ
 	cfg := b.Cfg
 	labels := normalizedDropletLabels(item.Tags)
 	liveTailscale := map[string]string{}
-	for _, key := range []string{"tailscale_ipv4", "tailscale_fqdn", "tailscale_state", "tailscale_error"} {
-		if value, ok := labels[key]; ok {
+	for _, key := range tagLabelKeys() {
+		if value, ok := labels[key]; ok && exactTagValueKey(key) {
 			liveTailscale[key] = value
 		}
 	}

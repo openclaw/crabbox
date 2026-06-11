@@ -66,6 +66,10 @@ type sshKey struct {
 	PublicKey   string `json:"public_key"`
 }
 
+type digitalOceanTag struct {
+	Name string `json:"name"`
+}
+
 func newDigitalOceanClient(rt core.Runtime) (*digitalOceanClient, error) {
 	token := strings.TrimSpace(os.Getenv("DIGITALOCEAN_TOKEN"))
 	if token == "" {
@@ -126,7 +130,7 @@ func (c *digitalOceanClient) do(ctx context.Context, method, path string, body a
 }
 
 func (c *digitalOceanClient) ListCrabboxDroplets(ctx context.Context) ([]droplet, error) {
-	droplets, err := c.listDropletsByTag(ctx, tagCrabbox)
+	droplets, err := c.listDroplets(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +141,30 @@ func (c *digitalOceanClient) ListCrabboxDroplets(ctx context.Context) ([]droplet
 		}
 	}
 	return out, nil
+}
+
+func (c *digitalOceanClient) listDroplets(ctx context.Context) ([]droplet, error) {
+	var out []droplet
+	for page := 1; ; page++ {
+		q := url.Values{}
+		q.Set("page", strconv.Itoa(page))
+		q.Set("per_page", "200")
+		var res struct {
+			Droplets []droplet `json:"droplets"`
+			Links    struct {
+				Pages struct {
+					Next string `json:"next"`
+				} `json:"pages"`
+			} `json:"links"`
+		}
+		if err := c.do(ctx, http.MethodGet, "/droplets?"+q.Encode(), nil, &res); err != nil {
+			return nil, err
+		}
+		out = append(out, res.Droplets...)
+		if res.Links.Pages.Next == "" {
+			return out, nil
+		}
+	}
 }
 
 func (c *digitalOceanClient) listDropletsByTag(ctx context.Context, tag string) ([]droplet, error) {
@@ -383,12 +411,96 @@ func (c *digitalOceanClient) DeleteSSHKeyByName(ctx context.Context, name string
 	return nil
 }
 
-func (c *digitalOceanClient) EnsureTag(ctx context.Context, tag string) error {
-	err := c.do(ctx, http.MethodPost, "/tags", map[string]any{"name": tag}, nil)
-	if apiErr, ok := err.(*digitalOceanAPIError); ok && apiErr.Status == http.StatusUnprocessableEntity {
-		return nil
+func (c *digitalOceanClient) ListTags(ctx context.Context) ([]digitalOceanTag, error) {
+	var out []digitalOceanTag
+	for page := 1; ; page++ {
+		q := url.Values{}
+		q.Set("page", strconv.Itoa(page))
+		q.Set("per_page", "200")
+		var res struct {
+			Tags  []digitalOceanTag `json:"tags"`
+			Links struct {
+				Pages struct {
+					Next string `json:"next"`
+				} `json:"pages"`
+			} `json:"links"`
+		}
+		if err := c.do(ctx, http.MethodGet, "/tags?"+q.Encode(), nil, &res); err != nil {
+			return nil, err
+		}
+		out = append(out, res.Tags...)
+		if res.Links.Pages.Next == "" {
+			return out, nil
+		}
 	}
-	return err
+}
+
+func canonicalTagNames(tags []digitalOceanTag) map[string]string {
+	names := make(map[string]string, len(tags))
+	for _, tag := range tags {
+		if name := strings.TrimSpace(tag.Name); name != "" {
+			names[strings.ToLower(name)] = name
+		}
+	}
+	return names
+}
+
+func (c *digitalOceanClient) GetTag(ctx context.Context, name string) (digitalOceanTag, bool, error) {
+	var res struct {
+		Tag digitalOceanTag `json:"tag"`
+	}
+	err := c.do(ctx, http.MethodGet, "/tags/"+url.PathEscape(name), nil, &res)
+	if isDigitalOceanNotFound(err) {
+		return digitalOceanTag{}, false, nil
+	}
+	if err != nil {
+		return digitalOceanTag{}, false, err
+	}
+	return res.Tag, true, nil
+}
+
+func (c *digitalOceanClient) EnsureTag(ctx context.Context, tag string, known map[string]string) (string, error) {
+	key := strings.ToLower(tag)
+	if canonical := known[key]; canonical != "" {
+		return canonical, nil
+	}
+	if existing, ok, err := c.GetTag(ctx, tag); err != nil {
+		return "", err
+	} else if ok {
+		canonical := strings.TrimSpace(existing.Name)
+		if canonical == "" {
+			canonical = tag
+		}
+		known[key] = canonical
+		return canonical, nil
+	}
+	var res struct {
+		Tag digitalOceanTag `json:"tag"`
+	}
+	err := c.do(ctx, http.MethodPost, "/tags", map[string]any{"name": tag}, &res)
+	if err == nil {
+		canonical := strings.TrimSpace(res.Tag.Name)
+		if canonical == "" {
+			canonical = tag
+		}
+		known[key] = canonical
+		return canonical, nil
+	}
+	apiErr, duplicate := err.(*digitalOceanAPIError)
+	if !duplicate || apiErr.Status != http.StatusUnprocessableEntity {
+		return "", err
+	}
+	tags, listErr := c.ListTags(ctx)
+	if listErr != nil {
+		return "", errors.Join(err, fmt.Errorf("resolve canonical digitalocean tag %q: %w", tag, listErr))
+	}
+	for folded, canonical := range canonicalTagNames(tags) {
+		known[folded] = canonical
+	}
+	if canonical := known[key]; canonical != "" {
+		return canonical, nil
+	}
+	return "", err
 }
 
 func (c *digitalOceanClient) ReplaceDropletTags(ctx context.Context, id int64, currentTags, desiredTags []string) error {
@@ -396,28 +508,31 @@ func (c *digitalOceanClient) ReplaceDropletTags(ctx context.Context, id int64, c
 	desiredTags = normalizeTags(desiredTags)
 	current := make(map[string]bool, len(currentTags))
 	for _, tag := range currentTags {
-		current[tag] = true
+		current[strings.ToLower(tag)] = true
 	}
 	desired := make(map[string]bool, len(desiredTags))
 	for _, tag := range desiredTags {
-		desired[tag] = true
+		desired[strings.ToLower(tag)] = true
 	}
+	known := map[string]string{}
 	resources := make([]map[string]any, 0, 1)
 	resources = append(resources, map[string]any{"resource_id": strconv.FormatInt(id, 10), "resource_type": "droplet"})
 	for _, tag := range desiredTags {
-		if current[tag] {
+		if current[strings.ToLower(tag)] {
 			continue
 		}
-		if err := c.EnsureTag(ctx, tag); err != nil {
+		canonical, err := c.EnsureTag(ctx, tag, known)
+		if err != nil {
 			return err
 		}
 		body := map[string]any{"resources": resources}
-		if err := c.do(ctx, http.MethodPost, "/tags/"+url.PathEscape(tag)+"/resources", body, nil); err != nil {
+		if err := c.do(ctx, http.MethodPost, "/tags/"+url.PathEscape(canonical)+"/resources", body, nil); err != nil {
 			return err
 		}
 	}
 	for _, tag := range currentTags {
-		if tag == tagCrabbox || !strings.HasPrefix(tag, tagPrefix) || desired[tag] {
+		lowerTag := strings.ToLower(tag)
+		if lowerTag == tagCrabbox || !strings.HasPrefix(lowerTag, tagPrefix) || desired[lowerTag] {
 			continue
 		}
 		body := map[string]any{"resources": resources}

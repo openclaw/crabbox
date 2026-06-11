@@ -611,11 +611,15 @@ func TestTouchPreservesLiveTailscaleTags(t *testing.T) {
 	server.Labels["tailscale_ipv4"] = "100.64.1.1"
 	server.Labels["tailscale_fqdn"] = "stale.example.ts.net"
 	server.Labels["tailscale_state"] = "requested"
+	server.Labels["tailscale_tags"] = "tag:stale"
+	server.Labels["tailscale_exit_node"] = "stale.example.ts.net"
 	liveLabels := normalizedDropletLabels(item.Tags)
 	liveLabels["tailscale_ipv4"] = "100.64.1.2"
 	liveLabels["tailscale_fqdn"] = "touch-me.example.ts.net"
 	liveLabels["tailscale_state"] = "ready"
 	liveLabels["tailscale_error"] = "last probe failed: retrying"
+	liveLabels["tailscale_tags"] = "tag:ci,tag:crabbox"
+	liveLabels["tailscale_exit_node"] = "exit.example.ts.net"
 	item.Tags = tagsFromLabels(liveLabels)
 	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
 	backend := newTestBackend(t, api)
@@ -641,7 +645,9 @@ func TestTouchPreservesLiveTailscaleTags(t *testing.T) {
 		decoded["tailscale_ipv4"] != "100.64.1.2" ||
 		decoded["tailscale_fqdn"] != "touch-me.example.ts.net" ||
 		decoded["tailscale_state"] != "ready" ||
-		decoded["tailscale_error"] != "last probe failed: retrying" {
+		decoded["tailscale_error"] != "last probe failed: retrying" ||
+		decoded["tailscale_tags"] != "tag:ci,tag:crabbox" ||
+		decoded["tailscale_exit_node"] != "exit.example.ts.net" {
 		t.Fatalf("persisted labels=%v tags=%v", decoded, api.replacedTo[0])
 	}
 }
@@ -660,8 +666,10 @@ func TestUpdateTailscaleMetadataPersistsDigitalOceanTags(t *testing.T) {
 		Hostname: "metadata",
 		FQDN:     "metadata.example.ts.net",
 		IPv4:     "100.64.1.3",
+		Tags:     []string{"tag:ci", "tag:crabbox"},
 		State:    "ready",
 		Error:    "last probe failed: retrying",
+		ExitNode: "exit.example.ts.net",
 	}
 
 	updated, err := backend.UpdateTailscaleMetadata(context.Background(), core.LeaseTarget{
@@ -678,7 +686,9 @@ func TestUpdateTailscaleMetadataPersistsDigitalOceanTags(t *testing.T) {
 		if labels["tailscale_ipv4"] != meta.IPv4 ||
 			labels["tailscale_fqdn"] != meta.FQDN ||
 			labels["tailscale_state"] != meta.State ||
-			labels["tailscale_error"] != meta.Error {
+			labels["tailscale_error"] != meta.Error ||
+			labels["tailscale_tags"] != strings.Join(meta.Tags, ",") ||
+			labels["tailscale_exit_node"] != meta.ExitNode {
 			t.Fatalf("persisted labels=%v tags=%v", labels, api.replacedTo[0])
 		}
 	}

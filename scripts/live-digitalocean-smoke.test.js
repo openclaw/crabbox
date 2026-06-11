@@ -12,6 +12,47 @@ function writeExecutable(file, body) {
   fs.chmodSync(file, 0o755);
 }
 
+function writeRawInventoryPythonStub(binDir, rawStatus) {
+  const python = spawnSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).stdout.trim();
+  assert.ok(python, "python3 is required for smoke tests");
+  writeExecutable(
+    path.join(binDir, "python3"),
+    `#!/usr/bin/env bash
+if [[ "$*" == *"/account/keys"* ]]; then
+  printf '[]\n'
+  exit 0
+fi
+if [[ "$*" == *"urllib.request"* ]]; then
+  exit ${rawStatus}
+fi
+exec ${JSON.stringify(python)} "$@"
+`,
+  );
+}
+
+function writeOrphanKeyPythonStub(binDir, stateFile) {
+  const python = spawnSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).stdout.trim();
+  assert.ok(python, "python3 is required for smoke tests");
+  writeExecutable(
+    path.join(binDir, "python3"),
+    `#!/usr/bin/env bash
+if [[ "$*" == *"/account/keys"* ]]; then
+  if [[ -f ${JSON.stringify(stateFile)} ]]; then
+    printf '[{"id":123,"name":"crabbox-cbx-orphan","fingerprint":"fp"}]\n'
+  else
+    : >${JSON.stringify(stateFile)}
+    printf '[]\n'
+  fi
+  exit 0
+fi
+if [[ "$*" == *"urllib.request"* ]]; then
+  exit 1
+fi
+exec ${JSON.stringify(python)} "$@"
+`,
+  );
+}
+
 function prepareSmokeRepo(dir) {
   const tempRoot = path.join(dir, "repo");
   const tempScripts = path.join(tempRoot, "scripts");
@@ -41,6 +82,7 @@ test("live digitalocean smoke runs guarded lifecycle and redacts token", () => {
   const calls = path.join(dir, "calls.log");
   const slugFile = path.join(dir, "slug.txt");
   fs.mkdirSync(binDir, { recursive: true });
+  writeRawInventoryPythonStub(binDir, 1);
 
   writeExecutable(
     path.join(binDir, "go"),
@@ -136,6 +178,7 @@ test("live digitalocean smoke attempts cleanup after partial failure", () => {
   const stopped = path.join(dir, "stopped.log");
   const calls = path.join(dir, "calls.log");
   fs.mkdirSync(binDir, { recursive: true });
+  writeRawInventoryPythonStub(binDir, 1);
 
   writeExecutable(
     path.join(binDir, "go"),
@@ -197,6 +240,7 @@ test("live digitalocean smoke reports targeted cleanup failure without global cl
   const binDir = path.join(dir, "bin");
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   const calls = path.join(dir, "calls.log");
+  const slugFile = path.join(dir, "slug.txt");
   fs.mkdirSync(binDir, { recursive: true });
 
   writeExecutable(
@@ -205,6 +249,7 @@ test("live digitalocean smoke reports targeted cleanup failure without global cl
 exit 0
 `,
   );
+  writeRawInventoryPythonStub(binDir, 0);
   writeExecutable(
     path.join(binDir, "go"),
     `#!/usr/bin/env bash
@@ -224,15 +269,21 @@ case "$1" in
     printf 'auth=ready\n'
     ;;
   list)
-    printf '[]\n'
+    if [[ -f "${slugFile}" ]]; then
+      slug="$(cat "${slugFile}")"
+      printf '[{"labels":{"slug":"%s"}}]\n' "$slug"
+    else
+      printf '[]\n'
+    fi
     ;;
   warmup)
+    printf '%s\n' "$5" >"${slugFile}"
     printf 'created droplet before failing\n' >&2
     exit 37
     ;;
   stop)
-    printf 'stop denied\n' >&2
-    exit 55
+    printf 'lease/droplet not found: cleanup-fail\n' >&2
+    exit 4
     ;;
   cleanup)
     printf 'global cleanup must not run\n' >&2
@@ -261,10 +312,140 @@ chmod +x "$out"
 
   assert.equal(result.status, 37, result.stdout + result.stderr);
   assert.match(result.stderr, /classification=cleanup_failed/);
-  assert.match(result.stderr, /stop denied/);
+  assert.match(result.stderr, /lease\/droplet not found: cleanup-fail/);
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
   assert.equal(seen.filter((line) => line.startsWith("stop ")).length, 3);
   assert.equal(seen.filter((line) => line.startsWith("cleanup ")).length, 0);
+});
+
+test("live digitalocean smoke accepts failed stop when rollback left no droplet", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-do-clean-rollback-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const calls = path.join(dir, "calls.log");
+  fs.mkdirSync(binDir, { recursive: true });
+  writeRawInventoryPythonStub(binDir, 1);
+
+  writeExecutable(
+    path.join(binDir, "go"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${calls}"
+case "$1" in
+  doctor)
+    printf 'auth=ready\n'
+    ;;
+  list)
+    printf '[]\n'
+    ;;
+  warmup)
+    printf 'create rejected before droplet persisted\n' >&2
+    exit 37
+    ;;
+  stop)
+    printf 'lease/droplet not found: rolled-back\n' >&2
+    exit 4
+    ;;
+  *)
+    exit 98
+    ;;
+esac
+SCRIPT
+chmod +x "$out"
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "digitalocean",
+      DIGITALOCEAN_TOKEN: "test-secret-token",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 37, result.stdout + result.stderr);
+  assert.doesNotMatch(result.stderr, /classification=cleanup_failed/);
+  const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
+  assert.equal(seen.filter((line) => line.startsWith("stop ")).length, 1);
+  assert.equal(seen.filter((line) => line.startsWith("list ")).length, 1);
+});
+
+test("live digitalocean smoke reports cleanup failure for an orphaned managed key", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-do-orphan-key-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const calls = path.join(dir, "calls.log");
+  fs.mkdirSync(binDir, { recursive: true });
+  writeOrphanKeyPythonStub(binDir, path.join(dir, "key-snapshot-seen"));
+  writeExecutable(path.join(binDir, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
+
+  writeExecutable(
+    path.join(binDir, "go"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${calls}"
+case "$1" in
+  doctor)
+    printf 'auth=ready\n'
+    ;;
+  list)
+    printf '[]\n'
+    ;;
+  warmup)
+    printf 'create failed after key creation\n' >&2
+    exit 37
+    ;;
+  stop)
+    printf 'lease/droplet not found: orphan-key\n' >&2
+    exit 4
+    ;;
+  *)
+    exit 98
+    ;;
+esac
+SCRIPT
+chmod +x "$out"
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "digitalocean",
+      DIGITALOCEAN_TOKEN: "test-secret-token",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 37, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=cleanup_failed/);
+  const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
+  assert.equal(seen.filter((line) => line.startsWith("stop ")).length, 3);
 });
 
 test("live digitalocean smoke refuses a non-empty inventory before mutation", () => {

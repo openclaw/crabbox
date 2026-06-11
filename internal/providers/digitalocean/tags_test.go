@@ -2,6 +2,7 @@ package digitalocean
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,9 +96,9 @@ func TestLeaseTagsPreserveTailscaleMetadata(t *testing.T) {
 	for key, want := range map[string]string{
 		"tailscale":                            "true",
 		"tailscale_state":                      "requested",
-		"tailscale_hostname":                   "cbx-blue-example-com",
-		"tailscale_tags":                       "tag:ci-tag:crabbox",
-		"tailscale_exit_node":                  "exit-example",
+		"tailscale_hostname":                   "cbx-blue.example.com",
+		"tailscale_tags":                       "tag:ci,tag:crabbox",
+		"tailscale_exit_node":                  "exit.example",
 		"tailscale_exit_node_allow_lan_access": "true",
 	} {
 		if got := labels[key]; got != want {
@@ -108,18 +109,20 @@ func TestLeaseTagsPreserveTailscaleMetadata(t *testing.T) {
 
 func TestTailscaleEndpointTagsRoundTrip(t *testing.T) {
 	labels := map[string]string{
-		"crabbox":            "true",
-		"created_by":         "crabbox",
-		"provider":           providerName,
-		"lease":              "cbx_abcdef123456",
-		"slug":               "blue",
-		"target":             core.TargetLinux,
-		"tailscale_ipv4":     "100.64.1.2",
-		"tailscale_fqdn":     "blue.example.ts.net",
-		"tailscale_state":    "ready",
-		"tailscale_error":    "last probe failed: retrying",
-		"tailscale":          "true",
-		"tailscale_hostname": "blue",
+		"crabbox":             "true",
+		"created_by":          "crabbox",
+		"provider":            providerName,
+		"lease":               "cbx_abcdef123456",
+		"slug":                "blue",
+		"target":              core.TargetLinux,
+		"tailscale_ipv4":      "100.64.1.2",
+		"tailscale_fqdn":      "blue.example.ts.net",
+		"tailscale_state":     "ready",
+		"tailscale_error":     "Auth failed: retrying",
+		"tailscale":           "true",
+		"tailscale_hostname":  "blue",
+		"tailscale_tags":      "tag:ci,tag:crabbox",
+		"tailscale_exit_node": "exit.example.ts.net",
 	}
 	tags := tagsFromLabels(labels)
 	for _, tag := range tags {
@@ -128,10 +131,49 @@ func TestTailscaleEndpointTagsRoundTrip(t *testing.T) {
 		}
 	}
 	decoded := labelsFromTags(tags)
-	for _, key := range []string{"tailscale_ipv4", "tailscale_fqdn", "tailscale_state", "tailscale_error"} {
+	for _, key := range []string{"tailscale_ipv4", "tailscale_fqdn", "tailscale_state", "tailscale_error", "tailscale_tags", "tailscale_exit_node"} {
 		if decoded[key] != labels[key] {
 			t.Fatalf("decoded[%q]=%q want %q; tags=%v", key, decoded[key], labels[key], tags)
 		}
+	}
+	if strings.EqualFold(
+		encodeTagKV("tailscale_error", "Auth failed"),
+		encodeTagKV("tailscale_error", "auth failed"),
+	) {
+		t.Fatal("exact tag encoding collapsed case-distinct values")
+	}
+}
+
+func TestLabelsFromTagsAcceptsCanonicalCaseVariants(t *testing.T) {
+	labels := labelsFromTags([]string{
+		"Crabbox",
+		"Crabbox:Provider:DigitalOcean",
+		"Crabbox:Target:Linux",
+		"Crabbox:Lease:cbx_abcdef123456",
+		"Crabbox:Slug:blue",
+	})
+	if err := validateDropletLabels(labels); err != nil {
+		t.Fatalf("validateDropletLabels err=%v labels=%v", err, labels)
+	}
+}
+
+func TestLabelsFromTagsPreservesLegacyExactFieldUnderscores(t *testing.T) {
+	legacy := "tag:ci_12"
+	labels := labelsFromTags([]string{"crabbox:tailscale_tags:" + legacy})
+	if labels["tailscale_tags"] != legacy {
+		t.Fatalf("tailscale_tags=%q want legacy %q", labels["tailscale_tags"], legacy)
+	}
+
+	versioned := tagsFromLabels(map[string]string{"tailscale_tags": "tag:ci,tag:crabbox"})
+	versioned = append(versioned, "crabbox:tailscale_tags:"+legacy)
+	labels = labelsFromTags(versioned)
+	if labels["tailscale_tags"] != "tag:ci,tag:crabbox" {
+		t.Fatalf("versioned tailscale_tags=%q tags=%v", labels["tailscale_tags"], versioned)
+	}
+
+	labels = labelsFromTags([]string{"crabbox:tailscale_ipv4:100_2e64_2e1_2e2"})
+	if labels["tailscale_ipv4"] != "100.64.1.2" {
+		t.Fatalf("legacy tailscale_ipv4=%q", labels["tailscale_ipv4"])
 	}
 }
 

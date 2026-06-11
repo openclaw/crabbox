@@ -111,9 +111,17 @@ func TestDigitalOceanClientReplaceDropletTagsDetachesObsoleteCrabboxTags(t *test
 			Path   string
 		}{Method: r.Method, Path: r.URL.RequestURI()})
 		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/tags/"):
+			http.NotFound(w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/tags":
+			var body struct {
+				Name string `json:"name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"tag":{"name":"ok"}}`))
+			_, _ = w.Write([]byte(`{"tag":{"name":"` + body.Name + `"}}`))
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/tags/") && strings.HasSuffix(r.URL.Path, "/resources"):
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/tags/") && strings.HasSuffix(r.URL.Path, "/resources"):
@@ -162,6 +170,76 @@ func TestDigitalOceanClientReplaceDropletTagsDetachesObsoleteCrabboxTags(t *test
 		!slicesContainSubstring(detached, "crabbox:state:running") ||
 		!slicesContainSubstring(detached, "crabbox:last_touched_at:100") {
 		t.Fatalf("detached=%v requests=%v", detached, requests)
+	}
+}
+
+func TestDigitalOceanClientReplaceDropletTagsUsesCanonicalTagName(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/tags/crabbox:state:ready":
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/tags":
+			http.Error(w, "already exists", http.StatusUnprocessableEntity)
+		case r.Method == http.MethodGet && r.URL.Path == "/tags":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"tags":[{"name":"Crabbox:State:Ready"}],"links":{"pages":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/tags/Crabbox:State:Ready/resources":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	if err := client.ReplaceDropletTags(
+		context.Background(),
+		42,
+		[]string{tagCrabbox},
+		[]string{tagCrabbox, "crabbox:state:ready"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 4 ||
+		requests[0] != "GET /tags/crabbox:state:ready" ||
+		requests[1] != "POST /tags" ||
+		requests[2] != "GET /tags?page=1&per_page=200" ||
+		requests[3] != "POST /tags/Crabbox:State:Ready/resources" {
+		t.Fatalf("requests=%v", requests)
+	}
+}
+
+func TestDigitalOceanClientEnsureTagRejectsUnconfirmedConflict(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/tags/crabbox:state:ready":
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/tags":
+			http.Error(w, "unprocessable", http.StatusUnprocessableEntity)
+		case r.Method == http.MethodGet && r.URL.Path == "/tags":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"tags":[],"links":{"pages":{}}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	if _, err := client.EnsureTag(context.Background(), "crabbox:state:ready", map[string]string{}); err == nil {
+		t.Fatal("EnsureTag unexpectedly suppressed unconfirmed 422")
 	}
 }
 
@@ -531,12 +609,12 @@ func TestListCrabboxDropletsFiltersAndPaginates(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer token" {
 			t.Fatalf("auth=%q", r.Header.Get("Authorization"))
 		}
-		if r.URL.Query().Get("tag_name") != "crabbox" {
+		if r.URL.Query().Get("tag_name") != "" {
 			t.Fatalf("tag_name=%q", r.URL.Query().Get("tag_name"))
 		}
 		page++
 		if page == 1 {
-			_, _ = w.Write([]byte(`{"droplets":[{"id":1,"name":"owned","tags":["crabbox","crabbox:provider:digitalocean","crabbox:lease:cbx_1","crabbox:slug:one","crabbox:target:linux"]},{"id":2,"name":"foreign","tags":["crabbox"]}],"links":{"pages":{"next":"yes"}}}`))
+			_, _ = w.Write([]byte(`{"droplets":[{"id":1,"name":"owned","tags":["Crabbox","Crabbox:Provider:DigitalOcean","Crabbox:Lease:cbx_1","Crabbox:Slug:one","Crabbox:Target:Linux"]},{"id":2,"name":"foreign","tags":["Crabbox"]}],"links":{"pages":{"next":"yes"}}}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"droplets":[{"id":3,"name":"owned2","tags":["crabbox","crabbox:provider:digitalocean","crabbox:lease:cbx_2","crabbox:slug:two","crabbox:target:linux"]}],"links":{"pages":{}}}`))

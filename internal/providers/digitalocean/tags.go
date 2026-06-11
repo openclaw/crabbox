@@ -65,6 +65,7 @@ func tagLabelKeys() []string {
 func encodeTagKV(key, value string) string {
 	key = sanitizeTagPart(key)
 	if exactTagValueKey(key) {
+		key += "_v1"
 		return tagPrefix + key + ":" + encodeExactTagValue(value, 255-len(tagPrefix)-len(key)-1)
 	}
 	return tagPrefix + key + ":" + sanitizeTagPart(value)
@@ -85,6 +86,20 @@ func sanitizeTagPart(value string) string {
 
 func exactTagValueKey(key string) bool {
 	switch key {
+	case "tailscale_hostname", "tailscale_tags", "tailscale_ipv4", "tailscale_fqdn", "tailscale_error", "tailscale_exit_node":
+		return true
+	default:
+		return false
+	}
+}
+
+func versionedExactTagValueKey(key string) (string, bool) {
+	logical := strings.TrimSuffix(key, "_v1")
+	return logical, logical != key && exactTagValueKey(logical)
+}
+
+func legacyEncodedExactTagValueKey(key string) bool {
+	switch key {
 	case "tailscale_ipv4", "tailscale_fqdn", "tailscale_error":
 		return true
 	default:
@@ -99,7 +114,6 @@ func encodeExactTagValue(value string, maxLen int) string {
 	for i := 0; i < len(value); i++ {
 		ch := value[i]
 		if (ch >= 'a' && ch <= 'z') ||
-			(ch >= 'A' && ch <= 'Z') ||
 			(ch >= '0' && ch <= '9') ||
 			ch == '-' || ch == ':' {
 			if out.Len()+1 > maxLen {
@@ -154,35 +168,50 @@ func normalizeTags(tags []string) []string {
 
 func labelsFromTags(tags []string) map[string]string {
 	labels := map[string]string{}
+	versionedExact := map[string]string{}
 	for _, tag := range tags {
+		lowerTag := strings.ToLower(tag)
 		switch {
-		case tag == tagCrabbox:
+		case lowerTag == tagCrabbox:
 			labels["crabbox"] = "true"
 			labels["created_by"] = "crabbox"
-		case tag == "crabbox:provider:"+providerName:
+		case lowerTag == "crabbox:provider:"+providerName:
 			labels["provider"] = providerName
-		case strings.HasPrefix(tag, tagPrefix):
-			parts := strings.SplitN(strings.TrimPrefix(tag, tagPrefix), ":", 2)
+		case strings.HasPrefix(lowerTag, tagPrefix):
+			parts := strings.SplitN(tag[len(tagPrefix):], ":", 2)
 			if len(parts) != 2 {
 				continue
 			}
-			switch parts[0] {
+			key := strings.ToLower(parts[0])
+			if logical, ok := versionedExactTagValueKey(key); ok {
+				versionedExact[logical] = decodeExactTagValue(parts[1])
+				continue
+			}
+			switch key {
 			case "lease", "slug", "keep", "target", "class", "server_type", "provider_key", "ttl_secs", "idle_timeout", "idle_timeout_secs", "created_at", "updated_at", "profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports", "tailscale", "tailscale_state", "tailscale_hostname", "tailscale_tags", "tailscale_ipv4", "tailscale_fqdn", "tailscale_error", "tailscale_exit_node", "tailscale_exit_node_allow_lan_access":
 				value := parts[1]
-				if exactTagValueKey(parts[0]) {
+				if legacyEncodedExactTagValueKey(key) {
 					value = decodeExactTagValue(value)
 				}
-				labels[parts[0]] = value
+				switch key {
+				case "provider", "target", "state", "keep", "tailscale", "tailscale_state", "tailscale_exit_node_allow_lan_access":
+					value = strings.ToLower(value)
+				}
+				labels[key] = value
 			case "state":
-				if statePriority(parts[1]) >= statePriority(labels["state"]) {
-					labels["state"] = parts[1]
+				value := strings.ToLower(parts[1])
+				if statePriority(value) >= statePriority(labels["state"]) {
+					labels["state"] = value
 				}
 			case "expires_at", "last_touched_at":
-				if numericTagValue(parts[1]) >= numericTagValue(labels[parts[0]]) {
-					labels[parts[0]] = parts[1]
+				if numericTagValue(parts[1]) >= numericTagValue(labels[key]) {
+					labels[key] = parts[1]
 				}
 			}
 		}
+	}
+	for key, value := range versionedExact {
+		labels[key] = value
 	}
 	return labels
 }
