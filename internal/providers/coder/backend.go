@@ -166,7 +166,11 @@ func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	server := coderWorkspaceToServer(workspace, b.cfg, leaseID, slug, true)
+	keep, err := b.resolveKeepLabel(leaseID)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	server := coderWorkspaceToServer(workspace, b.cfg, leaseID, slug, keep)
 	workspaceRef := coderWorkspaceCommandName(workspace)
 	if req.ReleaseOnly || req.StatusOnly {
 		lease := LeaseTarget{Server: server, LeaseID: leaseID}
@@ -189,7 +193,7 @@ func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		}
 		if refreshed, found := findCoderWorkspace(workspaces, workspaceRef); found {
 			workspace = refreshed
-			server = coderWorkspaceToServer(workspace, b.cfg, leaseID, slug, true)
+			server = coderWorkspaceToServer(workspace, b.cfg, leaseID, slug, keep)
 			workspaceRef = coderWorkspaceCommandName(workspace)
 		}
 	}
@@ -218,6 +222,17 @@ func (b *coderLeaseBackend) resolveNeedsListAll(identifier string) (bool, error)
 	return strings.Contains(coderClaimWorkspaceRef(claim), "/"), nil
 }
 
+func (b *coderLeaseBackend) resolveKeepLabel(leaseID string) (bool, error) {
+	if leaseID == "" {
+		return false, nil
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(leaseID, coderProvider)
+	if err != nil || !ok {
+		return false, err
+	}
+	return coderClaimKeep(claim), nil
+}
+
 func (b *coderLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
 	client, err := newCoderClient(b.cfg, b.rt)
 	if err != nil {
@@ -227,13 +242,17 @@ func (b *coderLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseV
 	if err != nil {
 		return nil, err
 	}
+	claims, err := listCoderClaimsByWorkspace(b.cfg)
+	if err != nil {
+		return nil, err
+	}
 	servers := make([]Server, 0, len(workspaces))
 	for _, workspace := range workspaces {
 		leaseID, slug, owned := coderWorkspaceLeaseMetadata(workspace, b.cfg)
 		if !owned && !req.All {
 			continue
 		}
-		servers = append(servers, coderWorkspaceToServer(workspace, b.cfg, leaseID, slug, true))
+		servers = append(servers, coderWorkspaceToServer(workspace, b.cfg, leaseID, slug, coderClaimKeep(claims[workspace.Name])))
 	}
 	return servers, nil
 }
@@ -389,7 +408,7 @@ func listCoderClaimsByWorkspace(cfg Config) (map[string]LeaseClaim, error) {
 }
 
 func shouldCleanupCoder(server Server, claim LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
-	if strings.EqualFold(server.Labels["keep"], "true") {
+	if strings.EqualFold(server.Labels["keep"], "true") || (hasClaim && coderClaimKeep(claim)) {
 		return false, "keep=true"
 	}
 	if hasClaim {
@@ -477,6 +496,10 @@ func coderClaimWorkspaceRef(claim LeaseClaim) string {
 		name = strings.TrimSpace(claim.Labels["coder_workspace"])
 	}
 	return name
+}
+
+func coderClaimKeep(claim LeaseClaim) bool {
+	return strings.EqualFold(claim.Labels["keep"], "true")
 }
 
 func coderWorkspacesToServers(workspaces []coderWorkspace, cfg Config) []Server {
