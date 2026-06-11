@@ -96,7 +96,9 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		"--outbound-http-proxy-listen=127.0.0.2:1055",
 		`--state="${TS_STATE_FILE}"`,
 		`test -n "${TS_AUTH_FILE}"`,
-		`TS_AUTH_FILE="$(mktemp /tmp/crabbox-ts-auth.XXXXXX)"`,
+		`TS_AUTH_FILE="$(mktemp "${TS_STATE_DIR}/auth.XXXXXX")"`,
+		`TS_INSTALL_DIR="$(mktemp -d "${TS_STATE_DIR}/install.XXXXXX")"`,
+		`TS_ARCHIVE="${TS_INSTALL_DIR}/tailscale.tgz"`,
 		`--auth-key="file:${TS_AUTH_FILE}"`,
 		"unset TS_AUTHKEY",
 		`if [ -n "${TS_AUTH_FILE}" ]; then rm -f "${TS_AUTH_FILE}"; fi`,
@@ -107,7 +109,7 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		`--login-server="${TS_LOGIN_SERVER}"`,
 		`--exit-node="${TS_EXIT_NODE}"`,
 		"--exit-node-allow-lan-access",
-		`/tmp/ts/tailscale --socket="${TS_SOCKET}" up "$@"`,
+		`"${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" up "$@"`,
 	} {
 		if !strings.Contains(isloTailscaleBringUp, want) {
 			t.Fatalf("bring-up script missing %q", want)
@@ -119,19 +121,24 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 	if strings.Contains(isloTailscaleBringUp, "--state=mem:") {
 		t.Fatal("bring-up script must retain node state for one-off auth keys")
 	}
-	if strings.Index(isloTailscaleBringUp, "unset TS_AUTHKEY") > strings.Index(isloTailscaleBringUp, "setsid /tmp/ts/tailscaled") {
+	if strings.Index(isloTailscaleBringUp, "unset TS_AUTHKEY") > strings.Index(isloTailscaleBringUp, `setsid "${TS_BIN_DIR}/tailscaled"`) {
 		t.Fatal("bring-up script must unset the auth key before starting tailscaled")
 	}
 	if strings.Contains(isloTailscaleBringUp, "--socks5-server=127.0.0.1:") || strings.Contains(isloTailscaleBringUp, "--outbound-http-proxy-listen=127.0.0.1:") {
 		t.Fatal("outbound proxies must not bind the loopback address used for tailnet ingress")
 	}
-	if strings.Contains(isloTailscaleBringUp, "[ ! -x /tmp/ts/tailscaled ]") {
-		t.Fatal("bring-up script must not trust cached Tailscale binaries")
+	if strings.Contains(isloTailscaleBringUp, "/tmp/ts") {
+		t.Fatal("root bootstrap artifacts must stay out of workload-writable /tmp paths")
 	}
 	verifyAt := strings.Index(isloTailscaleBringUp, "sha256sum -c -")
 	extractAt := strings.Index(isloTailscaleBringUp, `tar -xzf "${TS_ARCHIVE}"`)
 	if verifyAt < 0 || extractAt < 0 || verifyAt > extractAt {
 		t.Fatal("bring-up script must verify the archive before extraction")
+	}
+	for name, script := range map[string]string{"bring-up": isloTailscaleBringUp, "health": isloTailscaleHealthCheck} {
+		if !strings.Contains(script, `"BackendState"`) || !strings.Contains(script, `"Running"`) {
+			t.Fatalf("%s script must require a running Tailscale backend", name)
+		}
 	}
 }
 

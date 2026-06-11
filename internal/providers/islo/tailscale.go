@@ -52,39 +52,43 @@ printf '%s  %s\n' "${TS_SHA256}" "${TS_ARCHIVE}" | sha256sum -c - >/dev/null
 const isloTailscaleBringUp = `
 set -e
 umask 077
+: "${TS_STATE_DIR:?}"
+mkdir -p "${TS_STATE_DIR}"
+chmod 700 "${TS_STATE_DIR}"
 TS_AUTH_FILE=""
 if [ -n "${TS_AUTHKEY}" ]; then
-  TS_AUTH_FILE="$(mktemp /tmp/crabbox-ts-auth.XXXXXX)"
+  TS_AUTH_FILE="$(mktemp "${TS_STATE_DIR}/auth.XXXXXX")"
   printf '%s' "${TS_AUTHKEY}" >"${TS_AUTH_FILE}"
 fi
 unset TS_AUTHKEY
-trap 'if [ -n "${TS_AUTH_FILE}" ]; then rm -f "${TS_AUTH_FILE}"; fi; rm -rf "${TS_EXTRACT_DIR:-}"' EXIT
-cd /tmp
+TS_INSTALL_DIR="$(mktemp -d "${TS_STATE_DIR}/install.XXXXXX")"
+trap 'if [ -n "${TS_AUTH_FILE}" ]; then rm -f "${TS_AUTH_FILE}"; fi; rm -rf "${TS_INSTALL_DIR}"' EXIT
 case "$(uname -m)" in
   x86_64) A=amd64; TS_SHA256=` + defaultIsloTailscaleAMD64SHA256 + ` ;;
   aarch64|arm64) A=arm64; TS_SHA256=` + defaultIsloTailscaleARM64SHA256 + ` ;;
   *) echo "unsupported arch $(uname -m)" >&2; exit 3 ;;
 esac
-TS_ARCHIVE=/tmp/ts.tgz
+TS_ARCHIVE="${TS_INSTALL_DIR}/tailscale.tgz"
 wget -q -O "${TS_ARCHIVE}" "https://pkgs.tailscale.com/stable/tailscale_` + defaultIsloTailscaleVersion + `_${A}.tgz"
 ` + isloTailscaleVerifyArchive + `
-TS_EXTRACT_DIR="/tmp/ts.extract.$$"
-rm -rf "${TS_EXTRACT_DIR}"
+TS_EXTRACT_DIR="${TS_INSTALL_DIR}/extract"
 mkdir -p "${TS_EXTRACT_DIR}"
 tar -xzf "${TS_ARCHIVE}" -C "${TS_EXTRACT_DIR}" --strip-components=1
-rm -rf /tmp/ts
-mv "${TS_EXTRACT_DIR}" /tmp/ts
-TS_EXTRACT_DIR=""
-: "${TS_STATE_DIR:?}"
-mkdir -p "${TS_STATE_DIR}"
-chmod 700 "${TS_STATE_DIR}"
+TS_BIN_DIR="${TS_STATE_DIR}/bin"
+rm -rf "${TS_BIN_DIR}"
+mv "${TS_EXTRACT_DIR}" "${TS_BIN_DIR}"
 TS_SOCKET="${TS_STATE_DIR}/tailscaled.sock"
 TS_STATE_FILE="${TS_STATE_DIR}/tailscaled.state"
-if ! /tmp/ts/tailscale --socket="${TS_SOCKET}" status >/dev/null 2>&1; then
+tailscale_ip_if_ready() {
+  status_json="$("${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status --json 2>/dev/null || true)"
+  printf '%s' "${status_json}" | grep -Eq '"BackendState"[[:space:]]*:[[:space:]]*"Running"' || return 1
+  "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" ip -4 2>/dev/null | head -n1
+}
+if ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status >/dev/null 2>&1; then
   # Userspace ingress forwards tailnet TCP to 127.0.0.1:<port>. Keep the
   # unauthenticated outbound proxy on another loopback address.
   rm -f "${TS_SOCKET}"
-  setsid /tmp/ts/tailscaled --tun=userspace-networking --state="${TS_STATE_FILE}" \
+  setsid "${TS_BIN_DIR}/tailscaled" --tun=userspace-networking --state="${TS_STATE_FILE}" \
     --socket="${TS_SOCKET}" --socks5-server=127.0.0.2:1055 \
     --outbound-http-proxy-listen=127.0.0.2:1055 \
     >"${TS_STATE_DIR}/tailscaled.log" 2>&1 </dev/null &
@@ -92,7 +96,7 @@ if ! /tmp/ts/tailscale --socket="${TS_SOCKET}" status >/dev/null 2>&1; then
 fi
 ts_ip=""
 for _ in $(seq 1 10); do
-  ts_ip="$(/tmp/ts/tailscale --socket="${TS_SOCKET}" ip -4 2>/dev/null | head -n1 || true)"
+  ts_ip="$(tailscale_ip_if_ready || true)"
   if [ -n "${ts_ip}" ]; then break; fi
   sleep 1
 done
@@ -105,9 +109,9 @@ if [ -z "${ts_ip}" ]; then
     set -- "$@" --exit-node="${TS_EXIT_NODE}"
     if [ "${TS_EXIT_NODE_ALLOW_LAN}" = "true" ]; then set -- "$@" --exit-node-allow-lan-access; fi
   fi
-  /tmp/ts/tailscale --socket="${TS_SOCKET}" up "$@"
+  "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" up "$@"
   for _ in $(seq 1 24); do
-    ts_ip="$(/tmp/ts/tailscale --socket="${TS_SOCKET}" ip -4 2>/dev/null | head -n1 || true)"
+    ts_ip="$(tailscale_ip_if_ready || true)"
     if [ -n "${ts_ip}" ]; then break; fi
     sleep 5
   done
@@ -121,7 +125,10 @@ set -e
 : "${TS_STATE_DIR:?}"
 TS_SOCKET="${TS_STATE_DIR}/tailscaled.sock"
 test -S "${TS_SOCKET}"
-ts_ip="$(/tmp/ts/tailscale --socket="${TS_SOCKET}" ip -4 2>/dev/null | head -n1)"
+TS_BIN_DIR="${TS_STATE_DIR}/bin"
+status_json="$("${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status --json 2>/dev/null)"
+printf '%s' "${status_json}" | grep -Eq '"BackendState"[[:space:]]*:[[:space:]]*"Running"'
+ts_ip="$("${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" ip -4 2>/dev/null | head -n1)"
 test -n "${ts_ip}"
 echo "CRABBOX_TS_IP=${ts_ip}"
 `
