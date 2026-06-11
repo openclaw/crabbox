@@ -128,6 +128,50 @@ func TestConfigShowIncludesCloudflareWithoutSecret(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte("provider: digitalocean\ndigitalocean:\n  region: sfo3\n  image: ubuntu-24-04-x64\n  vpc: vpc-123\n  sshCIDRs: [203.0.113.0/24, 2001:db8::/64]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "digitalocean region=sfo3 image=ubuntu-24-04-x64 vpc=vpc-123 ssh_cidrs=203.0.113.0/24,2001:db8::/64") {
+		t.Fatalf("config show missing digitalocean summary: %q", text)
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		DigitalOcean struct {
+			Region   string   `json:"region"`
+			Image    string   `json:"image"`
+			VPC      string   `json:"vpc"`
+			SSHCIDRs []string `json:"sshCIDRs"`
+		} `json:"digitalocean"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DigitalOcean.Region != "sfo3" ||
+		got.DigitalOcean.Image != "ubuntu-24-04-x64" ||
+		got.DigitalOcean.VPC != "vpc-123" ||
+		strings.Join(got.DigitalOcean.SSHCIDRs, ",") != "203.0.113.0/24,2001:db8::/64" {
+		t.Fatalf("unexpected digitalocean json: %#v", got.DigitalOcean)
+	}
+}
+
 func TestConfigShowIncludesMorphWithoutSecret(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
