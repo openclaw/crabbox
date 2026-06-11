@@ -68,8 +68,9 @@ The action `stop` takes depends on how the lease was created:
 
 For `provider=docker-sandbox`, `crabbox stop` intentionally keeps Crabbox's
 cross-provider cleanup meaning. Use [`ports`](ports.md) and [`cp`](cp.md) for
-non-destructive post-create workflows on a running sandbox. A separate
-pause/resume command is deferred.
+non-destructive post-create workflows on a running sandbox. The separate
+[`pause`](pause.md) and [`resume`](resume.md) commands are provider-dependent
+and are not supported by Docker Sandbox.
 
 Where applicable, `stop` makes a best-effort attempt to stop GitHub
 [Actions hydration](../features/actions-hydration.md) on the host before

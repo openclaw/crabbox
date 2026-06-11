@@ -439,7 +439,7 @@ func (b *isloBackend) Pause(ctx context.Context, req PauseRequest) error {
 	if err != nil {
 		return err
 	}
-	if err := client.PauseSandbox(ctx, name); err != nil {
+	if _, err := client.PauseSandbox(ctx, name); err != nil {
 		return isloError("pause sandbox", err)
 	}
 	fmt.Fprintf(b.rt.Stderr, "paused lease=%s sandbox=%s\n", leaseID, name)
@@ -456,7 +456,7 @@ func (b *isloBackend) Resume(ctx context.Context, req ResumeRequest) error {
 	if err != nil {
 		return err
 	}
-	if err := client.ResumeSandbox(ctx, name); err != nil {
+	if _, err := client.ResumeSandbox(ctx, name); err != nil {
 		return isloError("resume sandbox", err)
 	}
 	fmt.Fprintf(b.rt.Stderr, "resumed lease=%s sandbox=%s\n", leaseID, name)

@@ -131,8 +131,8 @@ type CleanupBackend interface {
 	Cleanup(ctx context.Context, req CleanupRequest) error
 }
 
-// PausableBackend is implemented by providers that can pause a lease — freeing
-// remote compute while preserving its state — and resume it later. It is
+// PausableBackend is implemented by providers that can pause a lease, freeing
+// remote compute while preserving its state, and resume it later. It is
 // optional: the `pause`/`resume` commands report a clear error for providers
 // that do not implement it.
 type PausableBackend interface {
@@ -305,6 +305,7 @@ const (
 	FeatureRunProof     Feature = "run-proof"
 	FeatureRunSession   Feature = "run-session"
 	FeatureRunArtifacts Feature = "run-artifacts"
+	FeaturePauseResume  Feature = "pause-resume"
 )
 
 type FeatureSet []Feature

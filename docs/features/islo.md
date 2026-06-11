@@ -70,6 +70,8 @@ variable:
 crabbox warmup --provider islo --islo-image docker.io/library/ubuntu:26.04
 crabbox run --provider islo -- pnpm test
 crabbox status --provider islo --id blue-lobster
+crabbox pause --provider islo blue-lobster
+crabbox resume --provider islo blue-lobster
 crabbox stop --provider islo blue-lobster
 ```
 
@@ -86,6 +88,8 @@ crabbox stop --provider islo blue-lobster
   `DELETE`. All three act only on Crabbox-created sandboxes. Identifiers may be a
   Crabbox slug, an `isb_...` lease ID, or a Crabbox-created sandbox name;
   non-Crabbox sandboxes are rejected.
+- **pause** snapshots the sandbox and releases its active compute while
+  preserving the local lease claim; **resume** restores the sandbox to running.
 - The sandbox is deleted on release unless kept. `--keep-on-failure` keeps a
   newly created failed sandbox until an explicit `stop` or provider-side expiry.
 

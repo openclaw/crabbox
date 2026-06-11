@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
+	"io"
 	"math"
 	"strings"
 )
@@ -877,7 +879,7 @@ func (testIsloProvider) Spec() ProviderSpec {
 		Name:                "islo",
 		Kind:                ProviderKindDelegatedRun,
 		Targets:             []TargetSpec{{OS: targetLinux}},
-		Features:            FeatureSet{FeatureURLBridge, FeatureRunSession, FeatureTailscale},
+		Features:            FeatureSet{FeatureURLBridge, FeatureRunSession, FeatureTailscale, FeaturePauseResume},
 		Coordinator:         CoordinatorNever,
 		TailscaleEgressOnly: true,
 	}
@@ -914,7 +916,10 @@ func (testIsloProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	return nil
 }
 func (p testIsloProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testDelegatedBackend{spec: p.Spec()}, nil
+	return testIsloBackend{
+		testDelegatedBackend: testDelegatedBackend{spec: p.Spec()},
+		stderr:               rt.Stderr,
+	}, nil
 }
 
 type testE2BProvider struct{}
@@ -1507,6 +1512,21 @@ type testDelegatedBackend struct {
 	spec        ProviderSpec
 	portsOutput string
 	copyErr     error
+}
+
+type testIsloBackend struct {
+	testDelegatedBackend
+	stderr io.Writer
+}
+
+func (b testIsloBackend) Pause(_ context.Context, req PauseRequest) error {
+	fmt.Fprintf(b.stderr, "paused id=%s\n", req.ID)
+	return nil
+}
+
+func (b testIsloBackend) Resume(_ context.Context, req ResumeRequest) error {
+	fmt.Fprintf(b.stderr, "resumed id=%s\n", req.ID)
+	return nil
 }
 
 type testServiceControlProvider struct{}

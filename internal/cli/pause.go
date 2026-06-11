@@ -8,14 +8,11 @@ import (
 func (a App) pause(ctx context.Context, args []string) error {
 	return a.pauseResume(ctx, args, "pause")
 }
+
 func (a App) resume(ctx context.Context, args []string) error {
 	return a.pauseResume(ctx, args, "resume")
 }
 
-// pauseResume drives the `pause` and `resume` commands. It mirrors `stop`'s flag
-// parsing and provider resolution, then dispatches to the provider's optional
-// PausableBackend implementation, reporting a clear error when the provider does
-// not support pausing.
 func (a App) pauseResume(ctx context.Context, args []string, action string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet(action, a.Stderr)
