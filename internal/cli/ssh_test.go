@@ -1005,7 +1005,7 @@ func TestRemotePruneSyncManifestFallsBackToPerlWithoutPython(t *testing.T) {
 	mustWriteTestFile(t, filepath.Join(workdir, "stale.txt"), "stale")
 
 	toolDir := t.TempDir()
-	for _, name := range []string{"dirname", "perl", "rm", "rmdir"} {
+	for _, name := range []string{"bash", "dirname", "perl", "rm", "rmdir"} {
 		mustWriteTestCommandWrapper(t, toolDir, name)
 	}
 	bashPath, err := exec.LookPath("bash")
@@ -1166,7 +1166,7 @@ func TestRemoteWriteSyncManifestsNewFallsBackToPerlWithoutPython(t *testing.T) {
 	input := fmt.Sprintf("%d\n", len(manifest)) + manifest + deleted
 
 	toolDir := t.TempDir()
-	for _, name := range []string{"mkdir", "perl"} {
+	for _, name := range []string{"bash", "mkdir", "perl"} {
 		mustWriteTestCommandWrapper(t, toolDir, name)
 	}
 	bashPath, err := exec.LookPath("bash")
