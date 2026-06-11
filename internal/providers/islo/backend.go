@@ -184,9 +184,6 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 				return RunResult{}, exit(4, "islo lease claim %s not found; warm or reclaim the lease before enabling Tailscale", leaseID)
 			}
 		}
-		if err := b.migrateWorkspaceOwnership(ctx, client, name, workspace); err != nil {
-			return RunResult{}, err
-		}
 		if b.cfg.Tailscale.Enabled {
 			if !isloClaimTailscaleEnrolled(claim) {
 				if err := b.maybeJoinTailscale(ctx, client, name, slug, leaseID); err != nil {
@@ -208,6 +205,11 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 				return RunResult{}, err
 			}
 			tailnetReady = err == nil && meta.Enabled
+		}
+		if tailnetReady {
+			if err := b.migrateWorkspaceOwnership(ctx, client, name, workspace); err != nil {
+				return RunResult{}, err
+			}
 		}
 	}
 	shouldStop := acquired && !req.Keep
@@ -242,18 +244,22 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	fmt.Fprintf(b.rt.Stderr, "provider=islo lease=%s sandbox=%s\n", leaseID, name)
 	syncDuration := time.Duration(0)
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
+	workloadUser := ""
+	if tailnetReady {
+		workloadUser = isloWorkloadUser
+	}
 	if !req.NoSync {
 		var err error
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, name, req)
+		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, name, req, workloadUser)
 		if err != nil {
 			return finishResult(), err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, name, workspace); err != nil {
+	} else if err := b.prepareWorkspace(ctx, client, name, workspace, workloadUser); err != nil {
 		return finishResult(), err
 	}
 	commandStart := b.now()
-	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, isloWorkloadEnv(req.Env, tailnetReady))
+	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, isloWorkloadEnv(req.Env, tailnetReady), workloadUser)
 	commandDuration := b.now().Sub(commandStart)
 	result.ExitCode = exitCode
 	result.Command = commandDuration
@@ -296,17 +302,29 @@ func isloWorkloadEnv(env map[string]string, tailnetReady bool) map[string]string
 	if !tailnetReady {
 		return env
 	}
-	out := make(map[string]string, len(env)+3)
+	out := make(map[string]string, len(env)+6)
 	for name, value := range env {
 		out[name] = value
 	}
-	for name, value := range map[string]string{
-		"ALL_PROXY":   "socks5://127.0.0.2:1055",
-		"HTTP_PROXY":  "http://127.0.0.2:1055",
-		"HTTPS_PROXY": "http://127.0.0.2:1055",
+	for _, proxy := range []struct {
+		upper string
+		lower string
+		value string
+	}{
+		{upper: "ALL_PROXY", lower: "all_proxy", value: "socks5://127.0.0.2:1055"},
+		{upper: "HTTP_PROXY", lower: "http_proxy", value: "http://127.0.0.2:1055"},
+		{upper: "HTTPS_PROXY", lower: "https_proxy", value: "http://127.0.0.2:1055"},
 	} {
-		if _, overridden := out[name]; !overridden {
-			out[name] = value
+		upperValue, upperSet := out[proxy.upper]
+		lowerValue, lowerSet := out[proxy.lower]
+		switch {
+		case upperSet && !lowerSet:
+			out[proxy.lower] = upperValue
+		case lowerSet && !upperSet:
+			out[proxy.upper] = lowerValue
+		case !upperSet && !lowerSet:
+			out[proxy.upper] = proxy.value
+			out[proxy.lower] = proxy.value
 		}
 	}
 	return out
@@ -476,13 +494,15 @@ func deleteIsloSandboxForCleanup(client isloAPI, name string) error {
 	return client.DeleteSandbox(cleanupCtx, name)
 }
 
-func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir string, command []string, shellMode bool, env map[string]string) (int, error) {
+func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir string, command []string, shellMode bool, env map[string]string, user string) (int, error) {
 	execCommand, err := isloExecCommand(command, shellMode)
 	if err != nil {
 		return 2, err
 	}
 	req := &gosdk.ExecRequest{Command: execCommand}
-	req.User = stringValue(isloWorkloadUser)
+	if user != "" {
+		req.User = stringValue(user)
+	}
 	if workdir != "" {
 		req.Workdir = stringValue(workdir)
 	}

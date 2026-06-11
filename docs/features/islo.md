@@ -131,9 +131,9 @@ The Islo path runs Tailscale in userspace mode, so it does not install a kernel
 TUN route. For enrolled leases, Crabbox supplies workload commands with local
 proxy defaults (`ALL_PROXY=socks5://127.0.0.2:1055`,
 `HTTP_PROXY=http://127.0.0.2:1055`, and
-`HTTPS_PROXY=http://127.0.0.2:1055`); explicit command environment values
-override those defaults. Other processes must opt into those proxies or another
-userspace Tailscale surface.
+`HTTPS_PROXY=http://127.0.0.2:1055`) and their lowercase equivalents; explicit
+command environment values in either case override those defaults. Other
+processes must opt into those proxies or another userspace Tailscale surface.
 The proxy uses `127.0.0.2` because userspace Tailscale forwards inbound tailnet
 TCP to `127.0.0.1`; keeping the proxy on a separate loopback address prevents
 tailnet peers from using the unauthenticated outbound proxy.

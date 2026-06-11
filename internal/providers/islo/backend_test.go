@@ -366,8 +366,8 @@ func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 		t.Fatal("missing workload exec request")
 	}
 	workloadReq := client.execRequests[len(client.execRequests)-1]
-	if workloadReq.GetUser() == nil || *workloadReq.GetUser() != isloWorkloadUser {
-		t.Fatalf("workload exec user=%v want %q", workloadReq.GetUser(), isloWorkloadUser)
+	if workloadReq.GetUser() != nil {
+		t.Fatalf("plain workload exec user=%v want image default", workloadReq.GetUser())
 	}
 	got := result.Session
 	if got.Provider != isloProvider || got.LeaseID != "isb_crabbox-repo-abcdef" || got.Slug == "" || got.Reused || !got.Kept {
@@ -414,7 +414,14 @@ func TestIsloRunCleanupDeleteUsesBoundedContext(t *testing.T) {
 
 func TestIsloRunMigratesReusedWorkspaceOwnership(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	client := &fakeIsloSyncClient{}
+	leaseID := "isb_crabbox-old-abcdef"
+	if err := claimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{execOut: "CRABBOX_TS_IP=100.64.7.8"}
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
@@ -423,7 +430,7 @@ func TestIsloRunMigratesReusedWorkspaceOwnership(t *testing.T) {
 	}
 
 	_, err := backend.Run(context.Background(), RunRequest{
-		ID:      "isb_crabbox-old-abcdef",
+		ID:      leaseID,
 		Keep:    true,
 		NoSync:  true,
 		Command: []string{"true"},
@@ -431,10 +438,10 @@ func TestIsloRunMigratesReusedWorkspaceOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(client.execRequests) < 3 {
-		t.Fatalf("exec requests=%d want migration, prepare, workload", len(client.execRequests))
+	if len(client.execRequests) < 4 {
+		t.Fatalf("exec requests=%d want health, migration, prepare, workload", len(client.execRequests))
 	}
-	migration := client.execRequests[0]
+	migration := client.execRequests[1]
 	if migration.GetUser() == nil || *migration.GetUser() != isloAdminUser {
 		t.Fatalf("migration user=%v want %q", migration.GetUser(), isloAdminUser)
 	}
@@ -517,7 +524,7 @@ func TestIsloRunAddsTailnetProxyDefaultsToWorkload(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &fakeIsloSyncClient{
-		execOuts: []string{"", "CRABBOX_TS_IP=100.64.7.8"},
+		execOuts: []string{"CRABBOX_TS_IP=100.64.7.8"},
 	}
 	restore := swapNewIsloClient(client)
 	defer restore()
@@ -539,12 +546,18 @@ func TestIsloRunAddsTailnetProxyDefaultsToWorkload(t *testing.T) {
 	workload := client.execRequests[len(client.execRequests)-1]
 	for name, want := range map[string]string{
 		"ALL_PROXY":   "socks5://127.0.0.2:1055",
+		"all_proxy":   "socks5://127.0.0.2:1055",
 		"HTTP_PROXY":  "http://override.example:8080",
+		"http_proxy":  "http://override.example:8080",
 		"HTTPS_PROXY": "http://127.0.0.2:1055",
+		"https_proxy": "http://127.0.0.2:1055",
 	} {
 		if workload.Env[name] == nil || *workload.Env[name] != want {
 			t.Fatalf("workload %s=%v want %q", name, workload.Env[name], want)
 		}
+	}
+	if workload.GetUser() == nil || *workload.GetUser() != isloWorkloadUser {
+		t.Fatalf("tailnet workload user=%v want %q", workload.GetUser(), isloWorkloadUser)
 	}
 }
 
@@ -781,7 +794,7 @@ func TestIsloSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	}
 	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", RunRequest{
 		Repo: Repo{Root: root, Name: "repo"},
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -819,7 +832,7 @@ func TestIsloSyncWorkspaceFallsBackToExecUpload(t *testing.T) {
 	}
 	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", RunRequest{
 		Repo: Repo{Root: root, Name: "repo"},
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -840,7 +853,7 @@ func TestIsloExecUploadCleansTempFilesOnChunkFailure(t *testing.T) {
 	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
 	archive := bytes.NewReader(bytes.Repeat([]byte("x"), 49*1024))
 
-	err := backend.uploadArchiveViaExec(ctx, client, "crabbox-test", "/workspace/repo", archive)
+	err := backend.uploadArchiveViaExec(ctx, client, "crabbox-test", "/workspace/repo", archive, "")
 	if err == nil || !strings.Contains(err.Error(), "chunk transfer failed") {
 		t.Fatalf("uploadArchiveViaExec err=%v, want chunk transfer failure", err)
 	}
@@ -874,7 +887,7 @@ func TestIsloExecForwardsEnv(t *testing.T) {
 	code, err := backend.exec(context.Background(), client, "crabbox-test", "/workspace/repo", []string{"env"}, false, map[string]string{
 		"API_TOKEN": "secret",
 		"CI":        "1",
-	})
+	}, "")
 	if err != nil || code != 0 {
 		t.Fatalf("exec code=%d err=%v", code, err)
 	}
