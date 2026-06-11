@@ -25,6 +25,9 @@ builds:
     binary: crabbox-apple-vz-helper
     env:
       - CGO_ENABLED=1
+      - CGO_CFLAGS=-mmacosx-version-min=13.0
+      - CGO_LDFLAGS=-mmacosx-version-min=13.0
+      - MACOSX_DEPLOYMENT_TARGET=13.0
     targets:
       - darwin_arm64
 
