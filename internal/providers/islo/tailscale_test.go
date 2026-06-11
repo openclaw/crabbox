@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	gosdk "github.com/islo-labs/go-sdk"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
@@ -181,6 +182,30 @@ func TestEnsureLeaseTailscaleRevalidatesAsRoot(t *testing.T) {
 	}
 	if len(client.execRequests) != 1 || client.execRequests[0].GetUser() == nil || *client.execRequests[0].GetUser() != isloAdminUser {
 		t.Fatalf("health request must run as root: %#v", client.execRequests)
+	}
+}
+
+func TestEnsureLeaseTailscaleResumesPausedSandboxBeforeRepair(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{
+		getSandbox: &gosdk.SandboxResponse{Name: "crabbox-node-a", Status: "paused"},
+		execOut:    "CRABBOX_TS_IP=100.64.7.8",
+	}
+	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
+
+	meta, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.resumeCalls != 1 || meta.IPv4 != "100.64.7.8" {
+		t.Fatalf("resume calls=%d metadata=%#v", client.resumeCalls, meta)
 	}
 }
 

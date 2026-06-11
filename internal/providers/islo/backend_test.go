@@ -1199,6 +1199,8 @@ type fakeIsloSyncClient struct {
 	getSandbox               *gosdk.SandboxResponse
 	getSandboxErr            error
 	getSandboxGone           bool
+	resumeErr                error
+	resumeCalls              int
 	blockDelete              bool
 	deleteErr                error
 	deleteCalls              int
@@ -1224,6 +1226,15 @@ func (f *fakeIsloSyncClient) GetSandbox(_ context.Context, name string) (*gosdk.
 		return f.getSandbox, nil
 	}
 	return &gosdk.SandboxResponse{Name: name, Status: "running"}, nil
+}
+
+func (f *fakeIsloSyncClient) ResumeSandbox(_ context.Context, name string) (*gosdk.SandboxResponse, error) {
+	f.resumeCalls++
+	if f.resumeErr != nil {
+		return nil, f.resumeErr
+	}
+	f.getSandbox = &gosdk.SandboxResponse{Name: name, Status: "running"}
+	return f.getSandbox, nil
 }
 
 func (f *fakeIsloSyncClient) ListSandboxes(context.Context) ([]*gosdk.SandboxResponse, error) {

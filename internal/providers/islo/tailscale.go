@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	gosdk "github.com/islo-labs/go-sdk"
 	islcore "github.com/islo-labs/go-sdk/core"
@@ -314,6 +315,12 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 		}
 		return core.TailscaleMetadata{}, fmt.Errorf("%w: sandbox %s is %s", core.ErrTailnetPeerUnavailable, sandboxName, blank(sandboxStatus(sandbox), "missing"))
 	}
+	if repair && strings.EqualFold(strings.TrimSpace(sandbox.GetStatus()), "paused") {
+		sandbox, err = resumeIsloSandbox(ctx, client, sandboxName)
+		if err != nil {
+			return core.TailscaleMetadata{}, fmt.Errorf("%w: resume sandbox: %v", core.ErrTailnetPeerValidationUnavailable, err)
+		}
+	}
 	if !isloStatusReady(sandbox.GetStatus()) {
 		return core.TailscaleMetadata{}, fmt.Errorf("%w: sandbox %s is %s", core.ErrTailnetPeerUnavailable, sandboxName, sandbox.GetStatus())
 	}
@@ -367,6 +374,39 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 		return core.TailscaleMetadata{}, err
 	}
 	return core.TailscaleMetadata{}, fmt.Errorf("%w: restart failed: %v", core.ErrTailnetPeerUnavailable, restartErr)
+}
+
+func resumeIsloSandbox(ctx context.Context, client isloAPI, sandboxName string) (*gosdk.SandboxResponse, error) {
+	sandbox, err := client.ResumeSandbox(ctx, sandboxName)
+	if err != nil {
+		return nil, err
+	}
+	if sandbox != nil && isloStatusReady(sandbox.GetStatus()) {
+		return sandbox, nil
+	}
+	timeout := time.NewTimer(2 * time.Minute)
+	defer timeout.Stop()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timeout.C:
+			return nil, fmt.Errorf("timed out waiting for sandbox %s to resume", sandboxName)
+		case <-ticker.C:
+			sandbox, err = client.GetSandbox(ctx, sandboxName)
+			if err != nil {
+				return nil, err
+			}
+			if sandbox != nil && isloStatusReady(sandbox.GetStatus()) {
+				return sandbox, nil
+			}
+			if sandbox == nil || isloStatusTerminal(sandbox.GetStatus()) {
+				return nil, fmt.Errorf("sandbox %s entered %s while resuming", sandboxName, blank(sandboxStatus(sandbox), "missing"))
+			}
+		}
+	}
 }
 
 func isloSandboxGoneError(err error) bool {
