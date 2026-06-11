@@ -355,11 +355,11 @@ func TestResolvePondPeersReturnsBridgeErrorWhenAllTailnetClaimsAreStale(t *testi
 	}
 }
 
-func TestResolvePondPeersRefreshesTailnetLabelsAfterValidation(t *testing.T) {
+func TestResolvePondPeersRevalidatesPersistedTailnetEnrollment(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
 	})
-	mutateClaim(t, "isb_w", func(c *leaseClaim) { setLeaseClaimTailscale(c, "100.64.7.7", "") })
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { c.TailscaleHostname = "node-a" })
 	fake := &fakeTailnetBridgeProvider{
 		fakeBridgeProvider: &fakeBridgeProvider{listed: map[string][]BridgePeerTarget{
 			"isb_w": {{Port: 8080, URL: "https://abc.share.islo.dev"}},

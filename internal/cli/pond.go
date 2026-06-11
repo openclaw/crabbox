@@ -215,6 +215,11 @@ func pondClaimProviderSummary(pond string) (bool, bool) {
 func claimHasTailscaleMetadata(claim leaseClaim) bool {
 	return claim.TailscaleIPv4 != "" ||
 		claim.TailscaleFQDN != "" ||
+		claim.TailscaleHostname != "" ||
+		len(claim.TailscaleTags) > 0 ||
+		claim.TailscaleLoginURL != "" ||
+		claim.TailscaleExitNode != "" ||
+		claim.TailscaleExitLAN ||
 		labelBool(claim.Labels["tailscale"]) ||
 		strings.TrimSpace(claim.Labels["tailscale_state"]) != ""
 }
