@@ -211,6 +211,7 @@ internal/providers/blacksmith           # Blacksmith Testbox delegated backend
 internal/providers/e2b                  # E2B delegated backend
 internal/providers/islo                 # Islo delegated backend
 internal/providers/modal                # Modal delegated backend
+internal/providers/opencomputer         # OpenComputer delegated backend
 internal/providers/tensorlake           # Tensorlake delegated backend
 internal/providers/upstashbox           # Upstash Box delegated backend
 internal/providers/cloudflare           # Cloudflare Containers delegated backend

@@ -93,6 +93,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"multipass",
 		"mxc",
 		"namespace-devbox",
+		"opencomputer",
 		"parallels",
 		"proxmox",
 		"railway",

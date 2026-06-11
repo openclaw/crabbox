@@ -26,6 +26,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/multipass"
 	_ "github.com/openclaw/crabbox/internal/providers/mxc"
 	_ "github.com/openclaw/crabbox/internal/providers/namespace"
+	_ "github.com/openclaw/crabbox/internal/providers/opencomputer"
 	_ "github.com/openclaw/crabbox/internal/providers/parallels"
 	_ "github.com/openclaw/crabbox/internal/providers/proxmox"
 	_ "github.com/openclaw/crabbox/internal/providers/railway"

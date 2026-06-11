@@ -816,6 +816,65 @@ func TestTartConfigYAMLMissingFieldsNotOverwritten(t *testing.T) {
 	}
 }
 
+func TestOpenComputerConfigYAMLExplicitZeroPreserved(t *testing.T) {
+	cfg := baseConfig()
+	cfg.OpenComputer.CPU = 8
+	cfg.OpenComputer.MemoryMB = 16384
+	cfg.OpenComputer.TimeoutSecs = 600
+	cfg.OpenComputer.ExecTimeoutSecs = 7200
+	zero := 0
+	file := fileConfig{OpenComputer: &fileOpenComputerConfig{
+		CPU:             &zero,
+		MemoryMB:        &zero,
+		TimeoutSecs:     &zero,
+		ExecTimeoutSecs: &zero,
+	}}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenComputer.CPU != 0 || cfg.OpenComputer.MemoryMB != 0 || cfg.OpenComputer.TimeoutSecs != 0 || cfg.OpenComputer.ExecTimeoutSecs != 0 {
+		t.Fatalf("explicit zero values not preserved: %#v", cfg.OpenComputer)
+	}
+}
+
+func TestOpenComputerConfigYAMLCannotSetAPIURL(t *testing.T) {
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("openComputer:\n  apiUrl: https://attacker.example\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenComputer.APIURL != "" {
+		t.Fatalf("repository config set OpenComputer API URL to %q", cfg.OpenComputer.APIURL)
+	}
+}
+
+func TestOpenComputerBurstConfigYAMLAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("openComputer:\n  burst: true\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OpenComputer.Burst {
+		t.Fatal("openComputer.burst YAML was not applied")
+	}
+
+	cfg.OpenComputer.Burst = false
+	t.Setenv("CRABBOX_OPENCOMPUTER_BURST", "true")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OpenComputer.Burst {
+		t.Fatal("CRABBOX_OPENCOMPUTER_BURST was not applied")
+	}
+}
+
 func TestTartEnvExplicitFlags(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
@@ -1223,6 +1282,13 @@ tensorlake:
   diskMB: 30000
   timeoutSecs: 1800
   noInternet: true
+openComputer:
+  apiUrl: https://opencomputer.example.test
+  workdir: /workspace/oc-test
+  cpu: 8
+  memoryMB: 16384
+  timeoutSecs: 600
+  execTimeoutSecs: 7200
 cloudflare:
   apiUrl: https://cloudflare.example.test
   token: cloudflare-token
@@ -1383,6 +1449,9 @@ ssh:
 	}
 	if cfg.Tensorlake.APIURL != "https://api.tensorlake.example.test" || cfg.Tensorlake.CLIPath != "/usr/local/bin/tl" || cfg.Tensorlake.Image != "ubuntu-22.04" || cfg.Tensorlake.Snapshot != "snap-tl" || cfg.Tensorlake.OrganizationID != "org-tl" || cfg.Tensorlake.ProjectID != "proj-tl" || cfg.Tensorlake.Namespace != "ns-tl" || cfg.Tensorlake.Workdir != "/workspace/crabbox-test" || cfg.Tensorlake.CPUs != 4 || cfg.Tensorlake.MemoryMB != 8192 || cfg.Tensorlake.DiskMB != 30000 || cfg.Tensorlake.TimeoutSecs != 1800 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("tensorlake config not loaded: %#v", cfg.Tensorlake)
+	}
+	if cfg.OpenComputer.APIURL != "" || cfg.OpenComputer.Workdir != "/workspace/oc-test" || cfg.OpenComputer.CPU != 8 || cfg.OpenComputer.MemoryMB != 16384 || cfg.OpenComputer.TimeoutSecs != 600 || cfg.OpenComputer.ExecTimeoutSecs != 7200 {
+		t.Fatalf("opencomputer config not loaded: %#v", cfg.OpenComputer)
 	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare.example.test" || cfg.Cloudflare.Token != "cloudflare-token" || cfg.Cloudflare.Workdir != "/workspace/cf-test" {
 		t.Fatalf("cloudflare config not loaded: %#v", cfg.Cloudflare)
@@ -1697,6 +1766,13 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_TENSORLAKE_DISK_MB", "20480")
 	t.Setenv("CRABBOX_TENSORLAKE_TIMEOUT_SECS", "900")
 	t.Setenv("CRABBOX_TENSORLAKE_NO_INTERNET", "true")
+	t.Setenv("OPENCOMPUTER_API_URL", "https://oc-file.example")
+	t.Setenv("CRABBOX_OPENCOMPUTER_API_URL", "https://oc-env.example")
+	t.Setenv("CRABBOX_OPENCOMPUTER_WORKDIR", "/workspace/oc-env")
+	t.Setenv("CRABBOX_OPENCOMPUTER_CPU", "6")
+	t.Setenv("CRABBOX_OPENCOMPUTER_MEMORY_MB", "12288")
+	t.Setenv("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", "1200")
+	t.Setenv("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", "2400")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_URL", "https://cloudflare-env.example")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", "cloudflare-env-token")
 	t.Setenv("CRABBOX_CLOUDFLARE_WORKDIR", "/workspace/cloudflare-env")
@@ -1850,6 +1926,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Tensorlake.APIKey != "tl-api-env" || cfg.Tensorlake.APIURL != "https://api.tl-env.example" || cfg.Tensorlake.CLIPath != "/opt/tl/bin/tensorlake" || cfg.Tensorlake.Image != "ubuntu:tl-env" || cfg.Tensorlake.Snapshot != "snap-tl-env" || cfg.Tensorlake.OrganizationID != "org-tl-env" || cfg.Tensorlake.ProjectID != "proj-tl-env" || cfg.Tensorlake.Namespace != "ns-tl-env" || cfg.Tensorlake.Workdir != "/workspace/tl-env" || cfg.Tensorlake.CPUs != 2.5 || cfg.Tensorlake.MemoryMB != 4096 || cfg.Tensorlake.DiskMB != 20480 || cfg.Tensorlake.TimeoutSecs != 900 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("unexpected tensorlake env: %#v", cfg.Tensorlake)
+	}
+	if cfg.OpenComputer.APIURL != "https://oc-env.example" || cfg.OpenComputer.Workdir != "/workspace/oc-env" || cfg.OpenComputer.CPU != 6 || cfg.OpenComputer.MemoryMB != 12288 || cfg.OpenComputer.TimeoutSecs != 1200 || cfg.OpenComputer.ExecTimeoutSecs != 2400 {
+		t.Fatalf("unexpected opencomputer env: %#v", cfg.OpenComputer)
 	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare-env.example" || cfg.Cloudflare.Token != "cloudflare-env-token" || cfg.Cloudflare.Workdir != "/workspace/cloudflare-env" {
 		t.Fatalf("unexpected cloudflare env: %#v", cfg.Cloudflare)

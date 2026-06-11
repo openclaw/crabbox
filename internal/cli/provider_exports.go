@@ -135,6 +135,10 @@ func ListLeaseClaims() ([]LeaseClaim, error) {
 	return listLeaseClaims()
 }
 
+func ListLeaseClaimsWithPrefix(prefix string) ([]LeaseClaim, error) {
+	return listLeaseClaimsWithPrefix(prefix)
+}
+
 func ReadLeaseClaim(leaseID string) (LeaseClaim, error) {
 	return readLeaseClaim(leaseID)
 }

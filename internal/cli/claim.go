@@ -468,6 +468,10 @@ func removeLeaseClaim(leaseID string) {
 }
 
 func listLeaseClaims() ([]leaseClaim, error) {
+	return listLeaseClaimsWithPrefix("")
+}
+
+func listLeaseClaimsWithPrefix(prefix string) ([]leaseClaim, error) {
 	dir, err := crabboxStateDir()
 	if err != nil {
 		return nil, err
@@ -485,6 +489,9 @@ func listLeaseClaims() ([]leaseClaim, error) {
 			continue
 		}
 		leaseID := strings.TrimSuffix(entry.Name(), ".json")
+		if prefix != "" && !strings.HasPrefix(leaseID, prefix) {
+			continue
+		}
 		claim, err := readLeaseClaim(leaseID)
 		if err != nil {
 			return nil, err

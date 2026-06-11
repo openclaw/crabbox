@@ -46,7 +46,7 @@ Provider deep-dives that live here in `features/`:
 - [Hetzner](hetzner.md): Linux-only managed Hetzner behavior, classes, and cleanup.
 - [Blacksmith Testbox](blacksmith-testbox.md): delegated Testbox runner behavior.
 - [Namespace Devbox](namespace-devbox.md): Namespace Devbox SSH leases with Crabbox sync/run.
-- [Namespace Devbox setup](namespace-devbox-setup.md): CLI install, auth token profile, and live checks.
+- [Namespace Devbox setup](namespace-devbox-setup.md): CLI install, browser authentication, and live checks.
 - [Semaphore](semaphore.md): Semaphore CI job leases with Crabbox SSH sync/run.
 - [Sprites](sprites.md): Sprites microVM SSH leases through `sprite proxy`.
 - [Daytona](daytona.md): Daytona SDK/toolbox sandbox leases with optional short-lived SSH access.
