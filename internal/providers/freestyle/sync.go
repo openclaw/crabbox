@@ -1,13 +1,11 @@
 package freestyle
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path"
 	"strings"
 	"time"
@@ -66,11 +64,12 @@ func (b *freestyleBackend) syncWorkspace(ctx context.Context, client freestyleAP
 	remoteArchive := "/tmp/crabbox-" + suffix + ".tgz"
 	if err := client.WriteFile(ctx, name, remoteArchive, b64Content, "base64"); err != nil {
 		fmt.Fprintf(b.rt.Stderr, "warning: freestyle file API upload failed; falling back to exec upload: %v\n", err)
+		b.cleanupFreestyleUpload(client, name, remoteArchive)
 		if fallbackErr := b.uploadArchiveViaExec(ctx, client, name, workspace, archiveData); fallbackErr != nil {
 			return nil, 0, fallbackErr
 		}
 	} else {
-		if err := b.execShell(ctx, client, name, freestyleDirectExtractCommand(remoteArchive, workspace)); err != nil {
+		if err := b.extractFreestyleArchive(ctx, client, name, remoteArchive, workspace); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -107,14 +106,11 @@ func (b *freestyleBackend) uploadArchiveViaExec(ctx context.Context, client free
 		if !cleanupNeeded {
 			return
 		}
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), freestyleCleanupTimeout)
-		defer cancel()
-		if err := b.execShell(cleanupCtx, client, name, cleanupCommand); err != nil && b.rt.Stderr != nil {
-			fmt.Fprintf(b.rt.Stderr, "warning: freestyle fallback upload cleanup failed for %s: %v\n", name, err)
-		}
+		b.cleanupFreestyleUpload(client, name, remoteB64, remoteArchive)
 	}()
 	buf := archiveData
 	chunkSize := 48 * 1024
+	chunkCount := (len(buf) + chunkSize - 1) / chunkSize
 	for i := 0; i < len(buf); i += chunkSize {
 		end := i + chunkSize
 		if end > len(buf) {
@@ -122,7 +118,8 @@ func (b *freestyleBackend) uploadArchiveViaExec(ctx context.Context, client free
 		}
 		chunk := base64.StdEncoding.EncodeToString(buf[i:end])
 		command := "printf %s " + shellQuote(chunk) + " >> " + shellQuote(remoteB64)
-		if err := b.execShell(ctx, client, name, command); err != nil {
+		action := fmt.Sprintf("upload archive chunk %d/%d", i/chunkSize+1, chunkCount)
+		if err := b.execShellRedacted(ctx, client, name, command, action); err != nil {
 			return err
 		}
 	}
@@ -131,6 +128,35 @@ func (b *freestyleBackend) uploadArchiveViaExec(ctx context.Context, client free
 	}
 	cleanupNeeded = false
 	return nil
+}
+
+func (b *freestyleBackend) extractFreestyleArchive(ctx context.Context, client freestyleAPI, name, remoteArchive, workspace string) error {
+	cleanupNeeded := true
+	defer func() {
+		if cleanupNeeded {
+			b.cleanupFreestyleUpload(client, name, remoteArchive)
+		}
+	}()
+	if err := b.execShell(ctx, client, name, freestyleDirectExtractCommand(remoteArchive, workspace)); err != nil {
+		return err
+	}
+	cleanupNeeded = false
+	return nil
+}
+
+func (b *freestyleBackend) cleanupFreestyleUpload(client freestyleAPI, name string, paths ...string) {
+	if len(paths) == 0 {
+		return
+	}
+	quoted := make([]string, 0, len(paths))
+	for _, remotePath := range paths {
+		quoted = append(quoted, shellQuote(remotePath))
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), freestyleCleanupTimeout)
+	defer cancel()
+	if err := b.execShell(cleanupCtx, client, name, "rm -f "+strings.Join(quoted, " ")); err != nil && b.rt.Stderr != nil {
+		fmt.Fprintf(b.rt.Stderr, "warning: freestyle upload cleanup failed for %s: %v\n", name, err)
+	}
 }
 
 func readFreestyleArchiveForUpload(r io.Reader) ([]byte, error) {
@@ -171,31 +197,19 @@ func (b *freestyleBackend) execShell(ctx context.Context, client freestyleAPI, n
 	return nil
 }
 
-func createFreestyleSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, stderr io.Writer) (*os.File, error) {
-	var input bytes.Buffer
-	input.Write(manifest.NUL())
-	archive, err := os.CreateTemp("", "crabbox-freestyle-sync-*.tgz")
+func (b *freestyleBackend) execShellRedacted(ctx context.Context, client freestyleAPI, name, command, action string) error {
+	code, err := client.Exec(ctx, name, "bash -lc "+shellQuote(command), io.Discard, b.rt.Stderr)
 	if err != nil {
-		return nil, fmt.Errorf("create sync archive temp file: %w", err)
+		return fmt.Errorf("freestyle %s: %w", action, err)
 	}
-	keep := false
-	defer func() {
-		if !keep {
-			name := archive.Name()
-			_ = archive.Close()
-			_ = os.Remove(name)
-		}
-	}()
-	cmd := exec.CommandContext(ctx, "tar", "--no-xattrs", "-czf", "-", "-C", repo.Root, "--null", "-T", "-")
-	cmd.Stdin = &input
-	cmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
-	cmd.Stdout = archive
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		return nil, exit(6, "create sync archive: %v", err)
+	if code != 0 {
+		return exit(code, "freestyle %s exited %d", action, code)
 	}
-	keep = true
-	return archive, nil
+	return nil
+}
+
+func createFreestyleSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, _ io.Writer) (*os.File, error) {
+	return core.CreateSyncArchive(ctx, repo, manifest, "crabbox-freestyle-sync-*.tgz")
 }
 
 func freestyleWorkspacePath(cfg Config) (string, error) {

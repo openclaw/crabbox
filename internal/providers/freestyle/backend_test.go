@@ -609,15 +609,34 @@ func TestFreestyleSyncWorkspaceFallsBackToExecUpload(t *testing.T) {
 func TestFreestyleFallbackUploadCleansPartialArchiveAfterChunkFailure(t *testing.T) {
 	client := &fakeFreestyleClient{execErrAt: 2}
 	backend := &freestyleBackend{rt: Runtime{Stderr: io.Discard}}
-	err := backend.uploadArchiveViaExec(context.Background(), client, "vm123", "/workspace/repo", []byte("payload"))
+	payload := []byte("secret payload")
+	err := backend.uploadArchiveViaExec(context.Background(), client, "vm123", "/workspace/repo", payload)
 	if err == nil || !strings.Contains(err.Error(), "exec failed") {
 		t.Fatalf("err=%v, want chunk upload failure", err)
+	}
+	if strings.Contains(err.Error(), base64.StdEncoding.EncodeToString(payload)) || strings.Contains(err.Error(), "printf") {
+		t.Fatalf("err=%v contains archive payload command", err)
 	}
 	if len(client.execCommands) != 3 {
 		t.Fatalf("commands=%#v, want initial cleanup, failed chunk, rollback cleanup", client.execCommands)
 	}
 	if client.execCommands[0] != client.execCommands[2] || !strings.Contains(client.execCommands[2], "rm -f") {
 		t.Fatalf("commands=%#v, want matching cleanup commands", client.execCommands)
+	}
+}
+
+func TestFreestyleDirectUploadCleansArchiveAfterExecFailure(t *testing.T) {
+	client := &fakeFreestyleClient{execErrAt: 1}
+	backend := &freestyleBackend{rt: Runtime{Stderr: io.Discard}}
+	err := backend.extractFreestyleArchive(context.Background(), client, "vm123", "/tmp/crabbox-test.tgz", "/workspace/repo")
+	if err == nil || !strings.Contains(err.Error(), "exec failed") {
+		t.Fatalf("err=%v, want extraction transport failure", err)
+	}
+	if len(client.execCommands) != 2 {
+		t.Fatalf("commands=%#v, want failed extract and cleanup", client.execCommands)
+	}
+	if !strings.Contains(client.execCommands[0], "tar -xzf") || !strings.Contains(client.execCommands[1], "rm -f") {
+		t.Fatalf("commands=%#v, want extract followed by cleanup", client.execCommands)
 	}
 }
 
