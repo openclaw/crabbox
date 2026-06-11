@@ -142,6 +142,10 @@ func UpdateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
 	return updateLeaseClaimTailscale(leaseID, ipv4, fqdn)
 }
 
+func UpdateLeaseClaimTailscaleSettings(leaseID, hostname string, tags []string, loginURL, exitNode string, exitLAN bool) error {
+	return updateLeaseClaimTailscaleSettings(leaseID, hostname, tags, loginURL, exitNode, exitLAN)
+}
+
 func ClearLeaseClaimTailscale(leaseID string) error {
 	return clearLeaseClaimTailscale(leaseID)
 }

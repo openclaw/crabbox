@@ -31,6 +31,11 @@ type leaseClaim struct {
 	IdleTimeoutSeconds int               `json:"idleTimeoutSeconds,omitempty"`
 	TailscaleIPv4      string            `json:"tailscaleIPv4,omitempty"`
 	TailscaleFQDN      string            `json:"tailscaleFQDN,omitempty"`
+	TailscaleHostname  string            `json:"tailscaleHostname,omitempty"`
+	TailscaleTags      []string          `json:"tailscaleTags,omitempty"`
+	TailscaleLoginURL  string            `json:"tailscaleLoginURL,omitempty"`
+	TailscaleExitNode  string            `json:"tailscaleExitNode,omitempty"`
+	TailscaleExitLAN   bool              `json:"tailscaleExitLAN,omitempty"`
 	SSHHost            string            `json:"sshHost,omitempty"`
 	SSHPort            int               `json:"sshPort,omitempty"`
 	BridgeURL          string            `json:"bridgeURL,omitempty"`
@@ -244,6 +249,23 @@ func updateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
 			return nil
 		}
 		setLeaseClaimTailscale(claim, ipv4, fqdn)
+		return nil
+	})
+}
+
+func updateLeaseClaimTailscaleSettings(leaseID, hostname string, tags []string, loginURL, exitNode string, exitLAN bool) error {
+	if leaseID == "" {
+		return nil
+	}
+	return mutateLeaseClaim(leaseID, func(claim *leaseClaim) error {
+		if claim.LeaseID == "" {
+			return nil
+		}
+		claim.TailscaleHostname = hostname
+		claim.TailscaleTags = append([]string(nil), tags...)
+		claim.TailscaleLoginURL = loginURL
+		claim.TailscaleExitNode = exitNode
+		claim.TailscaleExitLAN = exitLAN
 		return nil
 	})
 }

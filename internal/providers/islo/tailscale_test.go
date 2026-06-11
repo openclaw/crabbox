@@ -102,6 +102,8 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		"for _ in $(seq 1 120)",
 		"exit 75",
 		`--auth-key="file:${TS_AUTH_FILE}"`,
+		`if [ -n "${TS_AUTH_FILE}" ]; then set -- "$@" --auth-key="file:${TS_AUTH_FILE}"; fi`,
+		`Stopped) : ;;`,
 		"unset TS_AUTHKEY",
 		`if [ -n "${TS_AUTH_FILE}" ]; then rm -f "${TS_AUTH_FILE}"; fi`,
 		"--shields-up=false",
@@ -270,13 +272,27 @@ func TestEnsureLeaseTailscaleRestartsFromStateWithPondTag(t *testing.T) {
 	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
 		t.Fatal(err)
 	}
+	if err := updateLeaseClaimTailscaleSettings(
+		leaseID,
+		"original-node",
+		[]string{"tag:original"},
+		"https://control.example.com",
+		"exit.example.com",
+		true,
+	); err != nil {
+		t.Fatal(err)
+	}
 	client := &fakeIsloSyncClient{
 		execCodes: []int{1, 0},
 		execOuts:  []string{"", "CRABBOX_TS_IP=100.64.7.8"},
 	}
 	backend := &isloBackend{
-		cfg: Config{Tailscale: core.TailscaleConfig{Tags: []string{"tag:base"}}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: Config{Tailscale: core.TailscaleConfig{
+			Hostname: "ambient-node",
+			Tags:     []string{"tag:ambient"},
+			ExitNode: "ambient-exit.example.com",
+		}},
+		rt: Runtime{Stderr: io.Discard},
 	}
 
 	meta, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID)
@@ -290,12 +306,16 @@ func TestEnsureLeaseTailscaleRestartsFromStateWithPondTag(t *testing.T) {
 	if got := *restartReq.Env["TS_AUTHKEY"]; got != "" {
 		t.Fatalf("state recovery should not require an auth key, got %q", got)
 	}
-	expected := backend.cfg
-	expected.Tailscale.Enabled = true
-	expected.Pond = "mesh-demo"
-	appendDirectPondTailscaleTag(&expected)
-	if got, want := *restartReq.Env["TS_TAGS"], strings.Join(expected.Tailscale.Tags, ","); got != want {
-		t.Fatalf("restart tags=%q want %q", got, want)
+	for key, want := range map[string]string{
+		"TS_HOST":                "original-node",
+		"TS_TAGS":                "tag:original",
+		"TS_LOGIN_SERVER":        "https://control.example.com",
+		"TS_EXIT_NODE":           "exit.example.com",
+		"TS_EXIT_NODE_ALLOW_LAN": "true",
+	} {
+		if got := *restartReq.Env[key]; got != want {
+			t.Fatalf("restart %s=%q want %q", key, got, want)
+		}
 	}
 }
 

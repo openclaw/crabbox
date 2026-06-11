@@ -116,11 +116,13 @@ done
 if [ -z "${ts_ip}" ]; then
   if [ -z "${TS_AUTH_FILE}" ]; then
     case "${backend_state}" in
-      Starting|"") echo "tailscale recovery is still starting" >&2; exit 75 ;;
+      Starting|Running|NeedsMachineAuth|"") echo "tailscale recovery is still starting" >&2; exit 75 ;;
+      Stopped) : ;;
       *) echo "tailscale state unavailable and no auth key provided" >&2; exit 4 ;;
     esac
   fi
-  set -- --auth-key="file:${TS_AUTH_FILE}" --hostname="${TS_HOST}" --accept-dns=false --shields-up=false --timeout=120s
+  set -- --hostname="${TS_HOST}" --accept-dns=false --shields-up=false --timeout=120s
+  if [ -n "${TS_AUTH_FILE}" ]; then set -- "$@" --auth-key="file:${TS_AUTH_FILE}"; fi
   if [ -n "${TS_TAGS}" ]; then set -- "$@" --advertise-tags="${TS_TAGS}"; fi
   if [ -n "${TS_LOGIN_SERVER}" ]; then set -- "$@" --login-server="${TS_LOGIN_SERVER}"; fi
   if [ -n "${TS_EXIT_NODE}" ]; then
@@ -151,6 +153,40 @@ test -n "${ts_ip}"
 echo "CRABBOX_TS_IP=${ts_ip}"
 `
 
+type isloTailscaleSettings struct {
+	Hostname    string
+	Tags        []string
+	LoginServer string
+	ExitNode    string
+	ExitNodeLAN bool
+}
+
+func (b *isloBackend) configuredTailscaleSettings(leaseID, slug string) isloTailscaleSettings {
+	return isloTailscaleSettings{
+		Hostname:    isloTailscaleHostname(b.cfg, leaseID, slug),
+		Tags:        append([]string(nil), b.cfg.Tailscale.Tags...),
+		LoginServer: strings.TrimSpace(os.Getenv("TS_CONTROL_URL")),
+		ExitNode:    strings.TrimSpace(b.cfg.Tailscale.ExitNode),
+		ExitNodeLAN: b.cfg.Tailscale.ExitNodeAllowLANAccess,
+	}
+}
+
+func (b *isloBackend) claimedTailscaleSettings(claim core.LeaseClaim, leaseID, slug string) isloTailscaleSettings {
+	if claim.TailscaleHostname != "" {
+		return isloTailscaleSettings{
+			Hostname:    claim.TailscaleHostname,
+			Tags:        append([]string(nil), claim.TailscaleTags...),
+			LoginServer: claim.TailscaleLoginURL,
+			ExitNode:    claim.TailscaleExitNode,
+			ExitNodeLAN: claim.TailscaleExitLAN,
+		}
+	}
+	restart := *b
+	restart.cfg.Pond = claim.Pond
+	appendDirectPondTailscaleTag(&restart.cfg)
+	return restart.configuredTailscaleSettings(leaseID, slug)
+}
+
 // maybeJoinTailscale brings an islo sandbox onto the configured tailnet when
 // the lease was created with --tailscale. It is a no-op otherwise, so plain
 // url-bridge islo ponds are unchanged. On success it records the tailnet IPv4
@@ -162,16 +198,16 @@ func (b *isloBackend) maybeJoinTailscale(ctx context.Context, client isloAPI, sa
 	if err := b.validateTailscaleConfig(); err != nil {
 		return err
 	}
-	return b.runTailscaleBringUp(ctx, client, sandboxName, slug, leaseID)
+	settings := b.configuredTailscaleSettings(leaseID, slug)
+	if err := b.runTailscaleBringUp(ctx, client, sandboxName, leaseID, settings); err != nil {
+		return err
+	}
+	return updateLeaseClaimTailscaleSettings(leaseID, settings.Hostname, settings.Tags, settings.LoginServer, settings.ExitNode, settings.ExitNodeLAN)
 }
 
-func (b *isloBackend) runTailscaleBringUp(ctx context.Context, client isloAPI, sandboxName, slug, leaseID string) error {
+func (b *isloBackend) runTailscaleBringUp(ctx context.Context, client isloAPI, sandboxName, leaseID string, settings isloTailscaleSettings) error {
 	authKey := strings.TrimSpace(b.cfg.Tailscale.AuthKey)
-	hostname := isloTailscaleHostname(b.cfg, leaseID, slug)
-	tags := strings.Join(b.cfg.Tailscale.Tags, ",")
-	loginServer := strings.TrimSpace(os.Getenv("TS_CONTROL_URL"))
-	exitNode := strings.TrimSpace(b.cfg.Tailscale.ExitNode)
-	allowLAN := fmt.Sprint(b.cfg.Tailscale.ExitNodeAllowLANAccess)
+	tags := strings.Join(settings.Tags, ",")
 	stateDir := isloTailscaleStateDir(leaseID)
 
 	req := &gosdk.ExecRequest{
@@ -181,18 +217,18 @@ func (b *isloBackend) runTailscaleBringUp(ctx context.Context, client isloAPI, s
 	req.Env = map[string]*string{}
 	for k, v := range map[string]string{
 		"TS_AUTHKEY":             authKey,
-		"TS_HOST":                hostname,
+		"TS_HOST":                settings.Hostname,
 		"TS_TAGS":                tags,
-		"TS_LOGIN_SERVER":        loginServer,
-		"TS_EXIT_NODE":           exitNode,
-		"TS_EXIT_NODE_ALLOW_LAN": allowLAN,
+		"TS_LOGIN_SERVER":        settings.LoginServer,
+		"TS_EXIT_NODE":           settings.ExitNode,
+		"TS_EXIT_NODE_ALLOW_LAN": fmt.Sprint(settings.ExitNodeLAN),
 		"TS_STATE_DIR":           stateDir,
 	} {
 		v := v
 		req.Env[k] = &v
 	}
 
-	fmt.Fprintf(b.rt.Stderr, "islo: joining tailnet (hostname=%s tags=%s)\n", hostname, blank(tags, "<none>"))
+	fmt.Fprintf(b.rt.Stderr, "islo: joining tailnet (hostname=%s tags=%s)\n", settings.Hostname, blank(tags, "<none>"))
 	var out bytes.Buffer
 	code, err := client.ExecStream(ctx, sandboxName, req, &out, b.rt.Stderr)
 	if err != nil {
@@ -261,10 +297,12 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 	}
 	restart := *b
 	restart.cfg.Tailscale.Enabled = true
-	restart.cfg.Pond = claim.Pond
-	appendDirectPondTailscaleTag(&restart.cfg)
-	restartErr := restart.runTailscaleBringUp(ctx, client, sandboxName, blank(claim.Slug, slug), leaseID)
+	settings := restart.claimedTailscaleSettings(claim, leaseID, blank(claim.Slug, slug))
+	restartErr := restart.runTailscaleBringUp(ctx, client, sandboxName, leaseID, settings)
 	if restartErr == nil {
+		if err := updateLeaseClaimTailscaleSettings(leaseID, settings.Hostname, settings.Tags, settings.LoginServer, settings.ExitNode, settings.ExitNodeLAN); err != nil {
+			return core.TailscaleMetadata{}, err
+		}
 		updated, _, readErr := resolveLeaseClaim(leaseID)
 		if readErr != nil {
 			return core.TailscaleMetadata{}, readErr

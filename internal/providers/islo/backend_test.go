@@ -619,6 +619,9 @@ func TestIsloCreateSandboxTailscaleClaimAndOptions(t *testing.T) {
 	if claim.Labels["tailscale"] != "true" || claim.Labels["tailscale_ipv4"] != "100.64.7.7" || claim.Labels["tailscale_state"] != "ready" {
 		t.Fatalf("tailscale labels=%#v", claim.Labels)
 	}
+	if claim.TailscaleHostname != "cbx-islo-node-a" || strings.Join(claim.TailscaleTags, ",") != "tag:cbx-pond-demo" {
+		t.Fatalf("tailscale settings=%#v", claim)
+	}
 	server := isloSandboxToServer(&gosdk.SandboxResponse{Name: client.createName, Status: "running"})
 	if server.Labels["tailscale_ipv4"] != "100.64.7.7" || server.Labels["tailscale_state"] != "ready" {
 		t.Fatalf("server tailscale labels=%#v", server.Labels)
