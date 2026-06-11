@@ -181,8 +181,13 @@ func (c *sdkOpenSandboxClient) lifecycle() *sdk.LifecycleClient {
 }
 
 func (c *sdkOpenSandboxClient) config() sdk.ConnectionConfig {
+	protocol := ""
+	if parsed, err := url.Parse(c.base); err == nil {
+		protocol = parsed.Scheme
+	}
 	return sdk.ConnectionConfig{
 		Domain:         c.base,
+		Protocol:       protocol,
 		APIKey:         c.key,
 		UseServerProxy: c.cfg.OpenSandbox.UseServerProxy,
 		HTTPClient:     c.client,
@@ -211,6 +216,7 @@ func (c *sdkOpenSandboxClient) CreateSandbox(ctx context.Context, opts createSan
 	}
 	req := sdk.CreateSandboxRequest{
 		Image:          &sdk.ImageSpec{URI: opts.Image},
+		Entrypoint:     sdk.DefaultEntrypoint,
 		Timeout:        timeout,
 		ResourceLimits: limits,
 		Metadata:       opts.Metadata,

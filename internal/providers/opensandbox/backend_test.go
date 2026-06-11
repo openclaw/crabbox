@@ -256,6 +256,7 @@ func TestSDKClientCreateUsesHeadersAndRequestBody(t *testing.T) {
 		} `json:"image"`
 		ResourceLimits map[string]string `json:"resourceLimits"`
 		Metadata       map[string]string `json:"metadata"`
+		Entrypoint     []string          `json:"entrypoint"`
 		Platform       struct {
 			OS   string `json:"os"`
 			Arch string `json:"arch"`
@@ -308,6 +309,9 @@ func TestSDKClientCreateUsesHeadersAndRequestBody(t *testing.T) {
 	}
 	if gotBody.Image.URI != "ubuntu:test" || gotBody.ResourceLimits["cpu"] != "500m" || gotBody.ResourceLimits["memory"] != "512Mi" || gotBody.Metadata[openSandboxClaimKey] != "scope" || gotBody.Platform.OS != "linux" || gotBody.Platform.Arch != "amd64" {
 		t.Fatalf("body=%#v", gotBody)
+	}
+	if strings.Join(gotBody.Entrypoint, "\x00") != strings.Join(sdk.DefaultEntrypoint, "\x00") {
+		t.Fatalf("entrypoint=%#v want %#v", gotBody.Entrypoint, sdk.DefaultEntrypoint)
 	}
 }
 
@@ -501,15 +505,15 @@ func TestSDKClientRunCommandSendsTimeoutMillis(t *testing.T) {
 	}
 }
 
-func TestSDKClientRunCommandAddsSchemeToBareEndpoint(t *testing.T) {
+func TestSDKClientRunCommandAddsConfiguredSchemeToBareEndpoint(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
 	commandHit := false
 	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-bare/endpoints/44772":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"endpoint":"`+strings.TrimPrefix(server.URL, "http://")+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
+			_, _ = io.WriteString(w, `{"endpoint":"`+strings.TrimPrefix(server.URL, "https://")+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/command":
 			commandHit = true
 			w.Header().Set("Content-Type", "text/event-stream")
