@@ -56,7 +56,7 @@ go build -o ./bin/crabbox-apple-vz-helper ./cmd/crabbox-apple-vz-helper
 provider: apple-vz
 appleVZ:
   helperPath: ./bin/crabbox-apple-vz-helper
-  image: https://cloud-images.ubuntu.com/releases/resolute/release/ubuntu-26.04-server-cloudimg-arm64.img
+  image: https://cloud-images.ubuntu.com/releases/resolute/release-20260520/ubuntu-26.04-server-cloudimg-arm64.img
   imageSHA256: 5e091e27d60116efbb0c743b8dd5cb2d15618e414ef04db0817ed43c8e2d7c7b
   user: crabbox
   workRoot: /work/crabbox
@@ -68,7 +68,9 @@ appleVZ:
 Defaults applied when unset: `user=crabbox`, `workRoot=/work/crabbox`,
 `cpus=4`, `memoryMiB=8192`, `diskGiB=30`.
 
-The default `appleVZ.image` follows Crabbox's portable `osImage` selector:
+The default `appleVZ.image` follows Crabbox's portable `osImage` selector and
+uses dated Ubuntu cloud-image release directories instead of moving `release/`
+aliases:
 
 - `ubuntu:24.04` → Noble arm64 cloud image
 - `ubuntu:26.04` → Resolute arm64 cloud image

@@ -34,6 +34,7 @@ while :; do sleep 1; done
 	originalPrepare := prepareInstanceAssetsFunc
 	originalExecutable := helperExecutable
 	originalProcessStartTime := processStartTime
+	originalWriteMetadata := writeMetadataFunc
 	originalReadyTimeout := runStartReadyTimeout
 	originalStartPoll := runStartPollInterval
 	originalTerminateGrace := terminateInstanceGraceTime
@@ -42,6 +43,7 @@ while :; do sleep 1; done
 		prepareInstanceAssetsFunc = originalPrepare
 		helperExecutable = originalExecutable
 		processStartTime = originalProcessStartTime
+		writeMetadataFunc = originalWriteMetadata
 		runStartReadyTimeout = originalReadyTimeout
 		runStartPollInterval = originalStartPoll
 		terminateInstanceGraceTime = originalTerminateGrace
@@ -96,6 +98,81 @@ while :; do sleep 1; done
 		t.Fatalf("parse helper pid %q: %v", string(pidData), parseErr)
 	}
 	if err := waitForDeadPID(pid, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(InstanceDir(stateRoot, name)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("instance directory stat error = %v, want os.ErrNotExist", statErr)
+	}
+}
+
+func TestRunStartCleansUpDaemonAndInstanceDirectoryOnMetadataWriteFailure(t *testing.T) {
+	stateRoot := t.TempDir()
+	name := "metadata-write-failure"
+	pidFile := filepath.Join(t.TempDir(), "helper.pid")
+	helperPath := filepath.Join(t.TempDir(), "fake-helper")
+	helperScript := `#!/bin/sh
+printf '%s\n' "$$" > "$CRABBOX_TEST_HELPER_PID_FILE"
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+`
+	if err := os.WriteFile(helperPath, []byte(helperScript), 0o755); err != nil {
+		t.Fatalf("write fake helper: %v", err)
+	}
+	t.Setenv("CRABBOX_TEST_HELPER_PID_FILE", pidFile)
+
+	originalPrepare := prepareInstanceAssetsFunc
+	originalExecutable := helperExecutable
+	originalProcessStartTime := processStartTime
+	originalWriteMetadata := writeMetadataFunc
+	originalTerminateGrace := terminateInstanceGraceTime
+	originalTerminatePoll := terminateInstancePollTime
+	t.Cleanup(func() {
+		prepareInstanceAssetsFunc = originalPrepare
+		helperExecutable = originalExecutable
+		processStartTime = originalProcessStartTime
+		writeMetadataFunc = originalWriteMetadata
+		terminateInstanceGraceTime = originalTerminateGrace
+		terminateInstancePollTime = originalTerminatePoll
+	})
+
+	prepareInstanceAssetsFunc = func(_ context.Context, cfg startConfig) (Instance, error) {
+		inst := cfg.Instance
+		inst.DiskPath = DiskPath(cfg.StateRoot, inst.Name)
+		inst.SeedPath = SeedPath(cfg.StateRoot, inst.Name)
+		inst.EFIVariableStorePath = EFIPath(cfg.StateRoot, inst.Name)
+		inst.ConsoleLogPath = ConsoleLogPath(cfg.StateRoot, inst.Name)
+		return inst, nil
+	}
+	helperExecutable = func() (string, error) { return helperPath, nil }
+	spawnedPID := 0
+	processStartTime = func(pid int) (string, error) {
+		spawnedPID = pid
+		return strconv.Itoa(pid) + "-start", nil
+	}
+	writeMetadataFunc = func(string, Instance) error { return errors.New("injected metadata write failure") }
+	terminateInstanceGraceTime = 500 * time.Millisecond
+	terminateInstancePollTime = 5 * time.Millisecond
+
+	err := runStart([]string{
+		"--state-root", stateRoot,
+		"--name", name,
+		"--lease-id", "lease-test",
+		"--slug", "my-app",
+		"--image", "test.img",
+		"--ssh-user", "alice",
+		"--ssh-public-key", "ssh-ed25519 AAAATEST alice@example.com",
+		"--work-root", "/workspace",
+		"--cpus", "2",
+		"--memory-mib", "2048",
+		"--disk-gib", "16",
+	}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "injected metadata write failure") {
+		t.Fatalf("runStart error = %v, want injected metadata write failure", err)
+	}
+	if spawnedPID <= 0 {
+		t.Fatal("processStartTime hook did not observe spawned helper PID")
+	}
+	if err := waitForDeadPID(spawnedPID, 2*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if _, statErr := os.Stat(InstanceDir(stateRoot, name)); !errors.Is(statErr, os.ErrNotExist) {

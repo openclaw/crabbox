@@ -381,7 +381,7 @@ the container.
 provider: apple-vz
 appleVZ:
   helperPath: ./bin/crabbox-apple-vz-helper
-  image: https://cloud-images.ubuntu.com/releases/resolute/release/ubuntu-26.04-server-cloudimg-arm64.img
+  image: https://cloud-images.ubuntu.com/releases/resolute/release-20260520/ubuntu-26.04-server-cloudimg-arm64.img
   imageSHA256: 5e091e27d60116efbb0c743b8dd5cb2d15618e414ef04db0817ed43c8e2d7c7b
   user: crabbox
   workRoot: /work/crabbox

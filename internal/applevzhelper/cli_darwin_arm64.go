@@ -26,6 +26,7 @@ var (
 	prepareInstanceAssetsFunc  = prepareInstanceAssets
 	helperExecutable           = os.Executable
 	processStartTime           = readProcessStartTime
+	writeMetadataFunc          = writeMetadata
 	runStartReadyTimeout       = 45 * time.Second
 	runStartPollInterval       = 250 * time.Millisecond
 	terminateInstanceGraceTime = 20 * time.Second
@@ -210,7 +211,10 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 		inst.PIDStartedAt = startedAt
 	}
 	inst.UpdatedAt = time.Now().UTC()
-	if err := writeMetadata(MetadataPath(root, *name), inst); err != nil {
+	if err := writeMetadataFunc(MetadataPath(root, *name), inst); err != nil {
+		terminateStartedHelper(cmd.Process, inst.PID)
+		_ = cmd.Wait()
+		_ = os.RemoveAll(instanceRoot)
 		return err
 	}
 	deadline := time.Now().Add(*readyTimeout)

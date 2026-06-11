@@ -92,7 +92,7 @@ func defaultAppleVZImage(osImage string) string {
 	if image, err := core.OSImageDefaultAppleVZImage(osImage); err == nil && strings.TrimSpace(image) != "" {
 		return image
 	}
-	return "https://cloud-images.ubuntu.com/releases/resolute/release/ubuntu-26.04-server-cloudimg-arm64.img"
+	return "https://cloud-images.ubuntu.com/releases/resolute/release-20260520/ubuntu-26.04-server-cloudimg-arm64.img"
 }
 
 func defaultAppleVZImageSHA256(osImage string) string {

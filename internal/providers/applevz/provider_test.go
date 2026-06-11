@@ -70,7 +70,7 @@ func testBackend(t *testing.T, runner *recordingRunner) *backend {
 	cfg.Provider = providerName
 	cfg.AppleVZ = core.AppleVZConfig{
 		HelperPath:  "/tmp/helper-source",
-		Image:       "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img",
+		Image:       "https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-arm64.img",
 		ImageSHA256: "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec",
 		User:        "runner",
 		WorkRoot:    "/workspace/crabbox",
@@ -172,7 +172,7 @@ func TestApplyFlags(t *testing.T) {
 
 func TestDoctorReady(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
-		commandKey("helper", []string{"doctor", "--state-root", "", "--image", "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img", "--image-sha256", "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec"}): {Stdout: mustJSON(t, applevzhelper.DoctorResponse{
+		commandKey("helper", []string{"doctor", "--state-root", "", "--image", "https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-arm64.img", "--image-sha256", "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec"}): {Stdout: mustJSON(t, applevzhelper.DoctorResponse{
 			Status:    "ok",
 			Message:   "runtime ready",
 			Instances: 2,
