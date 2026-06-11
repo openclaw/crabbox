@@ -23,8 +23,8 @@ const (
 	StatusStopped  = "stopped"
 	StatusError    = "error"
 
-	GuestSSHPort      uint32 = 22
-	GuestVSOCKSSHPort uint32 = 2222
+	GuestSSHPort     uint32 = 22
+	HostVSOCKSSHPort uint32 = 2222
 
 	MetadataFileName    = "instance.json"
 	HelperLogFileName   = "helper.log"

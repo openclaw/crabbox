@@ -221,10 +221,12 @@ or host restart.
 1. Crabbox creates a per-lease SSH key and asks the helper to start an instance.
 2. The helper verifies/downloads the image, prepares the root disk, creates an
    EFI variable store, and writes a NoCloud seed disk.
-3. Cloud-init creates the SSH user and work root, then starts a guest VSOCK to
-   SSH bridge.
-4. The helper listens on an ephemeral `127.0.0.1` port and proxies it to the
-   guest over VSOCK. The SSH endpoint is not exposed on the LAN.
+3. Cloud-init creates the SSH user and work root, then starts a bounded pool of
+   guest-initiated VSOCK channels to the helper.
+4. The helper activates one reverse channel for each connection to its
+   ephemeral `127.0.0.1` SSH port. Slow boot and guest proxy restarts cannot
+   strand host-side connection attempts, and the SSH endpoint is not exposed
+   on the LAN.
 5. Crabbox waits for `/usr/local/bin/crabbox-ready`, records the lease claim,
    syncs the checkout, and runs the command.
 6. `stop` terminates the owning helper process and removes the per-lease VM

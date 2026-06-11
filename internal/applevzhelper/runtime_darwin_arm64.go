@@ -47,6 +47,9 @@ const (
 	qcow2MinSnapshotHdrBytes = 40
 	consoleLogMaxBytes       = 8 << 20
 	consoleLogCloseTimeout   = time.Second
+	maxVSOCKProxyChannels    = 32
+	guestChannelAcquireWait  = 5 * time.Second
+	guestChannelActivateWait = 2 * time.Second
 	seedImageCommandTimeout  = 10 * time.Second
 	seedImageCleanupTimeout  = 15 * time.Second
 )
@@ -203,7 +206,18 @@ func resolveSourceImageWithLimit(ctx context.Context, stateRoot, image, expected
 		}
 		return target, nil
 	}
-	path := image
+	path, err := resolveLocalImagePath(image)
+	if err != nil {
+		return "", err
+	}
+	if checksum != "" {
+		return cacheVerifiedLocalImage(ctx, stateRoot, path, checksum, maxDiskBytes)
+	}
+	return path, nil
+}
+
+func resolveLocalImagePath(image string) (string, error) {
+	path := strings.TrimSpace(image)
 	if strings.HasPrefix(path, "~"+string(os.PathSeparator)) {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -218,11 +232,22 @@ func resolveSourceImageWithLimit(ctx context.Context, stateRoot, image, expected
 		}
 		path = abs
 	}
-	if _, err := os.Stat(path); err != nil {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
 		return "", fmt.Errorf("image %q: %w", path, err)
 	}
-	if checksum != "" {
-		return cacheVerifiedLocalImage(ctx, stateRoot, path, checksum, maxDiskBytes)
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = unix.Close(fd)
+		return "", fmt.Errorf("image %q: invalid file descriptor", path)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", fmt.Errorf("stat image %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("image %q is not a regular file", path)
 	}
 	return path, nil
 }
@@ -890,6 +915,9 @@ func validateQCOW2Metadata(source io.ReaderAt, sourceBytes, maxDiskBytes int64) 
 			return fmt.Errorf("read qcow2 v3 header: %w", err)
 		}
 		incompatibleFeatures = binary.BigEndian.Uint64(header[72:80])
+		if incompatibleFeatures&(1<<1) != 0 {
+			return fmt.Errorf("qcow2 image is marked corrupt")
+		}
 		if incompatibleFeatures&^uint64(0x1b) != 0 || incompatibleFeatures&(1<<2) != 0 {
 			return fmt.Errorf("unsupported qcow2 incompatible features 0x%x", incompatibleFeatures)
 		}
@@ -1318,11 +1346,16 @@ RestartSec=1
 WantedBy=multi-user.target
 `
 
-const vsockProxyPython = `#!/usr/bin/env python3
+var vsockProxyPython = fmt.Sprintf(`#!/usr/bin/env python3
 import socket
 import threading
+import time
 
-LISTEN_PORT = 2222
+HOST_PORT = %d
+POOL_SIZE = %d
+ACTIVATE = b"\x01"
+READY = b"\x02"
+RETRY_SECONDS = 0.25
 TARGET = ("127.0.0.1", 22)
 
 
@@ -1342,29 +1375,43 @@ def pump(src, dst):
             pass
 
 
-def handle(conn):
-    upstream = socket.create_connection(TARGET)
-    t1 = threading.Thread(target=pump, args=(conn, upstream), daemon=True)
-    t2 = threading.Thread(target=pump, args=(upstream, conn), daemon=True)
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
+def serve_channel():
+    channel = None
+    upstream = None
     try:
-        conn.close()
+        channel = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+        channel.connect((socket.VMADDR_CID_HOST, HOST_PORT))
+        if channel.recv(1) != ACTIVATE:
+            raise ConnectionError("host closed idle channel")
+        upstream = socket.create_connection(TARGET)
+        channel.sendall(READY)
+        t1 = threading.Thread(target=pump, args=(channel, upstream), daemon=True)
+        t2 = threading.Thread(target=pump, args=(upstream, channel), daemon=True)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+    except OSError:
+        pass
     finally:
-        upstream.close()
+        if channel is not None:
+            channel.close()
+        if upstream is not None:
+            upstream.close()
 
 
-sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind((socket.VMADDR_CID_ANY, LISTEN_PORT))
-sock.listen(16)
+def worker():
+    while True:
+        serve_channel()
+        time.sleep(RETRY_SECONDS)
 
-while True:
-    conn, _ = sock.accept()
-    threading.Thread(target=handle, args=(conn,), daemon=True).start()
-`
+
+workers = [threading.Thread(target=worker) for _ in range(POOL_SIZE)]
+for worker_thread in workers:
+    worker_thread.start()
+for worker_thread in workers:
+    worker_thread.join()
+`, HostVSOCKSSHPort, maxVSOCKProxyChannels)
 
 func runServe(stateRoot, name string, stdout, stderr io.Writer) error {
 	inst, err := initializeServeInstance(stateRoot, name)
@@ -1441,8 +1488,8 @@ func runServe(stateRoot, name string, stdout, stderr io.Writer) error {
 	for {
 		select {
 		case err := <-proxyErr:
-			if err == nil || errors.Is(err, net.ErrClosed) {
-				continue
+			if err == nil {
+				err = fmt.Errorf("local SSH proxy stopped unexpectedly")
 			}
 			inst.Status = StatusError
 			inst.Error = err.Error()
@@ -1750,26 +1797,138 @@ func serveLocalSSHProxy(listener net.Listener, vm *vz.VirtualMachine) error {
 	if len(socketDevices) == 0 {
 		return fmt.Errorf("vm socket device unavailable")
 	}
-	socketDevice := socketDevices[0]
+	guestListener, err := socketDevices[0].Listen(HostVSOCKSSHPort)
+	if err != nil {
+		return fmt.Errorf("listen for guest VSOCK SSH channels: %w", err)
+	}
+	return serveReverseSSHProxyWithTimeouts(
+		listener,
+		guestListener,
+		maxVSOCKProxyChannels,
+		guestChannelAcquireWait,
+		guestChannelActivateWait,
+	)
+}
+
+func serveReverseSSHProxy(localListener, guestListener net.Listener, maxChannels int) error {
+	return serveReverseSSHProxyWithTimeouts(
+		localListener,
+		guestListener,
+		maxChannels,
+		guestChannelAcquireWait,
+		guestChannelActivateWait,
+	)
+}
+
+func serveReverseSSHProxyWithTimeouts(
+	localListener, guestListener net.Listener,
+	maxChannels int,
+	acquireWait, activateWait time.Duration,
+) error {
+	if maxChannels < 1 {
+		return fmt.Errorf("VSOCK channel limit must be positive")
+	}
+	if acquireWait <= 0 || activateWait <= 0 {
+		return fmt.Errorf("VSOCK channel timeouts must be positive")
+	}
+	defer guestListener.Close()
+	idle := make(chan net.Conn, maxChannels)
+	active := make(chan struct{}, maxChannels)
+	guestErr := make(chan error, 1)
+	go func() {
+		for {
+			conn, err := guestListener.Accept()
+			if err != nil {
+				guestErr <- err
+				_ = localListener.Close()
+				return
+			}
+			enqueueGuestChannel(idle, conn)
+		}
+	}()
+
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	for {
-		conn, err := listener.Accept()
+		localConn, err := localListener.Accept()
 		if err != nil {
+			select {
+			case err := <-guestErr:
+				return fmt.Errorf("accept guest VSOCK SSH channel: %w", err)
+			default:
+			}
 			return err
 		}
+		select {
+		case active <- struct{}{}:
+		default:
+			_ = localConn.Close()
+			continue
+		}
+		guestConn, err := acquireGuestChannel(idle, acquireWait, activateWait)
+		if err != nil {
+			<-active
+			_ = localConn.Close()
+			continue
+		}
 		wg.Add(1)
-		go func(localConn net.Conn) {
+		go func() {
 			defer wg.Done()
+			defer func() { <-active }()
 			defer localConn.Close()
-			guestConn, err := socketDevice.Connect(GuestVSOCKSSHPort)
-			if err != nil {
-				return
-			}
 			defer guestConn.Close()
 			bridgeConnections(localConn, guestConn)
-		}(conn)
+		}()
 	}
+}
+
+func enqueueGuestChannel(idle chan net.Conn, conn net.Conn) {
+	for {
+		select {
+		case idle <- conn:
+			return
+		default:
+		}
+		select {
+		case stale := <-idle:
+			_ = stale.Close()
+		default:
+		}
+	}
+}
+
+func acquireGuestChannel(idle <-chan net.Conn, acquireWait, activateWait time.Duration) (net.Conn, error) {
+	timer := time.NewTimer(acquireWait)
+	defer timer.Stop()
+	for {
+		select {
+		case guestConn := <-idle:
+			if err := activateGuestChannel(guestConn, activateWait); err != nil {
+				_ = guestConn.Close()
+				continue
+			}
+			return guestConn, nil
+		case <-timer.C:
+			return nil, fmt.Errorf("guest VSOCK SSH channel unavailable")
+		}
+	}
+}
+
+func activateGuestChannel(conn net.Conn, timeout time.Duration) error {
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	if _, err := conn.Write([]byte{1}); err != nil {
+		return err
+	}
+	var ready [1]byte
+	if _, err := io.ReadFull(conn, ready[:]); err != nil {
+		return err
+	}
+	if ready[0] != 2 {
+		return fmt.Errorf("invalid guest VSOCK SSH channel acknowledgement")
+	}
+	return conn.SetDeadline(time.Time{})
 }
 
 func bridgeConnections(left, right net.Conn) {
@@ -1811,6 +1970,11 @@ func validateRuntimeConfig(stateRoot, image, expectedSHA256 string) (map[string]
 	}
 	if remote && strings.TrimSpace(expectedSHA256) == "" {
 		return nil, fmt.Errorf("apple-vz remote image %q requires a SHA-256 checksum", RedactImageRef(image))
+	}
+	if !remote {
+		if _, err := resolveLocalImagePath(image); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := exec.LookPath("hdiutil"); err != nil {
 		return nil, fmt.Errorf("hdiutil is required")

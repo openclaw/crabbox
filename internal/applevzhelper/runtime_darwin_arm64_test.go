@@ -11,12 +11,14 @@ import (
 	"errors"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -126,6 +128,180 @@ func TestConsoleLogSinkCapsFile(t *testing.T) {
 	if len(data) != 128 || !bytes.HasSuffix(data, []byte(consoleLogTruncatedMarker)) {
 		t.Fatalf("console log size=%d suffix=%q", len(data), data)
 	}
+}
+
+func TestServeReverseSSHProxyRecoversAndBoundsActiveChannels(t *testing.T) {
+	localListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	guestListener := newQueuedListener()
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- serveReverseSSHProxyWithTimeouts(localListener, guestListener, 1, 100*time.Millisecond, 100*time.Millisecond)
+	}()
+
+	early, err := net.Dial("tcp4", localListener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertConnectionClosed(t, early)
+
+	staleHost, staleGuest := net.Pipe()
+	guestListener.enqueue(staleHost)
+	_ = staleGuest.Close()
+
+	hostOne, guestOne := net.Pipe()
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		guestListener.enqueue(hostOne)
+	}()
+	activatedOne := make(chan struct{})
+	go func() {
+		defer guestOne.Close()
+		var activation [1]byte
+		if _, err := io.ReadFull(guestOne, activation[:]); err == nil && activation[0] == 1 {
+			_, _ = guestOne.Write([]byte{2})
+			close(activatedOne)
+			_, _ = io.Copy(io.Discard, guestOne)
+		}
+	}()
+	clientOne := dialAndWaitForActivation(t, localListener.Addr().String(), activatedOne)
+
+	hostTwo, guestTwo := net.Pipe()
+	guestListener.enqueue(hostTwo)
+	clientTwo, err := net.Dial("tcp4", localListener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertConnectionClosed(t, clientTwo)
+
+	_ = clientOne.Close()
+	_ = guestOne.Close()
+	_ = guestTwo.Close()
+
+	if err := localListener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serveDone; !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("serveReverseSSHProxy error=%v, want net.ErrClosed", err)
+	}
+}
+
+func TestServeReverseSSHProxyReplacesSaturatedStalePool(t *testing.T) {
+	localListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	guestListener := newQueuedListener()
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- serveReverseSSHProxyWithTimeouts(localListener, guestListener, 2, time.Second, 100*time.Millisecond)
+	}()
+
+	stalePeers := make([]net.Conn, 0, 2)
+	for range 2 {
+		host, guest := net.Pipe()
+		stalePeers = append(stalePeers, guest)
+		guestListener.enqueue(host)
+	}
+	t.Cleanup(func() {
+		for _, peer := range stalePeers {
+			_ = peer.Close()
+		}
+	})
+
+	freshHost, freshGuest := net.Pipe()
+	guestListener.enqueue(freshHost)
+	activated := make(chan struct{})
+	go func() {
+		defer freshGuest.Close()
+		var activation [1]byte
+		if _, err := io.ReadFull(freshGuest, activation[:]); err == nil && activation[0] == 1 {
+			_, _ = freshGuest.Write([]byte{2})
+			close(activated)
+			_, _ = io.Copy(io.Discard, freshGuest)
+		}
+	}()
+
+	client := dialAndWaitForActivation(t, localListener.Addr().String(), activated)
+	_ = client.Close()
+	if err := localListener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serveDone; !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("serveReverseSSHProxy error=%v, want net.ErrClosed", err)
+	}
+}
+
+type queuedListener struct {
+	conns  chan net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newQueuedListener() *queuedListener {
+	return &queuedListener{
+		conns:  make(chan net.Conn, 4),
+		closed: make(chan struct{}),
+	}
+}
+
+func (l *queuedListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.conns:
+		return conn, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *queuedListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *queuedListener) Addr() net.Addr {
+	return testAddr("vsock")
+}
+
+func (l *queuedListener) enqueue(conn net.Conn) {
+	l.conns <- conn
+}
+
+type testAddr string
+
+func (a testAddr) Network() string { return string(a) }
+func (a testAddr) String() string  { return string(a) }
+
+func assertConnectionClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var one [1]byte
+	if _, err := conn.Read(one[:]); err == nil {
+		t.Fatal("connection remained open")
+	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatal("connection was not closed promptly")
+	}
+}
+
+func dialAndWaitForActivation(t *testing.T, address string, activated <-chan struct{}) net.Conn {
+	t.Helper()
+	conn, err := net.Dial("tcp4", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-activated:
+		return conn
+	case <-time.After(time.Second):
+		_ = conn.Close()
+		t.Fatal("guest channel was not activated")
+	}
+	return nil
 }
 
 func TestResolveSourceImageRequiresChecksumForRemoteImages(t *testing.T) {
@@ -467,6 +643,37 @@ func TestValidateRuntimeConfigRejectsNonLoopbackHTTPImage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "must use HTTPS") {
 		t.Fatalf("error=%v, want HTTPS requirement", err)
+	}
+}
+
+func TestValidateRuntimeConfigRejectsMissingLocalImage(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.img")
+	_, err := validateRuntimeConfig(t.TempDir(), missing, "")
+	if err == nil || !strings.Contains(err.Error(), "no such file or directory") {
+		t.Fatalf("error=%v, want missing local image rejection", err)
+	}
+}
+
+func TestValidateRuntimeConfigRejectsLocalImageDirectory(t *testing.T) {
+	directory := t.TempDir()
+	_, err := validateRuntimeConfig(t.TempDir(), directory, "")
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("error=%v, want local image directory rejection", err)
+	}
+}
+
+func TestValidateRuntimeConfigRejectsLocalImageFIFOWithoutBlocking(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "image.fifo")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err := validateRuntimeConfig(t.TempDir(), fifo, "")
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("error=%v, want local image FIFO rejection", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("FIFO validation took %s, want nonblocking rejection", elapsed)
 	}
 }
 
@@ -861,6 +1068,12 @@ func TestValidateQCOW2MetadataBoundsParserAllocations(t *testing.T) {
 		t.Fatalf("unaligned L1 validation error=%v", err)
 	}
 
+	corrupt := append([]byte(nil), image...)
+	binary.BigEndian.PutUint64(corrupt[72:80], 1<<1)
+	if err := validateQCOW2Metadata(bytes.NewReader(corrupt), int64(len(corrupt)), 2<<30); err == nil || !strings.Contains(err.Error(), "marked corrupt") {
+		t.Fatalf("corrupt image validation error=%v", err)
+	}
+
 	largeExtension := append([]byte(nil), image...)
 	binary.BigEndian.PutUint32(largeExtension[104:108], 1)
 	binary.BigEndian.PutUint32(largeExtension[108:112], 5000)
@@ -971,6 +1184,10 @@ func TestSeedUserDataQuotesYAMLAndReadinessPath(t *testing.T) {
 		`- "ssh-ed25519 AAAATEST alice@example.com"`,
 		`[mkdir, -p, "/work/$(touch /tmp/not-run)'literal"]`,
 		`test -d '/work/$(touch /tmp/not-run)'\''literal'`,
+		`HOST_PORT = 2222`,
+		`POOL_SIZE = 32`,
+		`channel.connect((socket.VMADDR_CID_HOST, HOST_PORT))`,
+		`channel.sendall(READY)`,
 	} {
 		if !strings.Contains(data, want) {
 			t.Fatalf("seed data missing %q:\n%s", want, data)
