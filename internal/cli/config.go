@@ -144,6 +144,7 @@ type Config struct {
 	AnthropicSRT                  AnthropicSRTConfig
 	Modal                         ModalConfig
 	UpstashBox                    UpstashBoxConfig
+	Smolvm                        SmolvmConfig
 	AsciiBox                      AsciiBoxConfig
 	Cloudflare                    CloudflareConfig
 	Semaphore                     SemaphoreConfig
@@ -542,6 +543,17 @@ type UpstashBoxConfig struct {
 	Size      string
 	Workdir   string
 	KeepAlive bool
+}
+
+type SmolvmConfig struct {
+	APIKey   string
+	BaseURL  string
+	Image    string
+	Workdir  string
+	CPUs     int
+	MemoryMB int
+	Network  string
+	Keep     bool
 }
 
 type AsciiBoxConfig struct {
@@ -1699,6 +1711,14 @@ func baseConfig() Config {
 			Size:    "small",
 			Workdir: "/workspace/home/crabbox",
 		},
+		Smolvm: SmolvmConfig{
+			BaseURL:  "https://api.smolmachines.com",
+			Image:    "alpine",
+			Workdir:  "/workspace",
+			CPUs:     2,
+			MemoryMB: 2048,
+			Network:  "open",
+		},
 		AsciiBox: AsciiBoxConfig{
 			BaseURL: "https://ascii.dev",
 			CLIPath: "box",
@@ -1848,6 +1868,7 @@ type fileConfig struct {
 	AnthropicSRT         *fileAnthropicSRTConfig            `yaml:"anthropicSandboxRuntime,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
 	UpstashBox           *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
+	Smolvm               *fileSmolvmConfig                  `yaml:"smolvm,omitempty"`
 	AsciiBox             *fileAsciiBoxConfig                `yaml:"asciiBox,omitempty"`
 	Cloudflare           *fileCloudflareConfig              `yaml:"cloudflare,omitempty"`
 	Semaphore            *fileSemaphoreConfig               `yaml:"semaphore,omitempty"`
@@ -2327,6 +2348,16 @@ type fileUpstashBoxConfig struct {
 	Size      string `yaml:"size,omitempty"`
 	Workdir   string `yaml:"workdir,omitempty"`
 	KeepAlive *bool  `yaml:"keepAlive,omitempty"`
+}
+
+type fileSmolvmConfig struct {
+	BaseURL  string `yaml:"baseUrl,omitempty"`
+	Image    string `yaml:"image,omitempty"`
+	Workdir  string `yaml:"workdir,omitempty"`
+	CPUs     int    `yaml:"cpus,omitempty"`
+	MemoryMB int    `yaml:"memoryMB,omitempty"`
+	Network  string `yaml:"network,omitempty"`
+	Keep     *bool  `yaml:"keep,omitempty"`
 }
 
 type fileAsciiBoxConfig struct {
@@ -3873,6 +3904,29 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.UpstashBox.KeepAlive = *file.UpstashBox.KeepAlive
 		}
 	}
+	if file.Smolvm != nil {
+		if file.Smolvm.BaseURL != "" {
+			cfg.Smolvm.BaseURL = file.Smolvm.BaseURL
+		}
+		if file.Smolvm.Image != "" {
+			cfg.Smolvm.Image = file.Smolvm.Image
+		}
+		if file.Smolvm.Workdir != "" {
+			cfg.Smolvm.Workdir = file.Smolvm.Workdir
+		}
+		if file.Smolvm.CPUs > 0 {
+			cfg.Smolvm.CPUs = file.Smolvm.CPUs
+		}
+		if file.Smolvm.MemoryMB > 0 {
+			cfg.Smolvm.MemoryMB = file.Smolvm.MemoryMB
+		}
+		if file.Smolvm.Network != "" {
+			cfg.Smolvm.Network = file.Smolvm.Network
+		}
+		if file.Smolvm.Keep != nil {
+			cfg.Smolvm.Keep = *file.Smolvm.Keep
+		}
+	}
 	if file.AsciiBox != nil {
 		if file.AsciiBox.BaseURL != "" {
 			cfg.AsciiBox.BaseURL = file.AsciiBox.BaseURL
@@ -5014,6 +5068,16 @@ func applyEnv(cfg *Config) error {
 	cfg.UpstashBox.Workdir = getenv("CRABBOX_UPSTASH_BOX_WORKDIR", cfg.UpstashBox.Workdir)
 	if value, ok := getenvBool("CRABBOX_UPSTASH_BOX_KEEP_ALIVE"); ok {
 		cfg.UpstashBox.KeepAlive = value
+	}
+	cfg.Smolvm.APIKey = getenv("CRABBOX_SMOLVM_API_KEY", getenv("SMOLMACHINES_API_KEY", getenv("SMK_API_KEY", cfg.Smolvm.APIKey)))
+	cfg.Smolvm.BaseURL = getenv("CRABBOX_SMOLVM_BASE_URL", cfg.Smolvm.BaseURL)
+	cfg.Smolvm.Image = getenv("CRABBOX_SMOLVM_IMAGE", cfg.Smolvm.Image)
+	cfg.Smolvm.Workdir = getenv("CRABBOX_SMOLVM_WORKDIR", cfg.Smolvm.Workdir)
+	cfg.Smolvm.CPUs = getenvInt("CRABBOX_SMOLVM_CPUS", cfg.Smolvm.CPUs)
+	cfg.Smolvm.MemoryMB = getenvInt("CRABBOX_SMOLVM_MEMORY_MB", cfg.Smolvm.MemoryMB)
+	cfg.Smolvm.Network = getenv("CRABBOX_SMOLVM_NETWORK", cfg.Smolvm.Network)
+	if value, ok := getenvBool("CRABBOX_SMOLVM_KEEP"); ok {
+		cfg.Smolvm.Keep = value
 	}
 	cfg.AsciiBox.APIKey = getenv("CRABBOX_ASCII_BOX_API_KEY", getenv("ASCII_BOX_API_KEY", cfg.AsciiBox.APIKey))
 	cfg.AsciiBox.BaseURL = getenv("CRABBOX_ASCII_BOX_BASE_URL", getenv("ASCII_BOX_BASE_URL", cfg.AsciiBox.BaseURL))

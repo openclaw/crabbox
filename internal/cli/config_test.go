@@ -1433,6 +1433,116 @@ func TestOpenComputerBurstConfigYAMLAndEnv(t *testing.T) {
 	}
 }
 
+func TestSmolvmConfigYAMLOverrides(t *testing.T) {
+	cfg := baseConfig()
+	var file fileConfig
+	yamlText := strings.Join([]string{
+		"smolvm:",
+		"  baseUrl: https://smol.example",
+		"  image: ubuntu",
+		"  workdir: /srv/app",
+		"  cpus: 4",
+		"  memoryMB: 4096",
+		"  network: closed",
+		"  keep: true",
+	}, "\n")
+	if err := yaml.Unmarshal([]byte(yamlText), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	want := SmolvmConfig{
+		BaseURL:  "https://smol.example",
+		Image:    "ubuntu",
+		Workdir:  "/srv/app",
+		CPUs:     4,
+		MemoryMB: 4096,
+		Network:  "closed",
+		Keep:     true,
+	}
+	if cfg.Smolvm != want {
+		t.Fatalf("smolvm YAML config = %#v, want %#v", cfg.Smolvm, want)
+	}
+}
+
+func TestSmolvmConfigYAMLEmptyKeepsDefaults(t *testing.T) {
+	cfg := baseConfig()
+	defaults := cfg.Smolvm
+	file := fileConfig{Smolvm: &fileSmolvmConfig{}}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Smolvm != defaults {
+		t.Fatalf("empty smolvm YAML changed defaults: %#v, want %#v", cfg.Smolvm, defaults)
+	}
+}
+
+func TestSmolvmConfigYAMLCannotSetAPIKey(t *testing.T) {
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("smolvm:\n  apiKey: smk-attacker\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Smolvm.APIKey != "" {
+		t.Fatalf("repository config set smolvm API key to %q", cfg.Smolvm.APIKey)
+	}
+}
+
+func TestSmolvmConfigEnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	t.Setenv("CRABBOX_SMOLVM_API_KEY", "smk-env")
+	t.Setenv("CRABBOX_SMOLVM_BASE_URL", "https://env.smol.example")
+	t.Setenv("CRABBOX_SMOLVM_IMAGE", "debian")
+	t.Setenv("CRABBOX_SMOLVM_WORKDIR", "/env/workdir")
+	t.Setenv("CRABBOX_SMOLVM_CPUS", "8")
+	t.Setenv("CRABBOX_SMOLVM_MEMORY_MB", "8192")
+	t.Setenv("CRABBOX_SMOLVM_NETWORK", "closed")
+	t.Setenv("CRABBOX_SMOLVM_KEEP", "true")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	want := SmolvmConfig{
+		APIKey:   "smk-env",
+		BaseURL:  "https://env.smol.example",
+		Image:    "debian",
+		Workdir:  "/env/workdir",
+		CPUs:     8,
+		MemoryMB: 8192,
+		Network:  "closed",
+		Keep:     true,
+	}
+	if cfg.Smolvm != want {
+		t.Fatalf("smolvm env config = %#v, want %#v", cfg.Smolvm, want)
+	}
+}
+
+func TestSmolvmAPIKeyEnvFallbacks(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	t.Setenv("SMOLMACHINES_API_KEY", "smk-vendor")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Smolvm.APIKey != "smk-vendor" {
+		t.Fatalf("SMOLMACHINES_API_KEY fallback = %q, want smk-vendor", cfg.Smolvm.APIKey)
+	}
+
+	cfg = baseConfig()
+	t.Setenv("SMOLMACHINES_API_KEY", "")
+	t.Setenv("SMK_API_KEY", "smk-short")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Smolvm.APIKey != "smk-short" {
+		t.Fatalf("SMK_API_KEY fallback = %q, want smk-short", cfg.Smolvm.APIKey)
+	}
+}
+
 func TestHostingerPurchaseOptInRequiresTrustedConfig(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

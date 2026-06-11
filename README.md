@@ -168,6 +168,7 @@ hardware for macOS VM workflows.
 | [OpenSandbox](docs/providers/opensandbox.md) — `opensandbox` | Linux | OpenSandbox delegated containers through the OpenSandbox Go SDK. |
 | [Railway](docs/providers/railway.md) — `railway` (`rail`, `railwayapp`) | Linux | Redeploy and stream an existing Railway service. |
 | [Anthropic Sandbox Runtime](docs/providers/anthropic-sandbox-runtime.md) — `anthropic-sandbox-runtime` (`srt`) | macOS, Linux | Local one-shot sandboxing through Anthropic's `srt` CLI. |
+| [SmolVM](docs/providers/smolvm.md) — `smolvm` (`smol`, `smolmachines`, `smolfleet`) | Linux | Smol Machines microVM sandboxes via the smolfleet API. |
 | [Tensorlake](docs/providers/tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux | Tensorlake Firecracker sandbox via the Tensorlake CLI. |
 | [Upstash Box](docs/providers/upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux | Upstash Box through the Box REST API. |
 | [Azure Dynamic Sessions](docs/providers/azure-dynamic-sessions.md) — `azure-dynamic-sessions` | Linux | Azure Container Apps dynamic sessions. |
