@@ -60,9 +60,9 @@ operations fail with a clear error.
 Local lease claims are scoped to the normalized API URL and a random ownership
 marker stored in both the local claim and the sandbox tags. The API key is
 never stored. Before reusing or deleting a retained sandbox, Crabbox verifies
-that both markers match. This prevents a claim from being applied to a sandbox
-at another endpoint or account while allowing API-key rotation within the same
-account.
+that both markers match using the dedicated sandbox-tags endpoint. This
+prevents a claim from being applied to a sandbox at another endpoint or account
+while allowing API-key rotation within the same account.
 
 The API base URL defaults to `https://app.opencomputer.dev`. A trusted local
 override can come from `--opencomputer-api-url`,
@@ -84,6 +84,7 @@ openComputer:
   memoryMB: 0                  # memory; service infers CPU when set alone
   timeoutSecs: 0               # sandbox idle timeout; 0 leaves it to the default
   execTimeoutSecs: 3600        # command/sync-helper timeout
+  burst: false                 # opt into best-effort burst capacity
 ```
 
 Provider flags:
@@ -95,6 +96,7 @@ Provider flags:
 --opencomputer-memory-mb
 --opencomputer-timeout-secs
 --opencomputer-exec-timeout-secs
+--opencomputer-burst
 --opencomputer-forget-missing
 ```
 
@@ -108,6 +110,13 @@ deliberately CLI-only so stale-claim removal always requires explicit intent.
 > allowed tier (for example `1/1024`, `1/4096`, `2/8192`, `4/16384`). When only
 > one is set, OpenComputer infers the matching value. Leaving both at `0` uses
 > the service default tier.
+
+Set `openComputer.burst: true`, `CRABBOX_OPENCOMPUTER_BURST=true`, or pass
+`--opencomputer-burst` to request best-effort burst capacity. Burst is disabled
+by default, so normal on-demand or reserved capacity remains the standard path.
+Burst sandboxes are alpha: filesystem state persists across infrastructure
+restarts, but processes, memory, terminal sessions, and network connections may
+restart. Use burst only for restart-tolerant runs.
 
 ### Environment forwarding
 

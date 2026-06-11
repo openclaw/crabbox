@@ -426,6 +426,7 @@ type OpenComputerConfig struct {
 	MemoryMB        int
 	TimeoutSecs     int
 	ExecTimeoutSecs int
+	Burst           bool
 	ForgetMissing   bool
 }
 
@@ -1797,6 +1798,7 @@ type fileOpenComputerConfig struct {
 	MemoryMB        *int   `yaml:"memoryMB,omitempty"`
 	TimeoutSecs     *int   `yaml:"timeoutSecs,omitempty"`
 	ExecTimeoutSecs *int   `yaml:"execTimeoutSecs,omitempty"`
+	Burst           *bool  `yaml:"burst,omitempty"`
 }
 
 type fileDockerSandboxConfig struct {
@@ -3066,6 +3068,9 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.OpenComputer.ExecTimeoutSecs != nil {
 			cfg.OpenComputer.ExecTimeoutSecs = *file.OpenComputer.ExecTimeoutSecs
 		}
+		if file.OpenComputer.Burst != nil {
+			cfg.OpenComputer.Burst = *file.OpenComputer.Burst
+		}
 	}
 	if file.DockerSandbox != nil {
 		if file.DockerSandbox.CLIPath != "" {
@@ -4036,6 +4041,9 @@ func applyEnv(cfg *Config) error {
 	cfg.OpenComputer.MemoryMB = getenvInt("CRABBOX_OPENCOMPUTER_MEMORY_MB", cfg.OpenComputer.MemoryMB)
 	cfg.OpenComputer.TimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", cfg.OpenComputer.TimeoutSecs)
 	cfg.OpenComputer.ExecTimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", cfg.OpenComputer.ExecTimeoutSecs)
+	if v, ok := getenvBool("CRABBOX_OPENCOMPUTER_BURST"); ok {
+		cfg.OpenComputer.Burst = v
+	}
 	cfg.DockerSandbox.CLIPath = getenv("CRABBOX_DOCKER_SANDBOX_CLI", cfg.DockerSandbox.CLIPath)
 	cfg.DockerSandbox.Agent = getenv("CRABBOX_DOCKER_SANDBOX_AGENT", cfg.DockerSandbox.Agent)
 	cfg.DockerSandbox.Template = getenv("CRABBOX_DOCKER_SANDBOX_TEMPLATE", cfg.DockerSandbox.Template)

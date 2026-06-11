@@ -377,6 +377,11 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, []map[string]any{})
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/tags"):
+		f.mu.Lock()
+		tags := f.tags
+		f.mu.Unlock()
+		writeJSON(w, sandboxTagsResponse{Tags: tags})
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/sandboxes/"):
 		if f.blockGet {
 			<-r.Context().Done()
@@ -389,9 +394,8 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Lock()
 		metadata := f.metadata
-		tags := f.tags
 		f.mu.Unlock()
-		writeJSON(w, map[string]any{"sandboxID": f.sandboxID, "status": f.listState, "metadata": metadata, "tags": tags})
+		writeJSON(w, map[string]any{"sandboxID": f.sandboxID, "status": f.listState, "metadata": metadata})
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/sandboxes/"):
 		if f.blockDelete {
 			<-r.Context().Done()
@@ -884,6 +888,32 @@ func TestCreateSandboxForwardsPartialSizing(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxForwardsBurst(t *testing.T) {
+	f := newFakeAPI(t)
+	backend := newAPIBackend(t, f)
+	backend.cfg.OpenComputer.Burst = true
+	api, err := newOCAPIClient(backend.cfg, backend.rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseID, _, _, err := backend.createSandbox(context.Background(), api, Repo{Name: "carbbox", Root: t.TempDir()}, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeLeaseClaim(leaseID) })
+	recorded, ok := f.firstRequest(http.MethodPost, "/api/sandboxes")
+	if !ok {
+		t.Fatal("missing create request")
+	}
+	var req createSandboxRequest
+	if err := json.Unmarshal([]byte(recorded.body), &req); err != nil {
+		t.Fatal(err)
+	}
+	if !req.Burst {
+		t.Fatalf("create request burst=%v want true", req.Burst)
+	}
+}
+
 func TestCreateSandboxReportsCleanupFailureAndSandboxID(t *testing.T) {
 	f := newFakeAPI(t)
 	f.deleteStatus = http.StatusInternalServerError
@@ -1259,6 +1289,9 @@ func TestListFetchesClaimedHibernatedSandbox(t *testing.T) {
 	}
 	if f.callsExact(http.MethodGet, "/api/sandboxes/"+f.sandboxID) != 1 {
 		t.Fatalf("want one status fetch, requests=%#v", f.requests)
+	}
+	if f.callsExact(http.MethodGet, "/api/sandboxes/"+f.sandboxID+"/tags") != 1 {
+		t.Fatalf("want one ownership-tag fetch, requests=%#v", f.requests)
 	}
 	status, err := backend.Status(context.Background(), StatusRequest{ID: "slug"})
 	if err != nil {

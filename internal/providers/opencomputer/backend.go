@@ -227,7 +227,7 @@ func (b *openComputerBackend) List(ctx context.Context, req ListRequest) ([]Leas
 		if sandboxID == "" {
 			continue
 		}
-		sb, getErr := api.getSandbox(ctx, sandboxID)
+		sb, getErr := api.getSandboxWithTags(ctx, sandboxID)
 		state := ""
 		if getErr != nil {
 			if isOCNotFound(getErr) {
@@ -302,7 +302,7 @@ func (b *openComputerBackend) Status(ctx context.Context, req StatusRequest) (St
 	}
 	defer cancel()
 	for {
-		sb, getErr := api.getSandbox(pollCtx, sandboxID)
+		sb, getErr := api.getSandboxWithTags(pollCtx, sandboxID)
 		if getErr != nil {
 			if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 				return StatusView{}, exit(5, "timed out waiting for opencomputer sandbox %s to become ready", sandboxID)
@@ -417,6 +417,7 @@ func (b *openComputerBackend) createSandbox(ctx context.Context, api *ocAPIClien
 	}
 	req := createSandboxRequest{
 		Timeout: b.cfg.OpenComputer.TimeoutSecs,
+		Burst:   b.cfg.OpenComputer.Burst,
 		Metadata: map[string]string{
 			"crabbox":      "true",
 			"crabbox-name": newSandboxName(repo),
@@ -547,7 +548,7 @@ func verifyOpenComputerClaim(ctx context.Context, api *ocAPIClient, leaseID, san
 	if err := validateOpenComputerClaimScope(claim, api.baseURL); err != nil {
 		return sandbox{}, err
 	}
-	sb, err := api.getSandbox(ctx, sandboxID)
+	sb, err := api.getSandboxWithTags(ctx, sandboxID)
 	if err != nil {
 		return sandbox{}, err
 	}

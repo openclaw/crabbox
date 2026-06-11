@@ -52,6 +52,11 @@ type createSandboxRequest struct {
 	CPUCount int               `json:"cpuCount,omitempty"`
 	MemoryMB int               `json:"memoryMB,omitempty"`
 	DiskMB   int               `json:"diskMB,omitempty"`
+	Burst    bool              `json:"burst,omitempty"`
+}
+
+type sandboxTagsResponse struct {
+	Tags map[string]string `json:"tags"`
 }
 
 // execRunRequest is the POST /api/sandboxes/:id/exec/run body. Env travels in
@@ -280,6 +285,26 @@ func (c *ocAPIClient) killSandbox(ctx context.Context, id string) error {
 
 func (c *ocAPIClient) replaceSandboxTags(ctx context.Context, id string, tags map[string]string) error {
 	return c.doJSON(ctx, http.MethodPut, "/api/sandboxes/"+url.PathEscape(id)+"/tags", tags, nil)
+}
+
+func (c *ocAPIClient) getSandboxTags(ctx context.Context, id string) (map[string]string, error) {
+	var response sandboxTagsResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/api/sandboxes/"+url.PathEscape(id)+"/tags", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Tags, nil
+}
+
+func (c *ocAPIClient) getSandboxWithTags(ctx context.Context, id string) (sandbox, error) {
+	sb, err := c.getSandbox(ctx, id)
+	if err != nil {
+		return sandbox{}, err
+	}
+	sb.Tags, err = c.getSandboxTags(ctx, id)
+	if err != nil {
+		return sandbox{}, err
+	}
+	return sb, nil
 }
 
 func (c *ocAPIClient) execRun(ctx context.Context, id string, req execRunRequest) (execRunResult, error) {

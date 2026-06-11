@@ -796,6 +796,30 @@ func TestOpenComputerConfigYAMLCannotSetAPIURL(t *testing.T) {
 	}
 }
 
+func TestOpenComputerBurstConfigYAMLAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("openComputer:\n  burst: true\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OpenComputer.Burst {
+		t.Fatal("openComputer.burst YAML was not applied")
+	}
+
+	cfg.OpenComputer.Burst = false
+	t.Setenv("CRABBOX_OPENCOMPUTER_BURST", "true")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OpenComputer.Burst {
+		t.Fatal("CRABBOX_OPENCOMPUTER_BURST was not applied")
+	}
+}
+
 func TestTartEnvExplicitFlags(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
