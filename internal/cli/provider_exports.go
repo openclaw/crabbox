@@ -186,6 +186,10 @@ func NormalizeLeaseSlug(value string) string {
 	return normalizeLeaseSlug(value)
 }
 
+func RenderTailscaleHostname(template, leaseID, slug, provider string) string {
+	return renderTailscaleHostname(template, leaseID, slug, provider)
+}
+
 func LeaseProviderName(leaseID, slug string) string {
 	return leaseProviderName(leaseID, slug)
 }

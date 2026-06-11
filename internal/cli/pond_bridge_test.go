@@ -151,6 +151,38 @@ func TestResolvePondPeersPublishesShare(t *testing.T) {
 	}
 }
 
+func TestResolvePondPeersPublishesShareForTailnetPrimary(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { c.TailscaleIPv4 = "100.64.7.7" })
+	fake := &fakeBridgeProvider{
+		published: map[string]BridgePeerTarget{
+			"isb_w": {URL: "https://abc.share.islo.dev", ShareID: "shr_w"},
+		},
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{SharePort: 8080, ShareTTL: time.Hour})
+	if err != nil {
+		t.Fatalf("resolvePondPeers: %v", err)
+	}
+	if len(peers) != 1 || len(peers[0].Targets) != 1 {
+		t.Fatalf("expected 1 tailnet peer with 1 URL target, got %#v", peers)
+	}
+	if peers[0].Transport != TransportTailnet || peers[0].Endpoint != "100.64.7.7" {
+		t.Fatalf("primary transport changed: %#v", peers[0])
+	}
+	if peers[0].Targets[0].Port != 8080 || peers[0].Targets[0].URL == "" {
+		t.Fatalf("publish should have set port=8080 and URL: %#v", peers[0].Targets[0])
+	}
+	if fake.calls != 1 {
+		t.Fatalf("expected 1 fake call, got %d", fake.calls)
+	}
+}
+
 func TestResolvePondPeersUnknownProvider(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},

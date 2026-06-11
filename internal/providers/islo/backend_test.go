@@ -408,6 +408,28 @@ func TestIsloCreateSandboxPassesRelativeWorkdirToProvider(t *testing.T) {
 	}
 }
 
+func TestIsloCreateSandboxRejectsMissingTailscaleAuthKeyBeforeAPI(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
+	backend := &isloBackend{
+		cfg: Config{
+			Islo: IsloConfig{Workdir: "team/repo"},
+			Tailscale: core.TailscaleConfig{
+				Enabled:    true,
+				AuthKeyEnv: "TEST_TS_AUTH_KEY",
+			},
+		},
+		rt: Runtime{Stderr: io.Discard},
+	}
+	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	if err == nil || !strings.Contains(err.Error(), "$TEST_TS_AUTH_KEY") {
+		t.Fatalf("expected missing auth key error, got %v", err)
+	}
+	if client.createRequest != nil {
+		t.Fatalf("CreateSandbox was called with %#v", client.createRequest)
+	}
+}
+
 func TestIsloCreateSandboxStoresPondClaimForList(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
@@ -475,6 +497,7 @@ func TestIsloCreateSandboxTailscaleClaimAndOptions(t *testing.T) {
 		"TS_LOGIN_SERVER":        "https://headscale.example.com",
 		"TS_EXIT_NODE":           "exit.tailnet.ts.net",
 		"TS_EXIT_NODE_ALLOW_LAN": "true",
+		"TS_STATE_DIR":           "/tmp/crabbox-tailscale-" + normalizeLeaseSlug(leaseID),
 	} {
 		got := ""
 		if req.Env != nil && req.Env[key] != nil {

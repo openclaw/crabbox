@@ -330,7 +330,9 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 	bridgeLoaded := false
 	for _, claim := range claims {
 		peer := bridgePeerFromClaim(claim, class)
-		if peer.Transport == TransportURL {
+		urlPrimary := peer.Transport == TransportURL
+		useBridge := urlPrimary || (flags.SharePort > 0 && providerCapabilities(claim.Provider).URLBridge)
+		if useBridge {
 			if !bridgeLoaded {
 				b, err := loadBridgeProvider(provider, rt)
 				if err != nil {
@@ -344,10 +346,12 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 			// recorded on the claim. Skipping the lookup when an endpoint
 			// is already known keeps `pond peers` cheap for read-only
 			// listings on already-published shares.
-			needBridge := flags.SharePort > 0 || peer.Endpoint == ""
+			needBridge := flags.SharePort > 0 || (urlPrimary && peer.Endpoint == "")
 			if bridge == nil && needBridge {
 				peer.BridgeState = "unsupported-provider"
-				peer.Transport = TransportNone
+				if urlPrimary {
+					peer.Transport = TransportNone
+				}
 				peer.Note = fmt.Sprintf("no bridge adapter for provider %s", peer.Provider)
 				peers = append(peers, peer)
 				continue
@@ -358,7 +362,9 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 					if perr != nil {
 						if errors.Is(perr, ErrBridgeNotImplemented) {
 							peer.BridgeState = "unsupported"
-							peer.Transport = TransportNone
+							if urlPrimary {
+								peer.Transport = TransportNone
+							}
 							peer.Note = fmt.Sprintf("bridge adapter for provider %s reports unsupported", peer.Provider)
 							peers = append(peers, peer)
 							continue
@@ -374,7 +380,9 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 					if lerr != nil {
 						if errors.Is(lerr, ErrBridgeNotImplemented) {
 							peer.BridgeState = "unsupported"
-							peer.Transport = TransportNone
+							if urlPrimary {
+								peer.Transport = TransportNone
+							}
 							peer.Note = fmt.Sprintf("bridge adapter for provider %s reports unsupported", peer.Provider)
 							peers = append(peers, peer)
 							continue

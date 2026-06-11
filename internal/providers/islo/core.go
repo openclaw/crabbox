@@ -42,6 +42,10 @@ func normalizeLeaseSlug(value string) string {
 	return core.NormalizeLeaseSlug(value)
 }
 
+func renderTailscaleHostname(template, leaseID, slug, provider string) string {
+	return core.RenderTailscaleHostname(template, leaseID, slug, provider)
+}
+
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }

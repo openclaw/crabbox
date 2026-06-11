@@ -239,45 +239,31 @@ func updateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
 	if leaseID == "" {
 		return nil
 	}
-	path, err := leaseClaimPath(leaseID)
-	if err != nil {
-		return err
-	}
-	claim, err := readLeaseClaim(leaseID)
-	if err != nil {
-		return err
-	}
-	if claim.LeaseID == "" {
+	return mutateLeaseClaim(leaseID, func(claim *leaseClaim) error {
+		if claim.LeaseID == "" {
+			return nil
+		}
+		if ipv4 != "" {
+			claim.TailscaleIPv4 = ipv4
+		}
+		if fqdn != "" {
+			claim.TailscaleFQDN = fqdn
+		}
+		if claim.TailscaleIPv4 != "" || claim.TailscaleFQDN != "" {
+			if claim.Labels == nil {
+				claim.Labels = map[string]string{}
+			}
+			claim.Labels["tailscale"] = "true"
+			claim.Labels["tailscale_state"] = "ready"
+			if claim.TailscaleIPv4 != "" {
+				claim.Labels["tailscale_ipv4"] = claim.TailscaleIPv4
+			}
+			if claim.TailscaleFQDN != "" {
+				claim.Labels["tailscale_fqdn"] = claim.TailscaleFQDN
+			}
+		}
 		return nil
-	}
-	if ipv4 != "" {
-		claim.TailscaleIPv4 = ipv4
-	}
-	if fqdn != "" {
-		claim.TailscaleFQDN = fqdn
-	}
-	if claim.TailscaleIPv4 != "" || claim.TailscaleFQDN != "" {
-		if claim.Labels == nil {
-			claim.Labels = map[string]string{}
-		}
-		claim.Labels["tailscale"] = "true"
-		claim.Labels["tailscale_state"] = "ready"
-		if claim.TailscaleIPv4 != "" {
-			claim.Labels["tailscale_ipv4"] = claim.TailscaleIPv4
-		}
-		if claim.TailscaleFQDN != "" {
-			claim.Labels["tailscale_fqdn"] = claim.TailscaleFQDN
-		}
-	}
-	data, err := json.MarshalIndent(claim, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return exit(2, "write claim %s: %v", path, err)
-	}
-	return nil
+	})
 }
 
 func updateLeaseClaimCacheVolumes(leaseID string, specs []string) error {

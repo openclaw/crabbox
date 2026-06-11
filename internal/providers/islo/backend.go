@@ -334,6 +334,9 @@ func (b *isloBackend) Stop(ctx context.Context, req StopRequest) error {
 }
 
 func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
+	if err := b.validateTailscaleConfig(); err != nil {
+		return "", "", "", err
+	}
 	workdir, err := isloRelativeWorkdir(b.cfg)
 	if err != nil {
 		return "", "", "", err

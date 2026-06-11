@@ -23,10 +23,6 @@ const isloTailscaleVersionEnv = "CRABBOX_ISLO_TAILSCALE_VERSION"
 // on its own line so we never have to parse the full `tailscale status`.
 var isloTailscaleIPRe = regexp.MustCompile(`(?m)^CRABBOX_TS_IP=([0-9.]+)`)
 
-// isloTailscaleHostnameInvalid matches anything outside a DNS label so we can
-// collapse it to '-' before handing the hostname to `tailscale up`.
-var isloTailscaleHostnameInvalid = regexp.MustCompile(`[^a-z0-9-]+`)
-
 // isloTailscaleBringUp is the in-sandbox script crabbox runs over the islo exec
 // stream. Islo is a delegated-run provider with no SSH lease, so crabbox cannot
 // reuse the SSH runner-bootstrap that Tailscale-capable VM providers use. This
@@ -58,24 +54,33 @@ if [ ! -x /tmp/ts/tailscaled ]; then
   rm -rf /tmp/ts; mkdir -p /tmp/ts
   tar -xzf /tmp/ts.tgz -C /tmp/ts --strip-components=1
 fi
-if ! /tmp/ts/tailscale --socket=/tmp/tsd.sock status >/dev/null 2>&1; then
-  setsid /tmp/ts/tailscaled --tun=userspace-networking --statedir=/tmp/tsd \
-    --socket=/tmp/tsd.sock --socks5-server=localhost:1055 \
+: "${TS_STATE_DIR:?}"
+mkdir -p "${TS_STATE_DIR}"
+chmod 700 "${TS_STATE_DIR}"
+TS_SOCKET="${TS_STATE_DIR}/tailscaled.sock"
+if ! /tmp/ts/tailscale --socket="${TS_SOCKET}" status >/dev/null 2>&1; then
+  setsid /tmp/ts/tailscaled --tun=userspace-networking --statedir="${TS_STATE_DIR}" \
+    --socket="${TS_SOCKET}" --socks5-server=localhost:1055 \
     --outbound-http-proxy-listen=localhost:1055 \
-    >/tmp/tsd.log 2>&1 </dev/null &
-  for _ in $(seq 1 30); do [ -S /tmp/tsd.sock ] && break; sleep 0.5; done
+    >"${TS_STATE_DIR}/tailscaled.log" 2>&1 </dev/null &
+  for _ in $(seq 1 30); do [ -S "${TS_SOCKET}" ] && break; sleep 0.5; done
 fi
-set -- --authkey="${TS_AUTHKEY}" --hostname="${TS_HOST}" --accept-dns=false --timeout=120s
+umask 077
+TS_AUTH_FILE="$(mktemp /tmp/crabbox-ts-auth.XXXXXX)"
+printf '%s' "${TS_AUTHKEY}" >"${TS_AUTH_FILE}"
+unset TS_AUTHKEY
+trap 'rm -f "${TS_AUTH_FILE}"' EXIT
+set -- --auth-key="file:${TS_AUTH_FILE}" --hostname="${TS_HOST}" --accept-dns=false --timeout=120s
 if [ -n "${TS_TAGS}" ]; then set -- "$@" --advertise-tags="${TS_TAGS}"; fi
 if [ -n "${TS_LOGIN_SERVER}" ]; then set -- "$@" --login-server="${TS_LOGIN_SERVER}"; fi
 if [ -n "${TS_EXIT_NODE}" ]; then
   set -- "$@" --exit-node="${TS_EXIT_NODE}"
   if [ "${TS_EXIT_NODE_ALLOW_LAN}" = "true" ]; then set -- "$@" --exit-node-allow-lan-access; fi
 fi
-/tmp/ts/tailscale --socket=/tmp/tsd.sock up "$@"
+/tmp/ts/tailscale --socket="${TS_SOCKET}" up "$@"
 ts_ip=""
 for _ in $(seq 1 24); do
-  ts_ip="$(/tmp/ts/tailscale --socket=/tmp/tsd.sock ip -4 2>/dev/null | head -n1 || true)"
+  ts_ip="$(/tmp/ts/tailscale --socket="${TS_SOCKET}" ip -4 2>/dev/null | head -n1 || true)"
   if [ -n "${ts_ip}" ]; then break; fi
   sleep 5
 done
@@ -91,16 +96,17 @@ func (b *isloBackend) maybeJoinTailscale(ctx context.Context, client isloAPI, sa
 	if !b.cfg.Tailscale.Enabled {
 		return nil
 	}
-	authKey := strings.TrimSpace(b.cfg.Tailscale.AuthKey)
-	if authKey == "" {
-		return exit(2, "provider=islo: --tailscale requires a node auth key in $%s", blank(b.cfg.Tailscale.AuthKeyEnv, "CRABBOX_TAILSCALE_AUTH_KEY"))
+	if err := b.validateTailscaleConfig(); err != nil {
+		return err
 	}
-	hostname := isloTailscaleHostname(b.cfg, slug)
+	authKey := strings.TrimSpace(b.cfg.Tailscale.AuthKey)
+	hostname := isloTailscaleHostname(b.cfg, leaseID, slug)
 	tags := strings.Join(b.cfg.Tailscale.Tags, ",")
 	version := blank(strings.TrimSpace(os.Getenv(isloTailscaleVersionEnv)), defaultIsloTailscaleVersion)
 	loginServer := strings.TrimSpace(os.Getenv("TS_CONTROL_URL"))
 	exitNode := strings.TrimSpace(b.cfg.Tailscale.ExitNode)
 	allowLAN := fmt.Sprint(b.cfg.Tailscale.ExitNodeAllowLANAccess)
+	stateDir := "/tmp/crabbox-tailscale-" + normalizeLeaseSlug(leaseID)
 
 	req := &gosdk.ExecRequest{Command: []string{"bash", "-lc", isloTailscaleBringUp}}
 	req.Env = map[string]*string{}
@@ -112,6 +118,7 @@ func (b *isloBackend) maybeJoinTailscale(ctx context.Context, client isloAPI, sa
 		"TS_LOGIN_SERVER":        loginServer,
 		"TS_EXIT_NODE":           exitNode,
 		"TS_EXIT_NODE_ALLOW_LAN": allowLAN,
+		"TS_STATE_DIR":           stateDir,
 	} {
 		v := v
 		req.Env[k] = &v
@@ -134,25 +141,19 @@ func (b *isloBackend) maybeJoinTailscale(ctx context.Context, client isloAPI, sa
 	return updateLeaseClaimTailscale(leaseID, m[1], "")
 }
 
+func (b *isloBackend) validateTailscaleConfig() error {
+	if !b.cfg.Tailscale.Enabled || strings.TrimSpace(b.cfg.Tailscale.AuthKey) != "" {
+		return nil
+	}
+	return exit(2, "provider=islo: --tailscale requires a node auth key in $%s", blank(b.cfg.Tailscale.AuthKeyEnv, "CRABBOX_TAILSCALE_AUTH_KEY"))
+}
+
 // isloTailscaleHostname resolves the tailnet hostname for a sandbox from the
-// configured template, substituting {slug}/{provider}, and sanitizes the result
-// to a valid DNS label.
-func isloTailscaleHostname(cfg Config, slug string) string {
-	host := strings.TrimSpace(cfg.Tailscale.Hostname)
-	if host == "" {
-		tmpl := cfg.Tailscale.HostnameTemplate
-		if tmpl == "" {
-			tmpl = "crabbox-{slug}"
-		}
-		tmpl = strings.ReplaceAll(tmpl, "{slug}", slug)
-		tmpl = strings.ReplaceAll(tmpl, "{provider}", isloProvider)
-		host = tmpl
+// configured template, substituting all shared tokens and sanitizing the result.
+func isloTailscaleHostname(cfg Config, leaseID, slug string) string {
+	template := strings.TrimSpace(cfg.Tailscale.Hostname)
+	if template == "" {
+		template = cfg.Tailscale.HostnameTemplate
 	}
-	host = strings.ToLower(strings.TrimSpace(host))
-	host = isloTailscaleHostnameInvalid.ReplaceAllString(host, "-")
-	host = strings.Trim(host, "-")
-	if host == "" {
-		host = "crabbox-islo"
-	}
-	return host
+	return renderTailscaleHostname(template, leaseID, slug, isloProvider)
 }
