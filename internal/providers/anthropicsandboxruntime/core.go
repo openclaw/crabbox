@@ -1,4 +1,4 @@
-package sandboxruntime
+package anthropicsandboxruntime
 
 import (
 	"io"
@@ -7,7 +7,7 @@ import (
 )
 
 type Config = core.Config
-type SandboxRuntimeConfig = core.SandboxRuntimeConfig
+type AnthropicSRTConfig = core.AnthropicSRTConfig
 type ProviderSpec = core.ProviderSpec
 type Runtime = core.Runtime
 type Backend = core.Backend
@@ -28,8 +28,8 @@ type LocalCommandResult = core.LocalCommandResult
 type timingReport = core.TimingReport
 
 const (
-	providerName   = "sandbox-runtime"
-	providerFamily = "sandbox-runtime"
+	providerName   = "anthropic-sandbox-runtime"
+	providerFamily = "anthropic-sandbox-runtime"
 	defaultCLIPath = "srt"
 )
 

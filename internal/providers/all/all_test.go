@@ -45,19 +45,19 @@ func TestDockerSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
-func TestSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
-	for _, name := range []string{"sandbox-runtime", "srt"} {
+func TestAnthropicSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
+	for _, name := range []string{"anthropic-sandbox-runtime", "srt"} {
 		provider, err := core.ProviderFor(name)
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
-		if provider.Name() != "sandbox-runtime" {
+		if provider.Name() != "anthropic-sandbox-runtime" {
 			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Name())
 		}
 	}
-	spec := mustProvider(t, "sandbox-runtime").Spec()
-	if spec.Family != "sandbox-runtime" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever || len(spec.Features) != 0 {
-		t.Fatalf("sandbox-runtime spec=%#v", spec)
+	spec := mustProvider(t, "anthropic-sandbox-runtime").Spec()
+	if spec.Family != "anthropic-sandbox-runtime" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever || len(spec.Features) != 0 {
+		t.Fatalf("anthropic-sandbox-runtime spec=%#v", spec)
 	}
 }
 
@@ -114,7 +114,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"proxmox",
 		"railway",
 		"runpod",
-		"sandbox-runtime",
+		"anthropic-sandbox-runtime",
 		"semaphore",
 		"sprites",
 		"ssh",

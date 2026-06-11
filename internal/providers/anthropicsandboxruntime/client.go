@@ -1,4 +1,4 @@
-package sandboxruntime
+package anthropicsandboxruntime
 
 import (
 	"bytes"
@@ -16,28 +16,28 @@ type srtCLI struct {
 
 func newSRTCLI(cfg Config, rt Runtime) (*srtCLI, error) {
 	if rt.Exec == nil {
-		return nil, exit(2, "provider=sandbox-runtime requires Runtime.Exec")
+		return nil, exit(2, "provider=anthropic-sandbox-runtime requires Runtime.Exec")
 	}
 	return &srtCLI{cfg: cfg, rt: rt}, nil
 }
 
 func (c *srtCLI) binary() string {
-	return blank(strings.TrimSpace(c.cfg.SandboxRuntime.CLIPath), defaultCLIPath)
+	return blank(strings.TrimSpace(c.cfg.AnthropicSRT.CLIPath), defaultCLIPath)
 }
 
 func (c *srtCLI) baseArgs() []string {
 	args := []string{}
-	if c.cfg.SandboxRuntime.Debug {
+	if c.cfg.AnthropicSRT.Debug {
 		args = append(args, "--debug")
 	}
-	if settings := strings.TrimSpace(c.cfg.SandboxRuntime.Settings); settings != "" {
+	if settings := strings.TrimSpace(c.cfg.AnthropicSRT.Settings); settings != "" {
 		args = append(args, "--settings", settings)
 	}
 	return args
 }
 
 func (c *srtCLI) env(extra map[string]string) []string {
-	env := sandboxRuntimeBaseEnv()
+	env := anthropicSandboxRuntimeBaseEnv()
 	byName := make(map[string]int, len(env))
 	for i, value := range env {
 		key, _, ok := strings.Cut(value, "=")
@@ -55,7 +55,7 @@ func (c *srtCLI) env(extra map[string]string) []string {
 	return env
 }
 
-func sandboxRuntimeBaseEnv() []string {
+func anthropicSandboxRuntimeBaseEnv() []string {
 	keys := []string{
 		"PATH",
 		"HOME",

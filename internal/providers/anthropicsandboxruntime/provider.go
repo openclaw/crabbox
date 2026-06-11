@@ -1,4 +1,4 @@
-package sandboxruntime
+package anthropicsandboxruntime
 
 import (
 	"flag"
@@ -56,7 +56,7 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 	}
 	doctor, ok := backend.(core.DoctorBackend)
 	if !ok {
-		return nil, exit(2, "sandbox-runtime doctor backend unavailable")
+		return nil, exit(2, "anthropic-sandbox-runtime doctor backend unavailable")
 	}
 	return doctor, nil
 }

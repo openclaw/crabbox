@@ -38,9 +38,9 @@ SSH-lease providers further differ by how they reach the cloud:
   tart, and `hyperv` creates local Windows VMs through Microsoft Hyper-V.
 - **Delegated sandbox** — managed sandbox/proof runners that execute remotely
   without an SSH lease (e.g. `e2b`, `modal`, `islo`, `cloudflare`,
-  `azure-dynamic-sessions`, `docker-sandbox`). `sandbox-runtime` is the local
-  macOS/Linux delegated-run exception: SRT executes on the current machine while
-  still owning sync/run policy end to end.
+  `azure-dynamic-sessions`, `docker-sandbox`). `anthropic-sandbox-runtime` is
+  the local macOS/Linux delegated-run exception: Anthropic's `srt` executes on
+  the current machine while still owning sync/run policy end to end.
 
 Select a provider per command with `--provider <name>` (env `CRABBOX_PROVIDER`),
 or set `provider: <name>` in config. Provider flags are registered before
@@ -101,7 +101,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Microsoft Execution Containers](mxc.md) — `mxc` (`execution-container`) | Windows |
 | [OpenComputer](opencomputer.md) — `opencomputer` (`oc`, `open-computer`) | Linux |
 | [Railway](railway.md) — `railway` (`rail`, `railwayapp`) | Linux |
-| [Sandbox Runtime](sandbox-runtime.md) — `sandbox-runtime` (`srt`) | macOS, Linux |
+| [Anthropic Sandbox Runtime](anthropic-sandbox-runtime.md) — `anthropic-sandbox-runtime` (`srt`) | macOS, Linux |
 | [Tensorlake](tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux |
 | [Upstash Box](upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux |
 | [W&B Sandboxes](wandb.md) — `wandb` (`weights-and-biases`) | Linux |
@@ -120,9 +120,9 @@ reports.
 - Docker Sandbox is a delegated-run provider driven by the standalone `sbx`
   CLI. It has no aliases, so `docker`, `container`, and `local-docker` remain
   Local Container aliases.
-- Sandbox Runtime is a local one-shot delegated-run provider driven by the
-  standalone `srt` CLI. It has no SSH lease, no persistent lifecycle, and no
-  remote sync surface.
+- Anthropic Sandbox Runtime is a local one-shot delegated-run provider driven
+  by the standalone `srt` CLI. It has no SSH lease, no persistent lifecycle,
+  and no remote sync surface.
 - ASCII Box is an SSH-lease provider. Crabbox uses the documented `box --json`
   CLI for lifecycle/status/delete, then runs normal sync and commands over SSH.
 - `incus` is a direct Linux SSH-lease provider that stores Crabbox ownership and

@@ -1,4 +1,4 @@
-package sandboxruntime
+package anthropicsandboxruntime
 
 import (
 	"context"
@@ -24,7 +24,7 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 func (b *backend) Spec() ProviderSpec { return b.spec }
 
 func (b *backend) Warmup(context.Context, WarmupRequest) error {
-	return exit(2, "provider=sandbox-runtime is one-shot; use crabbox run")
+	return exit(2, "provider=anthropic-sandbox-runtime is one-shot; use crabbox run")
 }
 
 func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -55,7 +55,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		Provider:      providerName,
 		CommandText:   commandText,
 	}
-	fmt.Fprintf(b.rt.Stderr, "sandbox-runtime run summary sync_delegated=true command=%s total=%s exit=%d\n", commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
+	fmt.Fprintf(b.rt.Stderr, "anthropic-sandbox-runtime run summary sync_delegated=true command=%s total=%s exit=%d\n", commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
 	if req.TimingJSON {
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{
 			Provider:      providerName,
@@ -71,9 +71,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	if runErr != nil {
 		if exitCode != 0 {
-			return result, exit(exitCode, "sandbox-runtime run failed: %v", runErr)
+			return result, exit(exitCode, "anthropic-sandbox-runtime run failed: %v", runErr)
 		}
-		return result, exit(1, "sandbox-runtime run failed: %v", runErr)
+		return result, exit(1, "anthropic-sandbox-runtime run failed: %v", runErr)
 	}
 	return result, nil
 }
@@ -83,11 +83,11 @@ func (b *backend) List(context.Context, ListRequest) ([]LeaseView, error) {
 }
 
 func (b *backend) Status(context.Context, StatusRequest) (StatusView, error) {
-	return StatusView{}, exit(2, "provider=sandbox-runtime is one-shot and does not support status")
+	return StatusView{}, exit(2, "provider=anthropic-sandbox-runtime is one-shot and does not support status")
 }
 
 func (b *backend) Stop(context.Context, StopRequest) error {
-	return exit(2, "provider=sandbox-runtime is one-shot and does not support stop")
+	return exit(2, "provider=anthropic-sandbox-runtime is one-shot and does not support stop")
 }
 
 func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
@@ -99,8 +99,8 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	help, helpErr := cli.help(ctx)
 	helpDetails := map[string]string{
 		"cli":      cli.binary(),
-		"settings": blank(strings.TrimSpace(b.cfg.SandboxRuntime.Settings), "srt default"),
-		"debug":    fmt.Sprint(b.cfg.SandboxRuntime.Debug),
+		"settings": blank(strings.TrimSpace(b.cfg.AnthropicSRT.Settings), "srt default"),
+		"debug":    fmt.Sprint(b.cfg.AnthropicSRT.Debug),
 		"mutation": "false",
 	}
 	result.Checks = append(result.Checks, doctorCheck("srt_help", helpErr, helpDetails))
@@ -135,16 +135,16 @@ func rejectRunOptions(spec ProviderSpec, req RunRequest) error {
 		return err
 	}
 	if req.ID != "" || req.Keep || req.KeepOnFailure || strings.TrimSpace(req.RequestedSlug) != "" {
-		return exit(2, "provider=sandbox-runtime is one-shot and does not support persistent lease ids")
+		return exit(2, "provider=anthropic-sandbox-runtime is one-shot and does not support persistent lease ids")
 	}
 	if req.Options.Desktop || req.Options.Browser || req.Options.Code {
-		return exit(2, "provider=sandbox-runtime does not support desktop, browser, or code-server options")
+		return exit(2, "provider=anthropic-sandbox-runtime does not support desktop, browser, or code-server options")
 	}
 	if req.Options.Tailscale.Enabled {
-		return exit(2, "provider=sandbox-runtime is delegated-run only and does not support Tailscale options")
+		return exit(2, "provider=anthropic-sandbox-runtime is delegated-run only and does not support Tailscale options")
 	}
 	if !req.ApplyLocalPatch && strings.TrimSpace(req.Repo.Root) == "" {
-		return exit(2, "provider=sandbox-runtime requires a local workspace")
+		return exit(2, "provider=anthropic-sandbox-runtime requires a local workspace")
 	}
 	return nil
 }

@@ -15,9 +15,12 @@ function writeExecutable(file, body) {
 function prepareSmokeRepo(dir) {
   const tempRoot = path.join(dir, "repo");
   const tempScripts = path.join(tempRoot, "scripts");
-  const smokeScript = path.join(tempScripts, "live-sandbox-runtime-smoke.sh");
+  const smokeScript = path.join(tempScripts, "live-anthropic-sandbox-runtime-smoke.sh");
   fs.mkdirSync(tempScripts, { recursive: true });
-  fs.copyFileSync(path.join(repoRoot, "scripts", "live-sandbox-runtime-smoke.sh"), smokeScript);
+  fs.copyFileSync(
+    path.join(repoRoot, "scripts", "live-anthropic-sandbox-runtime-smoke.sh"),
+    smokeScript,
+  );
   fs.chmodSync(smokeScript, 0o755);
   return { tempRoot, smokeScript };
 }
@@ -29,13 +32,13 @@ function smokeEnv(dir, bin, extra = {}) {
     TMPDIR: dir,
     ...extra,
   };
-  if (!Object.hasOwn(extra, "CRABBOX_SANDBOX_RUNTIME_CLI")) {
-    delete env.CRABBOX_SANDBOX_RUNTIME_CLI;
+  if (!Object.hasOwn(extra, "CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI")) {
+    delete env.CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI;
   }
   return env;
 }
 
-test("live sandbox runtime smoke proves run and enforcement paths", () => {
+test("live Anthropic Sandbox Runtime smoke proves run and enforcement paths", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-srt-smoke-"));
   const bin = path.join(dir, "bin");
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
@@ -54,20 +57,20 @@ cat >bin/crabbox <<'SCRIPT'
 set -euo pipefail
 printf '%s\\n' "$*" >>"${calls}"
 case "$*" in
-  "doctor --provider sandbox-runtime")
-    printf 'ok      srt_help provider=sandbox-runtime mutation=false\\n'
+  "doctor --provider anthropic-sandbox-runtime")
+    printf 'ok      srt_help provider=anthropic-sandbox-runtime mutation=false\\n'
     ;;
-  "run --provider sandbox-runtime -- echo ok")
+  "run --provider anthropic-sandbox-runtime -- echo ok")
     printf 'ok\\n'
     ;;
-  run\\ --provider\\ sandbox-runtime\\ --sandbox-runtime-settings*allowed*)
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*allowed*)
     printf 'ok\\n'
     ;;
-  run\\ --provider\\ sandbox-runtime\\ --sandbox-runtime-settings*cat*)
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*cat*)
     printf 'Operation not permitted\\n' >&2
     exit 5
     ;;
-  run\\ --provider\\ sandbox-runtime\\ --sandbox-runtime-settings*curl*)
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*curl*)
     printf 'Connection blocked by network allowlist\\n' >&2
     exit 7
     ;;
@@ -88,17 +91,17 @@ chmod +x bin/crabbox
   });
 
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /classification=live_sandbox_runtime_smoke_passed/);
+  assert.match(result.stdout, /classification=live_anthropic_sandbox_runtime_smoke_passed/);
   assert.match(result.stdout, /ok/);
   assert.match(result.stderr, /Operation not permitted/);
   assert.match(result.stderr, /Connection blocked by network allowlist/);
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
   assert.equal(seen.length, 5, JSON.stringify(seen));
-  assert.equal(seen[0], "doctor --provider sandbox-runtime");
-  assert.equal(seen[1], "run --provider sandbox-runtime -- echo ok");
+  assert.equal(seen[0], "doctor --provider anthropic-sandbox-runtime");
+  assert.equal(seen[1], "run --provider anthropic-sandbox-runtime -- echo ok");
 });
 
-test("live sandbox runtime smoke classifies missing srt", () => {
+test("live Anthropic Sandbox Runtime smoke classifies missing srt", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-srt-missing-"));
   const bin = path.join(dir, "bin");
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
@@ -128,7 +131,7 @@ chmod +x bin/crabbox
   assert.match(result.stderr, /srt not found at configured path srt/);
 });
 
-test("live sandbox runtime smoke honors configured srt cli path", () => {
+test("live Anthropic Sandbox Runtime smoke honors configured srt cli path", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-srt-custom-"));
   const bin = path.join(dir, "bin");
   const custom = path.join(dir, "custom-srt");
@@ -146,20 +149,20 @@ cat >bin/crabbox <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
-  "doctor --provider sandbox-runtime")
-    printf 'ok      srt_help provider=sandbox-runtime mutation=false\\n'
+  "doctor --provider anthropic-sandbox-runtime")
+    printf 'ok      srt_help provider=anthropic-sandbox-runtime mutation=false\\n'
     ;;
-  "run --provider sandbox-runtime -- echo ok")
+  "run --provider anthropic-sandbox-runtime -- echo ok")
     printf 'ok\\n'
     ;;
-  run\\ --provider\\ sandbox-runtime\\ --sandbox-runtime-settings*allowed*)
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*allowed*)
     printf 'ok\\n'
     ;;
-  run\\ --provider\\ sandbox-runtime\\ --sandbox-runtime-settings*cat*)
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*cat*)
     printf 'Operation not permitted\\n' >&2
     exit 5
     ;;
-  run\\ --provider\\ sandbox-runtime\\ --sandbox-runtime-settings*curl*)
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*curl*)
     printf 'Connection blocked by network allowlist\\n' >&2
     exit 7
     ;;
@@ -176,16 +179,16 @@ chmod +x bin/crabbox
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
     env: smokeEnv(dir, bin, {
-      CRABBOX_SANDBOX_RUNTIME_CLI: custom,
+      CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI: custom,
     }),
     encoding: "utf8",
   });
 
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /classification=live_sandbox_runtime_smoke_passed/);
+  assert.match(result.stdout, /classification=live_anthropic_sandbox_runtime_smoke_passed/);
 });
 
-test("live sandbox runtime smoke rejects unexpected success for denied checks", () => {
+test("live Anthropic Sandbox Runtime smoke rejects unexpected success for denied checks", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-srt-validation-"));
   const bin = path.join(dir, "bin");
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
@@ -202,13 +205,13 @@ cat >bin/crabbox <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
-  "doctor --provider sandbox-runtime")
-    printf 'ok      srt_help provider=sandbox-runtime mutation=false\\n'
+  "doctor --provider anthropic-sandbox-runtime")
+    printf 'ok      srt_help provider=anthropic-sandbox-runtime mutation=false\\n'
     ;;
-  "run --provider sandbox-runtime -- echo ok")
+  "run --provider anthropic-sandbox-runtime -- echo ok")
     printf 'ok\\n'
     ;;
-  run\\ --provider\\ sandbox-runtime\\ --sandbox-runtime-settings*)
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*)
     printf 'ok\\n'
     ;;
 esac

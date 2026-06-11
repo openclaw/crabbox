@@ -157,7 +157,7 @@ configured); every other provider always runs direct from the CLI.
 | [Microsoft Execution Containers](docs/providers/mxc.md) — `mxc` (`execution-container`) | Windows | Policy-driven local Windows process containment. |
 | [OpenComputer](docs/providers/opencomputer.md) — `opencomputer` (`oc`, `open-computer`) | Linux | OpenComputer Linux VMs through the OpenComputer REST API. |
 | [Railway](docs/providers/railway.md) — `railway` (`rail`, `railwayapp`) | Linux | Redeploy and stream an existing Railway service. |
-| [Sandbox Runtime](docs/providers/sandbox-runtime.md) — `sandbox-runtime` (`srt`) | macOS, Linux | Local one-shot SRT sandboxing through the `srt` CLI. |
+| [Anthropic Sandbox Runtime](docs/providers/anthropic-sandbox-runtime.md) — `anthropic-sandbox-runtime` (`srt`) | macOS, Linux | Local one-shot sandboxing through Anthropic's `srt` CLI. |
 | [Tensorlake](docs/providers/tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux | Tensorlake Firecracker sandbox via the Tensorlake CLI. |
 | [Upstash Box](docs/providers/upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux | Upstash Box through the Box REST API. |
 | [Azure Dynamic Sessions](docs/providers/azure-dynamic-sessions.md) — `azure-dynamic-sessions` | Linux | Azure Container Apps dynamic sessions. |

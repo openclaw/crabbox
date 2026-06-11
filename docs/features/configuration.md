@@ -290,24 +290,26 @@ port `8787`. Auth uses `az account get-access-token --resource
 https://dynamicsessions.io` unless `CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN` is
 set.
 
-### Sandbox Runtime
+### Anthropic Sandbox Runtime
 
 ```yaml
-provider: sandbox-runtime
-sandboxRuntime:
+provider: anthropic-sandbox-runtime
+anthropicSandboxRuntime:
   cliPath: srt
-  settings: "" # empty means SRT default ~/.srt-settings.json
+  settings: "" # empty means Anthropic Sandbox Runtime default ~/.srt-settings.json
   debug: false
 ```
 
-`sandbox-runtime` is a local one-shot delegated-run provider. It shells out to
-Anthropic Sandbox Runtime with `srt [--debug] [--settings <path>] -c <command>`.
-Use `--sandbox-runtime-cli`, `--sandbox-runtime-settings`, and
-`--sandbox-runtime-debug` for command-line overrides, or
-`CRABBOX_SANDBOX_RUNTIME_CLI`, `CRABBOX_SANDBOX_RUNTIME_SETTINGS`, and
-`CRABBOX_SANDBOX_RUNTIME_DEBUG` for environment overrides. Crabbox validates the
-provider config keys; SRT validates its own settings JSON and enforcement
-policy.
+`anthropic-sandbox-runtime` is a local one-shot delegated-run provider. It
+shells out to Anthropic Sandbox Runtime with
+`srt [--debug] [--settings <path>] -c <command>`. Use
+`--anthropic-sandbox-runtime-cli`, `--anthropic-sandbox-runtime-settings`, and
+`--anthropic-sandbox-runtime-debug` for command-line overrides, or
+`CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI`,
+`CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS`, and
+`CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG` for environment overrides. Crabbox
+validates the provider config keys; Anthropic Sandbox Runtime validates its own
+settings JSON and enforcement policy.
 
 ### Hetzner
 

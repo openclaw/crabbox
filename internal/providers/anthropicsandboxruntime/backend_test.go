@@ -1,4 +1,4 @@
-package sandboxruntime
+package anthropicsandboxruntime
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func TestProviderSpecIsDelegatedOneShotSandboxRuntime(t *testing.T) {
+func TestProviderSpecIsDelegatedOneShotAnthropicSandboxRuntime(t *testing.T) {
 	provider := Provider{}
 	spec := provider.Spec()
 	if spec.Name != providerName || spec.Family != providerFamily {
@@ -42,18 +42,18 @@ func TestProviderFlagsApplyAndValidate(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	values := registerFlags(fs, cfg)
-	if err := fs.Parse([]string{"--sandbox-runtime-cli", "/opt/srt", "--sandbox-runtime-settings", ".crabbox/srt settings.json", "--sandbox-runtime-debug"}); err != nil {
+	if err := fs.Parse([]string{"--anthropic-sandbox-runtime-cli", "/opt/srt", "--anthropic-sandbox-runtime-settings", ".crabbox/srt settings.json", "--anthropic-sandbox-runtime-debug"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := applyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SandboxRuntime.CLIPath != "/opt/srt" || cfg.SandboxRuntime.Settings != ".crabbox/srt settings.json" || !cfg.SandboxRuntime.Debug {
-		t.Fatalf("sandboxRuntime=%#v", cfg.SandboxRuntime)
+	if cfg.AnthropicSRT.CLIPath != "/opt/srt" || cfg.AnthropicSRT.Settings != ".crabbox/srt settings.json" || !cfg.AnthropicSRT.Debug {
+		t.Fatalf("anthropicSandboxRuntime=%#v", cfg.AnthropicSRT)
 	}
 
 	bad := newTestConfig()
-	bad.SandboxRuntime.CLIPath = " "
+	bad.AnthropicSRT.CLIPath = " "
 	if err := validateConfig(bad); err == nil || !strings.Contains(err.Error(), "cliPath must not be empty") {
 		t.Fatalf("validateConfig err=%v", err)
 	}
@@ -73,9 +73,9 @@ func TestConfigureRequiresRuntimeExec(t *testing.T) {
 
 func TestRunBuildsSRTCommandAndStreamsOutput(t *testing.T) {
 	cfg := newTestConfig()
-	cfg.SandboxRuntime.CLIPath = "/opt/srt"
-	cfg.SandboxRuntime.Settings = ".crabbox/srt-settings.json"
-	cfg.SandboxRuntime.Debug = true
+	cfg.AnthropicSRT.CLIPath = "/opt/srt"
+	cfg.AnthropicSRT.Settings = ".crabbox/srt-settings.json"
+	cfg.AnthropicSRT.Debug = true
 	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		if req.Stdout != nil {
 			_, _ = io.WriteString(req.Stdout, "ok\n")
@@ -298,7 +298,7 @@ func (r *recordingRunner) onlyCall(t *testing.T) LocalCommandRequest {
 func newTestConfig() Config {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
-	cfg.SandboxRuntime.CLIPath = "srt"
+	cfg.AnthropicSRT.CLIPath = "srt"
 	return cfg
 }
 

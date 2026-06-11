@@ -65,9 +65,9 @@ mkdir -p bin
 rm -f bin/crabbox
 go build -trimpath -o bin/crabbox ./cmd/crabbox
 
-srt_cli="${CRABBOX_SANDBOX_RUNTIME_CLI:-srt}"
+srt_cli="${CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI:-srt}"
 if ! command -v "$srt_cli" >/dev/null 2>&1; then
-  classify_blocker "command -v $srt_cli" 127 "srt not found at configured path ${srt_cli}; install @anthropic-ai/sandbox-runtime or set CRABBOX_SANDBOX_RUNTIME_CLI"
+  classify_blocker "command -v $srt_cli" 127 "srt not found at configured path ${srt_cli}; install @anthropic-ai/sandbox-runtime or set CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI"
   exit 127
 fi
 if ! command -v curl >/dev/null 2>&1; then
@@ -75,13 +75,13 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 127
 fi
 
-doctor_output="$(run_capture "bin/crabbox doctor --provider sandbox-runtime" bin/crabbox doctor --provider sandbox-runtime)"
+doctor_output="$(run_capture "bin/crabbox doctor --provider anthropic-sandbox-runtime" bin/crabbox doctor --provider anthropic-sandbox-runtime)"
 printf '%s\n' "$doctor_output"
 
-echo_output="$(run_capture "bin/crabbox run --provider sandbox-runtime -- echo ok" bin/crabbox run --provider sandbox-runtime -- echo ok)"
+echo_output="$(run_capture "bin/crabbox run --provider anthropic-sandbox-runtime -- echo ok" bin/crabbox run --provider anthropic-sandbox-runtime -- echo ok)"
 printf '%s\n' "$echo_output"
 if [[ "$echo_output" != *ok* ]]; then
-  classify_validation_failure "bin/crabbox run --provider sandbox-runtime -- echo ok" 0 "echo smoke did not print ok"
+  classify_validation_failure "bin/crabbox run --provider anthropic-sandbox-runtime -- echo ok" 0 "echo smoke did not print ok"
   exit 1
 fi
 
@@ -105,20 +105,20 @@ cat >"$settings" <<JSON
 }
 JSON
 
-allowed_output="$(run_capture "bin/crabbox run --provider sandbox-runtime --sandbox-runtime-settings <settings> -- sh -lc <allowed-write-read>" \
-  bin/crabbox run --provider sandbox-runtime --sandbox-runtime-settings "$settings" -- sh -lc "printf ok > '$allowed_file' && cat '$allowed_file'")"
+allowed_output="$(run_capture "bin/crabbox run --provider anthropic-sandbox-runtime --anthropic-sandbox-runtime-settings <settings> -- sh -lc <allowed-write-read>" \
+  bin/crabbox run --provider anthropic-sandbox-runtime --anthropic-sandbox-runtime-settings "$settings" -- sh -lc "printf ok > '$allowed_file' && cat '$allowed_file'")"
 printf '%s\n' "$allowed_output"
 if [[ "$allowed_output" != *ok* ]]; then
   classify_validation_failure "allowed write/read" 0 "allowed write/read did not print ok"
   exit 1
 fi
 
-expect_failure "bin/crabbox run --provider sandbox-runtime --sandbox-runtime-settings <settings> -- cat <denied-secret>" \
+expect_failure "bin/crabbox run --provider anthropic-sandbox-runtime --anthropic-sandbox-runtime-settings <settings> -- cat <denied-secret>" \
   "" \
-  bin/crabbox run --provider sandbox-runtime --sandbox-runtime-settings "$settings" -- cat "$secret"
+  bin/crabbox run --provider anthropic-sandbox-runtime --anthropic-sandbox-runtime-settings "$settings" -- cat "$secret"
 
-expect_failure "bin/crabbox run --provider sandbox-runtime --sandbox-runtime-settings <settings> -- curl https://example.com" \
+expect_failure "bin/crabbox run --provider anthropic-sandbox-runtime --anthropic-sandbox-runtime-settings <settings> -- curl https://example.com" \
   "" \
-  bin/crabbox run --provider sandbox-runtime --sandbox-runtime-settings "$settings" -- curl -sS --max-time 3 https://example.com
+  bin/crabbox run --provider anthropic-sandbox-runtime --anthropic-sandbox-runtime-settings "$settings" -- curl -sS --max-time 3 https://example.com
 
-printf 'classification=live_sandbox_runtime_smoke_passed cleanup=complete\n'
+printf 'classification=live_anthropic_sandbox_runtime_smoke_passed cleanup=complete\n'

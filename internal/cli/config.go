@@ -127,7 +127,7 @@ type Config struct {
 	Tensorlake                    TensorlakeConfig
 	OpenComputer                  OpenComputerConfig
 	DockerSandbox                 DockerSandboxConfig
-	SandboxRuntime                SandboxRuntimeConfig
+	AnthropicSRT                  AnthropicSRTConfig
 	Modal                         ModalConfig
 	UpstashBox                    UpstashBoxConfig
 	AsciiBox                      AsciiBoxConfig
@@ -466,7 +466,7 @@ type DockerSandboxConfig struct {
 	Kit             []string
 }
 
-type SandboxRuntimeConfig struct {
+type AnthropicSRTConfig struct {
 	CLIPath  string
 	Settings string
 	Debug    bool
@@ -1471,7 +1471,7 @@ func baseConfig() Config {
 			CLIPath: "sbx",
 			Agent:   "shell",
 		},
-		SandboxRuntime: SandboxRuntimeConfig{
+		AnthropicSRT: AnthropicSRTConfig{
 			CLIPath: "srt",
 		},
 		Modal: ModalConfig{
@@ -1624,7 +1624,7 @@ type fileConfig struct {
 	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	OpenComputer         *fileOpenComputerConfig            `yaml:"openComputer,omitempty"`
 	DockerSandbox        *fileDockerSandboxConfig           `yaml:"dockerSandbox,omitempty"`
-	SandboxRuntime       *fileSandboxRuntimeConfig          `yaml:"sandboxRuntime,omitempty"`
+	AnthropicSRT         *fileAnthropicSRTConfig            `yaml:"anthropicSandboxRuntime,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
 	UpstashBox           *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
 	AsciiBox             *fileAsciiBoxConfig                `yaml:"asciiBox,omitempty"`
@@ -2035,7 +2035,7 @@ type fileDockerSandboxConfig struct {
 	Kit             *[]string `yaml:"kit,omitempty"`
 }
 
-type fileSandboxRuntimeConfig struct {
+type fileAnthropicSRTConfig struct {
 	CLIPath  string  `yaml:"cliPath,omitempty"`
 	Settings *string `yaml:"settings,omitempty"`
 	Debug    *bool   `yaml:"debug,omitempty"`
@@ -3376,15 +3376,15 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.DockerSandbox.Kit = append([]string(nil), (*file.DockerSandbox.Kit)...)
 		}
 	}
-	if file.SandboxRuntime != nil {
-		if file.SandboxRuntime.CLIPath != "" {
-			cfg.SandboxRuntime.CLIPath = file.SandboxRuntime.CLIPath
+	if file.AnthropicSRT != nil {
+		if file.AnthropicSRT.CLIPath != "" {
+			cfg.AnthropicSRT.CLIPath = file.AnthropicSRT.CLIPath
 		}
-		if file.SandboxRuntime.Settings != nil {
-			cfg.SandboxRuntime.Settings = *file.SandboxRuntime.Settings
+		if file.AnthropicSRT.Settings != nil {
+			cfg.AnthropicSRT.Settings = *file.AnthropicSRT.Settings
 		}
-		if file.SandboxRuntime.Debug != nil {
-			cfg.SandboxRuntime.Debug = *file.SandboxRuntime.Debug
+		if file.AnthropicSRT.Debug != nil {
+			cfg.AnthropicSRT.Debug = *file.AnthropicSRT.Debug
 		}
 	}
 	if file.Modal != nil {
@@ -4431,10 +4431,10 @@ func applyEnv(cfg *Config) error {
 	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_KIT"); ok {
 		cfg.DockerSandbox.Kit = values
 	}
-	cfg.SandboxRuntime.CLIPath = getenv("CRABBOX_SANDBOX_RUNTIME_CLI", cfg.SandboxRuntime.CLIPath)
-	cfg.SandboxRuntime.Settings = getenv("CRABBOX_SANDBOX_RUNTIME_SETTINGS", cfg.SandboxRuntime.Settings)
-	if value, ok := getenvBool("CRABBOX_SANDBOX_RUNTIME_DEBUG"); ok {
-		cfg.SandboxRuntime.Debug = value
+	cfg.AnthropicSRT.CLIPath = getenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI", cfg.AnthropicSRT.CLIPath)
+	cfg.AnthropicSRT.Settings = getenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS", cfg.AnthropicSRT.Settings)
+	if value, ok := getenvBool("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG"); ok {
+		cfg.AnthropicSRT.Debug = value
 	}
 	cfg.Modal.App = getenv("CRABBOX_MODAL_APP", cfg.Modal.App)
 	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)
