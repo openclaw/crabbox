@@ -123,6 +123,18 @@ func validateOCAPIURL(raw string) (string, error) {
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
 		return "", exit(2, "provider=opencomputer API URL must use HTTPS except for loopback development endpoints")
 	}
+	host := canonicalOCHostname(parsed.Hostname())
+	port := parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		parsed.Host = "[" + host + "]"
+	} else {
+		parsed.Host = host
+	}
 	cleanPath := strings.TrimRight(parsed.Path, "/")
 	if strings.HasSuffix(cleanPath, "/api") {
 		cleanPath = strings.TrimSuffix(cleanPath, "/api")
@@ -130,6 +142,13 @@ func validateOCAPIURL(raw string) (string, error) {
 	parsed.Path = cleanPath
 	parsed.RawPath = ""
 	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func canonicalOCHostname(host string) string {
+	if zoneAt := strings.Index(host, "%"); zoneAt > 0 && strings.Contains(host[:zoneAt], ":") {
+		return strings.ToLower(host[:zoneAt]) + host[zoneAt:]
+	}
+	return strings.ToLower(host)
 }
 
 func isLoopbackHost(host string) bool {

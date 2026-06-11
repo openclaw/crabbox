@@ -1091,6 +1091,30 @@ func TestAPIURLNormalizesTrailingAPISuffix(t *testing.T) {
 	}
 }
 
+func TestAPIURLCanonicalizesOrigin(t *testing.T) {
+	for _, tt := range []struct {
+		raw  string
+		want string
+	}{
+		{raw: "https://APP.OPENCOMPUTER.DEV:443/api/", want: "https://app.opencomputer.dev"},
+		{raw: "http://LOCALHOST:80/api", want: "http://localhost"},
+		{raw: "http://[::1]:80/api/", want: "http://[::1]"},
+		{raw: "https://[FE80::1%25MyNIC]:8443/api", want: "https://[fe80::1%25MyNIC]:8443"},
+		{raw: "https://[FE80::1%25My%25NIC]:8443/api", want: "https://[fe80::1%25My%25NIC]:8443"},
+		{raw: "https://API.EXAMPLE.TEST:8443/api", want: "https://api.example.test:8443"},
+	} {
+		t.Run(tt.raw, func(t *testing.T) {
+			got, err := validateOCAPIURL(tt.raw)
+			if err != nil {
+				t.Fatalf("validateOCAPIURL(%q) err=%v", tt.raw, err)
+			}
+			if got != tt.want {
+				t.Fatalf("validateOCAPIURL(%q)=%q want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAPIClientBlocksCrossOriginRedirects(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_test")
