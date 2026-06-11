@@ -80,6 +80,10 @@ func ClaimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot s
 	return claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
 }
 
+func AppendDirectPondTailscaleTag(cfg *Config) {
+	appendPondTailscaleTag(cfg, true)
+}
+
 // ClaimLeaseForRepoProviderPond is the pond-aware variant exposed for
 // delegated providers that need to persist the pond label in the local claim
 // sidecar (delegated providers do not own a provider-side label store).
@@ -131,6 +135,21 @@ func UpdateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 	return updateLeaseClaimEndpoint(leaseID, server, target)
 }
 
+// UpdateLeaseClaimTailscale records a tailnet endpoint (IPv4 and/or FQDN) on an
+// existing claim. Used by delegated-run providers that join the tailnet
+// out-of-band rather than through a Crabbox-managed SSH lease.
+func UpdateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
+	return updateLeaseClaimTailscale(leaseID, ipv4, fqdn)
+}
+
+func UpdateLeaseClaimTailscaleSettings(leaseID, hostname string, tags []string, loginURL, exitNode string, exitLAN bool) error {
+	return updateLeaseClaimTailscaleSettings(leaseID, hostname, tags, loginURL, exitNode, exitLAN)
+}
+
+func ClearLeaseClaimTailscale(leaseID string) error {
+	return clearLeaseClaimTailscale(leaseID)
+}
+
 func ListLeaseClaims() ([]LeaseClaim, error) {
 	return listLeaseClaims()
 }
@@ -177,6 +196,10 @@ func SlugWithCollisionSuffix(base, seed string) string {
 
 func NormalizeLeaseSlug(value string) string {
 	return normalizeLeaseSlug(value)
+}
+
+func RenderTailscaleHostname(template, leaseID, slug, provider string) string {
+	return renderTailscaleHostname(template, leaseID, slug, provider)
 }
 
 func LeaseProviderName(leaseID, slug string) string {

@@ -34,8 +34,8 @@ SSH-lease providers further differ by how they reach the cloud:
   `apple-container` uses Apple's native `container` runtime on Apple silicon
   macOS, `apple-vz` launches a headless Linux VM through Apple's
   `Virtualization.framework`, `multipass` launches local Ubuntu VMs through
-  Canonical Multipass, and `tart` runs macOS VMs on Apple Silicon via Cirrus
-  Labs tart.
+  Canonical Multipass, `tart` runs macOS VMs on Apple Silicon via Cirrus Labs
+  tart, and `hyperv` creates local Windows VMs through Microsoft Hyper-V.
 - **Delegated sandbox** — managed sandbox/proof runners that execute remotely
   without an SSH lease (e.g. `e2b`, `modal`, `islo`, `cloudflare`,
   `azure-dynamic-sessions`, `docker-sandbox`).
@@ -71,6 +71,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Apple VZ](apple-vz.md) — `apple-vz` (`applevz`) | Linux ARM64 · local |
 | [Multipass](multipass.md) — `multipass` (`mp`, `canonical-multipass`) | Linux · local |
 | [Tart](tart.md) — `tart` (`local-tart`, `macos-vm`) | macOS · local |
+| [Hyper-V](hyperv.md) — `hyperv` | Windows · local |
 | [exe.dev](exe-dev.md) — `exe-dev` (`exe`, `exedev`) | Linux · direct |
 | [KubeVirt](kubevirt.md) — `kubevirt` (`kubernetes-vm`) | Linux · direct |
 | [External](external.md) — `external` (`exec-provider`) | Linux · direct |
