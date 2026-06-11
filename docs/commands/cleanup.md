@@ -10,6 +10,7 @@ crabbox cleanup
 crabbox cleanup --provider namespace-devbox --dry-run
 crabbox cleanup --provider namespace-devbox
 crabbox cleanup --provider hostinger --dry-run
+crabbox cleanup --provider coder --dry-run
 ```
 
 `crabbox machine cleanup` is preserved as a compatibility alias and behaves
@@ -55,6 +56,10 @@ What cleanup does depends on the selected provider:
   provider scope. It deletes idle-expired Crabbox-owned sandboxes and keeps
   missing-or-inaccessible claims unless
   `--cloudflare-sandbox-forget-missing` is explicit.
+- **`coder`** lists Coder workspaces and acts only on workspaces with Crabbox
+  ownership evidence: the configured workspace prefix or Crabbox labels in
+  Coder JSON. It stops by default and deletes only with `coder.deleteOnRelease`
+  or `--coder-delete-on-release`.
 - Providers that have nothing to sweep return an error rather than acting. For
   example `provider=ssh` (static / bring-your-own hosts) reports:
 
@@ -123,10 +128,16 @@ When no matching files exist:
 namespace ssh cleanup no crabbox files found
 ```
 
+Coder cleanup prints one line per owned workspace:
+
+```text
+coder cleanup stop workspace=crabbox-blue dry_run=true
+```
+
 ## Flags
 
 ```text
---provider hetzner|aws|azure|gcp|proxmox|xcp-ng|hostinger|namespace-devbox|cloudflare|cloudflare-dynamic-workers|cloudflare-sandbox|blaxel|multipass|vercel-sandbox
+--provider hetzner|aws|azure|gcp|proxmox|xcp-ng|hostinger|namespace-devbox|namespace-instance|coder|cloudflare|cloudflare-dynamic-workers|cloudflare-sandbox|blaxel|multipass|vercel-sandbox
                                                                        provider to sweep (default from config)
 --dry-run                                                              print decisions without making provider calls
 ```

@@ -157,6 +157,7 @@ Pick whichever matches your intent:
   [Namespace Compute Instance](providers/namespace-instance.md),
   [Semaphore](providers/semaphore.md), [Sprites](providers/sprites.md),
   [Tenki](providers/tenki.md),
+  [Coder](providers/coder.md),
   [Daytona](providers/daytona.md), [Islo](providers/islo.md),
   [E2B](providers/e2b.md), [Modal](providers/modal.md),
   [Agent Sandbox](providers/agent-sandbox.md),

@@ -1139,6 +1139,7 @@ func allBuiltInProviderNames() []string {
 		"cloudflare-dynamic-workers",
 		"cloudflare-sandbox",
 		"codesandbox",
+		"coder",
 		"daytona",
 		"digitalocean",
 		"docker-sandbox",

@@ -155,6 +155,7 @@ type Config struct {
 	NamespaceInstance             NamespaceInstanceConfig
 	Phala                         PhalaConfig
 	phalaTypeExplicitOrder        uint64
+	Coder                         CoderConfig
 	Morph                         MorphConfig
 	Daytona                       DaytonaConfig
 	E2B                           E2BConfig
@@ -495,6 +496,19 @@ type PhalaConfig struct {
 	// backend treats nil as true. A non-nil false value (set only by the local
 	// --phala-skip-attestation flag or CRABBOX_PHALA_ATTEST=false env) opts out.
 	Attest *bool
+}
+
+type CoderConfig struct {
+	CLIPath              string
+	Template             string
+	Preset               string
+	WorkspacePrefix      string
+	WorkRoot             string
+	DeleteOnRelease      bool
+	Wait                 string
+	UseParameterDefaults bool
+	Parameters           []string
+	RichParameterFile    string
 }
 
 type MorphConfig struct {
@@ -2460,6 +2474,12 @@ func baseConfig() Config {
 			// writable. /var/volatile is a writable tmpfs on every dstack guest.
 			WorkRoot: "/var/volatile/crabbox",
 		},
+		Coder: CoderConfig{
+			CLIPath:         "coder",
+			WorkspacePrefix: "crabbox-",
+			WorkRoot:        "/home/coder/crabbox",
+			Wait:            "yes",
+		},
 		Morph: MorphConfig{
 			APIURL:         "https://cloud.morph.so",
 			SSHGatewayHost: "ssh.cloud.morph.so",
@@ -2802,6 +2822,7 @@ type fileConfig struct {
 	Namespace                *fileNamespaceConfig                `yaml:"namespace,omitempty"`
 	NamespaceInstance        *fileNamespaceInstanceConfig        `yaml:"namespaceInstance,omitempty"`
 	Phala                    *filePhalaConfig                    `yaml:"phala,omitempty"`
+	Coder                    *fileCoderConfig                    `yaml:"coder,omitempty"`
 	Morph                    *fileMorphConfig                    `yaml:"morph,omitempty"`
 	Daytona                  *fileDaytonaConfig                  `yaml:"daytona,omitempty"`
 	E2B                      *fileE2BConfig                      `yaml:"e2b,omitempty"`
@@ -3251,6 +3272,47 @@ type filePhalaConfig struct {
 	NodeID       string `yaml:"nodeId,omitempty"`
 	Compose      string `yaml:"compose,omitempty"`
 	Attest       *bool  `yaml:"attest,omitempty"`
+}
+
+type fileCoderConfig struct {
+	CLIPath              string   `yaml:"cliPath,omitempty"`
+	Template             string   `yaml:"template,omitempty"`
+	Preset               string   `yaml:"preset,omitempty"`
+	WorkspacePrefix      string   `yaml:"workspacePrefix,omitempty"`
+	WorkRoot             string   `yaml:"workRoot,omitempty"`
+	DeleteOnRelease      *bool    `yaml:"deleteOnRelease,omitempty"`
+	Wait                 string   `yaml:"wait,omitempty"`
+	UseParameterDefaults *bool    `yaml:"useParameterDefaults,omitempty"`
+	Parameters           []string `yaml:"parameters,omitempty"`
+	RichParameterFile    string   `yaml:"richParameterFile,omitempty"`
+}
+
+func (c *fileCoderConfig) UnmarshalYAML(node *yaml.Node) error {
+	type plain fileCoderConfig
+	var out plain
+	if err := node.Decode(&out); err != nil {
+		return err
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		value := node.Content[i+1]
+		if key != "parameters" {
+			continue
+		}
+		switch value.Kind {
+		case yaml.SequenceNode:
+			out.Parameters = out.Parameters[:0]
+			for _, item := range value.Content {
+				if strings.TrimSpace(item.Value) != "" {
+					out.Parameters = append(out.Parameters, strings.TrimSpace(item.Value))
+				}
+			}
+		case yaml.ScalarNode:
+			out.Parameters = splitCommaList(value.Value)
+		}
+	}
+	*c = fileCoderConfig(out)
+	return nil
 }
 
 type fileMorphConfig struct {
@@ -5203,6 +5265,38 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.Phala.Attest = &value
 		}
 	}
+	if file.Coder != nil {
+		if file.Coder.CLIPath != "" {
+			cfg.Coder.CLIPath = expandUserPath(file.Coder.CLIPath)
+		}
+		if file.Coder.Template != "" {
+			cfg.Coder.Template = file.Coder.Template
+		}
+		if file.Coder.Preset != "" {
+			cfg.Coder.Preset = file.Coder.Preset
+		}
+		if file.Coder.WorkspacePrefix != "" {
+			cfg.Coder.WorkspacePrefix = file.Coder.WorkspacePrefix
+		}
+		if file.Coder.WorkRoot != "" {
+			cfg.Coder.WorkRoot = file.Coder.WorkRoot
+		}
+		if file.Coder.DeleteOnRelease != nil {
+			cfg.Coder.DeleteOnRelease = *file.Coder.DeleteOnRelease
+		}
+		if file.Coder.Wait != "" {
+			cfg.Coder.Wait = file.Coder.Wait
+		}
+		if file.Coder.UseParameterDefaults != nil {
+			cfg.Coder.UseParameterDefaults = *file.Coder.UseParameterDefaults
+		}
+		if len(file.Coder.Parameters) > 0 {
+			cfg.Coder.Parameters = normalizeList(file.Coder.Parameters)
+		}
+		if file.Coder.RichParameterFile != "" {
+			cfg.Coder.RichParameterFile = expandUserPath(file.Coder.RichParameterFile)
+		}
+	}
 	if file.Morph != nil {
 		if file.Morph.APIKey != "" {
 			cfg.Morph.APIKey = file.Morph.APIKey
@@ -7147,6 +7241,26 @@ func applyEnv(cfg *Config) error {
 		cfg.Morph.APIURL = value
 		cfg.credentialProvenance.morphAPIURL = credentialSourceEnvironment
 	}
+	cfg.Coder.CLIPath = expandUserPath(getenv("CRABBOX_CODER_CLI", cfg.Coder.CLIPath))
+	cfg.Coder.Template = getenv("CRABBOX_CODER_TEMPLATE", cfg.Coder.Template)
+	cfg.Coder.Preset = getenv("CRABBOX_CODER_PRESET", cfg.Coder.Preset)
+	cfg.Coder.WorkspacePrefix = getenv("CRABBOX_CODER_WORKSPACE_PREFIX", cfg.Coder.WorkspacePrefix)
+	cfg.Coder.WorkRoot = getenv("CRABBOX_CODER_WORK_ROOT", cfg.Coder.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_CODER_DELETE_ON_RELEASE"); ok {
+		cfg.Coder.DeleteOnRelease = value
+	}
+	cfg.Coder.Wait = getenv("CRABBOX_CODER_WAIT", cfg.Coder.Wait)
+	if value, ok := getenvBool("CRABBOX_CODER_USE_PARAMETER_DEFAULTS"); ok {
+		cfg.Coder.UseParameterDefaults = value
+	}
+	if paramsEnv := os.Getenv("CRABBOX_CODER_PARAMETERS"); strings.TrimSpace(paramsEnv) != "" {
+		params := splitCommaList(paramsEnv)
+		if strings.EqualFold(strings.TrimSpace(paramsEnv), "none") {
+			params = []string{}
+		}
+		cfg.Coder.Parameters = params
+	}
+	cfg.Coder.RichParameterFile = expandUserPath(getenv("CRABBOX_CODER_RICH_PARAMETER_FILE", cfg.Coder.RichParameterFile))
 	cfg.Morph.Snapshot = getenv("CRABBOX_MORPH_SNAPSHOT", cfg.Morph.Snapshot)
 	if value := os.Getenv("CRABBOX_MORPH_SSH_GATEWAY_HOST"); value != "" {
 		cfg.Morph.SSHGatewayHost = value

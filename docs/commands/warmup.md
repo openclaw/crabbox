@@ -151,6 +151,15 @@ username, and password must come from config or environment before warmup can
 create a lease. Keep the XAPI endpoint on a management network or VPN, prefer
 trusted certificates, and treat `--xcp-ng-insecure-tls` as private-lab only.
 
+### coder
+
+`--provider coder` creates or reuses a Linux Coder workspace through the local
+`coder` CLI. New workspaces require `--coder-template` or `coder.template`.
+Crabbox connects through `coder ssh --stdio`, so no raw public host or provider
+SSH key is needed. Run `crabbox doctor --provider coder` first; if the local
+Coder CLI is not logged in, doctor reports `auth=missing_login` without
+mutating workspaces.
+
 ### aws — Windows
 
 `--provider aws --target windows --windows-mode normal --desktop` creates a real

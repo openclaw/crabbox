@@ -126,6 +126,12 @@ Crabbox prints the exact `crabbox stop --provider docker-sandbox <slug>`
 command for manual cleanup. Reused `--id` Docker Sandbox runs keep their
 existing lifecycle behavior.
 
+`--provider coder` remains on the normal SSH-run path. Crabbox asks the local
+`coder` CLI to create or start a Linux workspace, syncs into
+`coder.workRoot`, runs the command over `coder ssh --stdio`, and then stops the
+workspace by default for one-shot cleanup. Set `--coder-delete-on-release` only
+for disposable workspaces that should be deleted instead of stopped.
+
 ## Sync
 
 Sync builds a file manifest with `git ls-files --cached --others

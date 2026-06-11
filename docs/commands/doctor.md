@@ -91,6 +91,10 @@ Provider readiness validates the selected provider without creating a lease.
   auth/inventory access, project scoping readiness, and local `vsbx_...`
   inventory without creating resources. Blacksmith Testbox reports runtime as
   provider-hydrated because GitHub Actions hydration is owned by Testbox.
+- `provider=coder` runs only non-mutating Coder CLI checks: `coder version`,
+  `coder whoami -o json`, and workspace inventory. Missing login is reported as
+  `auth=missing_login` with `mutation=false`; doctor does not create, start,
+  stop, or delete Coder workspaces.
 - Providers with no direct doctor print `skip provider ... direct_doctor=unsupported`.
 
 The provider check is bounded to a 10s timeout. A failure adds a `class`

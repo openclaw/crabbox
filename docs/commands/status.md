@@ -39,6 +39,9 @@ addition to the Crabbox lease ID and local slug:
 - `sprites` — resolves local claims, Sprites labels, and SSH readiness through
   `sprite proxy`.
 - `daytona` — resolves Crabbox labels and sandbox state through the Daytona API.
+- `coder` — accepts a Crabbox lease ID, local slug, Coder workspace name, or
+  `owner/workspace`; plain status reads Coder inventory without starting stopped
+  workspaces.
 - `islo` — accepts an `isb_...` ID, a Crabbox-created sandbox name, or a local
   slug.
 - `e2b` — accepts a lease ID, local slug, or a Crabbox-owned E2B sandbox ID in
@@ -64,7 +67,7 @@ from idling out.
 
 ```text
 --id <lease-id-or-slug>
---provider hetzner|aws|azure|azure-dynamic-sessions|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|blaxel|namespace-devbox|semaphore|sprites|daytona|islo|e2b|vercel-sandbox
+--provider hetzner|aws|azure|azure-dynamic-sessions|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|blaxel|namespace-devbox|semaphore|sprites|tenki|coder|daytona|islo|e2b|vercel-sandbox
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>
