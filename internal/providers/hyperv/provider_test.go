@@ -20,10 +20,14 @@ type recordingRunner struct {
 	calls     []core.LocalCommandRequest
 	responses map[string]core.LocalCommandResult
 	errors    map[string]error
+	onRun     func(core.LocalCommandRequest)
 }
 
 func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
+	if r.onRun != nil {
+		r.onRun(req)
+	}
 	key := commandKey(req.Args)
 	if err, ok := r.errors[key]; ok {
 		return r.responses[key], err
@@ -344,9 +348,26 @@ func TestInstanceScopeRoundTrip(t *testing.T) {
 	}
 }
 
-func TestShouldCleanupRespectsKeepLabel(t *testing.T) {
-	server := Server{Status: "off", Labels: map[string]string{"keep": "true"}}
-	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, true, time.Now()); ok || reason != "keep=true" {
+func TestShouldCleanupKeepsUnexpiredRetainedLease(t *testing.T) {
+	now := time.Now().UTC()
+	server := Server{Status: "running", Labels: map[string]string{
+		"keep":       "true",
+		"expires_at": core.LeaseLabelTime(now.Add(time.Hour)),
+	}}
+	claim := core.LeaseClaim{LeaseID: "cbx_123", Labels: server.Labels}
+	if ok, reason := shouldCleanup(server, claim, true, now); ok || reason != "claim active" {
+		t.Fatalf("cleanup=%v reason=%s", ok, reason)
+	}
+}
+
+func TestShouldCleanupExpiresRetainedLease(t *testing.T) {
+	now := time.Now().UTC()
+	server := Server{Status: "running", Labels: map[string]string{
+		"keep":       "true",
+		"expires_at": core.LeaseLabelTime(now.Add(-time.Minute)),
+	}}
+	claim := core.LeaseClaim{LeaseID: "cbx_123", Labels: server.Labels}
+	if ok, reason := shouldCleanup(server, claim, true, now); !ok || reason != "claim expired" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
 }
@@ -719,6 +740,52 @@ func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
 	}
 }
 
+func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	var observed core.LeaseClaim
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.onRun = func(req core.LocalCommandRequest) {
+		if len(req.Args) == 0 || !strings.Contains(req.Args[len(req.Args)-1], "Get-VMNetworkAdapter") {
+			return
+		}
+		claims, err := listLeaseClaims()
+		if err == nil && len(claims) == 1 {
+			observed = claims[0]
+		}
+	}
+	b := testBackend(runner)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := b.Acquire(ctx, core.AcquireRequest{
+		Repo:          core.Repo{Root: t.TempDir()},
+		RequestedSlug: "rollback-failure",
+	})
+	if err == nil {
+		t.Fatal("Acquire unexpectedly succeeded")
+	}
+	if observed.LeaseID == "" || observed.Provider != providerName || instanceNameFromClaim(observed) == "" {
+		t.Fatalf("bootstrap started without a provisional claim: %#v", observed)
+	}
+	claims, claimErr := listLeaseClaims()
+	if claimErr != nil {
+		t.Fatalf("listLeaseClaims: %v", claimErr)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("failed non-retained lease left claims: %#v", claims)
+	}
+	keyPath, keyErr := testboxKeyPath(observed.LeaseID)
+	if keyErr != nil {
+		t.Fatalf("testboxKeyPath: %v", keyErr)
+	}
+	if _, statErr := os.Stat(keyPath); !os.IsNotExist(statErr) {
+		t.Fatalf("failed non-retained lease left key at %s: %v", keyPath, statErr)
+	}
+}
+
 func TestAcquireInitPasswordRejectsCmdUnsafePassword(t *testing.T) {
 	b := testBackend(&recordingRunner{})
 	oldOS := hypervHostOS
@@ -1017,10 +1084,13 @@ func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
 	}
 	// Windows OpenSSH ignores administrators_authorized_keys unless it is owned
 	// only by SYSTEM + Administrators with inheritance disabled.
-	for _, want := range []string{"icacls.exe", "/inheritance:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "$LASTEXITCODE", "PasswordAuthentication no", "PubkeyAuthentication yes", "sshd_config validation failed", "Start-Service sshd", "OpenSSH-Server-In-TCP"} {
+	for _, want := range []string{"icacls.exe", "/inheritance:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "$LASTEXITCODE", "PasswordAuthentication no", "PubkeyAuthentication yes", "sshd_config validation failed", "ssh_host_*", "ssh-keygen.exe", "-A", "SSH host key generation failed", "Start-Service sshd", "OpenSSH-Server-In-TCP"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("admin-key SSH lockdown missing %q\nscript: %s", want, script)
 		}
+	}
+	if strings.Index(script, "ssh-keygen.exe") > strings.Index(script, "Start-Service sshd") {
+		t.Fatal("SSH host keys must be regenerated before sshd starts")
 	}
 	if strings.Contains(script, "Add-Content") {
 		t.Fatalf("SSH key injection retained template keys: %s", script)
@@ -1195,8 +1265,9 @@ func TestRemoveVMCleansBaseDiskAndDirDespiteCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	baseVHD := filepath.Join(vhdDir, name+".vhdx")
-	checkpoint := filepath.Join(vhdDir, name+"_4F2A.avhdx")
-	for _, p := range []string{baseVHD, checkpoint} {
+	checkpoint := filepath.Join(vhdDir, name+"_4F2A4D3E-59D0-42B4-9D33-CA8B34C7CB4A.avhdx")
+	dataDisk := filepath.Join(vhdDir, name+"-data.vhdx")
+	for _, p := range []string{baseVHD, checkpoint, dataDisk} {
 		if err := os.WriteFile(p, []byte("disk"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -1206,7 +1277,7 @@ func TestRemoveVMCleansBaseDiskAndDirDespiteCheckpoint(t *testing.T) {
 	// The attached disk reported by Hyper-V is the checkpoint .avhdx, not the base.
 	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
 		`Get-VMHardDiskDrive -VMName 'crabbox-blue-1234' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path`})] =
-		core.LocalCommandResult{Stdout: checkpoint + "\n"}
+		core.LocalCommandResult{Stdout: checkpoint + "\n" + dataDisk + "\n"}
 	b := testBackend(runner)
 
 	if err := b.removeVM(context.Background(), name); err != nil {
@@ -1216,6 +1287,9 @@ func TestRemoveVMCleansBaseDiskAndDirDespiteCheckpoint(t *testing.T) {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("removeVM left %s behind (err=%v)", p, err)
 		}
+	}
+	if _, err := os.Stat(dataDisk); err != nil {
+		t.Fatalf("removeVM deleted attached user data disk %s: %v", dataDisk, err)
 	}
 }
 

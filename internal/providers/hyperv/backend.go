@@ -111,6 +111,9 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 			return LeaseTarget{}, exit(2, "provider=%s --hyperv-init-password sets the password through cmd.exe, which cannot carry double quotes or percent signs in the user name; choose a different --hyperv-user", providerName)
 		}
 	}
+	if strings.TrimSpace(req.Repo.Root) == "" {
+		return LeaseTarget{}, exit(2, "provider=%s requires a repository root so the VM claim can be persisted before bootstrap", providerName)
+	}
 	leaseID := newLeaseID()
 	instances, err := b.listInstances(ctx)
 	if err != nil {
@@ -154,59 +157,50 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		_ = b.removeVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
-	if req.Keep {
-		retained := LeaseTarget{
-			Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
-			LeaseID: leaseID,
+	provisional := LeaseTarget{
+		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
+		LeaseID: leaseID,
+	}
+	if err := persistLease(leaseID, slug, name, cfg, req, provisional); err != nil {
+		_ = b.removeVM(context.Background(), name)
+		return LeaseTarget{}, fmt.Errorf("persist hyperv lease before bootstrap: %w", err)
+	}
+	cleanupKey = false
+	cleanupFailedLease := func() error {
+		if req.Keep {
+			return nil
 		}
-		if err := persistLease(leaseID, slug, name, cfg, req, retained); err != nil {
-			_ = b.removeVM(context.Background(), name)
-			return LeaseTarget{}, fmt.Errorf("persist retained hyperv lease before bootstrap: %w", err)
+		if err := b.removeVM(context.Background(), name); err != nil {
+			return fmt.Errorf("remove failed hyperv lease %s: %w", leaseID, err)
 		}
-		cleanupKey = false
+		removeLeaseClaim(leaseID)
+		removeStoredTestboxKey(leaseID)
+		return nil
 	}
 
 	ip, err := b.waitForIP(ctx, name, 5*time.Minute)
 	if err != nil {
-		if !req.Keep {
-			_ = b.removeVM(context.Background(), name)
-		}
-		return LeaseTarget{}, err
+		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
 
 	if err := b.ensureOpenSSH(ctx, name, cfg.HyperV.User); err != nil {
-		if !req.Keep {
-			_ = b.removeVM(context.Background(), name)
-		}
-		return LeaseTarget{}, fmt.Errorf("guest OpenSSH setup failed: %w", err)
+		return LeaseTarget{}, errors.Join(fmt.Errorf("guest OpenSSH setup failed: %w", err), cleanupFailedLease())
 	}
 
 	if publicKey != "" {
 		if retryErr := b.injectSSHKey(ctx, name, cfg.HyperV.User, publicKey); retryErr != nil {
-			if !req.Keep {
-				_ = b.removeVM(context.Background(), name)
-			}
-			return LeaseTarget{}, fmt.Errorf("post-boot SSH key injection failed: %w", retryErr)
+			return LeaseTarget{}, errors.Join(fmt.Errorf("post-boot SSH key injection failed: %w", retryErr), cleanupFailedLease())
 		}
 	}
 	if err := b.ensureGit(ctx, name, cfg.HyperV.User); err != nil {
-		if !req.Keep {
-			_ = b.removeVM(context.Background(), name)
-		}
-		return LeaseTarget{}, fmt.Errorf("guest git setup failed: %w", err)
+		return LeaseTarget{}, errors.Join(fmt.Errorf("guest git setup failed: %w", err), cleanupFailedLease())
 	}
 	lease, err := b.prepareLease(ctx, cfg, hypervVM{Name: name, State: 2}, ip, claim, true)
 	if err != nil {
-		if !req.Keep {
-			_ = b.removeVM(context.Background(), name)
-		}
-		return LeaseTarget{}, err
+		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
 	if err := persistLease(leaseID, slug, name, cfg, req, lease); err != nil {
-		if !req.Keep {
-			_ = b.removeVM(context.Background(), name)
-		}
-		return LeaseTarget{}, err
+		return LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
@@ -579,12 +573,13 @@ func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, 
 	return lastErr
 }
 
-// ensureOpenSSH installs and starts the Windows OpenSSH server inside the guest
-// over PowerShell Direct when it is not already present, then opens the firewall
-// for it. This lets a plain Windows template be used as-is: it only needs a
-// reachable administrator account (CRABBOX_HYPERV_GUEST_PASSWORD), not a
-// pre-baked SSH setup. Idempotent; installing the capability needs guest
-// internet (or a configured Features-on-Demand source).
+// ensureOpenSSH installs the Windows OpenSSH server inside the guest, but keeps
+// sshd stopped and its firewall rule disabled until injectSSHKey replaces the
+// template credentials and host keys. This lets a plain Windows template be
+// used as-is: it only needs a reachable administrator account
+// (CRABBOX_HYPERV_GUEST_PASSWORD), not a pre-baked SSH setup. Idempotent;
+// installing the capability needs guest internet (or a configured
+// Features-on-Demand source).
 func (b *backend) ensureOpenSSH(ctx context.Context, vmName, user string) error {
 	scriptBlock := `$ErrorActionPreference='Stop'; ` +
 		`$cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*'; ` +
@@ -668,6 +663,11 @@ func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey stri
 			`$sshdExe = Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'; `+
 			`& $sshdExe -t -f $sshdConfig; `+
 			`if ($LASTEXITCODE -ne 0) { throw 'sshd_config validation failed' }; `+
+			`$hostKeyDir = Join-Path $env:ProgramData 'ssh'; `+
+			`Get-ChildItem -Path $hostKeyDir -Filter 'ssh_host_*' -ErrorAction SilentlyContinue | Remove-Item -Force; `+
+			`$sshKeygen = Join-Path $env:WINDIR 'System32\OpenSSH\ssh-keygen.exe'; `+
+			`& $sshKeygen -A; `+
+			`if ($LASTEXITCODE -ne 0) { throw 'SSH host key generation failed' }; `+
 			`Set-Service -Name sshd -StartupType Automatic; `+
 			`Start-Service sshd; `+
 			`if (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue) { `+
@@ -810,11 +810,9 @@ func (b *backend) removeVM(ctx context.Context, name string) error {
 		return commandError("Remove-VM", result, err)
 	}
 
-	// Always remove the provider-created boot disk. We can't rely on the attached
-	// disk path matching it: client Hyper-V may have created and attached a
-	// <name>_<guid>.avhdx checkpoint disk instead, in which case the base VHDX
-	// would otherwise be leaked. Also sweep any name-prefixed differencing disks
-	// in our VHD directory, while leaving unrelated attached disks untouched.
+	// Always remove the provider-created boot disk. Client Hyper-V may attach a
+	// <name>_<guid>.avhdx checkpoint disk instead, so remove attached checkpoint
+	// files only when their filename has that exact provider-owned shape.
 	vhdDir := hypervVHDDir()
 	expectedVHD := filepath.Join(vhdDir, name+".vhdx")
 	b.removeVHDFile(expectedVHD)
@@ -823,8 +821,7 @@ func (b *backend) removeVM(ctx context.Context, name string) error {
 		if strings.EqualFold(clean, filepath.Clean(expectedVHD)) {
 			continue
 		}
-		if strings.HasPrefix(filepath.Base(clean), name) &&
-			strings.EqualFold(filepath.Dir(clean), filepath.Clean(vhdDir)) {
+		if ownedHyperVCheckpoint(clean, vhdDir, name) {
 			b.removeVHDFile(p)
 		}
 	}
@@ -836,6 +833,37 @@ func (b *backend) removeVM(ctx context.Context, name string) error {
 	}
 
 	return nil
+}
+
+func ownedHyperVCheckpoint(path, vhdDir, name string) bool {
+	clean := filepath.Clean(path)
+	if !strings.EqualFold(filepath.Dir(clean), filepath.Clean(vhdDir)) {
+		return false
+	}
+	base := filepath.Base(clean)
+	ext := filepath.Ext(base)
+	if !strings.EqualFold(ext, ".avhdx") {
+		return false
+	}
+	stem := strings.TrimSuffix(base, ext)
+	prefix := name + "_"
+	if len(stem) != len(prefix)+36 || !strings.EqualFold(stem[:len(prefix)], prefix) {
+		return false
+	}
+	guid := stem[len(prefix):]
+	for i, r := range guid {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // removeVHDFile deletes a lease VHDX best-effort. The VM is already gone by the
@@ -1011,13 +1039,19 @@ func instanceNameFromScope(scope string) string {
 }
 
 func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
-	if strings.EqualFold(server.Labels["keep"], "true") {
-		return false, "keep=true"
-	}
 	if server.Status != "running" && server.Status != "ready" {
 		return true, "instance state=" + blank(server.Status, "unknown")
 	}
 	if hasClaim {
+		expiresAt := strings.TrimSpace(server.Labels["expires_at"])
+		if expiresAt == "" {
+			expiresAt = strings.TrimSpace(claim.Labels["expires_at"])
+		}
+		if display := core.LeaseLabelTimeDisplay(expiresAt); display != "" {
+			if parsed, err := time.Parse(time.RFC3339, display); err == nil && now.After(parsed) {
+				return true, "claim expired"
+			}
+		}
 		lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
 		if err != nil || lastUsed.IsZero() {
 			return false, "claim active"
