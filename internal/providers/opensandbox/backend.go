@@ -85,7 +85,11 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		if err != nil {
 			return RunResult{}, err
 		}
-		if _, err := verifyOpenSandboxClaim(ctx, api, leaseID, sandboxID); err != nil {
+		sb, err := verifyOpenSandboxClaim(ctx, api, leaseID, sandboxID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		if err := b.ensureReusableSandbox(ctx, api, sandboxID, sb); err != nil {
 			return RunResult{}, err
 		}
 		claim, err := readLeaseClaim(leaseID)
@@ -539,6 +543,18 @@ func validateOpenSandboxOwnership(claim LeaseClaim, sb sandboxInfo) error {
 		return exit(4, "opensandbox sandbox %q ownership metadata does not match its local claim", sb.ID)
 	}
 	return nil
+}
+
+func (b *openSandboxBackend) ensureReusableSandbox(ctx context.Context, api openSandboxClient, sandboxID string, sb sandboxInfo) error {
+	switch strings.ToLower(strings.TrimSpace(sb.State)) {
+	case "", "running":
+		return nil
+	case "paused":
+		fmt.Fprintf(b.rt.Stderr, "resuming opensandbox sandbox=%s\n", sandboxID)
+		return api.ResumeSandbox(ctx, sandboxID)
+	default:
+		return exit(4, "opensandbox sandbox %q is %s and cannot be reused until it is running", sandboxID, sb.State)
+	}
 }
 
 func buildCommand(command []string, shellMode bool) ([]string, error) {

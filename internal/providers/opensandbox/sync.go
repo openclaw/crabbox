@@ -157,7 +157,7 @@ func (b *openSandboxBackend) replaceWorkspace(ctx context.Context, api openSandb
 
 func (b *openSandboxBackend) execShell(ctx context.Context, api openSandboxClient, sandboxID, command string) error {
 	exitCode, err := api.RunCommand(ctx, sandboxID, runCommandRequest{
-		Command:     "bash -lc " + shellQuote(command),
+		Command:     "sh -lc " + shellQuote(command),
 		TimeoutSecs: b.execTimeoutSecs(),
 	})
 	if err != nil {

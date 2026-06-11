@@ -99,6 +99,26 @@ func TestRunCreatesSandboxForwardsEnvAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestRunNoSyncEnsuresWorkspaceWithPortableShell(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: tempGitRepo(t)},
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.runs) < 2 {
+		t.Fatalf("runs=%#v, want workspace setup and user command", fake.runs)
+	}
+	if !strings.HasPrefix(fake.runs[0].Command, "sh -lc ") {
+		t.Fatalf("workspace command=%q, want sh -lc", fake.runs[0].Command)
+	}
+}
+
 func TestRunPreservesBashLoginShellForExplicitInvocation(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeClient()
@@ -206,6 +226,27 @@ func TestRunVerifiesOwnershipBeforeReclaim(t *testing.T) {
 	}
 }
 
+func TestRunResumesPausedSandboxBeforeReuse(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.sandbox.State = "Paused"
+	backend := newTestBackend(fake)
+	leaseID := leasePrefix + fake.sandbox.ID
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, openSandboxEndpointScope(fake.baseURL)+"/ownership:local", "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = openSandboxEndpointScope(fake.baseURL) + "/ownership:local"
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/repo"}, NoSync: true, Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.resumed) != 1 || fake.resumed[0] != fake.sandbox.ID {
+		t.Fatalf("resumed=%#v", fake.resumed)
+	}
+}
+
 func TestStopRejectsOwnershipMismatch(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeClient()
@@ -244,6 +285,14 @@ func TestStopForgetMissingRemovesClaimOnlyWhenExplicit(t *testing.T) {
 		t.Fatal(err)
 	} else if claim.LeaseID != "" {
 		t.Fatalf("claim still present after forget-missing: %#v", claim)
+	}
+}
+
+func TestNewOpenSandboxClientRequiresExplicitAPIURL(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	_, err := newOpenSandboxClient(testConfig(), Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	if err == nil || !strings.Contains(err.Error(), "trusted API URL") {
+		t.Fatalf("err=%v, want trusted API URL requirement", err)
 	}
 }
 
@@ -677,6 +726,7 @@ type fakeOpenSandboxClient struct {
 	created  createSandboxOptions
 	runs     []runCommandRequest
 	deleted  []string
+	resumed  []string
 	uploads  []string
 	runExit  int
 	runErr   error
@@ -720,6 +770,12 @@ func (f *fakeOpenSandboxClient) DeleteSandbox(_ context.Context, sandboxID strin
 	if f.notFound {
 		return errOpenSandboxNotFound
 	}
+	return nil
+}
+
+func (f *fakeOpenSandboxClient) ResumeSandbox(_ context.Context, sandboxID string) error {
+	f.resumed = append(f.resumed, sandboxID)
+	f.sandbox.State = "Running"
 	return nil
 }
 

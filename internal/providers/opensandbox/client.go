@@ -22,6 +22,7 @@ type openSandboxClient interface {
 	ListSandboxes(context.Context, map[string]string) ([]sandboxInfo, error)
 	GetSandbox(context.Context, string) (sandboxInfo, error)
 	DeleteSandbox(context.Context, string) error
+	ResumeSandbox(context.Context, string) error
 	UploadFile(context.Context, string, string, io.Reader) error
 	RunCommand(context.Context, string, runCommandRequest) (int, error)
 	Probe(context.Context) error
@@ -63,7 +64,11 @@ type sdkOpenSandboxClient struct {
 }
 
 func newOpenSandboxClient(cfg Config, rt Runtime) (openSandboxClient, error) {
-	baseURL, err := validateOpenSandboxAPIURL(blank(strings.TrimSpace(cfg.OpenSandbox.APIURL), defaultAPIURL))
+	rawURL := strings.TrimSpace(cfg.OpenSandbox.APIURL)
+	if rawURL == "" {
+		return nil, exit(2, "provider=opensandbox needs a trusted API URL; set --opensandbox-api-url, CRABBOX_OPENSANDBOX_API_URL, or OPEN_SANDBOX_API_URL")
+	}
+	baseURL, err := validateOpenSandboxAPIURL(rawURL)
 	if err != nil {
 		return nil, err
 	}
@@ -250,6 +255,19 @@ func (c *sdkOpenSandboxClient) cleanupCreateFailure(ctx context.Context, sandbox
 		return fmt.Errorf("%w; cleanup opensandbox sandbox %s failed: %v", cause, sandboxID, err)
 	}
 	return cause
+}
+
+func (c *sdkOpenSandboxClient) ResumeSandbox(ctx context.Context, sandboxID string) error {
+	if err := c.lifecycle().ResumeSandbox(ctx, sandboxID); err != nil {
+		return fmt.Errorf("opensandbox resume sandbox: %w", err)
+	}
+	if _, err := c.waitForRunning(ctx, sandboxID); err != nil {
+		return fmt.Errorf("opensandbox wait for resumed sandbox: %w", err)
+	}
+	if err := c.waitUntilReady(ctx, sandboxID); err != nil {
+		return fmt.Errorf("opensandbox wait until resumed sandbox ready: %w", err)
+	}
+	return nil
 }
 
 func (c *sdkOpenSandboxClient) waitForRunning(ctx context.Context, sandboxID string) (*sdk.SandboxInfo, error) {
