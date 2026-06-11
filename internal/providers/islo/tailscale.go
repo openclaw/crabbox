@@ -162,6 +162,10 @@ echo "CRABBOX_TS_IP=${ts_ip}"
 const isloTailscaleHealthCheck = `
 set -e
 : "${TS_STATE_DIR:?}"
+if [ -e "${TS_STATE_DIR}/operation.lock" ]; then
+  echo "tailscale recovery is in progress" >&2
+  exit 75
+fi
 TS_SOCKET="${TS_STATE_DIR}/tailscaled.sock"
 test -S "${TS_SOCKET}"
 TS_BIN_DIR="${TS_STATE_DIR}/bin"
@@ -323,6 +327,9 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 			return core.TailscaleMetadata{Enabled: true, IPv4: match[1], FQDN: claim.TailscaleFQDN, State: "ready"}, nil
 		}
 		return core.TailscaleMetadata{}, fmt.Errorf("%w: health check returned no tailnet address", core.ErrTailnetPeerValidationUnavailable)
+	}
+	if code == isloTailscaleRecoveryPendingExitCode {
+		return core.TailscaleMetadata{}, fmt.Errorf("%w: tailnet recovery is in progress", core.ErrTailnetPeerValidationUnavailable)
 	}
 	if !repair {
 		if err := clearLeaseClaimTailscale(leaseID); err != nil {

@@ -429,6 +429,8 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 					targets, lerr := bridge.ListPeerTargets(ctx, claim.LeaseID)
 					if lerr != nil {
 						if secondaryRead {
+							peer.BridgeState = "error"
+							peer.Note = fmt.Sprintf("list secondary bridge targets failed: %v", lerr)
 							peers = append(peers, peer)
 							continue
 						}

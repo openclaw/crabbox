@@ -277,6 +277,9 @@ func TestResolvePondPeersKeepsTailnetPeerWhenURLMemberFails(t *testing.T) {
 	if got := bySlug["tailnet"]; got.Transport != TransportTailnet || got.Endpoint != "100.64.7.7" {
 		t.Fatalf("healthy tailnet peer missing: %#v", got)
 	}
+	if got := bySlug["tailnet"]; got.BridgeState != "error" || !strings.Contains(got.Note, "secondary bridge targets") {
+		t.Fatalf("tailnet peer should report secondary bridge failure: %#v", got)
+	}
 	if got := bySlug["url"]; got.Transport != TransportNone || got.BridgeState != "error" {
 		t.Fatalf("failed URL peer should degrade in place: %#v", got)
 	}

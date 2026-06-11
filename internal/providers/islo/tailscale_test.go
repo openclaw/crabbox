@@ -153,6 +153,9 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 			t.Fatalf("%s script must require a running Tailscale backend", name)
 		}
 	}
+	if !strings.Contains(isloTailscaleHealthCheck, `"${TS_STATE_DIR}/operation.lock"`) || !strings.Contains(isloTailscaleHealthCheck, "exit 75") {
+		t.Fatal("health check must preserve claims while recovery holds the operation lock")
+	}
 }
 
 func TestEnsureLeaseTailscaleRevalidatesAsRoot(t *testing.T) {
@@ -262,6 +265,27 @@ func TestEnsureLeaseTailscaleReadOnlyValidationDoesNotRepair(t *testing.T) {
 	}
 	if claim.TailscaleIPv4 != "" || claim.TailscaleHostname != "node-a" {
 		t.Fatalf("read-only validation should clear endpoint but preserve enrollment: %#v", claim)
+	}
+}
+
+func TestEnsureLeaseTailscaleReadOnlyValidationPreservesClaimDuringRecovery(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{execCode: isloTailscaleRecoveryPendingExitCode}
+	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
+
+	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID, false); !errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
+		t.Fatalf("expected recovery-pending validation error, got %v", err)
+	}
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok || claim.TailscaleIPv4 != "100.64.7.7" {
+		t.Fatalf("recovery validation erased claim: ok=%t err=%v claim=%#v", ok, err, claim)
 	}
 }
 
