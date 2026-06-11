@@ -13,10 +13,9 @@ import (
 // BridgePeer is the cross-provider shape returned by `crabbox pond peers`.
 // One row per pond member, regardless of which plane carries that member:
 //
-//   - Tailscale-capable providers surface with Transport="tailnet" and
-//     Endpoint=tailnet IPv4/FQDN. Managed Linux providers install an OS route;
-//     delegated userspace providers such as Islo expose the tailnet through
-//     their provider-specific userspace path.
+//   - Bidirectional Tailscale providers surface with Transport="tailnet" and
+//     Endpoint=tailnet IPv4/FQDN. Outbound-only userspace integrations such as
+//     Islo keep their dialable URL transport and report Tailscale in Note.
 //   - SSH-lease providers (exe.dev / RunPod / Daytona / Sprites / Namespace /
 //     Semaphore) surface with Transport="ssh" and Endpoint=ssh://host:port.
 //   - Delegated-with-URL providers (Islo, E2B, Modal, Cloudflare, Railway,
@@ -320,12 +319,11 @@ func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, fl
 //
 // The transport class is determined per-provider:
 //
-//   - tailnet — providers that recorded a tailnet endpoint on their claim
-//     (managed Linux providers via cloud-init, delegated providers such as
-//     Islo via their own join path). The resolver does not invoke a bridge
-//     backend for tailnet endpoints; the endpoint is read straight off the
-//     claim sidecar (TailscaleIPv4 / TailscaleFQDN), and missing endpoints
-//     surface as transport=pending with an honest note.
+//   - tailnet — bidirectional providers that recorded a tailnet endpoint on
+//     their claim. The resolver does not invoke a bridge backend for tailnet
+//     endpoints; the endpoint is read straight off the claim sidecar
+//     (TailscaleIPv4 / TailscaleFQDN), and missing endpoints surface as
+//     transport=pending with an honest note.
 //   - ssh — SSH-lease providers (exe.dev / RunPod / Daytona / Sprites /
 //     Namespace / Semaphore). Endpoint is built from SSHHost+SSHPort; an
 //     unset host surfaces as transport=pending.
@@ -344,14 +342,15 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 	var bridgeLoadErr error
 	for _, claim := range claims {
 		peer := bridgePeerFromClaim(claim, class)
-		urlCapable := providerCapabilities(claim.Provider).URLBridge
+		caps := providerCapabilities(claim.Provider)
+		urlCapable := caps.URLBridge
 		useBridge := peer.Transport == TransportURL || urlCapable
 		if useBridge {
 			if !bridgeLoaded {
 				bridgeLoaded = true
 				bridge, bridgeLoadErr = loadBridgeProvider(provider, rt)
 			}
-			if peer.Transport == TransportTailnet && bridgeLoadErr == nil {
+			if (caps.Tailscale || caps.TailscaleEgress) && claimHasTailscaleMetadata(claim) && bridgeLoadErr == nil {
 				if validator, ok := bridge.(TailnetPeerValidator); ok {
 					meta, validateErr := validator.ValidateTailnetPeer(ctx, claim.LeaseID)
 					if validateErr != nil {
@@ -363,7 +362,9 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 					} else {
 						setLeaseClaimTailscale(&claim, meta.IPv4, meta.FQDN)
 						peer = bridgePeerFromClaim(claim, class)
-						peer.Endpoint = firstNonEmpty(meta.IPv4, meta.FQDN, meta.Hostname)
+						if peer.Transport == TransportTailnet {
+							peer.Endpoint = firstNonEmpty(meta.IPv4, meta.FQDN, meta.Hostname)
+						}
 					}
 				}
 			}
@@ -485,13 +486,17 @@ func hasResolvedPrimary(peers []BridgePeer) bool {
 // the provider once for the fan-out path); the rest of the row is filled in
 // from the claim sidecar without any provider API calls.
 func bridgePeerFromClaim(claim leaseClaim, class string) BridgePeer {
+	caps := providerCapabilities(claim.Provider)
 	peer := BridgePeer{
 		Slug:       claim.Slug,
 		LeaseID:    claim.LeaseID,
 		Provider:   claim.Provider,
 		Pond:       claim.Pond,
 		Labels:     cloneStringMap(claim.Labels),
-		Transports: providerCapabilities(claim.Provider).Available(),
+		Transports: caps.Available(),
+	}
+	if caps.TailscaleEgress && claimHasTailscaleMetadata(claim) {
+		peer.Note = "tailnet available for outbound proxy traffic only"
 	}
 	switch class {
 	case TransportTailnet:

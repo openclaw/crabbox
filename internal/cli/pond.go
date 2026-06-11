@@ -184,7 +184,8 @@ func pondDynamicTailscaleTagAllowed(cfg Config) bool {
 // providerCapableOfTailscale reports whether the named provider advertises
 // FeatureTailscale in the registered provider spec.
 func providerCapableOfTailscale(provider string) bool {
-	return providerCapabilities(provider).Tailscale
+	caps := providerCapabilities(provider)
+	return caps.Tailscale || caps.TailscaleEgress
 }
 
 func pondClaimProviderSummary(pond string) (bool, bool) {
@@ -204,7 +205,7 @@ func pondClaimProviderSummary(pond string) (bool, bool) {
 		}
 		hasClaims = true
 		caps := providerCapabilities(claim.Provider)
-		if caps.Tailscale && (!caps.URLBridge || claimHasTailscaleMetadata(claim)) {
+		if (caps.Tailscale || caps.TailscaleEgress) && (!caps.URLBridge || claimHasTailscaleMetadata(claim)) {
 			hasTailscale = true
 		}
 	}
@@ -221,20 +222,21 @@ func claimHasTailscaleMetadata(claim leaseClaim) bool {
 // ProviderCapabilities is the per-provider truth about which pond transport
 // planes are *physically* possible on its leases. Each plane is independent —
 // some providers advertise more than one (Hetzner / Azure / GCP support both
-// the Tailscale peer mesh and the operator-side SSH-mesh; Islo supports the URL
-// bridge and a userspace Tailscale join). Older code that asked "which one
-// transport does this provider use" (providerTransportClass) is now a thin
-// Primary() picker; the capability set is the source of truth and the
-// `pond peers` + `pond connect` paths fan out across whichever planes the
-// operator (or default preference) actually wants.
+// the Tailscale peer mesh and the operator-side SSH-mesh). Islo separately
+// advertises URL ingress plus outbound-only userspace Tailscale access. Older
+// code that asked "which one transport does this provider use"
+// (providerTransportClass) is now a thin Primary() picker; the capability set
+// is the source of truth and the `pond peers` + `pond connect` paths fan out
+// across whichever dialable planes the operator actually wants.
 //
 // Capabilities are derived from the provider's own FeatureSet, so a provider
 // opts in to a transport plane by declaring the feature, not by being added
 // to a static table.
 type ProviderCapabilities struct {
-	Tailscale bool // tailnet plane (managed TUN or provider-specific userspace join)
-	SSHMesh   bool // operator-side `ssh -L` against the lease's SSH endpoint
-	URLBridge bool // native HTTPS endpoint surface (shares, preview URLs, deployments)
+	Tailscale       bool // bidirectional tailnet peer plane
+	TailscaleEgress bool // outbound-only userspace tailnet access
+	SSHMesh         bool // operator-side `ssh -L` against the lease's SSH endpoint
+	URLBridge       bool // native HTTPS endpoint surface (shares, preview URLs, deployments)
 }
 
 // providerCapabilities returns the capability set for the named provider.
@@ -242,11 +244,14 @@ type ProviderCapabilities struct {
 // into a transport plane by declaring the right Feature.
 func providerCapabilities(provider string) ProviderCapabilities {
 	if p, err := ProviderFor(provider); err == nil {
-		features := p.Spec().Features
+		spec := p.Spec()
+		features := spec.Features
+		tailscale := featureSetHas(features, FeatureTailscale)
 		return ProviderCapabilities{
-			Tailscale: featureSetHas(features, FeatureTailscale),
-			SSHMesh:   featureSetHas(features, FeatureSSH),
-			URLBridge: featureSetHas(features, FeatureURLBridge),
+			Tailscale:       tailscale && !spec.TailscaleEgressOnly,
+			TailscaleEgress: tailscale && spec.TailscaleEgressOnly,
+			SSHMesh:         featureSetHas(features, FeatureSSH),
+			URLBridge:       featureSetHas(features, FeatureURLBridge),
 		}
 	}
 	return ProviderCapabilities{}
