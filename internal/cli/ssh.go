@@ -1086,17 +1086,56 @@ func remoteWriteSyncDeletedNew(workdir string) string {
 	return "bash -lc " + shellQuote(script)
 }
 
-func remoteWriteSyncManifestsNew(workdir string) string {
-	python := `import pathlib
-import sys
+func remoteSyncInterpreterCommand(python, perl, args string) string {
+	if args != "" && !strings.HasPrefix(args, " ") {
+		args = " " + args
+	}
+	return "if command -v python3 >/dev/null 2>&1; then python3 -c " + shellQuote(python) + args +
+		"; elif command -v python >/dev/null 2>&1; then python -c " + shellQuote(python) + args +
+		"; elif command -v perl >/dev/null 2>&1; then perl -e " + shellQuote(perl) + args +
+		"; else echo " + shellQuote("missing required sync interpreter: need python3, python, or perl") + " >&2; exit 127; fi"
+}
 
-manifest_len = int(sys.stdin.buffer.readline())
-manifest = sys.stdin.buffer.read(manifest_len)
-deleted = sys.stdin.buffer.read()
-pathlib.Path(sys.argv[1]).write_bytes(manifest)
-pathlib.Path(sys.argv[2]).write_bytes(deleted)
+func remoteWriteSyncManifestsNew(workdir string) string {
+	python := `import sys
+
+reader = getattr(sys.stdin, "buffer", sys.stdin)
+manifest_len = int(reader.readline())
+manifest = reader.read(manifest_len)
+deleted = reader.read()
+with open(sys.argv[1], "wb") as handle:
+    handle.write(manifest)
+with open(sys.argv[2], "wb") as handle:
+    handle.write(deleted)
 `
-	script := "mkdir -p " + shellQuote(workdir) + " && cd " + shellQuote(workdir) + " && " + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\" && python3 -c " + shellQuote(python) + " \"$meta_dir/sync-manifest.new\" \"$meta_dir/sync-deleted.new\""
+	perl := `use strict;
+use warnings;
+
+my $len = <STDIN>;
+defined $len or die "missing manifest length\n";
+chomp $len;
+$len =~ /\A\d+\z/ or die "invalid manifest length\n";
+my $manifest = "";
+while (length($manifest) < $len) {
+    my $chunk = "";
+    my $read = read(STDIN, $chunk, $len - length($manifest));
+    defined $read or die "read manifest failed: $!\n";
+    $read > 0 or die "short manifest read\n";
+    $manifest .= $chunk;
+}
+local $/;
+my $deleted = <STDIN>;
+$deleted = "" unless defined $deleted;
+open my $manifest_fh, ">", $ARGV[0] or die "open manifest: $!\n";
+binmode $manifest_fh;
+print {$manifest_fh} $manifest or die "write manifest: $!\n";
+close $manifest_fh or die "close manifest: $!\n";
+open my $deleted_fh, ">", $ARGV[1] or die "open deleted: $!\n";
+binmode $deleted_fh;
+print {$deleted_fh} $deleted or die "write deleted: $!\n";
+close $deleted_fh or die "close deleted: $!\n";
+`
+	script := "mkdir -p " + shellQuote(workdir) + " && cd " + shellQuote(workdir) + " && " + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\" && " + remoteSyncInterpreterCommand(python, perl, "\"$meta_dir/sync-manifest.new\" \"$meta_dir/sync-deleted.new\"")
 	return "bash -lc " + shellQuote(script)
 }
 
@@ -1113,7 +1152,38 @@ fi
 }
 
 func remotePruneSyncManifest(workdir string) string {
-	script := "set -e\ncd " + shellQuote(workdir) + `
+	python := `import sys
+
+def read_manifest(path):
+    with open(path, "rb") as handle:
+        data = handle.read()
+    return [entry for entry in data.split(b"\0") if entry]
+
+old = read_manifest(sys.argv[1])
+new = set(read_manifest(sys.argv[2]))
+writer = getattr(sys.stdout, "buffer", sys.stdout)
+writer.write(b"".join(entry + b"\0" for entry in old if entry not in new))
+`
+	perl := `use strict;
+use warnings;
+
+sub read_manifest {
+    my ($path) = @_;
+    open my $fh, "<", $path or die "open $path: $!\n";
+    binmode $fh;
+    local $/;
+    my $data = <$fh>;
+    $data = "" unless defined $data;
+    close $fh or die "close $path: $!\n";
+    return grep { length $_ } split /\0/, $data, -1;
+}
+
+my @old = read_manifest($ARGV[0]);
+my %new = map { $_ => 1 } read_manifest($ARGV[1]);
+binmode STDOUT;
+print STDOUT map { $_ . "\0" } grep { !$new{$_} } @old;
+`
+	script := "set -e -o pipefail\ncd " + shellQuote(workdir) + `
 ` + remoteSyncMetaDirScript() + `
 old="$meta_dir/sync-manifest"
 new="$meta_dir/sync-manifest.new"
@@ -1130,21 +1200,7 @@ delete_paths() {
   done
 }
 manifest_removed_paths() {
-  python3 - "$old" "$new" <<'PY'
-import pathlib
-import sys
-
-def read_manifest(path):
-    try:
-        data = pathlib.Path(path).read_bytes()
-    except FileNotFoundError:
-        return []
-    return [entry for entry in data.split(b"\0") if entry]
-
-old = read_manifest(sys.argv[1])
-new = set(read_manifest(sys.argv[2]))
-sys.stdout.buffer.write(b"".join(entry + b"\0" for entry in old if entry not in new))
-PY
+  ` + remoteSyncInterpreterCommand(python, perl, "\"$old\" \"$new\"") + `
 }
 if [ -f "$deleted" ]; then delete_paths < "$deleted"; fi
 if [ -f "$old" ] && [ -f "$new" ]; then manifest_removed_paths | delete_paths; fi

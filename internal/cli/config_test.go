@@ -193,6 +193,14 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_NAMESPACE_AUTO_STOP_IDLE_TIMEOUT",
 		"CRABBOX_NAMESPACE_WORK_ROOT",
 		"CRABBOX_NAMESPACE_DELETE_ON_RELEASE",
+		"CRABBOX_MORPH_API_KEY",
+		"MORPH_API_KEY",
+		"CRABBOX_MORPH_API_URL",
+		"CRABBOX_MORPH_SNAPSHOT",
+		"CRABBOX_MORPH_SSH_GATEWAY_HOST",
+		"CRABBOX_MORPH_WORK_ROOT",
+		"CRABBOX_MORPH_DELETE_ON_RELEASE",
+		"CRABBOX_MORPH_WAKE_ON_SSH",
 		"CRABBOX_EXE_DEV_CONTROL_HOST",
 		"EXE_DEV_CONTROL_HOST",
 		"CRABBOX_EXE_DEV_IMAGE",
@@ -1085,6 +1093,14 @@ namespace:
   autoStopIdleTimeout: 1h
   workRoot: /workspaces/test
   deleteOnRelease: true
+morph:
+  apiKey: morph-file-key
+  apiUrl: https://morph.example.test
+  snapshot: snapshot-file
+  sshGatewayHost: ssh.morph.example.test
+  workRoot: /tmp/morph-test
+  deleteOnRelease: true
+  wakeOnSSH: false
 daytona:
   apiUrl: https://daytona.example.test/api
   snapshot: crabbox-ready
@@ -1291,6 +1307,9 @@ ssh:
 	}
 	if cfg.Namespace.Image != "crabbox-ready" || cfg.Namespace.Size != "L" || cfg.Namespace.Repository != "github.com/openclaw/crabbox" || cfg.Namespace.Site != "fra1" || cfg.Namespace.VolumeSizeGB != 120 || cfg.Namespace.AutoStopIdleTimeout != time.Hour || cfg.Namespace.WorkRoot != "/workspaces/test" || !cfg.Namespace.DeleteOnRelease {
 		t.Fatalf("namespace config not loaded: %#v", cfg.Namespace)
+	}
+	if cfg.Morph.APIKey != "morph-file-key" || cfg.Morph.APIURL != "https://morph.example.test" || cfg.Morph.Snapshot != "snapshot-file" || cfg.Morph.SSHGatewayHost != "ssh.morph.example.test" || cfg.Morph.WorkRoot != "/tmp/morph-test" || !cfg.Morph.DeleteOnRelease || cfg.Morph.WakeOnSSH {
+		t.Fatalf("morph config not loaded: %#v", cfg.Morph)
 	}
 	if cfg.Daytona.APIURL != "https://daytona.example.test/api" || cfg.Daytona.Snapshot != "crabbox-ready" || cfg.Daytona.Target != "us" || cfg.Daytona.User != "daytona" || cfg.Daytona.WorkRoot != "/home/daytona/crabbox" || cfg.Daytona.SSHGatewayHost != "ssh.daytona.example.test" || cfg.Daytona.SSHAccessMinutes != 12 {
 		t.Fatalf("daytona config not loaded: %#v", cfg.Daytona)
@@ -1536,6 +1555,14 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_TAILSCALE_EXIT_NODE_ALLOW_LAN_ACCESS", "1")
 	t.Setenv("CRABBOX_TARGET", "macos")
 	t.Setenv("CRABBOX_STATIC_HOST", "mac.local")
+	t.Setenv("MORPH_API_KEY", "morph-api-file")
+	t.Setenv("CRABBOX_MORPH_API_KEY", "morph-api-env")
+	t.Setenv("CRABBOX_MORPH_API_URL", "https://morph-env.example")
+	t.Setenv("CRABBOX_MORPH_SNAPSHOT", "snapshot-env")
+	t.Setenv("CRABBOX_MORPH_SSH_GATEWAY_HOST", "ssh.morph-env.example")
+	t.Setenv("CRABBOX_MORPH_WORK_ROOT", "/tmp/morph-env")
+	t.Setenv("CRABBOX_MORPH_DELETE_ON_RELEASE", "true")
+	t.Setenv("CRABBOX_MORPH_WAKE_ON_SSH", "false")
 	t.Setenv("DAYTONA_API_KEY", "daytona-api-file")
 	t.Setenv("CRABBOX_DAYTONA_API_KEY", "daytona-api-env")
 	t.Setenv("DAYTONA_API_URL", "https://daytona-file.example/api")
@@ -1759,6 +1786,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if len(cfg.Tailscale.Tags) != 2 || cfg.Tailscale.Tags[1] != "tag:ci" {
 		t.Fatalf("unexpected tailscale tags: %#v", cfg.Tailscale.Tags)
+	}
+	if cfg.Morph.APIKey != "morph-api-env" || cfg.Morph.APIURL != "https://morph-env.example" || cfg.Morph.Snapshot != "snapshot-env" || cfg.Morph.SSHGatewayHost != "ssh.morph-env.example" || cfg.Morph.WorkRoot != "/tmp/morph-env" || !cfg.Morph.DeleteOnRelease || cfg.Morph.WakeOnSSH {
+		t.Fatalf("unexpected morph env: %#v", cfg.Morph)
 	}
 	if cfg.Daytona.APIKey != "daytona-api-env" || cfg.Daytona.APIURL != "https://daytona-env.example/api" || cfg.Daytona.Snapshot != "snapshot-env" || cfg.Daytona.Target != "target-env" || cfg.Daytona.User != "daytona-env-user" || cfg.Daytona.WorkRoot != "/home/daytona/env" || cfg.Daytona.SSHGatewayHost != "ssh.env.example" || cfg.Daytona.SSHAccessMinutes != 44 {
 		t.Fatalf("unexpected daytona env: %#v", cfg.Daytona)

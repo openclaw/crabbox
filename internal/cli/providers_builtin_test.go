@@ -21,6 +21,7 @@ func init() {
 	RegisterProvider(testRunPodProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
+	RegisterProvider(testMorphProvider{})
 	RegisterProvider(testDaytonaProvider{})
 	RegisterProvider(testIsloProvider{})
 	RegisterProvider(testE2BProvider{})
@@ -708,6 +709,83 @@ type testNamespaceFlagValues struct {
 	Image    *string
 	Size     *string
 	WorkRoot *string
+}
+
+type testMorphProvider struct{}
+
+func (testMorphProvider) Name() string      { return "morph" }
+func (testMorphProvider) Aliases() []string { return nil }
+func (testMorphProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "morph",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testMorphFlagValues struct {
+	APIURL          *string
+	Snapshot        *string
+	WorkRoot        *string
+	DeleteOnRelease *bool
+	WakeOnSSH       *bool
+}
+
+func (testMorphProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testMorphFlagValues{
+		APIURL:          fs.String("morph-api-url", defaults.Morph.APIURL, "Morph API URL"),
+		Snapshot:        fs.String("morph-snapshot", defaults.Morph.Snapshot, "Morph snapshot"),
+		WorkRoot:        fs.String("morph-work-root", defaults.Morph.WorkRoot, "Morph work root"),
+		DeleteOnRelease: fs.Bool("morph-delete-on-release", defaults.Morph.DeleteOnRelease, "Morph delete on release"),
+		WakeOnSSH:       fs.Bool("morph-wake-on-ssh", defaults.Morph.WakeOnSSH, "Morph wake on ssh"),
+	}
+}
+
+func (testMorphProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	if cfg.Provider == "morph" {
+		if flagWasSet(fs, "class") {
+			return exit(2, "--class is not supported for provider=morph")
+		}
+		if flagWasSet(fs, "type") {
+			return exit(2, "--type is not supported for provider=morph; use --morph-snapshot")
+		}
+		if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
+			return exit(2, "provider=morph supports target=linux only")
+		}
+	}
+	v, ok := values.(testMorphFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "morph-api-url") {
+		cfg.Morph.APIURL = *v.APIURL
+	}
+	if flagWasSet(fs, "morph-snapshot") {
+		cfg.Morph.Snapshot = *v.Snapshot
+	}
+	if flagWasSet(fs, "morph-work-root") {
+		cfg.Morph.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "morph-delete-on-release") {
+		cfg.Morph.DeleteOnRelease = *v.DeleteOnRelease
+	}
+	if flagWasSet(fs, "morph-wake-on-ssh") {
+		cfg.Morph.WakeOnSSH = *v.WakeOnSSH
+	}
+	return nil
+}
+
+func (testMorphProvider) ServerTypeForConfig(cfg Config) string {
+	return firstNonBlank(cfg.Morph.Snapshot, "snapshot")
+}
+
+func (testMorphProvider) ServerTypeForClass(string) string { return "snapshot" }
+
+func (p testMorphProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
 }
 
 func (testDaytonaProvider) Name() string      { return "daytona" }

@@ -9,3 +9,12 @@ node_modules/
 *.test
 coverage.out
 crabbox
+
+# Local env files: never commit API keys, tokens, or user secrets.
+*.env
+api.env*
+
+# Local planning artifacts from $prepare-plans / $prepare-plans-goals.
+# These are scratch inputs for the current session, not part of the repo.
+PLAN*.md
+plan*.md

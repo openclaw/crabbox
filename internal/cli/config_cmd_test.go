@@ -128,6 +128,57 @@ func TestConfigShowIncludesCloudflareWithoutSecret(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesMorphWithoutSecret(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("MORPH_API_KEY", "morph-secret-token")
+	if err := os.WriteFile(configPath, []byte("morph:\n  apiUrl: https://morph.example.test\n  snapshot: snapshot_123\n  sshGatewayHost: ssh.morph.example.test\n  workRoot: /tmp/morph\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "morph api_url=https://morph.example.test snapshot=snapshot_123 ssh_gateway_host=ssh.morph.example.test work_root=/tmp/morph delete_on_release=false wake_on_ssh=true auth=configured") {
+		t.Fatalf("config show missing morph summary: %q", text)
+	}
+	if strings.Contains(text, "morph-secret-token") {
+		t.Fatalf("config show leaked Morph token: %q", text)
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Morph struct {
+			APIURL          string `json:"apiUrl"`
+			Auth            string `json:"auth"`
+			Snapshot        string `json:"snapshot"`
+			SSHGatewayHost  string `json:"sshGatewayHost"`
+			WorkRoot        string `json:"workRoot"`
+			DeleteOnRelease bool   `json:"deleteOnRelease"`
+			WakeOnSSH       bool   `json:"wakeOnSSH"`
+		} `json:"morph"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Morph.APIURL != "https://morph.example.test" || got.Morph.Snapshot != "snapshot_123" || got.Morph.SSHGatewayHost != "ssh.morph.example.test" || got.Morph.WorkRoot != "/tmp/morph" || got.Morph.Auth != "configured" || got.Morph.DeleteOnRelease || !got.Morph.WakeOnSSH {
+		t.Fatalf("unexpected morph json: %#v", got.Morph)
+	}
+	if strings.Contains(stdout.String(), "morph-secret-token") {
+		t.Fatalf("config show json leaked Morph token: %q", stdout.String())
+	}
+}
+
 func TestConfigShowSurfacesUnsupportedAzureDynamicSessionsPool(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

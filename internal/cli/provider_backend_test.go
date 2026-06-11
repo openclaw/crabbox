@@ -49,6 +49,7 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		{name: "blacksmith-testbox", canonical: "blacksmith-testbox"},
 		{name: "namespace", canonical: "namespace-devbox"},
 		{name: "namespace-devbox", canonical: "namespace-devbox"},
+		{name: "morph", canonical: "morph"},
 		{name: "daytona", canonical: "daytona"},
 		{name: "islo", canonical: "islo"},
 		{name: "e2b", canonical: "e2b"},
@@ -74,9 +75,10 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 	}
 }
 
-func TestProviderHelpAllIncludesWandb(t *testing.T) {
-	if !strings.Contains(providerHelpAll(), "wandb") {
-		t.Fatalf("providerHelpAll() = %q, want wandb", providerHelpAll())
+func TestProviderHelpAllIncludesWandbAndMorph(t *testing.T) {
+	all := providerHelpAll()
+	if !strings.Contains(all, "wandb") || !strings.Contains(all, "morph") {
+		t.Fatalf("providerHelpAll() = %q, want wandb and morph", all)
 	}
 	if strings.Contains(providerHelpSSH(), "azure-dynamic-sessions") {
 		t.Fatalf("providerHelpSSH() = %q, want only ssh-capable providers", providerHelpSSH())
@@ -269,6 +271,31 @@ func TestProviderFlagsApplyNamespaceWithoutCoreEdits(t *testing.T) {
 	}
 	if cfg.Namespace.Image != "crabbox-ready" || cfg.Namespace.Size != "L" || cfg.Namespace.WorkRoot != "/workspaces/test" {
 		t.Fatalf("namespace flags not applied: %#v", cfg.Namespace)
+	}
+}
+
+func TestProviderFlagsApplyMorphWithoutCoreEdits(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	values := registerProviderFlags(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "morph",
+		"--morph-api-url", "https://morph.example.test",
+		"--morph-snapshot", "snapshot_123",
+		"--morph-work-root", "/tmp/morph-work",
+		"--morph-delete-on-release",
+		"--morph-wake-on-ssh=false",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = *provider
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Morph.APIURL != "https://morph.example.test" || cfg.Morph.Snapshot != "snapshot_123" || cfg.Morph.WorkRoot != "/tmp/morph-work" || cfg.WorkRoot != "/tmp/morph-work" || !cfg.Morph.DeleteOnRelease || cfg.Morph.WakeOnSSH {
+		t.Fatalf("morph flags not applied: %#v workRoot=%q", cfg.Morph, cfg.WorkRoot)
 	}
 }
 

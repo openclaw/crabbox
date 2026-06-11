@@ -588,6 +588,8 @@ func doctorErrorHint(provider, class string) string {
 		return "check_blacksmith_cli_auth_and_testbox_list"
 	case "daytona":
 		return "check_daytona_auth_profile_and_sandboxes_list"
+	case "morph":
+		return "check_morph_api_key_snapshot_and_instance_read"
 	case "e2b":
 		return "check_e2b_api_key_and_sandbox_list"
 	case "islo":
