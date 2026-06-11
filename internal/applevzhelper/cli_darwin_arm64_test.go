@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,6 +33,7 @@ while :; do sleep 1; done
 
 	originalPrepare := prepareInstanceAssetsFunc
 	originalExecutable := helperExecutable
+	originalProcessStartTime := processStartTime
 	originalReadyTimeout := runStartReadyTimeout
 	originalStartPoll := runStartPollInterval
 	originalTerminateGrace := terminateInstanceGraceTime
@@ -39,6 +41,7 @@ while :; do sleep 1; done
 	t.Cleanup(func() {
 		prepareInstanceAssetsFunc = originalPrepare
 		helperExecutable = originalExecutable
+		processStartTime = originalProcessStartTime
 		runStartReadyTimeout = originalReadyTimeout
 		runStartPollInterval = originalStartPoll
 		terminateInstanceGraceTime = originalTerminateGrace
@@ -60,6 +63,7 @@ while :; do sleep 1; done
 		return inst, nil
 	}
 	helperExecutable = func() (string, error) { return helperPath, nil }
+	processStartTime = func(pid int) (string, error) { return strconv.Itoa(pid) + "-start", nil }
 	runStartReadyTimeout = time.Second
 	runStartPollInterval = 5 * time.Millisecond
 	terminateInstanceGraceTime = 500 * time.Millisecond
@@ -96,6 +100,80 @@ while :; do sleep 1; done
 	}
 	if _, statErr := os.Stat(InstanceDir(stateRoot, name)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("instance directory stat error = %v, want os.ErrNotExist", statErr)
+	}
+}
+
+func TestTerminateInstanceSkipsSignalWhenPIDIdentityMismatches(t *testing.T) {
+	root := t.TempDir()
+	name := "stale-pid"
+	mustCreateInstanceDir(t, root, name)
+	cmd := startSleepProcess(t)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	originalProcessStartTime := processStartTime
+	t.Cleanup(func() { processStartTime = originalProcessStartTime })
+	processStartTime = func(pid int) (string, error) {
+		if pid != cmd.Process.Pid {
+			t.Fatalf("processStartTime pid=%d want %d", pid, cmd.Process.Pid)
+		}
+		return "actual-start", nil
+	}
+
+	err := terminateInstance(root, name, Instance{PID: cmd.Process.Pid, PIDStartedAt: "old-start"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(InstanceDir(root, name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("instance directory stat error=%v, want os.ErrNotExist", err)
+	}
+	if !pidAlive(cmd.Process.Pid) {
+		t.Fatal("identity mismatch should not signal the live process")
+	}
+}
+
+func TestTerminateInstanceSignalsOnlyMatchingPIDIdentity(t *testing.T) {
+	root := t.TempDir()
+	name := "matching-pid"
+	mustCreateInstanceDir(t, root, name)
+	cmd := startSleepProcess(t)
+	waited := false
+	t.Cleanup(func() {
+		if !waited {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	})
+
+	originalProcessStartTime := processStartTime
+	originalTerminateGrace := terminateInstanceGraceTime
+	originalTerminatePoll := terminateInstancePollTime
+	t.Cleanup(func() {
+		processStartTime = originalProcessStartTime
+		terminateInstanceGraceTime = originalTerminateGrace
+		terminateInstancePollTime = originalTerminatePoll
+	})
+	processStartTime = func(pid int) (string, error) {
+		if pid != cmd.Process.Pid {
+			t.Fatalf("processStartTime pid=%d want %d", pid, cmd.Process.Pid)
+		}
+		return "matching-start", nil
+	}
+	terminateInstanceGraceTime = time.Second
+	terminateInstancePollTime = 5 * time.Millisecond
+
+	err := terminateInstance(root, name, Instance{PID: cmd.Process.Pid, PIDStartedAt: "matching-start"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForProcessExit(cmd, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	waited = true
+	if _, err := os.Stat(InstanceDir(root, name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("instance directory stat error=%v, want os.ErrNotExist", err)
 	}
 }
 
@@ -168,6 +246,29 @@ func waitForDeadPID(pid int, timeout time.Duration) error {
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	return errors.New("helper process remained alive after runStart timeout cleanup")
+}
+
+func waitForProcessExit(cmd *exec.Cmd, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+	select {
+	case <-time.After(timeout):
+		_ = cmd.Process.Kill()
+		return errors.New("helper process remained alive after matching identity cleanup")
+	case <-done:
+		return nil
+	}
+}
+
+func startSleepProcess(t *testing.T) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep process: %v", err)
+	}
+	return cmd
 }
 
 func mustCreateInstanceDir(t *testing.T, root, name string) {

@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -24,6 +25,7 @@ var (
 	signalStop                 = signal.Stop
 	prepareInstanceAssetsFunc  = prepareInstanceAssets
 	helperExecutable           = os.Executable
+	processStartTime           = readProcessStartTime
 	runStartReadyTimeout       = 45 * time.Second
 	runStartPollInterval       = 250 * time.Millisecond
 	terminateInstanceGraceTime = 20 * time.Second
@@ -204,6 +206,9 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("spawn helper daemon: %w", err)
 	}
 	inst.PID = cmd.Process.Pid
+	if startedAt, err := processStartTime(inst.PID); err == nil {
+		inst.PIDStartedAt = startedAt
+	}
 	inst.UpdatedAt = time.Now().UTC()
 	if err := writeMetadata(MetadataPath(root, *name), inst); err != nil {
 		return err
@@ -228,7 +233,7 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 		}
 		time.Sleep(runStartPollInterval)
 	}
-	_ = terminateInstance(root, *name, inst.PID)
+	_ = terminateInstance(root, *name, inst)
 	_ = cmd.Wait()
 	return fmt.Errorf("timed out waiting for helper daemon to report readiness")
 }
@@ -363,18 +368,24 @@ func runDelete(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	inst = normalizeInstance(inst)
-	if err := terminateInstance(root, *name, inst.PID); err != nil {
+	if err := terminateInstance(root, *name, inst); err != nil {
 		return err
 	}
 	inst.Status = StatusStopped
 	inst.UpdatedAt = time.Now().UTC()
 	inst.PID = 0
+	inst.PIDStartedAt = ""
 	return json.NewEncoder(stdout).Encode(DeleteResponse{Deleted: true, Instance: inst})
 }
 
-func terminateInstance(stateRoot, name string, pid int) error {
+func terminateInstance(stateRoot, name string, inst Instance) error {
+	pid := inst.PID
 	if pid > 0 && pidAlive(pid) {
-		if process, err := os.FindProcess(pid); err == nil {
+		if processIdentityMatches(inst) {
+			process, err := os.FindProcess(pid)
+			if err != nil {
+				return fmt.Errorf("find helper process %d: %w", pid, err)
+			}
 			_ = process.Signal(syscall.SIGTERM)
 			deadline := time.Now().Add(terminateInstanceGraceTime)
 			for pidAlive(pid) && time.Now().Before(deadline) {
@@ -389,6 +400,30 @@ func terminateInstance(stateRoot, name string, pid int) error {
 		return fmt.Errorf("remove instance directory: %w", err)
 	}
 	return nil
+}
+
+func processIdentityMatches(inst Instance) bool {
+	expected := strings.TrimSpace(inst.PIDStartedAt)
+	if inst.PID <= 0 || expected == "" {
+		return false
+	}
+	actual, err := processStartTime(inst.PID)
+	return err == nil && actual == expected
+}
+
+func readProcessStartTime(pid int) (string, error) {
+	if pid <= 0 {
+		return "", fmt.Errorf("pid must be positive")
+	}
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
+	if err != nil {
+		return "", err
+	}
+	startedAt := strings.TrimSpace(string(out))
+	if startedAt == "" {
+		return "", fmt.Errorf("process %d start time unavailable", pid)
+	}
+	return startedAt, nil
 }
 
 func normalizeStateRoot(root string) (string, error) {
@@ -485,6 +520,7 @@ func normalizeInstance(inst Instance) Instance {
 		if IsRunningStatus(inst.Status) || inst.Status == StatusStopping {
 			inst.Status = StatusStopped
 			inst.PID = 0
+			inst.PIDStartedAt = ""
 		}
 	}
 	return inst

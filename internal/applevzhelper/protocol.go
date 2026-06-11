@@ -53,6 +53,7 @@ type Instance struct {
 	MemoryMiB            int       `json:"memoryMiB"`
 	DiskGiB              int       `json:"diskGiB"`
 	PID                  int       `json:"pid,omitempty"`
+	PIDStartedAt         string    `json:"pidStartedAt,omitempty"`
 	SSHHost              string    `json:"sshHost,omitempty"`
 	SSHPort              int       `json:"sshPort,omitempty"`
 	DiskPath             string    `json:"diskPath,omitempty"`
