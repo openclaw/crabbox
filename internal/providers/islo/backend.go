@@ -171,7 +171,9 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		if err != nil {
 			return RunResult{}, err
 		}
-		if _, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID); err != nil {
+		if _, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID); err != nil &&
+			!errors.Is(err, core.ErrTailnetPeerUnavailable) &&
+			!errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
 			return RunResult{}, err
 		}
 	}
@@ -304,7 +306,9 @@ func (b *isloBackend) Status(ctx context.Context, req StatusRequest) (statusView
 			return statusView{}, isloError("get sandbox", err)
 		}
 		if sandbox != nil && isloStatusReady(sandbox.GetStatus()) {
-			if _, err := b.ensureLeaseTailscale(ctx, client, name, newLeaseSlug(leaseID), leaseID); err != nil {
+			if _, err := b.ensureLeaseTailscale(ctx, client, name, newLeaseSlug(leaseID), leaseID); err != nil &&
+				!errors.Is(err, core.ErrTailnetPeerUnavailable) &&
+				!errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
 				return statusView{}, err
 			}
 		}

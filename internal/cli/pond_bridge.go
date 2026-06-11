@@ -63,6 +63,11 @@ const (
 	TransportPending = "pending"
 )
 
+var (
+	ErrTailnetPeerUnavailable           = errors.New("tailnet peer unavailable")
+	ErrTailnetPeerValidationUnavailable = errors.New("tailnet peer validation unavailable")
+)
+
 // BridgePeerTarget is a single externally reachable HTTPS endpoint published
 // for a sandbox port. Different providers will populate it from different
 // native primitives (islo shares, modal web endpoints, e2b previews, …); the
@@ -356,9 +361,11 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 				if validator, ok := bridge.(TailnetPeerValidator); ok {
 					meta, validateErr := validator.ValidateTailnetPeer(ctx, claim.LeaseID)
 					if validateErr != nil {
-						claim.TailscaleIPv4 = ""
-						claim.TailscaleFQDN = ""
-						peer = bridgePeerFromClaim(claim, class)
+						if !errors.Is(validateErr, ErrTailnetPeerValidationUnavailable) {
+							claim.TailscaleIPv4 = ""
+							claim.TailscaleFQDN = ""
+							peer = bridgePeerFromClaim(claim, class)
+						}
 						peer.Note = fmt.Sprintf("tailnet validation failed: %v", validateErr)
 					} else {
 						peer.Endpoint = firstNonEmpty(meta.IPv4, meta.FQDN, meta.Hostname)

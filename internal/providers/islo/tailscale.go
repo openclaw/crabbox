@@ -183,13 +183,17 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 	}
 	var out bytes.Buffer
 	code, checkErr := client.ExecStream(ctx, sandboxName, req, &out, b.rt.Stderr)
-	if checkErr == nil && code == 0 {
+	if checkErr != nil {
+		return core.TailscaleMetadata{}, fmt.Errorf("%w: %v", core.ErrTailnetPeerValidationUnavailable, checkErr)
+	}
+	if code == 0 {
 		if match := isloTailscaleIPRe.FindStringSubmatch(out.String()); match != nil && match[1] != "" {
 			if err := updateLeaseClaimTailscale(leaseID, match[1], claim.TailscaleFQDN); err != nil {
 				return core.TailscaleMetadata{}, err
 			}
 			return core.TailscaleMetadata{Enabled: true, IPv4: match[1], FQDN: claim.TailscaleFQDN, State: "ready"}, nil
 		}
+		return core.TailscaleMetadata{}, fmt.Errorf("%w: health check returned no tailnet address", core.ErrTailnetPeerValidationUnavailable)
 	}
 	if strings.TrimSpace(b.cfg.Tailscale.AuthKey) != "" {
 		restart := *b
@@ -205,15 +209,12 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 		if err := clearLeaseClaimTailscale(leaseID); err != nil {
 			return core.TailscaleMetadata{}, err
 		}
-		return core.TailscaleMetadata{}, exit(1, "islo tailnet restart failed: %v", restartErr)
+		return core.TailscaleMetadata{}, fmt.Errorf("%w: restart failed: %v", core.ErrTailnetPeerUnavailable, restartErr)
 	}
 	if err := clearLeaseClaimTailscale(leaseID); err != nil {
 		return core.TailscaleMetadata{}, err
 	}
-	if checkErr != nil {
-		return core.TailscaleMetadata{}, exit(1, "islo tailnet health check: %v", checkErr)
-	}
-	return core.TailscaleMetadata{}, exit(1, "islo tailnet daemon unavailable for lease %s", leaseID)
+	return core.TailscaleMetadata{}, fmt.Errorf("%w: lease %s", core.ErrTailnetPeerUnavailable, leaseID)
 }
 
 func (b *isloBackend) ValidateTailnetPeer(ctx context.Context, leaseID string) (core.TailscaleMetadata, error) {
@@ -226,8 +227,7 @@ func (b *isloBackend) ValidateTailnetPeer(ctx context.Context, leaseID string) (
 	}
 	client, err := newIsloClient(b.cfg, b.rt)
 	if err != nil {
-		_ = clearLeaseClaimTailscale(leaseID)
-		return core.TailscaleMetadata{}, err
+		return core.TailscaleMetadata{}, fmt.Errorf("%w: %v", core.ErrTailnetPeerValidationUnavailable, err)
 	}
 	name := strings.TrimPrefix(leaseID, isloLeasePrefix)
 	return b.ensureLeaseTailscale(ctx, client, name, claim.Slug, leaseID)
