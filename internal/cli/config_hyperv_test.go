@@ -117,3 +117,23 @@ func TestLoadConfigAppliesHyperVWindowsDefaults(t *testing.T) {
 		t.Fatalf("Hyper-V SSH defaults not applied: user=%q port=%q root=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
 	}
 }
+
+func TestLoadConfigPreservesExplicitHyperVTargetForCLIOverride(t *testing.T) {
+	clearConfigEnv(t)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("provider: hyperv\ntarget: linux\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", path)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	t.Setenv("CRABBOX_TARGET", "")
+	t.Setenv("CRABBOX_TARGET_OS", "")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux || !IsTargetExplicit(&cfg) {
+		t.Fatalf("explicit target was rewritten: target=%q explicit=%v", cfg.TargetOS, IsTargetExplicit(&cfg))
+	}
+}

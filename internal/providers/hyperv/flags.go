@@ -56,14 +56,11 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		cfg.HyperV.InitPassword = *v.InitPassword
 	}
 	if isHyperVProviderName(cfg.Provider) {
-		// Reject an explicitly-set non-Windows target from any source (CLI flag,
-		// YAML, or env) rather than silently rewriting it to windows. Only adopt
-		// windows when the target was never set (baseConfig defaults to linux).
-		if flagWasSet(fs, "target") || core.IsTargetExplicit(cfg) {
-			if cfg.TargetOS != targetWindows {
-				return exit(2, "provider=%s supports target=%s only (got target=%s)", providerName, targetWindows, cfg.TargetOS)
-			}
-		} else {
+		// Target flags are applied after provider flags on several lifecycle
+		// commands. Leave target validation to the centralized provider-target
+		// check after all flag sources have been applied. When no target source
+		// is explicit, adopt the provider's Windows default here.
+		if !core.IsTargetExplicit(cfg) && !flagWasSet(fs, "target") {
 			cfg.TargetOS = targetWindows
 		}
 		applyDefaults(cfg)

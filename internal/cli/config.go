@@ -928,14 +928,9 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	}
 	applyOSImageProviderDefaults(cfg, false)
 	if cfg.Provider == "hyperv" {
-		if IsTargetExplicit(cfg) && normalizeTargetOS(cfg.TargetOS) != targetWindows {
-			return exit(2, "provider=hyperv supports target=windows only")
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetWindows
 		}
-		if normalizeWindowsMode(cfg.WindowsMode) != windowsModeNormal {
-			return exit(2, "provider=hyperv supports windows.mode=normal only")
-		}
-		cfg.TargetOS = targetWindows
-		cfg.WindowsMode = windowsModeNormal
 		cfg.SSHFallbackPorts = nil
 		if cfg.HyperV.User != "" {
 			cfg.SSHUser = cfg.HyperV.User

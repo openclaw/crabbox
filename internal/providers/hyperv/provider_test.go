@@ -586,6 +586,9 @@ func TestCreateVMInitPasswordInjectsRunOnceBeforeBoot(t *testing.T) {
 					t.Errorf("init-password script missing %q", want)
 				}
 			}
+			if !strings.Contains(script, "HKLM\\crabbox-init-") || !strings.Contains(script, "HKLM:\\crabbox-init-") {
+				t.Errorf("init-password script missing unique hive name: %s", script)
+			}
 			if strings.Contains(script, `C:\Images\windows.vhdx`) {
 				t.Error("init-password script must mount the lease disk, not the template")
 			}
@@ -613,6 +616,19 @@ func TestCreateVMInitPasswordInjectsRunOnceBeforeBoot(t *testing.T) {
 	}
 	if newVMIdx < 0 || newVMIdx < injectIdx {
 		t.Fatalf("password injection (call %d) must happen before New-VM (call %d)", injectIdx, newVMIdx)
+	}
+}
+
+func TestHyperVInitHiveNameIsUniqueAndSafe(t *testing.T) {
+	first := hypervInitHiveName(`C:\Hyper-V\one.vhdx`)
+	second := hypervInitHiveName(`C:\Hyper-V\two.vhdx`)
+	if first == second {
+		t.Fatalf("hive names collide: %q", first)
+	}
+	for _, name := range []string{first, second} {
+		if !strings.HasPrefix(name, "crabbox-init-") || strings.ContainsAny(name, `\/: `) {
+			t.Fatalf("unsafe hive name %q", name)
+		}
 	}
 }
 
@@ -1006,6 +1022,12 @@ func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
 			t.Errorf("admin-key SSH lockdown missing %q\nscript: %s", want, script)
 		}
 	}
+	if strings.Contains(script, "Add-Content") {
+		t.Fatalf("SSH key injection retained template keys: %s", script)
+	}
+	if strings.Count(script, "Set-Content -Encoding ASCII") < 3 {
+		t.Fatalf("SSH key injection should replace user, administrator, and config files: %s", script)
+	}
 }
 
 func TestInjectSSHKeyPasswordNotInArgs(t *testing.T) {
@@ -1244,60 +1266,30 @@ func TestApplyDefaultsPreservesExplicitTarget(t *testing.T) {
 	}
 }
 
-func TestApplyFlagsRejectsExplicitLinuxTarget(t *testing.T) {
+func TestApplyFlagsDefersTargetValidation(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
-
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	fs.String("target", "linux", "")
-	if err := fs.Set("target", "linux"); err != nil {
-		t.Fatal(err)
-	}
-
-	err := applyFlags(&cfg, fs, flagValues{})
-	if err == nil {
-		t.Fatal("applyFlags should reject explicit --target linux")
-	}
-}
-
-func TestApplyFlagsRejectsExplicitMacOSTarget(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.TargetOS = core.TargetMacOS
-
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	fs.String("target", "linux", "")
-	if err := fs.Set("target", "macos"); err != nil {
-		t.Fatal(err)
-	}
-
-	err := applyFlags(&cfg, fs, flagValues{})
-	if err == nil {
-		t.Fatal("applyFlags should reject explicit --target macos")
-	}
-}
-
-func TestApplyFlagsDefaultsLinuxToWindows(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
+	core.MarkTargetExplicit(&cfg)
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
 
-	err := applyFlags(&cfg, fs, flagValues{})
-	if err != nil {
-		t.Fatalf("applyFlags failed: %v", err)
+	if err := applyFlags(&cfg, fs, flagValues{}); err != nil {
+		t.Fatalf("applyFlags should defer target validation: %v", err)
 	}
-	if cfg.TargetOS != core.TargetWindows {
-		t.Fatalf("TargetOS=%s want windows (should default baseConfig linux to windows)", cfg.TargetOS)
+	if cfg.TargetOS != core.TargetLinux {
+		t.Fatalf("applyFlags rewrote explicit target to %s", cfg.TargetOS)
+	}
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
+		t.Fatal("central provider configuration should reject target=linux")
 	}
 }
 
-func TestApplyFlagsAcceptsExplicitWindows(t *testing.T) {
+func TestApplyFlagsAllowsLaterWindowsOverride(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
-	cfg.TargetOS = core.TargetWindows
+	cfg.TargetOS = core.TargetLinux
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
@@ -1307,28 +1299,29 @@ func TestApplyFlagsAcceptsExplicitWindows(t *testing.T) {
 
 	err := applyFlags(&cfg, fs, flagValues{})
 	if err != nil {
-		t.Fatalf("applyFlags should accept explicit --target windows: %v", err)
+		t.Fatalf("applyFlags should not reject a target flag before it is applied: %v", err)
 	}
+	cfg.TargetOS = core.TargetWindows
 	if cfg.TargetOS != core.TargetWindows {
 		t.Fatalf("TargetOS=%s want windows", cfg.TargetOS)
 	}
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err != nil {
+		t.Fatalf("provider should accept target after override: %v", err)
+	}
 }
 
-// A non-Windows target set via YAML or env (no CLI --target flag) must be
-// rejected, not silently rewritten to windows.
-func TestApplyFlagsRejectsExplicitConfigTarget(t *testing.T) {
-	for _, target := range []string{core.TargetLinux, core.TargetMacOS} {
-		cfg := core.BaseConfig()
-		cfg.Provider = providerName
-		cfg.TargetOS = target
-		core.MarkTargetExplicit(&cfg) // simulates target set from YAML/env
+func TestApplyFlagsDefaultsImplicitTargetToWindows(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
 
-		fs := flag.NewFlagSet("test", flag.ContinueOnError)
-		fs.String("target", "linux", "") // present but NOT set (no CLI flag)
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("target", "linux", "")
 
-		if err := applyFlags(&cfg, fs, flagValues{}); err == nil {
-			t.Fatalf("applyFlags should reject explicit config target=%s, got TargetOS=%s", target, cfg.TargetOS)
-		}
+	if err := applyFlags(&cfg, fs, flagValues{}); err != nil {
+		t.Fatalf("applyFlags: %v", err)
+	}
+	if cfg.TargetOS != core.TargetWindows {
+		t.Fatalf("TargetOS=%s want windows", cfg.TargetOS)
 	}
 }
 

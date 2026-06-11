@@ -2,6 +2,7 @@ package hyperv
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -512,6 +513,7 @@ func (b *backend) guestPassword() string {
 // a command line; inside the guest it is visible to the guest itself (RunOnce
 // value, then the net.exe command line at first logon), which the lease owns.
 func (b *backend) injectInitPassword(ctx context.Context, vhdPath, user string) error {
+	hiveName := hypervInitHiveName(vhdPath)
 	script := fmt.Sprintf(
 		`$ErrorActionPreference = 'Stop'; `+
 			`$disk = Mount-VHD -Path '%s' -Passthru | Get-Disk; `+
@@ -520,18 +522,18 @@ func (b *backend) injectInitPassword(ctx context.Context, vhdPath, user string) 
 			`$letters = ($disk | Get-Partition | Where-Object DriveLetter).DriveLetter; `+
 			`$sys = $letters | Where-Object { Test-Path ("$_" + ':\Windows\System32\config\SOFTWARE') } | Select-Object -First 1; `+
 			`if (-not $sys) { throw 'no Windows system volume found in template' }; `+
-			`reg.exe load HKLM\crabbox-init ("$sys" + ':\Windows\System32\config\SOFTWARE') | Out-Null; `+
+			`reg.exe load HKLM\%s ("$sys" + ':\Windows\System32\config\SOFTWARE') | Out-Null; `+
 			`if ($LASTEXITCODE -ne 0) { throw 'loading the offline SOFTWARE hive failed' }; `+
 			`try { `+
-			`$runOnce = 'HKLM:\crabbox-init\Microsoft\Windows\CurrentVersion\RunOnce'; `+
+			`$runOnce = 'HKLM:\%s\Microsoft\Windows\CurrentVersion\RunOnce'; `+
 			`if (-not (Test-Path $runOnce)) { New-Item -Path $runOnce -Force | Out-Null }; `+
 			`New-ItemProperty -Path $runOnce -Name 'CrabboxInitPassword' -PropertyType String -Force -Value ('cmd /c net user "%s" "' + $env:_CRABBOX_GP + '" /y') | Out-Null `+
 			`} finally { `+
 			`[gc]::Collect(); [gc]::WaitForPendingFinalizers(); `+
-			`reg.exe unload HKLM\crabbox-init | Out-Null `+
+			`reg.exe unload HKLM\%s | Out-Null `+
 			`} `+
 			`} finally { Dismount-VHD -Path '%s' }`,
-		escapePSString(vhdPath), escapePSString(user), escapePSString(vhdPath),
+		escapePSString(vhdPath), hiveName, hiveName, escapePSString(user), hiveName, escapePSString(vhdPath),
 	)
 	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
 	result, err := b.powershellWithEnv(ctx, script, env)
@@ -539,6 +541,11 @@ func (b *backend) injectInitPassword(ctx context.Context, vhdPath, user string) 
 		return commandError("init-password injection", result, err)
 	}
 	return nil
+}
+
+func hypervInitHiveName(vhdPath string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(vhdPath))))
+	return fmt.Sprintf("crabbox-init-%x", sum[:8])
 }
 
 // invokeInGuest runs a PowerShell script block inside the guest over PowerShell
@@ -631,17 +638,18 @@ func (b *backend) ensureGit(ctx context.Context, vmName, user string) error {
 }
 
 // injectSSHKey writes the SSH public key into the VM via PowerShell Direct,
-// appending to both the user's authorized_keys and, for admin accounts, the
-// administrators_authorized_keys file.
+// replacing both the user's authorized_keys and, for admin accounts, the
+// administrators_authorized_keys file so template-baked keys cannot retain
+// access to a new lease.
 func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey string) error {
 	scriptBlock := fmt.Sprintf(
 		`$ErrorActionPreference='Stop'; `+
 			`$sshDir = Join-Path $env:USERPROFILE '.ssh'; `+
 			`New-Item -ItemType Directory -Force -Path $sshDir | Out-Null; `+
 			`$akPath = Join-Path $sshDir 'authorized_keys'; `+
-			`Add-Content -Encoding ASCII -Path $akPath -Value '%s'; `+
+			`Set-Content -Encoding ASCII -Path $akPath -Value '%s'; `+
 			`$adminAK = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'; `+
-			`if (Test-Path (Split-Path $adminAK)) { Add-Content -Encoding ASCII -Path $adminAK -Value '%s'; `+
+			`if (Test-Path (Split-Path $adminAK)) { Set-Content -Encoding ASCII -Path $adminAK -Value '%s'; `+
 			`icacls.exe $adminAK /inheritance:r /grant '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null; `+
 			`if ($LASTEXITCODE -ne 0) { throw 'administrators_authorized_keys ACL update failed' } }; `+
 			`$sshdConfig = Join-Path $env:ProgramData 'ssh\sshd_config'; `+
