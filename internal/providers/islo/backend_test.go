@@ -480,6 +480,74 @@ func TestIsloRunPropagatesReusedLeaseTailscaleEnrollmentFailure(t *testing.T) {
 	}
 }
 
+func TestIsloRunRequiresClaimBeforeReusedLeaseTailscaleEnrollment(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{
+			Islo:      IsloConfig{APIKey: "test", Workdir: "repo"},
+			Tailscale: core.TailscaleConfig{Enabled: true, AuthKey: "tskey-secret"},
+		},
+		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID:      "isb_crabbox-unclaimed-abcdef",
+		Keep:    true,
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "lease claim") {
+		t.Fatalf("expected missing claim error, got %v", err)
+	}
+	if len(client.execRequests) != 0 {
+		t.Fatalf("sandbox mutated before missing claim failure: %#v", client.prepareCommands)
+	}
+}
+
+func TestIsloRunAddsTailnetProxyDefaultsToWorkload(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-old-abcdef"
+	if err := claimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{
+		execOuts: []string{"", "CRABBOX_TS_IP=100.64.7.8"},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID:      leaseID,
+		Keep:    true,
+		NoSync:  true,
+		Env:     map[string]string{"HTTP_PROXY": "http://override.example:8080"},
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workload := client.execRequests[len(client.execRequests)-1]
+	for name, want := range map[string]string{
+		"ALL_PROXY":   "socks5://127.0.0.2:1055",
+		"HTTP_PROXY":  "http://override.example:8080",
+		"HTTPS_PROXY": "http://127.0.0.2:1055",
+	} {
+		if workload.Env[name] == nil || *workload.Env[name] != want {
+			t.Fatalf("workload %s=%v want %q", name, workload.Env[name], want)
+		}
+	}
+}
+
 func TestIsloRunReturnsSessionHandleWhenPrepareFails(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{

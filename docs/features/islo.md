@@ -128,9 +128,12 @@ crabbox pond peers --pond mesh --json                # both members on transport
 The static build and its architecture-specific SHA-256 digests are pinned
 together in Crabbox.
 The Islo path runs Tailscale in userspace mode, so it does not install a kernel
-TUN route. Traffic from sandbox processes must use the local proxies that
-Crabbox starts with the daemon (`ALL_PROXY=socks5://127.0.0.2:1055` and
-`HTTP_PROXY=http://127.0.0.2:1055`) or another userspace Tailscale surface.
+TUN route. For enrolled leases, Crabbox supplies workload commands with local
+proxy defaults (`ALL_PROXY=socks5://127.0.0.2:1055`,
+`HTTP_PROXY=http://127.0.0.2:1055`, and
+`HTTPS_PROXY=http://127.0.0.2:1055`); explicit command environment values
+override those defaults. Other processes must opt into those proxies or another
+userspace Tailscale surface.
 The proxy uses `127.0.0.2` because userspace Tailscale forwards inbound tailnet
 TCP to `127.0.0.1`; keeping the proxy on a separate loopback address prevents
 tailnet peers from using the unauthenticated outbound proxy.

@@ -159,6 +159,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	}
 	leaseID, name, slug := "", "", ""
 	acquired := false
+	tailnetReady := false
 	if req.ID == "" {
 		leaseID, name, slug, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
 		if err != nil {
@@ -166,30 +167,47 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		}
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=islo sandbox=%s\n", leaseID, slug, name)
 		acquired = true
+		tailnetReady = b.cfg.Tailscale.Enabled
 	} else {
 		leaseID, name, slug, err = resolveIsloLeaseID(req.ID, req.Repo.Root, req.Reclaim)
 		if err != nil {
 			return RunResult{}, err
 		}
+		var claim core.LeaseClaim
+		if b.cfg.Tailscale.Enabled {
+			var ok bool
+			claim, ok, err = resolveLeaseClaim(leaseID)
+			if err != nil {
+				return RunResult{}, err
+			}
+			if !ok {
+				return RunResult{}, exit(4, "islo lease claim %s not found; warm or reclaim the lease before enabling Tailscale", leaseID)
+			}
+		}
 		if err := b.migrateWorkspaceOwnership(ctx, client, name, workspace); err != nil {
 			return RunResult{}, err
 		}
 		if b.cfg.Tailscale.Enabled {
-			claim, ok, claimErr := resolveLeaseClaim(leaseID)
-			if claimErr != nil {
-				return RunResult{}, claimErr
-			}
-			if !ok || !isloClaimTailscaleEnrolled(claim) {
+			if !isloClaimTailscaleEnrolled(claim) {
 				if err := b.maybeJoinTailscale(ctx, client, name, slug, leaseID); err != nil {
 					return RunResult{}, err
 				}
-			} else if _, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID); err != nil {
+				tailnetReady = true
+			} else {
+				meta, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID)
+				if err != nil {
+					return RunResult{}, err
+				}
+				tailnetReady = meta.Enabled
+			}
+		} else {
+			meta, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID)
+			if err != nil &&
+				!errors.Is(err, core.ErrTailnetPeerUnavailable) &&
+				!errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
 				return RunResult{}, err
 			}
-		} else if _, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID); err != nil &&
-			!errors.Is(err, core.ErrTailnetPeerUnavailable) &&
-			!errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
-			return RunResult{}, err
+			tailnetReady = err == nil && meta.Enabled
 		}
 	}
 	shouldStop := acquired && !req.Keep
@@ -235,7 +253,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		return finishResult(), err
 	}
 	commandStart := b.now()
-	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, req.Env)
+	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, isloWorkloadEnv(req.Env, tailnetReady))
 	commandDuration := b.now().Sub(commandStart)
 	result.ExitCode = exitCode
 	result.Command = commandDuration
@@ -272,6 +290,26 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("islo run exited %d", exitCode)}
 	}
 	return result, nil
+}
+
+func isloWorkloadEnv(env map[string]string, tailnetReady bool) map[string]string {
+	if !tailnetReady {
+		return env
+	}
+	out := make(map[string]string, len(env)+3)
+	for name, value := range env {
+		out[name] = value
+	}
+	for name, value := range map[string]string{
+		"ALL_PROXY":   "socks5://127.0.0.2:1055",
+		"HTTP_PROXY":  "http://127.0.0.2:1055",
+		"HTTPS_PROXY": "http://127.0.0.2:1055",
+	} {
+		if _, overridden := out[name]; !overridden {
+			out[name] = value
+		}
+	}
+	return out
 }
 
 func (b *isloBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
