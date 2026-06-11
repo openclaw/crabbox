@@ -49,12 +49,14 @@ func TestLocalContainerProviderE2E(t *testing.T) {
 	tag = strings.Trim(tag, "-") + "-" + time.Now().UTC().Format("150405")
 	oneShotSlug := tag + "-one"
 	warmSlug := tag + "-warm"
+	staleSlug := tag + "-stale"
 
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cleanupCancel()
 		_, _ = runCrabboxLocalContainerE2E(cleanupCtx, "stop", "--provider", "docker", oneShotSlug)
 		_, _ = runCrabboxLocalContainerE2E(cleanupCtx, "stop", "--provider", "docker", warmSlug)
+		_, _ = runCrabboxLocalContainerE2E(cleanupCtx, "stop", "--provider", "docker", staleSlug)
 	})
 
 	oneShot := runCrabboxLocalContainerE2EMust(t, ctx,
@@ -106,6 +108,37 @@ func TestLocalContainerProviderE2E(t *testing.T) {
 	}
 	runCrabboxLocalContainerE2EMust(t, ctx, "stop", "--provider", "docker", leaseID)
 	assertNoLocalContainerForSlug(t, ctx, warmSlug)
+
+	staleWarmup := runCrabboxLocalContainerE2EMust(t, ctx,
+		"warmup",
+		"--provider", "docker",
+		"--local-container-runtime", "docker",
+		"--local-container-image", image,
+		"--slug", staleSlug,
+	)
+	staleLeaseID := parseLocalContainerE2ELeaseID(staleWarmup.Stdout)
+	if staleLeaseID == "" {
+		t.Fatalf("could not parse stale local-container lease id: stdout=%q stderr=%q", staleWarmup.Stdout, staleWarmup.Stderr)
+	}
+	keyPath, err := cli.TestboxKeyPath(staleLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	containerID := localContainerIDForSlug(t, ctx, staleSlug)
+	runDockerLocalContainerE2EMust(t, ctx, "rm", "-f", containerID)
+	if _, err := runCrabboxLocalContainerE2E(ctx, "status", "--provider", "docker", "--id", staleSlug); err == nil {
+		t.Fatal("normal status succeeded after external container removal")
+	}
+	runCrabboxLocalContainerE2EMust(t, ctx, "stop", "--provider", "docker", staleSlug)
+	if claim, err := cli.ReadLeaseClaim(staleLeaseID); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("stale claim still exists after stop: %#v", claim)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("stale key still exists after stop: %v", err)
+	}
+	assertNoLocalContainerForSlug(t, ctx, staleSlug)
 }
 
 type localContainerE2EResult struct {
@@ -130,6 +163,13 @@ func runCrabboxLocalContainerE2E(ctx context.Context, args ...string) (localCont
 
 func assertNoLocalContainerForSlug(t *testing.T, ctx context.Context, slug string) {
 	t.Helper()
+	if id := localContainerIDForSlug(t, ctx, slug); id != "" {
+		t.Fatalf("local-container e2e left container for slug=%s: %s", slug, id)
+	}
+}
+
+func localContainerIDForSlug(t *testing.T, ctx context.Context, slug string) string {
+	t.Helper()
 	commandCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(commandCtx, "docker", "ps", "-aq",
@@ -140,8 +180,22 @@ func assertNoLocalContainerForSlug(t *testing.T, ctx context.Context, slug strin
 	if err != nil {
 		t.Fatalf("docker ps for slug %s failed: %v: %s", slug, err, strings.TrimSpace(string(out)))
 	}
-	if ids := strings.TrimSpace(string(out)); ids != "" {
-		t.Fatalf("local-container e2e left containers for slug=%s: %s", slug, ids)
+	ids := strings.Fields(string(out))
+	if len(ids) > 1 {
+		t.Fatalf("multiple local-container e2e containers for slug=%s: %v", slug, ids)
+	}
+	if len(ids) == 1 {
+		return ids[0]
+	}
+	return ""
+}
+
+func runDockerLocalContainerE2EMust(t *testing.T, ctx context.Context, args ...string) {
+	t.Helper()
+	commandCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(commandCtx, "docker", args...).CombinedOutput(); err != nil {
+		t.Fatalf("docker %s failed: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 }
 
