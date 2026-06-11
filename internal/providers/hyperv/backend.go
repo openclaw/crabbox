@@ -710,6 +710,15 @@ func sshAccessScript(user, publicKey string, activate bool) string {
 		`$sshKeygen = Join-Path $env:WINDIR 'System32\OpenSSH\ssh-keygen.exe'; ` +
 		`& $sshKeygen -A; ` +
 		`if ($LASTEXITCODE -ne 0) { throw 'SSH host key generation failed' }; ` +
+		`$systemSID = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'); ` +
+		`$adminsSID = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'); ` +
+		`Get-ChildItem -Path $hostKeyDir -Filter 'ssh_host_*_key' | ForEach-Object { ` +
+		`$hostKeyACL = New-Object System.Security.AccessControl.FileSecurity; ` +
+		`$hostKeyACL.SetOwner($adminsSID); ` +
+		`$hostKeyACL.SetAccessRuleProtection($true, $false); ` +
+		`$hostKeyACL.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($systemSID, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)); ` +
+		`$hostKeyACL.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($adminsSID, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)); ` +
+		`Set-Acl -LiteralPath $_.FullName -AclObject $hostKeyACL }; ` +
 		`$sshdExe = Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'; ` +
 		`& $sshdExe -t -f $sshdConfig; ` +
 		`if ($LASTEXITCODE -ne 0) { throw 'sshd_config validation failed' }; ` +

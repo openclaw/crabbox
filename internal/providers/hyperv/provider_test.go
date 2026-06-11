@@ -1391,7 +1391,7 @@ func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
 	}
 	// Windows OpenSSH ignores administrators_authorized_keys unless it is owned
 	// only by SYSTEM + Administrators with inheritance disabled.
-	for _, want := range []string{"icacls.exe", "/inheritance:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "$LASTEXITCODE", "Port|ListenAddress|AddressFamily|HostKey|", "Port 22", "AddressFamily any", "PasswordAuthentication no", "PubkeyAuthentication yes", "AuthenticationMethods publickey", "AllowUsers administrator", "|Include)", "sshd_config validation failed", "ssh_host_*", "ssh-keygen.exe", "-A", "SSH host key generation failed", "Start-Service sshd", "OpenSSH-Server-In-TCP", "Crabbox-SSH-Quarantine", "Remove-NetFirewallRule"} {
+	for _, want := range []string{"icacls.exe", "/inheritance:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "$LASTEXITCODE", "Port|ListenAddress|AddressFamily|HostKey|", "Port 22", "AddressFamily any", "PasswordAuthentication no", "PubkeyAuthentication yes", "AuthenticationMethods publickey", "AllowUsers administrator", "|Include)", "sshd_config validation failed", "ssh_host_*", "ssh-keygen.exe", "-A", "SSH host key generation failed", "SecurityIdentifier]::new('S-1-5-18')", "SecurityIdentifier]::new('S-1-5-32-544')", "$hostKeyACL.SetOwner($adminsSID)", "SetAccessRuleProtection($true, $false)", "Set-Acl -LiteralPath $_.FullName", "Start-Service sshd", "OpenSSH-Server-In-TCP", "Crabbox-SSH-Quarantine", "Remove-NetFirewallRule"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("admin-key SSH lockdown missing %q\nscript: %s", want, script)
 		}
@@ -1404,6 +1404,9 @@ func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
 	}
 	if strings.Index(script, "ssh-keygen.exe") > strings.Index(script, "& $sshdExe -t") {
 		t.Fatal("SSH host keys must be regenerated before sshd_config validation")
+	}
+	if strings.Index(script, "Set-Acl -LiteralPath $_.FullName") > strings.Index(script, "& $sshdExe -t") {
+		t.Fatal("SSH host key ACLs must be locked down before sshd_config validation")
 	}
 	if strings.Contains(script, "Add-Content") {
 		t.Fatalf("SSH key injection retained template keys: %s", script)
