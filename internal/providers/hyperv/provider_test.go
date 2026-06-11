@@ -50,12 +50,13 @@ func testBackend(runner *recordingRunner) *backend {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.HyperV = core.HyperVConfig{
-		Image:    `C:\Images\windows.vhdx`,
-		User:     "crabbox",
-		WorkRoot: `C:\crabbox`,
-		CPUs:     4,
-		Memory:   8192,
-		Switch:   "Default Switch",
+		Image:         `C:\Images\windows.vhdx`,
+		User:          "crabbox",
+		WorkRoot:      `C:\crabbox`,
+		CPUs:          4,
+		Memory:        8192,
+		Switch:        "Default Switch",
+		GuestPassword: "test-password",
 	}
 	return newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 }
@@ -294,9 +295,11 @@ func TestParseFirstIPv4(t *testing.T) {
 		{`["172.20.0.5","fe80::1"]`, "172.20.0.5"},
 		{`["fe80::1","192.168.1.100"]`, "192.168.1.100"},
 		{`"10.0.0.1"`, "10.0.0.1"},
+		{`["0.0.0.0","127.0.0.1","169.254.1.2","224.0.0.1","192.168.1.20"]`, "192.168.1.20"},
 		{`null`, ""},
 		{`""`, ""},
 		{`["fe80::1"]`, ""},
+		{`["0.0.0.0","127.0.0.1","169.254.1.2","224.0.0.1"]`, ""},
 	}
 	for _, tc := range tests {
 		got := parseFirstIPv4(tc.raw)
@@ -632,6 +635,62 @@ func TestAcquireInitPasswordRequiresExplicitPassword(t *testing.T) {
 	}
 }
 
+func TestAcquireRequiresExplicitGuestPassword(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	b.cfg.HyperV.GuestPassword = ""
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "requires an explicit CRABBOX_HYPERV_GUEST_PASSWORD") {
+		t.Fatalf("Acquire should require an explicit guest password, got: %v", err)
+	}
+}
+
+func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := b.Acquire(ctx, core.AcquireRequest{
+		Repo:          core.Repo{Root: t.TempDir()},
+		RequestedSlug: "retained-failure",
+		Keep:          true,
+	})
+	if err == nil {
+		t.Fatal("Acquire unexpectedly succeeded")
+	}
+
+	claims, claimErr := listLeaseClaims()
+	if claimErr != nil {
+		t.Fatalf("listLeaseClaims: %v", claimErr)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("claims=%#v, want retained lease claim", claims)
+	}
+	claim := claims[0]
+	t.Cleanup(func() {
+		removeLeaseClaim(claim.LeaseID)
+		removeStoredTestboxKey(claim.LeaseID)
+	})
+	if claim.Provider != providerName || instanceNameFromClaim(claim) == "" {
+		t.Fatalf("retained claim missing provider identity: %#v", claim)
+	}
+	keyPath, keyErr := testboxKeyPath(claim.LeaseID)
+	if keyErr != nil {
+		t.Fatalf("testboxKeyPath: %v", keyErr)
+	}
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatalf("retained lease key missing: %v", statErr)
+	}
+}
+
 func TestAcquireInitPasswordRejectsCmdUnsafePassword(t *testing.T) {
 	b := testBackend(&recordingRunner{})
 	oldOS := hypervHostOS
@@ -895,9 +954,9 @@ func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
 	}
 	// Windows OpenSSH ignores administrators_authorized_keys unless it is owned
 	// only by SYSTEM + Administrators with inheritance disabled.
-	for _, want := range []string{"icacls", "/inheritance:r", "SYSTEM:F", `BUILTIN\Administrators:F`} {
+	for _, want := range []string{"icacls.exe", "/inheritance:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "$LASTEXITCODE", "PasswordAuthentication no", "PubkeyAuthentication yes", "sshd_config validation failed"} {
 		if !strings.Contains(script, want) {
-			t.Errorf("admin-key ACL lockdown missing %q\nscript: %s", want, script)
+			t.Errorf("admin-key SSH lockdown missing %q\nscript: %s", want, script)
 		}
 	}
 }

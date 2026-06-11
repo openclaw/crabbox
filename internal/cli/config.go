@@ -927,6 +927,25 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		cfg.OSImage = normalized
 	}
 	applyOSImageProviderDefaults(cfg, false)
+	if cfg.Provider == "hyperv" {
+		if IsTargetExplicit(cfg) && normalizeTargetOS(cfg.TargetOS) != targetWindows {
+			return exit(2, "provider=hyperv supports target=windows only")
+		}
+		if normalizeWindowsMode(cfg.WindowsMode) != windowsModeNormal {
+			return exit(2, "provider=hyperv supports windows.mode=normal only")
+		}
+		cfg.TargetOS = targetWindows
+		cfg.WindowsMode = windowsModeNormal
+		cfg.SSHFallbackPorts = nil
+		if cfg.HyperV.User != "" {
+			cfg.SSHUser = cfg.HyperV.User
+		}
+		if cfg.HyperV.WorkRoot != "" {
+			cfg.WorkRoot = cfg.HyperV.WorkRoot
+		}
+		cfg.SSHPort = "22"
+		return nil
+	}
 	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
 		if cfg.ExeDev.User != "" {
 			cfg.SSHUser = cfg.ExeDev.User

@@ -93,3 +93,27 @@ func TestHyperVEnvInitPasswordFalseOverridesTrue(t *testing.T) {
 		t.Fatal("CRABBOX_HYPERV_INIT_PASSWORD=false must override a configured true")
 	}
 }
+
+func TestLoadConfigAppliesHyperVWindowsDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("provider: hyperv\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", path)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	t.Setenv("CRABBOX_TARGET", "")
+	t.Setenv("CRABBOX_TARGET_OS", "")
+	t.Setenv("CRABBOX_WINDOWS_MODE", "")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetWindows || cfg.WindowsMode != windowsModeNormal {
+		t.Fatalf("target=%q windowsMode=%q, want windows/normal", cfg.TargetOS, cfg.WindowsMode)
+	}
+	if cfg.SSHUser != cfg.HyperV.User || cfg.SSHPort != "22" || cfg.WorkRoot != cfg.HyperV.WorkRoot {
+		t.Fatalf("Hyper-V SSH defaults not applied: user=%q port=%q root=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
+	}
+}

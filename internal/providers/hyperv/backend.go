@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -93,10 +94,10 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if strings.HasSuffix(strings.ToLower(cfg.HyperV.Image), ".iso") {
 		return LeaseTarget{}, exit(2, "provider=%s does not support ISO images; provide a Windows VHDX template with a reachable administrator account", providerName)
 	}
+	if strings.TrimSpace(cfg.HyperV.GuestPassword) == "" {
+		return LeaseTarget{}, exit(2, "provider=%s requires an explicit CRABBOX_HYPERV_GUEST_PASSWORD or hyperv.guestPassword in trusted user config", providerName)
+	}
 	if cfg.HyperV.InitPassword {
-		if cfg.HyperV.GuestPassword == "" {
-			return LeaseTarget{}, exit(2, "provider=%s --hyperv-init-password requires an explicit CRABBOX_HYPERV_GUEST_PASSWORD (refusing to set the default password on the guest)", providerName)
-		}
 		// Both values land inside a double-quoted cmd.exe RunOnce command at
 		// first boot: a double quote would break out of the quoting and a
 		// percent sign would expand as a cmd variable, so reject either in
@@ -138,12 +139,30 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	}()
 	cfg.SSHKey = keyPath
 	name := leaseProviderName(leaseID, slug)
+	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
+	labels["instance"] = name
+	labels["image"] = cfg.HyperV.Image
+	labels["ssh_user"] = cfg.HyperV.User
+	labels["ssh_port"] = sshPort
+	labels["work_root"] = cfg.HyperV.WorkRoot
+	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB switch=%s keep=%v\n",
 		providerName, leaseID, slug, cfg.HyperV.Image, cfg.HyperV.CPUs, cfg.HyperV.Memory, cfg.HyperV.Switch, req.Keep)
 
 	if err := b.createVM(ctx, cfg, name, publicKey); err != nil {
 		_ = b.removeVM(context.Background(), name)
 		return LeaseTarget{}, err
+	}
+	if req.Keep {
+		retained := LeaseTarget{
+			Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
+			LeaseID: leaseID,
+		}
+		if err := persistLease(leaseID, slug, name, cfg, req, retained); err != nil {
+			_ = b.removeVM(context.Background(), name)
+			return LeaseTarget{}, fmt.Errorf("persist retained hyperv lease before bootstrap: %w", err)
+		}
+		cleanupKey = false
 	}
 
 	ip, err := b.waitForIP(ctx, name, 5*time.Minute)
@@ -160,12 +179,6 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		}
 		return LeaseTarget{}, fmt.Errorf("guest OpenSSH setup failed: %w", err)
 	}
-	if err := b.ensureGit(ctx, name, cfg.HyperV.User); err != nil {
-		if !req.Keep {
-			_ = b.removeVM(context.Background(), name)
-		}
-		return LeaseTarget{}, fmt.Errorf("guest git setup failed: %w", err)
-	}
 
 	if publicKey != "" {
 		if retryErr := b.injectSSHKey(ctx, name, cfg.HyperV.User, publicKey); retryErr != nil {
@@ -175,15 +188,12 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 			return LeaseTarget{}, fmt.Errorf("post-boot SSH key injection failed: %w", retryErr)
 		}
 	}
-
-	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
-	labels["instance"] = name
-	labels["image"] = cfg.HyperV.Image
-	labels["ssh_user"] = cfg.HyperV.User
-	labels["ssh_port"] = sshPort
-	labels["work_root"] = cfg.HyperV.WorkRoot
-
-	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
+	if err := b.ensureGit(ctx, name, cfg.HyperV.User); err != nil {
+		if !req.Keep {
+			_ = b.removeVM(context.Background(), name)
+		}
+		return LeaseTarget{}, fmt.Errorf("guest git setup failed: %w", err)
+	}
 	lease, err := b.prepareLease(ctx, cfg, hypervVM{Name: name, State: 2}, ip, claim, true)
 	if err != nil {
 		if !req.Keep {
@@ -486,10 +496,7 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name, publicKey stri
 }
 
 func (b *backend) guestPassword() string {
-	if password := b.cfg.HyperV.GuestPassword; password != "" {
-		return password
-	}
-	return "crabbox"
+	return b.cfg.HyperV.GuestPassword
 }
 
 // injectInitPassword makes a password-less template (e.g. a stock Windows
@@ -625,13 +632,32 @@ func (b *backend) ensureGit(ctx context.Context, vmName, user string) error {
 // administrators_authorized_keys file.
 func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey string) error {
 	scriptBlock := fmt.Sprintf(
-		`$sshDir = Join-Path $env:USERPROFILE '.ssh'; `+
+		`$ErrorActionPreference='Stop'; `+
+			`$sshDir = Join-Path $env:USERPROFILE '.ssh'; `+
 			`New-Item -ItemType Directory -Force -Path $sshDir | Out-Null; `+
 			`$akPath = Join-Path $sshDir 'authorized_keys'; `+
 			`Add-Content -Encoding ASCII -Path $akPath -Value '%s'; `+
 			`$adminAK = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'; `+
 			`if (Test-Path (Split-Path $adminAK)) { Add-Content -Encoding ASCII -Path $adminAK -Value '%s'; `+
-			`icacls $adminAK /inheritance:r /grant 'SYSTEM:F' 'BUILTIN\Administrators:F' | Out-Null }`,
+			`icacls.exe $adminAK /inheritance:r /grant '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null; `+
+			`if ($LASTEXITCODE -ne 0) { throw 'administrators_authorized_keys ACL update failed' } }; `+
+			`$sshdConfig = Join-Path $env:ProgramData 'ssh\sshd_config'; `+
+			`$sshdLines = if (Test-Path $sshdConfig) { Get-Content $sshdConfig } else { @() }; `+
+			`$globalLines = @(); $matchLines = @(); $inMatch = $false; `+
+			`foreach ($line in $sshdLines) { `+
+			`if ($line -match '^\s*Match\s+') { $inMatch = $true }; `+
+			`if (-not $inMatch -and $line -match '^\s*(PasswordAuthentication|PubkeyAuthentication)\s+') { continue }; `+
+			`if ($inMatch) { $matchLines += $line } else { $globalLines += $line } }; `+
+			`$globalLines += 'PubkeyAuthentication yes'; `+
+			`$globalLines += 'PasswordAuthentication no'; `+
+			`if (($matchLines -join [Environment]::NewLine) -notmatch '(?im)^\s*Match\s+Group\s+administrators\b') { `+
+			`$matchLines += 'Match Group administrators'; `+
+			`$matchLines += '       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys' }; `+
+			`Set-Content -Encoding ASCII -Path $sshdConfig -Value (($globalLines + $matchLines) -join [Environment]::NewLine); `+
+			`$sshdExe = Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'; `+
+			`& $sshdExe -t -f $sshdConfig; `+
+			`if ($LASTEXITCODE -ne 0) { throw 'sshd_config validation failed' }; `+
+			`Restart-Service sshd`,
 		escapePSString(publicKey), escapePSString(publicKey),
 	)
 	return b.invokeInGuest(ctx, vmName, user, scriptBlock, "SSH key injection")
@@ -1054,17 +1080,22 @@ func parseFirstIPv4(raw string) string {
 			return ""
 		}
 		for _, ip := range ips {
-			if isIPv4(ip) {
+			if isUsableIPv4(ip) {
 				return ip
 			}
 		}
 		return ""
 	}
 	raw = strings.Trim(raw, `"`)
-	if isIPv4(raw) {
+	if isUsableIPv4(raw) {
 		return raw
 	}
 	return ""
+}
+
+func isUsableIPv4(s string) bool {
+	addr, err := netip.ParseAddr(strings.TrimSpace(s))
+	return err == nil && addr.Is4() && addr.IsGlobalUnicast()
 }
 
 func isIPv4(s string) bool {

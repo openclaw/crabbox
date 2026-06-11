@@ -22,8 +22,8 @@ reject configuration on non-Windows hosts.
 - Windows 10 Pro/Enterprise/Education or Windows Server with Hyper-V enabled
 - PowerShell 5.1 or later (ships with Windows)
 - A Windows VHDX template (Generation 2 / UEFI) with:
-  - A local administrator account whose password is known to Crabbox
-    (`--hyperv-user` / `CRABBOX_HYPERV_GUEST_PASSWORD`)
+  - A local administrator account selected with `--hyperv-user`, with its
+    password explicitly provided through `CRABBOX_HYPERV_GUEST_PASSWORD`
   - Network configured for DHCP on the Hyper-V virtual switch
   - Guest internet access (or a Features-on-Demand source) so OpenSSH can be
     installed on first use
@@ -105,9 +105,11 @@ hyperv:
   cpus: 4
   memory: 8192
   switch: Default Switch
-  guestPassword: crabbox
   initPassword: false
 ```
+
+Keep `CRABBOX_HYPERV_GUEST_PASSWORD` in the environment or trusted user config,
+not repository config. There is no default guest password.
 
 ### Environment variables
 
@@ -143,8 +145,10 @@ Both the OpenSSH-install and key-injection steps authenticate over PowerShell
 Direct using the guest administrator password and retry up to 5 times with
 backoff to allow the guest OS to boot.
 
-Set `CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword` in config to
-match the administrator password in your VHDX template. Default: `crabbox`.
+Set `CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword` in trusted user
+config to match the administrator password in your VHDX template. The provider
+requires an explicit value and disables SSH password authentication after key
+installation.
 
 ## Lifecycle
 
