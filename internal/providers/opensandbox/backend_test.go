@@ -374,6 +374,52 @@ func TestSDKClientProxyExecdAddsAccessTokenWhenEndpointOmitsIt(t *testing.T) {
 	}
 }
 
+func TestSDKClientRunCommandSendsTimeoutMillis(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	var gotTimeout int64
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-timeout/endpoints/44772":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/command":
+			var body struct {
+				Timeout int64 `json:"timeout"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode body: %v", err)
+			}
+			gotTimeout = body.Timeout
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"type\":\"execution_complete\",\"exit_code\":0}\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitCode, err := client.RunCommand(context.Background(), "sb-timeout", runCommandRequest{
+		Command:     "true",
+		TimeoutSecs: 3600,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exit=%d", exitCode)
+	}
+	if gotTimeout != int64(time.Hour/time.Millisecond) {
+		t.Fatalf("timeout sent=%d, want %d milliseconds for 3600 seconds", gotTimeout, int64(time.Hour/time.Millisecond))
+	}
+}
+
 func TestCommandEventErrorDefaultsToFailureExit(t *testing.T) {
 	var stderr bytes.Buffer
 	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: io.Discard, Stderr: &stderr}}

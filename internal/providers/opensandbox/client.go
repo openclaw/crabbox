@@ -362,7 +362,7 @@ func (c *sdkOpenSandboxClient) RunCommand(ctx context.Context, sandboxID string,
 	err = execd.RunCommand(ctx, sdk.RunCommandRequest{
 		Command: strings.TrimSpace(req.Command),
 		Cwd:     req.Workdir,
-		Timeout: int64(req.TimeoutSecs),
+		Timeout: int64(req.TimeoutSecs) * int64(time.Second/time.Millisecond),
 		Envs:    req.Env,
 	}, func(event sdk.StreamEvent) error {
 		result, err := c.handleCommandEvent(event)
