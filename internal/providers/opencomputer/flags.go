@@ -9,6 +9,7 @@ type openComputerFlagValues struct {
 	MemoryMB        *int
 	TimeoutSecs     *int
 	ExecTimeoutSecs *int
+	ForgetMissing   *bool
 }
 
 func RegisterOpenComputerProviderFlags(fs *flag.FlagSet, defaults Config) any {
@@ -19,6 +20,7 @@ func RegisterOpenComputerProviderFlags(fs *flag.FlagSet, defaults Config) any {
 		MemoryMB:        fs.Int("opencomputer-memory-mb", defaults.OpenComputer.MemoryMB, "OpenComputer sandbox memory in MB (0 = service default; the service infers CPU when omitted)"),
 		TimeoutSecs:     fs.Int("opencomputer-timeout-secs", defaults.OpenComputer.TimeoutSecs, "OpenComputer sandbox idle timeout in seconds (0 = service default)"),
 		ExecTimeoutSecs: fs.Int("opencomputer-exec-timeout-secs", defaults.OpenComputer.ExecTimeoutSecs, "OpenComputer command timeout in seconds (0 = Crabbox default 3600)"),
+		ForgetMissing:   fs.Bool("opencomputer-forget-missing", defaults.OpenComputer.ForgetMissing, "remove the local claim when stop gets 404 (explicit stale-claim cleanup)"),
 	}
 }
 
@@ -44,6 +46,9 @@ func ApplyOpenComputerProviderFlags(cfg *Config, fs *flag.FlagSet, values any) e
 	}
 	if flagWasSet(fs, "opencomputer-exec-timeout-secs") {
 		cfg.OpenComputer.ExecTimeoutSecs = *v.ExecTimeoutSecs
+	}
+	if flagWasSet(fs, "opencomputer-forget-missing") {
+		cfg.OpenComputer.ForgetMissing = *v.ForgetMissing
 	}
 	return nil
 }

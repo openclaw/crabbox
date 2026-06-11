@@ -82,12 +82,14 @@ Provider flags:
 --opencomputer-memory-mb
 --opencomputer-timeout-secs
 --opencomputer-exec-timeout-secs
+--opencomputer-forget-missing
 ```
 
-Each flag has a matching `CRABBOX_OPENCOMPUTER_*` environment override (for
-example `CRABBOX_OPENCOMPUTER_WORKDIR`, `CRABBOX_OPENCOMPUTER_CPU`,
-`CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS`). The API URL also reads
-`OPENCOMPUTER_API_URL`.
+Configuration flags have matching `CRABBOX_OPENCOMPUTER_*` environment
+overrides (for example `CRABBOX_OPENCOMPUTER_WORKDIR`,
+`CRABBOX_OPENCOMPUTER_CPU`, `CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS`). The API
+URL also reads `OPENCOMPUTER_API_URL`. `--opencomputer-forget-missing` is
+deliberately CLI-only so stale-claim removal always requires explicit intent.
 
 > **Sizing tiers.** When both `cpu` and `memoryMB` are set, they must form an
 > allowed tier (for example `1/1024`, `1/4096`, `2/8192`, `4/16384`). When only
@@ -126,7 +128,11 @@ crabbox run --provider opencomputer --allow-env API_TOKEN -- printenv API_TOKEN
    `--keep` was set. `--keep-on-failure` retains a newly created sandbox after a
    failed run and prints a rerun/stop hint. Best-effort cleanup calls are
    bounded to 15 seconds; a failed rollback reports the remote sandbox ID for
-   manual cleanup in the OpenComputer console.
+   manual cleanup in the OpenComputer console. A newly acquired sandbox already
+   removed during automatic cleanup still clears its local claim. For an
+   existing lease, a 404 is account-ambiguous and keeps the claim by default;
+   pass `--opencomputer-forget-missing` to `stop` only after confirming the
+   sandbox is gone in the intended account.
 
 ## Capabilities
 
@@ -150,6 +156,13 @@ crabbox run --provider opencomputer --allow-env API_TOKEN -- printenv API_TOKEN
   checksum semantics. `--sync-only` and `--force-sync-large` are supported.
 - `--no-sync` only ensures the workdir exists. It never applies `sync.delete`,
   so reusing a retained sandbox does not erase its workspace.
+- With `sync.delete`, Crabbox uploads and extracts into a sibling staging
+  directory, then replaces the workdir only after extraction succeeds.
+- `crabbox list` starts from local OpenComputer claims and fetches each remote
+  status, so kept sandboxes remain visible after hibernation. A 404 remains
+  visible as `missing-or-inaccessible` until explicitly forgotten.
+- `warmup --actions-runner` is rejected because OpenComputer is a delegated
+  execution provider, not an SSH runner host.
 - Command and sync-helper requests use a 3600-second timeout by default instead
   of OpenComputer's 60-second API default. Override it with
   `openComputer.execTimeoutSecs` or

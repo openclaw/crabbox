@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -32,6 +33,9 @@ type openComputerBackend struct {
 func (b *openComputerBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *openComputerBackend) Warmup(ctx context.Context, req WarmupRequest) error {
+	if req.ActionsRunner {
+		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
+	}
 	started := b.now()
 	api, err := newOCAPIClient(b.cfg, b.rt)
 	if err != nil {
@@ -92,7 +96,7 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 			}
 			cleanupCtx, cancel := b.cleanupContext(ctx)
 			defer cancel()
-			if killErr := api.killSandbox(cleanupCtx, sandboxID); killErr != nil {
+			if killErr := api.killSandbox(cleanupCtx, sandboxID); killErr != nil && !isOCNotFound(killErr) {
 				fmt.Fprintf(b.rt.Stderr, "warning: opencomputer kill failed for %s: %v\n", sandboxID, killErr)
 				return
 			}
@@ -136,6 +140,9 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 	command, err := buildCommand(req.Command, req.ShellMode)
 	if err != nil {
 		return RunResult{}, err
+	}
+	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
+		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
 	commandStart := b.now()
 	// Env travels in the exec request body (`envs`), never argv. cwd is the
@@ -189,25 +196,34 @@ func (b *openComputerBackend) List(ctx context.Context, req ListRequest) ([]Leas
 	if err != nil {
 		return nil, err
 	}
-	sandboxes, err := api.listSandboxes(ctx)
+	claims, err := listOpenComputerLeaseClaims()
 	if err != nil {
 		return nil, err
 	}
-	servers := make([]Server, 0, len(sandboxes))
-	for _, sb := range sandboxes {
-		if sb.ID == "" {
+	servers := make([]Server, 0, len(claims))
+	for _, claim := range claims {
+		if claim.Provider != providerName || !strings.HasPrefix(claim.LeaseID, leasePrefix) {
 			continue
 		}
-		leaseID := leasePrefix + sb.ID
-		claim, ok, err := resolveLeaseClaim(leaseID)
-		if err != nil || !ok || claim.Provider != providerName {
+		sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
+		if sandboxID == "" {
 			continue
 		}
-		state := blank(sb.Status, statusViewReady)
+		sb, getErr := api.getSandbox(ctx, sandboxID)
+		state := ""
+		if getErr != nil {
+			if isOCNotFound(getErr) {
+				state = "missing-or-inaccessible"
+			} else {
+				return nil, getErr
+			}
+		} else {
+			state = blank(sb.Status, statusViewReady)
+		}
 		servers = append(servers, Server{
 			Provider: providerName,
-			CloudID:  sb.ID,
-			Name:     sb.ID,
+			CloudID:  sandboxID,
+			Name:     sandboxID,
 			Status:   state,
 			Labels: map[string]string{
 				"provider": providerName,
@@ -222,6 +238,13 @@ func (b *openComputerBackend) List(ctx context.Context, req ListRequest) ([]Leas
 }
 
 func (b *openComputerBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+	api, err := newOCAPIClient(b.cfg, b.rt)
+	if err != nil {
+		return DoctorResult{}, err
+	}
+	if err := api.probeSandboxes(ctx); err != nil {
+		return DoctorResult{}, err
+	}
 	servers, err := b.List(ctx, ListRequest{})
 	if err != nil {
 		return DoctorResult{}, err
@@ -292,7 +315,10 @@ func (b *openComputerBackend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	if err := api.killSandbox(ctx, sandboxID); err != nil {
-		return err
+		if !isOCNotFound(err) || !b.cfg.OpenComputer.ForgetMissing {
+			return err
+		}
+		fmt.Fprintf(b.rt.Stderr, "warning: forgetting missing opencomputer sandbox=%s after explicit request\n", sandboxID)
 	}
 	removeLeaseClaim(leaseID)
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, sandboxID)
@@ -362,31 +388,37 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 	if id == "" {
 		return "", "", "", exit(2, "provider=opencomputer requires a Crabbox-created sandbox slug or lease id")
 	}
-	probes := []string{id}
-	if !strings.HasPrefix(id, leasePrefix) {
-		probes = append(probes, leasePrefix+id)
+	exactLeaseID := id
+	if !strings.HasPrefix(exactLeaseID, leasePrefix) {
+		exactLeaseID = leasePrefix + exactLeaseID
 	}
-	for _, probe := range probes {
-		claim, ok, err := resolveLeaseClaimForProvider(probe, providerName)
-		if err != nil {
-			return "", "", "", err
-		}
-		if !ok {
-			continue
-		}
-		if repoRoot != "" {
-			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, providerName, repoRoot,
-				timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
-				return "", "", "", err
-			}
-		}
-		slug := claim.Slug
-		if strings.TrimSpace(slug) == "" {
-			slug = newLeaseSlug(claim.LeaseID)
-		}
-		return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, leasePrefix), slug, nil
+	if claim, ok, err := resolveLeaseClaim(exactLeaseID); err != nil {
+		return "", "", "", err
+	} else if ok && claim.Provider == providerName {
+		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout)
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(id, providerName)
+	if err != nil {
+		return "", "", "", err
+	}
+	if ok {
+		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout)
 	}
 	return "", "", "", exit(4, "opencomputer sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
+}
+
+func finishResolvedLease(claim LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {
+	if repoRoot != "" {
+		if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, providerName, repoRoot,
+			timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
+			return "", "", "", err
+		}
+	}
+	slug := claim.Slug
+	if strings.TrimSpace(slug) == "" {
+		slug = newLeaseSlug(claim.LeaseID)
+	}
+	return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, leasePrefix), slug, nil
 }
 
 func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
@@ -497,6 +529,9 @@ func (b *openComputerBackend) cleanupCreateFailure(ctx context.Context, api *ocA
 	cleanupCtx, cancel := b.cleanupContext(ctx)
 	defer cancel()
 	if err := api.killSandbox(cleanupCtx, sandboxID); err != nil {
+		if isOCNotFound(err) {
+			return cause
+		}
 		return errors.Join(cause, fmt.Errorf("opencomputer cleanup failed for sandbox %s; delete it in the OpenComputer console: %w", sandboxID, err))
 	}
 	return cause

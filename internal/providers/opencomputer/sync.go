@@ -2,6 +2,7 @@ package opencomputer
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path"
 	"strings"
@@ -34,12 +35,6 @@ func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClien
 	}
 	preflightDuration := b.now().Sub(preflightStart)
 
-	prepareStart := b.now()
-	if err := b.prepareWorkspace(ctx, api, sandboxID, workdir); err != nil {
-		return nil, 0, err
-	}
-	prepareDuration := b.now().Sub(prepareStart)
-
 	archiveStart := b.now()
 	archive, err := createOpenComputerSyncArchive(ctx, req.Repo, manifest)
 	if err != nil {
@@ -61,41 +56,96 @@ func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClien
 	}
 	uploadDuration := b.now().Sub(uploadStart)
 
-	extractStart := b.now()
-	// Extract must succeed; cleanup is best-effort. The uploaded archive is
-	// written by the file API as a different owner than the exec user, so a
-	// `rm` may be denied — and it does not matter on an ephemeral box.
-	if err := b.execShell(ctx, api, sandboxID, "tar -xzf "+shellQuote(remoteArchive)+" -C "+shellQuote(workdir)); err != nil {
+	extractDir := workdir
+	stagingDir := ""
+	if b.cfg.Sync.Delete {
+		stagingDir = path.Join(path.Dir(workdir), "."+path.Base(workdir)+".crabbox-sync-"+randomSuffix())
+		extractDir = stagingDir
+	}
+	cleanupRemote := func() {
+		cleanupCtx, cancel := b.cleanupContext(ctx)
+		defer cancel()
+		command := "rm -f " + shellQuote(remoteArchive) + " 2>/dev/null || true"
+		if stagingDir != "" {
+			command += "; rm -rf " + shellQuote(stagingDir) + " 2>/dev/null || true"
+		}
+		_ = b.execShell(cleanupCtx, api, sandboxID, command)
+	}
+	cleanupPending := true
+	defer func() {
+		if cleanupPending {
+			cleanupRemote()
+		}
+	}()
+
+	prepareStart := b.now()
+	if stagingDir == "" {
+		err = b.ensureWorkspace(ctx, api, sandboxID, workdir)
+	} else {
+		err = b.execShell(ctx, api, sandboxID, "rm -rf "+shellQuote(stagingDir)+" && mkdir -p "+shellQuote(stagingDir))
+	}
+	if err != nil {
 		return nil, 0, err
 	}
-	cleanupCtx, cancel := b.cleanupContext(ctx)
-	defer cancel()
-	_ = b.execShell(cleanupCtx, api, sandboxID, "rm -f "+shellQuote(remoteArchive)+" 2>/dev/null || true")
+	prepareDuration := b.now().Sub(prepareStart)
+
+	extractStart := b.now()
+	if err := b.execShell(ctx, api, sandboxID, "tar -xzf "+shellQuote(remoteArchive)+" -C "+shellQuote(extractDir)); err != nil {
+		return nil, 0, err
+	}
 	extractDuration := b.now().Sub(extractStart)
 
+	replaceDuration := time.Duration(0)
+	if stagingDir != "" {
+		replaceStart := b.now()
+		if err := b.replaceWorkspace(ctx, api, sandboxID, stagingDir, workdir); err != nil {
+			return nil, 0, err
+		}
+		replaceDuration = b.now().Sub(replaceStart)
+	}
+
+	cleanupStart := b.now()
+	cleanupRemote()
+	cleanupPending = false
+	cleanupDuration := b.now().Sub(cleanupStart)
+
 	total := b.now().Sub(start)
-	return []timingPhase{
+	phases := []timingPhase{
 		{Name: "manifest", Ms: manifestDuration.Milliseconds()},
 		{Name: "preflight", Ms: preflightDuration.Milliseconds()},
-		{Name: "prepare", Ms: prepareDuration.Milliseconds()},
 		{Name: "archive", Ms: archiveDuration.Milliseconds()},
 		{Name: "upload", Ms: uploadDuration.Milliseconds()},
+		{Name: "prepare", Ms: prepareDuration.Milliseconds()},
 		{Name: "extract", Ms: extractDuration.Milliseconds()},
-		{Name: "opencomputer_sync", Ms: total.Milliseconds()},
-	}, total, nil
-}
-
-func (b *openComputerBackend) prepareWorkspace(ctx context.Context, api *ocAPIClient, sandboxID, workdir string) error {
-	if !b.cfg.Sync.Delete {
-		return b.ensureWorkspace(ctx, api, sandboxID, workdir)
 	}
-	command := "rm -rf " + shellQuote(workdir) + " && mkdir -p " + shellQuote(workdir)
-	return b.execShell(ctx, api, sandboxID, command)
+	if stagingDir != "" {
+		phases = append(phases, timingPhase{Name: "replace", Ms: replaceDuration.Milliseconds()})
+	}
+	phases = append(phases, timingPhase{Name: "cleanup", Ms: cleanupDuration.Milliseconds()})
+	phases = append(phases, timingPhase{Name: "opencomputer_sync", Ms: total.Milliseconds()})
+	return phases, total, nil
 }
 
 func (b *openComputerBackend) ensureWorkspace(ctx context.Context, api *ocAPIClient, sandboxID, workdir string) error {
 	// --no-sync must never apply sync.delete to a retained workspace.
 	return b.execShell(ctx, api, sandboxID, "mkdir -p "+shellQuote(workdir))
+}
+
+func (b *openComputerBackend) replaceWorkspace(ctx context.Context, api *ocAPIClient, sandboxID, stagingDir, workdir string) error {
+	backupDir := stagingDir + ".previous"
+	command := "rm -rf " + shellQuote(backupDir) +
+		" && if [ -e " + shellQuote(workdir) + " ]; then mv " + shellQuote(workdir) + " " + shellQuote(backupDir) + "; fi" +
+		" && if mv " + shellQuote(stagingDir) + " " + shellQuote(workdir) +
+		"; then exit 0" +
+		"; else rc=$?; if [ -e " + shellQuote(backupDir) + " ]; then mv " + shellQuote(backupDir) + " " + shellQuote(workdir) +
+		"; fi; exit \"$rc\"; fi"
+	if err := b.execShell(ctx, api, sandboxID, command); err != nil {
+		return err
+	}
+	if err := b.execShell(ctx, api, sandboxID, "rm -rf "+shellQuote(backupDir)); err != nil {
+		fmt.Fprintf(b.rt.Stderr, "warning: opencomputer previous workspace cleanup failed path=%s: %v\n", backupDir, err)
+	}
+	return nil
 }
 
 // execShell runs `bash -lc <command>` via exec/run and returns an error for

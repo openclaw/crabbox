@@ -186,6 +186,24 @@ func TestResolveLeaseIDFallsBackForSluglessClaim(t *testing.T) {
 	}
 }
 
+func TestResolveLeaseIDPrefersExactLeaseOverCollidingSlug(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	exactLeaseID := "ocbx_sb-exact"
+	if err := claimLeaseForRepoProvider(exactLeaseID, "exact", providerName, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := claimLeaseForRepoProvider("ocbx_sb-other", exactLeaseID, providerName, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	leaseID, sandboxID, _, err := resolveLeaseID(exactLeaseID, "", false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaseID != exactLeaseID || sandboxID != "sb-exact" {
+		t.Fatalf("resolved lease=%q sandbox=%q", leaseID, sandboxID)
+	}
+}
+
 func TestNewSandboxName(t *testing.T) {
 	if name := newSandboxName(Repo{Name: "carbbox"}); !strings.HasPrefix(name, "crabbox-carbbox-") {
 		t.Fatalf("name=%q", name)
@@ -235,9 +253,11 @@ type fakeAPI struct {
 	execReply     []execRunResult // popped in order; last/zero reused when empty
 	sandboxID     string
 	listState     string
+	listStatus    int
 	getStatusCode int // when non-zero, GET /api/sandboxes/:id returns this code
 	blockDelete   bool
 	deleteStatus  int
+	uploadStatus  int
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
@@ -258,8 +278,12 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && r.URL.Path == "/api/sandboxes":
 		writeJSON(w, map[string]any{"sandboxID": f.sandboxID, "status": "running"})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/sandboxes":
-		// The real API returns a bare array (not a {"sandboxes":[...]} wrapper).
-		writeJSON(w, []map[string]any{{"sandboxID": f.sandboxID, "status": f.listState}})
+		if f.listStatus != 0 {
+			w.WriteHeader(f.listStatus)
+			_, _ = w.Write([]byte(`{"error":"list denied"}`))
+			return
+		}
+		writeJSON(w, []map[string]any{})
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/sandboxes/"):
 		if f.getStatusCode != 0 {
 			w.WriteHeader(f.getStatusCode)
@@ -279,6 +303,11 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/files"):
+		if f.uploadStatus != 0 {
+			w.WriteHeader(f.uploadStatus)
+			_, _ = w.Write([]byte(`{"error":"upload denied"}`))
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/exec/run"):
 		var req execRunRequest
@@ -426,16 +455,34 @@ func TestRunCleanupCannotBlockForever(t *testing.T) {
 	}
 }
 
+func TestRunClearsClaimWhenAcquiredSandboxAlreadyMissingAtCleanup(t *testing.T) {
+	f := newFakeAPI(t)
+	f.deleteStatus = http.StatusNotFound
+	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}}
+	backend := newAPIBackend(t, f)
+	if _, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
+	}); err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	if _, ok, err := resolveLeaseClaim(leasePrefix + f.sandboxID); err != nil || ok {
+		t.Fatalf("acquired missing sandbox claim remains: ok=%t err=%v", ok, err)
+	}
+}
+
 func TestRunForwardsEnvInExecBodyOffArgv(t *testing.T) {
 	f := newFakeAPI(t)
 	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0, Stdout: "ok\n"}}
 	backend := newAPIBackend(t, f)
+	var stderr bytes.Buffer
+	backend.rt.Stderr = &stderr
 	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "carbbox", Root: t.TempDir()},
-		Command: []string{"printenv", "SECRET_TOKEN"},
-		NoSync:  true,
-		Env:     map[string]string{"SECRET_TOKEN": "super-secret"},
-		Options: core.LeaseOptions{EnvAllow: []string{"SECRET_TOKEN"}},
+		Repo:       Repo{Name: "carbbox", Root: t.TempDir()},
+		Command:    []string{"printenv", "SECRET_TOKEN"},
+		NoSync:     true,
+		Env:        map[string]string{"SECRET_TOKEN": "super-secret"},
+		EnvSummary: true,
+		Options:    core.LeaseOptions{EnvAllow: []string{"SECRET_TOKEN"}},
 	})
 	if err != nil {
 		t.Fatalf("Run err=%v", err)
@@ -449,6 +496,12 @@ func TestRunForwardsEnvInExecBodyOffArgv(t *testing.T) {
 	// ...and never in cmd/args (argv).
 	if user.req.Cmd == "super-secret" || strings.Contains(strings.Join(user.req.Args, " "), "super-secret") {
 		t.Fatalf("secret leaked into exec argv: cmd=%q args=%v", user.req.Cmd, user.req.Args)
+	}
+	if !strings.Contains(stderr.String(), "env forwarding provider=opencomputer") || !strings.Contains(stderr.String(), "secret=true") {
+		t.Fatalf("stderr=%q, want redacted env summary", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "super-secret") {
+		t.Fatalf("secret leaked into stderr: %q", stderr.String())
 	}
 }
 
@@ -505,6 +558,78 @@ func TestRunPerformsArchiveSyncViaFileAPI(t *testing.T) {
 	}
 	if !sawExtract {
 		t.Fatalf("expected a tar extract exec after upload")
+	}
+}
+
+func TestSyncDeleteDoesNotTouchWorkspaceBeforeUploadSucceeds(t *testing.T) {
+	f := newFakeAPI(t)
+	f.uploadStatus = http.StatusServiceUnavailable
+	backend := newAPIBackend(t, f)
+	backend.cfg.Sync.Delete = true
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"}, Keep: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "upload denied") {
+		t.Fatalf("Run err=%v, want upload failure", err)
+	}
+	if execs := f.allExecs(); len(execs) != 0 {
+		t.Fatalf("remote workspace touched before upload succeeded: %#v", execs)
+	}
+}
+
+func TestSyncDeleteStagesBeforeReplacingWorkspace(t *testing.T) {
+	f := newFakeAPI(t)
+	backend := newAPIBackend(t, f)
+	backend.cfg.Sync.Delete = true
+	if _, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"},
+	}); err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	execs := f.allExecs()
+	extractIndex, replaceIndex := -1, -1
+	backupCleanupIndex := -1
+	for i, exec := range execs {
+		command := strings.Join(exec.req.Args, " ")
+		if strings.Contains(command, "rm -rf '/workspace/crabbox'") {
+			t.Fatalf("sync deleted live workspace directly: %q", command)
+		}
+		if strings.Contains(command, "tar -xzf") && strings.Contains(command, ".crabbox-sync-") {
+			extractIndex = i
+		}
+		if strings.Contains(command, "if mv ") && strings.Contains(command, "/workspace/crabbox") {
+			replaceIndex = i
+		}
+		if strings.Contains(command, ".previous") && strings.Contains(command, "rm -rf ") && !strings.Contains(command, "if mv ") {
+			backupCleanupIndex = i
+		}
+	}
+	if extractIndex < 0 || replaceIndex <= extractIndex {
+		t.Fatalf("execs=%#v, want staged extract before replacement", execs)
+	}
+	if backupCleanupIndex <= replaceIndex {
+		t.Fatalf("execs=%#v, want surfaced backup cleanup after committed swap", execs)
+	}
+}
+
+func TestSyncDeleteWarnsWhenPreviousWorkspaceCleanupFails(t *testing.T) {
+	f := newFakeAPI(t)
+	f.execReply = []execRunResult{
+		{ExitCode: 0}, {ExitCode: 0}, {ExitCode: 0},
+		{ExitCode: 1, Stderr: "permission denied"},
+		{ExitCode: 0}, {ExitCode: 0},
+	}
+	backend := newAPIBackend(t, f)
+	backend.cfg.Sync.Delete = true
+	var stderr bytes.Buffer
+	backend.rt.Stderr = &stderr
+	if _, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"},
+	}); err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	if !strings.Contains(stderr.String(), "previous workspace cleanup failed") || !strings.Contains(stderr.String(), ".previous") {
+		t.Fatalf("stderr=%q, want actionable backup cleanup warning", stderr.String())
 	}
 }
 
@@ -639,12 +764,61 @@ func TestKeepRetainsSandbox(t *testing.T) {
 	}
 }
 
+func TestWarmupRejectsActionsRunnerBeforeCreate(t *testing.T) {
+	f := newFakeAPI(t)
+	backend := newAPIBackend(t, f)
+	err := backend.Warmup(context.Background(), WarmupRequest{ActionsRunner: true})
+	if err == nil || !strings.Contains(err.Error(), "--actions-runner is not supported") {
+		t.Fatalf("Warmup err=%v", err)
+	}
+	if f.callsExact(http.MethodPost, "/api/sandboxes") != 0 {
+		t.Fatal("unsupported actions runner warmup created a sandbox")
+	}
+}
+
 func TestStopRejectsUnclaimedID(t *testing.T) {
 	f := newFakeAPI(t)
 	backend := newAPIBackend(t, f)
 	err := backend.Stop(context.Background(), StopRequest{ID: "sb-not-claimed"})
 	if err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
 		t.Fatalf("err=%v want unclaimed rejection", err)
+	}
+}
+
+func TestStopClearsClaimWhenSandboxAlreadyDeleted(t *testing.T) {
+	f := newFakeAPI(t)
+	f.deleteStatus = http.StatusNotFound
+	backend := newAPIBackend(t, f)
+	leaseID := leasePrefix + f.sandboxID
+	if err := claimLeaseForRepoProvider(leaseID, "gone", providerName, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	backend.cfg.OpenComputer.ForgetMissing = true
+	if err := backend.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
+		t.Fatalf("Stop err=%v", err)
+	}
+	if _, ok, err := resolveLeaseClaim(leaseID); err != nil || ok {
+		t.Fatalf("claim remains after idempotent stop: ok=%t err=%v", ok, err)
+	}
+}
+
+func TestStopPreservesClaimForAmbiguousMissingSandbox(t *testing.T) {
+	f := newFakeAPI(t)
+	f.deleteStatus = http.StatusNotFound
+	backend := newAPIBackend(t, f)
+	leaseID := leasePrefix + f.sandboxID
+	if err := claimLeaseForRepoProvider(leaseID, "possibly-other-account", providerName, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("Stop err=%v, want ambiguous missing error", err)
+	}
+	if f.calls(http.MethodDelete, "/api/sandboxes/") != 1 {
+		t.Fatal("stop did not attempt remote deletion")
+	}
+	if _, ok, err := resolveLeaseClaim(leaseID); err != nil || !ok {
+		t.Fatalf("claim removed without explicit forget: ok=%t err=%v", ok, err)
 	}
 }
 
@@ -682,12 +856,18 @@ func TestAPIURLPrecedenceHonorsOCConfig(t *testing.T) {
 	}
 }
 
-// TestListParsesBareArrayAndFiltersByClaim asserts List decodes the bare-array
-// list response and returns only locally-claimed Crabbox sandboxes.
-func TestListParsesBareArrayAndFiltersByClaim(t *testing.T) {
+func TestListFetchesClaimedHibernatedSandbox(t *testing.T) {
 	f := newFakeAPI(t)
+	f.listState = "hibernated"
 	backend := newAPIBackend(t, f)
-	// Unclaimed: List returns nothing.
+	claimsDir := path.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims")
+	if err := os.MkdirAll(claimsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path.Join(claimsDir, "cbx_unrelated.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Unclaimed sandboxes are not inventory and do not trigger remote calls.
 	views, err := backend.List(context.Background(), ListRequest{})
 	if err != nil {
 		t.Fatalf("List err=%v", err)
@@ -695,7 +875,11 @@ func TestListParsesBareArrayAndFiltersByClaim(t *testing.T) {
 	if len(views) != 0 {
 		t.Fatalf("want 0 unclaimed, got %d", len(views))
 	}
-	// Claim it: now List returns exactly that sandbox.
+	if f.calls(http.MethodGet, "/api/sandboxes") != 0 {
+		t.Fatal("unclaimed list unexpectedly queried remote inventory")
+	}
+	// The collection endpoint omits hibernated sandboxes, so List must fetch
+	// each locally claimed sandbox by ID.
 	if err := claimLeaseForRepoProvider("ocbx_"+f.sandboxID, "slug", providerName, "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
@@ -703,8 +887,59 @@ func TestListParsesBareArrayAndFiltersByClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List err=%v", err)
 	}
-	if len(views) != 1 || views[0].CloudID != f.sandboxID {
+	if len(views) != 1 || views[0].CloudID != f.sandboxID || views[0].Status != "hibernated" {
 		t.Fatalf("views=%#v", views)
+	}
+	if f.callsExact(http.MethodGet, "/api/sandboxes/"+f.sandboxID) != 1 {
+		t.Fatalf("want one status fetch, requests=%#v", f.requests)
+	}
+}
+
+func TestListKeepsAmbiguousMissingClaimVisible(t *testing.T) {
+	f := newFakeAPI(t)
+	f.getStatusCode = http.StatusNotFound
+	backend := newAPIBackend(t, f)
+	if err := claimLeaseForRepoProvider(leasePrefix+f.sandboxID, "ambiguous", providerName, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	views, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatalf("List err=%v", err)
+	}
+	if len(views) != 1 || views[0].Status != "missing-or-inaccessible" || views[0].Labels["slug"] != "ambiguous" {
+		t.Fatalf("views=%#v", views)
+	}
+}
+
+func TestListSkipsMalformedClaimAndKeepsValidInventory(t *testing.T) {
+	f := newFakeAPI(t)
+	backend := newAPIBackend(t, f)
+	if err := claimLeaseForRepoProvider(leasePrefix+f.sandboxID, "valid", providerName, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claimsDir := path.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims")
+	if err := os.WriteFile(path.Join(claimsDir, leasePrefix+"broken.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	views, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatalf("List err=%v", err)
+	}
+	if len(views) != 1 || views[0].Labels["slug"] != "valid" {
+		t.Fatalf("views=%#v", views)
+	}
+}
+
+func TestDoctorProbesControlPlaneWithoutClaims(t *testing.T) {
+	f := newFakeAPI(t)
+	f.listStatus = http.StatusUnauthorized
+	backend := newAPIBackend(t, f)
+	_, err := backend.Doctor(context.Background(), DoctorRequest{})
+	if err == nil || !strings.Contains(err.Error(), "list denied") {
+		t.Fatalf("Doctor err=%v, want control-plane failure", err)
+	}
+	if f.callsExact(http.MethodGet, "/api/sandboxes") != 1 {
+		t.Fatalf("want one collection probe, requests=%#v", f.requests)
 	}
 }
 

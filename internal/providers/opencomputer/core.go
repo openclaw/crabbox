@@ -26,6 +26,7 @@ type StatusView = core.StatusView
 type StopRequest = core.StopRequest
 type Server = core.Server
 type Repo = core.Repo
+type LeaseClaim = core.LeaseClaim
 type ExitError = core.ExitError
 type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
@@ -93,8 +94,16 @@ func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim,
 	return core.ResolveLeaseClaimForProvider(identifier, provider)
 }
 
+func listOpenComputerLeaseClaims() ([]core.LeaseClaim, error) {
+	return core.ListLeaseClaimsWithPrefix(leasePrefix)
+}
+
 func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
+}
+
+func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
+	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
 }
 
 func shouldUseShell(command []string) bool {

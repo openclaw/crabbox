@@ -426,6 +426,7 @@ type OpenComputerConfig struct {
 	MemoryMB        int
 	TimeoutSecs     int
 	ExecTimeoutSecs int
+	ForgetMissing   bool
 }
 
 type DockerSandboxConfig struct {

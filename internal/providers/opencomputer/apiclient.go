@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,10 +41,6 @@ type sandbox struct {
 	MemoryMB int               `json:"memoryMB,omitempty"`
 }
 
-type sandboxListResponse struct {
-	Sandboxes []sandbox `json:"sandboxes"`
-}
-
 // createSandboxRequest is the POST /api/sandboxes body. When only CPU or memory
 // is set, OpenComputer infers the matching sizing value.
 type createSandboxRequest struct {
@@ -69,6 +66,14 @@ type execRunResult struct {
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
 }
+
+type ocAPIError struct {
+	StatusCode int
+	err        error
+}
+
+func (e *ocAPIError) Error() string { return e.err.Error() }
+func (e *ocAPIError) Unwrap() error { return e.err }
 
 // newOCAPIClient resolves the API URL and key. Key precedence:
 // CRABBOX_OPENCOMPUTER_API_KEY, OPENCOMPUTER_API_KEY, then the `oc` CLI config
@@ -158,22 +163,9 @@ func (c *ocAPIClient) getSandbox(ctx context.Context, id string) (sandbox, error
 	return sb, nil
 }
 
-func (c *ocAPIClient) listSandboxes(ctx context.Context) ([]sandbox, error) {
-	// The list endpoint may return either a bare array of sandboxes or an object
-	// wrapping them under "sandboxes"; accept both.
+func (c *ocAPIClient) probeSandboxes(ctx context.Context) error {
 	var raw json.RawMessage
-	if err := c.doJSON(ctx, http.MethodGet, "/api/sandboxes", nil, &raw); err != nil {
-		return nil, err
-	}
-	var arr []sandbox
-	if err := json.Unmarshal(raw, &arr); err == nil {
-		return arr, nil
-	}
-	var wrapped sandboxListResponse
-	if err := json.Unmarshal(raw, &wrapped); err == nil {
-		return wrapped.Sandboxes, nil
-	}
-	return nil, exit(5, "opencomputer list: unexpected response shape")
+	return c.doJSON(ctx, http.MethodGet, "/api/sandboxes", nil, &raw)
 }
 
 func (c *ocAPIClient) killSandbox(ctx context.Context, id string) error {
@@ -218,7 +210,15 @@ func apiError(method, path string, resp *http.Response) error {
 	if json.Unmarshal(body, &wrapped) == nil && wrapped.Error != "" {
 		msg = wrapped.Error
 	}
-	return exit(5, "opencomputer %s %s failed: %s: %s", method, path, resp.Status, msg)
+	return &ocAPIError{
+		StatusCode: resp.StatusCode,
+		err:        exit(5, "opencomputer %s %s failed: %s: %s", method, path, resp.Status, msg),
+	}
+}
+
+func isOCNotFound(err error) bool {
+	var apiErr *ocAPIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
 func readOCFileConfig() ocFileConfig {
