@@ -270,8 +270,15 @@ func (c *sdkOpenSandboxClient) ResumeSandbox(ctx context.Context, sandboxID stri
 	return nil
 }
 
+func (c *sdkOpenSandboxClient) readyTimeout() time.Duration {
+	if c.cfg.OpenSandbox.TimeoutSecs > 0 {
+		return time.Duration(c.cfg.OpenSandbox.TimeoutSecs) * time.Second
+	}
+	return openSandboxReadyTimeout
+}
+
 func (c *sdkOpenSandboxClient) waitForRunning(ctx context.Context, sandboxID string) (*sdk.SandboxInfo, error) {
-	timeout := time.Duration(sdk.DefaultReadyTimeoutSeconds) * time.Second
+	timeout := c.readyTimeout()
 	waitCtx := ctx
 	cancel := func() {}
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
@@ -306,7 +313,7 @@ func (c *sdkOpenSandboxClient) waitForRunning(ctx context.Context, sandboxID str
 }
 
 func (c *sdkOpenSandboxClient) waitUntilReady(ctx context.Context, sandboxID string) error {
-	timeout := time.Duration(sdk.DefaultReadyTimeoutSeconds) * time.Second
+	timeout := c.readyTimeout()
 	interval := sdk.DefaultHealthCheckPollingInterval
 	waitCtx := ctx
 	cancel := func() {}

@@ -421,6 +421,17 @@ func TestSDKClientCreateWaitsForRunningAndExecdPing(t *testing.T) {
 	}
 }
 
+func TestSDKClientReadyTimeoutUsesProviderBudget(t *testing.T) {
+	client := &sdkOpenSandboxClient{cfg: testConfig()}
+	if got := client.readyTimeout(); got != openSandboxReadyTimeout {
+		t.Fatalf("ready timeout=%s want %s", got, openSandboxReadyTimeout)
+	}
+	client.cfg.OpenSandbox.TimeoutSecs = 900
+	if got := client.readyTimeout(); got != 15*time.Minute {
+		t.Fatalf("ready timeout=%s want 15m", got)
+	}
+}
+
 func TestSDKClientCreateDeletesSandboxWhenReadinessFails(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
 	deleted := 0

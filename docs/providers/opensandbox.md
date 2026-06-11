@@ -37,12 +37,14 @@ export CRABBOX_OPENSANDBOX_API_KEY="$(
 
 `OPEN_SANDBOX_API_KEY` is accepted as an environment fallback.
 
-The API URL defaults to the OpenSandbox SDK local-development endpoint
-`http://localhost:8080`. For hosted or shared deployments, set a trusted URL:
+Set the API URL explicitly from a trusted local environment or CLI flag. For a
+local-development OpenSandbox server, use the SDK endpoint directly:
 
 ```sh
-export CRABBOX_OPENSANDBOX_API_URL=https://opensandbox.example.test
+export CRABBOX_OPENSANDBOX_API_URL=http://localhost:8080
 ```
+
+For hosted or shared deployments, set the HTTPS origin for that deployment.
 
 ## Commands
 
@@ -85,7 +87,7 @@ openSandbox:
   workdir: /workspace/crabbox      # sync target and exec cwd
   cpu: "1"                         # resource limit string; empty = service default
   memory: 2Gi                      # resource limit string; empty = service default
-  timeoutSecs: 0                   # sandbox TTL; 0 leaves it to the service
+  timeoutSecs: 0                   # sandbox TTL; also readiness budget when set
   execTimeoutSecs: 3600            # command/sync-helper timeout
   platformOS: linux                # empty = service default
   platformArch: amd64              # empty = service default

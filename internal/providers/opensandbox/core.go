@@ -44,6 +44,7 @@ const (
 	statusViewReady = "running"
 
 	openSandboxCleanupTimeout  = 15 * time.Second
+	openSandboxReadyTimeout    = 5 * time.Minute
 	openSandboxExecTimeoutSecs = 3600
 	openSandboxClaimKey        = "crabbox.claim"
 	openSandboxNameKey         = "crabbox.name"

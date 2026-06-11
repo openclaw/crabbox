@@ -1324,8 +1324,8 @@ func baseConfig() Config {
 		},
 		OpenSandbox: OpenSandboxConfig{
 			// APIURL is intentionally unset here so repository YAML cannot
-			// redirect a shell-provided API key. The provider applies the
-			// OpenSandbox SDK local default as the final fallback.
+			// redirect a shell-provided API key. The provider requires an
+			// explicit trusted endpoint from flags or environment.
 			Image:           "ubuntu:24.04",
 			Workdir:         "/workspace/crabbox",
 			CPU:             "1",
