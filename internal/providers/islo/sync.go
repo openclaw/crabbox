@@ -2,7 +2,6 @@ package islo
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -103,22 +102,15 @@ func (b *isloBackend) prepareWorkspace(ctx context.Context, client isloAPI, name
 	return b.execShellAs(ctx, client, name, command, user, io.Discard)
 }
 
-func (b *isloBackend) migrateWorkspaceOwnership(ctx context.Context, client isloAPI, name, workspace string) error {
-	return b.execShellAs(ctx, client, name, isloWorkspaceOwnershipMigrationCommand(workspace), isloAdminUser, io.Discard)
+func (b *isloBackend) repairWorkspaceOwnership(ctx context.Context, client isloAPI, name, workspace string) error {
+	return b.execShellAs(ctx, client, name, isloWorkspaceOwnershipRepairCommand(workspace), isloAdminUser, io.Discard)
 }
 
-func isloWorkspaceOwnershipMigrationCommand(workspace string) string {
-	sum := sha256.Sum256([]byte(workspace))
-	marker := fmt.Sprintf("/var/lib/crabbox/workspace-owner-%x", sum[:8])
+func isloWorkspaceOwnershipRepairCommand(workspace string) string {
 	return strings.Join([]string{
 		"set -e",
-		"mkdir -p /var/lib/crabbox",
-		"if [ ! -e " + shellQuote(marker) + " ]; then",
 		"mkdir -p " + shellQuote(workspace),
 		"chown -R " + shellQuote(isloWorkloadUser+":"+isloWorkloadUser) + " " + shellQuote(workspace),
-		": > " + shellQuote(marker),
-		"chmod 600 " + shellQuote(marker),
-		"fi",
 	}, "\n")
 }
 

@@ -474,10 +474,13 @@ func TestIsloRunMigratesReusedWorkspaceOwnership(t *testing.T) {
 		t.Fatalf("migration user=%v want %q", migration.GetUser(), isloAdminUser)
 	}
 	command := strings.Join(migration.GetCommand(), " ")
-	for _, want := range []string{"chown -R", "'islo:islo'", "'/workspace/repo'", "workspace-owner-"} {
+	for _, want := range []string{"chown -R", "'islo:islo'", "'/workspace/repo'"} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("migration command=%q missing %q", command, want)
 		}
+	}
+	if strings.Contains(command, "workspace-owner-") {
+		t.Fatalf("ownership repair must not use a one-shot marker: %q", command)
 	}
 }
 
@@ -506,7 +509,7 @@ func TestIsloRunMigratesFreshTailnetWorkspaceOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !client.commandContains("workspace-owner-") {
+	if !client.commandContains("chown -R") {
 		t.Fatalf("fresh tailnet lease skipped workspace migration: %#v", client.prepareCommands)
 	}
 }
@@ -517,7 +520,7 @@ func TestIsloRunReturnsSessionHandleWhenFreshTailnetMigrationFails(t *testing.T)
 		createName:               "crabbox-repo-abcdef",
 		execOut:                  "CRABBOX_TS_IP=100.64.7.7",
 		execErrOnCommand:         errors.New("migration failed"),
-		execErrOnCommandContains: "workspace-owner-",
+		execErrOnCommandContains: "chown -R",
 	}
 	restore := swapNewIsloClient(client)
 	defer restore()
@@ -543,11 +546,11 @@ func TestIsloRunReturnsSessionHandleWhenFreshTailnetMigrationFails(t *testing.T)
 	}
 }
 
-func TestIsloWorkspaceOwnershipMigrationCommandIsValidBash(t *testing.T) {
+func TestIsloWorkspaceOwnershipRepairCommandIsValidBash(t *testing.T) {
 	cmd := exec.Command("bash", "-n")
-	cmd.Stdin = strings.NewReader(isloWorkspaceOwnershipMigrationCommand("/workspace/repo"))
+	cmd.Stdin = strings.NewReader(isloWorkspaceOwnershipRepairCommand("/workspace/repo"))
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("migration script syntax: %v\n%s", err, out)
+		t.Fatalf("ownership repair script syntax: %v\n%s", err, out)
 	}
 }
 

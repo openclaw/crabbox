@@ -236,7 +236,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		return result
 	}
 	if tailnetEnrolled {
-		if err := b.migrateWorkspaceOwnership(ctx, client, name, workspace); err != nil {
+		if err := b.repairWorkspaceOwnership(ctx, client, name, workspace); err != nil {
 			return finishResult(), err
 		}
 	}
