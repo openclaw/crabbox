@@ -482,6 +482,28 @@ func TestReleaseRefusesUnownedDroplet(t *testing.T) {
 	}
 }
 
+func TestReleaseRefusesDropletWhoseLiveOwnershipChanged(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	item := droplet{ID: 90, Name: "changed", Status: "active", Tags: leaseTags(cfg, "cbx_abcdef123456", "changed", "ready", false, time.Now())}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	server := serverFromDroplet(item, backend.Cfg)
+	api.droplets[0].Tags = removeTag(api.droplets[0].Tags, "crabbox:target:linux")
+
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		Server:  server,
+		LeaseID: "cbx_abcdef123456",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "refusing to operate") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("deleted=%v deletedKeys=%v", api.deleted, api.deletedKeys)
+	}
+}
+
 func TestCleanupDryRunDoesNotDelete(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -600,6 +622,76 @@ func TestTouchPersistsDigitalOceanTags(t *testing.T) {
 	}
 }
 
+func TestTouchRefusesDropletWhoseLiveOwnershipChanged(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	item := droplet{ID: 100, Name: "changed", Status: "active", Tags: leaseTags(cfg, "cbx_abcdef123456", "changed", "ready", false, time.Now())}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	server := serverFromDroplet(item, backend.Cfg)
+	api.droplets[0].Tags = removeTag(api.droplets[0].Tags, "crabbox:target:linux")
+
+	_, err := backend.Touch(context.Background(), core.TouchRequest{
+		Lease: core.LeaseTarget{Server: server, LeaseID: "cbx_abcdef123456"},
+		State: "running",
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to operate") {
+		t.Fatalf("Touch err=%v", err)
+	}
+	if len(api.replaced) != 0 {
+		t.Fatalf("replaced=%v", api.replaced)
+	}
+}
+
+func TestTouchRefusesDropletWhoseProviderKeyChanged(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ProviderKey = providerKeyForLease("cbx_abcdef123456")
+	item := droplet{ID: 102, Name: "changed-key", Status: "active", Tags: leaseTags(cfg, "cbx_abcdef123456", "changed-key", "ready", false, time.Now())}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	server := serverFromDroplet(item, backend.Cfg)
+	for i, tag := range api.droplets[0].Tags {
+		if strings.HasPrefix(tag, "crabbox:provider_key:") {
+			api.droplets[0].Tags[i] = "crabbox:provider_key:crabbox-cbx-other123456"
+		}
+	}
+
+	_, err := backend.Touch(context.Background(), core.TouchRequest{
+		Lease: core.LeaseTarget{Server: server, LeaseID: "cbx_abcdef123456"},
+		State: "running",
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to operate") {
+		t.Fatalf("Touch err=%v", err)
+	}
+	if len(api.replaced) != 0 {
+		t.Fatalf("replaced=%v", api.replaced)
+	}
+}
+
+func TestValidateLiveDropletDerivesMissingProviderKey(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123456"
+	item := droplet{ID: 103, Name: "missing-key", Status: "active", Tags: leaseTags(cfg, leaseID, "missing-key", "ready", false, time.Now())}
+	for i := 0; i < len(item.Tags); {
+		if strings.HasPrefix(item.Tags[i], "crabbox:provider_key:") {
+			item.Tags = append(item.Tags[:i], item.Tags[i+1:]...)
+			continue
+		}
+		i++
+	}
+	expected := serverFromDroplet(item, cfg)
+	delete(expected.Labels, "provider_key")
+
+	if err := validateLiveDroplet(item, expected); err != nil {
+		t.Fatalf("validateLiveDroplet err=%v tags=%v live=%v expected=%v", err, item.Tags, normalizedDropletLabels(item.Tags), expected.Labels)
+	}
+}
+
 func TestTouchReplacesObsoleteMutableTags(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -712,6 +804,34 @@ func TestApplyDigitalOceanDefaultsPreservesExplicitServerType(t *testing.T) {
 	if cfg.ServerType != "s-2vcpu-2gb" {
 		t.Fatalf("ServerType=%q want explicit type", cfg.ServerType)
 	}
+}
+
+func TestPublicIPv4RequiresPublicNetwork(t *testing.T) {
+	item := droplet{}
+	item.Networks.V4 = append(item.Networks.V4, struct {
+		IPAddress string `json:"ip_address"`
+		Type      string `json:"type"`
+	}{IPAddress: "10.0.0.2", Type: "private"})
+	if got := publicIPv4(item); got != "" {
+		t.Fatalf("publicIPv4(private-only)=%q", got)
+	}
+	item.Networks.V4 = append(item.Networks.V4, struct {
+		IPAddress string `json:"ip_address"`
+		Type      string `json:"type"`
+	}{IPAddress: "203.0.113.10", Type: "public"})
+	if got := publicIPv4(item); got != "203.0.113.10" {
+		t.Fatalf("publicIPv4=%q", got)
+	}
+}
+
+func removeTag(tags []string, target string) []string {
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		if tag != target {
+			out = append(out, tag)
+		}
+	}
+	return out
 }
 
 type fixedClock struct{ t time.Time }

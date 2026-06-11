@@ -288,22 +288,26 @@ func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequ
 	if err != nil {
 		return core.Server{}, err
 	}
-	cfg := b.Cfg
-	labels := server.Labels
-	if req.IdleTimeout > 0 {
-		cfg.IdleTimeout = req.IdleTimeout
-		labels = make(map[string]string, len(server.Labels))
-		for key, value := range server.Labels {
-			labels[key] = value
-		}
-		delete(labels, "idle_timeout")
-		delete(labels, "idle_timeout_secs")
-	}
-	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now())
 	item, err := client.GetDroplet(ctx, server.ID)
 	if err != nil {
 		return core.Server{}, err
 	}
+	if err := validateLiveDroplet(item, server); err != nil {
+		return core.Server{}, err
+	}
+	cfg := b.Cfg
+	labels := normalizedDropletLabels(item.Tags)
+	if req.IdleTimeout > 0 {
+		cfg.IdleTimeout = req.IdleTimeout
+		updated := make(map[string]string, len(labels))
+		for key, value := range labels {
+			updated[key] = value
+		}
+		labels = updated
+		delete(labels, "idle_timeout")
+		delete(labels, "idle_timeout_secs")
+	}
+	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now())
 	if err := client.ReplaceDropletTags(ctx, server.ID, item.Tags, tagsFromLabels(labels)); err != nil {
 		return core.Server{}, err
 	}
@@ -325,6 +329,14 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Conf
 	}
 	client, err := b.clientFactory(b.RT)
 	if err != nil {
+		return err
+	}
+	item, err := client.GetDroplet(ctx, server.ID)
+	if err == nil {
+		if err := validateLiveDroplet(item, server); err != nil {
+			return err
+		}
+	} else if !isDigitalOceanNotFound(err) {
 		return err
 	}
 	if err := client.DeleteDroplet(ctx, server.ID); err != nil {
@@ -391,11 +403,27 @@ func rollbackDigitalOceanAcquire(client digitalOceanAPI, dropletID int64, keyNam
 	return errors.Join(errs...)
 }
 
-func serverFromDroplet(item droplet, cfg core.Config) core.Server {
-	labels := labelsFromTags(item.Tags)
-	if labels["provider_key"] == "" && labels["lease"] != "" {
-		labels["provider_key"] = providerKeyForLease(labels["lease"])
+func validateLiveDroplet(item droplet, expected core.Server) error {
+	labels := normalizedDropletLabels(item.Tags)
+	if err := validateDropletLabels(labels); err != nil {
+		return err
 	}
+	expectedProviderKey := expected.Labels["provider_key"]
+	if expectedProviderKey == "" && expected.Labels["lease"] != "" {
+		expectedProviderKey = providerKeyForLease(expected.Labels["lease"])
+	}
+	if item.ID != expected.ID ||
+		item.Name != expected.Name ||
+		labels["lease"] != expected.Labels["lease"] ||
+		labels["slug"] != expected.Labels["slug"] ||
+		labels["provider_key"] != expectedProviderKey {
+		return core.Exit(2, "refusing to operate on changed DigitalOcean Droplet %d", expected.ID)
+	}
+	return nil
+}
+
+func serverFromDroplet(item droplet, cfg core.Config) core.Server {
+	labels := normalizedDropletLabels(item.Tags)
 	server := core.Server{
 		CloudID:  strconv.FormatInt(item.ID, 10),
 		Provider: providerName,
@@ -409,14 +437,17 @@ func serverFromDroplet(item droplet, cfg core.Config) core.Server {
 	return server
 }
 
+func normalizedDropletLabels(tags []string) map[string]string {
+	labels := labelsFromTags(tags)
+	if labels["provider_key"] == "" && labels["lease"] != "" {
+		labels["provider_key"] = providerKeyForLease(labels["lease"])
+	}
+	return labels
+}
+
 func publicIPv4(item droplet) string {
 	for _, net := range item.Networks.V4 {
 		if net.Type == "public" && net.IPAddress != "" {
-			return net.IPAddress
-		}
-	}
-	for _, net := range item.Networks.V4 {
-		if net.IPAddress != "" {
 			return net.IPAddress
 		}
 	}
