@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Fixed Apple VZ release artifacts to target macOS 13, bounded guest serial logs without blocking noisy VMs, escaped terminal controls in diagnostics, and preserved retained lease state when helper inventory lookup fails.
 - Fixed Namespace Devbox setup instructions to use the current browser workspace approval flow instead of obsolete token environment variables.
 
 ## 0.28.0 - 2026-06-11

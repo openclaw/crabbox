@@ -94,6 +94,14 @@ func TestIsRemoteImageRef(t *testing.T) {
 	}
 }
 
+func TestSanitizeDiagnosticTextEscapesTerminalControls(t *testing.T) {
+	input := "ready\n\t\x1b]0;owned\x07\r\u009b31m\u202etrusted"
+	want := "ready\n\t\\x1b]0;owned\\x07\\x0d\\x9b31m\\u202etrusted"
+	if got := SanitizeDiagnosticText(input); got != want {
+		t.Fatalf("SanitizeDiagnosticText=%q, want %q", got, want)
+	}
+}
+
 func TestEnsurePrivateDirTightensExistingPermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state")
 	if err := os.Mkdir(path, 0o755); err != nil {

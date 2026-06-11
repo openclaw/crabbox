@@ -45,9 +45,13 @@ const (
 	qcow2MaxL1TableBytes     = 32 << 20
 	qcow2MaxRefcountBytes    = 8 << 20
 	qcow2MinSnapshotHdrBytes = 40
+	consoleLogMaxBytes       = 8 << 20
+	consoleLogCloseTimeout   = time.Second
 	seedImageCommandTimeout  = 10 * time.Second
 	seedImageCleanupTimeout  = 15 * time.Second
 )
+
+const consoleLogTruncatedMarker = "\n[crabbox: console log truncated at 8 MiB]\n"
 
 var execSeedImageCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
@@ -1367,7 +1371,7 @@ func runServe(stateRoot, name string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	vmConfig, closers, err := buildVMConfig(inst)
+	vmConfig, resources, err := buildVMConfig(inst)
 	if err != nil {
 		inst.Status = StatusError
 		inst.Error = err.Error()
@@ -1375,7 +1379,7 @@ func runServe(stateRoot, name string, stdout, stderr io.Writer) error {
 		_ = writeMetadata(MetadataPath(stateRoot, name), inst)
 		return err
 	}
-	defer closeFiles(closers)
+	defer resources.Close()
 	if ok, err := vmConfig.Validate(); err != nil {
 		inst.Status = StatusError
 		inst.Error = err.Error()
@@ -1528,86 +1532,209 @@ func handleVMState(state vz.VirtualMachineState, inst *Instance, stateRoot, name
 	return vmStateResult{}
 }
 
-func buildVMConfig(inst Instance) (*vz.VirtualMachineConfiguration, []*os.File, error) {
-	var closers []*os.File
+type vmConfigResources struct {
+	closeOnce sync.Once
+	console   *consoleLogSink
+	files     []*os.File
+}
+
+func (r *vmConfigResources) Close() {
+	if r == nil {
+		return
+	}
+	r.closeOnce.Do(func() {
+		if r.console != nil {
+			_ = r.console.Close()
+		}
+		closeFiles(r.files)
+	})
+}
+
+type consoleLogSink struct {
+	closeOnce sync.Once
+	closeErr  error
+	done      chan struct{}
+	readFile  *os.File
+	writeFile *os.File
+}
+
+func newConsoleLogSink(path string, maxBytes int64) (*consoleLogSink, error) {
+	if maxBytes <= int64(len(consoleLogTruncatedMarker)) {
+		return nil, fmt.Errorf("console log limit must exceed truncation marker size")
+	}
+	logFile, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open console log: %w", err)
+	}
+	if err := logFile.Chmod(0o600); err != nil {
+		logFile.Close()
+		return nil, fmt.Errorf("secure console log: %w", err)
+	}
+	readFile, writeFile, err := os.Pipe()
+	if err != nil {
+		logFile.Close()
+		return nil, fmt.Errorf("create console log pipe: %w", err)
+	}
+	sink := &consoleLogSink{
+		done:      make(chan struct{}),
+		readFile:  readFile,
+		writeFile: writeFile,
+	}
+	go func() {
+		defer close(sink.done)
+		defer readFile.Close()
+		defer logFile.Close()
+		copyBoundedConsoleLog(logFile, readFile, maxBytes)
+	}()
+	return sink, nil
+}
+
+func (s *consoleLogSink) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		var closeErrs []error
+		if err := s.writeFile.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			closeErrs = append(closeErrs, err)
+		}
+		timer := time.NewTimer(consoleLogCloseTimeout)
+		select {
+		case <-s.done:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		case <-timer.C:
+			if err := s.readFile.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+				closeErrs = append(closeErrs, err)
+			}
+			<-s.done
+		}
+		s.closeErr = errors.Join(closeErrs...)
+	})
+	return s.closeErr
+}
+
+type boundedConsoleLogWriter struct {
+	dst       io.Writer
+	remaining int64
+	sealed    bool
+}
+
+func (w *boundedConsoleLogWriter) Write(data []byte) (int, error) {
+	if len(data) == 0 || w.sealed {
+		return len(data), nil
+	}
+	writeBytes := len(data)
+	if int64(writeBytes) > w.remaining {
+		writeBytes = int(w.remaining)
+	}
+	if writeBytes > 0 {
+		written, err := w.dst.Write(data[:writeBytes])
+		if err != nil || written != writeBytes {
+			w.sealed = true
+			return len(data), nil
+		}
+		w.remaining -= int64(writeBytes)
+	}
+	if writeBytes < len(data) {
+		_, _ = io.WriteString(w.dst, consoleLogTruncatedMarker)
+		w.sealed = true
+	}
+	return len(data), nil
+}
+
+func copyBoundedConsoleLog(dst io.Writer, src io.Reader, maxBytes int64) {
+	writer := &boundedConsoleLogWriter{
+		dst:       dst,
+		remaining: maxBytes - int64(len(consoleLogTruncatedMarker)),
+	}
+	_, _ = io.Copy(writer, src)
+}
+
+func buildVMConfig(inst Instance) (_ *vz.VirtualMachineConfiguration, resources *vmConfigResources, retErr error) {
+	resources = &vmConfigResources{}
+	defer func() {
+		if retErr != nil {
+			resources.Close()
+		}
+	}()
 	efiStore, err := vz.NewEFIVariableStore(inst.EFIVariableStorePath, vz.WithCreatingEFIVariableStore())
 	if err != nil {
-		return nil, closers, fmt.Errorf("create EFI variable store: %w", err)
+		return nil, resources, fmt.Errorf("create EFI variable store: %w", err)
 	}
 	if err := os.Chmod(inst.EFIVariableStorePath, 0o600); err != nil {
-		return nil, closers, fmt.Errorf("secure EFI variable store: %w", err)
+		return nil, resources, fmt.Errorf("secure EFI variable store: %w", err)
 	}
 	bootLoader, err := vz.NewEFIBootLoader(vz.WithEFIVariableStore(efiStore))
 	if err != nil {
-		return nil, closers, fmt.Errorf("create EFI boot loader: %w", err)
+		return nil, resources, fmt.Errorf("create EFI boot loader: %w", err)
 	}
 	config, err := vz.NewVirtualMachineConfiguration(bootLoader, uint(inst.CPUs), uint64(inst.MemoryMiB)*1024*1024)
 	if err != nil {
-		return nil, closers, fmt.Errorf("create vm config: %w", err)
+		return nil, resources, fmt.Errorf("create vm config: %w", err)
 	}
 	entropy, err := vz.NewVirtioEntropyDeviceConfiguration()
 	if err != nil {
-		return nil, closers, fmt.Errorf("create entropy device: %w", err)
+		return nil, resources, fmt.Errorf("create entropy device: %w", err)
 	}
 	config.SetEntropyDevicesVirtualMachineConfiguration([]*vz.VirtioEntropyDeviceConfiguration{entropy})
 	nat, err := vz.NewNATNetworkDeviceAttachment()
 	if err != nil {
-		return nil, closers, fmt.Errorf("create nat attachment: %w", err)
+		return nil, resources, fmt.Errorf("create nat attachment: %w", err)
 	}
 	netDevice, err := vz.NewVirtioNetworkDeviceConfiguration(nat)
 	if err != nil {
-		return nil, closers, fmt.Errorf("create network device: %w", err)
+		return nil, resources, fmt.Errorf("create network device: %w", err)
 	}
 	config.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{netDevice})
 	socketDevice, err := vz.NewVirtioSocketDeviceConfiguration()
 	if err != nil {
-		return nil, closers, fmt.Errorf("create socket device: %w", err)
+		return nil, resources, fmt.Errorf("create socket device: %w", err)
 	}
 	config.SetSocketDevicesVirtualMachineConfiguration([]vz.SocketDeviceConfiguration{socketDevice})
 	rootAttachment, err := vz.NewDiskImageStorageDeviceAttachment(inst.DiskPath, false)
 	if err != nil {
-		return nil, closers, fmt.Errorf("open root disk: %w", err)
+		return nil, resources, fmt.Errorf("open root disk: %w", err)
 	}
 	rootDevice, err := vz.NewVirtioBlockDeviceConfiguration(rootAttachment)
 	if err != nil {
-		return nil, closers, fmt.Errorf("configure root disk: %w", err)
+		return nil, resources, fmt.Errorf("configure root disk: %w", err)
 	}
 	seedAttachment, err := vz.NewDiskImageStorageDeviceAttachment(inst.SeedPath, true)
 	if err != nil {
-		return nil, closers, fmt.Errorf("open seed disk: %w", err)
+		return nil, resources, fmt.Errorf("open seed disk: %w", err)
 	}
 	seedDevice, err := vz.NewVirtioBlockDeviceConfiguration(seedAttachment)
 	if err != nil {
-		return nil, closers, fmt.Errorf("configure seed disk: %w", err)
+		return nil, resources, fmt.Errorf("configure seed disk: %w", err)
 	}
 	config.SetStorageDevicesVirtualMachineConfiguration([]vz.StorageDeviceConfiguration{rootDevice, seedDevice})
 	if inst.ConsoleLogPath != "" {
 		readFile, err := os.Open("/dev/null")
 		if err != nil {
-			return nil, closers, fmt.Errorf("open /dev/null: %w", err)
+			return nil, resources, fmt.Errorf("open /dev/null: %w", err)
 		}
-		writeFile, err := os.OpenFile(inst.ConsoleLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		resources.files = append(resources.files, readFile)
+		consoleSink, err := newConsoleLogSink(inst.ConsoleLogPath, consoleLogMaxBytes)
 		if err != nil {
-			readFile.Close()
-			return nil, closers, fmt.Errorf("open console log: %w", err)
+			return nil, resources, err
 		}
-		if err := writeFile.Chmod(0o600); err != nil {
-			readFile.Close()
-			writeFile.Close()
-			return nil, closers, fmt.Errorf("secure console log: %w", err)
-		}
-		closers = append(closers, readFile, writeFile)
-		consoleAttachment, err := vz.NewFileHandleSerialPortAttachment(readFile, writeFile)
+		resources.console = consoleSink
+		consoleAttachment, err := vz.NewFileHandleSerialPortAttachment(readFile, consoleSink.writeFile)
 		if err != nil {
-			return nil, closers, fmt.Errorf("create serial console: %w", err)
+			return nil, resources, fmt.Errorf("create serial console: %w", err)
 		}
 		consolePort, err := vz.NewVirtioConsoleDeviceSerialPortConfiguration(consoleAttachment)
 		if err != nil {
-			return nil, closers, fmt.Errorf("configure serial console: %w", err)
+			return nil, resources, fmt.Errorf("configure serial console: %w", err)
 		}
 		config.SetSerialPortsVirtualMachineConfiguration([]*vz.VirtioConsoleDeviceSerialPortConfiguration{consolePort})
 	}
-	return config, closers, nil
+	return config, resources, nil
 }
 
 func closeFiles(files []*os.File) {
@@ -1720,11 +1847,11 @@ func validateRuntimeConfig(stateRoot, image, expectedSHA256 string) (map[string]
 		EFIVariableStorePath: efiPath,
 		ConsoleLogPath:       filepath.Join(tmpDir, "console.log"),
 	}
-	config, closers, err := buildVMConfig(inst)
+	config, resources, err := buildVMConfig(inst)
 	if err != nil {
 		return nil, err
 	}
-	defer closeFiles(closers)
+	defer resources.Close()
 	if ok, err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("validate runtime config: %w", err)
 	} else if !ok {

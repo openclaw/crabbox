@@ -693,6 +693,119 @@ func TestResolveStatusOnlyAllowsStartingInstanceWithoutSSHEndpoint(t *testing.T)
 	}
 }
 
+func TestReleaseLeasePreservesClaimAndKeyWhenInstanceLookupFails(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+		errors:    map[string]error{},
+	}
+	b := testBackend(t, runner)
+	root, _ := b.stateRoot()
+	lookupErr := errors.New("helper inventory unavailable")
+	runner.errors[commandKey("helper", []string{"list", "--state-root", root})] = lookupErr
+
+	leaseID := "cbx_release123456"
+	slug := "release-lookup"
+	name := core.LeaseProviderName(leaseID, slug)
+	if err := core.ClaimLeaseForRepoProviderScopePond(
+		leaseID,
+		slug,
+		providerName,
+		name,
+		"",
+		t.TempDir(),
+		5*time.Minute,
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte("test private key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { core.RemoveStoredTestboxKey(leaseID) })
+
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{LeaseID: leaseID},
+	})
+	if err == nil || !strings.Contains(err.Error(), lookupErr.Error()) {
+		t.Fatalf("ReleaseLease error=%v, want message containing %q", err, lookupErr)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Fatalf("lease claim %s was removed after lookup failure", leaseID)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key was removed after lookup failure: %v", err)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && call.Args[0] == "delete" {
+			t.Fatalf("delete called after lookup failure: %+v", call)
+		}
+	}
+}
+
+func TestReleaseLeaseRemovesClaimAndKeyWhenInstanceIsMissing(t *testing.T) {
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+		errors:    map[string]error{},
+	}
+	b := testBackend(t, runner)
+	root, _ := b.stateRoot()
+	runner.responses[commandKey("helper", []string{"list", "--state-root", root})] = core.LocalCommandResult{
+		Stdout: mustJSON(t, applevzhelper.ListResponse{}),
+	}
+
+	leaseID := "cbx_missing123456"
+	slug := "missing-instance"
+	name := core.LeaseProviderName(leaseID, slug)
+	if err := core.ClaimLeaseForRepoProviderScopePond(
+		leaseID,
+		slug,
+		providerName,
+		name,
+		"",
+		t.TempDir(),
+		5*time.Minute,
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte("test private key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { core.RemoveStoredTestboxKey(leaseID) })
+
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{LeaseID: leaseID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatalf("lease claim %s remains after confirmed missing instance", leaseID)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored key stat error=%v, want os.ErrNotExist", err)
+	}
+}
+
 func TestResolveStatusReadyProbeIncludesPublishedSSHEndpoint(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(t, runner)
@@ -805,6 +918,29 @@ func TestAcquireKeepRollsBackFailedProvisioning(t *testing.T) {
 		t.Fatal(keyErr)
 	} else if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("lease key stat error=%v, want os.ErrNotExist", statErr)
+	}
+}
+
+func TestInstanceDiagnosticsEscapesTerminalControls(t *testing.T) {
+	stateRoot := t.TempDir()
+	name := "diagnostic-controls"
+	if err := os.MkdirAll(applevzhelper.InstanceDir(stateRoot, name), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		applevzhelper.ConsoleLogPath(stateRoot, name),
+		[]byte("guest failed\x1b]0;owned\x07\rmoved"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	err := instanceDiagnostics(stateRoot, name)
+	if err == nil {
+		t.Fatal("instanceDiagnostics returned nil")
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\x07\r") || !strings.Contains(err.Error(), `\x1b]0;owned\x07\x0dmoved`) {
+		t.Fatalf("instanceDiagnostics exposes terminal controls: %q", err)
 	}
 }
 

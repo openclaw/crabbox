@@ -255,12 +255,15 @@ cache/images/                     converted sparse raw images
 helper/                           managed signed helper and integrity digests
 instances/<name>/instance.json    lifecycle metadata
 instances/<name>/helper.log       helper process output
-instances/<name>/console.log      Linux serial console output
+instances/<name>/console.log      Linux serial console output, capped at 8 MiB
 instances/<name>/disk.raw         per-lease root disk
 ```
 
 Downloaded and converted base images are shared caches. Stopping a lease
-removes its instance directory but keeps reusable base-image caches.
+removes its instance directory but keeps reusable base-image caches. Each VM
+run starts a fresh console log. The helper continues draining guest serial
+output after the 8 MiB cap so a noisy or hostile guest cannot grow host storage
+or block on a full logging pipe.
 
 ## Troubleshooting
 

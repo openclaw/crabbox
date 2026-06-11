@@ -309,7 +309,13 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	name := strings.TrimSpace(firstNonBlank(req.Lease.Server.CloudID, req.Lease.Server.Labels["instance"]))
 	if name == "" && leaseID != "" {
 		inst, claim, err := b.resolveInstance(ctx, cfg, leaseID)
-		if err == nil {
+		if err != nil {
+			var missing *missingInstanceError
+			if !errors.As(err, &missing) {
+				return err
+			}
+			leaseID = firstNonBlank(leaseID, claim.LeaseID)
+		} else {
 			name = inst.Name
 			leaseID = firstNonBlank(leaseID, claim.LeaseID, inst.LeaseID)
 		}
@@ -554,7 +560,7 @@ func instanceDiagnostics(stateRoot, name string) error {
 			continue
 		}
 		if tail != "" {
-			parts = append(parts, fmt.Sprintf("%s tail:\n%s", log.label, tail))
+			parts = append(parts, fmt.Sprintf("%s tail:\n%s", log.label, applevzhelper.SanitizeDiagnosticText(tail)))
 		}
 	}
 	if len(parts) == 0 {
@@ -646,9 +652,23 @@ func (b *backend) resolveInstance(ctx context.Context, cfg core.Config, identifi
 		}
 	}
 	if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName); err == nil && ok {
-		return applevzhelper.Instance{}, claim, exit(4, "apple-vz lease %q points to a missing instance; run `crabbox cleanup --provider apple-vz`", identifier)
+		return applevzhelper.Instance{}, claim, &missingInstanceError{
+			err: exit(4, "apple-vz lease %q points to a missing instance; run `crabbox cleanup --provider apple-vz`", identifier),
+		}
 	}
 	return applevzhelper.Instance{}, core.LeaseClaim{}, exit(4, "apple-vz lease not found: %s", identifier)
+}
+
+type missingInstanceError struct {
+	err core.ExitError
+}
+
+func (e *missingInstanceError) Error() string {
+	return e.err.Error()
+}
+
+func (e *missingInstanceError) Unwrap() error {
+	return e.err
 }
 
 func (b *backend) serverFromInstance(inst applevzhelper.Instance, claim core.LeaseClaim, cfg core.Config) core.Server {

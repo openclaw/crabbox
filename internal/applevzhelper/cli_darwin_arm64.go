@@ -434,7 +434,7 @@ func startupDiagnostics(stateRoot, name string) error {
 			continue
 		}
 		if data != "" {
-			parts = append(parts, fmt.Sprintf("%s tail:\n%s", log.label, data))
+			parts = append(parts, fmt.Sprintf("%s tail:\n%s", log.label, SanitizeDiagnosticText(data)))
 		}
 	}
 	if len(parts) == 0 {

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -154,6 +155,29 @@ func ImageIdentity(value, expectedSHA256 string) string {
 func IsRemoteImageRef(value string) bool {
 	_, remote := remoteImageURL(value)
 	return remote
+}
+
+func SanitizeDiagnosticText(value string) string {
+	var sanitized strings.Builder
+	sanitized.Grow(len(value))
+	for _, r := range value {
+		switch {
+		case r == '\n' || r == '\t':
+			sanitized.WriteRune(r)
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			switch {
+			case r <= 0xff:
+				fmt.Fprintf(&sanitized, `\x%02x`, r)
+			case r <= 0xffff:
+				fmt.Fprintf(&sanitized, `\u%04x`, r)
+			default:
+				fmt.Fprintf(&sanitized, `\U%08x`, r)
+			}
+		default:
+			sanitized.WriteRune(r)
+		}
+	}
+	return sanitized.String()
 }
 
 func remoteImageURL(value string) (*url.URL, bool) {

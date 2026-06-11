@@ -61,6 +61,73 @@ func TestHandleVMStateErrorPersistsTerminalErrorAndRequestsStop(t *testing.T) {
 	}
 }
 
+func TestCopyBoundedConsoleLogCapsAndDrainsGuestOutput(t *testing.T) {
+	const maxBytes = 128
+	source := bytes.NewReader(bytes.Repeat([]byte("guest-output-"), 100))
+	var target bytes.Buffer
+
+	copyBoundedConsoleLog(&target, source, maxBytes)
+
+	if source.Len() != 0 {
+		t.Fatalf("source has %d unread bytes after log limit", source.Len())
+	}
+	if target.Len() != maxBytes {
+		t.Fatalf("console log size=%d, want %d", target.Len(), maxBytes)
+	}
+	if !strings.HasSuffix(target.String(), consoleLogTruncatedMarker) {
+		t.Fatalf("console log missing truncation marker: %q", target.String())
+	}
+}
+
+func TestCopyBoundedConsoleLogPreservesShortOutput(t *testing.T) {
+	const output = "boot complete\n"
+	var target bytes.Buffer
+
+	copyBoundedConsoleLog(&target, strings.NewReader(output), 128)
+
+	if target.String() != output {
+		t.Fatalf("console log=%q, want %q", target.String(), output)
+	}
+}
+
+type failingConsoleLogWriter struct{}
+
+func (failingConsoleLogWriter) Write([]byte) (int, error) {
+	return 0, errors.New("disk full")
+}
+
+func TestCopyBoundedConsoleLogDrainsAfterWriteFailure(t *testing.T) {
+	source := bytes.NewReader(bytes.Repeat([]byte("guest-output-"), 100))
+
+	copyBoundedConsoleLog(failingConsoleLogWriter{}, source, 128)
+
+	if source.Len() != 0 {
+		t.Fatalf("source has %d unread bytes after log write failure", source.Len())
+	}
+}
+
+func TestConsoleLogSinkCapsFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "console.log")
+	sink, err := newConsoleLogSink(path, 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sink.writeFile.Write(bytes.Repeat([]byte("serial-output-"), 100)); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 128 || !bytes.HasSuffix(data, []byte(consoleLogTruncatedMarker)) {
+		t.Fatalf("console log size=%d suffix=%q", len(data), data)
+	}
+}
+
 func TestResolveSourceImageRequiresChecksumForRemoteImages(t *testing.T) {
 	_, err := resolveSourceImage(context.Background(), t.TempDir(), "https://example.test/image.img", "")
 	if err == nil {

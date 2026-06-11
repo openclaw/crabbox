@@ -64,7 +64,11 @@ while :; do sleep 1; done
 		inst.EFIVariableStorePath = EFIPath(cfg.StateRoot, inst.Name)
 		inst.ConsoleLogPath = ConsoleLogPath(cfg.StateRoot, inst.Name)
 		for _, path := range []string{inst.DiskPath, inst.SeedPath, inst.EFIVariableStorePath, inst.ConsoleLogPath} {
-			if err := os.WriteFile(path, []byte("test asset\n"), 0o644); err != nil {
+			data := []byte("test asset\n")
+			if path == inst.ConsoleLogPath {
+				data = []byte("test asset\n\x1b]0;owned\x07\rmoved")
+			}
+			if err := os.WriteFile(path, data, 0o644); err != nil {
 				return Instance{}, err
 			}
 		}
@@ -95,6 +99,9 @@ while :; do sleep 1; done
 	}
 	if !strings.Contains(err.Error(), "console.log tail") || !strings.Contains(err.Error(), "test asset") {
 		t.Fatalf("runStart error missing startup diagnostics: %v", err)
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\x07\r") || !strings.Contains(err.Error(), `\x1b]0;owned\x07\x0dmoved`) {
+		t.Fatalf("runStart error exposes terminal controls: %q", err)
 	}
 
 	pidData, readErr := os.ReadFile(pidFile)
