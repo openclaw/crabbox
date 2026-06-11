@@ -31,9 +31,11 @@ type SSHTarget = core.SSHTarget
 type ExitError = core.ExitError
 
 const (
-	providerName  = "morph"
-	targetLinux   = core.TargetLinux
-	networkPublic = core.NetworkPublic
+	providerName     = "morph"
+	targetLinux      = core.TargetLinux
+	networkAuto      = core.NetworkAuto
+	networkTailscale = core.NetworkTailscale
+	networkPublic    = core.NetworkPublic
 )
 
 func exit(code int, format string, args ...any) core.ExitError {

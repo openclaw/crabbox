@@ -303,6 +303,16 @@ func TestNewMorphBackendAllowsMissingSnapshotForExistingLeaseOps(t *testing.T) {
 	}
 }
 
+func TestNewMorphBackendRejectsTailscaleNetwork(t *testing.T) {
+	cfg := testMorphConfig()
+	cfg.Network = networkTailscale
+
+	_, err := NewMorphBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	if err == nil || !strings.Contains(err.Error(), "--network=tailscale is not supported") {
+		t.Fatalf("NewMorphBackend error=%v", err)
+	}
+}
+
 func TestApplyMorphProviderFlagsUpdatesServerType(t *testing.T) {
 	cfg := testMorphConfig()
 	cfg.Morph.Snapshot = "snapshot_old"

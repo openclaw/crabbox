@@ -589,7 +589,9 @@ func applyMorphDefaults(cfg *Config) {
 		}
 	}
 	cfg.WorkRoot = cfg.Morph.WorkRoot
-	cfg.Network = networkPublic
+	if cfg.Network == "" || cfg.Network == networkAuto || cfg.Network == networkPublic {
+		cfg.Network = networkPublic
+	}
 	cfg.SSHPort = "22"
 	cfg.SSHFallbackPorts = nil
 	cfg.ServerType = blank(strings.TrimSpace(cfg.Morph.Snapshot), "snapshot")
@@ -598,6 +600,9 @@ func applyMorphDefaults(cfg *Config) {
 func validateMorphConfig(cfg Config) error {
 	if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
 		return exit(2, "provider=morph supports target=linux only")
+	}
+	if cfg.Network == networkTailscale {
+		return exit(2, "--network=tailscale is not supported for provider=morph; Morph exposes SSH through the public gateway")
 	}
 	if cfg.Tailscale.Enabled {
 		return exit(2, "--tailscale is not supported for provider=morph; Morph exposes SSH through the public gateway")

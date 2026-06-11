@@ -843,7 +843,7 @@ morph_smoke() {
 
   morph_run doctor
   local out
-  capture_run out morph_run warmup --slug "$slug" --ttl "$ttl" --idle-timeout "$idle"
+  capture_run out morph_run warmup --keep=false --slug "$slug" --ttl "$ttl" --idle-timeout "$idle"
   printf '%s\n' "$out"
   lease="$(printf '%s\n' "$out" | extract_lease)"
   slug="$(printf '%s\n' "$out" | extract_slug)"

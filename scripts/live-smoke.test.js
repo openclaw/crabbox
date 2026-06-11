@@ -595,7 +595,7 @@ esac
   assert.match(result.stdout, /crabbox-live-ok/);
   const crabboxCalls = fs.readFileSync(crabboxLog, "utf8");
   assert.match(crabboxCalls, /^doctor$/m);
-  assert.match(crabboxCalls, /^warmup --slug morph-smoke-\d+ --ttl 15m --idle-timeout 5m$/m);
+  assert.match(crabboxCalls, /^warmup --keep=false --slug morph-smoke-\d+ --ttl 15m --idle-timeout 5m$/m);
   assert.match(crabboxCalls, /^status --id morph-smoke-test --wait --wait-timeout 120s$/m);
   assert.match(crabboxCalls, /^inspect --id morph-smoke-test --json$/m);
   assert.match(crabboxCalls, /^run --id morph-smoke-test --shell --/m);
@@ -684,7 +684,7 @@ esac
   assert.match(result.stdout, /crabbox-live-ok/);
   const crabboxCalls = fs.readFileSync(crabboxLog, "utf8");
   assert.match(crabboxCalls, /^doctor$/m);
-  assert.match(crabboxCalls, /^warmup --slug morph-smoke-\d+ --ttl 15m --idle-timeout 5m$/m);
+  assert.match(crabboxCalls, /^warmup --keep=false --slug morph-smoke-\d+ --ttl 15m --idle-timeout 5m$/m);
   assert.match(crabboxCalls, /^stop morph-smoke-test$/m);
   assert.doesNotMatch(crabboxCalls, /config-backed-morph-key/);
 });
