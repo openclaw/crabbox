@@ -34,7 +34,10 @@ type digitalOceanClient struct {
 }
 
 type ambiguousDropletCreateError struct {
-	err error
+	err               error
+	keyID             int64
+	keyCreated        bool
+	keyOwnershipKnown bool
 }
 
 func (e *ambiguousDropletCreateError) Error() string {
@@ -43,6 +46,44 @@ func (e *ambiguousDropletCreateError) Error() string {
 
 func (e *ambiguousDropletCreateError) Unwrap() error {
 	return e.err
+}
+
+type ambiguousSSHKeyCreateError struct {
+	err error
+}
+
+func (e *ambiguousSSHKeyCreateError) Error() string {
+	return fmt.Sprintf("digitalocean SSH-key creation remains indeterminate; preserving credentials for recovery: %v", e.err)
+}
+
+func (e *ambiguousSSHKeyCreateError) Unwrap() error {
+	return e.err
+}
+
+type sshKeyConflictError struct {
+	err error
+}
+
+func (e *sshKeyConflictError) Error() string {
+	return e.err.Error()
+}
+
+func (e *sshKeyConflictError) Unwrap() error {
+	return e.err
+}
+
+type sshKeyCleanupError struct {
+	cause   error
+	cleanup error
+	keyID   int64
+}
+
+func (e *sshKeyCleanupError) Error() string {
+	return errors.Join(e.cause, e.cleanup).Error()
+}
+
+func (e *sshKeyCleanupError) Unwrap() []error {
+	return []error{e.cause, e.cleanup}
 }
 
 type digitalOceanAPIError struct {
@@ -56,11 +97,13 @@ func (e *digitalOceanAPIError) Error() string {
 }
 
 type droplet struct {
-	ID       int64    `json:"id"`
-	Name     string   `json:"name"`
-	Status   string   `json:"status"`
-	Tags     []string `json:"tags"`
-	Networks struct {
+	ID            int64    `json:"id"`
+	Name          string   `json:"name"`
+	Status        string   `json:"status"`
+	Tags          []string `json:"tags"`
+	SSHKeyID      int64    `json:"-"`
+	SSHKeyCreated bool     `json:"-"`
+	Networks      struct {
 		V4 []struct {
 			IPAddress string `json:"ip_address"`
 			Type      string `json:"type"`
@@ -266,7 +309,12 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 		if !createdKey {
 			return cause
 		}
-		return c.rollbackCreatedSSHKey(keyName, cause)
+		return c.rollbackCreatedSSHKey(key, cause)
+	}
+	withKeyIdentity := func(item droplet) droplet {
+		item.SSHKeyID = key.ID
+		item.SSHKeyCreated = createdKey
+		return item
 	}
 	name := core.LeaseProviderName(leaseID, slug)
 	body := map[string]any{
@@ -302,9 +350,14 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 	if createErr != nil {
 		if shouldReconcileMutation(createErr) {
 			if item, reconcileErr := c.reconcileDropletCreate(leaseTag, leaseTagResolved, leaseID, name); reconcileErr == nil {
-				return item, nil
+				return withKeyIdentity(item), nil
 			} else {
-				return droplet{}, &ambiguousDropletCreateError{err: errors.Join(createErr, reconcileErr)}
+				return droplet{}, &ambiguousDropletCreateError{
+					err:               errors.Join(createErr, reconcileErr),
+					keyID:             key.ID,
+					keyCreated:        createdKey,
+					keyOwnershipKnown: true,
+				}
 			}
 		}
 		return droplet{}, rollbackKey(createErr)
@@ -317,12 +370,17 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 			name,
 		)
 		if item, reconcileErr := c.reconcileDropletCreate(leaseTag, leaseTagResolved, leaseID, name); reconcileErr == nil {
-			return item, nil
+			return withKeyIdentity(item), nil
 		} else {
-			return droplet{}, &ambiguousDropletCreateError{err: errors.Join(incomplete, reconcileErr)}
+			return droplet{}, &ambiguousDropletCreateError{
+				err:               errors.Join(incomplete, reconcileErr),
+				keyID:             key.ID,
+				keyCreated:        createdKey,
+				keyOwnershipKnown: true,
+			}
 		}
 	}
-	return res.Droplet, nil
+	return withKeyIdentity(res.Droplet), nil
 }
 
 func shouldReconcileMutation(err error) bool {
@@ -386,11 +444,15 @@ func (c *digitalOceanClient) reconcileDropletCreate(leaseTag string, leaseTagRes
 	}
 }
 
-func (c *digitalOceanClient) rollbackCreatedSSHKey(keyName string, cause error) error {
+func (c *digitalOceanClient) rollbackCreatedSSHKey(key sshKey, cause error) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if cleanupErr := c.DeleteSSHKeyByName(ctx, keyName); cleanupErr != nil {
-		return errors.Join(cause, fmt.Errorf("rollback digitalocean ssh key %s: %w", keyName, cleanupErr))
+	if cleanupErr := c.DeleteSSHKey(ctx, key.ID); cleanupErr != nil {
+		return &sshKeyCleanupError{
+			cause:   cause,
+			cleanup: fmt.Errorf("rollback digitalocean ssh key %d: %w", key.ID, cleanupErr),
+			keyID:   key.ID,
+		}
 	}
 	return cause
 }
@@ -432,13 +494,10 @@ func (c *digitalOceanClient) EnsureSSHKey(ctx context.Context, name, publicKey s
 	if err != nil {
 		return sshKey{}, false, err
 	}
-	for _, key := range keys {
-		if key.Name == name {
-			if strings.TrimSpace(key.PublicKey) != strings.TrimSpace(publicKey) {
-				return sshKey{}, false, core.Exit(3, "digitalocean ssh key %q exists with different public key", name)
-			}
-			return key, false, nil
-		}
+	if key, found, err := selectSSHKey(keys, name, publicKey); err != nil {
+		return sshKey{}, false, err
+	} else if found {
+		return key, false, nil
 	}
 	body := map[string]any{"name": name, "public_key": publicKey}
 	var res struct {
@@ -449,7 +508,11 @@ func (c *digitalOceanClient) EnsureSSHKey(ctx context.Context, name, publicKey s
 			if key, reconcileErr := c.reconcileSSHKey(name, publicKey); reconcileErr == nil {
 				return key, true, nil
 			} else {
-				err = errors.Join(err, reconcileErr)
+				var conflict *sshKeyConflictError
+				if errors.As(reconcileErr, &conflict) {
+					return sshKey{}, false, conflict
+				}
+				return sshKey{}, false, &ambiguousSSHKeyCreateError{err: errors.Join(err, reconcileErr)}
 			}
 		}
 		return sshKey{}, false, err
@@ -459,31 +522,43 @@ func (c *digitalOceanClient) EnsureSSHKey(ctx context.Context, name, publicKey s
 		strings.TrimSpace(res.SSHKey.PublicKey) != strings.TrimSpace(publicKey) {
 		key, reconcileErr := c.reconcileSSHKey(name, publicKey)
 		if reconcileErr != nil {
-			return sshKey{}, false, errors.Join(
+			var conflict *sshKeyConflictError
+			if errors.As(reconcileErr, &conflict) {
+				return sshKey{}, false, conflict
+			}
+			return sshKey{}, false, &ambiguousSSHKeyCreateError{err: errors.Join(
 				fmt.Errorf("digitalocean ssh key creation returned incomplete identity: id=%d name=%q", res.SSHKey.ID, res.SSHKey.Name),
 				reconcileErr,
-			)
+			)}
 		}
 		return key, true, nil
 	}
 	return res.SSHKey, true, nil
 }
 
+func newSSHKeyConflictError(name string) error {
+	return &sshKeyConflictError{err: core.Exit(3, "digitalocean ssh key %q exists with different public key", name)}
+}
+
 func (c *digitalOceanClient) reconcileSSHKey(name, publicKey string) (sshKey, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), createReconcileTimeout)
+	timeout := c.reconcileTimeout
+	if timeout <= 0 {
+		timeout = createReconcileTimeout
+	}
+	interval := c.reconcileInterval
+	if interval <= 0 {
+		interval = createReconcileInterval
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	var lastErr error
 	for {
 		keys, err := c.ListSSHKeys(ctx)
 		if err == nil {
-			for _, key := range keys {
-				if key.Name != name {
-					continue
-				}
-				if strings.TrimSpace(key.PublicKey) != strings.TrimSpace(publicKey) {
-					return sshKey{}, core.Exit(3, "digitalocean ssh key %q exists with different public key", name)
-				}
+			if key, found, selectErr := selectSSHKey(keys, name, publicKey); selectErr != nil {
+				return sshKey{}, selectErr
+			} else if found {
 				return key, nil
 			}
 			lastErr = core.Exit(4, "digitalocean ssh key reconciliation did not find %q", name)
@@ -491,7 +566,7 @@ func (c *digitalOceanClient) reconcileSSHKey(name, publicKey string) (sshKey, er
 			lastErr = err
 		}
 
-		timer := time.NewTimer(createReconcileInterval)
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -501,21 +576,53 @@ func (c *digitalOceanClient) reconcileSSHKey(name, publicKey string) (sshKey, er
 	}
 }
 
-func (c *digitalOceanClient) DeleteSSHKeyByName(ctx context.Context, name string) error {
+func selectSSHKey(keys []sshKey, name, publicKey string) (sshKey, bool, error) {
+	publicKey = strings.TrimSpace(publicKey)
+	var match sshKey
+	nameMatches := 0
+	publicKeyMatches := 0
+	for _, key := range keys {
+		if key.Name != name {
+			continue
+		}
+		nameMatches++
+		if publicKey == "" {
+			continue
+		}
+		if strings.TrimSpace(key.PublicKey) != publicKey {
+			continue
+		}
+		match = key
+		publicKeyMatches++
+	}
+	switch {
+	case publicKey == "" && nameMatches > 0:
+		return sshKey{}, true, nil
+	case publicKeyMatches == 1:
+		return match, true, nil
+	case publicKeyMatches > 1:
+		return sshKey{}, false, core.Exit(4, "digitalocean SSH key %q has multiple entries matching the retained public key", name)
+	case nameMatches > 0:
+		return sshKey{}, false, newSSHKeyConflictError(name)
+	default:
+		return sshKey{}, false, nil
+	}
+}
+
+func (c *digitalOceanClient) FindSSHKey(ctx context.Context, name, publicKey string) (sshKey, bool, error) {
 	keys, err := c.ListSSHKeys(ctx)
 	if err != nil {
-		return err
+		return sshKey{}, false, err
 	}
-	for _, key := range keys {
-		if key.Name == name {
-			err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/account/keys/%d", key.ID), nil, nil)
-			if isDigitalOceanNotFound(err) {
-				return nil
-			}
-			return err
-		}
+	return selectSSHKey(keys, name, publicKey)
+}
+
+func (c *digitalOceanClient) DeleteSSHKey(ctx context.Context, id int64) error {
+	err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/account/keys/%d", id), nil, nil)
+	if isDigitalOceanNotFound(err) {
+		return nil
 	}
-	return nil
+	return err
 }
 
 func (c *digitalOceanClient) ListTags(ctx context.Context) ([]digitalOceanTag, error) {

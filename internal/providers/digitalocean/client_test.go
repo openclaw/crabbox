@@ -558,6 +558,9 @@ func TestDigitalOceanClientCreateDropletPreservesKeyOnAmbiguousFailure(t *testin
 	if !errors.As(err, &ambiguous) {
 		t.Fatalf("CreateDroplet err=%v, want ambiguousDropletCreateError", err)
 	}
+	if !ambiguous.keyOwnershipKnown || !ambiguous.keyCreated || ambiguous.keyID != 123 {
+		t.Fatalf("ambiguous key identity=%#v", ambiguous)
+	}
 	if deleteKey {
 		t.Fatal("ambiguous create deleted its SSH key")
 	}
@@ -638,12 +641,39 @@ func TestDigitalOceanClientRollbackCreatedSSHKeyUsesFreshContext(t *testing.T) {
 	}
 	client.baseURL = server.URL
 
-	err = client.rollbackCreatedSSHKey("crabbox-cbx-abcdef123456", context.Canceled)
+	err = client.rollbackCreatedSSHKey(sshKey{ID: 123, Name: "crabbox-cbx-abcdef123456"}, context.Canceled)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("rollback err=%v", err)
 	}
 	if !deleteKey {
 		t.Fatal("new ssh key was not rolled back")
+	}
+}
+
+func TestDigitalOceanClientRollbackCreatedSSHKeyReportsRetryableOwnership(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.RequestURI(), "/account/keys"):
+			_, _ = w.Write([]byte(`{"ssh_keys":[{"id":123,"name":"crabbox-cbx-abcdef123456","public_key":"ssh-ed25519 test"}],"links":{"pages":{}}}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/account/keys/123":
+			http.Error(w, "temporary failure", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	cause := errors.New("droplet create failed")
+	err = client.rollbackCreatedSSHKey(sshKey{ID: 123, Name: "crabbox-cbx-abcdef123456"}, cause)
+	var cleanup *sshKeyCleanupError
+	if !errors.As(err, &cleanup) || !errors.Is(err, cause) || cleanup.keyID != 123 {
+		t.Fatalf("rollback err=%v, want sshKeyCleanupError wrapping cause", err)
 	}
 }
 
@@ -1051,6 +1081,91 @@ func TestDigitalOceanClientEnsureSSHKeyRejectsMismatchedPublicKey(t *testing.T) 
 	_, _, err = client.EnsureSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 expected")
 	if err == nil || !strings.Contains(err.Error(), "exists with different public key") {
 		t.Fatalf("EnsureSSHKey err=%v", err)
+	}
+	var ambiguous *ambiguousSSHKeyCreateError
+	if errors.As(err, &ambiguous) {
+		t.Fatalf("EnsureSSHKey err=%v, definitive conflict classified as ambiguous", err)
+	}
+}
+
+func TestDigitalOceanClientEnsureSSHKeySelectsMatchingDuplicateName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.RequestURI(), "/account/keys"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ssh_keys":[{"id":122,"name":"crabbox-cbx-abcdef123456","public_key":"ssh-ed25519 different"},{"id":123,"name":"crabbox-cbx-abcdef123456","public_key":"ssh-ed25519 expected"}],"links":{"pages":{}}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+
+	key, created, err := client.EnsureSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 expected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created || key.ID != 123 {
+		t.Fatalf("key=%#v created=%v", key, created)
+	}
+}
+
+func TestDigitalOceanClientFindSSHKeyRejectsDuplicatePublicKeyMatches(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.RequestURI(), "/account/keys"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ssh_keys":[{"id":122,"name":"crabbox-cbx-abcdef123456","public_key":"ssh-ed25519 expected"},{"id":123,"name":"crabbox-cbx-abcdef123456","public_key":"ssh-ed25519 expected"}],"links":{"pages":{}}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+
+	_, _, err = client.FindSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 expected")
+	if err == nil || !strings.Contains(err.Error(), "multiple entries matching") {
+		t.Fatalf("FindSSHKey err=%v", err)
+	}
+}
+
+func TestDigitalOceanClientEnsureSSHKeyPreservesAmbiguousCreate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.RequestURI(), "/account/keys"):
+			_, _ = w.Write([]byte(`{"ssh_keys":[],"links":{"pages":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/account/keys":
+			http.Error(w, "temporary failure", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	client.reconcileTimeout = 20 * time.Millisecond
+	client.reconcileInterval = time.Millisecond
+	_, _, err = client.EnsureSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 test")
+	var ambiguous *ambiguousSSHKeyCreateError
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("EnsureSSHKey err=%v, want ambiguousSSHKeyCreateError", err)
 	}
 }
 
