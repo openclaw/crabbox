@@ -90,8 +90,8 @@ func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }
 
-func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim, bool, error) {
-	return core.ResolveLeaseClaimForProvider(identifier, provider)
+func readLeaseClaim(leaseID string) (core.LeaseClaim, error) {
+	return core.ReadLeaseClaim(leaseID)
 }
 
 func listOpenComputerLeaseClaims() ([]core.LeaseClaim, error) {

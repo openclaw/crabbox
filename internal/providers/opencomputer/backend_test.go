@@ -207,6 +207,30 @@ func TestResolveLeaseIDPrefersExactLeaseOverCollidingSlug(t *testing.T) {
 	}
 }
 
+func TestStopSurfacesMalformedExactClaimBeforeSlugFallback(t *testing.T) {
+	f := newFakeAPI(t)
+	backend := newAPIBackend(t, f)
+	exactLeaseID := leasePrefix + "sb-z-exact"
+	if err := claimLeaseForRepoProvider(exactLeaseID, "exact", providerName, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := claimLeaseForRepoProvider(leasePrefix+"sb-a-other", exactLeaseID, providerName, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claimPath := path.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", exactLeaseID+".json")
+	if err := os.WriteFile(claimPath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := backend.Stop(context.Background(), StopRequest{ID: exactLeaseID})
+	if err == nil || !strings.Contains(err.Error(), "parse claim") {
+		t.Fatalf("Stop err=%v, want malformed exact claim error", err)
+	}
+	if f.calls(http.MethodDelete, "/api/sandboxes/") != 0 {
+		t.Fatal("stop deleted a slug-colliding sandbox after exact claim parse failure")
+	}
+}
+
 func TestNewSandboxName(t *testing.T) {
 	if name := newSandboxName(Repo{Name: "carbbox"}); !strings.HasPrefix(name, "crabbox-carbbox-") {
 		t.Fatalf("name=%q", name)
@@ -585,6 +609,15 @@ func TestSyncHonorsConfiguredTimeout(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("Run took %s, sync timeout should bound upload", elapsed)
 	}
+	var sawRemoteCleanup bool
+	for _, exec := range f.allExecs() {
+		if strings.Contains(strings.Join(exec.req.Args, " "), "rm -f") && strings.Contains(strings.Join(exec.req.Args, " "), "crabbox-sync-") {
+			sawRemoteCleanup = true
+		}
+	}
+	if !sawRemoteCleanup {
+		t.Fatal("timed-out upload did not attempt remote archive cleanup")
+	}
 }
 
 func TestSyncPreflightGuardsFullArchiveCandidate(t *testing.T) {
@@ -603,7 +636,7 @@ func TestSyncPreflightGuardsFullArchiveCandidate(t *testing.T) {
 	}
 }
 
-func TestSyncDeleteDoesNotTouchWorkspaceBeforeUploadSucceeds(t *testing.T) {
+func TestSyncDeleteDoesNotTouchLiveWorkspaceBeforeUploadSucceeds(t *testing.T) {
 	f := newFakeAPI(t)
 	f.uploadStatus = http.StatusServiceUnavailable
 	backend := newAPIBackend(t, f)
@@ -614,8 +647,14 @@ func TestSyncDeleteDoesNotTouchWorkspaceBeforeUploadSucceeds(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "upload denied") {
 		t.Fatalf("Run err=%v, want upload failure", err)
 	}
-	if execs := f.allExecs(); len(execs) != 0 {
-		t.Fatalf("remote workspace touched before upload succeeded: %#v", execs)
+	for _, exec := range f.allExecs() {
+		command := strings.Join(exec.req.Args, " ")
+		if strings.Contains(command, "mkdir -p") ||
+			strings.Contains(command, "tar -xzf") ||
+			strings.Contains(command, "if mv ") ||
+			strings.Contains(command, "rm -rf '/workspace/crabbox'") {
+			t.Fatalf("live workspace touched before upload succeeded: %q", command)
+		}
 	}
 }
 

@@ -402,9 +402,9 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 	if !strings.HasPrefix(exactLeaseID, leasePrefix) {
 		exactLeaseID = leasePrefix + exactLeaseID
 	}
-	if claim, ok, err := resolveOpenComputerLeaseClaim(exactLeaseID); err != nil {
+	if claim, err := readLeaseClaim(exactLeaseID); err != nil {
 		return "", "", "", err
-	} else if ok {
+	} else if claim.LeaseID == exactLeaseID && claim.Provider == providerName {
 		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout)
 	}
 	claim, ok, err := resolveOpenComputerLeaseClaim(id)

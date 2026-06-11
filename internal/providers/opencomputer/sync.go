@@ -53,16 +53,7 @@ func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClien
 	}()
 	archiveDuration := b.now().Sub(archiveStart)
 
-	uploadStart := b.now()
-	if _, err := archive.Seek(0, 0); err != nil {
-		return nil, 0, exit(6, "rewind sync archive: %v", err)
-	}
 	remoteArchive := path.Join("/tmp", "crabbox-sync-"+randomSuffix()+".tgz")
-	if err := api.uploadFile(syncCtx, sandboxID, remoteArchive, archive); err != nil {
-		return nil, 0, err
-	}
-	uploadDuration := b.now().Sub(uploadStart)
-
 	extractDir := workdir
 	stagingDir := ""
 	if b.cfg.Sync.Delete {
@@ -84,6 +75,15 @@ func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClien
 			cleanupRemote()
 		}
 	}()
+
+	uploadStart := b.now()
+	if _, err := archive.Seek(0, 0); err != nil {
+		return nil, 0, exit(6, "rewind sync archive: %v", err)
+	}
+	if err := api.uploadFile(syncCtx, sandboxID, remoteArchive, archive); err != nil {
+		return nil, 0, err
+	}
+	uploadDuration := b.now().Sub(uploadStart)
 
 	prepareStart := b.now()
 	if stagingDir == "" {
