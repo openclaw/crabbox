@@ -25,7 +25,10 @@ type backend struct {
 
 var hypervHostOS = runtime.GOOS
 
-const hypervMissingState = -1
+const (
+	hypervMissingState           = -1
+	hypervProvisioningClaimGrace = time.Hour
+)
 
 type hypervVM struct {
 	Name  string `json:"Name"`
@@ -154,23 +157,26 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	labels["ssh_user"] = cfg.HyperV.User
 	labels["ssh_port"] = sshPort
 	labels["work_root"] = cfg.HyperV.WorkRoot
+	labels["state"] = "provisioning"
 	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB switch=%s keep=%v\n",
 		providerName, leaseID, slug, cfg.HyperV.Image, cfg.HyperV.CPUs, cfg.HyperV.Memory, cfg.HyperV.Switch, req.Keep)
 
-	if err := b.createVM(ctx, cfg, name); err != nil {
-		_ = b.removeVM(context.Background(), name)
-		return LeaseTarget{}, err
-	}
 	provisional := LeaseTarget{
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
 	if err := persistLease(leaseID, slug, name, cfg, req, provisional); err != nil {
-		_ = b.removeVM(context.Background(), name)
 		return LeaseTarget{}, fmt.Errorf("persist hyperv lease before bootstrap: %w", err)
 	}
 	cleanupKey = false
+	if err := b.createVM(ctx, cfg, name); err != nil {
+		cleanupErr := b.removeVM(context.Background(), name)
+		if cleanupErr == nil {
+			pruneLeaseState(leaseID)
+		}
+		return LeaseTarget{}, errors.Join(err, cleanupErr)
+	}
 	cleanupFailedLease := func() error {
 		if req.Keep {
 			return nil
@@ -219,10 +225,8 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	return lease, nil
 }
 
-// persistLease records the lease claim and its SSH endpoint in one atomic
-// write. Acquire removes the VM when this fails, so the claim and endpoint
-// must never be written separately: a failure between two writes would leave
-// a claim pointing at a VM that no longer exists.
+// persistLease records ownership before VM creation, then atomically updates
+// the same claim with its SSH endpoint after bootstrap.
 func persistLease(leaseID, slug, name string, cfg Config, req AcquireRequest, lease LeaseTarget) error {
 	return claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH)
 }
@@ -311,10 +315,6 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if lease.LeaseID == "" {
 		lease.LeaseID = strings.TrimSpace(lease.Server.Labels["lease"])
 	}
-	if lease.LeaseID != "" && lease.Server.Status == "missing" {
-		pruneLeaseState(lease.LeaseID)
-		return nil
-	}
 	name := strings.TrimSpace(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]))
 	if name == "" && lease.LeaseID != "" {
 		inst, _, err := b.resolveInstance(ctx, lease.LeaseID)
@@ -394,13 +394,21 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if _, ok := live[claim.LeaseID]; ok {
 			continue
 		}
+		if ready, reason := missingClaimCleanupReady(claim, now); !ready {
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
+			continue
+		}
 		if req.DryRun {
 			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, blank(claim.Slug, "-"))
 			continue
 		}
 		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, blank(claim.Slug, "-"))
-		removeLeaseClaim(claim.LeaseID)
-		removeStoredTestboxKey(claim.LeaseID)
+		if name := instanceNameFromClaim(claim); name != "" {
+			if err := b.removeVMStorage(name, nil); err != nil {
+				return err
+			}
+		}
+		pruneLeaseState(claim.LeaseID)
 		claimsRemoved++
 	}
 	if !req.DryRun {
@@ -679,18 +687,17 @@ func sshAccessScript(user, publicKey string, activate bool) string {
 			`$globalLines = @(); `+
 			`foreach ($line in $sshdLines) { `+
 			`if ($line -match '^\s*Match\s+') { break }; `+
-			`if ($line -match '^\s*(AuthenticationMethods|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|AllowUsers|AllowGroups|DenyUsers|DenyGroups|AuthorizedKeysFile|AuthorizedKeysCommand|AuthorizedKeysCommandUser|TrustedUserCAKeys|AuthorizedPrincipalsFile)\s+') { continue }; `+
+			`if ($line -match '^\s*(AuthenticationMethods|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|AllowUsers|AllowGroups|DenyUsers|DenyGroups|AuthorizedKeysFile|AuthorizedKeysCommand|AuthorizedKeysCommandUser|TrustedUserCAKeys|AuthorizedPrincipalsFile|Include)\s+') { continue }; `+
 			`$globalLines += $line }; `+
 			`$globalLines += 'PubkeyAuthentication yes'; `+
 			`$globalLines += 'PasswordAuthentication no'; `+
-			`$globalLines += 'KbdInteractiveAuthentication no'; `+
 			`$globalLines += 'AuthenticationMethods publickey'; `+
 			`$globalLines += 'AuthorizedKeysFile .ssh/authorized_keys'; `+
 			`$globalLines += 'AllowUsers %s'; `+
 			`$globalLines += 'Match Group administrators'; `+
 			`$globalLines += '       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys'; `+
 			`Set-Content -Encoding ASCII -Path $sshdConfig -Value ($globalLines -join [Environment]::NewLine); `,
-		escapePSString(publicKey), escapePSString(publicKey), escapePSString(user),
+		escapePSString(publicKey), escapePSString(publicKey), escapePSString(strings.ToLower(user)),
 	)
 	if !activate {
 		return script
@@ -866,40 +873,59 @@ func (b *backend) removeVM(ctx context.Context, name string) error {
 		return exit(2, "refusing to remove non-Crabbox Hyper-V VM %q", name)
 	}
 
-	vhdPaths := b.queryVHDPaths(ctx, name)
-
-	stopScript := fmt.Sprintf(`Stop-VM -Name '%s' -Force -Confirm:$false -ErrorAction SilentlyContinue`, escapePSString(name))
-	b.powershell(ctx, stopScript) //nolint:errcheck
-
-	removeScript := fmt.Sprintf(`Remove-VM -Name '%s' -Force -Confirm:$false`, escapePSString(name))
-	result, err := b.powershell(ctx, removeScript)
+	vm, err := b.queryVM(ctx, name)
 	if err != nil {
-		return commandError("Remove-VM", result, err)
+		return err
 	}
+	var vhdPaths []string
+	if vm.State != hypervMissingState {
+		vhdPaths = b.queryVHDPaths(ctx, name)
+		stopScript := fmt.Sprintf(`Stop-VM -Name '%s' -Force -Confirm:$false -ErrorAction SilentlyContinue`, escapePSString(name))
+		b.powershell(ctx, stopScript) //nolint:errcheck
 
-	// Always remove the provider-created boot disk. Client Hyper-V may attach a
-	// <name>_<guid>.avhdx checkpoint disk instead, so remove attached checkpoint
-	// files only when their filename has that exact provider-owned shape.
+		removeScript := fmt.Sprintf(`Remove-VM -Name '%s' -Force -Confirm:$false`, escapePSString(name))
+		result, removeErr := b.powershell(ctx, removeScript)
+		if removeErr != nil {
+			return commandError("Remove-VM", result, removeErr)
+		}
+	}
+	return b.removeVMStorage(name, vhdPaths)
+}
+
+func (b *backend) removeVMStorage(name string, attachedPaths []string) error {
+	var errs []error
 	vhdDir := hypervVHDDir()
 	expectedVHD := filepath.Join(vhdDir, name+".vhdx")
-	b.removeVHDFile(expectedVHD)
-	for _, p := range vhdPaths {
+	if err := b.removeVHDFile(expectedVHD); err != nil {
+		errs = append(errs, err)
+	}
+	for _, p := range attachedPaths {
 		clean := filepath.Clean(p)
 		if strings.EqualFold(clean, filepath.Clean(expectedVHD)) {
 			continue
 		}
 		if ownedHyperVCheckpoint(clean, vhdDir, name) {
-			b.removeVHDFile(p)
+			if err := b.removeVHDFile(p); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
-
-	// Remove the per-VM configuration directory created by New-VM -Path; Remove-VM
-	// unregisters the VM but leaves its <vmDir>/<name> folder behind.
-	if err := os.RemoveAll(filepath.Join(hypervVMDir(), name)); err != nil {
-		fmt.Fprintf(b.rt.Stderr, "warning: failed to remove VM directory for %s: %v\n", name, err)
+	if entries, err := os.ReadDir(vhdDir); err == nil {
+		for _, entry := range entries {
+			path := filepath.Join(vhdDir, entry.Name())
+			if ownedHyperVCheckpoint(path, vhdDir, name) {
+				if err := b.removeVHDFile(path); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("read Hyper-V VHD directory %s: %w", vhdDir, err))
 	}
-
-	return nil
+	if err := removeHyperVConfigFiles(filepath.Join(hypervVMDir(), name)); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 func ownedHyperVCheckpoint(path, vhdDir, name string) bool {
@@ -933,13 +959,60 @@ func ownedHyperVCheckpoint(path, vhdDir, name string) bool {
 	return true
 }
 
-// removeVHDFile deletes a lease VHDX best-effort. The VM is already gone by the
-// time this runs, so a failure must not abort ReleaseLease (that would strand
-// the lease claim); instead surface it as a warning so an orphaned disk is
-// visible rather than silently leaked.
-func (b *backend) removeVHDFile(path string) {
+func (b *backend) removeVHDFile(path string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(b.rt.Stderr, "warning: failed to remove lease VHDX %s: %v\n", path, err)
+		return fmt.Errorf("remove lease VHDX %s: %w", path, err)
+	}
+	return nil
+}
+
+func removeHyperVConfigFiles(root string) error {
+	var dirs []string
+	var errs []error
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if os.IsNotExist(walkErr) {
+				return nil
+			}
+			errs = append(errs, walkErr)
+			if entry != nil && entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			dirs = append(dirs, path)
+			return nil
+		}
+		if isVirtualDiskFile(path) {
+			return nil
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove Hyper-V config file %s: %w", path, err))
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		errs = append(errs, err)
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := os.Remove(dirs[i]); err != nil && !os.IsNotExist(err) {
+			entries, readErr := os.ReadDir(dirs[i])
+			if readErr == nil && len(entries) > 0 {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("remove Hyper-V config directory %s: %w", dirs[i], err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func isVirtualDiskFile(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".vhd", ".vhdx", ".avhd", ".avhdx", ".vhds":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1103,6 +1176,23 @@ func instanceNameFromClaim(claim core.LeaseClaim) string {
 
 func instanceNameFromScope(scope string) string {
 	return strings.TrimPrefix(strings.TrimSpace(scope), "instance:")
+}
+
+func missingClaimCleanupReady(claim core.LeaseClaim, now time.Time) (bool, string) {
+	if !strings.EqualFold(claim.Labels["state"], "provisioning") {
+		return true, ""
+	}
+	var createdAt time.Time
+	if display := core.LeaseLabelTimeDisplay(claim.Labels["created_at"]); display != "" {
+		createdAt, _ = time.Parse(time.RFC3339, display)
+	}
+	if createdAt.IsZero() {
+		createdAt, _ = time.Parse(time.RFC3339, strings.TrimSpace(claim.ClaimedAt))
+	}
+	if createdAt.IsZero() || now.Before(createdAt.Add(hypervProvisioningClaimGrace)) {
+		return false, "provisioning grace"
+	}
+	return true, ""
 }
 
 func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time.Time) (bool, string) {

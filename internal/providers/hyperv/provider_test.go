@@ -717,9 +717,18 @@ func TestAcquireQuarantinesSSHBeforeConnectingNetwork(t *testing.T) {
 	t.Cleanup(func() { hypervHostOS = oldOS })
 
 	ctx, cancel := context.WithCancel(context.Background())
+	var claimSeenBeforeStart bool
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	runner.onRun = func(req core.LocalCommandRequest) {
-		if len(req.Args) > 0 && strings.Contains(req.Args[len(req.Args)-1], "Connect-VMNetworkAdapter") {
+		if len(req.Args) == 0 {
+			return
+		}
+		script := req.Args[len(req.Args)-1]
+		if strings.Contains(script, "Start-VM") {
+			claims, err := listLeaseClaims()
+			claimSeenBeforeStart = err == nil && len(claims) == 1
+		}
+		if strings.Contains(script, "Connect-VMNetworkAdapter") {
 			cancel()
 		}
 	}
@@ -739,6 +748,9 @@ func TestAcquireQuarantinesSSHBeforeConnectingNetwork(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Acquire unexpectedly succeeded after test cancellation")
+	}
+	if !claimSeenBeforeStart {
+		t.Fatal("Acquire started the VM before persisting its provisional claim")
 	}
 
 	startIdx, stageIdx, connectIdx, activateIdx := -1, -1, -1, -1
@@ -1030,6 +1042,9 @@ func TestQueryVMParsesSingle(t *testing.T) {
 func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
 	t.Cleanup(func() { hypervHostOS = oldOS })
@@ -1057,6 +1072,20 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 	if err := persistLease(leaseID, claim.Slug, name, cfg, req, lease); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
+	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
+	vmConfig := filepath.Join(hypervVMDir(), name, "Virtual Machines", "lease.vmcx")
+	if err := os.MkdirAll(filepath.Dir(baseVHD), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(vmConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(baseVHD, []byte("disk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vmConfig, []byte("config"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	resolved, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
@@ -1078,10 +1107,84 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
 		t.Fatalf("missing VM release left key %s: %v", keyPath, err)
 	}
+	for _, path := range []string{baseVHD, vmConfig} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("missing VM release left storage %s: %v", path, err)
+		}
+	}
 	for _, call := range runner.calls {
 		if len(call.Args) > 0 && strings.Contains(call.Args[len(call.Args)-1], "Remove-VM") {
 			t.Fatal("missing VM release should prune local state without calling Remove-VM")
 		}
+	}
+}
+
+func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	const leaseID = "cbx_cleanupmissing"
+	const name = "crabbox-cleanup-missing"
+	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	cfg := b.configForRun()
+	claim := core.LeaseClaim{
+		LeaseID:       leaseID,
+		Slug:          "cleanup-missing",
+		Provider:      providerName,
+		ProviderScope: instanceScope(name),
+		Labels: map[string]string{
+			"instance":   name,
+			"lease":      leaseID,
+			"state":      "provisioning",
+			"created_at": core.LeaseLabelTime(time.Now().Add(-2 * hypervProvisioningClaimGrace)),
+		},
+	}
+	lease := LeaseTarget{
+		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
+		LeaseID: leaseID,
+	}
+	if err := persistLease(leaseID, claim.Slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}, lease); err != nil {
+		t.Fatalf("persistLease: %v", err)
+	}
+	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
+	if err := os.MkdirAll(filepath.Dir(baseVHD), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(baseVHD, []byte("disk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if _, err := os.Stat(baseVHD); !os.IsNotExist(err) {
+		t.Fatalf("cleanup left deterministic disk %s: %v", baseVHD, err)
+	}
+	if claims, err := listLeaseClaims(); err != nil || len(claims) != 0 {
+		t.Fatalf("claims after cleanup=%#v err=%v", claims, err)
+	}
+}
+
+func TestMissingClaimCleanupWaitsForProvisioningGrace(t *testing.T) {
+	now := time.Now().UTC()
+	claim := core.LeaseClaim{
+		LeaseID: "cbx_provisioning",
+		Labels: map[string]string{
+			"state":      "provisioning",
+			"created_at": core.LeaseLabelTime(now),
+		},
+	}
+	if ready, reason := missingClaimCleanupReady(claim, now); ready || reason != "provisioning grace" {
+		t.Fatalf("ready=%v reason=%q", ready, reason)
+	}
+	claim.Labels["created_at"] = core.LeaseLabelTime(now.Add(-2 * hypervProvisioningClaimGrace))
+	if ready, reason := missingClaimCleanupReady(claim, now); !ready || reason != "" {
+		t.Fatalf("stale claim ready=%v reason=%q", ready, reason)
 	}
 }
 
@@ -1211,10 +1314,13 @@ func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
 	}
 	// Windows OpenSSH ignores administrators_authorized_keys unless it is owned
 	// only by SYSTEM + Administrators with inheritance disabled.
-	for _, want := range []string{"icacls.exe", "/inheritance:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "$LASTEXITCODE", "PasswordAuthentication no", "PubkeyAuthentication yes", "AuthenticationMethods publickey", "AllowUsers Administrator", "sshd_config validation failed", "ssh_host_*", "ssh-keygen.exe", "-A", "SSH host key generation failed", "Start-Service sshd", "OpenSSH-Server-In-TCP", "Crabbox-SSH-Quarantine", "Remove-NetFirewallRule"} {
+	for _, want := range []string{"icacls.exe", "/inheritance:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "$LASTEXITCODE", "PasswordAuthentication no", "PubkeyAuthentication yes", "AuthenticationMethods publickey", "AllowUsers administrator", "|Include)", "sshd_config validation failed", "ssh_host_*", "ssh-keygen.exe", "-A", "SSH host key generation failed", "Start-Service sshd", "OpenSSH-Server-In-TCP", "Crabbox-SSH-Quarantine", "Remove-NetFirewallRule"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("admin-key SSH lockdown missing %q\nscript: %s", want, script)
 		}
+	}
+	if strings.Contains(script, "$globalLines += 'KbdInteractiveAuthentication") {
+		t.Fatal("Windows OpenSSH does not support KbdInteractiveAuthentication")
 	}
 	if strings.Index(script, "ssh-keygen.exe") > strings.Index(script, "Start-Service sshd") {
 		t.Fatal("SSH host keys must be regenerated before sshd starts")
@@ -1358,6 +1464,9 @@ func TestRemoveVMQueriesActualVHDPaths(t *testing.T) {
 		responses: map[string]core.LocalCommandResult{},
 	}
 	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
+		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State | ConvertTo-Json -Compress`})] =
+		core.LocalCommandResult{Stdout: `{"Name":"crabbox-blue-1234","State":2}`}
+	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
 		`Get-VMHardDiskDrive -VMName 'crabbox-blue-1234' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path`})] =
 		core.LocalCommandResult{Stdout: customPath + "\n"}
 	b := testBackend(runner)
@@ -1424,6 +1533,9 @@ func TestRemoveVMCleansBaseDiskAndDirDespiteCheckpoint(t *testing.T) {
 	}
 
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
+		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State | ConvertTo-Json -Compress`})] =
+		core.LocalCommandResult{Stdout: `{"Name":"crabbox-blue-1234","State":2}`}
 	// The attached disk reported by Hyper-V is the checkpoint .avhdx, not the base.
 	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
 		`Get-VMHardDiskDrive -VMName 'crabbox-blue-1234' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path`})] =
@@ -1440,6 +1552,41 @@ func TestRemoveVMCleansBaseDiskAndDirDespiteCheckpoint(t *testing.T) {
 	}
 	if _, err := os.Stat(dataDisk); err != nil {
 		t.Fatalf("removeVM deleted attached user data disk %s: %v", dataDisk, err)
+	}
+}
+
+func TestRemoveVMPreservesDataDiskInsideVMDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	name := "crabbox-blue-1234"
+	vmDir := filepath.Join(hypervVMDir(), name)
+	dataDisk := filepath.Join(vmDir, "Virtual Hard Disks", "user-data.vhdx")
+	configFile := filepath.Join(vmDir, "Virtual Machines", "lease.vmcx")
+	for _, path := range []string{dataDisk, configFile} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
+		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State | ConvertTo-Json -Compress`})] =
+		core.LocalCommandResult{Stdout: `{"Name":"crabbox-blue-1234","State":2}`}
+	b := testBackend(runner)
+
+	if err := b.removeVM(context.Background(), name); err != nil {
+		t.Fatalf("removeVM: %v", err)
+	}
+	if _, err := os.Stat(dataDisk); err != nil {
+		t.Fatalf("removeVM deleted user data disk: %v", err)
+	}
+	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
+		t.Fatalf("removeVM left Hyper-V config file: %v", err)
 	}
 }
 
