@@ -35,6 +35,7 @@ func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagVa
 	}
 	if flagWasSet(fs, "windows-mode") {
 		cfg.WindowsMode = *values.WindowsMode
+		cfg.explicitWindowsMode = *values.WindowsMode
 	}
 	if flagWasSet(fs, "static-host") {
 		cfg.Static.Host = *values.StaticHost

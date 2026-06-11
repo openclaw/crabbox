@@ -686,7 +686,7 @@ func TestProviderCapabilitiesPrimary(t *testing.T) {
 		{"proxmox", TransportSSH}, // legacy mapping was TransportTailnet — capability model corrects to SSH
 		{"exe-dev", TransportSSH},
 		{"daytona", TransportSSH},
-		{"islo", TransportURL},
+		{"islo", TransportURL}, // outbound-only userspace Tailscale is not a dialable peer plane
 		{"modal", TransportNone},
 		{"cloudflare", TransportNone},
 		{"blacksmith-testbox", TransportNone},

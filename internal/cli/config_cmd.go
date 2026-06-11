@@ -23,11 +23,26 @@ func (a App) configShow(args []string) error {
 	if err := validateProviderConfig(cfg); err != nil {
 		return err
 	}
+	cfg = effectiveConfigForShow(cfg)
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(configShowView(cfg))
 	}
 	writeConfigShowText(a.Stdout, cfg)
 	return nil
+}
+
+func effectiveConfigForShow(cfg Config) Config {
+	if cfg.Provider == "digitalocean" {
+		base := baseConfig()
+		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
+			cfg.SSHUser = "root"
+		}
+		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+	}
+	return cfg
 }
 
 func configShowView(cfg Config) map[string]any {
@@ -96,6 +111,12 @@ func configShowView(cfg Config) map[string]any {
 			"network":       cfg.AzureNetwork,
 			"sshCIDRs":      cfg.AzureSSHCIDRs,
 		},
+		"digitalocean": map[string]any{
+			"region":   cfg.DigitalOcean.Region,
+			"image":    cfg.DigitalOcean.Image,
+			"vpc":      cfg.DigitalOcean.VPCUUID,
+			"sshCIDRs": cfg.DigitalOcean.SSHCIDRs,
+		},
 		"azureDynamicSessions": map[string]any{
 			"endpoint":        cfg.AzureDynamicSessions.Endpoint,
 			"unsupportedPool": cfg.AzureDynamicSessions.Pool,
@@ -120,6 +141,15 @@ func configShowView(cfg Config) map[string]any {
 			"autoStopIdleTimeout": cfg.Namespace.AutoStopIdleTimeout.String(),
 			"workRoot":            cfg.Namespace.WorkRoot,
 			"deleteOnRelease":     cfg.Namespace.DeleteOnRelease,
+		},
+		"morph": map[string]any{
+			"apiUrl":          cfg.Morph.APIURL,
+			"auth":            tokenState(cfg.Morph.APIKey),
+			"snapshot":        cfg.Morph.Snapshot,
+			"sshGatewayHost":  cfg.Morph.SSHGatewayHost,
+			"workRoot":        cfg.Morph.WorkRoot,
+			"deleteOnRelease": cfg.Morph.DeleteOnRelease,
+			"wakeOnSSH":       cfg.Morph.WakeOnSSH,
 		},
 		"e2b": map[string]any{
 			"apiUrl":   cfg.E2B.APIURL,
@@ -292,6 +322,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "actions repo=%s workflow=%s job=%s ref=%s runner_version=%s ephemeral=%t labels=%s\n", blank(cfg.Actions.Repo, "-"), blank(cfg.Actions.Workflow, "-"), blank(cfg.Actions.Job, "-"), blank(cfg.Actions.Ref, "-"), cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, blank(strings.Join(cfg.Actions.RunnerLabels, ","), "-"))
 	fmt.Fprintf(w, "blacksmith org=%s workflow=%s job=%s ref=%s idle_timeout=%s debug=%t\n", blank(cfg.Blacksmith.Org, "-"), blank(cfg.Blacksmith.Workflow, "-"), blank(cfg.Blacksmith.Job, "-"), blank(cfg.Blacksmith.Ref, "-"), cfg.Blacksmith.IdleTimeout, cfg.Blacksmith.Debug)
 	fmt.Fprintf(w, "namespace image=%s size=%s repository=%s site=%s volume_size_gb=%d auto_stop_idle_timeout=%s work_root=%s delete_on_release=%t\n", cfg.Namespace.Image, blank(cfg.Namespace.Size, "-"), blank(cfg.Namespace.Repository, "-"), blank(cfg.Namespace.Site, "-"), cfg.Namespace.VolumeSizeGB, cfg.Namespace.AutoStopIdleTimeout, cfg.Namespace.WorkRoot, cfg.Namespace.DeleteOnRelease)
+	fmt.Fprintf(w, "morph api_url=%s snapshot=%s ssh_gateway_host=%s work_root=%s delete_on_release=%t wake_on_ssh=%t auth=%s\n", blank(cfg.Morph.APIURL, "-"), blank(cfg.Morph.Snapshot, "-"), blank(cfg.Morph.SSHGatewayHost, "-"), blank(cfg.Morph.WorkRoot, "-"), cfg.Morph.DeleteOnRelease, cfg.Morph.WakeOnSSH, tokenState(cfg.Morph.APIKey))
 	fmt.Fprintf(w, "e2b api_url=%s domain=%s template=%s workdir=%s user=%s\n", cfg.E2B.APIURL, cfg.E2B.Domain, cfg.E2B.Template, cfg.E2B.Workdir, blank(cfg.E2B.User, "-"))
 	fmt.Fprintf(w, "upstash_box base_url=%s runtime=%s size=%s workdir=%s keep_alive=%t auth=%s\n", cfg.UpstashBox.BaseURL, cfg.UpstashBox.Runtime, cfg.UpstashBox.Size, cfg.UpstashBox.Workdir, cfg.UpstashBox.KeepAlive, tokenState(cfg.UpstashBox.APIKey))
 	fmt.Fprintf(w, "ascii_box base_url=%s cli=%s workdir=%s auth=%s\n", cfg.AsciiBox.BaseURL, cfg.AsciiBox.CLIPath, cfg.AsciiBox.Workdir, tokenState(cfg.AsciiBox.APIKey))
@@ -314,6 +345,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	}
 	fmt.Fprintf(w, "aws region=%s root_gb=%d ssh_cidrs=%s\n", cfg.AWSRegion, cfg.AWSRootGB, blank(strings.Join(cfg.AWSSSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "azure location=%s resource_group=%s os_disk=%s network=%s ssh_cidrs=%s\n", cfg.AzureLocation, cfg.AzureResourceGroup, cfg.AzureOSDisk, blank(cfg.AzureNetwork, "-"), blank(strings.Join(cfg.AzureSSHCIDRs, ","), "-"))
+	fmt.Fprintf(w, "digitalocean region=%s image=%s vpc=%s ssh_cidrs=%s\n", cfg.DigitalOcean.Region, cfg.DigitalOcean.Image, blank(cfg.DigitalOcean.VPCUUID, "-"), blank(strings.Join(cfg.DigitalOcean.SSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "azure_dynamic_sessions endpoint=%s unsupported_pool=%s api_version=%s workdir=%s timeout_secs=%d\n", blank(cfg.AzureDynamicSessions.Endpoint, "-"), blank(cfg.AzureDynamicSessions.Pool, "-"), cfg.AzureDynamicSessions.APIVersion, cfg.AzureDynamicSessions.Workdir, cfg.AzureDynamicSessions.TimeoutSecs)
 	fmt.Fprintf(w, "gcp project=%s zone=%s image=%s network=%s subnet=%s root_gb=%d ssh_cidrs=%s\n", blank(cfg.GCPProject, "-"), cfg.GCPZone, cfg.GCPImage, cfg.GCPNetwork, blank(cfg.GCPSubnet, "-"), cfg.GCPRootGB, blank(strings.Join(cfg.GCPSSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "proxmox api_url=%s node=%s template_id=%d storage=%s pool=%s bridge=%s user=%s work_root=%s full_clone=%t auth=%s\n", blank(cfg.Proxmox.APIURL, "-"), blank(cfg.Proxmox.Node, "-"), cfg.Proxmox.TemplateID, blank(cfg.Proxmox.Storage, "-"), blank(cfg.Proxmox.Pool, "-"), blank(cfg.Proxmox.Bridge, "-"), cfg.Proxmox.User, cfg.Proxmox.WorkRoot, cfg.Proxmox.FullClone, tokenState(cfg.Proxmox.TokenSecret))

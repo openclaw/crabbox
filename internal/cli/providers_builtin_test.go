@@ -10,6 +10,7 @@ import (
 
 func init() {
 	RegisterProvider(testHetznerProvider{})
+	RegisterProvider(testDigitalOceanProvider{})
 	RegisterProvider(testAWSProvider{})
 	RegisterProvider(testAzureProvider{})
 	RegisterProvider(testAzureDynamicSessionsProvider{})
@@ -21,6 +22,7 @@ func init() {
 	RegisterProvider(testRunPodProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
+	RegisterProvider(testMorphProvider{})
 	RegisterProvider(testDaytonaProvider{})
 	RegisterProvider(testIsloProvider{})
 	RegisterProvider(testE2BProvider{})
@@ -28,9 +30,11 @@ func init() {
 	RegisterProvider(testCloudflareProvider{})
 	RegisterProvider(testSpritesProvider{})
 	RegisterProvider(testLocalContainerProvider{})
+	RegisterProvider(testAppleVZProvider{})
 	RegisterProvider(testDockerSandboxProvider{})
 	RegisterProvider(testMultipassProvider{})
 	RegisterProvider(testTartProvider{})
+	RegisterProvider(testHyperVProvider{})
 	RegisterProvider(testParallelsProvider{})
 	RegisterProvider(testWandbProvider{})
 	RegisterProvider(testServiceControlProvider{})
@@ -199,6 +203,30 @@ func (testHetznerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testHetznerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testDigitalOceanProvider struct{}
+
+func (testDigitalOceanProvider) Name() string      { return "digitalocean" }
+func (testDigitalOceanProvider) Aliases() []string { return nil }
+func (testDigitalOceanProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "digitalocean",
+		Family:      "digitalocean",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testDigitalOceanProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testDigitalOceanProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (testDigitalOceanProvider) ServerTypeForConfig(Config) string { return "s-1vcpu-1gb" }
+func (testDigitalOceanProvider) ServerTypeForClass(string) string  { return "s-1vcpu-1gb" }
+func (p testDigitalOceanProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
@@ -710,6 +738,83 @@ type testNamespaceFlagValues struct {
 	WorkRoot *string
 }
 
+type testMorphProvider struct{}
+
+func (testMorphProvider) Name() string      { return "morph" }
+func (testMorphProvider) Aliases() []string { return nil }
+func (testMorphProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "morph",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testMorphFlagValues struct {
+	APIURL          *string
+	Snapshot        *string
+	WorkRoot        *string
+	DeleteOnRelease *bool
+	WakeOnSSH       *bool
+}
+
+func (testMorphProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testMorphFlagValues{
+		APIURL:          fs.String("morph-api-url", defaults.Morph.APIURL, "Morph API URL"),
+		Snapshot:        fs.String("morph-snapshot", defaults.Morph.Snapshot, "Morph snapshot"),
+		WorkRoot:        fs.String("morph-work-root", defaults.Morph.WorkRoot, "Morph work root"),
+		DeleteOnRelease: fs.Bool("morph-delete-on-release", defaults.Morph.DeleteOnRelease, "Morph delete on release"),
+		WakeOnSSH:       fs.Bool("morph-wake-on-ssh", defaults.Morph.WakeOnSSH, "Morph wake on ssh"),
+	}
+}
+
+func (testMorphProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	if cfg.Provider == "morph" {
+		if flagWasSet(fs, "class") {
+			return exit(2, "--class is not supported for provider=morph")
+		}
+		if flagWasSet(fs, "type") {
+			return exit(2, "--type is not supported for provider=morph; use --morph-snapshot")
+		}
+		if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
+			return exit(2, "provider=morph supports target=linux only")
+		}
+	}
+	v, ok := values.(testMorphFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "morph-api-url") {
+		cfg.Morph.APIURL = *v.APIURL
+	}
+	if flagWasSet(fs, "morph-snapshot") {
+		cfg.Morph.Snapshot = *v.Snapshot
+	}
+	if flagWasSet(fs, "morph-work-root") {
+		cfg.Morph.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "morph-delete-on-release") {
+		cfg.Morph.DeleteOnRelease = *v.DeleteOnRelease
+	}
+	if flagWasSet(fs, "morph-wake-on-ssh") {
+		cfg.Morph.WakeOnSSH = *v.WakeOnSSH
+	}
+	return nil
+}
+
+func (testMorphProvider) ServerTypeForConfig(cfg Config) string {
+	return firstNonBlank(cfg.Morph.Snapshot, "snapshot")
+}
+
+func (testMorphProvider) ServerTypeForClass(string) string { return "snapshot" }
+
+func (p testMorphProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
 func (testDaytonaProvider) Name() string      { return "daytona" }
 func (testDaytonaProvider) Aliases() []string { return nil }
 func (testDaytonaProvider) Spec() ProviderSpec {
@@ -769,11 +874,12 @@ func (testIsloProvider) Name() string      { return "islo" }
 func (testIsloProvider) Aliases() []string { return nil }
 func (testIsloProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name:        "islo",
-		Kind:        ProviderKindDelegatedRun,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureURLBridge},
-		Coordinator: CoordinatorNever,
+		Name:                "islo",
+		Kind:                ProviderKindDelegatedRun,
+		Targets:             []TargetSpec{{OS: targetLinux}},
+		Features:            FeatureSet{FeatureURLBridge, FeatureRunSession, FeatureTailscale},
+		Coordinator:         CoordinatorNever,
+		TailscaleEgressOnly: true,
 	}
 }
 
@@ -1087,6 +1193,85 @@ func (testLocalContainerProvider) NativeCheckpointCapability(req NativeCheckpoin
 	return NativeCheckpointCapability{Kind: checkpointKindDockerCommit, Direct: true}, true
 }
 
+type testAppleVZProvider struct{}
+
+func (testAppleVZProvider) Name() string { return "apple-vz" }
+func (testAppleVZProvider) Aliases() []string {
+	return []string{"applevz"}
+}
+func (testAppleVZProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "apple-vz",
+		Family:      "local-vm",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testAppleVZFlagValues struct {
+	HelperPath  *string
+	Image       *string
+	ImageSHA256 *string
+	User        *string
+	WorkRoot    *string
+	CPUs        *int
+	MemoryMiB   *int
+	DiskGiB     *int
+}
+
+func (testAppleVZProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testAppleVZFlagValues{
+		HelperPath:  fs.String("apple-vz-helper", defaults.AppleVZ.HelperPath, "apple-vz helper"),
+		Image:       fs.String("apple-vz-image", defaults.AppleVZ.Image, "apple-vz image"),
+		ImageSHA256: fs.String("apple-vz-image-sha256", defaults.AppleVZ.ImageSHA256, "apple-vz image sha256"),
+		User:        fs.String("apple-vz-user", defaults.AppleVZ.User, "apple-vz user"),
+		WorkRoot:    fs.String("apple-vz-work-root", defaults.AppleVZ.WorkRoot, "apple-vz work root"),
+		CPUs:        fs.Int("apple-vz-cpus", defaults.AppleVZ.CPUs, "apple-vz CPUs"),
+		MemoryMiB:   fs.Int("apple-vz-memory", defaults.AppleVZ.MemoryMiB, "apple-vz memory MiB"),
+		DiskGiB:     fs.Int("apple-vz-disk", defaults.AppleVZ.DiskGiB, "apple-vz disk GiB"),
+	}
+}
+func (testAppleVZProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testAppleVZFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "apple-vz-helper") {
+		cfg.AppleVZ.HelperPath = *v.HelperPath
+	}
+	if flagWasSet(fs, "apple-vz-image") {
+		cfg.AppleVZ.Image = *v.Image
+		cfg.AppleVZ.ImageSHA256 = ""
+		cfg.appleVZImageExplicit = true
+	}
+	if flagWasSet(fs, "apple-vz-image-sha256") {
+		cfg.AppleVZ.ImageSHA256 = *v.ImageSHA256
+	}
+	if flagWasSet(fs, "apple-vz-user") {
+		cfg.AppleVZ.User = *v.User
+		cfg.SSHUser = *v.User
+	}
+	if flagWasSet(fs, "apple-vz-work-root") {
+		cfg.AppleVZ.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "apple-vz-cpus") {
+		cfg.AppleVZ.CPUs = *v.CPUs
+	}
+	if flagWasSet(fs, "apple-vz-memory") {
+		cfg.AppleVZ.MemoryMiB = *v.MemoryMiB
+	}
+	if flagWasSet(fs, "apple-vz-disk") {
+		cfg.AppleVZ.DiskGiB = *v.DiskGiB
+	}
+	return nil
+}
+func (p testAppleVZProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
 type testMultipassProvider struct{}
 
 func (testMultipassProvider) Name() string { return "multipass" }
@@ -1226,6 +1411,59 @@ func (testTartProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	return nil
 }
 func (p testTartProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testHyperVProvider struct{}
+
+func (testHyperVProvider) Name() string      { return "hyperv" }
+func (testHyperVProvider) Aliases() []string { return nil }
+func (testHyperVProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "hyperv",
+		Family:      "local-vm",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetWindows, WindowsMode: windowsModeNormal}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testHyperVFlagValues struct {
+	Image  *string
+	CPUs   *int
+	Memory *int
+	Switch *string
+}
+
+func (testHyperVProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testHyperVFlagValues{
+		Image:  fs.String("hyperv-image", defaults.HyperV.Image, "Hyper-V image"),
+		CPUs:   fs.Int("hyperv-cpu", defaults.HyperV.CPUs, "Hyper-V CPUs"),
+		Memory: fs.Int("hyperv-memory", defaults.HyperV.Memory, "Hyper-V memory MB"),
+		Switch: fs.String("hyperv-switch", defaults.HyperV.Switch, "Hyper-V switch"),
+	}
+}
+func (testHyperVProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testHyperVFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "hyperv-image") {
+		cfg.HyperV.Image = *v.Image
+	}
+	if flagWasSet(fs, "hyperv-cpu") {
+		cfg.HyperV.CPUs = *v.CPUs
+	}
+	if flagWasSet(fs, "hyperv-memory") {
+		cfg.HyperV.Memory = *v.Memory
+	}
+	if flagWasSet(fs, "hyperv-switch") {
+		cfg.HyperV.Switch = *v.Switch
+	}
+	return nil
+}
+func (p testHyperVProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

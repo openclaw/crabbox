@@ -95,9 +95,12 @@ Flag equivalents: `--tailscale`, `--network`, `--tailscale-tags`,
 `--tailscale-hostname-template`, `--tailscale-auth-key-env`, `--tailscale-exit-node`,
 and `--tailscale-exit-node-allow-lan-access`.
 
-In direct-provider mode the one-off auth key is read from the variable named by
-`tailscale.authKeyEnv` (default `CRABBOX_TAILSCALE_AUTH_KEY`). Brokered mode does not
-need a local key; the Worker mints one per lease (see below).
+In direct-provider mode the auth key is read from the variable named by
+`tailscale.authKeyEnv` (default `CRABBOX_TAILSCALE_AUTH_KEY`). Managed VM
+providers normally use a one-off key. Islo requires a reusable, ephemeral key
+because its snapshot-safe memory-only node identity must re-enroll after daemon
+loss. Brokered mode does not need a local key; the Worker mints one per lease
+(see below).
 
 ## Exit nodes
 

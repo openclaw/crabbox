@@ -145,6 +145,8 @@ Pick whichever matches your intent:
   [Tenki](providers/tenki.md),
   [Daytona](providers/daytona.md), [Islo](providers/islo.md),
   [E2B](providers/e2b.md), [Modal](providers/modal.md),
+  [OpenComputer](providers/opencomputer.md),
+  [Anthropic Sandbox Runtime](providers/anthropic-sandbox-runtime.md),
   [Tensorlake](providers/tensorlake.md), [Upstash Box](providers/upstash-box.md),
   [Weights & Biases](providers/wandb.md), [Cloudflare](providers/cloudflare.md).
 - **Operate it:** [Operations](operations.md),

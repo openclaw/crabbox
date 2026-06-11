@@ -51,6 +51,10 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_GCP_SSH_CIDRS",
 		"CRABBOX_GCP_ROOT_GB",
 		"CRABBOX_GCP_SERVICE_ACCOUNT",
+		"CRABBOX_DIGITALOCEAN_REGION",
+		"CRABBOX_DIGITALOCEAN_IMAGE",
+		"CRABBOX_DIGITALOCEAN_VPC",
+		"CRABBOX_DIGITALOCEAN_SSH_CIDRS",
 		"CRABBOX_DAYTONA_API_KEY",
 		"DAYTONA_API_KEY",
 		"CRABBOX_DAYTONA_JWT_TOKEN",
@@ -130,6 +134,9 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES",
 		"CRABBOX_DOCKER_SANDBOX_MCP",
 		"CRABBOX_DOCKER_SANDBOX_KIT",
+		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI",
+		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS",
+		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG",
 		"CRABBOX_ASCII_BOX_API_KEY",
 		"ASCII_BOX_API_KEY",
 		"CRABBOX_ASCII_BOX_BASE_URL",
@@ -144,6 +151,14 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_APPLE_CONTAINER_CPUS",
 		"CRABBOX_APPLE_CONTAINER_MEMORY",
 		"CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS",
+		"CRABBOX_APPLE_VZ_HELPER",
+		"CRABBOX_APPLE_VZ_IMAGE",
+		"CRABBOX_APPLE_VZ_IMAGE_SHA256",
+		"CRABBOX_APPLE_VZ_USER",
+		"CRABBOX_APPLE_VZ_WORK_ROOT",
+		"CRABBOX_APPLE_VZ_CPUS",
+		"CRABBOX_APPLE_VZ_MEMORY",
+		"CRABBOX_APPLE_VZ_DISK",
 		"CRABBOX_MULTIPASS_CLI",
 		"CRABBOX_MULTIPASS_IMAGE",
 		"CRABBOX_MULTIPASS_USER",
@@ -193,6 +208,14 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_NAMESPACE_AUTO_STOP_IDLE_TIMEOUT",
 		"CRABBOX_NAMESPACE_WORK_ROOT",
 		"CRABBOX_NAMESPACE_DELETE_ON_RELEASE",
+		"CRABBOX_MORPH_API_KEY",
+		"MORPH_API_KEY",
+		"CRABBOX_MORPH_API_URL",
+		"CRABBOX_MORPH_SNAPSHOT",
+		"CRABBOX_MORPH_SSH_GATEWAY_HOST",
+		"CRABBOX_MORPH_WORK_ROOT",
+		"CRABBOX_MORPH_DELETE_ON_RELEASE",
+		"CRABBOX_MORPH_WAKE_ON_SSH",
 		"CRABBOX_EXE_DEV_CONTROL_HOST",
 		"EXE_DEV_CONTROL_HOST",
 		"CRABBOX_EXE_DEV_IMAGE",
@@ -273,6 +296,286 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/a,/tmp/b" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7,all" || strings.Join(cfg.DockerSandbox.Kit, ",") != "kit-a,kit-b" {
 		t.Fatalf("env dockerSandbox list config not applied: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDigitalOceanConfigFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "digitalocean",
+		DigitalOcean: &fileDigitalOceanConfig{
+			Region:   "sfo3",
+			Image:    "ubuntu-24-04-x64",
+			VPCUUID:  "vpc-file",
+			SSHCIDRs: []string{"203.0.113.0/24"},
+		},
+	})
+	if cfg.Provider != "digitalocean" || cfg.DigitalOcean.Region != "sfo3" || cfg.Location == "sfo3" || cfg.DigitalOcean.Image != "ubuntu-24-04-x64" || cfg.Image == "ubuntu-24-04-x64" || cfg.DigitalOcean.VPCUUID != "vpc-file" {
+		t.Fatalf("file digitalocean config not applied: cfg=%#v do=%#v", cfg, cfg.DigitalOcean)
+	}
+	if strings.Join(cfg.DigitalOcean.SSHCIDRs, ",") != "203.0.113.0/24" {
+		t.Fatalf("file digitalocean ssh cidrs=%v", cfg.DigitalOcean.SSHCIDRs)
+	}
+
+	t.Setenv("CRABBOX_DIGITALOCEAN_REGION", "nyc3")
+	t.Setenv("CRABBOX_DIGITALOCEAN_IMAGE", "ubuntu-22-04-x64")
+	t.Setenv("CRABBOX_DIGITALOCEAN_VPC", "vpc-env")
+	t.Setenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS", "198.51.100.0/24,2001:db8::/64")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.DigitalOcean.Region != "nyc3" || cfg.Location == "nyc3" || cfg.DigitalOcean.Image != "ubuntu-22-04-x64" || cfg.Image == "ubuntu-22-04-x64" || cfg.DigitalOcean.VPCUUID != "vpc-env" {
+		t.Fatalf("env digitalocean config not applied: cfg=%#v do=%#v", cfg, cfg.DigitalOcean)
+	}
+	if strings.Join(cfg.DigitalOcean.SSHCIDRs, ",") != "198.51.100.0/24,2001:db8::/64" {
+		t.Fatalf("env digitalocean ssh cidrs=%v", cfg.DigitalOcean.SSHCIDRs)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	base := baseConfig()
+	if cfg.Location != base.Location || cfg.Image != base.Image {
+		t.Fatalf("digitalocean defaults leaked into generic fields: cfg=%#v", cfg)
+	}
+}
+
+func TestDigitalOceanPortableOSSelection(t *testing.T) {
+	t.Run("supported selector maps to provider image", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		cfg.OSImage = "ubuntu:24.04"
+		cfg.osImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+			t.Fatalf("DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+	})
+
+	t.Run("unsupported selector is deferred to acquisition", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+			t.Fatalf("default DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+		cfg.OSImage = "ubuntu:26.04"
+		cfg.osImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "" {
+			t.Fatalf("DigitalOcean.Image=%q, want unresolved provider image", cfg.DigitalOcean.Image)
+		}
+	})
+
+	t.Run("provider image overrides portable selector", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		cfg.OSImage = "ubuntu:26.04"
+		cfg.osImageExplicit = true
+		cfg.DigitalOcean.Image = "custom-image"
+		cfg.digitalOceanImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "custom-image" {
+			t.Fatalf("DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+	})
+}
+
+func TestDigitalOceanUnsupportedPortableOSDoesNotBlockCLIOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte("provider: digitalocean\nos: ubuntu:26.04\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("portable os override", func(t *testing.T) {
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs := newFlagSet("test", io.Discard)
+		values := registerLeaseCreateFlags(fs, cfg)
+		if err := parseFlags(fs, []string{"--os", "ubuntu:24.04"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+			t.Fatalf("DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+	})
+
+	t.Run("provider override", func(t *testing.T) {
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs := newFlagSet("test", io.Discard)
+		values := registerLeaseCreateFlags(fs, cfg)
+		if err := parseFlags(fs, []string{"--provider", "aws"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "aws" {
+			t.Fatalf("Provider=%q", cfg.Provider)
+		}
+	})
+}
+
+func TestDigitalOceanEnvDoesNotMutateGenericFieldsForOtherProviders(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "hetzner"
+	originalLocation := cfg.Location
+	originalImage := cfg.Image
+	t.Setenv("CRABBOX_DIGITALOCEAN_REGION", "nyc3")
+	t.Setenv("CRABBOX_DIGITALOCEAN_IMAGE", "ubuntu-22-04-x64")
+
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.DigitalOcean.Region != "nyc3" || cfg.DigitalOcean.Image != "ubuntu-22-04-x64" {
+		t.Fatalf("digitalocean env not stored: do=%#v", cfg.DigitalOcean)
+	}
+	if cfg.Location != originalLocation || cfg.Image != originalImage {
+		t.Fatalf("digitalocean env leaked into generic fields: location=%q image=%q", cfg.Location, cfg.Image)
+	}
+}
+
+func TestDigitalOceanDefaultsPreserveExplicitGenericBaseValues(t *testing.T) {
+	clearConfigEnv(t)
+	base := baseConfig()
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "digitalocean",
+		SSH: &fileSSHConfig{
+			User: base.SSHUser,
+			Port: base.SSHPort,
+		},
+		Hetzner: &fileHetznerConfig{
+			Location: base.Location,
+			Image:    base.Image,
+		},
+		DigitalOcean: &fileDigitalOceanConfig{
+			Region: "sfo3",
+			Image:  "ubuntu-24-04-x64",
+		},
+	})
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	if cfg.Location != base.Location {
+		t.Fatalf("Location=%q want explicit %q", cfg.Location, base.Location)
+	}
+	if cfg.Image != base.Image {
+		t.Fatalf("Image=%q want explicit %q", cfg.Image, base.Image)
+	}
+	if cfg.SSHUser != base.SSHUser || cfg.SSHPort != base.SSHPort {
+		t.Fatalf("SSH=%s@:%s want explicit %s@:%s", cfg.SSHUser, cfg.SSHPort, base.SSHUser, base.SSHPort)
+	}
+	if cfg.DigitalOcean.Region != "sfo3" || cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+		t.Fatalf("DigitalOcean=%#v", cfg.DigitalOcean)
+	}
+}
+
+func TestDigitalOceanDefaultsPreserveExplicitGenericWorkRoot(t *testing.T) {
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "tart",
+		WorkRoot: "/srv/crabbox",
+		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
+		Windows:  &fileWindowsConfig{Mode: windowsModeNormal},
+	})
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != cfg.Tart.WorkRoot {
+		t.Fatalf("Tart WorkRoot=%q want provider root %q before override", cfg.WorkRoot, cfg.Tart.WorkRoot)
+	}
+	cfg.WindowsMode = windowsModeWSL2
+	cfg.Provider = "digitalocean"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("DigitalOcean WorkRoot=%q want explicit generic root", cfg.WorkRoot)
+	}
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("DigitalOcean SSHUser=%q want explicit generic user", cfg.SSHUser)
+	}
+	if cfg.SSHPort != "2200" {
+		t.Fatalf("DigitalOcean SSHPort=%q want explicit generic port", cfg.SSHPort)
+	}
+	if cfg.WindowsMode != windowsModeNormal {
+		t.Fatalf("DigitalOcean WindowsMode=%q want explicit generic mode", cfg.WindowsMode)
+	}
+}
+
+func TestDigitalOceanDefaultsIgnoreStaticProviderOverlays(t *testing.T) {
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "ssh",
+		WorkRoot: "/srv/crabbox",
+		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
+		Static: &fileStaticConfig{
+			User:     "builder",
+			Port:     "2202",
+			WorkRoot: "/srv/static",
+		},
+	})
+	normalizeTargetConfig(&cfg)
+	if cfg.SSHUser != "alice" || cfg.SSHPort != "2200" || cfg.WorkRoot != "/srv/static" {
+		t.Fatalf("static source settings user=%q port=%q root=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
+	}
+
+	cfg.Provider = "digitalocean"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHUser != "alice" || cfg.SSHPort != "2200" || cfg.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("DigitalOcean settings user=%q port=%q root=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
+	}
+}
+
+func TestDigitalOceanDefaultsDoNotLeakAcrossProviderOverride(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "digitalocean"
+	wantLocation := cfg.Location
+	wantImage := cfg.Image
+	wantSSHUser := cfg.SSHUser
+	wantSSHPort := cfg.SSHPort
+	wantFallbackPorts := append([]string(nil), cfg.SSHFallbackPorts...)
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("digitalocean defaults: %v", err)
+	}
+	cfg.Provider = "hetzner"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("hetzner defaults: %v", err)
+	}
+
+	if cfg.Location != wantLocation || cfg.Image != wantImage ||
+		cfg.SSHUser != wantSSHUser || cfg.SSHPort != wantSSHPort ||
+		strings.Join(cfg.SSHFallbackPorts, ",") != strings.Join(wantFallbackPorts, ",") {
+		t.Fatalf("digitalocean defaults leaked after provider override: %#v", cfg)
 	}
 }
 
@@ -401,6 +704,57 @@ dockerSandbox:
 	}
 }
 
+func TestAnthropicSandboxRuntimeConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.AnthropicSRT.CLIPath != "srt" || cfg.AnthropicSRT.Settings != "" || cfg.AnthropicSRT.Debug {
+		t.Fatalf("anthropicSandboxRuntime defaults not applied: %#v", cfg.AnthropicSRT)
+	}
+	settings := ".crabbox/srt-settings.json"
+	debug := true
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "anthropic-sandbox-runtime",
+		AnthropicSRT: &fileAnthropicSRTConfig{
+			CLIPath:  "/opt/srt",
+			Settings: &settings,
+			Debug:    &debug,
+		},
+	})
+	if cfg.Provider != "anthropic-sandbox-runtime" || cfg.AnthropicSRT.CLIPath != "/opt/srt" || cfg.AnthropicSRT.Settings != settings || !cfg.AnthropicSRT.Debug {
+		t.Fatalf("file anthropicSandboxRuntime config not applied: %#v", cfg.AnthropicSRT)
+	}
+
+	t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI", "/usr/local/bin/srt")
+	t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS", ".crabbox/env-srt-settings.json")
+	t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.AnthropicSRT.CLIPath != "/usr/local/bin/srt" || cfg.AnthropicSRT.Settings != ".crabbox/env-srt-settings.json" || cfg.AnthropicSRT.Debug {
+		t.Fatalf("env anthropicSandboxRuntime config not applied: %#v", cfg.AnthropicSRT)
+	}
+}
+
+func TestAnthropicSandboxRuntimeFileConfigCanClearSettings(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.AnthropicSRT.Settings = ".crabbox/inherited-srt-settings.json"
+
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+anthropicSandboxRuntime:
+  settings: ""
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatalf("applyFileConfig err=%v", err)
+	}
+	if cfg.AnthropicSRT.Settings != "" {
+		t.Fatalf("settings=%q want cleared", cfg.AnthropicSRT.Settings)
+	}
+}
+
 func TestAsciiBoxConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
@@ -460,6 +814,126 @@ func TestAppleContainerConfigDefaultsFileAndEnv(t *testing.T) {
 	applyEnv(&cfg)
 	if cfg.AppleContainer.CLIPath != "/usr/local/bin/container" || cfg.AppleContainer.Image != "example-org/other:live" || cfg.AppleContainer.User != "env-user" || cfg.AppleContainer.WorkRoot != "/work/env" || cfg.AppleContainer.CPUs != 6 || cfg.AppleContainer.Memory != "12g" || len(cfg.AppleContainer.ExtraRunArgs) != 2 {
 		t.Fatalf("env appleContainer config not applied: %#v", cfg.AppleContainer)
+	}
+}
+
+func TestAppleVZConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "apple-vz"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVZ.User != "crabbox" || cfg.AppleVZ.WorkRoot != "/work/crabbox" || cfg.AppleVZ.CPUs != 4 || cfg.AppleVZ.MemoryMiB != 8192 || cfg.AppleVZ.DiskGiB != 30 {
+		t.Fatalf("apple-vz defaults not applied: %#v", cfg.AppleVZ)
+	}
+	if cfg.AppleVZ.ImageSHA256 == "" {
+		t.Fatalf("apple-vz default image checksum not applied: %#v", cfg.AppleVZ)
+	}
+	if cfg.SSHUser != "crabbox" || cfg.SSHPort != "22" || cfg.WorkRoot != "/work/crabbox" || cfg.TargetOS != targetLinux {
+		t.Fatalf("apple-vz derived defaults not applied: sshUser=%q sshPort=%q workRoot=%q target=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.TargetOS)
+	}
+	fileCPUs := 6
+	fileMemoryMiB := 12288
+	fileDiskGiB := 64
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "apple-vz",
+		AppleVZ: &fileAppleVZConfig{
+			HelperPath:  "/opt/bin/crabbox-apple-vz-helper",
+			Image:       "https://example.test/custom.img",
+			ImageSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			User:        "runner",
+			WorkRoot:    "/work/example",
+			CPUs:        &fileCPUs,
+			MemoryMiB:   &fileMemoryMiB,
+			DiskGiB:     &fileDiskGiB,
+		},
+	})
+	if cfg.Provider != "apple-vz" || cfg.AppleVZ.HelperPath != "/opt/bin/crabbox-apple-vz-helper" || cfg.AppleVZ.Image != "https://example.test/custom.img" || cfg.AppleVZ.ImageSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || cfg.AppleVZ.User != "runner" || cfg.AppleVZ.WorkRoot != "/work/example" || cfg.AppleVZ.CPUs != 6 || cfg.AppleVZ.MemoryMiB != 12288 || cfg.AppleVZ.DiskGiB != 64 {
+		t.Fatalf("file appleVZ config not applied: %#v", cfg.AppleVZ)
+	}
+	if !AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
+		t.Fatal("file appleVZ numeric settings should be marked explicit")
+	}
+
+	t.Setenv("CRABBOX_APPLE_VZ_HELPER", "/usr/local/bin/crabbox-apple-vz-helper")
+	t.Setenv("CRABBOX_APPLE_VZ_IMAGE", "https://example.test/env.img")
+	t.Setenv("CRABBOX_APPLE_VZ_IMAGE_SHA256", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	t.Setenv("CRABBOX_APPLE_VZ_USER", "env-user")
+	t.Setenv("CRABBOX_APPLE_VZ_WORK_ROOT", "/work/env")
+	t.Setenv("CRABBOX_APPLE_VZ_CPUS", "8")
+	t.Setenv("CRABBOX_APPLE_VZ_MEMORY", "16384")
+	t.Setenv("CRABBOX_APPLE_VZ_DISK", "80")
+	applyEnv(&cfg)
+	if cfg.AppleVZ.HelperPath != "/usr/local/bin/crabbox-apple-vz-helper" || cfg.AppleVZ.Image != "https://example.test/env.img" || cfg.AppleVZ.ImageSHA256 != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" || cfg.AppleVZ.User != "env-user" || cfg.AppleVZ.WorkRoot != "/work/env" || cfg.AppleVZ.CPUs != 8 || cfg.AppleVZ.MemoryMiB != 16384 || cfg.AppleVZ.DiskGiB != 80 {
+		t.Fatalf("env appleVZ config not applied: %#v", cfg.AppleVZ)
+	}
+	if !AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
+		t.Fatal("env appleVZ numeric settings should be marked explicit")
+	}
+}
+
+func TestAppleVZNumericSettingsPreserveExplicitZero(t *testing.T) {
+	clearConfigEnv(t)
+	fileZeroCPUs := 0
+	fileZero := 0
+	fileZeroDisk := 0
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{AppleVZ: &fileAppleVZConfig{
+		CPUs:      &fileZeroCPUs,
+		MemoryMiB: &fileZero,
+		DiskGiB:   &fileZeroDisk,
+	}})
+	if cfg.AppleVZ.CPUs != 0 || cfg.AppleVZ.MemoryMiB != 0 || cfg.AppleVZ.DiskGiB != 0 ||
+		!AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
+		t.Fatalf("file appleVZ=%+v explicit=%v/%v/%v", cfg.AppleVZ, AppleVZCPUsExplicit(cfg), AppleVZMemoryExplicit(cfg), AppleVZDiskExplicit(cfg))
+	}
+
+	cfg = baseConfig()
+	t.Setenv("CRABBOX_APPLE_VZ_CPUS", "0")
+	t.Setenv("CRABBOX_APPLE_VZ_MEMORY", "0")
+	t.Setenv("CRABBOX_APPLE_VZ_DISK", "0")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVZ.CPUs != 0 || cfg.AppleVZ.MemoryMiB != 0 || cfg.AppleVZ.DiskGiB != 0 ||
+		!AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
+		t.Fatalf("env appleVZ=%+v explicit=%v/%v/%v", cfg.AppleVZ, AppleVZCPUsExplicit(cfg), AppleVZMemoryExplicit(cfg), AppleVZDiskExplicit(cfg))
+	}
+}
+
+func TestAppleVZNumericSettingsRejectInvalidEnvironmentValues(t *testing.T) {
+	for _, name := range []string{"CRABBOX_APPLE_VZ_CPUS", "CRABBOX_APPLE_VZ_MEMORY", "CRABBOX_APPLE_VZ_DISK"} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			t.Setenv(name, "garbage")
+			if err := applyEnv(&cfg); err == nil || !strings.Contains(err.Error(), name+" must be an integer") {
+				t.Fatalf("applyEnv error=%v", err)
+			}
+		})
+	}
+}
+
+func TestAppleVZConfigDefaultsRedactSignedImageServerType(t *testing.T) {
+	for _, image := range []string{
+		"https://alice:secret@example.test/images/ubuntu.img?token=private#fragment",
+		"HTTPS://alice:secret@example.test/images/ubuntu.img?token=private#fragment",
+	} {
+		cfg := baseConfig()
+		cfg.Provider = "apple-vz"
+		cfg.AppleVZ.Image = image
+		cfg.AppleVZ.ImageSHA256 = strings.Repeat("a", 64)
+
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.ServerType != "<remote-image>" {
+			t.Fatalf("ServerType=%q", cfg.ServerType)
+		}
+		if !strings.Contains(cfg.AppleVZ.Image, "token=private") {
+			t.Fatalf("AppleVZ.Image should retain the request URL in memory: %q", cfg.AppleVZ.Image)
+		}
 	}
 }
 
@@ -750,6 +1224,65 @@ func TestTartConfigYAMLMissingFieldsNotOverwritten(t *testing.T) {
 	}
 	if cfg.Tart.Memory != 16384 {
 		t.Fatalf("Tart.Memory=%d, want 16384 (missing YAML field must not overwrite)", cfg.Tart.Memory)
+	}
+}
+
+func TestOpenComputerConfigYAMLExplicitZeroPreserved(t *testing.T) {
+	cfg := baseConfig()
+	cfg.OpenComputer.CPU = 8
+	cfg.OpenComputer.MemoryMB = 16384
+	cfg.OpenComputer.TimeoutSecs = 600
+	cfg.OpenComputer.ExecTimeoutSecs = 7200
+	zero := 0
+	file := fileConfig{OpenComputer: &fileOpenComputerConfig{
+		CPU:             &zero,
+		MemoryMB:        &zero,
+		TimeoutSecs:     &zero,
+		ExecTimeoutSecs: &zero,
+	}}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenComputer.CPU != 0 || cfg.OpenComputer.MemoryMB != 0 || cfg.OpenComputer.TimeoutSecs != 0 || cfg.OpenComputer.ExecTimeoutSecs != 0 {
+		t.Fatalf("explicit zero values not preserved: %#v", cfg.OpenComputer)
+	}
+}
+
+func TestOpenComputerConfigYAMLCannotSetAPIURL(t *testing.T) {
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("openComputer:\n  apiUrl: https://attacker.example\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenComputer.APIURL != "" {
+		t.Fatalf("repository config set OpenComputer API URL to %q", cfg.OpenComputer.APIURL)
+	}
+}
+
+func TestOpenComputerBurstConfigYAMLAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("openComputer:\n  burst: true\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OpenComputer.Burst {
+		t.Fatal("openComputer.burst YAML was not applied")
+	}
+
+	cfg.OpenComputer.Burst = false
+	t.Setenv("CRABBOX_OPENCOMPUTER_BURST", "true")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OpenComputer.Burst {
+		t.Fatal("CRABBOX_OPENCOMPUTER_BURST was not applied")
 	}
 }
 
@@ -1085,6 +1618,14 @@ namespace:
   autoStopIdleTimeout: 1h
   workRoot: /workspaces/test
   deleteOnRelease: true
+morph:
+  apiKey: morph-file-key
+  apiUrl: https://morph.example.test
+  snapshot: snapshot-file
+  sshGatewayHost: ssh.morph.example.test
+  workRoot: /tmp/morph-test
+  deleteOnRelease: true
+  wakeOnSSH: false
 daytona:
   apiUrl: https://daytona.example.test/api
   snapshot: crabbox-ready
@@ -1152,6 +1693,13 @@ tensorlake:
   diskMB: 30000
   timeoutSecs: 1800
   noInternet: true
+openComputer:
+  apiUrl: https://opencomputer.example.test
+  workdir: /workspace/oc-test
+  cpu: 8
+  memoryMB: 16384
+  timeoutSecs: 600
+  execTimeoutSecs: 7200
 cloudflare:
   apiUrl: https://cloudflare.example.test
   token: cloudflare-token
@@ -1286,6 +1834,9 @@ ssh:
 	if cfg.Namespace.Image != "crabbox-ready" || cfg.Namespace.Size != "L" || cfg.Namespace.Repository != "github.com/openclaw/crabbox" || cfg.Namespace.Site != "fra1" || cfg.Namespace.VolumeSizeGB != 120 || cfg.Namespace.AutoStopIdleTimeout != time.Hour || cfg.Namespace.WorkRoot != "/workspaces/test" || !cfg.Namespace.DeleteOnRelease {
 		t.Fatalf("namespace config not loaded: %#v", cfg.Namespace)
 	}
+	if cfg.Morph.APIKey != "morph-file-key" || cfg.Morph.APIURL != "https://morph.example.test" || cfg.Morph.Snapshot != "snapshot-file" || cfg.Morph.SSHGatewayHost != "ssh.morph.example.test" || cfg.Morph.WorkRoot != "/tmp/morph-test" || !cfg.Morph.DeleteOnRelease || cfg.Morph.WakeOnSSH {
+		t.Fatalf("morph config not loaded: %#v", cfg.Morph)
+	}
 	if cfg.Daytona.APIURL != "https://daytona.example.test/api" || cfg.Daytona.Snapshot != "crabbox-ready" || cfg.Daytona.Target != "us" || cfg.Daytona.User != "daytona" || cfg.Daytona.WorkRoot != "/home/daytona/crabbox" || cfg.Daytona.SSHGatewayHost != "ssh.daytona.example.test" || cfg.Daytona.SSHAccessMinutes != 12 {
 		t.Fatalf("daytona config not loaded: %#v", cfg.Daytona)
 	}
@@ -1310,6 +1861,9 @@ ssh:
 	if cfg.Tensorlake.APIURL != "https://api.tensorlake.example.test" || cfg.Tensorlake.CLIPath != "/usr/local/bin/tl" || cfg.Tensorlake.Image != "ubuntu-22.04" || cfg.Tensorlake.Snapshot != "snap-tl" || cfg.Tensorlake.OrganizationID != "org-tl" || cfg.Tensorlake.ProjectID != "proj-tl" || cfg.Tensorlake.Namespace != "ns-tl" || cfg.Tensorlake.Workdir != "/workspace/crabbox-test" || cfg.Tensorlake.CPUs != 4 || cfg.Tensorlake.MemoryMB != 8192 || cfg.Tensorlake.DiskMB != 30000 || cfg.Tensorlake.TimeoutSecs != 1800 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("tensorlake config not loaded: %#v", cfg.Tensorlake)
 	}
+	if cfg.OpenComputer.APIURL != "" || cfg.OpenComputer.Workdir != "/workspace/oc-test" || cfg.OpenComputer.CPU != 8 || cfg.OpenComputer.MemoryMB != 16384 || cfg.OpenComputer.TimeoutSecs != 600 || cfg.OpenComputer.ExecTimeoutSecs != 7200 {
+		t.Fatalf("opencomputer config not loaded: %#v", cfg.OpenComputer)
+	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare.example.test" || cfg.Cloudflare.Token != "cloudflare-token" || cfg.Cloudflare.Workdir != "/workspace/cf-test" {
 		t.Fatalf("cloudflare config not loaded: %#v", cfg.Cloudflare)
 	}
@@ -1322,8 +1876,11 @@ ssh:
 	if cfg.Sprites.APIURL != "https://api.sprites.example.test" || cfg.Sprites.WorkRoot != "/home/sprite/test" {
 		t.Fatalf("sprites config not loaded: %#v", cfg.Sprites)
 	}
-	if cfg.Static.Host != "win-dev.local" || cfg.Static.User != "peter" || cfg.Static.Port != "22" || cfg.WorkRoot != "/home/peter/crabbox" {
-		t.Fatalf("static config not loaded: static=%#v workRoot=%s", cfg.Static, cfg.WorkRoot)
+	if cfg.Static.Host != "win-dev.local" || cfg.Static.User != "peter" || cfg.Static.Port != "22" || cfg.Static.WorkRoot != "/home/peter/crabbox" {
+		t.Fatalf("static config not loaded: static=%#v", cfg.Static)
+	}
+	if cfg.WorkRoot != defaultPOSIXWorkRoot {
+		t.Fatalf("static work root leaked into active provider: workRoot=%s", cfg.WorkRoot)
 	}
 	if len(cfg.Results.JUnit) != 1 || cfg.Results.JUnit[0] != "junit.xml" || !cfg.Results.Auto {
 		t.Fatalf("results config not loaded: %#v", cfg.Results)
@@ -1527,6 +2084,14 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_TAILSCALE_EXIT_NODE_ALLOW_LAN_ACCESS", "1")
 	t.Setenv("CRABBOX_TARGET", "macos")
 	t.Setenv("CRABBOX_STATIC_HOST", "mac.local")
+	t.Setenv("MORPH_API_KEY", "morph-api-file")
+	t.Setenv("CRABBOX_MORPH_API_KEY", "morph-api-env")
+	t.Setenv("CRABBOX_MORPH_API_URL", "https://morph-env.example")
+	t.Setenv("CRABBOX_MORPH_SNAPSHOT", "snapshot-env")
+	t.Setenv("CRABBOX_MORPH_SSH_GATEWAY_HOST", "ssh.morph-env.example")
+	t.Setenv("CRABBOX_MORPH_WORK_ROOT", "/tmp/morph-env")
+	t.Setenv("CRABBOX_MORPH_DELETE_ON_RELEASE", "true")
+	t.Setenv("CRABBOX_MORPH_WAKE_ON_SSH", "false")
 	t.Setenv("DAYTONA_API_KEY", "daytona-api-file")
 	t.Setenv("CRABBOX_DAYTONA_API_KEY", "daytona-api-env")
 	t.Setenv("DAYTONA_API_URL", "https://daytona-file.example/api")
@@ -1615,6 +2180,13 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_TENSORLAKE_DISK_MB", "20480")
 	t.Setenv("CRABBOX_TENSORLAKE_TIMEOUT_SECS", "900")
 	t.Setenv("CRABBOX_TENSORLAKE_NO_INTERNET", "true")
+	t.Setenv("OPENCOMPUTER_API_URL", "https://oc-file.example")
+	t.Setenv("CRABBOX_OPENCOMPUTER_API_URL", "https://oc-env.example")
+	t.Setenv("CRABBOX_OPENCOMPUTER_WORKDIR", "/workspace/oc-env")
+	t.Setenv("CRABBOX_OPENCOMPUTER_CPU", "6")
+	t.Setenv("CRABBOX_OPENCOMPUTER_MEMORY_MB", "12288")
+	t.Setenv("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", "1200")
+	t.Setenv("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", "2400")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_URL", "https://cloudflare-env.example")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", "cloudflare-env-token")
 	t.Setenv("CRABBOX_CLOUDFLARE_WORKDIR", "/workspace/cloudflare-env")
@@ -1745,6 +2317,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if len(cfg.Tailscale.Tags) != 2 || cfg.Tailscale.Tags[1] != "tag:ci" {
 		t.Fatalf("unexpected tailscale tags: %#v", cfg.Tailscale.Tags)
 	}
+	if cfg.Morph.APIKey != "morph-api-env" || cfg.Morph.APIURL != "https://morph-env.example" || cfg.Morph.Snapshot != "snapshot-env" || cfg.Morph.SSHGatewayHost != "ssh.morph-env.example" || cfg.Morph.WorkRoot != "/tmp/morph-env" || !cfg.Morph.DeleteOnRelease || cfg.Morph.WakeOnSSH {
+		t.Fatalf("unexpected morph env: %#v", cfg.Morph)
+	}
 	if cfg.Daytona.APIKey != "daytona-api-env" || cfg.Daytona.APIURL != "https://daytona-env.example/api" || cfg.Daytona.Snapshot != "snapshot-env" || cfg.Daytona.Target != "target-env" || cfg.Daytona.User != "daytona-env-user" || cfg.Daytona.WorkRoot != "/home/daytona/env" || cfg.Daytona.SSHGatewayHost != "ssh.env.example" || cfg.Daytona.SSHAccessMinutes != 44 {
 		t.Fatalf("unexpected daytona env: %#v", cfg.Daytona)
 	}
@@ -1765,6 +2340,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Tensorlake.APIKey != "tl-api-env" || cfg.Tensorlake.APIURL != "https://api.tl-env.example" || cfg.Tensorlake.CLIPath != "/opt/tl/bin/tensorlake" || cfg.Tensorlake.Image != "ubuntu:tl-env" || cfg.Tensorlake.Snapshot != "snap-tl-env" || cfg.Tensorlake.OrganizationID != "org-tl-env" || cfg.Tensorlake.ProjectID != "proj-tl-env" || cfg.Tensorlake.Namespace != "ns-tl-env" || cfg.Tensorlake.Workdir != "/workspace/tl-env" || cfg.Tensorlake.CPUs != 2.5 || cfg.Tensorlake.MemoryMB != 4096 || cfg.Tensorlake.DiskMB != 20480 || cfg.Tensorlake.TimeoutSecs != 900 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("unexpected tensorlake env: %#v", cfg.Tensorlake)
+	}
+	if cfg.OpenComputer.APIURL != "https://oc-env.example" || cfg.OpenComputer.Workdir != "/workspace/oc-env" || cfg.OpenComputer.CPU != 6 || cfg.OpenComputer.MemoryMB != 12288 || cfg.OpenComputer.TimeoutSecs != 1200 || cfg.OpenComputer.ExecTimeoutSecs != 2400 {
+		t.Fatalf("unexpected opencomputer env: %#v", cfg.OpenComputer)
 	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare-env.example" || cfg.Cloudflare.Token != "cloudflare-env-token" || cfg.Cloudflare.Workdir != "/workspace/cloudflare-env" {
 		t.Fatalf("unexpected cloudflare env: %#v", cfg.Cloudflare)
@@ -1900,6 +2478,117 @@ func TestAppleContainerExplicitImageSurvivesOSDefault(t *testing.T) {
 	}
 	if cfg.AppleContainer.Image != "my-org/custom:tag" {
 		t.Fatalf("explicit apple-container image was overwritten by --os: %q", cfg.AppleContainer.Image)
+	}
+}
+
+func TestAppleVZImageFollowsOSImageDefault(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\ntarget: linux\nos: ubuntu:24.04\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cfg.AppleVZ.Image, "ubuntu-24.04-server-cloudimg-arm64.img") {
+		t.Fatalf("apple-vz image should follow --os default: %q", cfg.AppleVZ.Image)
+	}
+	if cfg.AppleVZ.ImageSHA256 != "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec" {
+		t.Fatalf("apple-vz checksum should follow --os default: %q", cfg.AppleVZ.ImageSHA256)
+	}
+}
+
+func TestAppleVZExplicitImageSurvivesOSDefault(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\ntarget: linux\nos: ubuntu:24.04\nappleVZ:\n  image: https://example.test/custom.img\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVZ.Image != "https://example.test/custom.img" {
+		t.Fatalf("explicit apple-vz image was overwritten by --os: %q", cfg.AppleVZ.Image)
+	}
+	if cfg.AppleVZ.ImageSHA256 != "" {
+		t.Fatalf("custom apple-vz image should clear default checksum unless explicitly set: %q", cfg.AppleVZ.ImageSHA256)
+	}
+}
+
+func TestAppleVZExplicitChecksumSurvivesOSDefault(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	checksum := strings.Repeat("b", 64)
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\ntarget: linux\nos: ubuntu:24.04\nappleVZ:\n  imageSHA256: "+checksum+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVZ.ImageSHA256 != checksum {
+		t.Fatalf("explicit apple-vz checksum was overwritten by OS defaults: %q", cfg.AppleVZ.ImageSHA256)
+	}
+
+	t.Setenv("CRABBOX_APPLE_VZ_IMAGE_SHA256", strings.Repeat("c", 64))
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVZ.ImageSHA256 != strings.Repeat("c", 64) {
+		t.Fatalf("environment apple-vz checksum was overwritten by OS defaults: %q", cfg.AppleVZ.ImageSHA256)
+	}
+}
+
+func TestAppleVZPreservesExplicitTopLevelWorkRoot(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\nworkRoot: /custom/crabbox\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/custom/crabbox" {
+		t.Fatalf("WorkRoot=%q want /custom/crabbox", cfg.WorkRoot)
+	}
+}
+
+func TestAppleVZSpecificWorkRootOverridesTopLevel(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\nworkRoot: /custom/crabbox\nappleVZ:\n  workRoot: /work/apple-vz\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/work/apple-vz" {
+		t.Fatalf("WorkRoot=%q want /work/apple-vz", cfg.WorkRoot)
 	}
 }
 
