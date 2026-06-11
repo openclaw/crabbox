@@ -81,11 +81,19 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
 		acquired = true
 	} else {
-		leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.BaseURL())
+		leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, "", false, 0, api.BaseURL())
 		if err != nil {
 			return RunResult{}, err
 		}
 		if _, err := verifyOpenSandboxClaim(ctx, api, leaseID, sandboxID); err != nil {
+			return RunResult{}, err
+		}
+		claim, err := readLeaseClaim(leaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		_, _, slug, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.BaseURL())
+		if err != nil {
 			return RunResult{}, err
 		}
 	}
@@ -376,6 +384,10 @@ func (b *openSandboxBackend) createSandbox(ctx context.Context, api openSandboxC
 	if image == "" {
 		image = defaultImage
 	}
+	platformOS, err := openSandboxPlatformOS(b.cfg.OpenSandbox.PlatformOS)
+	if err != nil {
+		return "", "", "", err
+	}
 	sb, err := api.CreateSandbox(ctx, createSandboxOptions{
 		Image:          image,
 		TimeoutSecs:    b.cfg.OpenSandbox.TimeoutSecs,
@@ -383,7 +395,7 @@ func (b *openSandboxBackend) createSandbox(ctx context.Context, api openSandboxC
 		Memory:         b.cfg.OpenSandbox.Memory,
 		SecureAccess:   b.cfg.OpenSandbox.SecureAccess,
 		UseServerProxy: b.cfg.OpenSandbox.UseServerProxy,
-		PlatformOS:     b.cfg.OpenSandbox.PlatformOS,
+		PlatformOS:     platformOS,
 		PlatformArch:   b.cfg.OpenSandbox.PlatformArch,
 		Metadata: map[string]string{
 			openSandboxClaimKey: providerScope,
@@ -478,6 +490,17 @@ func validateOpenSandboxClaimScope(claim LeaseClaim, baseURL string) error {
 		return exit(4, "opensandbox lease %q belongs to a different API endpoint; restore the endpoint used to create it", claim.LeaseID)
 	}
 	return nil
+}
+
+func openSandboxPlatformOS(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if !strings.EqualFold(value, "linux") {
+		return "", exit(2, "provider=opensandbox only supports Linux sandboxes; set openSandbox.platformOS to linux or leave it empty")
+	}
+	return "linux", nil
 }
 
 func newOpenSandboxClaimScope(baseURL string) (string, error) {

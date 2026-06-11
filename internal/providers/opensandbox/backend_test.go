@@ -164,6 +164,48 @@ func TestRunKeepsSandboxOnFailureWhenRequested(t *testing.T) {
 	}
 }
 
+func TestRunRejectsNonLinuxPlatformOS(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	backend.cfg.OpenSandbox.PlatformOS = "windows"
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: tempGitRepo(t)},
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "only supports Linux") {
+		t.Fatalf("err=%v, want Linux-only platform rejection", err)
+	}
+	if fake.created.Image != "" {
+		t.Fatalf("created sandbox despite invalid platform: %#v", fake.created)
+	}
+}
+
+func TestRunVerifiesOwnershipBeforeReclaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	leaseID := leasePrefix + fake.sandbox.ID
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, openSandboxEndpointScope(fake.baseURL)+"/ownership:local", "", "/original", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = "different"
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/replacement"}, Reclaim: true, NoSync: true, Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "ownership metadata") {
+		t.Fatalf("err=%v, want ownership mismatch", err)
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.RepoRoot != "/original" {
+		t.Fatalf("repo root=%q changed before ownership verification", claim.RepoRoot)
+	}
+}
+
 func TestStopRejectsOwnershipMismatch(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeClient()
