@@ -542,6 +542,34 @@ func TestIsloCreateSandboxTailscaleClaimAndOptions(t *testing.T) {
 	}
 }
 
+func TestIsloCreateSandboxRetainsClaimWhenTailscaleRollbackFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{
+		createName: "crabbox-repo-abcdef",
+		execErr:    errors.New("tailscale failed"),
+		deleteErr:  errors.New("delete failed"),
+	}
+	backend := &isloBackend{
+		cfg: Config{
+			Pond: "Mesh Demo",
+			Islo: IsloConfig{Workdir: "repo"},
+			Tailscale: core.TailscaleConfig{
+				Enabled: true,
+				AuthKey: "tskey-secret",
+			},
+		},
+		rt: Runtime{Stderr: io.Discard},
+	}
+	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "node-a")
+	if err == nil || !strings.Contains(err.Error(), "cleanup failed") {
+		t.Fatalf("expected cleanup failure, got %v", err)
+	}
+	claim, ok, claimErr := resolveLeaseClaim("isb_crabbox-repo-abcdef")
+	if claimErr != nil || !ok {
+		t.Fatalf("claim should remain discoverable after failed rollback: ok=%t err=%v claim=%#v", ok, claimErr, claim)
+	}
+}
+
 func TestIsloSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
@@ -829,6 +857,7 @@ type fakeIsloSyncClient struct {
 	createRequest            *gosdk.SandboxCreate
 	createName               string
 	blockDelete              bool
+	deleteErr                error
 	deleteCalls              int
 }
 
@@ -854,6 +883,9 @@ func (f *fakeIsloSyncClient) DeleteSandbox(ctx context.Context, _ string) error 
 	if f.blockDelete {
 		<-ctx.Done()
 		return ctx.Err()
+	}
+	if f.deleteErr != nil {
+		return f.deleteErr
 	}
 	return nil
 }

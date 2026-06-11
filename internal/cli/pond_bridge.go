@@ -328,19 +328,24 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 	peers := make([]BridgePeer, 0, len(claims))
 	var bridge BridgeProvider
 	bridgeLoaded := false
+	var bridgeLoadErr error
 	for _, claim := range claims {
 		peer := bridgePeerFromClaim(claim, class)
 		urlPrimary := peer.Transport == TransportURL
 		urlCapable := providerCapabilities(claim.Provider).URLBridge
+		secondaryRead := !urlPrimary && flags.SharePort == 0
 		useBridge := urlPrimary || urlCapable
 		if useBridge {
 			if !bridgeLoaded {
-				b, err := loadBridgeProvider(provider, rt)
-				if err != nil {
-					return nil, err
-				}
-				bridge = b
 				bridgeLoaded = true
+				bridge, bridgeLoadErr = loadBridgeProvider(provider, rt)
+			}
+			if bridgeLoadErr != nil {
+				if secondaryRead {
+					peers = append(peers, peer)
+					continue
+				}
+				return nil, bridgeLoadErr
 			}
 			// We invoke the bridge backend when the caller asked us to mint
 			// a share (--share-port) or when no canonical endpoint is yet
@@ -349,6 +354,10 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 			// listings on already-published shares.
 			needBridge := flags.SharePort > 0 || (urlPrimary && peer.Endpoint == "") || (!urlPrimary && urlCapable)
 			if bridge == nil && needBridge {
+				if secondaryRead {
+					peers = append(peers, peer)
+					continue
+				}
 				peer.BridgeState = "unsupported-provider"
 				if urlPrimary {
 					peer.Transport = TransportNone
@@ -379,6 +388,10 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 				} else {
 					targets, lerr := bridge.ListPeerTargets(ctx, claim.LeaseID)
 					if lerr != nil {
+						if secondaryRead {
+							peers = append(peers, peer)
+							continue
+						}
 						if errors.Is(lerr, ErrBridgeNotImplemented) {
 							peer.BridgeState = "unsupported"
 							if urlPrimary {

@@ -203,11 +203,19 @@ func pondClaimProviderSummary(pond string) (bool, bool) {
 			continue
 		}
 		hasClaims = true
-		if providerCapableOfTailscale(claim.Provider) {
+		caps := providerCapabilities(claim.Provider)
+		if caps.Tailscale && (!caps.URLBridge || claimHasTailscaleMetadata(claim)) {
 			hasTailscale = true
 		}
 	}
 	return hasClaims, hasTailscale
+}
+
+func claimHasTailscaleMetadata(claim leaseClaim) bool {
+	return claim.TailscaleIPv4 != "" ||
+		claim.TailscaleFQDN != "" ||
+		labelBool(claim.Labels["tailscale"]) ||
+		strings.TrimSpace(claim.Labels["tailscale_state"]) != ""
 }
 
 // ProviderCapabilities is the per-provider truth about which pond transport

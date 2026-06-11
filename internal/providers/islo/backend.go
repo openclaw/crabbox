@@ -388,10 +388,10 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 	// here means the lease cannot serve the plane the caller asked for, so we
 	// tear the sandbox down rather than leave a half-joined member behind.
 	if err := b.maybeJoinTailscale(ctx, client, sandbox.GetName(), slug, leaseID); err != nil {
-		removeLeaseClaim(leaseID)
 		if cleanupErr := deleteIsloSandboxForCleanup(client, sandbox.GetName()); cleanupErr != nil {
 			return "", "", "", fmt.Errorf("%w; cleanup failed for islo sandbox %s: %v", err, sandbox.GetName(), cleanupErr)
 		}
+		removeLeaseClaim(leaseID)
 		return "", "", "", err
 	}
 	return leaseID, sandbox.GetName(), slug, nil

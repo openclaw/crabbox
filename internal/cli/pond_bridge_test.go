@@ -215,6 +215,26 @@ func TestResolvePondPeersListsSharesForTailnetPrimary(t *testing.T) {
 	}
 }
 
+func TestResolvePondPeersKeepsTailnetPeerWhenSecondaryBridgeFails(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { c.TailscaleIPv4 = "100.64.7.7" })
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) {
+		return nil, errors.New("missing Islo API key")
+	}
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{})
+	if err != nil {
+		t.Fatalf("secondary URL lookup must not fail tailnet discovery: %v", err)
+	}
+	if len(peers) != 1 || peers[0].Transport != TransportTailnet || peers[0].Endpoint != "100.64.7.7" {
+		t.Fatalf("tailnet peer missing after secondary bridge failure: %#v", peers)
+	}
+}
+
 func TestResolvePondPeersUnknownProvider(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},

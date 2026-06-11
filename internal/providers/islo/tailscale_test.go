@@ -70,6 +70,7 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		`--auth-key="file:${TS_AUTH_FILE}"`,
 		"unset TS_AUTHKEY",
 		`trap 'rm -f "${TS_AUTH_FILE}"' EXIT`,
+		"--shields-up",
 		`--login-server="${TS_LOGIN_SERVER}"`,
 		`--exit-node="${TS_EXIT_NODE}"`,
 		"--exit-node-allow-lan-access",
