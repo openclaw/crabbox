@@ -239,7 +239,7 @@ func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget)
 // updateLeaseClaimTailscale records a tailnet endpoint on an existing claim.
 // Delegated-run providers (e.g. islo) have no SSH lease and so cannot go
 // through updateLeaseClaimEndpoint; they call this after joining the tailnet
-// out-of-band so `pond peers` can surface the member on the tailnet plane.
+// out-of-band so health, ACL, and pond discovery can report enrollment.
 func updateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
 	if leaseID == "" {
 		return nil

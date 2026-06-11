@@ -157,6 +157,61 @@ func TestUpdateLeaseClaimTailscaleIgnoresEmptyOrMissingClaim(t *testing.T) {
 	}
 }
 
+func TestLeaseClaimTailscaleSettingsSurviveEndpointClear(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", "islo", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	tags := []string{"tag:pond", "tag:ci"}
+	if err := updateLeaseClaimTailscaleSettings(leaseID, "node-a", tags, "https://control.example", "100.64.0.1", true); err != nil {
+		t.Fatal(err)
+	}
+	tags[0] = "tag:mutated"
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.2.20", "node-a.example.ts.net"); err != nil {
+		t.Fatal(err)
+	}
+	if err := clearLeaseClaimTailscale(leaseID); err != nil {
+		t.Fatal(err)
+	}
+
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.TailscaleIPv4 != "" || claim.TailscaleFQDN != "" {
+		t.Fatalf("tailnet endpoint not cleared: %#v", claim)
+	}
+	if claim.TailscaleHostname != "node-a" ||
+		strings.Join(claim.TailscaleTags, ",") != "tag:pond,tag:ci" ||
+		claim.TailscaleLoginURL != "https://control.example" ||
+		claim.TailscaleExitNode != "100.64.0.1" ||
+		!claim.TailscaleExitLAN {
+		t.Fatalf("recovery settings not preserved: %#v", claim)
+	}
+	for _, key := range []string{"tailscale", "tailscale_state", "tailscale_ipv4", "tailscale_fqdn"} {
+		if _, ok := claim.Labels[key]; ok {
+			t.Fatalf("stale label %q retained: %#v", key, claim.Labels)
+		}
+	}
+}
+
+func TestLeaseClaimTailscaleSettingsIgnoreEmptyOrMissingClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := updateLeaseClaimTailscaleSettings("", "node-a", []string{"tag:ci"}, "", "", false); err != nil {
+		t.Fatalf("empty settings update: %v", err)
+	}
+	if err := clearLeaseClaimTailscale(""); err != nil {
+		t.Fatalf("empty clear: %v", err)
+	}
+	if err := updateLeaseClaimTailscaleSettings("isb_crabbox-missing", "node-a", []string{"tag:ci"}, "", "", false); err != nil {
+		t.Fatalf("missing settings update: %v", err)
+	}
+	if err := clearLeaseClaimTailscale("isb_crabbox-missing"); err != nil {
+		t.Fatalf("missing clear: %v", err)
+	}
+}
+
 func TestClaimLeaseForRepoProviderStoresPond(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")
