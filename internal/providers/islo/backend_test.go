@@ -624,7 +624,7 @@ func TestIsloRunAddsTailnetProxyDefaultsToWorkload(t *testing.T) {
 	}
 }
 
-func TestIsloRunKeepsEnrolledWorkloadNonRootWhenValidationUnavailable(t *testing.T) {
+func TestIsloRunFailsClosedWhenEnrolledTailnetValidationUnavailable(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-old-abcdef"
 	if err := claimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
@@ -650,15 +650,13 @@ func TestIsloRunKeepsEnrolledWorkloadNonRootWhenValidationUnavailable(t *testing
 		NoSync:  true,
 		Command: []string{"true"},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
+		t.Fatalf("expected validation failure, got %v", err)
 	}
-	workload := client.execRequests[len(client.execRequests)-1]
-	if workload.GetUser() == nil || *workload.GetUser() != isloWorkloadUser {
-		t.Fatalf("enrolled workload user=%v want %q", workload.GetUser(), isloWorkloadUser)
-	}
-	if workload.Env != nil {
-		t.Fatalf("unvalidated tailnet should not inject proxy env: %#v", workload.Env)
+	for _, req := range client.execRequests {
+		if strings.Join(req.GetCommand(), " ") == "true" {
+			t.Fatal("workload ran after tailnet validation failed")
+		}
 	}
 }
 

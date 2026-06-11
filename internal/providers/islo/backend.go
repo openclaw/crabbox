@@ -196,10 +196,12 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			tailnetReady = meta.Enabled
 		} else {
 			meta, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID, true)
-			if err != nil &&
-				!errors.Is(err, core.ErrTailnetPeerUnavailable) &&
-				!errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
-				return RunResult{}, err
+			if err != nil {
+				unavailable := errors.Is(err, core.ErrTailnetPeerUnavailable) ||
+					errors.Is(err, core.ErrTailnetPeerValidationUnavailable)
+				if tailnetEnrolled || !unavailable {
+					return RunResult{}, err
+				}
 			}
 			tailnetReady = err == nil && meta.Enabled
 		}

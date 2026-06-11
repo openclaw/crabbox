@@ -114,15 +114,15 @@ are required:
    joins the tailnet and the exec channel survives;
 3. it runs `tailscale up` with the pond-scoped advertise tags, `TS_CONTROL_URL`
    as `--login-server` when set, and any configured exit-node flags;
-4. it records the assigned tailnet IPv4 on the lease claim, so `pond peers`
-   reports the member on the tailnet plane (`transport: tailnet`) instead of the
-   URL bridge.
+4. it records the assigned tailnet IPv4 on the lease claim for health and ACL
+   checks. `pond peers` keeps the URL bridge as the member's dialable transport
+   and notes that Tailscale is available for outbound proxy traffic only.
 
 ```sh
 export CRABBOX_TAILSCALE_AUTH_KEY=tskey-auth-...     # node auth key (tagged or tag-authorized)
 crabbox warmup --pond mesh --slug node-a --provider islo --tailscale
 crabbox warmup --pond mesh --slug node-b --provider islo --tailscale
-crabbox pond peers --pond mesh --json                # both members on transport=tailnet
+crabbox pond peers --pond mesh --json                # URL transport plus outbound-proxy note
 ```
 
 The static build and its architecture-specific SHA-256 digests are pinned
@@ -143,7 +143,8 @@ key is passed through stdin, so an Islo filesystem snapshot cannot clone either
 credential. The control socket is revalidated before lease reuse, status
 reporting, and `pond peers`; after daemon loss, recovery requires a usable auth
 key. If recovery fails, stale tailnet claim metadata is removed and the lease
-falls back to its URL bridge.
+remains visible through its URL bridge for status and discovery. `run` fails
+closed instead of executing an enrolled workload with ordinary direct egress.
 Read-only `status` and `pond peers` checks do not run the long repair path;
 lease reuse through `run` performs re-enrollment when needed.
 Unproxied process traffic still uses the sandbox's normal network namespace.
