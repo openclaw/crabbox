@@ -162,10 +162,7 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 		if !createdKey {
 			return cause
 		}
-		if cleanupErr := c.DeleteSSHKeyByName(ctx, keyName); cleanupErr != nil {
-			return errors.Join(cause, fmt.Errorf("rollback digitalocean ssh key %s: %w", keyName, cleanupErr))
-		}
-		return cause
+		return c.rollbackCreatedSSHKey(keyName, cause)
 	}
 	tags := leaseTags(cfg, leaseID, slug, "provisioning", keep, now)
 	for _, tag := range tags {
@@ -194,6 +191,15 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 		return droplet{}, rollbackKey(err)
 	}
 	return res.Droplet, nil
+}
+
+func (c *digitalOceanClient) rollbackCreatedSSHKey(keyName string, cause error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if cleanupErr := c.DeleteSSHKeyByName(ctx, keyName); cleanupErr != nil {
+		return errors.Join(cause, fmt.Errorf("rollback digitalocean ssh key %s: %w", keyName, cleanupErr))
+	}
+	return cause
 }
 
 func (c *digitalOceanClient) DeleteDroplet(ctx context.Context, id int64) error {

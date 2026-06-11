@@ -80,16 +80,18 @@ token needs at least:
 droplet:read
 droplet:create
 droplet:delete
+droplet:update
 ssh_key:read
 ssh_key:create
 ssh_key:delete
 tag:read
 tag:create
-tag:update
+tag:delete
 ```
 
 If a live smoke fails with a permission error, keep the error output secret-safe
-and adjust token scopes before retrying. Do not broaden scopes inside scripts.
+and adjust token scopes before retrying. Add `vpc:read` when selecting an
+explicit VPC. Do not broaden scopes inside scripts.
 
 ## Lifecycle
 
@@ -138,9 +140,10 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=digitalocean scripts/live-digitalocean-smo
 ```
 
 The script builds `bin/crabbox`, uses `DIGITALOCEAN_TOKEN` from the environment,
-creates a small `s-1vcpu-1gb` Droplet, runs `echo ok`, verifies `list --json`,
-stops the lease, runs dry-run cleanup, and verifies the smoke slug is absent
-afterward.
+requires an empty Crabbox-owned DigitalOcean inventory, creates a small
+`s-1vcpu-1gb` Droplet, waits for ready status, runs `echo ok`, verifies
+`list --json`, stops the lease, runs dry-run cleanup, and verifies the
+Crabbox-owned inventory is empty afterward.
 
 Final classifications include:
 

@@ -348,6 +348,36 @@ func TestDigitalOceanEnvDoesNotMutateGenericFieldsForOtherProviders(t *testing.T
 	}
 }
 
+func TestDigitalOceanDefaultsPreserveExplicitGenericBaseValues(t *testing.T) {
+	clearConfigEnv(t)
+	base := baseConfig()
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "digitalocean",
+		Hetzner: &fileHetznerConfig{
+			Location: base.Location,
+			Image:    base.Image,
+		},
+		DigitalOcean: &fileDigitalOceanConfig{
+			Region: "sfo3",
+			Image:  "ubuntu-24-04-x64",
+		},
+	})
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	if cfg.Location != base.Location {
+		t.Fatalf("Location=%q want explicit %q", cfg.Location, base.Location)
+	}
+	if cfg.Image != base.Image {
+		t.Fatalf("Image=%q want explicit %q", cfg.Image, base.Image)
+	}
+	if cfg.DigitalOcean.Region != "sfo3" || cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+		t.Fatalf("DigitalOcean=%#v", cfg.DigitalOcean)
+	}
+}
+
 func TestDockerSandboxEmptyFileConfigDoesNotClearExistingValues(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

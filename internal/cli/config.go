@@ -40,6 +40,7 @@ type Config struct {
 	HostID                        string
 	Access                        AccessConfig
 	Location                      string
+	locationExplicit              bool
 	Image                         string
 	imageExplicit                 bool
 	AWSRegion                     string
@@ -927,7 +928,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.DigitalOcean.Region == "" {
 			cfg.DigitalOcean.Region = "nyc3"
 		}
-		if cfg.Location == "" || cfg.Location == baseConfig().Location {
+		if cfg.Location == "" || (!cfg.locationExplicit && cfg.Location == baseConfig().Location) {
 			cfg.Location = cfg.DigitalOcean.Region
 		}
 		if cfg.DigitalOcean.Image == "" {
@@ -2347,6 +2348,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if file.Hetzner != nil {
 		if file.Hetzner.Location != "" {
 			cfg.Location = file.Hetzner.Location
+			cfg.locationExplicit = true
 		}
 		if file.Hetzner.Image != "" {
 			cfg.Image = file.Hetzner.Image
@@ -3795,7 +3797,10 @@ func applyEnv(cfg *Config) error {
 	cfg.Access.ClientID = getenv("CRABBOX_ACCESS_CLIENT_ID", getenv("CF_ACCESS_CLIENT_ID", cfg.Access.ClientID))
 	cfg.Access.ClientSecret = getenv("CRABBOX_ACCESS_CLIENT_SECRET", getenv("CF_ACCESS_CLIENT_SECRET", cfg.Access.ClientSecret))
 	cfg.Access.Token = getenv("CRABBOX_ACCESS_TOKEN", getenv("CF_ACCESS_TOKEN", cfg.Access.Token))
-	cfg.Location = getenv("CRABBOX_HETZNER_LOCATION", cfg.Location)
+	if location := os.Getenv("CRABBOX_HETZNER_LOCATION"); location != "" {
+		cfg.Location = location
+		cfg.locationExplicit = true
+	}
 	if image := os.Getenv("CRABBOX_HETZNER_IMAGE"); image != "" {
 		cfg.Image = image
 		cfg.imageExplicit = true

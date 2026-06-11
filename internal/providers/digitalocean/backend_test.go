@@ -274,6 +274,48 @@ func TestResolveBySlugAndReleaseDeletesOwnedDroplet(t *testing.T) {
 	}
 }
 
+func TestResolvePrefersNumericSlugOverDropletID(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = "s-1vcpu-1gb"
+	item := droplet{ID: 456, Name: "crabbox-numeric", Status: "active", Tags: leaseTags(cfg, "cbx_abcdef123456", "123", "ready", false, time.Now())}
+	item.Networks.V4 = append(item.Networks.V4, struct {
+		IPAddress string `json:"ip_address"`
+		Type      string `json:"type"`
+	}{IPAddress: "203.0.113.123", Type: "public"})
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.ID != 456 || lease.LeaseID != "cbx_abcdef123456" {
+		t.Fatalf("lease=%#v", lease)
+	}
+}
+
+func TestResolveByDropletIDRejectsMissingOwnershipTarget(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	item := droplet{ID: 77, Name: "partial", Status: "active", Tags: leaseTags(cfg, "cbx_abcdef123456", "partial", "ready", false, time.Now())}
+	for i, tag := range item.Tags {
+		if tag == "crabbox:target:linux" {
+			item.Tags = append(item.Tags[:i], item.Tags[i+1:]...)
+			break
+		}
+	}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "77", ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "refusing to operate") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+}
+
 func TestReleaseRefusesUnownedDroplet(t *testing.T) {
 	api := &fakeDigitalOceanAPI{}
 	backend := newTestBackend(t, api)
@@ -396,45 +438,43 @@ func TestAcquireReadyTagsPreserveRenderedTailscaleHostname(t *testing.T) {
 	}
 }
 
-func TestApplyDigitalOceanDefaultsDoesNotClobberExplicitLocation(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.Location = "us-east-1"
-	cfg.DigitalOcean.Region = "sfo3"
-
-	applyDigitalOceanDefaults(&cfg)
-
-	if cfg.Location != "us-east-1" {
-		t.Fatalf("Location=%q want %q", cfg.Location, "us-east-1")
-	}
-}
-
-func TestApplyDigitalOceanDefaultsDoesNotClobberExplicitImage(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.Image = "custom-do-image"
-	cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
-
-	applyDigitalOceanDefaults(&cfg)
-
-	if cfg.Image != "custom-do-image" {
-		t.Fatalf("Image=%q want %q", cfg.Image, "custom-do-image")
-	}
-}
-
-func TestApplyDigitalOceanDefaultsMirrorProviderDefaultsToBaseValues(t *testing.T) {
+func TestApplyDigitalOceanDefaultsDoesNotMutateGenericLocation(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.DigitalOcean.Region = "sfo3"
-	cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+	want := cfg.Location
 
 	applyDigitalOceanDefaults(&cfg)
 
-	if cfg.Location != "sfo3" {
-		t.Fatalf("Location=%q want %q", cfg.Location, "sfo3")
+	if cfg.Location != want {
+		t.Fatalf("Location=%q want %q", cfg.Location, want)
 	}
-	if cfg.Image != "ubuntu-24-04-x64" {
-		t.Fatalf("Image=%q want %q", cfg.Image, "ubuntu-24-04-x64")
+}
+
+func TestApplyDigitalOceanDefaultsDoesNotMutateGenericImage(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+	want := cfg.Image
+
+	applyDigitalOceanDefaults(&cfg)
+
+	if cfg.Image != want {
+		t.Fatalf("Image=%q want %q", cfg.Image, want)
+	}
+}
+
+func TestApplyDigitalOceanDefaultsUseProviderDefaults(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+
+	applyDigitalOceanDefaults(&cfg)
+
+	if cfg.DigitalOcean.Region != "nyc3" {
+		t.Fatalf("DigitalOcean.Region=%q want %q", cfg.DigitalOcean.Region, "nyc3")
+	}
+	if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+		t.Fatalf("DigitalOcean.Image=%q want %q", cfg.DigitalOcean.Image, "ubuntu-24-04-x64")
 	}
 }
 

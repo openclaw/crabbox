@@ -93,36 +93,30 @@ if not has_slug(payload):
   fi
 }
 
-validate_list_json_absent_slug() {
+validate_list_json_empty() {
   local command="$1"
   local output="$2"
+  local validation_output=""
+  local status=0
   set +e
-  CRABBOX_SMOKE_SLUG="$slug" python3 -c '
+  validation_output="$(python3 -c '
 import json
-import os
 import sys
 
-slug = os.environ["CRABBOX_SMOKE_SLUG"]
-payload = json.load(sys.stdin)
+try:
+    payload = json.load(sys.stdin)
+except Exception as exc:
+    print(f"invalid JSON: {exc}", file=sys.stderr)
+    sys.exit(1)
 
-def has_slug(value):
-    if isinstance(value, dict):
-        labels = value.get("labels")
-        if isinstance(labels, dict) and labels.get("slug") == slug:
-            return True
-        if value.get("slug") == slug or value.get("name") == slug or value.get("id") == slug or value.get("leaseId") == slug:
-            return True
-        return any(has_slug(child) for child in value.values())
-    if isinstance(value, list):
-        return any(has_slug(child) for child in value)
-    return False
-
-sys.exit(1 if has_slug(payload) else 0)
-' <<<"$output" >/dev/null 2>&1
-  local status=$?
+if payload != []:
+    print("DigitalOcean Crabbox inventory is not empty", file=sys.stderr)
+    sys.exit(1)
+' <<<"$output" 2>&1)"
+  status=$?
   set -e
   if [ "$status" -ne 0 ]; then
-    classify_validation_failure "$command" "$status" "list JSON still included slug $slug after stop"
+    classify_validation_failure "$command" "$status" "$validation_output"
     exit "$status"
   fi
 }
@@ -134,8 +128,27 @@ config_file=""
 cleanup() {
   local status=$?
   if [ "$cleanup_armed" -eq 1 ]; then
-    bin/crabbox stop --provider digitalocean "$slug" >/dev/null 2>&1 || true
-    bin/crabbox cleanup --provider digitalocean >/dev/null 2>&1 || true
+    local cleanup_output=""
+    local cleanup_status=1
+    local attempt
+    for attempt in 1 2 3; do
+      set +e
+      cleanup_output="$(bin/crabbox stop --provider digitalocean "$slug" 2>&1)"
+      cleanup_status=$?
+      set -e
+      if [ "$cleanup_status" -eq 0 ]; then
+        cleanup_armed=0
+        break
+      fi
+      sleep 2
+    done
+    if [ "$cleanup_status" -ne 0 ]; then
+      printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "bin/crabbox stop --provider digitalocean $slug" "$cleanup_status" "$slug" >&2
+      printf '%s\n' "$cleanup_output" >&2
+      if [ "$status" -eq 0 ]; then
+        status="$cleanup_status"
+      fi
+    fi
   fi
   if [ -n "$config_file" ]; then
     rm -f "$config_file"
@@ -177,8 +190,11 @@ export DIGITALOCEAN_TOKEN
 
 doctor_output="$(run_capture "bin/crabbox doctor --provider digitalocean" bin/crabbox doctor --provider digitalocean)"
 printf '%s\n' "$doctor_output"
+initial_list_output="$(run_capture "bin/crabbox list --provider digitalocean --json" bin/crabbox list --provider digitalocean --json)"
+validate_list_json_empty "bin/crabbox list --provider digitalocean --json" "$initial_list_output"
 cleanup_armed=1
 run_capture "bin/crabbox warmup --provider digitalocean --slug $slug --keep --type s-1vcpu-1gb --ttl 20m --idle-timeout 5m" bin/crabbox warmup --provider digitalocean --slug "$slug" --keep --type s-1vcpu-1gb --ttl 20m --idle-timeout 5m >/dev/null
+run_capture "bin/crabbox status --provider digitalocean --id $slug --wait --wait-timeout 300s" bin/crabbox status --provider digitalocean --id "$slug" --wait --wait-timeout 300s >/dev/null
 run_capture "bin/crabbox run --provider digitalocean --id $slug --no-sync -- echo ok" bin/crabbox run --provider digitalocean --id "$slug" --no-sync -- echo ok >/dev/null
 list_output="$(run_capture "bin/crabbox list --provider digitalocean --json" bin/crabbox list --provider digitalocean --json)"
 printf '%s\n' "$list_output"
@@ -187,6 +203,7 @@ run_capture "bin/crabbox stop --provider digitalocean $slug" bin/crabbox stop --
 cleanup_armed=0
 cleanup_output="$(run_capture "bin/crabbox cleanup --provider digitalocean --dry-run" bin/crabbox cleanup --provider digitalocean --dry-run)"
 post_list_output="$(run_capture "bin/crabbox list --provider digitalocean --json" bin/crabbox list --provider digitalocean --json)"
-validate_list_json_absent_slug "bin/crabbox list --provider digitalocean --json" "$post_list_output"
+validate_list_json_empty "bin/crabbox list --provider digitalocean --json" "$post_list_output"
 printf '%s\n' "$cleanup_output"
+printf '%s\n' "$post_list_output"
 printf 'classification=live_digitalocean_smoke_passed slug=%s cleanup=complete\n' "$slug"

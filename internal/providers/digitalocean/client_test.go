@@ -3,6 +3,7 @@ package digitalocean
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -188,6 +189,40 @@ func TestDigitalOceanClientCreateDropletRollsBackNewSSHKeyOnTagFailure(t *testin
 	_, err = client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "blue", false, time.Now())
 	if err == nil {
 		t.Fatal("CreateDroplet succeeded")
+	}
+	if !deleteKey {
+		t.Fatal("new ssh key was not rolled back")
+	}
+}
+
+func TestDigitalOceanClientRollbackCreatedSSHKeyUsesFreshContext(t *testing.T) {
+	var deleteKey bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Context().Err() != nil {
+			t.Fatalf("cleanup request used canceled context: %v", r.Context().Err())
+		}
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.RequestURI(), "/account/keys"):
+			_, _ = w.Write([]byte(`{"ssh_keys":[{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}],"links":{"pages":{}}}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/account/keys/123":
+			deleteKey = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+
+	err = client.rollbackCreatedSSHKey("crabbox-cbx-abcdef123456", context.Canceled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("rollback err=%v", err)
 	}
 	if !deleteKey {
 		t.Fatal("new ssh key was not rolled back")

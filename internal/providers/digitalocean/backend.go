@@ -129,13 +129,6 @@ func (b *digitalOceanLeaseBackend) Resolve(ctx context.Context, req core.Resolve
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if id, ok := parseDropletID(req.ID); ok {
-		item, err := client.GetDroplet(ctx, id)
-		if err != nil {
-			return core.LeaseTarget{}, err
-		}
-		return b.targetFromDroplet(item, req)
-	}
 	droplets, err := client.ListCrabboxDroplets(ctx)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -151,17 +144,24 @@ func (b *digitalOceanLeaseBackend) Resolve(ctx context.Context, req core.Resolve
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if leaseID == "" {
-		return core.LeaseTarget{}, core.Exit(4, "lease/droplet not found: %s", req.ID)
+	if leaseID != "" {
+		return b.targetFromDroplet(byID[server.ID], req)
 	}
-	return b.targetFromDroplet(byID[server.ID], req)
+	if id, ok := parseDropletID(req.ID); ok {
+		item, err := client.GetDroplet(ctx, id)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		return b.targetFromDroplet(item, req)
+	}
+	return core.LeaseTarget{}, core.Exit(4, "lease/droplet not found: %s", req.ID)
 }
 
 func (b *digitalOceanLeaseBackend) targetFromDroplet(item droplet, req core.ResolveRequest) (core.LeaseTarget, error) {
-	server := serverFromDroplet(item, b.Cfg)
-	if err := validateDropletLabels(server.Labels); err != nil {
+	if err := validateDropletLabels(labelsFromTags(item.Tags)); err != nil {
 		return core.LeaseTarget{}, err
 	}
+	server := serverFromDroplet(item, b.Cfg)
 	leaseID := server.Labels["lease"]
 	if req.ReleaseOnly {
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
@@ -323,9 +323,6 @@ func serverFromDroplet(item droplet, cfg core.Config) core.Server {
 	if labels["provider_key"] == "" && labels["lease"] != "" {
 		labels["provider_key"] = providerKeyForLease(labels["lease"])
 	}
-	if labels["target"] == "" {
-		labels["target"] = core.TargetLinux
-	}
 	server := core.Server{
 		CloudID:  strconv.FormatInt(item.ID, 10),
 		Provider: providerName,
@@ -377,21 +374,14 @@ func parseDropletID(id string) (int64, bool) {
 
 func applyDigitalOceanDefaults(cfg *core.Config) {
 	cfg.Provider = providerName
-	base := core.BaseConfig()
 	if cfg.TargetOS == "" {
 		cfg.TargetOS = core.TargetLinux
 	}
 	if cfg.DigitalOcean.Region == "" {
-		cfg.DigitalOcean.Region = firstNonBlank(cfg.Location, "nyc3")
-	}
-	if cfg.Location == "" || cfg.Location == base.Location {
-		cfg.Location = cfg.DigitalOcean.Region
+		cfg.DigitalOcean.Region = "nyc3"
 	}
 	if cfg.DigitalOcean.Image == "" {
-		cfg.DigitalOcean.Image = firstNonBlank(cfg.Image, "ubuntu-24-04-x64")
-	}
-	if cfg.Image == "" || cfg.Image == base.Image {
-		cfg.Image = cfg.DigitalOcean.Image
+		cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
 	}
 	if cfg.ServerType == "" {
 		cfg.ServerType = digitalOceanServerTypeForClass(cfg.Class)

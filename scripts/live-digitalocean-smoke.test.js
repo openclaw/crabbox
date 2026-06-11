@@ -71,12 +71,15 @@ case "$1" in
   warmup)
     printf '%s\n' "$5" >"${slugFile}"
     ;;
+  status)
+    printf 'status=ready\n'
+    ;;
   run)
     printf 'ok\n'
     ;;
   list)
     slug="$(cat "${slugFile}" 2>/dev/null || true)"
-    if [[ -f "${slugFile}.stopped" ]]; then
+    if [[ -z "$slug" || -f "${slugFile}.stopped" ]]; then
       printf '[]\n'
     else
       printf '[{"labels":{"slug":"%s"}}]\n' "$slug"
@@ -116,12 +119,14 @@ chmod +x "$out"
 
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
   assert.equal(seen[0], "doctor --provider digitalocean");
-  assert.match(seen[1], /^warmup --provider digitalocean --slug digitalocean-smoke-\d{14}-\d+ --keep --type s-1vcpu-1gb --ttl 20m --idle-timeout 5m$/);
-  assert.match(seen[2], /^run --provider digitalocean --id digitalocean-smoke-\d{14}-\d+ --no-sync -- echo ok$/);
-  assert.equal(seen[3], "list --provider digitalocean --json");
-  assert.match(seen[4], /^stop --provider digitalocean digitalocean-smoke-\d{14}-\d+$/);
-  assert.equal(seen[5], "cleanup --provider digitalocean --dry-run");
-  assert.equal(seen[6], "list --provider digitalocean --json");
+  assert.equal(seen[1], "list --provider digitalocean --json");
+  assert.match(seen[2], /^warmup --provider digitalocean --slug digitalocean-smoke-\d{14}-\d+ --keep --type s-1vcpu-1gb --ttl 20m --idle-timeout 5m$/);
+  assert.match(seen[3], /^status --provider digitalocean --id digitalocean-smoke-\d{14}-\d+ --wait --wait-timeout 300s$/);
+  assert.match(seen[4], /^run --provider digitalocean --id digitalocean-smoke-\d{14}-\d+ --no-sync -- echo ok$/);
+  assert.equal(seen[5], "list --provider digitalocean --json");
+  assert.match(seen[6], /^stop --provider digitalocean digitalocean-smoke-\d{14}-\d+$/);
+  assert.equal(seen[7], "cleanup --provider digitalocean --dry-run");
+  assert.equal(seen[8], "list --provider digitalocean --json");
 });
 
 test("live digitalocean smoke attempts cleanup after partial failure", () => {
@@ -129,6 +134,7 @@ test("live digitalocean smoke attempts cleanup after partial failure", () => {
   const binDir = path.join(dir, "bin");
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   const stopped = path.join(dir, "stopped.log");
+  const calls = path.join(dir, "calls.log");
   fs.mkdirSync(binDir, { recursive: true });
 
   writeExecutable(
@@ -144,8 +150,13 @@ mkdir -p "$(dirname "$out")"
 cat >"$out" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >>"${calls}"
 if [[ "$1" == "doctor" ]]; then
   printf 'auth=ready\n'
+  exit 0
+fi
+if [[ "$1" == "list" ]]; then
+  printf '[]\n'
   exit 0
 fi
 if [[ "$1" == "warmup" ]]; then
@@ -154,9 +165,6 @@ if [[ "$1" == "warmup" ]]; then
 fi
 if [[ "$1" == "stop" ]]; then
   printf '%s\n' "$4" >>"${stopped}"
-  exit 0
-fi
-if [[ "$1" == "cleanup" ]]; then
   exit 0
 fi
 exit 99
@@ -181,4 +189,139 @@ chmod +x "$out"
   assert.match(result.stderr, /classification=environment_blocked/);
   assert.match(result.stderr, /created droplet before failing/);
   assert.match(fs.readFileSync(stopped, "utf8"), /^digitalocean-smoke-\d{14}-\d+\n$/);
+  assert.doesNotMatch(fs.readFileSync(calls, "utf8"), /^cleanup /m);
+});
+
+test("live digitalocean smoke reports targeted cleanup failure without global cleanup", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-do-cleanup-fail-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const calls = path.join(dir, "calls.log");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeExecutable(
+    path.join(binDir, "sleep"),
+    `#!/usr/bin/env bash
+exit 0
+`,
+  );
+  writeExecutable(
+    path.join(binDir, "go"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${calls}"
+case "$1" in
+  doctor)
+    printf 'auth=ready\n'
+    ;;
+  list)
+    printf '[]\n'
+    ;;
+  warmup)
+    printf 'created droplet before failing\n' >&2
+    exit 37
+    ;;
+  stop)
+    printf 'stop denied\n' >&2
+    exit 55
+    ;;
+  cleanup)
+    printf 'global cleanup must not run\n' >&2
+    exit 99
+    ;;
+  *)
+    exit 98
+    ;;
+esac
+SCRIPT
+chmod +x "$out"
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "digitalocean",
+      DIGITALOCEAN_TOKEN: "test-secret-token",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 37, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=cleanup_failed/);
+  assert.match(result.stderr, /stop denied/);
+  const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
+  assert.equal(seen.filter((line) => line.startsWith("stop ")).length, 3);
+  assert.equal(seen.filter((line) => line.startsWith("cleanup ")).length, 0);
+});
+
+test("live digitalocean smoke refuses a non-empty inventory before mutation", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-do-nonempty-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const calls = path.join(dir, "calls.log");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeExecutable(
+    path.join(binDir, "go"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${calls}"
+case "$1" in
+  doctor)
+    printf 'auth=ready\n'
+    ;;
+  list)
+    printf '[{"labels":{"slug":"existing"}}]\n'
+    ;;
+  *)
+    printf 'mutation must not run\n' >&2
+    exit 99
+    ;;
+esac
+SCRIPT
+chmod +x "$out"
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "digitalocean",
+      DIGITALOCEAN_TOKEN: "test-secret-token",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=validation_failed/);
+  assert.match(result.stderr, /inventory is not empty/);
+  assert.deepEqual(fs.readFileSync(calls, "utf8").trim().split("\n"), [
+    "doctor --provider digitalocean",
+    "list --provider digitalocean --json",
+  ]);
 });
