@@ -453,16 +453,13 @@ func TestIsloRunMigratesReusedWorkspaceOwnership(t *testing.T) {
 	}
 }
 
-func TestIsloRunPropagatesReusedLeaseTailscaleEnrollmentFailure(t *testing.T) {
+func TestIsloRunRejectsReusedPlainLeaseTailscaleEnrollment(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-old-abcdef"
 	if err := claimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	client := &fakeIsloSyncClient{
-		execErrOnCommand:         errors.New("tailscale bootstrap failed"),
-		execErrOnCommandContains: "pkgs.tailscale.com",
-	}
+	client := &fakeIsloSyncClient{}
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
@@ -479,11 +476,11 @@ func TestIsloRunPropagatesReusedLeaseTailscaleEnrollmentFailure(t *testing.T) {
 		NoSync:  true,
 		Command: []string{"true"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "tailscale bootstrap failed") {
-		t.Fatalf("expected explicit Tailscale enrollment failure, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "cannot enable Tailscale in place") {
+		t.Fatalf("expected in-place Tailscale rejection, got %v", err)
 	}
-	if client.commandContains("cd '/workspace/repo'") {
-		t.Fatalf("workload ran after failed Tailscale enrollment: %#v", client.prepareCommands)
+	if len(client.execRequests) != 0 {
+		t.Fatalf("sandbox mutated before in-place enrollment rejection: %#v", client.prepareCommands)
 	}
 }
 
@@ -558,6 +555,58 @@ func TestIsloRunAddsTailnetProxyDefaultsToWorkload(t *testing.T) {
 	}
 	if workload.GetUser() == nil || *workload.GetUser() != isloWorkloadUser {
 		t.Fatalf("tailnet workload user=%v want %q", workload.GetUser(), isloWorkloadUser)
+	}
+}
+
+func TestIsloRunKeepsEnrolledWorkloadNonRootWhenValidationUnavailable(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-old-abcdef"
+	if err := claimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{
+		execErrOnCommand:         errors.New("health API unavailable"),
+		execErrOnCommandContains: `"BackendState"`,
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID:      leaseID,
+		Keep:    true,
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workload := client.execRequests[len(client.execRequests)-1]
+	if workload.GetUser() == nil || *workload.GetUser() != isloWorkloadUser {
+		t.Fatalf("enrolled workload user=%v want %q", workload.GetUser(), isloWorkloadUser)
+	}
+	if workload.Env != nil {
+		t.Fatalf("unvalidated tailnet should not inject proxy env: %#v", workload.Env)
+	}
+}
+
+func TestIsloWorkloadEnvExplicitAllProxySuppressesProtocolDefaults(t *testing.T) {
+	env := isloWorkloadEnv(map[string]string{
+		"all_proxy": "socks5://override.example:1080",
+	}, true)
+	if env["ALL_PROXY"] != "socks5://override.example:1080" || env["all_proxy"] != "socks5://override.example:1080" {
+		t.Fatalf("ALL_PROXY pair=%#v", env)
+	}
+	for _, name := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"} {
+		if _, ok := env[name]; ok {
+			t.Fatalf("explicit ALL_PROXY should suppress %s default: %#v", name, env)
+		}
 	}
 }
 

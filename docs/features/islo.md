@@ -132,7 +132,8 @@ TUN route. For enrolled leases, Crabbox supplies workload commands with local
 proxy defaults (`ALL_PROXY=socks5://127.0.0.2:1055`,
 `HTTP_PROXY=http://127.0.0.2:1055`, and
 `HTTPS_PROXY=http://127.0.0.2:1055`) and their lowercase equivalents; explicit
-command environment values in either case override those defaults. Other
+command environment values in either case override those defaults. An explicit
+`ALL_PROXY`/`all_proxy` also suppresses the protocol-specific defaults. Other
 processes must opt into those proxies or another userspace Tailscale surface.
 The proxy uses `127.0.0.2` because userspace Tailscale forwards inbound tailnet
 TCP to `127.0.0.1`; keeping the proxy on a separate loopback address prevents
@@ -152,6 +153,8 @@ A lease warmed **without** `--tailscale` is unchanged: no tailnet IP is recorded
 and `pond peers` reports it on the URL bridge as before. The pond ACL tag and its
 auto-bootstrap (`CRABBOX_POND_ACL_BOOTSTRAP=1` + `TS_API_KEY`) apply to Islo
 exactly as they do for other direct Tailscale-capable providers.
+Tailscale enrollment is creation-time only: a reused plain Islo lease must be
+recreated with `--tailscale` rather than enrolled in place.
 
 ## Rejected options
 

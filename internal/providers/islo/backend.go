@@ -159,6 +159,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	}
 	leaseID, name, slug := "", "", ""
 	acquired := false
+	tailnetEnrolled := false
 	tailnetReady := false
 	if req.ID == "" {
 		leaseID, name, slug, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
@@ -167,36 +168,32 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		}
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=islo sandbox=%s\n", leaseID, slug, name)
 		acquired = true
+		tailnetEnrolled = b.cfg.Tailscale.Enabled
 		tailnetReady = b.cfg.Tailscale.Enabled
 	} else {
 		leaseID, name, slug, err = resolveIsloLeaseID(req.ID, req.Repo.Root, req.Reclaim)
 		if err != nil {
 			return RunResult{}, err
 		}
-		var claim core.LeaseClaim
+		claim, claimOK, err := resolveLeaseClaim(leaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		tailnetEnrolled = claimOK && isloClaimTailscaleEnrolled(claim)
 		if b.cfg.Tailscale.Enabled {
-			var ok bool
-			claim, ok, err = resolveLeaseClaim(leaseID)
-			if err != nil {
-				return RunResult{}, err
-			}
-			if !ok {
+			if !claimOK {
 				return RunResult{}, exit(4, "islo lease claim %s not found; warm or reclaim the lease before enabling Tailscale", leaseID)
+			}
+			if !tailnetEnrolled {
+				return RunResult{}, exit(2, "provider=islo: cannot enable Tailscale in place on a reused plain lease; create a new lease with --tailscale")
 			}
 		}
 		if b.cfg.Tailscale.Enabled {
-			if !isloClaimTailscaleEnrolled(claim) {
-				if err := b.maybeJoinTailscale(ctx, client, name, slug, leaseID); err != nil {
-					return RunResult{}, err
-				}
-				tailnetReady = true
-			} else {
-				meta, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID)
-				if err != nil {
-					return RunResult{}, err
-				}
-				tailnetReady = meta.Enabled
+			meta, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID)
+			if err != nil {
+				return RunResult{}, err
 			}
+			tailnetReady = meta.Enabled
 		} else {
 			meta, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID)
 			if err != nil &&
@@ -206,7 +203,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			}
 			tailnetReady = err == nil && meta.Enabled
 		}
-		if tailnetReady {
+		if tailnetEnrolled {
 			if err := b.migrateWorkspaceOwnership(ctx, client, name, workspace); err != nil {
 				return RunResult{}, err
 			}
@@ -245,7 +242,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	syncDuration := time.Duration(0)
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	workloadUser := ""
-	if tailnetReady {
+	if tailnetEnrolled {
 		workloadUser = isloWorkloadUser
 	}
 	if !req.NoSync {
@@ -306,28 +303,27 @@ func isloWorkloadEnv(env map[string]string, tailnetReady bool) map[string]string
 	for name, value := range env {
 		out[name] = value
 	}
-	for _, proxy := range []struct {
-		upper string
-		lower string
-		value string
-	}{
-		{upper: "ALL_PROXY", lower: "all_proxy", value: "socks5://127.0.0.2:1055"},
-		{upper: "HTTP_PROXY", lower: "http_proxy", value: "http://127.0.0.2:1055"},
-		{upper: "HTTPS_PROXY", lower: "https_proxy", value: "http://127.0.0.2:1055"},
-	} {
-		upperValue, upperSet := out[proxy.upper]
-		lowerValue, lowerSet := out[proxy.lower]
-		switch {
-		case upperSet && !lowerSet:
-			out[proxy.lower] = upperValue
-		case lowerSet && !upperSet:
-			out[proxy.upper] = lowerValue
-		case !upperSet && !lowerSet:
-			out[proxy.upper] = proxy.value
-			out[proxy.lower] = proxy.value
-		}
-	}
+	_, explicitALLUpper := env["ALL_PROXY"]
+	_, explicitALLLower := env["all_proxy"]
+	explicitALL := explicitALLUpper || explicitALLLower
+	applyIsloProxyPair(out, "ALL_PROXY", "all_proxy", "socks5://127.0.0.2:1055", true)
+	applyIsloProxyPair(out, "HTTP_PROXY", "http_proxy", "http://127.0.0.2:1055", !explicitALL)
+	applyIsloProxyPair(out, "HTTPS_PROXY", "https_proxy", "http://127.0.0.2:1055", !explicitALL)
 	return out
+}
+
+func applyIsloProxyPair(env map[string]string, upper, lower, defaultValue string, useDefault bool) {
+	upperValue, upperSet := env[upper]
+	lowerValue, lowerSet := env[lower]
+	switch {
+	case upperSet && !lowerSet:
+		env[lower] = upperValue
+	case lowerSet && !upperSet:
+		env[upper] = lowerValue
+	case !upperSet && !lowerSet && useDefault:
+		env[upper] = defaultValue
+		env[lower] = defaultValue
+	}
 }
 
 func (b *isloBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
