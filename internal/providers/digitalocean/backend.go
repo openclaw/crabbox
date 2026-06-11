@@ -84,7 +84,7 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 			return
 		}
 		if cleanupErr := rollbackDigitalOceanAcquire(client, created.ID, providerKeyForLease(leaseID)); cleanupErr != nil {
-			err = errors.Join(err, fmt.Errorf("digitalocean cleanup failed: %w", cleanupErr))
+			err = fmt.Errorf("%v; digitalocean cleanup failed: %w", err, cleanupErr)
 			return
 		}
 		core.RemoveStoredTestboxKey(leaseID)
@@ -112,7 +112,7 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	if err := b.waitSSH(ctx, &ssh, "digitalocean bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	readyTags := leaseTags(cfg, leaseID, slug, "ready", req.Keep, b.now())
+	readyTags := leaseTags(cfg, leaseID, slug, "ready", req.Keep, now)
 	if err := client.ReplaceDropletTags(ctx, created.ID, created.Tags, readyTags); err != nil {
 		return core.LeaseTarget{}, err
 	} else {
@@ -297,6 +297,12 @@ func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequ
 	}
 	cfg := b.Cfg
 	labels := normalizedDropletLabels(item.Tags)
+	liveTailscale := map[string]string{}
+	for _, key := range []string{"tailscale_ipv4", "tailscale_fqdn", "tailscale_state", "tailscale_error"} {
+		if value, ok := labels[key]; ok {
+			liveTailscale[key] = value
+		}
+	}
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
 		updated := make(map[string]string, len(labels))
@@ -308,9 +314,38 @@ func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequ
 		delete(labels, "idle_timeout_secs")
 	}
 	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now())
+	for key, value := range liveTailscale {
+		labels[key] = value
+	}
 	if err := client.ReplaceDropletTags(ctx, server.ID, item.Tags, tagsFromLabels(labels)); err != nil {
 		return core.Server{}, err
 	}
+	server.Labels = labels
+	return server, nil
+}
+
+func (b *digitalOceanLeaseBackend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseTarget, meta core.TailscaleMetadata) (core.Server, error) {
+	server := lease.Server
+	if err := validateDropletLabels(server.Labels); err != nil {
+		return core.Server{}, err
+	}
+	client, err := b.clientFactory(b.RT)
+	if err != nil {
+		return core.Server{}, err
+	}
+	item, err := client.GetDroplet(ctx, server.ID)
+	if err != nil {
+		return core.Server{}, err
+	}
+	if err := validateLiveDroplet(item, server); err != nil {
+		return core.Server{}, err
+	}
+	labels := normalizedDropletLabels(item.Tags)
+	applyTailscaleMetadata(labels, meta)
+	if err := client.ReplaceDropletTags(ctx, server.ID, item.Tags, tagsFromLabels(labels)); err != nil {
+		return core.Server{}, err
+	}
+	server = serverFromDroplet(item, b.Cfg)
 	server.Labels = labels
 	return server, nil
 }
@@ -321,6 +356,38 @@ func (b *digitalOceanLeaseBackend) Cleanup(ctx context.Context, req core.Cleanup
 		return err
 	}
 	return b.CleanupServers(ctx, req, servers)
+}
+
+func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {
+	if meta.Enabled {
+		labels["tailscale"] = "true"
+	}
+	if meta.Hostname != "" {
+		labels["tailscale_hostname"] = meta.Hostname
+	}
+	if meta.FQDN != "" {
+		labels["tailscale_fqdn"] = meta.FQDN
+	}
+	if meta.IPv4 != "" {
+		labels["tailscale_ipv4"] = meta.IPv4
+	}
+	if len(meta.Tags) > 0 {
+		labels["tailscale_tags"] = strings.Join(meta.Tags, ",")
+	}
+	if meta.State != "" {
+		labels["tailscale_state"] = meta.State
+	}
+	if meta.Error != "" {
+		labels["tailscale_error"] = meta.Error
+	} else {
+		delete(labels, "tailscale_error")
+	}
+	if meta.ExitNode != "" {
+		labels["tailscale_exit_node"] = meta.ExitNode
+	}
+	if meta.ExitNodeAllowLANAccess {
+		labels["tailscale_exit_node_allow_lan_access"] = "true"
+	}
 }
 
 func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {
@@ -342,12 +409,12 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Conf
 	if err := client.DeleteDroplet(ctx, server.ID); err != nil {
 		return err
 	}
-	if keyName := core.ServerProviderKey(server); core.ValidCrabboxProviderKey(keyName) {
+	leaseID := server.Labels["lease"]
+	if keyName := providerKeyForLease(leaseID); core.ValidCrabboxProviderKey(keyName) {
 		if err := client.DeleteSSHKeyByName(ctx, keyName); err != nil {
 			return err
 		}
 	}
-	leaseID := server.Labels["lease"]
 	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil {
 		return err

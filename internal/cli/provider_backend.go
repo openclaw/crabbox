@@ -75,6 +75,11 @@ type SSHLeaseBackend interface {
 	Touch(ctx context.Context, req TouchRequest) (Server, error)
 }
 
+type TailscaleMetadataBackend interface {
+	Backend
+	UpdateTailscaleMetadata(ctx context.Context, lease LeaseTarget, meta TailscaleMetadata) (Server, error)
+}
+
 type DelegatedRunBackend interface {
 	Backend
 	Warmup(ctx context.Context, req WarmupRequest) error

@@ -170,6 +170,11 @@ func TestAcquireCreatesDropletClaimsLeaseAndMarksReady(t *testing.T) {
 	if lease.Server.Labels["state"] != "ready" {
 		t.Fatalf("labels=%v", lease.Server.Labels)
 	}
+	from := labelsFromTags(api.replacedFrom[0])
+	to := labelsFromTags(api.replacedTo[0])
+	if from["created_at"] != to["created_at"] || from["expires_at"] != to["expires_at"] {
+		t.Fatalf("ready transition changed lifetime: from=%v to=%v", from, to)
+	}
 }
 
 func TestAcquireRollsBackDropletAndKeyOnSSHFailure(t *testing.T) {
@@ -197,14 +202,19 @@ func TestAcquireRollsBackDropletAndKeyOnSSHFailure(t *testing.T) {
 
 func TestAcquireRetainsLocalKeyWhenRollbackFails(t *testing.T) {
 	api := &fakeDigitalOceanAPI{
-		createErr:    errors.New("create failed"),
 		keyDeleteErr: errors.New("key cleanup failed"),
 	}
 	backend := newTestBackend(t, api)
+	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+		return core.Exit(5, "timed out waiting for SSH")
+	}
 
 	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback-fail"})
-	if err == nil || !strings.Contains(err.Error(), "create failed") || !strings.Contains(err.Error(), "key cleanup failed") {
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for SSH") || !strings.Contains(err.Error(), "key cleanup failed") {
 		t.Fatalf("Acquire err=%v", err)
+	}
+	if len(api.createRequests) != 1 {
+		t.Fatalf("createRequests=%d, want no retry after rollback failure", len(api.createRequests))
 	}
 	keyPath, pathErr := core.TestboxKeyPath(api.createRequests[0].leaseID)
 	if pathErr != nil {
@@ -589,7 +599,7 @@ func writeStoredTestboxKey(t *testing.T, leaseID string) string {
 	return keyPath
 }
 
-func TestTouchPersistsDigitalOceanTags(t *testing.T) {
+func TestTouchPreservesLiveTailscaleTags(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
@@ -597,11 +607,20 @@ func TestTouchPersistsDigitalOceanTags(t *testing.T) {
 	cfg.TTL = time.Hour
 	cfg.IdleTimeout = time.Minute
 	item := droplet{ID: 99, Name: "touch", Status: "active", Tags: leaseTags(cfg, "cbx_abcdef123456", "touch-me", "ready", false, time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC))}
+	server := serverFromDroplet(item, cfg)
+	server.Labels["tailscale_ipv4"] = "100.64.1.1"
+	server.Labels["tailscale_fqdn"] = "stale.example.ts.net"
+	server.Labels["tailscale_state"] = "requested"
+	liveLabels := normalizedDropletLabels(item.Tags)
+	liveLabels["tailscale_ipv4"] = "100.64.1.2"
+	liveLabels["tailscale_fqdn"] = "touch-me.example.ts.net"
+	liveLabels["tailscale_state"] = "ready"
+	liveLabels["tailscale_error"] = "last probe failed: retrying"
+	item.Tags = tagsFromLabels(liveLabels)
 	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
 	backend := newTestBackend(t, api)
 	backend.RT.Clock = fixedClock{t: time.Date(2026, 6, 10, 12, 10, 0, 0, time.UTC)}
 
-	server := serverFromDroplet(item, backend.Cfg)
 	touched, err := backend.Touch(context.Background(), core.TouchRequest{
 		Lease:       core.LeaseTarget{Server: server, LeaseID: "cbx_abcdef123456"},
 		State:       "running",
@@ -617,8 +636,51 @@ func TestTouchPersistsDigitalOceanTags(t *testing.T) {
 		t.Fatalf("replaced=%v", api.replaced)
 	}
 	decoded := labelsFromTags(api.replacedTo[0])
-	if decoded["state"] != "running" || decoded["idle_timeout_secs"] != "1200" {
+	if decoded["state"] != "running" ||
+		decoded["idle_timeout_secs"] != "1200" ||
+		decoded["tailscale_ipv4"] != "100.64.1.2" ||
+		decoded["tailscale_fqdn"] != "touch-me.example.ts.net" ||
+		decoded["tailscale_state"] != "ready" ||
+		decoded["tailscale_error"] != "last probe failed: retrying" {
 		t.Fatalf("persisted labels=%v tags=%v", decoded, api.replacedTo[0])
+	}
+}
+
+func TestUpdateTailscaleMetadataPersistsDigitalOceanTags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.Tailscale.Enabled = true
+	item := droplet{ID: 105, Name: "metadata", Status: "active", Tags: leaseTags(cfg, "cbx_abcdef123456", "metadata", "ready", false, time.Now())}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	server := serverFromDroplet(item, backend.Cfg)
+	meta := core.TailscaleMetadata{
+		Enabled:  true,
+		Hostname: "metadata",
+		FQDN:     "metadata.example.ts.net",
+		IPv4:     "100.64.1.3",
+		State:    "ready",
+		Error:    "last probe failed: retrying",
+	}
+
+	updated, err := backend.UpdateTailscaleMetadata(context.Background(), core.LeaseTarget{
+		Server:  server,
+		LeaseID: "cbx_abcdef123456",
+	}, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(api.replacedTo) != 1 {
+		t.Fatalf("replacedTo=%v", api.replacedTo)
+	}
+	for _, labels := range []map[string]string{labelsFromTags(api.replacedTo[0]), updated.Labels} {
+		if labels["tailscale_ipv4"] != meta.IPv4 ||
+			labels["tailscale_fqdn"] != meta.FQDN ||
+			labels["tailscale_state"] != meta.State ||
+			labels["tailscale_error"] != meta.Error {
+			t.Fatalf("persisted labels=%v tags=%v", labels, api.replacedTo[0])
+		}
 	}
 }
 
@@ -668,6 +730,28 @@ func TestTouchRefusesDropletWhoseProviderKeyChanged(t *testing.T) {
 	}
 	if len(api.replaced) != 0 {
 		t.Fatalf("replaced=%v", api.replaced)
+	}
+}
+
+func TestReleaseDerivesProviderKeyFromLeaseID(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123456"
+	cfg.ProviderKey = "crabbox-cbx-deadbeef1234"
+	item := droplet{ID: 104, Name: "changed-key", Status: "active", Tags: leaseTags(cfg, leaseID, "changed-key", "ready", false, time.Now())}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	server := serverFromDroplet(item, backend.Cfg)
+
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		Server:  server,
+		LeaseID: leaseID,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deletedKeys) != 1 || api.deletedKeys[0] != providerKeyForLease(leaseID) {
+		t.Fatalf("deletedKeys=%v", api.deletedKeys)
 	}
 }
 

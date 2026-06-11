@@ -3,6 +3,7 @@ package digitalocean
 import (
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,12 +57,17 @@ func tagLabelKeys() []string {
 		"lease", "slug", "state", "keep", "target", "class", "server_type", "provider_key",
 		"ttl_secs", "idle_timeout", "idle_timeout_secs", "expires_at", "created_at", "last_touched_at", "updated_at",
 		"profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports",
-		"tailscale", "tailscale_state", "tailscale_hostname", "tailscale_tags", "tailscale_exit_node", "tailscale_exit_node_allow_lan_access",
+		"tailscale", "tailscale_state", "tailscale_hostname", "tailscale_tags", "tailscale_ipv4", "tailscale_fqdn", "tailscale_error",
+		"tailscale_exit_node", "tailscale_exit_node_allow_lan_access",
 	}
 }
 
 func encodeTagKV(key, value string) string {
-	return tagPrefix + sanitizeTagPart(key) + ":" + sanitizeTagPart(value)
+	key = sanitizeTagPart(key)
+	if exactTagValueKey(key) {
+		return tagPrefix + key + ":" + encodeExactTagValue(value, 255-len(tagPrefix)-len(key)-1)
+	}
+	return tagPrefix + key + ":" + sanitizeTagPart(value)
 }
 
 func sanitizeTagPart(value string) string {
@@ -75,6 +81,60 @@ func sanitizeTagPart(value string) string {
 		return value[:64]
 	}
 	return value
+}
+
+func exactTagValueKey(key string) bool {
+	switch key {
+	case "tailscale_ipv4", "tailscale_fqdn", "tailscale_error":
+		return true
+	default:
+		return false
+	}
+}
+
+func encodeExactTagValue(value string, maxLen int) string {
+	value = strings.TrimSpace(value)
+	const hex = "0123456789abcdef"
+	var out strings.Builder
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		if (ch >= 'a' && ch <= 'z') ||
+			(ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') ||
+			ch == '-' || ch == ':' {
+			if out.Len()+1 > maxLen {
+				break
+			}
+			out.WriteByte(ch)
+			continue
+		}
+		if out.Len()+3 > maxLen {
+			break
+		}
+		out.WriteByte('_')
+		out.WriteByte(hex[ch>>4])
+		out.WriteByte(hex[ch&0x0f])
+	}
+	if out.Len() == 0 {
+		return "unknown"
+	}
+	return out.String()
+}
+
+func decodeExactTagValue(value string) string {
+	var out strings.Builder
+	for i := 0; i < len(value); i++ {
+		if value[i] == '_' && i+2 < len(value) {
+			decoded, err := strconv.ParseUint(value[i+1:i+3], 16, 8)
+			if err == nil {
+				out.WriteByte(byte(decoded))
+				i += 2
+				continue
+			}
+		}
+		out.WriteByte(value[i])
+	}
+	return out.String()
 }
 
 func normalizeTags(tags []string) []string {
@@ -107,8 +167,12 @@ func labelsFromTags(tags []string) map[string]string {
 				continue
 			}
 			switch parts[0] {
-			case "lease", "slug", "keep", "target", "class", "server_type", "provider_key", "ttl_secs", "idle_timeout", "idle_timeout_secs", "created_at", "updated_at", "profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports", "tailscale", "tailscale_state", "tailscale_hostname", "tailscale_tags", "tailscale_exit_node", "tailscale_exit_node_allow_lan_access":
-				labels[parts[0]] = parts[1]
+			case "lease", "slug", "keep", "target", "class", "server_type", "provider_key", "ttl_secs", "idle_timeout", "idle_timeout_secs", "created_at", "updated_at", "profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports", "tailscale", "tailscale_state", "tailscale_hostname", "tailscale_tags", "tailscale_ipv4", "tailscale_fqdn", "tailscale_error", "tailscale_exit_node", "tailscale_exit_node_allow_lan_access":
+				value := parts[1]
+				if exactTagValueKey(parts[0]) {
+					value = decodeExactTagValue(value)
+				}
+				labels[parts[0]] = value
 			case "state":
 				if statePriority(parts[1]) >= statePriority(labels["state"]) {
 					labels["state"] = parts[1]

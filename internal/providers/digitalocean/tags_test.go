@@ -106,6 +106,35 @@ func TestLeaseTagsPreserveTailscaleMetadata(t *testing.T) {
 	}
 }
 
+func TestTailscaleEndpointTagsRoundTrip(t *testing.T) {
+	labels := map[string]string{
+		"crabbox":            "true",
+		"created_by":         "crabbox",
+		"provider":           providerName,
+		"lease":              "cbx_abcdef123456",
+		"slug":               "blue",
+		"target":             core.TargetLinux,
+		"tailscale_ipv4":     "100.64.1.2",
+		"tailscale_fqdn":     "blue.example.ts.net",
+		"tailscale_state":    "ready",
+		"tailscale_error":    "last probe failed: retrying",
+		"tailscale":          "true",
+		"tailscale_hostname": "blue",
+	}
+	tags := tagsFromLabels(labels)
+	for _, tag := range tags {
+		if !digitalOceanTagNameRE.MatchString(tag) {
+			t.Fatalf("invalid digitalocean tag %q in %v", tag, tags)
+		}
+	}
+	decoded := labelsFromTags(tags)
+	for _, key := range []string{"tailscale_ipv4", "tailscale_fqdn", "tailscale_state", "tailscale_error"} {
+		if decoded[key] != labels[key] {
+			t.Fatalf("decoded[%q]=%q want %q; tags=%v", key, decoded[key], labels[key], tags)
+		}
+	}
+}
+
 func TestLeaseTagsRoundTripCapabilityAndPondLabels(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
