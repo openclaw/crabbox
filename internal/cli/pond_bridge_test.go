@@ -247,6 +247,9 @@ func TestResolvePondPeersKeepsTailnetPeerWhenSecondaryBridgeFails(t *testing.T) 
 	if len(peers) != 1 || peers[0].Transport != TransportTailnet || peers[0].Endpoint != "100.64.7.7" {
 		t.Fatalf("tailnet peer missing after secondary bridge failure: %#v", peers)
 	}
+	if !strings.Contains(peers[0].Note, "tailnet validation unavailable") {
+		t.Fatalf("tailnet peer missing validation warning: %#v", peers[0])
+	}
 }
 
 func TestResolvePondPeersKeepsTailnetPeerWhenURLMemberFails(t *testing.T) {

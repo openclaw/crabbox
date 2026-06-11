@@ -843,15 +843,22 @@ func TestIsloSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	}
 	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", RunRequest{
 		Repo: Repo{Root: root, Name: "repo"},
-	}, "")
+	}, isloWorkloadUser)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if client.uploadPath != "/workspace/repo" {
 		t.Fatalf("upload path=%q", client.uploadPath)
 	}
-	if len(client.prepareCommands) != 1 || !strings.Contains(client.prepareCommands[0], "mkdir -p '/workspace/repo'") {
+	if len(client.prepareCommands) != 2 || !strings.Contains(client.prepareCommands[0], "mkdir -p '/workspace/repo'") {
 		t.Fatalf("prepare commands=%#v", client.prepareCommands)
+	}
+	if client.execRequests[0].GetUser() == nil || *client.execRequests[0].GetUser() != isloWorkloadUser {
+		t.Fatalf("prepare user=%v want %q", client.execRequests[0].GetUser(), isloWorkloadUser)
+	}
+	repair := client.execRequests[1]
+	if repair.GetUser() == nil || *repair.GetUser() != isloAdminUser || !strings.Contains(client.prepareCommands[1], "chown -R 'islo:islo' '/workspace/repo'") {
+		t.Fatalf("ownership repair request=%#v command=%q", repair, client.prepareCommands[1])
 	}
 	if !tarGzipContains(t, client.uploaded.Bytes(), "go.mod") {
 		t.Fatal("uploaded archive missing go.mod")

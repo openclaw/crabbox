@@ -371,6 +371,9 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 			secondaryRead := !urlPrimary && flags.SharePort == 0
 			if bridgeLoadErr != nil {
 				if secondaryRead {
+					if peer.Transport == TransportTailnet {
+						peer.Note = fmt.Sprintf("tailnet validation unavailable: %v", bridgeLoadErr)
+					}
 					peers = append(peers, peer)
 					continue
 				}

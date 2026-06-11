@@ -73,6 +73,10 @@ func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name st
 		if fallbackErr := b.uploadArchiveViaExec(ctx, client, name, workspace, archive, user); fallbackErr != nil {
 			return nil, 0, fallbackErr
 		}
+	} else if user != "" {
+		if err := b.restoreWorkspaceOwnership(ctx, client, name, workspace, user); err != nil {
+			return nil, 0, err
+		}
 	}
 	uploadDuration := b.now().Sub(uploadStarted)
 	total := b.now().Sub(start)
@@ -107,6 +111,11 @@ func (b *isloBackend) migrateWorkspaceOwnership(ctx context.Context, client islo
 		"chmod 600 " + shellQuote(marker),
 		"fi",
 	}, "; ")
+	return b.execShellAs(ctx, client, name, command, isloAdminUser, io.Discard)
+}
+
+func (b *isloBackend) restoreWorkspaceOwnership(ctx context.Context, client isloAPI, name, workspace, user string) error {
+	command := "chown -R " + shellQuote(user+":"+user) + " " + shellQuote(workspace)
 	return b.execShellAs(ctx, client, name, command, isloAdminUser, io.Discard)
 }
 
