@@ -214,6 +214,31 @@ func TestCoderDoctorClassifiesMissingLoginNonMutating(t *testing.T) {
 	}
 }
 
+func TestCoderDoctorPreservesChecksOnInventoryFailure(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch strings.Join(req.Args, " ") {
+		case "version":
+			return LocalCommandResult{Stdout: "Coder v2.33.5"}, nil
+		case "whoami -o json":
+			return LocalCommandResult{Stdout: `{"username":"alice"}`}, nil
+		case "list -o json":
+			return LocalCommandResult{ExitCode: 1, Stderr: "inventory unavailable"}, errors.New("inventory unavailable")
+		default:
+			t.Fatalf("doctor must only read inventory, got: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	if err == nil || !strings.Contains(err.Error(), "inventory unavailable") {
+		t.Fatalf("expected inventory error, got %v", err)
+	}
+	if len(result.Checks) != 3 || result.Checks[2].Check != "inventory" || result.Checks[2].Status != "fail" {
+		t.Fatalf("unexpected doctor checks: %#v", result.Checks)
+	}
+}
+
 func TestCoderListAndCleanupFilterCrabboxOwnedStoppedWorkspaces(t *testing.T) {
 	installCoderClaimState(t)
 	runner := &fakeRunner{}
@@ -482,6 +507,27 @@ func TestCoderResolveStatusOnlyDoesNotStartOrSSH(t *testing.T) {
 	}
 	if lease.Server.Status != "stopped" || lease.SSH.Host != "" {
 		t.Fatalf("unexpected lease: %#v", lease)
+	}
+}
+
+func TestCoderResolveStatusOnlyIncludesSSHForReadyWorkspace(t *testing.T) {
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch strings.Join(req.Args, " ") {
+		case "list -o json":
+			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"running","resources":[{"agents":[{"name":"main","operating_system":"linux","status":"connected","lifecycle_state":"ready"}]}]}}]`}, nil
+		default:
+			t.Fatalf("status-only ready resolve must only list, got: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "blue", StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.Host != "crabbox-blue" || !lease.SSH.SSHConfigProxy {
+		t.Fatalf("expected status-only ready lease to include SSH target, got %#v", lease)
 	}
 }
 

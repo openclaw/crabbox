@@ -170,10 +170,9 @@ func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 	workspaceRef := coderWorkspaceCommandName(workspace)
 	if req.ReleaseOnly || req.StatusOnly {
 		lease := LeaseTarget{Server: server, LeaseID: leaseID}
-		if !req.ReadyProbe || !coderWorkspaceReady(workspace) {
-			return lease, nil
+		if coderWorkspaceReady(workspace) && (req.StatusOnly || req.ReadyProbe) {
+			lease.SSH = coderSSHTarget(b.cfg, workspaceRef)
 		}
-		lease.SSH = coderSSHTarget(b.cfg, workspaceRef)
 		return lease, nil
 	}
 	if !coderWorkspaceReady(workspace) {
@@ -258,7 +257,7 @@ func (b *coderLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (Doctor
 	servers, err := b.List(ctx, ListRequest{})
 	if err != nil {
 		checks = append(checks, DoctorCheck{Status: "fail", Check: "inventory", Message: err.Error(), Details: map[string]string{"mutation": "false"}})
-		return DoctorResult{Provider: coderProvider, Status: "fail", Message: "cli=ready auth=ready inventory=failed mutation=false"}, err
+		return DoctorResult{Provider: coderProvider, Status: "fail", Message: "cli=ready auth=ready inventory=failed mutation=false", Checks: checks}, err
 	}
 	checks = append(checks, DoctorCheck{Status: "pass", Check: "inventory", Message: fmt.Sprintf("listed %d Crabbox-owned Coder workspaces", len(servers)), Details: map[string]string{"mutation": "false"}})
 	return DoctorResult{Provider: coderProvider, Status: "pass", Message: fmt.Sprintf("cli=ready auth=ready inventory=ready api=list mutation=false leases=%d runtime=unchecked", len(servers)), Checks: checks}, nil
