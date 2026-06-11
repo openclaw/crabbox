@@ -959,6 +959,64 @@ func TestResolveVisibleDropletIgnoresUnrelatedCorruptClaim(t *testing.T) {
 	}
 }
 
+func TestResolveNumericIdentifierPrefersDropletIDOverSlug(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	idLabels := core.DirectLeaseLabels(cfg, "cbx_abcdef123420", "id-match", providerName, "", false, time.Now())
+	slugLabels := core.DirectLeaseLabels(cfg, "cbx_abcdef123421", "105", providerName, "", false, time.Now())
+	api := &fakeDigitalOceanAPI{droplets: []droplet{
+		{ID: 105, Name: core.LeaseProviderName("cbx_abcdef123420", "id-match"), Status: "active", Tags: tagsFromLabels(idLabels)},
+		{ID: 106, Name: core.LeaseProviderName("cbx_abcdef123421", "105"), Status: "active", Tags: tagsFromLabels(slugLabels)},
+	}}
+	backend := newTestBackend(t, api)
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "105", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.ID != 105 || lease.LeaseID != "cbx_abcdef123420" {
+		t.Fatalf("resolved numeric identifier to %#v", lease)
+	}
+}
+
+func TestReleaseNumericIdentifierPrefersClaimCloudIDOverSlug(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	api := &fakeDigitalOceanAPI{}
+	backend := newTestBackend(t, api)
+	for _, tc := range []struct {
+		leaseID string
+		slug    string
+		cloudID string
+	}{
+		{leaseID: "cbx_abcdef123422", slug: "cloud-id-match", cloudID: "105"},
+		{leaseID: "cbx_abcdef123423", slug: "105", cloudID: "106"},
+	} {
+		labels := core.DirectLeaseLabels(cfg, tc.leaseID, tc.slug, providerName, "", false, time.Now())
+		labels[digitalOceanAccountLabel] = "team:test-account"
+		if err := core.ClaimLeaseTargetForRepoConfig(tc.leaseID, tc.slug, cfg, core.Server{
+			Provider: providerName,
+			CloudID:  tc.cloudID,
+			Name:     core.LeaseProviderName(tc.leaseID, tc.slug),
+			Labels:   labels,
+		}, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, identifier := range []string{"105", "00105", "+105"} {
+		lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: identifier, ReleaseOnly: true})
+		if err != nil {
+			t.Fatalf("Resolve(%q) err=%v", identifier, err)
+		}
+		if lease.LeaseID != "cbx_abcdef123422" || lease.Server.CloudID != "105" {
+			t.Fatalf("Resolve(%q)=%#v", identifier, lease)
+		}
+	}
+}
+
 func TestResolveVisibleDropletRejectsAccountMismatchBeforePreservingKeyIdentity(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -2029,7 +2087,7 @@ func TestReleaseFromClaimRefusesDropletMissingOwnershipTags(t *testing.T) {
 	}
 }
 
-func TestResolvePrefersNumericSlugOverDropletID(t *testing.T) {
+func TestResolveDoesNotTreatNumericIdentifierAsSlug(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
@@ -2043,11 +2101,8 @@ func TestResolvePrefersNumericSlugOverDropletID(t *testing.T) {
 	backend := newTestBackend(t, api)
 
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "123"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lease.Server.ID != 456 || lease.LeaseID != "cbx_abcdef123456" {
-		t.Fatalf("lease=%#v", lease)
+	if err == nil || !isDigitalOceanNotFound(err) {
+		t.Fatalf("lease=%#v err=%v", lease, err)
 	}
 }
 

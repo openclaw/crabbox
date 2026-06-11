@@ -331,14 +331,10 @@ func (b *digitalOceanLeaseBackend) Resolve(ctx context.Context, req core.Resolve
 		servers = append(servers, server)
 		byID[server.ID] = item
 	}
-	server, leaseID, err := core.FindServerByAlias(servers, req.ID)
-	if err != nil {
-		return core.LeaseTarget{}, err
-	}
-	if leaseID != "" {
-		return b.targetFromDroplet(byID[server.ID], req, droplets, accountID)
-	}
 	if id, ok := parseDropletID(req.ID); ok {
+		if item, found := byID[id]; found {
+			return b.targetFromDroplet(item, req, droplets, accountID)
+		}
 		item, err := client.GetDroplet(ctx, id)
 		if err != nil {
 			if req.ReleaseOnly && isDigitalOceanNotFound(err) {
@@ -348,6 +344,13 @@ func (b *digitalOceanLeaseBackend) Resolve(ctx context.Context, req core.Resolve
 		}
 		return b.targetFromDroplet(item, req, appendDropletIfMissing(droplets, item), accountID)
 	}
+	server, leaseID, err := core.FindServerByAlias(servers, req.ID)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if leaseID != "" {
+		return b.targetFromDroplet(byID[server.ID], req, droplets, accountID)
+	}
 	if req.ReleaseOnly {
 		return b.releaseTargetFromClaim(ctx, client, req.ID, accountID)
 	}
@@ -355,20 +358,23 @@ func (b *digitalOceanLeaseBackend) Resolve(ctx context.Context, req core.Resolve
 }
 
 func (b *digitalOceanLeaseBackend) releaseTargetFromClaim(ctx context.Context, client digitalOceanAPI, id, accountID string) (core.LeaseTarget, error) {
-	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(id, providerName)
+	var (
+		claim core.LeaseClaim
+		ok    bool
+		err   error
+	)
+	if dropletID, numeric := parseDropletID(id); numeric {
+		id = strconv.FormatInt(dropletID, 10)
+		claim, ok, err = core.ResolveLeaseClaimForProviderCloudID(id, providerName)
+	} else {
+		var exact bool
+		claim, ok, exact, err = core.ResolveLeaseClaimForProviderWithExact(id, providerName)
+		if err == nil && exact && (!ok || claim.LeaseID != id) {
+			return core.LeaseTarget{}, core.Exit(2, "digitalocean exact lease identifier %q does not match a valid digitalocean claim", id)
+		}
+	}
 	if err != nil {
 		return core.LeaseTarget{}, err
-	}
-	if exact && (!ok || claim.LeaseID != id) {
-		return core.LeaseTarget{}, core.Exit(2, "digitalocean exact lease identifier %q does not match a valid digitalocean claim", id)
-	}
-	if !ok {
-		if _, numeric := parseDropletID(id); numeric {
-			claim, ok, err = core.ResolveLeaseClaimForProviderCloudID(id, providerName)
-			if err != nil {
-				return core.LeaseTarget{}, err
-			}
-		}
 	}
 	if !ok || claim.LeaseID == "" {
 		return core.LeaseTarget{}, core.Exit(4, "lease/droplet not found: %s", id)

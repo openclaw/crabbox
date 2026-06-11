@@ -157,6 +157,46 @@ func TestLabelsFromTagsAcceptsCanonicalCaseVariants(t *testing.T) {
 	}
 }
 
+func TestLabelsFromTagsRejectsConflictingOwnershipValues(t *testing.T) {
+	base := []string{
+		"crabbox",
+		"crabbox:provider:digitalocean",
+		"crabbox:target:linux",
+		"crabbox:lease:cbx_abcdef123456",
+		"crabbox:slug:blue",
+	}
+	conflicts := map[string]string{
+		"provider": "crabbox:provider:aws",
+		"target":   "crabbox:target:windows",
+		"lease":    "crabbox:lease:cbx_abcdef999999",
+		"slug":     "crabbox:slug:red",
+	}
+	for key, conflict := range conflicts {
+		t.Run(key, func(t *testing.T) {
+			for _, tags := range [][]string{
+				append(append([]string(nil), base...), conflict),
+				append([]string{conflict}, base...),
+			} {
+				labels := labelsFromTags(tags)
+				if labels[ownershipTagConflictLabel] != key {
+					t.Fatalf("conflict=%q labels=%v tags=%v", labels[ownershipTagConflictLabel], labels, tags)
+				}
+				if err := validateDropletLabels(labels); err == nil {
+					t.Fatalf("conflicting ownership tags validated: labels=%v tags=%v", labels, tags)
+				}
+			}
+		})
+	}
+
+	labels := labelsFromTags(append(append([]string(nil), base...), "crabbox:lease:cbx_abcdef123456"))
+	if labels[ownershipTagConflictLabel] != "" {
+		t.Fatalf("equal ownership tags conflicted: %v", labels)
+	}
+	if err := validateDropletLabels(labels); err != nil {
+		t.Fatalf("equal ownership tags rejected: %v labels=%v", err, labels)
+	}
+}
+
 func TestLabelsFromTagsPreservesLegacyExactFieldUnderscores(t *testing.T) {
 	legacy := "tag:ci_12"
 	labels := labelsFromTags([]string{"crabbox:tailscale_tags:" + legacy})

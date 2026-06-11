@@ -13,8 +13,9 @@ import (
 const (
 	providerName = "digitalocean"
 
-	tagCrabbox = "crabbox"
-	tagPrefix  = "crabbox:"
+	tagCrabbox                = "crabbox"
+	tagPrefix                 = "crabbox:"
+	ownershipTagConflictLabel = "_digitalocean_ownership_tag_conflict"
 )
 
 var tagSafeRe = regexp.MustCompile(`[^A-Za-z0-9_:\-]`)
@@ -168,6 +169,7 @@ func normalizeTags(tags []string) []string {
 
 func labelsFromTags(tags []string) map[string]string {
 	labels := map[string]string{}
+	ownershipConflicts := map[string]bool{}
 	versionedExact := map[string]string{}
 	versionedExactConflict := map[string]bool{}
 	legacyExact := map[string]string{}
@@ -178,8 +180,6 @@ func labelsFromTags(tags []string) map[string]string {
 		case lowerTag == tagCrabbox:
 			labels["crabbox"] = "true"
 			labels["created_by"] = "crabbox"
-		case lowerTag == "crabbox:provider:"+providerName:
-			labels["provider"] = providerName
 		case strings.HasPrefix(lowerTag, tagPrefix):
 			parts := strings.SplitN(tag[len(tagPrefix):], ":", 2)
 			if len(parts) != 2 {
@@ -199,10 +199,16 @@ func labelsFromTags(tags []string) map[string]string {
 				continue
 			}
 			switch key {
-			case "lease", "slug", "keep", "target", "class", "server_type", "provider_key", "ttl_secs", "idle_timeout", "idle_timeout_secs", "created_at", "updated_at", "profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports", "tailscale", "tailscale_state", "tailscale_exit_node_allow_lan_access":
+			case "provider", "lease", "slug", "target":
+				value := parts[1]
+				if key == "provider" || key == "target" {
+					value = strings.ToLower(value)
+				}
+				recordOwnershipTagValue(labels, ownershipConflicts, key, value)
+			case "keep", "class", "server_type", "provider_key", "ttl_secs", "idle_timeout", "idle_timeout_secs", "created_at", "updated_at", "profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports", "tailscale", "tailscale_state", "tailscale_exit_node_allow_lan_access":
 				value := parts[1]
 				switch key {
-				case "provider", "target", "state", "keep", "tailscale", "tailscale_state", "tailscale_exit_node_allow_lan_access":
+				case "keep", "tailscale", "tailscale_state", "tailscale_exit_node_allow_lan_access":
 					value = strings.ToLower(value)
 				}
 				labels[key] = value
@@ -217,6 +223,14 @@ func labelsFromTags(tags []string) map[string]string {
 				}
 			}
 		}
+	}
+	if len(ownershipConflicts) > 0 {
+		keys := make([]string, 0, len(ownershipConflicts))
+		for key := range ownershipConflicts {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		labels[ownershipTagConflictLabel] = strings.Join(keys, ",")
 	}
 	for _, key := range tagLabelKeys() {
 		if !exactTagValueKey(key) {
@@ -233,6 +247,18 @@ func labelsFromTags(tags []string) map[string]string {
 		}
 	}
 	return labels
+}
+
+func recordOwnershipTagValue(labels map[string]string, conflicts map[string]bool, key, value string) {
+	if conflicts[key] {
+		return
+	}
+	if existing, ok := labels[key]; ok && existing != value {
+		delete(labels, key)
+		conflicts[key] = true
+		return
+	}
+	labels[key] = value
 }
 
 func recordExactTagValue(values map[string]string, conflicts map[string]bool, key, value string) {
@@ -281,6 +307,7 @@ func isOwnedDroplet(d droplet) bool {
 
 func validateDropletLabels(labels map[string]string) error {
 	if labels == nil ||
+		labels[ownershipTagConflictLabel] != "" ||
 		labels["crabbox"] != "true" ||
 		labels["created_by"] != "crabbox" ||
 		labels["provider"] != providerName ||
