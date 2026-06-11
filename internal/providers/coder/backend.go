@@ -151,7 +151,11 @@ func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		return LeaseTarget{}, err
 	}
 	listFn := client.list
-	if strings.Contains(strings.TrimSpace(req.ID), "/") {
+	useListAll, err := b.resolveNeedsListAll(req.ID)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if useListAll {
 		listFn = client.listAll
 	}
 	workspaces, err := listFn(ctx)
@@ -176,7 +180,11 @@ func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		if err := client.start(ctx, workspaceRef); err != nil {
 			return LeaseTarget{}, err
 		}
-		workspaces, err = client.list(ctx)
+		refreshList := client.list
+		if useListAll {
+			refreshList = client.listAll
+		}
+		workspaces, err = refreshList(ctx)
 		if err != nil {
 			return LeaseTarget{}, err
 		}
@@ -197,6 +205,18 @@ func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		_ = updateLeaseClaimEndpoint(leaseID, server, target)
 	}
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+}
+
+func (b *coderLeaseBackend) resolveNeedsListAll(identifier string) (bool, error) {
+	identifier = strings.TrimSpace(identifier)
+	if strings.Contains(identifier, "/") {
+		return true, nil
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(identifier, coderProvider)
+	if err != nil || !ok {
+		return false, err
+	}
+	return strings.Contains(coderClaimWorkspaceRef(claim), "/"), nil
 }
 
 func (b *coderLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -413,10 +433,7 @@ func (b *coderLeaseBackend) resolveWorkspace(identifier string, workspaces []cod
 	if claim, ok, err := resolveLeaseClaimForProvider(identifier, coderProvider); err != nil {
 		return coderWorkspace{}, "", "", err
 	} else if ok {
-		name := strings.TrimSpace(claim.Labels["coder_workspace_ref"])
-		if name == "" {
-			name = strings.TrimSpace(claim.Labels["coder_workspace"])
-		}
+		name := coderClaimWorkspaceRef(claim)
 		if name == "" {
 			var err error
 			name, err = coderWorkspaceName(b.cfg.Coder.WorkspacePrefix, claim.Slug, claim.LeaseID)
@@ -453,6 +470,14 @@ func (b *coderLeaseBackend) resolveWorkspace(identifier string, workspaces []cod
 	}
 	leaseID, slug, _ := coderWorkspaceLeaseMetadata(matches[0], b.cfg)
 	return matches[0], leaseID, slug, nil
+}
+
+func coderClaimWorkspaceRef(claim LeaseClaim) string {
+	name := strings.TrimSpace(claim.Labels["coder_workspace_ref"])
+	if name == "" {
+		name = strings.TrimSpace(claim.Labels["coder_workspace"])
+	}
+	return name
 }
 
 func coderWorkspacesToServers(workspaces []coderWorkspace, cfg Config) []Server {

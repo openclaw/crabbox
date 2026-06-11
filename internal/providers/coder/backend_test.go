@@ -514,6 +514,64 @@ func TestCoderResolveClaimUsesStoredWorkspaceAcrossPrefixChanges(t *testing.T) {
 	}
 }
 
+func TestCoderResolveClaimUsesListAllForOwnerQualifiedWorkspaceRef(t *testing.T) {
+	installCoderClaimState(t)
+	if err := claimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	server := Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
+	if err := updateLeaseClaimEndpoint("cbx_owner", server, SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch strings.Join(req.Args, " ") {
+		case "list --all -o json":
+			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+		default:
+			t.Fatalf("expected owner-qualified claim resolve to use list --all, got: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_owner", StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != "cbx_owner" || lease.Server.Labels["coder_workspace_ref"] != "alice/shared" {
+		t.Fatalf("unexpected lease: %#v", lease)
+	}
+}
+
+func TestCoderResolveNeedsListAllUsesOnlyOwnerQualifiedRequestOrClaim(t *testing.T) {
+	installCoderClaimState(t)
+	if err := claimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	server := Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
+	if err := updateLeaseClaimEndpoint("cbx_owner", server, SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}}
+	tests := []struct {
+		id   string
+		want bool
+	}{
+		{id: "alice/shared", want: true},
+		{id: "cbx_owner", want: true},
+		{id: "blue", want: false},
+	}
+	for _, tc := range tests {
+		got, err := backend.resolveNeedsListAll(tc.id)
+		if err != nil {
+			t.Fatalf("resolveNeedsListAll(%q): %v", tc.id, err)
+		}
+		if got != tc.want {
+			t.Fatalf("resolveNeedsListAll(%q)=%v want %v", tc.id, got, tc.want)
+		}
+	}
+}
+
 func TestCoderOwnerQualifiedResolveAndReleaseUseOwnerWorkspace(t *testing.T) {
 	runner := &fakeRunner{}
 	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
