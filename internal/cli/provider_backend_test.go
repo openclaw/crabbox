@@ -31,6 +31,7 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		canonical string
 	}{
 		{name: "hetzner", canonical: "hetzner"},
+		{name: "digitalocean", canonical: "digitalocean"},
 		{name: "aws", canonical: "aws"},
 		{name: "azure", canonical: "azure"},
 		{name: "azure-dynamic-sessions", canonical: "azure-dynamic-sessions"},

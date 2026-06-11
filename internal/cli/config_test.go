@@ -51,6 +51,10 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_GCP_SSH_CIDRS",
 		"CRABBOX_GCP_ROOT_GB",
 		"CRABBOX_GCP_SERVICE_ACCOUNT",
+		"CRABBOX_DIGITALOCEAN_REGION",
+		"CRABBOX_DIGITALOCEAN_IMAGE",
+		"CRABBOX_DIGITALOCEAN_VPC",
+		"CRABBOX_DIGITALOCEAN_SSH_CIDRS",
 		"CRABBOX_DAYTONA_API_KEY",
 		"DAYTONA_API_KEY",
 		"CRABBOX_DAYTONA_JWT_TOKEN",
@@ -281,6 +285,40 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/a,/tmp/b" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7,all" || strings.Join(cfg.DockerSandbox.Kit, ",") != "kit-a,kit-b" {
 		t.Fatalf("env dockerSandbox list config not applied: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDigitalOceanConfigFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "digitalocean",
+		DigitalOcean: &fileDigitalOceanConfig{
+			Region:   "sfo3",
+			Image:    "ubuntu-24-04-x64",
+			VPCUUID:  "vpc-file",
+			SSHCIDRs: []string{"203.0.113.0/24"},
+		},
+	})
+	if cfg.Provider != "digitalocean" || cfg.DigitalOcean.Region != "sfo3" || cfg.Location != "sfo3" || cfg.DigitalOcean.Image != "ubuntu-24-04-x64" || cfg.Image != "ubuntu-24-04-x64" || cfg.DigitalOcean.VPCUUID != "vpc-file" {
+		t.Fatalf("file digitalocean config not applied: cfg=%#v do=%#v", cfg, cfg.DigitalOcean)
+	}
+	if strings.Join(cfg.DigitalOcean.SSHCIDRs, ",") != "203.0.113.0/24" {
+		t.Fatalf("file digitalocean ssh cidrs=%v", cfg.DigitalOcean.SSHCIDRs)
+	}
+
+	t.Setenv("CRABBOX_DIGITALOCEAN_REGION", "nyc3")
+	t.Setenv("CRABBOX_DIGITALOCEAN_IMAGE", "ubuntu-22-04-x64")
+	t.Setenv("CRABBOX_DIGITALOCEAN_VPC", "vpc-env")
+	t.Setenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS", "198.51.100.0/24,2001:db8::/64")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.DigitalOcean.Region != "nyc3" || cfg.Location != "nyc3" || cfg.DigitalOcean.Image != "ubuntu-22-04-x64" || cfg.Image != "ubuntu-22-04-x64" || cfg.DigitalOcean.VPCUUID != "vpc-env" {
+		t.Fatalf("env digitalocean config not applied: cfg=%#v do=%#v", cfg, cfg.DigitalOcean)
+	}
+	if strings.Join(cfg.DigitalOcean.SSHCIDRs, ",") != "198.51.100.0/24,2001:db8::/64" {
+		t.Fatalf("env digitalocean ssh cidrs=%v", cfg.DigitalOcean.SSHCIDRs)
 	}
 }
 

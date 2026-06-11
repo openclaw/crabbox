@@ -85,6 +85,7 @@ type Config struct {
 	GCPRootGB                     int64
 	gcpRootGBExplicit             bool
 	GCPServiceAccount             string
+	DigitalOcean                  DigitalOceanConfig
 	Incus                         IncusConfig
 	Proxmox                       ProxmoxConfig
 	Parallels                     ParallelsConfig
@@ -175,6 +176,13 @@ type CapacityConfig struct {
 	Regions           []string
 	AvailabilityZones []string
 	Hints             bool
+}
+
+type DigitalOceanConfig struct {
+	Region   string
+	Image    string
+	VPCUUID  string
+	SSHCIDRs []string
 }
 
 type ActionsConfig struct {
@@ -915,6 +923,31 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		cfg.OSImage = normalized
 	}
 	applyOSImageProviderDefaults(cfg, false)
+	if cfg.Provider == "digitalocean" {
+		if cfg.DigitalOcean.Region == "" {
+			cfg.DigitalOcean.Region = "nyc3"
+		}
+		if cfg.Location == "" || cfg.Location == baseConfig().Location {
+			cfg.Location = cfg.DigitalOcean.Region
+		}
+		if cfg.DigitalOcean.Image == "" {
+			cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+		}
+		if cfg.Image == "" || (!cfg.imageExplicit && cfg.Image == baseConfig().Image) {
+			cfg.Image = cfg.DigitalOcean.Image
+		}
+		if cfg.SSHUser == "" || cfg.SSHUser == baseConfig().SSHUser {
+			cfg.SSHUser = "root"
+		}
+		if cfg.SSHPort == "" || cfg.SSHPort == baseConfig().SSHPort {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		if cfg.TargetOS == "" {
+			cfg.TargetOS = targetLinux
+		}
+		return nil
+	}
 	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
 		if cfg.ExeDev.User != "" {
 			cfg.SSHUser = cfg.ExeDev.User
@@ -1384,6 +1417,7 @@ type fileConfig struct {
 	HostID               string                             `yaml:"hostId,omitempty"`
 	Broker               *fileBrokerConfig                  `yaml:"broker,omitempty"`
 	Hetzner              *fileHetznerConfig                 `yaml:"hetzner,omitempty"`
+	DigitalOcean         *fileDigitalOceanConfig            `yaml:"digitalocean,omitempty"`
 	AWS                  *fileAWSConfig                     `yaml:"aws,omitempty"`
 	Azure                *fileAzureConfig                   `yaml:"azure,omitempty"`
 	AzureDynamicSessions *fileAzureDynamicSessionsConfig    `yaml:"azureDynamicSessions,omitempty"`
@@ -1460,6 +1494,13 @@ type fileHetznerConfig struct {
 	Location string `yaml:"location,omitempty"`
 	Image    string `yaml:"image,omitempty"`
 	SSHKey   string `yaml:"sshKey,omitempty"`
+}
+
+type fileDigitalOceanConfig struct {
+	Region   string   `yaml:"region,omitempty"`
+	Image    string   `yaml:"image,omitempty"`
+	VPCUUID  string   `yaml:"vpc,omitempty"`
+	SSHCIDRs []string `yaml:"sshCIDRs,omitempty"`
 }
 
 type fileAWSConfig struct {
@@ -2313,6 +2354,23 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.Hetzner.SSHKey != "" {
 			cfg.ProviderKey = file.Hetzner.SSHKey
+		}
+	}
+	if file.DigitalOcean != nil {
+		if file.DigitalOcean.Region != "" {
+			cfg.DigitalOcean.Region = file.DigitalOcean.Region
+			cfg.Location = file.DigitalOcean.Region
+		}
+		if file.DigitalOcean.Image != "" {
+			cfg.DigitalOcean.Image = file.DigitalOcean.Image
+			cfg.Image = file.DigitalOcean.Image
+			cfg.imageExplicit = true
+		}
+		if file.DigitalOcean.VPCUUID != "" {
+			cfg.DigitalOcean.VPCUUID = file.DigitalOcean.VPCUUID
+		}
+		if len(file.DigitalOcean.SSHCIDRs) > 0 {
+			cfg.DigitalOcean.SSHCIDRs = file.DigitalOcean.SSHCIDRs
 		}
 	}
 	if file.AWS != nil {
@@ -3847,6 +3905,19 @@ func applyEnv(cfg *Config) error {
 	}
 	if cidrs := os.Getenv("CRABBOX_GCP_SSH_CIDRS"); cidrs != "" {
 		cfg.GCPSSHCIDRs = splitCommaList(cidrs)
+	}
+	cfg.DigitalOcean.Region = getenv("CRABBOX_DIGITALOCEAN_REGION", cfg.DigitalOcean.Region)
+	if cfg.DigitalOcean.Region != "" {
+		cfg.Location = cfg.DigitalOcean.Region
+	}
+	if image := os.Getenv("CRABBOX_DIGITALOCEAN_IMAGE"); image != "" {
+		cfg.DigitalOcean.Image = image
+		cfg.Image = image
+		cfg.imageExplicit = true
+	}
+	cfg.DigitalOcean.VPCUUID = getenv("CRABBOX_DIGITALOCEAN_VPC", cfg.DigitalOcean.VPCUUID)
+	if cidrs := os.Getenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS"); cidrs != "" {
+		cfg.DigitalOcean.SSHCIDRs = splitCommaList(cidrs)
 	}
 	cfg.Proxmox.APIURL = getenv("CRABBOX_PROXMOX_API_URL", cfg.Proxmox.APIURL)
 	cfg.Proxmox.TokenID = getenv("CRABBOX_PROXMOX_TOKEN_ID", cfg.Proxmox.TokenID)

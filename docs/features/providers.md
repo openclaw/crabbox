@@ -70,8 +70,9 @@ Sessions backend with `azure.backend: dynamic-sessions` or
 
 When no coordinator is configured, these providers still work in **direct mode**:
 the CLI talks to the cloud API itself using local credentials (AWS SDK chain,
-Azure credentials, Google Application Default Credentials, or
-`HCLOUD_TOKEN`/`HETZNER_TOKEN`). Direct mode has no Durable Object alarm; cleanup
+Azure credentials, Google Application Default Credentials,
+`HCLOUD_TOKEN`/`HETZNER_TOKEN`, or `DIGITALOCEAN_TOKEN` for DigitalOcean).
+Direct mode has no Durable Object alarm; cleanup
 is best-effort through provider labels and manual `crabbox cleanup`. Prefer the
 brokered path when a broker is available.
 
@@ -82,6 +83,7 @@ sync/run/release path. None of them go through the Worker.
 
 ```text
 ssh              Existing SSH host (no provisioning)      Linux, macOS, Windows
+digitalocean     DigitalOcean Droplets                    Linux
 parallels        Parallels Desktop linked clones          Linux, macOS, Windows
 proxmox          Proxmox VE QEMU VM clones                Linux
 incus            Incus containers or VMs over SSH         Linux
@@ -134,6 +136,7 @@ railway                 Railway service status and stop controls
 - [Azure Dynamic Sessions](../providers/azure-dynamic-sessions.md): delegated Azure Container Apps sandbox execution.
 - [Google Cloud](../providers/gcp.md): GCP Compute Engine SSH leases.
 - [Hetzner](../providers/hetzner.md): Linux-only managed provider, classes, cleanup.
+- [DigitalOcean](../providers/digitalocean.md): direct Linux Droplet leases.
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [Parallels](../providers/parallels.md): local or remote Mac Parallels Desktop VM clones and small Mac fleets.
 - [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
@@ -219,6 +222,10 @@ An explicit `--type` is treated as an exact provider type request. If that type
 is rejected, Crabbox fails clearly instead of silently choosing a different
 instance type. Drop `--type` and use a class when you want fallback. See
 [Capacity and fallback](capacity-fallback.md) for the full fallback model.
+
+DigitalOcean maps every class to the smallest Phase 1 default size
+`s-1vcpu-1gb`. Use `--type <droplet-size-slug>` when you need a larger exact
+Droplet size.
 
 ## Brokered provider behavior
 

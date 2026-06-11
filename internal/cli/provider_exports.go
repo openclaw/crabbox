@@ -224,6 +224,10 @@ func ValidCrabboxProviderKey(value string) bool {
 	return validCrabboxProviderKey(value)
 }
 
+func RenderTailscaleHostname(template, leaseID, slug, provider string) string {
+	return renderTailscaleHostname(template, leaseID, slug, provider)
+}
+
 const (
 	CheckpointKindAWSAMI           = checkpointKindAWSAMI
 	CheckpointKindAWSEBS           = checkpointKindAWSEBS
