@@ -221,10 +221,6 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		_ = os.RemoveAll(instanceRoot)
 		return err
 	}
-	if err := os.Remove(PreparationPath(root, *name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		_ = os.RemoveAll(instanceRoot)
-		return fmt.Errorf("remove preparation marker: %w", err)
-	}
 	logPath := HelperLogPath(root, *name)
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -277,6 +273,15 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return failure
 	}
 	_ = startupWriter.Close()
+	if err := os.Remove(PreparationPath(root, *name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		terminateStartedHelper(cmd.Process, inst.PID)
+		failure := errors.Join(
+			fmt.Errorf("remove preparation marker: %w", err),
+			startupDiagnostics(root, *name),
+		)
+		_ = os.RemoveAll(instanceRoot)
+		return failure
+	}
 	readyTimer := time.NewTimer(*readyTimeout)
 	defer readyTimer.Stop()
 	pollTicker := time.NewTicker(runStartPollInterval)
@@ -545,6 +550,9 @@ func runDelete(args []string, stdout, stderr io.Writer) error {
 	if err := validateInstanceName(*name); err != nil {
 		return err
 	}
+	if preparationActive(root, *name) {
+		return fmt.Errorf("instance %s is still starting; retry after startup completes", strings.TrimSpace(*name))
+	}
 	inst, err := readMetadata(MetadataPath(root, *name))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -767,7 +775,10 @@ func preparationActive(stateRoot, name string) bool {
 		return false
 	}
 	startedAt, err := readProcessStartTime(marker.PID)
-	return err == nil && startedAt == marker.PIDStartedAt
+	if err != nil {
+		return true
+	}
+	return startedAt == marker.PIDStartedAt
 }
 
 func listMetadata(stateRoot string) ([]Instance, error) {

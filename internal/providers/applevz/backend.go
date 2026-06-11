@@ -658,9 +658,6 @@ func (b *backend) serverFromInstance(inst applevzhelper.Instance, claim core.Lea
 	if labels["slug"] == "" {
 		labels["slug"] = firstNonBlank(claim.Slug, inst.Slug)
 	}
-	if labels["state"] == "" {
-		labels["state"] = appleVZState(inst.Status)
-	}
 	imageIdentity := applevzhelper.ImageIdentity(cfg.AppleVZ.Image, cfg.AppleVZ.ImageSHA256)
 	if labels["server_type"] == "" {
 		labels["server_type"] = firstNonBlank(inst.Image, imageIdentity)
@@ -685,6 +682,7 @@ func (b *backend) serverFromInstance(inst applevzhelper.Instance, claim core.Lea
 	if appleVZRunning(inst.Status) && labels["state"] == "ready" {
 		status = "ready"
 	}
+	labels["state"] = status
 	server := core.Server{
 		CloudID:  inst.Name,
 		Provider: providerName,
@@ -1068,7 +1066,7 @@ func appleVZState(state string) string {
 	case applevzhelper.StatusStopping:
 		return applevzhelper.StatusStopping
 	case applevzhelper.StatusError:
-		return applevzhelper.StatusError
+		return "failed"
 	case "ready":
 		return "ready"
 	default:

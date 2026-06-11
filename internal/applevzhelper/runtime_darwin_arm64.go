@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -309,6 +310,9 @@ func ensureRawImage(ctx context.Context, stateRoot, sourceRef, sourcePath, expec
 		}
 		return sourcePath, nil
 	}
+	if err := validateStandaloneQCOW2Path(sourcePath); err != nil {
+		return "", err
+	}
 	info, err := os.Stat(sourcePath)
 	if err != nil {
 		return "", fmt.Errorf("stat source image: %w", err)
@@ -348,6 +352,18 @@ func ensureRawImage(ctx context.Context, stateRoot, sourceRef, sourcePath, expec
 		return "", fmt.Errorf("close raw image: %w", err)
 	}
 	return target, nil
+}
+
+func validateStandaloneQCOW2Path(sourcePath string) error {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return fmt.Errorf("open qcow2 image: %w", err)
+	}
+	defer source.Close()
+	if _, err := newStandaloneQCOW2Reader(source); err != nil {
+		return err
+	}
+	return nil
 }
 
 func rawImageCacheKey(sourceRef, sourcePath, checksum string, info os.FileInfo) [sha256.Size]byte {
@@ -513,7 +529,11 @@ func convertQCOW2ToRaw(ctx context.Context, sourcePath string, target *os.File, 
 		return fmt.Errorf("open qcow2 image: %w", err)
 	}
 	defer source.Close()
-	image, err := qcow2reader.Open(source)
+	reader, err := newStandaloneQCOW2Reader(source)
+	if err != nil {
+		return err
+	}
+	image, err := qcow2reader.Open(reader)
 	if err != nil {
 		return fmt.Errorf("open qcow2 image: %w", err)
 	}
@@ -556,6 +576,38 @@ func convertQCOW2ToRaw(ctx context.Context, sourcePath string, target *os.File, 
 		offset = end
 	}
 	return target.Sync()
+}
+
+type standaloneQCOW2Reader struct {
+	source io.ReaderAt
+	header [20]byte
+}
+
+func newStandaloneQCOW2Reader(source io.ReaderAt) (*standaloneQCOW2Reader, error) {
+	reader := &standaloneQCOW2Reader{source: source}
+	if _, err := io.ReadFull(io.NewSectionReader(source, 0, int64(len(reader.header))), reader.header[:]); err != nil {
+		return nil, fmt.Errorf("read qcow2 header: %w", err)
+	}
+	if !bytes.Equal(reader.header[:4], []byte{'Q', 'F', 'I', 0xfb}) {
+		return nil, fmt.Errorf("invalid qcow2 magic")
+	}
+	backingOffset := binary.BigEndian.Uint64(reader.header[8:16])
+	backingSize := binary.BigEndian.Uint32(reader.header[16:20])
+	if backingOffset != 0 || backingSize != 0 {
+		return nil, fmt.Errorf("qcow2 backing files are not supported")
+	}
+	return reader, nil
+}
+
+func (r *standaloneQCOW2Reader) ReadAt(p []byte, offset int64) (int, error) {
+	n, err := r.source.ReadAt(p, offset)
+	if n == 0 || offset >= int64(len(r.header)) || offset+int64(n) <= 0 {
+		return n, err
+	}
+	start := max(offset, 0)
+	end := min(offset+int64(n), int64(len(r.header)))
+	copy(p[start-offset:end-offset], r.header[start:end])
+	return n, err
 }
 
 func diskCapacityBytes(diskGiB int) (int64, error) {

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -522,6 +523,61 @@ func TestRawImageCacheKeyIncludesExpectedChecksum(t *testing.T) {
 	second := rawImageCacheKey(path, path, strings.Repeat("b", 64), info)
 	if first == second {
 		t.Fatal("raw cache key did not change with expected checksum")
+	}
+}
+
+func TestStandaloneQCOW2ReaderRejectsAndPinsBackingFileHeader(t *testing.T) {
+	header := make([]byte, 20)
+	copy(header, []byte{'Q', 'F', 'I', 0xfb})
+	binary.BigEndian.PutUint32(header[4:8], 3)
+	reader, err := newStandaloneQCOW2Reader(bytes.NewReader(header))
+	if err != nil {
+		t.Fatalf("standalone image rejected: %v", err)
+	}
+	if _, ok := any(reader).(interface{ Name() string }); ok {
+		t.Fatal("standalone reader exposes a host filename")
+	}
+
+	binary.BigEndian.PutUint64(header[8:16], 4096)
+	binary.BigEndian.PutUint32(header[16:20], uint32(len("../../host-secret")))
+	var pinned [20]byte
+	if _, err := reader.ReadAt(pinned[:], 0); err != nil {
+		t.Fatal(err)
+	}
+	if backingOffset := binary.BigEndian.Uint64(pinned[8:16]); backingOffset != 0 {
+		t.Fatalf("pinned backing offset=%d", backingOffset)
+	}
+	if _, err := newStandaloneQCOW2Reader(bytes.NewReader(header)); err == nil || !strings.Contains(err.Error(), "backing files are not supported") {
+		t.Fatalf("backed image validation error=%v", err)
+	}
+}
+
+func TestEnsureRawImageRejectsBackedSourceBeforeCacheHit(t *testing.T) {
+	stateRoot := t.TempDir()
+	sourcePath := filepath.Join(t.TempDir(), "backed.qcow2")
+	header := make([]byte, 20)
+	copy(header, []byte{'Q', 'F', 'I', 0xfb})
+	binary.BigEndian.PutUint32(header[4:8], 3)
+	binary.BigEndian.PutUint64(header[8:16], 4096)
+	binary.BigEndian.PutUint32(header[16:20], uint32(len("/tmp/host-secret")))
+	if err := os.WriteFile(sourcePath, header, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePrivateDir(ImagesDir(stateRoot)); err != nil {
+		t.Fatal(err)
+	}
+	key := rawImageCacheKey(sourcePath, sourcePath, "", info)
+	cachePath := filepath.Join(ImagesDir(stateRoot), hex.EncodeToString(key[:])+".raw")
+	if err := os.WriteFile(cachePath, make([]byte, 1<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ensureRawImage(context.Background(), stateRoot, sourcePath, sourcePath, "", 30<<30); err == nil || !strings.Contains(err.Error(), "backing files are not supported") {
+		t.Fatalf("ensureRawImage cache-hit error=%v", err)
 	}
 }
 

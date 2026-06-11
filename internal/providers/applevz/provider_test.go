@@ -163,6 +163,20 @@ func TestValidateConfigRejectsUnsafeGuestIdentity(t *testing.T) {
 	}
 }
 
+func TestServerFromInstanceMapsRuntimeErrorToTerminalFailure(t *testing.T) {
+	b := testBackend(t, &recordingRunner{})
+	inst := applevzhelper.Instance{
+		Name:   "runtime-error",
+		Status: applevzhelper.StatusError,
+	}
+	claim := core.LeaseClaim{Labels: map[string]string{"state": "ready"}}
+
+	server := b.serverFromInstance(inst, claim, b.configForRun())
+	if server.Status != "failed" || server.Labels["state"] != "failed" {
+		t.Fatalf("runtime error server=%+v", server)
+	}
+}
+
 func TestApplyDefaultsHonorsGlobalWorkRoot(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

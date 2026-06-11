@@ -436,6 +436,32 @@ func TestRunDeleteRemovesMetadataLessInstanceDirectory(t *testing.T) {
 	}
 }
 
+func TestRunDeleteRejectsActivePreparation(t *testing.T) {
+	stateRoot := t.TempDir()
+	name := "active-preparation"
+	mustCreateInstanceDir(t, stateRoot, name)
+	inst := Instance{
+		Name:      name,
+		Status:    StatusStarting,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := writeMetadata(MetadataPath(stateRoot, name), inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePreparationMarker(stateRoot, name); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runDelete([]string{"--state-root", stateRoot, "--name", name}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "still starting") {
+		t.Fatalf("runDelete error=%v, want active startup rejection", err)
+	}
+	if _, err := os.Stat(InstanceDir(stateRoot, name)); err != nil {
+		t.Fatalf("active instance directory removed: %v", err)
+	}
+}
+
 func TestInitializeServeInstancePersistsChildProcessIdentity(t *testing.T) {
 	stateRoot := t.TempDir()
 	name := "serve-identity"

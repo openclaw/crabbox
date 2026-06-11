@@ -196,12 +196,14 @@ a clean absolute POSIX guest path. Each path segment may contain letters,
 numbers, dots, underscores, and hyphens. Spaces and shell-active characters
 are rejected because the path also crosses SSH and rsync command boundaries.
 
-QCOW2 cloud images are converted once into a sparse raw base image. Each lease
-gets a clone or sparse copy of that base, resized to `diskGiB`. Changing the
-image reference, expected checksum, or source file creates a new cache entry.
-Interrupted downloads and conversions exit gracefully, remove their staging
-files, and detach seed-image mounts. A later run also removes unlocked staging
-files left by a forced process termination or host restart.
+Standalone QCOW2 cloud images are converted once into a sparse raw base image.
+Images with backing files or backing chains are rejected so conversion cannot
+read other host files. Each lease gets a clone or sparse copy of that base,
+resized to `diskGiB`. Changing the image reference, expected checksum, or source
+file creates a new cache entry. Interrupted downloads and conversions exit
+gracefully, remove their staging files, and detach seed-image mounts. A later
+run also removes unlocked staging files left by a forced process termination
+or host restart.
 
 ## Lifecycle and networking
 
