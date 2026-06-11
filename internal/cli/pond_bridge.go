@@ -331,7 +331,8 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 	for _, claim := range claims {
 		peer := bridgePeerFromClaim(claim, class)
 		urlPrimary := peer.Transport == TransportURL
-		useBridge := urlPrimary || (flags.SharePort > 0 && providerCapabilities(claim.Provider).URLBridge)
+		urlCapable := providerCapabilities(claim.Provider).URLBridge
+		useBridge := urlPrimary || urlCapable
 		if useBridge {
 			if !bridgeLoaded {
 				b, err := loadBridgeProvider(provider, rt)
@@ -346,7 +347,7 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 			// recorded on the claim. Skipping the lookup when an endpoint
 			// is already known keeps `pond peers` cheap for read-only
 			// listings on already-published shares.
-			needBridge := flags.SharePort > 0 || (urlPrimary && peer.Endpoint == "")
+			needBridge := flags.SharePort > 0 || (urlPrimary && peer.Endpoint == "") || (!urlPrimary && urlCapable)
 			if bridge == nil && needBridge {
 				peer.BridgeState = "unsupported-provider"
 				if urlPrimary {
