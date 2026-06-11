@@ -539,6 +539,15 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 		"state":    status,
 	}
 	applyIsloClaimLabels(labels, leaseID)
+	var tailscale *core.TailscaleMetadata
+	if labels["tailscale"] == "true" {
+		tailscale = &core.TailscaleMetadata{
+			Enabled: true,
+			FQDN:    labels["tailscale_fqdn"],
+			IPv4:    labels["tailscale_ipv4"],
+			State:   labels["tailscale_state"],
+		}
+	}
 	return statusView{
 		ID:         leaseID,
 		Slug:       labels["slug"],
@@ -548,6 +557,7 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 		ServerID:   name,
 		ServerType: image,
 		Network:    NetworkPublic,
+		Tailscale:  tailscale,
 		Ready:      isloStatusReady(status),
 		Labels:     labels,
 	}

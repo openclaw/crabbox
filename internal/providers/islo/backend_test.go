@@ -250,6 +250,25 @@ func TestIsloRunRejectsUnsafeWorkdirBeforeProviderClient(t *testing.T) {
 	}
 }
 
+func TestIsloStatusViewIncludesTailscaleMetadata(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", "node-a.tailnet.example"); err != nil {
+		t.Fatal(err)
+	}
+
+	view := isloStatusView(leaseID, &gosdk.SandboxResponse{Name: "crabbox-node-a", Status: "running"})
+	if view.Tailscale == nil {
+		t.Fatal("missing typed Tailscale metadata")
+	}
+	if !view.Tailscale.Enabled || view.Tailscale.IPv4 != "100.64.7.7" || view.Tailscale.FQDN != "node-a.tailnet.example" || view.Tailscale.State != "ready" {
+		t.Fatalf("tailscale metadata=%#v", view.Tailscale)
+	}
+}
+
 func TestIsloClientUsesBoundedDefaultTransport(t *testing.T) {
 	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "test", BaseURL: "http://127.0.0.1:8787"}}, Runtime{})
 	if err != nil {

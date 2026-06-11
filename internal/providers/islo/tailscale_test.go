@@ -82,4 +82,7 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 	if strings.Contains(isloTailscaleBringUp, `--authkey="${TS_AUTHKEY}"`) {
 		t.Fatal("bring-up script must not expose the auth key in tailscale argv")
 	}
+	if strings.Index(isloTailscaleBringUp, "unset TS_AUTHKEY") > strings.Index(isloTailscaleBringUp, "setsid /tmp/ts/tailscaled") {
+		t.Fatal("bring-up script must unset the auth key before starting tailscaled")
+	}
 }

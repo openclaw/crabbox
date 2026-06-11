@@ -43,6 +43,11 @@ var isloTailscaleIPRe = regexp.MustCompile(`(?m)^CRABBOX_TS_IP=([0-9.]+)`)
 // match this very shell's command line and kill the session.
 const isloTailscaleBringUp = `
 set -e
+umask 077
+TS_AUTH_FILE="$(mktemp /tmp/crabbox-ts-auth.XXXXXX)"
+printf '%s' "${TS_AUTHKEY}" >"${TS_AUTH_FILE}"
+unset TS_AUTHKEY
+trap 'rm -f "${TS_AUTH_FILE}"' EXIT
 cd /tmp
 case "$(uname -m)" in
   x86_64) A=amd64 ;;
@@ -65,11 +70,6 @@ if ! /tmp/ts/tailscale --socket="${TS_SOCKET}" status >/dev/null 2>&1; then
     >"${TS_STATE_DIR}/tailscaled.log" 2>&1 </dev/null &
   for _ in $(seq 1 30); do [ -S "${TS_SOCKET}" ] && break; sleep 0.5; done
 fi
-umask 077
-TS_AUTH_FILE="$(mktemp /tmp/crabbox-ts-auth.XXXXXX)"
-printf '%s' "${TS_AUTHKEY}" >"${TS_AUTH_FILE}"
-unset TS_AUTHKEY
-trap 'rm -f "${TS_AUTH_FILE}"' EXIT
 set -- --auth-key="file:${TS_AUTH_FILE}" --hostname="${TS_HOST}" --accept-dns=false --timeout=120s
 if [ -n "${TS_TAGS}" ]; then set -- "$@" --advertise-tags="${TS_TAGS}"; fi
 if [ -n "${TS_LOGIN_SERVER}" ]; then set -- "$@" --login-server="${TS_LOGIN_SERVER}"; fi
