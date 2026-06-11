@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Fixed Namespace Devbox setup instructions to use the current browser workspace approval flow instead of obsolete token environment variables.
+
 ## 0.28.0 - 2026-06-11
 
 ### Added
