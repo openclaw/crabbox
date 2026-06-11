@@ -52,10 +52,13 @@ printf '%s  %s\n' "${TS_SHA256}" "${TS_ARCHIVE}" | sha256sum -c - >/dev/null
 const isloTailscaleBringUp = `
 set -e
 umask 077
-TS_AUTH_FILE="$(mktemp /tmp/crabbox-ts-auth.XXXXXX)"
-printf '%s' "${TS_AUTHKEY}" >"${TS_AUTH_FILE}"
+TS_AUTH_FILE=""
+if [ -n "${TS_AUTHKEY}" ]; then
+  TS_AUTH_FILE="$(mktemp /tmp/crabbox-ts-auth.XXXXXX)"
+  printf '%s' "${TS_AUTHKEY}" >"${TS_AUTH_FILE}"
+fi
 unset TS_AUTHKEY
-trap 'rm -f "${TS_AUTH_FILE}"; rm -rf "${TS_EXTRACT_DIR:-}"' EXIT
+trap 'if [ -n "${TS_AUTH_FILE}" ]; then rm -f "${TS_AUTH_FILE}"; fi; rm -rf "${TS_EXTRACT_DIR:-}"' EXIT
 cd /tmp
 case "$(uname -m)" in
   x86_64) A=amd64; TS_SHA256=` + defaultIsloTailscaleAMD64SHA256 + ` ;;
@@ -76,29 +79,39 @@ TS_EXTRACT_DIR=""
 mkdir -p "${TS_STATE_DIR}"
 chmod 700 "${TS_STATE_DIR}"
 TS_SOCKET="${TS_STATE_DIR}/tailscaled.sock"
+TS_STATE_FILE="${TS_STATE_DIR}/tailscaled.state"
 if ! /tmp/ts/tailscale --socket="${TS_SOCKET}" status >/dev/null 2>&1; then
   # Userspace ingress forwards tailnet TCP to 127.0.0.1:<port>. Keep the
   # unauthenticated outbound proxy on another loopback address.
-  setsid /tmp/ts/tailscaled --tun=userspace-networking --state=mem: \
+  rm -f "${TS_SOCKET}"
+  setsid /tmp/ts/tailscaled --tun=userspace-networking --state="${TS_STATE_FILE}" \
     --socket="${TS_SOCKET}" --socks5-server=127.0.0.2:1055 \
     --outbound-http-proxy-listen=127.0.0.2:1055 \
     >"${TS_STATE_DIR}/tailscaled.log" 2>&1 </dev/null &
   for _ in $(seq 1 30); do [ -S "${TS_SOCKET}" ] && break; sleep 0.5; done
 fi
-set -- --auth-key="file:${TS_AUTH_FILE}" --hostname="${TS_HOST}" --accept-dns=false --shields-up=false --timeout=120s
-if [ -n "${TS_TAGS}" ]; then set -- "$@" --advertise-tags="${TS_TAGS}"; fi
-if [ -n "${TS_LOGIN_SERVER}" ]; then set -- "$@" --login-server="${TS_LOGIN_SERVER}"; fi
-if [ -n "${TS_EXIT_NODE}" ]; then
-  set -- "$@" --exit-node="${TS_EXIT_NODE}"
-  if [ "${TS_EXIT_NODE_ALLOW_LAN}" = "true" ]; then set -- "$@" --exit-node-allow-lan-access; fi
-fi
-/tmp/ts/tailscale --socket="${TS_SOCKET}" up "$@"
 ts_ip=""
-for _ in $(seq 1 24); do
+for _ in $(seq 1 10); do
   ts_ip="$(/tmp/ts/tailscale --socket="${TS_SOCKET}" ip -4 2>/dev/null | head -n1 || true)"
   if [ -n "${ts_ip}" ]; then break; fi
-  sleep 5
+  sleep 1
 done
+if [ -z "${ts_ip}" ]; then
+  test -n "${TS_AUTH_FILE}" || { echo "tailscale state unavailable and no auth key provided" >&2; exit 4; }
+  set -- --auth-key="file:${TS_AUTH_FILE}" --hostname="${TS_HOST}" --accept-dns=false --shields-up=false --timeout=120s
+  if [ -n "${TS_TAGS}" ]; then set -- "$@" --advertise-tags="${TS_TAGS}"; fi
+  if [ -n "${TS_LOGIN_SERVER}" ]; then set -- "$@" --login-server="${TS_LOGIN_SERVER}"; fi
+  if [ -n "${TS_EXIT_NODE}" ]; then
+    set -- "$@" --exit-node="${TS_EXIT_NODE}"
+    if [ "${TS_EXIT_NODE_ALLOW_LAN}" = "true" ]; then set -- "$@" --exit-node-allow-lan-access; fi
+  fi
+  /tmp/ts/tailscale --socket="${TS_SOCKET}" up "$@"
+  for _ in $(seq 1 24); do
+    ts_ip="$(/tmp/ts/tailscale --socket="${TS_SOCKET}" ip -4 2>/dev/null | head -n1 || true)"
+    if [ -n "${ts_ip}" ]; then break; fi
+    sleep 5
+  done
+fi
 test -n "${ts_ip}"
 echo "CRABBOX_TS_IP=${ts_ip}"
 `
@@ -124,6 +137,10 @@ func (b *isloBackend) maybeJoinTailscale(ctx context.Context, client isloAPI, sa
 	if err := b.validateTailscaleConfig(); err != nil {
 		return err
 	}
+	return b.runTailscaleBringUp(ctx, client, sandboxName, slug, leaseID)
+}
+
+func (b *isloBackend) runTailscaleBringUp(ctx context.Context, client isloAPI, sandboxName, slug, leaseID string) error {
 	authKey := strings.TrimSpace(b.cfg.Tailscale.AuthKey)
 	hostname := isloTailscaleHostname(b.cfg, leaseID, slug)
 	tags := strings.Join(b.cfg.Tailscale.Tags, ",")
@@ -195,26 +212,22 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 		}
 		return core.TailscaleMetadata{}, fmt.Errorf("%w: health check returned no tailnet address", core.ErrTailnetPeerValidationUnavailable)
 	}
-	if strings.TrimSpace(b.cfg.Tailscale.AuthKey) != "" {
-		restart := *b
-		restart.cfg.Tailscale.Enabled = true
-		restartErr := restart.maybeJoinTailscale(ctx, client, sandboxName, blank(claim.Slug, slug), leaseID)
-		if restartErr == nil {
-			updated, _, readErr := resolveLeaseClaim(leaseID)
-			if readErr != nil {
-				return core.TailscaleMetadata{}, readErr
-			}
-			return core.TailscaleMetadata{Enabled: true, IPv4: updated.TailscaleIPv4, FQDN: updated.TailscaleFQDN, State: "ready"}, nil
+	restart := *b
+	restart.cfg.Tailscale.Enabled = true
+	restart.cfg.Pond = claim.Pond
+	appendDirectPondTailscaleTag(&restart.cfg)
+	restartErr := restart.runTailscaleBringUp(ctx, client, sandboxName, blank(claim.Slug, slug), leaseID)
+	if restartErr == nil {
+		updated, _, readErr := resolveLeaseClaim(leaseID)
+		if readErr != nil {
+			return core.TailscaleMetadata{}, readErr
 		}
-		if err := clearLeaseClaimTailscale(leaseID); err != nil {
-			return core.TailscaleMetadata{}, err
-		}
-		return core.TailscaleMetadata{}, fmt.Errorf("%w: restart failed: %v", core.ErrTailnetPeerUnavailable, restartErr)
+		return core.TailscaleMetadata{Enabled: true, IPv4: updated.TailscaleIPv4, FQDN: updated.TailscaleFQDN, State: "ready"}, nil
 	}
 	if err := clearLeaseClaimTailscale(leaseID); err != nil {
 		return core.TailscaleMetadata{}, err
 	}
-	return core.TailscaleMetadata{}, fmt.Errorf("%w: lease %s", core.ErrTailnetPeerUnavailable, leaseID)
+	return core.TailscaleMetadata{}, fmt.Errorf("%w: restart failed: %v", core.ErrTailnetPeerUnavailable, restartErr)
 }
 
 func (b *isloBackend) ValidateTailnetPeer(ctx context.Context, leaseID string) (core.TailscaleMetadata, error) {
@@ -235,7 +248,7 @@ func (b *isloBackend) ValidateTailnetPeer(ctx context.Context, leaseID string) (
 
 func isloTailscaleStateDir(leaseID string) string {
 	sum := sha256.Sum256([]byte(leaseID))
-	return fmt.Sprintf("/tmp/crabbox-ts-%x", sum[:8])
+	return fmt.Sprintf("/var/lib/crabbox/tailscale/%x", sum[:8])
 }
 
 func (b *isloBackend) validateTailscaleConfig() error {

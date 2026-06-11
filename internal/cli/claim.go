@@ -243,27 +243,32 @@ func updateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
 		if claim.LeaseID == "" {
 			return nil
 		}
-		if ipv4 != "" {
-			claim.TailscaleIPv4 = ipv4
-		}
-		if fqdn != "" {
-			claim.TailscaleFQDN = fqdn
-		}
-		if claim.TailscaleIPv4 != "" || claim.TailscaleFQDN != "" {
-			if claim.Labels == nil {
-				claim.Labels = map[string]string{}
-			}
-			claim.Labels["tailscale"] = "true"
-			claim.Labels["tailscale_state"] = "ready"
-			if claim.TailscaleIPv4 != "" {
-				claim.Labels["tailscale_ipv4"] = claim.TailscaleIPv4
-			}
-			if claim.TailscaleFQDN != "" {
-				claim.Labels["tailscale_fqdn"] = claim.TailscaleFQDN
-			}
-		}
+		setLeaseClaimTailscale(claim, ipv4, fqdn)
 		return nil
 	})
+}
+
+func setLeaseClaimTailscale(claim *leaseClaim, ipv4, fqdn string) {
+	if ipv4 != "" {
+		claim.TailscaleIPv4 = ipv4
+	}
+	if fqdn != "" {
+		claim.TailscaleFQDN = fqdn
+	}
+	if claim.TailscaleIPv4 == "" && claim.TailscaleFQDN == "" {
+		return
+	}
+	if claim.Labels == nil {
+		claim.Labels = map[string]string{}
+	}
+	claim.Labels["tailscale"] = "true"
+	claim.Labels["tailscale_state"] = "ready"
+	if claim.TailscaleIPv4 != "" {
+		claim.Labels["tailscale_ipv4"] = claim.TailscaleIPv4
+	}
+	if claim.TailscaleFQDN != "" {
+		claim.Labels["tailscale_fqdn"] = claim.TailscaleFQDN
+	}
 }
 
 func clearLeaseClaimTailscale(leaseID string) error {
@@ -274,13 +279,17 @@ func clearLeaseClaimTailscale(leaseID string) error {
 		if claim.LeaseID == "" {
 			return nil
 		}
-		claim.TailscaleIPv4 = ""
-		claim.TailscaleFQDN = ""
-		for _, key := range []string{"tailscale", "tailscale_state", "tailscale_ipv4", "tailscale_fqdn"} {
-			delete(claim.Labels, key)
-		}
+		clearLeaseClaimTailscaleFields(claim)
 		return nil
 	})
+}
+
+func clearLeaseClaimTailscaleFields(claim *leaseClaim) {
+	claim.TailscaleIPv4 = ""
+	claim.TailscaleFQDN = ""
+	for _, key := range []string{"tailscale", "tailscale_state", "tailscale_ipv4", "tailscale_fqdn"} {
+		delete(claim.Labels, key)
+	}
 }
 
 func updateLeaseClaimCacheVolumes(leaseID string, specs []string) error {

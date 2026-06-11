@@ -62,6 +62,10 @@ func claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot s
 	return core.ClaimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
 }
 
+func appendDirectPondTailscaleTag(cfg *Config) {
+	core.AppendDirectPondTailscaleTag(cfg)
+}
+
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }

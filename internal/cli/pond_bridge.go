@@ -362,12 +362,13 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 					meta, validateErr := validator.ValidateTailnetPeer(ctx, claim.LeaseID)
 					if validateErr != nil {
 						if !errors.Is(validateErr, ErrTailnetPeerValidationUnavailable) {
-							claim.TailscaleIPv4 = ""
-							claim.TailscaleFQDN = ""
-							peer = bridgePeerFromClaim(claim, class)
+							clearLeaseClaimTailscaleFields(&claim)
 						}
+						peer = bridgePeerFromClaim(claim, class)
 						peer.Note = fmt.Sprintf("tailnet validation failed: %v", validateErr)
 					} else {
+						setLeaseClaimTailscale(&claim, meta.IPv4, meta.FQDN)
+						peer = bridgePeerFromClaim(claim, class)
 						peer.Endpoint = firstNonEmpty(meta.IPv4, meta.FQDN, meta.Hostname)
 					}
 				}

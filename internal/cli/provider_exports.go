@@ -80,6 +80,10 @@ func ClaimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot s
 	return claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
 }
 
+func AppendDirectPondTailscaleTag(cfg *Config) {
+	appendPondTailscaleTag(cfg, true)
+}
+
 // ClaimLeaseForRepoProviderPond is the pond-aware variant exposed for
 // delegated providers that need to persist the pond label in the local claim
 // sidecar (delegated providers do not own a provider-side label store).

@@ -165,7 +165,7 @@ func TestResolvePondPeersPublishesShareForTailnetPrimary(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
 	})
-	mutateClaim(t, "isb_w", func(c *leaseClaim) { c.TailscaleIPv4 = "100.64.7.7" })
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { setLeaseClaimTailscale(c, "100.64.7.7", "") })
 	fake := &fakeBridgeProvider{
 		published: map[string]BridgePeerTarget{
 			"isb_w": {URL: "https://abc.share.islo.dev", ShareID: "shr_w"},
@@ -279,7 +279,7 @@ func TestResolvePondPeersFallsBackWhenTailnetValidationFails(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
 	})
-	mutateClaim(t, "isb_w", func(c *leaseClaim) { c.TailscaleIPv4 = "100.64.7.7" })
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { setLeaseClaimTailscale(c, "100.64.7.7", "") })
 	fake := &fakeTailnetBridgeProvider{
 		fakeBridgeProvider: &fakeBridgeProvider{listed: map[string][]BridgePeerTarget{
 			"isb_w": {{Port: 8080, URL: "https://abc.share.islo.dev"}},
@@ -296,6 +296,33 @@ func TestResolvePondPeersFallsBackWhenTailnetValidationFails(t *testing.T) {
 	}
 	if len(peers) != 1 || peers[0].Transport != TransportURL || peers[0].Endpoint != "https://abc.share.islo.dev" {
 		t.Fatalf("expected URL fallback after failed tailnet validation, got %#v", peers)
+	}
+	for _, key := range []string{"tailscale", "tailscale_state", "tailscale_ipv4", "tailscale_fqdn"} {
+		if peers[0].Labels[key] != "" {
+			t.Fatalf("URL fallback retained stale %s label: %#v", key, peers[0])
+		}
+	}
+}
+
+func TestResolvePondPeersRefreshesTailnetLabelsAfterValidation(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { setLeaseClaimTailscale(c, "100.64.7.7", "") })
+	fake := &fakeTailnetBridgeProvider{
+		fakeBridgeProvider: &fakeBridgeProvider{},
+		meta:               TailscaleMetadata{Enabled: true, IPv4: "100.64.7.8", State: "ready"},
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].Endpoint != "100.64.7.8" || peers[0].Labels["tailscale_ipv4"] != "100.64.7.8" {
+		t.Fatalf("validated endpoint and labels disagree: %#v", peers)
 	}
 }
 

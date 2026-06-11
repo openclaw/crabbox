@@ -84,6 +84,9 @@ func TestIsloTailscaleStateDirIsBounded(t *testing.T) {
 	if stateDir == isloTailscaleStateDir(leaseID+"-other") {
 		t.Fatal("different lease IDs share a state directory")
 	}
+	if !strings.HasPrefix(stateDir, "/var/lib/crabbox/tailscale/") {
+		t.Fatalf("state directory must survive sandbox pauses: %q", stateDir)
+	}
 }
 
 func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *testing.T) {
@@ -91,11 +94,12 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		"--tun=userspace-networking",
 		"--socks5-server=127.0.0.2:1055",
 		"--outbound-http-proxy-listen=127.0.0.2:1055",
-		"--state=mem:",
+		`--state="${TS_STATE_FILE}"`,
+		`test -n "${TS_AUTH_FILE}"`,
 		`TS_AUTH_FILE="$(mktemp /tmp/crabbox-ts-auth.XXXXXX)"`,
 		`--auth-key="file:${TS_AUTH_FILE}"`,
 		"unset TS_AUTHKEY",
-		`trap 'rm -f "${TS_AUTH_FILE}"; rm -rf "${TS_EXTRACT_DIR:-}"' EXIT`,
+		`if [ -n "${TS_AUTH_FILE}" ]; then rm -f "${TS_AUTH_FILE}"; fi`,
 		"--shields-up=false",
 		defaultIsloTailscaleAMD64SHA256,
 		defaultIsloTailscaleARM64SHA256,
@@ -111,6 +115,9 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 	}
 	if strings.Contains(isloTailscaleBringUp, `--authkey="${TS_AUTHKEY}"`) {
 		t.Fatal("bring-up script must not expose the auth key in tailscale argv")
+	}
+	if strings.Contains(isloTailscaleBringUp, "--state=mem:") {
+		t.Fatal("bring-up script must retain node state for one-off auth keys")
 	}
 	if strings.Index(isloTailscaleBringUp, "unset TS_AUTHKEY") > strings.Index(isloTailscaleBringUp, "setsid /tmp/ts/tailscaled") {
 		t.Fatal("bring-up script must unset the auth key before starting tailscaled")
@@ -197,6 +204,44 @@ func TestEnsureLeaseTailscalePreservesClaimWhenValidationCannotRun(t *testing.T)
 	}
 	if claim.TailscaleIPv4 != "100.64.7.7" {
 		t.Fatalf("validation failure erased healthy claim: %#v", claim)
+	}
+}
+
+func TestEnsureLeaseTailscaleRestartsFromStateWithPondTag(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProviderWithPond(leaseID, "node-a", isloProvider, "mesh-demo", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{
+		execCodes: []int{1, 0},
+		execOuts:  []string{"", "CRABBOX_TS_IP=100.64.7.8"},
+	}
+	backend := &isloBackend{
+		cfg: Config{Tailscale: core.TailscaleConfig{Tags: []string{"tag:base"}}},
+		rt:  Runtime{Stderr: io.Discard},
+	}
+
+	meta, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.IPv4 != "100.64.7.8" || len(client.execRequests) != 2 {
+		t.Fatalf("restart metadata=%#v requests=%d", meta, len(client.execRequests))
+	}
+	restartReq := client.execRequests[1]
+	if got := *restartReq.Env["TS_AUTHKEY"]; got != "" {
+		t.Fatalf("state recovery should not require an auth key, got %q", got)
+	}
+	expected := backend.cfg
+	expected.Tailscale.Enabled = true
+	expected.Pond = "mesh-demo"
+	appendDirectPondTailscaleTag(&expected)
+	if got, want := *restartReq.Env["TS_TAGS"], strings.Join(expected.Tailscale.Tags, ","); got != want {
+		t.Fatalf("restart tags=%q want %q", got, want)
 	}
 }
 

@@ -857,7 +857,9 @@ type fakeIsloSyncClient struct {
 	uploadErr                error
 	execErr                  error
 	execCode                 int
+	execCodes                []int
 	execOut                  string
+	execOuts                 []string
 	execErrOnCommand         error
 	execErrOnCommandContains string
 	execErrOnCommandSkip     int
@@ -919,10 +921,15 @@ func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosd
 		return 1, ctx.Err()
 	}
 	f.execRequests = append(f.execRequests, req)
+	callIndex := len(f.execRequests) - 1
 	command := strings.Join(req.GetCommand(), " ")
 	f.prepareCommands = append(f.prepareCommands, command)
-	if f.execOut != "" {
-		_, _ = io.WriteString(stdout, f.execOut)
+	output := f.execOut
+	if callIndex < len(f.execOuts) {
+		output = f.execOuts[callIndex]
+	}
+	if output != "" {
+		_, _ = io.WriteString(stdout, output)
 	}
 	if f.execErr != nil {
 		return 1, f.execErr
@@ -936,6 +943,9 @@ func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosd
 			}
 			return 1, f.execErrOnCommand
 		}
+	}
+	if callIndex < len(f.execCodes) {
+		return f.execCodes[callIndex], nil
 	}
 	return f.execCode, nil
 }
