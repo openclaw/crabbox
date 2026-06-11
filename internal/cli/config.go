@@ -119,6 +119,7 @@ type Config struct {
 	Tensorlake                    TensorlakeConfig
 	OpenComputer                  OpenComputerConfig
 	DockerSandbox                 DockerSandboxConfig
+	SandboxRuntime                SandboxRuntimeConfig
 	Modal                         ModalConfig
 	UpstashBox                    UpstashBoxConfig
 	AsciiBox                      AsciiBoxConfig
@@ -442,6 +443,12 @@ type DockerSandboxConfig struct {
 	ExtraWorkspaces []string
 	MCP             []string
 	Kit             []string
+}
+
+type SandboxRuntimeConfig struct {
+	CLIPath  string
+	Settings string
+	Debug    bool
 }
 
 type ModalConfig struct {
@@ -1306,6 +1313,9 @@ func baseConfig() Config {
 			CLIPath: "sbx",
 			Agent:   "shell",
 		},
+		SandboxRuntime: SandboxRuntimeConfig{
+			CLIPath: "srt",
+		},
 		Modal: ModalConfig{
 			App:     "crabbox",
 			Image:   "python:3.13-slim",
@@ -1446,6 +1456,7 @@ type fileConfig struct {
 	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	OpenComputer         *fileOpenComputerConfig            `yaml:"openComputer,omitempty"`
 	DockerSandbox        *fileDockerSandboxConfig           `yaml:"dockerSandbox,omitempty"`
+	SandboxRuntime       *fileSandboxRuntimeConfig          `yaml:"sandboxRuntime,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
 	UpstashBox           *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
 	AsciiBox             *fileAsciiBoxConfig                `yaml:"asciiBox,omitempty"`
@@ -1846,6 +1857,12 @@ type fileDockerSandboxConfig struct {
 	ExtraWorkspaces *[]string `yaml:"extraWorkspaces,omitempty"`
 	MCP             *[]string `yaml:"mcp,omitempty"`
 	Kit             *[]string `yaml:"kit,omitempty"`
+}
+
+type fileSandboxRuntimeConfig struct {
+	CLIPath  string  `yaml:"cliPath,omitempty"`
+	Settings *string `yaml:"settings,omitempty"`
+	Debug    *bool   `yaml:"debug,omitempty"`
 }
 
 type fileModalConfig struct {
@@ -3152,6 +3169,17 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.DockerSandbox.Kit = append([]string(nil), (*file.DockerSandbox.Kit)...)
 		}
 	}
+	if file.SandboxRuntime != nil {
+		if file.SandboxRuntime.CLIPath != "" {
+			cfg.SandboxRuntime.CLIPath = file.SandboxRuntime.CLIPath
+		}
+		if file.SandboxRuntime.Settings != nil {
+			cfg.SandboxRuntime.Settings = *file.SandboxRuntime.Settings
+		}
+		if file.SandboxRuntime.Debug != nil {
+			cfg.SandboxRuntime.Debug = *file.SandboxRuntime.Debug
+		}
+	}
 	if file.Modal != nil {
 		if file.Modal.App != "" {
 			cfg.Modal.App = file.Modal.App
@@ -4138,6 +4166,11 @@ func applyEnv(cfg *Config) error {
 	}
 	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_KIT"); ok {
 		cfg.DockerSandbox.Kit = values
+	}
+	cfg.SandboxRuntime.CLIPath = getenv("CRABBOX_SANDBOX_RUNTIME_CLI", cfg.SandboxRuntime.CLIPath)
+	cfg.SandboxRuntime.Settings = getenv("CRABBOX_SANDBOX_RUNTIME_SETTINGS", cfg.SandboxRuntime.Settings)
+	if value, ok := getenvBool("CRABBOX_SANDBOX_RUNTIME_DEBUG"); ok {
+		cfg.SandboxRuntime.Debug = value
 	}
 	cfg.Modal.App = getenv("CRABBOX_MODAL_APP", cfg.Modal.App)
 	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)

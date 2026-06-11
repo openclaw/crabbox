@@ -31,6 +31,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/proxmox"
 	_ "github.com/openclaw/crabbox/internal/providers/railway"
 	_ "github.com/openclaw/crabbox/internal/providers/runpod"
+	_ "github.com/openclaw/crabbox/internal/providers/sandboxruntime"
 	_ "github.com/openclaw/crabbox/internal/providers/semaphore"
 	_ "github.com/openclaw/crabbox/internal/providers/sprites"
 	_ "github.com/openclaw/crabbox/internal/providers/ssh"
