@@ -473,6 +473,9 @@ func mutateLeaseClaimGuarded(leaseID string, guard func(leaseClaim, bool) error,
 		if err != nil {
 			return err
 		}
+		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
+			return err
+		}
 		if guard != nil {
 			if err := guard(claim, exists); err != nil {
 				return err
@@ -832,10 +835,17 @@ func readLeaseClaimWithPresence(leaseID string) (leaseClaim, bool, error) {
 	if err != nil {
 		return leaseClaim{}, exists, err
 	}
-	if exists && claim.LeaseID != "" && claim.LeaseID != leaseID {
-		return leaseClaim{}, true, exit(2, "claim file %s contains lease id %s; refusing misfiled claim", leaseID, claim.LeaseID)
+	if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
+		return leaseClaim{}, exists, err
 	}
 	return claim, exists, nil
+}
+
+func validateLeaseClaimFileIdentity(leaseID string, claim leaseClaim, exists bool) error {
+	if exists && claim.LeaseID != "" && claim.LeaseID != leaseID {
+		return exit(2, "claim file %s contains lease id %s; refusing misfiled claim", leaseID, claim.LeaseID)
+	}
+	return nil
 }
 
 func leaseClaimExists(leaseID string) (bool, error) {

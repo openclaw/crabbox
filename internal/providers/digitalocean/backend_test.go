@@ -971,12 +971,14 @@ func TestResolveNumericIdentifierPrefersDropletIDOverSlug(t *testing.T) {
 	}}
 	backend := newTestBackend(t, api)
 
-	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "105", ReleaseOnly: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lease.Server.ID != 105 || lease.LeaseID != "cbx_abcdef123420" {
-		t.Fatalf("resolved numeric identifier to %#v", lease)
+	for _, identifier := range []string{"105", " 105 ", "+105"} {
+		lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: identifier, ReleaseOnly: true})
+		if err != nil {
+			t.Fatalf("Resolve(%q) err=%v", identifier, err)
+		}
+		if lease.Server.ID != 105 || lease.LeaseID != "cbx_abcdef123420" {
+			t.Fatalf("Resolve(%q)=%#v", identifier, lease)
+		}
 	}
 }
 
@@ -1006,7 +1008,7 @@ func TestReleaseNumericIdentifierPrefersClaimCloudIDOverSlug(t *testing.T) {
 		}
 	}
 
-	for _, identifier := range []string{"105", "00105", "+105"} {
+	for _, identifier := range []string{"105", "00105", "+105", " 105 "} {
 		lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: identifier, ReleaseOnly: true})
 		if err != nil {
 			t.Fatalf("Resolve(%q) err=%v", identifier, err)

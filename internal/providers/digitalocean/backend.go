@@ -1239,7 +1239,8 @@ func normalizeDropletStatus(status string) string {
 }
 
 func parseDropletID(id string) (int64, bool) {
-	if strings.TrimSpace(id) == "" || strings.HasPrefix(id, "cbx_") {
+	id = strings.TrimSpace(id)
+	if id == "" || strings.HasPrefix(id, "cbx_") {
 		return 0, false
 	}
 	parsed, err := strconv.ParseInt(id, 10, 64)

@@ -217,6 +217,53 @@ func TestEndpointClaimRewriteRejectsUnknownExistingProvider(t *testing.T) {
 	}
 }
 
+func TestClaimMutationRejectsMisfiledClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	storedLeaseID := "cbx_storedclaim123"
+	requestedLeaseID := "cbx_requestedclaim123"
+	if err := claimLeaseTargetForRepoConfig(storedLeaseID, "stored", Config{Provider: "aws"}, Server{
+		Provider: "aws",
+		CloudID:  "i-stored",
+		Labels:   map[string]string{"lease": storedLeaseID, "slug": "stored", "provider": "aws"},
+	}, SSHTarget{}, "/stored", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	storedPath, err := leaseClaimPath(storedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestedPath, err := leaseClaimPath(requestedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(storedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(requestedPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(storedPath); err != nil {
+		t.Fatal(err)
+	}
+
+	err = claimLeaseTargetForRepoConfig(requestedLeaseID, "requested", Config{Provider: "aws"}, Server{
+		Provider: "aws",
+		CloudID:  "i-requested",
+		Labels:   map[string]string{"lease": requestedLeaseID, "slug": "requested", "provider": "aws"},
+	}, SSHTarget{}, "/requested", time.Minute, true)
+	if err == nil || !strings.Contains(err.Error(), "refusing misfiled claim") {
+		t.Fatalf("claim rewrite err=%v", err)
+	}
+	unchanged, err := os.ReadFile(requestedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(unchanged) != string(data) {
+		t.Fatalf("misfiled claim rewritten:\n%s\nwant:\n%s", unchanged, data)
+	}
+}
+
 func TestReadLeaseClaimWithPresenceDistinguishesEmptyAndMissing(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_claimpresence123"
