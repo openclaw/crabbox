@@ -454,6 +454,18 @@ func (c *digitalOceanClient) EnsureSSHKey(ctx context.Context, name, publicKey s
 		}
 		return sshKey{}, false, err
 	}
+	if res.SSHKey.ID <= 0 ||
+		res.SSHKey.Name != name ||
+		strings.TrimSpace(res.SSHKey.PublicKey) != strings.TrimSpace(publicKey) {
+		key, reconcileErr := c.reconcileSSHKey(name, publicKey)
+		if reconcileErr != nil {
+			return sshKey{}, false, errors.Join(
+				fmt.Errorf("digitalocean ssh key creation returned incomplete identity: id=%d name=%q", res.SSHKey.ID, res.SSHKey.Name),
+				reconcileErr,
+			)
+		}
+		return key, true, nil
+	}
 	return res.SSHKey, true, nil
 }
 

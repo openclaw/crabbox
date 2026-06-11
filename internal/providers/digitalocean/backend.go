@@ -508,11 +508,18 @@ func (b *digitalOceanLeaseBackend) List(ctx context.Context, req core.ListReques
 }
 
 func (b *digitalOceanLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
-	leases, err := b.List(ctx, core.ListRequest{})
+	client, err := b.clientFactory(b.RT)
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
-	result := core.InventoryDoctorResult(providerName, len(leases))
+	if _, err := client.AccountID(ctx); err != nil {
+		return core.DoctorResult{}, err
+	}
+	droplets, err := client.ListCrabboxDroplets(ctx)
+	if err != nil {
+		return core.DoctorResult{}, err
+	}
+	result := core.InventoryDoctorResult(providerName, len(droplets))
 	result.Message += fmt.Sprintf(" default_type=%s region=%s image=%s", b.Cfg.ServerType, digitalOceanRegion(b.Cfg), digitalOceanImage(b.Cfg))
 	return result, nil
 }

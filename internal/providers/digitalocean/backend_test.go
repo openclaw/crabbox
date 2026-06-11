@@ -198,6 +198,16 @@ func TestAcquireCreatesDropletClaimsLeaseAndMarksReady(t *testing.T) {
 	}
 }
 
+func TestDoctorRequiresDigitalOceanAccountRead(t *testing.T) {
+	api := &fakeDigitalOceanAPI{accountErr: errors.New("account scope denied")}
+	backend := newTestBackend(t, api)
+
+	_, err := backend.Doctor(context.Background(), core.DoctorRequest{})
+	if err == nil || !strings.Contains(err.Error(), "account scope denied") {
+		t.Fatalf("Doctor err=%v", err)
+	}
+}
+
 func TestAcquireRollsBackDropletAndKeyOnSSHFailure(t *testing.T) {
 	api := &fakeDigitalOceanAPI{}
 	backend := newTestBackend(t, api)

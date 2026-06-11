@@ -995,6 +995,41 @@ func TestDigitalOceanClientEnsureSSHKeyReconcilesTruncatedSuccessBody(t *testing
 	}
 }
 
+func TestDigitalOceanClientEnsureSSHKeyReconcilesEmptySuccessBody(t *testing.T) {
+	var listCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/account/keys":
+			listCalls++
+			if listCalls == 1 {
+				_, _ = w.Write([]byte(`{"ssh_keys":[],"links":{"pages":{}}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"ssh_keys":[{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}],"links":{"pages":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/account/keys":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	key, created, err := client.EnsureSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || key.ID != 123 || listCalls != 2 {
+		t.Fatalf("key=%#v created=%v listCalls=%d", key, created, listCalls)
+	}
+}
+
 func TestDigitalOceanClientEnsureSSHKeyRejectsMismatchedPublicKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
