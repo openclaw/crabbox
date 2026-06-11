@@ -44,6 +44,7 @@ func TestLiveMorphAcquireResolveTouchReleaseLease(t *testing.T) {
 	cfg := testMorphConfig()
 	cfg.Morph.APIKey = key
 	cfg.Morph.Snapshot = snapshotID
+	cfg.Morph.DeleteOnRelease = true
 	cfg.TTL = 10 * time.Minute
 	cfg.IdleTimeout = 5 * time.Minute
 

@@ -816,7 +816,7 @@ morph_smoke() {
   local ttl="${CRABBOX_LIVE_MORPH_TTL:-15m}"
   local idle="${CRABBOX_LIVE_MORPH_IDLE_TIMEOUT:-5m}"
 
-  local morph_env=(CRABBOX_PROVIDER=morph "CRABBOX_MORPH_SNAPSHOT=$snapshot")
+  local morph_env=(CRABBOX_PROVIDER=morph "CRABBOX_MORPH_SNAPSHOT=$snapshot" CRABBOX_MORPH_DELETE_ON_RELEASE=1)
   morph_run() {
     run_in_repo env "${morph_env[@]}" "$cb" "$@"
   }

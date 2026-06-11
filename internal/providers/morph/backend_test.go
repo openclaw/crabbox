@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
@@ -246,6 +247,23 @@ func TestNewMorphBackendAllowsMissingSnapshotForExistingLeaseOps(t *testing.T) {
 	}
 }
 
+func TestApplyMorphProviderFlagsUpdatesServerType(t *testing.T) {
+	cfg := testMorphConfig()
+	cfg.Morph.Snapshot = "snapshot_old"
+	cfg.ServerType = "snapshot_old"
+	fs := flag.NewFlagSet("morph", flag.ContinueOnError)
+	values := RegisterMorphProviderFlags(fs, cfg)
+	if err := fs.Parse([]string{"--morph-snapshot", "snapshot_new"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyMorphProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Morph.Snapshot != "snapshot_new" || cfg.ServerType != "snapshot_new" {
+		t.Fatalf("snapshot=%q serverType=%q", cfg.Morph.Snapshot, cfg.ServerType)
+	}
+}
+
 func TestConfigureDoctorReturnsMorphDoctorBackend(t *testing.T) {
 	doctor, err := Provider{}.ConfigureDoctor(testMorphConfig(), Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
@@ -347,9 +365,17 @@ func TestMorphResolveResumesPausedInstanceWithoutWakeOnSSH(t *testing.T) {
 		getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
 			getInstanceCalls++
 			if getInstanceCalls == 1 {
-				return morphInstance{ID: instanceID, Status: "paused"}, nil
+				return morphInstance{
+					ID:       instanceID,
+					Status:   "paused",
+					Metadata: morphMetadata{"crabbox": "true", "provider": providerName},
+				}, nil
 			}
-			return morphInstance{ID: instanceID, Status: "ready"}, nil
+			return morphInstance{
+				ID:       instanceID,
+				Status:   "ready",
+				Metadata: morphMetadata{"crabbox": "true", "provider": providerName},
+			}, nil
 		},
 		resumeInstance: func(_ context.Context, instanceID string) error {
 			resumeCalls++
@@ -417,6 +443,71 @@ func TestMorphResolveRejectsUnsafeMetadataLeaseID(t *testing.T) {
 	}
 }
 
+func TestMorphResolveRejectsUnmanagedInstance(t *testing.T) {
+	sshKeyCalls := 0
+	fake := &fakeMorphAPI{
+		getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
+			return morphInstance{ID: instanceID, Status: "ready"}, nil
+		},
+		getSSHKey: func(_ context.Context, _ string) (morphSSHKey, error) {
+			sshKeyCalls++
+			return morphSSHKey{PrivateKey: "PRIVATE KEY"}, nil
+		},
+	}
+	backend := &morphLeaseBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    testMorphConfig(),
+		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		client: fake,
+		now:    time.Now,
+	}
+
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: "inst_unmanaged"})
+	if err == nil || !strings.Contains(err.Error(), "not managed by Crabbox") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	if sshKeyCalls != 0 {
+		t.Fatalf("ssh key calls=%d, want 0", sshKeyCalls)
+	}
+}
+
+func TestMorphReleaseRejectsUnmanagedInstance(t *testing.T) {
+	deleteCalls := 0
+	pauseCalls := 0
+	fake := &fakeMorphAPI{
+		getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
+			return morphInstance{ID: instanceID, Status: "ready"}, nil
+		},
+		deleteInstance: func(_ context.Context, _ string) error {
+			deleteCalls++
+			return nil
+		},
+		pauseInstance: func(_ context.Context, _ string) error {
+			pauseCalls++
+			return nil
+		},
+	}
+	cfg := testMorphConfig()
+	cfg.Morph.DeleteOnRelease = true
+	backend := &morphLeaseBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    cfg,
+		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		client: fake,
+		now:    time.Now,
+	}
+
+	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{
+		Lease: LeaseTarget{LeaseID: "cbx_unmanaged", Server: Server{CloudID: "inst_unmanaged"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not managed by Crabbox") {
+		t.Fatalf("ReleaseLease error=%v", err)
+	}
+	if deleteCalls != 0 || pauseCalls != 0 {
+		t.Fatalf("deleteCalls=%d pauseCalls=%d, want 0", deleteCalls, pauseCalls)
+	}
+}
+
 func TestMorphResolveStatusOnlyAndReleaseOnlySkipSSHPreparation(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -434,7 +525,11 @@ func TestMorphResolveStatusOnlyAndReleaseOnlySkipSSHPreparation(t *testing.T) {
 			sshKeyCalls := 0
 			fake := &fakeMorphAPI{
 				getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
-					return morphInstance{ID: instanceID, Status: "paused"}, nil
+					return morphInstance{
+						ID:       instanceID,
+						Status:   "paused",
+						Metadata: morphMetadata{"crabbox": "true", "provider": providerName},
+					}, nil
 				},
 				resumeInstance: func(_ context.Context, instanceID string) error {
 					resumeCalls++
@@ -502,7 +597,11 @@ func TestMorphReleasePausesOrDeletesAndCleansKey(t *testing.T) {
 			deleteCalls := 0
 			fake := &fakeMorphAPI{
 				getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
-					return morphInstance{ID: instanceID, Status: "ready"}, nil
+					return morphInstance{
+						ID:       instanceID,
+						Status:   "ready",
+						Metadata: morphMetadata{"crabbox": "true", "provider": providerName},
+					}, nil
 				},
 				pauseInstance: func(_ context.Context, instanceID string) error {
 					pauseCalls++
@@ -568,9 +667,10 @@ func TestMorphTouchInitializesMissingMetadata(t *testing.T) {
 	fake := &fakeMorphAPI{
 		getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
 			return morphInstance{
-				ID:     instanceID,
-				Status: "ready",
-				Refs:   morphInstanceRefs{SnapshotID: "snapshot_123"},
+				ID:       instanceID,
+				Status:   "ready",
+				Refs:     morphInstanceRefs{SnapshotID: "snapshot_123"},
+				Metadata: morphMetadata{"crabbox": "true", "provider": providerName},
 			}, nil
 		},
 		setInstanceMetadata: func(_ context.Context, instanceID string, metadata map[string]string) error {
@@ -626,6 +726,7 @@ func TestMorphTouchPreservesCustomWorkRootAndRefreshesTTL(t *testing.T) {
 		"slug":       "blue-lobster",
 		"work_root":  "/workspace/custom",
 		"provider":   providerName,
+		"crabbox":    "true",
 		"created_at": strconv.FormatInt(now.Unix(), 10),
 	}
 

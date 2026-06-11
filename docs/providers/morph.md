@@ -141,7 +141,8 @@ crabbox stop --provider morph blue-lobster
 
 Two opt-in entry points exercise the real Morph API. Neither runs in the
 default `go test -race ./...` or `node --test scripts/*.test.js` CI jobs;
-both are skipped or fail-fast when the API key is absent.
+both are skipped or fail-fast when the API key is absent. Both force
+`deleteOnRelease=true` so test instances are deleted instead of retained.
 
 The Morph API key is read from the same contract as runtime auth:
 

@@ -329,6 +329,9 @@ func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 		if err != nil && !isMorphNotFound(err) {
 			return exit(1, "morph get instance %s failed: %v", instanceID, err)
 		}
+		if instance.ID != "" && !morphIsManaged(instance) {
+			return exit(4, "morph instance %s is not managed by Crabbox", instance.ID)
+		}
 	}
 	if instance.ID == "" {
 		resolveID := blank(leaseID, instanceID)
@@ -397,6 +400,9 @@ func (b *morphLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server
 			}
 			return Server{}, exit(1, "morph get instance %s failed: %v", instanceID, err)
 		}
+		if !morphIsManaged(instance) {
+			return Server{}, exit(4, "morph instance %s is not managed by Crabbox", instance.ID)
+		}
 	} else {
 		instance, leaseID, slug, err = b.resolveInstance(ctx, client, blank(leaseID, slug))
 		if err != nil {
@@ -454,6 +460,9 @@ func (b *morphLeaseBackend) resolveInstance(ctx context.Context, client morphAPI
 		}
 		instance, err := client.GetInstance(ctx, candidate)
 		if err == nil {
+			if !morphIsManaged(instance) {
+				return morphInstance{}, "", "", exit(4, "morph instance %s is not managed by Crabbox", instance.ID)
+			}
 			instance, leaseID, slug := finalizeMorphResolution(instance, identifier, claim, claimed)
 			return instance, leaseID, slug, nil
 		}
@@ -580,9 +589,7 @@ func applyMorphDefaults(cfg *Config) {
 	cfg.Network = networkPublic
 	cfg.SSHPort = "22"
 	cfg.SSHFallbackPorts = nil
-	if strings.TrimSpace(cfg.ServerType) == "" {
-		cfg.ServerType = blank(strings.TrimSpace(cfg.Morph.Snapshot), "snapshot")
-	}
+	cfg.ServerType = blank(strings.TrimSpace(cfg.Morph.Snapshot), "snapshot")
 }
 
 func validateMorphConfig(cfg Config) error {

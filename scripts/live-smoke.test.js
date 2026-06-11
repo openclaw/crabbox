@@ -534,6 +534,7 @@ case "$1" in
     printf '[{"id":"cbx_1a2b3c4d5e6f","slug":"morph-smoke-test","provider":"morph","state":"ready"}]\\n'
     ;;
   stop)
+    [[ "\${CRABBOX_MORPH_DELETE_ON_RELEASE:-}" == "1" ]] || exit 96
     printf 'stopped %s\\n' "\${*: -1}"
     ;;
   admin)
@@ -618,6 +619,7 @@ case "$1" in
     printf '[{"id":"cbx_1a2b3c4d5e6f","slug":"morph-smoke-test","provider":"morph","state":"ready"}]\\n'
     ;;
   stop)
+    [[ "\${CRABBOX_MORPH_DELETE_ON_RELEASE:-}" == "1" ]] || exit 96
     printf 'stopped %s\\n' "\${*: -1}"
     ;;
   admin)
