@@ -136,7 +136,7 @@ done
 if [ -z "${ts_ip}" ]; then
   if [ -z "${TS_AUTH_FILE}" ]; then
     case "${backend_state}" in
-      Starting|Running|NeedsMachineAuth|"") echo "tailscale recovery is still starting" >&2; exit 75 ;;
+      Starting|Running|NeedsMachineAuth) echo "tailscale recovery is still starting" >&2; exit 75 ;;
       Stopped) : ;;
       *) echo "tailscale state unavailable and no auth key provided" >&2; exit 4 ;;
     esac

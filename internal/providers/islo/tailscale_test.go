@@ -96,6 +96,7 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		"--outbound-http-proxy-listen=127.0.0.2:1055",
 		`--state="${TS_STATE_FILE}"`,
 		`if [ -z "${TS_AUTH_FILE}" ]; then`,
+		`Starting|Running|NeedsMachineAuth)`,
 		`TS_AUTH_FILE="$(mktemp "${TS_RUNTIME_DIR}/auth.XXXXXX")"`,
 		`TS_INSTALL_DIR="$(mktemp -d "${TS_STATE_DIR}/install.XXXXXX")"`,
 		`TS_LOCK_DIR="${TS_STATE_DIR}/operation.lock"`,
@@ -127,6 +128,9 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 	}
 	if strings.Contains(isloTailscaleBringUp, "--state=mem:") {
 		t.Fatal("bring-up script must retain node state for one-off auth keys")
+	}
+	if strings.Contains(isloTailscaleBringUp, `Starting|Running|NeedsMachineAuth|"")`) {
+		t.Fatal("an empty backend state after the recovery wait must fail closed")
 	}
 	if strings.Index(isloTailscaleBringUp, "unset TS_AUTHKEY") > strings.Index(isloTailscaleBringUp, `setsid "${TS_BIN_DIR}/tailscaled"`) {
 		t.Fatal("bring-up script must unset the auth key before starting tailscaled")
