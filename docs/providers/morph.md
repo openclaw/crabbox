@@ -126,8 +126,11 @@ crabbox stop --provider morph blue-lobster
 
 ## Gotchas
 
-- Morph uses an API-returned private key per instance. Crabbox stores it under
-  the normal per-lease key path and removes it when the lease is released.
+- Morph uses API-returned credentials per instance. If the private key is
+  passphrase-protected, Crabbox decrypts it in memory with the returned
+  password, stores the usable key under the normal per-lease path with mode
+  `0600`, and removes it when the lease is released. The password is not passed
+  in command-line arguments or retained on disk.
 - `stop` pauses by default. Paused instances can be reused later by `run`,
   `ssh`, or `status --wait`; with `wakeOnSSH=true`, SSH can wake them through
   the gateway.

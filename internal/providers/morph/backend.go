@@ -2,6 +2,7 @@ package morph
 
 import (
 	"context"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 const morphReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"
@@ -726,6 +729,22 @@ func storeMorphSSHKey(leaseID string, sshKey morphSSHKey) (string, error) {
 	if privateKey == "" {
 		return "", exit(1, "morph ssh key response did not include private_key")
 	}
+	keyData := []byte(privateKey + "\n")
+	if sshKey.Password != "" {
+		if _, err := ssh.ParseRawPrivateKey(keyData); err != nil {
+			password := []byte(sshKey.Password)
+			decryptedKey, decryptErr := ssh.ParseRawPrivateKeyWithPassphrase(keyData, password)
+			clear(password)
+			if decryptErr != nil {
+				return "", exit(1, "morph ssh key response could not be decrypted")
+			}
+			block, marshalErr := ssh.MarshalPrivateKey(decryptedKey, "")
+			if marshalErr != nil {
+				return "", exit(1, "morph ssh key response could not be stored: %v", marshalErr)
+			}
+			keyData = pem.EncodeToMemory(block)
+		}
+	}
 	path, err := testboxKeyPath(leaseID)
 	if err != nil {
 		return "", err
@@ -733,7 +752,7 @@ func storeMorphSSHKey(leaseID string, sshKey morphSSHKey) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, []byte(privateKey+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, keyData, 0o600); err != nil {
 		return "", err
 	}
 	return path, nil

@@ -195,6 +195,7 @@ provider_smoke() {
   local lease=""
   local slug=""
   cleanup() {
+    trap - RETURN ERR
     if [[ -n "$lease" ]]; then
       stop_lease "$lease" "$slug"
       lease=""
@@ -276,6 +277,7 @@ e2b_smoke() {
   local lease=""
   local slug=""
   cleanup() {
+    trap - RETURN ERR
     if [[ -n "$lease" ]]; then
       stop_provider_lease e2b "$lease" "$slug"
       lease=""
@@ -313,6 +315,7 @@ modal_smoke() {
   local lease=""
   local slug=""
   cleanup() {
+    trap - RETURN ERR
     if [[ -n "$lease" ]]; then
       stop_provider_lease modal "$lease" "$slug"
       lease=""
@@ -391,6 +394,7 @@ semaphore_smoke() {
   local lease=""
   local slug=""
   cleanup() {
+    trap - RETURN ERR
     if [[ -n "$lease" ]]; then
       stop_provider_lease semaphore "$lease" "$slug"
       lease=""
@@ -453,6 +457,7 @@ incus_smoke() {
   local retained_lease=""
   local retained_slug=""
   cleanup() {
+    trap - RETURN ERR
     if [[ -n "$retained_lease" ]]; then
       if [[ -n "$retained_slug" ]]; then
         run_in_repo "$cb" stop --provider incus --incus-delete-on-release=true "$retained_slug" || run_in_repo "$cb" stop --provider incus --incus-delete-on-release=true "$retained_lease" || true
@@ -551,6 +556,7 @@ sprites_smoke() {
   local lease=""
   local slug=""
   cleanup() {
+    trap - RETURN ERR
     if [[ -n "$lease" ]]; then
       stop_provider_lease sprites "$lease" "$slug"
       lease=""
@@ -600,6 +606,7 @@ tenki_smoke() {
   local slug=""
   local session=""
   cleanup() {
+    trap - RETURN ERR
     if [[ -n "$lease" ]]; then
       stop_provider_lease tenki "$lease" "$slug"
       lease=""
@@ -701,6 +708,7 @@ kubevirt_smoke() {
   local lease=""
   local slug=""
   cleanup() {
+    trap - RETURN ERR
     if [[ -n "$lease" ]]; then
       if [[ -n "$slug" ]]; then
         kubevirt_run stop "${route_args[@]}" "$slug" || kubevirt_run stop "${route_args[@]}" "$lease" || true
@@ -767,6 +775,7 @@ external_smoke() {
   local lease=""
   local slug=""
   cleanup() {
+    trap - RETURN ERR
     if [[ -n "$lease" ]]; then
       if [[ -n "$slug" ]]; then
         external_run stop "${route_args[@]}" "$slug" || external_run stop "${route_args[@]}" "$lease" || true
@@ -823,6 +832,7 @@ morph_smoke() {
 
   local lease=""
   cleanup() {
+    trap - RETURN ERR
     if [[ -n "$lease" ]]; then
       morph_run stop "$slug" || morph_run stop "$lease" || true
       lease=""

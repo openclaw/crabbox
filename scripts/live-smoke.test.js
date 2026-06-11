@@ -384,6 +384,13 @@ case "$1" in
   stop)
     printf 'stopped %s\\n' "\${*: -1}"
     ;;
+  admin)
+    if [[ "\${CRABBOX_FAKE_ADMIN_FAIL:-0}" == "1" ]]; then
+      printf 'admin endpoint unavailable\\n' >&2
+      exit 42
+    fi
+    printf '[]\\n'
+    ;;
   *)
     printf 'unexpected crabbox args: %s\\n' "$*" >&2
     exit 99
@@ -418,6 +425,25 @@ esac
   assert.match(crabboxCalls, /warmup --provider hetzner/);
   assert.doesNotMatch(crabboxCalls, /--provider morph/);
   assert.doesNotMatch(result.stderr, /CRABBOX_MORPH_API_KEY|MORPH_API_KEY|morph\.apiKey/);
+
+  const failedAudit = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...env,
+      PATH: `${bin}${path.delimiter}${env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_FAKE_ADMIN_FAIL: "1",
+      CRABBOX_FAKE_LOG: crabboxLog,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_ADMIN_AUDIT: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+  assert.equal(failedAudit.status, 42, failedAudit.stdout + failedAudit.stderr);
+  assert.match(failedAudit.stderr, /error: admin active-lease check failed: admin endpoint unavailable/);
+  assert.doesNotMatch(failedAudit.stderr, /unbound variable/);
 });
 
 test("live smoke fails when final active lease audit fails", () => {

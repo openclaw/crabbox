@@ -3,6 +3,9 @@ package morph
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"io"
@@ -12,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 type fakeMorphAPI struct {
@@ -230,6 +235,57 @@ func TestMorphAcquireStoresMetadataAndKey(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("key perms=%o want 600", info.Mode().Perm())
+	}
+}
+
+func TestStoreMorphSSHKeyDecryptsProtectedKey(t *testing.T) {
+	configureMorphTestHome(t)
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const password = "morph-test-password"
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(privateKey, "", []byte(password))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keyPath, err := storeMorphSSHKey("cbx_protected", morphSSHKey{
+		PrivateKey: string(pem.EncodeToMemory(block)),
+		Password:   password,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyData, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ssh.ParseRawPrivateKey(keyData); err != nil {
+		t.Fatalf("stored key is not usable without interaction: %v", err)
+	}
+	if bytes.Contains(keyData, []byte(password)) {
+		t.Fatal("stored key contains Morph password")
+	}
+}
+
+func TestStoreMorphSSHKeyRejectsWrongPassword(t *testing.T) {
+	configureMorphTestHome(t)
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(privateKey, "", []byte("correct-password"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = storeMorphSSHKey("cbx_wrong_password", morphSSHKey{
+		PrivateKey: string(pem.EncodeToMemory(block)),
+		Password:   "wrong-password",
+	})
+	if err == nil || !strings.Contains(err.Error(), "could not be decrypted") {
+		t.Fatalf("storeMorphSSHKey error=%v", err)
 	}
 }
 
