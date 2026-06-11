@@ -74,7 +74,7 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		`TS_AUTH_FILE="$(mktemp /tmp/crabbox-ts-auth.XXXXXX)"`,
 		`--auth-key="file:${TS_AUTH_FILE}"`,
 		"unset TS_AUTHKEY",
-		`trap 'rm -f "${TS_AUTH_FILE}"' EXIT`,
+		`trap 'rm -f "${TS_AUTH_FILE}"; rm -rf "${TS_EXTRACT_DIR:-}"' EXIT`,
 		"--shields-up=false",
 		defaultIsloTailscaleAMD64SHA256,
 		defaultIsloTailscaleARM64SHA256,
@@ -96,6 +96,14 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 	}
 	if strings.Contains(isloTailscaleBringUp, "--socks5-server=127.0.0.1:") || strings.Contains(isloTailscaleBringUp, "--outbound-http-proxy-listen=127.0.0.1:") {
 		t.Fatal("outbound proxies must not bind the loopback address used for tailnet ingress")
+	}
+	if strings.Contains(isloTailscaleBringUp, "[ ! -x /tmp/ts/tailscaled ]") {
+		t.Fatal("bring-up script must not trust cached Tailscale binaries")
+	}
+	verifyAt := strings.Index(isloTailscaleBringUp, "sha256sum -c -")
+	extractAt := strings.Index(isloTailscaleBringUp, `tar -xzf "${TS_ARCHIVE}"`)
+	if verifyAt < 0 || extractAt < 0 || verifyAt > extractAt {
+		t.Fatal("bring-up script must verify the archive before extraction")
 	}
 }
 

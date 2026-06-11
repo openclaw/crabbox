@@ -53,20 +53,23 @@ umask 077
 TS_AUTH_FILE="$(mktemp /tmp/crabbox-ts-auth.XXXXXX)"
 printf '%s' "${TS_AUTHKEY}" >"${TS_AUTH_FILE}"
 unset TS_AUTHKEY
-trap 'rm -f "${TS_AUTH_FILE}"' EXIT
+trap 'rm -f "${TS_AUTH_FILE}"; rm -rf "${TS_EXTRACT_DIR:-}"' EXIT
 cd /tmp
 case "$(uname -m)" in
   x86_64) A=amd64; TS_SHA256=` + defaultIsloTailscaleAMD64SHA256 + ` ;;
   aarch64|arm64) A=arm64; TS_SHA256=` + defaultIsloTailscaleARM64SHA256 + ` ;;
   *) echo "unsupported arch $(uname -m)" >&2; exit 3 ;;
 esac
-if [ ! -x /tmp/ts/tailscaled ]; then
-  TS_ARCHIVE=/tmp/ts.tgz
-  wget -q -O "${TS_ARCHIVE}" "https://pkgs.tailscale.com/stable/tailscale_` + defaultIsloTailscaleVersion + `_${A}.tgz"
+TS_ARCHIVE=/tmp/ts.tgz
+wget -q -O "${TS_ARCHIVE}" "https://pkgs.tailscale.com/stable/tailscale_` + defaultIsloTailscaleVersion + `_${A}.tgz"
 ` + isloTailscaleVerifyArchive + `
-  rm -rf /tmp/ts; mkdir -p /tmp/ts
-  tar -xzf "${TS_ARCHIVE}" -C /tmp/ts --strip-components=1
-fi
+TS_EXTRACT_DIR="/tmp/ts.extract.$$"
+rm -rf "${TS_EXTRACT_DIR}"
+mkdir -p "${TS_EXTRACT_DIR}"
+tar -xzf "${TS_ARCHIVE}" -C "${TS_EXTRACT_DIR}" --strip-components=1
+rm -rf /tmp/ts
+mv "${TS_EXTRACT_DIR}" /tmp/ts
+TS_EXTRACT_DIR=""
 : "${TS_STATE_DIR:?}"
 mkdir -p "${TS_STATE_DIR}"
 chmod 700 "${TS_STATE_DIR}"
