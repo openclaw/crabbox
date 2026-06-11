@@ -31,6 +31,11 @@ type leaseClaim struct {
 	IdleTimeoutSeconds int               `json:"idleTimeoutSeconds,omitempty"`
 	TailscaleIPv4      string            `json:"tailscaleIPv4,omitempty"`
 	TailscaleFQDN      string            `json:"tailscaleFQDN,omitempty"`
+	TailscaleHostname  string            `json:"tailscaleHostname,omitempty"`
+	TailscaleTags      []string          `json:"tailscaleTags,omitempty"`
+	TailscaleLoginURL  string            `json:"tailscaleLoginURL,omitempty"`
+	TailscaleExitNode  string            `json:"tailscaleExitNode,omitempty"`
+	TailscaleExitLAN   bool              `json:"tailscaleExitLAN,omitempty"`
 	SSHHost            string            `json:"sshHost,omitempty"`
 	SSHPort            int               `json:"sshPort,omitempty"`
 	BridgeURL          string            `json:"bridgeURL,omitempty"`
@@ -228,6 +233,84 @@ func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget)
 		claim.SSHPort = port
 	} else if statusTerminalState(server.Labels["state"]) {
 		claim.SSHPort = 0
+	}
+}
+
+// updateLeaseClaimTailscale records a tailnet endpoint on an existing claim.
+// Delegated-run providers (e.g. islo) have no SSH lease and so cannot go
+// through updateLeaseClaimEndpoint; they call this after joining the tailnet
+// out-of-band so health, ACL, and pond discovery can report enrollment.
+func updateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
+	if leaseID == "" {
+		return nil
+	}
+	return mutateLeaseClaim(leaseID, func(claim *leaseClaim) error {
+		if claim.LeaseID == "" {
+			return nil
+		}
+		setLeaseClaimTailscale(claim, ipv4, fqdn)
+		return nil
+	})
+}
+
+func updateLeaseClaimTailscaleSettings(leaseID, hostname string, tags []string, loginURL, exitNode string, exitLAN bool) error {
+	if leaseID == "" {
+		return nil
+	}
+	return mutateLeaseClaim(leaseID, func(claim *leaseClaim) error {
+		if claim.LeaseID == "" {
+			return nil
+		}
+		claim.TailscaleHostname = hostname
+		claim.TailscaleTags = append([]string(nil), tags...)
+		claim.TailscaleLoginURL = loginURL
+		claim.TailscaleExitNode = exitNode
+		claim.TailscaleExitLAN = exitLAN
+		return nil
+	})
+}
+
+func setLeaseClaimTailscale(claim *leaseClaim, ipv4, fqdn string) {
+	if ipv4 != "" {
+		claim.TailscaleIPv4 = ipv4
+	}
+	if fqdn != "" {
+		claim.TailscaleFQDN = fqdn
+	}
+	if claim.TailscaleIPv4 == "" && claim.TailscaleFQDN == "" {
+		return
+	}
+	if claim.Labels == nil {
+		claim.Labels = map[string]string{}
+	}
+	claim.Labels["tailscale"] = "true"
+	claim.Labels["tailscale_state"] = "ready"
+	if claim.TailscaleIPv4 != "" {
+		claim.Labels["tailscale_ipv4"] = claim.TailscaleIPv4
+	}
+	if claim.TailscaleFQDN != "" {
+		claim.Labels["tailscale_fqdn"] = claim.TailscaleFQDN
+	}
+}
+
+func clearLeaseClaimTailscale(leaseID string) error {
+	if leaseID == "" {
+		return nil
+	}
+	return mutateLeaseClaim(leaseID, func(claim *leaseClaim) error {
+		if claim.LeaseID == "" {
+			return nil
+		}
+		clearLeaseClaimTailscaleFields(claim)
+		return nil
+	})
+}
+
+func clearLeaseClaimTailscaleFields(claim *leaseClaim) {
+	claim.TailscaleIPv4 = ""
+	claim.TailscaleFQDN = ""
+	for _, key := range []string{"tailscale", "tailscale_state", "tailscale_ipv4", "tailscale_fqdn"} {
+		delete(claim.Labels, key)
 	}
 }
 

@@ -847,11 +847,12 @@ func (testIsloProvider) Name() string      { return "islo" }
 func (testIsloProvider) Aliases() []string { return nil }
 func (testIsloProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name:        "islo",
-		Kind:        ProviderKindDelegatedRun,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureURLBridge},
-		Coordinator: CoordinatorNever,
+		Name:                "islo",
+		Kind:                ProviderKindDelegatedRun,
+		Targets:             []TargetSpec{{OS: targetLinux}},
+		Features:            FeatureSet{FeatureURLBridge, FeatureRunSession, FeatureTailscale},
+		Coordinator:         CoordinatorNever,
+		TailscaleEgressOnly: true,
 	}
 }
 
