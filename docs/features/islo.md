@@ -119,7 +119,7 @@ are required:
    and notes that Tailscale is available for outbound proxy traffic only.
 
 ```sh
-export CRABBOX_TAILSCALE_AUTH_KEY=tskey-auth-...     # node auth key (tagged or tag-authorized)
+export CRABBOX_TAILSCALE_AUTH_KEY=tskey-auth-...     # reusable, ephemeral, tagged node auth key
 crabbox warmup --pond mesh --slug node-a --provider islo --tailscale
 crabbox warmup --pond mesh --slug node-b --provider islo --tailscale
 crabbox pond peers --pond mesh --json                # URL transport plus outbound-proxy note
@@ -127,6 +127,11 @@ crabbox pond peers --pond mesh --json                # URL transport plus outbou
 
 The static build and its architecture-specific SHA-256 digests are pinned
 together in Crabbox.
+The direct auth key must be both reusable and ephemeral. Reusable is required
+because memory-only identity must re-enroll after daemon loss; ephemeral keeps
+those replacement device records from accumulating after sandboxes disappear.
+Tailscale auth keys are opaque, so Crabbox cannot inspect these properties and
+treats the supplied key as an operator contract.
 The Islo path runs Tailscale in userspace mode, so it does not install a kernel
 TUN route. For enrolled leases, Crabbox supplies workload commands with local
 proxy defaults (`ALL_PROXY=socks5://127.0.0.2:1055`,

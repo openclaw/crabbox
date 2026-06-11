@@ -101,8 +101,13 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		`TS_AUTH_VALUE="${TS_AUTHKEY}"`,
 		`TS_INSTALL_DIR="$(mktemp -d "${TS_STATE_DIR}/install.XXXXXX")"`,
 		`TS_LOCK_FILE="${TS_STATE_DIR}/operation.lock"`,
+		`TS_PID_FILE="${TS_STATE_DIR}/tailscaled.pid"`,
 		`set -o noclobber`,
 		`kill -0 "${lock_pid}"`,
+		`*tailscaled*"--socket=${TS_SOCKET}"*`,
+		`kill "${old_pid}"`,
+		`kill -KILL "${old_pid}"`,
+		`printf '%s\n' "$!" >"${TS_PID_FILE}"`,
 		`TS_ARCHIVE="${TS_INSTALL_DIR}/tailscale.tgz"`,
 		`if [ ! -S "${TS_SOCKET}" ] || ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status --json >/dev/null 2>&1; then`,
 		"for _ in $(seq 1 120)",
@@ -127,6 +132,9 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 	}
 	if strings.Contains(isloTailscaleBringUp, `--authkey="${TS_AUTHKEY}"`) {
 		t.Fatal("bring-up script must not expose the auth key in tailscale argv")
+	}
+	if strings.Contains(isloTailscaleBringUp, "pkill") {
+		t.Fatal("bring-up script must target only the daemon for this lease")
 	}
 	if strings.Contains(isloTailscaleBringUp, "/auth.") || strings.Contains(isloTailscaleBringUp, "TS_AUTH_FILE") {
 		t.Fatal("bring-up script must not persist a snapshot-clonable auth key file")

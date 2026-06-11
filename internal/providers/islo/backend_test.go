@@ -784,6 +784,9 @@ func TestIsloCreateSandboxRejectsMissingTailscaleAuthKeyBeforeAPI(t *testing.T) 
 	if err == nil || !strings.Contains(err.Error(), "$TEST_TS_AUTH_KEY") {
 		t.Fatalf("expected missing auth key error, got %v", err)
 	}
+	if !strings.Contains(err.Error(), "reusable, ephemeral") {
+		t.Fatalf("missing Islo auth key contract: %v", err)
+	}
 	if client.createRequest != nil {
 		t.Fatalf("CreateSandbox was called with %#v", client.createRequest)
 	}

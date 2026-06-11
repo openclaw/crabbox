@@ -97,6 +97,7 @@ TS_BIN_DIR="${TS_STATE_DIR}/bin"
 rm -rf "${TS_BIN_DIR}"
 mv "${TS_EXTRACT_DIR}" "${TS_BIN_DIR}"
 TS_SOCKET="${TS_STATE_DIR}/tailscaled.sock"
+TS_PID_FILE="${TS_STATE_DIR}/tailscaled.pid"
 tailscale_ip_if_ready() {
   status_json="$("${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status --json 2>/dev/null || true)"
   printf '%s' "${status_json}" | grep -Eq '"BackendState"[[:space:]]*:[[:space:]]*"Running"' || return 1
@@ -108,13 +109,49 @@ tailscale_backend_state() {
     head -n1
 }
 if [ ! -S "${TS_SOCKET}" ] || ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status --json >/dev/null 2>&1; then
+  old_pid="$(cat "${TS_PID_FILE}" 2>/dev/null || true)"
+  case "${old_pid}" in
+    ""|*[!0-9]*)
+      old_pid=""
+      for proc_cmdline in /proc/[0-9]*/cmdline; do
+        [ -r "${proc_cmdline}" ] || continue
+        cmdline="$(tr '\000' ' ' <"${proc_cmdline}" 2>/dev/null || true)"
+        case "${cmdline}" in
+          *tailscaled*"--socket=${TS_SOCKET}"*)
+            old_pid="${proc_cmdline#/proc/}"
+            old_pid="${old_pid%/cmdline}"
+            break
+            ;;
+        esac
+      done
+      ;;
+  esac
+  if [ -n "${old_pid}" ] && kill -0 "${old_pid}" 2>/dev/null; then
+    cmdline="$(tr '\000' ' ' <"/proc/${old_pid}/cmdline" 2>/dev/null || true)"
+    case "${cmdline}" in
+      *tailscaled*"--socket=${TS_SOCKET}"*)
+        kill "${old_pid}" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+          kill -0 "${old_pid}" 2>/dev/null || break
+          sleep 0.25
+        done
+        if kill -0 "${old_pid}" 2>/dev/null; then
+          cmdline="$(tr '\000' ' ' <"/proc/${old_pid}/cmdline" 2>/dev/null || true)"
+          case "${cmdline}" in
+            *tailscaled*"--socket=${TS_SOCKET}"*) kill -KILL "${old_pid}" 2>/dev/null || true ;;
+          esac
+        fi
+        ;;
+    esac
+  fi
   # Userspace ingress forwards tailnet TCP to 127.0.0.1:<port>. Keep the
   # unauthenticated outbound proxy on another loopback address.
-  rm -f "${TS_SOCKET}"
+  rm -f "${TS_PID_FILE}" "${TS_SOCKET}"
   setsid "${TS_BIN_DIR}/tailscaled" --tun=userspace-networking --state=mem: \
     --socket="${TS_SOCKET}" --socks5-server=127.0.0.2:1055 \
     --outbound-http-proxy-listen=127.0.0.2:1055 \
     >"${TS_STATE_DIR}/tailscaled.log" 2>&1 </dev/null &
+  printf '%s\n' "$!" >"${TS_PID_FILE}"
   for _ in $(seq 1 30); do [ -S "${TS_SOCKET}" ] && break; sleep 0.5; done
 fi
 ts_ip=""
@@ -452,7 +489,7 @@ func (b *isloBackend) validateTailscaleConfig() error {
 	if !b.cfg.Tailscale.Enabled || strings.TrimSpace(b.cfg.Tailscale.AuthKey) != "" {
 		return nil
 	}
-	return exit(2, "provider=islo: --tailscale requires a node auth key in $%s", blank(b.cfg.Tailscale.AuthKeyEnv, "CRABBOX_TAILSCALE_AUTH_KEY"))
+	return exit(2, "provider=islo: --tailscale requires a reusable, ephemeral node auth key in $%s", blank(b.cfg.Tailscale.AuthKeyEnv, "CRABBOX_TAILSCALE_AUTH_KEY"))
 }
 
 // isloTailscaleHostname resolves the tailnet hostname for a sandbox from the
