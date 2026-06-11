@@ -1364,57 +1364,95 @@ func TestReleaseFromClaimRejectsCloudIDLessClaimWithoutRecoveryMarker(t *testing
 }
 
 func TestReleaseFromClaimRejectsMisfiledClaim(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.TargetOS = core.TargetLinux
-	requestedLeaseID := "cbx_abcdef123441"
-	claimLeaseID := "cbx_abcdef123440"
-	slug := "cbx-abcdef123441"
-	labels := core.DirectLeaseLabels(cfg, claimLeaseID, slug, providerName, "", false, time.Now())
-	labels[digitalOceanAccountLabel] = "team:test-account"
-	labels[digitalOceanRecoveryKeyIDLabel] = "703"
-	labels[digitalOceanKeyOwnedLabel] = "true"
-	server := core.Server{
-		Provider: providerName,
-		CloudID:  "103",
-		ID:       103,
-		Name:     core.LeaseProviderName(claimLeaseID, slug),
-		Labels:   labels,
+	tests := []struct {
+		name        string
+		claimID     string
+		fileID      string
+		slug        string
+		cloudID     string
+		resolveWith string
+	}{
+		{
+			name:        "exact lease id",
+			claimID:     "cbx_abcdef123440",
+			fileID:      "cbx_abcdef123441",
+			slug:        "misfiled-exact",
+			cloudID:     "103",
+			resolveWith: "cbx_abcdef123441",
+		},
+		{
+			name:        "slug",
+			claimID:     "cbx_abcdef123442",
+			fileID:      "cbx_abcdef123443",
+			slug:        "misfiled-slug",
+			cloudID:     "104",
+			resolveWith: "misfiled-slug",
+		},
+		{
+			name:        "droplet id",
+			claimID:     "cbx_abcdef123444",
+			fileID:      "cbx_abcdef123445",
+			slug:        "misfiled-cloud-id",
+			cloudID:     "105",
+			resolveWith: "105",
+		},
 	}
-	api := &fakeDigitalOceanAPI{}
-	backend := newTestBackend(t, api)
-	if err := core.ClaimLeaseTargetForRepoConfig(claimLeaseID, slug, cfg, server, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
-	stateDir, err := core.CrabboxStateDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	claimsDir := filepath.Join(stateDir, "claims")
-	data, err := os.ReadFile(filepath.Join(claimsDir, claimLeaseID+".json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(claimsDir, requestedLeaseID+".json"), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(claimsDir, claimLeaseID+".json")); err != nil {
-		t.Fatal(err)
-	}
-	keyPath := writeStoredTestboxKey(t, claimLeaseID)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.TargetOS = core.TargetLinux
+			labels := core.DirectLeaseLabels(cfg, tt.claimID, tt.slug, providerName, "", false, time.Now())
+			labels[digitalOceanAccountLabel] = "team:test-account"
+			labels[digitalOceanRecoveryKeyIDLabel] = "703"
+			labels[digitalOceanKeyOwnedLabel] = "true"
+			cloudID, err := strconv.ParseInt(tt.cloudID, 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := core.Server{
+				Provider: providerName,
+				CloudID:  tt.cloudID,
+				ID:       cloudID,
+				Name:     core.LeaseProviderName(tt.claimID, tt.slug),
+				Labels:   labels,
+			}
+			api := &fakeDigitalOceanAPI{}
+			backend := newTestBackend(t, api)
+			if err := core.ClaimLeaseTargetForRepoConfig(tt.claimID, tt.slug, cfg, server, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+				t.Fatal(err)
+			}
+			stateDir, err := core.CrabboxStateDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			claimsDir := filepath.Join(stateDir, "claims")
+			data, err := os.ReadFile(filepath.Join(claimsDir, tt.claimID+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(claimsDir, tt.fileID+".json"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(claimsDir, tt.claimID+".json")); err != nil {
+				t.Fatal(err)
+			}
+			keyPath := writeStoredTestboxKey(t, tt.claimID)
 
-	_, err = backend.Resolve(context.Background(), core.ResolveRequest{ID: requestedLeaseID, ReleaseOnly: true})
-	if err == nil || !strings.Contains(err.Error(), "does not match a valid digitalocean claim") {
-		t.Fatalf("Resolve err=%v", err)
-	}
-	if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 {
-		t.Fatalf("deleted=%v deletedKeyIDs=%v", api.deleted, api.deletedKeyIDs)
-	}
-	if _, err := os.Stat(filepath.Join(claimsDir, requestedLeaseID+".json")); err != nil {
-		t.Fatalf("misfiled claim removed: %v", err)
-	}
-	if _, err := os.Stat(keyPath); err != nil {
-		t.Fatalf("claim key removed: %v", err)
+			_, err = backend.Resolve(context.Background(), core.ResolveRequest{ID: tt.resolveWith, ReleaseOnly: true})
+			if err == nil || !strings.Contains(err.Error(), "refusing misfiled claim") {
+				t.Fatalf("Resolve err=%v", err)
+			}
+			if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 {
+				t.Fatalf("deleted=%v deletedKeyIDs=%v", api.deleted, api.deletedKeyIDs)
+			}
+			if _, err := os.Stat(filepath.Join(claimsDir, tt.fileID+".json")); err != nil {
+				t.Fatalf("misfiled claim removed: %v", err)
+			}
+			if _, err := os.Stat(keyPath); err != nil {
+				t.Fatalf("claim key removed: %v", err)
+			}
+		})
 	}
 }
 

@@ -832,6 +832,9 @@ func readLeaseClaimWithPresence(leaseID string) (leaseClaim, bool, error) {
 	if err != nil {
 		return leaseClaim{}, exists, err
 	}
+	if exists && claim.LeaseID != "" && claim.LeaseID != leaseID {
+		return leaseClaim{}, true, exit(2, "claim file %s contains lease id %s; refusing misfiled claim", leaseID, claim.LeaseID)
+	}
 	return claim, exists, nil
 }
 
