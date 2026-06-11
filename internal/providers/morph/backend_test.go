@@ -892,7 +892,7 @@ func TestMorphTouchInitializesMissingMetadata(t *testing.T) {
 	}
 }
 
-func TestMorphTouchPreservesCustomWorkRootAndRefreshesTTL(t *testing.T) {
+func TestMorphTouchPreservesCustomWorkRootAndProtectsActiveRun(t *testing.T) {
 	configureMorphTestHome(t)
 	now := time.Unix(1_700_000_000, 0).UTC()
 	cfg := testMorphConfig()
@@ -956,14 +956,29 @@ func TestMorphTouchPreservesCustomWorkRootAndRefreshesTTL(t *testing.T) {
 	if gotMetadata["work_root"] != "/workspace/custom" || gotMetadata["state"] != "running" || gotMetadata["instance_id"] != "inst_touch" {
 		t.Fatalf("unexpected touched metadata: %#v", gotMetadata)
 	}
-	if gotTTL != int((30 * time.Minute).Seconds()) {
-		t.Fatalf("ttl=%d want %d", gotTTL, int((30 * time.Minute).Seconds()))
+	if gotTTL != int((2 * time.Hour).Seconds()) {
+		t.Fatalf("ttl=%d want %d", gotTTL, int((2 * time.Hour).Seconds()))
 	}
 	if gotWakeOnSSH == nil || *gotWakeOnSSH {
 		t.Fatalf("unexpected wakeOnSSH value: %#v", gotWakeOnSSH)
 	}
-	if server.Labels["work_root"] != "/workspace/custom" {
-		t.Fatalf("server labels lost work_root: %#v", server.Labels)
+	if server.Status != "running" || server.Labels["state"] != "running" || server.Labels["work_root"] != "/workspace/custom" {
+		t.Fatalf("unexpected touched server: %#v", server)
+	}
+}
+
+func TestMorphServerUsesProviderStateWhenInstanceIsNotReady(t *testing.T) {
+	cfg := testMorphConfig()
+	for _, status := range []string{"paused", "failed"} {
+		instance := morphInstance{
+			ID:       "inst_state",
+			Status:   status,
+			Metadata: morphMetadata{"state": "running"},
+		}
+		server := morphServer(instance, cfg, "cbx_state", "state-test")
+		if server.Status != status || server.Labels["state"] != status {
+			t.Fatalf("status=%q server=%#v", status, server)
+		}
 	}
 }
 

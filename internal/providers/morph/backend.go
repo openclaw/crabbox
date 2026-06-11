@@ -645,6 +645,11 @@ func morphLeaseMetadata(cfg Config, instance morphInstance, leaseID, slug, state
 	var labels map[string]string
 	if touch {
 		labels = touchDirectLeaseLabels(instance.Metadata.Clone(), cfg, state, now)
+		if strings.EqualFold(strings.TrimSpace(state), "running") {
+			if expiresAt := morphLeaseTTLCap(labels); expiresAt != "" {
+				labels["expires_at"] = expiresAt
+			}
+		}
 	} else {
 		labels = directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
 	}
@@ -717,6 +722,12 @@ func morphServer(instance morphInstance, cfg Config, leaseID, slug string) Serve
 		labels["morph_internal_ip"] = instance.Networking.InternalIP
 	}
 	state := morphLeaseState(instance)
+	if morphInstanceReady(instance) {
+		switch runtimeState := strings.ToLower(strings.TrimSpace(labels["state"])); runtimeState {
+		case "running", "active":
+			state = runtimeState
+		}
+	}
 	if state != "" {
 		labels["state"] = state
 	}
@@ -875,6 +886,18 @@ func morphTTLSecondsFromLabels(labels map[string]string, now time.Time) int {
 		return 1
 	}
 	return int(remaining)
+}
+
+func morphLeaseTTLCap(labels map[string]string) string {
+	createdAt, err := strconv.ParseInt(strings.TrimSpace(labels["created_at"]), 10, 64)
+	if err != nil {
+		return ""
+	}
+	ttlSeconds, err := strconv.ParseInt(strings.TrimSpace(labels["ttl_secs"]), 10, 64)
+	if err != nil || ttlSeconds <= 0 {
+		return ""
+	}
+	return strconv.FormatInt(createdAt+ttlSeconds, 10)
 }
 
 func boolPtr(value bool) *bool {
