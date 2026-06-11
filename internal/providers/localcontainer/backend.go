@@ -145,6 +145,13 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	container, leaseID, slug, err := b.resolveContainer(ctx, req.ID)
 	if err != nil {
+		if req.ReleaseOnly && isExitCode(err, 4) {
+			if lease, ok, releaseErr := b.resolveMissingClaimForRelease(ctx, req.ID); releaseErr != nil {
+				return core.LeaseTarget{}, releaseErr
+			} else if ok {
+				return lease, nil
+			}
+		}
 		return core.LeaseTarget{}, err
 	}
 	cfg := b.configForRun()
@@ -209,6 +216,9 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	}
 	id := strings.TrimSpace(req.Lease.Server.CloudID)
 	if id == "" {
+		if b.releaseMissingClaim(lease) {
+			return nil
+		}
 		container, leaseID, _, err := b.resolveContainer(ctx, req.Lease.LeaseID)
 		if err != nil {
 			return err
@@ -242,6 +252,100 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return core.Exit(2, "remove local-container host work root %s: %v", hostLeaseRoot, cleanupErr)
 	}
 	return nil
+}
+
+func (b *backend) releaseMissingClaim(lease core.LeaseTarget) bool {
+	leaseID := strings.TrimSpace(firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]))
+	if leaseID == "" || strings.TrimSpace(lease.Server.CloudID) != "" {
+		return false
+	}
+	if lease.Server.Labels["missing_container"] != "1" {
+		return false
+	}
+	core.RemoveLeaseClaim(leaseID)
+	core.RemoveStoredTestboxKey(leaseID)
+	return true
+}
+
+func (b *backend) resolveMissingClaimForRelease(ctx context.Context, identifier string) (core.LeaseTarget, bool, error) {
+	claim, ok, err := localContainerClaimByIDOrSlug(identifier)
+	if err != nil || !ok {
+		return core.LeaseTarget{}, false, err
+	}
+	if _, err := b.applyCheckpointScopeLabels(ctx, claim.Labels); err != nil {
+		return core.LeaseTarget{}, false, err
+	}
+	if !b.claimMatchesCurrentScope(ctx, claim) {
+		return core.LeaseTarget{}, false, nil
+	}
+	labels := map[string]string{
+		"lease":             claim.LeaseID,
+		"slug":              claim.Slug,
+		"provider":          providerName,
+		"missing_container": "1",
+	}
+	for key, value := range claim.Labels {
+		if strings.TrimSpace(value) != "" {
+			labels[key] = value
+		}
+	}
+	return core.LeaseTarget{
+		LeaseID: claim.LeaseID,
+		Server: core.Server{
+			Provider: providerName,
+			Name:     core.LeaseProviderName(claim.LeaseID, claim.Slug),
+			Status:   "missing",
+			Labels:   labels,
+		},
+	}, true, nil
+}
+
+func localContainerClaimByIDOrSlug(identifier string) (core.LeaseClaim, bool, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return core.LeaseClaim{}, false, nil
+	}
+	exactClaim, err := core.ReadLeaseClaim(identifier)
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	if exactClaim.LeaseID == identifier && exactClaim.Provider == providerName {
+		return exactClaim, true, nil
+	}
+	normalized := core.NormalizeLeaseSlug(identifier)
+	if normalized == "" {
+		return core.LeaseClaim{}, false, nil
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	var matches []core.LeaseClaim
+	for _, claim := range claims {
+		if claim.Provider == providerName && core.NormalizeLeaseSlug(claim.Slug) == normalized {
+			matches = append(matches, claim)
+		}
+	}
+	if len(matches) > 1 {
+		return core.LeaseClaim{}, false, core.Exit(2, "local-container slug %s is ambiguous across %d lease claims; use a lease id", identifier, len(matches))
+	}
+	if len(matches) == 1 {
+		return matches[0], true, nil
+	}
+	return core.LeaseClaim{}, false, nil
+}
+
+func (b *backend) claimMatchesCurrentScope(ctx context.Context, claim core.LeaseClaim) bool {
+	claimScope := strings.TrimSpace(claim.ProviderScope)
+	if claimScope == "" {
+		return true
+	}
+	return claimScope == strings.TrimSpace(b.claimScope(ctx))
+}
+
+func isExitCode(err error, code int) bool {
+	var exit core.ExitError
+	return core.AsExitError(err, &exit) && exit.Code == code
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {

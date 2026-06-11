@@ -98,7 +98,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	if serverTailscaleMetadata(server).Enabled {
 		target = bootstrapNetworkTarget(cfg, server, target)
 		if err := waitForSSHReady(ctx, &target, a.Stderr, "tailscale metadata", 2*time.Minute); err == nil {
-			a.refreshTailscaleMetadata(ctx, cfg, lease.Coordinator, lease.Coordinator != nil, &server, target, leaseID)
+			a.refreshTailscaleMetadata(ctx, cfg, sshBackend, lease.Coordinator, lease.Coordinator != nil, &server, target, leaseID)
 			_ = updateLeaseClaimEndpoint(leaseID, server, target)
 		} else {
 			fmt.Fprintf(a.Stderr, "warning: tailscale metadata wait failed: %v\n", err)
@@ -911,7 +911,7 @@ retrySync:
 		if err := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute); err != nil {
 			return recordFailure(err)
 		}
-		a.refreshTailscaleMetadata(ctx, cfg, coord, useCoordinator, &server, target, leaseID)
+		a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID)
 		_ = updateLeaseClaimEndpoint(leaseID, server, target)
 		if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
 			return recordFailure(err)
@@ -1145,7 +1145,7 @@ afterSync:
 		}
 		return recordFailure(err)
 	}
-	a.refreshTailscaleMetadata(ctx, cfg, coord, useCoordinator, &server, target, leaseID)
+	a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID)
 	_ = updateLeaseClaimEndpoint(leaseID, server, target)
 	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
 		return recordFailure(err)

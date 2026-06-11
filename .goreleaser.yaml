@@ -20,11 +20,23 @@ builds:
       - linux_arm64
       - windows_amd64
       - windows_arm64
+  - id: crabbox-apple-vz-helper
+    main: ./cmd/crabbox-apple-vz-helper
+    binary: crabbox-apple-vz-helper
+    env:
+      - CGO_ENABLED=1
+      - CGO_CFLAGS=-mmacosx-version-min=13.0
+      - CGO_LDFLAGS=-mmacosx-version-min=13.0
+      - MACOSX_DEPLOYMENT_TARGET=13.0
+    targets:
+      - darwin_arm64
 
 archives:
   - id: crabbox
     ids:
       - crabbox
+      - crabbox-apple-vz-helper
+    allow_different_binary_count: true
     formats:
       - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
@@ -54,5 +66,6 @@ brews:
     license: MIT
     install: |
       bin.install "crabbox"
+      bin.install "crabbox-apple-vz-helper" if OS.mac? && Hardware::CPU.arm?
     test: |
       system bin/"crabbox", "--version"

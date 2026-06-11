@@ -71,6 +71,9 @@ crabbox --version
 No Homebrew? Grab a [GoReleaser archive](https://github.com/openclaw/crabbox/releases)
 for macOS, Linux, or Windows.
 
+Apple Silicon Homebrew bottles and archives also include the native
+`crabbox-apple-vz-helper` used by the local Apple VZ provider.
+
 Laptop prerequisites: `git`, `ssh`, `ssh-keygen`, `rsync`, `curl`.
 
 ## Quick start
@@ -129,6 +132,7 @@ configured); every other provider always runs direct from the CLI.
 | [Local Container](docs/providers/local-container.md) — `local-container` (`docker`, `container`, `local-docker`) | Linux · direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima, Podman). |
 | [Apple Container](docs/providers/apple-container.md) — `apple-container` (`apple`, `applecontainer`) | Linux · direct | Apple's native `container` runtime on Apple silicon macOS. |
 | [Apple Container Machine](docs/providers/apple-machine.md) — `apple-machine` (`applemachine`) | Linux · direct | Persistent Linux development machines from Apple Container 1.0, defaulting to Alpine. |
+| [Apple VZ](docs/providers/apple-vz.md) — `apple-vz` (`applevz`) | Linux ARM64 · direct | Full Ubuntu VMs through Apple `Virtualization.framework`; no cloud account or VM daemon. |
 | [exe.dev](docs/providers/exe-dev.md) — `exe-dev` (`exe`, `exedev`) | Linux · direct | exe.dev VMs exposed as public SSH leases. |
 | [KubeVirt](docs/providers/kubevirt.md) — `kubevirt` (`kubernetes-vm`) | Linux · direct | Generic KubeVirt VMs through `kubectl`, `virtctl`, and control-plane SSH forwarding. |
 | [External](docs/providers/external.md) — `external` (`exec-provider`) | Linux · direct | Configured executable implementing the Crabbox provider protocol. |

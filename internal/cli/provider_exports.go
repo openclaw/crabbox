@@ -110,6 +110,10 @@ func ClaimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Serv
 	return claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
 }
 
+func ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
 func ResolveLeaseClaim(identifier string) (LeaseClaim, bool, error) {
 	return resolveLeaseClaim(identifier)
 }
@@ -118,8 +122,24 @@ func ResolveLeaseClaimForProvider(identifier, provider string) (LeaseClaim, bool
 	return resolveLeaseClaimForProvider(identifier, provider)
 }
 
+func ResolveLeaseClaimForProviderWithExact(identifier, provider string) (LeaseClaim, bool, bool, error) {
+	return resolveLeaseClaimForProviderWithExact(identifier, provider)
+}
+
+func ResolveLeaseClaimForProviderCloudID(cloudID, provider string) (LeaseClaim, bool, error) {
+	return resolveLeaseClaimForProviderCloudID(cloudID, provider)
+}
+
+func LeaseClaimMatchesIdentifier(claim LeaseClaim, identifier string) bool {
+	return leaseClaimMatchesIdentifier(claim, identifier)
+}
+
 func RemoveLeaseClaim(leaseID string) {
 	removeLeaseClaim(leaseID)
+}
+
+func RemoveLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
+	return removeLeaseClaimIfUnchanged(leaseID, expected)
 }
 
 func ValidateAzureSSHCIDRsForAcquire(ctx context.Context, cfg Config) error {
@@ -133,6 +153,14 @@ func UpdateLeaseClaimCacheVolumes(leaseID string, specs []string) error {
 
 func UpdateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
 	return updateLeaseClaimEndpoint(leaseID, server, target)
+}
+
+func UpdateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
+	return updateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID, expected, server, target)
+}
+
+func UpdateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {
+	return updateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)
 }
 
 // UpdateLeaseClaimTailscale records a tailnet endpoint (IPv4 and/or FQDN) on an
@@ -160,6 +188,14 @@ func ListLeaseClaimsWithPrefix(prefix string) ([]LeaseClaim, error) {
 
 func ReadLeaseClaim(leaseID string) (LeaseClaim, error) {
 	return readLeaseClaim(leaseID)
+}
+
+func ReadLeaseClaimWithPresence(leaseID string) (LeaseClaim, bool, error) {
+	return readLeaseClaimWithPresence(leaseID)
+}
+
+func OSImageWasExplicit(cfg Config) bool {
+	return cfg.osImageExplicit
 }
 
 func CrabboxStateDir() (string, error) {

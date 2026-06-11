@@ -31,6 +31,7 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		canonical string
 	}{
 		{name: "hetzner", canonical: "hetzner"},
+		{name: "digitalocean", canonical: "digitalocean"},
 		{name: "aws", canonical: "aws"},
 		{name: "azure", canonical: "azure"},
 		{name: "azure-dynamic-sessions", canonical: "azure-dynamic-sessions"},
@@ -585,6 +586,85 @@ func TestLeaseCreateFlagsReapplyProxmoxDefaultsAfterProviderOverride(t *testing.
 	}
 	if cfg.ServerType != "template-9000" {
 		t.Fatalf("server type=%q want template-9000", cfg.ServerType)
+	}
+}
+
+func TestLeaseCreateFlagsReapplyDigitalOceanTargetAfterProviderOverride(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		target     string
+		hyperVRoot string
+		hyperVUser string
+		sourcePort string
+		modeFlag   string
+		wantErr    string
+		wantTarget string
+		wantMode   string
+		wantRoot   string
+		wantUser   string
+		wantPort   string
+	}{
+		{name: "implicit target", wantTarget: targetLinux, wantMode: windowsModeNormal, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "provider settings", hyperVRoot: `D:\work`, hyperVUser: "Administrator", sourcePort: "2202", wantTarget: targetLinux, wantMode: windowsModeNormal, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "explicit Windows mode", modeFlag: windowsModeWSL2, wantErr: "windows.mode is only valid with target=windows", wantTarget: targetLinux, wantMode: windowsModeWSL2, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "explicit target alias", target: "ubuntu", wantTarget: targetLinux, wantMode: windowsModeNormal, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "explicit Linux target with provider work root", target: targetLinux, hyperVRoot: `D:\work`, wantTarget: targetLinux, wantMode: windowsModeNormal, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "explicit target", target: targetWindows, modeFlag: windowsModeWSL2, wantErr: "supports target=linux only", wantTarget: targetWindows, wantMode: windowsModeWSL2, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			defaults := baseConfig()
+			defaults.Provider = "hyperv"
+			if tt.hyperVRoot != "" {
+				defaults.HyperV.WorkRoot = tt.hyperVRoot
+			}
+			if tt.hyperVUser != "" {
+				defaults.HyperV.User = tt.hyperVUser
+			}
+			if err := applyProviderConfigDefaults(&defaults); err != nil {
+				t.Fatal(err)
+			}
+			if tt.sourcePort != "" {
+				defaults.SSHPort = tt.sourcePort
+			}
+			if tt.target != "" {
+				defaults.TargetOS = tt.target
+				MarkTargetExplicit(&defaults)
+			}
+
+			fs := newFlagSet("test", io.Discard)
+			values := registerLeaseCreateFlags(fs, defaults)
+			args := []string{"--provider", "digitalocean"}
+			if tt.modeFlag != "" {
+				args = append(args, "--windows-mode", tt.modeFlag)
+			}
+			if err := parseFlags(fs, args); err != nil {
+				t.Fatal(err)
+			}
+			cfg := defaults
+			err := applyLeaseCreateFlags(&cfg, fs, values)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err=%v, want %q", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TargetOS != tt.wantTarget {
+				t.Fatalf("target=%q want %q", cfg.TargetOS, tt.wantTarget)
+			}
+			if cfg.WindowsMode != tt.wantMode {
+				t.Fatalf("windows mode=%q want %q", cfg.WindowsMode, tt.wantMode)
+			}
+			if cfg.WorkRoot != tt.wantRoot {
+				t.Fatalf("work root=%q want %q", cfg.WorkRoot, tt.wantRoot)
+			}
+			if cfg.SSHUser != tt.wantUser {
+				t.Fatalf("SSH user=%q want %q", cfg.SSHUser, tt.wantUser)
+			}
+			if cfg.SSHPort != tt.wantPort {
+				t.Fatalf("SSH port=%q want %q", cfg.SSHPort, tt.wantPort)
+			}
+		})
 	}
 }
 

@@ -160,6 +160,9 @@ metadata updates.
 8. `cleanup --provider docker` removes stopped containers and running
    non-`keep` containers whose local claim or lease labels are stale past the
    idle timeout plus a safety grace period.
+9. If a local claim remains after its container was removed outside Crabbox,
+   `crabbox stop --provider docker <lease-or-slug>` removes the stale claim and
+   stored SSH key.
 
 ## Limits and caveats
 
@@ -216,6 +219,17 @@ The backend relies on standard Docker-compatible behavior:
 
 That keeps it portable across Docker Desktop, OrbStack, Colima, Podman, and
 other runtimes exposing the standard Docker-compatible CLI.
+
+## Optional live smoke
+
+Run the local Docker-backed smoke when a Docker daemon is available:
+
+```sh
+go test -tags localcontainer ./cmd/crabbox
+```
+
+Set `CRABBOX_LOCAL_CONTAINER_E2E_IMAGE` to use a prebuilt image for faster
+startup. The test skips when the Docker CLI or daemon is unavailable.
 
 ## Related
 
