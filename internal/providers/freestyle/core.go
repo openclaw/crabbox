@@ -58,9 +58,7 @@ func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
 }
 
-func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
-}
+var claimLeaseForRepoProviderPond = core.ClaimLeaseForRepoProviderPond
 
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)

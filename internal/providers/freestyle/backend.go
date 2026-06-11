@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"regexp"
@@ -44,6 +45,8 @@ const (
 	freestyleLeasePrefix = "fsb_"
 	freestyleNamePrefix  = "crabbox-"
 )
+
+var freestyleCleanupTimeout = 30 * time.Second
 
 type freestyleFlagValues struct {
 	APIURL   *string
@@ -160,7 +163,7 @@ func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (RunResult, 
 			if !shouldStop {
 				return
 			}
-			if err := client.DeleteVM(context.Background(), name); err != nil {
+			if err := deleteFreestyleVMForCleanup(client, name); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: freestyle stop failed for %s: %v\n", name, err)
 				return
 			}
@@ -297,6 +300,9 @@ func (b *freestyleBackend) Status(ctx context.Context, req StatusRequest) (statu
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
+		if freestyleStatusTerminal(view.State) {
+			return statusView{}, exit(5, "freestyle vm %s entered terminal state %q before becoming ready", id, view.State)
+		}
 		if b.now().After(deadline) {
 			return statusView{}, exit(5, "timed out waiting for vm %s to become ready", id)
 		}
@@ -350,14 +356,29 @@ func (b *freestyleBackend) createSandbox(ctx context.Context, client freestyleAP
 	leaseID := freestyleLeasePrefix + vm.ID
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		_ = client.DeleteVM(context.Background(), vm.ID)
-		return "", "", "", err
+		return "", "", "", b.rollbackCreatedVM(client, vm.ID, err)
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, freestyleProvider, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		_ = client.DeleteVM(context.Background(), vm.ID)
-		return "", "", "", err
+	if err := claimLeaseForRepoProviderPond(leaseID, slug, freestyleProvider, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+		return "", "", "", b.rollbackCreatedVM(client, vm.ID, err)
 	}
 	return leaseID, vm.ID, slug, nil
+}
+
+func (b *freestyleBackend) rollbackCreatedVM(client freestyleAPI, vmID string, cause error) error {
+	if cleanupErr := deleteFreestyleVMForCleanup(client, vmID); cleanupErr != nil {
+		leakErr := fmt.Errorf("cleanup freestyle vm %s after acquire failure: %w; run `crabbox stop --provider freestyle --id %s%s` to retry cleanup", vmID, cleanupErr, freestyleLeasePrefix, vmID)
+		if b.rt.Stderr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: %v\n", leakErr)
+		}
+		return errors.Join(cause, leakErr)
+	}
+	return cause
+}
+
+func deleteFreestyleVMForCleanup(client freestyleAPI, vmID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), freestyleCleanupTimeout)
+	defer cancel()
+	return client.DeleteVM(ctx, vmID)
 }
 
 func (b *freestyleBackend) exec(ctx context.Context, client freestyleAPI, id, workdir string, command []string, shellMode bool, env map[string]string) (int, error) {
@@ -429,7 +450,7 @@ func resolveFreestyleLeaseID(ctx context.Context, client freestyleAPI, id, repoR
 		return "", "", err
 	} else if ok && claim.Provider == freestyleProvider {
 		if repoRoot != "" {
-			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, freestyleProvider, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
+			if err := claimLeaseForRepoProviderPond(claim.LeaseID, claim.Slug, freestyleProvider, claim.Pond, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
 				return "", "", err
 			}
 		}
@@ -465,10 +486,16 @@ func freestyleVMToServer(vm freestyleVM) Server {
 }
 
 func freestyleStatusView(leaseID string, vm freestyleVM) statusView {
-	slug := freestyleClaimSlug(leaseID)
+	labels := map[string]string{
+		"provider": freestyleProvider,
+		"lease":    leaseID,
+		"slug":     newLeaseSlug(leaseID),
+		"state":    vm.State,
+	}
+	applyFreestyleClaimMetadata(labels, leaseID)
 	return statusView{
 		ID:         leaseID,
-		Slug:       slug,
+		Slug:       labels["slug"],
 		Provider:   freestyleProvider,
 		TargetOS:   targetLinux,
 		State:      vm.State,
@@ -476,22 +503,32 @@ func freestyleStatusView(leaseID string, vm freestyleVM) statusView {
 		ServerType: vm.Name,
 		Network:    NetworkPublic,
 		Ready:      freestyleStatusReady(vm.State),
-		Labels: map[string]string{
-			"provider": freestyleProvider,
-			"lease":    leaseID,
-			"slug":     slug,
-			"state":    vm.State,
-		},
+		Labels:     labels,
 	}
 }
 
 func applyFreestyleClaimLabels(leaseID string, vm freestyleVM) map[string]string {
-	return map[string]string{
+	labels := map[string]string{
 		"provider": freestyleProvider,
 		"lease":    leaseID,
-		"slug":     freestyleClaimSlug(leaseID),
+		"slug":     newLeaseSlug(leaseID),
 		"target":   targetLinux,
 		"state":    vm.State,
+	}
+	applyFreestyleClaimMetadata(labels, leaseID)
+	return labels
+}
+
+func applyFreestyleClaimMetadata(labels map[string]string, leaseID string) {
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok || claim.Provider != freestyleProvider {
+		return
+	}
+	if strings.TrimSpace(claim.Slug) != "" {
+		labels["slug"] = normalizeLeaseSlug(claim.Slug)
+	}
+	if strings.TrimSpace(claim.Pond) != "" {
+		labels["pond"] = claim.Pond
 	}
 }
 
@@ -503,8 +540,12 @@ func freestyleClaimSlug(leaseID string) string {
 }
 
 func freestyleStatusReady(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), "running")
+}
+
+func freestyleStatusTerminal(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "ready", "running", "started", "active":
+	case "stopped", "lost":
 		return true
 	default:
 		return false

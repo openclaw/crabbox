@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFreestyleExecCommandPreservesShellString(t *testing.T) {
@@ -116,13 +117,46 @@ func TestFreestyleWarmupRejectsActionsRunner(t *testing.T) {
 }
 
 func TestFreestyleStatusReady(t *testing.T) {
-	for _, status := range []string{"ready", "running", "started", "active"} {
-		if !freestyleStatusReady(status) {
-			t.Fatalf("expected %q ready", status)
+	if !freestyleStatusReady("running") {
+		t.Fatal("running should be ready")
+	}
+	for _, status := range []string{"building", "starting", "suspended", "stopped", "lost"} {
+		if freestyleStatusReady(status) {
+			t.Fatalf("%q should not be ready", status)
 		}
 	}
-	if freestyleStatusReady("stopped") {
-		t.Fatal("stopped should not be ready")
+	for _, status := range []string{"stopped", "lost"} {
+		if !freestyleStatusTerminal(status) {
+			t.Fatalf("%q should be terminal", status)
+		}
+	}
+	for _, status := range []string{"building", "starting", "running", "suspending", "suspended"} {
+		if freestyleStatusTerminal(status) {
+			t.Fatalf("%q should not be terminal", status)
+		}
+	}
+}
+
+func TestFreestyleStatusWaitFailsOnTerminalState(t *testing.T) {
+	client := &fakeFreestyleClient{getVM: freestyleVM{
+		ID:    "vm123",
+		Name:  "crabbox-repo-abc123",
+		State: "stopped",
+	}}
+	oldClient := newFreestyleClient
+	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { newFreestyleClient = oldClient })
+
+	backend := &freestyleBackend{cfg: Config{}, rt: Runtime{Stderr: io.Discard}}
+	_, err := backend.Status(context.Background(), StatusRequest{
+		ID:          "fsb_vm123",
+		Wait:        true,
+		WaitTimeout: time.Minute,
+	})
+	if err == nil || !strings.Contains(err.Error(), `terminal state "stopped"`) {
+		t.Fatalf("Status err=%v, want terminal-state failure", err)
 	}
 }
 
@@ -356,7 +390,7 @@ func TestFreestyleCreateSandboxStoresClaimForList(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeFreestyleClient{createID: "vm789"}
 	backend := &freestyleBackend{
-		cfg: Config{Freestyle: FreestyleConfig{}},
+		cfg: Config{Pond: "Alpha Pond", Freestyle: FreestyleConfig{}},
 		rt:  Runtime{Stderr: io.Discard},
 	}
 	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
@@ -373,13 +407,16 @@ func TestFreestyleCreateSandboxStoresClaimForList(t *testing.T) {
 	if claim.Provider != "freestyle" {
 		t.Fatalf("claim provider=%q", claim.Provider)
 	}
+	if claim.Pond != "alpha-pond" {
+		t.Fatalf("claim pond=%q want alpha-pond", claim.Pond)
+	}
 }
 
 func TestFreestyleListAndStatusUseStoredClaimSlug(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeFreestyleClient{createID: "vm789"}
 	backend := &freestyleBackend{
-		cfg: Config{Freestyle: FreestyleConfig{}},
+		cfg: Config{Pond: "demo", Freestyle: FreestyleConfig{}},
 		rt:  Runtime{Stderr: io.Discard},
 	}
 	leaseID, id, slug, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "blue-lobster")
@@ -391,12 +428,53 @@ func TestFreestyleListAndStatusUseStoredClaimSlug(t *testing.T) {
 	}
 	vm := freestyleVM{ID: "vm789", Name: "crabbox-repo-abc123", State: "running"}
 	server := freestyleVMToServer(vm)
-	if server.Labels["slug"] != "blue-lobster" {
+	if server.Labels["slug"] != "blue-lobster" || server.Labels["pond"] != "demo" {
 		t.Fatalf("list labels=%v", server.Labels)
 	}
 	status := freestyleStatusView(leaseID, vm)
-	if status.Slug != "blue-lobster" || status.Labels["slug"] != "blue-lobster" {
+	if status.Slug != "blue-lobster" || status.Labels["slug"] != "blue-lobster" || status.Labels["pond"] != "demo" {
 		t.Fatalf("status=%#v labels=%v", status, status.Labels)
+	}
+}
+
+func TestFreestyleCreateSandboxReportsBoundedCleanupFailure(t *testing.T) {
+	oldClaim := claimLeaseForRepoProviderPond
+	claimLeaseForRepoProviderPond = func(_, _, _, _, _ string, _ time.Duration, _ bool) error {
+		return errors.New("claim write failed")
+	}
+	t.Cleanup(func() { claimLeaseForRepoProviderPond = oldClaim })
+
+	client := &fakeFreestyleClient{
+		createID:  "vm-leaked",
+		deleteErr: errors.New("delete failed"),
+	}
+	var stderr bytes.Buffer
+	backend := &freestyleBackend{
+		cfg: Config{Freestyle: FreestyleConfig{}},
+		rt:  Runtime{Stderr: &stderr},
+	}
+	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	if err == nil {
+		t.Fatal("expected claim failure")
+	}
+	for _, want := range []string{
+		"claim write failed",
+		"cleanup freestyle vm vm-leaked",
+		"delete failed",
+		"crabbox stop --provider freestyle --id fsb_vm-leaked",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%v, want %q", err, want)
+		}
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != "vm-leaked" {
+		t.Fatalf("deleteIDs=%#v want vm-leaked", client.deleteIDs)
+	}
+	if !client.deleteDeadlineSet {
+		t.Fatal("cleanup delete did not use a bounded context")
+	}
+	if !strings.Contains(stderr.String(), "warning: cleanup freestyle vm vm-leaked") {
+		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
 
@@ -600,6 +678,9 @@ type fakeFreestyleClient struct {
 	writeFileEncoding string
 	writeFileErr      error
 	execCommands      []string
+	deleteIDs         []string
+	deleteErr         error
+	deleteDeadlineSet bool
 }
 
 func (f *fakeFreestyleClient) CreateVM(_ context.Context, req freestyleCreateVMRequest) (freestyleVM, error) {
@@ -625,8 +706,10 @@ func (f *fakeFreestyleClient) ListVMs(_ context.Context) ([]freestyleVM, error) 
 	return nil, nil
 }
 
-func (f *fakeFreestyleClient) DeleteVM(_ context.Context, _ string) error {
-	return nil
+func (f *fakeFreestyleClient) DeleteVM(ctx context.Context, id string) error {
+	f.deleteIDs = append(f.deleteIDs, id)
+	_, f.deleteDeadlineSet = ctx.Deadline()
+	return f.deleteErr
 }
 
 func (f *fakeFreestyleClient) Exec(_ context.Context, _ string, command string, _, _ io.Writer) (int, error) {
