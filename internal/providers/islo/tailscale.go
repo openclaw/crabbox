@@ -4,18 +4,21 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
 
 	gosdk "github.com/islo-labs/go-sdk"
+	islcore "github.com/islo-labs/go-sdk/core"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 // The version and architecture-specific digests move together in code review
 // because every opted-in sandbox executes these downloaded binaries.
 const defaultIsloTailscaleVersion = "1.98.4"
+const isloTailscaleRecoveryPendingExitCode = 75
 
 const (
 	defaultIsloTailscaleAMD64SHA256 = "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b"
@@ -84,6 +87,11 @@ tailscale_ip_if_ready() {
   printf '%s' "${status_json}" | grep -Eq '"BackendState"[[:space:]]*:[[:space:]]*"Running"' || return 1
   "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" ip -4 2>/dev/null | head -n1
 }
+tailscale_backend_state() {
+  "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status --json 2>/dev/null |
+    sed -n 's/.*"BackendState"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+    head -n1
+}
 if ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status >/dev/null 2>&1; then
   # Userspace ingress forwards tailnet TCP to 127.0.0.1:<port>. Keep the
   # unauthenticated outbound proxy on another loopback address.
@@ -95,13 +103,23 @@ if ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status >/dev/null 2>&1; t
   for _ in $(seq 1 30); do [ -S "${TS_SOCKET}" ] && break; sleep 0.5; done
 fi
 ts_ip=""
-for _ in $(seq 1 10); do
+backend_state=""
+for _ in $(seq 1 120); do
+  backend_state="$(tailscale_backend_state || true)"
   ts_ip="$(tailscale_ip_if_ready || true)"
   if [ -n "${ts_ip}" ]; then break; fi
+  case "${backend_state}" in
+    NeedsLogin|NeedsMachineAuth|Stopped|NoState) break ;;
+  esac
   sleep 1
 done
 if [ -z "${ts_ip}" ]; then
-  test -n "${TS_AUTH_FILE}" || { echo "tailscale state unavailable and no auth key provided" >&2; exit 4; }
+  if [ -z "${TS_AUTH_FILE}" ]; then
+    case "${backend_state}" in
+      Starting|"") echo "tailscale recovery is still starting" >&2; exit 75 ;;
+      *) echo "tailscale state unavailable and no auth key provided" >&2; exit 4 ;;
+    esac
+  fi
   set -- --auth-key="file:${TS_AUTH_FILE}" --hostname="${TS_HOST}" --accept-dns=false --shields-up=false --timeout=120s
   if [ -n "${TS_TAGS}" ]; then set -- "$@" --advertise-tags="${TS_TAGS}"; fi
   if [ -n "${TS_LOGIN_SERVER}" ]; then set -- "$@" --login-server="${TS_LOGIN_SERVER}"; fi
@@ -181,6 +199,9 @@ func (b *isloBackend) runTailscaleBringUp(ctx context.Context, client isloAPI, s
 		return exit(1, "islo tailscale bring-up: %v", err)
 	}
 	if code != 0 {
+		if code == isloTailscaleRecoveryPendingExitCode {
+			return fmt.Errorf("%w: saved-state recovery is still starting", core.ErrTailnetPeerValidationUnavailable)
+		}
 		return exit(1, "islo tailscale bring-up exited %d", code)
 	}
 	m := isloTailscaleIPRe.FindStringSubmatch(out.String())
@@ -198,6 +219,25 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 	}
 	if !ok || (claim.TailscaleIPv4 == "" && claim.TailscaleFQDN == "") {
 		return core.TailscaleMetadata{}, nil
+	}
+	sandbox, sandboxErr := client.GetSandbox(ctx, sandboxName)
+	if sandboxErr != nil {
+		if isloSandboxGoneError(sandboxErr) {
+			if err := clearLeaseClaimTailscale(leaseID); err != nil {
+				return core.TailscaleMetadata{}, err
+			}
+			return core.TailscaleMetadata{}, fmt.Errorf("%w: sandbox %s no longer exists", core.ErrTailnetPeerUnavailable, sandboxName)
+		}
+		return core.TailscaleMetadata{}, fmt.Errorf("%w: get sandbox: %v", core.ErrTailnetPeerValidationUnavailable, sandboxErr)
+	}
+	if sandbox == nil || isloStatusTerminal(sandbox.GetStatus()) {
+		if err := clearLeaseClaimTailscale(leaseID); err != nil {
+			return core.TailscaleMetadata{}, err
+		}
+		return core.TailscaleMetadata{}, fmt.Errorf("%w: sandbox %s is %s", core.ErrTailnetPeerUnavailable, sandboxName, blank(sandboxStatus(sandbox), "missing"))
+	}
+	if !isloStatusReady(sandbox.GetStatus()) {
+		return core.TailscaleMetadata{}, fmt.Errorf("%w: sandbox %s is %s", core.ErrTailnetPeerUnavailable, sandboxName, sandbox.GetStatus())
 	}
 	stateDir := isloTailscaleStateDir(leaseID)
 	req := &gosdk.ExecRequest{
@@ -231,10 +271,29 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 		}
 		return core.TailscaleMetadata{Enabled: true, IPv4: updated.TailscaleIPv4, FQDN: updated.TailscaleFQDN, State: "ready"}, nil
 	}
+	if errors.Is(restartErr, core.ErrTailnetPeerValidationUnavailable) {
+		return core.TailscaleMetadata{}, restartErr
+	}
 	if err := clearLeaseClaimTailscale(leaseID); err != nil {
 		return core.TailscaleMetadata{}, err
 	}
 	return core.TailscaleMetadata{}, fmt.Errorf("%w: restart failed: %v", core.ErrTailnetPeerUnavailable, restartErr)
+}
+
+func isloSandboxGoneError(err error) bool {
+	var notFound *gosdk.NotFoundError
+	if errors.As(err, &notFound) {
+		return true
+	}
+	var apiErr *islcore.APIError
+	return errors.As(err, &apiErr) && (apiErr.StatusCode == 404 || apiErr.StatusCode == 410)
+}
+
+func sandboxStatus(sandbox *gosdk.SandboxResponse) string {
+	if sandbox == nil {
+		return ""
+	}
+	return sandbox.GetStatus()
 }
 
 func (b *isloBackend) ValidateTailnetPeer(ctx context.Context, leaseID string) (core.TailscaleMetadata, error) {

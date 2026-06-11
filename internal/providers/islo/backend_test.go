@@ -289,6 +289,25 @@ func TestIsloStatusViewMarksTailscaleValidationUnknown(t *testing.T) {
 	}
 }
 
+func TestIsloStatusViewDoesNotReportStoppedTailscaleReady(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	view := isloStatusView(leaseID, &gosdk.SandboxResponse{Name: "crabbox-node-a", Status: "stopped"})
+	if view.Tailscale == nil || view.Tailscale.State != "unavailable" {
+		t.Fatalf("stopped tailscale metadata=%#v", view.Tailscale)
+	}
+	if view.Labels["tailscale_state"] != "unavailable" {
+		t.Fatalf("stopped tailscale labels=%#v", view.Labels)
+	}
+}
+
 func TestIsloClientUsesBoundedDefaultTransport(t *testing.T) {
 	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "test", BaseURL: "http://127.0.0.1:8787"}}, Runtime{})
 	if err != nil {
@@ -922,6 +941,9 @@ type fakeIsloSyncClient struct {
 	closeUploadReader        bool
 	createRequest            *gosdk.SandboxCreate
 	createName               string
+	getSandbox               *gosdk.SandboxResponse
+	getSandboxErr            error
+	getSandboxGone           bool
 	blockDelete              bool
 	deleteErr                error
 	deleteCalls              int
@@ -936,8 +958,17 @@ func (f *fakeIsloSyncClient) CreateSandbox(_ context.Context, req *gosdk.Sandbox
 	return &gosdk.SandboxResponse{Name: name}, nil
 }
 
-func (f *fakeIsloSyncClient) GetSandbox(context.Context, string) (*gosdk.SandboxResponse, error) {
-	return nil, nil
+func (f *fakeIsloSyncClient) GetSandbox(_ context.Context, name string) (*gosdk.SandboxResponse, error) {
+	if f.getSandboxErr != nil {
+		return nil, f.getSandboxErr
+	}
+	if f.getSandboxGone {
+		return nil, nil
+	}
+	if f.getSandbox != nil {
+		return f.getSandbox, nil
+	}
+	return &gosdk.SandboxResponse{Name: name, Status: "running"}, nil
 }
 
 func (f *fakeIsloSyncClient) ListSandboxes(context.Context) ([]*gosdk.SandboxResponse, error) {

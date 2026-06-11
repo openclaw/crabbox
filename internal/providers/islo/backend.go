@@ -538,6 +538,7 @@ func isloSandboxToServer(sandbox *gosdk.SandboxResponse) Server {
 		"state":    sandbox.GetStatus(),
 	}
 	applyIsloClaimLabels(labels, leaseID)
+	applyIsloTailscaleSandboxState(labels, sandbox.GetStatus())
 	return Server{
 		Provider: isloProvider,
 		CloudID:  sandbox.GetID(),
@@ -563,6 +564,7 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 		"state":    status,
 	}
 	applyIsloClaimLabels(labels, leaseID)
+	applyIsloTailscaleSandboxState(labels, status)
 	var tailscale *core.TailscaleMetadata
 	if labels["tailscale"] == "true" {
 		tailscale = &core.TailscaleMetadata{
@@ -584,6 +586,20 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 		Tailscale:  tailscale,
 		Ready:      isloStatusReady(status),
 		Labels:     labels,
+	}
+}
+
+func applyIsloTailscaleSandboxState(labels map[string]string, sandboxState string) {
+	if labels["tailscale"] != "true" || isloStatusReady(sandboxState) {
+		return
+	}
+	switch {
+	case isloStatusTerminal(sandboxState):
+		labels["tailscale_state"] = "unavailable"
+	case strings.EqualFold(strings.TrimSpace(sandboxState), "paused"):
+		labels["tailscale_state"] = "paused"
+	default:
+		labels["tailscale_state"] = "unknown"
 	}
 }
 

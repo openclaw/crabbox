@@ -95,10 +95,12 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		"--socks5-server=127.0.0.2:1055",
 		"--outbound-http-proxy-listen=127.0.0.2:1055",
 		`--state="${TS_STATE_FILE}"`,
-		`test -n "${TS_AUTH_FILE}"`,
+		`if [ -z "${TS_AUTH_FILE}" ]; then`,
 		`TS_AUTH_FILE="$(mktemp "${TS_STATE_DIR}/auth.XXXXXX")"`,
 		`TS_INSTALL_DIR="$(mktemp -d "${TS_STATE_DIR}/install.XXXXXX")"`,
 		`TS_ARCHIVE="${TS_INSTALL_DIR}/tailscale.tgz"`,
+		"for _ in $(seq 1 120)",
+		"exit 75",
 		`--auth-key="file:${TS_AUTH_FILE}"`,
 		"unset TS_AUTHKEY",
 		`if [ -n "${TS_AUTH_FILE}" ]; then rm -f "${TS_AUTH_FILE}"; fi`,
@@ -211,6 +213,51 @@ func TestEnsureLeaseTailscalePreservesClaimWhenValidationCannotRun(t *testing.T)
 	}
 	if claim.TailscaleIPv4 != "100.64.7.7" {
 		t.Fatalf("validation failure erased healthy claim: %#v", claim)
+	}
+}
+
+func TestEnsureLeaseTailscalePreservesClaimWhileRecoveryStarts(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{execCodes: []int{1, isloTailscaleRecoveryPendingExitCode}}
+	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
+
+	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID); !errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
+		t.Fatalf("expected recovery-pending validation error, got %v", err)
+	}
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok || claim.TailscaleIPv4 != "100.64.7.7" {
+		t.Fatalf("recovery timeout erased claim: ok=%t err=%v claim=%#v", ok, err, claim)
+	}
+}
+
+func TestEnsureLeaseTailscaleClearsClaimForMissingSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{getSandboxGone: true}
+	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
+
+	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID); !errors.Is(err, core.ErrTailnetPeerUnavailable) {
+		t.Fatalf("expected missing sandbox to be unavailable, got %v", err)
+	}
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("resolve claim ok=%t err=%v", ok, err)
+	}
+	if claim.TailscaleIPv4 != "" || claim.Labels["tailscale"] != "" {
+		t.Fatalf("missing sandbox retained stale tailnet metadata: %#v", claim)
 	}
 }
 
