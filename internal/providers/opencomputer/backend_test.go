@@ -1,6 +1,7 @@
 package opencomputer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -234,6 +235,7 @@ type fakeAPI struct {
 	sandboxID     string
 	listState     string
 	getStatusCode int // when non-zero, GET /api/sandboxes/:id returns this code
+	blockDelete   bool
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
@@ -264,6 +266,10 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, map[string]any{"sandboxID": f.sandboxID, "status": f.listState})
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/sandboxes/"):
+		if f.blockDelete {
+			<-r.Context().Done()
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/files"):
 		w.WriteHeader(http.StatusNoContent)
@@ -366,6 +372,36 @@ func TestRunCreatesExecsAndKillsEphemeral(t *testing.T) {
 	}
 	if last.Cwd != "/workspace/crabbox" {
 		t.Fatalf("user exec cwd=%q", last.Cwd)
+	}
+}
+
+func TestRunCleanupCannotBlockForever(t *testing.T) {
+	f := newFakeAPI(t)
+	f.blockDelete = true
+	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}}
+	backend := newAPIBackend(t, f)
+	var stderr bytes.Buffer
+	backend.rt.Stderr = &stderr
+	backend.cleanupTimeoutOverride = 20 * time.Millisecond
+	started := time.Now()
+
+	res, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
+	})
+	if err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit=%d", res.ExitCode)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Run took %s, cleanup should be bounded", elapsed)
+	}
+	if f.calls(http.MethodDelete, "/api/sandboxes/") != 1 {
+		t.Fatalf("want 1 kill, got %d", f.calls(http.MethodDelete, "/api/sandboxes/"))
+	}
+	if !strings.Contains(stderr.String(), "context deadline exceeded") {
+		t.Fatalf("stderr=%q, want cleanup deadline warning", stderr.String())
 	}
 }
 

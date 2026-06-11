@@ -68,7 +68,9 @@ func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClien
 	if err := b.execShell(ctx, api, sandboxID, "tar -xzf "+shellQuote(remoteArchive)+" -C "+shellQuote(workdir)); err != nil {
 		return nil, 0, err
 	}
-	_ = b.execShell(context.Background(), api, sandboxID, "rm -f "+shellQuote(remoteArchive)+" 2>/dev/null || true")
+	cleanupCtx, cancel := b.cleanupContext(ctx)
+	defer cancel()
+	_ = b.execShell(cleanupCtx, api, sandboxID, "rm -f "+shellQuote(remoteArchive)+" 2>/dev/null || true")
 	extractDuration := b.now().Sub(extractStart)
 
 	total := b.now().Sub(start)

@@ -12,15 +12,18 @@ import (
 	"time"
 )
 
+const openComputerCleanupTimeout = 15 * time.Second
+
 func NewOpenComputerBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = providerName
 	return &openComputerBackend{spec: spec, cfg: cfg, rt: rt}
 }
 
 type openComputerBackend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec                   ProviderSpec
+	cfg                    Config
+	rt                     Runtime
+	cleanupTimeoutOverride time.Duration
 }
 
 func (b *openComputerBackend) Spec() ProviderSpec { return b.spec }
@@ -84,7 +87,9 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 			if !shouldStop {
 				return
 			}
-			if killErr := api.killSandbox(context.Background(), sandboxID); killErr != nil {
+			cleanupCtx, cancel := b.cleanupContext(ctx)
+			defer cancel()
+			if killErr := api.killSandbox(cleanupCtx, sandboxID); killErr != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: opencomputer kill failed for %s: %v\n", sandboxID, killErr)
 				return
 			}
@@ -336,11 +341,15 @@ func (b *openComputerBackend) createSandbox(ctx context.Context, api *ocAPIClien
 	leaseID := leasePrefix + sb.ID
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		_ = api.killSandbox(context.Background(), sb.ID)
+		cleanupCtx, cancel := b.cleanupContext(ctx)
+		defer cancel()
+		_ = api.killSandbox(cleanupCtx, sb.ID)
 		return "", "", "", err
 	}
 	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		_ = api.killSandbox(context.Background(), sb.ID)
+		cleanupCtx, cancel := b.cleanupContext(ctx)
+		defer cancel()
+		_ = api.killSandbox(cleanupCtx, sb.ID)
 		return "", "", "", err
 	}
 	return leaseID, sb.ID, slug, nil
@@ -477,4 +486,12 @@ func (b *openComputerBackend) now() time.Time {
 		return b.rt.Clock.Now()
 	}
 	return time.Now()
+}
+
+func (b *openComputerBackend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := openComputerCleanupTimeout
+	if b.cleanupTimeoutOverride > 0 {
+		timeout = b.cleanupTimeoutOverride
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
 }
