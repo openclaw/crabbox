@@ -181,6 +181,34 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 	}
 }
 
+func TestConfigShowPreservesExplicitDigitalOceanSSHBaseValues(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte("provider: digitalocean\nssh:\n  user: crabbox\n  port: \"2222\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		SSHUser string `json:"sshUser"`
+		SSHPort string `json:"sshPort"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.SSHUser != "crabbox" || got.SSHPort != "2222" {
+		t.Fatalf("unexpected explicit digitalocean ssh values: %#v", got)
+	}
+}
+
 func TestConfigShowIncludesMorphWithoutSecret(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

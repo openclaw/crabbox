@@ -24,6 +24,7 @@ type Config struct {
 	osImageExplicit               bool
 	osImageProviderDefaults       string
 	WindowsMode                   string
+	explicitWindowsMode           string
 	Desktop                       bool
 	DesktopEnv                    string
 	Browser                       bool
@@ -93,11 +94,14 @@ type Config struct {
 	Parallels                     ParallelsConfig
 	parallelsTemplateApplied      bool
 	SSHUser                       string
+	explicitSSHUser               string
 	SSHKey                        string
 	SSHPort                       string
+	explicitSSHPort               string
 	SSHFallbackPorts              []string
 	ProviderKey                   string
 	WorkRoot                      string
+	explicitWorkRoot              string
 	TTL                           time.Duration
 	IdleTimeout                   time.Duration
 	Sync                          SyncConfig
@@ -950,10 +954,31 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		} else if cfg.DigitalOcean.Image == "" {
 			cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
 		}
-		if cfg.TargetOS == "" {
+		if !IsTargetExplicit(cfg) {
 			cfg.TargetOS = targetLinux
 		}
-		return nil
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+		if cfg.explicitWorkRoot != "" {
+			cfg.WorkRoot = cfg.explicitWorkRoot
+		} else {
+			cfg.WorkRoot = defaultPOSIXWorkRoot
+		}
+		if cfg.explicitSSHUser != "" {
+			cfg.SSHUser = cfg.explicitSSHUser
+		} else {
+			cfg.SSHUser = baseConfig().SSHUser
+		}
+		if cfg.explicitSSHPort != "" {
+			cfg.SSHPort = cfg.explicitSSHPort
+		} else {
+			cfg.SSHPort = baseConfig().SSHPort
+		}
+		normalizeTargetConfig(cfg)
+		return validateTargetConfig(*cfg)
 	}
 	if cfg.Provider == "hyperv" {
 		if !IsTargetExplicit(cfg) {
@@ -1159,6 +1184,22 @@ func IsTargetExplicit(cfg *Config) bool {
 
 func MarkTargetExplicit(cfg *Config) {
 	cfg.targetExplicit = true
+}
+
+func IsSSHUserExplicit(cfg *Config) bool {
+	return cfg.explicitSSHUser != ""
+}
+
+func MarkSSHUserExplicit(cfg *Config) {
+	cfg.explicitSSHUser = cfg.SSHUser
+}
+
+func IsSSHPortExplicit(cfg *Config) bool {
+	return cfg.explicitSSHPort != ""
+}
+
+func MarkSSHPortExplicit(cfg *Config) {
+	cfg.explicitSSHPort = cfg.SSHPort
 }
 
 func baseConfig() Config {
@@ -2327,6 +2368,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	}
 	if file.Windows != nil && file.Windows.Mode != "" {
 		cfg.WindowsMode = file.Windows.Mode
+		cfg.explicitWindowsMode = file.Windows.Mode
 	}
 	if file.Desktop != nil {
 		cfg.Desktop = *file.Desktop
@@ -2690,12 +2732,14 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if file.SSH != nil {
 		if file.SSH.User != "" {
 			cfg.SSHUser = file.SSH.User
+			MarkSSHUserExplicit(cfg)
 		}
 		if file.SSH.Key != "" {
 			cfg.SSHKey = expandUserPath(file.SSH.Key)
 		}
 		if file.SSH.Port != "" {
 			cfg.SSHPort = file.SSH.Port
+			MarkSSHPortExplicit(cfg)
 		}
 		if file.SSH.FallbackPorts != nil {
 			cfg.SSHFallbackPorts = normalizeList(*file.SSH.FallbackPorts)
@@ -2703,6 +2747,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		cfg.explicitWorkRoot = file.WorkRoot
 	}
 	applyLeaseDuration(&cfg.TTL, file.TTL)
 	applyLeaseDuration(&cfg.IdleTimeout, file.IdleTimeout)
@@ -3837,7 +3882,10 @@ func applyEnv(cfg *Config) error {
 			applyOSImageProviderDefaults(cfg, false)
 		}
 	}
-	cfg.WindowsMode = getenv("CRABBOX_WINDOWS_MODE", cfg.WindowsMode)
+	if windowsMode := os.Getenv("CRABBOX_WINDOWS_MODE"); windowsMode != "" {
+		cfg.WindowsMode = windowsMode
+		cfg.explicitWindowsMode = windowsMode
+	}
 	if value, ok := getenvBool("CRABBOX_DESKTOP"); ok {
 		cfg.Desktop = value
 	}
@@ -4014,14 +4062,23 @@ func applyEnv(cfg *Config) error {
 	if startupTimeout := os.Getenv("CRABBOX_PARALLELS_STARTUP_TIMEOUT"); startupTimeout != "" {
 		applyLeaseDuration(&cfg.Parallels.StartupTimeout, startupTimeout)
 	}
-	cfg.SSHUser = getenv("CRABBOX_SSH_USER", cfg.SSHUser)
+	if sshUser := os.Getenv("CRABBOX_SSH_USER"); sshUser != "" {
+		cfg.SSHUser = sshUser
+		MarkSSHUserExplicit(cfg)
+	}
 	cfg.SSHKey = getenv("CRABBOX_SSH_KEY", cfg.SSHKey)
-	cfg.SSHPort = getenv("CRABBOX_SSH_PORT", cfg.SSHPort)
+	if sshPort := os.Getenv("CRABBOX_SSH_PORT"); sshPort != "" {
+		cfg.SSHPort = sshPort
+		MarkSSHPortExplicit(cfg)
+	}
 	if ports, ok := getenvList("CRABBOX_SSH_FALLBACK_PORTS"); ok {
 		cfg.SSHFallbackPorts = ports
 	}
 	cfg.ProviderKey = getenv("CRABBOX_HETZNER_SSH_KEY", cfg.ProviderKey)
-	cfg.WorkRoot = getenv("CRABBOX_WORK_ROOT", cfg.WorkRoot)
+	if workRoot := os.Getenv("CRABBOX_WORK_ROOT"); workRoot != "" {
+		cfg.WorkRoot = workRoot
+		cfg.explicitWorkRoot = workRoot
+	}
 	if ttl := os.Getenv("CRABBOX_TTL"); ttl != "" {
 		applyLeaseDuration(&cfg.TTL, ttl)
 	}

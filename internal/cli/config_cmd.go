@@ -34,10 +34,10 @@ func (a App) configShow(args []string) error {
 func effectiveConfigForShow(cfg Config) Config {
 	if cfg.Provider == "digitalocean" {
 		base := baseConfig()
-		if cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser {
+		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
 			cfg.SSHUser = "root"
 		}
-		if cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort {
+		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
 			cfg.SSHPort = "22"
 		}
 		cfg.SSHFallbackPorts = nil

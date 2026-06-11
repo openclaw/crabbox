@@ -1204,10 +1204,10 @@ func applyDigitalOceanDefaults(cfg *core.Config) {
 	if !cfg.ServerTypeExplicit || cfg.ServerType == "" {
 		cfg.ServerType = digitalOceanServerTypeForClass(cfg.Class)
 	}
-	if cfg.SSHUser == "" || cfg.SSHUser == "crabbox" {
+	if !core.IsSSHUserExplicit(cfg) && (cfg.SSHUser == "" || cfg.SSHUser == "crabbox") {
 		cfg.SSHUser = "root"
 	}
-	if cfg.SSHPort == "" || cfg.SSHPort == core.BaseConfig().SSHPort {
+	if !core.IsSSHPortExplicit(cfg) && (cfg.SSHPort == "" || cfg.SSHPort == core.BaseConfig().SSHPort) {
 		cfg.SSHPort = "22"
 	}
 	cfg.SSHFallbackPorts = nil

@@ -452,6 +452,10 @@ func TestDigitalOceanDefaultsPreserveExplicitGenericBaseValues(t *testing.T) {
 	cfg := baseConfig()
 	applyFileConfig(&cfg, fileConfig{
 		Provider: "digitalocean",
+		SSH: &fileSSHConfig{
+			User: base.SSHUser,
+			Port: base.SSHPort,
+		},
 		Hetzner: &fileHetznerConfig{
 			Location: base.Location,
 			Image:    base.Image,
@@ -471,8 +475,71 @@ func TestDigitalOceanDefaultsPreserveExplicitGenericBaseValues(t *testing.T) {
 	if cfg.Image != base.Image {
 		t.Fatalf("Image=%q want explicit %q", cfg.Image, base.Image)
 	}
+	if cfg.SSHUser != base.SSHUser || cfg.SSHPort != base.SSHPort {
+		t.Fatalf("SSH=%s@:%s want explicit %s@:%s", cfg.SSHUser, cfg.SSHPort, base.SSHUser, base.SSHPort)
+	}
 	if cfg.DigitalOcean.Region != "sfo3" || cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
 		t.Fatalf("DigitalOcean=%#v", cfg.DigitalOcean)
+	}
+}
+
+func TestDigitalOceanDefaultsPreserveExplicitGenericWorkRoot(t *testing.T) {
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "tart",
+		WorkRoot: "/srv/crabbox",
+		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
+		Windows:  &fileWindowsConfig{Mode: windowsModeNormal},
+	})
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != cfg.Tart.WorkRoot {
+		t.Fatalf("Tart WorkRoot=%q want provider root %q before override", cfg.WorkRoot, cfg.Tart.WorkRoot)
+	}
+	cfg.WindowsMode = windowsModeWSL2
+	cfg.Provider = "digitalocean"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("DigitalOcean WorkRoot=%q want explicit generic root", cfg.WorkRoot)
+	}
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("DigitalOcean SSHUser=%q want explicit generic user", cfg.SSHUser)
+	}
+	if cfg.SSHPort != "2200" {
+		t.Fatalf("DigitalOcean SSHPort=%q want explicit generic port", cfg.SSHPort)
+	}
+	if cfg.WindowsMode != windowsModeNormal {
+		t.Fatalf("DigitalOcean WindowsMode=%q want explicit generic mode", cfg.WindowsMode)
+	}
+}
+
+func TestDigitalOceanDefaultsIgnoreStaticProviderOverlays(t *testing.T) {
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "ssh",
+		WorkRoot: "/srv/crabbox",
+		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
+		Static: &fileStaticConfig{
+			User:     "builder",
+			Port:     "2202",
+			WorkRoot: "/srv/static",
+		},
+	})
+	normalizeTargetConfig(&cfg)
+	if cfg.SSHUser != "alice" || cfg.SSHPort != "2200" || cfg.WorkRoot != "/srv/static" {
+		t.Fatalf("static source settings user=%q port=%q root=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
+	}
+
+	cfg.Provider = "digitalocean"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHUser != "alice" || cfg.SSHPort != "2200" || cfg.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("DigitalOcean settings user=%q port=%q root=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
 	}
 }
 
@@ -1627,8 +1694,11 @@ ssh:
 	if cfg.Sprites.APIURL != "https://api.sprites.example.test" || cfg.Sprites.WorkRoot != "/home/sprite/test" {
 		t.Fatalf("sprites config not loaded: %#v", cfg.Sprites)
 	}
-	if cfg.Static.Host != "win-dev.local" || cfg.Static.User != "peter" || cfg.Static.Port != "22" || cfg.WorkRoot != "/home/peter/crabbox" {
-		t.Fatalf("static config not loaded: static=%#v workRoot=%s", cfg.Static, cfg.WorkRoot)
+	if cfg.Static.Host != "win-dev.local" || cfg.Static.User != "peter" || cfg.Static.Port != "22" || cfg.Static.WorkRoot != "/home/peter/crabbox" {
+		t.Fatalf("static config not loaded: static=%#v", cfg.Static)
+	}
+	if cfg.WorkRoot != defaultPOSIXWorkRoot {
+		t.Fatalf("static work root leaked into active provider: workRoot=%s", cfg.WorkRoot)
 	}
 	if len(cfg.Results.JUnit) != 1 || cfg.Results.JUnit[0] != "junit.xml" || !cfg.Results.Auto {
 		t.Fatalf("results config not loaded: %#v", cfg.Results)

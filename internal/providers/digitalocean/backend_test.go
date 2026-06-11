@@ -2021,6 +2021,19 @@ func TestApplyDigitalOceanDefaultsUseProviderDefaults(t *testing.T) {
 	}
 }
 
+func TestApplyDigitalOceanDefaultsPreservesExplicitBaseSSHValues(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	core.MarkSSHUserExplicit(&cfg)
+	core.MarkSSHPortExplicit(&cfg)
+
+	applyDigitalOceanDefaults(&cfg)
+
+	if cfg.SSHUser != "crabbox" || cfg.SSHPort != core.BaseConfig().SSHPort {
+		t.Fatalf("effective ssh=%s@:%s want explicit base values", cfg.SSHUser, cfg.SSHPort)
+	}
+}
+
 func TestApplyDigitalOceanDefaultsPreservesExplicitServerType(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

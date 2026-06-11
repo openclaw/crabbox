@@ -66,9 +66,10 @@ slug. Validation occurs when Crabbox acquires a new Droplet, after CLI
 overrides; `config show`, provider overrides, and cleanup commands remain
 available when the configured portable selector is unsupported.
 
-DigitalOcean leases use `root` on SSH port `22` with no fallback port. These
-effective values appear in `crabbox config show` without changing shared
-Hetzner configuration when a command overrides the provider.
+DigitalOcean leases default to `root` on SSH port `22` with no fallback port.
+Explicit generic `ssh.user` and `ssh.port` values remain authoritative. The
+effective values appear in `crabbox config show` without retaining defaults
+from another provider when a command overrides the provider.
 
 Environment overrides:
 
