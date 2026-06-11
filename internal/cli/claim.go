@@ -852,11 +852,6 @@ func leaseClaimExists(leaseID string) (bool, error) {
 	return true, nil
 }
 
-func readLeaseClaimPath(path string) (leaseClaim, error) {
-	claim, _, err := readLeaseClaimPathWithPresence(path)
-	return claim, err
-}
-
 func readLeaseClaimPathWithPresence(path string) (leaseClaim, bool, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {

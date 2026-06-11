@@ -155,10 +155,6 @@ func UpdateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 	return updateLeaseClaimEndpoint(leaseID, server, target)
 }
 
-func UpdateLeaseClaimEndpointIfUnchanged(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
-	return updateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
-}
-
 func UpdateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
 	return updateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID, expected, server, target)
 }
