@@ -222,6 +222,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if !appleVZRunning(inst.Status) && !req.StatusOnly {
 		return core.LeaseTarget{}, exit(5, "apple-vz instance %s is %s; start a new lease with `crabbox run` or clean it up with `crabbox cleanup --provider apple-vz`", inst.Name, core.Blank(inst.Status, "stopped"))
 	}
+	if req.StatusOnly && (inst.SSHHost == "" || inst.SSHPort <= 0) {
+		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: leaseID}, nil
+	}
 	lease, err := b.prepareLease(ctx, cfg, inst, claim, false)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -696,7 +699,7 @@ func (b *backend) serverFromInstance(inst applevzhelper.Instance, claim core.Lea
 		Status:   status,
 		Labels:   labels,
 	}
-	server.PublicNet.IPv4.IP = firstNonBlank(inst.SSHHost, "127.0.0.1")
+	server.PublicNet.IPv4.IP = inst.SSHHost
 	server.ServerType.Name = applevzhelper.RedactImageRef(firstNonBlank(labels["server_type"], imageIdentity))
 	return server
 }

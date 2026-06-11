@@ -619,6 +619,79 @@ func TestAcquireResolveListAndRelease(t *testing.T) {
 	}
 }
 
+func TestResolveStatusOnlyAllowsStartingInstanceWithoutSSHEndpoint(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(t, runner)
+	root, _ := b.stateRoot()
+	inst := applevzhelper.Instance{
+		Name:      "crabbox-cbx123-starting",
+		LeaseID:   "cbx_starting123",
+		Slug:      "starting",
+		Status:    applevzhelper.StatusStarting,
+		Image:     b.configForRun().AppleVZ.Image,
+		SSHUser:   b.configForRun().AppleVZ.User,
+		WorkRoot:  b.configForRun().AppleVZ.WorkRoot,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	runner.responses[commandKey("helper", []string{"list", "--state-root", root})] = core.LocalCommandResult{
+		Stdout: mustJSON(t, applevzhelper.ListResponse{Instances: []applevzhelper.Instance{inst}}),
+	}
+
+	for _, readyProbe := range []bool{false, true} {
+		lease, err := b.Resolve(context.Background(), core.ResolveRequest{
+			ID:         inst.LeaseID,
+			StatusOnly: true,
+			ReadyProbe: readyProbe,
+		})
+		if err != nil {
+			t.Fatalf("Resolve readyProbe=%v: %v", readyProbe, err)
+		}
+		if lease.Server.Status != applevzhelper.StatusStarting || lease.Server.PublicNet.IPv4.IP != "" {
+			t.Fatalf("Resolve readyProbe=%v server=%+v", readyProbe, lease.Server)
+		}
+		if lease.SSH.Host != "" || lease.SSH.Port != "" {
+			t.Fatalf("Resolve readyProbe=%v exposed premature SSH target=%+v", readyProbe, lease.SSH)
+		}
+	}
+}
+
+func TestResolveStatusReadyProbeIncludesPublishedSSHEndpoint(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(t, runner)
+	root, _ := b.stateRoot()
+	inst := applevzhelper.Instance{
+		Name:      "crabbox-cbx123-running",
+		LeaseID:   "cbx_running123",
+		Slug:      "running",
+		Status:    applevzhelper.StatusRunning,
+		Image:     b.configForRun().AppleVZ.Image,
+		SSHUser:   b.configForRun().AppleVZ.User,
+		WorkRoot:  b.configForRun().AppleVZ.WorkRoot,
+		SSHHost:   "127.0.0.1",
+		SSHPort:   43022,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	runner.responses[commandKey("helper", []string{"list", "--state-root", root})] = core.LocalCommandResult{
+		Stdout: mustJSON(t, applevzhelper.ListResponse{Instances: []applevzhelper.Instance{inst}}),
+	}
+
+	for _, readyProbe := range []bool{false, true} {
+		lease, err := b.Resolve(context.Background(), core.ResolveRequest{
+			ID:         inst.LeaseID,
+			StatusOnly: true,
+			ReadyProbe: readyProbe,
+		})
+		if err != nil {
+			t.Fatalf("Resolve readyProbe=%v: %v", readyProbe, err)
+		}
+		if lease.SSH.Host != inst.SSHHost || lease.SSH.Port != "43022" {
+			t.Fatalf("Resolve readyProbe=%v SSH target=%+v", readyProbe, lease.SSH)
+		}
+	}
+}
+
 func TestAcquireKeepRollsBackFailedProvisioning(t *testing.T) {
 	runner := &recordingRunner{}
 	b := testBackend(t, runner)

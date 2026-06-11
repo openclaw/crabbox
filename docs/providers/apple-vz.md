@@ -106,7 +106,9 @@ crabbox stop --provider apple-vz vz-dev
 
 Use `crabbox list --provider apple-vz --json` to inspect all local Apple VZ
 leases. `crabbox cleanup --provider apple-vz` removes stopped or otherwise
-cleanup-eligible instances and stale claims.
+cleanup-eligible instances and stale claims. Cold image download or conversion
+appears as `starting`; SSH host and port fields remain empty until the VM helper
+publishes a real endpoint.
 
 ## Configuration
 

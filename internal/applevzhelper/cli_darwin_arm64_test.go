@@ -215,13 +215,27 @@ func TestListMetadataHidesFreshMetadataLessDirectory(t *testing.T) {
 	}
 }
 
-func TestListMetadataHidesActivePreparationRegardlessOfAge(t *testing.T) {
+func TestListMetadataReportsActivePreparationRegardlessOfAge(t *testing.T) {
 	root := t.TempDir()
 	name := "active-long-preparation"
 	if err := os.MkdirAll(InstanceDir(root, name), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := writePreparationMarker(root, name); err != nil {
+	expected := Instance{
+		Name:      name,
+		LeaseID:   "cbx_preparing123",
+		Slug:      "preparing",
+		Status:    StatusStarting,
+		Image:     "local:test.img",
+		SSHUser:   "alice",
+		WorkRoot:  "/workspace",
+		CPUs:      2,
+		MemoryMiB: 2048,
+		DiskGiB:   16,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := writePreparationMarker(root, name, expected); err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().Add(-metadataLessStaleAfter - time.Hour)
@@ -233,8 +247,15 @@ func TestListMetadataHidesActivePreparationRegardlessOfAge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(instances) != 0 {
-		t.Fatalf("active preparation synthesized instances=%+v", instances)
+	if len(instances) != 1 {
+		t.Fatalf("active preparation instances=%+v", instances)
+	}
+	got := instances[0]
+	if got.Name != expected.Name || got.LeaseID != expected.LeaseID || got.Slug != expected.Slug || got.Status != StatusStarting {
+		t.Fatalf("active preparation instance=%+v", got)
+	}
+	if got.PID != 0 || got.PIDStartedAt != "" || got.SSHHost != "" || got.SSHPort != 0 {
+		t.Fatalf("active preparation exposed premature runtime endpoint=%+v", got)
 	}
 }
 
@@ -470,7 +491,7 @@ func TestRunDeleteRejectsActivePreparation(t *testing.T) {
 	if err := writeMetadata(MetadataPath(stateRoot, name), inst); err != nil {
 		t.Fatal(err)
 	}
-	if err := writePreparationMarker(stateRoot, name); err != nil {
+	if err := writePreparationMarker(stateRoot, name, inst); err != nil {
 		t.Fatal(err)
 	}
 
@@ -572,6 +593,121 @@ func TestReadProcessStartTimeIsTimezoneInvariant(t *testing.T) {
 	}
 	if first != second {
 		t.Fatalf("process start time changed with TZ: %q != %q", first, second)
+	}
+	if !strings.HasPrefix(first, processIdentityPrefix) {
+		t.Fatalf("process start identity=%q, want prefix %q", first, processIdentityPrefix)
+	}
+	parts := strings.Split(strings.TrimPrefix(first, processIdentityPrefix), ".")
+	if len(parts) != 2 || len(parts[1]) != 6 {
+		t.Fatalf("process start identity=%q, want seconds.microseconds", first)
+	}
+}
+
+func TestLegacyProcessIdentityMigratesAfterVerifiedMatch(t *testing.T) {
+	startedAt := time.Date(2026, time.June, 11, 16, 53, 13, 123456000, time.UTC)
+	kernelIdentity := processIdentityPrefix + strconv.FormatInt(startedAt.Unix(), 10) + ".123456"
+	inst := Instance{
+		Name:         "legacy-identity",
+		PID:          os.Getpid(),
+		PIDStartedAt: startedAt.Format("Mon Jan _2 15:04:05 2006"),
+		Status:       StatusRunning,
+	}
+	originalProcessStartTime := processStartTime
+	originalProcessArguments := processArguments
+	t.Cleanup(func() {
+		processStartTime = originalProcessStartTime
+		processArguments = originalProcessArguments
+	})
+	processStartTime = func(pid int) (string, error) {
+		if pid != inst.PID {
+			t.Fatalf("processStartTime pid=%d want %d", pid, inst.PID)
+		}
+		return kernelIdentity, nil
+	}
+	processArguments = func(pid int) ([]string, error) {
+		if pid != inst.PID {
+			t.Fatalf("processArguments pid=%d want %d", pid, inst.PID)
+		}
+		return []string{
+			"/tmp/crabbox-apple-vz-helper-0123456789abcdef",
+			"serve",
+			"--state-root", "/tmp/apple-vz",
+			"--name", inst.Name,
+		}, nil
+	}
+
+	if matches, err := processIdentityMatches(inst); err != nil || !matches {
+		t.Fatalf("legacy identity matches=%v err=%v", matches, err)
+	}
+	got := normalizeInstance(inst)
+	if got.Status != StatusRunning || got.PID != inst.PID || got.PIDStartedAt != inst.PIDStartedAt {
+		t.Fatalf("verified legacy identity should remain running: %+v", got)
+	}
+	migrated := migrateLegacyProcessIdentity(inst)
+	if migrated.PIDStartedAt != kernelIdentity {
+		t.Fatalf("migrated identity=%q want %q", migrated.PIDStartedAt, kernelIdentity)
+	}
+}
+
+func TestLegacyProcessIdentityRejectsUnexpectedProcessArguments(t *testing.T) {
+	startedAt := time.Date(2026, time.June, 11, 16, 53, 13, 123456000, time.UTC)
+	inst := Instance{
+		Name:         "legacy-identity",
+		PID:          os.Getpid(),
+		PIDStartedAt: startedAt.Format("Mon Jan _2 15:04:05 2006"),
+		Status:       StatusRunning,
+	}
+	originalProcessStartTime := processStartTime
+	originalProcessArguments := processArguments
+	t.Cleanup(func() {
+		processStartTime = originalProcessStartTime
+		processArguments = originalProcessArguments
+	})
+	processStartTime = func(int) (string, error) {
+		return processIdentityPrefix + strconv.FormatInt(startedAt.Unix(), 10) + ".123456", nil
+	}
+	processArguments = func(int) ([]string, error) {
+		return []string{"/usr/bin/sleep", "60"}, nil
+	}
+
+	if matches, err := processIdentityMatches(inst); err != nil || matches {
+		t.Fatalf("unexpected process matches=%v err=%v", matches, err)
+	}
+	got := normalizeInstance(inst)
+	if got.Status != StatusStopped || got.PID != 0 || got.PIDStartedAt != "" {
+		t.Fatalf("unexpected process should be treated as stale: %+v", got)
+	}
+}
+
+func TestParseProcessArgumentsStopsBeforeEnvironment(t *testing.T) {
+	raw := []byte{3, 0, 0, 0}
+	raw = append(raw, []byte("/tmp/helper\x00\x00/tmp/helper\x00serve\x00--name\x00SECRET=value\x00")...)
+	args, err := parseProcessArguments(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/tmp/helper", "serve", "--name"}
+	if !slices.Equal(args, want) {
+		t.Fatalf("args=%q want %q", args, want)
+	}
+}
+
+func TestLegacyProcessStartSecondsSupportsLocalAndUTC(t *testing.T) {
+	local := time.FixedZone("test-local", 2*60*60)
+	value := "Thu Jun 11 16:53:13 2026"
+
+	seconds, err := legacyProcessStartSecondsIn(value, local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []int64{
+		time.Date(2026, time.June, 11, 16, 53, 13, 0, local).Unix(),
+		time.Date(2026, time.June, 11, 16, 53, 13, 0, time.UTC).Unix(),
+	}
+	for _, expected := range want {
+		if !slices.Contains(seconds, expected) {
+			t.Fatalf("seconds=%v missing %d", seconds, expected)
+		}
 	}
 }
 

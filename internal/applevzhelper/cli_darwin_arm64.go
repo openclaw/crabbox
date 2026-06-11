@@ -3,7 +3,9 @@
 package applevzhelper
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +23,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -28,6 +32,7 @@ var (
 	prepareInstanceAssetsFunc  = prepareInstanceAssets
 	helperExecutable           = os.Executable
 	processStartTime           = readProcessStartTime
+	processArguments           = readProcessArguments
 	processAlive               = pidAlive
 	signalProcess              = sendProcessSignal
 	writeMetadataFunc          = writeMetadata
@@ -42,12 +47,14 @@ var (
 const (
 	inheritedStartupFD       = 3
 	startupAuthorizationByte = 0xa5
+	processIdentityPrefix    = "darwin-kinfo:"
 )
 
 type preparationMarker struct {
 	PID          int       `json:"pid"`
 	PIDStartedAt string    `json:"pidStartedAt"`
 	StartedAt    time.Time `json:"startedAt"`
+	Instance     Instance  `json:"instance"`
 }
 
 func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -211,10 +218,6 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err := ensurePrivateDir(instanceRoot); err != nil {
 		return fmt.Errorf("create instance root: %w", err)
 	}
-	if err := writePreparationMarker(root, *name); err != nil {
-		_ = os.RemoveAll(instanceRoot)
-		return err
-	}
 	now := time.Now().UTC()
 	inst := Instance{
 		Name:      strings.TrimSpace(*name),
@@ -229,6 +232,10 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		DiskGiB:   *diskGiB,
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+	if err := writePreparationMarker(root, *name, inst); err != nil {
+		_ = os.RemoveAll(instanceRoot)
+		return err
 	}
 	inst, err = prepareInstanceAssetsFunc(ctx, startConfig{
 		StateRoot:    root,
@@ -612,6 +619,7 @@ func runInspect(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	inst = migrateLegacyProcessIdentity(inst)
 	return json.NewEncoder(stdout).Encode(InspectResponse{Instance: normalizeInstance(inst)})
 }
 
@@ -653,6 +661,7 @@ func runDelete(args []string, stdout, stderr io.Writer) error {
 		}
 		return err
 	}
+	inst = migrateLegacyProcessIdentity(inst)
 	inst = normalizeInstance(inst)
 	if err := terminateInstance(root, *name, inst); err != nil {
 		return err
@@ -726,6 +735,9 @@ func processIdentityMatches(inst Instance) (bool, error) {
 	if expected == "" {
 		return false, fmt.Errorf("recorded process start time is missing")
 	}
+	if strings.ContainsAny(expected, " \t\r\n") {
+		return legacyProcessIdentityMatches(inst.PID, expected, "serve", inst.Name)
+	}
 	actual, err := processStartTime(inst.PID)
 	if err != nil {
 		return false, err
@@ -733,21 +745,163 @@ func processIdentityMatches(inst Instance) (bool, error) {
 	return actual == expected, nil
 }
 
+func legacyProcessIdentityMatches(pid int, expected, subcommand, name string) (bool, error) {
+	actual, err := processStartTime(pid)
+	if err != nil {
+		return false, err
+	}
+	actualSeconds, err := kernelProcessIdentitySeconds(actual)
+	if err != nil {
+		return false, err
+	}
+	legacySeconds, err := legacyProcessStartSeconds(expected)
+	if err != nil {
+		return false, err
+	}
+	if !slices.Contains(legacySeconds, actualSeconds) {
+		return false, nil
+	}
+	args, err := processArguments(pid)
+	if err != nil {
+		return false, fmt.Errorf("read legacy process arguments: %w", err)
+	}
+	return helperProcessArgumentsMatch(args, subcommand, name), nil
+}
+
+func legacyProcessStartSeconds(value string) ([]int64, error) {
+	local, err := systemLocalLocation()
+	if err != nil {
+		return nil, err
+	}
+	return legacyProcessStartSecondsIn(value, local)
+}
+
+func systemLocalLocation() (*time.Location, error) {
+	data, err := os.ReadFile("/etc/localtime")
+	if err != nil {
+		return nil, fmt.Errorf("read system timezone: %w", err)
+	}
+	location, err := time.LoadLocationFromTZData("system-local", data)
+	if err != nil {
+		return nil, fmt.Errorf("load system timezone: %w", err)
+	}
+	return location, nil
+}
+
+func legacyProcessStartSecondsIn(value string, local *time.Location) ([]int64, error) {
+	const layout = "Mon Jan _2 15:04:05 2006"
+	value = strings.TrimSpace(value)
+	locations := []*time.Location{local}
+	if local != time.UTC {
+		locations = append(locations, time.UTC)
+	}
+	seconds := make([]int64, 0, len(locations))
+	var parseErr error
+	for _, location := range locations {
+		startedAt, err := time.ParseInLocation(layout, value, location)
+		if err != nil {
+			parseErr = err
+			continue
+		}
+		if !slices.Contains(seconds, startedAt.Unix()) {
+			seconds = append(seconds, startedAt.Unix())
+		}
+	}
+	if len(seconds) == 0 {
+		return nil, fmt.Errorf("parse legacy process start time: %w", parseErr)
+	}
+	return seconds, nil
+}
+
+func kernelProcessIdentitySeconds(identity string) (int64, error) {
+	identity = strings.TrimSpace(identity)
+	if !strings.HasPrefix(identity, processIdentityPrefix) {
+		return 0, fmt.Errorf("invalid kernel process identity %q", identity)
+	}
+	raw := strings.TrimPrefix(identity, processIdentityPrefix)
+	parts := strings.Split(raw, ".")
+	if len(parts) != 2 || len(parts[1]) != 6 {
+		return 0, fmt.Errorf("invalid kernel process identity %q", identity)
+	}
+	seconds, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || seconds <= 0 {
+		return 0, fmt.Errorf("invalid kernel process identity %q", identity)
+	}
+	microseconds, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || microseconds < 0 || microseconds >= 1_000_000 {
+		return 0, fmt.Errorf("invalid kernel process identity %q", identity)
+	}
+	return seconds, nil
+}
+
+func helperProcessArgumentsMatch(args []string, subcommand, name string) bool {
+	if len(args) < 2 ||
+		!strings.HasPrefix(filepath.Base(args[0]), ManagedHelperName) ||
+		args[1] != subcommand {
+		return false
+	}
+	for i := 2; i+1 < len(args); i++ {
+		if args[i] == "--name" {
+			return args[i+1] == name
+		}
+	}
+	return false
+}
+
 func readProcessStartTime(pid int) (string, error) {
 	if pid <= 0 {
 		return "", fmt.Errorf("pid must be positive")
 	}
-	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=")
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "TZ=UTC")
-	out, err := cmd.Output()
+	info, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
 		return "", err
 	}
-	startedAt := strings.TrimSpace(string(out))
-	if startedAt == "" {
+	if info.Proc.P_pid != int32(pid) {
+		return "", fmt.Errorf("process %d identity unavailable", pid)
+	}
+	startedAt := info.Proc.P_starttime
+	if startedAt.Sec <= 0 || startedAt.Usec < 0 {
 		return "", fmt.Errorf("process %d start time unavailable", pid)
 	}
-	return startedAt, nil
+	return fmt.Sprintf("%s%d.%06d", processIdentityPrefix, startedAt.Sec, startedAt.Usec), nil
+}
+
+func readProcessArguments(pid int) ([]string, error) {
+	if pid <= 0 {
+		return nil, fmt.Errorf("pid must be positive")
+	}
+	raw, err := unix.SysctlRaw("kern.procargs2", pid)
+	if err != nil {
+		return nil, err
+	}
+	return parseProcessArguments(raw)
+}
+
+func parseProcessArguments(raw []byte) ([]string, error) {
+	if len(raw) < 4 {
+		return nil, fmt.Errorf("process arguments are truncated")
+	}
+	argc := int(binary.LittleEndian.Uint32(raw[:4]))
+	if argc <= 0 || argc > 4096 {
+		return nil, fmt.Errorf("invalid process argument count %d", argc)
+	}
+	raw = raw[4:]
+	executableEnd := bytes.IndexByte(raw, 0)
+	if executableEnd < 0 {
+		return nil, fmt.Errorf("process executable path is unterminated")
+	}
+	raw = raw[executableEnd+1:]
+	raw = bytes.TrimLeft(raw, "\x00")
+	args := make([]string, 0, argc)
+	for len(args) < argc {
+		end := bytes.IndexByte(raw, 0)
+		if end < 0 {
+			return nil, fmt.Errorf("process argument %d is unterminated", len(args))
+		}
+		args = append(args, string(raw[:end]))
+		raw = raw[end+1:]
+	}
+	return args, nil
 }
 
 func normalizeStateRoot(root string) (string, error) {
@@ -816,7 +970,7 @@ func readMetadata(path string) (Instance, error) {
 	return inst, nil
 }
 
-func writePreparationMarker(stateRoot, name string) error {
+func writePreparationMarker(stateRoot, name string, inst Instance) error {
 	pid := os.Getpid()
 	startedAt, err := readProcessStartTime(pid)
 	if err != nil {
@@ -826,6 +980,7 @@ func writePreparationMarker(stateRoot, name string) error {
 		PID:          pid,
 		PIDStartedAt: startedAt,
 		StartedAt:    time.Now().UTC(),
+		Instance:     inst,
 	}
 	data, err := json.Marshal(marker)
 	if err != nil {
@@ -843,22 +998,34 @@ func writePreparationMarker(stateRoot, name string) error {
 }
 
 func preparationActive(stateRoot, name string) bool {
+	_, active := activePreparationMarker(stateRoot, name)
+	return active
+}
+
+func activePreparationMarker(stateRoot, name string) (preparationMarker, bool) {
 	data, err := os.ReadFile(PreparationPath(stateRoot, name))
 	if err != nil {
-		return false
+		return preparationMarker{}, false
 	}
 	var marker preparationMarker
 	if err := json.Unmarshal(data, &marker); err != nil || marker.PID <= 0 || marker.PIDStartedAt == "" {
-		return false
+		return preparationMarker{}, false
 	}
 	if !pidAlive(marker.PID) {
-		return false
+		return preparationMarker{}, false
 	}
-	startedAt, err := readProcessStartTime(marker.PID)
+	if strings.ContainsAny(marker.PIDStartedAt, " \t\r\n") {
+		matches, err := legacyProcessIdentityMatches(marker.PID, marker.PIDStartedAt, "start", name)
+		if err != nil {
+			return marker, true
+		}
+		return marker, matches
+	}
+	startedAt, err := processStartTime(marker.PID)
 	if err != nil {
-		return true
+		return marker, true
 	}
-	return startedAt == marker.PIDStartedAt
+	return marker, startedAt == marker.PIDStartedAt
 }
 
 func listMetadata(stateRoot string) ([]Instance, error) {
@@ -879,7 +1046,20 @@ func listMetadata(stateRoot string) ([]Instance, error) {
 			if !errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			if preparationActive(stateRoot, entry.Name()) {
+			if marker, active := activePreparationMarker(stateRoot, entry.Name()); active {
+				inst = marker.Instance
+				inst.Name = entry.Name()
+				inst.Status = StatusStarting
+				inst.Error = ""
+				inst.PID = 0
+				inst.PIDStartedAt = ""
+				if inst.CreatedAt.IsZero() {
+					inst.CreatedAt = marker.StartedAt
+				}
+				if inst.UpdatedAt.IsZero() {
+					inst.UpdatedAt = marker.StartedAt
+				}
+				instances = append(instances, inst)
 				continue
 			}
 			info, infoErr := entry.Info()
@@ -895,10 +1075,27 @@ func listMetadata(stateRoot string) ([]Instance, error) {
 			})
 			continue
 		}
+		inst = migrateLegacyProcessIdentity(inst)
 		instances = append(instances, normalizeInstance(inst))
 	}
 	sort.Slice(instances, func(i, j int) bool { return instances[i].Name < instances[j].Name })
 	return instances, nil
+}
+
+func migrateLegacyProcessIdentity(inst Instance) Instance {
+	if inst.PID <= 0 || !strings.ContainsAny(inst.PIDStartedAt, " \t\r\n") {
+		return inst
+	}
+	matches, err := processIdentityMatches(inst)
+	if err != nil || !matches {
+		return inst
+	}
+	actual, err := processStartTime(inst.PID)
+	if err != nil {
+		return inst
+	}
+	inst.PIDStartedAt = actual
+	return inst
 }
 
 func normalizeInstance(inst Instance) Instance {
@@ -947,8 +1144,8 @@ func processIdentityChanged(inst Instance) bool {
 	if inst.PID <= 0 || expected == "" {
 		return false
 	}
-	actual, err := processStartTime(inst.PID)
-	return err == nil && actual != expected
+	matches, err := processIdentityMatches(inst)
+	return err == nil && !matches
 }
 
 func pidAlive(pid int) bool {
