@@ -711,6 +711,45 @@ func TestRawImageCacheKeyIncludesExpectedChecksum(t *testing.T) {
 	}
 }
 
+func TestRawImageCacheKeyChangesWhenSourceIdentityChanges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "image.qcow2")
+	fixedTime := time.Unix(1_700_000_000, 0)
+	if err := os.WriteFile(path, []byte("first-image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, fixedTime, fixedTime); err != nil {
+		t.Fatal(err)
+	}
+	firstInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := rawImageCacheKey(path, path, "", firstInfo)
+
+	replacement := filepath.Join(dir, "replacement.qcow2")
+	if err := os.WriteFile(replacement, []byte("other-image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, fixedTime, fixedTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	secondInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstInfo.Size() != secondInfo.Size() || !firstInfo.ModTime().Equal(secondInfo.ModTime()) {
+		t.Fatal("replacement fixture did not preserve source size and mtime")
+	}
+	second := rawImageCacheKey(path, path, "", secondInfo)
+	if first == second {
+		t.Fatal("raw cache key did not change when source file identity changed")
+	}
+}
+
 func TestStandaloneQCOW2ReaderRejectsAndPinsBackingFileHeader(t *testing.T) {
 	header := make([]byte, 20)
 	copy(header, []byte{'Q', 'F', 'I', 0xfb})
@@ -872,6 +911,141 @@ func TestSeedUserDataQuotesYAMLAndReadinessPath(t *testing.T) {
 	}
 	if strings.Contains(data, `test -d "/work/$(`) {
 		t.Fatalf("readiness script uses expandable double quotes:\n%s", data)
+	}
+}
+
+func TestCreateSeedImageDetachesWhenCanceledDuringAttach(t *testing.T) {
+	original := execSeedImageCommand
+	t.Cleanup(func() { execSeedImageCommand = original })
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls []string
+	execSeedImageCommand = func(commandCtx context.Context, name string, args ...string) ([]byte, error) {
+		if _, ok := commandCtx.Deadline(); !ok {
+			t.Fatalf("%s command has no deadline", name)
+		}
+		calls = append(calls, strings.Join(append([]string{name}, args...), " "))
+		switch {
+		case name == "hdiutil" && len(args) > 0 && args[0] == "attach":
+			cancel()
+			return []byte("/dev/disk99\n"), nil
+		case name == "hdiutil" && len(args) > 0 && args[0] == "detach":
+			return nil, nil
+		default:
+			t.Fatalf("unexpected command after attach cancellation: %s %v", name, args)
+			return nil, nil
+		}
+	}
+
+	err := createSeedImage(ctx, filepath.Join(t.TempDir(), "seed.img"), "host", "alice", "ssh-ed25519 AAAATEST", "/work")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("createSeedImage error=%v want context.Canceled", err)
+	}
+	if len(calls) != 2 || !strings.HasPrefix(calls[0], "hdiutil attach ") || calls[1] != "hdiutil detach /dev/disk99" {
+		t.Fatalf("commands=%v", calls)
+	}
+}
+
+func TestCreateSeedImageDetachesPartialAttachmentOnCommandFailure(t *testing.T) {
+	original := execSeedImageCommand
+	t.Cleanup(func() { execSeedImageCommand = original })
+	var calls []string
+	execSeedImageCommand = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(append([]string{name}, args...), " "))
+		if name == "hdiutil" && len(args) > 0 && args[0] == "attach" {
+			return []byte("hdiutil: operation timed out\n/dev/disk98\n"), context.DeadlineExceeded
+		}
+		if name == "hdiutil" && len(args) > 0 && args[0] == "detach" {
+			return nil, nil
+		}
+		t.Fatalf("unexpected command: %s %v", name, args)
+		return nil, nil
+	}
+
+	err := createSeedImage(context.Background(), filepath.Join(t.TempDir(), "seed.img"), "host", "alice", "ssh-ed25519 AAAATEST", "/work")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("createSeedImage error=%v want context.DeadlineExceeded", err)
+	}
+	if len(calls) != 2 || !strings.HasPrefix(calls[0], "hdiutil attach ") || calls[1] != "hdiutil detach /dev/disk98" {
+		t.Fatalf("commands=%v", calls)
+	}
+}
+
+func TestCreateSeedImageUnmountsAndDetachesWhenCanceledDuringMount(t *testing.T) {
+	original := execSeedImageCommand
+	t.Cleanup(func() { execSeedImageCommand = original })
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls []string
+	execSeedImageCommand = func(commandCtx context.Context, name string, args ...string) ([]byte, error) {
+		if _, ok := commandCtx.Deadline(); !ok {
+			t.Fatalf("%s command has no deadline", name)
+		}
+		calls = append(calls, strings.Join(append([]string{name}, args...), " "))
+		switch {
+		case name == "hdiutil" && len(args) > 0 && args[0] == "attach":
+			return []byte("/dev/disk99\n"), nil
+		case name == "newfs_msdos":
+			return nil, nil
+		case name == "mount":
+			cancel()
+			return nil, nil
+		case name == "umount":
+			return nil, nil
+		case name == "hdiutil" && len(args) > 0 && args[0] == "detach":
+			return nil, nil
+		default:
+			t.Fatalf("unexpected command: %s %v", name, args)
+			return nil, nil
+		}
+	}
+
+	err := createSeedImage(ctx, filepath.Join(t.TempDir(), "seed.img"), "host", "alice", "ssh-ed25519 AAAATEST", "/work")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("createSeedImage error=%v want context.Canceled", err)
+	}
+	if len(calls) != 5 ||
+		!strings.HasPrefix(calls[0], "hdiutil attach ") ||
+		!strings.HasPrefix(calls[1], "newfs_msdos ") ||
+		!strings.HasPrefix(calls[2], "mount ") ||
+		!strings.HasPrefix(calls[3], "umount ") ||
+		calls[4] != "hdiutil detach /dev/disk99" {
+		t.Fatalf("commands=%v", calls)
+	}
+}
+
+func TestCreateSeedImageCleansUpPartialMountOnCommandFailure(t *testing.T) {
+	original := execSeedImageCommand
+	t.Cleanup(func() { execSeedImageCommand = original })
+	var calls []string
+	execSeedImageCommand = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(append([]string{name}, args...), " "))
+		switch {
+		case name == "hdiutil" && len(args) > 0 && args[0] == "attach":
+			return []byte("/dev/disk97\n"), nil
+		case name == "newfs_msdos":
+			return nil, nil
+		case name == "mount":
+			return []byte("mount timed out"), context.DeadlineExceeded
+		case name == "umount":
+			return nil, nil
+		case name == "hdiutil" && len(args) > 0 && args[0] == "detach":
+			return nil, nil
+		default:
+			t.Fatalf("unexpected command: %s %v", name, args)
+			return nil, nil
+		}
+	}
+
+	err := createSeedImage(context.Background(), filepath.Join(t.TempDir(), "seed.img"), "host", "alice", "ssh-ed25519 AAAATEST", "/work")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("createSeedImage error=%v want context.DeadlineExceeded", err)
+	}
+	if len(calls) != 5 ||
+		!strings.HasPrefix(calls[0], "hdiutil attach ") ||
+		!strings.HasPrefix(calls[1], "newfs_msdos ") ||
+		!strings.HasPrefix(calls[2], "mount ") ||
+		!strings.HasPrefix(calls[3], "umount ") ||
+		calls[4] != "hdiutil detach /dev/disk97" {
+		t.Fatalf("commands=%v", calls)
 	}
 }
 

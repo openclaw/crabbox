@@ -134,6 +134,7 @@ type Config struct {
 	AppleVZ                       AppleVZConfig
 	appleVZImageExplicit          bool
 	appleVZImageSHA256Explicit    bool
+	appleVZMemoryExplicit         bool
 	MXC                           MXCConfig
 	Multipass                     MultipassConfig
 	multipassImageExplicit        bool
@@ -1129,6 +1130,14 @@ func MarkAppleVZImageSHA256Explicit(cfg *Config) {
 	cfg.appleVZImageSHA256Explicit = true
 }
 
+func AppleVZMemoryExplicit(cfg Config) bool {
+	return cfg.appleVZMemoryExplicit
+}
+
+func MarkAppleVZMemoryExplicit(cfg *Config) {
+	cfg.appleVZMemoryExplicit = true
+}
+
 func MarkMultipassImageExplicit(cfg *Config) {
 	cfg.multipassImageExplicit = true
 }
@@ -1970,7 +1979,7 @@ type fileAppleVZConfig struct {
 	User        string `yaml:"user,omitempty"`
 	WorkRoot    string `yaml:"workRoot,omitempty"`
 	CPUs        int    `yaml:"cpus,omitempty"`
-	MemoryMiB   int    `yaml:"memoryMiB,omitempty"`
+	MemoryMiB   *int   `yaml:"memoryMiB,omitempty"`
 	DiskGiB     int    `yaml:"diskGiB,omitempty"`
 }
 
@@ -3336,8 +3345,9 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.AppleVZ.CPUs > 0 {
 			cfg.AppleVZ.CPUs = file.AppleVZ.CPUs
 		}
-		if file.AppleVZ.MemoryMiB > 0 {
-			cfg.AppleVZ.MemoryMiB = file.AppleVZ.MemoryMiB
+		if file.AppleVZ.MemoryMiB != nil {
+			cfg.AppleVZ.MemoryMiB = *file.AppleVZ.MemoryMiB
+			cfg.appleVZMemoryExplicit = true
 		}
 		if file.AppleVZ.DiskGiB > 0 {
 			cfg.AppleVZ.DiskGiB = file.AppleVZ.DiskGiB
@@ -4251,7 +4261,14 @@ func applyEnv(cfg *Config) error {
 	cfg.AppleVZ.User = getenv("CRABBOX_APPLE_VZ_USER", cfg.AppleVZ.User)
 	cfg.AppleVZ.WorkRoot = getenv("CRABBOX_APPLE_VZ_WORK_ROOT", cfg.AppleVZ.WorkRoot)
 	cfg.AppleVZ.CPUs = getenvInt("CRABBOX_APPLE_VZ_CPUS", cfg.AppleVZ.CPUs)
-	cfg.AppleVZ.MemoryMiB = getenvInt("CRABBOX_APPLE_VZ_MEMORY", cfg.AppleVZ.MemoryMiB)
+	if rawMemory := os.Getenv("CRABBOX_APPLE_VZ_MEMORY"); rawMemory != "" {
+		memoryMiB, err := strconv.Atoi(strings.TrimSpace(rawMemory))
+		if err != nil {
+			return fmt.Errorf("CRABBOX_APPLE_VZ_MEMORY must be an integer: %w", err)
+		}
+		cfg.AppleVZ.MemoryMiB = memoryMiB
+		cfg.appleVZMemoryExplicit = true
+	}
 	cfg.AppleVZ.DiskGiB = getenvInt("CRABBOX_APPLE_VZ_DISK", cfg.AppleVZ.DiskGiB)
 	cfg.MXC.CLIPath = getenv("CRABBOX_MXC_CLI", cfg.MXC.CLIPath)
 	cfg.MXC.Version = getenv("CRABBOX_MXC_VERSION", cfg.MXC.Version)

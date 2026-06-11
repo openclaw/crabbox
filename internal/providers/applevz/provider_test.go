@@ -133,6 +133,15 @@ func TestApplyDefaults(t *testing.T) {
 	if cfg.SSHUser != "crabbox" || cfg.SSHPort != "22" || cfg.WorkRoot != "/work/crabbox" {
 		t.Fatalf("derived SSH defaults wrong: user=%q port=%q work=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
 	}
+
+	cfg = core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.AppleVZ.MemoryMiB = 0
+	core.MarkAppleVZMemoryExplicit(&cfg)
+	applyDefaults(&cfg)
+	if cfg.AppleVZ.MemoryMiB != 0 {
+		t.Fatalf("explicit zero memory defaulted to %d", cfg.AppleVZ.MemoryMiB)
+	}
 }
 
 func TestValidateConfigRejectsUnsafeGuestIdentity(t *testing.T) {
@@ -162,6 +171,28 @@ func TestValidateConfigRejectsUnsafeGuestIdentity(t *testing.T) {
 	cfg.AppleVZ.WorkRoot = "/work/$(touch)"
 	if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "safe absolute POSIX path") {
 		t.Fatalf("shell-active work root validation error=%v", err)
+	}
+
+	cfg = core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.AppleVZ.MemoryMiB = 512
+	if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "at least 1024 MiB") {
+		t.Fatalf("low memory validation error=%v", err)
+	}
+
+	cfg = core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.AppleVZ.MemoryMiB = 0
+	core.MarkAppleVZMemoryExplicit(&cfg)
+	if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "got 0") {
+		t.Fatalf("explicit zero memory validation error=%v", err)
+	}
+
+	cfg = core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.AppleVZ.MemoryMiB = -1
+	if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "got -1") {
+		t.Fatalf("negative memory validation error=%v", err)
 	}
 }
 
@@ -223,6 +254,9 @@ func TestApplyFlags(t *testing.T) {
 	}
 	if !core.AppleVZImageExplicit(cfg) {
 		t.Fatal("apple-vz image should be explicit after --apple-vz-image")
+	}
+	if !core.AppleVZMemoryExplicit(cfg) {
+		t.Fatal("apple-vz memory should be explicit after --apple-vz-memory")
 	}
 }
 

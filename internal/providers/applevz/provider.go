@@ -46,11 +46,17 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 func (Provider) ServerTypeForClass(string) string { return "" }
 
 func (Provider) ValidateConfig(cfg core.Config) error {
+	if err := validateConfigBeforeDefaults(cfg); err != nil {
+		return err
+	}
 	applyDefaults(&cfg)
 	return validateConfig(cfg)
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
+	if err := validateConfigBeforeDefaults(cfg); err != nil {
+		return nil, err
+	}
 	applyDefaults(&cfg)
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
@@ -76,12 +82,25 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 	return doctor, nil
 }
 
+func validateConfigBeforeDefaults(cfg core.Config) error {
+	if cfg.AppleVZ.MemoryMiB < 0 || (cfg.AppleVZ.MemoryMiB == 0 && core.AppleVZMemoryExplicit(cfg)) {
+		return core.Exit(2, "appleVZ.memoryMiB must be at least 1024 MiB (got %d)", cfg.AppleVZ.MemoryMiB)
+	}
+	if cfg.AppleVZ.MemoryMiB > 0 && cfg.AppleVZ.MemoryMiB < 1024 {
+		return core.Exit(2, "appleVZ.memoryMiB must be at least 1024 MiB (got %d)", cfg.AppleVZ.MemoryMiB)
+	}
+	return nil
+}
+
 func validateConfig(cfg core.Config) error {
 	if err := applevzhelper.ValidatePOSIXAccountName(cfg.AppleVZ.User); err != nil {
 		return core.Exit(2, "appleVZ.user %s", err)
 	}
 	if err := applevzhelper.ValidatePOSIXWorkRoot(cfg.AppleVZ.WorkRoot); err != nil {
 		return core.Exit(2, "appleVZ.workRoot %s", err)
+	}
+	if cfg.AppleVZ.MemoryMiB < 1024 {
+		return core.Exit(2, "appleVZ.memoryMiB must be at least 1024 MiB (got %d)", cfg.AppleVZ.MemoryMiB)
 	}
 	return nil
 }

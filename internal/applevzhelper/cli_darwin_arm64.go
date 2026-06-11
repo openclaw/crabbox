@@ -187,8 +187,11 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err := ValidatePOSIXWorkRoot(*workRoot); err != nil {
 		return err
 	}
-	if *cpus <= 0 || *memoryMiB <= 0 || *diskGiB <= 0 {
-		return fmt.Errorf("cpus, memory-mib, and disk-gib must be positive")
+	if *cpus <= 0 || *diskGiB <= 0 {
+		return fmt.Errorf("cpus and disk-gib must be positive")
+	}
+	if *memoryMiB < 1024 {
+		return fmt.Errorf("memory-mib must be at least 1024")
 	}
 	if *readyTimeout <= 0 {
 		return fmt.Errorf("ready-timeout must be positive")

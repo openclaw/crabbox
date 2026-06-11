@@ -72,6 +72,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return exit(2, "--apple-vz-memory must be at least 1024 MiB (got %d)", *v.MemoryMiB)
 		}
 		cfg.AppleVZ.MemoryMiB = *v.MemoryMiB
+		core.MarkAppleVZMemoryExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "apple-vz-disk") {
 		if *v.DiskGiB <= 0 {

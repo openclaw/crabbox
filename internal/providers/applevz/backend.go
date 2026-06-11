@@ -92,7 +92,7 @@ func applyDefaults(cfg *core.Config) {
 	if cfg.AppleVZ.CPUs <= 0 {
 		cfg.AppleVZ.CPUs = defaultCPUs
 	}
-	if cfg.AppleVZ.MemoryMiB <= 0 {
+	if cfg.AppleVZ.MemoryMiB == 0 && !core.AppleVZMemoryExplicit(*cfg) {
 		cfg.AppleVZ.MemoryMiB = defaultMemoryMiB
 	}
 	if cfg.AppleVZ.DiskGiB <= 0 {

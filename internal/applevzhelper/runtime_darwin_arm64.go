@@ -45,7 +45,13 @@ const (
 	qcow2MaxL1TableBytes     = 32 << 20
 	qcow2MaxRefcountBytes    = 8 << 20
 	qcow2MinSnapshotHdrBytes = 40
+	seedImageCommandTimeout  = 10 * time.Second
+	seedImageCleanupTimeout  = 15 * time.Second
 )
+
+var execSeedImageCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
 
 func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, error) {
 	inst := cfg.Instance
@@ -580,14 +586,27 @@ func validateStandaloneQCOW2Path(sourcePath string, maxDiskBytes int64) error {
 }
 
 func rawImageCacheKey(sourceRef, sourcePath, checksum string, info os.FileInfo) [sha256.Size]byte {
+	identity := ""
+	if checksum == "" {
+		identity = sourceFileIdentity(info)
+	}
 	return sha256.Sum256([]byte(fmt.Sprintf(
-		"%s|%s|%s|%d|%d",
+		"%s|%s|%s|%d|%d|%s",
 		sourceRef,
 		sourcePath,
 		checksum,
 		info.Size(),
 		info.ModTime().UnixNano(),
+		identity,
 	)))
+}
+
+func sourceFileIdentity(info os.FileInfo) string {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d:%d:%d", stat.Dev, stat.Ino, stat.Ctimespec.Sec, stat.Ctimespec.Nsec)
 }
 
 func createCacheTemp(target string) (*os.File, error) {
@@ -1117,7 +1136,7 @@ func allZero(buf []byte) bool {
 	return true
 }
 
-func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workRoot string) error {
+func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workRoot string) (returnErr error) {
 	tmpDir, err := os.MkdirTemp("", "crabbox-apple-vz-seed-*")
 	if err != nil {
 		return fmt.Errorf("create seed temp dir: %w", err)
@@ -1141,43 +1160,48 @@ func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workR
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("create seed image: %w", err)
 	}
-	// Register the attached device before honoring cancellation so cleanup can
-	// always detach it.
-	attachOut, err := exec.Command("hdiutil", "attach", "-imagekey", "diskimage-class=CRawDiskImage", "-nomount", path).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("attach seed image: %w: %s", err, strings.TrimSpace(string(attachOut)))
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	device := firstFieldLine(string(attachOut))
+	// Finish the bounded attach after cancellation so any returned device can
+	// be registered and detached before the helper exits.
+	attachOut, err := runSeedImageCommand(context.WithoutCancel(ctx), "hdiutil", "attach", "-imagekey", "diskimage-class=CRawDiskImage", "-nomount", path)
+	device := attachedDevice(string(attachOut))
+	if err != nil {
+		attachErr := fmt.Errorf("attach seed image: %w: %s", err, strings.TrimSpace(string(attachOut)))
+		if device == "" {
+			return attachErr
+		}
+		return errors.Join(attachErr, cleanupSeedImage("", device, false))
+	}
 	if device == "" {
 		return fmt.Errorf("attach seed image: missing device name")
 	}
-	detached := false
+	mounted := false
+	mountDir := ""
 	defer func() {
-		if !detached {
-			_, _ = exec.Command("hdiutil", "detach", device).CombinedOutput()
-		}
+		returnErr = errors.Join(returnErr, cleanupSeedImage(mountDir, device, mounted))
 	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if out, err := exec.CommandContext(ctx, "newfs_msdos", "-F", "16", "-v", "cidata", device).CombinedOutput(); err != nil {
+	if out, err := runSeedImageCommand(ctx, "newfs_msdos", "-F", "16", "-v", "cidata", device); err != nil {
 		return fmt.Errorf("format seed image: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	mountDir := filepath.Join(tmpDir, "mnt")
+	mountDir = filepath.Join(tmpDir, "mnt")
 	if err := os.MkdirAll(mountDir, 0o755); err != nil {
 		return fmt.Errorf("create seed mount dir: %w", err)
 	}
-	// As with attachment, establish the mounted state before honoring
-	// cancellation so the deferred unmount cannot be skipped.
-	if out, err := exec.Command("mount", "-t", "msdos", device, mountDir).CombinedOutput(); err != nil {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Finish the bounded mount after cancellation so deferred cleanup always
+	// knows whether an unmount is required.
+	out, err := runSeedImageCommand(context.WithoutCancel(ctx), "mount", "-t", "msdos", device, mountDir)
+	mounted = true
+	if err != nil {
 		return fmt.Errorf("mount seed image: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	mounted := true
-	defer func() {
-		if mounted {
-			_, _ = exec.Command("umount", mountDir).CombinedOutput()
-		}
-	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1186,15 +1210,28 @@ func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workR
 			return fmt.Errorf("populate seed image: %w", err)
 		}
 	}
-	if out, err := exec.CommandContext(ctx, "umount", mountDir).CombinedOutput(); err != nil {
-		return fmt.Errorf("unmount seed image: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	mounted = false
-	if out, err := exec.CommandContext(ctx, "hdiutil", "detach", device).CombinedOutput(); err != nil {
-		return fmt.Errorf("detach seed image: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	detached = true
 	return nil
+}
+
+func runSeedImageCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	commandCtx, cancel := context.WithTimeout(ctx, seedImageCommandTimeout)
+	defer cancel()
+	return execSeedImageCommand(commandCtx, name, args...)
+}
+
+func cleanupSeedImage(mountDir, device string, mounted bool) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), seedImageCleanupTimeout)
+	defer cancel()
+	var cleanupErrors []error
+	if mounted {
+		if out, err := runSeedImageCommand(cleanupCtx, "umount", mountDir); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("unmount seed image: %w: %s", err, strings.TrimSpace(string(out))))
+		}
+	}
+	if out, err := runSeedImageCommand(cleanupCtx, "hdiutil", "detach", device); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("detach seed image: %w: %s", err, strings.TrimSpace(string(out))))
+	}
+	return errors.Join(cleanupErrors...)
 }
 
 func seedUserData(user, publicKey, workRoot string) string {
@@ -1715,10 +1752,10 @@ func requireHardwareVirtualization() error {
 	return nil
 }
 
-func firstFieldLine(output string) string {
+func attachedDevice(output string) string {
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) > 0 {
+		if len(fields) > 0 && strings.HasPrefix(fields[0], "/dev/disk") {
 			return fields[0]
 		}
 	}

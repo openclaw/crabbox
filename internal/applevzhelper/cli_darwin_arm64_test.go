@@ -134,6 +134,25 @@ func TestRunStartRejectsUnsafeWorkRoot(t *testing.T) {
 	}
 }
 
+func TestRunStartRejectsMemoryBelowMinimum(t *testing.T) {
+	err := runStart([]string{
+		"--state-root", t.TempDir(),
+		"--name", "low-memory",
+		"--lease-id", "lease-test",
+		"--slug", "my-app",
+		"--image-request-stdin",
+		"--ssh-user", "alice",
+		"--ssh-public-key", "ssh-ed25519 AAAATEST alice@example.com",
+		"--work-root", "/work",
+		"--cpus", "2",
+		"--memory-mib", "512",
+		"--disk-gib", "16",
+	}, strings.NewReader(`{"image":"test.img"}`), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "at least 1024") {
+		t.Fatalf("runStart error=%v, want memory minimum rejection", err)
+	}
+}
+
 func TestListMetadataReturnsAgedMetadataLessDirectoryForCleanup(t *testing.T) {
 	root := t.TempDir()
 	name := "partial-instance"

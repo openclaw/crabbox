@@ -138,6 +138,9 @@ Defaults:
 | Memory | `8192` MiB |
 | Disk | `30` GiB |
 
+Memory must be at least `1024` MiB, whether configured by file, environment,
+or command-line flag.
+
 `--arch arm64` is accepted. Explicit `--arch amd64` is rejected because
 `Virtualization.framework` on Apple Silicon boots ARM64 guests for this
 provider.
