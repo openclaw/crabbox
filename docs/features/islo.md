@@ -128,8 +128,11 @@ crabbox pond peers --pond mesh --json                # both members on transport
 The static build is pinned; override it with `CRABBOX_ISLO_TAILSCALE_VERSION`.
 The Islo path runs Tailscale in userspace mode, so it does not install a kernel
 TUN route. Traffic from sandbox processes must use the local proxies that
-Crabbox starts with the daemon (`ALL_PROXY=socks5://localhost:1055` and
-`HTTP_PROXY=http://localhost:1055`) or another userspace Tailscale surface.
+Crabbox starts with the daemon (`ALL_PROXY=socks5://127.0.0.2:1055` and
+`HTTP_PROXY=http://127.0.0.2:1055`) or another userspace Tailscale surface.
+The proxy uses `127.0.0.2` because userspace Tailscale forwards inbound tailnet
+TCP to `127.0.0.1`; keeping the proxy on a separate loopback address prevents
+tailnet peers from using the unauthenticated outbound proxy.
 Unproxied process traffic still uses the sandbox's normal network namespace.
 Exit-node settings are passed through to `tailscale up`, but only traffic sent
 through the userspace Tailscale path uses them.

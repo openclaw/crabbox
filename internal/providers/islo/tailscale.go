@@ -64,13 +64,15 @@ mkdir -p "${TS_STATE_DIR}"
 chmod 700 "${TS_STATE_DIR}"
 TS_SOCKET="${TS_STATE_DIR}/tailscaled.sock"
 if ! /tmp/ts/tailscale --socket="${TS_SOCKET}" status >/dev/null 2>&1; then
+  # Userspace ingress forwards tailnet TCP to 127.0.0.1:<port>. Keep the
+  # unauthenticated outbound proxy on another loopback address.
   setsid /tmp/ts/tailscaled --tun=userspace-networking --statedir="${TS_STATE_DIR}" \
-    --socket="${TS_SOCKET}" --socks5-server=localhost:1055 \
-    --outbound-http-proxy-listen=localhost:1055 \
+    --socket="${TS_SOCKET}" --socks5-server=127.0.0.2:1055 \
+    --outbound-http-proxy-listen=127.0.0.2:1055 \
     >"${TS_STATE_DIR}/tailscaled.log" 2>&1 </dev/null &
   for _ in $(seq 1 30); do [ -S "${TS_SOCKET}" ] && break; sleep 0.5; done
 fi
-set -- --auth-key="file:${TS_AUTH_FILE}" --hostname="${TS_HOST}" --accept-dns=false --shields-up --timeout=120s
+set -- --auth-key="file:${TS_AUTH_FILE}" --hostname="${TS_HOST}" --accept-dns=false --shields-up=false --timeout=120s
 if [ -n "${TS_TAGS}" ]; then set -- "$@" --advertise-tags="${TS_TAGS}"; fi
 if [ -n "${TS_LOGIN_SERVER}" ]; then set -- "$@" --login-server="${TS_LOGIN_SERVER}"; fi
 if [ -n "${TS_EXIT_NODE}" ]; then

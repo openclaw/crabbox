@@ -63,14 +63,14 @@ func TestIsloTailscaleIPRegex(t *testing.T) {
 func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *testing.T) {
 	for _, want := range []string{
 		"--tun=userspace-networking",
-		"--socks5-server=localhost:1055",
-		"--outbound-http-proxy-listen=localhost:1055",
+		"--socks5-server=127.0.0.2:1055",
+		"--outbound-http-proxy-listen=127.0.0.2:1055",
 		`--statedir="${TS_STATE_DIR}"`,
 		`TS_AUTH_FILE="$(mktemp /tmp/crabbox-ts-auth.XXXXXX)"`,
 		`--auth-key="file:${TS_AUTH_FILE}"`,
 		"unset TS_AUTHKEY",
 		`trap 'rm -f "${TS_AUTH_FILE}"' EXIT`,
-		"--shields-up",
+		"--shields-up=false",
 		`--login-server="${TS_LOGIN_SERVER}"`,
 		`--exit-node="${TS_EXIT_NODE}"`,
 		"--exit-node-allow-lan-access",
@@ -85,5 +85,8 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 	}
 	if strings.Index(isloTailscaleBringUp, "unset TS_AUTHKEY") > strings.Index(isloTailscaleBringUp, "setsid /tmp/ts/tailscaled") {
 		t.Fatal("bring-up script must unset the auth key before starting tailscaled")
+	}
+	if strings.Contains(isloTailscaleBringUp, "--socks5-server=127.0.0.1:") || strings.Contains(isloTailscaleBringUp, "--outbound-http-proxy-listen=127.0.0.1:") {
+		t.Fatal("outbound proxies must not bind the loopback address used for tailnet ingress")
 	}
 }
