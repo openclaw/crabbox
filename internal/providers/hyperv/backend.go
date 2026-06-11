@@ -232,6 +232,9 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	if claim.LeaseID == "" {
 		return LeaseTarget{}, exit(4, "hyperv instance %q has no Crabbox lease claim; use `crabbox stop --provider hyperv %s` to delete it or warm a new lease", inst.Name, inst.Name)
 	}
+	if req.StatusOnly && !req.ReadyProbe {
+		return LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil
+	}
 	ip := b.queryLiveIP(ctx, inst.Name)
 	if ip == "" {
 		ip = b.getIPFromClaim(claim)
@@ -579,10 +582,10 @@ func (b *backend) ensureOpenSSH(ctx context.Context, vmName, user string) error 
 	scriptBlock := `$ErrorActionPreference='Stop'; ` +
 		`$cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*'; ` +
 		`if ($cap.State -ne 'Installed') { Add-WindowsCapability -Online -Name $cap.Name | Out-Null }; ` +
-		`Set-Service -Name sshd -StartupType Automatic; ` +
-		`Start-Service sshd; ` +
-		`if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)) { ` +
-		`New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null }`
+		`Stop-Service -Name sshd -Force -ErrorAction SilentlyContinue; ` +
+		`Set-Service -Name sshd -StartupType Manual; ` +
+		`if (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue) { ` +
+		`Disable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' | Out-Null }`
 	return b.invokeInGuest(ctx, vmName, user, scriptBlock, "OpenSSH install")
 }
 
@@ -657,7 +660,12 @@ func (b *backend) injectSSHKey(ctx context.Context, vmName, user, publicKey stri
 			`$sshdExe = Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'; `+
 			`& $sshdExe -t -f $sshdConfig; `+
 			`if ($LASTEXITCODE -ne 0) { throw 'sshd_config validation failed' }; `+
-			`Restart-Service sshd`,
+			`Set-Service -Name sshd -StartupType Automatic; `+
+			`Start-Service sshd; `+
+			`if (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue) { `+
+			`Enable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' | Out-Null `+
+			`} else { `+
+			`New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null }`,
 		escapePSString(publicKey), escapePSString(publicKey),
 	)
 	return b.invokeInGuest(ctx, vmName, user, scriptBlock, "SSH key injection")
@@ -900,8 +908,9 @@ func (b *backend) serverFromInstance(inst hypervVM, claim core.LeaseClaim, cfg C
 	if labels["slug"] == "" {
 		labels["slug"] = claim.Slug
 	}
-	if labels["state"] == "" {
-		labels["state"] = hypervState(inst.State)
+	liveState := hypervState(inst.State)
+	if inst.State != 2 || labels["state"] == "" {
+		labels["state"] = liveState
 	}
 	if labels["image"] == "" {
 		labels["image"] = cfg.HyperV.Image
@@ -915,7 +924,7 @@ func (b *backend) serverFromInstance(inst hypervVM, claim core.LeaseClaim, cfg C
 	if labels["work_root"] == "" {
 		labels["work_root"] = cfg.HyperV.WorkRoot
 	}
-	status := hypervState(inst.State)
+	status := liveState
 	if inst.State == 2 && labels["state"] == "ready" {
 		status = "ready"
 	}
@@ -1024,7 +1033,7 @@ func hypervState(state int) string {
 	case 2:
 		return "running"
 	case 3:
-		return "off"
+		return "stopped"
 	case 6:
 		return "saved"
 	case 9:

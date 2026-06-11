@@ -325,7 +325,7 @@ func TestIsIPv4(t *testing.T) {
 func TestHypervState(t *testing.T) {
 	tests := map[int]string{
 		2:  "running",
-		3:  "off",
+		3:  "stopped",
 		6:  "saved",
 		9:  "paused",
 		99: "unknown",
@@ -450,6 +450,18 @@ func TestServerFromInstanceNoIPWithoutClaim(t *testing.T) {
 	)
 	if server.PublicNet.IPv4.IP != "" {
 		t.Fatalf("PublicNet.IPv4.IP=%q want empty", server.PublicNet.IPv4.IP)
+	}
+}
+
+func TestServerFromInstanceOverridesStaleReadyState(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	server := b.serverFromInstance(
+		hypervVM{Name: "crabbox-blue-1234", State: 3},
+		core.LeaseClaim{Labels: map[string]string{"state": "ready"}},
+		b.configForRun(),
+	)
+	if server.Status != "stopped" || server.Labels["state"] != "stopped" {
+		t.Fatalf("status=%q state=%q, want stopped", server.Status, server.Labels["state"])
 	}
 }
 
@@ -796,6 +808,41 @@ func TestPersistLeaseFailureLeavesNoStaleClaim(t *testing.T) {
 	}
 }
 
+func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	name := "crabbox-retained-no-ip"
+	queryScript := fmt.Sprintf(`Get-VM -Name '%s' | Select-Object Name, State | ConvertTo-Json -Compress`, name)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		queryScript: {Stdout: `{"Name":"crabbox-retained-no-ip","State":2}`},
+	}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}
+	claim := core.LeaseClaim{
+		LeaseID:       "cbx_retained12345",
+		Slug:          "retained-no-ip",
+		Provider:      providerName,
+		ProviderScope: instanceScope(name),
+		Labels:        map[string]string{"instance": name, "state": "leased"},
+	}
+	lease := LeaseTarget{
+		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
+		LeaseID: claim.LeaseID,
+	}
+	if err := persistLease(claim.LeaseID, claim.Slug, name, cfg, req, lease); err != nil {
+		t.Fatalf("persistLease: %v", err)
+	}
+	t.Cleanup(func() { removeLeaseClaim(claim.LeaseID) })
+
+	resolved, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, StatusOnly: true})
+	if err != nil {
+		t.Fatalf("Resolve status-only: %v", err)
+	}
+	if resolved.LeaseID != claim.LeaseID || resolved.Server.PublicNet.IPv4.IP != "" {
+		t.Fatalf("resolved=%#v, want endpoint-less retained lease", resolved)
+	}
+}
+
 func TestAcquireRejectsISO(t *testing.T) {
 	b := testBackend(&recordingRunner{})
 	oldOS := hypervHostOS
@@ -954,7 +1001,7 @@ func TestInjectSSHKeyLocksAdminKeyACL(t *testing.T) {
 	}
 	// Windows OpenSSH ignores administrators_authorized_keys unless it is owned
 	// only by SYSTEM + Administrators with inheritance disabled.
-	for _, want := range []string{"icacls.exe", "/inheritance:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "$LASTEXITCODE", "PasswordAuthentication no", "PubkeyAuthentication yes", "sshd_config validation failed"} {
+	for _, want := range []string{"icacls.exe", "/inheritance:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "$LASTEXITCODE", "PasswordAuthentication no", "PubkeyAuthentication yes", "sshd_config validation failed", "Start-Service sshd", "OpenSSH-Server-In-TCP"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("admin-key SSH lockdown missing %q\nscript: %s", want, script)
 		}
@@ -991,7 +1038,7 @@ func TestInjectSSHKeyPasswordNotInArgs(t *testing.T) {
 	}
 }
 
-func TestEnsureOpenSSHInstallsAndStartsSshd(t *testing.T) {
+func TestEnsureOpenSSHInstallsWithSshdClosed(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(runner)
 
@@ -1009,9 +1056,14 @@ func TestEnsureOpenSSHInstallsAndStartsSshd(t *testing.T) {
 	if script == "" {
 		t.Fatal("ensureOpenSSH should invoke an OpenSSH install over PowerShell Direct")
 	}
-	for _, want := range []string{"Add-WindowsCapability", "Start-Service sshd", "OpenSSH-Server-In-TCP"} {
+	for _, want := range []string{"Add-WindowsCapability", "Stop-Service", "StartupType Manual", "Disable-NetFirewallRule"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("ensureOpenSSH script missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{"Start-Service sshd", "New-NetFirewallRule"} {
+		if strings.Contains(script, unwanted) {
+			t.Errorf("ensureOpenSSH exposes SSH before key-only configuration: %s", script)
 		}
 	}
 }

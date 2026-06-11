@@ -133,13 +133,14 @@ During `Acquire`, the provider:
 2. With `--hyperv-init-password`, mounts the lease disk offline and writes a
    first-boot `RunOnce` that sets the guest password (password-less templates)
 3. Creates and starts the VM
-4. Installs and starts the Windows OpenSSH server in the guest via PowerShell
-   Direct if not already present (`Add-WindowsCapability`, `Start-Service sshd`,
-   firewall rule), and installs git (MinGit) if absent — both required for SSH
-   readiness and crabbox sync
-5. Injects the per-lease SSH public key via PowerShell Direct
-   (`Invoke-Command -VMName`) using the configured guest password
-6. Waits for SSH readiness on the injected key
+4. Installs the Windows OpenSSH server in the guest via PowerShell Direct if
+   not already present, while keeping sshd stopped and its firewall rule
+   disabled
+5. Injects the per-lease SSH public key, applies SID-based ACLs, disables
+   password authentication, validates `sshd_config`, then starts sshd and opens
+   TCP/22
+6. Installs git (MinGit) if absent — required for Crabbox sync
+7. Waits for SSH readiness on the injected key
 
 Both the OpenSSH-install and key-injection steps authenticate over PowerShell
 Direct using the guest administrator password and retry up to 5 times with
