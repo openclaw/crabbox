@@ -446,6 +446,40 @@ func TestIsloRunMigratesReusedWorkspaceOwnership(t *testing.T) {
 	}
 }
 
+func TestIsloRunPropagatesReusedLeaseTailscaleEnrollmentFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-old-abcdef"
+	if err := claimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{
+		execErrOnCommand:         errors.New("tailscale bootstrap failed"),
+		execErrOnCommandContains: "pkgs.tailscale.com",
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{
+			Islo:      IsloConfig{APIKey: "test", Workdir: "repo"},
+			Tailscale: core.TailscaleConfig{Enabled: true, AuthKey: "tskey-secret"},
+		},
+		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID:      leaseID,
+		Keep:    true,
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "tailscale bootstrap failed") {
+		t.Fatalf("expected explicit Tailscale enrollment failure, got %v", err)
+	}
+	if client.commandContains("cd '/workspace/repo'") {
+		t.Fatalf("workload ran after failed Tailscale enrollment: %#v", client.prepareCommands)
+	}
+}
+
 func TestIsloRunReturnsSessionHandleWhenPrepareFails(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{

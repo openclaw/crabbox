@@ -173,6 +173,38 @@ func TestEnsureLeaseTailscaleRevalidatesAsRoot(t *testing.T) {
 	}
 }
 
+func TestIsloStatusDoesNotEnrollPlainLeaseFromAmbientConfig(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{
+			Islo:      IsloConfig{APIKey: "test"},
+			Tailscale: core.TailscaleConfig{Enabled: true, AuthKey: "tskey-secret"},
+		},
+		rt: Runtime{Stderr: io.Discard},
+	}
+
+	if _, err := backend.Status(context.Background(), StatusRequest{ID: leaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.execRequests) != 0 {
+		t.Fatalf("status enrolled a plain lease: %#v", client.prepareCommands)
+	}
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("resolve claim ok=%t err=%v", ok, err)
+	}
+	if isloClaimTailscaleEnrolled(claim) {
+		t.Fatalf("status persisted unexpected Tailscale enrollment: %#v", claim)
+	}
+}
+
 func TestEnsureLeaseTailscaleClearsDeadClaimWithoutAuthKey(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-node-a"

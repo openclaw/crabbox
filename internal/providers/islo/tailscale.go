@@ -207,6 +207,13 @@ func (b *isloBackend) claimedTailscaleSettings(claim core.LeaseClaim, leaseID, s
 	return restart.configuredTailscaleSettings(leaseID, slug)
 }
 
+func isloClaimTailscaleEnrolled(claim core.LeaseClaim) bool {
+	return claim.TailscaleIPv4 != "" ||
+		claim.TailscaleFQDN != "" ||
+		claim.TailscaleHostname != "" ||
+		claim.Labels["tailscale"] == "true"
+}
+
 // maybeJoinTailscale brings an islo sandbox onto the configured tailnet when
 // the lease was created with --tailscale. It is a no-op otherwise, so plain
 // url-bridge islo ponds are unchanged. On success it records the tailnet IPv4
@@ -276,8 +283,7 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 	if !ok {
 		return core.TailscaleMetadata{}, nil
 	}
-	enrolled := claim.TailscaleIPv4 != "" || claim.TailscaleFQDN != "" || claim.TailscaleHostname != "" || b.cfg.Tailscale.Enabled
-	if !enrolled {
+	if !isloClaimTailscaleEnrolled(claim) {
 		return core.TailscaleMetadata{}, nil
 	}
 	sandbox, sandboxErr := client.GetSandbox(ctx, sandboxName)

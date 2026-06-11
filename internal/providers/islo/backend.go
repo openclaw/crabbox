@@ -174,7 +174,19 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		if err := b.migrateWorkspaceOwnership(ctx, client, name, workspace); err != nil {
 			return RunResult{}, err
 		}
-		if _, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID); err != nil &&
+		if b.cfg.Tailscale.Enabled {
+			claim, ok, claimErr := resolveLeaseClaim(leaseID)
+			if claimErr != nil {
+				return RunResult{}, claimErr
+			}
+			if !ok || !isloClaimTailscaleEnrolled(claim) {
+				if err := b.maybeJoinTailscale(ctx, client, name, slug, leaseID); err != nil {
+					return RunResult{}, err
+				}
+			} else if _, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID); err != nil {
+				return RunResult{}, err
+			}
+		} else if _, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID); err != nil &&
 			!errors.Is(err, core.ErrTailnetPeerUnavailable) &&
 			!errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
 			return RunResult{}, err
