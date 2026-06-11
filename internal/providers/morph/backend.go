@@ -15,7 +15,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-const morphReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"
+const morphReadyCheck = "command -v bash >/dev/null && command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && (command -v python3 >/dev/null || command -v python >/dev/null || command -v perl >/dev/null)"
 const defaultMorphWorkRoot = "/tmp/crabbox"
 const morphAcquireRollbackTimeout = 30 * time.Second
 
@@ -224,7 +224,7 @@ func (b *morphLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 		}
 		return LeaseTarget{}, exit(1, "morph update wake-on for %s failed: %v", instance.ID, err)
 	}
-	instance, err = b.waitForInstanceReady(ctx, client, instance.ID)
+	instance, err = b.waitForInstanceReady(ctx, client, instance.ID, false)
 	if err != nil {
 		if !req.Keep {
 			cleanupCreated()
@@ -261,17 +261,18 @@ func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 	}
 	needsReady := !req.StatusOnly || req.ReadyProbe
 	if needsReady {
-		switch {
-		case morphInstancePaused(instance) && !cfg.Morph.WakeOnSSH:
-			if err := client.ResumeInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
-				return LeaseTarget{}, exit(1, "morph resume instance %s failed: %v", instance.ID, err)
+		for !morphInstanceReady(instance) {
+			if morphInstancePaused(instance) {
+				if cfg.Morph.WakeOnSSH {
+					break
+				}
+				if err := client.ResumeInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
+					return LeaseTarget{}, exit(1, "morph resume instance %s failed: %v", instance.ID, err)
+				}
+				instance, err = b.waitForInstanceReady(ctx, client, instance.ID, false)
+			} else {
+				instance, err = b.waitForInstanceReady(ctx, client, instance.ID, true)
 			}
-			instance, err = b.waitForInstanceReady(ctx, client, instance.ID)
-			if err != nil {
-				return LeaseTarget{}, err
-			}
-		case !morphInstanceReady(instance) && !morphInstancePaused(instance):
-			instance, err = b.waitForInstanceReady(ctx, client, instance.ID)
 			if err != nil {
 				return LeaseTarget{}, err
 			}
@@ -520,7 +521,7 @@ func (b *morphLeaseBackend) listInstances(ctx context.Context, client morphAPI, 
 	return filtered, nil
 }
 
-func (b *morphLeaseBackend) waitForInstanceReady(ctx context.Context, client morphAPI, instanceID string) (morphInstance, error) {
+func (b *morphLeaseBackend) waitForInstanceReady(ctx context.Context, client morphAPI, instanceID string, allowPaused bool) (morphInstance, error) {
 	waitCtx := ctx
 	cancel := func() {}
 	if b.readyTimeout > 0 {
@@ -536,6 +537,9 @@ func (b *morphLeaseBackend) waitForInstanceReady(ctx context.Context, client mor
 			return morphInstance{}, exit(1, "morph get instance %s failed: %v", instanceID, err)
 		}
 		if morphInstanceReady(instance) {
+			return instance, nil
+		}
+		if allowPaused && morphInstancePaused(instance) {
 			return instance, nil
 		}
 		if morphInstanceTerminal(instance) {

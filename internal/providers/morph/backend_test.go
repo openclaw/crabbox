@@ -490,6 +490,78 @@ func TestMorphResolveResumesPausedInstanceWithoutWakeOnSSH(t *testing.T) {
 	}
 }
 
+func TestMorphResolveResumesAfterSavingTransitionsToPaused(t *testing.T) {
+	configureMorphTestHome(t)
+	cfg := testMorphConfig()
+	cfg.Morph.WakeOnSSH = false
+
+	resumeCalls := 0
+	getInstanceCalls := 0
+	originalWait := waitForMorphSSHReady
+	waitForMorphSSHReady = func(_ context.Context, _ *SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
+		return nil
+	}
+	defer func() { waitForMorphSSHReady = originalWait }()
+
+	fake := &fakeMorphAPI{
+		getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
+			getInstanceCalls++
+			status := "ready"
+			switch getInstanceCalls {
+			case 1:
+				status = "saving"
+			case 2:
+				status = "paused"
+			}
+			return morphInstance{
+				ID:       instanceID,
+				Status:   status,
+				Metadata: morphMetadata{"crabbox": "true", "provider": providerName},
+			}, nil
+		},
+		resumeInstance: func(_ context.Context, _ string) error {
+			resumeCalls++
+			return nil
+		},
+		getSSHKey: func(_ context.Context, _ string) (morphSSHKey, error) {
+			return morphSSHKey{PrivateKey: "PRIVATE KEY"}, nil
+		},
+	}
+	backend := &morphLeaseBackend{
+		spec:              Provider{}.Spec(),
+		cfg:               cfg,
+		rt:                Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		client:            fake,
+		now:               time.Now,
+		readyPollInterval: time.Millisecond,
+		readyTimeout:      time.Second,
+	}
+
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "inst_saving"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumeCalls != 1 || lease.Server.Status != "ready" {
+		t.Fatalf("resumeCalls=%d lease=%#v", resumeCalls, lease)
+	}
+}
+
+func TestMorphReadyCheckIncludesSyncPrerequisites(t *testing.T) {
+	for _, prerequisite := range []string{
+		"command -v bash",
+		"command -v git",
+		"command -v rsync",
+		"command -v tar",
+		"command -v python3",
+		"command -v python",
+		"command -v perl",
+	} {
+		if !strings.Contains(morphReadyCheck, prerequisite) {
+			t.Fatalf("morphReadyCheck missing %q: %s", prerequisite, morphReadyCheck)
+		}
+	}
+}
+
 func TestMorphResolveRejectsUnsafeMetadataLeaseID(t *testing.T) {
 	home := t.TempDir()
 	configDir := filepath.Join(home, ".config")

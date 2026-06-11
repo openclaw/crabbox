@@ -33,6 +33,10 @@ controls, desktop/VNC, browser, or code-server surfaces.
 `--class`, `--type`, non-Linux `--target`, and `--tailscale` are rejected for
 this provider.
 
+Snapshots must provide `bash`, `git`, `rsync`, `tar`, and at least one of
+`python3`, `python`, or `perl`; warmup verifies these before accepting the
+instance.
+
 ## Auth
 
 Keep the Morph API key in the environment or user config, never on the command
