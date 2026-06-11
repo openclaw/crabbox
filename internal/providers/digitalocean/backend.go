@@ -562,31 +562,37 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Conf
 	if err != nil {
 		return err
 	}
+	cleanupServer := server
 	item, err := client.GetDroplet(ctx, server.ID)
 	if err == nil {
 		if err := validateLiveDroplet(item, server); err != nil {
 			return err
 		}
-		leaseID := server.Labels["lease"]
-		claim, claimErr := core.ReadLeaseClaim(leaseID)
-		if claimErr != nil {
-			fmt.Fprintf(b.RT.Stderr, "warning: unable to inspect local claim for visible digitalocean lease=%s: %v\n", leaseID, claimErr)
-		} else if isPendingRecoveryClaim(claim, leaseID) {
+		cleanupServer = serverFromDroplet(item, b.Cfg)
+	} else if !isDigitalOceanNotFound(err) {
+		return err
+	}
+	leaseID := cleanupServer.Labels["lease"]
+	claim, err := b.ensureCleanupClaim(cleanupServer)
+	if err != nil {
+		return err
+	}
+	if isPendingRecoveryClaim(claim, leaseID) {
+		if item.ID != 0 {
 			droplets, err := client.ListCrabboxDroplets(ctx)
 			if err != nil {
 				return err
 			}
-			if err := persistPendingRecoveryClaim(serverFromDroplet(item, b.Cfg), droplets, claim); err != nil {
+			if err := persistPendingRecoveryClaim(cleanupServer, droplets, claim); err != nil {
 				return err
 			}
+		} else if err := core.UpdateLeaseClaimEndpoint(claim.LeaseID, cleanupServer, core.SSHTarget{}); err != nil {
+			return fmt.Errorf("persist recovered digitalocean droplet: %w", err)
 		}
-	} else if !isDigitalOceanNotFound(err) {
-		return err
 	}
 	if err := client.DeleteDroplet(ctx, server.ID); err != nil {
 		return err
 	}
-	leaseID := server.Labels["lease"]
 	if keyName := providerKeyForLease(leaseID); core.ValidCrabboxProviderKey(keyName) {
 		if err := client.DeleteSSHKeyByName(ctx, keyName); err != nil {
 			return err
@@ -614,6 +620,41 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Conf
 	core.RemoveLeaseClaim(leaseID)
 	core.RemoveStoredTestboxKey(leaseID)
 	return nil
+}
+
+func (b *digitalOceanLeaseBackend) ensureCleanupClaim(server core.Server) (core.LeaseClaim, error) {
+	leaseID := server.Labels["lease"]
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if claim.LeaseID == "" {
+		repoRoot, err := os.Getwd()
+		if err != nil {
+			return core.LeaseClaim{}, fmt.Errorf("resolve cleanup claim working directory: %w", err)
+		}
+		if err := claimLeaseTargetForRepoConfig(
+			leaseID,
+			server.Labels["slug"],
+			b.Cfg,
+			server,
+			core.SSHTarget{},
+			repoRoot,
+			b.Cfg.IdleTimeout,
+			false,
+		); err != nil {
+			return core.LeaseClaim{}, fmt.Errorf("persist digitalocean cleanup claim: %w", err)
+		}
+		claim, err = core.ReadLeaseClaim(leaseID)
+		if err != nil {
+			return core.LeaseClaim{}, err
+		}
+	}
+	cloudID := firstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
+	if claim.Provider == providerName && claim.CloudID != "" && claim.CloudID != cloudID {
+		return core.LeaseClaim{}, core.Exit(2, "refusing to release DigitalOcean Droplet %d from stale local claim", server.ID)
+	}
+	return claim, nil
 }
 
 func (b *digitalOceanLeaseBackend) waitForDropletIP(ctx context.Context, client digitalOceanAPI, id int64) (droplet, error) {

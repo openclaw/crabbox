@@ -177,6 +177,36 @@ func TestLabelsFromTagsPreservesLegacyExactFieldUnderscores(t *testing.T) {
 	}
 }
 
+func TestLabelsFromTagsOmitsConflictingExactValues(t *testing.T) {
+	base := []string{
+		tagCrabbox,
+		"crabbox:provider:digitalocean",
+		"crabbox:target:linux",
+		"crabbox:lease:cbx_abcdef123456",
+		"crabbox:slug:blue",
+		"crabbox:tailscale_fqdn:legacy.example.ts.net",
+	}
+	first := encodeTagKV("tailscale_fqdn", "first.example.ts.net")
+	second := encodeTagKV("tailscale_fqdn", "second.example.ts.net")
+	for _, tags := range [][]string{
+		append(append([]string(nil), base...), first, second),
+		append(append([]string(nil), base...), second, first),
+	} {
+		labels := labelsFromTags(tags)
+		if _, ok := labels["tailscale_fqdn"]; ok {
+			t.Fatalf("conflicting tailscale_fqdn decoded=%q tags=%v", labels["tailscale_fqdn"], tags)
+		}
+		if err := validateDropletLabels(labels); err != nil {
+			t.Fatalf("ownership lost after mutable-tag conflict: %v labels=%v", err, labels)
+		}
+	}
+
+	labels := labelsFromTags(append(append([]string(nil), base...), first, first))
+	if labels["tailscale_fqdn"] != "first.example.ts.net" {
+		t.Fatalf("duplicate equal tailscale_fqdn=%q", labels["tailscale_fqdn"])
+	}
+}
+
 func TestLeaseTagsRoundTripCapabilityAndPondLabels(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

@@ -791,6 +791,47 @@ func TestReleaseRemovesStoredKeyWithoutClaim(t *testing.T) {
 	}
 }
 
+func TestReleasePersistsClaimBeforeUnclaimedDeleteFailure(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123461"
+	item := droplet{ID: 92, Name: "retry-delete", Status: "active", Tags: leaseTags(cfg, leaseID, "retry-delete", "ready", false, time.Now())}
+	api := &fakeDigitalOceanAPI{
+		droplets:  []droplet{item},
+		deleteErr: errors.New("delete response lost"),
+	}
+	backend := newTestBackend(t, api)
+	keyPath := writeStoredTestboxKey(t, leaseID)
+	lease := core.LeaseTarget{Server: serverFromDroplet(item, backend.Cfg), LeaseID: leaseID}
+
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "delete response lost") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil || !ok || claim.CloudID != strconv.FormatInt(item.ID, 10) {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key removed after failed delete: %v", err)
+	}
+
+	api.deleteErr = nil
+	retry, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: retry}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
+		t.Fatalf("claim after retry ok=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored key after retry: %v", err)
+	}
+}
+
 func TestReleaseRefusesDropletWhoseLiveOwnershipChanged(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

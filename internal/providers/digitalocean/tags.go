@@ -169,6 +169,9 @@ func normalizeTags(tags []string) []string {
 func labelsFromTags(tags []string) map[string]string {
 	labels := map[string]string{}
 	versionedExact := map[string]string{}
+	versionedExactConflict := map[string]bool{}
+	legacyExact := map[string]string{}
+	legacyExactConflict := map[string]bool{}
 	for _, tag := range tags {
 		lowerTag := strings.ToLower(tag)
 		switch {
@@ -184,15 +187,20 @@ func labelsFromTags(tags []string) map[string]string {
 			}
 			key := strings.ToLower(parts[0])
 			if logical, ok := versionedExactTagValueKey(key); ok {
-				versionedExact[logical] = decodeExactTagValue(parts[1])
+				recordExactTagValue(versionedExact, versionedExactConflict, logical, decodeExactTagValue(parts[1]))
 				continue
 			}
-			switch key {
-			case "lease", "slug", "keep", "target", "class", "server_type", "provider_key", "ttl_secs", "idle_timeout", "idle_timeout_secs", "created_at", "updated_at", "profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports", "tailscale", "tailscale_state", "tailscale_hostname", "tailscale_tags", "tailscale_ipv4", "tailscale_fqdn", "tailscale_error", "tailscale_exit_node", "tailscale_exit_node_allow_lan_access":
+			if exactTagValueKey(key) {
 				value := parts[1]
 				if legacyEncodedExactTagValueKey(key) {
 					value = decodeExactTagValue(value)
 				}
+				recordExactTagValue(legacyExact, legacyExactConflict, key, value)
+				continue
+			}
+			switch key {
+			case "lease", "slug", "keep", "target", "class", "server_type", "provider_key", "ttl_secs", "idle_timeout", "idle_timeout_secs", "created_at", "updated_at", "profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports", "tailscale", "tailscale_state", "tailscale_exit_node_allow_lan_access":
+				value := parts[1]
 				switch key {
 				case "provider", "target", "state", "keep", "tailscale", "tailscale_state", "tailscale_exit_node_allow_lan_access":
 					value = strings.ToLower(value)
@@ -210,10 +218,33 @@ func labelsFromTags(tags []string) map[string]string {
 			}
 		}
 	}
-	for key, value := range versionedExact {
-		labels[key] = value
+	for _, key := range tagLabelKeys() {
+		if !exactTagValueKey(key) {
+			continue
+		}
+		if value, ok := versionedExact[key]; ok || versionedExactConflict[key] {
+			if ok && !versionedExactConflict[key] {
+				labels[key] = value
+			}
+			continue
+		}
+		if value, ok := legacyExact[key]; ok && !legacyExactConflict[key] {
+			labels[key] = value
+		}
 	}
 	return labels
+}
+
+func recordExactTagValue(values map[string]string, conflicts map[string]bool, key, value string) {
+	if conflicts[key] {
+		return
+	}
+	if existing, ok := values[key]; ok && existing != value {
+		delete(values, key)
+		conflicts[key] = true
+		return
+	}
+	values[key] = value
 }
 
 func statePriority(state string) int64 {
