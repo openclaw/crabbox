@@ -20,6 +20,7 @@ type osImageSpec struct {
 	HetznerImage    string
 	DockerImage     string
 	ContainerName   string
+	AppleVZImage    string
 }
 
 var osImageSpecs = map[string]osImageSpec{
@@ -34,6 +35,7 @@ var osImageSpecs = map[string]osImageSpec{
 		HetznerImage:    "ubuntu-24.04",
 		DockerImage:     "docker.io/library/ubuntu:24.04",
 		ContainerName:   "ubuntu:24.04",
+		AppleVZImage:    "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img",
 	},
 	"ubuntu:26.04": {
 		Selector:        "ubuntu:26.04",
@@ -46,6 +48,7 @@ var osImageSpecs = map[string]osImageSpec{
 		HetznerImage:    "ubuntu-24.04",
 		DockerImage:     "docker.io/library/ubuntu:26.04",
 		ContainerName:   "ubuntu:26.04",
+		AppleVZImage:    "https://cloud-images.ubuntu.com/releases/resolute/release/ubuntu-26.04-server-cloudimg-arm64.img",
 	},
 }
 
@@ -140,4 +143,16 @@ func osImageDefaultMultipassImage(value string) (string, error) {
 		return "", err
 	}
 	return strings.TrimPrefix(spec.Selector, "ubuntu:"), nil
+}
+
+func osImageDefaultAppleVZImage(value string) (string, error) {
+	spec, err := osImageSpecFor(value)
+	if err != nil {
+		return "", err
+	}
+	return spec.AppleVZImage, nil
+}
+
+func OSImageDefaultAppleVZImage(value string) (string, error) {
+	return osImageDefaultAppleVZImage(value)
 }

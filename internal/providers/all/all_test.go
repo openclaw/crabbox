@@ -55,10 +55,23 @@ func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 	}
 }
 
+func TestAppleVZRegistersAsBuiltInProvider(t *testing.T) {
+	for _, name := range []string{"apple-vz", "applevz"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "apple-vz" {
+			t.Fatalf("ProviderFor(%q).Name=%q want apple-vz", name, provider.Name())
+		}
+	}
+}
+
 func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 	providers := []string{
 		"apple-container",
 		"apple-machine",
+		"apple-vz",
 		"ascii-box",
 		"aws",
 		"azure",

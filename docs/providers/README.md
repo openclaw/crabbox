@@ -32,8 +32,10 @@ SSH-lease providers further differ by how they reach the cloud:
 - **Local runtime** — `local-container` starts a labeled Linux container through
   a Docker-compatible local runtime (Docker Desktop, OrbStack, Colima),
   `apple-container` uses Apple's native `container` runtime on Apple silicon
-  macOS, `multipass` launches local Ubuntu VMs through Canonical Multipass,
-  and `tart` runs macOS VMs on Apple Silicon via Cirrus Labs tart.
+  macOS, `apple-vz` launches a headless Linux VM through Apple's
+  `Virtualization.framework`, `multipass` launches local Ubuntu VMs through
+  Canonical Multipass, and `tart` runs macOS VMs on Apple Silicon via Cirrus
+  Labs tart.
 - **Delegated sandbox** — managed sandbox/proof runners that execute remotely
   without an SSH lease (e.g. `e2b`, `modal`, `islo`, `cloudflare`,
   `azure-dynamic-sessions`, `docker-sandbox`).
@@ -66,6 +68,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Local Container](local-container.md) — `local-container` (`docker`, `container`, `local-docker`) | Linux · local |
 | [Apple Container](apple-container.md) — `apple-container` (`apple`, `applecontainer`) | Linux · local |
 | [Apple Container Machine](apple-machine.md) — `apple-machine` (`applemachine`) | Linux · local |
+| [Apple VZ](apple-vz.md) — `apple-vz` (`applevz`) | Linux · local |
 | [Multipass](multipass.md) — `multipass` (`mp`, `canonical-multipass`) | Linux · local |
 | [Tart](tart.md) — `tart` (`local-tart`, `macos-vm`) | macOS · local |
 | [exe.dev](exe-dev.md) — `exe-dev` (`exe`, `exedev`) | Linux · direct |
@@ -121,7 +124,8 @@ reports.
   against each provider's declared feature set. Among the SSH-lease providers,
   desktop/browser/code surfaces are richest on `aws`, `azure`, `hetzner`,
   `parallels`, `ssh`, and `local-container`; `multipass` exposes local VM SSH
-  and sync only in its first implementation, and most direct sandbox/delegated
+  and sync only in its first implementation, `apple-vz` does the same through a
+  local helper and host-local SSH proxy, and most direct sandbox/delegated
   providers expose `ssh` and Crabbox sync only.
 - Actions runner hydration requires a normal SSH lease on Linux. Use a
   Linux-capable SSH-lease provider for that path.
@@ -131,6 +135,7 @@ crabbox warmup --provider aws --class beast
 crabbox run --provider hetzner -- pnpm test
 crabbox run --provider docker -- pnpm test
 crabbox run --provider docker-sandbox -- go test ./...
+crabbox run --provider apple-vz --apple-vz-helper ./bin/crabbox-apple-vz-helper -- go test ./...
 crabbox run --provider multipass -- go test ./...
 crabbox run --provider blacksmith-testbox --id tbx_123 -- pnpm test
 crabbox run --provider namespace-devbox --id blue-lobster -- pnpm test

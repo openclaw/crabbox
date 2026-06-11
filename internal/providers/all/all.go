@@ -3,6 +3,7 @@ package all
 import (
 	_ "github.com/openclaw/crabbox/internal/providers/applecontainer"
 	_ "github.com/openclaw/crabbox/internal/providers/applemachine"
+	_ "github.com/openclaw/crabbox/internal/providers/applevz"
 	_ "github.com/openclaw/crabbox/internal/providers/asciibox"
 	_ "github.com/openclaw/crabbox/internal/providers/aws"
 	_ "github.com/openclaw/crabbox/internal/providers/azure"

@@ -932,6 +932,15 @@ if has_provider incus; then
   incus_smoke
 fi
 
+if has_provider apple-vz || has_provider applevz; then
+  apple_vz_helper="${CRABBOX_LIVE_APPLE_VZ_HELPER:-$root/bin/crabbox-apple-vz-helper}"
+  if [[ ! -x "$apple_vz_helper" ]]; then
+    echo "apple-vz smoke requires an executable helper at $apple_vz_helper; set CRABBOX_LIVE_APPLE_VZ_HELPER or build ./cmd/crabbox-apple-vz-helper into $root/bin" >&2
+    exit 2
+  fi
+  provider_smoke apple-vz --apple-vz-helper "$apple_vz_helper" --ttl 15m --idle-timeout 5m
+fi
+
 if has_provider kubevirt; then
   kubevirt_smoke
 fi

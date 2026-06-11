@@ -375,6 +375,26 @@ Use `--desktop --browser` to bootstrap Xvfb, XFCE, x11vnc, noVNC/websockify,
 desktop input tools, screenshot tools, ffmpeg, and a packaged browser inside
 the container.
 
+### Apple VZ
+
+```yaml
+provider: apple-vz
+appleVZ:
+  helperPath: ./bin/crabbox-apple-vz-helper
+  image: https://cloud-images.ubuntu.com/releases/resolute/release/ubuntu-26.04-server-cloudimg-arm64.img
+  user: crabbox
+  workRoot: /work/crabbox
+  cpus: 4
+  memoryMiB: 8192
+  diskGiB: 30
+```
+
+`provider: applevz` is an alias for `apple-vz`. The backend drives a small
+local helper that boots a headless Linux VM with Apple's
+`Virtualization.framework`, then exposes guest SSH through a host-local proxy so
+Crabbox can use the normal SSH sync and run path. The image default follows the
+portable `osImage` selector unless `appleVZ.image` is set explicitly.
+
 ### Multipass
 
 ```yaml

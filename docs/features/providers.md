@@ -86,6 +86,7 @@ parallels        Parallels Desktop linked clones          Linux, macOS, Windows
 proxmox          Proxmox VE QEMU VM clones                Linux
 incus            Incus containers or VMs over SSH         Linux
 local-container  Local Docker-compatible containers       Linux
+apple-vz         Apple Virtualization.framework Linux VM  Linux
 multipass        Canonical Multipass local Ubuntu VMs     Linux
 daytona          Daytona sandboxes (short-lived SSH)      Linux
 exe-dev          exe.dev managed VMs (public SSH)         Linux
@@ -138,6 +139,7 @@ railway                 Railway service status and stop controls
 - [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
 - [Incus](../providers/incus.md): direct Incus Linux SSH leases plus an opt-in Apple Silicon / local live smoke contract.
 - [Local Container](../providers/local-container.md): local Linux containers through Docker-compatible runtimes.
+- [Apple VZ](../providers/apple-vz.md): local Linux VMs through Apple's `Virtualization.framework`.
 - [Multipass](../providers/multipass.md): local Ubuntu VMs through Canonical Multipass.
 - [Daytona](../providers/daytona.md): Daytona SDK/toolbox sandbox leases.
 - [exe.dev](../providers/exe-dev.md): exe.dev VMs exposed as SSH leases.
