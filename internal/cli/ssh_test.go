@@ -900,7 +900,8 @@ func TestRemotePruneSyncManifestDeletesOnlyManagedPaths(t *testing.T) {
 	for _, want := range []string{
 		"sync-deleted.new",
 		"manifest_removed_paths",
-		"python3 -",
+		"command -v python3",
+		"command -v perl",
 		"rm -f --",
 		"rmdir --",
 		"sync-manifest.new",
@@ -992,6 +993,35 @@ func TestRemotePruneSyncManifestPrunesManagedFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Fatalf("unsafe deleted path should not escape workdir: %v", err)
+	}
+}
+
+func TestRemotePruneSyncManifestFallsBackToPerlWithoutPython(t *testing.T) {
+	workdir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest"), "keep.txt\x00stale.txt\x00")
+	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest.new"), "keep.txt\x00")
+	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-deleted.new"), "")
+	mustWriteTestFile(t, filepath.Join(workdir, "keep.txt"), "keep")
+	mustWriteTestFile(t, filepath.Join(workdir, "stale.txt"), "stale")
+
+	toolDir := t.TempDir()
+	for _, name := range []string{"dirname", "perl", "rm", "rmdir"} {
+		mustWriteTestCommandWrapper(t, toolDir, name)
+	}
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bashPath, "-lc", remotePruneSyncManifest(workdir))
+	cmd.Env = append(os.Environ(), "PATH="+toolDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("remote prune perl fallback failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "keep.txt")); err != nil {
+		t.Fatalf("keep.txt should survive prune: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("stale.txt should be pruned, stat err=%v", err)
 	}
 }
 
@@ -1111,6 +1141,43 @@ func TestRemoteWriteSyncManifestsNew(t *testing.T) {
 	cmd.Stdin = strings.NewReader(input)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("write manifests failed: %v\n%s", err, out)
+	}
+	metaDir := filepath.Join(workdir, ".crabbox")
+	gotManifest, err := os.ReadFile(filepath.Join(metaDir, "sync-manifest.new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotManifest) != manifest {
+		t.Fatalf("unexpected manifest: %q", gotManifest)
+	}
+	gotDeleted, err := os.ReadFile(filepath.Join(metaDir, "sync-deleted.new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotDeleted) != deleted {
+		t.Fatalf("unexpected deleted manifest: %q", gotDeleted)
+	}
+}
+
+func TestRemoteWriteSyncManifestsNewFallsBackToPerlWithoutPython(t *testing.T) {
+	workdir := t.TempDir()
+	manifest := "keep.txt\x00"
+	deleted := "old.txt\x00"
+	input := fmt.Sprintf("%d\n", len(manifest)) + manifest + deleted
+
+	toolDir := t.TempDir()
+	for _, name := range []string{"mkdir", "perl"} {
+		mustWriteTestCommandWrapper(t, toolDir, name)
+	}
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bashPath, "-lc", remoteWriteSyncManifestsNew(workdir))
+	cmd.Env = append(os.Environ(), "PATH="+toolDir)
+	cmd.Stdin = strings.NewReader(input)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("write manifests perl fallback failed: %v\n%s", err, out)
 	}
 	metaDir := filepath.Join(workdir, ".crabbox")
 	gotManifest, err := os.ReadFile(filepath.Join(metaDir, "sync-manifest.new"))
@@ -1305,6 +1372,19 @@ func mustWriteTestFile(t *testing.T, path, value string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWriteTestCommandWrapper(t *testing.T, dir, name string) {
+	t.Helper()
+	target, err := exec.LookPath(name)
+	if err != nil {
+		t.Fatalf("lookpath %s: %v", name, err)
+	}
+	path := filepath.Join(dir, name)
+	script := "#!/bin/sh\nexec " + shellQuote(target) + ` "$@"` + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }

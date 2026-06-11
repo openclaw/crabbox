@@ -197,9 +197,11 @@ provider_smoke() {
   cleanup() {
     if [[ -n "$lease" ]]; then
       stop_lease "$lease" "$slug"
+      lease=""
+      slug=""
     fi
   }
-  trap cleanup RETURN
+  trap cleanup RETURN ERR
 
   local out
   capture_run out run_in_repo "$cb" warmup --provider "$provider" "$@"
@@ -276,9 +278,11 @@ e2b_smoke() {
   cleanup() {
     if [[ -n "$lease" ]]; then
       stop_provider_lease e2b "$lease" "$slug"
+      lease=""
+      slug=""
     fi
   }
-  trap cleanup RETURN
+  trap cleanup RETURN ERR
 
   local out
   capture_run out run_in_repo "$cb" warmup --provider e2b --e2b-template "${CRABBOX_E2B_TEMPLATE:-base}" --timing-json
@@ -311,9 +315,11 @@ modal_smoke() {
   cleanup() {
     if [[ -n "$lease" ]]; then
       stop_provider_lease modal "$lease" "$slug"
+      lease=""
+      slug=""
     fi
   }
-  trap cleanup RETURN
+  trap cleanup RETURN ERR
 
   local out
   capture_run out run_in_repo "$cb" warmup \
@@ -387,9 +393,11 @@ semaphore_smoke() {
   cleanup() {
     if [[ -n "$lease" ]]; then
       stop_provider_lease semaphore "$lease" "$slug"
+      lease=""
+      slug=""
     fi
   }
-  trap cleanup RETURN
+  trap cleanup RETURN ERR
 
   local out
   capture_run out run_in_repo "$cb" warmup --provider semaphore --semaphore-host "$semaphore_host" --semaphore-project "$semaphore_project" --semaphore-idle-timeout "${CRABBOX_SEMAPHORE_IDLE_TIMEOUT:-10m}"
@@ -459,8 +467,12 @@ incus_smoke() {
         run_in_repo "$cb" stop "${delete_args[@]}" "$lease" || true
       fi
     fi
+    retained_lease=""
+    retained_slug=""
+    lease=""
+    slug=""
   }
-  trap cleanup RETURN
+  trap cleanup RETURN ERR
 
   local doctor_out
   log_step "incus doctor"
@@ -541,9 +553,11 @@ sprites_smoke() {
   cleanup() {
     if [[ -n "$lease" ]]; then
       stop_provider_lease sprites "$lease" "$slug"
+      lease=""
+      slug=""
     fi
   }
-  trap cleanup RETURN
+  trap cleanup RETURN ERR
 
   local out
   capture_run out run_in_repo "$cb" warmup --provider sprites --timing-json
@@ -588,9 +602,11 @@ tenki_smoke() {
   cleanup() {
     if [[ -n "$lease" ]]; then
       stop_provider_lease tenki "$lease" "$slug"
+      lease=""
+      slug=""
     fi
   }
-  trap cleanup RETURN
+  trap cleanup RETURN ERR
 
   run_in_repo "$cb" doctor --provider tenki
 
@@ -691,9 +707,11 @@ kubevirt_smoke() {
       else
         kubevirt_run stop "${route_args[@]}" "$lease" || true
       fi
+      lease=""
+      slug=""
     fi
   }
-  trap cleanup RETURN
+  trap cleanup RETURN ERR
 
   kubevirt_run doctor "${route_args[@]}"
   local out
@@ -755,9 +773,11 @@ external_smoke() {
       else
         external_run stop "${route_args[@]}" "$lease" || true
       fi
+      lease=""
+      slug=""
     fi
   }
-  trap cleanup RETURN
+  trap cleanup RETURN ERR
 
   external_run doctor "${route_args[@]}"
   local out
@@ -805,9 +825,11 @@ morph_smoke() {
   cleanup() {
     if [[ -n "$lease" ]]; then
       morph_run stop "$slug" || morph_run stop "$lease" || true
+      lease=""
+      slug=""
     fi
   }
-  trap cleanup RETURN
+  trap cleanup RETURN ERR
 
   morph_run doctor
   local out

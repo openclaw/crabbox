@@ -348,6 +348,14 @@ func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 	return nil
 }
 
+func (b *morphLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
+	instance := blank(blank(lease.Server.CloudID, lease.Server.Labels["instance_id"]), "-")
+	if b.configForRun().Morph.DeleteOnRelease {
+		return fmt.Sprintf("deleted lease=%s instance=%s", lease.LeaseID, instance)
+	}
+	return fmt.Sprintf("paused lease=%s instance=%s retained=true", lease.LeaseID, instance)
+}
+
 func (b *morphLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 	cfg := b.configForRun()
 	if req.IdleTimeout > 0 {

@@ -439,6 +439,25 @@ func TestMorphReleasePausesOrDeletesAndCleansKey(t *testing.T) {
 	}
 }
 
+func TestMorphReleaseLeaseMessage(t *testing.T) {
+	lease := LeaseTarget{
+		LeaseID: "cbx_release",
+		Server:  Server{CloudID: "inst_release"},
+	}
+
+	pauseBackend := &morphLeaseBackend{cfg: testMorphConfig()}
+	if got := pauseBackend.ReleaseLeaseMessage(lease); got != "paused lease=cbx_release instance=inst_release retained=true" {
+		t.Fatalf("pause message=%q", got)
+	}
+
+	deleteCfg := testMorphConfig()
+	deleteCfg.Morph.DeleteOnRelease = true
+	deleteBackend := &morphLeaseBackend{cfg: deleteCfg}
+	if got := deleteBackend.ReleaseLeaseMessage(lease); got != "deleted lease=cbx_release instance=inst_release" {
+		t.Fatalf("delete message=%q", got)
+	}
+}
+
 func TestMorphTouchInitializesMissingMetadata(t *testing.T) {
 	configureMorphTestHome(t)
 	now := time.Unix(1_700_000_000, 0).UTC()
