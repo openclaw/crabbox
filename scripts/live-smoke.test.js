@@ -499,6 +499,22 @@ if [[ "\${CRABBOX_APPLE_VZ_HELPER:-}" != "\${CRABBOX_FAKE_EXPECTED_HELPER:?}" ]]
   printf 'missing helper override for: %s\\n' "$*" >&2
   exit 98
 fi
+case "$1" in
+  warmup|status|inspect|ssh|cache|run|history|stop)
+    if [[ "\${CRABBOX_PROVIDER:-}" != "apple-vz" ]]; then
+      printf 'missing apple-vz provider environment for: %s\\n' "$*" >&2
+      exit 97
+    fi
+    ;;
+esac
+case "$1" in
+  cache|history)
+    if [[ " $* " == *" --provider "* ]]; then
+      printf 'unsupported provider flag for: %s\\n' "$*" >&2
+      exit 96
+    fi
+    ;;
+esac
 printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
 case "$1" in
   warmup)

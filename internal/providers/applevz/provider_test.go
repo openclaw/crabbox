@@ -92,6 +92,7 @@ func testBackend(t *testing.T, runner *recordingRunner) *backend {
 	}
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 	b.prepareHelper = func(context.Context, core.Config) (string, error) { return "helper", nil }
+	b.prepareExistingHelper = b.prepareHelper
 	b.stateRoot = func() (string, error) { return root, nil }
 	b.waitForSSH = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
 	return b
@@ -136,11 +137,15 @@ func TestApplyDefaults(t *testing.T) {
 
 	cfg = core.BaseConfig()
 	cfg.Provider = providerName
+	cfg.AppleVZ.CPUs = 0
 	cfg.AppleVZ.MemoryMiB = 0
+	cfg.AppleVZ.DiskGiB = 0
+	core.MarkAppleVZCPUsExplicit(&cfg)
 	core.MarkAppleVZMemoryExplicit(&cfg)
+	core.MarkAppleVZDiskExplicit(&cfg)
 	applyDefaults(&cfg)
-	if cfg.AppleVZ.MemoryMiB != 0 {
-		t.Fatalf("explicit zero memory defaulted to %d", cfg.AppleVZ.MemoryMiB)
+	if cfg.AppleVZ.CPUs != 0 || cfg.AppleVZ.MemoryMiB != 0 || cfg.AppleVZ.DiskGiB != 0 {
+		t.Fatalf("explicit zero numeric settings defaulted: %+v", cfg.AppleVZ)
 	}
 }
 
@@ -193,6 +198,30 @@ func TestValidateConfigRejectsUnsafeGuestIdentity(t *testing.T) {
 	cfg.AppleVZ.MemoryMiB = -1
 	if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "got -1") {
 		t.Fatalf("negative memory validation error=%v", err)
+	}
+
+	for _, test := range []struct {
+		name     string
+		setValue func(*core.Config, int)
+		mark     func(*core.Config)
+		want     string
+	}{
+		{name: "cpus", setValue: func(cfg *core.Config, value int) { cfg.AppleVZ.CPUs = value }, mark: core.MarkAppleVZCPUsExplicit, want: "appleVZ.cpus must be positive"},
+		{name: "disk", setValue: func(cfg *core.Config, value int) { cfg.AppleVZ.DiskGiB = value }, mark: core.MarkAppleVZDiskExplicit, want: "appleVZ.diskGiB must be positive"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, value := range []int{0, -1} {
+				cfg := core.BaseConfig()
+				cfg.Provider = providerName
+				test.setValue(&cfg, value)
+				if value == 0 {
+					test.mark(&cfg)
+				}
+				if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("value=%d validation error=%v", value, err)
+				}
+			}
+		})
 	}
 }
 
@@ -255,8 +284,8 @@ func TestApplyFlags(t *testing.T) {
 	if !core.AppleVZImageExplicit(cfg) {
 		t.Fatal("apple-vz image should be explicit after --apple-vz-image")
 	}
-	if !core.AppleVZMemoryExplicit(cfg) {
-		t.Fatal("apple-vz memory should be explicit after --apple-vz-memory")
+	if !core.AppleVZCPUsExplicit(cfg) || !core.AppleVZMemoryExplicit(cfg) || !core.AppleVZDiskExplicit(cfg) {
+		t.Fatal("apple-vz numeric settings should be explicit after flags")
 	}
 }
 
@@ -814,6 +843,23 @@ func TestEnsureHelperBinarySignsOnlyWhenSourceChanges(t *testing.T) {
 	}
 	if string(data) != "first" {
 		t.Fatalf("previous managed helper changed to %q", string(data))
+	}
+
+	if err := os.Remove(sourcePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.ensureHelperBinary(context.Background(), cfg); err == nil {
+		t.Fatal("strict helper preparation succeeded after source removal")
+	}
+	fallbackPath, err := b.ensureExistingHelperBinary(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fallbackPath != changedPath {
+		t.Fatalf("fallback helper path=%q want %q", fallbackPath, changedPath)
+	}
+	if got := codesignCallCount(runner.calls); got != 4 {
+		t.Fatalf("fallback codesign calls=%d want 4", got)
 	}
 }
 

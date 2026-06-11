@@ -39,12 +39,13 @@ const (
 var hostGOOS, hostGOARCH = runtime.GOOS, runtime.GOARCH
 
 type backend struct {
-	spec          core.ProviderSpec
-	cfg           core.Config
-	rt            core.Runtime
-	prepareHelper func(context.Context, core.Config) (string, error)
-	stateRoot     func() (string, error)
-	waitForSSH    func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
+	spec                  core.ProviderSpec
+	cfg                   core.Config
+	rt                    core.Runtime
+	prepareHelper         func(context.Context, core.Config) (string, error)
+	prepareExistingHelper func(context.Context, core.Config) (string, error)
+	stateRoot             func() (string, error)
+	waitForSSH            func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
 }
 
 type managedHelperDigests struct {
@@ -57,6 +58,7 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 	applyDefaults(&cfg)
 	b := &backend{spec: spec, cfg: cfg, rt: rt}
 	b.prepareHelper = b.ensureHelperBinary
+	b.prepareExistingHelper = b.ensureExistingHelperBinary
 	b.stateRoot = b.appleVZStateRoot
 	b.waitForSSH = core.WaitForSSHReady
 	return b
@@ -89,13 +91,13 @@ func applyDefaults(cfg *core.Config) {
 	} else if workRoot := strings.TrimSpace(cfg.WorkRoot); workRoot != "" && workRoot != defaultWorkRoot && cfg.AppleVZ.WorkRoot == defaultWorkRoot {
 		cfg.AppleVZ.WorkRoot = workRoot
 	}
-	if cfg.AppleVZ.CPUs <= 0 {
+	if cfg.AppleVZ.CPUs == 0 && !core.AppleVZCPUsExplicit(*cfg) {
 		cfg.AppleVZ.CPUs = defaultCPUs
 	}
 	if cfg.AppleVZ.MemoryMiB == 0 && !core.AppleVZMemoryExplicit(*cfg) {
 		cfg.AppleVZ.MemoryMiB = defaultMemoryMiB
 	}
-	if cfg.AppleVZ.DiskGiB <= 0 {
+	if cfg.AppleVZ.DiskGiB == 0 && !core.AppleVZDiskExplicit(*cfg) {
 		cfg.AppleVZ.DiskGiB = defaultDiskGiB
 	}
 	cfg.SSHUser = cfg.AppleVZ.User
@@ -579,7 +581,7 @@ func readFileTail(path string, limit int64) (string, error) {
 }
 
 func (b *backend) deleteInstance(ctx context.Context, cfg core.Config, name string) error {
-	helperPath, err := b.prepareHelper(ctx, cfg)
+	helperPath, err := b.prepareExistingHelper(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -602,7 +604,7 @@ func (b *backend) deleteInstance(ctx context.Context, cfg core.Config, name stri
 }
 
 func (b *backend) listInstances(ctx context.Context, cfg core.Config) ([]applevzhelper.Instance, error) {
-	helperPath, err := b.prepareHelper(ctx, cfg)
+	helperPath, err := b.prepareExistingHelper(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -862,6 +864,91 @@ func (b *backend) ensureHelperBinary(ctx context.Context, cfg core.Config) (_ st
 		return "", exit(2, "clean apple-vz helper directory: %v", err)
 	}
 	return managedPath, nil
+}
+
+func (b *backend) ensureExistingHelperBinary(ctx context.Context, cfg core.Config) (string, error) {
+	path, prepareErr := b.ensureHelperBinary(ctx, cfg)
+	if prepareErr == nil {
+		return path, nil
+	}
+	path, fallbackErr := b.latestValidManagedHelper()
+	if fallbackErr != nil {
+		return "", errors.Join(prepareErr, exit(2, "find existing apple-vz managed helper: %v", fallbackErr))
+	}
+	if path != "" {
+		return path, nil
+	}
+	return "", prepareErr
+}
+
+func (b *backend) latestValidManagedHelper() (_ string, returnErr error) {
+	root, err := b.stateRoot()
+	if err != nil {
+		return "", err
+	}
+	helperDir := applevzhelper.HelperDir(root)
+	if err := ensurePrivateDir(helperDir); err != nil {
+		return "", err
+	}
+	installLock, err := lockManagedHelperDir(helperDir)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, unlockManagedHelperDir(installLock))
+	}()
+	entries, err := os.ReadDir(helperDir)
+	if err != nil {
+		return "", err
+	}
+	type candidate struct {
+		path    string
+		modTime time.Time
+	}
+	var candidates []candidate
+	for _, entry := range entries {
+		path := filepath.Join(helperDir, entry.Name())
+		if entry.IsDir() || !isManagedHelperPath(path) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return "", err
+		}
+		candidates = append(candidates, candidate{path: path, modTime: info.ModTime()})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].modTime.After(candidates[j].modTime)
+	})
+	for _, candidate := range candidates {
+		if !managedHelperValid(candidate.path) {
+			continue
+		}
+		if err := touchAndCleanupManagedHelpers(helperDir, candidate.path); err != nil {
+			return "", err
+		}
+		return candidate.path, nil
+	}
+	return "", nil
+}
+
+func managedHelperValid(managedPath string) bool {
+	data, err := os.ReadFile(managedHelperDigestPath(managedPath))
+	if err != nil {
+		return false
+	}
+	var digests managedHelperDigests
+	if err := json.Unmarshal(data, &digests); err != nil ||
+		digests.SourceSHA256 == "" ||
+		digests.ManagedSHA256 == "" ||
+		digests.EntitlementsSHA256 == "" {
+		return false
+	}
+	if managedHelperInstallPath(filepath.Dir(managedPath), digests.SourceSHA256, digests.EntitlementsSHA256) != managedPath {
+		return false
+	}
+	managedDigest, err := fileSHA256(managedPath)
+	return err == nil && managedDigest == digests.ManagedSHA256
 }
 
 func managedHelperInstallPath(helperDir, sourceDigest, entitlementsDigest string) string {

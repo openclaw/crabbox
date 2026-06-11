@@ -83,11 +83,17 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 }
 
 func validateConfigBeforeDefaults(cfg core.Config) error {
+	if cfg.AppleVZ.CPUs < 0 || (cfg.AppleVZ.CPUs == 0 && core.AppleVZCPUsExplicit(cfg)) {
+		return core.Exit(2, "appleVZ.cpus must be positive (got %d)", cfg.AppleVZ.CPUs)
+	}
 	if cfg.AppleVZ.MemoryMiB < 0 || (cfg.AppleVZ.MemoryMiB == 0 && core.AppleVZMemoryExplicit(cfg)) {
 		return core.Exit(2, "appleVZ.memoryMiB must be at least 1024 MiB (got %d)", cfg.AppleVZ.MemoryMiB)
 	}
 	if cfg.AppleVZ.MemoryMiB > 0 && cfg.AppleVZ.MemoryMiB < 1024 {
 		return core.Exit(2, "appleVZ.memoryMiB must be at least 1024 MiB (got %d)", cfg.AppleVZ.MemoryMiB)
+	}
+	if cfg.AppleVZ.DiskGiB < 0 || (cfg.AppleVZ.DiskGiB == 0 && core.AppleVZDiskExplicit(cfg)) {
+		return core.Exit(2, "appleVZ.diskGiB must be positive (got %d)", cfg.AppleVZ.DiskGiB)
 	}
 	return nil
 }
@@ -101,6 +107,12 @@ func validateConfig(cfg core.Config) error {
 	}
 	if cfg.AppleVZ.MemoryMiB < 1024 {
 		return core.Exit(2, "appleVZ.memoryMiB must be at least 1024 MiB (got %d)", cfg.AppleVZ.MemoryMiB)
+	}
+	if cfg.AppleVZ.CPUs <= 0 {
+		return core.Exit(2, "appleVZ.cpus must be positive (got %d)", cfg.AppleVZ.CPUs)
+	}
+	if cfg.AppleVZ.DiskGiB <= 0 {
+		return core.Exit(2, "appleVZ.diskGiB must be positive (got %d)", cfg.AppleVZ.DiskGiB)
 	}
 	return nil
 }

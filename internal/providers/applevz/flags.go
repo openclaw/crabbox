@@ -66,6 +66,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return exit(2, "--apple-vz-cpus must be positive (got %d)", *v.CPUs)
 		}
 		cfg.AppleVZ.CPUs = *v.CPUs
+		core.MarkAppleVZCPUsExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "apple-vz-memory") {
 		if *v.MemoryMiB < 1024 {
@@ -79,6 +80,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return exit(2, "--apple-vz-disk must be positive (got %d)", *v.DiskGiB)
 		}
 		cfg.AppleVZ.DiskGiB = *v.DiskGiB
+		core.MarkAppleVZDiskExplicit(cfg)
 	}
 	if isAppleVZProviderName(cfg.Provider) {
 		applyDefaults(cfg)

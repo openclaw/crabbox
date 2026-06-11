@@ -134,7 +134,9 @@ type Config struct {
 	AppleVZ                       AppleVZConfig
 	appleVZImageExplicit          bool
 	appleVZImageSHA256Explicit    bool
+	appleVZCPUsExplicit           bool
 	appleVZMemoryExplicit         bool
+	appleVZDiskExplicit           bool
 	MXC                           MXCConfig
 	Multipass                     MultipassConfig
 	multipassImageExplicit        bool
@@ -1130,12 +1132,28 @@ func MarkAppleVZImageSHA256Explicit(cfg *Config) {
 	cfg.appleVZImageSHA256Explicit = true
 }
 
+func AppleVZCPUsExplicit(cfg Config) bool {
+	return cfg.appleVZCPUsExplicit
+}
+
+func MarkAppleVZCPUsExplicit(cfg *Config) {
+	cfg.appleVZCPUsExplicit = true
+}
+
 func AppleVZMemoryExplicit(cfg Config) bool {
 	return cfg.appleVZMemoryExplicit
 }
 
 func MarkAppleVZMemoryExplicit(cfg *Config) {
 	cfg.appleVZMemoryExplicit = true
+}
+
+func AppleVZDiskExplicit(cfg Config) bool {
+	return cfg.appleVZDiskExplicit
+}
+
+func MarkAppleVZDiskExplicit(cfg *Config) {
+	cfg.appleVZDiskExplicit = true
 }
 
 func MarkMultipassImageExplicit(cfg *Config) {
@@ -1978,9 +1996,9 @@ type fileAppleVZConfig struct {
 	ImageSHA256 string `yaml:"imageSHA256,omitempty"`
 	User        string `yaml:"user,omitempty"`
 	WorkRoot    string `yaml:"workRoot,omitempty"`
-	CPUs        int    `yaml:"cpus,omitempty"`
+	CPUs        *int   `yaml:"cpus,omitempty"`
 	MemoryMiB   *int   `yaml:"memoryMiB,omitempty"`
-	DiskGiB     int    `yaml:"diskGiB,omitempty"`
+	DiskGiB     *int   `yaml:"diskGiB,omitempty"`
 }
 
 type fileMXCConfig struct {
@@ -3342,15 +3360,17 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.AppleVZ.WorkRoot != "" {
 			cfg.AppleVZ.WorkRoot = file.AppleVZ.WorkRoot
 		}
-		if file.AppleVZ.CPUs > 0 {
-			cfg.AppleVZ.CPUs = file.AppleVZ.CPUs
+		if file.AppleVZ.CPUs != nil {
+			cfg.AppleVZ.CPUs = *file.AppleVZ.CPUs
+			cfg.appleVZCPUsExplicit = true
 		}
 		if file.AppleVZ.MemoryMiB != nil {
 			cfg.AppleVZ.MemoryMiB = *file.AppleVZ.MemoryMiB
 			cfg.appleVZMemoryExplicit = true
 		}
-		if file.AppleVZ.DiskGiB > 0 {
-			cfg.AppleVZ.DiskGiB = file.AppleVZ.DiskGiB
+		if file.AppleVZ.DiskGiB != nil {
+			cfg.AppleVZ.DiskGiB = *file.AppleVZ.DiskGiB
+			cfg.appleVZDiskExplicit = true
 		}
 	}
 	if file.MXC != nil {
@@ -4260,7 +4280,14 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.AppleVZ.User = getenv("CRABBOX_APPLE_VZ_USER", cfg.AppleVZ.User)
 	cfg.AppleVZ.WorkRoot = getenv("CRABBOX_APPLE_VZ_WORK_ROOT", cfg.AppleVZ.WorkRoot)
-	cfg.AppleVZ.CPUs = getenvInt("CRABBOX_APPLE_VZ_CPUS", cfg.AppleVZ.CPUs)
+	if rawCPUs := os.Getenv("CRABBOX_APPLE_VZ_CPUS"); rawCPUs != "" {
+		cpus, err := strconv.Atoi(strings.TrimSpace(rawCPUs))
+		if err != nil {
+			return fmt.Errorf("CRABBOX_APPLE_VZ_CPUS must be an integer: %w", err)
+		}
+		cfg.AppleVZ.CPUs = cpus
+		cfg.appleVZCPUsExplicit = true
+	}
 	if rawMemory := os.Getenv("CRABBOX_APPLE_VZ_MEMORY"); rawMemory != "" {
 		memoryMiB, err := strconv.Atoi(strings.TrimSpace(rawMemory))
 		if err != nil {
@@ -4269,7 +4296,14 @@ func applyEnv(cfg *Config) error {
 		cfg.AppleVZ.MemoryMiB = memoryMiB
 		cfg.appleVZMemoryExplicit = true
 	}
-	cfg.AppleVZ.DiskGiB = getenvInt("CRABBOX_APPLE_VZ_DISK", cfg.AppleVZ.DiskGiB)
+	if rawDisk := os.Getenv("CRABBOX_APPLE_VZ_DISK"); rawDisk != "" {
+		diskGiB, err := strconv.Atoi(strings.TrimSpace(rawDisk))
+		if err != nil {
+			return fmt.Errorf("CRABBOX_APPLE_VZ_DISK must be an integer: %w", err)
+		}
+		cfg.AppleVZ.DiskGiB = diskGiB
+		cfg.appleVZDiskExplicit = true
+	}
 	cfg.MXC.CLIPath = getenv("CRABBOX_MXC_CLI", cfg.MXC.CLIPath)
 	cfg.MXC.Version = getenv("CRABBOX_MXC_VERSION", cfg.MXC.Version)
 	cfg.MXC.Containment = getenv("CRABBOX_MXC_CONTAINMENT", cfg.MXC.Containment)

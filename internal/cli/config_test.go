@@ -495,7 +495,9 @@ func TestAppleVZConfigDefaultsFileAndEnv(t *testing.T) {
 	if cfg.SSHUser != "crabbox" || cfg.SSHPort != "22" || cfg.WorkRoot != "/work/crabbox" || cfg.TargetOS != targetLinux {
 		t.Fatalf("apple-vz derived defaults not applied: sshUser=%q sshPort=%q workRoot=%q target=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.TargetOS)
 	}
+	fileCPUs := 6
 	fileMemoryMiB := 12288
+	fileDiskGiB := 64
 	applyFileConfig(&cfg, fileConfig{
 		Provider: "apple-vz",
 		AppleVZ: &fileAppleVZConfig{
@@ -504,16 +506,16 @@ func TestAppleVZConfigDefaultsFileAndEnv(t *testing.T) {
 			ImageSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			User:        "runner",
 			WorkRoot:    "/work/example",
-			CPUs:        6,
+			CPUs:        &fileCPUs,
 			MemoryMiB:   &fileMemoryMiB,
-			DiskGiB:     64,
+			DiskGiB:     &fileDiskGiB,
 		},
 	})
 	if cfg.Provider != "apple-vz" || cfg.AppleVZ.HelperPath != "/opt/bin/crabbox-apple-vz-helper" || cfg.AppleVZ.Image != "https://example.test/custom.img" || cfg.AppleVZ.ImageSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || cfg.AppleVZ.User != "runner" || cfg.AppleVZ.WorkRoot != "/work/example" || cfg.AppleVZ.CPUs != 6 || cfg.AppleVZ.MemoryMiB != 12288 || cfg.AppleVZ.DiskGiB != 64 {
 		t.Fatalf("file appleVZ config not applied: %#v", cfg.AppleVZ)
 	}
-	if !AppleVZMemoryExplicit(cfg) {
-		t.Fatal("file appleVZ memory should be marked explicit")
+	if !AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
+		t.Fatal("file appleVZ numeric settings should be marked explicit")
 	}
 
 	t.Setenv("CRABBOX_APPLE_VZ_HELPER", "/usr/local/bin/crabbox-apple-vz-helper")
@@ -528,34 +530,50 @@ func TestAppleVZConfigDefaultsFileAndEnv(t *testing.T) {
 	if cfg.AppleVZ.HelperPath != "/usr/local/bin/crabbox-apple-vz-helper" || cfg.AppleVZ.Image != "https://example.test/env.img" || cfg.AppleVZ.ImageSHA256 != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" || cfg.AppleVZ.User != "env-user" || cfg.AppleVZ.WorkRoot != "/work/env" || cfg.AppleVZ.CPUs != 8 || cfg.AppleVZ.MemoryMiB != 16384 || cfg.AppleVZ.DiskGiB != 80 {
 		t.Fatalf("env appleVZ config not applied: %#v", cfg.AppleVZ)
 	}
-	if !AppleVZMemoryExplicit(cfg) {
-		t.Fatal("env appleVZ memory should be marked explicit")
+	if !AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
+		t.Fatal("env appleVZ numeric settings should be marked explicit")
 	}
 }
 
-func TestAppleVZMemoryPreservesExplicitZero(t *testing.T) {
+func TestAppleVZNumericSettingsPreserveExplicitZero(t *testing.T) {
 	clearConfigEnv(t)
+	fileZeroCPUs := 0
 	fileZero := 0
+	fileZeroDisk := 0
 	cfg := baseConfig()
-	applyFileConfig(&cfg, fileConfig{AppleVZ: &fileAppleVZConfig{MemoryMiB: &fileZero}})
-	if cfg.AppleVZ.MemoryMiB != 0 || !AppleVZMemoryExplicit(cfg) {
-		t.Fatalf("file memory=%d explicit=%v", cfg.AppleVZ.MemoryMiB, AppleVZMemoryExplicit(cfg))
+	applyFileConfig(&cfg, fileConfig{AppleVZ: &fileAppleVZConfig{
+		CPUs:      &fileZeroCPUs,
+		MemoryMiB: &fileZero,
+		DiskGiB:   &fileZeroDisk,
+	}})
+	if cfg.AppleVZ.CPUs != 0 || cfg.AppleVZ.MemoryMiB != 0 || cfg.AppleVZ.DiskGiB != 0 ||
+		!AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
+		t.Fatalf("file appleVZ=%+v explicit=%v/%v/%v", cfg.AppleVZ, AppleVZCPUsExplicit(cfg), AppleVZMemoryExplicit(cfg), AppleVZDiskExplicit(cfg))
 	}
 
 	cfg = baseConfig()
+	t.Setenv("CRABBOX_APPLE_VZ_CPUS", "0")
 	t.Setenv("CRABBOX_APPLE_VZ_MEMORY", "0")
-	applyEnv(&cfg)
-	if cfg.AppleVZ.MemoryMiB != 0 || !AppleVZMemoryExplicit(cfg) {
-		t.Fatalf("env memory=%d explicit=%v", cfg.AppleVZ.MemoryMiB, AppleVZMemoryExplicit(cfg))
+	t.Setenv("CRABBOX_APPLE_VZ_DISK", "0")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVZ.CPUs != 0 || cfg.AppleVZ.MemoryMiB != 0 || cfg.AppleVZ.DiskGiB != 0 ||
+		!AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
+		t.Fatalf("env appleVZ=%+v explicit=%v/%v/%v", cfg.AppleVZ, AppleVZCPUsExplicit(cfg), AppleVZMemoryExplicit(cfg), AppleVZDiskExplicit(cfg))
 	}
 }
 
-func TestAppleVZMemoryRejectsInvalidEnvironmentValue(t *testing.T) {
-	clearConfigEnv(t)
-	cfg := baseConfig()
-	t.Setenv("CRABBOX_APPLE_VZ_MEMORY", "garbage")
-	if err := applyEnv(&cfg); err == nil || !strings.Contains(err.Error(), "CRABBOX_APPLE_VZ_MEMORY must be an integer") {
-		t.Fatalf("applyEnv error=%v", err)
+func TestAppleVZNumericSettingsRejectInvalidEnvironmentValues(t *testing.T) {
+	for _, name := range []string{"CRABBOX_APPLE_VZ_CPUS", "CRABBOX_APPLE_VZ_MEMORY", "CRABBOX_APPLE_VZ_DISK"} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			t.Setenv(name, "garbage")
+			if err := applyEnv(&cfg); err == nil || !strings.Contains(err.Error(), name+" must be an integer") {
+				t.Fatalf("applyEnv error=%v", err)
+			}
+		})
 	}
 }
 

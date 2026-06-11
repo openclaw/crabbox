@@ -72,7 +72,9 @@ installed source binary untouched. Different helper versions can run
 concurrently without replacing each other. A managed helper is refreshed only
 when its signed copy no longer matches the recorded SHA-256 digest. Crabbox
 retains active versions and prunes older inactive copies as new versions are
-installed.
+installed. Existing retained VMs remain manageable through a verified managed
+copy if a custom source helper is later moved or removed; new VM starts still
+require the configured source helper.
 
 For source development:
 
@@ -138,8 +140,9 @@ Defaults:
 | Memory | `8192` MiB |
 | Disk | `30` GiB |
 
-Memory must be at least `1024` MiB, whether configured by file, environment,
-or command-line flag.
+CPU and disk values must be positive. Memory must be at least `1024` MiB.
+These constraints apply consistently to file, environment, and command-line
+configuration.
 
 `--arch arm64` is accepted. Explicit `--arch amd64` is rejected because
 `Virtualization.framework` on Apple Silicon boots ARM64 guests for this

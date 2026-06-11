@@ -192,12 +192,14 @@ provider_smoke() {
 
   local provider="$1"
   shift
+  local CRABBOX_PROVIDER="$provider"
+  export CRABBOX_PROVIDER
   local lease=""
   local slug=""
   cleanup() {
     trap - RETURN ERR
     if [[ -n "$lease" ]]; then
-      stop_lease "$lease" "$slug"
+      stop_provider_lease "$provider" "$lease" "$slug"
       lease=""
       slug=""
     fi
@@ -212,14 +214,14 @@ provider_smoke() {
   test -n "$lease"
   test -n "$slug"
 
-  run_in_repo "$cb" status --id "$slug" --wait --wait-timeout 90s
-  run_in_repo "$cb" inspect --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
-  run_in_repo "$cb" ssh --id "$slug"
+  run_in_repo "$cb" status --provider "$provider" --id "$slug" --wait --wait-timeout 90s
+  run_in_repo "$cb" inspect --provider "$provider" --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
+  run_in_repo "$cb" ssh --provider "$provider" --id "$slug"
   run_in_repo "$cb" cache stats --id "$slug" --json | jq 'if type=="array" then {items:length,kinds:[.[].kind]} else {keys:keys} end'
 
   local runout
   # shellcheck disable=SC2016 # expanded by the remote shell.
-  capture_run runout run_in_repo "$cb" run --id "$slug" --shell -- "$live_command"
+  capture_run runout run_in_repo "$cb" run --provider "$provider" --id "$slug" --shell -- "$live_command"
   printf '%s\n' "$runout"
   local runid
   runid="$(printf '%s\n' "$runout" | rg -o 'run_[a-f0-9]{12}' | tail -1 || true)"
@@ -227,7 +229,7 @@ provider_smoke() {
   if [[ -n "$runid" ]]; then
     run_in_repo "$cb" logs "$runid" | tail -80
   fi
-  stop_lease "$lease" "$slug"
+  stop_provider_lease "$provider" "$lease" "$slug"
   lease=""
 }
 
