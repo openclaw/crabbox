@@ -377,6 +377,7 @@ func (b *isloBackend) Status(ctx context.Context, req StatusRequest) (statusView
 			if _, err := b.ensureLeaseTailscale(ctx, client, name, newLeaseSlug(leaseID), leaseID, false); err != nil {
 				switch {
 				case errors.Is(err, core.ErrTailnetPeerUnavailable):
+					tailscaleValidationErr = err
 				case errors.Is(err, core.ErrTailnetPeerValidationUnavailable):
 					tailscaleValidationErr = err
 				default:
@@ -632,15 +633,19 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 	applyIsloClaimLabels(labels, leaseID)
 	applyIsloTailscaleSandboxState(labels, status)
 	var tailscale *core.TailscaleMetadata
-	if labels["tailscale"] == "true" {
-		claim, _, _ := resolveLeaseClaim(leaseID)
+	claim, claimOK, _ := resolveLeaseClaim(leaseID)
+	if labels["tailscale"] == "true" || (claimOK && isloClaimTailscaleEnrolled(claim)) {
+		tailscaleState := labels["tailscale_state"]
+		if tailscaleState == "" {
+			tailscaleState = "unavailable"
+		}
 		tailscale = &core.TailscaleMetadata{
 			Enabled:                true,
 			Hostname:               claim.TailscaleHostname,
 			FQDN:                   labels["tailscale_fqdn"],
 			IPv4:                   labels["tailscale_ipv4"],
 			Tags:                   append([]string(nil), claim.TailscaleTags...),
-			State:                  labels["tailscale_state"],
+			State:                  tailscaleState,
 			ExitNode:               claim.TailscaleExitNode,
 			ExitNodeAllowLANAccess: claim.TailscaleExitLAN,
 		}
@@ -678,9 +683,13 @@ func applyIsloTailscaleValidationError(view *statusView, err error) {
 	if view == nil || err == nil || view.Tailscale == nil {
 		return
 	}
-	view.Tailscale.State = "unknown"
+	state := "unknown"
+	if errors.Is(err, core.ErrTailnetPeerUnavailable) {
+		state = "unavailable"
+	}
+	view.Tailscale.State = state
 	view.Tailscale.Error = err.Error()
-	view.Labels["tailscale_state"] = "unknown"
+	view.Labels["tailscale_state"] = state
 	view.Labels["tailscale_error"] = err.Error()
 }
 

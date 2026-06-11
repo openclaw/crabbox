@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -293,6 +294,26 @@ func TestIsloStatusViewMarksTailscaleValidationUnknown(t *testing.T) {
 	}
 	if view.Labels["tailscale_state"] != "unknown" || view.Labels["tailscale_error"] == "" {
 		t.Fatalf("tailscale labels=%#v", view.Labels)
+	}
+}
+
+func TestIsloStatusViewPreservesUnavailableEnrollment(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscaleSettings(leaseID, "node-a", []string{"tag:demo"}, "", "", false); err != nil {
+		t.Fatal(err)
+	}
+
+	view := isloStatusView(leaseID, &gosdk.SandboxResponse{Name: "crabbox-node-a", Status: "running"})
+	applyIsloTailscaleValidationError(&view, fmt.Errorf("%w: daemon stopped", core.ErrTailnetPeerUnavailable))
+	if view.Tailscale == nil || !view.Tailscale.Enabled || view.Tailscale.State != "unavailable" {
+		t.Fatalf("tailscale metadata=%#v", view.Tailscale)
+	}
+	if view.Tailscale.Hostname != "node-a" || strings.Join(view.Tailscale.Tags, ",") != "tag:demo" {
+		t.Fatalf("tailscale settings=%#v", view.Tailscale)
 	}
 }
 
