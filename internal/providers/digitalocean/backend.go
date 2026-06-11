@@ -19,7 +19,7 @@ type digitalOceanAPI interface {
 	CreateDroplet(context.Context, core.Config, string, string, string, bool, time.Time) (droplet, error)
 	DeleteDroplet(context.Context, int64) error
 	DeleteSSHKeyByName(context.Context, string) error
-	TagDroplet(context.Context, int64, []string) error
+	ReplaceDropletTags(context.Context, int64, []string, []string) error
 }
 
 type digitalOceanLeaseBackend struct {
@@ -80,6 +80,9 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	if cfg.ServerType == "" {
 		cfg.ServerType = digitalOceanServerTypeForClass(cfg.Class)
 	}
+	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
+		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
+	}
 	now := b.now()
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=digitalocean lease=%s slug=%s type=%s region=%s image=%s keep=%v\n", leaseID, slug, cfg.ServerType, digitalOceanRegion(cfg), digitalOceanImage(cfg), req.Keep)
 	created, err := client.CreateDroplet(ctx, cfg, publicKey, leaseID, slug, req.Keep, now)
@@ -105,7 +108,7 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 		return core.LeaseTarget{}, err
 	}
 	readyTags := leaseTags(cfg, leaseID, slug, "ready", req.Keep, b.now())
-	if err := client.TagDroplet(ctx, created.ID, readyTags); err != nil {
+	if err := client.ReplaceDropletTags(ctx, created.ID, created.Tags, readyTags); err != nil {
 		fmt.Fprintf(b.RT.Stderr, "warning: digitalocean set ready tags: %v\n", err)
 	} else {
 		server.Labels = labelsFromTags(readyTags)
@@ -235,7 +238,11 @@ func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequ
 		delete(labels, "idle_timeout_secs")
 	}
 	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now())
-	if err := client.TagDroplet(ctx, server.ID, tagsFromLabels(labels)); err != nil {
+	item, err := client.GetDroplet(ctx, server.ID)
+	if err != nil {
+		return core.Server{}, err
+	}
+	if err := client.ReplaceDropletTags(ctx, server.ID, item.Tags, tagsFromLabels(labels)); err != nil {
 		return core.Server{}, err
 	}
 	server.Labels = labels

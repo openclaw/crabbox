@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -152,14 +153,24 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
-	key, _, err := c.EnsureSSHKey(ctx, providerKeyForLease(leaseID), publicKey)
+	keyName := providerKeyForLease(leaseID)
+	key, createdKey, err := c.EnsureSSHKey(ctx, keyName, publicKey)
 	if err != nil {
 		return droplet{}, err
+	}
+	rollbackKey := func(cause error) error {
+		if !createdKey {
+			return cause
+		}
+		if cleanupErr := c.DeleteSSHKeyByName(ctx, keyName); cleanupErr != nil {
+			return errors.Join(cause, fmt.Errorf("rollback digitalocean ssh key %s: %w", keyName, cleanupErr))
+		}
+		return cause
 	}
 	tags := leaseTags(cfg, leaseID, slug, "provisioning", keep, now)
 	for _, tag := range tags {
 		if err := c.EnsureTag(ctx, tag); err != nil {
-			return droplet{}, err
+			return droplet{}, rollbackKey(err)
 		}
 	}
 	body := map[string]any{
@@ -180,7 +191,7 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 		Droplet droplet `json:"droplet"`
 	}
 	if err := c.do(ctx, http.MethodPost, "/droplets", body, &res); err != nil {
-		return droplet{}, err
+		return droplet{}, rollbackKey(err)
 	}
 	return res.Droplet, nil
 }
@@ -262,15 +273,29 @@ func (c *digitalOceanClient) EnsureTag(ctx context.Context, tag string) error {
 	return err
 }
 
-func (c *digitalOceanClient) TagDroplet(ctx context.Context, id int64, tags []string) error {
+func (c *digitalOceanClient) ReplaceDropletTags(ctx context.Context, id int64, currentTags, desiredTags []string) error {
+	desiredTags = normalizeTags(desiredTags)
+	desired := make(map[string]bool, len(desiredTags))
+	for _, tag := range desiredTags {
+		desired[tag] = true
+	}
 	resources := make([]map[string]any, 0, 1)
 	resources = append(resources, map[string]any{"resource_id": strconv.FormatInt(id, 10), "resource_type": "droplet"})
-	for _, tag := range tags {
+	for _, tag := range desiredTags {
 		if err := c.EnsureTag(ctx, tag); err != nil {
 			return err
 		}
 		body := map[string]any{"resources": resources}
 		if err := c.do(ctx, http.MethodPost, "/tags/"+url.PathEscape(tag)+"/resources", body, nil); err != nil {
+			return err
+		}
+	}
+	for _, tag := range normalizeTags(currentTags) {
+		if tag == tagCrabbox || !strings.HasPrefix(tag, tagPrefix) || desired[tag] {
+			continue
+		}
+		body := map[string]any{"resources": resources}
+		if err := c.do(ctx, http.MethodDelete, "/tags/"+url.PathEscape(tag)+"/resources", body, nil); err != nil {
 			return err
 		}
 	}

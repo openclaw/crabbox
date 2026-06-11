@@ -20,8 +20,9 @@ type fakeDigitalOceanAPI struct {
 	created        []droplet
 	deleted        []int64
 	deletedKeys    []string
-	tagged         []int64
-	taggedTags     [][]string
+	replaced       []int64
+	replacedFrom   [][]string
+	replacedTo     [][]string
 	createRequests []struct {
 		cfg     core.Config
 		leaseID string
@@ -83,12 +84,18 @@ func (f *fakeDigitalOceanAPI) DeleteSSHKeyByName(_ context.Context, name string)
 	return nil
 }
 
-func (f *fakeDigitalOceanAPI) TagDroplet(_ context.Context, id int64, tags []string) error {
-	f.tagged = append(f.tagged, id)
-	f.taggedTags = append(f.taggedTags, append([]string(nil), tags...))
+func (f *fakeDigitalOceanAPI) ReplaceDropletTags(_ context.Context, id int64, currentTags, desiredTags []string) error {
+	f.replaced = append(f.replaced, id)
+	f.replacedFrom = append(f.replacedFrom, append([]string(nil), currentTags...))
+	f.replacedTo = append(f.replacedTo, append([]string(nil), desiredTags...))
 	for i := range f.created {
 		if f.created[i].ID == id {
-			f.created[i].Tags = tags
+			f.created[i].Tags = desiredTags
+		}
+	}
+	for i := range f.droplets {
+		if f.droplets[i].ID == id {
+			f.droplets[i].Tags = desiredTags
 		}
 	}
 	return nil
@@ -124,8 +131,8 @@ func TestAcquireCreatesDropletClaimsLeaseAndMarksReady(t *testing.T) {
 	if len(api.createRequests) != 1 || api.createRequests[0].slug != "my-app" || !api.createRequests[0].keep {
 		t.Fatalf("createRequests=%#v", api.createRequests)
 	}
-	if len(api.tagged) != 1 || api.tagged[0] != 100 {
-		t.Fatalf("tagged=%v", api.tagged)
+	if len(api.replaced) != 1 || api.replaced[0] != 100 {
+		t.Fatalf("replaced=%v", api.replaced)
 	}
 	if lease.Server.Labels["state"] != "ready" {
 		t.Fatalf("labels=%v", lease.Server.Labels)
@@ -234,12 +241,66 @@ func TestTouchPersistsDigitalOceanTags(t *testing.T) {
 	if touched.Labels["state"] != "running" || touched.Labels["idle_timeout_secs"] != "1200" {
 		t.Fatalf("touched labels=%v", touched.Labels)
 	}
-	if len(api.tagged) != 1 || api.tagged[0] != 99 {
-		t.Fatalf("tagged=%v", api.tagged)
+	if len(api.replaced) != 1 || api.replaced[0] != 99 {
+		t.Fatalf("replaced=%v", api.replaced)
 	}
-	decoded := labelsFromTags(api.taggedTags[0])
+	decoded := labelsFromTags(api.replacedTo[0])
 	if decoded["state"] != "running" || decoded["idle_timeout_secs"] != "1200" {
-		t.Fatalf("persisted labels=%v tags=%v", decoded, api.taggedTags[0])
+		t.Fatalf("persisted labels=%v tags=%v", decoded, api.replacedTo[0])
+	}
+}
+
+func TestTouchReplacesObsoleteMutableTags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = "s-1vcpu-1gb"
+	cfg.TTL = time.Hour
+	cfg.IdleTimeout = 5 * time.Minute
+	item := droplet{ID: 101, Name: "touch", Status: "active", Tags: leaseTags(cfg, "cbx_abcdef123456", "touch-me", "running", false, time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC))}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	backend.RT.Clock = fixedClock{t: time.Date(2026, 6, 10, 12, 10, 0, 0, time.UTC)}
+
+	server := serverFromDroplet(item, backend.Cfg)
+	_, err := backend.Touch(context.Background(), core.TouchRequest{
+		Lease: core.LeaseTarget{Server: server, LeaseID: "cbx_abcdef123456"},
+		State: "ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(api.replacedTo) != 1 {
+		t.Fatalf("replacedTo=%v", api.replacedTo)
+	}
+	for _, tag := range api.replacedTo[0] {
+		if tag == "crabbox:state:running" {
+			t.Fatalf("obsolete running tag persisted: %v", api.replacedTo[0])
+		}
+	}
+	if got := labelsFromTags(api.droplets[0].Tags)["state"]; got != "ready" {
+		t.Fatalf("state=%q tags=%v", got, api.droplets[0].Tags)
+	}
+}
+
+func TestAcquireReadyTagsPreserveRenderedTailscaleHostname(t *testing.T) {
+	api := &fakeDigitalOceanAPI{}
+	backend := newTestBackend(t, api)
+	backend.Cfg.Tailscale.Enabled = true
+	backend.Cfg.Tailscale.AuthKey = "tskey-auth-test"
+	backend.Cfg.Tailscale.HostnameTemplate = "{{slug}}-{{lease}}"
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "tailnet", Keep: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(api.createRequests) != 1 || api.createRequests[0].cfg.Tailscale.Hostname == "" {
+		t.Fatalf("createRequests=%#v", api.createRequests)
+	}
+	if got := lease.Server.Labels["tailscale_hostname"]; got == "" || got == "unknown" {
+		t.Fatalf("tailscale hostname=%q labels=%v", got, lease.Server.Labels)
+	}
+	if lease.Server.Labels["tailscale_hostname"] != api.createRequests[0].cfg.Tailscale.Hostname {
+		t.Fatalf("ready hostname=%q create hostname=%q", lease.Server.Labels["tailscale_hostname"], api.createRequests[0].cfg.Tailscale.Hostname)
 	}
 }
 
