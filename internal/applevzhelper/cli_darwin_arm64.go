@@ -26,6 +26,8 @@ var (
 	prepareInstanceAssetsFunc  = prepareInstanceAssets
 	helperExecutable           = os.Executable
 	processStartTime           = readProcessStartTime
+	processAlive               = pidAlive
+	signalProcess              = sendProcessSignal
 	writeMetadataFunc          = writeMetadata
 	runStartReadyTimeout       = 45 * time.Second
 	runStartPollInterval       = 250 * time.Millisecond
@@ -545,24 +547,41 @@ func runDelete(args []string, stdout, stderr io.Writer) error {
 
 func terminateInstance(stateRoot, name string, inst Instance) error {
 	pid := inst.PID
-	if pid > 0 && pidAlive(pid) {
+	if pid > 0 && processAlive(pid) {
 		matches, err := processIdentityMatches(inst)
 		if err != nil {
-			if pidAlive(pid) {
+			if processAlive(pid) {
 				return fmt.Errorf("verify helper process %d identity: %w", pid, err)
 			}
 		} else if matches {
-			process, err := os.FindProcess(pid)
-			if err != nil {
-				return fmt.Errorf("find helper process %d: %w", pid, err)
+			if err := signalProcess(pid, syscall.SIGTERM); err != nil && processAlive(pid) {
+				return fmt.Errorf("signal helper process %d: %w", pid, err)
 			}
-			_ = process.Signal(syscall.SIGTERM)
 			deadline := time.Now().Add(terminateInstanceGraceTime)
-			for pidAlive(pid) && time.Now().Before(deadline) {
+			for processAlive(pid) && time.Now().Before(deadline) {
+				matches, err := processIdentityMatches(inst)
+				if err != nil {
+					if processAlive(pid) {
+						return fmt.Errorf("reverify helper process %d identity: %w", pid, err)
+					}
+					break
+				}
+				if !matches {
+					break
+				}
 				time.Sleep(terminateInstancePollTime)
 			}
-			if pidAlive(pid) {
-				_ = process.Signal(syscall.SIGKILL)
+			if processAlive(pid) {
+				matches, err := processIdentityMatches(inst)
+				if err != nil {
+					if processAlive(pid) {
+						return fmt.Errorf("reverify helper process %d identity before kill: %w", pid, err)
+					}
+				} else if matches {
+					if err := signalProcess(pid, syscall.SIGKILL); err != nil && processAlive(pid) {
+						return fmt.Errorf("kill helper process %d: %w", pid, err)
+					}
+				}
 			}
 		}
 	}
@@ -570,6 +589,14 @@ func terminateInstance(stateRoot, name string, inst Instance) error {
 		return fmt.Errorf("remove instance directory: %w", err)
 	}
 	return nil
+}
+
+func sendProcessSignal(pid int, signal os.Signal) error {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return process.Signal(signal)
 }
 
 func processIdentityMatches(inst Instance) (bool, error) {

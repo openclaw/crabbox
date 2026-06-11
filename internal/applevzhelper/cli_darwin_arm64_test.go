@@ -529,6 +529,62 @@ func TestTerminateInstanceSignalsOnlyMatchingPIDIdentity(t *testing.T) {
 	}
 }
 
+func TestTerminateInstanceRechecksIdentityBeforeKill(t *testing.T) {
+	root := t.TempDir()
+	name := "pid-reused-during-stop"
+	mustCreateInstanceDir(t, root, name)
+
+	originalProcessStartTime := processStartTime
+	originalProcessAlive := processAlive
+	originalSignalProcess := signalProcess
+	originalTerminateGrace := terminateInstanceGraceTime
+	originalTerminatePoll := terminateInstancePollTime
+	t.Cleanup(func() {
+		processStartTime = originalProcessStartTime
+		processAlive = originalProcessAlive
+		signalProcess = originalSignalProcess
+		terminateInstanceGraceTime = originalTerminateGrace
+		terminateInstancePollTime = originalTerminatePoll
+	})
+
+	identityChecks := 0
+	processStartTime = func(pid int) (string, error) {
+		if pid != 4242 {
+			t.Fatalf("processStartTime pid=%d want 4242", pid)
+		}
+		identityChecks++
+		if identityChecks == 1 {
+			return "original-start", nil
+		}
+		return "replacement-start", nil
+	}
+	processAlive = func(int) bool { return true }
+	var signals []os.Signal
+	signalProcess = func(pid int, signal os.Signal) error {
+		if pid != 4242 {
+			t.Fatalf("signal pid=%d want 4242", pid)
+		}
+		signals = append(signals, signal)
+		return nil
+	}
+	terminateInstanceGraceTime = time.Second
+	terminateInstancePollTime = time.Millisecond
+
+	err := terminateInstance(root, name, Instance{PID: 4242, PIDStartedAt: "original-start"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != 1 || signals[0] != syscall.SIGTERM {
+		t.Fatalf("signals=%v, want SIGTERM only", signals)
+	}
+	if identityChecks < 2 {
+		t.Fatalf("identity checks=%d, want revalidation after SIGTERM", identityChecks)
+	}
+	if _, err := os.Stat(InstanceDir(root, name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("instance directory stat error=%v, want os.ErrNotExist", err)
+	}
+}
+
 func TestNormalizeInstanceMarksReusedPIDStopped(t *testing.T) {
 	originalProcessStartTime := processStartTime
 	t.Cleanup(func() { processStartTime = originalProcessStartTime })

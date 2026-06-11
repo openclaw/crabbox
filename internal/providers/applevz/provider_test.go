@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -255,6 +256,9 @@ func TestDoctorPassesSignedImageViaStdinAndRedactsDisplay(t *testing.T) {
 	b := testBackend(t, runner)
 	signedImage := "https://downloads.example.test/bearer-secret/ubuntu.img"
 	t.Setenv("CRABBOX_APPLE_VZ_IMAGE", signedImage)
+	t.Setenv("GITHUB_TOKEN", "github-secret")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+	t.Setenv("HTTPS_PROXY", "http://proxy.example.test:8080")
 	b.cfg.AppleVZ.Image = signedImage
 	b.cfg.AppleVZ.ImageSHA256 = strings.Repeat("a", 64)
 	applyDefaults(&b.cfg)
@@ -270,6 +274,12 @@ func TestDoctorPassesSignedImageViaStdinAndRedactsDisplay(t *testing.T) {
 			if strings.HasPrefix(entry, "CRABBOX_APPLE_VZ_IMAGE=") {
 				t.Fatalf("helper environment exposes signed image")
 			}
+			if strings.HasPrefix(entry, "GITHUB_TOKEN=") || strings.HasPrefix(entry, "AWS_SECRET_ACCESS_KEY=") {
+				t.Fatalf("helper environment exposes caller credential: %s", strings.SplitN(entry, "=", 2)[0])
+			}
+		}
+		if !slices.Contains(req.Env, "HTTPS_PROXY=http://proxy.example.test:8080") {
+			t.Fatalf("helper environment missing configured HTTPS proxy: %q", req.Env)
 		}
 		data, err := io.ReadAll(req.Stdin)
 		if err != nil {
@@ -705,6 +715,37 @@ func TestEnsureHelperBinarySignsOnlyWhenSourceChanges(t *testing.T) {
 	}
 	if string(data) != "other" {
 		t.Fatalf("managed helper=%q want changed source", string(data))
+	}
+}
+
+func TestResolveHelperSourcePathDoesNotTrustCheckoutBin(t *testing.T) {
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(originalDir) })
+	checkout := t.TempDir()
+	binDir := filepath.Join(checkout, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	checkoutHelper := filepath.Join(binDir, applevzhelper.ManagedHelperName)
+	if err := os.WriteFile(checkoutHelper, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(checkout); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+
+	cfg := core.BaseConfig()
+	cfg.AppleVZ.HelperPath = ""
+	path, err := resolveHelperSourcePath(cfg)
+	if err == nil {
+		t.Fatalf("resolveHelperSourcePath trusted checkout helper %q", path)
+	}
+	if strings.Contains(err.Error(), checkoutHelper) {
+		t.Fatalf("error exposes or selects checkout helper: %v", err)
 	}
 }
 

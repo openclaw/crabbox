@@ -707,15 +707,29 @@ func (b *backend) runHelperJSONInput(ctx context.Context, helperPath string, arg
 }
 
 func appleVZHelperEnv() []string {
-	env := os.Environ()
-	filtered := make([]string, 0, len(env))
-	for _, entry := range env {
-		if strings.HasPrefix(entry, "CRABBOX_APPLE_VZ_IMAGE=") {
-			continue
-		}
-		filtered = append(filtered, entry)
+	env := []string{
+		"PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+		"LC_ALL=C",
+		"LANG=C",
+		"TZ=UTC",
 	}
-	return filtered
+	for _, name := range []string{
+		"HOME",
+		"TMPDIR",
+		"HTTP_PROXY",
+		"HTTPS_PROXY",
+		"NO_PROXY",
+		"http_proxy",
+		"https_proxy",
+		"no_proxy",
+		"SSL_CERT_FILE",
+		"SSL_CERT_DIR",
+	} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			env = append(env, name+"="+value)
+		}
+	}
+	return env
 }
 
 func ensurePrivateDir(path string) error {
@@ -835,16 +849,10 @@ func resolveHelperSourcePath(cfg core.Config) (string, error) {
 			return sibling, nil
 		}
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		devPath := filepath.Join(cwd, "bin", applevzhelper.ManagedHelperName)
-		if _, err := os.Stat(devPath); err == nil {
-			return devPath, nil
-		}
-	}
 	if path, err := exec.LookPath(applevzhelper.ManagedHelperName); err == nil {
 		return path, nil
 	}
-	return "", exit(2, "apple-vz helper binary not found. Reinstall Crabbox on Apple Silicon, build it with `go build -o ./bin/%s ./cmd/%s`, put `%s` on PATH, or pass --apple-vz-helper", applevzhelper.ManagedHelperName, applevzhelper.ManagedHelperName, applevzhelper.ManagedHelperName)
+	return "", exit(2, "apple-vz helper binary not found. Reinstall Crabbox on Apple Silicon, put `%s` on PATH, or explicitly pass --apple-vz-helper for a source build", applevzhelper.ManagedHelperName)
 }
 
 func managedHelperCurrent(managedPath, digestPath, sourceDigest, entitlementsDigest string) bool {
