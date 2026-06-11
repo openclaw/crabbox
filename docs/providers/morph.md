@@ -144,8 +144,9 @@ crabbox stop --provider morph blue-lobster
 - `morph.snapshot` is required for new leases. Existing leases can still be
   resolved by lease id, slug, or instance id.
 - The SSH hostname is the shared gateway, not the instance-specific hostname,
-  so `status` shows the gateway target for SSH and the instance hostname only as
-  provider metadata when Morph reports one.
+  so `status` shows the gateway target for SSH. Morph-reported networking remains
+  available in `morph_hostname`, `morph_external_ip`, and `morph_internal_ip`
+  labels when present.
 
 ## Live testing
 

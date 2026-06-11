@@ -707,6 +707,15 @@ func morphServer(instance morphInstance, cfg Config, leaseID, slug string) Serve
 	if labels["snapshot_id"] == "" && instance.Refs.SnapshotID != "" {
 		labels["snapshot_id"] = instance.Refs.SnapshotID
 	}
+	if instance.Networking.Hostname != "" {
+		labels["morph_hostname"] = instance.Networking.Hostname
+	}
+	if instance.Networking.ExternalIP != "" {
+		labels["morph_external_ip"] = instance.Networking.ExternalIP
+	}
+	if instance.Networking.InternalIP != "" {
+		labels["morph_internal_ip"] = instance.Networking.InternalIP
+	}
 	state := morphLeaseState(instance)
 	if state != "" {
 		labels["state"] = state
@@ -719,7 +728,7 @@ func morphServer(instance morphInstance, cfg Config, leaseID, slug string) Serve
 		Labels:   labels,
 	}
 	server.ServerType.Name = blank(labels["server_type"], blank(labels["snapshot_id"], blank(cfg.ServerType, "snapshot")))
-	server.PublicNet.IPv4.IP = blank(instance.Networking.Hostname, blank(instance.Networking.ExternalIP, instance.Networking.InternalIP))
+	server.PublicNet.IPv4.IP = blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), "ssh.cloud.morph.so")
 	return server
 }
 

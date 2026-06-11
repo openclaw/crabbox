@@ -562,6 +562,33 @@ func TestMorphReadyCheckIncludesSyncPrerequisites(t *testing.T) {
 	}
 }
 
+func TestMorphServerReportsGatewayAndProviderNetworking(t *testing.T) {
+	cfg := testMorphConfig()
+	cfg.Morph.SSHGatewayHost = "gateway.morph.test"
+	server := morphServer(morphInstance{
+		ID:     "inst_network",
+		Status: "ready",
+		Networking: morphNetworking{
+			Hostname:   "instance.morph.internal",
+			ExternalIP: "203.0.113.10",
+			InternalIP: "10.0.0.10",
+		},
+	}, cfg, "cbx_network", "network-test")
+
+	if server.PublicNet.IPv4.IP != "gateway.morph.test" {
+		t.Fatalf("server host=%q", server.PublicNet.IPv4.IP)
+	}
+	for key, want := range map[string]string{
+		"morph_hostname":    "instance.morph.internal",
+		"morph_external_ip": "203.0.113.10",
+		"morph_internal_ip": "10.0.0.10",
+	} {
+		if server.Labels[key] != want {
+			t.Fatalf("label %s=%q want %q", key, server.Labels[key], want)
+		}
+	}
+}
+
 func TestMorphResolveRejectsUnsafeMetadataLeaseID(t *testing.T) {
 	home := t.TempDir()
 	configDir := filepath.Join(home, ".config")
