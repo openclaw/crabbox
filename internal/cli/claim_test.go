@@ -321,6 +321,88 @@ func TestConditionalClaimDeleteRejectsChangedState(t *testing.T) {
 	}
 }
 
+func TestConditionalClaimHelpersAndExactResolution(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_helperclaim123"
+	slug := "helper-claim"
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	server := Server{
+		Provider: "aws",
+		CloudID:  "i-123",
+		Labels:   map[string]string{"lease": leaseID, "slug": slug, "provider": "aws"},
+	}
+	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.CloudID = "i-456"
+	server.Labels["state"] = "ready"
+	updated, err := updateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID, expected, server, SSHTarget{Host: "203.0.113.10", Port: "22"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.CloudID != "i-456" || updated.SSHHost != "203.0.113.10" || updated.Labels["state"] != "ready" {
+		t.Fatalf("updated claim=%#v", updated)
+	}
+
+	labels := cloneStringMap(updated.Labels)
+	labels["state"] = "cleanup"
+	labeled, err := updateLeaseClaimLabelsIfUnchanged(leaseID, updated, labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if labeled.Labels["state"] != "cleanup" {
+		t.Fatalf("labeled claim=%#v", labeled)
+	}
+	if _, err := updateLeaseClaimLabelsIfUnchanged(leaseID, updated, labels); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("stale label update err=%v", err)
+	}
+	if empty, err := updateLeaseClaimLabelsIfUnchanged("", leaseClaim{}, nil); err != nil || empty.LeaseID != "" {
+		t.Fatalf("empty label update=%#v err=%v", empty, err)
+	}
+
+	exact, ok, exactFile, err := resolveLeaseClaimForProviderWithExact(leaseID, "aws")
+	if err != nil || !ok || !exactFile || exact.LeaseID != leaseID {
+		t.Fatalf("exact claim=%#v ok=%v exact=%v err=%v", exact, ok, exactFile, err)
+	}
+	foreign, ok, exactFile, err := resolveLeaseClaimForProviderWithExact(leaseID, "gcp")
+	if err != nil || ok || !exactFile || foreign.LeaseID != leaseID {
+		t.Fatalf("foreign exact claim=%#v ok=%v exact=%v err=%v", foreign, ok, exactFile, err)
+	}
+	alias, ok, exactFile, err := resolveLeaseClaimForProviderWithExact(slug, "aws")
+	if err != nil || !ok || exactFile || alias.LeaseID != leaseID {
+		t.Fatalf("alias claim=%#v ok=%v exact=%v err=%v", alias, ok, exactFile, err)
+	}
+	if empty, ok, exactFile, err := resolveLeaseClaimForProviderWithExact("", "aws"); err != nil || ok || exactFile || empty.LeaseID != "" {
+		t.Fatalf("empty exact claim=%#v ok=%v exact=%v err=%v", empty, ok, exactFile, err)
+	}
+
+	for identifier, want := range map[string]bool{
+		"":            false,
+		leaseID:       true,
+		"i-456":       true,
+		slug:          true,
+		"not-a-match": false,
+	} {
+		if got := leaseClaimMatchesIdentifier(labeled, identifier); got != want {
+			t.Fatalf("leaseClaimMatchesIdentifier(%q)=%v want %v", identifier, got, want)
+		}
+	}
+	if exists, err := leaseClaimExists(leaseID); err != nil || !exists {
+		t.Fatalf("existing claim exists=%v err=%v", exists, err)
+	}
+	if exists, err := leaseClaimExists("cbx_missingclaim123"); err != nil || exists {
+		t.Fatalf("missing claim exists=%v err=%v", exists, err)
+	}
+	if exists, err := leaseClaimExists("../invalid"); err != nil || exists {
+		t.Fatalf("invalid claim exists=%v err=%v", exists, err)
+	}
+}
+
 func TestResolveLeaseClaimForProviderCloudIDRejectsDuplicates(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := baseConfig()
