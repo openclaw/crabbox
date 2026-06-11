@@ -145,6 +145,8 @@ stopped daemon recover without reusing a one-off auth key. The control socket is
 revalidated before lease reuse, status reporting, and `pond peers`; if neither
 saved state nor a usable auth key can restore the daemon, stale tailnet claim
 metadata is removed and the lease falls back to its URL bridge.
+Read-only `status` and `pond peers` checks do not run the long repair path;
+lease reuse through `run` performs saved-state recovery.
 Unproxied process traffic still uses the sandbox's normal network namespace.
 Exit-node settings are passed through to `tailscale up`, but only traffic sent
 through the userspace Tailscale path uses them.

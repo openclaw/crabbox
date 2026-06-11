@@ -58,19 +58,18 @@ umask 077
 : "${TS_STATE_DIR:?}"
 mkdir -p "${TS_STATE_DIR}"
 chmod 700 "${TS_STATE_DIR}"
-TS_LOCK_DIR="${TS_STATE_DIR}/operation.lock"
+TS_LOCK_FILE="${TS_STATE_DIR}/operation.lock"
 TS_LOCKED=""
 for _ in $(seq 1 720); do
-  if mkdir "${TS_LOCK_DIR}" 2>/dev/null; then
-    printf '%s\n' "$$" >"${TS_LOCK_DIR}/pid"
+  if (set -o noclobber; printf '%s\n' "$$" >"${TS_LOCK_FILE}") 2>/dev/null; then
     TS_LOCKED=1
     break
   fi
-  lock_pid="$(cat "${TS_LOCK_DIR}/pid" 2>/dev/null || true)"
-  if [ -n "${lock_pid}" ] && ! kill -0 "${lock_pid}" 2>/dev/null; then
-    rm -rf "${TS_LOCK_DIR}"
-    continue
-  fi
+  lock_pid="$(cat "${TS_LOCK_FILE}" 2>/dev/null || true)"
+  case "${lock_pid}" in
+    ""|*[!0-9]*) rm -f "${TS_LOCK_FILE}"; continue ;;
+  esac
+  if ! kill -0 "${lock_pid}" 2>/dev/null; then rm -f "${TS_LOCK_FILE}"; continue; fi
   sleep 0.5
 done
 test "${TS_LOCKED}" = 1 || { echo "timed out waiting for tailscale operation lock" >&2; exit 75; }
@@ -85,7 +84,7 @@ if [ -n "${TS_AUTHKEY}" ]; then
 fi
 unset TS_AUTHKEY
 TS_INSTALL_DIR="$(mktemp -d "${TS_STATE_DIR}/install.XXXXXX")"
-trap 'if [ -n "${TS_AUTH_FILE}" ]; then rm -f "${TS_AUTH_FILE}"; fi; rm -rf "${TS_INSTALL_DIR}"; if [ "${TS_LOCKED}" = 1 ]; then rm -rf "${TS_LOCK_DIR}"; fi' EXIT
+trap 'if [ -n "${TS_AUTH_FILE}" ]; then rm -f "${TS_AUTH_FILE}"; fi; rm -rf "${TS_INSTALL_DIR}"; if [ "${TS_LOCKED}" = 1 ]; then rm -f "${TS_LOCK_FILE}"; fi' EXIT
 case "$(uname -m)" in
   x86_64) A=amd64; TS_SHA256=` + defaultIsloTailscaleAMD64SHA256 + ` ;;
   aarch64|arm64) A=arm64; TS_SHA256=` + defaultIsloTailscaleARM64SHA256 + ` ;;
@@ -136,7 +135,7 @@ done
 if [ -z "${ts_ip}" ]; then
   if [ -z "${TS_AUTH_FILE}" ]; then
     case "${backend_state}" in
-      Starting|Running|NeedsMachineAuth) echo "tailscale recovery is still starting" >&2; exit 75 ;;
+      Starting|Running) echo "tailscale recovery is still starting" >&2; exit 75 ;;
       Stopped) : ;;
       *) echo "tailscale state unavailable and no auth key provided" >&2; exit 4 ;;
     esac
@@ -275,7 +274,7 @@ func (b *isloBackend) runTailscaleBringUp(ctx context.Context, client isloAPI, s
 	return updateLeaseClaimTailscale(leaseID, m[1], "")
 }
 
-func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, sandboxName, slug, leaseID string) (core.TailscaleMetadata, error) {
+func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, sandboxName, slug, leaseID string, repair bool) (core.TailscaleMetadata, error) {
 	claim, ok, err := resolveLeaseClaim(leaseID)
 	if err != nil {
 		return core.TailscaleMetadata{}, err
@@ -324,6 +323,12 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 			return core.TailscaleMetadata{Enabled: true, IPv4: match[1], FQDN: claim.TailscaleFQDN, State: "ready"}, nil
 		}
 		return core.TailscaleMetadata{}, fmt.Errorf("%w: health check returned no tailnet address", core.ErrTailnetPeerValidationUnavailable)
+	}
+	if !repair {
+		if err := clearLeaseClaimTailscale(leaseID); err != nil {
+			return core.TailscaleMetadata{}, err
+		}
+		return core.TailscaleMetadata{}, fmt.Errorf("%w: health check reported tailnet unavailable", core.ErrTailnetPeerUnavailable)
 	}
 	restart := *b
 	restart.cfg.Tailscale.Enabled = true
@@ -377,7 +382,7 @@ func (b *isloBackend) ValidateTailnetPeer(ctx context.Context, leaseID string) (
 		return core.TailscaleMetadata{}, fmt.Errorf("%w: %v", core.ErrTailnetPeerValidationUnavailable, err)
 	}
 	name := strings.TrimPrefix(leaseID, isloLeasePrefix)
-	return b.ensureLeaseTailscale(ctx, client, name, claim.Slug, leaseID)
+	return b.ensureLeaseTailscale(ctx, client, name, claim.Slug, leaseID, false)
 }
 
 func isloTailscaleStateDir(leaseID string) string {

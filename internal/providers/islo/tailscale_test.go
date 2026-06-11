@@ -96,10 +96,11 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		"--outbound-http-proxy-listen=127.0.0.2:1055",
 		`--state="${TS_STATE_FILE}"`,
 		`if [ -z "${TS_AUTH_FILE}" ]; then`,
-		`Starting|Running|NeedsMachineAuth)`,
+		`Starting|Running)`,
 		`TS_AUTH_FILE="$(mktemp "${TS_RUNTIME_DIR}/auth.XXXXXX")"`,
 		`TS_INSTALL_DIR="$(mktemp -d "${TS_STATE_DIR}/install.XXXXXX")"`,
-		`TS_LOCK_DIR="${TS_STATE_DIR}/operation.lock"`,
+		`TS_LOCK_FILE="${TS_STATE_DIR}/operation.lock"`,
+		`set -o noclobber`,
 		`kill -0 "${lock_pid}"`,
 		`rm -f "${TS_RUNTIME_DIR}"/auth.*`,
 		`TS_ARCHIVE="${TS_INSTALL_DIR}/tailscale.tgz"`,
@@ -130,8 +131,8 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 	if strings.Contains(isloTailscaleBringUp, "--state=mem:") {
 		t.Fatal("bring-up script must retain node state for one-off auth keys")
 	}
-	if strings.Contains(isloTailscaleBringUp, `Starting|Running|NeedsMachineAuth|"")`) {
-		t.Fatal("an empty backend state after the recovery wait must fail closed")
+	if strings.Contains(isloTailscaleBringUp, `Starting|Running|NeedsMachineAuth`) || strings.Contains(isloTailscaleBringUp, `Starting|Running|"")`) {
+		t.Fatal("machine approval and empty backend states must fail closed")
 	}
 	if strings.Index(isloTailscaleBringUp, "unset TS_AUTHKEY") > strings.Index(isloTailscaleBringUp, `setsid "${TS_BIN_DIR}/tailscaled"`) {
 		t.Fatal("bring-up script must unset the auth key before starting tailscaled")
@@ -166,7 +167,7 @@ func TestEnsureLeaseTailscaleRevalidatesAsRoot(t *testing.T) {
 	client := &fakeIsloSyncClient{execOut: "CRABBOX_TS_IP=100.64.7.8"}
 	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
 
-	meta, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID)
+	meta, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +223,7 @@ func TestEnsureLeaseTailscaleClearsDeadClaimWithoutAuthKey(t *testing.T) {
 	client := &fakeIsloSyncClient{execCode: 1}
 	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
 
-	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID); err == nil {
+	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID, true); err == nil {
 		t.Fatal("expected dead daemon error")
 	}
 	claim, ok, err := resolveLeaseClaim(leaseID)
@@ -231,6 +232,36 @@ func TestEnsureLeaseTailscaleClearsDeadClaimWithoutAuthKey(t *testing.T) {
 	}
 	if claim.TailscaleIPv4 != "" || claim.Labels["tailscale"] != "" {
 		t.Fatalf("stale tailnet metadata not cleared: %#v", claim)
+	}
+}
+
+func TestEnsureLeaseTailscaleReadOnlyValidationDoesNotRepair(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscaleSettings(leaseID, "node-a", nil, "", "", false); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{execCode: 1}
+	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
+
+	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID, false); !errors.Is(err, core.ErrTailnetPeerUnavailable) {
+		t.Fatalf("expected unavailable tailnet, got %v", err)
+	}
+	if len(client.execRequests) != 1 {
+		t.Fatalf("read-only validation attempted repair: requests=%d", len(client.execRequests))
+	}
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("resolve claim ok=%t err=%v", ok, err)
+	}
+	if claim.TailscaleIPv4 != "" || claim.TailscaleHostname != "node-a" {
+		t.Fatalf("read-only validation should clear endpoint but preserve enrollment: %#v", claim)
 	}
 }
 
@@ -246,7 +277,7 @@ func TestEnsureLeaseTailscalePreservesClaimWhenValidationCannotRun(t *testing.T)
 	client := &fakeIsloSyncClient{execErr: errors.New("API unavailable")}
 	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
 
-	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID); !errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
+	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID, false); !errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
 		t.Fatalf("expected validation unavailable, got %v", err)
 	}
 	claim, ok, err := resolveLeaseClaim(leaseID)
@@ -270,7 +301,7 @@ func TestEnsureLeaseTailscalePreservesClaimWhileRecoveryStarts(t *testing.T) {
 	client := &fakeIsloSyncClient{execCodes: []int{1, isloTailscaleRecoveryPendingExitCode}}
 	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
 
-	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID); !errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
+	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID, true); !errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
 		t.Fatalf("expected recovery-pending validation error, got %v", err)
 	}
 	claim, ok, err := resolveLeaseClaim(leaseID)
@@ -291,7 +322,7 @@ func TestEnsureLeaseTailscaleClearsClaimForMissingSandbox(t *testing.T) {
 	client := &fakeIsloSyncClient{getSandboxGone: true}
 	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
 
-	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID); !errors.Is(err, core.ErrTailnetPeerUnavailable) {
+	if _, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID, false); !errors.Is(err, core.ErrTailnetPeerUnavailable) {
 		t.Fatalf("expected missing sandbox to be unavailable, got %v", err)
 	}
 	claim, ok, err := resolveLeaseClaim(leaseID)
@@ -335,7 +366,7 @@ func TestEnsureLeaseTailscaleRestartsFromStateWithPondTag(t *testing.T) {
 		rt: Runtime{Stderr: io.Discard},
 	}
 
-	meta, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID)
+	meta, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +408,7 @@ func TestEnsureLeaseTailscaleRejoinsFromSavedEnrollmentSettings(t *testing.T) {
 		rt:  Runtime{Stderr: io.Discard},
 	}
 
-	meta, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID)
+	meta, err := backend.ensureLeaseTailscale(context.Background(), client, "crabbox-node-a", "node-a", leaseID, true)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -189,13 +189,13 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			}
 		}
 		if b.cfg.Tailscale.Enabled {
-			meta, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID)
+			meta, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID, true)
 			if err != nil {
 				return RunResult{}, err
 			}
 			tailnetReady = meta.Enabled
 		} else {
-			meta, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID)
+			meta, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID, true)
 			if err != nil &&
 				!errors.Is(err, core.ErrTailnetPeerUnavailable) &&
 				!errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
@@ -374,7 +374,7 @@ func (b *isloBackend) Status(ctx context.Context, req StatusRequest) (statusView
 		}
 		var tailscaleValidationErr error
 		if sandbox != nil && isloStatusReady(sandbox.GetStatus()) {
-			if _, err := b.ensureLeaseTailscale(ctx, client, name, newLeaseSlug(leaseID), leaseID); err != nil {
+			if _, err := b.ensureLeaseTailscale(ctx, client, name, newLeaseSlug(leaseID), leaseID, false); err != nil {
 				switch {
 				case errors.Is(err, core.ErrTailnetPeerUnavailable):
 				case errors.Is(err, core.ErrTailnetPeerValidationUnavailable):
