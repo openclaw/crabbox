@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ocAPIClient is a thin REST client for the OpenComputer control plane. The
@@ -72,6 +74,12 @@ type ocAPIError struct {
 	err        error
 }
 
+const (
+	defaultOCControlRequestTimeout = 2 * time.Minute
+	defaultOCExecRequestTimeout    = time.Hour
+	ocExecRequestGrace             = 30 * time.Second
+)
+
 func (e *ocAPIError) Error() string { return e.err.Error() }
 func (e *ocAPIError) Unwrap() error { return e.err }
 
@@ -83,20 +91,92 @@ func newOCAPIClient(cfg Config, rt Runtime) (*ocAPIClient, error) {
 	// API URL precedence: an explicit trusted Crabbox setting, then the `oc` CLI
 	// config file's api_url, then the built-in default. Repository YAML cannot
 	// populate cfg.OpenComputer.APIURL.
-	baseURL := strings.TrimRight(blank(strings.TrimSpace(cfg.OpenComputer.APIURL), blank(strings.TrimSpace(fileCfg.APIURL), defaultAPIURL)), "/")
+	baseURL, err := validateOCAPIURL(blank(strings.TrimSpace(cfg.OpenComputer.APIURL), blank(strings.TrimSpace(fileCfg.APIURL), defaultAPIURL)))
+	if err != nil {
+		return nil, err
+	}
 	apiKey := firstNonEmpty(
 		os.Getenv("CRABBOX_OPENCOMPUTER_API_KEY"),
 		os.Getenv("OPENCOMPUTER_API_KEY"),
 		fileCfg.APIKey,
 	)
 	if apiKey == "" {
-		return nil, exit(2, "provider=opencomputer needs an API key; set it with `oc config set api-key <key>` or CRABBOX_OPENCOMPUTER_API_KEY")
+		return nil, exit(2, "provider=opencomputer needs an API key; load CRABBOX_OPENCOMPUTER_API_KEY from a secret manager or configure an existing oc CLI credential")
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &ocAPIClient{http: httpClient, baseURL: baseURL, apiKey: apiKey}, nil
+	return &ocAPIClient{http: secureOCAPIClient(httpClient, baseURL), baseURL: baseURL, apiKey: apiKey}, nil
+}
+
+func validateOCAPIURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
+		return "", exit(2, "provider=opencomputer API URL must be an absolute HTTPS URL")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", exit(2, "provider=opencomputer API URL must not contain userinfo, query parameters, or a fragment")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
+		return "", exit(2, "provider=opencomputer API URL must use HTTPS except for loopback development endpoints")
+	}
+	cleanPath := strings.TrimRight(parsed.Path, "/")
+	if strings.HasSuffix(cleanPath, "/api") {
+		cleanPath = strings.TrimSuffix(cleanPath, "/api")
+	}
+	parsed.Path = cleanPath
+	parsed.RawPath = ""
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func secureOCAPIClient(source *http.Client, baseURL string) *http.Client {
+	client := *source
+	trusted, _ := url.Parse(baseURL)
+	originalCheckRedirect := source.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !sameOCOrigin(trusted, req.URL) {
+			return fmt.Errorf("opencomputer refused cross-origin redirect to %s", req.URL.Redacted())
+		}
+		if originalCheckRedirect != nil {
+			return originalCheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &client
+}
+
+func sameOCOrigin(a, b *url.URL) bool {
+	return a != nil && b != nil &&
+		strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectiveOCPort(a) == effectiveOCPort(b)
+}
+
+func effectiveOCPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 func (c *ocAPIClient) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
@@ -111,6 +191,12 @@ func (c *ocAPIClient) newRequest(ctx context.Context, method, path string, body 
 // doJSON sends an optional JSON body and decodes a JSON response into out
 // (out may be nil). Non-2xx responses become errors carrying the response body.
 func (c *ocAPIClient) doJSON(ctx context.Context, method, path string, body, out any) error {
+	return c.doJSONWithTimeout(ctx, defaultOCControlRequestTimeout, method, path, body, out)
+}
+
+func (c *ocAPIClient) doJSONWithTimeout(ctx context.Context, timeout time.Duration, method, path string, body, out any) error {
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -119,7 +205,7 @@ func (c *ocAPIClient) doJSON(ctx context.Context, method, path string, body, out
 		}
 		reader = bytes.NewReader(buf)
 	}
-	req, err := c.newRequest(ctx, method, path, reader)
+	req, err := c.newRequest(requestCtx, method, path, reader)
 	if err != nil {
 		return fmt.Errorf("opencomputer request %s: %w", path, err)
 	}
@@ -174,7 +260,11 @@ func (c *ocAPIClient) killSandbox(ctx context.Context, id string) error {
 
 func (c *ocAPIClient) execRun(ctx context.Context, id string, req execRunRequest) (execRunResult, error) {
 	var res execRunResult
-	if err := c.doJSON(ctx, http.MethodPost, "/api/sandboxes/"+url.PathEscape(id)+"/exec/run", req, &res); err != nil {
+	timeout := defaultOCExecRequestTimeout
+	if req.Timeout > 0 {
+		timeout = time.Duration(req.Timeout) * time.Second
+	}
+	if err := c.doJSONWithTimeout(ctx, timeout+ocExecRequestGrace, http.MethodPost, "/api/sandboxes/"+url.PathEscape(id)+"/exec/run", req, &res); err != nil {
 		return execRunResult{}, err
 	}
 	return res, nil

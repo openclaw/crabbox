@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	osexec "os/exec"
 	"path"
@@ -18,6 +19,12 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 // --- pure-function tests -----------------------------------------------------
 
@@ -934,6 +941,157 @@ func TestAPIURLPrecedenceHonorsOCConfig(t *testing.T) {
 	}
 	if api.baseURL != "https://explicit.example" {
 		t.Fatalf("baseURL=%q want explicit override", api.baseURL)
+	}
+}
+
+func TestAPIURLRejectsUnsafeCredentialDestinations(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_test")
+	t.Setenv("OPENCOMPUTER_API_KEY", "")
+	for _, apiURL := range []string{
+		"http://api.example.test",
+		"https://user:password@api.example.test",
+		"https://api.example.test?account=other",
+		"https://api.example.test#other",
+		"api.example.test",
+	} {
+		t.Run(apiURL, func(t *testing.T) {
+			if _, err := newOCAPIClient(newTestConfig(apiURL), Runtime{}); err == nil {
+				t.Fatalf("newOCAPIClient(%q) succeeded", apiURL)
+			}
+		})
+	}
+}
+
+func TestAPIURLAllowsLoopbackHTTP(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_test")
+	t.Setenv("OPENCOMPUTER_API_KEY", "")
+	for _, apiURL := range []string{
+		"http://localhost:8080/",
+		"http://127.0.0.1:8080/",
+		"http://[::1]:8080/",
+	} {
+		t.Run(apiURL, func(t *testing.T) {
+			api, err := newOCAPIClient(newTestConfig(apiURL), Runtime{})
+			if err != nil {
+				t.Fatalf("newOCAPIClient(%q) err=%v", apiURL, err)
+			}
+			if strings.HasSuffix(api.baseURL, "/") {
+				t.Fatalf("baseURL=%q retains trailing slash", api.baseURL)
+			}
+		})
+	}
+}
+
+func TestAPIURLNormalizesTrailingAPISuffix(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_test")
+	t.Setenv("OPENCOMPUTER_API_KEY", "")
+	api, err := newOCAPIClient(newTestConfig("https://api.example.test/gateway/api/"), Runtime{})
+	if err != nil {
+		t.Fatalf("newOCAPIClient err=%v", err)
+	}
+	if api.baseURL != "https://api.example.test/gateway" {
+		t.Fatalf("baseURL=%q want normalized gateway base", api.baseURL)
+	}
+}
+
+func TestAPIClientBlocksCrossOriginRedirects(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_test")
+	t.Setenv("OPENCOMPUTER_API_KEY", "")
+	var leaked bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked = r.Header.Get("X-API-Key") != ""
+		writeJSON(w, []map[string]any{})
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/stolen", http.StatusFound)
+	}))
+	defer source.Close()
+
+	api, err := newOCAPIClient(newTestConfig(source.URL), Runtime{HTTP: source.Client()})
+	if err != nil {
+		t.Fatalf("newOCAPIClient err=%v", err)
+	}
+	err = api.probeSandboxes(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "cross-origin redirect") {
+		t.Fatalf("probeSandboxes err=%v, want redirect rejection", err)
+	}
+	if leaked {
+		t.Fatal("API key reached the redirect target")
+	}
+}
+
+func TestSameOCOriginNormalizesDefaultPorts(t *testing.T) {
+	parse := func(raw string) *url.URL {
+		t.Helper()
+		value, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{a: "https://api.example.test", b: "https://api.example.test:443/path", want: true},
+		{a: "http://localhost", b: "http://localhost:80/path", want: true},
+		{a: "https://api.example.test", b: "https://api.example.test:8443", want: false},
+		{a: "https://api.example.test", b: "http://api.example.test:443", want: false},
+		{a: "https://api.example.test", b: "https://other.example.test", want: false},
+	} {
+		if got := sameOCOrigin(parse(tc.a), parse(tc.b)); got != tc.want {
+			t.Errorf("sameOCOrigin(%q, %q)=%t want %t", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestControlAndExecRequestsUseOperationDeadlines(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_test")
+	t.Setenv("OPENCOMPUTER_API_KEY", "")
+	var deadlines []time.Duration
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		deadline, ok := req.Context().Deadline()
+		if !ok {
+			t.Fatal("request has no deadline")
+		}
+		deadlines = append(deadlines, time.Until(deadline))
+		body := `{"sandboxID":"sb-test"}`
+		if strings.HasSuffix(req.URL.Path, "/exec/run") {
+			body = `{"exitCode":0}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})}
+	api, err := newOCAPIClient(newTestConfig(""), Runtime{HTTP: httpClient})
+	if err != nil {
+		t.Fatalf("newOCAPIClient err=%v", err)
+	}
+	if _, err := api.getSandbox(context.Background(), "sb-test"); err != nil {
+		t.Fatalf("getSandbox err=%v", err)
+	}
+	if _, err := api.execRun(context.Background(), "sb-test", execRunRequest{Timeout: 3600}); err != nil {
+		t.Fatalf("execRun err=%v", err)
+	}
+	if len(deadlines) != 2 {
+		t.Fatalf("deadlines=%v", deadlines)
+	}
+	if deadlines[0] <= 0 || deadlines[0] > defaultOCControlRequestTimeout {
+		t.Fatalf("control deadline=%s want <=%s", deadlines[0], defaultOCControlRequestTimeout)
+	}
+	wantExec := time.Hour + ocExecRequestGrace
+	if deadlines[1] < wantExec-time.Second || deadlines[1] > wantExec {
+		t.Fatalf("exec deadline=%s want about %s", deadlines[1], wantExec)
 	}
 }
 

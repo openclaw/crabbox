@@ -1,6 +1,9 @@
 package opencomputer
 
-import "flag"
+import (
+	"flag"
+	"strings"
+)
 
 type openComputerFlagValues struct {
 	APIURL          *string
@@ -25,6 +28,15 @@ func RegisterOpenComputerProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyOpenComputerProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	switch strings.ToLower(strings.TrimSpace(cfg.Provider)) {
+	case providerName, "oc", "open-computer":
+		if flagWasSet(fs, "class") {
+			return exit(2, "--class is not supported for provider=opencomputer; use --opencomputer-cpu and --opencomputer-memory-mb")
+		}
+		if flagWasSet(fs, "type") {
+			return exit(2, "--type is not supported for provider=opencomputer; use --opencomputer-cpu and --opencomputer-memory-mb")
+		}
+	}
 	v, ok := values.(openComputerFlagValues)
 	if !ok {
 		return nil

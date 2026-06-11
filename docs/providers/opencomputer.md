@@ -25,16 +25,19 @@ access, since OpenComputer does not expose SSH through Crabbox.
 
 ## Prerequisites
 
-An OpenComputer API key (`osb_...`). The easiest way to provide it is the `oc`
-CLI's config file, which Crabbox reads automatically:
+An OpenComputer API key (`osb_...`). Prefer loading it from a secret manager or
+prompting into the environment so the value never appears in shell history or
+process arguments:
 
 ```sh
-oc config set api-key osb_...
+export CRABBOX_OPENCOMPUTER_API_KEY="$(
+  python3 -c 'import getpass; print(getpass.getpass("OpenComputer API key: "))'
+)"
 ```
 
-The `oc` binary is **not** required at runtime — Crabbox only reads the key it
-stores. Alternatively set `CRABBOX_OPENCOMPUTER_API_KEY` (or
-`OPENCOMPUTER_API_KEY`) in the environment.
+Crabbox also reads an existing `oc` CLI config file automatically. The `oc`
+binary is **not** required at runtime. `OPENCOMPUTER_API_KEY` is accepted as an
+environment fallback.
 
 ## Commands
 
@@ -50,15 +53,18 @@ crabbox stop --provider opencomputer blue-lobster
 
 Crabbox resolves the API key from, in order, `CRABBOX_OPENCOMPUTER_API_KEY`,
 `OPENCOMPUTER_API_KEY`, then the `oc` CLI config file (`~/.oc/config.json`,
-written by `oc config set api-key`). It is sent only in the `X-API-Key` header,
-never persisted in Crabbox config and never placed on argv. If no key is
-resolvable, operations fail with a clear error.
+if already configured). It is sent only in the `X-API-Key` header, never
+persisted in Crabbox config and never placed on argv. If no key is resolvable,
+operations fail with a clear error.
 
 The API base URL defaults to `https://app.opencomputer.dev`. A trusted local
 override can come from `--opencomputer-api-url`,
 `CRABBOX_OPENCOMPUTER_API_URL`, `OPENCOMPUTER_API_URL`, or the `api_url` in the
 local `oc` config. Repository YAML cannot set the API URL: that prevents a
-checked-in config from redirecting an automatically loaded API key.
+checked-in config from redirecting an automatically loaded API key. Overrides
+must use HTTPS and cannot contain userinfo, query parameters, or fragments;
+plain HTTP is accepted only for `localhost` or a loopback IP during local
+development.
 
 ## Config
 
