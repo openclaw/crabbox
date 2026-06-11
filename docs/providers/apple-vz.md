@@ -22,15 +22,18 @@ credentials.
 
 - macOS on Apple Silicon
 - Xcode command-line tools, for `codesign`, `hdiutil`, and `newfs_msdos`
-- a built helper binary, for example:
+- a locally built `crabbox-apple-vz-helper` binary:
 
 ```sh
 go build -o ./bin/crabbox-apple-vz-helper ./cmd/crabbox-apple-vz-helper
 ```
 
-Crabbox copies that helper into its user state directory and ad-hoc signs the
-managed copy with the Apple virtualization and local networking entitlements it
-needs. The source helper binary itself is left untouched.
+Release installs intentionally gate `apple-vz` behind this separate helper.
+The standard GoReleaser job runs on Linux and cannot cross-compile the helper's
+Apple `Virtualization.framework` bindings. Crabbox copies the helper into its
+user state directory and ad-hoc signs the managed copy with the Apple
+virtualization and local networking entitlements it needs. The source helper
+binary itself is left untouched.
 
 ## Quick start
 
@@ -54,6 +57,7 @@ provider: apple-vz
 appleVZ:
   helperPath: ./bin/crabbox-apple-vz-helper
   image: https://cloud-images.ubuntu.com/releases/resolute/release/ubuntu-26.04-server-cloudimg-arm64.img
+  imageSHA256: 5e091e27d60116efbb0c743b8dd5cb2d15618e414ef04db0817ed43c8e2d7c7b
   user: crabbox
   workRoot: /work/crabbox
   cpus: 4
@@ -69,11 +73,17 @@ The default `appleVZ.image` follows Crabbox's portable `osImage` selector:
 - `ubuntu:24.04` → Noble arm64 cloud image
 - `ubuntu:26.04` → Resolute arm64 cloud image
 
+Default remote image URLs include pinned SHA-256 checksums. Custom remote image
+URLs must set `appleVZ.imageSHA256` or `--apple-vz-image-sha256`; cached
+downloads are re-verified before reuse. Local image paths may omit the checksum,
+but if a checksum is supplied the helper verifies the local file before boot.
+
 Provider flags:
 
 ```text
 --apple-vz-helper <path>
 --apple-vz-image <path-or-url>
+--apple-vz-image-sha256 <sha256>
 --apple-vz-user <user>
 --apple-vz-work-root <path>
 --apple-vz-cpus <n>
@@ -86,6 +96,7 @@ Environment overrides:
 ```text
 CRABBOX_APPLE_VZ_HELPER
 CRABBOX_APPLE_VZ_IMAGE
+CRABBOX_APPLE_VZ_IMAGE_SHA256
 CRABBOX_APPLE_VZ_USER
 CRABBOX_APPLE_VZ_WORK_ROOT
 CRABBOX_APPLE_VZ_CPUS
@@ -113,7 +124,9 @@ CRABBOX_APPLE_VZ_DISK
 - No desktop, browser, VNC, WebVNC, or code-server surfaces in v1.
 - No checkpoint, fork, restore, or snapshot flow.
 - No Tailscale bootstrap.
-- Requires the separate helper binary today.
+- Release archives and the Homebrew formula do not install
+  `crabbox-apple-vz-helper`; build the helper from a source checkout and pass
+  `--apple-vz-helper` or put it on `PATH`.
 - The first run can take longer while Crabbox downloads and converts the base
   cloud image.
 

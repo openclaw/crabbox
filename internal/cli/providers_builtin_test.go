@@ -1184,24 +1184,26 @@ func (testAppleVZProvider) Spec() ProviderSpec {
 }
 
 type testAppleVZFlagValues struct {
-	HelperPath *string
-	Image      *string
-	User       *string
-	WorkRoot   *string
-	CPUs       *int
-	MemoryMiB  *int
-	DiskGiB    *int
+	HelperPath  *string
+	Image       *string
+	ImageSHA256 *string
+	User        *string
+	WorkRoot    *string
+	CPUs        *int
+	MemoryMiB   *int
+	DiskGiB     *int
 }
 
 func (testAppleVZProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
 	return testAppleVZFlagValues{
-		HelperPath: fs.String("apple-vz-helper", defaults.AppleVZ.HelperPath, "apple-vz helper"),
-		Image:      fs.String("apple-vz-image", defaults.AppleVZ.Image, "apple-vz image"),
-		User:       fs.String("apple-vz-user", defaults.AppleVZ.User, "apple-vz user"),
-		WorkRoot:   fs.String("apple-vz-work-root", defaults.AppleVZ.WorkRoot, "apple-vz work root"),
-		CPUs:       fs.Int("apple-vz-cpus", defaults.AppleVZ.CPUs, "apple-vz CPUs"),
-		MemoryMiB:  fs.Int("apple-vz-memory", defaults.AppleVZ.MemoryMiB, "apple-vz memory MiB"),
-		DiskGiB:    fs.Int("apple-vz-disk", defaults.AppleVZ.DiskGiB, "apple-vz disk GiB"),
+		HelperPath:  fs.String("apple-vz-helper", defaults.AppleVZ.HelperPath, "apple-vz helper"),
+		Image:       fs.String("apple-vz-image", defaults.AppleVZ.Image, "apple-vz image"),
+		ImageSHA256: fs.String("apple-vz-image-sha256", defaults.AppleVZ.ImageSHA256, "apple-vz image sha256"),
+		User:        fs.String("apple-vz-user", defaults.AppleVZ.User, "apple-vz user"),
+		WorkRoot:    fs.String("apple-vz-work-root", defaults.AppleVZ.WorkRoot, "apple-vz work root"),
+		CPUs:        fs.Int("apple-vz-cpus", defaults.AppleVZ.CPUs, "apple-vz CPUs"),
+		MemoryMiB:   fs.Int("apple-vz-memory", defaults.AppleVZ.MemoryMiB, "apple-vz memory MiB"),
+		DiskGiB:     fs.Int("apple-vz-disk", defaults.AppleVZ.DiskGiB, "apple-vz disk GiB"),
 	}
 }
 func (testAppleVZProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
@@ -1214,7 +1216,11 @@ func (testAppleVZProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any)
 	}
 	if flagWasSet(fs, "apple-vz-image") {
 		cfg.AppleVZ.Image = *v.Image
+		cfg.AppleVZ.ImageSHA256 = ""
 		cfg.appleVZImageExplicit = true
+	}
+	if flagWasSet(fs, "apple-vz-image-sha256") {
+		cfg.AppleVZ.ImageSHA256 = *v.ImageSHA256
 	}
 	if flagWasSet(fs, "apple-vz-user") {
 		cfg.AppleVZ.User = *v.User

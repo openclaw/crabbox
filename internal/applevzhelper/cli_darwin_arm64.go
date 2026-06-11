@@ -1,4 +1,4 @@
-//go:build darwin && arm64
+//go:build darwin && arm64 && cgo
 
 package applevzhelper
 
@@ -65,6 +65,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	stateRoot := fs.String("state-root", "", "apple-vz state root")
 	image := fs.String("image", "", "source image")
+	imageSHA256 := fs.String("image-sha256", "", "expected source image SHA-256")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -76,7 +77,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	details, runtimeErr := validateRuntimeConfig(root, strings.TrimSpace(*image))
+	details, runtimeErr := validateRuntimeConfig(root, strings.TrimSpace(*image), strings.TrimSpace(*imageSHA256))
 	if runtimeErr != nil {
 		if err := json.NewEncoder(stdout).Encode(DoctorResponse{
 			Status:    "error",
@@ -104,6 +105,7 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 	leaseID := fs.String("lease-id", "", "lease id")
 	slug := fs.String("slug", "", "lease slug")
 	image := fs.String("image", "", "source image")
+	imageSHA256 := fs.String("image-sha256", "", "expected source image SHA-256")
 	sshUser := fs.String("ssh-user", "", "ssh user")
 	sshPublicKey := fs.String("ssh-public-key", "", "ssh public key")
 	workRoot := fs.String("work-root", "", "work root")
@@ -170,6 +172,7 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 	inst, err = prepareInstanceAssetsFunc(context.Background(), startConfig{
 		StateRoot:    root,
 		Instance:     inst,
+		ImageSHA256:  strings.TrimSpace(*imageSHA256),
 		SSHPublicKey: strings.TrimSpace(*sshPublicKey),
 	})
 	if err != nil {

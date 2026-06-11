@@ -1,4 +1,4 @@
-//go:build darwin && arm64
+//go:build darwin && arm64 && cgo
 
 package applevzhelper
 
@@ -30,6 +30,7 @@ const helperLogFileName = "helper.log"
 type startConfig struct {
 	StateRoot    string
 	Instance     Instance
+	ImageSHA256  string
 	SSHPublicKey string
 }
 
@@ -38,7 +39,7 @@ func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, erro
 	if err := os.MkdirAll(InstanceDir(cfg.StateRoot, inst.Name), 0o755); err != nil {
 		return Instance{}, fmt.Errorf("create instance directory: %w", err)
 	}
-	sourcePath, err := resolveSourceImage(ctx, cfg.StateRoot, inst.Image)
+	sourcePath, err := resolveSourceImage(ctx, cfg.StateRoot, inst.Image, cfg.ImageSHA256)
 	if err != nil {
 		return Instance{}, err
 	}
@@ -78,12 +79,19 @@ func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, erro
 	return inst, nil
 }
 
-func resolveSourceImage(ctx context.Context, stateRoot, image string) (string, error) {
+func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 string) (string, error) {
 	image = strings.TrimSpace(image)
 	if image == "" {
 		return "", fmt.Errorf("image is required")
 	}
+	checksum, err := normalizeExpectedSHA256(expectedSHA256)
+	if err != nil {
+		return "", err
+	}
 	if strings.HasPrefix(image, "http://") || strings.HasPrefix(image, "https://") {
+		if checksum == "" {
+			return "", fmt.Errorf("apple-vz remote image %q requires --image-sha256", image)
+		}
 		if err := os.MkdirAll(DownloadsDir(stateRoot), 0o755); err != nil {
 			return "", fmt.Errorf("create downloads cache: %w", err)
 		}
@@ -94,6 +102,9 @@ func resolveSourceImage(ctx context.Context, stateRoot, image string) (string, e
 		}
 		target := filepath.Join(DownloadsDir(stateRoot), hex.EncodeToString(sum[:8])+"-"+name)
 		if _, err := os.Stat(target); err == nil {
+			if err := verifyFileSHA256(target, checksum); err != nil {
+				return "", err
+			}
 			return target, nil
 		}
 		tmp := target + ".tmp"
@@ -115,7 +126,8 @@ func resolveSourceImage(ctx context.Context, stateRoot, image string) (string, e
 		if err != nil {
 			return "", fmt.Errorf("create image cache file: %w", err)
 		}
-		if _, err := io.Copy(file, resp.Body); err != nil {
+		hash := sha256.New()
+		if _, err := io.Copy(file, io.TeeReader(resp.Body, hash)); err != nil {
 			file.Close()
 			_ = os.Remove(tmp)
 			return "", fmt.Errorf("write image cache file: %w", err)
@@ -123,6 +135,10 @@ func resolveSourceImage(ctx context.Context, stateRoot, image string) (string, e
 		if err := file.Close(); err != nil {
 			_ = os.Remove(tmp)
 			return "", fmt.Errorf("close image cache file: %w", err)
+		}
+		if actual := hex.EncodeToString(hash.Sum(nil)); actual != checksum {
+			_ = os.Remove(tmp)
+			return "", fmt.Errorf("verify image %q: sha256 %s does not match expected %s", image, actual, checksum)
 		}
 		if err := os.Rename(tmp, target); err != nil {
 			_ = os.Remove(tmp)
@@ -148,7 +164,46 @@ func resolveSourceImage(ctx context.Context, stateRoot, image string) (string, e
 	if _, err := os.Stat(path); err != nil {
 		return "", fmt.Errorf("image %q: %w", path, err)
 	}
+	if checksum != "" {
+		if err := verifyFileSHA256(path, checksum); err != nil {
+			return "", err
+		}
+	}
 	return path, nil
+}
+
+func normalizeExpectedSHA256(value string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(normalized, "sha256:") {
+		normalized = strings.TrimPrefix(normalized, "sha256:")
+	}
+	if len(normalized) != sha256.Size*2 {
+		return "", fmt.Errorf("image-sha256 must be a 64-character SHA-256 digest")
+	}
+	if _, err := hex.DecodeString(normalized); err != nil {
+		return "", fmt.Errorf("image-sha256 must be hex: %w", err)
+	}
+	return normalized, nil
+}
+
+func verifyFileSHA256(path, expected string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open image for sha256: %w", err)
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return fmt.Errorf("hash image: %w", err)
+	}
+	actual := hex.EncodeToString(hash.Sum(nil))
+	if actual != expected {
+		return fmt.Errorf("verify image %q: sha256 %s does not match expected %s", path, actual, expected)
+	}
+	return nil
 }
 
 func ensureRawImage(stateRoot, sourceRef, sourcePath string) (string, error) {
@@ -792,7 +847,13 @@ func requestStop(vm *vz.VirtualMachine) error {
 	return nil
 }
 
-func validateRuntimeConfig(stateRoot, image string) (map[string]string, error) {
+func validateRuntimeConfig(stateRoot, image, expectedSHA256 string) (map[string]string, error) {
+	if _, err := normalizeExpectedSHA256(expectedSHA256); err != nil {
+		return nil, err
+	}
+	if (strings.HasPrefix(image, "http://") || strings.HasPrefix(image, "https://")) && strings.TrimSpace(expectedSHA256) == "" {
+		return nil, fmt.Errorf("apple-vz remote image %q requires --image-sha256", image)
+	}
 	if _, err := exec.LookPath("hdiutil"); err != nil {
 		return nil, fmt.Errorf("hdiutil is required")
 	}
@@ -862,12 +923,4 @@ func copyPlainFile(sourcePath, targetPath string, mode os.FileMode) error {
 		return err
 	}
 	return os.WriteFile(targetPath, data, mode)
-}
-
-func runCommand(ctx context.Context, name string, args ...string) error {
-	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }

@@ -8,24 +8,26 @@ import (
 )
 
 type flagValues struct {
-	HelperPath *string
-	Image      *string
-	User       *string
-	WorkRoot   *string
-	CPUs       *int
-	MemoryMiB  *int
-	DiskGiB    *int
+	HelperPath  *string
+	Image       *string
+	ImageSHA256 *string
+	User        *string
+	WorkRoot    *string
+	CPUs        *int
+	MemoryMiB   *int
+	DiskGiB     *int
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		HelperPath: fs.String("apple-vz-helper", defaults.AppleVZ.HelperPath, "apple-vz helper binary path"),
-		Image:      fs.String("apple-vz-image", defaults.AppleVZ.Image, "apple-vz source image path or URL"),
-		User:       fs.String("apple-vz-user", defaults.AppleVZ.User, "SSH user created inside apple-vz leases"),
-		WorkRoot:   fs.String("apple-vz-work-root", defaults.AppleVZ.WorkRoot, "remote Crabbox work root inside apple-vz leases"),
-		CPUs:       fs.Int("apple-vz-cpus", defaults.AppleVZ.CPUs, "CPU count for apple-vz leases"),
-		MemoryMiB:  fs.Int("apple-vz-memory", defaults.AppleVZ.MemoryMiB, "memory in MiB for apple-vz leases"),
-		DiskGiB:    fs.Int("apple-vz-disk", defaults.AppleVZ.DiskGiB, "disk size in GiB for apple-vz leases"),
+		HelperPath:  fs.String("apple-vz-helper", defaults.AppleVZ.HelperPath, "apple-vz helper binary path"),
+		Image:       fs.String("apple-vz-image", defaults.AppleVZ.Image, "apple-vz source image path or URL"),
+		ImageSHA256: fs.String("apple-vz-image-sha256", defaults.AppleVZ.ImageSHA256, "expected SHA-256 for apple-vz source image downloads"),
+		User:        fs.String("apple-vz-user", defaults.AppleVZ.User, "SSH user created inside apple-vz leases"),
+		WorkRoot:    fs.String("apple-vz-work-root", defaults.AppleVZ.WorkRoot, "remote Crabbox work root inside apple-vz leases"),
+		CPUs:        fs.Int("apple-vz-cpus", defaults.AppleVZ.CPUs, "CPU count for apple-vz leases"),
+		MemoryMiB:   fs.Int("apple-vz-memory", defaults.AppleVZ.MemoryMiB, "memory in MiB for apple-vz leases"),
+		DiskGiB:     fs.Int("apple-vz-disk", defaults.AppleVZ.DiskGiB, "disk size in GiB for apple-vz leases"),
 	}
 }
 
@@ -39,7 +41,11 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "apple-vz-image") {
 		cfg.AppleVZ.Image = strings.TrimSpace(*v.Image)
+		cfg.AppleVZ.ImageSHA256 = ""
 		core.MarkAppleVZImageExplicit(cfg)
+	}
+	if core.FlagWasSet(fs, "apple-vz-image-sha256") {
+		cfg.AppleVZ.ImageSHA256 = strings.TrimSpace(*v.ImageSHA256)
 	}
 	if core.FlagWasSet(fs, "apple-vz-user") {
 		cfg.AppleVZ.User = strings.TrimSpace(*v.User)

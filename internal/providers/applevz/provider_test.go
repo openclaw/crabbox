@@ -69,13 +69,14 @@ func testBackend(t *testing.T, runner *recordingRunner) *backend {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.AppleVZ = core.AppleVZConfig{
-		HelperPath: "/tmp/helper-source",
-		Image:      "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img",
-		User:       "runner",
-		WorkRoot:   "/workspace/crabbox",
-		CPUs:       4,
-		MemoryMiB:  8192,
-		DiskGiB:    40,
+		HelperPath:  "/tmp/helper-source",
+		Image:       "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img",
+		ImageSHA256: "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec",
+		User:        "runner",
+		WorkRoot:    "/workspace/crabbox",
+		CPUs:        4,
+		MemoryMiB:   8192,
+		DiskGiB:     40,
 	}
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 	b.prepareHelper = func(context.Context, core.Config) (string, error) { return "helper", nil }
@@ -149,6 +150,7 @@ func TestApplyFlags(t *testing.T) {
 	if err := fs.Parse([]string{
 		"--apple-vz-helper", "/opt/bin/helper",
 		"--apple-vz-image", "https://example.test/custom.img",
+		"--apple-vz-image-sha256", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"--apple-vz-user", "ci",
 		"--apple-vz-work-root", "/work/ci",
 		"--apple-vz-cpus", "6",
@@ -160,7 +162,7 @@ func TestApplyFlags(t *testing.T) {
 	if err := applyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AppleVZ.HelperPath != "/opt/bin/helper" || cfg.AppleVZ.Image != "https://example.test/custom.img" || cfg.AppleVZ.User != "ci" || cfg.AppleVZ.WorkRoot != "/work/ci" || cfg.AppleVZ.CPUs != 6 || cfg.AppleVZ.MemoryMiB != 12288 || cfg.AppleVZ.DiskGiB != 64 {
+	if cfg.AppleVZ.HelperPath != "/opt/bin/helper" || cfg.AppleVZ.Image != "https://example.test/custom.img" || cfg.AppleVZ.ImageSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || cfg.AppleVZ.User != "ci" || cfg.AppleVZ.WorkRoot != "/work/ci" || cfg.AppleVZ.CPUs != 6 || cfg.AppleVZ.MemoryMiB != 12288 || cfg.AppleVZ.DiskGiB != 64 {
 		t.Fatalf("flags not applied: %#v", cfg.AppleVZ)
 	}
 	if !core.AppleVZImageExplicit(cfg) {
@@ -170,7 +172,7 @@ func TestApplyFlags(t *testing.T) {
 
 func TestDoctorReady(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
-		commandKey("helper", []string{"doctor", "--state-root", "", "--image", "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img"}): {Stdout: mustJSON(t, applevzhelper.DoctorResponse{
+		commandKey("helper", []string{"doctor", "--state-root", "", "--image", "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img", "--image-sha256", "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec"}): {Stdout: mustJSON(t, applevzhelper.DoctorResponse{
 			Status:    "ok",
 			Message:   "runtime ready",
 			Instances: 2,
@@ -179,8 +181,8 @@ func TestDoctorReady(t *testing.T) {
 	}}
 	b := testBackend(t, runner)
 	root, _ := b.stateRoot()
-	runner.responses[commandKey("helper", []string{"doctor", "--state-root", root, "--image", b.configForRun().AppleVZ.Image})] = runner.responses[commandKey("helper", []string{"doctor", "--state-root", "", "--image", b.configForRun().AppleVZ.Image})]
-	delete(runner.responses, commandKey("helper", []string{"doctor", "--state-root", "", "--image", b.configForRun().AppleVZ.Image}))
+	runner.responses[commandKey("helper", []string{"doctor", "--state-root", root, "--image", b.configForRun().AppleVZ.Image, "--image-sha256", b.configForRun().AppleVZ.ImageSHA256})] = runner.responses[commandKey("helper", []string{"doctor", "--state-root", "", "--image", b.configForRun().AppleVZ.Image, "--image-sha256", b.configForRun().AppleVZ.ImageSHA256})]
+	delete(runner.responses, commandKey("helper", []string{"doctor", "--state-root", "", "--image", b.configForRun().AppleVZ.Image, "--image-sha256", b.configForRun().AppleVZ.ImageSHA256}))
 	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)

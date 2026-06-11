@@ -1,4 +1,4 @@
-//go:build darwin && arm64
+//go:build darwin && arm64 && cgo
 
 package applevzhelper
 
@@ -71,6 +71,7 @@ while :; do sleep 1; done
 		"--lease-id", "lease-test",
 		"--slug", "my-app",
 		"--image", "test.img",
+		"--image-sha256", "",
 		"--ssh-user", "alice",
 		"--ssh-public-key", "ssh-ed25519 AAAATEST alice@example.com",
 		"--work-root", "/workspace",

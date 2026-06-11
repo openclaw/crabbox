@@ -146,6 +146,7 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS",
 		"CRABBOX_APPLE_VZ_HELPER",
 		"CRABBOX_APPLE_VZ_IMAGE",
+		"CRABBOX_APPLE_VZ_IMAGE_SHA256",
 		"CRABBOX_APPLE_VZ_USER",
 		"CRABBOX_APPLE_VZ_WORK_ROOT",
 		"CRABBOX_APPLE_VZ_CPUS",
@@ -488,34 +489,39 @@ func TestAppleVZConfigDefaultsFileAndEnv(t *testing.T) {
 	if cfg.AppleVZ.User != "crabbox" || cfg.AppleVZ.WorkRoot != "/work/crabbox" || cfg.AppleVZ.CPUs != 4 || cfg.AppleVZ.MemoryMiB != 8192 || cfg.AppleVZ.DiskGiB != 30 {
 		t.Fatalf("apple-vz defaults not applied: %#v", cfg.AppleVZ)
 	}
+	if cfg.AppleVZ.ImageSHA256 == "" {
+		t.Fatalf("apple-vz default image checksum not applied: %#v", cfg.AppleVZ)
+	}
 	if cfg.SSHUser != "crabbox" || cfg.SSHPort != "22" || cfg.WorkRoot != "/work/crabbox" || cfg.TargetOS != targetLinux {
 		t.Fatalf("apple-vz derived defaults not applied: sshUser=%q sshPort=%q workRoot=%q target=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.TargetOS)
 	}
 	applyFileConfig(&cfg, fileConfig{
 		Provider: "apple-vz",
 		AppleVZ: &fileAppleVZConfig{
-			HelperPath: "/opt/bin/crabbox-apple-vz-helper",
-			Image:      "https://example.test/custom.img",
-			User:       "runner",
-			WorkRoot:   "/work/example",
-			CPUs:       6,
-			MemoryMiB:  12288,
-			DiskGiB:    64,
+			HelperPath:  "/opt/bin/crabbox-apple-vz-helper",
+			Image:       "https://example.test/custom.img",
+			ImageSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			User:        "runner",
+			WorkRoot:    "/work/example",
+			CPUs:        6,
+			MemoryMiB:   12288,
+			DiskGiB:     64,
 		},
 	})
-	if cfg.Provider != "apple-vz" || cfg.AppleVZ.HelperPath != "/opt/bin/crabbox-apple-vz-helper" || cfg.AppleVZ.Image != "https://example.test/custom.img" || cfg.AppleVZ.User != "runner" || cfg.AppleVZ.WorkRoot != "/work/example" || cfg.AppleVZ.CPUs != 6 || cfg.AppleVZ.MemoryMiB != 12288 || cfg.AppleVZ.DiskGiB != 64 {
+	if cfg.Provider != "apple-vz" || cfg.AppleVZ.HelperPath != "/opt/bin/crabbox-apple-vz-helper" || cfg.AppleVZ.Image != "https://example.test/custom.img" || cfg.AppleVZ.ImageSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || cfg.AppleVZ.User != "runner" || cfg.AppleVZ.WorkRoot != "/work/example" || cfg.AppleVZ.CPUs != 6 || cfg.AppleVZ.MemoryMiB != 12288 || cfg.AppleVZ.DiskGiB != 64 {
 		t.Fatalf("file appleVZ config not applied: %#v", cfg.AppleVZ)
 	}
 
 	t.Setenv("CRABBOX_APPLE_VZ_HELPER", "/usr/local/bin/crabbox-apple-vz-helper")
 	t.Setenv("CRABBOX_APPLE_VZ_IMAGE", "https://example.test/env.img")
+	t.Setenv("CRABBOX_APPLE_VZ_IMAGE_SHA256", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 	t.Setenv("CRABBOX_APPLE_VZ_USER", "env-user")
 	t.Setenv("CRABBOX_APPLE_VZ_WORK_ROOT", "/work/env")
 	t.Setenv("CRABBOX_APPLE_VZ_CPUS", "8")
 	t.Setenv("CRABBOX_APPLE_VZ_MEMORY", "16384")
 	t.Setenv("CRABBOX_APPLE_VZ_DISK", "80")
 	applyEnv(&cfg)
-	if cfg.AppleVZ.HelperPath != "/usr/local/bin/crabbox-apple-vz-helper" || cfg.AppleVZ.Image != "https://example.test/env.img" || cfg.AppleVZ.User != "env-user" || cfg.AppleVZ.WorkRoot != "/work/env" || cfg.AppleVZ.CPUs != 8 || cfg.AppleVZ.MemoryMiB != 16384 || cfg.AppleVZ.DiskGiB != 80 {
+	if cfg.AppleVZ.HelperPath != "/usr/local/bin/crabbox-apple-vz-helper" || cfg.AppleVZ.Image != "https://example.test/env.img" || cfg.AppleVZ.ImageSHA256 != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" || cfg.AppleVZ.User != "env-user" || cfg.AppleVZ.WorkRoot != "/work/env" || cfg.AppleVZ.CPUs != 8 || cfg.AppleVZ.MemoryMiB != 16384 || cfg.AppleVZ.DiskGiB != 80 {
 		t.Fatalf("env appleVZ config not applied: %#v", cfg.AppleVZ)
 	}
 }
@@ -1999,6 +2005,9 @@ func TestAppleVZImageFollowsOSImageDefault(t *testing.T) {
 	if !strings.Contains(cfg.AppleVZ.Image, "ubuntu-24.04-server-cloudimg-arm64.img") {
 		t.Fatalf("apple-vz image should follow --os default: %q", cfg.AppleVZ.Image)
 	}
+	if cfg.AppleVZ.ImageSHA256 != "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec" {
+		t.Fatalf("apple-vz checksum should follow --os default: %q", cfg.AppleVZ.ImageSHA256)
+	}
 }
 
 func TestAppleVZExplicitImageSurvivesOSDefault(t *testing.T) {
@@ -2017,6 +2026,9 @@ func TestAppleVZExplicitImageSurvivesOSDefault(t *testing.T) {
 	}
 	if cfg.AppleVZ.Image != "https://example.test/custom.img" {
 		t.Fatalf("explicit apple-vz image was overwritten by --os: %q", cfg.AppleVZ.Image)
+	}
+	if cfg.AppleVZ.ImageSHA256 != "" {
+		t.Fatalf("custom apple-vz image should clear default checksum unless explicitly set: %q", cfg.AppleVZ.ImageSHA256)
 	}
 }
 

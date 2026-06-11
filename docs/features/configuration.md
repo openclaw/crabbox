@@ -382,6 +382,7 @@ provider: apple-vz
 appleVZ:
   helperPath: ./bin/crabbox-apple-vz-helper
   image: https://cloud-images.ubuntu.com/releases/resolute/release/ubuntu-26.04-server-cloudimg-arm64.img
+  imageSHA256: 5e091e27d60116efbb0c743b8dd5cb2d15618e414ef04db0817ed43c8e2d7c7b
   user: crabbox
   workRoot: /work/crabbox
   cpus: 4
@@ -393,7 +394,9 @@ appleVZ:
 local helper that boots a headless Linux VM with Apple's
 `Virtualization.framework`, then exposes guest SSH through a host-local proxy so
 Crabbox can use the normal SSH sync and run path. The image default follows the
-portable `osImage` selector unless `appleVZ.image` is set explicitly.
+portable `osImage` selector unless `appleVZ.image` is set explicitly. Default
+remote images include pinned SHA-256 checksums; custom remote image URLs must
+set `appleVZ.imageSHA256`, while local image paths may omit it.
 
 ### Multipass
 

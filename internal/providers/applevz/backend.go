@@ -58,6 +58,9 @@ func applyDefaults(cfg *core.Config) {
 	if cfg.AppleVZ.Image == "" {
 		cfg.AppleVZ.Image = defaultAppleVZImage(cfg.OSImage)
 	}
+	if cfg.AppleVZ.ImageSHA256 == "" && cfg.AppleVZ.Image == defaultAppleVZImage(cfg.OSImage) {
+		cfg.AppleVZ.ImageSHA256 = defaultAppleVZImageSHA256(cfg.OSImage)
+	}
 	if cfg.AppleVZ.User == "" {
 		cfg.AppleVZ.User = defaultUser
 	}
@@ -90,6 +93,13 @@ func defaultAppleVZImage(osImage string) string {
 		return image
 	}
 	return "https://cloud-images.ubuntu.com/releases/resolute/release/ubuntu-26.04-server-cloudimg-arm64.img"
+}
+
+func defaultAppleVZImageSHA256(osImage string) string {
+	if checksum, err := core.OSImageDefaultAppleVZSHA256(osImage); err == nil && strings.TrimSpace(checksum) != "" {
+		return checksum
+	}
+	return "5e091e27d60116efbb0c743b8dd5cb2d15618e414ef04db0817ed43c8e2d7c7b"
 }
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
@@ -241,7 +251,7 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 		return core.DoctorResult{}, err
 	}
 	var resp applevzhelper.DoctorResponse
-	if err := b.runHelperJSON(ctx, helperPath, []string{"doctor", "--state-root", root, "--image", cfg.AppleVZ.Image}, &resp); err != nil {
+	if err := b.runHelperJSON(ctx, helperPath, []string{"doctor", "--state-root", root, "--image", cfg.AppleVZ.Image, "--image-sha256", cfg.AppleVZ.ImageSHA256}, &resp); err != nil {
 		return core.DoctorResult{}, err
 	}
 	if strings.TrimSpace(resp.Status) != "ok" {
@@ -433,6 +443,7 @@ func (b *backend) startInstance(ctx context.Context, cfg core.Config, name, leas
 		"--lease-id", leaseID,
 		"--slug", slug,
 		"--image", cfg.AppleVZ.Image,
+		"--image-sha256", cfg.AppleVZ.ImageSHA256,
 		"--ssh-user", cfg.AppleVZ.User,
 		"--ssh-public-key", publicKey,
 		"--work-root", cfg.AppleVZ.WorkRoot,
@@ -652,7 +663,7 @@ func resolveHelperSourcePath(cfg core.Config) (string, error) {
 	if path, err := exec.LookPath(applevzhelper.ManagedHelperName); err == nil {
 		return path, nil
 	}
-	return "", exit(2, "apple-vz helper binary not found; build it with `go build -o ./bin/%s ./cmd/%s` or pass --apple-vz-helper", applevzhelper.ManagedHelperName, applevzhelper.ManagedHelperName)
+	return "", exit(2, "apple-vz helper binary not found; release installs intentionally require a separate Apple Silicon helper. Build it with `go build -o ./bin/%s ./cmd/%s`, put `%s` on PATH, or pass --apple-vz-helper", applevzhelper.ManagedHelperName, applevzhelper.ManagedHelperName, applevzhelper.ManagedHelperName)
 }
 
 func refreshManagedHelper(sourcePath, managedPath string) bool {
