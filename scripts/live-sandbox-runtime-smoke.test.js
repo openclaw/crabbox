@@ -22,6 +22,19 @@ function prepareSmokeRepo(dir) {
   return { tempRoot, smokeScript };
 }
 
+function smokeEnv(dir, bin, extra = {}) {
+  const env = {
+    ...process.env,
+    PATH: `${bin}${path.delimiter}/bin${path.delimiter}/usr/bin`,
+    TMPDIR: dir,
+    ...extra,
+  };
+  if (!Object.hasOwn(extra, "CRABBOX_SANDBOX_RUNTIME_CLI")) {
+    delete env.CRABBOX_SANDBOX_RUNTIME_CLI;
+  }
+  return env;
+}
+
 test("live sandbox runtime smoke proves run and enforcement paths", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-srt-smoke-"));
   const bin = path.join(dir, "bin");
@@ -70,11 +83,7 @@ chmod +x bin/crabbox
 
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
-    env: {
-      ...process.env,
-      PATH: `${bin}${path.delimiter}/bin${path.delimiter}/usr/bin`,
-      TMPDIR: dir,
-    },
+    env: smokeEnv(dir, bin),
     encoding: "utf8",
   });
 
@@ -110,11 +119,7 @@ chmod +x bin/crabbox
 
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
-    env: {
-      ...process.env,
-      PATH: `${bin}${path.delimiter}/bin${path.delimiter}/usr/bin`,
-      TMPDIR: dir,
-    },
+    env: smokeEnv(dir, bin),
     encoding: "utf8",
   });
 
@@ -170,12 +175,9 @@ chmod +x bin/crabbox
 
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
-    env: {
-      ...process.env,
+    env: smokeEnv(dir, bin, {
       CRABBOX_SANDBOX_RUNTIME_CLI: custom,
-      PATH: `${bin}${path.delimiter}/bin${path.delimiter}/usr/bin`,
-      TMPDIR: dir,
-    },
+    }),
     encoding: "utf8",
   });
 
@@ -217,11 +219,7 @@ chmod +x bin/crabbox
 
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
-    env: {
-      ...process.env,
-      PATH: `${bin}${path.delimiter}/bin${path.delimiter}/usr/bin`,
-      TMPDIR: dir,
-    },
+    env: smokeEnv(dir, bin),
     encoding: "utf8",
   });
 
