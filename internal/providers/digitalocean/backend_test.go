@@ -807,6 +807,8 @@ func TestResolvePendingRecoveryFindsLateDroplet(t *testing.T) {
 	cfg.ProviderKey = providerKeyForLease(leaseID)
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, createdAt)
 	labels["state"] = "provisioning"
+	labels["recovery"] = "ambiguous-create"
+	labels[digitalOceanAccountLabel] = "team:test-account"
 	labels[digitalOceanRecoveryKeyIDLabel] = "126"
 	labels[digitalOceanKeyOwnedLabel] = "true"
 	item := droplet{ID: 106, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
@@ -855,8 +857,20 @@ func TestResolvePendingRecoveryFindsLateDroplet(t *testing.T) {
 		t.Fatalf("first ReleaseLease err=%v", err)
 	}
 	claim, ok, err = core.ResolveLeaseClaimForProvider(slug, providerName)
-	if err != nil || !ok || claim.CloudID != strconv.FormatInt(item.ID, 10) {
+	if err != nil || !ok || claim.CloudID != strconv.FormatInt(item.ID, 10) ||
+		claim.Labels[digitalOceanKeyDeleteAuthorizedLabel] != "126" {
 		t.Fatalf("retained claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	staleServer := serverFromDroplet(item, backend.Cfg)
+	staleServer.Labels[digitalOceanAccountLabel] = "team:test-account"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, backend.Cfg, staleServer, core.SSHTarget{}, t.TempDir(), 0, true); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err = core.ResolveLeaseClaimForProvider(slug, providerName)
+	if err != nil || !ok || claim.Labels[digitalOceanKeyDeleteAuthorizedLabel] != "126" ||
+		claim.Labels[digitalOceanRecoveryKeyIDLabel] != "126" ||
+		claim.Labels[digitalOceanKeyOwnedLabel] != "true" {
+		t.Fatalf("guarded workflow rewrite claim=%#v ok=%v err=%v", claim, ok, err)
 	}
 
 	api.keyDeleteErr = nil
@@ -888,6 +902,8 @@ func TestResolvePendingRecoveryPersistsDropletFoundInInitialInventory(t *testing
 	cfg.ProviderKey = providerKeyForLease(leaseID)
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, createdAt)
 	labels["state"] = "provisioning"
+	labels["recovery"] = "ambiguous-create"
+	labels[digitalOceanAccountLabel] = "team:test-account"
 	item := droplet{ID: 107, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
 	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
 	backend := newTestBackend(t, api)
@@ -943,7 +959,286 @@ func TestResolveVisibleDropletIgnoresUnrelatedCorruptClaim(t *testing.T) {
 	}
 }
 
-func TestResolveAndReleaseVisibleDropletRepairsClaimWithoutTrustingTagKeyIdentity(t *testing.T) {
+func TestResolveVisibleDropletRejectsAccountMismatchBeforePreservingKeyIdentity(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123451"
+	slug := "account-mismatch"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	item := droplet{ID: 111, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
+	api := &fakeDigitalOceanAPI{
+		accountID: "team:account-b",
+		droplets:  []droplet{item},
+	}
+	backend := newTestBackend(t, api)
+	claimLabels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	claimLabels[digitalOceanAccountLabel] = "team:account-a"
+	claimLabels[digitalOceanRecoveryKeyIDLabel] = "711"
+	claimLabels[digitalOceanKeyOwnedLabel] = "true"
+	claimServer := core.Server{
+		Provider: providerName,
+		CloudID:  strconv.FormatInt(item.ID, 10),
+		ID:       item.ID,
+		Name:     item.Name,
+		Labels:   claimLabels,
+	}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "account mismatch") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	claim, claimErr := core.ReadLeaseClaim(leaseID)
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if claim.Labels[digitalOceanAccountLabel] != "team:account-a" ||
+		claim.Labels[digitalOceanRecoveryKeyIDLabel] != "711" ||
+		claim.Labels[digitalOceanKeyOwnedLabel] != "true" {
+		t.Fatalf("mismatched claim was rewritten: %#v", claim)
+	}
+}
+
+func TestResolveVisibleDropletRejectsStaleClaimCloudID(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123447"
+	slug := "cloud-id-mismatch"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	item := droplet{ID: 107, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	claimLabels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	claimLabels[digitalOceanAccountLabel] = "team:test-account"
+	claimLabels[digitalOceanRecoveryKeyIDLabel] = "707"
+	claimLabels[digitalOceanKeyOwnedLabel] = "true"
+	claimServer := core.Server{
+		Provider: providerName,
+		CloudID:  "999",
+		ID:       999,
+		Name:     item.Name,
+		Labels:   claimLabels,
+	}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "stale local claim") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	claim, claimErr := core.ReadLeaseClaim(leaseID)
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if claim.CloudID != "999" || claim.Labels[digitalOceanRecoveryKeyIDLabel] != "707" {
+		t.Fatalf("stale claim was rewritten: %#v", claim)
+	}
+}
+
+func TestResolveVisibleDropletRejectsClaimWithoutAccountIdentity(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123450"
+	slug := "account-missing"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	item := droplet{ID: 110, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	claimLabels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	claimLabels[digitalOceanRecoveryKeyIDLabel] = "710"
+	claimLabels[digitalOceanKeyOwnedLabel] = "true"
+	claimServer := core.Server{
+		Provider: providerName,
+		CloudID:  strconv.FormatInt(item.ID, 10),
+		ID:       item.ID,
+		Name:     item.Name,
+		Labels:   claimLabels,
+	}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "no account identity") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	claim, claimErr := core.ReadLeaseClaim(leaseID)
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if claim.Labels[digitalOceanAccountLabel] != "" ||
+		claim.Labels[digitalOceanRecoveryKeyIDLabel] != "710" ||
+		claim.Labels[digitalOceanKeyOwnedLabel] != "true" {
+		t.Fatalf("account-less claim was rewritten: %#v", claim)
+	}
+}
+
+func TestResolveVisibleDropletRejectsMismatchedClaimLabels(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123446"
+	slug := "claim-label-mismatch"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	item := droplet{ID: 106, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	claimLabels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	claimLabels["slug"] = "foreign"
+	claimLabels[digitalOceanAccountLabel] = "team:test-account"
+	claimLabels[digitalOceanRecoveryKeyIDLabel] = "706"
+	claimLabels[digitalOceanKeyOwnedLabel] = "true"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, core.Server{
+		Provider: providerName,
+		CloudID:  strconv.FormatInt(item.ID, 10),
+		ID:       item.ID,
+		Name:     item.Name,
+		Labels:   claimLabels,
+	}, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "claim identity") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	claim, claimErr := core.ReadLeaseClaim(leaseID)
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if claim.Labels["slug"] != "foreign" || claim.Labels[digitalOceanRecoveryKeyIDLabel] != "706" {
+		t.Fatalf("mismatched claim was rewritten: %#v", claim)
+	}
+}
+
+func TestResolveVisibleDropletRejectsCloudIDLessClaimWithoutRecoveryMarker(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123445"
+	slug := "missing-recovery-marker"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	item := droplet{ID: 105, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	claimLabels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	claimLabels[digitalOceanAccountLabel] = "team:test-account"
+	claimLabels[digitalOceanRecoveryKeyIDLabel] = "705"
+	claimLabels[digitalOceanKeyOwnedLabel] = "true"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, core.Server{
+		Provider: providerName,
+		Name:     item.Name,
+		Labels:   claimLabels,
+	}, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "valid pending recovery state") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	claim, claimErr := core.ReadLeaseClaim(leaseID)
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if claim.CloudID != "" || claim.Labels[digitalOceanRecoveryKeyIDLabel] != "705" {
+		t.Fatalf("unmarked claim was rewritten: %#v", claim)
+	}
+}
+
+func TestResolveVisibleDropletPreservesKeyDeleteAuthorization(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123439"
+	slug := "preserve-key-delete"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	item := droplet{ID: 102, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	claimLabels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	claimLabels[digitalOceanAccountLabel] = "team:test-account"
+	claimLabels[digitalOceanRecoveryKeyIDLabel] = "702"
+	claimLabels[digitalOceanKeyOwnedLabel] = "true"
+	claimLabels[digitalOceanKeyDeleteAuthorizedLabel] = "702"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, core.Server{
+		Provider: providerName,
+		CloudID:  strconv.FormatInt(item.ID, 10),
+		ID:       item.ID,
+		Name:     item.Name,
+		Labels:   claimLabels,
+	}, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true}); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Labels[digitalOceanKeyDeleteAuthorizedLabel] != "702" ||
+		claim.Labels[digitalOceanRecoveryKeyIDLabel] != "702" ||
+		claim.Labels[digitalOceanKeyOwnedLabel] != "true" {
+		t.Fatalf("authorization marker lost: %#v", claim)
+	}
+}
+
+func TestEndpointClaimRewriteCannotChangeDigitalOceanProvider(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123438"
+	slug := "provider-rewrite"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	labels[digitalOceanAccountLabel] = "team:test-account"
+	labels[digitalOceanRecoveryKeyIDLabel] = "701"
+	labels[digitalOceanKeyOwnedLabel] = "true"
+	server := core.Server{
+		Provider: providerName,
+		CloudID:  "101",
+		ID:       101,
+		Name:     core.LeaseProviderName(leaseID, slug),
+		Labels:   labels,
+	}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+
+	err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
+		leaseID,
+		slug,
+		"tart",
+		"instance:other",
+		"",
+		t.TempDir(),
+		time.Minute,
+		true,
+		core.Server{Provider: "tart", CloudID: "other", Labels: map[string]string{"lease": leaseID, "slug": slug, "provider": "tart"}},
+		core.SSHTarget{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "as provider=tart") {
+		t.Fatalf("rewrite err=%v", err)
+	}
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Provider != providerName || claim.CloudID != "101" ||
+		claim.Labels[digitalOceanRecoveryKeyIDLabel] != "701" {
+		t.Fatalf("claim rewritten: %#v", claim)
+	}
+}
+
+func TestUnreadableExactClaimBlocksResolveAndRelease(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
@@ -968,17 +1263,20 @@ func TestResolveAndReleaseVisibleDropletRepairsClaimWithoutTrustingTagKeyIdentit
 	}
 
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "parse claim") {
+		t.Fatalf("Resolve lease=%#v err=%v", lease, err)
 	}
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	server := serverFromDroplet(item, backend.Cfg)
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "parse claim") {
+		t.Fatalf("ReleaseLease err=%v", err)
 	}
-	if len(api.deleted) != 1 || api.deleted[0] != 112 || len(api.deletedKeyIDs) != 0 {
+	if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 {
 		t.Fatalf("deleted=%v deletedKeyIDs=%v", api.deleted, api.deletedKeyIDs)
 	}
-	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
-		t.Fatalf("claim after repair cleanup ok=%v err=%v", ok, err)
+	data, readErr := os.ReadFile(filepath.Join(claimsDir, leaseID+".json"))
+	if readErr != nil || string(data) != "{not-json" {
+		t.Fatalf("unreadable claim changed: data=%q err=%v", data, readErr)
 	}
 }
 
@@ -989,6 +1287,8 @@ func TestResolvePendingRecoveryRejectsDuplicateVisibleDroplets(t *testing.T) {
 	leaseID := "cbx_abcdef123459"
 	slug := "duplicate"
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	labels["recovery"] = "ambiguous-create"
+	labels[digitalOceanAccountLabel] = "team:test-account"
 	items := []droplet{
 		{ID: 109, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)},
 		{ID: 110, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)},
@@ -1015,6 +1315,109 @@ func TestResolvePendingRecoveryRejectsDuplicateVisibleDroplets(t *testing.T) {
 	}
 }
 
+func TestReleaseFromClaimRejectsCloudIDLessClaimWithoutRecoveryMarker(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123442"
+	slug := "unmarked-claim-only"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now().Add(-ambiguousCreateRecoveryGrace-time.Minute))
+	labels[digitalOceanAccountLabel] = "team:test-account"
+	labels[digitalOceanRecoveryKeyIDLabel] = "704"
+	labels[digitalOceanKeyOwnedLabel] = "true"
+	item := droplet{ID: 104, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
+	listCalls := 0
+	api := &fakeDigitalOceanAPI{}
+	api.listFn = func() ([]droplet, error) {
+		listCalls++
+		if listCalls == 1 {
+			return nil, nil
+		}
+		return []droplet{item}, nil
+	}
+	backend := newTestBackend(t, api)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, core.Server{
+		Provider: providerName,
+		Name:     item.Name,
+		Labels:   labels,
+	}, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "invalid recovery state") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	if listCalls != 1 {
+		t.Fatalf("unexpected reconciliation list calls=%d", listCalls)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("deleted=%v deletedKeyIDs=%v", api.deleted, api.deletedKeyIDs)
+	}
+	claim, claimErr := core.ReadLeaseClaim(leaseID)
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if claim.CloudID != "" || claim.Labels[digitalOceanRecoveryKeyIDLabel] != "704" {
+		t.Fatalf("unmarked claim was rewritten: %#v", claim)
+	}
+}
+
+func TestReleaseFromClaimRejectsMisfiledClaim(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	requestedLeaseID := "cbx_abcdef123441"
+	claimLeaseID := "cbx_abcdef123440"
+	slug := "cbx-abcdef123441"
+	labels := core.DirectLeaseLabels(cfg, claimLeaseID, slug, providerName, "", false, time.Now())
+	labels[digitalOceanAccountLabel] = "team:test-account"
+	labels[digitalOceanRecoveryKeyIDLabel] = "703"
+	labels[digitalOceanKeyOwnedLabel] = "true"
+	server := core.Server{
+		Provider: providerName,
+		CloudID:  "103",
+		ID:       103,
+		Name:     core.LeaseProviderName(claimLeaseID, slug),
+		Labels:   labels,
+	}
+	api := &fakeDigitalOceanAPI{}
+	backend := newTestBackend(t, api)
+	if err := core.ClaimLeaseTargetForRepoConfig(claimLeaseID, slug, cfg, server, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	stateDir, err := core.CrabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimsDir := filepath.Join(stateDir, "claims")
+	data, err := os.ReadFile(filepath.Join(claimsDir, claimLeaseID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claimsDir, requestedLeaseID+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(claimsDir, claimLeaseID+".json")); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := writeStoredTestboxKey(t, claimLeaseID)
+
+	_, err = backend.Resolve(context.Background(), core.ResolveRequest{ID: requestedLeaseID, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "does not match a valid digitalocean claim") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("deleted=%v deletedKeyIDs=%v", api.deleted, api.deletedKeyIDs)
+	}
+	if _, err := os.Stat(filepath.Join(claimsDir, requestedLeaseID+".json")); err != nil {
+		t.Fatalf("misfiled claim removed: %v", err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("claim key removed: %v", err)
+	}
+}
+
 func TestReleasePersistsPendingRecoveryBeforeKeyCleanupFailure(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -1022,9 +1425,11 @@ func TestReleasePersistsPendingRecoveryBeforeKeyCleanupFailure(t *testing.T) {
 	leaseID := "cbx_abcdef123460"
 	slug := "cleanup-retry"
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	labels[digitalOceanAccountLabel] = "team:test-account"
 	labels[digitalOceanRecoveryKeyIDLabel] = "705"
 	labels[digitalOceanKeyOwnedLabel] = "true"
 	item := droplet{ID: 111, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
+	labels["recovery"] = "ambiguous-create"
 	api := &fakeDigitalOceanAPI{
 		droplets:     []droplet{item},
 		keyDeleteErr: errors.New("key cleanup failed"),
@@ -1199,6 +1604,7 @@ func TestReleaseRetriesKeyCleanupFromRetainedClaimAfterDropletDeletion(t *testin
 	}
 	backend := newTestBackend(t, api)
 	server := serverFromDroplet(item, backend.Cfg)
+	server.Labels[digitalOceanAccountLabel] = "team:test-account"
 	server.Labels[digitalOceanRecoveryKeyIDLabel] = "706"
 	server.Labels[digitalOceanKeyOwnedLabel] = "true"
 	ssh := core.SSHTargetFromConfig(backend.Cfg, server.PublicNet.IPv4.IP)
@@ -1307,6 +1713,219 @@ func TestReleaseFromClaimRefusesDigitalOceanAccountMismatch(t *testing.T) {
 	}
 }
 
+func TestReleaseFromClaimRefusesMissingAccountIdentity(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123449"
+	slug := "claim-account-missing"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	labels[digitalOceanRecoveryKeyIDLabel] = "709"
+	labels[digitalOceanKeyOwnedLabel] = "true"
+	server := core.Server{
+		Provider: providerName,
+		CloudID:  "79",
+		ID:       79,
+		Name:     core.LeaseProviderName(leaseID, slug),
+		Labels:   labels,
+	}
+	api := &fakeDigitalOceanAPI{}
+	backend := newTestBackend(t, api)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, backend.Cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := writeStoredTestboxKey(t, leaseID)
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "no account identity") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("deleted=%v deletedKeyIDs=%v", api.deleted, api.deletedKeyIDs)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider(slug, providerName)
+	if claimErr != nil || !ok || claim.Labels[digitalOceanAccountLabel] != "" ||
+		claim.Labels[digitalOceanRecoveryKeyIDLabel] != "709" {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key after refusal: %v", err)
+	}
+}
+
+func TestReleaseLeaseRefusesMissingClaimAccountIdentity(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123448"
+	slug := "cleanup-account-missing"
+	item := droplet{ID: 78, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: leaseTags(cfg, leaseID, slug, "ready", false, time.Now())}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	liveServer := serverFromDroplet(item, backend.Cfg)
+	claimServer := liveServer
+	claimServer.Labels = core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	claimServer.Labels[digitalOceanRecoveryKeyIDLabel] = "708"
+	claimServer.Labels[digitalOceanKeyOwnedLabel] = "true"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, backend.Cfg, claimServer, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := writeStoredTestboxKey(t, leaseID)
+
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		Server:  liveServer,
+		LeaseID: leaseID,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "no account identity") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("deleted=%v deletedKeyIDs=%v", api.deleted, api.deletedKeyIDs)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider(slug, providerName)
+	if claimErr != nil || !ok || claim.Labels[digitalOceanAccountLabel] != "" ||
+		claim.Labels[digitalOceanRecoveryKeyIDLabel] != "708" {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key after refusal: %v", err)
+	}
+}
+
+func TestReleaseLeaseRefusesMismatchedClaimLabels(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123444"
+	slug := "cleanup-label-mismatch"
+	item := droplet{ID: 77, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: leaseTags(cfg, leaseID, slug, "ready", false, time.Now())}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	liveServer := serverFromDroplet(item, backend.Cfg)
+	claimServer := liveServer
+	claimServer.Labels = core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	claimServer.Labels["lease"] = "cbx_abcdef123443"
+	claimServer.Labels[digitalOceanAccountLabel] = "team:test-account"
+	claimServer.Labels[digitalOceanRecoveryKeyIDLabel] = "707"
+	claimServer.Labels[digitalOceanKeyOwnedLabel] = "true"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, backend.Cfg, claimServer, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := writeStoredTestboxKey(t, leaseID)
+
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		Server:  liveServer,
+		LeaseID: leaseID,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "claim identity") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("deleted=%v deletedKeyIDs=%v", api.deleted, api.deletedKeyIDs)
+	}
+	claim, claimErr := core.ReadLeaseClaim(leaseID)
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if claim.Labels["lease"] != "cbx_abcdef123443" || claim.Labels[digitalOceanRecoveryKeyIDLabel] != "707" {
+		t.Fatalf("mismatched claim was rewritten: %#v", claim)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key after refusal: %v", err)
+	}
+}
+
+func TestReleaseLeaseRefusesUnboundClaimWithoutRecoveryState(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123437"
+	slug := "cleanup-unbound"
+	item := droplet{ID: 76, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: leaseTags(cfg, leaseID, slug, "ready", false, time.Now())}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	backend := newTestBackend(t, api)
+	liveServer := serverFromDroplet(item, backend.Cfg)
+	claimLabels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	claimLabels[digitalOceanAccountLabel] = "team:test-account"
+	claimLabels[digitalOceanRecoveryKeyIDLabel] = "706"
+	claimLabels[digitalOceanKeyOwnedLabel] = "true"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, backend.Cfg, core.Server{
+		Provider: providerName,
+		Name:     item.Name,
+		Labels:   claimLabels,
+	}, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := writeStoredTestboxKey(t, leaseID)
+
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		Server:  liveServer,
+		LeaseID: leaseID,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "valid cleanup recovery state") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("deleted=%v deletedKeyIDs=%v", api.deleted, api.deletedKeyIDs)
+	}
+	claim, claimErr := core.ReadLeaseClaim(leaseID)
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if claim.CloudID != "" || claim.Labels[digitalOceanRecoveryKeyIDLabel] != "706" {
+		t.Fatalf("unbound claim changed: %#v", claim)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key after refusal: %v", err)
+	}
+}
+
+func TestReleaseLeaseRefusesAmbiguousCreateWithoutVerifiedDroplet(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef123436"
+	slug := "cleanup-ambiguous-hidden"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	labels["recovery"] = "ambiguous-create"
+	labels[digitalOceanAccountLabel] = "team:test-account"
+	labels[digitalOceanRecoveryKeyIDLabel] = "705"
+	labels[digitalOceanKeyOwnedLabel] = "true"
+	server := core.Server{
+		Provider: providerName,
+		ID:       75,
+		Name:     core.LeaseProviderName(leaseID, slug),
+		Labels:   labels,
+	}
+	api := &fakeDigitalOceanAPI{}
+	backend := newTestBackend(t, api)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, backend.Cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := writeStoredTestboxKey(t, leaseID)
+
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		Server:  server,
+		LeaseID: leaseID,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "valid cleanup recovery state") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("deleted=%v deletedKeyIDs=%v", api.deleted, api.deletedKeyIDs)
+	}
+	claim, claimErr := core.ReadLeaseClaim(leaseID)
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if claim.CloudID != "" || claim.Labels["recovery"] != "ambiguous-create" {
+		t.Fatalf("ambiguous claim changed: %#v", claim)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key after refusal: %v", err)
+	}
+}
+
 func TestReleaseDoesNotBackfillStaleLegacyClaim(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -1352,6 +1971,7 @@ func TestReleaseFromClaimRefusesDropletMissingOwnershipTags(t *testing.T) {
 	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
 	backend := newTestBackend(t, api)
 	server := serverFromDroplet(item, backend.Cfg)
+	server.Labels[digitalOceanAccountLabel] = "team:test-account"
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, backend.Cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
 		t.Fatal(err)
 	}
@@ -1522,6 +2142,7 @@ func TestCleanupDryRunDoesNotDelete(t *testing.T) {
 	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
 	backend := newTestBackend(t, api)
 	server := serverFromDroplet(item, backend.Cfg)
+	server.Labels[digitalOceanAccountLabel] = "team:test-account"
 	if err := core.ClaimLeaseTargetForRepoConfig("cbx_deadbeef1234", "old", backend.Cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
 		t.Fatal(err)
 	}
