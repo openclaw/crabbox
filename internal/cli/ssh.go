@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf16"
@@ -315,10 +316,8 @@ func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, r
 		probe := *target
 		probe.Port = port
 		probe.FallbackPorts = []string{}
-		cmd := exec.CommandContext(ctx, "ssh", sshArgsWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
-		err := cmd.Run()
+		cmd := exec.CommandContext(ctx, "ssh", sshArgsNoInputWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
+		err := runSSHCommand(cmd, io.Discard, io.Discard)
 		if err == nil {
 			target.Port = probe.Port
 			return nil
@@ -338,12 +337,13 @@ func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (string,
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
-		cmd := exec.CommandContext(ctx, "ssh", sshArgs(probe, remote)...)
-		out, err := cmd.Output()
+		cmd := exec.CommandContext(ctx, "ssh", sshArgsNoInput(probe, remote)...)
+		var out bytes.Buffer
+		err := runSSHCommand(cmd, &out, io.Discard)
 		if err == nil {
-			return strings.TrimSpace(string(out)), nil
+			return strings.TrimSpace(out.String()), nil
 		}
-		lastOut = out
+		lastOut = out.Bytes()
 		lastErr = err
 		if !shouldRetrySSHPort(err) {
 			return "", err
@@ -364,15 +364,16 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 		// before it reaches this boundary; see remoteCommand/shellQuote tests.
 		// codeql[go/command-injection]
 		// lgtm[go/command-injection]
-		cmd := exec.CommandContext(ctx, "ssh", sshArgs(probe, remote)...)
-		out, err := cmd.CombinedOutput()
+		cmd := exec.CommandContext(ctx, "ssh", sshArgsNoInput(probe, remote)...)
+		var out synchronizedBuffer
+		err := runSSHCommand(cmd, &out, &out)
 		if err == nil {
-			return strings.TrimSpace(string(out)), nil
+			return strings.TrimSpace(out.String()), nil
 		}
-		lastOut = out
+		lastOut = out.Bytes()
 		lastErr = err
 		if !shouldRetrySSHPort(err) {
-			return strings.TrimSpace(string(out)), err
+			return strings.TrimSpace(out.String()), err
 		}
 	}
 	return strings.TrimSpace(string(lastOut)), lastErr
@@ -397,9 +398,7 @@ func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.
 		probe.Port = port
 		cmd := exec.CommandContext(ctx, "ssh", sshArgs(probe, remote)...)
 		cmd.Stdin = bytes.NewReader(data)
-		cmd.Stdout = stdout
-		cmd.Stderr = stderr
-		err := cmd.Run()
+		err := runSSHCommand(cmd, stdout, stderr)
 		if err == nil {
 			return nil
 		}
@@ -425,9 +424,7 @@ func runSSHInputStream(ctx context.Context, target SSHTarget, remote string, inp
 		probe.Port = port
 		cmd := exec.CommandContext(ctx, "ssh", sshArgs(probe, remote)...)
 		cmd.Stdin = input
-		cmd.Stdout = stdout
-		cmd.Stderr = stderr
-		err := cmd.Run()
+		err := runSSHCommand(cmd, stdout, stderr)
 		if err == nil {
 			return nil
 		}
@@ -451,10 +448,8 @@ func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, st
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
-		cmd := exec.CommandContext(ctx, "ssh", sshArgs(probe, remote)...)
-		cmd.Stdout = stdout
-		cmd.Stderr = stderr
-		err := cmd.Run()
+		cmd := exec.CommandContext(ctx, "ssh", sshArgsNoInput(probe, remote)...)
+		err := runSSHCommand(cmd, stdout, stderr)
 		if err == nil {
 			return 0, nil
 		}
@@ -467,6 +462,33 @@ func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, st
 	return lastCode, lastErr
 }
 
+func runSSHCommand(cmd *exec.Cmd, stdout, stderr io.Writer) error {
+	return runCommandWithPlatformStreams(cmd, stdout, stderr)
+}
+
+type synchronizedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(data)
+}
+
+func (b *synchronizedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Clone(b.buf.Bytes())
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func isSSHCommandExitError(err error) bool {
 	var exitErr *exec.ExitError
 	return asExitError(err, &exitErr)
@@ -476,12 +498,24 @@ func sshArgs(target SSHTarget, remote string) []string {
 	return sshArgsWithOptions(target, remote, "10", "3")
 }
 
+func sshArgsNoInput(target SSHTarget, remote string) []string {
+	return sshArgsNoInputWithOptions(target, remote, "10", "3")
+}
+
 func shouldRetrySSHPort(err error) bool {
 	return exitCode(err) == 255
 }
 
 func sshArgsWithOptions(target SSHTarget, remote, connectTimeout, connectionAttempts string) []string {
 	return append(sshBaseArgsWithOptions(target, connectTimeout, connectionAttempts),
+		target.User+"@"+target.Host,
+		remote,
+	)
+}
+
+func sshArgsNoInputWithOptions(target SSHTarget, remote, connectTimeout, connectionAttempts string) []string {
+	return append(sshBaseArgsWithOptions(target, connectTimeout, connectionAttempts),
+		"-n",
 		target.User+"@"+target.Host,
 		remote,
 	)

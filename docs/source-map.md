@@ -78,6 +78,7 @@ SSH-lease providers:
 - Local Docker container: `internal/providers/localcontainer`
 - Canonical Multipass local Ubuntu VM: `internal/providers/multipass`
 - Cirrus Labs tart local macOS VM: `internal/providers/tart`
+- Microsoft Hyper-V local Windows VM: `internal/providers/hyperv`
 - Daytona, Morph, exe.dev, KubeVirt, External, Tenki, Namespace devbox, RunPod, Semaphore, Sprites, Railway:
   `internal/providers/daytona`, `internal/providers/morph`, `internal/providers/exedev`, `internal/providers/kubevirt`, `internal/providers/external`, `internal/providers/tenki`, `internal/providers/namespace`,
   `internal/providers/runpod`, `internal/providers/semaphore`, `internal/providers/sprites`,
