@@ -171,6 +171,9 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		if err != nil {
 			return RunResult{}, err
 		}
+		if err := b.migrateWorkspaceOwnership(ctx, client, name, workspace); err != nil {
+			return RunResult{}, err
+		}
 		if _, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID); err != nil &&
 			!errors.Is(err, core.ErrTailnetPeerUnavailable) &&
 			!errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
@@ -305,14 +308,20 @@ func (b *isloBackend) Status(ctx context.Context, req StatusRequest) (statusView
 		if err != nil {
 			return statusView{}, isloError("get sandbox", err)
 		}
+		var tailscaleValidationErr error
 		if sandbox != nil && isloStatusReady(sandbox.GetStatus()) {
-			if _, err := b.ensureLeaseTailscale(ctx, client, name, newLeaseSlug(leaseID), leaseID); err != nil &&
-				!errors.Is(err, core.ErrTailnetPeerUnavailable) &&
-				!errors.Is(err, core.ErrTailnetPeerValidationUnavailable) {
-				return statusView{}, err
+			if _, err := b.ensureLeaseTailscale(ctx, client, name, newLeaseSlug(leaseID), leaseID); err != nil {
+				switch {
+				case errors.Is(err, core.ErrTailnetPeerUnavailable):
+				case errors.Is(err, core.ErrTailnetPeerValidationUnavailable):
+					tailscaleValidationErr = err
+				default:
+					return statusView{}, err
+				}
 			}
 		}
 		view := isloStatusView(leaseID, sandbox)
+		applyIsloTailscaleValidationError(&view, tailscaleValidationErr)
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
@@ -576,6 +585,16 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 		Ready:      isloStatusReady(status),
 		Labels:     labels,
 	}
+}
+
+func applyIsloTailscaleValidationError(view *statusView, err error) {
+	if view == nil || err == nil || view.Tailscale == nil {
+		return
+	}
+	view.Tailscale.State = "unknown"
+	view.Tailscale.Error = err.Error()
+	view.Labels["tailscale_state"] = "unknown"
+	view.Labels["tailscale_error"] = err.Error()
 }
 
 func applyIsloClaimLabels(labels map[string]string, leaseID string) {

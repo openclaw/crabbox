@@ -337,14 +337,7 @@ func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, fl
 func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider string, claims []leaseClaim, flags pondPeersFlags) ([]BridgePeer, error) {
 	class := providerTransportClass(provider)
 	peers := make([]BridgePeer, 0, len(claims))
-	hasIndependentPrimary := false
-	for _, claim := range claims {
-		transport := bridgePeerFromClaim(claim, class).Transport
-		if transport == TransportTailnet || transport == TransportSSH {
-			hasIndependentPrimary = true
-			break
-		}
-	}
+	var deferredBridgeErr error
 	var bridge BridgeProvider
 	bridgeLoaded := false
 	var bridgeLoadErr error
@@ -380,11 +373,12 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 					peers = append(peers, peer)
 					continue
 				}
-				if flags.SharePort == 0 && hasIndependentPrimary {
+				if flags.SharePort == 0 {
 					peer.BridgeState = "error"
 					peer.Transport = TransportNone
 					peer.Note = fmt.Sprintf("bridge lookup failed for provider %s: %v", peer.Provider, bridgeLoadErr)
 					peers = append(peers, peer)
+					deferredBridgeErr = bridgeLoadErr
 					continue
 				}
 				return nil, bridgeLoadErr
@@ -443,11 +437,12 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 							peers = append(peers, peer)
 							continue
 						}
-						if hasIndependentPrimary {
+						if flags.SharePort == 0 {
 							peer.BridgeState = "error"
 							peer.Transport = TransportNone
 							peer.Note = fmt.Sprintf("list bridge targets failed: %v", lerr)
 							peers = append(peers, peer)
+							deferredBridgeErr = fmt.Errorf("list peer targets %s: %w", claim.LeaseID, lerr)
 							continue
 						}
 						return nil, fmt.Errorf("list peer targets %s: %w", claim.LeaseID, lerr)
@@ -461,7 +456,19 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 		}
 		peers = append(peers, peer)
 	}
+	if deferredBridgeErr != nil && !hasResolvedIndependentPrimary(peers) {
+		return nil, deferredBridgeErr
+	}
 	return peers, nil
+}
+
+func hasResolvedIndependentPrimary(peers []BridgePeer) bool {
+	for _, peer := range peers {
+		if peer.Transport == TransportTailnet || peer.Transport == TransportSSH {
+			return true
+		}
+	}
+	return false
 }
 
 // bridgePeerFromClaim turns a single lease claim into the unified peer row.

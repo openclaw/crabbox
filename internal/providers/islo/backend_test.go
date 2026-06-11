@@ -269,6 +269,26 @@ func TestIsloStatusViewIncludesTailscaleMetadata(t *testing.T) {
 	}
 }
 
+func TestIsloStatusViewMarksTailscaleValidationUnknown(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-node-a"
+	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	view := isloStatusView(leaseID, &gosdk.SandboxResponse{Name: "crabbox-node-a", Status: "running"})
+	applyIsloTailscaleValidationError(&view, errors.New("tailnet validation unavailable"))
+	if view.Tailscale == nil || view.Tailscale.State != "unknown" || view.Tailscale.Error == "" {
+		t.Fatalf("tailscale metadata=%#v", view.Tailscale)
+	}
+	if view.Labels["tailscale_state"] != "unknown" || view.Labels["tailscale_error"] == "" {
+		t.Fatalf("tailscale labels=%#v", view.Labels)
+	}
+}
+
 func TestIsloClientUsesBoundedDefaultTransport(t *testing.T) {
 	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "test", BaseURL: "http://127.0.0.1:8787"}}, Runtime{})
 	if err != nil {
@@ -370,6 +390,40 @@ func TestIsloRunCleanupDeleteUsesBoundedContext(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "warning: islo stop failed for crabbox-repo-abcdef: context deadline exceeded") {
 		t.Fatalf("stderr=%q, want cleanup timeout warning", stderr.String())
+	}
+}
+
+func TestIsloRunMigratesReusedWorkspaceOwnership(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID:      "isb_crabbox-old-abcdef",
+		Keep:    true,
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.execRequests) < 3 {
+		t.Fatalf("exec requests=%d want migration, prepare, workload", len(client.execRequests))
+	}
+	migration := client.execRequests[0]
+	if migration.GetUser() == nil || *migration.GetUser() != isloAdminUser {
+		t.Fatalf("migration user=%v want %q", migration.GetUser(), isloAdminUser)
+	}
+	command := strings.Join(migration.GetCommand(), " ")
+	for _, want := range []string{"chown -R", "'islo:islo'", "'/workspace/repo'", "workspace-owner-"} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("migration command=%q missing %q", command, want)
+		}
 	}
 }
 

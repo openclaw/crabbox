@@ -304,6 +304,24 @@ func TestResolvePondPeersFallsBackWhenTailnetValidationFails(t *testing.T) {
 	}
 }
 
+func TestResolvePondPeersReturnsBridgeErrorWhenAllTailnetClaimsAreStale(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { setLeaseClaimTailscale(c, "100.64.7.7", "") })
+	fake := &fakeTailnetBridgeProvider{
+		fakeBridgeProvider: &fakeBridgeProvider{listErr: errors.New("Islo API unavailable")},
+		validateErr:        errors.New("daemon unavailable"),
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	if _, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{}); err == nil {
+		t.Fatal("expected bridge error after the only tailnet claim failed validation")
+	}
+}
+
 func TestResolvePondPeersRefreshesTailnetLabelsAfterValidation(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},

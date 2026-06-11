@@ -2,6 +2,7 @@ package islo
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -93,6 +94,22 @@ func (b *isloBackend) prepareWorkspace(ctx context.Context, client isloAPI, name
 	return b.execShell(ctx, client, name, command, io.Discard)
 }
 
+func (b *isloBackend) migrateWorkspaceOwnership(ctx context.Context, client isloAPI, name, workspace string) error {
+	sum := sha256.Sum256([]byte(workspace))
+	marker := fmt.Sprintf("/var/lib/crabbox/workspace-owner-%x", sum[:8])
+	command := strings.Join([]string{
+		"set -e",
+		"mkdir -p /var/lib/crabbox",
+		"if [ ! -e " + shellQuote(marker) + " ]; then",
+		"mkdir -p " + shellQuote(workspace),
+		"chown -R " + shellQuote(isloWorkloadUser+":"+isloWorkloadUser) + " " + shellQuote(workspace),
+		": > " + shellQuote(marker),
+		"chmod 600 " + shellQuote(marker),
+		"fi",
+	}, "; ")
+	return b.execShellAs(ctx, client, name, command, isloAdminUser, io.Discard)
+}
+
 func (b *isloBackend) uploadArchiveViaExec(ctx context.Context, client isloAPI, name, workspace string, archive io.Reader) error {
 	suffix := isloRandomSuffix()
 	remoteB64 := path.Join("/tmp", "crabbox-"+suffix+".tgz.b64")
@@ -143,9 +160,13 @@ func isloFallbackExtractCommand(remoteB64, remoteArchive, workspace string) stri
 }
 
 func (b *isloBackend) execShell(ctx context.Context, client isloAPI, name, command string, stdout io.Writer) error {
+	return b.execShellAs(ctx, client, name, command, isloWorkloadUser, stdout)
+}
+
+func (b *isloBackend) execShellAs(ctx context.Context, client isloAPI, name, command, user string, stdout io.Writer) error {
 	code, err := client.ExecStream(ctx, name, &gosdk.ExecRequest{
 		Command: []string{"bash", "-lc", command},
-		User:    stringValue(isloWorkloadUser),
+		User:    stringValue(user),
 	}, stdout, b.rt.Stderr)
 	if err != nil {
 		return fmt.Errorf("islo exec %q: %w", command, err)
