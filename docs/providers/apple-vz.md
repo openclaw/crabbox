@@ -176,7 +176,7 @@ The portable `osImage` selector maps to dated Ubuntu ARM64 cloud images:
 Built-in remote URLs have pinned SHA-256 digests. A custom HTTP or HTTPS image
 must also set `appleVZ.imageSHA256`; Crabbox refuses an unverified remote image.
 A local image path may omit the checksum, or set one to verify the file before
-boot.
+boot. The image's raw or virtual size must not exceed `appleVZ.diskGiB`.
 
 Remote images must use HTTPS. Plain HTTP is accepted only for loopback
 development servers. Downloads are capped at 32 GiB before checksum
@@ -190,6 +190,11 @@ can validate them. `--apple-vz-image` accepts local paths only. Crabbox removes
 the image variable from helper environments, forwards the complete request
 over stdin, and represents remote images in logs and persisted lease metadata
 only by a checksum-derived identity such as `remote:sha256:6a61b967ba4a`.
+
+`appleVZ.user` must be a valid POSIX account name. `appleVZ.workRoot` must be
+a clean absolute POSIX guest path. Each path segment may contain letters,
+numbers, dots, underscores, and hyphens. Spaces and shell-active characters
+are rejected because the path also crosses SSH and rsync command boundaries.
 
 QCOW2 cloud images are converted once into a sparse raw base image. Each lease
 gets a clone or sparse copy of that base, resized to `diskGiB`. Changing the

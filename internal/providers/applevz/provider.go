@@ -45,7 +45,16 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 
 func (Provider) ServerTypeForClass(string) string { return "" }
 
+func (Provider) ValidateConfig(cfg core.Config) error {
+	applyDefaults(&cfg)
+	return validateConfig(cfg)
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
+	applyDefaults(&cfg)
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
 	}
@@ -65,4 +74,14 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 		return nil, core.Exit(2, "%s doctor backend unavailable", providerName)
 	}
 	return doctor, nil
+}
+
+func validateConfig(cfg core.Config) error {
+	if err := applevzhelper.ValidatePOSIXAccountName(cfg.AppleVZ.User); err != nil {
+		return core.Exit(2, "appleVZ.user %s", err)
+	}
+	if err := applevzhelper.ValidatePOSIXWorkRoot(cfg.AppleVZ.WorkRoot); err != nil {
+		return core.Exit(2, "appleVZ.workRoot %s", err)
+	}
+	return nil
 }

@@ -552,3 +552,50 @@ func TestCopyReaderAtRangeHonorsCancellation(t *testing.T) {
 		t.Fatalf("copyReaderAtRange error=%v, want context canceled", err)
 	}
 }
+
+func TestDiskCapacityRejectsOversizedSource(t *testing.T) {
+	capacity, err := diskCapacityBytes(30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capacity != 30<<30 {
+		t.Fatalf("capacity=%d", capacity)
+	}
+	if err := validateSourceDiskSize(capacity, capacity); err != nil {
+		t.Fatalf("equal source size rejected: %v", err)
+	}
+	if err := validateSourceDiskSize(capacity+1, capacity); err == nil {
+		t.Fatal("oversized source image accepted")
+	}
+}
+
+func TestSeedUserDataQuotesYAMLAndReadinessPath(t *testing.T) {
+	workRoot := "/work/$(touch /tmp/not-run)'literal"
+	data := seedUserData("alice", "ssh-ed25519 AAAATEST alice@example.com", workRoot)
+	for _, want := range []string{
+		`name: "alice"`,
+		`- "ssh-ed25519 AAAATEST alice@example.com"`,
+		`[mkdir, -p, "/work/$(touch /tmp/not-run)'literal"]`,
+		`test -d '/work/$(touch /tmp/not-run)'\''literal'`,
+	} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("seed data missing %q:\n%s", want, data)
+		}
+	}
+	if strings.Contains(data, `test -d "/work/$(`) {
+		t.Fatalf("readiness script uses expandable double quotes:\n%s", data)
+	}
+}
+
+func TestRequireHardwareVirtualizationRejectsUnsupportedHost(t *testing.T) {
+	dir := t.TempDir()
+	sysctl := filepath.Join(dir, "sysctl")
+	if err := os.WriteFile(sysctl, []byte("#!/bin/sh\nprintf '0\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	err := requireHardwareVirtualization()
+	if err == nil || !strings.Contains(err.Error(), "kern.hv_support=0") {
+		t.Fatalf("requireHardwareVirtualization error=%v", err)
+	}
+}

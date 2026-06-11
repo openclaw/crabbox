@@ -133,6 +133,36 @@ func TestApplyDefaults(t *testing.T) {
 	}
 }
 
+func TestValidateConfigRejectsUnsafeGuestIdentity(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	if err := (Provider{}).ValidateConfig(cfg); err != nil {
+		t.Fatalf("default config validation error=%v", err)
+	}
+
+	cfg.AppleVZ.User = "yes\nroot"
+	cfg.AppleVZ.WorkRoot = "/work/crabbox"
+	if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "valid POSIX") {
+		t.Fatalf("unsafe user validation error=%v", err)
+	}
+
+	cfg.AppleVZ.User = "runner"
+	cfg.AppleVZ.WorkRoot = "relative/work"
+	if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "safe absolute POSIX path") {
+		t.Fatalf("relative work root validation error=%v", err)
+	}
+
+	cfg.AppleVZ.WorkRoot = `C:\work\crabbox`
+	if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "safe absolute POSIX path") {
+		t.Fatalf("host-native work root validation error=%v", err)
+	}
+
+	cfg.AppleVZ.WorkRoot = "/work/$(touch)"
+	if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "safe absolute POSIX path") {
+		t.Fatalf("shell-active work root validation error=%v", err)
+	}
+}
+
 func TestApplyDefaultsHonorsGlobalWorkRoot(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

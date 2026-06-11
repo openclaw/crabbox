@@ -29,6 +29,9 @@ func TestProtocolPathsAndStatusHelpers(t *testing.T) {
 	if got := MetadataPath(root, name); got != filepath.Join(root, "instances", name, MetadataFileName) {
 		t.Fatalf("MetadataPath=%q", got)
 	}
+	if got := PreparationPath(root, name); got != filepath.Join(root, "instances", name, PreparationFileName) {
+		t.Fatalf("PreparationPath=%q", got)
+	}
 	for label, path := range map[string]string{
 		"disk":    DiskPath(root, name),
 		"seed":    SeedPath(root, name),
@@ -105,5 +108,43 @@ func TestEnsurePrivateDirTightensExistingPermissions(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o700 {
 		t.Fatalf("private dir mode=%#o, want 0700", got)
+	}
+}
+
+func TestValidatePOSIXAccountName(t *testing.T) {
+	for _, user := range []string{"crabbox", "_runner", "ci.user-1", strings.Repeat("a", 32)} {
+		if err := ValidatePOSIXAccountName(user); err != nil {
+			t.Fatalf("ValidatePOSIXAccountName(%q): %v", user, err)
+		}
+	}
+	for _, user := range []string{"", "yes\nroot", "user:name", "has space", strings.Repeat("a", 33)} {
+		if err := ValidatePOSIXAccountName(user); err == nil {
+			t.Fatalf("ValidatePOSIXAccountName(%q) succeeded", user)
+		}
+	}
+}
+
+func TestValidatePOSIXWorkRoot(t *testing.T) {
+	for _, workRoot := range []string{"/work/crabbox", "/var/lib/my-app_1.2", "/.cache/crabbox"} {
+		if err := ValidatePOSIXWorkRoot(workRoot); err != nil {
+			t.Fatalf("ValidatePOSIXWorkRoot(%q): %v", workRoot, err)
+		}
+	}
+	for _, workRoot := range []string{
+		"",
+		"/",
+		"relative/work",
+		`C:\work\crabbox`,
+		"/work/../root",
+		"/work/./root",
+		"/work//root",
+		"/work/root/",
+		"/work/has space",
+		"/work/$(touch)",
+		"/work/quote'",
+	} {
+		if err := ValidatePOSIXWorkRoot(workRoot); err == nil {
+			t.Fatalf("ValidatePOSIXWorkRoot(%q) succeeded", workRoot)
+		}
 	}
 }

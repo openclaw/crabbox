@@ -34,12 +34,19 @@ var (
 	terminateInstanceGraceTime = 20 * time.Second
 	terminateInstancePollTime  = 250 * time.Millisecond
 	pidlessStartupStaleAfter   = 2 * time.Minute
+	metadataLessStaleAfter     = 6 * time.Hour
 )
 
 const (
 	inheritedStartupFD       = 3
 	startupAuthorizationByte = 0xa5
 )
+
+type preparationMarker struct {
+	PID          int       `json:"pid"`
+	PIDStartedAt string    `json:"pidStartedAt"`
+	StartedAt    time.Time `json:"startedAt"`
+}
 
 func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -143,11 +150,17 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if strings.TrimSpace(*sshUser) == "" {
 		return fmt.Errorf("ssh user is required")
 	}
+	if err := ValidatePOSIXAccountName(*sshUser); err != nil {
+		return err
+	}
 	if strings.TrimSpace(*sshPublicKey) == "" {
 		return fmt.Errorf("ssh public key is required")
 	}
 	if strings.TrimSpace(*workRoot) == "" {
 		return fmt.Errorf("work root is required")
+	}
+	if err := ValidatePOSIXWorkRoot(*workRoot); err != nil {
+		return err
 	}
 	if *cpus <= 0 || *memoryMiB <= 0 || *diskGiB <= 0 {
 		return fmt.Errorf("cpus, memory-mib, and disk-gib must be positive")
@@ -169,6 +182,10 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 	if err := ensurePrivateDir(instanceRoot); err != nil {
 		return fmt.Errorf("create instance root: %w", err)
+	}
+	if err := writePreparationMarker(root, *name); err != nil {
+		_ = os.RemoveAll(instanceRoot)
+		return err
 	}
 	now := time.Now().UTC()
 	inst := Instance{
@@ -203,6 +220,10 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err := writeMetadata(MetadataPath(root, *name), inst); err != nil {
 		_ = os.RemoveAll(instanceRoot)
 		return err
+	}
+	if err := os.Remove(PreparationPath(root, *name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = os.RemoveAll(instanceRoot)
+		return fmt.Errorf("remove preparation marker: %w", err)
 	}
 	logPath := HelperLogPath(root, *name)
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -707,6 +728,48 @@ func readMetadata(path string) (Instance, error) {
 	return inst, nil
 }
 
+func writePreparationMarker(stateRoot, name string) error {
+	pid := os.Getpid()
+	startedAt, err := readProcessStartTime(pid)
+	if err != nil {
+		return fmt.Errorf("read preparation process identity: %w", err)
+	}
+	marker := preparationMarker{
+		PID:          pid,
+		PIDStartedAt: startedAt,
+		StartedAt:    time.Now().UTC(),
+	}
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return fmt.Errorf("encode preparation marker: %w", err)
+	}
+	path := PreparationPath(stateRoot, name)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write preparation marker: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("commit preparation marker: %w", err)
+	}
+	return nil
+}
+
+func preparationActive(stateRoot, name string) bool {
+	data, err := os.ReadFile(PreparationPath(stateRoot, name))
+	if err != nil {
+		return false
+	}
+	var marker preparationMarker
+	if err := json.Unmarshal(data, &marker); err != nil || marker.PID <= 0 || marker.PIDStartedAt == "" {
+		return false
+	}
+	if !pidAlive(marker.PID) {
+		return false
+	}
+	startedAt, err := readProcessStartTime(marker.PID)
+	return err == nil && startedAt == marker.PIDStartedAt
+}
+
 func listMetadata(stateRoot string) ([]Instance, error) {
 	entries, err := os.ReadDir(InstancesDir(stateRoot))
 	if err != nil {
@@ -722,6 +785,23 @@ func listMetadata(stateRoot string) ([]Instance, error) {
 		}
 		inst, err := readMetadata(filepath.Join(InstancesDir(stateRoot), entry.Name(), MetadataFileName))
 		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if preparationActive(stateRoot, entry.Name()) {
+				continue
+			}
+			info, infoErr := entry.Info()
+			if infoErr != nil || time.Since(info.ModTime()) < metadataLessStaleAfter {
+				continue
+			}
+			instances = append(instances, Instance{
+				Name:      entry.Name(),
+				Status:    StatusStopped,
+				Error:     "missing instance metadata",
+				CreatedAt: info.ModTime().UTC(),
+				UpdatedAt: info.ModTime().UTC(),
+			})
 			continue
 		}
 		instances = append(instances, normalizeInstance(inst))

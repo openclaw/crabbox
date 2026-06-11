@@ -2,9 +2,12 @@ package applevzhelper
 
 import (
 	"encoding/hex"
+	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -21,12 +24,13 @@ const (
 	GuestSSHPort      uint32 = 22
 	GuestVSOCKSSHPort uint32 = 2222
 
-	MetadataFileName   = "instance.json"
-	HelperLogFileName  = "helper.log"
-	ConsoleLogFileName = "console.log"
-	DiskFileName       = "disk.raw"
-	SeedFileName       = "seed.img"
-	EFIFileName        = "efi-variable-store.bin"
+	MetadataFileName    = "instance.json"
+	HelperLogFileName   = "helper.log"
+	ConsoleLogFileName  = "console.log"
+	DiskFileName        = "disk.raw"
+	SeedFileName        = "seed.img"
+	EFIFileName         = "efi-variable-store.bin"
+	PreparationFileName = "preparing.json"
 )
 
 const HelperEntitlements = `<?xml version="1.0" encoding="UTF-8"?>
@@ -95,6 +99,27 @@ type DoctorResponse struct {
 type ImageRequest struct {
 	Image  string `json:"image"`
 	SHA256 string `json:"sha256,omitempty"`
+}
+
+var (
+	validPOSIXAccountName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9._-]*$`)
+	validPOSIXWorkRoot    = regexp.MustCompile(`^/[a-zA-Z0-9._-]+(?:/[a-zA-Z0-9._-]+)*$`)
+)
+
+func ValidatePOSIXAccountName(value string) error {
+	normalized := strings.TrimSpace(value)
+	if len(normalized) > 32 || !validPOSIXAccountName.MatchString(normalized) {
+		return fmt.Errorf("%q is not a valid POSIX account name", value)
+	}
+	return nil
+}
+
+func ValidatePOSIXWorkRoot(value string) error {
+	normalized := strings.TrimSpace(value)
+	if path.Clean(normalized) != normalized || !validPOSIXWorkRoot.MatchString(normalized) {
+		return fmt.Errorf("%q is not a safe absolute POSIX path; use letters, numbers, dots, underscores, and hyphens in each segment", value)
+	}
+	return nil
 }
 
 func RedactImageRef(value string) string {
@@ -173,6 +198,10 @@ func InstanceDir(stateRoot, name string) string {
 
 func MetadataPath(stateRoot, name string) string {
 	return filepath.Join(InstanceDir(stateRoot, name), MetadataFileName)
+}
+
+func PreparationPath(stateRoot, name string) string {
+	return filepath.Join(InstanceDir(stateRoot, name), PreparationFileName)
 }
 
 func DiskPath(stateRoot, name string) string {

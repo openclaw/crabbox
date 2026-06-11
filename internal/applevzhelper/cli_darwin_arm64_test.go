@@ -113,6 +113,110 @@ while :; do sleep 1; done
 	}
 }
 
+func TestRunStartRejectsUnsafeWorkRoot(t *testing.T) {
+	err := runStart([]string{
+		"--state-root", t.TempDir(),
+		"--name", "unsafe-work-root",
+		"--lease-id", "lease-test",
+		"--slug", "my-app",
+		"--image-request-stdin",
+		"--ssh-user", "alice",
+		"--ssh-public-key", "ssh-ed25519 AAAATEST alice@example.com",
+		"--work-root", "/work/$(touch)",
+		"--cpus", "2",
+		"--memory-mib", "2048",
+		"--disk-gib", "16",
+	}, strings.NewReader(`{"image":"test.img"}`), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "safe absolute POSIX path") {
+		t.Fatalf("runStart error=%v, want unsafe work root rejection", err)
+	}
+}
+
+func TestListMetadataReturnsAgedMetadataLessDirectoryForCleanup(t *testing.T) {
+	root := t.TempDir()
+	name := "partial-instance"
+	dir := InstanceDir(root, name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-metadataLessStaleAfter - time.Minute)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	instances, err := listMetadata(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 1 || instances[0].Name != name || instances[0].Status != StatusStopped {
+		t.Fatalf("instances=%+v", instances)
+	}
+	if !strings.Contains(instances[0].Error, "missing instance metadata") {
+		t.Fatalf("instance error=%q", instances[0].Error)
+	}
+}
+
+func TestListMetadataDoesNotSynthesizeMalformedMetadata(t *testing.T) {
+	root := t.TempDir()
+	name := "malformed-instance"
+	dir := InstanceDir(root, name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(MetadataPath(root, name), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-metadataLessStaleAfter - time.Minute)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	instances, err := listMetadata(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 0 {
+		t.Fatalf("malformed metadata synthesized instances=%+v", instances)
+	}
+}
+
+func TestListMetadataHidesFreshMetadataLessDirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(InstanceDir(root, "active-preparation"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	instances, err := listMetadata(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 0 {
+		t.Fatalf("fresh partial instances=%+v", instances)
+	}
+}
+
+func TestListMetadataHidesActivePreparationRegardlessOfAge(t *testing.T) {
+	root := t.TempDir()
+	name := "active-long-preparation"
+	if err := os.MkdirAll(InstanceDir(root, name), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePreparationMarker(root, name); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-metadataLessStaleAfter - time.Hour)
+	if err := os.Chtimes(InstanceDir(root, name), old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	instances, err := listMetadata(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 0 {
+		t.Fatalf("active preparation synthesized instances=%+v", instances)
+	}
+}
+
 func TestRunStartReportsHelperExitWithoutWaitingForReadinessTimeout(t *testing.T) {
 	stateRoot := t.TempDir()
 	name := "early-exit"

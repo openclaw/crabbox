@@ -10,12 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,11 +46,15 @@ func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, erro
 	if err := cleanupImageCacheTemps(cfg.StateRoot); err != nil {
 		return Instance{}, err
 	}
+	targetSize, err := diskCapacityBytes(inst.DiskGiB)
+	if err != nil {
+		return Instance{}, err
+	}
 	sourcePath, err := resolveSourceImage(ctx, cfg.StateRoot, cfg.Image, cfg.ImageSHA256)
 	if err != nil {
 		return Instance{}, err
 	}
-	rawPath, err := ensureRawImage(ctx, cfg.StateRoot, cfg.Image, sourcePath, cfg.ImageSHA256)
+	rawPath, err := ensureRawImage(ctx, cfg.StateRoot, cfg.Image, sourcePath, cfg.ImageSHA256, targetSize)
 	if err != nil {
 		return Instance{}, err
 	}
@@ -63,16 +69,13 @@ func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, erro
 	if err := os.Chmod(inst.DiskPath, 0o600); err != nil {
 		return Instance{}, fmt.Errorf("secure root disk: %w", err)
 	}
-	if inst.DiskGiB > 0 {
-		targetSize := int64(inst.DiskGiB) * 1024 * 1024 * 1024
-		info, err := os.Stat(inst.DiskPath)
-		if err != nil {
-			return Instance{}, fmt.Errorf("stat cloned disk: %w", err)
-		}
-		if info.Size() < targetSize {
-			if err := os.Truncate(inst.DiskPath, targetSize); err != nil {
-				return Instance{}, fmt.Errorf("resize disk: %w", err)
-			}
+	info, err := os.Stat(inst.DiskPath)
+	if err != nil {
+		return Instance{}, fmt.Errorf("stat cloned disk: %w", err)
+	}
+	if info.Size() < targetSize {
+		if err := os.Truncate(inst.DiskPath, targetSize); err != nil {
+			return Instance{}, fmt.Errorf("resize disk: %w", err)
 		}
 	}
 	if err := createSeedImage(ctx, inst.SeedPath, inst.Name, inst.SSHUser, cfg.SSHPublicKey, inst.WorkRoot); err != nil {
@@ -291,12 +294,19 @@ func verifyFileSHA256(path, expected string) error {
 	return nil
 }
 
-func ensureRawImage(ctx context.Context, stateRoot, sourceRef, sourcePath, expectedSHA256 string) (string, error) {
+func ensureRawImage(ctx context.Context, stateRoot, sourceRef, sourcePath, expectedSHA256 string, maxDiskBytes int64) (string, error) {
 	qcow2, err := isQCOW2(sourcePath)
 	if err != nil {
 		return "", err
 	}
 	if !qcow2 {
+		info, err := os.Stat(sourcePath)
+		if err != nil {
+			return "", fmt.Errorf("stat source image: %w", err)
+		}
+		if err := validateSourceDiskSize(info.Size(), maxDiskBytes); err != nil {
+			return "", err
+		}
 		return sourcePath, nil
 	}
 	info, err := os.Stat(sourcePath)
@@ -312,7 +322,10 @@ func ensureRawImage(ctx context.Context, stateRoot, sourceRef, sourcePath, expec
 	}
 	key := rawImageCacheKey(sourceRef, sourcePath, checksum, info)
 	target := filepath.Join(ImagesDir(stateRoot), hex.EncodeToString(key[:])+".raw")
-	if _, err := os.Stat(target); err == nil {
+	if cachedInfo, err := os.Stat(target); err == nil {
+		if err := validateSourceDiskSize(cachedInfo.Size(), maxDiskBytes); err != nil {
+			return "", err
+		}
 		if err := os.Chmod(target, 0o600); err != nil {
 			return "", fmt.Errorf("secure cached raw image: %w", err)
 		}
@@ -325,7 +338,7 @@ func ensureRawImage(ctx context.Context, stateRoot, sourceRef, sourcePath, expec
 	tmp := tmpFile.Name()
 	defer tmpFile.Close()
 	defer os.Remove(tmp)
-	if err := convertQCOW2ToRaw(ctx, sourcePath, tmpFile); err != nil {
+	if err := convertQCOW2ToRaw(ctx, sourcePath, tmpFile, maxDiskBytes); err != nil {
 		return "", err
 	}
 	if err := os.Rename(tmp, target); err != nil {
@@ -494,7 +507,7 @@ func isQCOW2(path string) (bool, error) {
 	return bytes.Equal(header, []byte{'Q', 'F', 'I', 0xfb}), nil
 }
 
-func convertQCOW2ToRaw(ctx context.Context, sourcePath string, target *os.File) error {
+func convertQCOW2ToRaw(ctx context.Context, sourcePath string, target *os.File, maxDiskBytes int64) error {
 	source, err := os.Open(sourcePath)
 	if err != nil {
 		return fmt.Errorf("open qcow2 image: %w", err)
@@ -511,6 +524,9 @@ func convertQCOW2ToRaw(ctx context.Context, sourcePath string, target *os.File) 
 	size := image.Size()
 	if size <= 0 {
 		return fmt.Errorf("qcow2 image size is unavailable")
+	}
+	if err := validateSourceDiskSize(size, maxDiskBytes); err != nil {
+		return err
 	}
 	if err := target.Truncate(size); err != nil {
 		return fmt.Errorf("size raw image: %w", err)
@@ -540,6 +556,20 @@ func convertQCOW2ToRaw(ctx context.Context, sourcePath string, target *os.File) 
 		offset = end
 	}
 	return target.Sync()
+}
+
+func diskCapacityBytes(diskGiB int) (int64, error) {
+	if diskGiB <= 0 || int64(diskGiB) > math.MaxInt64/(1<<30) {
+		return 0, fmt.Errorf("invalid disk size %d GiB", diskGiB)
+	}
+	return int64(diskGiB) << 30, nil
+}
+
+func validateSourceDiskSize(sourceBytes, maxDiskBytes int64) error {
+	if sourceBytes > maxDiskBytes {
+		return fmt.Errorf("source image size %d bytes exceeds configured disk size %d bytes", sourceBytes, maxDiskBytes)
+	}
+	return nil
 }
 
 func cloneOrCopyFile(ctx context.Context, sourcePath, targetPath string) error {
@@ -719,11 +749,19 @@ write_files:
     content: |
 %s
 runcmd:
-  - [mkdir, -p, %q]
-  - [chown, %q, %q]
+  - [mkdir, -p, %s]
+  - [chown, %s, %s]
   - [systemctl, daemon-reload]
   - [systemctl, enable, --now, crabbox-vsock-ssh-proxy.service]
-`, user, publicKey, indentBlock(vsockProxyPython), indentBlock(vsockProxyService), indentBlock(readyScript(workRoot)), workRoot, user+":"+user, workRoot)) + "\n"
+`, yamlString(user), yamlString(publicKey), indentBlock(vsockProxyPython), indentBlock(vsockProxyService), indentBlock(readyScript(workRoot)), yamlString(workRoot), yamlString(user+":"+user), yamlString(workRoot))) + "\n"
+}
+
+func yamlString(value string) string {
+	return strconv.Quote(value)
+}
+
+func posixShellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func indentBlock(content string) string {
@@ -741,9 +779,9 @@ func indentBlock(content string) string {
 func readyScript(workRoot string) string {
 	return fmt.Sprintf(`#!/bin/sh
 set -eu
-test -d %q
+test -d %s
 systemctl is-active --quiet crabbox-vsock-ssh-proxy.service
-`, workRoot)
+`, posixShellQuote(workRoot))
 }
 
 const vsockProxyService = `[Unit]
@@ -1138,6 +1176,9 @@ func validateRuntimeConfig(stateRoot, image, expectedSHA256 string) (map[string]
 	if _, err := exec.LookPath("newfs_msdos"); err != nil {
 		return nil, fmt.Errorf("newfs_msdos is required")
 	}
+	if err := requireHardwareVirtualization(); err != nil {
+		return nil, err
+	}
 	tmpDir, err := os.MkdirTemp("", "crabbox-apple-vz-doctor-*")
 	if err != nil {
 		return nil, fmt.Errorf("create doctor temp dir: %w", err)
@@ -1183,6 +1224,17 @@ func validateRuntimeConfig(stateRoot, image, expectedSHA256 string) (map[string]
 		"runtime":    "virtualization.framework",
 		"host":       "darwin/arm64",
 	}, nil
+}
+
+func requireHardwareVirtualization() error {
+	output, err := exec.Command("sysctl", "-n", "kern.hv_support").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("check hardware virtualization support: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	if strings.TrimSpace(string(output)) != "1" {
+		return fmt.Errorf("virtualization is not available on this hardware (kern.hv_support=%s)", strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func firstFieldLine(output string) string {
