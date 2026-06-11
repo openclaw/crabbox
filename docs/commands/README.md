@@ -48,6 +48,8 @@ same order as the CLI help.
 - [screenshot](screenshot.md)
 - [inspect](inspect.md)
 - [stop](stop.md)
+- [pause](pause.md)
+- [resume](resume.md)
 - [cleanup](cleanup.md)
 - [pool](pool.md)
 - [pond](pond.md)

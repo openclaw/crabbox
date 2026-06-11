@@ -89,6 +89,11 @@ func TestLoadExternalRoutingRejectsBroadPermissions(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"command":"provider"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm()&0o077 == 0 {
+		t.Skipf("test process umask created a private file mode=%o", info.Mode().Perm())
+	}
 	if _, err := LoadExternalRouting(path); err == nil {
 		t.Fatal("expected insecure routing file rejection")
 	}

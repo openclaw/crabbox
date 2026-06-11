@@ -156,6 +156,12 @@ func TestIsloStatusTerminal(t *testing.T) {
 	}
 }
 
+func TestIsloProviderDeclaresPauseResume(t *testing.T) {
+	if !(Provider{}).Spec().Features.Has(core.FeaturePauseResume) {
+		t.Fatal("islo provider must declare pause-resume")
+	}
+}
+
 func TestResolveIsloLeaseIDRejectsUnclaimedRawSandbox(t *testing.T) {
 	if _, _, _, err := resolveIsloLeaseID("production", "", false); err == nil {
 		t.Fatal("expected raw non-Crabbox sandbox to be rejected")
@@ -1213,6 +1219,33 @@ func TestIsloSDKClientUploadArchiveStreamsMultipartTarball(t *testing.T) {
 	}
 }
 
+func TestIsloPauseResumeCallProvider(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	if err := backend.Pause(context.Background(), PauseRequest{ID: "crabbox-repo-abcdef"}); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if client.pausedName != "crabbox-repo-abcdef" {
+		t.Fatalf("pausedName=%q, want crabbox-repo-abcdef", client.pausedName)
+	}
+	if err := backend.Resume(context.Background(), ResumeRequest{ID: "crabbox-repo-abcdef"}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if client.resumedName != "crabbox-repo-abcdef" {
+		t.Fatalf("resumedName=%q, want crabbox-repo-abcdef", client.resumedName)
+	}
+	// A non-Crabbox sandbox id must be rejected before any provider call.
+	if err := backend.Pause(context.Background(), PauseRequest{ID: "production"}); err == nil {
+		t.Fatal("expected non-Crabbox sandbox to be rejected")
+	}
+}
+
 type fakeIsloSyncClient struct {
 	prepareCommands          []string
 	execRequests             []*gosdk.ExecRequest
@@ -1242,6 +1275,8 @@ type fakeIsloSyncClient struct {
 	blockDelete              bool
 	deleteErr                error
 	deleteCalls              int
+	pausedName               string
+	resumedName              string
 }
 
 func (f *fakeIsloSyncClient) CreateSandbox(_ context.Context, req *gosdk.SandboxCreate) (*gosdk.SandboxResponse, error) {
@@ -1268,6 +1303,7 @@ func (f *fakeIsloSyncClient) GetSandbox(_ context.Context, name string) (*gosdk.
 
 func (f *fakeIsloSyncClient) ResumeSandbox(_ context.Context, name string) (*gosdk.SandboxResponse, error) {
 	f.resumeCalls++
+	f.resumedName = name
 	if f.resumeErr != nil {
 		return nil, f.resumeErr
 	}
@@ -1289,6 +1325,11 @@ func (f *fakeIsloSyncClient) DeleteSandbox(ctx context.Context, _ string) error 
 		return f.deleteErr
 	}
 	return nil
+}
+
+func (f *fakeIsloSyncClient) PauseSandbox(_ context.Context, name string) (*gosdk.SandboxResponse, error) {
+	f.pausedName = name
+	return &gosdk.SandboxResponse{Name: name, Status: "paused"}, nil
 }
 
 func (f *fakeIsloSyncClient) UploadArchive(_ context.Context, _ string, targetPath string, archive io.Reader) error {

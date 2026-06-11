@@ -23,6 +23,7 @@ import (
 type isloAPI interface {
 	CreateSandbox(context.Context, *gosdk.SandboxCreate) (*gosdk.SandboxResponse, error)
 	GetSandbox(context.Context, string) (*gosdk.SandboxResponse, error)
+	PauseSandbox(context.Context, string) (*gosdk.SandboxResponse, error)
 	ResumeSandbox(context.Context, string) (*gosdk.SandboxResponse, error)
 	ListSandboxes(context.Context) ([]*gosdk.SandboxResponse, error)
 	DeleteSandbox(context.Context, string) error
@@ -96,6 +97,10 @@ func (c *isloSDKClient) CreateSandbox(ctx context.Context, req *gosdk.SandboxCre
 
 func (c *isloSDKClient) GetSandbox(ctx context.Context, name string) (*gosdk.SandboxResponse, error) {
 	return c.sdk.Sandboxes.GetSandbox(ctx, &gosdk.GetSandboxRequest{SandboxName: name})
+}
+
+func (c *isloSDKClient) PauseSandbox(ctx context.Context, name string) (*gosdk.SandboxResponse, error) {
+	return c.sdk.Sandboxes.PauseSandbox(ctx, &gosdk.PauseSandboxRequest{SandboxName: name})
 }
 
 func (c *isloSDKClient) ResumeSandbox(ctx context.Context, name string) (*gosdk.SandboxResponse, error) {

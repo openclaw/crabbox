@@ -27,6 +27,8 @@ type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
 type StatusView = core.StatusView
 type StopRequest = core.StopRequest
+type PauseRequest = core.PauseRequest
+type ResumeRequest = core.ResumeRequest
 type Server = core.Server
 type Repo = core.Repo
 type ExitError = core.ExitError
@@ -113,6 +115,9 @@ type isloBackend struct {
 	cfg  Config
 	rt   Runtime
 }
+
+// isloBackend implements the optional pause/resume capability.
+var _ core.PausableBackend = (*isloBackend)(nil)
 
 func (b *isloBackend) Spec() ProviderSpec { return b.spec }
 
@@ -420,6 +425,41 @@ func (b *isloBackend) Stop(ctx context.Context, req StopRequest) error {
 	}
 	removeLeaseClaim(leaseID)
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, name)
+	return nil
+}
+
+// Pause snapshots a running Islo sandbox to disk and frees its CPU/memory while
+// preserving state. The lease claim is kept so the sandbox can be resumed.
+func (b *isloBackend) Pause(ctx context.Context, req PauseRequest) error {
+	client, err := newIsloClient(b.cfg, b.rt)
+	if err != nil {
+		return err
+	}
+	leaseID, name, _, err := resolveIsloLeaseID(req.ID, "", false)
+	if err != nil {
+		return err
+	}
+	if _, err := client.PauseSandbox(ctx, name); err != nil {
+		return isloError("pause sandbox", err)
+	}
+	fmt.Fprintf(b.rt.Stderr, "paused lease=%s sandbox=%s\n", leaseID, name)
+	return nil
+}
+
+// Resume restores a paused Islo sandbox to running.
+func (b *isloBackend) Resume(ctx context.Context, req ResumeRequest) error {
+	client, err := newIsloClient(b.cfg, b.rt)
+	if err != nil {
+		return err
+	}
+	leaseID, name, _, err := resolveIsloLeaseID(req.ID, "", false)
+	if err != nil {
+		return err
+	}
+	if _, err := client.ResumeSandbox(ctx, name); err != nil {
+		return isloError("resume sandbox", err)
+	}
+	fmt.Fprintf(b.rt.Stderr, "resumed lease=%s sandbox=%s\n", leaseID, name)
 	return nil
 }
 

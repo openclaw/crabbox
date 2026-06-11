@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
+	"io"
 	"math"
 	"strings"
 )
 
 func init() {
 	RegisterProvider(testHetznerProvider{})
+	RegisterProvider(testDigitalOceanProvider{})
 	RegisterProvider(testAWSProvider{})
 	RegisterProvider(testAzureProvider{})
 	RegisterProvider(testAzureDynamicSessionsProvider{})
@@ -29,6 +32,7 @@ func init() {
 	RegisterProvider(testCloudflareProvider{})
 	RegisterProvider(testSpritesProvider{})
 	RegisterProvider(testLocalContainerProvider{})
+	RegisterProvider(testAppleVZProvider{})
 	RegisterProvider(testDockerSandboxProvider{})
 	RegisterProvider(testMultipassProvider{})
 	RegisterProvider(testTartProvider{})
@@ -201,6 +205,30 @@ func (testHetznerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testHetznerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testDigitalOceanProvider struct{}
+
+func (testDigitalOceanProvider) Name() string      { return "digitalocean" }
+func (testDigitalOceanProvider) Aliases() []string { return nil }
+func (testDigitalOceanProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "digitalocean",
+		Family:      "digitalocean",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testDigitalOceanProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testDigitalOceanProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (testDigitalOceanProvider) ServerTypeForConfig(Config) string { return "s-1vcpu-1gb" }
+func (testDigitalOceanProvider) ServerTypeForClass(string) string  { return "s-1vcpu-1gb" }
+func (p testDigitalOceanProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
@@ -851,7 +879,7 @@ func (testIsloProvider) Spec() ProviderSpec {
 		Name:                "islo",
 		Kind:                ProviderKindDelegatedRun,
 		Targets:             []TargetSpec{{OS: targetLinux}},
-		Features:            FeatureSet{FeatureURLBridge, FeatureRunSession, FeatureTailscale},
+		Features:            FeatureSet{FeatureURLBridge, FeatureRunSession, FeatureTailscale, FeaturePauseResume},
 		Coordinator:         CoordinatorNever,
 		TailscaleEgressOnly: true,
 	}
@@ -888,7 +916,10 @@ func (testIsloProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	return nil
 }
 func (p testIsloProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testDelegatedBackend{spec: p.Spec()}, nil
+	return testIsloBackend{
+		testDelegatedBackend: testDelegatedBackend{spec: p.Spec()},
+		stderr:               rt.Stderr,
+	}, nil
 }
 
 type testE2BProvider struct{}
@@ -1167,6 +1198,85 @@ func (testLocalContainerProvider) NativeCheckpointCapability(req NativeCheckpoin
 	return NativeCheckpointCapability{Kind: checkpointKindDockerCommit, Direct: true}, true
 }
 
+type testAppleVZProvider struct{}
+
+func (testAppleVZProvider) Name() string { return "apple-vz" }
+func (testAppleVZProvider) Aliases() []string {
+	return []string{"applevz"}
+}
+func (testAppleVZProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "apple-vz",
+		Family:      "local-vm",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testAppleVZFlagValues struct {
+	HelperPath  *string
+	Image       *string
+	ImageSHA256 *string
+	User        *string
+	WorkRoot    *string
+	CPUs        *int
+	MemoryMiB   *int
+	DiskGiB     *int
+}
+
+func (testAppleVZProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testAppleVZFlagValues{
+		HelperPath:  fs.String("apple-vz-helper", defaults.AppleVZ.HelperPath, "apple-vz helper"),
+		Image:       fs.String("apple-vz-image", defaults.AppleVZ.Image, "apple-vz image"),
+		ImageSHA256: fs.String("apple-vz-image-sha256", defaults.AppleVZ.ImageSHA256, "apple-vz image sha256"),
+		User:        fs.String("apple-vz-user", defaults.AppleVZ.User, "apple-vz user"),
+		WorkRoot:    fs.String("apple-vz-work-root", defaults.AppleVZ.WorkRoot, "apple-vz work root"),
+		CPUs:        fs.Int("apple-vz-cpus", defaults.AppleVZ.CPUs, "apple-vz CPUs"),
+		MemoryMiB:   fs.Int("apple-vz-memory", defaults.AppleVZ.MemoryMiB, "apple-vz memory MiB"),
+		DiskGiB:     fs.Int("apple-vz-disk", defaults.AppleVZ.DiskGiB, "apple-vz disk GiB"),
+	}
+}
+func (testAppleVZProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testAppleVZFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "apple-vz-helper") {
+		cfg.AppleVZ.HelperPath = *v.HelperPath
+	}
+	if flagWasSet(fs, "apple-vz-image") {
+		cfg.AppleVZ.Image = *v.Image
+		cfg.AppleVZ.ImageSHA256 = ""
+		cfg.appleVZImageExplicit = true
+	}
+	if flagWasSet(fs, "apple-vz-image-sha256") {
+		cfg.AppleVZ.ImageSHA256 = *v.ImageSHA256
+	}
+	if flagWasSet(fs, "apple-vz-user") {
+		cfg.AppleVZ.User = *v.User
+		cfg.SSHUser = *v.User
+	}
+	if flagWasSet(fs, "apple-vz-work-root") {
+		cfg.AppleVZ.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "apple-vz-cpus") {
+		cfg.AppleVZ.CPUs = *v.CPUs
+	}
+	if flagWasSet(fs, "apple-vz-memory") {
+		cfg.AppleVZ.MemoryMiB = *v.MemoryMiB
+	}
+	if flagWasSet(fs, "apple-vz-disk") {
+		cfg.AppleVZ.DiskGiB = *v.DiskGiB
+	}
+	return nil
+}
+func (p testAppleVZProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
 type testMultipassProvider struct{}
 
 func (testMultipassProvider) Name() string { return "multipass" }
@@ -1402,6 +1512,21 @@ type testDelegatedBackend struct {
 	spec        ProviderSpec
 	portsOutput string
 	copyErr     error
+}
+
+type testIsloBackend struct {
+	testDelegatedBackend
+	stderr io.Writer
+}
+
+func (b testIsloBackend) Pause(_ context.Context, req PauseRequest) error {
+	fmt.Fprintf(b.stderr, "paused id=%s\n", req.ID)
+	return nil
+}
+
+func (b testIsloBackend) Resume(_ context.Context, req ResumeRequest) error {
+	fmt.Fprintf(b.stderr, "resumed id=%s\n", req.ID)
+	return nil
 }
 
 type testServiceControlProvider struct{}

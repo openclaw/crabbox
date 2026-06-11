@@ -12,6 +12,7 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	entries := providerMatrix()
 	var aws *providerMatrixEntry
 	var incus *providerMatrixEntry
+	var digitalOcean *providerMatrixEntry
 	for i := range entries {
 		if entries[i].Provider == "aws" {
 			aws = &entries[i]
@@ -19,12 +20,18 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		if entries[i].Provider == "incus" {
 			incus = &entries[i]
 		}
+		if entries[i].Provider == "digitalocean" {
+			digitalOcean = &entries[i]
+		}
 	}
 	if aws == nil {
 		t.Fatal("aws provider not found")
 	}
 	if incus == nil {
 		t.Fatal("incus provider not found")
+	}
+	if digitalOcean == nil {
+		t.Fatal("digitalocean provider not found")
 	}
 	if aws.Kind != ProviderKindSSHLease {
 		t.Fatalf("aws kind=%q", aws.Kind)
@@ -48,6 +55,12 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		if !containsFeature(incus.Features, feature) {
 			t.Fatalf("incus features=%v missing %s", incus.Features, feature)
 		}
+	}
+	if digitalOcean.Kind != ProviderKindSSHLease || digitalOcean.Family != "digitalocean" || digitalOcean.Coordinator != string(CoordinatorNever) {
+		t.Fatalf("digitalocean kind/family/coordinator=%q/%q/%q", digitalOcean.Kind, digitalOcean.Family, digitalOcean.Coordinator)
+	}
+	if !containsString(digitalOcean.Targets, targetLinux) {
+		t.Fatalf("digitalocean targets=%v", digitalOcean.Targets)
 	}
 }
 

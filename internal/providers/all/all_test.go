@@ -60,6 +60,22 @@ func TestOpenSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestAnthropicSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
+	for _, name := range []string{"anthropic-sandbox-runtime", "srt"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "anthropic-sandbox-runtime" {
+			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Name())
+		}
+	}
+	spec := mustProvider(t, "anthropic-sandbox-runtime").Spec()
+	if spec.Family != "anthropic-sandbox-runtime" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever || len(spec.Features) != 0 {
+		t.Fatalf("anthropic-sandbox-runtime spec=%#v", spec)
+	}
+}
+
 func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 	provider, err := core.ProviderFor("incus")
 	if err != nil {
@@ -70,10 +86,23 @@ func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 	}
 }
 
+func TestAppleVZRegistersAsBuiltInProvider(t *testing.T) {
+	for _, name := range []string{"apple-vz", "applevz"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "apple-vz" {
+			t.Fatalf("ProviderFor(%q).Name=%q want apple-vz", name, provider.Name())
+		}
+	}
+}
+
 func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 	providers := []string{
 		"apple-container",
 		"apple-machine",
+		"apple-vz",
 		"ascii-box",
 		"aws",
 		"azure",
@@ -101,6 +130,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"proxmox",
 		"railway",
 		"runpod",
+		"anthropic-sandbox-runtime",
 		"semaphore",
 		"sprites",
 		"ssh",
@@ -121,4 +151,13 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mustProvider(t *testing.T, name string) core.Provider {
+	t.Helper()
+	provider, err := core.ProviderFor(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return provider
 }

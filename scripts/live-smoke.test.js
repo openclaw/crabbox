@@ -446,6 +446,137 @@ esac
   assert.doesNotMatch(failedAudit.stderr, /unbound variable/);
 });
 
+test("apple-vz live smoke rejects an invalid explicit helper binary", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-apple-vz-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  fs.mkdirSync(bin);
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf 'unexpected crabbox args: %s\\n' "$*" >&2
+exit 99
+`,
+  );
+
+  const missingHelper = path.join(dir, "missing-helper");
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "apple-vz",
+      CRABBOX_LIVE_APPLE_VZ_HELPER: missingHelper,
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /CRABBOX_LIVE_APPLE_VZ_HELPER must point to an executable helper/);
+  assert.match(result.stderr, new RegExp(missingHelper.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("apple-vz live smoke preserves the helper override for the full lifecycle", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-apple-vz-lifecycle-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  const helper = path.join(bin, "custom-apple-vz-helper");
+  const crabboxLog = path.join(dir, "crabbox.log");
+  fs.mkdirSync(bin);
+  writeExecutable(helper, "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${CRABBOX_APPLE_VZ_HELPER:-}" != "\${CRABBOX_FAKE_EXPECTED_HELPER:?}" ]]; then
+  printf 'missing helper override for: %s\\n' "$*" >&2
+  exit 98
+fi
+case "$1" in
+  warmup|status|inspect|ssh|cache|run|history|stop)
+    if [[ "\${CRABBOX_PROVIDER:-}" != "apple-vz" ]]; then
+      printf 'missing apple-vz provider environment for: %s\\n' "$*" >&2
+      exit 97
+    fi
+    ;;
+esac
+case "$1" in
+  cache|history)
+    if [[ " $* " == *" --provider "* ]]; then
+      printf 'unsupported provider flag for: %s\\n' "$*" >&2
+      exit 96
+    fi
+    ;;
+esac
+printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
+case "$1" in
+  warmup)
+    printf 'provisioning provider=apple-vz lease=cbx_123456789abc slug=apple-vz-smoke-test\\n'
+    printf 'provisioned lease=cbx_123456789abc slug=apple-vz-smoke-test state=ready\\n'
+    ;;
+  status)
+    printf 'lease=cbx_123456789abc slug=apple-vz-smoke-test provider=apple-vz state=ready ready=true\\n'
+    ;;
+  inspect)
+    printf '{"id":"cbx_123456789abc","slug":"apple-vz-smoke-test","provider":"apple-vz","state":"ready","serverType":"apple-vz","host":"127.0.0.1","ready":true,"lastTouchedAt":"2026-06-11T00:00:00Z","expiresAt":"2026-06-11T00:15:00Z"}\\n'
+    ;;
+  ssh)
+    exit 0
+    ;;
+  cache)
+    printf '[]\\n'
+    ;;
+  run)
+    printf 'crabbox-live-ok\\n'
+    ;;
+  history)
+    printf 'history ok\\n'
+    ;;
+  stop)
+    printf 'stopped %s\\n' "\${*: -1}"
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_FAKE_EXPECTED_HELPER: helper,
+      CRABBOX_FAKE_LOG: crabboxLog,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "apple-vz",
+      CRABBOX_LIVE_APPLE_VZ_HELPER: helper,
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /crabbox-live-ok/);
+  const calls = fs.readFileSync(crabboxLog, "utf8");
+  for (const command of ["warmup", "status", "inspect", "ssh", "cache", "run", "history", "stop"]) {
+    assert.match(calls, new RegExp(`^${command}(?: |$)`, "m"));
+  }
+  assert.doesNotMatch(calls, /--apple-vz-helper/);
+});
+
 test("live smoke fails when final active lease audit fails", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-admin-audit-"));
   const bin = path.join(dir, "bin");
